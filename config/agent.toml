@@ -1,0 +1,37 @@
+# Example wiring. Each string field under [agent] and [memory] selects a seam
+# implementation (see DESIGN.md §5). Swap them to run experiments — no code edit.
+
+[agent]
+provider = "openai-compat"   # -> OpenAiCompatProvider
+context  = "sliding-window"  # -> SlidingWindow
+policy   = "auto-approve"    # -> AutoApprove  (use "interactive" to gate tools)
+
+max_iterations = 12
+max_tokens     = 8192        # reasoning models (GLM) need real headroom
+temperature    = 0.7
+context_window = 131072
+reserve_output = 8192
+
+system_prompt = """
+You are a coding agent operating in a terminal working directory. Use the
+provided tools (bash, read_file, write_file) to inspect and modify files and to
+run commands. Work step by step: call a tool, observe the result, then decide
+the next step. When the task is complete, reply with a short plain-text summary
+and do not call any more tools.
+"""
+
+[provider]
+base_url = "https://213.173.96.56:8000/v1"
+model    = "/model"
+# The API key is NOT stored in this repo. It is read from this file at runtime:
+api_key_file = "~/Downloads/runpod/glm/glm-api-key"
+# Alternatively set api_key_env = "AGENT_API_KEY" and export it.
+insecure_tls = true          # GLM server uses a self-signed cert
+
+[memory]
+episodic_path = ".agent/episodic.jsonl"   # append-only event log ("what happened")
+semantic_dir  = ".agent/memory"           # curated markdown facts ("what is true")
+recall_limit  = 5
+
+[tools]
+enabled = ["bash", "read_file", "write_file"]

@@ -1,0 +1,19 @@
+[package]
+name = "agent-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+agent-core.workspace = true
+agent-providers.workspace = true
+agent-tools.workspace = true
+agent-memory.workspace = true
+agent-context.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
