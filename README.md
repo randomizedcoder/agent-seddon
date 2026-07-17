@@ -1,5 +1,9 @@
 # agent-seddon
 
+<p align="center">
+  <img src="agent-seddon.png" alt="agent-seddon logo" width="300">
+</p>
+
 Experimental, modular coding-agent harness in Rust. Every major component — the
 LLM provider, the tools, the memory, the context assembly — sits behind a trait
 so implementations can be swapped by config and compared cheaply.
