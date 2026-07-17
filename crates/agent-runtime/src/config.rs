@@ -86,7 +86,11 @@ fn default_context() -> String {
     "sliding-window".into()
 }
 fn default_policy() -> String {
-    "auto-approve".into()
+    // Fail safe: if the policy is unspecified, gate every tool call on the
+    // operator rather than silently granting unattended code execution. A model
+    // steered by prompt injection (e.g. via a malicious file it reads) could
+    // otherwise reach `bash`. Unattended runs must opt in with "auto-approve".
+    "interactive".into()
 }
 fn default_max_iters() -> usize {
     12

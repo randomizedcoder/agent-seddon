@@ -38,6 +38,13 @@ pub async fn build_agent(cfg: Config) -> anyhow::Result<Agent> {
 fn build_provider(cfg: &Config) -> anyhow::Result<Arc<dyn LlmProvider>> {
     match cfg.agent.provider.as_str() {
         "openai-compat" => {
+            if cfg.provider.insecure_tls {
+                tracing::warn!(
+                    "provider.insecure_tls=true: TLS certificate validation is DISABLED \
+                     (needed for the self-signed GLM dev server). This exposes the API key \
+                     and traffic to man-in-the-middle attacks — do not use over untrusted networks."
+                );
+            }
             let api_key = resolve_api_key(&cfg.provider)?;
             let provider = OpenAiCompatProvider::new(OpenAiCompatConfig {
                 base_url: cfg.provider.base_url.clone(),
@@ -111,7 +118,14 @@ fn build_context(name: &str) -> anyhow::Result<Arc<dyn ContextStrategy>> {
 
 fn build_policy(name: &str) -> anyhow::Result<Arc<dyn Policy>> {
     match name {
-        "auto-approve" => Ok(Arc::new(AutoApprove)),
+        "auto-approve" => {
+            tracing::warn!(
+                "policy=auto-approve: every tool call (including `bash`) runs WITHOUT \
+                 confirmation. Only use this on trusted goals/inputs — a prompt-injected \
+                 model can reach arbitrary code execution."
+            );
+            Ok(Arc::new(AutoApprove))
+        }
         "interactive" => Ok(Arc::new(Interactive)),
         other => Err(anyhow!("unknown policy `{other}` (known: auto-approve, interactive)")),
     }

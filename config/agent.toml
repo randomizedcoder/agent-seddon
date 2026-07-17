@@ -4,7 +4,9 @@
 [agent]
 provider = "openai-compat"   # -> OpenAiCompatProvider
 context  = "sliding-window"  # -> SlidingWindow
-policy   = "auto-approve"    # -> AutoApprove  (use "interactive" to gate tools)
+# SECURITY: "auto-approve" runs every tool call (incl. bash) with NO confirmation.
+# Only safe for trusted goals/inputs. The built-in default is "interactive".
+policy   = "auto-approve"    # -> AutoApprove  ("interactive" gates each tool call)
 
 max_iterations = 12
 max_tokens     = 8192        # reasoning models (GLM) need real headroom
