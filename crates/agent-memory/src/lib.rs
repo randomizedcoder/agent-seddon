@@ -4,6 +4,7 @@
 //!   * **episodic** — an append-only JSONL event log ("what happened").
 //!   * **semantic** — a directory of markdown files ("what is true"), recalled
 //!     by a naive keyword/recency match.
+//!
 //! The **working** layer is the live message window, owned by the runtime.
 //!
 //! Recall here is deliberately keyword-based (no embedding infra) — swapping in
@@ -21,7 +22,10 @@ pub struct FileMemory {
 
 impl FileMemory {
     pub fn new(episodic_path: impl Into<PathBuf>, semantic_dir: impl Into<PathBuf>) -> Self {
-        Self { episodic_path: episodic_path.into(), semantic_dir: semantic_dir.into() }
+        Self {
+            episodic_path: episodic_path.into(),
+            semantic_dir: semantic_dir.into(),
+        }
     }
 }
 
@@ -51,12 +55,20 @@ impl MemoryStore for FileMemory {
             if score == 0 {
                 continue;
             }
-            let source = path.file_name().and_then(|n| n.to_str()).unwrap_or("memory").to_string();
+            let source = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("memory")
+                .to_string();
             scored.push((score, MemoryItem { source, content }));
         }
 
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
-        Ok(scored.into_iter().take(query.limit).map(|(_, item)| item).collect())
+        scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+        Ok(scored
+            .into_iter()
+            .take(query.limit)
+            .map(|(_, item)| item)
+            .collect())
     }
 
     async fn append(&self, event: MemoryEvent) -> Result<()> {
@@ -78,7 +90,9 @@ impl MemoryStore for FileMemory {
         // Distillation (episodic -> curated semantic facts) needs the model to
         // decide what is durable; that's a v2 pipeline. For now this is an
         // honest no-op so the seam exists and the loop can call it.
-        tracing::debug!("distill(): no-op in v1 (episodic -> semantic promotion is a future pipeline)");
+        tracing::debug!(
+            "distill(): no-op in v1 (episodic -> semantic promotion is a future pipeline)"
+        );
         let _ = &self.semantic_dir;
         Ok(0)
     }
@@ -90,7 +104,9 @@ impl FileMemory {
         if let Some(parent) = self.episodic_path.parent() {
             tokio::fs::create_dir_all(parent).await.map_err(Error::Io)?;
         }
-        tokio::fs::create_dir_all(&self.semantic_dir).await.map_err(Error::Io)?;
+        tokio::fs::create_dir_all(&self.semantic_dir)
+            .await
+            .map_err(Error::Io)?;
         Ok(())
     }
 }

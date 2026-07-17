@@ -13,7 +13,9 @@ use tracing_subscriber::EnvFilter;
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .with_target(false)
         .init();
 
@@ -26,7 +28,9 @@ async fn main() -> Result<()> {
         .with_context(|| format!("reading config `{}`", config_path.display()))?;
     let config = agent_runtime::parse_config(&toml_str).context("parsing config")?;
 
-    let agent = agent_runtime::build_agent(config).await.context("building agent")?;
+    let agent = agent_runtime::build_agent(config)
+        .await
+        .context("building agent")?;
 
     tracing::info!(goal = %goal, "starting agent run");
     let answer = agent.run(&goal).await?;
@@ -48,9 +52,8 @@ fn parse_args() -> Result<Args> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--config" | "-c" => {
-                config_path = PathBuf::from(
-                    args.next().context("--config requires a path argument")?,
-                );
+                config_path =
+                    PathBuf::from(args.next().context("--config requires a path argument")?);
             }
             "--help" | "-h" => {
                 println!("usage: agent [--config PATH] <goal words...>");
@@ -60,5 +63,8 @@ fn parse_args() -> Result<Args> {
         }
     }
 
-    Ok(Args { config_path, goal: goal_parts.join(" ") })
+    Ok(Args {
+        config_path,
+        goal: goal_parts.join(" "),
+    })
 }

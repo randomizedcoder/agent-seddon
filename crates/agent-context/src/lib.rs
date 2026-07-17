@@ -6,9 +6,7 @@
 //! episodic memory — it only shortens the live window. A summarizing compactor
 //! is a future strategy behind the same trait (see DESIGN.md §4.4).
 
-use agent_core::{
-    ContextInput, ContextStrategy, Message, Result, Role, TokenBudget, WorkingSet,
-};
+use agent_core::{ContextInput, ContextStrategy, Message, Result, Role, TokenBudget, WorkingSet};
 use async_trait::async_trait;
 
 pub struct SlidingWindow;
@@ -41,14 +39,13 @@ impl ContextStrategy for SlidingWindow {
     }
 
     async fn compact(&self, working: &mut WorkingSet, budget: &TokenBudget) -> Result<()> {
-        let target = budget.max_context_tokens.saturating_sub(budget.reserve_output);
+        let target = budget
+            .max_context_tokens
+            .saturating_sub(budget.reserve_output);
 
         // Drop the oldest non-system message until we fit (or can't trim more).
         while estimate_tokens(&working.messages) > target {
-            let victim = working
-                .messages
-                .iter()
-                .position(|m| m.role != Role::System);
+            let victim = working.messages.iter().position(|m| m.role != Role::System);
             match victim {
                 Some(idx) if working.messages.len() > 2 => {
                     working.messages.remove(idx);

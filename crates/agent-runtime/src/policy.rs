@@ -19,7 +19,10 @@ pub struct Interactive;
 #[async_trait]
 impl Policy for Interactive {
     async fn authorize(&self, call: &ToolCall) -> Decision {
-        let prompt = format!("Allow tool `{}` with args {}? [y/N] ", call.name, call.arguments);
+        let prompt = format!(
+            "Allow tool `{}` with args {}? [y/N] ",
+            call.name, call.arguments
+        );
         // Block on a stdin read on a blocking thread so we don't stall the runtime.
         let answer = tokio::task::spawn_blocking(move || {
             use std::io::Write;

@@ -52,7 +52,10 @@ impl OpenAiCompatProvider {
 #[async_trait]
 impl LlmProvider for OpenAiCompatProvider {
     fn capabilities(&self) -> ModelCapabilities {
-        ModelCapabilities { supports_tools: true, context_window: self.context_window }
+        ModelCapabilities {
+            supports_tools: true,
+            context_window: self.context_window,
+        }
     }
 
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse> {
@@ -105,7 +108,10 @@ impl LlmProvider for OpenAiCompatProvider {
 
         if let Some(reasoning) = &choice.message.reasoning_content {
             if !reasoning.is_empty() {
-                tracing::debug!(chars = reasoning.len(), "model reasoning_content (not resent)");
+                tracing::debug!(
+                    chars = reasoning.len(),
+                    "model reasoning_content (not resent)"
+                );
             }
         }
 
@@ -121,7 +127,11 @@ impl LlmProvider for OpenAiCompatProvider {
                     serde_json::from_str(&tc.function.arguments)
                         .unwrap_or(Value::String(tc.function.arguments.clone()))
                 };
-                ToolCall { id: tc.id, name: tc.function.name, arguments }
+                ToolCall {
+                    id: tc.id,
+                    name: tc.function.name,
+                    arguments,
+                }
             })
             .collect();
 
@@ -179,7 +189,8 @@ impl WireMsg {
                     typ: "function",
                     function: WireToolCallFn {
                         name: tc.name.clone(),
-                        arguments: serde_json::to_string(&tc.arguments).unwrap_or_else(|_| "{}".into()),
+                        arguments: serde_json::to_string(&tc.arguments)
+                            .unwrap_or_else(|_| "{}".into()),
                     },
                 })
                 .collect(),
