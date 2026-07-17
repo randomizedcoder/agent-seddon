@@ -22,6 +22,8 @@ pub struct Settings {
     pub system_prompt: String,
     pub recall_limit: usize,
     pub cwd: PathBuf,
+    /// Per-run id, stamped on every recorded event (empty when telemetry is off).
+    pub session_id: String,
 }
 
 pub struct Agent {
@@ -115,6 +117,7 @@ impl Agent {
                     completion_tokens = u.completion_tokens,
                     "model turn"
                 );
+                self.record_usage(iter as u32, u).await;
             }
 
             // No tools requested → this is the final answer.
@@ -167,11 +170,31 @@ impl Agent {
     }
 
     async fn record(&self, kind: &str, message: Message) {
-        let event = MemoryEvent {
+        self.append_event(MemoryEvent {
             kind: kind.to_string(),
             message,
             ts_ms: now_ms(),
-        };
+            session_id: self.settings.session_id.clone(),
+            usage: None,
+            iter: None,
+        })
+        .await;
+    }
+
+    /// Record a per-turn token-usage event (routed to `agent_usage` by the sink).
+    async fn record_usage(&self, iter: u32, usage: &agent_core::Usage) {
+        self.append_event(MemoryEvent {
+            kind: "usage".to_string(),
+            message: Message::assistant(String::new()),
+            ts_ms: now_ms(),
+            session_id: self.settings.session_id.clone(),
+            usage: Some(usage.clone()),
+            iter: Some(iter),
+        })
+        .await;
+    }
+
+    async fn append_event(&self, event: MemoryEvent) {
         if let Err(e) = self.memory.append(event).await {
             tracing::warn!("episodic append failed: {e}");
         }

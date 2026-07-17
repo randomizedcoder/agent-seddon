@@ -10,6 +10,7 @@ agent-providers.workspace = true
 agent-tools.workspace = true
 agent-memory.workspace = true
 agent-context.workspace = true
+agent-telemetry.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true

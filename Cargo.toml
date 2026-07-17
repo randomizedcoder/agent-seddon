@@ -6,6 +6,7 @@ members = [
     "crates/agent-tools",
     "crates/agent-memory",
     "crates/agent-context",
+    "crates/agent-telemetry",
     "crates/agent-runtime",
     "crates/agent-cli",
 ]
@@ -25,7 +26,11 @@ tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 toml = "0.8"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
+
+# telemetry / ClickHouse (native protocol, port 9000)
+klickhouse = "0.13"
+uuid = { version = "1", features = ["v4"] }
 
 # internal crates (the seams)
 agent-core = { path = "crates/agent-core" }
@@ -33,4 +38,5 @@ agent-providers = { path = "crates/agent-providers" }
 agent-tools = { path = "crates/agent-tools" }
 agent-memory = { path = "crates/agent-memory" }
 agent-context = { path = "crates/agent-context" }
+agent-telemetry = { path = "crates/agent-telemetry" }
 agent-runtime = { path = "crates/agent-runtime" }

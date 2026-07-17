@@ -11,13 +11,21 @@ use agent_context::SlidingWindow;
 use agent_core::{ContextStrategy, LlmProvider, MemoryStore, Policy, ToolRegistry};
 use agent_memory::FileMemory;
 use agent_providers::{OpenAiCompatConfig, OpenAiCompatProvider};
+use agent_telemetry::{CompositeMemory, TelemetryHandle};
 use anyhow::{anyhow, Context};
 use std::sync::Arc;
 
-pub async fn build_agent(cfg: Config) -> anyhow::Result<Agent> {
+/// Build the agent. When `telemetry` is `Some`, the episodic store is wrapped in
+/// a `CompositeMemory` that mirrors events into ClickHouse, and `session_id` is
+/// stamped on every recorded event.
+pub async fn build_agent(
+    cfg: Config,
+    telemetry: Option<TelemetryHandle>,
+    session_id: String,
+) -> anyhow::Result<Agent> {
     let provider = build_provider(&cfg)?;
     let tools = build_tools(&cfg);
-    let memory = build_memory(&cfg).await?;
+    let memory = build_memory(&cfg, telemetry).await?;
     let context = build_context(&cfg.agent.context)?;
     let policy = build_policy(&cfg.agent.policy)?;
 
@@ -30,6 +38,7 @@ pub async fn build_agent(cfg: Config) -> anyhow::Result<Agent> {
         system_prompt: cfg.agent.system_prompt,
         recall_limit: cfg.memory.recall_limit,
         cwd: std::env::current_dir().context("resolving cwd")?,
+        session_id,
     };
 
     Ok(Agent::new(
@@ -105,10 +114,17 @@ fn build_tools(cfg: &Config) -> ToolRegistry {
     registry
 }
 
-async fn build_memory(cfg: &Config) -> anyhow::Result<Arc<dyn MemoryStore>> {
+async fn build_memory(
+    cfg: &Config,
+    telemetry: Option<TelemetryHandle>,
+) -> anyhow::Result<Arc<dyn MemoryStore>> {
     let mem = FileMemory::new(&cfg.memory.episodic_path, &cfg.memory.semantic_dir);
     mem.ensure_dirs().await.context("preparing memory dirs")?;
-    Ok(Arc::new(mem))
+    let inner: Arc<dyn MemoryStore> = Arc::new(mem);
+    match telemetry {
+        Some(handle) => Ok(Arc::new(CompositeMemory::new(inner, handle))),
+        None => Ok(inner),
+    }
 }
 
 fn build_context(name: &str) -> anyhow::Result<Arc<dyn ContextStrategy>> {

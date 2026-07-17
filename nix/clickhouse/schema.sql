@@ -16,10 +16,10 @@ CREATE DATABASE IF NOT EXISTS agent;
 CREATE TABLE IF NOT EXISTS agent.agent_events
 (
     session_id   String,
-    ts           DateTime64(3),
+    ts           DateTime64(3, 'UTC'),
     seq          UInt32,
-    kind         LowCardinality(String),   -- goal | assistant | tool | usage
-    role         LowCardinality(String),   -- system | user | assistant | tool
+    kind         String,                   -- goal | assistant | tool | usage
+    role         String,                   -- system | user | assistant | tool
     content      String,
     tool_calls   String,                   -- JSON array (empty for non-assistant)
     tool_call_id String
@@ -31,8 +31,8 @@ ORDER BY (session_id, ts, seq);
 CREATE TABLE IF NOT EXISTS agent.agent_logs
 (
     session_id String,
-    ts         DateTime64(3),
-    level      LowCardinality(String),     -- ERROR | WARN | INFO | DEBUG | TRACE
+    ts         DateTime64(3, 'UTC'),
+    level      String,                     -- ERROR | WARN | INFO | DEBUG | TRACE
     target     String,
     message    String,
     fields     String                      -- JSON of structured fields
@@ -44,7 +44,7 @@ ORDER BY (session_id, ts);
 CREATE TABLE IF NOT EXISTS agent.agent_usage
 (
     session_id        String,
-    ts                DateTime64(3),
+    ts                DateTime64(3, 'UTC'),
     iter              UInt32,
     prompt_tokens     UInt32,
     completion_tokens UInt32,
