@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/agent-core",
+    "crates/agent-providers",
+    "crates/agent-tools",
+    "crates/agent-memory",
+    "crates/agent-context",
+    "crates/agent-runtime",
+    "crates/agent-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# internal crates (the seams)
+agent-core = { path = "crates/agent-core" }
+agent-providers = { path = "crates/agent-providers" }
+agent-tools = { path = "crates/agent-tools" }
+agent-memory = { path = "crates/agent-memory" }
+agent-context = { path = "crates/agent-context" }
+agent-runtime = { path = "crates/agent-runtime" }

@@ -1,0 +1,264 @@
+//! An OpenAI-compatible `/chat/completions` provider.
+//!
+//! Tested against a GLM-5.2 server. GLM is a reasoning model: it emits a
+//! `reasoning_content` field (which we log for debugging but do NOT resend, per
+//! OpenAI convention) and only fills `content` once reasoning is done — so
+//! `max_tokens` needs real headroom.
+
+use agent_core::{
+    CompletionRequest, CompletionResponse, Error, LlmProvider, Message, ModelCapabilities, Result,
+    Role, ToolCall, Usage,
+};
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::time::Duration;
+
+pub struct OpenAiCompatConfig {
+    /// e.g. `https://host:8000/v1`
+    pub base_url: String,
+    pub model: String,
+    pub api_key: String,
+    pub insecure_tls: bool,
+    pub context_window: u32,
+}
+
+pub struct OpenAiCompatProvider {
+    client: reqwest::Client,
+    endpoint: String,
+    model: String,
+    api_key: String,
+    context_window: u32,
+}
+
+impl OpenAiCompatProvider {
+    pub fn new(cfg: OpenAiCompatConfig) -> Result<Self> {
+        let client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(cfg.insecure_tls)
+            .timeout(Duration::from_secs(600)) // reasoning models can be slow
+            .build()
+            .map_err(|e| Error::Provider(format!("building http client: {e}")))?;
+        let endpoint = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
+        Ok(Self {
+            client,
+            endpoint,
+            model: cfg.model,
+            api_key: cfg.api_key,
+            context_window: cfg.context_window,
+        })
+    }
+}
+
+#[async_trait]
+impl LlmProvider for OpenAiCompatProvider {
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities { supports_tools: true, context_window: self.context_window }
+    }
+
+    async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse> {
+        let wire = WireReq {
+            model: &self.model,
+            messages: req.messages.iter().map(WireMsg::from_core).collect(),
+            tools: req
+                .tools
+                .iter()
+                .map(|t| WireTool {
+                    typ: "function",
+                    function: WireFn {
+                        name: t.name.clone(),
+                        description: t.description.clone(),
+                        parameters: t.parameters.clone(),
+                    },
+                })
+                .collect(),
+            max_tokens: req.max_tokens,
+            temperature: req.temperature,
+        };
+
+        let resp = self
+            .client
+            .post(&self.endpoint)
+            .bearer_auth(&self.api_key)
+            .json(&wire)
+            .send()
+            .await
+            .map_err(|e| Error::Provider(format!("request failed: {e}")))?;
+
+        let status = resp.status();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| Error::Provider(format!("reading body: {e}")))?;
+
+        if !status.is_success() {
+            return Err(Error::Provider(format!("http {status}: {body}")));
+        }
+
+        let parsed: WireResp = serde_json::from_str(&body)
+            .map_err(|e| Error::Provider(format!("decoding response: {e}; body={body}")))?;
+
+        let choice = parsed
+            .choices
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::Provider("no choices in response".into()))?;
+
+        if let Some(reasoning) = &choice.message.reasoning_content {
+            if !reasoning.is_empty() {
+                tracing::debug!(chars = reasoning.len(), "model reasoning_content (not resent)");
+            }
+        }
+
+        let tool_calls = choice
+            .message
+            .tool_calls
+            .unwrap_or_default()
+            .into_iter()
+            .map(|tc| {
+                let arguments = if tc.function.arguments.trim().is_empty() {
+                    Value::Object(Default::default())
+                } else {
+                    serde_json::from_str(&tc.function.arguments)
+                        .unwrap_or(Value::String(tc.function.arguments.clone()))
+                };
+                ToolCall { id: tc.id, name: tc.function.name, arguments }
+            })
+            .collect();
+
+        let message = Message {
+            role: Role::Assistant,
+            content: choice.message.content.unwrap_or_default(),
+            tool_calls,
+            tool_call_id: None,
+        };
+
+        Ok(CompletionResponse {
+            message,
+            finish_reason: choice.finish_reason.unwrap_or_else(|| "stop".into()),
+            usage: parsed.usage.map(|u| Usage {
+                prompt_tokens: u.prompt_tokens,
+                completion_tokens: u.completion_tokens,
+                total_tokens: u.total_tokens,
+            }),
+        })
+    }
+}
+
+// --- wire types -----------------------------------------------------------
+
+#[derive(Serialize)]
+struct WireReq<'a> {
+    model: &'a str,
+    messages: Vec<WireMsg>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<WireTool>,
+    max_tokens: u32,
+    temperature: f32,
+}
+
+#[derive(Serialize)]
+struct WireMsg {
+    role: &'static str,
+    content: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tool_calls: Vec<WireToolCall>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+}
+
+impl WireMsg {
+    fn from_core(m: &Message) -> Self {
+        WireMsg {
+            role: m.role.as_str(),
+            content: m.content.clone(),
+            tool_calls: m
+                .tool_calls
+                .iter()
+                .map(|tc| WireToolCall {
+                    id: tc.id.clone(),
+                    typ: "function",
+                    function: WireToolCallFn {
+                        name: tc.name.clone(),
+                        arguments: serde_json::to_string(&tc.arguments).unwrap_or_else(|_| "{}".into()),
+                    },
+                })
+                .collect(),
+            tool_call_id: m.tool_call_id.clone(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct WireTool {
+    #[serde(rename = "type")]
+    typ: &'static str,
+    function: WireFn,
+}
+
+#[derive(Serialize)]
+struct WireFn {
+    name: String,
+    description: String,
+    parameters: Value,
+}
+
+#[derive(Serialize)]
+struct WireToolCall {
+    id: String,
+    #[serde(rename = "type")]
+    typ: &'static str,
+    function: WireToolCallFn,
+}
+
+#[derive(Serialize)]
+struct WireToolCallFn {
+    name: String,
+    arguments: String,
+}
+
+#[derive(Deserialize)]
+struct WireResp {
+    choices: Vec<WireChoice>,
+    #[serde(default)]
+    usage: Option<WireUsage>,
+}
+
+#[derive(Deserialize)]
+struct WireChoice {
+    message: WireRespMsg,
+    #[serde(default)]
+    finish_reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct WireRespMsg {
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<WireRespToolCall>>,
+}
+
+#[derive(Deserialize)]
+struct WireRespToolCall {
+    id: String,
+    function: WireRespFn,
+}
+
+#[derive(Deserialize)]
+struct WireRespFn {
+    name: String,
+    #[serde(default)]
+    arguments: String,
+}
+
+#[derive(Deserialize)]
+struct WireUsage {
+    #[serde(default)]
+    prompt_tokens: u32,
+    #[serde(default)]
+    completion_tokens: u32,
+    #[serde(default)]
+    total_tokens: u32,
+}
