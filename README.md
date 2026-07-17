@@ -57,9 +57,25 @@ nix run .#clickhouse-client -- -q 'SHOW TABLES FROM agent'
 nix run .#clickhouse-down                                # stop + remove (data discarded)
 ```
 
-> The Rust client integration that populates these tables (a composite memory sink +
-> a tracing layer, keyed by a per-run `session_id`) is a follow-up; the schema and
-> container are in place now.
+To actually populate the tables, enable telemetry in `config/agent.toml`
+(`[telemetry] enabled = true`) and run a goal. Each run gets a `session_id`
+(printed at the end); the composite memory sink mirrors every event into
+`agent_events`, a tracing layer streams logs into `agent_logs`, and per-turn
+token counts land in `agent_usage`. It's best-effort — if ClickHouse is
+unreachable the loop is unaffected and `.agent/episodic.jsonl` still holds the
+full record.
+
+Writes use ClickHouse's **native protocol** (`klickhouse`, port 9000) via a
+background batched writer, and the writer disables ClickHouse's own
+`system.query_log` for its connection so the high-frequency telemetry inserts
+don't bloat the server's internal logs.
+
+```sh
+# with telemetry enabled and the container up:
+nix run .#agent -- --config config/agent.toml "list the files in this repo"
+nix run .#clickhouse-client -- -q \
+  "SELECT kind, role, substring(content,1,60) FROM agent.agent_events ORDER BY ts, seq FORMAT PrettyCompact"
+```
 
 ## Configuration
 

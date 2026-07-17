@@ -20,6 +20,8 @@ let
 
   # The schema, materialized into the Nix store so we can bind-mount it.
   schema = ./schema.sql;
+  # Dev override widening the `default` user's allowed networks (see users.xml).
+  usersOverride = ./users.xml;
 in
 {
   clickhouse-up = pkgs.writeShellApplication {
@@ -41,11 +43,14 @@ in
           docker start "${name}" >/dev/null
         else
           echo "==> starting ClickHouse (${image})"
+          # Ports are published on 127.0.0.1 only (host-local); the users.xml
+          # override lets the `default` user connect over HTTP from the host.
           docker run -d \
             --name "${name}" \
-            -p ${httpPort}:8123 \
-            -p ${nativePort}:9000 \
+            -p 127.0.0.1:${httpPort}:8123 \
+            -p 127.0.0.1:${nativePort}:9000 \
             -v "${schema}:/docker-entrypoint-initdb.d/00-schema.sql:ro" \
+            -v "${usersOverride}:/etc/clickhouse-server/users.d/99-allow-remote-default.xml:ro" \
             "${image}" >/dev/null
         fi
 

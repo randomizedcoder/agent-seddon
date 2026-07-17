@@ -247,12 +247,22 @@ pub struct RecallQuery {
 }
 
 /// An append-only episodic event. `kind` distinguishes e.g. "goal",
-/// "assistant", "tool".
+/// "assistant", "tool", "usage".
+///
+/// `session_id`, `usage`, and `iter` are additive (serde-defaulted) so the JSONL
+/// episodic log stays backward-compatible; they carry the extra context the
+/// telemetry sink needs to route rows into ClickHouse.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryEvent {
     pub kind: String,
     pub message: Message,
     pub ts_ms: u64,
+    #[serde(default)]
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iter: Option<u32>,
 }
 
 #[async_trait]

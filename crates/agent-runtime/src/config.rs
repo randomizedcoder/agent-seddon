@@ -12,6 +12,8 @@ pub struct Config {
     pub memory: MemoryCfg,
     #[serde(default)]
     pub tools: ToolsCfg,
+    #[serde(default)]
+    pub telemetry: TelemetryCfg,
 }
 
 #[derive(Debug, Deserialize)]
@@ -82,6 +84,44 @@ pub struct ToolsCfg {
     pub enabled: Vec<String>,
 }
 
+/// Streaming telemetry into ClickHouse. Off by default — behavior is unchanged
+/// unless `enabled = true`.
+#[derive(Debug, Deserialize)]
+pub struct TelemetryCfg {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_clickhouse_url")]
+    pub clickhouse_url: String,
+    #[serde(default = "default_database")]
+    pub database: String,
+    #[serde(default = "default_ch_user")]
+    pub user: String,
+    #[serde(default)]
+    pub password: String,
+    /// Stream `tracing` log events into `agent_logs` (in addition to stdout).
+    #[serde(default = "default_true")]
+    pub stream_logs: bool,
+    #[serde(default = "default_batch_rows")]
+    pub batch_max_rows: usize,
+    #[serde(default = "default_flush_ms")]
+    pub flush_interval_ms: u64,
+}
+
+impl Default for TelemetryCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            clickhouse_url: default_clickhouse_url(),
+            database: default_database(),
+            user: default_ch_user(),
+            password: String::new(),
+            stream_logs: default_true(),
+            batch_max_rows: default_batch_rows(),
+            flush_interval_ms: default_flush_ms(),
+        }
+    }
+}
+
 fn default_context() -> String {
     "sliding-window".into()
 }
@@ -123,4 +163,23 @@ fn default_semantic_dir() -> String {
 }
 fn default_recall_limit() -> usize {
     5
+}
+fn default_clickhouse_url() -> String {
+    // Native protocol (TCP), host:port — fastest wire format.
+    "localhost:9000".into()
+}
+fn default_database() -> String {
+    "agent".into()
+}
+fn default_ch_user() -> String {
+    "default".into()
+}
+fn default_true() -> bool {
+    true
+}
+fn default_batch_rows() -> usize {
+    256
+}
+fn default_flush_ms() -> u64 {
+    1_000
 }

@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<!--
+  nix/clickhouse/users.xml — dev-only override.
+
+  The official image ships users.d/default-user.xml restricting the `default`
+  user to ::1/127.0.0.1. Connections from the host arrive via the Docker bridge
+  gateway IP, so they'd be rejected over HTTP. This widens the `default` user to
+  any network (no password) so the agent can reach it over the mapped port.
+
+  Safe for local dev because `clickhouse-up` publishes the ports on 127.0.0.1
+  only (host-local). Do NOT use this container config on a shared/exposed host.
+-->
+<clickhouse>
+    <users>
+        <default>
+            <networks replace="replace">
+                <ip>::/0</ip>
+            </networks>
+        </default>
+    </users>
+</clickhouse>

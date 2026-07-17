@@ -37,3 +37,19 @@ recall_limit  = 5
 
 [tools]
 enabled = ["bash", "read_file", "write_file"]
+
+# Stream the full transaction history (agent_events), logs (agent_logs), and
+# per-turn token usage (agent_usage) into ClickHouse, keyed by a per-run
+# session_id. Off by default — start the container first with
+# `nix run .#clickhouse-up`, then set enabled = true. Never blocks the loop: if
+# ClickHouse is unreachable, rows are dropped and the .agent/episodic.jsonl log
+# still holds the full record.
+[telemetry]
+enabled          = false
+clickhouse_url   = "localhost:9000"   # native protocol (TCP), host:port
+database         = "agent"
+user             = "default"
+password         = ""
+stream_logs      = true       # also send tracing logs to agent_logs
+batch_max_rows   = 256
+flush_interval_ms = 1000
