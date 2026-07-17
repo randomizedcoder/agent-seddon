@@ -279,10 +279,22 @@ pub trait MemoryStore: Send + Sync {
 // Seam 4: Context assembly / compaction
 // ---------------------------------------------------------------------------
 
+/// A fixed, user-provided block of context (from a `context.d/` file). Always
+/// injected — unlike recalled memory, it is not relevance-gated.
+#[derive(Debug, Clone)]
+pub struct ContextBlock {
+    pub source: String,
+    pub content: String,
+}
+
 pub struct ContextInput {
     pub system_prompt: String,
+    /// User context injected before the conversation (folded into the system prompt).
+    pub prepend: Vec<ContextBlock>,
     pub recalled: Vec<MemoryItem>,
     pub goal: String,
+    /// User context injected after the goal (a trailing system message).
+    pub append: Vec<ContextBlock>,
 }
 
 /// The live message window handed to the model each turn.

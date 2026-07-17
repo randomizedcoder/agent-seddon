@@ -32,6 +32,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 klickhouse = "0.13"
 uuid = { version = "1", features = ["v4"] }
 
+# metrics — text exposition only (no protobuf/push features)
+prometheus = { version = "0.13", default-features = false }
+tiny_http = "0.12"
+
 # internal crates (the seams)
 agent-core = { path = "crates/agent-core" }
 agent-providers = { path = "crates/agent-providers" }

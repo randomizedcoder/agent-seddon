@@ -14,6 +14,50 @@ pub struct Config {
     pub tools: ToolsCfg,
     #[serde(default)]
     pub telemetry: TelemetryCfg,
+    #[serde(default)]
+    pub context_files: ContextFilesCfg,
+    #[serde(default)]
+    pub metrics: MetricsCfg,
+}
+
+/// User context injected from `<dir>/prepend/` and `<dir>/append/` (NNNN_*.md).
+#[derive(Debug, Deserialize)]
+pub struct ContextFilesCfg {
+    #[serde(default = "default_context_dir")]
+    pub dir: String,
+}
+
+impl Default for ContextFilesCfg {
+    fn default() -> Self {
+        Self {
+            dir: default_context_dir(),
+        }
+    }
+}
+
+/// Prometheus metrics. Off by default.
+#[derive(Debug, Deserialize)]
+pub struct MetricsCfg {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_metrics_listen")]
+    pub listen: String,
+    /// If set, push metrics to this Pushgateway base URL on exit.
+    #[serde(default)]
+    pub pushgateway: String,
+    #[serde(default = "default_metrics_job")]
+    pub job: String,
+}
+
+impl Default for MetricsCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen: default_metrics_listen(),
+            pushgateway: String::new(),
+            job: default_metrics_job(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -163,6 +207,15 @@ fn default_semantic_dir() -> String {
 }
 fn default_recall_limit() -> usize {
     5
+}
+fn default_context_dir() -> String {
+    "context.d".into()
+}
+fn default_metrics_listen() -> String {
+    "127.0.0.1:9600".into()
+}
+fn default_metrics_job() -> String {
+    "agent-seddon".into()
 }
 fn default_clickhouse_url() -> String {
     // Native protocol (TCP), host:port — fastest wire format.

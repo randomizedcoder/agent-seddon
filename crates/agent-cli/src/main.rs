@@ -6,6 +6,9 @@
 //! Example:
 //!   agent --config config/agent.toml "list the files in this repo"
 
+mod metrics_server;
+
+use agent_runtime::Metrics;
 use agent_telemetry::{ClickHouseLayer, TelemetryConfig, TelemetryHandle};
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -46,15 +49,35 @@ async fn main() -> Result<()> {
 
     init_tracing(&telemetry, config.telemetry.stream_logs);
 
+    // Metrics (opt-in). Instrumentation always runs into this registry; serving
+    // the /metrics endpoint and pushing are gated by config.
+    let metrics = Metrics::new();
+    if config.metrics.enabled {
+        metrics_server::serve(metrics.clone(), &config.metrics.listen);
+    }
+    let metrics_cfg = MetricsRun {
+        enabled: config.metrics.enabled,
+        pushgateway: config.metrics.pushgateway.clone(),
+        job: config.metrics.job.clone(),
+    };
+
     tracing::info!(goal = %goal, session_id = %session_id, "starting agent run");
-    let agent = agent_runtime::build_agent(config, telemetry.clone(), session_id.clone())
-        .await
-        .context("building agent")?;
+    let agent = agent_runtime::build_agent(
+        config,
+        telemetry.clone(),
+        session_id.clone(),
+        metrics.clone(),
+    )
+    .await
+    .context("building agent")?;
     let result = agent.run(&goal).await;
 
-    // Flush telemetry before we surface success/failure or exit.
+    // Flush telemetry + push metrics before we surface success/failure or exit.
     if let Some(handle) = &telemetry {
         handle.shutdown().await;
+    }
+    if metrics_cfg.enabled && !metrics_cfg.pushgateway.is_empty() {
+        metrics_server::push(&metrics, &metrics_cfg.pushgateway, &metrics_cfg.job).await;
     }
 
     let answer = result?;
@@ -63,6 +86,13 @@ async fn main() -> Result<()> {
         println!("\n(telemetry session_id: {session_id})");
     }
     Ok(())
+}
+
+/// Metrics settings captured before `config` is moved into `build_agent`.
+struct MetricsRun {
+    enabled: bool,
+    pushgateway: String,
+    job: String,
 }
 
 /// Install the fmt layer plus, when telemetry + `stream_logs` are on, the

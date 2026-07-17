@@ -18,3 +18,4 @@ toml.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
+prometheus.workspace = true
