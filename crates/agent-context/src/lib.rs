@@ -28,6 +28,13 @@ fn estimate_tokens(messages: &[Message]) -> u32 {
 impl ContextStrategy for SlidingWindow {
     async fn assemble(&self, input: ContextInput) -> Result<Vec<Message>> {
         let mut system = input.system_prompt;
+
+        // User "prepend" context (context.d/prepend/*.md) — always injected,
+        // ahead of recalled memory.
+        for block in &input.prepend {
+            system.push_str(&format!("\n\n## {}\n{}", block.source, block.content));
+        }
+
         if !input.recalled.is_empty() {
             system.push_str("\n\n## Recalled memory\n");
             system.push_str("The following may be relevant to this task:\n");
@@ -35,7 +42,20 @@ impl ContextStrategy for SlidingWindow {
                 system.push_str(&format!("\n### {}\n{}\n", item.source, item.content));
             }
         }
-        Ok(vec![Message::system(system), Message::user(input.goal)])
+
+        let mut messages = vec![Message::system(system), Message::user(input.goal)];
+
+        // User "append" context (context.d/append/*.md) — a trailing system
+        // message after the goal.
+        if !input.append.is_empty() {
+            let mut tail = String::new();
+            for block in &input.append {
+                tail.push_str(&format!("## {}\n{}\n\n", block.source, block.content));
+            }
+            messages.push(Message::system(tail.trim_end().to_string()));
+        }
+
+        Ok(messages)
     }
 
     async fn compact(&self, working: &mut WorkingSet, budget: &TokenBudget) -> Result<()> {
@@ -70,5 +90,52 @@ impl ContextStrategy for SlidingWindow {
             "compacted working set"
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_core::{ContextBlock, Role};
+
+    #[tokio::test]
+    async fn assemble_places_prepend_and_append() {
+        let input = ContextInput {
+            system_prompt: "BASE".into(),
+            prepend: vec![ContextBlock {
+                source: "0001_pre.md".into(),
+                content: "PRE-CONTENT".into(),
+            }],
+            recalled: vec![],
+            goal: "do the thing".into(),
+            append: vec![ContextBlock {
+                source: "0010_post.md".into(),
+                content: "POST-CONTENT".into(),
+            }],
+        };
+        let msgs = SlidingWindow.assemble(input).await.unwrap();
+
+        // [ system(base+prepend), user(goal), system(append) ]
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[0].role, Role::System);
+        assert!(msgs[0].content.contains("BASE"));
+        assert!(msgs[0].content.contains("PRE-CONTENT"));
+        assert_eq!(msgs[1].role, Role::User);
+        assert_eq!(msgs[1].content, "do the thing");
+        assert_eq!(msgs[2].role, Role::System);
+        assert!(msgs[2].content.contains("POST-CONTENT"));
+    }
+
+    #[tokio::test]
+    async fn assemble_without_append_has_two_messages() {
+        let input = ContextInput {
+            system_prompt: "BASE".into(),
+            prepend: vec![],
+            recalled: vec![],
+            goal: "g".into(),
+            append: vec![],
+        };
+        let msgs = SlidingWindow.assemble(input).await.unwrap();
+        assert_eq!(msgs.len(), 2);
     }
 }

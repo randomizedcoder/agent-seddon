@@ -98,6 +98,33 @@ precedence, from:
 
 The example config points `api_key_file` at the GLM key file outside the repo.
 
+### User context files (`context.d/`)
+
+Drop markdown files into `context.d/` to add fixed entries to the model context on
+every run — always injected (unlike relevance-recalled semantic memory):
+
+- `context.d/prepend/NNNN_*.md` — folded into the system prompt (before the goal).
+- `context.d/append/NNNN_*.md` — a trailing message (after the goal).
+
+The leading `NNNN` orders files ascending. The directory is set by
+`[context_files] dir` (default `context.d`); a missing directory means no injection.
+See [`context.d/README.md`](context.d/README.md).
+
+## Metrics
+
+Prometheus metrics about a running agent. Enable in `config/agent.toml`
+(`[metrics] enabled = true`) to serve `/metrics` on `listen` (default
+`127.0.0.1:9600`); set `pushgateway` to also push on exit (useful for short runs).
+Exposed metrics include `agent_api_calls_total`, `agent_api_call_duration_seconds`,
+`agent_tokens_total`, `agent_context_tokens`, `agent_context_messages`,
+`agent_tool_calls_total`, `agent_iterations_total`, `agent_runs_total`,
+`agent_run_duration_seconds`, and `agent_active`.
+
+```sh
+# while a run is in progress:
+curl -s 127.0.0.1:9600/metrics | grep '^agent_'
+```
+
 ## Runtime state
 
 Written under `.agent/` (git-ignored):

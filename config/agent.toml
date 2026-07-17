@@ -53,3 +53,19 @@ password         = ""
 stream_logs      = true       # also send tracing logs to agent_logs
 batch_max_rows   = 256
 flush_interval_ms = 1000
+
+# Always-injected user context. Files in <dir>/prepend/ are folded into the
+# system prompt; files in <dir>/append/ become a trailing message. Name files
+# NNNN_something.md — the number orders them. See context.d/README.md.
+[context_files]
+dir = "context.d"
+
+# Prometheus metrics about the running agent (API calls, tokens, context size,
+# tool calls, iterations, run outcome). Off by default. When enabled, a
+# /metrics endpoint is served on `listen`; set `pushgateway` to also push on
+# exit (useful for short runs).
+[metrics]
+enabled     = false
+listen      = "127.0.0.1:9600"
+pushgateway = ""                # e.g. "http://localhost:9091"
+job         = "agent-seddon"

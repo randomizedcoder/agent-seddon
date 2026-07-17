@@ -6,6 +6,8 @@
 
 use crate::agent::{Agent, Settings};
 use crate::config::{Config, ProviderCfg};
+use crate::context_files;
+use crate::metrics::Metrics;
 use crate::policy::{AutoApprove, Interactive};
 use agent_context::SlidingWindow;
 use agent_core::{ContextStrategy, LlmProvider, MemoryStore, Policy, ToolRegistry};
@@ -22,12 +24,22 @@ pub async fn build_agent(
     cfg: Config,
     telemetry: Option<TelemetryHandle>,
     session_id: String,
+    metrics: Metrics,
 ) -> anyhow::Result<Agent> {
     let provider = build_provider(&cfg)?;
     let tools = build_tools(&cfg);
     let memory = build_memory(&cfg, telemetry).await?;
     let context = build_context(&cfg.agent.context)?;
     let policy = build_policy(&cfg.agent.policy)?;
+
+    let (context_prepend, context_append) = context_files::load(&cfg.context_files.dir);
+    if !context_prepend.is_empty() || !context_append.is_empty() {
+        tracing::info!(
+            prepend = context_prepend.len(),
+            append = context_append.len(),
+            "loaded user context files"
+        );
+    }
 
     let settings = Settings {
         max_iterations: cfg.agent.max_iterations,
@@ -38,11 +50,14 @@ pub async fn build_agent(
         system_prompt: cfg.agent.system_prompt,
         recall_limit: cfg.memory.recall_limit,
         cwd: std::env::current_dir().context("resolving cwd")?,
+        model: cfg.provider.model.clone(),
         session_id,
+        context_prepend,
+        context_append,
     };
 
     Ok(Agent::new(
-        provider, tools, memory, context, policy, settings,
+        provider, tools, memory, context, policy, metrics, settings,
     ))
 }
 
