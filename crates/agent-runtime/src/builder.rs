@@ -32,7 +32,9 @@ pub async fn build_agent(cfg: Config) -> anyhow::Result<Agent> {
         cwd: std::env::current_dir().context("resolving cwd")?,
     };
 
-    Ok(Agent::new(provider, tools, memory, context, policy, settings))
+    Ok(Agent::new(
+        provider, tools, memory, context, policy, settings,
+    ))
 }
 
 fn build_provider(cfg: &Config) -> anyhow::Result<Arc<dyn LlmProvider>> {
@@ -112,7 +114,9 @@ async fn build_memory(cfg: &Config) -> anyhow::Result<Arc<dyn MemoryStore>> {
 fn build_context(name: &str) -> anyhow::Result<Arc<dyn ContextStrategy>> {
     match name {
         "sliding-window" => Ok(Arc::new(SlidingWindow)),
-        other => Err(anyhow!("unknown context strategy `{other}` (known: sliding-window)")),
+        other => Err(anyhow!(
+            "unknown context strategy `{other}` (known: sliding-window)"
+        )),
     }
 }
 
@@ -127,6 +131,8 @@ fn build_policy(name: &str) -> anyhow::Result<Arc<dyn Policy>> {
             Ok(Arc::new(AutoApprove))
         }
         "interactive" => Ok(Arc::new(Interactive)),
-        other => Err(anyhow!("unknown policy `{other}` (known: auto-approve, interactive)")),
+        other => Err(anyhow!(
+            "unknown policy `{other}` (known: auto-approve, interactive)"
+        )),
     }
 }

@@ -7,8 +7,7 @@
 
 use agent_core::{
     CompletionRequest, ContextInput, ContextStrategy, Decision, LlmProvider, MemoryEvent,
-    MemoryStore, Message, Policy, RecallQuery, TokenBudget, ToolContext, ToolRegistry,
-    WorkingSet,
+    MemoryStore, Message, Policy, RecallQuery, TokenBudget, ToolContext, ToolRegistry, WorkingSet,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -43,7 +42,14 @@ impl Agent {
         policy: Arc<dyn Policy>,
         settings: Settings,
     ) -> Self {
-        Self { provider, tools, memory, context, policy, settings }
+        Self {
+            provider,
+            tools,
+            memory,
+            context,
+            policy,
+            settings,
+        }
     }
 
     /// Run the loop to completion, returning the model's final text answer.
@@ -51,7 +57,10 @@ impl Agent {
         // 1. Recall relevant memory for the goal.
         let recalled = self
             .memory
-            .recall(&RecallQuery { text: goal.to_string(), limit: self.settings.recall_limit })
+            .recall(&RecallQuery {
+                text: goal.to_string(),
+                limit: self.settings.recall_limit,
+            })
             .await
             .unwrap_or_else(|e| {
                 tracing::warn!("recall failed: {e}");
@@ -78,7 +87,9 @@ impl Agent {
             max_context_tokens: self.settings.context_window,
             reserve_output: self.settings.reserve_output,
         };
-        let tool_ctx = ToolContext { cwd: self.settings.cwd.clone() };
+        let tool_ctx = ToolContext {
+            cwd: self.settings.cwd.clone(),
+        };
         let tool_schemas = self.tools.describe_all();
 
         // 3. The loop.
@@ -149,11 +160,18 @@ impl Agent {
         }
 
         self.memory.distill().await.ok();
-        anyhow::bail!("reached max_iterations ({}) without a final answer", self.settings.max_iterations)
+        anyhow::bail!(
+            "reached max_iterations ({}) without a final answer",
+            self.settings.max_iterations
+        )
     }
 
     async fn record(&self, kind: &str, message: Message) {
-        let event = MemoryEvent { kind: kind.to_string(), message, ts_ms: now_ms() };
+        let event = MemoryEvent {
+            kind: kind.to_string(),
+            message,
+            ts_ms: now_ms(),
+        };
         if let Err(e) = self.memory.append(event).await {
             tracing::warn!("episodic append failed: {e}");
         }
@@ -161,5 +179,8 @@ impl Agent {
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }

@@ -2,7 +2,10 @@
 # will have compiled files and executables
 debug
 target
-/Cargo.lock
+
+# Nix build symlinks
+/result
+/result-*
 
 # Agent runtime state (episodic log + semantic memory)
 .agent/

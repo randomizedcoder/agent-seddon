@@ -53,27 +53,6 @@ fn truncate(mut s: String) -> String {
     s
 }
 
-#[cfg(test)]
-mod tests {
-    use super::resolve_within;
-    use std::path::Path;
-
-    #[test]
-    fn allows_paths_inside_cwd() {
-        let cwd = Path::new("/work/repo");
-        assert_eq!(resolve_within(cwd, "src/main.rs").unwrap(), Path::new("/work/repo/src/main.rs"));
-        assert_eq!(resolve_within(cwd, "./a/../b").unwrap(), Path::new("/work/repo/b"));
-    }
-
-    #[test]
-    fn rejects_traversal_and_absolute() {
-        let cwd = Path::new("/work/repo");
-        assert!(resolve_within(cwd, "../../etc/passwd").is_err());
-        assert!(resolve_within(cwd, "/etc/passwd").is_err());
-        assert!(resolve_within(cwd, "a/../../secret").is_err());
-    }
-}
-
 fn arg_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     args.get(key)
         .and_then(Value::as_str)
@@ -82,7 +61,11 @@ fn arg_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
 
 /// Convenience: build the default tool set.
 pub fn default_tools() -> Vec<Arc<dyn Tool>> {
-    vec![Arc::new(BashTool), Arc::new(ReadFileTool), Arc::new(WriteFileTool)]
+    vec![
+        Arc::new(BashTool),
+        Arc::new(ReadFileTool),
+        Arc::new(WriteFileTool),
+    ]
 }
 
 // --- bash -----------------------------------------------------------------
@@ -97,7 +80,9 @@ impl Tool for BashTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "bash".into(),
-            description: "Run a bash command in the working directory and return combined stdout/stderr.".into(),
+            description:
+                "Run a bash command in the working directory and return combined stdout/stderr."
+                    .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -148,7 +133,10 @@ impl Tool for BashTool {
             buf = format!("(no output, exit code {code})");
         }
         let is_error = !output.status.success();
-        Ok(Observation { content: truncate(buf), is_error })
+        Ok(Observation {
+            content: truncate(buf),
+            is_error,
+        })
     }
 }
 
@@ -199,7 +187,9 @@ impl Tool for WriteFileTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "write_file".into(),
-            description: "Write (create or overwrite) a UTF-8 text file relative to the working directory.".into(),
+            description:
+                "Write (create or overwrite) a UTF-8 text file relative to the working directory."
+                    .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -219,12 +209,44 @@ impl Tool for WriteFileTool {
         };
         if let Some(parent) = full.parent() {
             if let Err(e) = tokio::fs::create_dir_all(parent).await {
-                return Ok(Observation::error(format!("could not create dir for `{path}`: {e}")));
+                return Ok(Observation::error(format!(
+                    "could not create dir for `{path}`: {e}"
+                )));
             }
         }
         match tokio::fs::write(&full, content).await {
-            Ok(()) => Ok(Observation::ok(format!("wrote {} bytes to `{path}`", content.len()))),
+            Ok(()) => Ok(Observation::ok(format!(
+                "wrote {} bytes to `{path}`",
+                content.len()
+            ))),
             Err(e) => Ok(Observation::error(format!("could not write `{path}`: {e}"))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_within;
+    use std::path::Path;
+
+    #[test]
+    fn allows_paths_inside_cwd() {
+        let cwd = Path::new("/work/repo");
+        assert_eq!(
+            resolve_within(cwd, "src/main.rs").unwrap(),
+            Path::new("/work/repo/src/main.rs")
+        );
+        assert_eq!(
+            resolve_within(cwd, "./a/../b").unwrap(),
+            Path::new("/work/repo/b")
+        );
+    }
+
+    #[test]
+    fn rejects_traversal_and_absolute() {
+        let cwd = Path::new("/work/repo");
+        assert!(resolve_within(cwd, "../../etc/passwd").is_err());
+        assert!(resolve_within(cwd, "/etc/passwd").is_err());
+        assert!(resolve_within(cwd, "a/../../secret").is_err());
     }
 }
