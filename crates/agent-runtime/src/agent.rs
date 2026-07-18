@@ -17,6 +17,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+#[derive(Clone)]
 pub struct Settings {
     pub max_iterations: usize,
     pub max_tokens: u32,

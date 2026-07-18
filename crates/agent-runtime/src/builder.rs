@@ -44,7 +44,10 @@ pub async fn build_agent_with(
     let provider = registry
         .build_provider(&cfg.agent.provider, &cfg)
         .context("building provider")?;
-    let tools = build_tools(registry, &cfg)?;
+    #[allow(unused_mut)]
+    let mut tools = build_tools(registry, &cfg)?;
+    #[cfg(feature = "mcp")]
+    register_mcp_tools(&mut tools, &cfg).await;
 
     let inner_memory = registry
         .build_memory(&cfg.memory.backend, &cfg)
@@ -87,6 +90,24 @@ pub async fn build_agent_with(
         context_append,
     };
 
+    // Subagents: register a `delegate` tool whose children reuse the worker tool
+    // set (captured before `delegate` is added, so children can't see it) plus a
+    // deeper `delegate` while depth remains.
+    #[cfg(feature = "subagents")]
+    if cfg.agent.subagents {
+        let ctx = Arc::new(crate::subagent::SubagentContext {
+            provider: provider.clone(),
+            context: context.clone(),
+            policy: policy.clone(),
+            memory: memory.clone(),
+            worker_tools: tools.clone(),
+            metrics: metrics.clone(),
+            max_depth: cfg.agent.subagent_max_depth.max(1),
+            child_settings: settings.clone(),
+        });
+        tools.register(Arc::new(crate::subagent::DelegateTool::root(ctx)));
+    }
+
     Ok(Agent::new(
         provider, tools, memory, context, policy, metrics, settings,
     ))
@@ -110,6 +131,53 @@ fn build_tools(registry: &Registry, cfg: &Config) -> anyhow::Result<ToolRegistry
         }
     }
     Ok(tools)
+}
+
+/// Connect to each configured MCP server, discover its tools, and register them
+/// (as `mcp_<server>_<tool>`) into the tool registry. Best-effort: a server that
+/// fails to start or handshake is logged and skipped, never aborting the run.
+/// MCP tools are always added when their server is configured — the `[tools]
+/// enabled` allowlist only filters the built-ins.
+#[cfg(feature = "mcp")]
+async fn register_mcp_tools(tools: &mut ToolRegistry, cfg: &Config) {
+    for s in &cfg.mcp.servers {
+        let transport = if !s.command.is_empty() {
+            agent_mcp::Transport::Stdio {
+                command: s.command.clone(),
+                args: s.args.clone(),
+                env: s.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            }
+        } else if !s.url.is_empty() {
+            agent_mcp::Transport::Http {
+                url: s.url.clone(),
+                headers: s
+                    .headers
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            }
+        } else {
+            tracing::warn!(
+                "mcp server `{}` has neither command nor url; skipping",
+                s.name
+            );
+            continue;
+        };
+        let server = agent_mcp::ServerConfig {
+            name: s.name.clone(),
+            transport,
+        };
+        match agent_mcp::connect_tools(&server).await {
+            Ok(mcp_tools) => {
+                let n = mcp_tools.len();
+                for tool in mcp_tools {
+                    tools.register(tool);
+                }
+                tracing::info!("mcp server `{}`: registered {n} tool(s)", s.name);
+            }
+            Err(e) => tracing::warn!("mcp server `{}` unavailable: {e}", s.name),
+        }
+    }
 }
 
 // --- built-in factory functions (referenced from `register_builtins`) ------

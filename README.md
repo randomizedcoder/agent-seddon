@@ -26,7 +26,8 @@ One crate per seam (DESIGN.md §7):
 | `agent-tools` | `Tool` impls: `bash`, `read_file`, `write_file`, `edit`, `grep`, `find`, `ls` |
 | `agent-memory` | `MemoryStore`: JSONL episodic + markdown semantic |
 | `agent-context` | `ContextStrategy`: sliding-window compaction |
-| `agent-runtime` | Config, the plugin registry, and the loop (streaming + parallel tools) |
+| `agent-mcp` | MCP client (stdio + streamable-HTTP) — external tools as `mcp_<server>_<tool>` |
+| `agent-runtime` | Config, the plugin registry, the loop (streaming + parallel tools), and subagents |
 | `agent-cli` | The `agent` binary |
 
 ## Plugins & features
@@ -46,6 +47,15 @@ by config. Do it in-tree (a `#[cfg(feature)]` line in `register_builtins`) or
 out-of-tree from your own binary via the public `Registry` + `build_agent_with`
 API — see **[docs/extending.md](docs/extending.md)** and the runnable
 `cargo run -p agent-cli --example custom_provider`.
+
+Two more ways to get tools without writing Rust:
+
+- **MCP** — list external [Model Context Protocol](https://modelcontextprotocol.io)
+  servers under `[[mcp.servers]]` (stdio or streamable-HTTP); their tools are
+  discovered at startup and registered as `mcp_<server>_<tool>`.
+- **Subagents** — set `[agent] subagents = true` to expose a `delegate` tool the
+  model can call to run a well-scoped sub-task in a child agent with isolated
+  context (returns only a summary; depth-bounded).
 
 ## Build & run
 

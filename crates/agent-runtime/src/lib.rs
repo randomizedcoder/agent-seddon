@@ -7,6 +7,8 @@ mod context_files;
 mod metrics;
 mod policy;
 mod registry;
+#[cfg(feature = "subagents")]
+mod subagent;
 
 pub use agent::{Agent, Settings};
 pub use builder::{build_agent, build_agent_with};

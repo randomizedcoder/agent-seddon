@@ -15,6 +15,8 @@ default = [
     "tool-search",
     "context-sliding-window",
     "memory-file",
+    "mcp",
+    "subagents",
 ]
 
 # Each feature forwards to the owning impl crate + drives `register_builtins`.
@@ -25,6 +27,10 @@ tool-edit = ["agent-tools/tool-edit"]
 tool-search = ["agent-tools/tool-search"]
 context-sliding-window = ["agent-context/context-sliding-window"]
 memory-file = ["agent-memory/memory-file"]
+# Connect to external MCP servers and register their tools.
+mcp = ["dep:agent-mcp"]
+# Expose a `delegate` tool that spawns child agents (isolated context).
+subagents = []
 
 [dependencies]
 agent-core.workspace = true
@@ -33,6 +39,7 @@ agent-providers.workspace = true
 agent-tools.workspace = true
 agent-memory.workspace = true
 agent-context.workspace = true
+agent-mcp = { workspace = true, optional = true }
 agent-telemetry.workspace = true
 async-trait.workspace = true
 futures-util.workspace = true

@@ -1,7 +1,12 @@
 # Features Comparison: agent-seddon vs. pi vs. hermes-agent
 
-**Date:** 2026-07-17
-**Status:** Analysis / roadmap input — no code changes.
+**Date:** 2026-07-17 (updated 2026-07-18)
+**Status:** Analysis / roadmap input.
+
+> **Update (2026-07-18):** Since the original analysis, the plugin registry + P0
+> features shipped, and an **MCP client** (stdio + HTTP) and **subagent
+> `delegate`** landed. The rows and roadmap below are annotated where that changes
+> our coverage.
 
 ## Purpose
 
@@ -90,12 +95,12 @@ impl) · ❌ Missing · ➖ N/A.
 | Distillation (episodic→semantic) | No-op v1 | ➖ | Curator | 🟦 |
 | Prometheus metrics | Yes | No | No | ✅ |
 | Structured telemetry sink (ClickHouse) | Yes | Adapter interface | Trace upload | ✅ |
-| MCP client | No | No (by design) | Yes | ❌ |
+| MCP client | Yes (stdio + HTTP) | No (by design) | Yes | ✅ |
 | MCP server | No | No | Yes | ❌ |
 | Permission / approval gate | Yes (auto/interactive) | No (trust model) | Yes (rich) | 🟡 |
 | Path-traversal safety on file tools | Yes | — | — | ✅ |
 | Sandboxed execution backends | No | Docs/patterns | 6 backends | ❌ |
-| Subagents / delegation | Seam only | Extension | Yes + kanban | 🟦 |
+| Subagents / delegation | Yes (`delegate`, depth-capped) | Extension | Yes + kanban | ✅ |
 | Session persistence / resume | Append-only log; no resume UX | Yes (JSONL + `/resume`) | Yes (SQLite) | 🟡 |
 | Interactive TUI | No | Yes | Yes | ❌ |
 | Slash commands | No | Yes | Yes | ❌ |
