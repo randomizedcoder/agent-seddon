@@ -6,6 +6,7 @@ members = [
     "crates/agent-tools",
     "crates/agent-memory",
     "crates/agent-context",
+    "crates/agent-mcp",
     "crates/agent-telemetry",
     "crates/agent-runtime",
     "crates/agent-cli",
@@ -52,5 +53,6 @@ agent-providers = { path = "crates/agent-providers", default-features = false }
 agent-tools = { path = "crates/agent-tools", default-features = false }
 agent-memory = { path = "crates/agent-memory", default-features = false }
 agent-context = { path = "crates/agent-context", default-features = false }
+agent-mcp = { path = "crates/agent-mcp" }
 agent-telemetry = { path = "crates/agent-telemetry" }
 agent-runtime = { path = "crates/agent-runtime" }

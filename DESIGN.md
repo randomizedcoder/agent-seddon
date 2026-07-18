@@ -253,7 +253,20 @@ truncation, map-reduce summary, retrieval-only) plug in here.
   subset + policy), à la Roo Code modes. This is also the seam for **delegated
   subtasks**: a parent agent can spawn a child agent with an *isolated* context and
   receive only a summary back (Roo Code's "boomerang" pattern), preventing context
-  pollution.
+  pollution. **Implemented** as the `delegate` tool (`agent-runtime/src/subagent.rs`,
+  feature `subagents`): the child reuses the same provider/tools/context/policy,
+  runs its own loop, and returns only its final summary; recursion is bounded by
+  `subagent_max_depth`.
+
+### 4.6 External tools: MCP
+
+Tools need not be in-tree. The `agent-mcp` crate is a **Model Context Protocol**
+client (feature `mcp`): it connects to configured servers over **stdio**
+(subprocess) or **streamable HTTP**, discovers their tools (`tools/list`), and
+registers each as an `mcp_<server>_<tool>` `Tool` in the same `ToolRegistry` as the
+built-ins. This is the harness's answer to "add capabilities without writing Rust"
+— point it at any MCP server. Connection is best-effort; a failing server is logged
+and skipped.
 
 ---
 
@@ -440,5 +453,6 @@ loop iteration (model call → tool exec → observation → response), and flip
    and blocking walkers (`grep`/`find`/`ls`) run on `spawn_blocking`.
 4. Where does the distillation pipeline run — end-of-session only, or also on demand?
    (Still a no-op stub; unchanged.)
-5. How much of the `Agent`/subtask delegation to build vs. stub as a seam? (Still a
-   documented future seam — not built. Next up after the P0 coding features.)
+5. ~~How much of the `Agent`/subtask delegation to build vs. stub as a seam?~~
+   **Resolved:** built as the `delegate` tool (§4.5), depth-bounded. MCP client
+   (§4.6) added alongside for external tools.

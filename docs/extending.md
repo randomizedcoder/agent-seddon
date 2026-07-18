@@ -101,6 +101,43 @@ let agent = build_agent_with(&registry, config, /* telemetry */ None, session_id
 `config.agent.provider = "my-llm"` now selects it. See
 `crates/agent-cli/examples/custom_provider.rs` for a runnable example.
 
+## External tools via MCP
+
+Beyond in-tree/out-of-tree Rust tools, the harness can pull tools from any
+**Model Context Protocol** server at startup — no code required, just config. Each
+configured server is connected (`agent-mcp` feature `mcp`, on by default), its
+tools discovered via `tools/list`, and each registered as `mcp_<server>_<tool>`
+into the same `ToolRegistry` as the built-ins.
+
+```toml
+[[mcp.servers]]                 # stdio: spawned as a subprocess
+name    = "filesystem"
+command = "npx"
+args    = ["-y", "@modelcontextprotocol/server-filesystem", "."]
+
+[[mcp.servers]]                 # http: streamable-HTTP endpoint
+name    = "remote"
+url     = "https://mcp.example.com/mcp"
+# headers = { Authorization = "Bearer …" }
+```
+
+Connection is best-effort: a server that fails to start/handshake is logged and
+skipped, never aborting the run. MCP tools are always added when their server is
+configured — the `[tools] enabled` allowlist only filters the built-ins. The
+client lives in `crates/agent-mcp` (stdio + streamable-HTTP transports behind a
+`McpTransport` trait); it implements the client half of MCP (tool discovery +
+calls).
+
+## Subagents (`delegate`)
+
+With `[agent] subagents = true`, a `delegate` tool is registered. The model calls
+it with a sub-goal; it builds a **child agent** from the same components (provider,
+worker tools, context, policy, memory), runs the child's own tool loop in an
+isolated context, and returns only the child's final summary. Recursion is bounded
+by `[agent] subagent_max_depth` (a child gets its own `delegate` only while depth
+remains). See `crates/agent-runtime/src/subagent.rs`. Off by default — nested loops
+multiply token cost.
+
 ## Verifying an extension
 
 - `cargo build` (default features) and a minimal build to confirm gating:

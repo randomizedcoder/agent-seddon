@@ -3,6 +3,7 @@
 //! the factory (`builder.rs`) turns those strings into wired trait objects.
 
 use serde::Deserialize;
+use std::collections::HashMap;
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
@@ -13,11 +14,39 @@ pub struct Config {
     #[serde(default)]
     pub tools: ToolsCfg,
     #[serde(default)]
+    pub mcp: McpCfg,
+    #[serde(default)]
     pub telemetry: TelemetryCfg,
     #[serde(default)]
     pub context_files: ContextFilesCfg,
     #[serde(default)]
     pub metrics: MetricsCfg,
+}
+
+/// External MCP (Model Context Protocol) servers whose tools are discovered at
+/// startup and registered as `mcp_<server>_<tool>`. A server is stdio if it has
+/// a `command`, or HTTP if it has a `url`.
+#[derive(Debug, Default, Deserialize)]
+pub struct McpCfg {
+    #[serde(default)]
+    pub servers: Vec<McpServerCfg>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct McpServerCfg {
+    pub name: String,
+    // --- stdio ---
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    // --- http ---
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
 }
 
 /// User context injected from `<dir>/prepend/` and `<dir>/append/` (NNNN_*.md).
@@ -89,6 +118,13 @@ pub struct AgentCfg {
     /// Execute a turn's tool calls concurrently (when all are parallel-safe).
     #[serde(default = "default_true")]
     pub parallel_tools: bool,
+    /// Expose a `delegate` tool so the model can spawn child agents with isolated
+    /// context. Off by default (nested loops multiply cost).
+    #[serde(default)]
+    pub subagents: bool,
+    /// Maximum delegation depth (levels of nested `delegate`).
+    #[serde(default = "default_subagent_depth")]
+    pub subagent_max_depth: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -220,6 +256,9 @@ fn default_system_prompt() -> String {
 fn default_anthropic_version() -> String {
     "2023-06-01".into()
 }
+fn default_subagent_depth() -> usize {
+    2
+}
 fn default_memory_backend() -> String {
     "file".into()
 }
@@ -278,6 +317,8 @@ impl Config {
                 system_prompt: default_system_prompt(),
                 stream: true,
                 parallel_tools: true,
+                subagents: false,
+                subagent_max_depth: default_subagent_depth(),
             },
             provider: ProviderCfg {
                 base_url: "http://localhost:1".into(),
@@ -290,6 +331,7 @@ impl Config {
             },
             memory: MemoryCfg::default(),
             tools: ToolsCfg::default(),
+            mcp: McpCfg::default(),
             telemetry: TelemetryCfg::default(),
             context_files: ContextFilesCfg::default(),
             metrics: MetricsCfg::default(),

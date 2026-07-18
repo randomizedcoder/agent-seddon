@@ -22,6 +22,12 @@ reserve_output = 8192
 stream         = true
 parallel_tools = true
 
+# Subagents: expose a `delegate` tool so the model can spawn child agents with
+# an isolated context (they return only a final summary). Off by default —
+# nested loops multiply token cost. subagent_max_depth bounds recursion.
+subagents          = false
+subagent_max_depth = 2
+
 system_prompt = """
 You are a coding agent operating in a terminal working directory. Use the
 provided tools (bash, read_file, write_file, edit, grep, find, ls) to inspect and
@@ -55,8 +61,26 @@ recall_limit  = 5
 
 [tools]
 # Empty list = every registered tool. Name a subset to restrict (must be
-# registered, i.e. compiled in via cargo features).
+# registered, i.e. compiled in via cargo features). Note: MCP tools (below) are
+# always added when their server is configured — this allowlist only filters the
+# built-ins.
 enabled = ["bash", "read_file", "write_file", "edit", "grep", "find", "ls"]
+
+# External MCP (Model Context Protocol) servers. Their tools are discovered at
+# startup and registered as `mcp_<server>_<tool>`. Best-effort: a server that
+# fails to start is logged and skipped. A server is stdio (has `command`) or
+# HTTP (has `url`). Off unless you add a server here.
+#
+# [[mcp.servers]]                         # stdio: spawned as a subprocess
+# name    = "filesystem"
+# command = "npx"
+# args    = ["-y", "@modelcontextprotocol/server-filesystem", "."]
+# # env   = { SOME_KEY = "value" }
+#
+# [[mcp.servers]]                         # http: streamable-HTTP endpoint
+# name    = "remote"
+# url     = "https://mcp.example.com/mcp"
+# # headers = { Authorization = "Bearer …" }
 
 # Stream the full transaction history (agent_events), logs (agent_logs), and
 # per-turn token usage (agent_usage) into ClickHouse, keyed by a per-run
