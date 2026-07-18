@@ -161,8 +161,11 @@ vector/dialectic. Remaining: activate distillation + an embedding-backed
 `SemanticStore` (both are documented seams).
 
 ### Telemetry / metrics / observability — our moat
-`crates/agent-runtime/src/metrics.rs` exposes 10 Prometheus metrics over a
-`/metrics` endpoint (+ optional Pushgateway). `crates/agent-telemetry/` streams a
+`crates/agent-metrics` exposes Prometheus metrics over a `/metrics` endpoint (+
+optional Pushgateway) — loop-level counters plus per-seam series recorded by a
+metrics wrapper (`crates/agent-runtime/src/metered.rs`), scraped by a
+Nix-deployed Prometheus/Grafana stack with a per-component dashboard
+([`docs/metrics.md`](metrics.md)). `crates/agent-telemetry/` streams a
 full transaction history to **ClickHouse** — three tables (`agent_events`,
 `agent_logs`, `agent_usage`), keyed by per-run `session_id`, via a batched
 background writer that drops rows rather than blocking if ClickHouse is down.

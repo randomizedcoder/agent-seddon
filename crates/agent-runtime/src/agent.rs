@@ -5,12 +5,12 @@
 //! ordinary (DESIGN.md §2): assemble → complete → dispatch tools → record →
 //! compact → repeat until the model stops asking for tools.
 
-use crate::metrics::Metrics;
 use agent_core::{
     CompletionRequest, CompletionResponse, ContextBlock, ContextInput, ContextStrategy, Decision,
     LlmProvider, MemoryEvent, MemoryStore, Message, Observation, Policy, RecallQuery, Role,
     TokenBudget, ToolContext, ToolRegistry, ToolSchema, WorkingSet,
 };
+use agent_metrics::Metrics;
 use futures_util::StreamExt;
 use std::io::Write;
 use std::path::PathBuf;

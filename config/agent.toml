@@ -118,12 +118,16 @@ flush_interval_ms = 1000
 [context_files]
 dir = "context.d"
 
-# Prometheus metrics about the running agent (API calls, tokens, context size,
-# tool calls, iterations, run outcome). Off by default. When enabled, a
-# /metrics endpoint is served on `listen`; set `pushgateway` to also push on
-# exit (useful for short runs).
+# Prometheus metrics about the running agent: loop-level counters (API calls,
+# tokens, context size, tool calls, iterations, run outcome) plus per-component
+# series recorded at each seam (provider request/TTFT, tool exec latency, memory
+# recall/append, context assemble/compact, policy authorize). When enabled, a
+# /metrics endpoint is served on `listen`; scrape it with Prometheus + Grafana
+# (`nix run .#prometheus-up` / `.#grafana-up`, see docs/metrics.md). A
+# `--serve-<seam>` process serves its own /metrics on the seam's port (9601-9605).
+# Set `pushgateway` to also push on exit (useful for short one-shot runs).
 [metrics]
-enabled     = false
+enabled     = true
 listen      = "127.0.0.1:9600"
 pushgateway = ""                # e.g. "http://localhost:9091"
 job         = "agent-seddon"

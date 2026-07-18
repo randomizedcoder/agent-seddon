@@ -12,6 +12,9 @@ pub struct SeamEndpoint {
     pub tcp_port: u16,
     /// Unix-domain-socket path, for same-host TCP-bypassing use.
     pub uds_path: &'static str,
+    /// Loopback Prometheus `/metrics` port used when this seam runs as its own
+    /// `agent --serve-<seam>` process (so co-located seam servers don't collide).
+    pub metrics_port: u16,
 }
 
 /// Directory holding the per-seam unix domain sockets.
@@ -20,20 +23,25 @@ pub const SOCKET_DIR: &str = "/tmp/agent-seddon";
 pub const PROVIDER: SeamEndpoint = SeamEndpoint {
     tcp_port: 50051,
     uds_path: "/tmp/agent-seddon/provider.sock",
+    metrics_port: 9601,
 };
 pub const MEMORY: SeamEndpoint = SeamEndpoint {
     tcp_port: 50052,
     uds_path: "/tmp/agent-seddon/memory.sock",
+    metrics_port: 9602,
 };
 pub const TOOLS: SeamEndpoint = SeamEndpoint {
     tcp_port: 50053,
     uds_path: "/tmp/agent-seddon/tools.sock",
+    metrics_port: 9603,
 };
 pub const CONTEXT: SeamEndpoint = SeamEndpoint {
     tcp_port: 50054,
     uds_path: "/tmp/agent-seddon/context.sock",
+    metrics_port: 9604,
 };
 pub const POLICY: SeamEndpoint = SeamEndpoint {
     tcp_port: 50055,
     uds_path: "/tmp/agent-seddon/policy.sock",
+    metrics_port: 9605,
 };

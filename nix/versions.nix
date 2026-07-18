@@ -27,8 +27,9 @@ in
     ];
   };
 
-  # Nix formatter (used by `nix fmt` and the nix-fmt check).
-  nixfmt = pkgs.nixfmt-rfc-style or pkgs.nixfmt;
+  # Nix formatter (used by `nix fmt` and the nix-fmt check). `pkgs.nixfmt` is the
+  # RFC-style formatter now (the old `nixfmt-rfc-style` alias warns on eval).
+  nixfmt = pkgs.nixfmt;
 
   # Rust dev/CI tooling.
   cargo-audit = pkgs.cargo-audit;
@@ -64,4 +65,19 @@ in
   clickstackUiPort = 8080; # HyperDX web UI
   clickstackOtlpGrpcPort = 4317; # OTLP/gRPC receiver (the endpoint the agent uses)
   clickstackOtlpHttpPort = 4318; # OTLP/HTTP receiver
+
+  # ── Prometheus + Grafana settings ─────────────────────────────────────────
+  # The metrics scraper + dashboards for a running agent (complementary to the
+  # OTLP tracing above). Both containers run with docker `--network host` (Linux)
+  # so Prometheus can scrape the agent's loopback `127.0.0.1:9600` (+ the per-seam
+  # `--serve-<seam>` ports 9601–9605 from constants.nix) and Grafana can reach
+  # Prometheus at `127.0.0.1:9090`. Pin the images so an upstream bump is explicit.
+  prometheusImage = "prom/prometheus:v2.54.1";
+  prometheusContainerName = "agent-seddon-prometheus";
+  prometheusPort = 9090; # Prometheus web UI + API
+  grafanaImage = "grafana/grafana:11.2.0";
+  grafanaContainerName = "agent-seddon-grafana";
+  grafanaPort = 3000; # Grafana web UI
+  # The main agent process's `/metrics` port (config `[metrics] listen` default).
+  agentMetricsPort = 9600;
 }

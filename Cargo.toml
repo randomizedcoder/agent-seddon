@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/agent-core",
+    "crates/agent-metrics",
     "crates/agent-providers",
     "crates/agent-tools",
     "crates/agent-memory",
@@ -75,6 +76,7 @@ tracing-opentelemetry = "0.28"
 # when consumed as deps, so `agent-runtime` selects modules explicitly (and a
 # `--no-default-features` build of the runtime truly drops them).
 agent-core = { path = "crates/agent-core" }
+agent-metrics = { path = "crates/agent-metrics" }
 agent-providers = { path = "crates/agent-providers", default-features = false }
 agent-tools = { path = "crates/agent-tools", default-features = false }
 agent-memory = { path = "crates/agent-memory", default-features = false }

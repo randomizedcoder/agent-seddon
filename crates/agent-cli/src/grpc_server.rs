@@ -51,6 +51,19 @@ impl Seam {
         }
     }
 
+    /// The Prometheus `/metrics` port this seam serves on when hosted as its own
+    /// `--serve-<seam>` process (so co-located seam servers don't collide on the
+    /// main agent's default `:9600`). Ports come from `nix/constants.nix`.
+    pub fn metrics_port(self) -> u16 {
+        match self {
+            Seam::Provider => constants::PROVIDER.metrics_port,
+            Seam::Memory => constants::MEMORY.metrics_port,
+            Seam::Tools => constants::TOOLS.metrics_port,
+            Seam::Context => constants::CONTEXT.metrics_port,
+            Seam::Policy => constants::POLICY.metrics_port,
+        }
+    }
+
     fn configured_listen(self, cfg: &Config) -> &str {
         match self {
             Seam::Provider => &cfg.grpc.provider.listen,

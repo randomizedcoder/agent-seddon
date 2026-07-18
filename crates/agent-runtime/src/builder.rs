@@ -11,9 +11,9 @@ use crate::config::Config;
 #[cfg(any(feature = "provider-openai-compat", feature = "provider-anthropic"))]
 use crate::config::ProviderCfg;
 use crate::context_files;
-use crate::metrics::Metrics;
 use crate::registry::Registry;
 use agent_core::{MemoryStore, ToolRegistry};
+use agent_metrics::Metrics;
 use agent_telemetry::{CompositeMemory, TelemetryHandle};
 use anyhow::Context;
 use std::sync::Arc;
@@ -41,15 +41,22 @@ pub async fn build_agent_with(
     session_id: String,
     metrics: Metrics,
 ) -> anyhow::Result<Agent> {
-    let provider = registry
-        .build_provider(&cfg.agent.provider, &cfg)
-        .context("building provider")?;
+    // Wrap the provider in its metrics decorator up front, so every downstream
+    // user (the loop, the summarizing context strategy, distillation) is
+    // attributed the same way — including a remote `= "grpc"` client.
+    let provider = crate::metered::provider(
+        registry
+            .build_provider(&cfg.agent.provider, &cfg)
+            .context("building provider")?,
+        metrics.clone(),
+        &cfg.agent.provider,
+    );
     #[allow(unused_mut)]
-    let mut tools = build_tools(registry, &cfg)?;
+    let mut tools = build_tools(registry, &cfg, &metrics)?;
     #[cfg(feature = "mcp")]
-    register_mcp_tools(&mut tools, &cfg, registry).await;
+    register_mcp_tools(&mut tools, &cfg, registry, &metrics).await;
     #[cfg(feature = "grpc")]
-    register_grpc_tools(&mut tools, &cfg).await;
+    register_grpc_tools(&mut tools, &cfg, &metrics).await;
 
     // Memory: either the whole-store backend, or — when `[memory] semantic` is
     // set — the episodic layer of that backend composed with an independently
@@ -67,17 +74,27 @@ pub async fn build_agent_with(
             .context("building semantic layer")?;
         Arc::new(agent_core::LayeredMemory::new(episodic, semantic))
     };
-    let memory: Arc<dyn MemoryStore> = match telemetry {
+    let composed_memory: Arc<dyn MemoryStore> = match telemetry {
         Some(handle) => Arc::new(CompositeMemory::new(inner_memory, handle)),
         None => inner_memory,
     };
+    // Metrics wrapper outermost, so it times the whole memory op the loop sees
+    // (including the telemetry mirror, when enabled).
+    let memory = crate::metered::memory(composed_memory, metrics.clone());
 
-    let context = registry
-        .build_context(&cfg.agent.context, &cfg, &provider)
-        .context("building context strategy")?;
-    let policy = registry
-        .build_policy(&cfg.agent.policy, &cfg)
-        .context("building policy")?;
+    let context = crate::metered::context(
+        registry
+            .build_context(&cfg.agent.context, &cfg, &provider)
+            .context("building context strategy")?,
+        metrics.clone(),
+    );
+    let policy = crate::metered::policy(
+        registry
+            .build_policy(&cfg.agent.policy, &cfg)
+            .context("building policy")?,
+        metrics.clone(),
+        &cfg.agent.policy,
+    );
 
     let (context_prepend, context_append) = context_files::load(&cfg.context_files.dir);
     if !context_prepend.is_empty() || !context_append.is_empty() {
@@ -131,18 +148,23 @@ pub async fn build_agent_with(
 /// Resolve the enabled tools through the registry. Empty `[tools] enabled` means
 /// "every registered tool"; otherwise only the named ones (erroring, with the
 /// known names listed, on a typo).
-fn build_tools(registry: &Registry, cfg: &Config) -> anyhow::Result<ToolRegistry> {
+fn build_tools(
+    registry: &Registry,
+    cfg: &Config,
+    metrics: &Metrics,
+) -> anyhow::Result<ToolRegistry> {
     let mut tools = ToolRegistry::new();
     if cfg.tools.enabled.is_empty() {
         for name in registry.tool_names() {
-            tools.register(registry.build_tool(name, cfg)?);
+            let tool = registry.build_tool(name, cfg)?;
+            tools.register(crate::metered::tool(tool, metrics.clone()));
         }
     } else {
         for name in &cfg.tools.enabled {
             let tool = registry
                 .build_tool(name, cfg)
                 .with_context(|| format!("enabling tool `{name}`"))?;
-            tools.register(tool);
+            tools.register(crate::metered::tool(tool, metrics.clone()));
         }
     }
     Ok(tools)
@@ -154,7 +176,12 @@ fn build_tools(registry: &Registry, cfg: &Config) -> anyhow::Result<ToolRegistry
 /// MCP tools are always added when their server is configured — the `[tools]
 /// enabled` allowlist only filters the built-ins.
 #[cfg(feature = "mcp")]
-async fn register_mcp_tools(tools: &mut ToolRegistry, cfg: &Config, registry: &Registry) {
+async fn register_mcp_tools(
+    tools: &mut ToolRegistry,
+    cfg: &Config,
+    registry: &Registry,
+    metrics: &Metrics,
+) {
     for s in &cfg.mcp.servers {
         // A custom `kind` selects an out-of-tree transport registered on the
         // registry; the whole server config rides along as `params`. Otherwise the
@@ -201,7 +228,7 @@ async fn register_mcp_tools(tools: &mut ToolRegistry, cfg: &Config, registry: &R
             Ok(mcp_tools) => {
                 let n = mcp_tools.len();
                 for tool in mcp_tools {
-                    tools.register(tool);
+                    tools.register(crate::metered::tool(tool, metrics.clone()));
                 }
                 tracing::info!("mcp server `{}`: registered {n} tool(s)", s.name);
             }
@@ -214,7 +241,7 @@ async fn register_mcp_tools(tools: &mut ToolRegistry, cfg: &Config, registry: &R
 /// `register_mcp_tools`). Only acts when `[grpc.tools] endpoint` is set — there is
 /// no implicit default worker. Best-effort: a failing worker is logged and skipped.
 #[cfg(feature = "grpc")]
-async fn register_grpc_tools(tools: &mut ToolRegistry, cfg: &Config) {
+async fn register_grpc_tools(tools: &mut ToolRegistry, cfg: &Config, metrics: &Metrics) {
     let endpoint = &cfg.grpc.tools.endpoint;
     if endpoint.is_empty() {
         return;
@@ -224,7 +251,7 @@ async fn register_grpc_tools(tools: &mut ToolRegistry, cfg: &Config) {
         Ok(remote) => {
             let n = remote.len();
             for tool in remote {
-                tools.register(tool);
+                tools.register(crate::metered::tool(tool, metrics.clone()));
             }
             tracing::info!("grpc tool worker `{endpoint}`: registered {n} tool(s)");
         }

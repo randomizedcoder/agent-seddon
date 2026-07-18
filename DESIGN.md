@@ -512,9 +512,13 @@ loop iteration (model call → tool exec → observation → response), and flip
 
 Sections 2–5 cover the seams; several shipped subsystems live around them:
 
-- **Observability.** Prometheus metrics (`crates/agent-runtime/src/metrics.rs`) —
-  10 metrics (API calls, latency, tokens, context size, tool calls, iterations,
-  runs, active) served on a `/metrics` endpoint (+ optional Pushgateway). And a
+- **Observability.** Prometheus metrics (`crates/agent-metrics`) — loop-level
+  counters (API calls, latency, tokens, context size, tool calls, iterations,
+  runs, active) *plus* per-seam series recorded by a metrics wrapper
+  (`crates/agent-runtime/src/metered.rs`: provider request/TTFT, per-tool latency,
+  memory ops, context assemble/compact, policy authorize) — served on a `/metrics`
+  endpoint (+ optional Pushgateway), scraped by a Nix-deployed Prometheus/Grafana
+  stack with a per-component dashboard ([`docs/metrics.md`](docs/metrics.md)). And a
   ClickHouse telemetry sink (`crates/agent-telemetry`): a `CompositeMemory` wrapper
   and a tracing layer stream `agent_events` / `agent_logs` / `agent_usage` via a
   batched background writer, best-effort (rows dropped, never blocking, if
