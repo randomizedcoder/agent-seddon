@@ -9,6 +9,7 @@ name = "agent"
 path = "src/main.rs"
 
 [dependencies]
+agent-core.workspace = true
 agent-runtime.workspace = true
 agent-telemetry.workspace = true
 tokio.workspace = true

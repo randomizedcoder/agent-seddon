@@ -28,6 +28,11 @@ Trait contracts live in `crates/agent-core/src/lib.rs`. All are object-safe and 
 `ToolSchema`, `CompletionChunk`, …) is the only currency between seams — don't
 invent a parallel one.
 
+Context-strategy note: the context factory receives `(&Config, &Arc<dyn
+LlmProvider>)` — the already-built provider — so a strategy like
+`summarizing-window` can call the model during compaction. Strategies that don't
+need it (e.g. `sliding-window`) ignore the second argument.
+
 Provider note: implement `complete` (buffered); `stream` is optional and defaults
 to adapting `complete` into a single terminal chunk, so a provider works with
 streaming for free and only overrides `stream` to do incremental SSE.

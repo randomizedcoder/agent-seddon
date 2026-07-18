@@ -8,6 +8,8 @@ license.workspace = true
 default = ["context-sliding-window"]
 # Non-destructive sliding-window truncation.
 context-sliding-window = []
+# LLM-summarizing compaction (keeps head + recent tail, summarizes the middle).
+context-summarizing = []
 
 [dependencies]
 agent-core.workspace = true

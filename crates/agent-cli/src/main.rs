@@ -1,14 +1,16 @@
-//! `agent` — run one goal through the agent loop.
+//! `agent` — a coding agent.
 //!
 //! Usage:
-//!   agent [--config PATH] <goal words...>
+//!   agent [--config PATH] [--continue | --resume ID] [<goal words...>]
 //!
-//! Example:
-//!   agent --config config/agent.toml "list the files in this repo"
+//! With a goal, runs it once (one-shot). With no goal, enters an interactive
+//! multi-turn REPL (see `repl.rs`). `--continue` resumes the most recent saved
+//! session; `--resume ID` resumes a specific one.
 
 mod metrics_server;
+mod repl;
 
-use agent_runtime::Metrics;
+use agent_runtime::{session_store, Metrics};
 use agent_telemetry::{ClickHouseLayer, TelemetryConfig, TelemetryHandle};
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -18,10 +20,11 @@ use tracing_subscriber::{fmt, EnvFilter, Registry};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let Args { config_path, goal } = parse_args()?;
-    if goal.trim().is_empty() {
-        anyhow::bail!("no goal given.\nusage: agent [--config PATH] <goal words...>");
-    }
+    let Args {
+        config_path,
+        mode,
+        resume,
+    } = parse_args()?;
 
     let toml_str = std::fs::read_to_string(&config_path)
         .with_context(|| format!("reading config `{}`", config_path.display()))?;
@@ -61,7 +64,8 @@ async fn main() -> Result<()> {
         job: config.metrics.job.clone(),
     };
 
-    tracing::info!(goal = %goal, session_id = %session_id, "starting agent run");
+    let sessions_dir = session_store::default_dir();
+    tracing::info!(session_id = %session_id, "starting agent");
     let agent = agent_runtime::build_agent(
         config,
         telemetry.clone(),
@@ -70,9 +74,33 @@ async fn main() -> Result<()> {
     )
     .await
     .context("building agent")?;
-    let result = agent.run(&goal).await;
 
-    // Flush telemetry + push metrics before we surface success/failure or exit.
+    // Resolve an optional resume target to (id, transcript).
+    let resumed = resolve_resume(&resume, &sessions_dir);
+
+    // Run either one-shot or the REPL, capturing the answer (one-shot only).
+    let outcome: Result<Option<String>> = match mode {
+        Mode::OneShot(goal) => {
+            let mut session = agent.session();
+            let id = match resumed {
+                Some((rid, msgs)) => {
+                    session.load(msgs);
+                    rid
+                }
+                None => repl::new_id(),
+            };
+            let result = session.send(&goal).await;
+            if result.is_ok() {
+                let _ = session_store::save(&sessions_dir, &id, session.messages());
+            }
+            result.map(Some)
+        }
+        Mode::Repl => repl::run(&agent, &sessions_dir, resumed)
+            .await
+            .map(|()| None),
+    };
+
+    // Flush telemetry + push metrics before surfacing success/failure.
     if let Some(handle) = &telemetry {
         handle.shutdown().await;
     }
@@ -80,12 +108,32 @@ async fn main() -> Result<()> {
         metrics_server::push(&metrics, &metrics_cfg.pushgateway, &metrics_cfg.job).await;
     }
 
-    let answer = result?;
-    println!("\n=== ANSWER ===\n{answer}");
-    if !session_id.is_empty() {
-        println!("\n(telemetry session_id: {session_id})");
+    if let Some(answer) = outcome? {
+        println!("\n=== ANSWER ===\n{answer}");
+        if !session_id.is_empty() {
+            println!("\n(telemetry session_id: {session_id})");
+        }
     }
     Ok(())
+}
+
+/// Turn the parsed resume flag into a loaded `(id, transcript)`, if any.
+fn resolve_resume(
+    resume: &Option<ResumeArg>,
+    dir: &std::path::Path,
+) -> Option<(String, Vec<agent_core::Message>)> {
+    let id = match resume {
+        Some(ResumeArg::Continue) => session_store::most_recent(dir)?,
+        Some(ResumeArg::Id(id)) => id.clone(),
+        None => return None,
+    };
+    match session_store::load(dir, &id) {
+        Ok(msgs) => Some((id, msgs)),
+        Err(e) => {
+            eprintln!("could not resume session `{id}`: {e}");
+            None
+        }
+    }
 }
 
 /// Metrics settings captured before `config` is moved into `build_agent`.
@@ -96,8 +144,7 @@ struct MetricsRun {
 }
 
 /// Install the fmt layer plus, when telemetry + `stream_logs` are on, the
-/// ClickHouse layer. `Option<Layer>` is itself a `Layer`, so the same builder
-/// covers both cases.
+/// ClickHouse layer.
 fn init_tracing(telemetry: &Option<TelemetryHandle>, stream_logs: bool) {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let ch_layer = telemetry
@@ -111,13 +158,25 @@ fn init_tracing(telemetry: &Option<TelemetryHandle>, stream_logs: bool) {
         .init();
 }
 
+enum Mode {
+    OneShot(String),
+    Repl,
+}
+
+enum ResumeArg {
+    Continue,
+    Id(String),
+}
+
 struct Args {
     config_path: PathBuf,
-    goal: String,
+    mode: Mode,
+    resume: Option<ResumeArg>,
 }
 
 fn parse_args() -> Result<Args> {
     let mut config_path = PathBuf::from("config/agent.toml");
+    let mut resume: Option<ResumeArg> = None;
     let mut goal_parts: Vec<String> = Vec::new();
 
     let mut args = std::env::args().skip(1);
@@ -127,16 +186,35 @@ fn parse_args() -> Result<Args> {
                 config_path =
                     PathBuf::from(args.next().context("--config requires a path argument")?);
             }
+            "--continue" => resume = Some(ResumeArg::Continue),
+            "--resume" => {
+                resume = Some(ResumeArg::Id(
+                    args.next().context("--resume requires a session id")?,
+                ));
+            }
             "--help" | "-h" => {
-                println!("usage: agent [--config PATH] <goal words...>");
+                println!(
+                    "usage: agent [--config PATH] [--continue | --resume ID] [<goal words...>]\n\
+                     \n\
+                     With a goal: run it once. Without a goal: interactive REPL.\n  \
+                     --continue     resume the most recent saved session\n  \
+                     --resume ID    resume a specific session"
+                );
                 std::process::exit(0);
             }
             _ => goal_parts.push(arg),
         }
     }
 
+    let goal = goal_parts.join(" ");
+    let mode = if goal.trim().is_empty() {
+        Mode::Repl
+    } else {
+        Mode::OneShot(goal)
+    };
     Ok(Args {
         config_path,
-        goal: goal_parts.join(" "),
+        mode,
+        resume,
     })
 }

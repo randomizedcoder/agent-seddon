@@ -61,8 +61,16 @@ Two more ways to get tools without writing Rust:
 
 ```sh
 cargo build
+# one-shot:
 cargo run -p agent-cli -- --config config/agent.toml "list the files in this repo"
+# interactive REPL (no goal): multi-turn, streaming, slash commands, Ctrl-D to exit
+cargo run -p agent-cli -- --config config/agent.toml
 ```
+
+In the REPL, type a goal to run a turn (history persists across turns), or a slash
+command: `/help`, `/new`, `/compact`, `/resume`, `/model`, `/tools`, `/save`,
+`/quit`. Each turn is saved under `.agent/sessions/`; resume with `--continue`
+(most recent) or `--resume <id>`, or `/resume` inside the REPL.
 
 Set `RUST_LOG=debug` to see the model's `reasoning_content` length and compaction
 decisions.
@@ -169,3 +177,5 @@ Written under `.agent/` (git-ignored):
 - `.agent/episodic.jsonl` — append-only event log ("what happened").
 - `.agent/memory/*.md` — curated semantic facts ("what is true"), recalled by
   keyword match and injected into context.
+- `.agent/sessions/*.jsonl` — REPL conversation transcripts, for `--continue` /
+  `--resume` / `/resume`.

@@ -16,8 +16,13 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 type ProviderFactory = Box<dyn Fn(&Config) -> anyhow::Result<Arc<dyn LlmProvider>> + Send + Sync>;
-type ContextFactory =
-    Box<dyn Fn(&Config) -> anyhow::Result<Arc<dyn ContextStrategy>> + Send + Sync>;
+// Context strategies receive the already-built provider (so a summarizing
+// strategy can call the model); most ignore it.
+type ContextFactory = Box<
+    dyn Fn(&Config, &Arc<dyn LlmProvider>) -> anyhow::Result<Arc<dyn ContextStrategy>>
+        + Send
+        + Sync,
+>;
 type PolicyFactory = Box<dyn Fn(&Config) -> anyhow::Result<Arc<dyn Policy>> + Send + Sync>;
 type MemoryFactory = Box<dyn Fn(&Config) -> anyhow::Result<Arc<dyn MemoryStore>> + Send + Sync>;
 type ToolFactory = Box<dyn Fn(&Config) -> anyhow::Result<Arc<dyn Tool>> + Send + Sync>;
@@ -57,7 +62,10 @@ impl Registry {
     pub fn context(
         &mut self,
         name: &'static str,
-        f: impl Fn(&Config) -> anyhow::Result<Arc<dyn ContextStrategy>> + Send + Sync + 'static,
+        f: impl Fn(&Config, &Arc<dyn LlmProvider>) -> anyhow::Result<Arc<dyn ContextStrategy>>
+            + Send
+            + Sync
+            + 'static,
     ) {
         self.contexts.insert(name, Box::new(f));
     }
@@ -96,12 +104,13 @@ impl Registry {
         &self,
         name: &str,
         cfg: &Config,
+        provider: &Arc<dyn LlmProvider>,
     ) -> anyhow::Result<Arc<dyn ContextStrategy>> {
         let f = self
             .contexts
             .get(name)
             .ok_or_else(|| unknown("context strategy", name, self.contexts.keys().copied()))?;
-        f(cfg)
+        f(cfg, provider)
     }
     pub fn build_policy(&self, name: &str, cfg: &Config) -> anyhow::Result<Arc<dyn Policy>> {
         let f = self
@@ -155,8 +164,15 @@ pub fn register_builtins(r: &mut Registry) {
 
     // --- context strategies ---
     #[cfg(feature = "context-sliding-window")]
-    r.context("sliding-window", |_cfg| {
+    r.context("sliding-window", |_cfg, _provider| {
         Ok(Arc::new(agent_context::SlidingWindow) as Arc<dyn ContextStrategy>)
+    });
+    #[cfg(feature = "context-summarizing")]
+    r.context("summarizing-window", |cfg, provider| {
+        Ok(Arc::new(agent_context::SummarizingWindow::new(
+            provider.clone(),
+            cfg.agent.keep_recent_tokens,
+        )) as Arc<dyn ContextStrategy>)
     });
 
     // --- policies (always available; they live in agent-runtime) ---
