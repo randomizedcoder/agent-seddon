@@ -11,11 +11,11 @@
 //! `delegate` at `depth + 1`, so recursion is bounded by `max_depth`.
 
 use crate::agent::{Agent, Settings};
-use crate::metrics::Metrics;
 use agent_core::{
     ContextStrategy, LlmProvider, MemoryStore, Observation, Policy, Result, Tool, ToolContext,
     ToolRegistry, ToolSchema,
 };
+use agent_metrics::Metrics;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::Arc;

@@ -66,7 +66,13 @@ async fn main() -> Result<()> {
     // the /metrics endpoint and pushing are gated by config.
     let metrics = Metrics::new();
     if config.metrics.enabled {
-        metrics_server::serve(metrics.clone(), &config.metrics.listen);
+        // A `--serve-<seam>` process serves `/metrics` on that seam's dedicated
+        // port so several co-located seam servers don't collide on `:9600`.
+        let listen = match &mode {
+            Mode::ServeGrpc(seam, _) => format!("127.0.0.1:{}", seam.metrics_port()),
+            _ => config.metrics.listen.clone(),
+        };
+        metrics_server::serve(metrics.clone(), &listen);
     }
     let metrics_cfg = MetricsRun {
         enabled: config.metrics.enabled,

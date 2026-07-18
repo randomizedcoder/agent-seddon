@@ -1,0 +1,179 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "tags": ["agent-seddon"],
+  "time": { "from": "now-30m", "to": "now" },
+  "refresh": "5s",
+  "title": "agent-seddon",
+  "uid": "agent-seddon",
+  "templating": {
+    "list": [
+      {
+        "name": "job",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": "label_values(agent_active, job)",
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" },
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    { "type": "row", "title": "Overview", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }, "id": 1 },
+    {
+      "type": "timeseries", "title": "Runs/sec by outcome", "id": 2,
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+      "targets": [ { "expr": "sum by (outcome) (rate(agent_runs_total{job=~\"$job\"}[5m]))", "legendFormat": "{{outcome}}" } ]
+    },
+    {
+      "type": "timeseries", "title": "Run duration (p50/p95, s)", "id": 3,
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+      "targets": [
+        { "expr": "histogram_quantile(0.5, sum(rate(agent_run_duration_seconds_bucket{job=~\"$job\"}[5m])) by (le))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, sum(rate(agent_run_duration_seconds_bucket{job=~\"$job\"}[5m])) by (le))", "legendFormat": "p95" }
+      ]
+    },
+    {
+      "type": "timeseries", "title": "Iterations/sec", "id": 4,
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 },
+      "targets": [ { "expr": "sum by (job) (rate(agent_iterations_total{job=~\"$job\"}[5m]))", "legendFormat": "{{job}}" } ]
+    },
+    {
+      "type": "stat", "title": "Active runs", "id": 5,
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 9 },
+      "targets": [ { "expr": "sum(agent_active{job=~\"$job\"})", "legendFormat": "active" } ]
+    },
+
+    { "type": "row", "title": "Provider", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 17 }, "id": 10 },
+    {
+      "type": "timeseries", "title": "API calls/sec by finish_reason", "id": 11,
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 18 },
+      "targets": [ { "expr": "sum by (finish_reason) (rate(agent_api_calls_total{job=~\"$job\"}[5m]))", "legendFormat": "{{finish_reason}}" } ]
+    },
+    {
+      "type": "timeseries", "title": "API call latency (p50/p95, s)", "id": 12,
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 18 },
+      "targets": [
+        { "expr": "histogram_quantile(0.5, sum(rate(agent_api_call_duration_seconds_bucket{job=~\"$job\"}[5m])) by (le))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, sum(rate(agent_api_call_duration_seconds_bucket{job=~\"$job\"}[5m])) by (le))", "legendFormat": "p95" }
+      ]
+    },
+    {
+      "type": "timeseries", "title": "Provider request p95 by provider/stream (s)", "id": 13,
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 26 },
+      "targets": [ { "expr": "histogram_quantile(0.95, sum(rate(agent_provider_request_seconds_bucket{job=~\"$job\"}[5m])) by (le, provider, stream))", "legendFormat": "{{provider}} stream={{stream}}" } ]
+    },
+    {
+      "type": "timeseries", "title": "Provider TTFT p95 (s)", "id": 14,
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 26 },
+      "targets": [ { "expr": "histogram_quantile(0.95, sum(rate(agent_provider_ttft_seconds_bucket{job=~\"$job\"}[5m])) by (le, provider))", "legendFormat": "{{provider}}" } ]
+    },
+    {
+      "type": "timeseries", "title": "Tokens/sec by kind", "id": 15,
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 34 },
+      "targets": [ { "expr": "sum by (kind) (rate(agent_tokens_total{job=~\"$job\"}[5m]))", "legendFormat": "{{kind}}" } ]
+    },
+    {
+      "type": "timeseries", "title": "Provider errors/sec by kind", "id": 16,
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 34 },
+      "targets": [ { "expr": "sum by (provider, kind) (rate(agent_provider_errors_total{job=~\"$job\"}[5m]))", "legendFormat": "{{provider}}/{{kind}}" } ]
+    },
+
+    { "type": "row", "title": "Tools", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 42 }, "id": 20 },
+    {
+      "type": "timeseries", "title": "Tool calls/sec by tool/status", "id": 21,
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 43 },
+      "targets": [ { "expr": "sum by (tool, status) (rate(agent_tool_calls_total{job=~\"$job\"}[5m]))", "legendFormat": "{{tool}}/{{status}}" } ]
+    },
+    {
+      "type": "timeseries", "title": "Tool exec p95 by tool (s)", "id": 22,
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 43 },
+      "targets": [ { "expr": "histogram_quantile(0.95, sum(rate(agent_tool_exec_seconds_bucket{job=~\"$job\"}[5m])) by (le, tool))", "legendFormat": "{{tool}}" } ]
+    },
+    {
+      "type": "timeseries", "title": "Tool errors/sec by tool", "id": 23,
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 51 },
+      "targets": [ { "expr": "sum by (tool, kind) (rate(agent_tool_errors_total{job=~\"$job\"}[5m]))", "legendFormat": "{{tool}}/{{kind}}" } ]
+    },
+
+    { "type": "row", "title": "Memory", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 59 }, "id": 30 },
+    {
+      "type": "timeseries", "title": "Memory op p95 by op (s)", "id": 31,
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 60 },
+      "targets": [ { "expr": "histogram_quantile(0.95, sum(rate(agent_memory_op_seconds_bucket{job=~\"$job\"}[5m])) by (le, op))", "legendFormat": "{{op}}" } ]
+    },
+    {
+      "type": "timeseries", "title": "Recall items (p50)", "id": 32,
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 60 },
+      "targets": [ { "expr": "histogram_quantile(0.5, sum(rate(agent_memory_recall_items_bucket{job=~\"$job\"}[5m])) by (le))", "legendFormat": "items p50" } ]
+    },
+    {
+      "type": "timeseries", "title": "Memory errors/sec by op", "id": 33,
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 68 },
+      "targets": [ { "expr": "sum by (op) (rate(agent_memory_errors_total{job=~\"$job\"}[5m]))", "legendFormat": "{{op}}" } ]
+    },
+
+    { "type": "row", "title": "Context", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 76 }, "id": 40 },
+    {
+      "type": "timeseries", "title": "Context op p95 by op (s)", "id": 41,
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 77 },
+      "targets": [ { "expr": "histogram_quantile(0.95, sum(rate(agent_context_op_seconds_bucket{job=~\"$job\"}[5m])) by (le, op))", "legendFormat": "{{op}}" } ]
+    },
+    {
+      "type": "timeseries", "title": "Context size (tokens & messages)", "id": 42,
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 77 },
+      "targets": [
+        { "expr": "max(agent_context_tokens{job=~\"$job\"})", "legendFormat": "tokens" },
+        { "expr": "max(agent_context_messages{job=~\"$job\"})", "legendFormat": "messages" }
+      ]
+    },
+    {
+      "type": "timeseries", "title": "Compactions/sec", "id": 43,
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 85 },
+      "targets": [ { "expr": "sum by (job) (rate(agent_context_compactions_total{job=~\"$job\"}[5m]))", "legendFormat": "{{job}}" } ]
+    },
+    {
+      "type": "timeseries", "title": "Compaction tokens (before/after)", "id": 44,
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 85 },
+      "targets": [ { "expr": "max by (when) (agent_context_compact_tokens{job=~\"$job\"})", "legendFormat": "{{when}}" } ]
+    },
+
+    { "type": "row", "title": "Policy", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 93 }, "id": 50 },
+    {
+      "type": "timeseries", "title": "Authorize/sec by decision", "id": 51,
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 94 },
+      "targets": [ { "expr": "sum by (policy, decision) (rate(agent_policy_authorize_total{job=~\"$job\"}[5m]))", "legendFormat": "{{policy}}/{{decision}}" } ]
+    },
+    {
+      "type": "timeseries", "title": "Authorize latency p95 (s)", "id": 52,
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 94 },
+      "targets": [ { "expr": "histogram_quantile(0.95, sum(rate(agent_policy_authorize_seconds_bucket{job=~\"$job\"}[5m])) by (le))", "legendFormat": "p95" } ]
+    }
+  ]
+}

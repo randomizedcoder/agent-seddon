@@ -33,6 +33,7 @@ One crate per seam (DESIGN.md §7):
 | `agent-proto` | protobuf/gRPC wire contracts for the seams + core↔proto conversions & OTel trace propagation ([docs/grpc.md](docs/grpc.md)) |
 | `agent-grpc` | per-seam gRPC servers + clients over TCP or unix domain sockets (`--serve-<seam>`, `= "grpc"`) |
 | `agent-telemetry` | Telemetry sink: streams transaction history, logs & usage to ClickHouse; OTLP trace export to the ClickStack collector |
+| `agent-metrics` | Shared Prometheus registry + per-seam metric families ([docs/metrics.md](docs/metrics.md)) |
 | `agent-runtime` | Config, the plugin registry, the loop (streaming + parallel tools), sessions, subagents |
 | `agent-cli` | The `agent` binary (CLI + REPL + `--serve-mcp` + `--serve-<seam>`) |
 
@@ -218,18 +219,34 @@ See [`context.d/README.md`](context.d/README.md).
 
 ## Metrics
 
-Prometheus metrics about a running agent. Enable in `config/agent.toml`
+Prometheus metrics about a running agent — enabled in `config/agent.toml`
 (`[metrics] enabled = true`) to serve `/metrics` on `listen` (default
-`127.0.0.1:9600`); set `pushgateway` to also push on exit (useful for short runs).
-Exposed metrics include `agent_api_calls_total`, `agent_api_call_duration_seconds`,
-`agent_tokens_total`, `agent_context_tokens`, `agent_context_messages`,
-`agent_tool_calls_total`, `agent_iterations_total`, `agent_runs_total`,
-`agent_run_duration_seconds`, and `agent_active`.
+`127.0.0.1:9600`). Alongside the loop-level counters (`agent_api_calls_total`,
+`agent_api_call_duration_seconds`, `agent_tokens_total`, `agent_context_tokens`,
+`agent_context_messages`, `agent_tool_calls_total`, `agent_iterations_total`,
+`agent_runs_total`, `agent_run_duration_seconds`, `agent_active`), **each seam is
+instrumented independently** — a metrics wrapper (`agent-runtime/src/metered.rs`)
+records provider request/TTFT (`agent_provider_*`), per-tool latency
+(`agent_tool_exec_seconds`), memory ops (`agent_memory_*`), context
+assemble/compact (`agent_context_*`), and policy authorize (`agent_policy_*`). A
+remote `= "grpc"` seam is timed on the client side, and each `--serve-<seam>`
+process serves its own `/metrics` (ports 9601–9605) for server-side latency.
+
+A **Prometheus + Grafana** stack ships as Nix docker-apps (same pattern as
+ClickHouse/ClickStack), with a provisioned per-component dashboard:
 
 ```sh
-# while a run is in progress:
+nix run .#prometheus-up          # scraper — UI :9090, scrapes :9600–:9605
+nix run .#grafana-up             # dashboards — UI :3000 (Dashboards → agent-seddon)
+# run a REPL session (or the gRPC demo), then watch the dashboard fill.
+nix run .#grafana-down && nix run .#prometheus-down
+
+# or just curl the endpoint while a session is live:
 curl -s 127.0.0.1:9600/metrics | grep '^agent_'
 ```
+
+Full runbook (single-process + distributed topology + networking notes):
+**[docs/metrics.md](docs/metrics.md)**.
 
 ## Tracing (OpenTelemetry)
 

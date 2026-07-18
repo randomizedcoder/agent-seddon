@@ -87,6 +87,10 @@ let
   # ClickStack / HyperDX all-in-one apps (up / down / logs / client) — the OTLP
   # trace receiver + UI.
   clickstack = import ./clickstack { inherit pkgs lib versions; };
+
+  # Prometheus scraper + Grafana dashboards for the agent's metrics.
+  prometheus = import ./prometheus { inherit pkgs lib versions; };
+  grafana = import ./grafana { inherit pkgs lib versions; };
 in
 {
   packages = {
@@ -134,6 +138,22 @@ in
     clickstack-client = {
       type = "app";
       program = "${clickstack.clickstack-client}/bin/clickstack-client-wrapper";
+    };
+    prometheus-up = {
+      type = "app";
+      program = "${prometheus.prometheus-up}/bin/prometheus-up";
+    };
+    prometheus-down = {
+      type = "app";
+      program = "${prometheus.prometheus-down}/bin/prometheus-down";
+    };
+    grafana-up = {
+      type = "app";
+      program = "${grafana.grafana-up}/bin/grafana-up";
+    };
+    grafana-down = {
+      type = "app";
+      program = "${grafana.grafana-down}/bin/grafana-down";
     };
   };
 

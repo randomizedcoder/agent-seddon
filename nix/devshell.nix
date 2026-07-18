@@ -60,6 +60,12 @@ pkgs.mkShell {
       cs-logs                                 Follow container logs
       cs-down                                 Stop + remove the container
 
+    Prometheus + Grafana (docker) — metrics scraper + dashboards:
+      prom-up                                 Start Prometheus (UI :9090, scrapes :9600-9605)
+      prom-down                               Stop + remove the container
+      graf-up                                 Start Grafana (UI :3000, agent-seddon dashboard)
+      graf-down                               Stop + remove the container
+
     EOF
         }
 
@@ -95,6 +101,11 @@ pkgs.mkShell {
         cs-down()   { nix run .#clickstack-down -- "$@"; }
         cs-logs()   { nix run .#clickstack-logs -- "$@"; }
         cs-client() { nix run .#clickstack-client -- "$@"; }
+
+        prom-up()   { nix run .#prometheus-up -- "$@"; }
+        prom-down() { nix run .#prometheus-down -- "$@"; }
+        graf-up()   { nix run .#grafana-up -- "$@"; }
+        graf-down() { nix run .#grafana-down -- "$@"; }
 
         agent-help
   '';

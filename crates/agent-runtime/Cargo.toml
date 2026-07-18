@@ -39,6 +39,7 @@ subagents = []
 
 [dependencies]
 agent-core.workspace = true
+agent-metrics.workspace = true
 # These default to no features (see workspace deps); features below opt in.
 agent-providers.workspace = true
 agent-tools.workspace = true
@@ -49,6 +50,7 @@ agent-grpc = { workspace = true, optional = true }
 agent-telemetry.workspace = true
 async-trait.workspace = true
 futures-util.workspace = true
+async-stream.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
