@@ -10,6 +10,7 @@ members = [
     "crates/agent-telemetry",
     "crates/agent-runtime",
     "crates/agent-cli",
+    "crates/agent-testkit",
 ]
 
 [workspace.package]
@@ -37,6 +38,8 @@ rustyline = "14"
 # gitignore-aware file walking + regex for the search tools
 ignore = "0.4"
 regex = "1"
+# table-driven test cases (dev-only)
+rstest = "0.23"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 
 # telemetry / ClickHouse (native protocol, port 9000)
@@ -58,3 +61,5 @@ agent-context = { path = "crates/agent-context", default-features = false }
 agent-mcp = { path = "crates/agent-mcp" }
 agent-telemetry = { path = "crates/agent-telemetry" }
 agent-runtime = { path = "crates/agent-runtime" }
+# shared test doubles (dev-dependency only — never in a release build)
+agent-testkit = { path = "crates/agent-testkit" }

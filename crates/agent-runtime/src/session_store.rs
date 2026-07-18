@@ -100,16 +100,41 @@ fn preview(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     fn tempdir() -> PathBuf {
-        let mut p = std::env::temp_dir();
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        p.push(format!("agent-session-test-{nanos}"));
-        std::fs::create_dir_all(&p).unwrap();
-        p
+        agent_testkit::tempdir()
+    }
+
+    // --- preview: compact one-line label -----------------------------------
+    #[rstest]
+    #[case::positive_short("hello world", "hello world")]
+    #[case::corner_collapses_whitespace("a\n\n  b\tc", "a b c")]
+    #[case::boundary_empty("", "")]
+    #[case::corner_whitespace_only("   \t\n", "")]
+    fn preview_cases(#[case] input: &str, #[case] expected: &str) {
+        assert_eq!(preview(input), expected);
+    }
+
+    #[test]
+    fn preview_boundary_exactly_60_is_unchanged() {
+        let s = "a".repeat(60);
+        assert_eq!(preview(&s), s);
+    }
+
+    #[test]
+    fn preview_over_60_truncates_with_ellipsis() {
+        let p = preview(&"a".repeat(100));
+        assert_eq!(p.chars().count(), 61); // 60 chars + '…'
+        assert!(p.ends_with('…'));
+    }
+
+    #[test]
+    fn preview_corner_truncates_multibyte_by_char_not_byte() {
+        // 'é' is 2 bytes; truncation must count chars, not bytes.
+        let p = preview(&"é".repeat(100));
+        assert_eq!(p.chars().count(), 61);
+        assert!(p.ends_with('…'));
     }
 
     #[test]

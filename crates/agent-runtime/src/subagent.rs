@@ -141,78 +141,23 @@ impl Tool for DelegateTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::{
-        CompletionRequest, CompletionResponse, ContextInput, MemoryEvent, MemoryItem, Message,
-        ModelCapabilities, RecallQuery, Role, TokenBudget, ToolCall, WorkingSet,
-    };
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use agent_core::ToolCall;
+    use agent_testkit::{final_turn, tool_turn, RecordingMemory, ScriptedProvider, StaticContext};
+    use serde_json::json;
 
     /// call 0 → parent asks to delegate; call 1 → child's final answer;
-    /// call 2 → parent's final answer. Shared across parent + child (same Arc).
-    struct DelegatingMock {
-        calls: AtomicUsize,
-    }
-    #[async_trait]
-    impl LlmProvider for DelegatingMock {
-        fn capabilities(&self) -> ModelCapabilities {
-            ModelCapabilities {
-                supports_tools: true,
-                context_window: 1000,
-            }
-        }
-        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse> {
-            let n = self.calls.fetch_add(1, Ordering::SeqCst);
-            let (msg, finish) = match n {
-                0 => (
-                    Message {
-                        role: Role::Assistant,
-                        content: String::new(),
-                        tool_calls: vec![ToolCall {
-                            id: "d0".into(),
-                            name: "delegate".into(),
-                            arguments: json!({ "goal": "sub-task" }),
-                        }],
-                        tool_call_id: None,
-                    },
-                    "tool_calls",
-                ),
-                1 => (Message::assistant("child-done"), "stop"),
-                _ => (Message::assistant("parent-done"), "stop"),
-            };
-            Ok(CompletionResponse {
-                message: msg,
-                finish_reason: finish.into(),
-                usage: None,
-            })
-        }
-    }
-
-    struct MockContext;
-    #[async_trait]
-    impl ContextStrategy for MockContext {
-        async fn assemble(&self, input: ContextInput) -> Result<Vec<Message>> {
-            Ok(vec![
-                Message::system(input.system_prompt),
-                Message::user(input.goal),
-            ])
-        }
-        async fn compact(&self, _w: &mut WorkingSet, _b: &TokenBudget) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    struct NoMemory;
-    #[async_trait]
-    impl MemoryStore for NoMemory {
-        async fn recall(&self, _q: &RecallQuery) -> Result<Vec<MemoryItem>> {
-            Ok(vec![])
-        }
-        async fn append(&self, _e: MemoryEvent) -> Result<()> {
-            Ok(())
-        }
-        async fn distill(&self) -> Result<usize> {
-            Ok(0)
-        }
+    /// call 2 → parent's final answer. Shared across parent + child (same Arc), so
+    /// the scripted sequence spans both loops.
+    fn delegating_provider() -> ScriptedProvider {
+        ScriptedProvider::new(vec![
+            tool_turn(vec![ToolCall {
+                id: "d0".into(),
+                name: "delegate".into(),
+                arguments: json!({ "goal": "sub-task" }),
+            }]),
+            final_turn("child-done"),
+            final_turn("parent-done"),
+        ])
     }
 
     fn settings() -> Settings {
@@ -236,12 +181,10 @@ mod tests {
 
     #[tokio::test]
     async fn delegate_runs_a_child_loop_and_returns_to_parent() {
-        let provider: Arc<dyn LlmProvider> = Arc::new(DelegatingMock {
-            calls: AtomicUsize::new(0),
-        });
-        let context: Arc<dyn ContextStrategy> = Arc::new(MockContext);
+        let provider: Arc<dyn LlmProvider> = Arc::new(delegating_provider());
+        let context: Arc<dyn ContextStrategy> = Arc::new(StaticContext);
         let policy: Arc<dyn Policy> = Arc::new(crate::policy::AutoApprove);
-        let memory: Arc<dyn MemoryStore> = Arc::new(NoMemory);
+        let memory: Arc<dyn MemoryStore> = Arc::new(RecordingMemory::new());
 
         let ctx = Arc::new(SubagentContext {
             provider: provider.clone(),

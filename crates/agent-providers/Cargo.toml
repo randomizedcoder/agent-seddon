@@ -20,3 +20,7 @@ reqwest = { workspace = true, features = ["stream"] }
 tracing.workspace = true
 futures-util.workspace = true
 async-stream.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
+tokio = { workspace = true }

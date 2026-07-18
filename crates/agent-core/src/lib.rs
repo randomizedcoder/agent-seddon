@@ -319,6 +319,10 @@ pub struct MemoryEvent {
     pub iter: Option<u32>,
 }
 
+/// The loop-facing memory facade. This is the whole store the agent loop talks
+/// to. A backend can implement it directly (one type owns every layer), or
+/// compose an [`EpisodicStore`] and a [`SemanticStore`] via [`LayeredMemory`] so
+/// the two layers are swappable independently — see DESIGN.md §3.
 #[async_trait]
 pub trait MemoryStore: Send + Sync {
     /// Retrieve relevant items for the given query (recall pipeline).
@@ -327,6 +331,82 @@ pub trait MemoryStore: Send + Sync {
     async fn append(&self, event: MemoryEvent) -> Result<()>;
     /// Promote durable facts from episodic → semantic. Returns count written.
     async fn distill(&self) -> Result<usize>;
+}
+
+/// The append-only "what happened" layer, split out of [`MemoryStore`] so a
+/// backend can swap the durable log (JSONL, sqlite, …) independently of how
+/// semantic recall works.
+#[async_trait]
+pub trait EpisodicStore: Send + Sync {
+    /// Append an event to the log.
+    async fn append(&self, event: MemoryEvent) -> Result<()>;
+    /// The most recent events (oldest first), capped at `limit`. Feeds
+    /// distillation; a store with no readback can return an empty vec.
+    async fn recent(&self, limit: usize) -> Result<Vec<MemoryEvent>>;
+}
+
+/// The "what is true" layer: relevance recall plus promotion of durable facts.
+/// This is the seam a contributor swaps to move from keyword recall to a
+/// vector/embedding store — the episodic log and the loop stay unchanged.
+#[async_trait]
+pub trait SemanticStore: Send + Sync {
+    /// Retrieve relevant items for the query.
+    async fn recall(&self, query: &RecallQuery) -> Result<Vec<MemoryItem>>;
+    /// Promote durable facts from the given `episodic` events into semantic
+    /// storage. Returns the number of facts written (0 if nothing was durable).
+    async fn distill(&self, episodic: &[MemoryEvent]) -> Result<usize>;
+}
+
+/// Composes an [`EpisodicStore`] and a [`SemanticStore`] into the [`MemoryStore`]
+/// facade: `append` → episodic, `recall` → semantic, and `distill` reads a window
+/// of recent episodic events and hands them to the semantic layer to promote.
+///
+/// Both halves are trait objects, so they can be chosen independently at runtime
+/// (e.g. a file episodic log paired with a vector semantic store).
+pub struct LayeredMemory {
+    episodic: Arc<dyn EpisodicStore>,
+    semantic: Arc<dyn SemanticStore>,
+    distill_window: usize,
+}
+
+impl LayeredMemory {
+    /// Default distillation window (how many recent episodic events to consider).
+    pub const DEFAULT_DISTILL_WINDOW: usize = 200;
+
+    pub fn new(episodic: Arc<dyn EpisodicStore>, semantic: Arc<dyn SemanticStore>) -> Self {
+        Self {
+            episodic,
+            semantic,
+            distill_window: Self::DEFAULT_DISTILL_WINDOW,
+        }
+    }
+
+    /// Override how many recent episodic events distillation considers.
+    pub fn with_distill_window(mut self, n: usize) -> Self {
+        self.distill_window = n;
+        self
+    }
+
+    pub fn episodic(&self) -> &Arc<dyn EpisodicStore> {
+        &self.episodic
+    }
+    pub fn semantic(&self) -> &Arc<dyn SemanticStore> {
+        &self.semantic
+    }
+}
+
+#[async_trait]
+impl MemoryStore for LayeredMemory {
+    async fn recall(&self, query: &RecallQuery) -> Result<Vec<MemoryItem>> {
+        self.semantic.recall(query).await
+    }
+    async fn append(&self, event: MemoryEvent) -> Result<()> {
+        self.episodic.append(event).await
+    }
+    async fn distill(&self) -> Result<usize> {
+        let events = self.episodic.recent(self.distill_window).await?;
+        self.semantic.distill(&events).await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -391,11 +471,13 @@ pub trait Policy: Send + Sync {
 mod tests {
     use super::*;
     use futures_util::StreamExt;
+    use rstest::rstest;
 
-    struct Mock;
-
+    /// A provider whose `complete` returns a fixed response, exercising the
+    /// default `stream` adapter.
+    struct Fixed(CompletionResponse);
     #[async_trait]
-    impl LlmProvider for Mock {
+    impl LlmProvider for Fixed {
         fn capabilities(&self) -> ModelCapabilities {
             ModelCapabilities {
                 supports_tools: true,
@@ -403,39 +485,54 @@ mod tests {
             }
         }
         async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse> {
-            Ok(CompletionResponse {
-                message: Message {
-                    role: Role::Assistant,
-                    content: "hello".into(),
-                    tool_calls: vec![ToolCall {
-                        id: "1".into(),
-                        name: "bash".into(),
-                        arguments: serde_json::json!({"command": "ls"}),
-                    }],
-                    tool_call_id: None,
-                },
-                finish_reason: "tool_use".into(),
-                usage: Some(Usage {
-                    prompt_tokens: 3,
-                    completion_tokens: 2,
-                    total_tokens: 5,
-                }),
-            })
+            Ok(self.0.clone())
         }
     }
 
-    /// The default `stream` adapts `complete` into text + tool-call + terminal
-    /// chunks that reconstruct the original response.
+    fn response(content: &str, n_tools: usize, finish: &str, usage: bool) -> CompletionResponse {
+        let tool_calls = (0..n_tools)
+            .map(|i| ToolCall {
+                id: i.to_string(),
+                name: "t".into(),
+                arguments: serde_json::json!({}),
+            })
+            .collect();
+        CompletionResponse {
+            message: Message {
+                role: Role::Assistant,
+                content: content.into(),
+                tool_calls,
+                tool_call_id: None,
+            },
+            finish_reason: finish.into(),
+            usage: usage.then(Usage::default),
+        }
+    }
+
+    /// The default `stream` reconstructs `complete`: text chunk (if any) + one
+    /// chunk per tool call + a terminal chunk carrying finish reason and usage.
+    #[rstest]
+    #[case::text_only("hello", 0, "stop", false)]
+    #[case::tool_only("", 1, "tool_use", true)]
+    #[case::text_and_multi_tool("hi", 2, "tool_use", true)]
+    #[case::boundary_empty("", 0, "stop", false)]
     #[tokio::test]
-    async fn default_stream_wraps_complete() {
+    async fn default_stream_reconstructs_complete(
+        #[case] content: &str,
+        #[case] n_tools: usize,
+        #[case] finish: &str,
+        #[case] has_usage: bool,
+    ) {
+        let provider = Fixed(response(content, n_tools, finish, has_usage));
         let req = CompletionRequest {
             messages: vec![],
             tools: vec![],
             max_tokens: 10,
             temperature: 0.0,
         };
-        let mut s = Mock.stream(req).await.unwrap();
-        let (mut text, mut calls, mut finish, mut usage) = (String::new(), 0, None, None);
+        let mut s = provider.stream(req).await.unwrap();
+        let (mut text, mut calls, mut got_finish, mut got_usage) =
+            (String::new(), 0usize, None, None);
         while let Some(chunk) = s.next().await {
             let chunk = chunk.unwrap();
             text.push_str(&chunk.delta_text);
@@ -443,15 +540,15 @@ mod tests {
                 calls += 1;
             }
             if let Some(f) = chunk.finish_reason {
-                finish = Some(f);
+                got_finish = Some(f);
             }
             if chunk.usage.is_some() {
-                usage = chunk.usage;
+                got_usage = chunk.usage;
             }
         }
-        assert_eq!(text, "hello");
-        assert_eq!(calls, 1);
-        assert_eq!(finish.as_deref(), Some("tool_use"));
-        assert_eq!(usage.unwrap().total_tokens, 5);
+        assert_eq!(text, content);
+        assert_eq!(calls, n_tools);
+        assert_eq!(got_finish.as_deref(), Some(finish));
+        assert_eq!(got_usage.is_some(), has_usage);
     }
 }

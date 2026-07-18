@@ -127,18 +127,10 @@ impl LlmProvider for OpenAiCompatProvider {
             .tool_calls
             .unwrap_or_default()
             .into_iter()
-            .map(|tc| {
-                let arguments = if tc.function.arguments.trim().is_empty() {
-                    Value::Object(Default::default())
-                } else {
-                    serde_json::from_str(&tc.function.arguments)
-                        .unwrap_or(Value::String(tc.function.arguments.clone()))
-                };
-                ToolCall {
-                    id: tc.id,
-                    name: tc.function.name,
-                    arguments,
-                }
+            .map(|tc| ToolCall {
+                id: tc.id,
+                name: tc.function.name,
+                arguments: parse_tool_args(&tc.function.arguments),
             })
             .collect();
 
@@ -264,16 +256,23 @@ struct ToolAcc {
 
 impl ToolAcc {
     fn into_tool_call(self) -> ToolCall {
-        let arguments = if self.args.trim().is_empty() {
-            Value::Object(Default::default())
-        } else {
-            serde_json::from_str(&self.args).unwrap_or(Value::String(self.args))
-        };
         ToolCall {
+            arguments: parse_tool_args(&self.args),
             id: self.id,
             name: self.name,
-            arguments,
         }
+    }
+}
+
+/// Parse a tool call's `arguments`, which OpenAI-compatible APIs send as a JSON
+/// *string*. Empty/whitespace ⇒ empty object; unparseable ⇒ keep the raw text as a
+/// string (so the model at least sees what it sent). Shared by the buffered and
+/// streaming paths.
+fn parse_tool_args(raw: &str) -> Value {
+    if raw.trim().is_empty() {
+        Value::Object(Default::default())
+    } else {
+        serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
     }
 }
 
@@ -439,4 +438,23 @@ struct WireUsage {
     completion_tokens: u32,
     #[serde(default)]
     total_tokens: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_tool_args;
+    use rstest::rstest;
+    use serde_json::{json, Value};
+
+    /// OpenAI sends tool-call `arguments` as a JSON string.
+    #[rstest]
+    #[case::positive_object("{\"a\":1}", json!({"a":1}))]
+    #[case::positive_nested("{\"a\":{\"b\":[1,2]}}", json!({"a":{"b":[1,2]}}))]
+    #[case::boundary_empty("", json!({}))]
+    #[case::boundary_whitespace("   \n", json!({}))]
+    #[case::negative_invalid_kept_as_string("not json", Value::String("not json".into()))]
+    #[case::corner_partial_json("{oops", Value::String("{oops".into()))]
+    fn parse_tool_args_cases(#[case] raw: &str, #[case] expected: Value) {
+        assert_eq!(parse_tool_args(raw), expected);
+    }
 }

@@ -17,3 +17,4 @@ futures-util.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true }
+rstest.workspace = true

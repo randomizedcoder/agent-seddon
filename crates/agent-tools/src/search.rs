@@ -270,18 +270,9 @@ fn ls_walk(root: &Path, cwd: &Path, recursive: bool) -> String {
 mod tests {
     use super::*;
     use agent_core::ToolContext;
+    use agent_testkit::tempdir;
+    use rstest::rstest;
     use serde_json::json;
-
-    fn tempdir() -> PathBuf {
-        let mut p = std::env::temp_dir();
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        p.push(format!("agent-search-test-{nanos}"));
-        std::fs::create_dir_all(&p).unwrap();
-        p
-    }
 
     fn ctx(dir: &Path) -> ToolContext {
         ToolContext {
@@ -289,62 +280,115 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn grep_finds_matches() {
+    /// A dir with `a.txt` (foo/bar/foobar), `src/main.rs`, and `README.md`.
+    fn fixture() -> PathBuf {
         let dir = tempdir();
         std::fs::write(dir.join("a.txt"), "foo\nbar\nfoobar").unwrap();
-        let obs = GrepTool
-            .execute(json!({"pattern": "foo"}), &ctx(&dir))
-            .await
-            .unwrap();
-        assert!(!obs.is_error);
-        assert!(obs.content.contains("a.txt:1:foo"));
-        assert!(obs.content.contains("a.txt:3:foobar"));
-        assert!(!obs.content.contains(":2:"));
-    }
-
-    #[tokio::test]
-    async fn grep_invalid_regex_errors() {
-        let dir = tempdir();
-        let obs = GrepTool
-            .execute(json!({"pattern": "("}), &ctx(&dir))
-            .await
-            .unwrap();
-        assert!(obs.is_error);
-        assert!(obs.content.contains("invalid regex"));
-    }
-
-    #[tokio::test]
-    async fn find_matches_paths() {
-        let dir = tempdir();
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(dir.join("src/main.rs"), "x").unwrap();
         std::fs::write(dir.join("README.md"), "x").unwrap();
+        dir
+    }
+
+    // --- rel: relative-path formatting (pure) ------------------------------
+    #[rstest]
+    #[case::positive_inside("/work/repo/src/x.rs", "/work/repo", "src/x.rs")]
+    #[case::boundary_cwd_itself("/work/repo", "/work/repo", "")]
+    #[case::negative_outside("/other/x", "/work/repo", "/other/x")]
+    fn rel_cases(#[case] path: &str, #[case] cwd: &str, #[case] expected: &str) {
+        assert_eq!(rel(Path::new(path), Path::new(cwd)), expected);
+    }
+
+    // --- resolve_root: default "." + escape rejection ----------------------
+    #[rstest]
+    #[case::positive_default(json!({}), true)]
+    #[case::positive_subdir(json!({"path": "src"}), true)]
+    #[case::negative_escape(json!({"path": "../.."}), false)]
+    #[case::negative_absolute(json!({"path": "/etc"}), false)]
+    fn resolve_root_cases(#[case] args: Value, #[case] ok: bool) {
+        assert_eq!(resolve_root(Path::new("/work/repo"), &args).is_ok(), ok);
+    }
+
+    // --- grep --------------------------------------------------------------
+    #[rstest]
+    #[case::positive_matches_with_line_numbers("foo", json!({}), Ok(vec!["a.txt:1:foo", "a.txt:3:foobar"]))]
+    #[case::boundary_no_match("zzzznope", json!({}), Ok(vec![]))]
+    #[case::negative_invalid_regex("(", json!({}), Err("invalid regex"))]
+    #[case::negative_path_escape("x", json!({"path": "../.."}), Err("escape"))]
+    #[tokio::test]
+    async fn grep_cases(
+        #[case] pattern: &str,
+        #[case] extra: Value,
+        #[case] expected: std::result::Result<Vec<&str>, &str>,
+    ) {
+        let dir = fixture();
+        let mut args = json!({ "pattern": pattern });
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let obs = GrepTool.execute(args, &ctx(&dir)).await.unwrap();
+        match expected {
+            Ok(needles) => {
+                assert!(!obs.is_error, "unexpected error: {}", obs.content);
+                for n in needles {
+                    assert!(
+                        obs.content.contains(n),
+                        "output missing `{n}`:\n{}",
+                        obs.content
+                    );
+                }
+            }
+            Err(substr) => {
+                assert!(obs.is_error, "expected error, got: {}", obs.content);
+                assert!(
+                    obs.content.contains(substr),
+                    "error missing `{substr}`: {}",
+                    obs.content
+                );
+            }
+        }
+    }
+
+    // --- find --------------------------------------------------------------
+    #[rstest]
+    #[case::positive_rs_files("\\.rs$", vec!["src/main.rs"], vec!["README.md", "a.txt"])]
+    #[case::positive_all(".", vec!["a.txt", "src/main.rs", "README.md"], vec![])]
+    #[case::boundary_no_match("\\.zzz$", vec![], vec!["a.txt", "src/main.rs"])]
+    #[tokio::test]
+    async fn find_cases(
+        #[case] pattern: &str,
+        #[case] present: Vec<&str>,
+        #[case] absent: Vec<&str>,
+    ) {
+        let dir = fixture();
         let obs = FindTool
-            .execute(json!({"pattern": "\\.rs$"}), &ctx(&dir))
+            .execute(json!({ "pattern": pattern }), &ctx(&dir))
             .await
             .unwrap();
-        assert!(obs.content.contains("src/main.rs"));
-        assert!(!obs.content.contains("README.md"));
+        assert!(!obs.is_error, "{}", obs.content);
+        for p in present {
+            assert!(obs.content.contains(p), "missing `{p}`:\n{}", obs.content);
+        }
+        for a in absent {
+            assert!(
+                !obs.content.contains(a),
+                "should not contain `{a}`:\n{}",
+                obs.content
+            );
+        }
     }
 
+    // --- ls ----------------------------------------------------------------
     #[tokio::test]
-    async fn ls_lists_entries_with_dir_suffix() {
-        let dir = tempdir();
-        std::fs::create_dir_all(dir.join("sub")).unwrap();
-        std::fs::write(dir.join("file.txt"), "x").unwrap();
+    async fn ls_marks_dirs_with_trailing_slash() {
+        let dir = fixture();
         let obs = LsTool.execute(json!({}), &ctx(&dir)).await.unwrap();
-        assert!(obs.content.contains("sub/"));
-        assert!(obs.content.contains("file.txt"));
-    }
-
-    #[tokio::test]
-    async fn path_escape_rejected() {
-        let dir = tempdir();
-        let obs = GrepTool
-            .execute(json!({"pattern": "x", "path": "../.."}), &ctx(&dir))
-            .await
-            .unwrap();
-        assert!(obs.is_error);
+        assert!(!obs.is_error);
+        assert!(
+            obs.content.contains("src/"),
+            "dirs get a trailing slash:\n{}",
+            obs.content
+        );
+        assert!(obs.content.contains("a.txt"));
     }
 }

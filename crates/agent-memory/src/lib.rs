@@ -5,4 +5,4 @@
 #[cfg(feature = "memory-file")]
 mod file;
 #[cfg(feature = "memory-file")]
-pub use file::FileMemory;
+pub use file::{file_memory, FileEpisodic, FileSemantic};

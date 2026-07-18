@@ -23,6 +23,15 @@ pkgs.mkShell {
   packages = packages.allDevPackages;
 
   shellHook = ''
+        # Isolate CARGO_HOME to a repo-local dir. Cargo searches $CARGO_HOME/bin
+        # *before* $PATH when resolving `cargo-<subcommand>` binaries, so a stale
+        # ~/.cargo/bin/cargo-clippy (from a rustup or other Rust install) would
+        # otherwise shadow this shell's pinned toolchain — `cargo clippy` / `cargo
+        # fmt` would silently run the wrong version. A clean project-local
+        # CARGO_HOME makes them resolve to the nix toolchain on PATH. (.gitignored.)
+        export CARGO_HOME="$PWD/.cargo-home"
+        mkdir -p "$CARGO_HOME"
+
         agent-help() {
           cat <<'EOF'
 

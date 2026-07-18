@@ -168,7 +168,51 @@ fn drop_oldest(working: &mut WorkingSet, target: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::{CompletionResponse, ModelCapabilities, Usage};
+    use agent_core::{CompletionResponse, ModelCapabilities, ToolCall, Usage};
+    use rstest::rstest;
+
+    fn msg(role: Role, content: &str) -> Message {
+        match role {
+            Role::System => Message::system(content),
+            Role::User => Message::user(content),
+            Role::Assistant => Message::assistant(content),
+            Role::Tool => Message::tool("id", content),
+        }
+    }
+
+    // --- leading_system_count ----------------------------------------------
+    #[rstest]
+    #[case::boundary_empty(vec![], 0)]
+    #[case::positive_all_system(vec![Role::System, Role::System], 2)]
+    #[case::positive_leading_then_other(vec![Role::System, Role::User, Role::System], 1)]
+    #[case::negative_none(vec![Role::User, Role::System], 0)]
+    fn leading_system_count_cases(#[case] roles: Vec<Role>, #[case] expected: usize) {
+        let msgs: Vec<Message> = roles.into_iter().map(|r| msg(r, "")).collect();
+        assert_eq!(leading_system_count(&msgs), expected);
+    }
+
+    // --- render: role labels -----------------------------------------------
+    #[rstest]
+    #[case::system(Role::System, "s", "SYSTEM: s\n")]
+    #[case::user(Role::User, "hi", "USER: hi\n")]
+    #[case::assistant(Role::Assistant, "a", "ASSISTANT: a\n")]
+    #[case::tool(Role::Tool, "t", "TOOL: t\n")]
+    fn render_role_label_cases(#[case] role: Role, #[case] content: &str, #[case] expected: &str) {
+        assert_eq!(render(&[msg(role, content)]), expected);
+    }
+
+    #[test]
+    fn render_appends_tool_calls() {
+        let mut m = Message::assistant("hello");
+        m.tool_calls.push(ToolCall {
+            id: "1".into(),
+            name: "ls".into(),
+            arguments: serde_json::json!({"a": 1}),
+        });
+        let out = render(&[m]);
+        assert!(out.contains("ASSISTANT: hello"), "{out}");
+        assert!(out.contains("[tool_call ls {\"a\":1}]"), "{out}");
+    }
 
     /// Returns a fixed summary regardless of input.
     struct FixedSummarizer;

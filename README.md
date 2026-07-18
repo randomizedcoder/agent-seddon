@@ -9,9 +9,10 @@ LLM provider, the tools, the memory, the context assembly — sits behind a trai
 and is wired by a **plugin registry**, so implementations can be swapped by config,
 compiled in via cargo features, and contributed by third parties without forking.
 
-See **[DESIGN.md](DESIGN.md)** for the architecture, the loop, and the layered
-memory model; **[docs/extending.md](docs/extending.md)** for how to add a
-provider/tool/memory/context/policy; and
+See **[DESIGN.md](DESIGN.md)** for the design rationale, the loop, and the layered
+memory model; **[docs/architecture.md](docs/architecture.md)** for the boundary map
+and per-component docs; **[docs/extending.md](docs/extending.md)** for how to add a
+provider/tool/memory/context/policy/transport; and
 **[docs/features-comparison.md](docs/features-comparison.md)** for how it stacks up
 against other harnesses.
 
