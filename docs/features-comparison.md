@@ -7,7 +7,8 @@
 > features shipped; an **MCP client** (stdio + HTTP) and **subagent `delegate`**
 > landed; and the P1 usability bundle — **interactive REPL**, **session resume**,
 > **slash commands**, **summarizing compaction**, and **skills**
-> (`/skill:<name>`) — is in. Rows below are annotated where that changes our
+> (`/skill:<name>`) — is in. An **MCP server** (`--serve-mcp`) now also exposes
+> the agent to other MCP clients. Rows below are annotated where that changes our
 > coverage.
 
 ## Purpose
@@ -98,7 +99,7 @@ impl) · ❌ Missing · ➖ N/A.
 | Prometheus metrics | Yes | No | No | ✅ |
 | Structured telemetry sink (ClickHouse) | Yes | Adapter interface | Trace upload | ✅ |
 | MCP client | Yes (stdio + HTTP) | No (by design) | Yes | ✅ |
-| MCP server | No | No | Yes | ❌ |
+| MCP server | Yes (`--serve-mcp`, stdio) | No | Yes | ✅ |
 | Permission / approval gate | Yes (auto/interactive) | No (trust model) | Yes (rich) | 🟡 |
 | Path-traversal safety on file tools | Yes | — | — | ✅ |
 | Sandboxed execution backends | No | Docs/patterns | 6 backends | ❌ |
