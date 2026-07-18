@@ -6,10 +6,14 @@
 
 Experimental, modular coding-agent harness in Rust. Every major component — the
 LLM provider, the tools, the memory, the context assembly — sits behind a trait
-so implementations can be swapped by config and compared cheaply.
+and is wired by a **plugin registry**, so implementations can be swapped by config,
+compiled in via cargo features, and contributed by third parties without forking.
 
-See **[DESIGN.md](DESIGN.md)** for the architecture, the loop, the layered memory
-model, and a comparison to Hermes / OpenCode / Roo Code.
+See **[DESIGN.md](DESIGN.md)** for the architecture, the loop, and the layered
+memory model; **[docs/extending.md](docs/extending.md)** for how to add a
+provider/tool/memory/context/policy; and
+**[docs/features-comparison.md](docs/features-comparison.md)** for how it stacks up
+against other harnesses.
 
 ## Workspace
 
@@ -18,12 +22,30 @@ One crate per seam (DESIGN.md §7):
 | Crate | Role |
 |-------|------|
 | `agent-core` | Seam traits + shared types (no impls) |
-| `agent-providers` | `LlmProvider` impls (OpenAI-compatible / GLM) |
-| `agent-tools` | `Tool` impls: `bash`, `read_file`, `write_file` |
+| `agent-providers` | `LlmProvider` impls: OpenAI-compatible (GLM/OpenAI/vLLM/Ollama) + Anthropic-native, both streaming |
+| `agent-tools` | `Tool` impls: `bash`, `read_file`, `write_file`, `edit`, `grep`, `find`, `ls` |
 | `agent-memory` | `MemoryStore`: JSONL episodic + markdown semantic |
 | `agent-context` | `ContextStrategy`: sliding-window compaction |
-| `agent-runtime` | Config, the factory/registry, and the loop |
+| `agent-runtime` | Config, the plugin registry, and the loop (streaming + parallel tools) |
 | `agent-cli` | The `agent` binary |
+
+## Plugins & features
+
+Each seam implementation is a **registered plugin** selected by a config string
+(`provider = "anthropic"`, `[tools] enabled = ["edit", "grep", …]`) and gated by a
+**cargo feature**, so a build links only what it needs:
+
+```sh
+cargo build                    # default: both providers, all tools, sliding-window, file memory
+cargo build -p agent-runtime --no-default-features \
+  --features provider-openai-compat,tool-core,context-sliding-window,memory-file   # minimal
+```
+
+Adding a module is: implement the `agent-core` trait → register a factory → select
+by config. Do it in-tree (a `#[cfg(feature)]` line in `register_builtins`) or
+out-of-tree from your own binary via the public `Registry` + `build_agent_with`
+API — see **[docs/extending.md](docs/extending.md)** and the runnable
+`cargo run -p agent-cli --example custom_provider`.
 
 ## Build & run
 
@@ -84,8 +106,13 @@ nix run .#clickhouse-client -- -q \
 ## Configuration
 
 Wiring lives in [`config/agent.toml`](config/agent.toml). The string fields under
-`[agent]` and `[memory]` choose which seam implementation runs — swapping them is
-the experimentation lever, no code edit required.
+`[agent]` and `[memory]` choose which seam implementation runs (`provider`,
+`context`, `policy`, `[memory] backend`, `[tools] enabled`) — swapping them is the
+experimentation lever, no code edit required. `[agent] stream` toggles incremental
+SSE streaming with a live stderr echo (set `false` for the buffered path — the
+escape hatch for servers that misbehave on SSE, and the only path that reports
+token usage for openai-compat); `[agent] parallel_tools` runs a turn's
+parallel-safe tool calls concurrently.
 
 ### API key (kept out of the repo)
 

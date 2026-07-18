@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["context-sliding-window"]
+# Non-destructive sliding-window truncation.
+context-sliding-window = []
+
 [dependencies]
 agent-core.workspace = true
 async-trait.workspace = true

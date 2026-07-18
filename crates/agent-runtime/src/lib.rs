@@ -6,11 +6,13 @@ mod config;
 mod context_files;
 mod metrics;
 mod policy;
+mod registry;
 
 pub use agent::{Agent, Settings};
-pub use builder::build_agent;
+pub use builder::{build_agent, build_agent_with};
 pub use config::Config;
 pub use metrics::Metrics;
+pub use registry::{register_builtins, Registry};
 
 /// Parse a TOML config string into a [`Config`].
 pub fn parse_config(toml_str: &str) -> anyhow::Result<Config> {
