@@ -58,7 +58,7 @@ pub async fn build_agent_with(
     };
 
     let context = registry
-        .build_context(&cfg.agent.context, &cfg)
+        .build_context(&cfg.agent.context, &cfg, &provider)
         .context("building context strategy")?;
     let policy = registry
         .build_policy(&cfg.agent.policy, &cfg)

@@ -4,9 +4,11 @@
 **Status:** Analysis / roadmap input.
 
 > **Update (2026-07-18):** Since the original analysis, the plugin registry + P0
-> features shipped, and an **MCP client** (stdio + HTTP) and **subagent
-> `delegate`** landed. The rows and roadmap below are annotated where that changes
-> our coverage.
+> features shipped; an **MCP client** (stdio + HTTP) and **subagent `delegate`**
+> landed; and the P1 usability bundle — **interactive REPL**, **session resume**,
+> **slash commands**, **summarizing compaction**, and **skills**
+> (`/skill:<name>`) — is in. Rows below are annotated where that changes our
+> coverage.
 
 ## Purpose
 
@@ -88,7 +90,7 @@ impl) · ❌ Missing · ➖ N/A.
 | Anthropic-native provider | No | Yes | Yes | 🟦 |
 | Provider capability metadata | Yes (basic) | Yes (rich, cost) | Yes | 🟡 |
 | Context assembly | Yes | Yes | Yes | ✅ |
-| Compaction | Truncation only | LLM summary | LLM summary | 🟡 |
+| Compaction | Truncation + LLM summary | LLM summary | LLM summary | ✅ |
 | Session branching | No | Yes (`/tree`) | Partial | ❌ |
 | Working / episodic / semantic memory | Yes (layered) | Sessions only | MEMORY+USER files | ✅ |
 | Memory recall | Keyword | ➖ | FTS5 + LLM + vector plugins | 🟡 |
@@ -101,10 +103,10 @@ impl) · ❌ Missing · ➖ N/A.
 | Path-traversal safety on file tools | Yes | — | — | ✅ |
 | Sandboxed execution backends | No | Docs/patterns | 6 backends | ❌ |
 | Subagents / delegation | Yes (`delegate`, depth-capped) | Extension | Yes + kanban | ✅ |
-| Session persistence / resume | Append-only log; no resume UX | Yes (JSONL + `/resume`) | Yes (SQLite) | 🟡 |
-| Interactive TUI | No | Yes | Yes | ❌ |
-| Slash commands | No | Yes | Yes | ❌ |
-| Skills (SKILL.md) | No | Yes | Yes | ❌ |
+| Session persistence / resume | Yes (JSONL + `--continue`/`--resume`/`/resume`) | Yes (JSONL + `/resume`) | Yes (SQLite) | ✅ |
+| Interactive REPL / TUI | REPL (line-based) | Rich TUI | Rich TUI | 🟡 |
+| Slash commands | Yes | Yes | Yes | ✅ |
+| Skills (SKILL.md) | Yes (`/skill:<name>` load) | Yes | Yes | ✅ |
 | Plugins / extensions | Compile-time seams | Yes (hot-reload TS) | Yes (19 plugin types) | 🟡 |
 | Hooks | No | Yes (events) | Yes | ❌ |
 | Config system | TOML | JSON | YAML | ✅ |

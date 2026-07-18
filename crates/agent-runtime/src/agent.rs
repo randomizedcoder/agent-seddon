@@ -9,7 +9,7 @@ use crate::metrics::Metrics;
 use agent_core::{
     CompletionRequest, CompletionResponse, ContextBlock, ContextInput, ContextStrategy, Decision,
     LlmProvider, MemoryEvent, MemoryStore, Message, Observation, Policy, RecallQuery, Role,
-    TokenBudget, ToolContext, ToolRegistry, WorkingSet,
+    TokenBudget, ToolContext, ToolRegistry, ToolSchema, WorkingSet,
 };
 use futures_util::StreamExt;
 use std::io::Write;
@@ -72,66 +72,59 @@ impl Agent {
         }
     }
 
-    /// Run the loop to completion, returning the model's final text answer.
-    /// Wraps `run_inner` to record run outcome/duration metrics on every path.
+    /// Run a single goal to completion (one-shot): open a session and send it.
     pub async fn run(&self, goal: &str) -> anyhow::Result<String> {
-        self.metrics.run_started();
-        let start = Instant::now();
-        let result = self.run_inner(goal).await;
-        let outcome = if result.is_ok() { "success" } else { "error" };
-        self.metrics
-            .run_finished(outcome, start.elapsed().as_secs_f64());
-        result
+        self.session().send(goal).await
     }
 
-    async fn run_inner(&self, goal: &str) -> anyhow::Result<String> {
-        // 1. Recall relevant memory for the goal.
-        let recalled = self
-            .memory
-            .recall(&RecallQuery {
-                text: goal.to_string(),
-                limit: self.settings.recall_limit,
-            })
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!("recall failed: {e}");
-                Vec::new()
-            });
-        if !recalled.is_empty() {
-            tracing::info!(items = recalled.len(), "recalled memory");
+    /// Open a multi-turn session whose working set persists across `send` calls.
+    pub fn session(&self) -> Session<'_> {
+        Session {
+            agent: self,
+            working: WorkingSet::default(),
+            budget: TokenBudget {
+                max_context_tokens: self.settings.context_window,
+                reserve_output: self.settings.reserve_output,
+            },
+            tool_ctx: ToolContext {
+                cwd: self.settings.cwd.clone(),
+            },
+            tool_schemas: self.tools.describe_all(),
+            started: false,
+            pending_context: Vec::new(),
         }
+    }
 
-        // 2. Assemble the initial working set.
-        let messages = self
-            .context
-            .assemble(ContextInput {
-                system_prompt: self.settings.system_prompt.clone(),
-                prepend: self.settings.context_prepend.clone(),
-                recalled,
-                goal: goal.to_string(),
-                append: self.settings.context_append.clone(),
-            })
-            .await?;
-        let mut working = WorkingSet { messages };
+    /// The configured model name (for display, e.g. a `/model` command).
+    pub fn model(&self) -> &str {
+        &self.settings.model
+    }
 
-        self.record("goal", Message::user(goal)).await;
+    /// Registered tool names, sorted.
+    pub fn tool_names(&self) -> Vec<String> {
+        self.tools
+            .describe_all()
+            .into_iter()
+            .map(|s| s.name)
+            .collect()
+    }
 
-        let budget = TokenBudget {
-            max_context_tokens: self.settings.context_window,
-            reserve_output: self.settings.reserve_output,
-        };
-        let tool_ctx = ToolContext {
-            cwd: self.settings.cwd.clone(),
-        };
-        let tool_schemas = self.tools.describe_all();
-
-        // 3. The loop.
+    /// The core iteration loop over an existing working set: model call → tool
+    /// dispatch → record → compact, until the model stops asking for tools (or
+    /// `max_iterations`). Mutates `working` in place and returns the final answer.
+    async fn run_loop(
+        &self,
+        working: &mut WorkingSet,
+        budget: &TokenBudget,
+        tool_ctx: &ToolContext,
+        tool_schemas: &[ToolSchema],
+    ) -> anyhow::Result<String> {
         let model = self.settings.model.as_str();
         for iter in 1..=self.settings.max_iterations {
             self.metrics.on_iteration();
             let req = CompletionRequest {
                 messages: working.messages.clone(),
-                tools: tool_schemas.clone(),
+                tools: tool_schemas.to_vec(),
                 max_tokens: self.settings.max_tokens,
                 temperature: self.settings.temperature,
             };
@@ -199,7 +192,7 @@ impl Agent {
                 .zip(&decisions)
                 .map(|(call, dec)| {
                     let tools = &self.tools;
-                    let tool_ctx = &tool_ctx;
+                    let tool_ctx: &ToolContext = tool_ctx;
                     async move {
                         match dec {
                             Decision::Deny(_) => None,
@@ -254,7 +247,7 @@ impl Agent {
             }
 
             // Keep the working set within budget before the next turn.
-            self.context.compact(&mut working, &budget).await?;
+            self.context.compact(working, budget).await?;
         }
 
         self.memory.distill().await.ok();
@@ -340,6 +333,124 @@ impl Agent {
         if let Err(e) = self.memory.append(event).await {
             tracing::warn!("episodic append failed: {e}");
         }
+    }
+}
+
+/// A multi-turn conversation over an [`Agent`]. The working set (message history)
+/// persists across [`Session::send`] calls, so follow-up turns continue the
+/// conversation rather than starting fresh. The one-shot [`Agent::run`] is just a
+/// session that sends a single message.
+pub struct Session<'a> {
+    agent: &'a Agent,
+    working: WorkingSet,
+    budget: TokenBudget,
+    tool_ctx: ToolContext,
+    tool_schemas: Vec<ToolSchema>,
+    /// Whether the initial context (system prompt + recall) has been assembled or
+    /// a saved transcript loaded.
+    started: bool,
+    /// Extra system context queued before the first turn (e.g. a loaded skill),
+    /// injected once the initial context is assembled.
+    pending_context: Vec<String>,
+}
+
+impl Session<'_> {
+    /// Send a user message and run the loop to the next final answer. Each send
+    /// is recorded as one metrics "run".
+    pub async fn send(&mut self, input: &str) -> anyhow::Result<String> {
+        self.agent.metrics.run_started();
+        let start = Instant::now();
+        let result = self.send_inner(input).await;
+        let outcome = if result.is_ok() { "success" } else { "error" };
+        self.agent
+            .metrics
+            .run_finished(outcome, start.elapsed().as_secs_f64());
+        result
+    }
+
+    async fn send_inner(&mut self, input: &str) -> anyhow::Result<String> {
+        if !self.started {
+            // First turn: recall relevant memory and assemble the initial context.
+            let recalled = self
+                .agent
+                .memory
+                .recall(&RecallQuery {
+                    text: input.to_string(),
+                    limit: self.agent.settings.recall_limit,
+                })
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!("recall failed: {e}");
+                    Vec::new()
+                });
+            if !recalled.is_empty() {
+                tracing::info!(items = recalled.len(), "recalled memory");
+            }
+            self.working.messages = self
+                .agent
+                .context
+                .assemble(ContextInput {
+                    system_prompt: self.agent.settings.system_prompt.clone(),
+                    prepend: self.agent.settings.context_prepend.clone(),
+                    recalled,
+                    goal: input.to_string(),
+                    append: self.agent.settings.context_append.clone(),
+                })
+                .await?;
+            // Inject any context queued before the first turn (e.g. skills).
+            for ctx in self.pending_context.drain(..) {
+                self.working.messages.push(Message::system(ctx));
+            }
+            self.started = true;
+        } else {
+            // Continuation: append the new user message to the running history.
+            self.working.messages.push(Message::user(input));
+        }
+
+        self.agent.record("goal", Message::user(input)).await;
+        self.agent
+            .run_loop(
+                &mut self.working,
+                &self.budget,
+                &self.tool_ctx,
+                &self.tool_schemas,
+            )
+            .await
+    }
+
+    /// The current message history (for persistence / resume).
+    pub fn messages(&self) -> &[Message] {
+        &self.working.messages
+    }
+
+    /// Replace the working set with a saved transcript (resume).
+    pub fn load(&mut self, messages: Vec<Message>) {
+        self.working.messages = messages;
+        self.started = true;
+    }
+
+    /// Add a system-context block (e.g. a loaded skill body). Applied immediately
+    /// if the conversation has started, otherwise queued for the first turn.
+    pub fn add_context(&mut self, text: String) {
+        if self.started {
+            self.working.messages.push(Message::system(text));
+        } else {
+            self.pending_context.push(text);
+        }
+    }
+
+    /// Whether any turn has run (or a transcript was loaded).
+    pub fn is_started(&self) -> bool {
+        self.started
+    }
+
+    /// Force a compaction pass on the working set now (e.g. a `/compact` command).
+    pub async fn compact(&mut self) -> anyhow::Result<()> {
+        self.agent
+            .context
+            .compact(&mut self.working, &self.budget)
+            .await?;
+        Ok(())
     }
 }
 
@@ -534,5 +645,47 @@ mod tests {
     #[tokio::test]
     async fn tool_results_preserve_call_order_when_sequential() {
         assert_eq!(run_with(false).await, vec!["t0", "t1", "t2"]);
+    }
+
+    /// Answers with the number of user messages it sees, proving the working set
+    /// carried over from the previous turn.
+    struct CountingProvider;
+    #[async_trait]
+    impl LlmProvider for CountingProvider {
+        fn capabilities(&self) -> ModelCapabilities {
+            ModelCapabilities {
+                supports_tools: false,
+                context_window: 1000,
+            }
+        }
+        async fn complete(&self, req: CompletionRequest) -> agent_core::Result<CompletionResponse> {
+            let users = req.messages.iter().filter(|m| m.role == Role::User).count();
+            Ok(CompletionResponse {
+                message: Message::assistant(users.to_string()),
+                finish_reason: "stop".into(),
+                usage: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn session_keeps_history_across_turns() {
+        let agent = Agent::new(
+            Arc::new(CountingProvider),
+            ToolRegistry::new(),
+            Arc::new(RecordMemory {
+                tool_order: Arc::new(Mutex::new(Vec::new())),
+            }),
+            Arc::new(MockContext),
+            Arc::new(crate::policy::AutoApprove),
+            Metrics::new(),
+            settings(false),
+        );
+        let mut session = agent.session();
+        // Turn 1 sees one user message; turn 2 sees two → history persisted.
+        assert_eq!(session.send("hi").await.unwrap(), "1");
+        assert_eq!(session.send("more").await.unwrap(), "2");
+        // system + user + assistant (turn 1) + user + assistant (turn 2).
+        assert!(session.messages().len() >= 5);
     }
 }

@@ -4,7 +4,9 @@
 [agent]
 # Each name is resolved through the plugin registry (see docs/extending.md).
 provider = "openai-compat"   # -> OpenAiCompatProvider ("anthropic" -> AnthropicProvider)
-context  = "sliding-window"  # -> SlidingWindow
+# "sliding-window" drops oldest turns; "summarizing-window" LLM-summarizes them
+# (keeping the last `keep_recent_tokens` verbatim).
+context  = "sliding-window"  # -> SlidingWindow ("summarizing-window" -> SummarizingWindow)
 # SECURITY: "auto-approve" runs every tool call (incl. bash) with NO confirmation.
 # Only safe for trusted goals/inputs. The built-in default is "interactive".
 policy   = "auto-approve"    # -> AutoApprove  ("interactive" gates each tool call)
@@ -14,6 +16,7 @@ max_tokens     = 8192        # reasoning models (GLM) need real headroom
 temperature    = 0.7
 context_window = 131072
 reserve_output = 8192
+keep_recent_tokens = 20000   # summarizing-window: recent history kept verbatim
 
 # stream=true consumes the provider's incremental SSE stream and echoes assistant
 # text live to stderr. Set false for the buffered path (an escape hatch for

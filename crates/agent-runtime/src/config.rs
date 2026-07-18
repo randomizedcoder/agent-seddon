@@ -109,6 +109,10 @@ pub struct AgentCfg {
     pub context_window: u32,
     #[serde(default = "default_reserve_output")]
     pub reserve_output: u32,
+    /// For `context = "summarizing-window"`: tokens of recent history to keep
+    /// verbatim; older turns are summarized.
+    #[serde(default = "default_keep_recent")]
+    pub keep_recent_tokens: u32,
     #[serde(default = "default_system_prompt")]
     pub system_prompt: String,
     /// Consume completions as a stream and echo assistant text live to stderr.
@@ -245,6 +249,9 @@ fn default_context_window() -> u32 {
 fn default_reserve_output() -> u32 {
     8_192
 }
+fn default_keep_recent() -> u32 {
+    20_000
+}
 fn default_system_prompt() -> String {
     "You are a coding agent operating in a terminal working directory. \
      Use the provided tools to inspect and modify files and to run commands. \
@@ -314,6 +321,7 @@ impl Config {
                 temperature: default_temperature(),
                 context_window: default_context_window(),
                 reserve_output: default_reserve_output(),
+                keep_recent_tokens: default_keep_recent(),
                 system_prompt: default_system_prompt(),
                 stream: true,
                 parallel_tools: true,

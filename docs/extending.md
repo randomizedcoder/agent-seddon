@@ -28,6 +28,11 @@ Trait contracts live in `crates/agent-core/src/lib.rs`. All are object-safe and 
 `ToolSchema`, `CompletionChunk`, …) is the only currency between seams — don't
 invent a parallel one.
 
+Context-strategy note: the context factory receives `(&Config, &Arc<dyn
+LlmProvider>)` — the already-built provider — so a strategy like
+`summarizing-window` can call the model during compaction. Strategies that don't
+need it (e.g. `sliding-window`) ignore the second argument.
+
 Provider note: implement `complete` (buffered); `stream` is optional and defaults
 to adapting `complete` into a single terminal chunk, so a provider works with
 streaming for free and only overrides `stream` to do incremental SSE.
@@ -127,6 +132,15 @@ configured — the `[tools] enabled` allowlist only filters the built-ins. The
 client lives in `crates/agent-mcp` (stdio + streamable-HTTP transports behind a
 `McpTransport` trait); it implements the client half of MCP (tool discovery +
 calls).
+
+## Skills
+
+A **skill** is a `SKILL.md` file (frontmatter `name`/`description` + a markdown
+body) discovered from `skills/` and `.agent/skills/`. In the REPL, `/skills` lists
+them and `/skill:<name>` loads one skill's body into the conversation on demand
+(progressive disclosure — only the chosen skill enters context). No Rust required;
+just drop a `SKILL.md` in. See [`skills/README.md`](../skills/README.md) and the
+`agent_runtime::skills` module.
 
 ## Subagents (`delegate`)
 

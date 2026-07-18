@@ -240,10 +240,12 @@ pub trait ContextStrategy: Send + Sync {
 }
 ```
 
-Default is a sliding window with threshold-triggered summarization (borrowing
-OpenCode's approach: compact at a fraction of the context window, reserve output
-headroom, summarize the middle, keep the head/tail). Alternate strategies (pure
-truncation, map-reduce summary, retrieval-only) plug in here.
+Two strategies ship: `SlidingWindow` (drops the oldest turns — lossy but free) and
+`SummarizingWindow` (`context-summarizing`), which keeps the head + a recent tail
+(`keep_recent_tokens`) and replaces the middle with a single LLM-generated summary,
+falling back to truncation if the summarizer errors. Because summarization needs a
+model, the registry passes the already-built provider to every context factory
+(most ignore it). Further strategies (map-reduce, retrieval-only) plug in here.
 
 ### 4.5 Supporting seams: `Policy` and `Agent`
 
@@ -267,6 +269,15 @@ registers each as an `mcp_<server>_<tool>` `Tool` in the same `ToolRegistry` as 
 built-ins. This is the harness's answer to "add capabilities without writing Rust"
 — point it at any MCP server. Connection is best-effort; a failing server is logged
 and skipped.
+
+### 4.7 Skills
+
+The other no-Rust extension path: a **skill** is a `SKILL.md` file (frontmatter +
+markdown body) under `skills/` or `.agent/skills/`. The REPL's `/skills` lists them
+and `/skill:<name>` loads one skill's body into the conversation on demand
+(progressive disclosure — the descriptions are cheap to browse; only the chosen
+skill's body enters context). Discovery/loading lives in `agent-runtime::skills`;
+injection is `Session::add_context`.
 
 ---
 

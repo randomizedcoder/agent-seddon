@@ -14,6 +14,7 @@ default = [
     "tool-edit",
     "tool-search",
     "context-sliding-window",
+    "context-summarizing",
     "memory-file",
     "mcp",
     "subagents",
@@ -26,6 +27,7 @@ tool-core = ["agent-tools/tool-core"]
 tool-edit = ["agent-tools/tool-edit"]
 tool-search = ["agent-tools/tool-search"]
 context-sliding-window = ["agent-context/context-sliding-window"]
+context-summarizing = ["agent-context/context-summarizing"]
 memory-file = ["agent-memory/memory-file"]
 # Connect to external MCP servers and register their tools.
 mcp = ["dep:agent-mcp"]

@@ -7,10 +7,12 @@ mod context_files;
 mod metrics;
 mod policy;
 mod registry;
+pub mod session_store;
+pub mod skills;
 #[cfg(feature = "subagents")]
 mod subagent;
 
-pub use agent::{Agent, Settings};
+pub use agent::{Agent, Session, Settings};
 pub use builder::{build_agent, build_agent_with};
 pub use config::Config;
 pub use metrics::Metrics;
