@@ -522,8 +522,12 @@ Sections 2–5 cover the seams; several shipped subsystems live around them:
   **OpenTelemetry** tracing is layered on *alongside* the native sink
   (`crates/agent-telemetry/src/otel.rs`): a non-empty `[telemetry] otlp_endpoint`
   adds a batch OTLP/gRPC exporter to the ClickStack OTEL collector plus the global
-  W3C trace-context propagator, so spans can follow a request across component
-  boundaries — see §12.
+  W3C trace-context propagator. The loop is instrumented so a run is a **span tree**
+  (`agent.turn → memory.recall · context.assemble · provider.* · policy.authorize ·
+  tool.execute · context.compact`, + `agent.delegate`), and the OTLP layer carries
+  its own `INFO` filter so tracing is independent of `RUST_LOG`. When a seam is
+  remote the trace follows the request across the process boundary — see §12 and the
+  runbook [`docs/tracing.md`](docs/tracing.md).
 - **Interactive REPL + session persistence.** `agent` with no goal opens a
   multi-turn REPL (`crates/agent-cli/src/repl.rs`) with rustyline history + line
   editing, streaming, and slash commands (`/help`, `/new`, `/compact`, `/resume`,
@@ -576,3 +580,11 @@ The full contract, mapping decisions, transport pattern, error/status table, and
 deployment sketch live in **[`docs/grpc.md`](docs/grpc.md)**. This lifts the
 "multi-user serving / distributed subagents" non-goal in §1 — deliberately, and
 without touching the loop.
+
+**Verified end to end.** With the loop instrumented (§11) and a `--serve-provider`
+gateway (config `provider = "grpc"`), a single run yields **one trace spanning two
+services** — the gateway's `grpc.server` span is a child of the loop's
+`provider.stream` span, because the gRPC client injects the active span's context
+(`agent-grpc/src/client.rs`) and the server extracts it. The runnable demo (a
+ClickStack/HyperDX container + two-process setup) and its verification queries are
+in **[`docs/tracing.md`](docs/tracing.md)**.

@@ -72,13 +72,16 @@ High-level summaries; each links to its detailed doc.
   `interactive`.
 - **[MCP](components/mcp.md)** — external tools as first-class tools, plus the
   transport seam and the `--serve-mcp` server.
-- **[gRPC seams & tracing](grpc.md)** — the protobuf wire contracts (`agent-proto`)
-  and per-seam gRPC servers/clients (`agent-grpc`) that let each seam run as a
-  separate process/container over **TCP or unix domain sockets**, selected by
-  `= "grpc"` config and hosted by `agent --serve-<seam>`, with OTLP distributed
-  tracing into the ClickStack collector.
+- **[gRPC seams](grpc.md)** — the protobuf wire contracts (`agent-proto`) and
+  per-seam gRPC servers/clients (`agent-grpc`) that let each seam run as a separate
+  process/container over **TCP or unix domain sockets**, selected by `= "grpc"`
+  config and hosted by `agent --serve-<seam>`.
+- **[Tracing](tracing.md)** — the loop instrumented as a span tree, exported over
+  OTLP and (across gRPC hops) reassembled into one distributed trace in a
+  ClickStack/HyperDX collector; runbook + demo.
 - **[Runtime](components/runtime.md)** — the registry, builder, loop, config, and
-  cross-cutting pieces (subagents, skills, context files, metrics/telemetry).
+  cross-cutting pieces (subagents, skills, context files, metrics, telemetry,
+  tracing).
 - **[Testing](components/testing.md)** — `agent-testkit` shared doubles.
 
 ## What editing X touches

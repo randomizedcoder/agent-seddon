@@ -12,9 +12,11 @@ compiled in via cargo features, and contributed by third parties without forking
 See **[DESIGN.md](DESIGN.md)** for the design rationale, the loop, and the layered
 memory model; **[docs/architecture.md](docs/architecture.md)** for the boundary map
 and per-component docs; **[docs/extending.md](docs/extending.md)** for how to add a
-provider/tool/memory/context/policy/transport; and
-**[docs/features-comparison.md](docs/features-comparison.md)** for how it stacks up
-against other harnesses.
+provider/tool/memory/context/policy/transport;
+**[docs/grpc.md](docs/grpc.md)** for running the components as distributed gRPC
+services; **[docs/tracing.md](docs/tracing.md)** for the OpenTelemetry tracing
+runbook; and **[docs/features-comparison.md](docs/features-comparison.md)** for how
+it stacks up against other harnesses.
 
 ## Workspace
 
@@ -32,7 +34,7 @@ One crate per seam (DESIGN.md §7):
 | `agent-grpc` | per-seam gRPC servers + clients over TCP or unix domain sockets (`--serve-<seam>`, `= "grpc"`) |
 | `agent-telemetry` | Telemetry sink: streams transaction history, logs & usage to ClickHouse; OTLP trace export to the ClickStack collector |
 | `agent-runtime` | Config, the plugin registry, the loop (streaming + parallel tools), sessions, subagents |
-| `agent-cli` | The `agent` binary (CLI + REPL + `--serve-mcp`) |
+| `agent-cli` | The `agent` binary (CLI + REPL + `--serve-mcp` + `--serve-<seam>`) |
 
 ## Plugins & features
 
@@ -99,6 +101,35 @@ streaming echo go to stderr.
 Use a non-interactive policy (`auto-approve`) — stdin is the JSON-RPC channel, so
 an interactive approval prompt can't read it. (This is the server counterpart to
 the `agent-mcp` client, which *consumes* other MCP servers.)
+
+## Distributing components (gRPC)
+
+Because every seam is a trait selected by config, a component can run **in a
+different process or on a different machine** with no change to the loop — a remote
+seam is just another impl, chosen with `= "grpc"`. `agent-proto` defines the
+protobuf wire contract for every seam (all binary — arbitrary JSON args ride as a
+lossless `JsonValue`, not text); `agent-grpc` provides the per-seam servers and
+clients over **TCP or unix domain sockets** (UDS is the same-host fast path,
+bound `0700`/`0600`).
+
+Host a seam with `agent --serve-<seam>` and point another agent at it:
+
+```sh
+# terminal A — a model gateway serving the real provider over gRPC (default :50051)
+agent --serve-provider --config gateway.toml         # gateway.toml: provider = "anthropic"
+
+# terminal B — a loop that dials the gateway instead of calling the model directly
+#   loop.toml:  [agent] provider = "grpc"
+#               [grpc.provider] endpoint = "http://127.0.0.1:50051"  (or unix:/path)
+agent --config loop.toml "list the files in this repo"
+```
+
+`--serve-provider|--serve-memory|--serve-tools|--serve-context|--serve-policy` each
+host one seam; ports/socket paths are generated from `nix/constants.nix` into
+`agent-grpc`'s `constants.rs` (a `nix flake check` guard keeps them in sync). This
+lifts the design's "distributed components" goal to a k8s-style topology — a
+gateway, a shared memory service, sandboxed tool workers. Full contract, error
+mapping, and deployment sketch in **[docs/grpc.md](docs/grpc.md)**.
 
 ## Nix
 
@@ -199,6 +230,46 @@ Exposed metrics include `agent_api_calls_total`, `agent_api_call_duration_second
 # while a run is in progress:
 curl -s 127.0.0.1:9600/metrics | grep '^agent_'
 ```
+
+## Tracing (OpenTelemetry)
+
+Distributed traces show the agent's loop as a **span tree** and follow a request
+across process boundaries. Turn it on with a single knob:
+
+```toml
+[telemetry]
+otlp_endpoint = "http://127.0.0.1:4317"   # OTLP/gRPC receiver (empty = off)
+# otlp_headers = "authorization=<key>"    # if the collector authenticates ingestion
+```
+
+How it works:
+
+- **Spans.** The loop (`agent-runtime`) wraps each seam interaction in a span, so a
+  run is `agent.turn → memory.recall · context.assemble · provider.complete/stream ·
+  policy.authorize · tool.execute · context.compact` (+ `agent.delegate` for
+  subagents). `tracing-opentelemetry` also auto-tags each span with its
+  `code.filepath`/`lineno`, so a span links back to source.
+- **Export.** A `tracing` layer (`agent-telemetry`) batches the spans and exports
+  them over **OTLP/gRPC** to any collector. It's *additive* to the native ClickHouse
+  sink and **independent of `RUST_LOG`** (its own `INFO` filter — so quieting the
+  console doesn't silently disable tracing).
+- **Propagation.** The gRPC transports carry the **W3C trace context** in request
+  metadata (`agent-proto`), so when a seam is remote (`= "grpc"`), the server's
+  handler span is a child of the caller's span — **one trace across both
+  processes**.
+
+A ready-to-run demo ships as a **ClickStack / HyperDX** all-in-one container
+(collector + ClickHouse + UI):
+
+```sh
+nix run .#clickstack-up          # UI :8080, OTLP :4317
+# run the two-process demo in config/otel-demo/ (a gateway + a provider = "grpc" loop),
+# then open http://localhost:8080 → Traces to see the distributed waterfall.
+nix run .#clickstack-down
+```
+
+Full runbook (including the two-process distributed trace and the setup gotchas):
+**[docs/tracing.md](docs/tracing.md)**.
 
 ## Runtime state
 
