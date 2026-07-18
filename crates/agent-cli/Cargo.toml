@@ -18,3 +18,8 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 tiny_http.workspace = true
 reqwest.workspace = true
+
+[dev-dependencies]
+# For the out-of-tree extension example (examples/custom_provider.rs).
+agent-core.workspace = true
+async-trait.workspace = true

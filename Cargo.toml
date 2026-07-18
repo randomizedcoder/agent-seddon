@@ -26,6 +26,14 @@ tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 toml = "0.8"
 tracing = "0.1"
+
+# streaming (SSE) + concurrent tool execution
+futures-core = "0.3"
+futures-util = "0.3"
+async-stream = "0.3"
+# gitignore-aware file walking + regex for the search tools
+ignore = "0.4"
+regex = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 
 # telemetry / ClickHouse (native protocol, port 9000)
@@ -36,11 +44,13 @@ uuid = { version = "1", features = ["v4"] }
 prometheus = { version = "0.13", default-features = false }
 tiny_http = "0.12"
 
-# internal crates (the seams)
+# internal crates (the seams). The pluggable impl crates default to no features
+# when consumed as deps, so `agent-runtime` selects modules explicitly (and a
+# `--no-default-features` build of the runtime truly drops them).
 agent-core = { path = "crates/agent-core" }
-agent-providers = { path = "crates/agent-providers" }
-agent-tools = { path = "crates/agent-tools" }
-agent-memory = { path = "crates/agent-memory" }
-agent-context = { path = "crates/agent-context" }
+agent-providers = { path = "crates/agent-providers", default-features = false }
+agent-tools = { path = "crates/agent-tools", default-features = false }
+agent-memory = { path = "crates/agent-memory", default-features = false }
+agent-context = { path = "crates/agent-context", default-features = false }
 agent-telemetry = { path = "crates/agent-telemetry" }
 agent-runtime = { path = "crates/agent-runtime" }

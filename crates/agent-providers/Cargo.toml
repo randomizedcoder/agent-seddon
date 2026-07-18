@@ -4,10 +4,19 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["provider-openai-compat"]
+# OpenAI-compatible /chat/completions (covers GLM, OpenAI, vLLM, Ollama, …).
+provider-openai-compat = []
+# Anthropic-native Messages API.
+provider-anthropic = []
+
 [dependencies]
 agent-core.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["stream"] }
 tracing.workspace = true
+futures-util.workspace = true
+async-stream.workspace = true

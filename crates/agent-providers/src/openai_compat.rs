@@ -6,12 +6,14 @@
 //! `max_tokens` needs real headroom.
 
 use agent_core::{
-    CompletionRequest, CompletionResponse, Error, LlmProvider, Message, ModelCapabilities, Result,
-    Role, ToolCall, Usage,
+    ChunkStream, CompletionChunk, CompletionRequest, CompletionResponse, Error, LlmProvider,
+    Message, ModelCapabilities, Result, Role, ToolCall, Usage,
 };
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 pub struct OpenAiCompatConfig {
@@ -47,19 +49,9 @@ impl OpenAiCompatProvider {
             context_window: cfg.context_window,
         })
     }
-}
 
-#[async_trait]
-impl LlmProvider for OpenAiCompatProvider {
-    fn capabilities(&self) -> ModelCapabilities {
-        ModelCapabilities {
-            supports_tools: true,
-            context_window: self.context_window,
-        }
-    }
-
-    async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse> {
-        let wire = WireReq {
+    fn build_wire<'a>(&'a self, req: &CompletionRequest, stream: bool) -> WireReq<'a> {
+        WireReq {
             model: &self.model,
             messages: req.messages.iter().map(WireMsg::from_core).collect(),
             tools: req
@@ -76,7 +68,22 @@ impl LlmProvider for OpenAiCompatProvider {
                 .collect(),
             max_tokens: req.max_tokens,
             temperature: req.temperature,
-        };
+            stream,
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for OpenAiCompatProvider {
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities {
+            supports_tools: true,
+            context_window: self.context_window,
+        }
+    }
+
+    async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse> {
+        let wire = self.build_wire(&req, false);
 
         let resp = self
             .client
@@ -152,6 +159,164 @@ impl LlmProvider for OpenAiCompatProvider {
             }),
         })
     }
+
+    async fn stream(&self, req: CompletionRequest) -> Result<ChunkStream> {
+        let wire = self.build_wire(&req, true);
+        let resp = self
+            .client
+            .post(&self.endpoint)
+            .bearer_auth(&self.api_key)
+            .json(&wire)
+            .send()
+            .await
+            .map_err(|e| Error::Provider(format!("request failed: {e}")))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Error::Provider(format!("http {status}: {body}")));
+        }
+
+        // Text streams directly; tool-call `arguments` arrive as fragments keyed
+        // by `index` and are finalized when the stream ends. (Usage is not
+        // requested in stream mode; use `stream=false` for token counts.)
+        let stream = async_stream::stream! {
+            let mut bytes = resp.bytes_stream();
+            let mut buf = String::new();
+            let mut tools_acc: BTreeMap<u32, ToolAcc> = BTreeMap::new();
+            let mut finish: Option<String> = None;
+
+            'read: while let Some(next) = bytes.next().await {
+                let b = match next {
+                    Ok(b) => b,
+                    Err(e) => {
+                        yield Err(Error::Provider(format!("stream error: {e}")));
+                        break;
+                    }
+                };
+                buf.push_str(&String::from_utf8_lossy(&b));
+                while let Some(pos) = buf.find('\n') {
+                    let line = buf[..pos].trim_end_matches('\r').to_string();
+                    buf.drain(..pos + 1);
+                    let Some(data) = line.strip_prefix("data:") else { continue };
+                    let data = data.trim();
+                    if data.is_empty() {
+                        continue;
+                    }
+                    if data == "[DONE]" {
+                        break 'read;
+                    }
+                    let ev: StreamEvent = match serde_json::from_str(data) {
+                        Ok(ev) => ev,
+                        Err(_) => continue,
+                    };
+                    for choice in ev.choices {
+                        if let Some(delta) = choice.delta {
+                            if let Some(text) = delta.content {
+                                if !text.is_empty() {
+                                    yield Ok(CompletionChunk { delta_text: text, ..Default::default() });
+                                }
+                            }
+                            for tc in delta.tool_calls.unwrap_or_default() {
+                                let acc = tools_acc.entry(tc.index).or_default();
+                                if let Some(id) = tc.id {
+                                    if !id.is_empty() {
+                                        acc.id = id;
+                                    }
+                                }
+                                if let Some(f) = tc.function {
+                                    if let Some(n) = f.name {
+                                        if !n.is_empty() {
+                                            acc.name = n;
+                                        }
+                                    }
+                                    if let Some(a) = f.arguments {
+                                        acc.args.push_str(&a);
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(fr) = choice.finish_reason {
+                            finish = Some(fr);
+                        }
+                    }
+                }
+            }
+
+            for (_i, acc) in tools_acc {
+                yield Ok(CompletionChunk { tool_call: Some(acc.into_tool_call()), ..Default::default() });
+            }
+            yield Ok(CompletionChunk {
+                finish_reason: Some(finish.unwrap_or_else(|| "stop".into())),
+                ..Default::default()
+            });
+        };
+        Ok(Box::pin(stream))
+    }
+}
+
+/// A streamed tool call being assembled from `arguments` fragments.
+#[derive(Default)]
+struct ToolAcc {
+    id: String,
+    name: String,
+    args: String,
+}
+
+impl ToolAcc {
+    fn into_tool_call(self) -> ToolCall {
+        let arguments = if self.args.trim().is_empty() {
+            Value::Object(Default::default())
+        } else {
+            serde_json::from_str(&self.args).unwrap_or(Value::String(self.args))
+        };
+        ToolCall {
+            id: self.id,
+            name: self.name,
+            arguments,
+        }
+    }
+}
+
+// --- wire types (streaming) -----------------------------------------------
+
+#[derive(Deserialize)]
+struct StreamEvent {
+    #[serde(default)]
+    choices: Vec<StreamChoice>,
+}
+
+#[derive(Deserialize)]
+struct StreamChoice {
+    #[serde(default)]
+    delta: Option<StreamDelta>,
+    #[serde(default)]
+    finish_reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct StreamDelta {
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<StreamToolCall>>,
+}
+
+#[derive(Deserialize)]
+struct StreamToolCall {
+    #[serde(default)]
+    index: u32,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<StreamFn>,
+}
+
+#[derive(Deserialize)]
+struct StreamFn {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
 }
 
 // --- wire types -----------------------------------------------------------
@@ -164,6 +329,8 @@ struct WireReq<'a> {
     tools: Vec<WireTool>,
     max_tokens: u32,
     temperature: f32,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    stream: bool,
 }
 
 #[derive(Serialize)]

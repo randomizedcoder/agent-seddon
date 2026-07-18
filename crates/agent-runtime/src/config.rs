@@ -82,12 +82,26 @@ pub struct AgentCfg {
     pub reserve_output: u32,
     #[serde(default = "default_system_prompt")]
     pub system_prompt: String,
+    /// Consume completions as a stream and echo assistant text live to stderr.
+    /// (The loop always uses the provider's `stream`; this toggles the echo.)
+    #[serde(default = "default_true")]
+    pub stream: bool,
+    /// Execute a turn's tool calls concurrently (when all are parallel-safe).
+    #[serde(default = "default_true")]
+    pub parallel_tools: bool,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ProviderCfg {
+    /// Base URL of the API. Optional for providers with a well-known default
+    /// (e.g. Anthropic → `https://api.anthropic.com/v1`); required for
+    /// openai-compat.
+    #[serde(default)]
     pub base_url: String,
     pub model: String,
+    /// `anthropic-version` header for the Anthropic provider.
+    #[serde(default = "default_anthropic_version")]
+    pub version: String,
     /// Inline key (avoid committing). Takes precedence if non-empty.
     #[serde(default)]
     pub api_key: String,
@@ -104,6 +118,9 @@ pub struct ProviderCfg {
 
 #[derive(Debug, Deserialize)]
 pub struct MemoryCfg {
+    /// Which `MemoryStore` backend, e.g. "file". Selected via the registry.
+    #[serde(default = "default_memory_backend")]
+    pub backend: String,
     #[serde(default = "default_episodic_path")]
     pub episodic_path: String,
     #[serde(default = "default_semantic_dir")]
@@ -115,6 +132,7 @@ pub struct MemoryCfg {
 impl Default for MemoryCfg {
     fn default() -> Self {
         Self {
+            backend: default_memory_backend(),
             episodic_path: default_episodic_path(),
             semantic_dir: default_semantic_dir(),
             recall_limit: default_recall_limit(),
@@ -199,6 +217,12 @@ fn default_system_prompt() -> String {
      do not call any more tools."
         .into()
 }
+fn default_anthropic_version() -> String {
+    "2023-06-01".into()
+}
+fn default_memory_backend() -> String {
+    "file".into()
+}
 fn default_episodic_path() -> String {
     ".agent/episodic.jsonl".into()
 }
@@ -235,4 +259,40 @@ fn default_batch_rows() -> usize {
 }
 fn default_flush_ms() -> u64 {
     1_000
+}
+
+#[cfg(test)]
+impl Config {
+    /// A minimal, valid config for unit tests (no network use).
+    pub fn minimal_for_test() -> Self {
+        Config {
+            agent: AgentCfg {
+                provider: "openai-compat".into(),
+                context: default_context(),
+                policy: default_policy(),
+                max_iterations: default_max_iters(),
+                max_tokens: default_max_tokens(),
+                temperature: default_temperature(),
+                context_window: default_context_window(),
+                reserve_output: default_reserve_output(),
+                system_prompt: default_system_prompt(),
+                stream: true,
+                parallel_tools: true,
+            },
+            provider: ProviderCfg {
+                base_url: "http://localhost:1".into(),
+                model: "test-model".into(),
+                version: default_anthropic_version(),
+                api_key: "test-key".into(),
+                api_key_env: String::new(),
+                api_key_file: String::new(),
+                insecure_tls: false,
+            },
+            memory: MemoryCfg::default(),
+            tools: ToolsCfg::default(),
+            telemetry: TelemetryCfg::default(),
+            context_files: ContextFilesCfg::default(),
+            metrics: MetricsCfg::default(),
+        }
+    }
 }

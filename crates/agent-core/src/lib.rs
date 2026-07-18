@@ -147,13 +147,59 @@ pub struct CompletionResponse {
     pub usage: Option<Usage>,
 }
 
+/// One increment of a streamed completion. A provider emits any number of these:
+/// text arrives via `delta_text`, each fully-assembled tool call via `tool_call`,
+/// and the terminal chunk carries `finish_reason` (+ `usage` when reported).
+#[derive(Debug, Clone, Default)]
+pub struct CompletionChunk {
+    pub delta_text: String,
+    pub tool_call: Option<ToolCall>,
+    pub finish_reason: Option<String>,
+    pub usage: Option<Usage>,
+}
+
+/// A boxed stream of completion chunks (the streaming counterpart of
+/// `CompletionResponse`).
+pub type ChunkStream =
+    std::pin::Pin<Box<dyn futures_core::Stream<Item = Result<CompletionChunk>> + Send>>;
+
 /// Wraps a model behind a uniform request/response. Mirrors Hermes'
 /// `ProviderTransport` split: each impl owns its own message + tool-call
-/// conversion. (Streaming is a documented future addition; v1 is buffered.)
+/// conversion.
+///
+/// A provider must implement `complete` (buffered); `stream` is optional and
+/// defaults to adapting `complete` into a single terminal chunk, so existing and
+/// third-party providers keep working unchanged. Providers that support
+/// server-sent events override `stream` for incremental output.
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
     fn capabilities(&self) -> ModelCapabilities;
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse>;
+
+    /// Streaming completion. Default: run `complete`, then emit text, each tool
+    /// call, and a terminal chunk with the finish reason + usage.
+    async fn stream(&self, req: CompletionRequest) -> Result<ChunkStream> {
+        let resp = self.complete(req).await?;
+        let mut chunks: Vec<Result<CompletionChunk>> = Vec::new();
+        if !resp.message.content.is_empty() {
+            chunks.push(Ok(CompletionChunk {
+                delta_text: resp.message.content.clone(),
+                ..Default::default()
+            }));
+        }
+        for tc in resp.message.tool_calls {
+            chunks.push(Ok(CompletionChunk {
+                tool_call: Some(tc),
+                ..Default::default()
+            }));
+        }
+        chunks.push(Ok(CompletionChunk {
+            finish_reason: Some(resp.finish_reason),
+            usage: resp.usage,
+            ..Default::default()
+        }));
+        Ok(Box::pin(futures_util::stream::iter(chunks)))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -200,6 +246,14 @@ pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn schema(&self) -> ToolSchema;
     async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<Observation>;
+
+    /// Whether this tool is safe to run concurrently with other tool calls in the
+    /// same turn. Defaults to `true`; a tool with side effects that must not
+    /// interleave (e.g. an interactive REPL) can override to `false` to force the
+    /// whole turn's tools to run sequentially.
+    fn parallel_safe(&self) -> bool {
+        true
+    }
 }
 
 /// A name→tool map. The tools are the pluggable part; the registry is a plain
@@ -331,4 +385,73 @@ pub enum Decision {
 #[async_trait]
 pub trait Policy: Send + Sync {
     async fn authorize(&self, call: &ToolCall) -> Decision;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::StreamExt;
+
+    struct Mock;
+
+    #[async_trait]
+    impl LlmProvider for Mock {
+        fn capabilities(&self) -> ModelCapabilities {
+            ModelCapabilities {
+                supports_tools: true,
+                context_window: 1000,
+            }
+        }
+        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse> {
+            Ok(CompletionResponse {
+                message: Message {
+                    role: Role::Assistant,
+                    content: "hello".into(),
+                    tool_calls: vec![ToolCall {
+                        id: "1".into(),
+                        name: "bash".into(),
+                        arguments: serde_json::json!({"command": "ls"}),
+                    }],
+                    tool_call_id: None,
+                },
+                finish_reason: "tool_use".into(),
+                usage: Some(Usage {
+                    prompt_tokens: 3,
+                    completion_tokens: 2,
+                    total_tokens: 5,
+                }),
+            })
+        }
+    }
+
+    /// The default `stream` adapts `complete` into text + tool-call + terminal
+    /// chunks that reconstruct the original response.
+    #[tokio::test]
+    async fn default_stream_wraps_complete() {
+        let req = CompletionRequest {
+            messages: vec![],
+            tools: vec![],
+            max_tokens: 10,
+            temperature: 0.0,
+        };
+        let mut s = Mock.stream(req).await.unwrap();
+        let (mut text, mut calls, mut finish, mut usage) = (String::new(), 0, None, None);
+        while let Some(chunk) = s.next().await {
+            let chunk = chunk.unwrap();
+            text.push_str(&chunk.delta_text);
+            if chunk.tool_call.is_some() {
+                calls += 1;
+            }
+            if let Some(f) = chunk.finish_reason {
+                finish = Some(f);
+            }
+            if chunk.usage.is_some() {
+                usage = chunk.usage;
+            }
+        }
+        assert_eq!(text, "hello");
+        assert_eq!(calls, 1);
+        assert_eq!(finish.as_deref(), Some("tool_use"));
+        assert_eq!(usage.unwrap().total_tokens, 5);
+    }
 }

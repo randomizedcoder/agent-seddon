@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["memory-file"]
+# JSONL episodic log + markdown semantic store (keyword recall).
+memory-file = []
+
 [dependencies]
 agent-core.workspace = true
 async-trait.workspace = true
