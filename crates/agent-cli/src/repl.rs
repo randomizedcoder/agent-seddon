@@ -6,7 +6,7 @@
 //! is saved under `.agent/sessions/` so it can be resumed.
 
 use agent_core::Message;
-use agent_runtime::{session_store, Agent, Session};
+use agent_runtime::{session_store, skills, Agent, Session};
 use std::io::{BufRead, Write};
 use std::path::Path;
 
@@ -78,7 +78,26 @@ async fn handle_command<'a>(
     sessions_dir: &Path,
 ) -> Flow {
     let mut parts = cmd.split_whitespace();
-    match parts.next().unwrap_or("") {
+    let first = parts.next().unwrap_or("");
+
+    // Skills: `/skills` lists, `/skill:<name>` or `/skill <name>` loads.
+    if first == "skills" {
+        list_skills();
+        return Flow::Continue;
+    }
+    if let Some(name) = first.strip_prefix("skill:") {
+        load_skill(session, name);
+        return Flow::Continue;
+    }
+    if first == "skill" {
+        match parts.next() {
+            Some(name) => load_skill(session, name),
+            None => println!("usage: /skill:<name>  (or  /skill <name>) — see /skills"),
+        }
+        return Flow::Continue;
+    }
+
+    match first {
         "quit" | "exit" | "q" => return Flow::Quit,
         "help" | "h" => {
             println!(
@@ -87,6 +106,8 @@ async fn handle_command<'a>(
                  /new             start a fresh session\n  \
                  /compact         compact the context now\n  \
                  /resume          pick a saved session to resume\n  \
+                 /skills          list available skills\n  \
+                 /skill:<name>    load a skill into the conversation\n  \
                  /model           show the model\n  \
                  /tools           list available tools\n  \
                  /save            save the current session\n  \
@@ -156,6 +177,49 @@ fn resume_picker<'a>(
             println!("resumed session {} ({} turns)", info.id, info.turns);
         }
         Err(e) => eprintln!("could not load session: {e}"),
+    }
+}
+
+/// List discovered skills (`/skills`).
+fn list_skills() {
+    let dirs = skills::default_dirs();
+    let found = skills::discover(&dirs);
+    if found.is_empty() {
+        let where_ = dirs
+            .iter()
+            .map(|d| d.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("no skills found (looked in {where_})");
+        return;
+    }
+    println!("skills:");
+    for s in &found {
+        if s.description.is_empty() {
+            println!("  {}", s.name);
+        } else {
+            println!("  {} — {}", s.name, s.description);
+        }
+    }
+}
+
+/// Load a skill's body into the session context (`/skill:<name>`).
+fn load_skill(session: &mut Session<'_>, name: &str) {
+    let dirs = skills::default_dirs();
+    match skills::find(&dirs, name) {
+        Some(info) => match skills::load_body(&info.path) {
+            Ok(body) if body.is_empty() => println!("skill `{}` has no body", info.name),
+            Ok(body) => {
+                let chars = body.len();
+                session.add_context(format!("# Skill: {}\n\n{}", info.name, body));
+                println!(
+                    "loaded skill `{}` ({chars} chars) — applies on your next message",
+                    info.name
+                );
+            }
+            Err(e) => eprintln!("could not read skill `{name}`: {e}"),
+        },
+        None => println!("no skill named `{name}` (try /skills)"),
     }
 }
 

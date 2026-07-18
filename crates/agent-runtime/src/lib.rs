@@ -8,6 +8,7 @@ mod metrics;
 mod policy;
 mod registry;
 pub mod session_store;
+pub mod skills;
 #[cfg(feature = "subagents")]
 mod subagent;
 

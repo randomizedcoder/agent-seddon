@@ -91,6 +91,7 @@ impl Agent {
             },
             tool_schemas: self.tools.describe_all(),
             started: false,
+            pending_context: Vec::new(),
         }
     }
 
@@ -348,6 +349,9 @@ pub struct Session<'a> {
     /// Whether the initial context (system prompt + recall) has been assembled or
     /// a saved transcript loaded.
     started: bool,
+    /// Extra system context queued before the first turn (e.g. a loaded skill),
+    /// injected once the initial context is assembled.
+    pending_context: Vec<String>,
 }
 
 impl Session<'_> {
@@ -393,6 +397,10 @@ impl Session<'_> {
                     append: self.agent.settings.context_append.clone(),
                 })
                 .await?;
+            // Inject any context queued before the first turn (e.g. skills).
+            for ctx in self.pending_context.drain(..) {
+                self.working.messages.push(Message::system(ctx));
+            }
             self.started = true;
         } else {
             // Continuation: append the new user message to the running history.
@@ -419,6 +427,16 @@ impl Session<'_> {
     pub fn load(&mut self, messages: Vec<Message>) {
         self.working.messages = messages;
         self.started = true;
+    }
+
+    /// Add a system-context block (e.g. a loaded skill body). Applied immediately
+    /// if the conversation has started, otherwise queued for the first turn.
+    pub fn add_context(&mut self, text: String) {
+        if self.started {
+            self.working.messages.push(Message::system(text));
+        } else {
+            self.pending_context.push(text);
+        }
     }
 
     /// Whether any turn has run (or a transcript was loaded).

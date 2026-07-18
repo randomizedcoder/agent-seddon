@@ -270,6 +270,15 @@ built-ins. This is the harness's answer to "add capabilities without writing Rus
 — point it at any MCP server. Connection is best-effort; a failing server is logged
 and skipped.
 
+### 4.7 Skills
+
+The other no-Rust extension path: a **skill** is a `SKILL.md` file (frontmatter +
+markdown body) under `skills/` or `.agent/skills/`. The REPL's `/skills` lists them
+and `/skill:<name>` loads one skill's body into the conversation on demand
+(progressive disclosure — the descriptions are cheap to browse; only the chosen
+skill's body enters context). Discovery/loading lives in `agent-runtime::skills`;
+injection is `Session::add_context`.
+
 ---
 
 ## 5. Modularity mechanism — how swapping actually works
