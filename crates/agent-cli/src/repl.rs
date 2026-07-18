@@ -7,8 +7,70 @@
 
 use agent_core::Message;
 use agent_runtime::{session_store, skills, Agent, Session};
-use std::io::{BufRead, Write};
+use rustyline::error::ReadlineError;
+use rustyline::DefaultEditor;
+use std::io::{BufRead, IsTerminal, Write};
 use std::path::Path;
+
+/// A line source: rustyline in a terminal (arrow-key history + editing), or plain
+/// stdin when input is piped (so `printf … | agent` still works).
+enum Input {
+    Interactive(Box<DefaultEditor>),
+    Piped,
+}
+
+impl Input {
+    fn new() -> Self {
+        if std::io::stdin().is_terminal() {
+            match DefaultEditor::new() {
+                Ok(ed) => return Input::Interactive(Box::new(ed)),
+                Err(e) => {
+                    tracing::warn!("line editor unavailable ({e}); using plain input");
+                }
+            }
+        }
+        Input::Piped
+    }
+
+    /// Read one line. `None` on EOF (Ctrl-D); Ctrl-C yields an empty line.
+    fn readline(&mut self, prompt: &str) -> Option<String> {
+        match self {
+            Input::Interactive(ed) => match ed.readline(prompt) {
+                Ok(line) => {
+                    let _ = ed.add_history_entry(line.as_str());
+                    Some(line)
+                }
+                Err(ReadlineError::Eof) => None,
+                Err(ReadlineError::Interrupted) => Some(String::new()),
+                Err(e) => {
+                    tracing::warn!("readline error: {e}");
+                    None
+                }
+            },
+            Input::Piped => {
+                print!("{prompt}");
+                std::io::stdout().flush().ok();
+                let mut line = String::new();
+                match std::io::stdin().lock().read_line(&mut line) {
+                    Ok(0) => None,
+                    Ok(_) => Some(line),
+                    Err(_) => None,
+                }
+            }
+        }
+    }
+
+    fn load_history(&mut self, path: &Path) {
+        if let Input::Interactive(ed) = self {
+            let _ = ed.load_history(path);
+        }
+    }
+    fn save_history(&mut self, path: &Path) {
+        if let Input::Interactive(ed) = self {
+            let _ = ed.save_history(path);
+        }
+    }
+}
 
 /// Run the REPL until EOF or `/quit`. `initial` optionally seeds the session with
 /// a resumed transcript (its id + messages).
@@ -29,23 +91,24 @@ pub async fn run(
 
     println!("agent-seddon REPL — type a goal, or /help for commands. Ctrl-D to exit.");
 
-    let stdin = std::io::stdin();
-    loop {
-        print!("\n> ");
-        std::io::stdout().flush().ok();
+    let mut input = Input::new();
+    let history_path = sessions_dir.join(".repl_history");
+    input.load_history(&history_path);
 
-        let mut line = String::new();
-        if stdin.lock().read_line(&mut line)? == 0 {
+    loop {
+        let Some(raw) = input.readline("\n> ") else {
             println!(); // newline after ^D
             break;
-        }
-        let line = line.trim();
+        };
+        let line = raw.trim();
         if line.is_empty() {
             continue;
         }
 
         if let Some(cmd) = line.strip_prefix('/') {
-            if handle_command(cmd, agent, &mut session, &mut id, sessions_dir).await == Flow::Quit {
+            if handle_command(cmd, agent, &mut session, &mut id, sessions_dir, &mut input).await
+                == Flow::Quit
+            {
                 break;
             }
             continue;
@@ -61,6 +124,9 @@ pub async fn run(
             Err(e) => eprintln!("error: {e}"),
         }
     }
+
+    let _ = std::fs::create_dir_all(sessions_dir);
+    input.save_history(&history_path);
     Ok(())
 }
 
@@ -76,6 +142,7 @@ async fn handle_command<'a>(
     session: &mut Session<'a>,
     id: &mut String,
     sessions_dir: &Path,
+    input: &mut Input,
 ) -> Flow {
     let mut parts = cmd.split_whitespace();
     let first = parts.next().unwrap_or("");
@@ -129,7 +196,7 @@ async fn handle_command<'a>(
             Ok(()) => println!("saved session {id}"),
             Err(e) => eprintln!("save failed: {e}"),
         },
-        "resume" => resume_picker(agent, session, id, sessions_dir),
+        "resume" => resume_picker(agent, session, id, sessions_dir, input),
         other => println!("unknown command /{other} (try /help)"),
     }
     Flow::Continue
@@ -141,6 +208,7 @@ fn resume_picker<'a>(
     session: &mut Session<'a>,
     id: &mut String,
     sessions_dir: &Path,
+    input: &mut Input,
 ) {
     let infos = session_store::list(sessions_dir);
     if infos.is_empty() {
@@ -150,13 +218,10 @@ fn resume_picker<'a>(
     for (i, s) in infos.iter().enumerate() {
         println!("  [{i}] {} turn(s)  {}", s.turns, s.preview);
     }
-    print!("resume which? [index, or blank to cancel]: ");
-    std::io::stdout().flush().ok();
 
-    let mut choice = String::new();
-    if std::io::stdin().lock().read_line(&mut choice).is_err() {
+    let Some(choice) = input.readline("resume which? [index, or blank to cancel]: ") else {
         return;
-    }
+    };
     let choice = choice.trim();
     if choice.is_empty() {
         return;

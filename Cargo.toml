@@ -32,6 +32,8 @@ tracing = "0.1"
 futures-core = "0.3"
 futures-util = "0.3"
 async-stream = "0.3"
+# interactive REPL line editing + history
+rustyline = "14"
 # gitignore-aware file walking + regex for the search tools
 ignore = "0.4"
 regex = "1"

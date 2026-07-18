@@ -67,8 +67,10 @@ cargo run -p agent-cli -- --config config/agent.toml "list the files in this rep
 cargo run -p agent-cli -- --config config/agent.toml
 ```
 
-In the REPL, type a goal to run a turn (history persists across turns), or a slash
-command: `/help`, `/new`, `/compact`, `/resume`, `/skills`, `/skill:<name>`,
+The REPL has arrow-key line editing + command history (via `rustyline`, stored in
+`.agent/sessions/.repl_history`); piped input (`printf … | agent`) falls back to
+plain line reading. Type a goal to run a turn (history persists across turns), or a
+slash command: `/help`, `/new`, `/compact`, `/resume`, `/skills`, `/skill:<name>`,
 `/model`, `/tools`, `/save`, `/quit`. Each turn is saved under `.agent/sessions/`;
 resume with `--continue` (most recent) or `--resume <id>`, or `/resume` inside the
 REPL. `/skills` lists reusable instruction snippets (see [`skills/`](skills/)) and
