@@ -180,8 +180,11 @@ pub trait LlmProvider: Send + Sync {
 provider impl is responsible for parsing its own tool-call format (native JSON,
 XML-tagged Hermes-style, etc.) into that common shape.
 
-Planned impls: `AnthropicProvider`, `OpenAiCompatProvider` (also covers local
-OpenAI-compatible servers like Ollama). See §9 for the "wrap `genai`" option.
+Impls (both shipped): `OpenAiCompatProvider` (also covers local OpenAI-compatible
+servers like Ollama) and `AnthropicProvider` (native Messages API). Both implement
+real incremental **streaming** — `stream` is an additive, defaulted trait method,
+so a provider that only implements `complete` still streams (via a single terminal
+chunk). See §9 for the "wrap `genai`" option for more providers.
 
 ### 4.2 `Tool` and `ToolRegistry`
 
@@ -201,9 +204,11 @@ pub trait ToolRegistry: Send + Sync {
 }
 ```
 
-Built-in tools for v1: `bash`, `read_file`, `write_file`, `search`. Custom tools
-register into the same registry, so an experiment can add or replace tools without
-touching the loop.
+Built-in tools: `bash`, `read_file`, `write_file` (`tool-core`), `edit`
+(`tool-edit`), and `grep` / `find` / `ls` (`tool-search`, gitignore-aware). Custom
+tools register into the same registry, so an experiment can add or replace tools
+without touching the loop. `Tool::parallel_safe` (default `true`) lets a tool opt
+out of concurrent execution within a turn.
 
 ### 4.3 `MemoryStore` (+ layer traits)
 
@@ -261,30 +266,35 @@ Three cooperating mechanisms:
 2. **Compile-time gating with cargo features.** Each implementation lives behind a
    feature (`provider-anthropic`, `provider-openai`, `memory-vector`, …). Builds pull
    in only what an experiment needs.
-3. **Runtime selection via a registry/factory.** A `Registry` maps config strings to
-   constructors. The runtime reads the config, asks the registry for each seam by
-   name, and wires the loop.
+3. **Runtime selection via a registry/factory.** A `Registry`
+   (`agent-runtime/src/registry.rs`) maps config strings to factories, one map per
+   seam. The runtime reads the config, asks the registry for each seam by name, and
+   wires the loop. Built-ins are registered in one feature-gated `register_builtins`;
+   `build_agent_with(&Registry, …)` is public, so out-of-tree crates can register
+   their own factories without forking. See [`docs/extending.md`](docs/extending.md).
 
 Config is the experimentation lever — a single TOML file:
 
 ```toml
 [agent]
-provider = "anthropic"        # -> AnthropicProvider
-context  = "sliding-window"   # -> SlidingWindowStrategy
+provider = "anthropic"        # -> AnthropicProvider  ("openai-compat" -> OpenAiCompatProvider)
+context  = "sliding-window"   # -> SlidingWindow
 policy   = "interactive"
+stream         = true         # incremental SSE + live echo (false = buffered)
+parallel_tools = true         # run a turn's parallel-safe tool calls concurrently
 
 [memory]
-working  = "in-memory"
-episodic = "jsonl"
-semantic = "markdown"         # swap to "vector" or "sqlite"
+backend = "file"              # -> FileMemory  (future: "sqlite", "vector")
 
 [tools]
-enabled = ["bash", "read_file", "write_file", "search"]
+enabled = ["bash", "read_file", "write_file", "edit", "grep", "find", "ls"]
 ```
 
-Swapping `semantic = "vector"` or `provider = "openai"` changes behavior with no code
-edit — exactly the property we want for A/B comparison. *Future:* dynamic,
-out-of-process plugins via `libloading` for tools/providers (noted, not built for v1).
+Swapping `provider = "openai-compat"` or `backend = "vector"` changes behavior with
+no code edit — exactly the property we want for A/B comparison. Each impl also sits
+behind a **cargo feature** (`provider-*`, `tool-*`, `context-*`, `memory-*`), so a
+`--no-default-features` build links only what it needs. *Future:* dynamic,
+out-of-process plugins via `libloading` (the registry API is left clean for it).
 
 ---
 
@@ -419,11 +429,16 @@ Success = `cargo run -p agent-cli -- "list files in this repo"` completes one fu
 loop iteration (model call → tool exec → observation → response), and flipping
 `provider`/`memory` in the TOML changes behavior with no code edit.
 
-**Open questions to settle during implementation:**
+**Open questions — status:**
 
-1. Streaming vs. buffered completions first? (Buffered is simpler; streaming affects
-   the `ContextStrategy`/UI contract.)
-2. Embedding-based recall in v1, or keyword/recency only? (Lean keyword-first.)
-3. Tool execution: fully async, or is a blocking-in-spawn model acceptable for `bash`?
+1. ~~Streaming vs. buffered completions first?~~ **Resolved:** both. `stream` is an
+   additive, defaulted trait method; the loop consumes a chunk stream, and each
+   provider ships real SSE. `stream = false` selects the buffered path.
+2. Embedding-based recall in v1, or keyword/recency only? (Still keyword-first.)
+3. ~~Tool execution: fully async, or blocking-in-spawn for `bash`?~~ **Resolved:**
+   async; a turn's parallel-safe tool calls run concurrently (`parallel_tools`),
+   and blocking walkers (`grep`/`find`/`ls`) run on `spawn_blocking`.
 4. Where does the distillation pipeline run — end-of-session only, or also on demand?
-5. How much of the `Agent`/subtask delegation to build in v1 vs. stub as a seam?
+   (Still a no-op stub; unchanged.)
+5. How much of the `Agent`/subtask delegation to build vs. stub as a seam? (Still a
+   documented future seam — not built. Next up after the P0 coding features.)
