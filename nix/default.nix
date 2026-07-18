@@ -83,6 +83,10 @@ let
 
   # ClickHouse container apps (up / down / client).
   clickhouse = import ./clickhouse { inherit pkgs lib versions; };
+
+  # ClickStack / HyperDX all-in-one apps (up / down / logs / client) — the OTLP
+  # trace receiver + UI.
+  clickstack = import ./clickstack { inherit pkgs lib versions; };
 in
 {
   packages = {
@@ -114,6 +118,22 @@ in
     gen-constants = {
       type = "app";
       program = "${gen-constants}/bin/gen-constants";
+    };
+    clickstack-up = {
+      type = "app";
+      program = "${clickstack.clickstack-up}/bin/clickstack-up";
+    };
+    clickstack-down = {
+      type = "app";
+      program = "${clickstack.clickstack-down}/bin/clickstack-down";
+    };
+    clickstack-logs = {
+      type = "app";
+      program = "${clickstack.clickstack-logs}/bin/clickstack-logs";
+    };
+    clickstack-client = {
+      type = "app";
+      program = "${clickstack.clickstack-client}/bin/clickstack-client-wrapper";
     };
   };
 

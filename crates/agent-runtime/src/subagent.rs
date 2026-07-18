@@ -19,6 +19,7 @@ use agent_core::{
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::Arc;
+use tracing::Instrument;
 
 /// Everything needed to build a child agent, shared (via `Arc`) across every
 /// `DelegateTool` in a run.
@@ -126,7 +127,8 @@ impl Tool for DelegateTool {
         );
 
         tracing::info!(depth = self.depth + 1, goal, "delegating sub-task");
-        match child.run(goal).await {
+        let span = tracing::info_span!("agent.delegate", depth = self.depth + 1);
+        match child.run(goal).instrument(span).await {
             Ok(answer) => Ok(Observation::ok(answer)),
             Err(e) => Ok(Observation::error(format!("subagent failed: {e}"))),
         }

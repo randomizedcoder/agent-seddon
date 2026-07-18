@@ -17,13 +17,22 @@ use agent_proto::pb;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use tonic::transport::Channel;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::transport::Endpoint;
 
-/// Wrap a message in a request carrying the current trace context.
+/// Wrap a message in a request carrying the caller's trace context.
+///
+/// We inject the *active `tracing` span's* OTel context, not
+/// `opentelemetry::Context::current()` — the tracing-opentelemetry bridge keeps a
+/// span's OTel context in the span's extensions, not the OTel thread-local, so the
+/// latter is empty here and the server would see no parent. With the loop's seam
+/// calls wrapped in spans, this makes the server's handler span a child of the
+/// caller's span → one trace across the process boundary.
 fn outbound<T>(msg: T) -> tonic::Request<T> {
     let mut req = tonic::Request::new(msg);
-    agent_proto::trace::inject_context(&opentelemetry::Context::current(), req.metadata_mut());
+    let cx = tracing::Span::current().context();
+    agent_proto::trace::inject_context(&cx, req.metadata_mut());
     req
 }
 

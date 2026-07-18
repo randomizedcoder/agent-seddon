@@ -55,4 +55,13 @@ in
   clickhouseHttpPort = 8123; # HTTP interface (/ping, clickhouse-client --port for native below)
   clickhouseNativePort = 9000; # native TCP protocol
   clickhouseDatabase = "agent";
+
+  # ── ClickStack (HyperDX all-in-one) settings ──────────────────────────────
+  # The OTLP receiver + ClickHouse + HyperDX UI the agent's OTLP tracing exports
+  # to. Pin the image so an upstream bump is an explicit change here.
+  clickstackImage = "docker.hyperdx.io/hyperdx/hyperdx-all-in-one:2";
+  clickstackContainerName = "agent-seddon-clickstack";
+  clickstackUiPort = 8080; # HyperDX web UI
+  clickstackOtlpGrpcPort = 4317; # OTLP/gRPC receiver (the endpoint the agent uses)
+  clickstackOtlpHttpPort = 4318; # OTLP/HTTP receiver
 }

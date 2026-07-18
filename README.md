@@ -126,6 +126,11 @@ nix run .#clickhouse-client -- -q 'SHOW TABLES FROM agent'
 nix run .#clickhouse-down                                # stop + remove (data discarded)
 ```
 
+For **distributed OpenTelemetry tracing** (spans that follow a request across
+gRPC components into a **ClickStack / HyperDX** UI), a separate all-in-one container
+is provided (`nix run .#clickstack-up`, UI on `:8080`, OTLP on `:4317`). See the
+runbook in [`docs/tracing.md`](docs/tracing.md).
+
 To actually populate the tables, enable telemetry in `config/agent.toml`
 (`[telemetry] enabled = true`) and run a goal. Each run gets a `session_id`
 (printed at the end); the composite memory sink mirrors every event into

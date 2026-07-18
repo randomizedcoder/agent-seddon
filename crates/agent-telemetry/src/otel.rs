@@ -10,7 +10,7 @@
 
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::KeyValue;
-use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_otlp::{WithExportConfig, WithTonicConfig};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::{Tracer, TracerProvider};
 use opentelemetry_sdk::Resource;
@@ -25,6 +25,28 @@ pub struct OtelConfig {
     pub service_name: String,
     /// Optional `service.instance.id` — we pass the run's session id.
     pub instance_id: Option<String>,
+    /// Extra OTLP request headers as raw comma-separated `key=value` pairs. HyperDX/
+    /// ClickStack authenticates OTLP with an ingestion key (`authorization=<key>`).
+    /// Empty ⇒ no headers.
+    pub headers: String,
+}
+
+/// Parse `"k=v, k2=v2"` into gRPC metadata (keys lowercased; malformed pairs skipped).
+fn parse_headers(raw: &str) -> tonic::metadata::MetadataMap {
+    use tonic::metadata::{MetadataKey, MetadataValue};
+    let mut md = tonic::metadata::MetadataMap::new();
+    for pair in raw.split(',') {
+        let Some((k, v)) = pair.split_once('=') else {
+            continue;
+        };
+        if let (Ok(key), Ok(val)) = (
+            MetadataKey::from_bytes(k.trim().to_ascii_lowercase().as_bytes()),
+            MetadataValue::try_from(v.trim()),
+        ) {
+            md.insert(key, val);
+        }
+    }
+    md
 }
 
 /// Owns the tracer provider so pending spans can be flushed at shutdown. Dropping
@@ -60,10 +82,14 @@ pub fn otlp_layer<S>(
 where
     S: tracing::Subscriber + for<'span> LookupSpan<'span>,
 {
-    let exporter = opentelemetry_otlp::SpanExporter::builder()
+    let mut exporter_builder = opentelemetry_otlp::SpanExporter::builder()
         .with_tonic()
-        .with_endpoint(cfg.endpoint.clone())
-        .build()?;
+        .with_endpoint(cfg.endpoint.clone());
+    let headers = parse_headers(&cfg.headers);
+    if !headers.is_empty() {
+        exporter_builder = exporter_builder.with_metadata(headers);
+    }
+    let exporter = exporter_builder.build()?;
 
     let mut attrs = vec![KeyValue::new("service.name", cfg.service_name.clone())];
     if let Some(id) = &cfg.instance_id {

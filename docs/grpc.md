@@ -182,7 +182,9 @@ agent --serve-tools    ;  agent --serve-context  ;  agent --serve-policy
 ## Distributed tracing → ClickStack
 
 OTLP tracing is **shipped** and additive to the ClickHouse-native sink. Enable it
-with a non-empty `[telemetry] otlp_endpoint` (see [`config/agent.toml`](../config/agent.toml)):
+with a non-empty `[telemetry] otlp_endpoint` (see [`config/agent.toml`](../config/agent.toml)).
+For a runnable end-to-end demo (ClickStack container + a two-process distributed
+trace) see **[`tracing.md`](tracing.md)**.
 
 - [`agent-telemetry::otlp_layer`](../crates/agent-telemetry/src/otel.rs) builds a
   batch `TracerProvider` that exports spans over OTLP/gRPC to the ClickStack OTEL
