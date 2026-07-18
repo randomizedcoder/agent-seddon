@@ -25,10 +25,11 @@ One crate per seam (DESIGN.md §7):
 | `agent-providers` | `LlmProvider` impls: OpenAI-compatible (GLM/OpenAI/vLLM/Ollama) + Anthropic-native, both streaming |
 | `agent-tools` | `Tool` impls: `bash`, `read_file`, `write_file`, `edit`, `grep`, `find`, `ls` |
 | `agent-memory` | `MemoryStore`: JSONL episodic + markdown semantic |
-| `agent-context` | `ContextStrategy`: sliding-window compaction |
+| `agent-context` | `ContextStrategy`: sliding-window or summarizing-window compaction |
 | `agent-mcp` | MCP client (stdio + streamable-HTTP) — external tools as `mcp_<server>_<tool>` |
-| `agent-runtime` | Config, the plugin registry, the loop (streaming + parallel tools), and subagents |
-| `agent-cli` | The `agent` binary |
+| `agent-telemetry` | Telemetry sink: streams transaction history, logs & usage to ClickHouse |
+| `agent-runtime` | Config, the plugin registry, the loop (streaming + parallel tools), sessions, subagents |
+| `agent-cli` | The `agent` binary (CLI + REPL + `--serve-mcp`) |
 
 ## Plugins & features
 
