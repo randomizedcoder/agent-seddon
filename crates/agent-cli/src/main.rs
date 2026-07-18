@@ -7,12 +7,13 @@
 //! multi-turn REPL (see `repl.rs`). `--continue` resumes the most recent saved
 //! session; `--resume ID` resumes a specific one.
 
+mod grpc_server;
 mod mcp_server;
 mod metrics_server;
 mod repl;
 
 use agent_runtime::{session_store, Metrics};
-use agent_telemetry::{ClickHouseLayer, TelemetryConfig, TelemetryHandle};
+use agent_telemetry::{ClickHouseLayer, OtelConfig, OtelGuard, TelemetryConfig, TelemetryHandle};
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -51,7 +52,14 @@ async fn main() -> Result<()> {
         (None, String::new())
     };
 
-    init_tracing(&telemetry, config.telemetry.stream_logs);
+    // OTLP tracing (opt-in, independent of the ClickHouse sink): enabled by a
+    // non-empty `otlp_endpoint`. Tag spans with the run's session id when we have one.
+    let otel_cfg = (!config.telemetry.otlp_endpoint.is_empty()).then(|| OtelConfig {
+        endpoint: config.telemetry.otlp_endpoint.clone(),
+        service_name: config.telemetry.otel_service_name.clone(),
+        instance_id: (!session_id.is_empty()).then(|| session_id.clone()),
+    });
+    let otel_guard = init_tracing(&telemetry, config.telemetry.stream_logs, otel_cfg);
 
     // Metrics (opt-in). Instrumentation always runs into this registry; serving
     // the /metrics endpoint and pushing are gated by config.
@@ -63,6 +71,16 @@ async fn main() -> Result<()> {
         enabled: config.metrics.enabled,
         pushgateway: config.metrics.pushgateway.clone(),
         job: config.metrics.job.clone(),
+    };
+
+    // Resolve the gRPC serve target (which needs `config.grpc`) before `config` is
+    // moved into `build_agent`.
+    let serve_grpc: Option<(grpc_server::Seam, agent_grpc::Endpoint)> = match &mode {
+        Mode::ServeGrpc(seam, listen) => Some((
+            *seam,
+            grpc_server::resolve_listen(*seam, &config, listen.as_deref()),
+        )),
+        _ => None,
     };
 
     let sessions_dir = session_store::default_dir();
@@ -100,11 +118,20 @@ async fn main() -> Result<()> {
             .await
             .map(|()| None),
         Mode::ServeMcp => mcp_server::serve(&agent).await.map(|()| None),
+        Mode::ServeGrpc(..) => {
+            let (seam, listen) = serve_grpc.expect("serve target resolved above");
+            grpc_server::serve(&agent, seam, listen)
+                .await
+                .map(|()| None)
+        }
     };
 
     // Flush telemetry + push metrics before surfacing success/failure.
     if let Some(handle) = &telemetry {
         handle.shutdown().await;
+    }
+    if let Some(guard) = otel_guard {
+        guard.shutdown(); // flush any pending OTLP spans to the collector
     }
     if metrics_cfg.enabled && !metrics_cfg.pushgateway.is_empty() {
         metrics_server::push(&metrics, &metrics_cfg.pushgateway, &metrics_cfg.job).await;
@@ -145,27 +172,48 @@ struct MetricsRun {
     job: String,
 }
 
-/// Install the fmt layer plus, when telemetry + `stream_logs` are on, the
-/// ClickHouse layer.
-fn init_tracing(telemetry: &Option<TelemetryHandle>, stream_logs: bool) {
+/// Install the fmt layer, plus (each opt-in) the ClickHouse log layer when
+/// telemetry + `stream_logs` are on, and the OTLP trace layer when `otel` is set.
+/// Returns the OTLP guard (if any) so the caller can flush spans at shutdown.
+fn init_tracing(
+    telemetry: &Option<TelemetryHandle>,
+    stream_logs: bool,
+    otel: Option<OtelConfig>,
+) -> Option<OtelGuard> {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let ch_layer = telemetry
         .as_ref()
         .filter(|_| stream_logs)
         .map(|h| ClickHouseLayer::new(h.clone()));
+    // Build the OTLP layer (and its guard) up front; on exporter-build failure we
+    // log and carry on without it rather than abort the run.
+    let (otel_layer, otel_guard) = match otel {
+        Some(cfg) => match agent_telemetry::otlp_layer(&cfg) {
+            Ok((layer, guard)) => (Some(layer), Some(guard)),
+            Err(e) => {
+                eprintln!("OTLP exporter init failed ({e}); continuing without OTLP tracing");
+                (None, None)
+            }
+        },
+        None => (None, None),
+    };
     // Logs go to stderr so stdout stays clean (it carries the answer, and in
     // `--serve-mcp` mode the JSON-RPC channel).
     Registry::default()
         .with(env_filter)
         .with(fmt::layer().with_target(false).with_writer(std::io::stderr))
         .with(ch_layer)
+        .with(otel_layer)
         .init();
+    otel_guard
 }
 
 enum Mode {
     OneShot(String),
     Repl,
     ServeMcp,
+    /// Host one seam over gRPC (`--serve-<seam>`), with an optional listen override.
+    ServeGrpc(grpc_server::Seam, Option<String>),
 }
 
 enum ResumeArg {
@@ -183,6 +231,8 @@ fn parse_args() -> Result<Args> {
     let mut config_path = PathBuf::from("config/agent.toml");
     let mut resume: Option<ResumeArg> = None;
     let mut serve_mcp = false;
+    let mut serve_grpc: Option<grpc_server::Seam> = None;
+    let mut listen: Option<String> = None;
     let mut goal_parts: Vec<String> = Vec::new();
 
     let mut args = std::env::args().skip(1);
@@ -199,14 +249,22 @@ fn parse_args() -> Result<Args> {
                 ));
             }
             "--serve-mcp" => serve_mcp = true,
+            "--listen" => {
+                listen = Some(args.next().context("--listen requires an address")?);
+            }
+            flag if grpc_server::Seam::from_flag(flag).is_some() => {
+                serve_grpc = grpc_server::Seam::from_flag(flag);
+            }
             "--help" | "-h" => {
                 println!(
-                    "usage: agent [--config PATH] [--continue | --resume ID | --serve-mcp] [<goal words...>]\n\
+                    "usage: agent [--config PATH] [--continue | --resume ID | --serve-mcp | --serve-<seam>] [<goal words...>]\n\
                      \n\
                      With a goal: run it once. Without a goal: interactive REPL.\n  \
-                     --continue     resume the most recent saved session\n  \
-                     --resume ID    resume a specific session\n  \
-                     --serve-mcp    run as an MCP server over stdio (exposes a `run` tool)"
+                     --continue          resume the most recent saved session\n  \
+                     --resume ID         resume a specific session\n  \
+                     --serve-mcp         run as an MCP server over stdio (exposes a `run` tool)\n  \
+                     --serve-<seam>      host one seam over gRPC; <seam> = provider|memory|tools|context|policy\n  \
+                     --listen ADDR       override the gRPC listen address (host:port or unix:/path)"
                 );
                 std::process::exit(0);
             }
@@ -215,7 +273,9 @@ fn parse_args() -> Result<Args> {
     }
 
     let goal = goal_parts.join(" ");
-    let mode = if serve_mcp {
+    let mode = if let Some(seam) = serve_grpc {
+        Mode::ServeGrpc(seam, listen)
+    } else if serve_mcp {
         Mode::ServeMcp
     } else if goal.trim().is_empty() {
         Mode::Repl

@@ -28,7 +28,9 @@ One crate per seam (DESIGN.md §7):
 | `agent-memory` | `MemoryStore`: JSONL episodic + markdown semantic |
 | `agent-context` | `ContextStrategy`: sliding-window or summarizing-window compaction |
 | `agent-mcp` | MCP client (stdio + streamable-HTTP) — external tools as `mcp_<server>_<tool>` |
-| `agent-telemetry` | Telemetry sink: streams transaction history, logs & usage to ClickHouse |
+| `agent-proto` | protobuf/gRPC wire contracts for the seams + core↔proto conversions & OTel trace propagation ([docs/grpc.md](docs/grpc.md)) |
+| `agent-grpc` | per-seam gRPC servers + clients over TCP or unix domain sockets (`--serve-<seam>`, `= "grpc"`) |
+| `agent-telemetry` | Telemetry sink: streams transaction history, logs & usage to ClickHouse; OTLP trace export to the ClickStack collector |
 | `agent-runtime` | Config, the plugin registry, the loop (streaming + parallel tools), sessions, subagents |
 | `agent-cli` | The `agent` binary (CLI + REPL + `--serve-mcp`) |
 

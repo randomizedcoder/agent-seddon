@@ -78,6 +78,25 @@ impl Agent {
     }
 
     /// Open a multi-turn session whose working set persists across `send` calls.
+    /// The built seams, for hosting one over gRPC (`agent --serve-<seam>`). These
+    /// expose the same `Arc`/registry the loop uses, so a serve process reuses the
+    /// config-selected impl (e.g. a real `anthropic` provider behind a gateway).
+    pub fn provider(&self) -> Arc<dyn LlmProvider> {
+        self.provider.clone()
+    }
+    pub fn memory(&self) -> Arc<dyn MemoryStore> {
+        self.memory.clone()
+    }
+    pub fn context(&self) -> Arc<dyn ContextStrategy> {
+        self.context.clone()
+    }
+    pub fn policy(&self) -> Arc<dyn Policy> {
+        self.policy.clone()
+    }
+    pub fn tools(&self) -> ToolRegistry {
+        self.tools.clone()
+    }
+
     pub fn session(&self) -> Session<'_> {
         Session {
             agent: self,

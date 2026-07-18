@@ -1,0 +1,10 @@
+// The `Policy` seam over gRPC — the tool-approval gate as a service.
+syntax = "proto3";
+
+package agent.v1;
+
+import "agent/v1/common.proto";
+
+service Policy {
+  rpc Authorize(ToolCall) returns (Decision);
+}

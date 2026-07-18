@@ -1,0 +1,18 @@
+// The `LlmProvider` seam over gRPC — a model gateway. `Complete` is the buffered
+// path; `Stream` is server-streaming, the wire form of agent-core's `ChunkStream`.
+syntax = "proto3";
+
+package agent.v1;
+
+import "agent/v1/common.proto";
+
+message CapabilitiesRequest {}
+
+service Provider {
+  // Provider + model capabilities (tool support, context window).
+  rpc Capabilities(CapabilitiesRequest) returns (ModelCapabilities);
+  // Buffered completion.
+  rpc Complete(CompletionRequest) returns (CompletionResponse);
+  // Streaming completion — one CompletionChunk per increment.
+  rpc Stream(CompletionRequest) returns (stream CompletionChunk);
+}

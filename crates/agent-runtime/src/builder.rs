@@ -48,6 +48,8 @@ pub async fn build_agent_with(
     let mut tools = build_tools(registry, &cfg)?;
     #[cfg(feature = "mcp")]
     register_mcp_tools(&mut tools, &cfg, registry).await;
+    #[cfg(feature = "grpc")]
+    register_grpc_tools(&mut tools, &cfg).await;
 
     // Memory: either the whole-store backend, or — when `[memory] semantic` is
     // set — the episodic layer of that backend composed with an independently
@@ -205,6 +207,28 @@ async fn register_mcp_tools(tools: &mut ToolRegistry, cfg: &Config, registry: &R
             }
             Err(e) => tracing::warn!("mcp server `{}` unavailable: {e}", s.name),
         }
+    }
+}
+
+/// Discover and register a remote gRPC tool worker's tools (mirrors
+/// `register_mcp_tools`). Only acts when `[grpc.tools] endpoint` is set — there is
+/// no implicit default worker. Best-effort: a failing worker is logged and skipped.
+#[cfg(feature = "grpc")]
+async fn register_grpc_tools(tools: &mut ToolRegistry, cfg: &Config) {
+    let endpoint = &cfg.grpc.tools.endpoint;
+    if endpoint.is_empty() {
+        return;
+    }
+    let ep = agent_grpc::Endpoint::parse(endpoint);
+    match agent_grpc::client::grpc_tools(&ep).await {
+        Ok(remote) => {
+            let n = remote.len();
+            for tool in remote {
+                tools.register(tool);
+            }
+            tracing::info!("grpc tool worker `{endpoint}`: registered {n} tool(s)");
+        }
+        Err(e) => tracing::warn!("grpc tool worker `{endpoint}` unavailable: {e}"),
     }
 }
 

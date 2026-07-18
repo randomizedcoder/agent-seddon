@@ -13,6 +13,7 @@
   cargoArtifacts,
   advisory-db,
   versions,
+  constantsRs,
 }:
 
 {
@@ -21,4 +22,9 @@
   test = import ./test.nix { inherit craneLib commonArgs cargoArtifacts; };
   cargo-audit = import ./cargo-audit.nix { inherit craneLib commonArgs advisory-db; };
   nix-fmt = import ./nix-fmt.nix { inherit pkgs versions; };
+  # `constants.rs` must match what `nix/constants.nix` renders (see gen-constants).
+  constants-sync = import ./constants-sync.nix {
+    inherit pkgs constantsRs;
+    src = commonArgs.src;
+  };
 }

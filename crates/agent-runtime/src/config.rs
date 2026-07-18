@@ -21,6 +21,39 @@ pub struct Config {
     pub context_files: ContextFilesCfg,
     #[serde(default)]
     pub metrics: MetricsCfg,
+    #[serde(default)]
+    pub grpc: GrpcCfg,
+}
+
+/// gRPC transport wiring. Per seam: the `endpoint` a `= "grpc"` client dials, and
+/// the `listen` address an `agent --serve-<seam>` process binds. Both default
+/// (when empty) to `127.0.0.1:<port>` using the port from the generated
+/// `agent_grpc::constants`; set `endpoint`/`listen` to `unix:/path` to use a
+/// unix-domain socket (TCP-bypassing, same-host). See `docs/grpc.md`.
+#[derive(Debug, Default, Deserialize)]
+pub struct GrpcCfg {
+    #[serde(default)]
+    pub provider: GrpcSeamCfg,
+    #[serde(default)]
+    pub memory: GrpcSeamCfg,
+    /// A remote tool worker. Unlike the other seams, tools are only fetched when
+    /// `endpoint` is non-empty (there is no implicit default worker).
+    #[serde(default)]
+    pub tools: GrpcSeamCfg,
+    #[serde(default)]
+    pub context: GrpcSeamCfg,
+    #[serde(default)]
+    pub policy: GrpcSeamCfg,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct GrpcSeamCfg {
+    /// Endpoint a `= "grpc"` client dials. Empty ⇒ `127.0.0.1:<default port>`.
+    #[serde(default)]
+    pub endpoint: String,
+    /// Address a `--serve-<seam>` listener binds. Empty ⇒ `127.0.0.1:<default port>`.
+    #[serde(default)]
+    pub listen: String,
 }
 
 /// External MCP (Model Context Protocol) servers whose tools are discovered at
@@ -225,6 +258,15 @@ pub struct TelemetryCfg {
     pub batch_max_rows: usize,
     #[serde(default = "default_flush_ms")]
     pub flush_interval_ms: u64,
+    /// OTLP/gRPC endpoint for exporting distributed traces to the ClickStack OTEL
+    /// collector (e.g. `http://localhost:4317`). Empty (the default) = no exporter.
+    /// Independent of `enabled`: OTLP tracing can run with the native ClickHouse
+    /// sink off, and vice versa.
+    #[serde(default)]
+    pub otlp_endpoint: String,
+    /// `service.name` resource attribute on OTLP-exported spans.
+    #[serde(default = "default_otel_service_name")]
+    pub otel_service_name: String,
 }
 
 impl Default for TelemetryCfg {
@@ -238,8 +280,14 @@ impl Default for TelemetryCfg {
             stream_logs: default_true(),
             batch_max_rows: default_batch_rows(),
             flush_interval_ms: default_flush_ms(),
+            otlp_endpoint: String::new(),
+            otel_service_name: default_otel_service_name(),
         }
     }
+}
+
+fn default_otel_service_name() -> String {
+    "agent-seddon".into()
 }
 
 fn default_context() -> String {
@@ -361,6 +409,7 @@ impl Config {
             telemetry: TelemetryCfg::default(),
             context_files: ContextFilesCfg::default(),
             metrics: MetricsCfg::default(),
+            grpc: GrpcCfg::default(),
         }
     }
 }

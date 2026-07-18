@@ -6,7 +6,9 @@ members = [
     "crates/agent-tools",
     "crates/agent-memory",
     "crates/agent-context",
+    "crates/agent-grpc",
     "crates/agent-mcp",
+    "crates/agent-proto",
     "crates/agent-telemetry",
     "crates/agent-runtime",
     "crates/agent-cli",
@@ -50,6 +52,25 @@ uuid = { version = "1", features = ["v4"] }
 prometheus = { version = "0.13", default-features = false }
 tiny_http = "0.12"
 
+# gRPC / protobuf — the inter-component wire contracts (see crates/agent-proto).
+# `tonic-build` invokes `protoc` at build time (supplied by the nix dev shell /
+# crane; `PROTOC` env in nix/default.nix).
+tonic = "0.12"
+prost = "0.13"
+prost-types = "0.13"
+tonic-build = "0.12"
+# gRPC transport plumbing: TCP + unix-domain-socket listeners/dialers.
+tokio-stream = { version = "0.1", features = ["net"] }
+tower = { version = "0.5", features = ["util"] }
+hyper-util = "0.1"
+
+# OpenTelemetry — distributed tracing exported over OTLP/gRPC to the ClickStack
+# OTEL collector, layered onto `tracing` alongside the existing ClickHouse sink.
+opentelemetry = "0.27"
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic"] }
+tracing-opentelemetry = "0.28"
+
 # internal crates (the seams). The pluggable impl crates default to no features
 # when consumed as deps, so `agent-runtime` selects modules explicitly (and a
 # `--no-default-features` build of the runtime truly drops them).
@@ -58,7 +79,9 @@ agent-providers = { path = "crates/agent-providers", default-features = false }
 agent-tools = { path = "crates/agent-tools", default-features = false }
 agent-memory = { path = "crates/agent-memory", default-features = false }
 agent-context = { path = "crates/agent-context", default-features = false }
+agent-grpc = { path = "crates/agent-grpc" }
 agent-mcp = { path = "crates/agent-mcp" }
+agent-proto = { path = "crates/agent-proto" }
 agent-telemetry = { path = "crates/agent-telemetry" }
 agent-runtime = { path = "crates/agent-runtime" }
 # shared test doubles (dev-dependency only — never in a release build)

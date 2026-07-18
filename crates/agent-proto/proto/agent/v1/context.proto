@@ -1,0 +1,28 @@
+// The `ContextStrategy` seam over gRPC. `Compact` takes the working set + budget
+// and returns the compacted working set (the RPC form of agent-core's in-place
+// `compact(&mut WorkingSet, &TokenBudget)`).
+syntax = "proto3";
+
+package agent.v1;
+
+import "agent/v1/common.proto";
+
+message AssembleResponse {
+  repeated Message messages = 1;
+}
+
+message CompactRequest {
+  WorkingSet working = 1;
+  TokenBudget budget = 2;
+}
+
+message CompactResponse {
+  WorkingSet working = 1;
+}
+
+// Named `ContextService` (not `Context`) to avoid colliding with
+// `std::task::Context` in tonic's generated Tower `Service` impls.
+service ContextService {
+  rpc Assemble(ContextInput) returns (AssembleResponse);
+  rpc Compact(CompactRequest) returns (CompactResponse);
+}

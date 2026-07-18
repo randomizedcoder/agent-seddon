@@ -20,7 +20,9 @@ agent-core            (the seams: traits + shared message types, no impls)
    ├── agent-memory         (EpisodicStore + SemanticStore: file)
    ├── agent-context        (ContextStrategy: sliding-window, summarizing)
    ├── agent-mcp            (McpTransport: stdio, http — its own registry)
-   └── agent-telemetry      (CompositeMemory decorator → ClickHouse)
+   ├── agent-proto          (protobuf/gRPC wire contracts + core↔proto convert + trace)
+   ├── agent-grpc           (per-seam gRPC servers + clients over TCP/UDS; on agent-proto)
+   └── agent-telemetry      (CompositeMemory decorator → ClickHouse; OTLP trace export)
         ▲
         └── agent-runtime   (Registry + builder + the agent loop; wires it all)
              ▲
@@ -70,6 +72,11 @@ High-level summaries; each links to its detailed doc.
   `interactive`.
 - **[MCP](components/mcp.md)** — external tools as first-class tools, plus the
   transport seam and the `--serve-mcp` server.
+- **[gRPC seams & tracing](grpc.md)** — the protobuf wire contracts (`agent-proto`)
+  and per-seam gRPC servers/clients (`agent-grpc`) that let each seam run as a
+  separate process/container over **TCP or unix domain sockets**, selected by
+  `= "grpc"` config and hosted by `agent --serve-<seam>`, with OTLP distributed
+  tracing into the ClickStack collector.
 - **[Runtime](components/runtime.md)** — the registry, builder, loop, config, and
   cross-cutting pieces (subagents, skills, context files, metrics/telemetry).
 - **[Testing](components/testing.md)** — `agent-testkit` shared doubles.

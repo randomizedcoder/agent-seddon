@@ -1,0 +1,54 @@
+// The memory seams over gRPC — a shared, cluster-wide memory service. `Memory`
+// is the loop-facing facade (`MemoryStore`); `Episodic` and `Semantic` mirror
+// the layer traits so the two halves can be distributed independently (a shared
+// episodic log + a separate vector semantic service, say).
+syntax = "proto3";
+
+package agent.v1;
+
+import "agent/v1/common.proto";
+
+message RecallResponse {
+  repeated MemoryItem items = 1;
+}
+
+message AppendResponse {}
+
+message DistillRequest {}
+
+message DistillResponse {
+  // Number of semantic facts written (agent-core `usize`).
+  uint64 count = 1;
+}
+
+message RecentRequest {
+  uint64 limit = 1;
+}
+
+message RecentResponse {
+  repeated MemoryEvent events = 1;
+}
+
+message SemanticDistillRequest {
+  // The recent episodic window to promote from.
+  repeated MemoryEvent episodic = 1;
+}
+
+// The whole-store facade (agent-core `MemoryStore`).
+service Memory {
+  rpc Recall(RecallQuery) returns (RecallResponse);
+  rpc Append(MemoryEvent) returns (AppendResponse);
+  rpc Distill(DistillRequest) returns (DistillResponse);
+}
+
+// The append-only "what happened" layer (agent-core `EpisodicStore`).
+service Episodic {
+  rpc Append(MemoryEvent) returns (AppendResponse);
+  rpc Recent(RecentRequest) returns (RecentResponse);
+}
+
+// The "what is true" layer (agent-core `SemanticStore`).
+service Semantic {
+  rpc Recall(RecallQuery) returns (RecallResponse);
+  rpc Distill(SemanticDistillRequest) returns (DistillResponse);
+}

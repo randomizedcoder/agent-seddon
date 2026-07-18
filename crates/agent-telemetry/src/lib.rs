@@ -13,6 +13,7 @@
 
 mod layer;
 mod memory;
+mod otel;
 mod rows;
 mod writer;
 
@@ -24,6 +25,7 @@ use tokio::sync::{mpsc, oneshot};
 
 pub use layer::ClickHouseLayer;
 pub use memory::CompositeMemory;
+pub use otel::{otlp_layer, OtelConfig, OtelGuard};
 
 use rows::{EventRow, UsageRow};
 use writer::{Msg, WriterConfig, TARGET};

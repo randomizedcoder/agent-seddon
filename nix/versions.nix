@@ -7,7 +7,15 @@
 #
 { pkgs }:
 
+let
+  # Per-service gRPC ports + UDS paths (single source of truth). Re-exported here
+  # so every nix module reads them via `versions.grpc` / `versions.socketDir`,
+  # while the Rust side gets them from the generated `constants.rs`.
+  constants = import ./constants.nix;
+in
 {
+  inherit (constants) socketDir grpc;
+
   # Rust toolchain (via rust-overlay). `stable.latest` tracks the newest stable
   # release; pin to e.g. `pkgs.rust-bin.stable."1.90.0".default` for a frozen
   # toolchain. clippy/rustfmt/rust-src are needed by the checks + rust-analyzer.
@@ -26,6 +34,13 @@
   cargo-audit = pkgs.cargo-audit;
   cargo-nextest = pkgs.cargo-nextest;
   rust-analyzer = pkgs.rust-analyzer;
+
+  # Protobuf / gRPC tooling. `protobuf` supplies `protoc`, which `tonic-build`
+  # invokes at build time to compile `crates/agent-proto/proto/**.proto`. Pinning
+  # it here keeps codegen reproducible across the dev shell, `nix build`, and the
+  # checks. `grpcurl` is for manually poking gRPC servers once the transports land.
+  protobuf = pkgs.protobuf;
+  grpcurl = pkgs.grpcurl;
 
   # Runtime / ops tooling.
   clickhouse = pkgs.clickhouse; # provides `clickhouse-client` in the dev shell

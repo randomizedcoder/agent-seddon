@@ -105,6 +105,12 @@ password         = ""
 stream_logs      = true       # also send tracing logs to agent_logs
 batch_max_rows   = 256
 flush_interval_ms = 1000
+# Distributed tracing via OpenTelemetry, exported over OTLP/gRPC to the ClickStack
+# OTEL collector. Independent of `enabled` above (that gates the native ClickHouse
+# sink). Empty = no exporter (default). Set it to the collector's OTLP gRPC
+# endpoint to turn it on:
+# otlp_endpoint     = "http://localhost:4317"
+# otel_service_name = "agent-seddon"       # service.name on exported spans
 
 # Always-injected user context. Files in <dir>/prepend/ are folded into the
 # system prompt; files in <dir>/append/ become a trailing message. Name files
@@ -121,3 +127,15 @@ enabled     = false
 listen      = "127.0.0.1:9600"
 pushgateway = ""                # e.g. "http://localhost:9091"
 job         = "agent-seddon"
+
+# gRPC seam transports. A seam set to `= "grpc"` (e.g. `[agent] provider = "grpc"`)
+# dials `endpoint`; `agent --serve-<seam>` binds `listen`. Both default (when
+# empty/omitted) to 127.0.0.1:<port> using the generated ports (provider 50051,
+# memory 50052, tools 50053, context 50054, policy 50055). Use `unix:/path` for a
+# same-host, TCP-bypassing socket. See docs/grpc.md.
+#
+# [grpc.provider]
+# endpoint = "unix:/tmp/agent-seddon/provider.sock"   # client dials this
+# listen   = "unix:/tmp/agent-seddon/provider.sock"   # --serve-provider binds this
+# [grpc.tools]
+# endpoint = "http://tool-worker:50053"               # remote tool worker (opt-in)
