@@ -1,57 +1,55 @@
 # Features Comparison: agent-seddon vs. pi vs. hermes-agent
 
-**Date:** 2026-07-17 (updated 2026-07-18)
-**Status:** Analysis / roadmap input.
+**Original analysis:** 2026-07-17 · **Last refreshed:** 2026-07-18 to match the
+current code.
+**Status:** Capability inventory vs. two reference harnesses + remaining roadmap.
 
-> **Update (2026-07-18):** Since the original analysis, the plugin registry + P0
-> features shipped; an **MCP client** (stdio + HTTP) and **subagent `delegate`**
-> landed; and the P1 usability bundle — **interactive REPL**, **session resume**,
-> **slash commands**, **summarizing compaction**, and **skills**
-> (`/skill:<name>`) — is in. An **MCP server** (`--serve-mcp`) now also exposes
-> the agent to other MCP clients. Rows below are annotated where that changes our
-> coverage.
+> The original document was written before the plugin registry + P0 work. It has
+> since been refreshed: the matrix, the per-area notes, and the roadmap below all
+> reflect what is **actually implemented today** — plugin registry, `edit` /
+> `grep` / `find` / `ls` tools, an Anthropic-native provider, real streaming and
+> parallel tool execution, summarizing compaction, an MCP client (stdio + HTTP)
+> and server (`--serve-mcp`), subagent `delegate`, an interactive REPL with
+> session resume + slash commands + rustyline history, and skills.
 
 ## Purpose
 
 `agent-seddon` is an experimental, Rust-based coding-agent harness. This document
-inventories its capabilities against two mature open-source harnesses, states
-honestly what we already have and how complete each piece is, and proposes a
-**prioritized roadmap**.
-
-The evaluation is framed by a specific intent: **grow `agent-seddon` into a
-full-featured coding agent** — a daily-driver that competes with the reference
-harnesses, not merely a research toy. The two yardsticks:
+inventories its capabilities against two mature open-source harnesses and states
+honestly what we have, how complete it is, and what remains. The framing intent:
+**grow `agent-seddon` into a full-featured coding agent** — a daily driver, not a
+research toy. The two yardsticks:
 
 - **[pi](https://github.com/earendil-works/pi)** — a TypeScript monorepo with a
   deliberately *minimal core* (no built-in MCP or subagents) but exceptional
   breadth elsewhere: 40+ LLM providers, a polished differential-rendering TUI,
   session branching, LLM-summarizing compaction, and a first-class
-  extension/skill/theme system. Its philosophy: keep the core small, push
-  everything else to installable packages.
+  extension/skill/theme system.
 - **[hermes-agent](https://github.com/NousResearch/hermes-agent)** — a large
   Python "batteries-included" harness: ~94 tools, 27 provider plugins, 8 memory
   backends, MCP client *and* server, subagents + a kanban coordination board,
   19 messaging-platform gateways, 4 UI surfaces, and multiple sandboxing backends.
 
-Together they bracket the design space: pi = disciplined minimalism, hermes =
-maximalism. `agent-seddon` today sits below both in breadth but has a clean
-trait-seam architecture and a genuinely differentiated observability stack.
+pi = disciplined minimalism, hermes = maximalism. `agent-seddon` now covers the
+coding fundamentals both ship, still sits below both in raw breadth (providers,
+tools, UI surfaces), and has a genuinely differentiated observability stack.
 
 ---
 
 ## TL;DR
 
-We have a correct, well-architected **core loop** with three tools
-(`bash`/`read_file`/`write_file`), one OpenAI-compatible provider, sliding-window
-context trimming, a layered file-memory, and — our standout — **production-grade
-observability** (Prometheus metrics + ClickHouse event/log/usage streaming) that
-*neither reference harness ships out of the box*. The gap to a full-featured coding
-agent is breadth, not soundness. The four things to fix first: **(1)** a proper
-`edit` tool plus `grep`/`find`/`ls` (we can't do surgical code edits today);
-**(2)** an **Anthropic-native provider** and streaming; **(3)** an interactive
-**TUI with session resume**; **(4)** **summarizing compaction** (today we only drop
-old turns, losing information). MCP, subagents, and skills follow once the coding
-fundamentals are solid.
+The core loop is sound and the coding fundamentals are in: 7 tools
+(`bash`/`read_file`/`write_file`/`edit`/`grep`/`find`/`ls`), two providers
+(OpenAI-compatible + Anthropic-native) with real SSE **streaming**, **parallel**
+tool execution, **summarizing** *or* truncating compaction, a layered file-memory,
+an interactive **REPL** (history, slash commands, session resume), **skills**,
+**subagent delegation**, and an **MCP client + server**. Our standout remains
+**production-grade observability** (Prometheus metrics + ClickHouse event/log/usage
+streaming) that neither reference harness ships out of the box.
+
+What's left is mostly breadth and a couple of stubbed seams: more providers, web/
+browser tools, sandboxed execution, a full-screen TUI, embedding-based recall, and
+activating the distillation (episodic→semantic) pipeline.
 
 ---
 
@@ -60,13 +58,13 @@ fundamentals are solid.
 | | **agent-seddon** (us) | **pi** | **hermes-agent** |
 |---|---|---|---|
 | Language | Rust | TypeScript | Python (+ TS UIs) |
-| Scale | ~2.9k LOC, 8 crates | TS monorepo, 5 packages | ~40k+ core LOC, ~900 test files |
+| Scale | 9 crates | TS monorepo, 5 packages | ~40k+ core LOC, ~900 test files |
 | Philosophy | Trait seams, config-swappable | Minimal core + extensions | Batteries-included |
-| Maturity | Early / experimental | Production, polished | Production, sprawling |
+| Maturity | Experimental, fundamentals complete | Production, polished | Production, sprawling |
 | Standout strength | **Observability (Prometheus + ClickHouse)** | Provider breadth + TUI + branching | Tools/providers/surfaces breadth + multi-agent |
-| Providers | 1 | 40+ | 27 |
-| Tools | 3 | ~8 | ~94 |
-| UI surfaces | CLI only | Rich TUI + print/JSON/RPC/SDK | CLI + TUI + web + desktop |
+| Providers | 2 (OpenAI-compat + Anthropic) | 40+ | 27 |
+| Tools | 7 built-in + MCP | ~8 | ~94 |
+| UI surfaces | CLI + interactive REPL | Rich TUI + print/JSON/RPC/SDK | CLI + TUI + web + desktop |
 
 ---
 
@@ -78,24 +76,24 @@ impl) · ❌ Missing · ➖ N/A.
 | Feature area | agent-seddon | pi | hermes | Our coverage |
 |---|---|---|---|---|
 | Agent loop (assemble→call→tools→record) | Yes | Yes | Yes | ✅ |
-| Streaming completions | No (buffered) | Yes | Yes | ❌ |
-| Parallel tool execution | No (sequential) | Yes | Yes | ❌ |
+| Streaming completions | Yes (SSE, both providers) | Yes | Yes | ✅ |
+| Parallel tool execution | Yes (concurrent per turn) | Yes | Yes | ✅ |
 | Steering / follow-up while running | No | Yes | Yes | ❌ |
+| Multi-turn session (REPL) | Yes | Yes | Yes | ✅ |
 | `bash` tool | Yes | Yes | Yes | ✅ |
 | `read_file` / `write_file` | Yes | Yes | Yes | ✅ |
-| `edit` (surgical/diff edits) | No | Yes | Yes (`patch`) | ❌ |
-| `grep` / `find` / `ls` | No | Yes | Yes (`search_files`) | ❌ |
+| `edit` (surgical string replace) | Yes | Yes | Yes (`patch`) | ✅ |
+| `grep` / `find` / `ls` | Yes (gitignore-aware) | Yes | Yes (`search_files`) | ✅ |
 | Web search / fetch | No | Via extension | Yes | ❌ |
 | Browser automation | No | No (external) | Yes | ❌ |
-| LLM providers | 1 (OpenAI-compat) | 40+ | 27 | 🟡 |
-| Anthropic-native provider | No | Yes | Yes | 🟦 |
+| LLM providers | 2 (OpenAI-compat + Anthropic) | 40+ | 27 | 🟡 |
 | Provider capability metadata | Yes (basic) | Yes (rich, cost) | Yes | 🟡 |
 | Context assembly | Yes | Yes | Yes | ✅ |
-| Compaction | Truncation + LLM summary | LLM summary | LLM summary | ✅ |
+| Compaction | Truncation **and** LLM summary | LLM summary | LLM summary | ✅ |
 | Session branching | No | Yes (`/tree`) | Partial | ❌ |
 | Working / episodic / semantic memory | Yes (layered) | Sessions only | MEMORY+USER files | ✅ |
-| Memory recall | Keyword | ➖ | FTS5 + LLM + vector plugins | 🟡 |
-| Distillation (episodic→semantic) | No-op v1 | ➖ | Curator | 🟦 |
+| Memory recall | Keyword scan | ➖ | FTS5 + LLM + vector plugins | 🟡 |
+| Distillation (episodic→semantic) | Seam only (no-op stub) | ➖ | Curator | 🟦 |
 | Prometheus metrics | Yes | No | No | ✅ |
 | Structured telemetry sink (ClickHouse) | Yes | Adapter interface | Trace upload | ✅ |
 | MCP client | Yes (stdio + HTTP) | No (by design) | Yes | ✅ |
@@ -105,235 +103,170 @@ impl) · ❌ Missing · ➖ N/A.
 | Sandboxed execution backends | No | Docs/patterns | 6 backends | ❌ |
 | Subagents / delegation | Yes (`delegate`, depth-capped) | Extension | Yes + kanban | ✅ |
 | Session persistence / resume | Yes (JSONL + `--continue`/`--resume`/`/resume`) | Yes (JSONL + `/resume`) | Yes (SQLite) | ✅ |
-| Interactive REPL / TUI | REPL (line-based) | Rich TUI | Rich TUI | 🟡 |
+| Interactive REPL / TUI | REPL (line-based, rustyline) | Rich TUI | Rich TUI | 🟡 |
 | Slash commands | Yes | Yes | Yes | ✅ |
 | Skills (SKILL.md) | Yes (`/skill:<name>` load) | Yes | Yes | ✅ |
-| Plugins / extensions | Compile-time seams | Yes (hot-reload TS) | Yes (19 plugin types) | 🟡 |
+| Plugins / extensions | Compile-time seams + MCP tools + skills | Yes (hot-reload TS) | Yes (19 plugin types) | 🟡 |
 | Hooks | No | Yes (events) | Yes | ❌ |
 | Config system | TOML | JSON | YAML | ✅ |
 | User context files (project rules) | Yes (`context.d/`) | Skills/templates | `.hermes/context` | ✅ |
 | Multi-platform messaging | No | No | 19 platforms | ➖ |
 | Cron / scheduled runs | No | No | Yes | ❌ |
-| Test suite | Unit + Nix checks | vitest | ~17k pytest | 🟡 |
+| Test suite | Unit + integration + Nix checks | vitest | ~17k pytest | 🟡 |
 
 ---
 
-## Per-area deep dive
+## Per-area notes
 
-Coverage percentages below are rough judgments of "how much of a full-featured
-harness's version of this do we have," not precise measurements.
+### Agent loop / execution model — solid
+`crates/agent-runtime/src/agent.rs` runs assemble → complete → policy-gated tool
+dispatch → record → compact, with metrics on every path, refactored into a
+`Session` that keeps its working set across turns (multi-turn REPL) while
+`Agent::run` remains a one-shot. Completions **stream** (SSE) with a live echo, and
+a turn's parallel-safe tool calls run **concurrently** (`join_all`), results
+appended in call order. The remaining gap vs. pi/hermes is **steering / follow-up**
+(interrupting or queueing work mid-run).
 
-### Agent loop / execution model — **~70%**
-Our loop is sound and well-factored: `crates/agent-runtime/src/agent.rs` runs
-assemble → complete → policy-gated tool dispatch → record → compact → repeat, with
-metrics on every path. What's missing versus pi (`packages/agent/src/agent-loop.ts`)
-and hermes (`run_agent.py`) is **streaming** (we buffer the whole completion — the
-`LlmProvider` trait even sketches a `stream()` method in DESIGN.md §4.1 but the impl
-buffers), **parallel tool execution** (pi runs tool calls concurrently; we run them
-one at a time), and **steering / follow-up** (interrupting or queueing work while the
-agent runs). *Verdict:* solid foundation; needs streaming + parallelism to feel modern.
+### Tools — coding fundamentals in
+Seven built-ins, all registered through the plugin registry and gated by cargo
+features: `bash`, `read_file`, `write_file` (`tool-core`), `edit` (`tool-edit`,
+unique/`replace_all` string replace), and `grep`/`find`/`ls` (`tool-search`,
+gitignore-aware via ripgrep's `ignore` crate). All share lexical path-traversal
+protection and output caps. MCP servers add more tools at runtime as
+`mcp_<server>_<tool>`. Remaining: web/browser tools (hermes has ~90 tools total).
 
-### Tools — **~35%**
-We ship three: `bash`, `read_file`, `write_file` (`crates/agent-tools/src/lib.rs`,
-via `default_tools()`), with real path-traversal protection, output capping (12 KB),
-and a 120 s bash timeout. The critical gap for a *coding* agent is the lack of an
-**`edit` tool** — today the model must rewrite whole files via `write_file`, which is
-token-expensive and error-prone. pi has `read/write/edit/bash/ls/find/grep`; hermes
-has `patch` + `search_files` plus ~90 others. Note DESIGN.md §4.2 lists `search` as a
-v1 tool, but it is **not implemented** — `default_tools()` returns only three.
-*Verdict:* the single biggest functional gap. `edit` + `grep`/`find`/`ls` are table
-stakes.
+### LLM providers — right architecture, thin breadth
+Two hand-rolled impls behind the `LlmProvider` trait: `OpenAiCompatProvider`
+(GLM/OpenAI/vLLM/Ollama) and a native `AnthropicProvider` (Messages API,
+`tool_use`/`tool_result`), both with real SSE `stream`. pi has 40+ providers with
+cost metadata and OAuth; hermes 27. Breadth is the gap — a `genai`-style wrapper
+(DESIGN.md §9) would close much of it.
 
-### LLM providers — **~40% breadth, 100% of what a single provider needs**
-One impl: `OpenAiCompatProvider` (`crates/agent-providers/src/openai_compat.rs`),
-tested against GLM, with reasoning-content handling, configurable base URL/model,
-and optional insecure-TLS for dev servers. The trait (`LlmProvider`) is the right
-seam and exposes `capabilities()`. But pi supports 40+ providers with cost/token
-metadata and OAuth flows; hermes 27. Most urgent: an **Anthropic-native provider**
-(DESIGN.md §4.1 lists it as planned; §9 recommends wrapping the `genai` crate for
-breadth). *Verdict:* architecture is right, breadth is thin; Anthropic-native is the
-priority add.
+### Context management / compaction — both strategies
+Two context strategies, selected by `[agent] context`: `SlidingWindow` (drops the
+oldest turns — lossy but free) and `SummarizingWindow` (`context-summarizing`,
+keeps the head + a recent tail `keep_recent_tokens` and LLM-summarizes the middle,
+falling back to truncation on error). Non-destructive w.r.t. the episodic log. pi
+additionally does branch summarization for `/tree`.
 
-### Context management / compaction — **~45%**
-`SlidingWindow` (`crates/agent-context/src/lib.rs`) assembles `[system, user,
-(system-append)]` messages, folding in `context.d/` blocks and recalled memory, and
-compacts by **dropping the oldest non-system messages** until under budget (with a
-guard against orphaned tool results). This is honest truncation — it is *not*
-summarization, and information is simply lost when it triggers. Both references do
-**LLM-based summarizing compaction** (pi: `packages/coding-agent/src/core/compaction/`
-with configurable `reserveTokens`/`keepRecentTokens` and iterative summaries; hermes:
-`agent/context_compressor.py`). pi additionally does **branch summarization** for
-`/tree` navigation. *Verdict:* functional but lossy; a summarizing compactor (already
-anticipated in DESIGN.md §4.4) is a meaningful quality upgrade.
+### Memory — strong bones; recall + distillation still basic
+A genuine 3-layer model (`crates/agent-memory/src/file.rs`): in-memory working,
+append-only JSONL episodic (never mutated), and markdown semantic. Recall is a
+**keyword-count scan** of the semantic directory on each query (no embeddings, no
+index). `distill()` (episodic→semantic promotion) is an **honest no-op stub** that
+runs at session end but does nothing yet. hermes has 8 memory backends incl.
+vector/dialectic. Remaining: activate distillation + an embedding-backed
+`SemanticStore` (both are documented seams).
 
-### Memory — **~55%**
-This is an area where our *design* is arguably ahead: a genuine 3-layer model
-(`crates/agent-memory/src/lib.rs`) — in-memory working, append-only JSONL episodic
-(replayable, never mutated), and markdown-with-frontmatter semantic. Recall is
-keyword/recency scoring; `distill()` (episodic→semantic promotion) is an honest
-**no-op in v1**. pi has only session storage (no curated semantic layer); hermes has
-`MEMORY.md` + `USER.md` plus 8 pluggable memory backends including vector/dialectic
-(honcho, mem0, etc.). *Verdict:* strong bones, but recall is naive and the learning
-loop (distillation) is unbuilt — both are documented future seams.
+### Telemetry / metrics / observability — our moat
+`crates/agent-runtime/src/metrics.rs` exposes 10 Prometheus metrics over a
+`/metrics` endpoint (+ optional Pushgateway). `crates/agent-telemetry/` streams a
+full transaction history to **ClickHouse** — three tables (`agent_events`,
+`agent_logs`, `agent_usage`), keyed by per-run `session_id`, via a batched
+background writer that drops rows rather than blocking if ClickHouse is down.
+Neither pi nor hermes ships a turnkey metrics + queryable-history stack.
 
-### Telemetry / metrics / observability — **~90% (our moat)**
-This is where we **lead**. `crates/agent-runtime/src/metrics.rs` exposes 10
-Prometheus metrics (API calls, latency histograms, tokens, context size, tool calls,
-iterations, runs, run duration, active gauge) over a `/metrics` endpoint with
-optional Pushgateway push. `crates/agent-telemetry/` streams a full transaction
-history to **ClickHouse** — three tables (`agent_events`, `agent_logs`, `agent_usage`
-per `nix/clickhouse/schema.sql`), keyed by per-run `session_id`, via a batched
-background writer that drops rows rather than blocking the loop if ClickHouse is
-down. Neither pi nor hermes ships this: pi defines a vendor-neutral observability
-*interface* (`packages/agent/docs/observability.md`) but leaves the sink to you;
-hermes has trajectory/trace upload hooks. *Verdict:* a real differentiator — keep
-investing here.
+### MCP — client and server
+`crates/agent-mcp` is an MCP **client** (stdio subprocess + streamable HTTP behind
+an `McpTransport` trait): it runs `initialize`, discovers tools (`tools/list`), and
+registers each into the same `ToolRegistry` as the built-ins. `agent --serve-mcp`
+(`crates/agent-cli/src/mcp_server.rs`) is the **server** side — exposes a single
+`run` tool so another MCP client can drive the whole agent loop. Matches hermes;
+pi deliberately omits MCP.
 
-### MCP support — **0%**
-Not implemented; not even a seam. hermes is a full **MCP client and server**
-(`mcp_serve.py`, `tools/mcp_discovery.py`) with sampling support. pi deliberately
-omits MCP (README: "build an extension that adds MCP support"). *Verdict:* missing;
-an MCP client would unlock a large tool ecosystem cheaply and fits our `ToolRegistry`
-seam naturally.
+### Permissions / sandboxing / security — good primitives
+A `Policy` seam (`AutoApprove`, `Interactive`) plus lexical path-traversal
+protection and output/time caps. More built-in safety than pi (trust model only),
+far less than hermes (dangerous-command detection + 6 execution backends).
+Remaining: an `AllowList` policy and a sandboxed (Docker) execution backend.
 
-### Permissions / sandboxing / security — **~40%**
-We have a `Policy` seam (`crates/agent-runtime/src/policy.rs`) with `AutoApprove` and
-`Interactive` (stdin y/N) impls, plus lexical path-traversal protection and output/
-time caps on tools. That's more built-in safety than pi (which has *no* permission
-system — it relies on a project-trust model and tells you to containerize). hermes is
-far richer: a large approval engine (`tools/approval.py`) with dangerous-command
-detection, smart auto-approval, and **6 execution backends** (local/SSH/Docker/
-Singularity/Modal/Daytona). *Verdict:* good primitives; no sandboxed execution and no
-allowlist policy yet (DESIGN.md §4.5 mentions `AllowList` as planned).
+### Subagents / orchestration — implemented
+`crates/agent-runtime/src/subagent.rs`: with `[agent] subagents = true`, a
+`delegate` tool spawns a child agent from the same components, runs it in isolated
+context, and returns only the summary (the boomerang pattern), depth-bounded by
+`subagent_max_depth`. hermes goes further with batch/async workers + a kanban board.
 
-### Subagents / orchestration — **~10% (seam only)**
-DESIGN.md §4.5 describes the "boomerang" delegated-subtask pattern (parent spawns
-child with isolated context, gets a summary back) but there is no implementation. pi
-ships a subagent extension example; hermes has full delegation
-(`tools/delegate_tool.py`) with batch/async workers, depth control, and a kanban
-board for coordination. *Verdict:* a documented future seam; valuable but not before
-coding fundamentals.
+### Session management / persistence / resume — done
+`crates/agent-runtime/src/session_store.rs` saves each REPL turn's transcript under
+`.agent/sessions/<id>.jsonl`; resume via `--continue` (most recent), `--resume ID`,
+or `/resume` in the REPL. pi additionally has in-place branching; hermes SQLite +
+FTS5.
 
-### Session management / persistence / resume — **~40%**
-Every run gets a UUID `session_id`; the episodic JSONL log makes runs replayable in
-principle. But there is **no resume UX** — you cannot `--continue` a prior session or
-pick one from a list. pi has JSONL sessions with a tree structure (`id`/`parentId`),
-`/resume`, and in-place branching; hermes uses SQLite (WAL + FTS5) with session
-splitting/tagging and auto-reset. *Verdict:* the data model supports replay; the
-user-facing resume/branch features are missing.
+### CLI / REPL / UI surfaces — REPL, not yet a full TUI
+`agent` runs one-shot with a goal or opens an interactive **REPL** with no goal:
+multi-turn, live streaming, rustyline history + line editing (piped input falls
+back to plain reading), and slash commands. Still line-based, not a full-screen
+differential-render TUI like pi/hermes — that's the main remaining experience gap.
 
-### CLI / TUI / UI surfaces — **~20%**
-We are **CLI-only**: `agent [--config PATH] <goal>` (`crates/agent-cli/src/main.rs`),
-logging to stderr and printing a final answer, plus the `/metrics` HTTP endpoint. No
-interactive session, no streaming display. pi has a sophisticated differential-render
-TUI (`packages/tui/`) plus print/JSON/RPC/SDK modes; hermes has CLI + Ink TUI + web
-dashboard + Electron desktop. *Verdict:* the biggest *experience* gap — an
-interactive TUI is needed for daily-driver use.
+### Skills / plugins / extensions / hooks / slash commands — partial
+Compile-time extensibility (seams + cargo features + the registry), **plus**
+runtime capability without recompiling: MCP tools, `SKILL.md` skills
+(`/skills`, `/skill:<name>`), and slash commands. Still missing vs. pi/hermes:
+hot-reloadable extensions and lifecycle hooks.
 
-### Skills / plugins / extensions / hooks / slash commands — **~15%**
-We have compile-time extensibility (add a `Tool` impl, a provider, a context/memory
-strategy; wired by TOML via a registry) but **no runtime plugin/skill/hook/
-slash-command system**. pi has hot-reloadable TS extensions, SKILL.md skills, prompt
-templates, and rich event hooks; hermes has 19 plugin types, built-in + optional
-skills, and a curator that auto-maintains them. *Verdict:* our seams are real but
-compile-time only; runtime extensibility (starting with skills) is a large gap.
+### Configuration — strong
+A type-safe single-file TOML (`crates/agent-runtime/src/config.rs`) with sections
+for agent / provider / memory / tools / mcp / telemetry / context-files / metrics,
+three-tier API-key resolution (inline > env > file), and tilde expansion.
 
-### Configuration — **~85%**
-A clean, type-safe single-file TOML (`crates/agent-runtime/src/config.rs`) with
-sections for agent/provider/memory/tools/telemetry/metrics/context-files, three-tier
-API-key resolution (inline > env > file), and tilde expansion. Comparable in quality
-to pi's JSON settings and far smaller than hermes's 1500-line YAML. *Verdict:* strong
-and appropriately scoped; grows naturally as features land.
+### User context files — done
+`context.d/prepend/*.md` and `context.d/append/*.md` are always-injected,
+numerically ordered project instructions (`crates/agent-runtime/src/context_files.rs`).
 
-### User context files — **✅ done well**
-`context.d/prepend/*.md` and `context.d/append/*.md` are always-injected, numerically
-ordered project instructions (`crates/agent-runtime/src/context_files.rs`) — analogous
-to hermes's `.hermes/context`. A nice, simple feature we already have.
-
-### Testing — **~50% for our size**
-Unit tests across crates (path safety, context assembly, metrics encoding, row
-serialization) plus Nix flake checks (clippy `-D warnings`, rustfmt, `cargo test`,
-cargo-audit). Proportionate to a 2.9k-LOC codebase, but far from pi's vitest suites
-or hermes's ~17k tests. *Verdict:* good hygiene; needs integration/e2e coverage as
-features grow.
+### Testing — proportionate
+Unit tests across crates + an MCP client↔server integration test, all run under the
+Nix flake checks (clippy `-D warnings`, rustfmt, `cargo test`, cargo-audit,
+nix-fmt). Far smaller than pi's vitest suites or hermes's ~17k tests.
 
 ---
 
 ## Where we already lead
 
-These are worth protecting and extending as deliberate differentiators:
-
 1. **Observability.** First-class Prometheus metrics + ClickHouse transaction/log/
-   usage streaming, best-effort and non-blocking. Neither reference harness ships a
-   turnkey metrics + queryable-history stack. This is a genuine moat for anyone who
+   usage streaming, best-effort and non-blocking. A genuine moat for anyone who
    wants to *measure and compare* agent runs.
-2. **Clean trait-seam architecture.** Every major component is an `async` trait wired
-   by config (DESIGN.md §4–5). Swapping provider/memory/context is a one-line TOML
-   edit — ideal for A/B experimentation and for adding the features below without
-   touching the loop.
+2. **Clean trait-seam architecture.** Every major component is an `async` trait
+   wired by a config-selected registry, gated by cargo features. Swapping
+   provider/memory/context/policy is a one-line TOML edit; third parties can add
+   modules in-tree or out-of-tree without forking.
 3. **Rust.** Performance, memory safety, single static binary, no runtime/venv.
 4. **Reproducible tooling.** Modular Nix flake (dev shell, checks, ClickHouse
-   container) gives deterministic builds and CI.
-
-The strategic read: keep pi's *discipline* (small core, swappable impls — which we
-already have) while closing the coding fundamentals that both pi and hermes ship.
+   container).
 
 ---
 
-## Prioritized roadmap
+## Roadmap
+
+### Shipped since the original analysis
+Plugin registry + cargo-feature gating · `edit` / `grep` / `find` / `ls` tools ·
+Anthropic-native provider · streaming (both providers) · parallel tool execution ·
+summarizing compaction · MCP client (stdio + HTTP) · MCP server (`--serve-mcp`) ·
+subagent `delegate` · interactive REPL (rustyline history) · session resume · slash
+commands · skills.
+
+### Remaining
 
 Effort key: **S** ≈ hours–1 day · **M** ≈ a few days · **L** ≈ 1–2 weeks.
-Items marked *(seam exists)* are already anticipated in DESIGN.md, so they build on
-existing intent rather than contradicting it.
 
-### P0 — core coding parity (do first)
-
-| Feature | Current | Target | Effort | Why now |
-|---|---|---|---|---|
-| `edit` tool | Missing | Structured/diff-based line edits w/ preview | M | Whole-file rewrites are the #1 correctness+cost problem; blocks real coding |
-| `grep` / `find` / `ls` tools | Missing (`search` unbuilt) | Three read tools, gitignore-aware | S–M | Agents can't navigate a codebase without these |
-| Anthropic-native provider *(seam exists)* | Only OpenAI-compat | First-class Anthropic (tools, thinking, cache) | M | Best coding models; DESIGN.md §4.1 already plans it |
-| Streaming completions *(seam exists)* | Buffered | Real `stream()` impl end-to-end | M | Responsiveness; prerequisite for a good TUI |
-| Parallel tool execution | Sequential | Concurrent tool calls per turn | M | Matches pi/hermes; big latency win |
-
-### P1 — usability / daily-driver
-
-| Feature | Current | Target | Effort | Why now |
-|---|---|---|---|---|
-| Interactive TUI | CLI one-shot | Streaming multi-turn TUI | L | Biggest experience gap for daily use |
-| Session resume / `--continue` | Log only, no UX | Resume + list past sessions | M | Episodic log already supports replay; just needs UX |
-| Summarizing compaction *(seam exists)* | Truncation (lossy) | LLM summary, keep head/tail | M | Stop losing context; DESIGN.md §4.4 anticipates it |
-| Slash commands | None | `/model`, `/compact`, `/resume`, etc. | M | Standard control surface; pairs with TUI |
-
-### P2 — extensibility
-
-| Feature | Current | Target | Effort | Why now |
-|---|---|---|---|---|
-| MCP client | None | Connect stdio/HTTP MCP servers as tools | M | Unlocks a large tool ecosystem via the `ToolRegistry` seam |
-| Subagent / delegation *(seam exists)* | Seam only | Boomerang delegated subtasks | L | DESIGN.md §4.5; enables decomposition |
-| Skills (SKILL.md) | None | Load + progressive-disclosure skills | M | Portable across harnesses; cheap capability packs |
-| Distillation pipeline *(seam exists)* | No-op | Episodic→semantic promotion | M | Activates the memory model we already designed |
-| `AllowList` policy *(seam exists)* | auto/interactive | Pattern allowlist | S | DESIGN.md §4.5; safer unattended runs |
-
-### P3 — breadth
-
-| Feature | Current | Target | Effort | Why now |
-|---|---|---|---|---|
-| Multi-provider via `genai` wrapper *(§9)* | 1 provider | ~26 providers behind our trait | M | DESIGN.md §9 recommends exactly this |
-| Web search / fetch tool | None | Built-in web tools | M | Common coding need (docs lookup) |
-| Embedding-based recall *(seam exists)* | Keyword | Vector semantic store (Qdrant/LanceDB) | L | Better memory recall; DESIGN.md §9 |
-| Sandboxed execution backend | None | Docker backend for bash | L | Safety for untrusted repos; hermes-style |
+| Feature | Current | Target | Effort |
+|---|---|---|---|
+| Distillation pipeline *(seam exists)* | No-op stub | Episodic→semantic promotion via the model | M |
+| Embedding-based recall *(seam exists)* | Keyword scan | Vector semantic store (Qdrant/LanceDB) | L |
+| More providers | 2 hand-rolled | `genai`-style wrapper for breadth (DESIGN.md §9) | M |
+| Web search / fetch tools | None | Built-in web tools | M |
+| Sandboxed execution backend | None | Docker backend for `bash` | L |
+| `AllowList` policy *(seam exists)* | auto/interactive | Pattern allowlist | S |
+| Full-screen TUI | Line-based REPL | Differential-render multi-turn TUI | L |
+| Steering / follow-up | None | Interrupt / queue work mid-run | M |
+| Session branching | Linear resume | In-place branch tree | M |
 
 ---
 
 ## Philosophy note
 
-pi and hermes represent opposite bets. pi keeps a **small core** and pushes MCP,
-subagents, and plan-mode into installable extensions — betting that a lean,
-composable base ages better. hermes bundles **everything** — betting that breadth in
-core is what users actually want. `agent-seddon` already has pi's structural
-discipline (trait seams + config wiring), which means we can pursue hermes-like
-breadth *incrementally* without bloating the loop: each roadmap item lands behind an
-existing seam. The recommended posture: **keep the core small and swappable, close
-the coding fundamentals (P0/P1) that both references ship, and lean into
-observability as our differentiator.**
+pi keeps a **small core** and pushes MCP, subagents, and plan-mode into installable
+extensions; hermes bundles **everything**. `agent-seddon` has pi's structural
+discipline (trait seams + config wiring) — so it can pursue hermes-like breadth
+*incrementally*, each item landing behind an existing seam. The posture that got us
+here and should continue: keep the core small and swappable, close the fundamentals
+both references ship, and lean into observability as the differentiator.

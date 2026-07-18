@@ -23,7 +23,9 @@ Design principles:
   TOML file (and gated at compile time by cargo features). Changing the memory
   backend or the provider is a one-line config edit, not a code change.
 - **Layered memory is first-class.** Memory is not "the message list" — it is three
-  distinct, individually swappable layers (working / episodic / semantic).
+  distinct layers (working / episodic / semantic), each behind a trait (the whole
+  `MemoryStore` backend is registry-swappable today; per-layer swapping is a future
+  extension — see §3).
 - **Small, honest prototype.** The first milestone runs one real end-to-end loop.
   Everything else is a documented seam we can fill in later.
 
@@ -41,23 +43,33 @@ any tools it asked for → record what happened → repeat until done. The novel
 
 Steps:
 
-1. **Ingest goal.** The user's goal enters the runtime. The `ContextStrategy`
-   assembles the initial context: system prompt + memory recall (relevant semantic
-   facts + recent episodic events) + the goal.
+1. **Ingest goal.** The user's goal enters the runtime. On a session's *first*
+   turn the `ContextStrategy` assembles the initial context: system prompt +
+   memory recall (relevant semantic facts) + the goal. In the multi-turn REPL,
+   later turns append the new user message to the running working set instead of
+   re-assembling (`Session::send` in `crates/agent-runtime/src/agent.rs`).
 2. **Model call.** The `LlmProvider` is invoked with the assembled request and
-   returns an assistant message that may contain text and/or tool calls.
+   returns an assistant message that may contain text and/or tool calls. The loop
+   consumes it as a stream (with a live echo) when `stream = true`.
 3. **Tool dispatch.** If the message contains tool calls, each is routed through the
-   `Policy` (approval / permission gate) and then executed by the `ToolRegistry`.
-   Observations (stdout, file contents, errors) are collected.
+   `Policy` (approval / permission gate) and then executed by the `ToolRegistry` —
+   concurrently when `parallel_tools = true` and every tool is parallel-safe,
+   results appended in call order. Observations (stdout, file contents, errors) are
+   collected.
 4. **Record.** The turn (assistant message + tool observations) is appended to
    working memory and the episodic log.
 5. **Context management.** The `ContextStrategy` checks the token budget. If over
-   threshold it compacts — summarizing older turns non-destructively (the raw
-   episodic log is never mutated; only the working window is condensed).
-6. **Termination check.** Finish if the model signalled completion, `max_iterations`
-   was hit, or the user interrupted; otherwise loop back to step 2.
-7. **Finish.** Persist the episodic log and, optionally, run the **distillation
-   pipeline** to promote durable facts from this session into semantic memory.
+   threshold it compacts — either dropping the oldest turns (`SlidingWindow`) or
+   LLM-summarizing them (`SummarizingWindow`), see §4.4. Compaction is
+   non-destructive: the raw episodic log is never mutated; only the working window
+   is condensed.
+6. **Termination check.** Finish if the model returned no tool calls (final
+   answer), `max_iterations` was hit, or an error occurred; otherwise loop back to
+   step 2. (There is no in-loop user-interrupt path; the REPL exits on stdin EOF,
+   outside the loop.)
+7. **Finish.** The episodic log is already persisted incrementally. The
+   **distillation pipeline** (promote durable facts into semantic memory) is
+   invoked at session end but is currently a **no-op stub** — see §3.
 
 ```mermaid
 sequenceDiagram
@@ -75,7 +87,7 @@ sequenceDiagram
     RT->>CTX: assemble(system, memory, goal)
     CTX-->>RT: prompt
 
-    loop until done / max_iters / interrupt
+    loop until done / max_iters
         RT->>LLM: complete(prompt)
         LLM-->>RT: assistant message (text + tool calls)
         alt has tool calls
@@ -98,9 +110,11 @@ sequenceDiagram
 ## 3. Memory model (centerpiece)
 
 Memory is the part we most want to experiment with, so it is deliberately layered.
-A single `MemoryStore` facade fronts three independently swappable layers, each with
-its own trait. An agent can mix, e.g., an in-memory working buffer with a
-vector-backed semantic store.
+A single `MemoryStore` facade fronts three layers. The `EpisodicStore` and
+`SemanticStore` layer traits are defined in `agent-core` as extension points, but
+in v1 the shipped `FileMemory` composes them as a unit; the registry selects the
+whole `MemoryStore` backend by `[memory] backend` (only `"file"` today), not each
+layer independently. A future backend (SQLite/vector semantic) plugs in the same way.
 
 | Layer | Question it answers | Lifetime | Default impl |
 |-------|--------------------|----------|--------------|
@@ -117,19 +131,22 @@ vector-backed semantic store.
   we can always reconstruct. Default is JSONL on disk.
 - **Semantic memory** is curated, durable knowledge — the equivalent of
   Claude Code's memory files: markdown with YAML frontmatter (`name`, `description`,
-  `type`), one fact per file, plus an index loaded each session. It is git-friendly
-  and human-inspectable. Documented alternates behind the same trait: **SQLite**
-  (structured queries) and a **vector store** (Qdrant / LanceDB) for embedding recall.
+  `type`), one fact per file. It is git-friendly and human-inspectable. Documented
+  future alternates behind the same trait: **SQLite** (structured queries) and a
+  **vector store** (Qdrant / LanceDB) for embedding recall — neither built yet.
 
 Two pipelines connect the layers:
 
-- **Recall** (before/within a turn): `query → retrieve → inject`. The default
-  retriever is keyword/recency-based (cheap, no embedding infra). An optional
-  embedding retriever ranks semantic entries by vector similarity. Retrieved items
-  are injected into the working context by the `ContextStrategy`.
-- **Distillation** (on session end, or on demand): scan the episodic log for durable
-  facts and promote them into semantic memory (dedup against existing entries). This
-  is the harness analogue of Hermes' "agent-curated memory" learning loop.
+- **Recall** (on a session's first turn): `query → retrieve → inject`. The shipped
+  retriever is **keyword-based** — a live scan of the semantic directory scored by
+  keyword-match count (no pre-built index, no recency weighting, no embeddings;
+  `crates/agent-memory/src/file.rs`). An embedding retriever is a future option.
+  Retrieved items are injected into the working context by the `ContextStrategy`.
+- **Distillation** (episodic → semantic promotion): this is the intended
+  agent-curated learning loop (scan the episodic log for durable facts, promote
+  them, dedup). It is **not yet implemented** — `FileMemory::distill()` is an honest
+  no-op stub that runs at session end and returns 0. It's kept as a live seam the
+  loop already calls.
 
 ```mermaid
 flowchart LR
@@ -224,9 +241,11 @@ pub trait MemoryStore: Send + Sync {
 #[async_trait] pub trait SemanticStore: Send + Sync { /* upsert / retrieve / index */ }
 ```
 
-The default `MemoryStore` composes an in-memory working buffer, a JSONL
-`EpisodicStore`, and a markdown `SemanticStore`. Swapping the semantic layer to
-SQLite or a vector DB is a config change.
+The shipped `FileMemory` `MemoryStore` composes an in-memory working buffer, a
+JSONL episodic log, and a markdown semantic store as one unit (the layer traits
+above are extension points, not yet independently config-swappable). Adding a
+whole alternative backend — e.g. a SQLite or vector-backed store — is a new
+registry entry selected by `[memory] backend`.
 
 ### 4.4 `ContextStrategy` / `Compactor`
 
@@ -307,7 +326,7 @@ Config is the experimentation lever — a single TOML file:
 ```toml
 [agent]
 provider = "anthropic"        # -> AnthropicProvider  ("openai-compat" -> OpenAiCompatProvider)
-context  = "sliding-window"   # -> SlidingWindow
+context  = "sliding-window"   # -> SlidingWindow  ("summarizing-window" -> SummarizingWindow)
 policy   = "interactive"
 stream         = true         # incremental SSE + live echo (false = buffered)
 parallel_tools = true         # run a turn's parallel-safe tool calls concurrently
@@ -319,11 +338,16 @@ backend = "file"              # -> FileMemory  (future: "sqlite", "vector")
 enabled = ["bash", "read_file", "write_file", "edit", "grep", "find", "ls"]
 ```
 
-Swapping `provider = "openai-compat"` or `backend = "vector"` changes behavior with
-no code edit — exactly the property we want for A/B comparison. Each impl also sits
-behind a **cargo feature** (`provider-*`, `tool-*`, `context-*`, `memory-*`), so a
-`--no-default-features` build links only what it needs. *Future:* dynamic,
-out-of-process plugins via `libloading` (the registry API is left clean for it).
+Swapping `provider = "openai-compat"` or `context = "summarizing-window"` changes
+behavior with no code edit — exactly the property we want for A/B comparison. Each
+impl also sits behind a **cargo feature** (`provider-*`, `tool-*`, `context-*`,
+`memory-*`, `mcp`, `subagents`), so a `--no-default-features` build links only what
+it needs. The example above is a sketch; the real
+[`config/agent.toml`](config/agent.toml) is the source of truth and also carries
+`[mcp.servers]`, `[telemetry]`, `[metrics]`, `[context_files]`, and the extra
+`[agent]` knobs (`keep_recent_tokens`, `subagents`, `subagent_max_depth`).
+*Future:* dynamic, out-of-process plugins via `libloading` (the registry API is
+left clean for it).
 
 ---
 
@@ -367,12 +391,14 @@ agent-seddon/
 ├── Cargo.toml                # workspace
 ├── crates/
 │   ├── agent-core/           # seam traits + shared types (no impls)
-│   ├── agent-providers/      # LlmProvider impls: anthropic, openai/local
-│   ├── agent-tools/          # Tool impls: bash, read_file, write_file, search
-│   ├── agent-memory/         # MemoryStore + working/episodic/semantic impls
-│   ├── agent-context/        # ContextStrategy impls: sliding-window, …
-│   ├── agent-runtime/        # the loop + Registry wiring + Policy
-│   └── agent-cli/            # binary: parse config, build runtime, run goal
+│   ├── agent-providers/      # LlmProvider impls: openai-compat, anthropic
+│   ├── agent-tools/          # Tool impls: bash, read_file, write_file, edit, grep, find, ls
+│   ├── agent-memory/         # MemoryStore impl: FileMemory (JSONL episodic + markdown semantic)
+│   ├── agent-context/        # ContextStrategy impls: sliding-window, summarizing-window
+│   ├── agent-mcp/            # MCP client (stdio + streamable-HTTP transports)
+│   ├── agent-telemetry/      # ClickHouse telemetry sink (events / logs / usage)
+│   ├── agent-runtime/        # the loop + Registry wiring + Policy + sessions + subagents
+│   └── agent-cli/            # binary: CLI/REPL, MCP server, metrics endpoint
 └── config/agent.toml         # example wiring
 ```
 
@@ -423,18 +449,15 @@ Baseline crates: **`tokio`** (async runtime), **`serde` / `serde_json`**
 binary, **`tracing`** for structured logging of the loop (invaluable for comparing
 runs), **`reqwest`** for HTTP, **`toml`** for config.
 
-**Key decision to record — provider layer:** hand-roll provider clients
-(`reqwest` + e.g. `async-anthropic`) *versus* wrap an existing multi-provider crate
-(**`genai`**, ~26 providers; or **`rig-core`**, a fuller agent framework) behind our
-own `LlmProvider` trait.
-
-- **Recommendation:** wrap **`genai`** behind `LlmProvider` for the prototype. It buys
-  many providers immediately (including local/Ollama), and because our own trait stays
-  the stable seam, we can drop to a hand-rolled client later for any provider that
-  needs behavior `genai` doesn't expose — without touching the loop. We keep
-  `rig-core` in mind as a reference for the tool-macro and vector-store patterns, but
-  we do **not** adopt it as the framework, because the whole point is that *we* own the
-  seams.
+**Key decision — provider layer (decided):** we **hand-rolled** the provider
+clients (`reqwest` + our own wire types): `OpenAiCompatProvider` (covers GLM /
+OpenAI / vLLM / Ollama) and a native `AnthropicProvider`, both with real SSE
+streaming. We did *not* adopt the earlier idea of wrapping the **`genai`** crate
+(~26 providers). Rationale: hand-rolling kept full control of streaming, tool-call
+parsing, and error behavior with no heavy dependency, and our `LlmProvider` trait
+remains the stable seam. Wrapping `genai` (or `rig-core`'s patterns) stays a viable
+*future* option to add breadth quickly if we want many more providers — behind the
+same trait, no loop changes.
 
 Embeddings/vector recall (optional): **Qdrant** (native Rust) or **LanceDB**
 (embedded) behind the `SemanticStore` trait — feature-gated, off by default.
@@ -463,7 +486,8 @@ loop iteration (model call → tool exec → observation → response), and flip
 1. ~~Streaming vs. buffered completions first?~~ **Resolved:** both. `stream` is an
    additive, defaulted trait method; the loop consumes a chunk stream, and each
    provider ships real SSE. `stream = false` selects the buffered path.
-2. Embedding-based recall in v1, or keyword/recency only? (Still keyword-first.)
+2. Embedding-based recall, or keyword only? (Still keyword-only — a live scan of
+   the semantic dir scored by match count; no recency weighting, no embeddings.)
 3. ~~Tool execution: fully async, or blocking-in-spawn for `bash`?~~ **Resolved:**
    async; a turn's parallel-safe tool calls run concurrently (`parallel_tools`),
    and blocking walkers (`grep`/`find`/`ls`) run on `spawn_blocking`.
@@ -472,3 +496,28 @@ loop iteration (model call → tool exec → observation → response), and flip
 5. ~~How much of the `Agent`/subtask delegation to build vs. stub as a seam?~~
    **Resolved:** built as the `delegate` tool (§4.5), depth-bounded. MCP client
    (§4.6) added alongside for external tools.
+
+---
+
+## 11. Implemented subsystems beyond the core loop
+
+Sections 2–5 cover the seams; several shipped subsystems live around them:
+
+- **Observability.** Prometheus metrics (`crates/agent-runtime/src/metrics.rs`) —
+  10 metrics (API calls, latency, tokens, context size, tool calls, iterations,
+  runs, active) served on a `/metrics` endpoint (+ optional Pushgateway). And a
+  ClickHouse telemetry sink (`crates/agent-telemetry`): a `CompositeMemory` wrapper
+  and a tracing layer stream `agent_events` / `agent_logs` / `agent_usage` via a
+  batched background writer, best-effort (rows dropped, never blocking, if
+  ClickHouse is down). Both opt-in via `[metrics]` / `[telemetry]`.
+- **Interactive REPL + session persistence.** `agent` with no goal opens a
+  multi-turn REPL (`crates/agent-cli/src/repl.rs`) with rustyline history + line
+  editing, streaming, and slash commands (`/help`, `/new`, `/compact`, `/resume`,
+  `/skills`, `/skill:<name>`, `/model`, `/tools`, `/save`, `/quit`). Each turn's
+  transcript is saved under `.agent/sessions/` (`session_store.rs`); resume with
+  `--continue`, `--resume <id>`, or `/resume`. `Agent::run` is a one-shot session.
+- **User context files.** `context.d/prepend/*.md` and `context.d/append/*.md` are
+  always-injected, numerically ordered project instructions
+  (`crates/agent-runtime/src/context_files.rs`).
+- **MCP server.** `agent --serve-mcp` (`crates/agent-cli/src/mcp_server.rs`) is the
+  server counterpart to the `agent-mcp` client (§4.6) — see that section.

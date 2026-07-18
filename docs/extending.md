@@ -6,7 +6,9 @@ runtime by a **plugin registry**. Adding a new implementation is the same three
 steps for any seam:
 
 1. **Implement the trait** from `agent-core`.
-2. **Write a factory** — a `Fn(&Config) -> anyhow::Result<Arc<dyn Trait>>`.
+2. **Write a factory** — a `Fn(&Config) -> anyhow::Result<Arc<dyn Trait>>` (the one
+   exception: context strategies get `Fn(&Config, &Arc<dyn LlmProvider>) -> …` so
+   they can call the model during compaction — see the note below).
 3. **Register it** under a config-string name.
 
 Then a user selects it purely by config (`provider = "my-provider"`), with no code
