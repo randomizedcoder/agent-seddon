@@ -79,6 +79,23 @@ REPL. `/skills` lists reusable instruction snippets (see [`skills/`](skills/)) a
 Set `RUST_LOG=debug` to see the model's `reasoning_content` length and compaction
 decisions.
 
+## As an MCP server
+
+`agent --serve-mcp` runs agent-seddon as a [Model Context
+Protocol](https://modelcontextprotocol.io) server over stdio, exposing a single
+`run` tool: any MCP client (Claude Desktop, another agent, …) can hand it a goal
+and get the final answer back. stdout carries only JSON-RPC; logs and the
+streaming echo go to stderr.
+
+```jsonc
+// e.g. in an MCP client's server config:
+{ "command": "agent", "args": ["--serve-mcp", "--config", "/path/to/agent.toml"] }
+```
+
+Use a non-interactive policy (`auto-approve`) — stdin is the JSON-RPC channel, so
+an interactive approval prompt can't read it. (This is the server counterpart to
+the `agent-mcp` client, which *consumes* other MCP servers.)
+
 ## Nix
 
 A modular flake (thin `flake.nix` + `./nix/` aggregator, pinned Rust toolchain via

@@ -7,6 +7,7 @@
 //! multi-turn REPL (see `repl.rs`). `--continue` resumes the most recent saved
 //! session; `--resume ID` resumes a specific one.
 
+mod mcp_server;
 mod metrics_server;
 mod repl;
 
@@ -98,6 +99,7 @@ async fn main() -> Result<()> {
         Mode::Repl => repl::run(&agent, &sessions_dir, resumed)
             .await
             .map(|()| None),
+        Mode::ServeMcp => mcp_server::serve(&agent).await.map(|()| None),
     };
 
     // Flush telemetry + push metrics before surfacing success/failure.
@@ -151,9 +153,11 @@ fn init_tracing(telemetry: &Option<TelemetryHandle>, stream_logs: bool) {
         .as_ref()
         .filter(|_| stream_logs)
         .map(|h| ClickHouseLayer::new(h.clone()));
+    // Logs go to stderr so stdout stays clean (it carries the answer, and in
+    // `--serve-mcp` mode the JSON-RPC channel).
     Registry::default()
         .with(env_filter)
-        .with(fmt::layer().with_target(false))
+        .with(fmt::layer().with_target(false).with_writer(std::io::stderr))
         .with(ch_layer)
         .init();
 }
@@ -161,6 +165,7 @@ fn init_tracing(telemetry: &Option<TelemetryHandle>, stream_logs: bool) {
 enum Mode {
     OneShot(String),
     Repl,
+    ServeMcp,
 }
 
 enum ResumeArg {
@@ -177,6 +182,7 @@ struct Args {
 fn parse_args() -> Result<Args> {
     let mut config_path = PathBuf::from("config/agent.toml");
     let mut resume: Option<ResumeArg> = None;
+    let mut serve_mcp = false;
     let mut goal_parts: Vec<String> = Vec::new();
 
     let mut args = std::env::args().skip(1);
@@ -192,13 +198,15 @@ fn parse_args() -> Result<Args> {
                     args.next().context("--resume requires a session id")?,
                 ));
             }
+            "--serve-mcp" => serve_mcp = true,
             "--help" | "-h" => {
                 println!(
-                    "usage: agent [--config PATH] [--continue | --resume ID] [<goal words...>]\n\
+                    "usage: agent [--config PATH] [--continue | --resume ID | --serve-mcp] [<goal words...>]\n\
                      \n\
                      With a goal: run it once. Without a goal: interactive REPL.\n  \
                      --continue     resume the most recent saved session\n  \
-                     --resume ID    resume a specific session"
+                     --resume ID    resume a specific session\n  \
+                     --serve-mcp    run as an MCP server over stdio (exposes a `run` tool)"
                 );
                 std::process::exit(0);
             }
@@ -207,7 +215,9 @@ fn parse_args() -> Result<Args> {
     }
 
     let goal = goal_parts.join(" ");
-    let mode = if goal.trim().is_empty() {
+    let mode = if serve_mcp {
+        Mode::ServeMcp
+    } else if goal.trim().is_empty() {
         Mode::Repl
     } else {
         Mode::OneShot(goal)

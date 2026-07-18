@@ -7,12 +7,14 @@ name = "agent-cli"
 version = "0.1.0"
 dependencies = [
  "agent-core",
+ "agent-mcp",
  "agent-runtime",
  "agent-telemetry",
  "anyhow",
  "async-trait",
  "reqwest",
  "rustyline",
+ "serde_json",
  "tiny_http",
  "tokio",
  "tracing",
