@@ -464,134 +464,37 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::{
-        CompletionResponse, MemoryItem, ModelCapabilities, Tool, ToolCall, ToolSchema,
+    use agent_core::ToolCall;
+    use agent_testkit::{
+        final_turn, tool_turn, EchoTool, FnProvider, RecordingMemory, ScriptedProvider,
+        StaticContext,
     };
-    use async_trait::async_trait;
     use serde_json::json;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Mutex;
 
-    /// Emits three tool calls on the first turn, then a final answer.
-    struct SeqProvider {
-        calls: AtomicUsize,
-    }
-    #[async_trait]
-    impl LlmProvider for SeqProvider {
-        fn capabilities(&self) -> ModelCapabilities {
-            ModelCapabilities {
-                supports_tools: true,
-                context_window: 1000,
-            }
-        }
-        async fn complete(
-            &self,
-            _req: CompletionRequest,
-        ) -> agent_core::Result<CompletionResponse> {
-            let n = self.calls.fetch_add(1, Ordering::SeqCst);
-            if n == 0 {
-                let tool_calls = vec![
-                    ToolCall {
-                        id: "t0".into(),
-                        name: "echo".into(),
-                        arguments: json!({"sleep_ms": 40, "val": "a"}),
-                    },
-                    ToolCall {
-                        id: "t1".into(),
-                        name: "echo".into(),
-                        arguments: json!({"sleep_ms": 0, "val": "b"}),
-                    },
-                    ToolCall {
-                        id: "t2".into(),
-                        name: "echo".into(),
-                        arguments: json!({"sleep_ms": 15, "val": "c"}),
-                    },
-                ];
-                Ok(CompletionResponse {
-                    message: Message {
-                        role: Role::Assistant,
-                        content: String::new(),
-                        tool_calls,
-                        tool_call_id: None,
-                    },
-                    finish_reason: "tool_calls".into(),
-                    usage: None,
-                })
-            } else {
-                Ok(CompletionResponse {
-                    message: Message::assistant("done"),
-                    finish_reason: "stop".into(),
-                    usage: None,
-                })
-            }
-        }
-    }
-
-    /// Sleeps `sleep_ms` then echoes `val`, so completion order differs from call
+    /// Emits three tool calls on the first turn, then a final answer. The
+    /// `EchoTool` sleeps per `sleep_ms`, so completion order differs from call
     /// order (t0 sleeps longest yet is requested first).
-    struct EchoTool;
-    #[async_trait]
-    impl Tool for EchoTool {
-        fn name(&self) -> &str {
-            "echo"
-        }
-        fn schema(&self) -> ToolSchema {
-            ToolSchema {
-                name: "echo".into(),
-                description: "test".into(),
-                parameters: json!({"type": "object"}),
-            }
-        }
-        async fn execute(
-            &self,
-            args: serde_json::Value,
-            _ctx: &ToolContext,
-        ) -> agent_core::Result<Observation> {
-            let ms = args.get("sleep_ms").and_then(|v| v.as_u64()).unwrap_or(0);
-            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
-            Ok(Observation::ok(
-                args.get("val")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-            ))
-        }
-    }
-
-    /// Records the `tool_call_id` of every appended tool event, in order.
-    struct RecordMemory {
-        tool_order: Arc<Mutex<Vec<String>>>,
-    }
-    #[async_trait]
-    impl MemoryStore for RecordMemory {
-        async fn recall(&self, _q: &RecallQuery) -> agent_core::Result<Vec<MemoryItem>> {
-            Ok(vec![])
-        }
-        async fn append(&self, e: MemoryEvent) -> agent_core::Result<()> {
-            if e.kind == "tool" {
-                if let Some(id) = e.message.tool_call_id {
-                    self.tool_order.lock().unwrap().push(id);
-                }
-            }
-            Ok(())
-        }
-        async fn distill(&self) -> agent_core::Result<usize> {
-            Ok(0)
-        }
-    }
-
-    struct MockContext;
-    #[async_trait]
-    impl ContextStrategy for MockContext {
-        async fn assemble(&self, input: ContextInput) -> agent_core::Result<Vec<Message>> {
-            Ok(vec![
-                Message::system(input.system_prompt),
-                Message::user(input.goal),
-            ])
-        }
-        async fn compact(&self, _w: &mut WorkingSet, _b: &TokenBudget) -> agent_core::Result<()> {
-            Ok(())
-        }
+    fn seq_provider() -> ScriptedProvider {
+        ScriptedProvider::new(vec![
+            tool_turn(vec![
+                ToolCall {
+                    id: "t0".into(),
+                    name: "echo".into(),
+                    arguments: json!({"sleep_ms": 40, "val": "a"}),
+                },
+                ToolCall {
+                    id: "t1".into(),
+                    name: "echo".into(),
+                    arguments: json!({"sleep_ms": 0, "val": "b"}),
+                },
+                ToolCall {
+                    id: "t2".into(),
+                    name: "echo".into(),
+                    arguments: json!({"sleep_ms": 15, "val": "c"}),
+                },
+            ]),
+            final_turn("done"),
+        ])
     }
 
     fn settings(parallel: bool) -> Settings {
@@ -614,26 +517,21 @@ mod tests {
     }
 
     async fn run_with(parallel: bool) -> Vec<String> {
-        let order = Arc::new(Mutex::new(Vec::new()));
+        let memory = RecordingMemory::new();
         let mut tools = ToolRegistry::new();
         tools.register(Arc::new(EchoTool));
         let agent = Agent::new(
-            Arc::new(SeqProvider {
-                calls: AtomicUsize::new(0),
-            }),
+            Arc::new(seq_provider()),
             tools,
-            Arc::new(RecordMemory {
-                tool_order: order.clone(),
-            }),
-            Arc::new(MockContext),
+            Arc::new(memory.clone()),
+            Arc::new(StaticContext),
             Arc::new(crate::policy::AutoApprove),
             Metrics::new(),
             settings(parallel),
         );
         let out = agent.run("go").await.unwrap();
         assert_eq!(out, "done");
-        let v = order.lock().unwrap().clone();
-        v
+        memory.tool_order()
     }
 
     #[tokio::test]
@@ -647,36 +545,19 @@ mod tests {
         assert_eq!(run_with(false).await, vec!["t0", "t1", "t2"]);
     }
 
-    /// Answers with the number of user messages it sees, proving the working set
-    /// carried over from the previous turn.
-    struct CountingProvider;
-    #[async_trait]
-    impl LlmProvider for CountingProvider {
-        fn capabilities(&self) -> ModelCapabilities {
-            ModelCapabilities {
-                supports_tools: false,
-                context_window: 1000,
-            }
-        }
-        async fn complete(&self, req: CompletionRequest) -> agent_core::Result<CompletionResponse> {
-            let users = req.messages.iter().filter(|m| m.role == Role::User).count();
-            Ok(CompletionResponse {
-                message: Message::assistant(users.to_string()),
-                finish_reason: "stop".into(),
-                usage: None,
-            })
-        }
-    }
-
     #[tokio::test]
     async fn session_keeps_history_across_turns() {
+        // Answers with the number of user messages it sees, proving the working
+        // set carried over from the previous turn.
+        let counting = FnProvider::new(|req: &CompletionRequest| {
+            let users = req.messages.iter().filter(|m| m.role == Role::User).count();
+            final_turn(users.to_string())
+        });
         let agent = Agent::new(
-            Arc::new(CountingProvider),
+            Arc::new(counting),
             ToolRegistry::new(),
-            Arc::new(RecordMemory {
-                tool_order: Arc::new(Mutex::new(Vec::new())),
-            }),
-            Arc::new(MockContext),
+            Arc::new(RecordingMemory::new()),
+            Arc::new(StaticContext),
             Arc::new(crate::policy::AutoApprove),
             Metrics::new(),
             settings(false),

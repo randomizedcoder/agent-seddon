@@ -3,6 +3,9 @@
 debug
 target
 
+# Project-local CARGO_HOME set by the nix dev shell (see nix/devshell.nix)
+/.cargo-home/
+
 # Nix build symlinks
 /result
 /result-*

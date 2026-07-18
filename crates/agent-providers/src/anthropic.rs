@@ -478,6 +478,7 @@ impl WireResp {
 mod tests {
     use super::*;
     use agent_core::ToolCall;
+    use rstest::rstest;
     use serde_json::json;
 
     fn msg(role: Role, content: &str) -> Message {
@@ -489,15 +490,63 @@ mod tests {
         }
     }
 
+    // --- to_anthropic_messages: system split + role coalescing -------------
+    // `(system string, number of wire messages)`.
+    #[rstest]
+    #[case::positive_system_and_user(vec![(Role::System, "S"), (Role::User, "hi")], "S", 1)]
+    #[case::positive_user_only(vec![(Role::User, "hi")], "", 1)]
+    #[case::boundary_system_only(vec![(Role::System, "S")], "S", 0)]
+    #[case::corner_multi_system_joined(vec![(Role::System, "A"), (Role::System, "B"), (Role::User, "x")], "A\n\nB", 1)]
+    #[case::boundary_empty(vec![], "", 0)]
+    #[case::corner_consecutive_users_coalesce(vec![(Role::User, "a"), (Role::User, "b")], "", 1)]
+    #[case::corner_empty_user_content_no_block(vec![(Role::User, "")], "", 0)]
+    fn to_anthropic_messages_shape(
+        #[case] msgs: Vec<(Role, &str)>,
+        #[case] system: &str,
+        #[case] out_len: usize,
+    ) {
+        let built: Vec<Message> = msgs.into_iter().map(|(r, c)| msg(r, c)).collect();
+        let (sys, out) = to_anthropic_messages(&built);
+        assert_eq!(sys, system);
+        assert_eq!(out.len(), out_len);
+    }
+
     #[test]
-    fn system_is_separated_and_first_message_is_user() {
-        let msgs = vec![msg(Role::System, "you are a bot"), msg(Role::User, "hi")];
-        let (system, out) = to_anthropic_messages(&msgs);
-        assert_eq!(system, "you are a bot");
-        assert_eq!(out.len(), 1);
+    fn to_anthropic_messages_first_is_user_text_block() {
+        let (_s, out) = to_anthropic_messages(&[msg(Role::System, "bot"), msg(Role::User, "hi")]);
         assert_eq!(out[0]["role"], "user");
         assert_eq!(out[0]["content"][0]["type"], "text");
         assert_eq!(out[0]["content"][0]["text"], "hi");
+    }
+
+    // --- WireResp::into_response: content blocks → message -----------------
+    // `(body) → (text, #tool_calls, finish_reason)`.
+    #[rstest]
+    #[case::positive_text_only(json!({"content":[{"type":"text","text":"hi"}]}), "hi", 0, "end_turn")]
+    #[case::positive_tool_only(json!({"content":[{"type":"tool_use","id":"t","name":"ls","input":{}}],"stop_reason":"tool_use"}), "", 1, "tool_use")]
+    #[case::positive_text_and_tool(json!({"content":[{"type":"text","text":"a"},{"type":"tool_use","id":"t","name":"b","input":{}}],"stop_reason":"tool_use"}), "a", 1, "tool_use")]
+    #[case::boundary_empty_content(json!({}), "", 0, "end_turn")]
+    #[case::corner_ignores_unknown_block(json!({"content":[{"type":"thinking","text":"…"},{"type":"text","text":"x"}]}), "x", 0, "end_turn")]
+    fn into_response_cases(
+        #[case] body: Value,
+        #[case] text: &str,
+        #[case] n_tools: usize,
+        #[case] finish: &str,
+    ) {
+        let parsed: WireResp = serde_json::from_value(body).unwrap();
+        let resp = parsed.into_response();
+        assert_eq!(resp.message.content, text);
+        assert_eq!(resp.message.tool_calls.len(), n_tools);
+        assert_eq!(resp.finish_reason, finish);
+    }
+
+    #[test]
+    fn into_response_sums_usage_tokens() {
+        let body = json!({"content":[], "usage":{"input_tokens":10,"output_tokens":5}});
+        let resp = serde_json::from_value::<WireResp>(body)
+            .unwrap()
+            .into_response();
+        assert_eq!(resp.usage.unwrap().total_tokens, 15);
     }
 
     #[test]
@@ -536,25 +585,5 @@ mod tests {
         assert_eq!(out[2]["content"].as_array().unwrap().len(), 2);
         assert_eq!(out[2]["content"][0]["type"], "tool_result");
         assert_eq!(out[2]["content"][0]["tool_use_id"], "a");
-    }
-
-    #[test]
-    fn parses_tool_use_response() {
-        let body = json!({
-            "content": [
-                {"type": "text", "text": "sure"},
-                {"type": "tool_use", "id": "t1", "name": "bash", "input": {"command": "ls"}}
-            ],
-            "stop_reason": "tool_use",
-            "usage": {"input_tokens": 10, "output_tokens": 5}
-        })
-        .to_string();
-        let parsed: WireResp = serde_json::from_str(&body).unwrap();
-        let resp = parsed.into_response();
-        assert_eq!(resp.message.content, "sure");
-        assert_eq!(resp.message.tool_calls.len(), 1);
-        assert_eq!(resp.message.tool_calls[0].name, "bash");
-        assert_eq!(resp.finish_reason, "tool_use");
-        assert_eq!(resp.usage.unwrap().total_tokens, 15);
     }
 }

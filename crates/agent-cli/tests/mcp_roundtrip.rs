@@ -4,7 +4,7 @@
 //! handshake and `tools/list` — without any network (the agent is built but the
 //! model is never called for discovery).
 
-use agent_mcp::{connect, ServerConfig, Transport};
+use agent_mcp::{connect, ServerConfig, Transport, TransportRegistry};
 
 fn tempdir() -> std::path::PathBuf {
     let mut p = std::env::temp_dir();
@@ -48,7 +48,7 @@ async fn server_advertises_run_tool() {
         },
     };
 
-    let (_client, defs) = connect(&server)
+    let (_client, defs) = connect(&TransportRegistry::with_builtins(), &server)
         .await
         .expect("connect to agent --serve-mcp");
     assert!(

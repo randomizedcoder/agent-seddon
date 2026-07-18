@@ -112,78 +112,64 @@ impl UsageRow {
 mod tests {
     use super::*;
     use agent_core::{Message, ToolCall, Usage};
+    use rstest::rstest;
     use serde_json::json;
 
+    fn ev(kind: &str, message: Message, usage: Option<Usage>) -> MemoryEvent {
+        MemoryEvent {
+            kind: kind.into(),
+            message,
+            ts_ms: 1,
+            session_id: "s".into(),
+            usage,
+            iter: Some(2),
+        }
+    }
+
+    // --- EventRow: role/content extraction + blank tool_calls --------------
+    #[rstest]
+    #[case::user(ev("goal", Message::user("hello"), None), "user", "hello")]
+    #[case::system(ev("x", Message::system("sys"), None), "system", "sys")]
+    #[case::assistant_empty(ev("assistant", Message::assistant(""), None), "assistant", "")]
+    fn event_row_role_and_content_cases(
+        #[case] event: MemoryEvent,
+        #[case] role: &str,
+        #[case] content: &str,
+    ) {
+        let row = EventRow::from_event(&event, 0);
+        assert_eq!(row.role, role);
+        assert_eq!(row.content, content);
+        assert_eq!(row.tool_calls, ""); // no tool calls ⇒ blank
+    }
+
     #[test]
-    fn event_row_serializes_tool_calls_and_role() {
+    fn event_row_serializes_tool_calls() {
         let mut msg = Message::assistant("");
         msg.tool_calls = vec![ToolCall {
             id: "call_1".into(),
             name: "bash".into(),
             arguments: json!({ "command": "ls" }),
         }];
-        let event = MemoryEvent {
-            kind: "assistant".into(),
-            message: msg,
-            ts_ms: 1000,
-            session_id: "sess".into(),
-            usage: None,
-            iter: None,
-        };
-        let row = EventRow::from_event(&event, 3);
+        let row = EventRow::from_event(&ev("assistant", msg, None), 3);
         assert_eq!(row.seq, 3);
-        assert_eq!(row.kind, "assistant");
-        assert_eq!(row.role, "assistant");
-        assert_eq!(row.session_id, "sess");
+        assert_eq!(row.session_id, "s");
         assert!(row.tool_calls.contains("bash"));
     }
 
-    #[test]
-    fn event_row_empty_tool_calls_is_blank() {
-        let event = MemoryEvent {
-            kind: "goal".into(),
-            message: Message::user("hello"),
-            ts_ms: 1,
-            session_id: "s".into(),
-            usage: None,
-            iter: None,
-        };
-        let row = EventRow::from_event(&event, 0);
-        assert_eq!(row.role, "user");
-        assert_eq!(row.content, "hello");
-        assert_eq!(row.tool_calls, "");
-    }
-
-    #[test]
-    fn usage_row_from_usage_event() {
-        let event = MemoryEvent {
-            kind: "usage".into(),
-            message: Message::assistant(""),
-            ts_ms: 1,
-            session_id: "s".into(),
-            usage: Some(Usage {
-                prompt_tokens: 10,
-                completion_tokens: 5,
-                total_tokens: 15,
-            }),
-            iter: Some(2),
-        };
-        let row = UsageRow::from_event(&event).expect("usage row");
-        assert_eq!(row.prompt_tokens, 10);
-        assert_eq!(row.total_tokens, 15);
-        assert_eq!(row.iter, 2);
-    }
-
-    #[test]
-    fn usage_row_none_without_usage() {
-        let event = MemoryEvent {
-            kind: "usage".into(),
-            message: Message::assistant(""),
-            ts_ms: 1,
-            session_id: "s".into(),
-            usage: None,
-            iter: None,
-        };
-        assert!(UsageRow::from_event(&event).is_none());
+    // --- UsageRow: present ⇒ Some(tokens); absent ⇒ None ------------------
+    #[rstest]
+    #[case::present(Some(Usage { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 }), Some((10, 15)))]
+    #[case::absent(None, None)]
+    fn usage_row_cases(#[case] usage: Option<Usage>, #[case] expected: Option<(u32, u32)>) {
+        let row = UsageRow::from_event(&ev("usage", Message::assistant(""), usage));
+        match (row, expected) {
+            (Some(r), Some((prompt, total))) => {
+                assert_eq!(r.prompt_tokens, prompt);
+                assert_eq!(r.total_tokens, total);
+                assert_eq!(r.iter, 2);
+            }
+            (None, None) => {}
+            (r, exp) => panic!("got Some={}, expected {exp:?}", r.is_some()),
+        }
     }
 }

@@ -90,6 +90,8 @@ impl Tool for EditTool {
 mod tests {
     use super::*;
     use agent_core::ToolContext;
+    use agent_testkit::tempdir;
+    use rstest::rstest;
     use serde_json::json;
 
     async fn run(dir: &std::path::Path, args: Value) -> Observation {
@@ -104,81 +106,69 @@ mod tests {
             .unwrap()
     }
 
+    /// `Ok(final)` ⇒ file should end up as `final`; `Err(substr)` ⇒ error containing
+    /// `substr`. The file `f.txt` starts as `initial`.
+    #[rstest]
+    #[case::positive_unique_replace(
+        "hello world",
+        json!({"path": "f.txt", "old_string": "world", "new_string": "rust"}),
+        Ok("hello rust")
+    )]
+    #[case::positive_replace_all(
+        "a a a",
+        json!({"path": "f.txt", "old_string": "a", "new_string": "b", "replace_all": true}),
+        Ok("b b b")
+    )]
+    #[case::corner_replace_with_empty(
+        "abc",
+        json!({"path": "f.txt", "old_string": "b", "new_string": ""}),
+        Ok("ac")
+    )]
+    #[case::corner_unicode(
+        "héllo",
+        json!({"path": "f.txt", "old_string": "héllo", "new_string": "wörld"}),
+        Ok("wörld")
+    )]
+    #[case::negative_non_unique_without_flag(
+        "a a a",
+        json!({"path": "f.txt", "old_string": "a", "new_string": "b"}),
+        Err("not unique")
+    )]
+    #[case::negative_missing_string(
+        "hello",
+        json!({"path": "f.txt", "old_string": "zzz", "new_string": "x"}),
+        Err("not found")
+    )]
+    #[case::negative_path_escape(
+        "hello",
+        json!({"path": "../secret", "old_string": "a", "new_string": "b"}),
+        Err("escape")
+    )]
     #[tokio::test]
-    async fn unique_replace_succeeds() {
+    async fn edit_cases(
+        #[case] initial: &str,
+        #[case] args: Value,
+        #[case] expected: std::result::Result<&str, &str>,
+    ) {
         let dir = tempdir();
-        std::fs::write(dir.join("f.txt"), "hello world").unwrap();
-        let obs = run(
-            &dir,
-            json!({"path": "f.txt", "old_string": "world", "new_string": "rust"}),
-        )
-        .await;
-        assert!(!obs.is_error, "{}", obs.content);
-        assert_eq!(
-            std::fs::read_to_string(dir.join("f.txt")).unwrap(),
-            "hello rust"
-        );
-    }
-
-    #[tokio::test]
-    async fn non_unique_without_replace_all_errors() {
-        let dir = tempdir();
-        std::fs::write(dir.join("f.txt"), "a a a").unwrap();
-        let obs = run(
-            &dir,
-            json!({"path": "f.txt", "old_string": "a", "new_string": "b"}),
-        )
-        .await;
-        assert!(obs.is_error);
-        assert!(obs.content.contains("not unique"));
-    }
-
-    #[tokio::test]
-    async fn replace_all_replaces_every_occurrence() {
-        let dir = tempdir();
-        std::fs::write(dir.join("f.txt"), "a a a").unwrap();
-        let obs = run(
-            &dir,
-            json!({"path": "f.txt", "old_string": "a", "new_string": "b", "replace_all": true}),
-        )
-        .await;
-        assert!(!obs.is_error, "{}", obs.content);
-        assert_eq!(std::fs::read_to_string(dir.join("f.txt")).unwrap(), "b b b");
-    }
-
-    #[tokio::test]
-    async fn missing_string_errors() {
-        let dir = tempdir();
-        std::fs::write(dir.join("f.txt"), "hello").unwrap();
-        let obs = run(
-            &dir,
-            json!({"path": "f.txt", "old_string": "zzz", "new_string": "x"}),
-        )
-        .await;
-        assert!(obs.is_error);
-        assert!(obs.content.contains("not found"));
-    }
-
-    #[tokio::test]
-    async fn escapes_working_dir_rejected() {
-        let dir = tempdir();
-        let obs = run(
-            &dir,
-            json!({"path": "../secret", "old_string": "a", "new_string": "b"}),
-        )
-        .await;
-        assert!(obs.is_error);
-    }
-
-    /// A unique temp dir per test (no external tempfile dep).
-    fn tempdir() -> std::path::PathBuf {
-        let mut p = std::env::temp_dir();
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        p.push(format!("agent-edit-test-{nanos}"));
-        std::fs::create_dir_all(&p).unwrap();
-        p
+        std::fs::write(dir.join("f.txt"), initial).unwrap();
+        let obs = run(&dir, args).await;
+        match expected {
+            Ok(final_content) => {
+                assert!(!obs.is_error, "unexpected error: {}", obs.content);
+                assert_eq!(
+                    std::fs::read_to_string(dir.join("f.txt")).unwrap(),
+                    final_content
+                );
+            }
+            Err(substr) => {
+                assert!(obs.is_error, "expected error, got ok: {}", obs.content);
+                assert!(
+                    obs.content.contains(substr),
+                    "error `{}` missing `{substr}`",
+                    obs.content
+                );
+            }
+        }
     }
 }

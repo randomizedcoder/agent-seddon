@@ -140,13 +140,29 @@ impl McpTransport for HttpTransport {
 #[cfg(test)]
 mod tests {
     use super::first_sse_response;
+    use rstest::rstest;
 
-    #[test]
-    fn extracts_response_from_sse() {
-        let body =
-            "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\n\n";
-        let msg = first_sse_response(body).unwrap();
-        assert_eq!(msg["id"], 1);
-        assert_eq!(msg["result"]["ok"], true);
+    /// `Some(id)` ⇒ parses to a response whose `id` equals it; `None` ⇒ errors.
+    #[rstest]
+    #[case::positive_basic(
+        "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\n\n",
+        Some(1)
+    )]
+    #[case::positive_skips_non_data_and_no_id(
+        "event: ping\ndata: {\"jsonrpc\":\"2.0\"}\ndata: {\"id\":7,\"result\":1}\n",
+        Some(7)
+    )]
+    #[case::corner_whitespace_after_data("data:    {\"id\":3}\n", Some(3))]
+    #[case::negative_empty_body("", None)]
+    #[case::negative_no_data_lines("event: message\n: comment\n", None)]
+    #[case::negative_empty_payload("data: \ndata:\n", None)]
+    #[case::negative_non_json("data: not json at all\n", None)]
+    #[case::negative_json_without_id("data: {\"result\": 1}\n", None)]
+    fn first_sse_response_cases(#[case] body: &str, #[case] expected_id: Option<i64>) {
+        match (first_sse_response(body), expected_id) {
+            (Ok(msg), Some(id)) => assert_eq!(msg["id"], id),
+            (Err(_), None) => {}
+            (got, exp) => panic!("body {body:?}: got {got:?}, expected id {exp:?}"),
+        }
     }
 }

@@ -1,6 +1,6 @@
 //! `CompositeMemory` — a `MemoryStore` that mirrors every appended event into
 //! ClickHouse while delegating recall/distill (and the durable append) to an
-//! inner store (the JSONL `FileMemory`).
+//! inner store (the file-backed `LayeredMemory`).
 
 use crate::TelemetryHandle;
 use agent_core::{MemoryEvent, MemoryItem, MemoryStore, RecallQuery, Result};

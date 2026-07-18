@@ -64,7 +64,13 @@ pub(crate) fn resolve_within(
 
 pub(crate) fn truncate(mut s: String) -> String {
     if s.len() > MAX_OUTPUT {
-        s.truncate(MAX_OUTPUT);
+        // Cut on a char boundary — `String::truncate` panics if `MAX_OUTPUT` lands
+        // inside a multi-byte char, which real tool output (UTF-8) can trigger.
+        let mut cut = MAX_OUTPUT;
+        while cut > 0 && !s.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        s.truncate(cut);
         s.push_str("\n...[output truncated]");
     }
     s
@@ -101,27 +107,102 @@ pub fn default_tools() -> Vec<std::sync::Arc<dyn agent_core::Tool>> {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_within;
+    use super::*;
+    use rstest::rstest;
+    use serde_json::json;
     use std::path::Path;
 
-    #[test]
-    fn allows_paths_inside_cwd() {
+    // --- resolve_within: path safety ---------------------------------------
+    // `Some(expected)` ⇒ resolves to that path; `None` ⇒ rejected.
+    #[rstest]
+    #[case::positive_relative("src/main.rs", Some("/work/repo/src/main.rs"))]
+    #[case::positive_nested("a/b/c.txt", Some("/work/repo/a/b/c.txt"))]
+    #[case::positive_curdir(".", Some("/work/repo"))]
+    #[case::positive_normalized_in_bounds("./a/../b", Some("/work/repo/b"))]
+    #[case::boundary_empty("", Some("/work/repo"))]
+    #[case::boundary_bare_parent("..", None)]
+    #[case::negative_parent_escape("../../etc/passwd", None)]
+    #[case::negative_absolute("/etc/passwd", None)]
+    #[case::negative_mixed_escape("a/../../secret", None)]
+    #[case::corner_double_slash("a//b", Some("/work/repo/a/b"))]
+    #[case::corner_trailing_slash("a/b/", Some("/work/repo/a/b"))]
+    #[case::corner_unicode("café/π.rs", Some("/work/repo/café/π.rs"))]
+    fn resolve_within_cases(#[case] path: &str, #[case] expected: Option<&str>) {
         let cwd = Path::new("/work/repo");
-        assert_eq!(
-            resolve_within(cwd, "src/main.rs").unwrap(),
-            Path::new("/work/repo/src/main.rs")
-        );
-        assert_eq!(
-            resolve_within(cwd, "./a/../b").unwrap(),
-            Path::new("/work/repo/b")
-        );
+        match (resolve_within(cwd, path), expected) {
+            (Ok(got), Some(exp)) => assert_eq!(got, Path::new(exp), "path `{path}`"),
+            (Err(_), None) => {}
+            (got, exp) => panic!("path `{path}`: got {got:?}, expected {exp:?}"),
+        }
+    }
+
+    // --- truncate: output capping ------------------------------------------
+    #[rstest]
+    #[case::positive_short("hello", "hello")]
+    #[case::boundary_empty("", "")]
+    fn truncate_passthrough_when_under_limit(#[case] input: &str, #[case] expected: &str) {
+        assert_eq!(truncate(input.to_string()), expected);
     }
 
     #[test]
-    fn rejects_traversal_and_absolute() {
-        let cwd = Path::new("/work/repo");
-        assert!(resolve_within(cwd, "../../etc/passwd").is_err());
-        assert!(resolve_within(cwd, "/etc/passwd").is_err());
-        assert!(resolve_within(cwd, "a/../../secret").is_err());
+    fn truncate_boundary_exactly_at_limit_is_unchanged() {
+        let s = "a".repeat(MAX_OUTPUT);
+        assert_eq!(truncate(s.clone()), s);
+    }
+
+    #[test]
+    fn truncate_over_limit_appends_marker() {
+        let out = truncate("a".repeat(MAX_OUTPUT + 500));
+        assert!(out.starts_with(&"a".repeat(MAX_OUTPUT)));
+        assert!(out.ends_with("[output truncated]"));
+    }
+
+    #[test]
+    fn truncate_corner_does_not_split_multibyte_char() {
+        // Byte index MAX_OUTPUT lands inside the 2-byte 'é' — must not panic.
+        let mut s = "a".repeat(MAX_OUTPUT - 1);
+        s.push('é');
+        s.push_str("tail");
+        let out = truncate(s);
+        assert!(out.ends_with("[output truncated]"));
+        // The kept prefix is valid UTF-8 (no torn char): the 'é' was dropped whole.
+        assert!(out.starts_with(&"a".repeat(MAX_OUTPUT - 1)));
+    }
+
+    // --- arg extractors -----------------------------------------------------
+    #[rstest]
+    #[case::positive_present(json!({"k": "v"}), true)]
+    #[case::positive_empty_string(json!({"k": ""}), true)]
+    #[case::negative_missing(json!({}), false)]
+    #[case::negative_wrong_type_number(json!({"k": 5}), false)]
+    #[case::negative_wrong_type_bool(json!({"k": true}), false)]
+    #[case::corner_null(json!({"k": null}), false)]
+    fn arg_str_cases(#[case] args: serde_json::Value, #[case] ok: bool) {
+        assert_eq!(arg_str(&args, "k").is_ok(), ok);
+    }
+
+    #[cfg(feature = "tool-search")]
+    #[rstest]
+    #[case::positive_present(json!({"k": "v"}), Some("v"))]
+    #[case::negative_missing(json!({}), None)]
+    #[case::negative_wrong_type(json!({"k": 5}), None)]
+    #[case::corner_null(json!({"k": null}), None)]
+    fn arg_str_opt_cases(#[case] args: serde_json::Value, #[case] expected: Option<&str>) {
+        assert_eq!(arg_str_opt(&args, "k"), expected);
+    }
+
+    #[cfg(any(feature = "tool-edit", feature = "tool-search"))]
+    #[rstest]
+    #[case::positive_true(json!({"k": true}), false, true)]
+    #[case::positive_false(json!({"k": false}), true, false)]
+    #[case::boundary_missing_uses_default(json!({}), true, true)]
+    #[case::corner_wrong_type_uses_default(json!({"k": "yes"}), false, false)]
+    #[case::corner_null_uses_default(json!({"k": null}), true, true)]
+    fn arg_bool_cases(
+        #[case] args: serde_json::Value,
+        #[case] default: bool,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(arg_bool(&args, "k", default), expected);
     }
 }

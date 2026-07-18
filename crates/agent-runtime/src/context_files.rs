@@ -62,12 +62,31 @@ fn numeric_prefix(name: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_testkit::tempdir;
+    use rstest::rstest;
+
+    // --- numeric_prefix: leading-digit ordering key ------------------------
+    #[rstest]
+    #[case::positive_leading_zeros("0001_foo.md", 1)]
+    #[case::positive_plain("123_x.md", 123)]
+    #[case::positive_ten("0010_bar.md", 10)]
+    #[case::positive_all_digits("42", 42)]
+    #[case::negative_no_prefix("noprefix.md", u64::MAX)]
+    #[case::boundary_empty("", u64::MAX)]
+    #[case::corner_overflow_sorts_last("99999999999999999999_x.md", u64::MAX)]
+    fn numeric_prefix_cases(#[case] name: &str, #[case] expected: u64) {
+        assert_eq!(numeric_prefix(name), expected);
+    }
 
     #[test]
-    fn numeric_prefix_parsing() {
-        assert_eq!(numeric_prefix("0001_foo.md"), 1);
-        assert_eq!(numeric_prefix("0010_bar.md"), 10);
-        assert_eq!(numeric_prefix("noprefix.md"), u64::MAX);
+    fn load_subdir_sorts_by_prefix_then_name_and_ignores_non_md() {
+        let dir = tempdir();
+        std::fs::write(dir.join("0002_b.md"), "B").unwrap();
+        std::fs::write(dir.join("0001_a.md"), "A").unwrap();
+        std::fs::write(dir.join("zzz.md"), "Z").unwrap(); // no prefix ⇒ sorts last
+        std::fs::write(dir.join("ignore.txt"), "no").unwrap(); // non-.md ignored
+        let sources: Vec<String> = load_subdir(&dir).into_iter().map(|b| b.source).collect();
+        assert_eq!(sources, vec!["0001_a.md", "0002_b.md", "zzz.md"]);
     }
 
     #[test]

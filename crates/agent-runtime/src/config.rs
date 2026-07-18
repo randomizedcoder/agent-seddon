@@ -35,6 +35,11 @@ pub struct McpCfg {
 #[derive(Debug, Deserialize)]
 pub struct McpServerCfg {
     pub name: String,
+    /// Transport kind. Empty ⇒ inferred (`command` → stdio, `url` → http). Set to a
+    /// custom kind registered via `Registry::transport` to use an out-of-tree
+    /// transport; the whole server config is handed to its factory as `params`.
+    #[serde(default)]
+    pub kind: String,
     // --- stdio ---
     #[serde(default)]
     pub command: String,
@@ -165,6 +170,17 @@ pub struct MemoryCfg {
     pub episodic_path: String,
     #[serde(default = "default_semantic_dir")]
     pub semantic_dir: String,
+    /// Optional independent `SemanticStore` backend, e.g. "file" or a custom
+    /// "vector". When set, the runtime composes the file episodic log with this
+    /// semantic layer via `LayeredMemory` instead of using `backend`'s whole
+    /// store. Empty ⇒ use `backend`.
+    #[serde(default)]
+    pub semantic: String,
+    /// Whether `distill()` promotes episodic events into semantic facts (a model
+    /// call at each run's end). Off by default so the default build makes no extra
+    /// model calls.
+    #[serde(default)]
+    pub distill: bool,
     #[serde(default = "default_recall_limit")]
     pub recall_limit: usize,
 }
@@ -175,6 +191,8 @@ impl Default for MemoryCfg {
             backend: default_memory_backend(),
             episodic_path: default_episodic_path(),
             semantic_dir: default_semantic_dir(),
+            semantic: String::new(),
+            distill: false,
             recall_limit: default_recall_limit(),
         }
     }

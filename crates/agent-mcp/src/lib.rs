@@ -19,6 +19,7 @@ pub use http::HttpTransport;
 use agent_core::{Observation, Tool, ToolSchema};
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// The MCP protocol version this client advertises.
@@ -50,6 +51,12 @@ pub trait McpTransport: Send + Sync {
 }
 
 /// How to reach an MCP server.
+///
+/// The built-in variants (`Stdio`, `Http`) carry their own config; `Other` is the
+/// escape hatch for out-of-tree transports registered on a [`TransportRegistry`] —
+/// it names the transport `kind` and carries a free-form `params` blob the custom
+/// factory interprets. Every variant reports a `kind()` string that the registry
+/// keys off, so adding a transport never means editing [`connect`].
 #[derive(Debug, Clone)]
 pub enum Transport {
     /// Spawn a subprocess and speak JSON-RPC over its stdio.
@@ -63,6 +70,101 @@ pub enum Transport {
         url: String,
         headers: Vec<(String, String)>,
     },
+    /// A transport supplied out-of-tree, resolved by its `kind` on the registry.
+    Other { kind: String, params: Value },
+}
+
+impl Transport {
+    /// The registry key for this transport. Built-ins are `"stdio"` / `"http"`;
+    /// an `Other` reports its own kind.
+    pub fn kind(&self) -> &str {
+        match self {
+            Transport::Stdio { .. } => "stdio",
+            Transport::Http { .. } => "http",
+            Transport::Other { kind, .. } => kind,
+        }
+    }
+}
+
+/// Builds an [`McpTransport`] for a configured server. Registered on a
+/// [`TransportRegistry`] under a `kind` string, this is the MCP-side equivalent of
+/// the runtime's seam factories: a new transport (websocket, in-process, …) drops
+/// in by registering a factory — no change to [`connect`].
+#[async_trait]
+pub trait TransportFactory: Send + Sync {
+    async fn build(&self, cfg: &ServerConfig) -> Result<Box<dyn McpTransport>>;
+}
+
+/// `kind` → factory map for MCP transports. Mirrors `agent_runtime::Registry`:
+/// built-ins are wired by [`TransportRegistry::with_builtins`]; out-of-tree code
+/// registers its own before calling [`connect`] / [`connect_tools`] (the runtime
+/// threads one through `agent_runtime::Registry`).
+#[derive(Default)]
+pub struct TransportRegistry {
+    factories: BTreeMap<String, Box<dyn TransportFactory>>,
+}
+
+impl TransportRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A registry pre-populated with the built-in `stdio` + `http` transports.
+    pub fn with_builtins() -> Self {
+        let mut r = Self::new();
+        r.register("stdio", StdioFactory);
+        r.register("http", HttpFactory);
+        r
+    }
+
+    pub fn register(&mut self, kind: impl Into<String>, factory: impl TransportFactory + 'static) {
+        self.factories.insert(kind.into(), Box::new(factory));
+    }
+
+    /// Look up the factory for `cfg`'s transport kind and build it.
+    pub async fn build(&self, cfg: &ServerConfig) -> Result<Box<dyn McpTransport>> {
+        let kind = cfg.transport.kind();
+        let factory = self.factories.get(kind).ok_or_else(|| {
+            let known: Vec<&str> = self.factories.keys().map(String::as_str).collect();
+            McpError::Transport(format!(
+                "unknown transport kind `{kind}` (known: {})",
+                known.join(", ")
+            ))
+        })?;
+        factory.build(cfg).await
+    }
+}
+
+/// Built-in factory for the subprocess-stdio transport.
+struct StdioFactory;
+#[async_trait]
+impl TransportFactory for StdioFactory {
+    async fn build(&self, cfg: &ServerConfig) -> Result<Box<dyn McpTransport>> {
+        match &cfg.transport {
+            Transport::Stdio { command, args, env } => {
+                Ok(Box::new(StdioTransport::spawn(command, args, env).await?))
+            }
+            other => Err(McpError::Transport(format!(
+                "stdio factory received a `{}` transport",
+                other.kind()
+            ))),
+        }
+    }
+}
+
+/// Built-in factory for the streamable-HTTP transport.
+struct HttpFactory;
+#[async_trait]
+impl TransportFactory for HttpFactory {
+    async fn build(&self, cfg: &ServerConfig) -> Result<Box<dyn McpTransport>> {
+        match &cfg.transport {
+            Transport::Http { url, headers } => Ok(Box::new(HttpTransport::new(url, headers)?)),
+            other => Err(McpError::Transport(format!(
+                "http factory received a `{}` transport",
+                other.kind()
+            ))),
+        }
+    }
 }
 
 /// A configured MCP server.
@@ -108,6 +210,13 @@ pub struct McpClient {
 }
 
 impl McpClient {
+    /// Wrap an already-built transport. `connect` uses this after resolving a
+    /// transport from the registry; tests use it to drive the client with a fake
+    /// transport (e.g. `agent_testkit::mcp::ScriptedTransport`) directly.
+    pub fn with_transport(transport: Box<dyn McpTransport>) -> Self {
+        Self { transport }
+    }
+
     /// Run the `initialize` handshake, then send `notifications/initialized`.
     pub async fn initialize(&self) -> Result<()> {
         let params = json!({
@@ -178,22 +287,25 @@ fn extract_text(result: &Value) -> String {
 }
 
 /// Connect to a server, initialize it, and return the client plus its tool defs.
-pub async fn connect(cfg: &ServerConfig) -> Result<(Arc<McpClient>, Vec<McpToolDef>)> {
-    let transport: Box<dyn McpTransport> = match &cfg.transport {
-        Transport::Stdio { command, args, env } => {
-            Box::new(StdioTransport::spawn(command, args, env).await?)
-        }
-        Transport::Http { url, headers } => Box::new(HttpTransport::new(url, headers)?),
-    };
-    let client = Arc::new(McpClient { transport });
+/// The transport is resolved through `transports` (use
+/// [`TransportRegistry::with_builtins`] for the stock stdio/http set).
+pub async fn connect(
+    transports: &TransportRegistry,
+    cfg: &ServerConfig,
+) -> Result<(Arc<McpClient>, Vec<McpToolDef>)> {
+    let transport = transports.build(cfg).await?;
+    let client = Arc::new(McpClient::with_transport(transport));
     client.initialize().await?;
     let defs = client.list_tools().await?;
     Ok((client, defs))
 }
 
 /// Connect and wrap every discovered tool as an `agent_core::Tool`.
-pub async fn connect_tools(cfg: &ServerConfig) -> Result<Vec<Arc<dyn Tool>>> {
-    let (client, defs) = connect(cfg).await?;
+pub async fn connect_tools(
+    transports: &TransportRegistry,
+    cfg: &ServerConfig,
+) -> Result<Vec<Arc<dyn Tool>>> {
+    let (client, defs) = connect(transports, cfg).await?;
     Ok(defs
         .into_iter()
         .map(|def| Arc::new(McpTool::new(client.clone(), &cfg.name, def)) as Arc<dyn Tool>)
@@ -284,41 +396,92 @@ pub(crate) fn parse_rpc_response(msg: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
+
+    // --- sanitize: model-safe tool names -----------------------------------
+    #[rstest]
+    #[case::positive_alnum("abc123", "abc123")]
+    #[case::positive_keeps_underscore_hyphen("a_b-c", "a_b-c")]
+    #[case::negative_dot("read.file", "read_file")]
+    #[case::negative_slash_and_space("a/b c", "a_b_c")]
+    #[case::corner_unicode("café", "caf_")]
+    #[case::corner_all_invalid("!!!", "___")]
+    #[case::boundary_empty("", "")]
+    fn sanitize_cases(#[case] input: &str, #[case] expected: &str) {
+        assert_eq!(sanitize(input), expected);
+    }
+
+    // --- McpToolDef::from_value: field extraction + defaults ----------------
+    #[rstest]
+    #[case::positive_all(json!({"name":"n","description":"d"}), "n", "d")]
+    #[case::boundary_missing_name(json!({"description":"d"}), "", "d")]
+    #[case::boundary_missing_description(json!({"name":"n"}), "n", "")]
+    #[case::boundary_empty_object(json!({}), "", "")]
+    #[case::corner_null_fields(json!({"name":null,"description":null}), "", "")]
+    fn tool_def_from_value_cases(#[case] v: Value, #[case] name: &str, #[case] desc: &str) {
+        let def = McpToolDef::from_value(&v);
+        assert_eq!(def.name, name);
+        assert_eq!(def.description, desc);
+    }
 
     #[test]
-    fn tool_def_parsing_and_namespacing() {
-        let v = json!({
-            "name": "read.file",
-            "description": "read a file",
-            "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}}
-        });
-        let def = McpToolDef::from_value(&v);
-        assert_eq!(def.name, "read.file");
-        // A dummy client so we can construct the adapter (no I/O).
+    fn tool_def_missing_input_schema_defaults_to_object() {
+        let def = McpToolDef::from_value(&json!({"name": "n"}));
+        assert_eq!(def.input_schema, json!({"type": "object"}));
+    }
+
+    #[test]
+    fn mcp_tool_name_is_namespaced_and_sanitized() {
+        let def = McpToolDef::from_value(&json!({"name": "read.file"}));
         let client = Arc::new(McpClient {
             transport: Box::new(NullTransport),
         });
-        let tool = McpTool::new(client, "fs", def);
-        assert_eq!(tool.name(), "mcp_fs_read_file"); // '.' sanitized to '_'
+        assert_eq!(McpTool::new(client, "fs", def).name(), "mcp_fs_read_file");
     }
 
-    #[test]
-    fn extract_text_joins_text_blocks() {
-        let res = json!({"content": [
-            {"type": "text", "text": "line1"},
-            {"type": "image", "data": "…"},
-            {"type": "text", "text": "line2"}
-        ]});
-        assert_eq!(extract_text(&res), "line1\n[image content omitted]\nline2");
+    // --- extract_text: MCP content-block flattening ------------------------
+    #[rstest]
+    #[case::boundary_no_content(json!({}), "")]
+    #[case::boundary_empty_array(json!({"content": []}), "")]
+    #[case::positive_text_only(
+        json!({"content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]}),
+        "a\nb"
+    )]
+    #[case::positive_mixed(
+        json!({"content":[
+            {"type":"text","text":"line1"},
+            {"type":"image","data":"…"},
+            {"type":"text","text":"line2"}
+        ]}),
+        "line1\n[image content omitted]\nline2"
+    )]
+    #[case::corner_text_block_without_text(json!({"content":[{"type":"text"}]}), "")]
+    fn extract_text_cases(#[case] v: Value, #[case] expected: &str) {
+        assert_eq!(extract_text(&v), expected);
     }
 
-    #[test]
-    fn rpc_error_maps() {
-        let msg = json!({"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"no method"}});
+    // --- parse_rpc_response: success path ----------------------------------
+    #[rstest]
+    #[case::positive_result(json!({"result": {"ok": true}}), json!({"ok": true}))]
+    #[case::boundary_missing_result(json!({"jsonrpc":"2.0","id":1}), Value::Null)]
+    fn parse_rpc_ok_cases(#[case] msg: Value, #[case] expected: Value) {
+        assert_eq!(parse_rpc_response(&msg).unwrap(), expected);
+    }
+
+    // --- parse_rpc_response: error extraction + defaults -------------------
+    #[rstest]
+    #[case::positive_full(json!({"error":{"code":-32601,"message":"no method"}}), -32601, "no method")]
+    #[case::boundary_missing_code(json!({"error":{"message":"boom"}}), 0, "boom")]
+    #[case::boundary_missing_message(json!({"error":{"code":5}}), 5, "unknown error")]
+    #[case::corner_empty_error_obj(json!({"error":{}}), 0, "unknown error")]
+    fn parse_rpc_error_cases(#[case] msg: Value, #[case] code: i64, #[case] message: &str) {
         match parse_rpc_response(&msg) {
-            Err(McpError::Rpc { code, message }) => {
-                assert_eq!(code, -32601);
-                assert_eq!(message, "no method");
+            Err(McpError::Rpc {
+                code: c,
+                message: m,
+            }) => {
+                assert_eq!(c, code);
+                assert_eq!(m, message);
             }
             other => panic!("expected rpc error, got {other:?}"),
         }
@@ -333,5 +496,58 @@ mod tests {
         async fn notify(&self, _m: &str, _p: Value) -> Result<()> {
             Ok(())
         }
+    }
+
+    #[rstest]
+    #[case::stdio(Transport::Stdio { command: "cat".into(), args: vec![], env: vec![] }, "stdio")]
+    #[case::http(Transport::Http { url: "http://x".into(), headers: vec![] }, "http")]
+    #[case::other(Transport::Other { kind: "websocket".into(), params: json!({}) }, "websocket")]
+    fn transport_kind_cases(#[case] transport: Transport, #[case] expected: &str) {
+        assert_eq!(transport.kind(), expected);
+    }
+
+    struct NullFactory;
+    #[async_trait]
+    impl TransportFactory for NullFactory {
+        async fn build(&self, _cfg: &ServerConfig) -> Result<Box<dyn McpTransport>> {
+            Ok(Box::new(NullTransport))
+        }
+    }
+
+    /// An out-of-tree transport is reachable by registering a factory under its
+    /// `Other` kind — no edit to `connect`.
+    #[tokio::test]
+    async fn registry_builds_custom_transport() {
+        let mut reg = TransportRegistry::new();
+        reg.register("websocket", NullFactory);
+        let cfg = ServerConfig {
+            name: "ws".into(),
+            transport: Transport::Other {
+                kind: "websocket".into(),
+                params: json!({"url": "ws://x"}),
+            },
+        };
+        assert!(reg.build(&cfg).await.is_ok());
+    }
+
+    /// An unknown kind lists the known ones, matching the runtime registry's
+    /// error style.
+    #[tokio::test]
+    async fn registry_unknown_kind_lists_known() {
+        let reg = TransportRegistry::with_builtins();
+        let cfg = ServerConfig {
+            name: "x".into(),
+            transport: Transport::Other {
+                kind: "nope".into(),
+                params: json!({}),
+            },
+        };
+        let err = match reg.build(&cfg).await {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected an unknown-kind error"),
+        };
+        assert!(err.contains("unknown transport kind `nope`"), "{err}");
+        assert!(err.contains("stdio"), "{err}");
+        assert!(err.contains("http"), "{err}");
     }
 }

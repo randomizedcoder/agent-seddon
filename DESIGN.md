@@ -23,9 +23,10 @@ Design principles:
   TOML file (and gated at compile time by cargo features). Changing the memory
   backend or the provider is a one-line config edit, not a code change.
 - **Layered memory is first-class.** Memory is not "the message list" — it is three
-  distinct layers (working / episodic / semantic), each behind a trait (the whole
-  `MemoryStore` backend is registry-swappable today; per-layer swapping is a future
-  extension — see §3).
+  distinct layers (working / episodic / semantic), each behind a trait. The whole
+  `MemoryStore` backend is registry-swappable, and the episodic and semantic layers
+  are independently swappable too (`[memory] semantic` selects a `SemanticStore`
+  composed against the file episodic log via `LayeredMemory`) — see §3.
 - **Small, honest prototype.** The first milestone runs one real end-to-end loop.
   Everything else is a documented seam we can fill in later.
 
@@ -69,7 +70,8 @@ Steps:
    outside the loop.)
 7. **Finish.** The episodic log is already persisted incrementally. The
    **distillation pipeline** (promote durable facts into semantic memory) is
-   invoked at session end but is currently a **no-op stub** — see §3.
+   invoked at session end; it is model-backed and **opt-in** via `[memory] distill`
+   (off by default, so no extra model call unless enabled) — see §3.
 
 ```mermaid
 sequenceDiagram
@@ -111,10 +113,11 @@ sequenceDiagram
 
 Memory is the part we most want to experiment with, so it is deliberately layered.
 A single `MemoryStore` facade fronts three layers. The `EpisodicStore` and
-`SemanticStore` layer traits are defined in `agent-core` as extension points, but
-in v1 the shipped `FileMemory` composes them as a unit; the registry selects the
-whole `MemoryStore` backend by `[memory] backend` (only `"file"` today), not each
-layer independently. A future backend (SQLite/vector semantic) plugs in the same way.
+`SemanticStore` layer traits are defined in `agent-core`, and `LayeredMemory`
+composes one of each into the facade. The registry can select the whole
+`MemoryStore` backend by `[memory] backend`, **or** swap just the semantic layer by
+`[memory] semantic` (composed against the file episodic log) — so a SQLite/vector
+semantic store plugs in without reimplementing the episodic log or the loop.
 
 | Layer | Question it answers | Lifetime | Default impl |
 |-------|--------------------|----------|--------------|
@@ -142,11 +145,12 @@ Two pipelines connect the layers:
   keyword-match count (no pre-built index, no recency weighting, no embeddings;
   `crates/agent-memory/src/file.rs`). An embedding retriever is a future option.
   Retrieved items are injected into the working context by the `ContextStrategy`.
-- **Distillation** (episodic → semantic promotion): this is the intended
-  agent-curated learning loop (scan the episodic log for durable facts, promote
-  them, dedup). It is **not yet implemented** — `FileMemory::distill()` is an honest
-  no-op stub that runs at session end and returns 0. It's kept as a live seam the
-  loop already calls.
+- **Distillation** (episodic → semantic promotion): the agent-curated learning
+  loop. `FileSemantic::distill()` reads a window of recent episodic events, asks the
+  model to extract durable facts, and writes them as a curated markdown file (which
+  recall then surfaces). It runs at session end and is **opt-in** via
+  `[memory] distill = true`; with the flag off (the default) no provider is attached
+  and it is a no-op returning 0, so the default build makes no extra model calls.
 
 ```mermaid
 flowchart LR
@@ -237,15 +241,17 @@ pub trait MemoryStore: Send + Sync {
     async fn distill(&self) -> Result<usize>;       // episodic → semantic
 }
 
-#[async_trait] pub trait EpisodicStore: Send + Sync { /* append / range / replay */ }
-#[async_trait] pub trait SemanticStore: Send + Sync { /* upsert / retrieve / index */ }
+#[async_trait] pub trait EpisodicStore: Send + Sync { async fn append(..); async fn recent(..); }
+#[async_trait] pub trait SemanticStore: Send + Sync { async fn recall(..); async fn distill(..); }
 ```
 
-The shipped `FileMemory` `MemoryStore` composes an in-memory working buffer, a
-JSONL episodic log, and a markdown semantic store as one unit (the layer traits
-above are extension points, not yet independently config-swappable). Adding a
-whole alternative backend — e.g. a SQLite or vector-backed store — is a new
-registry entry selected by `[memory] backend`.
+`LayeredMemory` composes an `EpisodicStore` and a `SemanticStore` into the
+`MemoryStore` facade: `append` → episodic, `recall` → semantic, `distill` reads the
+recent episodic tail and hands it to the semantic layer. The file backend pairs
+`FileEpisodic` (JSONL log) with `FileSemantic` (markdown store). Both layers are
+independently config-swappable: `[memory] backend` picks the whole store (or its
+episodic layer), and `[memory] semantic` swaps just the semantic layer — so a
+SQLite/vector semantic store plugs in without re-implementing the episodic log.
 
 ### 4.4 `ContextStrategy` / `Compactor`
 
@@ -332,7 +338,9 @@ stream         = true         # incremental SSE + live echo (false = buffered)
 parallel_tools = true         # run a turn's parallel-safe tool calls concurrently
 
 [memory]
-backend = "file"              # -> FileMemory  (future: "sqlite", "vector")
+backend  = "file"             # whole store: FileEpisodic + FileSemantic via LayeredMemory
+# semantic = "vector"         # swap only the semantic layer (composed w/ file episodic)
+# distill  = true             # opt in to model-backed episodic -> semantic promotion
 
 [tools]
 enabled = ["bash", "read_file", "write_file", "edit", "grep", "find", "ls"]
@@ -393,7 +401,7 @@ agent-seddon/
 │   ├── agent-core/           # seam traits + shared types (no impls)
 │   ├── agent-providers/      # LlmProvider impls: openai-compat, anthropic
 │   ├── agent-tools/          # Tool impls: bash, read_file, write_file, edit, grep, find, ls
-│   ├── agent-memory/         # MemoryStore impl: FileMemory (JSONL episodic + markdown semantic)
+│   ├── agent-memory/         # FileEpisodic (JSONL) + FileSemantic (markdown) via LayeredMemory
 │   ├── agent-context/        # ContextStrategy impls: sliding-window, summarizing-window
 │   ├── agent-mcp/            # MCP client (stdio + streamable-HTTP transports)
 │   ├── agent-telemetry/      # ClickHouse telemetry sink (events / logs / usage)
@@ -492,7 +500,8 @@ loop iteration (model call → tool exec → observation → response), and flip
    async; a turn's parallel-safe tool calls run concurrently (`parallel_tools`),
    and blocking walkers (`grep`/`find`/`ls`) run on `spawn_blocking`.
 4. Where does the distillation pipeline run — end-of-session only, or also on demand?
-   (Still a no-op stub; unchanged.)
+   (Now implemented as an opt-in, model-backed end-of-session pass via
+   `[memory] distill`; on-demand/mid-session triggering is still open.)
 5. ~~How much of the `Agent`/subtask delegation to build vs. stub as a seam?~~
    **Resolved:** built as the `delegate` tool (§4.5), depth-bounded. MCP client
    (§4.6) added alongside for external tools.

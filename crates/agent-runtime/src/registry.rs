@@ -10,7 +10,9 @@
 //! See `docs/extending.md` for the contributor workflow.
 
 use crate::config::Config;
-use agent_core::{ContextStrategy, LlmProvider, MemoryStore, Policy, Tool};
+use agent_core::{
+    ContextStrategy, EpisodicStore, LlmProvider, MemoryStore, Policy, SemanticStore, Tool,
+};
 use anyhow::anyhow;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -24,7 +26,15 @@ type ContextFactory = Box<
         + Sync,
 >;
 type PolicyFactory = Box<dyn Fn(&Config) -> anyhow::Result<Arc<dyn Policy>> + Send + Sync>;
-type MemoryFactory = Box<dyn Fn(&Config) -> anyhow::Result<Arc<dyn MemoryStore>> + Send + Sync>;
+// Memory + semantic factories receive the provider too — a store that distills
+// (promotes episodic → semantic facts) needs the model. Most ignore it.
+type MemoryFactory = Box<
+    dyn Fn(&Config, &Arc<dyn LlmProvider>) -> anyhow::Result<Arc<dyn MemoryStore>> + Send + Sync,
+>;
+type EpisodicFactory = Box<dyn Fn(&Config) -> anyhow::Result<Arc<dyn EpisodicStore>> + Send + Sync>;
+type SemanticFactory = Box<
+    dyn Fn(&Config, &Arc<dyn LlmProvider>) -> anyhow::Result<Arc<dyn SemanticStore>> + Send + Sync,
+>;
 type ToolFactory = Box<dyn Fn(&Config) -> anyhow::Result<Arc<dyn Tool>> + Send + Sync>;
 
 /// Name → factory maps for every swappable seam. Keys are `&'static str` and the
@@ -35,7 +45,13 @@ pub struct Registry {
     contexts: BTreeMap<&'static str, ContextFactory>,
     policies: BTreeMap<&'static str, PolicyFactory>,
     memories: BTreeMap<&'static str, MemoryFactory>,
+    episodics: BTreeMap<&'static str, EpisodicFactory>,
+    semantics: BTreeMap<&'static str, SemanticFactory>,
     tools: BTreeMap<&'static str, ToolFactory>,
+    // MCP transports live behind their own registry in `agent-mcp`; the runtime
+    // owns one so a custom transport is registrable out-of-tree like any seam.
+    #[cfg(feature = "mcp")]
+    transports: agent_mcp::TransportRegistry,
 }
 
 impl Registry {
@@ -79,9 +95,29 @@ impl Registry {
     pub fn memory(
         &mut self,
         name: &'static str,
-        f: impl Fn(&Config) -> anyhow::Result<Arc<dyn MemoryStore>> + Send + Sync + 'static,
+        f: impl Fn(&Config, &Arc<dyn LlmProvider>) -> anyhow::Result<Arc<dyn MemoryStore>>
+            + Send
+            + Sync
+            + 'static,
     ) {
         self.memories.insert(name, Box::new(f));
+    }
+    pub fn episodic(
+        &mut self,
+        name: &'static str,
+        f: impl Fn(&Config) -> anyhow::Result<Arc<dyn EpisodicStore>> + Send + Sync + 'static,
+    ) {
+        self.episodics.insert(name, Box::new(f));
+    }
+    pub fn semantic(
+        &mut self,
+        name: &'static str,
+        f: impl Fn(&Config, &Arc<dyn LlmProvider>) -> anyhow::Result<Arc<dyn SemanticStore>>
+            + Send
+            + Sync
+            + 'static,
+    ) {
+        self.semantics.insert(name, Box::new(f));
     }
     pub fn tool(
         &mut self,
@@ -89,6 +125,23 @@ impl Registry {
         f: impl Fn(&Config) -> anyhow::Result<Arc<dyn Tool>> + Send + Sync + 'static,
     ) {
         self.tools.insert(name, Box::new(f));
+    }
+
+    /// Register an MCP transport factory under a `kind` (e.g. `"websocket"`),
+    /// selected by an `[[mcp.servers]] kind = "..."` (or `Transport::Other`).
+    #[cfg(feature = "mcp")]
+    pub fn transport(
+        &mut self,
+        kind: impl Into<String>,
+        factory: impl agent_mcp::TransportFactory + 'static,
+    ) {
+        self.transports.register(kind, factory);
+    }
+
+    /// The MCP transport registry (used by the builder to connect servers).
+    #[cfg(feature = "mcp")]
+    pub fn transports(&self) -> &agent_mcp::TransportRegistry {
+        &self.transports
     }
 
     // --- resolution --------------------------------------------------------
@@ -119,12 +172,40 @@ impl Registry {
             .ok_or_else(|| unknown("policy", name, self.policies.keys().copied()))?;
         f(cfg)
     }
-    pub fn build_memory(&self, name: &str, cfg: &Config) -> anyhow::Result<Arc<dyn MemoryStore>> {
+    pub fn build_memory(
+        &self,
+        name: &str,
+        cfg: &Config,
+        provider: &Arc<dyn LlmProvider>,
+    ) -> anyhow::Result<Arc<dyn MemoryStore>> {
         let f = self
             .memories
             .get(name)
             .ok_or_else(|| unknown("memory backend", name, self.memories.keys().copied()))?;
+        f(cfg, provider)
+    }
+    pub fn build_episodic(
+        &self,
+        name: &str,
+        cfg: &Config,
+    ) -> anyhow::Result<Arc<dyn EpisodicStore>> {
+        let f = self
+            .episodics
+            .get(name)
+            .ok_or_else(|| unknown("episodic backend", name, self.episodics.keys().copied()))?;
         f(cfg)
+    }
+    pub fn build_semantic(
+        &self,
+        name: &str,
+        cfg: &Config,
+        provider: &Arc<dyn LlmProvider>,
+    ) -> anyhow::Result<Arc<dyn SemanticStore>> {
+        let f = self
+            .semantics
+            .get(name)
+            .ok_or_else(|| unknown("semantic backend", name, self.semantics.keys().copied()))?;
+        f(cfg, provider)
     }
     pub fn build_tool(&self, name: &str, cfg: &Config) -> anyhow::Result<Arc<dyn Tool>> {
         let f = self
@@ -156,6 +237,12 @@ fn unknown(kind: &str, name: &str, known: impl Iterator<Item = &'static str>) ->
 /// contributor adds a line for a new in-tree module — each guarded by the cargo
 /// feature that compiles the module in. See `docs/extending.md`.
 pub fn register_builtins(r: &mut Registry) {
+    // --- mcp transports (stdio + http) ---
+    #[cfg(feature = "mcp")]
+    {
+        r.transports = agent_mcp::TransportRegistry::with_builtins();
+    }
+
     // --- providers ---
     #[cfg(feature = "provider-openai-compat")]
     r.provider("openai-compat", crate::builder::openai_compat_provider);
@@ -188,9 +275,13 @@ pub fn register_builtins(r: &mut Registry) {
         Ok(Arc::new(crate::policy::Interactive) as Arc<dyn Policy>)
     });
 
-    // --- memory backends ---
+    // --- memory backends (whole-store + independently-swappable layers) ---
     #[cfg(feature = "memory-file")]
-    r.memory("file", crate::builder::file_memory);
+    {
+        r.memory("file", crate::builder::file_memory);
+        r.episodic("file", crate::builder::file_episodic);
+        r.semantic("file", crate::builder::file_semantic);
+    }
 
     // --- tools ---
     #[cfg(feature = "tool-core")]
@@ -226,6 +317,17 @@ pub fn register_builtins(r: &mut Registry) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
+
+    // --- unknown(): error message formatting -------------------------------
+    #[rstest]
+    #[case::some_known(&["a", "b", "c"], "unknown thing `x` (known: a, b, c)")]
+    #[case::single_known(&["only"], "unknown thing `x` (known: only)")]
+    #[case::none_known(&[], "unknown thing `x` (known: <none — check enabled cargo features>)")]
+    fn unknown_error_cases(#[case] known: &[&'static str], #[case] expected: &str) {
+        let err = unknown("thing", "x", known.iter().copied());
+        assert_eq!(err.to_string(), expected);
+    }
 
     #[test]
     fn builtins_register_expected_names() {

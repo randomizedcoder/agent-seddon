@@ -117,16 +117,34 @@ fn field(front: &str, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     fn tempdir() -> PathBuf {
-        let mut p = std::env::temp_dir();
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        p.push(format!("agent-skills-test-{nanos}"));
-        std::fs::create_dir_all(&p).unwrap();
-        p
+        agent_testkit::tempdir()
+    }
+
+    // --- split_frontmatter: `---`-delimited YAML head ----------------------
+    #[rstest]
+    #[case::positive_with_frontmatter("---\nname: x\n---\nbody", "name: x", "body")]
+    #[case::negative_no_frontmatter("just body", "", "just body")]
+    #[case::negative_unterminated("---\nname: x\nbody", "", "---\nname: x\nbody")]
+    #[case::boundary_eof_close("---\nname: x\n---", "name: x", "")]
+    #[case::boundary_empty("", "", "")]
+    fn split_frontmatter_cases(#[case] input: &str, #[case] front: &str, #[case] body: &str) {
+        assert_eq!(split_frontmatter(input), (front, body));
+    }
+
+    // --- field: `key: value` extraction ------------------------------------
+    #[rstest]
+    #[case::positive_plain("name: pdf", "name", Some("pdf"))]
+    #[case::positive_double_quoted("name: \"pdf\"", "name", Some("pdf"))]
+    #[case::positive_single_quoted("name: 'pdf'", "name", Some("pdf"))]
+    #[case::corner_extra_whitespace("name:    pdf   ", "name", Some("pdf"))]
+    #[case::positive_first_match_wins("name: a\nname: b", "name", Some("a"))]
+    #[case::negative_missing("other: x", "name", None)]
+    #[case::boundary_empty_value("name:", "name", None)]
+    fn field_cases(#[case] front: &str, #[case] key: &str, #[case] expected: Option<&str>) {
+        assert_eq!(field(front, key).as_deref(), expected);
     }
 
     #[test]

@@ -59,10 +59,13 @@ insecure_tls = true          # GLM server uses a self-signed cert
 #   # base_url defaults to https://api.anthropic.com/v1; version to 2023-06-01.
 
 [memory]
-backend       = "file"                    # -> FileMemory (registry-selected)
+backend       = "file"                    # whole store: FileEpisodic + FileSemantic (registry-selected)
 episodic_path = ".agent/episodic.jsonl"   # append-only event log ("what happened")
 semantic_dir  = ".agent/memory"           # curated markdown facts ("what is true")
 recall_limit  = 5
+# semantic    = "vector"                  # swap ONLY the semantic layer (composed w/ file episodic)
+# distill     = true                      # opt in to model-backed episodic -> semantic promotion
+#                                         # (off by default: no extra model call per run)
 
 [tools]
 # Empty list = every registered tool. Name a subset to restrict (must be
