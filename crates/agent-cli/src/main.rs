@@ -58,6 +58,7 @@ async fn main() -> Result<()> {
         endpoint: config.telemetry.otlp_endpoint.clone(),
         service_name: config.telemetry.otel_service_name.clone(),
         instance_id: (!session_id.is_empty()).then(|| session_id.clone()),
+        headers: config.telemetry.otlp_headers.clone(),
     });
     let otel_guard = init_tracing(&telemetry, config.telemetry.stream_logs, otel_cfg);
 
@@ -180,7 +181,9 @@ fn init_tracing(
     stream_logs: bool,
     otel: Option<OtelConfig>,
 ) -> Option<OtelGuard> {
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    // A fresh `RUST_LOG`-derived filter per call site (EnvFilter isn't `Clone`).
+    let env_filter =
+        || EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let ch_layer = telemetry
         .as_ref()
         .filter(|_| stream_logs)
@@ -197,13 +200,20 @@ fn init_tracing(
         },
         None => (None, None),
     };
-    // Logs go to stderr so stdout stays clean (it carries the answer, and in
-    // `--serve-mcp` mode the JSON-RPC channel).
+    // Per-layer filters so each sink is independent. Console (stderr, to keep stdout
+    // clean for the answer / the `--serve-mcp` JSON-RPC channel) and the ClickHouse
+    // log layer respect `RUST_LOG`; the OTLP trace layer always captures `INFO`+
+    // spans — otherwise `RUST_LOG=warn` (a common way to quiet the console) would
+    // silently drop every span and disable distributed tracing.
     Registry::default()
-        .with(env_filter)
-        .with(fmt::layer().with_target(false).with_writer(std::io::stderr))
-        .with(ch_layer)
-        .with(otel_layer)
+        .with(
+            fmt::layer()
+                .with_target(false)
+                .with_writer(std::io::stderr)
+                .with_filter(env_filter()),
+        )
+        .with(ch_layer.map(|l| l.with_filter(env_filter())))
+        .with(otel_layer.map(|l| l.with_filter(tracing_subscriber::filter::LevelFilter::INFO)))
         .init();
     otel_guard
 }

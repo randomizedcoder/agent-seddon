@@ -267,6 +267,11 @@ pub struct TelemetryCfg {
     /// `service.name` resource attribute on OTLP-exported spans.
     #[serde(default = "default_otel_service_name")]
     pub otel_service_name: String,
+    /// Extra OTLP request headers, raw `key=value` pairs (comma-separated). Needed
+    /// for collectors that authenticate ingestion — e.g. HyperDX/ClickStack expects
+    /// `authorization=<ingestion-key>`. Empty (the default) ⇒ no headers.
+    #[serde(default)]
+    pub otlp_headers: String,
 }
 
 impl Default for TelemetryCfg {
@@ -282,6 +287,7 @@ impl Default for TelemetryCfg {
             flush_interval_ms: default_flush_ms(),
             otlp_endpoint: String::new(),
             otel_service_name: default_otel_service_name(),
+            otlp_headers: String::new(),
         }
     }
 }

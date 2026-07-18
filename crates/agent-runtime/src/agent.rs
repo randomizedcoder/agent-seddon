@@ -16,6 +16,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use tracing::Instrument;
 
 #[derive(Clone)]
 pub struct Settings {
@@ -154,9 +155,14 @@ impl Agent {
             // echo); `stream=false` is the buffered path (an escape hatch for
             // servers that misbehave on SSE).
             let resp = if self.settings.stream {
-                self.complete_streaming(req).await?
+                self.complete_streaming(req)
+                    .instrument(tracing::info_span!("provider.stream", iter))
+                    .await?
             } else {
-                self.provider.complete(req).await?
+                self.provider
+                    .complete(req)
+                    .instrument(tracing::info_span!("provider.complete", iter))
+                    .await?
             };
             self.metrics.on_api_call(
                 model,
@@ -196,7 +202,14 @@ impl Agent {
             // transcript.
             let mut decisions = Vec::with_capacity(assistant.tool_calls.len());
             for call in &assistant.tool_calls {
-                decisions.push(self.policy.authorize(call).await);
+                decisions.push(
+                    self.policy
+                        .authorize(call)
+                        .instrument(
+                            tracing::info_span!("policy.authorize", iter, tool = %call.name),
+                        )
+                        .await,
+                );
             }
 
             let parallel = self.settings.parallel_tools
@@ -212,6 +225,7 @@ impl Agent {
                 .map(|(call, dec)| {
                     let tools = &self.tools;
                     let tool_ctx: &ToolContext = tool_ctx;
+                    let span = tracing::info_span!("tool.execute", iter, tool = %call.name);
                     async move {
                         match dec {
                             Decision::Deny(_) => None,
@@ -226,6 +240,7 @@ impl Agent {
                             }),
                         }
                     }
+                    .instrument(span)
                 });
 
             let mut observations: Vec<Option<Observation>> = if parallel {
@@ -266,7 +281,10 @@ impl Agent {
             }
 
             // Keep the working set within budget before the next turn.
-            self.context.compact(working, budget).await?;
+            self.context
+                .compact(working, budget)
+                .instrument(tracing::info_span!("context.compact", iter))
+                .await?;
         }
 
         self.memory.distill().await.ok();
@@ -379,7 +397,11 @@ impl Session<'_> {
     pub async fn send(&mut self, input: &str) -> anyhow::Result<String> {
         self.agent.metrics.run_started();
         let start = Instant::now();
-        let result = self.send_inner(input).await;
+        // Root span of the run's trace tree; every seam interaction below nests
+        // under it, and OTLP exports the whole tree to the collector.
+        let goal: String = input.chars().take(80).collect();
+        let span = tracing::info_span!("agent.turn", goal = %goal);
+        let result = self.send_inner(input).instrument(span).await;
         let outcome = if result.is_ok() { "success" } else { "error" };
         self.agent
             .metrics
@@ -397,6 +419,7 @@ impl Session<'_> {
                     text: input.to_string(),
                     limit: self.agent.settings.recall_limit,
                 })
+                .instrument(tracing::info_span!("memory.recall"))
                 .await
                 .unwrap_or_else(|e| {
                     tracing::warn!("recall failed: {e}");
@@ -415,6 +438,7 @@ impl Session<'_> {
                     goal: input.to_string(),
                     append: self.agent.settings.context_append.clone(),
                 })
+                .instrument(tracing::info_span!("context.assemble"))
                 .await?;
             // Inject any context queued before the first turn (e.g. skills).
             for ctx in self.pending_context.drain(..) {
