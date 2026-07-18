@@ -68,9 +68,11 @@ cargo run -p agent-cli -- --config config/agent.toml
 ```
 
 In the REPL, type a goal to run a turn (history persists across turns), or a slash
-command: `/help`, `/new`, `/compact`, `/resume`, `/model`, `/tools`, `/save`,
-`/quit`. Each turn is saved under `.agent/sessions/`; resume with `--continue`
-(most recent) or `--resume <id>`, or `/resume` inside the REPL.
+command: `/help`, `/new`, `/compact`, `/resume`, `/skills`, `/skill:<name>`,
+`/model`, `/tools`, `/save`, `/quit`. Each turn is saved under `.agent/sessions/`;
+resume with `--continue` (most recent) or `--resume <id>`, or `/resume` inside the
+REPL. `/skills` lists reusable instruction snippets (see [`skills/`](skills/)) and
+`/skill:<name>` loads one into the conversation on demand.
 
 Set `RUST_LOG=debug` to see the model's `reasoning_content` length and compaction
 decisions.

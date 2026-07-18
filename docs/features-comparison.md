@@ -6,8 +6,9 @@
 > **Update (2026-07-18):** Since the original analysis, the plugin registry + P0
 > features shipped; an **MCP client** (stdio + HTTP) and **subagent `delegate`**
 > landed; and the P1 usability bundle — **interactive REPL**, **session resume**,
-> **slash commands**, and **summarizing compaction** — is in. Rows below are
-> annotated where that changes our coverage.
+> **slash commands**, **summarizing compaction**, and **skills**
+> (`/skill:<name>`) — is in. Rows below are annotated where that changes our
+> coverage.
 
 ## Purpose
 
@@ -105,7 +106,7 @@ impl) · ❌ Missing · ➖ N/A.
 | Session persistence / resume | Yes (JSONL + `--continue`/`--resume`/`/resume`) | Yes (JSONL + `/resume`) | Yes (SQLite) | ✅ |
 | Interactive REPL / TUI | REPL (line-based) | Rich TUI | Rich TUI | 🟡 |
 | Slash commands | Yes | Yes | Yes | ✅ |
-| Skills (SKILL.md) | No | Yes | Yes | ❌ |
+| Skills (SKILL.md) | Yes (`/skill:<name>` load) | Yes | Yes | ✅ |
 | Plugins / extensions | Compile-time seams | Yes (hot-reload TS) | Yes (19 plugin types) | 🟡 |
 | Hooks | No | Yes (events) | Yes | ❌ |
 | Config system | TOML | JSON | YAML | ✅ |
