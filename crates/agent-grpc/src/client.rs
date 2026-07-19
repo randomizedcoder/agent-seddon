@@ -246,6 +246,7 @@ impl Policy for GrpcPolicy {
 struct GrpcTool {
     client: pb::tool_service_client::ToolServiceClient<Channel>,
     schema: ToolSchema,
+    parallel_safe: bool,
 }
 
 #[async_trait]
@@ -256,6 +257,12 @@ impl Tool for GrpcTool {
 
     fn schema(&self) -> ToolSchema {
         self.schema.clone()
+    }
+
+    /// Preserve the remote tool's concurrency contract (carried in `DescribeAll`),
+    /// so a non-parallel-safe remote tool isn't run concurrently by the loop.
+    fn parallel_safe(&self) -> bool {
+        self.parallel_safe
     }
 
     async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<Observation> {
@@ -597,12 +604,16 @@ pub async fn grpc_tools(endpoint: &Endpoint) -> Result<Vec<Arc<dyn Tool>>> {
         .map_err(|s| agent_core::Error::Tool(s.to_string()))?;
     let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
     for schema in resp.into_inner().tools {
+        // Read the concurrency flag off the wire before converting (agent-core's
+        // `ToolSchema` has no such field).
+        let parallel_safe = schema.parallel_safe;
         let schema: ToolSchema = schema
             .try_into()
             .map_err(|e: agent_proto::ConvertError| agent_core::Error::Tool(e.to_string()))?;
         tools.push(Arc::new(GrpcTool {
             client: pb::tool_service_client::ToolServiceClient::new(channel.clone()),
             schema,
+            parallel_safe,
         }));
     }
     Ok(tools)

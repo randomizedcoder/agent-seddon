@@ -27,9 +27,10 @@ not test it at all.
 > FS side effects — gap 2), and the timeout is **test-lowered to 1s under
 > `cfg(test)`** so the timeout test is fast (production keeps 120s). No iai perf
 > bench: `bash` is subprocess-dominated with no deterministic CPU hot path. Gaps
-> 6–7 (workdir/env/prefix/sudo/spill) remain deliberate non-features. One new
-> follow-up surfaced: a tool's `parallel_safe()` flag is **not propagated over the
-> gRPC seam** (the client proxy defaults to `true`) — noted in the roundtrip test.
+> 6–7 (workdir/env/prefix/sudo/spill) remain deliberate non-features. (The
+> follow-up this surfaced — a tool's `parallel_safe()` flag not surviving the gRPC
+> seam — is now **fixed**: `parallel_safe` is carried in `DescribeAll`, so a remote
+> `bash` is serialized like a local one.)
 
 ## 2. agent-seddon today
 

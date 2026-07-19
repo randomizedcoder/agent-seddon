@@ -142,7 +142,19 @@ impl pb::tool_service_server::ToolService for ToolWorker {
             .tools
             .describe_all()
             .into_iter()
-            .map(Into::into)
+            .map(|schema| {
+                // Carry each tool's real `parallel_safe` flag (the `From` default is
+                // `true`); look the tool back up by name so a non-parallel-safe
+                // remote tool isn't run concurrently by the client loop.
+                let parallel_safe = self
+                    .tools
+                    .get(&schema.name)
+                    .is_none_or(|t| t.parallel_safe());
+                pb::ToolSchema {
+                    parallel_safe,
+                    ..schema.into()
+                }
+            })
             .collect();
         Ok(Response::new(pb::DescribeAllResponse { tools }))
     }
