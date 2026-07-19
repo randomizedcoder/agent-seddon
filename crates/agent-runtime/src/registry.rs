@@ -355,6 +355,10 @@ pub fn register_builtins(r: &mut Registry) {
     r.tool("edit", |_cfg| {
         Ok(Arc::new(agent_tools::EditTool) as Arc<dyn Tool>)
     });
+    #[cfg(feature = "tool-patch")]
+    r.tool("apply_patch", |_cfg| {
+        Ok(Arc::new(agent_tools::ApplyPatchTool) as Arc<dyn Tool>)
+    });
     #[cfg(feature = "tool-search")]
     {
         r.tool("grep", |_cfg| {

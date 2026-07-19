@@ -170,6 +170,42 @@ async fn tools_describe_and_execute(#[case] transport: Transport) {
     assert_eq!(obs.content, "pong");
 }
 
+// A real built-in tool (`apply_patch`) dispatched over the generic ToolService
+// `Execute` RPC — proves a *feature* tool works end-to-end over protobuf+gRPC on
+// both transports, not just the in-testkit `EchoTool`.
+#[rstest]
+#[case::tcp(Transport::Tcp)]
+#[case::uds(Transport::Uds)]
+#[tokio::test(flavor = "multi_thread")]
+async fn apply_patch_roundtrips(#[case] transport: Transport) {
+    let dir = tempdir();
+    std::fs::write(dir.join("f.txt"), "before\n").unwrap();
+
+    let mut registry = agent_core::ToolRegistry::new();
+    registry.register(Arc::new(agent_tools::ApplyPatchTool));
+    let (dial, _srv) = spawn(transport, tools_router(registry, dir.clone())).await;
+
+    let tools = grpc_tools(&dial).await.unwrap();
+    let patch = tools.iter().find(|t| t.name() == "apply_patch").unwrap();
+
+    let ctx = ToolContext { cwd: dir.clone() };
+    let obs = patch
+        .execute(
+            serde_json::json!({
+                "patch": "*** Begin Patch\n*** Update File: f.txt\n@@\n-before\n+after\n*** End Patch"
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert!(!obs.is_error, "{}", obs.content);
+    assert!(obs.content.contains("M f.txt"), "summary: {}", obs.content);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("f.txt")).unwrap(),
+        "after\n"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Memory
 // ---------------------------------------------------------------------------

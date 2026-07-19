@@ -10,6 +10,8 @@ default = ["tool-core"]
 tool-core = []
 # Surgical string-replace edit tool.
 tool-edit = []
+# Multi-file unified-diff ("V4A") patch tool: add/update/delete in one atomic call.
+tool-patch = []
 # gitignore-aware grep / find / ls (pulls in the `ignore` + `regex` crates).
 tool-search = ["dep:ignore", "dep:regex"]
 # The `search` tool over the SearchBackend seam (index-backed full-text search).
@@ -20,6 +22,9 @@ tool-search-index = []
 tool-git = []
 # The `metrics` tool: lets the agent read its own live performance registry.
 tool-metrics = ["dep:agent-metrics"]
+# Heap-leak/allocation assertions for tests/leak.rs (dhat global allocator). Off by
+# default; the leak check runs `--features dhat-heap,tool-patch`.
+dhat-heap = ["dep:dhat"]
 
 [dependencies]
 agent-core.workspace = true
@@ -29,7 +34,16 @@ serde_json.workspace = true
 tokio.workspace = true
 ignore = { workspace = true, optional = true }
 regex = { workspace = true, optional = true }
+# Optional heap profiler for tests/leak.rs (only under the `dhat-heap` feature).
+dhat = { workspace = true, optional = true }
 
 [dev-dependencies]
 rstest.workspace = true
 agent-testkit.workspace = true
+iai-callgrind.workspace = true
+
+# Deterministic instruction-count bench for the patch parser (see benches/patch.rs).
+[[bench]]
+name = "patch"
+harness = false
+required-features = ["tool-patch"]

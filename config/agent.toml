@@ -79,7 +79,7 @@ recall_limit  = 5
 # always added when their server is configured — this allowlist only filters the
 # built-ins.
 enabled = [
-    "bash", "read_file", "write_file", "edit", "grep", "find", "ls", "search", "metrics",
+    "bash", "read_file", "write_file", "edit", "apply_patch", "grep", "find", "ls", "search", "metrics",
     "git_read", "git_tree", "git_diff", "git_grep", "git_log", "git_branches", "git_status",
     "git_worktree", "git_checkpoint",
 ]
