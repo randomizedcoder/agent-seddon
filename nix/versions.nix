@@ -43,6 +43,28 @@ in
   protobuf = pkgs.protobuf;
   grpcurl = pkgs.grpcurl;
 
+  # ── Benchmarks: the performance + leak gate ───────────────────────────────
+  # `iai-callgrind` runs each bench under callgrind for a *deterministic*
+  # instruction count (no wall-clock noise), so an absolute ceiling
+  # (`--callgrind-limits='ir=…'`) can gate a stateless `nix flake check`.
+  # `valgrind` executes the benches; the `iai-callgrind-runner` binary version
+  # MUST equal the `iai-callgrind` dev-dep in Cargo.toml — bump the dep,
+  # `iaiCallgrindVersion`, and both hashes below together (recompute a hash by
+  # setting it to "" and reading nix's "got:" line).
+  valgrind = pkgs.valgrind;
+  iaiCallgrindVersion = "0.16.1";
+  iai-callgrind-runner = pkgs.rustPlatform.buildRustPackage {
+    pname = "iai-callgrind-runner";
+    version = "0.16.1";
+    src = pkgs.fetchCrate {
+      pname = "iai-callgrind-runner";
+      version = "0.16.1";
+      hash = "sha256-wJTwaqAz8GWCJ/l9GRXYBVBkpPYrWxN4VQ7GdRFXmzM=";
+    };
+    cargoHash = "sha256-4N7P23bCeeJee/Cm3sSORByh+HzflOENqYqpu629mpA=";
+    doCheck = false; # a plain runner binary; its upstream tests need fixtures
+  };
+
   # ── Search backends (the SearchBackend seam) ──────────────────────────────
   # Upstream search engines pinned by git rev for reproducibility. `tantivy` is a
   # normal cargo git dependency (see crates/agent-search/Cargo.toml); crane

@@ -46,6 +46,14 @@ regex = "1"
 # table-driven test cases (dev-only)
 rstest = "0.23"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
+# performance benchmarks — deterministic instruction counts via callgrind, so a
+# regression fails a stateless `nix flake check` (dev-only; needs valgrind + the
+# matching `iai-callgrind-runner`, both pinned in nix/versions.nix).
+iai-callgrind = "0.16"
+# heap profiler for allocation-budget + leak assertions in targeted tests. Behind
+# a per-crate `dhat-heap` feature so its `#[global_allocator]` is never in a normal
+# build (dev-only).
+dhat = "0.3"
 
 # telemetry / ClickHouse (native protocol, port 9000)
 klickhouse = "0.13"

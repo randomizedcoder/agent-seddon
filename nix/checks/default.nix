@@ -19,8 +19,26 @@
 {
   clippy = import ./clippy.nix { inherit craneLib commonArgs cargoArtifacts; };
   rustfmt = import ./rustfmt.nix { inherit craneLib commonArgs; };
-  test = import ./test.nix { inherit craneLib commonArgs cargoArtifacts; };
+  test = import ./test.nix {
+    inherit
+      pkgs
+      craneLib
+      commonArgs
+      cargoArtifacts
+      ;
+  };
   cargo-audit = import ./cargo-audit.nix { inherit craneLib commonArgs advisory-db; };
+  # Deterministic perf gate (iai-callgrind under valgrind, absolute Ir ceilings)
+  # + heap leak/allocation-budget gate (dhat). See docs/components/benchmarking.md.
+  bench = import ./bench.nix {
+    inherit
+      craneLib
+      commonArgs
+      cargoArtifacts
+      versions
+      ;
+  };
+  leak = import ./leak.nix { inherit craneLib commonArgs cargoArtifacts; };
   nix-fmt = import ./nix-fmt.nix { inherit pkgs versions; };
   # `constants.rs` must match what `nix/constants.nix` renders (see gen-constants).
   constants-sync = import ./constants-sync.nix {

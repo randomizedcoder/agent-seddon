@@ -10,3 +10,20 @@ license.workspace = true
 
 [dependencies]
 prometheus.workspace = true
+# Optional heap profiler — pulled in only by the `dhat-heap` feature for the leak
+# test (tests/leak.rs). Absent from every normal build.
+dhat = { workspace = true, optional = true }
+
+[features]
+# Installs dhat's global allocator so tests/leak.rs can assert no leak + an
+# allocation budget. Off by default; the leak check runs `--features dhat-heap`.
+dhat-heap = ["dep:dhat"]
+
+[dev-dependencies]
+# Deterministic instruction-count benchmark harness (see benches/metrics.rs).
+iai-callgrind.workspace = true
+
+# The exemplar bench + leak test establish the pattern every feature PR follows.
+[[bench]]
+name = "metrics"
+harness = false

@@ -40,6 +40,32 @@ nix run   .#gen-constants       # regenerate constants.rs after editing nix/cons
 `nix flake check` is the gate: it runs `clippy` with `-D warnings`, so the tree
 must be warning-clean. When in doubt, run it before considering work done.
 
+## Benchmarks & leak checks
+
+Performance and heap behaviour are **gated by `nix flake check`** (two checks,
+`bench` + `leak`), so a regression fails the build like a lint would. See
+[`docs/components/benchmarking.md`](docs/components/benchmarking.md) for the full
+pattern; the essentials:
+
+```sh
+nix run .#bench                       # run every iai-callgrind bench locally
+nix run .#bench -- -p agent-metrics   # scope to one crate
+nix develop -c cargo test -p agent-metrics --features dhat-heap --test leak   # leak test
+```
+
+- **Perf** — `benches/*.rs` use **iai-callgrind** (deterministic instruction
+  counts under `valgrind`). Each bench has an **absolute Ir ceiling** enforced in
+  `nix/checks/bench.nix` via `--callgrind-limits='ir=…'`; bump a ceiling there (the
+  diff records it) when a legitimate change moves a bench.
+- **Leak** — `tests/leak.rs` use **dhat** behind a per-crate `dhat-heap` feature:
+  assert a hot path frees everything it allocates and stays under an allocation
+  budget. `nix/checks/leak.nix` runs them.
+- **Versions** — `valgrind` and the matching `iai-callgrind-runner` are pinned in
+  `nix/versions.nix`; the runner version **must equal** the `iai-callgrind` dev-dep
+  in `Cargo.toml` (bump together).
+- Reusable, deterministic bench/test inputs and the `MetricsProbe` / `captured_spans`
+  observability assertions live in `agent-testkit` (`bench`, `observe` modules).
+
 ## Architecture (see DESIGN.md + docs/)
 
 - Every replaceable component is an `async` trait in `agent-core` (a **seam**):

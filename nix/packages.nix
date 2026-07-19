@@ -19,6 +19,11 @@
     versions.protobuf
     versions.grpcurl
 
+    # Benchmarks: valgrind runs the iai-callgrind benches; the runner binary must
+    # match the `iai-callgrind` dev-dep version (see nix/versions.nix).
+    versions.valgrind
+    versions.iai-callgrind-runner
+
     # Ops / ClickHouse.
     versions.clickhouse # clickhouse-client
     versions.docker
