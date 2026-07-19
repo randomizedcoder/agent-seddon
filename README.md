@@ -14,9 +14,10 @@ memory model; **[docs/architecture.md](docs/architecture.md)** for the boundary 
 and per-component docs; **[docs/extending.md](docs/extending.md)** for how to add a
 provider/tool/memory/context/policy/transport;
 **[docs/grpc.md](docs/grpc.md)** for running the components as distributed gRPC
-services; **[docs/tracing.md](docs/tracing.md)** for the OpenTelemetry tracing
-runbook; and **[docs/features-comparison.md](docs/features-comparison.md)** for how
-it stacks up against other harnesses.
+services; **[docs/observability.md](docs/observability.md)** for the metrics +
+tracing + logs overview (Grafana dashboards, HyperDX, and how the agent inspects
+its own performance); and **[docs/features-comparison.md](docs/features-comparison.md)**
+for how it stacks up against other harnesses.
 
 ## Workspace
 
@@ -26,7 +27,8 @@ One crate per seam (DESIGN.md §7):
 |-------|------|
 | `agent-core` | Seam traits + shared types (no impls) |
 | `agent-providers` | `LlmProvider` impls: OpenAI-compatible (GLM/OpenAI/vLLM/Ollama) + Anthropic-native, both streaming |
-| `agent-tools` | `Tool` impls: `bash`, `read_file`, `write_file`, `edit`, `grep`, `find`, `ls` |
+| `agent-tools` | `Tool` impls: `bash`, `read_file`, `write_file`, `edit`, `grep`, `find`, `ls`, `search`, `metrics` (self-inspection) |
+| `agent-search` | `SearchBackend`: high-performance code search (tantivy full-text index) ([docs/components/search.md](docs/components/search.md)) |
 | `agent-memory` | `MemoryStore`: JSONL episodic + markdown semantic |
 | `agent-context` | `ContextStrategy`: sliding-window or summarizing-window compaction |
 | `agent-mcp` | MCP client (stdio + streamable-HTTP) — external tools as `mcp_<server>_<tool>` |
@@ -125,7 +127,7 @@ agent --serve-provider --config gateway.toml         # gateway.toml: provider = 
 agent --config loop.toml "list the files in this repo"
 ```
 
-`--serve-provider|--serve-memory|--serve-tools|--serve-context|--serve-policy` each
+`--serve-provider|--serve-memory|--serve-tools|--serve-context|--serve-policy|--serve-search` each
 host one seam; ports/socket paths are generated from `nix/constants.nix` into
 `agent-grpc`'s `constants.rs` (a `nix flake check` guard keeps them in sync). This
 lifts the design's "distributed components" goal to a k8s-style topology — a
@@ -228,15 +230,19 @@ Prometheus metrics about a running agent — enabled in `config/agent.toml`
 instrumented independently** — a metrics wrapper (`agent-runtime/src/metered.rs`)
 records provider request/TTFT (`agent_provider_*`), per-tool latency
 (`agent_tool_exec_seconds`), memory ops (`agent_memory_*`), context
-assemble/compact (`agent_context_*`), and policy authorize (`agent_policy_*`). A
-remote `= "grpc"` seam is timed on the client side, and each `--serve-<seam>`
-process serves its own `/metrics` (ports 9601–9605) for server-side latency.
+assemble/compact (`agent_context_*`), policy authorize (`agent_policy_*`), and
+search index/query timings labelled by backend (`agent_search_*`). A remote
+`= "grpc"` seam is timed on the client side, and each `--serve-<seam>` process
+serves its own `/metrics` (ports 9601–9606) for server-side latency.
+
+The agent can inspect **its own** performance in-process via the built-in
+`metrics` tool (no stack required) — see **[docs/observability.md](docs/observability.md)**.
 
 A **Prometheus + Grafana** stack ships as Nix docker-apps (same pattern as
 ClickHouse/ClickStack), with a provisioned per-component dashboard:
 
 ```sh
-nix run .#prometheus-up          # scraper — UI :9090, scrapes :9600–:9605
+nix run .#prometheus-up          # scraper — UI :9090, scrapes :9600–:9606
 nix run .#grafana-up             # dashboards — UI :3000 (Dashboards → agent-seddon)
 # run a REPL session (or the gRPC demo), then watch the dashboard fill.
 nix run .#grafana-down && nix run .#prometheus-down
@@ -246,7 +252,8 @@ curl -s 127.0.0.1:9600/metrics | grep '^agent_'
 ```
 
 Full runbook (single-process + distributed topology + networking notes):
-**[docs/metrics.md](docs/metrics.md)**.
+**[docs/metrics.md](docs/metrics.md)**; the three-signal overview (metrics +
+tracing + logs, and agent self-inspection) is **[docs/observability.md](docs/observability.md)**.
 
 ## Tracing (OpenTelemetry)
 

@@ -10,6 +10,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "proto/agent/v1/memory.proto",
         "proto/agent/v1/context.proto",
         "proto/agent/v1/policy.proto",
+        "proto/agent/v1/search.proto",
     ];
     // Re-run only when a proto changes.
     for p in &protos {

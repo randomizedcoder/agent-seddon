@@ -60,6 +60,17 @@ pub struct Metrics {
     // --- policy (recorded by the policy metrics wrapper) ------------------
     policy_authorize: IntCounterVec,
     policy_authorize_seconds: Histogram,
+
+    // --- search (recorded by the search metrics wrapper) ------------------
+    // Labelled by `backend` so tantivy vs. a second backend can be compared
+    // head-to-head under the same interface.
+    search_query_seconds: HistogramVec,
+    search_hits: HistogramVec,
+    search_index_seconds: HistogramVec,
+    search_index_files: IntGaugeVec,
+    search_index_fresh: IntGaugeVec,
+    search_errors: IntCounterVec,
+    search_reindex: IntCounterVec,
 }
 
 impl Metrics {
@@ -209,6 +220,52 @@ impl Metrics {
         ))
         .unwrap();
 
+        // --- search -----------------------------------------------------------
+        let search_query_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "agent_search_query_seconds",
+                "Search query latency (measured inside the backend)",
+            ),
+            &["backend", "mode"],
+        )
+        .unwrap();
+        let search_hits = HistogramVec::new(
+            HistogramOpts::new("agent_search_hits", "Hits returned by a search query"),
+            &["backend", "mode"],
+        )
+        .unwrap();
+        let search_index_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "agent_search_index_seconds",
+                "Reindex (build/update) duration",
+            ),
+            &["backend"],
+        )
+        .unwrap();
+        let search_index_files = IntGaugeVec::new(
+            Opts::new("agent_search_index_files", "Files in the search index"),
+            &["backend"],
+        )
+        .unwrap();
+        let search_index_fresh = IntGaugeVec::new(
+            Opts::new(
+                "agent_search_index_fresh",
+                "1 when the index is fresh with the working tree, else 0",
+            ),
+            &["backend"],
+        )
+        .unwrap();
+        let search_errors = IntCounterVec::new(
+            Opts::new("agent_search_errors_total", "Search operation errors"),
+            &["backend", "op"],
+        )
+        .unwrap();
+        let search_reindex = IntCounterVec::new(
+            Opts::new("agent_search_reindex_total", "Reindex runs"),
+            &["backend", "trigger"],
+        )
+        .unwrap();
+
         let collectors: Vec<Box<dyn prometheus::core::Collector>> = vec![
             Box::new(api_calls.clone()),
             Box::new(api_call_seconds.clone()),
@@ -234,6 +291,13 @@ impl Metrics {
             Box::new(context_compact_tokens.clone()),
             Box::new(policy_authorize.clone()),
             Box::new(policy_authorize_seconds.clone()),
+            Box::new(search_query_seconds.clone()),
+            Box::new(search_hits.clone()),
+            Box::new(search_index_seconds.clone()),
+            Box::new(search_index_files.clone()),
+            Box::new(search_index_fresh.clone()),
+            Box::new(search_errors.clone()),
+            Box::new(search_reindex.clone()),
         ];
         for m in collectors {
             registry.register(m).expect("register metric");
@@ -265,6 +329,13 @@ impl Metrics {
             context_compact_tokens,
             policy_authorize,
             policy_authorize_seconds,
+            search_query_seconds,
+            search_hits,
+            search_index_seconds,
+            search_index_files,
+            search_index_fresh,
+            search_errors,
+            search_reindex,
         }
     }
 
@@ -393,6 +464,52 @@ impl Metrics {
             .inc();
         self.policy_authorize_seconds.observe(seconds);
     }
+
+    // --- search instrumentation -------------------------------------------
+
+    /// Record a completed search query: latency + the number of hits, both
+    /// labelled by backend + query mode for head-to-head comparison.
+    pub fn on_search_query(&self, backend: &str, mode: &str, seconds: f64, hits: usize) {
+        self.search_query_seconds
+            .with_label_values(&[backend, mode])
+            .observe(seconds);
+        self.search_hits
+            .with_label_values(&[backend, mode])
+            .observe(hits as f64);
+    }
+    /// Record a completed reindex: duration + the resulting file count, and mark
+    /// the index fresh. Timed at the seam boundary (the metrics wrapper).
+    pub fn observe_reindex(&self, backend: &str, seconds: f64, files: i64) {
+        self.search_index_seconds
+            .with_label_values(&[backend])
+            .observe(seconds);
+        self.set_search_files(backend, files);
+        self.set_search_fresh(backend, true);
+    }
+    /// Set the indexed-file-count gauge (also refreshed by `status()` so the count
+    /// is populated even when the index was already fresh and no reindex ran).
+    pub fn set_search_files(&self, backend: &str, files: i64) {
+        self.search_index_files
+            .with_label_values(&[backend])
+            .set(files);
+    }
+    /// Count a reindex run, tagged with what triggered it (`startup`/`manual`).
+    /// Called by whoever initiates the reindex (it knows the trigger).
+    pub fn on_search_reindex(&self, backend: &str, trigger: &str) {
+        self.search_reindex
+            .with_label_values(&[backend, trigger])
+            .inc();
+    }
+    /// Set the index-freshness gauge (1 = fresh, 0 = stale/missing/building).
+    pub fn set_search_fresh(&self, backend: &str, fresh: bool) {
+        self.search_index_fresh
+            .with_label_values(&[backend])
+            .set(fresh as i64);
+    }
+    /// Count a search error, tagged with the operation (`query`/`status`/`reindex`).
+    pub fn on_search_error(&self, backend: &str, op: &str) {
+        self.search_errors.with_label_values(&[backend, op]).inc();
+    }
 }
 
 fn bool_label(b: bool) -> &'static str {
@@ -452,6 +569,11 @@ mod tests {
         m.on_context_op("assemble", 0.001);
         m.on_compaction(9000, 4000);
         m.on_authorize("auto-approve", "approved", 0.0001);
+        m.on_search_query("tantivy", "literal", 0.002, 5);
+        m.observe_reindex("tantivy", 0.5, 120);
+        m.on_search_reindex("tantivy", "startup");
+        m.set_search_fresh("tantivy", true);
+        m.on_search_error("tantivy", "query");
 
         let text = m.encode_text();
         for name in [
@@ -469,6 +591,13 @@ mod tests {
             "agent_context_compact_tokens",
             "agent_policy_authorize_total",
             "agent_policy_authorize_seconds",
+            "agent_search_query_seconds",
+            "agent_search_hits",
+            "agent_search_index_seconds",
+            "agent_search_index_files",
+            "agent_search_index_fresh",
+            "agent_search_errors_total",
+            "agent_search_reindex_total",
         ] {
             assert!(text.contains(name), "missing metric `{name}` in:\n{text}");
         }

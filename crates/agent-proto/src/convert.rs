@@ -143,6 +143,7 @@ pub fn status_from_error(e: &agent_core::Error) -> tonic::Status {
         Error::Config(m) => tonic::Status::invalid_argument(format!("config: {m}")),
         Error::Io(m) => tonic::Status::unavailable(format!("io: {m}")),
         Error::Json(m) => tonic::Status::invalid_argument(format!("json: {m}")),
+        Error::Search(m) => tonic::Status::internal(format!("search: {m}")),
     }
 }
 
@@ -586,6 +587,186 @@ impl From<pb::Decision> for agent_core::Decision {
     }
 }
 
+// --- Search: SearchMode / IndexState ---------------------------------------
+
+impl From<agent_core::SearchMode> for pb::SearchMode {
+    fn from(m: agent_core::SearchMode) -> Self {
+        match m {
+            agent_core::SearchMode::Literal => pb::SearchMode::Literal,
+            agent_core::SearchMode::Phrase => pb::SearchMode::Phrase,
+            agent_core::SearchMode::Fuzzy => pb::SearchMode::Fuzzy,
+            agent_core::SearchMode::Regex => pb::SearchMode::Regex,
+        }
+    }
+}
+
+/// Wire `SearchMode` tag → core. An unknown tag decodes to `Literal` (the zero
+/// value and the mode every backend supports), never an error.
+fn search_mode_from_i32(v: i32) -> agent_core::SearchMode {
+    match pb::SearchMode::try_from(v) {
+        Ok(pb::SearchMode::Phrase) => agent_core::SearchMode::Phrase,
+        Ok(pb::SearchMode::Fuzzy) => agent_core::SearchMode::Fuzzy,
+        Ok(pb::SearchMode::Regex) => agent_core::SearchMode::Regex,
+        Ok(pb::SearchMode::Literal) | Err(_) => agent_core::SearchMode::Literal,
+    }
+}
+
+impl From<agent_core::IndexState> for pb::IndexState {
+    fn from(s: agent_core::IndexState) -> Self {
+        match s {
+            agent_core::IndexState::Fresh => pb::IndexState::Fresh,
+            agent_core::IndexState::Stale => pb::IndexState::Stale,
+            agent_core::IndexState::Missing => pb::IndexState::Missing,
+            agent_core::IndexState::Building => pb::IndexState::Building,
+        }
+    }
+}
+
+fn index_state_from_i32(v: i32) -> agent_core::IndexState {
+    match pb::IndexState::try_from(v) {
+        Ok(pb::IndexState::Stale) => agent_core::IndexState::Stale,
+        Ok(pb::IndexState::Missing) => agent_core::IndexState::Missing,
+        Ok(pb::IndexState::Building) => agent_core::IndexState::Building,
+        Ok(pb::IndexState::Fresh) | Err(_) => agent_core::IndexState::Fresh,
+    }
+}
+
+// --- SearchQuery -----------------------------------------------------------
+
+impl From<agent_core::SearchQuery> for pb::SearchQuery {
+    fn from(q: agent_core::SearchQuery) -> Self {
+        pb::SearchQuery {
+            text: q.text,
+            mode: pb::SearchMode::from(q.mode) as i32,
+            path_globs: q.path_globs,
+            lang: q.lang,
+            limit: q.limit as u64,
+            fuzzy_distance: q.fuzzy_distance.map(u32::from),
+        }
+    }
+}
+
+impl From<pb::SearchQuery> for agent_core::SearchQuery {
+    fn from(q: pb::SearchQuery) -> Self {
+        agent_core::SearchQuery {
+            text: q.text,
+            mode: search_mode_from_i32(q.mode),
+            path_globs: q.path_globs,
+            lang: q.lang,
+            limit: q.limit as usize,
+            fuzzy_distance: q.fuzzy_distance.map(|d| d.min(u8::MAX as u32) as u8),
+        }
+    }
+}
+
+// --- SearchHit -------------------------------------------------------------
+
+impl From<agent_core::SearchHit> for pb::SearchHit {
+    fn from(h: agent_core::SearchHit) -> Self {
+        pb::SearchHit {
+            path: h.path.to_string_lossy().into_owned(),
+            line: h.line,
+            col_start: h.col_start,
+            col_end: h.col_end,
+            score: h.score,
+            snippet: h.snippet,
+        }
+    }
+}
+
+impl From<pb::SearchHit> for agent_core::SearchHit {
+    fn from(h: pb::SearchHit) -> Self {
+        agent_core::SearchHit {
+            path: std::path::PathBuf::from(h.path),
+            line: h.line,
+            col_start: h.col_start,
+            col_end: h.col_end,
+            score: h.score,
+            snippet: h.snippet,
+        }
+    }
+}
+
+// --- SearchCapabilities ----------------------------------------------------
+
+impl From<agent_core::SearchCapabilities> for pb::SearchCapabilities {
+    fn from(c: agent_core::SearchCapabilities) -> Self {
+        pb::SearchCapabilities {
+            backend: c.backend,
+            modes: c
+                .modes
+                .into_iter()
+                .map(|m| pb::SearchMode::from(m) as i32)
+                .collect(),
+            content_search: c.content_search,
+            scored: c.scored,
+            incremental: c.incremental,
+            max_concurrent_queries: c.max_concurrent_queries,
+        }
+    }
+}
+
+impl From<pb::SearchCapabilities> for agent_core::SearchCapabilities {
+    fn from(c: pb::SearchCapabilities) -> Self {
+        agent_core::SearchCapabilities {
+            backend: c.backend,
+            modes: c.modes.into_iter().map(search_mode_from_i32).collect(),
+            content_search: c.content_search,
+            scored: c.scored,
+            incremental: c.incremental,
+            max_concurrent_queries: c.max_concurrent_queries,
+        }
+    }
+}
+
+// --- IndexStatus (core lacks the wire `backend` field; server fills it) -----
+
+impl From<agent_core::IndexStatus> for pb::IndexStatus {
+    fn from(s: agent_core::IndexStatus) -> Self {
+        pb::IndexStatus {
+            state: pb::IndexState::from(s.state) as i32,
+            indexed_files: s.indexed_files,
+            last_indexed_ms: s.last_indexed_ms,
+            manifest_digest: s.manifest_digest,
+            backend: String::new(),
+        }
+    }
+}
+
+impl From<pb::IndexStatus> for agent_core::IndexStatus {
+    fn from(s: pb::IndexStatus) -> Self {
+        agent_core::IndexStatus {
+            state: index_state_from_i32(s.state),
+            indexed_files: s.indexed_files,
+            last_indexed_ms: s.last_indexed_ms,
+            manifest_digest: s.manifest_digest,
+        }
+    }
+}
+
+// --- ReindexProgress -------------------------------------------------------
+
+impl From<agent_core::ReindexProgress> for pb::ReindexProgress {
+    fn from(p: agent_core::ReindexProgress) -> Self {
+        pb::ReindexProgress {
+            files_done: p.files_done,
+            files_total: p.files_total,
+            done: p.done,
+            backend: String::new(),
+        }
+    }
+}
+
+impl From<pb::ReindexProgress> for agent_core::ReindexProgress {
+    fn from(p: pb::ReindexProgress) -> Self {
+        agent_core::ReindexProgress {
+            files_done: p.files_done,
+            files_total: p.files_total,
+            done: p.done,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -828,6 +1009,79 @@ mod tests {
             pb::TokenBudget::from(agent_core::TokenBudget::from(pbud)),
             pbud
         );
+    }
+
+    #[rstest]
+    #[case(agent_core::SearchMode::Literal, pb::SearchMode::Literal)]
+    #[case(agent_core::SearchMode::Phrase, pb::SearchMode::Phrase)]
+    #[case(agent_core::SearchMode::Fuzzy, pb::SearchMode::Fuzzy)]
+    #[case(agent_core::SearchMode::Regex, pb::SearchMode::Regex)]
+    fn search_mode_roundtrip(#[case] core: agent_core::SearchMode, #[case] wire: pb::SearchMode) {
+        assert_eq!(pb::SearchMode::from(core), wire);
+        assert_eq!(search_mode_from_i32(wire as i32), core);
+    }
+
+    #[test]
+    fn unknown_search_mode_defaults_to_literal() {
+        assert_eq!(search_mode_from_i32(999), agent_core::SearchMode::Literal);
+    }
+
+    #[test]
+    fn search_query_roundtrip() {
+        let core = agent_core::SearchQuery {
+            text: "fn main".into(),
+            mode: agent_core::SearchMode::Phrase,
+            path_globs: vec!["**/*.rs".into()],
+            lang: Some("rust".into()),
+            limit: 25,
+            fuzzy_distance: Some(2),
+        };
+        let p1 = pb::SearchQuery::from(core);
+        let back = agent_core::SearchQuery::from(p1.clone());
+        assert_eq!(pb::SearchQuery::from(back), p1);
+    }
+
+    #[test]
+    fn search_hit_and_status_roundtrip() {
+        let hit = agent_core::SearchHit {
+            path: std::path::PathBuf::from("src/main.rs"),
+            line: 12,
+            col_start: 0,
+            col_end: 0,
+            score: 1.5,
+            snippet: "fn main()".into(),
+        };
+        let p = pb::SearchHit::from(hit);
+        assert_eq!(agent_core::SearchHit::from(p.clone()).line, 12);
+
+        let status = agent_core::IndexStatus {
+            state: agent_core::IndexState::Stale,
+            indexed_files: 42,
+            last_indexed_ms: 1000,
+            manifest_digest: "abcd".into(),
+        };
+        let ps = pb::IndexStatus::from(status);
+        let back = agent_core::IndexStatus::from(ps);
+        assert_eq!(back.state, agent_core::IndexState::Stale);
+        assert_eq!(back.indexed_files, 42);
+    }
+
+    #[test]
+    fn search_capabilities_roundtrip() {
+        let caps = agent_core::SearchCapabilities {
+            backend: "tantivy".into(),
+            modes: vec![
+                agent_core::SearchMode::Literal,
+                agent_core::SearchMode::Regex,
+            ],
+            content_search: true,
+            scored: true,
+            incremental: true,
+            max_concurrent_queries: 0,
+        };
+        let p1 = pb::SearchCapabilities::from(caps);
+        let back = agent_core::SearchCapabilities::from(p1.clone());
+        assert_eq!(pb::SearchCapabilities::from(back), p1);
     }
 
     #[test]

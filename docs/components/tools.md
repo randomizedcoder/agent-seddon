@@ -7,8 +7,11 @@ via `[tools] enabled` (empty ⇒ every registered tool).
 - **Trait:** `agent_core::Tool` (+ `ToolRegistry`) ([`agent-core/src/lib.rs`](../../crates/agent-core/src/lib.rs))
 - **Impl crate:** [`agent-tools`](../../crates/agent-tools)
 - **Shipped:** `bash`, `read_file`, `write_file` (`tool-core`); `edit` (`tool-edit`);
-  `grep`, `find`, `ls` (`tool-search`)
-- **Cargo features:** `tool-core` (default), `tool-edit`, `tool-search`
+  `grep`, `find`, `ls` (`tool-search`); `search` (`tool-search-index`, index-backed —
+  see the [search seam](search.md)); `metrics` (`tool-metrics`, the agent inspects
+  its own live performance registry — see [observability](../observability.md))
+- **Cargo features:** `tool-core` (default), `tool-edit`, `tool-search`,
+  `tool-search-index`, `tool-metrics`
 - **Also register as tools:** [MCP](mcp.md) server tools (`mcp_<server>_<tool>`) and,
   with `[agent] subagents`, the `delegate` tool (see [runtime](runtime.md)).
 

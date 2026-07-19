@@ -7,6 +7,8 @@ mod context_files;
 mod metered;
 mod policy;
 mod registry;
+#[cfg(feature = "search")]
+mod search;
 pub mod session_store;
 pub mod skills;
 #[cfg(feature = "subagents")]

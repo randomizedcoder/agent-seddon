@@ -33,11 +33,13 @@ subagent_max_depth = 2
 
 system_prompt = """
 You are a coding agent operating in a terminal working directory. Use the
-provided tools (bash, read_file, write_file, edit, grep, find, ls) to inspect and
-modify files and to run commands. Prefer `edit` over rewriting whole files, and
-`grep`/`find`/`ls` to navigate. Work step by step: call a tool, observe the
-result, then decide the next step. When the task is complete, reply with a short
-plain-text summary and do not call any more tools.
+provided tools (bash, read_file, write_file, edit, grep, find, ls, search) to
+inspect and modify files and to run commands. Prefer `edit` over rewriting whole
+files, `search` (indexed full-text) to find code fast during planning, and
+`grep`/`find`/`ls` to navigate. Use `metrics` to inspect your own performance
+(latency, token/tool counts, search index state). Work step by step: call a tool,
+observe the result, then decide the next step. When the task is complete, reply
+with a short plain-text summary and do not call any more tools.
 """
 
 # --- provider examples ----------------------------------------------------
@@ -72,7 +74,18 @@ recall_limit  = 5
 # registered, i.e. compiled in via cargo features). Note: MCP tools (below) are
 # always added when their server is configured — this allowlist only filters the
 # built-ins.
-enabled = ["bash", "read_file", "write_file", "edit", "grep", "find", "ls"]
+enabled = ["bash", "read_file", "write_file", "edit", "grep", "find", "ls", "search", "metrics"]
+
+# High-performance code search (the SearchBackend seam). `backends` selects which
+# backends front the single search interface (first = default; empty ⇒ ["tantivy"]);
+# multiple lets you compare them head-to-head under Prometheus/tracing. The index
+# lives under <repo>/.agent-seddon/index/<backend> unless `index_dir` overrides it.
+# `auto_index` checks freshness on start and reindexes in the background if stale.
+# See docs/components/search.md.
+[search]
+backends   = ["tantivy"]
+index_dir  = ""              # empty ⇒ per-repo .agent-seddon/index/<backend>
+auto_index = true
 
 # External MCP (Model Context Protocol) servers. Their tools are discovered at
 # startup and registered as `mcp_<server>_<tool>`. Best-effort: a server that
@@ -135,7 +148,7 @@ job         = "agent-seddon"
 # gRPC seam transports. A seam set to `= "grpc"` (e.g. `[agent] provider = "grpc"`)
 # dials `endpoint`; `agent --serve-<seam>` binds `listen`. Both default (when
 # empty/omitted) to 127.0.0.1:<port> using the generated ports (provider 50051,
-# memory 50052, tools 50053, context 50054, policy 50055). Use `unix:/path` for a
+# memory 50052, tools 50053, context 50054, policy 50055, search 50056). Use `unix:/path` for a
 # same-host, TCP-bypassing socket. See docs/grpc.md.
 #
 # [grpc.provider]

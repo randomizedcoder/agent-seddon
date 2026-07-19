@@ -46,6 +46,7 @@ talks to traits, so it is untouched.
 | `memory.proto` | `service Memory` (facade) + `service Episodic` + `service Semantic`. |
 | `context.proto` | `service ContextService` — `Assemble`, `Compact`. |
 | `policy.proto` | `service Policy` — `Authorize`. |
+| `search.proto` | `service SearchService` — `Status`, `Capabilities`, `Reindex` (server-streaming), `Search`. A `backend` selector routes to a named backend (empty ⇒ default). |
 
 `tonic-build` (invoked from `build.rs`, needs `protoc` — pinned in `nix/`) generates
 client + server stubs into `OUT_DIR`, re-exported as `agent_proto::pb`.
@@ -92,14 +93,14 @@ Each seam gets **two** thin pieces in [`agent-grpc`](../crates/agent-grpc)
 `--serve-mcp`):
 
 **Client** — a `Grpc<Seam>` type (`GrpcProvider`, `GrpcMemory`, `GrpcContext`,
-`GrpcPolicy`, and `grpc_tools()` for a remote tool worker) that implements the
+`GrpcPolicy`, `GrpcSearch`, and `grpc_tools()` for a remote tool worker) that implements the
 `agent-core` trait by calling a remote server, converting via `agent-proto` and
 mapping `tonic::Status` → `agent_core::Error`. Channels are built **lazily**
 (`Endpoint::connect_lazy`) so the runtime's *synchronous* seam factories can
 construct a client without `await`.
 
 **Server** — a `<Seam>Service` (`ProviderService`, `ToolWorker`, `MemoryService`
-(+ `EpisodicService`/`SemanticService`), `ContextSvc`, `PolicySvc`) that wraps a
+(+ `EpisodicService`/`SemanticService`), `ContextSvc`, `PolicySvc`, `SearchServiceSvc`) that wraps a
 locally-built `Arc<dyn Trait>` and implements the generated tonic service, mapping
 errors via `status_from_error`. The `*_router` helpers return a ready-to-serve
 `Router`.
@@ -133,6 +134,7 @@ renders it into the committed `crates/agent-grpc/src/constants.rs`, and the
 | tools | 50053 | `/tmp/agent-seddon/tools.sock` |
 | context | 50054 | `/tmp/agent-seddon/context.sock` |
 | policy | 50055 | `/tmp/agent-seddon/policy.sock` |
+| search | 50056 | `/tmp/agent-seddon/search.sock` |
 
 ### Selection is config, exactly like every other seam
 
@@ -151,7 +153,8 @@ endpoint = "unix:/tmp/agent-seddon/provider.sock"   # same-host, TCP-bypassing
 ```
 
 …and likewise `context = "grpc"`, `policy = "grpc"`, `[memory] backend = "grpc"`,
-and `[grpc.tools] endpoint` for a remote tool worker. No loop changes.
+`[search] backends = ["grpc"]`, and `[grpc.tools] endpoint` for a remote tool
+worker. No loop changes.
 
 ### Serve binaries
 
@@ -162,7 +165,7 @@ hosting the config-selected concrete impl over gRPC (config picks e.g.
 ```
 agent --serve-provider --config gateway.toml        # binds [grpc.provider] listen
 agent --serve-memory   --listen 0.0.0.0:50052       # or override the address
-agent --serve-tools    ;  agent --serve-context  ;  agent --serve-policy
+agent --serve-tools ; agent --serve-context ; agent --serve-policy ; agent --serve-search
 ```
 
 ### Streaming & errors
@@ -174,7 +177,7 @@ agent --serve-tools    ;  agent --serve-context  ;  agent --serve-policy
 
   | `agent_core::Error` | gRPC `Code` |
   |---|---|
-  | `Provider` / `Tool` / `Memory` | `Internal` |
+  | `Provider` / `Tool` / `Memory` / `Search` | `Internal` |
   | `Config` | `InvalidArgument` |
   | `Io` | `Unavailable` |
   | `Json` (and any `ConvertError`) | `InvalidArgument` |

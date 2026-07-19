@@ -18,6 +18,10 @@ use agent_core::{
     LlmProvider, MemoryEvent, MemoryItem, MemoryStore, Message, ModelCapabilities, Observation,
     Policy, RecallQuery, Result, TokenBudget, Tool, ToolContext, ToolSchema, WorkingSet,
 };
+#[cfg(feature = "search")]
+use agent_core::{
+    IndexState, IndexStatus, ProgressFn, SearchBackend, SearchCapabilities, SearchHit, SearchQuery,
+};
 use agent_metrics::Metrics;
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -53,6 +57,21 @@ pub(crate) fn policy(inner: Arc<dyn Policy>, m: Metrics, name: &str) -> Arc<dyn 
 }
 pub(crate) fn tool(inner: Arc<dyn Tool>, m: Metrics) -> Arc<dyn Tool> {
     Arc::new(MeteredTool { inner, metrics: m })
+}
+/// Wrap a single search backend. `name` is the concrete backend (`tantivy`, …),
+/// the label that makes the head-to-head comparison meaningful — so backends are
+/// wrapped *before* being composed into a `DispatchSearch`.
+#[cfg(feature = "search")]
+pub(crate) fn search(
+    inner: Arc<dyn SearchBackend>,
+    m: Metrics,
+    name: &str,
+) -> Arc<dyn SearchBackend> {
+    Arc::new(MeteredSearch {
+        inner,
+        metrics: m,
+        name: name.to_string(),
+    })
 }
 
 // --- provider --------------------------------------------------------------
@@ -254,6 +273,62 @@ impl Tool for MeteredTool {
             Ok(o) if o.is_error => self.metrics.on_tool_error(self.inner.name(), "observation"),
             Err(_) => self.metrics.on_tool_error(self.inner.name(), "error"),
             _ => {}
+        }
+        out
+    }
+}
+
+// --- search ----------------------------------------------------------------
+
+#[cfg(feature = "search")]
+struct MeteredSearch {
+    inner: Arc<dyn SearchBackend>,
+    metrics: Metrics,
+    name: String,
+}
+
+#[cfg(feature = "search")]
+#[async_trait]
+impl SearchBackend for MeteredSearch {
+    fn capabilities(&self) -> SearchCapabilities {
+        self.inner.capabilities()
+    }
+    async fn status(&self) -> Result<IndexStatus> {
+        let out = self.inner.status().await;
+        match &out {
+            Ok(s) => {
+                self.metrics
+                    .set_search_fresh(&self.name, s.state == IndexState::Fresh);
+                self.metrics
+                    .set_search_files(&self.name, s.indexed_files as i64);
+            }
+            Err(_) => self.metrics.on_search_error(&self.name, "status"),
+        }
+        out
+    }
+    async fn reindex(&self, progress: ProgressFn<'_>) -> Result<IndexStatus> {
+        let start = Instant::now();
+        let out = self.inner.reindex(progress).await;
+        match &out {
+            Ok(s) => self.metrics.observe_reindex(
+                &self.name,
+                start.elapsed().as_secs_f64(),
+                s.indexed_files as i64,
+            ),
+            Err(_) => self.metrics.on_search_error(&self.name, "reindex"),
+        }
+        out
+    }
+    async fn query(&self, q: &SearchQuery) -> Result<Vec<SearchHit>> {
+        let start = Instant::now();
+        let out = self.inner.query(q).await;
+        let seconds = start.elapsed().as_secs_f64();
+        match &out {
+            Ok(hits) => {
+                self.metrics
+                    .on_search_query(&self.name, q.mode.as_str(), seconds, hits.len())
+            }
+            Err(_) => self.metrics.on_search_error(&self.name, "query"),
         }
         out
     }

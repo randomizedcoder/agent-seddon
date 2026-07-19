@@ -45,3 +45,8 @@ pub const POLICY: SeamEndpoint = SeamEndpoint {
     uds_path: "/tmp/agent-seddon/policy.sock",
     metrics_port: 9605,
 };
+pub const SEARCH: SeamEndpoint = SeamEndpoint {
+    tcp_port: 50056,
+    uds_path: "/tmp/agent-seddon/search.sock",
+    metrics_port: 9606,
+};

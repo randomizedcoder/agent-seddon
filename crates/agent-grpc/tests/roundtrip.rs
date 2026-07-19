@@ -8,17 +8,19 @@
 use std::sync::Arc;
 
 use agent_core::{
-    CompletionRequest, ContextInput, ContextStrategy, Decision, LlmProvider, MemoryEvent,
-    MemoryStore, Message, ModelCapabilities, Policy, RecallQuery, TokenBudget, ToolCall,
-    ToolContext, WorkingSet,
+    CompletionRequest, ContextInput, ContextStrategy, Decision, IndexState, LlmProvider,
+    MemoryEvent, MemoryStore, Message, ModelCapabilities, Policy, RecallQuery, SearchBackend,
+    SearchMode, SearchQuery, TokenBudget, ToolCall, ToolContext, WorkingSet,
 };
-use agent_grpc::client::{grpc_tools, GrpcContext, GrpcMemory, GrpcPolicy, GrpcProvider};
+use agent_grpc::client::{
+    grpc_tools, GrpcContext, GrpcMemory, GrpcPolicy, GrpcProvider, GrpcSearch,
+};
 use agent_grpc::server::{
-    context_router, memory_router, policy_router, provider_router, tools_router,
+    context_router, memory_router, policy_router, provider_router, search_router, tools_router,
 };
 use agent_grpc::Endpoint;
 use agent_testkit::{
-    final_turn, tempdir, EchoTool, RecordingMemory, ScriptedProvider, StaticContext,
+    final_turn, tempdir, EchoTool, FixtureSearch, RecordingMemory, ScriptedProvider, StaticContext,
 };
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -300,4 +302,71 @@ async fn policy_authorize_deny(#[case] transport: Transport) {
         arguments: serde_json::json!({}),
     };
     assert_eq!(client.authorize(&call).await, Decision::Deny("nope".into()));
+}
+
+// ---------------------------------------------------------------------------
+// Search
+// ---------------------------------------------------------------------------
+
+fn literal(text: &str) -> SearchQuery {
+    SearchQuery {
+        text: text.into(),
+        mode: SearchMode::Literal,
+        path_globs: vec![],
+        lang: None,
+        limit: 10,
+        fuzzy_distance: None,
+    }
+}
+
+#[rstest]
+#[case::tcp(Transport::Tcp)]
+#[case::uds(Transport::Uds)]
+#[tokio::test(flavor = "multi_thread")]
+async fn search_status_and_query(#[case] transport: Transport) {
+    let backend = Arc::new(FixtureSearch::new().with_hits(vec![FixtureSearch::hit(
+        "src/main.rs",
+        12,
+        "fn main()",
+    )]));
+    let (dial, _srv) = spawn(transport, search_router(backend)).await;
+    let client = GrpcSearch::connect(&dial).unwrap();
+
+    // status → the fixture's fresh index
+    let status = client.status().await.unwrap();
+    assert_eq!(status.state, IndexState::Fresh);
+    assert_eq!(status.indexed_files, 3);
+
+    // query → the fixture's hit list, converted back across the wire
+    let hits = client.query(&literal("main")).await.unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].path.to_string_lossy(), "src/main.rs");
+    assert_eq!(hits[0].line, 12);
+    assert_eq!(hits[0].snippet, "fn main()");
+}
+
+#[rstest]
+#[case::tcp(Transport::Tcp)]
+#[case::uds(Transport::Uds)]
+#[tokio::test(flavor = "multi_thread")]
+async fn search_reindex_streams_progress(#[case] transport: Transport) {
+    let backend = Arc::new(FixtureSearch::new());
+    let (dial, _srv) = spawn(transport, search_router(backend)).await;
+    let client = GrpcSearch::connect(&dial).unwrap();
+
+    // Drive the server-streamed reindex; count progress increments to the terminal.
+    let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen2 = seen.clone();
+    let progress = move |p: agent_core::ReindexProgress| {
+        seen2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if p.done {
+            assert_eq!(p.files_done, p.files_total);
+        }
+    };
+    let status = client.reindex(&progress).await.unwrap();
+    assert_eq!(status.state, IndexState::Fresh);
+    assert!(
+        seen.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+        "expected at least two progress increments (incl. the terminal one)"
+    );
 }

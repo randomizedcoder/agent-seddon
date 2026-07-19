@@ -13,6 +13,8 @@ default = [
     "tool-core",
     "tool-edit",
     "tool-search",
+    "tool-metrics",
+    "search",
     "context-sliding-window",
     "context-summarizing",
     "memory-file",
@@ -27,6 +29,14 @@ provider-anthropic = ["agent-providers/provider-anthropic"]
 tool-core = ["agent-tools/tool-core"]
 tool-edit = ["agent-tools/tool-edit"]
 tool-search = ["agent-tools/tool-search"]
+# The `metrics` tool: the agent can read its own live performance registry.
+tool-metrics = ["agent-tools/tool-metrics"]
+# High-performance code search seam: the tantivy backend + the `search` tool.
+search = [
+    "dep:agent-search",
+    "agent-search/search-tantivy",
+    "agent-tools/tool-search-index",
+]
 context-sliding-window = ["agent-context/context-sliding-window"]
 context-summarizing = ["agent-context/context-summarizing"]
 memory-file = ["agent-memory/memory-file"]
@@ -43,6 +53,7 @@ agent-metrics.workspace = true
 # These default to no features (see workspace deps); features below opt in.
 agent-providers.workspace = true
 agent-tools.workspace = true
+agent-search = { workspace = true, optional = true }
 agent-memory.workspace = true
 agent-context.workspace = true
 agent-mcp = { workspace = true, optional = true }

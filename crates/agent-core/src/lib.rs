@@ -29,6 +29,8 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("search error: {0}")]
+    Search(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -465,6 +467,155 @@ pub enum Decision {
 #[async_trait]
 pub trait Policy: Send + Sync {
     async fn authorize(&self, call: &ToolCall) -> Decision;
+}
+
+// ---------------------------------------------------------------------------
+// Seam 6: Search (high-performance code search)
+// ---------------------------------------------------------------------------
+//
+// A replaceable code-search backend. The agent indexes the repo it starts in
+// (in the background if the index is stale) and issues many concurrent queries
+// during planning. Concrete backends (tantivy, …) live in `agent-search` behind
+// cargo features; a single gRPC `SearchService` can front one or several so
+// their performance is comparable head-to-head. See `docs/components/search.md`.
+
+/// How the query text is interpreted. Backends advertise which modes they can
+/// serve via [`SearchCapabilities`]; an unsupported mode is rejected before
+/// dispatch rather than silently degraded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchMode {
+    /// Match the literal tokens (the intersection every backend supports).
+    Literal,
+    /// Match the terms as an ordered phrase.
+    Phrase,
+    /// Levenshtein-fuzzy term match (see [`SearchQuery::fuzzy_distance`]).
+    Fuzzy,
+    /// Regular-expression match.
+    Regex,
+}
+
+impl SearchMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SearchMode::Literal => "literal",
+            SearchMode::Phrase => "phrase",
+            SearchMode::Fuzzy => "fuzzy",
+            SearchMode::Regex => "regex",
+        }
+    }
+}
+
+/// A search request. `path_globs`/`lang` narrow the corpus; `limit` caps hits.
+/// The optional fields are serde-defaulted so the wire/JSON shape stays additive.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchQuery {
+    pub text: String,
+    pub mode: SearchMode,
+    /// Include filters, e.g. `["**/*.rs"]`. Empty ⇒ the whole corpus.
+    #[serde(default)]
+    pub path_globs: Vec<String>,
+    /// Restrict to a language label, e.g. `"rust"`. `None` ⇒ any.
+    #[serde(default)]
+    pub lang: Option<String>,
+    pub limit: usize,
+    /// Max edit distance for [`SearchMode::Fuzzy`] (`None` ⇒ backend default).
+    #[serde(default)]
+    pub fuzzy_distance: Option<u8>,
+}
+
+/// One match. `line == 0` denotes a filename-only match (no content position),
+/// which some backends return for path matches.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchHit {
+    pub path: PathBuf,
+    /// 1-based line of the match; `0` ⇒ filename-only match.
+    pub line: u32,
+    pub col_start: u32,
+    pub col_end: u32,
+    /// Relevance score (BM25 for scored backends; rank-derived otherwise).
+    pub score: f32,
+    pub snippet: String,
+}
+
+/// A backend's advertised feature set — the search analogue of
+/// [`ModelCapabilities`]. The dispatcher consults it to reject a query whose
+/// [`SearchMode`] the backend cannot serve.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchCapabilities {
+    pub backend: String,
+    pub modes: Vec<SearchMode>,
+    /// Matches inside file contents (vs. filename-only).
+    pub content_search: bool,
+    /// Returns meaningful relevance scores.
+    pub scored: bool,
+    /// Supports incremental reindex (vs. full rebuild only).
+    pub incremental: bool,
+    /// Advisory cap on concurrent queries (`0` ⇒ unbounded).
+    pub max_concurrent_queries: u32,
+}
+
+impl SearchCapabilities {
+    pub fn supports(&self, mode: SearchMode) -> bool {
+        self.modes.contains(&mode)
+    }
+}
+
+/// Freshness of the on-disk index relative to the working tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IndexState {
+    /// Up to date with the working tree.
+    Fresh,
+    /// An index exists but the tree has changed since it was built.
+    Stale,
+    /// No index yet.
+    Missing,
+    /// A (re)index is currently running.
+    Building,
+}
+
+/// A read-only snapshot of the index state (see [`SearchBackend::status`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexStatus {
+    pub state: IndexState,
+    pub indexed_files: u64,
+    pub last_indexed_ms: u64,
+    /// Digest of the freshness manifest — cheap over-the-wire equality check.
+    pub manifest_digest: String,
+}
+
+/// Progress emitted during a (re)index; streamed over gRPC.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReindexProgress {
+    pub files_done: u64,
+    pub files_total: u64,
+    pub done: bool,
+}
+
+/// A callback invoked with incremental [`ReindexProgress`] during a reindex.
+/// Boxed as a plain `Fn` so the trait stays object-safe; the gRPC server adapter
+/// turns each call into a streamed response, local callers pass a no-op or a
+/// metrics-recording closure.
+pub type ProgressFn<'a> = &'a (dyn Fn(ReindexProgress) + Send + Sync);
+
+/// A replaceable code-search backend. `status` is a cheap freshness probe safe
+/// to call on every start; `reindex` is long-running (the runtime drives it on a
+/// background task); `query` must be safe to call concurrently from many tasks,
+/// including while a reindex runs (serve-stale semantics).
+#[async_trait]
+pub trait SearchBackend: Send + Sync {
+    fn capabilities(&self) -> SearchCapabilities;
+
+    /// Cheap, read-only staleness probe. Never triggers a rebuild.
+    async fn status(&self) -> Result<IndexStatus>;
+
+    /// Bring the index up to date (incremental where supported), reporting
+    /// progress. Long-running — callers should run it off the request path.
+    async fn reindex(&self, progress: ProgressFn<'_>) -> Result<IndexStatus>;
+
+    /// Run a query. Safe to call concurrently, including during a reindex.
+    async fn query(&self, q: &SearchQuery) -> Result<Vec<SearchHit>>;
 }
 
 #[cfg(test)]

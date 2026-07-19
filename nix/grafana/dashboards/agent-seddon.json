@@ -174,6 +174,62 @@
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 94 },
       "targets": [ { "expr": "histogram_quantile(0.95, sum(rate(agent_policy_authorize_seconds_bucket{job=~\"$job\"}[5m])) by (le))", "legendFormat": "p95" } ]
+    },
+
+    { "type": "row", "title": "Search", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 102 }, "id": 60 },
+    {
+      "type": "timeseries", "title": "Index fresh (1 = up to date) by backend", "id": 61,
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 103 },
+      "targets": [ { "expr": "max by (backend) (agent_search_index_fresh{job=~\"$job\"})", "legendFormat": "{{backend}}" } ]
+    },
+    {
+      "type": "timeseries", "title": "Indexed files by backend", "id": 62,
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 103 },
+      "targets": [ { "expr": "max by (backend) (agent_search_index_files{job=~\"$job\"})", "legendFormat": "{{backend}}" } ]
+    },
+    {
+      "type": "timeseries", "title": "Reindex duration p50/p95 by backend (s)", "id": 63,
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 111 },
+      "targets": [
+        { "expr": "histogram_quantile(0.5, sum(rate(agent_search_index_seconds_bucket{job=~\"$job\"}[5m])) by (le, backend))", "legendFormat": "p50 {{backend}}" },
+        { "expr": "histogram_quantile(0.95, sum(rate(agent_search_index_seconds_bucket{job=~\"$job\"}[5m])) by (le, backend))", "legendFormat": "p95 {{backend}}" }
+      ]
+    },
+    {
+      "type": "timeseries", "title": "Reindexes/sec by backend/trigger", "id": 64,
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 111 },
+      "targets": [ { "expr": "sum by (backend, trigger) (rate(agent_search_reindex_total{job=~\"$job\"}[5m]))", "legendFormat": "{{backend}}/{{trigger}}" } ]
+    },
+    {
+      "type": "timeseries", "title": "Query latency p50/p95 by backend/mode (s)", "id": 65,
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 119 },
+      "targets": [
+        { "expr": "histogram_quantile(0.5, sum(rate(agent_search_query_seconds_bucket{job=~\"$job\"}[5m])) by (le, backend, mode))", "legendFormat": "p50 {{backend}}/{{mode}}" },
+        { "expr": "histogram_quantile(0.95, sum(rate(agent_search_query_seconds_bucket{job=~\"$job\"}[5m])) by (le, backend, mode))", "legendFormat": "p95 {{backend}}/{{mode}}" }
+      ]
+    },
+    {
+      "type": "timeseries", "title": "Queries/sec by backend/mode", "id": 66,
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 119 },
+      "targets": [ { "expr": "sum by (backend, mode) (rate(agent_search_query_seconds_count{job=~\"$job\"}[5m]))", "legendFormat": "{{backend}}/{{mode}}" } ]
+    },
+    {
+      "type": "timeseries", "title": "Hits per query p50 by backend", "id": 67,
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 127 },
+      "targets": [ { "expr": "histogram_quantile(0.5, sum(rate(agent_search_hits_bucket{job=~\"$job\"}[5m])) by (le, backend))", "legendFormat": "{{backend}}" } ]
+    },
+    {
+      "type": "timeseries", "title": "Search errors/sec by backend/op", "id": 68,
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 127 },
+      "targets": [ { "expr": "sum by (backend, op) (rate(agent_search_errors_total{job=~\"$job\"}[5m]))", "legendFormat": "{{backend}}/{{op}}" } ]
     }
   ]
 }

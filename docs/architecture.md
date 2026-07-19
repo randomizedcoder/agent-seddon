@@ -16,7 +16,8 @@ selected by TOML config. Nothing depends "sideways" — the graph is acyclic:
 agent-core            (the seams: traits + shared message types, no impls)
    ▲
    ├── agent-providers      (LlmProvider: anthropic, openai-compat)
-   ├── agent-tools          (Tool: bash, read/write, edit, grep/find/ls)
+   ├── agent-tools          (Tool: bash, read/write, edit, grep/find/ls, search)
+   ├── agent-search         (SearchBackend: tantivy full-text index)
    ├── agent-memory         (EpisodicStore + SemanticStore: file)
    ├── agent-context        (ContextStrategy: sliding-window, summarizing)
    ├── agent-mcp            (McpTransport: stdio, http — its own registry)
@@ -47,6 +48,7 @@ or store.
 | Memory — episodic | `EpisodicStore` | `[memory] backend` | `Registry::episodic` | [memory](components/memory.md) |
 | Memory — semantic | `SemanticStore` | `[memory] semantic` | `Registry::semantic` | [memory](components/memory.md) |
 | MCP transport | `McpTransport` | `[[mcp.servers]] kind` | `Registry::transport` | [mcp](components/mcp.md) |
+| Search | `SearchBackend` | `[search] backends` | `Registry::search` | [search](components/search.md) |
 
 Every seam is uniform: a config string selects a named factory from a registry, and
 out-of-tree code can register its own factory on the `Registry` passed to

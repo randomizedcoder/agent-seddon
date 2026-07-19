@@ -23,6 +23,46 @@ pub struct Config {
     pub metrics: MetricsCfg,
     #[serde(default)]
     pub grpc: GrpcCfg,
+    #[serde(default)]
+    pub search: SearchCfg,
+}
+
+/// High-performance code search (the `SearchBackend` seam). `backends` selects
+/// which backends to wire behind the single search interface (the first is the
+/// default); empty ⇒ just `["tantivy"]`. The on-disk index lives under
+/// `<repo>/.agent-seddon/index/<backend>` unless `index_dir` overrides it. See
+/// `docs/components/search.md`.
+#[derive(Debug, Deserialize)]
+pub struct SearchCfg {
+    #[serde(default)]
+    pub backends: Vec<String>,
+    /// Override the index directory (empty ⇒ per-repo default).
+    #[serde(default)]
+    pub index_dir: String,
+    /// On start, check index freshness and reindex in the background if stale.
+    #[serde(default = "default_true")]
+    pub auto_index: bool,
+}
+
+impl Default for SearchCfg {
+    fn default() -> Self {
+        Self {
+            backends: Vec::new(),
+            index_dir: String::new(),
+            auto_index: true,
+        }
+    }
+}
+
+impl SearchCfg {
+    /// The configured backend names, or the single default when unset.
+    pub fn backend_names(&self) -> Vec<String> {
+        if self.backends.is_empty() {
+            vec!["tantivy".to_string()]
+        } else {
+            self.backends.clone()
+        }
+    }
 }
 
 /// gRPC transport wiring. Per seam: the `endpoint` a `= "grpc"` client dials, and
@@ -44,6 +84,8 @@ pub struct GrpcCfg {
     pub context: GrpcSeamCfg,
     #[serde(default)]
     pub policy: GrpcSeamCfg,
+    #[serde(default)]
+    pub search: GrpcSeamCfg,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -416,6 +458,7 @@ impl Config {
             context_files: ContextFilesCfg::default(),
             metrics: MetricsCfg::default(),
             grpc: GrpcCfg::default(),
+            search: SearchCfg::default(),
         }
     }
 }

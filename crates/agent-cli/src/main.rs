@@ -279,7 +279,7 @@ fn parse_args() -> Result<Args> {
                      --continue          resume the most recent saved session\n  \
                      --resume ID         resume a specific session\n  \
                      --serve-mcp         run as an MCP server over stdio (exposes a `run` tool)\n  \
-                     --serve-<seam>      host one seam over gRPC; <seam> = provider|memory|tools|context|policy\n  \
+                     --serve-<seam>      host one seam over gRPC; <seam> = provider|memory|tools|context|policy|search\n  \
                      --listen ADDR       override the gRPC listen address (host:port or unix:/path)"
                 );
                 std::process::exit(0);

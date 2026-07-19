@@ -1,0 +1,34 @@
+[package]
+name = "agent-search"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Tantivy is the default (and, for now, only) backend. A DeepSearch backend is
+# reserved behind `search-deepsearch` for a follow-up (see docs/components/search.md).
+default = ["search-tantivy"]
+# Full-text code search via the tantivy library (on-disk inverted index).
+search-tantivy = ["dep:tantivy"]
+
+[dependencies]
+agent-core.workspace = true
+async-trait.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+# gitignore-aware tree walking (shared with the grep/find/ls tools) + regex for
+# regex-mode queries and glob→regex path filtering.
+ignore.workspace = true
+regex.workspace = true
+
+# Pinned by git rev so the exact indexed/queried behavior is reproducible; the
+# nix build declares the matching crane `outputHashes` (see nix/versions.nix).
+# tantivy 0.26.0 @ 057458bf14d6973c9c97594c1d99580b6af4c49d
+tantivy = { git = "https://github.com/quickwit-oss/tantivy", rev = "057458bf14d6973c9c97594c1d99580b6af4c49d", optional = true }
+
+[dev-dependencies]
+rstest.workspace = true
+agent-testkit.workspace = true
+futures-util.workspace = true
