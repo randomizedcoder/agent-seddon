@@ -206,6 +206,46 @@ async fn apply_patch_roundtrips(#[case] transport: Transport) {
     );
 }
 
+// The file tools over gRPC: write a file then read it back through the seam on
+// both transports (a real cwd flows in the ToolContext, distinct from the
+// server's default).
+#[rstest]
+#[case::tcp(Transport::Tcp)]
+#[case::uds(Transport::Uds)]
+#[tokio::test(flavor = "multi_thread")]
+async fn read_write_roundtrips(#[case] transport: Transport) {
+    let dir = tempdir();
+    let mut registry = agent_core::ToolRegistry::new();
+    registry.register(Arc::new(agent_tools::WriteFileTool));
+    registry.register(Arc::new(agent_tools::ReadFileTool));
+    let (dial, _srv) = spawn(transport, tools_router(registry, dir.clone())).await;
+
+    let tools = grpc_tools(&dial).await.unwrap();
+    let write = tools.iter().find(|t| t.name() == "write_file").unwrap();
+    let read = tools.iter().find(|t| t.name() == "read_file").unwrap();
+    let ctx = ToolContext { cwd: dir.clone() };
+
+    let w = write
+        .execute(
+            serde_json::json!({ "path": "f.txt", "content": "over the wire" }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert!(!w.is_error, "{}", w.content);
+
+    let r = read
+        .execute(serde_json::json!({ "path": "f.txt" }), &ctx)
+        .await
+        .unwrap();
+    assert!(!r.is_error, "{}", r.content);
+    assert_eq!(r.content, "over the wire");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("f.txt")).unwrap(),
+        "over the wire"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Memory
 // ---------------------------------------------------------------------------

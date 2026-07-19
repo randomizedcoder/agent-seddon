@@ -5,6 +5,18 @@ Per-feature parity spec for the always-shipped file I/O pair — `read_file` and
 is section 5: these two tools have **zero direct table-driven tests today**, and
 their peers guard behaviour we do not.
 
+> **Status: implemented** — the §5 table-driven tests now live in
+> [`crates/agent-tools/src/core.rs`](../../crates/agent-tools/src/core.rs) (18
+> cases + the output-cap and non-UTF-8 tests), plus a write→read gRPC roundtrip
+> (TCP+UDS) and a dhat leak test (`tests/leak.rs`). **No iai perf bench:** these are
+> I/O-bound tools whose only CPU work is the shared `truncate` cap (already
+> benched-in-spirit and unit-tested); a deterministic instruction-count bench would
+> mostly measure tokio/the OS, not our logic — so the "no leaks / no low-hanging
+> fruit" bar is met by the leak test here, not a perf bench. Observability is
+> inherited: every tool is wrapped by `metered::tool` (proven by the apply_patch
+> metered test). Gaps 4–6 (pagination, create-vs-overwrite signal, write deny-list)
+> remain deliberate divergences, not bugs.
+
 ## 1. Feature & why it matters
 
 `read_file` returns the UTF-8 text of a file relative to the working directory;

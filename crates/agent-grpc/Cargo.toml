@@ -28,5 +28,5 @@ tracing-opentelemetry = { workspace = true }
 agent-testkit = { workspace = true }
 # A real built-in tool, to prove a feature tool (not just EchoTool) roundtrips over
 # the ToolService seam. Only the patch tool is compiled in.
-agent-tools = { workspace = true, features = ["tool-patch"] }
+agent-tools = { workspace = true, features = ["tool-core", "tool-patch"] }
 rstest = { workspace = true }
