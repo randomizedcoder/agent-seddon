@@ -1,9 +1,13 @@
 # Parity: patch / diff editing (`apply_patch`)
 
-> Per-feature parity spec for a **unified-diff / patch edit tool**. agent-seddon
-> does **not** currently ship this tool — this document is the spec for a *new*
-> `apply_patch` tool plus its test plan. It is the headline editing gap: our
-> only structured editor is the single-hunk `edit`.
+> Per-feature parity spec for a **unified-diff / patch edit tool**.
+> **Status: implemented** — `apply_patch` now ships (`tool-patch` feature,
+> [`crates/agent-tools/src/patch.rs`](../../crates/agent-tools/src/patch.rs)),
+> with the table-driven tests, a real-tool gRPC roundtrip, an observability
+> assertion, and an iai-callgrind bench + dhat leak test described below. The
+> remaining follow-ups are noted inline (fuzzy whitespace matching and the
+> per-path failure-escalation tracker). This was the headline editing gap: our
+> only structured editor was the single-hunk `edit`.
 
 ## Feature & why it matters
 

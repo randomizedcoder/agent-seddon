@@ -32,6 +32,7 @@ craneLib.mkCargoDerivation (
     IAI_CALLGRIND_RUNNER = "${versions.iai-callgrind-runner}/bin/iai-callgrind-runner";
     buildPhaseCargoCommand = ''
       cargo bench -p agent-metrics --bench metrics
+      cargo bench -p agent-tools --features tool-patch --bench patch
     '';
     installPhaseCommand = "mkdir -p $out";
   }

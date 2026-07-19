@@ -12,6 +12,7 @@ default = [
     "provider-anthropic",
     "tool-core",
     "tool-edit",
+    "tool-patch",
     "tool-search",
     "tool-metrics",
     "search",
@@ -29,6 +30,7 @@ provider-openai-compat = ["agent-providers/provider-openai-compat"]
 provider-anthropic = ["agent-providers/provider-anthropic"]
 tool-core = ["agent-tools/tool-core"]
 tool-edit = ["agent-tools/tool-edit"]
+tool-patch = ["agent-tools/tool-patch"]
 tool-search = ["agent-tools/tool-search"]
 # The `metrics` tool: the agent can read its own live performance registry.
 tool-metrics = ["agent-tools/tool-metrics"]

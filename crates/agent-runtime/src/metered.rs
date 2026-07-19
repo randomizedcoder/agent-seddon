@@ -480,3 +480,43 @@ impl RepoBackend for MeteredRepo {
         self.record("push", start, out)
     }
 }
+
+#[cfg(all(test, feature = "tool-patch"))]
+mod tests {
+    use super::*;
+    use agent_testkit::observe::MetricsProbe;
+    use agent_testkit::tempdir;
+
+    // A metered tool must record `agent_tool_exec_seconds` (labelled by tool). Uses
+    // a real `apply_patch` so the feature is proven observable end-to-end, not just
+    // correct — the "prove it's observable" step of the per-feature pattern.
+    #[tokio::test]
+    async fn metered_tool_records_exec_metric() {
+        let dir = tempdir();
+        std::fs::write(dir.join("f.txt"), "before\n").unwrap();
+        let metrics = Metrics::new();
+        let probe = MetricsProbe::new(&metrics);
+        let tool = super::tool(Arc::new(agent_tools::ApplyPatchTool), metrics.clone());
+
+        let ctx = ToolContext { cwd: dir.clone() };
+        let obs = tool
+            .execute(
+                serde_json::json!({
+                    "patch": "*** Begin Patch\n*** Update File: f.txt\n@@\n-before\n+after\n*** End Patch"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(!obs.is_error, "{}", obs.content);
+
+        assert!(
+            probe.delta(
+                &metrics,
+                "agent_tool_exec_seconds_count",
+                Some("tool=\"apply_patch\"")
+            ) >= 1.0,
+            "apply_patch execution should record the tool-exec metric"
+        );
+    }
+}

@@ -3,6 +3,7 @@
 //! Tools are grouped by cargo feature so a build can include only what it needs:
 //!   * `tool-core`   — `bash`, `read_file`, `write_file`
 //!   * `tool-edit`   — `edit` (surgical string replace)
+//!   * `tool-patch`  — `apply_patch` (multi-file unified-diff batch)
 //!   * `tool-search` — `grep`, `find`, `ls` (gitignore-aware)
 //!   * `tool-git`    — `git_read`/`git_diff`/`git_worktree`/… over the RepoBackend seam
 //!
@@ -23,6 +24,14 @@ pub use core::{BashTool, ReadFileTool, WriteFileTool};
 mod edit;
 #[cfg(feature = "tool-edit")]
 pub use edit::EditTool;
+
+#[cfg(feature = "tool-patch")]
+mod patch;
+#[cfg(feature = "tool-patch")]
+#[doc(hidden)]
+pub use patch::parse_op_count;
+#[cfg(feature = "tool-patch")]
+pub use patch::ApplyPatchTool;
 
 #[cfg(feature = "tool-search")]
 mod search;
