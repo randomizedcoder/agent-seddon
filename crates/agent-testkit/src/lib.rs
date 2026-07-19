@@ -13,6 +13,12 @@
 //! * [`StaticContext`] — a trivial `ContextStrategy`.
 //! * [`EchoTool`] — a `Tool` that echoes its args (optionally after a delay).
 //! * [`mcp::ScriptedTransport`] — a canned `McpTransport` for client tests.
+//! * [`bench`] — deterministic input fixtures shared by benches + larger tests.
+//! * [`observe`] — assert observability: metric deltas ([`observe::MetricsProbe`])
+//!   and emitted spans ([`observe::captured_spans`]).
+
+pub mod bench;
+pub mod observe;
 
 use agent_core::{
     BlobContent, Checkpoint, CommitInfo, CompletionRequest, CompletionResponse, ContextInput,

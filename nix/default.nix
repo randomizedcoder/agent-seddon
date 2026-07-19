@@ -70,6 +70,27 @@ let
     '';
   };
 
+  # Run the iai-callgrind benches locally (valgrind + the matching runner on PATH).
+  # `nix run .#bench` runs every bench; `nix run .#bench -- -p agent-metrics` scopes
+  # it. The same benches gate the tree via `nix flake check` (the `bench` check).
+  bench = pkgs.writeShellApplication {
+    name = "bench";
+    runtimeInputs = [
+      versions.rustToolchain
+      versions.valgrind
+      versions.iai-callgrind-runner
+      versions.protobuf
+    ];
+    text = ''
+      export IAI_CALLGRIND_RUNNER="${versions.iai-callgrind-runner}/bin/iai-callgrind-runner"
+      export PROTOC="${versions.protobuf}/bin/protoc"
+      if [ "$#" -eq 0 ]; then
+        exec cargo bench
+      fi
+      exec cargo bench "$@"
+    '';
+  };
+
   # Static analysis + tests.
   checks = import ./checks {
     inherit
@@ -128,6 +149,10 @@ in
     gen-constants = {
       type = "app";
       program = "${gen-constants}/bin/gen-constants";
+    };
+    bench = {
+      type = "app";
+      program = "${bench}/bin/bench";
     };
     clickstack-up = {
       type = "app";
