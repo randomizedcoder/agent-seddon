@@ -1,24 +1,28 @@
-# Features Comparison: agent-seddon vs. pi vs. hermes-agent
+# Features Comparison: agent-seddon vs. pi vs. hermes-agent vs. opencode
 
 **Original analysis:** 2026-07-17 · **Last refreshed:** 2026-07-18 to match the
-current code.
-**Status:** Capability inventory vs. two reference harnesses + remaining roadmap.
+current code (adds a fourth yardstick — **opencode** — and a coding-fundamentals
+deep dive).
+**Status:** Capability inventory vs. three reference harnesses + remaining roadmap.
 
 > The original document was written before the plugin registry + P0 work. It has
 > since been refreshed: the matrix, the per-area notes, and the roadmap below all
 > reflect what is **actually implemented today** — plugin registry, `edit` /
-> `grep` / `find` / `ls` tools, an Anthropic-native provider, real streaming and
-> parallel tool execution, summarizing compaction, an MCP client (stdio + HTTP)
-> and server (`--serve-mcp`), subagent `delegate`, an interactive REPL with
-> session resume + slash commands + rustyline history, and skills.
+> `grep` / `find` / `ls` tools, **full-text code search** (tantivy) and
+> **multi-branch git** tools (9 `git_*`), an Anthropic-native provider, real
+> streaming and parallel tool execution, summarizing compaction, an MCP client
+> (stdio + HTTP) and server (`--serve-mcp`), subagent `delegate`, an interactive
+> REPL with session resume + slash commands + rustyline history, and skills. This
+> pass also adds **opencode** as a fourth comparison column and a dedicated
+> **coding-fundamentals deep dive** (editing / skills / tool calling).
 
 ## Purpose
 
 `agent-seddon` is an experimental, Rust-based coding-agent harness. This document
-inventories its capabilities against two mature open-source harnesses and states
+inventories its capabilities against three mature open-source harnesses and states
 honestly what we have, how complete it is, and what remains. The framing intent:
 **grow `agent-seddon` into a full-featured coding agent** — a daily driver, not a
-research toy. The two yardsticks:
+research toy. The three yardsticks:
 
 - **[pi](https://github.com/earendil-works/pi)** — a TypeScript monorepo with a
   deliberately *minimal core* (no built-in MCP or subagents) but exceptional
@@ -29,42 +33,55 @@ research toy. The two yardsticks:
   Python "batteries-included" harness: ~94 tools, 27 provider plugins, 8 memory
   backends, MCP client *and* server, subagents + a kanban coordination board,
   19 messaging-platform gateways, 4 UI surfaces, and multiple sandboxing backends.
+- **[opencode](https://github.com/anomalyco/opencode)** — a TypeScript/Bun
+  monorepo (~34 packages) built on the **Effect** effect system. The most direct
+  peer on *coding fundamentals*: it ships **both** a surgical `edit` and an
+  `apply_patch` (unified-diff) tool, line-ending/BOM-safe editing with stale-file
+  detection, a **model-invocable `skill` tool**, an LSP subsystem, MCP, 13+
+  providers, build/plan/general agents, a permission system, and TUI + desktop +
+  web UIs.
 
-pi = disciplined minimalism, hermes = maximalism. `agent-seddon` now covers the
-coding fundamentals both ship, still sits below both in raw breadth (providers,
-tools, UI surfaces), and has a genuinely differentiated observability stack.
+pi = disciplined minimalism, hermes = maximalism, opencode = a polished
+fundamentals-first daily driver. `agent-seddon` now covers most of the coding
+fundamentals all three ship, still sits below them in raw breadth (providers,
+tools, UI surfaces) and in editing sophistication (no patch/diff tool yet), and
+has a genuinely differentiated observability + distributed-seam stack.
 
 ---
 
 ## TL;DR
 
-The core loop is sound and the coding fundamentals are in: 7 tools
-(`bash`/`read_file`/`write_file`/`edit`/`grep`/`find`/`ls`), two providers
+The core loop is sound and the coding fundamentals are in: **18 built-in tools**
+(`bash`/`read_file`/`write_file`/`edit`/`grep`/`find`/`ls`, full-text `search`,
+self-inspection `metrics`, and 9 multi-branch `git_*`) plus MCP, two providers
 (OpenAI-compatible + Anthropic-native) with real SSE **streaming**, **parallel**
 tool execution, **summarizing** *or* truncating compaction, a layered file-memory,
 an interactive **REPL** (history, slash commands, session resume), **skills**,
 **subagent delegation**, and an **MCP client + server**. Our standout remains
 **production-grade observability** (Prometheus metrics + ClickHouse event/log/usage
-streaming) that neither reference harness ships out of the box.
+streaming) plus **distributed gRPC seams**, which none of the three reference
+harnesses ships out of the box.
 
-What's left is mostly breadth and a couple of stubbed seams: more providers, web/
-browser tools, sandboxed execution, a full-screen TUI, embedding-based recall, and
-activating the distillation (episodic→semantic) pipeline.
+What's left is mostly breadth, editing sophistication, and a couple of stubbed
+seams: a patch/diff edit tool and model-invocable skill loading (both of which
+opencode has), more providers, web/browser tools, sandboxed execution, a
+full-screen TUI, embedding-based recall, and activating the distillation
+(episodic→semantic) pipeline.
 
 ---
 
 ## The three harnesses at a glance
 
-| | **agent-seddon** (us) | **pi** | **hermes-agent** |
-|---|---|---|---|
-| Language | Rust | TypeScript | Python (+ TS UIs) |
-| Scale | 9 crates | TS monorepo, 5 packages | ~40k+ core LOC, ~900 test files |
-| Philosophy | Trait seams, config-swappable | Minimal core + extensions | Batteries-included |
-| Maturity | Experimental, fundamentals complete | Production, polished | Production, sprawling |
-| Standout strength | **Observability (Prometheus + ClickHouse)** | Provider breadth + TUI + branching | Tools/providers/surfaces breadth + multi-agent |
-| Providers | 2 (OpenAI-compat + Anthropic) | 40+ | 27 |
-| Tools | 7 built-in + MCP | ~8 | ~94 |
-| UI surfaces | CLI + interactive REPL | Rich TUI + print/JSON/RPC/SDK | CLI + TUI + web + desktop |
+| | **agent-seddon** (us) | **pi** | **hermes-agent** | **opencode** |
+|---|---|---|---|---|
+| Language | Rust | TypeScript | Python (+ TS UIs) | TypeScript / Bun |
+| Scale | 15 crates | TS monorepo, 5 packages | ~40k+ core LOC, ~900 test files | TS monorepo, ~34 packages |
+| Philosophy | Trait seams, config-swappable | Minimal core + extensions | Batteries-included | Fundamentals-first, Effect-based |
+| Maturity | Experimental, fundamentals complete | Production, polished | Production, sprawling | Production, polished |
+| Standout strength | **Observability + distributed seams** | Provider breadth + TUI + branching | Tools/providers/surfaces breadth + multi-agent | **Editing (edit + patch + LSP) + multi-UI** |
+| Providers | 2 (OpenAI-compat + Anthropic) | 40+ | 27 | 13+ |
+| Tools | 18 built-in + MCP | ~8 | ~94 | 12 built-in + MCP |
+| UI surfaces | CLI + interactive REPL | Rich TUI + print/JSON/RPC/SDK | CLI + TUI + web + desktop | CLI + TUI + desktop + web |
 
 ---
 
@@ -73,48 +90,130 @@ activating the distillation (episodic→semantic) pipeline.
 Coverage rubric (our column): ✅ Full · 🟡 Partial · 🟦 Seam only (trait defined, no
 impl) · ❌ Missing · ➖ N/A.
 
-| Feature area | agent-seddon | pi | hermes | Our coverage |
+| Feature area | agent-seddon | pi | hermes | opencode | Our coverage |
+|---|---|---|---|---|---|
+| Agent loop (assemble→call→tools→record) | Yes | Yes | Yes | Yes | ✅ |
+| Streaming completions | Yes (SSE, both providers) | Yes | Yes | Yes | ✅ |
+| Parallel tool execution | Yes (concurrent per turn) | Yes | Yes | Yes | ✅ |
+| Steering / follow-up while running | No | Yes | Yes | Yes (`question` + bg jobs) | ❌ |
+| Multi-turn session (REPL) | Yes | Yes | Yes | Yes | ✅ |
+| `bash` tool | Yes | Yes | Yes | Yes | ✅ |
+| `read_file` / `write_file` | Yes | Yes | Yes | Yes (`read`/`write`) | ✅ |
+| `edit` (surgical string replace) | Yes | Yes | Yes (`patch`) | Yes | ✅ |
+| Patch/diff (unified) edit tool | No | No | Yes (`patch`) | Yes (`apply_patch`) | ❌ |
+| `grep` / `find` / `ls` | Yes (gitignore-aware) | Yes | Yes (`search_files`) | Yes (`grep`/`glob`) | ✅ |
+| Full-text indexed code search | Yes (tantivy `search`) | No | No | No (ripgrep only) | ✅ |
+| Multi-branch git tools (revision-addressed) | Yes (9 `git_*` + worktrees/checkpoint) | No | No | No (git via `bash`) | ✅ |
+| LSP integration | No | No | No | Yes (symbols/diagnostics) | ❌ |
+| Structured task list (todos) | No | No | Yes (kanban) | Yes (`todowrite`) | ❌ |
+| Web search / fetch | No | Via extension | Yes | Yes (`websearch`/`webfetch`) | ❌ |
+| Browser automation | No | No (external) | Yes | No | ❌ |
+| LLM providers | 2 (OpenAI-compat + Anthropic) | 40+ | 27 | 13+ | 🟡 |
+| Provider capability metadata | Yes (basic) | Yes (rich, cost) | Yes | Yes | 🟡 |
+| Context assembly | Yes | Yes | Yes | Yes | ✅ |
+| Compaction | Truncation **and** LLM summary | LLM summary | LLM summary | LLM summary | ✅ |
+| Session branching | No | Yes (`/tree`) | Partial | No | ❌ |
+| Working / episodic / semantic memory | Yes (layered) | Sessions only | MEMORY+USER files | Sessions (SQLite) + AGENTS.md | ✅ |
+| Memory recall | Keyword scan | ➖ | FTS5 + LLM + vector plugins | ➖ | 🟡 |
+| Distillation (episodic→semantic) | Seam only (no-op stub) | ➖ | Curator | ➖ | 🟦 |
+| Prometheus metrics | Yes | No | No | No | ✅ |
+| Structured telemetry sink (ClickHouse) | Yes | Adapter interface | Trace upload | No | ✅ |
+| MCP client | Yes (stdio + HTTP) | No (by design) | Yes | Yes (stdio + HTTP) | ✅ |
+| MCP server | Yes (`--serve-mcp`, stdio) | No | Yes | No | ✅ |
+| Distributed components (run seams as services) | Yes (gRPC over TCP/UDS, `--serve-<seam>`) | No | No | No | ✅ |
+| Distributed tracing | Yes (OpenTelemetry/OTLP → ClickStack) | No | Trace upload | No | ✅ |
+| Permission / approval gate | Yes (auto/interactive) | No (trust model) | Yes (rich) | Yes (rich, per-agent) | 🟡 |
+| Path-traversal safety on file tools | Yes | — | — | Yes (Location-scoped) | ✅ |
+| Sandboxed execution backends | No | Docs/patterns | 6 backends | Partial (codemode) | ❌ |
+| Subagents / delegation | Yes (`delegate`, depth-capped) | Extension | Yes + kanban | Yes (build/plan/general agents) | ✅ |
+| Session persistence / resume | Yes (JSONL + `--continue`/`--resume`/`/resume`) | Yes (JSONL + `/resume`) | Yes (SQLite) | Yes (SQLite) | ✅ |
+| Interactive REPL / TUI | REPL (line-based, rustyline) | Rich TUI | Rich TUI | Rich TUI | 🟡 |
+| Slash commands | Yes | Yes | Yes | Yes | ✅ |
+| Skills (SKILL.md) | Yes (`/skill:<name>` load, user-invoked) | Yes | Yes | Yes (model-invocable `skill` tool) | ✅ |
+| Plugins / extensions | Compile-time seams + MCP tools + skills | Yes (hot-reload TS) | Yes (19 plugin types) | Yes (hot-reload plugins) | 🟡 |
+| Hooks | No | Yes (events) | Yes | Yes (plugin events) | ❌ |
+| Config system | TOML | JSON | YAML | JSON | ✅ |
+| User context files (project rules) | Yes (`context.d/`) | Skills/templates | `.hermes/context` | Yes (`AGENTS.md`) | ✅ |
+| Multi-platform messaging | No | No | 19 platforms | No | ➖ |
+| Cron / scheduled runs | No | No | Yes | No | ❌ |
+| Test suite | Unit + integration + Nix checks | vitest | ~17k pytest | Bun/vitest | 🟡 |
+
+---
+
+## Coding fundamentals — deep dive
+
+The matrix above is broad. This section zooms in on the three things a coding
+agent lives or dies by — **code editing, skills, and tool calling** — at finer
+grain. Cells use the same rubric (✅ Full · 🟡 Partial · ❌ Missing · ➖ N/A);
+**—** means *not assessed at this grain*. The `agent-seddon` and `opencode`
+columns are **source-audited**; the `pi` and `hermes` columns reflect their
+documented tool surface, so their fine-grained cells are deliberately sparse.
+
+> **Going deeper:** for the top-10 fundamentals, per-feature parity specs in
+> [`parity/`](parity/) mine each peer's *test suite* and lay out table-driven test
+> plans to match and exceed them — execution-ready detail behind this matrix.
+
+### Code editing
+
+opencode is the clear leader here: it ships **two** editors (`edit` +
+`apply_patch`) and a fully hardened write path (line-ending, BOM, stale-file). Our
+`edit` (`crates/agent-tools/src/edit.rs`) is a clean but *minimal* exact-string
+replace — the biggest single gap this comparison surfaces.
+
+| Capability | agent-seddon | pi | hermes | opencode |
 |---|---|---|---|---|
-| Agent loop (assemble→call→tools→record) | Yes | Yes | Yes | ✅ |
-| Streaming completions | Yes (SSE, both providers) | Yes | Yes | ✅ |
-| Parallel tool execution | Yes (concurrent per turn) | Yes | Yes | ✅ |
-| Steering / follow-up while running | No | Yes | Yes | ❌ |
-| Multi-turn session (REPL) | Yes | Yes | Yes | ✅ |
-| `bash` tool | Yes | Yes | Yes | ✅ |
-| `read_file` / `write_file` | Yes | Yes | Yes | ✅ |
-| `edit` (surgical string replace) | Yes | Yes | Yes (`patch`) | ✅ |
-| `grep` / `find` / `ls` | Yes (gitignore-aware) | Yes | Yes (`search_files`) | ✅ |
-| Web search / fetch | No | Via extension | Yes | ❌ |
-| Browser automation | No | No (external) | Yes | ❌ |
-| LLM providers | 2 (OpenAI-compat + Anthropic) | 40+ | 27 | 🟡 |
-| Provider capability metadata | Yes (basic) | Yes (rich, cost) | Yes | 🟡 |
-| Context assembly | Yes | Yes | Yes | ✅ |
-| Compaction | Truncation **and** LLM summary | LLM summary | LLM summary | ✅ |
-| Session branching | No | Yes (`/tree`) | Partial | ❌ |
-| Working / episodic / semantic memory | Yes (layered) | Sessions only | MEMORY+USER files | ✅ |
-| Memory recall | Keyword scan | ➖ | FTS5 + LLM + vector plugins | 🟡 |
-| Distillation (episodic→semantic) | Seam only (no-op stub) | ➖ | Curator | 🟦 |
-| Prometheus metrics | Yes | No | No | ✅ |
-| Structured telemetry sink (ClickHouse) | Yes | Adapter interface | Trace upload | ✅ |
-| MCP client | Yes (stdio + HTTP) | No (by design) | Yes | ✅ |
-| MCP server | Yes (`--serve-mcp`, stdio) | No | Yes | ✅ |
-| Distributed components (run seams as services) | Yes (gRPC over TCP/UDS, `--serve-<seam>`) | No | No | ✅ |
-| Distributed tracing | Yes (OpenTelemetry/OTLP → ClickStack) | No | Trace upload | ✅ |
-| Permission / approval gate | Yes (auto/interactive) | No (trust model) | Yes (rich) | 🟡 |
-| Path-traversal safety on file tools | Yes | — | — | ✅ |
-| Sandboxed execution backends | No | Docs/patterns | 6 backends | ❌ |
-| Subagents / delegation | Yes (`delegate`, depth-capped) | Extension | Yes + kanban | ✅ |
-| Session persistence / resume | Yes (JSONL + `--continue`/`--resume`/`/resume`) | Yes (JSONL + `/resume`) | Yes (SQLite) | ✅ |
-| Interactive REPL / TUI | REPL (line-based, rustyline) | Rich TUI | Rich TUI | 🟡 |
-| Slash commands | Yes | Yes | Yes | ✅ |
-| Skills (SKILL.md) | Yes (`/skill:<name>` load) | Yes | Yes | ✅ |
-| Plugins / extensions | Compile-time seams + MCP tools + skills | Yes (hot-reload TS) | Yes (19 plugin types) | 🟡 |
-| Hooks | No | Yes (events) | Yes | ❌ |
-| Config system | TOML | JSON | YAML | ✅ |
-| User context files (project rules) | Yes (`context.d/`) | Skills/templates | `.hermes/context` | ✅ |
-| Multi-platform messaging | No | No | 19 platforms | ➖ |
-| Cron / scheduled runs | No | No | Yes | ❌ |
-| Test suite | Unit + integration + Nix checks | vitest | ~17k pytest | 🟡 |
+| Exact string-replace (`old`→`new`) | ✅ | ✅ | ✅ | ✅ |
+| Unique-match guard (errors on ambiguous match) | ✅ | — | — | ✅ |
+| Replace-all option | ✅ (`replace_all`) | — | — | ✅ (`replaceAll`) |
+| Unified-diff / patch tool | ❌ | ❌ | ✅ (`patch`) | ✅ (`apply_patch`, add/update/delete) |
+| Multi-file edit in one call | ❌ | — | 🟡 (`patch`) | 🟡 (`apply_patch` spans files) |
+| Line-ending (CRLF/LF) preservation | ❌ | — | — | ✅ |
+| UTF-8 BOM preservation | ❌ | — | — | ✅ |
+| Stale-file detection (changed since read) | ❌ | — | — | ✅ |
+| Fuzzy / whitespace-tolerant match | ❌ | — | — | ❌ (planned) |
+| LSP-assisted edits / diagnostics | ❌ | ❌ | ❌ | 🟡 (LSP present, not wired into edit) |
+| Format-on-save | ❌ | — | — | ❌ (planned) |
+| Snapshot / undo | ❌ | — | 🟡 | ❌ (planned) |
+| Path-traversal / scope safety | ✅ | — | — | ✅ (Location-scoped) |
+
+### Skills
+
+Both agent-seddon and opencode read `SKILL.md` with frontmatter and progressive
+disclosure. The decisive difference: **who loads a skill.** Ours are **user-driven**
+(`/skills`, `/skill:<name>` in the REPL — `crates/agent-runtime/src/skills.rs`);
+opencode exposes a **`skill` tool the model itself calls** to pull a capability in
+mid-task, plus URL/embedded sources and per-agent permission filtering.
+
+| Capability | agent-seddon | pi | hermes | opencode |
+|---|---|---|---|---|
+| `SKILL.md` discovery (dir + flat file) | ✅ | ✅ | ✅ | ✅ |
+| YAML frontmatter (name / description) | ✅ | ✅ | ✅ | ✅ |
+| Progressive disclosure (load body on demand) | ✅ | ✅ | — | ✅ |
+| Model-invocable (agent loads via a tool) | ❌ (user `/skill:<name>`) | — | — | ✅ (`skill` tool) |
+| Skill sources: dir / URL / embedded | Dir only | — | — | ✅ (dir + URL + embedded) |
+| Per-agent permission filtering | ❌ | — | — | ✅ |
+| Bundled files / scripts referenced | ❌ | — | — | ✅ |
+| Slash-command exposure | ✅ | ✅ | — | ✅ (optional `slash`) |
+
+### Tool calling
+
+The core mechanics are at parity — a `Tool` trait + registry, JSON-schema params,
+parallel dispatch, per-call approval, output caps. We even lead on a per-tool
+`parallel_safe()` flag. opencode's edges are ergonomic: a **large-output → managed
+file** fallback and a per-tool **`toModelOutput` projection** that shapes results
+for the model.
+
+| Capability | agent-seddon | pi | hermes | opencode |
+|---|---|---|---|---|
+| Tool trait + registry | ✅ | ✅ | ✅ | ✅ |
+| JSON-Schema parameter validation | ✅ | ✅ | ✅ | ✅ (Effect schema) |
+| Parallel tool execution | ✅ | ✅ | ✅ | ✅ |
+| Per-tool parallel-safety flag | ✅ (`parallel_safe()`) | — | — | — |
+| Per-call approval / permission gate | ✅ (Policy seam) | ❌ (trust) | ✅ | ✅ (per-agent) |
+| Output size caps | ✅ (12 KB) | — | — | ✅ (bounded) |
+| Large-output → file fallback | ❌ | — | — | ✅ (managed file) |
+| Custom model-output projection | ❌ | — | — | ✅ (`toModelOutput`) |
+| Dynamic MCP tools at runtime | ✅ | ❌ | ✅ | ✅ |
 
 ---
 
@@ -130,12 +229,18 @@ appended in call order. The remaining gap vs. pi/hermes is **steering / follow-u
 (interrupting or queueing work mid-run).
 
 ### Tools — coding fundamentals in
-Seven built-ins, all registered through the plugin registry and gated by cargo
-features: `bash`, `read_file`, `write_file` (`tool-core`), `edit` (`tool-edit`,
-unique/`replace_all` string replace), and `grep`/`find`/`ls` (`tool-search`,
-gitignore-aware via ripgrep's `ignore` crate). All share lexical path-traversal
-protection and output caps. MCP servers add more tools at runtime as
-`mcp_<server>_<tool>`. Remaining: web/browser tools (hermes has ~90 tools total).
+Eighteen built-ins (per `config/agent.toml`), all registered through the plugin
+registry and gated by cargo features: `bash`, `read_file`, `write_file`
+(`tool-core`), `edit` (`tool-edit`, unique/`replace_all` string replace),
+`grep`/`find`/`ls` (`tool-search`, gitignore-aware via ripgrep's `ignore` crate),
+full-text `search` (`search`, the tantivy `SearchBackend` seam), self-inspection
+`metrics` (`tool-metrics`), and nine multi-branch `git_*` tools (`tool-git`, the
+`RepoBackend` seam: `git_read`/`git_tree`/`git_diff`/`git_grep`/`git_log`/
+`git_branches`/`git_status`/`git_worktree`/`git_checkpoint`). All share lexical
+path-traversal protection and output caps. MCP servers add more at runtime as
+`mcp_<server>_<tool>`. The remaining tool gaps are **editing depth** (no
+unified-diff/patch tool — see the deep dive; hermes and opencode both ship one)
+and web/browser tools (hermes has ~90 tools total).
 
 ### LLM providers — right architecture, thin breadth
 Two hand-rolled impls behind the `LlmProvider` trait: `OpenAiCompatProvider`
@@ -219,8 +324,12 @@ differential-render TUI like pi/hermes — that's the main remaining experience 
 ### Skills / plugins / extensions / hooks / slash commands — partial
 Compile-time extensibility (seams + cargo features + the registry), **plus**
 runtime capability without recompiling: MCP tools, `SKILL.md` skills
-(`/skills`, `/skill:<name>`), and slash commands. Still missing vs. pi/hermes:
-hot-reloadable extensions and lifecycle hooks.
+(`/skills`, `/skill:<name>`), and slash commands. Two gaps stand out. First,
+**skill loading is user-driven, not model-invocable**: the model can't pull a
+skill in mid-task the way opencode's `skill` *tool* lets it (and we load only
+local-directory skills, not URL/embedded sources — see the skills deep dive).
+Second, still missing vs. pi/hermes/opencode: hot-reloadable extensions and
+lifecycle hooks.
 
 ### Configuration — strong
 A type-safe single-file TOML (`crates/agent-runtime/src/config.rs`) with sections
@@ -257,6 +366,10 @@ nix-fmt). Far smaller than pi's vitest suites or hermes's ~17k tests.
 
 ### Shipped since the original analysis
 Plugin registry + cargo-feature gating · `edit` / `grep` / `find` / `ls` tools ·
+**full-text code search** (tantivy `SearchBackend`) · **multi-branch git** (9
+`git_*` tools, the `RepoBackend` seam) · **self-inspection `metrics` tool** ·
+**per-component Prometheus metrics** + Grafana stack · **distributed gRPC seams**
+(`--serve-<seam>`) · **OpenTelemetry tracing** (OTLP → ClickStack) ·
 Anthropic-native provider · streaming (both providers) · parallel tool execution ·
 summarizing compaction · MCP client (stdio + HTTP) · MCP server (`--serve-mcp`) ·
 subagent `delegate` · interactive REPL (rustyline history) · session resume · slash
@@ -268,6 +381,10 @@ Effort key: **S** ≈ hours–1 day · **M** ≈ a few days · **L** ≈ 1–2 w
 
 | Feature | Current | Target | Effort |
 |---|---|---|---|
+| Unified-diff / patch edit tool | Exact string-replace only | `apply_patch`-style add/update/delete (as opencode/hermes) | M |
+| Line-ending / BOM-safe editing | Plain UTF-8 rewrite | CRLF/LF + BOM preservation + stale-file detection | S |
+| Model-invocable skill loading | User `/skill:<name>` | A `skill` tool the model calls mid-task (as opencode) | S |
+| LSP-assisted editing *(optional)* | None | Symbols/diagnostics fed into edits | L |
 | Distillation pipeline *(seam exists)* | No-op stub | Episodic→semantic promotion via the model | M |
 | Embedding-based recall *(seam exists)* | Keyword scan | Vector semantic store (Qdrant/LanceDB) | L |
 | More providers | 2 hand-rolled | `genai`-style wrapper for breadth (DESIGN.md §9) | M |
