@@ -6,6 +6,18 @@ coverage is thin, and a concrete table-driven test plan to close the gap. Scope 
 the `Policy` seam only — the one decision point every tool call passes through
 before it runs.
 
+> **Status: implemented.** `AutoApprove`/`Interactive`/the new **`AllowList`** now
+> have unit tests in [`policy.rs`](../../crates/agent-runtime/src/policy.rs)
+> (`Interactive`'s answer→decision was extracted behind a shared fn so
+> `ScriptedInteractive` can test it without a TTY), the loop's **deny branch** has a
+> test in [`agent.rs`](../../crates/agent-runtime/src/agent.rs)
+> (`denied_tool_is_not_run_and_is_reported`), and `AllowList` is a config-selectable
+> policy (`[agent] policy = "allow-list"` + `[policy] allow = […]`, see
+> [`policy.md`](../components/policy.md)). The policy gRPC seam's allow **and** deny
+> paths were already covered in `roundtrip.rs`. Gap 5 (a secret-path write
+> deny-list) stays **aspirational**. No perf-bench/leak: `authorize` is a pure,
+> O(rules) decision with no resources to leak.
+
 ---
 
 ## 1. Feature & why it matters

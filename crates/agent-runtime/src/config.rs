@@ -27,6 +27,26 @@ pub struct Config {
     pub search: SearchCfg,
     #[serde(default)]
     pub git: GitCfg,
+    #[serde(default)]
+    pub policy: PolicyCfg,
+}
+
+/// Parameters for the `allow-list` policy (used when `[agent] policy =
+/// "allow-list"`). Each rule allows a tool whose name matches `tool` (a minimal
+/// `*` glob) and, when `arg` is set, whose serialized arguments contain that
+/// substring. An empty `allow` list denies every tool call.
+#[derive(Debug, Default, Deserialize)]
+pub struct PolicyCfg {
+    #[serde(default)]
+    pub allow: Vec<AllowRule>,
+}
+
+/// One `allow-list` rule: `{ tool = "git_*", arg = "..." }` (arg optional).
+#[derive(Debug, Clone, Deserialize)]
+pub struct AllowRule {
+    pub tool: String,
+    #[serde(default)]
+    pub arg: Option<String>,
 }
 
 /// Multi-branch git (the `RepoBackend` seam). One shared bare/mirror object DB
@@ -527,6 +547,7 @@ impl Config {
             grpc: GrpcCfg::default(),
             search: SearchCfg::default(),
             git: GitCfg::default(),
+            policy: PolicyCfg::default(),
         }
     }
 }

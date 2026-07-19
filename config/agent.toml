@@ -9,7 +9,9 @@ provider = "openai-compat"   # -> OpenAiCompatProvider ("anthropic" -> Anthropic
 context  = "sliding-window"  # -> SlidingWindow ("summarizing-window" -> SummarizingWindow)
 # SECURITY: "auto-approve" runs every tool call (incl. bash) with NO confirmation.
 # Only safe for trusted goals/inputs. The built-in default is "interactive".
-policy   = "auto-approve"    # -> AutoApprove  ("interactive" gates each tool call)
+# "allow-list" allows only the tool+arg patterns in the [policy] section below
+# (deny the rest) — an unattended-but-scoped option. See docs/components/policy.md.
+policy   = "auto-approve"    # -> AutoApprove ("interactive" | "allow-list")
 
 max_iterations = 12
 max_tokens     = 8192        # reasoning models (GLM) need real headroom
@@ -182,3 +184,14 @@ job         = "agent-seddon"
 # endpoint = "http://tool-worker:50053"               # remote tool worker (opt-in)
 # [grpc.repo]
 # endpoint = "unix:/tmp/agent-seddon/repo.sock"       # a git gateway (backend = "grpc")
+
+# Rules for the "allow-list" policy (only used when [agent] policy = "allow-list").
+# Allow a tool whose name matches `tool` (a `*` glob) and, if `arg` is set, whose
+# arguments contain that substring. Everything else is denied. Empty ⇒ deny all.
+# [policy]
+# allow = [
+#   { tool = "read_file" },
+#   { tool = "grep" },
+#   { tool = "git_*" },
+#   { tool = "bash", arg = "ls" },
+# ]
