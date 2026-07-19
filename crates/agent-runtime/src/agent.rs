@@ -617,6 +617,64 @@ mod tests {
         assert_eq!(run_with(false).await, vec!["t0", "t1", "t2"]);
     }
 
+    /// A policy that denies exactly one tool name — drives the loop's deny branch.
+    struct DenyNamed(&'static str);
+    #[async_trait::async_trait]
+    impl agent_core::Policy for DenyNamed {
+        async fn authorize(&self, call: &ToolCall) -> agent_core::Decision {
+            if call.name == self.0 {
+                agent_core::Decision::Deny("blocked in test".into())
+            } else {
+                agent_core::Decision::Allow
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn denied_tool_is_not_run_and_is_reported() {
+        let memory = RecordingMemory::new();
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(EchoTool));
+        let provider = ScriptedProvider::new(vec![
+            tool_turn(vec![ToolCall {
+                id: "t0".into(),
+                name: "echo".into(),
+                arguments: json!({"val": "secret"}),
+            }]),
+            final_turn("done"),
+        ]);
+        let agent = Agent::new(
+            Arc::new(provider),
+            tools,
+            Arc::new(memory.clone()),
+            Arc::new(StaticContext),
+            Arc::new(DenyNamed("echo")),
+            Metrics::new(),
+            settings(false),
+        );
+        let out = agent.run("go").await.unwrap();
+        assert_eq!(out, "done"); // a denial adapts; it does not abort the run
+
+        let tool_msgs: Vec<String> = memory
+            .events()
+            .into_iter()
+            .filter(|e| e.kind == "tool")
+            .map(|e| e.message.content)
+            .collect();
+        // The recorded tool result is the denial, and EchoTool never ran (it would
+        // otherwise have echoed "secret" back as the result).
+        assert!(
+            tool_msgs
+                .iter()
+                .any(|c| c.contains("denied by policy: blocked in test")),
+            "no denial recorded: {tool_msgs:?}"
+        );
+        assert!(
+            !tool_msgs.iter().any(|c| c.contains("secret")),
+            "tool ran despite deny: {tool_msgs:?}"
+        );
+    }
+
     #[tokio::test]
     async fn session_keeps_history_across_turns() {
         // Answers with the number of user messages it sees, proving the working

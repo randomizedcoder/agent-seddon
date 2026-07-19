@@ -329,6 +329,17 @@ pub fn register_builtins(r: &mut Registry) {
     r.policy("interactive", |_cfg| {
         Ok(Arc::new(crate::policy::Interactive) as Arc<dyn Policy>)
     });
+    r.policy("allow-list", |cfg| {
+        // Allow only the tool+arg patterns in `[policy] allow`; deny the rest.
+        // An empty list denies everything (fail safe).
+        let rules = cfg
+            .policy
+            .allow
+            .iter()
+            .map(|r| (r.tool.clone(), r.arg.clone()))
+            .collect();
+        Ok(Arc::new(crate::policy::AllowList::new(rules)) as Arc<dyn Policy>)
+    });
 
     // --- memory backends (whole-store + independently-swappable layers) ---
     #[cfg(feature = "memory-file")]
