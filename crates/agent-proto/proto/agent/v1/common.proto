@@ -76,6 +76,11 @@ message ToolSchema {
   string description = 2;
   // JSON Schema for the arguments object.
   JsonValue parameters = 3;
+  // Whether the tool is safe to run concurrently with other tool calls (the
+  // `Tool::parallel_safe` contract). Carried so a *remote* tool's concurrency
+  // contract survives the seam — a non-parallel-safe tool (e.g. `bash`) must not
+  // be run concurrently just because it is behind gRPC. Defaults to true.
+  bool parallel_safe = 4;
 }
 
 message Observation {

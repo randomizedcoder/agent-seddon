@@ -158,6 +158,8 @@ async fn tools_describe_and_execute(#[case] transport: Transport) {
     let tools = grpc_tools(&dial).await.unwrap();
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0].name(), "echo");
+    // A parallel-safe tool (EchoTool inherits the default `true`) propagates as such.
+    assert!(tools[0].parallel_safe());
 
     let ctx = ToolContext {
         cwd: std::env::temp_dir(),
@@ -259,10 +261,10 @@ async fn bash_roundtrips(#[case] transport: Transport) {
 
     let tools = grpc_tools(&dial).await.unwrap();
     let bash = tools.iter().find(|t| t.name() == "bash").unwrap();
-    // (Note: the client proxy reports the default `parallel_safe() == true` — the
-    // flag isn't carried in `ToolSchema`, so a *remote* tool's concurrency contract
-    // isn't yet propagated over the seam. Tracked as a follow-up; asserted locally
-    // in `bash_corner_parallel_safe_is_false`.)
+    // The concurrency contract now survives the seam (`parallel_safe` is carried in
+    // `DescribeAll`): a *remote* `bash` reports NOT parallel-safe, so the loop
+    // serializes it exactly as it would a local `bash`.
+    assert!(!bash.parallel_safe());
 
     let ctx = ToolContext {
         cwd: std::env::temp_dir(),

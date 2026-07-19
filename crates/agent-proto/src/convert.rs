@@ -221,6 +221,10 @@ impl From<agent_core::ToolSchema> for pb::ToolSchema {
             name: s.name,
             description: s.description,
             parameters: Some(value_to_pb(&s.parameters)),
+            // `ToolSchema` (agent-core) carries no concurrency flag — it lives on the
+            // `Tool`. Default to the trait default (`true`); the tools server sets the
+            // real per-tool value in `describe_all` (see agent-grpc `server.rs`).
+            parallel_safe: true,
         }
     }
 }
