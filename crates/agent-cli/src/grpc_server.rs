@@ -17,6 +17,7 @@ pub enum Seam {
     Context,
     Policy,
     Search,
+    Repo,
 }
 
 impl Seam {
@@ -29,6 +30,7 @@ impl Seam {
             "--serve-context" => Some(Seam::Context),
             "--serve-policy" => Some(Seam::Policy),
             "--serve-search" => Some(Seam::Search),
+            "--serve-repo" => Some(Seam::Repo),
             _ => None,
         }
     }
@@ -41,6 +43,7 @@ impl Seam {
             Seam::Context => "context",
             Seam::Policy => "policy",
             Seam::Search => "search",
+            Seam::Repo => "repo",
         }
     }
 
@@ -52,6 +55,7 @@ impl Seam {
             Seam::Context => constants::CONTEXT.tcp_port,
             Seam::Policy => constants::POLICY.tcp_port,
             Seam::Search => constants::SEARCH.tcp_port,
+            Seam::Repo => constants::REPO.tcp_port,
         }
     }
 
@@ -66,6 +70,7 @@ impl Seam {
             Seam::Context => constants::CONTEXT.metrics_port,
             Seam::Policy => constants::POLICY.metrics_port,
             Seam::Search => constants::SEARCH.metrics_port,
+            Seam::Repo => constants::REPO.metrics_port,
         }
     }
 
@@ -77,6 +82,7 @@ impl Seam {
             Seam::Context => &cfg.grpc.context.listen,
             Seam::Policy => &cfg.grpc.policy.listen,
             Seam::Search => &cfg.grpc.search.listen,
+            Seam::Repo => &cfg.grpc.repo.listen,
         }
     }
 }
@@ -107,6 +113,11 @@ pub async fn serve(agent: &Agent, seam: Seam, listen: Endpoint) -> anyhow::Resul
             agent
                 .search()
                 .ok_or_else(|| anyhow::anyhow!("search seam not enabled in this build/config"))?,
+        ),
+        Seam::Repo => agent_grpc::server::repo_router(
+            agent
+                .repo()
+                .ok_or_else(|| anyhow::anyhow!("git seam not enabled in this build/config"))?,
         ),
     };
     let bound = listen.bind().await?;

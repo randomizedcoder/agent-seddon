@@ -39,6 +39,9 @@ type ToolFactory = Box<dyn Fn(&Config) -> anyhow::Result<Arc<dyn Tool>> + Send +
 #[cfg(feature = "search")]
 type SearchFactory =
     Box<dyn Fn(&Config) -> anyhow::Result<Arc<dyn agent_core::SearchBackend>> + Send + Sync>;
+#[cfg(feature = "git")]
+type RepoFactory =
+    Box<dyn Fn(&Config) -> anyhow::Result<Arc<dyn agent_core::RepoBackend>> + Send + Sync>;
 
 /// Name → factory maps for every swappable seam. Keys are `&'static str` and the
 /// maps are ordered so error messages list known names deterministically.
@@ -53,6 +56,8 @@ pub struct Registry {
     tools: BTreeMap<&'static str, ToolFactory>,
     #[cfg(feature = "search")]
     searches: BTreeMap<&'static str, SearchFactory>,
+    #[cfg(feature = "git")]
+    repos: BTreeMap<&'static str, RepoFactory>,
     // MCP transports live behind their own registry in `agent-mcp`; the runtime
     // owns one so a custom transport is registrable out-of-tree like any seam.
     #[cfg(feature = "mcp")]
@@ -141,6 +146,14 @@ impl Registry {
             + 'static,
     ) {
         self.searches.insert(name, Box::new(f));
+    }
+    #[cfg(feature = "git")]
+    pub fn repo(
+        &mut self,
+        name: &'static str,
+        f: impl Fn(&Config) -> anyhow::Result<Arc<dyn agent_core::RepoBackend>> + Send + Sync + 'static,
+    ) {
+        self.repos.insert(name, Box::new(f));
     }
 
     /// Register an MCP transport factory under a `kind` (e.g. `"websocket"`),
@@ -246,6 +259,19 @@ impl Registry {
             .searches
             .get(name)
             .ok_or_else(|| unknown("search backend", name, self.searches.keys().copied()))?;
+        f(cfg)
+    }
+
+    #[cfg(feature = "git")]
+    pub fn build_repo(
+        &self,
+        name: &str,
+        cfg: &Config,
+    ) -> anyhow::Result<Arc<dyn agent_core::RepoBackend>> {
+        let f = self
+            .repos
+            .get(name)
+            .ok_or_else(|| unknown("git backend", name, self.repos.keys().copied()))?;
         f(cfg)
     }
 }
@@ -359,6 +385,17 @@ pub fn register_builtins(r: &mut Registry) {
                 as Arc<dyn agent_core::SearchBackend>)
         });
     }
+
+    // --- git backends (the RepoBackend seam) ---
+    // The built-in local backend is wired in `crate::git::build_repo` (it needs
+    // the session id, which the config-only factory can't carry). The remote
+    // `= "grpc"` client backend registers here.
+    #[cfg(all(feature = "git", feature = "grpc"))]
+    r.repo("grpc", |cfg| {
+        let ep = grpc_client_endpoint(&cfg.grpc.repo.endpoint, agent_grpc::constants::REPO);
+        Ok(Arc::new(agent_grpc::client::GrpcRepo::connect(&ep)?)
+            as Arc<dyn agent_core::RepoBackend>)
+    });
 
     // --- gRPC seam clients (a remote seam is just another impl, selected by
     //     `= "grpc"`; endpoint from `[grpc]`, defaulting to the generated ports) ---

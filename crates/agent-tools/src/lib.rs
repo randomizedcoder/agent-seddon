@@ -4,6 +4,7 @@
 //!   * `tool-core`   — `bash`, `read_file`, `write_file`
 //!   * `tool-edit`   — `edit` (surgical string replace)
 //!   * `tool-search` — `grep`, `find`, `ls` (gitignore-aware)
+//!   * `tool-git`    — `git_read`/`git_diff`/`git_worktree`/… over the RepoBackend seam
 //!
 //! The shared path-safety / output-capping helpers live here and are reused by
 //! every tool module. Custom tools plug into the same `ToolRegistry` (see
@@ -32,6 +33,14 @@ pub use search::{FindTool, GrepTool, LsTool};
 mod search_index;
 #[cfg(feature = "tool-search-index")]
 pub use search_index::SearchTool;
+
+#[cfg(feature = "tool-git")]
+mod git;
+#[cfg(feature = "tool-git")]
+pub use git::{
+    git_tools, GitBranchesTool, GitCheckpointTool, GitDiffTool, GitGrepTool, GitLogTool,
+    GitReadTool, GitStatusTool, GitTreeTool, GitWorktreeTool,
+};
 
 #[cfg(feature = "tool-metrics")]
 mod metrics;

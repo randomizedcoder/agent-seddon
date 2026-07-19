@@ -4,6 +4,8 @@ mod agent;
 mod builder;
 mod config;
 mod context_files;
+#[cfg(feature = "git")]
+mod git;
 mod metered;
 mod policy;
 mod registry;

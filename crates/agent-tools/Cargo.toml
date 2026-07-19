@@ -15,6 +15,9 @@ tool-search = ["dep:ignore", "dep:regex"]
 # The `search` tool over the SearchBackend seam (index-backed full-text search).
 # The backend is wired by the runtime; this feature only compiles the tool.
 tool-search-index = []
+# The git tools over the RepoBackend seam (multi-branch object reads + worktrees).
+# The backend is wired by the runtime; this feature only compiles the tools.
+tool-git = []
 # The `metrics` tool: lets the agent read its own live performance registry.
 tool-metrics = ["dep:agent-metrics"]
 

@@ -8,19 +8,22 @@
 use std::sync::Arc;
 
 use agent_core::{
-    CompletionRequest, ContextInput, ContextStrategy, Decision, IndexState, LlmProvider,
-    MemoryEvent, MemoryStore, Message, ModelCapabilities, Policy, RecallQuery, SearchBackend,
-    SearchMode, SearchQuery, TokenBudget, ToolCall, ToolContext, WorkingSet,
+    ChangeKind, CompletionRequest, ContextInput, ContextStrategy, Decision, FileDiff, IndexState,
+    LlmProvider, MemoryEvent, MemoryStore, Message, ModelCapabilities, Policy, RecallQuery,
+    RepoBackend, Revision, SearchBackend, SearchMode, SearchQuery, TokenBudget, ToolCall,
+    ToolContext, WorkingSet, WorktreeSpec,
 };
 use agent_grpc::client::{
-    grpc_tools, GrpcContext, GrpcMemory, GrpcPolicy, GrpcProvider, GrpcSearch,
+    grpc_tools, GrpcContext, GrpcMemory, GrpcPolicy, GrpcProvider, GrpcRepo, GrpcSearch,
 };
 use agent_grpc::server::{
-    context_router, memory_router, policy_router, provider_router, search_router, tools_router,
+    context_router, memory_router, policy_router, provider_router, repo_router, search_router,
+    tools_router,
 };
 use agent_grpc::Endpoint;
 use agent_testkit::{
-    final_turn, tempdir, EchoTool, FixtureSearch, RecordingMemory, ScriptedProvider, StaticContext,
+    final_turn, tempdir, EchoTool, FixtureRepo, FixtureSearch, RecordingMemory, ScriptedProvider,
+    StaticContext,
 };
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -369,4 +372,85 @@ async fn search_reindex_streams_progress(#[case] transport: Transport) {
         seen.load(std::sync::atomic::Ordering::SeqCst) >= 2,
         "expected at least two progress increments (incl. the terminal one)"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Repo (multi-branch git)
+// ---------------------------------------------------------------------------
+
+#[rstest]
+#[case::tcp(Transport::Tcp)]
+#[case::uds(Transport::Uds)]
+#[tokio::test(flavor = "multi_thread")]
+async fn repo_reads_over_the_wire(#[case] transport: Transport) {
+    let backend = Arc::new(
+        FixtureRepo::new()
+            .with_branch("main", "a".repeat(40))
+            .with_blob("main", "a.txt", "hello over the wire")
+            .with_diff(vec![FileDiff {
+                change: ChangeKind::Added,
+                old_path: None,
+                new_path: Some("b.txt".into()),
+                old_oid: None,
+                new_oid: None,
+                additions: 2,
+                deletions: 0,
+                patch: "+hi".into(),
+            }]),
+    );
+    let (dial, _srv) = spawn(transport, repo_router(backend)).await;
+    let client = GrpcRepo::connect(&dial).unwrap();
+
+    // resolve → a full oid derived from the revision
+    let oid = client.resolve(&Revision::from("main")).await.unwrap();
+    assert_eq!(oid.as_str().len(), 40);
+
+    // read_file → the canned blob, converted back across the wire
+    let blob = client
+        .read_file(&Revision::from("main"), std::path::Path::new("a.txt"))
+        .await
+        .unwrap();
+    assert_eq!(blob.text, "hello over the wire");
+
+    // diff → the canned FileDiff, change kind + patch preserved
+    let diff = client
+        .diff(&Revision::from("main"), &Revision::from("main"), &[])
+        .await
+        .unwrap();
+    assert_eq!(diff.files.len(), 1);
+    assert_eq!(diff.files[0].change, ChangeKind::Added);
+    assert_eq!(
+        diff.files[0].new_path.as_deref(),
+        Some(std::path::Path::new("b.txt"))
+    );
+
+    // branches → the fixture branch
+    let branches = client.branches().await.unwrap();
+    assert!(branches.iter().any(|(n, _)| n == "main"));
+}
+
+#[rstest]
+#[case::tcp(Transport::Tcp)]
+#[case::uds(Transport::Uds)]
+#[tokio::test(flavor = "multi_thread")]
+async fn repo_worktree_lifecycle_over_the_wire(#[case] transport: Transport) {
+    let backend = Arc::new(FixtureRepo::new().with_branch("main", "a".repeat(40)));
+    let (dial, _srv) = spawn(transport, repo_router(backend)).await;
+    let client = GrpcRepo::connect(&dial).unwrap();
+
+    assert!(client.worktree_list().await.unwrap().is_empty());
+    let handle = client
+        .worktree_add(&WorktreeSpec {
+            revision: Revision::from("main"),
+            writable: false,
+            id: Some("cmp".into()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(handle.id, "cmp");
+    assert_eq!(client.worktree_list().await.unwrap().len(), 1);
+    // status reflects the live worktree over the wire.
+    assert_eq!(client.status().await.unwrap().live_worktrees, 1);
+    client.worktree_remove("cmp").await.unwrap();
+    assert!(client.worktree_list().await.unwrap().is_empty());
 }

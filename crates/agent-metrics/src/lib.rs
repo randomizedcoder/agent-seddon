@@ -71,6 +71,13 @@ pub struct Metrics {
     search_index_fresh: IntGaugeVec,
     search_errors: IntCounterVec,
     search_reindex: IntCounterVec,
+
+    // --- git / repo (recorded by the repo metrics wrapper) ----------------
+    // Labelled by `backend` (cli/hybrid/grpc), like the search families.
+    repo_op_seconds: HistogramVec,
+    repo_errors: IntCounterVec,
+    repo_worktrees: IntGaugeVec,
+    repo_fetch_seconds: HistogramVec,
 }
 
 impl Metrics {
@@ -266,6 +273,31 @@ impl Metrics {
         )
         .unwrap();
 
+        // --- git / repo -------------------------------------------------------
+        let repo_op_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "agent_repo_op_seconds",
+                "RepoBackend operation latency (measured inside the backend)",
+            ),
+            &["backend", "op"],
+        )
+        .unwrap();
+        let repo_errors = IntCounterVec::new(
+            Opts::new("agent_repo_errors_total", "RepoBackend operation errors"),
+            &["backend", "op"],
+        )
+        .unwrap();
+        let repo_worktrees = IntGaugeVec::new(
+            Opts::new("agent_repo_worktrees_live", "Live disposable worktrees"),
+            &["backend"],
+        )
+        .unwrap();
+        let repo_fetch_seconds = HistogramVec::new(
+            HistogramOpts::new("agent_repo_fetch_seconds", "Mirror fetch duration"),
+            &["backend"],
+        )
+        .unwrap();
+
         let collectors: Vec<Box<dyn prometheus::core::Collector>> = vec![
             Box::new(api_calls.clone()),
             Box::new(api_call_seconds.clone()),
@@ -298,6 +330,10 @@ impl Metrics {
             Box::new(search_index_fresh.clone()),
             Box::new(search_errors.clone()),
             Box::new(search_reindex.clone()),
+            Box::new(repo_op_seconds.clone()),
+            Box::new(repo_errors.clone()),
+            Box::new(repo_worktrees.clone()),
+            Box::new(repo_fetch_seconds.clone()),
         ];
         for m in collectors {
             registry.register(m).expect("register metric");
@@ -336,6 +372,10 @@ impl Metrics {
             search_index_fresh,
             search_errors,
             search_reindex,
+            repo_op_seconds,
+            repo_errors,
+            repo_worktrees,
+            repo_fetch_seconds,
         }
     }
 
@@ -510,6 +550,29 @@ impl Metrics {
     pub fn on_search_error(&self, backend: &str, op: &str) {
         self.search_errors.with_label_values(&[backend, op]).inc();
     }
+
+    // --- repo (git seam) instrumentation ----------------------------------
+
+    /// Record a RepoBackend operation's latency, labelled by backend + op name.
+    pub fn on_repo_op(&self, backend: &str, op: &str, seconds: f64) {
+        self.repo_op_seconds
+            .with_label_values(&[backend, op])
+            .observe(seconds);
+    }
+    /// Count a RepoBackend error, tagged with the operation.
+    pub fn on_repo_error(&self, backend: &str, op: &str) {
+        self.repo_errors.with_label_values(&[backend, op]).inc();
+    }
+    /// Set the live-worktree gauge (refreshed on `status`/`worktree_list`).
+    pub fn set_repo_worktrees(&self, backend: &str, n: i64) {
+        self.repo_worktrees.with_label_values(&[backend]).set(n);
+    }
+    /// Record a mirror fetch's duration.
+    pub fn observe_repo_fetch(&self, backend: &str, seconds: f64) {
+        self.repo_fetch_seconds
+            .with_label_values(&[backend])
+            .observe(seconds);
+    }
 }
 
 fn bool_label(b: bool) -> &'static str {
@@ -574,6 +637,10 @@ mod tests {
         m.on_search_reindex("tantivy", "startup");
         m.set_search_fresh("tantivy", true);
         m.on_search_error("tantivy", "query");
+        m.on_repo_op("cli", "diff", 0.01);
+        m.on_repo_error("cli", "read_file");
+        m.set_repo_worktrees("cli", 2);
+        m.observe_repo_fetch("cli", 0.3);
 
         let text = m.encode_text();
         for name in [
@@ -598,6 +665,10 @@ mod tests {
             "agent_search_index_fresh",
             "agent_search_errors_total",
             "agent_search_reindex_total",
+            "agent_repo_op_seconds",
+            "agent_repo_errors_total",
+            "agent_repo_worktrees_live",
+            "agent_repo_fetch_seconds",
         ] {
             assert!(text.contains(name), "missing metric `{name}` in:\n{text}");
         }

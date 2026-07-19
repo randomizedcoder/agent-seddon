@@ -36,7 +36,11 @@ You are a coding agent operating in a terminal working directory. Use the
 provided tools (bash, read_file, write_file, edit, grep, find, ls, search) to
 inspect and modify files and to run commands. Prefer `edit` over rewriting whole
 files, `search` (indexed full-text) to find code fast during planning, and
-`grep`/`find`/`ls` to navigate. Use `metrics` to inspect your own performance
+`grep`/`find`/`ls` to navigate. To work across branches without checking them out,
+use the git tools: `git_read`/`git_tree`/`git_diff`/`git_grep`/`git_log` read any
+revision, `git_branches`/`git_status` survey the repo, and `git_worktree`/
+`git_checkpoint` materialize disposable checkouts and save private checkpoints.
+Use `metrics` to inspect your own performance
 (latency, token/tool counts, search index state). Work step by step: call a tool,
 observe the result, then decide the next step. When the task is complete, reply
 with a short plain-text summary and do not call any more tools.
@@ -74,7 +78,11 @@ recall_limit  = 5
 # registered, i.e. compiled in via cargo features). Note: MCP tools (below) are
 # always added when their server is configured — this allowlist only filters the
 # built-ins.
-enabled = ["bash", "read_file", "write_file", "edit", "grep", "find", "ls", "search", "metrics"]
+enabled = [
+    "bash", "read_file", "write_file", "edit", "grep", "find", "ls", "search", "metrics",
+    "git_read", "git_tree", "git_diff", "git_grep", "git_log", "git_branches", "git_status",
+    "git_worktree", "git_checkpoint",
+]
 
 # High-performance code search (the SearchBackend seam). `backends` selects which
 # backends front the single search interface (first = default; empty ⇒ ["tantivy"]);
@@ -86,6 +94,22 @@ enabled = ["bash", "read_file", "write_file", "edit", "grep", "find", "ls", "sea
 backends   = ["tantivy"]
 index_dir  = ""              # empty ⇒ per-repo .agent-seddon/index/<backend>
 auto_index = true
+
+# Multi-branch git (the RepoBackend seam). One shared bare/mirror object DB fronts
+# many disposable `git worktree`s, so the agent can read, diff and analyze code
+# across branches without many full clones. `backend` selects the impl: "cli"
+# (shells out to git — the default, zero extra deps) or "grpc" (a remote seam).
+# The mirror/worktrees live under <repo>/.agent-seddon/ unless overridden.
+# `push_policy` gates the only operation that leaves the sandbox (default "never":
+# checkpoints stay in private local refs). See docs/components/git.md.
+[git]
+backend       = "cli"
+mirror_dir    = ""           # empty ⇒ <repo>/.agent-seddon/mirror
+worktrees_dir = ""           # empty ⇒ <repo>/.agent-seddon/worktrees
+remote        = ""           # empty ⇒ infer from the checkout's origin
+auto_fetch_secs = 0          # >0 ⇒ background-fetch the mirror if older than this
+max_worktrees = 8
+push_policy   = "never"      # never | checkpoint-only | explicit
 
 # External MCP (Model Context Protocol) servers. Their tools are discovered at
 # startup and registered as `mcp_<server>_<tool>`. Best-effort: a server that
@@ -148,11 +172,13 @@ job         = "agent-seddon"
 # gRPC seam transports. A seam set to `= "grpc"` (e.g. `[agent] provider = "grpc"`)
 # dials `endpoint`; `agent --serve-<seam>` binds `listen`. Both default (when
 # empty/omitted) to 127.0.0.1:<port> using the generated ports (provider 50051,
-# memory 50052, tools 50053, context 50054, policy 50055, search 50056). Use `unix:/path` for a
-# same-host, TCP-bypassing socket. See docs/grpc.md.
+# memory 50052, tools 50053, context 50054, policy 50055, search 50056, repo 50057).
+# Use `unix:/path` for a same-host, TCP-bypassing socket. See docs/grpc.md.
 #
 # [grpc.provider]
 # endpoint = "unix:/tmp/agent-seddon/provider.sock"   # client dials this
 # listen   = "unix:/tmp/agent-seddon/provider.sock"   # --serve-provider binds this
 # [grpc.tools]
 # endpoint = "http://tool-worker:50053"               # remote tool worker (opt-in)
+# [grpc.repo]
+# endpoint = "unix:/tmp/agent-seddon/repo.sock"       # a git gateway (backend = "grpc")

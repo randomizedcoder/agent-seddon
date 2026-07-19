@@ -81,6 +81,21 @@ pub async fn build_agent_with(
         dispatch
     };
 
+    // Git: build the configured RepoBackend (scoped to this session's run dir) and
+    // expose the multi-branch git tools (git_read/git_diff/git_worktree/…).
+    // Registered before the subagent set is captured so child agents inherit them;
+    // the handle drives the optional background mirror-fetch below.
+    #[cfg(feature = "git")]
+    let repo_backend = {
+        let backend =
+            crate::git::build_repo(registry, &cfg, &session_id).context("building git backend")?;
+        let backend = crate::metered::repo(backend, metrics.clone(), cfg.git.backend_name());
+        for tool in agent_tools::git_tools(backend.clone()) {
+            tools.register(crate::metered::tool(tool, metrics.clone()));
+        }
+        backend
+    };
+
     // Memory: either the whole-store backend, or — when `[memory] semantic` is
     // set — the episodic layer of that backend composed with an independently
     // chosen `SemanticStore` (e.g. a vector store) via `LayeredMemory`.
@@ -170,9 +185,15 @@ pub async fn build_agent_with(
         crate::search::spawn_freshness(search_dispatch.clone(), metrics.clone());
     }
 
+    // Keep the shared git mirror fresh in the background (opt-in via auto_fetch_secs).
+    #[cfg(feature = "git")]
+    crate::git::spawn_fetch(repo_backend.clone(), cfg.git.auto_fetch_secs);
+
     let agent = Agent::new(provider, tools, memory, context, policy, metrics, settings);
     #[cfg(feature = "search")]
     let agent = agent.with_search(search_dispatch as Arc<dyn agent_core::SearchBackend>);
+    #[cfg(feature = "git")]
+    let agent = agent.with_repo(repo_backend);
     Ok(agent)
 }
 
@@ -192,6 +213,13 @@ fn build_tools(
         }
     } else {
         for name in &cfg.tools.enabled {
+            // Tools wired later by the builder (`search`, `metrics`, the `git_*`
+            // set, `delegate`) aren't in the registry — naming one is not a typo,
+            // it's added unconditionally below. Skip it here; still error on a
+            // genuine unknown name.
+            if is_builder_registered_tool(name) {
+                continue;
+            }
             let tool = registry
                 .build_tool(name, cfg)
                 .with_context(|| format!("enabling tool `{name}`"))?;
@@ -199,6 +227,17 @@ fn build_tools(
         }
     }
     Ok(tools)
+}
+
+/// Names of tools the builder registers directly (not through the [`Registry`]),
+/// so `[tools] enabled` can list them without tripping the typo check. They are
+/// added unconditionally when their feature is compiled in, so the allowlist only
+/// filters the registry-built tools (see `config/agent.toml`).
+fn is_builder_registered_tool(name: &str) -> bool {
+    (cfg!(feature = "tool-metrics") && name == "metrics")
+        || (cfg!(feature = "search") && name == "search")
+        || (cfg!(feature = "subagents") && name == "delegate")
+        || (cfg!(feature = "git") && name.starts_with("git_"))
 }
 
 /// Connect to each configured MCP server, discover its tools, and register them

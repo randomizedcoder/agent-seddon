@@ -25,6 +25,65 @@ pub struct Config {
     pub grpc: GrpcCfg,
     #[serde(default)]
     pub search: SearchCfg,
+    #[serde(default)]
+    pub git: GitCfg,
+}
+
+/// Multi-branch git (the `RepoBackend` seam). One shared bare/mirror object DB
+/// under `mirror_dir` fronts disposable worktrees under `worktrees_dir`; a run
+/// directory is `<worktrees_dir>/<session_id>/`. `backend` selects the impl
+/// ("cli" = all shell-out, "hybrid" = in-process gix reads + git-CLI writes,
+/// "grpc" = a remote seam). `push_policy` gates the only operation that leaves
+/// the sandbox. See `docs/components/git.md`.
+#[derive(Debug, Deserialize)]
+pub struct GitCfg {
+    /// "cli" (default) | "hybrid" | "grpc". Empty ⇒ "cli".
+    #[serde(default)]
+    pub backend: String,
+    /// Shared bare/mirror object DB. Empty ⇒ `<repo>/.agent-seddon/mirror`.
+    #[serde(default)]
+    pub mirror_dir: String,
+    /// Parent dir for disposable worktrees. Empty ⇒ `<repo>/.agent-seddon/worktrees`.
+    #[serde(default)]
+    pub worktrees_dir: String,
+    /// Upstream remote URL for the mirror. Empty ⇒ infer from the checkout's origin.
+    #[serde(default)]
+    pub remote: String,
+    /// On start, fetch the mirror in the background if it is older than this many
+    /// seconds. `0` ⇒ never auto-fetch.
+    #[serde(default)]
+    pub auto_fetch_secs: u64,
+    /// Max concurrent live worktrees (`0` ⇒ unbounded).
+    #[serde(default = "default_max_worktrees")]
+    pub max_worktrees: u32,
+    /// "never" (default) | "checkpoint-only" | "explicit".
+    #[serde(default = "default_push_policy")]
+    pub push_policy: String,
+}
+
+impl Default for GitCfg {
+    fn default() -> Self {
+        Self {
+            backend: String::new(),
+            mirror_dir: String::new(),
+            worktrees_dir: String::new(),
+            remote: String::new(),
+            auto_fetch_secs: 0,
+            max_worktrees: default_max_worktrees(),
+            push_policy: default_push_policy(),
+        }
+    }
+}
+
+impl GitCfg {
+    /// The configured backend name, or the default when unset.
+    pub fn backend_name(&self) -> &str {
+        if self.backend.is_empty() {
+            "cli"
+        } else {
+            &self.backend
+        }
+    }
 }
 
 /// High-performance code search (the `SearchBackend` seam). `backends` selects
@@ -86,6 +145,8 @@ pub struct GrpcCfg {
     pub policy: GrpcSeamCfg,
     #[serde(default)]
     pub search: GrpcSeamCfg,
+    #[serde(default)]
+    pub repo: GrpcSeamCfg,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -417,6 +478,12 @@ fn default_true() -> bool {
 fn default_batch_rows() -> usize {
     256
 }
+fn default_max_worktrees() -> u32 {
+    8
+}
+fn default_push_policy() -> String {
+    "never".into()
+}
 fn default_flush_ms() -> u64 {
     1_000
 }
@@ -459,6 +526,7 @@ impl Config {
             metrics: MetricsCfg::default(),
             grpc: GrpcCfg::default(),
             search: SearchCfg::default(),
+            git: GitCfg::default(),
         }
     }
 }

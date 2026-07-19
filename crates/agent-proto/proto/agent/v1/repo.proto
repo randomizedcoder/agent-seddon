@@ -1,0 +1,189 @@
+// The `RepoBackend` seam over gRPC — a multi-branch git gateway. Object reads are
+// addressed by revision (a branch/tag/oid string); worktree/mirror/ref lifecycle
+// side-effects on the shared object DB. Oids and revisions ride as plain strings
+// (they are already hex / rev-spec text). See docs/components/git.md.
+syntax = "proto3";
+
+package agent.v1;
+
+// The kind of object a TreeEntry points at.
+enum EntryKind {
+  ENTRY_KIND_BLOB = 0;
+  ENTRY_KIND_TREE = 1;
+  ENTRY_KIND_SYMLINK = 2;
+  ENTRY_KIND_SUBMODULE = 3;
+}
+
+// Per-file change class in a base..target diff. MODIFIED is the proto3 zero value.
+enum ChangeKind {
+  CHANGE_KIND_MODIFIED = 0;
+  CHANGE_KIND_ADDED = 1;
+  CHANGE_KIND_DELETED = 2;
+  CHANGE_KIND_RENAMED = 3;
+  CHANGE_KIND_COPIED = 4;
+  CHANGE_KIND_TYPE_CHANGE = 5;
+}
+
+message TreeEntry {
+  string path = 1;
+  string oid = 2;
+  EntryKind kind = 3;
+  uint32 mode = 4;
+  optional uint64 size = 5;
+}
+
+message BlobContent {
+  string oid = 1;
+  string path = 2;
+  uint64 bytes_len = 3;
+  bool is_binary = 4;
+  string text = 5;
+}
+
+message FileDiff {
+  ChangeKind change = 1;
+  optional string old_path = 2;
+  optional string new_path = 3;
+  optional string old_oid = 4;
+  optional string new_oid = 5;
+  uint32 additions = 6;
+  uint32 deletions = 7;
+  string patch = 8;
+}
+
+message DiffResult {
+  string base = 1;
+  string target = 2;
+  repeated FileDiff files = 3;
+}
+
+message CommitInfo {
+  string oid = 1;
+  repeated string parents = 2;
+  string author = 3;
+  string author_email = 4;
+  uint64 committed_ms = 5;
+  string summary = 6;
+  string body = 7;
+}
+
+message GrepHit {
+  string path = 1;
+  uint32 line = 2;
+  string text = 3;
+}
+
+message WorktreeHandle {
+  string id = 1;
+  string path = 2;
+  string head = 3;
+  string revision = 4;
+  bool writable = 5;
+}
+
+message WorktreeSpec {
+  string revision = 1;
+  bool writable = 2;
+  optional string id = 3;
+}
+
+message Checkpoint {
+  string name = 1;
+  string oid = 2;
+  string ref_name = 3;
+}
+
+// A branch (or remote-tracking branch) and its resolved head oid.
+message Branch {
+  string name = 1;
+  string oid = 2;
+}
+
+message RepoStatus {
+  string mirror_path = 1;
+  uint64 last_fetch_ms = 2;
+  uint32 live_worktrees = 3;
+  repeated Branch heads = 4;
+}
+
+// --- requests / responses --------------------------------------------------
+
+message ResolveRequest { string revision = 1; }
+message ResolveResponse { string oid = 1; }
+
+message ReadFileRequest {
+  string revision = 1;
+  string path = 2;
+}
+
+message ListTreeRequest {
+  string revision = 1;
+  string path = 2;
+  bool recursive = 3;
+}
+message ListTreeResponse { repeated TreeEntry entries = 1; }
+
+message DiffRequest {
+  string base = 1;
+  string target = 2;
+  repeated string path_globs = 3;
+}
+
+message GrepRequest {
+  string revision = 1;
+  string pattern = 2;
+  repeated string path_globs = 3;
+  uint64 limit = 4; // agent-core `usize`
+}
+message GrepResponse { repeated GrepHit hits = 1; }
+
+message LogRequest {
+  string revision = 1;
+  optional string path = 2;
+  uint64 limit = 3;
+}
+message LogResponse { repeated CommitInfo commits = 1; }
+
+message BranchesRequest {}
+message BranchesResponse { repeated Branch branches = 1; }
+
+message RepoStatusRequest {}
+message FetchRequest {}
+
+message WorktreeListRequest {}
+message WorktreeListResponse { repeated WorktreeHandle worktrees = 1; }
+
+message WorktreeRemoveRequest { string id = 1; }
+message WorktreeRemoveResponse {}
+
+message CheckpointRequest {
+  string worktree_id = 1;
+  string name = 2;
+}
+
+message PushRequest {
+  Checkpoint checkpoint = 1;
+  string remote_ref = 2;
+}
+message PushResponse {}
+
+service RepoService {
+  // Object-level, read-only, revision-addressed.
+  rpc Resolve(ResolveRequest) returns (ResolveResponse);
+  rpc ReadFile(ReadFileRequest) returns (BlobContent);
+  rpc ListTree(ListTreeRequest) returns (ListTreeResponse);
+  rpc Diff(DiffRequest) returns (DiffResult);
+  rpc Grep(GrepRequest) returns (GrepResponse);
+  rpc Log(LogRequest) returns (LogResponse);
+  rpc Branches(BranchesRequest) returns (BranchesResponse);
+  // Mirror / worktree / ref lifecycle.
+  rpc Status(RepoStatusRequest) returns (RepoStatus);
+  rpc Fetch(FetchRequest) returns (RepoStatus);
+  rpc WorktreeAdd(WorktreeSpec) returns (WorktreeHandle);
+  rpc WorktreeList(WorktreeListRequest) returns (WorktreeListResponse);
+  rpc WorktreeRemove(WorktreeRemoveRequest) returns (WorktreeRemoveResponse);
+  // Named `CreateCheckpoint` (not `Checkpoint`) so the method name doesn't shadow
+  // the `Checkpoint` message type when protoc resolves the return type.
+  rpc CreateCheckpoint(CheckpointRequest) returns (Checkpoint);
+  rpc Push(PushRequest) returns (PushResponse);
+}

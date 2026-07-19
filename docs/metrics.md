@@ -39,6 +39,8 @@ gated by `[metrics] enabled`.
     `agent_search_reindex_total{backend,trigger}`,
     `agent_search_errors_total{backend,op}`. Backends are labelled so tantivy vs. a
     second backend compare head-to-head under the same interface.
+  - Git — `agent_repo_op_seconds{backend,op}`, `agent_repo_errors_total{backend,op}`,
+    `agent_repo_worktrees_live{backend}`, `agent_repo_fetch_seconds{backend}`.
 
 Because the wrapper sits at the seam boundary, a remote `= "grpc"` seam is timed
 on the loop side (label `provider="grpc"`, etc.), and the same wrapper on a
@@ -90,6 +92,7 @@ job so co-located servers don't collide on `:9600`:
 | `--serve-context`  | `context`  | `127.0.0.1:9604` |
 | `--serve-policy`   | `policy`   | `127.0.0.1:9605` |
 | `--serve-search`   | `search`   | `127.0.0.1:9606` |
+| `--serve-repo`     | `repo`     | `127.0.0.1:9607` |
 
 Run the `config/otel-demo` two-process demo (a gateway + a `provider = "grpc"`
 loop) and both the loop (`agent`, `:9600`) and the gateway (`provider`, `:9601`)
