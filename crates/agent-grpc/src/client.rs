@@ -1,0 +1,300 @@
+//! gRPC **clients** — each implements an `agent_core` seam trait by calling a
+//! remote server, so the loop can't tell a remote seam from a local one.
+//!
+//! Channels are built **lazily** (see [`crate::transport::Endpoint::connect_lazy`])
+//! so the runtime's synchronous seam factories can construct a client without
+//! awaiting. Every outbound request carries the current W3C trace context in its
+//! metadata (via [`outbound`]) so the server can continue the trace.
+
+use std::sync::Arc;
+
+use agent_core::{
+    ChunkStream, CompletionRequest, CompletionResponse, ContextInput, ContextStrategy, Decision,
+    LlmProvider, MemoryEvent, MemoryItem, MemoryStore, Message, ModelCapabilities, Observation,
+    Policy, RecallQuery, Result, TokenBudget, Tool, ToolContext, ToolSchema, WorkingSet,
+};
+use agent_proto::pb;
+use async_trait::async_trait;
+use futures_util::StreamExt;
+use tonic::transport::Channel;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+use crate::transport::Endpoint;
+
+/// Wrap a message in a request carrying the caller's trace context.
+///
+/// We inject the *active `tracing` span's* OTel context, not
+/// `opentelemetry::Context::current()` — the tracing-opentelemetry bridge keeps a
+/// span's OTel context in the span's extensions, not the OTel thread-local, so the
+/// latter is empty here and the server would see no parent. With the loop's seam
+/// calls wrapped in spans, this makes the server's handler span a child of the
+/// caller's span → one trace across the process boundary.
+fn outbound<T>(msg: T) -> tonic::Request<T> {
+    let mut req = tonic::Request::new(msg);
+    let cx = tracing::Span::current().context();
+    agent_proto::trace::inject_context(&cx, req.metadata_mut());
+    req
+}
+
+// ---------------------------------------------------------------------------
+// Provider
+// ---------------------------------------------------------------------------
+
+pub struct GrpcProvider {
+    client: pb::provider_client::ProviderClient<Channel>,
+    caps: ModelCapabilities,
+}
+
+impl GrpcProvider {
+    /// Connect lazily. `caps` is config-derived so `capabilities()` (a sync trait
+    /// method) needs no round-trip and the factory stays synchronous.
+    pub fn connect(endpoint: &Endpoint, caps: ModelCapabilities) -> Result<Self> {
+        let channel = endpoint
+            .connect_lazy()
+            .map_err(|e| agent_core::Error::Provider(e.to_string()))?;
+        Ok(Self {
+            client: pb::provider_client::ProviderClient::new(channel),
+            caps,
+        })
+    }
+}
+
+#[async_trait]
+impl LlmProvider for GrpcProvider {
+    fn capabilities(&self) -> ModelCapabilities {
+        self.caps.clone()
+    }
+
+    async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse> {
+        let mut client = self.client.clone();
+        let resp = client
+            .complete(outbound(pb::CompletionRequest::from(req)))
+            .await
+            .map_err(|s| agent_core::Error::Provider(s.to_string()))?;
+        resp.into_inner()
+            .try_into()
+            .map_err(|e: agent_proto::ConvertError| agent_core::Error::Provider(e.to_string()))
+    }
+
+    async fn stream(&self, req: CompletionRequest) -> Result<ChunkStream> {
+        let mut client = self.client.clone();
+        let stream = client
+            .stream(outbound(pb::CompletionRequest::from(req)))
+            .await
+            .map_err(|s| agent_core::Error::Provider(s.to_string()))?
+            .into_inner();
+        let mapped = stream.map(|item| match item {
+            Ok(chunk) => agent_core::CompletionChunk::try_from(chunk)
+                .map_err(|e| agent_core::Error::Provider(e.to_string())),
+            Err(s) => Err(agent_core::Error::Provider(s.to_string())),
+        });
+        Ok(Box::pin(mapped))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Memory
+// ---------------------------------------------------------------------------
+
+pub struct GrpcMemory {
+    client: pb::memory_client::MemoryClient<Channel>,
+}
+
+impl GrpcMemory {
+    pub fn connect(endpoint: &Endpoint) -> Result<Self> {
+        let channel = endpoint
+            .connect_lazy()
+            .map_err(|e| agent_core::Error::Memory(e.to_string()))?;
+        Ok(Self {
+            client: pb::memory_client::MemoryClient::new(channel),
+        })
+    }
+}
+
+#[async_trait]
+impl MemoryStore for GrpcMemory {
+    async fn recall(&self, query: &RecallQuery) -> Result<Vec<MemoryItem>> {
+        let mut client = self.client.clone();
+        let resp = client
+            .recall(outbound(pb::RecallQuery::from(query.clone())))
+            .await
+            .map_err(|s| agent_core::Error::Memory(s.to_string()))?;
+        Ok(resp
+            .into_inner()
+            .items
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+
+    async fn append(&self, event: MemoryEvent) -> Result<()> {
+        let mut client = self.client.clone();
+        client
+            .append(outbound(pb::MemoryEvent::from(event)))
+            .await
+            .map_err(|s| agent_core::Error::Memory(s.to_string()))?;
+        Ok(())
+    }
+
+    async fn distill(&self) -> Result<usize> {
+        let mut client = self.client.clone();
+        let resp = client
+            .distill(outbound(pb::DistillRequest {}))
+            .await
+            .map_err(|s| agent_core::Error::Memory(s.to_string()))?;
+        Ok(resp.into_inner().count as usize)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Context
+// ---------------------------------------------------------------------------
+
+pub struct GrpcContext {
+    client: pb::context_service_client::ContextServiceClient<Channel>,
+}
+
+impl GrpcContext {
+    pub fn connect(endpoint: &Endpoint) -> Result<Self> {
+        let channel = endpoint
+            .connect_lazy()
+            .map_err(|e| agent_core::Error::Provider(e.to_string()))?;
+        Ok(Self {
+            client: pb::context_service_client::ContextServiceClient::new(channel),
+        })
+    }
+}
+
+#[async_trait]
+impl ContextStrategy for GrpcContext {
+    async fn assemble(&self, input: ContextInput) -> Result<Vec<Message>> {
+        let mut client = self.client.clone();
+        let resp = client
+            .assemble(outbound(pb::ContextInput::from(input)))
+            .await
+            .map_err(|s| agent_core::Error::Provider(s.to_string()))?;
+        resp.into_inner()
+            .messages
+            .into_iter()
+            .map(|m| m.try_into())
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e: agent_proto::ConvertError| agent_core::Error::Provider(e.to_string()))
+    }
+
+    async fn compact(&self, working: &mut WorkingSet, budget: &TokenBudget) -> Result<()> {
+        let mut client = self.client.clone();
+        let req = pb::CompactRequest {
+            working: Some(std::mem::take(working).into()),
+            budget: Some(budget.clone().into()),
+        };
+        let resp = client
+            .compact(outbound(req))
+            .await
+            .map_err(|s| agent_core::Error::Provider(s.to_string()))?;
+        let compacted = resp
+            .into_inner()
+            .working
+            .ok_or_else(|| agent_core::Error::Provider("compact: missing working set".into()))?;
+        *working = compacted
+            .try_into()
+            .map_err(|e: agent_proto::ConvertError| agent_core::Error::Provider(e.to_string()))?;
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Policy
+// ---------------------------------------------------------------------------
+
+pub struct GrpcPolicy {
+    client: pb::policy_client::PolicyClient<Channel>,
+}
+
+impl GrpcPolicy {
+    pub fn connect(endpoint: &Endpoint) -> Result<Self> {
+        let channel = endpoint
+            .connect_lazy()
+            .map_err(|e| agent_core::Error::Config(e.to_string()))?;
+        Ok(Self {
+            client: pb::policy_client::PolicyClient::new(channel),
+        })
+    }
+}
+
+#[async_trait]
+impl Policy for GrpcPolicy {
+    async fn authorize(&self, call: &agent_core::ToolCall) -> Decision {
+        let mut client = self.client.clone();
+        match client
+            .authorize(outbound(pb::ToolCall::from(call.clone())))
+            .await
+        {
+            Ok(resp) => resp.into_inner().into(),
+            // Fail safe: a broken policy service denies rather than silently allows.
+            Err(s) => Decision::Deny(format!("policy rpc failed: {s}")),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tools — connect, discover, and present remote tools as `Arc<dyn Tool>`
+// ---------------------------------------------------------------------------
+
+struct GrpcTool {
+    client: pb::tool_service_client::ToolServiceClient<Channel>,
+    schema: ToolSchema,
+}
+
+#[async_trait]
+impl Tool for GrpcTool {
+    fn name(&self) -> &str {
+        &self.schema.name
+    }
+
+    fn schema(&self) -> ToolSchema {
+        self.schema.clone()
+    }
+
+    async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<Observation> {
+        let mut client = self.client.clone();
+        let req = pb::ExecuteRequest {
+            name: self.schema.name.clone(),
+            arguments: Some(args.into()),
+            context: Some(ctx.into()),
+        };
+        // Mirror `McpTool`: transport failures surface as an error observation, not
+        // a hard `Err`, so one flaky worker doesn't abort the turn.
+        match client.execute(outbound(req)).await {
+            Ok(resp) => Ok(resp.into_inner().into()),
+            Err(s) => Ok(Observation::error(format!(
+                "grpc tool `{}` failed: {s}",
+                self.schema.name
+            ))),
+        }
+    }
+}
+
+/// Connect to a remote tool worker, discover its tools (`DescribeAll`), and return
+/// one `Arc<dyn Tool>` per remote tool (each calls `Execute`). Mirrors
+/// `agent-mcp`'s `connect_tools`.
+pub async fn grpc_tools(endpoint: &Endpoint) -> Result<Vec<Arc<dyn Tool>>> {
+    let channel = endpoint
+        .connect_lazy()
+        .map_err(|e| agent_core::Error::Tool(e.to_string()))?;
+    let mut client = pb::tool_service_client::ToolServiceClient::new(channel.clone());
+    let resp = client
+        .describe_all(outbound(pb::DescribeAllRequest {}))
+        .await
+        .map_err(|s| agent_core::Error::Tool(s.to_string()))?;
+    let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
+    for schema in resp.into_inner().tools {
+        let schema: ToolSchema = schema
+            .try_into()
+            .map_err(|e: agent_proto::ConvertError| agent_core::Error::Tool(e.to_string()))?;
+        tools.push(Arc::new(GrpcTool {
+            client: pb::tool_service_client::ToolServiceClient::new(channel.clone()),
+            schema,
+        }));
+    }
+    Ok(tools)
+}

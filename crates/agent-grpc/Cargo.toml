@@ -1,0 +1,29 @@
+[package]
+name = "agent-grpc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "gRPC transport for the agent-seddon seams: per-seam servers + clients over TCP or unix domain sockets"
+
+[dependencies]
+agent-core = { workspace = true }
+agent-proto = { workspace = true }
+tonic = { workspace = true }
+prost = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tower = { workspace = true }
+hyper-util = { workspace = true }
+async-trait = { workspace = true }
+futures-core = { workspace = true }
+futures-util = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+# W3C trace-context propagation across the gRPC hop.
+opentelemetry = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+
+[dev-dependencies]
+agent-testkit = { workspace = true }
+rstest = { workspace = true }

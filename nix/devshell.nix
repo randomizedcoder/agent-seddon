@@ -54,6 +54,18 @@ pkgs.mkShell {
       ch-client -q 'SHOW TABLES FROM agent'   Run a query against it
       ch-down                                 Stop + remove the container
 
+    ClickStack / HyperDX (docker) — OTLP trace receiver + UI:
+      cs-up                                   Start HyperDX all-in-one (UI :8080, OTLP :4317)
+      cs-client -q 'SHOW TABLES FROM default' Query the bundled ClickHouse (traces)
+      cs-logs                                 Follow container logs
+      cs-down                                 Stop + remove the container
+
+    Prometheus + Grafana (docker) — metrics scraper + dashboards:
+      prom-up                                 Start Prometheus (UI :9090, scrapes :9600-9605)
+      prom-down                               Stop + remove the container
+      graf-up                                 Start Grafana (UI :3000, agent-seddon dashboard)
+      graf-down                               Stop + remove the container
+
     EOF
         }
 
@@ -84,6 +96,16 @@ pkgs.mkShell {
         ch-up()     { nix run .#clickhouse-up -- "$@"; }
         ch-down()   { nix run .#clickhouse-down -- "$@"; }
         ch-client() { nix run .#clickhouse-client -- "$@"; }
+
+        cs-up()     { nix run .#clickstack-up -- "$@"; }
+        cs-down()   { nix run .#clickstack-down -- "$@"; }
+        cs-logs()   { nix run .#clickstack-logs -- "$@"; }
+        cs-client() { nix run .#clickstack-client -- "$@"; }
+
+        prom-up()   { nix run .#prometheus-up -- "$@"; }
+        prom-down() { nix run .#prometheus-down -- "$@"; }
+        graf-up()   { nix run .#grafana-up -- "$@"; }
+        graf-down() { nix run .#grafana-down -- "$@"; }
 
         agent-help
   '';

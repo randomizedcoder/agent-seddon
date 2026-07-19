@@ -512,13 +512,26 @@ loop iteration (model call → tool exec → observation → response), and flip
 
 Sections 2–5 cover the seams; several shipped subsystems live around them:
 
-- **Observability.** Prometheus metrics (`crates/agent-runtime/src/metrics.rs`) —
-  10 metrics (API calls, latency, tokens, context size, tool calls, iterations,
-  runs, active) served on a `/metrics` endpoint (+ optional Pushgateway). And a
+- **Observability.** Prometheus metrics (`crates/agent-metrics`) — loop-level
+  counters (API calls, latency, tokens, context size, tool calls, iterations,
+  runs, active) *plus* per-seam series recorded by a metrics wrapper
+  (`crates/agent-runtime/src/metered.rs`: provider request/TTFT, per-tool latency,
+  memory ops, context assemble/compact, policy authorize) — served on a `/metrics`
+  endpoint (+ optional Pushgateway), scraped by a Nix-deployed Prometheus/Grafana
+  stack with a per-component dashboard ([`docs/metrics.md`](docs/metrics.md)). And a
   ClickHouse telemetry sink (`crates/agent-telemetry`): a `CompositeMemory` wrapper
   and a tracing layer stream `agent_events` / `agent_logs` / `agent_usage` via a
   batched background writer, best-effort (rows dropped, never blocking, if
   ClickHouse is down). Both opt-in via `[metrics]` / `[telemetry]`.
+  **OpenTelemetry** tracing is layered on *alongside* the native sink
+  (`crates/agent-telemetry/src/otel.rs`): a non-empty `[telemetry] otlp_endpoint`
+  adds a batch OTLP/gRPC exporter to the ClickStack OTEL collector plus the global
+  W3C trace-context propagator. The loop is instrumented so a run is a **span tree**
+  (`agent.turn → memory.recall · context.assemble · provider.* · policy.authorize ·
+  tool.execute · context.compact`, + `agent.delegate`), and the OTLP layer carries
+  its own `INFO` filter so tracing is independent of `RUST_LOG`. When a seam is
+  remote the trace follows the request across the process boundary — see §12 and the
+  runbook [`docs/tracing.md`](docs/tracing.md).
 - **Interactive REPL + session persistence.** `agent` with no goal opens a
   multi-turn REPL (`crates/agent-cli/src/repl.rs`) with rustyline history + line
   editing, streaming, and slash commands (`/help`, `/new`, `/compact`, `/resume`,
@@ -530,3 +543,52 @@ Sections 2–5 cover the seams; several shipped subsystems live around them:
   (`crates/agent-runtime/src/context_files.rs`).
 - **MCP server.** `agent --serve-mcp` (`crates/agent-cli/src/mcp_server.rs`) is the
   server counterpart to the `agent-mcp` client (§4.6) — see that section.
+
+---
+
+## 12. Distributed components (gRPC) & OTLP tracing
+
+The seams were designed to be process-local trait objects, but nothing about the
+loop assumes co-location: it only ever calls traits. So the same boundaries that
+make components swappable also make them **distributable** — a remote provider,
+tool, memory, context, or policy is just another impl of its `agent-core` trait,
+selected by config (`provider = "grpc"`, endpoint in config), exactly like MCP
+transports already are (§4.6, [`architecture.md`](docs/architecture.md)).
+
+Two pieces make this concrete, and land in stages:
+
+- **Shipped now — the wire contract + tracing.** [`agent-proto`](crates/agent-proto)
+  is the protobuf mirror of the shared message currency: every type in §4 has a
+  generated twin, every seam trait has a gRPC service (`Provider`, `ToolService`,
+  `Memory`/`Episodic`/`Semantic`, `ContextService`, `Policy`), and lossless
+  `From`/`TryFrom` conversions bridge the two (proto depends on core, never the
+  reverse — the acyclic graph holds). Everything is **binary protobuf** end to
+  end: dynamic `serde_json::Value` fields ride as a custom lossless `JsonValue`
+  message (64-bit-exact integers, not `google.protobuf.Struct`'s lossy `double`),
+  and proto3 `optional` carries the additive fields. Alongside it, OTLP tracing (§11)
+  and the W3C propagation helpers in `agent-proto::trace` are in place, so a trace
+  can span component boundaries into the ClickStack collector.
+- **Shipped — the transports.** [`agent-grpc`](crates/agent-grpc) provides, for
+  each seam, a `Grpc<Seam>` client (implements the trait by calling a remote
+  server) and a `<Seam>Service` server (wraps a local impl), over **TCP or unix
+  domain sockets** (UDS is the same-host fast path). Selection is config
+  (`provider = "grpc"`, `[grpc]` endpoints), and `agent --serve-<seam>` binaries
+  host a component — the server counterparts to `--serve-mcp`. Default ports/sockets
+  are generated from `nix/constants.nix` (the single source of truth) into a
+  committed `constants.rs`, guarded by a `constants-sync` check. This is the k8s
+  topology: a central model gateway, a shared memory service, sandboxed tool
+  workers, each an independently-scalable Deployment, all exporting traces to one
+  collector.
+
+The full contract, mapping decisions, transport pattern, error/status table, and
+deployment sketch live in **[`docs/grpc.md`](docs/grpc.md)**. This lifts the
+"multi-user serving / distributed subagents" non-goal in §1 — deliberately, and
+without touching the loop.
+
+**Verified end to end.** With the loop instrumented (§11) and a `--serve-provider`
+gateway (config `provider = "grpc"`), a single run yields **one trace spanning two
+services** — the gateway's `grpc.server` span is a child of the loop's
+`provider.stream` span, because the gRPC client injects the active span's context
+(`agent-grpc/src/client.rs`) and the server extracts it. The runnable demo (a
+ClickStack/HyperDX container + two-process setup) and its verification queries are
+in **[`docs/tracing.md`](docs/tracing.md)**.

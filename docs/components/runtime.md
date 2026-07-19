@@ -52,6 +52,11 @@ The TOML schema (`Config` + per-section structs). Every field is
 - **Metrics** (`metrics.rs`): Prometheus counters/gauges, optionally served or
   pushed. Telemetry (ClickHouse) lives in [`agent-telemetry`](../../crates/agent-telemetry)
   as a `CompositeMemory` decorator — best-effort; the JSONL log is the source of truth.
+- **Tracing** (`agent.rs`): each seam call in the loop is wrapped in a `tracing`
+  span (`agent.turn → memory.recall · context.assemble · provider.* ·
+  policy.authorize · tool.execute · context.compact`), which `agent-telemetry`
+  exports over OTLP when `[telemetry] otlp_endpoint` is set — see
+  [tracing](../tracing.md).
 
 ## Testing
 

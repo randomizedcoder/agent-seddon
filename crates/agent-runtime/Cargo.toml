@@ -17,6 +17,7 @@ default = [
     "context-summarizing",
     "memory-file",
     "mcp",
+    "grpc",
     "subagents",
 ]
 
@@ -31,20 +32,25 @@ context-summarizing = ["agent-context/context-summarizing"]
 memory-file = ["agent-memory/memory-file"]
 # Connect to external MCP servers and register their tools.
 mcp = ["dep:agent-mcp"]
+# gRPC seam transports: `= "grpc"` client factories + remote tool workers.
+grpc = ["dep:agent-grpc"]
 # Expose a `delegate` tool that spawns child agents (isolated context).
 subagents = []
 
 [dependencies]
 agent-core.workspace = true
+agent-metrics.workspace = true
 # These default to no features (see workspace deps); features below opt in.
 agent-providers.workspace = true
 agent-tools.workspace = true
 agent-memory.workspace = true
 agent-context.workspace = true
 agent-mcp = { workspace = true, optional = true }
+agent-grpc = { workspace = true, optional = true }
 agent-telemetry.workspace = true
 async-trait.workspace = true
 futures-util.workspace = true
+async-stream.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true

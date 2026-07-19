@@ -4,7 +4,7 @@ mod agent;
 mod builder;
 mod config;
 mod context_files;
-mod metrics;
+mod metered;
 mod policy;
 mod registry;
 pub mod session_store;
@@ -13,9 +13,9 @@ pub mod skills;
 mod subagent;
 
 pub use agent::{Agent, Session, Settings};
+pub use agent_metrics::Metrics;
 pub use builder::{build_agent, build_agent_with};
 pub use config::Config;
-pub use metrics::Metrics;
 pub use registry::{register_builtins, Registry};
 
 /// Parse a TOML config string into a [`Config`].

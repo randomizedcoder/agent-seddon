@@ -312,6 +312,54 @@ pub fn register_builtins(r: &mut Registry) {
             Ok(Arc::new(agent_tools::LsTool) as Arc<dyn Tool>)
         });
     }
+
+    // --- gRPC seam clients (a remote seam is just another impl, selected by
+    //     `= "grpc"`; endpoint from `[grpc]`, defaulting to the generated ports) ---
+    #[cfg(feature = "grpc")]
+    {
+        r.provider("grpc", |cfg| {
+            let ep =
+                grpc_client_endpoint(&cfg.grpc.provider.endpoint, agent_grpc::constants::PROVIDER);
+            // Capabilities are config-derived (no eager round-trip) — the real model
+            // lives behind the gateway; this just informs the loop.
+            let caps = agent_core::ModelCapabilities {
+                supports_tools: true,
+                context_window: cfg.agent.context_window,
+            };
+            Ok(
+                Arc::new(agent_grpc::client::GrpcProvider::connect(&ep, caps)?)
+                    as Arc<dyn LlmProvider>,
+            )
+        });
+        r.memory("grpc", |cfg, _provider| {
+            let ep = grpc_client_endpoint(&cfg.grpc.memory.endpoint, agent_grpc::constants::MEMORY);
+            Ok(Arc::new(agent_grpc::client::GrpcMemory::connect(&ep)?) as Arc<dyn MemoryStore>)
+        });
+        r.context("grpc", |cfg, _provider| {
+            let ep =
+                grpc_client_endpoint(&cfg.grpc.context.endpoint, agent_grpc::constants::CONTEXT);
+            Ok(Arc::new(agent_grpc::client::GrpcContext::connect(&ep)?)
+                as Arc<dyn ContextStrategy>)
+        });
+        r.policy("grpc", |cfg| {
+            let ep = grpc_client_endpoint(&cfg.grpc.policy.endpoint, agent_grpc::constants::POLICY);
+            Ok(Arc::new(agent_grpc::client::GrpcPolicy::connect(&ep)?) as Arc<dyn Policy>)
+        });
+    }
+}
+
+/// Resolve a `[grpc]` client endpoint: the configured string, or a loopback TCP
+/// default on the seam's generated port. Set the config to `unix:/path` for UDS.
+#[cfg(feature = "grpc")]
+fn grpc_client_endpoint(
+    configured: &str,
+    default: agent_grpc::constants::SeamEndpoint,
+) -> agent_grpc::Endpoint {
+    if configured.is_empty() {
+        agent_grpc::Endpoint::parse(&format!("127.0.0.1:{}", default.tcp_port))
+    } else {
+        agent_grpc::Endpoint::parse(configured)
+    }
 }
 
 #[cfg(test)]

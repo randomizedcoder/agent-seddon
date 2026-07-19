@@ -1,0 +1,33 @@
+# OTLP tracing demo — the AGENT LOOP process.
+#
+# Run (after starting the gateway):
+#   agent --config config/otel-demo/loop.toml "list the files in this repo and read Cargo.toml"
+#
+# The provider is REMOTE (provider = "grpc") — the loop dials the gateway process
+# on 127.0.0.1:50051. Memory / tools / context / policy stay in-process. Every
+# seam call is a span, so the exported trace shows the agent driving each
+# component, with the provider hop crossing into the gateway (one distributed
+# trace across two services).
+
+[agent]
+provider = "grpc"            # -> GrpcProvider, dials the gateway below
+context  = "sliding-window"
+policy   = "auto-approve"    # non-interactive so the loop runs unattended
+max_iterations = 8
+max_tokens     = 8192
+temperature    = 0.7
+context_window = 131072
+stream         = true
+
+# provider = "grpc" ignores [provider]; a model name is still parsed, keep a stub.
+[provider]
+model = "grpc-remote"
+
+[grpc.provider]
+endpoint = "http://127.0.0.1:50051"   # the gateway (gateway.toml)
+
+[telemetry]
+otlp_endpoint     = "http://127.0.0.1:4317"   # 127.0.0.1, not localhost (IPv4-only map)
+otel_service_name = "agent-loop"
+# Same HyperDX Ingestion API Key as gateway.toml (from the UI's Team Settings):
+# otlp_headers = "authorization=<ingestion-key>"

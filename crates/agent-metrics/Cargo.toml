@@ -1,0 +1,12 @@
+[package]
+name = "agent-metrics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The shared Prometheus registry + metric handles. This is a leaf crate (only
+# depends on `prometheus`) so every seam impl crate can hold a `Metrics` and
+# record its own timings/counts, without depending on `agent-runtime`.
+
+[dependencies]
+prometheus.workspace = true

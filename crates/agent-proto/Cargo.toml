@@ -1,0 +1,23 @@
+[package]
+name = "agent-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "protobuf/gRPC wire contracts for the agent-seddon seams + core<->proto conversions and OTel trace propagation helpers"
+
+[dependencies]
+agent-core = { workspace = true }
+tonic = { workspace = true }
+prost = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# W3C trace-context inject/extract over tonic metadata (helpers in src/trace.rs).
+opentelemetry = { workspace = true }
+
+[build-dependencies]
+tonic-build = { workspace = true }
+
+[dev-dependencies]
+rstest = { workspace = true }
+# concrete propagator for the trace round-trip test
+opentelemetry_sdk = { workspace = true }
