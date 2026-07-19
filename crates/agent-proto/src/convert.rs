@@ -144,6 +144,7 @@ pub fn status_from_error(e: &agent_core::Error) -> tonic::Status {
         Error::Io(m) => tonic::Status::unavailable(format!("io: {m}")),
         Error::Json(m) => tonic::Status::invalid_argument(format!("json: {m}")),
         Error::Search(m) => tonic::Status::internal(format!("search: {m}")),
+        Error::Repo(m) => tonic::Status::internal(format!("repo: {m}")),
     }
 }
 
@@ -763,6 +764,302 @@ impl From<pb::ReindexProgress> for agent_core::ReindexProgress {
             files_done: p.files_done,
             files_total: p.files_total,
             done: p.done,
+        }
+    }
+}
+
+// --- Repo: EntryKind / ChangeKind ------------------------------------------
+
+impl From<agent_core::EntryKind> for pb::EntryKind {
+    fn from(k: agent_core::EntryKind) -> Self {
+        match k {
+            agent_core::EntryKind::Blob => pb::EntryKind::Blob,
+            agent_core::EntryKind::Tree => pb::EntryKind::Tree,
+            agent_core::EntryKind::Symlink => pb::EntryKind::Symlink,
+            agent_core::EntryKind::Submodule => pb::EntryKind::Submodule,
+        }
+    }
+}
+
+fn entry_kind_from_i32(v: i32) -> agent_core::EntryKind {
+    match pb::EntryKind::try_from(v) {
+        Ok(pb::EntryKind::Tree) => agent_core::EntryKind::Tree,
+        Ok(pb::EntryKind::Symlink) => agent_core::EntryKind::Symlink,
+        Ok(pb::EntryKind::Submodule) => agent_core::EntryKind::Submodule,
+        Ok(pb::EntryKind::Blob) | Err(_) => agent_core::EntryKind::Blob,
+    }
+}
+
+impl From<agent_core::ChangeKind> for pb::ChangeKind {
+    fn from(k: agent_core::ChangeKind) -> Self {
+        match k {
+            agent_core::ChangeKind::Modified => pb::ChangeKind::Modified,
+            agent_core::ChangeKind::Added => pb::ChangeKind::Added,
+            agent_core::ChangeKind::Deleted => pb::ChangeKind::Deleted,
+            agent_core::ChangeKind::Renamed => pb::ChangeKind::Renamed,
+            agent_core::ChangeKind::Copied => pb::ChangeKind::Copied,
+            agent_core::ChangeKind::TypeChange => pb::ChangeKind::TypeChange,
+        }
+    }
+}
+
+fn change_kind_from_i32(v: i32) -> agent_core::ChangeKind {
+    match pb::ChangeKind::try_from(v) {
+        Ok(pb::ChangeKind::Added) => agent_core::ChangeKind::Added,
+        Ok(pb::ChangeKind::Deleted) => agent_core::ChangeKind::Deleted,
+        Ok(pb::ChangeKind::Renamed) => agent_core::ChangeKind::Renamed,
+        Ok(pb::ChangeKind::Copied) => agent_core::ChangeKind::Copied,
+        Ok(pb::ChangeKind::TypeChange) => agent_core::ChangeKind::TypeChange,
+        Ok(pb::ChangeKind::Modified) | Err(_) => agent_core::ChangeKind::Modified,
+    }
+}
+
+// --- Repo: TreeEntry / BlobContent -----------------------------------------
+
+impl From<agent_core::TreeEntry> for pb::TreeEntry {
+    fn from(e: agent_core::TreeEntry) -> Self {
+        pb::TreeEntry {
+            path: e.path.to_string_lossy().into_owned(),
+            oid: e.oid.0,
+            kind: pb::EntryKind::from(e.kind) as i32,
+            mode: e.mode,
+            size: e.size,
+        }
+    }
+}
+
+impl From<pb::TreeEntry> for agent_core::TreeEntry {
+    fn from(e: pb::TreeEntry) -> Self {
+        agent_core::TreeEntry {
+            path: std::path::PathBuf::from(e.path),
+            oid: agent_core::Oid(e.oid),
+            kind: entry_kind_from_i32(e.kind),
+            mode: e.mode,
+            size: e.size,
+        }
+    }
+}
+
+impl From<agent_core::BlobContent> for pb::BlobContent {
+    fn from(b: agent_core::BlobContent) -> Self {
+        pb::BlobContent {
+            oid: b.oid.0,
+            path: b.path.to_string_lossy().into_owned(),
+            bytes_len: b.bytes_len,
+            is_binary: b.is_binary,
+            text: b.text,
+        }
+    }
+}
+
+impl From<pb::BlobContent> for agent_core::BlobContent {
+    fn from(b: pb::BlobContent) -> Self {
+        agent_core::BlobContent {
+            oid: agent_core::Oid(b.oid),
+            path: std::path::PathBuf::from(b.path),
+            bytes_len: b.bytes_len,
+            is_binary: b.is_binary,
+            text: b.text,
+        }
+    }
+}
+
+// --- Repo: FileDiff / DiffResult -------------------------------------------
+
+impl From<agent_core::FileDiff> for pb::FileDiff {
+    fn from(f: agent_core::FileDiff) -> Self {
+        pb::FileDiff {
+            change: pb::ChangeKind::from(f.change) as i32,
+            old_path: f.old_path.map(|p| p.to_string_lossy().into_owned()),
+            new_path: f.new_path.map(|p| p.to_string_lossy().into_owned()),
+            old_oid: f.old_oid.map(|o| o.0),
+            new_oid: f.new_oid.map(|o| o.0),
+            additions: f.additions,
+            deletions: f.deletions,
+            patch: f.patch,
+        }
+    }
+}
+
+impl From<pb::FileDiff> for agent_core::FileDiff {
+    fn from(f: pb::FileDiff) -> Self {
+        agent_core::FileDiff {
+            change: change_kind_from_i32(f.change),
+            old_path: f.old_path.map(std::path::PathBuf::from),
+            new_path: f.new_path.map(std::path::PathBuf::from),
+            old_oid: f.old_oid.map(agent_core::Oid),
+            new_oid: f.new_oid.map(agent_core::Oid),
+            additions: f.additions,
+            deletions: f.deletions,
+            patch: f.patch,
+        }
+    }
+}
+
+impl From<agent_core::DiffResult> for pb::DiffResult {
+    fn from(d: agent_core::DiffResult) -> Self {
+        pb::DiffResult {
+            base: d.base.0,
+            target: d.target.0,
+            files: d.files.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<pb::DiffResult> for agent_core::DiffResult {
+    fn from(d: pb::DiffResult) -> Self {
+        agent_core::DiffResult {
+            base: agent_core::Oid(d.base),
+            target: agent_core::Oid(d.target),
+            files: d.files.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+// --- Repo: CommitInfo / GrepHit --------------------------------------------
+
+impl From<agent_core::CommitInfo> for pb::CommitInfo {
+    fn from(c: agent_core::CommitInfo) -> Self {
+        pb::CommitInfo {
+            oid: c.oid.0,
+            parents: c.parents.into_iter().map(|o| o.0).collect(),
+            author: c.author,
+            author_email: c.author_email,
+            committed_ms: c.committed_ms,
+            summary: c.summary,
+            body: c.body,
+        }
+    }
+}
+
+impl From<pb::CommitInfo> for agent_core::CommitInfo {
+    fn from(c: pb::CommitInfo) -> Self {
+        agent_core::CommitInfo {
+            oid: agent_core::Oid(c.oid),
+            parents: c.parents.into_iter().map(agent_core::Oid).collect(),
+            author: c.author,
+            author_email: c.author_email,
+            committed_ms: c.committed_ms,
+            summary: c.summary,
+            body: c.body,
+        }
+    }
+}
+
+impl From<agent_core::GrepHit> for pb::GrepHit {
+    fn from(h: agent_core::GrepHit) -> Self {
+        pb::GrepHit {
+            path: h.path.to_string_lossy().into_owned(),
+            line: h.line,
+            text: h.text,
+        }
+    }
+}
+
+impl From<pb::GrepHit> for agent_core::GrepHit {
+    fn from(h: pb::GrepHit) -> Self {
+        agent_core::GrepHit {
+            path: std::path::PathBuf::from(h.path),
+            line: h.line,
+            text: h.text,
+        }
+    }
+}
+
+// --- Repo: WorktreeHandle / WorktreeSpec / Checkpoint ----------------------
+
+impl From<agent_core::WorktreeHandle> for pb::WorktreeHandle {
+    fn from(w: agent_core::WorktreeHandle) -> Self {
+        pb::WorktreeHandle {
+            id: w.id,
+            path: w.path.to_string_lossy().into_owned(),
+            head: w.head.0,
+            revision: w.revision.0,
+            writable: w.writable,
+        }
+    }
+}
+
+impl From<pb::WorktreeHandle> for agent_core::WorktreeHandle {
+    fn from(w: pb::WorktreeHandle) -> Self {
+        agent_core::WorktreeHandle {
+            id: w.id,
+            path: std::path::PathBuf::from(w.path),
+            head: agent_core::Oid(w.head),
+            revision: agent_core::Revision(w.revision),
+            writable: w.writable,
+        }
+    }
+}
+
+impl From<agent_core::WorktreeSpec> for pb::WorktreeSpec {
+    fn from(s: agent_core::WorktreeSpec) -> Self {
+        pb::WorktreeSpec {
+            revision: s.revision.0,
+            writable: s.writable,
+            id: s.id,
+        }
+    }
+}
+
+impl From<pb::WorktreeSpec> for agent_core::WorktreeSpec {
+    fn from(s: pb::WorktreeSpec) -> Self {
+        agent_core::WorktreeSpec {
+            revision: agent_core::Revision(s.revision),
+            writable: s.writable,
+            id: s.id,
+        }
+    }
+}
+
+impl From<agent_core::Checkpoint> for pb::Checkpoint {
+    fn from(c: agent_core::Checkpoint) -> Self {
+        pb::Checkpoint {
+            name: c.name,
+            oid: c.oid.0,
+            ref_name: c.ref_name,
+        }
+    }
+}
+
+impl From<pb::Checkpoint> for agent_core::Checkpoint {
+    fn from(c: pb::Checkpoint) -> Self {
+        agent_core::Checkpoint {
+            name: c.name,
+            oid: agent_core::Oid(c.oid),
+            ref_name: c.ref_name,
+        }
+    }
+}
+
+// --- Repo: RepoStatus (heads map ↔ repeated Branch) ------------------------
+
+impl From<agent_core::RepoStatus> for pb::RepoStatus {
+    fn from(s: agent_core::RepoStatus) -> Self {
+        pb::RepoStatus {
+            mirror_path: s.mirror_path.to_string_lossy().into_owned(),
+            last_fetch_ms: s.last_fetch_ms,
+            live_worktrees: s.live_worktrees,
+            heads: s
+                .heads
+                .into_iter()
+                .map(|(name, oid)| pb::Branch { name, oid: oid.0 })
+                .collect(),
+        }
+    }
+}
+
+impl From<pb::RepoStatus> for agent_core::RepoStatus {
+    fn from(s: pb::RepoStatus) -> Self {
+        agent_core::RepoStatus {
+            mirror_path: std::path::PathBuf::from(s.mirror_path),
+            last_fetch_ms: s.last_fetch_ms,
+            live_worktrees: s.live_worktrees,
+            heads: s
+                .heads
+                .into_iter()
+                .map(|b| (b.name, agent_core::Oid(b.oid)))
+                .collect(),
         }
     }
 }

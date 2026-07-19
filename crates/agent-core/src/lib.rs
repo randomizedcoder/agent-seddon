@@ -10,7 +10,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -31,6 +31,8 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     #[error("search error: {0}")]
     Search(String),
+    #[error("repo error: {0}")]
+    Repo(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -616,6 +618,264 @@ pub trait SearchBackend: Send + Sync {
 
     /// Run a query. Safe to call concurrently, including during a reindex.
     async fn query(&self, q: &SearchQuery) -> Result<Vec<SearchHit>>;
+}
+
+// ---------------------------------------------------------------------------
+// Seam 7: RepoBackend (multi-branch git — see docs/components/git.md)
+// ---------------------------------------------------------------------------
+//
+// One shared bare/mirror object database fronts many disposable worktrees. The
+// trait has two halves: immutable, revision-addressed *object reads* (safe to
+// call concurrently from many planning tasks) and side-effecting *worktree /
+// mirror / ref* lifecycle (session-scoped). `push` is the only operation that
+// leaves the sandbox — the runtime gates it through the `Policy` seam and the
+// `[git] push_policy`. Concrete backends live in `agent-git` behind cargo
+// features (`git-hybrid` = gix reads + git-CLI writes, `git-cli` = all shell-out).
+
+/// A resolved git object id (commit/tree/blob), as its hex string. A newtype so
+/// cache keys and diffs are type-checked; `Display`/`as_str` yield the hex.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Oid(pub String);
+
+impl Oid {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for Oid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// An unresolved revision spec the model may pass: a branch, tag, `HEAD~3`, a raw
+/// oid, or a `base...target` range for `diff`. Backends resolve it via `resolve`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Revision(pub String);
+
+impl Revision {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<S: Into<String>> From<S> for Revision {
+    fn from(s: S) -> Self {
+        Revision(s.into())
+    }
+}
+
+/// The kind of object a [`TreeEntry`] points at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EntryKind {
+    Blob,
+    Tree,
+    Symlink,
+    Submodule,
+}
+
+/// One entry in a tree listing (`list_tree`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TreeEntry {
+    /// Repo-relative path.
+    pub path: PathBuf,
+    /// Blob or tree oid.
+    pub oid: Oid,
+    pub kind: EntryKind,
+    /// Git filemode (e.g. `0o100644`).
+    pub mode: u32,
+    /// Blob size when cheaply known.
+    #[serde(default)]
+    pub size: Option<u64>,
+}
+
+/// A file's contents at a revision. Carries its blob `oid` so callers can key
+/// AST/semantic caches by immutable identity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlobContent {
+    pub oid: Oid,
+    pub path: PathBuf,
+    pub bytes_len: u64,
+    pub is_binary: bool,
+    /// Empty when `is_binary`.
+    #[serde(default)]
+    pub text: String,
+}
+
+/// Per-file change class in a `base..target` diff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChangeKind {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    Copied,
+    TypeChange,
+}
+
+/// One file's diff within a [`DiffResult`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileDiff {
+    pub change: ChangeKind,
+    #[serde(default)]
+    pub old_path: Option<PathBuf>,
+    #[serde(default)]
+    pub new_path: Option<PathBuf>,
+    #[serde(default)]
+    pub old_oid: Option<Oid>,
+    #[serde(default)]
+    pub new_oid: Option<Oid>,
+    pub additions: u32,
+    pub deletions: u32,
+    /// Unified diff text (the tool layer may truncate it).
+    #[serde(default)]
+    pub patch: String,
+}
+
+/// The result of comparing two revisions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiffResult {
+    pub base: Oid,
+    pub target: Oid,
+    pub files: Vec<FileDiff>,
+}
+
+/// One commit in a history walk (`log`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitInfo {
+    pub oid: Oid,
+    #[serde(default)]
+    pub parents: Vec<Oid>,
+    pub author: String,
+    #[serde(default)]
+    pub author_email: String,
+    pub committed_ms: u64,
+    /// First line of the message.
+    pub summary: String,
+    #[serde(default)]
+    pub body: String,
+}
+
+/// A grep-at-revision hit (content search against the object DB, not a worktree).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrepHit {
+    pub path: PathBuf,
+    /// 1-based line of the match.
+    pub line: u32,
+    pub text: String,
+}
+
+/// A live disposable worktree checked out from the shared object DB.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorktreeHandle {
+    /// Stable id (used as the directory name under the runs dir).
+    pub id: String,
+    /// Absolute checkout path.
+    pub path: PathBuf,
+    /// Detached HEAD oid.
+    pub head: Oid,
+    /// What it was created from.
+    pub revision: Revision,
+    /// `false` ⇒ a read-only comparison worktree.
+    pub writable: bool,
+}
+
+/// A request to materialize a worktree.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorktreeSpec {
+    /// Branch/tag/oid to check out (detached).
+    pub revision: Revision,
+    pub writable: bool,
+    /// Caller-chosen id; the backend generates one when `None`.
+    #[serde(default)]
+    pub id: Option<String>,
+}
+
+/// A private agent ref (checkpoint) under `refs/agent/<session>/<name>` — never
+/// pushed upstream unless the push policy allows it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Checkpoint {
+    pub name: String,
+    pub oid: Oid,
+    /// Full ref path.
+    pub ref_name: String,
+}
+
+/// A cheap probe of the mirror's state — the git analogue of [`IndexStatus`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepoStatus {
+    pub mirror_path: PathBuf,
+    pub last_fetch_ms: u64,
+    pub live_worktrees: u32,
+    /// Resolved head oid per known remote branch.
+    #[serde(default)]
+    pub heads: HashMap<String, Oid>,
+}
+
+/// A replaceable git backend. The object-read methods are documented as
+/// concurrent-safe (they address immutable objects); the lifecycle methods
+/// side-effect on the shared mirror and the runs directory. `status` is the
+/// cheap probe (mirrors [`SearchBackend::status`]); `fetch` is long-running (the
+/// runtime drives it off the request path, mirroring `reindex`).
+#[async_trait]
+pub trait RepoBackend: Send + Sync {
+    // --- object-level, read-only, revision-addressed (concurrent-safe) ---
+
+    /// Resolve a revision spec to a concrete object id.
+    async fn resolve(&self, rev: &Revision) -> Result<Oid>;
+    /// Read a file's contents at a revision.
+    async fn read_file(&self, rev: &Revision, path: &Path) -> Result<BlobContent>;
+    /// List a tree at a revision, optionally recursing.
+    async fn list_tree(
+        &self,
+        rev: &Revision,
+        path: &Path,
+        recursive: bool,
+    ) -> Result<Vec<TreeEntry>>;
+    /// Diff `base` against `target`, optionally narrowed by path globs.
+    async fn diff(
+        &self,
+        base: &Revision,
+        target: &Revision,
+        path_globs: &[String],
+    ) -> Result<DiffResult>;
+    /// Regex content search at a revision (object DB, not a worktree).
+    async fn grep(
+        &self,
+        rev: &Revision,
+        pattern: &str,
+        path_globs: &[String],
+        limit: usize,
+    ) -> Result<Vec<GrepHit>>;
+    /// Commit history for a revision, optionally following one path.
+    async fn log(
+        &self,
+        rev: &Revision,
+        path: Option<&Path>,
+        limit: usize,
+    ) -> Result<Vec<CommitInfo>>;
+    /// All known branches with their resolved head oids.
+    async fn branches(&self) -> Result<Vec<(String, Oid)>>;
+
+    // --- mirror / worktree / ref lifecycle (side-effecting, session-scoped) ---
+
+    /// Cheap, read-only probe of the mirror and live worktrees. Never fetches.
+    async fn status(&self) -> Result<RepoStatus>;
+    /// Update the shared mirror from upstream. Long-running.
+    async fn fetch(&self) -> Result<RepoStatus>;
+    /// Materialize a disposable worktree checked out at the spec's revision.
+    async fn worktree_add(&self, spec: &WorktreeSpec) -> Result<WorktreeHandle>;
+    /// List the live worktrees.
+    async fn worktree_list(&self) -> Result<Vec<WorktreeHandle>>;
+    /// Remove a worktree by id (best-effort cleanup on session end).
+    async fn worktree_remove(&self, id: &str) -> Result<()>;
+    /// Commit a worktree's current state to a private agent ref (checkpoint).
+    async fn checkpoint(&self, worktree_id: &str, name: &str) -> Result<Checkpoint>;
+    /// Push a checkpoint to a remote ref. Policy-gated — the only sandbox escape.
+    async fn push(&self, checkpoint: &Checkpoint, remote_ref: &str) -> Result<()>;
 }
 
 #[cfg(test)]

@@ -27,8 +27,9 @@ One crate per seam (DESIGN.md §7):
 |-------|------|
 | `agent-core` | Seam traits + shared types (no impls) |
 | `agent-providers` | `LlmProvider` impls: OpenAI-compatible (GLM/OpenAI/vLLM/Ollama) + Anthropic-native, both streaming |
-| `agent-tools` | `Tool` impls: `bash`, `read_file`, `write_file`, `edit`, `grep`, `find`, `ls`, `search`, `metrics` (self-inspection) |
+| `agent-tools` | `Tool` impls: `bash`, `read_file`, `write_file`, `edit`, `grep`, `find`, `ls`, `search`, `metrics` (self-inspection), `git_*` (multi-branch git) |
 | `agent-search` | `SearchBackend`: high-performance code search (tantivy full-text index) ([docs/components/search.md](docs/components/search.md)) |
+| `agent-git` | `RepoBackend`: multi-branch git — one shared object DB + disposable worktrees, revision-addressed reads ([docs/components/git.md](docs/components/git.md)) |
 | `agent-memory` | `MemoryStore`: JSONL episodic + markdown semantic |
 | `agent-context` | `ContextStrategy`: sliding-window or summarizing-window compaction |
 | `agent-mcp` | MCP client (stdio + streamable-HTTP) — external tools as `mcp_<server>_<tool>` |
@@ -127,7 +128,7 @@ agent --serve-provider --config gateway.toml         # gateway.toml: provider = 
 agent --config loop.toml "list the files in this repo"
 ```
 
-`--serve-provider|--serve-memory|--serve-tools|--serve-context|--serve-policy|--serve-search` each
+`--serve-provider|--serve-memory|--serve-tools|--serve-context|--serve-policy|--serve-search|--serve-repo` each
 host one seam; ports/socket paths are generated from `nix/constants.nix` into
 `agent-grpc`'s `constants.rs` (a `nix flake check` guard keeps them in sync). This
 lifts the design's "distributed components" goal to a k8s-style topology — a
@@ -230,10 +231,11 @@ Prometheus metrics about a running agent — enabled in `config/agent.toml`
 instrumented independently** — a metrics wrapper (`agent-runtime/src/metered.rs`)
 records provider request/TTFT (`agent_provider_*`), per-tool latency
 (`agent_tool_exec_seconds`), memory ops (`agent_memory_*`), context
-assemble/compact (`agent_context_*`), policy authorize (`agent_policy_*`), and
-search index/query timings labelled by backend (`agent_search_*`). A remote
+assemble/compact (`agent_context_*`), policy authorize (`agent_policy_*`),
+search index/query timings (`agent_search_*`), and git operations labelled by
+backend (`agent_repo_*`). A remote
 `= "grpc"` seam is timed on the client side, and each `--serve-<seam>` process
-serves its own `/metrics` (ports 9601–9606) for server-side latency.
+serves its own `/metrics` (ports 9601–9607) for server-side latency.
 
 The agent can inspect **its own** performance in-process via the built-in
 `metrics` tool (no stack required) — see **[docs/observability.md](docs/observability.md)**.

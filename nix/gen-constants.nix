@@ -45,6 +45,7 @@ let
     ${seamConst "CONTEXT" g.context}
     ${seamConst "POLICY" g.policy}
     ${seamConst "SEARCH" g.search}
+    ${seamConst "REPO" g.repo}
   '';
 
   rawFile = pkgs.writeText "agent-grpc-constants-raw.rs" raw;

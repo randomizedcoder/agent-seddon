@@ -15,6 +15,7 @@ default = [
     "tool-search",
     "tool-metrics",
     "search",
+    "git",
     "context-sliding-window",
     "context-summarizing",
     "memory-file",
@@ -37,6 +38,12 @@ search = [
     "agent-search/search-tantivy",
     "agent-tools/tool-search-index",
 ]
+# Multi-branch git seam: the RepoBackend backend (CLI by default) + the git tools.
+git = [
+    "dep:agent-git",
+    "agent-git/git-cli",
+    "agent-tools/tool-git",
+]
 context-sliding-window = ["agent-context/context-sliding-window"]
 context-summarizing = ["agent-context/context-summarizing"]
 memory-file = ["agent-memory/memory-file"]
@@ -54,6 +61,7 @@ agent-metrics.workspace = true
 agent-providers.workspace = true
 agent-tools.workspace = true
 agent-search = { workspace = true, optional = true }
+agent-git = { workspace = true, optional = true }
 agent-memory.workspace = true
 agent-context.workspace = true
 agent-mcp = { workspace = true, optional = true }

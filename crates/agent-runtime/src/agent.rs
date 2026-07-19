@@ -53,6 +53,9 @@ pub struct Agent {
     /// be hosted over gRPC (`agent --serve-search`); the loop reaches search
     /// through the `search` *tool*, not this field.
     search: Option<Arc<dyn agent_core::SearchBackend>>,
+    /// The git backend, if the `git` seam is wired. Held so it can be hosted over
+    /// gRPC (`agent --serve-git`); the loop reaches it through the `git_*` tools.
+    repo: Option<Arc<dyn agent_core::RepoBackend>>,
 }
 
 impl Agent {
@@ -75,12 +78,19 @@ impl Agent {
             metrics,
             settings,
             search: None,
+            repo: None,
         }
     }
 
     /// Attach the composed search backend (so `--serve-search` can host it).
     pub fn with_search(mut self, search: Arc<dyn agent_core::SearchBackend>) -> Self {
         self.search = Some(search);
+        self
+    }
+
+    /// Attach the git backend (so `--serve-git` can host it).
+    pub fn with_repo(mut self, repo: Arc<dyn agent_core::RepoBackend>) -> Self {
+        self.repo = Some(repo);
         self
     }
 
@@ -111,6 +121,10 @@ impl Agent {
     /// The composed search backend, if wired (for `agent --serve-search`).
     pub fn search(&self) -> Option<Arc<dyn agent_core::SearchBackend>> {
         self.search.clone()
+    }
+    /// The git backend, if wired (for `agent --serve-git`).
+    pub fn repo(&self) -> Option<Arc<dyn agent_core::RepoBackend>> {
+        self.repo.clone()
     }
 
     pub fn session(&self) -> Session<'_> {

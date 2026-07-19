@@ -47,6 +47,7 @@ talks to traits, so it is untouched.
 | `context.proto` | `service ContextService` — `Assemble`, `Compact`. |
 | `policy.proto` | `service Policy` — `Authorize`. |
 | `search.proto` | `service SearchService` — `Status`, `Capabilities`, `Reindex` (server-streaming), `Search`. A `backend` selector routes to a named backend (empty ⇒ default). |
+| `repo.proto` | `service RepoService` — object reads (`Resolve`, `ReadFile`, `ListTree`, `Diff`, `Grep`, `Log`, `Branches`) + lifecycle (`Status`, `Fetch`, `WorktreeAdd/List/Remove`, `CreateCheckpoint`, `Push`). Oids/revisions ride as strings. |
 
 `tonic-build` (invoked from `build.rs`, needs `protoc` — pinned in `nix/`) generates
 client + server stubs into `OUT_DIR`, re-exported as `agent_proto::pb`.
@@ -100,7 +101,7 @@ mapping `tonic::Status` → `agent_core::Error`. Channels are built **lazily**
 construct a client without `await`.
 
 **Server** — a `<Seam>Service` (`ProviderService`, `ToolWorker`, `MemoryService`
-(+ `EpisodicService`/`SemanticService`), `ContextSvc`, `PolicySvc`, `SearchServiceSvc`) that wraps a
+(+ `EpisodicService`/`SemanticService`), `ContextSvc`, `PolicySvc`, `SearchServiceSvc`, `RepoServiceSvc`) that wraps a
 locally-built `Arc<dyn Trait>` and implements the generated tonic service, mapping
 errors via `status_from_error`. The `*_router` helpers return a ready-to-serve
 `Router`.
@@ -135,6 +136,7 @@ renders it into the committed `crates/agent-grpc/src/constants.rs`, and the
 | context | 50054 | `/tmp/agent-seddon/context.sock` |
 | policy | 50055 | `/tmp/agent-seddon/policy.sock` |
 | search | 50056 | `/tmp/agent-seddon/search.sock` |
+| repo | 50057 | `/tmp/agent-seddon/repo.sock` |
 
 ### Selection is config, exactly like every other seam
 
@@ -165,7 +167,7 @@ hosting the config-selected concrete impl over gRPC (config picks e.g.
 ```
 agent --serve-provider --config gateway.toml        # binds [grpc.provider] listen
 agent --serve-memory   --listen 0.0.0.0:50052       # or override the address
-agent --serve-tools ; agent --serve-context ; agent --serve-policy ; agent --serve-search
+agent --serve-tools ; agent --serve-context ; agent --serve-policy ; agent --serve-search ; agent --serve-repo
 ```
 
 ### Streaming & errors

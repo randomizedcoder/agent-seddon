@@ -9,10 +9,12 @@
 use std::sync::Arc;
 
 use agent_core::{
-    ChunkStream, CompletionRequest, CompletionResponse, ContextInput, ContextStrategy, Decision,
-    IndexStatus, LlmProvider, MemoryEvent, MemoryItem, MemoryStore, Message, ModelCapabilities,
-    Observation, Policy, ProgressFn, RecallQuery, Result, SearchBackend, SearchCapabilities,
-    SearchHit, SearchMode, SearchQuery, TokenBudget, Tool, ToolContext, ToolSchema, WorkingSet,
+    BlobContent, Checkpoint, ChunkStream, CommitInfo, CompletionRequest, CompletionResponse,
+    ContextInput, ContextStrategy, Decision, DiffResult, GrepHit, IndexStatus, LlmProvider,
+    MemoryEvent, MemoryItem, MemoryStore, Message, ModelCapabilities, Observation, Oid, Policy,
+    ProgressFn, RecallQuery, RepoBackend, RepoStatus, Result, Revision, SearchBackend,
+    SearchCapabilities, SearchHit, SearchMode, SearchQuery, TokenBudget, Tool, ToolContext,
+    ToolSchema, TreeEntry, WorkingSet, WorktreeHandle, WorktreeSpec,
 };
 use agent_proto::pb;
 use async_trait::async_trait;
@@ -359,6 +361,225 @@ impl SearchBackend for GrpcSearch {
             .await
             .map_err(|s| agent_core::Error::Search(s.to_string()))?;
         Ok(resp.into_inner().hits.into_iter().map(Into::into).collect())
+    }
+}
+
+/// A `RepoBackend` that calls a remote `RepoService` (multi-branch git gateway).
+pub struct GrpcRepo {
+    client: pb::repo_service_client::RepoServiceClient<Channel>,
+}
+
+impl GrpcRepo {
+    pub fn connect(endpoint: &Endpoint) -> Result<Self> {
+        let channel = endpoint
+            .connect_lazy()
+            .map_err(|e| agent_core::Error::Repo(e.to_string()))?;
+        Ok(Self {
+            client: pb::repo_service_client::RepoServiceClient::new(channel),
+        })
+    }
+}
+
+/// Map a transport `Status` to a repo error.
+fn repo_err(s: tonic::Status) -> agent_core::Error {
+    agent_core::Error::Repo(s.to_string())
+}
+
+#[async_trait]
+impl RepoBackend for GrpcRepo {
+    async fn resolve(&self, rev: &Revision) -> Result<Oid> {
+        let mut client = self.client.clone();
+        let resp = client
+            .resolve(outbound(pb::ResolveRequest {
+                revision: rev.0.clone(),
+            }))
+            .await
+            .map_err(repo_err)?;
+        Ok(Oid(resp.into_inner().oid))
+    }
+
+    async fn read_file(&self, rev: &Revision, path: &std::path::Path) -> Result<BlobContent> {
+        let mut client = self.client.clone();
+        let resp = client
+            .read_file(outbound(pb::ReadFileRequest {
+                revision: rev.0.clone(),
+                path: path.to_string_lossy().into_owned(),
+            }))
+            .await
+            .map_err(repo_err)?;
+        Ok(resp.into_inner().into())
+    }
+
+    async fn list_tree(
+        &self,
+        rev: &Revision,
+        path: &std::path::Path,
+        recursive: bool,
+    ) -> Result<Vec<TreeEntry>> {
+        let mut client = self.client.clone();
+        let resp = client
+            .list_tree(outbound(pb::ListTreeRequest {
+                revision: rev.0.clone(),
+                path: path.to_string_lossy().into_owned(),
+                recursive,
+            }))
+            .await
+            .map_err(repo_err)?;
+        Ok(resp
+            .into_inner()
+            .entries
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+
+    async fn diff(
+        &self,
+        base: &Revision,
+        target: &Revision,
+        path_globs: &[String],
+    ) -> Result<DiffResult> {
+        let mut client = self.client.clone();
+        let resp = client
+            .diff(outbound(pb::DiffRequest {
+                base: base.0.clone(),
+                target: target.0.clone(),
+                path_globs: path_globs.to_vec(),
+            }))
+            .await
+            .map_err(repo_err)?;
+        Ok(resp.into_inner().into())
+    }
+
+    async fn grep(
+        &self,
+        rev: &Revision,
+        pattern: &str,
+        path_globs: &[String],
+        limit: usize,
+    ) -> Result<Vec<GrepHit>> {
+        let mut client = self.client.clone();
+        let resp = client
+            .grep(outbound(pb::GrepRequest {
+                revision: rev.0.clone(),
+                pattern: pattern.to_string(),
+                path_globs: path_globs.to_vec(),
+                limit: limit as u64,
+            }))
+            .await
+            .map_err(repo_err)?;
+        Ok(resp.into_inner().hits.into_iter().map(Into::into).collect())
+    }
+
+    async fn log(
+        &self,
+        rev: &Revision,
+        path: Option<&std::path::Path>,
+        limit: usize,
+    ) -> Result<Vec<CommitInfo>> {
+        let mut client = self.client.clone();
+        let resp = client
+            .log(outbound(pb::LogRequest {
+                revision: rev.0.clone(),
+                path: path.map(|p| p.to_string_lossy().into_owned()),
+                limit: limit as u64,
+            }))
+            .await
+            .map_err(repo_err)?;
+        Ok(resp
+            .into_inner()
+            .commits
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+
+    async fn branches(&self) -> Result<Vec<(String, Oid)>> {
+        let mut client = self.client.clone();
+        let resp = client
+            .branches(outbound(pb::BranchesRequest {}))
+            .await
+            .map_err(repo_err)?;
+        Ok(resp
+            .into_inner()
+            .branches
+            .into_iter()
+            .map(|b| (b.name, Oid(b.oid)))
+            .collect())
+    }
+
+    async fn status(&self) -> Result<RepoStatus> {
+        let mut client = self.client.clone();
+        let resp = client
+            .status(outbound(pb::RepoStatusRequest {}))
+            .await
+            .map_err(repo_err)?;
+        Ok(resp.into_inner().into())
+    }
+
+    async fn fetch(&self) -> Result<RepoStatus> {
+        let mut client = self.client.clone();
+        let resp = client
+            .fetch(outbound(pb::FetchRequest {}))
+            .await
+            .map_err(repo_err)?;
+        Ok(resp.into_inner().into())
+    }
+
+    async fn worktree_add(&self, spec: &WorktreeSpec) -> Result<WorktreeHandle> {
+        let mut client = self.client.clone();
+        let resp = client
+            .worktree_add(outbound(pb::WorktreeSpec::from(spec.clone())))
+            .await
+            .map_err(repo_err)?;
+        Ok(resp.into_inner().into())
+    }
+
+    async fn worktree_list(&self) -> Result<Vec<WorktreeHandle>> {
+        let mut client = self.client.clone();
+        let resp = client
+            .worktree_list(outbound(pb::WorktreeListRequest {}))
+            .await
+            .map_err(repo_err)?;
+        Ok(resp
+            .into_inner()
+            .worktrees
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+
+    async fn worktree_remove(&self, id: &str) -> Result<()> {
+        let mut client = self.client.clone();
+        client
+            .worktree_remove(outbound(pb::WorktreeRemoveRequest { id: id.to_string() }))
+            .await
+            .map_err(repo_err)?;
+        Ok(())
+    }
+
+    async fn checkpoint(&self, worktree_id: &str, name: &str) -> Result<Checkpoint> {
+        let mut client = self.client.clone();
+        let resp = client
+            .create_checkpoint(outbound(pb::CheckpointRequest {
+                worktree_id: worktree_id.to_string(),
+                name: name.to_string(),
+            }))
+            .await
+            .map_err(repo_err)?;
+        Ok(resp.into_inner().into())
+    }
+
+    async fn push(&self, checkpoint: &Checkpoint, remote_ref: &str) -> Result<()> {
+        let mut client = self.client.clone();
+        client
+            .push(outbound(pb::PushRequest {
+                checkpoint: Some(pb::Checkpoint::from(checkpoint.clone())),
+                remote_ref: remote_ref.to_string(),
+            }))
+            .await
+            .map_err(repo_err)?;
+        Ok(())
     }
 }
 

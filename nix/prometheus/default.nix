@@ -38,7 +38,8 @@ let
     + seamJob "tools" g.tools.metrics_port
     + seamJob "context" g.context.metrics_port
     + seamJob "policy" g.policy.metrics_port
-    + seamJob "search" g.search.metrics_port;
+    + seamJob "search" g.search.metrics_port
+    + seamJob "repo" g.repo.metrics_port;
 
   configYml = pkgs.writeText "prometheus.yml" (
     ''

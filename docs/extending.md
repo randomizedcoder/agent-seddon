@@ -24,6 +24,7 @@ and its own "Adding your own"):
 | Memory — semantic | `[memory] semantic` | `Registry::semantic` | [memory](components/memory.md) |
 | MCP transport | `[[mcp.servers]] kind` | `Registry::transport` | [mcp](components/mcp.md) |
 | Search | `[search] backends` | `Registry::search` | [search](components/search.md) |
+| Git (repo) | `[git] backend` | `Registry::repo` | [git](components/git.md) |
 
 The shared message protocol (`Message`, `ToolCall`, `Observation`, `ToolSchema`,
 `CompletionChunk`, …) is the only currency between seams — don't invent a parallel

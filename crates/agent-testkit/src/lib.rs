@@ -15,11 +15,12 @@
 //! * [`mcp::ScriptedTransport`] — a canned `McpTransport` for client tests.
 
 use agent_core::{
-    CompletionRequest, CompletionResponse, ContextInput, ContextStrategy, IndexState, IndexStatus,
-    LlmProvider, MemoryEvent, MemoryItem, MemoryStore, Message, ModelCapabilities, Observation,
-    ProgressFn, RecallQuery, ReindexProgress, Result, Role, SearchBackend, SearchCapabilities,
-    SearchHit, SearchMode, SearchQuery, TokenBudget, Tool, ToolCall, ToolContext, ToolSchema,
-    WorkingSet,
+    BlobContent, Checkpoint, CommitInfo, CompletionRequest, CompletionResponse, ContextInput,
+    ContextStrategy, DiffResult, FileDiff, GrepHit, IndexState, IndexStatus, LlmProvider,
+    MemoryEvent, MemoryItem, MemoryStore, Message, ModelCapabilities, Observation, Oid, ProgressFn,
+    RecallQuery, ReindexProgress, RepoBackend, RepoStatus, Result, Revision, Role, SearchBackend,
+    SearchCapabilities, SearchHit, SearchMode, SearchQuery, TokenBudget, Tool, ToolCall,
+    ToolContext, ToolSchema, TreeEntry, WorkingSet, WorktreeHandle, WorktreeSpec,
 };
 use async_trait::async_trait;
 use std::path::PathBuf;
@@ -377,6 +378,162 @@ impl SearchBackend for FixtureSearch {
 }
 
 // ---------------------------------------------------------------------------
+// Git (RepoBackend)
+// ---------------------------------------------------------------------------
+
+/// A `RepoBackend` double: canned branches + blobs + diff for the object-read
+/// methods, and an in-memory worktree list that `worktree_add`/`worktree_remove`
+/// mutate. Enough to exercise the git seam (and, later, its gRPC transport)
+/// without a real repo. Cloneable: clones share the worktree list.
+#[derive(Clone, Default)]
+pub struct FixtureRepo {
+    branches: Vec<(String, Oid)>,
+    /// `"rev:path"` → file text.
+    blobs: std::collections::HashMap<String, String>,
+    diff: Vec<FileDiff>,
+    worktrees: Arc<Mutex<Vec<WorktreeHandle>>>,
+}
+
+impl FixtureRepo {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// Add a branch and its head oid.
+    pub fn with_branch(mut self, name: impl Into<String>, oid: impl Into<String>) -> Self {
+        self.branches.push((name.into(), Oid(oid.into())));
+        self
+    }
+    /// Set a file's text at a revision (looked up by `read_file`).
+    pub fn with_blob(
+        mut self,
+        rev: impl Into<String>,
+        path: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Self {
+        self.blobs
+            .insert(format!("{}:{}", rev.into(), path.into()), text.into());
+        self
+    }
+    /// Set the file list `diff` returns.
+    pub fn with_diff(mut self, files: Vec<FileDiff>) -> Self {
+        self.diff = files;
+        self
+    }
+    /// A deterministic 40-hex oid from a seed (no randomness).
+    pub fn fake_oid(seed: &str) -> Oid {
+        let mut h: String = seed.bytes().map(|b| format!("{b:02x}")).collect();
+        h.truncate(40);
+        while h.len() < 40 {
+            h.push('0');
+        }
+        Oid(h)
+    }
+}
+
+#[async_trait]
+impl RepoBackend for FixtureRepo {
+    async fn resolve(&self, rev: &Revision) -> Result<Oid> {
+        Ok(Self::fake_oid(rev.as_str()))
+    }
+    async fn read_file(&self, rev: &Revision, path: &std::path::Path) -> Result<BlobContent> {
+        let key = format!("{}:{}", rev.as_str(), path.to_string_lossy());
+        match self.blobs.get(&key) {
+            Some(text) => Ok(BlobContent {
+                oid: Self::fake_oid(&key),
+                path: path.to_path_buf(),
+                bytes_len: text.len() as u64,
+                is_binary: false,
+                text: text.clone(),
+            }),
+            None => Err(agent_core::Error::Repo(format!("no blob `{key}`"))),
+        }
+    }
+    async fn list_tree(
+        &self,
+        _rev: &Revision,
+        _path: &std::path::Path,
+        _recursive: bool,
+    ) -> Result<Vec<TreeEntry>> {
+        Ok(vec![])
+    }
+    async fn diff(
+        &self,
+        base: &Revision,
+        target: &Revision,
+        _globs: &[String],
+    ) -> Result<DiffResult> {
+        Ok(DiffResult {
+            base: Self::fake_oid(base.as_str()),
+            target: Self::fake_oid(target.as_str()),
+            files: self.diff.clone(),
+        })
+    }
+    async fn grep(
+        &self,
+        _rev: &Revision,
+        _pattern: &str,
+        _globs: &[String],
+        _limit: usize,
+    ) -> Result<Vec<GrepHit>> {
+        Ok(vec![])
+    }
+    async fn log(
+        &self,
+        _rev: &Revision,
+        _path: Option<&std::path::Path>,
+        _limit: usize,
+    ) -> Result<Vec<CommitInfo>> {
+        Ok(vec![])
+    }
+    async fn branches(&self) -> Result<Vec<(String, Oid)>> {
+        Ok(self.branches.clone())
+    }
+    async fn status(&self) -> Result<RepoStatus> {
+        Ok(RepoStatus {
+            mirror_path: std::path::PathBuf::from("/fixture"),
+            last_fetch_ms: 0,
+            live_worktrees: self.worktrees.lock().unwrap().len() as u32,
+            heads: self.branches.iter().cloned().collect(),
+        })
+    }
+    async fn fetch(&self) -> Result<RepoStatus> {
+        self.status().await
+    }
+    async fn worktree_add(&self, spec: &WorktreeSpec) -> Result<WorktreeHandle> {
+        let id = spec
+            .id
+            .clone()
+            .unwrap_or_else(|| format!("wt{}", self.worktrees.lock().unwrap().len()));
+        let handle = WorktreeHandle {
+            id: id.clone(),
+            path: std::path::PathBuf::from(format!("/fixture/worktrees/{id}")),
+            head: Self::fake_oid(spec.revision.as_str()),
+            revision: spec.revision.clone(),
+            writable: spec.writable,
+        };
+        self.worktrees.lock().unwrap().push(handle.clone());
+        Ok(handle)
+    }
+    async fn worktree_list(&self) -> Result<Vec<WorktreeHandle>> {
+        Ok(self.worktrees.lock().unwrap().clone())
+    }
+    async fn worktree_remove(&self, id: &str) -> Result<()> {
+        self.worktrees.lock().unwrap().retain(|w| w.id != id);
+        Ok(())
+    }
+    async fn checkpoint(&self, worktree_id: &str, name: &str) -> Result<Checkpoint> {
+        Ok(Checkpoint {
+            name: name.to_string(),
+            oid: Self::fake_oid(&format!("{worktree_id}:{name}")),
+            ref_name: format!("refs/agent/checkpoints/{worktree_id}/{name}"),
+        })
+    }
+    async fn push(&self, _checkpoint: &Checkpoint, _remote_ref: &str) -> Result<()> {
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // MCP transport
 // ---------------------------------------------------------------------------
 
@@ -467,6 +624,36 @@ mod tests {
         let defs = client.list_tools().await.unwrap();
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].name, "ping");
+    }
+
+    #[tokio::test]
+    async fn fixture_repo_reads_and_mutates_worktrees() {
+        let repo = FixtureRepo::new()
+            .with_branch("main", "a".repeat(40))
+            .with_blob("main", "a.txt", "hello");
+        // canned read
+        let blob = repo
+            .read_file(&Revision::from("main"), std::path::Path::new("a.txt"))
+            .await
+            .unwrap();
+        assert_eq!(blob.text, "hello");
+        assert!(repo
+            .read_file(&Revision::from("main"), std::path::Path::new("nope"))
+            .await
+            .is_err());
+        // worktree list mutates
+        assert!(repo.worktree_list().await.unwrap().is_empty());
+        repo.worktree_add(&WorktreeSpec {
+            revision: Revision::from("main"),
+            writable: true,
+            id: Some("w0".into()),
+        })
+        .await
+        .unwrap();
+        assert_eq!(repo.worktree_list().await.unwrap().len(), 1);
+        assert_eq!(repo.status().await.unwrap().live_worktrees, 1);
+        repo.worktree_remove("w0").await.unwrap();
+        assert!(repo.worktree_list().await.unwrap().is_empty());
     }
 
     #[tokio::test]

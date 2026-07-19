@@ -13,6 +13,11 @@
 //! counters; these wrappers add the per-component detail (provider TTFT, recall
 //! item counts, compaction deltas, authorize decisions, per-tool latency).
 
+#[cfg(feature = "git")]
+use agent_core::{
+    BlobContent, Checkpoint, CommitInfo, DiffResult, GrepHit, Oid, RepoBackend, RepoStatus,
+    Revision, TreeEntry, WorktreeHandle, WorktreeSpec,
+};
 use agent_core::{
     ChunkStream, CompletionRequest, CompletionResponse, ContextInput, ContextStrategy, Decision,
     LlmProvider, MemoryEvent, MemoryItem, MemoryStore, Message, ModelCapabilities, Observation,
@@ -68,6 +73,16 @@ pub(crate) fn search(
     name: &str,
 ) -> Arc<dyn SearchBackend> {
     Arc::new(MeteredSearch {
+        inner,
+        metrics: m,
+        name: name.to_string(),
+    })
+}
+/// Wrap the git backend. `name` is the config-selected impl (`cli`/`hybrid`/`grpc`),
+/// the metric label so a remote seam reads distinctly from a local one.
+#[cfg(feature = "git")]
+pub(crate) fn repo(inner: Arc<dyn RepoBackend>, m: Metrics, name: &str) -> Arc<dyn RepoBackend> {
+    Arc::new(MeteredRepo {
         inner,
         metrics: m,
         name: name.to_string(),
@@ -331,5 +346,137 @@ impl SearchBackend for MeteredSearch {
             Err(_) => self.metrics.on_search_error(&self.name, "query"),
         }
         out
+    }
+}
+
+// --- git / repo ------------------------------------------------------------
+
+#[cfg(feature = "git")]
+struct MeteredRepo {
+    inner: Arc<dyn RepoBackend>,
+    metrics: Metrics,
+    name: String,
+}
+
+#[cfg(feature = "git")]
+impl MeteredRepo {
+    /// Record an op's latency + error, keyed by op name. Returns the result so it
+    /// can be used inline: `self.record("resolve", start, out)`.
+    fn record<T>(&self, op: &str, start: Instant, out: Result<T>) -> Result<T> {
+        self.metrics
+            .on_repo_op(&self.name, op, start.elapsed().as_secs_f64());
+        if out.is_err() {
+            self.metrics.on_repo_error(&self.name, op);
+        }
+        out
+    }
+}
+
+#[cfg(feature = "git")]
+#[async_trait]
+impl RepoBackend for MeteredRepo {
+    async fn resolve(&self, rev: &Revision) -> Result<Oid> {
+        let start = Instant::now();
+        let out = self.inner.resolve(rev).await;
+        self.record("resolve", start, out)
+    }
+    async fn read_file(&self, rev: &Revision, path: &std::path::Path) -> Result<BlobContent> {
+        let start = Instant::now();
+        let out = self.inner.read_file(rev, path).await;
+        self.record("read_file", start, out)
+    }
+    async fn list_tree(
+        &self,
+        rev: &Revision,
+        path: &std::path::Path,
+        recursive: bool,
+    ) -> Result<Vec<TreeEntry>> {
+        let start = Instant::now();
+        let out = self.inner.list_tree(rev, path, recursive).await;
+        self.record("list_tree", start, out)
+    }
+    async fn diff(
+        &self,
+        base: &Revision,
+        target: &Revision,
+        path_globs: &[String],
+    ) -> Result<DiffResult> {
+        let start = Instant::now();
+        let out = self.inner.diff(base, target, path_globs).await;
+        self.record("diff", start, out)
+    }
+    async fn grep(
+        &self,
+        rev: &Revision,
+        pattern: &str,
+        path_globs: &[String],
+        limit: usize,
+    ) -> Result<Vec<GrepHit>> {
+        let start = Instant::now();
+        let out = self.inner.grep(rev, pattern, path_globs, limit).await;
+        self.record("grep", start, out)
+    }
+    async fn log(
+        &self,
+        rev: &Revision,
+        path: Option<&std::path::Path>,
+        limit: usize,
+    ) -> Result<Vec<CommitInfo>> {
+        let start = Instant::now();
+        let out = self.inner.log(rev, path, limit).await;
+        self.record("log", start, out)
+    }
+    async fn branches(&self) -> Result<Vec<(String, Oid)>> {
+        let start = Instant::now();
+        let out = self.inner.branches().await;
+        self.record("branches", start, out)
+    }
+    async fn status(&self) -> Result<RepoStatus> {
+        let start = Instant::now();
+        let out = self.inner.status().await;
+        if let Ok(st) = &out {
+            self.metrics
+                .set_repo_worktrees(&self.name, st.live_worktrees as i64);
+        }
+        self.record("status", start, out)
+    }
+    async fn fetch(&self) -> Result<RepoStatus> {
+        let start = Instant::now();
+        let out = self.inner.fetch().await;
+        let seconds = start.elapsed().as_secs_f64();
+        self.metrics.observe_repo_fetch(&self.name, seconds);
+        if let Ok(st) = &out {
+            self.metrics
+                .set_repo_worktrees(&self.name, st.live_worktrees as i64);
+        }
+        self.record("fetch", start, out)
+    }
+    async fn worktree_add(&self, spec: &WorktreeSpec) -> Result<WorktreeHandle> {
+        let start = Instant::now();
+        let out = self.inner.worktree_add(spec).await;
+        self.record("worktree_add", start, out)
+    }
+    async fn worktree_list(&self) -> Result<Vec<WorktreeHandle>> {
+        let start = Instant::now();
+        let out = self.inner.worktree_list().await;
+        if let Ok(ws) = &out {
+            self.metrics.set_repo_worktrees(&self.name, ws.len() as i64);
+        }
+        self.record("worktree_list", start, out)
+    }
+    async fn worktree_remove(&self, id: &str) -> Result<()> {
+        let start = Instant::now();
+        let out = self.inner.worktree_remove(id).await;
+        self.record("worktree_remove", start, out)
+    }
+    async fn checkpoint(&self, worktree_id: &str, name: &str) -> Result<Checkpoint> {
+        let start = Instant::now();
+        let out = self.inner.checkpoint(worktree_id, name).await;
+        self.record("checkpoint", start, out)
+    }
+    async fn push(&self, checkpoint: &Checkpoint, remote_ref: &str) -> Result<()> {
+        let start = Instant::now();
+        let out = self.inner.push(checkpoint, remote_ref).await;
+        self.record("push", start, out)
     }
 }
