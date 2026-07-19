@@ -1,0 +1,174 @@
+// The shared "message currency" that crosses every seam boundary — the wire
+// mirror of the types in `crates/agent-core/src/lib.rs`. Kept deliberately
+// stable and extended additively (new fields with new tags), exactly as the
+// in-process `agent-core` types are.
+//
+// Dynamic, schemaless values (`serde_json::Value` in agent-core — tool arguments
+// and JSON Schemas) are carried as [`JsonValue`], a fully-binary recursive value.
+// It is deliberately NOT `google.protobuf.Struct` (whose spec forces every number
+// to `double`, losing 64-bit integer range): dedicated `int_value`/`uint_value`
+// arms keep integers exact, and `big_number` (a decimal string) is the
+// arbitrary-precision escape hatch — so the encoding is both binary and lossless.
+syntax = "proto3";
+
+package agent.v1;
+
+// Conversation role. `ROLE_UNSPECIFIED` is the proto3 zero value and is never a
+// valid agent-core `Role`; conversions reject it.
+enum Role {
+  ROLE_UNSPECIFIED = 0;
+  ROLE_SYSTEM = 1;
+  ROLE_USER = 2;
+  ROLE_ASSISTANT = 3;
+  ROLE_TOOL = 4;
+}
+
+// The sole inhabitant of the JSON `null` type (proto enums need a zero value).
+enum NullValue {
+  NULL_VALUE = 0;
+}
+
+// A lossless, fully-binary encoding of an arbitrary JSON value — the wire twin of
+// agent-core's `serde_json::Value`. Numbers keep their exact type: integers use
+// the 64-bit `int_value`/`uint_value` arms, non-integers use `double_value`, and
+// anything beyond native range rides in `big_number` as a decimal string. An unset
+// `kind` decodes to JSON `null`.
+message JsonValue {
+  oneof kind {
+    NullValue null_value = 1;
+    bool bool_value = 2;
+    sint64 int_value = 3; // JSON integers within i64
+    uint64 uint_value = 4; // JSON integers needing the full u64 range
+    double double_value = 5; // JSON non-integer numbers
+    string string_value = 6;
+    JsonArray array_value = 7;
+    JsonObject object_value = 8;
+    string big_number = 9; // arbitrary-precision numeric literal (decimal string)
+  }
+}
+
+message JsonArray {
+  repeated JsonValue values = 1;
+}
+
+message JsonObject {
+  map<string, JsonValue> fields = 1;
+}
+
+// A single tool invocation requested by the model.
+message ToolCall {
+  string id = 1;
+  string name = 2;
+  // The arguments object (agent-core `serde_json::Value`).
+  JsonValue arguments = 3;
+}
+
+message Message {
+  Role role = 1;
+  string content = 2;
+  repeated ToolCall tool_calls = 3;
+  optional string tool_call_id = 4;
+}
+
+// A tool's advertised interface (what we hand the model).
+message ToolSchema {
+  string name = 1;
+  string description = 2;
+  // JSON Schema for the arguments object.
+  JsonValue parameters = 3;
+}
+
+message Observation {
+  string content = 1;
+  bool is_error = 2;
+}
+
+// Ambient context handed to every tool invocation.
+message ToolContext {
+  string cwd = 1;
+}
+
+message ModelCapabilities {
+  bool supports_tools = 1;
+  uint32 context_window = 2;
+}
+
+message Usage {
+  uint32 prompt_tokens = 1;
+  uint32 completion_tokens = 2;
+  uint32 total_tokens = 3;
+}
+
+message CompletionRequest {
+  repeated Message messages = 1;
+  repeated ToolSchema tools = 2;
+  uint32 max_tokens = 3;
+  float temperature = 4;
+}
+
+message CompletionResponse {
+  Message message = 1;
+  string finish_reason = 2;
+  optional Usage usage = 3;
+}
+
+// One increment of a streamed completion (server-streamed by Provider.Stream).
+message CompletionChunk {
+  string delta_text = 1;
+  optional ToolCall tool_call = 2;
+  optional string finish_reason = 3;
+  optional Usage usage = 4;
+}
+
+// A recalled memory item, ready to inject into context.
+message MemoryItem {
+  string source = 1;
+  string content = 2;
+}
+
+message RecallQuery {
+  string text = 1;
+  // agent-core `usize`.
+  uint64 limit = 2;
+}
+
+// An append-only episodic event.
+message MemoryEvent {
+  string kind = 1;
+  Message message = 2;
+  uint64 ts_ms = 3;
+  string session_id = 4;
+  optional Usage usage = 5;
+  optional uint32 iter = 6;
+}
+
+// A fixed, user-provided block of context (from a `context.d/` file).
+message ContextBlock {
+  string source = 1;
+  string content = 2;
+}
+
+message ContextInput {
+  string system_prompt = 1;
+  repeated ContextBlock prepend = 2;
+  repeated MemoryItem recalled = 3;
+  string goal = 4;
+  repeated ContextBlock append = 5;
+}
+
+// The live message window handed to the model each turn.
+message WorkingSet {
+  repeated Message messages = 1;
+}
+
+message TokenBudget {
+  uint32 max_context_tokens = 1;
+  uint32 reserve_output = 2;
+}
+
+// The policy authorization result. `agent-core::Decision::Allow` maps to
+// `allowed = true`; `Deny(reason)` maps to `allowed = false` + `deny_reason`.
+message Decision {
+  bool allowed = 1;
+  optional string deny_reason = 2;
+}

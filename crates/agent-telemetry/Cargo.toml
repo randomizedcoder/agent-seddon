@@ -14,5 +14,14 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 klickhouse.workspace = true
 
+# OTLP trace export to the ClickStack OTEL collector, layered onto `tracing`
+# alongside the ClickHouse-native sink above.
+opentelemetry.workspace = true
+opentelemetry_sdk.workspace = true
+opentelemetry-otlp.workspace = true
+tracing-opentelemetry.workspace = true
+# For attaching OTLP request headers (e.g. the HyperDX ingestion key) as gRPC metadata.
+tonic.workspace = true
+
 [dev-dependencies]
 rstest.workspace = true

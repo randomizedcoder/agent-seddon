@@ -98,6 +98,8 @@ impl) · ❌ Missing · ➖ N/A.
 | Structured telemetry sink (ClickHouse) | Yes | Adapter interface | Trace upload | ✅ |
 | MCP client | Yes (stdio + HTTP) | No (by design) | Yes | ✅ |
 | MCP server | Yes (`--serve-mcp`, stdio) | No | Yes | ✅ |
+| Distributed components (run seams as services) | Yes (gRPC over TCP/UDS, `--serve-<seam>`) | No | No | ✅ |
+| Distributed tracing | Yes (OpenTelemetry/OTLP → ClickStack) | No | Trace upload | ✅ |
 | Permission / approval gate | Yes (auto/interactive) | No (trust model) | Yes (rich) | 🟡 |
 | Path-traversal safety on file tools | Yes | — | — | ✅ |
 | Sandboxed execution backends | No | Docs/patterns | 6 backends | ❌ |
@@ -159,12 +161,28 @@ vector/dialectic. Remaining: activate distillation + an embedding-backed
 `SemanticStore` (both are documented seams).
 
 ### Telemetry / metrics / observability — our moat
-`crates/agent-runtime/src/metrics.rs` exposes 10 Prometheus metrics over a
-`/metrics` endpoint (+ optional Pushgateway). `crates/agent-telemetry/` streams a
+`crates/agent-metrics` exposes Prometheus metrics over a `/metrics` endpoint (+
+optional Pushgateway) — loop-level counters plus per-seam series recorded by a
+metrics wrapper (`crates/agent-runtime/src/metered.rs`), scraped by a
+Nix-deployed Prometheus/Grafana stack with a per-component dashboard
+([`docs/metrics.md`](metrics.md)). `crates/agent-telemetry/` streams a
 full transaction history to **ClickHouse** — three tables (`agent_events`,
 `agent_logs`, `agent_usage`), keyed by per-run `session_id`, via a batched
 background writer that drops rows rather than blocking if ClickHouse is down.
-Neither pi nor hermes ships a turnkey metrics + queryable-history stack.
+On top of that, **OpenTelemetry tracing**: the loop is instrumented as a span tree
+and exported over OTLP; W3C context propagates across gRPC seam boundaries, so a
+distributed run reassembles into **one trace** in a ClickStack/HyperDX collector
+(see [`tracing.md`](tracing.md)). Neither pi nor hermes ships a turnkey metrics +
+queryable-history + distributed-tracing stack.
+
+### Distributed components (gRPC) — a differentiator
+Because every seam is a config-selected trait, a component can run as its own
+process/container: `agent-proto` (binary protobuf contracts) + `agent-grpc`
+(per-seam servers/clients over TCP or unix domain sockets) let the loop dial a
+remote provider/memory/tools/context/policy with `= "grpc"`, hosted by
+`agent --serve-<seam>` (see [`grpc.md`](grpc.md)). This enables a k8s-style
+topology — a model gateway, a shared memory service, sandboxed tool workers —
+that neither pi nor hermes offers out of the box.
 
 ### MCP — client and server
 `crates/agent-mcp` is an MCP **client** (stdio subprocess + streamable HTTP behind

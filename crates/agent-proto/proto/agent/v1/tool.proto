@@ -1,0 +1,28 @@
+// The `Tool` / `ToolRegistry` seam over gRPC — remote/sandboxed tool workers.
+// `Execute` is keyed by tool name (the server hosts a registry), mirroring
+// `ToolRegistry::get(name)?.execute(args, ctx)`.
+syntax = "proto3";
+
+package agent.v1;
+
+import "agent/v1/common.proto";
+
+message DescribeAllRequest {}
+
+message DescribeAllResponse {
+  repeated ToolSchema tools = 1;
+}
+
+message ExecuteRequest {
+  string name = 1;
+  // The arguments object (agent-core `serde_json::Value`).
+  JsonValue arguments = 2;
+  ToolContext context = 3;
+}
+
+service ToolService {
+  // The tools this worker advertises (what the model is told about).
+  rpc DescribeAll(DescribeAllRequest) returns (DescribeAllResponse);
+  // Run one named tool.
+  rpc Execute(ExecuteRequest) returns (Observation);
+}

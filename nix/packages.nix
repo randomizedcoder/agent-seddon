@@ -15,6 +15,10 @@
     versions.cargo-nextest
     versions.rust-analyzer
 
+    # Protobuf / gRPC (protoc for tonic-build codegen; grpcurl for poking servers).
+    versions.protobuf
+    versions.grpcurl
+
     # Ops / ClickHouse.
     versions.clickhouse # clickhouse-client
     versions.docker

@@ -12,9 +12,11 @@ compiled in via cargo features, and contributed by third parties without forking
 See **[DESIGN.md](DESIGN.md)** for the design rationale, the loop, and the layered
 memory model; **[docs/architecture.md](docs/architecture.md)** for the boundary map
 and per-component docs; **[docs/extending.md](docs/extending.md)** for how to add a
-provider/tool/memory/context/policy/transport; and
-**[docs/features-comparison.md](docs/features-comparison.md)** for how it stacks up
-against other harnesses.
+provider/tool/memory/context/policy/transport;
+**[docs/grpc.md](docs/grpc.md)** for running the components as distributed gRPC
+services; **[docs/tracing.md](docs/tracing.md)** for the OpenTelemetry tracing
+runbook; and **[docs/features-comparison.md](docs/features-comparison.md)** for how
+it stacks up against other harnesses.
 
 ## Workspace
 
@@ -28,9 +30,12 @@ One crate per seam (DESIGN.md §7):
 | `agent-memory` | `MemoryStore`: JSONL episodic + markdown semantic |
 | `agent-context` | `ContextStrategy`: sliding-window or summarizing-window compaction |
 | `agent-mcp` | MCP client (stdio + streamable-HTTP) — external tools as `mcp_<server>_<tool>` |
-| `agent-telemetry` | Telemetry sink: streams transaction history, logs & usage to ClickHouse |
+| `agent-proto` | protobuf/gRPC wire contracts for the seams + core↔proto conversions & OTel trace propagation ([docs/grpc.md](docs/grpc.md)) |
+| `agent-grpc` | per-seam gRPC servers + clients over TCP or unix domain sockets (`--serve-<seam>`, `= "grpc"`) |
+| `agent-telemetry` | Telemetry sink: streams transaction history, logs & usage to ClickHouse; OTLP trace export to the ClickStack collector |
+| `agent-metrics` | Shared Prometheus registry + per-seam metric families ([docs/metrics.md](docs/metrics.md)) |
 | `agent-runtime` | Config, the plugin registry, the loop (streaming + parallel tools), sessions, subagents |
-| `agent-cli` | The `agent` binary (CLI + REPL + `--serve-mcp`) |
+| `agent-cli` | The `agent` binary (CLI + REPL + `--serve-mcp` + `--serve-<seam>`) |
 
 ## Plugins & features
 
@@ -98,6 +103,35 @@ Use a non-interactive policy (`auto-approve`) — stdin is the JSON-RPC channel,
 an interactive approval prompt can't read it. (This is the server counterpart to
 the `agent-mcp` client, which *consumes* other MCP servers.)
 
+## Distributing components (gRPC)
+
+Because every seam is a trait selected by config, a component can run **in a
+different process or on a different machine** with no change to the loop — a remote
+seam is just another impl, chosen with `= "grpc"`. `agent-proto` defines the
+protobuf wire contract for every seam (all binary — arbitrary JSON args ride as a
+lossless `JsonValue`, not text); `agent-grpc` provides the per-seam servers and
+clients over **TCP or unix domain sockets** (UDS is the same-host fast path,
+bound `0700`/`0600`).
+
+Host a seam with `agent --serve-<seam>` and point another agent at it:
+
+```sh
+# terminal A — a model gateway serving the real provider over gRPC (default :50051)
+agent --serve-provider --config gateway.toml         # gateway.toml: provider = "anthropic"
+
+# terminal B — a loop that dials the gateway instead of calling the model directly
+#   loop.toml:  [agent] provider = "grpc"
+#               [grpc.provider] endpoint = "http://127.0.0.1:50051"  (or unix:/path)
+agent --config loop.toml "list the files in this repo"
+```
+
+`--serve-provider|--serve-memory|--serve-tools|--serve-context|--serve-policy` each
+host one seam; ports/socket paths are generated from `nix/constants.nix` into
+`agent-grpc`'s `constants.rs` (a `nix flake check` guard keeps them in sync). This
+lifts the design's "distributed components" goal to a k8s-style topology — a
+gateway, a shared memory service, sandboxed tool workers. Full contract, error
+mapping, and deployment sketch in **[docs/grpc.md](docs/grpc.md)**.
+
 ## Nix
 
 A modular flake (thin `flake.nix` + `./nix/` aggregator, pinned Rust toolchain via
@@ -123,6 +157,11 @@ nix run .#clickhouse-up                                  # start + apply schema
 nix run .#clickhouse-client -- -q 'SHOW TABLES FROM agent'
 nix run .#clickhouse-down                                # stop + remove (data discarded)
 ```
+
+For **distributed OpenTelemetry tracing** (spans that follow a request across
+gRPC components into a **ClickStack / HyperDX** UI), a separate all-in-one container
+is provided (`nix run .#clickstack-up`, UI on `:8080`, OTLP on `:4317`). See the
+runbook in [`docs/tracing.md`](docs/tracing.md).
 
 To actually populate the tables, enable telemetry in `config/agent.toml`
 (`[telemetry] enabled = true`) and run a goal. Each run gets a `session_id`
@@ -180,18 +219,74 @@ See [`context.d/README.md`](context.d/README.md).
 
 ## Metrics
 
-Prometheus metrics about a running agent. Enable in `config/agent.toml`
+Prometheus metrics about a running agent — enabled in `config/agent.toml`
 (`[metrics] enabled = true`) to serve `/metrics` on `listen` (default
-`127.0.0.1:9600`); set `pushgateway` to also push on exit (useful for short runs).
-Exposed metrics include `agent_api_calls_total`, `agent_api_call_duration_seconds`,
-`agent_tokens_total`, `agent_context_tokens`, `agent_context_messages`,
-`agent_tool_calls_total`, `agent_iterations_total`, `agent_runs_total`,
-`agent_run_duration_seconds`, and `agent_active`.
+`127.0.0.1:9600`). Alongside the loop-level counters (`agent_api_calls_total`,
+`agent_api_call_duration_seconds`, `agent_tokens_total`, `agent_context_tokens`,
+`agent_context_messages`, `agent_tool_calls_total`, `agent_iterations_total`,
+`agent_runs_total`, `agent_run_duration_seconds`, `agent_active`), **each seam is
+instrumented independently** — a metrics wrapper (`agent-runtime/src/metered.rs`)
+records provider request/TTFT (`agent_provider_*`), per-tool latency
+(`agent_tool_exec_seconds`), memory ops (`agent_memory_*`), context
+assemble/compact (`agent_context_*`), and policy authorize (`agent_policy_*`). A
+remote `= "grpc"` seam is timed on the client side, and each `--serve-<seam>`
+process serves its own `/metrics` (ports 9601–9605) for server-side latency.
+
+A **Prometheus + Grafana** stack ships as Nix docker-apps (same pattern as
+ClickHouse/ClickStack), with a provisioned per-component dashboard:
 
 ```sh
-# while a run is in progress:
+nix run .#prometheus-up          # scraper — UI :9090, scrapes :9600–:9605
+nix run .#grafana-up             # dashboards — UI :3000 (Dashboards → agent-seddon)
+# run a REPL session (or the gRPC demo), then watch the dashboard fill.
+nix run .#grafana-down && nix run .#prometheus-down
+
+# or just curl the endpoint while a session is live:
 curl -s 127.0.0.1:9600/metrics | grep '^agent_'
 ```
+
+Full runbook (single-process + distributed topology + networking notes):
+**[docs/metrics.md](docs/metrics.md)**.
+
+## Tracing (OpenTelemetry)
+
+Distributed traces show the agent's loop as a **span tree** and follow a request
+across process boundaries. Turn it on with a single knob:
+
+```toml
+[telemetry]
+otlp_endpoint = "http://127.0.0.1:4317"   # OTLP/gRPC receiver (empty = off)
+# otlp_headers = "authorization=<key>"    # if the collector authenticates ingestion
+```
+
+How it works:
+
+- **Spans.** The loop (`agent-runtime`) wraps each seam interaction in a span, so a
+  run is `agent.turn → memory.recall · context.assemble · provider.complete/stream ·
+  policy.authorize · tool.execute · context.compact` (+ `agent.delegate` for
+  subagents). `tracing-opentelemetry` also auto-tags each span with its
+  `code.filepath`/`lineno`, so a span links back to source.
+- **Export.** A `tracing` layer (`agent-telemetry`) batches the spans and exports
+  them over **OTLP/gRPC** to any collector. It's *additive* to the native ClickHouse
+  sink and **independent of `RUST_LOG`** (its own `INFO` filter — so quieting the
+  console doesn't silently disable tracing).
+- **Propagation.** The gRPC transports carry the **W3C trace context** in request
+  metadata (`agent-proto`), so when a seam is remote (`= "grpc"`), the server's
+  handler span is a child of the caller's span — **one trace across both
+  processes**.
+
+A ready-to-run demo ships as a **ClickStack / HyperDX** all-in-one container
+(collector + ClickHouse + UI):
+
+```sh
+nix run .#clickstack-up          # UI :8080, OTLP :4317
+# run the two-process demo in config/otel-demo/ (a gateway + a provider = "grpc" loop),
+# then open http://localhost:8080 → Traces to see the distributed waterfall.
+nix run .#clickstack-down
+```
+
+Full runbook (including the two-process distributed trace and the setup gotchas):
+**[docs/tracing.md](docs/tracing.md)**.
 
 ## Runtime state
 
