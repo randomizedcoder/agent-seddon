@@ -36,6 +36,9 @@ type SemanticFactory = Box<
     dyn Fn(&Config, &Arc<dyn LlmProvider>) -> anyhow::Result<Arc<dyn SemanticStore>> + Send + Sync,
 >;
 type ToolFactory = Box<dyn Fn(&Config) -> anyhow::Result<Arc<dyn Tool>> + Send + Sync>;
+#[cfg(feature = "search")]
+type SearchFactory =
+    Box<dyn Fn(&Config) -> anyhow::Result<Arc<dyn agent_core::SearchBackend>> + Send + Sync>;
 
 /// Name → factory maps for every swappable seam. Keys are `&'static str` and the
 /// maps are ordered so error messages list known names deterministically.
@@ -48,6 +51,8 @@ pub struct Registry {
     episodics: BTreeMap<&'static str, EpisodicFactory>,
     semantics: BTreeMap<&'static str, SemanticFactory>,
     tools: BTreeMap<&'static str, ToolFactory>,
+    #[cfg(feature = "search")]
+    searches: BTreeMap<&'static str, SearchFactory>,
     // MCP transports live behind their own registry in `agent-mcp`; the runtime
     // owns one so a custom transport is registrable out-of-tree like any seam.
     #[cfg(feature = "mcp")]
@@ -125,6 +130,17 @@ impl Registry {
         f: impl Fn(&Config) -> anyhow::Result<Arc<dyn Tool>> + Send + Sync + 'static,
     ) {
         self.tools.insert(name, Box::new(f));
+    }
+    #[cfg(feature = "search")]
+    pub fn search(
+        &mut self,
+        name: &'static str,
+        f: impl Fn(&Config) -> anyhow::Result<Arc<dyn agent_core::SearchBackend>>
+            + Send
+            + Sync
+            + 'static,
+    ) {
+        self.searches.insert(name, Box::new(f));
     }
 
     /// Register an MCP transport factory under a `kind` (e.g. `"websocket"`),
@@ -218,6 +234,19 @@ impl Registry {
     /// All registered tool names (used when `[tools] enabled` is empty ⇒ all).
     pub fn tool_names(&self) -> impl Iterator<Item = &'static str> + '_ {
         self.tools.keys().copied()
+    }
+
+    #[cfg(feature = "search")]
+    pub fn build_search(
+        &self,
+        name: &str,
+        cfg: &Config,
+    ) -> anyhow::Result<Arc<dyn agent_core::SearchBackend>> {
+        let f = self
+            .searches
+            .get(name)
+            .ok_or_else(|| unknown("search backend", name, self.searches.keys().copied()))?;
+        f(cfg)
     }
 }
 
@@ -313,6 +342,24 @@ pub fn register_builtins(r: &mut Registry) {
         });
     }
 
+    // --- search backends (the SearchBackend seam) ---
+    #[cfg(feature = "search")]
+    {
+        r.search("tantivy", |cfg| {
+            let (root, index_dir) = search_paths(cfg, "tantivy")?;
+            Ok(
+                Arc::new(agent_search::TantivyBackend::open(root, index_dir)?)
+                    as Arc<dyn agent_core::SearchBackend>,
+            )
+        });
+        #[cfg(feature = "grpc")]
+        r.search("grpc", |cfg| {
+            let ep = grpc_client_endpoint(&cfg.grpc.search.endpoint, agent_grpc::constants::SEARCH);
+            Ok(Arc::new(agent_grpc::client::GrpcSearch::connect(&ep)?)
+                as Arc<dyn agent_core::SearchBackend>)
+        });
+    }
+
     // --- gRPC seam clients (a remote seam is just another impl, selected by
     //     `= "grpc"`; endpoint from `[grpc]`, defaulting to the generated ports) ---
     #[cfg(feature = "grpc")]
@@ -346,6 +393,23 @@ pub fn register_builtins(r: &mut Registry) {
             Ok(Arc::new(agent_grpc::client::GrpcPolicy::connect(&ep)?) as Arc<dyn Policy>)
         });
     }
+}
+
+/// Resolve the repo root + on-disk index directory for a search backend: the
+/// repo root is discovered from the cwd, and the index lives under
+/// `<root>/.agent-seddon/index/<backend>` unless `[search] index_dir` overrides it.
+#[cfg(feature = "search")]
+fn search_paths(
+    cfg: &Config,
+    backend: &str,
+) -> anyhow::Result<(std::path::PathBuf, std::path::PathBuf)> {
+    let root = agent_search::repo_root(&std::env::current_dir()?);
+    let index_dir = if cfg.search.index_dir.is_empty() {
+        agent_search::default_index_dir(&root, backend)
+    } else {
+        std::path::PathBuf::from(&cfg.search.index_dir).join(backend)
+    };
+    Ok((root, index_dir))
 }
 
 /// Resolve a `[grpc]` client endpoint: the configured string, or a loopback TCP

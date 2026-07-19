@@ -10,8 +10,9 @@ use std::sync::Arc;
 
 use agent_core::{
     ChunkStream, CompletionRequest, CompletionResponse, ContextInput, ContextStrategy, Decision,
-    LlmProvider, MemoryEvent, MemoryItem, MemoryStore, Message, ModelCapabilities, Observation,
-    Policy, RecallQuery, Result, TokenBudget, Tool, ToolContext, ToolSchema, WorkingSet,
+    IndexStatus, LlmProvider, MemoryEvent, MemoryItem, MemoryStore, Message, ModelCapabilities,
+    Observation, Policy, ProgressFn, RecallQuery, Result, SearchBackend, SearchCapabilities,
+    SearchHit, SearchMode, SearchQuery, TokenBudget, Tool, ToolContext, ToolSchema, WorkingSet,
 };
 use agent_proto::pb;
 use async_trait::async_trait;
@@ -271,6 +272,93 @@ impl Tool for GrpcTool {
                 self.schema.name
             ))),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Search
+// ---------------------------------------------------------------------------
+
+pub struct GrpcSearch {
+    client: pb::search_service_client::SearchServiceClient<Channel>,
+}
+
+impl GrpcSearch {
+    pub fn connect(endpoint: &Endpoint) -> Result<Self> {
+        let channel = endpoint
+            .connect_lazy()
+            .map_err(|e| agent_core::Error::Search(e.to_string()))?;
+        Ok(Self {
+            client: pb::search_service_client::SearchServiceClient::new(channel),
+        })
+    }
+}
+
+#[async_trait]
+impl SearchBackend for GrpcSearch {
+    fn capabilities(&self) -> SearchCapabilities {
+        // A sync trait method can't round-trip, so the remote client advertises a
+        // permissive capability set (the real backend behind the gateway enforces
+        // the actual modes and rejects anything it can't serve).
+        SearchCapabilities {
+            backend: "grpc".into(),
+            modes: vec![
+                SearchMode::Literal,
+                SearchMode::Phrase,
+                SearchMode::Fuzzy,
+                SearchMode::Regex,
+            ],
+            content_search: true,
+            scored: true,
+            incremental: true,
+            max_concurrent_queries: 0,
+        }
+    }
+
+    async fn status(&self) -> Result<IndexStatus> {
+        let mut client = self.client.clone();
+        let resp = client
+            .status(outbound(pb::StatusRequest {
+                backend: String::new(),
+            }))
+            .await
+            .map_err(|s| agent_core::Error::Search(s.to_string()))?;
+        resp.into_inner()
+            .backends
+            .into_iter()
+            .next()
+            .map(IndexStatus::from)
+            .ok_or_else(|| agent_core::Error::Search("search status: empty response".into()))
+    }
+
+    async fn reindex(&self, progress: ProgressFn<'_>) -> Result<IndexStatus> {
+        let mut client = self.client.clone();
+        let mut stream = client
+            .reindex(outbound(pb::ReindexRequest {
+                backend: String::new(),
+            }))
+            .await
+            .map_err(|s| agent_core::Error::Search(s.to_string()))?
+            .into_inner();
+        while let Some(item) = stream.next().await {
+            let p = item.map_err(|s| agent_core::Error::Search(s.to_string()))?;
+            progress(agent_core::ReindexProgress::from(p));
+        }
+        // The stream carries progress, not a terminal status — fetch final state.
+        self.status().await
+    }
+
+    async fn query(&self, q: &SearchQuery) -> Result<Vec<SearchHit>> {
+        let mut client = self.client.clone();
+        let req = pb::SearchRequest {
+            query: Some(pb::SearchQuery::from(q.clone())),
+            backend: String::new(),
+        };
+        let resp = client
+            .search(outbound(req))
+            .await
+            .map_err(|s| agent_core::Error::Search(s.to_string()))?;
+        Ok(resp.into_inner().hits.into_iter().map(Into::into).collect())
     }
 }
 

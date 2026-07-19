@@ -18,10 +18,16 @@ let
 
   # Source filter: crane's default keeps only cargo-relevant files (Cargo.toml,
   # Cargo.lock, *.rs), which would drop `crates/agent-proto/proto/**.proto` — the
-  # inputs `tonic-build` needs. Union in `.proto` files so codegen has them.
+  # inputs `tonic-build` needs — and the non-.rs files under `agent-search`'s
+  # `tests/fixtures/` (e.g. the .nix/.md corpus its index tests search). Union
+  # both back in so codegen and the fixture-driven tests have their inputs.
   cleanedSrc = lib.cleanSourceWith {
     inherit src;
-    filter = path: type: (lib.hasSuffix ".proto" path) || (craneLib.filterCargoSources path type);
+    filter =
+      path: type:
+      (lib.hasSuffix ".proto" path)
+      || (lib.hasInfix "/tests/fixtures/" path)
+      || (craneLib.filterCargoSources path type);
     name = "source";
   };
 

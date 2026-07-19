@@ -5,6 +5,9 @@ HyperDX** collector and seeing the agent interacting with its components — inc
 a **distributed trace that spans two processes** (the loop + a `--serve-provider`
 model gateway).
 
+> See **[observability.md](observability.md)** for how tracing fits alongside
+> metrics + logs, and how the agent inspects its own performance.
+
 ## What you get
 
 The loop is instrumented (`agent-runtime/src/agent.rs`) so one run is a span tree:
@@ -15,10 +18,14 @@ agent.turn
 ├─ context.assemble
 ├─ provider.stream ──▶ grpc.server        (agent-loop → agent-provider-gateway)
 ├─ policy.authorize
-├─ tool.execute
+├─ tool.execute            (e.g. the `search` tool ──▶ search.query when `= "grpc"`)
 ├─ context.compact
 └─ provider.stream ──▶ grpc.server        (next iteration)
 ```
+
+The search seam's server spans are `search.query`, `search.status`, and
+`search.reindex`; with `[search] backends = ["grpc"]` they nest under the caller's
+span, so a planning turn's many concurrent `search` calls appear as siblings.
 
 With `provider = "grpc"`, the `provider.*` calls cross a process boundary and the
 gateway's `grpc.server` span is a **child** of the loop's `provider.stream` span —

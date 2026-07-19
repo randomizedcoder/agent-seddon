@@ -1,0 +1,109 @@
+// The `SearchBackend` seam over gRPC — a code-search gateway. A single service
+// can front one or more backends (tantivy, …); the `backend` selector on a
+// request routes to a named backend (empty ⇒ the server's default), so their
+// performance is comparable head-to-head under the same metrics + tracing.
+// `Reindex` is server-streaming, the wire form of the reindex progress callback.
+syntax = "proto3";
+
+package agent.v1;
+
+// How the query text is interpreted. `SEARCH_MODE_LITERAL` is the proto3 zero
+// value and the common mode every backend supports.
+enum SearchMode {
+  SEARCH_MODE_LITERAL = 0;
+  SEARCH_MODE_PHRASE = 1;
+  SEARCH_MODE_FUZZY = 2;
+  SEARCH_MODE_REGEX = 3;
+}
+
+// Freshness of the on-disk index relative to the working tree.
+enum IndexState {
+  INDEX_STATE_FRESH = 0;
+  INDEX_STATE_STALE = 1;
+  INDEX_STATE_MISSING = 2;
+  INDEX_STATE_BUILDING = 3;
+}
+
+message SearchQuery {
+  string text = 1;
+  SearchMode mode = 2;
+  repeated string path_globs = 3;
+  optional string lang = 4;
+  uint64 limit = 5; // agent-core `usize`
+  optional uint32 fuzzy_distance = 6;
+}
+
+message SearchHit {
+  string path = 1;
+  uint32 line = 2; // 1-based; 0 = filename-only match
+  uint32 col_start = 3;
+  uint32 col_end = 4;
+  float score = 5;
+  string snippet = 6;
+}
+
+message SearchRequest {
+  SearchQuery query = 1;
+  // Which backend to query. Empty ⇒ the server's default backend.
+  string backend = 2;
+}
+
+message SearchResponse {
+  repeated SearchHit hits = 1;
+  // The backend that served the response (echoed for attribution).
+  string backend = 2;
+}
+
+message SearchCapabilities {
+  string backend = 1;
+  repeated SearchMode modes = 2;
+  bool content_search = 3;
+  bool scored = 4;
+  bool incremental = 5;
+  uint32 max_concurrent_queries = 6;
+}
+
+message SearchCapabilitiesRequest {
+  string backend = 1;
+}
+message SearchCapabilitiesResponse {
+  repeated SearchCapabilities backends = 1;
+}
+
+message IndexStatus {
+  IndexState state = 1;
+  uint64 indexed_files = 2;
+  uint64 last_indexed_ms = 3;
+  string manifest_digest = 4;
+  string backend = 5;
+}
+
+message StatusRequest {
+  string backend = 1;
+}
+message StatusResponse {
+  repeated IndexStatus backends = 1;
+}
+
+message ReindexRequest {
+  string backend = 1;
+}
+
+// One increment of reindex progress (server-streamed by SearchService.Reindex).
+message ReindexProgress {
+  uint64 files_done = 1;
+  uint64 files_total = 2;
+  bool done = 3;
+  string backend = 4;
+}
+
+service SearchService {
+  // Index freshness (one entry per served backend, or the selected one).
+  rpc Status(StatusRequest) returns (StatusResponse);
+  // Advertised capabilities per backend.
+  rpc Capabilities(SearchCapabilitiesRequest) returns (SearchCapabilitiesResponse);
+  // Bring the index up to date, streaming progress.
+  rpc Reindex(ReindexRequest) returns (stream ReindexProgress);
+  // Run a query against the selected backend.
+  rpc Search(SearchRequest) returns (SearchResponse);
+}

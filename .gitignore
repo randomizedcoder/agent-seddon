@@ -13,6 +13,9 @@ target
 # Agent runtime state (episodic log + semantic memory)
 .agent/
 
+# Per-repo search index + freshness manifest (the SearchBackend seam)
+.agent-seddon/
+
 # Never commit secrets
 *api-key*
 *.key

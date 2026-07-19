@@ -5,6 +5,7 @@ members = [
     "crates/agent-metrics",
     "crates/agent-providers",
     "crates/agent-tools",
+    "crates/agent-search",
     "crates/agent-memory",
     "crates/agent-context",
     "crates/agent-grpc",
@@ -79,6 +80,7 @@ agent-core = { path = "crates/agent-core" }
 agent-metrics = { path = "crates/agent-metrics" }
 agent-providers = { path = "crates/agent-providers", default-features = false }
 agent-tools = { path = "crates/agent-tools", default-features = false }
+agent-search = { path = "crates/agent-search", default-features = false }
 agent-memory = { path = "crates/agent-memory", default-features = false }
 agent-context = { path = "crates/agent-context", default-features = false }
 agent-grpc = { path = "crates/agent-grpc" }

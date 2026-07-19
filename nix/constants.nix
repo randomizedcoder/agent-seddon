@@ -52,5 +52,10 @@
       socket = "/tmp/agent-seddon/policy.sock";
       metrics_port = 9605;
     };
+    search = {
+      port = 50056;
+      socket = "/tmp/agent-seddon/search.sock";
+      metrics_port = 9606;
+    };
   };
 }

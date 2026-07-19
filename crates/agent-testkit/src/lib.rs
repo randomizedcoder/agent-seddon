@@ -15,9 +15,11 @@
 //! * [`mcp::ScriptedTransport`] — a canned `McpTransport` for client tests.
 
 use agent_core::{
-    CompletionRequest, CompletionResponse, ContextInput, ContextStrategy, LlmProvider, MemoryEvent,
-    MemoryItem, MemoryStore, Message, ModelCapabilities, Observation, RecallQuery, Result, Role,
-    TokenBudget, Tool, ToolCall, ToolContext, ToolSchema, WorkingSet,
+    CompletionRequest, CompletionResponse, ContextInput, ContextStrategy, IndexState, IndexStatus,
+    LlmProvider, MemoryEvent, MemoryItem, MemoryStore, Message, ModelCapabilities, Observation,
+    ProgressFn, RecallQuery, ReindexProgress, Result, Role, SearchBackend, SearchCapabilities,
+    SearchHit, SearchMode, SearchQuery, TokenBudget, Tool, ToolCall, ToolContext, ToolSchema,
+    WorkingSet,
 };
 use async_trait::async_trait;
 use std::path::PathBuf;
@@ -270,6 +272,107 @@ impl Tool for EchoTool {
                 .unwrap_or("")
                 .to_string(),
         ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Search
+// ---------------------------------------------------------------------------
+
+/// A `SearchBackend` that returns a fixed hit list + settable index status, and
+/// streams a canned reindex progression. Cloneable-cheap via `Arc` counters so a
+/// test can assert a reindex happened. Enough to exercise the search seam (and its
+/// gRPC transport) without pulling in tantivy.
+pub struct FixtureSearch {
+    caps: SearchCapabilities,
+    status: IndexStatus,
+    hits: Vec<SearchHit>,
+    reindexed: Arc<AtomicUsize>,
+}
+
+impl Default for FixtureSearch {
+    fn default() -> Self {
+        Self {
+            caps: SearchCapabilities {
+                backend: "fixture".into(),
+                modes: vec![
+                    SearchMode::Literal,
+                    SearchMode::Phrase,
+                    SearchMode::Fuzzy,
+                    SearchMode::Regex,
+                ],
+                content_search: true,
+                scored: true,
+                incremental: true,
+                max_concurrent_queries: 0,
+            },
+            status: IndexStatus {
+                state: IndexState::Fresh,
+                indexed_files: 3,
+                last_indexed_ms: 0,
+                manifest_digest: "fixture".into(),
+            },
+            hits: Vec::new(),
+            reindexed: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+impl FixtureSearch {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// The hits every `query` returns.
+    pub fn with_hits(mut self, hits: Vec<SearchHit>) -> Self {
+        self.hits = hits;
+        self
+    }
+    /// The status `status()` reports.
+    pub fn with_status(mut self, status: IndexStatus) -> Self {
+        self.status = status;
+        self
+    }
+    /// How many times `reindex` has been called.
+    pub fn reindex_count(&self) -> usize {
+        self.reindexed.load(Ordering::SeqCst)
+    }
+    /// A single hit, for convenience in assertions.
+    pub fn hit(path: &str, line: u32, snippet: &str) -> SearchHit {
+        SearchHit {
+            path: PathBuf::from(path),
+            line,
+            col_start: 0,
+            col_end: 0,
+            score: 1.0,
+            snippet: snippet.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl SearchBackend for FixtureSearch {
+    fn capabilities(&self) -> SearchCapabilities {
+        self.caps.clone()
+    }
+    async fn status(&self) -> Result<IndexStatus> {
+        Ok(self.status.clone())
+    }
+    async fn reindex(&self, progress: ProgressFn<'_>) -> Result<IndexStatus> {
+        self.reindexed.fetch_add(1, Ordering::SeqCst);
+        progress(ReindexProgress {
+            files_done: 1,
+            files_total: 2,
+            done: false,
+        });
+        progress(ReindexProgress {
+            files_done: 2,
+            files_total: 2,
+            done: true,
+        });
+        Ok(self.status.clone())
+    }
+    async fn query(&self, _q: &SearchQuery) -> Result<Vec<SearchHit>> {
+        Ok(self.hits.clone())
     }
 }
 

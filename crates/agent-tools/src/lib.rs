@@ -28,6 +28,16 @@ mod search;
 #[cfg(feature = "tool-search")]
 pub use search::{FindTool, GrepTool, LsTool};
 
+#[cfg(feature = "tool-search-index")]
+mod search_index;
+#[cfg(feature = "tool-search-index")]
+pub use search_index::SearchTool;
+
+#[cfg(feature = "tool-metrics")]
+mod metrics;
+#[cfg(feature = "tool-metrics")]
+pub use metrics::MetricsTool;
+
 /// Cap tool output so a runaway command can't blow the context window.
 pub(crate) const MAX_OUTPUT: usize = 12_000;
 

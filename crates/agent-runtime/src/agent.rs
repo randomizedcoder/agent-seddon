@@ -49,6 +49,10 @@ pub struct Agent {
     policy: Arc<dyn Policy>,
     metrics: Metrics,
     settings: Settings,
+    /// The composed search backend, if the `search` seam is wired. Held so it can
+    /// be hosted over gRPC (`agent --serve-search`); the loop reaches search
+    /// through the `search` *tool*, not this field.
+    search: Option<Arc<dyn agent_core::SearchBackend>>,
 }
 
 impl Agent {
@@ -70,7 +74,14 @@ impl Agent {
             policy,
             metrics,
             settings,
+            search: None,
         }
+    }
+
+    /// Attach the composed search backend (so `--serve-search` can host it).
+    pub fn with_search(mut self, search: Arc<dyn agent_core::SearchBackend>) -> Self {
+        self.search = Some(search);
+        self
     }
 
     /// Run a single goal to completion (one-shot): open a session and send it.
@@ -96,6 +107,10 @@ impl Agent {
     }
     pub fn tools(&self) -> ToolRegistry {
         self.tools.clone()
+    }
+    /// The composed search backend, if wired (for `agent --serve-search`).
+    pub fn search(&self) -> Option<Arc<dyn agent_core::SearchBackend>> {
+        self.search.clone()
     }
 
     pub fn session(&self) -> Session<'_> {

@@ -58,6 +58,29 @@ pub async fn build_agent_with(
     #[cfg(feature = "grpc")]
     register_grpc_tools(&mut tools, &cfg, &metrics).await;
 
+    // The `metrics` tool reads the shared registry, so the agent can inspect its
+    // own performance (see docs/observability.md). Registered before the subagent
+    // set is captured so child agents inherit it.
+    #[cfg(feature = "tool-metrics")]
+    {
+        let tool = Arc::new(agent_tools::MetricsTool::new(metrics.clone()));
+        tools.register(crate::metered::tool(tool, metrics.clone()));
+    }
+
+    // Search: compose the configured backends into one metered `DispatchSearch`,
+    // expose it to the model as the `search` tool (registered before the subagent
+    // set is captured, so child agents inherit it), and keep the handle to host
+    // over gRPC / kick off the background freshness check below.
+    #[cfg(feature = "search")]
+    let search_dispatch = {
+        let dispatch = crate::search::build_search(registry, &cfg, &metrics)?;
+        let tool = Arc::new(agent_tools::SearchTool::new(
+            dispatch.clone() as Arc<dyn agent_core::SearchBackend>
+        ));
+        tools.register(crate::metered::tool(tool, metrics.clone()));
+        dispatch
+    };
+
     // Memory: either the whole-store backend, or — when `[memory] semantic` is
     // set — the episodic layer of that backend composed with an independently
     // chosen `SemanticStore` (e.g. a vector store) via `LayeredMemory`.
@@ -140,9 +163,17 @@ pub async fn build_agent_with(
         tools.register(Arc::new(crate::subagent::DelegateTool::root(ctx)));
     }
 
-    Ok(Agent::new(
-        provider, tools, memory, context, policy, metrics, settings,
-    ))
+    // Kick off the background index-freshness check (unless disabled) before the
+    // agent starts its loop; queries serve the last committed snapshot meanwhile.
+    #[cfg(feature = "search")]
+    if cfg.search.auto_index {
+        crate::search::spawn_freshness(search_dispatch.clone(), metrics.clone());
+    }
+
+    let agent = Agent::new(provider, tools, memory, context, policy, metrics, settings);
+    #[cfg(feature = "search")]
+    let agent = agent.with_search(search_dispatch as Arc<dyn agent_core::SearchBackend>);
+    Ok(agent)
 }
 
 /// Resolve the enabled tools through the registry. Empty `[tools] enabled` means

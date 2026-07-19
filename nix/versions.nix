@@ -43,6 +43,20 @@ in
   protobuf = pkgs.protobuf;
   grpcurl = pkgs.grpcurl;
 
+  # ── Search backends (the SearchBackend seam) ──────────────────────────────
+  # Upstream search engines pinned by git rev for reproducibility. `tantivy` is a
+  # normal cargo git dependency (see crates/agent-search/Cargo.toml); crane
+  # vendors it hermetically from the rev in Cargo.lock, so the rev below is the
+  # single record of what's pinned — bump both together. A DeepSearch backend is
+  # reserved for a follow-up (it is not a library and needs a vendored fork).
+  search = {
+    tantivy = {
+      version = "0.26.0";
+      rev = "057458bf14d6973c9c97594c1d99580b6af4c49d";
+      url = "https://github.com/quickwit-oss/tantivy";
+    };
+  };
+
   # Runtime / ops tooling.
   clickhouse = pkgs.clickhouse; # provides `clickhouse-client` in the dev shell
   docker = pkgs.docker;
@@ -70,7 +84,7 @@ in
   # The metrics scraper + dashboards for a running agent (complementary to the
   # OTLP tracing above). Both containers run with docker `--network host` (Linux)
   # so Prometheus can scrape the agent's loopback `127.0.0.1:9600` (+ the per-seam
-  # `--serve-<seam>` ports 9601–9605 from constants.nix) and Grafana can reach
+  # `--serve-<seam>` ports 9601–9606 from constants.nix) and Grafana can reach
   # Prometheus at `127.0.0.1:9090`. Pin the images so an upstream bump is explicit.
   prometheusImage = "prom/prometheus:v2.54.1";
   prometheusContainerName = "agent-seddon-prometheus";

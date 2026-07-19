@@ -16,6 +16,7 @@ pub enum Seam {
     Tools,
     Context,
     Policy,
+    Search,
 }
 
 impl Seam {
@@ -27,6 +28,7 @@ impl Seam {
             "--serve-tools" => Some(Seam::Tools),
             "--serve-context" => Some(Seam::Context),
             "--serve-policy" => Some(Seam::Policy),
+            "--serve-search" => Some(Seam::Search),
             _ => None,
         }
     }
@@ -38,6 +40,7 @@ impl Seam {
             Seam::Tools => "tools",
             Seam::Context => "context",
             Seam::Policy => "policy",
+            Seam::Search => "search",
         }
     }
 
@@ -48,6 +51,7 @@ impl Seam {
             Seam::Tools => constants::TOOLS.tcp_port,
             Seam::Context => constants::CONTEXT.tcp_port,
             Seam::Policy => constants::POLICY.tcp_port,
+            Seam::Search => constants::SEARCH.tcp_port,
         }
     }
 
@@ -61,6 +65,7 @@ impl Seam {
             Seam::Tools => constants::TOOLS.metrics_port,
             Seam::Context => constants::CONTEXT.metrics_port,
             Seam::Policy => constants::POLICY.metrics_port,
+            Seam::Search => constants::SEARCH.metrics_port,
         }
     }
 
@@ -71,6 +76,7 @@ impl Seam {
             Seam::Tools => &cfg.grpc.tools.listen,
             Seam::Context => &cfg.grpc.context.listen,
             Seam::Policy => &cfg.grpc.policy.listen,
+            Seam::Search => &cfg.grpc.search.listen,
         }
     }
 }
@@ -97,6 +103,11 @@ pub async fn serve(agent: &Agent, seam: Seam, listen: Endpoint) -> anyhow::Resul
         Seam::Tools => agent_grpc::server::tools_router(agent.tools(), std::env::current_dir()?),
         Seam::Context => agent_grpc::server::context_router(agent.context()),
         Seam::Policy => agent_grpc::server::policy_router(agent.policy()),
+        Seam::Search => agent_grpc::server::search_router(
+            agent
+                .search()
+                .ok_or_else(|| anyhow::anyhow!("search seam not enabled in this build/config"))?,
+        ),
     };
     let bound = listen.bind().await?;
     tracing::info!(seam = seam.name(), endpoint = ?bound.dial_endpoint()?, "gRPC seam server ready");

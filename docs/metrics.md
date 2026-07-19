@@ -6,6 +6,10 @@ observability; it complements the OTLP **tracing** ([docs/tracing.md](tracing.md
 and the native ClickHouse transaction sink. Everything ships behind the same Nix
 docker-app pattern as ClickHouse/ClickStack.
 
+> See **[observability.md](observability.md)** for the map that ties metrics,
+> traces, and logs together — and how the agent inspects its own performance via
+> the `metrics` tool.
+
 ## What's instrumented
 
 Instrumentation is unconditional and cheap — a shared `agent_metrics::Metrics`
@@ -29,6 +33,12 @@ gated by `[metrics] enabled`.
     `agent_context_compactions_total`, `agent_context_compact_tokens{when}`.
   - Policy — `agent_policy_authorize_total{policy,decision}`,
     `agent_policy_authorize_seconds`.
+  - Search — `agent_search_query_seconds{backend,mode}`,
+    `agent_search_hits{backend,mode}`, `agent_search_index_seconds{backend}`,
+    `agent_search_index_files{backend}`, `agent_search_index_fresh{backend}`,
+    `agent_search_reindex_total{backend,trigger}`,
+    `agent_search_errors_total{backend,op}`. Backends are labelled so tantivy vs. a
+    second backend compare head-to-head under the same interface.
 
 Because the wrapper sits at the seam boundary, a remote `= "grpc"` seam is timed
 on the loop side (label `provider="grpc"`, etc.), and the same wrapper on a
@@ -40,19 +50,22 @@ Metrics are enabled by default in [`config/agent.toml`](../config/agent.toml)
 (`[metrics] enabled = true`), served on `127.0.0.1:9600`.
 
 ```sh
-nix run .#prometheus-up          # Prometheus  UI :9090, scrapes :9600–:9605
+nix run .#prometheus-up          # Prometheus  UI :9090, scrapes :9600–:9606
 nix run .#grafana-up             # Grafana     UI :3000, provisioned dashboard
 
 # start a session so metrics accumulate (the REPL stays up for scraping):
 nix run .#agent -- --config config/agent.toml
 
 # in another terminal, confirm the endpoint:
-curl -s 127.0.0.1:9600/metrics | grep -E '^agent_(provider|tool|memory|context|policy)_'
+curl -s 127.0.0.1:9600/metrics | grep -E '^agent_(provider|tool|memory|context|policy|search)_'
 ```
 
 Open Grafana at <http://localhost:3000> (anonymous Admin) → **Dashboards →
-agent-seddon**. Prometheus target health is at
-<http://localhost:9090/targets>.
+agent-seddon**. The dashboard has a row per component (Overview, Provider, Tools,
+Memory, Context, Policy, **Search**); the Search row shows index freshness +
+file count, reindex duration/rate (when indexing runs), and query
+latency/rate/hits by `backend`+`mode` (so tantivy vs. a second backend compare
+side by side). Prometheus target health is at <http://localhost:9090/targets>.
 
 ```sh
 nix run .#prometheus-down
@@ -76,6 +89,7 @@ job so co-located servers don't collide on `:9600`:
 | `--serve-tools`    | `tools`    | `127.0.0.1:9603` |
 | `--serve-context`  | `context`  | `127.0.0.1:9604` |
 | `--serve-policy`   | `policy`   | `127.0.0.1:9605` |
+| `--serve-search`   | `search`   | `127.0.0.1:9606` |
 
 Run the `config/otel-demo` two-process demo (a gateway + a `provider = "grpc"`
 loop) and both the loop (`agent`, `:9600`) and the gateway (`provider`, `:9601`)
