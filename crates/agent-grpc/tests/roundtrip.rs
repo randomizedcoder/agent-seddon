@@ -246,6 +246,39 @@ async fn read_write_roundtrips(#[case] transport: Transport) {
     );
 }
 
+// `bash` over gRPC: run a command through the ToolService seam and get its output
+// back on both transports.
+#[rstest]
+#[case::tcp(Transport::Tcp)]
+#[case::uds(Transport::Uds)]
+#[tokio::test(flavor = "multi_thread")]
+async fn bash_roundtrips(#[case] transport: Transport) {
+    let mut registry = agent_core::ToolRegistry::new();
+    registry.register(Arc::new(agent_tools::BashTool));
+    let (dial, _srv) = spawn(transport, tools_router(registry, std::env::temp_dir())).await;
+
+    let tools = grpc_tools(&dial).await.unwrap();
+    let bash = tools.iter().find(|t| t.name() == "bash").unwrap();
+    // (Note: the client proxy reports the default `parallel_safe() == true` — the
+    // flag isn't carried in `ToolSchema`, so a *remote* tool's concurrency contract
+    // isn't yet propagated over the seam. Tracked as a follow-up; asserted locally
+    // in `bash_corner_parallel_safe_is_false`.)
+
+    let ctx = ToolContext {
+        cwd: std::env::temp_dir(),
+    };
+    let obs = bash
+        .execute(serde_json::json!({ "command": "echo over-the-wire" }), &ctx)
+        .await
+        .unwrap();
+    assert!(!obs.is_error, "{}", obs.content);
+    assert!(
+        obs.content.contains("over-the-wire"),
+        "output: {}",
+        obs.content
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Memory
 // ---------------------------------------------------------------------------

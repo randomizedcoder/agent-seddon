@@ -6,8 +6,10 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 /// Wall-clock ceiling for a single `bash` invocation, so a hung or looping
-/// command can't stall the agent indefinitely.
-const BASH_TIMEOUT_SECS: u64 = 120;
+/// command can't stall the agent indefinitely. Lowered to 1s under `cfg(test)` so
+/// the timeout test doesn't wait two minutes (the tool is inert as a dependency,
+/// where `cfg(test)` is off, so production keeps the full 120s).
+const BASH_TIMEOUT_SECS: u64 = if cfg!(test) { 1 } else { 120 };
 
 // --- bash -----------------------------------------------------------------
 
@@ -17,6 +19,13 @@ pub struct BashTool;
 impl Tool for BashTool {
     fn name(&self) -> &str {
         "bash"
+    }
+    /// Not parallel-safe: `bash` runs arbitrary commands in the shared working
+    /// directory with unrestricted filesystem side effects, so the loop must not
+    /// run it concurrently with sibling tool calls (which could race on the same
+    /// files). The file tools are lexically cwd-pinned; `bash` is the escape hatch.
+    fn parallel_safe(&self) -> bool {
+        false
     }
     fn schema(&self) -> ToolSchema {
         ToolSchema {
@@ -299,5 +308,91 @@ mod tests {
             "error `{}` missing `{err_substr}`",
             obs.content
         );
+    }
+
+    // --- bash ---------------------------------------------------------------
+    // `Ok(substr)` ⇒ non-error observation containing `substr`; `Err(substr)` ⇒
+    // error observation containing `substr`.
+    #[rstest]
+    // happy path / output capture
+    #[case::positive_simple_stdout(json!({"command": "echo hello"}), Ok("hello"))]
+    #[case::positive_runs_in_cwd(json!({"command": "pwd"}), Ok("agent-testkit-"))]
+    #[case::positive_multiline_stdout(json!({"command": "printf 'a\\nb\\nc\\n'"}), Ok("a\nb\nc"))]
+    #[case::corner_unicode_roundtrip(json!({"command": "printf 'héllo π'"}), Ok("héllo π"))]
+    // exit-code semantics
+    #[case::negative_nonzero_exit_is_error(json!({"command": "exit 3"}), Err("exit code 3"))]
+    #[case::corner_zero_exit_empty_output(json!({"command": "true"}), Ok("no output, exit code 0"))]
+    #[case::negative_false_is_error(json!({"command": "false"}), Err("exit code 1"))]
+    // stderr framing
+    #[case::corner_stderr_marker(json!({"command": "echo out; echo err 1>&2"}), Ok("[stderr]\nerr"))]
+    #[case::corner_stderr_only_on_success(json!({"command": "echo warn 1>&2; true"}), Ok("[stderr]\nwarn"))]
+    // argument validation
+    #[case::negative_missing_command_arg(json!({}), Err("missing string argument `command`"))]
+    #[tokio::test]
+    async fn bash_output_cases(
+        #[case] args: Value,
+        #[case] expected: std::result::Result<&str, &str>,
+    ) {
+        let dir = tempdir();
+        let obs = run(&dir, &BashTool, args).await;
+        match expected {
+            Ok(substr) => {
+                assert!(!obs.is_error, "unexpected error: {}", obs.content);
+                assert!(
+                    obs.content.contains(substr),
+                    "output `{}` missing `{substr}`",
+                    obs.content
+                );
+            }
+            Err(substr) => {
+                assert!(obs.is_error, "expected error, got ok: {}", obs.content);
+                assert!(
+                    obs.content.contains(substr),
+                    "error `{}` missing `{substr}`",
+                    obs.content
+                );
+            }
+        }
+    }
+
+    // Shell output over the cap is truncated with the marker (pins that `bash`
+    // applies `truncate`, char-boundary safe, on real command output).
+    #[tokio::test]
+    async fn bash_boundary_output_truncated_at_cap() {
+        let dir = tempdir();
+        let obs = run(&dir, &BashTool, json!({"command": "yes x | head -c 20000"})).await;
+        assert!(!obs.is_error, "{}", obs.content);
+        assert!(obs.content.ends_with("[output truncated]"));
+        assert!(obs.content.len() <= crate::MAX_OUTPUT + "\n...[output truncated]".len());
+    }
+
+    // A trailing newline is preserved verbatim, not miscounted or stripped.
+    #[tokio::test]
+    async fn bash_corner_trailing_newline_preserved() {
+        let dir = tempdir();
+        let obs = run(&dir, &BashTool, json!({"command": "printf 'one\\n'"})).await;
+        assert!(!obs.is_error);
+        assert_eq!(obs.content, "one\n");
+    }
+
+    // A command that outlives the (test-lowered 1s) ceiling is killed and reported
+    // as a model-visible timeout error, not a hang.
+    #[tokio::test]
+    async fn bash_boundary_timeout_kills_and_reports() {
+        let dir = tempdir();
+        let obs = run(&dir, &BashTool, json!({"command": "sleep 5"})).await;
+        assert!(obs.is_error, "expected timeout error, got: {}", obs.content);
+        assert!(
+            obs.content.contains("timed out"),
+            "message: {}",
+            obs.content
+        );
+    }
+
+    // Pin the concurrency contract: bash is NOT parallel-safe (shared cwd + FS
+    // side effects), unlike the default-true trait impl.
+    #[test]
+    fn bash_corner_parallel_safe_is_false() {
+        assert!(!BashTool.parallel_safe());
     }
 }

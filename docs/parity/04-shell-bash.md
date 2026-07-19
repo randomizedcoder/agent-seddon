@@ -18,6 +18,19 @@ it may run concurrently with sibling tool calls. Every peer agent treats its
 shell tool as the highest-risk, most-tested surface; agent-seddon currently does
 not test it at all.
 
+> **Status: implemented.** The §5 table now lives in
+> [`crates/agent-tools/src/core.rs`](../../crates/agent-tools/src/core.rs) (14
+> cases: output capture, exit-code semantics, stderr framing, arg validation,
+> output-cap truncation, trailing-newline, and a timeout test), plus a `bash` gRPC
+> roundtrip (TCP+UDS) and the bash path in the dhat leak test. Two impl decisions
+> the spec called for are done: **`parallel_safe()` is now `false`** (shared cwd +
+> FS side effects — gap 2), and the timeout is **test-lowered to 1s under
+> `cfg(test)`** so the timeout test is fast (production keeps 120s). No iai perf
+> bench: `bash` is subprocess-dominated with no deterministic CPU hot path. Gaps
+> 6–7 (workdir/env/prefix/sudo/spill) remain deliberate non-features. One new
+> follow-up surfaced: a tool's `parallel_safe()` flag is **not propagated over the
+> gRPC seam** (the client proxy defaults to `true`) — noted in the roundtrip test.
+
 ## 2. agent-seddon today
 
 `BashTool` lives in
