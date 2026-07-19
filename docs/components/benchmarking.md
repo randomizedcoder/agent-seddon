@@ -1,5 +1,9 @@
 # Benchmarking & leak checks
 
+> **This is the how-to reference** (commands, templates, ceilings). For the *why*
+> — why instruction counts over wall-clock, why absolute ceilings, why dhat, and
+> how the pieces fit — see the design doc [`../benchmarking.md`](../benchmarking.md).
+
 Performance and heap behaviour are treated like correctness: both are **gated by
 `nix flake check`**, so a regression fails the build. Two mechanisms, both
 deterministic (no wall-clock noise, no flaky thresholds):

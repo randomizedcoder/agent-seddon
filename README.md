@@ -16,7 +16,9 @@ provider/tool/memory/context/policy/transport;
 **[docs/grpc.md](docs/grpc.md)** for running the components as distributed gRPC
 services; **[docs/observability.md](docs/observability.md)** for the metrics +
 tracing + logs overview (Grafana dashboards, HyperDX, and how the agent inspects
-its own performance); and **[docs/features-comparison.md](docs/features-comparison.md)**
+its own performance); **[docs/benchmarking.md](docs/benchmarking.md)** for the
+performance + leak gate (deterministic instruction-count benches + dhat, wired into
+`nix flake check`); and **[docs/features-comparison.md](docs/features-comparison.md)**
 for how it stacks up against other harnesses.
 
 ## Workspace
