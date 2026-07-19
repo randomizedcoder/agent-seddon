@@ -83,4 +83,16 @@ async fn tools_do_not_leak() {
         assert!(!r.is_error, "{}", r.content);
     })
     .await;
+
+    // bash spawns a subprocess each run; assert the parent-side Command/pipe/output
+    // allocations don't leak across runs.
+    #[cfg(feature = "tool-core")]
+    assert_no_leak(200, || async {
+        let obs = agent_tools::BashTool
+            .execute(serde_json::json!({ "command": "printf hi" }), &ctx)
+            .await
+            .unwrap();
+        assert!(!obs.is_error, "{}", obs.content);
+    })
+    .await;
 }
