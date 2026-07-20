@@ -5,6 +5,21 @@ semantic + recall + distillation). Tracks what agent-seddon ships today, what th
 peer agents assert, and the concrete behaviour + tests needed to be the most
 complete of the four.
 
+> **Status: implemented (hardening + a new safety bar).** Recall, distillation,
+> episodic, and tokenize now carry a full `#[rstest]` table (45 tests). New this
+> pass: a phrase-level **prompt-injection scan** (`scan_for_injection`) on both the
+> write path (`FileSemantic::distill` refuses to persist a poisoned candidate fact,
+> returning 0) and the read path (`recall` replaces the payload of an
+> already-poisoned on-disk file with a `[BLOCKED: …]` placeholder, preserving score
+> + source) — it flags clear role-hijack / "ignore previous instructions" phrases
+> and invisible zero-width/bidi control characters, while ordinary preferences
+> ("ignore whitespace") pass. Also covered: recall **keyword-count ranking**
+> (more matches ranks first) and the **episodic append-only invariant** (appends are
+> strictly additive, insertion-ordered). No iai bench (I/O-bound + the scan is a
+> trivial substring pass) and no dhat leak test (same `tokio::fs` read/write paths
+> already leak-covered elsewhere); the memory seam's `memory_append_and_recall`
+> gRPC roundtrip already exists.
+
 ## Feature & why it matters
 
 Memory is what lets an agent carry state past the live message window: **working**

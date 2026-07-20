@@ -26,7 +26,7 @@ Legend: ✅ merged · 🔶 in review · ⬜ not started.
 | 7 | skills (SKILL.md) | ✅ recursive discovery (hidden-skip, root-preference), BOM + desc-from-body, name-safety (36 tests) | #33 |
 | 8 | `Policy` approval seam | ✅ `AllowList` policy + matcher + unit tests + loop deny test | #27 |
 | 9 | context assembly + compaction | ✅ compaction hardening — SlidingWindow compact (was 0 tests), summarizer-error + nothing-to-summarize fallbacks, orphan-tool tail invariant (33 tests) + `estimate_tokens` bench | #34 |
-| 10 | memory recall + safety | ⬜ not started | — |
+| 10 | memory recall + safety | ✅ prompt-injection scan (phrase + zero-width/bidi) on distill-write **and** recall-read, keyword-count ranking, episodic append-only invariant (45 tests) | #35 |
 
 ## Supporting / adjacent work (merged)
 
@@ -39,12 +39,11 @@ Legend: ✅ merged · 🔶 in review · ⬜ not started.
 
 ## Next steps
 
-1. **Merge #30** (search) — the only top-10 feature in review.
-2. **Remaining parity PR** (extension work — already has decent coverage, so it's
-   "extend toward peer edge-cases + add bench/leak where meaningful"):
-   - **memory (10)** — recall ranking + episodic append-only invariant + a
-     hermes-style prompt-injection scan before persist (a new bar).
-3. **ripgrep-backed grep** (new feature you requested; "both, now") — make `grep`
+With **memory (10)** done (#35), **all ten** top-10 fundamentals are implemented;
+only #30 remains in review.
+
+1. **Merge #30** (search) — the last top-10 feature in review.
+2. **ripgrep-backed grep** (new feature you requested; "both, now") — make `grep`
    prefer `rg` (pin in nix) with the in-process `ignore` walk as fallback.
    **Blocked on #30**: both edit `crates/agent-tools/src/search.rs`, so build it
    from a fresh `main` once #30 lands. Design: validate the regex up-front (keep
