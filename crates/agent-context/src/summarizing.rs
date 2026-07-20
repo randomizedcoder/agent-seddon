@@ -285,4 +285,95 @@ mod tests {
         strat.compact(&mut working, &budget).await.unwrap();
         assert_eq!(working.messages.len(), 2); // untouched
     }
+
+    /// Always fails — drives the summarize-error → truncation fallback.
+    struct FailingSummarizer;
+    #[async_trait]
+    impl LlmProvider for FailingSummarizer {
+        fn capabilities(&self) -> ModelCapabilities {
+            ModelCapabilities {
+                supports_tools: false,
+                context_window: 1000,
+            }
+        }
+        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse> {
+            Err(agent_core::Error::Provider("summarizer down".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn summarizer_error_falls_back_to_truncation() {
+        let strat = SummarizingWindow::new(Arc::new(FailingSummarizer), 200);
+        let mut working = WorkingSet {
+            messages: vec![
+                long(Role::System, 20),
+                long(Role::User, 400),
+                long(Role::Assistant, 400),
+                long(Role::User, 400),
+                long(Role::Assistant, 50),
+            ],
+        };
+        let budget = TokenBudget {
+            max_context_tokens: 500,
+            reserve_output: 100,
+        }; // target 400
+        strat.compact(&mut working, &budget).await.unwrap();
+        // No summary inserted; fell back to dropping oldest, under target, head kept.
+        assert!(!working
+            .messages
+            .iter()
+            .any(|m| m.content.contains("Summary of earlier")));
+        assert!(estimate_tokens(&working.messages) <= 400);
+        assert_eq!(working.messages[0].role, Role::System);
+    }
+
+    #[tokio::test]
+    async fn nothing_to_summarize_falls_back_to_truncation() {
+        // A huge keep_recent means the whole tail is "recent" → cut reaches the
+        // head → nothing to summarize → truncation.
+        let strat = SummarizingWindow::new(Arc::new(FixedSummarizer), 100_000);
+        let mut working = WorkingSet {
+            messages: vec![
+                long(Role::System, 10),
+                long(Role::User, 400),
+                long(Role::Assistant, 400),
+            ],
+        };
+        let budget = TokenBudget {
+            max_context_tokens: 300,
+            reserve_output: 50,
+        }; // target 250
+        strat.compact(&mut working, &budget).await.unwrap();
+        assert!(!working
+            .messages
+            .iter()
+            .any(|m| m.content.contains("Summary of earlier")));
+        assert!(estimate_tokens(&working.messages) <= 250);
+    }
+
+    #[tokio::test]
+    async fn tail_never_starts_with_orphan_tool() {
+        let strat = SummarizingWindow::new(Arc::new(FixedSummarizer), 60);
+        let mut working = WorkingSet {
+            messages: vec![
+                long(Role::System, 10),
+                long(Role::User, 400),
+                long(Role::Assistant, 400),
+                long(Role::Tool, 30),
+                long(Role::Assistant, 30),
+            ],
+        };
+        let budget = TokenBudget {
+            max_context_tokens: 300,
+            reserve_output: 50,
+        };
+        strat.compact(&mut working, &budget).await.unwrap();
+        // Whatever the kept set, no tool result is the first non-system message.
+        let first_non_sys = working.messages.iter().find(|m| m.role != Role::System);
+        assert!(
+            first_non_sys.is_none_or(|m| m.role != Role::Tool),
+            "tail starts with an orphan tool: {:?}",
+            working.messages.iter().map(|m| m.role).collect::<Vec<_>>()
+        );
+    }
 }

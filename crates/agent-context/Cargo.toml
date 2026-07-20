@@ -21,3 +21,9 @@ tokio.workspace = true
 rstest.workspace = true
 serde_json.workspace = true
 agent-testkit.workspace = true
+iai-callgrind.workspace = true
+
+# Guards `estimate_tokens` — called in the compaction loop.
+[[bench]]
+name = "context"
+harness = false
