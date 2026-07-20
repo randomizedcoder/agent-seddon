@@ -25,7 +25,7 @@ Legend: ✅ merged · 🔶 in review · ⬜ not started.
 | 6 | tool-calling loop + registry | ✅ dispatch tests (unknown/error/max-iter/output-cap) + `parallel_safe` concurrency proof + `describe_all` bench | #28 |
 | 7 | skills (SKILL.md) | ✅ recursive discovery (hidden-skip, root-preference), BOM + desc-from-body, name-safety (36 tests) | #33 |
 | 8 | `Policy` approval seam | ✅ `AllowList` policy + matcher + unit tests + loop deny test | #27 |
-| 9 | context assembly + compaction | ⬜ not started | — |
+| 9 | context assembly + compaction | ✅ compaction hardening — SlidingWindow compact (was 0 tests), summarizer-error + nothing-to-summarize fallbacks, orphan-tool tail invariant (33 tests) + `estimate_tokens` bench | #34 |
 | 10 | memory recall + safety | ⬜ not started | — |
 
 ## Supporting / adjacent work (merged)
@@ -40,10 +40,8 @@ Legend: ✅ merged · 🔶 in review · ⬜ not started.
 ## Next steps
 
 1. **Merge #30** (search) — the only top-10 feature in review.
-2. **Remaining parity PRs** (extension work — these already have decent coverage,
-   so each is "extend toward peer edge-cases + add bench/leak where meaningful"):
-   - **context (09)** — harden window boundaries + a summarizer-error→truncation
-     fallback (peer compaction tests are thin; this is "exceed, not port").
+2. **Remaining parity PR** (extension work — already has decent coverage, so it's
+   "extend toward peer edge-cases + add bench/leak where meaningful"):
    - **memory (10)** — recall ranking + episodic append-only invariant + a
      hermes-style prompt-injection scan before persist (a new bar).
 3. **ripgrep-backed grep** (new feature you requested; "both, now") — make `grep`

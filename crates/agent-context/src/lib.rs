@@ -62,6 +62,13 @@ pub(crate) fn estimate_tokens(messages: &[Message]) -> u32 {
     (chars / 4) as u32
 }
 
+/// Benchmark hook: `estimate_tokens` is called repeatedly inside the compaction
+/// loop, so guard its cost. Exposed for `benches/context.rs` (the fn is crate-private).
+#[doc(hidden)]
+pub fn bench_estimate_tokens(messages: &[Message]) -> u32 {
+    estimate_tokens(messages)
+}
+
 #[cfg(all(
     test,
     any(feature = "context-sliding-window", feature = "context-summarizing")

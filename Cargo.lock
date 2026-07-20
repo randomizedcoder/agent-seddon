@@ -45,6 +45,7 @@ dependencies = [
  "agent-core",
  "agent-testkit",
  "async-trait",
+ "iai-callgrind",
  "rstest",
  "serde_json",
  "tokio",

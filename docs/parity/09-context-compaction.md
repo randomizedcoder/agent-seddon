@@ -6,6 +6,20 @@ it grows past the token budget (sliding-window vs summarizing-window). Tracks wh
 agent-seddon ships today, what the peers assert, and the concrete cases needed to
 be the most complete of the four.
 
+> **Status: implemented (hardening).** The compaction edge paths — previously
+> present but untested — are now covered (33 tests). `SlidingWindow::compact` (had
+> **zero** tests) now covers drop-oldest-until-under-budget, no-op-under-budget,
+> keep-≥2, and leading-orphan-tool removal; `SummarizingWindow` adds the
+> **summarizer-error → truncation fallback** (via a `FailingSummarizer` double),
+> the **nothing-to-summarize → truncation** path (`cut ≤ head`), and the
+> tail-never-starts-with-an-orphan-tool invariant. A deterministic
+> `estimate_tokens` iai bench guards the estimator called in the drop loop
+> ([`benches/context.rs`](../../crates/agent-context/benches/context.rs), ~206k Ir).
+> This is mostly "exceed, not port" — peer compaction test coverage is thin. The
+> `ContextStrategy` gRPC seam's assemble/compact are already round-tripped in
+> `roundtrip.rs`. No leak test: compaction is pure computation with no retained
+> resources.
+
 Unlike most parity docs, this one is more **exceed** than **port**: our own
 compaction is already decently tested, and — as §3 shows — the peers test
 *compaction* surprisingly lightly (opencode: 2 prompt-shape assertions; pi: rich

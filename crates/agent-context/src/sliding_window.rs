@@ -97,4 +97,88 @@ mod tests {
         let msgs = SlidingWindow.assemble(input).await.unwrap();
         assert_eq!(msgs.len(), 2);
     }
+
+    // --- compact: drop-oldest under budget ---------------------------------
+
+    fn long(role: Role, n: usize) -> Message {
+        let c = "x ".repeat(n);
+        match role {
+            Role::System => Message::system(c),
+            Role::User => Message::user(c),
+            Role::Assistant => Message::assistant(c),
+            Role::Tool => Message::tool("id", c),
+        }
+    }
+
+    #[tokio::test]
+    async fn compact_drops_oldest_until_under_budget() {
+        let mut w = WorkingSet {
+            messages: vec![
+                long(Role::System, 10),
+                long(Role::User, 400),
+                long(Role::Assistant, 400),
+                long(Role::User, 400),
+                long(Role::Assistant, 20),
+            ],
+        };
+        let budget = TokenBudget {
+            max_context_tokens: 400,
+            reserve_output: 100,
+        }; // target 300
+        SlidingWindow.compact(&mut w, &budget).await.unwrap();
+        assert!(estimate_tokens(&w.messages) <= 300, "still over target");
+        assert_eq!(w.messages[0].role, Role::System, "system head kept");
+        assert!(w.messages.len() < 5, "some turns were dropped");
+    }
+
+    #[tokio::test]
+    async fn compact_no_op_under_budget() {
+        let mut w = WorkingSet {
+            messages: vec![Message::system("s"), Message::user("hi")],
+        };
+        let budget = TokenBudget {
+            max_context_tokens: 100_000,
+            reserve_output: 1000,
+        };
+        SlidingWindow.compact(&mut w, &budget).await.unwrap();
+        assert_eq!(w.messages.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn compact_keeps_at_least_two_messages() {
+        // Even an impossibly small budget can't trim below two messages.
+        let mut w = WorkingSet {
+            messages: vec![
+                long(Role::System, 100),
+                long(Role::User, 100),
+                long(Role::Assistant, 100),
+            ],
+        };
+        let budget = TokenBudget {
+            max_context_tokens: 1,
+            reserve_output: 0,
+        };
+        SlidingWindow.compact(&mut w, &budget).await.unwrap();
+        assert!(w.messages.len() >= 2);
+    }
+
+    #[tokio::test]
+    async fn compact_removes_leading_orphan_tool() {
+        // A tool result must never be the first non-system message (the API rejects
+        // a tool_result with no preceding assistant tool_call).
+        let mut w = WorkingSet {
+            messages: vec![
+                Message::system("s"),
+                Message::tool("id", "orphan"),
+                Message::assistant("a"),
+            ],
+        };
+        let budget = TokenBudget {
+            max_context_tokens: 100_000,
+            reserve_output: 0,
+        };
+        SlidingWindow.compact(&mut w, &budget).await.unwrap();
+        assert_eq!(w.messages[0].role, Role::System);
+        assert_eq!(w.messages[1].role, Role::Assistant, "orphan tool removed");
+    }
 }
