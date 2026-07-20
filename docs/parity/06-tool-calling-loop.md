@@ -15,6 +15,19 @@ results back into the transcript, and loops. Everything else in the system —
 providers, memory, context, policy, search, git — exists to feed or be reached by
 this loop.
 
+> **Status: implemented.** Direct loop-dispatch tests now live in the
+> [`agent.rs`](../../crates/agent-runtime/src/agent.rs) test module: unknown-tool →
+> error observation, `tool.execute() == Err` → `"tool errored: …"`, the oversized
+> output-cap marker carried into the recorded event, the `max_iterations` bound,
+> and — the important pair — a concurrency-probe tool proving `parallel_safe()` is
+> honoured (peak concurrency = 1 when false, ≥ 2 when true). The policy `Deny`
+> branch was covered in the policy PR (`denied_tool_is_not_run_and_is_reported`).
+> A deterministic `ToolRegistry::describe_all` bench (the per-turn schema assembly)
+> is in [`agent-core/benches/registry.rs`](../../crates/agent-core/benches/registry.rs);
+> the loop's *parallelism* is a wall-clock property, so it's validated by the
+> concurrency tests, not an instruction-count bench. Gap 6 (per-turn enable/disable,
+> scoped/stale registration) stays a deliberate simplicity choice.
+
 The subtleties are what make it correct rather than merely functional:
 
 - **Authorization must gate execution**, and a denied call must never run its

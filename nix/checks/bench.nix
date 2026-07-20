@@ -33,6 +33,7 @@ craneLib.mkCargoDerivation (
     buildPhaseCargoCommand = ''
       cargo bench -p agent-metrics --bench metrics
       cargo bench -p agent-tools --features tool-patch --bench patch
+      cargo bench -p agent-core --bench registry
     '';
     installPhaseCommand = "mkdir -p $out";
   }
