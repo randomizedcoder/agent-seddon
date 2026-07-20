@@ -120,7 +120,7 @@ pub(crate) fn arg_str_opt<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
 }
 
 /// Optional bool argument (defaults to `default` when absent).
-#[cfg(any(feature = "tool-edit", feature = "tool-search"))]
+#[cfg(any(feature = "tool-core", feature = "tool-edit", feature = "tool-search"))]
 pub(crate) fn arg_bool(args: &Value, key: &str, default: bool) -> bool {
     args.get(key).and_then(Value::as_bool).unwrap_or(default)
 }
