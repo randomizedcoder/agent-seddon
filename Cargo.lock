@@ -58,6 +58,7 @@ dependencies = [
  "async-trait",
  "futures-core",
  "futures-util",
+ "iai-callgrind",
  "rstest",
  "serde",
  "serde_json",

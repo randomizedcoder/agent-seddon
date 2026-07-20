@@ -15,3 +15,10 @@ futures-util.workspace = true
 [dev-dependencies]
 tokio = { workspace = true }
 rstest.workspace = true
+iai-callgrind.workspace = true
+
+# The loop calls `ToolRegistry::describe_all` once per turn to assemble the tool
+# schemas; this guards that per-turn cost (sort + clone) against regression.
+[[bench]]
+name = "registry"
+harness = false

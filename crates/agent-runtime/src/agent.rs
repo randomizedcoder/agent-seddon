@@ -699,4 +699,254 @@ mod tests {
         // system + user + assistant (turn 1) + user + assistant (turn 2).
         assert!(session.messages().len() >= 5);
     }
+
+    // ---- loop-dispatch coverage (doc 06) -----------------------------------
+
+    fn tool_call(id: &str, name: &str) -> ToolCall {
+        ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments: json!({}),
+        }
+    }
+
+    /// A tool that always errors — exercises `execute() == Err` → the
+    /// `"tool errored: …"` observation.
+    struct ErrTool;
+    #[async_trait::async_trait]
+    impl agent_core::Tool for ErrTool {
+        fn name(&self) -> &str {
+            "boom"
+        }
+        fn schema(&self) -> agent_core::ToolSchema {
+            agent_core::ToolSchema {
+                name: "boom".into(),
+                description: "always fails".into(),
+                parameters: json!({"type": "object"}),
+            }
+        }
+        async fn execute(
+            &self,
+            _a: serde_json::Value,
+            _c: &agent_core::ToolContext,
+        ) -> agent_core::Result<Observation> {
+            Err(agent_core::Error::Tool("kaboom".into()))
+        }
+    }
+
+    /// A tool whose (already-capped) output carries the truncation marker — the
+    /// loop must record it verbatim.
+    struct BigTool;
+    #[async_trait::async_trait]
+    impl agent_core::Tool for BigTool {
+        fn name(&self) -> &str {
+            "big"
+        }
+        fn schema(&self) -> agent_core::ToolSchema {
+            agent_core::ToolSchema {
+                name: "big".into(),
+                description: "big output".into(),
+                parameters: json!({"type": "object"}),
+            }
+        }
+        async fn execute(
+            &self,
+            _a: serde_json::Value,
+            _c: &agent_core::ToolContext,
+        ) -> agent_core::Result<Observation> {
+            Ok(Observation::ok(format!(
+                "{}\n...[output truncated]",
+                "x".repeat(12_000)
+            )))
+        }
+    }
+
+    /// Tracks peak concurrent executions so a test can prove the loop honours
+    /// `parallel_safe` (sequential when false, concurrent when true).
+    struct ConcProbe {
+        active: Arc<std::sync::atomic::AtomicUsize>,
+        max: Arc<std::sync::atomic::AtomicUsize>,
+        safe: bool,
+    }
+    #[async_trait::async_trait]
+    impl agent_core::Tool for ConcProbe {
+        fn name(&self) -> &str {
+            "conc"
+        }
+        fn schema(&self) -> agent_core::ToolSchema {
+            agent_core::ToolSchema {
+                name: "conc".into(),
+                description: "concurrency probe".into(),
+                parameters: json!({"type": "object"}),
+            }
+        }
+        fn parallel_safe(&self) -> bool {
+            self.safe
+        }
+        async fn execute(
+            &self,
+            _a: serde_json::Value,
+            _c: &agent_core::ToolContext,
+        ) -> agent_core::Result<Observation> {
+            use std::sync::atomic::Ordering::SeqCst;
+            let now = self.active.fetch_add(1, SeqCst) + 1;
+            self.max.fetch_max(now, SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            self.active.fetch_sub(1, SeqCst);
+            Ok(Observation::ok("ok"))
+        }
+    }
+
+    /// Run one tool turn (`calls`) then a final "done"; return the recorded
+    /// `(tool_call_id, content)` events in order.
+    async fn dispatch_events(
+        tools: ToolRegistry,
+        policy: Arc<dyn agent_core::Policy>,
+        calls: Vec<ToolCall>,
+    ) -> Vec<(String, String)> {
+        let memory = RecordingMemory::new();
+        let provider = ScriptedProvider::new(vec![tool_turn(calls), final_turn("done")]);
+        let agent = Agent::new(
+            Arc::new(provider),
+            tools,
+            Arc::new(memory.clone()),
+            Arc::new(StaticContext),
+            policy,
+            Metrics::new(),
+            settings(false),
+        );
+        assert_eq!(agent.run("go").await.unwrap(), "done");
+        memory
+            .events()
+            .into_iter()
+            .filter(|e| e.kind == "tool")
+            .map(|e| {
+                (
+                    e.message.tool_call_id.clone().unwrap_or_default(),
+                    e.message.content,
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_becomes_error_observation() {
+        let events = dispatch_events(
+            ToolRegistry::new(),
+            Arc::new(crate::policy::AutoApprove),
+            vec![tool_call("t0", "nope")],
+        )
+        .await;
+        assert_eq!(events.len(), 1);
+        assert!(events[0].1.contains("unknown tool `nope`"), "{:?}", events);
+    }
+
+    #[tokio::test]
+    async fn tool_error_becomes_observation() {
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(ErrTool));
+        let events = dispatch_events(
+            tools,
+            Arc::new(crate::policy::AutoApprove),
+            vec![tool_call("t0", "boom")],
+        )
+        .await;
+        // Wrapped as `tool errored: {e}`, where `e` is `Error::Tool`'s Display.
+        assert!(
+            events[0].1.contains("tool errored") && events[0].1.contains("kaboom"),
+            "{:?}",
+            events
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_output_cap_marker_is_recorded() {
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(BigTool));
+        let events = dispatch_events(
+            tools,
+            Arc::new(crate::policy::AutoApprove),
+            vec![tool_call("t0", "big")],
+        )
+        .await;
+        assert!(
+            events[0].1.ends_with("...[output truncated]"),
+            "truncation marker not carried into the record"
+        );
+    }
+
+    #[tokio::test]
+    async fn loop_terminates_at_max_iterations() {
+        // ScriptedProvider repeats its last response, so the loop is only ever
+        // handed a tool request and never an empty-tool-calls (final) turn.
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(EchoTool));
+        let provider = ScriptedProvider::new(vec![tool_turn(vec![tool_call("t0", "echo")])]);
+        let mut s = settings(false);
+        s.max_iterations = 3;
+        let agent = Agent::new(
+            Arc::new(provider),
+            tools,
+            Arc::new(RecordingMemory::new()),
+            Arc::new(StaticContext),
+            Arc::new(crate::policy::AutoApprove),
+            Metrics::new(),
+            s,
+        );
+        let err = agent
+            .run("go")
+            .await
+            .expect_err("should hit the iteration bound")
+            .to_string();
+        assert!(err.contains("max_iterations"), "{err}");
+    }
+
+    /// Peak concurrent executions of three `conc` calls in one turn, given the
+    /// tool's `parallel_safe` flag (with `parallel_tools = true`).
+    async fn peak_concurrency(safe: bool) -> usize {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let max = Arc::new(AtomicUsize::new(0));
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(ConcProbe {
+            active: Arc::new(AtomicUsize::new(0)),
+            max: max.clone(),
+            safe,
+        }));
+        let provider = ScriptedProvider::new(vec![
+            tool_turn(vec![
+                tool_call("t0", "conc"),
+                tool_call("t1", "conc"),
+                tool_call("t2", "conc"),
+            ]),
+            final_turn("done"),
+        ]);
+        let agent = Agent::new(
+            Arc::new(provider),
+            tools,
+            Arc::new(RecordingMemory::new()),
+            Arc::new(StaticContext),
+            Arc::new(crate::policy::AutoApprove),
+            Metrics::new(),
+            settings(true),
+        );
+        assert_eq!(agent.run("go").await.unwrap(), "done");
+        max.load(SeqCst)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn parallel_safe_tools_run_concurrently() {
+        assert!(
+            peak_concurrency(true).await >= 2,
+            "parallel-safe tools should run concurrently"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn non_parallel_safe_tool_forces_sequential() {
+        assert_eq!(
+            peak_concurrency(false).await,
+            1,
+            "a non-parallel-safe tool must serialize the whole turn"
+        );
+    }
 }
