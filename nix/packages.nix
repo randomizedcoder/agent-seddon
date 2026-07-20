@@ -15,9 +15,11 @@
     versions.cargo-nextest
     versions.rust-analyzer
 
-    # Protobuf / gRPC (protoc for tonic-build codegen; grpcurl for poking servers).
+    # Protobuf / gRPC (protoc for tonic-build codegen; grpcurl for poking servers;
+    # buf for proto lint + breaking-change checks).
     versions.protobuf
     versions.grpcurl
+    versions.buf
 
     # Benchmarks: valgrind runs the iai-callgrind benches; the runner binary must
     # match the `iai-callgrind` dev-dep version (see nix/versions.nix).

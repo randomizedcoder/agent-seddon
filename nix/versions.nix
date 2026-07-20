@@ -42,6 +42,9 @@ in
   # checks. `grpcurl` is for manually poking gRPC servers once the transports land.
   protobuf = pkgs.protobuf;
   grpcurl = pkgs.grpcurl;
+  # `buf` lints the `.proto` wire contracts and gates wire-compatibility
+  # (`buf lint` + `buf breaking`); codegen stays on `tonic-build`. See buf.yaml.
+  buf = pkgs.buf;
 
   # ── Benchmarks: the performance + leak gate ───────────────────────────────
   # `iai-callgrind` runs each bench under callgrind for a *deterministic*
