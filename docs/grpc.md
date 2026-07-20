@@ -227,6 +227,30 @@ lifts the "multi-user serving / distributed subagents" non-goal in
 [`DESIGN.md`](../DESIGN.md) §1 — the seam boundaries were always the plan; gRPC just
 makes them network-addressable.
 
+## Introspection — reflection + `grpcurl`
+
+Every `--serve-<seam>` process enables **gRPC server reflection** (both the `v1`
+and `v1alpha` services, for broad client compatibility), so you can list, describe,
+and *call* a seam with human-readable JSON using [`grpcurl`](https://github.com/fullstorydev/grpcurl)
+(pinned in the dev shell) — no `.proto` files on hand:
+
+```sh
+agent --serve-search &                      # search seam on 127.0.0.1:50056
+
+grpcurl -plaintext 127.0.0.1:50056 list                        # → agent.v1.SearchService, …
+grpcurl -plaintext 127.0.0.1:50056 describe agent.v1.SearchService
+grpcurl -plaintext -d '{"globs":["**/*.rs"]}' \
+        127.0.0.1:50056 agent.v1.SearchService/ListFiles       # JSON in → binary → JSON out
+```
+
+The reflection descriptor is a `FileDescriptorSet` emitted by `agent-proto`'s
+`build.rs` and exposed as `agent_proto::FILE_DESCRIPTOR_SET`; `agent_grpc::server::with_reflection`
+registers it on a seam's `Router` (a unit test asserts it carries every seam
+service). The JSON you send maps onto the typed proto fields — note that tool
+arguments ride the custom `JsonValue` message (which preserves i64/u64 exactly and
+escapes arbitrary-precision numbers via its `big_number` field), *not*
+`google.protobuf.Struct`.
+
 ## Testing
 
 `crates/agent-grpc/tests/roundtrip.rs` exercises **every seam over both TCP and

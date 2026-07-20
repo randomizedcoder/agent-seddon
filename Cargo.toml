@@ -70,6 +70,9 @@ tonic = "0.12"
 prost = "0.13"
 prost-types = "0.13"
 tonic-build = "0.12"
+# gRPC server reflection (v1alpha) so `grpcurl` can introspect a `--serve-<seam>`
+# process without the `.proto` files. Version-locked to `tonic`.
+tonic-reflection = "0.12"
 # gRPC transport plumbing: TCP + unix-domain-socket listeners/dialers.
 tokio-stream = { version = "0.1", features = ["net"] }
 tower = { version = "0.5", features = ["util"] }

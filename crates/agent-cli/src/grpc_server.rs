@@ -120,6 +120,9 @@ pub async fn serve(agent: &Agent, seam: Seam, listen: Endpoint) -> anyhow::Resul
                 .ok_or_else(|| anyhow::anyhow!("git seam not enabled in this build/config"))?,
         ),
     };
+    // Enable gRPC reflection so the seam can be introspected + called with JSON via
+    // `grpcurl` (see docs/components/grpc-introspection.md).
+    let router = agent_grpc::server::with_reflection(router).map_err(anyhow::Error::msg)?;
     let bound = listen.bind().await?;
     tracing::info!(seam = seam.name(), endpoint = ?bound.dial_endpoint()?, "gRPC seam server ready");
     let shutdown = async {

@@ -26,7 +26,48 @@ pub mod pb {
     tonic::include_proto!("agent.v1");
 }
 
+/// The serialized `FileDescriptorSet` for every `agent.v1` proto, emitted by
+/// `build.rs`. Feed it to `tonic_reflection` so a `--serve-<seam>` process can be
+/// introspected by `grpcurl` (list/describe/call with JSON) without the `.proto`
+/// files on hand. See `docs/components/grpc-introspection.md`.
+pub const FILE_DESCRIPTOR_SET: &[u8] = tonic::include_file_descriptor_set!("agent_descriptor");
+
 pub mod convert;
 pub mod trace;
 
 pub use convert::{status_from_error, ConvertError};
+
+#[cfg(test)]
+mod descriptor_tests {
+    use super::FILE_DESCRIPTOR_SET;
+    use prost::Message;
+    use prost_types::FileDescriptorSet;
+
+    // The reflection descriptor must decode and carry every seam service, so
+    // `grpcurl` can introspect any `--serve-<seam>` process.
+    #[test]
+    fn descriptor_set_lists_every_seam_service() {
+        let set =
+            FileDescriptorSet::decode(FILE_DESCRIPTOR_SET).expect("emitted descriptor set decodes");
+        let services: Vec<&str> = set
+            .file
+            .iter()
+            .flat_map(|f| f.service.iter())
+            .filter_map(|s| s.name.as_deref())
+            .collect();
+        for expected in [
+            "SearchService",
+            "ToolService",
+            "Provider",
+            "Memory",
+            "ContextService",
+            "Policy",
+            "RepoService",
+        ] {
+            assert!(
+                services.contains(&expected),
+                "reflection descriptor missing `{expected}`; has {services:?}"
+            );
+        }
+    }
+}

@@ -21,3 +21,5 @@ tonic-build = { workspace = true }
 rstest = { workspace = true }
 # concrete propagator for the trace round-trip test
 opentelemetry_sdk = { workspace = true }
+# decode the emitted FileDescriptorSet in the reflection descriptor test
+prost-types = { workspace = true }
