@@ -294,6 +294,7 @@ pub struct FixtureSearch {
     caps: SearchCapabilities,
     status: IndexStatus,
     hits: Vec<SearchHit>,
+    files: Vec<PathBuf>,
     reindexed: Arc<AtomicUsize>,
 }
 
@@ -320,6 +321,7 @@ impl Default for FixtureSearch {
                 manifest_digest: "fixture".into(),
             },
             hits: Vec::new(),
+            files: Vec::new(),
             reindexed: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -328,6 +330,11 @@ impl Default for FixtureSearch {
 impl FixtureSearch {
     pub fn new() -> Self {
         Self::default()
+    }
+    /// The file paths `list_files` returns (globs are ignored by the fixture).
+    pub fn with_files(mut self, files: Vec<PathBuf>) -> Self {
+        self.files = files;
+        self
     }
     /// The hits every `query` returns.
     pub fn with_hits(mut self, hits: Vec<SearchHit>) -> Self {
@@ -380,6 +387,9 @@ impl SearchBackend for FixtureSearch {
     }
     async fn query(&self, _q: &SearchQuery) -> Result<Vec<SearchHit>> {
         Ok(self.hits.clone())
+    }
+    async fn list_files(&self, _globs: &[String]) -> Result<Vec<PathBuf>> {
+        Ok(self.files.clone())
     }
 }
 

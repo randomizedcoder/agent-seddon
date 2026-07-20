@@ -74,10 +74,12 @@ pub async fn build_agent_with(
     #[cfg(feature = "search")]
     let search_dispatch = {
         let dispatch = crate::search::build_search(registry, &cfg, &metrics)?;
-        let tool = Arc::new(agent_tools::SearchTool::new(
-            dispatch.clone() as Arc<dyn agent_core::SearchBackend>
-        ));
+        let backend = dispatch.clone() as Arc<dyn agent_core::SearchBackend>;
+        let tool = Arc::new(agent_tools::SearchTool::new(backend.clone()));
         tools.register(crate::metered::tool(tool, metrics.clone()));
+        // `index_ls`: list files straight from the index (fast; no FS walk).
+        let ls = Arc::new(agent_tools::IndexLsTool::new(backend));
+        tools.register(crate::metered::tool(ls, metrics.clone()));
         dispatch
     };
 
@@ -235,7 +237,7 @@ fn build_tools(
 /// filters the registry-built tools (see `config/agent.toml`).
 fn is_builder_registered_tool(name: &str) -> bool {
     (cfg!(feature = "tool-metrics") && name == "metrics")
-        || (cfg!(feature = "search") && name == "search")
+        || (cfg!(feature = "search") && (name == "search" || name == "index_ls"))
         || (cfg!(feature = "subagents") && name == "delegate")
         || (cfg!(feature = "git") && name.starts_with("git_"))
 }

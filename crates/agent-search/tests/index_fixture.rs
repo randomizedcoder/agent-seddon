@@ -74,6 +74,26 @@ async fn fixture_query_modes(
 }
 
 #[tokio::test]
+async fn list_files_enumerates_indexed_paths() {
+    let (_root, backend) = indexed_fixture().await;
+
+    // No globs ⇒ every indexed file, sorted + de-duplicated.
+    let all = backend.list_files(&[]).await.unwrap();
+    assert!(all.windows(2).all(|w| w[0] <= w[1]), "must be sorted");
+    assert!(all.iter().any(|p| p.ends_with("lib.rs")), "got {all:?}");
+    assert!(all.iter().any(|p| p.to_string_lossy().ends_with(".nix")));
+
+    // A glob restricts to matching paths only.
+    let rs = backend.list_files(&["**/*.rs".into()]).await.unwrap();
+    assert!(!rs.is_empty());
+    assert!(
+        rs.iter().all(|p| p.to_string_lossy().ends_with(".rs")),
+        "glob must exclude non-.rs: {rs:?}"
+    );
+    assert!(rs.len() < all.len(), "the glob should narrow the set");
+}
+
+#[tokio::test]
 async fn fixture_lang_filter_excludes_markdown() {
     let (_root, backend) = indexed_fixture().await;
     // "fox" appears in both lib.rs and docs/notes.md; the rust filter drops the md.

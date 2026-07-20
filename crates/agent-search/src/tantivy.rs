@@ -19,10 +19,10 @@ use agent_core::{
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use tantivy::collector::TopDocs;
+use tantivy::collector::{DocSetCollector, TopDocs};
 use tantivy::directory::MmapDirectory;
 use tantivy::query::{
-    BooleanQuery, FuzzyTermQuery, Occur, PhraseQuery, Query, RegexQuery, TermQuery,
+    AllQuery, BooleanQuery, FuzzyTermQuery, Occur, PhraseQuery, Query, RegexQuery, TermQuery,
 };
 use tantivy::schema::{
     Field, IndexRecordOption, Schema, TantivyDocument, Value, STORED, STRING, TEXT,
@@ -159,6 +159,29 @@ impl SearchBackend for TantivyBackend {
         })
         .await
         .map_err(|e| Error::Search(format!("query task panicked: {e}")))?
+    }
+
+    async fn list_files(&self, globs: &[String]) -> Result<Vec<PathBuf>> {
+        let globs = compile_globs(globs)?;
+        let searcher = self.reader.searcher();
+        let path_field = self.fields.path;
+        tokio::task::spawn_blocking(move || {
+            let addrs = searcher.search(&AllQuery, &DocSetCollector).map_err(se)?;
+            let mut paths = Vec::with_capacity(addrs.len());
+            for addr in addrs {
+                let doc: TantivyDocument = searcher.doc(addr).map_err(se)?;
+                if let Some(p) = doc.get_first(path_field).and_then(|v| v.as_str()) {
+                    if globs.is_empty() || globs.iter().any(|g| g.is_match(p)) {
+                        paths.push(PathBuf::from(p));
+                    }
+                }
+            }
+            paths.sort();
+            paths.dedup();
+            Ok(paths)
+        })
+        .await
+        .map_err(|e| Error::Search(format!("list_files task panicked: {e}")))?
     }
 }
 

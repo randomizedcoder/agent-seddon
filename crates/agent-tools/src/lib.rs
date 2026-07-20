@@ -44,7 +44,7 @@ pub use search::{FindTool, GrepTool, LsTool};
 #[cfg(feature = "tool-search-index")]
 mod search_index;
 #[cfg(feature = "tool-search-index")]
-pub use search_index::SearchTool;
+pub use search_index::{IndexLsTool, SearchTool};
 
 #[cfg(feature = "tool-git")]
 mod git;

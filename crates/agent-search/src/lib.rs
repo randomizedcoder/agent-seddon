@@ -115,6 +115,9 @@ impl SearchBackend for DispatchSearch {
         reject_unsupported(&backend.capabilities(), q)?;
         backend.query(q).await
     }
+    async fn list_files(&self, globs: &[String]) -> Result<Vec<std::path::PathBuf>> {
+        self.default_backend().list_files(globs).await
+    }
 }
 
 /// Guard: a backend must not silently degrade an unsupported [`agent_core::SearchMode`].
