@@ -95,4 +95,19 @@ async fn tools_do_not_leak() {
         assert!(!obs.is_error, "{}", obs.content);
     })
     .await;
+
+    // edit: exercise the read → match/replace → write path (fuzzy fallback).
+    #[cfg(feature = "tool-edit")]
+    assert_no_leak(100, || async {
+        std::fs::write(ctx.cwd.join("e.txt"), "before\nkeep\n").unwrap();
+        let obs = agent_tools::EditTool
+            .execute(
+                serde_json::json!({ "path": "e.txt", "old_string": "before", "new_string": "after", "fuzzy": true }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(!obs.is_error, "{}", obs.content);
+    })
+    .await;
 }
