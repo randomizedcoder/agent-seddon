@@ -32,6 +32,7 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use std::sync::Arc;
 use std::time::Instant;
+use tracing::Instrument;
 
 /// Wrap each seam of a built agent in its metrics decorator. `provider_name`,
 /// `context_name`, `policy_name` are the config-selected impl names (used as the
@@ -171,7 +172,11 @@ impl MemoryStore for MeteredMemory {
     }
     async fn append(&self, event: MemoryEvent) -> Result<()> {
         let start = Instant::now();
-        let out = self.inner.append(event).await;
+        let out = self
+            .inner
+            .append(event)
+            .instrument(tracing::info_span!("memory.append"))
+            .await;
         self.metrics
             .on_memory_op("append", start.elapsed().as_secs_f64());
         if out.is_err() {
@@ -181,7 +186,11 @@ impl MemoryStore for MeteredMemory {
     }
     async fn distill(&self) -> Result<usize> {
         let start = Instant::now();
-        let out = self.inner.distill().await;
+        let out = self
+            .inner
+            .distill()
+            .instrument(tracing::info_span!("memory.distill"))
+            .await;
         self.metrics
             .on_memory_op("distill", start.elapsed().as_secs_f64());
         if out.is_err() {
@@ -309,7 +318,11 @@ impl SearchBackend for MeteredSearch {
         self.inner.capabilities()
     }
     async fn status(&self) -> Result<IndexStatus> {
-        let out = self.inner.status().await;
+        let out = self
+            .inner
+            .status()
+            .instrument(tracing::info_span!("search.status", backend = %self.name))
+            .await;
         match &out {
             Ok(s) => {
                 self.metrics
@@ -323,7 +336,11 @@ impl SearchBackend for MeteredSearch {
     }
     async fn reindex(&self, progress: ProgressFn<'_>) -> Result<IndexStatus> {
         let start = Instant::now();
-        let out = self.inner.reindex(progress).await;
+        let out = self
+            .inner
+            .reindex(progress)
+            .instrument(tracing::info_span!("search.reindex", backend = %self.name))
+            .await;
         match &out {
             Ok(s) => self.metrics.observe_reindex(
                 &self.name,
@@ -336,7 +353,13 @@ impl SearchBackend for MeteredSearch {
     }
     async fn query(&self, q: &SearchQuery) -> Result<Vec<SearchHit>> {
         let start = Instant::now();
-        let out = self.inner.query(q).await;
+        let out = self
+            .inner
+            .query(q)
+            .instrument(
+                tracing::info_span!("search.query", backend = %self.name, mode = q.mode.as_str()),
+            )
+            .await;
         let seconds = start.elapsed().as_secs_f64();
         match &out {
             Ok(hits) => {
@@ -349,7 +372,11 @@ impl SearchBackend for MeteredSearch {
     }
     async fn list_files(&self, globs: &[String]) -> Result<Vec<std::path::PathBuf>> {
         let start = Instant::now();
-        let out = self.inner.list_files(globs).await;
+        let out = self
+            .inner
+            .list_files(globs)
+            .instrument(tracing::info_span!("search.list_files", backend = %self.name))
+            .await;
         let seconds = start.elapsed().as_secs_f64();
         match &out {
             Ok(paths) => {
@@ -373,6 +400,12 @@ struct MeteredRepo {
 
 #[cfg(feature = "git")]
 impl MeteredRepo {
+    /// A tracing span for a repo op, attributed by backend + op (so a remote git
+    /// gateway and a local repo read distinctly in the trace tree).
+    fn span(&self, op: &'static str) -> tracing::Span {
+        tracing::info_span!("repo.op", backend = %self.name, op)
+    }
+
     /// Record an op's latency + error, keyed by op name. Returns the result so it
     /// can be used inline: `self.record("resolve", start, out)`.
     fn record<T>(&self, op: &str, start: Instant, out: Result<T>) -> Result<T> {
@@ -390,12 +423,20 @@ impl MeteredRepo {
 impl RepoBackend for MeteredRepo {
     async fn resolve(&self, rev: &Revision) -> Result<Oid> {
         let start = Instant::now();
-        let out = self.inner.resolve(rev).await;
+        let out = self
+            .inner
+            .resolve(rev)
+            .instrument(self.span("resolve"))
+            .await;
         self.record("resolve", start, out)
     }
     async fn read_file(&self, rev: &Revision, path: &std::path::Path) -> Result<BlobContent> {
         let start = Instant::now();
-        let out = self.inner.read_file(rev, path).await;
+        let out = self
+            .inner
+            .read_file(rev, path)
+            .instrument(self.span("read_file"))
+            .await;
         self.record("read_file", start, out)
     }
     async fn list_tree(
@@ -405,7 +446,11 @@ impl RepoBackend for MeteredRepo {
         recursive: bool,
     ) -> Result<Vec<TreeEntry>> {
         let start = Instant::now();
-        let out = self.inner.list_tree(rev, path, recursive).await;
+        let out = self
+            .inner
+            .list_tree(rev, path, recursive)
+            .instrument(self.span("list_tree"))
+            .await;
         self.record("list_tree", start, out)
     }
     async fn diff(
@@ -415,7 +460,11 @@ impl RepoBackend for MeteredRepo {
         path_globs: &[String],
     ) -> Result<DiffResult> {
         let start = Instant::now();
-        let out = self.inner.diff(base, target, path_globs).await;
+        let out = self
+            .inner
+            .diff(base, target, path_globs)
+            .instrument(self.span("diff"))
+            .await;
         self.record("diff", start, out)
     }
     async fn grep(
@@ -426,7 +475,11 @@ impl RepoBackend for MeteredRepo {
         limit: usize,
     ) -> Result<Vec<GrepHit>> {
         let start = Instant::now();
-        let out = self.inner.grep(rev, pattern, path_globs, limit).await;
+        let out = self
+            .inner
+            .grep(rev, pattern, path_globs, limit)
+            .instrument(self.span("grep"))
+            .await;
         self.record("grep", start, out)
     }
     async fn log(
@@ -436,17 +489,25 @@ impl RepoBackend for MeteredRepo {
         limit: usize,
     ) -> Result<Vec<CommitInfo>> {
         let start = Instant::now();
-        let out = self.inner.log(rev, path, limit).await;
+        let out = self
+            .inner
+            .log(rev, path, limit)
+            .instrument(self.span("log"))
+            .await;
         self.record("log", start, out)
     }
     async fn branches(&self) -> Result<Vec<(String, Oid)>> {
         let start = Instant::now();
-        let out = self.inner.branches().await;
+        let out = self
+            .inner
+            .branches()
+            .instrument(self.span("branches"))
+            .await;
         self.record("branches", start, out)
     }
     async fn status(&self) -> Result<RepoStatus> {
         let start = Instant::now();
-        let out = self.inner.status().await;
+        let out = self.inner.status().instrument(self.span("status")).await;
         if let Ok(st) = &out {
             self.metrics
                 .set_repo_worktrees(&self.name, st.live_worktrees as i64);
@@ -455,7 +516,7 @@ impl RepoBackend for MeteredRepo {
     }
     async fn fetch(&self) -> Result<RepoStatus> {
         let start = Instant::now();
-        let out = self.inner.fetch().await;
+        let out = self.inner.fetch().instrument(self.span("fetch")).await;
         let seconds = start.elapsed().as_secs_f64();
         self.metrics.observe_repo_fetch(&self.name, seconds);
         if let Ok(st) = &out {
@@ -466,12 +527,20 @@ impl RepoBackend for MeteredRepo {
     }
     async fn worktree_add(&self, spec: &WorktreeSpec) -> Result<WorktreeHandle> {
         let start = Instant::now();
-        let out = self.inner.worktree_add(spec).await;
+        let out = self
+            .inner
+            .worktree_add(spec)
+            .instrument(self.span("worktree_add"))
+            .await;
         self.record("worktree_add", start, out)
     }
     async fn worktree_list(&self) -> Result<Vec<WorktreeHandle>> {
         let start = Instant::now();
-        let out = self.inner.worktree_list().await;
+        let out = self
+            .inner
+            .worktree_list()
+            .instrument(self.span("worktree_list"))
+            .await;
         if let Ok(ws) = &out {
             self.metrics.set_repo_worktrees(&self.name, ws.len() as i64);
         }
@@ -479,17 +548,29 @@ impl RepoBackend for MeteredRepo {
     }
     async fn worktree_remove(&self, id: &str) -> Result<()> {
         let start = Instant::now();
-        let out = self.inner.worktree_remove(id).await;
+        let out = self
+            .inner
+            .worktree_remove(id)
+            .instrument(self.span("worktree_remove"))
+            .await;
         self.record("worktree_remove", start, out)
     }
     async fn checkpoint(&self, worktree_id: &str, name: &str) -> Result<Checkpoint> {
         let start = Instant::now();
-        let out = self.inner.checkpoint(worktree_id, name).await;
+        let out = self
+            .inner
+            .checkpoint(worktree_id, name)
+            .instrument(self.span("checkpoint"))
+            .await;
         self.record("checkpoint", start, out)
     }
     async fn push(&self, checkpoint: &Checkpoint, remote_ref: &str) -> Result<()> {
         let start = Instant::now();
-        let out = self.inner.push(checkpoint, remote_ref).await;
+        let out = self
+            .inner
+            .push(checkpoint, remote_ref)
+            .instrument(self.span("push"))
+            .await;
         self.record("push", start, out)
     }
 }
@@ -531,5 +612,39 @@ mod tests {
             ) >= 1.0,
             "apply_patch execution should record the tool-exec metric"
         );
+    }
+}
+
+// A local seam op must now emit a tracing span through its metered wrapper (was
+// metrics-only). Proven for `search.query`; the same `.instrument(...)` pattern
+// covers the other search/repo/memory ops.
+#[cfg(all(test, feature = "search"))]
+mod span_tests {
+    use super::*;
+    use agent_core::SearchQuery;
+    use agent_testkit::observe::captured_spans;
+    use agent_testkit::FixtureSearch;
+
+    #[test]
+    fn metered_search_query_emits_span() {
+        let spans = captured_spans(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let backend =
+                    super::search(Arc::new(FixtureSearch::new()), Metrics::new(), "fixture");
+                let q = SearchQuery {
+                    text: "x".into(),
+                    mode: agent_core::SearchMode::Literal,
+                    path_globs: vec![],
+                    lang: None,
+                    limit: 5,
+                    fuzzy_distance: None,
+                };
+                let _ = backend.query(&q).await;
+            });
+        });
+        assert!(spans.contains(&"search.query".to_string()), "{spans:?}");
     }
 }

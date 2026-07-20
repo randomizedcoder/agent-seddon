@@ -18,14 +18,20 @@ agent.turn
 ├─ context.assemble
 ├─ provider.stream ──▶ grpc.server        (agent-loop → agent-provider-gateway)
 ├─ policy.authorize
-├─ tool.execute            (e.g. the `search` tool ──▶ search.query when `= "grpc"`)
+├─ tool.execute            (e.g. the `search` tool ──▶ search.query; git tools ──▶ repo.op)
 ├─ context.compact
+├─ memory.append
 └─ provider.stream ──▶ grpc.server        (next iteration)
 ```
 
-The search seam's server spans are `search.query`, `search.status`, and
-`search.reindex`; with `[search] backends = ["grpc"]` they nest under the caller's
-span, so a planning turn's many concurrent `search` calls appear as siblings.
+Every seam op is now spanned at its **metered wrapper** (not just at the loop call
+site), so a local backend is as visible as a remote one: the search seam emits
+`search.query` / `search.status` / `search.reindex` / `search.list_files` (attributed
+by `backend`), the git seam emits `repo.op` (attributed by `backend` + `op`), and
+memory emits `memory.recall` / `memory.append` / `memory.distill`. Startup paths are
+spanned too: `skills.discover` and `context_files.load`. With `= "grpc"` the wrapper
+span nests over the `grpc.server` span, so a local and a remote backend read
+identically in the trace tree.
 
 With `provider = "grpc"`, the `provider.*` calls cross a process boundary and the
 gateway's `grpc.server` span is a **child** of the loop's `provider.stream` span —

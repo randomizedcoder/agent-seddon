@@ -28,11 +28,13 @@ pub fn default_dirs() -> Vec<PathBuf> {
 /// deduped by name (first wins — earlier roots and shallower paths take
 /// precedence) and sorted.
 pub fn discover(dirs: &[PathBuf]) -> Vec<SkillInfo> {
+    let _span = tracing::info_span!("skills.discover", dirs = dirs.len()).entered();
     let mut skills: Vec<SkillInfo> = Vec::new();
     for dir in dirs {
         collect(dir, true, &mut skills);
     }
     skills.sort_by(|a, b| a.name.cmp(&b.name));
+    tracing::debug!(count = skills.len(), "discovered skills");
     skills
 }
 
@@ -340,5 +342,14 @@ mod tests {
         let info = read_info(&file, "notes").unwrap();
         assert_eq!(info.name, "notes");
         assert_eq!(info.description, "just a body");
+    }
+
+    // Discovery emits a `skills.discover` span so the path is observable.
+    #[test]
+    fn discover_emits_span() {
+        let spans = agent_testkit::observe::captured_spans(|| {
+            let _ = discover(&[PathBuf::from("/no/such/dir")]);
+        });
+        assert!(spans.contains(&"skills.discover".to_string()), "{spans:?}");
     }
 }

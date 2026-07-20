@@ -9,11 +9,18 @@ use std::path::Path;
 
 /// Returns `(prepend, append)` context blocks, each sorted by numeric prefix.
 pub fn load(dir: &str) -> (Vec<ContextBlock>, Vec<ContextBlock>) {
+    let _span = tracing::info_span!("context_files.load", dir).entered();
     let base = Path::new(dir);
-    (
+    let out = (
         load_subdir(&base.join("prepend")),
         load_subdir(&base.join("append")),
-    )
+    );
+    tracing::debug!(
+        prepend = out.0.len(),
+        append = out.1.len(),
+        "loaded context files"
+    );
+    out
 }
 
 fn load_subdir(dir: &Path) -> Vec<ContextBlock> {
@@ -93,5 +100,17 @@ mod tests {
     fn missing_dir_is_empty() {
         let (pre, post) = load("/nonexistent/path/xyz");
         assert!(pre.is_empty() && post.is_empty());
+    }
+
+    // Loading emits a `context_files.load` span so the startup path is observable.
+    #[test]
+    fn load_emits_span() {
+        let spans = agent_testkit::observe::captured_spans(|| {
+            let _ = load("/nonexistent/path/xyz");
+        });
+        assert!(
+            spans.contains(&"context_files.load".to_string()),
+            "{spans:?}"
+        );
     }
 }
