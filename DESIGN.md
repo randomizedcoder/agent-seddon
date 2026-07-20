@@ -560,7 +560,8 @@ Two pieces make this concrete, and land in stages:
 - **Shipped now — the wire contract + tracing.** [`agent-proto`](crates/agent-proto)
   is the protobuf mirror of the shared message currency: every type in §4 has a
   generated twin, every seam trait has a gRPC service (`Provider`, `ToolService`,
-  `Memory`/`Episodic`/`Semantic`, `ContextService`, `Policy`), and lossless
+  `Memory`/`Episodic`/`Semantic`, `ContextService`, `Policy`, `SearchService`
+  — incl. `ListFiles` for index-backed listing — and `RepoService`), and lossless
   `From`/`TryFrom` conversions bridge the two (proto depends on core, never the
   reverse — the acyclic graph holds). Everything is **binary protobuf** end to
   end: dynamic `serde_json::Value` fields ride as a custom lossless `JsonValue`
@@ -579,9 +580,21 @@ Two pieces make this concrete, and land in stages:
   topology: a central model gateway, a shared memory service, sandboxed tool
   workers, each an independently-scalable Deployment, all exporting traces to one
   collector.
+- **Shipped — introspection & governance.** Every `--serve-<seam>` process enables
+  **gRPC server reflection** (v1 + v1alpha), so a running seam can be listed,
+  described, and *called with human-readable JSON* via `grpcurl` — no `.proto`
+  files on hand (`agent_grpc::server::with_reflection`, fed by the
+  `FILE_DESCRIPTOR_SET` that `agent-proto`'s `build.rs` emits). Codegen stays on
+  `tonic-build`; **`buf`** adds a proto-governance gate to `nix flake check` —
+  `buf lint` (style, with the `agent-core`-mirroring names deliberately exempted)
+  and `buf breaking` against a committed baseline image
+  (`crates/agent-proto/buf.image.binpb`, moved with `nix run .#buf-image`), so a
+  wire-incompatible change fails the build until it is deliberately accepted.
 
-The full contract, mapping decisions, transport pattern, error/status table, and
-deployment sketch live in **[`docs/grpc.md`](docs/grpc.md)**. This lifts the
+The full contract, mapping decisions, transport pattern, error/status table,
+reflection/`grpcurl` recipes, and deployment sketch live in
+**[`docs/grpc.md`](docs/grpc.md)**; the `buf` workflow is in
+[`CLAUDE.md`](CLAUDE.md). This lifts the
 "multi-user serving / distributed subagents" non-goal in §1 — deliberately, and
 without touching the loop.
 
