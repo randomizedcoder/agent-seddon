@@ -391,4 +391,144 @@ mod tests {
         );
         assert!(obs.content.contains("a.txt"));
     }
+
+    // --- gitignore / hidden / case / truncation extensions -----------------
+
+    /// A **git repo** (so `.gitignore` is honoured — the `ignore` walker requires
+    /// one by default, matching how the agent runs inside a checkout) with:
+    ///   a.txt "foo\nbar\nFOO", keep.txt/ignored.txt/.secret/h.txt "needle",
+    ///   .gitignore excluding ignored.txt, and a binary bin.dat.
+    fn fixture_ignore() -> PathBuf {
+        let dir = tempdir();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&dir)
+            .status()
+            .expect("git init");
+        std::fs::write(dir.join("a.txt"), "foo\nbar\nFOO").unwrap();
+        std::fs::write(dir.join("keep.txt"), "needle").unwrap();
+        std::fs::write(dir.join("ignored.txt"), "needle").unwrap();
+        std::fs::write(dir.join(".gitignore"), "ignored.txt\n").unwrap();
+        std::fs::create_dir_all(dir.join(".secret")).unwrap();
+        std::fs::write(dir.join(".secret/h.txt"), "needle").unwrap();
+        std::fs::write(dir.join("bin.dat"), [0xff, 0xfe, 0x00, 0x9f]).unwrap();
+        dir
+    }
+
+    fn assert_contains(obs: &Observation, present: &[&str], absent: &[&str]) {
+        assert!(!obs.is_error, "unexpected error: {}", obs.content);
+        for p in present {
+            assert!(obs.content.contains(p), "missing `{p}`:\n{}", obs.content);
+        }
+        for a in absent {
+            assert!(
+                !obs.content.contains(a),
+                "should not contain `{a}`:\n{}",
+                obs.content
+            );
+        }
+    }
+
+    // grep respects `.gitignore` + skips hidden dirs + binary files; `case_insensitive`
+    // and flag-like-literal behaviour.
+    #[rstest]
+    #[case::corner_case_insensitive("foo", json!({"case_insensitive": true}), vec!["a.txt:1:foo", "a.txt:3:FOO"], vec![])]
+    #[case::boundary_case_sensitive_default("foo", json!({}), vec!["a.txt:1:foo"], vec!["FOO"])]
+    #[case::negative_gitignored_not_searched("needle", json!({}), vec!["keep.txt"], vec!["ignored.txt"])]
+    #[case::negative_hidden_dir_not_searched("needle", json!({}), vec!["keep.txt"], vec![".secret"])]
+    #[case::corner_flag_like_pattern_is_literal("--pre=/x", json!({}), vec!["(no matches)"], vec![])]
+    #[case::corner_binary_file_skipped("needle", json!({}), vec!["keep.txt"], vec!["bin.dat"])]
+    #[tokio::test]
+    async fn grep_gitignore_cases(
+        #[case] pattern: &str,
+        #[case] extra: Value,
+        #[case] present: Vec<&str>,
+        #[case] absent: Vec<&str>,
+    ) {
+        let dir = fixture_ignore();
+        let mut args = json!({ "pattern": pattern });
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let obs = GrepTool.execute(args, &ctx(&dir)).await.unwrap();
+        assert_contains(&obs, &present, &absent);
+    }
+
+    // The MAX_HITS cap fires and emits its marker.
+    #[tokio::test]
+    async fn grep_truncates_at_max_hits() {
+        let dir = tempdir();
+        std::fs::write(dir.join("big.txt"), "match\n".repeat(MAX_HITS + 50)).unwrap();
+        let obs = GrepTool
+            .execute(json!({"pattern": "match"}), &ctx(&dir))
+            .await
+            .unwrap();
+        assert!(!obs.is_error);
+        assert!(
+            obs.content.contains("more matches truncated"),
+            "{}",
+            obs.content
+        );
+    }
+
+    // find matches a regex over paths (not a glob), respecting .gitignore + hidden.
+    #[tokio::test]
+    async fn find_regex_respects_gitignore_and_hidden() {
+        // `\.txt$` is a regex anchor (a glob would be `*.txt`) — the documented
+        // divergence from the peers.
+        let dir = fixture_ignore();
+        let obs = FindTool
+            .execute(json!({"pattern": "\\.txt$"}), &ctx(&dir))
+            .await
+            .unwrap();
+        assert_contains(
+            &obs,
+            &["a.txt", "keep.txt"],
+            &["ignored.txt", ".secret/h.txt"],
+        );
+    }
+
+    #[rstest]
+    #[case::negative_invalid_regex("(", json!({}), "invalid regex")]
+    #[case::negative_path_escape("x", json!({"path": "../.."}), "escape")]
+    #[tokio::test]
+    async fn find_error_cases(#[case] pattern: &str, #[case] extra: Value, #[case] needle: &str) {
+        let dir = fixture_ignore();
+        let mut args = json!({ "pattern": pattern });
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let obs = FindTool.execute(args, &ctx(&dir)).await.unwrap();
+        assert!(obs.is_error, "expected error: {}", obs.content);
+        assert!(
+            obs.content.contains(needle),
+            "missing `{needle}`: {}",
+            obs.content
+        );
+    }
+
+    // ls: non-recursive uses `read_dir` (lists dotfiles + gitignored); recursive
+    // uses the `ignore` walker (honours .gitignore + skips hidden). Pin the split.
+    #[rstest]
+    #[case::positive_nonrecursive_lists_dotfiles(
+        json!({}), vec![".gitignore", ".secret/", "ignored.txt"], vec![])]
+    #[case::positive_recursive_honors_gitignore_and_hidden(
+        json!({"recursive": true}), vec!["a.txt", "keep.txt"], vec!["ignored.txt", ".secret"])]
+    #[tokio::test]
+    async fn ls_cases_ext(
+        #[case] args: Value,
+        #[case] present: Vec<&str>,
+        #[case] absent: Vec<&str>,
+    ) {
+        let dir = fixture_ignore();
+        let obs = LsTool.execute(args, &ctx(&dir)).await.unwrap();
+        assert_contains(&obs, &present, &absent);
+    }
+
+    #[tokio::test]
+    async fn ls_empty_dir_reports_empty() {
+        let dir = tempdir();
+        let obs = LsTool.execute(json!({}), &ctx(&dir)).await.unwrap();
+        assert_eq!(obs.content, "(empty)");
+    }
 }

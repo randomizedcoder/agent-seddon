@@ -110,4 +110,19 @@ async fn tools_do_not_leak() {
         assert!(!obs.is_error, "{}", obs.content);
     })
     .await;
+
+    // grep walks the tree (spawn_blocking + WalkBuilder + regex) each call; assert
+    // the walker/output allocations don't leak across runs.
+    #[cfg(feature = "tool-search")]
+    {
+        std::fs::write(ctx.cwd.join("s.txt"), "needle here\nother line\n").unwrap();
+        assert_no_leak(400, || async {
+            let obs = agent_tools::GrepTool
+                .execute(serde_json::json!({ "pattern": "needle" }), &ctx)
+                .await
+                .unwrap();
+            assert!(!obs.is_error, "{}", obs.content);
+        })
+        .await;
+    }
 }
