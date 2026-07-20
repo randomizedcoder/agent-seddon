@@ -36,6 +36,22 @@ fn missing(field: &'static str) -> Status {
     Status::invalid_argument(format!("missing required field `{field}`"))
 }
 
+/// Add gRPC server reflection to a seam's `Router`, so a `--serve-<seam>` process
+/// can be introspected (`grpcurl … list` / `describe`) and called with JSON without
+/// the `.proto` files on hand. Registers both the `v1` and `v1alpha` reflection
+/// services for maximum client compatibility (older `grpcurl` speaks only v1alpha).
+pub fn with_reflection(
+    router: Router,
+) -> Result<Router, Box<dyn std::error::Error + Send + Sync + 'static>> {
+    let v1 = tonic_reflection::server::Builder::configure()
+        .register_encoded_file_descriptor_set(agent_proto::FILE_DESCRIPTOR_SET)
+        .build_v1()?;
+    let v1alpha = tonic_reflection::server::Builder::configure()
+        .register_encoded_file_descriptor_set(agent_proto::FILE_DESCRIPTOR_SET)
+        .build_v1alpha()?;
+    Ok(router.add_service(v1).add_service(v1alpha))
+}
+
 // ---------------------------------------------------------------------------
 // Provider
 // ---------------------------------------------------------------------------

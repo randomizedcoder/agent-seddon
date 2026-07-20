@@ -17,9 +17,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for p in &protos {
         println!("cargo:rerun-if-changed={p}");
     }
+    // Emit a serialized FileDescriptorSet alongside the generated code so the crate
+    // can serve gRPC reflection (see `FILE_DESCRIPTOR_SET` in lib.rs).
+    let descriptor =
+        std::path::PathBuf::from(std::env::var("OUT_DIR")?).join("agent_descriptor.bin");
     tonic_build::configure()
         .build_client(true)
         .build_server(true)
+        .file_descriptor_set_path(&descriptor)
         .compile_protos(&protos, &["proto"])?;
     Ok(())
 }

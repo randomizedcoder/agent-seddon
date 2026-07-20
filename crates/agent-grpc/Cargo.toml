@@ -9,6 +9,7 @@ description = "gRPC transport for the agent-seddon seams: per-seam servers + cli
 agent-core = { workspace = true }
 agent-proto = { workspace = true }
 tonic = { workspace = true }
+tonic-reflection = { workspace = true }
 prost = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
