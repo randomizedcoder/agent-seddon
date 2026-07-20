@@ -6,6 +6,20 @@ table-driven test plan to close the gaps. Scope is the `tool-search` trio only;
 the index-backed `search` tool (tantivy, the `SearchBackend` seam) is covered by
 its own spec.
 
+> **Status: implemented.** The §5 extensions are in
+> [`crates/agent-tools/src/search.rs`](../../crates/agent-tools/src/search.rs) (28
+> cases total): grep respects `.gitignore` + skips hidden dirs + skips binary files,
+> `case_insensitive`, flag-like-literal, and the `MAX_HITS` truncation marker; `find`
+> is regex-over-path honouring gitignore/hidden + invalid-regex/path-escape errors;
+> `ls` non-recursive lists dotfiles (`read_dir`) while recursive honours
+> gitignore/hidden — the split is pinned. Plus the grep path in the dhat leak test.
+> **Two corrections to the spec** made against real behaviour: the fixture must be a
+> **git repo** (`git init`) because the `ignore` walker only applies `.gitignore`
+> inside one; and grep/find **skip all hidden files** (walker default), so the
+> hidden-not-gitignored-*included* case became a hidden-*excluded* case (a documented
+> divergence from pi). No perf bench: search is an I/O-bound walk over the upstream
+> `ignore`/`regex` crates with no deterministic CPU hot path.
+
 ## 1. Feature & why it matters
 
 `grep`, `find`, and `ls` are the model's eyes on an unfamiliar tree. Almost every
