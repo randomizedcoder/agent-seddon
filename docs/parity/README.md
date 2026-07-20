@@ -46,9 +46,6 @@ follow-up backlog below; none is on the critical path.
 
 ## Open follow-ups (accumulated, small)
 
-- **`list_files` over the gRPC search seam** — `index_ls` (#31) is local-only; a
-  `= "grpc"` backend returns the unsupported default. Needs a proto RPC + client/
-  server, like the `parallel_safe` propagation in #26.
 - **edit fuzzy** — currently line-oriented with ASCII-class folds (quotes, dashes,
   NBSP, fullwidth); full NFC/decomposition folding is deferred.
 - **apply_patch** — fuzzy hunk matching + a per-(path) consecutive-failure

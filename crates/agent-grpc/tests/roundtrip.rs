@@ -485,6 +485,25 @@ async fn search_reindex_streams_progress(#[case] transport: Transport) {
     );
 }
 
+#[rstest]
+#[case::tcp(Transport::Tcp)]
+#[case::uds(Transport::Uds)]
+#[tokio::test(flavor = "multi_thread")]
+async fn search_list_files(#[case] transport: Transport) {
+    // `list_files` previously fell through to the trait default (unsupported) on the
+    // gRPC client; assert the paths now round-trip over the seam.
+    let files = vec![
+        std::path::PathBuf::from("src/lib.rs"),
+        std::path::PathBuf::from("src/main.rs"),
+    ];
+    let backend = Arc::new(FixtureSearch::new().with_files(files.clone()));
+    let (dial, _srv) = spawn(transport, search_router(backend)).await;
+    let client = GrpcSearch::connect(&dial).unwrap();
+
+    let got = client.list_files(&["**/*.rs".into()]).await.unwrap();
+    assert_eq!(got, files);
+}
+
 // ---------------------------------------------------------------------------
 // Repo (multi-branch git)
 // ---------------------------------------------------------------------------

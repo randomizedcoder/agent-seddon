@@ -369,6 +369,24 @@ impl SearchBackend for GrpcSearch {
             .map_err(|s| agent_core::Error::Search(s.to_string()))?;
         Ok(resp.into_inner().hits.into_iter().map(Into::into).collect())
     }
+
+    async fn list_files(&self, globs: &[String]) -> Result<Vec<std::path::PathBuf>> {
+        let mut client = self.client.clone();
+        let req = pb::ListFilesRequest {
+            globs: globs.to_vec(),
+            backend: String::new(),
+        };
+        let resp = client
+            .list_files(outbound(req))
+            .await
+            .map_err(|s| agent_core::Error::Search(s.to_string()))?;
+        Ok(resp
+            .into_inner()
+            .paths
+            .into_iter()
+            .map(std::path::PathBuf::from)
+            .collect())
+    }
 }
 
 /// A `RepoBackend` that calls a remote `RepoService` (multi-branch git gateway).
