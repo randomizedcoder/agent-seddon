@@ -23,7 +23,7 @@ Legend: ✅ merged · 🔶 in review · ⬜ not started.
 | 4 | `bash` shell execution | ✅ 14 cases; **`parallel_safe()` → false** fix; test-lowered timeout; gRPC roundtrip + leak | #25 |
 | 5 | `grep` / `find` / `ls` | 🔶 28 cases (gitignore/hidden/binary/case/MAX_HITS; ls read_dir-vs-walker split) + grep leak | **#30 open** |
 | 6 | tool-calling loop + registry | ✅ dispatch tests (unknown/error/max-iter/output-cap) + `parallel_safe` concurrency proof + `describe_all` bench | #28 |
-| 7 | skills (SKILL.md) | ⬜ not started | — |
+| 7 | skills (SKILL.md) | ✅ recursive discovery (hidden-skip, root-preference), BOM + desc-from-body, name-safety (36 tests) | #33 |
 | 8 | `Policy` approval seam | ✅ `AllowList` policy + matcher + unit tests + loop deny test | #27 |
 | 9 | context assembly + compaction | ⬜ not started | — |
 | 10 | memory recall + safety | ⬜ not started | — |
@@ -42,9 +42,6 @@ Legend: ✅ merged · 🔶 in review · ⬜ not started.
 1. **Merge #30** (search) — the only top-10 feature in review.
 2. **Remaining parity PRs** (extension work — these already have decent coverage,
    so each is "extend toward peer edge-cases + add bench/leak where meaningful"):
-   - **skills (07)** — add path-traversal/precedence/recursive-discovery cases;
-     the notable gap is *model-invocable* skill loading (peers expose a `skill`
-     tool; ours is user-driven `/skill:<name>`).
    - **context (09)** — harden window boundaries + a summarizer-error→truncation
      fallback (peer compaction tests are thin; this is "exceed, not port").
    - **memory (10)** — recall ranking + episodic append-only invariant + a
@@ -67,6 +64,9 @@ Legend: ✅ merged · 🔶 in review · ⬜ not started.
 - **apply_patch** — fuzzy hunk matching + a per-(path) consecutive-failure
   escalation hint.
 - **policy** — a secret-path write deny-list (hermes-style) is aspirational.
+- **skills** — a *model-invocable* `skill` tool (self-selection), per-skill
+  permission filtering, and remote/URL sources are deferred design directions;
+  today skills are user-driven (`/skill:<name>`).
 
 ## Conventions (for the remaining PRs)
 

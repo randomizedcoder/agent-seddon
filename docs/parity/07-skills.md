@@ -4,6 +4,20 @@ Per-feature parity spec for the **skills** seam — reusable, on-demand instruct
 snippets discovered from `SKILL.md` files and injected into the conversation via
 progressive disclosure.
 
+> **Status: implemented (in-scope gaps).** `crates/agent-runtime/src/skills.rs`
+> now discovers dir-based `SKILL.md` **recursively** (skipping hidden dirs like
+> `.git`/`.venv`, preferring a directory's root `SKILL.md`), tolerates a **UTF-8
+> BOM**, and falls back to the body's first prose line for a missing
+> **description** — 36 tests total (discovery/recursion/hidden-skip, first-wins
+> precedence, `find` name-safety, frontmatter robustness). `find` traversal-safety
+> is **structural** (it matches discovered *names*, never using them as paths), so
+> the security cases pin that rather than an added guard. Deferred (larger design
+> directions, §4 gaps 2/3/7): a **model-invocable `skill` tool**, per-skill
+> permission filtering, and remote/URL sources — the notable remaining gap is that
+> skills are user-driven (`/skill:<name>`), not model-selected. No bench/leak:
+> discovery is light sync I/O with trivial parsing; skills are runtime-internal
+> (no gRPC seam).
+
 ## 1. Feature & why it matters
 
 A *skill* is a `SKILL.md` file carrying YAML-ish frontmatter (`name`,
