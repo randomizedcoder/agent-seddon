@@ -85,6 +85,11 @@ in
   jq = pkgs.jq;
   curl = pkgs.curl;
 
+  # `rg` (ripgrep): the `grep` tool's fast path shells out to it when present and
+  # falls back to the in-process `ignore` walk otherwise. Pinned so the dev shell
+  # and the hermetic test sandbox (which has no host PATH) exercise the `rg` path.
+  ripgrep = pkgs.ripgrep;
+
   # ── ClickHouse container settings ──────────────────────────────────────────
   # Pin the server image so an upstream bump is an explicit change here.
   clickhouseImage = "clickhouse/clickhouse-server:24.8";

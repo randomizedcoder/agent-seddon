@@ -3,6 +3,11 @@
 //! All three use ripgrep's `ignore` crate to walk the tree (respecting
 //! `.gitignore`) and stay within the working directory. The walk is synchronous,
 //! so it runs on a blocking thread. Output is capped like the other tools.
+//!
+//! `grep` additionally prefers the **`rg` binary** when it is on `PATH` (much
+//! faster than the in-process line scan on large trees) and transparently falls
+//! back to the `ignore`-crate walk when `rg` is absent or errors — the two paths
+//! produce the same `path:line:text` output, so behaviour is identical either way.
 
 use crate::{arg_bool, arg_str, arg_str_opt, resolve_within, truncate};
 use agent_core::{Error, Observation, Result, Tool, ToolContext, ToolSchema};
@@ -58,15 +63,75 @@ impl Tool for GrepTool {
             Ok(p) => p,
             Err(e) => return Ok(Observation::error(e)),
         };
+        // Validate the regex up-front so an invalid pattern is a clean tool error
+        // (identical message on both the `rg` and the fallback path) before we
+        // spawn anything. `rg` is then given the *raw* pattern string — `regex`
+        // and ripgrep share the same syntax, so this compile also guards `rg`.
         let re = match RegexBuilder::new(&pattern).case_insensitive(ci).build() {
             Ok(r) => r,
             Err(e) => return Ok(Observation::error(format!("invalid regex: {e}"))),
         };
         let cwd = ctx.cwd.clone();
+        // Fast path: the `rg` binary. `None` means it could not run (not on PATH,
+        // or a hard error) — fall back to the equivalent in-process walk.
+        if let Some(out) = ripgrep(&pattern, ci, &root, &cwd).await {
+            return Ok(Observation::ok(truncate(out)));
+        }
         let out = tokio::task::spawn_blocking(move || grep_walk(&root, &cwd, &re))
             .await
             .map_err(|e| Error::Tool(format!("search task failed: {e}")))?;
         Ok(Observation::ok(truncate(out)))
+    }
+}
+
+/// Run `grep` via the external `rg` binary. Returns `Some(output)` when `rg` ran
+/// to a clean conclusion (matches, or a genuine "no matches"), or `None` when it
+/// could not be used at all (not installed, spawn failure, or an internal `rg`
+/// error) so the caller falls back to `grep_walk`.
+///
+/// Output is normalised to match the fallback exactly: paths relative to `cwd`
+/// (`rg` is handed the absolute root and prints absolute paths, which we strip),
+/// capped at `MAX_HITS` with the same truncation marker.
+async fn ripgrep(pattern: &str, ci: bool, root: &Path, cwd: &Path) -> Option<String> {
+    let mut cmd = tokio::process::Command::new("rg");
+    cmd.arg("--no-heading") // `path:line:text` per match, not grouped-by-file
+        .arg("--line-number")
+        .arg("--color=never")
+        .arg("--no-messages"); // swallow "binary file" / permission notes
+    if ci {
+        cmd.arg("--ignore-case");
+    }
+    // `-e <pattern>` keeps a flag-like pattern (e.g. `--pre=/x`) a literal regex;
+    // the absolute `root` positional cannot be mistaken for a flag.
+    cmd.arg("-e").arg(pattern).arg(root).current_dir(cwd);
+
+    let output = cmd.output().await.ok()?; // spawn failure (no `rg`) → fall back
+    match output.status.code() {
+        Some(0) => Some(format_rg(&output.stdout, cwd)), // matches
+        Some(1) => Some("(no matches)".into()),          // ran cleanly, found nothing
+        _ => None, // exit 2 (bad usage / internal error) → fall back to the walk
+    }
+}
+
+/// Rewrite `rg`'s stdout to the fallback's shape: strip the absolute-`cwd` prefix
+/// from each `path:line:text` line and enforce the `MAX_HITS` cap.
+fn format_rg(stdout: &[u8], cwd: &Path) -> String {
+    let text = String::from_utf8_lossy(stdout);
+    let prefix = format!("{}/", cwd.display());
+    let mut out = String::new();
+    for (hits, line) in text.lines().enumerate() {
+        if hits >= MAX_HITS {
+            out.push_str("...[more matches truncated]\n");
+            break;
+        }
+        let line = line.strip_prefix(&prefix).unwrap_or(line);
+        out.push_str(line);
+        out.push('\n');
+    }
+    if out.is_empty() {
+        "(no matches)".into()
+    } else {
+        out
     }
 }
 
@@ -530,5 +595,46 @@ mod tests {
         let dir = tempdir();
         let obs = LsTool.execute(json!({}), &ctx(&dir)).await.unwrap();
         assert_eq!(obs.content, "(empty)");
+    }
+
+    // --- ripgrep fast path -------------------------------------------------
+
+    // format_rg: strip the absolute cwd prefix, cap at MAX_HITS, empty→(no matches).
+    #[rstest]
+    #[case::positive_strips_cwd_prefix("/w/repo/a.txt:1:foo\n", "/w/repo", "a.txt:1:foo\n")]
+    #[case::corner_unprefixed_line_kept("a.txt:1:foo\n", "/w/repo", "a.txt:1:foo\n")]
+    #[case::boundary_empty_is_no_matches("", "/w/repo", "(no matches)")]
+    fn format_rg_cases(#[case] stdout: &str, #[case] cwd: &str, #[case] expected: &str) {
+        assert_eq!(format_rg(stdout.as_bytes(), Path::new(cwd)), expected);
+    }
+
+    #[test]
+    fn format_rg_caps_at_max_hits() {
+        let stdout = "f:1:match\n".repeat(MAX_HITS + 50);
+        let out = format_rg(stdout.as_bytes(), Path::new("/nope"));
+        assert_eq!(
+            out.lines().filter(|l| l.starts_with("f:")).count(),
+            MAX_HITS
+        );
+        assert!(out.contains("more matches truncated"));
+    }
+
+    // The in-process fallback (`grep_walk`) must stand on its own — the GrepTool
+    // tests above exercise `rg` when it is on PATH, so pin the walk directly to
+    // keep the two paths equivalent regardless of the sandbox.
+    #[test]
+    fn grep_walk_fallback_matches_with_line_numbers() {
+        let dir = fixture();
+        let re = RegexBuilder::new("foo").build().unwrap();
+        let out = grep_walk(&dir, &dir, &re);
+        assert!(out.contains("a.txt:1:foo"), "{out}");
+        assert!(out.contains("a.txt:3:foobar"), "{out}");
+    }
+
+    #[test]
+    fn grep_walk_fallback_no_match_reports_none() {
+        let dir = fixture();
+        let re = RegexBuilder::new("zzzznope").build().unwrap();
+        assert_eq!(grep_walk(&dir, &dir, &re), "(no matches)");
     }
 }

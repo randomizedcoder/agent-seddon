@@ -21,7 +21,7 @@ Legend: ✅ merged · 🔶 in review · ⬜ not started.
 | 2 | `apply_patch` (unified-diff / V4A) | ✅ new tool — add/update/delete, atomic validation, hunk-numbered errors (19 cases + parser bench + leak + gRPC roundtrip) | #23 |
 | 3 | `read_file` / `write_file` | ✅ 18 cases (pagination-cap, binary/UTF-8, path safety) + write→read gRPC roundtrip + leak | #24 |
 | 4 | `bash` shell execution | ✅ 14 cases; **`parallel_safe()` → false** fix; test-lowered timeout; gRPC roundtrip + leak | #25 |
-| 5 | `grep` / `find` / `ls` | 🔶 28 cases (gitignore/hidden/binary/case/MAX_HITS; ls read_dir-vs-walker split) + grep leak | **#30 open** |
+| 5 | `grep` / `find` / `ls` | ✅ 34 cases (gitignore/hidden/binary/case/MAX_HITS; ls read_dir-vs-walker split) + grep leak; **`rg` fast path** with in-process fallback | #30, #36 |
 | 6 | tool-calling loop + registry | ✅ dispatch tests (unknown/error/max-iter/output-cap) + `parallel_safe` concurrency proof + `describe_all` bench | #28 |
 | 7 | skills (SKILL.md) | ✅ recursive discovery (hidden-skip, root-preference), BOM + desc-from-body, name-safety (36 tests) | #33 |
 | 8 | `Policy` approval seam | ✅ `AllowList` policy + matcher + unit tests + loop deny test | #27 |
@@ -39,17 +39,10 @@ Legend: ✅ merged · 🔶 in review · ⬜ not started.
 
 ## Next steps
 
-With **memory (10)** done (#35), **all ten** top-10 fundamentals are implemented;
-only #30 remains in review.
-
-1. **Merge #30** (search) — the last top-10 feature in review.
-2. **ripgrep-backed grep** (new feature you requested; "both, now") — make `grep`
-   prefer `rg` (pin in nix) with the in-process `ignore` walk as fallback.
-   **Blocked on #30**: both edit `crates/agent-tools/src/search.rs`, so build it
-   from a fresh `main` once #30 lands. Design: validate the regex up-front (keep
-   the `"invalid regex"` error + exact semantics), run `rg` with `current_dir(cwd)`,
-   exit 1 ⇒ `(no matches)`, spawn-fail ⇒ fall back; test the builtin directly and
-   the rg path end-to-end (rg pinned in the test sandbox).
+**All ten** top-10 fundamentals are implemented and merged (#30 = search closed the
+set), and the two requested extras — index-backed `index_ls` (#31) and the
+**ripgrep-backed `grep` fast path** (#36) — are done. What remains is the small
+follow-up backlog below; none is on the critical path.
 
 ## Open follow-ups (accumulated, small)
 
