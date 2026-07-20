@@ -31,14 +31,45 @@ pub struct Config {
     pub policy: PolicyCfg,
 }
 
-/// Parameters for the `allow-list` policy (used when `[agent] policy =
-/// "allow-list"`). Each rule allows a tool whose name matches `tool` (a minimal
-/// `*` glob) and, when `arg` is set, whose serialized arguments contain that
-/// substring. An empty `allow` list denies every tool call.
-#[derive(Debug, Default, Deserialize)]
+/// Policy parameters. `allow` feeds the `allow-list` policy (used when `[agent]
+/// policy = "allow-list"`): each rule allows a tool whose name matches `tool` (a
+/// minimal `*` glob) and, when `arg` is set, whose serialized arguments contain
+/// that substring; an empty `allow` list denies every tool call.
+///
+/// The `guard` fields are independent of the base policy: a **guard** wraps
+/// whatever `[agent] policy` selects and screens each call for dangerous shell
+/// commands (`rm -rf /`, `curl … | sh`, `chmod 777`, …) and writes to sensitive
+/// paths (`.env`, `.ssh/`, `.git/`, `/etc/`, credentials). `guard = "prompt"`
+/// (default) asks the operator to confirm a flagged call — a hard deny when
+/// stdin isn't a TTY; `"deny"` blocks outright; `"off"` disables the screen.
+#[derive(Debug, Deserialize)]
 pub struct PolicyCfg {
     #[serde(default)]
     pub allow: Vec<AllowRule>,
+    /// `"prompt"` (default) | `"deny"` | `"off"`.
+    #[serde(default = "default_guard")]
+    pub guard: String,
+    /// Extra sensitive-path globs to deny/flag (in addition to the built-ins).
+    #[serde(default)]
+    pub deny_paths: Vec<String>,
+    /// Path globs to exempt from the sensitive-path guard (escape hatch).
+    #[serde(default)]
+    pub allow_paths: Vec<String>,
+}
+
+impl Default for PolicyCfg {
+    fn default() -> Self {
+        Self {
+            allow: Vec::new(),
+            guard: default_guard(),
+            deny_paths: Vec::new(),
+            allow_paths: Vec::new(),
+        }
+    }
+}
+
+pub(crate) fn default_guard() -> String {
+    "prompt".into()
 }
 
 /// One `allow-list` rule: `{ tool = "git_*", arg = "..." }` (arg optional).
@@ -547,7 +578,12 @@ impl Config {
             grpc: GrpcCfg::default(),
             search: SearchCfg::default(),
             git: GitCfg::default(),
-            policy: PolicyCfg::default(),
+            // Guard off in tests: full-agent tests stay hermetic and never block on
+            // an interactive prompt. Guard behaviour is unit-tested directly.
+            policy: PolicyCfg {
+                guard: "off".into(),
+                ..PolicyCfg::default()
+            },
         }
     }
 }
