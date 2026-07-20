@@ -128,13 +128,20 @@ pub async fn build_agent_with(
             .context("building context strategy")?,
         metrics.clone(),
     );
-    let policy = crate::metered::policy(
-        registry
-            .build_policy(&cfg.agent.policy, &cfg)
-            .context("building policy")?,
+    // Wrap the selected base policy with the dangerous-command / sensitive-path
+    // guard (unless `[policy] guard = "off"`), then meter the composite so metrics
+    // see the final decision.
+    let base_policy = registry
+        .build_policy(&cfg.agent.policy, &cfg)
+        .context("building policy")?;
+    let guarded = crate::policy::guard(
+        base_policy,
+        crate::policy::GuardMode::parse(&cfg.policy.guard),
+        cfg.policy.deny_paths.clone(),
+        cfg.policy.allow_paths.clone(),
         metrics.clone(),
-        &cfg.agent.policy,
     );
+    let policy = crate::metered::policy(guarded, metrics.clone(), &cfg.agent.policy);
 
     let (context_prepend, context_append) = context_files::load(&cfg.context_files.dir);
     if !context_prepend.is_empty() || !context_append.is_empty() {

@@ -60,6 +60,7 @@ pub struct Metrics {
     // --- policy (recorded by the policy metrics wrapper) ------------------
     policy_authorize: IntCounterVec,
     policy_authorize_seconds: Histogram,
+    policy_guard: IntCounterVec,
 
     // --- search (recorded by the search metrics wrapper) ------------------
     // Labelled by `backend` so tantivy vs. a second backend can be compared
@@ -226,6 +227,16 @@ impl Metrics {
             "Policy authorize latency",
         ))
         .unwrap();
+        // Guard hits: a dangerous-command / sensitive-path match, labelled by the
+        // rule category and the action taken (deny / prompt / allowed-after-prompt).
+        let policy_guard = IntCounterVec::new(
+            Opts::new(
+                "agent_policy_guard_total",
+                "Policy guard matches (dangerous command / sensitive path)",
+            ),
+            &["category", "action"],
+        )
+        .unwrap();
 
         // --- search -----------------------------------------------------------
         let search_query_seconds = HistogramVec::new(
@@ -323,6 +334,7 @@ impl Metrics {
             Box::new(context_compact_tokens.clone()),
             Box::new(policy_authorize.clone()),
             Box::new(policy_authorize_seconds.clone()),
+            Box::new(policy_guard.clone()),
             Box::new(search_query_seconds.clone()),
             Box::new(search_hits.clone()),
             Box::new(search_index_seconds.clone()),
@@ -365,6 +377,7 @@ impl Metrics {
             context_compact_tokens,
             policy_authorize,
             policy_authorize_seconds,
+            policy_guard,
             search_query_seconds,
             search_hits,
             search_index_seconds,
@@ -503,6 +516,15 @@ impl Metrics {
             .with_label_values(&[policy, decision])
             .inc();
         self.policy_authorize_seconds.observe(seconds);
+    }
+
+    /// A guard rule matched a call: `category` is the rule family
+    /// (`dangerous_command` / `sensitive_path`), `action` is what happened
+    /// (`deny` / `prompt_denied` / `prompt_allowed`).
+    pub fn on_policy_guard(&self, category: &str, action: &str) {
+        self.policy_guard
+            .with_label_values(&[category, action])
+            .inc();
     }
 
     // --- search instrumentation -------------------------------------------

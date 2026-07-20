@@ -185,10 +185,25 @@ job         = "agent-seddon"
 # [grpc.repo]
 # endpoint = "unix:/tmp/agent-seddon/repo.sock"       # a git gateway (backend = "grpc")
 
-# Rules for the "allow-list" policy (only used when [agent] policy = "allow-list").
-# Allow a tool whose name matches `tool` (a `*` glob) and, if `arg` is set, whose
-# arguments contain that substring. Everything else is denied. Empty ⇒ deny all.
+# [policy] configures two independent things: the `allow-list` rules and the guard.
+#
+# `guard` wraps WHATEVER `[agent] policy` you selected and screens each call for
+# dangerous shell commands (`rm -rf /`, `curl … | sh`, `chmod 777`, fork bombs, …)
+# and writes to sensitive paths (`.env`, `.ssh/`, `.git/`, `/etc/`, credentials).
+#   "prompt" (default) — ask the operator to confirm a flagged call; a hard deny
+#                        when stdin is not a TTY (so unattended runs fail safe).
+#   "deny"             — block a flagged call outright, no prompt.
+#   "off"              — disable screening (e.g. `--serve-mcp`, where stdin is the
+#                        JSON-RPC channel and can't take a prompt).
+# `deny_paths` adds sensitive-path globs; `allow_paths` exempts paths from the guard.
+#
+# `allow` is only used when [agent] policy = "allow-list": allow a tool whose name
+# matches `tool` (a `*` glob) and, if `arg` is set, whose arguments contain that
+# substring. Everything else is denied. Empty ⇒ deny all.
 # [policy]
+# guard      = "prompt"                 # "prompt" | "deny" | "off"
+# deny_paths = ["deploy/*.key", "*.pem"]
+# allow_paths = [".env.example"]
 # allow = [
 #   { tool = "read_file" },
 #   { tool = "grep" },

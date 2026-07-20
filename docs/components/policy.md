@@ -26,7 +26,42 @@ the model as the tool result (so it can adapt) rather than aborting the run.
 `auto-approve` runs every tool call — including `bash` — without confirmation, so a
 prompt-injected model can reach arbitrary code execution. Its factory logs a warning
 for that reason. Prefer `interactive` for untrusted goals or inputs, or `allow-list`
-for an unattended-but-scoped run.
+for an unattended-but-scoped run. The **guard** (below) adds a second line of
+defence that applies *regardless* of which base policy you pick.
+
+## The guard (dangerous commands + sensitive paths)
+
+A **guard** wraps whatever `[agent] policy` you select and screens every call
+*before* the base policy runs, catching the destructive shapes an allow-list would
+miss (the model can phrase `bash` a thousand ways). It has two screens:
+
+- **Dangerous commands** (on `bash`) — recursive forced deletes (`rm -rf`), raw disk
+  writes (`mkfs`, `dd of=/dev/…`), fork bombs, privilege escalation (`sudo`/`su`),
+  world-writable `chmod 777` / `chown -R root`, download-piped-to-a-shell
+  (`curl … | sh`, `base64 -d | bash`), mass process kills, host power/service
+  control (`shutdown`, `systemctl stop`), and redirects to a sensitive path.
+- **Sensitive-path writes** (on `write_file`/`edit`/`apply_patch`) — `.env*`,
+  `.ssh/`, `.aws/`, `.gnupg/`, `.git/`, `/etc//boot//sys//proc//dev/`, and credential
+  files (`id_rsa`, `.netrc`, `.npmrc`, `credentials`, `authorized_keys`, …), plus
+  any `deny_paths` globs you add, minus `allow_paths` exemptions.
+
+```toml
+[policy]
+guard       = "prompt"                 # "prompt" (default) | "deny" | "off"
+deny_paths  = ["deploy/*.key", "*.pem"]
+allow_paths = [".env.example"]
+```
+
+- `"prompt"` (default) asks the operator to confirm a flagged call, and **hard-denies
+  when stdin is not a TTY** — so unattended runs (and `--serve-mcp`, where stdin is the
+  JSON-RPC channel) fail safe without the prompt ever touching the protocol stream.
+- `"deny"` blocks a flagged call outright.
+- `"off"` disables screening (only the base policy applies).
+
+An unflagged call passes straight through to the base policy unchanged. Guard hits
+are counted in `agent_policy_guard_total{category,action}` for the security audit
+trail. The scanners are conservative (they flag clear-and-present danger, not every
+risky-looking string) and thoroughly table-tested in `policy.rs`.
 
 ## `allow-list`
 
