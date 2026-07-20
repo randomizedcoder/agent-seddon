@@ -1,0 +1,27 @@
+version: v2
+modules:
+  - path: crates/agent-proto/proto
+lint:
+  use:
+    - STANDARD
+  # The wire types deliberately mirror the `agent-core` "message currency" (Message,
+  # ToolCall, Observation, CompletionRequest, …) and the seams keep their trait
+  # names, rather than buf's method-derived naming. The enums also use meaningful
+  # zero values (SEARCH_MODE_LITERAL, …), not a synthetic *_UNSPECIFIED. Renaming any
+  # of these would churn the wire for no benefit, so exempt the naming/uniqueness
+  # rules while keeping the rest of STANDARD (package/version, snake_case fields,
+  # ALL_CAPS enum values, imports, …) enforced.
+  except:
+    - ENUM_ZERO_VALUE_SUFFIX
+    - SERVICE_SUFFIX
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_RESPONSE_STANDARD_NAME
+    - RPC_REQUEST_RESPONSE_UNIQUE
+  ignore_only:
+    # `NullValue { NULL_VALUE = 0; }` intentionally mirrors google.protobuf.NullValue
+    # (the JSON-null inhabitant); keep ENUM_VALUE_PREFIX on for every other enum.
+    ENUM_VALUE_PREFIX:
+      - crates/agent-proto/proto/agent/v1/common.proto
+breaking:
+  use:
+    - WIRE_JSON

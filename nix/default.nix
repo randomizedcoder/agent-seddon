@@ -91,6 +91,19 @@ let
     '';
   };
 
+  # Regenerate the committed buf baseline image after an *intentional* wire change.
+  # The `buf` check gates `buf breaking` against this image, so bumping it is the
+  # deliberate "accept this as the new wire contract" step (reviewed in the diff).
+  buf-image = pkgs.writeShellApplication {
+    name = "buf-image";
+    runtimeInputs = [ versions.buf ];
+    text = ''
+      dest="''${1:-crates/agent-proto/buf.image.binpb}"
+      buf build -o "$dest"
+      echo "wrote $dest"
+    '';
+  };
+
   # Static analysis + tests.
   checks = import ./checks {
     inherit
@@ -153,6 +166,10 @@ in
     bench = {
       type = "app";
       program = "${bench}/bin/bench";
+    };
+    buf-image = {
+      type = "app";
+      program = "${buf-image}/bin/buf-image";
     };
     clickstack-up = {
       type = "app";

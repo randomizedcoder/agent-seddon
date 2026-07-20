@@ -35,10 +35,27 @@ nix flake check                 # clippy -D warnings + rustfmt + tests + cargo-a
 nix fmt                         # format all .nix files
 nix build .#agent               # build the `agent` binary -> ./result/bin/agent
 nix run   .#gen-constants       # regenerate constants.rs after editing nix/constants.nix
+nix run   .#buf-image           # regenerate the buf baseline after an intentional wire change
 ```
 
 `nix flake check` is the gate: it runs `clippy` with `-D warnings`, so the tree
 must be warning-clean. When in doubt, run it before considering work done.
+
+## Proto governance (buf)
+
+The `.proto` wire contracts are **codegen'd by `tonic-build`** (unchanged); `buf`
+adds lint + wire-compatibility gating on top (`nix/checks/buf.nix`, config in
+`buf.yaml`):
+
+- **`buf lint`** — style/consistency. The naming rules that clash with the
+  deliberate `agent-core`-mirroring type names are exempted in `buf.yaml` (with a
+  comment); the rest of `STANDARD` is enforced.
+- **`buf breaking`** — runs against the committed baseline image
+  `crates/agent-proto/buf.image.binpb`, since `nix flake check` is stateless and
+  can't reach git history. Additive changes (a new RPC/field) pass untouched; a
+  wire-incompatible edit fails until you deliberately move the baseline with
+  `nix run .#buf-image` (the image bump shows up in the diff for review).
+- Introspect a running seam with reflection + `grpcurl` — see `docs/grpc.md`.
 
 ## Benchmarks & leak checks
 

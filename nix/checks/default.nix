@@ -40,6 +40,9 @@
   };
   leak = import ./leak.nix { inherit craneLib commonArgs cargoArtifacts; };
   nix-fmt = import ./nix-fmt.nix { inherit pkgs versions; };
+  # `buf lint` + `buf breaking` over the .proto contracts (see buf.yaml). Breaking
+  # is gated against the committed image; regenerate it with `nix run .#buf-image`.
+  buf = import ./buf.nix { inherit pkgs versions; };
   # `constants.rs` must match what `nix/constants.nix` renders (see gen-constants).
   constants-sync = import ./constants-sync.nix {
     inherit pkgs constantsRs;
