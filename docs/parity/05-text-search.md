@@ -19,6 +19,18 @@ its own spec.
 > hidden-not-gitignored-*included* case became a hidden-*excluded* case (a documented
 > divergence from pi). No perf bench: search is an I/O-bound walk over the upstream
 > `ignore`/`regex` crates with no deterministic CPU hot path.
+>
+> **Follow-up — ripgrep fast path (34 cases).** `grep` now prefers the external
+> `rg` binary when it is on `PATH` (much faster than the in-process line scan on a
+> large tree) and transparently falls back to the `ignore`-crate walk when `rg` is
+> absent or errors. The regex is still validated up-front (identical `invalid
+> regex` error on both paths), `rg` is handed the raw pattern via `-e` (a flag-like
+> pattern stays a literal), and its output is normalised to the same
+> `path:line:text` shape (absolute-`cwd` prefix stripped, same `MAX_HITS`
+> truncation marker) so behaviour is byte-identical either way. `rg` is pinned in
+> `nix/versions.nix` and added to the dev shell + the hermetic test sandbox (which
+> exercises the `rg` branch); direct `grep_walk`/`format_rg` unit tests keep the
+> fallback honest independent of whether `rg` is present.
 
 ## 1. Feature & why it matters
 

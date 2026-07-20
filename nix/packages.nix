@@ -29,6 +29,7 @@
     versions.docker
     versions.jq
     versions.curl
+    versions.ripgrep # `grep` tool's fast path (falls back to the in-process walk)
 
     # Nix.
     versions.nixfmt
