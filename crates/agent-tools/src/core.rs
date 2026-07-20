@@ -1,6 +1,6 @@
 //! `tool-core` — the always-useful trio: `bash`, `read_file`, `write_file`.
 
-use crate::{arg_str, resolve_within, truncate};
+use crate::{arg_bool, arg_str, resolve_within, truncate};
 use agent_core::{Observation, Result, Tool, ToolContext, ToolSchema};
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -102,11 +102,18 @@ impl Tool for ReadFileTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "read_file".into(),
-            description: "Read a UTF-8 text file (relative to the working directory) and return its contents.".into(),
+            description: "Read a text file (relative to the working directory). By default \
+                          returns the whole file; pass `offset`/`limit` to read a line window \
+                          of a large file, and `line_numbers` to prefix each line with its \
+                          number. Binary files are detected and reported, not dumped."
+                .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Path to the file." }
+                    "path": { "type": "string", "description": "Path to the file." },
+                    "offset": { "type": "integer", "description": "1-based line to start from (default 1)." },
+                    "limit": { "type": "integer", "description": "Max lines to return from `offset` (default: all)." },
+                    "line_numbers": { "type": "boolean", "description": "Prefix each line with its 1-based number (default false)." }
                 },
                 "required": ["path"]
             }),
@@ -114,15 +121,93 @@ impl Tool for ReadFileTool {
     }
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<Observation> {
         let path = arg_str(&args, "path")?;
+        let offset = args.get("offset").and_then(Value::as_u64);
+        let limit = args.get("limit").and_then(Value::as_u64);
+        let line_numbers = arg_bool(&args, "line_numbers", false);
         let full = match resolve_within(&ctx.cwd, path) {
             Ok(p) => p,
             Err(e) => return Ok(Observation::error(e)),
         };
-        match tokio::fs::read_to_string(&full).await {
-            Ok(content) => Ok(Observation::ok(truncate(content))),
-            Err(e) => Ok(Observation::error(format!("could not read `{path}`: {e}"))),
+        let bytes = match tokio::fs::read(&full).await {
+            Ok(b) => b,
+            Err(e) => return Ok(Observation::error(format!("could not read `{path}`: {e}"))),
+        };
+        // Binary files (NUL byte or invalid UTF-8) are reported, not dumped as
+        // mojibake — the model gets a clear, actionable message instead.
+        let text = match as_text(&bytes) {
+            Some(t) => t,
+            None => {
+                return Ok(Observation::ok(format!(
+                    "`{path}` is a binary file ({} bytes); not shown as text.",
+                    bytes.len()
+                )))
+            }
+        };
+        Ok(Observation::ok(render_read(
+            text,
+            offset,
+            limit,
+            line_numbers,
+        )))
+    }
+}
+
+/// Interpret bytes as UTF-8 text, or `None` if they look binary (contain a NUL or
+/// aren't valid UTF-8).
+fn as_text(bytes: &[u8]) -> Option<&str> {
+    if bytes.contains(&0) {
+        return None;
+    }
+    std::str::from_utf8(bytes).ok()
+}
+
+/// Render a read result: apply the optional `offset`/`limit` line window, add
+/// line numbers if asked, and cap the output — appending a footer that tells the
+/// model the file is larger and how to page when the window doesn't reach the end.
+fn render_read(text: &str, offset: Option<u64>, limit: Option<u64>, line_numbers: bool) -> String {
+    let windowed = offset.is_some() || limit.is_some();
+    if !windowed && !line_numbers {
+        // Fast path: whole file, no numbering. If truncated *and* the file has
+        // multiple lines (so line paging is meaningful), hint how to page.
+        let total = text.lines().count();
+        let out = truncate(text.to_string());
+        if out.len() < text.len() && total > 1 {
+            return format!(
+                "{out}\n[showing a prefix of {total} lines; pass `offset`/`limit` to page]"
+            );
+        }
+        return out;
+    }
+
+    let lines: Vec<&str> = text.lines().collect();
+    let total = lines.len();
+    let start = offset
+        .map(|o| o.max(1) as usize - 1)
+        .unwrap_or(0)
+        .min(total);
+    let end = match limit {
+        Some(l) => (start + l as usize).min(total),
+        None => total,
+    };
+
+    let mut body = String::new();
+    for (i, line) in lines[start..end].iter().enumerate() {
+        if line_numbers {
+            body.push_str(&format!("{:>6}\t{line}\n", start + i + 1));
+        } else {
+            body.push_str(line);
+            body.push('\n');
         }
     }
+    let mut out = truncate(body);
+    if end < total {
+        out.push_str(&format!(
+            "\n[lines {}–{} of {total}; pass `offset`/`limit` to page]",
+            start + 1,
+            end
+        ));
+    }
+    out
 }
 
 // --- write_file -----------------------------------------------------------
@@ -164,13 +249,27 @@ impl Tool for WriteFileTool {
                 )));
             }
         }
-        match tokio::fs::write(&full, content).await {
-            Ok(()) => Ok(Observation::ok(format!(
-                "wrote {} bytes to `{path}`",
-                content.len()
-            ))),
-            Err(e) => Ok(Observation::error(format!("could not write `{path}`: {e}"))),
+        // Atomic write: stage into a sibling temp file, then rename over the target.
+        // A crash mid-write leaves the original intact instead of a truncated file
+        // (rename is atomic within a filesystem, and the temp is in the same dir).
+        let tmp = {
+            let name = full
+                .file_name()
+                .map(|n| n.to_string_lossy())
+                .unwrap_or_default();
+            full.with_file_name(format!(".{name}.tmp"))
+        };
+        if let Err(e) = tokio::fs::write(&tmp, content).await {
+            return Ok(Observation::error(format!("could not write `{path}`: {e}")));
         }
+        if let Err(e) = tokio::fs::rename(&tmp, &full).await {
+            let _ = tokio::fs::remove_file(&tmp).await; // don't leave a turd behind
+            return Ok(Observation::error(format!("could not write `{path}`: {e}")));
+        }
+        Ok(Observation::ok(format!(
+            "wrote {} bytes to `{path}`",
+            content.len()
+        )))
     }
 }
 
@@ -253,15 +352,85 @@ mod tests {
         assert!(obs.content.len() <= MAX_OUTPUT + "\n...[output truncated]".len());
     }
 
-    // read_to_string is UTF-8 only: a non-UTF-8 file is a model-visible error that
-    // names the path (pins the intentional UTF-8-only contract).
+    // A binary file (invalid UTF-8 / NUL bytes) is reported cleanly — a non-error
+    // observation naming the file + size — rather than dumped as mojibake or
+    // surfaced as a read failure.
     #[tokio::test]
-    async fn read_file_negative_non_utf8_is_model_error() {
+    async fn read_file_binary_is_reported_not_dumped() {
         let dir = tempdir();
         std::fs::write(dir.join("blob.bin"), [0xff, 0xfe, 0x00, 0x80]).unwrap();
         let obs = run(&dir, &ReadFileTool, json!({"path": "blob.bin"})).await;
-        assert!(obs.is_error);
-        assert!(obs.content.contains("blob.bin"), "message: {}", obs.content);
+        assert!(!obs.is_error, "binary read is informational, not an error");
+        assert!(
+            obs.content.contains("binary file"),
+            "message: {}",
+            obs.content
+        );
+        assert!(obs.content.contains("blob.bin"));
+    }
+
+    // --- read_file: line-window paging + line numbers -----------------------
+    fn numbered_fixture(dir: &Path) {
+        // 10 lines: "line1".."line10"
+        let body = (1..=10)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(dir.join("f.txt"), body).unwrap();
+    }
+
+    #[rstest]
+    // offset+limit returns just that window
+    #[case::window(json!({"path": "f.txt", "offset": 3, "limit": 2}), &["line3", "line4"], &["line2", "line5"])]
+    // offset to end
+    #[case::offset_to_end(json!({"path": "f.txt", "offset": 9}), &["line9", "line10"], &["line8"])]
+    // limit from start
+    #[case::limit_from_start(json!({"path": "f.txt", "limit": 2}), &["line1", "line2"], &["line3"])]
+    #[tokio::test]
+    async fn read_file_windows(
+        #[case] args: Value,
+        #[case] present: &[&str],
+        #[case] absent: &[&str],
+    ) {
+        let dir = tempdir();
+        numbered_fixture(&dir);
+        let obs = run(&dir, &ReadFileTool, args).await;
+        assert!(!obs.is_error, "{}", obs.content);
+        for p in present {
+            assert!(obs.content.contains(p), "missing `{p}`:\n{}", obs.content);
+        }
+        for a in absent {
+            assert!(
+                !obs.content.contains(a),
+                "should omit `{a}`:\n{}",
+                obs.content
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn read_file_window_has_paging_footer() {
+        let dir = tempdir();
+        numbered_fixture(&dir);
+        let obs = run(&dir, &ReadFileTool, json!({"path": "f.txt", "limit": 3})).await;
+        assert!(
+            obs.content.contains("of 10"),
+            "footer missing: {}",
+            obs.content
+        );
+    }
+
+    #[tokio::test]
+    async fn read_file_line_numbers_prefix() {
+        let dir = tempdir();
+        numbered_fixture(&dir);
+        let obs = run(
+            &dir,
+            &ReadFileTool,
+            json!({"path": "f.txt", "offset": 2, "limit": 1, "line_numbers": true}),
+        )
+        .await;
+        assert!(obs.content.contains("2\tline2"), "content: {}", obs.content);
     }
 
     // --- write_file ---------------------------------------------------------
@@ -290,6 +459,26 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.join(check_path)).unwrap(),
             expected_file
+        );
+    }
+
+    // Atomic write leaves no `.tmp` sibling behind and overwrites cleanly.
+    #[tokio::test]
+    async fn write_file_is_atomic_no_temp_leftover() {
+        let dir = tempdir();
+        std::fs::write(dir.join("f.txt"), "old contents here").unwrap();
+        let obs = run(
+            &dir,
+            &WriteFileTool,
+            json!({"path": "f.txt", "content": "new"}),
+        )
+        .await;
+        assert!(!obs.is_error, "{}", obs.content);
+        assert_eq!(std::fs::read_to_string(dir.join("f.txt")).unwrap(), "new");
+        // The staging temp (`.f.txt.tmp`) must be gone after the rename.
+        assert!(
+            !dir.join(".f.txt.tmp").exists(),
+            "temp file should not survive"
         );
     }
 

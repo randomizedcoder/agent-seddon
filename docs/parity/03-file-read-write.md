@@ -14,8 +14,19 @@ their peers guard behaviour we do not.
 > mostly measure tokio/the OS, not our logic — so the "no leaks / no low-hanging
 > fruit" bar is met by the leak test here, not a perf bench. Observability is
 > inherited: every tool is wrapped by `metered::tool` (proven by the apply_patch
-> metered test). Gaps 4–6 (pagination, create-vs-overwrite signal, write deny-list)
-> remain deliberate divergences, not bugs.
+> metered test).
+>
+> **Follow-up — fast + accurate reads/writes (peer parity + safety).** `read_file`
+> gained `offset`/`limit` **line-window paging** (read a slice of a large file
+> instead of the 12 KB truncate) and an optional `line_numbers` prefix, with a
+> paging footer that tells the model the total line count and how to page; a
+> **binary file** (NUL / invalid UTF-8) is now reported as a clean informational
+> message (`"… is a binary file (N bytes)"`), not a read error or mojibake dump.
+> `write_file` is now an **atomic temp-write + rename** (a crash mid-write leaves
+> the original intact, never a truncated file; the staging `.tmp` sibling is cleaned
+> up on failure). The write **deny-list** gap (item 6) is now covered separately by
+> the policy **guard** (`docs/components/policy.md`). Image→base64 reads remain a
+> documented follow-up (needs multimodal plumbing to be useful).
 
 ## 1. Feature & why it matters
 
