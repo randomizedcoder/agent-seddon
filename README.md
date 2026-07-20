@@ -29,14 +29,14 @@ One crate per seam (DESIGN.md §7):
 |-------|------|
 | `agent-core` | Seam traits + shared types (no impls) |
 | `agent-providers` | `LlmProvider` impls: OpenAI-compatible (GLM/OpenAI/vLLM/Ollama) + Anthropic-native, both streaming |
-| `agent-tools` | `Tool` impls: `bash`, `read_file`, `write_file`, `edit`, `grep`, `find`, `ls`, `search`, `metrics` (self-inspection), `git_*` (multi-branch git) |
+| `agent-tools` | `Tool` impls: `bash`, `read_file`, `write_file`, `edit`, `apply_patch`, `grep`, `find`, `ls`, `search`, `index_ls` (index-backed listing), `metrics` (self-inspection), `git_*` (multi-branch git) |
 | `agent-search` | `SearchBackend`: high-performance code search (tantivy full-text index) ([docs/components/search.md](docs/components/search.md)) |
 | `agent-git` | `RepoBackend`: multi-branch git — one shared object DB + disposable worktrees, revision-addressed reads ([docs/components/git.md](docs/components/git.md)) |
 | `agent-memory` | `MemoryStore`: JSONL episodic + markdown semantic |
 | `agent-context` | `ContextStrategy`: sliding-window or summarizing-window compaction |
 | `agent-mcp` | MCP client (stdio + streamable-HTTP) — external tools as `mcp_<server>_<tool>` |
 | `agent-proto` | protobuf/gRPC wire contracts for the seams + core↔proto conversions & OTel trace propagation ([docs/grpc.md](docs/grpc.md)) |
-| `agent-grpc` | per-seam gRPC servers + clients over TCP or unix domain sockets (`--serve-<seam>`, `= "grpc"`) |
+| `agent-grpc` | per-seam gRPC servers + clients over TCP or unix domain sockets (`--serve-<seam>`, `= "grpc"`); server reflection for `grpcurl`/JSON introspection |
 | `agent-telemetry` | Telemetry sink: streams transaction history, logs & usage to ClickHouse; OTLP trace export to the ClickStack collector |
 | `agent-metrics` | Shared Prometheus registry + per-seam metric families ([docs/metrics.md](docs/metrics.md)) |
 | `agent-runtime` | Config, the plugin registry, the loop (streaming + parallel tools), sessions, subagents |
@@ -137,6 +137,20 @@ lifts the design's "distributed components" goal to a k8s-style topology — a
 gateway, a shared memory service, sandboxed tool workers. Full contract, error
 mapping, and deployment sketch in **[docs/grpc.md](docs/grpc.md)**.
 
+Every `--serve-<seam>` process enables **gRPC reflection**, so you can introspect
+and call a running seam with human-readable JSON via `grpcurl` (no `.proto` files):
+
+```sh
+agent --serve-search &                                   # search seam on :50056
+grpcurl -plaintext 127.0.0.1:50056 list                  # → agent.v1.SearchService, …
+grpcurl -plaintext -d '{"globs":["**/*.rs"]}' \
+        127.0.0.1:50056 agent.v1.SearchService/ListFiles # JSON in → binary → JSON out
+```
+
+The wire contract is governed by **`buf`** in `nix flake check` (`buf lint` +
+`buf breaking` against a committed baseline image; codegen stays on `tonic-build`)
+— see the "Proto governance" note in [CLAUDE.md](CLAUDE.md).
+
 ## Nix
 
 A modular flake (thin `flake.nix` + `./nix/` aggregator, pinned Rust toolchain via
@@ -145,7 +159,7 @@ container. See `nix/versions.nix` for the single source of truth on tool version
 
 ```sh
 nix develop                 # dev shell: toolchain + tools + `agent-help` menu
-nix flake check             # clippy (-D warnings) + rustfmt + tests + cargo-audit + nix-fmt
+nix flake check             # clippy (-D warnings) + rustfmt + tests + cargo-audit + bench/leak + buf (proto lint/breaking) + nix-fmt
 nix build .#agent           # build the `agent` binary -> ./result/bin/agent
 nix run   .#agent -- --config config/agent.toml "list files in this repo"
 nix fmt                     # format all .nix files

@@ -77,7 +77,10 @@ High-level summaries; each links to its detailed doc.
 - **[gRPC seams](grpc.md)** — the protobuf wire contracts (`agent-proto`) and
   per-seam gRPC servers/clients (`agent-grpc`) that let each seam run as a separate
   process/container over **TCP or unix domain sockets**, selected by `= "grpc"`
-  config and hosted by `agent --serve-<seam>`.
+  config and hosted by `agent --serve-<seam>`. Every served seam enables **gRPC
+  reflection**, so it can be introspected and called with JSON via `grpcurl`; the
+  wire contract is linted + breaking-change-gated by **`buf`** in `nix flake check`
+  (codegen stays on `tonic-build`).
 - **[Tracing](tracing.md)** — the loop instrumented as a span tree, exported over
   OTLP and (across gRPC hops) reassembled into one distributed trace in a
   ClickStack/HyperDX collector; runbook + demo.
