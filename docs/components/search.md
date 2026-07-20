@@ -120,9 +120,10 @@ lists repository files straight from the index (fast, no filesystem walk),
 optionally filtered by path globs; it reflects the last index build, so `ls`
 remains the tool for a live listing. The tantivy backend enumerates its stored
 `path` field; backends that don't index a path enumeration return an error (the
-trait default). Note: `list_files` is **not yet carried over the gRPC search seam**
-(a `= "grpc"` backend returns the unsupported default) — a documented follow-up,
-like the local-only capabilities before it.
+trait default). `list_files` is carried over the gRPC seam by the `ListFiles` RPC
+on `SearchService`, so a `= "grpc"` backend lists files remotely (round-tripped
+over TCP + UDS in `roundtrip.rs`); a backend that doesn't support it still surfaces
+the unsupported error across the wire.
 
 ## Testing
 

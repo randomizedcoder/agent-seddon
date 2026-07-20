@@ -89,6 +89,20 @@ message ReindexRequest {
   string backend = 1;
 }
 
+message ListFilesRequest {
+  // Glob patterns to filter the indexed paths. Empty ⇒ every indexed file.
+  repeated string globs = 1;
+  // Which backend to list from. Empty ⇒ the server's default backend.
+  string backend = 2;
+}
+
+message ListFilesResponse {
+  // Matching indexed paths, sorted + deduplicated by the backend.
+  repeated string paths = 1;
+  // The backend that served the response (echoed for attribution).
+  string backend = 2;
+}
+
 // One increment of reindex progress (server-streamed by SearchService.Reindex).
 message ReindexProgress {
   uint64 files_done = 1;
@@ -106,4 +120,6 @@ service SearchService {
   rpc Reindex(ReindexRequest) returns (stream ReindexProgress);
   // Run a query against the selected backend.
   rpc Search(SearchRequest) returns (SearchResponse);
+  // List indexed file paths (optionally glob-filtered) from the selected backend.
+  rpc ListFiles(ListFilesRequest) returns (ListFilesResponse);
 }

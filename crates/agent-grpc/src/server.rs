@@ -599,6 +599,31 @@ impl pb::search_service_server::SearchService for SearchServiceSvc {
         .instrument(sp)
         .await
     }
+
+    async fn list_files(
+        &self,
+        request: Request<pb::ListFilesRequest>,
+    ) -> Result<Response<pb::ListFilesResponse>, Status> {
+        let sp = span("search.list_files", request.metadata());
+        let inner = self.inner.clone();
+        let label = self.label();
+        async move {
+            let req = request.into_inner();
+            let paths = inner
+                .list_files(&req.globs)
+                .await
+                .map_err(|e| status_from_error(&e))?;
+            Ok(Response::new(pb::ListFilesResponse {
+                paths: paths
+                    .into_iter()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect(),
+                backend: label,
+            }))
+        }
+        .instrument(sp)
+        .await
+    }
 }
 
 pub fn search_router(inner: Arc<dyn SearchBackend>) -> Router {
