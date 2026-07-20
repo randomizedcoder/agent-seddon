@@ -8,6 +8,10 @@
 > remaining follow-ups are noted inline (fuzzy whitespace matching and the
 > per-path failure-escalation tracker). This was the headline editing gap: our
 > only structured editor was the single-hunk `edit`.
+>
+> **Follow-up — perf.** A pure-addition hunk now inserts all its lines with one
+> `Vec::splice` instead of an `insert()` per line (which re-shifted the tail O(n)
+> times); the parser bench ceiling is unchanged.
 
 ## Feature & why it matters
 

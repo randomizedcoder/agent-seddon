@@ -17,6 +17,19 @@ agent-seddon ships today, what the peer agents assert, and the concrete behaviou
 > small to trigger deterministically in a unit test (the positive path is covered by
 > every other case); and the EACCES branch isn't asserted under the root-uid nix
 > build sandbox. The §5 plan below is the design of record.
+>
+> **Follow-up — graduated fuzzy chain + perf.** The fuzzy fallback is now a
+> **two-level chain** applied in increasing looseness, taking the *first* level that
+> locates the block **uniquely** (never loosening past an ambiguity): `Fold`
+> (trailing-ws + unicode look-alikes, as before) → `Collapse` (also flattens
+> indentation width and interior spacing/tabs), with the replacement **re-indented**
+> to the file's matched block so the file's own indentation is preserved. An
+> ambiguous fuzzy match now **reports the match count** ("… (N matches); add
+> surrounding context") instead of a bare "not unique". Perf: fuzzy normalizes each
+> file line **once per level** (was re-normalizing per window position), and
+> multi-edit finds each target in a **single scan** (`match_indices`, was
+> count-then-find). New rstest cases cover indentation-flexible + interior-whitespace
+> matches and the ambiguity-count error; the fuzzy bench ceiling is unchanged.
 
 ## Feature & why it matters
 
