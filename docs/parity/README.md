@@ -1,38 +1,84 @@
-# Coding-fundamentals parity specs
+# Coding-fundamentals parity — specs & status
 
 Per-feature specs for the **top-10 coding fundamentals**, each measuring
-agent-seddon against the three reference harnesses — **pi**, **hermes-agent**, and
-**opencode** — with a focus on *tests*. Every doc mines the peers' own test suites
+agent-seddon against three reference harnesses — **pi**, **hermes-agent**, and
+**opencode** — with a focus on *tests*. Each doc mines the peers' own test suites
 and lays out a table-driven `#[rstest]` plan to **match and exceed** them.
 
-These are **specs, not implementations**: they describe the target behaviour and
-the test tables to write, but change no code. They complement the high-level
-[`../features-comparison.md`](../features-comparison.md) (the matrix + deep dive)
-with execution-ready detail, and the per-seam docs under
+The specs were written first (design of record); most are now **implemented**, one
+PR per feature, each green under `nix flake check`. Each doc's top carries a
+`Status:` note; this page is the rollup. They complement the high-level
+[`../features-comparison.md`](../features-comparison.md) and the per-seam docs under
 [`../components/`](../components/).
 
-Each doc follows the same six sections: *Feature & why it matters · agent-seddon
-today · Peer implementations & their tests · Completeness gaps · Table-driven test
-plan · References.*
+## Status (top 10)
 
-| # | Spec | Feature | agent-seddon status |
-|---|------|---------|---------------------|
-| 1 | [01-code-editing.md](01-code-editing.md) | `edit` (surgical string replace) | Strong (7 cases); no CRLF/BOM/fuzzy/multi-edit/stale guard |
-| 2 | [02-patch-diff-editing.md](02-patch-diff-editing.md) | `apply_patch` (unified diff) | **Missing** — the headline gap |
-| 3 | [03-file-read-write.md](03-file-read-write.md) | `read_file` / `write_file` | Works; **0 direct tests** |
-| 4 | [04-shell-bash.md](04-shell-bash.md) | `bash` shell execution | Works; **0 direct tests** |
-| 5 | [05-text-search.md](05-text-search.md) | `grep` / `find` / `ls` | Good (14 cases); extend to gitignore/injection/context edges |
-| 6 | [06-tool-calling-loop.md](06-tool-calling-loop.md) | tool dispatch loop + registry | **No direct loop unit tests** (only gRPC roundtrip) |
-| 7 | [07-skills.md](07-skills.md) | skills (SKILL.md) | Good (12 cases); user-loaded only, no traversal hardening |
-| 8 | [08-permissions-policy.md](08-permissions-policy.md) | `Policy` approval seam | **0 tests** |
-| 9 | [09-context-compaction.md](09-context-compaction.md) | context assembly + compaction | Good (~18 cases); harden boundaries + summarizer-fallback |
-| 10 | [10-memory.md](10-memory.md) | memory recall + safety | Good (25 cases); no injection scan / embedding recall |
+Legend: ✅ merged · 🔶 in review · ⬜ not started.
 
-**Conventions** (see any doc's test plan): `#[rstest]` + `#[case::name]` tables
-with `positive_`/`negative_`/`corner_`/`boundary_` prefixes, modelled on
-[`../../crates/agent-tools/src/edit.rs`](../../crates/agent-tools/src/edit.rs);
-test doubles from
-[`../../crates/agent-testkit/src/lib.rs`](../../crates/agent-testkit/src/lib.rs);
-gate stays `nix flake check` (clippy `-D warnings` + rustfmt + `cargo test`).
+| # | Feature | Status | PR |
+|---|---------|--------|----|
+| 1 | `edit` (surgical string replace) | ✅ full spec — CRLF/BOM, distinct errno, atomic multi-edit, opt-in fuzzy fallback, stale guard (25 cases + fuzzy bench + leak) | #29 |
+| 2 | `apply_patch` (unified-diff / V4A) | ✅ new tool — add/update/delete, atomic validation, hunk-numbered errors (19 cases + parser bench + leak + gRPC roundtrip) | #23 |
+| 3 | `read_file` / `write_file` | ✅ 18 cases (pagination-cap, binary/UTF-8, path safety) + write→read gRPC roundtrip + leak | #24 |
+| 4 | `bash` shell execution | ✅ 14 cases; **`parallel_safe()` → false** fix; test-lowered timeout; gRPC roundtrip + leak | #25 |
+| 5 | `grep` / `find` / `ls` | 🔶 28 cases (gitignore/hidden/binary/case/MAX_HITS; ls read_dir-vs-walker split) + grep leak | **#30 open** |
+| 6 | tool-calling loop + registry | ✅ dispatch tests (unknown/error/max-iter/output-cap) + `parallel_safe` concurrency proof + `describe_all` bench | #28 |
+| 7 | skills (SKILL.md) | ⬜ not started | — |
+| 8 | `Policy` approval seam | ✅ `AllowList` policy + matcher + unit tests + loop deny test | #27 |
+| 9 | context assembly + compaction | ⬜ not started | — |
+| 10 | memory recall + safety | ⬜ not started | — |
 
-Peer sources are read-only clones under `/home/das/Downloads/{pi,hermes-agent,opencode}`.
+## Supporting / adjacent work (merged)
+
+- **Bench + leak harness** (iai-callgrind + dhat, gating `nix flake check`) — PR #21;
+  design doc [`../benchmarking.md`](../benchmarking.md) — PR #22.
+- **Comparison refresh + these specs** — PR #20.
+- **gRPC tool `parallel_safe` propagation** (follow-up from #25) — PR #26.
+- **`index_ls`** — list files from the search index; added
+  `SearchBackend::list_files` (a new capability idea, beyond the top 10) — PR #31.
+
+## Next steps
+
+1. **Merge #30** (search) — the only top-10 feature in review.
+2. **Remaining parity PRs** (extension work — these already have decent coverage,
+   so each is "extend toward peer edge-cases + add bench/leak where meaningful"):
+   - **skills (07)** — add path-traversal/precedence/recursive-discovery cases;
+     the notable gap is *model-invocable* skill loading (peers expose a `skill`
+     tool; ours is user-driven `/skill:<name>`).
+   - **context (09)** — harden window boundaries + a summarizer-error→truncation
+     fallback (peer compaction tests are thin; this is "exceed, not port").
+   - **memory (10)** — recall ranking + episodic append-only invariant + a
+     hermes-style prompt-injection scan before persist (a new bar).
+3. **ripgrep-backed grep** (new feature you requested; "both, now") — make `grep`
+   prefer `rg` (pin in nix) with the in-process `ignore` walk as fallback.
+   **Blocked on #30**: both edit `crates/agent-tools/src/search.rs`, so build it
+   from a fresh `main` once #30 lands. Design: validate the regex up-front (keep
+   the `"invalid regex"` error + exact semantics), run `rg` with `current_dir(cwd)`,
+   exit 1 ⇒ `(no matches)`, spawn-fail ⇒ fall back; test the builtin directly and
+   the rg path end-to-end (rg pinned in the test sandbox).
+
+## Open follow-ups (accumulated, small)
+
+- **`list_files` over the gRPC search seam** — `index_ls` (#31) is local-only; a
+  `= "grpc"` backend returns the unsupported default. Needs a proto RPC + client/
+  server, like the `parallel_safe` propagation in #26.
+- **edit fuzzy** — currently line-oriented with ASCII-class folds (quotes, dashes,
+  NBSP, fullwidth); full NFC/decomposition folding is deferred.
+- **apply_patch** — fuzzy hunk matching + a per-(path) consecutive-failure
+  escalation hint.
+- **policy** — a secret-path write deny-list (hermes-style) is aspirational.
+
+## Conventions (for the remaining PRs)
+
+- `#[rstest]` + `#[case::name]` tables, `positive_`/`negative_`/`corner_`/`boundary_`
+  prefixes, modelled on [`../../crates/agent-tools/src/edit.rs`](../../crates/agent-tools/src/edit.rs);
+  doubles from [`../../crates/agent-testkit/src/lib.rs`](../../crates/agent-testkit/src/lib.rs).
+- Per-feature PR shape: table tests → (seam features) extend the gRPC roundtrip →
+  observability assertion where a metric/span exists → **iai bench only for a real
+  deterministic CPU hot path** (I/O-bound tools skip it, documented) → **dhat leak**
+  test for allocation-heavy/async paths.
+- Gotchas learned: dhat's `Profiler` is a process-global singleton (keep all leak
+  asserts in ONE `#[test]`); async/`tokio::fs` pools buffers, so leak tests are
+  **iteration-based** (flat live blocks across N runs), not one-shot.
+- Gate stays `nix flake check`. Peer sources are read-only clones under
+  `/home/das/Downloads/{pi,hermes-agent,opencode}`.
