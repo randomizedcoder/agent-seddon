@@ -94,6 +94,94 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SpanCollector {
     }
 }
 
+/// One captured span field: `(span_name, field_name, value)`.
+pub type SpanField = (String, String, String);
+
+/// Run `f` with a subscriber that records span **fields** — both those set at
+/// creation and those attached later with `Span::record(...)` — as
+/// `(span_name, field, value)` tuples. Lets a test assert an *attribute* landed
+/// on a span (e.g. `policy.authorize` recorded `decision = "deny"`), not just that
+/// the span exists.
+pub fn captured_span_fields<F: FnOnce()>(f: F) -> Vec<SpanField> {
+    use tracing_subscriber::layer::SubscriberExt;
+
+    let fields: Arc<Mutex<Vec<SpanField>>> = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::registry().with(FieldCollector(fields.clone()));
+    tracing::subscriber::with_default(subscriber, f);
+    let collected = fields.lock().expect("field collector poisoned").clone();
+    collected
+}
+
+/// Captures span fields at creation (`on_new_span`) and on later `record`
+/// (`on_record`), keyed by span name.
+struct FieldCollector(Arc<Mutex<Vec<SpanField>>>);
+
+impl<S> tracing_subscriber::Layer<S> for FieldCollector
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        _id: &tracing::span::Id,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let name = attrs.metadata().name().to_string();
+        let mut v = Visitor {
+            name,
+            out: self.0.clone(),
+        };
+        attrs.record(&mut v);
+    }
+
+    fn on_record(
+        &self,
+        id: &tracing::span::Id,
+        values: &tracing::span::Record<'_>,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let name = ctx
+            .span(id)
+            .map(|s| s.name().to_string())
+            .unwrap_or_default();
+        let mut v = Visitor {
+            name,
+            out: self.0.clone(),
+        };
+        values.record(&mut v);
+    }
+}
+
+/// Records each visited field as `(span, field, value)`; skips `Empty` fields
+/// (they surface later via `on_record`).
+struct Visitor {
+    name: String,
+    out: Arc<Mutex<Vec<SpanField>>>,
+}
+
+impl Visitor {
+    fn push(&mut self, field: &tracing::field::Field, value: String) {
+        if let Ok(mut v) = self.out.lock() {
+            v.push((self.name.clone(), field.name().to_string(), value));
+        }
+    }
+}
+
+impl tracing::field::Visit for Visitor {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.push(field, value.to_string());
+    }
+    fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+        self.push(field, value.to_string());
+    }
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        self.push(field, value.to_string());
+    }
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.push(field, format!("{value:?}"));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,5 +215,33 @@ mod tests {
         });
         assert!(spans.contains(&"skill.load".to_string()));
         assert!(spans.contains(&"inner".to_string()));
+    }
+
+    // Captures both creation-time fields and fields attached later via `record`.
+    // Uses a callsite unique to this test so global interest caching can't be
+    // poisoned by a subscriber-less test hitting the same callsite.
+    #[test]
+    fn captured_span_fields_records_created_and_recorded() {
+        let fields = captured_span_fields(|| {
+            let s = tracing::info_span!(
+                "observe.fieldtest",
+                at_create = "yes",
+                later = tracing::field::Empty
+            );
+            let _e = s.enter();
+            s.record("later", "recorded");
+        });
+        assert!(
+            fields
+                .iter()
+                .any(|(sp, f, v)| sp == "observe.fieldtest" && f == "at_create" && v == "yes"),
+            "creation field missing: {fields:?}"
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|(sp, f, v)| sp == "observe.fieldtest" && f == "later" && v == "recorded"),
+            "recorded field missing: {fields:?}"
+        );
     }
 }

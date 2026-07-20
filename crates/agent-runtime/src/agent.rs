@@ -185,12 +185,12 @@ impl Agent {
             // servers that misbehave on SSE).
             let resp = if self.settings.stream {
                 self.complete_streaming(req)
-                    .instrument(tracing::info_span!("provider.stream", iter))
+                    .instrument(tracing::info_span!("provider.stream", iter, model))
                     .await?
             } else {
                 self.provider
                     .complete(req)
-                    .instrument(tracing::info_span!("provider.complete", iter))
+                    .instrument(tracing::info_span!("provider.complete", iter, model))
                     .await?
             };
             self.metrics.on_api_call(
@@ -231,14 +231,31 @@ impl Agent {
             // transcript.
             let mut decisions = Vec::with_capacity(assistant.tool_calls.len());
             for call in &assistant.tool_calls {
-                decisions.push(
-                    self.policy
-                        .authorize(call)
-                        .instrument(
-                            tracing::info_span!("policy.authorize", iter, tool = %call.name),
-                        )
-                        .await,
+                // Record the outcome (and deny reason) onto the span *from inside*
+                // the instrumented future, so the fields land while the span is
+                // still open — an allow/deny audit trail in the trace tree.
+                let span = tracing::info_span!(
+                    "policy.authorize",
+                    iter,
+                    tool = %call.name,
+                    decision = tracing::field::Empty,
+                    reason = tracing::field::Empty,
                 );
+                let dec = async {
+                    let d = self.policy.authorize(call).await;
+                    let s = tracing::Span::current();
+                    match &d {
+                        Decision::Allow => s.record("decision", "allow"),
+                        Decision::Deny(r) => {
+                            s.record("decision", "deny");
+                            s.record("reason", r.as_str())
+                        }
+                    };
+                    d
+                }
+                .instrument(span)
+                .await;
+                decisions.push(dec);
             }
 
             let parallel = self.settings.parallel_tools
@@ -441,19 +458,27 @@ impl Session<'_> {
     async fn send_inner(&mut self, input: &str) -> anyhow::Result<String> {
         if !self.started {
             // First turn: recall relevant memory and assemble the initial context.
-            let recalled = self
-                .agent
-                .memory
-                .recall(&RecallQuery {
-                    text: input.to_string(),
-                    limit: self.agent.settings.recall_limit,
-                })
-                .instrument(tracing::info_span!("memory.recall"))
-                .await
-                .unwrap_or_else(|e| {
-                    tracing::warn!("recall failed: {e}");
-                    Vec::new()
-                });
+            let recall_span = tracing::info_span!("memory.recall", items = tracing::field::Empty);
+            let recalled = async {
+                let out = self
+                    .agent
+                    .memory
+                    .recall(&RecallQuery {
+                        text: input.to_string(),
+                        limit: self.agent.settings.recall_limit,
+                    })
+                    .await;
+                if let Ok(items) = &out {
+                    tracing::Span::current().record("items", items.len());
+                }
+                out
+            }
+            .instrument(recall_span)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("recall failed: {e}");
+                Vec::new()
+            });
             if !recalled.is_empty() {
                 tracing::info!(items = recalled.len(), "recalled memory");
             }
