@@ -33,6 +33,14 @@ spanned too: `skills.discover` and `context_files.load`. With `= "grpc"` the wra
 span nests over the `grpc.server` span, so a local and a remote backend read
 identically in the trace tree.
 
+Spans also carry **attributes** for at-a-glance triage: `provider.*` records the
+`model`; `policy.authorize` records the `decision` (`allow`/`deny`) and, on a deny,
+the `reason` (so a guard block is an audit trail in the trace, not just a counter);
+`memory.recall` records the `items` count; `search.*`/`repo.op` record the `backend`
+(+ `mode`/`op`). Assert attributes in tests with
+`agent_testkit::observe::captured_span_fields` (fields set at creation *and* via
+`Span::record`).
+
 With `provider = "grpc"`, the `provider.*` calls cross a process boundary and the
 gateway's `grpc.server` span is a **child** of the loop's `provider.stream` span —
 one trace, two services (`agent-loop`, `agent-provider-gateway`).
