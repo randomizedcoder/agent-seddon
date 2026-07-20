@@ -23,6 +23,9 @@ pub use core::{BashTool, ReadFileTool, WriteFileTool};
 #[cfg(feature = "tool-edit")]
 mod edit;
 #[cfg(feature = "tool-edit")]
+#[doc(hidden)]
+pub use edit::bench_apply;
+#[cfg(feature = "tool-edit")]
 pub use edit::EditTool;
 
 #[cfg(feature = "tool-patch")]

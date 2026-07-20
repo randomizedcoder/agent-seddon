@@ -23,7 +23,7 @@ craneLib.mkCargoDerivation (
     doInstallCargoArtifacts = false;
     buildPhaseCargoCommand = ''
       cargo test -p agent-metrics --features dhat-heap --test leak
-      cargo test -p agent-tools --features dhat-heap,tool-patch --test leak
+      cargo test -p agent-tools --features dhat-heap,tool-patch,tool-edit --test leak
     '';
     installPhaseCommand = "mkdir -p $out";
   }

@@ -1,9 +1,21 @@
-//! `tool-edit` — surgical string replacement.
+//! `tool-edit` — surgical string replacement, single or batched.
 //!
 //! Replaces `old_string` with `new_string` in a file. By default the match must
 //! be unique (so the model can't silently edit the wrong occurrence); set
 //! `replace_all` to replace every occurrence. Far cheaper and safer than
 //! rewriting whole files via `write_file`.
+//!
+//! Beyond the exact single replace it also handles the things that trip up a
+//! model editing a file it read earlier:
+//! - **CRLF/BOM fidelity** — an `\n`-only `old_string` matches a CRLF file, and
+//!   the file's dominant line ending + a leading UTF-8 BOM are preserved on write.
+//! - **Multi-edit** — an `edits` array applies a *batch* against the original
+//!   content, atomically (all-or-nothing), rejecting overlapping targets.
+//! - **Fuzzy fallback** (opt-in, `fuzzy: true`) — when the exact match fails,
+//!   retry line-wise ignoring trailing whitespace / smart quotes / unicode dashes
+//!   / NBSP / fullwidth forms; exact always wins.
+//! - **Stale guard** — refuse to write if the file changed on disk since we read
+//!   it (best-effort TOCTOU protection).
 
 use crate::{arg_bool, arg_str, resolve_within, truncate};
 use agent_core::{Observation, Result, Tool, ToolContext, ToolSchema};
@@ -11,6 +23,12 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 pub struct EditTool;
+
+/// One replacement.
+struct Edit {
+    old: String,
+    new: String,
+}
 
 #[async_trait]
 impl Tool for EditTool {
@@ -20,69 +38,300 @@ impl Tool for EditTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "edit".into(),
-            description: "Replace an exact string in a text file. `old_string` must occur exactly \
-                          once unless `replace_all` is true. Include enough surrounding context to \
-                          make the match unique."
+            description: "Replace exact text in a file. Provide `old_string`/`new_string` for a \
+                 single replacement (must occur once unless `replace_all` is true), or an `edits` \
+                 array of `{old_string,new_string}` applied as one atomic batch against the \
+                 original content. `\\n`-only strings match CRLF files; a leading BOM and the \
+                 file's line endings are preserved. Set `fuzzy` to allow a whitespace/quote/dash \
+                 -insensitive fallback when the exact text isn't found."
                 .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Path to the file." },
-                    "old_string": { "type": "string", "description": "Exact text to replace." },
-                    "new_string": { "type": "string", "description": "Replacement text." },
-                    "replace_all": { "type": "boolean", "description": "Replace every occurrence (default false)." }
+                    "old_string": { "type": "string", "description": "Exact text to replace (single-edit mode)." },
+                    "new_string": { "type": "string", "description": "Replacement text (single-edit mode)." },
+                    "replace_all": { "type": "boolean", "description": "Replace every occurrence (default false)." },
+                    "fuzzy": { "type": "boolean", "description": "Allow a fuzzy fallback when the exact text isn't found (default false)." },
+                    "edits": {
+                        "type": "array",
+                        "description": "Batch mode: replacements applied atomically against the original content.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "old_string": { "type": "string" },
+                                "new_string": { "type": "string" }
+                            },
+                            "required": ["old_string", "new_string"]
+                        }
+                    }
                 },
-                "required": ["path", "old_string", "new_string"]
+                "required": ["path"]
             }),
         }
     }
+
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<Observation> {
         let path = arg_str(&args, "path")?;
-        let old = arg_str(&args, "old_string")?;
-        let new = arg_str(&args, "new_string")?;
         let replace_all = arg_bool(&args, "replace_all", false);
+        let fuzzy = arg_bool(&args, "fuzzy", false);
 
-        if old.is_empty() {
-            return Ok(Observation::error("old_string must not be empty"));
-        }
-        if old == new {
-            return Ok(Observation::error(
-                "old_string and new_string are identical",
-            ));
-        }
+        // Gather the edit(s): a multi-edit `edits` array, or a single old/new pair.
+        let (edits, multi) = match args.get("edits") {
+            Some(v) => match parse_multi(v) {
+                Ok(e) => (e, true),
+                Err(msg) => return Ok(Observation::error(msg)),
+            },
+            None => {
+                let old = arg_str(&args, "old_string")?.to_string();
+                let new = arg_str(&args, "new_string")?.to_string();
+                if let Err(msg) = validate_edit(&old, &new) {
+                    return Ok(Observation::error(msg));
+                }
+                (vec![Edit { old, new }], false)
+            }
+        };
+
         let full = match resolve_within(&ctx.cwd, path) {
             Ok(p) => p,
             Err(e) => return Ok(Observation::error(e)),
         };
-        let content = match tokio::fs::read_to_string(&full).await {
+        let raw = match tokio::fs::read_to_string(&full).await {
             Ok(c) => c,
-            Err(e) => return Ok(Observation::error(format!("could not read `{path}`: {e}"))),
+            Err(e) => return Ok(Observation::error(io_err_msg("read", path, &e))),
         };
 
-        let count = content.matches(old).count();
-        if count == 0 {
-            return Ok(Observation::error(format!(
-                "old_string not found in `{path}`"
-            )));
-        }
-        let (updated, n) = if replace_all {
-            (content.replace(old, new), count)
-        } else if count > 1 {
-            return Ok(Observation::error(format!(
-                "old_string is not unique in `{path}` ({count} occurrences); \
-                 add surrounding context or set replace_all"
-            )));
+        // Preserve a leading BOM and the file's dominant line ending; match against
+        // an `\n`-normalized copy so an LF `old_string` finds CRLF content.
+        let (bom, body) = split_bom(&raw);
+        let crlf = body.contains("\r\n");
+        let normalized = body.replace("\r\n", "\n");
+
+        let outcome = if multi {
+            apply_multi(&normalized, &edits)
         } else {
-            (content.replacen(old, new, 1), 1)
+            apply_single(&normalized, &edits[0], replace_all, fuzzy)
+        };
+        let (new_norm, n) = match outcome {
+            Ok(x) => x,
+            Err(msg) => return Ok(Observation::error(format!("{msg} in `{path}`"))),
         };
 
-        if let Err(e) = tokio::fs::write(&full, updated).await {
-            return Ok(Observation::error(format!("could not write `{path}`: {e}")));
+        let out_body = if crlf {
+            new_norm.replace('\n', "\r\n")
+        } else {
+            new_norm
+        };
+        let out = if bom {
+            format!("\u{feff}{out_body}")
+        } else {
+            out_body
+        };
+
+        // Best-effort stale guard: if the file changed on disk since we read it,
+        // refuse to write rather than clobber the newer content.
+        if let Ok(current) = tokio::fs::read_to_string(&full).await {
+            if current != raw {
+                return Ok(Observation::error(format!(
+                    "`{path}` changed on disk since it was read; re-read it before editing"
+                )));
+            }
+        }
+        if let Err(e) = tokio::fs::write(&full, out).await {
+            return Ok(Observation::error(io_err_msg("write", path, &e)));
         }
         Ok(Observation::ok(truncate(format!(
             "edited `{path}` ({n} replacement{})",
             if n == 1 { "" } else { "s" }
         ))))
+    }
+}
+
+/// `Ok(())` if the pair is a usable replacement; `Err(msg)` otherwise.
+fn validate_edit(old: &str, new: &str) -> std::result::Result<(), String> {
+    if old.is_empty() {
+        return Err("old_string must not be empty".into());
+    }
+    if old == new {
+        return Err("old_string and new_string are identical".into());
+    }
+    Ok(())
+}
+
+fn parse_multi(v: &Value) -> std::result::Result<Vec<Edit>, String> {
+    let arr = v.as_array().ok_or("`edits` must be an array")?;
+    if arr.is_empty() {
+        return Err("`edits` must contain at least one replacement".into());
+    }
+    let mut edits = Vec::with_capacity(arr.len());
+    for (i, item) in arr.iter().enumerate() {
+        let old = item
+            .get("old_string")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("edit {}: missing `old_string`", i + 1))?;
+        let new = item
+            .get("new_string")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("edit {}: missing `new_string`", i + 1))?;
+        validate_edit(old, new).map_err(|m| format!("edit {}: {m}", i + 1))?;
+        edits.push(Edit {
+            old: old.into(),
+            new: new.into(),
+        });
+    }
+    Ok(edits)
+}
+
+/// Benchmark hook: run the pure editing computation (exact + optional fuzzy) and
+/// return the result length. Exposed so `benches/edit.rs` can exercise the
+/// deterministic hot path (`Edit` is private, so this takes plain strings).
+#[doc(hidden)]
+pub fn bench_apply(content: &str, old: &str, new: &str, fuzzy: bool) -> usize {
+    apply_single(
+        content,
+        &Edit {
+            old: old.to_string(),
+            new: new.to_string(),
+        },
+        false,
+        fuzzy,
+    )
+    .map(|(s, _)| s.len())
+    .unwrap_or(0)
+}
+
+/// Single exact replace on `\n`-normalized `content`, with an optional fuzzy
+/// fallback. Returns `(new_content, replacements)`.
+fn apply_single(
+    content: &str,
+    edit: &Edit,
+    replace_all: bool,
+    fuzzy: bool,
+) -> std::result::Result<(String, usize), String> {
+    let old = edit.old.replace("\r\n", "\n");
+    let new = edit.new.replace("\r\n", "\n");
+    let count = content.matches(&old).count();
+    if count == 0 {
+        if fuzzy {
+            return fuzzy_replace(content, &old, &new);
+        }
+        return Err("old_string not found".into());
+    }
+    if replace_all {
+        Ok((content.replace(&old, &new), count))
+    } else if count > 1 {
+        Err(format!(
+            "old_string is not unique ({count} occurrences); add surrounding context or set replace_all"
+        ))
+    } else {
+        Ok((content.replacen(&old, &new, 1), 1))
+    }
+}
+
+/// Line-wise fuzzy replace: find the unique run of lines whose normalized form
+/// equals the normalized `old`, and replace those *original* lines with `new`.
+/// Exact matching is tried first by the caller, so this only runs as a fallback.
+fn fuzzy_replace(
+    content: &str,
+    old: &str,
+    new: &str,
+) -> std::result::Result<(String, usize), String> {
+    let lines: Vec<&str> = content.split('\n').collect();
+    let want: Vec<String> = old.split('\n').map(fuzz_line).collect();
+    if want.is_empty() || want.len() > lines.len() {
+        return Err("old_string not found (even with fuzzy matching)".into());
+    }
+    let hits: Vec<usize> = (0..=lines.len() - want.len())
+        .filter(|&i| {
+            lines[i..i + want.len()]
+                .iter()
+                .map(|l| fuzz_line(l))
+                .eq(want.iter().cloned())
+        })
+        .collect();
+    match hits.as_slice() {
+        [] => Err("old_string not found (even with fuzzy matching)".into()),
+        [i] => {
+            let mut out: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
+            let repl: Vec<String> = new.split('\n').map(str::to_string).collect();
+            out.splice(*i..*i + want.len(), repl);
+            Ok((out.join("\n"), 1))
+        }
+        _ => Err("old_string is not unique after fuzzy normalization".into()),
+    }
+}
+
+/// Normalize one line for fuzzy matching: strip trailing whitespace and fold
+/// smart quotes / unicode dashes / NBSP / fullwidth forms to their ASCII equivalents.
+fn fuzz_line(line: &str) -> String {
+    line.chars()
+        .map(|c| match c {
+            '\u{2018}' | '\u{2019}' => '\'',
+            '\u{201C}' | '\u{201D}' => '"',
+            '\u{2013}' | '\u{2014}' => '-',
+            '\u{00A0}' => ' ',
+            c if ('\u{FF01}'..='\u{FF5E}').contains(&c) => {
+                char::from_u32(c as u32 - 0xFEE0).unwrap_or(c)
+            }
+            c => c,
+        })
+        .collect::<String>()
+        .trim_end()
+        .to_string()
+}
+
+/// Multi-edit: each `old` must occur exactly once in the *original* content; the
+/// matched spans must not overlap; all replacements are spliced in one pass.
+fn apply_multi(content: &str, edits: &[Edit]) -> std::result::Result<(String, usize), String> {
+    let mut spans: Vec<(usize, usize, String)> = Vec::with_capacity(edits.len());
+    for (i, e) in edits.iter().enumerate() {
+        let old = e.old.replace("\r\n", "\n");
+        let count = content.matches(&old).count();
+        if count == 0 {
+            return Err(format!("edit {}: old_string not found", i + 1));
+        }
+        if count > 1 {
+            return Err(format!(
+                "edit {}: old_string is not unique ({count} occurrences)",
+                i + 1
+            ));
+        }
+        let start = content.find(&old).unwrap();
+        spans.push((start, start + old.len(), e.new.replace("\r\n", "\n")));
+    }
+    spans.sort_by_key(|s| s.0);
+    for w in spans.windows(2) {
+        if w[1].0 < w[0].1 {
+            return Err("edits overlap (a later edit's target overlaps an earlier one)".into());
+        }
+    }
+    let mut result = String::with_capacity(content.len());
+    let mut cursor = 0;
+    for (start, end, new) in &spans {
+        result.push_str(&content[cursor..*start]);
+        result.push_str(new);
+        cursor = *end;
+    }
+    result.push_str(&content[cursor..]);
+    Ok((result, spans.len()))
+}
+
+fn split_bom(s: &str) -> (bool, &str) {
+    match s.strip_prefix('\u{feff}') {
+        Some(rest) => (true, rest),
+        None => (false, s),
+    }
+}
+
+/// Distinguish the common I/O failures so the model gets an actionable signal.
+fn io_err_msg(op: &str, path: &str, e: &std::io::Error) -> String {
+    use std::io::ErrorKind;
+    match e.kind() {
+        ErrorKind::NotFound => format!("could not {op} `{path}`: not found (ENOENT)"),
+        ErrorKind::PermissionDenied => {
+            format!("could not {op} `{path}`: permission denied (EACCES)")
+        }
+        _ => format!("could not {op} `{path}`: {e}"),
     }
 }
 
@@ -93,8 +342,9 @@ mod tests {
     use agent_testkit::tempdir;
     use rstest::rstest;
     use serde_json::json;
+    use std::path::Path;
 
-    async fn run(dir: &std::path::Path, args: Value) -> Observation {
+    async fn run(dir: &Path, args: Value) -> Observation {
         EditTool
             .execute(
                 args,
@@ -144,6 +394,40 @@ mod tests {
         json!({"path": "../secret", "old_string": "a", "new_string": "b"}),
         Err("escape")
     )]
+    // CRLF: an LF old_string matches CRLF content; endings preserved.
+    #[case::boundary_crlf_preserved(
+        "first\r\nsecond\r\nthird\r\n",
+        json!({"path": "f.txt", "old_string": "second", "new_string": "REPLACED"}),
+        Ok("first\r\nREPLACED\r\nthird\r\n")
+    )]
+    #[case::boundary_lf_preserved(
+        "first\nsecond\nthird\n",
+        json!({"path": "f.txt", "old_string": "second", "new_string": "REPLACED"}),
+        Ok("first\nREPLACED\nthird\n")
+    )]
+    // BOM preserved through the edit.
+    #[case::boundary_bom_preserved(
+        "\u{feff}old\n",
+        json!({"path": "f.txt", "old_string": "old", "new_string": "new"}),
+        Ok("\u{feff}new\n")
+    )]
+    // Fuzzy fallback (opt-in): smart quotes and trailing whitespace.
+    #[case::corner_fuzzy_smart_quotes(
+        "console.log(\u{2018}hi\u{2019});\n",
+        json!({"path": "f.txt", "old_string": "console.log('hi');", "new_string": "console.log('bye');", "fuzzy": true}),
+        Ok("console.log('bye');\n")
+    )]
+    #[case::corner_fuzzy_trailing_ws(
+        "line one   \nline two\n",
+        json!({"path": "f.txt", "old_string": "line one\nline two", "new_string": "replaced", "fuzzy": true}),
+        Ok("replaced\n")
+    )]
+    // Fuzzy is opt-in: the same smart-quote input fails without the flag.
+    #[case::negative_fuzzy_off_by_default(
+        "console.log(\u{2018}hi\u{2019});\n",
+        json!({"path": "f.txt", "old_string": "console.log('hi');", "new_string": "x"}),
+        Err("not found")
+    )]
     #[tokio::test]
     async fn edit_cases(
         #[case] initial: &str,
@@ -170,5 +454,96 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Multi-edit: `Ok(final)` / `Err(substr)`; on error the file must be untouched.
+    #[rstest]
+    #[case::positive_multi_disjoint(
+        "alpha\nbeta\ngamma\ndelta\n",
+        json!({"path": "f.txt", "edits": [
+            {"old_string": "alpha", "new_string": "ALPHA"},
+            {"old_string": "gamma", "new_string": "GAMMA"}]}),
+        Ok("ALPHA\nbeta\nGAMMA\ndelta\n")
+    )]
+    #[case::corner_multi_against_original_not_incremental(
+        "foo\nbar\nbaz\n",
+        json!({"path": "f.txt", "edits": [
+            {"old_string": "foo", "new_string": "foo bar"},
+            {"old_string": "bar", "new_string": "BAR"}]}),
+        Ok("foo bar\nBAR\nbaz\n")
+    )]
+    #[case::negative_multi_overlap(
+        "one\ntwo\nthree\n",
+        json!({"path": "f.txt", "edits": [
+            {"old_string": "one\ntwo", "new_string": "X"},
+            {"old_string": "two\nthree", "new_string": "Y"}]}),
+        Err("overlap")
+    )]
+    #[case::negative_multi_empty(
+        "hello\n",
+        json!({"path": "f.txt", "edits": []}),
+        Err("at least one")
+    )]
+    #[case::negative_multi_atomic_no_partial(
+        "alpha\nbeta\n",
+        json!({"path": "f.txt", "edits": [
+            {"old_string": "alpha", "new_string": "ALPHA"},
+            {"old_string": "missing", "new_string": "X"}]}),
+        Err("not found")
+    )]
+    #[tokio::test]
+    async fn multi_edit_cases(
+        #[case] initial: &str,
+        #[case] args: Value,
+        #[case] expected: std::result::Result<&str, &str>,
+    ) {
+        let dir = tempdir();
+        std::fs::write(dir.join("f.txt"), initial).unwrap();
+        let obs = run(&dir, args).await;
+        match expected {
+            Ok(final_content) => {
+                assert!(!obs.is_error, "unexpected error: {}", obs.content);
+                assert_eq!(
+                    std::fs::read_to_string(dir.join("f.txt")).unwrap(),
+                    final_content
+                );
+            }
+            Err(substr) => {
+                assert!(obs.is_error, "expected error: {}", obs.content);
+                assert!(
+                    obs.content.contains(substr),
+                    "`{}` missing `{substr}`",
+                    obs.content
+                );
+                // Atomic: a failed batch leaves the file exactly as it was.
+                assert_eq!(std::fs::read_to_string(dir.join("f.txt")).unwrap(), initial);
+            }
+        }
+    }
+
+    // A missing file surfaces a distinct ENOENT signal (EACCES is symmetric in the
+    // impl but not reliably testable under the root-uid nix build sandbox).
+    #[tokio::test]
+    async fn missing_file_reports_enoent() {
+        let dir = tempdir();
+        let obs = run(
+            &dir,
+            json!({"path": "nope.txt", "old_string": "a", "new_string": "b"}),
+        )
+        .await;
+        assert!(obs.is_error);
+        assert!(obs.content.contains("ENOENT"), "message: {}", obs.content);
+    }
+
+    // The fuzz normalizer folds the documented character classes.
+    #[rstest]
+    #[case::trailing_ws("code   ", "code")]
+    #[case::smart_single("it\u{2019}s", "it's")]
+    #[case::smart_double("\u{201C}q\u{201D}", "\"q\"")]
+    #[case::em_dash("a\u{2014}b", "a-b")]
+    #[case::nbsp("a\u{00A0}b", "a b")]
+    #[case::fullwidth("\u{FF21}\u{FF22}\u{FF23}", "ABC")]
+    fn fuzz_line_folds(#[case] input: &str, #[case] expected: &str) {
+        assert_eq!(fuzz_line(input), expected);
     }
 }

@@ -47,3 +47,9 @@ iai-callgrind.workspace = true
 name = "patch"
 harness = false
 required-features = ["tool-patch"]
+
+# Deterministic bench for the edit hot path (exact + fuzzy line matching).
+[[bench]]
+name = "edit"
+harness = false
+required-features = ["tool-edit"]

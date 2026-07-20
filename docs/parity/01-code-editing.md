@@ -4,6 +4,20 @@ Per-feature parity spec for the surgical string-replacement tool. Tracks what
 agent-seddon ships today, what the peer agents assert, and the concrete behaviour
 + tests needed to be the most complete of the four.
 
+> **Status: implemented (full spec).** `edit`
+> ([`crates/agent-tools/src/edit.rs`](../../crates/agent-tools/src/edit.rs)) now
+> preserves **CRLF + BOM** (an `\n`-only `old_string` matches a CRLF file), reports
+> distinct **ENOENT/EACCES** errors, supports **multi-edit** (an `edits` array
+> applied atomically against the original, overlap-rejecting), an opt-in
+> **exact-first fuzzy fallback** (trailing whitespace / smart quotes / unicode
+> dashes / NBSP / fullwidth), and a best-effort **stale-file guard**. Covered by 25
+> rstest cases plus a deterministic fuzzy-match bench and the dhat leak test.
+> Caveats: fuzzy is **line-oriented** (whole matched lines are replaced) and does
+> **not** do full NFC/decomposition folding; the stale guard's TOCTOU window is too
+> small to trigger deterministically in a unit test (the positive path is covered by
+> every other case); and the EACCES branch isn't asserted under the root-uid nix
+> build sandbox. The §5 plan below is the design of record.
+
 ## Feature & why it matters
 
 The `edit` tool replaces an exact `old_string` with `new_string` in a single file.
