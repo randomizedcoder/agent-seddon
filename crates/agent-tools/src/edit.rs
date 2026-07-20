@@ -228,43 +228,70 @@ fn apply_single(
     }
 }
 
-/// Line-wise fuzzy replace: find the unique run of lines whose normalized form
-/// equals the normalized `old`, and replace those *original* lines with `new`.
-/// Exact matching is tried first by the caller, so this only runs as a fallback.
+/// Graduated line-wise fuzzy replace. Tries progressively looser per-line
+/// normalizations and applies the *first* level that locates the block **uniquely**
+/// — never loosening past an ambiguity, so a looser rule can't silently pick the
+/// wrong site. Exact matching is tried first by the caller, so this is a fallback.
+///
+/// Levels:
+///  - `Fold`: strip trailing whitespace + fold smart quotes / dashes / NBSP /
+///    fullwidth to ASCII (handles copy-paste unicode drift).
+///  - `Collapse`: additionally collapse *all* whitespace (so differing indentation
+///    and internal spacing/tabs match); the replacement is re-indented to the
+///    file's matched block so the file's own indentation is preserved.
 fn fuzzy_replace(
     content: &str,
     old: &str,
     new: &str,
 ) -> std::result::Result<(String, usize), String> {
     let lines: Vec<&str> = content.split('\n').collect();
-    let want: Vec<String> = old.split('\n').map(fuzz_line).collect();
-    if want.is_empty() || want.len() > lines.len() {
-        return Err("old_string not found (even with fuzzy matching)".into());
-    }
-    let hits: Vec<usize> = (0..=lines.len() - want.len())
-        .filter(|&i| {
-            lines[i..i + want.len()]
-                .iter()
-                .map(|l| fuzz_line(l))
-                .eq(want.iter().cloned())
-        })
-        .collect();
-    match hits.as_slice() {
-        [] => Err("old_string not found (even with fuzzy matching)".into()),
-        [i] => {
-            let mut out: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
-            let repl: Vec<String> = new.split('\n').map(str::to_string).collect();
-            out.splice(*i..*i + want.len(), repl);
-            Ok((out.join("\n"), 1))
+    for level in [FuzzLevel::Fold, FuzzLevel::Collapse] {
+        // Normalize every file line once per level (not once per window position).
+        let norm_lines: Vec<String> = lines.iter().map(|l| norm_line(l, level)).collect();
+        let want: Vec<String> = old.split('\n').map(|l| norm_line(l, level)).collect();
+        if want.is_empty() || want.len() > lines.len() {
+            return Err("old_string not found (even with fuzzy matching)".into());
         }
-        _ => Err("old_string is not unique after fuzzy normalization".into()),
+        let hits: Vec<usize> = (0..=norm_lines.len() - want.len())
+            .filter(|&i| norm_lines[i..i + want.len()] == want[..])
+            .collect();
+        match hits.as_slice() {
+            [] => continue, // nothing at this level — loosen and retry
+            [i] => {
+                let mut out: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
+                let repl = match level {
+                    FuzzLevel::Fold => new.split('\n').map(str::to_string).collect(),
+                    // Collapse ignored indentation to match, so re-anchor the
+                    // replacement to the file block's indentation.
+                    FuzzLevel::Collapse => reindent(new, leading_ws(lines[*i])),
+                };
+                out.splice(*i..*i + want.len(), repl);
+                return Ok((out.join("\n"), 1));
+            }
+            many => {
+                return Err(format!(
+                    "old_string is not unique after fuzzy normalization ({} matches); add surrounding context",
+                    many.len()
+                ))
+            }
+        }
     }
+    Err("old_string not found (even with fuzzy matching)".into())
 }
 
-/// Normalize one line for fuzzy matching: strip trailing whitespace and fold
-/// smart quotes / unicode dashes / NBSP / fullwidth forms to their ASCII equivalents.
-fn fuzz_line(line: &str) -> String {
-    line.chars()
+/// How aggressively [`norm_line`] normalizes when fuzzy-matching.
+#[derive(Clone, Copy)]
+enum FuzzLevel {
+    /// Trailing-whitespace + unicode look-alike folding.
+    Fold,
+    /// Also collapse all whitespace (indentation- and spacing-insensitive).
+    Collapse,
+}
+
+/// Normalize one line for fuzzy matching at the given level.
+fn norm_line(line: &str, level: FuzzLevel) -> String {
+    let folded: String = line
+        .chars()
         .map(|c| match c {
             '\u{2018}' | '\u{2019}' => '\'',
             '\u{201C}' | '\u{201D}' => '"',
@@ -275,9 +302,41 @@ fn fuzz_line(line: &str) -> String {
             }
             c => c,
         })
-        .collect::<String>()
-        .trim_end()
-        .to_string()
+        .collect();
+    match level {
+        FuzzLevel::Fold => folded.trim_end().to_string(),
+        // Collapse every run of whitespace to a single space and trim — makes the
+        // match blind to indentation width and internal spacing/tab differences.
+        FuzzLevel::Collapse => folded.split_whitespace().collect::<Vec<_>>().join(" "),
+    }
+}
+
+/// The leading-whitespace prefix of a line (its indentation).
+fn leading_ws(line: &str) -> &str {
+    &line[..line.len() - line.trim_start().len()]
+}
+
+/// Re-indent a replacement block to the file's indentation. Detects the block's
+/// own base indent (from its first non-blank line) and rewrites every line so that
+/// base becomes `file_indent`, preserving relative nesting deeper than the base.
+fn reindent(new: &str, file_indent: &str) -> Vec<String> {
+    let base = new
+        .split('\n')
+        .find(|l| !l.trim().is_empty())
+        .map(leading_ws)
+        .unwrap_or("");
+    new.split('\n')
+        .map(|line| {
+            if line.trim().is_empty() {
+                String::new()
+            } else if let Some(rest) = line.strip_prefix(base) {
+                format!("{file_indent}{rest}")
+            } else {
+                // Line less-indented than the detected base — anchor it directly.
+                format!("{file_indent}{}", line.trim_start())
+            }
+        })
+        .collect()
 }
 
 /// Multi-edit: each `old` must occur exactly once in the *original* content; the
@@ -286,17 +345,18 @@ fn apply_multi(content: &str, edits: &[Edit]) -> std::result::Result<(String, us
     let mut spans: Vec<(usize, usize, String)> = Vec::with_capacity(edits.len());
     for (i, e) in edits.iter().enumerate() {
         let old = e.old.replace("\r\n", "\n");
-        let count = content.matches(&old).count();
-        if count == 0 {
+        // Count occurrences and grab the first position in a single scan.
+        let mut indices = content.match_indices(&old);
+        let Some((start, _)) = indices.next() else {
             return Err(format!("edit {}: old_string not found", i + 1));
-        }
-        if count > 1 {
+        };
+        if indices.next().is_some() {
+            let count = 2 + indices.count();
             return Err(format!(
                 "edit {}: old_string is not unique ({count} occurrences)",
                 i + 1
             ));
         }
-        let start = content.find(&old).unwrap();
         spans.push((start, start + old.len(), e.new.replace("\r\n", "\n")));
     }
     spans.sort_by_key(|s| s.0);
@@ -428,6 +488,26 @@ mod tests {
         json!({"path": "f.txt", "old_string": "console.log('hi');", "new_string": "x"}),
         Err("not found")
     )]
+    // Fuzzy Collapse level: indentation differs (file uses 4 spaces, old_string
+    // uses 2) — the block still matches and the replacement is re-indented to the
+    // file's 4-space block.
+    #[case::corner_fuzzy_indentation_flexible(
+        "def f():\n    if x:\n        go()\n",
+        json!({"path": "f.txt", "old_string": "  if x:\n      go()", "new_string": "if y:\n    stop()", "fuzzy": true}),
+        Ok("def f():\n    if y:\n        stop()\n")
+    )]
+    // Fuzzy Collapse level: interior whitespace differs (tabs vs spaced runs).
+    #[case::corner_fuzzy_interior_whitespace(
+        "let  x   =  1;\n",
+        json!({"path": "f.txt", "old_string": "let x = 1;", "new_string": "let x = 2;", "fuzzy": true}),
+        Ok("let x = 2;\n")
+    )]
+    // Fuzzy ambiguity: two normalized matches — reject with the count, don't guess.
+    #[case::negative_fuzzy_ambiguous_reports_count(
+        "a = 1\nb = 2\na = 1\n",
+        json!({"path": "f.txt", "old_string": "a  =  1", "new_string": "a = 9", "fuzzy": true}),
+        Err("2 matches")
+    )]
     #[tokio::test]
     async fn edit_cases(
         #[case] initial: &str,
@@ -535,7 +615,8 @@ mod tests {
         assert!(obs.content.contains("ENOENT"), "message: {}", obs.content);
     }
 
-    // The fuzz normalizer folds the documented character classes.
+    // The `Fold` normalizer folds the documented character classes (trailing-ws +
+    // unicode look-alikes) without touching interior spacing.
     #[rstest]
     #[case::trailing_ws("code   ", "code")]
     #[case::smart_single("it\u{2019}s", "it's")]
@@ -543,7 +624,24 @@ mod tests {
     #[case::em_dash("a\u{2014}b", "a-b")]
     #[case::nbsp("a\u{00A0}b", "a b")]
     #[case::fullwidth("\u{FF21}\u{FF22}\u{FF23}", "ABC")]
-    fn fuzz_line_folds(#[case] input: &str, #[case] expected: &str) {
-        assert_eq!(fuzz_line(input), expected);
+    fn fold_normalizer(#[case] input: &str, #[case] expected: &str) {
+        assert_eq!(norm_line(input, FuzzLevel::Fold), expected);
+    }
+
+    // The `Collapse` normalizer additionally flattens indentation + interior runs.
+    #[rstest]
+    #[case::leading_indent("    a b", "a b")]
+    #[case::interior_runs("a\t\tb   c", "a b c")]
+    #[case::tabs_and_spaces("\t a  b ", "a b")]
+    fn collapse_normalizer(#[case] input: &str, #[case] expected: &str) {
+        assert_eq!(norm_line(input, FuzzLevel::Collapse), expected);
+    }
+
+    // reindent re-anchors a replacement block to the file's indentation, keeping
+    // relative nesting deeper than the block's own base indent.
+    #[test]
+    fn reindent_reanchors_to_file_indent() {
+        let out = reindent("if x:\n    body\n", "        ");
+        assert_eq!(out, vec!["        if x:", "            body", ""]);
     }
 }

@@ -397,9 +397,9 @@ fn apply_hunk(file_lines: &mut Vec<String>, hunk: &Hunk) -> std::result::Result<
             },
             None => file_lines.len(),
         };
-        for (k, line) in after.into_iter().enumerate() {
-            file_lines.insert(pos + k, line);
-        }
+        // Splice all inserted lines in one shift, not one `insert()` per line
+        // (which re-shifts the tail O(n) times).
+        file_lines.splice(pos..pos, after);
         return Ok(true);
     }
 
