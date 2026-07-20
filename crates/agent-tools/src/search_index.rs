@@ -132,6 +132,69 @@ fn format_hits(hits: &[SearchHit]) -> String {
     truncate(out)
 }
 
+/// The `index_ls` tool: list repository files straight from the search index —
+/// fast, no filesystem walk — optionally filtered by path globs. Complements the
+/// live `ls`/`find` walk; reflects the last index build (use `ls` for live state).
+pub struct IndexLsTool {
+    backend: Arc<dyn SearchBackend>,
+}
+
+impl IndexLsTool {
+    pub fn new(backend: Arc<dyn SearchBackend>) -> Self {
+        Self { backend }
+    }
+}
+
+#[async_trait]
+impl Tool for IndexLsTool {
+    fn name(&self) -> &str {
+        "index_ls"
+    }
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "index_ls".into(),
+            description:
+                "List repository files from the search index (fast — no filesystem walk). \
+                          Optionally restrict to `path_globs`, e.g. [\"src/**\", \"**/*.rs\"]. \
+                          Reflects the last index build; use `ls` for a live directory listing."
+                    .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path_globs": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Restrict to matching paths (empty ⇒ every indexed file)."
+                    }
+                }
+            }),
+        }
+    }
+    async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<Observation> {
+        let globs: Vec<String> = args
+            .get("path_globs")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        match self.backend.list_files(&globs).await {
+            Ok(paths) if paths.is_empty() => Ok(Observation::ok("(no files)")),
+            Ok(paths) => {
+                let mut out = String::new();
+                for p in &paths {
+                    out.push_str(&p.display().to_string());
+                    out.push('\n');
+                }
+                Ok(Observation::ok(truncate(out)))
+            }
+            Err(e) => Ok(Observation::error(e.to_string())),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,5 +311,31 @@ mod tests {
             .unwrap();
         assert!(obs.is_error);
         assert!(obs.content.contains("kaboom"));
+    }
+
+    // --- index_ls ----------------------------------------------------------
+
+    #[tokio::test]
+    async fn index_ls_lists_indexed_files() {
+        let backend = Arc::new(agent_testkit::FixtureSearch::new().with_files(vec![
+            PathBuf::from("src/main.rs"),
+            PathBuf::from("README.md"),
+        ]));
+        let obs = IndexLsTool::new(backend)
+            .execute(json!({}), &ctx())
+            .await
+            .unwrap();
+        assert!(!obs.is_error, "{}", obs.content);
+        assert!(obs.content.contains("src/main.rs"));
+        assert!(obs.content.contains("README.md"));
+    }
+
+    #[tokio::test]
+    async fn index_ls_empty_reports_no_files() {
+        let obs = IndexLsTool::new(Arc::new(agent_testkit::FixtureSearch::new()))
+            .execute(json!({}), &ctx())
+            .await
+            .unwrap();
+        assert_eq!(obs.content, "(no files)");
     }
 }

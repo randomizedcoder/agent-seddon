@@ -618,6 +618,16 @@ pub trait SearchBackend: Send + Sync {
 
     /// Run a query. Safe to call concurrently, including during a reindex.
     async fn query(&self, q: &SearchQuery) -> Result<Vec<SearchHit>>;
+
+    /// List indexed file paths matching `globs` (empty ⇒ all), sorted and
+    /// de-duplicated — the index-backed alternative to walking the tree with
+    /// `ls`/`find`. Reflects the index (fast, but as fresh as the last reindex).
+    /// Backends that don't enumerate paths return an error (the default).
+    async fn list_files(&self, _globs: &[String]) -> Result<Vec<std::path::PathBuf>> {
+        Err(Error::Search(
+            "this search backend does not support listing files".into(),
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------

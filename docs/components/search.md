@@ -112,10 +112,22 @@ r.search("mine", |cfg| Ok(Arc::new(MyBackend::open(...)?) as Arc<dyn SearchBacke
 Add `"mine"` to `[search] backends`. Out-of-tree, register on a `Registry` before
 `build_agent_with`. See the general [extension model](../extending.md).
 
+## Listing files from the index (`index_ls`)
+
+Besides `query`, the `SearchBackend` seam exposes `list_files(globs)` — the
+index-backed alternative to walking the tree with `ls`/`find`. The `index_ls` tool
+lists repository files straight from the index (fast, no filesystem walk),
+optionally filtered by path globs; it reflects the last index build, so `ls`
+remains the tool for a live listing. The tantivy backend enumerates its stored
+`path` field; backends that don't index a path enumeration return an error (the
+trait default). Note: `list_files` is **not yet carried over the gRPC search seam**
+(a `= "grpc"` backend returns the unsupported default) — a documented follow-up,
+like the local-only capabilities before it.
+
 ## Testing
 
 `agent_testkit::FixtureSearch` is a ready-made backend double (settable status +
-scripted hits + canned reindex stream). A committed fixture tree lives at
+scripted hits + canned reindex stream + `with_files` for `list_files`). A committed fixture tree lives at
 `crates/agent-search/tests/fixtures/tree/` with planted tokens; the table-driven
 tests index a temp-dir copy and assert per mode (see
 `crates/agent-search/tests/index_fixture.rs`). The gRPC path is round-tripped over

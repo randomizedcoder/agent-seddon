@@ -347,6 +347,19 @@ impl SearchBackend for MeteredSearch {
         }
         out
     }
+    async fn list_files(&self, globs: &[String]) -> Result<Vec<std::path::PathBuf>> {
+        let start = Instant::now();
+        let out = self.inner.list_files(globs).await;
+        let seconds = start.elapsed().as_secs_f64();
+        match &out {
+            Ok(paths) => {
+                self.metrics
+                    .on_search_query(&self.name, "list_files", seconds, paths.len())
+            }
+            Err(_) => self.metrics.on_search_error(&self.name, "list_files"),
+        }
+        out
+    }
 }
 
 // --- git / repo ------------------------------------------------------------
