@@ -328,5 +328,3 @@ trace-per-run root span are net-new differentiators with no peer analogue).
 - **opencode:** — (no cron scheduler; `packages/cli/src/services/daemon.ts` is a
   process daemon, not scheduled jobs).
 - **pi:** — (no scheduling surface).
-</content>
-</invoke>

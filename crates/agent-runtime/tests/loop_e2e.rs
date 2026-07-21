@@ -206,3 +206,60 @@ async fn loop_terminates_at_max_iterations() {
         "expected the iteration-cap error, got: {msg}"
     );
 }
+
+/// Parity spec 18, the headline integration: a secret in a `write_file` body is
+/// caught by the scanner, mapped to a `Deny` by the Policy gate, and the file is
+/// never created — while the run still completes (a deny adapts, it does not
+/// abort). Drives the real builder → scanner → guard → loop path.
+#[tokio::test]
+async fn scanned_write_with_a_secret_is_denied_and_file_not_written() {
+    let dir = tempdir();
+    let cfg = format!(
+        "{}\n[scanner]\nrules = [\"secret\"]\ndeny_at = \"high\"\n",
+        config_toml(&dir)
+    );
+    let script = vec![
+        tool_turn(vec![call(
+            "1",
+            "write_file",
+            json!({"path": "creds.txt", "content": "aws_key = \"AKIAIOSFODNN7EXAMPLE\""}),
+        )]),
+        final_turn("I could not write that file."),
+    ];
+    let agent = agent_for_cfg(&cfg, script).await;
+
+    let answer = agent.run("save the key").await.expect("run completes");
+
+    assert!(
+        !dir.join("creds.txt").exists(),
+        "the write must have been blocked before touching the disk"
+    );
+    assert_eq!(answer, "I could not write that file.");
+}
+
+/// The control for the case above: identical wiring, clean content, write lands.
+/// Without this, the deny test would also pass if the scanner blocked everything.
+#[tokio::test]
+async fn scanned_write_with_clean_content_is_allowed() {
+    let dir = tempdir();
+    let cfg = format!(
+        "{}\n[scanner]\nrules = [\"secret\"]\ndeny_at = \"high\"\n",
+        config_toml(&dir)
+    );
+    let script = vec![
+        tool_turn(vec![call(
+            "1",
+            "write_file",
+            json!({"path": "ok.txt", "content": "fn main() {}"}),
+        )]),
+        final_turn("Wrote ok.txt."),
+    ];
+    let agent = agent_for_cfg(&cfg, script).await;
+
+    agent.run("write ok.txt").await.expect("run");
+
+    assert_eq!(
+        std::fs::read_to_string(dir.join("ok.txt")).expect("file written"),
+        "fn main() {}"
+    );
+}

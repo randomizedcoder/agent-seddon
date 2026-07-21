@@ -318,5 +318,3 @@ unambiguous):
 - **hermes-agent:** `hermes-agent/agent/error_classifier.py` (`FailoverReason`, `classify_api_error`), `hermes-agent/run_agent.py` (`fallback_model`, `switch_model`), `hermes-agent/agent/retry_utils.py` (`jittered_backoff`); tests `hermes-agent/tests/agent/test_error_classifier.py`, `hermes-agent/tests/run_agent/test_auth_provider_failover.py`, `.../test_24996_fallback_exhaustion_cooldown.py`, `.../test_31273_402_not_retried.py`, `hermes-agent/tests/test_retry_utils.py`.
 - **pi:** `pi/packages/ai/src/utils/retry.ts` (`isRetryableAssistantError`), `pi/packages/coding-agent/src/core/model-resolver.ts` (`buildFallbackModel`, `resolveCliModel`); tests `pi/packages/ai/test/retry.test.ts`, `pi/packages/coding-agent/test/model-resolver.test.ts`.
 - **opencode:** `opencode/packages/opencode/src/provider/provider.ts`, `opencode/packages/opencode/src/provider/transform.ts`, `opencode/specs/v2/provider-policy.md`; tests `opencode/packages/core/test/plugin/provider-cloudflare-ai-gateway.test.ts`, `opencode/packages/core/test/plugin/provider-llmgateway.test.ts`, `opencode/packages/opencode/test/provider/transform.test.ts`.
-</content>
-</invoke>

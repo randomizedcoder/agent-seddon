@@ -304,5 +304,3 @@ is ours).
   (cost-scored model selection); tests
   `opencode/packages/core/test/session-projector.test.ts`,
   `opencode/packages/core/test/catalog.test.ts`.
-</content>
-</invoke>

@@ -30,9 +30,12 @@ fn new_registry() -> Metrics {
 
 // The hot observability path: record many tool-exec samples, then encode the text
 // exposition once (what a `/metrics` scrape does). Grows as seams add metric
-// families (web/tasks/structured/lsp/sandbox/embed — specs 11–15). Observed ~813k Ir.
+// families (web/tasks/structured/lsp/sandbox/embed — specs 11–15; content blocks
+// — spec 26; scanner findings + scan latency — spec 18). Observed ~1.00M Ir;
+// encoding is linear in the number of registered families, so this ceiling is
+// expected to step up as seams land rather than to stay fixed.
 #[library_benchmark(config = LibraryBenchmarkConfig::default()
-    .tool(Callgrind::default().hard_limits([(EventKind::Ir, 1_000_000u64)])))]
+    .tool(Callgrind::default().hard_limits([(EventKind::Ir, 1_400_000u64)])))]
 fn record_and_encode() -> String {
     let m = Metrics::new();
     for _ in 0..100 {

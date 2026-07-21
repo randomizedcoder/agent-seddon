@@ -1282,6 +1282,7 @@ mod web_tests {
                 vec![],
                 false,
                 vec![],
+                None,
                 Metrics::new(),
             );
 
@@ -1631,5 +1632,56 @@ mod tokenizer_span_tests {
             });
         });
         assert!(spans.contains(&"tokenizer.count".to_string()), "{spans:?}");
+    }
+}
+
+/// Wrap a [`Scanner`](agent_core::Scanner) so each `scan` emits a `scanner.scan`
+/// span (`kind`, finding count, max severity) and counts findings by
+/// `(severity, rule, kind)`. Labels are the bounded rule/severity/kind enums —
+/// never the scanned content or the matched bytes.
+#[cfg(feature = "scanner")]
+pub(crate) fn scanner(
+    inner: Arc<dyn agent_core::Scanner>,
+    m: Metrics,
+) -> Arc<dyn agent_core::Scanner> {
+    Arc::new(MeteredScanner { inner, metrics: m })
+}
+
+#[cfg(feature = "scanner")]
+struct MeteredScanner {
+    inner: Arc<dyn agent_core::Scanner>,
+    metrics: Metrics,
+}
+
+#[cfg(feature = "scanner")]
+#[async_trait]
+impl agent_core::Scanner for MeteredScanner {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    async fn scan(&self, kind: agent_core::ScanKind, content: &str) -> Vec<agent_core::Finding> {
+        let span = tracing::info_span!(
+            "scanner.scan",
+            kind = kind.as_str(),
+            findings = tracing::field::Empty,
+            max_severity = tracing::field::Empty,
+        );
+        let start = Instant::now();
+        let findings = self
+            .inner
+            .scan(kind, content)
+            .instrument(span.clone())
+            .await;
+        self.metrics.on_scan(start.elapsed().as_secs_f64());
+        span.record("findings", findings.len());
+        if let Some(worst) = agent_core::max_severity(&findings) {
+            span.record("max_severity", worst.as_str());
+        }
+        for f in &findings {
+            self.metrics
+                .on_scanner_finding(f.severity.as_str(), &f.rule, kind.as_str());
+        }
+        findings
     }
 }

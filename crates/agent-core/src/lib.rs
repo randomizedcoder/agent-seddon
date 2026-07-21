@@ -1836,6 +1836,113 @@ pub trait ContextStrategy: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// Supporting seam: Scanner (content security findings)
+// ---------------------------------------------------------------------------
+//
+// Three streams a coding agent handles carry risk the model cannot police
+// itself: secrets it might write into a file, vulnerable/malicious packages it
+// might install, and poisoned content it might ingest. A `Scanner` turns all
+// three into typed findings at a severity; the `Policy` gate turns a severity
+// into a `Decision`. Detection alone is advisory — detection wired into
+// authorization is a control. See parity spec 18 and `docs/components/scanner.md`.
+
+/// How serious a finding is. Ordered, so a caller can compare against a
+/// configured threshold (`deny_at`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
+    Info,
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+impl Severity {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Severity::Info => "info",
+            Severity::Low => "low",
+            Severity::Medium => "medium",
+            Severity::High => "high",
+            Severity::Critical => "critical",
+        }
+    }
+    /// Parse a config string. Unknown values fall back to `High` — a typo must
+    /// not silently disable the gate.
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "info" => Severity::Info,
+            "low" => Severity::Low,
+            "medium" => Severity::Medium,
+            "critical" => Severity::Critical,
+            _ => Severity::High,
+        }
+    }
+}
+
+/// What kind of content is being scanned. Lets a backend apply only the rules
+/// that make sense (secret rules on a file body, threat rules on fetched web
+/// text) instead of every rule on everything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanKind {
+    /// Arguments the model supplied to a tool call.
+    ToolInput,
+    /// The body of a file about to be written/edited.
+    FileBody,
+    /// Text fetched from the network (`web_fetch`, MCP results).
+    WebContent,
+    /// A dependency lockfile / manifest.
+    Lockfile,
+}
+
+impl ScanKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ScanKind::ToolInput => "tool_input",
+            ScanKind::FileBody => "file_body",
+            ScanKind::WebContent => "web_content",
+            ScanKind::Lockfile => "lockfile",
+        }
+    }
+}
+
+/// One thing a scanner found: which rule fired, how bad, and where.
+///
+/// `span` is a byte range into the scanned content so a caller can point at (or
+/// later redact) the offending substring. The **matched bytes are deliberately
+/// not carried** — a denial reason that echoes them would hand an attacker an
+/// oracle for probing what is gated (see parity spec 08).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Finding {
+    /// Stable dotted rule id, e.g. `secret.aws_access_key`.
+    pub rule: String,
+    pub severity: Severity,
+    /// Coarse category for metrics/denial reasons, e.g. `secret`, `threat`.
+    pub category: &'static str,
+    pub span: std::ops::Range<usize>,
+}
+
+/// Scans untrusted content for security findings.
+///
+/// Implementations must be **fail-open on infrastructure errors** (an
+/// unreachable advisory database must never block a tool call) but **fail-closed
+/// on detection** — a match is a finding, and the caller decides.
+#[async_trait]
+pub trait Scanner: Send + Sync {
+    /// Backend name, used as a metric/span label.
+    fn name(&self) -> &str;
+    /// Findings in `content`, in the order the rules ran. Never errors: a
+    /// backend that cannot run returns no findings rather than failing the call.
+    async fn scan(&self, kind: ScanKind, content: &str) -> Vec<Finding>;
+}
+
+/// The highest severity among `findings`, or `None` when clean.
+pub fn max_severity(findings: &[Finding]) -> Option<Severity> {
+    findings.iter().map(|f| f.severity).max()
+}
+
+// ---------------------------------------------------------------------------
 // Supporting seam: Policy (the tool approval gate)
 // ---------------------------------------------------------------------------
 
