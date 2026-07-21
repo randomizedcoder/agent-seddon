@@ -22,6 +22,10 @@ tool-search-index = []
 tool-git = []
 # The `metrics` tool: lets the agent read its own live performance registry.
 tool-metrics = ["dep:agent-metrics"]
+# The `web_fetch` tool over the WebBackend seam (HTTP GET → sanitized text). The
+# backend is wired by the runtime; this feature only compiles the tool + the
+# dependency-free HTML sanitizer.
+tool-web = []
 # Heap-leak/allocation assertions for tests/leak.rs (dhat global allocator). Off by
 # default; the leak check runs `--features dhat-heap,tool-patch`.
 dhat-heap = ["dep:dhat"]
@@ -53,3 +57,9 @@ required-features = ["tool-patch"]
 name = "edit"
 harness = false
 required-features = ["tool-edit"]
+
+# Deterministic bench for the web_fetch HTML sanitizer (tokenize → markdown/text).
+[[bench]]
+name = "web"
+harness = false
+required-features = ["tool-web"]

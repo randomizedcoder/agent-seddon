@@ -125,4 +125,45 @@ async fn tools_do_not_leak() {
         })
         .await;
     }
+
+    // web_fetch: the fetch → MIME-gate → HTML→markdown sanitize → truncate path.
+    // The sanitizer builds a token vec + output strings each run; assert those
+    // buffers are freed (flat live blocks) across iterations. A local, *non*-
+    // recording backend is used so the double's own state can't read as a leak.
+    #[cfg(feature = "tool-web")]
+    {
+        use agent_core::{Result, WebBackend, WebRequest, WebResponse};
+        use async_trait::async_trait;
+        use std::sync::Arc;
+
+        struct StaticWeb(String);
+        #[async_trait]
+        impl WebBackend for StaticWeb {
+            async fn fetch(&self, req: &WebRequest) -> Result<WebResponse> {
+                Ok(WebResponse {
+                    final_url: req.url.clone(),
+                    status: 200,
+                    content_type: "text/html".into(),
+                    format: req.format,
+                    body: self.0.clone(),
+                    bytes: self.0.len() as u64,
+                })
+            }
+        }
+
+        let html = agent_testkit::bench::html_document(60);
+        let tool = agent_tools::WebFetchTool::new(Arc::new(StaticWeb(html)), 5 << 20, 30, 120, 5);
+        assert_no_leak(6000, || {
+            let tool = &tool;
+            let ctx = &ctx;
+            async move {
+                let obs = tool
+                    .execute(serde_json::json!({ "url": "https://example.com/doc" }), ctx)
+                    .await
+                    .unwrap();
+                assert!(!obs.is_error, "{}", obs.content);
+            }
+        })
+        .await;
+    }
 }

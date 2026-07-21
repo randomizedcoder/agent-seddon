@@ -85,6 +85,15 @@ pub struct Metrics {
     repo_errors: IntCounterVec,
     repo_worktrees: IntGaugeVec,
     repo_fetch_seconds: HistogramVec,
+
+    // --- web (web_fetch seam) ---------------------------------------------
+    // Deliberately NOT labelled by host: the model is untrusted and chooses the
+    // URL, so a host label is an unbounded-cardinality Prometheus DoS vector.
+    // The host lands on the `web.fetch` span (per-trace, not an accumulating
+    // series) instead. Only the outcome is labelled here.
+    web_fetch_total: IntCounterVec,
+    web_fetch_seconds: Histogram,
+    web_fetch_bytes: Histogram,
 }
 
 impl Metrics {
@@ -328,6 +337,26 @@ impl Metrics {
         )
         .unwrap();
 
+        // --- web (recorded by the web metrics wrapper) ------------------------
+        let web_fetch_total = IntCounterVec::new(
+            Opts::new(
+                "agent_web_fetch_total",
+                "web_fetch calls by outcome (ok/error)",
+            ),
+            &["outcome"],
+        )
+        .unwrap();
+        let web_fetch_seconds = Histogram::with_opts(HistogramOpts::new(
+            "agent_web_fetch_seconds",
+            "web_fetch latency (measured at the seam boundary)",
+        ))
+        .unwrap();
+        let web_fetch_bytes = Histogram::with_opts(HistogramOpts::new(
+            "agent_web_fetch_bytes",
+            "web_fetch decoded body size in bytes",
+        ))
+        .unwrap();
+
         let collectors: Vec<Box<dyn prometheus::core::Collector>> = vec![
             Box::new(api_calls.clone()),
             Box::new(api_call_seconds.clone()),
@@ -367,6 +396,9 @@ impl Metrics {
             Box::new(repo_errors.clone()),
             Box::new(repo_worktrees.clone()),
             Box::new(repo_fetch_seconds.clone()),
+            Box::new(web_fetch_total.clone()),
+            Box::new(web_fetch_seconds.clone()),
+            Box::new(web_fetch_bytes.clone()),
         ];
         for m in collectors {
             registry.register(m).expect("register metric");
@@ -412,6 +444,9 @@ impl Metrics {
             repo_errors,
             repo_worktrees,
             repo_fetch_seconds,
+            web_fetch_total,
+            web_fetch_seconds,
+            web_fetch_bytes,
         }
     }
 
@@ -659,6 +694,17 @@ impl Metrics {
         self.repo_fetch_seconds
             .with_label_values(&[backend])
             .observe(seconds);
+    }
+
+    // --- web (web_fetch seam) instrumentation -----------------------------
+
+    /// Record a completed `web_fetch`: outcome (`ok`/`error`), latency, and the
+    /// decoded body size. Not labelled by host (untrusted URL → cardinality DoS);
+    /// the host is a `web.fetch` span attribute instead.
+    pub fn on_web_fetch(&self, outcome: &str, seconds: f64, bytes: u64) {
+        self.web_fetch_total.with_label_values(&[outcome]).inc();
+        self.web_fetch_seconds.observe(seconds);
+        self.web_fetch_bytes.observe(bytes as f64);
     }
 }
 

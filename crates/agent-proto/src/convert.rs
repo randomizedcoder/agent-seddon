@@ -146,6 +146,7 @@ pub fn status_from_error(e: &agent_core::Error) -> tonic::Status {
         Error::Search(m) => tonic::Status::internal(format!("search: {m}")),
         Error::Repo(m) => tonic::Status::internal(format!("repo: {m}")),
         Error::Tokenizer(m) => tonic::Status::internal(format!("tokenizer: {m}")),
+        Error::Web(m) => tonic::Status::internal(format!("web: {m}")),
     }
 }
 

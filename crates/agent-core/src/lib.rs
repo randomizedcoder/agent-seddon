@@ -35,6 +35,8 @@ pub enum Error {
     Repo(String),
     #[error("tokenizer error: {0}")]
     Tokenizer(String),
+    #[error("web error: {0}")]
+    Web(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -349,6 +351,127 @@ pub fn calculate_cost(model: &str, usage: &Usage, prices: &dyn Prices) -> (Cost,
         total: input + output + cache_read + cache_write,
     };
     (cost, status)
+}
+
+// ---------------------------------------------------------------------------
+// Seam: WebBackend (read-only outbound HTTP fetch)
+// ---------------------------------------------------------------------------
+//
+// The agent's one legitimate outbound-network primitive: GET a URL, decode the
+// body to model-friendly text. Because a prompt-injected model controls the URL,
+// the destination is SSRF-screened by the `Policy` guard *before* the fetch, and
+// the body is size/timeout/redirect-capped and sanitized. Concrete backends live
+// in `agent-web` behind a cargo feature; see parity spec 11 and
+// `docs/components/web-fetch.md`.
+
+/// How the fetched body is reduced for the model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WebFormat {
+    /// HTML → markdown (the default); non-HTML bodies pass through as text.
+    Markdown,
+    /// HTML → plain text; non-HTML passes through.
+    Text,
+    /// The raw body, unconverted.
+    Html,
+}
+
+impl WebFormat {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WebFormat::Markdown => "markdown",
+            WebFormat::Text => "text",
+            WebFormat::Html => "html",
+        }
+    }
+}
+
+/// A read-only HTTP fetch request. The caps are part of the request so the seam
+/// (and a remote `= "grpc"` worker) enforces them uniformly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebRequest {
+    pub url: String,
+    pub format: WebFormat,
+    /// Per-request timeout in seconds.
+    pub timeout_secs: u64,
+    /// Reject a body (declared or streamed) larger than this many bytes.
+    pub max_bytes: u64,
+    /// Cap on the redirect chain length.
+    pub max_redirects: u32,
+}
+
+/// The result of a fetch: the final URL after redirects, the raw decoded body,
+/// and metadata for observability. The backend is transport-only — it returns
+/// the decoded text body verbatim; MIME-gating and the HTML→`format` conversion
+/// are applied by the `web_fetch` tool (see `agent-tools`) so the conversion is
+/// unit-testable over a `FakeWebBackend` without a socket. `format` echoes the
+/// request so a caller knows which reduction to apply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebResponse {
+    /// The final URL after following redirects.
+    pub final_url: String,
+    pub status: u16,
+    pub content_type: String,
+    pub format: WebFormat,
+    /// The raw decoded body (UTF-8 lossy). Not yet reduced to `format`.
+    pub body: String,
+    /// Full decoded body length in bytes (before the model-visible preview cap).
+    pub bytes: u64,
+}
+
+/// A replaceable outbound-HTTP backend. `fetch` enforces the request's
+/// size/timeout/redirect caps and returns the raw decoded body; the SSRF
+/// destination screen is applied by the `Policy` guard before the tool calls
+/// this, and MIME-gating + `format` conversion are the tool's job.
+#[async_trait]
+pub trait WebBackend: Send + Sync {
+    async fn fetch(&self, req: &WebRequest) -> Result<WebResponse>;
+}
+
+// --- SSRF IP classification (single source of truth) -----------------------
+//
+// The one definition of "an address a model-driven fetch must never reach",
+// shared by the `Policy` guard's literal pre-flight screen (`agent-runtime`) and
+// the transport's authoritative *resolved-IP* screen (`agent-web`), so the two
+// layers can't drift. Covers loopback, RFC1918 private, link-local (incl. the
+// `169.254.169.254` cloud-metadata address), RFC6598 CGNAT, unspecified,
+// broadcast, multicast, IPv6 unique-local / link-local, and IPv4-mapped IPv6.
+
+/// Is `ip` a private / loopback / link-local / metadata / non-routable address?
+pub fn ip_is_private(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => ipv4_is_private(v4),
+        std::net::IpAddr::V6(v6) => ipv6_is_private(v6),
+    }
+}
+
+/// IPv4 form of [`ip_is_private`].
+pub fn ipv4_is_private(ip: std::net::Ipv4Addr) -> bool {
+    ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_broadcast()
+        || ip.is_multicast()
+        || {
+            // RFC 6598 CGNAT shared space `100.64.0.0/10` (`is_shared` is unstable).
+            let o = ip.octets();
+            o[0] == 100 && (o[1] & 0xc0) == 64
+        }
+}
+
+/// IPv6 form of [`ip_is_private`]. IPv4-mapped addresses are classified by their
+/// embedded v4 so `::ffff:127.0.0.1` can't smuggle a loopback past the screen.
+pub fn ipv6_is_private(ip: std::net::Ipv6Addr) -> bool {
+    if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
+        return true;
+    }
+    if let Some(v4) = ip.to_ipv4_mapped() {
+        return ipv4_is_private(v4);
+    }
+    let seg = ip.segments();
+    (seg[0] & 0xfe00) == 0xfc00 // fc00::/7 unique-local
+        || (seg[0] & 0xffc0) == 0xfe80 // fe80::/10 link-local
 }
 
 // ---------------------------------------------------------------------------

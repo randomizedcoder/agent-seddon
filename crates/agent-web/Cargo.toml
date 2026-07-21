@@ -1,0 +1,32 @@
+[package]
+name = "agent-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# The `local` reqwest-backed transport is the default. A `grpc` fetch worker
+# (`WebService.Fetch`) is reserved for a follow-up, mirroring the tokenizer seam's
+# staging. See docs/components/web-fetch.md and parity spec 11.
+default = ["web-local"]
+# `reqwest/stream` gives `bytes_stream()` so the body cap is enforced on the
+# actual bytes as they arrive, not just the declared content-length. `tokio/net`
+# provides `lookup_host` for the resolved-IP SSRF screen.
+web-local = ["dep:reqwest", "reqwest/stream", "dep:futures-util", "dep:tokio"]
+# Injects a dhat global allocator for the allocation-budget leak test only; never
+# in a normal build. Mirrors the other crates' `dhat-heap` gate.
+dhat-heap = ["dep:dhat"]
+
+[dependencies]
+agent-core.workspace = true
+async-trait.workspace = true
+url.workspace = true
+reqwest = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+dhat = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio.workspace = true
+rstest.workspace = true
+tiny_http.workspace = true

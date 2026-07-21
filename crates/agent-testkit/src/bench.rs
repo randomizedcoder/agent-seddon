@@ -24,6 +24,27 @@ pub fn write_tree(root: &Path, files: &[(&str, &str)]) -> PathBuf {
     root.to_path_buf()
 }
 
+/// A synthetic HTML document of `n` article blocks — each a heading, a paragraph
+/// with inline emphasis + an entity, and a `script`/`style` pair that the
+/// sanitizer must strip. Deterministic input for the `web_fetch`
+/// HTML→markdown/text conversion bench (and larger conversion tests).
+pub fn html_document(n: usize) -> String {
+    let mut s =
+        String::from("<html><head><title>t</title><style>.x{color:red}</style></head><body>");
+    for i in 0..n {
+        s.push_str("<h2>Section ");
+        s.push_str(&i.to_string());
+        s.push_str("</h2><p>Paragraph ");
+        s.push_str(&i.to_string());
+        s.push_str(
+            " with <strong>bold</strong> and <em>italic</em> &amp; entities.</p>\
+             <script>evil()</script>",
+        );
+    }
+    s.push_str("</body></html>");
+    s
+}
+
 /// A synthetic conversation of `n` messages alternating user/assistant, each body
 /// `body_len` bytes of a repeated filler char. Deterministic input for the
 /// context-assembly / compaction benches and window tests.

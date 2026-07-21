@@ -24,6 +24,7 @@ default = [
     "mcp",
     "grpc",
     "subagents",
+    "web",
 ]
 
 # Each feature forwards to the owning impl crate + drives `register_builtins`.
@@ -59,6 +60,9 @@ mcp = ["dep:agent-mcp"]
 grpc = ["dep:agent-grpc"]
 # Expose a `delegate` tool that spawns child agents (isolated context).
 subagents = []
+# The `web_fetch` tool over the WebBackend seam: the local reqwest transport +
+# the tool + the SSRF guard wiring. See parity spec 11.
+web = ["dep:agent-web", "agent-web/web-local", "agent-tools/tool-web"]
 
 [dependencies]
 agent-core.workspace = true
@@ -71,6 +75,7 @@ agent-git = { workspace = true, optional = true }
 agent-memory.workspace = true
 agent-context.workspace = true
 agent-tokenizer = { workspace = true, optional = true }
+agent-web = { workspace = true, optional = true }
 agent-mcp = { workspace = true, optional = true }
 agent-grpc = { workspace = true, optional = true }
 agent-telemetry.workspace = true
@@ -84,6 +89,8 @@ tokio.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
 prometheus.workspace = true
+# Robust URL host/scheme extraction for the SSRF guard (parity spec 11).
+url.workspace = true
 
 [dev-dependencies]
 agent-testkit.workspace = true

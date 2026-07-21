@@ -1,9 +1,10 @@
 //! Policy implementations behind the `Policy` seam — the tool approval gate.
 
-use agent_core::{Decision, Policy, ToolCall};
+use agent_core::{ipv4_is_private, ipv6_is_private, Decision, Policy, ToolCall};
 use agent_metrics::Metrics;
 use async_trait::async_trait;
 use std::sync::Arc;
+use url::Url;
 
 /// Approve every tool call. Convenient for unattended runs / experiments.
 pub struct AutoApprove;
@@ -135,6 +136,7 @@ impl GuardMode {
 /// metric label.
 const CAT_DANGEROUS: &str = "dangerous_command";
 const CAT_SENSITIVE: &str = "sensitive_path";
+const CAT_SSRF: &str = "ssrf_target";
 
 /// Wraps a base policy and screens each call for dangerous shell commands and
 /// writes to sensitive paths *before* the base policy runs. A flagged call is
@@ -145,15 +147,23 @@ pub struct Guard {
     mode: GuardMode,
     deny_paths: Vec<String>,
     allow_paths: Vec<String>,
+    /// `web_fetch` SSRF screen: when `false` (default) private/loopback/link-local
+    /// and cloud-metadata targets are flagged; `true` opts local dev back in.
+    web_allow_private: bool,
+    /// Host globs that bypass the SSRF screen entirely (explicit operator opt-in).
+    web_allow_hosts: Vec<String>,
     metrics: Metrics,
 }
 
 impl Guard {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         base: Arc<dyn Policy>,
         mode: GuardMode,
         deny_paths: Vec<String>,
         allow_paths: Vec<String>,
+        web_allow_private: bool,
+        web_allow_hosts: Vec<String>,
         metrics: Metrics,
     ) -> Self {
         Self {
@@ -161,6 +171,8 @@ impl Guard {
             mode,
             deny_paths,
             allow_paths,
+            web_allow_private,
+            web_allow_hosts,
             metrics,
         }
     }
@@ -177,6 +189,10 @@ impl Policy for Guard {
             .or_else(|| {
                 scan_sensitive_path(call, &self.deny_paths, &self.allow_paths)
                     .map(|r| (CAT_SENSITIVE, r))
+            })
+            .or_else(|| {
+                scan_ssrf(call, self.web_allow_private, &self.web_allow_hosts)
+                    .map(|r| (CAT_SSRF, r))
             });
         let Some((category, reason)) = flag else {
             return self.base.authorize(call).await;
@@ -240,17 +256,28 @@ async fn prompt_operator(call: &ToolCall, reason: &str) -> bool {
 
 /// Build the guard around a base policy from the `[policy]` config. `Off` mode
 /// returns the base policy untouched (no wrapper overhead).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn guard(
     base: Arc<dyn Policy>,
     mode: GuardMode,
     deny_paths: Vec<String>,
     allow_paths: Vec<String>,
+    web_allow_private: bool,
+    web_allow_hosts: Vec<String>,
     metrics: Metrics,
 ) -> Arc<dyn Policy> {
     if mode == GuardMode::Off {
         return base;
     }
-    Arc::new(Guard::new(base, mode, deny_paths, allow_paths, metrics))
+    Arc::new(Guard::new(
+        base,
+        mode,
+        deny_paths,
+        allow_paths,
+        web_allow_private,
+        web_allow_hosts,
+        metrics,
+    ))
 }
 
 /// Screen a `bash` call for a dangerous shell command. Returns a human reason if
@@ -505,6 +532,98 @@ fn path_is_sensitive(path: &str, extra_deny: &[String], allow: &[String]) -> Opt
     None
 }
 
+// ---------------------------------------------------------------------------
+// SSRF screen for the `web_fetch` tool (parity spec 11)
+// ---------------------------------------------------------------------------
+
+/// Hostnames that name an internal/metadata endpoint by DNS name (so the IP
+/// screen alone can't catch them). Always denied unless in the allow-list. This
+/// is a best-effort *pre-flight* list; the authoritative defence is the
+/// transport's resolved-IP screen (`agent-web`), which rejects *any* host whose
+/// resolved address is private/metadata regardless of name.
+const SSRF_DENY_HOSTS: &[&str] = &[
+    "metadata.google.internal",
+    "metadata",
+    "instance-data",
+    "metadata.azure.com", // Azure IMDS is fronted by this name too
+];
+
+/// Screen a `web_fetch` call's target URL. Returns a human reason when the URL is
+/// a non-web scheme, hostless, or resolves (by literal) to a private/loopback/
+/// link-local/metadata endpoint; `None` when it is a public web target.
+fn scan_ssrf(call: &ToolCall, allow_private: bool, allow_hosts: &[String]) -> Option<String> {
+    if call.name != "web_fetch" {
+        return None;
+    }
+    let url = call.arguments.get("url").and_then(|v| v.as_str())?;
+    scan_ssrf_target(url, allow_private, allow_hosts)
+}
+
+/// The pure SSRF **pre-flight** classifier — a fast, synchronous, literal screen
+/// factored out so the adversarial table can drive it directly. `allow_private`
+/// opts private/loopback targets back in; `allow_hosts` globs bypass the screen
+/// for named hosts (explicit operator opt-in).
+///
+/// This is defence-in-depth, **not** the authoritative screen: it catches obvious
+/// literal targets before any work, but a DNS name that resolves to a private
+/// address (and a redirect to one) are caught by the transport's resolved-IP
+/// screen in `agent-web`, which resolves every hop, rejects any private resolved
+/// address, and pins the checked IP to the connection (defeating DNS rebinding).
+///
+/// Robustness note: `Url::parse` follows the WHATWG host parser for the `http(s)`
+/// special schemes, so obfuscated IPv4 literals (decimal `2130706433`, hex
+/// `0x7f.0.0.1`, short `127.1`) and IPv4-mapped IPv6 are normalised to their real
+/// address *before* classification — the classic SSRF-bypass encodings can't slip
+/// a loopback past the screen.
+fn scan_ssrf_target(url: &str, allow_private: bool, allow_hosts: &[String]) -> Option<String> {
+    let parsed = match Url::parse(url) {
+        Ok(u) => u,
+        Err(_) => return Some("invalid URL".into()),
+    };
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
+        return Some(format!(
+            "scheme `{scheme}` not allowed (must use http/https)"
+        ));
+    }
+    let Some(host) = parsed.host() else {
+        return Some("URL has no host".into());
+    };
+    // Explicit operator allow-list bypasses the whole screen (case-insensitive).
+    let host_str = host.to_string().to_lowercase();
+    if allow_hosts
+        .iter()
+        .any(|g| glob_match(&g.to_lowercase(), &host_str))
+    {
+        return None;
+    }
+    match host {
+        // IP literals are classified by the shared `agent-core` predicate — the
+        // one source of truth the transport screen also uses.
+        url::Host::Ipv4(ip) => {
+            if !allow_private && ipv4_is_private(ip) {
+                return Some(format!("private/loopback address (`{ip}`)"));
+            }
+        }
+        url::Host::Ipv6(ip) => {
+            if !allow_private && ipv6_is_private(ip) {
+                return Some(format!("private/loopback address (`{ip}`)"));
+            }
+        }
+        url::Host::Domain(name) => {
+            let lower = name.to_lowercase();
+            if lower == "localhost" || lower.ends_with(".localhost") {
+                if !allow_private {
+                    return Some("loopback host (`localhost`)".into());
+                }
+            } else if SSRF_DENY_HOSTS.contains(&lower.as_str()) {
+                return Some(format!("internal metadata host (`{lower}`)"));
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -701,6 +820,8 @@ mod tests {
             GuardMode::Deny,
             vec![],
             vec![],
+            false,
+            vec![],
             test_metrics(),
         );
         let dec = g.authorize(&bash("rm -rf /")).await;
@@ -716,6 +837,8 @@ mod tests {
             GuardMode::Deny,
             vec![],
             vec![],
+            false,
+            vec![],
             test_metrics(),
         );
         assert_eq!(allow.authorize(&bash("ls")).await, Decision::Allow);
@@ -724,6 +847,8 @@ mod tests {
             Arc::new(AllowList::new(vec![])),
             GuardMode::Deny,
             vec![],
+            vec![],
+            false,
             vec![],
             test_metrics(),
         );
@@ -741,9 +866,111 @@ mod tests {
             GuardMode::Off,
             vec![],
             vec![],
+            false,
+            vec![],
             test_metrics(),
         );
         assert_eq!(g.authorize(&bash("rm -rf /")).await, Decision::Allow);
+    }
+
+    // --- guard: SSRF screen for web_fetch (adversarial) -------------------
+    // The model is untrusted: every `web_fetch` URL is attacker-chosen. The
+    // screen fails CLOSED — a target is public-only if it survives all checks.
+    #[rstest]
+    // adversarial — must be flagged (default: allow_private = false)
+    #[case::adversarial_loopback_v4("http://127.0.0.1/", true)]
+    #[case::adversarial_loopback_name("http://localhost/admin", true)]
+    #[case::adversarial_loopback_sub("http://foo.localhost/", true)]
+    #[case::adversarial_loopback_v6("http://[::1]/", true)]
+    #[case::adversarial_metadata_ip("http://169.254.169.254/latest/meta-data/", true)]
+    #[case::adversarial_metadata_host("http://metadata.google.internal/", true)]
+    #[case::adversarial_link_local("http://169.254.1.1/", true)]
+    #[case::adversarial_rfc1918_10("http://10.0.0.5/", true)]
+    #[case::adversarial_rfc1918_192("http://192.168.1.1/", true)]
+    #[case::adversarial_rfc1918_172("http://172.16.0.1/", true)]
+    #[case::adversarial_cgnat("http://100.64.0.1/", true)]
+    #[case::adversarial_unspecified("http://0.0.0.0/", true)]
+    #[case::adversarial_ula_v6("http://[fc00::1]/", true)]
+    #[case::adversarial_linklocal_v6("http://[fe80::1]/", true)]
+    // adversarial — obfuscated loopback encodings normalise before the screen
+    #[case::adversarial_decimal_ip("http://2130706433/", true)]
+    #[case::adversarial_hex_ip("http://0x7f.0.0.1/", true)]
+    #[case::adversarial_short_ip("http://127.1/", true)]
+    #[case::adversarial_mapped_v6("http://[::ffff:127.0.0.1]/", true)]
+    #[case::adversarial_userinfo("http://user@127.0.0.1/", true)]
+    // adversarial — non-web schemes are refused outright
+    #[case::adversarial_file("file:///etc/passwd", true)]
+    #[case::adversarial_gopher("gopher://127.0.0.1:70/", true)]
+    #[case::adversarial_data("data:text/html,<script>", true)]
+    #[case::negative_ftp("ftp://example.com/x", true)]
+    #[case::corner_garbage("not a url", true)]
+    // positive — legitimate public targets pass
+    #[case::positive_https("https://example.com/page", false)]
+    #[case::positive_http_public("http://93.184.216.34/", false)]
+    #[case::positive_public_v6("http://[2606:2800:220:1::1]/", false)]
+    #[case::positive_subpath("https://api.github.com/repos/x/y", false)]
+    fn scan_ssrf_default(#[case] url: &str, #[case] flagged: bool) {
+        assert_eq!(
+            scan_ssrf_target(url, false, &[]).is_some(),
+            flagged,
+            "url: {url}"
+        );
+    }
+
+    // allow_private = true opts private/loopback IPs back in (local dev), but
+    // cloud-metadata *hostnames* and non-web schemes stay denied.
+    #[rstest]
+    #[case::loopback_now_ok("http://127.0.0.1:8080/", false)]
+    #[case::localhost_now_ok("http://localhost:3000/", false)]
+    #[case::rfc1918_now_ok("http://10.0.0.5/", false)]
+    #[case::metadata_host_still_denied("http://metadata.google.internal/", true)]
+    #[case::file_still_denied("file:///etc/passwd", true)]
+    fn scan_ssrf_allow_private(#[case] url: &str, #[case] flagged: bool) {
+        assert_eq!(
+            scan_ssrf_target(url, true, &[]).is_some(),
+            flagged,
+            "url: {url}"
+        );
+    }
+
+    // An explicit host allow-glob bypasses the screen even with allow_private off.
+    #[rstest]
+    #[case::exact_host("http://127.0.0.1/", vec!["127.0.0.1"], false)]
+    #[case::glob_host("http://svc.internal/", vec!["*.internal"], false)]
+    #[case::case_insensitive("http://LocalHost/", vec!["localhost"], false)]
+    #[case::non_match_still_flagged("http://127.0.0.1/", vec!["10.0.0.1"], true)]
+    fn scan_ssrf_allow_hosts(#[case] url: &str, #[case] hosts: Vec<&str>, #[case] flagged: bool) {
+        let hosts: Vec<String> = hosts.into_iter().map(String::from).collect();
+        assert_eq!(
+            scan_ssrf_target(url, false, &hosts).is_some(),
+            flagged,
+            "url: {url}"
+        );
+    }
+
+    // The screen only applies to `web_fetch` — the same URL as another tool's
+    // arg must not be flagged (no false positives on unrelated calls).
+    #[test]
+    fn scan_ssrf_ignores_non_web_fetch() {
+        let c = call("read_file", json!({ "url": "http://127.0.0.1/" }));
+        assert!(scan_ssrf(&c, false, &[]).is_none());
+    }
+
+    // End-to-end through the Guard: a metadata-IP fetch is denied in Deny mode.
+    #[tokio::test]
+    async fn guard_blocks_ssrf_fetch() {
+        let g = Guard::new(
+            Arc::new(AutoApprove),
+            GuardMode::Deny,
+            vec![],
+            vec![],
+            false,
+            vec![],
+            test_metrics(),
+        );
+        let c = call("web_fetch", json!({ "url": "http://169.254.169.254/" }));
+        let dec = g.authorize(&c).await;
+        assert!(matches!(dec, Decision::Deny(r) if r.contains("blocked by policy guard")));
     }
 
     #[rstest]

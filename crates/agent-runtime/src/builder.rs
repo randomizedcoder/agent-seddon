@@ -98,6 +98,33 @@ pub async fn build_agent_with(
         backend
     };
 
+    // Web: build the WebBackend (local reqwest transport), meter it (per-fetch
+    // span + metrics), and expose the `web_fetch` tool. The SSRF/private-IP screen
+    // is applied by the Policy guard (`[web] allow_private`), not the tool.
+    #[cfg(feature = "web")]
+    {
+        let backend: Arc<dyn agent_core::WebBackend> = match cfg.web.backend.as_str() {
+            "local" => Arc::new(
+                agent_web::LocalWebBackend::new()
+                    .with_ssrf(cfg.web.allow_private, cfg.web.allow_hosts.clone()),
+            ),
+            other => anyhow::bail!("unknown [web] backend `{other}` (only `local` is built in)"),
+        };
+        let backend = crate::metered::web(backend, metrics.clone());
+        let default_timeout = cfg
+            .web
+            .timeout_secs
+            .clamp(1, cfg.web.max_timeout_secs.max(1));
+        let tool = Arc::new(agent_tools::WebFetchTool::new(
+            backend,
+            cfg.web.max_bytes,
+            default_timeout,
+            cfg.web.max_timeout_secs.max(1),
+            cfg.web.max_redirects,
+        ));
+        tools.register(crate::metered::tool(tool, metrics.clone()));
+    }
+
     // Memory: either the whole-store backend, or — when `[memory] semantic` is
     // set — the episodic layer of that backend composed with an independently
     // chosen `SemanticStore` (e.g. a vector store) via `LayeredMemory`.
@@ -150,6 +177,8 @@ pub async fn build_agent_with(
         crate::policy::GuardMode::parse(&cfg.policy.guard),
         cfg.policy.deny_paths.clone(),
         cfg.policy.allow_paths.clone(),
+        cfg.web.allow_private,
+        cfg.web.allow_hosts.clone(),
         metrics.clone(),
     );
     let policy = crate::metered::policy(guarded, metrics.clone(), &cfg.agent.policy);
@@ -263,6 +292,7 @@ fn is_builder_registered_tool(name: &str) -> bool {
         || (cfg!(feature = "search") && (name == "search" || name == "index_ls"))
         || (cfg!(feature = "subagents") && name == "delegate")
         || (cfg!(feature = "git") && name.starts_with("git_"))
+        || (cfg!(feature = "web") && name == "web_fetch")
 }
 
 /// Connect to each configured MCP server, discover its tools, and register them
