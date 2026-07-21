@@ -107,7 +107,7 @@ In-tree: implement `SearchBackend` in `agent-search` (behind a `search-*`
 feature), then register a factory line in `register_builtins`:
 ```rust
 #[cfg(feature = "search-mine")]
-r.search("mine", |cfg| Ok(Arc::new(MyBackend::open(...)?) as Arc<dyn SearchBackend>));
+r.search("mine", |ctx| Ok(Arc::new(MyBackend::open(...)?) as Arc<dyn SearchBackend>));
 ```
 Add `"mine"` to `[search] backends`. Out-of-tree, register on a `Registry` before
 `build_agent_with`. See the general [extension model](../extending.md).

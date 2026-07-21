@@ -51,7 +51,7 @@ The headline capability. Implement `SemanticStore`, register it, and select it â
 the runtime composes it against the file episodic log for you:
 
 ```rust
-registry.semantic("vector", |cfg, provider| Ok(Arc::new(VectorSemantic::new(&cfg.memory.semantic_dir)?)));
+registry.semantic("vector", |ctx| Ok(Arc::new(VectorSemantic::new(&ctx.cfg.memory.semantic_dir)?)));
 ```
 ```toml
 [memory]

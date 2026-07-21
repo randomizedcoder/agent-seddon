@@ -44,6 +44,10 @@ pub struct Metrics {
     // Content security scanning (parity spec 18): findings by severity/rule/kind,
     // and scan latency. Labels are bounded enums + built-in rule ids — never the
     // scanned content.
+    // Prompt-cache anchors placed, by strategy (parity spec 24). Read alongside
+    // `agent_cache_tokens_total` to tell a low hit-rate caused by bad placement
+    // apart from one caused by a merely cold cache.
+    cache_breakpoints: IntCounterVec,
     scanner_findings: IntCounterVec,
     scan_seconds: Histogram,
     content_blocks_dropped: IntCounter,
@@ -193,6 +197,14 @@ impl Metrics {
         let tool_calls = IntCounterVec::new(
             Opts::new("agent_tool_calls_total", "Tool invocations"),
             &["tool", "status"],
+        )
+        .unwrap();
+        let cache_breakpoints = IntCounterVec::new(
+            Opts::new(
+                "agent_cache_breakpoints_total",
+                "Prompt-cache anchors placed, by placement strategy",
+            ),
+            &["strategy"],
         )
         .unwrap();
         let scanner_findings = IntCounterVec::new(
@@ -552,6 +564,7 @@ impl Metrics {
             Box::new(context_tokens.clone()),
             Box::new(context_messages.clone()),
             Box::new(tool_calls.clone()),
+            Box::new(cache_breakpoints.clone()),
             Box::new(scanner_findings.clone()),
             Box::new(scan_seconds.clone()),
             Box::new(content_blocks.clone()),
@@ -620,6 +633,7 @@ impl Metrics {
             context_tokens,
             context_messages,
             tool_calls,
+            cache_breakpoints,
             scanner_findings,
             scan_seconds,
             content_blocks,
@@ -716,6 +730,12 @@ impl Metrics {
     /// Latency of one content scan.
     pub fn on_scan(&self, seconds: f64) {
         self.scan_seconds.observe(seconds);
+    }
+    /// Prompt-cache anchors placed on one request (parity spec 24).
+    pub fn on_cache_breakpoints(&self, strategy: &str, n: u64) {
+        self.cache_breakpoints
+            .with_label_values(&[strategy])
+            .inc_by(n);
     }
     pub fn on_api_call(&self, model: &str, finish_reason: &str, seconds: f64) {
         self.api_calls

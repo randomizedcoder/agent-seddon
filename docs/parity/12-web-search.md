@@ -77,7 +77,7 @@ spec deliberately mirrors it so the two are structurally identical:
   report freshness without refetching.
 - **Registry factory to mirror:** `register_builtins` in
   [`registry.rs`](../../crates/agent-runtime/src/registry.rs) (~line 40:
-  `SearchFactory = Fn(&Config) -> Arc<dyn SearchBackend>`; ~line 140:
+  `SearchFactory = Fn(&FactoryCtx) -> Arc<dyn SearchBackend>`; see also
   `Registry::search`) — a `WebSearchFactory` line per backend, feature-gated,
   config-selected.
 - **Metered decorator to mirror:** `metered::search` in

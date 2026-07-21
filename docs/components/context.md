@@ -25,13 +25,14 @@ injected [context files](runtime.md), recalled [memory](memory.md), and the goal
 `compact` must be **non-destructive** with respect to episodic memory — it only
 trims the live working set; the durable log is never mutated.
 
-## Design note: the factory gets the provider
+## Design note: the factory context
 
-Unlike most seams, the context factory receives the already-built provider —
-`Fn(&Config, &Arc<dyn LlmProvider>) -> ...` — so a strategy like
-`summarizing-window` can call the model to summarize the dropped middle. Strategies
-that don't need it (e.g. `sliding-window`) ignore the second argument. Both share
-the `assemble_messages`/`estimate_tokens` helpers in
+Every seam factory takes one `FactoryCtx`, which carries the config, the shared
+`Metrics`, and — where already built — the provider and tokenizer. The context
+strategy is built after both, so `summarizing-window` can call `ctx.provider()?`
+to summarize the dropped middle and either strategy can take `ctx.tokenizer()` to
+budget with real counts. Strategies that need neither simply ignore them. Both
+share the `assemble_messages`/`estimate_tokens` helpers in
 [`agent-context/src/lib.rs`](../../crates/agent-context/src/lib.rs).
 
 ## Adding your own
@@ -39,7 +40,7 @@ the `assemble_messages`/`estimate_tokens` helpers in
 In-tree: implement `ContextStrategy` in `agent-context` (gate behind a `context-*`
 feature), register a factory + one line in `register_builtins`. Out-of-tree:
 ```rust
-registry.context("map-reduce", |_cfg, provider| Ok(Arc::new(MapReduce::new(provider.clone()))));
+registry.context("map-reduce", |ctx| Ok(Arc::new(MapReduce::new(ctx.provider()?.clone()))));
 ```
 Then `[agent] context = "map-reduce"`. See the general
 [extension model](../extending.md).
