@@ -63,6 +63,7 @@ fn req() -> CompletionRequest {
         tools: vec![],
         max_tokens: 16,
         temperature: 0.0,
+        response_format: None,
     }
 }
 

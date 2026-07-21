@@ -60,6 +60,10 @@ pub struct Agent {
     /// The git backend, if the `git` seam is wired. Held so it can be hosted over
     /// gRPC (`agent --serve-git`); the loop reaches it through the `git_*` tools.
     repo: Option<Arc<dyn agent_core::RepoBackend>>,
+    /// The (metered) structured-output validator, if the `structured` seam is
+    /// wired. Reached via [`Agent::complete_structured`] (parity spec 16).
+    #[cfg(feature = "structured")]
+    validator: Option<Arc<dyn agent_core::OutputSchema>>,
 }
 
 impl Agent {
@@ -83,6 +87,8 @@ impl Agent {
             settings,
             search: None,
             repo: None,
+            #[cfg(feature = "structured")]
+            validator: None,
         }
     }
 
@@ -90,6 +96,39 @@ impl Agent {
     pub fn with_search(mut self, search: Arc<dyn agent_core::SearchBackend>) -> Self {
         self.search = Some(search);
         self
+    }
+
+    /// Attach the structured-output validator (parity spec 16).
+    #[cfg(feature = "structured")]
+    pub fn with_validator(mut self, validator: Arc<dyn agent_core::OutputSchema>) -> Self {
+        self.validator = Some(validator);
+        self
+    }
+
+    /// Run a schema-constrained completion with a bounded one-shot repair loop:
+    /// attach `schema`, validate the model's JSON, and repair up to `max_repairs`
+    /// times before erroring. Steers natively when the provider supports it, else
+    /// injects the schema into the prompt. See `docs/components/structured-output.md`.
+    #[cfg(feature = "structured")]
+    pub async fn complete_structured(
+        &self,
+        request: agent_core::CompletionRequest,
+        schema: &serde_json::Value,
+        max_repairs: usize,
+    ) -> anyhow::Result<serde_json::Value> {
+        let validator = self
+            .validator
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("structured output is not configured"))?;
+        Ok(crate::structured::complete_structured(
+            self.provider.as_ref(),
+            validator.as_ref(),
+            request,
+            schema,
+            max_repairs,
+            &self.metrics,
+        )
+        .await?)
     }
 
     /// Attach the git backend (so `--serve-git` can host it).
@@ -201,6 +240,9 @@ impl Agent {
                 tools: tool_schemas.to_vec(),
                 max_tokens: self.settings.max_tokens,
                 temperature: self.settings.temperature,
+                // The main loop uses free-text completions; structured output is a
+                // separate helper path (parity spec 16).
+                response_format: None,
             };
 
             let call_start = Instant::now();

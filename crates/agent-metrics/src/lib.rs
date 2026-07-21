@@ -100,6 +100,11 @@ pub struct Metrics {
     // (completed + cancelled), refreshed on every write/update/clear.
     tasks_open: IntGauge,
     tasks_closed: IntGauge,
+
+    // --- structured output (OutputSchema seam) ----------------------------
+    // Per-completion outcome (pass / repaired / exhausted) + validation latency.
+    structured_total: IntCounterVec,
+    structured_validate_seconds: Histogram,
 }
 
 impl Metrics {
@@ -375,6 +380,21 @@ impl Metrics {
         )
         .unwrap();
 
+        // --- structured output (recorded by the structured helper) ------------
+        let structured_total = IntCounterVec::new(
+            Opts::new(
+                "agent_structured_total",
+                "Structured completions by outcome (pass/repaired/exhausted)",
+            ),
+            &["outcome"],
+        )
+        .unwrap();
+        let structured_validate_seconds = Histogram::with_opts(HistogramOpts::new(
+            "agent_structured_validate_seconds",
+            "OutputSchema validation latency",
+        ))
+        .unwrap();
+
         let collectors: Vec<Box<dyn prometheus::core::Collector>> = vec![
             Box::new(api_calls.clone()),
             Box::new(api_call_seconds.clone()),
@@ -419,6 +439,8 @@ impl Metrics {
             Box::new(web_fetch_bytes.clone()),
             Box::new(tasks_open.clone()),
             Box::new(tasks_closed.clone()),
+            Box::new(structured_total.clone()),
+            Box::new(structured_validate_seconds.clone()),
         ];
         for m in collectors {
             registry.register(m).expect("register metric");
@@ -469,6 +491,8 @@ impl Metrics {
             web_fetch_bytes,
             tasks_open,
             tasks_closed,
+            structured_total,
+            structured_validate_seconds,
         }
     }
 
@@ -736,6 +760,17 @@ impl Metrics {
     pub fn set_tasks_progress(&self, open: i64, closed: i64) {
         self.tasks_open.set(open);
         self.tasks_closed.set(closed);
+    }
+
+    // --- structured output (OutputSchema seam) instrumentation ------------
+
+    /// Count a completed structured request by outcome (`pass`/`repaired`/`exhausted`).
+    pub fn on_structured_outcome(&self, outcome: &str) {
+        self.structured_total.with_label_values(&[outcome]).inc();
+    }
+    /// Record one schema-validation's latency (per attempt).
+    pub fn on_structured_validate(&self, seconds: f64) {
+        self.structured_validate_seconds.observe(seconds);
     }
 }
 

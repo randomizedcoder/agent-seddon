@@ -1,0 +1,28 @@
+[package]
+name = "agent-validate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# The dependency-free draft-07-subset validator is the default — no external
+# jsonschema crate, so the build stays hermetic. See parity spec 16.
+default = ["validate-draft07"]
+validate-draft07 = []
+# Injects a dhat global allocator for the allocation-budget leak test only.
+dhat-heap = ["dep:dhat"]
+
+[dependencies]
+agent-core.workspace = true
+serde_json.workspace = true
+dhat = { workspace = true, optional = true }
+
+[dev-dependencies]
+rstest.workspace = true
+iai-callgrind.workspace = true
+
+# Deterministic instruction-count bench for the validator (the CPU hot path).
+[[bench]]
+name = "validate"
+harness = false
+required-features = ["validate-draft07"]

@@ -142,6 +142,7 @@ impl LlmProvider for AnthropicProvider {
         ModelCapabilities {
             supports_tools: true,
             context_window: self.context_window,
+            supports_response_format: false,
         }
     }
 

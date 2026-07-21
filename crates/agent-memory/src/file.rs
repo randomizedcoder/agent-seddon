@@ -189,6 +189,7 @@ impl SemanticStore for FileSemantic {
             tools: Vec::new(),
             max_tokens: 1024,
             temperature: 0.0,
+            response_format: None,
         };
         let resp = provider
             .complete(req)

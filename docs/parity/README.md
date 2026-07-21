@@ -71,7 +71,7 @@ Legend: ✅ merged · 🔶 in review · ⬜ spec written, not started.
 | 13 | [diagnostics / LSP](13-diagnostics-lsp.md) | ⬜ | Superset seam: hermes has diagnostics-only, opencode navigation-only — we unify both **+ `rename`** behind one gRPC seam |
 | 14 | [`sandbox`](14-sandbox.md) | ⬜ | **`nix` backend** — deterministic, content-addressed, reproducible isolation from the repo's own hermetic flake (peers use mutable images) |
 | 15 | [semantic / embeddings search](15-semantic-search.md) | ⬜ | `Embedder` seam + vector backend fused with BM25 via existing `DispatchSearch` (hybrid); also upgrades keyword-only memory recall |
-| 16 | [structured output](16-structured-output.md) | ⬜ | `OutputSchema` seam with **bounded one-shot repair** (peers validate or raise, none repair); proto-typed schema + verdict over gRPC |
+| 16 | [structured output](16-structured-output.md) | ✅ `OutputSchema` seam + dependency-free draft-07-subset validator + `response_format` request contract + **bounded one-shot repair loop** (`Agent::complete_structured`; peers validate or raise, none repair); outcome metrics + `structured.validate`/`repair` spans; validator bench + leak. Native `response_format` + gRPC `Validator` deferred | — |
 | 17 | [`@`-reference resolution](17-reference-resolution.md) | ⬜ | Typed refs resolved *through* the Search/Repo/LSP/Web seams; injection-scanned `@url`, size-budgeted expansion |
 | 18 | [security scanner](18-security-scanner.md) | ⬜ | `Scanner` seam (secrets + OSV + threat-patterns) feeding a severity→`Policy` `Decision`; generalizes the memory injection scan |
 

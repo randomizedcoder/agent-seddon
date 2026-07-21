@@ -472,6 +472,7 @@ pub fn register_builtins(r: &mut Registry) {
             let caps = agent_core::ModelCapabilities {
                 supports_tools: true,
                 context_window: cfg.agent.context_window,
+                supports_response_format: false,
             };
             Ok(
                 Arc::new(agent_grpc::client::GrpcProvider::connect(&ep, caps)?)
