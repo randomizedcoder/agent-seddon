@@ -49,6 +49,36 @@ pub struct Config {
     pub reference: ReferenceCfg,
     #[serde(default)]
     pub scanner: ScannerCfg,
+    #[serde(default)]
+    pub cache: CacheCfg,
+}
+
+/// Prompt-cache breakpoint placement (the `CacheStrategy` seam, parity spec 24).
+/// `strategy` = "stable-prefix" (default) | "tail-window" | "off". Placement is a
+/// no-op on providers with no prompt cache. See docs/components/prompt-cache.md.
+#[derive(Debug, Deserialize)]
+pub struct CacheCfg {
+    #[serde(default = "default_cache_strategy")]
+    pub strategy: String,
+    /// `tail-window` only: how far back from the newest message to anchor.
+    #[serde(default = "default_cache_tail_back")]
+    pub tail_back: usize,
+}
+
+impl Default for CacheCfg {
+    fn default() -> Self {
+        Self {
+            strategy: default_cache_strategy(),
+            tail_back: default_cache_tail_back(),
+        }
+    }
+}
+
+fn default_cache_strategy() -> String {
+    "stable-prefix".to_string()
+}
+fn default_cache_tail_back() -> usize {
+    2
 }
 
 /// Content security scanning (the `Scanner` seam, parity spec 18). Findings feed
@@ -940,6 +970,7 @@ impl Config {
             session: SessionCfg::default(),
             reference: ReferenceCfg::default(),
             scanner: ScannerCfg::default(),
+            cache: CacheCfg::default(),
         }
     }
 }

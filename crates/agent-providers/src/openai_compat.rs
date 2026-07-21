@@ -14,6 +14,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 pub struct OpenAiCompatConfig {
@@ -39,6 +40,8 @@ pub struct OpenAiCompatProvider {
     api_key: String,
     context_window: u32,
     supports_vision: bool,
+    /// Prompt-cache placement policy (parity spec 24). `None` ⇒ no cache key.
+    cache: Option<Arc<dyn agent_core::CacheStrategy>>,
     retry: agent_retry::RetryPolicy,
 }
 
@@ -57,8 +60,15 @@ impl OpenAiCompatProvider {
             api_key: cfg.api_key,
             context_window: cfg.context_window,
             supports_vision: cfg.supports_vision,
+            cache: None,
             retry: agent_retry::RetryPolicy::new(cfg.max_retries),
         })
+    }
+
+    /// Attach the prompt-cache placement strategy.
+    pub fn with_cache_strategy(mut self, s: Arc<dyn agent_core::CacheStrategy>) -> Self {
+        self.cache = Some(s);
+        self
     }
 
     /// POST the request body via the canonical retry driver (shared by
@@ -124,7 +134,18 @@ impl OpenAiCompatProvider {
             max_tokens: req.max_tokens,
             temperature: req.temperature,
             stream,
+            prompt_cache_key: self.cache_key(req),
         }
+    }
+
+    /// A stable cache key from the configured strategy, if any. This family
+    /// caches prefixes automatically; the key only steers routing affinity.
+    fn cache_key(&self, req: &CompletionRequest) -> Option<String> {
+        let strategy = self.cache.as_ref()?;
+        let shape = agent_core::PromptShape::new(true, req.tools.len(), &req.messages);
+        strategy
+            .place(&shape, &agent_core::CacheCapabilities::openai())
+            .cache_key
     }
 }
 
@@ -388,6 +409,10 @@ struct WireReq<'a> {
     temperature: f32,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     stream: bool,
+    /// Routing affinity for the provider's automatic prefix cache (parity spec
+    /// 24). Omitted when no strategy is wired, so the body is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_key: Option<String>,
 }
 
 /// Render message content for the wire. A text-only message stays a plain

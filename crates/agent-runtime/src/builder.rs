@@ -551,6 +551,11 @@ pub(crate) fn openai_compat_provider(
         supports_vision: cfg.provider.supports_vision,
     })
     .map_err(|e| anyhow::anyhow!("building provider: {e}"))?;
+    #[cfg(feature = "cache")]
+    let provider = match build_cache_strategy(cfg)? {
+        Some(s) => provider.with_cache_strategy(s),
+        None => provider,
+    };
     Ok(Arc::new(provider))
 }
 
@@ -573,6 +578,11 @@ pub(crate) fn anthropic_provider(cfg: &Config) -> anyhow::Result<Arc<dyn agent_c
         max_retries: cfg.provider.max_retries,
     })
     .map_err(|e| anyhow::anyhow!("building provider: {e}"))?;
+    #[cfg(feature = "cache")]
+    let provider = match build_cache_strategy(cfg)? {
+        Some(s) => provider.with_cache_strategy(s),
+        None => provider,
+    };
     Ok(Arc::new(provider))
 }
 
@@ -767,4 +777,22 @@ fn build_scanner(
         scanner,
         agent_core::Severity::parse(&cfg.scanner.deny_at),
     )))
+}
+
+/// Build the config-selected prompt-cache placement strategy (parity spec 24).
+/// `"off"` ⇒ `None`, and the request body is byte-identical to a build without
+/// this feature.
+#[cfg(feature = "cache")]
+pub(crate) fn build_cache_strategy(
+    cfg: &Config,
+) -> anyhow::Result<Option<Arc<dyn agent_core::CacheStrategy>>> {
+    let inner: Arc<dyn agent_core::CacheStrategy> = match cfg.cache.strategy.as_str() {
+        "off" => return Ok(None),
+        "stable-prefix" => Arc::new(agent_cache::StablePrefix),
+        "tail-window" => Arc::new(agent_cache::TailWindow::new(cfg.cache.tail_back)),
+        other => {
+            anyhow::bail!("unknown [cache] strategy `{other}` (stable-prefix|tail-window|off)")
+        }
+    };
+    Ok(Some(crate::metered::cache(inner)))
 }

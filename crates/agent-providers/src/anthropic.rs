@@ -16,6 +16,7 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 pub struct AnthropicConfig {
@@ -37,6 +38,8 @@ pub struct AnthropicProvider {
     api_key: String,
     version: String,
     context_window: u32,
+    /// Prompt-cache placement policy (parity spec 24). `None` ⇒ no anchors.
+    cache: Option<Arc<dyn agent_core::CacheStrategy>>,
     retry: agent_retry::RetryPolicy,
 }
 
@@ -54,14 +57,27 @@ impl AnthropicProvider {
             api_key: cfg.api_key,
             version: cfg.version,
             context_window: cfg.context_window,
+            cache: None,
             retry: agent_retry::RetryPolicy::new(cfg.max_retries),
         })
     }
 
+    /// Attach the prompt-cache placement strategy.
+    pub fn with_cache_strategy(mut self, s: Arc<dyn agent_core::CacheStrategy>) -> Self {
+        self.cache = Some(s);
+        self
+    }
+
     /// Build the JSON request body from a normalized `CompletionRequest`.
     fn build_body(&self, req: &CompletionRequest, stream: bool) -> Value {
-        let (system, messages) = to_anthropic_messages(&req.messages);
-        let tools: Vec<Value> = req
+        let (system, mut messages, index_map) = to_anthropic_messages(&req.messages);
+
+        // Prompt-cache anchors (parity spec 24). Placement is a policy: the
+        // strategy decides *where*, this adapter only serializes the decision
+        // into the vendor's `cache_control` shape.
+        let marks = self.cache_marks(req, !system.is_empty());
+
+        let mut tools: Vec<Value> = req
             .tools
             .iter()
             .map(|t| {
@@ -72,6 +88,39 @@ impl AnthropicProvider {
                 })
             })
             .collect();
+        // Anchoring the LAST tool def caches the whole tool block before it.
+        if marks.tools {
+            if let Some(last) = tools.last_mut() {
+                last["cache_control"] = ephemeral();
+            }
+        }
+        // A marked message anchors its final content block — translated from the
+        // input index the strategy used into the wire index it actually landed
+        // in. The volatile tail's wire message is never anchored, even if
+        // coalescing merged a stable message into it: anchoring a prefix that
+        // changes next turn pays the write premium for a read that never comes.
+        let tail_wire = req
+            .messages
+            .len()
+            .checked_sub(1)
+            .and_then(|t| index_map.get(t).copied().flatten());
+        for &idx in &marks.messages {
+            let Some(wire_idx) = index_map.get(idx).copied().flatten() else {
+                continue; // a system message, already folded into `system`
+            };
+            if Some(wire_idx) == tail_wire {
+                continue;
+            }
+            if let Some(blocks) = messages
+                .get_mut(wire_idx)
+                .and_then(|m| m.get_mut("content"))
+                .and_then(|c| c.as_array_mut())
+            {
+                if let Some(last) = blocks.last_mut() {
+                    last["cache_control"] = ephemeral();
+                }
+            }
+        }
 
         let mut body = json!({
             "model": self.model,
@@ -83,12 +132,30 @@ impl AnthropicProvider {
             body["stream"] = Value::Bool(true);
         }
         if !system.is_empty() {
-            body["system"] = Value::String(system);
+            // A cache anchor can only ride on a content block, so an anchored
+            // system prompt is serialized as a one-element block array. Without
+            // an anchor it stays a plain string — byte-identical to before, so
+            // nothing changes for a non-caching setup.
+            body["system"] = if marks.system {
+                json!([{ "type": "text", "text": system, "cache_control": ephemeral() }])
+            } else {
+                Value::String(system)
+            };
         }
         if !tools.is_empty() {
             body["tools"] = Value::Array(tools);
         }
         body
+    }
+
+    /// Ask the configured strategy where the anchors go. No strategy ⇒ no marks,
+    /// and the body is byte-identical to the pre-spec-24 shape.
+    fn cache_marks(&self, req: &CompletionRequest, has_system: bool) -> agent_core::CacheMarks {
+        let Some(strategy) = &self.cache else {
+            return agent_core::CacheMarks::default();
+        };
+        let shape = agent_core::PromptShape::new(has_system, req.tools.len(), &req.messages);
+        strategy.place(&shape, &agent_core::CacheCapabilities::anthropic())
     }
 
     /// Fire the request via the canonical retry driver (shared by complete/stream):
@@ -364,6 +431,11 @@ struct SseUsage {
     cache_creation_input_tokens: u32,
 }
 
+/// The cache-anchor marker this API expects.
+fn ephemeral() -> Value {
+    json!({ "type": "ephemeral" })
+}
+
 /// One `ContentBlock` in the Messages API's own envelope. Images use a base64
 /// `source`; documents ride the `document` block where the API accepts them, and
 /// otherwise degrade to a text note rather than erroring the whole request.
@@ -418,9 +490,16 @@ fn wire_blocks(blocks: &[ContentBlock]) -> Vec<Value> {
 /// System-role messages are concatenated into the top-level system prompt; the
 /// rest become user/assistant turns with typed content blocks, coalescing
 /// consecutive same-role turns into one message (required by the API).
-fn to_anthropic_messages(messages: &[Message]) -> (String, Vec<Value>) {
+fn to_anthropic_messages(messages: &[Message]) -> (String, Vec<Value>, Vec<Option<usize>>) {
     let mut system_parts: Vec<String> = Vec::new();
     let mut out: Vec<Value> = Vec::new();
+    // For each INPUT message, which wire message it ends up in — `None` for a
+    // system message (extracted to the top-level `system` field). Wire indices
+    // are not input indices: system messages are removed and consecutive
+    // same-role turns are coalesced, so a cache anchor placed by input index
+    // would land on the wrong message (and, in the worst case, on the volatile
+    // tail — exactly the mistake prompt caching must avoid).
+    let mut map: Vec<Option<usize>> = Vec::with_capacity(messages.len());
     // The role ("user"/"assistant") and accumulated content blocks of the
     // message currently being built.
     let mut cur_role: Option<&'static str> = None;
@@ -435,8 +514,12 @@ fn to_anthropic_messages(messages: &[Message]) -> (String, Vec<Value>) {
     };
 
     for m in messages {
+        // The in-progress message will be pushed at `out.len()` when it flushes;
+        // role-change flushes happen inside `push_role` *before* blocks are
+        // added, so this is the correct destination index.
         match m.role {
             Role::System => {
+                map.push(None);
                 // The system prompt is a plain string in this API — media cannot
                 // ride there, so only the text contributes.
                 let text = m.content_text();
@@ -446,6 +529,7 @@ fn to_anthropic_messages(messages: &[Message]) -> (String, Vec<Value>) {
             }
             Role::User => {
                 push_role(&mut cur_role, "user", &mut cur_blocks, &mut out, &flush);
+                map.push(Some(out.len()));
                 cur_blocks.extend(wire_blocks(&m.content));
             }
             Role::Assistant => {
@@ -456,6 +540,7 @@ fn to_anthropic_messages(messages: &[Message]) -> (String, Vec<Value>) {
                     &mut out,
                     &flush,
                 );
+                map.push(Some(out.len()));
                 cur_blocks.extend(wire_blocks(&m.content));
                 for tc in &m.tool_calls {
                     cur_blocks.push(json!({
@@ -472,6 +557,7 @@ fn to_anthropic_messages(messages: &[Message]) -> (String, Vec<Value>) {
                 // that produced an image (a screenshot, `read_file` of a PNG)
                 // forwards it instead of flattening to text.
                 push_role(&mut cur_role, "user", &mut cur_blocks, &mut out, &flush);
+                map.push(Some(out.len()));
                 let result: Vec<Value> = wire_blocks(&m.content);
                 cur_blocks.push(json!({
                     "type": "tool_result",
@@ -488,7 +574,7 @@ fn to_anthropic_messages(messages: &[Message]) -> (String, Vec<Value>) {
         }
     }
 
-    (system_parts.join("\n\n"), out)
+    (system_parts.join("\n\n"), out, map)
 }
 
 /// Switch the current message to `role`, flushing the previous one first when the
@@ -623,14 +709,15 @@ mod tests {
         #[case] out_len: usize,
     ) {
         let built: Vec<Message> = msgs.into_iter().map(|(r, c)| msg(r, c)).collect();
-        let (sys, out) = to_anthropic_messages(&built);
+        let (sys, out, _) = to_anthropic_messages(&built);
         assert_eq!(sys, system);
         assert_eq!(out.len(), out_len);
     }
 
     #[test]
     fn to_anthropic_messages_first_is_user_text_block() {
-        let (_s, out) = to_anthropic_messages(&[msg(Role::System, "bot"), msg(Role::User, "hi")]);
+        let (_s, out, _) =
+            to_anthropic_messages(&[msg(Role::System, "bot"), msg(Role::User, "hi")]);
         assert_eq!(out[0]["role"], "user");
         assert_eq!(out[0]["content"][0]["type"], "text");
         assert_eq!(out[0]["content"][0]["text"], "hi");
@@ -686,7 +773,7 @@ mod tests {
                 ContentBlock::image("image/png", TINY_PNG),
             ],
         );
-        let (_sys, out) = to_anthropic_messages(&[m]);
+        let (_sys, out, _) = to_anthropic_messages(&[m]);
         assert_eq!(out.len(), 1);
         let blocks = out[0]["content"].as_array().expect("content is an array");
         assert_eq!(blocks.len(), 2);
@@ -710,7 +797,7 @@ mod tests {
                 ContentBlock::image("image/png", TINY_PNG),
             ],
         );
-        let (_sys, out) = to_anthropic_messages(&[m]);
+        let (_sys, out, _) = to_anthropic_messages(&[m]);
         let result = &out[0]["content"][0];
         assert_eq!(result["type"], "tool_result");
         let inner = result["content"].as_array().expect("block array");
@@ -725,7 +812,7 @@ mod tests {
             Role::User,
             vec![ContentBlock::text(""), ContentBlock::text("real")],
         );
-        let (_sys, out) = to_anthropic_messages(&[m]);
+        let (_sys, out, _) = to_anthropic_messages(&[m]);
         let blocks = out[0]["content"].as_array().unwrap();
         assert_eq!(blocks.len(), 1, "the empty text block must be dropped");
         assert_eq!(blocks[0]["text"], "real");
@@ -756,7 +843,7 @@ mod tests {
             Message::tool("a", "file1\nfile2"),
             Message::tool("b", "contents"),
         ];
-        let (_system, out) = to_anthropic_messages(&msgs);
+        let (_system, out, _) = to_anthropic_messages(&msgs);
         // user(go) | assistant(text+2 tool_use) | user(2 tool_result, coalesced)
         assert_eq!(out.len(), 3);
         assert_eq!(out[1]["role"], "assistant");
@@ -767,5 +854,154 @@ mod tests {
         assert_eq!(out[2]["content"].as_array().unwrap().len(), 2);
         assert_eq!(out[2]["content"][0]["type"], "tool_result");
         assert_eq!(out[2]["content"][0]["tool_use_id"], "a");
+    }
+
+    // --- spec 24: prompt-cache serialization ------------------------------
+
+    fn req_with(tools: usize, msgs: Vec<Message>) -> CompletionRequest {
+        CompletionRequest {
+            messages: msgs,
+            tools: (0..tools)
+                .map(|i| agent_core::ToolSchema {
+                    name: format!("tool{i}"),
+                    description: "d".into(),
+                    parameters: json!({}),
+                })
+                .collect(),
+            max_tokens: 100,
+            temperature: 0.0,
+            response_format: None,
+        }
+    }
+
+    fn provider() -> AnthropicProvider {
+        AnthropicProvider::new(AnthropicConfig {
+            base_url: "https://example.test/v1".into(),
+            model: "m".into(),
+            api_key: "k".into(),
+            version: "2023-06-01".into(),
+            context_window: 100_000,
+            max_retries: 0,
+        })
+        .expect("provider")
+    }
+
+    /// With a strategy wired, the system prompt becomes a block array carrying
+    /// the anchor, and the last tool def is anchored too.
+    #[test]
+    fn positive_cache_control_lands_on_system_and_last_tool() {
+        let p = provider().with_cache_strategy(Arc::new(agent_cache::StablePrefix));
+        let req = req_with(
+            3,
+            vec![
+                Message::system("SYS"),
+                Message::user("a"),
+                Message::assistant("b"),
+                Message::user("c"),
+            ],
+        );
+        let body = p.build_body(&req, false);
+
+        let sys = body["system"].as_array().expect("system is a block array");
+        assert_eq!(sys[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(sys[0]["text"], "SYS");
+
+        let tools = body["tools"].as_array().unwrap();
+        assert!(
+            tools[0].get("cache_control").is_none(),
+            "only the LAST tool def is anchored"
+        );
+        assert_eq!(tools[2]["cache_control"]["type"], "ephemeral");
+    }
+
+    /// Without a strategy the body must be byte-identical to the pre-spec-24
+    /// shape — `system` stays a plain string, nothing carries `cache_control`.
+    #[test]
+    fn negative_no_strategy_leaves_body_unchanged() {
+        let req = req_with(2, vec![Message::system("SYS"), Message::user("a")]);
+        let body = provider().build_body(&req, false);
+        assert!(
+            body["system"].is_string(),
+            "system must stay a plain string"
+        );
+        assert!(
+            !serde_json::to_string(&body)
+                .unwrap()
+                .contains("cache_control"),
+            "no anchors may be emitted: {body}"
+        );
+    }
+
+    /// The volatile tail must never carry an anchor on the wire.
+    #[test]
+    fn negative_tail_message_is_never_anchored_on_the_wire() {
+        let p = provider().with_cache_strategy(Arc::new(agent_cache::StablePrefix));
+        let req = req_with(
+            1,
+            vec![
+                Message::system("SYS"),
+                Message::user("old"),
+                Message::assistant("mid"),
+                Message::user("NEWEST"),
+            ],
+        );
+        let body = p.build_body(&req, false);
+        let msgs = body["messages"].as_array().unwrap();
+        let last = msgs.last().unwrap();
+        let blocks = last["content"].as_array().unwrap();
+        for b in blocks {
+            assert!(
+                b.get("cache_control").is_none(),
+                "the newest turn must not be anchored: {last}"
+            );
+        }
+    }
+
+    /// Never exceed the provider's documented four-anchor limit.
+    #[test]
+    fn boundary_at_most_four_anchors_on_the_wire() {
+        let p = provider().with_cache_strategy(Arc::new(agent_cache::StablePrefix));
+        let mut msgs = vec![Message::system("SYS")];
+        for i in 0..20 {
+            msgs.push(Message::user(format!("m{i}")));
+        }
+        let body = p.build_body(&req_with(10, msgs), false);
+        let n = serde_json::to_string(&body)
+            .unwrap()
+            .matches("cache_control")
+            .count();
+        assert!(n <= 4, "emitted {n} anchors, provider allows 4");
+    }
+
+    /// Regression: wire indices are NOT input indices. System messages are
+    /// extracted and consecutive same-role turns are coalesced, so an anchor
+    /// placed by input index lands on the wrong wire message — and here, on the
+    /// volatile tail. Both effects are exercised: a leading system message
+    /// shifts every index, and two trailing user turns merge into one.
+    #[test]
+    fn adversarial_coalescing_never_anchors_the_tail_message() {
+        let p = provider().with_cache_strategy(Arc::new(agent_cache::StablePrefix));
+        let req = req_with(
+            1,
+            vec![
+                Message::system("SYS"),  // extracted -> shifts indices
+                Message::user("older"),  // } these two coalesce
+                Message::user("NEWEST"), // } into ONE wire message
+            ],
+        );
+        let body = p.build_body(&req, false);
+        let msgs = body["messages"].as_array().unwrap();
+        let last = msgs.last().unwrap();
+        let text = serde_json::to_string(last).unwrap();
+        assert!(
+            text.contains("NEWEST"),
+            "expected the merged tail message: {text}"
+        );
+        for b in last["content"].as_array().unwrap() {
+            assert!(
+                b.get("cache_control").is_none(),
+                "a message containing the volatile tail must not be anchored: {text}"
+            );
+        }
     }
 }

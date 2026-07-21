@@ -7,7 +7,30 @@ stable prefix on every turn. Tracks what agent-seddon ships today, what the peer
 assert, and the concrete behaviour + tests needed to be the most complete of the
 four.
 
-> **Status: spec (design of record).** Introduces a new **`CacheStrategy` seam**
+> **Status: implemented** (`CacheStrategy` seam + `agent-cache` with
+> `StablePrefix`/`TailWindow`, Anthropic `cache_control` serialization, OpenAI
+> `prompt_cache_key`, config + span + bench + leak; doc in
+> `docs/components/prompt-cache.md`). Departures from the plan below: **the
+> provider holds the strategy** rather than the loop threading marks through
+> `CompletionRequest` — placement depends on provider capabilities, which the
+> provider knows, and it avoids touching 26 request-literal sites; this mirrors
+> how `bash` receives the `Sandbox`. Observability is **span-only**
+> (`cache.place`): the registry's provider factories are `Fn(&Config)` with no
+> `Metrics` handle, and the cost-relevant numbers (cache-read/write tokens, hence
+> hit-rate and tokens-saved) are already metered from `Usage` by spec 23.
+>
+> Implementation note worth carrying forward: wire indices are **not** input
+> indices — `to_anthropic_messages` extracts system messages and coalesces
+> same-role turns, so anchoring by input index lands on the wrong message and, in
+> the common case, directly on the volatile tail. Valid JSON, silently destroyed
+> hit rate. The converter now returns an input→wire map and placement refuses to
+> anchor the tail's wire message; both are regression-tested.
+>
+> **Deferred:** the compaction cost/benefit policy (the strategy *sees*
+> `compacted`, but nothing decides whether to compact based on cache value), the
+> 1-hour TTL tier, and per-provider anchor dialects beyond Anthropic/OpenAI.
+>
+> Original plan follows. Introduces a new **`CacheStrategy` seam**
 > in `agent-core` — `place_breakpoints(assembled_prompt) -> marked_prompt` — that
 > annotates the model-ready message list with cache anchors *after* assembly but
 > *before* the provider serializes the wire request. The provider (Anthropic

@@ -1836,6 +1836,136 @@ pub trait ContextStrategy: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// Supporting seam: CacheStrategy (prompt-cache breakpoint placement)
+// ---------------------------------------------------------------------------
+//
+// A turn is dominated by a large, stable prefix: the system prompt, the tool
+// definitions, and the accumulated history. Only the tail changes. Providers
+// cache that prefix — Anthropic on up to four explicit `cache_control` anchors,
+// OpenAI-family automatically on a stable prefix — but the cache is a *prefix*
+// cache: an anchor only hits if every byte before it is byte-identical to the
+// previous request. So *where* the anchors go decides the hit rate, and getting
+// it wrong silently re-bills the whole prompt every turn.
+//
+// Placement is therefore a policy, not a detail. See parity spec 24 and
+// `docs/components/prompt-cache.md`.
+
+/// What a provider can do with cache anchors.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CacheCapabilities {
+    /// The provider honours explicit per-block anchors (Anthropic).
+    pub explicit_breakpoints: bool,
+    /// Hard cap on anchors the provider accepts (Anthropic: 4). `0` ⇒ no cap.
+    pub max_breakpoints: usize,
+    /// Anchors may be placed on tool definitions.
+    pub supports_on_tools: bool,
+    /// The provider caches a stable prefix automatically and takes a cache key
+    /// instead of anchors (OpenAI-family).
+    pub automatic_prefix: bool,
+}
+
+impl CacheCapabilities {
+    /// A provider with no prompt cache at all: placement must be a no-op.
+    pub fn none() -> Self {
+        Self::default()
+    }
+    pub fn anthropic() -> Self {
+        Self {
+            explicit_breakpoints: true,
+            max_breakpoints: 4,
+            supports_on_tools: true,
+            automatic_prefix: false,
+        }
+    }
+    pub fn openai() -> Self {
+        Self {
+            explicit_breakpoints: false,
+            max_breakpoints: 0,
+            supports_on_tools: false,
+            automatic_prefix: true,
+        }
+    }
+    /// `true` when there is nothing to place.
+    pub fn is_noop(&self) -> bool {
+        !self.explicit_breakpoints && !self.automatic_prefix
+    }
+}
+
+/// The shape of an assembled prompt, as a placement policy needs to see it.
+///
+/// Deliberately structural rather than raw bytes: a strategy reasons about
+/// *regions* (system / tools / history / volatile tail), which is what stability
+/// is a property of.
+#[derive(Debug, Clone)]
+pub struct PromptShape<'a> {
+    /// Whether a system prompt is present (and thus anchorable).
+    pub has_system: bool,
+    /// Number of tool definitions.
+    pub tools: usize,
+    /// The conversation, oldest first. The **last** entry is the volatile tail.
+    pub messages: &'a [Message],
+    /// `true` when compaction just rewrote the middle of the window. Every anchor
+    /// downstream of the edit is invalidated, so there is no stable history
+    /// prefix this turn — anchor system + tools only.
+    pub compacted: bool,
+}
+
+impl<'a> PromptShape<'a> {
+    pub fn new(has_system: bool, tools: usize, messages: &'a [Message]) -> Self {
+        Self {
+            has_system,
+            tools,
+            messages,
+            compacted: false,
+        }
+    }
+    pub fn compacted(mut self, yes: bool) -> Self {
+        self.compacted = yes;
+        self
+    }
+    /// Index of the newest message — never anchorable.
+    pub fn tail_index(&self) -> Option<usize> {
+        self.messages.len().checked_sub(1)
+    }
+}
+
+/// Where a strategy decided to put cache anchors.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CacheMarks {
+    /// Anchor the end of the system prompt.
+    pub system: bool,
+    /// Anchor the last tool definition (covers the whole tool block).
+    pub tools: bool,
+    /// Indices into `PromptShape::messages` whose last content block is anchored.
+    pub messages: Vec<usize>,
+    /// A stable key for providers that cache automatically (OpenAI-family).
+    pub cache_key: Option<String>,
+}
+
+impl CacheMarks {
+    /// Total explicit anchors — what the provider's `max_breakpoints` caps.
+    pub fn count(&self) -> usize {
+        self.system as usize + self.tools as usize + self.messages.len()
+    }
+    /// `true` when nothing is marked and no key is set (a byte-identical request).
+    pub fn is_empty(&self) -> bool {
+        self.count() == 0 && self.cache_key.is_none()
+    }
+}
+
+/// Decides where prompt-cache anchors go for a given prompt and provider.
+///
+/// Pure and synchronous: placement is computation over the message array, on the
+/// critical path of every turn.
+pub trait CacheStrategy: Send + Sync {
+    /// Strategy name, used as a metric/span label.
+    fn name(&self) -> &str;
+    /// Anchors for this prompt. Must return no anchors when `caps.is_noop()`, so
+    /// a non-caching provider's request is byte-for-byte unchanged.
+    fn place(&self, prompt: &PromptShape<'_>, caps: &CacheCapabilities) -> CacheMarks;
+}
+
+// ---------------------------------------------------------------------------
 // Supporting seam: Scanner (content security findings)
 // ---------------------------------------------------------------------------
 //
