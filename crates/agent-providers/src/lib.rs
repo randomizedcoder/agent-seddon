@@ -9,6 +9,10 @@
 //! Adding a provider is a new module here plus a registry line in
 //! `agent-runtime` — the loop never changes. See `docs/extending.md`.
 
+// Shared transient-error retry, used by every HTTP provider.
+#[cfg(any(feature = "provider-openai-compat", feature = "provider-anthropic"))]
+mod retry;
+
 #[cfg(feature = "provider-openai-compat")]
 mod openai_compat;
 #[cfg(feature = "provider-openai-compat")]

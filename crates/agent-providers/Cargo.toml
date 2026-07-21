@@ -20,6 +20,8 @@ reqwest = { workspace = true, features = ["stream"] }
 tracing.workspace = true
 futures-util.workspace = true
 async-stream.workspace = true
+# `tokio::time::sleep` for the retry backoff (the runtime is already tokio).
+tokio = { workspace = true }
 
 [dev-dependencies]
 rstest.workspace = true

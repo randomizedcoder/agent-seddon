@@ -23,6 +23,8 @@ pub struct OpenAiCompatConfig {
     pub api_key: String,
     pub insecure_tls: bool,
     pub context_window: u32,
+    /// Retries for transient failures (429 / 5xx / timeout); 0 disables.
+    pub max_retries: u32,
 }
 
 pub struct OpenAiCompatProvider {
@@ -31,6 +33,7 @@ pub struct OpenAiCompatProvider {
     model: String,
     api_key: String,
     context_window: u32,
+    retry: crate::retry::RetryPolicy,
 }
 
 impl OpenAiCompatProvider {
@@ -47,7 +50,20 @@ impl OpenAiCompatProvider {
             model: cfg.model,
             api_key: cfg.api_key,
             context_window: cfg.context_window,
+            retry: crate::retry::RetryPolicy::new(cfg.max_retries),
         })
+    }
+
+    /// POST the request body, retrying transient failures (shared by
+    /// complete/stream). Returns the response for the caller to read/stream.
+    async fn send(&self, wire: &WireReq<'_>) -> Result<reqwest::Response> {
+        crate::retry::send_with_retry(&self.retry, || {
+            self.client
+                .post(&self.endpoint)
+                .bearer_auth(&self.api_key)
+                .json(wire)
+        })
+        .await
     }
 
     fn build_wire<'a>(&'a self, req: &CompletionRequest, stream: bool) -> WireReq<'a> {
@@ -85,14 +101,7 @@ impl LlmProvider for OpenAiCompatProvider {
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse> {
         let wire = self.build_wire(&req, false);
 
-        let resp = self
-            .client
-            .post(&self.endpoint)
-            .bearer_auth(&self.api_key)
-            .json(&wire)
-            .send()
-            .await
-            .map_err(|e| Error::Provider(format!("request failed: {e}")))?;
+        let resp = self.send(&wire).await?;
 
         let status = resp.status();
         let body = resp
@@ -160,14 +169,7 @@ impl LlmProvider for OpenAiCompatProvider {
 
     async fn stream(&self, req: CompletionRequest) -> Result<ChunkStream> {
         let wire = self.build_wire(&req, true);
-        let resp = self
-            .client
-            .post(&self.endpoint)
-            .bearer_auth(&self.api_key)
-            .json(&wire)
-            .send()
-            .await
-            .map_err(|e| Error::Provider(format!("request failed: {e}")))?;
+        let resp = self.send(&wire).await?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();

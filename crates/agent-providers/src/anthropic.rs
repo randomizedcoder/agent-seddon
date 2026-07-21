@@ -26,6 +26,8 @@ pub struct AnthropicConfig {
     /// The `anthropic-version` header (e.g. `2023-06-01`).
     pub version: String,
     pub context_window: u32,
+    /// Retries for transient failures (429 / 5xx / timeout); 0 disables.
+    pub max_retries: u32,
 }
 
 pub struct AnthropicProvider {
@@ -35,6 +37,7 @@ pub struct AnthropicProvider {
     api_key: String,
     version: String,
     context_window: u32,
+    retry: crate::retry::RetryPolicy,
 }
 
 impl AnthropicProvider {
@@ -51,6 +54,7 @@ impl AnthropicProvider {
             api_key: cfg.api_key,
             version: cfg.version,
             context_window: cfg.context_window,
+            retry: crate::retry::RetryPolicy::new(cfg.max_retries),
         })
     }
 
@@ -87,16 +91,17 @@ impl AnthropicProvider {
         body
     }
 
-    /// Fire the request and return the raw response (shared by complete/stream).
+    /// Fire the request and return the raw response (shared by complete/stream),
+    /// retrying transient failures (429 / 5xx / timeout) per the retry policy.
     async fn send(&self, body: &Value) -> Result<reqwest::Response> {
-        self.client
-            .post(&self.endpoint)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", &self.version)
-            .json(body)
-            .send()
-            .await
-            .map_err(|e| Error::Provider(format!("request failed: {e}")))
+        crate::retry::send_with_retry(&self.retry, || {
+            self.client
+                .post(&self.endpoint)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", &self.version)
+                .json(body)
+        })
+        .await
     }
 }
 
