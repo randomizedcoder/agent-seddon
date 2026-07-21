@@ -1,0 +1,31 @@
+[package]
+name = "agent-scanner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Secret detection (labelled regex set + Shannon-entropy heuristic).
+default = ["scanner-secret", "scanner-threat"]
+scanner-secret = []
+# Prompt-injection / threat-pattern matching over untrusted content.
+scanner-threat = []
+# Injects a dhat global allocator for the allocation-budget leak test only.
+dhat-heap = ["dep:dhat"]
+
+[dependencies]
+agent-core.workspace = true
+async-trait.workspace = true
+regex.workspace = true
+dhat = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio.workspace = true
+rstest.workspace = true
+iai-callgrind.workspace = true
+
+# Deterministic instruction-count bench for the secret+entropy scan (the CPU hot
+# path). The OSV path is network-bound and has no bench by design.
+[[bench]]
+name = "scan"
+harness = false

@@ -5,7 +5,23 @@ vulnerability lookup, and injection/threat-pattern matching on tool inputs and
 fetched content — findings wired into the `Policy` decision path so a
 high-severity hit gates a write / exec / fetch.
 
-> **Status: spec (design of record).** Introduces a new `agent_core::Scanner`
+> **Status: implemented** (`Scanner` seam + `agent-scanner` with `SecretScanner` /
+> `ThreatScanner` / `DispatchScanner`, wired into the `Policy` guard, config +
+> metrics + span + bench + leak; doc in `docs/components/scanner.md`). Notes on
+> what differs from the plan below: the integration is a **`Scanner`-aware
+> `Guard`** rather than a separate `ScanningPolicy` — the spec allows either, and
+> reusing `Guard` inherits its `Deny`/`Prompt` modes, metric labels, and
+> base-policy composition instead of duplicating them. `Decision` did **not** need
+> widening: `Deny(String)` already carries the outcome and `Prompt` lives in
+> `GuardMode`, so no `Policy` impl changed. The entropy heuristic is
+> **structure-aware** — a pure entropy threshold provably cannot separate secrets
+> from identifiers (an ordinary class name scores *higher* than a real hex
+> secret), so entropy is combined with letter/digit mixing and alphabetic-run
+> length; the counterexamples are pinned as false-positive tests. **Deferred:**
+> the OSV lookup (the one network-bound rule; fail-open, seam takes it unchanged)
+> and the `scanner.proto` gRPC service, consistent with specs 11–19.
+>
+> Original plan follows. Introduces a new `agent_core::Scanner`
 > seam (`async fn scan(&self, kind, content) -> Vec<Finding>`, each finding
 > carrying `severity`, `rule`, and a byte `span`) with impls in a new
 > `agent-scanner` crate behind a cargo feature, a `scanner.proto` gRPC service

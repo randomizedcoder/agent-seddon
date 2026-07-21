@@ -47,6 +47,44 @@ pub struct Config {
     pub session: SessionCfg,
     #[serde(default)]
     pub reference: ReferenceCfg,
+    #[serde(default)]
+    pub scanner: ScannerCfg,
+}
+
+/// Content security scanning (the `Scanner` seam, parity spec 18). Findings feed
+/// the `Policy` gate: a finding at or above `deny_at` blocks the call.
+/// `rules` selects the sub-scanners; empty ⇒ scanning is off. `allow_rules`
+/// waives specific rule ids (e.g. a known fixture secret) without disabling the
+/// scanner. See docs/components/scanner.md.
+#[derive(Debug, Deserialize)]
+pub struct ScannerCfg {
+    #[serde(default)]
+    pub rules: Vec<String>,
+    #[serde(default = "default_scanner_deny_at")]
+    pub deny_at: String,
+    #[serde(default)]
+    pub allow_rules: Vec<String>,
+    /// Threat-pattern breadth: "all" | "context" | "strict".
+    #[serde(default = "default_scanner_scope")]
+    pub scope: String,
+}
+
+impl Default for ScannerCfg {
+    fn default() -> Self {
+        Self {
+            rules: Vec::new(),
+            deny_at: default_scanner_deny_at(),
+            allow_rules: Vec::new(),
+            scope: default_scanner_scope(),
+        }
+    }
+}
+
+fn default_scanner_deny_at() -> String {
+    "high".to_string()
+}
+fn default_scanner_scope() -> String {
+    "context".to_string()
 }
 
 /// Content-addressed session history (the `SessionStore` seam, parity spec 19).
@@ -901,6 +939,7 @@ impl Config {
             embedder: EmbedderCfg::default(),
             session: SessionCfg::default(),
             reference: ReferenceCfg::default(),
+            scanner: ScannerCfg::default(),
         }
     }
 }

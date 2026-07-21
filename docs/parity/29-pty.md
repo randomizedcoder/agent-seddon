@@ -375,5 +375,3 @@ idempotent-close, and metered-session/bytes assertions that have no peer analogu
   `tools/environments/local.py` (background/PTY spawn env path, ~line 484);
   tests: `tests/tools/test_process_registry.py` (`test_write_stdin_uses_str_for_windows_pty`, `test_write_stdin_uses_bytes_for_posix_pty`, `test_reader_loop_streams_incremental_chunks_from_read1`, `test_close_stdin_pty_mode`, `test_close_stdin_allows_eof_driven_process_to_finish`, `test_reconcile_flips_exited_when_direct_child_done`, `test_lists_running_and_finished`, `test_prune_over_max_removes_oldest`, `test_prune_expired_finished`).
 - **pi:** — (no PTY / interactive terminal; no `node-pty`/`ptyprocess`/pseudo-terminal impl).
-</content>
-</invoke>

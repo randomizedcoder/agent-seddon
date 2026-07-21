@@ -233,6 +233,13 @@ pub async fn build_agent_with(
     let base_policy = registry
         .build_policy(&cfg.agent.policy, &cfg)
         .context("building policy")?;
+    // Content scanner (parity spec 18): compose the configured rules into one
+    // metered `DispatchScanner` and hand it to the guard, which maps the worst
+    // finding's severity to a `Decision`.
+    #[cfg(feature = "scanner")]
+    let scanner = build_scanner(&cfg, &metrics)?;
+    #[cfg(not(feature = "scanner"))]
+    let scanner = None;
     let guarded = crate::policy::guard(
         base_policy,
         crate::policy::GuardMode::parse(&cfg.policy.guard),
@@ -240,6 +247,7 @@ pub async fn build_agent_with(
         cfg.policy.allow_paths.clone(),
         cfg.web.allow_private,
         cfg.web.allow_hosts.clone(),
+        scanner,
         metrics.clone(),
     );
     let policy = crate::metered::policy(guarded, metrics.clone(), &cfg.agent.policy);
@@ -730,4 +738,33 @@ mod tests {
     fn resolve_api_key_errors_when_none_configured() {
         assert!(resolve_api_key(&pcfg("", "", "")).is_err());
     }
+}
+
+/// Build the config-selected content scanner, or `None` when `[scanner] rules`
+/// is empty (scanning off by default — it is a control, not a default-on cost).
+#[cfg(feature = "scanner")]
+fn build_scanner(
+    cfg: &Config,
+    metrics: &Metrics,
+) -> anyhow::Result<Option<(Arc<dyn agent_core::Scanner>, agent_core::Severity)>> {
+    if cfg.scanner.rules.is_empty() {
+        return Ok(None);
+    }
+    let mut subs: Vec<Arc<dyn agent_core::Scanner>> = Vec::new();
+    for rule in &cfg.scanner.rules {
+        match rule.as_str() {
+            "secret" => subs.push(Arc::new(agent_scanner::SecretScanner::new())),
+            "threat" => subs.push(Arc::new(agent_scanner::ThreatScanner::new(
+                agent_scanner::Scope::parse(&cfg.scanner.scope),
+            ))),
+            other => anyhow::bail!("unknown [scanner] rule `{other}` (secret|threat)"),
+        }
+    }
+    let dispatch = agent_scanner::DispatchScanner::new(subs)
+        .with_allowlist(cfg.scanner.allow_rules.iter().cloned());
+    let scanner = crate::metered::scanner(Arc::new(dispatch), metrics.clone());
+    Ok(Some((
+        scanner,
+        agent_core::Severity::parse(&cfg.scanner.deny_at),
+    )))
 }

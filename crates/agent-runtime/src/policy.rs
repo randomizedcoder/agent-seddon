@@ -137,6 +137,7 @@ impl GuardMode {
 const CAT_DANGEROUS: &str = "dangerous_command";
 const CAT_SENSITIVE: &str = "sensitive_path";
 const CAT_SSRF: &str = "ssrf_target";
+const CAT_SCANNED: &str = "scanned_content";
 
 /// Wraps a base policy and screens each call for dangerous shell commands and
 /// writes to sensitive paths *before* the base policy runs. A flagged call is
@@ -152,6 +153,11 @@ pub struct Guard {
     web_allow_private: bool,
     /// Host globs that bypass the SSRF screen entirely (explicit operator opt-in).
     web_allow_hosts: Vec<String>,
+    /// Content scanner (parity spec 18). When wired, the argument/body of a
+    /// side-effecting call is scanned before the base policy runs, and a finding
+    /// at or above `deny_at` flags the call.
+    scanner: Option<Arc<dyn agent_core::Scanner>>,
+    deny_at: agent_core::Severity,
     metrics: Metrics,
 }
 
@@ -173,8 +179,64 @@ impl Guard {
             allow_paths,
             web_allow_private,
             web_allow_hosts,
+            scanner: None,
+            deny_at: agent_core::Severity::High,
             metrics,
         }
+    }
+
+    /// Attach the content scanner and its severity threshold (parity spec 18).
+    pub fn with_scanner(
+        mut self,
+        scanner: Arc<dyn agent_core::Scanner>,
+        deny_at: agent_core::Severity,
+    ) -> Self {
+        self.scanner = Some(scanner);
+        self.deny_at = deny_at;
+        self
+    }
+}
+
+impl Guard {
+    /// Scan the content a side-effecting call would write or ingest, returning a
+    /// **coarse** reason when the worst finding reaches the threshold.
+    ///
+    /// The reason names the severity and category only — never the matched bytes
+    /// or the rule that fired. Echoing those would hand an attacker an oracle for
+    /// probing exactly what is gated (parity spec 08's uniform-denial rule).
+    async fn scan_content(&self, call: &ToolCall) -> Option<String> {
+        let scanner = self.scanner.as_ref()?;
+        let (kind, content) = scannable(call)?;
+        let findings = scanner.scan(kind, content).await;
+        let worst = agent_core::max_severity(&findings)?;
+        if worst < self.deny_at {
+            return None;
+        }
+        let category = findings
+            .iter()
+            .find(|f| f.severity == worst)
+            .map(|f| f.category)
+            .unwrap_or("content");
+        Some(format!(
+            "content scan found a {} issue of {} severity",
+            category,
+            worst.as_str()
+        ))
+    }
+}
+
+/// The scannable payload of a side-effecting call: what would be written to disk
+/// or fed back into the model. Read-only calls are not scanned.
+fn scannable(call: &ToolCall) -> Option<(agent_core::ScanKind, &str)> {
+    use agent_core::ScanKind;
+    let args = call.arguments.as_object()?;
+    let text = |k: &str| args.get(k).and_then(|v| v.as_str());
+    match call.name.as_str() {
+        "write_file" => text("content").map(|c| (ScanKind::FileBody, c)),
+        "edit" => text("new_string").map(|c| (ScanKind::FileBody, c)),
+        "apply_patch" => text("patch").map(|c| (ScanKind::FileBody, c)),
+        "bash" => text("command").map(|c| (ScanKind::ToolInput, c)),
+        _ => None,
     }
 }
 
@@ -194,6 +256,12 @@ impl Policy for Guard {
                 scan_ssrf(call, self.web_allow_private, &self.web_allow_hosts)
                     .map(|r| (CAT_SSRF, r))
             });
+        // Content scan runs last: it is the most expensive check, and there is no
+        // point scanning a body for secrets on a call already flagged.
+        let flag = match flag {
+            Some(f) => Some(f),
+            None => self.scan_content(call).await.map(|r| (CAT_SCANNED, r)),
+        };
         let Some((category, reason)) = flag else {
             return self.base.authorize(call).await;
         };
@@ -264,12 +332,15 @@ pub(crate) fn guard(
     allow_paths: Vec<String>,
     web_allow_private: bool,
     web_allow_hosts: Vec<String>,
+    scanner: Option<(Arc<dyn agent_core::Scanner>, agent_core::Severity)>,
     metrics: Metrics,
 ) -> Arc<dyn Policy> {
-    if mode == GuardMode::Off {
+    // `Off` disables the command/path/SSRF screens, but a wired scanner is an
+    // independent control and still applies.
+    if mode == GuardMode::Off && scanner.is_none() {
         return base;
     }
-    Arc::new(Guard::new(
+    let g = Guard::new(
         base,
         mode,
         deny_paths,
@@ -277,7 +348,11 @@ pub(crate) fn guard(
         web_allow_private,
         web_allow_hosts,
         metrics,
-    ))
+    );
+    Arc::new(match scanner {
+        Some((s, deny_at)) => g.with_scanner(s, deny_at),
+        None => g,
+    })
 }
 
 /// Screen a `bash` call for a dangerous shell command. Returns a human reason if
@@ -868,6 +943,7 @@ mod tests {
             vec![],
             false,
             vec![],
+            None,
             test_metrics(),
         );
         assert_eq!(g.authorize(&bash("rm -rf /")).await, Decision::Allow);
@@ -994,5 +1070,168 @@ mod tests {
     #[case::mid_star_no_match("a*z", "abc", false)]
     fn glob_match_cases(#[case] pattern: &str, #[case] text: &str, #[case] expected: bool) {
         assert_eq!(glob_match(pattern, text), expected);
+    }
+
+    // --- spec 18: scanner findings -> Decision -----------------------------
+
+    /// A scanner that reports exactly one finding at a fixed severity.
+    struct StubScanner(agent_core::Severity, &'static str);
+    #[async_trait]
+    impl agent_core::Scanner for StubScanner {
+        fn name(&self) -> &str {
+            "stub"
+        }
+        async fn scan(&self, _k: agent_core::ScanKind, _c: &str) -> Vec<agent_core::Finding> {
+            vec![agent_core::Finding {
+                rule: self.1.to_string(),
+                severity: self.0,
+                category: "secret",
+                span: 0..1,
+            }]
+        }
+    }
+
+    fn write_call(body: &str) -> ToolCall {
+        ToolCall {
+            id: "1".into(),
+            name: "write_file".into(),
+            arguments: serde_json::json!({ "path": "a.txt", "content": body }),
+        }
+    }
+
+    fn scanning_guard(
+        scanner: Arc<dyn agent_core::Scanner>,
+        deny_at: agent_core::Severity,
+    ) -> Guard {
+        Guard::new(
+            Arc::new(AutoApprove),
+            GuardMode::Deny,
+            vec![],
+            vec![],
+            false,
+            vec![],
+            test_metrics(),
+        )
+        .with_scanner(scanner, deny_at)
+    }
+
+    /// The headline behaviour: severity at/above the threshold denies, below allows.
+    #[rstest]
+    #[case::negative_low_finding_allows(
+        agent_core::Severity::Low,
+        agent_core::Severity::High,
+        true
+    )]
+    #[case::boundary_at_threshold_denies(
+        agent_core::Severity::High,
+        agent_core::Severity::High,
+        false
+    )]
+    #[case::positive_critical_denies(
+        agent_core::Severity::Critical,
+        agent_core::Severity::High,
+        false
+    )]
+    #[case::boundary_threshold_lowered_denies(
+        agent_core::Severity::Medium,
+        agent_core::Severity::Medium,
+        false
+    )]
+    #[tokio::test]
+    async fn scanning_policy_maps_severity(
+        #[case] finding: agent_core::Severity,
+        #[case] deny_at: agent_core::Severity,
+        #[case] allow: bool,
+    ) {
+        let g = scanning_guard(
+            Arc::new(StubScanner(finding, "secret.aws_access_key")),
+            deny_at,
+        );
+        let d = g.authorize(&write_call("body")).await;
+        assert_eq!(d == Decision::Allow, allow, "got {d:?}");
+    }
+
+    /// The denial reason must be coarse: severity + category, never the rule id
+    /// or the matched bytes (parity spec 08's uniform-denial rule — otherwise it
+    /// is an oracle for probing what is gated).
+    #[tokio::test]
+    async fn adversarial_deny_reason_leaks_neither_rule_nor_bytes() {
+        let g = scanning_guard(
+            Arc::new(StubScanner(
+                agent_core::Severity::Critical,
+                "secret.private_key",
+            )),
+            agent_core::Severity::High,
+        );
+        let Decision::Deny(reason) = g.authorize(&write_call("AKIAIOSFODNN7EXAMPLE")).await else {
+            panic!("must deny");
+        };
+        assert!(
+            !reason.contains("secret.private_key"),
+            "leaked rule: {reason}"
+        );
+        assert!(!reason.contains("AKIA"), "leaked matched bytes: {reason}");
+        assert!(reason.contains("critical"), "must state severity: {reason}");
+    }
+
+    /// Only side-effecting calls carry scannable content; a read must not be
+    /// blocked by content it merely names.
+    #[rstest]
+    #[case::positive_write_file_scanned("write_file", "content", false)]
+    #[case::positive_edit_scanned("edit", "new_string", false)]
+    #[case::positive_bash_scanned("bash", "command", false)]
+    #[case::negative_read_file_not_scanned("read_file", "path", true)]
+    #[tokio::test]
+    async fn only_side_effecting_calls_are_scanned(
+        #[case] tool: &str,
+        #[case] arg: &str,
+        #[case] allow: bool,
+    ) {
+        let g = scanning_guard(
+            Arc::new(StubScanner(agent_core::Severity::Critical, "r")),
+            agent_core::Severity::High,
+        );
+        let call = ToolCall {
+            id: "1".into(),
+            name: tool.into(),
+            arguments: serde_json::json!({ arg: "whatever" }),
+        };
+        assert_eq!(g.authorize(&call).await == Decision::Allow, allow);
+    }
+
+    /// A real end-to-end pass through the actual scanner: an AWS key in a
+    /// `write_file` body is denied, clean content is allowed.
+    #[rstest]
+    #[case::positive_secret_in_body_denied("key = \"AKIAIOSFODNN7EXAMPLE\"", false)]
+    #[case::negative_clean_body_allowed("fn main() { println!(\"hello\"); }", true)]
+    #[tokio::test]
+    async fn real_scanner_gates_a_write(#[case] body: &str, #[case] allow: bool) {
+        let scanner = Arc::new(agent_scanner::DispatchScanner::new(vec![Arc::new(
+            agent_scanner::SecretScanner::new(),
+        )]));
+        let g = scanning_guard(scanner, agent_core::Severity::High);
+        assert_eq!(
+            g.authorize(&write_call(body)).await == Decision::Allow,
+            allow
+        );
+    }
+
+    /// An allowlisted rule is waived — the escape hatch for a known fixture
+    /// secret, without turning the scanner off entirely.
+    #[rstest]
+    #[case::positive_suppressed_rule(true, true)]
+    #[case::negative_unsuppressed_rule(false, false)]
+    #[tokio::test]
+    async fn suppression_waives(#[case] allowlisted: bool, #[case] allow: bool) {
+        let mut d =
+            agent_scanner::DispatchScanner::new(vec![
+                Arc::new(agent_scanner::SecretScanner::new()),
+            ]);
+        if allowlisted {
+            d = d.with_allowlist(["secret.aws_access_key".to_string()]);
+        }
+        let g = scanning_guard(Arc::new(d), agent_core::Severity::High);
+        let call = write_call("key = \"AKIAIOSFODNN7EXAMPLE\"");
+        assert_eq!(g.authorize(&call).await == Decision::Allow, allow);
     }
 }

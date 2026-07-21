@@ -41,6 +41,11 @@ pub struct Metrics {
     // Multimodal content accounting (parity spec 26): blocks sent to the model by
     // modality, and blocks dropped because the model lacks vision support.
     content_blocks: IntCounterVec,
+    // Content security scanning (parity spec 18): findings by severity/rule/kind,
+    // and scan latency. Labels are bounded enums + built-in rule ids — never the
+    // scanned content.
+    scanner_findings: IntCounterVec,
+    scan_seconds: Histogram,
     content_blocks_dropped: IntCounter,
     iterations: IntCounter,
     runs: IntCounterVec,
@@ -189,6 +194,19 @@ impl Metrics {
             Opts::new("agent_tool_calls_total", "Tool invocations"),
             &["tool", "status"],
         )
+        .unwrap();
+        let scanner_findings = IntCounterVec::new(
+            Opts::new(
+                "agent_scanner_findings_total",
+                "Security findings, by severity, rule and scanned content kind",
+            ),
+            &["severity", "rule", "kind"],
+        )
+        .unwrap();
+        let scan_seconds = Histogram::with_opts(HistogramOpts::new(
+            "agent_scan_duration_seconds",
+            "Content scan latency",
+        ))
         .unwrap();
         let content_blocks = IntCounterVec::new(
             Opts::new(
@@ -534,6 +552,8 @@ impl Metrics {
             Box::new(context_tokens.clone()),
             Box::new(context_messages.clone()),
             Box::new(tool_calls.clone()),
+            Box::new(scanner_findings.clone()),
+            Box::new(scan_seconds.clone()),
             Box::new(content_blocks.clone()),
             Box::new(content_blocks_dropped.clone()),
             Box::new(iterations.clone()),
@@ -600,6 +620,8 @@ impl Metrics {
             context_tokens,
             context_messages,
             tool_calls,
+            scanner_findings,
+            scan_seconds,
             content_blocks,
             content_blocks_dropped,
             iterations,
@@ -684,6 +706,16 @@ impl Metrics {
     /// Media blocks stripped because the model cannot accept them.
     pub fn on_content_blocks_dropped(&self, n: u64) {
         self.content_blocks_dropped.inc_by(n);
+    }
+    /// One security finding (parity spec 18).
+    pub fn on_scanner_finding(&self, severity: &str, rule: &str, kind: &str) {
+        self.scanner_findings
+            .with_label_values(&[severity, rule, kind])
+            .inc();
+    }
+    /// Latency of one content scan.
+    pub fn on_scan(&self, seconds: f64) {
+        self.scan_seconds.observe(seconds);
     }
     pub fn on_api_call(&self, model: &str, finish_reason: &str, seconds: f64) {
         self.api_calls

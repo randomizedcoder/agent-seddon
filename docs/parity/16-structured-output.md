@@ -367,5 +367,3 @@ flake check`):
   `packages/ai/test/validation.test.ts`,
   `packages/ai/test/openai-completions-tool-choice.test.ts`,
   `packages/ai/test/mistral-tool-schema.test.ts`.
-</content>
-</invoke>
