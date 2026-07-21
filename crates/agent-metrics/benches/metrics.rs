@@ -28,9 +28,10 @@ fn new_registry() -> Metrics {
 }
 
 // The hot observability path: record many tool-exec samples, then encode the text
-// exposition once (what a `/metrics` scrape does). Observed ~560k Ir.
+// exposition once (what a `/metrics` scrape does). Grows as seams add metric
+// families (web/tasks/structured/lsp/sandbox/embed — specs 11–15). Observed ~813k Ir.
 #[library_benchmark(config = LibraryBenchmarkConfig::default()
-    .tool(Callgrind::default().hard_limits([(EventKind::Ir, 800_000u64)])))]
+    .tool(Callgrind::default().hard_limits([(EventKind::Ir, 1_000_000u64)])))]
 fn record_and_encode() -> String {
     let m = Metrics::new();
     for _ in 0..100 {

@@ -286,6 +286,55 @@ impl agent_core::Sandbox for MeteredSandbox {
     }
 }
 
+/// Wrap an [`Embedder`](agent_core::Embedder) so each embed emits an
+/// `embedder.embed` span (`backend`/`batch` attrs) + records latency/batch size.
+#[cfg(feature = "semantic-search")]
+pub(crate) fn embedder(
+    inner: Arc<dyn agent_core::Embedder>,
+    m: Metrics,
+    name: &str,
+) -> Arc<dyn agent_core::Embedder> {
+    Arc::new(MeteredEmbedder {
+        inner,
+        metrics: m,
+        name: name.to_string(),
+    })
+}
+
+#[cfg(feature = "semantic-search")]
+struct MeteredEmbedder {
+    inner: Arc<dyn agent_core::Embedder>,
+    metrics: Metrics,
+    name: String,
+}
+
+#[cfg(feature = "semantic-search")]
+#[async_trait]
+impl agent_core::Embedder for MeteredEmbedder {
+    fn dimensions(&self) -> usize {
+        self.inner.dimensions()
+    }
+    fn max_batch(&self) -> usize {
+        self.inner.max_batch()
+    }
+    async fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
+        let span = tracing::info_span!("embedder.embed", backend = %self.name, batch = 1);
+        let start = Instant::now();
+        let out = self.inner.embed_query(text).instrument(span).await;
+        self.metrics
+            .on_embed(&self.name, start.elapsed().as_secs_f64(), 1);
+        out
+    }
+    async fn embed_docs(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let span = tracing::info_span!("embedder.embed", backend = %self.name, batch = texts.len());
+        let start = Instant::now();
+        let out = self.inner.embed_docs(texts).instrument(span).await;
+        self.metrics
+            .on_embed(&self.name, start.elapsed().as_secs_f64(), texts.len());
+        out
+    }
+}
+
 /// Wrap an [`LspBackend`](agent_core::LspBackend) so each `request` emits an
 /// `lsp.request` span (`method`/`uri` attrs), records per-method latency/errors,
 /// and counts observed diagnostics by severity.

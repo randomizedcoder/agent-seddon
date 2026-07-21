@@ -7,9 +7,15 @@ license.workspace = true
 [features]
 # Tantivy is the default (and, for now, only) backend. A DeepSearch backend is
 # reserved behind `search-deepsearch` for a follow-up (see docs/components/search.md).
-default = ["search-tantivy"]
+default = ["search-tantivy", "search-vector"]
 # Full-text code search via the tantivy library (on-disk inverted index).
 search-tantivy = ["dep:tantivy"]
+# Semantic (embeddings) code search: a brute-force exact-cosine vector backend
+# over the Embedder seam. Dependency-free (reuses agent-core cosine + the shared
+# Manifest). See parity spec 15 + docs/components/embedder.md.
+search-vector = []
+# Injects a dhat global allocator for the allocation-budget leak test only.
+dhat-heap = ["dep:dhat"]
 
 [dependencies]
 agent-core.workspace = true
@@ -22,6 +28,8 @@ tracing.workspace = true
 # regex-mode queries and glob→regex path filtering.
 ignore.workspace = true
 regex.workspace = true
+# Optional heap profiler for tests/leak.rs (only under the `dhat-heap` feature).
+dhat = { workspace = true, optional = true }
 
 # Pinned by git rev so the exact indexed/queried behavior is reproducible; the
 # nix build declares the matching crane `outputHashes` (see nix/versions.nix).
@@ -32,3 +40,12 @@ tantivy = { git = "https://github.com/quickwit-oss/tantivy", rev = "057458bf14d6
 rstest.workspace = true
 agent-testkit.workspace = true
 futures-util.workspace = true
+iai-callgrind.workspace = true
+# The vector-backend leak test dogfoods the dependency-free local embedder.
+agent-embed = { workspace = true, features = ["embed-local"] }
+
+# Deterministic instruction-count benches for the cosine scan + RRF fusion.
+[[bench]]
+name = "vector"
+harness = false
+required-features = ["search-vector"]

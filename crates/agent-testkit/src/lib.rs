@@ -681,6 +681,71 @@ impl agent_core::WebBackend for FakeWebBackend {
 }
 
 // ---------------------------------------------------------------------------
+// Embedder (semantic search seam)
+// ---------------------------------------------------------------------------
+
+/// A deterministic [`Embedder`](agent_core::Embedder) double: fixed vectors keyed
+/// by input text (plus a default for unknown text), so cosine ranking + fusion
+/// order are byte-reproducible with no model, no network, no float nondeterminism.
+/// Records how many texts were embedded so a test can assert incremental reindex
+/// only re-embedded the changed file.
+pub struct FakeEmbedder {
+    dims: usize,
+    table: HashMap<String, Vec<f32>>,
+    default: Vec<f32>,
+    embedded: AtomicUsize,
+}
+
+impl FakeEmbedder {
+    /// `pairs` maps a text → its fixed vector (all length `dims`); unknown text
+    /// gets `default` (a fixed non-zero vector, so OOV still ranks by cosine).
+    pub fn new(dims: usize, pairs: Vec<(&str, Vec<f32>)>) -> Self {
+        let mut default = vec![0.0f32; dims];
+        if dims > 0 {
+            default[0] = 1.0; // non-zero so cosine is defined
+        }
+        Self {
+            dims,
+            table: pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+            default,
+            embedded: AtomicUsize::new(0),
+        }
+    }
+    /// Set the vector unknown text maps to.
+    pub fn with_default(mut self, default: Vec<f32>) -> Self {
+        self.default = default;
+        self
+    }
+    /// How many texts have been embedded so far (across query + docs).
+    pub fn embedded(&self) -> usize {
+        self.embedded.load(Ordering::SeqCst)
+    }
+    fn lookup(&self, text: &str) -> Vec<f32> {
+        self.embedded.fetch_add(1, Ordering::SeqCst);
+        self.table
+            .get(text)
+            .cloned()
+            .unwrap_or_else(|| self.default.clone())
+    }
+}
+
+#[async_trait]
+impl agent_core::Embedder for FakeEmbedder {
+    fn dimensions(&self) -> usize {
+        self.dims
+    }
+    fn max_batch(&self) -> usize {
+        8
+    }
+    async fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
+        Ok(self.lookup(text))
+    }
+    async fn embed_docs(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        Ok(texts.iter().map(|t| self.lookup(t)).collect())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // MCP transport
 // ---------------------------------------------------------------------------
 
