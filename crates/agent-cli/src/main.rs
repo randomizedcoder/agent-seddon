@@ -115,11 +115,25 @@ async fn main() -> Result<()> {
                 }
                 None => repl::new_id(),
             };
-            let result = session.send(&goal).await;
-            if result.is_ok() {
-                let _ = session_store::save(&sessions_dir, &id, session.messages());
+            // Race the run against Ctrl-C: an interrupt should save the (partial)
+            // transcript and clean up rather than killing the process and orphaning
+            // state. Cancelling `send` drops its future; the working set it mutated
+            // in place is still readable via `messages()`.
+            let outcome: Result<Option<String>> = tokio::select! {
+                r = session.send(&goal) => r.map(Some),
+                _ = tokio::signal::ctrl_c() => {
+                    eprintln!("\n^C — interrupted; saving session and cleaning up…");
+                    Ok(None)
+                }
+            };
+            // Always persist the transcript (success, error, or interrupt) so the
+            // run is resumable with `--resume {id}` / `--continue`.
+            if let Err(e) = session_store::save(&sessions_dir, &id, session.messages()) {
+                tracing::warn!("could not save session `{id}`: {e}");
+            } else {
+                tracing::info!("session saved as `{id}`");
             }
-            result.map(Some)
+            outcome
         }
         Mode::Repl => repl::run(&agent, &sessions_dir, resumed)
             .await
@@ -132,6 +146,10 @@ async fn main() -> Result<()> {
                 .map(|()| None)
         }
     };
+
+    // Remove this session's disposable worktrees on every exit path (best-effort),
+    // so an aborted or finished run doesn't leave them orphaned on disk.
+    agent.cleanup().await;
 
     // Flush telemetry + push metrics before surfacing success/failure.
     if let Some(handle) = &telemetry {
