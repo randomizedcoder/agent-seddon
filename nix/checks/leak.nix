@@ -25,6 +25,7 @@ craneLib.mkCargoDerivation (
       cargo test -p agent-metrics --features dhat-heap --test leak
       cargo test -p agent-tools --features dhat-heap,tool-patch,tool-edit,tool-search,tool-web --test leak
       cargo test -p agent-tokenizer --features dhat-heap --test leak
+      cargo test -p agent-tasks --features dhat-heap --test leak
     '';
     installPhaseCommand = "mkdir -p $out";
   }

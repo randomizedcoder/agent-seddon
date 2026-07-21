@@ -37,6 +37,8 @@ pub enum Error {
     Tokenizer(String),
     #[error("web error: {0}")]
     Web(String),
+    #[error("tasks error: {0}")]
+    Tasks(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -472,6 +474,122 @@ pub fn ipv6_is_private(ip: std::net::Ipv6Addr) -> bool {
     let seg = ip.segments();
     (seg[0] & 0xfe00) == 0xfc00 // fc00::/7 unique-local
         || (seg[0] & 0xffc0) == 0xfe80 // fe80::/10 link-local
+}
+
+// ---------------------------------------------------------------------------
+// Seam: TaskTracker (structured, inspectable agent plan)
+// ---------------------------------------------------------------------------
+//
+// An explicit, mutable todo list so the model carries a first-class plan instead
+// of re-deriving "what's left" from the transcript every turn. The `todo_write`
+// tool drives it; a concrete backend lives behind a cargo feature. See parity
+// spec 21 and `docs/components/tasks.md`.
+
+/// Where a todo sits in its lifecycle. `Pending`/`InProgress` are **open**;
+/// `Completed`/`Cancelled` are **closed** (see [`TodoStatus::is_open`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Cancelled,
+}
+
+impl TodoStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TodoStatus::Pending => "pending",
+            TodoStatus::InProgress => "in_progress",
+            TodoStatus::Completed => "completed",
+            TodoStatus::Cancelled => "cancelled",
+        }
+    }
+    /// Parse a model-supplied status string, or `None` if unrecognised (the tool
+    /// turns `None` into a precise `invalid status` error, rather than accepting a
+    /// free string like the peers do).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "pending" => Some(TodoStatus::Pending),
+            "in_progress" => Some(TodoStatus::InProgress),
+            "completed" => Some(TodoStatus::Completed),
+            "cancelled" => Some(TodoStatus::Cancelled),
+            _ => None,
+        }
+    }
+    /// Open = still on the plan (pending or in progress).
+    pub fn is_open(&self) -> bool {
+        matches!(self, TodoStatus::Pending | TodoStatus::InProgress)
+    }
+}
+
+/// A todo's priority; also its `list()` ordering key (high → medium → low).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TodoPriority {
+    High,
+    Medium,
+    Low,
+}
+
+impl TodoPriority {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TodoPriority::High => "high",
+            TodoPriority::Medium => "medium",
+            TodoPriority::Low => "low",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "high" => Some(TodoPriority::High),
+            "medium" => Some(TodoPriority::Medium),
+            "low" => Some(TodoPriority::Low),
+            _ => None,
+        }
+    }
+    /// Sort key: lower comes first, so High(0) < Medium(1) < Low(2).
+    pub fn rank(&self) -> u8 {
+        match self {
+            TodoPriority::High => 0,
+            TodoPriority::Medium => 1,
+            TodoPriority::Low => 2,
+        }
+    }
+}
+
+/// One plan item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Todo {
+    pub content: String,
+    pub status: TodoStatus,
+    pub priority: TodoPriority,
+}
+
+/// An incremental patch to a single existing todo (matched by `content`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TodoPatch {
+    pub content: String,
+    pub status: Option<TodoStatus>,
+    pub priority: Option<TodoPriority>,
+}
+
+/// A replaceable store for the agent's plan. `write` swaps the whole list
+/// atomically (all-or-nothing); `update` patches one item; both enforce the
+/// **at-most-one-`in_progress`** invariant and return the resulting
+/// priority-ordered list. A rejected mutation leaves the store unchanged.
+#[async_trait]
+pub trait TaskTracker: Send + Sync {
+    /// Replace the entire plan. Rejects (store unchanged) if it would leave more
+    /// than one `in_progress`. Returns the stored, priority-ordered list.
+    async fn write(&self, todos: Vec<Todo>) -> Result<Vec<Todo>>;
+    /// Patch the single todo whose `content` matches. Errors if none matches or
+    /// the change would break the single-`in_progress` invariant.
+    async fn update(&self, patch: TodoPatch) -> Result<Vec<Todo>>;
+    /// The current plan, priority-ordered.
+    async fn list(&self) -> Result<Vec<Todo>>;
+    /// Empty the plan.
+    async fn clear(&self) -> Result<()>;
 }
 
 // ---------------------------------------------------------------------------

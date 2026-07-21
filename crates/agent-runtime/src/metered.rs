@@ -34,6 +34,18 @@ use std::sync::Arc;
 use std::time::Instant;
 use tracing::Instrument;
 
+// Serializes the span/metric tests that share a tracing callsite (`web.fetch`,
+// `tasks.write`): a non-recording test can cache a callsite's interest as
+// disabled, so a span-capturing test must rebuild the interest cache without a
+// concurrent test swapping the subscriber underneath it. `#[cfg(test)]` only.
+#[cfg(test)]
+pub(crate) static CALLSITE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn callsite_guard() -> std::sync::MutexGuard<'static, ()> {
+    CALLSITE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Wrap each seam of a built agent in its metrics decorator. `provider_name`,
 /// `context_name`, `policy_name` are the config-selected impl names (used as the
 /// metric label so `= "grpc"` reads distinctly from `= "anthropic"`).
@@ -109,6 +121,93 @@ pub(crate) fn web(
     m: Metrics,
 ) -> Arc<dyn agent_core::WebBackend> {
     Arc::new(MeteredWeb { inner, metrics: m })
+}
+
+/// Wrap a [`TaskTracker`](agent_core::TaskTracker) so each mutation refreshes the
+/// `agent_tasks_open`/`agent_tasks_closed` gauges and emits a `tasks.<op>` span
+/// carrying `{op, total, in_progress, completed}` attributes.
+#[cfg(feature = "tasks")]
+pub(crate) fn tasks(
+    inner: Arc<dyn agent_core::TaskTracker>,
+    m: Metrics,
+) -> Arc<dyn agent_core::TaskTracker> {
+    Arc::new(MeteredTasks { inner, metrics: m })
+}
+
+#[cfg(feature = "tasks")]
+struct MeteredTasks {
+    inner: Arc<dyn agent_core::TaskTracker>,
+    metrics: Metrics,
+}
+
+#[cfg(feature = "tasks")]
+impl MeteredTasks {
+    /// Refresh the progress gauges + record the plan-shape span attributes.
+    fn record_plan(&self, span: &tracing::Span, list: &[agent_core::Todo]) {
+        use agent_core::TodoStatus;
+        let total = list.len();
+        let in_progress = list
+            .iter()
+            .filter(|t| t.status == TodoStatus::InProgress)
+            .count();
+        let completed = list
+            .iter()
+            .filter(|t| t.status == TodoStatus::Completed)
+            .count();
+        let open = list.iter().filter(|t| t.status.is_open()).count();
+        span.record("total", total);
+        span.record("in_progress", in_progress);
+        span.record("completed", completed);
+        self.metrics
+            .set_tasks_progress(open as i64, (total - open) as i64);
+    }
+}
+
+#[cfg(feature = "tasks")]
+#[async_trait]
+impl agent_core::TaskTracker for MeteredTasks {
+    async fn write(&self, todos: Vec<agent_core::Todo>) -> Result<Vec<agent_core::Todo>> {
+        let span = tracing::info_span!(
+            "tasks.write",
+            op = "write",
+            total = tracing::field::Empty,
+            in_progress = tracing::field::Empty,
+            completed = tracing::field::Empty,
+        );
+        let out = self.inner.write(todos).instrument(span.clone()).await;
+        if let Ok(list) = &out {
+            self.record_plan(&span, list);
+        }
+        out
+    }
+    async fn update(&self, patch: agent_core::TodoPatch) -> Result<Vec<agent_core::Todo>> {
+        let span = tracing::info_span!(
+            "tasks.update",
+            op = "update",
+            total = tracing::field::Empty,
+            in_progress = tracing::field::Empty,
+            completed = tracing::field::Empty,
+        );
+        let out = self.inner.update(patch).instrument(span.clone()).await;
+        if let Ok(list) = &out {
+            self.record_plan(&span, list);
+        }
+        out
+    }
+    async fn list(&self) -> Result<Vec<agent_core::Todo>> {
+        self.inner.list().await
+    }
+    async fn clear(&self) -> Result<()> {
+        let out = self
+            .inner
+            .clear()
+            .instrument(tracing::info_span!("tasks.clear", op = "clear"))
+            .await;
+        if out.is_ok() {
+            self.metrics.set_tasks_progress(0, 0);
+        }
+        out
+    }
 }
 
 #[cfg(feature = "web")]
@@ -750,6 +849,7 @@ mod web_tests {
     // The metered WebBackend emits `web.fetch` carrying host/format/status/bytes.
     #[test]
     fn metered_web_emits_span_with_attributes() {
+        let _lock = super::callsite_guard();
         let fields = captured_span_fields(|| {
             // Another test creates `web.fetch` under a non-recording subscriber,
             // caching this callsite's interest as disabled; force a re-evaluation
@@ -811,46 +911,146 @@ mod web_tests {
         }
     }
 
-    #[tokio::test]
-    async fn guard_denies_ssrf_but_allows_public() {
-        let backend = Arc::new(
-            FakeWebBackend::new()
-                .with_response("http://169.254.169.254/meta", "text/plain", "SECRET")
-                .with_response("https://example.com/doc", "text/html", "<h1>Hi</h1>"),
-        );
-        let tool = agent_tools::WebFetchTool::new(
-            super::web(backend.clone(), Metrics::new()),
-            1 << 20,
-            30,
-            120,
-            5,
-        );
-        let g: Arc<dyn Policy> = guard(
-            Arc::new(AutoApprove),
-            GuardMode::Deny,
-            vec![],
-            vec![],
-            false,
-            vec![],
-            Metrics::new(),
-        );
+    // Sync `#[test]` (not `#[tokio::test]`) so the callsite lock isn't held across
+    // an await point — it serializes this metered-fetch path (which primes the
+    // `web.fetch` callsite under no subscriber) against the span-capturing test.
+    #[test]
+    fn guard_denies_ssrf_but_allows_public() {
+        let _lock = super::callsite_guard();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let backend = Arc::new(
+                FakeWebBackend::new()
+                    .with_response("http://169.254.169.254/meta", "text/plain", "SECRET")
+                    .with_response("https://example.com/doc", "text/html", "<h1>Hi</h1>"),
+            );
+            let tool = agent_tools::WebFetchTool::new(
+                super::web(backend.clone(), Metrics::new()),
+                1 << 20,
+                30,
+                120,
+                5,
+            );
+            let g: Arc<dyn Policy> = guard(
+                Arc::new(AutoApprove),
+                GuardMode::Deny,
+                vec![],
+                vec![],
+                false,
+                vec![],
+                Metrics::new(),
+            );
 
-        // SSRF metadata target: denied by the guard, opaque reason, never fetched.
-        let denied = run_guarded(&g, &tool, "http://169.254.169.254/meta").await;
-        assert!(denied.is_error);
-        assert!(
-            denied.content.contains("blocked by policy guard"),
-            "{}",
-            denied.content
-        );
+            // SSRF metadata target: denied by the guard, opaque reason, never fetched.
+            let denied = run_guarded(&g, &tool, "http://169.254.169.254/meta").await;
+            assert!(denied.is_error);
+            assert!(
+                denied.content.contains("blocked by policy guard"),
+                "{}",
+                denied.content
+            );
 
-        // Public target: allowed, fetched, converted to markdown.
-        let ok = run_guarded(&g, &tool, "https://example.com/doc").await;
-        assert!(!ok.is_error, "{}", ok.content);
-        assert!(ok.content.contains("# Hi"), "{}", ok.content);
+            // Public target: allowed, fetched, converted to markdown.
+            let ok = run_guarded(&g, &tool, "https://example.com/doc").await;
+            assert!(!ok.is_error, "{}", ok.content);
+            assert!(ok.content.contains("# Hi"), "{}", ok.content);
 
-        // Only the public URL reached the backend — the SSRF target never did.
-        assert_eq!(backend.requested(), vec!["https://example.com/doc"]);
+            // Only the public URL reached the backend — the SSRF target never did.
+            assert_eq!(backend.requested(), vec!["https://example.com/doc"]);
+        });
+    }
+}
+
+// tasks: the metered TaskTracker refreshes the open/closed gauges and emits a
+// `tasks.write` span. Uses the real in-memory tracker (dogfoods it).
+#[cfg(all(test, feature = "tasks"))]
+mod tasks_tests {
+    use super::*;
+    use agent_core::{Todo, TodoPatch, TodoPriority, TodoStatus};
+    use agent_testkit::observe::{captured_spans, MetricsProbe};
+
+    fn todo(content: &str, status: TodoStatus, priority: TodoPriority) -> Todo {
+        Todo {
+            content: content.into(),
+            status,
+            priority,
+        }
+    }
+
+    // Sync `#[test]` (not `#[tokio::test]`): the callsite lock must not span an
+    // await; this primes the `tasks.write` callsite under no subscriber, so it is
+    // serialized against the span-capturing test.
+    #[test]
+    fn metered_tasks_gauge_reflects_plan() {
+        let _lock = super::callsite_guard();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let metrics = Metrics::new();
+            let probe = MetricsProbe::new(&metrics);
+            let tracker = super::tasks(
+                Arc::new(agent_tasks::MemoryTaskTracker::new()),
+                metrics.clone(),
+            );
+
+            // 2 open (in_progress + pending), 1 closed (completed).
+            tracker
+                .write(vec![
+                    todo("a", TodoStatus::InProgress, TodoPriority::High),
+                    todo("b", TodoStatus::Pending, TodoPriority::Low),
+                    todo("c", TodoStatus::Completed, TodoPriority::High),
+                ])
+                .await
+                .unwrap();
+            assert_eq!(probe.delta(&metrics, "agent_tasks_open", None), 2.0);
+            assert_eq!(probe.delta(&metrics, "agent_tasks_closed", None), 1.0);
+
+            // c -> cancelled, a -> completed: open drops to 1 (b), closed rises to 2.
+            tracker
+                .update(TodoPatch {
+                    content: "c".into(),
+                    status: Some(TodoStatus::Cancelled),
+                    priority: None,
+                })
+                .await
+                .unwrap();
+            tracker
+                .update(TodoPatch {
+                    content: "a".into(),
+                    status: Some(TodoStatus::Completed),
+                    priority: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(probe.delta(&metrics, "agent_tasks_open", None), 1.0);
+            assert_eq!(probe.delta(&metrics, "agent_tasks_closed", None), 2.0);
+        });
+    }
+
+    #[test]
+    fn metered_tasks_emits_write_span() {
+        let _lock = super::callsite_guard();
+        let spans = captured_spans(|| {
+            // Guard against the callsite-interest cache being primed disabled by a
+            // sibling test that ran the tracker under no recording subscriber.
+            tracing::callsite::rebuild_interest_cache();
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let tracker = super::tasks(
+                    Arc::new(agent_tasks::MemoryTaskTracker::new()),
+                    Metrics::new(),
+                );
+                let _ = tracker
+                    .write(vec![todo("a", TodoStatus::Pending, TodoPriority::High)])
+                    .await;
+            });
+        });
+        assert!(spans.contains(&"tasks.write".to_string()), "{spans:?}");
     }
 }
 

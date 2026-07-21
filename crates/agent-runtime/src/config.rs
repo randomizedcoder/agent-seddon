@@ -33,6 +33,29 @@ pub struct Config {
     pub policy: PolicyCfg,
     #[serde(default)]
     pub web: WebCfg,
+    #[serde(default)]
+    pub tasks: TasksCfg,
+}
+
+/// The `todo_write` tool (the `TaskTracker` seam, parity spec 21). `backend`
+/// selects the impl (`"memory"` = an in-process plan for the session; a
+/// `SessionStore`-backed backend is a follow-up). See docs/components/tasks.md.
+#[derive(Debug, Deserialize)]
+pub struct TasksCfg {
+    #[serde(default = "default_tasks_backend")]
+    pub backend: String,
+}
+
+impl Default for TasksCfg {
+    fn default() -> Self {
+        Self {
+            backend: default_tasks_backend(),
+        }
+    }
+}
+
+fn default_tasks_backend() -> String {
+    "memory".to_string()
 }
 
 /// The `web_fetch` tool (the `WebBackend` seam, parity spec 11). `backend`
@@ -700,6 +723,7 @@ impl Config {
                 ..PolicyCfg::default()
             },
             web: WebCfg::default(),
+            tasks: TasksCfg::default(),
         }
     }
 }

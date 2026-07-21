@@ -1,0 +1,24 @@
+[package]
+name = "agent-tasks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# The in-memory backend is dependency-free and always available — the default.
+# Persistence via the `SessionStore` seam (parity spec 19) is a follow-up, staged
+# like the tokenizer seam. See docs/components/tasks.md and parity spec 21.
+default = ["tasks-memory"]
+tasks-memory = []
+# Injects a dhat global allocator for the allocation-budget leak test only; never
+# in a normal build. Mirrors the other crates' `dhat-heap` gate.
+dhat-heap = ["dep:dhat"]
+
+[dependencies]
+agent-core.workspace = true
+async-trait.workspace = true
+dhat = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio.workspace = true
+rstest.workspace = true
