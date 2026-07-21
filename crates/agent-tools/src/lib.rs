@@ -58,8 +58,29 @@ mod metrics;
 #[cfg(feature = "tool-metrics")]
 pub use metrics::MetricsTool;
 
+#[cfg(feature = "tool-session-export")]
+mod session_export;
 #[cfg(feature = "tool-web")]
 mod web;
+#[cfg(feature = "tool-session-export")]
+pub use session_export::SessionExportTool;
+
+/// Load a session transcript from `<dir>/<id>.jsonl`. Mirrors the runtime's
+/// session store loader; kept here so the tool crate does not depend on the
+/// runtime (which depends on it).
+#[cfg(feature = "tool-session-export")]
+pub(crate) fn session_export_load(
+    dir: &std::path::Path,
+    id: &str,
+) -> std::io::Result<Vec<agent_core::Message>> {
+    let raw = std::fs::read_to_string(dir.join(format!("{id}.jsonl")))?;
+    Ok(raw
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect())
+}
+
 #[cfg(feature = "tool-web-search")]
 mod web_search;
 #[cfg(feature = "tool-web")]

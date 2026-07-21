@@ -5,7 +5,21 @@ Per-feature parity spec for turning a saved session into a shareable transcript
 about X last week?") via a full-text index. Pairs with spec 19 (`SessionStore`),
 which owns the checkpoint/branch model these read from.
 
-> **Status: spec (design of record).** Two capabilities, one spec. (1) **Export**
+> **Status: export implemented; cross-session recall deferred.** The spec is
+> explicitly two capabilities and they are landing separately. Shipped: the
+> `agent-export` crate (byte-stable md/json/html render, redaction via the
+> spec-18 `Scanner` with a built-in fallback, HTML escaping + self-contained
+> page) and the `session_export` tool; doc in
+> `docs/components/session-export.md`. Notes: the real determinism hazard turned
+> out to be tool-call arguments — they are `serde_json::Value`, which is
+> map-backed, so keys are sorted explicitly. Redaction defaults ON, since a
+> transcript is the artifact people paste into bug reports. **Deferred:**
+> cross-session recall, because `SearchBackend::reindex` walks a filesystem tree
+> (`Manifest::scan`) — indexing the session corpus needs either a second tantivy
+> backend rooted at the sessions dir (the intended path) or a document-source
+> abstraction in `agent-search`.
+>
+> Original plan follows. Two capabilities, one spec. (1) **Export**
 > — render a session transcript to `md` / `json` / `html` as a **deterministic,
 > byte-stable** function of the transcript (no clock/uuid/ordering nondeterminism
 > in the output), with secret **redaction on export** (ties to spec 18's
