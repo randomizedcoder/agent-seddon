@@ -13,6 +13,8 @@ provider-anthropic = []
 
 [dependencies]
 agent-core.workspace = true
+# The one canonical retry/backoff library — never hand-roll a retry loop.
+agent-retry.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true

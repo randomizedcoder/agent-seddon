@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/agent-core",
     "crates/agent-metrics",
+    "crates/agent-retry",
     "crates/agent-providers",
     "crates/agent-tools",
     "crates/agent-search",
@@ -91,6 +92,7 @@ tracing-opentelemetry = "0.28"
 # `--no-default-features` build of the runtime truly drops them).
 agent-core = { path = "crates/agent-core" }
 agent-metrics = { path = "crates/agent-metrics" }
+agent-retry = { path = "crates/agent-retry" }
 agent-providers = { path = "crates/agent-providers", default-features = false }
 agent-tools = { path = "crates/agent-tools", default-features = false }
 agent-search = { path = "crates/agent-search", default-features = false }

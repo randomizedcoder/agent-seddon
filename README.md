@@ -236,6 +236,22 @@ The leading `NNNN` orders files ascending. The directory is set by
 `[context_files] dir` (default `context.d`); a missing directory means no injection.
 See [`context.d/README.md`](context.d/README.md).
 
+## Reliability: retries & backoff
+
+Transient failures — a rate-limit (HTTP 429 / gRPC `RESOURCE_EXHAUSTED`), a brief
+`5xx` / `UNAVAILABLE`, a dropped connection — must not abort a whole run. **All
+retrying in this workspace goes through one library, [`agent-retry`](crates/agent-retry)
+— never hand-roll a retry loop or a `sleep`+loop.** It provides exponential backoff
+with **full jitter**, honours server backoff hints (HTTP `Retry-After`, gRPC
+`grpc-retry-pushback-ms`), and classifies which HTTP statuses / gRPC codes are
+actually transient (so a 400 / `INVALID_ARGUMENT` fails fast). Streams are not
+retried. Providers expose `[provider] max_retries` (default `3`, `0` disables).
+
+> **Contributor rule:** if your code makes a call that can fail transiently, use
+> `agent-retry` and add a *classifier* there — do not write a new retry loop.
+
+See [`docs/components/retry.md`](docs/components/retry.md).
+
 ## Metrics
 
 Prometheus metrics about a running agent — enabled in `config/agent.toml`

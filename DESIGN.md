@@ -543,6 +543,12 @@ Sections 2–5 cover the seams; several shipped subsystems live around them:
   (`crates/agent-runtime/src/context_files.rs`).
 - **MCP server.** `agent --serve-mcp` (`crates/agent-cli/src/mcp_server.rs`) is the
   server counterpart to the `agent-mcp` client (§4.6) — see that section.
+- **Retries (one library).** All transient-failure retrying goes through the single
+  `agent-retry` leaf crate — exponential backoff + full jitter, HTTP/gRPC classifiers
+  (429/5xx, `UNAVAILABLE`/`RESOURCE_EXHAUSTED`), and server backoff hints
+  (`Retry-After` / `grpc-retry-pushback-ms`). No component hand-rolls a retry loop;
+  a new retryable transport adds a classifier there. See
+  [`docs/components/retry.md`](docs/components/retry.md).
 
 ---
 
