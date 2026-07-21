@@ -6,18 +6,21 @@ status (pending / in_progress / completed / cancelled) and a priority
 (high / medium / low), so the model carries an explicit multi-step plan it can
 read back and revise.
 
-> **Status: spec (design of record).** New **`TaskTracker` seam** (an `async`
-> trait in `agent-core`: `write` / `update` / `list` / `clear`) with a concrete
-> impl in a sibling crate, wired by `register_builtins`, exposed as a
-> `todo_write` **`Tool`** in `crates/agent-tools` and — like every other seam — as
-> its own `--serve-tasks` **gRPC service with reflection**. Persistence rides the
-> `SessionStore` seam (parity spec [19](19-session-checkpoint.md)), so a plan
-> survives across turns and session forks. **Differentiator:** *metered plan
-> progress* — a Prometheus **gauge of open vs. closed todos** (plus an OTel
-> `tasks.write` span) makes the agent's plan an externally observable signal, and
-> the whole tracker is a distributed, benchmarked, leak-tested, metric+span
-> instrumented seam. No peer meters plan progress or serves its todo store over a
-> reflection-introspectable RPC.
+> **Status: implemented** (seam + in-memory backend + tool + observability +
+> leak). New **`TaskTracker` seam** (an `async` trait in `agent-core`: `write` /
+> `update` / `list` / `clear`) with a concrete `memory` impl in
+> [`agent-tasks`](../../crates/agent-tasks), wired by the builder and exposed as a
+> `todo_write` **`Tool`** in [`agent-tools`](../../crates/agent-tools/src/todo.rs).
+> **Differentiator landed:** *metered plan progress* — `agent_tasks_open` /
+> `agent_tasks_closed` Prometheus gauges refreshed on every mutation, plus
+> `tasks.write`/`update`/`clear` OTel spans carrying `{op, total, in_progress,
+> completed}`. Tighter than the peers: typed enums (unknown status/priority
+> rejected), **at-most-one-`in_progress`** invariant, atomic full-list replace.
+> **Deferred to a follow-up** (staged like the tokenizer / web seams): the
+> `agent.v1.TaskService` gRPC worker (`agent --serve-tasks`) and `SessionStore`
+> persistence (parity spec [19](19-session-checkpoint.md) — until it lands the
+> plan is per-session in-memory). See
+> [`docs/components/tasks.md`](../components/tasks.md).
 
 ## Feature & why it matters
 

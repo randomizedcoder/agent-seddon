@@ -94,6 +94,12 @@ pub struct Metrics {
     web_fetch_total: IntCounterVec,
     web_fetch_seconds: Histogram,
     web_fetch_bytes: Histogram,
+
+    // --- tasks (TaskTracker seam) -----------------------------------------
+    // Plan progress as a graphable signal: open (pending + in_progress) vs closed
+    // (completed + cancelled), refreshed on every write/update/clear.
+    tasks_open: IntGauge,
+    tasks_closed: IntGauge,
 }
 
 impl Metrics {
@@ -357,6 +363,18 @@ impl Metrics {
         ))
         .unwrap();
 
+        // --- tasks (recorded by the tasks metrics wrapper) --------------------
+        let tasks_open = IntGauge::new(
+            "agent_tasks_open",
+            "Open todos in the current plan (pending + in_progress)",
+        )
+        .unwrap();
+        let tasks_closed = IntGauge::new(
+            "agent_tasks_closed",
+            "Closed todos in the current plan (completed + cancelled)",
+        )
+        .unwrap();
+
         let collectors: Vec<Box<dyn prometheus::core::Collector>> = vec![
             Box::new(api_calls.clone()),
             Box::new(api_call_seconds.clone()),
@@ -399,6 +417,8 @@ impl Metrics {
             Box::new(web_fetch_total.clone()),
             Box::new(web_fetch_seconds.clone()),
             Box::new(web_fetch_bytes.clone()),
+            Box::new(tasks_open.clone()),
+            Box::new(tasks_closed.clone()),
         ];
         for m in collectors {
             registry.register(m).expect("register metric");
@@ -447,6 +467,8 @@ impl Metrics {
             web_fetch_total,
             web_fetch_seconds,
             web_fetch_bytes,
+            tasks_open,
+            tasks_closed,
         }
     }
 
@@ -705,6 +727,15 @@ impl Metrics {
         self.web_fetch_total.with_label_values(&[outcome]).inc();
         self.web_fetch_seconds.observe(seconds);
         self.web_fetch_bytes.observe(bytes as f64);
+    }
+
+    // --- tasks (TaskTracker seam) instrumentation -------------------------
+
+    /// Set the plan-progress gauges to the current open / closed todo counts.
+    /// Called by the tasks metrics wrapper after every write/update/clear.
+    pub fn set_tasks_progress(&self, open: i64, closed: i64) {
+        self.tasks_open.set(open);
+        self.tasks_closed.set(closed);
     }
 }
 

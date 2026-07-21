@@ -12,6 +12,7 @@ members = [
     "crates/agent-context",
     "crates/agent-tokenizer",
     "crates/agent-web",
+    "crates/agent-tasks",
     "crates/agent-grpc",
     "crates/agent-mcp",
     "crates/agent-proto",
@@ -104,6 +105,7 @@ agent-memory = { path = "crates/agent-memory", default-features = false }
 agent-context = { path = "crates/agent-context", default-features = false }
 agent-tokenizer = { path = "crates/agent-tokenizer", default-features = false }
 agent-web = { path = "crates/agent-web", default-features = false }
+agent-tasks = { path = "crates/agent-tasks", default-features = false }
 agent-grpc = { path = "crates/agent-grpc" }
 agent-mcp = { path = "crates/agent-mcp" }
 agent-proto = { path = "crates/agent-proto" }

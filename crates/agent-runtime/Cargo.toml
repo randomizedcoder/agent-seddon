@@ -25,6 +25,7 @@ default = [
     "grpc",
     "subagents",
     "web",
+    "tasks",
 ]
 
 # Each feature forwards to the owning impl crate + drives `register_builtins`.
@@ -63,6 +64,9 @@ subagents = []
 # The `web_fetch` tool over the WebBackend seam: the local reqwest transport +
 # the tool + the SSRF guard wiring. See parity spec 11.
 web = ["dep:agent-web", "agent-web/web-local", "agent-tools/tool-web"]
+# The `todo_write` tool over the TaskTracker seam: the in-memory tracker + the
+# tool + plan-progress metrics. See parity spec 21.
+tasks = ["dep:agent-tasks", "agent-tasks/tasks-memory", "agent-tools/tool-todo"]
 
 [dependencies]
 agent-core.workspace = true
@@ -76,6 +80,7 @@ agent-memory.workspace = true
 agent-context.workspace = true
 agent-tokenizer = { workspace = true, optional = true }
 agent-web = { workspace = true, optional = true }
+agent-tasks = { workspace = true, optional = true }
 agent-mcp = { workspace = true, optional = true }
 agent-grpc = { workspace = true, optional = true }
 agent-telemetry.workspace = true

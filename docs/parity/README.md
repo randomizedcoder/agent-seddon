@@ -81,7 +81,7 @@ Legend: ✅ merged · 🔶 in review · ⬜ spec written, not started.
 |---|---------|--------|---------|
 | 19 | [session checkpoint / branch / undo](19-session-checkpoint.md) | ⬜ | `SessionStore` seam with git-style immutable checkpoints reusing the `RepoBackend` object model; time-travel inspectable via spans |
 | 20 | [session export + cross-session search](20-session-export.md) | ⬜ | Deterministic (byte-stable, bench-able) transcript render + secret redaction; cross-session recall reuses `SearchBackend` |
-| 21 | [todo / plan tracking](21-todo.md) | ⬜ | `TaskTracker` seam + `todo_write`; metered open/closed **plan-progress gauge**, persisted via `SessionStore` |
+| 21 | [todo / plan tracking](21-todo.md) | ✅ `TaskTracker` seam + in-memory backend + `todo_write` tool; metered open/closed **plan-progress gauges** + `tasks.*` spans; typed enums, at-most-one-`in_progress`, atomic full-list replace; leak. gRPC worker + `SessionStore` persistence deferred | — |
 | 22 | [lifecycle hooks / extensions](22-hooks.md) | ⬜ | `Hook` seam (pre/post tool+turn, on_compact) with a server-streaming gRPC event bus; hooks can *be* remote seams; `pre_tool` veto folds into `Policy` |
 
 **C — Provider & model**

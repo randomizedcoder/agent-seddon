@@ -67,6 +67,11 @@ pub use web::bench_sanitize;
 #[cfg(feature = "tool-web")]
 pub use web::WebFetchTool;
 
+#[cfg(feature = "tool-todo")]
+mod todo;
+#[cfg(feature = "tool-todo")]
+pub use todo::TodoWriteTool;
+
 /// Cap tool output so a runaway command can't blow the context window.
 pub(crate) const MAX_OUTPUT: usize = 12_000;
 

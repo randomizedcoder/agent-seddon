@@ -125,6 +125,19 @@ pub async fn build_agent_with(
         tools.register(crate::metered::tool(tool, metrics.clone()));
     }
 
+    // Tasks: build the TaskTracker (in-memory plan), meter it (plan-progress
+    // gauges + `tasks.*` spans), and expose the `todo_write` tool.
+    #[cfg(feature = "tasks")]
+    {
+        let tracker: Arc<dyn agent_core::TaskTracker> = match cfg.tasks.backend.as_str() {
+            "memory" => Arc::new(agent_tasks::MemoryTaskTracker::new()),
+            other => anyhow::bail!("unknown [tasks] backend `{other}` (only `memory` is built in)"),
+        };
+        let tracker = crate::metered::tasks(tracker, metrics.clone());
+        let tool = Arc::new(agent_tools::TodoWriteTool::new(tracker));
+        tools.register(crate::metered::tool(tool, metrics.clone()));
+    }
+
     // Memory: either the whole-store backend, or — when `[memory] semantic` is
     // set — the episodic layer of that backend composed with an independently
     // chosen `SemanticStore` (e.g. a vector store) via `LayeredMemory`.
@@ -293,6 +306,7 @@ fn is_builder_registered_tool(name: &str) -> bool {
         || (cfg!(feature = "subagents") && name == "delegate")
         || (cfg!(feature = "git") && name.starts_with("git_"))
         || (cfg!(feature = "web") && name == "web_fetch")
+        || (cfg!(feature = "tasks") && name == "todo_write")
 }
 
 /// Connect to each configured MCP server, discover its tools, and register them

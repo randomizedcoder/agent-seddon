@@ -26,6 +26,9 @@ tool-metrics = ["dep:agent-metrics"]
 # backend is wired by the runtime; this feature only compiles the tool + the
 # dependency-free HTML sanitizer.
 tool-web = []
+# The `todo_write` tool over the TaskTracker seam (structured plan). The tracker
+# is wired by the runtime; this feature only compiles the tool.
+tool-todo = []
 # Heap-leak/allocation assertions for tests/leak.rs (dhat global allocator). Off by
 # default; the leak check runs `--features dhat-heap,tool-patch`.
 dhat-heap = ["dep:dhat"]
@@ -45,6 +48,8 @@ dhat = { workspace = true, optional = true }
 rstest.workspace = true
 agent-testkit.workspace = true
 iai-callgrind.workspace = true
+# The `todo_write` tool test dogfoods the real in-memory TaskTracker backend.
+agent-tasks = { workspace = true, features = ["tasks-memory"] }
 
 # Deterministic instruction-count bench for the patch parser (see benches/patch.rs).
 [[bench]]
