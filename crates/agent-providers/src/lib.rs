@@ -18,3 +18,10 @@ pub use openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 mod anthropic;
 #[cfg(feature = "provider-anthropic")]
 pub use anthropic::{AnthropicConfig, AnthropicProvider};
+
+/// Provider routing + failover (parity spec 25). A `Router` IS-A `LlmProvider`,
+/// so nothing downstream knows it composes others.
+#[cfg(feature = "provider-router")]
+pub mod router;
+#[cfg(feature = "provider-router")]
+pub use router::{Candidate, RouteEvent, RoutePolicy, Router};

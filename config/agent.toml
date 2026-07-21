@@ -232,6 +232,20 @@ tail_back = 2
 # options), so a repeated search inside the TTL costs nothing; a stale entry is
 # served while it refetches. The API key is never echoed into results, errors,
 # spans, or the cache. See docs/components/web-search.md.
+# Provider routing + failover (the Router). Select with `[agent] provider =
+# "router"`. `providers` names OTHER registered providers in preference order;
+# each is built through the registry, so a candidate can itself be "grpc" — one
+# router can span local and remote providers.
+# A *retryable* failure (429/5xx/timeout) transparently continues on the next
+# candidate; a *terminal* one (auth/billing/bad request) does not, since it would
+# fail identically everywhere. Repeated failures open a per-candidate circuit
+# breaker that closes after `cooldown_secs`. See docs/components/router.md.
+[router]
+providers         = []            # e.g. ["anthropic", "openai-compat"]
+policy            = "in-order"    # in-order | round-robin
+failure_threshold = 3
+cooldown_secs     = 30
+
 [web_search]
 backends          = []            # e.g. ["brave"] or ["searxng", "brave"]
 cache_ttl_secs    = 900

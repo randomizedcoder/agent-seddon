@@ -285,3 +285,67 @@ async fn web_search_tool_registration(#[case] ws_cfg: &str, #[case] want: bool) 
         .any(|s| s.name == "web_search");
     assert_eq!(has, want, "web_search registration did not match config");
 }
+
+/// Parity spec 25: `[agent] provider = "router"` builds a Router whose
+/// candidates come back through the registry, and the loop runs against it
+/// without knowing it is not a single provider.
+///
+/// This is also the composing-factory path: the router factory calls
+/// `registry.build_provider` for each candidate via the `FactoryCtx` registry
+/// handle, so it exercises re-entrant registry use.
+#[tokio::test]
+async fn router_composes_candidates_through_the_registry() {
+    let dir = tempdir();
+    let cfg = format!(
+        "{}\n[router]\nproviders = [\"scripted\", \"scripted2\"]\npolicy = \"in-order\"\n",
+        config_toml(&dir).replace("provider = \"scripted\"", "provider = \"router\"")
+    );
+    let parsed = parse_config(&cfg).expect("parse config");
+    let mut registry = Registry::new();
+    register_builtins(&mut registry);
+    // Two independent scripted candidates.
+    let a = std::sync::Mutex::new(Some(vec![final_turn("from-a")]));
+    registry.provider("scripted", move |_ctx| {
+        Ok(Arc::new(agent_testkit::ScriptedProvider::new(
+            a.lock().unwrap().take().expect("built once"),
+        )) as Arc<dyn LlmProvider>)
+    });
+    let b = std::sync::Mutex::new(Some(vec![final_turn("from-b")]));
+    registry.provider("scripted2", move |_ctx| {
+        Ok(Arc::new(agent_testkit::ScriptedProvider::new(
+            b.lock().unwrap().take().expect("built once"),
+        )) as Arc<dyn LlmProvider>)
+    });
+
+    let agent = build_agent_with(&registry, parsed, None, "router-e2e".into(), Metrics::new())
+        .await
+        .expect("router builds through the registry");
+
+    let answer = agent.run("hello").await.expect("run");
+    assert_eq!(
+        answer, "from-a",
+        "in-order routing uses the first candidate"
+    );
+}
+
+/// A router listing itself would recurse until the stack blows — reject it at
+/// build time rather than at run time.
+#[tokio::test]
+async fn adversarial_router_listing_itself_is_rejected() {
+    let dir = tempdir();
+    let cfg = format!(
+        "{}\n[router]\nproviders = [\"router\"]\n",
+        config_toml(&dir).replace("provider = \"scripted\"", "provider = \"router\"")
+    );
+    let parsed = parse_config(&cfg).expect("parse config");
+    let mut registry = Registry::new();
+    register_builtins(&mut registry);
+    let err = match build_agent_with(&registry, parsed, None, "s".into(), Metrics::new()).await {
+        Ok(_) => panic!("a router listing itself must be rejected"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(
+        err.contains("must not include `router`"),
+        "unhelpful error: {err}"
+    );
+}

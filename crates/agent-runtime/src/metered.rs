@@ -1798,3 +1798,32 @@ impl agent_core::WebSearch for MeteredWebSearch {
         out
     }
 }
+
+/// Record a router decision (parity spec 25).
+///
+/// `agent-providers` does not depend on `agent-metrics`, so the router emits
+/// typed events through a callback and the runtime turns them into metrics —
+/// keeping the dependency direction intact rather than inverting it for
+/// observability.
+#[cfg(feature = "provider-router")]
+pub(crate) fn record_route_event(m: &Metrics, ev: agent_providers::RouteEvent<'_>) {
+    use agent_providers::RouteEvent;
+    match ev {
+        RouteEvent::Routed { target } => {
+            tracing::debug!(target, "routed request");
+            m.on_route_decision(target, "routed");
+        }
+        RouteEvent::FellOver { from, reason } => {
+            tracing::info!(from, reason, "provider fallover");
+            m.on_route_decision(from, "fellover");
+        }
+        RouteEvent::SkippedUnhealthy { target } => {
+            tracing::debug!(target, "skipped unhealthy provider");
+            m.on_route_decision(target, "skipped_unhealthy");
+        }
+        RouteEvent::Exhausted => {
+            tracing::warn!("router exhausted every candidate");
+            m.on_route_decision("-", "exhausted");
+        }
+    }
+}

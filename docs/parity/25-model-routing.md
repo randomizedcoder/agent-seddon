@@ -6,7 +6,21 @@ Per-feature parity spec for a **`Router` seam** that fronts several
 Tracks what agent-seddon ships today, what the peer agents assert, and the
 concrete behaviour + tests needed to be the most complete of the four.
 
-> **Status: spec (design of record).** A new **`Router`** that **IS-A
+> **Status: implemented** (`Router` in `agent-providers` behind
+> `provider-router`, shared `agent_retry::classify`, circuit breaker, route
+> metrics, config + e2e; doc in `docs/components/router.md`). Notes: the router
+> is a **composing registry factory** — it builds its candidates by calling back
+> into the registry through the `FactoryCtx` registry handle added for this
+> spec, which is the extension point the spec-24 refactor was designed for.
+> Failure classification is **message-based**, because `Error::Provider(String)`
+> carries no status code; unknown messages classify as *terminal* so an
+> unrecognised deterministic bug cannot burn the whole candidate chain. That is
+> the honest weak point — structured provider errors would remove the guesswork.
+> **Deferred:** cost- and latency-based policies (need per-candidate price
+> metadata from `agent-tokenizer`'s `PriceTable`), structured provider errors,
+> and mid-stream failover (needs replay semantics the seam lacks).
+>
+> Original plan follows. A new **`Router`** that **IS-A
 > `LlmProvider`** (composes N inner `LlmProvider`s behind the same
 > `agent-core` trait) and is selected by config like any other provider. It
 > adds (a) a **routing policy** — capability-match / cost-min / latency /
