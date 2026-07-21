@@ -1,0 +1,33 @@
+[package]
+name = "agent-session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# The `file` content-addressed store is dependency-free — the default. A
+# `RepoBackend`-backed impl (dedup via real git objects) is a follow-up. See
+# docs/components/session.md and parity spec 19.
+default = ["session-file"]
+session-file = []
+# Injects a dhat global allocator for the allocation-budget leak test only.
+dhat-heap = ["dep:dhat"]
+
+[dependencies]
+agent-core.workspace = true
+async-trait.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+dhat = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio.workspace = true
+rstest.workspace = true
+agent-testkit.workspace = true
+iai-callgrind.workspace = true
+
+# Deterministic instruction-count bench for checkpoint serialize + content-hash.
+[[bench]]
+name = "checkpoint"
+harness = false
+required-features = ["session-file"]

@@ -64,6 +64,10 @@ pub struct Agent {
     /// wired. Reached via [`Agent::complete_structured`] (parity spec 16).
     #[cfg(feature = "structured")]
     validator: Option<Arc<dyn agent_core::OutputSchema>>,
+    /// The (metered) session-history store, if the `session` seam is wired. Reached
+    /// via [`Agent::checkpoint`] / [`Agent::restore_checkpoint`] (parity spec 19).
+    #[cfg(feature = "session")]
+    session_store: Option<Arc<dyn agent_core::SessionStore>>,
 }
 
 impl Agent {
@@ -89,6 +93,8 @@ impl Agent {
             repo: None,
             #[cfg(feature = "structured")]
             validator: None,
+            #[cfg(feature = "session")]
+            session_store: None,
         }
     }
 
@@ -129,6 +135,61 @@ impl Agent {
             &self.metrics,
         )
         .await?)
+    }
+
+    /// Attach the session-history store (parity spec 19).
+    #[cfg(feature = "session")]
+    pub fn with_session_store(mut self, store: Arc<dyn agent_core::SessionStore>) -> Self {
+        self.session_store = Some(store);
+        self
+    }
+
+    /// The session-history store, if wired (for `agent --serve-session`).
+    #[cfg(feature = "session")]
+    pub fn session_store(&self) -> Option<Arc<dyn agent_core::SessionStore>> {
+        self.session_store.clone()
+    }
+
+    /// Checkpoint `ws` as an immutable, content-addressed entry on `session`'s
+    /// current branch. See `docs/components/session.md`.
+    #[cfg(feature = "session")]
+    pub async fn checkpoint(
+        &self,
+        session: &str,
+        ws: &WorkingSet,
+        label: &str,
+    ) -> anyhow::Result<agent_core::CheckpointId> {
+        let store = self
+            .session_store
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("session history is not configured"))?;
+        Ok(store.checkpoint(session, ws, label).await?)
+    }
+
+    /// Rehydrate the working set stored at a checkpoint id.
+    #[cfg(feature = "session")]
+    pub async fn restore_checkpoint(
+        &self,
+        id: &agent_core::CheckpointId,
+    ) -> anyhow::Result<WorkingSet> {
+        let store = self
+            .session_store
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("session history is not configured"))?;
+        Ok(store.restore(id).await?)
+    }
+
+    /// The branch tree for `session` (every checkpoint reachable from a head).
+    #[cfg(feature = "session")]
+    pub async fn list_checkpoints(
+        &self,
+        session: &str,
+    ) -> anyhow::Result<Vec<agent_core::CheckpointMeta>> {
+        let store = self
+            .session_store
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("session history is not configured"))?;
+        Ok(store.list(session).await?)
     }
 
     /// Attach the git backend (so `--serve-git` can host it).

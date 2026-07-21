@@ -230,6 +230,7 @@ dependencies = [
  "agent-providers",
  "agent-sandbox",
  "agent-search",
+ "agent-session",
  "agent-tasks",
  "agent-telemetry",
  "agent-testkit",
@@ -282,6 +283,21 @@ dependencies = [
  "tantivy",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "agent-session"
+version = "0.1.0"
+dependencies = [
+ "agent-core",
+ "agent-testkit",
+ "async-trait",
+ "dhat",
+ "iai-callgrind",
+ "rstest",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

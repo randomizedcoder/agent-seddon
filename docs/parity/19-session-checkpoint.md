@@ -7,20 +7,24 @@ session into an independent line. Tracks what agent-seddon ships today, what the
 peers assert, and the concrete behaviour + tests needed to be the most complete of
 the four.
 
-> **Status: spec (design of record).** Introduce a **`SessionStore` seam**
-> (`agent-core` trait) with a git-style object model — a checkpoint is a
-> **commit-like, immutable, content-addressed** object over the working set, linked
-> to its parent to form a **branch tree**; `undo`/`branch`/`fork` are pointer moves,
-> never rewrites. Served as a new `session.proto` gRPC service (`--serve-session`,
-> reflection-introspectable) so a `= "grpc"` client can time-travel a remote
-> session. **Differentiator:** reuse agent-seddon's existing
-> [`RepoBackend`](../../crates/agent-core/src/lib.rs) object model — the same
-> immutable-revision reads and `checkpoint()`-to-a-private-ref machinery that backs
-> the git seam — so a conversation checkpoint is a real content-addressed object
-> (dedup across turns/branches for free), and each checkpoint/restore is an OTel
-> span, making the branch tree replayable and inspectable. No peer offers a seam
-> that is *at once* content-addressed, branchable, gRPC-served, metered, and
-> span-traced.
+> **Status: implemented** (seam + content-addressed file backend + Agent
+> integration + observability + bench + leak). New **`SessionStore` seam**
+> (`agent-core`: `checkpoint`/`list`/`restore`/`branch`/`undo`/`fork`/`diff`/
+> `prune`) with a dependency-free, content-addressed **`FileSessionStore`** in
+> [`agent-session`](../../crates/agent-session): a checkpoint is an **immutable**
+> JSON object whose id is a hash of `(messages + parent + label)` — so
+> immutability is structural and identical content **dedups** across turns and
+> branches; `undo`/`branch`/`fork` are pointer moves over per-session branch heads;
+> `prune` GCs objects unreachable from any live head (git-style, over the shared
+> store). Reached via `Agent::checkpoint`/`restore_checkpoint`/`list_checkpoints`,
+> config-selected (`[session] backend = "file"`). Metered
+> (`agent_session_ops_total{op}` + `agent_session_gc_reclaimed_total`) +
+> `session.<op>` spans, so the branch tree is time-travel-inspectable in the trace.
+> **Deferred to a follow-up** (staged like the prior seams): the `session.proto`
+> gRPC service (`--serve-session`), a **`RepoBackend`-backed** impl (dedup via real
+> git objects), loop auto-checkpoint + `RepoBackend` code-checkpoint coupling +
+> retention policy + flat-`.jsonl` migration. See
+> [`docs/components/session.md`](../components/session.md).
 
 ## Feature & why it matters
 

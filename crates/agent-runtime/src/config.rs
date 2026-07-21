@@ -43,6 +43,32 @@ pub struct Config {
     pub sandbox: SandboxCfg,
     #[serde(default)]
     pub embedder: EmbedderCfg,
+    #[serde(default)]
+    pub session: SessionCfg,
+}
+
+/// Content-addressed session history (the `SessionStore` seam, parity spec 19).
+/// `backend` = `"file"` (immutable objects under `dir`); `dir` empty ⇒
+/// `<working_dir>/.agent-seddon/session`. See docs/components/session.md.
+#[derive(Debug, Deserialize)]
+pub struct SessionCfg {
+    #[serde(default = "default_session_backend")]
+    pub backend: String,
+    #[serde(default)]
+    pub dir: String,
+}
+
+impl Default for SessionCfg {
+    fn default() -> Self {
+        Self {
+            backend: default_session_backend(),
+            dir: String::new(),
+        }
+    }
+}
+
+fn default_session_backend() -> String {
+    "file".to_string()
 }
 
 /// The embedding model for semantic search (the `Embedder` seam, parity spec 15).
@@ -829,6 +855,7 @@ impl Config {
             lsp: LspCfg::default(),
             sandbox: SandboxCfg::default(),
             embedder: EmbedderCfg::default(),
+            session: SessionCfg::default(),
         }
     }
 }
