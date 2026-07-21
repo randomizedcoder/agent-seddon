@@ -8,7 +8,7 @@
 use agent_core::{
     CompletionRequest, CompletionResponse, ContextBlock, ContextInput, ContextStrategy, Decision,
     LlmProvider, MemoryEvent, MemoryStore, Message, Observation, Policy, RecallQuery, Role,
-    TokenBudget, ToolContext, ToolRegistry, ToolSchema, WorkingSet,
+    TokenBudget, Tool, ToolContext, ToolRegistry, ToolSchema, WorkingSet,
 };
 use agent_metrics::Metrics;
 use futures_util::StreamExt;
@@ -30,6 +30,10 @@ pub struct Settings {
     pub stream: bool,
     /// Run a turn's parallel-safe tool calls concurrently.
     pub parallel_tools: bool,
+    /// Per-tool wall-clock timeout (seconds); a hung tool becomes an error
+    /// observation rather than freezing the loop. `0` disables (e.g. relying on
+    /// `bash`'s own timeout).
+    pub tool_timeout_secs: u64,
     pub recall_limit: usize,
     pub cwd: PathBuf,
     /// Model name, used as a metrics label.
@@ -283,23 +287,30 @@ impl Agent {
                     .iter()
                     .all(|c| self.tools.get(&c.name).is_none_or(|t| t.parallel_safe()));
 
+            let tool_timeout = self.settings.tool_timeout_secs;
             let futures = assistant
                 .tool_calls
                 .iter()
                 .zip(&decisions)
                 .map(|(call, dec)| {
                     let tools = &self.tools;
-                    let tool_ctx: &ToolContext = tool_ctx;
+                    let cwd = tool_ctx.cwd.clone();
                     let span = tracing::info_span!("tool.execute", iter, tool = %call.name);
                     async move {
                         match dec {
                             Decision::Deny(_) => None,
                             Decision::Allow => Some(match tools.get(&call.name) {
+                                // Guarded: a hung tool times out and a panicking tool
+                                // is isolated — either way an error observation, so
+                                // one bad tool never freezes or crashes the loop.
                                 Some(tool) => {
-                                    match tool.execute(call.arguments.clone(), tool_ctx).await {
-                                        Ok(obs) => obs,
-                                        Err(e) => Observation::error(format!("tool errored: {e}")),
-                                    }
+                                    run_tool_guarded(
+                                        tool,
+                                        call.arguments.clone(),
+                                        cwd,
+                                        tool_timeout,
+                                    )
+                                    .await
                                 }
                                 None => Observation::error(format!("unknown tool `{}`", call.name)),
                             }),
@@ -577,6 +588,47 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Run a tool with a wall-clock timeout **and** panic isolation, always returning
+/// an [`Observation`] — a hung or panicking tool becomes an error observation fed
+/// back to the model, so one bad tool never freezes or crashes the loop.
+///
+/// The tool runs on its own task, so a panic surfaces as a `JoinError` rather than
+/// unwinding the loop's task / aborting the process. On timeout the task is aborted
+/// so the hung work actually stops. `timeout_secs == 0` disables the timeout (e.g.
+/// when `bash`'s own timeout is the intended bound).
+async fn run_tool_guarded(
+    tool: Arc<dyn Tool>,
+    args: serde_json::Value,
+    cwd: PathBuf,
+    timeout_secs: u64,
+) -> Observation {
+    let handle = tokio::spawn(async move { tool.execute(args, &ToolContext { cwd }).await });
+
+    let outcome = if timeout_secs == 0 {
+        handle.await
+    } else {
+        let abort = handle.abort_handle();
+        match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), handle).await {
+            Ok(joined) => joined,
+            Err(_elapsed) => {
+                abort.abort();
+                return Observation::error(format!(
+                    "tool timed out after {timeout_secs}s and was aborted"
+                ));
+            }
+        }
+    };
+
+    match outcome {
+        Ok(Ok(obs)) => obs,
+        Ok(Err(e)) => Observation::error(format!("tool errored: {e}")),
+        Err(join_err) if join_err.is_panic() => {
+            Observation::error("tool panicked (isolated; the run continues)")
+        }
+        Err(join_err) => Observation::error(format!("tool task failed: {join_err}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -623,6 +675,7 @@ mod tests {
             system_prompt: "sys".into(),
             stream: false,
             parallel_tools: parallel,
+            tool_timeout_secs: 30,
             recall_limit: 0,
             cwd: std::env::temp_dir(),
             model: "m".into(),
@@ -943,6 +996,119 @@ mod tests {
             .expect_err("should hit the iteration bound")
             .to_string();
         assert!(err.contains("max_iterations"), "{err}");
+    }
+
+    // ---- tool timeout + panic isolation ------------------------------------
+
+    /// A tool that never returns — stands in for a hung build / deadlocked call.
+    struct HangTool;
+    #[async_trait::async_trait]
+    impl agent_core::Tool for HangTool {
+        fn name(&self) -> &str {
+            "hang"
+        }
+        fn schema(&self) -> agent_core::ToolSchema {
+            agent_core::ToolSchema {
+                name: "hang".into(),
+                description: "never returns".into(),
+                parameters: json!({"type": "object"}),
+            }
+        }
+        async fn execute(
+            &self,
+            _a: serde_json::Value,
+            _c: &agent_core::ToolContext,
+        ) -> agent_core::Result<Observation> {
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            Ok(Observation::ok("unreachable"))
+        }
+    }
+
+    /// A tool that panics mid-execution — must be isolated, not crash the loop.
+    struct PanicTool;
+    #[async_trait::async_trait]
+    impl agent_core::Tool for PanicTool {
+        fn name(&self) -> &str {
+            "panic"
+        }
+        fn schema(&self) -> agent_core::ToolSchema {
+            agent_core::ToolSchema {
+                name: "panic".into(),
+                description: "panics".into(),
+                parameters: json!({"type": "object"}),
+            }
+        }
+        async fn execute(
+            &self,
+            _a: serde_json::Value,
+            _c: &agent_core::ToolContext,
+        ) -> agent_core::Result<Observation> {
+            panic!("boom from a tool");
+        }
+    }
+
+    #[tokio::test]
+    async fn guard_times_out_a_hung_tool() {
+        let obs = run_tool_guarded(Arc::new(HangTool), json!({}), std::env::temp_dir(), 1).await;
+        assert!(obs.is_error);
+        assert!(obs.content.contains("timed out"), "{}", obs.content);
+    }
+
+    #[tokio::test]
+    async fn guard_isolates_a_panicking_tool() {
+        let obs = run_tool_guarded(Arc::new(PanicTool), json!({}), std::env::temp_dir(), 5).await;
+        assert!(obs.is_error);
+        assert!(obs.content.contains("panicked"), "{}", obs.content);
+    }
+
+    #[tokio::test]
+    async fn guard_passes_ok_and_err_through() {
+        let cwd = std::env::temp_dir();
+        let ok = run_tool_guarded(Arc::new(EchoTool), json!({"val": "hi"}), cwd.clone(), 5).await;
+        assert!(!ok.is_error, "{}", ok.content);
+        assert!(ok.content.contains("hi"));
+
+        let err = run_tool_guarded(Arc::new(ErrTool), json!({}), cwd, 5).await;
+        assert!(err.is_error);
+        assert!(err.content.contains("tool errored"), "{}", err.content);
+    }
+
+    #[tokio::test]
+    async fn loop_continues_after_a_tool_times_out() {
+        // The model calls a hung tool, then answers. The loop must feed the timeout
+        // back as an observation and keep going (not freeze), reaching the answer.
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(HangTool));
+        let provider = ScriptedProvider::new(vec![
+            tool_turn(vec![tool_call("t0", "hang")]),
+            final_turn("recovered"),
+        ]);
+        let memory = RecordingMemory::new();
+        let mut s = settings(false);
+        s.tool_timeout_secs = 1; // fast timeout for the test
+        let agent = Agent::new(
+            Arc::new(provider),
+            tools,
+            Arc::new(memory.clone()),
+            Arc::new(StaticContext),
+            Arc::new(crate::policy::AutoApprove),
+            Metrics::new(),
+            s,
+        );
+
+        let out = agent.run("go").await.unwrap();
+        assert_eq!(out, "recovered", "loop should recover past the timeout");
+
+        let tool_msgs: Vec<String> = memory
+            .events()
+            .into_iter()
+            .filter(|e| e.kind == "tool")
+            .map(|e| e.message.content)
+            .collect();
+        assert!(
+            tool_msgs.iter().any(|c| c.contains("timed out")),
+            "timeout not fed back: {tool_msgs:?}"
+        );
     }
 
     /// Peak concurrent executions of three `conc` calls in one turn, given the

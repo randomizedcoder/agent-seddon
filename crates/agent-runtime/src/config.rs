@@ -344,6 +344,11 @@ pub struct AgentCfg {
     /// Execute a turn's tool calls concurrently (when all are parallel-safe).
     #[serde(default = "default_true")]
     pub parallel_tools: bool,
+    /// Per-tool wall-clock timeout in seconds (a backstop against a hung tool
+    /// freezing the loop). Generous by default so real builds/tests aren't cut;
+    /// `bash` also has its own shorter timeout. `0` disables the loop-level guard.
+    #[serde(default = "default_tool_timeout")]
+    pub tool_timeout_secs: u64,
     /// Expose a `delegate` tool so the model can spawn child agents with isolated
     /// context. Off by default (nested loops multiply cost).
     #[serde(default)]
@@ -497,6 +502,11 @@ fn default_policy() -> String {
 fn default_max_iters() -> usize {
     12
 }
+fn default_tool_timeout() -> u64 {
+    // 10 minutes: a backstop for a truly hung tool, well above a normal
+    // build/test invoked via `bash` (which has its own shorter timeout).
+    600
+}
 fn default_max_tokens() -> u32 {
     8192
 }
@@ -595,6 +605,7 @@ impl Config {
                 system_prompt: default_system_prompt(),
                 stream: true,
                 parallel_tools: true,
+                tool_timeout_secs: default_tool_timeout(),
                 subagents: false,
                 subagent_max_depth: default_subagent_depth(),
             },

@@ -172,6 +172,7 @@ mod tests {
             system_prompt: "sys".into(),
             stream: false,
             parallel_tools: true,
+            tool_timeout_secs: 30,
             recall_limit: 0,
             cwd: std::env::temp_dir(),
             model: "m".into(),

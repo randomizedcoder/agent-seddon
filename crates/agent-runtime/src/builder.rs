@@ -172,6 +172,7 @@ pub async fn build_agent_with(
         system_prompt: cfg.agent.system_prompt,
         stream: cfg.agent.stream,
         parallel_tools: cfg.agent.parallel_tools,
+        tool_timeout_secs: cfg.agent.tool_timeout_secs,
         recall_limit: cfg.memory.recall_limit,
         cwd: if cfg.agent.working_dir.is_empty() {
             std::env::current_dir().context("resolving cwd")?
