@@ -309,7 +309,7 @@ mod tests {
                 .iter()
                 .map(|(r, c)| Message {
                     role: *r,
-                    content: c.to_string(),
+                    content: vec![agent_core::ContentBlock::text(*c)],
                     tool_calls: vec![],
                     tool_call_id: None,
                 })

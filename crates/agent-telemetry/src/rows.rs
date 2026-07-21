@@ -45,7 +45,9 @@ impl EventRow {
             seq,
             kind: event.kind.clone(),
             role: event.message.role.as_str().to_string(),
-            content: event.message.content.clone(),
+            // The telemetry row is a flat text column; media blocks are
+            // summarized by `content_text` rather than base64'd into ClickHouse.
+            content: event.message.content_text(),
             tool_calls,
             tool_call_id: event.message.tool_call_id.clone().unwrap_or_default(),
         }

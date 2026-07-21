@@ -38,6 +38,10 @@ pub struct Metrics {
     context_tokens: IntGauge,
     context_messages: IntGauge,
     tool_calls: IntCounterVec,
+    // Multimodal content accounting (parity spec 26): blocks sent to the model by
+    // modality, and blocks dropped because the model lacks vision support.
+    content_blocks: IntCounterVec,
+    content_blocks_dropped: IntCounter,
     iterations: IntCounter,
     runs: IntCounterVec,
     run_seconds: Histogram,
@@ -184,6 +188,19 @@ impl Metrics {
         let tool_calls = IntCounterVec::new(
             Opts::new("agent_tool_calls_total", "Tool invocations"),
             &["tool", "status"],
+        )
+        .unwrap();
+        let content_blocks = IntCounterVec::new(
+            Opts::new(
+                "agent_content_blocks_total",
+                "Message content blocks sent to the model, by modality",
+            ),
+            &["modality"],
+        )
+        .unwrap();
+        let content_blocks_dropped = IntCounter::new(
+            "agent_content_blocks_dropped_total",
+            "Media blocks dropped because the selected model has no vision support",
         )
         .unwrap();
         let iterations =
@@ -517,6 +534,8 @@ impl Metrics {
             Box::new(context_tokens.clone()),
             Box::new(context_messages.clone()),
             Box::new(tool_calls.clone()),
+            Box::new(content_blocks.clone()),
+            Box::new(content_blocks_dropped.clone()),
             Box::new(iterations.clone()),
             Box::new(runs.clone()),
             Box::new(run_seconds.clone()),
@@ -581,6 +600,8 @@ impl Metrics {
             context_tokens,
             context_messages,
             tool_calls,
+            content_blocks,
+            content_blocks_dropped,
             iterations,
             runs,
             run_seconds,
@@ -654,6 +675,15 @@ impl Metrics {
     }
     pub fn on_iteration(&self) {
         self.iterations.inc();
+    }
+    /// Count one content block about to be sent, by modality (parity spec 26).
+    /// Takes the label rather than a `Message` so this stays a leaf crate.
+    pub fn on_content_block(&self, modality: &str) {
+        self.content_blocks.with_label_values(&[modality]).inc();
+    }
+    /// Media blocks stripped because the model cannot accept them.
+    pub fn on_content_blocks_dropped(&self, n: u64) {
+        self.content_blocks_dropped.inc_by(n);
     }
     pub fn on_api_call(&self, model: &str, finish_reason: &str, seconds: f64) {
         self.api_calls

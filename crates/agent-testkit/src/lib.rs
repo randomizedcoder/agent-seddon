@@ -83,6 +83,7 @@ impl ScriptedProvider {
                 supports_tools: true,
                 context_window: 1000,
                 supports_response_format: false,
+                supports_vision: false,
             },
         }
     }
@@ -138,6 +139,7 @@ where
                 supports_tools: false,
                 context_window: 1000,
                 supports_response_format: false,
+                supports_vision: false,
             },
         }
     }
@@ -165,7 +167,7 @@ pub fn tool_turn(calls: Vec<ToolCall>) -> CompletionResponse {
     CompletionResponse {
         message: Message {
             role: Role::Assistant,
-            content: String::new(),
+            content: Vec::new(),
             tool_calls: calls,
             tool_call_id: None,
         },
@@ -813,10 +815,10 @@ mod tests {
         assert_eq!(r0.message.tool_calls.len(), 1);
         // turn 1: final answer
         let r1 = p.complete(req.clone()).await.unwrap();
-        assert_eq!(r1.message.content, "done");
+        assert_eq!(r1.message.content_text(), "done");
         // turn 2+: repeats the final answer, never panics
         let r2 = p.complete(req).await.unwrap();
-        assert_eq!(r2.message.content, "done");
+        assert_eq!(r2.message.content_text(), "done");
     }
 
     #[tokio::test]

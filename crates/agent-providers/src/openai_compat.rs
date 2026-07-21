@@ -6,13 +6,13 @@
 //! `max_tokens` needs real headroom.
 
 use agent_core::{
-    ChunkStream, CompletionChunk, CompletionRequest, CompletionResponse, Error, LlmProvider,
-    Message, ModelCapabilities, Result, Role, ToolCall, Usage,
+    ChunkStream, CompletionChunk, CompletionRequest, CompletionResponse, ContentBlock, Error,
+    LlmProvider, Message, ModelCapabilities, Result, Role, ToolCall, Usage,
 };
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -25,6 +25,11 @@ pub struct OpenAiCompatConfig {
     pub context_window: u32,
     /// Retries for transient failures (429 / 5xx / timeout); 0 disables.
     pub max_retries: u32,
+    /// Whether the configured model accepts image blocks. This endpoint is
+    /// generic (any OpenAI-compatible server, including local text-only models),
+    /// so it **defaults off** and is opted into per deployment — sending an image
+    /// to a model that cannot take one fails the entire request.
+    pub supports_vision: bool,
 }
 
 pub struct OpenAiCompatProvider {
@@ -33,6 +38,7 @@ pub struct OpenAiCompatProvider {
     model: String,
     api_key: String,
     context_window: u32,
+    supports_vision: bool,
     retry: agent_retry::RetryPolicy,
 }
 
@@ -50,6 +56,7 @@ impl OpenAiCompatProvider {
             model: cfg.model,
             api_key: cfg.api_key,
             context_window: cfg.context_window,
+            supports_vision: cfg.supports_vision,
             retry: agent_retry::RetryPolicy::new(cfg.max_retries),
         })
     }
@@ -130,6 +137,7 @@ impl LlmProvider for OpenAiCompatProvider {
             // Native `response_format` serialization is a documented follow-up; the
             // structured helper prompt-injects the schema until then (parity spec 16).
             supports_response_format: false,
+            supports_vision: self.supports_vision,
         }
     }
 
@@ -178,9 +186,16 @@ impl LlmProvider for OpenAiCompatProvider {
             })
             .collect();
 
+        let text = choice.message.content.unwrap_or_default();
         let message = Message {
             role: Role::Assistant,
-            content: choice.message.content.unwrap_or_default(),
+            // This API returns assistant text only (images come back via separate
+            // modalities), so a single text block is the faithful decode.
+            content: if text.is_empty() {
+                Vec::new()
+            } else {
+                vec![ContentBlock::text(text)]
+            },
             tool_calls,
             tool_call_id: None,
         };
@@ -375,10 +390,66 @@ struct WireReq<'a> {
     stream: bool,
 }
 
+/// Render message content for the wire. A text-only message stays a plain
+/// string so nothing changes for the (overwhelmingly common) text case and
+/// text-only servers keep working; anything with media becomes the parts array.
+fn to_openai_content(blocks: &[ContentBlock]) -> WireContent {
+    if !blocks.iter().any(ContentBlock::is_media) {
+        let mut s = String::new();
+        for b in blocks {
+            if let Some(t) = b.as_text() {
+                s.push_str(t);
+            }
+        }
+        return WireContent::Text(s);
+    }
+    WireContent::Parts(
+        blocks
+            .iter()
+            .map(|b| match b {
+                ContentBlock::Text { text } => json!({ "type": "text", "text": text }),
+                ContentBlock::Image { media_type, data } => json!({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": format!(
+                            "data:{media_type};base64,{}",
+                            agent_core::b64_encode(data)
+                        ),
+                    },
+                }),
+                // This API has no inline document part; describe it instead of
+                // dropping it silently.
+                ContentBlock::Document {
+                    media_type,
+                    data,
+                    name,
+                } => json!({
+                    "type": "text",
+                    "text": format!(
+                        "[{}: {media_type}, {} bytes — not inlinable]",
+                        name.as_deref().unwrap_or("attachment"),
+                        data.len()
+                    ),
+                }),
+            })
+            .collect(),
+    )
+}
+
+/// This API accepts `content` as either a bare string or an array of typed
+/// parts. Text-only turns keep the string form (what every existing deployment
+/// and every non-vision server expects); a turn carrying media uses the array.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum WireContent {
+    Text(String),
+    Parts(Vec<Value>),
+}
+
 #[derive(Serialize)]
 struct WireMsg {
     role: &'static str,
-    content: String,
+    content: WireContent,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tool_calls: Vec<WireToolCall>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -389,7 +460,7 @@ impl WireMsg {
     fn from_core(m: &Message) -> Self {
         WireMsg {
             role: m.role.as_str(),
-            content: m.content.clone(),
+            content: to_openai_content(&m.content),
             tool_calls: m
                 .tool_calls
                 .iter()
@@ -496,9 +567,50 @@ struct PromptTokensDetails {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_tool_args;
+    use super::{parse_tool_args, to_openai_content, WireContent};
+    use agent_core::ContentBlock;
     use rstest::rstest;
     use serde_json::{json, Value};
+
+    /// The 67-byte minimal 1x1 PNG (deterministic fixture, no assets).
+    const TINY_PNG: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    /// A text-only turn must stay a bare string on the wire — text-only servers
+    /// (and every pre-spec-26 deployment) expect exactly that.
+    #[test]
+    fn positive_text_only_stays_a_bare_string() {
+        let out = to_openai_content(&[ContentBlock::text("a"), ContentBlock::text("b")]);
+        match serde_json::to_value(&out).unwrap() {
+            Value::String(s) => assert_eq!(s, "ab"),
+            other => panic!("expected a bare string, got {other}"),
+        }
+        assert!(matches!(out, WireContent::Text(_)));
+    }
+
+    /// An image becomes a `image_url` part carrying a data URI.
+    #[test]
+    fn positive_image_becomes_image_url_data_uri() {
+        let out = to_openai_content(&[
+            ContentBlock::text("look"),
+            ContentBlock::image("image/png", TINY_PNG),
+        ]);
+        let v = serde_json::to_value(&out).unwrap();
+        let parts = v.as_array().expect("parts array");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[1]["type"], "image_url");
+        let url = parts[1]["image_url"]["url"].as_str().unwrap();
+        let b64 = url
+            .strip_prefix("data:image/png;base64,")
+            .expect("data URI prefix");
+        assert_eq!(agent_core::b64_decode(b64).unwrap(), TINY_PNG);
+    }
 
     /// OpenAI sends tool-call `arguments` as a JSON string.
     #[rstest]

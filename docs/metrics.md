@@ -19,7 +19,8 @@ gated by `[metrics] enabled`.
 - **Loop** (`agent-runtime`): `agent_runs_total`, `agent_run_duration_seconds`,
   `agent_active`, `agent_iterations_total`, `agent_api_calls_total`,
   `agent_api_call_duration_seconds`, `agent_tokens_total`,
-  `agent_context_tokens`, `agent_context_messages`, `agent_tool_calls_total`.
+  `agent_context_tokens`, `agent_context_messages`, `agent_tool_calls_total`,
+  `agent_content_blocks_total{modality}`, `agent_content_blocks_dropped_total`.
 - **Per component** (recorded at each seam via a metrics wrapper — see
   `crates/agent-runtime/src/metered.rs`):
   - Provider — `agent_provider_request_seconds{provider,stream}`,

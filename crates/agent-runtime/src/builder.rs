@@ -540,6 +540,7 @@ pub(crate) fn openai_compat_provider(
         insecure_tls: cfg.provider.insecure_tls,
         context_window: cfg.agent.context_window,
         max_retries: cfg.provider.max_retries,
+        supports_vision: cfg.provider.supports_vision,
     })
     .map_err(|e| anyhow::anyhow!("building provider: {e}"))?;
     Ok(Arc::new(provider))
@@ -669,6 +670,7 @@ mod tests {
             base_url: String::new(),
             model: String::new(),
             version: String::new(),
+            supports_vision: false,
             api_key: api_key.into(),
             api_key_env: api_key_env.into(),
             api_key_file: api_key_file.into(),

@@ -88,6 +88,7 @@ impl Tool for BashTool {
         }
         let is_error = code != 0;
         Ok(Observation {
+            blocks: Vec::new(),
             content: truncate(buf),
             is_error,
         })
@@ -137,14 +138,31 @@ impl Tool for ReadFileTool {
             Err(e) => return Ok(Observation::error(format!("could not read `{path}`: {e}"))),
         };
         // Binary files (NUL byte or invalid UTF-8) are reported, not dumped as
-        // mojibake — the model gets a clear, actionable message instead.
+        // mojibake — the model gets a clear, actionable message instead. An image
+        // is the exception: it becomes a typed content block the model can
+        // actually see (parity spec 26). Detection is by file **magic**, never by
+        // extension — a `.png` holding other bytes must not be sent as an image.
         let text = match as_text(&bytes) {
             Some(t) => t,
             None => {
+                if let Some(media_type) = detect_image(&bytes) {
+                    if bytes.len() > MAX_INLINE_IMAGE_BYTES {
+                        return Ok(Observation::ok(format!(
+                            "`{path}` is a {media_type} image ({} bytes); too large to inline \
+                             (limit {MAX_INLINE_IMAGE_BYTES} bytes).",
+                            bytes.len()
+                        )));
+                    }
+                    let n = bytes.len();
+                    return Ok(Observation::ok(format!(
+                        "Read image file `{path}` [{media_type}, {n} bytes]"
+                    ))
+                    .with_blocks(vec![agent_core::ContentBlock::image(media_type, bytes)]));
+                }
                 return Ok(Observation::ok(format!(
                     "`{path}` is a binary file ({} bytes); not shown as text.",
                     bytes.len()
-                )))
+                )));
             }
         };
         Ok(Observation::ok(render_read(
@@ -154,6 +172,32 @@ impl Tool for ReadFileTool {
             line_numbers,
         )))
     }
+}
+
+/// Largest image inlined into the context. Base64 inflates by ~4/3 and vendors
+/// cap inline media, so an oversized file is described rather than sent — the
+/// bytes are attacker-influenced (the model chooses the path), so this is a hard
+/// cap, not a hint.
+const MAX_INLINE_IMAGE_BYTES: usize = 3 * 1024 * 1024;
+
+/// Identify an image by **file magic**, returning its media type. Extension is
+/// never consulted: a `.png` containing arbitrary bytes must not be presented to
+/// the model as a decodable image (the peers' tests pin this exact case).
+fn detect_image(b: &[u8]) -> Option<&'static str> {
+    if b.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        return Some("image/png");
+    }
+    if b.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Some("image/jpeg");
+    }
+    if b.starts_with(b"GIF87a") || b.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    // RIFF....WEBP
+    if b.len() >= 12 && b.starts_with(b"RIFF") && &b[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    None
 }
 
 /// Interpret bytes as UTF-8 text, or `None` if they look binary (contain a NUL or
@@ -371,6 +415,76 @@ mod tests {
             obs.content
         );
         assert!(obs.content.contains("blob.bin"));
+        assert!(
+            obs.blocks.is_empty(),
+            "a non-image binary must not produce a media block"
+        );
+    }
+
+    /// The 67-byte minimal 1x1 PNG (deterministic fixture, no assets).
+    const TINY_PNG: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    /// Reading an image yields a typed block the model can actually see, plus a
+    /// text note — not the "binary file … not shown" drop (parity spec 26).
+    #[tokio::test]
+    async fn positive_read_file_png_yields_image_block() {
+        let dir = tempdir();
+        std::fs::write(dir.join("pic.png"), TINY_PNG).unwrap();
+        let obs = run(&dir, &ReadFileTool, json!({"path": "pic.png"})).await;
+        assert!(!obs.is_error);
+        assert!(!obs.content.contains("binary file"), "got: {}", obs.content);
+        assert!(obs.content.contains("image/png"), "got: {}", obs.content);
+        assert_eq!(obs.blocks.len(), 1);
+        match &obs.blocks[0] {
+            agent_core::ContentBlock::Image { media_type, data } => {
+                assert_eq!(media_type, "image/png");
+                assert_eq!(data.as_slice(), TINY_PNG);
+            }
+            other => panic!("expected an image block, got {other:?}"),
+        }
+    }
+
+    /// Detection is by magic, never by extension: a `.png` holding other bytes
+    /// must NOT be handed to the model as a decodable image.
+    #[rstest]
+    #[case::adversarial_png_extension_wrong_bytes("evil.png", &[0x00, 0x01, 0x02, 0xFF])]
+    #[case::adversarial_jpg_extension_wrong_bytes("evil.jpg", &[0xDE, 0xAD, 0xBE, 0xEF])]
+    #[tokio::test]
+    async fn adversarial_image_extension_does_not_imply_image(
+        #[case] name: &str,
+        #[case] bytes: &[u8],
+    ) {
+        let dir = tempdir();
+        std::fs::write(dir.join(name), bytes).unwrap();
+        let obs = run(&dir, &ReadFileTool, json!({ "path": name })).await;
+        assert!(
+            obs.blocks.is_empty(),
+            "`{name}` is not really an image; no media block may be produced"
+        );
+        assert!(obs.content.contains("binary file"), "got: {}", obs.content);
+    }
+
+    /// An image over the inline cap is described, not inlined — the path is
+    /// model-chosen, so the cap must hold regardless of what it points at.
+    #[tokio::test]
+    async fn adversarial_oversized_image_is_not_inlined() {
+        let dir = tempdir();
+        let mut huge = TINY_PNG.to_vec();
+        huge.resize(MAX_INLINE_IMAGE_BYTES + 1, 0);
+        std::fs::write(dir.join("huge.png"), &huge).unwrap();
+        let obs = run(&dir, &ReadFileTool, json!({"path": "huge.png"})).await;
+        assert!(obs.blocks.is_empty(), "oversized image must not be inlined");
+        assert!(
+            obs.content.contains("too large to inline"),
+            "got: {}",
+            obs.content
+        );
     }
 
     // --- read_file: line-window paging + line numbers -----------------------

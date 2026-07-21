@@ -144,7 +144,7 @@ impl SummarizingWindow {
             response_format: None,
         };
         let resp = self.summarizer.complete(req).await?;
-        Ok(resp.message.content)
+        Ok(resp.message.content_text())
     }
 }
 
@@ -168,7 +168,25 @@ fn render(messages: &[Message]) -> String {
         };
         out.push_str(who);
         out.push_str(": ");
-        out.push_str(&m.content);
+        // Media can't go into a text transcript, but it must not vanish silently:
+        // the summary should record that the turn carried an image, or the
+        // compacted history reads as though it never happened.
+        for b in &m.content {
+            match b {
+                agent_core::ContentBlock::Text { text } => out.push_str(text),
+                agent_core::ContentBlock::Image { media_type, .. } => {
+                    out.push_str(&format!("[image: {media_type}]"))
+                }
+                agent_core::ContentBlock::Document {
+                    media_type, name, ..
+                } => out.push_str(&format!(
+                    "[document: {}{media_type}]",
+                    name.as_deref()
+                        .map(|n| format!("{n}, "))
+                        .unwrap_or_default()
+                )),
+            }
+        }
         for tc in &m.tool_calls {
             out.push_str(&format!("\n  [tool_call {} {}]", tc.name, tc.arguments));
         }
@@ -255,6 +273,7 @@ mod tests {
                 supports_tools: false,
                 context_window: 1000,
                 supports_response_format: false,
+                supports_vision: false,
             }
         }
         async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse> {
@@ -297,7 +316,7 @@ mod tests {
 
         // Head system preserved; a summary system message inserted right after.
         assert_eq!(working.messages[0].role, Role::System);
-        assert!(working.messages[1].content.contains("SUMMARY"));
+        assert!(working.messages[1].content_text().contains("SUMMARY"));
         // The recent tail survived.
         let last = working.messages.last().unwrap();
         assert_eq!(last.role, Role::Assistant);
@@ -328,6 +347,7 @@ mod tests {
                 supports_tools: false,
                 context_window: 1000,
                 supports_response_format: false,
+                supports_vision: false,
             }
         }
         async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse> {
@@ -356,7 +376,7 @@ mod tests {
         assert!(!working
             .messages
             .iter()
-            .any(|m| m.content.contains("Summary of earlier")));
+            .any(|m| m.content_text().contains("Summary of earlier")));
         assert!(estimate_tokens(&working.messages) <= 400);
         assert_eq!(working.messages[0].role, Role::System);
     }
@@ -381,7 +401,7 @@ mod tests {
         assert!(!working
             .messages
             .iter()
-            .any(|m| m.content.contains("Summary of earlier")));
+            .any(|m| m.content_text().contains("Summary of earlier")));
         assert!(estimate_tokens(&working.messages) <= 250);
     }
 

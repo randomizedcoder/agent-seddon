@@ -50,6 +50,7 @@ fn provider(base_url: String, max_retries: u32) -> OpenAiCompatProvider {
         base_url,
         model: "m".into(),
         api_key: "k".into(),
+        supports_vision: false,
         insecure_tls: false,
         context_window: 1000,
         max_retries,
@@ -77,7 +78,7 @@ async fn retries_transient_error_then_succeeds() {
     let p = provider(base_url, 3);
 
     let resp = p.complete(req()).await.expect("should succeed after retry");
-    assert_eq!(resp.message.content, "hello");
+    assert_eq!(resp.message.content_text(), "hello");
     assert_eq!(conns.load(Ordering::SeqCst), 2, "one retry after the 503");
 }
 

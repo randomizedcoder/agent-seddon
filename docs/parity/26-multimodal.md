@@ -6,7 +6,20 @@ in each vendor's multimodal message format. Tracks what agent-seddon ships today
 what the peers assert, and the concrete behaviour + tests needed to be the most
 complete of the four.
 
-> **Status: spec (design of record).** Introduce **typed content blocks** on
+> **Status: implemented** (typed `ContentBlock` on `Message`/`Observation`, both
+> provider encoders, `read_file` image blocks, capability gating, block-aware
+> token accounting, modality metrics, additive proto + gRPC roundtrip; doc in
+> `docs/components/multimodal.md`). Two deliberate departures from the plan below:
+> (1) the wire change is **purely additive** — `string content = 2` is kept as the
+> always-populated text field and a `repeated ContentBlock blocks = 5` is added
+> alongside, rather than retyping field 2, so `buf breaking` passes untouched and
+> a pre-26 peer still reads the prose of every message; (2) `Observation` **gains**
+> a `blocks` field rather than having `content` retyped, keeping its text summary
+> (and every existing tool + assertion) unchanged. **Deferred:** image
+> resize/downscale + format conversion (BMP→PNG), which need a decode dependency —
+> an oversized image is described rather than re-encoded.
+>
+> Original plan follows. Introduce **typed content blocks** on
 > `agent_core::Message` — `content` becomes an ordered list of `Text | Image |
 > Document` blocks (back-compatible with the current bare `String`) — and mirror
 > them on the wire in `crates/agent-proto/proto/agent/v1/common.proto` (agent-seddon

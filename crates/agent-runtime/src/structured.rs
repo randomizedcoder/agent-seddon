@@ -56,7 +56,7 @@ pub async fn complete_structured(
     let mut attempt = 0usize;
     loop {
         let resp = provider.complete(request.clone()).await?;
-        let text = resp.message.content;
+        let text = resp.message.content_text();
 
         match parse_json_lenient(&text) {
             Some(value) => {

@@ -85,11 +85,180 @@ pub struct ToolCall {
     pub arguments: serde_json::Value,
 }
 
+/// One typed piece of message content. A message is an ordered list of these, so
+/// a turn can interleave prose with an image or a document (parity spec 26).
+///
+/// Serde is `tag = "type"`, matching the shape both vendors use on the wire and
+/// the peers use internally (`{"type":"text","text":…}` /
+/// `{"type":"image","media_type":…,"data":…}`). `data` is raw bytes, base64-encoded
+/// by serde so a block round-trips through JSON losslessly; the provider adapters
+/// re-encode into each vendor's own envelope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentBlock {
+    Text {
+        text: String,
+    },
+    Image {
+        media_type: String,
+        #[serde(with = "base64_bytes")]
+        data: Vec<u8>,
+    },
+    Document {
+        media_type: String,
+        #[serde(with = "base64_bytes")]
+        data: Vec<u8>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+}
+
+impl ContentBlock {
+    /// A text block (the overwhelmingly common case).
+    pub fn text(s: impl Into<String>) -> Self {
+        ContentBlock::Text { text: s.into() }
+    }
+    /// An image block from raw (already-decoded) bytes.
+    pub fn image(media_type: impl Into<String>, data: impl Into<Vec<u8>>) -> Self {
+        ContentBlock::Image {
+            media_type: media_type.into(),
+            data: data.into(),
+        }
+    }
+    /// The block's text, if it is a text block.
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            ContentBlock::Text { text } => Some(text),
+            _ => None,
+        }
+    }
+    /// `true` for anything a text-only model cannot accept.
+    pub fn is_media(&self) -> bool {
+        !matches!(self, ContentBlock::Text { .. })
+    }
+    /// The metric/span label for this block's modality.
+    pub fn modality(&self) -> &'static str {
+        match self {
+            ContentBlock::Text { .. } => "text",
+            ContentBlock::Image { .. } => "image",
+            ContentBlock::Document { .. } => "document",
+        }
+    }
+}
+
+/// Base64 for the `data` field of a media block, so a `ContentBlock` survives a
+/// JSON round-trip (session files, gRPC JSON, provider payloads) unchanged.
+mod base64_bytes {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &[u8], s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(&super::b64_encode(v))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<Vec<u8>, D::Error> {
+        let s = String::deserialize(d)?;
+        super::b64_decode(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// Standard base64 with padding. Dependency-free (the crate carries no base64
+/// dep, matching the other hand-rolled primitives in-tree) and used for every
+/// media block's bytes on the JSON/provider path.
+pub fn b64_encode(data: &[u8]) -> String {
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(B64[(n >> 18) as usize & 63] as char);
+        out.push(B64[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            B64[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            B64[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// Decode standard base64, rejecting any non-alphabet byte. Input is untrusted
+/// (a provider response or a session file), so this fails closed rather than
+/// skipping junk.
+pub fn b64_decode(s: &str) -> std::result::Result<Vec<u8>, String> {
+    let mut acc: u32 = 0;
+    let mut bits = 0u8;
+    let mut out = Vec::with_capacity(s.len() / 4 * 3);
+    for c in s.bytes() {
+        if c == b'=' || c == b'\n' || c == b'\r' {
+            continue;
+        }
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return Err(format!("invalid base64 character: {:?}", c as char)),
+        };
+        acc = (acc << 6) | v as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Ok(out)
+}
+
+/// Message content: a bare string (legacy / text-only) or an explicit block list.
+///
+/// This exists so `Message` deserializes **both** shapes — every session file,
+/// config, and gRPC JSON payload written before spec 26 carries a bare string, and
+/// must keep loading. Serialization always emits the block list.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum ContentRepr {
+    Text(String),
+    Blocks(Vec<ContentBlock>),
+}
+
+impl From<ContentRepr> for Vec<ContentBlock> {
+    fn from(r: ContentRepr) -> Self {
+        match r {
+            // A bare string folds into exactly one text block; an empty string is
+            // no content at all (the old `content: ""` default).
+            ContentRepr::Text(s) if s.is_empty() => Vec::new(),
+            ContentRepr::Text(s) => vec![ContentBlock::text(s)],
+            ContentRepr::Blocks(b) => b,
+        }
+    }
+}
+
+fn deserialize_content<'de, D>(d: D) -> std::result::Result<Vec<ContentBlock>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(ContentRepr::deserialize(d)?.into())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
-    #[serde(default)]
-    pub content: String,
+    /// Ordered content blocks. Text-only messages hold a single
+    /// [`ContentBlock::Text`]; use [`Message::content_text`] to read them as a
+    /// string. Deserializes from a bare string too (pre-spec-26 data).
+    #[serde(default, deserialize_with = "deserialize_content")]
+    pub content: Vec<ContentBlock>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCall>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -97,38 +266,88 @@ pub struct Message {
 }
 
 impl Message {
-    pub fn system(content: impl Into<String>) -> Self {
+    fn new(role: Role, content: impl Into<String>, tool_call_id: Option<String>) -> Self {
+        let s = content.into();
         Self {
-            role: Role::System,
-            content: content.into(),
+            role,
+            content: if s.is_empty() {
+                Vec::new()
+            } else {
+                vec![ContentBlock::text(s)]
+            },
             tool_calls: Vec::new(),
-            tool_call_id: None,
+            tool_call_id,
         }
+    }
+
+    pub fn system(content: impl Into<String>) -> Self {
+        Self::new(Role::System, content, None)
     }
     pub fn user(content: impl Into<String>) -> Self {
-        Self {
-            role: Role::User,
-            content: content.into(),
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-        }
+        Self::new(Role::User, content, None)
     }
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self {
-            role: Role::Assistant,
-            content: content.into(),
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-        }
+        Self::new(Role::Assistant, content, None)
     }
     /// A tool-result message, linked back to the call that produced it.
     pub fn tool(call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self::new(Role::Tool, content, Some(call_id.into()))
+    }
+
+    /// A message carrying explicit blocks (the multimodal constructor).
+    pub fn with_blocks(role: Role, content: Vec<ContentBlock>) -> Self {
+        Self {
+            role,
+            content,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }
+    }
+
+    /// A tool result that carries typed blocks alongside its text summary.
+    pub fn tool_with_blocks(call_id: impl Into<String>, content: Vec<ContentBlock>) -> Self {
         Self {
             role: Role::Tool,
-            content: content.into(),
+            content,
             tool_calls: Vec::new(),
             tool_call_id: Some(call_id.into()),
         }
+    }
+
+    /// The message's text: every [`ContentBlock::Text`] concatenated. Media blocks
+    /// contribute nothing, so a text-only consumer (token estimation, logging, the
+    /// summarizer) reads exactly what it did before spec 26.
+    pub fn content_text(&self) -> String {
+        let mut out = String::new();
+        for b in &self.content {
+            if let Some(t) = b.as_text() {
+                out.push_str(t);
+            }
+        }
+        out
+    }
+
+    /// `true` when the message has no content blocks at all.
+    pub fn is_empty(&self) -> bool {
+        self.content.is_empty()
+    }
+
+    /// `true` when any block is an image/document.
+    pub fn has_media(&self) -> bool {
+        self.content.iter().any(ContentBlock::is_media)
+    }
+
+    /// Drop every media block, replacing them with `note` (once) when any were
+    /// dropped. Used to degrade a turn for a model without vision support rather
+    /// than sending a block the provider would reject outright.
+    pub fn strip_media(&mut self, note: &str) -> usize {
+        let before = self.content.len();
+        self.content.retain(|b| !b.is_media());
+        let dropped = before - self.content.len();
+        if dropped > 0 {
+            self.content.push(ContentBlock::text(note));
+        }
+        dropped
     }
 }
 
@@ -144,6 +363,11 @@ pub struct ModelCapabilities {
     /// (OpenAI `response_format`/`json_schema`). When `false`, the structured-output
     /// helper injects the schema into the prompt instead (parity spec 16).
     pub supports_response_format: bool,
+    /// Whether the selected model accepts image content blocks. When `false`, the
+    /// adapters strip media with an explicit note rather than sending a block the
+    /// provider would reject — one unsupported block errors the whole request
+    /// (parity spec 26).
+    pub supports_vision: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -246,9 +470,12 @@ pub trait LlmProvider: Send + Sync {
     async fn stream(&self, req: CompletionRequest) -> Result<ChunkStream> {
         let resp = self.complete(req).await?;
         let mut chunks: Vec<Result<CompletionChunk>> = Vec::new();
-        if !resp.message.content.is_empty() {
+        // Only text streams as a delta; media blocks have no `delta_text`
+        // representation and are carried by the final message, not the chunks.
+        let text = resp.message.content_text();
+        if !text.is_empty() {
             chunks.push(Ok(CompletionChunk {
-                delta_text: resp.message.content.clone(),
+                delta_text: text,
                 ..Default::default()
             }));
         }
@@ -283,6 +510,32 @@ pub trait LlmProvider: Send + Sync {
 /// framing every chat API adds around each message.
 pub const MESSAGE_TOKEN_OVERHEAD: u32 = 3;
 
+/// Token cost of a non-text content block, estimated from its encoded size.
+///
+/// Vendors price images by pixel area (Anthropic ≈ `w*h/750`), but decoding every
+/// image just to budget a request is far too expensive for a hot path, so this
+/// approximates from byte length and deliberately **over**-estimates: budgeting is
+/// only safe when it errs high. Under-counting silently overflows the provider's
+/// context window at request time; over-counting merely compacts a little early.
+///
+/// Shared by [`Tokenizer::count_messages`], `agent-context`'s `estimate_tokens`,
+/// and the runtime's `rough_tokens` so all three agree on what an image costs.
+pub fn media_block_tokens(block: &ContentBlock) -> u32 {
+    let bytes = match block {
+        ContentBlock::Text { text } => return text.len().div_ceil(4) as u32,
+        ContentBlock::Image { data, .. } | ContentBlock::Document { data, .. } => data.len(),
+    };
+    // ~1 token per 750 bytes of encoded image is roughly the pixel-area rule for
+    // typical PNG/JPEG density, floored so a tiny image is never free, and capped
+    // so one pathological attachment cannot saturate the whole budget.
+    ((bytes / 750) as u32).clamp(MIN_MEDIA_TOKENS, MAX_MEDIA_TOKENS)
+}
+
+/// A media block always costs at least this much (never free).
+pub const MIN_MEDIA_TOKENS: u32 = 8;
+/// Ceiling on a single media block's estimated cost.
+pub const MAX_MEDIA_TOKENS: u32 = 8_000;
+
 /// Accurate, per-model token counting — the seam the compaction loop and the cost
 /// model call instead of a byte heuristic. `count` is the primitive; the default
 /// `count_messages` folds per-message + per-tool-call overhead on top of it, so a
@@ -303,7 +556,17 @@ pub trait Tokenizer: Send + Sync {
     async fn count_messages(&self, messages: &[Message], model: &str) -> Result<u32> {
         let mut total: u32 = 0;
         for m in messages {
-            total = total.saturating_add(self.count(&m.content, model).await?);
+            for block in &m.content {
+                total = total.saturating_add(match block {
+                    ContentBlock::Text { text } => self.count(text, model).await?,
+                    // A media block is not text and must not be tokenized as if it
+                    // were: counting only the text would silently under-count an
+                    // image-carrying turn and overflow the provider's window.
+                    // `media_block_tokens` is the shared, deliberately conservative
+                    // size-based estimate.
+                    other => media_block_tokens(other),
+                });
+            }
             for tc in &m.tool_calls {
                 total = total.saturating_add(self.count(&tc.name, model).await?);
                 total = total.saturating_add(self.count(&tc.arguments.to_string(), model).await?);
@@ -1310,9 +1573,16 @@ pub struct ToolSchema {
     pub parameters: serde_json::Value,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Observation {
+    /// The tool's textual result — what the model reads. Always populated, so a
+    /// tool that attaches media still describes it in text.
     pub content: String,
+    /// Typed media the tool produced (a screenshot, an image read off disk).
+    /// Empty for the overwhelming majority of tools. `content` stays the text
+    /// summary rather than becoming a block itself, which keeps every existing
+    /// text-only tool and its assertions unchanged (parity spec 26).
+    pub blocks: Vec<ContentBlock>,
     pub is_error: bool,
 }
 
@@ -1320,14 +1590,32 @@ impl Observation {
     pub fn ok(content: impl Into<String>) -> Self {
         Self {
             content: content.into(),
+            blocks: Vec::new(),
             is_error: false,
         }
     }
     pub fn error(content: impl Into<String>) -> Self {
         Self {
             content: content.into(),
+            blocks: Vec::new(),
             is_error: true,
         }
+    }
+    /// Attach typed media blocks to a successful observation.
+    pub fn with_blocks(mut self, blocks: Vec<ContentBlock>) -> Self {
+        self.blocks = blocks;
+        self
+    }
+    /// The observation as message content: the text summary first, then any media.
+    /// This is the Observation → `Message` bridge the loop uses, so a tool's image
+    /// reaches the next request instead of being flattened to text.
+    pub fn into_blocks(self) -> Vec<ContentBlock> {
+        let mut out = Vec::with_capacity(self.blocks.len() + 1);
+        if !self.content.is_empty() {
+            out.push(ContentBlock::text(self.content));
+        }
+        out.extend(self.blocks);
+        out
     }
 }
 
@@ -2013,6 +2301,7 @@ mod tests {
                 supports_tools: true,
                 context_window: 1000,
                 supports_response_format: false,
+                supports_vision: false,
             }
         }
         async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse> {
@@ -2031,7 +2320,11 @@ mod tests {
         CompletionResponse {
             message: Message {
                 role: Role::Assistant,
-                content: content.into(),
+                content: if content.is_empty() {
+                    vec![]
+                } else {
+                    vec![ContentBlock::text(content)]
+                },
                 tool_calls,
                 tool_call_id: None,
             },
@@ -2082,5 +2375,160 @@ mod tests {
         assert_eq!(calls, n_tools);
         assert_eq!(got_finish.as_deref(), Some(finish));
         assert_eq!(got_usage.is_some(), has_usage);
+    }
+
+    // --- spec 26: content blocks -------------------------------------------
+
+    /// The 67-byte minimal 1x1 PNG — a deterministic fixture, no assets needed.
+    const TINY_PNG: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    /// `Message` must accept BOTH the pre-spec-26 bare string and a block list,
+    /// or every session file and gRPC JSON payload written before this change
+    /// stops loading.
+    #[rstest]
+    #[case::positive_bare_string_folds_to_one_text_block(
+        serde_json::json!({"role":"user","content":"hello"}),
+        1,
+        "hello"
+    )]
+    #[case::positive_block_list_roundtrips(
+        serde_json::json!({"role":"user","content":[{"type":"text","text":"hi"}]}),
+        1,
+        "hi"
+    )]
+    #[case::corner_text_accessor_concats_text_blocks(
+        serde_json::json!({"role":"user","content":[
+            {"type":"text","text":"a"},{"type":"text","text":"b"}]}),
+        2,
+        "ab"
+    )]
+    #[case::boundary_empty_string_is_no_blocks(
+        serde_json::json!({"role":"user","content":""}),
+        0,
+        ""
+    )]
+    #[case::boundary_empty_block_list(
+        serde_json::json!({"role":"user","content":[]}),
+        0,
+        ""
+    )]
+    #[case::corner_missing_content_defaults_empty(
+        serde_json::json!({"role":"user"}),
+        0,
+        ""
+    )]
+    fn message_content_deserialize(
+        #[case] raw: serde_json::Value,
+        #[case] want_blocks: usize,
+        #[case] want_text: &str,
+    ) {
+        let m: Message = serde_json::from_value(raw).expect("deserialize");
+        assert_eq!(m.content.len(), want_blocks);
+        assert_eq!(m.content_text(), want_text);
+    }
+
+    /// A media block must survive a JSON round-trip byte-for-byte — sessions and
+    /// the gRPC JSON gateway both persist messages this way.
+    #[test]
+    fn positive_image_block_survives_json_roundtrip() {
+        let m = Message::with_blocks(
+            Role::User,
+            vec![
+                ContentBlock::text("look:"),
+                ContentBlock::image("image/png", TINY_PNG),
+            ],
+        );
+        let json = serde_json::to_string(&m).unwrap();
+        let back: Message = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.content, m.content);
+        assert_eq!(back.content_text(), "look:");
+        assert!(back.has_media());
+        match &back.content[1] {
+            ContentBlock::Image { media_type, data } => {
+                assert_eq!(media_type, "image/png");
+                assert_eq!(data.as_slice(), TINY_PNG);
+            }
+            other => panic!("expected an image block, got {other:?}"),
+        }
+    }
+
+    #[rstest]
+    #[case::positive_empty(&[], "")]
+    #[case::boundary_one_byte(&[0x41], "QQ==")]
+    #[case::boundary_two_bytes(&[0x41, 0x42], "QUI=")]
+    #[case::positive_three_bytes(&[0x41, 0x42, 0x43], "QUJD")]
+    #[case::corner_high_bytes(&[0xFF, 0xFE, 0xFD], "//79")]
+    fn base64_encodes_known_vectors(#[case] input: &[u8], #[case] want: &str) {
+        assert_eq!(b64_encode(input), want);
+        assert_eq!(b64_decode(want).unwrap(), input);
+    }
+
+    /// Base64 on the decode side is untrusted (a provider response, a session
+    /// file), so junk must fail closed rather than be silently skipped.
+    #[rstest]
+    #[case::adversarial_non_alphabet("QU!D")]
+    #[case::adversarial_unicode("QUJÐ")]
+    #[case::adversarial_null_byte("QU\0D")]
+    fn adversarial_base64_rejects_junk(#[case] input: &str) {
+        assert!(
+            b64_decode(input).is_err(),
+            "`{input}` must be rejected, not silently skipped"
+        );
+    }
+
+    /// A media block must never be free (it would let an image-only turn look
+    /// empty to the compactor) and never unbounded (one attachment must not
+    /// saturate the budget).
+    #[rstest]
+    #[case::boundary_tiny_image_costs_the_floor(10, MIN_MEDIA_TOKENS)]
+    #[case::positive_mid_size(750_000, 1_000)]
+    #[case::adversarial_huge_image_capped(usize::MAX / 2, MAX_MEDIA_TOKENS)]
+    fn media_block_tokens_are_bounded(#[case] bytes: usize, #[case] want: u32) {
+        // Build the block without allocating the pathological case.
+        let block = if bytes > 10_000_000 {
+            // Exercise the cap arithmetic directly for the adversarial size.
+            assert_eq!(
+                ((bytes / 750) as u32).clamp(MIN_MEDIA_TOKENS, MAX_MEDIA_TOKENS),
+                want
+            );
+            return;
+        } else {
+            ContentBlock::image("image/png", vec![0u8; bytes])
+        };
+        assert_eq!(media_block_tokens(&block), want);
+    }
+
+    /// A model without vision must get a note instead of a block it would reject.
+    #[test]
+    fn negative_strip_media_replaces_blocks_with_a_note() {
+        let mut m = Message::with_blocks(
+            Role::User,
+            vec![
+                ContentBlock::text("what is this?"),
+                ContentBlock::image("image/png", TINY_PNG),
+            ],
+        );
+        let dropped = m.strip_media("[image omitted: model has no vision support]");
+        assert_eq!(dropped, 1);
+        assert!(!m.has_media());
+        assert!(m.content_text().contains("what is this?"));
+        assert!(m.content_text().contains("image omitted"));
+    }
+
+    /// An observation's media must reach the next request, not be flattened.
+    #[test]
+    fn positive_observation_into_blocks_keeps_media() {
+        let obs = Observation::ok("Read image file [image/png]")
+            .with_blocks(vec![ContentBlock::image("image/png", TINY_PNG)]);
+        let blocks = obs.into_blocks();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].as_text(), Some("Read image file [image/png]"));
+        assert!(blocks[1].is_media());
     }
 }

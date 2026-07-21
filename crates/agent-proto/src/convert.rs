@@ -192,15 +192,84 @@ impl TryFrom<pb::ToolCall> for agent_core::ToolCall {
     }
 }
 
+// --- ContentBlock ----------------------------------------------------------
+
+impl From<agent_core::ContentBlock> for pb::ContentBlock {
+    fn from(b: agent_core::ContentBlock) -> Self {
+        use pb::content_block::{Document, Image, Kind, Text};
+        let kind = match b {
+            agent_core::ContentBlock::Text { text } => Kind::Text(Text { text }),
+            agent_core::ContentBlock::Image { media_type, data } => {
+                Kind::Image(Image { media_type, data })
+            }
+            agent_core::ContentBlock::Document {
+                media_type,
+                data,
+                name,
+            } => Kind::Document(Document {
+                media_type,
+                data,
+                name,
+            }),
+        };
+        pb::ContentBlock { kind: Some(kind) }
+    }
+}
+
+impl TryFrom<pb::ContentBlock> for agent_core::ContentBlock {
+    type Error = ConvertError;
+    fn try_from(b: pb::ContentBlock) -> Result<Self, Self::Error> {
+        use pb::content_block::Kind;
+        // An unset `kind` is a malformed block from an untrusted peer — fail
+        // closed rather than inventing empty content.
+        let kind = b
+            .kind
+            .ok_or(ConvertError::MissingField("ContentBlock.kind"))?;
+        Ok(match kind {
+            Kind::Text(t) => agent_core::ContentBlock::Text { text: t.text },
+            Kind::Image(i) => agent_core::ContentBlock::Image {
+                media_type: i.media_type,
+                data: i.data,
+            },
+            Kind::Document(d) => agent_core::ContentBlock::Document {
+                media_type: d.media_type,
+                data: d.data,
+                name: d.name,
+            },
+        })
+    }
+}
+
 // --- Message ---------------------------------------------------------------
+
+/// `true` when the block list is exactly zero-or-one **text** block — the shape
+/// that field 2 (`string content`) already represents losslessly, so `blocks`
+/// can stay unset and the message costs nothing extra on the wire.
+fn is_plain_text(blocks: &[agent_core::ContentBlock]) -> bool {
+    match blocks {
+        [] => true,
+        [b] => !b.is_media(),
+        _ => false,
+    }
+}
 
 impl From<agent_core::Message> for pb::Message {
     fn from(m: agent_core::Message) -> Self {
+        // `content` is ALWAYS the text, so a peer built before multimodal landed
+        // still reads the prose. `blocks` is set only when it carries information
+        // `content` cannot (media, or several blocks).
+        let content = m.content_text();
+        let blocks = if is_plain_text(&m.content) {
+            Vec::new()
+        } else {
+            m.content.into_iter().map(Into::into).collect()
+        };
         pb::Message {
             role: pb::Role::from(m.role) as i32,
-            content: m.content,
+            content,
             tool_calls: m.tool_calls.into_iter().map(Into::into).collect(),
             tool_call_id: m.tool_call_id,
+            blocks,
         }
     }
 }
@@ -208,9 +277,23 @@ impl From<agent_core::Message> for pb::Message {
 impl TryFrom<pb::Message> for agent_core::Message {
     type Error = ConvertError;
     fn try_from(m: pb::Message) -> Result<Self, Self::Error> {
+        // Prefer the full block list; fall back to folding `content` into one
+        // text block (a legacy peer, or a plain-text message).
+        let content = if m.blocks.is_empty() {
+            if m.content.is_empty() {
+                Vec::new()
+            } else {
+                vec![agent_core::ContentBlock::text(m.content)]
+            }
+        } else {
+            m.blocks
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>, _>>()?
+        };
         Ok(agent_core::Message {
             role: role_from_i32(m.role)?,
-            content: m.content,
+            content,
             tool_calls: m
                 .tool_calls
                 .into_iter()
@@ -255,16 +338,23 @@ impl From<agent_core::Observation> for pb::Observation {
         pb::Observation {
             content: o.content,
             is_error: o.is_error,
+            blocks: o.blocks.into_iter().map(Into::into).collect(),
         }
     }
 }
 
-impl From<pb::Observation> for agent_core::Observation {
-    fn from(o: pb::Observation) -> Self {
-        agent_core::Observation {
+impl TryFrom<pb::Observation> for agent_core::Observation {
+    type Error = ConvertError;
+    fn try_from(o: pb::Observation) -> Result<Self, Self::Error> {
+        Ok(agent_core::Observation {
             content: o.content,
+            blocks: o
+                .blocks
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>, _>>()?,
             is_error: o.is_error,
-        }
+        })
     }
 }
 
@@ -293,6 +383,7 @@ impl From<agent_core::ModelCapabilities> for pb::ModelCapabilities {
         pb::ModelCapabilities {
             supports_tools: c.supports_tools,
             context_window: c.context_window,
+            supports_vision: c.supports_vision,
         }
     }
 }
@@ -304,6 +395,7 @@ impl From<pb::ModelCapabilities> for agent_core::ModelCapabilities {
             context_window: c.context_window,
             // Not on the wire yet (native response_format is a follow-up, spec 16).
             supports_response_format: false,
+            supports_vision: c.supports_vision,
         }
     }
 }
@@ -1099,7 +1191,7 @@ mod tests {
     fn msg_with_calls() -> agent_core::Message {
         agent_core::Message {
             role: agent_core::Role::Assistant,
-            content: "hi".into(),
+            content: vec![agent_core::ContentBlock::text("hi")],
             tool_calls: vec![agent_core::ToolCall {
                 id: "c1".into(),
                 name: "bash".into(),
@@ -1299,6 +1391,7 @@ mod tests {
             supports_tools: true,
             context_window: 128_000,
             supports_response_format: false,
+            supports_vision: true,
         };
         let pc = pb::ModelCapabilities::from(caps);
         assert_eq!(
@@ -1309,7 +1402,9 @@ mod tests {
         let obs = agent_core::Observation::error("boom");
         let po = pb::Observation::from(obs);
         assert_eq!(
-            pb::Observation::from(agent_core::Observation::from(po.clone())),
+            pb::Observation::from(
+                agent_core::Observation::try_from(po.clone()).expect("observation converts")
+            ),
             po
         );
 

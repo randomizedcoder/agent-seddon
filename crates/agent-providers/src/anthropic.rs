@@ -8,8 +8,8 @@
 //! single message) and parses the typed response back into a `CompletionResponse`.
 
 use agent_core::{
-    ChunkStream, CompletionChunk, CompletionRequest, CompletionResponse, Error, LlmProvider,
-    Message, ModelCapabilities, Result, Role, ToolCall, Usage,
+    ChunkStream, CompletionChunk, CompletionRequest, CompletionResponse, ContentBlock, Error,
+    LlmProvider, Message, ModelCapabilities, Result, Role, ToolCall, Usage,
 };
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -143,6 +143,8 @@ impl LlmProvider for AnthropicProvider {
             supports_tools: true,
             context_window: self.context_window,
             supports_response_format: false,
+            // Every Claude model this adapter targets accepts image blocks.
+            supports_vision: true,
         }
     }
 
@@ -362,6 +364,56 @@ struct SseUsage {
     cache_creation_input_tokens: u32,
 }
 
+/// One `ContentBlock` in the Messages API's own envelope. Images use a base64
+/// `source`; documents ride the `document` block where the API accepts them, and
+/// otherwise degrade to a text note rather than erroring the whole request.
+fn to_anthropic_block(b: &ContentBlock) -> Value {
+    match b {
+        ContentBlock::Text { text } => json!({ "type": "text", "text": text }),
+        ContentBlock::Image { media_type, data } => json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": agent_core::b64_encode(data),
+            },
+        }),
+        ContentBlock::Document {
+            media_type,
+            data,
+            name,
+        } => {
+            if media_type == "application/pdf" {
+                json!({
+                    "type": "document",
+                    "source": {
+                        "type": "base64",
+                        "media_type": media_type,
+                        "data": agent_core::b64_encode(data),
+                    },
+                })
+            } else {
+                let label = name.as_deref().unwrap_or("attachment");
+                json!({
+                    "type": "text",
+                    "text": format!("[{label}: {media_type}, {} bytes — not inlinable]", data.len()),
+                })
+            }
+        }
+    }
+}
+
+/// Map content blocks to wire blocks, dropping empty text. The API rejects a
+/// `{"type":"text","text":""}` block outright, so an empty block must never
+/// reach it — previously the `if !content.is_empty()` guard did this implicitly.
+fn wire_blocks(blocks: &[ContentBlock]) -> Vec<Value> {
+    blocks
+        .iter()
+        .filter(|b| !matches!(b, ContentBlock::Text { text } if text.is_empty()))
+        .map(to_anthropic_block)
+        .collect()
+}
+
 /// Convert our message list into `(system, messages)` for the Messages API.
 /// System-role messages are concatenated into the top-level system prompt; the
 /// rest become user/assistant turns with typed content blocks, coalescing
@@ -385,15 +437,16 @@ fn to_anthropic_messages(messages: &[Message]) -> (String, Vec<Value>) {
     for m in messages {
         match m.role {
             Role::System => {
-                if !m.content.is_empty() {
-                    system_parts.push(m.content.clone());
+                // The system prompt is a plain string in this API — media cannot
+                // ride there, so only the text contributes.
+                let text = m.content_text();
+                if !text.is_empty() {
+                    system_parts.push(text);
                 }
             }
             Role::User => {
                 push_role(&mut cur_role, "user", &mut cur_blocks, &mut out, &flush);
-                if !m.content.is_empty() {
-                    cur_blocks.push(json!({ "type": "text", "text": m.content }));
-                }
+                cur_blocks.extend(wire_blocks(&m.content));
             }
             Role::Assistant => {
                 push_role(
@@ -403,9 +456,7 @@ fn to_anthropic_messages(messages: &[Message]) -> (String, Vec<Value>) {
                     &mut out,
                     &flush,
                 );
-                if !m.content.is_empty() {
-                    cur_blocks.push(json!({ "type": "text", "text": m.content }));
-                }
+                cur_blocks.extend(wire_blocks(&m.content));
                 for tc in &m.tool_calls {
                     cur_blocks.push(json!({
                         "type": "tool_use",
@@ -417,11 +468,15 @@ fn to_anthropic_messages(messages: &[Message]) -> (String, Vec<Value>) {
             }
             Role::Tool => {
                 // Tool results are `user` messages carrying tool_result blocks.
+                // The API accepts a block array as the result content, so a tool
+                // that produced an image (a screenshot, `read_file` of a PNG)
+                // forwards it instead of flattening to text.
                 push_role(&mut cur_role, "user", &mut cur_blocks, &mut out, &flush);
+                let result: Vec<Value> = wire_blocks(&m.content);
                 cur_blocks.push(json!({
                     "type": "tool_result",
                     "tool_use_id": m.tool_call_id.clone().unwrap_or_default(),
-                    "content": m.content,
+                    "content": result,
                 }));
             }
         }
@@ -495,11 +550,13 @@ struct WireUsage {
 
 impl WireResp {
     fn into_response(self) -> CompletionResponse {
-        let mut content = String::new();
+        // Keep the model's blocks as blocks rather than concatenating into one
+        // string — flattening here is lossy by construction.
+        let mut content: Vec<ContentBlock> = Vec::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         for block in self.content {
             match block {
-                WireBlock::Text { text } => content.push_str(&text),
+                WireBlock::Text { text } => content.push(ContentBlock::text(text)),
                 WireBlock::ToolUse { id, name, input } => tool_calls.push(ToolCall {
                     id,
                     name,
@@ -539,7 +596,12 @@ mod tests {
     fn msg(role: Role, content: &str) -> Message {
         Message {
             role,
-            content: content.into(),
+            // Mirror `Message::user`/`system`: an empty string is *no* content.
+            content: if content.is_empty() {
+                Vec::new()
+            } else {
+                vec![ContentBlock::text(content)]
+            },
             tool_calls: Vec::new(),
             tool_call_id: None,
         }
@@ -590,7 +652,7 @@ mod tests {
     ) {
         let parsed: WireResp = serde_json::from_value(body).unwrap();
         let resp = parsed.into_response();
-        assert_eq!(resp.message.content, text);
+        assert_eq!(resp.message.content_text(), text);
         assert_eq!(resp.message.tool_calls.len(), n_tools);
         assert_eq!(resp.finish_reason, finish);
     }
@@ -604,11 +666,76 @@ mod tests {
         assert_eq!(resp.usage.unwrap().total_tokens, 15);
     }
 
+    /// The 67-byte minimal 1x1 PNG (deterministic fixture, no assets).
+    const TINY_PNG: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    /// An image block must reach the wire as Anthropic's base64 `source` envelope
+    /// (parity spec 26).
+    #[test]
+    fn positive_image_block_encodes_to_anthropic_source() {
+        let m = Message::with_blocks(
+            Role::User,
+            vec![
+                ContentBlock::text("what is this?"),
+                ContentBlock::image("image/png", TINY_PNG),
+            ],
+        );
+        let (_sys, out) = to_anthropic_messages(&[m]);
+        assert_eq!(out.len(), 1);
+        let blocks = out[0]["content"].as_array().expect("content is an array");
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[1]["type"], "image");
+        assert_eq!(blocks[1]["source"]["type"], "base64");
+        assert_eq!(blocks[1]["source"]["media_type"], "image/png");
+        // Byte-exact: the base64 must decode back to the original PNG.
+        let b64 = blocks[1]["source"]["data"].as_str().unwrap();
+        assert_eq!(agent_core::b64_decode(b64).unwrap(), TINY_PNG);
+    }
+
+    /// A tool result carrying an image must forward it, not flatten to text —
+    /// this is what makes `read_file` of a PNG actually reach the model.
+    #[test]
+    fn positive_tool_result_forwards_image_block() {
+        let m = Message::tool_with_blocks(
+            "call_1",
+            vec![
+                ContentBlock::text("Read image file `shot.png` [image/png, 67 bytes]"),
+                ContentBlock::image("image/png", TINY_PNG),
+            ],
+        );
+        let (_sys, out) = to_anthropic_messages(&[m]);
+        let result = &out[0]["content"][0];
+        assert_eq!(result["type"], "tool_result");
+        let inner = result["content"].as_array().expect("block array");
+        assert_eq!(inner.len(), 2);
+        assert_eq!(inner[1]["type"], "image");
+    }
+
+    /// Empty text blocks must never be sent — the API rejects them outright.
+    #[test]
+    fn negative_empty_text_block_is_not_sent() {
+        let m = Message::with_blocks(
+            Role::User,
+            vec![ContentBlock::text(""), ContentBlock::text("real")],
+        );
+        let (_sys, out) = to_anthropic_messages(&[m]);
+        let blocks = out[0]["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 1, "the empty text block must be dropped");
+        assert_eq!(blocks[0]["text"], "real");
+    }
+
     #[test]
     fn tool_calls_and_results_map_to_blocks_and_coalesce() {
         let assistant = Message {
             role: Role::Assistant,
-            content: "let me check".into(),
+            content: vec![ContentBlock::text("let me check")],
             tool_calls: vec![
                 ToolCall {
                     id: "a".into(),

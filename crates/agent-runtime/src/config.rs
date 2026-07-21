@@ -634,6 +634,12 @@ pub struct ProviderCfg {
     /// connection error), with exponential backoff. `0` disables retrying.
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
+    /// Whether the configured model accepts image content blocks (parity spec 26).
+    /// Defaults **off** and is opted into per deployment: this endpoint is generic,
+    /// and sending an image to a text-only model fails the whole request. The
+    /// Anthropic provider ignores this (every Claude model takes images).
+    #[serde(default)]
+    pub supports_vision: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -869,6 +875,7 @@ impl Config {
                 // No retries in tests: fail fast, keep the suite quick (a test that
                 // hits the unreachable localhost URL shouldn't sleep through backoff).
                 max_retries: 0,
+                supports_vision: false,
             },
             memory: MemoryCfg::default(),
             tools: ToolsCfg::default(),

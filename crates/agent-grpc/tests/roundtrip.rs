@@ -93,6 +93,7 @@ fn caps() -> ModelCapabilities {
         supports_tools: true,
         context_window: 1000,
         supports_response_format: false,
+        supports_vision: false,
     }
 }
 
@@ -119,8 +120,85 @@ async fn provider_complete(#[case] transport: Transport) {
         response_format: None,
     };
     let resp = client.complete(req).await.unwrap();
-    assert_eq!(resp.message.content, "hello from gateway");
+    assert_eq!(resp.message.content_text(), "hello from gateway");
     assert!(client.capabilities().supports_tools);
+}
+
+/// The 67-byte minimal 1x1 PNG (deterministic fixture, no assets).
+const TINY_PNG: &[u8] = &[
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
+    0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00,
+    0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
+    0x42, 0x60, 0x82,
+];
+
+/// A message's content blocks must survive the wire byte-for-byte — a media
+/// block through the `blocks` field, and plain text through the legacy `content`
+/// field, over both transports (parity spec 26).
+#[rstest]
+#[case::positive_image_block_survives_grpc(Transport::Tcp, true)]
+#[case::positive_image_block_survives_uds(Transport::Uds, true)]
+#[case::positive_text_only_uses_legacy_field(Transport::Tcp, false)]
+#[tokio::test]
+async fn message_blocks_roundtrip(#[case] transport: Transport, #[case] with_image: bool) {
+    let content = if with_image {
+        vec![
+            agent_core::ContentBlock::text("look at this:"),
+            agent_core::ContentBlock::image("image/png", TINY_PNG),
+        ]
+    } else {
+        vec![agent_core::ContentBlock::text("just text")]
+    };
+    let sent = Message::with_blocks(agent_core::Role::User, content.clone());
+
+    // Round-trip through the generated proto types exactly as the transport does.
+    let pb: agent_proto::pb::Message = sent.clone().into();
+    if with_image {
+        assert!(!pb.blocks.is_empty(), "media must ride in `blocks`");
+    } else {
+        assert!(
+            pb.blocks.is_empty(),
+            "plain text must stay in the legacy `content` field (wire compatibility)"
+        );
+    }
+    // `content` always carries the text, so a pre-spec-26 peer still reads prose.
+    assert_eq!(pb.content, sent.content_text());
+
+    let back = Message::try_from(pb).expect("decodes");
+    assert_eq!(back.content, content, "blocks must survive byte-for-byte");
+
+    // And over a real server on this transport.
+    let provider = Arc::new(ScriptedProvider::new(vec![final_turn("ack")]));
+    let (dial, _srv) = spawn(transport, provider_router(provider)).await;
+    let client = GrpcProvider::connect(&dial, caps()).unwrap();
+    let resp = client
+        .complete(CompletionRequest {
+            messages: vec![sent],
+            tools: vec![],
+            max_tokens: 16,
+            temperature: 0.0,
+            response_format: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(resp.message.content_text(), "ack");
+}
+
+/// A peer built before spec 26 sends only `content`; it must decode into one
+/// text block rather than empty content.
+#[test]
+fn positive_legacy_string_content_decodes_to_one_text_block() {
+    let legacy = agent_proto::pb::Message {
+        role: agent_proto::pb::Role::User as i32,
+        content: "from an old peer".into(),
+        tool_calls: vec![],
+        tool_call_id: None,
+        blocks: vec![], // pre-spec-26 peers never set this
+    };
+    let m = Message::try_from(legacy).expect("decodes");
+    assert_eq!(m.content.len(), 1);
+    assert_eq!(m.content_text(), "from an old peer");
 }
 
 // --- fault injection: the client retries a transient gRPC UNAVAILABLE ---------
@@ -218,7 +296,7 @@ async fn complete_via(faulty: FaultyProvider) -> (std::result::Result<String, St
             response_format: None,
         })
         .await
-        .map(|r| r.message.content)
+        .map(|r| r.message.content_text())
         .map_err(|e| e.to_string());
     (out, calls.load(Ordering::SeqCst))
 }
@@ -468,7 +546,7 @@ async fn memory_append_and_recall(#[case] transport: Transport) {
 
     let events = mem.events();
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0].message.content, "remembered over the wire");
+    assert_eq!(events[0].message.content_text(), "remembered over the wire");
     assert_eq!(events[0].ts_ms, 42);
 }
 
@@ -496,7 +574,7 @@ async fn context_assemble_and_compact(#[case] transport: Transport) {
         .unwrap();
     // StaticContext yields [system, user].
     assert_eq!(messages.len(), 2);
-    assert_eq!(messages[1].content, "do the thing");
+    assert_eq!(messages[1].content_text(), "do the thing");
 
     // StaticContext.compact is a no-op — the working set survives the round-trip.
     let mut working = WorkingSet {
@@ -513,7 +591,7 @@ async fn context_assemble_and_compact(#[case] transport: Transport) {
         .await
         .unwrap();
     assert_eq!(working.messages.len(), 1);
-    assert_eq!(working.messages[0].content, "keep me");
+    assert_eq!(working.messages[0].content_text(), "keep me");
 }
 
 // ---------------------------------------------------------------------------

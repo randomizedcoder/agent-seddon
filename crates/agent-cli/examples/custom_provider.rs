@@ -21,6 +21,7 @@ impl LlmProvider for EchoProvider {
             supports_tools: false,
             context_window: 8192,
             supports_response_format: false,
+            supports_vision: false,
         }
     }
     async fn complete(&self, _req: CompletionRequest) -> agent_core::Result<CompletionResponse> {

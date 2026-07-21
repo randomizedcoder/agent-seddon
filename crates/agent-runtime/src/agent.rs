@@ -341,8 +341,28 @@ impl Agent {
         let model = self.settings.model.as_str();
         for iter in 1..=self.settings.max_iterations {
             self.metrics.on_iteration();
+            // Capability gate: a model without vision must never be sent an image
+            // block — one unsupported block errors the entire request, losing the
+            // turn. Degrade to an explicit note instead (parity spec 26).
+            let mut messages = working.messages.clone();
+            if !self.provider.capabilities().supports_vision {
+                let mut dropped = 0usize;
+                for m in &mut messages {
+                    dropped += m
+                        .strip_media("[media omitted: the selected model does not support images]");
+                }
+                if dropped > 0 {
+                    self.metrics.on_content_blocks_dropped(dropped as u64);
+                    tracing::debug!(dropped, "stripped media for a non-vision model");
+                }
+            }
+            for m in &messages {
+                for b in &m.content {
+                    self.metrics.on_content_block(b.modality());
+                }
+            }
             let req = CompletionRequest {
-                messages: working.messages.clone(),
+                messages,
                 tools: tool_schemas.to_vec(),
                 max_tokens: self.settings.max_tokens,
                 temperature: self.settings.temperature,
@@ -413,7 +433,7 @@ impl Agent {
             // No tools requested → this is the final answer.
             if assistant.tool_calls.is_empty() {
                 self.memory.distill().await.ok();
-                return Ok(assistant.content);
+                return Ok(assistant.content_text());
             }
 
             // Dispatch the requested tool calls. Authorization runs sequentially
@@ -515,10 +535,16 @@ impl Agent {
                         tracing::info!(
                             tool = %call.name,
                             is_error = observation.is_error,
-                            bytes = observation.content.len(),
+                            // Total payload, not just the text: a tool returning
+                            // an image would otherwise look ~free in telemetry.
+                            bytes = observation_bytes(&observation),
+                            media = observation.blocks.len(),
                             "tool result"
                         );
-                        Message::tool(&call.id, observation.content)
+                        // Move the blocks through rather than flattening to text,
+                        // so a tool that produced an image (a screenshot, a PNG
+                        // read off disk) reaches the next request intact.
+                        Message::tool_with_blocks(&call.id, observation.into_blocks())
                     }
                 };
                 working.messages.push(msg.clone());
@@ -577,7 +603,12 @@ impl Agent {
         Ok(CompletionResponse {
             message: Message {
                 role: Role::Assistant,
-                content,
+                // The streaming path accumulates text deltas only.
+                content: if content.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![agent_core::ContentBlock::text(content)]
+                },
                 tool_calls,
                 tool_call_id: None,
             },
@@ -757,6 +788,20 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Total bytes an observation carries — its text plus any media payload. Used
+/// for telemetry so an image-bearing result isn't reported as near-zero.
+fn observation_bytes(o: &agent_core::Observation) -> usize {
+    o.content.len()
+        + o.blocks
+            .iter()
+            .map(|b| match b {
+                agent_core::ContentBlock::Text { text } => text.len(),
+                agent_core::ContentBlock::Image { data, .. }
+                | agent_core::ContentBlock::Document { data, .. } => data.len(),
+            })
+            .sum::<usize>()
+}
+
 /// Run a tool with a wall-clock timeout **and** panic isolation, always returning
 /// an [`Observation`] — a hung or panicking tool becomes an error observation fed
 /// back to the model, so one bad tool never freezes or crashes the loop.
@@ -926,7 +971,7 @@ mod tests {
             .events()
             .into_iter()
             .filter(|e| e.kind == "tool")
-            .map(|e| e.message.content)
+            .map(|e| e.message.content_text())
             .collect();
         // The recorded tool result is the denial, and EchoTool never ran (it would
         // otherwise have echoed "secret" back as the result).
@@ -1090,7 +1135,7 @@ mod tests {
             .map(|e| {
                 (
                     e.message.tool_call_id.clone().unwrap_or_default(),
-                    e.message.content,
+                    e.message.content_text(),
                 )
             })
             .collect()
@@ -1466,7 +1511,7 @@ mod tests {
             .events()
             .into_iter()
             .filter(|e| e.kind == "tool")
-            .map(|e| e.message.content)
+            .map(|e| e.message.content_text())
             .collect();
         assert!(
             tool_msgs.iter().any(|c| c.contains("timed out")),

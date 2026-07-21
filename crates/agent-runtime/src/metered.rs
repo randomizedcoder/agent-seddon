@@ -697,15 +697,26 @@ impl ContextStrategy for MeteredContext {
 /// `agent_context::estimate_tokens` — kept local so this wrapper needs nothing
 /// from the context crate.
 fn rough_tokens(messages: &[Message]) -> u32 {
-    let mut chars = 0usize;
+    let mut tokens = 0u32;
     for m in messages {
-        chars += m.content.len();
+        let mut chars = 0usize;
+        for b in &m.content {
+            match b {
+                agent_core::ContentBlock::Text { text } => chars += text.len(),
+                // Media is not text: charge it via the shared estimator so all
+                // three estimators agree on what an image costs. Counting only
+                // text here would let an image-bearing turn look nearly free and
+                // overflow the model's window.
+                media => tokens = tokens.saturating_add(agent_core::media_block_tokens(media)),
+            }
+        }
         for tc in &m.tool_calls {
             chars += tc.name.len() + tc.arguments.to_string().len();
         }
-        chars += 8;
+        chars += 8; // role/formatting overhead
+        tokens = tokens.saturating_add((chars / 4) as u32);
     }
-    (chars / 4) as u32
+    tokens
 }
 
 // --- policy ----------------------------------------------------------------
@@ -1578,7 +1589,7 @@ mod session_tests {
                 let ws = WorkingSet {
                     messages: vec![Message {
                         role: Role::User,
-                        content: "hi".into(),
+                        content: vec![agent_core::ContentBlock::text("hi")],
                         tool_calls: vec![],
                         tool_call_id: None,
                     }],
