@@ -257,10 +257,11 @@ origin (symbol→LSP routing, injection block, backend-absent, dedup call-count)
   `agent-reference` crate behind a cargo feature; config-selected and wired in
   [`crates/agent-runtime/src/builder.rs`](../../crates/agent-runtime/src/builder.rs)
   — **not** a `register_builtins` factory line. (A resolver needs `Arc` handles to
-  the already-built `SearchBackend`/`WebBackend` plus `Metrics`, which the
-  `Fn(&Config)` factory signature in `registry.rs` cannot supply; `sandbox`, `web`,
-  `tasks`, `lsp`, `session`, and `embedder` are all wired the same way for the same
-  reason.) Doc in `docs/components/reference.md`.
+  the already-built `SearchBackend`/`WebBackend`; `sandbox`, `web`, `tasks`, `lsp`,
+  `session`, and `embedder` are wired the same way. Note the `Metrics` half of this
+  argument no longer applies: factories now receive `FactoryCtx`, which carries the
+  metrics registry — so seams needing only config + metrics *can* be plain factory
+  lines.) Doc in `docs/components/reference.md`.
 - **Proto + gRPC:** `crates/agent-proto/proto/agent/v1/reference.proto`
   (`Resolve(prompt, budget) -> Resolution{blocks, warnings, blocked}`) + `build.rs`
   entry + server/client in `agent-grpc` + `--serve-reference` + reflection; commit

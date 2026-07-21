@@ -13,45 +13,87 @@ use crate::config::Config;
 use agent_core::{
     ContextStrategy, EpisodicStore, LlmProvider, MemoryStore, Policy, SemanticStore, Tool,
 };
+use agent_metrics::Metrics;
 use anyhow::anyhow;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-type ProviderFactory = Box<dyn Fn(&Config) -> anyhow::Result<Arc<dyn LlmProvider>> + Send + Sync>;
-// Context strategies receive the already-built provider (so a summarizing
-// strategy can call the model); most ignore it.
-// Context strategies receive the already-built (metered) provider and the
-// optional (metered) tokenizer, so a summarizing strategy can call the model and
-// either strategy can budget with real token counts.
-type ContextFactory = Box<
-    dyn Fn(
-            &Config,
-            &Arc<dyn LlmProvider>,
-            Option<&Arc<dyn agent_core::Tokenizer>>,
-        ) -> anyhow::Result<Arc<dyn ContextStrategy>>
-        + Send
-        + Sync,
->;
-type PolicyFactory = Box<dyn Fn(&Config) -> anyhow::Result<Arc<dyn Policy>> + Send + Sync>;
-// Memory + semantic factories receive the provider too — a store that distills
-// (promotes episodic → semantic facts) needs the model. Most ignore it.
-type MemoryFactory = Box<
-    dyn Fn(&Config, &Arc<dyn LlmProvider>) -> anyhow::Result<Arc<dyn MemoryStore>> + Send + Sync,
->;
-type EpisodicFactory = Box<dyn Fn(&Config) -> anyhow::Result<Arc<dyn EpisodicStore>> + Send + Sync>;
-type SemanticFactory = Box<
-    dyn Fn(&Config, &Arc<dyn LlmProvider>) -> anyhow::Result<Arc<dyn SemanticStore>> + Send + Sync,
->;
-type ToolFactory = Box<dyn Fn(&Config) -> anyhow::Result<Arc<dyn Tool>> + Send + Sync>;
+/// Everything a seam factory may need, in one place.
+///
+/// Every factory takes `&FactoryCtx` and nothing else. That is deliberate: the
+/// signatures used to differ per seam (`Fn(&Config)`, plus the provider for
+/// memory, plus the tokenizer for context), and each new requirement broke all
+/// of them. Adding a field here is backward-compatible, so the next seam that
+/// needs something new does not force another workspace-wide edit.
+///
+/// `provider` and `tokenizer` are optional because of build ORDER, not because
+/// they are unimportant: the provider is built first (so it cannot see itself),
+/// and the tokenizer is built after it but before the context strategy. Use the
+/// [`FactoryCtx::provider`] / [`FactoryCtx::tokenizer`] accessors, which report a
+/// clear error rather than panicking if a seam asks for something not yet built.
+pub struct FactoryCtx<'a> {
+    /// The parsed configuration.
+    pub cfg: &'a Config,
+    /// The shared metrics registry, so a factory can build a metered impl.
+    pub metrics: &'a Metrics,
+    /// The already-built (metered) provider — absent while building the provider.
+    pub built_provider: Option<&'a Arc<dyn LlmProvider>>,
+    /// The already-built (metered) tokenizer — absent until it is built.
+    pub built_tokenizer: Option<&'a Arc<dyn agent_core::Tokenizer>>,
+}
+
+impl<'a> FactoryCtx<'a> {
+    /// A context with only config + metrics (the common case).
+    pub fn new(cfg: &'a Config, metrics: &'a Metrics) -> Self {
+        Self {
+            cfg,
+            metrics,
+            built_provider: None,
+            built_tokenizer: None,
+        }
+    }
+    pub fn with_provider(mut self, p: &'a Arc<dyn LlmProvider>) -> Self {
+        self.built_provider = Some(p);
+        self
+    }
+    pub fn with_tokenizer(mut self, t: Option<&'a Arc<dyn agent_core::Tokenizer>>) -> Self {
+        self.built_tokenizer = t;
+        self
+    }
+    /// The built provider, or a clear error naming the ordering constraint.
+    pub fn provider(&self) -> anyhow::Result<&'a Arc<dyn LlmProvider>> {
+        self.built_provider.ok_or_else(|| {
+            anyhow!("this seam needs the provider, which is not built yet at this point")
+        })
+    }
+    /// The built tokenizer, if one is configured and already built.
+    pub fn tokenizer(&self) -> Option<&'a Arc<dyn agent_core::Tokenizer>> {
+        self.built_tokenizer
+    }
+}
+
+type ProviderFactory =
+    Box<dyn Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn LlmProvider>> + Send + Sync>;
+type ContextFactory =
+    Box<dyn Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn ContextStrategy>> + Send + Sync>;
+type PolicyFactory = Box<dyn Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn Policy>> + Send + Sync>;
+type MemoryFactory =
+    Box<dyn Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn MemoryStore>> + Send + Sync>;
+type EpisodicFactory =
+    Box<dyn Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn EpisodicStore>> + Send + Sync>;
+type SemanticFactory =
+    Box<dyn Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn SemanticStore>> + Send + Sync>;
+type ToolFactory = Box<dyn Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn Tool>> + Send + Sync>;
 #[cfg(feature = "search")]
-type SearchFactory =
-    Box<dyn Fn(&Config) -> anyhow::Result<Arc<dyn agent_core::SearchBackend>> + Send + Sync>;
+type SearchFactory = Box<
+    dyn Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn agent_core::SearchBackend>> + Send + Sync,
+>;
 #[cfg(feature = "git")]
 type RepoFactory =
-    Box<dyn Fn(&Config) -> anyhow::Result<Arc<dyn agent_core::RepoBackend>> + Send + Sync>;
+    Box<dyn Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn agent_core::RepoBackend>> + Send + Sync>;
 #[cfg(feature = "tokenizer")]
 type TokenizerFactory =
-    Box<dyn Fn(&Config) -> anyhow::Result<Arc<dyn agent_core::Tokenizer>> + Send + Sync>;
+    Box<dyn Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn agent_core::Tokenizer>> + Send + Sync>;
 
 /// Name → factory maps for every swappable seam. Keys are `&'static str` and the
 /// maps are ordered so error messages list known names deterministically.
@@ -93,62 +135,49 @@ impl Registry {
     pub fn provider(
         &mut self,
         name: &'static str,
-        f: impl Fn(&Config) -> anyhow::Result<Arc<dyn LlmProvider>> + Send + Sync + 'static,
+        f: impl Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn LlmProvider>> + Send + Sync + 'static,
     ) {
         self.providers.insert(name, Box::new(f));
     }
     pub fn context(
         &mut self,
         name: &'static str,
-        f: impl Fn(
-                &Config,
-                &Arc<dyn LlmProvider>,
-                Option<&Arc<dyn agent_core::Tokenizer>>,
-            ) -> anyhow::Result<Arc<dyn ContextStrategy>>
-            + Send
-            + Sync
-            + 'static,
+        f: impl Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn ContextStrategy>> + Send + Sync + 'static,
     ) {
         self.contexts.insert(name, Box::new(f));
     }
     pub fn policy(
         &mut self,
         name: &'static str,
-        f: impl Fn(&Config) -> anyhow::Result<Arc<dyn Policy>> + Send + Sync + 'static,
+        f: impl Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn Policy>> + Send + Sync + 'static,
     ) {
         self.policies.insert(name, Box::new(f));
     }
     pub fn memory(
         &mut self,
         name: &'static str,
-        f: impl Fn(&Config, &Arc<dyn LlmProvider>) -> anyhow::Result<Arc<dyn MemoryStore>>
-            + Send
-            + Sync
-            + 'static,
+        f: impl Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn MemoryStore>> + Send + Sync + 'static,
     ) {
         self.memories.insert(name, Box::new(f));
     }
     pub fn episodic(
         &mut self,
         name: &'static str,
-        f: impl Fn(&Config) -> anyhow::Result<Arc<dyn EpisodicStore>> + Send + Sync + 'static,
+        f: impl Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn EpisodicStore>> + Send + Sync + 'static,
     ) {
         self.episodics.insert(name, Box::new(f));
     }
     pub fn semantic(
         &mut self,
         name: &'static str,
-        f: impl Fn(&Config, &Arc<dyn LlmProvider>) -> anyhow::Result<Arc<dyn SemanticStore>>
-            + Send
-            + Sync
-            + 'static,
+        f: impl Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn SemanticStore>> + Send + Sync + 'static,
     ) {
         self.semantics.insert(name, Box::new(f));
     }
     pub fn tool(
         &mut self,
         name: &'static str,
-        f: impl Fn(&Config) -> anyhow::Result<Arc<dyn Tool>> + Send + Sync + 'static,
+        f: impl Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn Tool>> + Send + Sync + 'static,
     ) {
         self.tools.insert(name, Box::new(f));
     }
@@ -156,7 +185,7 @@ impl Registry {
     pub fn search(
         &mut self,
         name: &'static str,
-        f: impl Fn(&Config) -> anyhow::Result<Arc<dyn agent_core::SearchBackend>>
+        f: impl Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn agent_core::SearchBackend>>
             + Send
             + Sync
             + 'static,
@@ -167,7 +196,10 @@ impl Registry {
     pub fn repo(
         &mut self,
         name: &'static str,
-        f: impl Fn(&Config) -> anyhow::Result<Arc<dyn agent_core::RepoBackend>> + Send + Sync + 'static,
+        f: impl Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn agent_core::RepoBackend>>
+            + Send
+            + Sync
+            + 'static,
     ) {
         self.repos.insert(name, Box::new(f));
     }
@@ -176,7 +208,10 @@ impl Registry {
     pub fn tokenizer(
         &mut self,
         name: &'static str,
-        f: impl Fn(&Config) -> anyhow::Result<Arc<dyn agent_core::Tokenizer>> + Send + Sync + 'static,
+        f: impl Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn agent_core::Tokenizer>>
+            + Send
+            + Sync
+            + 'static,
     ) {
         self.tokenizers.insert(name, Box::new(f));
     }
@@ -200,74 +235,78 @@ impl Registry {
 
     // --- resolution --------------------------------------------------------
 
-    pub fn build_provider(&self, name: &str, cfg: &Config) -> anyhow::Result<Arc<dyn LlmProvider>> {
+    pub fn build_provider(
+        &self,
+        name: &str,
+        ctx: &FactoryCtx<'_>,
+    ) -> anyhow::Result<Arc<dyn LlmProvider>> {
         let f = self
             .providers
             .get(name)
             .ok_or_else(|| unknown("provider", name, self.providers.keys().copied()))?;
-        f(cfg)
+        f(ctx)
     }
     pub fn build_context(
         &self,
         name: &str,
-        cfg: &Config,
-        provider: &Arc<dyn LlmProvider>,
-        tokenizer: Option<&Arc<dyn agent_core::Tokenizer>>,
+        ctx: &FactoryCtx<'_>,
     ) -> anyhow::Result<Arc<dyn ContextStrategy>> {
         let f = self
             .contexts
             .get(name)
             .ok_or_else(|| unknown("context strategy", name, self.contexts.keys().copied()))?;
-        f(cfg, provider, tokenizer)
+        f(ctx)
     }
-    pub fn build_policy(&self, name: &str, cfg: &Config) -> anyhow::Result<Arc<dyn Policy>> {
+    pub fn build_policy(
+        &self,
+        name: &str,
+        ctx: &FactoryCtx<'_>,
+    ) -> anyhow::Result<Arc<dyn Policy>> {
         let f = self
             .policies
             .get(name)
             .ok_or_else(|| unknown("policy", name, self.policies.keys().copied()))?;
-        f(cfg)
+        f(ctx)
     }
     pub fn build_memory(
         &self,
         name: &str,
-        cfg: &Config,
-        provider: &Arc<dyn LlmProvider>,
+        ctx: &FactoryCtx<'_>,
     ) -> anyhow::Result<Arc<dyn MemoryStore>> {
         let f = self
             .memories
             .get(name)
             .ok_or_else(|| unknown("memory backend", name, self.memories.keys().copied()))?;
-        f(cfg, provider)
+        f(ctx)
     }
     pub fn build_episodic(
         &self,
         name: &str,
-        cfg: &Config,
+        ctx: &FactoryCtx<'_>,
     ) -> anyhow::Result<Arc<dyn EpisodicStore>> {
         let f = self
             .episodics
             .get(name)
             .ok_or_else(|| unknown("episodic backend", name, self.episodics.keys().copied()))?;
-        f(cfg)
+        f(ctx)
     }
     pub fn build_semantic(
         &self,
         name: &str,
-        cfg: &Config,
-        provider: &Arc<dyn LlmProvider>,
+        ctx: &FactoryCtx<'_>,
     ) -> anyhow::Result<Arc<dyn SemanticStore>> {
         let f = self
             .semantics
             .get(name)
             .ok_or_else(|| unknown("semantic backend", name, self.semantics.keys().copied()))?;
-        f(cfg, provider)
+        f(ctx)
     }
-    pub fn build_tool(&self, name: &str, cfg: &Config) -> anyhow::Result<Arc<dyn Tool>> {
+    pub fn build_tool(&self, name: &str, ctx: &FactoryCtx<'_>) -> anyhow::Result<Arc<dyn Tool>> {
         let f = self
             .tools
             .get(name)
             .ok_or_else(|| unknown("tool", name, self.tools.keys().copied()))?;
-        f(cfg)
+        f(ctx)
     }
 
     /// All registered tool names (used when `[tools] enabled` is empty ⇒ all).
@@ -279,39 +318,39 @@ impl Registry {
     pub fn build_search(
         &self,
         name: &str,
-        cfg: &Config,
+        ctx: &FactoryCtx<'_>,
     ) -> anyhow::Result<Arc<dyn agent_core::SearchBackend>> {
         let f = self
             .searches
             .get(name)
             .ok_or_else(|| unknown("search backend", name, self.searches.keys().copied()))?;
-        f(cfg)
+        f(ctx)
     }
 
     #[cfg(feature = "git")]
     pub fn build_repo(
         &self,
         name: &str,
-        cfg: &Config,
+        ctx: &FactoryCtx<'_>,
     ) -> anyhow::Result<Arc<dyn agent_core::RepoBackend>> {
         let f = self
             .repos
             .get(name)
             .ok_or_else(|| unknown("git backend", name, self.repos.keys().copied()))?;
-        f(cfg)
+        f(ctx)
     }
 
     #[cfg(feature = "tokenizer")]
     pub fn build_tokenizer(
         &self,
         name: &str,
-        cfg: &Config,
+        ctx: &FactoryCtx<'_>,
     ) -> anyhow::Result<Arc<dyn agent_core::Tokenizer>> {
         let f = self
             .tokenizers
             .get(name)
             .ok_or_else(|| unknown("tokenizer", name, self.tokenizers.keys().copied()))?;
-        f(cfg)
+        f(ctx)
     }
 }
 
@@ -343,30 +382,33 @@ pub fn register_builtins(r: &mut Registry) {
     #[cfg(feature = "provider-anthropic")]
     r.provider("anthropic", crate::builder::anthropic_provider);
 
-    // --- context strategies (each budgets with the injected tokenizer) ---
+    // --- context strategies (each budgets with the injected ctx.tokenizer()) ---
     #[cfg(feature = "context-sliding-window")]
-    r.context("sliding-window", |cfg, _provider, tokenizer| {
+    r.context("sliding-window", |ctx| {
         Ok(Arc::new(agent_context::SlidingWindow::new(
-            tokenizer.cloned(),
-            cfg.provider.model.clone(),
+            ctx.tokenizer().cloned(),
+            ctx.cfg.provider.model.clone(),
         )) as Arc<dyn ContextStrategy>)
     });
     #[cfg(feature = "context-summarizing")]
-    r.context("summarizing-window", |cfg, provider, tokenizer| {
+    r.context("summarizing-window", |ctx| {
         Ok(Arc::new(
-            agent_context::SummarizingWindow::new(provider.clone(), cfg.agent.keep_recent_tokens)
-                .with_tokenizer(tokenizer.cloned(), cfg.provider.model.clone()),
+            agent_context::SummarizingWindow::new(
+                ctx.provider()?.clone(),
+                ctx.cfg.agent.keep_recent_tokens,
+            )
+            .with_tokenizer(ctx.tokenizer().cloned(), ctx.cfg.provider.model.clone()),
         ) as Arc<dyn ContextStrategy>)
     });
 
     // --- tokenizer seam (accurate counts + cost, parity spec 23) ---
     #[cfg(feature = "tokenizer")]
-    r.tokenizer("approx", |_cfg| {
+    r.tokenizer("approx", |_ctx| {
         Ok(Arc::new(agent_tokenizer::ApproxTokenizer::new()) as Arc<dyn agent_core::Tokenizer>)
     });
 
     // --- policies (always available; they live in agent-runtime) ---
-    r.policy("auto-approve", |_cfg| {
+    r.policy("auto-approve", |_ctx| {
         tracing::warn!(
             "policy=auto-approve: every tool call (including `bash`) runs WITHOUT \
              confirmation. Only use this on trusted goals/inputs — a prompt-injected \
@@ -374,13 +416,14 @@ pub fn register_builtins(r: &mut Registry) {
         );
         Ok(Arc::new(crate::policy::AutoApprove) as Arc<dyn Policy>)
     });
-    r.policy("interactive", |_cfg| {
+    r.policy("interactive", |_ctx| {
         Ok(Arc::new(crate::policy::Interactive) as Arc<dyn Policy>)
     });
-    r.policy("allow-list", |cfg| {
+    r.policy("allow-list", |ctx| {
         // Allow only the tool+arg patterns in `[policy] allow`; deny the rest.
         // An empty list denies everything (fail safe).
-        let rules = cfg
+        let rules = ctx
+            .cfg
             .policy
             .allow
             .iter()
@@ -401,48 +444,54 @@ pub fn register_builtins(r: &mut Registry) {
     #[cfg(feature = "tool-core")]
     {
         // `bash` is wired by the builder (it needs the config-selected Sandbox
-        // backend + metrics), not a plain registry factory. See builder.rs.
-        r.tool("read_file", |_cfg| {
+        // backend), not a plain registry factory. See builder.rs.
+        r.tool("read_file", |_ctx| {
             Ok(Arc::new(agent_tools::ReadFileTool) as Arc<dyn Tool>)
         });
-        r.tool("write_file", |_cfg| {
+        r.tool("write_file", |_ctx| {
             Ok(Arc::new(agent_tools::WriteFileTool) as Arc<dyn Tool>)
         });
     }
     #[cfg(feature = "tool-edit")]
-    r.tool("edit", |_cfg| {
+    r.tool("edit", |_ctx| {
         Ok(Arc::new(agent_tools::EditTool) as Arc<dyn Tool>)
     });
     #[cfg(feature = "tool-patch")]
-    r.tool("apply_patch", |_cfg| {
+    r.tool("apply_patch", |_ctx| {
         Ok(Arc::new(agent_tools::ApplyPatchTool) as Arc<dyn Tool>)
     });
     #[cfg(feature = "tool-search")]
     {
-        r.tool("grep", |_cfg| {
+        r.tool("grep", |_ctx| {
             Ok(Arc::new(agent_tools::GrepTool) as Arc<dyn Tool>)
         });
-        r.tool("find", |_cfg| {
+        r.tool("find", |_ctx| {
             Ok(Arc::new(agent_tools::FindTool) as Arc<dyn Tool>)
         });
-        r.tool("ls", |_cfg| {
+        r.tool("ls", |_ctx| {
             Ok(Arc::new(agent_tools::LsTool) as Arc<dyn Tool>)
         });
     }
 
     // --- search backends (the SearchBackend seam) ---
+    #[cfg(feature = "semantic-search")]
+    // The vector backend meters its own Embedder, which is why it used to be
+    // special-cased in `search.rs` instead of living here; `FactoryCtx` carries
+    // `Metrics`, so it is now an ordinary factory like every other backend.
+    r.search("vector", crate::search::build_vector);
     #[cfg(feature = "search")]
     {
-        r.search("tantivy", |cfg| {
-            let (root, index_dir) = search_paths(cfg, "tantivy")?;
+        r.search("tantivy", |ctx| {
+            let (root, index_dir) = search_paths(ctx.cfg, "tantivy")?;
             Ok(
                 Arc::new(agent_search::TantivyBackend::open(root, index_dir)?)
                     as Arc<dyn agent_core::SearchBackend>,
             )
         });
         #[cfg(feature = "grpc")]
-        r.search("grpc", |cfg| {
-            let ep = grpc_client_endpoint(&cfg.grpc.search.endpoint, agent_grpc::constants::SEARCH);
+        r.search("grpc", |ctx| {
+            let ep =
+                grpc_client_endpoint(&ctx.cfg.grpc.search.endpoint, agent_grpc::constants::SEARCH);
             Ok(Arc::new(agent_grpc::client::GrpcSearch::connect(&ep)?)
                 as Arc<dyn agent_core::SearchBackend>)
         });
@@ -453,8 +502,8 @@ pub fn register_builtins(r: &mut Registry) {
     // the session id, which the config-only factory can't carry). The remote
     // `= "grpc"` client backend registers here.
     #[cfg(all(feature = "git", feature = "grpc"))]
-    r.repo("grpc", |cfg| {
-        let ep = grpc_client_endpoint(&cfg.grpc.repo.endpoint, agent_grpc::constants::REPO);
+    r.repo("grpc", |ctx| {
+        let ep = grpc_client_endpoint(&ctx.cfg.grpc.repo.endpoint, agent_grpc::constants::REPO);
         Ok(Arc::new(agent_grpc::client::GrpcRepo::connect(&ep)?)
             as Arc<dyn agent_core::RepoBackend>)
     });
@@ -463,34 +512,40 @@ pub fn register_builtins(r: &mut Registry) {
     //     `= "grpc"`; endpoint from `[grpc]`, defaulting to the generated ports) ---
     #[cfg(feature = "grpc")]
     {
-        r.provider("grpc", |cfg| {
-            let ep =
-                grpc_client_endpoint(&cfg.grpc.provider.endpoint, agent_grpc::constants::PROVIDER);
+        r.provider("grpc", |ctx| {
+            let ep = grpc_client_endpoint(
+                &ctx.cfg.grpc.provider.endpoint,
+                agent_grpc::constants::PROVIDER,
+            );
             // Capabilities are config-derived (no eager round-trip) — the real model
             // lives behind the gateway; this just informs the loop.
             let caps = agent_core::ModelCapabilities {
                 supports_tools: true,
-                context_window: cfg.agent.context_window,
+                context_window: ctx.cfg.agent.context_window,
                 supports_response_format: false,
-                supports_vision: cfg.provider.supports_vision,
+                supports_vision: ctx.cfg.provider.supports_vision,
             };
             Ok(
                 Arc::new(agent_grpc::client::GrpcProvider::connect(&ep, caps)?)
                     as Arc<dyn LlmProvider>,
             )
         });
-        r.memory("grpc", |cfg, _provider| {
-            let ep = grpc_client_endpoint(&cfg.grpc.memory.endpoint, agent_grpc::constants::MEMORY);
+        r.memory("grpc", |ctx| {
+            let ep =
+                grpc_client_endpoint(&ctx.cfg.grpc.memory.endpoint, agent_grpc::constants::MEMORY);
             Ok(Arc::new(agent_grpc::client::GrpcMemory::connect(&ep)?) as Arc<dyn MemoryStore>)
         });
-        r.context("grpc", |cfg, _provider, _tokenizer| {
-            let ep =
-                grpc_client_endpoint(&cfg.grpc.context.endpoint, agent_grpc::constants::CONTEXT);
+        r.context("grpc", |ctx| {
+            let ep = grpc_client_endpoint(
+                &ctx.cfg.grpc.context.endpoint,
+                agent_grpc::constants::CONTEXT,
+            );
             Ok(Arc::new(agent_grpc::client::GrpcContext::connect(&ep)?)
                 as Arc<dyn ContextStrategy>)
         });
-        r.policy("grpc", |cfg| {
-            let ep = grpc_client_endpoint(&cfg.grpc.policy.endpoint, agent_grpc::constants::POLICY);
+        r.policy("grpc", |ctx| {
+            let ep =
+                grpc_client_endpoint(&ctx.cfg.grpc.policy.endpoint, agent_grpc::constants::POLICY);
             Ok(Arc::new(agent_grpc::client::GrpcPolicy::connect(&ep)?) as Arc<dyn Policy>)
         });
     }
@@ -558,13 +613,50 @@ mod tests {
             assert!(names.contains(&"read_file"));
             assert!(names.contains(&"write_file"));
         }
+        // The vector backend used to be special-cased in `search.rs` because a
+        // factory had no `Metrics` handle. It is an ordinary registry entry now.
+        #[cfg(feature = "semantic-search")]
+        assert!(
+            r.searches.contains_key("vector"),
+            "vector must be a plain registry factory"
+        );
+    }
+
+    /// A seam that asks for the provider before it exists gets a clear error,
+    /// not a panic — the ordering constraint is the price of one uniform
+    /// signature, so it must fail legibly.
+    #[test]
+    fn negative_provider_before_it_is_built_errors_clearly() {
+        let cfg = crate::config::Config::minimal_for_test();
+        let metrics = Metrics::new();
+        let ctx = FactoryCtx::new(&cfg, &metrics);
+        let err = match ctx.provider() {
+            Ok(_) => panic!("no provider is attached; this must fail"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("not built yet"), "unhelpful error: {err}");
+        assert!(ctx.tokenizer().is_none());
+    }
+
+    /// Once attached, the ctx hands the provider back.
+    #[test]
+    fn positive_ctx_exposes_the_built_provider() {
+        let cfg = crate::config::Config::minimal_for_test();
+        let metrics = Metrics::new();
+        let p: Arc<dyn LlmProvider> = Arc::new(agent_testkit::ScriptedProvider::new(vec![
+            agent_testkit::final_turn("ok"),
+        ]));
+        let ctx = FactoryCtx::new(&cfg, &metrics).with_provider(&p);
+        assert!(ctx.provider().is_ok());
     }
 
     #[test]
     fn unknown_key_lists_known_names() {
         let r = Registry::with_builtins();
+        let cfg = crate::config::Config::minimal_for_test();
+        let metrics = Metrics::new();
         let err = r
-            .build_policy("nope", &crate::config::Config::minimal_for_test())
+            .build_policy("nope", &FactoryCtx::new(&cfg, &metrics))
             .map(|_| ())
             .unwrap_err()
             .to_string();

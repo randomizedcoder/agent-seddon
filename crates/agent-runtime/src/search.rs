@@ -22,16 +22,14 @@ pub fn build_search(
     metrics: &Metrics,
 ) -> anyhow::Result<Arc<DispatchSearch>> {
     let mut backends = Vec::new();
+    // Every backend now comes from the registry: since factories receive
+    // `Metrics` via `FactoryCtx`, the `vector` backend no longer needs to be
+    // special-cased here to get its Embedder metered (parity spec 24 follow-up).
+    let ctx = crate::registry::FactoryCtx::new(cfg, metrics);
     for name in cfg.search.backend_names() {
-        // The `vector` (semantic) backend is built here rather than via a registry
-        // factory so its Embedder is metered (the factory has no Metrics handle).
-        let inner = match name.as_str() {
-            #[cfg(feature = "semantic-search")]
-            "vector" => build_vector(cfg, metrics)?,
-            _ => registry
-                .build_search(&name, cfg)
-                .with_context(|| format!("building search backend `{name}`"))?,
-        };
+        let inner = registry
+            .build_search(&name, &ctx)
+            .with_context(|| format!("building search backend `{name}`"))?;
         let metered = crate::metered::search(inner, metrics.clone(), &name);
         backends.push((name, metered));
     }
@@ -41,10 +39,10 @@ pub fn build_search(
 /// Build the semantic `VectorBackend` over the config-selected, metered Embedder
 /// (parity spec 15).
 #[cfg(feature = "semantic-search")]
-fn build_vector(
-    cfg: &Config,
-    metrics: &Metrics,
+pub(crate) fn build_vector(
+    ctx: &crate::registry::FactoryCtx<'_>,
 ) -> anyhow::Result<Arc<dyn agent_core::SearchBackend>> {
+    let (cfg, metrics) = (ctx.cfg, ctx.metrics);
     let embedder = build_embedder(cfg)?;
     let embedder = crate::metered::embedder(embedder, metrics.clone(), &cfg.embedder.backend);
     let start = if cfg.agent.working_dir.is_empty() {
