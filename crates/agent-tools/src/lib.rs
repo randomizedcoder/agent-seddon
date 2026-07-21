@@ -93,6 +93,58 @@ pub(crate) fn resolve_within(
     Ok(resolved)
 }
 
+/// Resolve a caller-supplied path within `cwd` **and defend against symlink escape**.
+///
+/// [`resolve_within`] is lexical only, so a symlink *inside* the working dir that
+/// points outside it (planted e.g. via `bash`, or already present in a repo) slips
+/// past: a model could then `read_file` a link to `/etc/passwd`, or `edit` /
+/// `write_file` / `apply_patch` through a link to clobber a file outside the tree.
+/// `confine` additionally canonicalizes the deepest existing prefix of the resolved
+/// path (which resolves any symlink in it) and requires it to stay under the real
+/// `cwd`; a symlink component that resolves — or dangles — outside is rejected. Used
+/// by the file-opening tools (`bash` stays the unconfined escape hatch by design).
+pub(crate) fn confine(cwd: &std::path::Path, path: &str) -> std::result::Result<PathBuf, String> {
+    let candidate = resolve_within(cwd, path)?; // lexical: reject absolute / `..` escape
+    let real_cwd = cwd
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve working directory: {e}"))?;
+
+    // Walk up to the deepest existing prefix; `canonicalize` resolves any symlink
+    // along the way. If that real path leaves `cwd`, the path escapes via a symlink.
+    let mut probe = candidate.clone();
+    loop {
+        match probe.canonicalize() {
+            Ok(real) => {
+                if real.starts_with(&real_cwd) {
+                    return Ok(candidate);
+                }
+                return Err(format!(
+                    "path escapes the working directory via a symlink: `{path}`"
+                ));
+            }
+            Err(_) => {
+                // A not-yet-existing component (a new file/dir being created). If it
+                // is itself a symlink (a dangling link), reject — writing through it
+                // could still land outside the tree.
+                if std::fs::symlink_metadata(&probe)
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(false)
+                {
+                    return Err(format!(
+                        "path is a symlink that cannot be confined: `{path}`"
+                    ));
+                }
+                match probe.parent() {
+                    Some(p) if p != probe => probe = p.to_path_buf(),
+                    _ => {
+                        return Err(format!("path escapes the working directory: `{path}`"));
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn truncate(mut s: String) -> String {
     if s.len() > MAX_OUTPUT {
         // Cut on a char boundary — `String::truncate` panics if `MAX_OUTPUT` lands
@@ -165,6 +217,69 @@ mod tests {
             (Err(_), None) => {}
             (got, exp) => panic!("path `{path}`: got {got:?}, expected {exp:?}"),
         }
+    }
+
+    // --- confine: symlink-escape defense (real filesystem) -----------------
+    // Each case builds a scenario under a temp working dir and asserts whether
+    // `confine` allows the path. The adversarial cases are the confirmed escape
+    // vectors: a leaf/parent-dir/dangling symlink pointing OUTSIDE the tree.
+    #[cfg(unix)]
+    #[derive(Clone, Copy)]
+    enum Scenario {
+        RealFileInRepo,
+        NewFileInRepo,
+        InternalSymlink,         // link → target inside the repo (allowed)
+        LeafSymlinkOutside,      // link → file outside the repo
+        ParentDirSymlinkOutside, // linkdir → dir outside; write linkdir/x
+        DanglingSymlinkOutside,  // link → nonexistent outside path
+    }
+
+    #[cfg(unix)]
+    #[rstest]
+    #[case::positive_real_file(Scenario::RealFileInRepo, true)]
+    #[case::positive_new_file(Scenario::NewFileInRepo, true)]
+    #[case::corner_internal_symlink_allowed(Scenario::InternalSymlink, true)]
+    #[case::adversarial_leaf_symlink_escapes(Scenario::LeafSymlinkOutside, false)]
+    #[case::adversarial_parent_dir_symlink_escapes(Scenario::ParentDirSymlinkOutside, false)]
+    #[case::adversarial_dangling_symlink_escapes(Scenario::DanglingSymlinkOutside, false)]
+    fn confine_symlink_cases(#[case] scenario: Scenario, #[case] expect_ok: bool) {
+        use std::os::unix::fs::symlink;
+        let cwd = agent_testkit::tempdir();
+        let outside = agent_testkit::tempdir();
+        std::fs::write(outside.join("secret.txt"), "top secret").unwrap();
+
+        let path: String = match scenario {
+            Scenario::RealFileInRepo => {
+                std::fs::write(cwd.join("file.txt"), "hi").unwrap();
+                "file.txt".into()
+            }
+            Scenario::NewFileInRepo => "brand-new.txt".into(),
+            Scenario::InternalSymlink => {
+                std::fs::write(cwd.join("target.txt"), "hi").unwrap();
+                symlink(cwd.join("target.txt"), cwd.join("link")).unwrap();
+                "link".into()
+            }
+            Scenario::LeafSymlinkOutside => {
+                symlink(outside.join("secret.txt"), cwd.join("link")).unwrap();
+                "link".into()
+            }
+            Scenario::ParentDirSymlinkOutside => {
+                symlink(&outside, cwd.join("linkdir")).unwrap();
+                "linkdir/pwned.txt".into()
+            }
+            Scenario::DanglingSymlinkOutside => {
+                symlink(outside.join("does-not-exist"), cwd.join("dead")).unwrap();
+                "dead".into()
+            }
+        };
+
+        let got = confine(&cwd, &path);
+        assert_eq!(
+            got.is_ok(),
+            expect_ok,
+            "scenario allowed={:?} for path `{path}` (result: {got:?})",
+            got.is_ok()
+        );
     }
 
     // --- truncate: output capping ------------------------------------------

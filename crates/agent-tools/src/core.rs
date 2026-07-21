@@ -1,6 +1,6 @@
 //! `tool-core` — the always-useful trio: `bash`, `read_file`, `write_file`.
 
-use crate::{arg_bool, arg_str, resolve_within, truncate};
+use crate::{arg_bool, arg_str, confine, truncate};
 use agent_core::{Observation, Result, Tool, ToolContext, ToolSchema};
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -124,7 +124,7 @@ impl Tool for ReadFileTool {
         let offset = args.get("offset").and_then(Value::as_u64);
         let limit = args.get("limit").and_then(Value::as_u64);
         let line_numbers = arg_bool(&args, "line_numbers", false);
-        let full = match resolve_within(&ctx.cwd, path) {
+        let full = match confine(&ctx.cwd, path) {
             Ok(p) => p,
             Err(e) => return Ok(Observation::error(e)),
         };
@@ -238,7 +238,7 @@ impl Tool for WriteFileTool {
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<Observation> {
         let path = arg_str(&args, "path")?;
         let content = arg_str(&args, "content")?;
-        let full = match resolve_within(&ctx.cwd, path) {
+        let full = match confine(&ctx.cwd, path) {
             Ok(p) => p,
             Err(e) => return Ok(Observation::error(e)),
         };
