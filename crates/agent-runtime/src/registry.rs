@@ -88,6 +88,9 @@ type ToolFactory = Box<dyn Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn Tool>> 
 type SearchFactory = Box<
     dyn Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn agent_core::SearchBackend>> + Send + Sync,
 >;
+#[cfg(feature = "web-search")]
+type WebSearchFactory =
+    Box<dyn Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn agent_core::WebSearch>> + Send + Sync>;
 #[cfg(feature = "git")]
 type RepoFactory =
     Box<dyn Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn agent_core::RepoBackend>> + Send + Sync>;
@@ -108,6 +111,8 @@ pub struct Registry {
     tools: BTreeMap<&'static str, ToolFactory>,
     #[cfg(feature = "search")]
     searches: BTreeMap<&'static str, SearchFactory>,
+    #[cfg(feature = "web-search")]
+    web_searches: BTreeMap<&'static str, WebSearchFactory>,
     #[cfg(feature = "git")]
     repos: BTreeMap<&'static str, RepoFactory>,
     #[cfg(feature = "tokenizer")]
@@ -191,6 +196,18 @@ impl Registry {
             + 'static,
     ) {
         self.searches.insert(name, Box::new(f));
+    }
+    /// Register a web-search backend (parity spec 12).
+    #[cfg(feature = "web-search")]
+    pub fn web_search(
+        &mut self,
+        name: &'static str,
+        f: impl Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn agent_core::WebSearch>>
+            + Send
+            + Sync
+            + 'static,
+    ) {
+        self.web_searches.insert(name, Box::new(f));
     }
     #[cfg(feature = "git")]
     pub fn repo(
@@ -327,6 +344,26 @@ impl Registry {
         f(ctx)
     }
 
+    /// Names of every registered web-search backend.
+    #[cfg(feature = "web-search")]
+    pub fn web_search_names(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.web_searches.keys().copied()
+    }
+    #[cfg(feature = "web-search")]
+    pub fn build_web_search(
+        &self,
+        name: &str,
+        ctx: &FactoryCtx<'_>,
+    ) -> anyhow::Result<Arc<dyn agent_core::WebSearch>> {
+        let f = self.web_searches.get(name).ok_or_else(|| {
+            unknown(
+                "web-search backend",
+                name,
+                self.web_searches.keys().copied(),
+            )
+        })?;
+        f(ctx)
+    }
     #[cfg(feature = "git")]
     pub fn build_repo(
         &self,
@@ -473,6 +510,43 @@ pub fn register_builtins(r: &mut Registry) {
         });
     }
 
+    // --- web-search backends (the WebSearch seam, parity spec 12) ---
+    //
+    // These are ORDINARY factory lines. Each needs config + the API key + retry
+    // settings and nothing else, so nothing has to be special-cased in the
+    // builder — the whole point of `FactoryCtx`.
+    #[cfg(feature = "websearch-brave")]
+    r.web_search("brave", |ctx| {
+        let cfg = &ctx.cfg.web_search;
+        Ok(Arc::new(agent_web_search::BraveSearch::new(
+            agent_web_search::HttpSearchConfig {
+                endpoint: if cfg.brave_endpoint.is_empty() {
+                    "https://api.search.brave.com/res/v1/web/search".to_string()
+                } else {
+                    cfg.brave_endpoint.clone()
+                },
+                api_key: resolve_ws_key(&cfg.brave_api_key, &cfg.brave_api_key_env),
+                timeout_secs: cfg.timeout_secs,
+                max_retries: cfg.max_retries,
+            },
+        )?) as Arc<dyn agent_core::WebSearch>)
+    });
+    #[cfg(feature = "websearch-searxng")]
+    r.web_search("searxng", |ctx| {
+        let cfg = &ctx.cfg.web_search;
+        if cfg.searxng_endpoint.is_empty() {
+            anyhow::bail!("[web_search] searxng_endpoint must be set to use the searxng backend");
+        }
+        Ok(Arc::new(agent_web_search::SearxngSearch::new(
+            agent_web_search::HttpSearchConfig {
+                endpoint: cfg.searxng_endpoint.clone(),
+                api_key: String::new(),
+                timeout_secs: cfg.timeout_secs,
+                max_retries: cfg.max_retries,
+            },
+        )?) as Arc<dyn agent_core::WebSearch>)
+    });
+
     // --- search backends (the SearchBackend seam) ---
     #[cfg(feature = "semantic-search")]
     // The vector backend meters its own Embedder, which is why it used to be
@@ -580,6 +654,19 @@ fn grpc_client_endpoint(
     } else {
         agent_grpc::Endpoint::parse(configured)
     }
+}
+
+/// Resolve a web-search API key: inline value first, then the named env var.
+/// The key is never logged or echoed — see `agent-web-search`.
+#[cfg(feature = "web-search")]
+fn resolve_ws_key(inline: &str, env_var: &str) -> String {
+    if !inline.is_empty() {
+        return inline.to_string();
+    }
+    if env_var.is_empty() {
+        return String::new();
+    }
+    std::env::var(env_var).unwrap_or_default()
 }
 
 #[cfg(test)]

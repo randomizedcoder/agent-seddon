@@ -263,3 +263,25 @@ async fn scanned_write_with_clean_content_is_allowed() {
         "fn main() {}"
     );
 }
+
+/// Parity spec 12: with `[web_search] backends` configured, the `web_search`
+/// tool is registered and reaches the model's schema list. With it empty (the
+/// default), the tool is absent entirely — nothing egresses unless opted in.
+#[rstest::rstest]
+#[case::positive_configured_registers_the_tool(
+    "backends = [\"searxng\"]\nsearxng_endpoint = \"http://127.0.0.1:1/search\"",
+    true
+)]
+#[case::negative_unconfigured_omits_the_tool("backends = []", false)]
+#[tokio::test]
+async fn web_search_tool_registration(#[case] ws_cfg: &str, #[case] want: bool) {
+    let dir = tempdir();
+    let cfg = format!("{}\n[web_search]\n{ws_cfg}\n", config_toml(&dir));
+    let agent = agent_for_cfg(&cfg, vec![final_turn("done")]).await;
+    let has = agent
+        .tools()
+        .describe_all()
+        .iter()
+        .any(|s| s.name == "web_search");
+    assert_eq!(has, want, "web_search registration did not match config");
+}

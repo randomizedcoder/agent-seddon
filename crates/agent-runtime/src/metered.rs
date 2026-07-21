@@ -1732,3 +1732,69 @@ impl agent_core::CacheStrategy for TracedCache {
         marks
     }
 }
+
+/// Wrap a [`WebSearch`](agent_core::WebSearch) so each search emits a
+/// `web_search.query` span (`backend`, result count, cache state) and records
+/// per-backend latency, result counts, and cache hits.
+///
+/// Wraps each backend *before* composition, so metrics are attributed to the
+/// concrete provider rather than to the dispatcher — mirroring `metered::search`.
+/// Labels are the configured backend name; the query text and the API key never
+/// appear.
+#[cfg(feature = "web-search")]
+pub(crate) fn web_search(
+    inner: Arc<dyn agent_core::WebSearch>,
+    m: Metrics,
+    backend: &str,
+) -> Arc<dyn agent_core::WebSearch> {
+    Arc::new(MeteredWebSearch {
+        inner,
+        metrics: m,
+        backend: backend.to_string(),
+    })
+}
+
+#[cfg(feature = "web-search")]
+struct MeteredWebSearch {
+    inner: Arc<dyn agent_core::WebSearch>,
+    metrics: Metrics,
+    backend: String,
+}
+
+#[cfg(feature = "web-search")]
+#[async_trait]
+impl agent_core::WebSearch for MeteredWebSearch {
+    fn capabilities(&self) -> agent_core::WebSearchCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn status(&self, q: &agent_core::WebQuery) -> agent_core::Result<agent_core::CacheState> {
+        self.inner.status(q).await
+    }
+
+    async fn search(
+        &self,
+        q: &agent_core::WebQuery,
+    ) -> agent_core::Result<Vec<agent_core::WebResult>> {
+        let span = tracing::info_span!(
+            "web_search.query",
+            backend = %self.backend,
+            results = tracing::field::Empty,
+            outcome = tracing::field::Empty,
+        );
+        let start = Instant::now();
+        let out = self.inner.search(q).instrument(span.clone()).await;
+        let outcome = if out.is_ok() { "ok" } else { "error" };
+        span.record("outcome", outcome);
+        if let Ok(r) = &out {
+            span.record("results", r.len());
+        }
+        self.metrics.on_web_search(
+            &self.backend,
+            outcome,
+            start.elapsed().as_secs_f64(),
+            out.as_ref().map(|r| r.len() as u64).unwrap_or(0),
+        );
+        out
+    }
+}

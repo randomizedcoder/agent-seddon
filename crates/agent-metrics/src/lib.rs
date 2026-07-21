@@ -47,6 +47,12 @@ pub struct Metrics {
     // Prompt-cache anchors placed, by strategy (parity spec 24). Read alongside
     // `agent_cache_tokens_total` to tell a low hit-rate caused by bad placement
     // apart from one caused by a merely cold cache.
+    // Live web search (parity spec 12): per-backend outcome, latency, and the
+    // number of results returned. Labels are the configured backend name — never
+    // the query text or the API key.
+    web_searches: IntCounterVec,
+    web_search_seconds: HistogramVec,
+    web_search_results: IntCounterVec,
     cache_breakpoints: IntCounterVec,
     scanner_findings: IntCounterVec,
     scan_seconds: Histogram,
@@ -197,6 +203,27 @@ impl Metrics {
         let tool_calls = IntCounterVec::new(
             Opts::new("agent_tool_calls_total", "Tool invocations"),
             &["tool", "status"],
+        )
+        .unwrap();
+        let web_searches = IntCounterVec::new(
+            Opts::new(
+                "agent_web_searches_total",
+                "Web searches, by backend and outcome",
+            ),
+            &["backend", "outcome"],
+        )
+        .unwrap();
+        let web_search_seconds = HistogramVec::new(
+            HistogramOpts::new("agent_web_search_duration_seconds", "Web search latency"),
+            &["backend"],
+        )
+        .unwrap();
+        let web_search_results = IntCounterVec::new(
+            Opts::new(
+                "agent_web_search_results_total",
+                "Web search results returned",
+            ),
+            &["backend"],
         )
         .unwrap();
         let cache_breakpoints = IntCounterVec::new(
@@ -564,6 +591,9 @@ impl Metrics {
             Box::new(context_tokens.clone()),
             Box::new(context_messages.clone()),
             Box::new(tool_calls.clone()),
+            Box::new(web_searches.clone()),
+            Box::new(web_search_seconds.clone()),
+            Box::new(web_search_results.clone()),
             Box::new(cache_breakpoints.clone()),
             Box::new(scanner_findings.clone()),
             Box::new(scan_seconds.clone()),
@@ -633,6 +663,9 @@ impl Metrics {
             context_tokens,
             context_messages,
             tool_calls,
+            web_searches,
+            web_search_seconds,
+            web_search_results,
             cache_breakpoints,
             scanner_findings,
             scan_seconds,
@@ -730,6 +763,18 @@ impl Metrics {
     /// Latency of one content scan.
     pub fn on_scan(&self, seconds: f64) {
         self.scan_seconds.observe(seconds);
+    }
+    /// One web search: outcome, latency, and result count (parity spec 12).
+    pub fn on_web_search(&self, backend: &str, outcome: &str, seconds: f64, results: u64) {
+        self.web_searches
+            .with_label_values(&[backend, outcome])
+            .inc();
+        self.web_search_seconds
+            .with_label_values(&[backend])
+            .observe(seconds);
+        self.web_search_results
+            .with_label_values(&[backend])
+            .inc_by(results);
     }
     /// Prompt-cache anchors placed on one request (parity spec 24).
     pub fn on_cache_breakpoints(&self, strategy: &str, n: u64) {

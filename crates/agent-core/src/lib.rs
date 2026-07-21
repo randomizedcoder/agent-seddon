@@ -715,6 +715,88 @@ pub struct WebResponse {
     pub bytes: u64,
 }
 
+// ---------------------------------------------------------------------------
+// Seam: WebSearch (live web results)
+// ---------------------------------------------------------------------------
+//
+// A coding agent's knowledge is frozen at its training cutoff; `web_search` is
+// the escape hatch for current information. Two properties matter beyond
+// "returns links": provider **portability** (the APIs are a churning, paywalled,
+// rate-limited mess — an operator must swap backends by config) and **cost
+// discipline** (upstream calls are billed, and the same query recurs within a
+// session). Both are why this is a seam with a cache, not a function.
+//
+// Deliberately mirrors `SearchBackend`: `capabilities()` / `status()` /
+// `search()`, composed by a dispatcher, so code search and web search are
+// structurally identical. See parity spec 12 and `docs/components/web-search.md`.
+
+/// What a web-search backend supports.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebSearchCapabilities {
+    pub backend: String,
+    /// Results carry meaningful relevance scores (vs. rank order only).
+    pub scored: bool,
+    /// The backend can restrict results by recency.
+    pub freshness: bool,
+    /// Advisory cap on results per query (`0` ⇒ backend default).
+    pub max_results: u32,
+}
+
+/// How fresh a cached result set is — reported **without** a network call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CacheState {
+    /// Cached and within its TTL.
+    Fresh,
+    /// Cached but past its TTL — served, then refetched.
+    Stale,
+    /// Not cached.
+    Missing,
+}
+
+/// A web-search query. `backend` optionally overrides the configured default for
+/// this one call (mirrors `DispatchSearch::resolve`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WebQuery {
+    pub text: String,
+    /// Maximum results to return (0 ⇒ the backend/config default).
+    pub limit: u32,
+    /// Restrict to results newer than this many days (0 ⇒ no restriction).
+    pub freshness_days: u32,
+    /// Per-query backend selector; unknown names fall back to the default.
+    pub backend: Option<String>,
+}
+
+/// One normalized result. Heterogeneous provider payloads are flattened into
+/// this shape so ranking, dedup, and the tool output are provider-independent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WebResult {
+    pub url: String,
+    pub title: String,
+    pub snippet: String,
+    /// Relevance in `[0,1]`. Backends without scores get a rank-derived value so
+    /// ordering stays deterministic across providers.
+    pub score: f32,
+    /// Publication time, when the provider reports one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_ms: Option<u64>,
+}
+
+/// A replaceable web-search backend.
+#[async_trait]
+pub trait WebSearch: Send + Sync {
+    fn capabilities(&self) -> WebSearchCapabilities;
+
+    /// Cheap, read-only cache-freshness probe. Never performs a network call.
+    async fn status(&self, q: &WebQuery) -> Result<CacheState> {
+        let _ = q;
+        Ok(CacheState::Missing)
+    }
+
+    /// Run a search. Safe to call concurrently.
+    async fn search(&self, q: &WebQuery) -> Result<Vec<WebResult>>;
+}
+
 /// A replaceable outbound-HTTP backend. `fetch` enforces the request's
 /// size/timeout/redirect caps and returns the raw decoded body; the SSRF
 /// destination screen is applied by the `Policy` guard before the tool calls
