@@ -28,6 +28,8 @@ use agent_testkit::{
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use rstest::rstest;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU32, Ordering};
 use tokio::sync::oneshot;
 use tonic::transport::server::Router;
 
@@ -117,6 +119,90 @@ async fn provider_complete(#[case] transport: Transport) {
     let resp = client.complete(req).await.unwrap();
     assert_eq!(resp.message.content, "hello from gateway");
     assert!(client.capabilities().supports_tools);
+}
+
+// --- fault injection: the client retries a transient gRPC UNAVAILABLE ---------
+//
+// A provider service that returns `UNAVAILABLE` (an "overloaded" code) on its first
+// `fail_first` calls, then delegates to `inner`. Proves the gRPC client's canonical
+// retry (agent-retry) reacts correctly to the overload codes, end to end.
+use agent_proto::pb;
+
+struct FaultyProvider {
+    inner: Arc<dyn LlmProvider>,
+    calls: Arc<AtomicU32>,
+    fail_first: u32,
+}
+
+#[tonic::async_trait]
+impl pb::provider_server::Provider for FaultyProvider {
+    async fn capabilities(
+        &self,
+        _request: tonic::Request<pb::CapabilitiesRequest>,
+    ) -> Result<tonic::Response<pb::ModelCapabilities>, tonic::Status> {
+        Ok(tonic::Response::new(self.inner.capabilities().into()))
+    }
+
+    async fn complete(
+        &self,
+        request: tonic::Request<pb::CompletionRequest>,
+    ) -> Result<tonic::Response<pb::CompletionResponse>, tonic::Status> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) < self.fail_first {
+            return Err(tonic::Status::unavailable("overloaded"));
+        }
+        let req = request
+            .into_inner()
+            .try_into()
+            .map_err(|e: agent_proto::ConvertError| tonic::Status::internal(e.to_string()))?;
+        let resp = self
+            .inner
+            .complete(req)
+            .await
+            .map_err(|e| tonic::Status::internal(e.to_string()))?;
+        Ok(tonic::Response::new(resp.into()))
+    }
+
+    type StreamStream = Pin<
+        Box<dyn futures_util::Stream<Item = Result<pb::CompletionChunk, tonic::Status>> + Send>,
+    >;
+
+    #[allow(clippy::result_large_err)]
+    async fn stream(
+        &self,
+        _request: tonic::Request<pb::CompletionRequest>,
+    ) -> Result<tonic::Response<Self::StreamStream>, tonic::Status> {
+        Err(tonic::Status::unimplemented("stream unused in this test"))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn provider_retries_unavailable_then_succeeds() {
+    let calls = Arc::new(AtomicU32::new(0));
+    let faulty = FaultyProvider {
+        inner: Arc::new(ScriptedProvider::new(vec![final_turn("recovered")])),
+        calls: calls.clone(),
+        fail_first: 1, // first call UNAVAILABLE, second succeeds
+    };
+    let router = tonic::transport::Server::builder()
+        .add_service(pb::provider_server::ProviderServer::new(faulty));
+    let (dial, _srv) = spawn(Transport::Tcp, router).await;
+    let client = GrpcProvider::connect(&dial, caps()).unwrap();
+
+    let resp = client
+        .complete(CompletionRequest {
+            messages: vec![Message::user("hi")],
+            tools: vec![],
+            max_tokens: 16,
+            temperature: 0.0,
+        })
+        .await
+        .expect("client should retry the UNAVAILABLE and succeed");
+    assert_eq!(resp.message.content, "recovered");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "one retry after the UNAVAILABLE"
+    );
 }
 
 #[rstest]
