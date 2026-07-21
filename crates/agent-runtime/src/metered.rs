@@ -99,6 +99,54 @@ pub(crate) fn tokenizer(inner: Arc<dyn agent_core::Tokenizer>) -> Arc<dyn agent_
     Arc::new(MeteredTokenizer { inner })
 }
 
+/// Wrap a [`WebBackend`](agent_core::WebBackend) so each fetch emits a
+/// `web.fetch` span carrying `host`/`format`/`status`/`bytes` attributes and
+/// records the `agent_web_fetch_*` metrics. The host is a span attribute, not a
+/// metric label (untrusted URL → cardinality DoS).
+#[cfg(feature = "web")]
+pub(crate) fn web(
+    inner: Arc<dyn agent_core::WebBackend>,
+    m: Metrics,
+) -> Arc<dyn agent_core::WebBackend> {
+    Arc::new(MeteredWeb { inner, metrics: m })
+}
+
+#[cfg(feature = "web")]
+struct MeteredWeb {
+    inner: Arc<dyn agent_core::WebBackend>,
+    metrics: Metrics,
+}
+
+#[cfg(feature = "web")]
+#[async_trait]
+impl agent_core::WebBackend for MeteredWeb {
+    async fn fetch(&self, req: &agent_core::WebRequest) -> Result<agent_core::WebResponse> {
+        let host = url::Url::parse(&req.url)
+            .ok()
+            .and_then(|u| u.host_str().map(String::from))
+            .unwrap_or_else(|| "?".into());
+        let span = tracing::info_span!(
+            "web.fetch",
+            host = %host,
+            format = req.format.as_str(),
+            status = tracing::field::Empty,
+            bytes = tracing::field::Empty,
+        );
+        let start = Instant::now();
+        let out = self.inner.fetch(req).instrument(span.clone()).await;
+        let secs = start.elapsed().as_secs_f64();
+        match &out {
+            Ok(r) => {
+                span.record("status", r.status);
+                span.record("bytes", r.bytes);
+                self.metrics.on_web_fetch("ok", secs, r.bytes);
+            }
+            Err(_) => self.metrics.on_web_fetch("error", secs, 0),
+        }
+        out
+    }
+}
+
 #[cfg(feature = "tokenizer")]
 struct MeteredTokenizer {
     inner: Arc<dyn agent_core::Tokenizer>,
@@ -682,6 +730,127 @@ mod span_tests {
             });
         });
         assert!(spans.contains(&"search.query".to_string()), "{spans:?}");
+    }
+}
+
+// web_fetch: the metered WebBackend emits a `web.fetch` span with attributes, and
+// the Policy guard denies an SSRF target *before* the tool fetches — proving the
+// SSRF screen and the tool compose the way the loop wires them.
+#[cfg(all(test, feature = "web"))]
+mod web_tests {
+    use super::*;
+    use crate::policy::{guard, AutoApprove, GuardMode};
+    use agent_core::{
+        Decision, Observation, Policy, Tool, ToolCall, ToolContext, WebFormat, WebRequest,
+    };
+    use agent_testkit::observe::captured_span_fields;
+    use agent_testkit::FakeWebBackend;
+    use serde_json::json;
+
+    // The metered WebBackend emits `web.fetch` carrying host/format/status/bytes.
+    #[test]
+    fn metered_web_emits_span_with_attributes() {
+        let fields = captured_span_fields(|| {
+            // Another test creates `web.fetch` under a non-recording subscriber,
+            // caching this callsite's interest as disabled; force a re-evaluation
+            // against the recording subscriber so the fields are captured here.
+            tracing::callsite::rebuild_interest_cache();
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let inner = Arc::new(FakeWebBackend::new().with_response(
+                    "https://example.com/doc",
+                    "text/html",
+                    "<h1>Hi</h1>",
+                ));
+                let backend = super::web(inner, Metrics::new());
+                let req = WebRequest {
+                    url: "https://example.com/doc".into(),
+                    format: WebFormat::Markdown,
+                    timeout_secs: 30,
+                    max_bytes: 1 << 20,
+                    max_redirects: 5,
+                };
+                let _ = backend.fetch(&req).await;
+            });
+        });
+        let has = |f: &str, v: &str| {
+            fields
+                .iter()
+                .any(|(s, fld, val)| s == "web.fetch" && fld == f && val == v)
+        };
+        assert!(has("host", "example.com"), "{fields:?}");
+        assert!(has("format", "markdown"), "{fields:?}");
+        assert!(has("status", "200"), "{fields:?}");
+        assert!(
+            fields
+                .iter()
+                .any(|(s, fld, _)| s == "web.fetch" && fld == "bytes"),
+            "bytes attribute missing: {fields:?}"
+        );
+    }
+
+    // Mirror the agent loop: authorize the call, then execute only if allowed.
+    async fn run_guarded(
+        g: &Arc<dyn Policy>,
+        tool: &agent_tools::WebFetchTool,
+        url: &str,
+    ) -> Observation {
+        let call = ToolCall {
+            id: "c0".into(),
+            name: "web_fetch".into(),
+            arguments: json!({ "url": url }),
+        };
+        match g.authorize(&call).await {
+            Decision::Allow => tool
+                .execute(call.arguments, &ToolContext { cwd: ".".into() })
+                .await
+                .unwrap(),
+            Decision::Deny(r) => Observation::error(r),
+        }
+    }
+
+    #[tokio::test]
+    async fn guard_denies_ssrf_but_allows_public() {
+        let backend = Arc::new(
+            FakeWebBackend::new()
+                .with_response("http://169.254.169.254/meta", "text/plain", "SECRET")
+                .with_response("https://example.com/doc", "text/html", "<h1>Hi</h1>"),
+        );
+        let tool = agent_tools::WebFetchTool::new(
+            super::web(backend.clone(), Metrics::new()),
+            1 << 20,
+            30,
+            120,
+            5,
+        );
+        let g: Arc<dyn Policy> = guard(
+            Arc::new(AutoApprove),
+            GuardMode::Deny,
+            vec![],
+            vec![],
+            false,
+            vec![],
+            Metrics::new(),
+        );
+
+        // SSRF metadata target: denied by the guard, opaque reason, never fetched.
+        let denied = run_guarded(&g, &tool, "http://169.254.169.254/meta").await;
+        assert!(denied.is_error);
+        assert!(
+            denied.content.contains("blocked by policy guard"),
+            "{}",
+            denied.content
+        );
+
+        // Public target: allowed, fetched, converted to markdown.
+        let ok = run_guarded(&g, &tool, "https://example.com/doc").await;
+        assert!(!ok.is_error, "{}", ok.content);
+        assert!(ok.content.contains("# Hi"), "{}", ok.content);
+
+        // Only the public URL reached the backend — the SSRF target never did.
+        assert_eq!(backend.requested(), vec!["https://example.com/doc"]);
     }
 }
 

@@ -113,6 +113,20 @@ auto_index = true
 [tokenizer]
 backend = "approx"
 
+# The web_fetch tool (the WebBackend seam). GET a URL → sanitized markdown/text/
+# html under size/timeout/redirect caps. `backend` = "local" (in-process reqwest).
+# The SSRF guard (in the Policy seam) denies loopback/private/link-local/metadata
+# targets by default; `allow_private = true` opts local dev back in, and
+# `allow_hosts` globs exempt named hosts. See docs/components/web-fetch.md.
+[web]
+backend          = "local"
+max_bytes        = 5242880   # 5 MiB body cap (declared + streamed)
+timeout_secs     = 30        # default per-request timeout
+max_timeout_secs = 120       # upper bound a caller-requested timeout is clamped to
+max_redirects    = 5
+allow_private    = false     # true ⇒ allow loopback/private/link-local targets
+allow_hosts      = []        # host globs that bypass the SSRF screen, e.g. ["*.internal"]
+
 # Multi-branch git (the RepoBackend seam). One shared bare/mirror object DB fronts
 # many disposable `git worktree`s, so the agent can read, diff and analyze code
 # across branches without many full clones. `backend` selects the impl: "cli"

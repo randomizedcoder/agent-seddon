@@ -34,6 +34,7 @@ craneLib.mkCargoDerivation (
       cargo bench -p agent-metrics --bench metrics
       cargo bench -p agent-tools --features tool-patch --bench patch
       cargo bench -p agent-tools --features tool-edit --bench edit
+      cargo bench -p agent-tools --features tool-web --bench web
       cargo bench -p agent-core --bench registry
       cargo bench -p agent-context --bench context
       cargo bench -p agent-tokenizer --bench tokenize

@@ -5,23 +5,28 @@ markdown / text / HTML, under size + timeout + redirect caps, with an SSRF guard
 Tracks the intended `WebBackend` seam, what the peers assert, and the concrete
 behaviour + tests needed to be the most complete of the four.
 
-> **Status: spec (design of record).** agent-seddon has **no web fetch today**.
-> This spec defines a new **`WebBackend` seam** (`async fn fetch(WebRequest) ->
-> WebResponse` in `agent-core`) with a `local` reqwest-backed impl, and a
-> `web_fetch` **`Tool`** in front of it, wired by the plugin registry
-> (`register_builtins`) and config-selected like every other seam. It adds a new
-> proto service `agent.v1.WebService` (`crates/agent-proto/proto/agent/v1/web.proto`)
-> so the fetch worker can run as its own reflection-introspectable gRPC service
-> (`agent --serve-web`). The **differentiator vs the peers** is an **SSRF /
-> private-IP guard wired through the existing `Policy` seam**
-> ([`crates/agent-runtime/src/policy.rs`](../../crates/agent-runtime/src/policy.rs)):
-> the resolved destination IP is screened *before the socket opens* and
-> localhost / loopback / link-local / private (RFC 1918) / cloud-metadata
-> (`169.254.169.254`) targets are **denied by default**, with the deny reason
-> flowing through the same `Decision::Deny` path as the dangerous-command guard.
-> Plus per-host Prometheus metrics + an OTel `web.fetch` span carrying `host`,
-> `format`, `status`, `bytes` attributes. This spec is the design of record; no
-> code lands here.
+> **Status: implemented** (seam + `local` transport + tool + SSRF guard +
+> observability + bench + leak). The **`WebBackend` seam** (`async fn
+> fetch(WebRequest) -> WebResponse` in `agent-core`) ships with a `local`
+> reqwest-backed transport ([`agent-web`](../../crates/agent-web)) and a
+> `web_fetch` **`Tool`** ([`agent-tools`](../../crates/agent-tools/src/web.rs))
+> in front of it, wired by the builder and config-selected (`[web] backend`).
+> The **differentiator vs the peers** landed: an **SSRF / private-IP guard wired
+> through the existing `Policy` seam**
+> ([`crates/agent-runtime/src/policy.rs`](../../crates/agent-runtime/src/policy.rs),
+> `scan_ssrf_target`, `ssrf_target` category) that screens the destination
+> *before the socket opens* and denies localhost / loopback / link-local /
+> RFC-1918 / cloud-metadata (`169.254.169.254`) targets by default — including
+> the obfuscated-IP encodings (decimal/hex/short/IPv4-mapped/userinfo), which
+> `Url::parse` normalises before classification — through the same
+> `Decision::Deny("blocked by policy guard: …")` path as the dangerous-command
+> guard, with an opaque reason. Plus outcome Prometheus metrics + an OTel
+> `web.fetch` span carrying `host`/`format`/`status`/`bytes`. **Deferred to a
+> follow-up** (staged like the tokenizer seam): the `agent.v1.WebService` gRPC
+> worker (`agent --serve-web`) and DNS-name→IP resolution screening (a public
+> name resolving to a private address; per-redirect-hop re-screening). Metrics
+> are **not** labelled by host (untrusted URL → cardinality DoS); the host is a
+> span attribute. See [`docs/components/web-fetch.md`](../components/web-fetch.md).
 
 ## Feature & why it matters
 

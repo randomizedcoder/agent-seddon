@@ -11,6 +11,7 @@ members = [
     "crates/agent-memory",
     "crates/agent-context",
     "crates/agent-tokenizer",
+    "crates/agent-web",
     "crates/agent-grpc",
     "crates/agent-mcp",
     "crates/agent-proto",
@@ -33,6 +34,8 @@ thiserror = "1"
 anyhow = "1"
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# URL parsing for the SSRF guard (robust host/scheme extraction; already in-tree via reqwest).
+url = "2"
 toml = "0.8"
 tracing = "0.1"
 
@@ -100,6 +103,7 @@ agent-git = { path = "crates/agent-git", default-features = false }
 agent-memory = { path = "crates/agent-memory", default-features = false }
 agent-context = { path = "crates/agent-context", default-features = false }
 agent-tokenizer = { path = "crates/agent-tokenizer", default-features = false }
+agent-web = { path = "crates/agent-web", default-features = false }
 agent-grpc = { path = "crates/agent-grpc" }
 agent-mcp = { path = "crates/agent-mcp" }
 agent-proto = { path = "crates/agent-proto" }

@@ -59,6 +59,14 @@ mod metrics;
 #[cfg(feature = "tool-metrics")]
 pub use metrics::MetricsTool;
 
+#[cfg(feature = "tool-web")]
+mod web;
+#[cfg(feature = "tool-web")]
+#[doc(hidden)]
+pub use web::bench_sanitize;
+#[cfg(feature = "tool-web")]
+pub use web::WebFetchTool;
+
 /// Cap tool output so a runaway command can't blow the context window.
 pub(crate) const MAX_OUTPUT: usize = 12_000;
 

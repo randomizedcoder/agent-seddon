@@ -31,6 +31,68 @@ pub struct Config {
     pub git: GitCfg,
     #[serde(default)]
     pub policy: PolicyCfg,
+    #[serde(default)]
+    pub web: WebCfg,
+}
+
+/// The `web_fetch` tool (the `WebBackend` seam, parity spec 11). `backend`
+/// selects the impl (`"local"` = in-process reqwest, `"grpc"` = a remote fetch
+/// worker). The caps bound a single fetch; the SSRF fields feed the `Policy`
+/// guard's `web_fetch` screen — `allow_private = false` (default) denies
+/// loopback/private/link-local/metadata targets, and `allow_hosts` globs
+/// exempt named hosts. See `docs/components/web-fetch.md`.
+#[derive(Debug, Deserialize)]
+pub struct WebCfg {
+    #[serde(default = "default_web_backend")]
+    pub backend: String,
+    /// Max bytes read from a single response body (hard cap; default 5 MiB).
+    #[serde(default = "default_web_max_bytes")]
+    pub max_bytes: u64,
+    /// Per-fetch timeout, seconds (clamped to `max_timeout_secs`; default 30).
+    #[serde(default = "default_web_timeout")]
+    pub timeout_secs: u64,
+    /// Upper bound the requested timeout is clamped to (default 120).
+    #[serde(default = "default_web_max_timeout")]
+    pub max_timeout_secs: u64,
+    /// Redirect hops followed before giving up (default 5).
+    #[serde(default = "default_web_max_redirects")]
+    pub max_redirects: u32,
+    /// SSRF screen: allow private/loopback/link-local targets (default false).
+    #[serde(default)]
+    pub allow_private: bool,
+    /// Host globs that bypass the SSRF screen entirely (explicit opt-in).
+    #[serde(default)]
+    pub allow_hosts: Vec<String>,
+}
+
+impl Default for WebCfg {
+    fn default() -> Self {
+        Self {
+            backend: default_web_backend(),
+            max_bytes: default_web_max_bytes(),
+            timeout_secs: default_web_timeout(),
+            max_timeout_secs: default_web_max_timeout(),
+            max_redirects: default_web_max_redirects(),
+            allow_private: false,
+            allow_hosts: Vec::new(),
+        }
+    }
+}
+
+fn default_web_backend() -> String {
+    "local".to_string()
+}
+fn default_web_max_bytes() -> u64 {
+    5 * 1024 * 1024
+}
+fn default_web_timeout() -> u64 {
+    30
+}
+fn default_web_max_timeout() -> u64 {
+    120
+}
+fn default_web_max_redirects() -> u32 {
+    5
 }
 
 /// Policy parameters. `allow` feeds the `allow-list` policy (used when `[agent]
@@ -637,6 +699,7 @@ impl Config {
                 guard: "off".into(),
                 ..PolicyCfg::default()
             },
+            web: WebCfg::default(),
         }
     }
 }

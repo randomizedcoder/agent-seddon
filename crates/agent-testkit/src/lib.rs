@@ -26,8 +26,8 @@ use agent_core::{
     MemoryEvent, MemoryItem, MemoryStore, Message, ModelCapabilities, ModelPrices, Observation,
     Oid, Prices, ProgressFn, RecallQuery, ReindexProgress, RepoBackend, RepoStatus, Result,
     Revision, Role, SearchBackend, SearchCapabilities, SearchHit, SearchMode, SearchQuery,
-    TokenBudget, Tokenizer, Tool, ToolCall, ToolContext, ToolSchema, TreeEntry, WorkingSet,
-    WorktreeHandle, WorktreeSpec,
+    TokenBudget, Tokenizer, Tool, ToolCall, ToolContext, ToolSchema, TreeEntry, WebFormat,
+    WebResponse, WorkingSet, WorktreeHandle, WorktreeSpec,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -603,6 +603,72 @@ impl RepoBackend for FixtureRepo {
     }
     async fn push(&self, _checkpoint: &Checkpoint, _remote_ref: &str) -> Result<()> {
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Web backend (web_fetch seam)
+// ---------------------------------------------------------------------------
+
+/// A fake [`WebBackend`] for `web_fetch` tests: returns a canned [`WebResponse`]
+/// per URL (or a canned error), and records every requested URL so a test can
+/// assert what was — and, for an SSRF-denied case, was *not* — fetched. The tool
+/// applies the request's `format` on top of the raw body this returns, exactly
+/// as it would over a real transport.
+#[derive(Default)]
+pub struct FakeWebBackend {
+    responses: Mutex<HashMap<String, std::result::Result<WebResponse, String>>>,
+    requested: Mutex<Vec<String>>,
+}
+
+impl FakeWebBackend {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// Canned success for `url`: `content_type` + raw `body` (HTTP 200).
+    pub fn with_response(self, url: &str, content_type: &str, body: &str) -> Self {
+        self.responses.lock().unwrap().insert(
+            url.to_string(),
+            Ok(WebResponse {
+                final_url: url.to_string(),
+                status: 200,
+                content_type: content_type.to_string(),
+                format: WebFormat::Markdown,
+                body: body.to_string(),
+                bytes: body.len() as u64,
+            }),
+        );
+        self
+    }
+    /// Canned transport error for `url` (e.g. `"response too large"`).
+    pub fn with_error(self, url: &str, msg: &str) -> Self {
+        self.responses
+            .lock()
+            .unwrap()
+            .insert(url.to_string(), Err(msg.to_string()));
+        self
+    }
+    /// The URLs the backend was asked to fetch, in order (empty ⇒ nothing fetched).
+    pub fn requested(&self) -> Vec<String> {
+        self.requested.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl agent_core::WebBackend for FakeWebBackend {
+    async fn fetch(&self, req: &agent_core::WebRequest) -> Result<WebResponse> {
+        self.requested.lock().unwrap().push(req.url.clone());
+        match self.responses.lock().unwrap().get(&req.url) {
+            Some(Ok(r)) => Ok(WebResponse {
+                format: req.format,
+                ..r.clone()
+            }),
+            Some(Err(e)) => Err(agent_core::Error::Web(e.clone())),
+            None => Err(agent_core::Error::Web(format!(
+                "no canned response for {}",
+                req.url
+            ))),
+        }
     }
 }
 
