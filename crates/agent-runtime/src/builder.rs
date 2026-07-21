@@ -150,6 +150,34 @@ pub async fn build_agent_with(
         tools.register(crate::metered::tool(tool, metrics.clone()));
     }
 
+    // Web search: compose the configured backends into one metered, caching
+    // `DispatchWebSearch` and expose the `web_search` tool. Each backend comes
+    // from an ordinary registry factory.
+    #[cfg(feature = "web-search")]
+    if !cfg.web_search.backends.is_empty() {
+        let ws_ctx = crate::registry::FactoryCtx::new(&cfg, &metrics);
+        let mut backends: Vec<(String, Arc<dyn agent_core::WebSearch>)> = Vec::new();
+        for name in &cfg.web_search.backends {
+            let backend = registry
+                .build_web_search(name, &ws_ctx)
+                .with_context(|| format!("building web-search backend `{name}`"))?;
+            backends.push((
+                name.clone(),
+                crate::metered::web_search(backend, metrics.clone(), name),
+            ));
+        }
+        let dispatch = agent_web_search::DispatchWebSearch::new(
+            backends,
+            cfg.web_search.cache_ttl_secs.saturating_mul(1_000),
+            cfg.web_search.cache_max_entries,
+        )?;
+        let tool = Arc::new(agent_tools::WebSearchTool::new(
+            Arc::new(dispatch) as Arc<dyn agent_core::WebSearch>,
+            cfg.web_search.default_limit,
+        ));
+        tools.register(crate::metered::tool(tool, metrics.clone()));
+    }
+
     // Tasks: build the TaskTracker (in-memory plan), meter it (plan-progress
     // gauges + `tasks.*` spans), and expose the `todo_write` tool.
     #[cfg(feature = "tasks")]

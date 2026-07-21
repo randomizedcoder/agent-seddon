@@ -224,6 +224,27 @@ scope       = "context"
 strategy  = "stable-prefix"
 tail_back = 2
 
+# Live web search (the WebSearch seam). `backends` lists providers in preference
+# order — the first is the default, the rest are selectable per query via the
+# tool's `backend` argument (an unknown name falls back to the default).
+# EMPTY (default) ⇒ the `web_search` tool is not registered at all.
+# Results are cached for `cache_ttl_secs`, keyed by (backend, normalized query,
+# options), so a repeated search inside the TTL costs nothing; a stale entry is
+# served while it refetches. The API key is never echoed into results, errors,
+# spans, or the cache. See docs/components/web-search.md.
+[web_search]
+backends          = []            # e.g. ["brave"] or ["searxng", "brave"]
+cache_ttl_secs    = 900
+cache_max_entries = 256
+default_limit     = 5
+timeout_secs      = 20
+max_retries       = 2
+# Brave: key resolution is brave_api_key (inline) > brave_api_key_env (env var).
+# brave_api_key_env = "BRAVE_SEARCH_API_KEY"
+# brave_endpoint    = "https://api.search.brave.com/res/v1/web/search"
+# SearXNG: point at your own instance's JSON search endpoint (no key needed).
+# searxng_endpoint  = "http://localhost:8888/search"
+
 # Language servers (the LspBackend seam). The agent can verify edits
 # (`diagnostics`) and navigate code (`hover`/`definition`/`references`/`rename`/
 # `document_symbols`) via real servers over JSON-RPC/stdio. OFF by default (no

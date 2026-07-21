@@ -26,6 +26,8 @@ tool-metrics = ["dep:agent-metrics"]
 # backend is wired by the runtime; this feature only compiles the tool + the
 # dependency-free HTML sanitizer.
 tool-web = []
+# `web_search` over the WebSearch seam (parity spec 12).
+tool-web-search = []
 # The `todo_write` tool over the TaskTracker seam (structured plan). The tracker
 # is wired by the runtime; this feature only compiles the tool.
 tool-todo = []

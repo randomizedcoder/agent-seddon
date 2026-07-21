@@ -789,6 +789,100 @@ pub mod mcp {
     }
 }
 
+// --- WebSearch double (parity spec 12) --------------------------------------
+
+/// A scripted [`WebSearch`](agent_core::WebSearch) backend: query → canned
+/// results, with a settable error and a call counter.
+///
+/// The counter is the point — cache behaviour is only meaningful if a test can
+/// assert how many times the provider was actually reached.
+pub struct ScriptedWebSearch {
+    name: String,
+    script: std::sync::Mutex<std::collections::HashMap<String, Vec<agent_core::WebResult>>>,
+    error: std::sync::Mutex<Option<String>>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl ScriptedWebSearch {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            script: std::sync::Mutex::new(std::collections::HashMap::new()),
+            error: std::sync::Mutex::new(None),
+            calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// Script one result for `query`.
+    pub fn with_result(self, query: &str, url: &str) -> Self {
+        self.script.lock().unwrap().insert(
+            query.trim().to_lowercase(),
+            vec![agent_core::WebResult {
+                url: url.into(),
+                title: format!("result for {query}"),
+                snippet: "snippet".into(),
+                score: 1.0,
+                published_ms: None,
+            }],
+        );
+        self
+    }
+
+    /// Script an explicit result list for `query`.
+    pub fn with_results(self, query: &str, results: Vec<agent_core::WebResult>) -> Self {
+        self.script
+            .lock()
+            .unwrap()
+            .insert(query.trim().to_lowercase(), results);
+        self
+    }
+
+    /// Make every subsequent search fail with this message (`None` clears).
+    pub fn set_error(&self, e: Option<String>) {
+        *self.error.lock().unwrap() = e;
+    }
+
+    /// How many times the provider was actually reached.
+    pub fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl agent_core::WebSearch for ScriptedWebSearch {
+    fn capabilities(&self) -> agent_core::WebSearchCapabilities {
+        agent_core::WebSearchCapabilities {
+            backend: self.name.clone(),
+            scored: true,
+            freshness: true,
+            max_results: 20,
+        }
+    }
+
+    async fn search(
+        &self,
+        q: &agent_core::WebQuery,
+    ) -> agent_core::Result<Vec<agent_core::WebResult>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(e) = self.error.lock().unwrap().clone() {
+            return Err(agent_core::Error::Web(e));
+        }
+        let key = q
+            .text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        Ok(self
+            .script
+            .lock()
+            .unwrap()
+            .get(&key)
+            .cloned()
+            .unwrap_or_default())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

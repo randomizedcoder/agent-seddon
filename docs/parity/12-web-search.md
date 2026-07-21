@@ -5,7 +5,20 @@ Per-feature parity spec for a `web_search` tool over a new, config-swappable
 assert, and the concrete behaviour + table-driven tests needed to be the most
 complete of the four.
 
-> **Status: spec (design of record).** Unimplemented. This spec introduces a new
+> **Status: implemented** (`WebSearch` seam + `agent-web-search` with
+> `DispatchWebSearch`, a TTL cache, deterministic ranking, Brave + SearXNG
+> backends, the `web_search` tool, config + metrics + span + bench + leak; doc in
+> `docs/components/web-search.md`). Notes: the backends are **plain
+> `register_builtins` factory lines** — the first seam since the `FactoryCtx`
+> refactor that needed no builder special-casing, which was the point of that
+> change. Provider scores are sanitized *before* sorting: `partial_cmp` returns
+> `None` for `NaN`, which collapses to "equal" and silently scrambles the order
+> rather than sinking the bad entry (caught by an adversarial test). **Deferred:**
+> the Tavily and Bing backends (the seam takes them unchanged; Brave and SearXNG
+> cover the paid-API and self-hosted shapes), a disk-backed cache, and the
+> `web_search.proto` gRPC service, consistent with specs 11–24.
+>
+> Original plan follows. This spec introduces a new
 > **`WebSearch` seam** (`async trait` in `agent-core`) fronted by a `web_search`
 > tool and a `DispatchWebSearch` composer, mirroring the existing
 > [`SearchBackend`](../../crates/agent-core/src/lib.rs) seam +

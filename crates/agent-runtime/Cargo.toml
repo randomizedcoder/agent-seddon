@@ -33,6 +33,7 @@ default = [
     "reference",
     "scanner",
     "cache",
+    "web-search",
 ]
 
 # Each feature forwards to the owning impl crate + drives `register_builtins`.
@@ -68,6 +69,15 @@ reference = ["dep:agent-reference", "agent-reference/reference-local"]
 # Prompt-cache breakpoint placement. See parity spec 24 and
 # docs/components/prompt-cache.md.
 cache = ["dep:agent-cache", "agent-cache/cache-strategies"]
+# Live web search: the WebSearch seam + the `web_search` tool. See parity spec 12.
+web-search = [
+    "dep:agent-web-search",
+    "agent-tools/tool-web-search",
+    "websearch-brave",
+    "websearch-searxng",
+]
+websearch-brave = ["agent-web-search/websearch-brave"]
+websearch-searxng = ["agent-web-search/websearch-searxng"]
 scanner = [
     "dep:agent-scanner",
     "agent-scanner/scanner-secret",
@@ -123,6 +133,7 @@ agent-session = { workspace = true, optional = true }
 agent-reference = { workspace = true, optional = true }
 agent-scanner = { workspace = true, optional = true }
 agent-cache = { workspace = true, optional = true }
+agent-web-search = { workspace = true, optional = true }
 agent-validate = { workspace = true, optional = true }
 agent-lsp = { workspace = true, optional = true }
 # bash (tool-core) routes through the Sandbox seam; the local + nix backends ship

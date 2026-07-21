@@ -42,6 +42,7 @@ craneLib.mkCargoDerivation (
       cargo bench -p agent-reference --bench parse
       cargo bench -p agent-scanner --bench scan
       cargo bench -p agent-cache --bench place
+      cargo bench -p agent-web-search --bench rank
       cargo bench -p agent-core --bench registry
       cargo bench -p agent-context --bench context
       cargo bench -p agent-tokenizer --bench tokenize

@@ -265,6 +265,7 @@ dependencies = [
  "agent-tools",
  "agent-validate",
  "agent-web",
+ "agent-web-search",
  "anyhow",
  "async-stream",
  "async-trait",
@@ -443,6 +444,24 @@ dependencies = [
  "tiny_http",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "agent-web-search"
+version = "0.1.0"
+dependencies = [
+ "agent-core",
+ "agent-retry",
+ "agent-testkit",
+ "async-trait",
+ "dhat",
+ "iai-callgrind",
+ "reqwest",
+ "rstest",
+ "serde",
+ "serde_json",
+ "tiny_http",
+ "tokio",
 ]
 
 [[package]]

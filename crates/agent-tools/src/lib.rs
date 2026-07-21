@@ -60,11 +60,15 @@ pub use metrics::MetricsTool;
 
 #[cfg(feature = "tool-web")]
 mod web;
+#[cfg(feature = "tool-web-search")]
+mod web_search;
 #[cfg(feature = "tool-web")]
 #[doc(hidden)]
 pub use web::bench_sanitize;
 #[cfg(feature = "tool-web")]
 pub use web::WebFetchTool;
+#[cfg(feature = "tool-web-search")]
+pub use web_search::WebSearchTool;
 
 #[cfg(feature = "tool-todo")]
 mod todo;

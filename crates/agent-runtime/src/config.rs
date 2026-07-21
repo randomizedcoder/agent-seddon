@@ -51,6 +51,73 @@ pub struct Config {
     pub scanner: ScannerCfg,
     #[serde(default)]
     pub cache: CacheCfg,
+    #[serde(default)]
+    pub web_search: WebSearchCfg,
+}
+
+/// Live web search (the `WebSearch` seam, parity spec 12). `backends` lists the
+/// providers in preference order — the first is the default and the rest are
+/// selectable per query. Empty ⇒ the `web_search` tool is not registered.
+/// Results are cached for `cache_ttl_secs`, keyed by (backend, normalized query,
+/// options). See docs/components/web-search.md.
+#[derive(Debug, Deserialize)]
+pub struct WebSearchCfg {
+    #[serde(default)]
+    pub backends: Vec<String>,
+    #[serde(default = "default_ws_ttl")]
+    pub cache_ttl_secs: u64,
+    #[serde(default = "default_ws_cache_entries")]
+    pub cache_max_entries: usize,
+    #[serde(default = "default_ws_limit")]
+    pub default_limit: u32,
+    #[serde(default = "default_ws_timeout")]
+    pub timeout_secs: u64,
+    #[serde(default = "default_ws_retries")]
+    pub max_retries: u32,
+    /// Brave endpoint override (defaults to the public API).
+    #[serde(default)]
+    pub brave_endpoint: String,
+    /// Brave API key; read from `brave_api_key_env` when empty.
+    #[serde(default)]
+    pub brave_api_key: String,
+    #[serde(default)]
+    pub brave_api_key_env: String,
+    /// SearXNG instance search endpoint, e.g. `http://localhost:8888/search`.
+    #[serde(default)]
+    pub searxng_endpoint: String,
+}
+
+impl Default for WebSearchCfg {
+    fn default() -> Self {
+        Self {
+            backends: Vec::new(),
+            cache_ttl_secs: default_ws_ttl(),
+            cache_max_entries: default_ws_cache_entries(),
+            default_limit: default_ws_limit(),
+            timeout_secs: default_ws_timeout(),
+            max_retries: default_ws_retries(),
+            brave_endpoint: String::new(),
+            brave_api_key: String::new(),
+            brave_api_key_env: String::new(),
+            searxng_endpoint: String::new(),
+        }
+    }
+}
+
+fn default_ws_ttl() -> u64 {
+    900
+}
+fn default_ws_cache_entries() -> usize {
+    256
+}
+fn default_ws_limit() -> u32 {
+    5
+}
+fn default_ws_timeout() -> u64 {
+    20
+}
+fn default_ws_retries() -> u32 {
+    2
 }
 
 /// Prompt-cache breakpoint placement (the `CacheStrategy` seam, parity spec 24).
@@ -971,6 +1038,7 @@ impl Config {
             reference: ReferenceCfg::default(),
             scanner: ScannerCfg::default(),
             cache: CacheCfg::default(),
+            web_search: WebSearchCfg::default(),
         }
     }
 }
