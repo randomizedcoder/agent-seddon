@@ -273,14 +273,44 @@ mod tests {
         assert_eq!(p.delay(attempt, rand01), Duration::from_millis(expected_ms));
     }
 
-    #[test]
-    fn clamp_hint_bounds_server_pushback() {
-        let p = RetryPolicy::new(3); // max_delay 20s
-        assert_eq!(
-            p.clamp_hint(Duration::from_secs(3600)),
-            Duration::from_secs(20)
-        );
-        assert_eq!(p.clamp_hint(Duration::from_secs(2)), Duration::from_secs(2));
+    // A server-supplied hint is clamped to `max_delay` so a hostile server can't pin
+    // us indefinitely. Covers below/at/above the cap and the extreme inputs.
+    #[rstest]
+    #[case::below_cap(Duration::from_secs(2), Duration::from_secs(2))]
+    #[case::at_cap(Duration::from_secs(20), Duration::from_secs(20))]
+    #[case::above_cap(Duration::from_secs(3600), Duration::from_secs(20))]
+    #[case::adversarial_max(Duration::MAX, Duration::from_secs(20))]
+    #[case::zero(Duration::ZERO, Duration::ZERO)]
+    fn clamp_hint_cases(#[case] hint: Duration, #[case] expected: Duration) {
+        assert_eq!(RetryPolicy::new(3).clamp_hint(hint), expected); // max_delay 20s
+    }
+
+    #[tokio::test]
+    async fn run_honors_and_clamps_a_server_hint() {
+        // A hostile 1-hour hint must be clamped to `max_delay` (here ZERO → instant)
+        // and the retry still happens — exercises `backoff_wait`'s `Some(hint)` branch,
+        // which no other test reaches.
+        let policy = RetryPolicy::new(3)
+            .with_base_delay(Duration::ZERO)
+            .with_max_delay(Duration::ZERO);
+        let calls = Arc::new(AtomicU32::new(0));
+        let c = calls.clone();
+        let out: Result<&str, &str> = run(&policy, || {
+            let n = c.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if n < 1 {
+                    Attempt::Retry {
+                        err: "x",
+                        after: Some(Duration::from_secs(3600)),
+                    }
+                } else {
+                    Attempt::Done("ok")
+                }
+            }
+        })
+        .await;
+        assert_eq!(out, Ok("ok"));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     // --- run: retries the right number of times, then succeeds --------------

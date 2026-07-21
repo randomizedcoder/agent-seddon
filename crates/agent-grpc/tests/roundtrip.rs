@@ -132,6 +132,27 @@ struct FaultyProvider {
     inner: Arc<dyn LlmProvider>,
     calls: Arc<AtomicU32>,
     fail_first: u32,
+    /// Status code returned on the failing calls.
+    fail_code: tonic::Code,
+    /// Optional `grpc-retry-pushback-ms` header attached to the failing status.
+    pushback: Option<&'static str>,
+}
+
+impl FaultyProvider {
+    fn new(inner: Arc<dyn LlmProvider>, calls: Arc<AtomicU32>, fail_first: u32) -> Self {
+        Self {
+            inner,
+            calls,
+            fail_first,
+            fail_code: tonic::Code::Unavailable,
+            pushback: None,
+        }
+    }
+    fn with_failure(mut self, code: tonic::Code, pushback: Option<&'static str>) -> Self {
+        self.fail_code = code;
+        self.pushback = pushback;
+        self
+    }
 }
 
 #[tonic::async_trait]
@@ -148,7 +169,12 @@ impl pb::provider_server::Provider for FaultyProvider {
         request: tonic::Request<pb::CompletionRequest>,
     ) -> Result<tonic::Response<pb::CompletionResponse>, tonic::Status> {
         if self.calls.fetch_add(1, Ordering::SeqCst) < self.fail_first {
-            return Err(tonic::Status::unavailable("overloaded"));
+            let mut s = tonic::Status::new(self.fail_code, "injected fault");
+            if let Some(p) = self.pushback {
+                s.metadata_mut()
+                    .insert("grpc-retry-pushback-ms", p.parse().unwrap());
+            }
+            return Err(s);
         }
         let req = request
             .into_inner()
@@ -175,20 +201,13 @@ impl pb::provider_server::Provider for FaultyProvider {
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn provider_retries_unavailable_then_succeeds() {
-    let calls = Arc::new(AtomicU32::new(0));
-    let faulty = FaultyProvider {
-        inner: Arc::new(ScriptedProvider::new(vec![final_turn("recovered")])),
-        calls: calls.clone(),
-        fail_first: 1, // first call UNAVAILABLE, second succeeds
-    };
+async fn complete_via(faulty: FaultyProvider) -> (std::result::Result<String, String>, u32) {
+    let calls = faulty.calls.clone();
     let router = tonic::transport::Server::builder()
         .add_service(pb::provider_server::ProviderServer::new(faulty));
     let (dial, _srv) = spawn(Transport::Tcp, router).await;
     let client = GrpcProvider::connect(&dial, caps()).unwrap();
-
-    let resp = client
+    let out = client
         .complete(CompletionRequest {
             messages: vec![Message::user("hi")],
             tools: vec![],
@@ -196,12 +215,55 @@ async fn provider_retries_unavailable_then_succeeds() {
             temperature: 0.0,
         })
         .await
-        .expect("client should retry the UNAVAILABLE and succeed");
-    assert_eq!(resp.message.content, "recovered");
+        .map(|r| r.message.content)
+        .map_err(|e| e.to_string());
+    (out, calls.load(Ordering::SeqCst))
+}
+
+fn faulty(fail_first: u32) -> FaultyProvider {
+    FaultyProvider::new(
+        Arc::new(ScriptedProvider::new(vec![final_turn("recovered")])),
+        Arc::new(AtomicU32::new(0)),
+        fail_first,
+    )
+}
+
+/// Positive: a transient `UNAVAILABLE` is retried and the next call succeeds.
+#[tokio::test(flavor = "multi_thread")]
+async fn provider_retries_unavailable_then_succeeds() {
+    let (out, calls) = complete_via(faulty(1)).await;
+    assert_eq!(out.as_deref(), Ok("recovered"));
+    assert_eq!(calls, 2, "one retry after the UNAVAILABLE");
+}
+
+/// Negative: a permanent `INVALID_ARGUMENT` is not retried — one call, then fail.
+#[tokio::test(flavor = "multi_thread")]
+async fn provider_does_not_retry_invalid_argument() {
+    let f = faulty(u32::MAX).with_failure(tonic::Code::InvalidArgument, None);
+    let (out, calls) = complete_via(f).await;
+    assert!(out.is_err());
+    assert_eq!(calls, 1, "a permanent code must not be retried");
+}
+
+/// Adversarial: a `-1` pushback header vetoes the retry even on a retryable code.
+#[tokio::test(flavor = "multi_thread")]
+async fn provider_honors_minus_one_pushback() {
+    let f = faulty(u32::MAX).with_failure(tonic::Code::Unavailable, Some("-1"));
+    let (out, calls) = complete_via(f).await;
+    assert!(out.is_err());
+    assert_eq!(calls, 1, "`-1` pushback must forbid the retry");
+}
+
+/// Adversarial: a positive pushback attached to a permanent code must NOT force a
+/// retry (the abuse vector fixed in grpc_retry_decision).
+#[tokio::test(flavor = "multi_thread")]
+async fn provider_pushback_cannot_force_retry_of_permanent_error() {
+    let f = faulty(u32::MAX).with_failure(tonic::Code::InvalidArgument, Some("50"));
+    let (out, calls) = complete_via(f).await;
+    assert!(out.is_err());
     assert_eq!(
-        calls.load(Ordering::SeqCst),
-        2,
-        "one retry after the UNAVAILABLE"
+        calls, 1,
+        "pushback must not force a retry of a permanent code"
     );
 }
 

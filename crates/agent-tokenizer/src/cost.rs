@@ -132,6 +132,35 @@ mod tests {
         assert_eq!(status, CostStatus::Estimated);
     }
 
+    // A price row is config/provider data and could be malformed or hostile; the
+    // cost must stay finite and non-negative (so `total` isn't poisoned by `NaN` and
+    // the Prometheus counter never sees a NaN/negative that would panic `inc_by`).
+    // `expect_zero` ⇒ a bad rate yields 0 cost; else a valid rate on max tokens is >0.
+    #[rstest]
+    #[case::boundary_u32_max_tokens(u32::MAX, 3.0, false)]
+    #[case::adversarial_nan_rate(1_000_000, f64::NAN, true)]
+    #[case::adversarial_negative_rate(1_000_000, -5.0, true)]
+    #[case::adversarial_inf_rate(1_000_000, f64::INFINITY, true)]
+    #[case::boundary_zero_rate(1_000_000, 0.0, true)]
+    fn hostile_or_extreme_input_stays_finite(
+        #[case] tokens: u32,
+        #[case] rate: f64,
+        #[case] expect_zero: bool,
+    ) {
+        let prices = StaticPrices::one("model", rate, 0.0, 0.0, 0.0);
+        let (cost, _status) = calculate_cost("model", &usage(tokens, 0, 0, 0), &prices);
+        assert!(
+            cost.total.is_finite() && cost.total >= 0.0,
+            "total must stay finite & non-negative, got {}",
+            cost.total
+        );
+        if expect_zero {
+            assert_eq!(cost.input, 0.0, "a bad/zero rate must yield 0 cost");
+        } else {
+            assert!(cost.input > 0.0, "a valid rate on max tokens should be > 0");
+        }
+    }
+
     // --- PriceTable resolution: exact + longest-prefix family match ---------
     #[rstest]
     #[case::exact("gpt-4o", true)]

@@ -470,7 +470,10 @@ impl Metrics {
             ("cache_read", cache_read),
             ("cache_write", cache_write),
         ] {
-            if usd > 0.0 {
+            // Only record a finite, positive amount: `inc_by` panics on a negative
+            // value, and a non-finite (NaN/inf) — from a malformed/hostile price row
+            // — would poison the counter. Both are dropped defensively.
+            if usd.is_finite() && usd > 0.0 {
                 self.cost_usd.with_label_values(&[model, kind]).inc_by(usd);
             }
         }
@@ -703,6 +706,28 @@ mod tests {
             assert!(text.contains(name), "missing metric `{name}` in:\n{text}");
         }
         assert!(text.contains("test-model"));
+    }
+
+    #[test]
+    fn add_cost_drops_non_finite_and_non_positive_lines() {
+        let m = Metrics::new();
+        // Must not panic (inc_by panics on negatives; NaN/inf would poison the
+        // counter). Only the one finite-positive line is recorded.
+        m.add_cost("m", f64::NAN, -1.0, f64::INFINITY, 0.003);
+        let text = m.encode_text();
+        assert!(text.contains("kind=\"cache_write\""), "{text}");
+        assert!(
+            !text.contains("kind=\"input\""),
+            "NaN input recorded: {text}"
+        );
+        assert!(
+            !text.contains("kind=\"output\""),
+            "negative output recorded"
+        );
+        assert!(
+            !text.contains("kind=\"cache_read\""),
+            "infinite cache_read recorded"
+        );
     }
 
     #[test]

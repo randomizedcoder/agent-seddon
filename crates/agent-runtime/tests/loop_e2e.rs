@@ -145,6 +145,43 @@ async fn loop_reads_then_edits_a_source_file() {
     assert!(answer.contains("Renamed"), "answer: {answer}");
 }
 
+/// Adversarial: a prompt-injected model that asks `write_file` to escape the
+/// working dir (`../…` or an absolute path) must be confined — no file is created
+/// outside the working dir, and the tool result is an error the model sees. Proves
+/// the built loop's `working_dir` + the tool's `resolve_within` guard hold end to
+/// end, not just in the tool's unit tests.
+#[tokio::test]
+async fn loop_confines_write_to_the_working_dir() {
+    let dir = tempdir();
+    let outside = dir.parent().unwrap().join("escaped-e2e.txt");
+    let _ = std::fs::remove_file(&outside); // ensure a clean slate
+    let script = vec![
+        tool_turn(vec![call(
+            "1",
+            "write_file",
+            json!({"path": "../escaped-e2e.txt", "content": "pwned"}),
+        )]),
+        final_turn("could not escape"),
+    ];
+    let agent = agent_for(&dir, script).await;
+
+    let answer = agent.run("try to escape").await.expect("run");
+
+    assert!(
+        !outside.exists(),
+        "write escaped the working dir to {}",
+        outside.display()
+    );
+    assert!(answer.contains("could not escape"), "answer: {answer}");
+    // The episodic log should show the write was refused (an error observation),
+    // not silently succeeded.
+    let log = std::fs::read_to_string(dir.join(".agent/episodic.jsonl")).unwrap_or_default();
+    assert!(
+        log.contains("escape") || log.contains("outside") || log.contains("error"),
+        "no refusal recorded in episodic log"
+    );
+}
+
 /// A model that never yields a final answer must terminate at `max_iterations`
 /// rather than loop forever — the loop's safety bound, exercised through the real
 /// build. The scripted provider repeats its only (tool-requesting) turn, so the

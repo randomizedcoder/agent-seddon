@@ -1228,11 +1228,45 @@ mod tests {
         }
     }
 
+    /// A tool that takes a little while but does finish — used to prove the
+    /// timeout-disabled (`timeout_secs == 0`) branch lets it complete.
+    struct SlowTool;
+    #[async_trait::async_trait]
+    impl agent_core::Tool for SlowTool {
+        fn name(&self) -> &str {
+            "slow"
+        }
+        fn schema(&self) -> agent_core::ToolSchema {
+            agent_core::ToolSchema {
+                name: "slow".into(),
+                description: "slow but finite".into(),
+                parameters: json!({"type": "object"}),
+            }
+        }
+        async fn execute(
+            &self,
+            _a: serde_json::Value,
+            _c: &agent_core::ToolContext,
+        ) -> agent_core::Result<Observation> {
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            Ok(Observation::ok("finished"))
+        }
+    }
+
     #[tokio::test]
     async fn guard_times_out_a_hung_tool() {
         let obs = run_tool_guarded(Arc::new(HangTool), json!({}), std::env::temp_dir(), 1).await;
         assert!(obs.is_error);
         assert!(obs.content.contains("timed out"), "{}", obs.content);
+    }
+
+    #[tokio::test]
+    async fn guard_disabled_timeout_lets_a_slow_tool_finish() {
+        // `timeout_secs == 0` disables the loop-level timeout (the untested branch):
+        // a slow-but-finite tool must complete, not be cut off.
+        let obs = run_tool_guarded(Arc::new(SlowTool), json!({}), std::env::temp_dir(), 0).await;
+        assert!(!obs.is_error, "{}", obs.content);
+        assert!(obs.content.contains("finished"), "{}", obs.content);
     }
 
     #[tokio::test]

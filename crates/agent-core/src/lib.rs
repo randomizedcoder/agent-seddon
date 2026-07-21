@@ -326,7 +326,17 @@ pub fn calculate_cost(model: &str, usage: &Usage, prices: &dyn Prices) -> (Cost,
         Some(p) => (p, CostStatus::Actual),
         None => (ModelPrices::ZERO, CostStatus::Estimated),
     };
-    let line = |rate: f64, tokens: u32| (rate / 1_000_000.0) * tokens as f64;
+    // A price row is config/provider data and could be malformed or hostile
+    // (`NaN`, negative, `inf`). Treat any non-finite or negative rate as 0 so a bad
+    // row can't poison `total` (NaN propagates through `+`) or reach the Prometheus
+    // cost counter, whose `inc_by` panics on NaN/negative.
+    let line = |rate: f64, tokens: u32| {
+        if rate.is_finite() && rate > 0.0 {
+            (rate / 1_000_000.0) * tokens as f64
+        } else {
+            0.0
+        }
+    };
     let input = line(p.input, usage.prompt_tokens);
     let output = line(p.output, usage.completion_tokens);
     let cache_read = line(p.cache_read, usage.cache_read_tokens);

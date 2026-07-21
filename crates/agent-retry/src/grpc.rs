@@ -89,6 +89,17 @@ mod tests {
     #[case::whitespace("  100 ", Some(Pushback::RetryAfter(Duration::from_millis(100))))]
     #[case::garbage("later", None)]
     #[case::empty("", None)]
+    // adversarial: only `-1` is the "do not retry" sentinel — every other negative
+    // must fail to parse (a `< 0` check instead of `== -1` would diverge here); a
+    // huge value parses unclamped (clamp is downstream).
+    #[case::other_negative("-2", None)]
+    #[case::negative_hundred("-100", None)]
+    #[case::adversarial_huge(
+        "999999999999999",
+        Some(Pushback::RetryAfter(Duration::from_millis(999_999_999_999_999)))
+    )]
+    #[case::float("5.0", None)]
+    #[case::trailing_junk("5ms", None)]
     fn parse_pushback_cases(#[case] value: &str, #[case] expected: Option<Pushback>) {
         assert_eq!(parse_pushback(value), expected);
     }
