@@ -117,6 +117,11 @@ pub struct Metrics {
     // Per-backend exec latency + outcome. `backend` is a config-bounded label.
     sandbox_exec_seconds: HistogramVec,
     sandbox_exec_total: IntCounterVec,
+
+    // --- embed (Embedder seam) --------------------------------------------
+    // Per-backend embed latency + batch size (config-bounded `backend` label).
+    embed_seconds: HistogramVec,
+    embed_batch: HistogramVec,
 }
 
 impl Metrics {
@@ -445,6 +450,18 @@ impl Metrics {
         )
         .unwrap();
 
+        // --- embed (recorded by the embedder metrics wrapper) ----------------
+        let embed_seconds = HistogramVec::new(
+            HistogramOpts::new("agent_embed_seconds", "Embedding latency, by backend"),
+            &["backend"],
+        )
+        .unwrap();
+        let embed_batch = HistogramVec::new(
+            HistogramOpts::new("agent_embed_batch", "Texts embedded per call, by backend"),
+            &["backend"],
+        )
+        .unwrap();
+
         let collectors: Vec<Box<dyn prometheus::core::Collector>> = vec![
             Box::new(api_calls.clone()),
             Box::new(api_call_seconds.clone()),
@@ -496,6 +513,8 @@ impl Metrics {
             Box::new(lsp_diagnostics.clone()),
             Box::new(sandbox_exec_seconds.clone()),
             Box::new(sandbox_exec_total.clone()),
+            Box::new(embed_seconds.clone()),
+            Box::new(embed_batch.clone()),
         ];
         for m in collectors {
             registry.register(m).expect("register metric");
@@ -553,6 +572,8 @@ impl Metrics {
             lsp_diagnostics,
             sandbox_exec_seconds,
             sandbox_exec_total,
+            embed_seconds,
+            embed_batch,
         }
     }
 
@@ -860,6 +881,18 @@ impl Metrics {
         self.sandbox_exec_total
             .with_label_values(&[backend, outcome])
             .inc();
+    }
+
+    // --- embed (Embedder seam) instrumentation ----------------------------
+
+    /// Record an embed call: latency + batch size, by backend.
+    pub fn on_embed(&self, backend: &str, seconds: f64, batch: usize) {
+        self.embed_seconds
+            .with_label_values(&[backend])
+            .observe(seconds);
+        self.embed_batch
+            .with_label_values(&[backend])
+            .observe(batch as f64);
     }
 }
 

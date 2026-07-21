@@ -41,6 +41,36 @@ pub struct Config {
     pub lsp: LspCfg,
     #[serde(default)]
     pub sandbox: SandboxCfg,
+    #[serde(default)]
+    pub embedder: EmbedderCfg,
+}
+
+/// The embedding model for semantic search (the `Embedder` seam, parity spec 15).
+/// `backend` = `"local"` (dependency-free feature-hashing embedder). `dimensions`
+/// sizes its vectors. Enable the vector backend via `[search] backends =
+/// ["tantivy", "vector"]`. See docs/components/embedder.md.
+#[derive(Debug, Deserialize)]
+pub struct EmbedderCfg {
+    #[serde(default = "default_embedder_backend")]
+    pub backend: String,
+    #[serde(default = "default_embedder_dims")]
+    pub dimensions: usize,
+}
+
+impl Default for EmbedderCfg {
+    fn default() -> Self {
+        Self {
+            backend: default_embedder_backend(),
+            dimensions: default_embedder_dims(),
+        }
+    }
+}
+
+fn default_embedder_backend() -> String {
+    "local".to_string()
+}
+fn default_embedder_dims() -> usize {
+    256
 }
 
 /// Execution isolation for `bash` (the `Sandbox` seam, parity spec 14). `backend`
@@ -798,6 +828,7 @@ impl Config {
             structured: StructuredCfg::default(),
             lsp: LspCfg::default(),
             sandbox: SandboxCfg::default(),
+            embedder: EmbedderCfg::default(),
         }
     }
 }

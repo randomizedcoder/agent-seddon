@@ -342,6 +342,15 @@ fn build_query(fields: &Fields, q: &SearchQuery) -> Result<(Box<dyn Query>, Line
                 Err(_) => LineMatcher::None,
             }
         }
+        // tantivy is lexical; semantic/hybrid are the vector backend's / dispatch's
+        // job and are rejected up front by `reject_unsupported` (tantivy's caps
+        // don't advertise them), so this arm is unreachable in practice.
+        SearchMode::Semantic | SearchMode::Hybrid => {
+            return Err(Error::Search(format!(
+                "tantivy does not support {} search",
+                q.mode.as_str()
+            )));
+        }
     };
     if let Some(lang) = &q.lang {
         let term = Term::from_field_text(fields.lang, &lang.to_lowercase());

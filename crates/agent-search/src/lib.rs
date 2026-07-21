@@ -12,9 +12,10 @@
 
 use agent_core::{
     Error, IndexStatus, ProgressFn, Result, SearchBackend, SearchCapabilities, SearchHit,
-    SearchQuery,
+    SearchMode, SearchQuery,
 };
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -25,6 +26,47 @@ pub use manifest::Manifest;
 mod tantivy;
 #[cfg(feature = "search-tantivy")]
 pub use tantivy::TantivyBackend;
+
+#[cfg(feature = "search-vector")]
+mod vector;
+#[cfg(feature = "search-vector")]
+pub use vector::VectorBackend;
+
+/// The reciprocal-rank-fusion constant (`score = Σ 1/(k + rank)`). 60 is the
+/// standard default; it needs no cross-backend score normalisation (BM25 and
+/// cosine live on different scales), which is why RRF is the default fusion.
+pub const RRF_K: usize = 60;
+
+/// Fuse ranked hit lists with reciprocal-rank fusion, keyed by path. A doc that
+/// ranks high in multiple lists rises above either single-list winner. Order is
+/// deterministic (fused score desc, then path, then line); the fused score
+/// replaces the per-backend score. Returns the top `limit`.
+pub fn rrf_fuse(lists: &[Vec<SearchHit>], limit: usize) -> Vec<SearchHit> {
+    let mut acc: HashMap<PathBuf, (f32, SearchHit)> = HashMap::new();
+    for list in lists {
+        for (rank, hit) in list.iter().enumerate() {
+            let contribution = 1.0 / (RRF_K + rank + 1) as f32;
+            acc.entry(hit.path.clone())
+                .and_modify(|(s, _)| *s += contribution)
+                .or_insert_with(|| (contribution, hit.clone()));
+        }
+    }
+    let mut fused: Vec<(f32, SearchHit)> = acc.into_values().collect();
+    fused.sort_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.1.path.cmp(&b.1.path))
+            .then_with(|| a.1.line.cmp(&b.1.line))
+    });
+    fused
+        .into_iter()
+        .take(limit)
+        .map(|(score, mut hit)| {
+            hit.score = score;
+            hit
+        })
+        .collect()
+}
 
 /// Walk up from `start` looking for a `.git` directory; return that repo root, or
 /// `start` itself if none is found. The index and its freshness manifest are
@@ -97,6 +139,29 @@ impl DispatchSearch {
             ))
         })
     }
+
+    /// Fan out to every backend (each with a mode it supports — semantic where
+    /// available, else literal) and fuse the ranked lists with RRF. A backend that
+    /// errors on its sub-query is skipped (best-effort). This is the hybrid
+    /// lexical+semantic path (parity spec 15).
+    pub async fn hybrid_query(&self, q: &SearchQuery) -> Result<Vec<SearchHit>> {
+        let mut lists: Vec<Vec<SearchHit>> = Vec::new();
+        for (_, backend) in &self.backends {
+            let caps = backend.capabilities();
+            let mode = if caps.supports(SearchMode::Semantic) {
+                SearchMode::Semantic
+            } else if caps.supports(SearchMode::Literal) {
+                SearchMode::Literal
+            } else {
+                continue;
+            };
+            let sub = SearchQuery { mode, ..q.clone() };
+            if let Ok(hits) = backend.query(&sub).await {
+                lists.push(hits);
+            }
+        }
+        Ok(rrf_fuse(&lists, q.limit.max(1)))
+    }
 }
 
 #[async_trait]
@@ -111,6 +176,9 @@ impl SearchBackend for DispatchSearch {
         self.default_backend().reindex(progress).await
     }
     async fn query(&self, q: &SearchQuery) -> Result<Vec<SearchHit>> {
+        if q.mode == SearchMode::Hybrid {
+            return self.hybrid_query(q).await;
+        }
         let backend = self.default_backend();
         reject_unsupported(&backend.capabilities(), q)?;
         backend.query(q).await
@@ -203,6 +271,102 @@ mod tests {
             err.to_string().contains("does not support regex"),
             "got: {err}"
         );
+    }
+
+    // --- hybrid RRF fusion --------------------------------------------------
+    fn hits(paths: &[&str]) -> Vec<SearchHit> {
+        paths
+            .iter()
+            .map(|p| SearchHit {
+                path: PathBuf::from(p),
+                line: 0,
+                col_start: 0,
+                col_end: 0,
+                score: 0.0,
+                snippet: String::new(),
+            })
+            .collect()
+    }
+
+    #[rstest::rstest]
+    // a doc high in BOTH lists rises above either single-list winner
+    #[case::blends(vec!["a.rs", "b.rs", "c.rs"], vec!["b.rs", "c.rs", "a.rs"], vec!["b.rs", "a.rs", "c.rs"])]
+    // a doc lexical never returns still appears (semantic contributed it)
+    #[case::semantic_only_survives(vec!["a.rs"], vec!["z.rs", "a.rs"], vec!["a.rs", "z.rs"])]
+    #[case::identical_preserves_order(vec!["a.rs", "b.rs"], vec!["a.rs", "b.rs"], vec!["a.rs", "b.rs"])]
+    fn rrf_fuse_cases(
+        #[case] lexical: Vec<&str>,
+        #[case] semantic: Vec<&str>,
+        #[case] fused: Vec<&str>,
+    ) {
+        let lists = vec![hits(&lexical), hits(&semantic)];
+        let out: Vec<String> = rrf_fuse(&lists, 10)
+            .into_iter()
+            .map(|h| h.path.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(out, fused);
+    }
+
+    // A backend that returns a fixed ordered result and advertises one mode.
+    struct Ordered {
+        name: &'static str,
+        mode: SearchMode,
+        paths: Vec<&'static str>,
+    }
+    #[async_trait]
+    impl SearchBackend for Ordered {
+        fn capabilities(&self) -> SearchCapabilities {
+            SearchCapabilities {
+                backend: self.name.into(),
+                modes: vec![self.mode],
+                content_search: true,
+                scored: true,
+                incremental: false,
+                max_concurrent_queries: 0,
+            }
+        }
+        async fn status(&self) -> Result<IndexStatus> {
+            Ok(IndexStatus {
+                state: IndexState::Fresh,
+                indexed_files: 0,
+                last_indexed_ms: 0,
+                manifest_digest: String::new(),
+            })
+        }
+        async fn reindex(&self, _p: ProgressFn<'_>) -> Result<IndexStatus> {
+            self.status().await
+        }
+        async fn query(&self, _q: &SearchQuery) -> Result<Vec<SearchHit>> {
+            Ok(hits(&self.paths))
+        }
+    }
+
+    // Hybrid mode fans out to a lexical + a semantic backend and fuses the lists.
+    #[tokio::test]
+    async fn hybrid_fans_out_and_fuses() {
+        let lex = Arc::new(Ordered {
+            name: "lex",
+            mode: SearchMode::Literal,
+            paths: vec!["a.rs", "b.rs", "c.rs"],
+        });
+        let vec = Arc::new(Ordered {
+            name: "vec",
+            mode: SearchMode::Semantic,
+            paths: vec!["b.rs", "c.rs", "a.rs"],
+        });
+        let d = DispatchSearch::new(vec![
+            ("lex".into(), lex as Arc<dyn SearchBackend>),
+            ("vec".into(), vec as Arc<dyn SearchBackend>),
+        ])
+        .unwrap();
+        let out: Vec<String> = d
+            .query(&q(SearchMode::Hybrid))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|h| h.path.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(out, vec!["b.rs", "a.rs", "c.rs"]);
     }
 
     #[test]

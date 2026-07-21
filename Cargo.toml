@@ -16,6 +16,7 @@ members = [
     "crates/agent-validate",
     "crates/agent-lsp",
     "crates/agent-sandbox",
+    "crates/agent-embed",
     "crates/agent-grpc",
     "crates/agent-mcp",
     "crates/agent-proto",
@@ -112,6 +113,7 @@ agent-tasks = { path = "crates/agent-tasks", default-features = false }
 agent-validate = { path = "crates/agent-validate", default-features = false }
 agent-lsp = { path = "crates/agent-lsp", default-features = false }
 agent-sandbox = { path = "crates/agent-sandbox", default-features = false }
+agent-embed = { path = "crates/agent-embed", default-features = false }
 agent-grpc = { path = "crates/agent-grpc" }
 agent-mcp = { path = "crates/agent-mcp" }
 agent-proto = { path = "crates/agent-proto" }

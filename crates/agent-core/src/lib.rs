@@ -45,6 +45,8 @@ pub enum Error {
     Lsp(String),
     #[error("sandbox error: {0}")]
     Sandbox(String),
+    #[error("embed error: {0}")]
+    Embed(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -987,6 +989,49 @@ pub trait Sandbox: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// Seam: Embedder (text → vector, for semantic search + recall, parity spec 15)
+// ---------------------------------------------------------------------------
+//
+// Maps query + document text into a shared vector space where nearness is
+// *meaning*, not spelling — so a `VectorBackend` (a `SearchBackend` impl in
+// `agent-search`) can find code from a paraphrase, and `DispatchSearch` can fuse
+// lexical + semantic hits. Concrete embedders live in `agent-embed` behind cargo
+// features. See `docs/components/embedder.md`.
+
+#[async_trait]
+pub trait Embedder: Send + Sync {
+    /// The fixed dimensionality of every vector this embedder produces. The vector
+    /// index validates stored/queried vectors against it (config-drift guard).
+    fn dimensions(&self) -> usize;
+    /// The largest `embed_docs` batch the backend accepts (the impl chunks to it).
+    fn max_batch(&self) -> usize;
+    /// Embed one query string (may use a query-specific instruction prefix).
+    async fn embed_query(&self, text: &str) -> Result<Vec<f32>>;
+    /// Embed a batch of documents (the index-time hot path).
+    async fn embed_docs(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
+}
+
+/// Cosine similarity of two equal-length vectors, in `[-1, 1]`. Returns `0.0` on a
+/// length mismatch or a zero vector (callers screen dims first for a clear error).
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() {
+        return 0.0;
+    }
+    let mut dot = 0.0f32;
+    let mut na = 0.0f32;
+    let mut nb = 0.0f32;
+    for (x, y) in a.iter().zip(b.iter()) {
+        dot += x * y;
+        na += x * x;
+        nb += y * y;
+    }
+    if na == 0.0 || nb == 0.0 {
+        return 0.0;
+    }
+    dot / (na.sqrt() * nb.sqrt())
+}
+
+// ---------------------------------------------------------------------------
 // Seam 2: Tools + registry
 // ---------------------------------------------------------------------------
 
@@ -1275,6 +1320,11 @@ pub enum SearchMode {
     Fuzzy,
     /// Regular-expression match.
     Regex,
+    /// Embedding cosine-similarity match (the vector backend; parity spec 15).
+    Semantic,
+    /// Fan out to every backend and fuse the ranked lists (reciprocal-rank
+    /// fusion). Handled by `DispatchSearch`, not a single backend.
+    Hybrid,
 }
 
 impl SearchMode {
@@ -1284,7 +1334,20 @@ impl SearchMode {
             SearchMode::Phrase => "phrase",
             SearchMode::Fuzzy => "fuzzy",
             SearchMode::Regex => "regex",
+            SearchMode::Semantic => "semantic",
+            SearchMode::Hybrid => "hybrid",
         }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "literal" => SearchMode::Literal,
+            "phrase" => SearchMode::Phrase,
+            "fuzzy" => SearchMode::Fuzzy,
+            "regex" => SearchMode::Regex,
+            "semantic" => SearchMode::Semantic,
+            "hybrid" => SearchMode::Hybrid,
+            _ => return None,
+        })
     }
 }
 

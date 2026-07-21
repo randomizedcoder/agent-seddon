@@ -151,6 +151,7 @@ pub fn status_from_error(e: &agent_core::Error) -> tonic::Status {
         Error::Structured(m) => tonic::Status::invalid_argument(format!("structured: {m}")),
         Error::Lsp(m) => tonic::Status::internal(format!("lsp: {m}")),
         Error::Sandbox(m) => tonic::Status::internal(format!("sandbox: {m}")),
+        Error::Embed(m) => tonic::Status::internal(format!("embed: {m}")),
     }
 }
 
@@ -617,6 +618,11 @@ impl From<agent_core::SearchMode> for pb::SearchMode {
             agent_core::SearchMode::Phrase => pb::SearchMode::Phrase,
             agent_core::SearchMode::Fuzzy => pb::SearchMode::Fuzzy,
             agent_core::SearchMode::Regex => pb::SearchMode::Regex,
+            // `semantic`/`hybrid` are not on the wire yet (the vector backend over
+            // gRPC is a follow-up); map to Literal so the enum stays exhaustive.
+            agent_core::SearchMode::Semantic | agent_core::SearchMode::Hybrid => {
+                pb::SearchMode::Literal
+            }
         }
     }
 }

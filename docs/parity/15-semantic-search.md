@@ -6,21 +6,25 @@ impl, so agent-seddon's existing `DispatchSearch` can front BM25 (tantivy) **and
 a vector index for **hybrid lexical+semantic** ranking — and so the keyword-only
 memory recall can be upgraded to semantic recall.
 
-> **Status: spec (design of record).** Unimplemented. Introduces one new seam —
-> **`Embedder`** (`agent_core::Embedder`: `embed_query` / `embed_docs`, advertised
-> `dimensions`, batch limits) — impl'd in a new `agent-embed` crate behind cargo
-> features (`embed-local` for an in-process model, `embed-openai`/`embed-grpc` for
-> remote). The **vector search backend** is a new `SearchBackend` impl
-> (`VectorBackend`) in `agent-search`; it does **not** need its own gRPC service —
-> it reuses the existing **`SearchService`** (`search.proto`) exactly as tantivy
-> does, so `--serve-search`, reflection, streaming `Reindex`, freshness manifest,
-> and metrics all apply unchanged. The **`Embedder` seam gets its own proto +
-> gRPC service** (`embedder.proto`, `--serve-embedder`, reflection) so the model
-> can run out-of-process (GPU host, remote API) and be dialed by an `= "grpc"`
-> client. **Differentiator:** hybrid lexical+semantic behind the *existing*
-> `SearchBackend` seam via `DispatchSearch` fusion (reciprocal-rank / weighted),
-> reusing reindex/freshness/gRPC streaming/metrics, with metered recall quality —
-> no peer ships vector code-search in its core agent at all.
+> **Status: implemented** (seam + local embedder + vector backend + hybrid fusion
+> + observability + bench + leak). New **`Embedder`** seam (`agent_core::Embedder`:
+> `embed_query`/`embed_docs`, `dimensions`/`max_batch`) with a dependency-free,
+> deterministic **`LocalEmbedder`** (feature-hashing over tokens + char-trigrams)
+> in [`agent-embed`](../../crates/agent-embed). New **`VectorBackend`**
+> ([`agent-search`](../../crates/agent-search/src/vector.rs), `search-vector`) — a
+> `SearchBackend` answering `SearchMode::Semantic` by exact brute-force cosine,
+> incremental via the shared `Manifest`, with a dimension-drift guard. **Hybrid
+> lexical+semantic** landed as `SearchMode::Hybrid` → `DispatchSearch::hybrid_query`
+> fan-out + **reciprocal-rank fusion** (`agent_search::rrf_fuse`). Config-selected
+> (`[embedder] backend`, `[search] backends = ["tantivy","vector"]`). Metered
+> (`agent_embed_seconds`/`agent_embed_batch` + `embedder.embed` span; the vector
+> backend inherits the existing `search.query` span/metrics). `agent-testkit`
+> gained `FakeEmbedder` (fixed vectors → byte-reproducible cosine + fusion).
+> **Deferred to a follow-up** (staged like the prior seams): real semantic models
+> (`embed-openai`/`embed-grpc`), the `EmbedderService` gRPC (`--serve-embedder`) —
+> the vector backend reuses the existing `SearchService`, an ANN (HNSW) index,
+> weighted-blend fusion, an embedder registry factory, and `VectorSemantic` memory
+> recall. See [`docs/components/embedder.md`](../components/embedder.md).
 
 ## Feature & why it matters
 
