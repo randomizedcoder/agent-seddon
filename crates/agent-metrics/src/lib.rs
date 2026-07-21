@@ -122,6 +122,12 @@ pub struct Metrics {
     // Per-backend embed latency + batch size (config-bounded `backend` label).
     embed_seconds: HistogramVec,
     embed_batch: HistogramVec,
+
+    // --- session (SessionStore seam) --------------------------------------
+    // Session-history mutations by op (checkpoint/restore/branch/undo/fork/prune)
+    // + GC objects reclaimed. `op` is a bounded enum.
+    session_ops: IntCounterVec,
+    session_gc_reclaimed: IntCounter,
 }
 
 impl Metrics {
@@ -462,6 +468,18 @@ impl Metrics {
         )
         .unwrap();
 
+        // --- session (recorded by the session metrics wrapper) ----------------
+        let session_ops = IntCounterVec::new(
+            Opts::new("agent_session_ops_total", "Session-history mutations by op"),
+            &["op"],
+        )
+        .unwrap();
+        let session_gc_reclaimed = IntCounter::new(
+            "agent_session_gc_reclaimed_total",
+            "Checkpoint objects reclaimed by prune",
+        )
+        .unwrap();
+
         let collectors: Vec<Box<dyn prometheus::core::Collector>> = vec![
             Box::new(api_calls.clone()),
             Box::new(api_call_seconds.clone()),
@@ -515,6 +533,8 @@ impl Metrics {
             Box::new(sandbox_exec_total.clone()),
             Box::new(embed_seconds.clone()),
             Box::new(embed_batch.clone()),
+            Box::new(session_ops.clone()),
+            Box::new(session_gc_reclaimed.clone()),
         ];
         for m in collectors {
             registry.register(m).expect("register metric");
@@ -574,6 +594,8 @@ impl Metrics {
             sandbox_exec_total,
             embed_seconds,
             embed_batch,
+            session_ops,
+            session_gc_reclaimed,
         }
     }
 
@@ -893,6 +915,17 @@ impl Metrics {
         self.embed_batch
             .with_label_values(&[backend])
             .observe(batch as f64);
+    }
+
+    // --- session (SessionStore seam) instrumentation ----------------------
+
+    /// Count a session-history mutation, labelled by op.
+    pub fn on_session_op(&self, op: &str) {
+        self.session_ops.with_label_values(&[op]).inc();
+    }
+    /// Count checkpoint objects reclaimed by a prune.
+    pub fn on_session_gc(&self, reclaimed: usize) {
+        self.session_gc_reclaimed.inc_by(reclaimed as u64);
     }
 }
 

@@ -47,6 +47,8 @@ pub enum Error {
     Sandbox(String),
     #[error("embed error: {0}")]
     Embed(String),
+    #[error("session error: {0}")]
+    Session(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -1011,6 +1013,67 @@ pub trait Embedder: Send + Sync {
     async fn embed_docs(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
 }
 
+// ---------------------------------------------------------------------------
+// Seam: SessionStore (git-style checkpoint / branch / undo, parity spec 19)
+// ---------------------------------------------------------------------------
+//
+// Turns flat save/resume into a content-addressed history: a checkpoint is an
+// immutable object over the conversation working set, linked to its parent to form
+// a branch tree; `undo`/`branch`/`fork` are pointer moves, never rewrites. A
+// checkpoint id is the hash of its content + parent, so immutability is structural
+// and dedup across turns/branches is automatic. Concrete impls live in
+// `agent-session` behind a cargo feature; see `docs/components/session.md`.
+
+/// A content-addressed checkpoint id (hex hash of content + parent + label).
+pub type CheckpointId = String;
+
+/// One node in the branch tree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointMeta {
+    pub id: CheckpointId,
+    #[serde(default)]
+    pub parent: Option<CheckpointId>,
+    pub branch: String,
+    pub turn: u32,
+    pub label: String,
+    pub created_ms: u64,
+}
+
+/// The message/turn delta between two checkpoints (`b` relative to `a`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CheckpointDiff {
+    pub added: usize,
+    pub removed: usize,
+}
+
+/// A git-style, content-addressed store for conversation history. Checkpoints are
+/// immutable; `restore` is a pure read by id; `branch`/`undo`/`fork` move heads
+/// without rewriting existing nodes; `prune` GCs only nodes unreachable from a head.
+#[async_trait]
+pub trait SessionStore: Send + Sync {
+    /// Append an immutable checkpoint of `ws` to `session`'s current branch head.
+    /// Same content + parent + label ⇒ the same id (dedup); any change ⇒ a new id.
+    async fn checkpoint(&self, session: &str, ws: &WorkingSet, label: &str)
+        -> Result<CheckpointId>;
+    /// The branch tree for `session`: every checkpoint reachable from any head.
+    async fn list(&self, session: &str) -> Result<Vec<CheckpointMeta>>;
+    /// Rehydrate the working set stored at `id`. Unknown id ⇒ a `not found` error.
+    async fn restore(&self, id: &CheckpointId) -> Result<WorkingSet>;
+    /// Create a new branch head `name` off `from` (and switch to it) — divergent,
+    /// non-destructive to the source line.
+    async fn branch(&self, session: &str, from: &CheckpointId, name: &str) -> Result<()>;
+    /// Move the current branch head back `n` turns (a pointer move; the skipped
+    /// checkpoints remain restorable by id). Returns the new head id.
+    async fn undo(&self, session: &str, n: u32) -> Result<CheckpointId>;
+    /// Fork `session` into an independent session (shared immutable objects, own
+    /// heads — writes to the child never touch the parent). Returns its id.
+    async fn fork(&self, session: &str) -> Result<String>;
+    /// The message/turn delta between two checkpoints.
+    async fn diff(&self, a: &CheckpointId, b: &CheckpointId) -> Result<CheckpointDiff>;
+    /// GC checkpoints unreachable from any live head; returns the count reclaimed.
+    async fn prune(&self, session: &str) -> Result<usize>;
+}
+
 /// Cosine similarity of two equal-length vectors, in `[-1, 1]`. Returns `0.0` on a
 /// length mismatch or a zero vector (callers screen dims first for a clear error).
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
@@ -1261,7 +1324,7 @@ pub struct ContextInput {
 }
 
 /// The live message window handed to the model each turn.
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct WorkingSet {
     pub messages: Vec<Message>,
 }

@@ -19,10 +19,11 @@ use iai_callgrind::{
     library_benchmark, library_benchmark_group, main, Callgrind, EventKind, LibraryBenchmarkConfig,
 };
 
-// Constructing the shared registry (registers ~34 metric families) — the
-// per-process startup cost of observability. Observed ~312k Ir.
+// Constructing the shared registry (registers the metric families) — the
+// per-process startup cost of observability. Grows as each seam adds families
+// (specs 11–19). Observed ~453k Ir; ceiling has headroom for more seams.
 #[library_benchmark(config = LibraryBenchmarkConfig::default()
-    .tool(Callgrind::default().hard_limits([(EventKind::Ir, 450_000u64)])))]
+    .tool(Callgrind::default().hard_limits([(EventKind::Ir, 650_000u64)])))]
 fn new_registry() -> Metrics {
     black_box(Metrics::new())
 }

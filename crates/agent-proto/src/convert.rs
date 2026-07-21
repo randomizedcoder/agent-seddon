@@ -152,6 +152,7 @@ pub fn status_from_error(e: &agent_core::Error) -> tonic::Status {
         Error::Lsp(m) => tonic::Status::internal(format!("lsp: {m}")),
         Error::Sandbox(m) => tonic::Status::internal(format!("sandbox: {m}")),
         Error::Embed(m) => tonic::Status::internal(format!("embed: {m}")),
+        Error::Session(m) => tonic::Status::internal(format!("session: {m}")),
     }
 }
 

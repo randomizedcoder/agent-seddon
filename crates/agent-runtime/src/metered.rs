@@ -286,6 +286,107 @@ impl agent_core::Sandbox for MeteredSandbox {
     }
 }
 
+/// Wrap a [`SessionStore`](agent_core::SessionStore) so each mutation emits a
+/// `session.<op>` span (`session`/`id` attrs) + counts the op; `prune` also counts
+/// reclaimed objects.
+#[cfg(feature = "session")]
+pub(crate) fn session(
+    inner: Arc<dyn agent_core::SessionStore>,
+    m: Metrics,
+) -> Arc<dyn agent_core::SessionStore> {
+    Arc::new(MeteredSession { inner, metrics: m })
+}
+
+#[cfg(feature = "session")]
+struct MeteredSession {
+    inner: Arc<dyn agent_core::SessionStore>,
+    metrics: Metrics,
+}
+
+#[cfg(feature = "session")]
+#[async_trait]
+impl agent_core::SessionStore for MeteredSession {
+    async fn checkpoint(
+        &self,
+        session: &str,
+        ws: &agent_core::WorkingSet,
+        label: &str,
+    ) -> Result<agent_core::CheckpointId> {
+        let out = self
+            .inner
+            .checkpoint(session, ws, label)
+            .instrument(
+                tracing::info_span!("session.checkpoint", session = %session, label = %label),
+            )
+            .await;
+        self.metrics.on_session_op("checkpoint");
+        out
+    }
+    async fn list(&self, session: &str) -> Result<Vec<agent_core::CheckpointMeta>> {
+        self.inner.list(session).await
+    }
+    async fn restore(&self, id: &agent_core::CheckpointId) -> Result<agent_core::WorkingSet> {
+        let out = self
+            .inner
+            .restore(id)
+            .instrument(tracing::info_span!("session.restore", id = %id))
+            .await;
+        self.metrics.on_session_op("restore");
+        out
+    }
+    async fn branch(
+        &self,
+        session: &str,
+        from: &agent_core::CheckpointId,
+        name: &str,
+    ) -> Result<()> {
+        let out = self
+            .inner
+            .branch(session, from, name)
+            .instrument(tracing::info_span!("session.branch", session = %session, from = %from, name = %name))
+            .await;
+        self.metrics.on_session_op("branch");
+        out
+    }
+    async fn undo(&self, session: &str, n: u32) -> Result<agent_core::CheckpointId> {
+        let out = self
+            .inner
+            .undo(session, n)
+            .instrument(tracing::info_span!("session.undo", session = %session, n))
+            .await;
+        self.metrics.on_session_op("undo");
+        out
+    }
+    async fn fork(&self, session: &str) -> Result<String> {
+        let out = self
+            .inner
+            .fork(session)
+            .instrument(tracing::info_span!("session.fork", session = %session))
+            .await;
+        self.metrics.on_session_op("fork");
+        out
+    }
+    async fn diff(
+        &self,
+        a: &agent_core::CheckpointId,
+        b: &agent_core::CheckpointId,
+    ) -> Result<agent_core::CheckpointDiff> {
+        self.inner.diff(a, b).await
+    }
+    async fn prune(&self, session: &str) -> Result<usize> {
+        let out = self
+            .inner
+            .prune(session)
+            .instrument(tracing::info_span!("session.prune", session = %session))
+            .await;
+        if let Ok(n) = &out {
+            self.metrics.on_session_gc(*n);
+        }
+        self.metrics.on_session_op("prune");
+        out
+    }
+}
+
 /// Wrap an [`Embedder`](agent_core::Embedder) so each embed emits an
 /// `embedder.embed` span (`backend`/`batch` attrs) + records latency/batch size.
 #[cfg(feature = "semantic-search")]
@@ -1391,6 +1492,56 @@ mod sandbox_tests {
                 &metrics,
                 "agent_sandbox_exec_total",
                 Some("backend=\"fake\"")
+            ) >= 1.0
+        );
+    }
+}
+
+// session: the metered SessionStore emits a `session.checkpoint` span and meters
+// the op.
+#[cfg(all(test, feature = "session"))]
+mod session_tests {
+    use super::*;
+    use agent_core::{Message, Role, WorkingSet};
+    use agent_testkit::observe::{captured_spans, MetricsProbe};
+    use agent_testkit::tempdir;
+
+    #[test]
+    fn metered_session_emits_span_and_meters() {
+        let _lock = super::callsite_guard();
+        let metrics = Metrics::new();
+        let probe = MetricsProbe::new(&metrics);
+        let dir = tempdir();
+        let spans = captured_spans(|| {
+            tracing::callsite::rebuild_interest_cache();
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let store = super::session(
+                    Arc::new(agent_session::FileSessionStore::new(dir.clone())),
+                    metrics.clone(),
+                );
+                let ws = WorkingSet {
+                    messages: vec![Message {
+                        role: Role::User,
+                        content: "hi".into(),
+                        tool_calls: vec![],
+                        tool_call_id: None,
+                    }],
+                };
+                let _ = store.checkpoint("s", &ws, "t").await;
+            });
+        });
+        assert!(
+            spans.contains(&"session.checkpoint".to_string()),
+            "{spans:?}"
+        );
+        assert!(
+            probe.delta(
+                &metrics,
+                "agent_session_ops_total",
+                Some("op=\"checkpoint\"")
             ) >= 1.0
         );
     }

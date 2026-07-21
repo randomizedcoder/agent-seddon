@@ -323,6 +323,24 @@ pub async fn build_agent_with(
         let validator = crate::structured::build_validator(&cfg.structured.validator)?;
         agent.with_validator(crate::metered::validator(validator, metrics.clone()))
     };
+    // Session history: build the config-selected store, meter it, attach it.
+    #[cfg(feature = "session")]
+    let agent = {
+        let store: Arc<dyn agent_core::SessionStore> = match cfg.session.backend.as_str() {
+            "file" => {
+                let dir = if cfg.session.dir.is_empty() {
+                    std::path::PathBuf::from(&cfg.agent.working_dir)
+                        .join(".agent-seddon")
+                        .join("session")
+                } else {
+                    std::path::PathBuf::from(&cfg.session.dir)
+                };
+                Arc::new(agent_session::FileSessionStore::new(dir))
+            }
+            other => anyhow::bail!("unknown [session] backend `{other}` (only `file` is built in)"),
+        };
+        agent.with_session_store(crate::metered::session(store, metrics.clone()))
+    };
     Ok(agent)
 }
 
