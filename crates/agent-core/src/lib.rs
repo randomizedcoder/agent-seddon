@@ -428,6 +428,52 @@ pub trait WebBackend: Send + Sync {
     async fn fetch(&self, req: &WebRequest) -> Result<WebResponse>;
 }
 
+// --- SSRF IP classification (single source of truth) -----------------------
+//
+// The one definition of "an address a model-driven fetch must never reach",
+// shared by the `Policy` guard's literal pre-flight screen (`agent-runtime`) and
+// the transport's authoritative *resolved-IP* screen (`agent-web`), so the two
+// layers can't drift. Covers loopback, RFC1918 private, link-local (incl. the
+// `169.254.169.254` cloud-metadata address), RFC6598 CGNAT, unspecified,
+// broadcast, multicast, IPv6 unique-local / link-local, and IPv4-mapped IPv6.
+
+/// Is `ip` a private / loopback / link-local / metadata / non-routable address?
+pub fn ip_is_private(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => ipv4_is_private(v4),
+        std::net::IpAddr::V6(v6) => ipv6_is_private(v6),
+    }
+}
+
+/// IPv4 form of [`ip_is_private`].
+pub fn ipv4_is_private(ip: std::net::Ipv4Addr) -> bool {
+    ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_broadcast()
+        || ip.is_multicast()
+        || {
+            // RFC 6598 CGNAT shared space `100.64.0.0/10` (`is_shared` is unstable).
+            let o = ip.octets();
+            o[0] == 100 && (o[1] & 0xc0) == 64
+        }
+}
+
+/// IPv6 form of [`ip_is_private`]. IPv4-mapped addresses are classified by their
+/// embedded v4 so `::ffff:127.0.0.1` can't smuggle a loopback past the screen.
+pub fn ipv6_is_private(ip: std::net::Ipv6Addr) -> bool {
+    if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
+        return true;
+    }
+    if let Some(v4) = ip.to_ipv4_mapped() {
+        return ipv4_is_private(v4);
+    }
+    let seg = ip.segments();
+    (seg[0] & 0xfe00) == 0xfc00 // fc00::/7 unique-local
+        || (seg[0] & 0xffc0) == 0xfe80 // fe80::/10 link-local
+}
+
 // ---------------------------------------------------------------------------
 // Seam 2: Tools + registry
 // ---------------------------------------------------------------------------

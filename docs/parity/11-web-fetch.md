@@ -20,13 +20,19 @@ behaviour + tests needed to be the most complete of the four.
 > the obfuscated-IP encodings (decimal/hex/short/IPv4-mapped/userinfo), which
 > `Url::parse` normalises before classification — through the same
 > `Decision::Deny("blocked by policy guard: …")` path as the dangerous-command
-> guard, with an opaque reason. Plus outcome Prometheus metrics + an OTel
-> `web.fetch` span carrying `host`/`format`/`status`/`bytes`. **Deferred to a
-> follow-up** (staged like the tokenizer seam): the `agent.v1.WebService` gRPC
-> worker (`agent --serve-web`) and DNS-name→IP resolution screening (a public
-> name resolving to a private address; per-redirect-hop re-screening). Metrics
-> are **not** labelled by host (untrusted URL → cardinality DoS); the host is a
-> span attribute. See [`docs/components/web-fetch.md`](../components/web-fetch.md).
+> guard, with an opaque reason. The **authoritative** screen is in the `local`
+> transport ([`agent-web`](../../crates/agent-web/src/local.rs)): it resolves
+> every redirect hop's host, refuses any that resolves to a private address
+> (catching public-name→private-IP), follows redirects manually so the screen
+> re-runs on each `Location` (catching a `302` to `169.254.169.254`), and pins
+> the checked IP to the connection (defeating DNS rebinding) — sharing one IP
+> classifier (`agent_core::ip_is_private`) with the guard. Plus outcome
+> Prometheus metrics + an OTel `web.fetch` span carrying
+> `host`/`format`/`status`/`bytes`. Metrics are **not** labelled by host
+> (untrusted URL → cardinality DoS); the host is a span attribute. **Deferred to
+> a follow-up** (staged like the tokenizer seam): only the `agent.v1.WebService`
+> gRPC worker (`agent --serve-web`). See
+> [`docs/components/web-fetch.md`](../components/web-fetch.md).
 
 ## Feature & why it matters
 

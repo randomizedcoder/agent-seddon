@@ -104,7 +104,10 @@ pub async fn build_agent_with(
     #[cfg(feature = "web")]
     {
         let backend: Arc<dyn agent_core::WebBackend> = match cfg.web.backend.as_str() {
-            "local" => Arc::new(agent_web::LocalWebBackend::new()),
+            "local" => Arc::new(
+                agent_web::LocalWebBackend::new()
+                    .with_ssrf(cfg.web.allow_private, cfg.web.allow_hosts.clone()),
+            ),
             other => anyhow::bail!("unknown [web] backend `{other}` (only `local` is built in)"),
         };
         let backend = crate::metered::web(backend, metrics.clone());

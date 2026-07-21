@@ -34,33 +34,44 @@ before the socket opens** — that screen is the differentiator over the peers
 
 ## The SSRF / private-IP guard (the differentiator)
 
-The destination screen lives in the `Policy` `Guard`
-([`agent-runtime/src/policy.rs`](../../crates/agent-runtime/src/policy.rs)) as a
-new `ssrf_target` category, alongside the dangerous-command and sensitive-path
-screens. A `web_fetch` call is denied — through the same
-`Decision::Deny("blocked by policy guard: …")` path, with an **opaque** reason
-(no host-resolved / responded oracle) — when its URL:
+The screen is **two layers**, sharing one IP classifier
+(`agent_core::ip_is_private` — the single source of truth for "private / loopback
+/ link-local / metadata / non-routable", covering `127.0.0.0/8`, `::1`,
+`169.254.0.0/16` incl. `169.254.169.254`, RFC-1918 `10/8`·`172.16/12`·`192.168/16`,
+CGNAT `100.64/10`, IPv6 ULA `fc00::/7`, link-local `fe80::/10`,
+unspecified/broadcast/multicast, and IPv4-mapped IPv6):
 
-- uses a scheme other than `http`/`https` (`file:`/`gopher:`/`data:` rejected
-  before any DNS or socket work); or
-- resolves *by literal* to a private / loopback / link-local / cloud-metadata
-  target: `127.0.0.0/8`, `::1`, `169.254.0.0/16` (incl. `169.254.169.254`),
-  RFC-1918 (`10/8`, `172.16/12`, `192.168/16`), CGNAT `100.64/10`, IPv6 ULA
-  `fc00::/7`, link-local `fe80::/10`, unspecified/broadcast/multicast; the
-  `localhost` name and `metadata.google.internal` are denied by name.
-
-`Url::parse` follows the WHATWG host parser for the special schemes, so the
-classic SSRF-bypass encodings — decimal (`2130706433`), hex (`0x7f.0.0.1`), short
-(`127.1`), IPv4-mapped IPv6 (`::ffff:127.0.0.1`), and `user@host` userinfo — are
-normalised to their real address *before* classification and can't slip a
-loopback past the screen.
+1. **Pre-flight literal screen** — in the `Policy` `Guard`
+   ([`agent-runtime/src/policy.rs`](../../crates/agent-runtime/src/policy.rs),
+   new `ssrf_target` category). A fast, synchronous check of the *literal* URL:
+   denies non-`http(s)` schemes and IP-literal private/loopback/metadata targets
+   before any work, through the opaque
+   `Decision::Deny("blocked by policy guard: …")` path (no resolved/responded
+   oracle). `Url::parse` normalises the classic bypass encodings — decimal
+   (`2130706433`), hex (`0x7f.0.0.1`), short (`127.1`), IPv4-mapped
+   (`::ffff:127.0.0.1`), `user@host` userinfo — to their real address before
+   classification. `localhost`, `metadata.google.internal`, `metadata.azure.com`
+   are denied by name.
+2. **Authoritative resolved-IP screen** — in the `local` transport
+   ([`agent-web/src/local.rs`](../../crates/agent-web/src/local.rs)). Only the
+   transport sees the *resolved* IP and every *redirect hop*, so this is where
+   the real enforcement lives:
+   - every hop's host is resolved (`getaddrinfo`) and refused if **any** resolved
+     address is private — catching a **public DNS name that resolves to a private
+     address**, which the literal screen cannot;
+   - redirects are followed **manually** (reqwest auto-follow disabled) so the
+     screen re-runs on every `Location` — a public URL that `302`s to
+     `169.254.169.254` is refused **before** the next request is issued;
+   - the checked IP is **pinned** to the connection (`Client::resolve`), so the
+     IP screened is the IP connected to — defeating **DNS rebinding** (a TOCTOU
+     re-resolve between check and connect).
 
 Config (`[web]`): `allow_private = true` opts private/loopback targets back in for
-local dev; `allow_hosts = ["*.internal", "127.0.0.1"]` are host globs that bypass
-the screen entirely (explicit operator opt-in). **DNS-name → IP resolution** (a
-public name that resolves to a private address, and re-screening each redirect
-hop's resolved host) is a documented follow-up; the literal screen + the `local`
-backend's bounded redirect policy are the first line today.
+local dev (both layers); `allow_hosts = ["*.internal", "127.0.0.1"]` are host
+globs that bypass the screen (explicit operator opt-in). Residual note: the pin
+uses the first screened address; hosts that resolve to a *set* mixing public and
+private addresses are refused outright (any-private → deny), so there is no
+partial-set bypass.
 
 ## Observability
 
@@ -83,7 +94,10 @@ backend's bounded redirect policy are the first line today.
   guard+tool test (`metered.rs`) proving an SSRF target is denied and **never
   fetched** while a public one is fetched + converted.
 - **Transport:** live `tiny_http` loopback tests for `LocalWebBackend` (body,
-  redirect-follow, redirect-cap, oversize, scheme).
+  redirect-follow, redirect-cap, oversize, scheme) + the resolved-IP screen:
+  hermetic IP-literal unit tests, a loopback-refused-at-connect test, and the
+  **redirect-to-metadata bypass regression** (a `302` to `169.254.169.254` is
+  refused before the hop is issued).
 - **Span:** `captured_span_fields` asserts the `web.fetch` attributes.
 - **Bench:** `benches/web.rs` — the HTML sanitizer over a fixed
   `agent_testkit::bench::html_document` fixture (deterministic Ir ceiling in

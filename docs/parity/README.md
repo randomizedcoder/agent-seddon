@@ -66,7 +66,7 @@ Legend: ✅ merged · 🔶 in review · ⬜ spec written, not started.
 
 | # | Feature | Status | Differentiator (vs pi / hermes / opencode) |
 |---|---------|--------|---------|
-| 11 | [`web_fetch`](11-web-fetch.md) | ✅ `WebBackend` seam + `local` reqwest transport + `web_fetch` tool; **SSRF/private-IP guard** through the `Policy` seam (loopback/RFC1918/link-local/metadata + obfuscated-IP encodings denied; `allow_private`/`allow_hosts` opt-in); dependency-free HTML→md/text sanitizer; `web.fetch` span + outcome metrics; sanitizer bench + leak. gRPC worker + DNS-resolution screen deferred | — |
+| 11 | [`web_fetch`](11-web-fetch.md) | ✅ `WebBackend` seam + `local` reqwest transport + `web_fetch` tool; **two-layer SSRF guard** (Policy literal pre-flight + transport resolved-IP screen: every redirect hop resolved & re-screened, private-resolving names refused, checked IP pinned vs DNS rebinding; obfuscated-IP encodings normalised; `allow_private`/`allow_hosts` opt-in); dependency-free HTML→md/text sanitizer; `web.fetch` span + outcome metrics; sanitizer bench + leak. Only the gRPC worker deferred | — |
 | 12 | [`web_search`](12-web-search.md) | ⬜ | Swap-by-config `WebSearch` seam (Brave/SearXNG/Tavily/…) with caching + freshness manifest, mirroring `SearchBackend` |
 | 13 | [diagnostics / LSP](13-diagnostics-lsp.md) | ⬜ | Superset seam: hermes has diagnostics-only, opencode navigation-only — we unify both **+ `rename`** behind one gRPC seam |
 | 14 | [`sandbox`](14-sandbox.md) | ⬜ | **`nix` backend** — deterministic, content-addressed, reproducible isolation from the repo's own hermetic flake (peers use mutable images) |

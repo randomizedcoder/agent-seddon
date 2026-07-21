@@ -1,9 +1,8 @@
 //! Policy implementations behind the `Policy` seam — the tool approval gate.
 
-use agent_core::{Decision, Policy, ToolCall};
+use agent_core::{ipv4_is_private, ipv6_is_private, Decision, Policy, ToolCall};
 use agent_metrics::Metrics;
 use async_trait::async_trait;
-use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use url::Url;
 
@@ -538,8 +537,16 @@ fn path_is_sensitive(path: &str, extra_deny: &[String], allow: &[String]) -> Opt
 // ---------------------------------------------------------------------------
 
 /// Hostnames that name an internal/metadata endpoint by DNS name (so the IP
-/// screen alone can't catch them). Always denied unless in the allow-list.
-const SSRF_DENY_HOSTS: &[&str] = &["metadata.google.internal", "metadata", "instance-data"];
+/// screen alone can't catch them). Always denied unless in the allow-list. This
+/// is a best-effort *pre-flight* list; the authoritative defence is the
+/// transport's resolved-IP screen (`agent-web`), which rejects *any* host whose
+/// resolved address is private/metadata regardless of name.
+const SSRF_DENY_HOSTS: &[&str] = &[
+    "metadata.google.internal",
+    "metadata",
+    "instance-data",
+    "metadata.azure.com", // Azure IMDS is fronted by this name too
+];
 
 /// Screen a `web_fetch` call's target URL. Returns a human reason when the URL is
 /// a non-web scheme, hostless, or resolves (by literal) to a private/loopback/
@@ -552,15 +559,22 @@ fn scan_ssrf(call: &ToolCall, allow_private: bool, allow_hosts: &[String]) -> Op
     scan_ssrf_target(url, allow_private, allow_hosts)
 }
 
-/// The pure SSRF classifier — factored out so the adversarial table can drive it
-/// directly. `allow_private` opts private/loopback targets back in; `allow_hosts`
-/// globs bypass the screen for named hosts (explicit operator opt-in).
+/// The pure SSRF **pre-flight** classifier — a fast, synchronous, literal screen
+/// factored out so the adversarial table can drive it directly. `allow_private`
+/// opts private/loopback targets back in; `allow_hosts` globs bypass the screen
+/// for named hosts (explicit operator opt-in).
+///
+/// This is defence-in-depth, **not** the authoritative screen: it catches obvious
+/// literal targets before any work, but a DNS name that resolves to a private
+/// address (and a redirect to one) are caught by the transport's resolved-IP
+/// screen in `agent-web`, which resolves every hop, rejects any private resolved
+/// address, and pins the checked IP to the connection (defeating DNS rebinding).
 ///
 /// Robustness note: `Url::parse` follows the WHATWG host parser for the `http(s)`
 /// special schemes, so obfuscated IPv4 literals (decimal `2130706433`, hex
 /// `0x7f.0.0.1`, short `127.1`) and IPv4-mapped IPv6 are normalised to their real
 /// address *before* classification — the classic SSRF-bypass encodings can't slip
-/// a loopback past the screen. DNS-name → IP resolution is a documented follow-up.
+/// a loopback past the screen.
 fn scan_ssrf_target(url: &str, allow_private: bool, allow_hosts: &[String]) -> Option<String> {
     let parsed = match Url::parse(url) {
         Ok(u) => u,
@@ -584,13 +598,15 @@ fn scan_ssrf_target(url: &str, allow_private: bool, allow_hosts: &[String]) -> O
         return None;
     }
     match host {
+        // IP literals are classified by the shared `agent-core` predicate — the
+        // one source of truth the transport screen also uses.
         url::Host::Ipv4(ip) => {
-            if !allow_private && is_private_v4(ip) {
+            if !allow_private && ipv4_is_private(ip) {
                 return Some(format!("private/loopback address (`{ip}`)"));
             }
         }
         url::Host::Ipv6(ip) => {
-            if !allow_private && is_private_v6(ip) {
+            if !allow_private && ipv6_is_private(ip) {
                 return Some(format!("private/loopback address (`{ip}`)"));
             }
         }
@@ -606,41 +622,6 @@ fn scan_ssrf_target(url: &str, allow_private: bool, allow_hosts: &[String]) -> O
         }
     }
     None
-}
-
-/// An IPv4 literal that must never be reached from a model-driven fetch:
-/// loopback, RFC1918 private, link-local (incl. the `169.254.169.254` cloud
-/// metadata address), CGNAT shared space, unspecified, broadcast, multicast.
-fn is_private_v4(ip: Ipv4Addr) -> bool {
-    ip.is_loopback()
-        || ip.is_private()
-        || ip.is_link_local()
-        || ip.is_unspecified()
-        || ip.is_broadcast()
-        || ip.is_multicast()
-        || is_cgnat_v4(ip)
-}
-
-/// RFC 6598 carrier-grade-NAT shared address space `100.64.0.0/10`
-/// (`Ipv4Addr::is_shared` is still unstable, so classify by hand).
-fn is_cgnat_v4(ip: Ipv4Addr) -> bool {
-    let o = ip.octets();
-    o[0] == 100 && (o[1] & 0xc0) == 64
-}
-
-/// An IPv6 literal that must never be reached: loopback (`::1`), unspecified
-/// (`::`), multicast, unique-local `fc00::/7`, link-local `fe80::/10`, and any
-/// IPv4-mapped address whose embedded v4 is itself private.
-fn is_private_v6(ip: Ipv6Addr) -> bool {
-    if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
-        return true;
-    }
-    if let Some(v4) = ip.to_ipv4_mapped() {
-        return is_private_v4(v4);
-    }
-    let seg = ip.segments();
-    (seg[0] & 0xfe00) == 0xfc00 // fc00::/7 unique-local
-        || (seg[0] & 0xffc0) == 0xfe80 // fe80::/10 link-local
 }
 
 #[cfg(test)]
