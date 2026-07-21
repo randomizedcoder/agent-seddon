@@ -32,6 +32,7 @@ default = [
     "session",
     "reference",
     "scanner",
+    "cache",
 ]
 
 # Each feature forwards to the owning impl crate + drives `register_builtins`.
@@ -64,6 +65,9 @@ session = ["dep:agent-session", "agent-session/session-file"]
 reference = ["dep:agent-reference", "agent-reference/reference-local"]
 # Content security scanning: the Scanner seam feeding the Policy gate. See
 # parity spec 18 and docs/components/scanner.md.
+# Prompt-cache breakpoint placement. See parity spec 24 and
+# docs/components/prompt-cache.md.
+cache = ["dep:agent-cache", "agent-cache/cache-strategies"]
 scanner = [
     "dep:agent-scanner",
     "agent-scanner/scanner-secret",
@@ -118,6 +122,7 @@ agent-embed = { workspace = true, optional = true }
 agent-session = { workspace = true, optional = true }
 agent-reference = { workspace = true, optional = true }
 agent-scanner = { workspace = true, optional = true }
+agent-cache = { workspace = true, optional = true }
 agent-validate = { workspace = true, optional = true }
 agent-lsp = { workspace = true, optional = true }
 # bash (tool-core) routes through the Sandbox seam; the local + nix backends ship

@@ -1,0 +1,26 @@
+[package]
+name = "agent-cache"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Prompt-cache breakpoint placement (the CacheStrategy seam, parity spec 24).
+default = ["cache-strategies"]
+cache-strategies = []
+# Injects a dhat global allocator for the allocation-budget leak test only.
+dhat-heap = ["dep:dhat"]
+
+[dependencies]
+agent-core.workspace = true
+dhat = { workspace = true, optional = true }
+
+[dev-dependencies]
+rstest.workspace = true
+agent-core.workspace = true
+iai-callgrind.workspace = true
+
+# Deterministic instruction-count bench: placement runs on every turn.
+[[bench]]
+name = "place"
+harness = false
