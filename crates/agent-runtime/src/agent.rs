@@ -68,6 +68,13 @@ pub struct Agent {
     /// via [`Agent::checkpoint`] / [`Agent::restore_checkpoint`] (parity spec 19).
     #[cfg(feature = "session")]
     session_store: Option<Arc<dyn agent_core::SessionStore>>,
+    /// The (metered) `@`-reference resolver, if the `reference` seam is wired.
+    /// Reached via [`Agent::resolve_references`] (parity spec 17).
+    #[cfg(feature = "reference")]
+    reference: Option<Arc<dyn agent_core::ReferenceResolver>>,
+    /// Token budget a prompt's `@`-mentions may expand into (0 ⇒ unbounded).
+    #[cfg(feature = "reference")]
+    reference_budget: usize,
 }
 
 impl Agent {
@@ -95,6 +102,10 @@ impl Agent {
             validator: None,
             #[cfg(feature = "session")]
             session_store: None,
+            #[cfg(feature = "reference")]
+            reference: None,
+            #[cfg(feature = "reference")]
+            reference_budget: 0,
         }
     }
 
@@ -190,6 +201,40 @@ impl Agent {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("session history is not configured"))?;
         Ok(store.list(session).await?)
+    }
+
+    /// Attach the `@`-reference resolver + its token budget (parity spec 17).
+    #[cfg(feature = "reference")]
+    pub fn with_reference_resolver(
+        mut self,
+        resolver: Arc<dyn agent_core::ReferenceResolver>,
+        budget_tokens: usize,
+    ) -> Self {
+        self.reference = Some(resolver);
+        self.reference_budget = budget_tokens;
+        self
+    }
+
+    /// The `@`-reference resolver, if wired (for `agent --serve-reference`).
+    #[cfg(feature = "reference")]
+    pub fn reference_resolver(&self) -> Option<Arc<dyn agent_core::ReferenceResolver>> {
+        self.reference.clone()
+    }
+
+    /// Expand a prompt's `@file`/`@dir`/`@symbol`/`@url` mentions into context
+    /// blocks, using the configured token budget. Returns an empty resolution when
+    /// no resolver is wired, so callers can fold this in unconditionally. See
+    /// `docs/components/reference.md`.
+    #[cfg(feature = "reference")]
+    pub async fn resolve_references(&self, prompt: &str) -> agent_core::Resolution {
+        match &self.reference {
+            Some(r) => r.resolve(prompt, self.reference_budget).await,
+            None => agent_core::Resolution {
+                blocks: vec![],
+                warnings: vec![],
+                blocked: false,
+            },
+        }
     }
 
     /// Attach the git backend (so `--serve-git` can host it).

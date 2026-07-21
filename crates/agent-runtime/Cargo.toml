@@ -30,6 +30,7 @@ default = [
     "lsp",
     "semantic-search",
     "session",
+    "reference",
 ]
 
 # Each feature forwards to the owning impl crate + drives `register_builtins`.
@@ -57,6 +58,9 @@ semantic-search = [
 ]
 # Content-addressed session history (checkpoint/branch/undo/fork). See spec 19.
 session = ["dep:agent-session", "agent-session/session-file"]
+# `@file`/`@dir`/`@symbol`/`@url` prompt-reference expansion, routed through the
+# Search + Web seams, injection-scanned + token-budgeted. See parity spec 17.
+reference = ["dep:agent-reference", "agent-reference/reference-local"]
 # Multi-branch git seam: the RepoBackend backend (CLI by default) + the git tools.
 git = [
     "dep:agent-git",
@@ -104,6 +108,7 @@ agent-web = { workspace = true, optional = true }
 agent-tasks = { workspace = true, optional = true }
 agent-embed = { workspace = true, optional = true }
 agent-session = { workspace = true, optional = true }
+agent-reference = { workspace = true, optional = true }
 agent-validate = { workspace = true, optional = true }
 agent-lsp = { workspace = true, optional = true }
 # bash (tool-core) routes through the Sandbox seam; the local + nix backends ship

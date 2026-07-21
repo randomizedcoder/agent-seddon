@@ -128,6 +128,14 @@ pub struct Metrics {
     // + GC objects reclaimed. `op` is a bounded enum.
     session_ops: IntCounterVec,
     session_gc_reclaimed: IntCounter,
+
+    // --- reference (ReferenceResolver seam) -------------------------------
+    // `@`-mention expansion latency, refs resolved by (kind, outcome), and
+    // budget-blocked expansions. `kind` (file/dir/symbol/url) + `outcome`
+    // (block/warn) are bounded enums — never the attacker-controlled target.
+    reference_resolve_seconds: Histogram,
+    reference_refs: IntCounterVec,
+    reference_blocked: IntCounter,
 }
 
 impl Metrics {
@@ -480,6 +488,26 @@ impl Metrics {
         )
         .unwrap();
 
+        // --- reference (recorded by the reference metrics wrapper) ------------
+        let reference_resolve_seconds = Histogram::with_opts(HistogramOpts::new(
+            "agent_reference_resolve_seconds",
+            "`@`-reference expansion latency per prompt",
+        ))
+        .unwrap();
+        let reference_refs = IntCounterVec::new(
+            Opts::new(
+                "agent_reference_refs_total",
+                "References resolved by kind + outcome (block/warn)",
+            ),
+            &["kind", "outcome"],
+        )
+        .unwrap();
+        let reference_blocked = IntCounter::new(
+            "agent_reference_blocked_total",
+            "Reference expansions dropped for exceeding the token budget",
+        )
+        .unwrap();
+
         let collectors: Vec<Box<dyn prometheus::core::Collector>> = vec![
             Box::new(api_calls.clone()),
             Box::new(api_call_seconds.clone()),
@@ -535,6 +563,9 @@ impl Metrics {
             Box::new(embed_batch.clone()),
             Box::new(session_ops.clone()),
             Box::new(session_gc_reclaimed.clone()),
+            Box::new(reference_resolve_seconds.clone()),
+            Box::new(reference_refs.clone()),
+            Box::new(reference_blocked.clone()),
         ];
         for m in collectors {
             registry.register(m).expect("register metric");
@@ -596,6 +627,9 @@ impl Metrics {
             embed_batch,
             session_ops,
             session_gc_reclaimed,
+            reference_resolve_seconds,
+            reference_refs,
+            reference_blocked,
         }
     }
 
@@ -926,6 +960,23 @@ impl Metrics {
     /// Count checkpoint objects reclaimed by a prune.
     pub fn on_session_gc(&self, reclaimed: usize) {
         self.session_gc_reclaimed.inc_by(reclaimed as u64);
+    }
+
+    // --- reference (ReferenceResolver seam) instrumentation ---------------
+
+    /// Record a prompt's `@`-reference expansion: total latency.
+    pub fn on_reference_resolve(&self, seconds: f64) {
+        self.reference_resolve_seconds.observe(seconds);
+    }
+    /// Count one resolved reference by kind + outcome (`block`/`warn`).
+    pub fn on_reference_ref(&self, kind: &str, outcome: &str) {
+        self.reference_refs
+            .with_label_values(&[kind, outcome])
+            .inc();
+    }
+    /// Count an expansion dropped for exceeding the token budget.
+    pub fn on_reference_blocked(&self) {
+        self.reference_blocked.inc();
     }
 }
 

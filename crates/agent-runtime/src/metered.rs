@@ -1036,6 +1036,59 @@ impl RepoBackend for MeteredRepo {
     }
 }
 
+/// Wrap a [`ReferenceResolver`](agent_core::ReferenceResolver) so each `resolve`
+/// emits a `reference.resolve` span (`refs`/`blocked` attrs), records the
+/// expansion latency, counts each resolved reference by `source`-derived kind +
+/// outcome (block vs warn), and counts a budget-blocked expansion. Labels are the
+/// bounded kind/outcome enums, never the attacker-controlled reference target.
+#[cfg(feature = "reference")]
+pub(crate) fn reference(
+    inner: Arc<dyn agent_core::ReferenceResolver>,
+    m: Metrics,
+) -> Arc<dyn agent_core::ReferenceResolver> {
+    Arc::new(MeteredReference { inner, metrics: m })
+}
+
+#[cfg(feature = "reference")]
+struct MeteredReference {
+    inner: Arc<dyn agent_core::ReferenceResolver>,
+    metrics: Metrics,
+}
+
+#[cfg(feature = "reference")]
+#[async_trait]
+impl agent_core::ReferenceResolver for MeteredReference {
+    async fn resolve(&self, prompt: &str, budget_tokens: usize) -> agent_core::Resolution {
+        let span = tracing::info_span!(
+            "reference.resolve",
+            refs = tracing::field::Empty,
+            blocked = tracing::field::Empty,
+        );
+        let start = Instant::now();
+        let res = self
+            .inner
+            .resolve(prompt, budget_tokens)
+            .instrument(span.clone())
+            .await;
+        self.metrics
+            .on_reference_resolve(start.elapsed().as_secs_f64());
+        // The `source` prefix ("file:"/"dir:"/"symbol:"/"url:") is the bounded kind.
+        for b in &res.blocks {
+            let kind = b.source.split_once(':').map(|(k, _)| k).unwrap_or("other");
+            self.metrics.on_reference_ref(kind, "block");
+        }
+        for _ in &res.warnings {
+            self.metrics.on_reference_ref("other", "warn");
+        }
+        if res.blocked {
+            self.metrics.on_reference_blocked();
+        }
+        span.record("refs", res.blocks.len());
+        span.record("blocked", res.blocked);
+        res
+    }
+}
+
 #[cfg(all(test, feature = "tool-patch"))]
 mod tests {
     use super::*;

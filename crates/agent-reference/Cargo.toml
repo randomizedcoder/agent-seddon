@@ -1,0 +1,29 @@
+[package]
+name = "agent-reference"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# The resolver + grammar are dependency-free (route through the seams the runtime
+# passes in). See docs/components/reference.md and parity spec 17.
+default = ["reference-local"]
+reference-local = []
+# Injects a dhat global allocator for the allocation-budget leak test only.
+dhat-heap = ["dep:dhat"]
+
+[dependencies]
+agent-core.workspace = true
+async-trait.workspace = true
+dhat = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio.workspace = true
+rstest.workspace = true
+agent-testkit.workspace = true
+iai-callgrind.workspace = true
+
+# Deterministic instruction-count bench for the reference parser (the CPU hot path).
+[[bench]]
+name = "parse"
+harness = false

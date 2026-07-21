@@ -39,6 +39,7 @@ craneLib.mkCargoDerivation (
       cargo bench -p agent-lsp --bench lsp_parse
       cargo bench -p agent-search --features search-vector --bench vector
       cargo bench -p agent-session --bench checkpoint
+      cargo bench -p agent-reference --bench parse
       cargo bench -p agent-core --bench registry
       cargo bench -p agent-context --bench context
       cargo bench -p agent-tokenizer --bench tokenize

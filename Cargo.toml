@@ -18,6 +18,7 @@ members = [
     "crates/agent-sandbox",
     "crates/agent-embed",
     "crates/agent-session",
+    "crates/agent-reference",
     "crates/agent-grpc",
     "crates/agent-mcp",
     "crates/agent-proto",
@@ -116,6 +117,7 @@ agent-lsp = { path = "crates/agent-lsp", default-features = false }
 agent-sandbox = { path = "crates/agent-sandbox", default-features = false }
 agent-embed = { path = "crates/agent-embed", default-features = false }
 agent-session = { path = "crates/agent-session", default-features = false }
+agent-reference = { path = "crates/agent-reference", default-features = false }
 agent-grpc = { path = "crates/agent-grpc" }
 agent-mcp = { path = "crates/agent-mcp" }
 agent-proto = { path = "crates/agent-proto" }
