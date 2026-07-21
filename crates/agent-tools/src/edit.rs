@@ -17,7 +17,7 @@
 //! - **Stale guard** — refuse to write if the file changed on disk since we read
 //!   it (best-effort TOCTOU protection).
 
-use crate::{arg_bool, arg_str, resolve_within, truncate};
+use crate::{arg_bool, arg_str, confine, truncate};
 use agent_core::{Observation, Result, Tool, ToolContext, ToolSchema};
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -92,7 +92,7 @@ impl Tool for EditTool {
             }
         };
 
-        let full = match resolve_within(&ctx.cwd, path) {
+        let full = match confine(&ctx.cwd, path) {
             Ok(p) => p,
             Err(e) => return Ok(Observation::error(e)),
         };

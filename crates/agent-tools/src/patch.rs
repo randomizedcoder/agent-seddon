@@ -9,10 +9,10 @@
 //! fails, *nothing is written*. The commit phase then applies sequentially and
 //! reports a per-file `A`/`M`/`D` summary.
 //!
-//! Every target is resolved through the shared [`resolve_within`] guard, exactly
+//! Every target is resolved through the shared [`confine`] guard, exactly
 //! like `edit`/`write_file`, and the summary is [`truncate`]d like every builtin.
 
-use crate::{arg_str, resolve_within, truncate};
+use crate::{arg_str, confine, truncate};
 use agent_core::{Observation, Result, Tool, ToolContext, ToolSchema};
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -57,7 +57,7 @@ impl Tool for ApplyPatchTool {
         for op in &ops {
             match op {
                 Op::Add { path, lines } => {
-                    let full = match resolve_within(&ctx.cwd, path) {
+                    let full = match confine(&ctx.cwd, path) {
                         Ok(p) => p,
                         Err(e) => return Ok(Observation::error(e)),
                     };
@@ -76,7 +76,7 @@ impl Tool for ApplyPatchTool {
                     });
                 }
                 Op::Update { path, hunks } => {
-                    let full = match resolve_within(&ctx.cwd, path) {
+                    let full = match confine(&ctx.cwd, path) {
                         Ok(p) => p,
                         Err(e) => return Ok(Observation::error(e)),
                     };
@@ -114,7 +114,7 @@ impl Tool for ApplyPatchTool {
                     });
                 }
                 Op::Delete { path } => {
-                    let full = match resolve_within(&ctx.cwd, path) {
+                    let full = match confine(&ctx.cwd, path) {
                         Ok(p) => p,
                         Err(e) => return Ok(Observation::error(e)),
                     };
