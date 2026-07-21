@@ -90,6 +90,42 @@ pub(crate) fn repo(inner: Arc<dyn RepoBackend>, m: Metrics, name: &str) -> Arc<d
     })
 }
 
+/// Wrap a [`Tokenizer`](agent_core::Tokenizer) so each `count` emits a
+/// `tokenizer.count` span carrying `backend`/`model`/`text_bytes`/`tokens`
+/// attributes (the span-attribute pattern from the telemetry work). Cost/cache
+/// USD accounting is recorded in the loop where usage arrives, not here.
+#[cfg(feature = "tokenizer")]
+pub(crate) fn tokenizer(inner: Arc<dyn agent_core::Tokenizer>) -> Arc<dyn agent_core::Tokenizer> {
+    Arc::new(MeteredTokenizer { inner })
+}
+
+#[cfg(feature = "tokenizer")]
+struct MeteredTokenizer {
+    inner: Arc<dyn agent_core::Tokenizer>,
+}
+
+#[cfg(feature = "tokenizer")]
+#[async_trait]
+impl agent_core::Tokenizer for MeteredTokenizer {
+    fn backend(&self) -> &str {
+        self.inner.backend()
+    }
+    async fn count(&self, text: &str, model: &str) -> Result<u32> {
+        let span = tracing::info_span!(
+            "tokenizer.count",
+            backend = self.inner.backend(),
+            model,
+            text_bytes = text.len(),
+            tokens = tracing::field::Empty,
+        );
+        let out = self.inner.count(text, model).instrument(span.clone()).await;
+        if let Ok(n) = &out {
+            span.record("tokens", *n);
+        }
+        out
+    }
+}
+
 // --- provider --------------------------------------------------------------
 
 struct MeteredProvider {
@@ -646,5 +682,28 @@ mod span_tests {
             });
         });
         assert!(spans.contains(&"search.query".to_string()), "{spans:?}");
+    }
+}
+
+// The metered tokenizer must emit a `tokenizer.count` span (the observability
+// half of parity spec 23), mirroring the `search.query` proof above.
+#[cfg(all(test, feature = "tokenizer"))]
+mod tokenizer_span_tests {
+    use super::*;
+    use agent_testkit::observe::captured_spans;
+    use agent_testkit::FixedVocabTokenizer;
+
+    #[test]
+    fn metered_tokenizer_count_emits_span() {
+        let spans = captured_spans(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let tok = super::tokenizer(Arc::new(FixedVocabTokenizer));
+                let _ = tok.count("one two three", "some-model").await;
+            });
+        });
+        assert!(spans.contains(&"tokenizer.count".to_string()), "{spans:?}");
     }
 }

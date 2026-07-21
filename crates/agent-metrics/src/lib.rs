@@ -16,8 +16,8 @@
 //! crate can hold a `Metrics` without a cycle back through `agent-runtime`.
 
 use prometheus::{
-    Encoder, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
-    IntGaugeVec, Opts, Registry, TextEncoder,
+    CounterVec, Encoder, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec,
+    IntGauge, IntGaugeVec, Opts, Registry, TextEncoder,
 };
 use std::sync::Arc;
 
@@ -29,6 +29,12 @@ pub struct Metrics {
     api_calls: IntCounterVec,
     api_call_seconds: HistogramVec,
     tokens: IntCounterVec,
+    // USD cost + cache-token accounting (recorded once a price table is applied,
+    // see agent-tokenizer + parity spec 23). `cost_usd` is a float counter (money);
+    // `cache_tokens` splits prompt-cache reads/writes so the cache-hit ratio
+    // (cache_read / (cache_read + input)) is derivable in PromQL.
+    cost_usd: CounterVec,
+    cache_tokens: IntCounterVec,
     context_tokens: IntGauge,
     context_messages: IntGauge,
     tool_calls: IntCounterVec,
@@ -98,6 +104,19 @@ impl Metrics {
         .unwrap();
         let tokens = IntCounterVec::new(
             Opts::new("agent_tokens_total", "Tokens consumed"),
+            &["model", "kind"],
+        )
+        .unwrap();
+        let cost_usd = CounterVec::new(
+            Opts::new("agent_cost_usd_total", "Cumulative USD cost by billed line"),
+            &["model", "kind"],
+        )
+        .unwrap();
+        let cache_tokens = IntCounterVec::new(
+            Opts::new(
+                "agent_cache_tokens_total",
+                "Prompt-cache tokens (read = hit, write = created)",
+            ),
             &["model", "kind"],
         )
         .unwrap();
@@ -313,6 +332,8 @@ impl Metrics {
             Box::new(api_calls.clone()),
             Box::new(api_call_seconds.clone()),
             Box::new(tokens.clone()),
+            Box::new(cost_usd.clone()),
+            Box::new(cache_tokens.clone()),
             Box::new(context_tokens.clone()),
             Box::new(context_messages.clone()),
             Box::new(tool_calls.clone()),
@@ -356,6 +377,8 @@ impl Metrics {
             api_calls,
             api_call_seconds,
             tokens,
+            cost_usd,
+            cache_tokens,
             context_tokens,
             context_messages,
             tool_calls,
@@ -430,6 +453,45 @@ impl Metrics {
             .with_label_values(&[model, "completion"])
             .inc_by(completion);
     }
+    /// Record a turn's USD cost, one line per billed `kind`
+    /// (`input`/`output`/`cache_read`/`cache_write`). Zero lines are still
+    /// recorded (a `0` increment is a no-op) so the series exists for a model.
+    pub fn add_cost(
+        &self,
+        model: &str,
+        input: f64,
+        output: f64,
+        cache_read: f64,
+        cache_write: f64,
+    ) {
+        for (kind, usd) in [
+            ("input", input),
+            ("output", output),
+            ("cache_read", cache_read),
+            ("cache_write", cache_write),
+        ] {
+            if usd > 0.0 {
+                self.cost_usd.with_label_values(&[model, kind]).inc_by(usd);
+            }
+        }
+    }
+
+    /// Record prompt-cache token counts for a turn: `read` = tokens served from the
+    /// cache (a hit), `write` = tokens written into it. The cache-hit ratio is
+    /// derived downstream as `cache_read / (cache_read + input)`.
+    pub fn add_cache_tokens(&self, model: &str, read: u64, write: u64) {
+        if read > 0 {
+            self.cache_tokens
+                .with_label_values(&[model, "read"])
+                .inc_by(read);
+        }
+        if write > 0 {
+            self.cache_tokens
+                .with_label_values(&[model, "write"])
+                .inc_by(write);
+        }
+    }
+
     pub fn set_context(&self, prompt_tokens: i64, messages: i64) {
         self.context_tokens.set(prompt_tokens);
         self.context_messages.set(messages);
@@ -621,6 +683,8 @@ mod tests {
         m.on_iteration();
         m.on_api_call("test-model", "stop", 0.5);
         m.add_tokens("test-model", 100, 20);
+        m.add_cost("test-model", 0.003, 0.015, 0.0003, 0.0);
+        m.add_cache_tokens("test-model", 80, 20);
         m.set_context(100, 4);
         m.on_tool("bash", "ok");
         m.run_finished("success", 1.5);
@@ -630,6 +694,8 @@ mod tests {
             "agent_iterations_total",
             "agent_api_calls_total",
             "agent_tokens_total",
+            "agent_cost_usd_total",
+            "agent_cache_tokens_total",
             "agent_context_tokens",
             "agent_tool_calls_total",
             "agent_runs_total",

@@ -122,9 +122,20 @@ pub async fn build_agent_with(
     // (including the telemetry mirror, when enabled).
     let memory = crate::metered::memory(composed_memory, metrics.clone());
 
+    // The tokenizer the context strategy budgets with — built (and metered, so its
+    // `tokenizer.count` spans emit) here, then injected like the provider. `None`
+    // when the feature is off or the backend is unknown → heuristic fallback.
+    #[cfg(feature = "tokenizer")]
+    let tokenizer: Option<Arc<dyn agent_core::Tokenizer>> = registry
+        .build_tokenizer(&cfg.tokenizer.backend, &cfg)
+        .ok()
+        .map(crate::metered::tokenizer);
+    #[cfg(not(feature = "tokenizer"))]
+    let tokenizer: Option<Arc<dyn agent_core::Tokenizer>> = None;
+
     let context = crate::metered::context(
         registry
-            .build_context(&cfg.agent.context, &cfg, &provider)
+            .build_context(&cfg.agent.context, &cfg, &provider, tokenizer.as_ref())
             .context("building context strategy")?,
         metrics.clone(),
     );

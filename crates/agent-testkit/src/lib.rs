@@ -23,12 +23,14 @@ pub mod observe;
 use agent_core::{
     BlobContent, Checkpoint, CommitInfo, CompletionRequest, CompletionResponse, ContextInput,
     ContextStrategy, DiffResult, FileDiff, GrepHit, IndexState, IndexStatus, LlmProvider,
-    MemoryEvent, MemoryItem, MemoryStore, Message, ModelCapabilities, Observation, Oid, ProgressFn,
-    RecallQuery, ReindexProgress, RepoBackend, RepoStatus, Result, Revision, Role, SearchBackend,
-    SearchCapabilities, SearchHit, SearchMode, SearchQuery, TokenBudget, Tool, ToolCall,
-    ToolContext, ToolSchema, TreeEntry, WorkingSet, WorktreeHandle, WorktreeSpec,
+    MemoryEvent, MemoryItem, MemoryStore, Message, ModelCapabilities, ModelPrices, Observation,
+    Oid, Prices, ProgressFn, RecallQuery, ReindexProgress, RepoBackend, RepoStatus, Result,
+    Revision, Role, SearchBackend, SearchCapabilities, SearchHit, SearchMode, SearchQuery,
+    TokenBudget, Tokenizer, Tool, ToolCall, ToolContext, ToolSchema, TreeEntry, WorkingSet,
+    WorktreeHandle, WorktreeSpec,
 };
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -238,6 +240,61 @@ impl ContextStrategy for StaticContext {
     }
     async fn compact(&self, _working: &mut WorkingSet, _budget: &TokenBudget) -> Result<()> {
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tokenizer + prices
+// ---------------------------------------------------------------------------
+
+/// A deterministic `Tokenizer` for tests: 1 token per whitespace-delimited chunk,
+/// counted by `char` (so it never inflates on multi-byte UTF-8). Exact and
+/// byte-stable, so a test can assert precise counts (and the compaction boundary)
+/// without shipping a real BPE vocab. `backend()` is `"fixed"`.
+pub struct FixedVocabTokenizer;
+
+#[async_trait]
+impl Tokenizer for FixedVocabTokenizer {
+    fn backend(&self) -> &str {
+        "fixed"
+    }
+    async fn count(&self, text: &str, _model: &str) -> Result<u32> {
+        Ok(text.split_whitespace().count() as u32)
+    }
+}
+
+/// A fixed `{model → ModelPrices}` map implementing the [`Prices`] seam, for cost
+/// tests. Mirrors the `ScriptedProvider`/`StaticContext` style — canned data, no
+/// I/O — so `calculate_cost` can be exercised deterministically.
+pub struct StaticPrices {
+    rows: HashMap<String, ModelPrices>,
+}
+
+impl StaticPrices {
+    pub fn new(rows: impl IntoIterator<Item = (String, ModelPrices)>) -> Self {
+        Self {
+            rows: rows.into_iter().collect(),
+        }
+    }
+
+    /// A one-model table with the four `$/MTok` rates spelled out — the common
+    /// case for a single `cost_cases` row.
+    pub fn one(model: &str, input: f64, output: f64, cache_read: f64, cache_write: f64) -> Self {
+        Self::new([(
+            model.to_string(),
+            ModelPrices {
+                input,
+                output,
+                cache_read,
+                cache_write,
+            },
+        )])
+    }
+}
+
+impl Prices for StaticPrices {
+    fn get(&self, model: &str) -> Option<ModelPrices> {
+        self.rows.get(model).copied()
     }
 }
 

@@ -215,6 +215,25 @@ impl Agent {
                     .add_tokens(model, u.prompt_tokens as u64, u.completion_tokens as u64);
                 self.metrics
                     .set_context(u.prompt_tokens as i64, msg_count as i64);
+                // Prompt-cache token split (Anthropic/OpenAI report these) + USD cost
+                // from the price table — the accounting half of the tokenizer seam.
+                self.metrics.add_cache_tokens(
+                    model,
+                    u.cache_read_tokens as u64,
+                    u.cache_write_tokens as u64,
+                );
+                #[cfg(feature = "tokenizer")]
+                {
+                    let prices = agent_tokenizer::PriceTable::builtin();
+                    let (cost, _status) = agent_core::calculate_cost(model, u, &prices);
+                    self.metrics.add_cost(
+                        model,
+                        cost.input,
+                        cost.output,
+                        cost.cache_read,
+                        cost.cache_write,
+                    );
+                }
                 self.record_usage(iter as u32, u).await;
             }
 

@@ -1,0 +1,34 @@
+[package]
+name = "agent-tokenizer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# The `approx` backend is dependency-free, deterministic, and always available —
+# the default. Real BPE/provider backends (`tokenizer-tiktoken`, `tokenizer-hf`,
+# `tokenizer-provider`) are reserved for a follow-up so the default build stays
+# hermetic (no bundled vocab / network). See docs/components/tokenizer.md.
+default = ["tokenizer-approx"]
+tokenizer-approx = []
+# Injects a dhat global allocator for the allocation-budget leak test only; never
+# in a normal build. Mirrors the other crates' `dhat-heap` gate.
+dhat-heap = ["dep:dhat"]
+
+[dependencies]
+agent-core.workspace = true
+async-trait.workspace = true
+dhat = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio.workspace = true
+rstest.workspace = true
+serde_json.workspace = true
+agent-testkit.workspace = true
+iai-callgrind.workspace = true
+
+# Guards the CPU hot path — `count_text` runs inside the compaction loop and per
+# turn on the assembled prompt.
+[[bench]]
+name = "tokenize"
+harness = false

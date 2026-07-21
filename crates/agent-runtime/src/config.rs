@@ -26,6 +26,8 @@ pub struct Config {
     #[serde(default)]
     pub search: SearchCfg,
     #[serde(default)]
+    pub tokenizer: TokenizerCfg,
+    #[serde(default)]
     pub git: GitCfg,
     #[serde(default)]
     pub policy: PolicyCfg,
@@ -162,6 +164,28 @@ impl Default for SearchCfg {
             auto_index: true,
         }
     }
+}
+
+/// `[tokenizer]` — selects the [`agent_core::Tokenizer`] backend that counts tokens
+/// for compaction budgeting and cost accounting. `approx` (the default) is the
+/// dependency-free segmenter; `grpc` dials a remote tokenizer seam (follow-up).
+/// See parity spec 23 and `docs/components/tokenizer.md`.
+#[derive(Debug, Deserialize)]
+pub struct TokenizerCfg {
+    #[serde(default = "default_tokenizer")]
+    pub backend: String,
+}
+
+impl Default for TokenizerCfg {
+    fn default() -> Self {
+        Self {
+            backend: default_tokenizer(),
+        }
+    }
+}
+
+fn default_tokenizer() -> String {
+    "approx".to_string()
 }
 
 impl SearchCfg {
@@ -577,6 +601,7 @@ impl Config {
             metrics: MetricsCfg::default(),
             grpc: GrpcCfg::default(),
             search: SearchCfg::default(),
+            tokenizer: TokenizerCfg::default(),
             git: GitCfg::default(),
             // Guard off in tests: full-agent tests stay hermetic and never block on
             // an interactive prompt. Guard behaviour is unit-tested directly.

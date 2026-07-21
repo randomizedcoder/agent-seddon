@@ -33,6 +33,8 @@ pub enum Error {
     Search(String),
     #[error("repo error: {0}")]
     Repo(String),
+    #[error("tokenizer error: {0}")]
+    Tokenizer(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -134,7 +136,18 @@ pub struct CompletionRequest {
     pub temperature: f32,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// A per-model USD cost breakdown for a [`Usage`], in dollars. The four lines are
+/// billed at distinct rates (see [`ModelPrices`]); `total` is their sum.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct Cost {
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    pub cache_write: f64,
+    pub total: f64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Usage {
     #[serde(default)]
     pub prompt_tokens: u32,
@@ -142,6 +155,19 @@ pub struct Usage {
     pub completion_tokens: u32,
     #[serde(default)]
     pub total_tokens: u32,
+    /// Input tokens served from the provider's prompt cache (billed at the cheap
+    /// cache-read rate). Additive/serde-defaulted so the JSONL episodic log and the
+    /// gRPC wire stay backward-compatible.
+    #[serde(default)]
+    pub cache_read_tokens: u32,
+    /// Input tokens written into the prompt cache (billed at the cache-write
+    /// premium over the input rate).
+    #[serde(default)]
+    pub cache_write_tokens: u32,
+    /// USD cost breakdown, filled in once a price table is applied to the token
+    /// counts (`None` until then — providers report tokens, not money).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<Cost>,
 }
 
 #[derive(Debug, Clone)]
@@ -204,6 +230,115 @@ pub trait LlmProvider: Send + Sync {
         }));
         Ok(Box::pin(futures_util::stream::iter(chunks)))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Seam: Tokenizer + cost model
+// ---------------------------------------------------------------------------
+//
+// Accurate, per-model token counting replaces the crate-private `~chars/4`
+// heuristic in `agent-context`, and — once tokens are counted per model — a price
+// table turns them into USD. Concrete tokenizer backends (approx / tiktoken / HF /
+// provider-endpoint) live in `agent-tokenizer` behind cargo features; the cost
+// math is a pure function here so every crate shares one definition. See
+// `docs/components/tokenizer.md` and parity spec 23.
+
+/// Per-message structural overhead (role tag + delimiters) folded into
+/// [`Tokenizer::count_messages`], in tokens. A model-agnostic approximation of the
+/// framing every chat API adds around each message.
+pub const MESSAGE_TOKEN_OVERHEAD: u32 = 3;
+
+/// Accurate, per-model token counting — the seam the compaction loop and the cost
+/// model call instead of a byte heuristic. `count` is the primitive; the default
+/// `count_messages` folds per-message + per-tool-call overhead on top of it, so a
+/// backend only has to implement `count` (though it may override `count_messages`
+/// to use a provider's own message-counting endpoint).
+#[async_trait]
+pub trait Tokenizer: Send + Sync {
+    /// The backend's name (used as a metric/span label), e.g. `"approx"`.
+    fn backend(&self) -> &str;
+
+    /// Count the tokens in `text` as the given `model` would tokenize it.
+    async fn count(&self, text: &str, model: &str) -> Result<u32>;
+
+    /// Count tokens across a message array, adding per-message +
+    /// per-tool-call name/argument overhead. Default: sum `count` over every
+    /// content and tool-call field plus [`MESSAGE_TOKEN_OVERHEAD`] per message —
+    /// the accurate analogue of what `estimate_tokens` approximated.
+    async fn count_messages(&self, messages: &[Message], model: &str) -> Result<u32> {
+        let mut total: u32 = 0;
+        for m in messages {
+            total = total.saturating_add(self.count(&m.content, model).await?);
+            for tc in &m.tool_calls {
+                total = total.saturating_add(self.count(&tc.name, model).await?);
+                total = total.saturating_add(self.count(&tc.arguments.to_string(), model).await?);
+            }
+            total = total.saturating_add(MESSAGE_TOKEN_OVERHEAD);
+        }
+        Ok(total)
+    }
+}
+
+/// Per-model prices in USD per **million** tokens (`$/MTok`), one rate per billed
+/// line. Cache-read is the discounted rate; cache-write is the premium over input.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ModelPrices {
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    pub cache_write: f64,
+}
+
+impl ModelPrices {
+    /// The unknown-model fallback: everything free, so a missing model never bills.
+    pub const ZERO: ModelPrices = ModelPrices {
+        input: 0.0,
+        output: 0.0,
+        cache_read: 0.0,
+        cache_write: 0.0,
+    };
+}
+
+/// Where a cost figure came from (mirrors hermes' `CostStatus`): `Actual` when the
+/// model was found in the price table, `Estimated` when it fell back to zero-price.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CostStatus {
+    Actual,
+    Estimated,
+    Unknown,
+}
+
+/// A source of per-model prices. `PriceTable` (in `agent-tokenizer`) and
+/// `StaticPrices` (the test double in `agent-testkit`) implement it, so the cost
+/// math below is agnostic to where the rates come from.
+pub trait Prices: Send + Sync {
+    fn get(&self, model: &str) -> Option<ModelPrices>;
+}
+
+/// Compute the USD [`Cost`] of a [`Usage`] under `prices` for `model`. Each line is
+/// `(rate / 1_000_000) * tokens` (pi's `calculateCost` formula): input←prompt,
+/// output←completion, plus the cache-read (discounted) and cache-write (premium)
+/// lines. An unknown model yields a zero-priced cost + [`CostStatus::Estimated`] —
+/// never a panic and never a wrong bill.
+pub fn calculate_cost(model: &str, usage: &Usage, prices: &dyn Prices) -> (Cost, CostStatus) {
+    let (p, status) = match prices.get(model) {
+        Some(p) => (p, CostStatus::Actual),
+        None => (ModelPrices::ZERO, CostStatus::Estimated),
+    };
+    let line = |rate: f64, tokens: u32| (rate / 1_000_000.0) * tokens as f64;
+    let input = line(p.input, usage.prompt_tokens);
+    let output = line(p.output, usage.completion_tokens);
+    let cache_read = line(p.cache_read, usage.cache_read_tokens);
+    let cache_write = line(p.cache_write, usage.cache_write_tokens);
+    let cost = Cost {
+        input,
+        output,
+        cache_read,
+        cache_write,
+        total: input + output + cache_read + cache_write,
+    };
+    (cost, status)
 }
 
 // ---------------------------------------------------------------------------

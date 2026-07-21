@@ -20,8 +20,15 @@ use std::sync::Arc;
 type ProviderFactory = Box<dyn Fn(&Config) -> anyhow::Result<Arc<dyn LlmProvider>> + Send + Sync>;
 // Context strategies receive the already-built provider (so a summarizing
 // strategy can call the model); most ignore it.
+// Context strategies receive the already-built (metered) provider and the
+// optional (metered) tokenizer, so a summarizing strategy can call the model and
+// either strategy can budget with real token counts.
 type ContextFactory = Box<
-    dyn Fn(&Config, &Arc<dyn LlmProvider>) -> anyhow::Result<Arc<dyn ContextStrategy>>
+    dyn Fn(
+            &Config,
+            &Arc<dyn LlmProvider>,
+            Option<&Arc<dyn agent_core::Tokenizer>>,
+        ) -> anyhow::Result<Arc<dyn ContextStrategy>>
         + Send
         + Sync,
 >;
@@ -42,6 +49,9 @@ type SearchFactory =
 #[cfg(feature = "git")]
 type RepoFactory =
     Box<dyn Fn(&Config) -> anyhow::Result<Arc<dyn agent_core::RepoBackend>> + Send + Sync>;
+#[cfg(feature = "tokenizer")]
+type TokenizerFactory =
+    Box<dyn Fn(&Config) -> anyhow::Result<Arc<dyn agent_core::Tokenizer>> + Send + Sync>;
 
 /// Name → factory maps for every swappable seam. Keys are `&'static str` and the
 /// maps are ordered so error messages list known names deterministically.
@@ -58,6 +68,8 @@ pub struct Registry {
     searches: BTreeMap<&'static str, SearchFactory>,
     #[cfg(feature = "git")]
     repos: BTreeMap<&'static str, RepoFactory>,
+    #[cfg(feature = "tokenizer")]
+    tokenizers: BTreeMap<&'static str, TokenizerFactory>,
     // MCP transports live behind their own registry in `agent-mcp`; the runtime
     // owns one so a custom transport is registrable out-of-tree like any seam.
     #[cfg(feature = "mcp")]
@@ -88,7 +100,11 @@ impl Registry {
     pub fn context(
         &mut self,
         name: &'static str,
-        f: impl Fn(&Config, &Arc<dyn LlmProvider>) -> anyhow::Result<Arc<dyn ContextStrategy>>
+        f: impl Fn(
+                &Config,
+                &Arc<dyn LlmProvider>,
+                Option<&Arc<dyn agent_core::Tokenizer>>,
+            ) -> anyhow::Result<Arc<dyn ContextStrategy>>
             + Send
             + Sync
             + 'static,
@@ -156,6 +172,15 @@ impl Registry {
         self.repos.insert(name, Box::new(f));
     }
 
+    #[cfg(feature = "tokenizer")]
+    pub fn tokenizer(
+        &mut self,
+        name: &'static str,
+        f: impl Fn(&Config) -> anyhow::Result<Arc<dyn agent_core::Tokenizer>> + Send + Sync + 'static,
+    ) {
+        self.tokenizers.insert(name, Box::new(f));
+    }
+
     /// Register an MCP transport factory under a `kind` (e.g. `"websocket"`),
     /// selected by an `[[mcp.servers]] kind = "..."` (or `Transport::Other`).
     #[cfg(feature = "mcp")]
@@ -187,12 +212,13 @@ impl Registry {
         name: &str,
         cfg: &Config,
         provider: &Arc<dyn LlmProvider>,
+        tokenizer: Option<&Arc<dyn agent_core::Tokenizer>>,
     ) -> anyhow::Result<Arc<dyn ContextStrategy>> {
         let f = self
             .contexts
             .get(name)
             .ok_or_else(|| unknown("context strategy", name, self.contexts.keys().copied()))?;
-        f(cfg, provider)
+        f(cfg, provider, tokenizer)
     }
     pub fn build_policy(&self, name: &str, cfg: &Config) -> anyhow::Result<Arc<dyn Policy>> {
         let f = self
@@ -274,6 +300,19 @@ impl Registry {
             .ok_or_else(|| unknown("git backend", name, self.repos.keys().copied()))?;
         f(cfg)
     }
+
+    #[cfg(feature = "tokenizer")]
+    pub fn build_tokenizer(
+        &self,
+        name: &str,
+        cfg: &Config,
+    ) -> anyhow::Result<Arc<dyn agent_core::Tokenizer>> {
+        let f = self
+            .tokenizers
+            .get(name)
+            .ok_or_else(|| unknown("tokenizer", name, self.tokenizers.keys().copied()))?;
+        f(cfg)
+    }
 }
 
 fn unknown(kind: &str, name: &str, known: impl Iterator<Item = &'static str>) -> anyhow::Error {
@@ -304,17 +343,26 @@ pub fn register_builtins(r: &mut Registry) {
     #[cfg(feature = "provider-anthropic")]
     r.provider("anthropic", crate::builder::anthropic_provider);
 
-    // --- context strategies ---
+    // --- context strategies (each budgets with the injected tokenizer) ---
     #[cfg(feature = "context-sliding-window")]
-    r.context("sliding-window", |_cfg, _provider| {
-        Ok(Arc::new(agent_context::SlidingWindow) as Arc<dyn ContextStrategy>)
+    r.context("sliding-window", |cfg, _provider, tokenizer| {
+        Ok(Arc::new(agent_context::SlidingWindow::new(
+            tokenizer.cloned(),
+            cfg.provider.model.clone(),
+        )) as Arc<dyn ContextStrategy>)
     });
     #[cfg(feature = "context-summarizing")]
-    r.context("summarizing-window", |cfg, provider| {
-        Ok(Arc::new(agent_context::SummarizingWindow::new(
-            provider.clone(),
-            cfg.agent.keep_recent_tokens,
-        )) as Arc<dyn ContextStrategy>)
+    r.context("summarizing-window", |cfg, provider, tokenizer| {
+        Ok(Arc::new(
+            agent_context::SummarizingWindow::new(provider.clone(), cfg.agent.keep_recent_tokens)
+                .with_tokenizer(tokenizer.cloned(), cfg.provider.model.clone()),
+        ) as Arc<dyn ContextStrategy>)
+    });
+
+    // --- tokenizer seam (accurate counts + cost, parity spec 23) ---
+    #[cfg(feature = "tokenizer")]
+    r.tokenizer("approx", |_cfg| {
+        Ok(Arc::new(agent_tokenizer::ApproxTokenizer::new()) as Arc<dyn agent_core::Tokenizer>)
     });
 
     // --- policies (always available; they live in agent-runtime) ---
@@ -434,7 +482,7 @@ pub fn register_builtins(r: &mut Registry) {
             let ep = grpc_client_endpoint(&cfg.grpc.memory.endpoint, agent_grpc::constants::MEMORY);
             Ok(Arc::new(agent_grpc::client::GrpcMemory::connect(&ep)?) as Arc<dyn MemoryStore>)
         });
-        r.context("grpc", |cfg, _provider| {
+        r.context("grpc", |cfg, _provider, _tokenizer| {
             let ep =
                 grpc_client_endpoint(&cfg.grpc.context.endpoint, agent_grpc::constants::CONTEXT);
             Ok(Arc::new(agent_grpc::client::GrpcContext::connect(&ep)?)

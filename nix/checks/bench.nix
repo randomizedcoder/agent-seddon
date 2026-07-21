@@ -36,6 +36,7 @@ craneLib.mkCargoDerivation (
       cargo bench -p agent-tools --features tool-edit --bench edit
       cargo bench -p agent-core --bench registry
       cargo bench -p agent-context --bench context
+      cargo bench -p agent-tokenizer --bench tokenize
     '';
     installPhaseCommand = "mkdir -p $out";
   }

@@ -97,6 +97,13 @@ backends   = ["tantivy"]
 index_dir  = ""              # empty ⇒ per-repo .agent-seddon/index/<backend>
 auto_index = true
 
+# Tokenizer (the Tokenizer seam): accurate per-model token counts that drive
+# compaction budgeting + USD/cache cost accounting, replacing the ~chars/4
+# heuristic. "approx" is the dependency-free default; unset/unknown ⇒ heuristic
+# fallback. See docs/components/tokenizer.md.
+[tokenizer]
+backend = "approx"
+
 # Multi-branch git (the RepoBackend seam). One shared bare/mirror object DB fronts
 # many disposable `git worktree`s, so the agent can read, diff and analyze code
 # across branches without many full clones. `backend` selects the impl: "cli"

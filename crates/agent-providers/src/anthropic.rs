@@ -143,6 +143,8 @@ impl LlmProvider for AnthropicProvider {
             let mut blocks: BTreeMap<usize, ToolBlockAcc> = BTreeMap::new();
             let mut input_tokens = 0u32;
             let mut output_tokens = 0u32;
+            let mut cache_read_tokens = 0u32;
+            let mut cache_write_tokens = 0u32;
             let mut stop_reason: Option<String> = None;
 
             'read: while let Some(next) = bytes.next().await {
@@ -170,6 +172,8 @@ impl LlmProvider for AnthropicProvider {
                         "message_start" => {
                             if let Some(u) = ev.message.and_then(|m| m.usage) {
                                 input_tokens = u.input_tokens;
+                                cache_read_tokens = u.cache_read_input_tokens;
+                                cache_write_tokens = u.cache_creation_input_tokens;
                             }
                         }
                         "content_block_start" => {
@@ -232,6 +236,9 @@ impl LlmProvider for AnthropicProvider {
                     prompt_tokens: input_tokens,
                     completion_tokens: output_tokens,
                     total_tokens: input_tokens + output_tokens,
+                    cache_read_tokens,
+                    cache_write_tokens,
+                    cost: None,
                 }),
                 ..Default::default()
             });
@@ -312,6 +319,10 @@ struct SseUsage {
     input_tokens: u32,
     #[serde(default)]
     output_tokens: u32,
+    #[serde(default)]
+    cache_read_input_tokens: u32,
+    #[serde(default)]
+    cache_creation_input_tokens: u32,
 }
 
 /// Convert our message list into `(system, messages)` for the Messages API.
@@ -439,6 +450,10 @@ struct WireUsage {
     input_tokens: u32,
     #[serde(default)]
     output_tokens: u32,
+    #[serde(default)]
+    cache_read_input_tokens: u32,
+    #[serde(default)]
+    cache_creation_input_tokens: u32,
 }
 
 impl WireResp {
@@ -469,6 +484,9 @@ impl WireResp {
                 prompt_tokens: u.input_tokens,
                 completion_tokens: u.output_tokens,
                 total_tokens: u.input_tokens + u.output_tokens,
+                cache_read_tokens: u.cache_read_input_tokens,
+                cache_write_tokens: u.cache_creation_input_tokens,
+                cost: None,
             }),
         }
     }

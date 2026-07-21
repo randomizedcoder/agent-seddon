@@ -192,6 +192,7 @@ dependencies = [
  "agent-search",
  "agent-telemetry",
  "agent-testkit",
+ "agent-tokenizer",
  "agent-tools",
  "anyhow",
  "async-stream",
@@ -257,6 +258,20 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "agent-tokenizer"
+version = "0.1.0"
+dependencies = [
+ "agent-core",
+ "agent-testkit",
+ "async-trait",
+ "dhat",
+ "iai-callgrind",
+ "rstest",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

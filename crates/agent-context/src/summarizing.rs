@@ -11,7 +11,7 @@
 use crate::{assemble_messages, estimate_tokens};
 use agent_core::{
     CompletionRequest, ContextInput, ContextStrategy, LlmProvider, Message, Result, Role,
-    TokenBudget, WorkingSet,
+    TokenBudget, Tokenizer, WorkingSet,
 };
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -20,6 +20,11 @@ pub struct SummarizingWindow {
     summarizer: Arc<dyn LlmProvider>,
     keep_recent_tokens: u32,
     summary_max_tokens: u32,
+    /// Accurate token counter for the over-budget gate (parity spec 23); `None`
+    /// falls back to the `~chars/4` heuristic. The tail-walk still uses the
+    /// heuristic — it only needs relative sizes, not the model's exact boundary.
+    tokenizer: Option<Arc<dyn Tokenizer>>,
+    model: String,
 }
 
 impl SummarizingWindow {
@@ -28,6 +33,32 @@ impl SummarizingWindow {
             summarizer,
             keep_recent_tokens,
             summary_max_tokens: 1024,
+            tokenizer: None,
+            model: String::new(),
+        }
+    }
+
+    /// Attach a [`Tokenizer`] so the over-budget gate uses the target model's real
+    /// token count. A `None` tokenizer leaves the heuristic in place.
+    pub fn with_tokenizer(
+        mut self,
+        tokenizer: Option<Arc<dyn Tokenizer>>,
+        model: impl Into<String>,
+    ) -> Self {
+        self.tokenizer = tokenizer;
+        self.model = model.into();
+        self
+    }
+
+    /// Tokens in `messages` under the configured tokenizer, or the heuristic when
+    /// none is set (or it errors — budgeting must never hard-fail).
+    async fn budget_tokens(&self, messages: &[Message]) -> u32 {
+        match &self.tokenizer {
+            Some(t) => t
+                .count_messages(messages, &self.model)
+                .await
+                .unwrap_or_else(|_| estimate_tokens(messages)),
+            None => estimate_tokens(messages),
         }
     }
 }
@@ -42,7 +73,7 @@ impl ContextStrategy for SummarizingWindow {
         let target = budget
             .max_context_tokens
             .saturating_sub(budget.reserve_output);
-        if estimate_tokens(&working.messages) <= target {
+        if self.budget_tokens(&working.messages).await <= target {
             return Ok(());
         }
 

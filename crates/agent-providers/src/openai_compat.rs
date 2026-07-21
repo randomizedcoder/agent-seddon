@@ -148,6 +148,12 @@ impl LlmProvider for OpenAiCompatProvider {
                 prompt_tokens: u.prompt_tokens,
                 completion_tokens: u.completion_tokens,
                 total_tokens: u.total_tokens,
+                // OpenAI reports prompt-cache hits under `prompt_tokens_details.
+                // cached_tokens`; there is no separate cache-write line (writes are
+                // billed as normal input), so `cache_write_tokens` stays 0.
+                cache_read_tokens: u.prompt_tokens_details.cached_tokens,
+                cache_write_tokens: 0,
+                cost: None,
             }),
         })
     }
@@ -438,6 +444,17 @@ struct WireUsage {
     completion_tokens: u32,
     #[serde(default)]
     total_tokens: u32,
+    #[serde(default)]
+    prompt_tokens_details: PromptTokensDetails,
+}
+
+/// The `usage.prompt_tokens_details` sub-object (OpenAI + compatible gateways);
+/// `cached_tokens` is the prompt-cache hit count. Defaulted so providers that omit
+/// it (vLLM, Ollama, older OpenAI) parse to zero.
+#[derive(Deserialize, Default)]
+struct PromptTokensDetails {
+    #[serde(default)]
+    cached_tokens: u32,
 }
 
 #[cfg(test)]

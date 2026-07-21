@@ -6,10 +6,52 @@
 //! `context-summarizing`.
 
 use crate::{assemble_messages, estimate_tokens};
-use agent_core::{ContextInput, ContextStrategy, Message, Result, Role, TokenBudget, WorkingSet};
+use agent_core::{
+    ContextInput, ContextStrategy, Message, Result, Role, TokenBudget, Tokenizer, WorkingSet,
+};
 use async_trait::async_trait;
+use std::sync::Arc;
 
-pub struct SlidingWindow;
+/// Drop-oldest compaction. Holds an optional [`Tokenizer`]: when present, the
+/// budget boundary is computed from the target model's **real** token count
+/// (parity spec 23); when absent it falls back to the crate-private `~chars/4`
+/// [`estimate_tokens`] heuristic — the only count available before this seam.
+#[derive(Default)]
+pub struct SlidingWindow {
+    tokenizer: Option<Arc<dyn Tokenizer>>,
+    /// The model whose tokenization the budget is measured in (unused by the
+    /// heuristic fallback).
+    model: String,
+}
+
+impl SlidingWindow {
+    /// Accurate-count variant: budget the working set with `tokenizer` for `model`.
+    /// A `None` tokenizer degrades to the heuristic.
+    pub fn new(tokenizer: Option<Arc<dyn Tokenizer>>, model: impl Into<String>) -> Self {
+        Self {
+            tokenizer,
+            model: model.into(),
+        }
+    }
+
+    /// Heuristic-only variant (no tokenizer) — the pre-spec-23 behaviour, handy in
+    /// tests that don't exercise the seam.
+    pub fn heuristic() -> Self {
+        Self::default()
+    }
+
+    /// Tokens in `messages` under the configured tokenizer, or the heuristic when
+    /// none is set (or the tokenizer errors — budgeting must never hard-fail).
+    async fn budget_tokens(&self, messages: &[Message]) -> u32 {
+        match &self.tokenizer {
+            Some(t) => t
+                .count_messages(messages, &self.model)
+                .await
+                .unwrap_or_else(|_| estimate_tokens(messages)),
+            None => estimate_tokens(messages),
+        }
+    }
+}
 
 #[async_trait]
 impl ContextStrategy for SlidingWindow {
@@ -23,7 +65,9 @@ impl ContextStrategy for SlidingWindow {
             .saturating_sub(budget.reserve_output);
 
         // Drop the oldest non-system message until we fit (or can't trim more).
-        while estimate_tokens(&working.messages) > target {
+        // The gate uses the real tokenizer count when configured, so the boundary
+        // matches the model's actual window rather than a byte estimate.
+        while self.budget_tokens(&working.messages).await > target {
             let victim = working.messages.iter().position(|m| m.role != Role::System);
             match victim {
                 Some(idx) if working.messages.len() > 2 => {
@@ -43,11 +87,8 @@ impl ContextStrategy for SlidingWindow {
             }
         }
 
-        tracing::debug!(
-            estimated_tokens = estimate_tokens(&working.messages),
-            target,
-            "compacted working set"
-        );
+        let final_tokens = self.budget_tokens(&working.messages).await;
+        tracing::debug!(tokens = final_tokens, target, "compacted working set");
         Ok(())
     }
 }
@@ -72,7 +113,7 @@ mod tests {
                 content: "POST-CONTENT".into(),
             }],
         };
-        let msgs = SlidingWindow.assemble(input).await.unwrap();
+        let msgs = SlidingWindow::heuristic().assemble(input).await.unwrap();
 
         // [ system(base+prepend), user(goal), system(append) ]
         assert_eq!(msgs.len(), 3);
@@ -94,7 +135,7 @@ mod tests {
             goal: "g".into(),
             append: vec![],
         };
-        let msgs = SlidingWindow.assemble(input).await.unwrap();
+        let msgs = SlidingWindow::heuristic().assemble(input).await.unwrap();
         assert_eq!(msgs.len(), 2);
     }
 
@@ -125,7 +166,10 @@ mod tests {
             max_context_tokens: 400,
             reserve_output: 100,
         }; // target 300
-        SlidingWindow.compact(&mut w, &budget).await.unwrap();
+        SlidingWindow::heuristic()
+            .compact(&mut w, &budget)
+            .await
+            .unwrap();
         assert!(estimate_tokens(&w.messages) <= 300, "still over target");
         assert_eq!(w.messages[0].role, Role::System, "system head kept");
         assert!(w.messages.len() < 5, "some turns were dropped");
@@ -140,7 +184,10 @@ mod tests {
             max_context_tokens: 100_000,
             reserve_output: 1000,
         };
-        SlidingWindow.compact(&mut w, &budget).await.unwrap();
+        SlidingWindow::heuristic()
+            .compact(&mut w, &budget)
+            .await
+            .unwrap();
         assert_eq!(w.messages.len(), 2);
     }
 
@@ -158,8 +205,97 @@ mod tests {
             max_context_tokens: 1,
             reserve_output: 0,
         };
-        SlidingWindow.compact(&mut w, &budget).await.unwrap();
+        SlidingWindow::heuristic()
+            .compact(&mut w, &budget)
+            .await
+            .unwrap();
         assert!(w.messages.len() >= 2);
+    }
+
+    // --- real token count drives compaction (the spec-23 differentiator) -----
+    // `FixedVocabTokenizer` counts 1 token per whitespace word; `long(role,n)`
+    // builds "x "×n = n words. So the tokenizer sees ~n tokens where the byte
+    // heuristic sees ~n/2 — the two disagree about the budget boundary, and the
+    // injected tokenizer must win.
+    use agent_testkit::FixedVocabTokenizer;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn compact_uses_real_count_where_heuristic_would_not() {
+        // Two 100-word user turns: tokenizer count ≈ 206, heuristic ≈ 106.
+        let msgs = || WorkingSet {
+            messages: vec![
+                Message::system("s"),
+                long(Role::User, 100),
+                long(Role::User, 100),
+            ],
+        };
+        // Target 150 sits *between* the heuristic (106) and the real count (206).
+        let budget = TokenBudget {
+            max_context_tokens: 200,
+            reserve_output: 50,
+        };
+
+        // Heuristic thinks we're under budget → no-op.
+        let mut w_heur = msgs();
+        SlidingWindow::heuristic()
+            .compact(&mut w_heur, &budget)
+            .await
+            .unwrap();
+        assert_eq!(
+            w_heur.messages.len(),
+            3,
+            "heuristic wrongly leaves it alone"
+        );
+
+        // The real tokenizer knows we're over → it drops a turn.
+        let mut w_tok = msgs();
+        SlidingWindow::new(Some(Arc::new(FixedVocabTokenizer)), "fixed")
+            .compact(&mut w_tok, &budget)
+            .await
+            .unwrap();
+        assert!(
+            w_tok.messages.len() < 3,
+            "real count should trigger a drop the heuristic skips"
+        );
+        let tok = FixedVocabTokenizer;
+        assert!(
+            tok.count_messages(&w_tok.messages, "fixed").await.unwrap() <= 150,
+            "real count under target after compaction"
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_noop_where_heuristic_would_over_count() {
+        // The reverse crossover: one long *space-free* blob — the tokenizer sees
+        // ~1 token, the byte heuristic sees ~100. Under a target of 50 the
+        // heuristic would compact; the real count must leave it untouched.
+        let blob = Message::user("x".repeat(400));
+        let msgs = || WorkingSet {
+            messages: vec![Message::system("s"), blob.clone(), Message::assistant("ok")],
+        };
+        let budget = TokenBudget {
+            max_context_tokens: 50,
+            reserve_output: 0,
+        };
+
+        let mut w_heur = msgs();
+        SlidingWindow::heuristic()
+            .compact(&mut w_heur, &budget)
+            .await
+            .unwrap();
+        assert!(w_heur.messages.len() < 3, "heuristic over-counts and trims");
+
+        let mut w_tok = msgs();
+        SlidingWindow::new(Some(Arc::new(FixedVocabTokenizer)), "fixed")
+            .compact(&mut w_tok, &budget)
+            .await
+            .unwrap();
+        assert_eq!(
+            w_tok.messages.len(),
+            3,
+            "real count is under budget → no compaction"
+        );
     }
 
     #[tokio::test]
@@ -177,7 +313,10 @@ mod tests {
             max_context_tokens: 100_000,
             reserve_output: 0,
         };
-        SlidingWindow.compact(&mut w, &budget).await.unwrap();
+        SlidingWindow::heuristic()
+            .compact(&mut w, &budget)
+            .await
+            .unwrap();
         assert_eq!(w.messages[0].role, Role::System);
         assert_eq!(w.messages[1].role, Role::Assistant, "orphan tool removed");
     }
