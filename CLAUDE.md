@@ -100,11 +100,36 @@ nix develop -c cargo test -p agent-metrics --features dhat-heap --test leak   # 
 Per-component docs live in `docs/components/*.md`; add/adjust the matching doc
 when you change a component.
 
+## Security: the model is untrusted
+
+The LLM is prompt-injectable, so **every tool arg** (paths, ids, names, regexes,
+patch content, revisions) and **every provider/server value** (codes, headers,
+numbers, backoff hints) is attacker-controlled. **Fail closed.** Rules that already
+cost a bug:
+
+- Model **paths** go through `confine()` (`agent-tools/src/lib.rs`) — canonicalizes
+  to block symlink escape — never lexical `resolve_within` alone. `bash` is the
+  intentional unconfined escape hatch (gated by `Policy`).
+- Model **ids/names** that become a path segment or git ref pass `safe_segment`
+  (`agent-git`): reject `..`, separators, leading `-`, ref-special chars — don't
+  sanitize (traversal, ref-injection like `../../heads/main`).
+- Guards screen the **resolved** path, **case-insensitively**, and are best-effort
+  defense-in-depth, not a sandbox — don't oversell them.
+- **Hostile numbers** (NaN/negative/inf token counts, prices, hints) are
+  clamped/zeroed before a Prometheus `inc_by` (panics), a total, or a `sleep`; retry
+  only transient failures and **cap** server backoff hints.
+- **Cap** output, file size before buffering, entry/hit counts.
+- Retry/backoff is one library (`agent-retry`) — never hand-roll.
+
 ## Conventions
 
-- **Tests are table-driven** with `rstest` `#[case]`; shared test doubles +
-  `tempdir()` live in `agent-testkit`. Match the existing style (see
-  `crates/agent-grpc/tests/roundtrip.rs`, `crates/agent-tools/src/search.rs`).
+- **Tests are table-driven** (`rstest` `#[case::name]`; doubles + `tempdir()` in
+  `agent-testkit`; model on `crates/agent-tools/src/edit.rs`). Cover **all four**
+  case classes by prefix — `positive_`/`negative_`/`corner_`/`boundary_`; for
+  **untrusted input**, `adversarial_` cases (traversal/injection/overflow/huge) are
+  **mandatory** and must assert the rejection. Test the composition and the
+  error/fallback branches, not just the parts and the happy path. `#[cfg(test)] mod`
+  goes at the **end** of the file (clippy `items_after_test_module`).
 - **Adding a seam impl**: implement the trait → add a feature to the owning
   crate → register a factory line in `register_builtins` (guarded by the feature)
   → document it. See `docs/extending.md`.
