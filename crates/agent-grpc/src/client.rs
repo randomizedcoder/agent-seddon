@@ -51,15 +51,24 @@ fn grpc_retry_policy() -> agent_retry::RetryPolicy {
 /// honouring the server's `grpc-retry-pushback-ms` hint (including its `-1`
 /// "do not retry" sentinel); fail fast on every other status.
 fn grpc_retry_decision(status: &tonic::Status) -> Option<Option<std::time::Duration>> {
+    use agent_retry::grpc::Pushback;
+    let retryable = agent_retry::grpc::retryable_code(status.code() as i32);
     match status
         .metadata()
         .get("grpc-retry-pushback-ms")
         .and_then(|v| v.to_str().ok())
         .and_then(agent_retry::grpc::parse_pushback)
     {
-        Some(agent_retry::grpc::Pushback::DoNotRetry) => None,
-        Some(agent_retry::grpc::Pushback::RetryAfter(d)) => Some(Some(d)),
-        None if agent_retry::grpc::retryable_code(status.code() as i32) => Some(None),
+        // The server explicitly forbids a retry — always honoured.
+        Some(Pushback::DoNotRetry) => None,
+        // A positive pushback only modulates the *delay* for a code we would already
+        // retry. It must NOT let a hostile server force retries of a permanent error
+        // (INVALID_ARGUMENT / PERMISSION_DENIED / …) by attaching a pushback header —
+        // that is an amplification/abuse vector.
+        Some(Pushback::RetryAfter(d)) if retryable => Some(Some(d)),
+        Some(Pushback::RetryAfter(_)) => None,
+        // No (usable) hint: fall back to code classification.
+        None if retryable => Some(None),
         None => None,
     }
 }
@@ -766,4 +775,49 @@ pub async fn grpc_tools(endpoint: &Endpoint) -> Result<Vec<Arc<dyn Tool>>> {
         }));
     }
     Ok(tools)
+}
+
+#[cfg(test)]
+mod retry_decision_tests {
+    use super::grpc_retry_decision;
+    use agent_retry::grpc::code;
+    use rstest::rstest;
+    use std::time::Duration;
+
+    /// Build a `Status` with `code` and an optional `grpc-retry-pushback-ms` value.
+    fn status(code: i32, pushback: Option<&str>) -> tonic::Status {
+        let mut s = tonic::Status::new(tonic::Code::from_i32(code), "test");
+        if let Some(v) = pushback {
+            s.metadata_mut()
+                .insert("grpc-retry-pushback-ms", v.parse().unwrap());
+        }
+        s
+    }
+
+    // The result shape: `None` = don't retry, `Some(None)` = retry with computed
+    // backoff, `Some(Some(d))` = retry after the server's delay.
+    #[rstest]
+    #[case::positive_retryable_no_hint(code::UNAVAILABLE, None, Some(None))]
+    #[case::positive_resource_exhausted(code::RESOURCE_EXHAUSTED, None, Some(None))]
+    #[case::positive_pushback_delay(
+        code::UNAVAILABLE,
+        Some("100"),
+        Some(Some(Duration::from_millis(100)))
+    )]
+    #[case::negative_nonretryable_no_hint(code::INVALID_ARGUMENT, None, None)]
+    #[case::negative_permission_denied(code::PERMISSION_DENIED, None, None)]
+    // Adversarial: `-1` must veto a retry even on a retryable code.
+    #[case::adversarial_do_not_retry_overrides(code::UNAVAILABLE, Some("-1"), None)]
+    // Adversarial: a positive pushback must NOT force a retry of a permanent error.
+    #[case::adversarial_pushback_on_nonretryable(code::INVALID_ARGUMENT, Some("2500"), None)]
+    // Corner: an unparseable/garbage hint falls back to code classification.
+    #[case::corner_garbage_hint_falls_through(code::UNAVAILABLE, Some("later"), Some(None))]
+    #[case::corner_other_negative_not_sentinel(code::UNAVAILABLE, Some("-2"), Some(None))]
+    fn decision_cases(
+        #[case] code: i32,
+        #[case] pushback: Option<&str>,
+        #[case] expected: Option<Option<Duration>>,
+    ) {
+        assert_eq!(grpc_retry_decision(&status(code, pushback)), expected);
+    }
 }
