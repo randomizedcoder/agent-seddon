@@ -131,6 +131,27 @@ impl Agent {
         self.repo.clone()
     }
 
+    /// Best-effort removal of this session's disposable worktrees, so an aborted or
+    /// finished run doesn't leave them orphaned on disk. Call it on every exit path
+    /// (success, error, Ctrl-C). `worktree_list` is scoped to this session's run
+    /// directory, so it never disturbs a concurrent session. Logs failures; the
+    /// method itself never errors (cleanup must not mask the real outcome).
+    pub async fn cleanup(&self) {
+        let Some(repo) = &self.repo else { return };
+        let worktrees = match repo.worktree_list().await {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::warn!(error = %e, "worktree list failed during cleanup");
+                return;
+            }
+        };
+        for wt in worktrees {
+            if let Err(e) = repo.worktree_remove(&wt.id).await {
+                tracing::warn!(id = %wt.id, error = %e, "worktree cleanup failed");
+            }
+        }
+    }
+
     pub fn session(&self) -> Session<'_> {
         Session {
             agent: self,
@@ -637,6 +658,7 @@ mod tests {
         final_turn, tool_turn, EchoTool, FnProvider, RecordingMemory, ScriptedProvider,
         StaticContext,
     };
+    use rstest::rstest;
     use serde_json::json;
 
     /// Emits three tool calls on the first turn, then a final answer. The
@@ -996,6 +1018,165 @@ mod tests {
             .expect_err("should hit the iteration bound")
             .to_string();
         assert!(err.contains("max_iterations"), "{err}");
+    }
+
+    // ---- worktree cleanup on exit ------------------------------------------
+
+    /// A scriptable `RepoBackend` for `Agent::cleanup`: `list` is what
+    /// `worktree_list` returns (`None` ⇒ the list call errors), `fail_remove` names
+    /// ids whose `worktree_remove` errors, and `removed` records every id cleanup
+    /// *attempted*. Everything else is unimplemented (cleanup only touches
+    /// `worktree_list` / `worktree_remove`).
+    #[derive(Clone)]
+    struct RecordingRepo {
+        list: Option<Vec<String>>,
+        fail_remove: Vec<String>,
+        removed: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+    impl RecordingRepo {
+        fn new(list: Option<Vec<&str>>, fail_remove: Vec<&str>) -> Self {
+            Self {
+                list: list.map(|l| l.into_iter().map(String::from).collect()),
+                fail_remove: fail_remove.into_iter().map(String::from).collect(),
+                removed: Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
+    }
+    #[async_trait::async_trait]
+    impl agent_core::RepoBackend for RecordingRepo {
+        async fn worktree_list(&self) -> agent_core::Result<Vec<agent_core::WorktreeHandle>> {
+            let ids = self
+                .list
+                .clone()
+                .ok_or_else(|| agent_core::Error::Repo("list failed".into()))?;
+            Ok(ids
+                .into_iter()
+                .map(|id| agent_core::WorktreeHandle {
+                    path: std::path::PathBuf::from(&id),
+                    id,
+                    head: agent_core::Oid("0".into()),
+                    revision: agent_core::Revision("HEAD".into()),
+                    writable: true,
+                })
+                .collect())
+        }
+        async fn worktree_remove(&self, id: &str) -> agent_core::Result<()> {
+            self.removed.lock().unwrap().push(id.to_string());
+            if self.fail_remove.iter().any(|f| f == id) {
+                return Err(agent_core::Error::Repo(format!("remove `{id}` failed")));
+            }
+            Ok(())
+        }
+        // --- unused by cleanup ---
+        async fn resolve(&self, _: &agent_core::Revision) -> agent_core::Result<agent_core::Oid> {
+            unimplemented!()
+        }
+        async fn read_file(
+            &self,
+            _: &agent_core::Revision,
+            _: &std::path::Path,
+        ) -> agent_core::Result<agent_core::BlobContent> {
+            unimplemented!()
+        }
+        async fn list_tree(
+            &self,
+            _: &agent_core::Revision,
+            _: &std::path::Path,
+            _: bool,
+        ) -> agent_core::Result<Vec<agent_core::TreeEntry>> {
+            unimplemented!()
+        }
+        async fn diff(
+            &self,
+            _: &agent_core::Revision,
+            _: &agent_core::Revision,
+            _: &[String],
+        ) -> agent_core::Result<agent_core::DiffResult> {
+            unimplemented!()
+        }
+        async fn grep(
+            &self,
+            _: &agent_core::Revision,
+            _: &str,
+            _: &[String],
+            _: usize,
+        ) -> agent_core::Result<Vec<agent_core::GrepHit>> {
+            unimplemented!()
+        }
+        async fn log(
+            &self,
+            _: &agent_core::Revision,
+            _: Option<&std::path::Path>,
+            _: usize,
+        ) -> agent_core::Result<Vec<agent_core::CommitInfo>> {
+            unimplemented!()
+        }
+        async fn branches(&self) -> agent_core::Result<Vec<(String, agent_core::Oid)>> {
+            unimplemented!()
+        }
+        async fn status(&self) -> agent_core::Result<agent_core::RepoStatus> {
+            unimplemented!()
+        }
+        async fn fetch(&self) -> agent_core::Result<agent_core::RepoStatus> {
+            unimplemented!()
+        }
+        async fn worktree_add(
+            &self,
+            _: &agent_core::WorktreeSpec,
+        ) -> agent_core::Result<agent_core::WorktreeHandle> {
+            unimplemented!()
+        }
+        async fn checkpoint(&self, _: &str, _: &str) -> agent_core::Result<agent_core::Checkpoint> {
+            unimplemented!()
+        }
+        async fn push(&self, _: &agent_core::Checkpoint, _: &str) -> agent_core::Result<()> {
+            unimplemented!()
+        }
+    }
+
+    fn bare_agent() -> Agent {
+        Agent::new(
+            Arc::new(ScriptedProvider::new(vec![final_turn("x")])),
+            ToolRegistry::new(),
+            Arc::new(RecordingMemory::new()),
+            Arc::new(StaticContext),
+            Arc::new(crate::policy::AutoApprove),
+            Metrics::new(),
+            settings(false),
+        )
+    }
+
+    /// Cleanup must remove **exactly** what `worktree_list` reports (it can't reach
+    /// anything else — that's the session-scoping guarantee), keep going when a
+    /// remove fails, and never panic when the list call errors. `list = None` models
+    /// the list RPC failing; `fail` names ids whose remove errors. `expected` is the
+    /// set of ids cleanup should *attempt*.
+    #[rstest]
+    #[case::positive_removes_all(Some(vec!["w0", "w1"]), vec![], vec!["w0", "w1"])]
+    #[case::boundary_empty_list(Some(vec![]), vec![], vec![])]
+    #[case::boundary_single(Some(vec!["only"]), vec![], vec!["only"])]
+    #[case::negative_list_error_is_swallowed(None, vec![], vec![])]
+    #[case::corner_partial_failure_continues(
+        Some(vec!["w0", "w1", "w2"]), vec!["w1"], vec!["w0", "w1", "w2"])]
+    #[case::corner_all_removes_fail(Some(vec!["w0", "w1"]), vec!["w0", "w1"], vec!["w0", "w1"])]
+    #[tokio::test]
+    async fn cleanup_cases(
+        #[case] list: Option<Vec<&str>>,
+        #[case] fail: Vec<&str>,
+        #[case] expected: Vec<&str>,
+    ) {
+        let repo = RecordingRepo::new(list, fail);
+        let agent = bare_agent().with_repo(Arc::new(repo.clone()));
+        agent.cleanup().await; // must not panic on any input
+        let got = repo.removed.lock().unwrap().clone();
+        let want: Vec<String> = expected.into_iter().map(String::from).collect();
+        assert_eq!(got, want);
+    }
+
+    #[tokio::test]
+    async fn cleanup_is_a_noop_without_a_repo() {
+        // No git backend wired → cleanup does nothing and doesn't panic.
+        bare_agent().cleanup().await;
     }
 
     // ---- tool timeout + panic isolation ------------------------------------

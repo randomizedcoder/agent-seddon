@@ -114,14 +114,25 @@ pub async fn run(
             continue;
         }
 
-        match session.send(line).await {
-            Ok(answer) => {
-                println!("{answer}");
-                if let Err(e) = session_store::save(sessions_dir, &id, session.messages()) {
-                    tracing::warn!("could not save session: {e}");
-                }
-            }
-            Err(e) => eprintln!("error: {e}"),
+        // Race the turn against Ctrl-C so an interrupt cancels just this turn
+        // instead of killing the REPL.
+        enum Turn {
+            Done(anyhow::Result<String>),
+            Interrupted,
+        }
+        let turn = tokio::select! {
+            r = session.send(line) => Turn::Done(r),
+            _ = tokio::signal::ctrl_c() => Turn::Interrupted,
+        };
+        // Save regardless of outcome: a turn that errored or was interrupted still
+        // leaves a resumable transcript (the working set was mutated in place).
+        if let Err(e) = session_store::save(sessions_dir, &id, session.messages()) {
+            tracing::warn!("could not save session: {e}");
+        }
+        match turn {
+            Turn::Done(Ok(answer)) => println!("{answer}"),
+            Turn::Done(Err(e)) => eprintln!("error: {e}"),
+            Turn::Interrupted => eprintln!("\n^C — turn interrupted (partial transcript saved)"),
         }
     }
 

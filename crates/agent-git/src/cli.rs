@@ -212,6 +212,33 @@ fn sanitize(s: &str) -> String {
         .collect()
 }
 
+/// Validate a **caller-supplied** worktree id / checkpoint name before it is used
+/// to build a filesystem path under the runs dir or a git ref.
+///
+/// The caller here is ultimately the model (via the `git_worktree` / `git_checkpoint`
+/// tools), which is untrusted under prompt injection, so this is **fail-closed**: it
+/// rejects path traversal (`..`, path separators — which would let
+/// `worktree remove --force <runs>/<id>` escape the runs dir) and ref-injection
+/// (e.g. a checkpoint `name` of `../../heads/main` would otherwise write
+/// `refs/heads/main` and hijack a branch). A value must be a single, non-empty
+/// `[A-Za-z0-9._-]` segment that is not `.`/`..` and does not start with `-`.
+fn safe_segment(kind: &str, s: &str) -> Result<()> {
+    let valid = !s.is_empty()
+        && s != "."
+        && s != ".."
+        && !s.starts_with('-')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    if valid {
+        Ok(())
+    } else {
+        Err(Error::Repo(format!(
+            "invalid {kind} `{s}`: must be a single `[A-Za-z0-9._-]` segment \
+             (no path separators, `..`, or leading `-`)"
+        )))
+    }
+}
+
 #[async_trait]
 impl RepoBackend for CliBackend {
     async fn resolve(&self, rev: &Revision) -> Result<Oid> {
@@ -528,6 +555,11 @@ impl RepoBackend for CliBackend {
     }
 
     async fn worktree_add(&self, spec: &WorktreeSpec) -> Result<WorktreeHandle> {
+        // A caller-supplied id must be a safe path segment; the auto-generated one
+        // (below) is already `sanitize`d.
+        if let Some(id) = &spec.id {
+            safe_segment("worktree id", id)?;
+        }
         let oid = self.resolve(&spec.revision).await?;
         let id = spec.id.clone().unwrap_or_else(|| {
             let short = &oid.as_str()[..oid.as_str().len().min(8)];
@@ -591,6 +623,7 @@ impl RepoBackend for CliBackend {
     }
 
     async fn worktree_remove(&self, id: &str) -> Result<()> {
+        safe_segment("worktree id", id)?;
         let base = self.base().to_path_buf();
         let path = self.worktrees.join(id);
         let path_str = path.to_string_lossy().into_owned();
@@ -602,6 +635,10 @@ impl RepoBackend for CliBackend {
     }
 
     async fn checkpoint(&self, worktree_id: &str, name: &str) -> Result<Checkpoint> {
+        // Both flow into a path and a ref (`refs/agent/checkpoints/<id>/<name>`);
+        // reject traversal/ref-injection before touching the filesystem or refs.
+        safe_segment("worktree id", worktree_id)?;
+        safe_segment("checkpoint name", name)?;
         let path = self.worktrees.join(worktree_id);
         if !path.exists() {
             return Err(Error::Repo(format!("no worktree `{worktree_id}`")));
@@ -629,5 +666,85 @@ impl RepoBackend for CliBackend {
         let refspec = format!("{}:{}", checkpoint.ref_name, remote_ref);
         self.git_str(&base, &["push", &remote, &refspec]).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_core::RepoBackend;
+    use rstest::rstest;
+
+    // --- safe_segment: fail-closed validation of caller-supplied ids/names ---
+    // The model (untrusted under prompt injection) supplies worktree ids and
+    // checkpoint names via the git tools; these must not traverse the runs dir or
+    // inject a git ref.
+    #[rstest]
+    // positive: ordinary ids/names
+    #[case::positive_simple("main", true)]
+    #[case::positive_dash_underscore_dot("feat_x-1.2", true)]
+    #[case::positive_oid_like("mainline-a1b2c3d4", true)]
+    // boundary
+    #[case::boundary_single_char("a", true)]
+    #[case::boundary_empty("", false)]
+    // adversarial: path traversal / escaping the runs dir
+    #[case::adversarial_parent("..", false)]
+    #[case::adversarial_current(".", false)]
+    #[case::adversarial_slash_traversal("../../etc/passwd", false)]
+    #[case::adversarial_forward_slash("a/b", false)]
+    #[case::adversarial_back_slash("a\\b", false)]
+    // adversarial: git ref injection (a checkpoint name → refs/.../<name>)
+    #[case::adversarial_ref_hijack("../../heads/main", false)]
+    // corner: git/shell metacharacters + arg injection + non-ascii
+    #[case::corner_leading_dash("-rf", false)]
+    #[case::corner_glob("a*", false)]
+    #[case::corner_ref_tilde("a~1", false)]
+    #[case::corner_space("a b", false)]
+    #[case::corner_colon("refs:x", false)]
+    #[case::corner_control_char("a\nb", false)]
+    #[case::corner_unicode("café", false)]
+    fn safe_segment_cases(#[case] s: &str, #[case] ok: bool) {
+        assert_eq!(safe_segment("id", s).is_ok(), ok, "input {s:?}");
+    }
+
+    fn backend() -> CliBackend {
+        let dir = agent_testkit::tempdir();
+        CliBackend::new(
+            dir.join("root"),
+            dir.join("mirror"),
+            dir.join("worktrees"),
+            "",
+        )
+    }
+
+    // The backend methods must reject a malicious id/name *before* running any git
+    // command (so no path escape / ref write can happen).
+    #[tokio::test]
+    async fn worktree_remove_rejects_traversal() {
+        let err = backend().worktree_remove("../../evil").await.unwrap_err();
+        assert!(err.to_string().contains("invalid worktree id"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn checkpoint_rejects_ref_injection_name() {
+        // `../../heads/main` must not be allowed to write refs/heads/main.
+        let err = backend()
+            .checkpoint("wt", "../../heads/main")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("invalid checkpoint name"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn worktree_add_rejects_traversal_id() {
+        let err = backend()
+            .worktree_add(&agent_core::WorktreeSpec {
+                revision: agent_core::Revision("HEAD".into()),
+                writable: true,
+                id: Some("../escape".into()),
+            })
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("invalid worktree id"), "{err}");
     }
 }
