@@ -39,6 +39,44 @@ fn outbound<T>(msg: T) -> tonic::Request<T> {
     req
 }
 
+/// Default retry policy for the gRPC seam clients: the canonical backoff (+ full
+/// jitter) with 3 attempts. Threading a `[grpc] max_retries` value here is a
+/// trivial follow-up; the wiring below is the substance.
+fn grpc_retry_policy() -> agent_retry::RetryPolicy {
+    agent_retry::RetryPolicy::new(3)
+}
+
+/// Retry decision for a gRPC `Status`, in the shape `agent_retry::retry` wants:
+/// retry the transient "overloaded" codes (`UNAVAILABLE` / `RESOURCE_EXHAUSTED`),
+/// honouring the server's `grpc-retry-pushback-ms` hint (including its `-1`
+/// "do not retry" sentinel); fail fast on every other status.
+fn grpc_retry_decision(status: &tonic::Status) -> Option<Option<std::time::Duration>> {
+    match status
+        .metadata()
+        .get("grpc-retry-pushback-ms")
+        .and_then(|v| v.to_str().ok())
+        .and_then(agent_retry::grpc::parse_pushback)
+    {
+        Some(agent_retry::grpc::Pushback::DoNotRetry) => None,
+        Some(agent_retry::grpc::Pushback::RetryAfter(d)) => Some(Some(d)),
+        None if agent_retry::grpc::retryable_code(status.code() as i32) => Some(None),
+        None => None,
+    }
+}
+
+/// Run a **unary** gRPC call `op` through the canonical retry driver with the gRPC
+/// classifier. `op` is re-invoked per attempt, so clone the request inside it.
+/// (Streaming RPCs are intentionally not retried — a partial stream can't replay.)
+async fn call_retry<T, Fut>(
+    policy: &agent_retry::RetryPolicy,
+    op: impl FnMut() -> Fut,
+) -> std::result::Result<T, tonic::Status>
+where
+    Fut: std::future::Future<Output = std::result::Result<T, tonic::Status>>,
+{
+    agent_retry::retry(policy, grpc_retry_decision, op).await
+}
+
 // ---------------------------------------------------------------------------
 // Provider
 // ---------------------------------------------------------------------------
@@ -46,6 +84,7 @@ fn outbound<T>(msg: T) -> tonic::Request<T> {
 pub struct GrpcProvider {
     client: pb::provider_client::ProviderClient<Channel>,
     caps: ModelCapabilities,
+    retry: agent_retry::RetryPolicy,
 }
 
 impl GrpcProvider {
@@ -58,6 +97,7 @@ impl GrpcProvider {
         Ok(Self {
             client: pb::provider_client::ProviderClient::new(channel),
             caps,
+            retry: grpc_retry_policy(),
         })
     }
 }
@@ -69,11 +109,14 @@ impl LlmProvider for GrpcProvider {
     }
 
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse> {
-        let mut client = self.client.clone();
-        let resp = client
-            .complete(outbound(pb::CompletionRequest::from(req)))
-            .await
-            .map_err(|s| agent_core::Error::Provider(s.to_string()))?;
+        let pbreq = pb::CompletionRequest::from(req);
+        let resp = call_retry(&self.retry, || {
+            let mut client = self.client.clone();
+            let r = pbreq.clone();
+            async move { client.complete(outbound(r)).await }
+        })
+        .await
+        .map_err(|s| agent_core::Error::Provider(s.to_string()))?;
         resp.into_inner()
             .try_into()
             .map_err(|e: agent_proto::ConvertError| agent_core::Error::Provider(e.to_string()))
@@ -101,6 +144,7 @@ impl LlmProvider for GrpcProvider {
 
 pub struct GrpcMemory {
     client: pb::memory_client::MemoryClient<Channel>,
+    retry: agent_retry::RetryPolicy,
 }
 
 impl GrpcMemory {
@@ -110,6 +154,7 @@ impl GrpcMemory {
             .map_err(|e| agent_core::Error::Memory(e.to_string()))?;
         Ok(Self {
             client: pb::memory_client::MemoryClient::new(channel),
+            retry: grpc_retry_policy(),
         })
     }
 }
@@ -117,11 +162,14 @@ impl GrpcMemory {
 #[async_trait]
 impl MemoryStore for GrpcMemory {
     async fn recall(&self, query: &RecallQuery) -> Result<Vec<MemoryItem>> {
-        let mut client = self.client.clone();
-        let resp = client
-            .recall(outbound(pb::RecallQuery::from(query.clone())))
-            .await
-            .map_err(|s| agent_core::Error::Memory(s.to_string()))?;
+        let pbreq = pb::RecallQuery::from(query.clone());
+        let resp = call_retry(&self.retry, || {
+            let mut client = self.client.clone();
+            let r = pbreq.clone();
+            async move { client.recall(outbound(r)).await }
+        })
+        .await
+        .map_err(|s| agent_core::Error::Memory(s.to_string()))?;
         Ok(resp
             .into_inner()
             .items
@@ -131,20 +179,24 @@ impl MemoryStore for GrpcMemory {
     }
 
     async fn append(&self, event: MemoryEvent) -> Result<()> {
-        let mut client = self.client.clone();
-        client
-            .append(outbound(pb::MemoryEvent::from(event)))
-            .await
-            .map_err(|s| agent_core::Error::Memory(s.to_string()))?;
+        let pbreq = pb::MemoryEvent::from(event);
+        call_retry(&self.retry, || {
+            let mut client = self.client.clone();
+            let r = pbreq.clone();
+            async move { client.append(outbound(r)).await }
+        })
+        .await
+        .map_err(|s| agent_core::Error::Memory(s.to_string()))?;
         Ok(())
     }
 
     async fn distill(&self) -> Result<usize> {
-        let mut client = self.client.clone();
-        let resp = client
-            .distill(outbound(pb::DistillRequest {}))
-            .await
-            .map_err(|s| agent_core::Error::Memory(s.to_string()))?;
+        let resp = call_retry(&self.retry, || {
+            let mut client = self.client.clone();
+            async move { client.distill(outbound(pb::DistillRequest {})).await }
+        })
+        .await
+        .map_err(|s| agent_core::Error::Memory(s.to_string()))?;
         Ok(resp.into_inner().count as usize)
     }
 }
@@ -155,6 +207,7 @@ impl MemoryStore for GrpcMemory {
 
 pub struct GrpcContext {
     client: pb::context_service_client::ContextServiceClient<Channel>,
+    retry: agent_retry::RetryPolicy,
 }
 
 impl GrpcContext {
@@ -164,6 +217,7 @@ impl GrpcContext {
             .map_err(|e| agent_core::Error::Provider(e.to_string()))?;
         Ok(Self {
             client: pb::context_service_client::ContextServiceClient::new(channel),
+            retry: grpc_retry_policy(),
         })
     }
 }
@@ -171,11 +225,14 @@ impl GrpcContext {
 #[async_trait]
 impl ContextStrategy for GrpcContext {
     async fn assemble(&self, input: ContextInput) -> Result<Vec<Message>> {
-        let mut client = self.client.clone();
-        let resp = client
-            .assemble(outbound(pb::ContextInput::from(input)))
-            .await
-            .map_err(|s| agent_core::Error::Provider(s.to_string()))?;
+        let pbreq = pb::ContextInput::from(input);
+        let resp = call_retry(&self.retry, || {
+            let mut client = self.client.clone();
+            let r = pbreq.clone();
+            async move { client.assemble(outbound(r)).await }
+        })
+        .await
+        .map_err(|s| agent_core::Error::Provider(s.to_string()))?;
         resp.into_inner()
             .messages
             .into_iter()
@@ -185,15 +242,17 @@ impl ContextStrategy for GrpcContext {
     }
 
     async fn compact(&self, working: &mut WorkingSet, budget: &TokenBudget) -> Result<()> {
-        let mut client = self.client.clone();
         let req = pb::CompactRequest {
             working: Some(std::mem::take(working).into()),
             budget: Some(budget.clone().into()),
         };
-        let resp = client
-            .compact(outbound(req))
-            .await
-            .map_err(|s| agent_core::Error::Provider(s.to_string()))?;
+        let resp = call_retry(&self.retry, || {
+            let mut client = self.client.clone();
+            let r = req.clone();
+            async move { client.compact(outbound(r)).await }
+        })
+        .await
+        .map_err(|s| agent_core::Error::Provider(s.to_string()))?;
         let compacted = resp
             .into_inner()
             .working
@@ -211,6 +270,7 @@ impl ContextStrategy for GrpcContext {
 
 pub struct GrpcPolicy {
     client: pb::policy_client::PolicyClient<Channel>,
+    retry: agent_retry::RetryPolicy,
 }
 
 impl GrpcPolicy {
@@ -220,6 +280,7 @@ impl GrpcPolicy {
             .map_err(|e| agent_core::Error::Config(e.to_string()))?;
         Ok(Self {
             client: pb::policy_client::PolicyClient::new(channel),
+            retry: grpc_retry_policy(),
         })
     }
 }
@@ -227,13 +288,17 @@ impl GrpcPolicy {
 #[async_trait]
 impl Policy for GrpcPolicy {
     async fn authorize(&self, call: &agent_core::ToolCall) -> Decision {
-        let mut client = self.client.clone();
-        match client
-            .authorize(outbound(pb::ToolCall::from(call.clone())))
-            .await
+        let pbreq = pb::ToolCall::from(call.clone());
+        // Retry a transient policy-service blip before falling back; a persistent
+        // failure fails safe (deny) rather than silently allowing.
+        match call_retry(&self.retry, || {
+            let mut client = self.client.clone();
+            let r = pbreq.clone();
+            async move { client.authorize(outbound(r)).await }
+        })
+        .await
         {
             Ok(resp) => resp.into_inner().into(),
-            // Fail safe: a broken policy service denies rather than silently allows.
             Err(s) => Decision::Deny(format!("policy rpc failed: {s}")),
         }
     }
@@ -247,6 +312,7 @@ struct GrpcTool {
     client: pb::tool_service_client::ToolServiceClient<Channel>,
     schema: ToolSchema,
     parallel_safe: bool,
+    retry: agent_retry::RetryPolicy,
 }
 
 #[async_trait]
@@ -266,15 +332,21 @@ impl Tool for GrpcTool {
     }
 
     async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<Observation> {
-        let mut client = self.client.clone();
         let req = pb::ExecuteRequest {
             name: self.schema.name.clone(),
             arguments: Some(args.into()),
             context: Some(ctx.into()),
         };
         // Mirror `McpTool`: transport failures surface as an error observation, not
-        // a hard `Err`, so one flaky worker doesn't abort the turn.
-        match client.execute(outbound(req)).await {
+        // a hard `Err`, so one flaky worker doesn't abort the turn — but retry a
+        // transient overload/availability blip first.
+        match call_retry(&self.retry, || {
+            let mut client = self.client.clone();
+            let r = req.clone();
+            async move { client.execute(outbound(r)).await }
+        })
+        .await
+        {
             Ok(resp) => Ok(resp.into_inner().into()),
             Err(s) => Ok(Observation::error(format!(
                 "grpc tool `{}` failed: {s}",
@@ -290,6 +362,7 @@ impl Tool for GrpcTool {
 
 pub struct GrpcSearch {
     client: pb::search_service_client::SearchServiceClient<Channel>,
+    retry: agent_retry::RetryPolicy,
 }
 
 impl GrpcSearch {
@@ -299,6 +372,7 @@ impl GrpcSearch {
             .map_err(|e| agent_core::Error::Search(e.to_string()))?;
         Ok(Self {
             client: pb::search_service_client::SearchServiceClient::new(channel),
+            retry: grpc_retry_policy(),
         })
     }
 }
@@ -325,13 +399,18 @@ impl SearchBackend for GrpcSearch {
     }
 
     async fn status(&self) -> Result<IndexStatus> {
-        let mut client = self.client.clone();
-        let resp = client
-            .status(outbound(pb::StatusRequest {
-                backend: String::new(),
-            }))
-            .await
-            .map_err(|s| agent_core::Error::Search(s.to_string()))?;
+        let resp = call_retry(&self.retry, || {
+            let mut client = self.client.clone();
+            async move {
+                client
+                    .status(outbound(pb::StatusRequest {
+                        backend: String::new(),
+                    }))
+                    .await
+            }
+        })
+        .await
+        .map_err(|s| agent_core::Error::Search(s.to_string()))?;
         resp.into_inner()
             .backends
             .into_iter()
@@ -358,28 +437,32 @@ impl SearchBackend for GrpcSearch {
     }
 
     async fn query(&self, q: &SearchQuery) -> Result<Vec<SearchHit>> {
-        let mut client = self.client.clone();
         let req = pb::SearchRequest {
             query: Some(pb::SearchQuery::from(q.clone())),
             backend: String::new(),
         };
-        let resp = client
-            .search(outbound(req))
-            .await
-            .map_err(|s| agent_core::Error::Search(s.to_string()))?;
+        let resp = call_retry(&self.retry, || {
+            let mut client = self.client.clone();
+            let r = req.clone();
+            async move { client.search(outbound(r)).await }
+        })
+        .await
+        .map_err(|s| agent_core::Error::Search(s.to_string()))?;
         Ok(resp.into_inner().hits.into_iter().map(Into::into).collect())
     }
 
     async fn list_files(&self, globs: &[String]) -> Result<Vec<std::path::PathBuf>> {
-        let mut client = self.client.clone();
         let req = pb::ListFilesRequest {
             globs: globs.to_vec(),
             backend: String::new(),
         };
-        let resp = client
-            .list_files(outbound(req))
-            .await
-            .map_err(|s| agent_core::Error::Search(s.to_string()))?;
+        let resp = call_retry(&self.retry, || {
+            let mut client = self.client.clone();
+            let r = req.clone();
+            async move { client.list_files(outbound(r)).await }
+        })
+        .await
+        .map_err(|s| agent_core::Error::Search(s.to_string()))?;
         Ok(resp
             .into_inner()
             .paths
@@ -392,6 +475,7 @@ impl SearchBackend for GrpcSearch {
 /// A `RepoBackend` that calls a remote `RepoService` (multi-branch git gateway).
 pub struct GrpcRepo {
     client: pb::repo_service_client::RepoServiceClient<Channel>,
+    retry: agent_retry::RetryPolicy,
 }
 
 impl GrpcRepo {
@@ -401,6 +485,7 @@ impl GrpcRepo {
             .map_err(|e| agent_core::Error::Repo(e.to_string()))?;
         Ok(Self {
             client: pb::repo_service_client::RepoServiceClient::new(channel),
+            retry: grpc_retry_policy(),
         })
     }
 }
@@ -413,25 +498,31 @@ fn repo_err(s: tonic::Status) -> agent_core::Error {
 #[async_trait]
 impl RepoBackend for GrpcRepo {
     async fn resolve(&self, rev: &Revision) -> Result<Oid> {
-        let mut client = self.client.clone();
-        let resp = client
-            .resolve(outbound(pb::ResolveRequest {
-                revision: rev.0.clone(),
-            }))
-            .await
-            .map_err(repo_err)?;
+        let req = pb::ResolveRequest {
+            revision: rev.0.clone(),
+        };
+        let resp = call_retry(&self.retry, || {
+            let mut client = self.client.clone();
+            let r = req.clone();
+            async move { client.resolve(outbound(r)).await }
+        })
+        .await
+        .map_err(repo_err)?;
         Ok(Oid(resp.into_inner().oid))
     }
 
     async fn read_file(&self, rev: &Revision, path: &std::path::Path) -> Result<BlobContent> {
-        let mut client = self.client.clone();
-        let resp = client
-            .read_file(outbound(pb::ReadFileRequest {
-                revision: rev.0.clone(),
-                path: path.to_string_lossy().into_owned(),
-            }))
-            .await
-            .map_err(repo_err)?;
+        let req = pb::ReadFileRequest {
+            revision: rev.0.clone(),
+            path: path.to_string_lossy().into_owned(),
+        };
+        let resp = call_retry(&self.retry, || {
+            let mut client = self.client.clone();
+            let r = req.clone();
+            async move { client.read_file(outbound(r)).await }
+        })
+        .await
+        .map_err(repo_err)?;
         Ok(resp.into_inner().into())
     }
 
@@ -441,15 +532,18 @@ impl RepoBackend for GrpcRepo {
         path: &std::path::Path,
         recursive: bool,
     ) -> Result<Vec<TreeEntry>> {
-        let mut client = self.client.clone();
-        let resp = client
-            .list_tree(outbound(pb::ListTreeRequest {
-                revision: rev.0.clone(),
-                path: path.to_string_lossy().into_owned(),
-                recursive,
-            }))
-            .await
-            .map_err(repo_err)?;
+        let req = pb::ListTreeRequest {
+            revision: rev.0.clone(),
+            path: path.to_string_lossy().into_owned(),
+            recursive,
+        };
+        let resp = call_retry(&self.retry, || {
+            let mut client = self.client.clone();
+            let r = req.clone();
+            async move { client.list_tree(outbound(r)).await }
+        })
+        .await
+        .map_err(repo_err)?;
         Ok(resp
             .into_inner()
             .entries
@@ -464,15 +558,18 @@ impl RepoBackend for GrpcRepo {
         target: &Revision,
         path_globs: &[String],
     ) -> Result<DiffResult> {
-        let mut client = self.client.clone();
-        let resp = client
-            .diff(outbound(pb::DiffRequest {
-                base: base.0.clone(),
-                target: target.0.clone(),
-                path_globs: path_globs.to_vec(),
-            }))
-            .await
-            .map_err(repo_err)?;
+        let req = pb::DiffRequest {
+            base: base.0.clone(),
+            target: target.0.clone(),
+            path_globs: path_globs.to_vec(),
+        };
+        let resp = call_retry(&self.retry, || {
+            let mut client = self.client.clone();
+            let r = req.clone();
+            async move { client.diff(outbound(r)).await }
+        })
+        .await
+        .map_err(repo_err)?;
         Ok(resp.into_inner().into())
     }
 
@@ -483,16 +580,19 @@ impl RepoBackend for GrpcRepo {
         path_globs: &[String],
         limit: usize,
     ) -> Result<Vec<GrepHit>> {
-        let mut client = self.client.clone();
-        let resp = client
-            .grep(outbound(pb::GrepRequest {
-                revision: rev.0.clone(),
-                pattern: pattern.to_string(),
-                path_globs: path_globs.to_vec(),
-                limit: limit as u64,
-            }))
-            .await
-            .map_err(repo_err)?;
+        let req = pb::GrepRequest {
+            revision: rev.0.clone(),
+            pattern: pattern.to_string(),
+            path_globs: path_globs.to_vec(),
+            limit: limit as u64,
+        };
+        let resp = call_retry(&self.retry, || {
+            let mut client = self.client.clone();
+            let r = req.clone();
+            async move { client.grep(outbound(r)).await }
+        })
+        .await
+        .map_err(repo_err)?;
         Ok(resp.into_inner().hits.into_iter().map(Into::into).collect())
     }
 
@@ -502,15 +602,18 @@ impl RepoBackend for GrpcRepo {
         path: Option<&std::path::Path>,
         limit: usize,
     ) -> Result<Vec<CommitInfo>> {
-        let mut client = self.client.clone();
-        let resp = client
-            .log(outbound(pb::LogRequest {
-                revision: rev.0.clone(),
-                path: path.map(|p| p.to_string_lossy().into_owned()),
-                limit: limit as u64,
-            }))
-            .await
-            .map_err(repo_err)?;
+        let req = pb::LogRequest {
+            revision: rev.0.clone(),
+            path: path.map(|p| p.to_string_lossy().into_owned()),
+            limit: limit as u64,
+        };
+        let resp = call_retry(&self.retry, || {
+            let mut client = self.client.clone();
+            let r = req.clone();
+            async move { client.log(outbound(r)).await }
+        })
+        .await
+        .map_err(repo_err)?;
         Ok(resp
             .into_inner()
             .commits
@@ -520,11 +623,12 @@ impl RepoBackend for GrpcRepo {
     }
 
     async fn branches(&self) -> Result<Vec<(String, Oid)>> {
-        let mut client = self.client.clone();
-        let resp = client
-            .branches(outbound(pb::BranchesRequest {}))
-            .await
-            .map_err(repo_err)?;
+        let resp = call_retry(&self.retry, || {
+            let mut client = self.client.clone();
+            async move { client.branches(outbound(pb::BranchesRequest {})).await }
+        })
+        .await
+        .map_err(repo_err)?;
         Ok(resp
             .into_inner()
             .branches
@@ -534,38 +638,48 @@ impl RepoBackend for GrpcRepo {
     }
 
     async fn status(&self) -> Result<RepoStatus> {
-        let mut client = self.client.clone();
-        let resp = client
-            .status(outbound(pb::RepoStatusRequest {}))
-            .await
-            .map_err(repo_err)?;
+        let resp = call_retry(&self.retry, || {
+            let mut client = self.client.clone();
+            async move { client.status(outbound(pb::RepoStatusRequest {})).await }
+        })
+        .await
+        .map_err(repo_err)?;
         Ok(resp.into_inner().into())
     }
 
     async fn fetch(&self) -> Result<RepoStatus> {
-        let mut client = self.client.clone();
-        let resp = client
-            .fetch(outbound(pb::FetchRequest {}))
-            .await
-            .map_err(repo_err)?;
+        let resp = call_retry(&self.retry, || {
+            let mut client = self.client.clone();
+            async move { client.fetch(outbound(pb::FetchRequest {})).await }
+        })
+        .await
+        .map_err(repo_err)?;
         Ok(resp.into_inner().into())
     }
 
     async fn worktree_add(&self, spec: &WorktreeSpec) -> Result<WorktreeHandle> {
-        let mut client = self.client.clone();
-        let resp = client
-            .worktree_add(outbound(pb::WorktreeSpec::from(spec.clone())))
-            .await
-            .map_err(repo_err)?;
+        let req = pb::WorktreeSpec::from(spec.clone());
+        let resp = call_retry(&self.retry, || {
+            let mut client = self.client.clone();
+            let r = req.clone();
+            async move { client.worktree_add(outbound(r)).await }
+        })
+        .await
+        .map_err(repo_err)?;
         Ok(resp.into_inner().into())
     }
 
     async fn worktree_list(&self) -> Result<Vec<WorktreeHandle>> {
-        let mut client = self.client.clone();
-        let resp = client
-            .worktree_list(outbound(pb::WorktreeListRequest {}))
-            .await
-            .map_err(repo_err)?;
+        let resp = call_retry(&self.retry, || {
+            let mut client = self.client.clone();
+            async move {
+                client
+                    .worktree_list(outbound(pb::WorktreeListRequest {}))
+                    .await
+            }
+        })
+        .await
+        .map_err(repo_err)?;
         Ok(resp
             .into_inner()
             .worktrees
@@ -575,35 +689,44 @@ impl RepoBackend for GrpcRepo {
     }
 
     async fn worktree_remove(&self, id: &str) -> Result<()> {
-        let mut client = self.client.clone();
-        client
-            .worktree_remove(outbound(pb::WorktreeRemoveRequest { id: id.to_string() }))
-            .await
-            .map_err(repo_err)?;
+        let req = pb::WorktreeRemoveRequest { id: id.to_string() };
+        call_retry(&self.retry, || {
+            let mut client = self.client.clone();
+            let r = req.clone();
+            async move { client.worktree_remove(outbound(r)).await }
+        })
+        .await
+        .map_err(repo_err)?;
         Ok(())
     }
 
     async fn checkpoint(&self, worktree_id: &str, name: &str) -> Result<Checkpoint> {
-        let mut client = self.client.clone();
-        let resp = client
-            .create_checkpoint(outbound(pb::CheckpointRequest {
-                worktree_id: worktree_id.to_string(),
-                name: name.to_string(),
-            }))
-            .await
-            .map_err(repo_err)?;
+        let req = pb::CheckpointRequest {
+            worktree_id: worktree_id.to_string(),
+            name: name.to_string(),
+        };
+        let resp = call_retry(&self.retry, || {
+            let mut client = self.client.clone();
+            let r = req.clone();
+            async move { client.create_checkpoint(outbound(r)).await }
+        })
+        .await
+        .map_err(repo_err)?;
         Ok(resp.into_inner().into())
     }
 
     async fn push(&self, checkpoint: &Checkpoint, remote_ref: &str) -> Result<()> {
-        let mut client = self.client.clone();
-        client
-            .push(outbound(pb::PushRequest {
-                checkpoint: Some(pb::Checkpoint::from(checkpoint.clone())),
-                remote_ref: remote_ref.to_string(),
-            }))
-            .await
-            .map_err(repo_err)?;
+        let req = pb::PushRequest {
+            checkpoint: Some(pb::Checkpoint::from(checkpoint.clone())),
+            remote_ref: remote_ref.to_string(),
+        };
+        call_retry(&self.retry, || {
+            let mut client = self.client.clone();
+            let r = req.clone();
+            async move { client.push(outbound(r)).await }
+        })
+        .await
+        .map_err(repo_err)?;
         Ok(())
     }
 }
@@ -615,11 +738,18 @@ pub async fn grpc_tools(endpoint: &Endpoint) -> Result<Vec<Arc<dyn Tool>>> {
     let channel = endpoint
         .connect_lazy()
         .map_err(|e| agent_core::Error::Tool(e.to_string()))?;
-    let mut client = pb::tool_service_client::ToolServiceClient::new(channel.clone());
-    let resp = client
-        .describe_all(outbound(pb::DescribeAllRequest {}))
-        .await
-        .map_err(|s| agent_core::Error::Tool(s.to_string()))?;
+    let client = pb::tool_service_client::ToolServiceClient::new(channel.clone());
+    let policy = grpc_retry_policy();
+    let resp = call_retry(&policy, || {
+        let mut client = client.clone();
+        async move {
+            client
+                .describe_all(outbound(pb::DescribeAllRequest {}))
+                .await
+        }
+    })
+    .await
+    .map_err(|s| agent_core::Error::Tool(s.to_string()))?;
     let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
     for schema in resp.into_inner().tools {
         // Read the concurrency flag off the wire before converting (agent-core's
@@ -632,6 +762,7 @@ pub async fn grpc_tools(endpoint: &Endpoint) -> Result<Vec<Arc<dyn Tool>>> {
             client: pb::tool_service_client::ToolServiceClient::new(channel.clone()),
             schema,
             parallel_safe,
+            retry: grpc_retry_policy(),
         }));
     }
     Ok(tools)

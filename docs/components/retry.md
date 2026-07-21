@@ -96,21 +96,28 @@ Retry counts come from config; the schedule/jitter are the canonical defaults.
 
 - ✅ **HTTP providers** (`agent-providers`): `complete` + `stream` route through
   `agent_retry::run`, honouring `Retry-After`. `[provider] max_retries` (default 3).
-- ⬜ **gRPC seam clients** (`agent-grpc`: provider/memory/context/policy/search/
-  repo/tool), **MCP** reconnect, **telemetry** writer, **git** fetch: adopt the
-  `agent_retry` helpers (the gRPC clients via the `grpc_retry_decision` pattern
-  above, retrying `UNAVAILABLE`/`RESOURCE_EXHAUSTED` and honouring pushback). This
-  is a mechanical sweep tracked as a follow-up — **the classifier and driver are
-  ready and fully tested**, so adoption is call-site wiring plus a fault-injection
-  test per transport, not new retry logic.
+- ✅ **gRPC seam clients** (`agent-grpc`: provider / memory / context / policy /
+  search / repo / tool): every **unary** RPC goes through `call_retry` +
+  `grpc_retry_decision`, retrying `UNAVAILABLE` / `RESOURCE_EXHAUSTED` and honouring
+  `grpc-retry-pushback-ms`. Streaming RPCs (`provider.stream`, `search.reindex`) are
+  intentionally not retried. Fault-injection test in `agent-grpc/tests/roundtrip.rs`
+  proves `UNAVAILABLE → OK`.
+- ⬜ **MCP** reconnect, **telemetry** writer, **git-CLI** fetch: **blocked on error
+  classification, not wiring.** These surface opaque `String` errors today with no
+  transient-vs-permanent distinction, so routing them through `agent-retry` first
+  needs each to expose a structured "is this transient?" signal — otherwise blind
+  retry would *violate* the library's core rule (only retry genuinely transient
+  failures) and could spin on a permanent config/auth error. Tracked as a follow-up
+  that adds the classification, then the (trivial) wiring. (Note: a `= "grpc"` git
+  backend already retries at the gRPC layer above.)
 
 The rule holds regardless of adoption status: **new code that retries MUST use
-`agent-retry`.** The follow-up only migrates existing call sites.
+`agent-retry`.**
 
 ## Tests
 
 `agent-retry` is unit-tested exhaustively (policy ceiling/jitter bounds with pinned
 randomness, `run`/`retry` attempt counting, HTTP status + `Retry-After`, gRPC codes
 + pushback). `agent-providers` adds a raw-TCP mock-server integration proving
-`503→200` retries and `400` does not. A gRPC fault-injection test lands with the
-gRPC-client wiring follow-up.
+`503→200` retries and `400` does not. `agent-grpc` adds a fault-injecting Provider
+service proving a gRPC `UNAVAILABLE → OK` retry through the real client.

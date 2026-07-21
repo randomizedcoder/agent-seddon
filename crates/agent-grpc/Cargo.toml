@@ -8,6 +8,8 @@ description = "gRPC transport for the agent-seddon seams: per-seam servers + cli
 [dependencies]
 agent-core = { workspace = true }
 agent-proto = { workspace = true }
+# The one canonical retry/backoff library (gRPC overload-code classifier).
+agent-retry = { workspace = true }
 tonic = { workspace = true }
 tonic-reflection = { workspace = true }
 prost = { workspace = true }
