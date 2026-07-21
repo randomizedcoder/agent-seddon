@@ -30,6 +30,10 @@ keep_recent_tokens = 20000   # summarizing-window: recent history kept verbatim
 # openai-compat). parallel_tools runs a turn's parallel-safe tool calls at once.
 stream         = true
 parallel_tools = true
+# Per-tool wall-clock timeout (seconds): a backstop so a hung tool becomes an error
+# observation instead of freezing the loop. Generous by default (bash has its own
+# shorter timeout); 0 disables the loop-level guard.
+tool_timeout_secs = 600
 
 # Subagents: expose a `delegate` tool so the model can spawn child agents with
 # an isolated context (they return only a final summary). Off by default —
