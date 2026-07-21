@@ -4,6 +4,10 @@
 [agent]
 # Each name is resolved through the plugin registry (see docs/extending.md).
 provider = "openai-compat"   # -> OpenAiCompatProvider ("anthropic" -> AnthropicProvider)
+# Working directory the file/shell tools operate under. Empty ⇒ the process's
+# current dir. Set this to point the agent at a target repo without cd-ing the
+# process (embedded/served use, or the agent working on a checkout). `~` expands.
+working_dir = ""
 # "sliding-window" drops oldest turns; "summarizing-window" LLM-summarizes them
 # (keeping the last `keep_recent_tokens` verbatim).
 context  = "sliding-window"  # -> SlidingWindow ("summarizing-window" -> SummarizingWindow)

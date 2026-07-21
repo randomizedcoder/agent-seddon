@@ -173,7 +173,11 @@ pub async fn build_agent_with(
         stream: cfg.agent.stream,
         parallel_tools: cfg.agent.parallel_tools,
         recall_limit: cfg.memory.recall_limit,
-        cwd: std::env::current_dir().context("resolving cwd")?,
+        cwd: if cfg.agent.working_dir.is_empty() {
+            std::env::current_dir().context("resolving cwd")?
+        } else {
+            std::path::PathBuf::from(expand_tilde(&cfg.agent.working_dir))
+        },
         model: cfg.provider.model.clone(),
         session_id,
         context_prepend,
