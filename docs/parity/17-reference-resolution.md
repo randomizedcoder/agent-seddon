@@ -5,19 +5,26 @@ Per-feature parity spec for a new **`ReferenceResolver` seam**: expand `@file`,
 blocks *before* the turn, so the model sees the exact bytes it was pointed at
 instead of guessing filenames or re-reading via tools.
 
-> **Status: spec (design of record).** New **`ReferenceResolver` seam**
-> (`resolve(prompt, budget) -> Resolution`) with its own `reference.proto` gRPC
-> service (reflection-introspectable). The differentiator is a **typed reference
-> graph resolved *through* the existing seams**: `@file`/`@dir` route to
-> `RepoBackend`, `@symbol` routes to the `SearchBackend` today and to the future
-> `LspBackend` (spec 13) when present, and `@url` routes to the future
-> `WebBackend` (spec [11](11-web-fetch.md)). Every resolution is **deduped,
-> size-budgeted, injection-scanned** (reusing memory's `scan_for_injection`), and
-> emits a per-reference OTel span carrying a `ref.kind` attribute plus a metered
-> expansion cost. The expanded blocks feed the `ContextStrategy` assembly as
-> prepend/append context. None of the three peers routes references through
-> pluggable, distributed code-intelligence seams — hermes resolves inline, pi and
-> opencode resolve at the editor/CLI edge only.
+> **Status: implemented** (seam + `LocalResolver` backend in `agent-reference`
+> behind the `reference-local` feature + `[reference]` config + `Agent`
+> `resolve_references()` accessor + metered decorator + `parse` bench + leak; PR
+> pending). New **`ReferenceResolver` seam** (`resolve(prompt, budget) ->
+> Resolution`). The differentiator is a **typed reference graph resolved *through*
+> the existing seams**: `@file`/`@dir` read the workspace filesystem (confined via
+> the shared canonicalizing `agent_core::confine` — a symlink pointing out of the
+> tree is refused, not just `..`/absolute — plus sensitive-path-guarded),
+> `@symbol` routes to the `SearchBackend`, and `@url`
+> routes to the `WebBackend` (spec [11](11-web-fetch.md), reusing its SSRF guard).
+> Every resolution is **deduped** (in the parser), **token-budgeted** (soft 25% /
+> hard 50% of the window — over-hard leaves the prompt unmodified), and
+> **injection-scanned** (`agent_core::scan_for_injection`), and the seam boundary
+> emits a `reference.resolve` OTel span (`refs`/`blocked` attrs) plus per-`(kind,
+> outcome)` metered expansion counts. Deferred consistently with the other 11–19
+> seams: the `reference.proto` gRPC `--serve-reference` service, the future
+> `LspBackend` (spec 13) route for `@symbol`, and loop auto-expansion. None of the
+> three peers routes references through pluggable, distributed code-intelligence
+> seams — hermes resolves inline, pi and opencode resolve at the editor/CLI edge
+> only.
 
 ## Feature & why it matters
 
@@ -246,12 +253,14 @@ origin (symbol→LSP routing, injection block, backend-absent, dedup call-count)
 
 ### Harness obligations
 
-- **Seam + registry:** new `ReferenceResolver` trait in `agent-core`; impl in a new
-  `agent-reference` crate behind a cargo feature; one factory line in
-  `register_builtins` ([`crates/agent-runtime/src/registry.rs`](../../crates/agent-runtime/src/registry.rs)),
-  config-selected; the factory receives `Arc` handles to the wired
-  `RepoBackend`/`SearchBackend`/(`LspBackend`)/(`WebBackend`) seams. Doc in
-  `docs/components/reference.md`.
+- **Seam + wiring:** new `ReferenceResolver` trait in `agent-core`; impl in a new
+  `agent-reference` crate behind a cargo feature; config-selected and wired in
+  [`crates/agent-runtime/src/builder.rs`](../../crates/agent-runtime/src/builder.rs)
+  — **not** a `register_builtins` factory line. (A resolver needs `Arc` handles to
+  the already-built `SearchBackend`/`WebBackend` plus `Metrics`, which the
+  `Fn(&Config)` factory signature in `registry.rs` cannot supply; `sandbox`, `web`,
+  `tasks`, `lsp`, `session`, and `embedder` are all wired the same way for the same
+  reason.) Doc in `docs/components/reference.md`.
 - **Proto + gRPC:** `crates/agent-proto/proto/agent/v1/reference.proto`
   (`Resolve(prompt, budget) -> Resolution{blocks, warnings, blocked}`) + `build.rs`
   entry + server/client in `agent-grpc` + `--serve-reference` + reflection; commit

@@ -13,7 +13,6 @@
 
 use agent_core::{Error, Result};
 use serde_json::Value;
-use std::path::{Component, PathBuf};
 
 #[cfg(feature = "tool-core")]
 mod core;
@@ -80,88 +79,15 @@ pub use lsp::LspTool;
 /// Cap tool output so a runaway command can't blow the context window.
 pub(crate) const MAX_OUTPUT: usize = 12_000;
 
-/// Resolve a caller-supplied path against the working directory, rejecting any
-/// path that would escape it (absolute paths, `..` traversal). Lexical only —
-/// it does not follow symlinks, so `bash` remains the unconfined escape hatch by
-/// design; this is defense-in-depth for the file tools.
-pub(crate) fn resolve_within(
-    cwd: &std::path::Path,
-    path: &str,
-) -> std::result::Result<PathBuf, String> {
-    let candidate = std::path::Path::new(path);
-    if candidate.is_absolute() {
-        return Err(format!("absolute paths are not allowed: `{path}`"));
-    }
-    let mut resolved = cwd.to_path_buf();
-    for comp in candidate.components() {
-        match comp {
-            Component::Normal(c) => resolved.push(c),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                resolved.pop();
-            }
-            Component::RootDir | Component::Prefix(_) => {
-                return Err(format!("path is not allowed: `{path}`"));
-            }
-        }
-    }
-    if !resolved.starts_with(cwd) {
-        return Err(format!("path escapes the working directory: `{path}`"));
-    }
-    Ok(resolved)
-}
-
-/// Resolve a caller-supplied path within `cwd` **and defend against symlink escape**.
-///
-/// [`resolve_within`] is lexical only, so a symlink *inside* the working dir that
-/// points outside it (planted e.g. via `bash`, or already present in a repo) slips
-/// past: a model could then `read_file` a link to `/etc/passwd`, or `edit` /
-/// `write_file` / `apply_patch` through a link to clobber a file outside the tree.
-/// `confine` additionally canonicalizes the deepest existing prefix of the resolved
-/// path (which resolves any symlink in it) and requires it to stay under the real
-/// `cwd`; a symlink component that resolves — or dangles — outside is rejected. Used
-/// by the file-opening tools (`bash` stays the unconfined escape hatch by design).
-pub(crate) fn confine(cwd: &std::path::Path, path: &str) -> std::result::Result<PathBuf, String> {
-    let candidate = resolve_within(cwd, path)?; // lexical: reject absolute / `..` escape
-    let real_cwd = cwd
-        .canonicalize()
-        .map_err(|e| format!("cannot resolve working directory: {e}"))?;
-
-    // Walk up to the deepest existing prefix; `canonicalize` resolves any symlink
-    // along the way. If that real path leaves `cwd`, the path escapes via a symlink.
-    let mut probe = candidate.clone();
-    loop {
-        match probe.canonicalize() {
-            Ok(real) => {
-                if real.starts_with(&real_cwd) {
-                    return Ok(candidate);
-                }
-                return Err(format!(
-                    "path escapes the working directory via a symlink: `{path}`"
-                ));
-            }
-            Err(_) => {
-                // A not-yet-existing component (a new file/dir being created). If it
-                // is itself a symlink (a dangling link), reject — writing through it
-                // could still land outside the tree.
-                if std::fs::symlink_metadata(&probe)
-                    .map(|m| m.file_type().is_symlink())
-                    .unwrap_or(false)
-                {
-                    return Err(format!(
-                        "path is a symlink that cannot be confined: `{path}`"
-                    ));
-                }
-                match probe.parent() {
-                    Some(p) if p != probe => probe = p.to_path_buf(),
-                    _ => {
-                        return Err(format!("path escapes the working directory: `{path}`"));
-                    }
-                }
-            }
-        }
-    }
-}
+// Path confinement lives in `agent-core` so every model-facing path consumer —
+// the file tools here and the `@`-reference resolver in `agent-reference` — shares
+// one canonicalizing implementation. Re-exported under the original names so the
+// tool modules (and the `confine_symlink_cases` table below) are unchanged.
+// Which of the two a given build actually calls depends on the enabled tool
+// features (`confine` from core/edit/patch, `resolve_within` from search), so a
+// reduced feature set legitimately leaves one unused.
+#[allow(unused_imports)]
+pub(crate) use agent_core::{confine, resolve_within};
 
 pub(crate) fn truncate(mut s: String) -> String {
     if s.len() > MAX_OUTPUT {

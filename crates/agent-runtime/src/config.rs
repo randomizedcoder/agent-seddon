@@ -45,6 +45,8 @@ pub struct Config {
     pub embedder: EmbedderCfg,
     #[serde(default)]
     pub session: SessionCfg,
+    #[serde(default)]
+    pub reference: ReferenceCfg,
 }
 
 /// Content-addressed session history (the `SessionStore` seam, parity spec 19).
@@ -69,6 +71,41 @@ impl Default for SessionCfg {
 
 fn default_session_backend() -> String {
     "file".to_string()
+}
+
+/// `@`-reference expansion (the `ReferenceResolver` seam, parity spec 17).
+/// `backend` = `"local"` (workspace-confined `@file`/`@dir`, routed `@symbol`/
+/// `@url`). `budget_tokens` caps how much a prompt's mentions may expand (0 ⇒
+/// unbounded); `per_block_max_chars` truncates a single oversized block. See
+/// docs/components/reference.md.
+#[derive(Debug, Deserialize)]
+pub struct ReferenceCfg {
+    #[serde(default = "default_reference_backend")]
+    pub backend: String,
+    #[serde(default = "default_reference_budget")]
+    pub budget_tokens: usize,
+    #[serde(default = "default_reference_block_chars")]
+    pub per_block_max_chars: usize,
+}
+
+impl Default for ReferenceCfg {
+    fn default() -> Self {
+        Self {
+            backend: default_reference_backend(),
+            budget_tokens: default_reference_budget(),
+            per_block_max_chars: default_reference_block_chars(),
+        }
+    }
+}
+
+fn default_reference_backend() -> String {
+    "local".to_string()
+}
+fn default_reference_budget() -> usize {
+    8_000
+}
+fn default_reference_block_chars() -> usize {
+    8_000
 }
 
 /// The embedding model for semantic search (the `Embedder` seam, parity spec 15).
@@ -856,6 +893,7 @@ impl Config {
             sandbox: SandboxCfg::default(),
             embedder: EmbedderCfg::default(),
             session: SessionCfg::default(),
+            reference: ReferenceCfg::default(),
         }
     }
 }

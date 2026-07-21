@@ -314,7 +314,7 @@ pub async fn build_agent_with(
         settings,
     );
     #[cfg(feature = "search")]
-    let agent = agent.with_search(search_dispatch as Arc<dyn agent_core::SearchBackend>);
+    let agent = agent.with_search(search_dispatch.clone() as Arc<dyn agent_core::SearchBackend>);
     #[cfg(feature = "git")]
     let agent = agent.with_repo(repo_backend);
     // Structured output: build the config-selected validator, meter it, attach it.
@@ -340,6 +340,43 @@ pub async fn build_agent_with(
             other => anyhow::bail!("unknown [session] backend `{other}` (only `file` is built in)"),
         };
         agent.with_session_store(crate::metered::session(store, metrics.clone()))
+    };
+    // `@`-reference expansion: build the config-selected resolver, route it through
+    // the Search seam (`@symbol`) and a fresh Web backend (`@url`, reusing the SSRF
+    // guard), meter it, attach it with its token budget.
+    #[cfg(feature = "reference")]
+    let agent = {
+        let resolver: Arc<dyn agent_core::ReferenceResolver> = match cfg.reference.backend.as_str()
+        {
+            "local" => {
+                // `mut` is only needed when a route below is compiled in; without
+                // `search`/`web` the resolver is built and used as-is.
+                #[allow(unused_mut)]
+                let mut r = agent_reference::LocalResolver::new(&cfg.agent.working_dir)
+                    .with_max_block_chars(cfg.reference.per_block_max_chars);
+                #[cfg(feature = "search")]
+                {
+                    r = r
+                        .with_search(search_dispatch.clone() as Arc<dyn agent_core::SearchBackend>);
+                }
+                #[cfg(feature = "web")]
+                {
+                    let web: Arc<dyn agent_core::WebBackend> = Arc::new(
+                        agent_web::LocalWebBackend::new()
+                            .with_ssrf(cfg.web.allow_private, cfg.web.allow_hosts.clone()),
+                    );
+                    r = r.with_web(crate::metered::web(web, metrics.clone()));
+                }
+                Arc::new(r)
+            }
+            other => {
+                anyhow::bail!("unknown [reference] backend `{other}` (only `local` is built in)")
+            }
+        };
+        agent.with_reference_resolver(
+            crate::metered::reference(resolver, metrics.clone()),
+            cfg.reference.budget_tokens,
+        )
     };
     Ok(agent)
 }
