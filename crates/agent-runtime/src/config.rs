@@ -53,6 +53,49 @@ pub struct Config {
     pub cache: CacheCfg,
     #[serde(default)]
     pub web_search: WebSearchCfg,
+    #[serde(default)]
+    pub router: RouterCfg,
+}
+
+/// Provider routing + failover (parity spec 25). Selected with
+/// `[agent] provider = "router"`. `providers` names other registered providers
+/// in preference order; each is built through the registry, so a candidate can
+/// itself be a `grpc` client — one router can span local and remote providers.
+/// See docs/components/router.md.
+#[derive(Debug, Deserialize)]
+pub struct RouterCfg {
+    #[serde(default)]
+    pub providers: Vec<String>,
+    /// `in-order` (default) | `round-robin`.
+    #[serde(default = "default_route_policy")]
+    pub policy: String,
+    /// Consecutive failures before a candidate's circuit breaker opens.
+    #[serde(default = "default_breaker_threshold")]
+    pub failure_threshold: usize,
+    /// How long a breaker stays open.
+    #[serde(default = "default_breaker_cooldown")]
+    pub cooldown_secs: u64,
+}
+
+impl Default for RouterCfg {
+    fn default() -> Self {
+        Self {
+            providers: Vec::new(),
+            policy: default_route_policy(),
+            failure_threshold: default_breaker_threshold(),
+            cooldown_secs: default_breaker_cooldown(),
+        }
+    }
+}
+
+fn default_route_policy() -> String {
+    "in-order".to_string()
+}
+fn default_breaker_threshold() -> usize {
+    3
+}
+fn default_breaker_cooldown() -> u64 {
+    30
 }
 
 /// Live web search (the `WebSearch` seam, parity spec 12). `backends` lists the
@@ -1039,6 +1082,7 @@ impl Config {
             scanner: ScannerCfg::default(),
             cache: CacheCfg::default(),
             web_search: WebSearchCfg::default(),
+            router: RouterCfg::default(),
         }
     }
 }

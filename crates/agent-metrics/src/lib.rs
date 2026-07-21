@@ -50,6 +50,10 @@ pub struct Metrics {
     // Live web search (parity spec 12): per-backend outcome, latency, and the
     // number of results returned. Labels are the configured backend name — never
     // the query text or the API key.
+    // Provider routing (parity spec 25): which target a request went to, and
+    // how often the router fell over or skipped an unhealthy candidate. Labels
+    // are the configured candidate names — bounded by config, never user input.
+    route_decisions: IntCounterVec,
     web_searches: IntCounterVec,
     web_search_seconds: HistogramVec,
     web_search_results: IntCounterVec,
@@ -203,6 +207,14 @@ impl Metrics {
         let tool_calls = IntCounterVec::new(
             Opts::new("agent_tool_calls_total", "Tool invocations"),
             &["tool", "status"],
+        )
+        .unwrap();
+        let route_decisions = IntCounterVec::new(
+            Opts::new(
+                "agent_route_decisions_total",
+                "Router decisions, by target provider and outcome",
+            ),
+            &["target", "decision"],
         )
         .unwrap();
         let web_searches = IntCounterVec::new(
@@ -591,6 +603,7 @@ impl Metrics {
             Box::new(context_tokens.clone()),
             Box::new(context_messages.clone()),
             Box::new(tool_calls.clone()),
+            Box::new(route_decisions.clone()),
             Box::new(web_searches.clone()),
             Box::new(web_search_seconds.clone()),
             Box::new(web_search_results.clone()),
@@ -663,6 +676,7 @@ impl Metrics {
             context_tokens,
             context_messages,
             tool_calls,
+            route_decisions,
             web_searches,
             web_search_seconds,
             web_search_results,
@@ -763,6 +777,13 @@ impl Metrics {
     /// Latency of one content scan.
     pub fn on_scan(&self, seconds: f64) {
         self.scan_seconds.observe(seconds);
+    }
+    /// One router decision: `routed` / `fellover` / `skipped_unhealthy` /
+    /// `exhausted`, by target (parity spec 25).
+    pub fn on_route_decision(&self, target: &str, decision: &str) {
+        self.route_decisions
+            .with_label_values(&[target, decision])
+            .inc();
     }
     /// One web search: outcome, latency, and result count (parity spec 12).
     pub fn on_web_search(&self, backend: &str, outcome: &str, seconds: f64, results: u64) {

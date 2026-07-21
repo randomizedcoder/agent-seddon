@@ -34,11 +34,14 @@ default = [
     "scanner",
     "cache",
     "web-search",
+    "provider-router",
 ]
 
 # Each feature forwards to the owning impl crate + drives `register_builtins`.
 provider-openai-compat = ["agent-providers/provider-openai-compat"]
 provider-anthropic = ["agent-providers/provider-anthropic"]
+# Router: composes N providers behind the LlmProvider trait. See parity spec 25.
+provider-router = ["agent-providers/provider-router"]
 tool-core = ["agent-tools/tool-core"]
 tool-edit = ["agent-tools/tool-edit"]
 tool-patch = ["agent-tools/tool-patch"]

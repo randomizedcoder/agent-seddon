@@ -46,7 +46,7 @@ pub async fn build_agent_with(
     // attributed the same way — including a remote `= "grpc"` client.
     // The factory context. `provider`/`tokenizer` are filled in as they become
     // available — see `FactoryCtx` on why those two are optional.
-    let base_ctx = crate::registry::FactoryCtx::new(&cfg, &metrics);
+    let base_ctx = crate::registry::FactoryCtx::new(&cfg, &metrics).with_registry(registry);
     let provider = crate::metered::provider(
         registry
             .build_provider(&cfg.agent.provider, &base_ctx)

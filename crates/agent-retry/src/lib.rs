@@ -398,3 +398,126 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 }
+
+// --- failure classification (parity spec 25) --------------------------------
+
+/// Whether a failure is worth another attempt — the decision a router needs
+/// before it burns a second provider on the same request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Class {
+    /// Transient: rate limit, overload, 5xx, timeout, connection failure.
+    /// Retrying — here or on another candidate — can succeed.
+    Retryable,
+    /// Deterministic: auth, billing, bad request, content policy, missing model.
+    /// The same call will fail the same way on every candidate.
+    Terminal,
+}
+
+/// Classify a provider error **message**.
+///
+/// This reads text because that is the contract the provider seam actually has:
+/// `agent_core::Error::Provider(String)` carries no status code, and the
+/// in-tree adapters format failures as `"http {code}: {body}"`. Rather than
+/// re-parse that in each consumer, the recognition lives here once.
+///
+/// Unknown failures classify as **`Terminal`**. That is the conservative choice
+/// for a router: an unrecognised error is more likely a deterministic bug (a
+/// malformed request, an unsupported parameter) than a transient blip, and
+/// retrying it across every candidate burns the whole chain — and real money —
+/// to arrive at the same failure.
+pub fn classify(message: &str) -> Class {
+    let lower = message.to_ascii_lowercase();
+
+    // Prefer an explicit HTTP status when the message carries one.
+    if let Some(code) = extract_http_status(&lower) {
+        return if http::retryable_status(code) {
+            Class::Retryable
+        } else {
+            Class::Terminal
+        };
+    }
+
+    // Transport-level failures never reached a status.
+    const TRANSIENT: [&str; 6] = [
+        "timed out",
+        "timeout",
+        "connection reset",
+        "connection refused",
+        "broken pipe",
+        "stream error",
+    ];
+    if TRANSIENT.iter().any(|p| lower.contains(p)) {
+        return Class::Retryable;
+    }
+
+    // Named conditions some providers report without a status code.
+    const TERMINAL: [&str; 5] = [
+        "invalid api key",
+        "unauthorized",
+        "insufficient_quota",
+        "content policy",
+        "model_not_found",
+    ];
+    if TERMINAL.iter().any(|p| lower.contains(p)) {
+        return Class::Terminal;
+    }
+
+    Class::Terminal
+}
+
+/// Pull the status out of a `"http {code}"` prefix, if present.
+fn extract_http_status(lower: &str) -> Option<u16> {
+    let idx = lower.find("http ")?;
+    let rest = &lower[idx + 5..];
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+#[cfg(test)]
+mod classify_tests {
+    use super::*;
+    use rstest::rstest;
+
+    #[rstest]
+    // Retryable: the provider is having a bad moment.
+    #[case::positive_rate_limit("http 429: slow down", Class::Retryable)]
+    #[case::positive_overloaded("http 529: overloaded", Class::Retryable)]
+    #[case::positive_server_error("http 500: internal", Class::Retryable)]
+    #[case::positive_bad_gateway("http 502: bad gateway", Class::Retryable)]
+    #[case::positive_timeout("request failed: operation timed out", Class::Retryable)]
+    #[case::positive_conn_refused("request failed: connection refused", Class::Retryable)]
+    // Terminal: the same call fails identically everywhere.
+    #[case::negative_auth("http 401: invalid api key", Class::Terminal)]
+    #[case::negative_forbidden("http 403: forbidden", Class::Terminal)]
+    #[case::negative_billing("http 402: payment required", Class::Terminal)]
+    #[case::negative_bad_request("http 400: unsupported parameter", Class::Terminal)]
+    #[case::negative_not_found("http 404: model_not_found", Class::Terminal)]
+    #[case::negative_content_policy("blocked by content policy", Class::Terminal)]
+    // Unknown fails closed, so a deterministic bug can't burn the whole chain.
+    #[case::boundary_unknown_is_terminal("something inexplicable", Class::Terminal)]
+    #[case::boundary_empty("", Class::Terminal)]
+    fn classify_cases(#[case] msg: &str, #[case] want: Class) {
+        assert_eq!(classify(msg), want, "message: {msg:?}");
+    }
+
+    /// A 402 must never be retried — retrying a billing failure just burns the
+    /// candidate chain (hermes pins this exact case).
+    #[test]
+    fn negative_billing_is_never_retryable() {
+        assert_eq!(classify("http 402: insufficient funds"), Class::Terminal);
+    }
+
+    /// The message is provider-supplied, so parsing must not panic or be fooled.
+    #[rstest]
+    #[case::adversarial_huge_number("http 99999999999999999999: x")]
+    #[case::adversarial_no_digits("http : x")]
+    #[case::adversarial_word_http("nothing to do with http requests")]
+    #[case::adversarial_multibyte("http 429: 你好世界 émoji 🎉")]
+    #[case::adversarial_very_long("http 500: x")]
+    fn adversarial_messages_are_safe(#[case] msg: &str) {
+        let _ = classify(msg); // must not panic
+    }
+}

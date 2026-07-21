@@ -14,7 +14,7 @@ use agent_core::{
     ContextStrategy, EpisodicStore, LlmProvider, MemoryStore, Policy, SemanticStore, Tool,
 };
 use agent_metrics::Metrics;
-use anyhow::anyhow;
+use anyhow::{anyhow, Context};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -40,6 +40,11 @@ pub struct FactoryCtx<'a> {
     pub built_provider: Option<&'a Arc<dyn LlmProvider>>,
     /// The already-built (metered) tokenizer — absent until it is built.
     pub built_tokenizer: Option<&'a Arc<dyn agent_core::Tokenizer>>,
+    /// The registry itself, so a **composing** factory can build its children by
+    /// config name (the `router` provider builds its candidates this way). The
+    /// borrow is immutable and re-entrant: `build_*` takes `&self`, so a factory
+    /// it invoked may call back into it.
+    pub registry: Option<&'a Registry>,
 }
 
 impl<'a> FactoryCtx<'a> {
@@ -50,7 +55,13 @@ impl<'a> FactoryCtx<'a> {
             metrics,
             built_provider: None,
             built_tokenizer: None,
+            registry: None,
         }
+    }
+    /// Let a composing factory build children by name.
+    pub fn with_registry(mut self, r: &'a Registry) -> Self {
+        self.registry = Some(r);
+        self
     }
     pub fn with_provider(mut self, p: &'a Arc<dyn LlmProvider>) -> Self {
         self.built_provider = Some(p);
@@ -69,6 +80,12 @@ impl<'a> FactoryCtx<'a> {
     /// The built tokenizer, if one is configured and already built.
     pub fn tokenizer(&self) -> Option<&'a Arc<dyn agent_core::Tokenizer>> {
         self.built_tokenizer
+    }
+    /// The registry, for a factory that composes other seams by config name.
+    pub fn registry(&self) -> anyhow::Result<&'a Registry> {
+        self.registry.ok_or_else(|| {
+            anyhow!("this seam composes other seams but was built without a registry handle")
+        })
     }
 }
 
@@ -509,6 +526,52 @@ pub fn register_builtins(r: &mut Registry) {
             Ok(Arc::new(agent_tools::LsTool) as Arc<dyn Tool>)
         });
     }
+
+    // --- router: a provider that composes other providers (parity spec 25) ---
+    //
+    // A COMPOSING factory: it builds its candidates back through the registry,
+    // which is why `FactoryCtx` carries a registry handle. Each candidate is an
+    // ordinary provider — including a `grpc` client — so one router can span
+    // local and remote providers.
+    #[cfg(feature = "provider-router")]
+    r.provider("router", |ctx| {
+        let cfg = &ctx.cfg.router;
+        if cfg.providers.is_empty() {
+            anyhow::bail!(
+                "[router] providers must list at least one provider name when \
+                 `[agent] provider = \"router\"`"
+            );
+        }
+        let registry = ctx.registry()?;
+        let mut candidates = Vec::new();
+        for name in &cfg.providers {
+            if name == "router" {
+                // Guard the obvious footgun: a router listing itself would
+                // recurse until the stack blows.
+                anyhow::bail!("[router] providers must not include `router` itself");
+            }
+            let provider = registry
+                .build_provider(name, ctx)
+                .with_context(|| format!("building router candidate `{name}`"))?;
+            candidates.push(agent_providers::Candidate {
+                name: name.clone(),
+                provider: crate::metered::provider(provider, ctx.metrics.clone(), name),
+            });
+        }
+        let metrics = ctx.metrics.clone();
+        let router = agent_providers::Router::new(
+            candidates,
+            agent_providers::RoutePolicy::parse(&cfg.policy),
+        )?
+        .with_breaker(
+            cfg.failure_threshold,
+            cfg.cooldown_secs.saturating_mul(1_000),
+        )
+        .with_observer(Arc::new(move |ev| {
+            crate::metered::record_route_event(&metrics, ev);
+        }));
+        Ok(Arc::new(router) as Arc<dyn LlmProvider>)
+    });
 
     // --- web-search backends (the WebSearch seam, parity spec 12) ---
     //
