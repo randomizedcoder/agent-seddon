@@ -39,6 +39,8 @@ pub enum Error {
     Web(String),
     #[error("tasks error: {0}")]
     Tasks(String),
+    #[error("structured output error: {0}")]
+    Structured(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -126,18 +128,39 @@ impl Message {
 // Seam 1: LlmProvider
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ModelCapabilities {
     pub supports_tools: bool,
     pub context_window: u32,
+    /// Whether the provider can natively constrain a completion to a JSON schema
+    /// (OpenAI `response_format`/`json_schema`). When `false`, the structured-output
+    /// helper injects the schema into the prompt instead (parity spec 16).
+    pub supports_response_format: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CompletionRequest {
     pub messages: Vec<Message>,
     pub tools: Vec<ToolSchema>,
     pub max_tokens: u32,
     pub temperature: f32,
+    /// When set, the completion is expected to match this JSON schema (parity
+    /// spec 16). Providers with `supports_response_format` constrain natively;
+    /// otherwise the structured helper injects the schema into the prompt. `None`
+    /// ⇒ today's free-text behaviour, unchanged.
+    pub response_format: Option<ResponseFormat>,
+}
+
+/// A JSON-schema contract attached to a [`CompletionRequest`].
+#[derive(Debug, Clone, Default)]
+pub struct ResponseFormat {
+    /// The JSON Schema (draft-07 subset) the output must satisfy.
+    pub schema: serde_json::Value,
+    /// Whether unknown keys are rejected (maps to `additionalProperties: false`
+    /// semantics for the native path; the validator honours the schema regardless).
+    pub strict: bool,
+    /// An optional schema name (surfaced to native `json_schema` + as a span attr).
+    pub name: Option<String>,
 }
 
 /// A per-model USD cost breakdown for a [`Usage`], in dollars. The four lines are
@@ -590,6 +613,45 @@ pub trait TaskTracker: Send + Sync {
     async fn list(&self) -> Result<Vec<Todo>>;
     /// Empty the plan.
     async fn clear(&self) -> Result<()>;
+}
+
+// ---------------------------------------------------------------------------
+// Seam: OutputSchema (schema-constrained completions, parity spec 16)
+// ---------------------------------------------------------------------------
+//
+// Validates a completion's JSON against a caller-supplied JSON Schema. The
+// runtime pairs this with a bounded one-shot repair loop: on mismatch it feeds the
+// validation error back to the model and retries. Concrete validators live behind
+// a cargo feature; see `docs/components/structured-output.md`.
+
+/// The result of validating a value against a schema: `ok` plus human-readable
+/// errors (each naming the offending JSON path) when it doesn't match.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Verdict {
+    pub ok: bool,
+    pub errors: Vec<String>,
+}
+
+impl Verdict {
+    /// A passing verdict (no errors).
+    pub fn pass() -> Self {
+        Self {
+            ok: true,
+            errors: Vec::new(),
+        }
+    }
+    /// A failing verdict from one or more error strings.
+    pub fn fail(errors: Vec<String>) -> Self {
+        Self { ok: false, errors }
+    }
+}
+
+/// A replaceable JSON-schema validator. `validate` is pure and synchronous (a CPU
+/// check, not I/O), so it benches directly and any impl — local or a future
+/// gRPC-served one — shares the same `Verdict` contract.
+pub trait OutputSchema: Send + Sync {
+    /// Validate `value` against `schema`, returning a [`Verdict`].
+    fn validate(&self, schema: &serde_json::Value, value: &serde_json::Value) -> Verdict;
 }
 
 // ---------------------------------------------------------------------------
@@ -1289,6 +1351,7 @@ mod tests {
             ModelCapabilities {
                 supports_tools: true,
                 context_window: 1000,
+                supports_response_format: false,
             }
         }
         async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse> {
@@ -1336,6 +1399,7 @@ mod tests {
             tools: vec![],
             max_tokens: 10,
             temperature: 0.0,
+            response_format: None,
         };
         let mut s = provider.stream(req).await.unwrap();
         let (mut text, mut calls, mut got_finish, mut got_usage) =

@@ -5,16 +5,22 @@ JSON Schema to a request, ask the provider to honour it (`response_format` / too
 where native, prompt-injected schema otherwise), **validate** the model's output against
 the schema, and do a **one-shot repair** round-trip when it does not match.
 
-> **Status: spec (design of record).** Introduces a new **`OutputSchema` validator
-> seam** in `agent-core`, a `response_format: Option<ResponseFormat>` field on
-> `CompletionRequest`, and a bounded **one-shot repair loop** in the runtime. The
-> differentiator is a **proto-typed schema contract**: the schema and the validation
-> *verdict* travel over gRPC (a new `Validator` service + `ResponseFormat` in
-> `common.proto`), so structured generation is a distributed, reflection-introspectable
-> seam — metered (validation-pass / repair / exhaustion rates) and traced (a
-> `structured.validate` / `structured.repair` span per attempt). None of the three peers
-> expose schema validation as a swappable, gRPC-served seam. Useful for **tool-argument
-> validation**, **subagent structured returns**, and **machine-consumable agent output**.
+> **Status: implemented** (seam + validator + repair loop + observability + bench +
+> leak). New **`OutputSchema` validator seam** in `agent-core`
+> (`validate(&schema,&value) -> Verdict`), a `response_format: Option<ResponseFormat>`
+> field on `CompletionRequest` + a `supports_response_format` capability, a
+> dependency-free draft-07-subset validator in [`agent-validate`](../../crates/agent-validate),
+> and a bounded **one-shot repair loop** (`agent_runtime::structured::complete_structured`,
+> reached via `Agent::complete_structured`). **Differentiator landed:** the
+> model-in-the-loop repair no peer has (hermes validates but doesn't repair;
+> opencode/pi validate tool I/O, not a general completion). Metered
+> (`agent_structured_total{outcome=pass|repaired|exhausted}` +
+> `agent_structured_validate_seconds`) and traced (`structured.validate` /
+> `structured.repair` spans). **Deferred to a follow-up** (staged like the
+> tokenizer / web / tasks seams): native provider `response_format` serialization
+> (the flag is `false` today → the helper prompt-injects the schema) and the
+> `Validator` gRPC service + `ResponseFormat` proto field. See
+> [`docs/components/structured-output.md`](../components/structured-output.md).
 
 ## Feature & why it matters
 

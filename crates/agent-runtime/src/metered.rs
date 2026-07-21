@@ -210,6 +210,45 @@ impl agent_core::TaskTracker for MeteredTasks {
     }
 }
 
+/// Wrap an [`OutputSchema`](agent_core::OutputSchema) so each `validate` emits a
+/// `structured.validate` span (`ok` / `errors` attrs) and records the validation
+/// latency. The per-completion outcome counter is recorded by the repair loop.
+#[cfg(feature = "structured")]
+pub(crate) fn validator(
+    inner: Arc<dyn agent_core::OutputSchema>,
+    m: Metrics,
+) -> Arc<dyn agent_core::OutputSchema> {
+    Arc::new(MeteredValidator { inner, metrics: m })
+}
+
+#[cfg(feature = "structured")]
+struct MeteredValidator {
+    inner: Arc<dyn agent_core::OutputSchema>,
+    metrics: Metrics,
+}
+
+#[cfg(feature = "structured")]
+impl agent_core::OutputSchema for MeteredValidator {
+    fn validate(
+        &self,
+        schema: &serde_json::Value,
+        value: &serde_json::Value,
+    ) -> agent_core::Verdict {
+        let start = Instant::now();
+        let span = tracing::info_span!(
+            "structured.validate",
+            ok = tracing::field::Empty,
+            errors = tracing::field::Empty,
+        );
+        let verdict = span.in_scope(|| self.inner.validate(schema, value));
+        span.record("ok", verdict.ok);
+        span.record("errors", verdict.errors.len());
+        self.metrics
+            .on_structured_validate(start.elapsed().as_secs_f64());
+        verdict
+    }
+}
+
 #[cfg(feature = "web")]
 struct MeteredWeb {
     inner: Arc<dyn agent_core::WebBackend>,
@@ -1051,6 +1090,44 @@ mod tasks_tests {
             });
         });
         assert!(spans.contains(&"tasks.write".to_string()), "{spans:?}");
+    }
+}
+
+// structured output: the metered validator emits a `structured.validate` span
+// carrying the ok/errors attributes on both the pass and fail paths.
+#[cfg(all(test, feature = "structured"))]
+mod structured_tests {
+    use super::*;
+    use agent_testkit::observe::captured_span_fields;
+    use serde_json::json;
+
+    #[test]
+    fn metered_validator_emits_span_with_attributes() {
+        let _lock = super::callsite_guard();
+        let fields = captured_span_fields(|| {
+            tracing::callsite::rebuild_interest_cache();
+            let v = super::validator(
+                Arc::new(agent_validate::Draft07Validator::new()),
+                Metrics::new(),
+            );
+            let schema = json!({"type": "object", "required": ["n"],
+                                "properties": {"n": {"type": "integer"}}});
+            let _ = v.validate(&schema, &json!({"n": 1})); // ok = true
+            let _ = v.validate(&schema, &json!({})); // ok = false, errors >= 1
+        });
+        let has = |f: &str, val: &str| {
+            fields
+                .iter()
+                .any(|(s, fld, v)| s == "structured.validate" && fld == f && v == val)
+        };
+        assert!(has("ok", "true"), "{fields:?}");
+        assert!(has("ok", "false"), "{fields:?}");
+        assert!(
+            fields
+                .iter()
+                .any(|(s, fld, _)| s == "structured.validate" && fld == "errors"),
+            "errors attr missing: {fields:?}"
+        );
     }
 }
 

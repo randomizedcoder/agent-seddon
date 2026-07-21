@@ -127,6 +127,9 @@ impl LlmProvider for OpenAiCompatProvider {
         ModelCapabilities {
             supports_tools: true,
             context_window: self.context_window,
+            // Native `response_format` serialization is a documented follow-up; the
+            // structured helper prompt-injects the schema until then (parity spec 16).
+            supports_response_format: false,
         }
     }
 

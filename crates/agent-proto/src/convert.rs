@@ -148,6 +148,7 @@ pub fn status_from_error(e: &agent_core::Error) -> tonic::Status {
         Error::Tokenizer(m) => tonic::Status::internal(format!("tokenizer: {m}")),
         Error::Web(m) => tonic::Status::internal(format!("web: {m}")),
         Error::Tasks(m) => tonic::Status::internal(format!("tasks: {m}")),
+        Error::Structured(m) => tonic::Status::invalid_argument(format!("structured: {m}")),
     }
 }
 
@@ -297,6 +298,8 @@ impl From<pb::ModelCapabilities> for agent_core::ModelCapabilities {
         agent_core::ModelCapabilities {
             supports_tools: c.supports_tools,
             context_window: c.context_window,
+            // Not on the wire yet (native response_format is a follow-up, spec 16).
+            supports_response_format: false,
         }
     }
 }
@@ -357,6 +360,9 @@ impl TryFrom<pb::CompletionRequest> for agent_core::CompletionRequest {
                 .collect::<Result<Vec<_>, _>>()?,
             max_tokens: r.max_tokens,
             temperature: r.temperature,
+            // `response_format` is not yet on the wire — the Validator gRPC service
+            // + proto field are a documented follow-up (parity spec 16).
+            response_format: None,
         })
     }
 }
@@ -1229,6 +1235,7 @@ mod tests {
             }],
             max_tokens: 256,
             temperature: 0.5,
+            response_format: None,
         };
         let p1 = pb::CompletionRequest::from(core);
         let back = agent_core::CompletionRequest::try_from(p1.clone()).unwrap();
@@ -1282,6 +1289,7 @@ mod tests {
         let caps = agent_core::ModelCapabilities {
             supports_tools: true,
             context_window: 128_000,
+            supports_response_format: false,
         };
         let pc = pb::ModelCapabilities::from(caps);
         assert_eq!(

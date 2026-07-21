@@ -82,6 +82,7 @@ impl ScriptedProvider {
             caps: ModelCapabilities {
                 supports_tools: true,
                 context_window: 1000,
+                supports_response_format: false,
             },
         }
     }
@@ -96,6 +97,12 @@ impl ScriptedProvider {
     pub fn with_capabilities(mut self, caps: ModelCapabilities) -> Self {
         self.caps = caps;
         self
+    }
+
+    /// How many times `complete` has been called (the number of provider
+    /// round-trips) — lets a test assert e.g. "one repair = 2 round-trips".
+    pub fn calls(&self) -> usize {
+        self.next.load(Ordering::SeqCst)
     }
 }
 
@@ -130,6 +137,7 @@ where
             caps: ModelCapabilities {
                 supports_tools: false,
                 context_window: 1000,
+                supports_response_format: false,
             },
         }
     }
@@ -733,6 +741,7 @@ mod tests {
             tools: vec![],
             max_tokens: 10,
             temperature: 0.0,
+            response_format: None,
         };
         // turn 0: tool call
         let r0 = p.complete(req.clone()).await.unwrap();

@@ -35,6 +35,35 @@ pub struct Config {
     pub web: WebCfg,
     #[serde(default)]
     pub tasks: TasksCfg,
+    #[serde(default)]
+    pub structured: StructuredCfg,
+}
+
+/// Structured output (the `OutputSchema` seam, parity spec 16). `validator`
+/// selects the impl (`"draft07"`); `max_repairs` bounds the one-shot repair loop.
+/// See docs/components/structured-output.md.
+#[derive(Debug, Deserialize)]
+pub struct StructuredCfg {
+    #[serde(default = "default_validator")]
+    pub validator: String,
+    #[serde(default = "default_max_repairs")]
+    pub max_repairs: usize,
+}
+
+impl Default for StructuredCfg {
+    fn default() -> Self {
+        Self {
+            validator: default_validator(),
+            max_repairs: default_max_repairs(),
+        }
+    }
+}
+
+fn default_validator() -> String {
+    "draft07".to_string()
+}
+fn default_max_repairs() -> usize {
+    1
 }
 
 /// The `todo_write` tool (the `TaskTracker` seam, parity spec 21). `backend`
@@ -724,6 +753,7 @@ impl Config {
             },
             web: WebCfg::default(),
             tasks: TasksCfg::default(),
+            structured: StructuredCfg::default(),
         }
     }
 }

@@ -26,6 +26,7 @@ default = [
     "subagents",
     "web",
     "tasks",
+    "structured",
 ]
 
 # Each feature forwards to the owning impl crate + drives `register_builtins`.
@@ -67,6 +68,9 @@ web = ["dep:agent-web", "agent-web/web-local", "agent-tools/tool-web"]
 # The `todo_write` tool over the TaskTracker seam: the in-memory tracker + the
 # tool + plan-progress metrics. See parity spec 21.
 tasks = ["dep:agent-tasks", "agent-tasks/tasks-memory", "agent-tools/tool-todo"]
+# Structured output: the OutputSchema validator seam + the bounded repair loop.
+# See parity spec 16.
+structured = ["dep:agent-validate", "agent-validate/validate-draft07"]
 
 [dependencies]
 agent-core.workspace = true
@@ -81,6 +85,7 @@ agent-context.workspace = true
 agent-tokenizer = { workspace = true, optional = true }
 agent-web = { workspace = true, optional = true }
 agent-tasks = { workspace = true, optional = true }
+agent-validate = { workspace = true, optional = true }
 agent-mcp = { workspace = true, optional = true }
 agent-grpc = { workspace = true, optional = true }
 agent-telemetry.workspace = true

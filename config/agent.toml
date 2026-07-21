@@ -135,6 +135,15 @@ allow_hosts      = []        # host globs that bypass the SSRF screen, e.g. ["*.
 [tasks]
 backend = "memory"
 
+# Structured output (the OutputSchema seam). Constrain a completion to a JSON
+# schema, validate the result, and repair once on mismatch. `validator` selects
+# the impl ("draft07" = the dependency-free draft-07 subset); `max_repairs`
+# bounds the one-shot repair loop. Reached via `Agent::complete_structured`. See
+# docs/components/structured-output.md.
+[structured]
+validator   = "draft07"
+max_repairs = 1
+
 # Multi-branch git (the RepoBackend seam). One shared bare/mirror object DB fronts
 # many disposable `git worktree`s, so the agent can read, diff and analyze code
 # across branches without many full clones. `backend` selects the impl: "cli"

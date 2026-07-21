@@ -13,6 +13,8 @@ mod registry;
 mod search;
 pub mod session_store;
 pub mod skills;
+#[cfg(feature = "structured")]
+pub mod structured;
 #[cfg(feature = "subagents")]
 mod subagent;
 

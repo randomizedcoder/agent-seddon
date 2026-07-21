@@ -92,6 +92,7 @@ fn caps() -> ModelCapabilities {
     ModelCapabilities {
         supports_tools: true,
         context_window: 1000,
+        supports_response_format: false,
     }
 }
 
@@ -115,6 +116,7 @@ async fn provider_complete(#[case] transport: Transport) {
         tools: vec![],
         max_tokens: 16,
         temperature: 0.0,
+        response_format: None,
     };
     let resp = client.complete(req).await.unwrap();
     assert_eq!(resp.message.content, "hello from gateway");
@@ -213,6 +215,7 @@ async fn complete_via(faulty: FaultyProvider) -> (std::result::Result<String, St
             tools: vec![],
             max_tokens: 16,
             temperature: 0.0,
+            response_format: None,
         })
         .await
         .map(|r| r.message.content)
@@ -281,6 +284,7 @@ async fn provider_stream(#[case] transport: Transport) {
         tools: vec![],
         max_tokens: 16,
         temperature: 0.0,
+        response_format: None,
     };
     let mut stream = client.stream(req).await.unwrap();
     let mut text = String::new();

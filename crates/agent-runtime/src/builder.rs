@@ -256,11 +256,25 @@ pub async fn build_agent_with(
     #[cfg(feature = "git")]
     crate::git::spawn_fetch(repo_backend.clone(), cfg.git.auto_fetch_secs);
 
-    let agent = Agent::new(provider, tools, memory, context, policy, metrics, settings);
+    let agent = Agent::new(
+        provider,
+        tools,
+        memory,
+        context,
+        policy,
+        metrics.clone(),
+        settings,
+    );
     #[cfg(feature = "search")]
     let agent = agent.with_search(search_dispatch as Arc<dyn agent_core::SearchBackend>);
     #[cfg(feature = "git")]
     let agent = agent.with_repo(repo_backend);
+    // Structured output: build the config-selected validator, meter it, attach it.
+    #[cfg(feature = "structured")]
+    let agent = {
+        let validator = crate::structured::build_validator(&cfg.structured.validator)?;
+        agent.with_validator(crate::metered::validator(validator, metrics.clone()))
+    };
     Ok(agent)
 }
 

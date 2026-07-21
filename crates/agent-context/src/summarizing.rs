@@ -141,6 +141,7 @@ impl SummarizingWindow {
             tools: vec![],
             max_tokens: self.summary_max_tokens,
             temperature: 0.0,
+            response_format: None,
         };
         let resp = self.summarizer.complete(req).await?;
         Ok(resp.message.content)
@@ -253,6 +254,7 @@ mod tests {
             ModelCapabilities {
                 supports_tools: false,
                 context_window: 1000,
+                supports_response_format: false,
             }
         }
         async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse> {
@@ -325,6 +327,7 @@ mod tests {
             ModelCapabilities {
                 supports_tools: false,
                 context_window: 1000,
+                supports_response_format: false,
             }
         }
         async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse> {
