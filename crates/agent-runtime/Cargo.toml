@@ -19,6 +19,7 @@ default = [
     "git",
     "context-sliding-window",
     "context-summarizing",
+    "tokenizer",
     "memory-file",
     "mcp",
     "grpc",
@@ -48,6 +49,9 @@ git = [
 ]
 context-sliding-window = ["agent-context/context-sliding-window"]
 context-summarizing = ["agent-context/context-summarizing"]
+# Tokenizer + cost seam: the approx backend, price table, accurate compaction
+# counts + USD/cache accounting (parity spec 23).
+tokenizer = ["dep:agent-tokenizer", "agent-tokenizer/tokenizer-approx"]
 memory-file = ["agent-memory/memory-file"]
 # Connect to external MCP servers and register their tools.
 mcp = ["dep:agent-mcp"]
@@ -66,6 +70,7 @@ agent-search = { workspace = true, optional = true }
 agent-git = { workspace = true, optional = true }
 agent-memory.workspace = true
 agent-context.workspace = true
+agent-tokenizer = { workspace = true, optional = true }
 agent-mcp = { workspace = true, optional = true }
 agent-grpc = { workspace = true, optional = true }
 agent-telemetry.workspace = true

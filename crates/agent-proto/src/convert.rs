@@ -145,6 +145,7 @@ pub fn status_from_error(e: &agent_core::Error) -> tonic::Status {
         Error::Json(m) => tonic::Status::invalid_argument(format!("json: {m}")),
         Error::Search(m) => tonic::Status::internal(format!("search: {m}")),
         Error::Repo(m) => tonic::Status::internal(format!("repo: {m}")),
+        Error::Tokenizer(m) => tonic::Status::internal(format!("tokenizer: {m}")),
     }
 }
 
@@ -312,10 +313,15 @@ impl From<agent_core::Usage> for pb::Usage {
 
 impl From<pb::Usage> for agent_core::Usage {
     fn from(u: pb::Usage) -> Self {
+        // NOTE: the `pb::Usage` wire message does not yet carry the cache-token /
+        // cost fields (added to `agent_core::Usage` in parity spec 23); they
+        // default here and will traverse gRPC once `common.proto` is extended in
+        // the tokenizer-gRPC follow-up.
         agent_core::Usage {
             prompt_tokens: u.prompt_tokens,
             completion_tokens: u.completion_tokens,
             total_tokens: u.total_tokens,
+            ..Default::default()
         }
     }
 }
@@ -1182,7 +1188,7 @@ mod tests {
 
     #[rstest]
     #[case(None, None)]
-    #[case(Some(agent_core::Usage { prompt_tokens: 3, completion_tokens: 5, total_tokens: 8 }), Some(7))]
+    #[case(Some(agent_core::Usage { prompt_tokens: 3, completion_tokens: 5, total_tokens: 8, ..Default::default() }), Some(7))]
     fn memory_event_roundtrip(#[case] usage: Option<agent_core::Usage>, #[case] iter: Option<u32>) {
         let core = agent_core::MemoryEvent {
             kind: "assistant".into(),

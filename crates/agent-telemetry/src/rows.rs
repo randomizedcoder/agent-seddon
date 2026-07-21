@@ -158,7 +158,7 @@ mod tests {
 
     // --- UsageRow: present ⇒ Some(tokens); absent ⇒ None ------------------
     #[rstest]
-    #[case::present(Some(Usage { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 }), Some((10, 15)))]
+    #[case::present(Some(Usage { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15, ..Default::default() }), Some((10, 15)))]
     #[case::absent(None, None)]
     fn usage_row_cases(#[case] usage: Option<Usage>, #[case] expected: Option<(u32, u32)>) {
         let row = UsageRow::from_event(&ev("usage", Message::assistant(""), usage));
