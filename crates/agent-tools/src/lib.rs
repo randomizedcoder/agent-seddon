@@ -200,7 +200,7 @@ pub(crate) fn arg_bool(args: &Value, key: &str, default: bool) -> bool {
 #[cfg(feature = "tool-core")]
 pub fn default_tools() -> Vec<std::sync::Arc<dyn agent_core::Tool>> {
     vec![
-        std::sync::Arc::new(BashTool),
+        std::sync::Arc::new(BashTool::default()),
         std::sync::Arc::new(ReadFileTool),
         std::sync::Arc::new(WriteFileTool),
     ]

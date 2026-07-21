@@ -5,25 +5,27 @@ file-writing tools inside a pluggable execution boundary — with a **`nix`** ba
 that reuses the repo's own pinned, hermetic `flake.nix` for deterministic,
 content-addressed, reproducible isolation that no peer can match.
 
-> **Status: spec (design of record).** A new `Sandbox` seam
-> (`agent_core::Sandbox`) with config-selected backends — `local` (today's
-> unconfined spawn), **`nix` (HEADLINE)**, plus `bubblewrap`, `nsjail`, and
-> `docker`. `bash` and the write-side file tools (`write_file`, `edit`, `patch`)
-> route their process/IO through the selected backend instead of spawning
-> directly. The seam is *itself* gRPC-served (`agent --serve-sandbox`, reflection),
-> so a backend can be a remote executor; each `exec` is metered and carries an OTel
-> span with a `backend` attribute; a capability probe lets an absent backend binary
-> degrade rather than hard-fail. **Differentiator:** agent-seddon is already a
-> pinned hermetic `flake.nix` repo ([`flake.nix`](../../flake.nix),
-> [`nix/versions.nix`](../../nix/versions.nix)), so the `nix` backend runs each tool
-> command inside Nix's *own* sandbox — `nix develop -c <cmd>`, a `nix build`-style
-> sandboxed derivation, or `nix shell` with a pinned toolchain closure — with no
-> ambient `$PATH` and, on Linux, the same bind-mount + private-`/tmp` +
-> network-off isolation Nix uses for hermetic builds. Isolation is **deterministic,
-> content-addressed, and reproducible**, keyed to `nix/versions.nix` — where pi's
-> Gondolin micro-VM and hermes' docker/ssh/modal backends are all mutable-image
-> based. The `Policy` seam ([`crates/agent-runtime/src/policy.rs`](../../crates/agent-runtime/src/policy.rs))
-> picks the backend per call.
+> **Status: implemented** (seam + `local` + headline `nix` backends + `bash`
+> wiring + probe + observability + leak). New `Sandbox` seam
+> (`agent_core::Sandbox`: `exec(&ExecSpec) -> ExecOutput` + `capabilities()`) with
+> config-selected backends in [`agent-sandbox`](../../crates/agent-sandbox):
+> `local` (today's unconfined spawn) and **`nix` (HEADLINE)** — runs each command
+> inside the repo's pinned flake dev-shell closure (`nix develop <flake> -c bash -c
+> …`), so the toolchain/`$PATH` is exactly `nix/versions.nix`: **reproducible +
+> content-addressed + re-derivable from the lockfile**, where pi's micro-VM and
+> hermes' docker/ssh/modal backends are mutable-image based. `bash`
+> ([`agent-tools`](../../crates/agent-tools/src/core.rs)) routes through the seam
+> (`local` is its `Default`, so nothing else changes); the builder picks the
+> backend from `[sandbox] backend`. Metered (`agent_sandbox_exec_seconds{backend}`,
+> `agent_sandbox_exec_total{backend,outcome}`) + `sandbox.exec` span; a capability
+> probe degrades cleanly when `nix` is absent. **Deferred to a follow-up** (staged
+> like the tokenizer / web / tasks / structured / lsp seams): the nix
+> **sandboxed-derivation mode** (real network-off + private-`/tmp` + mount
+> confinement — the dev-shell mode ships now), the `bubblewrap`/`nsjail`/`docker`
+> backends, per-call backend selection via `Policy`, the `SandboxService` gRPC
+> service (`--serve-sandbox`), and routing the write tools through the sandbox
+> (`bash`, the highest-risk surface, routes through it now). See
+> [`docs/components/sandbox.md`](../components/sandbox.md).
 
 ## Feature & why it matters
 

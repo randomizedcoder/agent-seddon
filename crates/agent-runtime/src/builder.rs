@@ -58,6 +58,28 @@ pub async fn build_agent_with(
     #[cfg(feature = "grpc")]
     register_grpc_tools(&mut tools, &cfg, &metrics).await;
 
+    // `bash` routes through the config-selected Sandbox backend (local unconfined
+    // spawn, or the `nix` pinned-closure backend), metered per-backend. Wired here
+    // (not a registry factory) so it gets the backend + metrics.
+    #[cfg(feature = "tool-core")]
+    {
+        let backend: Arc<dyn agent_core::Sandbox> = match cfg.sandbox.backend.as_str() {
+            "local" => Arc::new(agent_sandbox::LocalSandbox),
+            "nix" => {
+                let flake = if cfg.agent.working_dir.is_empty() {
+                    ".".to_string()
+                } else {
+                    cfg.agent.working_dir.clone()
+                };
+                Arc::new(agent_sandbox::NixSandbox::new(flake))
+            }
+            other => anyhow::bail!("unknown [sandbox] backend `{other}` (local|nix)"),
+        };
+        let backend = crate::metered::sandbox(backend, metrics.clone());
+        let tool = Arc::new(agent_tools::BashTool::new(backend));
+        tools.register(crate::metered::tool(tool, metrics.clone()));
+    }
+
     // The `metrics` tool reads the shared registry, so the agent can inspect its
     // own performance (see docs/observability.md). Registered before the subagent
     // set is captured so child agents inherit it.
@@ -341,7 +363,8 @@ fn build_tools(
 /// added unconditionally when their feature is compiled in, so the allowlist only
 /// filters the registry-built tools (see `config/agent.toml`).
 fn is_builder_registered_tool(name: &str) -> bool {
-    (cfg!(feature = "tool-metrics") && name == "metrics")
+    (cfg!(feature = "tool-core") && name == "bash")
+        || (cfg!(feature = "tool-metrics") && name == "metrics")
         || (cfg!(feature = "search") && (name == "search" || name == "index_ls"))
         || (cfg!(feature = "subagents") && name == "delegate")
         || (cfg!(feature = "git") && name.starts_with("git_"))

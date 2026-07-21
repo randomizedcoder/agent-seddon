@@ -408,7 +408,7 @@ async fn read_write_roundtrips(#[case] transport: Transport) {
 #[tokio::test(flavor = "multi_thread")]
 async fn bash_roundtrips(#[case] transport: Transport) {
     let mut registry = agent_core::ToolRegistry::new();
-    registry.register(Arc::new(agent_tools::BashTool));
+    registry.register(Arc::new(agent_tools::BashTool::default()));
     let (dial, _srv) = spawn(transport, tools_router(registry, std::env::temp_dir())).await;
 
     let tools = grpc_tools(&dial).await.unwrap();

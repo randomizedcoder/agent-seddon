@@ -43,6 +43,8 @@ pub enum Error {
     Structured(String),
     #[error("lsp error: {0}")]
     Lsp(String),
+    #[error("sandbox error: {0}")]
+    Sandbox(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -877,6 +879,111 @@ pub trait LspBackend: Send + Sync {
     async fn request(&self, req: &LspRequest) -> Result<LspResult>;
     /// Tear down all pooled servers (idempotent; no leaked daemons).
     async fn shutdown(&self) -> Result<()>;
+}
+
+// ---------------------------------------------------------------------------
+// Seam: Sandbox (pluggable execution isolation, parity spec 14)
+// ---------------------------------------------------------------------------
+//
+// Confines `bash` inside a chosen boundary instead of spawning unconfined. The
+// headline backend is `nix`: it runs each command inside the repo's own pinned,
+// hermetic flake closure, so isolation is reproducible + content-addressed +
+// re-derivable from `nix/versions.nix` — where the peers use mutable images.
+// Concrete backends live in `agent-sandbox` behind cargo features; see
+// `docs/components/sandbox.md`.
+
+/// Whether the command may reach the network. Fully enforced only by backends
+/// that can (the sandboxed-derivation / `bwrap` modes); `local` and the `nix`
+/// dev-shell mode carry it but can't enforce `Off` (their capability probe says so).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NetworkPolicy {
+    /// No network (enforced by capable backends).
+    Off,
+    /// Full network.
+    #[default]
+    On,
+    /// Loopback only.
+    Loopback,
+}
+
+/// Whether the command inherits the ambient environment or runs against a
+/// scrubbed one (closure `PATH`, no host secrets).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EnvPolicy {
+    #[default]
+    Inherit,
+    Scrub,
+}
+
+/// One command to run inside a [`Sandbox`]. Mirrors `bash -c <command>` so the
+/// `local` backend is behaviour-identical to today's `BashTool`.
+#[derive(Debug, Clone)]
+pub struct ExecSpec {
+    pub command: String,
+    pub cwd: std::path::PathBuf,
+    pub network: NetworkPolicy,
+    pub env: EnvPolicy,
+    pub timeout_secs: u64,
+}
+
+impl ExecSpec {
+    /// A command with default policies (network on, env inherit).
+    pub fn sh(command: impl Into<String>, cwd: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            command: command.into(),
+            cwd: cwd.into(),
+            network: NetworkPolicy::On,
+            env: EnvPolicy::Inherit,
+            timeout_secs: 120,
+        }
+    }
+    pub fn network(mut self, n: NetworkPolicy) -> Self {
+        self.network = n;
+        self
+    }
+    pub fn env(mut self, e: EnvPolicy) -> Self {
+        self.env = e;
+        self
+    }
+    pub fn timeout(mut self, secs: u64) -> Self {
+        self.timeout_secs = secs;
+        self
+    }
+}
+
+/// The result of a sandboxed exec (mirrors `BashTool`'s capture).
+#[derive(Debug, Clone)]
+pub struct ExecOutput {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+    pub timed_out: bool,
+}
+
+/// A backend's isolation capabilities — a probe so the runtime can pick or
+/// degrade instead of failing at exec time.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SandboxCapabilities {
+    pub backend: String,
+    /// The backend's binary is present (`local` is always available).
+    pub available: bool,
+    /// Can enforce `NetworkPolicy::Off`.
+    pub network_off: bool,
+    /// Runs in a private `/tmp`.
+    pub private_tmp: bool,
+    /// The tool environment is content-addressed / re-derivable from a pin.
+    pub content_addressed: bool,
+}
+
+/// A replaceable execution boundary for `bash`. `exec` runs one command and
+/// returns its capture; `capabilities` is a cheap probe (binary presence + what
+/// the backend can enforce).
+#[async_trait]
+pub trait Sandbox: Send + Sync {
+    async fn exec(&self, spec: &ExecSpec) -> Result<ExecOutput>;
+    fn capabilities(&self) -> SandboxCapabilities;
 }
 
 // ---------------------------------------------------------------------------
