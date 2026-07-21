@@ -309,6 +309,12 @@ impl Default for MetricsCfg {
 pub struct AgentCfg {
     /// Which `LlmProvider` impl, e.g. "openai-compat".
     pub provider: String,
+    /// Working directory the file/shell tools operate under (`bash`, `read_file`,
+    /// `edit`, `grep`, …). Empty ⇒ the process's current directory. Set this to
+    /// point the agent at a target repo without `cd`-ing the process — needed for
+    /// embedded/served use and hermetic tests. `~` is expanded.
+    #[serde(default)]
+    pub working_dir: String,
     /// Which `ContextStrategy` impl, e.g. "sliding-window".
     #[serde(default = "default_context")]
     pub context: String,
@@ -570,6 +576,7 @@ impl Config {
         Config {
             agent: AgentCfg {
                 provider: "openai-compat".into(),
+                working_dir: String::new(),
                 context: default_context(),
                 policy: default_policy(),
                 max_iterations: default_max_iters(),
