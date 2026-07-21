@@ -5,8 +5,9 @@ plugin [`Registry`](../crates/agent-runtime/src/registry.rs). Adding an
 implementation is the **same three steps for any seam**:
 
 1. **Implement the trait** from `agent-core`.
-2. **Write a factory** — `Fn(&Config) -> anyhow::Result<Arc<dyn Trait>>` (a few
-   seams also receive the built provider — see the per-component notes).
+2. **Write a factory** — `Fn(&FactoryCtx) -> anyhow::Result<Arc<dyn Trait>>`.
+   Every seam uses this one signature; `FactoryCtx` carries the config, the shared
+   `Metrics`, and (where already built) the provider and tokenizer.
 3. **Register it** under a config-string name.
 
 Then a user selects it purely by config, with no change to the loop. This doc covers
@@ -76,8 +77,8 @@ use agent_runtime::{register_builtins, build_agent_with, Config, Metrics, Regist
 
 let mut registry = Registry::new();
 register_builtins(&mut registry);              // keep the built-ins…
-registry.provider("my-llm", |cfg| {            // …and add your own
-    Ok(Arc::new(my_crate::MyLlmProvider::new(cfg.provider.model.clone())?))
+registry.provider("my-llm", |ctx| {            // …and add your own
+    Ok(Arc::new(my_crate::MyLlmProvider::new(ctx.cfg.provider.model.clone())?))
 });
 
 let agent = build_agent_with(&registry, config, None, session_id, Metrics::new()).await?;

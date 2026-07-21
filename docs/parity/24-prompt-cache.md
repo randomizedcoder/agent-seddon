@@ -14,10 +14,10 @@ four.
 > provider holds the strategy** rather than the loop threading marks through
 > `CompletionRequest` — placement depends on provider capabilities, which the
 > provider knows, and it avoids touching 26 request-literal sites; this mirrors
-> how `bash` receives the `Sandbox`. Observability is **span-only**
-> (`cache.place`): the registry's provider factories are `Fn(&Config)` with no
-> `Metrics` handle, and the cost-relevant numbers (cache-read/write tokens, hence
-> hit-rate and tokens-saved) are already metered from `Usage` by spec 23.
+> how `bash` receives the `Sandbox`. Observability is a `cache.place` span plus
+> `agent_cache_breakpoints_total{strategy}`; the cost-relevant numbers
+> (cache-read/write tokens, hence hit-rate and tokens-saved) are already metered
+> from `Usage` by spec 23.
 >
 > Implementation note worth carrying forward: wire indices are **not** input
 > indices — `to_anthropic_messages` extracts system messages and coalesces

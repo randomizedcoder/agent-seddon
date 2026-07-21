@@ -11,6 +11,7 @@
 use crate::config::Config;
 use crate::registry::Registry;
 use agent_core::RepoBackend;
+use agent_metrics::Metrics;
 use anyhow::Context;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -39,6 +40,7 @@ pub fn build_repo(
     registry: &Registry,
     cfg: &Config,
     session_id: &str,
+    metrics: &Metrics,
 ) -> anyhow::Result<Arc<dyn RepoBackend>> {
     match cfg.git.backend_name() {
         "cli" | "hybrid" => {
@@ -56,7 +58,7 @@ pub fn build_repo(
             )))
         }
         name => registry
-            .build_repo(name, cfg)
+            .build_repo(name, &crate::registry::FactoryCtx::new(cfg, metrics))
             .with_context(|| format!("building git backend `{name}`")),
     }
 }

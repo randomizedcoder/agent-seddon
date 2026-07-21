@@ -46,7 +46,7 @@ tools are gitignore-aware (via the `ignore` crate) and run their blocking walk o
 In-tree: implement `Tool` in `agent-tools` (gate behind a `tool-*` feature),
 register a factory + one line in `register_builtins`. Out-of-tree:
 ```rust
-registry.tool("my_tool", |_cfg| Ok(Arc::new(MyTool)));
+registry.tool("my_tool", |_ctx| Ok(Arc::new(MyTool)));
 ```
 Then add `"my_tool"` to `[tools] enabled` (or leave the list empty for all). See the
 general [extension model](../extending.md).

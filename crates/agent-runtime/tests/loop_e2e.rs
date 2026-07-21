@@ -68,7 +68,7 @@ async fn agent_for_cfg(cfg_toml: &str, script: Vec<CompletionResponse>) -> agent
     register_builtins(&mut registry);
     // Replace the model with a canned script. The factory is called once at build.
     let script = std::sync::Mutex::new(Some(script));
-    registry.provider("scripted", move |_cfg| {
+    registry.provider("scripted", move |_ctx| {
         let s = script
             .lock()
             .unwrap()

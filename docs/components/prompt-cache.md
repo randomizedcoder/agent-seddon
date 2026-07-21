@@ -108,11 +108,9 @@ The numbers that matter for cost are already recorded from provider `Usage`
 the hit rate (`cache_read / (cache_read + prompt_tokens)`) and tokens-saved
 (`cache_read`, billed at `0.1×`) follow in PromQL.
 
-There is deliberately **no Prometheus counter for anchors placed**: the provider
-holds the strategy (placement depends on provider capabilities) and the registry's
-provider factories are `Fn(&Config)` with no `Metrics` handle. The anchor count is
-diagnostic, so it rides on the span instead of forcing a registry-wide signature
-change.
+`agent_cache_breakpoints_total{strategy}` counts the anchors placed. Read
+alongside `agent_cache_tokens_total`, it distinguishes a low hit-rate caused by bad
+*placement* from one caused by a merely cold cache.
 
 ## Interaction with compaction
 
