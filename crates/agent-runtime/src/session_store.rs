@@ -69,7 +69,7 @@ pub fn list(dir: &Path) -> Vec<SessionInfo> {
         let preview = msgs
             .iter()
             .find(|m| m.role == Role::User)
-            .map(|m| preview(&m.content))
+            .map(|m| preview(&m.content_text()))
             .unwrap_or_default();
         infos.push(SessionInfo {
             id: id.to_string(),
@@ -148,7 +148,7 @@ mod tests {
         save(&dir, "s1", &msgs).unwrap();
         let loaded = load(&dir, "s1").unwrap();
         assert_eq!(loaded.len(), 3);
-        assert_eq!(loaded[1].content, "hello world");
+        assert_eq!(loaded[1].content_text(), "hello world");
     }
 
     #[test]

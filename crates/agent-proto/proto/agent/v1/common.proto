@@ -63,11 +63,42 @@ message ToolCall {
   JsonValue arguments = 3;
 }
 
+// One typed piece of message content (agent-core `ContentBlock`): prose, an
+// image, or a document. `data` is raw bytes — not base64 — since proto carries
+// binary natively.
+message ContentBlock {
+  message Text {
+    string text = 1;
+  }
+  message Image {
+    string media_type = 1; // e.g. "image/png"
+    bytes data = 2;
+  }
+  message Document {
+    string media_type = 1;
+    bytes data = 2;
+    optional string name = 3;
+  }
+  oneof kind {
+    Text text = 1;
+    Image image = 2;
+    Document document = 3;
+  }
+}
+
 message Message {
   Role role = 1;
+  // The message's TEXT, always populated. Kept as field 2 with its original type
+  // so this change stays wire-compatible: a peer built before multimodal landed
+  // still reads the prose of every message, just without the media.
   string content = 2;
   repeated ToolCall tool_calls = 3;
   optional string tool_call_id = 4;
+  // The full ordered block list. Set only when the content is NOT simply
+  // zero-or-one text block (i.e. when there is media, or several text blocks) —
+  // so the common text-only message costs nothing extra on the wire. When empty,
+  // decoders fold `content` into a single text block.
+  repeated ContentBlock blocks = 5;
 }
 
 // A tool's advertised interface (what we hand the model).
@@ -86,6 +117,9 @@ message ToolSchema {
 message Observation {
   string content = 1;
   bool is_error = 2;
+  // Typed media the tool produced (a screenshot, an image read off disk).
+  // Additive: `content` remains the text summary every tool populates.
+  repeated ContentBlock blocks = 3;
 }
 
 // Ambient context handed to every tool invocation.
@@ -96,6 +130,10 @@ message ToolContext {
 message ModelCapabilities {
   bool supports_tools = 1;
   uint32 context_window = 2;
+  // Whether the model accepts image content blocks. Carried on the wire so a
+  // `= "grpc"` provider client can strip media BEFORE sending, instead of the
+  // remote model rejecting the whole request.
+  bool supports_vision = 3;
 }
 
 message Usage {

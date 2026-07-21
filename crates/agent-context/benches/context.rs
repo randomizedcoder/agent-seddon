@@ -24,9 +24,16 @@ fn history(n: usize) -> Vec<Message> {
         .collect()
 }
 
-// Estimate tokens over a 500-message window. Observed ~206k Ir; ceiling ~1.4×.
+// Estimate tokens over a 500-message window. Observed ~420k Ir; ceiling ~1.4×.
+//
+// Ceiling raised from 300k when parity spec 26 made `Message.content` a
+// `Vec<ContentBlock>`: like every bench here, this one builds its input inside
+// the measured region, and a message now heap-allocates a Vec for its content,
+// so `history(500)` costs ~500 extra allocations (~120k Ir). `estimate_tokens`
+// itself is unchanged — it still walks the blocks once, doing O(1) work per
+// text block.
 #[library_benchmark(config = LibraryBenchmarkConfig::default()
-    .tool(Callgrind::default().hard_limits([(EventKind::Ir, 300_000u64)])))]
+    .tool(Callgrind::default().hard_limits([(EventKind::Ir, 600_000u64)])))]
 fn estimate_tokens_500() -> u32 {
     let msgs = history(black_box(500));
     black_box(agent_context::bench_estimate_tokens(black_box(&msgs)))

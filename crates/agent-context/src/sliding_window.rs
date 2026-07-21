@@ -118,12 +118,12 @@ mod tests {
         // [ system(base+prepend), user(goal), system(append) ]
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[0].role, Role::System);
-        assert!(msgs[0].content.contains("BASE"));
-        assert!(msgs[0].content.contains("PRE-CONTENT"));
+        assert!(msgs[0].content_text().contains("BASE"));
+        assert!(msgs[0].content_text().contains("PRE-CONTENT"));
         assert_eq!(msgs[1].role, Role::User);
-        assert_eq!(msgs[1].content, "do the thing");
+        assert_eq!(msgs[1].content_text(), "do the thing");
         assert_eq!(msgs[2].role, Role::System);
-        assert!(msgs[2].content.contains("POST-CONTENT"));
+        assert!(msgs[2].content_text().contains("POST-CONTENT"));
     }
 
     #[tokio::test]

@@ -91,7 +91,7 @@ Legend: ✅ merged · 🔶 in review · ⬜ spec written, not started.
 | 23 | [tokenizer + cost accounting](23-tokenizer-cost.md) | 🔶 | Real per-model counts (pi/opencode still use chars/4) driving compaction; USD + cache-read/write split as metrics, behind one seam. **Core landed**: `Tokenizer` seam + `approx` backend + price table + cost model + `Usage` cache fields + compaction crossover + metrics/span (gRPC + BPE backends follow) |
 | 24 | [prompt caching](24-prompt-cache.md) | ⬜ | Swappable `CacheStrategy` breakpoint-placement policy with metered hit-rate & tokens-saved (ties to #23) |
 | 25 | [model routing / fallback](25-model-routing.md) | ⬜ | `Router` **is-a** `LlmProvider` composing N providers (local + remote gRPC); capability/cost/latency routing + classified failover, metered |
-| 26 | [multimodal content](26-multimodal.md) | ⬜ | Proto-typed image/PDF content blocks end-to-end (Message + common.proto + providers), metered by modality; tool results carry images |
+| 26 | [multimodal content](26-multimodal.md) | ✅ typed `ContentBlock` (`Text｜Image｜Document`) on `Message` + `Observation`, with **serde back-compat** for the pre-26 bare string; **purely additive** `common.proto` change (legacy `string content` still carries the text, so old peers keep working) + `supports_vision` on the wire; Anthropic `image`/`document` + OpenAI `image_url` encoding; `read_file` returns an image block by **file magic** (not extension) under a 3 MiB cap; capability gate strips media with a note for non-vision models; block-aware token accounting shared by all three estimators; `agent_content_blocks_total{modality}`. Image resize/convert deferred | — |
 
 **D — Agent-platform breadth**
 

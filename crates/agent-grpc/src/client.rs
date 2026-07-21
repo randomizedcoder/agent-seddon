@@ -356,7 +356,16 @@ impl Tool for GrpcTool {
         })
         .await
         {
-            Ok(resp) => Ok(resp.into_inner().into()),
+            // A malformed block from a remote tool fails closed rather than
+            // silently becoming empty content.
+            Ok(resp) => Ok(
+                Observation::try_from(resp.into_inner()).unwrap_or_else(|e| {
+                    Observation::error(format!(
+                        "grpc tool `{}` sent a bad observation: {e}",
+                        self.schema.name
+                    ))
+                }),
+            ),
             Err(s) => Ok(Observation::error(format!(
                 "grpc tool `{}` failed: {s}",
                 self.schema.name

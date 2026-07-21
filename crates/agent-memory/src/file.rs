@@ -195,7 +195,8 @@ impl SemanticStore for FileSemantic {
             .complete(req)
             .await
             .map_err(|e| Error::Memory(format!("distill completion: {e}")))?;
-        let body = resp.message.content.trim();
+        let body_text = resp.message.content_text();
+        let body = body_text.trim();
         if body.is_empty() || body == DISTILL_SENTINEL_NONE {
             return Ok(0);
         }
@@ -252,7 +253,8 @@ fn render_transcript(events: &[MemoryEvent]) -> String {
             Role::Assistant => "assistant",
             Role::Tool => "tool",
         };
-        let content = e.message.content.trim();
+        let content_text = e.message.content_text();
+        let content = content_text.trim();
         if content.is_empty() {
             continue;
         }
@@ -301,7 +303,7 @@ mod tests {
             kind: kind.into(),
             message: Message {
                 role,
-                content: content.into(),
+                content: vec![agent_core::ContentBlock::text(content)],
                 tool_calls: vec![],
                 tool_call_id: None,
             },
@@ -384,11 +386,11 @@ mod tests {
         if expected_len > 0 {
             // Kept oldest-first: last is newest, first is `append - expected_len`.
             assert_eq!(
-                recent.last().unwrap().message.content,
+                recent.last().unwrap().message.content_text(),
                 format!("g{}", append - 1)
             );
             assert_eq!(
-                recent.first().unwrap().message.content,
+                recent.first().unwrap().message.content_text(),
                 format!("g{}", append - expected_len)
             );
         }
@@ -579,8 +581,8 @@ mod tests {
         let recent = ep.recent(10).await.unwrap();
         // Nothing overwritten: all three survive, in insertion order.
         assert_eq!(recent.len(), 3);
-        assert_eq!(recent[0].message.content, "first");
-        assert_eq!(recent[2].message.content, "third");
+        assert_eq!(recent[0].message.content_text(), "first");
+        assert_eq!(recent[2].message.content_text(), "third");
     }
 
     #[tokio::test]

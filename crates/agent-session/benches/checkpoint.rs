@@ -21,7 +21,9 @@ fn conversation(n: usize) -> Vec<Message> {
             } else {
                 Role::Assistant
             },
-            content: format!("turn {i}: consider the retry backoff and the config parse path"),
+            content: vec![agent_core::ContentBlock::text(format!(
+                "turn {i}: consider the retry backoff and the config parse path"
+            ))],
             tool_calls: vec![],
             tool_call_id: None,
         })

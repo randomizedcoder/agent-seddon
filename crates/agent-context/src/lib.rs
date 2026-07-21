@@ -51,15 +51,26 @@ pub(crate) fn assemble_messages(input: ContextInput) -> Vec<Message> {
 /// Very rough token estimate: ~4 chars per token, plus a small per-message tax.
 #[cfg(any(feature = "context-sliding-window", feature = "context-summarizing"))]
 pub(crate) fn estimate_tokens(messages: &[Message]) -> u32 {
-    let mut chars = 0usize;
+    let mut tokens = 0u32;
     for m in messages {
-        chars += m.content.len();
+        let mut chars = 0usize;
+        for b in &m.content {
+            match b {
+                agent_core::ContentBlock::Text { text } => chars += text.len(),
+                // Media is not text: charge it via the shared estimator so all
+                // three estimators agree on what an image costs. Counting only
+                // text here would let an image-bearing turn look nearly free and
+                // overflow the model's window.
+                media => tokens = tokens.saturating_add(agent_core::media_block_tokens(media)),
+            }
+        }
         for tc in &m.tool_calls {
             chars += tc.name.len() + tc.arguments.to_string().len();
         }
         chars += 8; // role/formatting overhead
+        tokens = tokens.saturating_add((chars / 4) as u32);
     }
-    (chars / 4) as u32
+    tokens
 }
 
 /// Benchmark hook: `estimate_tokens` is called repeatedly inside the compaction
@@ -150,7 +161,7 @@ mod tests {
         assert_eq!(msgs.len(), expected);
         assert_eq!(msgs[0].role, Role::System);
         assert_eq!(msgs[1].role, Role::User);
-        assert_eq!(msgs[1].content, "GOAL");
+        assert_eq!(msgs[1].content_text(), "GOAL");
     }
 
     #[test]
@@ -160,7 +171,7 @@ mod tests {
             vec![mem("srcM", "BODYM")],
             vec![],
         ));
-        let sys = &msgs[0].content;
+        let sys = msgs[0].content_text();
         assert!(sys.starts_with("SYS"), "system prompt kept as head: {sys}");
         assert!(sys.contains("## srcP\nBODYP"));
         assert!(sys.contains("## Recalled memory"));
@@ -172,6 +183,6 @@ mod tests {
         let msgs = assemble_messages(input(vec![], vec![], vec![block("note", "N")]));
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[2].role, Role::System);
-        assert!(msgs[2].content.contains("## note\nN"));
+        assert!(msgs[2].content_text().contains("## note\nN"));
     }
 }

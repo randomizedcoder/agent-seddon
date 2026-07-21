@@ -20,7 +20,7 @@ fn ws(n: usize) -> WorkingSet {
                 } else {
                     Role::Assistant
                 },
-                content: format!("turn {i}"),
+                content: vec![agent_core::ContentBlock::text(format!("turn {i}"))],
                 tool_calls: vec![],
                 tool_call_id: None,
             })
