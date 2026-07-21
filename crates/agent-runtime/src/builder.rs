@@ -375,6 +375,7 @@ pub(crate) fn openai_compat_provider(
         api_key,
         insecure_tls: cfg.provider.insecure_tls,
         context_window: cfg.agent.context_window,
+        max_retries: cfg.provider.max_retries,
     })
     .map_err(|e| anyhow::anyhow!("building provider: {e}"))?;
     Ok(Arc::new(provider))
@@ -396,6 +397,7 @@ pub(crate) fn anthropic_provider(cfg: &Config) -> anyhow::Result<Arc<dyn agent_c
         api_key,
         version: cfg.provider.version.clone(),
         context_window: cfg.agent.context_window,
+        max_retries: cfg.provider.max_retries,
     })
     .map_err(|e| anyhow::anyhow!("building provider: {e}"))?;
     Ok(Arc::new(provider))
@@ -507,6 +509,7 @@ mod tests {
             api_key_env: api_key_env.into(),
             api_key_file: api_key_file.into(),
             insecure_tls: false,
+            max_retries: 0,
         }
     }
 

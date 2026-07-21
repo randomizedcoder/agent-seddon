@@ -1,0 +1,17 @@
+[package]
+name = "agent-retry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The ONE retry/backoff implementation for the whole workspace. A leaf crate (no
+# dependency on any other agent-* crate) so every layer — providers, gRPC clients,
+# MCP, telemetry, git — can depend on it without a cycle. See docs/components/retry.md.
+
+[dependencies]
+# `tokio::time::sleep` for the backoff wait (the runtime is already tokio).
+tokio = { workspace = true }
+tracing.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true

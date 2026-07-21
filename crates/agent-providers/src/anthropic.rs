@@ -26,6 +26,8 @@ pub struct AnthropicConfig {
     /// The `anthropic-version` header (e.g. `2023-06-01`).
     pub version: String,
     pub context_window: u32,
+    /// Retries for transient failures (429 / 5xx / timeout); 0 disables.
+    pub max_retries: u32,
 }
 
 pub struct AnthropicProvider {
@@ -35,6 +37,7 @@ pub struct AnthropicProvider {
     api_key: String,
     version: String,
     context_window: u32,
+    retry: agent_retry::RetryPolicy,
 }
 
 impl AnthropicProvider {
@@ -51,6 +54,7 @@ impl AnthropicProvider {
             api_key: cfg.api_key,
             version: cfg.version,
             context_window: cfg.context_window,
+            retry: agent_retry::RetryPolicy::new(cfg.max_retries),
         })
     }
 
@@ -87,16 +91,48 @@ impl AnthropicProvider {
         body
     }
 
-    /// Fire the request and return the raw response (shared by complete/stream).
+    /// Fire the request via the canonical retry driver (shared by complete/stream):
+    /// retry 429/5xx (honouring `Retry-After`) and connection/timeout errors, fail
+    /// fast on other 4xx. A non-retryable error status is returned as `Ok` so the
+    /// caller can read its body for the message.
     async fn send(&self, body: &Value) -> Result<reqwest::Response> {
-        self.client
-            .post(&self.endpoint)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", &self.version)
-            .json(body)
-            .send()
-            .await
-            .map_err(|e| Error::Provider(format!("request failed: {e}")))
+        agent_retry::run(&self.retry, || async {
+            match self
+                .client
+                .post(&self.endpoint)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", &self.version)
+                .json(body)
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    let code = resp.status().as_u16();
+                    if agent_retry::http::retryable_status(code) {
+                        let after = resp
+                            .headers()
+                            .get(reqwest::header::RETRY_AFTER)
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(agent_retry::http::parse_retry_after);
+                        let body = resp.text().await.unwrap_or_default();
+                        agent_retry::Attempt::Retry {
+                            err: Error::Provider(format!("http {code}: {body}")),
+                            after,
+                        }
+                    } else {
+                        agent_retry::Attempt::Done(resp)
+                    }
+                }
+                Err(e) if e.is_timeout() || e.is_connect() => agent_retry::Attempt::Retry {
+                    err: Error::Provider(format!("request failed: {e}")),
+                    after: None,
+                },
+                Err(e) => {
+                    agent_retry::Attempt::Fail(Error::Provider(format!("request failed: {e}")))
+                }
+            }
+        })
+        .await
     }
 }
 

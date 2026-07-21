@@ -62,6 +62,7 @@ model    = "/model"
 api_key_file = "~/Downloads/runpod/glm/glm-api-key"
 # api_key_env = "AGENT_API_KEY"     # alternative: read from this env var
 insecure_tls = true          # GLM server uses a self-signed cert
+max_retries  = 3             # retry transient 429/5xx/timeout with backoff (0 = off)
 # version = "2023-06-01"       # Anthropic `anthropic-version` header (Anthropic only)
 #
 # To use Anthropic instead, set provider = "anthropic" above and:

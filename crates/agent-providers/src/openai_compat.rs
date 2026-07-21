@@ -23,6 +23,8 @@ pub struct OpenAiCompatConfig {
     pub api_key: String,
     pub insecure_tls: bool,
     pub context_window: u32,
+    /// Retries for transient failures (429 / 5xx / timeout); 0 disables.
+    pub max_retries: u32,
 }
 
 pub struct OpenAiCompatProvider {
@@ -31,6 +33,7 @@ pub struct OpenAiCompatProvider {
     model: String,
     api_key: String,
     context_window: u32,
+    retry: agent_retry::RetryPolicy,
 }
 
 impl OpenAiCompatProvider {
@@ -47,7 +50,52 @@ impl OpenAiCompatProvider {
             model: cfg.model,
             api_key: cfg.api_key,
             context_window: cfg.context_window,
+            retry: agent_retry::RetryPolicy::new(cfg.max_retries),
         })
+    }
+
+    /// POST the request body via the canonical retry driver (shared by
+    /// complete/stream): retry 429/5xx (honouring `Retry-After`) and connection/
+    /// timeout errors, fail fast on other 4xx. Returns the final response for the
+    /// caller to read/stream (a non-retryable error status is returned as `Ok` so
+    /// the caller can read its body for the message).
+    async fn send(&self, wire: &WireReq<'_>) -> Result<reqwest::Response> {
+        agent_retry::run(&self.retry, || async {
+            match self
+                .client
+                .post(&self.endpoint)
+                .bearer_auth(&self.api_key)
+                .json(wire)
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    let code = resp.status().as_u16();
+                    if agent_retry::http::retryable_status(code) {
+                        let after = resp
+                            .headers()
+                            .get(reqwest::header::RETRY_AFTER)
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(agent_retry::http::parse_retry_after);
+                        let body = resp.text().await.unwrap_or_default();
+                        agent_retry::Attempt::Retry {
+                            err: Error::Provider(format!("http {code}: {body}")),
+                            after,
+                        }
+                    } else {
+                        agent_retry::Attempt::Done(resp)
+                    }
+                }
+                Err(e) if e.is_timeout() || e.is_connect() => agent_retry::Attempt::Retry {
+                    err: Error::Provider(format!("request failed: {e}")),
+                    after: None,
+                },
+                Err(e) => {
+                    agent_retry::Attempt::Fail(Error::Provider(format!("request failed: {e}")))
+                }
+            }
+        })
+        .await
     }
 
     fn build_wire<'a>(&'a self, req: &CompletionRequest, stream: bool) -> WireReq<'a> {
@@ -85,14 +133,7 @@ impl LlmProvider for OpenAiCompatProvider {
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse> {
         let wire = self.build_wire(&req, false);
 
-        let resp = self
-            .client
-            .post(&self.endpoint)
-            .bearer_auth(&self.api_key)
-            .json(&wire)
-            .send()
-            .await
-            .map_err(|e| Error::Provider(format!("request failed: {e}")))?;
+        let resp = self.send(&wire).await?;
 
         let status = resp.status();
         let body = resp
@@ -160,14 +201,7 @@ impl LlmProvider for OpenAiCompatProvider {
 
     async fn stream(&self, req: CompletionRequest) -> Result<ChunkStream> {
         let wire = self.build_wire(&req, true);
-        let resp = self
-            .client
-            .post(&self.endpoint)
-            .bearer_auth(&self.api_key)
-            .json(&wire)
-            .send()
-            .await
-            .map_err(|e| Error::Provider(format!("request failed: {e}")))?;
+        let resp = self.send(&wire).await?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();

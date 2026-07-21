@@ -166,6 +166,7 @@ name = "agent-providers"
 version = "0.1.0"
 dependencies = [
  "agent-core",
+ "agent-retry",
  "async-stream",
  "async-trait",
  "futures-util",
@@ -173,6 +174,15 @@ dependencies = [
  "rstest",
  "serde",
  "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "agent-retry"
+version = "0.1.0"
+dependencies = [
+ "rstest",
  "tokio",
  "tracing",
 ]

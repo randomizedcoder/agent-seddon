@@ -376,6 +376,10 @@ pub struct ProviderCfg {
     pub api_key_file: String,
     #[serde(default)]
     pub insecure_tls: bool,
+    /// Retries for transient request failures (HTTP 429 / 5xx / timeout /
+    /// connection error), with exponential backoff. `0` disables retrying.
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -519,6 +523,9 @@ fn default_system_prompt() -> String {
 fn default_anthropic_version() -> String {
     "2023-06-01".into()
 }
+fn default_max_retries() -> u32 {
+    3
+}
 fn default_subagent_depth() -> usize {
     2
 }
@@ -599,6 +606,9 @@ impl Config {
                 api_key_env: String::new(),
                 api_key_file: String::new(),
                 insecure_tls: false,
+                // No retries in tests: fail fast, keep the suite quick (a test that
+                // hits the unreachable localhost URL shouldn't sleep through backoff).
+                max_retries: 0,
             },
             memory: MemoryCfg::default(),
             tools: ToolsCfg::default(),
