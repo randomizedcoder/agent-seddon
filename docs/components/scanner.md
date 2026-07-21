@@ -135,6 +135,24 @@ It never echoes the rule id or the matched bytes. Doing so would hand an attacke
 an oracle for probing exactly what is gated — the same uniform-denial rule as
 parity spec 08.
 
+## Performance
+
+The scan runs before every side-effecting tool call, so its cost is on the loop's
+critical path. Two things matter, both pinned by benches:
+
+- **Patterns run in ASCII mode** (`(?i-u)`, `(?-u:\w)`). Unicode case-folding and
+  Unicode `\w` build far larger automata; switching the threat set to ASCII cut a
+  16 KiB scan from **59.8M to 21.1M** instructions (2.8x) for vocabulary that is
+  ASCII by construction. Full-width homographs are handled by the explicit
+  `fold_width` pass instead, so nothing is lost. The two patterns using negated
+  classes (`[^\n]`) stay in Unicode mode — in ASCII mode those can match invalid
+  UTF-8, which the `&str` regex rejects outright.
+- **`RegexSet` was tried and rejected.** One combined pass to learn which rules
+  match, then re-running only those for spans, is ~2x *slower* whenever anything
+  matches (you pay both passes) and only helps on clean input. Measured, not
+  assumed. The clean case is benched separately (`scan_clean_16k`) so a future
+  attempt has a baseline to beat.
+
 ## Observability
 
 | Metric | Labels |

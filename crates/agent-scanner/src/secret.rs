@@ -71,7 +71,7 @@ static RULES: LazyLock<Vec<Rule>> = LazyLock::new(|| {
     add(
         "secret.assignment",
         Severity::High,
-        r#"(?i)\b(?:api[_-]?key|auth[_-]?token|access[_-]?token|bearer|credential|password|passwd|secret|token)\b\s*[=:]\s*["']([A-Za-z0-9+/=_\-]{16,})["']"#,
+        r#"(?i-u)\b(?:api[_-]?key|auth[_-]?token|access[_-]?token|bearer|credential|password|passwd|secret|token)\b\s*[=:]\s*["']([A-Za-z0-9+/=_\-]{16,})["']"#,
     );
     rules
 });

@@ -46,22 +46,22 @@ static PATTERNS: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
         });
     };
 
-    // Instruction override / role hijack. Bounded `(?:\w+\s+){0,6}` filler
+    // Instruction override / role hijack. Bounded `(?:(?-u:\w)+\s+){0,6}` filler
     // resists word-insertion bypass without catastrophic backtracking.
     add(
         "threat.prompt_injection",
         Severity::High,
-        r"(?i)\b(?:ignore|disregard|forget)\s+(?:\w+\s+){0,6}(?:previous|prior|earlier|above|all)\s+(?:\w+\s+){0,3}(?:instruction|instructions|prompt|prompts|rule|rules)\b",
+        r"(?i-u)\b(?:ignore|disregard|forget)\s+(?:(?-u:\w)+\s+){0,6}(?:previous|prior|earlier|above|all)\s+(?:(?-u:\w)+\s+){0,3}(?:instruction|instructions|prompt|prompts|rule|rules)\b",
     );
     add(
         "threat.role_hijack",
         Severity::High,
-        r"(?i)\b(?:you\s+are\s+now\s+(?:a|an|the)\b|system\s+prompt\s+override|override\s+the\s+system\s+prompt|act\s+as\s+if\s+you\s+have\s+no\s+restrictions)",
+        r"(?i-u)\b(?:you\s+are\s+now\s+(?:a|an|the)\b|system\s+prompt\s+override|override\s+the\s+system\s+prompt|act\s+as\s+if\s+you\s+have\s+no\s+restrictions)",
     );
     add(
         "threat.prompt_disclosure",
         Severity::Medium,
-        r"(?i)\b(?:reveal|print|output|repeat|show)\s+(?:\w+\s+){0,3}system\s+prompt\b",
+        r"(?i-u)\b(?:reveal|print|output|repeat|show)\s+(?:(?-u:\w)+\s+){0,3}system\s+prompt\b",
     );
     // Reading credential material — the file the agent should never cat.
     add(
@@ -73,7 +73,7 @@ static PATTERNS: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
     add(
         "threat.exfiltration",
         Severity::High,
-        r"(?i)\b(?:exfiltrate|send|upload|post|leak)\s+(?:\w+\s+){0,6}(?:key|keys|token|tokens|secret|secrets|credential|credentials|password|passwords|env)\b",
+        r"(?i-u)\b(?:exfiltrate|send|upload|post|leak)\s+(?:(?-u:\w)+\s+){0,6}(?:key|keys|token|tokens|secret|secrets|credential|credentials|password|passwords|env)\b",
     );
     // Remote-exec / C2 vocabulary.
     add(
