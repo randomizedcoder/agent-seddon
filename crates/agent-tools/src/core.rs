@@ -13,7 +13,26 @@ const BASH_TIMEOUT_SECS: u64 = if cfg!(test) { 1 } else { 120 };
 
 // --- bash -----------------------------------------------------------------
 
-pub struct BashTool;
+/// `bash` routes through the [`Sandbox`](agent_core::Sandbox) seam: the `local`
+/// backend is a plain unconfined spawn (behaviour-identical to before), and the
+/// `nix` backend runs the command inside the repo's pinned flake closure. The
+/// runtime picks the backend from `[sandbox] backend`.
+pub struct BashTool {
+    sandbox: std::sync::Arc<dyn agent_core::Sandbox>,
+}
+
+impl BashTool {
+    pub fn new(sandbox: std::sync::Arc<dyn agent_core::Sandbox>) -> Self {
+        Self { sandbox }
+    }
+}
+
+impl Default for BashTool {
+    /// The unconfined `local` backend — today's behaviour.
+    fn default() -> Self {
+        Self::new(std::sync::Arc::new(agent_sandbox::LocalSandbox))
+    }
+}
 
 #[async_trait]
 impl Tool for BashTool {
@@ -44,45 +63,30 @@ impl Tool for BashTool {
     }
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<Observation> {
         let command = arg_str(&args, "command")?;
-        let run = tokio::process::Command::new("bash")
-            .arg("-c")
-            .arg(command)
-            .current_dir(&ctx.cwd)
-            .kill_on_drop(true) // ensure the child is killed if we time out
-            .output();
-        let output = match tokio::time::timeout(
-            std::time::Duration::from_secs(BASH_TIMEOUT_SECS),
-            run,
-        )
-        .await
-        {
-            Ok(Ok(o)) => o,
-            Ok(Err(e)) => return Err(agent_core::Error::Tool(format!("spawning bash: {e}"))),
-            Err(_) => {
-                return Ok(Observation::error(format!(
-                    "command timed out after {BASH_TIMEOUT_SECS}s and was killed"
-                )))
-            }
-        };
+        let spec = agent_core::ExecSpec::sh(command, ctx.cwd.clone()).timeout(BASH_TIMEOUT_SECS);
+        let output = self.sandbox.exec(&spec).await?;
+        if output.timed_out {
+            return Ok(Observation::error(format!(
+                "command timed out after {BASH_TIMEOUT_SECS}s and was killed"
+            )));
+        }
 
         let mut buf = String::new();
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if !stdout.is_empty() {
-            buf.push_str(&stdout);
+        if !output.stdout.is_empty() {
+            buf.push_str(&output.stdout);
         }
-        if !stderr.is_empty() {
+        if !output.stderr.is_empty() {
             if !buf.is_empty() {
                 buf.push('\n');
             }
             buf.push_str("[stderr]\n");
-            buf.push_str(&stderr);
+            buf.push_str(&output.stderr);
         }
-        let code = output.status.code().unwrap_or(-1);
+        let code = output.exit_code;
         if buf.is_empty() {
             buf = format!("(no output, exit code {code})");
         }
-        let is_error = !output.status.success();
+        let is_error = code != 0;
         Ok(Observation {
             content: truncate(buf),
             is_error,
@@ -523,7 +527,7 @@ mod tests {
         #[case] expected: std::result::Result<&str, &str>,
     ) {
         let dir = tempdir();
-        let obs = run(&dir, &BashTool, args).await;
+        let obs = run(&dir, &BashTool::default(), args).await;
         match expected {
             Ok(substr) => {
                 assert!(!obs.is_error, "unexpected error: {}", obs.content);
@@ -549,7 +553,12 @@ mod tests {
     #[tokio::test]
     async fn bash_boundary_output_truncated_at_cap() {
         let dir = tempdir();
-        let obs = run(&dir, &BashTool, json!({"command": "yes x | head -c 20000"})).await;
+        let obs = run(
+            &dir,
+            &BashTool::default(),
+            json!({"command": "yes x | head -c 20000"}),
+        )
+        .await;
         assert!(!obs.is_error, "{}", obs.content);
         assert!(obs.content.ends_with("[output truncated]"));
         assert!(obs.content.len() <= crate::MAX_OUTPUT + "\n...[output truncated]".len());
@@ -559,7 +568,12 @@ mod tests {
     #[tokio::test]
     async fn bash_corner_trailing_newline_preserved() {
         let dir = tempdir();
-        let obs = run(&dir, &BashTool, json!({"command": "printf 'one\\n'"})).await;
+        let obs = run(
+            &dir,
+            &BashTool::default(),
+            json!({"command": "printf 'one\\n'"}),
+        )
+        .await;
         assert!(!obs.is_error);
         assert_eq!(obs.content, "one\n");
     }
@@ -569,7 +583,7 @@ mod tests {
     #[tokio::test]
     async fn bash_boundary_timeout_kills_and_reports() {
         let dir = tempdir();
-        let obs = run(&dir, &BashTool, json!({"command": "sleep 5"})).await;
+        let obs = run(&dir, &BashTool::default(), json!({"command": "sleep 5"})).await;
         assert!(obs.is_error, "expected timeout error, got: {}", obs.content);
         assert!(
             obs.content.contains("timed out"),
@@ -582,6 +596,6 @@ mod tests {
     // side effects), unlike the default-true trait impl.
     #[test]
     fn bash_corner_parallel_safe_is_false() {
-        assert!(!BashTool.parallel_safe());
+        assert!(!BashTool::default().parallel_safe());
     }
 }

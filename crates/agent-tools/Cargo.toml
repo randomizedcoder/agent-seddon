@@ -39,6 +39,8 @@ dhat-heap = ["dep:dhat"]
 [dependencies]
 agent-core.workspace = true
 agent-metrics = { workspace = true, optional = true }
+# `bash` routes through the Sandbox seam; the `local` backend is the default.
+agent-sandbox = { workspace = true, features = ["sandbox-local"] }
 async-trait.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

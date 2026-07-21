@@ -1,0 +1,26 @@
+[package]
+name = "agent-sandbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# The `local` (unconfined spawn) backend is always available — the default. The
+# `nix` backend runs commands inside the repo's pinned flake closure. Heavier
+# isolators (`bwrap`/`nsjail`/`docker`) + the nix sandboxed-derivation mode are
+# follow-ups. See docs/components/sandbox.md and parity spec 14.
+default = ["sandbox-local", "sandbox-nix"]
+sandbox-local = []
+sandbox-nix = []
+# Injects a dhat global allocator for the allocation-budget leak test only.
+dhat-heap = ["dep:dhat"]
+
+[dependencies]
+agent-core.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+dhat = { workspace = true, optional = true }
+
+[dev-dependencies]
+rstest.workspace = true
+agent-testkit.workspace = true

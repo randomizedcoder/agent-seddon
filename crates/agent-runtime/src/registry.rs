@@ -400,9 +400,8 @@ pub fn register_builtins(r: &mut Registry) {
     // --- tools ---
     #[cfg(feature = "tool-core")]
     {
-        r.tool("bash", |_cfg| {
-            Ok(Arc::new(agent_tools::BashTool) as Arc<dyn Tool>)
-        });
+        // `bash` is wired by the builder (it needs the config-selected Sandbox
+        // backend + metrics), not a plain registry factory. See builder.rs.
         r.tool("read_file", |_cfg| {
             Ok(Arc::new(agent_tools::ReadFileTool) as Arc<dyn Tool>)
         });
@@ -552,8 +551,9 @@ mod tests {
         assert!(r.providers.contains_key("openai-compat"));
         #[cfg(feature = "tool-core")]
         {
+            // `bash` is builder-wired (needs the Sandbox backend), not in the
+            // registry; `read_file`/`write_file` remain plain factories.
             let names: Vec<&str> = r.tool_names().collect();
-            assert!(names.contains(&"bash"));
             assert!(names.contains(&"read_file"));
             assert!(names.contains(&"write_file"));
         }

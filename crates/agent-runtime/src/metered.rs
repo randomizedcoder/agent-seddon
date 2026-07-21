@@ -249,6 +249,43 @@ impl agent_core::OutputSchema for MeteredValidator {
     }
 }
 
+/// Wrap a [`Sandbox`](agent_core::Sandbox) so each `exec` emits a `sandbox.exec`
+/// span (`backend` attr) and records per-backend exec latency + outcome.
+#[cfg(feature = "tool-core")]
+pub(crate) fn sandbox(
+    inner: Arc<dyn agent_core::Sandbox>,
+    m: Metrics,
+) -> Arc<dyn agent_core::Sandbox> {
+    Arc::new(MeteredSandbox { inner, metrics: m })
+}
+
+#[cfg(feature = "tool-core")]
+struct MeteredSandbox {
+    inner: Arc<dyn agent_core::Sandbox>,
+    metrics: Metrics,
+}
+
+#[cfg(feature = "tool-core")]
+#[async_trait]
+impl agent_core::Sandbox for MeteredSandbox {
+    async fn exec(&self, spec: &agent_core::ExecSpec) -> Result<agent_core::ExecOutput> {
+        let backend = self.inner.capabilities().backend;
+        let span = tracing::info_span!("sandbox.exec", backend = %backend);
+        let start = Instant::now();
+        let out = self.inner.exec(spec).instrument(span).await;
+        let outcome = match &out {
+            Ok(o) if o.exit_code == 0 && !o.timed_out => "ok",
+            _ => "error",
+        };
+        self.metrics
+            .on_sandbox_exec(&backend, outcome, start.elapsed().as_secs_f64());
+        out
+    }
+    fn capabilities(&self) -> agent_core::SandboxCapabilities {
+        self.inner.capabilities()
+    }
+}
+
 /// Wrap an [`LspBackend`](agent_core::LspBackend) so each `request` emits an
 /// `lsp.request` span (`method`/`uri` attrs), records per-method latency/errors,
 /// and counts observed diagnostics by severity.
@@ -1252,6 +1289,59 @@ mod lsp_tests {
                 &metrics,
                 "agent_lsp_request_seconds_count",
                 Some("method=\"diagnostics\"")
+            ) >= 1.0
+        );
+    }
+}
+
+// sandbox: the metered Sandbox emits a `sandbox.exec` span (backend attr) and
+// meters per-backend exec latency + outcome.
+#[cfg(all(test, feature = "tool-core"))]
+mod sandbox_tests {
+    use super::*;
+    use agent_core::{ExecOutput, ExecSpec, Sandbox, SandboxCapabilities};
+    use agent_testkit::observe::{captured_spans, MetricsProbe};
+
+    struct FakeSandbox;
+    #[async_trait]
+    impl Sandbox for FakeSandbox {
+        async fn exec(&self, _spec: &ExecSpec) -> Result<ExecOutput> {
+            Ok(ExecOutput {
+                stdout: "ok".into(),
+                stderr: String::new(),
+                exit_code: 0,
+                timed_out: false,
+            })
+        }
+        fn capabilities(&self) -> SandboxCapabilities {
+            SandboxCapabilities {
+                backend: "fake".into(),
+                ..Default::default()
+            }
+        }
+    }
+
+    #[test]
+    fn metered_sandbox_emits_span_and_meters() {
+        let _lock = super::callsite_guard();
+        let metrics = Metrics::new();
+        let probe = MetricsProbe::new(&metrics);
+        let spans = captured_spans(|| {
+            tracing::callsite::rebuild_interest_cache();
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let sb = super::sandbox(Arc::new(FakeSandbox), metrics.clone());
+                let _ = sb.exec(&ExecSpec::sh("echo hi", ".")).await;
+            });
+        });
+        assert!(spans.contains(&"sandbox.exec".to_string()), "{spans:?}");
+        assert!(
+            probe.delta(
+                &metrics,
+                "agent_sandbox_exec_total",
+                Some("backend=\"fake\"")
             ) >= 1.0
         );
     }

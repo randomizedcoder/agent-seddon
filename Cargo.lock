@@ -216,6 +216,7 @@ dependencies = [
  "agent-memory",
  "agent-metrics",
  "agent-providers",
+ "agent-sandbox",
  "agent-search",
  "agent-tasks",
  "agent-telemetry",
@@ -236,6 +237,18 @@ dependencies = [
  "toml",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "agent-sandbox"
+version = "0.1.0"
+dependencies = [
+ "agent-core",
+ "agent-testkit",
+ "async-trait",
+ "dhat",
+ "rstest",
+ "tokio",
 ]
 
 [[package]]
@@ -322,6 +335,7 @@ version = "0.1.0"
 dependencies = [
  "agent-core",
  "agent-metrics",
+ "agent-sandbox",
  "agent-tasks",
  "agent-testkit",
  "async-trait",

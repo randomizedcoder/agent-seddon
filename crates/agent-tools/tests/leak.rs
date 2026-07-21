@@ -84,17 +84,25 @@ async fn tools_do_not_leak() {
     })
     .await;
 
-    // bash spawns a subprocess each run; assert the parent-side Command/pipe/output
-    // allocations don't leak across runs.
+    // bash spawns a subprocess each run (through the Sandbox seam); assert the
+    // parent-side Command/pipe/output allocations don't leak across runs. The tool
+    // (and its Sandbox Arc) is built once — only the per-exec path repeats.
     #[cfg(feature = "tool-core")]
-    assert_no_leak(200, || async {
-        let obs = agent_tools::BashTool
-            .execute(serde_json::json!({ "command": "printf hi" }), &ctx)
-            .await
-            .unwrap();
-        assert!(!obs.is_error, "{}", obs.content);
-    })
-    .await;
+    {
+        let bash = agent_tools::BashTool::default();
+        assert_no_leak(200, || {
+            let bash = &bash;
+            let ctx = &ctx;
+            async move {
+                let obs = bash
+                    .execute(serde_json::json!({ "command": "printf hi" }), ctx)
+                    .await
+                    .unwrap();
+                assert!(!obs.is_error, "{}", obs.content);
+            }
+        })
+        .await;
+    }
 
     // edit: exercise the read → match/replace → write path (fuzzy fallback).
     #[cfg(feature = "tool-edit")]

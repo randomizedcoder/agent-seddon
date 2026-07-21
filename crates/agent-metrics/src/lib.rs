@@ -112,6 +112,11 @@ pub struct Metrics {
     lsp_request_seconds: HistogramVec,
     lsp_errors: IntCounterVec,
     lsp_diagnostics: IntCounterVec,
+
+    // --- sandbox (Sandbox seam) -------------------------------------------
+    // Per-backend exec latency + outcome. `backend` is a config-bounded label.
+    sandbox_exec_seconds: HistogramVec,
+    sandbox_exec_total: IntCounterVec,
 }
 
 impl Metrics {
@@ -422,6 +427,24 @@ impl Metrics {
         )
         .unwrap();
 
+        // --- sandbox (recorded by the sandbox metrics wrapper) ----------------
+        let sandbox_exec_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "agent_sandbox_exec_seconds",
+                "Sandboxed exec latency, by backend",
+            ),
+            &["backend"],
+        )
+        .unwrap();
+        let sandbox_exec_total = IntCounterVec::new(
+            Opts::new(
+                "agent_sandbox_exec_total",
+                "Sandboxed execs by backend + outcome (ok/error)",
+            ),
+            &["backend", "outcome"],
+        )
+        .unwrap();
+
         let collectors: Vec<Box<dyn prometheus::core::Collector>> = vec![
             Box::new(api_calls.clone()),
             Box::new(api_call_seconds.clone()),
@@ -471,6 +494,8 @@ impl Metrics {
             Box::new(lsp_request_seconds.clone()),
             Box::new(lsp_errors.clone()),
             Box::new(lsp_diagnostics.clone()),
+            Box::new(sandbox_exec_seconds.clone()),
+            Box::new(sandbox_exec_total.clone()),
         ];
         for m in collectors {
             registry.register(m).expect("register metric");
@@ -526,6 +551,8 @@ impl Metrics {
             lsp_request_seconds,
             lsp_errors,
             lsp_diagnostics,
+            sandbox_exec_seconds,
+            sandbox_exec_total,
         }
     }
 
@@ -821,6 +848,18 @@ impl Metrics {
     /// Count one observed diagnostic, labelled by severity.
     pub fn on_lsp_diagnostic(&self, severity: &str) {
         self.lsp_diagnostics.with_label_values(&[severity]).inc();
+    }
+
+    // --- sandbox (Sandbox seam) instrumentation ---------------------------
+
+    /// Record a sandboxed exec: latency + outcome (`ok`/`error`), by backend.
+    pub fn on_sandbox_exec(&self, backend: &str, outcome: &str, seconds: f64) {
+        self.sandbox_exec_seconds
+            .with_label_values(&[backend])
+            .observe(seconds);
+        self.sandbox_exec_total
+            .with_label_values(&[backend, outcome])
+            .inc();
     }
 }
 

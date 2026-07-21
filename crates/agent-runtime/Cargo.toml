@@ -92,6 +92,9 @@ agent-web = { workspace = true, optional = true }
 agent-tasks = { workspace = true, optional = true }
 agent-validate = { workspace = true, optional = true }
 agent-lsp = { workspace = true, optional = true }
+# bash (tool-core) routes through the Sandbox seam; the local + nix backends ship
+# unconditionally (the seam is always available). See parity spec 14.
+agent-sandbox = { workspace = true, features = ["sandbox-local", "sandbox-nix"] }
 agent-mcp = { workspace = true, optional = true }
 agent-grpc = { workspace = true, optional = true }
 agent-telemetry.workspace = true

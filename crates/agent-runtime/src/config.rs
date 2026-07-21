@@ -39,6 +39,30 @@ pub struct Config {
     pub structured: StructuredCfg,
     #[serde(default)]
     pub lsp: LspCfg,
+    #[serde(default)]
+    pub sandbox: SandboxCfg,
+}
+
+/// Execution isolation for `bash` (the `Sandbox` seam, parity spec 14). `backend`
+/// = `"local"` (unconfined spawn, today's behaviour) or `"nix"` (run inside the
+/// repo's pinned flake closure — reproducible + content-addressed). See
+/// docs/components/sandbox.md.
+#[derive(Debug, Deserialize)]
+pub struct SandboxCfg {
+    #[serde(default = "default_sandbox_backend")]
+    pub backend: String,
+}
+
+impl Default for SandboxCfg {
+    fn default() -> Self {
+        Self {
+            backend: default_sandbox_backend(),
+        }
+    }
+}
+
+fn default_sandbox_backend() -> String {
+    "local".to_string()
 }
 
 /// Language servers (the `LspBackend` seam, parity spec 13). Empty ⇒ LSP is off
@@ -773,6 +797,7 @@ impl Config {
             tasks: TasksCfg::default(),
             structured: StructuredCfg::default(),
             lsp: LspCfg::default(),
+            sandbox: SandboxCfg::default(),
         }
     }
 }
