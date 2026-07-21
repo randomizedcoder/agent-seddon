@@ -658,6 +658,7 @@ mod tests {
         final_turn, tool_turn, EchoTool, FnProvider, RecordingMemory, ScriptedProvider,
         StaticContext,
     };
+    use rstest::rstest;
     use serde_json::json;
 
     /// Emits three tool calls on the first turn, then a final answer. The
@@ -1021,27 +1022,49 @@ mod tests {
 
     // ---- worktree cleanup on exit ------------------------------------------
 
-    /// A `RepoBackend` that reports two live worktrees and records the ids removed,
-    /// so `Agent::cleanup` can be checked without a real git repo. Everything else
-    /// is unimplemented (cleanup only touches `worktree_list` / `worktree_remove`).
-    #[derive(Clone, Default)]
+    /// A scriptable `RepoBackend` for `Agent::cleanup`: `list` is what
+    /// `worktree_list` returns (`None` ⇒ the list call errors), `fail_remove` names
+    /// ids whose `worktree_remove` errors, and `removed` records every id cleanup
+    /// *attempted*. Everything else is unimplemented (cleanup only touches
+    /// `worktree_list` / `worktree_remove`).
+    #[derive(Clone)]
     struct RecordingRepo {
+        list: Option<Vec<String>>,
+        fail_remove: Vec<String>,
         removed: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+    impl RecordingRepo {
+        fn new(list: Option<Vec<&str>>, fail_remove: Vec<&str>) -> Self {
+            Self {
+                list: list.map(|l| l.into_iter().map(String::from).collect()),
+                fail_remove: fail_remove.into_iter().map(String::from).collect(),
+                removed: Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
     }
     #[async_trait::async_trait]
     impl agent_core::RepoBackend for RecordingRepo {
         async fn worktree_list(&self) -> agent_core::Result<Vec<agent_core::WorktreeHandle>> {
-            let wt = |id: &str| agent_core::WorktreeHandle {
-                id: id.into(),
-                path: std::path::PathBuf::from(id),
-                head: agent_core::Oid("0".into()),
-                revision: agent_core::Revision("HEAD".into()),
-                writable: true,
-            };
-            Ok(vec![wt("w0"), wt("w1")])
+            let ids = self
+                .list
+                .clone()
+                .ok_or_else(|| agent_core::Error::Repo("list failed".into()))?;
+            Ok(ids
+                .into_iter()
+                .map(|id| agent_core::WorktreeHandle {
+                    path: std::path::PathBuf::from(&id),
+                    id,
+                    head: agent_core::Oid("0".into()),
+                    revision: agent_core::Revision("HEAD".into()),
+                    writable: true,
+                })
+                .collect())
         }
         async fn worktree_remove(&self, id: &str) -> agent_core::Result<()> {
             self.removed.lock().unwrap().push(id.to_string());
+            if self.fail_remove.iter().any(|f| f == id) {
+                return Err(agent_core::Error::Repo(format!("remove `{id}` failed")));
+            }
             Ok(())
         }
         // --- unused by cleanup ---
@@ -1123,12 +1146,31 @@ mod tests {
         )
     }
 
+    /// Cleanup must remove **exactly** what `worktree_list` reports (it can't reach
+    /// anything else — that's the session-scoping guarantee), keep going when a
+    /// remove fails, and never panic when the list call errors. `list = None` models
+    /// the list RPC failing; `fail` names ids whose remove errors. `expected` is the
+    /// set of ids cleanup should *attempt*.
+    #[rstest]
+    #[case::positive_removes_all(Some(vec!["w0", "w1"]), vec![], vec!["w0", "w1"])]
+    #[case::boundary_empty_list(Some(vec![]), vec![], vec![])]
+    #[case::boundary_single(Some(vec!["only"]), vec![], vec!["only"])]
+    #[case::negative_list_error_is_swallowed(None, vec![], vec![])]
+    #[case::corner_partial_failure_continues(
+        Some(vec!["w0", "w1", "w2"]), vec!["w1"], vec!["w0", "w1", "w2"])]
+    #[case::corner_all_removes_fail(Some(vec!["w0", "w1"]), vec!["w0", "w1"], vec!["w0", "w1"])]
     #[tokio::test]
-    async fn cleanup_removes_this_sessions_worktrees() {
-        let repo = RecordingRepo::default();
+    async fn cleanup_cases(
+        #[case] list: Option<Vec<&str>>,
+        #[case] fail: Vec<&str>,
+        #[case] expected: Vec<&str>,
+    ) {
+        let repo = RecordingRepo::new(list, fail);
         let agent = bare_agent().with_repo(Arc::new(repo.clone()));
-        agent.cleanup().await;
-        assert_eq!(repo.removed.lock().unwrap().clone(), vec!["w0", "w1"]);
+        agent.cleanup().await; // must not panic on any input
+        let got = repo.removed.lock().unwrap().clone();
+        let want: Vec<String> = expected.into_iter().map(String::from).collect();
+        assert_eq!(got, want);
     }
 
     #[tokio::test]
