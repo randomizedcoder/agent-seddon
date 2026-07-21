@@ -37,6 +37,24 @@ pub struct Config {
     pub tasks: TasksCfg,
     #[serde(default)]
     pub structured: StructuredCfg,
+    #[serde(default)]
+    pub lsp: LspCfg,
+}
+
+/// Language servers (the `LspBackend` seam, parity spec 13). Empty ⇒ LSP is off
+/// (no daemons spawned). Each entry maps a language + file extensions to a server
+/// command. See docs/components/lsp.md.
+#[derive(Debug, Default, Deserialize)]
+pub struct LspCfg {
+    #[serde(default)]
+    pub servers: Vec<LspServerCfg>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LspServerCfg {
+    pub language: String,
+    pub command: Vec<String>,
+    pub extensions: Vec<String>,
 }
 
 /// Structured output (the `OutputSchema` seam, parity spec 16). `validator`
@@ -754,6 +772,7 @@ impl Config {
             web: WebCfg::default(),
             tasks: TasksCfg::default(),
             structured: StructuredCfg::default(),
+            lsp: LspCfg::default(),
         }
     }
 }

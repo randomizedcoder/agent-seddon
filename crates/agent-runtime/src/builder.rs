@@ -138,6 +138,32 @@ pub async fn build_agent_with(
         tools.register(crate::metered::tool(tool, metrics.clone()));
     }
 
+    // LSP: only when `[lsp] servers` is configured (no daemons otherwise). Build
+    // the manager (real stdio servers, pooled per language), meter it, expose the
+    // `lsp` tool. The workspace root is the agent's working directory.
+    #[cfg(feature = "lsp")]
+    if !cfg.lsp.servers.is_empty() {
+        let servers = cfg
+            .lsp
+            .servers
+            .iter()
+            .map(|s| agent_lsp::ServerConfig {
+                language: s.language.clone(),
+                command: s.command.clone(),
+                extensions: s.extensions.clone(),
+            })
+            .collect();
+        let root = cfg.agent.working_dir.clone();
+        let backend: Arc<dyn agent_core::LspBackend> = Arc::new(agent_lsp::LspManager::new(
+            Arc::new(agent_lsp::StdioFactory),
+            root,
+            servers,
+        ));
+        let backend = crate::metered::lsp(backend, metrics.clone());
+        let tool = Arc::new(agent_tools::LspTool::new(backend));
+        tools.register(crate::metered::tool(tool, metrics.clone()));
+    }
+
     // Memory: either the whole-store backend, or — when `[memory] semantic` is
     // set — the episodic layer of that backend composed with an independently
     // chosen `SemanticStore` (e.g. a vector store) via `LayeredMemory`.
@@ -321,6 +347,7 @@ fn is_builder_registered_tool(name: &str) -> bool {
         || (cfg!(feature = "git") && name.starts_with("git_"))
         || (cfg!(feature = "web") && name == "web_fetch")
         || (cfg!(feature = "tasks") && name == "todo_write")
+        || (cfg!(feature = "lsp") && name == "lsp")
 }
 
 /// Connect to each configured MCP server, discover its tools, and register them

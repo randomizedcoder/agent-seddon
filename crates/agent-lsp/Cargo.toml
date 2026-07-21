@@ -1,0 +1,31 @@
+[package]
+name = "agent-lsp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# The full seam: JSON-RPC protocol codec + client + manager + the real stdio
+# (subprocess) transport. See docs/components/lsp.md and parity spec 13.
+default = ["lsp-stdio"]
+lsp-stdio = []
+# Injects a dhat global allocator for the allocation-budget leak test only.
+dhat-heap = ["dep:dhat"]
+
+[dependencies]
+agent-core.workspace = true
+async-trait.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+dhat = { workspace = true, optional = true }
+
+[dev-dependencies]
+rstest.workspace = true
+agent-testkit.workspace = true
+iai-callgrind.workspace = true
+
+# Deterministic instruction-count bench for the diagnostics JSON-RPC parse.
+[[bench]]
+name = "lsp_parse"
+harness = false

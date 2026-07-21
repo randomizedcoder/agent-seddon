@@ -249,6 +249,58 @@ impl agent_core::OutputSchema for MeteredValidator {
     }
 }
 
+/// Wrap an [`LspBackend`](agent_core::LspBackend) so each `request` emits an
+/// `lsp.request` span (`method`/`uri` attrs), records per-method latency/errors,
+/// and counts observed diagnostics by severity.
+#[cfg(feature = "lsp")]
+pub(crate) fn lsp(
+    inner: Arc<dyn agent_core::LspBackend>,
+    m: Metrics,
+) -> Arc<dyn agent_core::LspBackend> {
+    Arc::new(MeteredLsp { inner, metrics: m })
+}
+
+#[cfg(feature = "lsp")]
+struct MeteredLsp {
+    inner: Arc<dyn agent_core::LspBackend>,
+    metrics: Metrics,
+}
+
+#[cfg(feature = "lsp")]
+#[async_trait]
+impl agent_core::LspBackend for MeteredLsp {
+    fn capabilities(&self, language: &str) -> agent_core::LspCapabilities {
+        self.inner.capabilities(language)
+    }
+    async fn open(&self, uri: &str, text: &str) -> Result<()> {
+        self.inner.open(uri, text).await
+    }
+    async fn request(&self, req: &agent_core::LspRequest) -> Result<agent_core::LspResult> {
+        let span = tracing::info_span!(
+            "lsp.request",
+            method = req.method.as_str(),
+            uri = %req.uri,
+        );
+        let start = Instant::now();
+        let out = self.inner.request(req).instrument(span).await;
+        self.metrics
+            .on_lsp_request(req.method.as_str(), start.elapsed().as_secs_f64());
+        match &out {
+            Ok(agent_core::LspResult::Diagnostics(d)) => {
+                for diag in d {
+                    self.metrics.on_lsp_diagnostic(diag.severity.as_str());
+                }
+            }
+            Err(_) => self.metrics.on_lsp_error(req.method.as_str()),
+            _ => {}
+        }
+        out
+    }
+    async fn shutdown(&self) -> Result<()> {
+        self.inner.shutdown().await
+    }
+}
+
 #[cfg(feature = "web")]
 struct MeteredWeb {
     inner: Arc<dyn agent_core::WebBackend>,
@@ -1127,6 +1179,80 @@ mod structured_tests {
                 .iter()
                 .any(|(s, fld, _)| s == "structured.validate" && fld == "errors"),
             "errors attr missing: {fields:?}"
+        );
+    }
+}
+
+// lsp: the metered LspBackend emits an `lsp.request` span and meters per-method
+// latency + diagnostics by severity.
+#[cfg(all(test, feature = "lsp"))]
+mod lsp_tests {
+    use super::*;
+    use agent_core::{
+        Diagnostic, DiagnosticSeverity, LspBackend, LspCapabilities, LspMethod, LspRequest,
+        LspResult, Range,
+    };
+    use agent_testkit::observe::{captured_spans, MetricsProbe};
+
+    struct FakeLsp;
+    #[async_trait]
+    impl LspBackend for FakeLsp {
+        fn capabilities(&self, _language: &str) -> LspCapabilities {
+            LspCapabilities::default()
+        }
+        async fn open(&self, _uri: &str, _text: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn request(&self, _req: &LspRequest) -> Result<LspResult> {
+            Ok(LspResult::Diagnostics(vec![Diagnostic {
+                range: Range::default(),
+                severity: DiagnosticSeverity::Warning,
+                message: "x".into(),
+                code: None,
+                source: None,
+            }]))
+        }
+        async fn shutdown(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn metered_lsp_emits_span_and_meters_diagnostics() {
+        let _lock = super::callsite_guard();
+        let metrics = Metrics::new();
+        let probe = MetricsProbe::new(&metrics);
+        let spans = captured_spans(|| {
+            tracing::callsite::rebuild_interest_cache();
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let backend = super::lsp(Arc::new(FakeLsp), metrics.clone());
+                let req = LspRequest {
+                    method: LspMethod::Diagnostics,
+                    uri: "file:///a.rs".into(),
+                    position: None,
+                    new_name: None,
+                };
+                let _ = backend.request(&req).await;
+            });
+        });
+        assert!(spans.contains(&"lsp.request".to_string()), "{spans:?}");
+        assert_eq!(
+            probe.delta(
+                &metrics,
+                "agent_lsp_diagnostics_total",
+                Some("severity=\"warning\"")
+            ),
+            1.0
+        );
+        assert!(
+            probe.delta(
+                &metrics,
+                "agent_lsp_request_seconds_count",
+                Some("method=\"diagnostics\"")
+            ) >= 1.0
         );
     }
 }

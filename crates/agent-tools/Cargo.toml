@@ -29,6 +29,9 @@ tool-web = []
 # The `todo_write` tool over the TaskTracker seam (structured plan). The tracker
 # is wired by the runtime; this feature only compiles the tool.
 tool-todo = []
+# The `lsp` tool over the LspBackend seam (diagnostics + navigation + rename). The
+# backend is wired by the runtime; this feature only compiles the tool.
+tool-lsp = []
 # Heap-leak/allocation assertions for tests/leak.rs (dhat global allocator). Off by
 # default; the leak check runs `--features dhat-heap,tool-patch`.
 dhat-heap = ["dep:dhat"]

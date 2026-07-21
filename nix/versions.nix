@@ -36,6 +36,19 @@ in
   cargo-nextest = pkgs.cargo-nextest;
   rust-analyzer = pkgs.rust-analyzer;
 
+  # Language servers for the `LspBackend` seam (parity spec 13). Pinned + supplied
+  # by the flake so the `lsp` tool has real servers on `PATH` inside `nix develop`
+  # (and in the hermetic test sandbox), reproducibly — no host toolchain needed.
+  # `command` in `[[lsp.servers]]` (config/agent.toml) names the binaries below.
+  lspServers = {
+    # rust-analyzer is already pinned above (reused as the Rust server).
+    rust-analyzer = pkgs.rust-analyzer;
+    gopls = pkgs.gopls; # Go
+    clang-tools = pkgs.clang-tools; # provides `clangd` for C/C++/Objective-C
+    pyright = pkgs.pyright; # Python (`pyright-langserver --stdio`)
+    typescript-language-server = pkgs.typescript-language-server; # TS/JS
+  };
+
   # Protobuf / gRPC tooling. `protobuf` supplies `protoc`, which `tonic-build`
   # invokes at build time to compile `crates/agent-proto/proto/**.proto`. Pinning
   # it here keeps codegen reproducible across the dev shell, `nix build`, and the
