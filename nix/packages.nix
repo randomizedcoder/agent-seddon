@@ -14,6 +14,11 @@
     versions.cargo-audit
     versions.cargo-nextest
     versions.rust-analyzer
+  ]
+  # Language servers for the `lsp` tool (LspBackend seam) — real gopls / clangd /
+  # pyright / typescript-language-server / rust-analyzer on PATH in the dev shell.
+  ++ builtins.attrValues versions.lspServers
+  ++ [
 
     # Protobuf / gRPC (protoc for tonic-build codegen; grpcurl for poking servers;
     # buf for proto lint + breaking-change checks).

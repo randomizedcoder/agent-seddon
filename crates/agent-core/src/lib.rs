@@ -41,6 +41,8 @@ pub enum Error {
     Tasks(String),
     #[error("structured output error: {0}")]
     Structured(String),
+    #[error("lsp error: {0}")]
+    Lsp(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -652,6 +654,229 @@ impl Verdict {
 pub trait OutputSchema: Send + Sync {
     /// Validate `value` against `schema`, returning a [`Verdict`].
     fn validate(&self, schema: &serde_json::Value, value: &serde_json::Value) -> Verdict;
+}
+
+// ---------------------------------------------------------------------------
+// Seam: LspBackend (live Language Server Protocol, parity spec 13)
+// ---------------------------------------------------------------------------
+//
+// So the agent can *verify* its edits (diagnostics) and *navigate* code
+// semantically (hover/definition/references/rename/symbols) via real language
+// servers, instead of editing blind. Concrete impls live in `agent-lsp` behind a
+// cargo feature; see `docs/components/lsp.md`. Positions are 0-based line/character
+// (LSP-native).
+
+/// A 0-based source position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Position {
+    pub line: u32,
+    pub character: u32,
+}
+
+/// A half-open source range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Range {
+    pub start: Position,
+    pub end: Position,
+}
+
+/// A location: a URI plus a range within it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Location {
+    pub uri: String,
+    pub range: Range,
+}
+
+/// Diagnostic severity (maps to LSP `1..=4`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DiagnosticSeverity {
+    Error,
+    Warning,
+    Information,
+    Hint,
+}
+
+impl DiagnosticSeverity {
+    /// Map the LSP integer severity (`1`=error … `4`=hint); anything else ⇒ Error.
+    pub fn from_lsp(n: u64) -> Self {
+        match n {
+            2 => DiagnosticSeverity::Warning,
+            3 => DiagnosticSeverity::Information,
+            4 => DiagnosticSeverity::Hint,
+            _ => DiagnosticSeverity::Error,
+        }
+    }
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DiagnosticSeverity::Error => "error",
+            DiagnosticSeverity::Warning => "warning",
+            DiagnosticSeverity::Information => "info",
+            DiagnosticSeverity::Hint => "hint",
+        }
+    }
+}
+
+/// One diagnostic (error/warning/…) for a file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Diagnostic {
+    pub range: Range,
+    pub severity: DiagnosticSeverity,
+    pub message: String,
+    #[serde(default)]
+    pub code: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
+/// The resolved type / doc markup for a symbol under the cursor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Hover {
+    pub contents: String,
+}
+
+/// A single text edit within a file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TextEdit {
+    pub range: Range,
+    pub new_text: String,
+}
+
+/// A reference-aware, workspace-wide edit set (the result of `rename`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceEdit {
+    /// Per-URI edits (`uri`, its `edits`).
+    pub changes: Vec<(String, Vec<TextEdit>)>,
+}
+
+/// An outline entry (function/class/impl/…).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentSymbol {
+    pub name: String,
+    pub kind: String,
+    pub range: Range,
+}
+
+/// The LSP methods the seam exposes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LspMethod {
+    Diagnostics,
+    Hover,
+    Definition,
+    References,
+    Rename,
+    DocumentSymbols,
+}
+
+impl LspMethod {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LspMethod::Diagnostics => "diagnostics",
+            LspMethod::Hover => "hover",
+            LspMethod::Definition => "definition",
+            LspMethod::References => "references",
+            LspMethod::Rename => "rename",
+            LspMethod::DocumentSymbols => "document_symbols",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "diagnostics" => LspMethod::Diagnostics,
+            "hover" => LspMethod::Hover,
+            "definition" => LspMethod::Definition,
+            "references" => LspMethod::References,
+            "rename" => LspMethod::Rename,
+            "document_symbols" => LspMethod::DocumentSymbols,
+            _ => return None,
+        })
+    }
+}
+
+/// A unified LSP request. `position` is required by the position-addressed
+/// methods (hover/definition/references/rename); `new_name` only by `rename`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LspRequest {
+    pub method: LspMethod,
+    pub uri: String,
+    pub position: Option<Position>,
+    pub new_name: Option<String>,
+}
+
+/// The typed result of an [`LspRequest`], keyed by the method.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LspResult {
+    Diagnostics(Vec<Diagnostic>),
+    Hover(Option<Hover>),
+    Locations(Vec<Location>),
+    Symbols(Vec<DocumentSymbol>),
+    Rename(WorkspaceEdit),
+}
+
+impl LspResult {
+    /// A compact, model-facing summary (also what the seam tests substring-match).
+    pub fn summary(&self) -> String {
+        match self {
+            LspResult::Diagnostics(d) if d.is_empty() => "no diagnostics".into(),
+            LspResult::Diagnostics(d) => {
+                let head = &d[0];
+                format!(
+                    "{} diagnostic(s); first: [{}] {}",
+                    d.len(),
+                    head.severity.as_str(),
+                    head.message
+                )
+            }
+            LspResult::Hover(None) => "no hover".into(),
+            LspResult::Hover(Some(h)) => h.contents.clone(),
+            LspResult::Locations(l) if l.is_empty() => "no locations".into(),
+            LspResult::Locations(l) => {
+                format!("{} location(s); first: {}", l.len(), l[0].uri)
+            }
+            LspResult::Symbols(s) if s.is_empty() => "no symbols".into(),
+            LspResult::Symbols(s) => {
+                let names: Vec<&str> = s.iter().map(|x| x.name.as_str()).collect();
+                format!("{} symbol(s): {}", s.len(), names.join(", "))
+            }
+            LspResult::Rename(w) => {
+                let files = w.changes.len();
+                let edits: usize = w.changes.iter().map(|(_, e)| e.len()).sum();
+                format!("rename touches {files} file(s), {edits} edit(s)")
+            }
+        }
+    }
+}
+
+/// Which methods a given language's server supports (from the `initialize`
+/// capability negotiation). Reject an unsupported method up front — never hang.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LspCapabilities {
+    /// The server command/name (empty ⇒ no server configured for the language).
+    pub server: String,
+    pub methods: Vec<LspMethod>,
+}
+
+impl LspCapabilities {
+    pub fn supports(&self, method: LspMethod) -> bool {
+        self.methods.contains(&method)
+    }
+}
+
+/// A replaceable Language Server Protocol backend. One live server per
+/// `(language, workspace_root)` is pooled behind this seam; `open` syncs a
+/// document, `request` dispatches a method (rejecting unsupported ones), and
+/// `shutdown` tears down the pool.
+#[async_trait]
+pub trait LspBackend: Send + Sync {
+    /// Which methods the configured server for `language` supports (empty when
+    /// none is configured — the graceful-degradation signal).
+    fn capabilities(&self, language: &str) -> LspCapabilities;
+    /// Open or refresh a document's text (`didOpen`/`didChange`, version bumped).
+    async fn open(&self, uri: &str, text: &str) -> Result<()>;
+    /// Dispatch a request; rejects an unsupported method before dispatch.
+    async fn request(&self, req: &LspRequest) -> Result<LspResult>;
+    /// Tear down all pooled servers (idempotent; no leaked daemons).
+    async fn shutdown(&self) -> Result<()>;
 }
 
 // ---------------------------------------------------------------------------

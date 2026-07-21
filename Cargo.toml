@@ -14,6 +14,7 @@ members = [
     "crates/agent-web",
     "crates/agent-tasks",
     "crates/agent-validate",
+    "crates/agent-lsp",
     "crates/agent-grpc",
     "crates/agent-mcp",
     "crates/agent-proto",
@@ -108,6 +109,7 @@ agent-tokenizer = { path = "crates/agent-tokenizer", default-features = false }
 agent-web = { path = "crates/agent-web", default-features = false }
 agent-tasks = { path = "crates/agent-tasks", default-features = false }
 agent-validate = { path = "crates/agent-validate", default-features = false }
+agent-lsp = { path = "crates/agent-lsp", default-features = false }
 agent-grpc = { path = "crates/agent-grpc" }
 agent-mcp = { path = "crates/agent-mcp" }
 agent-proto = { path = "crates/agent-proto" }

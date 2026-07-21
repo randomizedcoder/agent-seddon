@@ -6,15 +6,25 @@ real language servers (rust-analyzer, `typescript-language-server`, pyright,
 gopls, …) over JSON-RPC — so the agent can **verify** its edits and **navigate**
 code semantically instead of editing blind.
 
-> **Status: spec (design of record).** Introduces a new **`LspBackend` seam**
-> (`agent-core`) with impls in a sibling `agent-lsp` crate behind a cargo feature,
-> config-selected per language, wired by `register_builtins`. A new
-> `crates/agent-proto/proto/agent/v1/lsp.proto` fronts it as a first-class gRPC
-> service (`--serve-lsp`, reflection) so a language-server pool can run out of
-> process and be dialed by a `= "grpc"` client — mirroring `SearchService` /
-> `RepoService`. The `diagnostics` results are **fed back into the tool-calling
-> loop** after every `edit`/`write_file`/`patch`, closing a self-correction cycle.
-> Metered per-language-server, one OTel span per LSP request.
+> **Status: implemented** (seam + protocol + client + manager + `lsp` tool +
+> observability + bench + leak; tested via a scripted transport). New
+> **`LspBackend` seam** (`agent-core`) with a full JSON-RPC-over-stdio impl in
+> [`agent-lsp`](../../crates/agent-lsp) — `Content-Length` protocol codec →
+> `LspTransport` (real `StdioTransport` / scripted double) → `LspClient`
+> (handshake + capability probe, whole-document sync, the six methods, diagnostics
+> store, `ContentModified` retry, crash recovery) → `LspManager` (pools one server
+> per language). Model-facing as the `lsp` tool
+> ([`agent-tools`](../../crates/agent-tools/src/lsp.rs)); off unless `[lsp]
+> servers` is configured (no daemons otherwise). **Differentiator landed — the
+> union:** diagnostics (hermes' half) **and** hover/definition/references/
+> document-symbols (opencode's half) **and** `rename` (neither peer surfaces),
+> behind one swap-by-config seam. Metered (`agent_lsp_request_seconds{method}`,
+> `agent_lsp_diagnostics_total{severity}`) + `lsp.request` span. **Deferred to a
+> follow-up** (staged like the tokenizer / web / tasks / structured seams):
+> **diagnostics fed back into the loop** after each edit (the seam + tool land
+> first; the `agent.rs` wiring follows), the `LspService` gRPC service
+> (`--serve-lsp`), and real-server E2E (non-hermetic). See
+> [`docs/components/lsp.md`](../components/lsp.md).
 >
 > **Differentiator — nuance, stated honestly.** The naive "no peer has LSP" claim
 > is *false* and this spec does not make it. Two of the three peers ship a real,

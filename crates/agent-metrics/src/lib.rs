@@ -105,6 +105,13 @@ pub struct Metrics {
     // Per-completion outcome (pass / repaired / exhausted) + validation latency.
     structured_total: IntCounterVec,
     structured_validate_seconds: Histogram,
+
+    // --- lsp (LspBackend seam) --------------------------------------------
+    // Per-method request latency + errors, and diagnostics by severity. Labels
+    // (method, severity) are bounded enums — safe cardinality.
+    lsp_request_seconds: HistogramVec,
+    lsp_errors: IntCounterVec,
+    lsp_diagnostics: IntCounterVec,
 }
 
 impl Metrics {
@@ -395,6 +402,26 @@ impl Metrics {
         ))
         .unwrap();
 
+        // --- lsp (recorded by the lsp metrics wrapper) ------------------------
+        let lsp_request_seconds = HistogramVec::new(
+            HistogramOpts::new("agent_lsp_request_seconds", "LSP request latency"),
+            &["method"],
+        )
+        .unwrap();
+        let lsp_errors = IntCounterVec::new(
+            Opts::new("agent_lsp_errors_total", "LSP request errors"),
+            &["method"],
+        )
+        .unwrap();
+        let lsp_diagnostics = IntCounterVec::new(
+            Opts::new(
+                "agent_lsp_diagnostics_total",
+                "Diagnostics observed, by severity",
+            ),
+            &["severity"],
+        )
+        .unwrap();
+
         let collectors: Vec<Box<dyn prometheus::core::Collector>> = vec![
             Box::new(api_calls.clone()),
             Box::new(api_call_seconds.clone()),
@@ -441,6 +468,9 @@ impl Metrics {
             Box::new(tasks_closed.clone()),
             Box::new(structured_total.clone()),
             Box::new(structured_validate_seconds.clone()),
+            Box::new(lsp_request_seconds.clone()),
+            Box::new(lsp_errors.clone()),
+            Box::new(lsp_diagnostics.clone()),
         ];
         for m in collectors {
             registry.register(m).expect("register metric");
@@ -493,6 +523,9 @@ impl Metrics {
             tasks_closed,
             structured_total,
             structured_validate_seconds,
+            lsp_request_seconds,
+            lsp_errors,
+            lsp_diagnostics,
         }
     }
 
@@ -771,6 +804,23 @@ impl Metrics {
     /// Record one schema-validation's latency (per attempt).
     pub fn on_structured_validate(&self, seconds: f64) {
         self.structured_validate_seconds.observe(seconds);
+    }
+
+    // --- lsp (LspBackend seam) instrumentation ----------------------------
+
+    /// Record an LSP request's latency, labelled by method.
+    pub fn on_lsp_request(&self, method: &str, seconds: f64) {
+        self.lsp_request_seconds
+            .with_label_values(&[method])
+            .observe(seconds);
+    }
+    /// Count an LSP request error, labelled by method.
+    pub fn on_lsp_error(&self, method: &str) {
+        self.lsp_errors.with_label_values(&[method]).inc();
+    }
+    /// Count one observed diagnostic, labelled by severity.
+    pub fn on_lsp_diagnostic(&self, severity: &str) {
+        self.lsp_diagnostics.with_label_values(&[severity]).inc();
     }
 }
 

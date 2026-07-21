@@ -72,6 +72,11 @@ mod todo;
 #[cfg(feature = "tool-todo")]
 pub use todo::TodoWriteTool;
 
+#[cfg(feature = "tool-lsp")]
+mod lsp;
+#[cfg(feature = "tool-lsp")]
+pub use lsp::LspTool;
+
 /// Cap tool output so a runaway command can't blow the context window.
 pub(crate) const MAX_OUTPUT: usize = 12_000;
 

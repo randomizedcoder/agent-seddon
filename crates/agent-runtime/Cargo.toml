@@ -27,6 +27,7 @@ default = [
     "web",
     "tasks",
     "structured",
+    "lsp",
 ]
 
 # Each feature forwards to the owning impl crate + drives `register_builtins`.
@@ -71,6 +72,10 @@ tasks = ["dep:agent-tasks", "agent-tasks/tasks-memory", "agent-tools/tool-todo"]
 # Structured output: the OutputSchema validator seam + the bounded repair loop.
 # See parity spec 16.
 structured = ["dep:agent-validate", "agent-validate/validate-draft07"]
+# The `lsp` tool over the LspBackend seam: the LSP manager (real stdio servers) +
+# the tool + diagnostics/navigation metrics. Off unless `[lsp] servers` is set.
+# See parity spec 13.
+lsp = ["dep:agent-lsp", "agent-lsp/lsp-stdio", "agent-tools/tool-lsp"]
 
 [dependencies]
 agent-core.workspace = true
@@ -86,6 +91,7 @@ agent-tokenizer = { workspace = true, optional = true }
 agent-web = { workspace = true, optional = true }
 agent-tasks = { workspace = true, optional = true }
 agent-validate = { workspace = true, optional = true }
+agent-lsp = { workspace = true, optional = true }
 agent-mcp = { workspace = true, optional = true }
 agent-grpc = { workspace = true, optional = true }
 agent-telemetry.workspace = true
