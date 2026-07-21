@@ -1690,22 +1690,21 @@ impl agent_core::Scanner for MeteredScanner {
 /// `cache.place` span carrying `strategy`, `breakpoints`, and whether the
 /// provider supports caching at all.
 ///
-/// Span-only, deliberately: the **provider** holds the strategy (placement
-/// depends on provider capabilities) and the registry's provider factories are
-/// `Fn(&Config)` with no `Metrics` handle. The numbers that matter for cost —
-/// `agent_cache_tokens_total{kind="cache_read"|"cache_write"}`, and the hit rate
-/// derived from them — are already recorded from provider `Usage` (spec 23);
-/// the anchor count is diagnostic and rides on the span.
+/// Also counts the anchors placed (`agent_cache_breakpoints_total{strategy}`),
+/// which read alongside `agent_cache_tokens_total` distinguishes a low hit-rate
+/// caused by bad *placement* from one caused by a merely cold cache.
 #[cfg(feature = "cache")]
 pub(crate) fn cache(
     inner: Arc<dyn agent_core::CacheStrategy>,
+    m: Metrics,
 ) -> Arc<dyn agent_core::CacheStrategy> {
-    Arc::new(TracedCache { inner })
+    Arc::new(TracedCache { inner, metrics: m })
 }
 
 #[cfg(feature = "cache")]
 struct TracedCache {
     inner: Arc<dyn agent_core::CacheStrategy>,
+    metrics: Metrics,
 }
 
 #[cfg(feature = "cache")]
@@ -1728,6 +1727,8 @@ impl agent_core::CacheStrategy for TracedCache {
         let _e = span.enter();
         let marks = self.inner.place(prompt, caps);
         span.record("breakpoints", marks.count());
+        self.metrics
+            .on_cache_breakpoints(self.inner.name(), marks.count() as u64);
         marks
     }
 }

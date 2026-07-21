@@ -175,7 +175,7 @@ In-tree: implement `RepoBackend` in `agent-git` (behind a `git-*` feature), then
 register a factory line in `register_builtins`:
 ```rust
 #[cfg(feature = "git-mine")]
-r.repo("mine", |cfg| Ok(Arc::new(MyBackend::open(...)?) as Arc<dyn RepoBackend>));
+r.repo("mine", |ctx| Ok(Arc::new(MyBackend::open(...)?) as Arc<dyn RepoBackend>));
 ```
 Set `[git] backend = "mine"`. Out-of-tree, register on a `Registry` before
 `build_agent_with`. See the general [extension model](../extending.md).

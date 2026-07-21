@@ -50,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
     // Start from the built-ins, then register our own factory under "echo".
     let mut registry = Registry::new();
     register_builtins(&mut registry);
-    registry.provider("echo", |_cfg| {
+    registry.provider("echo", |_ctx| {
         Ok(Arc::new(EchoProvider) as Arc<dyn LlmProvider>)
     });
 

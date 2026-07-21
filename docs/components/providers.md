@@ -41,7 +41,7 @@ In-tree:
 
 Out-of-tree (no fork):
 ```rust
-registry.provider("my-llm", |cfg| Ok(Arc::new(MyProvider::new(cfg.provider.model.clone())?)));
+registry.provider("my-llm", |ctx| Ok(Arc::new(MyProvider::new(ctx.cfg.provider.model.clone())?)));
 ```
 Then `[agent] provider = "my-llm"`. See the general
 [extension model](../extending.md) and

@@ -44,9 +44,12 @@ pub async fn build_agent_with(
     // Wrap the provider in its metrics decorator up front, so every downstream
     // user (the loop, the summarizing context strategy, distillation) is
     // attributed the same way — including a remote `= "grpc"` client.
+    // The factory context. `provider`/`tokenizer` are filled in as they become
+    // available — see `FactoryCtx` on why those two are optional.
+    let base_ctx = crate::registry::FactoryCtx::new(&cfg, &metrics);
     let provider = crate::metered::provider(
         registry
-            .build_provider(&cfg.agent.provider, &cfg)
+            .build_provider(&cfg.agent.provider, &base_ctx)
             .context("building provider")?,
         metrics.clone(),
         &cfg.agent.provider,
@@ -111,8 +114,8 @@ pub async fn build_agent_with(
     // the handle drives the optional background mirror-fetch below.
     #[cfg(feature = "git")]
     let repo_backend = {
-        let backend =
-            crate::git::build_repo(registry, &cfg, &session_id).context("building git backend")?;
+        let backend = crate::git::build_repo(registry, &cfg, &session_id, &metrics)
+            .context("building git backend")?;
         let backend = crate::metered::repo(backend, metrics.clone(), cfg.git.backend_name());
         for tool in agent_tools::git_tools(backend.clone()) {
             tools.register(crate::metered::tool(tool, metrics.clone()));
@@ -189,16 +192,17 @@ pub async fn build_agent_with(
     // Memory: either the whole-store backend, or — when `[memory] semantic` is
     // set — the episodic layer of that backend composed with an independently
     // chosen `SemanticStore` (e.g. a vector store) via `LayeredMemory`.
+    let provider_ctx = crate::registry::FactoryCtx::new(&cfg, &metrics).with_provider(&provider);
     let inner_memory: Arc<dyn MemoryStore> = if cfg.memory.semantic.is_empty() {
         registry
-            .build_memory(&cfg.memory.backend, &cfg, &provider)
+            .build_memory(&cfg.memory.backend, &provider_ctx)
             .context("building memory")?
     } else {
         let episodic = registry
-            .build_episodic(&cfg.memory.backend, &cfg)
+            .build_episodic(&cfg.memory.backend, &provider_ctx)
             .context("building episodic layer")?;
         let semantic = registry
-            .build_semantic(&cfg.memory.semantic, &cfg, &provider)
+            .build_semantic(&cfg.memory.semantic, &provider_ctx)
             .context("building semantic layer")?;
         Arc::new(agent_core::LayeredMemory::new(episodic, semantic))
     };
@@ -215,15 +219,18 @@ pub async fn build_agent_with(
     // when the feature is off or the backend is unknown → heuristic fallback.
     #[cfg(feature = "tokenizer")]
     let tokenizer: Option<Arc<dyn agent_core::Tokenizer>> = registry
-        .build_tokenizer(&cfg.tokenizer.backend, &cfg)
+        .build_tokenizer(&cfg.tokenizer.backend, &provider_ctx)
         .ok()
         .map(crate::metered::tokenizer);
     #[cfg(not(feature = "tokenizer"))]
     let tokenizer: Option<Arc<dyn agent_core::Tokenizer>> = None;
 
+    let full_ctx = crate::registry::FactoryCtx::new(&cfg, &metrics)
+        .with_provider(&provider)
+        .with_tokenizer(tokenizer.as_ref());
     let context = crate::metered::context(
         registry
-            .build_context(&cfg.agent.context, &cfg, &provider, tokenizer.as_ref())
+            .build_context(&cfg.agent.context, &full_ctx)
             .context("building context strategy")?,
         metrics.clone(),
     );
@@ -231,7 +238,7 @@ pub async fn build_agent_with(
     // guard (unless `[policy] guard = "off"`), then meter the composite so metrics
     // see the final decision.
     let base_policy = registry
-        .build_policy(&cfg.agent.policy, &cfg)
+        .build_policy(&cfg.agent.policy, &full_ctx)
         .context("building policy")?;
     // Content scanner (parity spec 18): compose the configured rules into one
     // metered `DispatchScanner` and hand it to the guard, which maps the worst
@@ -398,9 +405,10 @@ fn build_tools(
     metrics: &Metrics,
 ) -> anyhow::Result<ToolRegistry> {
     let mut tools = ToolRegistry::new();
+    let ctx = crate::registry::FactoryCtx::new(cfg, metrics);
     if cfg.tools.enabled.is_empty() {
         for name in registry.tool_names() {
-            let tool = registry.build_tool(name, cfg)?;
+            let tool = registry.build_tool(name, &ctx)?;
             tools.register(crate::metered::tool(tool, metrics.clone()));
         }
     } else {
@@ -413,7 +421,7 @@ fn build_tools(
                 continue;
             }
             let tool = registry
-                .build_tool(name, cfg)
+                .build_tool(name, &ctx)
                 .with_context(|| format!("enabling tool `{name}`"))?;
             tools.register(crate::metered::tool(tool, metrics.clone()));
         }
@@ -530,8 +538,9 @@ async fn register_grpc_tools(tools: &mut ToolRegistry, cfg: &Config, metrics: &M
 /// Factory for the OpenAI-compatible provider.
 #[cfg(feature = "provider-openai-compat")]
 pub(crate) fn openai_compat_provider(
-    cfg: &Config,
+    ctx: &crate::registry::FactoryCtx<'_>,
 ) -> anyhow::Result<Arc<dyn agent_core::LlmProvider>> {
+    let cfg = ctx.cfg;
     use agent_providers::{OpenAiCompatConfig, OpenAiCompatProvider};
     if cfg.provider.insecure_tls {
         tracing::warn!(
@@ -552,7 +561,7 @@ pub(crate) fn openai_compat_provider(
     })
     .map_err(|e| anyhow::anyhow!("building provider: {e}"))?;
     #[cfg(feature = "cache")]
-    let provider = match build_cache_strategy(cfg)? {
+    let provider = match build_cache_strategy(ctx)? {
         Some(s) => provider.with_cache_strategy(s),
         None => provider,
     };
@@ -561,7 +570,10 @@ pub(crate) fn openai_compat_provider(
 
 /// Factory for the Anthropic-native provider.
 #[cfg(feature = "provider-anthropic")]
-pub(crate) fn anthropic_provider(cfg: &Config) -> anyhow::Result<Arc<dyn agent_core::LlmProvider>> {
+pub(crate) fn anthropic_provider(
+    ctx: &crate::registry::FactoryCtx<'_>,
+) -> anyhow::Result<Arc<dyn agent_core::LlmProvider>> {
+    let cfg = ctx.cfg;
     use agent_providers::{AnthropicConfig, AnthropicProvider};
     let api_key = resolve_api_key(&cfg.provider)?;
     let base_url = if cfg.provider.base_url.is_empty() {
@@ -579,7 +591,7 @@ pub(crate) fn anthropic_provider(cfg: &Config) -> anyhow::Result<Arc<dyn agent_c
     })
     .map_err(|e| anyhow::anyhow!("building provider: {e}"))?;
     #[cfg(feature = "cache")]
-    let provider = match build_cache_strategy(cfg)? {
+    let provider = match build_cache_strategy(ctx)? {
         Some(s) => provider.with_cache_strategy(s),
         None => provider,
     };
@@ -591,11 +603,14 @@ pub(crate) fn anthropic_provider(cfg: &Config) -> anyhow::Result<Arc<dyn agent_c
 /// wired only when `[memory] distill = true` (it costs a model call per run).
 #[cfg(feature = "memory-file")]
 pub(crate) fn file_memory(
-    cfg: &Config,
-    provider: &Arc<dyn agent_core::LlmProvider>,
+    ctx: &crate::registry::FactoryCtx<'_>,
 ) -> anyhow::Result<Arc<dyn MemoryStore>> {
+    let cfg = ctx.cfg;
     file_dir_prep(cfg);
-    let distill_provider = cfg.memory.distill.then(|| provider.clone());
+    let distill_provider = match cfg.memory.distill {
+        true => Some(ctx.provider()?.clone()),
+        false => None,
+    };
     Ok(Arc::new(agent_memory::file_memory(
         &cfg.memory.episodic_path,
         &cfg.memory.semantic_dir,
@@ -606,7 +621,10 @@ pub(crate) fn file_memory(
 /// Factory for just the file episodic layer (used when a custom semantic backend
 /// is composed against it via `[memory] semantic`).
 #[cfg(feature = "memory-file")]
-pub(crate) fn file_episodic(cfg: &Config) -> anyhow::Result<Arc<dyn agent_core::EpisodicStore>> {
+pub(crate) fn file_episodic(
+    ctx: &crate::registry::FactoryCtx<'_>,
+) -> anyhow::Result<Arc<dyn agent_core::EpisodicStore>> {
+    let cfg = ctx.cfg;
     file_dir_prep(cfg);
     Ok(Arc::new(agent_memory::FileEpisodic::new(
         &cfg.memory.episodic_path,
@@ -616,13 +634,13 @@ pub(crate) fn file_episodic(cfg: &Config) -> anyhow::Result<Arc<dyn agent_core::
 /// Factory for just the file semantic layer.
 #[cfg(feature = "memory-file")]
 pub(crate) fn file_semantic(
-    cfg: &Config,
-    provider: &Arc<dyn agent_core::LlmProvider>,
+    ctx: &crate::registry::FactoryCtx<'_>,
 ) -> anyhow::Result<Arc<dyn agent_core::SemanticStore>> {
+    let cfg = ctx.cfg;
     file_dir_prep(cfg);
     let mut semantic = agent_memory::FileSemantic::new(&cfg.memory.semantic_dir);
     if cfg.memory.distill {
-        semantic = semantic.with_provider(provider.clone());
+        semantic = semantic.with_provider(ctx.provider()?.clone());
     }
     Ok(Arc::new(semantic))
 }
@@ -784,8 +802,9 @@ fn build_scanner(
 /// this feature.
 #[cfg(feature = "cache")]
 pub(crate) fn build_cache_strategy(
-    cfg: &Config,
+    ctx: &crate::registry::FactoryCtx<'_>,
 ) -> anyhow::Result<Option<Arc<dyn agent_core::CacheStrategy>>> {
+    let cfg = ctx.cfg;
     let inner: Arc<dyn agent_core::CacheStrategy> = match cfg.cache.strategy.as_str() {
         "off" => return Ok(None),
         "stable-prefix" => Arc::new(agent_cache::StablePrefix),
@@ -794,5 +813,5 @@ pub(crate) fn build_cache_strategy(
             anyhow::bail!("unknown [cache] strategy `{other}` (stable-prefix|tail-window|off)")
         }
     };
-    Ok(Some(crate::metered::cache(inner)))
+    Ok(Some(crate::metered::cache(inner, ctx.metrics.clone())))
 }
