@@ -1,9 +1,12 @@
 # Coding-fundamentals parity — specs & status
 
-Per-feature specs for the **top-10 coding fundamentals**, each measuring
-agent-seddon against three reference harnesses — **pi**, **hermes-agent**, and
-**opencode** — with a focus on *tests*. Each doc mines the peers' own test suites
-and lays out a table-driven `#[rstest]` plan to **match and exceed** them.
+Per-feature specs measuring agent-seddon against three reference harnesses —
+**pi**, **hermes-agent**, and **opencode** — with a focus on *tests*. Each doc mines
+the peers' own test suites and lays out a table-driven `#[rstest]` plan to **match
+and exceed** them. Specs **01–10** cover the **top-10 coding fundamentals** (all
+merged); specs **11–30** ([below](#next-20-1130--beyond-fundamentals-differentiators))
+cover the next **top-20 beyond-fundamentals** capabilities, each introducing or
+extending a distributed, inspectable **seam**.
 
 The specs were written first (design of record); most are now **implemented**, one
 PR per feature, each green under `nix flake check`. Each doc's top carries a
@@ -43,6 +46,66 @@ Legend: ✅ merged · 🔶 in review · ⬜ not started.
 set), and the two requested extras — index-backed `index_ls` (#31) and the
 **ripgrep-backed `grep` fast path** (#36) — are done. What remains is the small
 follow-up backlog below; none is on the critical path.
+
+## Next 20 (11–30) — beyond-fundamentals differentiators
+
+With the top-10 fundamentals closed, specs **11–30** target the capabilities the
+peers have *beyond* the basics — and push past them. Each is written first as a
+design-of-record (same 8-section shape as 01–10), and each introduces (or extends)
+a **seam**: a distributed, gRPC-reflection-introspectable, benchmarked, leak-tested,
+metric+span-instrumented component. That "every capability is an inspectable seam"
+property is the through-line differentiator — no single peer does it across all of
+these. New seams are allowed (and expected): `WebBackend`, `WebSearch`, `LspBackend`,
+`Sandbox`, `Embedder`, `OutputSchema`, `ReferenceResolver`, `Scanner`, `SessionStore`,
+`TaskTracker`, `Hook`, `Tokenizer`, `CacheStrategy`, `Router`, `Forge`, `Scheduler`,
+`Pty`.
+
+Legend: ✅ merged · 🔶 in review · ⬜ spec written, not started.
+
+**A — Coding-core depth**
+
+| # | Feature | Status | Differentiator (vs pi / hermes / opencode) |
+|---|---------|--------|---------|
+| 11 | [`web_fetch`](11-web-fetch.md) | ⬜ | SSRF/private-IP guard wired through the `Policy` seam (peers allow localhost); gRPC fetch worker, per-host metrics |
+| 12 | [`web_search`](12-web-search.md) | ⬜ | Swap-by-config `WebSearch` seam (Brave/SearXNG/Tavily/…) with caching + freshness manifest, mirroring `SearchBackend` |
+| 13 | [diagnostics / LSP](13-diagnostics-lsp.md) | ⬜ | Superset seam: hermes has diagnostics-only, opencode navigation-only — we unify both **+ `rename`** behind one gRPC seam |
+| 14 | [`sandbox`](14-sandbox.md) | ⬜ | **`nix` backend** — deterministic, content-addressed, reproducible isolation from the repo's own hermetic flake (peers use mutable images) |
+| 15 | [semantic / embeddings search](15-semantic-search.md) | ⬜ | `Embedder` seam + vector backend fused with BM25 via existing `DispatchSearch` (hybrid); also upgrades keyword-only memory recall |
+| 16 | [structured output](16-structured-output.md) | ⬜ | `OutputSchema` seam with **bounded one-shot repair** (peers validate or raise, none repair); proto-typed schema + verdict over gRPC |
+| 17 | [`@`-reference resolution](17-reference-resolution.md) | ⬜ | Typed refs resolved *through* the Search/Repo/LSP/Web seams; injection-scanned `@url`, size-budgeted expansion |
+| 18 | [security scanner](18-security-scanner.md) | ⬜ | `Scanner` seam (secrets + OSV + threat-patterns) feeding a severity→`Policy` `Decision`; generalizes the memory injection scan |
+
+**B — Session & workflow**
+
+| # | Feature | Status | Differentiator |
+|---|---------|--------|---------|
+| 19 | [session checkpoint / branch / undo](19-session-checkpoint.md) | ⬜ | `SessionStore` seam with git-style immutable checkpoints reusing the `RepoBackend` object model; time-travel inspectable via spans |
+| 20 | [session export + cross-session search](20-session-export.md) | ⬜ | Deterministic (byte-stable, bench-able) transcript render + secret redaction; cross-session recall reuses `SearchBackend` |
+| 21 | [todo / plan tracking](21-todo.md) | ⬜ | `TaskTracker` seam + `todo_write`; metered open/closed **plan-progress gauge**, persisted via `SessionStore` |
+| 22 | [lifecycle hooks / extensions](22-hooks.md) | ⬜ | `Hook` seam (pre/post tool+turn, on_compact) with a server-streaming gRPC event bus; hooks can *be* remote seams; `pre_tool` veto folds into `Policy` |
+
+**C — Provider & model**
+
+| # | Feature | Status | Differentiator |
+|---|---------|--------|---------|
+| 23 | [tokenizer + cost accounting](23-tokenizer-cost.md) | 🔶 | Real per-model counts (pi/opencode still use chars/4) driving compaction; USD + cache-read/write split as metrics, behind one seam. **Core landed**: `Tokenizer` seam + `approx` backend + price table + cost model + `Usage` cache fields + compaction crossover + metrics/span (gRPC + BPE backends follow) |
+| 24 | [prompt caching](24-prompt-cache.md) | ⬜ | Swappable `CacheStrategy` breakpoint-placement policy with metered hit-rate & tokens-saved (ties to #23) |
+| 25 | [model routing / fallback](25-model-routing.md) | ⬜ | `Router` **is-a** `LlmProvider` composing N providers (local + remote gRPC); capability/cost/latency routing + classified failover, metered |
+| 26 | [multimodal content](26-multimodal.md) | ⬜ | Proto-typed image/PDF content blocks end-to-end (Message + common.proto + providers), metered by modality; tool results carry images |
+
+**D — Agent-platform breadth**
+
+| # | Feature | Status | Differentiator |
+|---|---------|--------|---------|
+| 27 | [GitHub / forge](27-forge.md) | ⬜ | One `Forge` seam, GitHub↔GitLab by config, Policy-gated outward writes; reuses `RepoBackend` for local git |
+| 28 | [cron / scheduler](28-scheduler.md) | ⬜ | `Scheduler` seam with overlap/runaway guards, metered job outcomes, and a full OTel **trace per unattended run** |
+| 29 | [PTY / interactive terminal](29-pty.md) | ⬜ | `Pty` seam with server-streaming gRPC I/O (mirrors `SearchService.Reindex`); metered sessions/bytes; runs inside a #14 sandbox |
+| 30 | [autonomous skill authoring](30-skill-authoring.md) | ⬜ | `skill_write` closing the loop on #07 discovery: versioned, provenance-tracked, injection-scanned (#10) + `Policy`-gated writes |
+
+Suggested build order (earliest value + lowest coupling first): **23**, **11**, then
+**21**, **16**, **13**, **14**, **15**, **19** as the high-impact core; the rest
+follow. One feature per PR, each green under `nix flake check` — the same cadence as
+#23–45. Sequencing rationale + the per-spec build contract live in the plan doc.
 
 ## Open follow-ups (accumulated, small)
 
