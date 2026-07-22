@@ -1185,6 +1185,91 @@ impl From<pb::RepoStatus> for agent_core::RepoStatus {
     }
 }
 
+// --- Scanner ---------------------------------------------------------------
+
+/// Saturating decode: an unknown wire enum degrades to the least-severe value
+/// rather than erroring. A garbled severity must not be read as `Critical` (a
+/// remote could then deny everything) nor fail the scan outright.
+pub fn scan_severity_from_i32(v: i32) -> agent_core::Severity {
+    match v {
+        1 => agent_core::Severity::Low,
+        2 => agent_core::Severity::Medium,
+        3 => agent_core::Severity::High,
+        4 => agent_core::Severity::Critical,
+        _ => agent_core::Severity::Info,
+    }
+}
+
+pub fn scan_kind_from_i32(v: i32) -> agent_core::ScanKind {
+    match v {
+        1 => agent_core::ScanKind::FileBody,
+        2 => agent_core::ScanKind::WebContent,
+        3 => agent_core::ScanKind::Lockfile,
+        _ => agent_core::ScanKind::ToolInput,
+    }
+}
+
+impl From<agent_core::Severity> for pb::ScanSeverity {
+    fn from(s: agent_core::Severity) -> Self {
+        match s {
+            agent_core::Severity::Info => pb::ScanSeverity::Info,
+            agent_core::Severity::Low => pb::ScanSeverity::Low,
+            agent_core::Severity::Medium => pb::ScanSeverity::Medium,
+            agent_core::Severity::High => pb::ScanSeverity::High,
+            agent_core::Severity::Critical => pb::ScanSeverity::Critical,
+        }
+    }
+}
+
+impl From<agent_core::ScanKind> for pb::ScanKind {
+    fn from(k: agent_core::ScanKind) -> Self {
+        match k {
+            agent_core::ScanKind::ToolInput => pb::ScanKind::ToolInput,
+            agent_core::ScanKind::FileBody => pb::ScanKind::FileBody,
+            agent_core::ScanKind::WebContent => pb::ScanKind::WebContent,
+            agent_core::ScanKind::Lockfile => pb::ScanKind::Lockfile,
+        }
+    }
+}
+
+impl From<agent_core::Finding> for pb::ScanFinding {
+    fn from(f: agent_core::Finding) -> Self {
+        pb::ScanFinding {
+            rule: f.rule,
+            severity: pb::ScanSeverity::from(f.severity) as i32,
+            category: f.category.to_string(),
+            span_start: f.span.start as u64,
+            span_end: f.span.end as u64,
+        }
+    }
+}
+
+impl From<pb::ScanFinding> for agent_core::Finding {
+    fn from(f: pb::ScanFinding) -> Self {
+        // `category` is `&'static str` in core but arbitrary text on the wire.
+        // Map the known set and funnel anything else to a single static label
+        // rather than leaking a remote-controlled string via `Box::leak` — an
+        // unbounded leak an attacker could drive.
+        let category = match f.category.as_str() {
+            "secret" => "secret",
+            "threat" => "threat",
+            "injection" => "injection",
+            "vuln" => "vuln",
+            _ => "unknown",
+        };
+        // A hostile span must not panic a slicing caller: keep it ordered and
+        // let the consumer clamp against its own content length.
+        let start = usize::try_from(f.span_start).unwrap_or(usize::MAX);
+        let end = usize::try_from(f.span_end).unwrap_or(usize::MAX);
+        agent_core::Finding {
+            rule: f.rule,
+            severity: scan_severity_from_i32(f.severity),
+            category,
+            span: start..end.max(start),
+        }
+    }
+}
+
 // --- SessionStore (checkpoint metadata) ------------------------------------
 
 impl From<agent_core::CheckpointMeta> for pb::SessionCheckpointMeta {

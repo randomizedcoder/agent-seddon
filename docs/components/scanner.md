@@ -166,11 +166,57 @@ labels are bounded enums or built-in rule ids — never scanned content.
 `agent_policy_guard_total{category="scanned_content"}` records the resulting
 decision alongside the other guard categories.
 
+## Over gRPC — a central ruleset
+
+A remote scanner is just another **rule** in the dispatch chain, so it composes
+with the local ones rather than replacing them:
+
+```toml
+[scanner]
+rules = ["secret", "grpc"]   # local secret rules AND a central scanner
+[grpc.scanner]
+endpoint = "http://security:50059"
+```
+
+`agent --serve-scanner` hosts one (default `127.0.0.1:50059`). This centralises
+security policy — one process holds the rules and allowlist, and every agent
+pointed at it inherits a change without redeploying — and is the natural home for
+a backend needing credentials or a large local database (an advisory feed, a
+proprietary ruleset) that agents shouldn't each carry.
+
+### Fail-open, loudly
+
+> This is the one seam where **"fail closed" is the wrong answer**, and the trait
+> says so: implementations are fail-open on infrastructure errors, fail-closed on
+> detection. `Scanner::scan` returns `Vec<Finding>` with no `Result` — it
+> structurally cannot report a failure. A scanner that denied every tool call
+> whenever its backend blinked would be an availability weapon pointed at the
+> agent, and operators would just turn it off.
+
+The cost is real: **an unreachable scanner is indistinguishable from clean
+content** at the call site. So every transport failure emits a `WARN` carrying
+`scanner.transport_failed`, and *that log is the compensating control*. It is the
+only signal that scanning silently stopped. Alert on it, and read a steady stream
+of it as "security scanning is currently off" — not as noise.
+
+### The wire is a trust boundary
+
+The remote is as untrusted as any other input, so the client screens what comes
+back:
+
+| Hostile input | Handling |
+|---|---|
+| Unknown/garbled `severity` | Decodes to the **least** severe (`Info`) — a compromised scanner must not be able to push everything to `Critical` and deny arbitrary calls |
+| Arbitrary `category` string | Mapped to a known label, else `unknown` — never leaked into a `'static` (an unbounded per-request leak) |
+| `span` past the content | Clamped to the content length — callers slice on spans, so an unclamped one is a panic |
+
+Matched bytes are still **not** carried on the wire, only the span — the same
+oracle-avoidance rule as the local path.
+
 ## Deferred
 
 - **OSV vulnerability lookup.** Lockfile parsing + an advisory query (`MAL-*` ⇒
   Critical, CVE ⇒ High/Medium), **fail-open** on network error. Deferred because
   it is the one network-bound rule; the seam takes it unchanged.
-- **`scanner.proto` / `--serve-scanner`**, consistent with specs 11–19.
 - **Redaction.** `Finding.span` exists so a caller can redact rather than deny;
   nothing consumes it yet (spec 20's export redaction is the first consumer).

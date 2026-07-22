@@ -32,6 +32,9 @@ tracing-opentelemetry = { workspace = true }
 # The real session store, so the round-trip asserts the store's own properties
 # (content-addressed dedup, undo-as-pointer-move) across the wire, not a double.
 agent-session = { workspace = true, features = ["session-file"] }
+# The real secret/threat rules, so the round-trip asserts detections surviving
+# the hop rather than a double echoing what it was handed.
+agent-scanner = { workspace = true, features = ["scanner-secret", "scanner-threat"] }
 agent-testkit = { workspace = true }
 # A real built-in tool, to prove a feature tool (not just EchoTool) roundtrips over
 # the ToolService seam. Only the patch tool is compiled in.

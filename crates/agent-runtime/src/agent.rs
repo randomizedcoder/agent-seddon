@@ -60,6 +60,10 @@ pub struct Agent {
     /// The git backend, if the `git` seam is wired. Held so it can be hosted over
     /// gRPC (`agent --serve-git`); the loop reaches it through the `git_*` tools.
     repo: Option<Arc<dyn agent_core::RepoBackend>>,
+    /// The composed content scanner, if the `scanner` seam is wired. Held so it
+    /// can be hosted over gRPC (`agent --serve-scanner`); the loop reaches it
+    /// through the policy guard and the `skill_write` / `session_export` tools.
+    scanner: Option<Arc<dyn agent_core::Scanner>>,
     /// The (metered) structured-output validator, if the `structured` seam is
     /// wired. Reached via [`Agent::complete_structured`] (parity spec 16).
     #[cfg(feature = "structured")]
@@ -109,6 +113,7 @@ impl Agent {
             settings,
             search: None,
             repo: None,
+            scanner: None,
             #[cfg(feature = "structured")]
             validator: None,
             #[cfg(feature = "session")]
@@ -330,6 +335,17 @@ impl Agent {
         self.search.clone()
     }
     /// The git backend, if wired (for `agent --serve-git`).
+    /// The content scanner, if wired (for `agent --serve-scanner`).
+    pub fn scanner(&self) -> Option<Arc<dyn agent_core::Scanner>> {
+        self.scanner.clone()
+    }
+
+    /// Attach the composed content scanner (parity spec 18).
+    pub fn with_scanner(mut self, s: Arc<dyn agent_core::Scanner>) -> Self {
+        self.scanner = Some(s);
+        self
+    }
+
     pub fn repo(&self) -> Option<Arc<dyn agent_core::RepoBackend>> {
         self.repo.clone()
     }

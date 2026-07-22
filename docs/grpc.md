@@ -168,7 +168,7 @@ hosting the config-selected concrete impl over gRPC (config picks e.g.
 agent --serve-provider --config gateway.toml        # binds [grpc.provider] listen
 agent --serve-memory   --listen 0.0.0.0:50052       # or override the address
 agent --serve-tools ; agent --serve-context ; agent --serve-policy ; agent --serve-search
-agent --serve-repo ; agent --serve-session
+agent --serve-repo ; agent --serve-session ; agent --serve-scanner
 ```
 
 ### One process, every seam — `--serve-all`
@@ -362,9 +362,16 @@ Three things are judgement, not mechanics:
 - **Streams bypass retry.** A partial stream can't replay, so `call_retry` wraps
   unary calls only.
 - **The failure semantic is per-seam and deliberate.** `Policy` fails *safe*
-  (deny), `Tool` fails *soft* (an error observation), `Search`/`Repo` fail *hard*
-  (`Err`). Copying the wrong one from a neighbouring seam silently changes
-  behaviour under partition — pick it, don't inherit it.
+  (deny), `Tool` fails *soft* (an error observation), `Search`/`Repo`/`Session`
+  fail *hard* (`Err`), and `Scanner` fails **open** — the one place "fail closed"
+  is wrong, because its trait has no error channel and a scanner that denied
+  every call when its backend blinked would be an availability weapon. Copying
+  the wrong one from a neighbouring seam silently changes behaviour under
+  partition — pick it, don't inherit it.
+
+  Fail-open needs a compensating control, or the failure is invisible: the
+  scanner client emits a `WARN` (`scanner.transport_failed`) on every transport
+  failure, and that log is the only signal that scanning has stopped happening.
 
 ## Possible follow-ups
 

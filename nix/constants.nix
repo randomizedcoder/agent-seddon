@@ -69,6 +69,11 @@
       socket = "/tmp/agent-seddon/session.sock";
       metrics_port = 9608;
     };
+    scanner = {
+      port = 50059;
+      socket = "/tmp/agent-seddon/scanner.sock";
+      metrics_port = 9609;
+    };
 
     # NOT a seam: the `agent --serve-all` gateway, which hosts every seam's
     # service in one process on one endpoint. A same-host deployment that wants
