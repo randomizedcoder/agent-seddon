@@ -67,6 +67,23 @@ decorator ([`agent-runtime/src/metered.rs`](../../crates/agent-runtime/src/meter
 - **Leak:** `tests/leak.rs` runs repeated write→update→list→clear cycles under
   dhat and asserts flat live blocks.
 
+## Over gRPC — a shared plan
+
+`[tasks] backend = "grpc"` points the plan at a remote `TaskService`
+(`agent --serve-tasks`, default `127.0.0.1:50069`), so several agents can work
+against one task list.
+
+The **at-most-one-`in_progress`** invariant is enforced by the store, which means
+it is enforced *server-side* — a rejected write leaves the store unchanged and
+surfaces as an error, rather than each client hoping the others behave. That is
+the property that makes a shared plan coherent rather than merely shared.
+
+`write` and `update` are both idempotent (a whole-list swap, and a patch that
+sets fields to given values), so both retry safely.
+
+A garbled status decodes to `Pending`, never `Completed`: marking work done that
+was not would make the agent skip it.
+
 ## Deferred (staged like the tokenizer / web seams)
 
 - The `agent.v1.TaskService` gRPC worker (`agent --serve-tasks`) with reflection.

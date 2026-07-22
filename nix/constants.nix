@@ -121,6 +121,19 @@
       socket = "/tmp/agent-seddon/pty.sock";
       metrics_port = 9617;
     };
+    # NOTE: forge performs authenticated WRITES to the hosting platform (opens
+    # PRs, comments, reviews). Same socket-permission caveat as sandbox/pty, for
+    # a different blast radius.
+    forge = {
+      port = 50068;
+      socket = "/tmp/agent-seddon/forge.sock";
+      metrics_port = 9618;
+    };
+    tasks = {
+      port = 50069;
+      socket = "/tmp/agent-seddon/tasks.sock";
+      metrics_port = 9619;
+    };
 
     # NOT a seam: the `agent --serve-all` gateway, which hosts every seam's
     # service in one process on one endpoint. A same-host deployment that wants

@@ -173,6 +173,7 @@ agent --serve-reference ; agent --serve-scheduler
 agent --serve-tokenizer ; agent --serve-embed
 agent --serve-web ; agent --serve-web-search
 agent --serve-sandbox ; agent --serve-pty      # see the warning below
+agent --serve-forge ; agent --serve-tasks     # forge writes to the platform
 ```
 
 ### One process, every seam — `--serve-all`
@@ -401,6 +402,13 @@ and unprivileged while execution happens on a host built for it — one with the
 toolchain, or one deliberately isolated from anything the agent should not reach.
 That is a *better* posture than executing in-process, provided the socket is
 where you think it is.
+
+**`--serve-forge` carries the same caveat with a different blast radius.** It
+performs *authenticated writes to the hosting platform* — opening pull requests,
+commenting, submitting reviews — on behalf of whoever reaches it. The same upside
+applies, and is arguably stronger: the platform token lives in one process, so an
+agent can open a pull request without ever holding a credential that could also
+delete a repository.
 
 ## Serving a seam is not always the same as *using* one remotely
 

@@ -44,6 +44,9 @@ agent-embed = { workspace = true, features = ["embed-local"] }
 # than a double echoing what it was handed.
 agent-sandbox = { workspace = true }
 agent-pty = { workspace = true }
+# The real in-memory task store, so the at-most-one-in_progress invariant is
+# asserted across the wire rather than by a double that fakes it.
+agent-tasks = { workspace = true, features = ["tasks-memory"] }
 agent-testkit = { workspace = true }
 # A real built-in tool, to prove a feature tool (not just EchoTool) roundtrips over
 # the ToolService seam. Only the patch tool is compiled in.

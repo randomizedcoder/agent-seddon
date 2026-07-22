@@ -1,0 +1,153 @@
+// The `Forge` and `TaskTracker` seams over gRPC.
+//
+// `Forge` is the interesting one to distribute: it is the only seam here that
+// *writes to the outside world* (opens PRs, comments, submits reviews), and it
+// needs a credential to do it. Hosting it means the platform token lives in one
+// process rather than in every agent — an agent can open a pull request without
+// ever holding a token that could also delete a repository.
+//
+// `TaskTracker` rides along because it is the same shape: a small mutable store
+// with an invariant the server enforces.
+//
+// SECURITY. `--serve-forge` performs authenticated writes on behalf of whoever
+// reaches it, and the transport is unauthenticated by design — the same warning
+// as sandbox/pty, for a different blast radius. Note also that the `Policy` gate
+// stays on the agent side; the server hosts the raw capability.
+//
+// Messages are prefixed: the project shares one flat `agent.v1` package, so
+// message names are global (see session.proto).
+syntax = "proto3";
+
+package agent.v1;
+
+service ForgeService {
+  rpc GetPr(ForgeNumber) returns (ForgePullRequest);
+  rpc ListPrs(ForgePage) returns (ForgePrPage);
+  rpc ListIssues(ForgePage) returns (ForgeIssuePage);
+  rpc ImportIssue(ForgeNumber) returns (ForgeIssue);
+  rpc CreatePr(ForgeCreatePrRequest) returns (ForgePullRequest);
+  rpc Comment(ForgeCommentRequest) returns (ForgeComment);
+  rpc ReviewPr(ForgeReviewRequest) returns (ForgeComment);
+}
+
+service TaskService {
+  rpc Write(TaskWriteRequest) returns (TaskList);
+  rpc Update(TaskUpdateRequest) returns (TaskList);
+  rpc List(TaskListRequest) returns (TaskList);
+  rpc Clear(TaskClearRequest) returns (TaskClearResponse);
+}
+
+message ForgeNumber {
+  uint64 number = 1;
+}
+
+message ForgePage {
+  uint32 page = 1;
+}
+
+message ForgePullRequest {
+  // The user-facing number (#42), not an internal id.
+  uint64 number = 1;
+  string title = 2;
+  string body = 3;
+  // open / closed / merged.
+  string state = 4;
+  string author = 5;
+  string url = 6;
+  string source_branch = 7;
+  string target_branch = 8;
+  bool draft = 9;
+}
+
+message ForgeComment {
+  string author = 1;
+  string body = 2;
+  string url = 3;
+}
+
+message ForgeIssue {
+  uint64 number = 1;
+  string title = 2;
+  string body = 3;
+  string state = 4;
+  string author = 5;
+  string url = 6;
+  repeated string labels = 7;
+  // Populated by ImportIssue; empty in list results.
+  repeated ForgeComment comments = 8;
+}
+
+// `next_page` absent ⇒ this is the last page, so a caller can paginate without
+// knowing the platform's pagination dialect.
+message ForgePrPage {
+  repeated ForgePullRequest items = 1;
+  optional uint32 next_page = 2;
+}
+
+message ForgeIssuePage {
+  repeated ForgeIssue items = 1;
+  optional uint32 next_page = 2;
+}
+
+message ForgeCreatePrRequest {
+  string title = 1;
+  string body = 2;
+  string source_branch = 3;
+  string target_branch = 4;
+  bool draft = 5;
+}
+
+message ForgeCommentRequest {
+  uint64 number = 1;
+  string body = 2;
+}
+
+enum ForgeReviewVerdict {
+  FORGE_REVIEW_VERDICT_COMMENT = 0;
+  FORGE_REVIEW_VERDICT_APPROVE = 1;
+  FORGE_REVIEW_VERDICT_REQUEST_CHANGES = 2;
+}
+
+message ForgeReviewRequest {
+  uint64 number = 1;
+  ForgeReviewVerdict verdict = 2;
+  string body = 3;
+}
+
+enum TaskStatus {
+  TASK_STATUS_PENDING = 0;
+  TASK_STATUS_IN_PROGRESS = 1;
+  TASK_STATUS_COMPLETED = 2;
+  TASK_STATUS_CANCELLED = 3;
+}
+
+enum TaskPriority {
+  TASK_PRIORITY_MEDIUM = 0;
+  TASK_PRIORITY_HIGH = 1;
+  TASK_PRIORITY_LOW = 2;
+}
+
+message Task {
+  string content = 1;
+  TaskStatus status = 2;
+  TaskPriority priority = 3;
+}
+
+message TaskWriteRequest {
+  repeated Task todos = 1;
+}
+
+// Patches one existing todo, matched by `content`. Absent fields are unchanged.
+message TaskUpdateRequest {
+  string content = 1;
+  optional TaskStatus status = 2;
+  optional TaskPriority priority = 3;
+}
+
+message TaskListRequest {}
+message TaskClearRequest {}
+message TaskClearResponse {}
+
+message TaskList {
+  repeated Task todos = 1;
+}

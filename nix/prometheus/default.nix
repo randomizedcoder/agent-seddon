@@ -50,6 +50,8 @@ let
     + seamJob "web-search" g.web_search.metrics_port
     + seamJob "sandbox" g.sandbox.metrics_port
     + seamJob "pty" g.pty.metrics_port
+    + seamJob "forge" g.forge.metrics_port
+    + seamJob "tasks" g.tasks.metrics_port
     + seamJob "gateway" g.gateway.metrics_port;
 
   configYml = pkgs.writeText "prometheus.yml" (

@@ -73,6 +73,8 @@ mod descriptor_tests {
             "WebSearchService",
             "SandboxService",
             "PtyService",
+            "ForgeService",
+            "TaskService",
         ] {
             assert!(
                 services.contains(&expected),

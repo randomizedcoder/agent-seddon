@@ -54,6 +54,12 @@ pub async fn build_agent_with(
         metrics.clone(),
         &cfg.agent.provider,
     );
+    // Set when the forge / tasks backends are built below; held for serving.
+    #[allow(unused_assignments, unused_mut)]
+    let mut shared_forge: Option<Arc<dyn agent_core::Forge>> = None;
+    #[allow(unused_assignments, unused_mut)]
+    let mut shared_tasks: Option<Arc<dyn agent_core::TaskTracker>> = None;
+
     // Set when the sandbox / pty backends are built below; held for serving.
     #[allow(unused_assignments, unused_mut)]
     let mut shared_sandbox: Option<Arc<dyn agent_core::Sandbox>> = None;
@@ -274,6 +280,7 @@ pub async fn build_agent_with(
             .build_forge(&cfg.forge.backend, &fctx)
             .with_context(|| format!("building forge backend `{}`", cfg.forge.backend))?;
         let backend = crate::metered::forge(backend, metrics.clone());
+        shared_forge = Some(backend.clone());
         if cfg.forge.dry_run {
             tracing::info!("forge is in dry-run: writes will be previewed, not sent");
         }
@@ -353,9 +360,19 @@ pub async fn build_agent_with(
     {
         let tracker: Arc<dyn agent_core::TaskTracker> = match cfg.tasks.backend.as_str() {
             "memory" => Arc::new(agent_tasks::MemoryTaskTracker::new()),
-            other => anyhow::bail!("unknown [tasks] backend `{other}` (only `memory` is built in)"),
+            // A shared plan: several agents against one task list.
+            #[cfg(feature = "grpc")]
+            "grpc" => {
+                let ep = crate::registry::grpc_client_endpoint(
+                    &cfg.grpc.tasks.endpoint,
+                    agent_grpc::constants::TASKS,
+                );
+                Arc::new(agent_grpc::client::GrpcTasks::connect(&ep)?)
+            }
+            other => anyhow::bail!("unknown [tasks] backend `{other}` (memory|grpc)"),
         };
         let tracker = crate::metered::tasks(tracker, metrics.clone());
+        shared_tasks = Some(tracker.clone());
         let tool = Arc::new(agent_tools::TodoWriteTool::new(tracker));
         tools.register(crate::metered::tool(tool, metrics.clone()));
     }
@@ -569,7 +586,9 @@ pub async fn build_agent_with(
         .with_web(shared_web.clone())
         .with_web_search(shared_web_search.clone())
         .with_sandbox(shared_sandbox.clone())
-        .with_pty(shared_pty.clone());
+        .with_pty(shared_pty.clone())
+        .with_forge(shared_forge.clone())
+        .with_tasks(shared_tasks.clone());
     let agent = agent.with_embedder(embedder.clone());
     // Structured output: build the config-selected validator, meter it, attach it.
     #[cfg(feature = "structured")]

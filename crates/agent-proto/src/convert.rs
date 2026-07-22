@@ -1185,6 +1185,221 @@ impl From<pb::RepoStatus> for agent_core::RepoStatus {
     }
 }
 
+// --- Forge -----------------------------------------------------------------
+
+/// Saturating decode. An unknown verdict reads as `Comment` — the INERT one. A
+/// garbled field must never be read as `Approve`, which would let a malformed
+/// message approve a pull request.
+pub fn forge_verdict_from_i32(v: i32) -> agent_core::ReviewVerdict {
+    match v {
+        1 => agent_core::ReviewVerdict::Approve,
+        2 => agent_core::ReviewVerdict::RequestChanges,
+        _ => agent_core::ReviewVerdict::Comment,
+    }
+}
+
+impl From<agent_core::ReviewVerdict> for pb::ForgeReviewVerdict {
+    fn from(v: agent_core::ReviewVerdict) -> Self {
+        match v {
+            agent_core::ReviewVerdict::Approve => pb::ForgeReviewVerdict::Approve,
+            agent_core::ReviewVerdict::RequestChanges => pb::ForgeReviewVerdict::RequestChanges,
+            agent_core::ReviewVerdict::Comment => pb::ForgeReviewVerdict::Comment,
+        }
+    }
+}
+
+impl From<agent_core::Comment> for pb::ForgeComment {
+    fn from(c: agent_core::Comment) -> Self {
+        pb::ForgeComment {
+            author: c.author,
+            body: c.body,
+            url: c.url,
+        }
+    }
+}
+
+impl From<pb::ForgeComment> for agent_core::Comment {
+    fn from(c: pb::ForgeComment) -> Self {
+        agent_core::Comment {
+            author: c.author,
+            body: c.body,
+            url: c.url,
+        }
+    }
+}
+
+impl From<agent_core::PullRequest> for pb::ForgePullRequest {
+    fn from(p: agent_core::PullRequest) -> Self {
+        pb::ForgePullRequest {
+            number: p.number,
+            title: p.title,
+            body: p.body,
+            state: p.state,
+            author: p.author,
+            url: p.url,
+            source_branch: p.source_branch,
+            target_branch: p.target_branch,
+            draft: p.draft,
+        }
+    }
+}
+
+impl From<pb::ForgePullRequest> for agent_core::PullRequest {
+    fn from(p: pb::ForgePullRequest) -> Self {
+        agent_core::PullRequest {
+            number: p.number,
+            title: p.title,
+            body: p.body,
+            state: p.state,
+            author: p.author,
+            url: p.url,
+            source_branch: p.source_branch,
+            target_branch: p.target_branch,
+            draft: p.draft,
+        }
+    }
+}
+
+impl From<agent_core::Issue> for pb::ForgeIssue {
+    fn from(i: agent_core::Issue) -> Self {
+        pb::ForgeIssue {
+            number: i.number,
+            title: i.title,
+            body: i.body,
+            state: i.state,
+            author: i.author,
+            url: i.url,
+            labels: i.labels,
+            comments: i.comments.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<pb::ForgeIssue> for agent_core::Issue {
+    fn from(i: pb::ForgeIssue) -> Self {
+        agent_core::Issue {
+            number: i.number,
+            title: i.title,
+            body: i.body,
+            state: i.state,
+            author: i.author,
+            url: i.url,
+            labels: i.labels,
+            comments: i.comments.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<agent_core::CreatePrRequest> for pb::ForgeCreatePrRequest {
+    fn from(r: agent_core::CreatePrRequest) -> Self {
+        pb::ForgeCreatePrRequest {
+            title: r.title,
+            body: r.body,
+            source_branch: r.source_branch,
+            target_branch: r.target_branch,
+            draft: r.draft,
+        }
+    }
+}
+
+impl From<pb::ForgeCreatePrRequest> for agent_core::CreatePrRequest {
+    fn from(r: pb::ForgeCreatePrRequest) -> Self {
+        agent_core::CreatePrRequest {
+            title: r.title,
+            body: r.body,
+            source_branch: r.source_branch,
+            target_branch: r.target_branch,
+            draft: r.draft,
+        }
+    }
+}
+
+// --- TaskTracker -----------------------------------------------------------
+
+/// Saturating decode. An unknown status reads as `Pending` — the neutral one. In
+/// particular it must NOT read as `Completed`: a garbled field marking work done
+/// would make the agent skip it.
+pub fn task_status_from_i32(v: i32) -> agent_core::TodoStatus {
+    match v {
+        1 => agent_core::TodoStatus::InProgress,
+        2 => agent_core::TodoStatus::Completed,
+        3 => agent_core::TodoStatus::Cancelled,
+        _ => agent_core::TodoStatus::Pending,
+    }
+}
+
+pub fn task_priority_from_i32(v: i32) -> agent_core::TodoPriority {
+    match v {
+        1 => agent_core::TodoPriority::High,
+        2 => agent_core::TodoPriority::Low,
+        _ => agent_core::TodoPriority::Medium,
+    }
+}
+
+impl From<agent_core::TodoStatus> for pb::TaskStatus {
+    fn from(s: agent_core::TodoStatus) -> Self {
+        match s {
+            agent_core::TodoStatus::Pending => pb::TaskStatus::Pending,
+            agent_core::TodoStatus::InProgress => pb::TaskStatus::InProgress,
+            agent_core::TodoStatus::Completed => pb::TaskStatus::Completed,
+            agent_core::TodoStatus::Cancelled => pb::TaskStatus::Cancelled,
+        }
+    }
+}
+
+impl From<agent_core::TodoPriority> for pb::TaskPriority {
+    fn from(p: agent_core::TodoPriority) -> Self {
+        match p {
+            agent_core::TodoPriority::High => pb::TaskPriority::High,
+            agent_core::TodoPriority::Medium => pb::TaskPriority::Medium,
+            agent_core::TodoPriority::Low => pb::TaskPriority::Low,
+        }
+    }
+}
+
+impl From<agent_core::Todo> for pb::Task {
+    fn from(t: agent_core::Todo) -> Self {
+        pb::Task {
+            content: t.content,
+            status: pb::TaskStatus::from(t.status) as i32,
+            priority: pb::TaskPriority::from(t.priority) as i32,
+        }
+    }
+}
+
+impl From<pb::Task> for agent_core::Todo {
+    fn from(t: pb::Task) -> Self {
+        agent_core::Todo {
+            content: t.content,
+            status: task_status_from_i32(t.status),
+            priority: task_priority_from_i32(t.priority),
+        }
+    }
+}
+
+impl From<agent_core::TodoPatch> for pb::TaskUpdateRequest {
+    fn from(p: agent_core::TodoPatch) -> Self {
+        pb::TaskUpdateRequest {
+            content: p.content,
+            status: p.status.map(|s| pb::TaskStatus::from(s) as i32),
+            priority: p.priority.map(|p| pb::TaskPriority::from(p) as i32),
+        }
+    }
+}
+
+impl From<pb::TaskUpdateRequest> for agent_core::TodoPatch {
+    fn from(p: pb::TaskUpdateRequest) -> Self {
+        agent_core::TodoPatch {
+            content: p.content,
+            // `None` means "leave unchanged", which is meaningfully different
+            // from any concrete value — so the optionality is carried, not
+            // flattened to a default.
+            status: p.status.map(task_status_from_i32),
+            priority: p.priority.map(task_priority_from_i32),
+        }
+    }
+}
+
 // --- Sandbox ---------------------------------------------------------------
 
 /// Saturating decode. An unknown network policy reads as `Off` — the RESTRICTIVE
