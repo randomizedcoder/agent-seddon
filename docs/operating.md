@@ -137,6 +137,40 @@ nix fmt                     # format all .nix files
 `cargo-audit`, nix-fmt, generated-constant drift, `buf lint`, `buf breaking`, and
 the bench + leak suites ([`benchmarking.md`](benchmarking.md)).
 
+### Does it actually work? (`nix run .#e2e-live`)
+
+The gate proves the binary, the wire format and the tool path against a
+*scripted* server ([`crates/agent-cli/tests/cli_e2e.rs`](../crates/agent-cli/tests/cli_e2e.rs)).
+It cannot prove a real model can drive them, because the check sandbox has no
+network. That is what this app is for:
+
+```sh
+ollama serve && ollama pull llama3.1:latest
+nix run .#e2e-live
+```
+
+It runs the real agent on a real model, asks for a C hello world, then compiles
+and runs the result. Point it elsewhere with `AGENT_E2E_BASE_URL`,
+`AGENT_E2E_MODEL` and `AGENT_E2E_API_KEY`.
+
+The exit codes are split on purpose, because the two failures have different
+owners and merging them makes the result useless:
+
+| Exit | Meaning |
+|:--:|---|
+| `0` | The agent ran the task **and** the program compiles and prints a greeting. |
+| `1` | **Harness failure** — the agent errored, called no tool, or wrote no file. Our bug. It dumps the agent's stderr and `.agent/episodic.jsonl`, which is the record of what it actually did. |
+| `2` | **Model-quality failure** — the agent worked, but the generated C does not compile. Not our bug, but not hidden either. |
+
+If no model server is reachable it **fails** rather than skipping: a skip that
+exits 0 reads as a pass, and the entire point of this tier is that it really
+talked to a model.
+
+> Expect exit 2 from small models sometimes. `llama3.1:latest` at
+> `temperature = 0` passed three runs out of three; at the default temperature it
+> emitted `<stdio.h>` and literal `\n` escapes and failed to compile.
+> Sampling noise in an 8B model shows up directly as broken C.
+
 > The toolchain is supplied reproducibly by the flake lock, but is **not pinned to
 > a specific Rust version** — `nix/versions.nix` uses `rust-bin.stable.latest`.
 > Pin it there if you need a frozen toolchain.
