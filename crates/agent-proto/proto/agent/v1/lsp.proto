@@ -1,0 +1,146 @@
+// The `LspBackend` seam over gRPC — language intelligence as a service.
+//
+// A language server is a long-lived process with a warm index: `rust-analyzer`
+// can take minutes to reach steady state and hold gigabytes of it. Hosting the
+// seam separately means that warm process is shared and survives the agent
+// restarting, instead of every agent paying the cold-start cost.
+//
+// Messages are `Lsp`-prefixed: the project shares one flat `agent.v1` package,
+// so message names are global (see session.proto).
+syntax = "proto3";
+
+package agent.v1;
+
+service LspService {
+  // Tell the server about a file's current contents (unsaved buffers).
+  rpc Open(LspOpenRequest) returns (LspOpenResponse);
+  rpc Request(LspRequestMsg) returns (LspResultMsg);
+  rpc Capabilities(LspCapabilitiesRequest) returns (LspCapabilities);
+  rpc Shutdown(LspShutdownRequest) returns (LspShutdownResponse);
+}
+
+enum LspMethod {
+  LSP_METHOD_DIAGNOSTICS = 0;
+  LSP_METHOD_HOVER = 1;
+  LSP_METHOD_DEFINITION = 2;
+  LSP_METHOD_REFERENCES = 3;
+  LSP_METHOD_RENAME = 4;
+  LSP_METHOD_DOCUMENT_SYMBOLS = 5;
+}
+
+enum LspDiagnosticSeverity {
+  LSP_DIAGNOSTIC_SEVERITY_ERROR = 0;
+  LSP_DIAGNOSTIC_SEVERITY_WARNING = 1;
+  LSP_DIAGNOSTIC_SEVERITY_INFORMATION = 2;
+  LSP_DIAGNOSTIC_SEVERITY_HINT = 3;
+}
+
+message LspPosition {
+  uint32 line = 1;
+  uint32 character = 2;
+}
+
+// Half-open.
+message LspRange {
+  LspPosition start = 1;
+  LspPosition end = 2;
+}
+
+message LspLocation {
+  string uri = 1;
+  LspRange range = 2;
+}
+
+message LspDiagnostic {
+  LspRange range = 1;
+  LspDiagnosticSeverity severity = 2;
+  string message = 3;
+  optional string code = 4;
+  optional string source = 5;
+}
+
+message LspHover {
+  string contents = 1;
+}
+
+message LspTextEdit {
+  LspRange range = 1;
+  string new_text = 2;
+}
+
+message LspFileEdits {
+  string uri = 1;
+  repeated LspTextEdit edits = 2;
+}
+
+// Ordered, and a repeated field rather than a map: a rename's edits are applied
+// per file, and proto3 maps have no defined ordering.
+message LspWorkspaceEdit {
+  repeated LspFileEdits changes = 1;
+}
+
+message LspDocumentSymbol {
+  string name = 1;
+  string kind = 2;
+  LspRange range = 3;
+}
+
+message LspOpenRequest {
+  string uri = 1;
+  string text = 2;
+}
+
+message LspOpenResponse {}
+
+message LspRequestMsg {
+  LspMethod method = 1;
+  string uri = 2;
+  // Required by hover/definition/references/rename; absent otherwise.
+  optional LspPosition position = 3;
+  // Required by rename.
+  optional string new_name = 4;
+}
+
+// The result is keyed by the method, so the variant is explicit rather than
+// inferred: a caller that asked for `hover` and received locations should see a
+// type error, not silently reinterpret them.
+message LspResultMsg {
+  oneof kind {
+    LspDiagnostics diagnostics = 1;
+    LspHoverResult hover = 2;
+    LspLocations locations = 3;
+    LspSymbols symbols = 4;
+    LspWorkspaceEdit rename = 5;
+  }
+}
+
+message LspDiagnostics {
+  repeated LspDiagnostic items = 1;
+}
+
+// `hover` is absent when the server had nothing to say — distinct from a hover
+// whose contents are empty.
+message LspHoverResult {
+  optional LspHover hover = 1;
+}
+
+message LspLocations {
+  repeated LspLocation items = 1;
+}
+
+message LspSymbols {
+  repeated LspDocumentSymbol items = 1;
+}
+
+message LspCapabilitiesRequest {
+  string language = 1;
+}
+
+message LspCapabilities {
+  // Empty ⇒ no server configured for that language.
+  string server = 1;
+  repeated LspMethod methods = 2;
+}
+
+message LspShutdownRequest {}
+message LspShutdownResponse {}

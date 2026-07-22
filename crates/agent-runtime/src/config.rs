@@ -507,8 +507,18 @@ fn default_sandbox_backend() -> String {
 /// command. See docs/components/lsp.md.
 #[derive(Debug, Default, Deserialize)]
 pub struct LspCfg {
+    /// `"local"` (stdio language servers on this host) or `"grpc"` (a shared
+    /// host holding the warm index). `servers` still lists the languages: with
+    /// `"grpc"` it says which languages the remote can answer for, and the
+    /// `command` is unused.
+    #[serde(default = "default_lsp_backend")]
+    pub backend: String,
     #[serde(default)]
     pub servers: Vec<LspServerCfg>,
+}
+
+fn default_lsp_backend() -> String {
+    "local".into()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -839,6 +849,8 @@ pub struct GrpcCfg {
     pub forge: GrpcSeamCfg,
     #[serde(default)]
     pub tasks: GrpcSeamCfg,
+    #[serde(default)]
+    pub lsp: GrpcSeamCfg,
     /// Not a seam: the `agent --serve-all` gateway, which hosts every enabled
     /// seam's service in one process. Only `listen` is meaningful — a client
     /// dials an individual seam's service, not the gateway as a whole.

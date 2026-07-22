@@ -75,6 +75,7 @@ mod descriptor_tests {
             "PtyService",
             "ForgeService",
             "TaskService",
+            "LspService",
         ] {
             assert!(
                 services.contains(&expected),

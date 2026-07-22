@@ -80,6 +80,53 @@ metered, benchmarked, leak-tested seam.
 - **Leak:** `tests/leak.rs` runs open→change→request cycles under dhat, asserting
   the diagnostics store + request buffers stay flat.
 
+## Over gRPC — a shared warm index
+
+`[lsp] backend = "grpc"` points language intelligence at a remote `LspService`
+(`agent --serve-lsp`, default `127.0.0.1:50070`). This is the seam where the
+*state* is the expensive part: `rust-analyzer` can take minutes to reach steady
+state and hold gigabytes of index. Hosting it means that warm process is shared
+and **survives the agent restarting**, instead of every agent paying the cold
+start.
+
+```toml
+[lsp]
+backend = "grpc"
+# `servers` still lists which languages the remote can answer for; `command` is
+# unused with the grpc backend.
+[[lsp.servers]]
+language   = "rust"
+command    = []
+extensions = ["rs"]
+[grpc.lsp]
+endpoint = "http://lsp-host:50070"
+```
+
+### `shutdown` is deliberately a client-side no-op
+
+`shutdown` means "stop the language servers". On a shared host that is not a
+client's to do: one agent finishing a run would tear down the warm index every
+*other* agent is using — and that cold start is the entire cost this seam exists
+to amortise. The server's own lifecycle owns it, and a test asserts the call
+never reaches the server.
+
+### The result is a tagged union, and stays one
+
+`LspResult` is keyed by the method, and the wire carries the variant explicitly
+rather than letting the caller infer it. A result arriving with **no** variant is
+refused, not defaulted: guessing empty diagnostics would report "no problems
+found" for a request that in fact answered nothing at all.
+
+`Hover(None)` — "the server had nothing to say" — survives as `None` rather than
+collapsing into a hover with empty contents. They mean different things.
+
+A garbled severity decodes to `Hint`, the least severe: manufacturing an `Error`
+would have the caller report a compile failure that does not exist.
+
+**Failure semantic: hard.** Language intelligence feeds edits. An empty result
+fabricated on failure would read as "no diagnostics" — the model concludes the
+code compiles — or as "no references", and it renames one call site out of forty.
+
 ## Deferred (staged like the tokenizer / web / tasks / structured seams)
 
 - **Diagnostics fed back into the loop** after every `edit`/`patch`/`write_file`

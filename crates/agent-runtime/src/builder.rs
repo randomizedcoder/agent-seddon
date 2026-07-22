@@ -54,6 +54,10 @@ pub async fn build_agent_with(
         metrics.clone(),
         &cfg.agent.provider,
     );
+    // Set when the LSP backend is built below; held for serving.
+    #[allow(unused_assignments, unused_mut)]
+    let mut shared_lsp: Option<Arc<dyn agent_core::LspBackend>> = None;
+
     // Set when the forge / tasks backends are built below; held for serving.
     #[allow(unused_assignments, unused_mut)]
     let mut shared_forge: Option<Arc<dyn agent_core::Forge>> = None;
@@ -393,12 +397,27 @@ pub async fn build_agent_with(
             })
             .collect();
         let root = cfg.agent.working_dir.clone();
-        let backend: Arc<dyn agent_core::LspBackend> = Arc::new(agent_lsp::LspManager::new(
-            Arc::new(agent_lsp::StdioFactory),
-            root,
-            servers,
-        ));
+        let backend: Arc<dyn agent_core::LspBackend> = match cfg.lsp.backend.as_str() {
+            "local" => Arc::new(agent_lsp::LspManager::new(
+                Arc::new(agent_lsp::StdioFactory),
+                root,
+                servers,
+            )),
+            // A shared host: the warm index lives there and survives this
+            // process restarting, instead of every agent paying the cold start.
+            #[cfg(feature = "grpc")]
+            "grpc" => {
+                let ep = crate::registry::grpc_client_endpoint(
+                    &cfg.grpc.lsp.endpoint,
+                    agent_grpc::constants::LSP,
+                );
+                let languages = cfg.lsp.servers.iter().map(|s| s.language.clone()).collect();
+                Arc::new(agent_grpc::client::GrpcLsp::connect(&ep, languages)?)
+            }
+            other => anyhow::bail!("unknown [lsp] backend `{other}` (local|grpc)"),
+        };
         let backend = crate::metered::lsp(backend, metrics.clone());
+        shared_lsp = Some(backend.clone());
         let tool = Arc::new(agent_tools::LspTool::new(backend));
         tools.register(crate::metered::tool(tool, metrics.clone()));
     }
@@ -588,7 +607,8 @@ pub async fn build_agent_with(
         .with_sandbox(shared_sandbox.clone())
         .with_pty(shared_pty.clone())
         .with_forge(shared_forge.clone())
-        .with_tasks(shared_tasks.clone());
+        .with_tasks(shared_tasks.clone())
+        .with_lsp(shared_lsp.clone());
     let agent = agent.with_embedder(embedder.clone());
     // Structured output: build the config-selected validator, meter it, attach it.
     #[cfg(feature = "structured")]
