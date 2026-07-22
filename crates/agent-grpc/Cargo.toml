@@ -37,6 +37,9 @@ agent-session = { workspace = true, features = ["session-file"] }
 agent-scanner = { workspace = true, features = ["scanner-secret", "scanner-threat"] }
 # The real scheduler, so spec parsing + rejection are asserted across the wire.
 agent-scheduler = { workspace = true }
+# Real tokenizer + embedder, so remote counts/vectors are asserted equal to local.
+agent-tokenizer = { workspace = true, features = ["tokenizer-approx"] }
+agent-embed = { workspace = true, features = ["embed-local"] }
 agent-testkit = { workspace = true }
 # A real built-in tool, to prove a feature tool (not just EchoTool) roundtrips over
 # the ToolService seam. Only the patch tool is compiled in.

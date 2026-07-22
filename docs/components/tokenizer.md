@@ -57,3 +57,31 @@ and the reverse.
   today).
 
 [`MESSAGE_TOKEN_OVERHEAD`]: ../../crates/agent-core/src/lib.rs
+
+## Over gRPC — one count for a fleet
+
+`[tokenizer] backend = "grpc"` points counting at a remote `TokenizerService`
+(`agent --serve-tokenizer`, default `127.0.0.1:50062`).
+
+The win here is **agreement**, not offload. Every agent dialling one tokenizer
+produces identical counts, so budget and compaction decisions stay consistent
+across a fleet instead of drifting with whichever backend each agent was built
+with. It is also where a real BPE/HF vocabulary can live once rather than being
+shipped into every agent image.
+
+```toml
+[tokenizer]
+backend = "grpc"
+[grpc.tokenizer]
+endpoint = "http://tokenizer:50062"
+```
+
+The client **overrides `count_messages`** rather than inheriting the trait
+default. The default counts each field with a separate `count` call, which over a
+network is one round trip *per message field* on the loop's hot path; the remote
+takes the whole message array in one call.
+
+**Failure semantic: hard.** A fabricated count would silently mis-size the
+context window. Callers already have a heuristic fallback for "no tokenizer
+wired" — an `Err` lets them choose it knowingly.
+

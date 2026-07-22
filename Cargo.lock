@@ -134,12 +134,14 @@ name = "agent-grpc"
 version = "0.1.0"
 dependencies = [
  "agent-core",
+ "agent-embed",
  "agent-proto",
  "agent-retry",
  "agent-scanner",
  "agent-scheduler",
  "agent-session",
  "agent-testkit",
+ "agent-tokenizer",
  "agent-tools",
  "async-trait",
  "futures-core",

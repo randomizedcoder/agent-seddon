@@ -34,6 +34,8 @@ pub enum Seam {
     Scanner,
     Reference,
     Scheduler,
+    Tokenizer,
+    Embed,
 }
 
 /// Every variant, so the table can be checked for completeness.
@@ -49,6 +51,8 @@ const ALL_SEAMS: &[Seam] = &[
     Seam::Scanner,
     Seam::Reference,
     Seam::Scheduler,
+    Seam::Tokenizer,
+    Seam::Embed,
 ];
 
 /// The static facts about a seam served as its own process.
@@ -143,6 +147,20 @@ const SEAMS: &[SeamInfo] = &[
         service: "agent.v1.SchedulerService",
         endpoint: constants::SCHEDULER,
     },
+    SeamInfo {
+        seam: Seam::Tokenizer,
+        flag: "--serve-tokenizer",
+        name: "tokenizer",
+        service: "agent.v1.TokenizerService",
+        endpoint: constants::TOKENIZER,
+    },
+    SeamInfo {
+        seam: Seam::Embed,
+        flag: "--serve-embed",
+        name: "embed",
+        service: "agent.v1.EmbedService",
+        endpoint: constants::EMBED,
+    },
 ];
 
 impl Seam {
@@ -197,6 +215,8 @@ impl Seam {
             Seam::Scanner => &cfg.grpc.scanner.listen,
             Seam::Reference => &cfg.grpc.reference.listen,
             Seam::Scheduler => &cfg.grpc.scheduler.listen,
+            Seam::Tokenizer => &cfg.grpc.tokenizer.listen,
+            Seam::Embed => &cfg.grpc.embed.listen,
         }
     }
 }
@@ -298,6 +318,20 @@ fn add_seam_service(router: Router, agent: &Agent, seam: Seam) -> anyhow::Result
         Seam::Scheduler => match agent.scheduler_seam() {
             Some(s) => (
                 router.add_service(srv::SchedulerServiceSvc::new(s).into_server()),
+                true,
+            ),
+            None => (router, false),
+        },
+        Seam::Tokenizer => match agent.tokenizer() {
+            Some(t) => (
+                router.add_service(srv::TokenizerServiceSvc::new(t).into_server()),
+                true,
+            ),
+            None => (router, false),
+        },
+        Seam::Embed => match agent.embedder() {
+            Some(e) => (
+                router.add_service(srv::EmbedServiceSvc::new(e).into_server()),
                 true,
             ),
             None => (router, false),
@@ -437,6 +471,7 @@ mod tests {
     #[case::positive_session("--serve-session", Some(Seam::Session))]
     #[case::positive_scanner("--serve-scanner", Some(Seam::Scanner))]
     #[case::positive_reference("--serve-reference", Some(Seam::Reference))]
+    #[case::positive_embed("--serve-embed", Some(Seam::Embed))]
     #[case::negative_unknown_seam("--serve-nope", None)]
     #[case::negative_not_a_serve_flag("--help", None)]
     #[case::adversarial_empty("", None)]

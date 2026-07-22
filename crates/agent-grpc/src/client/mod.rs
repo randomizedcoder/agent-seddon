@@ -18,6 +18,7 @@
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 mod context;
+mod embed;
 mod memory;
 mod policy;
 mod provider;
@@ -27,9 +28,11 @@ mod scanner;
 mod scheduler;
 mod search;
 mod session;
+mod tokenizer;
 mod tools;
 
 pub use context::*;
+pub use embed::*;
 pub use memory::*;
 pub use policy::*;
 pub use provider::*;
@@ -39,6 +42,7 @@ pub use scanner::*;
 pub use scheduler::*;
 pub use search::*;
 pub use session::*;
+pub use tokenizer::*;
 pub use tools::*;
 
 /// Wrap a message in a request carrying the caller's trace context.

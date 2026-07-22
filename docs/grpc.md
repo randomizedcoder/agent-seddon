@@ -170,6 +170,7 @@ agent --serve-memory   --listen 0.0.0.0:50052       # or override the address
 agent --serve-tools ; agent --serve-context ; agent --serve-policy ; agent --serve-search
 agent --serve-repo ; agent --serve-session ; agent --serve-scanner
 agent --serve-reference ; agent --serve-scheduler
+agent --serve-tokenizer ; agent --serve-embed
 ```
 
 ### One process, every seam — `--serve-all`

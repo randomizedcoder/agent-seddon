@@ -815,6 +815,10 @@ pub struct GrpcCfg {
     pub reference: GrpcSeamCfg,
     #[serde(default)]
     pub scheduler: GrpcSeamCfg,
+    #[serde(default)]
+    pub tokenizer: GrpcSeamCfg,
+    #[serde(default)]
+    pub embed: GrpcSeamCfg,
     /// Not a seam: the `agent --serve-all` gateway, which hosts every enabled
     /// seam's service in one process. Only `listen` is meaningful — a client
     /// dials an individual seam's service, not the gateway as a whole.

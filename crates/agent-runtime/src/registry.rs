@@ -40,6 +40,11 @@ pub struct FactoryCtx<'a> {
     pub built_provider: Option<&'a Arc<dyn LlmProvider>>,
     /// The already-built (metered) tokenizer — absent until it is built.
     pub built_tokenizer: Option<&'a Arc<dyn agent_core::Tokenizer>>,
+    /// The already-built embedder, so the vector search backend and
+    /// `agent --serve-embed` share ONE instance rather than each constructing
+    /// their own (a real embedder loads a model).
+    #[cfg(feature = "semantic-search")]
+    pub built_embedder: Option<&'a Arc<dyn agent_core::Embedder>>,
     /// The registry itself, so a **composing** factory can build its children by
     /// config name (the `router` provider builds its candidates this way). The
     /// borrow is immutable and re-entrant: `build_*` takes `&self`, so a factory
@@ -55,6 +60,8 @@ impl<'a> FactoryCtx<'a> {
             metrics,
             built_provider: None,
             built_tokenizer: None,
+            #[cfg(feature = "semantic-search")]
+            built_embedder: None,
             registry: None,
         }
     }
@@ -69,6 +76,13 @@ impl<'a> FactoryCtx<'a> {
     }
     pub fn with_tokenizer(mut self, t: Option<&'a Arc<dyn agent_core::Tokenizer>>) -> Self {
         self.built_tokenizer = t;
+        self
+    }
+
+    /// Inject the already-built embedder (see [`FactoryCtx::built_embedder`]).
+    #[cfg(feature = "semantic-search")]
+    pub fn with_embedder(mut self, e: Option<&'a Arc<dyn agent_core::Embedder>>) -> Self {
+        self.built_embedder = e;
         self
     }
     /// The built provider, or a clear error naming the ordering constraint.
@@ -490,6 +504,17 @@ pub fn register_builtins(r: &mut Registry) {
     #[cfg(feature = "tokenizer")]
     r.tokenizer("approx", |_ctx| {
         Ok(Arc::new(agent_tokenizer::ApproxTokenizer::new()) as Arc<dyn agent_core::Tokenizer>)
+    });
+    // One tokenizer for a fleet: identical counts everywhere, so budget and
+    // compaction decisions stay consistent across agents.
+    #[cfg(feature = "grpc")]
+    r.tokenizer("grpc", |ctx| {
+        let ep = grpc_client_endpoint(
+            &ctx.cfg.grpc.tokenizer.endpoint,
+            agent_grpc::constants::TOKENIZER,
+        );
+        Ok(Arc::new(agent_grpc::client::GrpcTokenizer::connect(&ep)?)
+            as Arc<dyn agent_core::Tokenizer>)
     });
 
     // --- policies (always available; they live in agent-runtime) ---

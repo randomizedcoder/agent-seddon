@@ -358,9 +358,41 @@ pub async fn build_agent_with(
     #[cfg(not(feature = "tokenizer"))]
     let tokenizer: Option<Arc<dyn agent_core::Tokenizer>> = None;
 
-    let full_ctx = crate::registry::FactoryCtx::new(&cfg, &metrics)
+    // The embedder is built ONCE here — a real one loads a model, so the vector
+    // index and `agent --serve-embed` must share an instance rather than each
+    // constructing their own. A remote embedder additionally VERIFIES that the
+    // server's dimensionality matches `[embedder] dimensions`: a mismatch would
+    // silently write wrong-width vectors into the index and corrupt recall.
+    #[cfg(feature = "semantic-search")]
+    let embedder: Option<Arc<dyn agent_core::Embedder>> = {
+        let built = crate::search::build_embedder(&cfg)?;
+        #[cfg(feature = "grpc")]
+        if cfg.embedder.backend == "grpc" {
+            let ep = crate::registry::grpc_client_endpoint(
+                &cfg.grpc.embed.endpoint,
+                agent_grpc::constants::EMBED,
+            );
+            let mut probe = agent_grpc::client::GrpcEmbed::connect(&ep, cfg.embedder.dimensions)?;
+            probe.verify_dimensions().await?;
+        }
+        Some(crate::metered::embedder(
+            built,
+            metrics.clone(),
+            &cfg.embedder.backend,
+        ))
+    };
+    #[cfg(not(feature = "semantic-search"))]
+    let embedder: Option<Arc<dyn agent_core::Embedder>> = None;
+
+    #[allow(unused_mut)]
+    let mut full_ctx = crate::registry::FactoryCtx::new(&cfg, &metrics)
         .with_provider(&provider)
         .with_tokenizer(tokenizer.as_ref());
+    #[cfg(feature = "semantic-search")]
+    {
+        full_ctx = full_ctx.with_embedder(embedder.as_ref());
+    }
+    let full_ctx = full_ctx;
     let context = crate::metered::context(
         registry
             .build_context(&cfg.agent.context, &full_ctx)
@@ -467,6 +499,9 @@ pub async fn build_agent_with(
         Some(s) => agent.with_scanner(s),
         None => agent,
     };
+    // …and the tokenizer / embedder, for `--serve-tokenizer` / `--serve-embed`.
+    let agent = agent.with_tokenizer_seam(tokenizer.clone());
+    let agent = agent.with_embedder(embedder.clone());
     // Structured output: build the config-selected validator, meter it, attach it.
     #[cfg(feature = "structured")]
     let agent = {
