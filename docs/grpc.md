@@ -167,7 +167,8 @@ hosting the config-selected concrete impl over gRPC (config picks e.g.
 ```
 agent --serve-provider --config gateway.toml        # binds [grpc.provider] listen
 agent --serve-memory   --listen 0.0.0.0:50052       # or override the address
-agent --serve-tools ; agent --serve-context ; agent --serve-policy ; agent --serve-search ; agent --serve-repo
+agent --serve-tools ; agent --serve-context ; agent --serve-policy ; agent --serve-search
+agent --serve-repo ; agent --serve-session
 ```
 
 ### One process, every seam — `--serve-all`

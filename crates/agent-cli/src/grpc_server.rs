@@ -30,6 +30,7 @@ pub enum Seam {
     Policy,
     Search,
     Repo,
+    Session,
 }
 
 /// Every variant, so the table can be checked for completeness.
@@ -41,6 +42,7 @@ const ALL_SEAMS: &[Seam] = &[
     Seam::Policy,
     Seam::Search,
     Seam::Repo,
+    Seam::Session,
 ];
 
 /// The static facts about a seam served as its own process.
@@ -107,6 +109,13 @@ const SEAMS: &[SeamInfo] = &[
         service: "agent.v1.RepoService",
         endpoint: constants::REPO,
     },
+    SeamInfo {
+        seam: Seam::Session,
+        flag: "--serve-session",
+        name: "session",
+        service: "agent.v1.SessionService",
+        endpoint: constants::SESSION,
+    },
 ];
 
 impl Seam {
@@ -157,6 +166,7 @@ impl Seam {
             Seam::Policy => &cfg.grpc.policy.listen,
             Seam::Search => &cfg.grpc.search.listen,
             Seam::Repo => &cfg.grpc.repo.listen,
+            Seam::Session => &cfg.grpc.session.listen,
         }
     }
 }
@@ -230,6 +240,13 @@ fn add_seam_service(router: Router, agent: &Agent, seam: Seam) -> anyhow::Result
         Seam::Repo => match agent.repo() {
             Some(r) => (
                 router.add_service(srv::RepoServiceSvc::new(r).into_server()),
+                true,
+            ),
+            None => (router, false),
+        },
+        Seam::Session => match agent.session_store() {
+            Some(s) => (
+                router.add_service(srv::SessionServiceSvc::new(s).into_server()),
                 true,
             ),
             None => (router, false),
@@ -366,6 +383,7 @@ mod tests {
     #[rstest]
     #[case::positive_provider("--serve-provider", Some(Seam::Provider))]
     #[case::positive_repo("--serve-repo", Some(Seam::Repo))]
+    #[case::positive_session("--serve-session", Some(Seam::Session))]
     #[case::negative_unknown_seam("--serve-nope", None)]
     #[case::negative_not_a_serve_flag("--help", None)]
     #[case::adversarial_empty("", None)]

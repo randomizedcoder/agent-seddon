@@ -565,10 +565,10 @@ Two pieces make this concrete, and land in stages:
 
 - **Shipped now — the wire contract + tracing.** [`agent-proto`](crates/agent-proto)
   is the protobuf mirror of the shared message currency: every type in §4 has a
-  generated twin, **seven** seam traits have a gRPC service today (`Provider`,
+  generated twin, **eight** seam traits have a gRPC service today (`Provider`,
   `ToolService`, `Memory`/`Episodic`/`Semantic`, `ContextService`, `Policy`,
-  `SearchService` — incl. `ListFiles` for index-backed listing — and
-  `RepoService`), and lossless
+  `SearchService` — incl. `ListFiles` for index-backed listing — `RepoService`,
+  and `SessionService`), and lossless
   `From`/`TryFrom` conversions bridge the two (proto depends on core, never the
   reverse — the acyclic graph holds). Everything is **binary protobuf** end to
   end: dynamic `serde_json::Value` fields ride as a custom lossless `JsonValue`

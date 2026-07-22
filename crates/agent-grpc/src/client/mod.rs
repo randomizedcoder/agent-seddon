@@ -23,6 +23,7 @@ mod policy;
 mod provider;
 mod repo;
 mod search;
+mod session;
 mod tools;
 
 pub use context::*;
@@ -31,6 +32,7 @@ pub use policy::*;
 pub use provider::*;
 pub use repo::*;
 pub use search::*;
+pub use session::*;
 pub use tools::*;
 
 /// Wrap a message in a request carrying the caller's trace context.

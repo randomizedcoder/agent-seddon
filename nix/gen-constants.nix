@@ -46,6 +46,7 @@ let
     ${seamConst "POLICY" g.policy}
     ${seamConst "SEARCH" g.search}
     ${seamConst "REPO" g.repo}
+    ${seamConst "SESSION" g.session}
 
     /// The `agent --serve-all` gateway (not a seam — it hosts every seam).
     ${seamConst "GATEWAY" g.gateway}

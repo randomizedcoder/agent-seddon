@@ -1185,6 +1185,54 @@ impl From<pb::RepoStatus> for agent_core::RepoStatus {
     }
 }
 
+// --- SessionStore (checkpoint metadata) ------------------------------------
+
+impl From<agent_core::CheckpointMeta> for pb::SessionCheckpointMeta {
+    fn from(m: agent_core::CheckpointMeta) -> Self {
+        pb::SessionCheckpointMeta {
+            id: m.id,
+            parent: m.parent,
+            branch: m.branch,
+            turn: m.turn,
+            label: m.label,
+            created_ms: m.created_ms,
+        }
+    }
+}
+
+impl From<pb::SessionCheckpointMeta> for agent_core::CheckpointMeta {
+    fn from(m: pb::SessionCheckpointMeta) -> Self {
+        agent_core::CheckpointMeta {
+            id: m.id,
+            parent: m.parent,
+            branch: m.branch,
+            turn: m.turn,
+            label: m.label,
+            created_ms: m.created_ms,
+        }
+    }
+}
+
+impl From<agent_core::CheckpointDiff> for pb::SessionCheckpointDiff {
+    fn from(d: agent_core::CheckpointDiff) -> Self {
+        pb::SessionCheckpointDiff {
+            added: d.added as u64,
+            removed: d.removed as u64,
+        }
+    }
+}
+
+impl From<pb::SessionCheckpointDiff> for agent_core::CheckpointDiff {
+    fn from(d: pb::SessionCheckpointDiff) -> Self {
+        // A hostile/garbled server can send a count past `usize` on a 32-bit
+        // target; saturate rather than wrap into a small number.
+        agent_core::CheckpointDiff {
+            added: usize::try_from(d.added).unwrap_or(usize::MAX),
+            removed: usize::try_from(d.removed).unwrap_or(usize::MAX),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
