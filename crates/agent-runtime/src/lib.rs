@@ -6,6 +6,7 @@ mod config;
 mod context_files;
 #[cfg(feature = "git")]
 mod git;
+pub mod hooks;
 mod metered;
 mod policy;
 mod registry;

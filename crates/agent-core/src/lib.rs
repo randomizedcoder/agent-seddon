@@ -1918,6 +1918,131 @@ pub trait ContextStrategy: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// Seam: Hook (lifecycle observation + intervention)
+// ---------------------------------------------------------------------------
+//
+// The loop is a fixed sequence: assemble → complete → authorize → dispatch →
+// record → compact. Anything cross-cutting that wants to observe or intervene
+// at those points — a tracing sink, a custom guard, a Slack notifier — otherwise
+// has to be baked into the loop or a decorator, and that does not scale.
+//
+// A `Hook` externalizes those five attachment points as a **typed** trait (not
+// an untyped event payload), so a hook is compile-checked against what it
+// actually receives. See parity spec 22 and `docs/components/hooks.md`.
+
+/// What a `pre_tool` hook decided.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HookOutcome {
+    /// Proceed with the call.
+    Continue,
+    /// Refuse the call, with a reason surfaced to the model.
+    Deny(String),
+}
+
+/// What compaction did, for `on_compact`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactionInfo {
+    pub messages_before: usize,
+    pub messages_after: usize,
+    /// Estimated tokens before/after, when the strategy reports them.
+    pub tokens_before: u32,
+    pub tokens_after: u32,
+}
+
+/// Observes — and can intervene in — the agent loop's lifecycle.
+///
+/// Every callback defaults to a no-op, so a hook implements only the points it
+/// cares about. Observation callbacks return nothing: a hook that fails must not
+/// be able to fail the turn. `pre_tool` is the one interventional point.
+#[async_trait]
+pub trait Hook: Send + Sync {
+    /// Hook name, used as a metric/span label.
+    fn name(&self) -> &str;
+
+    /// Start of a turn, before the model is called.
+    async fn pre_turn(&self, _working: &WorkingSet) {}
+
+    /// Before an authorized tool call is dispatched. Returning
+    /// [`HookOutcome::Deny`] refuses the call — the veto point.
+    async fn pre_tool(&self, _call: &ToolCall) -> HookOutcome {
+        HookOutcome::Continue
+    }
+
+    /// After a tool produced an observation.
+    async fn post_tool(&self, _call: &ToolCall, _obs: &Observation) {}
+
+    /// After the assistant message for this turn is recorded.
+    async fn post_turn(&self, _message: &Message) {}
+
+    /// After the context strategy compacted the working set.
+    async fn on_compact(&self, _info: &CompactionInfo) {}
+}
+
+/// An ordered set of hooks.
+///
+/// Order is **the configured order**, and dispatch follows it deterministically,
+/// so a guard can be placed before an observer and results are reproducible.
+#[derive(Default, Clone)]
+pub struct HookRegistry {
+    hooks: Vec<Arc<dyn Hook>>,
+}
+
+impl HookRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn register(&mut self, h: Arc<dyn Hook>) {
+        self.hooks.push(h);
+    }
+    pub fn is_empty(&self) -> bool {
+        self.hooks.is_empty()
+    }
+    pub fn len(&self) -> usize {
+        self.hooks.len()
+    }
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.hooks.iter().map(|h| h.name())
+    }
+
+    pub async fn pre_turn(&self, working: &WorkingSet) {
+        for h in &self.hooks {
+            h.pre_turn(working).await;
+        }
+    }
+
+    /// Run every `pre_tool` hook in order, stopping at the **first** denial.
+    /// First-denial-wins keeps the decision deterministic and avoids running
+    /// later hooks whose side effects would assume the call proceeds.
+    pub async fn pre_tool(&self, call: &ToolCall) -> HookOutcome {
+        for h in &self.hooks {
+            match h.pre_tool(call).await {
+                HookOutcome::Continue => {}
+                deny => return deny,
+            }
+        }
+        HookOutcome::Continue
+    }
+
+    pub async fn post_tool(&self, call: &ToolCall, obs: &Observation) {
+        for h in &self.hooks {
+            h.post_tool(call, obs).await;
+        }
+    }
+
+    pub async fn post_turn(&self, message: &Message) {
+        for h in &self.hooks {
+            h.post_turn(message).await;
+        }
+    }
+
+    pub async fn on_compact(&self, info: &CompactionInfo) {
+        for h in &self.hooks {
+            h.on_compact(info).await;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Supporting seam: CacheStrategy (prompt-cache breakpoint placement)
 // ---------------------------------------------------------------------------
 //

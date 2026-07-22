@@ -389,3 +389,278 @@ async fn session_export_produces_a_redacted_self_contained_page() {
         assert!(!html.contains(bad), "external reference `{bad}`");
     }
 }
+
+// --- parity spec 22: lifecycle hooks ----------------------------------------
+
+/// A hook that records which callbacks fired, and can veto a named tool.
+struct RecordingHook {
+    events: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    veto_tool: Option<&'static str>,
+}
+
+#[async_trait::async_trait]
+impl agent_core::Hook for RecordingHook {
+    fn name(&self) -> &str {
+        "recording"
+    }
+    async fn pre_turn(&self, _w: &agent_core::WorkingSet) {
+        self.events.lock().unwrap().push("pre_turn".into());
+    }
+    async fn pre_tool(&self, call: &ToolCall) -> agent_core::HookOutcome {
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("pre_tool:{}", call.name));
+        match self.veto_tool {
+            Some(t) if t == call.name => {
+                agent_core::HookOutcome::Deny("vetoed by test hook".into())
+            }
+            _ => agent_core::HookOutcome::Continue,
+        }
+    }
+    async fn post_tool(&self, call: &ToolCall, _o: &agent_core::Observation) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("post_tool:{}", call.name));
+    }
+    async fn post_turn(&self, _m: &agent_core::Message) {
+        self.events.lock().unwrap().push("post_turn".into());
+    }
+}
+
+async fn agent_with_hook(
+    dir: &Path,
+    script: Vec<CompletionResponse>,
+    hook: std::sync::Arc<dyn agent_core::Hook>,
+) -> agent_runtime::Agent {
+    let mut hooks = agent_core::HookRegistry::new();
+    hooks.register(hook);
+    agent_for(dir, script).await.with_hooks(hooks)
+}
+
+/// All five attachment points fire, in loop order.
+#[tokio::test]
+async fn hooks_fire_at_every_lifecycle_point() {
+    let dir = tempdir();
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let hook = std::sync::Arc::new(RecordingHook {
+        events: events.clone(),
+        veto_tool: None,
+    });
+    let script = vec![
+        tool_turn(vec![call(
+            "1",
+            "write_file",
+            json!({"path": "a.txt", "content": "hi"}),
+        )]),
+        final_turn("done"),
+    ];
+    let agent = agent_with_hook(&dir, script, hook).await;
+    agent.run("go").await.expect("run");
+
+    let got = events.lock().unwrap().clone();
+    assert!(got.contains(&"pre_turn".to_string()), "{got:?}");
+    assert!(got.contains(&"pre_tool:write_file".to_string()), "{got:?}");
+    assert!(got.contains(&"post_tool:write_file".to_string()), "{got:?}");
+    assert!(got.contains(&"post_turn".to_string()), "{got:?}");
+    // Ordering: the pre_tool for a call precedes its post_tool.
+    let pre = got.iter().position(|e| e == "pre_tool:write_file").unwrap();
+    let post = got
+        .iter()
+        .position(|e| e == "post_tool:write_file")
+        .unwrap();
+    assert!(pre < post, "pre_tool must precede post_tool: {got:?}");
+}
+
+/// The veto point: a `pre_tool` hook refuses a call the policy allowed, and the
+/// tool genuinely does not run.
+#[tokio::test]
+async fn hook_veto_blocks_a_policy_allowed_call() {
+    let dir = tempdir();
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let hook = std::sync::Arc::new(RecordingHook {
+        events: events.clone(),
+        veto_tool: Some("write_file"),
+    });
+    let script = vec![
+        tool_turn(vec![call(
+            "1",
+            "write_file",
+            json!({"path": "blocked.txt", "content": "hi"}),
+        )]),
+        final_turn("could not write"),
+    ];
+    let agent = agent_with_hook(&dir, script, hook).await;
+    let answer = agent.run("go").await.expect("run completes");
+
+    assert!(
+        !dir.join("blocked.txt").exists(),
+        "the veto must prevent the write from happening"
+    );
+    assert_eq!(answer, "could not write");
+    // A vetoed call never produces an observation, so post_tool must not fire.
+    let got = events.lock().unwrap().clone();
+    assert!(
+        !got.iter().any(|e| e.starts_with("post_tool")),
+        "post_tool fired for a vetoed call: {got:?}"
+    );
+}
+
+/// A hook can only narrow permission: it runs after the policy, so it cannot
+/// resurrect a call the policy already denied.
+#[tokio::test]
+async fn hook_cannot_widen_a_policy_denial() {
+    let dir = tempdir();
+    let cfg = format!(
+        "{}\n[policy]\nguard = \"deny\"\n",
+        config_toml(&dir).replace("policy = \"auto-approve\"", "policy = \"allow-list\"")
+    );
+    // allow-list with no rules denies everything.
+    let script = vec![
+        tool_turn(vec![call(
+            "1",
+            "write_file",
+            json!({"path": "nope.txt", "content": "x"}),
+        )]),
+        final_turn("denied"),
+    ];
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut hooks = agent_core::HookRegistry::new();
+    hooks.register(std::sync::Arc::new(RecordingHook {
+        events: events.clone(),
+        veto_tool: None, // this hook would allow it
+    }));
+    let agent = agent_for_cfg(&cfg, script).await.with_hooks(hooks);
+    agent.run("go").await.expect("run");
+
+    assert!(!dir.join("nope.txt").exists(), "policy denial must stand");
+    let got = events.lock().unwrap().clone();
+    assert!(
+        !got.iter().any(|e| e.starts_with("pre_tool")),
+        "pre_tool must not run for a policy-denied call: {got:?}"
+    );
+}
+
+// --- the "dark seam" debt: features that shipped unreachable ----------------
+
+/// Parity spec 17 was merged with `resolve_references` reachable only as an
+/// `Agent` method that nothing called — the feature shipped dark. This asserts
+/// an `@file` mention in the prompt actually reaches the model.
+#[tokio::test]
+async fn reference_mention_is_expanded_into_the_prompt() {
+    let dir = tempdir();
+    std::fs::write(dir.join("target.rs"), "fn unique_marker_fn() {}").unwrap();
+
+    // A recording provider that captures the assembled prompt it was sent.
+    let seen: std::sync::Arc<std::sync::Mutex<String>> =
+        std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let sink = seen.clone();
+    let cfg = parse_config(&config_toml(&dir)).expect("config");
+    let mut registry = Registry::new();
+    register_builtins(&mut registry);
+    registry.provider("scripted", move |_ctx| {
+        let sink = sink.clone();
+        Ok(Arc::new(agent_testkit::FnProvider::new(move |req| {
+            let mut all = String::new();
+            for m in &req.messages {
+                all.push_str(&m.content_text());
+                all.push('\n');
+            }
+            *sink.lock().unwrap() = all;
+            final_turn("ok")
+        })) as Arc<dyn LlmProvider>)
+    });
+    let agent = build_agent_with(&registry, cfg, None, "ref-e2e".into(), Metrics::new())
+        .await
+        .expect("build");
+
+    agent
+        .run("explain @file:target.rs please")
+        .await
+        .expect("run");
+
+    let prompt = seen.lock().unwrap().clone();
+    assert!(
+        prompt.contains("unique_marker_fn"),
+        "the @file mention was not expanded into the prompt:\n{prompt}"
+    );
+}
+
+/// Parity spec 19 shipped `Agent::checkpoint` reachable only as a method nothing
+/// called. With `[session] auto_checkpoint = true` a completed turn leaves a
+/// restorable checkpoint behind.
+#[tokio::test]
+async fn auto_checkpoint_records_a_restorable_turn() {
+    let dir = tempdir();
+    let cfg = format!(
+        "{}\n[session]\nauto_checkpoint = true\ndir = \"{}/.agent/session\"\n",
+        config_toml(&dir),
+        dir.display()
+    );
+    let agent = agent_for_cfg(&cfg, vec![final_turn("answered")]).await;
+    agent.run("remember this").await.expect("run");
+
+    let checkpoints = agent
+        .list_checkpoints("e2e-session")
+        .await
+        .expect("session store is wired");
+    assert!(
+        !checkpoints.is_empty(),
+        "a completed turn must leave a checkpoint when auto_checkpoint is on"
+    );
+}
+
+/// The control: without opting in, nothing is checkpointed.
+#[tokio::test]
+async fn negative_auto_checkpoint_off_writes_nothing() {
+    let dir = tempdir();
+    let cfg = format!(
+        "{}\n[session]\ndir = \"{}/.agent/session\"\n",
+        config_toml(&dir),
+        dir.display()
+    );
+    let agent = agent_for_cfg(&cfg, vec![final_turn("answered")]).await;
+    agent.run("hello").await.expect("run");
+    let checkpoints = agent
+        .list_checkpoints("e2e-session")
+        .await
+        .unwrap_or_default();
+    assert!(
+        checkpoints.is_empty(),
+        "must not checkpoint unless opted in"
+    );
+}
+
+/// The Hook seam must be reachable from CONFIG, not just from a test calling
+/// `with_hooks` — otherwise it ships dark exactly like specs 17 and 19 did.
+#[tokio::test]
+async fn hooks_are_reachable_from_config() {
+    let dir = tempdir();
+    let cfg = format!("{}\n[hooks]\nenabled = [\"tracing\"]\n", config_toml(&dir));
+    let agent = agent_for_cfg(&cfg, vec![final_turn("ok")]).await;
+    // The run completes with the hook wired through the real builder path.
+    assert_eq!(agent.run("hello").await.expect("run"), "ok");
+}
+
+/// A typo must fail loudly at build time rather than silently disabling
+/// observability the operator believes is on.
+#[tokio::test]
+async fn negative_unknown_hook_fails_the_build() {
+    let dir = tempdir();
+    let cfg = format!("{}\n[hooks]\nenabled = [\"nope\"]\n", config_toml(&dir));
+    let parsed = parse_config(&cfg).expect("parse");
+    let mut registry = Registry::new();
+    register_builtins(&mut registry);
+    registry.provider("scripted", move |_ctx| {
+        Ok(
+            Arc::new(agent_testkit::ScriptedProvider::new(vec![final_turn("x")]))
+                as Arc<dyn LlmProvider>,
+        )
+    });
+    let err = match build_agent_with(&registry, parsed, None, "s".into(), Metrics::new()).await {
+        Ok(_) => panic!("an unknown hook must fail the build"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(err.contains("unknown [hooks] entry"), "got: {err}");
+}

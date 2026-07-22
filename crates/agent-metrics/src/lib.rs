@@ -53,6 +53,9 @@ pub struct Metrics {
     // Provider routing (parity spec 25): which target a request went to, and
     // how often the router fell over or skipped an unhealthy candidate. Labels
     // are the configured candidate names — bounded by config, never user input.
+    // Lifecycle hook dispatches (parity spec 22), by hook name and attachment
+    // point. Labels are bounded by config + the fixed point set.
+    hook_dispatches: IntCounterVec,
     route_decisions: IntCounterVec,
     web_searches: IntCounterVec,
     web_search_seconds: HistogramVec,
@@ -207,6 +210,14 @@ impl Metrics {
         let tool_calls = IntCounterVec::new(
             Opts::new("agent_tool_calls_total", "Tool invocations"),
             &["tool", "status"],
+        )
+        .unwrap();
+        let hook_dispatches = IntCounterVec::new(
+            Opts::new(
+                "agent_hook_dispatches_total",
+                "Lifecycle hook dispatches, by hook and attachment point",
+            ),
+            &["hook", "point"],
         )
         .unwrap();
         let route_decisions = IntCounterVec::new(
@@ -603,6 +614,7 @@ impl Metrics {
             Box::new(context_tokens.clone()),
             Box::new(context_messages.clone()),
             Box::new(tool_calls.clone()),
+            Box::new(hook_dispatches.clone()),
             Box::new(route_decisions.clone()),
             Box::new(web_searches.clone()),
             Box::new(web_search_seconds.clone()),
@@ -676,6 +688,7 @@ impl Metrics {
             context_tokens,
             context_messages,
             tool_calls,
+            hook_dispatches,
             route_decisions,
             web_searches,
             web_search_seconds,
@@ -777,6 +790,10 @@ impl Metrics {
     /// Latency of one content scan.
     pub fn on_scan(&self, seconds: f64) {
         self.scan_seconds.observe(seconds);
+    }
+    /// One lifecycle hook dispatch (parity spec 22).
+    pub fn on_hook(&self, hook: &str, point: &str) {
+        self.hook_dispatches.with_label_values(&[hook, point]).inc();
     }
     /// One router decision: `routed` / `fellover` / `skipped_unhealthy` /
     /// `exhausted`, by target (parity spec 25).
