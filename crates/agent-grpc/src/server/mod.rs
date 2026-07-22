@@ -27,6 +27,7 @@ mod policy;
 mod provider;
 mod repo;
 mod search;
+mod session;
 mod tools;
 
 pub use context::*;
@@ -36,6 +37,7 @@ pub use policy::*;
 pub use provider::*;
 pub use repo::*;
 pub use search::*;
+pub use session::*;
 pub use tools::*;
 
 /// Build a per-call span parented on the caller's extracted trace context.

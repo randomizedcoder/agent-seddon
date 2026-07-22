@@ -63,6 +63,7 @@ mod descriptor_tests {
             "ContextService",
             "Policy",
             "RepoService",
+            "SessionService",
         ] {
             assert!(
                 services.contains(&expected),

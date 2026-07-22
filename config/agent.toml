@@ -174,6 +174,10 @@ dimensions = 256
 # (immutable JSON objects under `dir`); `dir` empty ⇒
 # <working_dir>/.agent-seddon/session. See docs/components/session.md.
 [session]
+# "file" (a local content-addressed store) or "grpc" (a shared remote store —
+# several agents on one history, handing work between them by checkpoint id, with
+# the immutable objects deduplicating across them). The grpc endpoint comes from
+# [grpc.session] below. See docs/components/session.md.
 backend = "file"
 dir     = ""
 # Checkpoint the working set after each completed turn, so restore/branch/undo
@@ -431,7 +435,8 @@ job         = "agent-seddon"
 # gRPC seam transports. A seam set to `= "grpc"` (e.g. `[agent] provider = "grpc"`)
 # dials `endpoint`; `agent --serve-<seam>` binds `listen`. Both default (when
 # empty/omitted) to 127.0.0.1:<port> using the generated ports (provider 50051,
-# memory 50052, tools 50053, context 50054, policy 50055, search 50056, repo 50057).
+# memory 50052, tools 50053, context 50054, policy 50055, search 50056, repo 50057,
+# session 50058).
 # Use `unix:/path` for a same-host, TCP-bypassing socket. See docs/grpc.md.
 #
 # [grpc.provider]
@@ -441,6 +446,8 @@ job         = "agent-seddon"
 # endpoint = "http://tool-worker:50053"               # remote tool worker (opt-in)
 # [grpc.repo]
 # endpoint = "unix:/tmp/agent-seddon/repo.sock"       # a git gateway (backend = "grpc")
+# [grpc.session]
+# endpoint = "http://session-store:50058"             # shared history ([session] backend = "grpc")
 #
 # `agent --serve-all` hosts every enabled seam in ONE process on ONE endpoint,
 # so a same-host deployment isn't one process per seam. Seams whose impl is
@@ -448,7 +455,7 @@ job         = "agent-seddon"
 # the process. Clients still dial the individual seam service by name — the
 # gateway is not itself a seam, so only `listen` is meaningful here.
 # [grpc.gateway]
-# listen = "unix:/tmp/agent-seddon/gateway.sock"      # default 127.0.0.1:50058
+# listen = "unix:/tmp/agent-seddon/gateway.sock"      # default 127.0.0.1:50100
 #
 # Every seam process also serves the standard `grpc.health.v1.Health` service, so
 # a k8s `grpc` probe or any off-the-shelf balancer can check it with no

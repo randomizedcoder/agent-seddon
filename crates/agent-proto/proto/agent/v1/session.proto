@@ -1,0 +1,90 @@
+// The `SessionStore` seam over gRPC — content-addressed conversation history
+// (checkpoint / branch / undo / fork) as a service.
+//
+// Distributing this is the point of the seam rather than an afterthought: several
+// agents sharing one store can hand work between them by id, and because
+// checkpoints are immutable and content-addressed, a shared store dedups across
+// agents for free. `WorkingSet` rides on the shared `common.proto` currency.
+syntax = "proto3";
+
+package agent.v1;
+
+import "agent/v1/common.proto";
+
+service SessionService {
+  // Append an immutable checkpoint; same content + parent + label ⇒ same id.
+  rpc Checkpoint(SessionCheckpointRequest) returns (SessionCheckpointRef);
+  // The branch tree: every checkpoint reachable from any head.
+  rpc List(SessionRef) returns (SessionCheckpointList);
+  // Rehydrate the working set stored at an id.
+  rpc Restore(SessionCheckpointRef) returns (WorkingSet);
+  // Create a new branch head off a checkpoint (and switch to it).
+  rpc Branch(SessionBranchRequest) returns (SessionBranchResponse);
+  // Move the current head back n turns; returns the new head id.
+  rpc Undo(SessionUndoRequest) returns (SessionCheckpointRef);
+  // Fork into an independent session sharing the immutable objects.
+  rpc Fork(SessionRef) returns (SessionRef);
+  // The message/turn delta between two checkpoints.
+  rpc Diff(SessionDiffRequest) returns (SessionCheckpointDiff);
+  // GC checkpoints unreachable from any live head; returns the count reclaimed.
+  rpc Prune(SessionRef) returns (SessionPruneResponse);
+}
+
+// A content-addressed checkpoint id.
+message SessionCheckpointRef {
+  string id = 1;
+}
+
+// A session id.
+message SessionRef {
+  string session = 1;
+}
+
+message SessionCheckpointRequest {
+  string session = 1;
+  WorkingSet working = 2;
+  string label = 3;
+}
+
+// One node in the branch tree.
+message SessionCheckpointMeta {
+  string id = 1;
+  // Absent for a root checkpoint.
+  optional string parent = 2;
+  string branch = 3;
+  uint32 turn = 4;
+  string label = 5;
+  uint64 created_ms = 6;
+}
+
+message SessionCheckpointList {
+  repeated SessionCheckpointMeta checkpoints = 1;
+}
+
+message SessionBranchRequest {
+  string session = 1;
+  string from = 2;
+  string name = 3;
+}
+
+message SessionBranchResponse {}
+
+message SessionUndoRequest {
+  string session = 1;
+  uint32 n = 2;
+}
+
+message SessionDiffRequest {
+  string a = 1;
+  string b = 2;
+}
+
+// The delta of `b` relative to `a`.
+message SessionCheckpointDiff {
+  uint64 added = 1;
+  uint64 removed = 2;
+}
+
+message SessionPruneResponse {
+  uint64 reclaimed = 1;
+}

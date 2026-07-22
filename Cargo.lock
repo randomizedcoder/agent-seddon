@@ -136,6 +136,7 @@ dependencies = [
  "agent-core",
  "agent-proto",
  "agent-retry",
+ "agent-session",
  "agent-testkit",
  "agent-tools",
  "async-trait",

@@ -29,6 +29,9 @@ opentelemetry = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 
 [dev-dependencies]
+# The real session store, so the round-trip asserts the store's own properties
+# (content-addressed dedup, undo-as-pointer-move) across the wire, not a double.
+agent-session = { workspace = true, features = ["session-file"] }
 agent-testkit = { workspace = true }
 # A real built-in tool, to prove a feature tool (not just EchoTool) roundtrips over
 # the ToolService seam. Only the patch tool is compiled in.

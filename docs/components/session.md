@@ -55,10 +55,48 @@ none expose it as a swappable, metered, span-traced seam. agent-seddon does.
   gRPC paths are I/O-bound and not benched.
 - **Leak:** `tests/leak.rs` runs repeated checkpoints under dhat.
 
+## Over gRPC — a shared history
+
+`[session] backend = "grpc"` points the store at a remote `SessionService`
+(`agent --serve-session`, default `127.0.0.1:50058`). This is the seam where
+distribution buys something structural rather than merely being possible:
+checkpoints are **immutable and content-addressed**, so several agents pointed at
+one store share objects, hand work to each other by checkpoint id, and dedup
+between themselves for free.
+
+```toml
+[session]
+backend = "grpc"
+[grpc.session]
+endpoint = "http://session-store:50058"
+```
+
+### Which dedup you actually get
+
+An id hashes content + **parent** + label. So:
+
+- Two sessions at the same point in their history (both parentless, say)
+  checkpointing the same content land on **the same id** — that is the cross-agent
+  dedup above, and it is asserted over the wire.
+- Two *consecutive* checkpoints in one session do **not** collapse, because the
+  first moved the head and so became the second's parent.
+
+> That distinction is load-bearing, not trivia. It is why the gRPC client does
+> **not** retry `checkpoint`: if a response is lost after the server committed,
+> the retry hashes against the *new* head and appends a second node with identical
+> content instead of collapsing onto the first — silently doubling history on a
+> flaky link. `undo` and `fork` are not retried either (neither is idempotent).
+> Only the pure reads — `list`, `restore`, `diff` — and `prune` are.
+
+### Failure semantic: hard
+
+A transport failure surfaces as `Err`, never as a silently-missing checkpoint. A
+`checkpoint` that quietly no-ops loses work the user believes is saved, and a
+`restore` that quietly returns an empty working set is worse than an error — it
+looks like a successful restore of nothing.
+
 ## Deferred (staged like the prior seams)
 
-- The `SessionService` gRPC (`agent --serve-session`, reflection) so a `= "grpc"`
-  client can time-travel a remote session.
 - A **`RepoBackend`-backed** impl (dedup via real git objects, reusing the git
   seam's object DB) as a second, capability-equivalent backend.
 - **Loop auto-checkpoint** (a checkpoint each turn) + coupling `undo`/`rollback` to

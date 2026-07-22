@@ -476,7 +476,19 @@ pub async fn build_agent_with(
                 };
                 Arc::new(agent_session::FileSessionStore::new(dir))
             }
-            other => anyhow::bail!("unknown [session] backend `{other}` (only `file` is built in)"),
+            // A remote store: several agents sharing one content-addressed
+            // history, handing work between them by checkpoint id.
+            #[cfg(feature = "grpc")]
+            "grpc" => {
+                let ep = crate::registry::grpc_client_endpoint(
+                    &cfg.grpc.session.endpoint,
+                    agent_grpc::constants::SESSION,
+                );
+                Arc::new(agent_grpc::client::GrpcSession::connect(&ep)?)
+            }
+            other => {
+                anyhow::bail!("unknown [session] backend `{other}` (built in: `file`, `grpc`)")
+            }
         };
         agent
             .with_session_store(crate::metered::session(store, metrics.clone()))

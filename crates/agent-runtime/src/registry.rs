@@ -778,7 +778,7 @@ fn search_paths(
 /// Resolve a `[grpc]` client endpoint: the configured string, or a loopback TCP
 /// default on the seam's generated port. Set the config to `unix:/path` for UDS.
 #[cfg(feature = "grpc")]
-fn grpc_client_endpoint(
+pub(crate) fn grpc_client_endpoint(
     configured: &str,
     default: agent_grpc::constants::SeamEndpoint,
 ) -> agent_grpc::Endpoint {
