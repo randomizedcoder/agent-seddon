@@ -143,6 +143,20 @@ impl Agent {
         self.scheduler.clone()
     }
 
+    /// The scheduler as the bare seam, for `agent --serve-scheduler`.
+    ///
+    /// Separate from [`Agent::scheduler`] because driving jobs needs the
+    /// concrete type: `tick_with` takes the executor closure and is deliberately
+    /// NOT on the `Scheduler` trait, since a job's executor is this agent. So a
+    /// remote client can manage the registry (schedule/list/cancel/history) but
+    /// only the process that owns the scheduler can fire its jobs.
+    #[cfg(feature = "scheduler")]
+    pub fn scheduler_seam(&self) -> Option<Arc<dyn agent_core::Scheduler>> {
+        self.scheduler
+            .clone()
+            .map(|s| s as Arc<dyn agent_core::Scheduler>)
+    }
+
     /// Fire every due job once, running each as a fresh headless turn.
     ///
     /// Returns how many ran. The executor is supplied here rather than stored by

@@ -48,6 +48,8 @@ let
     ${seamConst "REPO" g.repo}
     ${seamConst "SESSION" g.session}
     ${seamConst "SCANNER" g.scanner}
+    ${seamConst "REFERENCE" g.reference}
+    ${seamConst "SCHEDULER" g.scheduler}
 
     /// The `agent --serve-all` gateway (not a seam — it hosts every seam).
     ${seamConst "GATEWAY" g.gateway}

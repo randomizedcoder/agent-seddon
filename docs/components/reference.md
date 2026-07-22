@@ -73,6 +73,28 @@ resolve at the editor/CLI edge. agent-seddon resolves a **typed reference graph
 - **Leak:** `agent-reference/tests/leak.rs` runs the parse + `@file`/`@dir` resolve
   path under dhat (allocation budget + live-block assertion).
 
+## Over gRPC — a remote resolver
+
+`[reference] backend = "grpc"` points expansion at a remote `ReferenceService`
+(`agent --serve-reference`, default `127.0.0.1:50060`). A resolver reads the
+workspace, the search index and the network, so hosting it separately lets the
+process that touches those run where the checkout is mounted while the agent
+keeps only the expanded blocks.
+
+```toml
+[reference]
+backend = "grpc"
+[grpc.reference]
+endpoint = "http://repo-worker:50060"
+```
+
+**Failure semantic: degrade, never fail.** `resolve` has no error channel by
+design — one bad `@`-mention must not fail the turn — so an unreachable resolver
+returns no blocks plus a warning, and the prompt is left unexpanded. It
+deliberately does **not** set `blocked`: that flag means "over the hard budget,
+leave the prompt alone *on purpose*", and an outage is not a deliberate refusal.
+Conflating them would hide an outage behind a legitimate-looking result.
+
 ## Deferred (staged like the tokenizer / web / tasks / structured / lsp / sandbox / session seams)
 
 - **The `reference.proto` gRPC service** (`agent --serve-reference`, reflection) so

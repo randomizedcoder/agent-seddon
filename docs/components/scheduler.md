@@ -94,6 +94,25 @@ needs the agent. Rather than working around that with a weak reference or a
 mutable slot, the **executor is passed per tick** (`tick_with`) instead of being
 stored. The cycle simply doesn't form, and the closure needs no `'static`.
 
+## Over gRPC — managed remotely, driven locally
+
+`agent --serve-scheduler` (default `127.0.0.1:50061`) hosts the job registry, so
+a remote client can schedule, list, cancel and read history. That separates
+*holding the jobs* from *running them*, and lets the registry outlive any single
+agent process.
+
+> **There is deliberately no `[scheduler] backend = "grpc"`.** Firing a job needs
+> `tick_with`, which takes the executor closure and is **not** on the `Scheduler`
+> trait — because a job's executor *is* the agent. So a remote registry can be
+> **managed** remotely but only **driven** by the process that owns it. Wiring a
+> config backend anyway would give you a scheduler that accepts jobs and silently
+> never fires them, which is exactly the failure this component's design works
+> hardest to prevent.
+
+Distributed *driving* — claim a due job, run it, report the outcome — is a richer
+protocol than a registry, and is deferred as a feature rather than faked as a
+wiring line.
+
 ## Deferred
 
 - **Durable jobs.** The registry is in-memory, so jobs do not survive a restart.
@@ -101,4 +120,3 @@ stored. The cycle simply doesn't form, and the closure needs no `'static`.
 - **A concurrency ceiling across jobs.** Each job is individually guarded against
   overlap, but N distinct due jobs run sequentially within a tick rather than
   under a bounded pool.
-- **`scheduler.proto` / `--serve-scheduler`**, consistent with specs 11–30.

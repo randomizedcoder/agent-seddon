@@ -1185,6 +1185,132 @@ impl From<pb::RepoStatus> for agent_core::RepoStatus {
     }
 }
 
+// --- ReferenceResolver -----------------------------------------------------
+
+impl From<agent_core::Resolution> for pb::RefResolution {
+    fn from(r: agent_core::Resolution) -> Self {
+        pb::RefResolution {
+            blocks: r.blocks.into_iter().map(Into::into).collect(),
+            warnings: r.warnings,
+            blocked: r.blocked,
+        }
+    }
+}
+
+impl From<pb::RefResolution> for agent_core::Resolution {
+    fn from(r: pb::RefResolution) -> Self {
+        agent_core::Resolution {
+            blocks: r.blocks.into_iter().map(Into::into).collect(),
+            warnings: r.warnings,
+            blocked: r.blocked,
+        }
+    }
+}
+
+// --- Scheduler -------------------------------------------------------------
+
+/// Saturating decode: an unknown wire outcome reads as `Failed` rather than
+/// `Completed`. A garbled history entry must not be reported as a success.
+pub fn sched_outcome_from_i32(v: i32) -> agent_core::RunOutcome {
+    match v {
+        0 => agent_core::RunOutcome::Completed,
+        2 => agent_core::RunOutcome::Skipped,
+        _ => agent_core::RunOutcome::Failed,
+    }
+}
+
+impl From<agent_core::RunOutcome> for pb::SchedRunOutcome {
+    fn from(o: agent_core::RunOutcome) -> Self {
+        match o {
+            agent_core::RunOutcome::Completed => pb::SchedRunOutcome::Completed,
+            agent_core::RunOutcome::Failed => pb::SchedRunOutcome::Failed,
+            agent_core::RunOutcome::Skipped => pb::SchedRunOutcome::Skipped,
+        }
+    }
+}
+
+impl From<agent_core::Schedule> for pb::SchedSchedule {
+    fn from(s: agent_core::Schedule) -> Self {
+        use pb::sched_schedule::Kind;
+        pb::SchedSchedule {
+            kind: Some(match s {
+                agent_core::Schedule::Interval { secs } => Kind::IntervalSecs(secs),
+                agent_core::Schedule::Cron { expr } => Kind::CronExpr(expr),
+                agent_core::Schedule::Once { at_ms } => Kind::OnceAtMs(at_ms),
+            }),
+        }
+    }
+}
+
+impl TryFrom<pb::SchedSchedule> for agent_core::Schedule {
+    type Error = ConvertError;
+    fn try_from(s: pb::SchedSchedule) -> Result<Self, Self::Error> {
+        use pb::sched_schedule::Kind;
+        // An absent kind is a malformed job, not a defaultable one: guessing
+        // (say, "every 0s") would spin, and guessing a far-future one-shot would
+        // silently never fire. Reject it.
+        match s.kind.ok_or(ConvertError::MissingField("schedule.kind"))? {
+            Kind::IntervalSecs(secs) => Ok(agent_core::Schedule::Interval { secs }),
+            Kind::CronExpr(expr) => Ok(agent_core::Schedule::Cron { expr }),
+            Kind::OnceAtMs(at_ms) => Ok(agent_core::Schedule::Once { at_ms }),
+        }
+    }
+}
+
+impl From<agent_core::Job> for pb::SchedJob {
+    fn from(j: agent_core::Job) -> Self {
+        pb::SchedJob {
+            id: j.id,
+            spec: j.spec,
+            schedule: Some(j.schedule.into()),
+            goal: j.goal,
+            next_fire_ms: j.next_fire_ms,
+            enabled: j.enabled,
+        }
+    }
+}
+
+impl TryFrom<pb::SchedJob> for agent_core::Job {
+    type Error = ConvertError;
+    fn try_from(j: pb::SchedJob) -> Result<Self, Self::Error> {
+        Ok(agent_core::Job {
+            id: j.id,
+            spec: j.spec,
+            schedule: j
+                .schedule
+                .ok_or(ConvertError::MissingField("job.schedule"))?
+                .try_into()?,
+            goal: j.goal,
+            next_fire_ms: j.next_fire_ms,
+            enabled: j.enabled,
+        })
+    }
+}
+
+impl From<agent_core::Run> for pb::SchedRun {
+    fn from(r: agent_core::Run) -> Self {
+        pb::SchedRun {
+            job_id: r.job_id,
+            started_ms: r.started_ms,
+            finished_ms: r.finished_ms,
+            outcome: pb::SchedRunOutcome::from(r.outcome) as i32,
+            detail: r.detail,
+        }
+    }
+}
+
+impl From<pb::SchedRun> for agent_core::Run {
+    fn from(r: pb::SchedRun) -> Self {
+        agent_core::Run {
+            job_id: r.job_id,
+            started_ms: r.started_ms,
+            finished_ms: r.finished_ms,
+            outcome: sched_outcome_from_i32(r.outcome),
+            detail: r.detail,
+        }
+    }
+}
+
 // --- Scanner ---------------------------------------------------------------
 
 /// Saturating decode: an unknown wire enum degrades to the least-severe value

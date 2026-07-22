@@ -444,7 +444,7 @@ job         = "agent-seddon"
 # dials `endpoint`; `agent --serve-<seam>` binds `listen`. Both default (when
 # empty/omitted) to 127.0.0.1:<port> using the generated ports (provider 50051,
 # memory 50052, tools 50053, context 50054, policy 50055, search 50056, repo 50057,
-# session 50058, scanner 50059).
+# session 50058, scanner 50059, reference 50060, scheduler 50061).
 # Use `unix:/path` for a same-host, TCP-bypassing socket. See docs/grpc.md.
 #
 # [grpc.provider]
@@ -458,6 +458,10 @@ job         = "agent-seddon"
 # endpoint = "http://session-store:50058"             # shared history ([session] backend = "grpc")
 # [grpc.scanner]
 # endpoint = "http://security:50059"                  # central ruleset ([scanner] rules = ["grpc"])
+# [grpc.reference]
+# endpoint = "http://repo-worker:50060"               # remote @-expansion ([reference] backend = "grpc")
+# [grpc.scheduler]
+# listen   = "unix:/tmp/agent-seddon/scheduler.sock"  # --serve-scheduler (management only; see below)
 #
 # `agent --serve-all` hosts every enabled seam in ONE process on ONE endpoint,
 # so a same-host deployment isn't one process per seam. Seams whose impl is
