@@ -46,6 +46,8 @@ let
     + seamJob "scheduler" g.scheduler.metrics_port
     + seamJob "tokenizer" g.tokenizer.metrics_port
     + seamJob "embed" g.embed.metrics_port
+    + seamJob "web" g.web.metrics_port
+    + seamJob "web-search" g.web_search.metrics_port
     + seamJob "gateway" g.gateway.metrics_port;
 
   configYml = pkgs.writeText "prometheus.yml" (

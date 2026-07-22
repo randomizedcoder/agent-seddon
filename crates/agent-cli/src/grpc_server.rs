@@ -36,6 +36,8 @@ pub enum Seam {
     Scheduler,
     Tokenizer,
     Embed,
+    Web,
+    WebSearch,
 }
 
 /// Every variant, so the table can be checked for completeness.
@@ -53,6 +55,8 @@ const ALL_SEAMS: &[Seam] = &[
     Seam::Scheduler,
     Seam::Tokenizer,
     Seam::Embed,
+    Seam::Web,
+    Seam::WebSearch,
 ];
 
 /// The static facts about a seam served as its own process.
@@ -161,6 +165,20 @@ const SEAMS: &[SeamInfo] = &[
         service: "agent.v1.EmbedService",
         endpoint: constants::EMBED,
     },
+    SeamInfo {
+        seam: Seam::Web,
+        flag: "--serve-web",
+        name: "web",
+        service: "agent.v1.WebService",
+        endpoint: constants::WEB,
+    },
+    SeamInfo {
+        seam: Seam::WebSearch,
+        flag: "--serve-web-search",
+        name: "web-search",
+        service: "agent.v1.WebSearchService",
+        endpoint: constants::WEB_SEARCH,
+    },
 ];
 
 impl Seam {
@@ -217,6 +235,8 @@ impl Seam {
             Seam::Scheduler => &cfg.grpc.scheduler.listen,
             Seam::Tokenizer => &cfg.grpc.tokenizer.listen,
             Seam::Embed => &cfg.grpc.embed.listen,
+            Seam::Web => &cfg.grpc.web.listen,
+            Seam::WebSearch => &cfg.grpc.web_search.listen,
         }
     }
 }
@@ -332,6 +352,20 @@ fn add_seam_service(router: Router, agent: &Agent, seam: Seam) -> anyhow::Result
         Seam::Embed => match agent.embedder() {
             Some(e) => (
                 router.add_service(srv::EmbedServiceSvc::new(e).into_server()),
+                true,
+            ),
+            None => (router, false),
+        },
+        Seam::Web => match agent.web() {
+            Some(w) => (
+                router.add_service(srv::WebServiceSvc::new(w).into_server()),
+                true,
+            ),
+            None => (router, false),
+        },
+        Seam::WebSearch => match agent.web_search() {
+            Some(w) => (
+                router.add_service(srv::WebSearchServiceSvc::new(w).into_server()),
                 true,
             ),
             None => (router, false),
@@ -472,6 +506,7 @@ mod tests {
     #[case::positive_scanner("--serve-scanner", Some(Seam::Scanner))]
     #[case::positive_reference("--serve-reference", Some(Seam::Reference))]
     #[case::positive_embed("--serve-embed", Some(Seam::Embed))]
+    #[case::positive_web_search("--serve-web-search", Some(Seam::WebSearch))]
     #[case::negative_unknown_seam("--serve-nope", None)]
     #[case::negative_not_a_serve_flag("--help", None)]
     #[case::adversarial_empty("", None)]

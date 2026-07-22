@@ -54,6 +54,39 @@ pub async fn build_agent_with(
         metrics.clone(),
         &cfg.agent.provider,
     );
+    // Set when the web_search dispatch is composed below; held for serving.
+    #[allow(unused_assignments, unused_mut)]
+    let mut shared_web_search: Option<Arc<dyn agent_core::WebSearch>> = None;
+
+    // The web backend is built ONCE here and shared by every consumer — the
+    // `web_fetch` tool, the `@url` reference route, and `agent --serve-web`. It
+    // used to be constructed separately per consumer, so the SSRF screen was
+    // configured (identically) two or three times over.
+    #[cfg(feature = "web")]
+    let shared_web: Option<Arc<dyn agent_core::WebBackend>> = {
+        let backend: Arc<dyn agent_core::WebBackend> = match cfg.web.backend.as_str() {
+            "local" => Arc::new(
+                agent_web::LocalWebBackend::new()
+                    .with_ssrf(cfg.web.allow_private, cfg.web.allow_hosts.clone()),
+            ),
+            // A remote egress host: every outbound request leaves from one
+            // process, so the SSRF screen is a property of network position
+            // rather than of each agent's config.
+            #[cfg(feature = "grpc")]
+            "grpc" => {
+                let ep = crate::registry::grpc_client_endpoint(
+                    &cfg.grpc.web.endpoint,
+                    agent_grpc::constants::WEB,
+                );
+                Arc::new(agent_grpc::client::GrpcWeb::connect(&ep)?)
+            }
+            other => anyhow::bail!("unknown [web] backend `{other}` (built in: `local`, `grpc`)"),
+        };
+        Some(crate::metered::web(backend, metrics.clone()))
+    };
+    #[cfg(not(feature = "web"))]
+    let shared_web: Option<Arc<dyn agent_core::WebBackend>> = None;
+
     // The content scanner (parity spec 18) is built ONCE here and shared by every
     // consumer — the `skill_write` and `session_export` tools, the policy guard,
     // and `agent --serve-scanner`. It used to be built per consumer, which made
@@ -137,14 +170,9 @@ pub async fn build_agent_with(
     // is applied by the Policy guard (`[web] allow_private`), not the tool.
     #[cfg(feature = "web")]
     {
-        let backend: Arc<dyn agent_core::WebBackend> = match cfg.web.backend.as_str() {
-            "local" => Arc::new(
-                agent_web::LocalWebBackend::new()
-                    .with_ssrf(cfg.web.allow_private, cfg.web.allow_hosts.clone()),
-            ),
-            other => anyhow::bail!("unknown [web] backend `{other}` (only `local` is built in)"),
-        };
-        let backend = crate::metered::web(backend, metrics.clone());
+        let backend = shared_web
+            .clone()
+            .expect("the web backend is built above when the feature is on");
         let default_timeout = cfg
             .web
             .timeout_secs
@@ -276,8 +304,12 @@ pub async fn build_agent_with(
             cfg.web_search.cache_ttl_secs.saturating_mul(1_000),
             cfg.web_search.cache_max_entries,
         )?;
+        let dispatch = Arc::new(dispatch) as Arc<dyn agent_core::WebSearch>;
+        // Held so `agent --serve-web-search` can host the composed dispatch
+        // (cache + fusion included), not just one backend.
+        shared_web_search = Some(dispatch.clone());
         let tool = Arc::new(agent_tools::WebSearchTool::new(
-            Arc::new(dispatch) as Arc<dyn agent_core::WebSearch>,
+            dispatch,
             cfg.web_search.default_limit,
         ));
         tools.register(crate::metered::tool(tool, metrics.clone()));
@@ -501,6 +533,9 @@ pub async fn build_agent_with(
     };
     // …and the tokenizer / embedder, for `--serve-tokenizer` / `--serve-embed`.
     let agent = agent.with_tokenizer_seam(tokenizer.clone());
+    let agent = agent
+        .with_web(shared_web.clone())
+        .with_web_search(shared_web_search.clone());
     let agent = agent.with_embedder(embedder.clone());
     // Structured output: build the config-selected validator, meter it, attach it.
     #[cfg(feature = "structured")]
@@ -575,12 +610,8 @@ pub async fn build_agent_with(
                         .with_search(search_dispatch.clone() as Arc<dyn agent_core::SearchBackend>);
                 }
                 #[cfg(feature = "web")]
-                {
-                    let web: Arc<dyn agent_core::WebBackend> = Arc::new(
-                        agent_web::LocalWebBackend::new()
-                            .with_ssrf(cfg.web.allow_private, cfg.web.allow_hosts.clone()),
-                    );
-                    r = r.with_web(crate::metered::web(web, metrics.clone()));
+                if let Some(web) = shared_web.clone() {
+                    r = r.with_web(web);
                 }
                 Arc::new(r)
             }

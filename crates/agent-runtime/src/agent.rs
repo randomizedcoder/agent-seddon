@@ -68,6 +68,13 @@ pub struct Agent {
     /// (`agent --serve-tokenizer`); the loop reaches it through the context
     /// strategy's budget calculation.
     tokenizer: Option<Arc<dyn agent_core::Tokenizer>>,
+    /// The web transport, if wired. Held so it can be hosted over gRPC
+    /// (`agent --serve-web`); the loop reaches it through the `web_fetch` tool
+    /// and the `@url` reference route.
+    web: Option<Arc<dyn agent_core::WebBackend>>,
+    /// The composed web-search dispatch (cache + fusion), if wired. Held so
+    /// `agent --serve-web-search` hosts the composite rather than one backend.
+    web_search: Option<Arc<dyn agent_core::WebSearch>>,
     /// The embedder, if wired. Held so it can be hosted over gRPC
     /// (`agent --serve-embed`); the loop reaches it through the vector search
     /// backend.
@@ -128,6 +135,8 @@ impl Agent {
             repo: None,
             scanner: None,
             tokenizer: None,
+            web: None,
+            web_search: None,
             embedder: None,
             #[cfg(feature = "structured")]
             validator: None,
@@ -377,6 +386,28 @@ impl Agent {
     /// Attach the tokenizer so it can be served.
     pub fn with_tokenizer_seam(mut self, t: Option<Arc<dyn agent_core::Tokenizer>>) -> Self {
         self.tokenizer = t;
+        self
+    }
+
+    /// The web transport, if wired (for `agent --serve-web`).
+    pub fn web(&self) -> Option<Arc<dyn agent_core::WebBackend>> {
+        self.web.clone()
+    }
+
+    /// Attach the web transport so it can be served.
+    pub fn with_web(mut self, w: Option<Arc<dyn agent_core::WebBackend>>) -> Self {
+        self.web = w;
+        self
+    }
+
+    /// The composed web-search dispatch, if wired (for `--serve-web-search`).
+    pub fn web_search(&self) -> Option<Arc<dyn agent_core::WebSearch>> {
+        self.web_search.clone()
+    }
+
+    /// Attach the web-search dispatch so it can be served.
+    pub fn with_web_search(mut self, w: Option<Arc<dyn agent_core::WebSearch>>) -> Self {
+        self.web_search = w;
         self
     }
 

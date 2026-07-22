@@ -85,6 +85,16 @@ pub const EMBED: SeamEndpoint = SeamEndpoint {
     uds_path: "/tmp/agent-seddon/embed.sock",
     metrics_port: 9613,
 };
+pub const WEB: SeamEndpoint = SeamEndpoint {
+    tcp_port: 50064,
+    uds_path: "/tmp/agent-seddon/web.sock",
+    metrics_port: 9614,
+};
+pub const WEB_SEARCH: SeamEndpoint = SeamEndpoint {
+    tcp_port: 50065,
+    uds_path: "/tmp/agent-seddon/web-search.sock",
+    metrics_port: 9615,
+};
 
 /// The `agent --serve-all` gateway (not a seam — it hosts every seam).
 pub const GATEWAY: SeamEndpoint = SeamEndpoint {

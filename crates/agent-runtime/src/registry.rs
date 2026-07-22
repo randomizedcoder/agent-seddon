@@ -674,6 +674,17 @@ pub fn register_builtins(r: &mut Registry) {
     // settings and nothing else, so nothing has to be special-cased in the
     // builder — the whole point of `FactoryCtx`.
     #[cfg(feature = "websearch-brave")]
+    // Search behind one process: the API keys live there, so an agent can
+    // search without ever holding one.
+    #[cfg(feature = "grpc")]
+    r.web_search("grpc", |ctx| {
+        let ep = grpc_client_endpoint(
+            &ctx.cfg.grpc.web_search.endpoint,
+            agent_grpc::constants::WEB_SEARCH,
+        );
+        Ok(Arc::new(agent_grpc::client::GrpcWebSearch::connect(&ep)?)
+            as Arc<dyn agent_core::WebSearch>)
+    });
     r.web_search("brave", |ctx| {
         let cfg = &ctx.cfg.web_search;
         Ok(Arc::new(agent_web_search::BraveSearch::new(

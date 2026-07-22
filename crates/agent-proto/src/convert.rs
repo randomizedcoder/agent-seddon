@@ -1185,6 +1185,174 @@ impl From<pb::RepoStatus> for agent_core::RepoStatus {
     }
 }
 
+// --- Web (WebBackend + WebSearch) ------------------------------------------
+
+pub fn web_format_from_i32(v: i32) -> agent_core::WebFormat {
+    match v {
+        1 => agent_core::WebFormat::Text,
+        2 => agent_core::WebFormat::Html,
+        _ => agent_core::WebFormat::Markdown,
+    }
+}
+
+/// Saturating decode: an unknown state reads as `Missing`, the conservative
+/// answer — it means "fetch it", never "serve something stale as fresh".
+pub fn web_cache_state_from_i32(v: i32) -> agent_core::CacheState {
+    match v {
+        1 => agent_core::CacheState::Fresh,
+        2 => agent_core::CacheState::Stale,
+        _ => agent_core::CacheState::Missing,
+    }
+}
+
+impl From<agent_core::WebFormat> for pb::WebFormat {
+    fn from(f: agent_core::WebFormat) -> Self {
+        match f {
+            agent_core::WebFormat::Markdown => pb::WebFormat::Markdown,
+            agent_core::WebFormat::Text => pb::WebFormat::Text,
+            agent_core::WebFormat::Html => pb::WebFormat::Html,
+        }
+    }
+}
+
+impl From<agent_core::CacheState> for pb::WebCacheState {
+    fn from(s: agent_core::CacheState) -> Self {
+        match s {
+            agent_core::CacheState::Missing => pb::WebCacheState::Missing,
+            agent_core::CacheState::Fresh => pb::WebCacheState::Fresh,
+            agent_core::CacheState::Stale => pb::WebCacheState::Stale,
+        }
+    }
+}
+
+impl From<agent_core::WebRequest> for pb::WebFetchRequest {
+    fn from(r: agent_core::WebRequest) -> Self {
+        pb::WebFetchRequest {
+            url: r.url,
+            format: pb::WebFormat::from(r.format) as i32,
+            timeout_secs: r.timeout_secs,
+            max_bytes: r.max_bytes,
+            max_redirects: r.max_redirects,
+        }
+    }
+}
+
+impl From<pb::WebFetchRequest> for agent_core::WebRequest {
+    fn from(r: pb::WebFetchRequest) -> Self {
+        agent_core::WebRequest {
+            url: r.url,
+            format: web_format_from_i32(r.format),
+            timeout_secs: r.timeout_secs,
+            max_bytes: r.max_bytes,
+            max_redirects: r.max_redirects,
+        }
+    }
+}
+
+impl From<agent_core::WebResponse> for pb::WebFetchResponse {
+    fn from(r: agent_core::WebResponse) -> Self {
+        pb::WebFetchResponse {
+            final_url: r.final_url,
+            status: r.status as u32,
+            content_type: r.content_type,
+            format: pb::WebFormat::from(r.format) as i32,
+            body: r.body,
+            bytes: r.bytes,
+        }
+    }
+}
+
+impl From<pb::WebFetchResponse> for agent_core::WebResponse {
+    fn from(r: pb::WebFetchResponse) -> Self {
+        agent_core::WebResponse {
+            final_url: r.final_url,
+            // A status past u16 is a malformed server, not a real HTTP code;
+            // saturate rather than wrapping into a plausible-looking one (a
+            // wrapped 65536 would read as 0, and 65736 as 200 — "success").
+            status: u16::try_from(r.status).unwrap_or(u16::MAX),
+            content_type: r.content_type,
+            format: web_format_from_i32(r.format),
+            body: r.body,
+            bytes: r.bytes,
+        }
+    }
+}
+
+impl From<agent_core::WebQuery> for pb::WebSearchRequest {
+    fn from(q: agent_core::WebQuery) -> Self {
+        pb::WebSearchRequest {
+            text: q.text,
+            limit: q.limit,
+            freshness_days: q.freshness_days,
+            backend: q.backend,
+        }
+    }
+}
+
+impl From<pb::WebSearchRequest> for agent_core::WebQuery {
+    fn from(q: pb::WebSearchRequest) -> Self {
+        agent_core::WebQuery {
+            text: q.text,
+            limit: q.limit,
+            freshness_days: q.freshness_days,
+            backend: q.backend,
+        }
+    }
+}
+
+impl From<agent_core::WebResult> for pb::WebSearchResult {
+    fn from(r: agent_core::WebResult) -> Self {
+        pb::WebSearchResult {
+            url: r.url,
+            title: r.title,
+            snippet: r.snippet,
+            score: r.score,
+            published_ms: r.published_ms,
+        }
+    }
+}
+
+impl From<pb::WebSearchResult> for agent_core::WebResult {
+    fn from(r: pb::WebSearchResult) -> Self {
+        agent_core::WebResult {
+            url: r.url,
+            title: r.title,
+            snippet: r.snippet,
+            // A NaN or out-of-range score scrambles ordering: `partial_cmp`
+            // returns `None`, which collapses to `Equal` and corrupts the whole
+            // sort. Sanitise at the boundary.
+            score: if r.score.is_finite() {
+                r.score.clamp(0.0, 1.0)
+            } else {
+                0.0
+            },
+            published_ms: r.published_ms,
+        }
+    }
+}
+
+impl From<agent_core::WebSearchCapabilities> for pb::WebSearchCapabilities {
+    fn from(c: agent_core::WebSearchCapabilities) -> Self {
+        pb::WebSearchCapabilities {
+            backend: c.backend,
+            scored: c.scored,
+            freshness: c.freshness,
+            max_results: c.max_results,
+        }
+    }
+}
+
+impl From<pb::WebSearchCapabilities> for agent_core::WebSearchCapabilities {
+    fn from(c: pb::WebSearchCapabilities) -> Self {
+        agent_core::WebSearchCapabilities {
+            backend: c.backend,
+            scored: c.scored,
+            freshness: c.freshness,
+            max_results: c.max_results,
+        }
+    }
+}
+
 // --- ReferenceResolver -----------------------------------------------------
 
 impl From<agent_core::Resolution> for pb::RefResolution {

@@ -104,3 +104,39 @@ partial-set bypass.
   `nix/checks/bench.nix`). The transport is I/O-bound → not benched.
 - **Leak:** `tests/leak.rs` runs the fetch→sanitize→truncate path under dhat and
   asserts flat live blocks across iterations.
+
+## Over gRPC — a shared egress host
+
+`[web] backend = "grpc"` routes fetches through a remote `WebService`
+(`agent --serve-web`, default `127.0.0.1:50064`). Every outbound request then
+leaves from **one** process, which makes the SSRF screen a property of *network
+position* rather than of each agent's config — an agent with no egress of its own
+can still fetch, through a host with exactly the reach it should have.
+
+```toml
+[web]
+backend = "grpc"
+[grpc.web]
+endpoint = "http://egress:50064"
+```
+
+### Hosting egress remotely does not make its output trustworthy
+
+The bytes still originate on the open internet, and the gateway itself may be the
+thing misbehaving. So the client screens what comes back:
+
+| Hostile input | Handling | Why |
+|---|---|---|
+| Body over the caller's `max_bytes` | Rejected locally | The cap protects *this* process's memory and context window; it cannot be delegated to the peer it is protecting against |
+| HTTP status past `u16` | Saturates to `u16::MAX` | A wrapped `65736` reads as **`200`** — the model would be told a failed fetch succeeded |
+
+**Failure semantic: hard.** An empty body on failure is indistinguishable from a
+page that is genuinely empty, and the model would reason over the absence as if
+it were evidence.
+
+### One backend, not three
+
+The web backend is now built once and shared between the `web_fetch` tool, the
+`@url` reference route, and `--serve-web`. It used to be constructed per
+consumer, so the SSRF screen was configured (identically) two or three times.
+

@@ -1,0 +1,93 @@
+// The `WebBackend` and `WebSearch` seams over gRPC — the agent's egress.
+//
+// Distributing these puts every outbound request behind one process: search API
+// keys live there rather than in every agent, and the SSRF screen becomes a
+// property of the network position rather than of each agent's config. An agent
+// with no egress of its own can still fetch and search, through a host that has
+// exactly the reach it should.
+//
+// Messages are `Web`-prefixed: the project shares one flat `agent.v1` package,
+// so message names are global (see session.proto for the collision that taught
+// us this).
+syntax = "proto3";
+
+package agent.v1;
+
+service WebService {
+  rpc Fetch(WebFetchRequest) returns (WebFetchResponse);
+}
+
+service WebSearchService {
+  rpc Search(WebSearchRequest) returns (WebSearchResponse);
+  // Whether a query is cached, and how fresh — so a caller can report a cache
+  // hit without paying for the search.
+  rpc Status(WebSearchRequest) returns (WebCacheStatus);
+  rpc Capabilities(WebSearchCapabilitiesRequest) returns (WebSearchCapabilities);
+}
+
+enum WebFormat {
+  WEB_FORMAT_MARKDOWN = 0;
+  WEB_FORMAT_TEXT = 1;
+  WEB_FORMAT_HTML = 2;
+}
+
+message WebFetchRequest {
+  string url = 1;
+  WebFormat format = 2;
+  uint64 timeout_secs = 3;
+  // Reject a body (declared or streamed) larger than this.
+  uint64 max_bytes = 4;
+  uint32 max_redirects = 5;
+}
+
+message WebFetchResponse {
+  string final_url = 1;
+  uint32 status = 2;
+  string content_type = 3;
+  WebFormat format = 4;
+  // The raw decoded body, not yet reduced to `format`.
+  string body = 5;
+  uint64 bytes = 6;
+}
+
+message WebSearchRequest {
+  string text = 1;
+  // 0 ⇒ the backend/config default.
+  uint32 limit = 2;
+  // 0 ⇒ no restriction.
+  uint32 freshness_days = 3;
+  // Per-query backend selector; unknown names fall back to the default.
+  optional string backend = 4;
+}
+
+message WebSearchResult {
+  string url = 1;
+  string title = 2;
+  string snippet = 3;
+  // Relevance in [0,1].
+  float score = 4;
+  optional uint64 published_ms = 5;
+}
+
+message WebSearchResponse {
+  repeated WebSearchResult results = 1;
+}
+
+enum WebCacheState {
+  WEB_CACHE_STATE_MISSING = 0;
+  WEB_CACHE_STATE_FRESH = 1;
+  WEB_CACHE_STATE_STALE = 2;
+}
+
+message WebCacheStatus {
+  WebCacheState state = 1;
+}
+
+message WebSearchCapabilitiesRequest {}
+
+message WebSearchCapabilities {
+  string backend = 1;
+  bool scored = 2;
+  bool freshness = 3;
+  uint32 max_results = 4;
+}

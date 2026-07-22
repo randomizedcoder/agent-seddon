@@ -34,6 +34,7 @@ mod search;
 mod session;
 mod tokenizer;
 mod tools;
+mod web;
 
 pub use context::*;
 pub use embed::*;
@@ -49,6 +50,7 @@ pub use search::*;
 pub use session::*;
 pub use tokenizer::*;
 pub use tools::*;
+pub use web::*;
 
 /// Build a per-call span parented on the caller's extracted trace context.
 pub(crate) fn span(rpc: &'static str, meta: &tonic::metadata::MetadataMap) -> tracing::Span {
