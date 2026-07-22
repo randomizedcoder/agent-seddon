@@ -52,6 +52,8 @@ let
     ${seamConst "SCHEDULER" g.scheduler}
     ${seamConst "TOKENIZER" g.tokenizer}
     ${seamConst "EMBED" g.embed}
+    ${seamConst "WEB" g.web}
+    ${seamConst "WEB_SEARCH" g.web_search}
 
     /// The `agent --serve-all` gateway (not a seam — it hosts every seam).
     ${seamConst "GATEWAY" g.gateway}

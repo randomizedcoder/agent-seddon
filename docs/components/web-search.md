@@ -157,6 +157,33 @@ Rate limits and 5xx go through `agent-retry` (the canonical driver, honouring
 `Retry-After`); other 4xx fail fast. The destination host passes the same `Policy`
 egress screen as `web_fetch`, so an operator can allow/deny search endpoints.
 
+## Over gRPC — the keys stay on the server
+
+`[web_search] backends = ["grpc"]` routes search through a remote
+`WebSearchService` (`agent --serve-web-search`, default `127.0.0.1:50065`), so an
+agent can search **without ever holding an API key**. It composes like any other
+backend, so `backends = ["brave", "grpc"]` fuses a local provider with a remote
+one.
+
+`--serve-web-search` hosts the composed `DispatchWebSearch` — cache and RRF
+fusion included — not a single backend, so a remote caller gets the same
+behaviour the local tool does.
+
+### The remote is not trusted more than a search provider is
+
+| Hostile input | Handling | Why |
+|---|---|---|
+| `NaN` or out-of-`[0,1]` score | Sanitised at the boundary | A `NaN` makes `partial_cmp` return `None`, which collapses to `Equal` and corrupts the **entire** ranking — not just that row |
+| More results than `limit` | Truncated locally | The limit is what stops a result set swamping the context window |
+| Unknown cache state | Decodes to `Missing` | The conservative answer: "fetch it", never "serve something stale as fresh" |
+
+`capabilities()` is a sync trait method and cannot round-trip, so the client
+advertises permissively and lets the real backend reject what it cannot serve —
+claiming *less* would suppress queries the remote could have answered.
+
+**Failure semantic: hard.** An empty result set on failure reads to the model as
+"nothing exists about this".
+
 ## Deferred
 
 - **Tavily and Bing backends.** The seam takes them unchanged; Brave and SearXNG

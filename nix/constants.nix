@@ -94,6 +94,16 @@
       socket = "/tmp/agent-seddon/embed.sock";
       metrics_port = 9613;
     };
+    web = {
+      port = 50064;
+      socket = "/tmp/agent-seddon/web.sock";
+      metrics_port = 9614;
+    };
+    web_search = {
+      port = 50065;
+      socket = "/tmp/agent-seddon/web-search.sock";
+      metrics_port = 9615;
+    };
 
     # NOT a seam: the `agent --serve-all` gateway, which hosts every seam's
     # service in one process on one endpoint. A same-host deployment that wants

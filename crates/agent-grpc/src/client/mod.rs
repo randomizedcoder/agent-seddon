@@ -30,6 +30,7 @@ mod search;
 mod session;
 mod tokenizer;
 mod tools;
+mod web;
 
 pub use context::*;
 pub use embed::*;
@@ -44,6 +45,7 @@ pub use search::*;
 pub use session::*;
 pub use tokenizer::*;
 pub use tools::*;
+pub use web::*;
 
 /// Wrap a message in a request carrying the caller's trace context.
 ///

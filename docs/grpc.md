@@ -171,6 +171,7 @@ agent --serve-tools ; agent --serve-context ; agent --serve-policy ; agent --ser
 agent --serve-repo ; agent --serve-session ; agent --serve-scanner
 agent --serve-reference ; agent --serve-scheduler
 agent --serve-tokenizer ; agent --serve-embed
+agent --serve-web ; agent --serve-web-search
 ```
 
 ### One process, every seam — `--serve-all`
