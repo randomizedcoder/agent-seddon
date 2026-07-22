@@ -150,8 +150,29 @@ nix run .#e2e-live
 ```
 
 It runs the real agent on a real model, asks for a C hello world, then compiles
-and runs the result. Point it elsewhere with `AGENT_E2E_BASE_URL`,
-`AGENT_E2E_MODEL` and `AGENT_E2E_API_KEY`.
+and runs the result. Point it at any OpenAI-compatible endpoint:
+
+| Variable | Default | Notes |
+|---|---|---|
+| `AGENT_E2E_BASE_URL` | `http://localhost:11434/v1` | |
+| `AGENT_E2E_MODEL` | `llama3.1:latest` | |
+| `AGENT_E2E_API_KEY` | `ollama` | Required even when ignored |
+| `AGENT_E2E_MAX_TOKENS` | `2048` | **Raise for a reasoning model** — see below |
+| `AGENT_E2E_CONTEXT_WINDOW` | `8192` | Must not exceed what the server serves |
+| `AGENT_E2E_INSECURE_TLS` | `0` | `1` skips certificate verification (self-signed dev endpoints only) |
+
+```sh
+AGENT_E2E_BASE_URL=https://my-endpoint:8000/v1 AGENT_E2E_MODEL=/model \
+AGENT_E2E_API_KEY="$MY_KEY" AGENT_E2E_INSECURE_TLS=1 \
+AGENT_E2E_MAX_TOKENS=8192 AGENT_E2E_CONTEXT_WINDOW=131072 \
+  nix run .#e2e-live
+```
+
+> **Reasoning models need a much larger `max_tokens`.** They spend output tokens
+> on `reasoning_content` *before* writing any answer, so a budget sized for a
+> plain model is consumed entirely by the reasoning and comes back with
+> `finish_reason: length` and empty `content` — which looks like the model
+> ignoring you rather than running out of room. 8192 is a reasonable floor.
 
 The exit codes are split on purpose, because the two failures have different
 owners and merging them makes the result useless:

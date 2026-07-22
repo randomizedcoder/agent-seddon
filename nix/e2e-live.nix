@@ -37,17 +37,35 @@ pkgs.writeShellApplication {
     BASE_URL="''${AGENT_E2E_BASE_URL:-http://localhost:11434/v1}"
     MODEL="''${AGENT_E2E_MODEL:-llama3.1:latest}"
     API_KEY="''${AGENT_E2E_API_KEY:-ollama}"
+    # Reasoning models spend output tokens on `reasoning_content` BEFORE writing
+    # any answer, so a budget sized for a plain model gets consumed entirely by
+    # the reasoning and returns finish_reason=length with empty content. Raise
+    # both for one.
+    MAX_TOKENS="''${AGENT_E2E_MAX_TOKENS:-2048}"
+    CONTEXT_WINDOW="''${AGENT_E2E_CONTEXT_WINDOW:-8192}"
+    # Self-signed dev endpoints only. Skips certificate verification, so only set
+    # it for a server you control on a network you trust.
+    INSECURE_TLS="''${AGENT_E2E_INSECURE_TLS:-0}"
 
     echo "e2e-live: $MODEL at $BASE_URL"
 
+    curl_opts=(-sf -m 10)
+    tls_line=""
+    if [ "$INSECURE_TLS" = "1" ]; then
+      echo "e2e-live: TLS verification DISABLED (AGENT_E2E_INSECURE_TLS=1)"
+      curl_opts+=(-k)
+      tls_line="insecure_tls = true"
+    fi
+
     # Refuse rather than skip. A skip that exits 0 reads as a pass in a log, and
     # the whole point of this tier is that it actually talked to a model.
-    probe="''${BASE_URL%/v1}/api/tags"
-    if ! curl -sf -m 5 "$probe" >/dev/null 2>&1 \
-       && ! curl -sf -m 5 "$BASE_URL/models" >/dev/null 2>&1; then
+    auth=(-H "Authorization: Bearer $API_KEY")
+    if ! curl "''${curl_opts[@]}" "''${auth[@]}" "$BASE_URL/models" >/dev/null 2>&1 \
+       && ! curl "''${curl_opts[@]}" "''${BASE_URL%/v1}/api/tags" >/dev/null 2>&1; then
       echo "FAIL: no model server reachable at $BASE_URL" >&2
       echo "  start one:  ollama serve && ollama pull $MODEL" >&2
-      echo "  or point elsewhere: AGENT_E2E_BASE_URL=... AGENT_E2E_MODEL=... AGENT_E2E_API_KEY=..." >&2
+      echo "  or point elsewhere with AGENT_E2E_BASE_URL / _MODEL / _API_KEY." >&2
+      echo "  a self-signed endpoint also needs AGENT_E2E_INSECURE_TLS=1." >&2
       exit 1
     fi
 
@@ -62,9 +80,9 @@ pkgs.writeShellApplication {
     policy   = "auto-approve"
     working_dir = "$work"
     max_iterations = 10
-    max_tokens = 2048
-    context_window = 8192
-    reserve_output = 2048
+    max_tokens = $MAX_TOKENS
+    context_window = $CONTEXT_WINDOW
+    reserve_output = $MAX_TOKENS
     stream = false
     # Deterministic as the model allows: this is a test, and sampling noise in a
     # small model shows up directly as flaky C.
@@ -76,6 +94,7 @@ pkgs.writeShellApplication {
     model    = "$MODEL"
     api_key  = "$API_KEY"
     max_retries = 2
+    $tls_line
 
     [memory]
     backend       = "file"
