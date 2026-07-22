@@ -9,6 +9,33 @@ provider's on-the-wire format. Selected by `[agent] provider`.
   vLLM, Ollama, OpenAI), `anthropic` (native Messages API)
 - **Cargo features:** `provider-openai-compat` (default), `provider-anthropic`
 
+## Configuring an endpoint
+
+```toml
+[provider]
+base_url = "http://localhost:11434/v1"   # Ollama's OpenAI-compatible endpoint
+model    = "llama3.1:latest"
+api_key  = "ollama"
+```
+
+Three things bite people, in the order they hit them:
+
+- **A key is always required.** Resolution is `api_key` (inline) > `api_key_env` >
+  `api_key_file`, and if all three are empty the build fails with *"no API key"* —
+  even for a local server that ignores it. Pass a placeholder.
+- **The model must support tool calling.** The loop cannot act without it. The
+  symptom of a model that lacks it is an agent that answers in prose and never
+  touches a file. `qwen2.5-coder`, `llama3.1` and `mistral-nemo` work; many small
+  models do not.
+- **`[agent] context_window` must match the model**, not the largest model you
+  once used. It is the budget compaction works against, so overstating it means
+  the request overflows the real window rather than being compacted.
+
+`insecure_tls = true` skips TLS certificate verification. It is **off by default**
+and should stay off: it disables the check that the endpoint is who it claims to
+be, so it is only defensible for a self-signed development endpoint you control
+and reach over a trusted network. Prefer trusting the CA.
+
 ## The trait
 
 ```rust

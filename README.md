@@ -21,7 +21,7 @@ does something, you should be able to say which component did it, read the metri
 it emitted and the span it opened, and replace that component without forking the
 project.
 
-It is a single-author experimental project. There are 1,669 tests and a nine-target
+It is a single-author experimental project. There are 1,692 tests and a nine-target
 `nix flake check` gate — but **no CI**: the gate runs locally, by hand, so take the
 claims below as things you can verify yourself rather than things a badge asserts.
 
@@ -103,16 +103,27 @@ beyond this project.
 Toolchain, `protoc` and dev tools all come from the flake — nothing to install on
 the host.
 
+The shipped config targets a local [Ollama](https://ollama.com), so there is no
+account and no key to obtain:
+
 ```sh
+ollama pull llama3.1:latest                   # a model that really calls tools
 nix develop                                   # dev shell
 cargo build
-cargo run -p agent-cli -- --config config/agent.toml "list the files in this repo"
-cargo run -p agent-cli -- --config config/agent.toml    # no goal ⇒ interactive REPL
+cargo run -p agent-cli -- --config config/local-ollama.toml \
+  "write a hello world program in C called hello.c"
+cargo run -p agent-cli -- --config config/local-ollama.toml   # no goal ⇒ REPL
 ```
 
-Point [`config/agent.toml`](config/agent.toml) at a model and a key first — inline,
-an env var, or a file path. Config, the REPL's slash commands and the runtime state
-layout are in [`docs/operating.md`](docs/operating.md).
+[`config/local-ollama.toml`](config/local-ollama.toml) is the short runnable file;
+[`config/agent.toml`](config/agent.toml) is the annotated reference that shows every
+seam. To use a hosted model instead, point `[provider] base_url`/`model` at it and
+supply a key inline, via an env var, or from a file.
+
+**The model must support tool calling** — the loop cannot do anything without it,
+and the symptom of a model that lacks it is an agent that replies in prose and
+never edits a file. Config, the REPL's slash commands and the runtime state layout
+are in [`docs/operating.md`](docs/operating.md).
 
 ## What it can do
 
@@ -191,10 +202,22 @@ execution or authenticated writes — read the warning there before exposing the
 
 ## How it's kept honest
 
-- **Table-driven tests.** 1,669 tests over 1,096 `#[rstest]` cases, classified by
+- **Table-driven tests.** 1,692 tests over 1,096 `#[rstest]` cases, classified by
   prefix: `positive_`, `negative_`, `corner_`, `boundary_`. For anything reading
   untrusted input, `adversarial_` cases are **mandatory** and must assert the
-  rejection — there are 82 of them.
+  rejection — there are 87 of them.
+- **The binary is tested as a process, not just as a library.** The loop is
+  covered in-process, and separately the shipped `agent` binary is spawned as a
+  subprocess against a scripted OpenAI-compatible server — so argv parsing, the
+  stdout contract, exit codes and the real request/response serialization are
+  covered too. A pty tier reaches the two surfaces a pipe cannot: the REPL's line
+  editor and the policy guard's operator prompt, which hard-denies without reading
+  when stdin is not a terminal.
+- **And against a real model.** `nix run .#e2e-live` runs the whole thing on an
+  actual LLM, has it write a C program, then compiles and runs it. It reports a
+  harness failure and a model-quality failure as different exit codes, because
+  they have different owners. It is opt-in and outside the gate — it needs a
+  network the hermetic checks do not have.
 - **Instruction-count ceilings.** 17 iai-callgrind benchmarks measure deterministic
   instruction counts under valgrind, each with a hard ceiling. A regression fails
   the build like a lint, and raising a ceiling shows up in the diff.

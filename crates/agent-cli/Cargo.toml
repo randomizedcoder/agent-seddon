@@ -31,3 +31,9 @@ async-trait.workspace = true
 agent-mcp.workspace = true
 # Table-driven tests (the seam table's completeness + flag parsing).
 rstest.workspace = true
+
+# Pty-driven CLI tests (tests/repl_pty.rs). Unix-only: it spawns the binary on a
+# real terminal to reach the REPL's line editor and the policy guard's operator
+# prompt, neither of which a pipe can exercise.
+[target.'cfg(unix)'.dev-dependencies]
+rexpect.workspace = true

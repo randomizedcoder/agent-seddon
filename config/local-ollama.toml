@@ -1,0 +1,85 @@
+# Minimal runnable config: agent-seddon against a local Ollama.
+#
+# The point of this file is that it works with nothing but a model pulled —
+# no account, no API key, no network. `config/agent.toml` is the annotated
+# reference that shows every seam; this is the short one to start from.
+#
+#     ollama pull llama3.1:latest
+#     ollama serve                       # if it isn't already running
+#     cargo run -p agent-cli -- --config config/local-ollama.toml \
+#       "write a hello world program in C called hello.c"
+#
+# CHOOSING A MODEL. The loop can do nothing without real tool calling, and
+# `ollama show <model>` listing `tools` under Capabilities is necessary but NOT
+# sufficient — some models advertise it and still emit tool-call-shaped JSON as
+# ordinary prose, so the agent completes with an answer and an empty directory.
+# llama3.1:latest is the default here because it was verified doing the task
+# end to end. qwen2.5-coder:7b advertises `tools` and did NOT work. Test any
+# substitute on a task you can check, rather than trusting the capability list.
+
+[agent]
+provider = "openai-compat"
+context  = "sliding-window"
+# Runs tool calls without asking. The `[policy] guard` below still screens the
+# dangerous ones (rm -rf, writes to .ssh/.env/.git), so this is "unattended for
+# ordinary work, prompt for the scary stuff". Use "interactive" to confirm
+# every single call instead.
+policy   = "auto-approve"
+
+max_iterations = 12
+max_tokens     = 2048
+temperature    = 0.7
+# This is the budget compaction works against, so it must not exceed what the
+# server will actually accept. Ollama serves its OWN `num_ctx` (a few thousand
+# tokens by default) regardless of the model's advertised maximum — llama3.1
+# claims 131072, but you only get that after raising num_ctx (OLLAMA_CONTEXT_LENGTH
+# or a Modelfile). 8192 is deliberately conservative: overstating it means the
+# server silently truncates instead of the agent compacting.
+context_window = 8192
+reserve_output = 2048
+
+stream         = true
+parallel_tools = true
+
+system_prompt = """
+You are a coding agent operating in a terminal working directory. Use the
+provided tools (bash, read_file, write_file, edit, grep, find, ls) to inspect
+and modify files and to run commands. Prefer `edit` over rewriting whole files.
+Work step by step: call a tool, observe the result, then decide the next step.
+When the task is complete, reply with a short plain-text summary and do not call
+any more tools.
+"""
+
+[provider]
+base_url = "http://localhost:11434/v1"
+model    = "llama3.1:latest"
+# A key is required by the config even though Ollama ignores it.
+api_key  = "ollama"
+
+# Screen dangerous commands and writes to sensitive paths, prompting the
+# operator to confirm. A hard deny when stdin is not a TTY, so unattended runs
+# fail safe. This is the default; it is spelled out here because it is the one
+# safety net left on when policy = "auto-approve".
+[policy]
+guard = "prompt"
+
+[memory]
+backend       = "file"
+episodic_path = ".agent/episodic.jsonl"
+semantic_dir  = ".agent/memory"
+recall_limit  = 5
+
+# A deliberately small tool set: the file and shell basics, nothing that needs
+# an index, a network egress path, or a token. Add from config/agent.toml as
+# you need them.
+[tools]
+enabled = ["bash", "read_file", "write_file", "edit", "grep", "find", "ls"]
+
+# Off by default here: indexing a large repo on first run is a slow surprise
+# when you are only trying to check that the agent works.
+[search]
+auto_index = false
+
+[metrics]
+enabled = true
+listen  = "127.0.0.1:9600"

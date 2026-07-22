@@ -6,13 +6,32 @@ see [`README.md`](README.md); for the observability stack see
 
 ## Running
 
+The default configs target a local [Ollama](https://ollama.com), so a fresh clone
+runs with no account and no API key:
+
 ```sh
+ollama pull llama3.1:latest      # a model that really CALLS TOOLS — required
+ollama serve                     # if not already running
+
 cargo build
 # one-shot:
-cargo run -p agent-cli -- --config config/agent.toml "list the files in this repo"
+cargo run -p agent-cli -- --config config/local-ollama.toml "list the files in this repo"
 # interactive REPL (no goal): multi-turn, streaming, Ctrl-D to exit
-cargo run -p agent-cli -- --config config/agent.toml
+cargo run -p agent-cli -- --config config/local-ollama.toml
 ```
+
+Two configs ship, and they differ in purpose rather than backend:
+
+- [`../config/local-ollama.toml`](../config/local-ollama.toml) — minimal and
+  runnable, a small tool set, no indexing on first run. Start here.
+- [`../config/agent.toml`](../config/agent.toml) — the annotated reference: every
+  seam, every knob, with the rationale inline. Copy from it as you need things.
+
+For a hosted model, set `[provider] base_url` and `model` and supply a key. Note
+that **a key is required even when the endpoint ignores it** (Ollama's placeholder
+is `api_key = "ollama"`), and that `[agent] context_window` must match the model
+you actually configured — it is the budget compaction works against. See
+[`components/providers.md`](components/providers.md#configuring-an-endpoint).
 
 The REPL has arrow-key line editing and command history (via `rustyline`, stored in
 `.agent/sessions/.repl_history`); piped input (`printf … | agent`) falls back to
@@ -117,6 +136,40 @@ nix fmt                     # format all .nix files
 `nix flake check` runs nine checks: clippy (`-D warnings`), rustfmt, tests,
 `cargo-audit`, nix-fmt, generated-constant drift, `buf lint`, `buf breaking`, and
 the bench + leak suites ([`benchmarking.md`](benchmarking.md)).
+
+### Does it actually work? (`nix run .#e2e-live`)
+
+The gate proves the binary, the wire format and the tool path against a
+*scripted* server ([`crates/agent-cli/tests/cli_e2e.rs`](../crates/agent-cli/tests/cli_e2e.rs)).
+It cannot prove a real model can drive them, because the check sandbox has no
+network. That is what this app is for:
+
+```sh
+ollama serve && ollama pull llama3.1:latest
+nix run .#e2e-live
+```
+
+It runs the real agent on a real model, asks for a C hello world, then compiles
+and runs the result. Point it elsewhere with `AGENT_E2E_BASE_URL`,
+`AGENT_E2E_MODEL` and `AGENT_E2E_API_KEY`.
+
+The exit codes are split on purpose, because the two failures have different
+owners and merging them makes the result useless:
+
+| Exit | Meaning |
+|:--:|---|
+| `0` | The agent ran the task **and** the program compiles and prints a greeting. |
+| `1` | **Harness failure** — the agent errored, called no tool, or wrote no file. Our bug. It dumps the agent's stderr and `.agent/episodic.jsonl`, which is the record of what it actually did. |
+| `2` | **Model-quality failure** — the agent worked, but the generated C does not compile. Not our bug, but not hidden either. |
+
+If no model server is reachable it **fails** rather than skipping: a skip that
+exits 0 reads as a pass, and the entire point of this tier is that it really
+talked to a model.
+
+> Expect exit 2 from small models sometimes. `llama3.1:latest` at
+> `temperature = 0` passed three runs out of three; at the default temperature it
+> emitted `<stdio.h>` and literal `\n` escapes and failed to compile.
+> Sampling noise in an 8B model shows up directly as broken C.
 
 > The toolchain is supplied reproducibly by the flake lock, but is **not pinned to
 > a specific Rust version** — `nix/versions.nix` uses `rust-bin.stable.latest`.

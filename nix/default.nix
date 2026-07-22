@@ -52,7 +52,22 @@ let
   cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
   # The `agent` binary (from crates/agent-cli).
-  agent = craneLib.buildPackage (commonArgs // { inherit cargoArtifacts; });
+  #
+  # `buildPackage` runs the test suite as its check phase, so it needs the same
+  # CLIs the tests shell out to that `checks/test.nix` provides — `git` for
+  # agent-git's fixture repos and `rg` for the `grep` tool's fast path. Without
+  # them `nix build .#agent` and `nix run .#agent` fail on a clean tree even
+  # though `nix flake check` passes, because only the check supplied them.
+  agent = craneLib.buildPackage (
+    commonArgs
+    // {
+      inherit cargoArtifacts;
+      nativeBuildInputs = (commonArgs.nativeBuildInputs or [ ]) ++ [
+        pkgs.git
+        pkgs.ripgrep
+      ];
+    }
+  );
 
   # The generated `crates/agent-grpc/src/constants.rs` (from nix/constants.nix).
   # One derivation, shared by the `gen-constants` app and the `constants-sync`
@@ -89,6 +104,18 @@ let
       fi
       exec cargo bench "$@"
     '';
+  };
+
+  # Drive the real agent against a real model (`nix run .#e2e-live`). Not a check:
+  # it needs a network socket and a running model, which the hermetic check
+  # sandbox has neither of. See nix/e2e-live.nix for the exit-code contract.
+  e2e-live = import ./e2e-live.nix {
+    inherit
+      pkgs
+      lib
+      versions
+      agent
+      ;
   };
 
   # Regenerate the committed buf baseline image after an *intentional* wire change.
@@ -166,6 +193,10 @@ in
     bench = {
       type = "app";
       program = "${bench}/bin/bench";
+    };
+    e2e-live = {
+      type = "app";
+      program = "${e2e-live}/bin/e2e-live";
     };
     buf-image = {
       type = "app";
