@@ -103,16 +103,27 @@ beyond this project.
 Toolchain, `protoc` and dev tools all come from the flake — nothing to install on
 the host.
 
+The shipped config targets a local [Ollama](https://ollama.com), so there is no
+account and no key to obtain:
+
 ```sh
+ollama pull llama3.1:latest                   # a model that really calls tools
 nix develop                                   # dev shell
 cargo build
-cargo run -p agent-cli -- --config config/agent.toml "list the files in this repo"
-cargo run -p agent-cli -- --config config/agent.toml    # no goal ⇒ interactive REPL
+cargo run -p agent-cli -- --config config/local-ollama.toml \
+  "write a hello world program in C called hello.c"
+cargo run -p agent-cli -- --config config/local-ollama.toml   # no goal ⇒ REPL
 ```
 
-Point [`config/agent.toml`](config/agent.toml) at a model and a key first — inline,
-an env var, or a file path. Config, the REPL's slash commands and the runtime state
-layout are in [`docs/operating.md`](docs/operating.md).
+[`config/local-ollama.toml`](config/local-ollama.toml) is the short runnable file;
+[`config/agent.toml`](config/agent.toml) is the annotated reference that shows every
+seam. To use a hosted model instead, point `[provider] base_url`/`model` at it and
+supply a key inline, via an env var, or from a file.
+
+**The model must support tool calling** — the loop cannot do anything without it,
+and the symptom of a model that lacks it is an agent that replies in prose and
+never edits a file. Config, the REPL's slash commands and the runtime state layout
+are in [`docs/operating.md`](docs/operating.md).
 
 ## What it can do
 

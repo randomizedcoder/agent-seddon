@@ -47,8 +47,9 @@ one trace, two services (`agent-loop`, `agent-provider-gateway`).
 
 ## Run it
 
-Prereqs: Docker running; a working provider (the example uses the GLM endpoint from
-`config/agent.toml`).
+Prereqs: Docker running; a working provider (the example inherits the endpoint from
+`config/agent.toml` — a local Ollama by default, see
+[`operating.md`](operating.md#running)).
 
 **1. Start ClickStack** (HyperDX all-in-one: OTLP collector + ClickHouse + UI):
 

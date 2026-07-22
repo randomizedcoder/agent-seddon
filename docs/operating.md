@@ -6,13 +6,32 @@ see [`README.md`](README.md); for the observability stack see
 
 ## Running
 
+The default configs target a local [Ollama](https://ollama.com), so a fresh clone
+runs with no account and no API key:
+
 ```sh
+ollama pull llama3.1:latest      # a model that really CALLS TOOLS — required
+ollama serve                     # if not already running
+
 cargo build
 # one-shot:
-cargo run -p agent-cli -- --config config/agent.toml "list the files in this repo"
+cargo run -p agent-cli -- --config config/local-ollama.toml "list the files in this repo"
 # interactive REPL (no goal): multi-turn, streaming, Ctrl-D to exit
-cargo run -p agent-cli -- --config config/agent.toml
+cargo run -p agent-cli -- --config config/local-ollama.toml
 ```
+
+Two configs ship, and they differ in purpose rather than backend:
+
+- [`../config/local-ollama.toml`](../config/local-ollama.toml) — minimal and
+  runnable, a small tool set, no indexing on first run. Start here.
+- [`../config/agent.toml`](../config/agent.toml) — the annotated reference: every
+  seam, every knob, with the rationale inline. Copy from it as you need things.
+
+For a hosted model, set `[provider] base_url` and `model` and supply a key. Note
+that **a key is required even when the endpoint ignores it** (Ollama's placeholder
+is `api_key = "ollama"`), and that `[agent] context_window` must match the model
+you actually configured — it is the budget compaction works against. See
+[`components/providers.md`](components/providers.md#configuring-an-endpoint).
 
 The REPL has arrow-key line editing and command history (via `rustyline`, stored in
 `.agent/sessions/.repl_history`); piped input (`printf … | agent`) falls back to

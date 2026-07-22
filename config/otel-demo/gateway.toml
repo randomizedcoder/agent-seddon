@@ -2,7 +2,7 @@
 #
 # Run:  agent --serve-provider --config config/otel-demo/gateway.toml
 #
-# Serves the real GLM provider over gRPC on 127.0.0.1:50051 (see [grpc.provider]).
+# Serves a real provider over gRPC on 127.0.0.1:50051 (see [grpc.provider]).
 # The loop process (loop.toml) dials it with provider = "grpc". Both export OTLP
 # traces to the ClickStack collector under distinct service names, so one trace
 # spans both processes.
@@ -11,17 +11,17 @@
 provider = "openai-compat"   # the concrete provider this gateway exposes
 context  = "sliding-window"
 policy   = "auto-approve"
-max_tokens     = 8192
+max_tokens     = 2048
 temperature    = 0.7
-context_window = 131072
+context_window = 8192
 stream         = true
 
-# The real model endpoint (copied from config/agent.toml).
+# The real model endpoint (same defaults as config/agent.toml — point this at
+# whatever you actually run; a local Ollama needs no key beyond a placeholder).
 [provider]
-base_url     = "https://213.173.96.56:8000/v1"
-model        = "/model"
-api_key_file = "~/Downloads/runpod/glm/glm-api-key"
-insecure_tls = true
+base_url = "http://localhost:11434/v1"
+model    = "llama3.1:latest"
+api_key  = "ollama"
 
 # Bind address for `--serve-provider` (defaults to 127.0.0.1:50051 anyway).
 [grpc.provider]
