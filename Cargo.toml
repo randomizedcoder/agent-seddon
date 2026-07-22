@@ -86,6 +86,12 @@ uuid = { version = "1", features = ["v4"] }
 prometheus = { version = "0.13", default-features = false }
 tiny_http = "0.12"
 
+# Drives the CLI through a real pty in tests. Needed because the REPL's line
+# editor and the policy guard's operator prompt are both tty-only: the guard
+# hard-denies without reading a byte when stdin is not a terminal, so a pipe can
+# never reach that code. Unix-only, and used only as a dev-dependency.
+rexpect = "0.7"
+
 # gRPC / protobuf — the inter-component wire contracts (see crates/agent-proto).
 # `tonic-build` invokes `protoc` at build time (supplied by the nix dev shell /
 # crane; `PROTOC` env in nix/default.nix).

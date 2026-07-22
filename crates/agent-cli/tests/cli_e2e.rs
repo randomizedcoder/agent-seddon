@@ -384,6 +384,38 @@ fn adversarial_absolute_path_outside_workspace_is_refused() {
     );
 }
 
+/// **Adversarial.** Off a terminal, the policy guard must hard-deny a flagged
+/// call rather than prompt — there is no operator to answer, and under
+/// `--serve-mcp` stdin carries the JSON-RPC protocol, so reading it would corrupt
+/// the stream.
+///
+/// This is the piped counterpart to `repl_pty.rs`, which drives the *approval*
+/// path on a real terminal. Together they pin both sides of the tty branch in
+/// `agent-runtime/src/policy.rs`; neither test can reach the other's case.
+#[test]
+fn adversarial_guard_denies_without_prompting_when_stdin_is_not_a_tty() {
+    let ws = TempWorkspace::new("guardpiped");
+    let llm = FakeLlm::start(vec![
+        tool(
+            "write_file",
+            json!({ "path": ".env", "content": "SECRET=1\n" }),
+        ),
+        text("was denied"),
+    ]);
+    let cfg = write_config(&ws, llm.base_url(), "\n[policy]\nguard = \"prompt\"\n");
+
+    let (_code, stdout, _err) = run_agent(&cfg, &ws, &["write the env file"]);
+
+    assert!(
+        !ws.path(".env").exists(),
+        "a flagged call must be denied outright when there is no operator"
+    );
+    assert!(
+        !stdout.contains("allow this call?"),
+        "the guard must not prompt into a pipe nobody can answer, got:\n{stdout}"
+    );
+}
+
 /// **Adversarial.** A hostile `content` must be written as data, never
 /// interpreted — and the double JSON-string encoding of `arguments` is exactly
 /// where a quoting bug would turn content into structure.
