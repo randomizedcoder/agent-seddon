@@ -42,6 +42,7 @@ pub enum Seam {
     Pty,
     Forge,
     Tasks,
+    Lsp,
 }
 
 /// Every variant, so the table can be checked for completeness.
@@ -65,6 +66,7 @@ const ALL_SEAMS: &[Seam] = &[
     Seam::Pty,
     Seam::Forge,
     Seam::Tasks,
+    Seam::Lsp,
 ];
 
 /// The static facts about a seam served as its own process.
@@ -215,6 +217,13 @@ const SEAMS: &[SeamInfo] = &[
         service: "agent.v1.TaskService",
         endpoint: constants::TASKS,
     },
+    SeamInfo {
+        seam: Seam::Lsp,
+        flag: "--serve-lsp",
+        name: "lsp",
+        service: "agent.v1.LspService",
+        endpoint: constants::LSP,
+    },
 ];
 
 impl Seam {
@@ -277,6 +286,7 @@ impl Seam {
             Seam::Pty => &cfg.grpc.pty.listen,
             Seam::Forge => &cfg.grpc.forge.listen,
             Seam::Tasks => &cfg.grpc.tasks.listen,
+            Seam::Lsp => &cfg.grpc.lsp.listen,
         }
     }
 }
@@ -438,6 +448,13 @@ fn add_seam_service(router: Router, agent: &Agent, seam: Seam) -> anyhow::Result
             ),
             None => (router, false),
         },
+        Seam::Lsp => match agent.lsp() {
+            Some(l) => (
+                router.add_service(srv::LspServiceSvc::new(l).into_server()),
+                true,
+            ),
+            None => (router, false),
+        },
     })
 }
 
@@ -577,6 +594,7 @@ mod tests {
     #[case::positive_web_search("--serve-web-search", Some(Seam::WebSearch))]
     #[case::positive_sandbox("--serve-sandbox", Some(Seam::Sandbox))]
     #[case::positive_forge("--serve-forge", Some(Seam::Forge))]
+    #[case::positive_lsp("--serve-lsp", Some(Seam::Lsp))]
     #[case::negative_unknown_seam("--serve-nope", None)]
     #[case::negative_not_a_serve_flag("--help", None)]
     #[case::adversarial_empty("", None)]

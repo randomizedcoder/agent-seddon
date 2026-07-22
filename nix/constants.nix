@@ -134,6 +134,11 @@
       socket = "/tmp/agent-seddon/tasks.sock";
       metrics_port = 9619;
     };
+    lsp = {
+      port = 50070;
+      socket = "/tmp/agent-seddon/lsp.sock";
+      metrics_port = 9620;
+    };
 
     # NOT a seam: the `agent --serve-all` gateway, which hosts every seam's
     # service in one process on one endpoint. A same-host deployment that wants

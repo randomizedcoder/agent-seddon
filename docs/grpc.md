@@ -174,6 +174,7 @@ agent --serve-tokenizer ; agent --serve-embed
 agent --serve-web ; agent --serve-web-search
 agent --serve-sandbox ; agent --serve-pty      # see the warning below
 agent --serve-forge ; agent --serve-tasks     # forge writes to the platform
+agent --serve-lsp
 ```
 
 ### One process, every seam — `--serve-all`

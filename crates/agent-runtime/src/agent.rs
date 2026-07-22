@@ -87,6 +87,9 @@ pub struct Agent {
     /// The task tracker, if wired. Held so it can be hosted over gRPC
     /// (`agent --serve-tasks`); the loop reaches it through `todo_write`.
     tasks: Option<Arc<dyn agent_core::TaskTracker>>,
+    /// The LSP backend, if wired. Held so it can be hosted over gRPC
+    /// (`agent --serve-lsp`); the loop reaches it through the `lsp` tool.
+    lsp: Option<Arc<dyn agent_core::LspBackend>>,
     /// The embedder, if wired. Held so it can be hosted over gRPC
     /// (`agent --serve-embed`); the loop reaches it through the vector search
     /// backend.
@@ -153,6 +156,7 @@ impl Agent {
             pty: None,
             forge: None,
             tasks: None,
+            lsp: None,
             embedder: None,
             #[cfg(feature = "structured")]
             validator: None,
@@ -468,6 +472,17 @@ impl Agent {
     /// Attach the task tracker so it can be served.
     pub fn with_tasks(mut self, t: Option<Arc<dyn agent_core::TaskTracker>>) -> Self {
         self.tasks = t;
+        self
+    }
+
+    /// The LSP backend, if wired (for `agent --serve-lsp`).
+    pub fn lsp(&self) -> Option<Arc<dyn agent_core::LspBackend>> {
+        self.lsp.clone()
+    }
+
+    /// Attach the LSP backend so it can be served.
+    pub fn with_lsp(mut self, l: Option<Arc<dyn agent_core::LspBackend>>) -> Self {
+        self.lsp = l;
         self
     }
 

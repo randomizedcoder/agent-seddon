@@ -1185,6 +1185,302 @@ impl From<pb::RepoStatus> for agent_core::RepoStatus {
     }
 }
 
+// --- Lsp -------------------------------------------------------------------
+
+pub fn lsp_method_from_i32(v: i32) -> agent_core::LspMethod {
+    match v {
+        1 => agent_core::LspMethod::Hover,
+        2 => agent_core::LspMethod::Definition,
+        3 => agent_core::LspMethod::References,
+        4 => agent_core::LspMethod::Rename,
+        5 => agent_core::LspMethod::DocumentSymbols,
+        _ => agent_core::LspMethod::Diagnostics,
+    }
+}
+
+/// Saturating decode. An unknown severity reads as `Hint` — the LEAST severe. A
+/// garbled field must not manufacture an `Error` the caller then reports as a
+/// real compile failure.
+pub fn lsp_severity_from_i32(v: i32) -> agent_core::DiagnosticSeverity {
+    match v {
+        0 => agent_core::DiagnosticSeverity::Error,
+        1 => agent_core::DiagnosticSeverity::Warning,
+        2 => agent_core::DiagnosticSeverity::Information,
+        _ => agent_core::DiagnosticSeverity::Hint,
+    }
+}
+
+impl From<agent_core::LspMethod> for pb::LspMethod {
+    fn from(m: agent_core::LspMethod) -> Self {
+        match m {
+            agent_core::LspMethod::Diagnostics => pb::LspMethod::Diagnostics,
+            agent_core::LspMethod::Hover => pb::LspMethod::Hover,
+            agent_core::LspMethod::Definition => pb::LspMethod::Definition,
+            agent_core::LspMethod::References => pb::LspMethod::References,
+            agent_core::LspMethod::Rename => pb::LspMethod::Rename,
+            agent_core::LspMethod::DocumentSymbols => pb::LspMethod::DocumentSymbols,
+        }
+    }
+}
+
+impl From<agent_core::DiagnosticSeverity> for pb::LspDiagnosticSeverity {
+    fn from(s: agent_core::DiagnosticSeverity) -> Self {
+        match s {
+            agent_core::DiagnosticSeverity::Error => pb::LspDiagnosticSeverity::Error,
+            agent_core::DiagnosticSeverity::Warning => pb::LspDiagnosticSeverity::Warning,
+            agent_core::DiagnosticSeverity::Information => pb::LspDiagnosticSeverity::Information,
+            agent_core::DiagnosticSeverity::Hint => pb::LspDiagnosticSeverity::Hint,
+        }
+    }
+}
+
+impl From<agent_core::Position> for pb::LspPosition {
+    fn from(p: agent_core::Position) -> Self {
+        pb::LspPosition {
+            line: p.line,
+            character: p.character,
+        }
+    }
+}
+
+impl From<pb::LspPosition> for agent_core::Position {
+    fn from(p: pb::LspPosition) -> Self {
+        agent_core::Position {
+            line: p.line,
+            character: p.character,
+        }
+    }
+}
+
+impl From<agent_core::Range> for pb::LspRange {
+    fn from(r: agent_core::Range) -> Self {
+        pb::LspRange {
+            start: Some(r.start.into()),
+            end: Some(r.end.into()),
+        }
+    }
+}
+
+impl From<pb::LspRange> for agent_core::Range {
+    fn from(r: pb::LspRange) -> Self {
+        // A missing endpoint defaults to 0:0 rather than erroring: a range is
+        // positional metadata, and losing a whole diagnostic because one bound
+        // was absent would hide the message the caller actually needs.
+        agent_core::Range {
+            start: r.start.map(Into::into).unwrap_or_default(),
+            end: r.end.map(Into::into).unwrap_or_default(),
+        }
+    }
+}
+
+impl From<agent_core::Location> for pb::LspLocation {
+    fn from(l: agent_core::Location) -> Self {
+        pb::LspLocation {
+            uri: l.uri,
+            range: Some(l.range.into()),
+        }
+    }
+}
+
+impl From<pb::LspLocation> for agent_core::Location {
+    fn from(l: pb::LspLocation) -> Self {
+        agent_core::Location {
+            uri: l.uri,
+            range: l.range.map(Into::into).unwrap_or_default(),
+        }
+    }
+}
+
+impl From<agent_core::Diagnostic> for pb::LspDiagnostic {
+    fn from(d: agent_core::Diagnostic) -> Self {
+        pb::LspDiagnostic {
+            range: Some(d.range.into()),
+            severity: pb::LspDiagnosticSeverity::from(d.severity) as i32,
+            message: d.message,
+            code: d.code,
+            source: d.source,
+        }
+    }
+}
+
+impl From<pb::LspDiagnostic> for agent_core::Diagnostic {
+    fn from(d: pb::LspDiagnostic) -> Self {
+        agent_core::Diagnostic {
+            range: d.range.map(Into::into).unwrap_or_default(),
+            severity: lsp_severity_from_i32(d.severity),
+            message: d.message,
+            code: d.code,
+            source: d.source,
+        }
+    }
+}
+
+impl From<agent_core::TextEdit> for pb::LspTextEdit {
+    fn from(e: agent_core::TextEdit) -> Self {
+        pb::LspTextEdit {
+            range: Some(e.range.into()),
+            new_text: e.new_text,
+        }
+    }
+}
+
+impl From<pb::LspTextEdit> for agent_core::TextEdit {
+    fn from(e: pb::LspTextEdit) -> Self {
+        agent_core::TextEdit {
+            range: e.range.map(Into::into).unwrap_or_default(),
+            new_text: e.new_text,
+        }
+    }
+}
+
+impl From<agent_core::WorkspaceEdit> for pb::LspWorkspaceEdit {
+    fn from(w: agent_core::WorkspaceEdit) -> Self {
+        pb::LspWorkspaceEdit {
+            changes: w
+                .changes
+                .into_iter()
+                .map(|(uri, edits)| pb::LspFileEdits {
+                    uri,
+                    edits: edits.into_iter().map(Into::into).collect(),
+                })
+                .collect(),
+        }
+    }
+}
+
+impl From<pb::LspWorkspaceEdit> for agent_core::WorkspaceEdit {
+    fn from(w: pb::LspWorkspaceEdit) -> Self {
+        agent_core::WorkspaceEdit {
+            changes: w
+                .changes
+                .into_iter()
+                .map(|f| (f.uri, f.edits.into_iter().map(Into::into).collect()))
+                .collect(),
+        }
+    }
+}
+
+impl From<agent_core::DocumentSymbol> for pb::LspDocumentSymbol {
+    fn from(s: agent_core::DocumentSymbol) -> Self {
+        pb::LspDocumentSymbol {
+            name: s.name,
+            kind: s.kind,
+            range: Some(s.range.into()),
+        }
+    }
+}
+
+impl From<pb::LspDocumentSymbol> for agent_core::DocumentSymbol {
+    fn from(s: pb::LspDocumentSymbol) -> Self {
+        agent_core::DocumentSymbol {
+            name: s.name,
+            kind: s.kind,
+            range: s.range.map(Into::into).unwrap_or_default(),
+        }
+    }
+}
+
+impl From<agent_core::LspRequest> for pb::LspRequestMsg {
+    fn from(r: agent_core::LspRequest) -> Self {
+        pb::LspRequestMsg {
+            method: pb::LspMethod::from(r.method) as i32,
+            uri: r.uri,
+            position: r.position.map(Into::into),
+            new_name: r.new_name,
+        }
+    }
+}
+
+impl From<pb::LspRequestMsg> for agent_core::LspRequest {
+    fn from(r: pb::LspRequestMsg) -> Self {
+        agent_core::LspRequest {
+            method: lsp_method_from_i32(r.method),
+            uri: r.uri,
+            position: r.position.map(Into::into),
+            new_name: r.new_name,
+        }
+    }
+}
+
+impl From<agent_core::LspResult> for pb::LspResultMsg {
+    fn from(r: agent_core::LspResult) -> Self {
+        use pb::lsp_result_msg::Kind;
+        pb::LspResultMsg {
+            kind: Some(match r {
+                agent_core::LspResult::Diagnostics(d) => Kind::Diagnostics(pb::LspDiagnostics {
+                    items: d.into_iter().map(Into::into).collect(),
+                }),
+                agent_core::LspResult::Hover(h) => Kind::Hover(pb::LspHoverResult {
+                    hover: h.map(|h| pb::LspHover {
+                        contents: h.contents,
+                    }),
+                }),
+                agent_core::LspResult::Locations(l) => Kind::Locations(pb::LspLocations {
+                    items: l.into_iter().map(Into::into).collect(),
+                }),
+                agent_core::LspResult::Symbols(s) => Kind::Symbols(pb::LspSymbols {
+                    items: s.into_iter().map(Into::into).collect(),
+                }),
+                agent_core::LspResult::Rename(w) => Kind::Rename(w.into()),
+            }),
+        }
+    }
+}
+
+impl TryFrom<pb::LspResultMsg> for agent_core::LspResult {
+    type Error = ConvertError;
+    fn try_from(r: pb::LspResultMsg) -> Result<Self, Self::Error> {
+        use pb::lsp_result_msg::Kind;
+        // No default: the variant IS the answer's type. Guessing (say, empty
+        // diagnostics) would report "no problems found" for a request that in
+        // fact returned nothing at all.
+        Ok(
+            match r
+                .kind
+                .ok_or(ConvertError::MissingField("lsp_result.kind"))?
+            {
+                Kind::Diagnostics(d) => agent_core::LspResult::Diagnostics(
+                    d.items.into_iter().map(Into::into).collect(),
+                ),
+                Kind::Hover(h) => {
+                    agent_core::LspResult::Hover(h.hover.map(|h| agent_core::Hover {
+                        contents: h.contents,
+                    }))
+                }
+                Kind::Locations(l) => {
+                    agent_core::LspResult::Locations(l.items.into_iter().map(Into::into).collect())
+                }
+                Kind::Symbols(s) => {
+                    agent_core::LspResult::Symbols(s.items.into_iter().map(Into::into).collect())
+                }
+                Kind::Rename(w) => agent_core::LspResult::Rename(w.into()),
+            },
+        )
+    }
+}
+
+impl From<agent_core::LspCapabilities> for pb::LspCapabilities {
+    fn from(c: agent_core::LspCapabilities) -> Self {
+        pb::LspCapabilities {
+            server: c.server,
+            methods: c
+                .methods
+                .into_iter()
+                .map(|m| pb::LspMethod::from(m) as i32)
+                .collect(),
+        }
+    }
+}
+
+impl From<pb::LspCapabilities> for agent_core::LspCapabilities {
+    fn from(c: pb::LspCapabilities) -> Self {
+        agent_core::LspCapabilities {
+            server: c.server,
+            methods: c.methods.into_iter().map(lsp_method_from_i32).collect(),
+        }
+    }
+}
+
 // --- Forge -----------------------------------------------------------------
 
 /// Saturating decode. An unknown verdict reads as `Comment` — the INERT one. A

@@ -115,6 +115,11 @@ pub const TASKS: SeamEndpoint = SeamEndpoint {
     uds_path: "/tmp/agent-seddon/tasks.sock",
     metrics_port: 9619,
 };
+pub const LSP: SeamEndpoint = SeamEndpoint {
+    tcp_port: 50070,
+    uds_path: "/tmp/agent-seddon/lsp.sock",
+    metrics_port: 9620,
+};
 
 /// The `agent --serve-all` gateway (not a seam — it hosts every seam).
 pub const GATEWAY: SeamEndpoint = SeamEndpoint {
