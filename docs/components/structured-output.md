@@ -62,6 +62,17 @@ machine-consumable agent output. See parity spec
 - **Leak:** `agent-validate/tests/leak.rs` asserts the validate path frees its
   path-strings + error vec across iterations.
 
+## Not distributed over gRPC, deliberately
+
+``OutputSchema``'s primary operation is a **synchronous, pure, local function** — a CPU-bound JSON-schema check.
+A gRPC client cannot implement a sync trait method (there is nowhere to await),
+and making the trait `async` to allow it would add an `async_trait` heap
+allocation to every call while buying nothing: there is no I/O to overlap, no
+credential to isolate, and no hardware or shared state worth a network hop.
+
+The full reasoning — and what to measure if the decision is ever revisited — is
+in [`../grpc.md`](../grpc.md#three-seams-are-deliberately-not-distributed).
+
 ## Deferred (staged like the tokenizer / web / tasks seams)
 
 - **Native provider `response_format` serialization** — providers advertise

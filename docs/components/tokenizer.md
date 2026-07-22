@@ -85,3 +85,13 @@ takes the whole message array in one call.
 context window. Callers already have a heuristic fallback for "no tokenizer
 wired" — an `Err` lets them choose it knowingly.
 
+## Not distributed over gRPC, deliberately
+
+``Prices``'s primary operation is a **synchronous, pure, local function** — a table lookup.
+A gRPC client cannot implement a sync trait method (there is nowhere to await),
+and making the trait `async` to allow it would add an `async_trait` heap
+allocation to every call while buying nothing: there is no I/O to overlap, no
+credential to isolate, and no hardware or shared state worth a network hop.
+
+The full reasoning — and what to measure if the decision is ever revisited — is
+in [`../grpc.md`](../grpc.md#three-seams-are-deliberately-not-distributed).
