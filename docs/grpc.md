@@ -364,7 +364,8 @@ Three things are judgement, not mechanics:
 - **Sync trait methods can't round-trip.** Metadata accessors (`capabilities()`,
   `name()`) are answered from a config-derived value cached at connect time — see
   `GrpcProvider`. A seam whose *primary* operation is sync can't be distributed
-  without making the trait async.
+  without making the trait async — see
+  [Three seams are deliberately not distributed](#three-seams-are-deliberately-not-distributed).
 - **Streams bypass retry.** A partial stream can't replay, so `call_retry` wraps
   unary calls only.
 - **The failure semantic is per-seam and deliberate.** `Policy` fails *safe*
@@ -434,3 +435,76 @@ wiring line, and is deferred as such.
   `EpisodicService` / `SemanticService` (the CLI currently serves the `Memory`
   facade).
 - TLS / mTLS on the TCP transport for cross-host trust.
+
+## Three seams are deliberately not distributed
+
+Twenty seam traits have a gRPC service. Three do not, and will not:
+
+| Seam | Primary operation |
+|---|---|
+| `Prices` | `fn get(&self, model: &str) -> Option<ModelPrices>` |
+| `OutputSchema` | `fn validate(&self, schema: &Value, value: &Value) -> Verdict` |
+| `CacheStrategy` | `fn place(&self, prompt: &PromptShape, caps: &CacheCapabilities) -> CacheMarks` |
+
+All three are `fn`, not `async fn`. A gRPC client physically cannot implement
+them: there is nowhere to await the response. Distributing them therefore is not
+a wiring exercise — it requires making those traits `async`, which ripples
+through every implementation and call site in the workspace.
+
+**That refactor was considered and declined.** The reasoning, recorded here so it
+does not have to be rediscovered:
+
+### It would make them slower, not faster
+
+The intuition that `async` improves performance does not hold for these. Async
+buys throughput when there is **I/O to overlap** — the await lets other work
+proceed while you wait on a socket or a disk. None of these three wait on
+anything:
+
+- `Prices::get` is a map lookup, falling back to a longest-prefix scan of the
+  table when the model id is not an exact row (a dated id matching its family).
+- `OutputSchema::validate` is a pure, CPU-bound JSON-schema check.
+- `CacheStrategy::place` is a pure function over the assembled message list.
+
+Every one is CPU-bound and returns immediately. There is no point at which the
+thread would otherwise be parked.
+
+Meanwhile `#[async_trait]` — which every *async* seam trait here uses, and which
+these would have to adopt — desugars each method to return
+`Pin<Box<dyn Future + Send>>`. That is a **heap allocation on every call**, plus
+a future state machine and an extra indirection. On the exact-hit path of
+`Prices::get` that allocation plausibly costs as much as the lookup it wraps; on
+the heavier paths it is proportionally smaller but still strictly additive. In
+no case does anything get faster, because nothing was ever waiting.
+
+> This is an argument from what `async_trait` provably generates, not from a
+> benchmark. If the decision is ever revisited, measure it rather than re-arguing
+> it: the `iai-callgrind` benches give deterministic instruction counts, and a
+> before/after on a `Prices::get` bench would settle it in minutes. See
+> [`components/benchmarking.md`](components/benchmarking.md).
+
+### And there is nothing to gain by remoting them
+
+Even setting the local cost aside, a network hop is *far* more expensive than the
+work being done. A remote price lookup costs a round trip to save a hashmap
+probe. There is no credential to isolate (the price table is public data), no
+hardware to exploit (no GPU, no warm index), and no shared state worth
+centralising that a config file does not already handle.
+
+Contrast the seams that *are* distributed, each of which had a concrete reason:
+credentials (`Forge`, `WebSearch`), specialised hardware (`Embedder`), a warm
+process worth sharing (`LspBackend`), a host with the right reach or isolation
+(`WebBackend`, `Sandbox`, `Pty`), or genuinely shared state (`SessionStore`,
+`TaskTracker`). These three have none of those.
+
+### What this costs, honestly
+
+"Every capability is an inspectable, distributed seam" is now *nearly* true
+rather than exactly true, and `--serve-all` hosts twenty services rather than
+twenty-three. That is a real loss of uniformity, and it is the price of not
+paying a per-call allocation across the whole workspace to make three pure
+functions remotable for no benefit.
+
+If a future backend changes the premise — a licensed schema validator behind an
+API, or a pricing service with live rates — the calculus changes with it, and the
+trait should go async *then*, for that reason.

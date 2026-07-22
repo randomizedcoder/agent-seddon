@@ -120,6 +120,17 @@ Invariant 2 handles the placement side. The broader trade-off is **not** yet
 automated: compacting to save window space can cost more than it saves if it nukes
 a hot cache. Exposing that to a policy is a follow-up.
 
+## Not distributed over gRPC, deliberately
+
+``CacheStrategy``'s primary operation is a **synchronous, pure, local function** — a pure function over the assembled message list.
+A gRPC client cannot implement a sync trait method (there is nowhere to await),
+and making the trait `async` to allow it would add an `async_trait` heap
+allocation to every call while buying nothing: there is no I/O to overlap, no
+credential to isolate, and no hardware or shared state worth a network hop.
+
+The full reasoning — and what to measure if the decision is ever revisited — is
+in [`../grpc.md`](../grpc.md#three-seams-are-deliberately-not-distributed).
+
 ## Deferred
 
 - **Compaction cost/benefit policy** (above) — the strategy sees `compacted` but
