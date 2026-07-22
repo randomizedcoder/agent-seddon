@@ -441,6 +441,19 @@ job         = "agent-seddon"
 # endpoint = "http://tool-worker:50053"               # remote tool worker (opt-in)
 # [grpc.repo]
 # endpoint = "unix:/tmp/agent-seddon/repo.sock"       # a git gateway (backend = "grpc")
+#
+# `agent --serve-all` hosts every enabled seam in ONE process on ONE endpoint,
+# so a same-host deployment isn't one process per seam. Seams whose impl is
+# disabled in this build/config are skipped with a warning rather than failing
+# the process. Clients still dial the individual seam service by name — the
+# gateway is not itself a seam, so only `listen` is meaningful here.
+# [grpc.gateway]
+# listen = "unix:/tmp/agent-seddon/gateway.sock"      # default 127.0.0.1:50058
+#
+# Every seam process also serves the standard `grpc.health.v1.Health` service, so
+# a k8s `grpc` probe or any off-the-shelf balancer can check it with no
+# agent-specific knowledge. SERVING means "up and this seam's adapter is wired",
+# NOT that the backing impl is healthy — see docs/grpc.md.
 
 # [policy] configures two independent things: the `allow-list` rules and the guard.
 #

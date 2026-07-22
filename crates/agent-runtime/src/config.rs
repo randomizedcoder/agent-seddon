@@ -807,6 +807,11 @@ pub struct GrpcCfg {
     pub search: GrpcSeamCfg,
     #[serde(default)]
     pub repo: GrpcSeamCfg,
+    /// Not a seam: the `agent --serve-all` gateway, which hosts every enabled
+    /// seam's service in one process. Only `listen` is meaningful — a client
+    /// dials an individual seam's service, not the gateway as a whole.
+    #[serde(default)]
+    pub gateway: GrpcSeamCfg,
 }
 
 #[derive(Debug, Default, Deserialize)]

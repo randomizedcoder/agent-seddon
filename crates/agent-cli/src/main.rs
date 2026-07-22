@@ -72,6 +72,9 @@ async fn main() -> Result<()> {
         // port so several co-located seam servers don't collide on `:9600`.
         let listen = match &mode {
             Mode::ServeGrpc(seam, _) => format!("127.0.0.1:{}", seam.metrics_port()),
+            Mode::ServeGrpcAll(_) => {
+                format!("127.0.0.1:{}", agent_grpc::constants::GATEWAY.metrics_port)
+            }
             _ => config.metrics.listen.clone(),
         };
         metrics_server::serve(metrics.clone(), &listen);
@@ -88,6 +91,13 @@ async fn main() -> Result<()> {
         Mode::ServeGrpc(seam, listen) => Some((
             *seam,
             grpc_server::resolve_listen(*seam, &config, listen.as_deref()),
+        )),
+        _ => None,
+    };
+    let serve_grpc_all_listen: Option<agent_grpc::Endpoint> = match &mode {
+        Mode::ServeGrpcAll(listen) => Some(grpc_server::resolve_gateway_listen(
+            &config,
+            listen.as_deref(),
         )),
         _ => None,
     };
@@ -168,6 +178,10 @@ async fn main() -> Result<()> {
             grpc_server::serve(&agent, seam, listen)
                 .await
                 .map(|()| None)
+        }
+        Mode::ServeGrpcAll(..) => {
+            let listen = serve_grpc_all_listen.expect("gateway target resolved above");
+            grpc_server::serve_all(&agent, listen).await.map(|()| None)
         }
     };
 
@@ -272,6 +286,9 @@ enum Mode {
     ServeMcp,
     /// Host one seam over gRPC (`--serve-<seam>`), with an optional listen override.
     ServeGrpc(grpc_server::Seam, Option<String>),
+    /// Host **every** seam over gRPC from one process (`--serve-all`), with an
+    /// optional listen override. Seams whose impl is disabled are skipped.
+    ServeGrpcAll(Option<String>),
     /// Drive the scheduler: tick on an interval, firing due jobs (parity spec 28).
     Scheduler,
 }
@@ -293,6 +310,7 @@ fn parse_args() -> Result<Args> {
     let mut scheduler_mode = false;
     let mut serve_mcp = false;
     let mut serve_grpc: Option<grpc_server::Seam> = None;
+    let mut serve_grpc_all = false;
     let mut listen: Option<String> = None;
     let mut goal_parts: Vec<String> = Vec::new();
 
@@ -311,6 +329,7 @@ fn parse_args() -> Result<Args> {
             }
             "--scheduler" => scheduler_mode = true,
             "--serve-mcp" => serve_mcp = true,
+            "--serve-all" => serve_grpc_all = true,
             "--listen" => {
                 listen = Some(args.next().context("--listen requires an address")?);
             }
@@ -326,8 +345,10 @@ fn parse_args() -> Result<Args> {
                      --resume ID         resume a specific session\n  \
                      --scheduler         drive scheduled jobs (ticks until interrupted)\n  \
                      --serve-mcp         run as an MCP server over stdio (exposes a `run` tool)\n  \
-                     --serve-<seam>      host one seam over gRPC; <seam> = provider|memory|tools|context|policy|search|repo\n  \
-                     --listen ADDR       override the gRPC listen address (host:port or unix:/path)"
+                     --serve-<seam>      host one seam over gRPC; <seam> = {seams}\n  \
+                     --serve-all         host every enabled seam over gRPC from one process\n  \
+                     --listen ADDR       override the gRPC listen address (host:port or unix:/path)",
+                    seams = grpc_server::Seam::flag_names()
                 );
                 std::process::exit(0);
             }
@@ -338,6 +359,8 @@ fn parse_args() -> Result<Args> {
     let goal = goal_parts.join(" ");
     let mode = if scheduler_mode {
         Mode::Scheduler
+    } else if serve_grpc_all {
+        Mode::ServeGrpcAll(listen)
     } else if let Some(seam) = serve_grpc {
         Mode::ServeGrpc(seam, listen)
     } else if serve_mcp {

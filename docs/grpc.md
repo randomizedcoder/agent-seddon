@@ -170,6 +170,67 @@ agent --serve-memory   --listen 0.0.0.0:50052       # or override the address
 agent --serve-tools ; agent --serve-context ; agent --serve-policy ; agent --serve-search ; agent --serve-repo
 ```
 
+### One process, every seam — `--serve-all`
+
+Distributing every seam as its own process means one process, one port and one
+scrape target *per seam*. That is the right shape across hosts and the wrong one
+on a single box, so `--serve-all` hosts **every enabled seam's service on one
+endpoint** (default `127.0.0.1:50058`, `[grpc.gateway] listen` to override):
+
+```
+agent --serve-all --listen unix:/tmp/agent-seddon/gateway.sock
+```
+
+Clients are unchanged: a `= "grpc"` seam dials its own service by name, and
+several seams pointed at the same endpoint just work. Seams whose impl is
+disabled in this build/config are **skipped with a warning** rather than failing
+the process — a gateway that refuses to start because one optional seam is off
+would be useless.
+
+Internally this is the same code path as `--serve-<seam>`: both fold seam
+services onto the router returned by `server::base_router()`, so the one-seam and
+all-seams paths cannot drift.
+
+### Health checking
+
+Every seam process serves the standard **`grpc.health.v1.Health`** service, so a
+k8s `grpc` probe, `grpcurl grpc.health.v1.Health/Check`, or any off-the-shelf
+balancer works with no agent-specific knowledge:
+
+```sh
+grpcurl -plaintext localhost:50055 grpc.health.v1.Health/Check
+grpcurl -plaintext -d '{"service":"agent.v1.Policy"}' localhost:50055 grpc.health.v1.Health/Check
+```
+
+Both the **empty** service name (the protocol's "server as a whole", and what
+k8s' optional `grpcService` field defaults to) and each **fully-qualified** seam
+service name are reported, because probes disagree about which to ask for and
+answering only one makes the other silently fail.
+
+> **What SERVING claims, precisely.** That the process is up and *that seam's
+> adapter is wired* — bound transport, built `Arc<dyn Trait>`, service added to
+> the router. It does **not** claim the backing impl is healthy: no seam trait has
+> a readiness method, so a `--serve-search` with a corrupt index still reports
+> SERVING. The narrow claim is deliberate. Health that quietly means less than a
+> reader assumes is worse than none, because it gets wired into failover.
+> Widening it needs a readiness method on the seam traits; `HealthHandle` is where
+> that signal would be flipped.
+
+A seam that was *not* added never reports SERVING — that is what makes
+`--serve-all`'s skip path safe, and it has a regression test.
+
+> **Reflection lists the schema; health lists what is running.** Every process
+> registers the *whole* descriptor set, so `grpcurl … list` shows every seam
+> service the project defines — including ones this process does not host (and
+> `agent.v1.Episodic` / `agent.v1.Semantic`, which nothing hosts yet). Calling
+> one of those returns `UNIMPLEMENTED`. To ask what is actually being served, use
+> the health service, not reflection.
+>
+> `grpc.health.v1`'s own descriptor is registered alongside the agent's for
+> exactly this reason: a reflection-based client resolves a method through
+> reflection *before* calling it, so a service absent from the descriptor set is
+> invisible to `grpcurl` even while it answers generated clients perfectly well.
+
 ### Streaming & errors
 
 - **Streaming.** `Provider::Stream` is server-streaming; the client maps the tonic
@@ -258,6 +319,51 @@ UDS** (a table-driven `#[case::tcp]` / `#[case::uds]`): each test binds a real
 server on an ephemeral port or a temp-dir socket, connects the client, and asserts
 the round-trip (including Provider server-streaming). `transport.rs` unit-tests
 the `unix:`/TCP endpoint parsing.
+
+`tests/common/mod.rs` holds the harness both test files share — `Transport`,
+`spawn(transport, router)`, and a `TestServer` that shuts down and unlinks its
+socket on drop. It lives there rather than in `agent-testkit` so testkit's other
+consumers don't all pull in `agent-grpc`; a new seam's test file gets a real
+server on both transports for one `use`.
+
+`tests/gateway.rs` covers the transport-level properties rather than any one
+seam: health reporting (serving, draining, and the NOT_FOUND an unhosted service
+must give) and one router hosting several seams at once.
+
+## Adding a seam to the wire
+
+The per-seam work is mechanical; the shared pieces — `transport.rs`, reflection,
+health, trace propagation, the retry classifier, `status_from_error`, and the
+test harness — are written once and are not touched again.
+
+1. `proto/agent/v1/<seam>.proto`, then one line in `agent-proto/build.rs` and one
+   in the descriptor-set test in its `lib.rs`.
+2. `From`/`TryFrom` pairs in `agent-proto/src/convert.rs` (usually the largest
+   part; enums get a saturating `*_from_i32` helper rather than a fallible
+   conversion, so an unknown wire value degrades instead of erroring).
+3. `agent-grpc/src/server/<seam>.rs` — the service impl and its `*_router`.
+4. `agent-grpc/src/client/<seam>.rs` — the core trait implemented over the wire.
+5. A row in `nix/constants.nix` and a line in `nix/gen-constants.nix`, then
+   `nix run .#gen-constants`.
+6. A `GrpcSeamCfg` field in `config.rs`, a `"grpc"` factory in `registry.rs`, and
+   a `SEAMS` row in `agent-cli/src/grpc_server.rs`.
+7. Round-trip tests over both transports.
+
+Additive proto changes (a new service, RPC, or field) pass `buf breaking`
+untouched, so a new seam needs **no** `buf.image.binpb` bump.
+
+Three things are judgement, not mechanics:
+
+- **Sync trait methods can't round-trip.** Metadata accessors (`capabilities()`,
+  `name()`) are answered from a config-derived value cached at connect time — see
+  `GrpcProvider`. A seam whose *primary* operation is sync can't be distributed
+  without making the trait async.
+- **Streams bypass retry.** A partial stream can't replay, so `call_retry` wraps
+  unary calls only.
+- **The failure semantic is per-seam and deliberate.** `Policy` fails *safe*
+  (deny), `Tool` fails *soft* (an error observation), `Search`/`Repo` fail *hard*
+  (`Err`). Copying the wrong one from a neighbouring seam silently changes
+  behaviour under partition — pick it, don't inherit it.
 
 ## Possible follow-ups
 
