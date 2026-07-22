@@ -41,6 +41,8 @@ pub enum Error {
     Tasks(String),
     #[error("scheduler error: {0}")]
     Scheduler(String),
+    #[error("pty error: {0}")]
+    Pty(String),
     #[error("structured output error: {0}")]
     Structured(String),
     #[error("lsp error: {0}")]
@@ -1917,6 +1919,117 @@ pub trait ContextStrategy: Send + Sync {
     /// Compact when over budget. Must be non-destructive w.r.t. episodic memory
     /// (it only trims the working set).
     async fn compact(&self, working: &mut WorkingSet, budget: &TokenBudget) -> Result<()>;
+}
+
+// ---------------------------------------------------------------------------
+// Seam: Pty (interactive terminal sessions)
+// ---------------------------------------------------------------------------
+//
+// `bash` is one-shot: run, capture, exit. Some work is inherently interactive —
+// a REPL, a dev server, an ncurses installer, anything that prompts. A `Pty`
+// session is a *live* terminal the agent holds across turns.
+//
+// That makes it strictly more powerful than `bash`, and therefore more
+// dangerous: it is a **persistent escape hatch**, so `open` is policy-gated and
+// output is bounded. See parity spec 29 and `docs/components/pty.md`.
+
+pub type PtySessionId = String;
+
+/// What to start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PtySpec {
+    pub command: String,
+    pub args: Vec<String>,
+    pub cols: u16,
+    pub rows: u16,
+    /// Working directory; empty ⇒ the agent's.
+    pub cwd: String,
+}
+
+impl Default for PtySpec {
+    fn default() -> Self {
+        Self {
+            command: "bash".into(),
+            args: Vec::new(),
+            // A sane default terminal, so a program that queries the size gets
+            // something reasonable rather than 0x0.
+            cols: 120,
+            rows: 40,
+            cwd: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PtyState {
+    Running,
+    /// The child exited with this status.
+    Exited {
+        code: i32,
+    },
+    /// Closed by the caller.
+    Closed,
+}
+
+impl PtyState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PtyState::Running => "running",
+            PtyState::Exited { .. } => "exited",
+            PtyState::Closed => "closed",
+        }
+    }
+    pub fn is_running(&self) -> bool {
+        matches!(self, PtyState::Running)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PtySessionInfo {
+    pub id: PtySessionId,
+    pub command: String,
+    pub state: PtyState,
+    pub cols: u16,
+    pub rows: u16,
+    pub bytes_out: u64,
+    /// Absolute offset of the first byte still retained. Bytes before this were
+    /// dropped by the rolling buffer, so a cursor below it cannot be replayed.
+    pub first_retained: u64,
+    /// Absolute offset just past the last byte produced.
+    pub next_cursor: u64,
+}
+
+/// A chunk of output plus the cursor to resume from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PtyOutput {
+    pub data: Vec<u8>,
+    /// Cursor to pass to the next read.
+    pub next_cursor: u64,
+    /// Bytes skipped because the rolling buffer had already dropped them —
+    /// surfaced rather than silently omitted, so a caller knows it lost data.
+    pub dropped: u64,
+    pub state: PtyState,
+}
+
+/// Interactive terminal sessions.
+#[async_trait]
+pub trait Pty: Send + Sync {
+    fn name(&self) -> &str;
+    /// Start a session. Policy-gated by the caller.
+    async fn open(&self, spec: &PtySpec) -> Result<PtySessionId>;
+    /// Send input to the session's terminal.
+    async fn write(&self, id: &str, bytes: &[u8]) -> Result<()>;
+    /// Read output from an absolute `cursor`. `None` ⇒ from the oldest retained
+    /// byte.
+    async fn read(&self, id: &str, cursor: Option<u64>) -> Result<PtyOutput>;
+    /// Apply a new window size (delivers SIGWINCH). A no-op on a session that is
+    /// no longer running — not an error.
+    async fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<()>;
+    /// Terminate the session. `true` if it existed.
+    async fn close(&self, id: &str) -> Result<bool>;
+    async fn list(&self) -> Result<Vec<PtySessionInfo>>;
+    async fn get(&self, id: &str) -> Result<PtySessionInfo>;
 }
 
 // ---------------------------------------------------------------------------

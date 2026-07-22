@@ -1,0 +1,23 @@
+[package]
+name = "agent-pty"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["pty-local"]
+pty-local = []
+
+[target.'cfg(unix)'.dependencies]
+# The only unsafe surface: openpty + setsid/TIOCSCTTY. Already in the tree
+# transitively, so this adds no new external crate.
+libc = "0.2"
+
+[dependencies]
+agent-core.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+futures-lite = "2"
+rstest.workspace = true

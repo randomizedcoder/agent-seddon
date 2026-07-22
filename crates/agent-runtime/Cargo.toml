@@ -39,6 +39,7 @@ default = [
     "skill-write",
     "forge",
     "scheduler",
+    "pty",
 ]
 
 # Each feature forwards to the owning impl crate + drives `register_builtins`.
@@ -84,6 +85,8 @@ skill-write = ["agent-tools/tool-skill-write"]
 # Forge: GitHub/GitLab PRs, issues, reviews. See parity spec 27.
 # Scheduler: recurring unattended runs. See parity spec 28.
 scheduler = ["dep:agent-scheduler", "agent-tools/tool-schedule"]
+# PTY: interactive terminal sessions. See parity spec 29.
+pty = ["dep:agent-pty", "agent-tools/tool-pty"]
 forge = ["dep:agent-forge", "agent-tools/tool-forge", "forge-github", "forge-gitlab"]
 forge-github = ["agent-forge/forge-github"]
 forge-gitlab = ["agent-forge/forge-gitlab"]
@@ -153,6 +156,7 @@ agent-cache = { workspace = true, optional = true }
 agent-web-search = { workspace = true, optional = true }
 agent-forge = { workspace = true, optional = true }
 agent-scheduler = { workspace = true, optional = true }
+agent-pty = { workspace = true, optional = true }
 agent-validate = { workspace = true, optional = true }
 agent-lsp = { workspace = true, optional = true }
 # bash (tool-core) routes through the Sandbox seam; the local + nix backends ship

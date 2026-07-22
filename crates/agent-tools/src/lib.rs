@@ -58,6 +58,11 @@ mod metrics;
 #[cfg(feature = "tool-metrics")]
 pub use metrics::MetricsTool;
 
+#[cfg(feature = "tool-pty")]
+mod pty_tool;
+#[cfg(feature = "tool-pty")]
+pub use pty_tool::PtyTool;
+
 #[cfg(feature = "tool-schedule")]
 mod schedule_tool;
 #[cfg(feature = "tool-schedule")]

@@ -149,6 +149,7 @@ pub fn status_from_error(e: &agent_core::Error) -> tonic::Status {
         Error::Web(m) => tonic::Status::internal(format!("web: {m}")),
         Error::Tasks(m) => tonic::Status::internal(format!("tasks: {m}")),
         Error::Scheduler(m) => tonic::Status::internal(format!("scheduler: {m}")),
+        Error::Pty(m) => tonic::Status::internal(format!("pty: {m}")),
         Error::Structured(m) => tonic::Status::invalid_argument(format!("structured: {m}")),
         Error::Lsp(m) => tonic::Status::internal(format!("lsp: {m}")),
         Error::Sandbox(m) => tonic::Status::internal(format!("sandbox: {m}")),
