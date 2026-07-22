@@ -51,6 +51,10 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # URL parsing for the SSRF guard (robust host/scheme extraction; already in-tree via reqwest).
 url = "2"
 toml = "0.8"
+# Collects the config keys serde IGNORED during deserialization, so a misplaced
+# or misspelled key can be warned about instead of silently doing nothing. See
+# `parse_config`.
+serde_ignored = "0.1"
 tracing = "0.1"
 
 # streaming (SSE) + concurrent tool execution
