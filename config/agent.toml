@@ -297,6 +297,10 @@ write_dir = ""
 # See docs/components/pty.md.
 [pty]
 enabled      = false
+# "local" (a tty on this host) or "grpc" (a remote terminal host — see the
+# warning by [grpc.pty]).
+backend      = "local"
+
 max_sessions = 8
 
 [scheduler]
@@ -445,7 +449,8 @@ job         = "agent-seddon"
 # empty/omitted) to 127.0.0.1:<port> using the generated ports (provider 50051,
 # memory 50052, tools 50053, context 50054, policy 50055, search 50056, repo 50057,
 # session 50058, scanner 50059, reference 50060, scheduler 50061,
-# tokenizer 50062, embed 50063, web 50064, web_search 50065).
+# tokenizer 50062, embed 50063, web 50064, web_search 50065, sandbox 50066,
+# pty 50067).
 # Use `unix:/path` for a same-host, TCP-bypassing socket. See docs/grpc.md.
 #
 # [grpc.provider]
@@ -471,6 +476,16 @@ job         = "agent-seddon"
 # endpoint = "http://egress:50064"                    # egress host ([web] backend = "grpc")
 # [grpc.web_search]
 # endpoint = "http://egress:50065"                    # search keys stay there ([web_search] backends = ["grpc"])
+#
+# DANGEROUS — read before enabling. `--serve-sandbox` and `--serve-pty` accept a
+# command string and RUN it, and the transport is unauthenticated by design.
+# Anyone who can reach these sockets can execute code on the serving host as the
+# serving user. Keep them on a unix socket (0o600 in a 0o700 dir) or loopback;
+# never bind them to a routable address.
+# [grpc.sandbox]
+# endpoint = "unix:/tmp/agent-seddon/sandbox.sock"    # remote exec ([sandbox] backend = "grpc")
+# [grpc.pty]
+# endpoint = "unix:/tmp/agent-seddon/pty.sock"        # remote terminal ([pty] backend = "grpc")
 #
 # `agent --serve-all` hosts every enabled seam in ONE process on ONE endpoint,
 # so a same-host deployment isn't one process per seam. Seams whose impl is

@@ -71,6 +71,8 @@ mod descriptor_tests {
             "EmbedService",
             "WebService",
             "WebSearchService",
+            "SandboxService",
+            "PtyService",
         ] {
             assert!(
                 services.contains(&expected),

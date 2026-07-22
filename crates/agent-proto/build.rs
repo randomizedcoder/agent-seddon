@@ -19,6 +19,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "proto/agent/v1/tokenizer.proto",
         "proto/agent/v1/embed.proto",
         "proto/agent/v1/web.proto",
+        "proto/agent/v1/exec.proto",
     ];
     // Re-run only when a proto changes.
     for p in &protos {

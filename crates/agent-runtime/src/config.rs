@@ -74,14 +74,22 @@ pub struct Config {
 pub struct PtyCfg {
     #[serde(default)]
     pub enabled: bool,
+    /// `"local"` (a tty on this host) or `"grpc"` (a remote terminal host).
+    #[serde(default = "default_pty_backend")]
+    pub backend: String,
     #[serde(default = "default_max_pty_sessions")]
     pub max_sessions: usize,
+}
+
+fn default_pty_backend() -> String {
+    "local".into()
 }
 
 impl Default for PtyCfg {
     fn default() -> Self {
         Self {
             enabled: false,
+            backend: default_pty_backend(),
             max_sessions: default_max_pty_sessions(),
         }
     }
@@ -823,6 +831,10 @@ pub struct GrpcCfg {
     pub web: GrpcSeamCfg,
     #[serde(default)]
     pub web_search: GrpcSeamCfg,
+    #[serde(default)]
+    pub sandbox: GrpcSeamCfg,
+    #[serde(default)]
+    pub pty: GrpcSeamCfg,
     /// Not a seam: the `agent --serve-all` gateway, which hosts every enabled
     /// seam's service in one process. Only `listen` is meaningful — a client
     /// dials an individual seam's service, not the gateway as a whole.

@@ -53,6 +53,45 @@ re-derive.
 - **Leak:** `tests/leak.rs` runs repeated local execs under dhat, asserting the
   Command/pipe/capture allocations stay flat.
 
+## Over gRPC — execution on another host
+
+`[sandbox] backend = "grpc"` routes `bash` through a remote `SandboxService`
+(`agent --serve-sandbox`, default `127.0.0.1:50066`). The agent process stays
+thin and unprivileged while execution happens on a host built for it — one with
+the toolchain, or one deliberately isolated from anything the agent should not
+reach.
+
+> ### This is a different class of grant
+>
+> Every other seam server exposes a capability with a *shape*. This one exposes
+> **arbitrary code execution**: it accepts a command string and runs it, so
+> anyone who can reach the socket can execute code on that host as the serving
+> user. The transport is unauthenticated **by design**, so the socket's file
+> permissions *are* the access control (0o600 in a 0o700 dir). Binding it to a
+> routable address is equivalent to running an unauthenticated remote shell.
+>
+> Note also what does **not** move: the `Policy` gate stays on the agent side,
+> in front of the tool. The server hosts the raw capability.
+
+### Capabilities are probed, not assumed
+
+`capabilities()` is a sync trait method and cannot round-trip, so a fresh client
+advertises a **conservative** set — `network_off: false`, `private_tmp: false`.
+Claiming isolation that has not been confirmed would let the runtime pick this
+backend for a job needing `NetworkPolicy::Off` and then silently not enforce it.
+
+The build calls `probe()` to replace that with the remote's real capabilities,
+labelled `grpc:<backend>` so the hop stays visible rather than the client
+impersonating the remote backend.
+
+**Failure semantic: hard.** `exec` is also **not retried** — a command is not
+idempotent, and a retry after a lost response runs it a second time. `git push`,
+`rm`, a migration: executed twice, invisibly. And an `exit_code: 0` fabricated on
+failure would tell the model its build passed.
+
+A non-zero exit is a *result*, not an error: the failing status and stderr come
+back so the model can read them.
+
 ## Deferred (staged like the tokenizer / web / tasks / structured / lsp seams)
 
 - **The nix sandboxed-derivation mode** — the strongest: on Linux, Nix's own build

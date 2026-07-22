@@ -18,8 +18,11 @@
 # main agent's default `127.0.0.1:9600`, so co-located seam servers don't collide
 # and Prometheus can scrape each as a separate job (see nix/prometheus).
 #
-# Security: the server binds each socket 0o600 in a 0o700 dir, so only the owner
-# UID can connect (on Linux, connecting requires write perm on the socket). On a
+# Security: the server binds each socket 0o600, so only the owner UID can connect
+# (on Linux, connecting requires write perm on the socket). It also creates the
+# parent dir 0o700 — but only when it does not already exist; a pre-existing dir
+# keeps its own mode, and the server WARNS when that mode is group/world
+# accessible. The socket's 0o600 is the effective gate either way. On a
 # multi-user host, prefer overriding to a per-user runtime dir —
 # `[grpc.<seam>] listen = "unix:${XDG_RUNTIME_DIR}/agent-seddon/<seam>.sock"` — so
 # sockets never share world-traversable /tmp. See docs/grpc.md.
@@ -103,6 +106,20 @@
       port = 50065;
       socket = "/tmp/agent-seddon/web-search.sock";
       metrics_port = 9615;
+    };
+    # NOTE: sandbox and pty accept a command string and run it. Anyone who can
+    # reach these sockets can execute code on the host as the serving user, and
+    # the transport is unauthenticated by design. Keep them on a unix socket
+    # (0o600 in a 0o700 dir) or loopback; do not bind them to a routable address.
+    sandbox = {
+      port = 50066;
+      socket = "/tmp/agent-seddon/sandbox.sock";
+      metrics_port = 9616;
+    };
+    pty = {
+      port = 50067;
+      socket = "/tmp/agent-seddon/pty.sock";
+      metrics_port = 9617;
     };
 
     # NOT a seam: the `agent --serve-all` gateway, which hosts every seam's

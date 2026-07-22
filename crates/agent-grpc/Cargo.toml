@@ -40,6 +40,10 @@ agent-scheduler = { workspace = true }
 # Real tokenizer + embedder, so remote counts/vectors are asserted equal to local.
 agent-tokenizer = { workspace = true, features = ["tokenizer-approx"] }
 agent-embed = { workspace = true, features = ["embed-local"] }
+# Real command execution + real ptys, so the round-trips assert behaviour rather
+# than a double echoing what it was handed.
+agent-sandbox = { workspace = true }
+agent-pty = { workspace = true }
 agent-testkit = { workspace = true }
 # A real built-in tool, to prove a feature tool (not just EchoTool) roundtrips over
 # the ToolService seam. Only the patch tool is compiled in.

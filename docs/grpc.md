@@ -172,6 +172,7 @@ agent --serve-repo ; agent --serve-session ; agent --serve-scanner
 agent --serve-reference ; agent --serve-scheduler
 agent --serve-tokenizer ; agent --serve-embed
 agent --serve-web ; agent --serve-web-search
+agent --serve-sandbox ; agent --serve-pty      # see the warning below
 ```
 
 ### One process, every seam — `--serve-all`
@@ -378,6 +379,28 @@ Three things are judgement, not mechanics:
   `ReferenceResolver` degrades the same way — an outage becomes a warning and an
   unexpanded prompt, and deliberately does **not** set `blocked`, which means
   "refused on purpose".
+
+## `--serve-sandbox` and `--serve-pty` are a different class of grant
+
+Every other seam server exposes a *capability with a shape*: fetch this URL,
+count these tokens, scan this text. These two expose **arbitrary code
+execution**. They accept a command string and run it, so anyone who can reach
+the socket can execute code on that host as the serving user.
+
+The transport is unauthenticated **by design** — a unix socket 0o600 in a 0o700
+dir, or loopback TCP — so the socket's file permissions *are* the access control.
+Binding either to a routable address is equivalent to running an unauthenticated
+remote shell.
+
+Note also what does **not** move: the `Policy` gate lives on the agent side, in
+front of the tool. A seam server hosts the raw capability, so a compromised or
+careless client is not screened by the server.
+
+The upside is real, which is why they are here: an agent process can stay thin
+and unprivileged while execution happens on a host built for it — one with the
+toolchain, or one deliberately isolated from anything the agent should not reach.
+That is a *better* posture than executing in-process, provided the socket is
+where you think it is.
 
 ## Serving a seam is not always the same as *using* one remotely
 

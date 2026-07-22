@@ -100,6 +100,48 @@ writes when it feels like it; a fixed sleep is how a PTY test suite becomes flak
 
 Plus a `pty.session` span carrying the command and dimensions.
 
+## Over gRPC — a remote terminal host
+
+`[pty] backend = "grpc"` puts the tty on another machine (`agent --serve-pty`,
+default `127.0.0.1:50067`); this process only drives it. The same warning as
+`--serve-sandbox` applies in full — see [`sandbox.md`](sandbox.md) and
+[`../grpc.md`](../grpc.md): the service spawns processes, and the socket's
+permissions are the access control.
+
+### What is and is not retried
+
+Reads are by **absolute cursor**, which is what makes them safe to retry: the
+same cursor returns the same bytes rather than consuming a stream. `resize` and
+`close` are idempotent, so they retry too.
+
+`open` and `write` do **not**. An `open` retried after a lost response leaks an
+orphaned session holding a real child process; a `write` retried duplicates
+keystrokes, re-running whatever the last line was.
+
+### The exit code comes from `wait`, never from EOF
+
+EOF on the pty master means the child's *output* ended — it does **not** carry an
+exit status. An earlier version wrote `Exited { code: 0 }` from the reader thread
+at EOF, racing the `try_wait` that reads the real status. When the reader won, a
+command that exited 3 was reported as **0, a success** — and because `reap` skips
+sessions already marked not-running, the wrong code was permanent.
+
+The state now transitions only in `reap`, from the real wait status. A session
+reads as `Running` between the child exiting and the next observation, and every
+observation path reaps first. The regression test asserts the *code*, not merely
+that the session exited — the assertion the original test's doc comment claimed
+but did not make.
+
+### A missing state is refused, not guessed
+
+`PtyState` has no safe default across the wire: guessing `Running` reports a dead
+session as live, and guessing `Closed` strands a live one. A response without a
+state is an error, and a malformed row in `list` is dropped with a warning rather
+than failing the whole listing.
+
+Dimensions are clamped to 1..=1000 at the conversion boundary, the same range the
+local tool enforces.
+
 ## Deferred
 
 - **Server-streaming gRPC output** (`pty.proto`, mirroring

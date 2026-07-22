@@ -112,9 +112,16 @@ async fn positive_cursor_resumes_without_replaying() {
     let _ = pty.close(&id).await;
 }
 
-/// A child that exits is reported as exited, with its code.
+/// A child that exits is reported as exited, **with its actual code**.
+///
+/// The code assertion is the point, not decoration. This test previously said
+/// "with its code" but only checked `Exited { .. }`, and that gap hid a real
+/// bug: the reader thread wrote `Exited { code: 0 }` on EOF, racing the
+/// `try_wait` that reads the true status. When the reader won, a command that
+/// exited 3 was reported to the model as **0 — a success**. `reap` skips
+/// sessions already marked not-running, so the wrong code was permanent.
 #[tokio::test]
-async fn positive_exit_is_observed() {
+async fn positive_exit_reports_the_real_code() {
     let pty = LocalPty::new();
     let id = pty
         .open(&spec("sh", &["-c", "exit 3"]))
@@ -129,10 +136,10 @@ async fn positive_exit_is_observed() {
     )
     .await;
     let info = pty.get(&id).await.unwrap();
-    assert!(
-        matches!(info.state, PtyState::Exited { .. }),
-        "{:?}",
-        info.state
+    assert_eq!(
+        info.state,
+        PtyState::Exited { code: 3 },
+        "a failing child must not be reported as a success"
     );
 }
 
