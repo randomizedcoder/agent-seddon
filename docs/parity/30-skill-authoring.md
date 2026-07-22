@@ -5,7 +5,20 @@ agent **create / update / validate** a `SKILL.md` over agent-seddon's existing
 skills system — versioned, provenance-tracked, injection-scanned, and
 policy-gated.
 
-> **Status: spec (design of record).** Proposes a new `skill_write` `Tool` (over
+> **Status: implemented** (`skill_write` tool with name confinement, injection
+> scanning on body and description, no-silent-overwrite, provenance +
+> versioning, and a size cap; config-gated OFF by default; doc in
+> `docs/components/skill-authoring.md`). The round trip is what matters and is
+> tested end-to-end: the agent authors a skill and spec 07's `discover` finds it
+> and loads its body. Note the guard is deliberately wider than the spec asked —
+> the **description** is scanned too, since it appears in every skill menu, and
+> fields are newline-collapsed so a description cannot forge extra frontmatter
+> keys (`author`, `version`). **Deferred:** `edit`/`patch` fuzzy find-replace
+> (an update here is a full rewrite via `overwrite: true`), supporting files
+> alongside `SKILL.md`, and auto-curation (provenance is recorded so a future
+> curator can distinguish agent-authored skills, but nothing curates yet).
+>
+> Original plan follows. Proposes a new `skill_write` `Tool` (over
 > the read-only skills system speccd in [`07-skills.md`](07-skills.md)) that
 > writes a `SKILL.md` with validated YAML frontmatter into the existing skill
 > roots, so a skill it authors is immediately **discoverable** by

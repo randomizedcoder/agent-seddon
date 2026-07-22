@@ -36,6 +36,7 @@ default = [
     "web-search",
     "provider-router",
     "session-export",
+    "skill-write",
 ]
 
 # Each feature forwards to the owning impl crate + drives `register_builtins`.
@@ -76,6 +77,8 @@ cache = ["dep:agent-cache", "agent-cache/cache-strategies"]
 # Live web search: the WebSearch seam + the `web_search` tool. See parity spec 12.
 # Session export: deterministic transcript render + redaction (parity spec 20).
 session-export = ["agent-tools/tool-session-export"]
+# Skill authoring: the agent writes a reusable SKILL.md (parity spec 30).
+skill-write = ["agent-tools/tool-skill-write"]
 web-search = [
     "dep:agent-web-search",
     "agent-tools/tool-web-search",

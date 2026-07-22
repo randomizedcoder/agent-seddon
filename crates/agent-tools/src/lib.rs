@@ -58,6 +58,11 @@ mod metrics;
 #[cfg(feature = "tool-metrics")]
 pub use metrics::MetricsTool;
 
+#[cfg(feature = "tool-skill-write")]
+mod skill_write;
+#[cfg(feature = "tool-skill-write")]
+pub use skill_write::SkillWriteTool;
+
 #[cfg(feature = "tool-session-export")]
 mod session_export;
 #[cfg(feature = "tool-web")]

@@ -150,6 +150,25 @@ pub async fn build_agent_with(
         tools.register(crate::metered::tool(tool, metrics.clone()));
     }
 
+    // Skill authoring (parity spec 30): the agent captures a reusable procedure
+    // as a SKILL.md the discovery path picks up next run. OFF by default — a
+    // skill is read back into future prompts, so authoring is privileged.
+    #[cfg(feature = "skill-write")]
+    if cfg.skills.write {
+        let root = if cfg.skills.write_dir.is_empty() {
+            std::path::PathBuf::from(&cfg.agent.working_dir).join(".agent/skills")
+        } else {
+            std::path::PathBuf::from(&cfg.skills.write_dir)
+        };
+        let mut tool = agent_tools::SkillWriteTool::new(root);
+        // Prefer the Scanner seam for the injection check when one is wired.
+        #[cfg(feature = "scanner")]
+        if let Some((s, _)) = build_scanner(&cfg, &metrics)? {
+            tool = tool.with_scanner(s);
+        }
+        tools.register(crate::metered::tool(Arc::new(tool), metrics.clone()));
+    }
+
     // Session export: the `session_export` tool renders a saved transcript to a
     // shareable artifact, redacting secrets through the Scanner when one is
     // wired (parity spec 20).

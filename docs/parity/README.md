@@ -100,7 +100,7 @@ Legend: ✅ merged · 🔶 in review · ⬜ spec written, not started.
 | 27 | [GitHub / forge](27-forge.md) | ⬜ | One `Forge` seam, GitHub↔GitLab by config, Policy-gated outward writes; reuses `RepoBackend` for local git |
 | 28 | [cron / scheduler](28-scheduler.md) | ⬜ | `Scheduler` seam with overlap/runaway guards, metered job outcomes, and a full OTel **trace per unattended run** |
 | 29 | [PTY / interactive terminal](29-pty.md) | ⬜ | `Pty` seam with server-streaming gRPC I/O (mirrors `SearchService.Reindex`); metered sessions/bytes; runs inside a #14 sandbox |
-| 30 | [autonomous skill authoring](30-skill-authoring.md) | ⬜ | `skill_write` closing the loop on #07 discovery: versioned, provenance-tracked, injection-scanned (#10) + `Policy`-gated writes |
+| 30 | [autonomous skill authoring](30-skill-authoring.md) | ✅ `skill_write` closing the loop on 07 discovery — an authored skill is proven discoverable + loadable end-to-end. Guarded five ways because a skill is read back into FUTURE prompts (a persistent foothold, not a one-turn problem): safe-segment name, injection scan on body **and** description (via the spec-18 `Scanner`, falling back to `scan_for_injection`), no silent overwrite, `Policy` gate, 32 KiB cap. Provenance (`author: agent`) + version bump on update, no timestamp (determinism); newline-collapsed fields so a description cannot forge frontmatter keys. OFF by default. `edit`/`patch` + supporting files deferred |
 
 Suggested build order (earliest value + lowest coupling first): **23**, **11**, then
 **21**, **16**, **13**, **14**, **15**, **19** as the high-impact core; the rest
