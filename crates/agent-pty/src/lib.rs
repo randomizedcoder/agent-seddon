@@ -295,10 +295,20 @@ impl Pty for LocalPty {
                     Err(_) => break,
                 }
             }
-            let mut st = rstate.lock().expect("state");
-            if st.is_running() {
-                *st = PtyState::Exited { code: 0 };
-            }
+            // Deliberately does NOT set the state.
+            //
+            // EOF on the master means the child's output ended — it does NOT
+            // carry the child's exit status. This used to write
+            // `Exited { code: 0 }` here, which raced `reap()`'s `try_wait` and,
+            // whenever the reader won, reported a FABRICATED SUCCESS: a command
+            // that exited 7 was shown to the model as exit code 0. `reap` skips
+            // sessions already marked not-running, so the wrong code was
+            // permanent rather than eventually corrected.
+            //
+            // The state now transitions only in `reap`, from the real wait
+            // status. The session reads as `Running` between the child exiting
+            // and the next observation, and every observation path reaps first.
+            drop(rstate);
         });
 
         sessions.insert(

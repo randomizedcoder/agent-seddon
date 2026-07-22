@@ -1,0 +1,143 @@
+// The `Sandbox` and `Pty` seams over gRPC — running things somewhere else.
+//
+// These two are grouped because they are the same idea at different durations:
+// `Sandbox` runs one command to completion, `Pty` holds a live terminal across
+// turns. Distributing them means the agent can execute on a host built for it —
+// a machine with the toolchain, or one deliberately isolated from anything the
+// agent shouldn't reach — while the agent process itself stays thin.
+//
+// SECURITY. Serving these is a materially larger grant than serving any other
+// seam in this project. `--serve-sandbox` and `--serve-pty` accept a command
+// string and run it; anyone who can reach the socket can execute code on that
+// host as that user. The transport is unauthenticated by design (a unix socket
+// 0o600 in a 0o700 dir, or loopback TCP), so exposing either beyond that is
+// exactly as dangerous as it sounds. See docs/grpc.md.
+//
+// Messages are `Exec`/`Pty`-prefixed: the project shares one flat `agent.v1`
+// package, so message names are global (see session.proto).
+syntax = "proto3";
+
+package agent.v1;
+
+service SandboxService {
+  rpc Exec(ExecRequest) returns (ExecResult);
+  rpc Capabilities(ExecCapabilitiesRequest) returns (ExecCapabilities);
+}
+
+service PtyService {
+  rpc Open(PtyOpenRequest) returns (PtySessionRef);
+  rpc Write(PtyWriteRequest) returns (PtyWriteResponse);
+  rpc Read(PtyReadRequest) returns (PtyReadResponse);
+  rpc Resize(PtyResizeRequest) returns (PtyResizeResponse);
+  rpc Close(PtySessionRef) returns (PtyCloseResponse);
+  rpc List(PtyListRequest) returns (PtySessionList);
+  rpc Get(PtySessionRef) returns (PtySessionInfo);
+}
+
+enum ExecNetworkPolicy {
+  EXEC_NETWORK_POLICY_ON = 0;
+  EXEC_NETWORK_POLICY_OFF = 1;
+  EXEC_NETWORK_POLICY_LOOPBACK = 2;
+}
+
+enum ExecEnvPolicy {
+  EXEC_ENV_POLICY_INHERIT = 0;
+  EXEC_ENV_POLICY_SCRUB = 1;
+}
+
+message ExecRequest {
+  string command = 1;
+  string cwd = 2;
+  ExecNetworkPolicy network = 3;
+  ExecEnvPolicy env = 4;
+  uint64 timeout_secs = 5;
+}
+
+message ExecResult {
+  string stdout = 1;
+  string stderr = 2;
+  int32 exit_code = 3;
+  bool timed_out = 4;
+}
+
+message ExecCapabilitiesRequest {}
+
+message ExecCapabilities {
+  string backend = 1;
+  bool available = 2;
+  bool network_off = 3;
+  bool private_tmp = 4;
+  bool content_addressed = 5;
+}
+
+message PtySessionRef {
+  string id = 1;
+}
+
+message PtyOpenRequest {
+  string command = 1;
+  repeated string args = 2;
+  uint32 cols = 3;
+  uint32 rows = 4;
+  // Empty ⇒ the server's working directory.
+  string cwd = 5;
+}
+
+message PtyWriteRequest {
+  string id = 1;
+  bytes input = 2;
+}
+
+message PtyWriteResponse {}
+
+message PtyReadRequest {
+  string id = 1;
+  // Absent ⇒ from the oldest retained byte.
+  optional uint64 cursor = 2;
+}
+
+message PtyStateMsg {
+  // Running / Closed carry no code; Exited does.
+  bool running = 1;
+  bool closed = 2;
+  optional int32 exit_code = 3;
+}
+
+message PtyReadResponse {
+  bytes data = 1;
+  uint64 next_cursor = 2;
+  // Bytes the rolling buffer had already dropped — surfaced rather than
+  // silently omitted, so a caller knows it lost data.
+  uint64 dropped = 3;
+  PtyStateMsg state = 4;
+}
+
+message PtyResizeRequest {
+  string id = 1;
+  uint32 cols = 2;
+  uint32 rows = 3;
+}
+
+message PtyResizeResponse {}
+
+message PtyCloseResponse {
+  // False when there was no such session — not an error.
+  bool closed = 1;
+}
+
+message PtyListRequest {}
+
+message PtySessionInfo {
+  string id = 1;
+  string command = 2;
+  PtyStateMsg state = 3;
+  uint32 cols = 4;
+  uint32 rows = 5;
+  uint64 bytes_out = 6;
+  uint64 first_retained = 7;
+  uint64 next_cursor = 8;
+}
+
+message PtySessionList {
+  repeated PtySessionInfo sessions = 1;
+}

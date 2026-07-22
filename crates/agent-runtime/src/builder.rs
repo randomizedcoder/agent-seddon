@@ -54,6 +54,12 @@ pub async fn build_agent_with(
         metrics.clone(),
         &cfg.agent.provider,
     );
+    // Set when the sandbox / pty backends are built below; held for serving.
+    #[allow(unused_assignments, unused_mut)]
+    let mut shared_sandbox: Option<Arc<dyn agent_core::Sandbox>> = None;
+    #[allow(unused_assignments, unused_mut)]
+    let mut shared_pty: Option<Arc<dyn agent_core::Pty>> = None;
+
     // Set when the web_search dispatch is composed below; held for serving.
     #[allow(unused_assignments, unused_mut)]
     let mut shared_web_search: Option<Arc<dyn agent_core::WebSearch>> = None;
@@ -118,9 +124,24 @@ pub async fn build_agent_with(
                 };
                 Arc::new(agent_sandbox::NixSandbox::new(flake))
             }
-            other => anyhow::bail!("unknown [sandbox] backend `{other}` (local|nix)"),
+            // A remote executor: run on a host built for it (the toolchain, or
+            // deliberate isolation) while this process stays thin.
+            #[cfg(feature = "grpc")]
+            "grpc" => {
+                let ep = crate::registry::grpc_client_endpoint(
+                    &cfg.grpc.sandbox.endpoint,
+                    agent_grpc::constants::SANDBOX,
+                );
+                let mut c = agent_grpc::client::GrpcSandbox::connect(&ep)?;
+                // Learn the remote's real isolation up front, so the runtime
+                // picks or degrades on facts rather than on a placeholder.
+                c.probe().await?;
+                Arc::new(c)
+            }
+            other => anyhow::bail!("unknown [sandbox] backend `{other}` (local|nix|grpc)"),
         };
         let backend = crate::metered::sandbox(backend, metrics.clone());
+        shared_sandbox = Some(backend.clone());
         let tool = Arc::new(agent_tools::BashTool::new(backend));
         tools.register(crate::metered::tool(tool, metrics.clone()));
     }
@@ -192,12 +213,23 @@ pub async fn build_agent_with(
     // unless configured, and every call still passes the Policy gate.
     #[cfg(feature = "pty")]
     if cfg.pty.enabled {
-        let backend: Arc<dyn agent_core::Pty> =
-            Arc::new(agent_pty::LocalPty::new().with_max_sessions(cfg.pty.max_sessions));
-        let tool = Arc::new(agent_tools::PtyTool::new(crate::metered::pty(
-            backend,
-            metrics.clone(),
-        )));
+        let backend: Arc<dyn agent_core::Pty> = match cfg.pty.backend.as_str() {
+            "local" => Arc::new(agent_pty::LocalPty::new().with_max_sessions(cfg.pty.max_sessions)),
+            // A remote terminal host: the tty lives there, this process only
+            // drives it.
+            #[cfg(feature = "grpc")]
+            "grpc" => {
+                let ep = crate::registry::grpc_client_endpoint(
+                    &cfg.grpc.pty.endpoint,
+                    agent_grpc::constants::PTY,
+                );
+                Arc::new(agent_grpc::client::GrpcPty::connect(&ep)?)
+            }
+            other => anyhow::bail!("unknown [pty] backend `{other}` (local|grpc)"),
+        };
+        let backend = crate::metered::pty(backend, metrics.clone());
+        shared_pty = Some(backend.clone());
+        let tool = Arc::new(agent_tools::PtyTool::new(backend));
         tools.register(crate::metered::tool(tool, metrics.clone()));
     }
 
@@ -535,7 +567,9 @@ pub async fn build_agent_with(
     let agent = agent.with_tokenizer_seam(tokenizer.clone());
     let agent = agent
         .with_web(shared_web.clone())
-        .with_web_search(shared_web_search.clone());
+        .with_web_search(shared_web_search.clone())
+        .with_sandbox(shared_sandbox.clone())
+        .with_pty(shared_pty.clone());
     let agent = agent.with_embedder(embedder.clone());
     // Structured output: build the config-selected validator, meter it, attach it.
     #[cfg(feature = "structured")]

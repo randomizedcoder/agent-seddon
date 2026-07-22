@@ -1185,6 +1185,224 @@ impl From<pb::RepoStatus> for agent_core::RepoStatus {
     }
 }
 
+// --- Sandbox ---------------------------------------------------------------
+
+/// Saturating decode. An unknown network policy reads as `Off` — the RESTRICTIVE
+/// value. A garbled field must not silently grant network access.
+pub fn exec_network_from_i32(v: i32) -> agent_core::NetworkPolicy {
+    match v {
+        0 => agent_core::NetworkPolicy::On,
+        2 => agent_core::NetworkPolicy::Loopback,
+        _ => agent_core::NetworkPolicy::Off,
+    }
+}
+
+/// Saturating decode. An unknown env policy reads as `Scrub` — the restrictive
+/// value, so a garbled field cannot silently leak the environment.
+pub fn exec_env_from_i32(v: i32) -> agent_core::EnvPolicy {
+    match v {
+        0 => agent_core::EnvPolicy::Inherit,
+        _ => agent_core::EnvPolicy::Scrub,
+    }
+}
+
+impl From<agent_core::NetworkPolicy> for pb::ExecNetworkPolicy {
+    fn from(p: agent_core::NetworkPolicy) -> Self {
+        match p {
+            agent_core::NetworkPolicy::On => pb::ExecNetworkPolicy::On,
+            agent_core::NetworkPolicy::Off => pb::ExecNetworkPolicy::Off,
+            agent_core::NetworkPolicy::Loopback => pb::ExecNetworkPolicy::Loopback,
+        }
+    }
+}
+
+impl From<agent_core::EnvPolicy> for pb::ExecEnvPolicy {
+    fn from(p: agent_core::EnvPolicy) -> Self {
+        match p {
+            agent_core::EnvPolicy::Inherit => pb::ExecEnvPolicy::Inherit,
+            agent_core::EnvPolicy::Scrub => pb::ExecEnvPolicy::Scrub,
+        }
+    }
+}
+
+impl From<agent_core::ExecSpec> for pb::ExecRequest {
+    fn from(s: agent_core::ExecSpec) -> Self {
+        pb::ExecRequest {
+            command: s.command,
+            cwd: s.cwd.to_string_lossy().into_owned(),
+            network: pb::ExecNetworkPolicy::from(s.network) as i32,
+            env: pb::ExecEnvPolicy::from(s.env) as i32,
+            timeout_secs: s.timeout_secs,
+        }
+    }
+}
+
+impl From<pb::ExecRequest> for agent_core::ExecSpec {
+    fn from(s: pb::ExecRequest) -> Self {
+        agent_core::ExecSpec {
+            command: s.command,
+            cwd: std::path::PathBuf::from(s.cwd),
+            network: exec_network_from_i32(s.network),
+            env: exec_env_from_i32(s.env),
+            timeout_secs: s.timeout_secs,
+        }
+    }
+}
+
+impl From<agent_core::ExecOutput> for pb::ExecResult {
+    fn from(o: agent_core::ExecOutput) -> Self {
+        pb::ExecResult {
+            stdout: o.stdout,
+            stderr: o.stderr,
+            exit_code: o.exit_code,
+            timed_out: o.timed_out,
+        }
+    }
+}
+
+impl From<pb::ExecResult> for agent_core::ExecOutput {
+    fn from(o: pb::ExecResult) -> Self {
+        agent_core::ExecOutput {
+            stdout: o.stdout,
+            stderr: o.stderr,
+            exit_code: o.exit_code,
+            timed_out: o.timed_out,
+        }
+    }
+}
+
+impl From<agent_core::SandboxCapabilities> for pb::ExecCapabilities {
+    fn from(c: agent_core::SandboxCapabilities) -> Self {
+        pb::ExecCapabilities {
+            backend: c.backend,
+            available: c.available,
+            network_off: c.network_off,
+            private_tmp: c.private_tmp,
+            content_addressed: c.content_addressed,
+        }
+    }
+}
+
+impl From<pb::ExecCapabilities> for agent_core::SandboxCapabilities {
+    fn from(c: pb::ExecCapabilities) -> Self {
+        agent_core::SandboxCapabilities {
+            backend: c.backend,
+            available: c.available,
+            network_off: c.network_off,
+            private_tmp: c.private_tmp,
+            content_addressed: c.content_addressed,
+        }
+    }
+}
+
+// --- Pty -------------------------------------------------------------------
+
+impl From<agent_core::PtyState> for pb::PtyStateMsg {
+    fn from(s: agent_core::PtyState) -> Self {
+        match s {
+            agent_core::PtyState::Running => pb::PtyStateMsg {
+                running: true,
+                closed: false,
+                exit_code: None,
+            },
+            agent_core::PtyState::Exited { code } => pb::PtyStateMsg {
+                running: false,
+                closed: false,
+                exit_code: Some(code),
+            },
+            agent_core::PtyState::Closed => pb::PtyStateMsg {
+                running: false,
+                closed: true,
+                exit_code: None,
+            },
+        }
+    }
+}
+
+impl From<pb::PtyStateMsg> for agent_core::PtyState {
+    fn from(s: pb::PtyStateMsg) -> Self {
+        // Order matters: `running` wins, then `closed`, then an exit code. A
+        // garbled combination must resolve to something, and reporting a live
+        // session as `Closed` would strand a real child process.
+        if s.running {
+            agent_core::PtyState::Running
+        } else if s.closed {
+            agent_core::PtyState::Closed
+        } else {
+            agent_core::PtyState::Exited {
+                code: s.exit_code.unwrap_or(-1),
+            }
+        }
+    }
+}
+
+/// Terminal dimensions are `u16` in core but `u32` on the wire. Clamp to the
+/// same 1..=1000 range the local pty tool enforces: a 0- or 60000-column ioctl
+/// is nonsense, and 0 rows can wedge a child.
+fn pty_dim(v: u32) -> u16 {
+    v.clamp(1, 1000) as u16
+}
+
+impl From<agent_core::PtySpec> for pb::PtyOpenRequest {
+    fn from(s: agent_core::PtySpec) -> Self {
+        pb::PtyOpenRequest {
+            command: s.command,
+            args: s.args,
+            cols: s.cols as u32,
+            rows: s.rows as u32,
+            cwd: s.cwd,
+        }
+    }
+}
+
+impl From<pb::PtyOpenRequest> for agent_core::PtySpec {
+    fn from(s: pb::PtyOpenRequest) -> Self {
+        agent_core::PtySpec {
+            command: s.command,
+            args: s.args,
+            cols: pty_dim(s.cols),
+            rows: pty_dim(s.rows),
+            cwd: s.cwd,
+        }
+    }
+}
+
+impl From<agent_core::PtySessionInfo> for pb::PtySessionInfo {
+    fn from(i: agent_core::PtySessionInfo) -> Self {
+        pb::PtySessionInfo {
+            id: i.id,
+            command: i.command,
+            state: Some(i.state.into()),
+            cols: i.cols as u32,
+            rows: i.rows as u32,
+            bytes_out: i.bytes_out,
+            first_retained: i.first_retained,
+            next_cursor: i.next_cursor,
+        }
+    }
+}
+
+impl TryFrom<pb::PtySessionInfo> for agent_core::PtySessionInfo {
+    type Error = ConvertError;
+    fn try_from(i: pb::PtySessionInfo) -> Result<Self, Self::Error> {
+        Ok(agent_core::PtySessionInfo {
+            id: i.id,
+            command: i.command,
+            // No sensible default: guessing `Running` would report a dead
+            // session as live, and guessing `Closed` would strand a live one.
+            state: i
+                .state
+                .ok_or(ConvertError::MissingField("pty_session.state"))?
+                .into(),
+            cols: pty_dim(i.cols),
+            rows: pty_dim(i.rows),
+            bytes_out: i.bytes_out,
+            first_retained: i.first_retained,
+            next_cursor: i.next_cursor,
+        })
+    }
+}
+
 // --- Web (WebBackend + WebSearch) ------------------------------------------
 
 pub fn web_format_from_i32(v: i32) -> agent_core::WebFormat {

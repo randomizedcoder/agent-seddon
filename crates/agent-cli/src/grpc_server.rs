@@ -38,6 +38,8 @@ pub enum Seam {
     Embed,
     Web,
     WebSearch,
+    Sandbox,
+    Pty,
 }
 
 /// Every variant, so the table can be checked for completeness.
@@ -57,6 +59,8 @@ const ALL_SEAMS: &[Seam] = &[
     Seam::Embed,
     Seam::Web,
     Seam::WebSearch,
+    Seam::Sandbox,
+    Seam::Pty,
 ];
 
 /// The static facts about a seam served as its own process.
@@ -179,6 +183,20 @@ const SEAMS: &[SeamInfo] = &[
         service: "agent.v1.WebSearchService",
         endpoint: constants::WEB_SEARCH,
     },
+    SeamInfo {
+        seam: Seam::Sandbox,
+        flag: "--serve-sandbox",
+        name: "sandbox",
+        service: "agent.v1.SandboxService",
+        endpoint: constants::SANDBOX,
+    },
+    SeamInfo {
+        seam: Seam::Pty,
+        flag: "--serve-pty",
+        name: "pty",
+        service: "agent.v1.PtyService",
+        endpoint: constants::PTY,
+    },
 ];
 
 impl Seam {
@@ -237,6 +255,8 @@ impl Seam {
             Seam::Embed => &cfg.grpc.embed.listen,
             Seam::Web => &cfg.grpc.web.listen,
             Seam::WebSearch => &cfg.grpc.web_search.listen,
+            Seam::Sandbox => &cfg.grpc.sandbox.listen,
+            Seam::Pty => &cfg.grpc.pty.listen,
         }
     }
 }
@@ -366,6 +386,20 @@ fn add_seam_service(router: Router, agent: &Agent, seam: Seam) -> anyhow::Result
         Seam::WebSearch => match agent.web_search() {
             Some(w) => (
                 router.add_service(srv::WebSearchServiceSvc::new(w).into_server()),
+                true,
+            ),
+            None => (router, false),
+        },
+        Seam::Sandbox => match agent.sandbox() {
+            Some(s) => (
+                router.add_service(srv::SandboxServiceSvc::new(s).into_server()),
+                true,
+            ),
+            None => (router, false),
+        },
+        Seam::Pty => match agent.pty() {
+            Some(p) => (
+                router.add_service(srv::PtyServiceSvc::new(p).into_server()),
                 true,
             ),
             None => (router, false),
@@ -507,6 +541,7 @@ mod tests {
     #[case::positive_reference("--serve-reference", Some(Seam::Reference))]
     #[case::positive_embed("--serve-embed", Some(Seam::Embed))]
     #[case::positive_web_search("--serve-web-search", Some(Seam::WebSearch))]
+    #[case::positive_sandbox("--serve-sandbox", Some(Seam::Sandbox))]
     #[case::negative_unknown_seam("--serve-nope", None)]
     #[case::negative_not_a_serve_flag("--help", None)]
     #[case::adversarial_empty("", None)]

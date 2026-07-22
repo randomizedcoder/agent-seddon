@@ -75,6 +75,12 @@ pub struct Agent {
     /// The composed web-search dispatch (cache + fusion), if wired. Held so
     /// `agent --serve-web-search` hosts the composite rather than one backend.
     web_search: Option<Arc<dyn agent_core::WebSearch>>,
+    /// The sandbox backing `bash`, if wired. Held so it can be hosted over gRPC
+    /// (`agent --serve-sandbox`).
+    sandbox: Option<Arc<dyn agent_core::Sandbox>>,
+    /// The pty backend, if wired. Held so it can be hosted over gRPC
+    /// (`agent --serve-pty`).
+    pty: Option<Arc<dyn agent_core::Pty>>,
     /// The embedder, if wired. Held so it can be hosted over gRPC
     /// (`agent --serve-embed`); the loop reaches it through the vector search
     /// backend.
@@ -137,6 +143,8 @@ impl Agent {
             tokenizer: None,
             web: None,
             web_search: None,
+            sandbox: None,
+            pty: None,
             embedder: None,
             #[cfg(feature = "structured")]
             validator: None,
@@ -408,6 +416,28 @@ impl Agent {
     /// Attach the web-search dispatch so it can be served.
     pub fn with_web_search(mut self, w: Option<Arc<dyn agent_core::WebSearch>>) -> Self {
         self.web_search = w;
+        self
+    }
+
+    /// The sandbox, if wired (for `agent --serve-sandbox`).
+    pub fn sandbox(&self) -> Option<Arc<dyn agent_core::Sandbox>> {
+        self.sandbox.clone()
+    }
+
+    /// Attach the sandbox so it can be served.
+    pub fn with_sandbox(mut self, s: Option<Arc<dyn agent_core::Sandbox>>) -> Self {
+        self.sandbox = s;
+        self
+    }
+
+    /// The pty backend, if wired (for `agent --serve-pty`).
+    pub fn pty(&self) -> Option<Arc<dyn agent_core::Pty>> {
+        self.pty.clone()
+    }
+
+    /// Attach the pty backend so it can be served.
+    pub fn with_pty(mut self, p: Option<Arc<dyn agent_core::Pty>>) -> Self {
+        self.pty = p;
         self
     }
 

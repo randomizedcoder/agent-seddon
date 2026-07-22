@@ -22,6 +22,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 mod context;
 mod embed;
+mod exec;
 mod health;
 mod memory;
 mod policy;
@@ -38,6 +39,7 @@ mod web;
 
 pub use context::*;
 pub use embed::*;
+pub use exec::*;
 pub use health::*;
 pub use memory::*;
 pub use policy::*;
