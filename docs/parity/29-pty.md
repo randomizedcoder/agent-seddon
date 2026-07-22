@@ -5,7 +5,23 @@ with streamed I/O — so the agent can drive REPLs, dev servers, interactive
 installers, and watch long-running output, instead of only running a command to
 completion and reading back captured bytes.
 
-> **Status: spec (design of record).** New `Pty` seam (async trait in
+> **Status: implemented** (`Pty` seam + `agent-pty` with a real `openpty`
+> backend, bounded rolling output, the `pty` tool, config + metrics; doc in
+> `docs/components/pty.md`). Notes: the environment risk was checked **before**
+> writing code — `/dev/ptmx` is present in the nix build sandbox, `/dev/pts` is
+> mounted, and `openpty` + fork/exec round-trip — so the tests allocate real
+> PTYs and fork real children under `nix flake check` rather than being
+> `#[ignore]`d. `libc` was already in the tree transitively, so the backend adds
+> **no new external crate** (the spec suggested a `portable-pty`-class
+> dependency); the unsafe surface is three calls. One detail worth recording:
+> the parent must drop its slave fd after spawning, or reads on the master never
+> see EOF and the session appears to hang forever instead of reporting its exit.
+> **Deferred:** the server-streaming `pty.proto` (the cursor-based `read` is
+> already the right shape for it), sandbox-confined sessions (spec 14 — the
+> child is spawned on the host today), and idle-TTL reaping of abandoned
+> *running* sessions.
+>
+> Original plan follows. New `Pty` seam (async trait in
 > `agent-core`) + `pty.proto` gRPC service with a **server-streaming** output RPC
 > (reflection, `--serve-pty`) that mirrors the existing
 > [`SearchService.Reindex`](../../crates/agent-proto/proto/agent/v1/search.proto)

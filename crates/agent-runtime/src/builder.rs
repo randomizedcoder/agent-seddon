@@ -150,6 +150,20 @@ pub async fn build_agent_with(
         tools.register(crate::metered::tool(tool, metrics.clone()));
     }
 
+    // PTY (parity spec 29): interactive terminal sessions. A live tty held
+    // across turns is strictly more powerful than one-shot `bash`, so it is off
+    // unless configured, and every call still passes the Policy gate.
+    #[cfg(feature = "pty")]
+    if cfg.pty.enabled {
+        let backend: Arc<dyn agent_core::Pty> =
+            Arc::new(agent_pty::LocalPty::new().with_max_sessions(cfg.pty.max_sessions));
+        let tool = Arc::new(agent_tools::PtyTool::new(crate::metered::pty(
+            backend,
+            metrics.clone(),
+        )));
+        tools.register(crate::metered::tool(tool, metrics.clone()));
+    }
+
     // Scheduler (parity spec 28): recurring unattended runs. The `schedule` tool
     // registers/inspects jobs; they only FIRE while a driver ticks
     // (`agent --scheduler`), so enabling this alone cannot start work silently.

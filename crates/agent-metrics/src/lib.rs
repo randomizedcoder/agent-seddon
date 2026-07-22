@@ -59,6 +59,11 @@ pub struct Metrics {
     // Labels are bounded enums — never a token, URL, or remote content.
     // Scheduled runs (parity spec 28), by outcome — including `skipped`, so a
     // dropped overlapping fire is visible rather than silent.
+    // Interactive terminal sessions (parity spec 29): a live gauge, byte
+    // volumes by direction, and session outcomes.
+    pty_active: IntGauge,
+    pty_bytes: IntCounterVec,
+    pty_sessions: IntCounterVec,
     scheduled_runs: IntCounterVec,
     scheduled_seconds: Histogram,
     forge_calls: IntCounterVec,
@@ -218,6 +223,17 @@ impl Metrics {
         let tool_calls = IntCounterVec::new(
             Opts::new("agent_tool_calls_total", "Tool invocations"),
             &["tool", "status"],
+        )
+        .unwrap();
+        let pty_active = IntGauge::new("agent_pty_active_sessions", "Live pty sessions").unwrap();
+        let pty_bytes = IntCounterVec::new(
+            Opts::new("agent_pty_bytes_total", "Bytes through pty sessions"),
+            &["direction"],
+        )
+        .unwrap();
+        let pty_sessions = IntCounterVec::new(
+            Opts::new("agent_pty_sessions_total", "Pty sessions, by outcome"),
+            &["outcome"],
         )
         .unwrap();
         let scheduled_runs = IntCounterVec::new(
@@ -645,6 +661,9 @@ impl Metrics {
             Box::new(context_tokens.clone()),
             Box::new(context_messages.clone()),
             Box::new(tool_calls.clone()),
+            Box::new(pty_active.clone()),
+            Box::new(pty_bytes.clone()),
+            Box::new(pty_sessions.clone()),
             Box::new(scheduled_runs.clone()),
             Box::new(scheduled_seconds.clone()),
             Box::new(forge_calls.clone()),
@@ -723,6 +742,9 @@ impl Metrics {
             context_tokens,
             context_messages,
             tool_calls,
+            pty_active,
+            pty_bytes,
+            pty_sessions,
             scheduled_runs,
             scheduled_seconds,
             forge_calls,
@@ -829,6 +851,19 @@ impl Metrics {
     /// Latency of one content scan.
     pub fn on_scan(&self, seconds: f64) {
         self.scan_seconds.observe(seconds);
+    }
+    /// A pty session opened (parity spec 29).
+    pub fn on_pty_open(&self) {
+        self.pty_active.inc();
+    }
+    /// A pty session ended.
+    pub fn on_pty_close(&self, outcome: &str) {
+        self.pty_active.dec();
+        self.pty_sessions.with_label_values(&[outcome]).inc();
+    }
+    /// Bytes through a pty, by direction (`in`/`out`).
+    pub fn on_pty_bytes(&self, direction: &str, n: u64) {
+        self.pty_bytes.with_label_values(&[direction]).inc_by(n);
     }
     /// One scheduled run (parity spec 28).
     pub fn on_scheduled_run(&self, outcome: &str, seconds: f64) {

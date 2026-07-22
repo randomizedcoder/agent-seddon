@@ -277,6 +277,16 @@ write_dir = ""
 # A job whose previous run is still in flight is SKIPPED, not stacked (and the
 # skip is recorded); a crashed run's claim expires after `claim_ttl_secs` so it
 # cannot wedge the job forever. See docs/components/scheduler.md.
+# Interactive terminal sessions (the Pty seam). A live tty the agent holds ACROSS
+# TURNS is strictly more powerful than one-shot `bash` — it survives turns, holds
+# a real process, and accepts arbitrary keystrokes — so it is OFF by default and
+# every call still passes the Policy gate. Output retention is a bounded 2 MiB
+# rolling buffer; a reader that falls behind is told how many bytes it missed.
+# See docs/components/pty.md.
+[pty]
+enabled      = false
+max_sessions = 8
+
 [scheduler]
 enabled        = false
 tick_secs      = 30

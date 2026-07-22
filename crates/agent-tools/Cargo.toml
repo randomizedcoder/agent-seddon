@@ -34,6 +34,8 @@ tool-skill-write = []
 tool-forge = []
 # `schedule`: recurring unattended runs (parity spec 28).
 tool-schedule = ["dep:agent-scheduler"]
+# `pty`: interactive terminal sessions (parity spec 29).
+tool-pty = ["dep:agent-pty"]
 # `session_export` over the deterministic renderer (parity spec 20).
 tool-session-export = ["dep:agent-export"]
 # The `todo_write` tool over the TaskTracker seam (structured plan). The tracker
@@ -50,6 +52,7 @@ dhat-heap = ["dep:dhat"]
 agent-core.workspace = true
 agent-export = { workspace = true, optional = true }
 agent-scheduler = { workspace = true, optional = true }
+agent-pty = { workspace = true, optional = true }
 agent-metrics = { workspace = true, optional = true }
 # `bash` routes through the Sandbox seam; the `local` backend is the default.
 agent-sandbox = { workspace = true, features = ["sandbox-local"] }

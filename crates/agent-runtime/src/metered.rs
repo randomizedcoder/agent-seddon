@@ -1912,3 +1912,80 @@ impl agent_core::Forge for MeteredForge {
             .await
     }
 }
+
+/// Wrap a [`Pty`](agent_core::Pty) so sessions and byte volumes are visible.
+///
+/// A live terminal is the most powerful thing the agent holds, so its usage
+/// being observable matters more here than for a read-only seam.
+#[cfg(feature = "pty")]
+pub(crate) fn pty(inner: Arc<dyn agent_core::Pty>, m: Metrics) -> Arc<dyn agent_core::Pty> {
+    Arc::new(MeteredPty { inner, metrics: m })
+}
+
+#[cfg(feature = "pty")]
+struct MeteredPty {
+    inner: Arc<dyn agent_core::Pty>,
+    metrics: Metrics,
+}
+
+#[cfg(feature = "pty")]
+#[async_trait]
+impl agent_core::Pty for MeteredPty {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    async fn open(&self, spec: &agent_core::PtySpec) -> agent_core::Result<String> {
+        let span = tracing::info_span!(
+            "pty.session",
+            command = %spec.command,
+            cols = spec.cols,
+            rows = spec.rows,
+        );
+        let out = self.inner.open(spec).instrument(span).await;
+        if out.is_ok() {
+            self.metrics.on_pty_open();
+        }
+        out
+    }
+
+    async fn write(&self, id: &str, bytes: &[u8]) -> agent_core::Result<()> {
+        let out = self.inner.write(id, bytes).await;
+        if out.is_ok() {
+            self.metrics.on_pty_bytes("in", bytes.len() as u64);
+        }
+        out
+    }
+
+    async fn read(
+        &self,
+        id: &str,
+        cursor: Option<u64>,
+    ) -> agent_core::Result<agent_core::PtyOutput> {
+        let out = self.inner.read(id, cursor).await;
+        if let Ok(o) = &out {
+            self.metrics.on_pty_bytes("out", o.data.len() as u64);
+        }
+        out
+    }
+
+    async fn resize(&self, id: &str, cols: u16, rows: u16) -> agent_core::Result<()> {
+        self.inner.resize(id, cols, rows).await
+    }
+
+    async fn close(&self, id: &str) -> agent_core::Result<bool> {
+        let out = self.inner.close(id).await;
+        if matches!(out, Ok(true)) {
+            self.metrics.on_pty_close("closed");
+        }
+        out
+    }
+
+    async fn list(&self) -> agent_core::Result<Vec<agent_core::PtySessionInfo>> {
+        self.inner.list().await
+    }
+
+    async fn get(&self, id: &str) -> agent_core::Result<agent_core::PtySessionInfo> {
+        self.inner.get(id).await
+    }
+}

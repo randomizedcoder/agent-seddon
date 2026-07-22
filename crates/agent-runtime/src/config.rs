@@ -63,6 +63,32 @@ pub struct Config {
     pub forge: ForgeCfg,
     #[serde(default)]
     pub scheduler: SchedulerCfg,
+    #[serde(default)]
+    pub pty: PtyCfg,
+}
+
+/// Interactive terminal sessions (the `Pty` seam, parity spec 29). A live tty
+/// the agent holds across turns is strictly more powerful than one-shot `bash`,
+/// so this is OFF by default. See docs/components/pty.md.
+#[derive(Debug, Deserialize)]
+pub struct PtyCfg {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_max_pty_sessions")]
+    pub max_sessions: usize,
+}
+
+impl Default for PtyCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_sessions: default_max_pty_sessions(),
+        }
+    }
+}
+
+fn default_max_pty_sessions() -> usize {
+    8
 }
 
 /// Recurring unattended runs (the `Scheduler` seam, parity spec 28). `enabled`
@@ -1219,6 +1245,7 @@ impl Config {
             skills: SkillsCfg::default(),
             forge: ForgeCfg::default(),
             scheduler: SchedulerCfg::default(),
+            pty: PtyCfg::default(),
         }
     }
 }

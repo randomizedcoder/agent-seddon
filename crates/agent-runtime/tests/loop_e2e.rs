@@ -887,3 +887,75 @@ async fn negative_schedule_tool_absent_unless_enabled() {
     );
     assert_eq!(agent.tick_scheduler().await, 0, "no scheduler, no ticks");
 }
+
+// --- parity spec 29: pty ------------------------------------------------------
+
+/// A real interactive session through the whole agent path: the model opens a
+/// pty, writes to it, and reads the child's response back. This is the thing
+/// `bash` structurally cannot do — a live terminal held across turns.
+#[tokio::test]
+async fn pty_session_is_interactive_across_turns() {
+    let dir = tempdir();
+    let cfg = format!("{}\n[pty]\nenabled = true\n", config_toml(&dir));
+    let script = vec![
+        tool_turn(vec![call(
+            "1",
+            "pty",
+            json!({"action": "open", "command": "cat"}),
+        )]),
+        tool_turn(vec![call(
+            "2",
+            "pty",
+            json!({"action": "write", "id": "pty-1", "input": "round-trip\n"}),
+        )]),
+        // A separate turn reads what the child echoed — the "across turns" part.
+        tool_turn(vec![call(
+            "3",
+            "pty",
+            json!({"action": "read", "id": "pty-1"}),
+        )]),
+        final_turn("Done."),
+    ];
+    let agent = agent_for_cfg(&cfg, script).await;
+    agent.run("talk to a terminal").await.expect("run");
+
+    // Prove the round trip actually happened, rather than just that the tool
+    // exists. The child echoes asynchronously, so poll the session through the
+    // tool the model itself used.
+    let tools = agent.tools();
+    let pty = tools.get("pty").expect("pty tool registered");
+    let ctx = agent_core::ToolContext { cwd: dir.clone() };
+    let mut saw = String::new();
+    for _ in 0..200 {
+        let obs = pty
+            .execute(json!({"action": "read", "id": "pty-1"}), &ctx)
+            .await
+            .expect("read");
+        saw = obs.content;
+        if saw.contains("round-trip") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(
+        saw.contains("round-trip"),
+        "the terminal never echoed the input back; saw: {saw}"
+    );
+
+    // Clean up the child rather than leaving it running.
+    let _ = pty
+        .execute(json!({"action": "close", "id": "pty-1"}), &ctx)
+        .await;
+}
+
+/// A live tty is strictly more powerful than one-shot `bash`, so it is off
+/// unless an operator opts in.
+#[tokio::test]
+async fn negative_pty_tool_absent_unless_enabled() {
+    let dir = tempdir();
+    let agent = agent_for(&dir, vec![final_turn("ok")]).await;
+    assert!(
+        !agent.tools().describe_all().iter().any(|s| s.name == "pty"),
+        "pty must not be registered unless [pty] enabled = true"
+    );
+}
