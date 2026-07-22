@@ -4,7 +4,22 @@ Per-feature parity spec for a **`Scheduler` seam**: unattended, cron-like agent
 runs, job-lifecycle guards (no runaway/overlapping jobs), and durable run history —
 so the same agent that runs interactively can run *on a schedule*, unattended.
 
-> **Status: spec (design of record).** New `Scheduler` seam (async trait in
+> **Status: implemented** (`Scheduler` seam + `agent-scheduler` with a
+> dependency-free cron subset, the overlap/claim guard, bounded history, the
+> `schedule` tool, an `agent --scheduler` driver, and metrics; doc in
+> `docs/components/scheduler.md`). Two notes worth carrying forward. **`next_fire`
+> must be strictly-after**: with "at or after" semantics a re-armed cron job
+> whose expression matches its own fire instant is immediately due again and
+> spins in a hot loop, and a one-shot re-arms at its own instant and fires
+> forever — both were caught by tests and both now have regression cases. And the
+> **executor is passed per tick** rather than stored, because the agent owns the
+> scheduler (via the tool) while running a job needs the agent; passing it in
+> means the cycle never forms. **Deferred:** durable jobs (the registry is
+> in-memory, so jobs do not survive a restart — persistence belongs with
+> `SessionStore`), a concurrency ceiling across distinct jobs, and
+> `scheduler.proto` / `--serve-scheduler`.
+>
+> Original plan follows. New `Scheduler` seam (async trait in
 > `agent-core`) + `scheduler.proto` gRPC service (reflection, `--serve-scheduler`),
 > wrapping the existing **headless** agent loop
 > ([`crates/agent-runtime/src/agent.rs`](../../crates/agent-runtime/src/agent.rs),

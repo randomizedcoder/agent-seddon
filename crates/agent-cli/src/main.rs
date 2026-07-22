@@ -31,6 +31,8 @@ async fn main() -> Result<()> {
     let toml_str = std::fs::read_to_string(&config_path)
         .with_context(|| format!("reading config `{}`", config_path.display()))?;
     let config = agent_runtime::parse_config(&toml_str).context("parsing config")?;
+    // Captured before `config` is consumed by the builder.
+    let cfg_tick_secs = config.scheduler.tick_secs;
 
     // Telemetry (opt-in). Build the writer before installing tracing so the
     // ClickHouse layer can stream logs from the very first event.
@@ -138,6 +140,28 @@ async fn main() -> Result<()> {
         Mode::Repl => repl::run(&agent, &sessions_dir, resumed)
             .await
             .map(|()| None),
+        Mode::Scheduler => {
+            // Tick until interrupted. Each due job runs as a fresh headless turn,
+            // and the scheduler's own overlap guard is what stops a slow job
+            // stacking copies of itself.
+            let every = std::time::Duration::from_secs(cfg_tick_secs.max(1));
+            eprintln!("scheduler: ticking every {}s — ^C to stop", every.as_secs());
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(every) => {
+                        let n = agent.tick_scheduler().await;
+                        if n > 0 {
+                            tracing::info!(jobs = n, "scheduler fired due jobs");
+                        }
+                    }
+                    _ = tokio::signal::ctrl_c() => {
+                        eprintln!("\n^C — stopping the scheduler");
+                        break;
+                    }
+                }
+            }
+            Ok(None)
+        }
         Mode::ServeMcp => mcp_server::serve(&agent).await.map(|()| None),
         Mode::ServeGrpc(..) => {
             let (seam, listen) = serve_grpc.expect("serve target resolved above");
@@ -248,6 +272,8 @@ enum Mode {
     ServeMcp,
     /// Host one seam over gRPC (`--serve-<seam>`), with an optional listen override.
     ServeGrpc(grpc_server::Seam, Option<String>),
+    /// Drive the scheduler: tick on an interval, firing due jobs (parity spec 28).
+    Scheduler,
 }
 
 enum ResumeArg {
@@ -264,6 +290,7 @@ struct Args {
 fn parse_args() -> Result<Args> {
     let mut config_path = PathBuf::from("config/agent.toml");
     let mut resume: Option<ResumeArg> = None;
+    let mut scheduler_mode = false;
     let mut serve_mcp = false;
     let mut serve_grpc: Option<grpc_server::Seam> = None;
     let mut listen: Option<String> = None;
@@ -282,6 +309,7 @@ fn parse_args() -> Result<Args> {
                     args.next().context("--resume requires a session id")?,
                 ));
             }
+            "--scheduler" => scheduler_mode = true,
             "--serve-mcp" => serve_mcp = true,
             "--listen" => {
                 listen = Some(args.next().context("--listen requires an address")?);
@@ -296,6 +324,7 @@ fn parse_args() -> Result<Args> {
                      With a goal: run it once. Without a goal: interactive REPL.\n  \
                      --continue          resume the most recent saved session\n  \
                      --resume ID         resume a specific session\n  \
+                     --scheduler         drive scheduled jobs (ticks until interrupted)\n  \
                      --serve-mcp         run as an MCP server over stdio (exposes a `run` tool)\n  \
                      --serve-<seam>      host one seam over gRPC; <seam> = provider|memory|tools|context|policy|search|repo\n  \
                      --listen ADDR       override the gRPC listen address (host:port or unix:/path)"
@@ -307,7 +336,9 @@ fn parse_args() -> Result<Args> {
     }
 
     let goal = goal_parts.join(" ");
-    let mode = if let Some(seam) = serve_grpc {
+    let mode = if scheduler_mode {
+        Mode::Scheduler
+    } else if let Some(seam) = serve_grpc {
         Mode::ServeGrpc(seam, listen)
     } else if serve_mcp {
         Mode::ServeMcp

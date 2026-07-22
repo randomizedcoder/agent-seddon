@@ -82,6 +82,10 @@ pub struct Agent {
     /// Checkpoint the working set after each completed turn (parity spec 19).
     #[cfg(feature = "session")]
     auto_checkpoint: bool,
+    /// The scheduler, if wired — held so the `--scheduler` driver can tick it
+    /// (parity spec 28).
+    #[cfg(feature = "scheduler")]
+    scheduler: Option<Arc<agent_scheduler::LocalScheduler>>,
 }
 
 impl Agent {
@@ -116,7 +120,38 @@ impl Agent {
             hooks: agent_core::HookRegistry::new(),
             #[cfg(feature = "session")]
             auto_checkpoint: false,
+            #[cfg(feature = "scheduler")]
+            scheduler: None,
         }
+    }
+
+    /// Attach the scheduler (parity spec 28).
+    #[cfg(feature = "scheduler")]
+    pub fn with_scheduler(mut self, s: Arc<agent_scheduler::LocalScheduler>) -> Self {
+        self.scheduler = Some(s);
+        self
+    }
+
+    /// The scheduler, if wired.
+    #[cfg(feature = "scheduler")]
+    pub fn scheduler(&self) -> Option<Arc<agent_scheduler::LocalScheduler>> {
+        self.scheduler.clone()
+    }
+
+    /// Fire every due job once, running each as a fresh headless turn.
+    ///
+    /// Returns how many ran. The executor is supplied here rather than stored by
+    /// the scheduler, which is what keeps agent and scheduler from owning each
+    /// other.
+    #[cfg(feature = "scheduler")]
+    pub async fn tick_scheduler(&self) -> usize {
+        let Some(s) = &self.scheduler else { return 0 };
+        s.tick_with(|goal| async move {
+            self.run(&goal)
+                .await
+                .map_err(|e| agent_core::Error::Scheduler(e.to_string()))
+        })
+        .await
     }
 
     /// Checkpoint automatically after each completed turn (parity spec 19).

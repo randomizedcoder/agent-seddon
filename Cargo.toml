@@ -24,6 +24,7 @@ members = [
     "crates/agent-web-search",
     "crates/agent-export",
     "crates/agent-forge",
+    "crates/agent-scheduler",
     "crates/agent-grpc",
     "crates/agent-mcp",
     "crates/agent-proto",
@@ -128,6 +129,7 @@ agent-cache = { path = "crates/agent-cache", default-features = false }
 agent-web-search = { path = "crates/agent-web-search", default-features = false }
 agent-export = { path = "crates/agent-export", default-features = false }
 agent-forge = { path = "crates/agent-forge", default-features = false }
+agent-scheduler = { path = "crates/agent-scheduler", default-features = false }
 agent-grpc = { path = "crates/agent-grpc" }
 agent-mcp = { path = "crates/agent-mcp" }
 agent-proto = { path = "crates/agent-proto" }

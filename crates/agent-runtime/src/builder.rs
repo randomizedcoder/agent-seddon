@@ -150,6 +150,37 @@ pub async fn build_agent_with(
         tools.register(crate::metered::tool(tool, metrics.clone()));
     }
 
+    // Scheduler (parity spec 28): recurring unattended runs. The `schedule` tool
+    // registers/inspects jobs; they only FIRE while a driver ticks
+    // (`agent --scheduler`), so enabling this alone cannot start work silently.
+    #[cfg(feature = "scheduler")]
+    let scheduler = if cfg.scheduler.enabled {
+        let m = metrics.clone();
+        let s = Arc::new(
+            agent_scheduler::LocalScheduler::new()
+                .with_max_jobs(cfg.scheduler.max_jobs)
+                .with_claim_ttl_ms(cfg.scheduler.claim_ttl_secs.saturating_mul(1_000))
+                .with_observer(Arc::new(move |run: &agent_core::Run| {
+                    m.on_scheduled_run(
+                        run.outcome.as_str(),
+                        run.finished_ms.saturating_sub(run.started_ms) as f64 / 1000.0,
+                    );
+                    tracing::info!(
+                        job = %run.job_id,
+                        outcome = run.outcome.as_str(),
+                        "scheduled run finished"
+                    );
+                })),
+        );
+        let tool = Arc::new(agent_tools::ScheduleTool::new(
+            s.clone() as Arc<dyn agent_core::Scheduler>
+        ));
+        tools.register(crate::metered::tool(tool, metrics.clone()));
+        Some(s)
+    } else {
+        None
+    };
+
     // Forge (parity spec 27): the remote platform. Local git stays with the
     // RepoBackend; this is only the PR/issue/review API. Writes are Policy-gated
     // like any side-effecting tool and default to dry-run.
@@ -442,6 +473,11 @@ pub async fn build_agent_with(
     // guard), meter it, attach it with its token budget.
     // Lifecycle hooks (parity spec 22): config-selected, dispatched in the order
     // listed. Empty by default, and every dispatch short-circuits when empty.
+    #[cfg(feature = "scheduler")]
+    let agent = match scheduler {
+        Some(s) => agent.with_scheduler(s),
+        None => agent,
+    };
     let agent = {
         let hooks = crate::hooks::build(&cfg.hooks.enabled, &metrics)?;
         if hooks.is_empty() {

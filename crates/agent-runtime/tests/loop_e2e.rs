@@ -821,3 +821,69 @@ async fn negative_forge_missing_repo_fails_the_build() {
     };
     assert!(err.contains("owner and repo"), "got: {err}");
 }
+
+// --- parity spec 28: scheduler ------------------------------------------------
+
+/// The full path: the `schedule` tool registers a job, and `tick_scheduler`
+/// runs it as a real headless turn through the agent. Without this the seam
+/// would be another feature that only exists in its own unit tests.
+#[tokio::test]
+async fn scheduled_job_runs_a_real_turn() {
+    let dir = tempdir();
+    let cfg = format!("{}\n[scheduler]\nenabled = true\n", config_toml(&dir));
+    // Turn 1-2: the model schedules a job. Turn 3: the scheduled run's own turn.
+    let script = vec![
+        tool_turn(vec![call(
+            "1",
+            "schedule",
+            json!({"action": "create", "spec": "in 1s", "goal": "write scheduled.txt"}),
+        )]),
+        final_turn("Scheduled."),
+        tool_turn(vec![call(
+            "2",
+            "write_file",
+            json!({"path": "scheduled.txt", "content": "ran unattended"}),
+        )]),
+        final_turn("Wrote it."),
+    ];
+    let agent = agent_for_cfg(&cfg, script).await;
+    agent.run("schedule some work").await.expect("run");
+
+    // Nothing fires until a driver ticks — enabling the scheduler alone must not
+    // start work silently.
+    assert_eq!(agent.tick_scheduler().await, 0, "not due yet");
+    assert!(!dir.join("scheduled.txt").exists());
+
+    // Once due, the job runs a real turn against the real tool registry.
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+    assert_eq!(agent.tick_scheduler().await, 1, "job should have fired");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("scheduled.txt")).expect("the scheduled run wrote it"),
+        "ran unattended"
+    );
+
+    // …and the outcome is recorded, which is what makes autonomy auditable.
+    let s = agent.scheduler().expect("scheduler wired");
+    let hist = agent_core::Scheduler::history(s.as_ref(), "job-1")
+        .await
+        .unwrap();
+    assert_eq!(hist.len(), 1);
+    assert_eq!(hist[0].outcome, agent_core::RunOutcome::Completed);
+}
+
+/// The tool is absent unless configured — scheduling is persistent and
+/// privileged, so it is opt-in.
+#[tokio::test]
+async fn negative_schedule_tool_absent_unless_enabled() {
+    let dir = tempdir();
+    let agent = agent_for(&dir, vec![final_turn("ok")]).await;
+    assert!(
+        !agent
+            .tools()
+            .describe_all()
+            .iter()
+            .any(|s| s.name == "schedule"),
+        "schedule must not be registered unless [scheduler] enabled = true"
+    );
+    assert_eq!(agent.tick_scheduler().await, 0, "no scheduler, no ticks");
+}

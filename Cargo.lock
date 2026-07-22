@@ -284,6 +284,7 @@ dependencies = [
  "agent-reference",
  "agent-sandbox",
  "agent-scanner",
+ "agent-scheduler",
  "agent-search",
  "agent-session",
  "agent-tasks",
@@ -329,6 +330,17 @@ dependencies = [
  "dhat",
  "iai-callgrind",
  "regex",
+ "rstest",
+ "tokio",
+]
+
+[[package]]
+name = "agent-scheduler"
+version = "0.1.0"
+dependencies = [
+ "agent-core",
+ "async-trait",
+ "iai-callgrind",
  "rstest",
  "tokio",
 ]
@@ -437,6 +449,7 @@ dependencies = [
  "agent-export",
  "agent-metrics",
  "agent-sandbox",
+ "agent-scheduler",
  "agent-tasks",
  "agent-testkit",
  "async-trait",
