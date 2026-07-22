@@ -190,3 +190,19 @@ impl pb::semantic_server::Semantic for SemanticService {
 pub fn memory_router(inner: Arc<dyn MemoryStore>) -> Router {
     Server::builder().add_service(MemoryService::new(inner).into_server())
 }
+
+/// The episodic layer as its own service.
+///
+/// Separate from `memory_router` on purpose: the whole reason the layers are
+/// split in `agent-core` is so the durable log can be swapped independently of
+/// how semantic recall works. Serving them separately is the same idea across a
+/// network — the append-only log can live on one host and the vector store on
+/// another.
+pub fn episodic_router(inner: Arc<dyn EpisodicStore>) -> Router {
+    Server::builder().add_service(EpisodicService::new(inner).into_server())
+}
+
+/// The semantic layer as its own service.
+pub fn semantic_router(inner: Arc<dyn SemanticStore>) -> Router {
+    Server::builder().add_service(SemanticService::new(inner).into_server())
+}

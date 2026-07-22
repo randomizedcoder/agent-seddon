@@ -450,7 +450,8 @@ job         = "agent-seddon"
 # memory 50052, tools 50053, context 50054, policy 50055, search 50056, repo 50057,
 # session 50058, scanner 50059, reference 50060, scheduler 50061,
 # tokenizer 50062, embed 50063, web 50064, web_search 50065, sandbox 50066,
-# pty 50067, forge 50068, tasks 50069, lsp 50070).
+# pty 50067, forge 50068, tasks 50069, lsp 50070, episodic 50071,
+# semantic 50072).
 # Use `unix:/path` for a same-host, TCP-bypassing socket. See docs/grpc.md.
 #
 # [grpc.provider]
@@ -498,6 +499,14 @@ job         = "agent-seddon"
 # endpoint = "http://plan:50069"                      # a shared plan ([tasks] backend = "grpc")
 # [grpc.lsp]
 # endpoint = "http://lsp-host:50070"                  # a warm index ([lsp] backend = "grpc")
+#
+# The memory LAYERS, hosted individually — the append-only log and the semantic
+# store can live on different hosts. Only available when `[memory] semantic`
+# composes them; an unlayered store is a single facade served by --serve-memory.
+# [grpc.episodic]
+# endpoint = "http://log-host:50071"                  # ([memory] backend = "grpc")
+# [grpc.semantic]
+# endpoint = "http://vector-host:50072"               # ([memory] semantic = "grpc")
 #
 # `agent --serve-all` hosts every enabled seam in ONE process on ONE endpoint,
 # so a same-host deployment isn't one process per seam. Seams whose impl is

@@ -139,6 +139,19 @@
       socket = "/tmp/agent-seddon/lsp.sock";
       metrics_port = 9620;
     };
+    # The memory LAYERS, hosted individually so the append-only log and the
+    # semantic/vector store can live on different hosts. Only available when
+    # `[memory] semantic` composes them.
+    episodic = {
+      port = 50071;
+      socket = "/tmp/agent-seddon/episodic.sock";
+      metrics_port = 9621;
+    };
+    semantic = {
+      port = 50072;
+      socket = "/tmp/agent-seddon/semantic.sock";
+      metrics_port = 9622;
+    };
 
     # NOT a seam: the `agent --serve-all` gateway, which hosts every seam's
     # service in one process on one endpoint. A same-host deployment that wants

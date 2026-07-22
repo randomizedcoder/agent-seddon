@@ -59,6 +59,8 @@ let
     ${seamConst "FORGE" g.forge}
     ${seamConst "TASKS" g.tasks}
     ${seamConst "LSP" g.lsp}
+    ${seamConst "EPISODIC" g.episodic}
+    ${seamConst "SEMANTIC" g.semantic}
 
     /// The `agent --serve-all` gateway (not a seam — it hosts every seam).
     ${seamConst "GATEWAY" g.gateway}

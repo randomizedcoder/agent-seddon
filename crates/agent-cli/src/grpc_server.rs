@@ -43,6 +43,8 @@ pub enum Seam {
     Forge,
     Tasks,
     Lsp,
+    Episodic,
+    Semantic,
 }
 
 /// Every variant, so the table can be checked for completeness.
@@ -67,6 +69,8 @@ const ALL_SEAMS: &[Seam] = &[
     Seam::Forge,
     Seam::Tasks,
     Seam::Lsp,
+    Seam::Episodic,
+    Seam::Semantic,
 ];
 
 /// The static facts about a seam served as its own process.
@@ -224,6 +228,20 @@ const SEAMS: &[SeamInfo] = &[
         service: "agent.v1.LspService",
         endpoint: constants::LSP,
     },
+    SeamInfo {
+        seam: Seam::Episodic,
+        flag: "--serve-episodic",
+        name: "episodic",
+        service: "agent.v1.Episodic",
+        endpoint: constants::EPISODIC,
+    },
+    SeamInfo {
+        seam: Seam::Semantic,
+        flag: "--serve-semantic",
+        name: "semantic",
+        service: "agent.v1.Semantic",
+        endpoint: constants::SEMANTIC,
+    },
 ];
 
 impl Seam {
@@ -287,6 +305,8 @@ impl Seam {
             Seam::Forge => &cfg.grpc.forge.listen,
             Seam::Tasks => &cfg.grpc.tasks.listen,
             Seam::Lsp => &cfg.grpc.lsp.listen,
+            Seam::Episodic => &cfg.grpc.episodic.listen,
+            Seam::Semantic => &cfg.grpc.semantic.listen,
         }
     }
 }
@@ -455,6 +475,22 @@ fn add_seam_service(router: Router, agent: &Agent, seam: Seam) -> anyhow::Result
             ),
             None => (router, false),
         },
+        // The layers exist only when `[memory] semantic` composes them; an
+        // unlayered store is a single facade with nothing to split.
+        Seam::Episodic => match agent.episodic() {
+            Some(e) => (
+                router.add_service(srv::EpisodicService::new(e).into_server()),
+                true,
+            ),
+            None => (router, false),
+        },
+        Seam::Semantic => match agent.semantic() {
+            Some(s) => (
+                router.add_service(srv::SemanticService::new(s).into_server()),
+                true,
+            ),
+            None => (router, false),
+        },
     })
 }
 
@@ -595,6 +631,7 @@ mod tests {
     #[case::positive_sandbox("--serve-sandbox", Some(Seam::Sandbox))]
     #[case::positive_forge("--serve-forge", Some(Seam::Forge))]
     #[case::positive_lsp("--serve-lsp", Some(Seam::Lsp))]
+    #[case::positive_episodic("--serve-episodic", Some(Seam::Episodic))]
     #[case::negative_unknown_seam("--serve-nope", None)]
     #[case::negative_not_a_serve_flag("--help", None)]
     #[case::adversarial_empty("", None)]
