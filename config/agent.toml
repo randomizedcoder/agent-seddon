@@ -205,6 +205,14 @@ per_block_max_chars = 8000
 # side-effecting ones (write_file/edit/apply_patch body, bash command).
 # OFF by default — `rules` empty means no scanning. Enable with:
 #   rules = ["secret", "threat"]
+# A rule may also be "grpc" — a REMOTE scanner (see [grpc.scanner]), which
+# composes with the local ones: rules = ["secret", "grpc"] runs both. That
+# centralises the ruleset: one scanner process holds the rules and every agent
+# pointed at it inherits a change without redeploying.
+#   NOTE the remote is deliberately FAIL-OPEN, as the seam contract requires: if
+#   it is unreachable it contributes no findings rather than blocking every call.
+#   That means scanning silently stops. The compensating control is the WARN it
+#   logs (`scanner.transport_failed`) — alert on it.
 # `deny_at` = info|low|medium|high|critical. `allow_rules` waives specific rule
 # ids (e.g. a known fixture secret) without disabling the scanner. `scope` sets
 # threat-pattern breadth: all (high-confidence only) | context | strict.
@@ -436,7 +444,7 @@ job         = "agent-seddon"
 # dials `endpoint`; `agent --serve-<seam>` binds `listen`. Both default (when
 # empty/omitted) to 127.0.0.1:<port> using the generated ports (provider 50051,
 # memory 50052, tools 50053, context 50054, policy 50055, search 50056, repo 50057,
-# session 50058).
+# session 50058, scanner 50059).
 # Use `unix:/path` for a same-host, TCP-bypassing socket. See docs/grpc.md.
 #
 # [grpc.provider]
@@ -448,6 +456,8 @@ job         = "agent-seddon"
 # endpoint = "unix:/tmp/agent-seddon/repo.sock"       # a git gateway (backend = "grpc")
 # [grpc.session]
 # endpoint = "http://session-store:50058"             # shared history ([session] backend = "grpc")
+# [grpc.scanner]
+# endpoint = "http://security:50059"                  # central ruleset ([scanner] rules = ["grpc"])
 #
 # `agent --serve-all` hosts every enabled seam in ONE process on ONE endpoint,
 # so a same-host deployment isn't one process per seam. Seams whose impl is

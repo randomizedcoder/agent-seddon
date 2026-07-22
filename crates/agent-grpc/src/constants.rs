@@ -60,6 +60,11 @@ pub const SESSION: SeamEndpoint = SeamEndpoint {
     uds_path: "/tmp/agent-seddon/session.sock",
     metrics_port: 9608,
 };
+pub const SCANNER: SeamEndpoint = SeamEndpoint {
+    tcp_port: 50059,
+    uds_path: "/tmp/agent-seddon/scanner.sock",
+    metrics_port: 9609,
+};
 
 /// The `agent --serve-all` gateway (not a seam — it hosts every seam).
 pub const GATEWAY: SeamEndpoint = SeamEndpoint {

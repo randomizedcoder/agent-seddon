@@ -41,6 +41,7 @@ let
     + seamJob "search" g.search.metrics_port
     + seamJob "repo" g.repo.metrics_port
     + seamJob "session" g.session.metrics_port
+    + seamJob "scanner" g.scanner.metrics_port
     + seamJob "gateway" g.gateway.metrics_port;
 
   configYml = pkgs.writeText "prometheus.yml" (

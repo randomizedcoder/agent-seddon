@@ -1,0 +1,62 @@
+// The `Scanner` seam over gRPC — untrusted-content scanning as a service.
+//
+// Distributing this centralises security policy: one scanner process holds the
+// rules and allowlist, and every agent pointed at it inherits a rule change
+// without redeploying. It is also the natural home for a backend that needs
+// credentials or a large local database (an advisory feed, a proprietary
+// ruleset) that individual agents should not each carry.
+//
+// Messages are `Scan`-prefixed: the project shares one flat `agent.v1` package,
+// so message names are global (see session.proto for the collision that taught
+// us this).
+syntax = "proto3";
+
+package agent.v1;
+
+service ScannerService {
+  // Findings in `content`, in the order the rules ran.
+  //
+  // NOTE the seam's contract, mirrored here: this RPC reports *detections*, and
+  // an empty result means "nothing found". A backend that cannot run must
+  // return an empty result rather than an error — the `Scanner` trait is
+  // deliberately fail-open on infrastructure failure so an unreachable advisory
+  // database can never block a tool call.
+  rpc Scan(ScanRequest) returns (ScanResponse);
+}
+
+enum ScanKind {
+  SCAN_KIND_TOOL_INPUT = 0;
+  SCAN_KIND_FILE_BODY = 1;
+  SCAN_KIND_WEB_CONTENT = 2;
+  SCAN_KIND_LOCKFILE = 3;
+}
+
+enum ScanSeverity {
+  SCAN_SEVERITY_INFO = 0;
+  SCAN_SEVERITY_LOW = 1;
+  SCAN_SEVERITY_MEDIUM = 2;
+  SCAN_SEVERITY_HIGH = 3;
+  SCAN_SEVERITY_CRITICAL = 4;
+}
+
+message ScanRequest {
+  ScanKind kind = 1;
+  string content = 2;
+}
+
+// One finding: which rule fired, how bad, and where.
+//
+// The matched bytes are deliberately NOT carried — only the span. A denial
+// reason that echoed them would hand an attacker an oracle for probing what is
+// gated (parity spec 08). The span is a byte range into the scanned content.
+message ScanFinding {
+  string rule = 1;
+  ScanSeverity severity = 2;
+  string category = 3;
+  uint64 span_start = 4;
+  uint64 span_end = 5;
+}
+
+message ScanResponse {
+  repeated ScanFinding findings = 1;
+}

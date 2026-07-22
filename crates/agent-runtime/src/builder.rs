@@ -54,6 +54,15 @@ pub async fn build_agent_with(
         metrics.clone(),
         &cfg.agent.provider,
     );
+    // The content scanner (parity spec 18) is built ONCE here and shared by every
+    // consumer — the `skill_write` and `session_export` tools, the policy guard,
+    // and `agent --serve-scanner`. It used to be built per consumer, which made
+    // three independent `DispatchScanner`s with identical rules.
+    #[cfg(feature = "scanner")]
+    let scanner_pair = build_scanner(&cfg, &metrics)?;
+    #[cfg(not(feature = "scanner"))]
+    let scanner_pair: Option<(Arc<dyn agent_core::Scanner>, agent_core::Severity)> = None;
+    let shared_scanner = scanner_pair.as_ref().map(|(s, _)| s.clone());
     #[allow(unused_mut)]
     let mut tools = build_tools(registry, &cfg, &metrics)?;
     #[cfg(feature = "mcp")]
@@ -225,7 +234,7 @@ pub async fn build_agent_with(
         let mut tool = agent_tools::SkillWriteTool::new(root);
         // Prefer the Scanner seam for the injection check when one is wired.
         #[cfg(feature = "scanner")]
-        if let Some((s, _)) = build_scanner(&cfg, &metrics)? {
+        if let Some(s) = shared_scanner.clone() {
             tool = tool.with_scanner(s);
         }
         tools.register(crate::metered::tool(Arc::new(tool), metrics.clone()));
@@ -240,7 +249,7 @@ pub async fn build_agent_with(
             &cfg.agent.working_dir,
         ));
         #[cfg(feature = "scanner")]
-        if let Some((s, _)) = build_scanner(&cfg, &metrics)? {
+        if let Some(s) = shared_scanner.clone() {
             tool = tool.with_scanner(s);
         }
         tools.register(crate::metered::tool(Arc::new(tool), metrics.clone()));
@@ -367,10 +376,7 @@ pub async fn build_agent_with(
     // Content scanner (parity spec 18): compose the configured rules into one
     // metered `DispatchScanner` and hand it to the guard, which maps the worst
     // finding's severity to a `Decision`.
-    #[cfg(feature = "scanner")]
-    let scanner = build_scanner(&cfg, &metrics)?;
-    #[cfg(not(feature = "scanner"))]
-    let scanner = None;
+    let scanner = scanner_pair;
     let guarded = crate::policy::guard(
         base_policy,
         crate::policy::GuardMode::parse(&cfg.policy.guard),
@@ -456,6 +462,11 @@ pub async fn build_agent_with(
     let agent = agent.with_search(search_dispatch.clone() as Arc<dyn agent_core::SearchBackend>);
     #[cfg(feature = "git")]
     let agent = agent.with_repo(repo_backend);
+    // Hold the shared scanner so `agent --serve-scanner` can host it.
+    let agent = match shared_scanner.clone() {
+        Some(s) => agent.with_scanner(s),
+        None => agent,
+    };
     // Structured output: build the config-selected validator, meter it, attach it.
     #[cfg(feature = "structured")]
     let agent = {
@@ -939,7 +950,17 @@ fn build_scanner(
             "threat" => subs.push(Arc::new(agent_scanner::ThreatScanner::new(
                 agent_scanner::Scope::parse(&cfg.scanner.scope),
             ))),
-            other => anyhow::bail!("unknown [scanner] rule `{other}` (secret|threat)"),
+            // A remote scanner composes like any other rule, so a deployment can
+            // run local rules AND a central one: rules = ["secret", "grpc"].
+            #[cfg(feature = "grpc")]
+            "grpc" => {
+                let ep = crate::registry::grpc_client_endpoint(
+                    &cfg.grpc.scanner.endpoint,
+                    agent_grpc::constants::SCANNER,
+                );
+                subs.push(Arc::new(agent_grpc::client::GrpcScanner::connect(&ep)?));
+            }
+            other => anyhow::bail!("unknown [scanner] rule `{other}` (secret|threat|grpc)"),
         }
     }
     let dispatch = agent_scanner::DispatchScanner::new(subs)

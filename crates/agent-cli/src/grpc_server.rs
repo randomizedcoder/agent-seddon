@@ -31,6 +31,7 @@ pub enum Seam {
     Search,
     Repo,
     Session,
+    Scanner,
 }
 
 /// Every variant, so the table can be checked for completeness.
@@ -43,6 +44,7 @@ const ALL_SEAMS: &[Seam] = &[
     Seam::Search,
     Seam::Repo,
     Seam::Session,
+    Seam::Scanner,
 ];
 
 /// The static facts about a seam served as its own process.
@@ -116,6 +118,13 @@ const SEAMS: &[SeamInfo] = &[
         service: "agent.v1.SessionService",
         endpoint: constants::SESSION,
     },
+    SeamInfo {
+        seam: Seam::Scanner,
+        flag: "--serve-scanner",
+        name: "scanner",
+        service: "agent.v1.ScannerService",
+        endpoint: constants::SCANNER,
+    },
 ];
 
 impl Seam {
@@ -167,6 +176,7 @@ impl Seam {
             Seam::Search => &cfg.grpc.search.listen,
             Seam::Repo => &cfg.grpc.repo.listen,
             Seam::Session => &cfg.grpc.session.listen,
+            Seam::Scanner => &cfg.grpc.scanner.listen,
         }
     }
 }
@@ -247,6 +257,13 @@ fn add_seam_service(router: Router, agent: &Agent, seam: Seam) -> anyhow::Result
         Seam::Session => match agent.session_store() {
             Some(s) => (
                 router.add_service(srv::SessionServiceSvc::new(s).into_server()),
+                true,
+            ),
+            None => (router, false),
+        },
+        Seam::Scanner => match agent.scanner() {
+            Some(s) => (
+                router.add_service(srv::ScannerServiceSvc::new(s).into_server()),
                 true,
             ),
             None => (router, false),
@@ -384,6 +401,7 @@ mod tests {
     #[case::positive_provider("--serve-provider", Some(Seam::Provider))]
     #[case::positive_repo("--serve-repo", Some(Seam::Repo))]
     #[case::positive_session("--serve-session", Some(Seam::Session))]
+    #[case::positive_scanner("--serve-scanner", Some(Seam::Scanner))]
     #[case::negative_unknown_seam("--serve-nope", None)]
     #[case::negative_not_a_serve_flag("--help", None)]
     #[case::adversarial_empty("", None)]
