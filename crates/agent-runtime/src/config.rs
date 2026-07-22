@@ -55,6 +55,17 @@ pub struct Config {
     pub web_search: WebSearchCfg,
     #[serde(default)]
     pub router: RouterCfg,
+    #[serde(default)]
+    pub hooks: HooksCfg,
+}
+
+/// Lifecycle hooks fired from the loop (the `Hook` seam, parity spec 22).
+/// `enabled` lists built-in hooks in dispatch order; empty ⇒ no hooks and no
+/// per-turn cost. See docs/components/hooks.md.
+#[derive(Debug, Default, Deserialize)]
+pub struct HooksCfg {
+    #[serde(default)]
+    pub enabled: Vec<String>,
 }
 
 /// Provider routing + failover (parity spec 25). Selected with
@@ -236,11 +247,17 @@ pub struct SessionCfg {
     pub backend: String,
     #[serde(default)]
     pub dir: String,
+    /// Checkpoint the working set automatically after each completed turn
+    /// (parity spec 19 + 22). Off by default — checkpointing every turn costs
+    /// disk, and an operator opts in.
+    #[serde(default)]
+    pub auto_checkpoint: bool,
 }
 
 impl Default for SessionCfg {
     fn default() -> Self {
         Self {
+            auto_checkpoint: false,
             backend: default_session_backend(),
             dir: String::new(),
         }
@@ -1083,6 +1100,7 @@ impl Config {
             cache: CacheCfg::default(),
             web_search: WebSearchCfg::default(),
             router: RouterCfg::default(),
+            hooks: HooksCfg::default(),
         }
     }
 }

@@ -75,6 +75,13 @@ pub struct Agent {
     /// Token budget a prompt's `@`-mentions may expand into (0 ⇒ unbounded).
     #[cfg(feature = "reference")]
     reference_budget: usize,
+    /// Lifecycle hooks fired from the loop (parity spec 22). Empty by default,
+    /// and every dispatch short-circuits when empty, so an agent without hooks
+    /// pays nothing.
+    hooks: agent_core::HookRegistry,
+    /// Checkpoint the working set after each completed turn (parity spec 19).
+    #[cfg(feature = "session")]
+    auto_checkpoint: bool,
 }
 
 impl Agent {
@@ -106,7 +113,23 @@ impl Agent {
             reference: None,
             #[cfg(feature = "reference")]
             reference_budget: 0,
+            hooks: agent_core::HookRegistry::new(),
+            #[cfg(feature = "session")]
+            auto_checkpoint: false,
         }
+    }
+
+    /// Checkpoint automatically after each completed turn (parity spec 19).
+    #[cfg(feature = "session")]
+    pub fn with_auto_checkpoint(mut self, yes: bool) -> Self {
+        self.auto_checkpoint = yes;
+        self
+    }
+
+    /// Attach lifecycle hooks (parity spec 22).
+    pub fn with_hooks(mut self, hooks: agent_core::HookRegistry) -> Self {
+        self.hooks = hooks;
+        self
     }
 
     /// Attach the composed search backend (so `--serve-search` can host it).
@@ -341,6 +364,9 @@ impl Agent {
         let model = self.settings.model.as_str();
         for iter in 1..=self.settings.max_iterations {
             self.metrics.on_iteration();
+            if !self.hooks.is_empty() {
+                self.hooks.pre_turn(working).await;
+            }
             // Capability gate: a model without vision must never be sent an image
             // block — one unsupported block errors the entire request, losing the
             // turn. Degrade to an explicit note instead (parity spec 26).
@@ -394,6 +420,9 @@ impl Agent {
             let assistant = resp.message.clone();
             working.messages.push(assistant.clone());
             self.record("assistant", assistant.clone()).await;
+            if !self.hooks.is_empty() {
+                self.hooks.post_turn(&assistant).await;
+            }
 
             if let Some(u) = &resp.usage {
                 tracing::info!(
@@ -467,6 +496,21 @@ impl Agent {
                 }
                 .instrument(span)
                 .await;
+                // A `pre_tool` hook can veto a call the policy allowed — the
+                // interventional point. It runs AFTER the policy so a hook can
+                // only ever narrow permission, never widen it.
+                let dec = match dec {
+                    Decision::Allow if !self.hooks.is_empty() => {
+                        match self.hooks.pre_tool(call).await {
+                            agent_core::HookOutcome::Continue => Decision::Allow,
+                            agent_core::HookOutcome::Deny(reason) => {
+                                tracing::info!(tool = %call.name, %reason, "denied by hook");
+                                Decision::Deny(reason)
+                            }
+                        }
+                    }
+                    other => other,
+                };
                 decisions.push(dec);
             }
 
@@ -541,6 +585,9 @@ impl Agent {
                             media = observation.blocks.len(),
                             "tool result"
                         );
+                        if !self.hooks.is_empty() {
+                            self.hooks.post_tool(call, &observation).await;
+                        }
                         // Move the blocks through rather than flattening to text,
                         // so a tool that produced an image (a screenshot, a PNG
                         // read off disk) reaches the next request intact.
@@ -552,10 +599,22 @@ impl Agent {
             }
 
             // Keep the working set within budget before the next turn.
+            let before = working.messages.len();
+            let tokens_before = agent_context::bench_estimate_tokens(&working.messages);
             self.context
                 .compact(working, budget)
                 .instrument(tracing::info_span!("context.compact", iter))
                 .await?;
+            if !self.hooks.is_empty() && before != working.messages.len() {
+                self.hooks
+                    .on_compact(&agent_core::CompactionInfo {
+                        messages_before: before,
+                        messages_after: working.messages.len(),
+                        tokens_before,
+                        tokens_after: agent_context::bench_estimate_tokens(&working.messages),
+                    })
+                    .await;
+            }
         }
 
         self.memory.distill().await.ok();
@@ -678,6 +737,20 @@ impl Session<'_> {
         let goal: String = input.chars().take(80).collect();
         let span = tracing::info_span!("agent.turn", goal = %goal);
         let result = self.send_inner(input).instrument(span).await;
+        // Checkpoint the completed turn, so `restore`/`branch`/`undo` have
+        // something to work with (parity spec 19). Best-effort: a checkpoint
+        // failure must not fail a turn that already succeeded.
+        #[cfg(feature = "session")]
+        if result.is_ok() && self.agent.auto_checkpoint {
+            let label: String = input.chars().take(60).collect();
+            if let Err(e) = self
+                .agent
+                .checkpoint(&self.agent.settings.session_id, &self.working, &label)
+                .await
+            {
+                tracing::warn!(error = %e, "auto-checkpoint failed");
+            }
+        }
         let outcome = if result.is_ok() { "success" } else { "error" };
         self.agent
             .metrics
@@ -686,6 +759,26 @@ impl Session<'_> {
     }
 
     async fn send_inner(&mut self, input: &str) -> anyhow::Result<String> {
+        // Expand the prompt's `@file`/`@dir`/`@symbol`/`@url` mentions into
+        // context blocks BEFORE assembly, so the model sees the exact bytes the
+        // user pointed at (parity spec 17). Resolution never errors: an
+        // unresolved or denied reference degrades to a warning and the turn runs.
+        #[cfg(feature = "reference")]
+        let expanded: Vec<ContextBlock> = {
+            let res = self.agent.resolve_references(input).await;
+            for w in &res.warnings {
+                tracing::info!(warning = %w, "reference not expanded");
+            }
+            if res.blocked {
+                tracing::warn!(
+                    "reference expansion exceeded its token budget; the prompt is unmodified"
+                );
+            }
+            res.blocks
+        };
+        #[cfg(not(feature = "reference"))]
+        let expanded: Vec<ContextBlock> = Vec::new();
+
         if !self.started {
             // First turn: recall relevant memory and assemble the initial context.
             let recall_span = tracing::info_span!("memory.recall", items = tracing::field::Empty);
@@ -717,7 +810,11 @@ impl Session<'_> {
                 .context
                 .assemble(ContextInput {
                     system_prompt: self.agent.settings.system_prompt.clone(),
-                    prepend: self.agent.settings.context_prepend.clone(),
+                    prepend: {
+                        let mut p = self.agent.settings.context_prepend.clone();
+                        p.extend(expanded.iter().cloned());
+                        p
+                    },
                     recalled,
                     goal: input.to_string(),
                     append: self.agent.settings.context_append.clone(),
@@ -730,7 +827,13 @@ impl Session<'_> {
             }
             self.started = true;
         } else {
-            // Continuation: append the new user message to the running history.
+            // Continuation: assembly already happened, so expanded references are
+            // injected as system context ahead of the new user message.
+            for b in &expanded {
+                self.working
+                    .messages
+                    .push(Message::system(format!("## {}\n{}", b.source, b.content)));
+            }
             self.working.messages.push(Message::user(input));
         }
 

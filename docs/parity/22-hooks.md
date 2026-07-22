@@ -4,7 +4,24 @@ Per-feature parity spec for a new **`Hook` seam** and a gRPC **event bus** that 
 external processes observe and gate the agent loop's lifecycle — extending the loop
 without forking it.
 
-> **Status: spec (design of record).** Introduces a new `Hook` seam in `agent-core`
+> **Status: implemented** (typed `Hook` seam + `HookRegistry` dispatched from
+> `run_loop` at all five points, `pre_tool` veto, config-selected built-in
+> `tracing` hook, metrics; doc in `docs/components/hooks.md`). Notes: the veto
+> runs **after** the `Policy` decision, so a hook can only narrow permission —
+> hooks are an extension point, not an authorization bypass, and a test pins it.
+> A built-in hook ships deliberately: a seam with no in-tree implementation is
+> exactly how specs 17 and 19 ended up merged-but-unreachable, and this PR also
+> fixes those (see below). **Deferred:** `hook.proto` /
+> `HookService.Subscribe`, the server-streaming event bus for out-of-process
+> subscribers, consistent with specs 11–25.
+>
+> **Dark-seam debt paid here.** This PR also wires the two features that shipped
+> reachable-only-as-an-unused-method: `@`-reference expansion (spec 17) now runs
+> on every prompt before assembly, and auto-checkpoint (spec 19) records a
+> restorable checkpoint after each completed turn under `[session]
+> auto_checkpoint`. Both are proven end-to-end rather than merely wired.
+>
+> Original plan follows. Introduces a new `Hook` seam in `agent-core`
 > with five lifecycle callbacks (`pre_tool`, `post_tool`, `pre_turn`, `post_turn`,
 > `on_compact`), a `HookRegistry` dispatched from `Agent::run_loop`, and a new
 > `hook.proto` / `HookService` exposing a **server-streaming `Subscribe`** RPC (the

@@ -397,11 +397,24 @@ pub async fn build_agent_with(
             }
             other => anyhow::bail!("unknown [session] backend `{other}` (only `file` is built in)"),
         };
-        agent.with_session_store(crate::metered::session(store, metrics.clone()))
+        agent
+            .with_session_store(crate::metered::session(store, metrics.clone()))
+            .with_auto_checkpoint(cfg.session.auto_checkpoint)
     };
     // `@`-reference expansion: build the config-selected resolver, route it through
     // the Search seam (`@symbol`) and a fresh Web backend (`@url`, reusing the SSRF
     // guard), meter it, attach it with its token budget.
+    // Lifecycle hooks (parity spec 22): config-selected, dispatched in the order
+    // listed. Empty by default, and every dispatch short-circuits when empty.
+    let agent = {
+        let hooks = crate::hooks::build(&cfg.hooks.enabled, &metrics)?;
+        if hooks.is_empty() {
+            agent
+        } else {
+            tracing::info!(hooks = hooks.len(), "lifecycle hooks enabled");
+            agent.with_hooks(hooks)
+        }
+    };
     #[cfg(feature = "reference")]
     let agent = {
         let resolver: Arc<dyn agent_core::ReferenceResolver> = match cfg.reference.backend.as_str()

@@ -176,6 +176,9 @@ dimensions = 256
 [session]
 backend = "file"
 dir     = ""
+# Checkpoint the working set after each completed turn, so restore/branch/undo
+# have something to work with. OFF by default (it costs disk per turn).
+auto_checkpoint = false
 
 # `@`-reference expansion (the ReferenceResolver seam). Expands `@file:src/lib.rs`,
 # `@file:src/lib.rs:40-80`, `@dir:src/auth`, `@symbol:AuthService`, and
@@ -240,6 +243,15 @@ tail_back = 2
 # candidate; a *terminal* one (auth/billing/bad request) does not, since it would
 # fail identically everywhere. Repeated failures open a per-candidate circuit
 # breaker that closes after `cooldown_secs`. See docs/components/router.md.
+# Lifecycle hooks fired from the loop (the Hook seam). `enabled` lists built-in
+# hooks in DISPATCH order. Empty (default) ⇒ no hooks and no per-turn cost; an
+# unknown name fails the build rather than silently disabling observability.
+# Built-in: "tracing" (structured log + metric at each lifecycle point).
+# A `pre_tool` hook runs AFTER the Policy decision, so a hook can only narrow
+# permission, never widen it. See docs/components/hooks.md.
+[hooks]
+enabled = []
+
 [router]
 providers         = []            # e.g. ["anthropic", "openai-compat"]
 policy            = "in-order"    # in-order | round-robin
