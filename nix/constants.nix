@@ -84,6 +84,16 @@
       socket = "/tmp/agent-seddon/scheduler.sock";
       metrics_port = 9611;
     };
+    tokenizer = {
+      port = 50062;
+      socket = "/tmp/agent-seddon/tokenizer.sock";
+      metrics_port = 9612;
+    };
+    embed = {
+      port = 50063;
+      socket = "/tmp/agent-seddon/embed.sock";
+      metrics_port = 9613;
+    };
 
     # NOT a seam: the `agent --serve-all` gateway, which hosts every seam's
     # service in one process on one endpoint. A same-host deployment that wants

@@ -1,0 +1,35 @@
+// The `Tokenizer` seam over gRPC — token counting as a service.
+//
+// Distributing this buys *agreement*: every agent dialling one tokenizer
+// produces identical counts, so budget and compaction decisions are consistent
+// across a fleet rather than drifting with whichever backend each was built
+// with. It is also where a real BPE/HF tokenizer's vocabulary files can live
+// once, instead of being shipped into every agent image.
+//
+// Messages are `Tok`-prefixed: the project shares one flat `agent.v1` package,
+// so message names are global (see session.proto for the collision that taught
+// us this).
+syntax = "proto3";
+
+package agent.v1;
+
+import "agent/v1/common.proto";
+
+service TokenizerService {
+  rpc Count(TokCountRequest) returns (TokCount);
+  rpc CountMessages(TokCountMessagesRequest) returns (TokCount);
+}
+
+message TokCountRequest {
+  string text = 1;
+  string model = 2;
+}
+
+message TokCountMessagesRequest {
+  repeated Message messages = 1;
+  string model = 2;
+}
+
+message TokCount {
+  uint32 tokens = 1;
+}

@@ -59,6 +59,51 @@ metrics are all inherited.
 - **Leak:** `agent-search/tests/leak.rs` runs the embed-query + cosine-scan path
   under dhat.
 
+## Over gRPC — an embedding host
+
+`[embedder] backend = "grpc"` points embedding at a remote `EmbedService`
+(`agent --serve-embed`, default `127.0.0.1:50063`). This is the seam most
+obviously worth distributing: embedding wants a GPU and a multi-gigabyte model,
+and neither belongs in every agent process.
+
+```toml
+[embedder]
+backend    = "grpc"
+dimensions = 384
+[grpc.embed]
+endpoint = "http://gpu-host:50063"
+```
+
+### Dimensions are verified, not assumed
+
+`dimensions()` is a sync accessor and cannot round-trip, so it returns the
+**configured** value. But that value is a *claim*, and the vector index validates
+against it — if the remote disagrees, every vector it returns is the wrong shape
+and the index is corrupted **silently**, surfacing much later as bad recall
+rather than an error.
+
+So the build **fetches the remote's capabilities and refuses to start on a
+mismatch**, naming both widths so the message is actionable:
+
+```
+remote embedder produces 64-dimensional vectors but `[embedder] dimensions` is 128;
+the vector index would be corrupted
+```
+
+Belt and braces: every response is length-checked at the boundary too, and a
+batch that comes back with a different arity than it was sent is rejected — a
+short batch would misalign vectors with their documents, so every later recall
+would return the wrong text.
+
+**Failure semantic: hard.** A zero vector on failure would be indexed as though
+it were real and poison recall for the life of the index.
+
+### One instance, not several
+
+The embedder is built once in the builder and shared (via `FactoryCtx`) between
+the vector search backend and `--serve-embed`. A real embedder loads a model;
+building it per consumer would load it per consumer.
+
 ## Deferred (staged like the tokenizer / web / tasks / structured / lsp / sandbox seams)
 
 - **Real semantic models:** `embed-openai` (API) and `embed-grpc` (remote GPU

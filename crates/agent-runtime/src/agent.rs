@@ -64,6 +64,19 @@ pub struct Agent {
     /// can be hosted over gRPC (`agent --serve-scanner`); the loop reaches it
     /// through the policy guard and the `skill_write` / `session_export` tools.
     scanner: Option<Arc<dyn agent_core::Scanner>>,
+    /// The tokenizer, if wired. Held so it can be hosted over gRPC
+    /// (`agent --serve-tokenizer`); the loop reaches it through the context
+    /// strategy's budget calculation.
+    tokenizer: Option<Arc<dyn agent_core::Tokenizer>>,
+    /// The embedder, if wired. Held so it can be hosted over gRPC
+    /// (`agent --serve-embed`); the loop reaches it through the vector search
+    /// backend.
+    ///
+    /// NOT feature-gated, deliberately: `agent-cli` has no `semantic-search`
+    /// feature of its own, so a `#[cfg]` here would be always-false there and
+    /// would silently disable `--serve-embed`. `None` when the feature is off,
+    /// exactly like `search` and `repo`.
+    embedder: Option<Arc<dyn agent_core::Embedder>>,
     /// The (metered) structured-output validator, if the `structured` seam is
     /// wired. Reached via [`Agent::complete_structured`] (parity spec 16).
     #[cfg(feature = "structured")]
@@ -114,6 +127,8 @@ impl Agent {
             search: None,
             repo: None,
             scanner: None,
+            tokenizer: None,
+            embedder: None,
             #[cfg(feature = "structured")]
             validator: None,
             #[cfg(feature = "session")]
@@ -352,6 +367,28 @@ impl Agent {
     /// The content scanner, if wired (for `agent --serve-scanner`).
     pub fn scanner(&self) -> Option<Arc<dyn agent_core::Scanner>> {
         self.scanner.clone()
+    }
+
+    /// The tokenizer, if wired (for `agent --serve-tokenizer`).
+    pub fn tokenizer(&self) -> Option<Arc<dyn agent_core::Tokenizer>> {
+        self.tokenizer.clone()
+    }
+
+    /// Attach the tokenizer so it can be served.
+    pub fn with_tokenizer_seam(mut self, t: Option<Arc<dyn agent_core::Tokenizer>>) -> Self {
+        self.tokenizer = t;
+        self
+    }
+
+    /// The embedder, if wired (for `agent --serve-embed`).
+    pub fn embedder(&self) -> Option<Arc<dyn agent_core::Embedder>> {
+        self.embedder.clone()
+    }
+
+    /// Attach the embedder so it can be served.
+    pub fn with_embedder(mut self, e: Option<Arc<dyn agent_core::Embedder>>) -> Self {
+        self.embedder = e;
+        self
     }
 
     /// Attach the composed content scanner (parity spec 18).

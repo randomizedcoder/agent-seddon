@@ -67,6 +67,8 @@ mod descriptor_tests {
             "ScannerService",
             "ReferenceService",
             "SchedulerService",
+            "TokenizerService",
+            "EmbedService",
         ] {
             assert!(
                 services.contains(&expected),

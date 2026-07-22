@@ -1,0 +1,44 @@
+// The `Embedder` seam over gRPC — text embedding as a service.
+//
+// This is the seam most obviously worth distributing: embedding wants a GPU and
+// a multi-gigabyte model, and neither belongs in every agent process. One
+// embedder host serves a fleet.
+//
+// Messages are `Emb`-prefixed: the project shares one flat `agent.v1` package,
+// so message names are global (see session.proto for the collision that taught
+// us this).
+syntax = "proto3";
+
+package agent.v1;
+
+service EmbedService {
+  // The fixed dimensionality and batch ceiling. Fetched so a client can VERIFY
+  // the remote against its configured `[embedder] dimensions` rather than
+  // assuming — a mismatch silently corrupts a vector index.
+  rpc Capabilities(EmbCapabilitiesRequest) returns (EmbCapabilities);
+  rpc EmbedQuery(EmbQueryRequest) returns (EmbVector);
+  rpc EmbedDocs(EmbDocsRequest) returns (EmbVectors);
+}
+
+message EmbCapabilitiesRequest {}
+
+message EmbCapabilities {
+  uint32 dimensions = 1;
+  uint32 max_batch = 2;
+}
+
+message EmbQueryRequest {
+  string text = 1;
+}
+
+message EmbDocsRequest {
+  repeated string texts = 1;
+}
+
+message EmbVector {
+  repeated float values = 1;
+}
+
+message EmbVectors {
+  repeated EmbVector vectors = 1;
+}

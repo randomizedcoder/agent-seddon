@@ -21,6 +21,7 @@ pub use tonic::transport::server::Router;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 mod context;
+mod embed;
 mod health;
 mod memory;
 mod policy;
@@ -31,9 +32,11 @@ mod scanner;
 mod scheduler;
 mod search;
 mod session;
+mod tokenizer;
 mod tools;
 
 pub use context::*;
+pub use embed::*;
 pub use health::*;
 pub use memory::*;
 pub use policy::*;
@@ -44,6 +47,7 @@ pub use scanner::*;
 pub use scheduler::*;
 pub use search::*;
 pub use session::*;
+pub use tokenizer::*;
 pub use tools::*;
 
 /// Build a per-call span parented on the caller's extracted trace context.

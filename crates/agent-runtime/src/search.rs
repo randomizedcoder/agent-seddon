@@ -43,8 +43,16 @@ pub(crate) fn build_vector(
     ctx: &crate::registry::FactoryCtx<'_>,
 ) -> anyhow::Result<Arc<dyn agent_core::SearchBackend>> {
     let (cfg, metrics) = (ctx.cfg, ctx.metrics);
-    let embedder = build_embedder(cfg)?;
-    let embedder = crate::metered::embedder(embedder, metrics.clone(), &cfg.embedder.backend);
+    // Prefer the embedder the builder already made (and metered), so the vector
+    // index and `agent --serve-embed` share one instance — a real embedder loads
+    // a model, and building it twice would load it twice.
+    let embedder = match ctx.built_embedder {
+        Some(e) => e.clone(),
+        None => {
+            let e = build_embedder(cfg)?;
+            crate::metered::embedder(e, metrics.clone(), &cfg.embedder.backend)
+        }
+    };
     let start = if cfg.agent.working_dir.is_empty() {
         std::path::PathBuf::from(".")
     } else {
@@ -63,12 +71,25 @@ pub(crate) fn build_vector(
 
 /// Build the config-selected embedder (`[embedder] backend`).
 #[cfg(feature = "semantic-search")]
-fn build_embedder(cfg: &Config) -> anyhow::Result<Arc<dyn agent_core::Embedder>> {
+pub(crate) fn build_embedder(cfg: &Config) -> anyhow::Result<Arc<dyn agent_core::Embedder>> {
     match cfg.embedder.backend.as_str() {
         "local" => Ok(Arc::new(agent_embed::LocalEmbedder::new(
             cfg.embedder.dimensions,
         ))),
-        other => anyhow::bail!("unknown [embedder] backend `{other}` (only `local` is built in)"),
+        // A remote embedder: a GPU host serving a fleet. Dimensions are VERIFIED
+        // against config at build time — see `GrpcEmbed::verify_dimensions`.
+        #[cfg(feature = "grpc")]
+        "grpc" => {
+            let ep = crate::registry::grpc_client_endpoint(
+                &cfg.grpc.embed.endpoint,
+                agent_grpc::constants::EMBED,
+            );
+            Ok(Arc::new(agent_grpc::client::GrpcEmbed::connect(
+                &ep,
+                cfg.embedder.dimensions,
+            )?))
+        }
+        other => anyhow::bail!("unknown [embedder] backend `{other}` (built in: `local`, `grpc`)"),
     }
 }
 

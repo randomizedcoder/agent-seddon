@@ -50,6 +50,8 @@ let
     ${seamConst "SCANNER" g.scanner}
     ${seamConst "REFERENCE" g.reference}
     ${seamConst "SCHEDULER" g.scheduler}
+    ${seamConst "TOKENIZER" g.tokenizer}
+    ${seamConst "EMBED" g.embed}
 
     /// The `agent --serve-all` gateway (not a seam — it hosts every seam).
     ${seamConst "GATEWAY" g.gateway}
