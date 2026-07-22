@@ -81,3 +81,44 @@ entry points — `Registry::memory` (whole store), `Registry::episodic`, and
 
 `agent_testkit::RecordingMemory` records appended events (assert on order/content)
 and recalls nothing — see [testing](testing.md).
+
+## The layers, over gRPC
+
+`EpisodicStore` and `SemanticStore` can each be hosted on their own
+(`agent --serve-episodic` / `--serve-semantic`, defaults `127.0.0.1:50071` and
+`:50072`), and dialled independently:
+
+```toml
+[memory]
+backend  = "grpc"   # the episodic layer
+semantic = "grpc"   # the semantic layer
+[grpc.episodic]
+endpoint = "http://log-host:50071"
+[grpc.semantic]
+endpoint = "http://vector-host:50072"
+```
+
+This is the same reason the layers are separate traits at all: the durable log
+can be swapped independently of how semantic recall works. Across a network that
+becomes an append-only log on one host and a vector store on another — the
+semantic side being the one that actually wants an index and the hardware to
+serve it.
+
+> **Only available when the layers are composed.** `[memory] semantic` is what
+> builds a `LayeredMemory`; without it the memory is a single facade, and a
+> `MemoryStore` is *not* an `EpisodicStore` or a `SemanticStore` — the traits have
+> different methods, so there is nothing to split. `--serve-episodic` on an
+> unlayered agent hosts nothing and says so; `--serve-memory` serves the facade
+> as before.
+
+### Neither write is retried
+
+`append` is not retried: the log is append-only, so a retry after a lost response
+writes the event **twice** — a silent corruption of the record that distillation
+then reads. `distill` is not retried either: it writes facts, so a repeat
+promotes the same window twice and the returned count would describe only the
+second pass. The reads (`recent`, `recall`) do retry.
+
+**Failure semantic: hard.** An empty recall is indistinguishable from "nothing
+relevant is known", and the model would proceed as though it had checked.
+

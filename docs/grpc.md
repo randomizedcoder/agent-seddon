@@ -175,6 +175,7 @@ agent --serve-web ; agent --serve-web-search
 agent --serve-sandbox ; agent --serve-pty      # see the warning below
 agent --serve-forge ; agent --serve-tasks     # forge writes to the platform
 agent --serve-lsp
+agent --serve-episodic ; agent --serve-semantic   # the memory layers, individually
 ```
 
 ### One process, every seam — `--serve-all`
@@ -228,10 +229,9 @@ A seam that was *not* added never reports SERVING — that is what makes
 
 > **Reflection lists the schema; health lists what is running.** Every process
 > registers the *whole* descriptor set, so `grpcurl … list` shows every seam
-> service the project defines — including ones this process does not host (and
-> `agent.v1.Episodic` / `agent.v1.Semantic`, which nothing hosts yet). Calling
-> one of those returns `UNIMPLEMENTED`. To ask what is actually being served, use
-> the health service, not reflection.
+> service the project defines — including ones this process does not host.
+> Calling one of those returns `UNIMPLEMENTED`. To ask what is actually being
+> served, use the health service, not reflection.
 >
 > `grpc.health.v1`'s own descriptor is registered alongside the agent's for
 > exactly this reason: a reflection-based client resolves a method through
@@ -431,9 +431,6 @@ wiring line, and is deferred as such.
 
 - An example / compose file running the loop against a separate `--serve-provider`
   gateway process end-to-end.
-- Distributing the memory layers independently via the shipped
-  `EpisodicService` / `SemanticService` (the CLI currently serves the `Memory`
-  facade).
 - TLS / mTLS on the TCP transport for cross-host trust.
 
 ## Three seams are deliberately not distributed

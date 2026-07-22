@@ -426,6 +426,13 @@ pub async fn build_agent_with(
     // set — the episodic layer of that backend composed with an independently
     // chosen `SemanticStore` (e.g. a vector store) via `LayeredMemory`.
     let provider_ctx = crate::registry::FactoryCtx::new(&cfg, &metrics).with_provider(&provider);
+    // The layers are held when composed, so `--serve-episodic` /
+    // `--serve-semantic` can host them individually. They exist only on the
+    // layered path: an unlayered `MemoryStore` is a single facade, and it is NOT
+    // an `EpisodicStore` or a `SemanticStore` — the traits have different
+    // methods, so there is nothing to serve.
+    let mut layer_episodic: Option<Arc<dyn agent_core::EpisodicStore>> = None;
+    let mut layer_semantic: Option<Arc<dyn agent_core::SemanticStore>> = None;
     let inner_memory: Arc<dyn MemoryStore> = if cfg.memory.semantic.is_empty() {
         registry
             .build_memory(&cfg.memory.backend, &provider_ctx)
@@ -437,6 +444,8 @@ pub async fn build_agent_with(
         let semantic = registry
             .build_semantic(&cfg.memory.semantic, &provider_ctx)
             .context("building semantic layer")?;
+        layer_episodic = Some(episodic.clone());
+        layer_semantic = Some(semantic.clone());
         Arc::new(agent_core::LayeredMemory::new(episodic, semantic))
     };
     let composed_memory: Arc<dyn MemoryStore> = match telemetry {
@@ -608,7 +617,8 @@ pub async fn build_agent_with(
         .with_pty(shared_pty.clone())
         .with_forge(shared_forge.clone())
         .with_tasks(shared_tasks.clone())
-        .with_lsp(shared_lsp.clone());
+        .with_lsp(shared_lsp.clone())
+        .with_memory_layers(layer_episodic.clone(), layer_semantic.clone());
     let agent = agent.with_embedder(embedder.clone());
     // Structured output: build the config-selected validator, meter it, attach it.
     #[cfg(feature = "structured")]

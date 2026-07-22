@@ -548,6 +548,28 @@ pub fn register_builtins(r: &mut Registry) {
         r.memory("file", crate::builder::file_memory);
         r.episodic("file", crate::builder::file_episodic);
         r.semantic("file", crate::builder::file_semantic);
+        // The layers, independently remotable: the append-only log can live on
+        // one host and the vector store on another, which is the reason they
+        // are separate traits at all.
+        #[cfg(feature = "grpc")]
+        {
+            r.episodic("grpc", |ctx| {
+                let ep = grpc_client_endpoint(
+                    &ctx.cfg.grpc.episodic.endpoint,
+                    agent_grpc::constants::EPISODIC,
+                );
+                Ok(Arc::new(agent_grpc::client::GrpcEpisodic::connect(&ep)?)
+                    as Arc<dyn agent_core::EpisodicStore>)
+            });
+            r.semantic("grpc", |ctx| {
+                let ep = grpc_client_endpoint(
+                    &ctx.cfg.grpc.semantic.endpoint,
+                    agent_grpc::constants::SEMANTIC,
+                );
+                Ok(Arc::new(agent_grpc::client::GrpcSemantic::connect(&ep)?)
+                    as Arc<dyn agent_core::SemanticStore>)
+            });
+        }
     }
 
     // --- tools ---

@@ -53,6 +53,8 @@ let
     + seamJob "forge" g.forge.metrics_port
     + seamJob "tasks" g.tasks.metrics_port
     + seamJob "lsp" g.lsp.metrics_port
+    + seamJob "episodic" g.episodic.metrics_port
+    + seamJob "semantic" g.semantic.metrics_port
     + seamJob "gateway" g.gateway.metrics_port;
 
   configYml = pkgs.writeText "prometheus.yml" (

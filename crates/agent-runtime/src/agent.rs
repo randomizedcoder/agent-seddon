@@ -90,6 +90,11 @@ pub struct Agent {
     /// The LSP backend, if wired. Held so it can be hosted over gRPC
     /// (`agent --serve-lsp`); the loop reaches it through the `lsp` tool.
     lsp: Option<Arc<dyn agent_core::LspBackend>>,
+    /// The memory layers, when `[memory] semantic` composes them. Held so each
+    /// can be hosted over gRPC (`agent --serve-episodic` / `--serve-semantic`);
+    /// the loop reaches memory through the composed facade.
+    episodic: Option<Arc<dyn agent_core::EpisodicStore>>,
+    semantic: Option<Arc<dyn agent_core::SemanticStore>>,
     /// The embedder, if wired. Held so it can be hosted over gRPC
     /// (`agent --serve-embed`); the loop reaches it through the vector search
     /// backend.
@@ -157,6 +162,8 @@ impl Agent {
             forge: None,
             tasks: None,
             lsp: None,
+            episodic: None,
+            semantic: None,
             embedder: None,
             #[cfg(feature = "structured")]
             validator: None,
@@ -483,6 +490,27 @@ impl Agent {
     /// Attach the LSP backend so it can be served.
     pub fn with_lsp(mut self, l: Option<Arc<dyn agent_core::LspBackend>>) -> Self {
         self.lsp = l;
+        self
+    }
+
+    /// The episodic layer, when the memory is layered (for `--serve-episodic`).
+    pub fn episodic(&self) -> Option<Arc<dyn agent_core::EpisodicStore>> {
+        self.episodic.clone()
+    }
+
+    /// The semantic layer, when the memory is layered (for `--serve-semantic`).
+    pub fn semantic(&self) -> Option<Arc<dyn agent_core::SemanticStore>> {
+        self.semantic.clone()
+    }
+
+    /// Attach the composed memory layers so each can be served individually.
+    pub fn with_memory_layers(
+        mut self,
+        episodic: Option<Arc<dyn agent_core::EpisodicStore>>,
+        semantic: Option<Arc<dyn agent_core::SemanticStore>>,
+    ) -> Self {
+        self.episodic = episodic;
+        self.semantic = semantic;
         self
     }
 
