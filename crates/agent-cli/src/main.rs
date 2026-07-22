@@ -30,7 +30,12 @@ async fn main() -> Result<()> {
 
     let toml_str = std::fs::read_to_string(&config_path)
         .with_context(|| format!("reading config `{}`", config_path.display()))?;
-    let config = agent_runtime::parse_config(&toml_str).context("parsing config")?;
+    // Parse with the ignored-key list in hand rather than letting `parse_config`
+    // log it: this runs BEFORE `init_tracing` below, so a `tracing::warn!` here
+    // would have no subscriber and be swallowed. The warnings are emitted once
+    // tracing is up, further down.
+    let (config, unknown_config_keys) =
+        agent_runtime::parse_config_reporting_unknown(&toml_str).context("parsing config")?;
     // Captured before `config` is consumed by the builder.
     let cfg_tick_secs = config.scheduler.tick_secs;
 
@@ -63,6 +68,19 @@ async fn main() -> Result<()> {
         headers: config.telemetry.otlp_headers.clone(),
     });
     let otel_guard = init_tracing(&telemetry, config.telemetry.stream_logs, otel_cfg);
+
+    // Now that there is a subscriber, report anything in the config that nothing
+    // reads. Ignored keys are not fatal, but they must not be silent: this file
+    // selects which implementation each seam uses, so a misplaced key means the
+    // agent quietly runs something other than what was asked for.
+    for key in &unknown_config_keys {
+        tracing::warn!(
+            key = %key,
+            "unknown config key — it is being IGNORED, so anything it was meant to \
+             configure is running its default. Check the spelling and the section \
+             it belongs in (see config/agent.toml)"
+        );
+    }
 
     // Metrics (opt-in). Instrumentation always runs into this registry; serving
     // the /metrics endpoint and pushing are gated by config.
