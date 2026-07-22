@@ -57,6 +57,10 @@ pub struct Metrics {
     // point. Labels are bounded by config + the fixed point set.
     // Forge API calls (parity spec 27), by backend, operation, and outcome.
     // Labels are bounded enums — never a token, URL, or remote content.
+    // Scheduled runs (parity spec 28), by outcome — including `skipped`, so a
+    // dropped overlapping fire is visible rather than silent.
+    scheduled_runs: IntCounterVec,
+    scheduled_seconds: Histogram,
     forge_calls: IntCounterVec,
     forge_seconds: HistogramVec,
     hook_dispatches: IntCounterVec,
@@ -215,6 +219,16 @@ impl Metrics {
             Opts::new("agent_tool_calls_total", "Tool invocations"),
             &["tool", "status"],
         )
+        .unwrap();
+        let scheduled_runs = IntCounterVec::new(
+            Opts::new("agent_scheduled_runs_total", "Scheduled runs, by outcome"),
+            &["outcome"],
+        )
+        .unwrap();
+        let scheduled_seconds = Histogram::with_opts(HistogramOpts::new(
+            "agent_scheduled_run_duration_seconds",
+            "Scheduled run duration",
+        ))
         .unwrap();
         let forge_calls = IntCounterVec::new(
             Opts::new(
@@ -631,6 +645,8 @@ impl Metrics {
             Box::new(context_tokens.clone()),
             Box::new(context_messages.clone()),
             Box::new(tool_calls.clone()),
+            Box::new(scheduled_runs.clone()),
+            Box::new(scheduled_seconds.clone()),
             Box::new(forge_calls.clone()),
             Box::new(forge_seconds.clone()),
             Box::new(hook_dispatches.clone()),
@@ -707,6 +723,8 @@ impl Metrics {
             context_tokens,
             context_messages,
             tool_calls,
+            scheduled_runs,
+            scheduled_seconds,
             forge_calls,
             forge_seconds,
             hook_dispatches,
@@ -811,6 +829,11 @@ impl Metrics {
     /// Latency of one content scan.
     pub fn on_scan(&self, seconds: f64) {
         self.scan_seconds.observe(seconds);
+    }
+    /// One scheduled run (parity spec 28).
+    pub fn on_scheduled_run(&self, outcome: &str, seconds: f64) {
+        self.scheduled_runs.with_label_values(&[outcome]).inc();
+        self.scheduled_seconds.observe(seconds);
     }
     /// One forge API call (parity spec 27).
     pub fn on_forge_call(&self, backend: &str, op: &str, outcome: &str, seconds: f64) {

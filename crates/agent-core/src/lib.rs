@@ -39,6 +39,8 @@ pub enum Error {
     Web(String),
     #[error("tasks error: {0}")]
     Tasks(String),
+    #[error("scheduler error: {0}")]
+    Scheduler(String),
     #[error("structured output error: {0}")]
     Structured(String),
     #[error("lsp error: {0}")]
@@ -1915,6 +1917,95 @@ pub trait ContextStrategy: Send + Sync {
     /// Compact when over budget. Must be non-destructive w.r.t. episodic memory
     /// (it only trims the working set).
     async fn compact(&self, working: &mut WorkingSet, budget: &TokenBudget) -> Result<()>;
+}
+
+// ---------------------------------------------------------------------------
+// Seam: Scheduler (recurring unattended runs)
+// ---------------------------------------------------------------------------
+//
+// A scheduler turns the one-shot agent into a background worker. The moment runs
+// happen without a human watching, two failure modes appear that interactive
+// runs never had, and both are designed in rather than bolted on:
+//
+//  * **Overlap / runaway.** A job firing every 60s that takes 5 minutes must not
+//    fan out into a growing pile of concurrent agents — and a crashed run must
+//    not wedge the job forever.
+//  * **Invisibility.** An unattended run vanishes unless its outcome is recorded
+//    and its execution traced. Observability here is the safety mechanism that
+//    makes autonomy auditable after the fact.
+//
+// See parity spec 28 and `docs/components/scheduler.md`.
+
+/// When a job fires.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Schedule {
+    /// Every N seconds.
+    Interval { secs: u64 },
+    /// A 5-field cron expression (see `docs/components/scheduler.md` for the
+    /// supported subset).
+    Cron { expr: String },
+    /// Once, at an absolute epoch-millisecond instant.
+    Once { at_ms: u64 },
+}
+
+pub type JobId = String;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Job {
+    pub id: JobId,
+    /// The schedule as the operator wrote it, for display.
+    pub spec: String,
+    pub schedule: Schedule,
+    /// What the agent is asked to do.
+    pub goal: String,
+    /// Next fire time (epoch ms); `None` for a spent one-shot.
+    pub next_fire_ms: Option<u64>,
+    pub enabled: bool,
+}
+
+/// How one execution ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RunOutcome {
+    Completed,
+    Failed,
+    /// The previous run was still going — this fire was deliberately dropped
+    /// rather than stacked.
+    Skipped,
+}
+
+impl RunOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RunOutcome::Completed => "completed",
+            RunOutcome::Failed => "failed",
+            RunOutcome::Skipped => "skipped",
+        }
+    }
+}
+
+/// One recorded execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Run {
+    pub job_id: JobId,
+    pub started_ms: u64,
+    pub finished_ms: u64,
+    pub outcome: RunOutcome,
+    /// Answer or error, truncated for storage.
+    pub detail: String,
+}
+
+/// Schedules unattended agent runs.
+#[async_trait]
+pub trait Scheduler: Send + Sync {
+    fn name(&self) -> &str;
+    /// Register a job. `spec` is parsed into a [`Schedule`].
+    async fn schedule(&self, spec: &str, goal: &str) -> Result<JobId>;
+    async fn list(&self) -> Result<Vec<Job>>;
+    /// `true` if the job existed and was removed.
+    async fn cancel(&self, id: &str) -> Result<bool>;
+    /// Recorded executions, most recent last.
+    async fn history(&self, id: &str) -> Result<Vec<Run>>;
 }
 
 // ---------------------------------------------------------------------------

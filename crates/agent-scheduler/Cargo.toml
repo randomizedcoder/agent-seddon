@@ -1,0 +1,23 @@
+[package]
+name = "agent-scheduler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["scheduler-local"]
+scheduler-local = []
+
+[dependencies]
+agent-core.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+rstest.workspace = true
+iai-callgrind.workspace = true
+
+# Deterministic bench: cron next-fire is the CPU path (a minute-stepping scan).
+[[bench]]
+name = "next_fire"
+harness = false

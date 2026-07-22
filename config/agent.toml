@@ -270,6 +270,19 @@ write_dir = ""
 # TRUE: the agent previews the request shape until an operator turns it off.
 # The token never appears in results, errors, or spans; a missing one is a
 # distinct error, not an empty result. See docs/components/forge.md.
+# Recurring unattended runs (the Scheduler seam). `enabled` registers the
+# `schedule` tool so the agent can create/list/cancel jobs — but nothing FIRES
+# until a driver ticks (`agent --scheduler`), so turning this on cannot start
+# unattended work as a side effect.
+# A job whose previous run is still in flight is SKIPPED, not stacked (and the
+# skip is recorded); a crashed run's claim expires after `claim_ttl_secs` so it
+# cannot wedge the job forever. See docs/components/scheduler.md.
+[scheduler]
+enabled        = false
+tick_secs      = 30
+max_jobs       = 64
+claim_ttl_secs = 900
+
 [forge]
 backend   = ""              # "" | "github" | "gitlab"
 # github:

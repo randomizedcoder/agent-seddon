@@ -61,6 +61,48 @@ pub struct Config {
     pub skills: SkillsCfg,
     #[serde(default)]
     pub forge: ForgeCfg,
+    #[serde(default)]
+    pub scheduler: SchedulerCfg,
+}
+
+/// Recurring unattended runs (the `Scheduler` seam, parity spec 28). `enabled`
+/// registers the `schedule` tool; jobs only actually fire while a driver is
+/// ticking (`agent --scheduler`). See docs/components/scheduler.md.
+#[derive(Debug, Deserialize)]
+pub struct SchedulerCfg {
+    #[serde(default)]
+    pub enabled: bool,
+    /// How often the driver checks for due jobs.
+    #[serde(default = "default_tick_secs")]
+    pub tick_secs: u64,
+    /// Cap on registered jobs (the model can create them).
+    #[serde(default = "default_max_jobs")]
+    pub max_jobs: usize,
+    /// How long an in-flight claim is honoured before a crashed run's job is
+    /// reclaimable.
+    #[serde(default = "default_claim_ttl_secs")]
+    pub claim_ttl_secs: u64,
+}
+
+impl Default for SchedulerCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            tick_secs: default_tick_secs(),
+            max_jobs: default_max_jobs(),
+            claim_ttl_secs: default_claim_ttl_secs(),
+        }
+    }
+}
+
+fn default_tick_secs() -> u64 {
+    30
+}
+fn default_max_jobs() -> usize {
+    64
+}
+fn default_claim_ttl_secs() -> u64 {
+    900
 }
 
 /// Remote code-collaboration platform (the `Forge` seam, parity spec 27).
@@ -1176,6 +1218,7 @@ impl Config {
             hooks: HooksCfg::default(),
             skills: SkillsCfg::default(),
             forge: ForgeCfg::default(),
+            scheduler: SchedulerCfg::default(),
         }
     }
 }
