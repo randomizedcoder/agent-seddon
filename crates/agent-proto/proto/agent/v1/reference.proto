@@ -1,0 +1,40 @@
+// The `ReferenceResolver` seam over gRPC — `@`-mention expansion as a service.
+//
+// A resolver reads the workspace, the search index, and the network, so hosting
+// it separately lets the process that touches those run somewhere the agent
+// itself need not (a repo-side worker with the checkout mounted, say) while the
+// agent keeps only the expanded blocks.
+//
+// Messages are `Ref`-prefixed: the project shares one flat `agent.v1` package,
+// so message names are global (see session.proto for the collision that taught
+// us this).
+syntax = "proto3";
+
+package agent.v1;
+
+import "agent/v1/common.proto";
+
+service ReferenceService {
+  // Expand a prompt's `@`-mentions into context blocks, budget-bounded.
+  //
+  // NOTE the seam's contract, mirrored here: resolution NEVER fails. An
+  // unresolved, denied, or errored reference becomes a warning, so one bad
+  // mention can't fail the turn. `blocked` (over the hard budget) means the
+  // prompt is left unmodified — it is not an error either.
+  rpc Resolve(RefResolveRequest) returns (RefResolution);
+}
+
+message RefResolveRequest {
+  string prompt = 1;
+  // 0 ⇒ unbounded.
+  uint64 budget_tokens = 2;
+}
+
+message RefResolution {
+  repeated ContextBlock blocks = 1;
+  // Unresolved / denied / injection-blocked / over-budget, for the operator.
+  repeated string warnings = 2;
+  // Expansion was refused wholesale (over the hard budget); the caller must
+  // leave the prompt unmodified.
+  bool blocked = 3;
+}

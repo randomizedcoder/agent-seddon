@@ -549,8 +549,18 @@ pub async fn build_agent_with(
                 }
                 Arc::new(r)
             }
+            // A remote resolver: the process with the checkout and the index
+            // mounted does the reading; this agent keeps only the blocks.
+            #[cfg(feature = "grpc")]
+            "grpc" => {
+                let ep = crate::registry::grpc_client_endpoint(
+                    &cfg.grpc.reference.endpoint,
+                    agent_grpc::constants::REFERENCE,
+                );
+                Arc::new(agent_grpc::client::GrpcReference::connect(&ep)?)
+            }
             other => {
-                anyhow::bail!("unknown [reference] backend `{other}` (only `local` is built in)")
+                anyhow::bail!("unknown [reference] backend `{other}` (built in: `local`, `grpc`)")
             }
         };
         agent.with_reference_resolver(

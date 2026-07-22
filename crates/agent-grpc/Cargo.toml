@@ -35,6 +35,8 @@ agent-session = { workspace = true, features = ["session-file"] }
 # The real secret/threat rules, so the round-trip asserts detections surviving
 # the hop rather than a double echoing what it was handed.
 agent-scanner = { workspace = true, features = ["scanner-secret", "scanner-threat"] }
+# The real scheduler, so spec parsing + rejection are asserted across the wire.
+agent-scheduler = { workspace = true }
 agent-testkit = { workspace = true }
 # A real built-in tool, to prove a feature tool (not just EchoTool) roundtrips over
 # the ToolService seam. Only the patch tool is compiled in.

@@ -1,0 +1,84 @@
+// The `Scheduler` seam over gRPC — unattended recurring agent runs as a service.
+//
+// Distributing this separates *deciding what is due* from *doing it*: one
+// scheduler process can hold the job registry while any number of agents drive
+// it, and the registry outlives an individual agent process.
+//
+// Messages are `Sched`-prefixed: the project shares one flat `agent.v1` package,
+// so message names are global (see session.proto for the collision that taught
+// us this).
+syntax = "proto3";
+
+package agent.v1;
+
+service SchedulerService {
+  rpc Schedule(SchedScheduleRequest) returns (SchedJobRef);
+  rpc List(SchedListRequest) returns (SchedJobList);
+  rpc Cancel(SchedJobRef) returns (SchedCancelResponse);
+  rpc History(SchedJobRef) returns (SchedRunList);
+}
+
+message SchedJobRef {
+  string id = 1;
+}
+
+message SchedListRequest {}
+
+message SchedScheduleRequest {
+  // The schedule as written, e.g. "every 30m", "cron: 0 6 * * *", "in 45m".
+  // Parsed server-side: the parser is the scheduler's, and a spec it rejects
+  // must be rejected at scheduling time rather than silently never firing.
+  string spec = 1;
+  string goal = 2;
+}
+
+// Mirrors `agent_core::Schedule`. Carried explicitly rather than re-parsed from
+// `spec` on the client, so a client needs no copy of the cron parser — and can
+// therefore never disagree with the server about when a job fires.
+message SchedSchedule {
+  oneof kind {
+    uint64 interval_secs = 1;
+    string cron_expr = 2;
+    uint64 once_at_ms = 3;
+  }
+}
+
+message SchedJob {
+  string id = 1;
+  string spec = 2;
+  SchedSchedule schedule = 3;
+  string goal = 4;
+  // Absent for a spent one-shot.
+  optional uint64 next_fire_ms = 5;
+  bool enabled = 6;
+}
+
+message SchedJobList {
+  repeated SchedJob jobs = 1;
+}
+
+enum SchedRunOutcome {
+  SCHED_RUN_OUTCOME_COMPLETED = 0;
+  SCHED_RUN_OUTCOME_FAILED = 1;
+  // The previous run was still going — this fire was deliberately dropped
+  // rather than stacked.
+  SCHED_RUN_OUTCOME_SKIPPED = 2;
+}
+
+message SchedRun {
+  string job_id = 1;
+  uint64 started_ms = 2;
+  uint64 finished_ms = 3;
+  SchedRunOutcome outcome = 4;
+  // Answer or error, truncated for storage.
+  string detail = 5;
+}
+
+message SchedRunList {
+  repeated SchedRun runs = 1;
+}
+
+message SchedCancelResponse {
+  // False when no such job existed — not an error.
+  bool cancelled = 1;
+}

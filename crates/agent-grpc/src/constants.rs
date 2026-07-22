@@ -65,6 +65,16 @@ pub const SCANNER: SeamEndpoint = SeamEndpoint {
     uds_path: "/tmp/agent-seddon/scanner.sock",
     metrics_port: 9609,
 };
+pub const REFERENCE: SeamEndpoint = SeamEndpoint {
+    tcp_port: 50060,
+    uds_path: "/tmp/agent-seddon/reference.sock",
+    metrics_port: 9610,
+};
+pub const SCHEDULER: SeamEndpoint = SeamEndpoint {
+    tcp_port: 50061,
+    uds_path: "/tmp/agent-seddon/scheduler.sock",
+    metrics_port: 9611,
+};
 
 /// The `agent --serve-all` gateway (not a seam — it hosts every seam).
 pub const GATEWAY: SeamEndpoint = SeamEndpoint {

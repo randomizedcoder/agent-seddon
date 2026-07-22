@@ -137,6 +137,7 @@ dependencies = [
  "agent-proto",
  "agent-retry",
  "agent-scanner",
+ "agent-scheduler",
  "agent-session",
  "agent-testkit",
  "agent-tools",

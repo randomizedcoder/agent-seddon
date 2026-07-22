@@ -32,6 +32,8 @@ pub enum Seam {
     Repo,
     Session,
     Scanner,
+    Reference,
+    Scheduler,
 }
 
 /// Every variant, so the table can be checked for completeness.
@@ -45,6 +47,8 @@ const ALL_SEAMS: &[Seam] = &[
     Seam::Repo,
     Seam::Session,
     Seam::Scanner,
+    Seam::Reference,
+    Seam::Scheduler,
 ];
 
 /// The static facts about a seam served as its own process.
@@ -125,6 +129,20 @@ const SEAMS: &[SeamInfo] = &[
         service: "agent.v1.ScannerService",
         endpoint: constants::SCANNER,
     },
+    SeamInfo {
+        seam: Seam::Reference,
+        flag: "--serve-reference",
+        name: "reference",
+        service: "agent.v1.ReferenceService",
+        endpoint: constants::REFERENCE,
+    },
+    SeamInfo {
+        seam: Seam::Scheduler,
+        flag: "--serve-scheduler",
+        name: "scheduler",
+        service: "agent.v1.SchedulerService",
+        endpoint: constants::SCHEDULER,
+    },
 ];
 
 impl Seam {
@@ -177,6 +195,8 @@ impl Seam {
             Seam::Repo => &cfg.grpc.repo.listen,
             Seam::Session => &cfg.grpc.session.listen,
             Seam::Scanner => &cfg.grpc.scanner.listen,
+            Seam::Reference => &cfg.grpc.reference.listen,
+            Seam::Scheduler => &cfg.grpc.scheduler.listen,
         }
     }
 }
@@ -264,6 +284,20 @@ fn add_seam_service(router: Router, agent: &Agent, seam: Seam) -> anyhow::Result
         Seam::Scanner => match agent.scanner() {
             Some(s) => (
                 router.add_service(srv::ScannerServiceSvc::new(s).into_server()),
+                true,
+            ),
+            None => (router, false),
+        },
+        Seam::Reference => match agent.reference_resolver() {
+            Some(r) => (
+                router.add_service(srv::ReferenceServiceSvc::new(r).into_server()),
+                true,
+            ),
+            None => (router, false),
+        },
+        Seam::Scheduler => match agent.scheduler_seam() {
+            Some(s) => (
+                router.add_service(srv::SchedulerServiceSvc::new(s).into_server()),
                 true,
             ),
             None => (router, false),
@@ -402,6 +436,7 @@ mod tests {
     #[case::positive_repo("--serve-repo", Some(Seam::Repo))]
     #[case::positive_session("--serve-session", Some(Seam::Session))]
     #[case::positive_scanner("--serve-scanner", Some(Seam::Scanner))]
+    #[case::positive_reference("--serve-reference", Some(Seam::Reference))]
     #[case::negative_unknown_seam("--serve-nope", None)]
     #[case::negative_not_a_serve_flag("--help", None)]
     #[case::adversarial_empty("", None)]

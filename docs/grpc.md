@@ -169,6 +169,7 @@ agent --serve-provider --config gateway.toml        # binds [grpc.provider] list
 agent --serve-memory   --listen 0.0.0.0:50052       # or override the address
 agent --serve-tools ; agent --serve-context ; agent --serve-policy ; agent --serve-search
 agent --serve-repo ; agent --serve-session ; agent --serve-scanner
+agent --serve-reference ; agent --serve-scheduler
 ```
 
 ### One process, every seam — `--serve-all`
@@ -372,6 +373,24 @@ Three things are judgement, not mechanics:
   Fail-open needs a compensating control, or the failure is invisible: the
   scanner client emits a `WARN` (`scanner.transport_failed`) on every transport
   failure, and that log is the only signal that scanning has stopped happening.
+  `ReferenceResolver` degrades the same way — an outage becomes a warning and an
+  unexpanded prompt, and deliberately does **not** set `blocked`, which means
+  "refused on purpose".
+
+## Serving a seam is not always the same as *using* one remotely
+
+`--serve-scheduler` hosts the job registry, so a remote client can schedule,
+list, cancel and inspect history. But there is deliberately **no**
+`[scheduler] backend = "grpc"`: firing a job needs `tick_with`, which takes the
+executor closure and is not on the `Scheduler` trait, because a job's executor
+*is* the agent. A remote registry can therefore be **managed** remotely but only
+**driven** by the process that owns it.
+
+Wiring a config backend anyway would produce a scheduler that accepts jobs and
+silently never fires them — precisely the failure mode the scheduler's design
+goes out of its way to prevent. Distributed *driving* needs a richer protocol
+(claim a due job, run it, report the outcome), which is a feature rather than a
+wiring line, and is deferred as such.
 
 ## Possible follow-ups
 
