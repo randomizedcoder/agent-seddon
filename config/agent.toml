@@ -252,6 +252,17 @@ tail_back = 2
 [hooks]
 enabled = []
 
+# Skill authoring (parity spec 30): the agent captures a reusable procedure as a
+# SKILL.md that spec 07's discovery picks up on the next run. OFF by default —
+# an authored skill is read back into FUTURE system prompts, so writing one is a
+# privileged, persistent action. The name is confined to a single path segment,
+# and the body + description are injection-scanned before anything reaches disk.
+# `write_dir` empty ⇒ <working_dir>/.agent/skills.
+# See docs/components/skill-authoring.md.
+[skills]
+write     = false
+write_dir = ""
+
 [router]
 providers         = []            # e.g. ["anthropic", "openai-compat"]
 policy            = "in-order"    # in-order | round-robin

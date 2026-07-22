@@ -57,6 +57,21 @@ pub struct Config {
     pub router: RouterCfg,
     #[serde(default)]
     pub hooks: HooksCfg,
+    #[serde(default)]
+    pub skills: SkillsCfg,
+}
+
+/// Skill authoring (parity spec 30). `write` enables the `skill_write` tool so
+/// the agent can capture a reusable procedure. OFF by default: a skill is read
+/// back into future system prompts, which makes authoring a privileged,
+/// persistent action. `write_dir` is where authored skills land (empty ⇒
+/// `<working_dir>/.agent/skills`). See docs/components/skill-authoring.md.
+#[derive(Debug, Default, Deserialize)]
+pub struct SkillsCfg {
+    #[serde(default)]
+    pub write: bool,
+    #[serde(default)]
+    pub write_dir: String,
 }
 
 /// Lifecycle hooks fired from the loop (the `Hook` seam, parity spec 22).
@@ -1101,6 +1116,7 @@ impl Config {
             web_search: WebSearchCfg::default(),
             router: RouterCfg::default(),
             hooks: HooksCfg::default(),
+            skills: SkillsCfg::default(),
         }
     }
 }
