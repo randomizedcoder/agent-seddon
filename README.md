@@ -4,337 +4,238 @@
   <img src="agent-seddon.png" alt="agent-seddon logo" width="300">
 </p>
 
-Experimental, modular coding-agent harness in Rust. Every major component — the
-LLM provider, the tools, the memory, the context assembly — sits behind a trait
-and is wired by a **plugin registry**, so implementations can be swapped by config,
-compiled in via cargo features, and contributed by third parties without forking.
+A coding agent in Rust, built so you can see what it is doing and change how it
+does it.
 
-See **[DESIGN.md](DESIGN.md)** for the design rationale, the loop, and the layered
-memory model; **[docs/architecture.md](docs/architecture.md)** for the boundary map
-and per-component docs; **[docs/extending.md](docs/extending.md)** for how to add a
-provider/tool/memory/context/policy/transport;
-**[docs/grpc.md](docs/grpc.md)** for running the components as distributed gRPC
-services; **[docs/observability.md](docs/observability.md)** for the metrics +
-tracing + logs overview (Grafana dashboards, HyperDX, and how the agent inspects
-its own performance); **[docs/benchmarking.md](docs/benchmarking.md)** for the
-performance + leak gate (deterministic instruction-count benches + dhat, wired into
-`nix flake check`); and **[docs/features-comparison.md](docs/features-comparison.md)**
-for how it stacks up against other harnesses.
+## What this is
 
-## Workspace
+`agent-seddon` edits files, runs shells, searches code, drives git across
+branches, talks to language servers, and holds interactive terminals. That part is
+not unusual — the harnesses it was measured against do most of it too.
 
-One crate per seam (DESIGN.md §7):
+What is unusual is the shape. **Every capability is a named component behind a
+trait** — a *seam* — and each seam is swappable by a config string, separately
+instrumented, individually benchmarked, and can be moved into its own process
+behind a gRPC service. The thesis is that an agent should be **legible**: when it
+does something, you should be able to say which component did it, read the metric
+it emitted and the span it opened, and replace that component without forking the
+project.
 
-| Crate | Role |
-|-------|------|
-| `agent-core` | Seam traits + shared types (no impls) |
-| `agent-providers` | `LlmProvider` impls: OpenAI-compatible (GLM/OpenAI/vLLM/Ollama) + Anthropic-native, both streaming |
-| `agent-tools` | `Tool` impls: `bash`, `read_file`, `write_file`, `edit`, `apply_patch`, `grep`, `find`, `ls`, `search`, `index_ls` (index-backed listing), `metrics` (self-inspection), `git_*` (multi-branch git) |
-| `agent-search` | `SearchBackend`: high-performance code search (tantivy full-text index) ([docs/components/search.md](docs/components/search.md)) |
-| `agent-git` | `RepoBackend`: multi-branch git — one shared object DB + disposable worktrees, revision-addressed reads ([docs/components/git.md](docs/components/git.md)) |
-| `agent-memory` | `MemoryStore`: JSONL episodic + markdown semantic |
-| `agent-context` | `ContextStrategy`: sliding-window or summarizing-window compaction |
-| `agent-mcp` | MCP client (stdio + streamable-HTTP) — external tools as `mcp_<server>_<tool>` |
-| `agent-proto` | protobuf/gRPC wire contracts for the seams + core↔proto conversions & OTel trace propagation ([docs/grpc.md](docs/grpc.md)) |
-| `agent-grpc` | per-seam gRPC servers + clients over TCP or unix domain sockets (`--serve-<seam>`, `= "grpc"`); server reflection for `grpcurl`/JSON introspection |
-| `agent-telemetry` | Telemetry sink: streams transaction history, logs & usage to ClickHouse; OTLP trace export to the ClickStack collector |
-| `agent-metrics` | Shared Prometheus registry + per-seam metric families ([docs/metrics.md](docs/metrics.md)) |
-| `agent-runtime` | Config, the plugin registry, the loop (streaming + parallel tools), sessions, subagents |
-| `agent-cli` | The `agent` binary (CLI + REPL + `--serve-mcp` + `--serve-<seam>`) |
+It is a single-author experimental project. There are 1,669 tests and a nine-target
+`nix flake check` gate — but **no CI**: the gate runs locally, by hand, so take the
+claims below as things you can verify yourself rather than things a badge asserts.
 
-## Plugins & features
+## What's different
 
-Each seam implementation is a **registered plugin** selected by a config string
-(`provider = "anthropic"`, `[tools] enabled = ["edit", "grep", …]`) and gated by a
-**cargo feature**, so a build links only what it needs:
+The five things below are all in service of that one thesis.
+
+- **It was specified against its peers before it was built.** 30 per-feature specs
+  in [`docs/parity/`](docs/parity/README.md), each written by reading the
+  corresponding implementation *and its test suite* in three mature harnesses, then
+  laying out a test plan to match them. The specs are in the repo, including the
+  parts where the peers are still ahead.
+- **Every capability is a seam.** 26 traits in
+  [`agent-core`](crates/agent-core/src/lib.rs), concrete impls in sibling crates
+  behind cargo features, selected by config. Adding a backend is never a fork.
+- **Seams can become services.** 22 of the 26 have a gRPC service with a
+  buf-governed wire contract and server reflection, so a running seam can be
+  introspected and called with plain JSON. The point is *structure and
+  introspectability*, not speed — for a same-host seam a gRPC hop is slower than a
+  direct call. See the honest scope [below](#running-seams-as-services).
+- **Observability on all of it.** 74 Prometheus metric families, a 37-panel Grafana
+  dashboard provisioned in-tree, OpenTelemetry spans that follow a call across a
+  process boundary, and the run history queryable in ClickHouse.
+- **Rust, for two specific reasons.** A single binary with no runtime or virtualenv
+  to install; and no GC or JIT between the code and the numbers, which is what
+  makes the instruction-count benchmarks below stable enough to gate on.
+
+## Compared to the harnesses it was measured against
+
+The peers are [pi](https://github.com/earendil-works/pi) (TypeScript, disciplined
+minimalism), [hermes-agent](https://github.com/NousResearch/hermes-agent) (Python,
+batteries-included), and [opencode](https://github.com/anomalyco/opencode)
+(TypeScript, a polished fundamentals-first daily driver).
+
+> **Peer columns are a snapshot** taken from read-only clones in July 2026. These
+> are active projects and will have moved on. Every cell traces to a source path
+> in [`docs/features-comparison.md`](docs/features-comparison.md).
+
+**Fundamentals — all four have these.** The last column is the interesting one.
+
+| Capability | pi | hermes | opencode | What agent-seddon does with it |
+|---|:--:|:--:|:--:|---|
+| Loop, streaming, parallel tools | Yes | Yes | Yes | Same shape; every stage emits a metric and a span |
+| `bash`, read / write | Yes | Yes | Yes | Through a `Sandbox` seam, behind a `Policy` gate |
+| Surgical `edit` | Yes | Yes | Yes | Unique-match guard; paths canonicalised to block symlink escape |
+| Unified-diff `apply_patch` | — | Yes | Yes | Fuzzy-match chain with an explicit failure ladder |
+| grep / find / ls | Yes | Yes | Yes | gitignore-aware |
+| MCP client | by design, no | Yes | Yes | Plus an MCP *server* (`--serve-mcp`) |
+| Subagents | — | Yes | Yes | Depth-bounded, isolated context, returns a summary |
+| Skills | Yes | Yes | Yes | User-invoked (`/skill:<name>`); authoring is injection-scanned |
+| Sessions and resume | Yes | Yes | Yes | Content-addressed checkpoints — branch, undo, fork |
+| Approval gate | trust model | Yes | Yes | A `Policy` seam: swappable, and dialable over gRPC |
+| Context compaction | Yes | Yes | Yes | Truncating *and* summarizing |
+
+**Where it differs.** Each row is backed by a spec citing the peers' source paths.
+The `Status` column bounds the claim.
+
+| Capability | agent-seddon | Peers | Status |
+|---|---|---|---|
+| Seams as gRPC services | 22 `--serve-<seam>` + an all-in-one gateway, TCP or unix socket, reflection-introspectable | None ship this | Works and tested; **no container deployment** |
+| Per-seam metrics | Every served seam exposes its own `/metrics`; ports generated from `nix/constants.nix` | None | Shipped, Grafana provisioned |
+| Queryable run history | ClickHouse `agent_events` / `agent_logs` / `agent_usage` | pi has an adapter interface | Shipped; best-effort, drops rather than blocks |
+| Traces across seams | OTLP span tree, W3C propagation into another process | None | Shipped |
+| Agent inspects its own metrics | A `metrics` tool, in-process, no stack required | None | Shipped |
+| Perf + leak as a build gate | iai-callgrind instruction ceilings, dhat budgets | None | Shipped; runs locally, **no CI** |
+| Full-text indexed code search | tantivy index, hybrid RRF fusion | ripgrep or none | Shipped |
+| Multi-branch git as tools | 9 `git_*`, one object DB + disposable worktrees, revision-addressed | all shell out to `git` | Shipped |
+| LSP | diagnostics **and** navigation **and** `rename` | hermes diagnostics; opencode navigation | Shipped |
+| Structured output | Validates **and repairs**, bounded | all three validate; none repair | Shipped |
+| Forge | GitHub **and** GitLab behind one seam | — | Shipped |
+| Reproducible execution | `nix` backend runs in a pinned flake closure | mutable images | **Reproducibility, not confinement** |
+
+No single peer does all of these, and several do individual rows better: pi's
+provider breadth (40+), hermes' ~94 tools, and opencode's UI surfaces are all well
+beyond this project.
+
+## Quickstart
+
+Toolchain, `protoc` and dev tools all come from the flake — nothing to install on
+the host.
 
 ```sh
-cargo build                    # default: both providers, all tools, sliding-window, file memory
-cargo build -p agent-runtime --no-default-features \
-  --features provider-openai-compat,tool-core,context-sliding-window,memory-file   # minimal
-```
-
-Adding a module is: implement the `agent-core` trait → register a factory → select
-by config. Do it in-tree (a `#[cfg(feature)]` line in `register_builtins`) or
-out-of-tree from your own binary via the public `Registry` + `build_agent_with`
-API — see **[docs/extending.md](docs/extending.md)** and the runnable
-`cargo run -p agent-cli --example custom_provider`.
-
-Two more ways to get tools without writing Rust:
-
-- **MCP** — list external [Model Context Protocol](https://modelcontextprotocol.io)
-  servers under `[[mcp.servers]]` (stdio or streamable-HTTP); their tools are
-  discovered at startup and registered as `mcp_<server>_<tool>`.
-- **Subagents** — set `[agent] subagents = true` to expose a `delegate` tool the
-  model can call to run a well-scoped sub-task in a child agent with isolated
-  context (returns only a summary; depth-bounded).
-
-## Build & run
-
-```sh
+nix develop                                   # dev shell
 cargo build
-# one-shot:
 cargo run -p agent-cli -- --config config/agent.toml "list the files in this repo"
-# interactive REPL (no goal): multi-turn, streaming, slash commands, Ctrl-D to exit
-cargo run -p agent-cli -- --config config/agent.toml
+cargo run -p agent-cli -- --config config/agent.toml    # no goal ⇒ interactive REPL
 ```
 
-The REPL has arrow-key line editing + command history (via `rustyline`, stored in
-`.agent/sessions/.repl_history`); piped input (`printf … | agent`) falls back to
-plain line reading. Type a goal to run a turn (history persists across turns), or a
-slash command: `/help`, `/new`, `/compact`, `/resume`, `/skills`, `/skill:<name>`,
-`/model`, `/tools`, `/save`, `/quit`. Each turn is saved under `.agent/sessions/`;
-resume with `--continue` (most recent) or `--resume <id>`, or `/resume` inside the
-REPL. `/skills` lists reusable instruction snippets (see [`skills/`](skills/)) and
-`/skill:<name>` loads one into the conversation on demand.
+Point [`config/agent.toml`](config/agent.toml) at a model and a key first — inline,
+an env var, or a file path. Config, the REPL's slash commands and the runtime state
+layout are in [`docs/operating.md`](docs/operating.md).
 
-Set `RUST_LOG=debug` to see the model's `reasoning_content` length and compaction
-decisions.
+## What it can do
 
-## As an MCP server
+29 built-in tools: **files** (`read_file`, `write_file`, `edit`, `apply_patch`),
+**shell** (`bash`, plus `pty` for interactive sessions held across turns),
+**search** (`grep`, `find`, `ls`, indexed `search`, `index_ls`), **git** (9
+`git_*`), **web** (`web_fetch`, `web_search`), **code intelligence** (`lsp`), and
+**platform** (`forge`, `schedule`, `todo_write`, `session_export`, `skill_write`,
+`delegate`, `metrics`) — plus every tool exposed by any MCP server you configure.
 
-`agent --serve-mcp` runs agent-seddon as a [Model Context
-Protocol](https://modelcontextprotocol.io) server over stdio, exposing a single
-`run` tool: any MCP client (Claude Desktop, another agent, …) can hand it a goal
-and get the final answer back. stdout carries only JSON-RPC; logs and the
-streaming echo go to stderr.
+Providers are OpenAI-compatible and Anthropic-native, both streaming, with model
+routing and failover, prompt-cache breakpoint placement, and token/cost accounting.
+Memory is a layered episodic log plus semantic recall. Multimodal content, lifecycle
+hooks, and a content scanner that feeds the `Policy` gate are all seams too.
 
-```jsonc
-// e.g. in an MCP client's server config:
-{ "command": "agent", "args": ["--serve-mcp", "--config", "/path/to/agent.toml"] }
-```
+## Understanding what it's doing
 
-Use a non-interactive policy (`auto-approve`) — stdin is the JSON-RPC channel, so
-an interactive approval prompt can't read it. (This is the server counterpart to
-the `agent-mcp` client, which *consumes* other MCP servers.)
+This is what the project is actually for.
 
-## Distributing components (gRPC)
-
-Because every seam is a trait selected by config, a component can run **in a
-different process or on a different machine** with no change to the loop — a remote
-seam is just another impl, chosen with `= "grpc"`. `agent-proto` defines the
-protobuf wire contract for every seam (all binary — arbitrary JSON args ride as a
-lossless `JsonValue`, not text); `agent-grpc` provides the per-seam servers and
-clients over **TCP or unix domain sockets** (UDS is the same-host fast path,
-bound `0700`/`0600`).
-
-Host a seam with `agent --serve-<seam>` and point another agent at it:
+**Metrics.** 74 Prometheus families covering every seam — provider latency and
+tokens, per-tool duration and outcome, context size and compactions, policy
+decisions, scanner findings, search and memory timings. The agent serves its own
+`/metrics`, and a `metrics` tool lets the model inspect its own performance
+mid-run. A Grafana dashboard and the Prometheus scrape config are generated from
+the same source of truth as the ports (`nix/constants.nix`), so they cannot drift:
 
 ```sh
-# terminal A — a model gateway serving the real provider over gRPC (default :50051)
-agent --serve-provider --config gateway.toml         # gateway.toml: provider = "anthropic"
-
-# terminal B — a loop that dials the gateway instead of calling the model directly
-#   loop.toml:  [agent] provider = "grpc"
-#               [grpc.provider] endpoint = "http://127.0.0.1:50051"  (or unix:/path)
-agent --config loop.toml "list the files in this repo"
+nix run .#prometheus-up          # scraper, UI :9090
+nix run .#grafana-up             # dashboards, UI :3000
 ```
 
-`--serve-provider|--serve-memory|--serve-tools|--serve-context|--serve-policy|--serve-search|--serve-repo` each
-host one seam; ports/socket paths are generated from `nix/constants.nix` into
-`agent-grpc`'s `constants.rs` (a `nix flake check` guard keeps them in sync). This
-lifts the design's "distributed components" goal to a k8s-style topology — a
-gateway, a shared memory service, sandboxed tool workers. Full contract, error
-mapping, and deployment sketch in **[docs/grpc.md](docs/grpc.md)**.
+**Traces.** OpenTelemetry spans with W3C context propagation, so one trace follows
+a call *across* a gRPC seam into another process — see the two-process demo in
+[`docs/tracing.md`](docs/tracing.md).
 
-Every `--serve-<seam>` process enables **gRPC reflection**, so you can introspect
-and call a running seam with human-readable JSON via `grpcurl` (no `.proto` files):
+**History.** A separate native-protocol writer streams the transaction history,
+logs and token usage into ClickHouse (`agent_events`, `agent_logs`, `agent_usage`).
+It runs on a bounded channel and **drops rows rather than blocking the loop**: if
+ClickHouse is down the agent is unaffected, and `.agent/episodic.jsonl` remains the
+durable record.
 
-```sh
-agent --serve-search &                                   # search seam on :50056
-grpcurl -plaintext 127.0.0.1:50056 list                  # → agent.v1.SearchService, …
-grpcurl -plaintext -d '{"globs":["**/*.rs"]}' \
-        127.0.0.1:50056 agent.v1.SearchService/ListFiles # JSON in → binary → JSON out
-```
+Full three-signal overview: [`docs/observability.md`](docs/observability.md).
 
-The wire contract is governed by **`buf`** in `nix flake check` (`buf lint` +
-`buf breaking` against a committed baseline image; codegen stays on `tonic-build`)
-— see the "Proto governance" note in [CLAUDE.md](CLAUDE.md).
+## Running seams as services
 
-## Nix
-
-A modular flake (thin `flake.nix` + `./nix/` aggregator, pinned Rust toolchain via
-`rust-overlay`, builds via `crane`) provides the dev shell, checks, and a ClickHouse
-container. See `nix/versions.nix` for the single source of truth on tool versions.
-
-```sh
-nix develop                 # dev shell: toolchain + tools + `agent-help` menu
-nix flake check             # clippy (-D warnings) + rustfmt + tests + cargo-audit + bench/leak + buf (proto lint/breaking) + nix-fmt
-nix build .#agent           # build the `agent` binary -> ./result/bin/agent
-nix run   .#agent -- --config config/agent.toml "list files in this repo"
-nix fmt                     # format all .nix files
-```
-
-### ClickHouse (telemetry)
-
-A pinned ClickHouse container (Docker) holds the agent's full transaction history,
-logs, and token usage. Schema: [`nix/clickhouse/schema.sql`](nix/clickhouse/schema.sql)
-(`agent_events`, `agent_logs`, `agent_usage`). Requires a running Docker daemon.
-
-```sh
-nix run .#clickhouse-up                                  # start + apply schema
-nix run .#clickhouse-client -- -q 'SHOW TABLES FROM agent'
-nix run .#clickhouse-down                                # stop + remove (data discarded)
-```
-
-For **distributed OpenTelemetry tracing** (spans that follow a request across
-gRPC components into a **ClickStack / HyperDX** UI), a separate all-in-one container
-is provided (`nix run .#clickstack-up`, UI on `:8080`, OTLP on `:4317`). See the
-runbook in [`docs/tracing.md`](docs/tracing.md).
-
-To actually populate the tables, enable telemetry in `config/agent.toml`
-(`[telemetry] enabled = true`) and run a goal. Each run gets a `session_id`
-(printed at the end); the composite memory sink mirrors every event into
-`agent_events`, a tracing layer streams logs into `agent_logs`, and per-turn
-token counts land in `agent_usage`. It's best-effort — if ClickHouse is
-unreachable the loop is unaffected and `.agent/episodic.jsonl` still holds the
-full record.
-
-Writes use ClickHouse's **native protocol** (`klickhouse`, port 9000) via a
-background batched writer, and the writer disables ClickHouse's own
-`system.query_log` for its connection so the high-frequency telemetry inserts
-don't bloat the server's internal logs.
-
-```sh
-# with telemetry enabled and the container up:
-nix run .#agent -- --config config/agent.toml "list the files in this repo"
-nix run .#clickhouse-client -- -q \
-  "SELECT kind, role, substring(content,1,60) FROM agent.agent_events ORDER BY ts, seq FORMAT PrettyCompact"
-```
-
-## Configuration
-
-Wiring lives in [`config/agent.toml`](config/agent.toml). The string fields under
-`[agent]` and `[memory]` choose which seam implementation runs (`provider`,
-`context`, `policy`, `[memory] backend`, `[tools] enabled`) — swapping them is the
-experimentation lever, no code edit required. `[agent] stream` toggles incremental
-SSE streaming with a live stderr echo (set `false` for the buffered path — the
-escape hatch for servers that misbehave on SSE, and the only path that reports
-token usage for openai-compat); `[agent] parallel_tools` runs a turn's
-parallel-safe tool calls concurrently.
-
-### API key (kept out of the repo)
-
-The key is never stored in this repo. The provider config reads it, in order of
-precedence, from:
-
-1. `provider.api_key` (inline — avoid),
-2. `provider.api_key_env` (an environment variable), or
-3. `provider.api_key_file` (a path, e.g. `~/Downloads/runpod/glm/glm-api-key`).
-
-The example config points `api_key_file` at the GLM key file outside the repo.
-
-### User context files (`context.d/`)
-
-Drop markdown files into `context.d/` to add fixed entries to the model context on
-every run — always injected (unlike relevance-recalled semantic memory):
-
-- `context.d/prepend/NNNN_*.md` — folded into the system prompt (before the goal).
-- `context.d/append/NNNN_*.md` — a trailing message (after the goal).
-
-The leading `NNNN` orders files ascending. The directory is set by
-`[context_files] dir` (default `context.d`); a missing directory means no injection.
-See [`context.d/README.md`](context.d/README.md).
-
-## Reliability: retries & backoff
-
-Transient failures — a rate-limit (HTTP 429 / gRPC `RESOURCE_EXHAUSTED`), a brief
-`5xx` / `UNAVAILABLE`, a dropped connection — must not abort a whole run. **All
-retrying in this workspace goes through one library, [`agent-retry`](crates/agent-retry)
-— never hand-roll a retry loop or a `sleep`+loop.** It provides exponential backoff
-with **full jitter**, honours server backoff hints (HTTP `Retry-After`, gRPC
-`grpc-retry-pushback-ms`), and classifies which HTTP statuses / gRPC codes are
-actually transient (so a 400 / `INVALID_ARGUMENT` fails fast). Streams are not
-retried. Providers expose `[provider] max_retries` (default `3`, `0` disables).
-
-> **Contributor rule:** if your code makes a call that can fail transiently, use
-> `agent-retry` and add a *classifier* there — do not write a new retry loop.
-
-See [`docs/components/retry.md`](docs/components/retry.md).
-
-## Metrics
-
-Prometheus metrics about a running agent — enabled in `config/agent.toml`
-(`[metrics] enabled = true`) to serve `/metrics` on `listen` (default
-`127.0.0.1:9600`). Alongside the loop-level counters (`agent_api_calls_total`,
-`agent_api_call_duration_seconds`, `agent_tokens_total`, `agent_context_tokens`,
-`agent_context_messages`, `agent_tool_calls_total`, `agent_iterations_total`,
-`agent_runs_total`, `agent_run_duration_seconds`, `agent_active`), **each seam is
-instrumented independently** — a metrics wrapper (`agent-runtime/src/metered.rs`)
-records provider request/TTFT (`agent_provider_*`), per-tool latency
-(`agent_tool_exec_seconds`), memory ops (`agent_memory_*`), context
-assemble/compact (`agent_context_*`), policy authorize (`agent_policy_*`),
-search index/query timings (`agent_search_*`), and git operations labelled by
-backend (`agent_repo_*`). A remote
-`= "grpc"` seam is timed on the client side, and each `--serve-<seam>` process
-serves its own `/metrics` (ports 9601–9607) for server-side latency.
-
-The agent can inspect **its own** performance in-process via the built-in
-`metrics` tool (no stack required) — see **[docs/observability.md](docs/observability.md)**.
-
-A **Prometheus + Grafana** stack ships as Nix docker-apps (same pattern as
-ClickHouse/ClickStack), with a provisioned per-component dashboard:
-
-```sh
-nix run .#prometheus-up          # scraper — UI :9090, scrapes :9600–:9606
-nix run .#grafana-up             # dashboards — UI :3000 (Dashboards → agent-seddon)
-# run a REPL session (or the gRPC demo), then watch the dashboard fill.
-nix run .#grafana-down && nix run .#prometheus-down
-
-# or just curl the endpoint while a session is live:
-curl -s 127.0.0.1:9600/metrics | grep '^agent_'
-```
-
-Full runbook (single-process + distributed topology + networking notes):
-**[docs/metrics.md](docs/metrics.md)**; the three-signal overview (metrics +
-tracing + logs, and agent self-inspection) is **[docs/observability.md](docs/observability.md)**.
-
-## Tracing (OpenTelemetry)
-
-Distributed traces show the agent's loop as a **span tree** and follow a request
-across process boundaries. Turn it on with a single knob:
+22 seams have a gRPC service. Selecting one is a config change, not a code change —
+the loop cannot tell a remote seam from a local one:
 
 ```toml
-[telemetry]
-otlp_endpoint = "http://127.0.0.1:4317"   # OTLP/gRPC receiver (empty = off)
-# otlp_headers = "authorization=<key>"    # if the collector authenticates ingestion
+[agent]
+policy = "grpc"                            # the approval gate now runs elsewhere
+[grpc.policy]
+endpoint = "http://policy-host:50055"
 ```
-
-How it works:
-
-- **Spans.** The loop (`agent-runtime`) wraps each seam interaction in a span, so a
-  run is `agent.turn → memory.recall · context.assemble · provider.complete/stream ·
-  policy.authorize · tool.execute · context.compact` (+ `agent.delegate` for
-  subagents). `tracing-opentelemetry` also auto-tags each span with its
-  `code.filepath`/`lineno`, so a span links back to source.
-- **Export.** A `tracing` layer (`agent-telemetry`) batches the spans and exports
-  them over **OTLP/gRPC** to any collector. It's *additive* to the native ClickHouse
-  sink and **independent of `RUST_LOG`** (its own `INFO` filter — so quieting the
-  console doesn't silently disable tracing).
-- **Propagation.** The gRPC transports carry the **W3C trace context** in request
-  metadata (`agent-proto`), so when a seam is remote (`= "grpc"`), the server's
-  handler span is a child of the caller's span — **one trace across both
-  processes**.
-
-A ready-to-run demo ships as a **ClickStack / HyperDX** all-in-one container
-(collector + ClickHouse + UI):
 
 ```sh
-nix run .#clickstack-up          # UI :8080, OTLP :4317
-# run the two-process demo in config/otel-demo/ (a gateway + a provider = "grpc" loop),
-# then open http://localhost:8080 → Traces to see the distributed waterfall.
-nix run .#clickstack-down
+agent --serve-policy                       # host one seam
+agent --serve-all                          # host every enabled seam in one process
 ```
 
-Full runbook (including the two-process distributed trace and the setup gotchas):
-**[docs/tracing.md](docs/tracing.md)**.
+Every server carries gRPC reflection — introspect and call a live seam with plain
+JSON, no `.proto` files — and the standard `grpc.health.v1` health service. The
+wire contract is governed by `buf` (lint + breaking-change checks) in the gate.
 
-## Runtime state
+**What is not shipped: container images, orchestration manifests, or any multi-host
+deployment.** Everything runs over loopback or a unix socket today. The seams, the
+transports, the health checks and the tests are real — a round-trip suite covers
+every seam on both TCP and UDS, and
+[`grpc_e2e.rs`](crates/agent-runtime/tests/grpc_e2e.rs) runs the actual agent loop
+with four seams remote at once — but the deployment layer does not exist yet.
 
-Written under `.agent/` (git-ignored):
+Three seams are deliberately *not* distributed;
+[`docs/grpc.md`](docs/grpc.md#three-seams-are-deliberately-not-distributed) explains
+why. `--serve-sandbox`, `--serve-pty` and `--serve-forge` expose arbitrary code
+execution or authenticated writes — read the warning there before exposing them.
 
-- `.agent/episodic.jsonl` — append-only event log ("what happened").
-- `.agent/memory/*.md` — curated semantic facts ("what is true"), recalled by
-  keyword match and injected into context.
-- `.agent/sessions/*.jsonl` — REPL conversation transcripts, for `--continue` /
-  `--resume` / `/resume`.
+## How it's kept honest
+
+- **Table-driven tests.** 1,669 tests over 1,096 `#[rstest]` cases, classified by
+  prefix: `positive_`, `negative_`, `corner_`, `boundary_`. For anything reading
+  untrusted input, `adversarial_` cases are **mandatory** and must assert the
+  rejection — there are 82 of them.
+- **Instruction-count ceilings.** 17 iai-callgrind benchmarks measure deterministic
+  instruction counts under valgrind, each with a hard ceiling. A regression fails
+  the build like a lint, and raising a ceiling shows up in the diff.
+- **Leak budgets.** 14 dhat tests assert hot paths free what they allocate.
+- **One gate.** `nix flake check` runs nine checks: clippy (`-D warnings`), rustfmt,
+  tests, `cargo-audit`, nix-fmt, generated-constant drift, buf lint, buf
+  wire-compatibility, and the bench and leak suites.
+
+The security model assumes the model is prompt-injectable: every tool argument and
+every provider-supplied value is treated as attacker-controlled. The rules are in
+[`CLAUDE.md`](CLAUDE.md).
+
+## Extending it
+
+Implement the trait, gate it behind a cargo feature, register a factory, select it
+by config string. In-tree that is one line in `register_builtins`; out-of-tree,
+build your own binary against the public `Registry` + `build_agent_with` API and
+never touch this repo — see [`docs/extending.md`](docs/extending.md) and the
+runnable `cargo run -p agent-cli --example custom_provider`. Tools can also arrive
+with no Rust at all, from any MCP server named in config.
+
+## Status and limitations
+
+Experimental, single-author, no CI. Known gaps, stated plainly:
+
+- **No deployment story for the distributed seams** — see above.
+- **The `nix` sandbox backend is reproducibility, not confinement.** It reports
+  `network_off: false` in its own capabilities. Real isolation is unbuilt.
+- **The bundled embedder is feature hashing**, not a learned model — deterministic
+  and dependency-free, but real embedding backends are a seam away and not shipped.
+- **The bundled tokenizer is a heuristic** and does not tokenize per-model; hermes
+  is genuinely ahead here. Real BPE backends are deferred.
+- Cross-session export recall, model-invocable skills, fuzzy hunk matching in
+  `apply_patch`, and a secret-path write deny-list are open follow-ups — the live
+  list is at the foot of [`docs/parity/README.md`](docs/parity/README.md).
+
+## Docs
+
+[**`docs/README.md`**](docs/README.md) indexes everything: design and architecture,
+per-component docs, the operating guides, and the 30 parity specs.
+
+## License
+
+Public domain — [Unlicense](LICENSE).

@@ -53,7 +53,7 @@ Metrics are enabled by default in [`config/agent.toml`](../config/agent.toml)
 (`[metrics] enabled = true`), served on `127.0.0.1:9600`.
 
 ```sh
-nix run .#prometheus-up          # Prometheus  UI :9090, scrapes :9600–:9606
+nix run .#prometheus-up          # Prometheus  UI :9090, scrapes every seam target
 nix run .#grafana-up             # Grafana     UI :3000, provisioned dashboard
 
 # start a session so metrics accumulate (the REPL stays up for scraping):
@@ -94,6 +94,13 @@ job so co-located servers don't collide on `:9600`:
 | `--serve-policy`   | `policy`   | `127.0.0.1:9605` |
 | `--serve-search`   | `search`   | `127.0.0.1:9606` |
 | `--serve-repo`     | `repo`     | `127.0.0.1:9607` |
+| …                  | …          | one per served seam, through `9622` |
+| `--serve-all`      | gateway    | `127.0.0.1:9700` |
+
+There are **22 served seams**; the table above lists the first seven for shape.
+`nix/constants.nix` is the source of truth — the Prometheus scrape config and
+`agent-grpc`'s `constants.rs` are both generated from it, and a `nix flake check`
+guard fails if they drift.
 
 Run the `config/otel-demo` two-process demo (a gateway + a `provider = "grpc"`
 loop) and both the loop (`agent`, `:9600`) and the gateway (`provider`, `:9601`)

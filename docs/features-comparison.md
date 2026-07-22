@@ -1,8 +1,7 @@
 # Features Comparison: agent-seddon vs. pi vs. hermes-agent vs. opencode
 
-**Original analysis:** 2026-07-17 · **Last refreshed:** 2026-07-18 to match the
-current code (adds a fourth yardstick — **opencode** — and a coding-fundamentals
-deep dive).
+**Original analysis:** 2026-07-17 · **Last refreshed:** 2026-07-22, after the
+30-spec parity programme and the gRPC distribution work (7 → 22 served seams).
 **Status:** Capability inventory vs. three reference harnesses + remaining roadmap.
 
 > The original document was written before the plugin registry + P0 work. It has
@@ -42,16 +41,18 @@ research toy. The three yardsticks:
   web UIs.
 
 pi = disciplined minimalism, hermes = maximalism, opencode = a polished
-fundamentals-first daily driver. `agent-seddon` now covers most of the coding
+fundamentals-first daily driver. `agent-seddon` now covers the coding
 fundamentals all three ship, still sits below them in raw breadth (providers,
-tools, UI surfaces) and in editing sophistication (no patch/diff tool yet), and
-has a genuinely differentiated observability + distributed-seam stack.
+tools, UI surfaces), and has a genuinely differentiated observability +
+distributed-seam stack. Where it is *behind* is worth naming too: real
+tokenization (hermes uses tiktoken; ours is a heuristic), sandbox confinement, and
+learned embeddings are all unbuilt.
 
 ---
 
 ## TL;DR
 
-The core loop is sound and the coding fundamentals are in: **18 built-in tools**
+The core loop is sound and the coding fundamentals are in: **29 built-in tools**
 (`bash`/`read_file`/`write_file`/`edit`/`grep`/`find`/`ls`, full-text `search`,
 self-inspection `metrics`, and 9 multi-branch `git_*`) plus MCP, two providers
 (OpenAI-compatible + Anthropic-native) with real SSE **streaming**, **parallel**
@@ -62,11 +63,11 @@ an interactive **REPL** (history, slash commands, session resume), **skills**,
 streaming) plus **distributed gRPC seams**, which none of the three reference
 harnesses ships out of the box.
 
-What's left is mostly breadth, editing sophistication, and a couple of stubbed
-seams: a patch/diff edit tool and model-invocable skill loading (both of which
-opencode has), more providers, web/browser tools, sandboxed execution, a
-full-screen TUI, embedding-based recall, and activating the distillation
-(episodic→semantic) pipeline.
+What's left is mostly breadth and a handful of backends that are seams with
+placeholder implementations: real tokenization, sandbox confinement, learned
+embeddings, model-invocable skill loading, more providers, a full-screen TUI, and
+activating the distillation (episodic→semantic) pipeline. See **Remaining** below,
+which is the maintained list.
 
 ---
 
@@ -100,43 +101,51 @@ impl) · ❌ Missing · ➖ N/A.
 | `bash` tool | Yes | Yes | Yes | Yes | ✅ |
 | `read_file` / `write_file` | Yes | Yes | Yes | Yes (`read`/`write`) | ✅ |
 | `edit` (surgical string replace) | Yes | Yes | Yes (`patch`) | Yes | ✅ |
-| Patch/diff (unified) edit tool | No | No | Yes (`patch`) | Yes (`apply_patch`) | ❌ |
+| Patch/diff (unified) edit tool | Yes (`apply_patch`, fuzzy chain) | No | Yes (`patch`) | Yes (`apply_patch`) | ✅ |
 | `grep` / `find` / `ls` | Yes (gitignore-aware) | Yes | Yes (`search_files`) | Yes (`grep`/`glob`) | ✅ |
 | Full-text indexed code search | Yes (tantivy `search`) | No | No | No (ripgrep only) | ✅ |
 | Multi-branch git tools (revision-addressed) | Yes (9 `git_*` + worktrees/checkpoint) | No | No | No (git via `bash`) | ✅ |
-| LSP integration | No | No | No | Yes (symbols/diagnostics) | ❌ |
-| Structured task list (todos) | No | No | Yes (kanban) | Yes (`todowrite`) | ❌ |
-| Web search / fetch | No | Via extension | Yes | Yes (`websearch`/`webfetch`) | ❌ |
+| LSP integration | Yes (diagnostics + navigation + `rename`) | No | Diagnostics only | Navigation only | ✅ |
+| Structured task list (todos) | Yes (`todo_write`, plan progress as a metric) | No | Yes (kanban) | Yes (`todowrite`) | ✅ |
+| Web search / fetch | Yes (`web_fetch` + `web_search`, cached, SSRF-guarded) | Via extension | Yes | Yes (`websearch`/`webfetch`) | ✅ |
 | Browser automation | No | No (external) | Yes | No | ❌ |
-| LLM providers | 2 (OpenAI-compat + Anthropic) | 40+ | 27 | 13+ | 🟡 |
+| LLM providers | 2 (OpenAI-compat + Anthropic) + a `Router` seam for failover | 40+ | 27 | 13+ | 🟡 |
 | Provider capability metadata | Yes (basic) | Yes (rich, cost) | Yes | Yes | 🟡 |
 | Context assembly | Yes | Yes | Yes | Yes | ✅ |
 | Compaction | Truncation **and** LLM summary | LLM summary | LLM summary | LLM summary | ✅ |
-| Session branching | No | Yes (`/tree`) | Partial | No | ❌ |
+| Session branching | Yes (content-addressed checkpoints: branch/undo/fork) | Yes (`/tree`) | Partial | No | ✅ |
 | Working / episodic / semantic memory | Yes (layered) | Sessions only | MEMORY+USER files | Sessions (SQLite) + AGENTS.md | ✅ |
-| Memory recall | Keyword scan | ➖ | FTS5 + LLM + vector plugins | ➖ | 🟡 |
+| Memory recall | Keyword + vector, hybrid RRF fusion | ➖ | FTS5 + LLM + vector plugins | ➖ | 🟡 |
 | Distillation (episodic→semantic) | Seam only (no-op stub) | ➖ | Curator | ➖ | 🟦 |
 | Prometheus metrics | Yes | No | No | No | ✅ |
 | Structured telemetry sink (ClickHouse) | Yes | Adapter interface | Trace upload | No | ✅ |
 | MCP client | Yes (stdio + HTTP) | No (by design) | Yes | Yes (stdio + HTTP) | ✅ |
 | MCP server | Yes (`--serve-mcp`, stdio) | No | Yes | No | ✅ |
-| Distributed components (run seams as services) | Yes (gRPC over TCP/UDS, `--serve-<seam>`) | No | No | No | ✅ |
+| Distributed components (run seams as services) | Yes — 22 seams over TCP/UDS + `--serve-all`, reflection + health | No | No | No | ✅ |
 | Distributed tracing | Yes (OpenTelemetry/OTLP → ClickStack) | No | Trace upload | No | ✅ |
 | Permission / approval gate | Yes (auto/interactive) | No (trust model) | Yes (rich) | Yes (rich, per-agent) | 🟡 |
 | Path-traversal safety on file tools | Yes | — | — | Yes (Location-scoped) | ✅ |
-| Sandboxed execution backends | No | Docs/patterns | 6 backends | Partial (codemode) | ❌ |
+| Sandboxed execution backends | `Sandbox` seam; `nix` backend is **reproducibility, not confinement** | Docs/patterns | 6 backends | Partial (codemode) | 🟡 |
 | Subagents / delegation | Yes (`delegate`, depth-capped) | Extension | Yes + kanban | Yes (build/plan/general agents) | ✅ |
 | Session persistence / resume | Yes (JSONL + `--continue`/`--resume`/`/resume`) | Yes (JSONL + `/resume`) | Yes (SQLite) | Yes (SQLite) | ✅ |
 | Interactive REPL / TUI | REPL (line-based, rustyline) | Rich TUI | Rich TUI | Rich TUI | 🟡 |
 | Slash commands | Yes | Yes | Yes | Yes | ✅ |
 | Skills (SKILL.md) | Yes (`/skill:<name>` load, user-invoked) | Yes | Yes | Yes (model-invocable `skill` tool) | ✅ |
 | Plugins / extensions | Compile-time seams + MCP tools + skills | Yes (hot-reload TS) | Yes (19 plugin types) | Yes (hot-reload plugins) | 🟡 |
-| Hooks | No | Yes (events) | Yes | Yes (plugin events) | ❌ |
+| Hooks | Yes (5 lifecycle points, one typed seam) | Yes (events) | Yes | Yes (plugin events) | ✅ |
+| Interactive terminals (PTY) | Yes (bounded rolling buffer, cursor reads) | No | Yes (`ptyprocess`) | Yes (`Pty.Service`) | ✅ |
+| Forge (PRs / issues / reviews) | Yes — GitHub **and** GitLab behind one seam | No | Partial | No | ✅ |
+| Structured output | Validates **and** repairs (bounded) | Validates tool args | Validates, raises | Validates tool I/O | ✅ |
+| Multimodal content (image/document) | Yes (typed content blocks) | Yes | Yes | Yes | ✅ |
+| Prompt-cache breakpoint placement | Yes (`CacheStrategy` seam) | Yes (Anthropic) | Partial | Yes | ✅ |
+| Content scanner feeding the policy gate | Yes (secrets + injection, severity → `Decision`) | No | Partial | No | ✅ |
+| `@`-reference expansion in prompts | Yes (`@file`/`@dir`/`@symbol`/`@url`, budgeted) | Yes | No | Yes | ✅ |
+| Session export | Yes (deterministic render, scanner-redacted) | No | Partial | No | 🟡 |
 | Config system | TOML | JSON | YAML | JSON | ✅ |
 | User context files (project rules) | Yes (`context.d/`) | Skills/templates | `.hermes/context` | Yes (`AGENTS.md`) | ✅ |
 | Multi-platform messaging | No | No | 19 platforms | No | ➖ |
-| Cron / scheduled runs | No | No | Yes | No | ❌ |
-| Test suite | Unit + integration + Nix checks | vitest | ~17k pytest | Bun/vitest | 🟡 |
+| Cron / scheduled runs | Yes (`schedule` tool + `--scheduler` driver) | No | Yes | No | ✅ |
+| Test suite | Table-driven `#[rstest]` + instruction-count benches + dhat leak gate | vitest | ~17k pytest | Bun/vitest | 🟡 |
 
 ---
 
@@ -284,10 +293,20 @@ queryable-history + distributed-tracing stack.
 Because every seam is a config-selected trait, a component can run as its own
 process/container: `agent-proto` (binary protobuf contracts) + `agent-grpc`
 (per-seam servers/clients over TCP or unix domain sockets) let the loop dial a
-remote provider/memory/tools/context/policy with `= "grpc"`, hosted by
-`agent --serve-<seam>` (see [`grpc.md`](grpc.md)). This enables a k8s-style
-topology — a model gateway, a shared memory service, sandboxed tool workers —
-that neither pi nor hermes offers out of the box.
+remote seam with `= "grpc"`, hosted by `agent --serve-<seam>` (see
+[`grpc.md`](grpc.md)). **22 of the 26 seams** are served today, plus a
+`--serve-all` gateway; every server carries reflection and the standard
+`grpc.health.v1` health service. Three seams are deliberately not distributed —
+their primary operation is a synchronous pure function, so a network hop would
+cost more than the work; the reasoning is recorded in `grpc.md`.
+
+None of the three peers offers this out of the box. But be precise about what
+exists: the contract, the transports, the health checks and the tests are real —
+including an end-to-end test that runs the loop with four seams remote at once —
+while **container images, orchestration manifests and any multi-host deployment
+are not built**. Everything runs over loopback or a unix socket today. Calling it
+a "k8s-style topology" (as an earlier draft of this document did) promised more
+than the code delivers.
 
 ### MCP — client and server
 `crates/agent-mcp` is an MCP **client** (stdio subprocess + streamable HTTP behind
@@ -356,15 +375,23 @@ nix-fmt). Far smaller than pi's vitest suites or hermes's ~17k tests.
    wired by a config-selected registry, gated by cargo features. Swapping
    provider/memory/context/policy is a one-line TOML edit; third parties can add
    modules in-tree or out-of-tree without forking.
-3. **Rust.** Performance, memory safety, single static binary, no runtime/venv.
-4. **Reproducible tooling.** Modular Nix flake (dev shell, checks, ClickHouse
-   container).
+3. **Rust.** Memory safety and a single static binary with no runtime or venv —
+   and, because there is no GC or JIT in the way, instruction-count benchmarks
+   stable enough to gate a build on.
+4. **Reproducible tooling.** Modular Nix flake (dev shell, checks, containers).
+5. **A quality gate that includes performance and memory.** 17 iai-callgrind
+   benches with hard instruction ceilings and 14 dhat leak budgets, wired into
+   `nix flake check` alongside clippy/fmt/tests/audit/buf. No peer gates on either.
+   Caveat: it runs locally — there is no CI.
+6. **Specified against the peers before being built.** The 30 specs in
+   `docs/parity/` were each written by reading the peers' implementation *and their
+   tests*, which is also why this document can cite source paths.
 
 ---
 
 ## Roadmap
 
-### Shipped since the original analysis
+### Shipped since the original analysis (2026-07-17 → 2026-07-22)
 Plugin registry + cargo-feature gating · `edit` / `grep` / `find` / `ls` tools ·
 **full-text code search** (tantivy `SearchBackend`) · **multi-branch git** (9
 `git_*` tools, the `RepoBackend` seam) · **self-inspection `metrics` tool** ·
@@ -375,25 +402,37 @@ summarizing compaction · MCP client (stdio + HTTP) · MCP server (`--serve-mcp`
 subagent `delegate` · interactive REPL (rustyline history) · session resume · slash
 commands · skills.
 
+Then the 30-spec parity programme: `apply_patch` · web fetch + search · **LSP**
+(diagnostics, navigation **and** `rename`) · the `Sandbox` seam · vector search with
+hybrid RRF fusion · structured output **with bounded repair** · `@`-reference
+expansion · a content **scanner** feeding the policy gate · content-addressed
+**session checkpoints** (branch/undo/fork) + export · **todos** · **lifecycle
+hooks** · tokenizer/cost accounting · **prompt-cache** placement · **model routing**
+and failover · **multimodal** content blocks · **forge** (GitHub + GitLab) ·
+**scheduler** · **PTY** · skill authoring. Then the distribution programme took
+served gRPC seams from 7 to **22**, added `--serve-all`, health checking, and an
+end-to-end test running the loop with four seams remote at once.
+
 ### Remaining
 
 Effort key: **S** ≈ hours–1 day · **M** ≈ a few days · **L** ≈ 1–2 weeks.
 
 | Feature | Current | Target | Effort |
 |---|---|---|---|
-| Unified-diff / patch edit tool | Exact string-replace only | `apply_patch`-style add/update/delete (as opencode/hermes) | M |
-| Line-ending / BOM-safe editing | Plain UTF-8 rewrite | CRLF/LF + BOM preservation + stale-file detection | S |
+| **Real tokenization** | Heuristic; the shipped backend ignores the model — hermes uses tiktoken, so we are **behind** here | BPE/HF backends behind the existing `Tokenizer` seam | M |
+| **Sandbox with teeth** | The `nix` backend gives reproducibility, **not confinement** (`network_off: false`) | Network/mount enforcement via sandboxed derivations or a container backend | L |
+| **Real embeddings** | `LocalEmbedder` is feature hashing, not a learned model | A hosted or local model behind the `Embedder` seam | M |
+| Deployment for distributed seams | Transport, health and tests exist; nothing to deploy with | Container images + a compose/k8s example | M |
+| CI | `nix flake check` run locally by hand | The gate on every PR, with a badge | S |
 | Model-invocable skill loading | User `/skill:<name>` | A `skill` tool the model calls mid-task (as opencode) | S |
-| LSP-assisted editing *(optional)* | None | Symbols/diagnostics fed into edits | L |
+| Line-ending / BOM-safe editing | Plain UTF-8 rewrite | CRLF/LF + BOM preservation + stale-file detection | S |
+| Fuzzy hunk matching in `apply_patch` | Exact + line-oriented fuzzy chain | Offset-tolerant hunk application | M |
 | Distillation pipeline *(seam exists)* | No-op stub | Episodic→semantic promotion via the model | M |
-| Embedding-based recall *(seam exists)* | Keyword scan | Vector semantic store (Qdrant/LanceDB) | L |
-| More providers | 2 hand-rolled | `genai`-style wrapper for breadth (DESIGN.md §9) | M |
-| Web search / fetch tools | None | Built-in web tools | M |
-| Sandboxed execution backend | None | Docker backend for `bash` | L |
-| `AllowList` policy *(seam exists)* | auto/interactive | Pattern allowlist | S |
+| Cross-session export recall | Export renders; recall across sessions unbuilt | Index the session corpus | M |
+| Secret-path write deny-list | Guard screens dangerous paths; no explicit deny-list | hermes-style deny-list in `Policy` | S |
+| More providers | 2 hand-rolled + a `Router` | `genai`-style wrapper for breadth (DESIGN.md §9) | M |
 | Full-screen TUI | Line-based REPL | Differential-render multi-turn TUI | L |
 | Steering / follow-up | None | Interrupt / queue work mid-run | M |
-| Session branching | Linear resume | In-place branch tree | M |
 
 ---
 
@@ -404,4 +443,10 @@ extensions; hermes bundles **everything**. `agent-seddon` has pi's structural
 discipline (trait seams + config wiring) — so it can pursue hermes-like breadth
 *incrementally*, each item landing behind an existing seam. The posture that got us
 here and should continue: keep the core small and swappable, close the fundamentals
-both references ship, and lean into observability as the differentiator.
+the references ship, and lean into observability as the differentiator.
+
+Two honest notes on that posture. The breadth gaps that remain are real — provider
+count, UI surfaces, and tool volume are all still well behind. And the rows where
+this project leads are mostly *structural* (seams, transports, instrumentation,
+gates) rather than *capability* rows; that is a deliberate bet, not an accident,
+but it should not be mistaken for being ahead overall.
