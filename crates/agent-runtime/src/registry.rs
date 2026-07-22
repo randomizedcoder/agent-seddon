@@ -105,6 +105,9 @@ type ToolFactory = Box<dyn Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn Tool>> 
 type SearchFactory = Box<
     dyn Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn agent_core::SearchBackend>> + Send + Sync,
 >;
+#[cfg(feature = "forge")]
+type ForgeFactory =
+    Box<dyn Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn agent_core::Forge>> + Send + Sync>;
 #[cfg(feature = "web-search")]
 type WebSearchFactory =
     Box<dyn Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn agent_core::WebSearch>> + Send + Sync>;
@@ -128,6 +131,8 @@ pub struct Registry {
     tools: BTreeMap<&'static str, ToolFactory>,
     #[cfg(feature = "search")]
     searches: BTreeMap<&'static str, SearchFactory>,
+    #[cfg(feature = "forge")]
+    forges: BTreeMap<&'static str, ForgeFactory>,
     #[cfg(feature = "web-search")]
     web_searches: BTreeMap<&'static str, WebSearchFactory>,
     #[cfg(feature = "git")]
@@ -214,6 +219,19 @@ impl Registry {
     ) {
         self.searches.insert(name, Box::new(f));
     }
+    /// Register a forge backend (parity spec 27).
+    #[cfg(feature = "forge")]
+    pub fn forge(
+        &mut self,
+        name: &'static str,
+        f: impl Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn agent_core::Forge>>
+            + Send
+            + Sync
+            + 'static,
+    ) {
+        self.forges.insert(name, Box::new(f));
+    }
+
     /// Register a web-search backend (parity spec 12).
     #[cfg(feature = "web-search")]
     pub fn web_search(
@@ -358,6 +376,19 @@ impl Registry {
             .searches
             .get(name)
             .ok_or_else(|| unknown("search backend", name, self.searches.keys().copied()))?;
+        f(ctx)
+    }
+
+    #[cfg(feature = "forge")]
+    pub fn build_forge(
+        &self,
+        name: &str,
+        ctx: &FactoryCtx<'_>,
+    ) -> anyhow::Result<Arc<dyn agent_core::Forge>> {
+        let f = self
+            .forges
+            .get(name)
+            .ok_or_else(|| unknown("forge backend", name, self.forges.keys().copied()))?;
         f(ctx)
     }
 
@@ -573,6 +604,45 @@ pub fn register_builtins(r: &mut Registry) {
         Ok(Arc::new(router) as Arc<dyn LlmProvider>)
     });
 
+    // --- forge backends (the Forge seam, parity spec 27) ---
+    #[cfg(feature = "forge-github")]
+    r.forge("github", |ctx| {
+        let cfg = &ctx.cfg.forge;
+        if cfg.owner.is_empty() || cfg.repo.is_empty() {
+            anyhow::bail!("[forge] owner and repo must be set for the github backend");
+        }
+        Ok(Arc::new(agent_forge::GitHubForge::new(
+            if cfg.base_url.is_empty() {
+                "https://api.github.com".to_string()
+            } else {
+                cfg.base_url.clone()
+            },
+            cfg.owner.clone(),
+            cfg.repo.clone(),
+            resolve_ws_key(&cfg.token, &cfg.token_env),
+            cfg.timeout_secs,
+            cfg.max_retries,
+        )?) as Arc<dyn agent_core::Forge>)
+    });
+    #[cfg(feature = "forge-gitlab")]
+    r.forge("gitlab", |ctx| {
+        let cfg = &ctx.cfg.forge;
+        if cfg.project.is_empty() {
+            anyhow::bail!("[forge] project must be set for the gitlab backend");
+        }
+        Ok(Arc::new(agent_forge::GitLabForge::new(
+            if cfg.base_url.is_empty() {
+                "https://gitlab.com/api/v4".to_string()
+            } else {
+                cfg.base_url.clone()
+            },
+            cfg.project.clone(),
+            resolve_ws_key(&cfg.token, &cfg.token_env),
+            cfg.timeout_secs,
+            cfg.max_retries,
+        )?) as Arc<dyn agent_core::Forge>)
+    });
+
     // --- web-search backends (the WebSearch seam, parity spec 12) ---
     //
     // These are ORDINARY factory lines. Each needs config + the API key + retry
@@ -721,7 +791,7 @@ fn grpc_client_endpoint(
 
 /// Resolve a web-search API key: inline value first, then the named env var.
 /// The key is never logged or echoed — see `agent-web-search`.
-#[cfg(feature = "web-search")]
+#[cfg(any(feature = "web-search", feature = "forge"))]
 fn resolve_ws_key(inline: &str, env_var: &str) -> String {
     if !inline.is_empty() {
         return inline.to_string();

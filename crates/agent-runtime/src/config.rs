@@ -59,6 +59,64 @@ pub struct Config {
     pub hooks: HooksCfg,
     #[serde(default)]
     pub skills: SkillsCfg,
+    #[serde(default)]
+    pub forge: ForgeCfg,
+}
+
+/// Remote code-collaboration platform (the `Forge` seam, parity spec 27).
+/// `backend` = "" (off) | "github" | "gitlab". Writes mutate a shared remote and
+/// are visible to humans, so `dry_run` defaults ON: the agent previews the
+/// request shape until an operator turns it off. Token resolution mirrors the
+/// provider `api_key` (inline > env var). See docs/components/forge.md.
+#[derive(Debug, Deserialize)]
+pub struct ForgeCfg {
+    #[serde(default)]
+    pub backend: String,
+    /// GitHub: `owner`/`repo`. GitLab: `project` (`group/project` or a numeric id).
+    #[serde(default)]
+    pub owner: String,
+    #[serde(default)]
+    pub repo: String,
+    #[serde(default)]
+    pub project: String,
+    /// API base; empty ⇒ the platform default.
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub token: String,
+    #[serde(default)]
+    pub token_env: String,
+    /// Preview writes instead of sending them. **Defaults true.**
+    #[serde(default = "default_true")]
+    pub dry_run: bool,
+    #[serde(default = "default_forge_timeout")]
+    pub timeout_secs: u64,
+    #[serde(default = "default_forge_retries")]
+    pub max_retries: u32,
+}
+
+impl Default for ForgeCfg {
+    fn default() -> Self {
+        Self {
+            backend: String::new(),
+            owner: String::new(),
+            repo: String::new(),
+            project: String::new(),
+            base_url: String::new(),
+            token: String::new(),
+            token_env: String::new(),
+            dry_run: true,
+            timeout_secs: default_forge_timeout(),
+            max_retries: default_forge_retries(),
+        }
+    }
+}
+
+fn default_forge_timeout() -> u64 {
+    30
+}
+fn default_forge_retries() -> u32 {
+    2
 }
 
 /// Skill authoring (parity spec 30). `write` enables the `skill_write` tool so
@@ -1117,6 +1175,7 @@ impl Config {
             router: RouterCfg::default(),
             hooks: HooksCfg::default(),
             skills: SkillsCfg::default(),
+            forge: ForgeCfg::default(),
         }
     }
 }

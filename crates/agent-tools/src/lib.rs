@@ -58,6 +58,11 @@ mod metrics;
 #[cfg(feature = "tool-metrics")]
 pub use metrics::MetricsTool;
 
+#[cfg(feature = "tool-forge")]
+mod forge;
+#[cfg(feature = "tool-forge")]
+pub use forge::ForgeTool;
+
 #[cfg(feature = "tool-skill-write")]
 mod skill_write;
 #[cfg(feature = "tool-skill-write")]

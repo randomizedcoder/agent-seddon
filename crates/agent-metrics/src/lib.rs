@@ -55,6 +55,10 @@ pub struct Metrics {
     // are the configured candidate names — bounded by config, never user input.
     // Lifecycle hook dispatches (parity spec 22), by hook name and attachment
     // point. Labels are bounded by config + the fixed point set.
+    // Forge API calls (parity spec 27), by backend, operation, and outcome.
+    // Labels are bounded enums — never a token, URL, or remote content.
+    forge_calls: IntCounterVec,
+    forge_seconds: HistogramVec,
     hook_dispatches: IntCounterVec,
     route_decisions: IntCounterVec,
     web_searches: IntCounterVec,
@@ -210,6 +214,19 @@ impl Metrics {
         let tool_calls = IntCounterVec::new(
             Opts::new("agent_tool_calls_total", "Tool invocations"),
             &["tool", "status"],
+        )
+        .unwrap();
+        let forge_calls = IntCounterVec::new(
+            Opts::new(
+                "agent_forge_calls_total",
+                "Forge API calls, by backend, op and outcome",
+            ),
+            &["backend", "op", "outcome"],
+        )
+        .unwrap();
+        let forge_seconds = HistogramVec::new(
+            HistogramOpts::new("agent_forge_duration_seconds", "Forge API latency"),
+            &["backend", "op"],
         )
         .unwrap();
         let hook_dispatches = IntCounterVec::new(
@@ -614,6 +631,8 @@ impl Metrics {
             Box::new(context_tokens.clone()),
             Box::new(context_messages.clone()),
             Box::new(tool_calls.clone()),
+            Box::new(forge_calls.clone()),
+            Box::new(forge_seconds.clone()),
             Box::new(hook_dispatches.clone()),
             Box::new(route_decisions.clone()),
             Box::new(web_searches.clone()),
@@ -688,6 +707,8 @@ impl Metrics {
             context_tokens,
             context_messages,
             tool_calls,
+            forge_calls,
+            forge_seconds,
             hook_dispatches,
             route_decisions,
             web_searches,
@@ -790,6 +811,15 @@ impl Metrics {
     /// Latency of one content scan.
     pub fn on_scan(&self, seconds: f64) {
         self.scan_seconds.observe(seconds);
+    }
+    /// One forge API call (parity spec 27).
+    pub fn on_forge_call(&self, backend: &str, op: &str, outcome: &str, seconds: f64) {
+        self.forge_calls
+            .with_label_values(&[backend, op, outcome])
+            .inc();
+        self.forge_seconds
+            .with_label_values(&[backend, op])
+            .observe(seconds);
     }
     /// One lifecycle hook dispatch (parity spec 22).
     pub fn on_hook(&self, hook: &str, point: &str) {

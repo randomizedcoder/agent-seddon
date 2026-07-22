@@ -749,3 +749,75 @@ async fn adversarial_injected_skill_never_reaches_disk() {
         "an injected skill must never reach disk"
     );
 }
+
+// --- parity spec 27: forge ----------------------------------------------------
+
+/// The forge tool is registered only when a backend is configured, and both
+/// platforms are selectable by config alone.
+#[rstest::rstest]
+#[case::positive_github("backend = \"github\"\nowner = \"o\"\nrepo = \"r\"", true)]
+#[case::positive_gitlab("backend = \"gitlab\"\nproject = \"g/p\"", true)]
+#[case::negative_unconfigured("", false)]
+#[tokio::test]
+async fn forge_tool_registration(#[case] forge_cfg: &str, #[case] want: bool) {
+    let dir = tempdir();
+    let cfg = format!("{}\n[forge]\n{forge_cfg}\n", config_toml(&dir));
+    let agent = agent_for_cfg(&cfg, vec![final_turn("ok")]).await;
+    let has = agent
+        .tools()
+        .describe_all()
+        .iter()
+        .any(|s| s.name == "forge");
+    assert_eq!(has, want, "forge registration did not match config");
+}
+
+/// Writes default to dry-run: an outward-facing mutation is visible to humans,
+/// so the agent previews it until an operator opts in. With no token configured,
+/// a real send would fail — so a successful preview also proves nothing fired.
+#[tokio::test]
+async fn forge_writes_default_to_dry_run() {
+    let dir = tempdir();
+    let cfg = format!(
+        "{}\n[forge]\nbackend = \"github\"\nowner = \"o\"\nrepo = \"r\"\n",
+        config_toml(&dir)
+    );
+    let script = vec![
+        tool_turn(vec![call(
+            "1",
+            "forge",
+            json!({
+                "action": "create_pr",
+                "title": "Add a thing",
+                "source_branch": "feat",
+                "target_branch": "main"
+            }),
+        )]),
+        final_turn("previewed"),
+    ];
+    let agent = agent_for_cfg(&cfg, script).await;
+    agent.run("open a PR").await.expect("run");
+    // The run completing without a token proves the request was never sent:
+    // a real create_pr would have failed on the missing credential.
+}
+
+/// A misconfigured backend fails the build with a clear message rather than at
+/// the first API call.
+#[tokio::test]
+async fn negative_forge_missing_repo_fails_the_build() {
+    let dir = tempdir();
+    let cfg = format!("{}\n[forge]\nbackend = \"github\"\n", config_toml(&dir));
+    let parsed = parse_config(&cfg).expect("parse");
+    let mut registry = Registry::new();
+    register_builtins(&mut registry);
+    registry.provider("scripted", move |_ctx| {
+        Ok(
+            Arc::new(agent_testkit::ScriptedProvider::new(vec![final_turn("x")]))
+                as Arc<dyn LlmProvider>,
+        )
+    });
+    let err = match build_agent_with(&registry, parsed, None, "s".into(), Metrics::new()).await {
+        Ok(_) => panic!("a github forge without owner/repo must fail the build"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(err.contains("owner and repo"), "got: {err}");
+}

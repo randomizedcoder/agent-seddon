@@ -150,6 +150,23 @@ pub async fn build_agent_with(
         tools.register(crate::metered::tool(tool, metrics.clone()));
     }
 
+    // Forge (parity spec 27): the remote platform. Local git stays with the
+    // RepoBackend; this is only the PR/issue/review API. Writes are Policy-gated
+    // like any side-effecting tool and default to dry-run.
+    #[cfg(feature = "forge")]
+    if !cfg.forge.backend.is_empty() {
+        let fctx = crate::registry::FactoryCtx::new(&cfg, &metrics);
+        let backend = registry
+            .build_forge(&cfg.forge.backend, &fctx)
+            .with_context(|| format!("building forge backend `{}`", cfg.forge.backend))?;
+        let backend = crate::metered::forge(backend, metrics.clone());
+        if cfg.forge.dry_run {
+            tracing::info!("forge is in dry-run: writes will be previewed, not sent");
+        }
+        let tool = Arc::new(agent_tools::ForgeTool::new(backend, cfg.forge.dry_run));
+        tools.register(crate::metered::tool(tool, metrics.clone()));
+    }
+
     // Skill authoring (parity spec 30): the agent captures a reusable procedure
     // as a SKILL.md the discovery path picks up next run. OFF by default — a
     // skill is read back into future prompts, so authoring is privileged.

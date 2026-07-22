@@ -4,7 +4,21 @@ Per-feature parity spec for a new **`Forge` seam**: read/create/review pull
 requests, import and triage issues, and post comments across **GitHub *and*
 GitLab** — the remote-platform API complement to the local-git `RepoBackend`.
 
-> **Status: spec (design of record).** Introduce a new `Forge` seam (async trait
+> **Status: implemented** (`Forge` seam + `agent-forge` with GitHub and GitLab
+> backends, the `forge` tool, config + metrics + span, both backends tested
+> against a loopback server; doc in `docs/components/forge.md`). The GitLab
+> backend is the one that proves the seam: `iid` rather than `id`,
+> `PRIVATE-TOKEN` rather than `Bearer`, notes rather than comments, header
+> pagination, a `Draft:` title prefix, and **no review object at all** — approve
+> is a separate endpoint and "request changes" does not exist, so the seam
+> expresses it as an explicit note. Writes are gated twice (`Policy` plus
+> `dry_run` defaulting **true**), because an outward-facing mutation is visible
+> to humans. **Deferred:** line comments on reviews (the most platform-divergent
+> surface — GitHub anchors to `(path, position, commit)`, GitLab to a position
+> object on a discussion), issue triage writes, and `forge.proto` /
+> `--serve-forge`, consistent with specs 11–30.
+>
+> Original plan follows. Introduce a new `Forge` seam (async trait
 > in `agent-core`) with pluggable **GitHub** and **GitLab** backends selected by
 > config (`forge = "github" | "gitlab"`), mirroring the swap-by-config pattern of
 > `SearchBackend` / `LlmProvider`. It gets its own `forge.proto` gRPC service with
