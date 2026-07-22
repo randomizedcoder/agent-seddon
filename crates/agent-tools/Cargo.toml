@@ -30,6 +30,8 @@ tool-web = []
 tool-web-search = []
 # `skill_write`: the agent authors a reusable skill (parity spec 30).
 tool-skill-write = []
+# `forge`: GitHub/GitLab PRs, issues, reviews (parity spec 27).
+tool-forge = []
 # `session_export` over the deterministic renderer (parity spec 20).
 tool-session-export = ["dep:agent-export"]
 # The `todo_write` tool over the TaskTracker seam (structured plan). The tracker

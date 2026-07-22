@@ -1827,3 +1827,88 @@ pub(crate) fn record_route_event(m: &Metrics, ev: agent_providers::RouteEvent<'_
         }
     }
 }
+
+/// Wrap a [`Forge`](agent_core::Forge) so each API call emits a `forge.request`
+/// span (`backend`, `op`, `outcome`) and a per-op counter.
+///
+/// Labels are the backend name and the fixed op set — never a token, a URL, or
+/// remote content.
+#[cfg(feature = "forge")]
+pub(crate) fn forge(inner: Arc<dyn agent_core::Forge>, m: Metrics) -> Arc<dyn agent_core::Forge> {
+    Arc::new(MeteredForge { inner, metrics: m })
+}
+
+#[cfg(feature = "forge")]
+struct MeteredForge {
+    inner: Arc<dyn agent_core::Forge>,
+    metrics: Metrics,
+}
+
+#[cfg(feature = "forge")]
+impl MeteredForge {
+    async fn record<T>(
+        &self,
+        op: &'static str,
+        fut: impl std::future::Future<Output = agent_core::Result<T>>,
+    ) -> agent_core::Result<T> {
+        let span = tracing::info_span!(
+            "forge.request",
+            backend = self.inner.name(),
+            op,
+            outcome = tracing::field::Empty,
+        );
+        let start = Instant::now();
+        let out = fut.instrument(span.clone()).await;
+        let outcome = if out.is_ok() { "ok" } else { "error" };
+        span.record("outcome", outcome);
+        self.metrics.on_forge_call(
+            self.inner.name(),
+            op,
+            outcome,
+            start.elapsed().as_secs_f64(),
+        );
+        out
+    }
+}
+
+#[cfg(feature = "forge")]
+#[async_trait]
+impl agent_core::Forge for MeteredForge {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+    async fn get_pr(&self, n: u64) -> agent_core::Result<agent_core::PullRequest> {
+        self.record("get_pr", self.inner.get_pr(n)).await
+    }
+    async fn list_prs(
+        &self,
+        p: u32,
+    ) -> agent_core::Result<agent_core::Page<agent_core::PullRequest>> {
+        self.record("list_prs", self.inner.list_prs(p)).await
+    }
+    async fn list_issues(&self, p: u32) -> agent_core::Result<agent_core::Page<agent_core::Issue>> {
+        self.record("list_issues", self.inner.list_issues(p)).await
+    }
+    async fn import_issue(&self, n: u64) -> agent_core::Result<agent_core::Issue> {
+        self.record("import_issue", self.inner.import_issue(n))
+            .await
+    }
+    async fn create_pr(
+        &self,
+        r: &agent_core::CreatePrRequest,
+    ) -> agent_core::Result<agent_core::PullRequest> {
+        self.record("create_pr", self.inner.create_pr(r)).await
+    }
+    async fn comment(&self, n: u64, b: &str) -> agent_core::Result<agent_core::Comment> {
+        self.record("comment", self.inner.comment(n, b)).await
+    }
+    async fn review_pr(
+        &self,
+        n: u64,
+        v: agent_core::ReviewVerdict,
+        b: &str,
+    ) -> agent_core::Result<agent_core::Comment> {
+        self.record("review_pr", self.inner.review_pr(n, v, b))
+            .await
+    }
+}

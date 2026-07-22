@@ -37,6 +37,7 @@ default = [
     "provider-router",
     "session-export",
     "skill-write",
+    "forge",
 ]
 
 # Each feature forwards to the owning impl crate + drives `register_builtins`.
@@ -79,6 +80,10 @@ cache = ["dep:agent-cache", "agent-cache/cache-strategies"]
 session-export = ["agent-tools/tool-session-export"]
 # Skill authoring: the agent writes a reusable SKILL.md (parity spec 30).
 skill-write = ["agent-tools/tool-skill-write"]
+# Forge: GitHub/GitLab PRs, issues, reviews. See parity spec 27.
+forge = ["dep:agent-forge", "agent-tools/tool-forge", "forge-github", "forge-gitlab"]
+forge-github = ["agent-forge/forge-github"]
+forge-gitlab = ["agent-forge/forge-gitlab"]
 web-search = [
     "dep:agent-web-search",
     "agent-tools/tool-web-search",
@@ -143,6 +148,7 @@ agent-reference = { workspace = true, optional = true }
 agent-scanner = { workspace = true, optional = true }
 agent-cache = { workspace = true, optional = true }
 agent-web-search = { workspace = true, optional = true }
+agent-forge = { workspace = true, optional = true }
 agent-validate = { workspace = true, optional = true }
 agent-lsp = { workspace = true, optional = true }
 # bash (tool-core) routes through the Sandbox seam; the local + nix backends ship

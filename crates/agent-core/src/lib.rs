@@ -1918,6 +1918,129 @@ pub trait ContextStrategy: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// Seam: Forge (remote code-collaboration platform)
+// ---------------------------------------------------------------------------
+//
+// A coding agent that stops at the local worktree stops short of where software
+// collaboration happens: read an issue → make the change (local git, which
+// `RepoBackend` already owns) → open a PR → review it → comment. That last mile
+// is entirely remote-platform API, which neither `git` nor `RepoBackend` can do.
+//
+// GitHub and GitLab expose the same *concepts* — PR/MR, issue, review, comment —
+// through incompatible APIs, so they belong behind one trait for the same reason
+// `LlmProvider` and `SearchBackend` do. `Forge` owns ONLY the remote platform;
+// all local git stays with `RepoBackend`.
+//
+// See parity spec 27 and `docs/components/forge.md`.
+
+/// A pull request (GitHub) or merge request (GitLab), normalized.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequest {
+    /// The user-facing number (`#42`), not an internal id.
+    pub number: u64,
+    pub title: String,
+    pub body: String,
+    /// `open` / `closed` / `merged`.
+    pub state: String,
+    pub author: String,
+    pub url: String,
+    pub source_branch: String,
+    pub target_branch: String,
+    pub draft: bool,
+}
+
+/// An issue, optionally with its comment thread (for context import).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Issue {
+    pub number: u64,
+    pub title: String,
+    pub body: String,
+    pub state: String,
+    pub author: String,
+    pub url: String,
+    #[serde(default)]
+    pub labels: Vec<String>,
+    /// Populated by `import_issue`; empty in list results.
+    #[serde(default)]
+    pub comments: Vec<Comment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Comment {
+    pub author: String,
+    pub body: String,
+    pub url: String,
+}
+
+/// One page of results. `next_page` is `None` on the last page, so a caller can
+/// paginate without knowing the platform's pagination dialect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Page<T> {
+    pub items: Vec<T>,
+    pub next_page: Option<u32>,
+}
+
+/// What to open.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CreatePrRequest {
+    pub title: String,
+    pub body: String,
+    pub source_branch: String,
+    pub target_branch: String,
+    pub draft: bool,
+}
+
+/// A review verdict. Line comments are deliberately not modelled yet — they are
+/// the most platform-divergent surface (see `docs/components/forge.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewVerdict {
+    Approve,
+    RequestChanges,
+    Comment,
+}
+
+impl ReviewVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ReviewVerdict::Approve => "approve",
+            ReviewVerdict::RequestChanges => "request_changes",
+            ReviewVerdict::Comment => "comment",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s.trim().to_ascii_lowercase().as_str() {
+            "approve" => ReviewVerdict::Approve,
+            "request_changes" | "request-changes" => ReviewVerdict::RequestChanges,
+            "comment" => ReviewVerdict::Comment,
+            _ => return None,
+        })
+    }
+}
+
+/// A remote code-collaboration platform.
+///
+/// Read verbs are safe; **write verbs mutate a shared remote and are visible to
+/// humans**, so callers route them through the `Policy` gate — the same
+/// treatment `RepoBackend::push` gets as the one policy-gated escape today.
+#[async_trait]
+pub trait Forge: Send + Sync {
+    /// Backend name (`github` / `gitlab`), used as a metric/span label.
+    fn name(&self) -> &str;
+
+    // --- read -------------------------------------------------------------
+    async fn get_pr(&self, number: u64) -> Result<PullRequest>;
+    async fn list_prs(&self, page: u32) -> Result<Page<PullRequest>>;
+    async fn list_issues(&self, page: u32) -> Result<Page<Issue>>;
+    /// An issue with its comment thread, for injecting into context.
+    async fn import_issue(&self, number: u64) -> Result<Issue>;
+
+    // --- write (policy-gated by the caller) --------------------------------
+    async fn create_pr(&self, req: &CreatePrRequest) -> Result<PullRequest>;
+    async fn comment(&self, number: u64, body: &str) -> Result<Comment>;
+    async fn review_pr(&self, number: u64, verdict: ReviewVerdict, body: &str) -> Result<Comment>;
+}
+
+// ---------------------------------------------------------------------------
 // Seam: Hook (lifecycle observation + intervention)
 // ---------------------------------------------------------------------------
 //

@@ -263,6 +263,23 @@ enabled = []
 write     = false
 write_dir = ""
 
+# Remote code-collaboration platform (the Forge seam). Local git stays with the
+# git_* tools; this is only the PR/issue/review API. OFF by default (`backend`
+# empty ⇒ the `forge` tool is not registered).
+# Writes mutate a shared remote and are visible to humans, so `dry_run` defaults
+# TRUE: the agent previews the request shape until an operator turns it off.
+# The token never appears in results, errors, or spans; a missing one is a
+# distinct error, not an empty result. See docs/components/forge.md.
+[forge]
+backend   = ""              # "" | "github" | "gitlab"
+# github:
+# owner   = "randomizedcoder"
+# repo    = "agent-seddon"
+# gitlab:
+# project = "group/project"   # or a numeric project id
+# token_env = "GITHUB_TOKEN"  # or GITLAB_TOKEN
+dry_run   = true
+
 [router]
 providers         = []            # e.g. ["anthropic", "openai-compat"]
 policy            = "in-order"    # in-order | round-robin
