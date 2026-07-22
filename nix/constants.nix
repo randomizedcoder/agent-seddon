@@ -8,11 +8,11 @@
 # `crates/agent-grpc/src/constants.rs`, and the `constants-sync` flake check fails
 # if that file drifts from this one. Edit here, then regenerate.
 #
-# Ports: 50051–50055 (the conventional gRPC range). Sockets live under a single
+# Ports: 50051–50058 (the conventional gRPC range). Sockets live under a single
 # writable dir so a same-host deployment can bypass TCP; override per-seam in
 # `[grpc]` config (e.g. a k8s emptyDir mount) as needed.
 #
-# Each seam also gets a Prometheus `metrics_port` (9601–9605). When a seam runs as
+# Each seam also gets a Prometheus `metrics_port` (9601–9608). When a seam runs as
 # its own `agent --serve-<seam>` process, it serves `/metrics` there instead of the
 # main agent's default `127.0.0.1:9600`, so co-located seam servers don't collide
 # and Prometheus can scrape each as a separate job (see nix/prometheus).
@@ -61,6 +61,16 @@
       port = 50057;
       socket = "/tmp/agent-seddon/repo.sock";
       metrics_port = 9607;
+    };
+
+    # NOT a seam: the `agent --serve-all` gateway, which hosts every seam's
+    # service in one process on one endpoint. A same-host deployment that wants
+    # all seams distributed would otherwise run one process (and one port) per
+    # seam. Kept in this table so the port allocation stays in one place.
+    gateway = {
+      port = 50058;
+      socket = "/tmp/agent-seddon/gateway.sock";
+      metrics_port = 9608;
     };
   };
 }

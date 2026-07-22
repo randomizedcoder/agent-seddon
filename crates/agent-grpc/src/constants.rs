@@ -55,3 +55,10 @@ pub const REPO: SeamEndpoint = SeamEndpoint {
     uds_path: "/tmp/agent-seddon/repo.sock",
     metrics_port: 9607,
 };
+
+/// The `agent --serve-all` gateway (not a seam — it hosts every seam).
+pub const GATEWAY: SeamEndpoint = SeamEndpoint {
+    tcp_port: 50058,
+    uds_path: "/tmp/agent-seddon/gateway.sock",
+    metrics_port: 9608,
+};

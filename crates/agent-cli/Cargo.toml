@@ -29,3 +29,5 @@ agent-core.workspace = true
 async-trait.workspace = true
 # For the MCP client↔server round-trip integration test.
 agent-mcp.workspace = true
+# Table-driven tests (the seam table's completeness + flag parsing).
+rstest.workspace = true

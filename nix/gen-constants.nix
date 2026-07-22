@@ -46,6 +46,9 @@ let
     ${seamConst "POLICY" g.policy}
     ${seamConst "SEARCH" g.search}
     ${seamConst "REPO" g.repo}
+
+    /// The `agent --serve-all` gateway (not a seam — it hosts every seam).
+    ${seamConst "GATEWAY" g.gateway}
   '';
 
   rawFile = pkgs.writeText "agent-grpc-constants-raw.rs" raw;
