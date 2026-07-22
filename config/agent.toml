@@ -450,7 +450,7 @@ job         = "agent-seddon"
 # memory 50052, tools 50053, context 50054, policy 50055, search 50056, repo 50057,
 # session 50058, scanner 50059, reference 50060, scheduler 50061,
 # tokenizer 50062, embed 50063, web 50064, web_search 50065, sandbox 50066,
-# pty 50067).
+# pty 50067, forge 50068, tasks 50069).
 # Use `unix:/path` for a same-host, TCP-bypassing socket. See docs/grpc.md.
 #
 # [grpc.provider]
@@ -486,6 +486,16 @@ job         = "agent-seddon"
 # endpoint = "unix:/tmp/agent-seddon/sandbox.sock"    # remote exec ([sandbox] backend = "grpc")
 # [grpc.pty]
 # endpoint = "unix:/tmp/agent-seddon/pty.sock"        # remote terminal ([pty] backend = "grpc")
+#
+# `--serve-forge` performs authenticated WRITES to the hosting platform (opens
+# PRs, comments, reviews) on behalf of whoever reaches it. Same socket caveat as
+# above, different blast radius. The upside: the platform token lives in ONE
+# process, so an agent can open a PR without holding a token that could also
+# delete a repository.
+# [grpc.forge]
+# endpoint = "unix:/tmp/agent-seddon/forge.sock"      # ([forge] backend = "grpc" is not needed; see docs)
+# [grpc.tasks]
+# endpoint = "http://plan:50069"                      # a shared plan ([tasks] backend = "grpc")
 #
 # `agent --serve-all` hosts every enabled seam in ONE process on ONE endpoint,
 # so a same-host deployment isn't one process per seam. Seams whose impl is

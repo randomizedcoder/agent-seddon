@@ -81,6 +81,12 @@ pub struct Agent {
     /// The pty backend, if wired. Held so it can be hosted over gRPC
     /// (`agent --serve-pty`).
     pty: Option<Arc<dyn agent_core::Pty>>,
+    /// The forge backend, if wired. Held so it can be hosted over gRPC
+    /// (`agent --serve-forge`); the loop reaches it through the `forge` tool.
+    forge: Option<Arc<dyn agent_core::Forge>>,
+    /// The task tracker, if wired. Held so it can be hosted over gRPC
+    /// (`agent --serve-tasks`); the loop reaches it through `todo_write`.
+    tasks: Option<Arc<dyn agent_core::TaskTracker>>,
     /// The embedder, if wired. Held so it can be hosted over gRPC
     /// (`agent --serve-embed`); the loop reaches it through the vector search
     /// backend.
@@ -145,6 +151,8 @@ impl Agent {
             web_search: None,
             sandbox: None,
             pty: None,
+            forge: None,
+            tasks: None,
             embedder: None,
             #[cfg(feature = "structured")]
             validator: None,
@@ -438,6 +446,28 @@ impl Agent {
     /// Attach the pty backend so it can be served.
     pub fn with_pty(mut self, p: Option<Arc<dyn agent_core::Pty>>) -> Self {
         self.pty = p;
+        self
+    }
+
+    /// The forge backend, if wired (for `agent --serve-forge`).
+    pub fn forge(&self) -> Option<Arc<dyn agent_core::Forge>> {
+        self.forge.clone()
+    }
+
+    /// Attach the forge backend so it can be served.
+    pub fn with_forge(mut self, f: Option<Arc<dyn agent_core::Forge>>) -> Self {
+        self.forge = f;
+        self
+    }
+
+    /// The task tracker, if wired (for `agent --serve-tasks`).
+    pub fn tasks(&self) -> Option<Arc<dyn agent_core::TaskTracker>> {
+        self.tasks.clone()
+    }
+
+    /// Attach the task tracker so it can be served.
+    pub fn with_tasks(mut self, t: Option<Arc<dyn agent_core::TaskTracker>>) -> Self {
+        self.tasks = t;
         self
     }
 

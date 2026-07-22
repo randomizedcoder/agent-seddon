@@ -40,6 +40,8 @@ pub enum Seam {
     WebSearch,
     Sandbox,
     Pty,
+    Forge,
+    Tasks,
 }
 
 /// Every variant, so the table can be checked for completeness.
@@ -61,6 +63,8 @@ const ALL_SEAMS: &[Seam] = &[
     Seam::WebSearch,
     Seam::Sandbox,
     Seam::Pty,
+    Seam::Forge,
+    Seam::Tasks,
 ];
 
 /// The static facts about a seam served as its own process.
@@ -197,6 +201,20 @@ const SEAMS: &[SeamInfo] = &[
         service: "agent.v1.PtyService",
         endpoint: constants::PTY,
     },
+    SeamInfo {
+        seam: Seam::Forge,
+        flag: "--serve-forge",
+        name: "forge",
+        service: "agent.v1.ForgeService",
+        endpoint: constants::FORGE,
+    },
+    SeamInfo {
+        seam: Seam::Tasks,
+        flag: "--serve-tasks",
+        name: "tasks",
+        service: "agent.v1.TaskService",
+        endpoint: constants::TASKS,
+    },
 ];
 
 impl Seam {
@@ -257,6 +275,8 @@ impl Seam {
             Seam::WebSearch => &cfg.grpc.web_search.listen,
             Seam::Sandbox => &cfg.grpc.sandbox.listen,
             Seam::Pty => &cfg.grpc.pty.listen,
+            Seam::Forge => &cfg.grpc.forge.listen,
+            Seam::Tasks => &cfg.grpc.tasks.listen,
         }
     }
 }
@@ -404,6 +424,20 @@ fn add_seam_service(router: Router, agent: &Agent, seam: Seam) -> anyhow::Result
             ),
             None => (router, false),
         },
+        Seam::Forge => match agent.forge() {
+            Some(f) => (
+                router.add_service(srv::ForgeServiceSvc::new(f).into_server()),
+                true,
+            ),
+            None => (router, false),
+        },
+        Seam::Tasks => match agent.tasks() {
+            Some(t) => (
+                router.add_service(srv::TaskServiceSvc::new(t).into_server()),
+                true,
+            ),
+            None => (router, false),
+        },
     })
 }
 
@@ -542,6 +576,7 @@ mod tests {
     #[case::positive_embed("--serve-embed", Some(Seam::Embed))]
     #[case::positive_web_search("--serve-web-search", Some(Seam::WebSearch))]
     #[case::positive_sandbox("--serve-sandbox", Some(Seam::Sandbox))]
+    #[case::positive_forge("--serve-forge", Some(Seam::Forge))]
     #[case::negative_unknown_seam("--serve-nope", None)]
     #[case::negative_not_a_serve_flag("--help", None)]
     #[case::adversarial_empty("", None)]

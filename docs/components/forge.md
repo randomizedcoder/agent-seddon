@@ -105,6 +105,35 @@ retryable rather than as a permission failure.
 Plus a `forge.request` span. Labels are the backend name and the fixed op set —
 never a token, a URL, or remote content.
 
+## Over gRPC — the token lives on the server
+
+`agent --serve-forge` (default `127.0.0.1:50068`) hosts the platform API, so the
+credential lives in **one** process rather than in every agent. An agent can open
+a pull request without ever holding a token that could also delete a repository.
+
+> ### It writes to the outside world
+>
+> This is the only seam that does. `--serve-forge` performs authenticated writes
+> on behalf of whoever reaches it, and the transport is unauthenticated by design
+> — the socket's permissions are the access control, exactly as for
+> [`sandbox`](sandbox.md), with a different blast radius. The `Policy` gate and
+> `dry_run` both stay on the agent side; the server hosts the raw capability.
+
+### Nothing that writes is retried
+
+`create_pr`, `comment` and `review_pr` are **not** idempotent. A retry after a
+lost response opens a second pull request, or posts a duplicate comment or
+review — visibly, publicly, to other people. The reads retry; the writes do not,
+and a test asserts exactly one write reaches the server per call.
+
+### A garbled verdict is inert
+
+An unknown `ReviewVerdict` on the wire decodes to `Comment`, never `Approve`: a
+malformed message must not be able to approve a pull request.
+
+**Failure semantic: hard.** Telling the model its pull request was opened when it
+was not is the worst outcome this seam has.
+
 ## Deferred
 
 - **Line comments on reviews.** The most platform-divergent surface: GitHub

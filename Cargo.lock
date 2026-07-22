@@ -142,6 +142,7 @@ dependencies = [
  "agent-scanner",
  "agent-scheduler",
  "agent-session",
+ "agent-tasks",
  "agent-testkit",
  "agent-tokenizer",
  "agent-tools",

@@ -56,6 +56,8 @@ let
     ${seamConst "WEB_SEARCH" g.web_search}
     ${seamConst "SANDBOX" g.sandbox}
     ${seamConst "PTY" g.pty}
+    ${seamConst "FORGE" g.forge}
+    ${seamConst "TASKS" g.tasks}
 
     /// The `agent --serve-all` gateway (not a seam — it hosts every seam).
     ${seamConst "GATEWAY" g.gateway}
