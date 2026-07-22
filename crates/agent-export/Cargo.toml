@@ -1,0 +1,27 @@
+[package]
+name = "agent-export"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["export-render"]
+export-render = []
+# Injects a dhat global allocator for the allocation-budget leak test only.
+dhat-heap = ["dep:dhat"]
+
+[dependencies]
+agent-core.workspace = true
+serde_json.workspace = true
+dhat = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio.workspace = true
+rstest.workspace = true
+iai-callgrind.workspace = true
+
+# Deterministic instruction-count bench: a byte-stable render has a stable
+# instruction count, so a regression here means the render changed.
+[[bench]]
+name = "render"
+harness = false

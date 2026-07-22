@@ -35,6 +35,7 @@ default = [
     "cache",
     "web-search",
     "provider-router",
+    "session-export",
 ]
 
 # Each feature forwards to the owning impl crate + drives `register_builtins`.
@@ -73,6 +74,8 @@ reference = ["dep:agent-reference", "agent-reference/reference-local"]
 # docs/components/prompt-cache.md.
 cache = ["dep:agent-cache", "agent-cache/cache-strategies"]
 # Live web search: the WebSearch seam + the `web_search` tool. See parity spec 12.
+# Session export: deterministic transcript render + redaction (parity spec 20).
+session-export = ["agent-tools/tool-session-export"]
 web-search = [
     "dep:agent-web-search",
     "agent-tools/tool-web-search",

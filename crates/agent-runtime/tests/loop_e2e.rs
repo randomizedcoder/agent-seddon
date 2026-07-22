@@ -349,3 +349,43 @@ async fn adversarial_router_listing_itself_is_rejected() {
         "unhelpful error: {err}"
     );
 }
+
+/// Parity spec 20: the loop can export a session it just saved — through the
+/// real builder, the real tool, and the real renderer — and the artifact is
+/// redacted and self-contained.
+#[tokio::test]
+async fn session_export_produces_a_redacted_self_contained_page() {
+    let dir = tempdir();
+    let sessions = dir.join(".agent/sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    // A transcript with a secret and an XSS payload in it.
+    let msgs = vec![
+        agent_core::Message::user("deploy with AKIAIOSFODNN7EXAMPLE"),
+        agent_core::Message::assistant("<script>alert(1)</script> done"),
+    ];
+    agent_runtime::session_store::save(&sessions, "s1", &msgs).unwrap();
+
+    let script = vec![
+        tool_turn(vec![call(
+            "1",
+            "session_export",
+            json!({"session": "s1", "format": "html", "path": "report.html"}),
+        )]),
+        final_turn("Exported."),
+    ];
+    // The sessions dir is resolved from `[agent] working_dir`, so this needs no
+    // process-wide `set_current_dir` (which would race other parallel tests).
+    let agent = agent_for(&dir, script).await;
+    agent.run("export the session").await.expect("run");
+
+    let html = std::fs::read_to_string(dir.join("report.html")).expect("report written");
+    assert!(
+        !html.contains("AKIAIOSFODNN7EXAMPLE"),
+        "the secret survived into the shareable artifact"
+    );
+    assert!(!html.contains("<script>alert"), "unescaped payload: {html}");
+    assert!(html.contains("<style>"), "CSS must be inlined");
+    for bad in ["http://", "https://", "<link", "src="] {
+        assert!(!html.contains(bad), "external reference `{bad}`");
+    }
+}

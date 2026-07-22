@@ -8,9 +8,21 @@
 use agent_core::{Message, Role};
 use std::path::{Path, PathBuf};
 
-/// Default sessions directory (sibling of the episodic log under `.agent/`).
+/// Default sessions directory (sibling of the episodic log under `.agent/`),
+/// relative to the process working directory.
 pub fn default_dir() -> PathBuf {
     PathBuf::from(".agent/sessions")
+}
+
+/// Sessions directory for a configured `working_dir`, so a component holding the
+/// path does not depend on the process's current directory. An empty
+/// `working_dir` keeps the relative default.
+pub fn dir_for(working_dir: &str) -> PathBuf {
+    if working_dir.is_empty() {
+        default_dir()
+    } else {
+        Path::new(working_dir).join(".agent/sessions")
+    }
 }
 
 /// Metadata about a saved session, for a resume picker.

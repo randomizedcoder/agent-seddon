@@ -150,6 +150,21 @@ pub async fn build_agent_with(
         tools.register(crate::metered::tool(tool, metrics.clone()));
     }
 
+    // Session export: the `session_export` tool renders a saved transcript to a
+    // shareable artifact, redacting secrets through the Scanner when one is
+    // wired (parity spec 20).
+    #[cfg(feature = "session-export")]
+    {
+        let mut tool = agent_tools::SessionExportTool::new(crate::session_store::dir_for(
+            &cfg.agent.working_dir,
+        ));
+        #[cfg(feature = "scanner")]
+        if let Some((s, _)) = build_scanner(&cfg, &metrics)? {
+            tool = tool.with_scanner(s);
+        }
+        tools.register(crate::metered::tool(Arc::new(tool), metrics.clone()));
+    }
+
     // Web search: compose the configured backends into one metered, caching
     // `DispatchWebSearch` and expose the `web_search` tool. Each backend comes
     // from an ordinary registry factory.

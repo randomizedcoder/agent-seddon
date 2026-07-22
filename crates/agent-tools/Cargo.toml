@@ -28,6 +28,8 @@ tool-metrics = ["dep:agent-metrics"]
 tool-web = []
 # `web_search` over the WebSearch seam (parity spec 12).
 tool-web-search = []
+# `session_export` over the deterministic renderer (parity spec 20).
+tool-session-export = ["dep:agent-export"]
 # The `todo_write` tool over the TaskTracker seam (structured plan). The tracker
 # is wired by the runtime; this feature only compiles the tool.
 tool-todo = []
@@ -40,6 +42,7 @@ dhat-heap = ["dep:dhat"]
 
 [dependencies]
 agent-core.workspace = true
+agent-export = { workspace = true, optional = true }
 agent-metrics = { workspace = true, optional = true }
 # `bash` routes through the Sandbox seam; the `local` backend is the default.
 agent-sandbox = { workspace = true, features = ["sandbox-local"] }
