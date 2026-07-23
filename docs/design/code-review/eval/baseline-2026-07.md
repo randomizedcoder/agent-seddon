@@ -73,20 +73,48 @@ drop means a later increment started *guessing*, which the whole design forbids)
 
 ## Assessment — GLM-5.2
 
-> Populated by `nix run .#review-eval -- --judge` against a GLM endpoint
-> (`REVIEW_EVAL_BASE_URL`/`_MODEL`/`_API_KEY`); paste the per-context JSON
-> (`groundedness`/`readiness`/`signal`/`gaps`) and the aggregate here. Kept
-> separate from the assistant's scores so the two judges can be compared — if GLM
-> and the assistant diverge sharply on readiness or gaps, that disagreement is
-> itself a finding worth recording.
+Produced by `nix run .#review-eval -- --judge` over the same 10 contexts (model
+`/model`, one `{groundedness,readiness,signal,gaps}` verdict each; two samples in
+[`samples/judge/`](samples/judge/)). Aggregate:
 
-_Pending an endpoint. The rubric and command are in [`README.md`](README.md)._
+| Dimension | Mean | Spread |
+|---|:--:|---|
+| **Groundedness / accuracy** | **5.0** | 5 on all 10 |
+| **Review-readiness / completeness** | **2.1** | 2 on nine, 3 on one (a 22-file PR) |
+| **Signal-to-noise** | **4.5** | 5 on the smaller changes, 4 on the larger (a 28-file listing reads slightly noisier) |
+
+GLM's most-cited gaps, across the corpus:
+
+1. **The actual code diffs / hunks** (≈8 mentions) — "I can see 7 files changed but not a single line."
+2. **Commit message / PR description explaining intent** (≈6 mentions) — the *why*.
+3. Test/build status, a semantic summary of what changed, and rationale.
 
 ## Comparison + conclusion
 
-_(To finalize once GLM's scores are in.)_ Expected: both judges score groundedness
-high and readiness low, converging on "show the diff + summarize the change" as the
-top gaps. Any divergence — e.g. GLM rating readiness higher because it infers intent
-from filenames — is a caution that the facts-only context invites the reader to
-*guess*, which is the exact failure the summaries (incr 8) will replace with
-grounded prose.
+The two judges **converge almost exactly**:
+
+| | Assistant | GLM-5.2 |
+|---|:--:|:--:|
+| Groundedness | 5 | 5.0 |
+| Review-readiness | 2 | 2.1 |
+| Signal-to-noise | 5 | 4.5 |
+
+No divergence to caution about — GLM did **not** inflate readiness by inferring
+intent from filenames; it explicitly docked the score *because* the intent and the
+diff are absent. Both judges independently name the **same top-two gaps in the same
+order: show the diff content, and surface the commit message / intent.**
+
+That agreement makes the base rate and the next step unusually well-founded:
+
+- **Base rate to beat: groundedness 5, readiness ≈ 2, signal ≈ 4.5–5.**
+- **Do first (both judges' #1–2):** render the diff hunks (already in
+  `ChangeSet.patch`, merely dropped by `render_facts`) and add the range's commit
+  messages (`RepoBackend::log base..head`). Neither needs a model; both move
+  readiness directly.
+- **Then:** change summaries (incr 8) and static-analysis findings (incr 5) for the
+  deeper "what/why/is-it-correct" signal; a churn/history collector for hot-spot +
+  line-age context.
+
+Re-run `--judge` after each increment. **Readiness should climb while groundedness
+holds at 5** — if groundedness ever drops, a later increment started *guessing*,
+which the whole design forbids.
