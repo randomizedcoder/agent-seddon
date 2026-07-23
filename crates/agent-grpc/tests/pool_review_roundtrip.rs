@@ -113,8 +113,16 @@ impl ReviewCollector for FakeReview {
                     deletions: 1,
                     is_binary: false,
                     lang: "go".into(),
+                    patch: "@@ -1 +1 @@\n-old\n+new\n".into(),
                 }],
                 repo_file_count: 26,
+                commits: vec![agent_core::ReviewCommit {
+                    short: "abc123".into(),
+                    summary: "add fmt.Println".into(),
+                    body: "why".into(),
+                    author: "t".into(),
+                    age_days: 1,
+                }],
             },
             git_state: GitState {
                 remote_url_hash: "deadbeef".into(),
@@ -171,6 +179,9 @@ async fn review_collect_roundtrips(#[case] transport: Transport) {
     assert_eq!(facts.meta.repo_hash, "abc123");
     assert_eq!(facts.change.files.len(), 1);
     assert_eq!(facts.change.files[0].lang, "go");
+    assert_eq!(facts.change.files[0].patch, "@@ -1 +1 @@\n-old\n+new\n");
+    assert_eq!(facts.change.commits.len(), 1);
+    assert_eq!(facts.change.commits[0].summary, "add fmt.Println");
     assert_eq!(
         facts.change.files[0].change,
         agent_core::ChangeKind::Modified

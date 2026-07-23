@@ -180,6 +180,7 @@ mod tests {
             context_prepend: vec![],
             context_append: vec![],
             review_in_loop: false,
+            review_context_budget: 24_000,
         }
     }
 

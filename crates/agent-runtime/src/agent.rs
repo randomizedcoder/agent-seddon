@@ -46,6 +46,8 @@ pub struct Settings {
     /// Auto-detect a code-review task mid-conversation and inject grounded facts
     /// (docs/design/code-review/). Off unless `[review] in_loop = true`.
     pub review_in_loop: bool,
+    /// Byte budget for the rendered review context (`[review] context_budget_bytes`).
+    pub review_context_budget: usize,
 }
 
 pub struct Agent {
@@ -623,7 +625,10 @@ impl Agent {
                     confidence = verdict.confidence,
                     "entering review mode: injecting grounded facts"
                 );
-                Some(agent_review::render_facts(&facts))
+                Some(agent_review::render_facts_with(
+                    &facts,
+                    self.settings.review_context_budget,
+                ))
             }
             Err(e) => {
                 tracing::warn!("review fact collection failed: {e}");
@@ -1521,6 +1526,7 @@ mod tests {
             context_prepend: vec![],
             context_append: vec![],
             review_in_loop: false,
+            review_context_budget: 24_000,
         }
     }
 

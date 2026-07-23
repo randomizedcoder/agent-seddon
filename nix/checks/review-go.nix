@@ -66,9 +66,10 @@ pkgs.runCommand "agent-review-go"
 
     fail() { echo "FAIL: $1" >&2; exit 1; }
     echo "$ctx" | grep -q "Grounded review facts" || fail "no grounded facts block"
-    echo "$ctx" | grep -q "go project"            || fail "not detected as a Go project"
-    echo "$ctx" | grep -q "host github"           || fail "remote host not github"
+    echo "$ctx" | grep -q "Repo: go ·"            || fail "not detected as a Go project"
+    echo "$ctx" | grep -q "· clone ·"             || fail "remote relationship not clone"
     echo "$ctx" | grep -q "cmd/xtcp2/xtcp2.go"    || fail "missing the changed .go file"
+    echo "$ctx" | grep -q "^Diffs:"               || fail "diff hunks not rendered"
 
     echo "OK: pinned Go change reconstructed; review facts correct" > "$out"
   ''

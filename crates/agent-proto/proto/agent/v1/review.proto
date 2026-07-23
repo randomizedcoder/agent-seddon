@@ -73,6 +73,16 @@ message ReviewChangedFile {
   uint32 deletions = 4;
   bool is_binary = 5;
   string lang = 6;
+  // Unified-diff hunks (bounded; empty for binary/omitted files). Untrusted.
+  string patch = 7;
+}
+
+message ReviewCommit {
+  string short = 1;
+  string summary = 2;
+  string body = 3;
+  string author = 4;
+  uint32 age_days = 5;
 }
 
 message ReviewChangeSet {
@@ -80,6 +90,7 @@ message ReviewChangeSet {
   string head_rev = 2;
   repeated ReviewChangedFile files = 3;
   uint32 repo_file_count = 4;
+  repeated ReviewCommit commits = 5;
 }
 
 message ReviewGitState {

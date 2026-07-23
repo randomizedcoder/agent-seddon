@@ -41,6 +41,49 @@ pub(crate) fn safe_segment(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
+/// A "noisy" file whose *content diff* is low-signal for a reviewer — a lockfile
+/// or generated code. Its hunks are collapsed to a one-liner (kept as a fact:
+/// the file changed, by how much) rather than flooding the context. Filename +
+/// suffix based, deliberately conservative (only well-known noise).
+pub(crate) fn is_noisy(path: &Path) -> bool {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if matches!(
+        name,
+        "Cargo.lock"
+            | "package-lock.json"
+            | "yarn.lock"
+            | "pnpm-lock.yaml"
+            | "go.sum"
+            | "flake.lock"
+            | "poetry.lock"
+            | "Gemfile.lock"
+            | "composer.lock"
+    ) {
+        return true;
+    }
+    let s = path.to_str().unwrap_or("");
+    name.ends_with(".lock")
+        || s.ends_with(".pb.go")
+        || s.ends_with(".pb.rs")
+        || s.ends_with("_pb2.py")
+        || s.ends_with("_pb2.pyi")
+        || s.ends_with(".min.js")
+        || s.ends_with(".min.css")
+        || s.ends_with("_generated.go")
+        || s.contains("/generated/")
+}
+
+/// Truncate untrusted text to a byte-ish char budget, appending an honest marker.
+pub(crate) fn bound(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let mut t: String = s.chars().take(max).collect();
+        t.push_str(" …[truncated]");
+        t
+    }
+}
+
 /// Fail-closed validator for an explicit revision (a commit id or a ref like
 /// `main`, `HEAD~1`, `origin/main`). More permissive than [`safe_segment`] (revs
 /// carry `/`, `~`, `^`) but still rejects empty, a leading `-`, and any

@@ -693,6 +693,7 @@ pub async fn build_agent_with(
         context_prepend,
         context_append,
         review_in_loop: cfg.review.in_loop,
+        review_context_budget: cfg.review.context_budget_bytes,
     };
 
     // Subagents: register a `delegate` tool whose children reuse the worker tool

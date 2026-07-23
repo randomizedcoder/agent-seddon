@@ -3,11 +3,18 @@
 //! walk. This is the cheapest, highest-value grounded fact (increment 3).
 
 use crate::collector::{CollectCtx, CollectorOutput, FactCollector, FactFragment};
-use crate::util::{forge_host, lang_of, parse_remote};
+use crate::util::{bound, forge_host, is_noisy, lang_of, parse_remote};
 use agent_core::{
     fnv1a_hex, ChangeSet, ChangedFile, ForgeHost, GitState, RepoLanguage, RepoRelation,
+    ReviewCommit,
 };
 use std::path::{Path, PathBuf};
+
+/// Per-file patch cap (chars) at collection time — a backstop so one enormous
+/// file can't dominate before the render budget even applies. Untrusted content.
+const MAX_FILE_PATCH: usize = 16_000;
+/// Commits pulled for the range's intent (newest first).
+const MAX_COMMITS: usize = 10;
 
 pub(crate) struct RepoChangeCollector;
 
@@ -24,7 +31,7 @@ impl FactCollector for RepoChangeCollector {
         // The change set is the load-bearing fact; if the diff cannot be computed
         // the collector still contributes the git state (a partial result).
         let git_state = build_git_state(ctx, &files).await;
-        let change = match ctx.repo.diff(&ctx.base, &ctx.head, &[]).await {
+        let mut change = match ctx.repo.diff(&ctx.base, &ctx.head, &[]).await {
             Ok(diff) => build_change_set(ctx, diff, repo_file_count),
             Err(e) => {
                 return CollectorOutput::partial(
@@ -34,6 +41,7 @@ impl FactCollector for RepoChangeCollector {
                             head_rev: ctx.head_label.clone(),
                             files: Vec::new(),
                             repo_file_count,
+                            commits: build_commits(ctx).await,
                         },
                         git_state,
                     },
@@ -41,6 +49,8 @@ impl FactCollector for RepoChangeCollector {
                 );
             }
         };
+        // The commits in the range give the reviewer the change's stated intent.
+        change.commits = build_commits(ctx).await;
 
         CollectorOutput::ok(FactFragment::RepoChange { change, git_state })
     }
@@ -83,6 +93,13 @@ fn build_change_set(
         };
         let is_binary = fd.patch.contains("Binary files");
         let lang = lang_of(&rel);
+        // Carry the hunks — bounded, and dropped for binary or noisy (lockfile /
+        // generated) files, which the renderer collapses to a one-liner.
+        let patch = if is_binary || is_noisy(&rel) {
+            String::new()
+        } else {
+            bound(&fd.patch, MAX_FILE_PATCH)
+        };
         files.push(ChangedFile {
             path: rel,
             change: fd.change,
@@ -90,6 +107,7 @@ fn build_change_set(
             deletions: fd.deletions,
             is_binary,
             lang,
+            patch,
         });
     }
     ChangeSet {
@@ -97,7 +115,42 @@ fn build_change_set(
         head_rev: ctx.head_label.clone(),
         files,
         repo_file_count,
+        commits: Vec::new(),
     }
+}
+
+/// The commits in `base..head` (newest first, capped), condensed: every commit's
+/// summary is kept; the body is kept only for the head commit (intermediates are
+/// summary-only, per the "don't bloat" guidance).
+async fn build_commits(ctx: &CollectCtx) -> Vec<ReviewCommit> {
+    let raw = ctx
+        .repo
+        .log_range(&ctx.base, &ctx.head, MAX_COMMITS)
+        .await
+        .unwrap_or_default();
+    let now_ms = now_ms();
+    raw.into_iter()
+        .enumerate()
+        .map(|(i, c)| ReviewCommit {
+            short: c.oid.as_str().chars().take(8).collect(),
+            summary: bound(&c.summary, 200),
+            body: if i == 0 {
+                bound(c.body.trim(), 2000)
+            } else {
+                String::new()
+            },
+            author: bound(&c.author, 80),
+            age_days: (now_ms.saturating_sub(c.committed_ms) / 86_400_000).min(u32::MAX as u64)
+                as u32,
+        })
+        .collect()
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Validate a repo-relative path stays inside the repo (via `confine`), returning

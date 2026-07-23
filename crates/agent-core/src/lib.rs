@@ -3286,6 +3286,18 @@ pub trait RepoBackend: Send + Sync {
     async fn remote_url(&self) -> Result<Option<String>> {
         Ok(None)
     }
+    /// Commits in the `base..head` range (those reachable from `head` but not
+    /// `base`), newest first, capped at `limit`. Default `Ok(vec![])` — a backend
+    /// (or a remote gRPC client that does not forward it) reports "no commits"
+    /// rather than an error. The review flow reads this for the change's intent.
+    async fn log_range(
+        &self,
+        _base: &Revision,
+        _head: &Revision,
+        _limit: usize,
+    ) -> Result<Vec<CommitInfo>> {
+        Ok(Vec::new())
+    }
 
     // --- mirror / worktree / ref lifecycle (side-effecting, session-scoped) ---
 
@@ -3402,15 +3414,40 @@ pub struct ChangedFile {
     pub deletions: u32,
     pub is_binary: bool,
     pub lang: String,
+    /// Unified-diff hunks for this file. Empty for a binary file, or when the
+    /// collector deliberately omitted it (a lockfile/generated file, or over the
+    /// context budget). Bounded — it is untrusted repo content, rendered as data.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub patch: String,
 }
 
-/// The set of files a review touches, plus repo-size context.
+/// One commit in a review's revision range (`base..head`), for the reviewer's
+/// sense of *intent*.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReviewCommit {
+    /// Abbreviated commit id.
+    pub short: String,
+    /// First line of the message.
+    pub summary: String,
+    /// Body (kept only for the head commit; condensed away for intermediates).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub body: String,
+    pub author: String,
+    /// Age in days at collection time (a churn/recency signal).
+    pub age_days: u32,
+}
+
+/// The set of files a review touches, the commits that made them, plus repo-size
+/// context.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChangeSet {
     pub base_rev: String,
     pub head_rev: String,
     pub files: Vec<ChangedFile>,
     pub repo_file_count: u32,
+    /// Commits in `base..head` (capped), newest first — the change's stated intent.
+    #[serde(default)]
+    pub commits: Vec<ReviewCommit>,
 }
 
 /// Which forge a remote points at (parsed, closed set; fails closed to `Other`).

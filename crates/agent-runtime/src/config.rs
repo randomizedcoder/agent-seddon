@@ -327,6 +327,10 @@ pub struct ReviewCfg {
     pub deadline_secs: u64,
     #[serde(default)]
     pub in_loop: bool,
+    /// Byte budget for the rendered grounded context. The facts + commits + file
+    /// list are always included; diff hunks fill what remains. `0` ⇒ unbounded.
+    #[serde(default = "default_review_budget")]
+    pub context_budget_bytes: usize,
 }
 
 impl Default for ReviewCfg {
@@ -336,6 +340,7 @@ impl Default for ReviewCfg {
             classifier: default_classifier(),
             deadline_secs: default_review_deadline(),
             in_loop: false,
+            context_budget_bytes: default_review_budget(),
         }
     }
 }
@@ -345,6 +350,9 @@ fn default_classifier() -> String {
 }
 fn default_review_deadline() -> u64 {
     60
+}
+fn default_review_budget() -> usize {
+    24_000
 }
 
 /// Live web search (the `WebSearch` seam, parity spec 12). `backends` lists the

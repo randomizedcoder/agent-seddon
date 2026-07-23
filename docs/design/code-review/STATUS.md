@@ -61,6 +61,18 @@ are not separate increments — each increment lands its own slice of both.
 
 ## Change log
 
+- **2026-07-23** — **Thicken + compact the review context** (model-free, from the
+  dual-judge base rate + [GLM design input](eval/design-input-glm.md)): the diff
+  hunks are carried through and rendered; the range's commit messages
+  (`RepoBackend::log_range base..head`) give intent; and compaction keeps it tight
+  — telemetry footer dropped, repo line condensed, lockfile/generated diffs
+  collapsed (`is_noisy`), intermediate commit bodies dropped, and a
+  `[review] context_budget_bytes` (default 24 KB) fills the diff section with
+  graceful truncation. `ChangedFile.patch` + `ChangeSet.commits` + `ReviewCommit`
+  added (proto additive). **Refined roadmap (GLM-ranked, dual-judge-validated):**
+  static-analysis findings (incr 5) → **AST signature diff** (cheap subset of incr
+  6) → test-execution results (new) → call-graph blast radius (incr 6) →
+  churn/blame collector.
 - **2026-07-23** — **Evaluation harness + base rate** ([`eval/`](eval/README.md)):
   `ReviewTarget::Revs { base, head }` (`agent --review <base>..<head>`, + `revs:`
   gRPC wire); an opt-in `nix run .#review-eval` that generates grounded contexts

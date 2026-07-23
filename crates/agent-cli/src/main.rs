@@ -38,6 +38,8 @@ async fn main() -> Result<()> {
         agent_runtime::parse_config_reporting_unknown(&toml_str).context("parsing config")?;
     // Captured before `config` is consumed by the builder.
     let cfg_tick_secs = config.scheduler.tick_secs;
+    // Captured before `config` moves into `build_agent` (see the metrics note below).
+    let review_budget = config.review.context_budget_bytes;
 
     // Telemetry (opt-in). Build the writer before installing tracing so the
     // ClickHouse layer can stream logs from the very first event.
@@ -196,7 +198,7 @@ async fn main() -> Result<()> {
                     .collect(&target)
                     .await
                     .context("collecting grounded review facts")?;
-                println!("{}", agent_review::render_facts(&facts));
+                println!("{}", agent_review::render_facts_with(&facts, review_budget));
                 Ok(None)
             }
             None => anyhow::bail!(

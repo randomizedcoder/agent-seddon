@@ -82,6 +82,18 @@ async fn positive_collects_change_set_and_git_state() {
     assert_eq!(facts.git_state.host, ForgeHost::None);
     assert!(facts.git_state.remote_url_hash.is_empty());
 
+    // Diff hunks are carried through for non-binary files.
+    assert!(
+        facts.change.files.iter().any(|f| !f.patch.is_empty()),
+        "at least one changed file should carry its diff"
+    );
+    // The range's commit(s) give the intent — the `feature` commit shows up.
+    assert!(
+        !facts.change.commits.is_empty(),
+        "commits in the range missing"
+    );
+    assert!(facts.change.commits[0].summary.contains("feature work"));
+
     // Meta: the collector ran and is recorded with a duration.
     assert_eq!(facts.meta.collectors.len(), 1);
     assert_eq!(facts.meta.collectors[0].collector, "repo-change");
