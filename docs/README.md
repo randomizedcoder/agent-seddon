@@ -96,6 +96,15 @@ One doc per seam or subsystem. The **config key** column is what you set in
 | Testing conventions | [`testing.md`](components/testing.md) |
 | Benchmarking and leak gate | [`benchmarking.md`](components/benchmarking.md) |
 
+## Design notes (forward-looking)
+
+Pre-implementation design documents in [`design/`](design/) — the input to a
+feature's implementation phase, distinct from the shipped `components/` docs.
+
+| Doc | About |
+|---|---|
+| [`tool-call-verification.md`](design/tool-call-verification.md) | A measured, multi-model gate that inspects a tool call before it runs (Allow / Revise / Deny), records every verdict to ClickHouse, and learns which verifier to trust per task type |
+
 ## The parity program
 
 Thirty per-feature specs in [`parity/`](parity/README.md). Each was written by
