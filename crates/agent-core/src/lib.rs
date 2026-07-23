@@ -3570,14 +3570,58 @@ pub struct ReviewMeta {
     pub collectors: Vec<CollectorStatus>,
 }
 
+/// One static-analysis finding — a deterministic linter result (distinct from the
+/// security-scanner [`Finding`], which has no file/line). Untrusted linter output:
+/// `file` is confined, `message` bounded before this is built.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AnalysisFinding {
+    /// The tool that produced it (`golangci-lint`, `go-vet`, `clippy`).
+    pub tool: String,
+    /// Linter/rule id (`errcheck`, `clippy::needless_return`, …).
+    pub rule: String,
+    /// `warning` | `error`.
+    pub severity: String,
+    /// Repo-relative path (confined).
+    pub file: String,
+    pub line: u32,
+    /// Bounded message.
+    pub message: String,
+    /// The finding is on a file the change touched (foregrounded in the render).
+    pub in_change: bool,
+}
+
+/// One analyzer tool invocation's outcome (self-describing, like [`CollectorStatus`]).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AnalyzerRun {
+    pub tool: String,
+    /// `ok` | `skipped` | `failed` | `timeout`.
+    pub status: String,
+    #[serde(default)]
+    pub reason: String,
+    pub duration_ms: u32,
+    pub finding_count: u32,
+}
+
+/// The static-analysis contribution to a review: per-tool run outcomes + findings
+/// (capped). Empty when no analyzer applied / the sandbox was absent.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AnalysisReport {
+    pub language: String,
+    pub runs: Vec<AnalyzerRun>,
+    pub findings: Vec<AnalysisFinding>,
+}
+
 /// The grounded fact bundle a reviewer reasons over. Everything here is a hard
-/// fact from a tool. Later increments add analysis / call-graph / style /
-/// summaries as additional fields.
+/// fact from a tool. Later increments add call-graph / style / summaries as
+/// additional fields.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ReviewFacts {
     pub meta: ReviewMeta,
     pub change: ChangeSet,
     pub git_state: GitState,
+    /// Static-analysis findings (increment 5). Empty when analysis is off/skipped.
+    #[serde(default)]
+    pub analysis: AnalysisReport,
 }
 
 /// Runs a fan-out of deterministic collectors into a grounded [`ReviewFacts`].

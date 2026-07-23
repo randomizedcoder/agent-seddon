@@ -131,6 +131,25 @@ impl ReviewCollector for FakeReview {
                 default_branch: "main".into(),
                 project: RepoLanguage::Go,
             },
+            analysis: agent_core::AnalysisReport {
+                language: "go".into(),
+                runs: vec![agent_core::AnalyzerRun {
+                    tool: "golangci-lint".into(),
+                    status: "ok".into(),
+                    reason: String::new(),
+                    duration_ms: 12,
+                    finding_count: 1,
+                }],
+                findings: vec![agent_core::AnalysisFinding {
+                    tool: "golangci-lint".into(),
+                    rule: "errcheck".into(),
+                    severity: "warning".into(),
+                    file: "main.go".into(),
+                    line: 1,
+                    message: "Error return value is not checked".into(),
+                    in_change: true,
+                }],
+            },
         })
     }
 }
@@ -190,6 +209,12 @@ async fn review_collect_roundtrips(#[case] transport: Transport) {
     assert_eq!(facts.git_state.relationship, RepoRelation::Fork);
     assert_eq!(facts.git_state.project, RepoLanguage::Go);
     assert_eq!(facts.meta.collectors[0].status, CollectStatus::Ok);
+    // Static-analysis report survives the wire round-trip.
+    assert_eq!(facts.analysis.language, "go");
+    assert_eq!(facts.analysis.runs.len(), 1);
+    assert_eq!(facts.analysis.findings.len(), 1);
+    assert_eq!(facts.analysis.findings[0].rule, "errcheck");
+    assert!(facts.analysis.findings[0].in_change);
 }
 
 /// A PR target survives the encode/decode round-trip through the wire string.

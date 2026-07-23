@@ -1905,6 +1905,14 @@ pub(crate) fn record_review_event(m: &Metrics, ev: agent_review::ReviewEvent) {
         } => {
             m.on_review_gitstate(relationship, host, project);
         }
+        ReviewEvent::Findings {
+            tool,
+            severity,
+            in_change,
+            count,
+        } => {
+            m.on_review_findings(&tool, &severity, in_change, count as u64);
+        }
     }
 }
 

@@ -331,6 +331,13 @@ pub struct ReviewCfg {
     /// list are always included; diff hunks fill what remains. `0` ⇒ unbounded.
     #[serde(default = "default_review_budget")]
     pub context_budget_bytes: usize,
+    /// Run the static-analysis collector (linters on the changed packages). On by
+    /// default — the binaries are `/nix/store`-cached; fail-soft + timeout-bounded.
+    #[serde(default = "default_true")]
+    pub analyze: bool,
+    /// Per-tool timeout for the analyzer (seconds). Bounds a cold/slow linter run.
+    #[serde(default = "default_analyze_timeout")]
+    pub analyze_timeout_secs: u64,
 }
 
 impl Default for ReviewCfg {
@@ -341,6 +348,8 @@ impl Default for ReviewCfg {
             deadline_secs: default_review_deadline(),
             in_loop: false,
             context_budget_bytes: default_review_budget(),
+            analyze: true,
+            analyze_timeout_secs: default_analyze_timeout(),
         }
     }
 }
@@ -353,6 +362,9 @@ fn default_review_deadline() -> u64 {
 }
 fn default_review_budget() -> usize {
     24_000
+}
+fn default_analyze_timeout() -> u64 {
+    45
 }
 
 /// Live web search (the `WebSearch` seam, parity spec 12). `backends` lists the

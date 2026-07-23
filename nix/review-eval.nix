@@ -79,6 +79,10 @@ pkgs.writeShellApplication {
     auto_index = false
     [review]
     backend = "local"
+    # The corpus is reconstructed with no build cache/deps, so linting each item
+    # would be cold + slow (or need network); the eval measures the base facts.
+    # Static analysis is demonstrated live via `agent --review` in a warm repo.
+    analyze = false
     [pool]
     members = []
     TOML

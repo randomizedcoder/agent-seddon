@@ -6,6 +6,7 @@
 //! objects; the model is only ever asked to *vote* on the task mode, never to
 //! supply a fact. See `docs/design/code-review/`.
 
+mod analyzer;
 mod classifier;
 mod collector;
 mod orchestrator;
@@ -101,6 +102,10 @@ pub fn render_facts_with(facts: &ReviewFacts, budget_bytes: usize) -> String {
         ));
     }
 
+    // Static-analysis findings — higher-signal than raw hunks, so rendered *before*
+    // the diffs. Per-tool run summary, then findings with changed-file hits first.
+    render_analysis(&mut out, &facts.analysis);
+
     // Diff hunks — fill the remaining budget; omit (with a count) what doesn't fit.
     let with_patch: Vec<&agent_core::ChangedFile> =
         ch.files.iter().filter(|f| !f.patch.is_empty()).collect();
@@ -122,6 +127,51 @@ pub fn render_facts_with(facts: &ReviewFacts, budget_bytes: usize) -> String {
         }
     }
     out
+}
+
+/// The most findings rendered verbatim; the rest are summarized as a count.
+const MAX_RENDERED_FINDINGS: usize = 80;
+
+/// Render the static-analysis section: a one-line-per-tool run summary, then the
+/// findings (changed-file hits first, capped). Nothing is emitted if the analyzer
+/// never ran (`analyze = false` ⇒ empty report).
+fn render_analysis(out: &mut String, report: &agent_core::AnalysisReport) {
+    if report.runs.is_empty() {
+        return; // analyzer disabled or not wired — say nothing rather than "0"
+    }
+    out.push_str("\nAnalysis (static):\n");
+    for r in &report.runs {
+        let reason = if r.reason.is_empty() {
+            String::new()
+        } else {
+            format!(" — {}", r.reason)
+        };
+        out.push_str(&format!(
+            "  {}: {} ({} finding(s), {} ms){}\n",
+            r.tool, r.status, r.finding_count, r.duration_ms, reason,
+        ));
+    }
+
+    if report.findings.is_empty() {
+        return;
+    }
+    // Changed-file findings first (higher signal), stable within each group.
+    let mut ordered: Vec<&agent_core::AnalysisFinding> = report.findings.iter().collect();
+    ordered.sort_by_key(|f| !f.in_change);
+    out.push_str("Findings:\n");
+    for f in ordered.iter().take(MAX_RENDERED_FINDINGS) {
+        let scope = if f.in_change { "" } else { " [pre-existing]" };
+        out.push_str(&format!(
+            "  {} {}/{} {}:{} — {}{}\n",
+            f.severity, f.tool, f.rule, f.file, f.line, f.message, scope,
+        ));
+    }
+    if ordered.len() > MAX_RENDERED_FINDINGS {
+        out.push_str(&format!(
+            "  … and {} more finding(s) (omitted from the listing)\n",
+            ordered.len() - MAX_RENDERED_FINDINGS
+        ));
+    }
 }
 
 /// A short note after a file's header explaining an absent diff.

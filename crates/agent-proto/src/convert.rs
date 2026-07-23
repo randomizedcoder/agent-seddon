@@ -2669,12 +2669,82 @@ impl From<pb::ReviewGitState> for agent_core::GitState {
     }
 }
 
+impl From<agent_core::AnalysisFinding> for pb::ReviewAnalysisFinding {
+    fn from(f: agent_core::AnalysisFinding) -> Self {
+        pb::ReviewAnalysisFinding {
+            tool: f.tool,
+            rule: f.rule,
+            severity: f.severity,
+            file: f.file,
+            line: f.line,
+            message: f.message,
+            in_change: f.in_change,
+        }
+    }
+}
+impl From<pb::ReviewAnalysisFinding> for agent_core::AnalysisFinding {
+    fn from(f: pb::ReviewAnalysisFinding) -> Self {
+        agent_core::AnalysisFinding {
+            tool: f.tool,
+            rule: f.rule,
+            severity: f.severity,
+            file: f.file,
+            line: f.line,
+            message: f.message,
+            in_change: f.in_change,
+        }
+    }
+}
+
+impl From<agent_core::AnalyzerRun> for pb::ReviewAnalyzerRun {
+    fn from(r: agent_core::AnalyzerRun) -> Self {
+        pb::ReviewAnalyzerRun {
+            tool: r.tool,
+            status: r.status,
+            reason: r.reason,
+            duration_ms: r.duration_ms,
+            finding_count: r.finding_count,
+        }
+    }
+}
+impl From<pb::ReviewAnalyzerRun> for agent_core::AnalyzerRun {
+    fn from(r: pb::ReviewAnalyzerRun) -> Self {
+        agent_core::AnalyzerRun {
+            tool: r.tool,
+            status: r.status,
+            reason: r.reason,
+            duration_ms: r.duration_ms,
+            finding_count: r.finding_count,
+        }
+    }
+}
+
+impl From<agent_core::AnalysisReport> for pb::ReviewAnalysisReport {
+    fn from(a: agent_core::AnalysisReport) -> Self {
+        pb::ReviewAnalysisReport {
+            language: a.language,
+            runs: a.runs.into_iter().map(Into::into).collect(),
+            findings: a.findings.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+impl From<pb::ReviewAnalysisReport> for agent_core::AnalysisReport {
+    fn from(a: pb::ReviewAnalysisReport) -> Self {
+        agent_core::AnalysisReport {
+            language: a.language,
+            runs: a.runs.into_iter().map(Into::into).collect(),
+            findings: a.findings.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
 impl From<agent_core::ReviewFacts> for pb::ReviewFacts {
     fn from(f: agent_core::ReviewFacts) -> Self {
         pb::ReviewFacts {
             meta: Some(f.meta.into()),
             change: Some(f.change.into()),
             git_state: Some(f.git_state.into()),
+            analysis: Some(f.analysis.into()),
         }
     }
 }
@@ -2684,6 +2754,7 @@ impl From<pb::ReviewFacts> for agent_core::ReviewFacts {
             meta: f.meta.map(Into::into).unwrap_or_default(),
             change: f.change.map(Into::into).unwrap_or_default(),
             git_state: f.git_state.map(Into::into).unwrap_or_default(),
+            analysis: f.analysis.map(Into::into).unwrap_or_default(),
         }
     }
 }
