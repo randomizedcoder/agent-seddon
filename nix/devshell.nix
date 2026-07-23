@@ -12,6 +12,10 @@
   pkgs,
   lib,
   versions,
+  # In-flake-built tools to add to the shell PATH (e.g. the review call-graph
+  # helper `go-ast`), which can't live in packages.nix (that has no access to the
+  # built derivations).
+  extraPackages ? [ ],
 }:
 
 let
@@ -20,7 +24,7 @@ in
 pkgs.mkShell {
   name = "agent-seddon-dev";
 
-  packages = packages.allDevPackages;
+  packages = packages.allDevPackages ++ extraPackages;
 
   shellHook = ''
         # Isolate CARGO_HOME to a repo-local dir. Cargo searches $CARGO_HOME/bin

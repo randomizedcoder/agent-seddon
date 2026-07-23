@@ -7,6 +7,7 @@
 //! supply a fact. See `docs/design/code-review/`.
 
 mod analyzer;
+mod callgraph;
 mod classifier;
 mod collector;
 mod orchestrator;
@@ -107,6 +108,9 @@ pub fn render_facts_with(facts: &ReviewFacts, budget_bytes: usize) -> String {
     // before the findings and the raw hunks.
     render_signatures(&mut out, &facts.signatures);
 
+    // Call graph — the blast radius of the changed functions (who calls them).
+    render_callgraph(&mut out, &facts.callgraph);
+
     // Static-analysis findings — higher-signal than raw hunks, so rendered *before*
     // the diffs. Per-tool run summary, then findings with changed-file hits first.
     render_analysis(&mut out, &facts.analysis);
@@ -160,6 +164,79 @@ fn render_signatures(out: &mut String, report: &agent_core::SignatureReport) {
     }
     if report.truncated {
         out.push_str("    … more signature changes omitted (cap reached)\n");
+    }
+}
+
+/// The most changed functions rendered with their blast radius.
+const MAX_BLAST_FNS: usize = 40;
+/// The most callers listed per changed function.
+const MAX_CALLERS: usize = 8;
+
+/// Render the call graph as a **blast radius**: for each changed function, its
+/// direct in-repo callers and its callee count. Nothing is emitted if the graph is
+/// empty (helper off/absent, or no Go source changed).
+fn render_callgraph(out: &mut String, g: &agent_core::CallGraph) {
+    if g.nodes.is_empty() {
+        return;
+    }
+    let by_id: std::collections::HashMap<u32, &agent_core::CallGraphNode> =
+        g.nodes.iter().map(|n| (n.id, n)).collect();
+    let qual = |n: &agent_core::CallGraphNode| -> String {
+        if n.package.is_empty() {
+            n.name.clone()
+        } else {
+            format!("{}.{}", n.package, n.name)
+        }
+    };
+
+    out.push_str(&format!(
+        "\nCall graph — {} fn(s), {} edge(s) across {} package(s); blast radius of {} changed fn(s):\n",
+        g.nodes.len(),
+        g.edges.len(),
+        g.packages.len(),
+        g.changed_fns.len(),
+    ));
+    for id in g.changed_fns.iter().take(MAX_BLAST_FNS) {
+        let Some(node) = by_id.get(id) else { continue };
+        let callers: Vec<String> = g
+            .edges
+            .iter()
+            .filter(|e| e.callee_id == *id && e.caller_id != *id)
+            .filter_map(|e| by_id.get(&e.caller_id))
+            .map(|n| qual(n))
+            .collect();
+        let calls = g.edges.iter().filter(|e| e.caller_id == *id).count();
+        if callers.is_empty() {
+            out.push_str(&format!(
+                "  {}  ← no in-repo callers  · calls {}\n",
+                qual(node),
+                calls
+            ));
+        } else {
+            let shown: Vec<String> = callers.iter().take(MAX_CALLERS).cloned().collect();
+            let more = callers.len().saturating_sub(shown.len());
+            let extra = if more > 0 {
+                format!(" (+{more} more)")
+            } else {
+                String::new()
+            };
+            out.push_str(&format!(
+                "  {}  ← called by {}{}  · calls {}\n",
+                qual(node),
+                shown.join(", "),
+                extra,
+                calls
+            ));
+        }
+    }
+    if g.changed_fns.len() > MAX_BLAST_FNS {
+        out.push_str(&format!(
+            "  … and {} more changed fn(s) (omitted)\n",
+            g.changed_fns.len() - MAX_BLAST_FNS
+        ));
+    }
+    if g.truncated {
+        out.push_str("  (graph truncated — size cap reached)\n");
     }
 }
 

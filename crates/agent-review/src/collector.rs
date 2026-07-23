@@ -1,7 +1,7 @@
 //! The internal `FactCollector` abstraction the orchestrator fans out over.
 
 use agent_core::{
-    AnalysisReport, ChangeSet, CollectStatus, GitState, RepoBackend, Revision, Sandbox,
+    AnalysisReport, CallGraph, ChangeSet, CollectStatus, GitState, RepoBackend, Revision, Sandbox,
     SearchBackend, SignatureReport,
 };
 use std::path::PathBuf;
@@ -39,6 +39,9 @@ pub(crate) enum FactFragment {
     },
     Signatures {
         report: SignatureReport,
+    },
+    CallGraph {
+        graph: CallGraph,
     },
 }
 

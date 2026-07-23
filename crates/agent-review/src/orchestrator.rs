@@ -2,6 +2,7 @@
 //! concurrently, and assembles their fragments into a grounded [`ReviewFacts`].
 
 use crate::analyzer::AnalyzerCollector;
+use crate::callgraph::CallGraphCollector;
 use crate::collector::{CollectCtx, CollectorOutput, FactCollector, FactFragment};
 use crate::repo_facts::RepoChangeCollector;
 use crate::signatures::SignatureCollector;
@@ -51,6 +52,11 @@ pub enum ReviewEvent {
         lang: String,
         kind: String,
         count: u32,
+    },
+    /// Call-graph size (for the graph-size histograms).
+    CallGraph {
+        nodes: u32,
+        edges: u32,
     },
 }
 
@@ -124,6 +130,18 @@ impl ReviewOrchestrator {
     /// in-process (reads blobs + a regex scan); bounded by the fan-out deadline.
     pub fn with_signatures(mut self) -> Self {
         self.collectors.push(Box::new(SignatureCollector));
+        self
+    }
+
+    /// Enable the call-graph collector (`[review] callgraph = true`). Shells out to
+    /// the pinned `agent-go-ast` helper via the sandbox (fail-soft without one).
+    pub fn with_callgraph(mut self, sandbox: Option<Arc<dyn Sandbox>>, timeout_secs: u64) -> Self {
+        if self.sandbox.is_none() {
+            self.sandbox = sandbox;
+        }
+        self.collectors.push(Box::new(CallGraphCollector {
+            timeout_secs: timeout_secs.max(1),
+        }));
         self
     }
 
@@ -276,6 +294,13 @@ impl ReviewCollector for ReviewOrchestrator {
                         self.emit(ReviewEvent::Signatures { lang, kind, count });
                     }
                     facts.signatures = report;
+                }
+                Some(FactFragment::CallGraph { graph }) => {
+                    self.emit(ReviewEvent::CallGraph {
+                        nodes: graph.nodes.len().min(u32::MAX as usize) as u32,
+                        edges: graph.edges.len().min(u32::MAX as usize) as u32,
+                    });
+                    facts.callgraph = graph;
                 }
                 None => {}
             }

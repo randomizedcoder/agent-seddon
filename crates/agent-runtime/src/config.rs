@@ -342,6 +342,13 @@ pub struct ReviewCfg {
     /// — pure in-process (blob reads + a regex scan), deadline-bounded.
     #[serde(default = "default_true")]
     pub signatures: bool,
+    /// Run the call-graph collector (Go blast radius via the `agent-go-ast` helper).
+    /// On by default; fail-soft + skip-if-helper-missing + timeout-bounded.
+    #[serde(default = "default_true")]
+    pub callgraph: bool,
+    /// Timeout for the call-graph helper (seconds). Bounds a large-repo walk.
+    #[serde(default = "default_callgraph_timeout")]
+    pub callgraph_timeout_secs: u64,
 }
 
 impl Default for ReviewCfg {
@@ -355,6 +362,8 @@ impl Default for ReviewCfg {
             analyze: true,
             analyze_timeout_secs: default_analyze_timeout(),
             signatures: true,
+            callgraph: true,
+            callgraph_timeout_secs: default_callgraph_timeout(),
         }
     }
 }
@@ -370,6 +379,9 @@ fn default_review_budget() -> usize {
 }
 fn default_analyze_timeout() -> u64 {
     45
+}
+fn default_callgraph_timeout() -> u64 {
+    30
 }
 
 /// Live web search (the `WebSearch` seam, parity spec 12). `backends` lists the

@@ -61,8 +61,11 @@ too but are telemetry-local (no service).
 > - **05:** `ReviewAnalysisFinding`, `ReviewAnalyzerRun`, `ReviewAnalysisReport` →
 >   `ReviewFacts` field 4. See [`05`](static-analysis.md).
 > - **06 (signature-diff subset):** `ReviewSignatureChange`, `ReviewSignatureReport`
->   → `ReviewFacts` field 5. The full call-graph `ast.proto`/`AstService` stays the
->   deferred target. See [`06`](ast-callgraph.md).
+>   → `ReviewFacts` field 5. See [`06`](ast-callgraph.md).
+> - **06 (call-graph):** `ReviewCallGraphNode`, `ReviewCallEdge`,
+>   `ReviewPackageShape`, `ReviewCallGraph` → `ReviewFacts` field 6. The precise
+>   `x/tools` graph + a dedicated `ast.proto`/`AstService` stay the deferred target.
+>   See [`06`](ast-callgraph.md).
 >
 > All additive (no baseline bump); round-trip tested through `FactCollectorService`.
 
