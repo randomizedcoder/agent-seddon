@@ -55,6 +55,11 @@ in
   # checks. `grpcurl` is for manually poking gRPC servers once the transports land.
   protobuf = pkgs.protobuf;
   grpcurl = pkgs.grpcurl;
+  # Go static-analysis toolchain for the code-review analyzer (increment 5). The
+  # binaries are cached in /nix/store; the review flow shells out to them.
+  go = pkgs.go_1_25 or pkgs.go;
+  golangci-lint = pkgs.golangci-lint;
+  gosec = pkgs.gosec;
   # `buf` lints the `.proto` wire contracts and gates wire-compatibility
   # (`buf lint` + `buf breaking`); codegen stays on `tonic-build`. See buf.yaml.
   buf = pkgs.buf;

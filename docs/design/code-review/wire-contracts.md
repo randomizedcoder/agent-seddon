@@ -53,6 +53,14 @@ convention):
 can embed them; `ModeVerdict` (02) and `ReviewRecord` (09) live in `review.proto`
 too but are telemetry-local (no service).
 
+> **Shipped (increment 5).** Rather than a standalone `analyzer.proto` +
+> `AnalyzerService`, the static-analysis messages ship **inside `review.proto`** —
+> `ReviewAnalysisFinding`, `ReviewAnalyzerRun`, `ReviewAnalysisReport`, added as
+> `ReviewFacts` field 4 (additive; no baseline bump). They ride the existing
+> `FactCollectorService` (the analyzer is a `FactCollector`, not yet its own seam),
+> so no new `--serve-analyzer` endpoint exists yet. The dedicated `analyzer.proto`
+> service in the table below stays the deferred target. See [`05`](static-analysis.md).
+
 ### Services and endpoints
 
 | Service | RPCs | `--serve` flag | `nix/constants.nix` block | Failure |

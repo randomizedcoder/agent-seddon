@@ -43,6 +43,7 @@ fn facts(files: Vec<ChangedFile>, commits: Vec<ReviewCommit>) -> ReviewFacts {
             default_branch: "main".into(),
             project: RepoLanguage::Rust,
         },
+        analysis: Default::default(),
     }
 }
 

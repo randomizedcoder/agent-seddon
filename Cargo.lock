@@ -300,6 +300,7 @@ dependencies = [
  "async-trait",
  "futures-util",
  "rstest",
+ "serde_json",
  "tokio",
  "tracing",
 ]

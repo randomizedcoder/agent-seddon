@@ -40,5 +40,12 @@
 
     # Nix.
     versions.nixfmt
+
+    # Go static-analysis toolchain for the code-review analyzer (increment 5), so
+    # `cargo run -- --review` finds golangci-lint / go vet during dev. (clippy is
+    # already in rustToolchain.)
+    versions.go
+    versions.golangci-lint
+    versions.gosec
   ];
 }

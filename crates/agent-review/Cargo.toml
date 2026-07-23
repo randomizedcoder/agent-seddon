@@ -12,6 +12,8 @@ async-trait.workspace = true
 futures-util.workspace = true
 tracing.workspace = true
 tokio = { workspace = true }
+# Parse the linters' JSON output (analyzer collector). Defensive Value parsing.
+serde_json.workspace = true
 
 [dev-dependencies]
 # The concrete git backend, for collector tests against a real temp repo.

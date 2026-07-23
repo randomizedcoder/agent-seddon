@@ -1,11 +1,12 @@
 # Code Review Flow — implementation status
 
 The living scorecard for the [Code Review Flow](README.md) design. The design is
-**complete**; **nothing is implemented yet**. This file tracks the transition from
-design → merged code, increment by increment (the same per-increment PR cadence
-the [tool-call-verifier](../tool-call-verification.md) followed).
+**complete**; implementation is **underway** (increments 1–5 merged). This file
+tracks the transition from design → merged code, increment by increment (the same
+per-increment PR cadence the [tool-call-verifier](../tool-call-verification.md)
+followed).
 
-**Overall: design complete · implementation not started.**
+**Overall: design complete · components 01–05 implemented (seam + tests + gRPC).**
 
 ## Legend
 
@@ -24,7 +25,7 @@ the [tool-call-verifier](../tool-call-verification.md) followed).
 | 02 | Task-mode detection | ✅ | ✅ | ✅ | ✅ | n/a | ✅ | — |
 | 03 | Orchestrator + `ReviewFacts` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 | 04 | Repo / change / git-state | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
-| 05 | Static analysis (Go) | ✅ | ✅ | ✅ | ⬜ | ⬜ | ⬜ | — |
+| 05 | Static analysis (Go + Rust) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 | 06 | AST & call-graph | ✅ | ✅ | ✅ | ⬜ | ⬜ | ⬜ | — |
 | 07 | Code-style fingerprint | ✅ | ✅ | ✅ | ⬜ | ⬜ | ⬜ | — |
 | 08 | Cheap-LLM summaries | ✅ | ✅ | ✅ | ⬜ | ⬜ | ⬜ | — |
@@ -61,6 +62,30 @@ are not separate increments — each increment lands its own slice of both.
 
 ## Change log
 
+- **2026-07-23** — **Static-analysis findings (increment 5, component 05).** An
+  `AnalyzerCollector` joins the fan-out: it recomputes the (cached) diff, maps the
+  changed files to their owning Go packages / Rust crates, and runs the language's
+  linters **scoped to those packages** via the shared `Sandbox` —
+  `golangci-lint run --output.json.path stdout ./<pkg>/...` (quick tier: errcheck /
+  govet / staticcheck / ineffassign / unused) and
+  `cargo clippy --message-format=json -p <crate>`. Their JSON is parsed defensively
+  (`serde_json::Value`) into `AnalysisFinding`s (tool · rule · severity · file:line
+  · message), **changed-file hits foregrounded**, folded into `ReviewFacts.analysis`
+  and rendered in an `Analysis (static):` section *before* the diffs. Runs **by
+  default** (`[review] analyze = true`; `/nix/store`-cached binaries) but is
+  **fail-soft + `analyze_timeout_secs`-bounded + skip-if-tool-missing**, so a cold /
+  slow / missing / erroring linter degrades to a recorded `skipped`/`timeout`/
+  `failed` run and never blocks or slows the bundle. Untrusted linter output is
+  contained: finding paths through `confine` (escapers dropped), messages `bound`ed,
+  the count capped (`MAX_FINDINGS`). New `agent_review_findings_total{tool,severity,
+  in_change}` counter (via `ReviewEvent::Findings`). Wire: additive
+  `ReviewAnalysisFinding`/`ReviewAnalyzerRun`/`ReviewAnalysisReport` + `ReviewFacts`
+  field 4 (rides `FactCollectorService`; round-trip tested). Gate: hermetic
+  `review-analyze` check (self-contained stdlib-only Go module with a deliberate
+  `ineffassign` hit, offline) + `adversarial_` parser tests (path-escape dropped,
+  hostile message bounded, garbage JSON inert). The dedicated `--serve-analyzer`
+  service (design doc 05) stays deferred; the quick tier + gosec/comprehensive tiers
+  behind a future `analyze_tier` knob.
 - **2026-07-23** — **Thicken + compact the review context** (model-free, from the
   dual-judge base rate + [GLM design input](eval/design-input-glm.md)): the diff
   hunks are carried through and rendered; the range's commit messages

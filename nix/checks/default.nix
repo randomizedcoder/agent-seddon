@@ -55,4 +55,9 @@
   # pinned trees are offline store paths, so this runs in the hermetic sandbox
   # (unlike the real-repo Rust sweep in `nix run .#review-eval`).
   review-go = import ./review-go.nix { inherit pkgs agent reviewGoCorpus; };
+  # Static-analysis coverage for the review flow: a self-contained, stdlib-only Go
+  # module with a deliberate lint hit + the pinned `go`/`golangci-lint` on PATH;
+  # assert `agent --review` surfaces the finding. Offline (no module download), so
+  # it runs in the hermetic sandbox. clippy is covered live (dev shell + eval).
+  review-analyze = import ./review-analyze.nix { inherit pkgs versions agent; };
 }

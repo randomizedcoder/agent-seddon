@@ -101,8 +101,38 @@ message ReviewGitState {
   ReviewRepoLanguage project = 5;
 }
 
+// One static-analysis finding (a linter diagnostic). All fields are
+// tool-derived and untrusted: `file` is repo-relative + confined, `message`
+// bounded. `in_change` marks a finding on a file the change touched.
+message ReviewAnalysisFinding {
+  string tool = 1;
+  string rule = 2;
+  string severity = 3;
+  string file = 4;
+  uint32 line = 5;
+  string message = 6;
+  bool in_change = 7;
+}
+
+// The outcome of one linter invocation (`status`: ok | skipped | timeout |
+// failed). Distinct from a finding — a clean or unrun tool still gets a run.
+message ReviewAnalyzerRun {
+  string tool = 1;
+  string status = 2;
+  string reason = 3;
+  uint32 duration_ms = 4;
+  uint32 finding_count = 5;
+}
+
+message ReviewAnalysisReport {
+  string language = 1;
+  repeated ReviewAnalyzerRun runs = 2;
+  repeated ReviewAnalysisFinding findings = 3;
+}
+
 message ReviewFacts {
   ReviewMeta meta = 1;
   ReviewChangeSet change = 2;
   ReviewGitState git_state = 3;
+  ReviewAnalysisReport analysis = 4;
 }

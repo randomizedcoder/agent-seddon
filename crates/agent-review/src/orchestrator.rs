@@ -1,15 +1,17 @@
 //! `ReviewOrchestrator` — resolves the target, fans the collectors out
 //! concurrently, and assembles their fragments into a grounded [`ReviewFacts`].
 
+use crate::analyzer::AnalyzerCollector;
 use crate::collector::{CollectCtx, CollectorOutput, FactCollector, FactFragment};
 use crate::repo_facts::RepoChangeCollector;
 use crate::util::{safe_rev, safe_segment};
 use agent_core::{
     fnv1a_hex, CollectStatus, CollectorStatus, Error, Forge, GitState, RepoBackend, Result,
-    ReviewCollector, ReviewFacts, ReviewTarget, Revision, SearchBackend,
+    ReviewCollector, ReviewFacts, ReviewTarget, Revision, Sandbox, SearchBackend,
 };
 use async_trait::async_trait;
 use futures_util::FutureExt;
+use std::collections::BTreeMap;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -36,6 +38,13 @@ pub enum ReviewEvent {
         host: &'static str,
         project: &'static str,
     },
+    /// One `(tool, severity, in_change)` bucket of analyzer findings.
+    Findings {
+        tool: String,
+        severity: String,
+        in_change: bool,
+        count: u32,
+    },
 }
 
 /// Observability hook (see [`ReviewEvent`]).
@@ -50,6 +59,8 @@ pub struct ReviewOrchestrator {
     collectors: Vec<Box<dyn FactCollector>>,
     observer: Option<ReviewObserver>,
     deadline: Duration,
+    sandbox: Option<Arc<dyn Sandbox>>,
+    analyze_timeout_secs: u64,
 }
 
 struct Resolved {
@@ -76,6 +87,8 @@ impl ReviewOrchestrator {
             collectors: vec![Box::new(RepoChangeCollector)],
             observer: None,
             deadline: Duration::from_secs(60),
+            sandbox: None,
+            analyze_timeout_secs: 45,
         }
     }
 
@@ -86,6 +99,17 @@ impl ReviewOrchestrator {
 
     pub fn with_deadline(mut self, d: Duration) -> Self {
         self.deadline = d;
+        self
+    }
+
+    /// Enable the static-analysis collector (`[review] analyze = true`). It needs a
+    /// [`Sandbox`] to shell out to the linters; without one it is a no-op.
+    pub fn with_analyzer(mut self, sandbox: Option<Arc<dyn Sandbox>>, timeout_secs: u64) -> Self {
+        self.sandbox = sandbox;
+        self.analyze_timeout_secs = timeout_secs.max(1);
+        self.collectors.push(Box::new(AnalyzerCollector {
+            timeout_secs: self.analyze_timeout_secs,
+        }));
         self
     }
 
@@ -162,6 +186,7 @@ impl ReviewCollector for ReviewOrchestrator {
             repo: self.repo.clone(),
             search: self.search.clone(),
             branch_names: r.branch_names,
+            sandbox: self.sandbox.clone(),
         };
 
         let span = tracing::info_span!(
@@ -195,17 +220,39 @@ impl ReviewCollector for ReviewOrchestrator {
                 status: out.status,
                 duration_ms: out.duration_ms,
             });
-            if let Some(FactFragment::RepoChange { change, git_state }) = out.fragment {
-                self.emit(ReviewEvent::ChangeFiles {
-                    n: change.files.len().min(u32::MAX as usize) as u32,
-                });
-                self.emit(ReviewEvent::GitState {
-                    relationship: git_state.relationship.as_str(),
-                    host: git_state.host.as_str(),
-                    project: git_state.project.as_str(),
-                });
-                facts.change = change;
-                facts.git_state = git_state;
+            match out.fragment {
+                Some(FactFragment::RepoChange { change, git_state }) => {
+                    self.emit(ReviewEvent::ChangeFiles {
+                        n: change.files.len().min(u32::MAX as usize) as u32,
+                    });
+                    self.emit(ReviewEvent::GitState {
+                        relationship: git_state.relationship.as_str(),
+                        host: git_state.host.as_str(),
+                        project: git_state.project.as_str(),
+                    });
+                    facts.change = change;
+                    facts.git_state = git_state;
+                }
+                Some(FactFragment::Analysis { report }) => {
+                    // Aggregate findings into (tool, severity, in_change) buckets
+                    // for the counter, then keep the report.
+                    let mut buckets: BTreeMap<(String, String, bool), u32> = BTreeMap::new();
+                    for f in &report.findings {
+                        *buckets
+                            .entry((f.tool.clone(), f.severity.clone(), f.in_change))
+                            .or_insert(0) += 1;
+                    }
+                    for ((tool, severity, in_change), count) in buckets {
+                        self.emit(ReviewEvent::Findings {
+                            tool,
+                            severity,
+                            in_change,
+                            count,
+                        });
+                    }
+                    facts.analysis = report;
+                }
+                None => {}
             }
         }
 

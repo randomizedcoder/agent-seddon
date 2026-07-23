@@ -645,7 +645,7 @@ pub async fn build_agent_with(
                 // Root the collector at the same repo the RepoBackend uses (the git
                 // root of the process cwd), so the file set and the diff agree.
                 let review_root = crate::git::git_paths(&cfg)?.0;
-                let orch = agent_review::ReviewOrchestrator::new(
+                let mut orch = agent_review::ReviewOrchestrator::new(
                     review_root,
                     repo_backend.clone(),
                     review_search,
@@ -655,6 +655,12 @@ pub async fn build_agent_with(
                     crate::metered::record_review_event(&m, ev)
                 }))
                 .with_deadline(std::time::Duration::from_secs(cfg.review.deadline_secs));
+                // Static analysis runs by default; it shells out to the linters via
+                // the shared sandbox (fail-soft without one).
+                if cfg.review.analyze {
+                    orch =
+                        orch.with_analyzer(shared_sandbox.clone(), cfg.review.analyze_timeout_secs);
+                }
                 Some(Arc::new(orch) as Arc<dyn agent_core::ReviewCollector>)
             }
             // A remote fact-collection host (CPU-heavy, worth distributing).

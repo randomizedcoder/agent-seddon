@@ -1,6 +1,9 @@
 //! The internal `FactCollector` abstraction the orchestrator fans out over.
 
-use agent_core::{ChangeSet, CollectStatus, GitState, RepoBackend, Revision, SearchBackend};
+use agent_core::{
+    AnalysisReport, ChangeSet, CollectStatus, GitState, RepoBackend, Revision, Sandbox,
+    SearchBackend,
+};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -19,6 +22,9 @@ pub(crate) struct CollectCtx {
     pub search: Option<Arc<dyn SearchBackend>>,
     /// Short branch names (incl. `origin/*`, `upstream/*`) for the fork heuristic.
     pub branch_names: Vec<String>,
+    /// For collectors that run external tools (the analyzer). `None` ⇒ the
+    /// analyzer is skipped fail-soft.
+    pub sandbox: Option<Arc<dyn Sandbox>>,
 }
 
 /// A collector's typed contribution. One variant per collector; assembly into
@@ -27,6 +33,9 @@ pub(crate) enum FactFragment {
     RepoChange {
         change: ChangeSet,
         git_state: GitState,
+    },
+    Analysis {
+        report: AnalysisReport,
     },
 }
 
@@ -56,6 +65,15 @@ impl CollectorOutput {
     pub(crate) fn failed(reason: impl Into<String>) -> Self {
         Self {
             status: CollectStatus::Failed,
+            reason: reason.into(),
+            fragment: None,
+        }
+    }
+    /// The collector had nothing to do (e.g. no analyzable files, or no sandbox).
+    /// Recorded, not an error — distinct from `failed`.
+    pub(crate) fn skipped(reason: impl Into<String>) -> Self {
+        Self {
+            status: CollectStatus::Skipped,
             reason: reason.into(),
             fragment: None,
         }

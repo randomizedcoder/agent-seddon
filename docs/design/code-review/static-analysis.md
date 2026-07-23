@@ -1,6 +1,54 @@
-# 05 — Static analysis (Go first)
+# 05 — Static analysis (Go + Rust)
 
-Status: **design / pre-implementation.**
+Status: **implemented (increment 5)** — a pragmatic subset of this design ships;
+the richer pieces below (dedicated service, tiers, standalone `gosec`/`go vet`,
+line-level `in_diff`) remain the roadmap. See **Implementation** below.
+
+## Implementation (increment 5)
+
+What shipped rides `ReviewFacts` rather than a standalone service — the lowest-risk
+slice that delivers the #1 dual-judge-ranked addition (linter findings), with the
+extension points intact:
+
+- **`AnalyzerCollector`** (`agent-review/src/analyzer.rs`), a `FactCollector` in the
+  same fan-out as the repo collector — not a separate `Analyzer` seam/service yet.
+  It recomputes the (cached) diff, maps changed files → owning **Go packages** /
+  **Rust crates**, and runs the linters **scoped to those packages** via the shared
+  `Sandbox` (uncapped when called directly — not the `bash` tool's 12 KB cap).
+- **Both languages ship:** Go via `golangci-lint run --output.json.path stdout
+  ./<pkg>/...` (its **default linters = the Quick tier**: errcheck / govet /
+  staticcheck / ineffassign / unused — `go vet` is folded in, no standalone run);
+  Rust via `cargo clippy --message-format=json -p <crate>`. JSON is parsed
+  defensively into `AnalysisFinding { tool, rule, severity, file, line, message,
+  in_change }`.
+- **`in_change` is file-level** (finding's file ∈ the change set), not the design's
+  line-level `in_diff` — enough to foreground PR-touched findings; line-level is
+  deferred.
+- **Default-on, fail-soft:** `[review] analyze = true` (binaries are `/nix/store`-
+  cached) + `analyze_timeout_secs` (default 45) + skip-if-tool-missing (exit 127).
+  A cold/slow/missing/erroring linter → a recorded `skipped`/`timeout`/`failed`
+  `AnalyzerRun`, never a blocked bundle.
+- **Untrusted output contained** exactly as the Security section requires: paths
+  `confine`d (escapers dropped), messages `bound`ed, finding count capped
+  (`MAX_FINDINGS`, drop-with-count).
+- **Wire:** additive `ReviewAnalysisFinding` / `ReviewAnalyzerRun` /
+  `ReviewAnalysisReport` + `ReviewFacts` field 4 — rides `FactCollectorService`
+  (round-trip tested); no `--serve-analyzer` yet.
+- **Metric:** `agent_review_findings_total{tool,severity,in_change}` (via
+  `ReviewEvent::Findings`); the collector's duration rides the existing
+  `agent_review_collector_duration_seconds{collector="analyzer",status}`.
+- **Gate:** hermetic `nix/checks/review-analyze.nix` — a self-contained stdlib-only
+  Go module with a deliberate `ineffassign` hit, run offline; plus `adversarial_`
+  parser tests. clippy is exercised live (dev shell + eval).
+
+**Deferred to a follow-up** (the design vision below): the dedicated `Analyzer`
+seam + `AnalyzerService`/`--serve-analyzer`; the Gating/Comprehensive tiers +
+standalone `gosec`/`go vet`/`gocritic`/…; line-level `in_diff`; SARIF ingestion;
+content-hash caching. A `[review] analyze_tier` knob widens the tier later.
+
+---
+
+The original design (the target the above is the first slice of):
 
 Deterministic findings from the language's own tools. For Go that is a rich,
 mature set — the same one used in `~/Downloads/xtcp2-go`: tiered `golangci-lint`

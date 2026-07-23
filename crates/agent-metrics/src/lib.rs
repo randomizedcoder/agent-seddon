@@ -85,6 +85,7 @@ pub struct Metrics {
     review_collectors: IntCounterVec,
     review_change_files: Histogram,
     review_gitstate: IntCounterVec,
+    review_findings: IntCounterVec,
     web_searches: IntCounterVec,
     web_search_seconds: HistogramVec,
     web_search_results: IntCounterVec,
@@ -359,6 +360,14 @@ impl Metrics {
                 "Review git-state facts, by relationship, host and project",
             ),
             &["relationship", "host", "project"],
+        )
+        .unwrap();
+        let review_findings = IntCounterVec::new(
+            Opts::new(
+                "agent_review_findings_total",
+                "Static-analysis findings, by tool, severity and whether in the change",
+            ),
+            &["tool", "severity", "in_change"],
         )
         .unwrap();
         let web_searches = IntCounterVec::new(
@@ -766,6 +775,7 @@ impl Metrics {
             Box::new(review_collectors.clone()),
             Box::new(review_change_files.clone()),
             Box::new(review_gitstate.clone()),
+            Box::new(review_findings.clone()),
             Box::new(web_searches.clone()),
             Box::new(web_search_seconds.clone()),
             Box::new(web_search_results.clone()),
@@ -857,6 +867,7 @@ impl Metrics {
             review_collectors,
             review_change_files,
             review_gitstate,
+            review_findings,
             web_searches,
             web_search_seconds,
             web_search_results,
@@ -1040,6 +1051,14 @@ impl Metrics {
         self.review_gitstate
             .with_label_values(&[relationship, host, project])
             .inc();
+    }
+    /// Review: a bucket of static-analysis findings. `count` is a trusted internal
+    /// aggregate (never a hostile number), so `inc_by` is safe here.
+    pub fn on_review_findings(&self, tool: &str, severity: &str, in_change: bool, count: u64) {
+        let ic = if in_change { "true" } else { "false" };
+        self.review_findings
+            .with_label_values(&[tool, severity, ic])
+            .inc_by(count);
     }
     /// One web search: outcome, latency, and result count (parity spec 12).
     pub fn on_web_search(&self, backend: &str, outcome: &str, seconds: f64, results: u64) {
