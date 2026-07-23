@@ -31,12 +31,14 @@ impl GrpcReview {
     }
 }
 
-/// Encode a target for the wire: `pr:<n>` | `branch:<name>` | `worktree`.
+/// Encode a target for the wire: `pr:<n>` | `branch:<name>` | `worktree` |
+/// `revs:<base>..<head>`.
 pub(crate) fn encode_target(t: &ReviewTarget) -> String {
     match t {
         ReviewTarget::Pr(n) => format!("pr:{n}"),
         ReviewTarget::Branch(b) => format!("branch:{b}"),
         ReviewTarget::WorkingTree => "worktree".to_string(),
+        ReviewTarget::Revs { base, head } => format!("revs:{base}..{head}"),
     }
 }
 

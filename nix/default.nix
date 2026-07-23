@@ -8,6 +8,8 @@
   src,
   crane,
   advisory-db,
+  # Pinned Go review-eval corpus: { <label> = { base; head; }; } store paths.
+  reviewGoCorpus,
 }:
 
 let
@@ -118,6 +120,20 @@ let
       ;
   };
 
+  # Code-review-flow evaluation harness (`nix run .#review-eval`). Not a check:
+  # the Rust corpus is the real working tree's git history (stripped from the
+  # hermetic sandbox) and `--judge` needs a network model endpoint. Generates
+  # grounded contexts for a curated code-heavy corpus (local Rust + pinned Go)
+  # and, with `--judge`, drives the GLM assessment. See docs/design/code-review/eval/.
+  review-eval = import ./review-eval.nix {
+    inherit
+      pkgs
+      lib
+      agent
+      reviewGoCorpus
+      ;
+  };
+
   # Regenerate the committed buf baseline image after an *intentional* wire change.
   # The `buf` check gates `buf breaking` against this image, so bumping it is the
   # deliberate "accept this as the new wire contract" step (reviewed in the diff).
@@ -142,6 +158,8 @@ let
       advisory-db
       versions
       constantsRs
+      agent
+      reviewGoCorpus
       ;
   };
 
@@ -197,6 +215,10 @@ in
     e2e-live = {
       type = "app";
       program = "${e2e-live}/bin/e2e-live";
+    };
+    review-eval = {
+      type = "app";
+      program = "${review-eval}/bin/review-eval";
     };
     buf-image = {
       type = "app";

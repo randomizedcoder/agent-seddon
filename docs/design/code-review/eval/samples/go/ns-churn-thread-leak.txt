@@ -1,0 +1,14 @@
+## Grounded review facts (tool-derived — not model-generated)
+
+Repo: go project · clone · host github · default branch `main` · identity c462a21ddf81124c
+Change: `0dab8ca9b4570f32c143b18221a8b729999b18b5`..`ae93732baa7954298d8466a4f2db7f8e0516c201` — 8 changed file(s) of 2156 tracked
+  modified  docs/integration-testing.md (+1/-1)
+  modified  nix/microvms/constants.nix (+0/-7)
+  modified  nix/microvms/lib.nix (+1/-1)
+  modified  nix/microvms/mkVm.nix (+2/-10)
+  modified  pkg/xtcp/ns_add.go (+33/-7)
+  added     pkg/xtcp/ns_churn_race_test.go (+122/-0)
+  modified  pkg/xtcp/ns_createNetlinkersAndStore.go (+19/-0)
+  modified  pkg/xtcp/ns_net_namespace.go (+19/-7)
+Collection: 59 ms — repo-change=ok(57ms)
+

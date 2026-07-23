@@ -14,6 +14,8 @@
   advisory-db,
   versions,
   constantsRs,
+  agent,
+  reviewGoCorpus,
 }:
 
 {
@@ -48,4 +50,9 @@
     inherit pkgs constantsRs;
     src = commonArgs.src;
   };
+  # Reproducible Go coverage for the review flow: reconstruct a flake-pinned
+  # xtcp2 change and assert `agent --review` detects Go + the changed files. The
+  # pinned trees are offline store paths, so this runs in the hermetic sandbox
+  # (unlike the real-repo Rust sweep in `nix run .#review-eval`).
+  review-go = import ./review-go.nix { inherit pkgs agent reviewGoCorpus; };
 }

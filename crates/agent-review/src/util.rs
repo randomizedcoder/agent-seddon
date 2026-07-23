@@ -41,6 +41,19 @@ pub(crate) fn safe_segment(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
+/// Fail-closed validator for an explicit revision (a commit id or a ref like
+/// `main`, `HEAD~1`, `origin/main`). More permissive than [`safe_segment`] (revs
+/// carry `/`, `~`, `^`) but still rejects empty, a leading `-`, and any
+/// space/shell metacharacter — so a swept, attacker-adjacent rev cannot inject an
+/// option or a shell escape before git resolves it. Length-capped to a sane max.
+pub(crate) fn safe_rev(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 256
+        && !s.starts_with('-')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | '~' | '^'))
+}
+
 /// Parse a git remote URL into `(host, owner, repo)`. **Fails closed**: returns
 /// `None` on anything it does not fully recognize, and rejects an `owner`/`repo`
 /// that is not a safe path segment (the URL is attacker-controlled repo config).

@@ -57,8 +57,13 @@ starts from fact rather than a model's guess about the codebase. `.` (or
 `worktree`) reviews the current branch against the default branch; a number is a
 PR (resolved via the `Forge` seam); anything else is a branch name. Enable it with
 `[review] backend = "local"`; a `[pool]` of cheap models powers the mode-detection
-vote and (with `[review] in_loop = true`) an in-conversation hand-off. Design:
+vote and (with `[review] in_loop = true`) an in-conversation hand-off. A commit
+range works too: `agent --review <base>..<head>`. Design:
 [`design/code-review/`](design/code-review/README.md).
+
+To **measure** the generated context quality against a code-heavy Rust+Go corpus
+and record a base rate, `nix run .#review-eval` (add `--judge` for a GLM
+assessment) — see [`design/code-review/eval/`](design/code-review/eval/README.md).
 
 ## Configuration
 

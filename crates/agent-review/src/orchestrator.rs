@@ -3,7 +3,7 @@
 
 use crate::collector::{CollectCtx, CollectorOutput, FactCollector, FactFragment};
 use crate::repo_facts::RepoChangeCollector;
-use crate::util::safe_segment;
+use crate::util::{safe_rev, safe_segment};
 use agent_core::{
     fnv1a_hex, CollectStatus, CollectorStatus, Error, Forge, GitState, RepoBackend, Result,
     ReviewCollector, ReviewFacts, ReviewTarget, Revision, SearchBackend,
@@ -119,6 +119,17 @@ impl ReviewOrchestrator {
                 (default_branch.clone(), b.clone())
             }
             ReviewTarget::WorkingTree => (default_branch.clone(), "HEAD".to_string()),
+            ReviewTarget::Revs { base, head } => {
+                // Explicit revisions (commit ids / refs). Validated fail-closed
+                // before git resolves them — a sweep feeds these, and they are
+                // otherwise attacker-adjacent.
+                if !safe_rev(base) || !safe_rev(head) {
+                    return Err(Error::Config(format!(
+                        "unsafe revision in `{base}..{head}` (rejected before touching git)"
+                    )));
+                }
+                (base.clone(), head.clone())
+            }
         };
 
         Ok(Resolved {

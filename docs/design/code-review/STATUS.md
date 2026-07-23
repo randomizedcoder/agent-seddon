@@ -61,6 +61,13 @@ are not separate increments — each increment lands its own slice of both.
 
 ## Change log
 
+- **2026-07-23** — **Evaluation harness + base rate** ([`eval/`](eval/README.md)):
+  `ReviewTarget::Revs { base, head }` (`agent --review <base>..<head>`, + `revs:`
+  gRPC wire); an opt-in `nix run .#review-eval` that generates grounded contexts
+  for a code-heavy dual-language corpus (Rust from the local repo via worktrees;
+  Go from **flake-pinned xtcp2** changes, hash-locked) and, with `--judge`, drives
+  the GLM-5.2 assessment; a hermetic `review-go` gate check on the pinned Go
+  corpus; and the recorded baseline with the assistant's + GLM's assessments.
 - **2026-07-23** — **gRPC serviceability** for increments 1–3: `LlmPoolService`
   (`--serve-llm-pool`) and `FactCollectorService` (`--serve-fact-collector`) —
   `llm_pool.proto`/`review.proto`, `From`/`TryFrom` conversions, client + server
