@@ -45,6 +45,8 @@ pub enum Seam {
     Lsp,
     Episodic,
     Semantic,
+    LlmPool,
+    Review,
 }
 
 /// Every variant, so the table can be checked for completeness.
@@ -71,6 +73,8 @@ const ALL_SEAMS: &[Seam] = &[
     Seam::Lsp,
     Seam::Episodic,
     Seam::Semantic,
+    Seam::LlmPool,
+    Seam::Review,
 ];
 
 /// The static facts about a seam served as its own process.
@@ -242,6 +246,20 @@ const SEAMS: &[SeamInfo] = &[
         service: "agent.v1.Semantic",
         endpoint: constants::SEMANTIC,
     },
+    SeamInfo {
+        seam: Seam::LlmPool,
+        flag: "--serve-llm-pool",
+        name: "llm-pool",
+        service: "agent.v1.LlmPoolService",
+        endpoint: constants::LLM_POOL,
+    },
+    SeamInfo {
+        seam: Seam::Review,
+        flag: "--serve-fact-collector",
+        name: "fact-collector",
+        service: "agent.v1.FactCollectorService",
+        endpoint: constants::REVIEW,
+    },
 ];
 
 impl Seam {
@@ -307,6 +325,8 @@ impl Seam {
             Seam::Lsp => &cfg.grpc.lsp.listen,
             Seam::Episodic => &cfg.grpc.episodic.listen,
             Seam::Semantic => &cfg.grpc.semantic.listen,
+            Seam::LlmPool => &cfg.grpc.llm_pool.listen,
+            Seam::Review => &cfg.grpc.review.listen,
         }
     }
 }
@@ -487,6 +507,20 @@ fn add_seam_service(router: Router, agent: &Agent, seam: Seam) -> anyhow::Result
         Seam::Semantic => match agent.semantic() {
             Some(s) => (
                 router.add_service(srv::SemanticService::new(s).into_server()),
+                true,
+            ),
+            None => (router, false),
+        },
+        Seam::LlmPool => match agent.llm_pool() {
+            Some(p) => (
+                router.add_service(srv::LlmPoolServiceSvc::new(p).into_server()),
+                true,
+            ),
+            None => (router, false),
+        },
+        Seam::Review => match agent.review_collector() {
+            Some(r) => (
+                router.add_service(srv::FactCollectorServiceSvc::new(r).into_server()),
                 true,
             ),
             None => (router, false),

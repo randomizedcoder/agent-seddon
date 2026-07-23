@@ -1,0 +1,97 @@
+// The `ReviewCollector` seam over gRPC — the fact-collection fan-out as a
+// service. `Collect` runs every collector and returns a grounded `ReviewFacts`.
+//
+// `Review`-prefixed messages (the flat `agent.v1` package makes names global);
+// `ChangeKind` is reused from repo.proto. See docs/design/code-review/.
+syntax = "proto3";
+
+package agent.v1;
+
+import "agent/v1/repo.proto";
+
+service FactCollectorService {
+  // Collect grounded facts for a target. Fail-soft: a partial bundle is a
+  // success; only an unresolvable target is an error.
+  rpc Collect(ReviewCollectRequest) returns (ReviewFacts);
+}
+
+// The target, encoded: `pr:<n>` | `branch:<name>` | `worktree`.
+message ReviewCollectRequest {
+  string target = 1;
+}
+
+enum ReviewCollectStatus {
+  REVIEW_COLLECT_STATUS_UNSPECIFIED = 0;
+  REVIEW_COLLECT_STATUS_OK = 1;
+  REVIEW_COLLECT_STATUS_PARTIAL = 2;
+  REVIEW_COLLECT_STATUS_SKIPPED = 3;
+  REVIEW_COLLECT_STATUS_FAILED = 4;
+}
+
+enum ReviewForgeHost {
+  REVIEW_FORGE_HOST_UNSPECIFIED = 0;
+  REVIEW_FORGE_HOST_GITHUB = 1;
+  REVIEW_FORGE_HOST_GITLAB = 2;
+  REVIEW_FORGE_HOST_OTHER = 3;
+  REVIEW_FORGE_HOST_NONE = 4;
+}
+
+enum ReviewRepoRelation {
+  REVIEW_REPO_RELATION_UNSPECIFIED = 0;
+  REVIEW_REPO_RELATION_CLONE = 1;
+  REVIEW_REPO_RELATION_FORK = 2;
+  REVIEW_REPO_RELATION_UNKNOWN = 3;
+}
+
+enum ReviewRepoLanguage {
+  REVIEW_REPO_LANGUAGE_UNSPECIFIED = 0;
+  REVIEW_REPO_LANGUAGE_GO = 1;
+  REVIEW_REPO_LANGUAGE_RUST = 2;
+  REVIEW_REPO_LANGUAGE_MIXED = 3;
+  REVIEW_REPO_LANGUAGE_UNKNOWN = 4;
+}
+
+message ReviewCollectorStatus {
+  string collector = 1;
+  ReviewCollectStatus status = 2;
+  string reason = 3;
+  uint32 duration_ms = 4;
+}
+
+message ReviewMeta {
+  string repo_hash = 1;
+  string base_rev = 2;
+  string head_rev = 3;
+  uint32 total_ms = 4;
+  repeated ReviewCollectorStatus collectors = 5;
+}
+
+message ReviewChangedFile {
+  string path = 1;
+  ChangeKind change = 2;
+  uint32 additions = 3;
+  uint32 deletions = 4;
+  bool is_binary = 5;
+  string lang = 6;
+}
+
+message ReviewChangeSet {
+  string base_rev = 1;
+  string head_rev = 2;
+  repeated ReviewChangedFile files = 3;
+  uint32 repo_file_count = 4;
+}
+
+message ReviewGitState {
+  string remote_url_hash = 1;
+  ReviewForgeHost host = 2;
+  ReviewRepoRelation relationship = 3;
+  string default_branch = 4;
+  ReviewRepoLanguage project = 5;
+}
+
+message ReviewFacts {
+  ReviewMeta meta = 1;
+  ReviewChangeSet change = 2;
+  ReviewGitState git_state = 3;
+}

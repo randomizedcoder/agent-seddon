@@ -2344,6 +2344,323 @@ impl From<pb::SessionCheckpointDiff> for agent_core::CheckpointDiff {
     }
 }
 
+// --- LlmPool ---------------------------------------------------------------
+
+impl From<agent_core::PoolTier> for pb::PoolTier {
+    fn from(t: agent_core::PoolTier) -> Self {
+        match t {
+            agent_core::PoolTier::Light => pb::PoolTier::Light,
+            agent_core::PoolTier::Medium => pb::PoolTier::Medium,
+            agent_core::PoolTier::Heavy => pb::PoolTier::Heavy,
+        }
+    }
+}
+
+/// A garbled/unspecified tier decodes to `Light` — the cheap floor, never a
+/// silent escalation to an expensive tier.
+impl From<pb::PoolTier> for agent_core::PoolTier {
+    fn from(t: pb::PoolTier) -> Self {
+        match t {
+            pb::PoolTier::Heavy => agent_core::PoolTier::Heavy,
+            pb::PoolTier::Medium => agent_core::PoolTier::Medium,
+            _ => agent_core::PoolTier::Light,
+        }
+    }
+}
+
+/// The i32-on-the-wire form of [`From<pb::PoolTier>`]. `pub` so the server maps a
+/// request's tier without re-implementing the safe-floor rule.
+pub fn pool_tier_from_i32(v: i32) -> agent_core::PoolTier {
+    pb::PoolTier::try_from(v)
+        .map(agent_core::PoolTier::from)
+        .unwrap_or(agent_core::PoolTier::Light)
+}
+
+impl From<agent_core::PoolMemberHealth> for pb::PoolMemberHealth {
+    fn from(h: agent_core::PoolMemberHealth) -> Self {
+        pb::PoolMemberHealth {
+            name: h.name,
+            tier: pb::PoolTier::from(h.tier) as i32,
+            alive: h.alive,
+            consecutive_failures: h.consecutive_failures,
+            last_probe_ms: h.last_probe_ms,
+        }
+    }
+}
+impl From<pb::PoolMemberHealth> for agent_core::PoolMemberHealth {
+    fn from(h: pb::PoolMemberHealth) -> Self {
+        agent_core::PoolMemberHealth {
+            name: h.name,
+            tier: pool_tier_from_i32(h.tier),
+            alive: h.alive,
+            consecutive_failures: h.consecutive_failures,
+            last_probe_ms: h.last_probe_ms,
+        }
+    }
+}
+
+impl From<agent_core::HealthReport> for pb::PoolHealthReport {
+    fn from(r: agent_core::HealthReport) -> Self {
+        pb::PoolHealthReport {
+            members: r.members.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+impl From<pb::PoolHealthReport> for agent_core::HealthReport {
+    fn from(r: pb::PoolHealthReport) -> Self {
+        agent_core::HealthReport {
+            members: r.members.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<agent_core::PoolMemberResult> for pb::PoolMemberResult {
+    fn from(r: agent_core::PoolMemberResult) -> Self {
+        pb::PoolMemberResult {
+            member: r.member,
+            ok: r.response.is_some(),
+            error: r.error.unwrap_or_default(),
+            duration_ms: r.duration_ms,
+            response: r.response.map(Into::into),
+        }
+    }
+}
+impl From<pb::PoolMemberResult> for agent_core::PoolMemberResult {
+    fn from(r: pb::PoolMemberResult) -> Self {
+        // A malformed response decodes to a failed slot rather than a panic.
+        let response = if r.ok {
+            r.response
+                .and_then(|resp| agent_core::CompletionResponse::try_from(resp).ok())
+        } else {
+            None
+        };
+        let error = if response.is_some() {
+            None
+        } else {
+            Some(if r.error.is_empty() {
+                "remote pool member failed".to_string()
+            } else {
+                r.error
+            })
+        };
+        agent_core::PoolMemberResult {
+            member: r.member,
+            duration_ms: r.duration_ms,
+            response,
+            error,
+        }
+    }
+}
+
+// --- Review ----------------------------------------------------------------
+
+impl From<agent_core::CollectStatus> for pb::ReviewCollectStatus {
+    fn from(s: agent_core::CollectStatus) -> Self {
+        match s {
+            agent_core::CollectStatus::Ok => pb::ReviewCollectStatus::Ok,
+            agent_core::CollectStatus::Partial => pb::ReviewCollectStatus::Partial,
+            agent_core::CollectStatus::Skipped => pb::ReviewCollectStatus::Skipped,
+            agent_core::CollectStatus::Failed => pb::ReviewCollectStatus::Failed,
+        }
+    }
+}
+fn collect_status_from_i32(v: i32) -> agent_core::CollectStatus {
+    match pb::ReviewCollectStatus::try_from(v) {
+        Ok(pb::ReviewCollectStatus::Ok) => agent_core::CollectStatus::Ok,
+        Ok(pb::ReviewCollectStatus::Partial) => agent_core::CollectStatus::Partial,
+        Ok(pb::ReviewCollectStatus::Skipped) => agent_core::CollectStatus::Skipped,
+        // Failed / unspecified / garbled → Failed (the conservative reading).
+        _ => agent_core::CollectStatus::Failed,
+    }
+}
+
+impl From<agent_core::ForgeHost> for pb::ReviewForgeHost {
+    fn from(h: agent_core::ForgeHost) -> Self {
+        match h {
+            agent_core::ForgeHost::GitHub => pb::ReviewForgeHost::Github,
+            agent_core::ForgeHost::GitLab => pb::ReviewForgeHost::Gitlab,
+            agent_core::ForgeHost::Other => pb::ReviewForgeHost::Other,
+            agent_core::ForgeHost::None => pb::ReviewForgeHost::None,
+        }
+    }
+}
+fn forge_host_from_i32(v: i32) -> agent_core::ForgeHost {
+    match pb::ReviewForgeHost::try_from(v) {
+        Ok(pb::ReviewForgeHost::Github) => agent_core::ForgeHost::GitHub,
+        Ok(pb::ReviewForgeHost::Gitlab) => agent_core::ForgeHost::GitLab,
+        Ok(pb::ReviewForgeHost::None) => agent_core::ForgeHost::None,
+        _ => agent_core::ForgeHost::Other,
+    }
+}
+
+impl From<agent_core::RepoRelation> for pb::ReviewRepoRelation {
+    fn from(r: agent_core::RepoRelation) -> Self {
+        match r {
+            agent_core::RepoRelation::Clone => pb::ReviewRepoRelation::Clone,
+            agent_core::RepoRelation::Fork => pb::ReviewRepoRelation::Fork,
+            agent_core::RepoRelation::Unknown => pb::ReviewRepoRelation::Unknown,
+        }
+    }
+}
+fn repo_relation_from_i32(v: i32) -> agent_core::RepoRelation {
+    match pb::ReviewRepoRelation::try_from(v) {
+        Ok(pb::ReviewRepoRelation::Clone) => agent_core::RepoRelation::Clone,
+        Ok(pb::ReviewRepoRelation::Fork) => agent_core::RepoRelation::Fork,
+        _ => agent_core::RepoRelation::Unknown,
+    }
+}
+
+impl From<agent_core::RepoLanguage> for pb::ReviewRepoLanguage {
+    fn from(l: agent_core::RepoLanguage) -> Self {
+        match l {
+            agent_core::RepoLanguage::Go => pb::ReviewRepoLanguage::Go,
+            agent_core::RepoLanguage::Rust => pb::ReviewRepoLanguage::Rust,
+            agent_core::RepoLanguage::Mixed => pb::ReviewRepoLanguage::Mixed,
+            agent_core::RepoLanguage::Unknown => pb::ReviewRepoLanguage::Unknown,
+        }
+    }
+}
+fn repo_language_from_i32(v: i32) -> agent_core::RepoLanguage {
+    match pb::ReviewRepoLanguage::try_from(v) {
+        Ok(pb::ReviewRepoLanguage::Go) => agent_core::RepoLanguage::Go,
+        Ok(pb::ReviewRepoLanguage::Rust) => agent_core::RepoLanguage::Rust,
+        Ok(pb::ReviewRepoLanguage::Mixed) => agent_core::RepoLanguage::Mixed,
+        _ => agent_core::RepoLanguage::Unknown,
+    }
+}
+
+impl From<agent_core::CollectorStatus> for pb::ReviewCollectorStatus {
+    fn from(c: agent_core::CollectorStatus) -> Self {
+        pb::ReviewCollectorStatus {
+            collector: c.collector,
+            status: pb::ReviewCollectStatus::from(c.status) as i32,
+            reason: c.reason,
+            duration_ms: c.duration_ms,
+        }
+    }
+}
+impl From<pb::ReviewCollectorStatus> for agent_core::CollectorStatus {
+    fn from(c: pb::ReviewCollectorStatus) -> Self {
+        agent_core::CollectorStatus {
+            collector: c.collector,
+            status: collect_status_from_i32(c.status),
+            reason: c.reason,
+            duration_ms: c.duration_ms,
+        }
+    }
+}
+
+impl From<agent_core::ReviewMeta> for pb::ReviewMeta {
+    fn from(m: agent_core::ReviewMeta) -> Self {
+        pb::ReviewMeta {
+            repo_hash: m.repo_hash,
+            base_rev: m.base_rev,
+            head_rev: m.head_rev,
+            total_ms: m.total_ms,
+            collectors: m.collectors.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+impl From<pb::ReviewMeta> for agent_core::ReviewMeta {
+    fn from(m: pb::ReviewMeta) -> Self {
+        agent_core::ReviewMeta {
+            repo_hash: m.repo_hash,
+            base_rev: m.base_rev,
+            head_rev: m.head_rev,
+            total_ms: m.total_ms,
+            collectors: m.collectors.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<agent_core::ChangedFile> for pb::ReviewChangedFile {
+    fn from(f: agent_core::ChangedFile) -> Self {
+        pb::ReviewChangedFile {
+            path: f.path.to_string_lossy().into_owned(),
+            change: pb::ChangeKind::from(f.change) as i32,
+            additions: f.additions,
+            deletions: f.deletions,
+            is_binary: f.is_binary,
+            lang: f.lang,
+        }
+    }
+}
+impl From<pb::ReviewChangedFile> for agent_core::ChangedFile {
+    fn from(f: pb::ReviewChangedFile) -> Self {
+        agent_core::ChangedFile {
+            path: std::path::PathBuf::from(f.path),
+            change: change_kind_from_i32(f.change),
+            additions: f.additions,
+            deletions: f.deletions,
+            is_binary: f.is_binary,
+            lang: f.lang,
+        }
+    }
+}
+
+impl From<agent_core::ChangeSet> for pb::ReviewChangeSet {
+    fn from(c: agent_core::ChangeSet) -> Self {
+        pb::ReviewChangeSet {
+            base_rev: c.base_rev,
+            head_rev: c.head_rev,
+            files: c.files.into_iter().map(Into::into).collect(),
+            repo_file_count: c.repo_file_count,
+        }
+    }
+}
+impl From<pb::ReviewChangeSet> for agent_core::ChangeSet {
+    fn from(c: pb::ReviewChangeSet) -> Self {
+        agent_core::ChangeSet {
+            base_rev: c.base_rev,
+            head_rev: c.head_rev,
+            files: c.files.into_iter().map(Into::into).collect(),
+            repo_file_count: c.repo_file_count,
+        }
+    }
+}
+
+impl From<agent_core::GitState> for pb::ReviewGitState {
+    fn from(g: agent_core::GitState) -> Self {
+        pb::ReviewGitState {
+            remote_url_hash: g.remote_url_hash,
+            host: pb::ReviewForgeHost::from(g.host) as i32,
+            relationship: pb::ReviewRepoRelation::from(g.relationship) as i32,
+            default_branch: g.default_branch,
+            project: pb::ReviewRepoLanguage::from(g.project) as i32,
+        }
+    }
+}
+impl From<pb::ReviewGitState> for agent_core::GitState {
+    fn from(g: pb::ReviewGitState) -> Self {
+        agent_core::GitState {
+            remote_url_hash: g.remote_url_hash,
+            host: forge_host_from_i32(g.host),
+            relationship: repo_relation_from_i32(g.relationship),
+            default_branch: g.default_branch,
+            project: repo_language_from_i32(g.project),
+        }
+    }
+}
+
+impl From<agent_core::ReviewFacts> for pb::ReviewFacts {
+    fn from(f: agent_core::ReviewFacts) -> Self {
+        pb::ReviewFacts {
+            meta: Some(f.meta.into()),
+            change: Some(f.change.into()),
+            git_state: Some(f.git_state.into()),
+        }
+    }
+}
+impl From<pb::ReviewFacts> for agent_core::ReviewFacts {
+    fn from(f: pb::ReviewFacts) -> Self {
+        agent_core::ReviewFacts {
+            meta: f.meta.map(Into::into).unwrap_or_default(),
+            change: f.change.map(Into::into).unwrap_or_default(),
+            git_state: f.git_state.map(Into::into).unwrap_or_default(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,0 +1,59 @@
+// The `LlmPool` seam over gRPC — a health-checked, tiered pool with a parallel
+// fan-out `Complete`. Distinct from the `Provider` service: the pool's liveness
+// view and multi-answer fan-out have no single-answer analogue.
+//
+// `Pool`-prefixed messages: the project shares one flat `agent.v1` package, so
+// names are global (see the collision noted in session.proto).
+syntax = "proto3";
+
+package agent.v1;
+
+import "agent/v1/common.proto";
+
+service LlmPoolService {
+  // Current liveness of every pool member (from the active probe).
+  rpc Health(PoolHealthRequest) returns (PoolHealthReport);
+  // Fan out one request to up to `fanout` healthy members at/above `tier`.
+  rpc Complete(PoolCompleteRequest) returns (PoolCompleteResponse);
+}
+
+enum PoolTier {
+  POOL_TIER_UNSPECIFIED = 0;
+  POOL_TIER_LIGHT = 1;
+  POOL_TIER_MEDIUM = 2;
+  POOL_TIER_HEAVY = 3;
+}
+
+message PoolHealthRequest {}
+
+message PoolMemberHealth {
+  string name = 1;
+  PoolTier tier = 2;
+  bool alive = 3;
+  uint32 consecutive_failures = 4;
+  uint32 last_probe_ms = 5;
+}
+
+message PoolHealthReport {
+  repeated PoolMemberHealth members = 1;
+}
+
+message PoolCompleteRequest {
+  CompletionRequest req = 1;
+  PoolTier tier = 2;
+  uint32 fanout = 3;
+}
+
+// One member's settled result. `ok=false` carries a class-only `error` (never a
+// raw body) and no `response`; the batch never fails.
+message PoolMemberResult {
+  string member = 1;
+  bool ok = 2;
+  string error = 3;
+  uint32 duration_ms = 4;
+  CompletionResponse response = 5;
+}
+
+message PoolCompleteResponse {
+  repeated PoolMemberResult results = 1;
+}

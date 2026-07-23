@@ -76,6 +76,8 @@ mod descriptor_tests {
             "ForgeService",
             "TaskService",
             "LspService",
+            "LlmPoolService",
+            "FactCollectorService",
         ] {
             assert!(
                 services.contains(&expected),
