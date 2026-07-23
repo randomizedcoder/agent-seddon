@@ -1,9 +1,18 @@
 # Design: the Code Review Flow
 
-Status: **design / pre-implementation.** This directory is the input to the
-implementation phase. It states the requirements, the intended behaviour, the
-wire contracts, the instrumentation, and what is deliberately deferred. It does
-not commit to line-level details.
+Status: **increments 1–4 implemented + measured; 5–9 designed.** This directory is
+the design of record (requirements, wire contracts, instrumentation, what is
+deferred). The grounded-fact core is now **built, gate-tested, and running** — see
+the live per-increment tracker in [`STATUS.md`](STATUS.md) and the measured base
+rate in [`eval/`](eval/README.md). The component docs below still read as the
+original design; where the shipped code refined a detail, `STATUS.md` is authoritative.
+
+**Shipped (merged):** `agent --review <PR#|branch|.|base..head>` produces a
+grounded, **compacted** context — repo/change/git-state, the range's commit intent,
+and budget-bounded diff hunks — driven by a health-checked LLM pool, with two gRPC
+services and a dual-judge (assistant + GLM-5.2) evaluation harness that documents
+the base rate. **Next:** static-analysis findings (increment 5), then AST/style/
+summaries/recording.
 
 ## The idea
 
@@ -99,48 +108,51 @@ and **Tracing + logs** sections.
 
 ## Status
 
-**Design complete · nothing implemented.** [`STATUS.md`](STATUS.md) is the living
-tracker (per-increment, updated as code merges). The snapshot below is the
-design-time scorecard. Columns:
-**Designed** (the doc exists and is complete), **Wire** (its `.proto` + service
-are specified), **Metrics** (its instrumentation is specified), **Impl** (code
-merged). *Reuses* names the existing primitive the implementation builds on.
+[`STATUS.md`](STATUS.md) is the **live tracker** (per-increment, per-PR, updated as
+code merges); the snapshot below is the coarse scorecard. Columns: **Designed** (the
+doc is complete), **Wire** (its `.proto` + service exist), **Metrics** (instrumented),
+**Impl** (code merged). *Reuses* names the existing primitive it builds on. The
+grounded-fact core (01–04) is shipped, gate-tested, and measured (see [`eval/`](eval/README.md));
+the deeper enrichments (05–09) are designed and next.
 
 | Component | Designed | Wire | Metrics | Impl | Reuses (exists today) |
 |---|:--:|:--:|:--:|:--:|---|
-| 01 LLM Pool & Health | ✅ | ✅ | ✅ | ❌ | `Router` / `Candidate` / `RouterCfg` (`agent-providers`) |
-| 02 Task-mode detection | ✅ | ✅ | ✅ | ❌ | `SearchMode` enum pattern; `clamped_confidence` |
-| 03 Orchestrator + `ReviewFacts` | ✅ | ✅ | ✅ | ❌ | parallel tool-dispatch idiom (`agent.rs`); registry seam pattern |
-| 04 Repo / change / git-state | ✅ | ✅ | ✅ | ❌ | `Manifest::scan`, `RepoBackend::diff`, `Forge`, `lang_of` |
+| 01 LLM Pool & Health | ✅ | ✅ | ✅ | **✅** | `Router` / `Candidate` / `RouterCfg` (`agent-providers`) |
+| 02 Task-mode detection | ✅ | ✅ | ✅ | **✅** | `SearchMode` enum pattern; `clamped_confidence` |
+| 03 Orchestrator + `ReviewFacts` | ✅ | ✅ | ✅ | **✅** | parallel tool-dispatch idiom (`agent.rs`); registry seam pattern |
+| 04 Repo / change / git-state | ✅ | ✅ | ✅ | **✅** | `Manifest::scan`, `RepoBackend::diff`/`log_range`, `Forge`, `lang_of` |
 | 05 Static analysis (Go) | ✅ | ✅ | ✅ | ❌ | `Sandbox` seam; xtcp2-go tiered `golangci-lint` |
 | 06 AST & call-graph | ✅ | ✅ | ✅ | ❌ | `Sandbox` seam (go helper); `RepoBackend::read_file` |
 | 07 Code-style fingerprint | ✅ | ✅ | ✅ | ❌ | `Manifest::scan`, `RepoBackend::log` |
 | 08 Cheap-LLM summaries | ✅ | ✅ | ✅ | ❌ | LLM Pool (01); `DiffResult`; `join_all` idiom |
 | 09 Grounded context + recording | ✅ | ✅ | ✅ | ❌ | `MemoryEvent` side-channel, `CompositeMemory`, telemetry rows/writer |
-| 10 Wire contracts | ✅ | — | — | ❌ | `agent-proto` + `build.rs` + buf; `embed` end-to-end template |
+| 10 Wire contracts | ✅ | ✅ | — | **partial** | `agent-proto` + `build.rs` + buf; `embed` end-to-end template |
 | 11 Observability | ✅ | — | — | ❌ | `metered.rs` decorators, `RouteEvent` callback, W3C span propagation |
 
-### Service + metrics allocation (specified in `10` / `11`, applied on impl)
+### Service + metrics allocation
 
-| Service (`--serve-…`) | `nix/constants.nix` block | Fan-out span child |
-|---|---|---|
-| `llm-pool` | new `pool` `{ port, socket, metrics_port }` | `pool.dispatch` |
-| `fact-collector` (gateway) | new `review` block | `review.collect` (root) |
-| `analyzer` | new `analyzer` block | `review.analyze` |
-| `ast` | new `ast` block | `review.ast` |
-| `style` | new `style` block | `review.style` |
-| `summarizer` | new `summarizer` block | `review.summarize` |
+| Service (`--serve-…`) | `nix/constants.nix` block | Fan-out span child | Status |
+|---|---|---|:--:|
+| `llm-pool` | `llm_pool` (:50073) | `pool.dispatch` | ✅ shipped |
+| `fact-collector` (gateway) | `review` (:50074) | `review.collect` (root) | ✅ shipped |
+| `analyzer` | new `analyzer` block | `review.analyze` | designed |
+| `ast` | new `ast` block | `review.ast` | designed |
+| `style` | new `style` block | `review.style` | designed |
+| `summarizer` | new `summarizer` block | `review.summarize` | designed |
 
-New metric families (namespaced `agent_review_*` and `agent_pool_*`): see `11`.
+Metric families `agent_pool_*` and `agent_review_*` are live (see `11`).
 
-## Recommended build order
+## Build order (progress)
 
-1. **01 Pool** — the foundation (active health + fan-out) everything else calls.
-2. **02 + 03** — the spine: detect the mode, orchestrate the fan-out.
-3. **04** — the cheapest, highest-value grounded facts (file set, diff, git state).
-4. **05** — the Go toolset into our `flake.nix`; the dedicated analyzer service.
+1. ✅ **01 Pool** — the foundation (active health + fan-out) everything else calls.
+2. ✅ **02 + 03** — the spine: detect the mode, orchestrate the fan-out.
+3. ✅ **04** — the cheapest, highest-value grounded facts (file set, diff, git state),
+   then the **thicken + compact** pass (diff hunks, commit intent, a byte budget).
+4. **05 ← next** — the Go/Rust linter toolset into `flake.nix`; the dedicated
+   analyzer service. GLM ranked static analysis its **#1 addition**.
 5. **08** — summaries over the pool.
-6. **06 · 07 · 09** — AST/call-graph, style fingerprint, and recording.
+6. **06 · 07 · 09** — AST/call-graph (incl. the cheap **signature-diff** subset),
+   style fingerprint, and recording.
 
 ## House rules these docs follow
 
