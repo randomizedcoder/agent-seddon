@@ -152,6 +152,18 @@
       socket = "/tmp/agent-seddon/semantic.sock";
       metrics_port = 9622;
     };
+    # Code review flow (docs/design/code-review/): the health-checked LLM pool and
+    # the fact-collection orchestrator, each servable on its own host.
+    llm_pool = {
+      port = 50073;
+      socket = "/tmp/agent-seddon/llm_pool.sock";
+      metrics_port = 9623;
+    };
+    review = {
+      port = 50074;
+      socket = "/tmp/agent-seddon/review.sock";
+      metrics_port = 9624;
+    };
 
     # NOT a seam: the `agent --serve-all` gateway, which hosts every seam's
     # service in one process on one endpoint. A same-host deployment that wants

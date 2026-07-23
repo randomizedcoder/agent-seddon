@@ -20,10 +20,10 @@ the [tool-call-verifier](../tool-call-verification.md) followed).
 
 | # | Component | Design | Wire | Metrics | Seam | gRPC | Tests | PR |
 |---|---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| 01 | LLM Pool & Health | ✅ | ✅ | ✅ | ✅ | ⬜ | ✅ | — |
+| 01 | LLM Pool & Health | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 | 02 | Task-mode detection | ✅ | ✅ | ✅ | ✅ | n/a | ✅ | — |
-| 03 | Orchestrator + `ReviewFacts` | ✅ | ✅ | ✅ | ✅ | ⬜ | ✅ | — |
-| 04 | Repo / change / git-state | ✅ | ✅ | ✅ | ✅ | ⬜ | ✅ | — |
+| 03 | Orchestrator + `ReviewFacts` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+| 04 | Repo / change / git-state | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 | 05 | Static analysis (Go) | ✅ | ✅ | ✅ | ⬜ | ⬜ | ⬜ | — |
 | 06 | AST & call-graph | ✅ | ✅ | ✅ | ⬜ | ⬜ | ⬜ | — |
 | 07 | Code-style fingerprint | ✅ | ✅ | ✅ | ⬜ | ⬜ | ⬜ | — |
@@ -61,6 +61,13 @@ are not separate increments — each increment lands its own slice of both.
 
 ## Change log
 
+- **2026-07-23** — **gRPC serviceability** for increments 1–3: `LlmPoolService`
+  (`--serve-llm-pool`) and `FactCollectorService` (`--serve-fact-collector`) —
+  `llm_pool.proto`/`review.proto`, `From`/`TryFrom` conversions, client + server
+  adapters, `nix/constants.nix` ports 50073/50074 (+ `gen-constants`), CLI serve
+  table, `[grpc.llm_pool]`/`[grpc.review]` client wiring (`[review] backend =
+  "grpc"`). buf lint + breaking pass (additive — no baseline bump). 7 round-trip
+  tests (TCP + UDS); validated end-to-end with `grpcurl` (reflection + `Collect`).
 - **2026-07-23** — Increments 1–3 **seam layer** implemented (in-process): the
   `LlmPool` seam + `PoolProvider` (tiers, active liveness probe, parallel
   fan-out); the `TaskClassifier`/`ReviewCollector` seams + the `agent-review`

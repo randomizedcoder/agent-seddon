@@ -558,8 +558,25 @@ pub async fn build_agent_with(
     // LLM pool + review seams (docs/design/code-review/). Built here — after the
     // repo/search/forge seams and while `base_ctx` (which borrows `cfg`) is still
     // usable, i.e. before `settings` moves `cfg.agent.system_prompt`.
+    // A `[grpc.llm_pool] endpoint` dials a remote pool; else `[pool] members`
+    // builds a local one; else no pool (mode detection degrades to the prefilter).
+    #[cfg(all(feature = "provider-pool", feature = "grpc"))]
+    let grpc_pool: Option<Arc<dyn agent_core::LlmPool>> = if cfg.grpc.llm_pool.endpoint.is_empty() {
+        None
+    } else {
+        let ep = crate::registry::grpc_client_endpoint(
+            &cfg.grpc.llm_pool.endpoint,
+            agent_grpc::constants::LLM_POOL,
+        );
+        Some(Arc::new(agent_grpc::client::GrpcLlmPool::connect(&ep)?))
+    };
+    #[cfg(all(feature = "provider-pool", not(feature = "grpc")))]
+    let grpc_pool: Option<Arc<dyn agent_core::LlmPool>> = None;
+
     #[cfg(feature = "provider-pool")]
-    let llm_pool_seam: Option<Arc<dyn agent_core::LlmPool>> = if cfg.pool.members.is_empty() {
+    let llm_pool_seam: Option<Arc<dyn agent_core::LlmPool>> = if grpc_pool.is_some() {
+        grpc_pool
+    } else if cfg.pool.members.is_empty() {
         None
     } else {
         let mut specs = Vec::new();
@@ -613,32 +630,44 @@ pub async fn build_agent_with(
 
     #[cfg(feature = "review")]
     let review_collector_seam: Option<Arc<dyn agent_core::ReviewCollector>> =
-        if cfg.review.backend == "local" {
-            #[cfg(feature = "search")]
-            let review_search = Some(search_dispatch.clone() as Arc<dyn agent_core::SearchBackend>);
-            #[cfg(not(feature = "search"))]
-            let review_search: Option<Arc<dyn agent_core::SearchBackend>> = None;
-            #[cfg(feature = "forge")]
-            let review_forge = shared_forge.clone();
-            #[cfg(not(feature = "forge"))]
-            let review_forge: Option<Arc<dyn agent_core::Forge>> = None;
-            let m = metrics.clone();
-            // Root the collector at the same repo the RepoBackend uses (the git
-            // root of the process cwd), so the file set and the diff agree.
-            let review_root = crate::git::git_paths(&cfg)?.0;
-            let orch = agent_review::ReviewOrchestrator::new(
-                review_root,
-                repo_backend.clone(),
-                review_search,
-                review_forge,
-            )
-            .with_observer(Arc::new(move |ev| {
-                crate::metered::record_review_event(&m, ev)
-            }))
-            .with_deadline(std::time::Duration::from_secs(cfg.review.deadline_secs));
-            Some(Arc::new(orch) as Arc<dyn agent_core::ReviewCollector>)
-        } else {
-            None
+        match cfg.review.backend.as_str() {
+            "local" => {
+                #[cfg(feature = "search")]
+                let review_search =
+                    Some(search_dispatch.clone() as Arc<dyn agent_core::SearchBackend>);
+                #[cfg(not(feature = "search"))]
+                let review_search: Option<Arc<dyn agent_core::SearchBackend>> = None;
+                #[cfg(feature = "forge")]
+                let review_forge = shared_forge.clone();
+                #[cfg(not(feature = "forge"))]
+                let review_forge: Option<Arc<dyn agent_core::Forge>> = None;
+                let m = metrics.clone();
+                // Root the collector at the same repo the RepoBackend uses (the git
+                // root of the process cwd), so the file set and the diff agree.
+                let review_root = crate::git::git_paths(&cfg)?.0;
+                let orch = agent_review::ReviewOrchestrator::new(
+                    review_root,
+                    repo_backend.clone(),
+                    review_search,
+                    review_forge,
+                )
+                .with_observer(Arc::new(move |ev| {
+                    crate::metered::record_review_event(&m, ev)
+                }))
+                .with_deadline(std::time::Duration::from_secs(cfg.review.deadline_secs));
+                Some(Arc::new(orch) as Arc<dyn agent_core::ReviewCollector>)
+            }
+            // A remote fact-collection host (CPU-heavy, worth distributing).
+            #[cfg(feature = "grpc")]
+            "grpc" => {
+                let ep = crate::registry::grpc_client_endpoint(
+                    &cfg.grpc.review.endpoint,
+                    agent_grpc::constants::REVIEW,
+                );
+                Some(Arc::new(agent_grpc::client::GrpcReview::connect(&ep)?)
+                    as Arc<dyn agent_core::ReviewCollector>)
+            }
+            _ => None,
         };
     #[cfg(not(feature = "review"))]
     let review_collector_seam: Option<Arc<dyn agent_core::ReviewCollector>> = None;
