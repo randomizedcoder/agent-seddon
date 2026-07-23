@@ -26,14 +26,18 @@ followed).
 | 03 | Orchestrator + `ReviewFacts` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 | 04 | Repo / change / git-state | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 | 05 | Static analysis (Go + Rust) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
-| 06 | AST & call-graph | ✅ | ✅ | ✅ | ⬜ | ⬜ | ⬜ | — |
+| 06 | AST & call-graph | ✅ | ✅ | ✅ | 🟡 | 🟡 | ✅ | — |
 | 07 | Code-style fingerprint | ✅ | ✅ | ✅ | ⬜ | ⬜ | ⬜ | — |
 | 08 | Cheap-LLM summaries | ✅ | ✅ | ✅ | ⬜ | ⬜ | ⬜ | — |
 | 09 | Grounded context + recording | ✅ | ✅ | ✅ | ⬜ | n/a | ⬜ | — |
 | 10 | Wire contracts (consolidation) | ✅ | — | — | — | — | — | — |
 | 11 | Observability (consolidation) | ✅ | — | — | — | — | — | — |
 
-`⬜` not started · `🟡` in progress · `✅` merged · `n/a` telemetry-local / no service.
+`⬜` not started · `🟡` in progress / partial · `✅` merged · `n/a` telemetry-local / no service.
+
+Component 06 is **partial**: the deterministic **signature-diff subset** shipped
+(`SignatureCollector`, riding `ReviewFacts`/`FactCollectorService`); the full
+Go-helper **call-graph** + dedicated `AstService` remain the deferred target.
 
 ## Planned increments (build order)
 
@@ -62,6 +66,24 @@ are not separate increments — each increment lands its own slice of both.
 
 ## Change log
 
+- **2026-07-23** — **Signature-diff (increment 6, component 06 — cheap subset).**
+  A `SignatureCollector` joins the fan-out: for each changed Go/Rust file it reads
+  the **full base/head blobs** (`RepoBackend::read_file` per revision) and extracts
+  every top-level function **signature** with a `regex`-anchored scanner
+  (dependency-free — no tree-sitter). It diffs the sets → `SignatureChange{file,
+  lang,kind,name,before,after}` (`added`/`removed`/`modified`), Go methods keyed by
+  receiver so same-named methods don't conflate, multi-line signatures normalized to
+  one bounded line. Rendered as an **`API signature changes`** section (grouped by
+  file, `~`/`+`/`-`) before analysis + diffs. **Default-on** (`[review] signatures =
+  true`), pure in-process, deadline-bounded, fail-soft; untrusted content contained
+  (paths `confine`d, signatures `bound`ed, count capped). Wire: additive
+  `ReviewSignatureChange`/`ReviewSignatureReport` + `ReviewFacts` field 5 (rides
+  `FactCollectorService`, round-trip tested; no baseline bump). Metric
+  `agent_review_signature_changes_total{lang,kind}` via `ReviewEvent::Signatures`.
+  Gate: hermetic `review-signatures` check (two-commit Go history, modified + added
+  signature, offline, no toolchain) + `adversarial_` unit tests. **Deferred:** the
+  parsed AST / call-graph (blast radius) + `AstService` — the syntactic subset is
+  the 80/20. This finding was mapped live via `agent --review`.
 - **2026-07-23** — **Static-analysis findings (increment 5, component 05).** An
   `AnalyzerCollector` joins the fan-out: it recomputes the (cached) diff, maps the
   changed files to their owning Go packages / Rust crates, and runs the language's

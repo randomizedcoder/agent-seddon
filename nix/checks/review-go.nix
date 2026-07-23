@@ -39,6 +39,10 @@ pkgs.runCommand "agent-review-go"
     auto_index = false
     [review]
     backend = "local"
+    # This check is scoped to repo/change/git-state facts; the analyzer + signature
+    # collectors have their own dedicated checks (review-analyze, review-signatures).
+    analyze = false
+    signatures = false
     [pool]
     members = []
     TOML

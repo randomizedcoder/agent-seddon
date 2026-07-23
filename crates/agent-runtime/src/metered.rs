@@ -1913,6 +1913,9 @@ pub(crate) fn record_review_event(m: &Metrics, ev: agent_review::ReviewEvent) {
         } => {
             m.on_review_findings(&tool, &severity, in_change, count as u64);
         }
+        ReviewEvent::Signatures { lang, kind, count } => {
+            m.on_review_signatures(&lang, &kind, count as u64);
+        }
     }
 }
 

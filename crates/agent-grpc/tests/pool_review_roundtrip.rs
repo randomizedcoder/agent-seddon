@@ -150,6 +150,18 @@ impl ReviewCollector for FakeReview {
                     in_change: true,
                 }],
             },
+            signatures: agent_core::SignatureReport {
+                changes: vec![agent_core::SignatureChange {
+                    file: "main.go".into(),
+                    lang: "go".into(),
+                    kind: "modified".into(),
+                    name: "Run".into(),
+                    before: "func Run()".into(),
+                    after: "func Run(x int)".into(),
+                }],
+                files_scanned: 1,
+                truncated: false,
+            },
         })
     }
 }
@@ -215,6 +227,11 @@ async fn review_collect_roundtrips(#[case] transport: Transport) {
     assert_eq!(facts.analysis.findings.len(), 1);
     assert_eq!(facts.analysis.findings[0].rule, "errcheck");
     assert!(facts.analysis.findings[0].in_change);
+    // Signature-diff report survives the wire round-trip.
+    assert_eq!(facts.signatures.changes.len(), 1);
+    assert_eq!(facts.signatures.changes[0].kind, "modified");
+    assert_eq!(facts.signatures.changes[0].after, "func Run(x int)");
+    assert_eq!(facts.signatures.files_scanned, 1);
 }
 
 /// A PR target survives the encode/decode round-trip through the wire string.

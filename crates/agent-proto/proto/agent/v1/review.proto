@@ -130,9 +130,27 @@ message ReviewAnalysisReport {
   repeated ReviewAnalysisFinding findings = 3;
 }
 
+// One changed top-level function signature (the cheap AST subset). Tool-derived
+// and untrusted: `file` is repo-relative + confined, `before`/`after` bounded.
+message ReviewSignatureChange {
+  string file = 1;
+  string lang = 2;      // go | rust
+  string kind = 3;      // added | removed | modified
+  string name = 4;
+  string before = 5;    // "" for added
+  string after = 6;     // "" for removed
+}
+
+message ReviewSignatureReport {
+  repeated ReviewSignatureChange changes = 1;
+  uint32 files_scanned = 2;
+  bool truncated = 3;
+}
+
 message ReviewFacts {
   ReviewMeta meta = 1;
   ReviewChangeSet change = 2;
   ReviewGitState git_state = 3;
   ReviewAnalysisReport analysis = 4;
+  ReviewSignatureReport signatures = 5;
 }

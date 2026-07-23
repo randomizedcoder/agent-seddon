@@ -53,13 +53,18 @@ convention):
 can embed them; `ModeVerdict` (02) and `ReviewRecord` (09) live in `review.proto`
 too but are telemetry-local (no service).
 
-> **Shipped (increment 5).** Rather than a standalone `analyzer.proto` +
-> `AnalyzerService`, the static-analysis messages ship **inside `review.proto`** —
-> `ReviewAnalysisFinding`, `ReviewAnalyzerRun`, `ReviewAnalysisReport`, added as
-> `ReviewFacts` field 4 (additive; no baseline bump). They ride the existing
-> `FactCollectorService` (the analyzer is a `FactCollector`, not yet its own seam),
-> so no new `--serve-analyzer` endpoint exists yet. The dedicated `analyzer.proto`
-> service in the table below stays the deferred target. See [`05`](static-analysis.md).
+> **Shipped (increments 5–6).** Rather than standalone `analyzer.proto` /
+> `ast.proto` services, the analysis + signature messages ship **inside
+> `review.proto`** and ride the existing `FactCollectorService` (each collector is a
+> `FactCollector`, not yet its own seam), so no new `--serve-analyzer` / `--serve-ast`
+> endpoint exists yet:
+> - **05:** `ReviewAnalysisFinding`, `ReviewAnalyzerRun`, `ReviewAnalysisReport` →
+>   `ReviewFacts` field 4. See [`05`](static-analysis.md).
+> - **06 (signature-diff subset):** `ReviewSignatureChange`, `ReviewSignatureReport`
+>   → `ReviewFacts` field 5. The full call-graph `ast.proto`/`AstService` stays the
+>   deferred target. See [`06`](ast-callgraph.md).
+>
+> All additive (no baseline bump); round-trip tested through `FactCollectorService`.
 
 ### Services and endpoints
 

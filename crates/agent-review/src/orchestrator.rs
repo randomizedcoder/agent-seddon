@@ -4,6 +4,7 @@
 use crate::analyzer::AnalyzerCollector;
 use crate::collector::{CollectCtx, CollectorOutput, FactCollector, FactFragment};
 use crate::repo_facts::RepoChangeCollector;
+use crate::signatures::SignatureCollector;
 use crate::util::{safe_rev, safe_segment};
 use agent_core::{
     fnv1a_hex, CollectStatus, CollectorStatus, Error, Forge, GitState, RepoBackend, Result,
@@ -43,6 +44,12 @@ pub enum ReviewEvent {
         tool: String,
         severity: String,
         in_change: bool,
+        count: u32,
+    },
+    /// One `(lang, kind)` bucket of changed function signatures.
+    Signatures {
+        lang: String,
+        kind: String,
         count: u32,
     },
 }
@@ -110,6 +117,13 @@ impl ReviewOrchestrator {
         self.collectors.push(Box::new(AnalyzerCollector {
             timeout_secs: self.analyze_timeout_secs,
         }));
+        self
+    }
+
+    /// Enable the signature-diff collector (`[review] signatures = true`). Pure
+    /// in-process (reads blobs + a regex scan); bounded by the fan-out deadline.
+    pub fn with_signatures(mut self) -> Self {
+        self.collectors.push(Box::new(SignatureCollector));
         self
     }
 
@@ -251,6 +265,17 @@ impl ReviewCollector for ReviewOrchestrator {
                         });
                     }
                     facts.analysis = report;
+                }
+                Some(FactFragment::Signatures { report }) => {
+                    // Count changed signatures by (lang, kind) for the metric.
+                    let mut buckets: BTreeMap<(String, String), u32> = BTreeMap::new();
+                    for c in &report.changes {
+                        *buckets.entry((c.lang.clone(), c.kind.clone())).or_insert(0) += 1;
+                    }
+                    for ((lang, kind), count) in buckets {
+                        self.emit(ReviewEvent::Signatures { lang, kind, count });
+                    }
+                    facts.signatures = report;
                 }
                 None => {}
             }

@@ -60,4 +60,8 @@
   # assert `agent --review` surfaces the finding. Offline (no module download), so
   # it runs in the hermetic sandbox. clippy is covered live (dev shell + eval).
   review-analyze = import ./review-analyze.nix { inherit pkgs versions agent; };
+  # Signature-diff coverage: reconstruct a two-commit history where a Go function's
+  # signature changes + a new function appears, assert the `API signature changes`
+  # section renders. Pure in-process (regex over blobs) — no toolchain, offline.
+  review-signatures = import ./review-signatures.nix { inherit pkgs agent; };
 }

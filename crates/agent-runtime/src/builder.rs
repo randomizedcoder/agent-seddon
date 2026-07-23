@@ -661,6 +661,11 @@ pub async fn build_agent_with(
                     orch =
                         orch.with_analyzer(shared_sandbox.clone(), cfg.review.analyze_timeout_secs);
                 }
+                // Signature-diff (changed function signatures) runs by default —
+                // pure in-process, no external tool.
+                if cfg.review.signatures {
+                    orch = orch.with_signatures();
+                }
                 Some(Arc::new(orch) as Arc<dyn agent_core::ReviewCollector>)
             }
             // A remote fact-collection host (CPU-heavy, worth distributing).

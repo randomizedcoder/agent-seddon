@@ -86,6 +86,7 @@ pub struct Metrics {
     review_change_files: Histogram,
     review_gitstate: IntCounterVec,
     review_findings: IntCounterVec,
+    review_signatures: IntCounterVec,
     web_searches: IntCounterVec,
     web_search_seconds: HistogramVec,
     web_search_results: IntCounterVec,
@@ -368,6 +369,14 @@ impl Metrics {
                 "Static-analysis findings, by tool, severity and whether in the change",
             ),
             &["tool", "severity", "in_change"],
+        )
+        .unwrap();
+        let review_signatures = IntCounterVec::new(
+            Opts::new(
+                "agent_review_signature_changes_total",
+                "Changed function signatures, by language and kind (added/removed/modified)",
+            ),
+            &["lang", "kind"],
         )
         .unwrap();
         let web_searches = IntCounterVec::new(
@@ -776,6 +785,7 @@ impl Metrics {
             Box::new(review_change_files.clone()),
             Box::new(review_gitstate.clone()),
             Box::new(review_findings.clone()),
+            Box::new(review_signatures.clone()),
             Box::new(web_searches.clone()),
             Box::new(web_search_seconds.clone()),
             Box::new(web_search_results.clone()),
@@ -868,6 +878,7 @@ impl Metrics {
             review_change_files,
             review_gitstate,
             review_findings,
+            review_signatures,
             web_searches,
             web_search_seconds,
             web_search_results,
@@ -1058,6 +1069,13 @@ impl Metrics {
         let ic = if in_change { "true" } else { "false" };
         self.review_findings
             .with_label_values(&[tool, severity, ic])
+            .inc_by(count);
+    }
+    /// Review: a bucket of changed function signatures. `count` is a trusted
+    /// internal aggregate, so `inc_by` is safe.
+    pub fn on_review_signatures(&self, lang: &str, kind: &str, count: u64) {
+        self.review_signatures
+            .with_label_values(&[lang, kind])
             .inc_by(count);
     }
     /// One web search: outcome, latency, and result count (parity spec 12).

@@ -1,6 +1,47 @@
 # 06 — AST & call-graph
 
-Status: **design / pre-implementation.**
+Status: **partially implemented** — the **signature-diff subset** ships (increment
+6); the full Go-helper call-graph below is the deferred target. See
+**Implementation** below.
+
+## Implementation — signature-diff subset (increment 6)
+
+The dual-judge base rate ranked "which functions/APIs the change altered" as a top
+enrichment after the diff+commits+findings. The cheapest slice of the AST design
+delivers exactly that **without** a Go helper, a call graph, or a grammar
+dependency:
+
+- **`SignatureCollector`** (`agent-review/src/signatures.rs`), a `FactCollector` in
+  the fan-out. For each changed Go/Rust file it reads the **full base and head
+  blobs** (`RepoBackend::read_file` at each revision — not just the diff hunks) and
+  extracts every top-level function **signature** with a small `regex`-anchored
+  scanner (dependency-free, like the rest of `agent-review`).
+- It diffs the two signature sets per file → **`SignatureChange { file, lang, kind,
+  name, before, after }`**: `added` / `removed` / `modified` (before→after). Go
+  methods are keyed by receiver type so same-named methods don't conflate; Rust
+  `fn`s (incl. `pub`/`async`/`const`/`unsafe`) are matched by name. Multi-line
+  signatures are normalized to one bounded line.
+- Rendered as an **`API signature changes`** section (grouped by file, `~`/`+`/`-`)
+  *before* the analysis findings and the diffs.
+- **Default-on** (`[review] signatures = true`), pure in-process, deadline-bounded,
+  fail-soft (an unreadable/binary/oversized blob is skipped; a bad parse yields no
+  signatures, never a panic). Untrusted repo content is contained: paths `confine`d,
+  signatures `bound`ed, change count capped (`MAX_CHANGES`, drop-with-count).
+- **Wire:** additive `ReviewSignatureChange` / `ReviewSignatureReport` +
+  `ReviewFacts` field 5 (rides `FactCollectorService`, round-trip tested; no baseline
+  bump). **Metric:** `agent_review_signature_changes_total{lang,kind}` via
+  `ReviewEvent::Signatures`. **Gate:** hermetic `nix/checks/review-signatures.nix`
+  (a two-commit Go history with a modified + an added signature, offline, no
+  toolchain) + unit tests incl. `adversarial_` (hostile-length signature bounded,
+  garbage input never panics).
+
+**What it is not (deferred, the design below):** it is *syntactic*, not a parsed
+AST — no **call graph** (who-calls-whom / blast radius), no `PackageShape`, no
+receiver/impl-type for Rust methods, no cross-file resolution. Those need the Go
+helper + `syn`/`rust-analyzer` behind a real `AstBackend` seam and `AstService`,
+described next. The signature subset is the deterministic, dependency-free 80/20.
+
+---
 
 Go ships first-class AST and call-graph tooling in its standard library and
 `golang.org/x/tools`. Extracting the **structure** — packages, types, functions,

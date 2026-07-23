@@ -3611,6 +3611,37 @@ pub struct AnalysisReport {
     pub findings: Vec<AnalysisFinding>,
 }
 
+/// One changed top-level function signature — the deterministic structural fact of
+/// *which API a change altered* (increment 6, the cheap subset of the AST/call-graph
+/// design). Derived from the base/head blobs, not the model. `file` is confined and
+/// `before`/`after` are bounded, one-line-normalized signatures.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SignatureChange {
+    /// Repo-relative path (confined) — the head path, or the base path for a delete.
+    pub file: String,
+    /// `go` | `rust`.
+    pub lang: String,
+    /// `added` | `removed` | `modified`.
+    pub kind: String,
+    /// Best-effort function name (empty if it couldn't be extracted).
+    pub name: String,
+    /// Signature at base (`""` for an added function).
+    pub before: String,
+    /// Signature at head (`""` for a removed function).
+    pub after: String,
+}
+
+/// The signature-diff contribution to a review: the changed function signatures
+/// (capped), plus how many files were scanned. Empty when signature extraction is
+/// off or no source file changed.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SignatureReport {
+    pub changes: Vec<SignatureChange>,
+    pub files_scanned: u32,
+    /// The change list hit the cap and was truncated (drop-with-count honesty).
+    pub truncated: bool,
+}
+
 /// The grounded fact bundle a reviewer reasons over. Everything here is a hard
 /// fact from a tool. Later increments add call-graph / style / summaries as
 /// additional fields.
@@ -3622,6 +3653,9 @@ pub struct ReviewFacts {
     /// Static-analysis findings (increment 5). Empty when analysis is off/skipped.
     #[serde(default)]
     pub analysis: AnalysisReport,
+    /// Changed function signatures (increment 6). Empty when off/no source changed.
+    #[serde(default)]
+    pub signatures: SignatureReport,
 }
 
 /// Runs a fan-out of deterministic collectors into a grounded [`ReviewFacts`].

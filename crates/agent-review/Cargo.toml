@@ -14,6 +14,8 @@ tracing.workspace = true
 tokio = { workspace = true }
 # Parse the linters' JSON output (analyzer collector). Defensive Value parsing.
 serde_json.workspace = true
+# Anchor the function-signature scanner (signature-diff collector). No grammar dep.
+regex.workspace = true
 
 [dev-dependencies]
 # The concrete git backend, for collector tests against a real temp repo.
