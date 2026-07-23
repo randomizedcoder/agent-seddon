@@ -190,6 +190,19 @@ async fn main() -> Result<()> {
             }
             Ok(None)
         }
+        Mode::Review(target) => match agent.review_collector() {
+            Some(collector) => {
+                let facts = collector
+                    .collect(&target)
+                    .await
+                    .context("collecting grounded review facts")?;
+                println!("{}", agent_review::render_facts(&facts));
+                Ok(None)
+            }
+            None => anyhow::bail!(
+                "the review flow is not enabled — set `[review] backend = \"local\"` in the config"
+            ),
+        },
         Mode::ServeMcp => mcp_server::serve(&agent).await.map(|()| None),
         Mode::ServeGrpc(..) => {
             let (seam, listen) = serve_grpc.expect("serve target resolved above");
@@ -309,6 +322,26 @@ enum Mode {
     ServeGrpcAll(Option<String>),
     /// Drive the scheduler: tick on an interval, firing due jobs (parity spec 28).
     Scheduler,
+    /// Collect grounded review facts for a target and print them
+    /// (`agent --review <PR#|branch|.>`). See docs/design/code-review/.
+    Review(agent_core::ReviewTarget),
+}
+
+/// Parse a `--review` target: all-digits ⇒ a PR number; `.`/`worktree`/`HEAD` ⇒
+/// the working tree (current branch vs default); otherwise a branch name.
+fn parse_review_target(s: &str) -> agent_core::ReviewTarget {
+    let t = s.trim();
+    if t.is_empty()
+        || t == "."
+        || t.eq_ignore_ascii_case("worktree")
+        || t.eq_ignore_ascii_case("head")
+    {
+        agent_core::ReviewTarget::WorkingTree
+    } else if let Ok(n) = t.parse::<u64>() {
+        agent_core::ReviewTarget::Pr(n)
+    } else {
+        agent_core::ReviewTarget::Branch(t.to_string())
+    }
 }
 
 enum ResumeArg {
@@ -330,6 +363,7 @@ fn parse_args() -> Result<Args> {
     let mut serve_grpc: Option<grpc_server::Seam> = None;
     let mut serve_grpc_all = false;
     let mut listen: Option<String> = None;
+    let mut review_target: Option<String> = None;
     let mut goal_parts: Vec<String> = Vec::new();
 
     let mut args = std::env::args().skip(1);
@@ -348,6 +382,12 @@ fn parse_args() -> Result<Args> {
             "--scheduler" => scheduler_mode = true,
             "--serve-mcp" => serve_mcp = true,
             "--serve-all" => serve_grpc_all = true,
+            "--review" => {
+                review_target = Some(
+                    args.next()
+                        .context("--review requires a target (a PR#, a branch, or `.`)")?,
+                );
+            }
             "--listen" => {
                 listen = Some(args.next().context("--listen requires an address")?);
             }
@@ -362,6 +402,7 @@ fn parse_args() -> Result<Args> {
                      --continue          resume the most recent saved session\n  \
                      --resume ID         resume a specific session\n  \
                      --scheduler         drive scheduled jobs (ticks until interrupted)\n  \
+                     --review TARGET     collect + print grounded review facts (TARGET = PR#, branch, or `.`)\n  \
                      --serve-mcp         run as an MCP server over stdio (exposes a `run` tool)\n  \
                      --serve-<seam>      host one seam over gRPC; <seam> = {seams}\n  \
                      --serve-all         host every enabled seam over gRPC from one process\n  \
@@ -383,6 +424,8 @@ fn parse_args() -> Result<Args> {
         Mode::ServeGrpc(seam, listen)
     } else if serve_mcp {
         Mode::ServeMcp
+    } else if let Some(t) = review_target {
+        Mode::Review(parse_review_target(&t))
     } else if goal.trim().is_empty() {
         Mode::Repl
     } else {

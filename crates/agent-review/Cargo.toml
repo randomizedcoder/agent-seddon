@@ -1,0 +1,21 @@
+[package]
+name = "agent-review"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+agent-core.workspace = true
+# For the index-free repo file set (`Manifest::scan`). Not feature-gated.
+agent-search.workspace = true
+async-trait.workspace = true
+futures-util.workspace = true
+tracing.workspace = true
+tokio = { workspace = true }
+
+[dev-dependencies]
+# The concrete git backend, for collector tests against a real temp repo.
+agent-git = { workspace = true, features = ["git-cli"] }
+agent-testkit.workspace = true
+rstest.workspace = true
+tokio = { workspace = true }

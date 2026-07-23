@@ -11,6 +11,8 @@ path = "src/main.rs"
 [dependencies]
 agent-core.workspace = true
 agent-runtime.workspace = true
+# Grounded-fact rendering for `agent --review` (docs/design/code-review/).
+agent-review.workspace = true
 agent-grpc.workspace = true
 agent-telemetry.workspace = true
 tokio.workspace = true

@@ -977,6 +977,10 @@ impl RepoBackend for MeteredRepo {
             .await;
         self.record("branches", start, out)
     }
+    async fn remote_url(&self) -> Result<Option<String>> {
+        // Delegate the default method so it is not swallowed by the decorator.
+        self.inner.remote_url().await
+    }
     async fn status(&self) -> Result<RepoStatus> {
         let start = Instant::now();
         let out = self.inner.status().instrument(self.span("status")).await;
@@ -1824,6 +1828,74 @@ pub(crate) fn record_route_event(m: &Metrics, ev: agent_providers::RouteEvent<'_
         RouteEvent::Exhausted => {
             tracing::warn!("router exhausted every candidate");
             m.on_route_decision("-", "exhausted");
+        }
+    }
+}
+
+/// Turn a typed `PoolEvent` into pool metrics (same inversion-avoiding pattern as
+/// the router — `agent-providers` stays off `agent-metrics`).
+#[cfg(feature = "provider-pool")]
+pub(crate) fn record_pool_event(m: &Metrics, ev: agent_providers::PoolEvent) {
+    use agent_providers::PoolEvent;
+    match ev {
+        PoolEvent::Dispatch {
+            mode,
+            tier,
+            requested,
+            alive,
+        } => {
+            tracing::debug!(
+                mode,
+                tier = tier.as_str(),
+                requested,
+                alive,
+                "pool dispatch"
+            );
+            m.set_pool_members_alive(tier.as_str(), alive as i64);
+        }
+        PoolEvent::MemberCall {
+            member,
+            ok,
+            duration_ms,
+        } => {
+            m.on_pool_member_call(&member, if ok { "ok" } else { "error" });
+            m.on_pool_dispatch("member", duration_ms as f64 / 1000.0);
+        }
+        PoolEvent::Probe {
+            member,
+            alive,
+            duration_ms,
+        } => {
+            let outcome = if alive { "live" } else { "dead" };
+            m.on_pool_probe(&member, outcome, duration_ms as f64 / 1000.0);
+        }
+    }
+}
+
+/// Turn a typed `ReviewEvent` into review metrics.
+#[cfg(feature = "review")]
+pub(crate) fn record_review_event(m: &Metrics, ev: agent_review::ReviewEvent) {
+    use agent_review::ReviewEvent;
+    match ev {
+        ReviewEvent::Collect { total_ms } => {
+            m.on_review_collect(total_ms as f64 / 1000.0);
+        }
+        ReviewEvent::Collector {
+            collector,
+            status,
+            duration_ms,
+        } => {
+            m.on_review_collector(&collector, status.as_str(), duration_ms as f64 / 1000.0);
+        }
+        ReviewEvent::ChangeFiles { n } => {
+            m.on_review_change_files(n as u64);
+        }
+        ReviewEvent::GitState {
+            relationship,
+            host,
+            project,
+        } => {
+            m.on_review_gitstate(relationship, host, project);
         }
     }
 }

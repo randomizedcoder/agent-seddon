@@ -7,6 +7,9 @@ license.workspace = true
 [features]
 # Router: composes N providers behind the LlmProvider trait (parity spec 25).
 provider-router = []
+# Pool: a health-checked, tiered pool with parallel fan-out. Reuses the router's
+# circuit breaker, so it implies `provider-router`.
+provider-pool = ["provider-router"]
 default = ["provider-openai-compat"]
 # OpenAI-compatible /chat/completions (covers GLM, OpenAI, vLLM, Ollama, …).
 provider-openai-compat = []

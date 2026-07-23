@@ -43,6 +43,9 @@ pub struct Settings {
     /// Always-injected user context (context.d/prepend and /append).
     pub context_prepend: Vec<ContextBlock>,
     pub context_append: Vec<ContextBlock>,
+    /// Auto-detect a code-review task mid-conversation and inject grounded facts
+    /// (docs/design/code-review/). Off unless `[review] in_loop = true`.
+    pub review_in_loop: bool,
 }
 
 pub struct Agent {
@@ -60,6 +63,15 @@ pub struct Agent {
     /// The git backend, if the `git` seam is wired. Held so it can be hosted over
     /// gRPC (`agent --serve-git`); the loop reaches it through the `git_*` tools.
     repo: Option<Arc<dyn agent_core::RepoBackend>>,
+    /// The health-checked LLM pool, if `[pool] members` is configured. Used by the
+    /// review classifier's vote and hosted over gRPC (`agent --serve-llm-pool`).
+    llm_pool: Option<Arc<dyn agent_core::LlmPool>>,
+    /// The task-mode classifier, if the `review` seam is wired. Detects a review
+    /// task for the in-loop hand-off.
+    task_classifier: Option<Arc<dyn agent_core::TaskClassifier>>,
+    /// The review fact collector, if the `review` seam is wired. Produces the
+    /// grounded `ReviewFacts`; hosted over gRPC (`agent --serve-fact-collector`).
+    review_collector: Option<Arc<dyn agent_core::ReviewCollector>>,
     /// The composed content scanner, if the `scanner` seam is wired. Held so it
     /// can be hosted over gRPC (`agent --serve-scanner`); the loop reaches it
     /// through the policy guard and the `skill_write` / `session_export` tools.
@@ -159,6 +171,9 @@ impl Agent {
             settings,
             search: None,
             repo: None,
+            llm_pool: None,
+            task_classifier: None,
+            review_collector: None,
             scanner: None,
             verifier: None,
             verifier_enforce: false,
@@ -379,6 +394,24 @@ impl Agent {
         self
     }
 
+    /// Attach the health-checked LLM pool.
+    pub fn with_llm_pool(mut self, pool: Arc<dyn agent_core::LlmPool>) -> Self {
+        self.llm_pool = Some(pool);
+        self
+    }
+
+    /// Attach the task-mode classifier.
+    pub fn with_task_classifier(mut self, c: Arc<dyn agent_core::TaskClassifier>) -> Self {
+        self.task_classifier = Some(c);
+        self
+    }
+
+    /// Attach the review fact collector.
+    pub fn with_review_collector(mut self, r: Arc<dyn agent_core::ReviewCollector>) -> Self {
+        self.review_collector = Some(r);
+        self
+    }
+
     /// Run a single goal to completion (one-shot): open a session and send it.
     pub async fn run(&self, goal: &str) -> anyhow::Result<String> {
         self.session().send(goal).await
@@ -550,6 +583,53 @@ impl Agent {
 
     pub fn repo(&self) -> Option<Arc<dyn agent_core::RepoBackend>> {
         self.repo.clone()
+    }
+
+    pub fn llm_pool(&self) -> Option<Arc<dyn agent_core::LlmPool>> {
+        self.llm_pool.clone()
+    }
+
+    pub fn task_classifier(&self) -> Option<Arc<dyn agent_core::TaskClassifier>> {
+        self.task_classifier.clone()
+    }
+
+    pub fn review_collector(&self) -> Option<Arc<dyn agent_core::ReviewCollector>> {
+        self.review_collector.clone()
+    }
+
+    /// The in-loop review hand-off: classify the prompt and, if it is a review
+    /// with enough confidence, collect grounded facts for the working tree and
+    /// return them rendered as a context block. `None` when it is not a review,
+    /// the seams are not wired, or collection fails (best-effort).
+    #[cfg(feature = "review")]
+    async fn review_handoff(&self, input: &str) -> Option<String> {
+        let classifier = self.task_classifier.as_ref()?;
+        let collector = self.review_collector.as_ref()?;
+        let verdict = classifier
+            .classify(&agent_core::ClassifyCtx {
+                prompt: input,
+                history: &[],
+            })
+            .await;
+        if verdict.mode != agent_core::TaskMode::Review || verdict.confidence < 0.6 {
+            return None;
+        }
+        match collector
+            .collect(&agent_core::ReviewTarget::WorkingTree)
+            .await
+        {
+            Ok(facts) => {
+                tracing::info!(
+                    confidence = verdict.confidence,
+                    "entering review mode: injecting grounded facts"
+                );
+                Some(agent_review::render_facts(&facts))
+            }
+            Err(e) => {
+                tracing::warn!("review fact collection failed: {e}");
+                None
+            }
+        }
     }
 
     /// Best-effort removal of this session's disposable worktrees, so an aborted or
@@ -1203,6 +1283,14 @@ impl Session<'_> {
         let expanded: Vec<ContextBlock> = Vec::new();
 
         if !self.started {
+            // In-loop review hand-off: if this looks like a review task, collect
+            // grounded facts once and queue them as context (docs/design/code-review/).
+            #[cfg(feature = "review")]
+            if self.agent.settings.review_in_loop {
+                if let Some(block) = self.agent.review_handoff(input).await {
+                    self.pending_context.push(block);
+                }
+            }
             // First turn: recall relevant memory and assemble the initial context.
             let recall_span = tracing::info_span!("memory.recall", items = tracing::field::Empty);
             let recalled = async {
@@ -1432,6 +1520,7 @@ mod tests {
             session_id: String::new(),
             context_prepend: vec![],
             context_append: vec![],
+            review_in_loop: false,
         }
     }
 

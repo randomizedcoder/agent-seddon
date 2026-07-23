@@ -179,6 +179,7 @@ mod tests {
             session_id: String::new(),
             context_prepend: vec![],
             context_append: vec![],
+            review_in_loop: false,
         }
     }
 

@@ -36,6 +36,8 @@ default = [
     "cache",
     "web-search",
     "provider-router",
+    "provider-pool",
+    "review",
     "session-export",
     "skill-write",
     "forge",
@@ -48,6 +50,12 @@ provider-openai-compat = ["agent-providers/provider-openai-compat"]
 provider-anthropic = ["agent-providers/provider-anthropic"]
 # Router: composes N providers behind the LlmProvider trait. See parity spec 25.
 provider-router = ["agent-providers/provider-router"]
+# LlmPool: a health-checked, tiered pool with parallel fan-out (implies router).
+# See docs/design/code-review/llm-pool.md.
+provider-pool = ["provider-router", "agent-providers/provider-pool"]
+# Code review flow: the TaskClassifier + ReviewCollector seams. Needs `git` for
+# the RepoBackend the collector reads. See docs/design/code-review/.
+review = ["dep:agent-review", "git"]
 tool-core = ["agent-tools/tool-core"]
 tool-edit = ["agent-tools/tool-edit"]
 tool-patch = ["agent-tools/tool-patch"]
@@ -161,6 +169,7 @@ agent-verifier = { workspace = true, optional = true }
 agent-cache = { workspace = true, optional = true }
 agent-web-search = { workspace = true, optional = true }
 agent-forge = { workspace = true, optional = true }
+agent-review = { workspace = true, optional = true }
 agent-scheduler = { workspace = true, optional = true }
 agent-pty = { workspace = true, optional = true }
 agent-validate = { workspace = true, optional = true }

@@ -59,21 +59,21 @@ impl RoutePolicy {
 
 /// Per-candidate health. A candidate that fails repeatedly is skipped until a
 /// cooldown elapses, so a dead provider costs one timeout rather than one per
-/// turn forever.
-struct Health {
+/// turn forever. `pub(crate)` so `LlmPool` reuses the exact same breaker.
+pub(crate) struct Health {
     consecutive_failures: AtomicUsize,
     /// When the breaker opened (clock ms); `0` ⇒ closed.
     opened_ms: AtomicU64,
 }
 
 impl Health {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             consecutive_failures: AtomicUsize::new(0),
             opened_ms: AtomicU64::new(0),
         }
     }
-    fn is_open(&self, now_ms: u64, cooldown_ms: u64) -> bool {
+    pub(crate) fn is_open(&self, now_ms: u64, cooldown_ms: u64) -> bool {
         let opened = self.opened_ms.load(Ordering::SeqCst);
         if opened == 0 {
             return false;
@@ -86,17 +86,34 @@ impl Health {
         }
         true
     }
-    fn record_success(&self) {
+    /// Consecutive failures currently recorded (for a health snapshot).
+    pub(crate) fn failures(&self) -> usize {
+        self.consecutive_failures.load(Ordering::SeqCst)
+    }
+    pub(crate) fn record_success(&self) {
         self.consecutive_failures.store(0, Ordering::SeqCst);
         self.opened_ms.store(0, Ordering::SeqCst);
     }
-    fn record_failure(&self, now_ms: u64, threshold: usize) {
+    pub(crate) fn record_failure(&self, now_ms: u64, threshold: usize) {
         let n = self.consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1;
         if n >= threshold {
             // `now_ms == 0` would read as "closed"; 1 is the earliest open stamp.
             self.opened_ms.store(now_ms.max(1), Ordering::SeqCst);
         }
     }
+}
+
+/// Can a candidate serve the request at all? Shared by `Router` and `LlmPool` —
+/// failing over/out to a candidate that structurally cannot answer just produces
+/// a different error.
+pub(crate) fn is_capable(caps: &ModelCapabilities, req: &CompletionRequest) -> bool {
+    if !req.tools.is_empty() && !caps.supports_tools {
+        return false;
+    }
+    if req.messages.iter().any(|m| m.has_media()) && !caps.supports_vision {
+        return false;
+    }
+    true
 }
 
 /// One candidate: its config name and the (already metered) provider.
@@ -137,7 +154,7 @@ pub struct Router {
     observer: Option<RouteObserver>,
 }
 
-fn wall_clock_ms() -> u64 {
+pub(crate) fn wall_clock_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -187,18 +204,6 @@ impl Router {
         }
     }
 
-    /// Can this candidate serve the request at all? Failing over to a candidate
-    /// that structurally cannot answer just produces a different error.
-    fn is_capable(caps: &ModelCapabilities, req: &CompletionRequest) -> bool {
-        if !req.tools.is_empty() && !caps.supports_tools {
-            return false;
-        }
-        if req.messages.iter().any(|m| m.has_media()) && !caps.supports_vision {
-            return false;
-        }
-        true
-    }
-
     /// Candidate indices to try, in order: capable ones first in policy order,
     /// with open breakers skipped. Unhealthy candidates are appended last rather
     /// than dropped, so a total outage still attempts *something* instead of
@@ -215,7 +220,7 @@ impl Router {
         let mut unhealthy = Vec::new();
         for k in 0..n {
             let i = (start + k) % n;
-            if !Self::is_capable(&self.candidates[i].provider.capabilities(), req) {
+            if !is_capable(&self.candidates[i].provider.capabilities(), req) {
                 continue;
             }
             if self.health[i].is_open(now, self.cooldown_ms) {

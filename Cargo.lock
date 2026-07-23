@@ -34,6 +34,7 @@ dependencies = [
  "agent-core",
  "agent-grpc",
  "agent-mcp",
+ "agent-review",
  "agent-runtime",
  "agent-telemetry",
  "anyhow",
@@ -289,6 +290,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-review"
+version = "0.1.0"
+dependencies = [
+ "agent-core",
+ "agent-git",
+ "agent-search",
+ "agent-testkit",
+ "async-trait",
+ "futures-util",
+ "rstest",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "agent-runtime"
 version = "0.1.0"
 dependencies = [
@@ -306,6 +322,7 @@ dependencies = [
  "agent-providers",
  "agent-pty",
  "agent-reference",
+ "agent-review",
  "agent-sandbox",
  "agent-scanner",
  "agent-scheduler",
