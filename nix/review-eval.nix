@@ -168,8 +168,10 @@ pkgs.writeShellApplication {
       rubric='You are grading an auto-generated, tool-derived "grounded review context" for a code change. It is meant to prepare a reviewer with FACTS (no hallucination). Score 1-5 on: (a) groundedness/accuracy, (b) review-readiness/completeness, (c) signal-to-noise. Then list concrete GAPS a reviewer still needs. Reply as compact JSON: {"groundedness":N,"readiness":N,"signal":N,"gaps":["..."]}.'
       for ctx in "$out"/*.txt; do
         [ -e "$ctx" ] || continue
+        # A reasoning model (GLM) spends output on reasoning_content before the
+        # answer, so give it real headroom or `content` comes back empty.
         body="$(jq -n --arg m "$model" --arg r "$rubric" --rawfile c "$ctx" \
-          '{model:$m,temperature:0,max_tokens:4096,messages:[{role:"user",content:($r+"\n\n---\n"+$c)}]}')"
+          '{model:$m,temperature:0,max_tokens:16384,messages:[{role:"user",content:($r+"\n\n---\n"+$c)}]}')"
         resp="$(curl -s $ins -m 600 -H "Authorization: Bearer $key" -H "Content-Type: application/json" \
           -d "$body" "$base_url/chat/completions" || true)"
         echo "$resp" | jq -r '.choices[0].message.content // "no content"' > "$out/judge-$(basename "$ctx" .txt).txt"
