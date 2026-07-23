@@ -105,6 +105,7 @@ feature's implementation phase, distinct from the shipped `components/` docs.
 | Doc | About |
 |---|---|
 | [`tool-call-verification.md`](design/tool-call-verification.md) | A measured, multi-model gate that inspects a tool call before it runs (Allow / Revise / Deny), records every verdict to ClickHouse, and learns which verifier to trust per task type |
+| [`code-review/`](design/code-review/README.md) | The **Code Review Flow**: detect a review task, then a parallel fan-out of mostly-deterministic collectors (file set, diff, Go static analysis, AST/call-graph, style, git state) builds a *grounded* fact-bundle a model can't hallucinate over — driven by a health-checked pool of cheap LLMs, deeply instrumented for duration + parallel-optimization accounting. A 12-doc set with a status table |
 
 ## The parity program
 
