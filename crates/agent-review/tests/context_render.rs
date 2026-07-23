@@ -44,6 +44,7 @@ fn facts(files: Vec<ChangedFile>, commits: Vec<ReviewCommit>) -> ReviewFacts {
             project: RepoLanguage::Rust,
         },
         analysis: Default::default(),
+        signatures: Default::default(),
     }
 }
 

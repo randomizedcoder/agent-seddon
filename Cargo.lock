@@ -299,6 +299,7 @@ dependencies = [
  "agent-testkit",
  "async-trait",
  "futures-util",
+ "regex",
  "rstest",
  "serde_json",
  "tokio",

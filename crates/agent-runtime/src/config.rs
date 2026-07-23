@@ -338,6 +338,10 @@ pub struct ReviewCfg {
     /// Per-tool timeout for the analyzer (seconds). Bounds a cold/slow linter run.
     #[serde(default = "default_analyze_timeout")]
     pub analyze_timeout_secs: u64,
+    /// Run the signature-diff collector (changed function signatures). On by default
+    /// — pure in-process (blob reads + a regex scan), deadline-bounded.
+    #[serde(default = "default_true")]
+    pub signatures: bool,
 }
 
 impl Default for ReviewCfg {
@@ -350,6 +354,7 @@ impl Default for ReviewCfg {
             context_budget_bytes: default_review_budget(),
             analyze: true,
             analyze_timeout_secs: default_analyze_timeout(),
+            signatures: true,
         }
     }
 }

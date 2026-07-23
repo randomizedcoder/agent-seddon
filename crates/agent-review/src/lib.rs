@@ -11,6 +11,7 @@ mod classifier;
 mod collector;
 mod orchestrator;
 mod repo_facts;
+mod signatures;
 mod util;
 
 pub use classifier::HybridClassifier;
@@ -102,6 +103,10 @@ pub fn render_facts_with(facts: &ReviewFacts, budget_bytes: usize) -> String {
         ));
     }
 
+    // Changed function signatures — the structural "what APIs moved" fact, read
+    // before the findings and the raw hunks.
+    render_signatures(&mut out, &facts.signatures);
+
     // Static-analysis findings — higher-signal than raw hunks, so rendered *before*
     // the diffs. Per-tool run summary, then findings with changed-file hits first.
     render_analysis(&mut out, &facts.analysis);
@@ -127,6 +132,35 @@ pub fn render_facts_with(facts: &ReviewFacts, budget_bytes: usize) -> String {
         }
     }
     out
+}
+
+/// Render the changed-signature section, grouped by file: `~` modified (before →
+/// after), `+` added, `-` removed. Nothing is emitted if extraction found nothing.
+fn render_signatures(out: &mut String, report: &agent_core::SignatureReport) {
+    if report.changes.is_empty() {
+        return;
+    }
+    out.push_str(&format!(
+        "\nAPI signature changes ({}):\n",
+        report.changes.len()
+    ));
+    let mut last_file = "";
+    for c in &report.changes {
+        if c.file != last_file {
+            out.push_str(&format!("  {}\n", c.file));
+            last_file = &c.file;
+        }
+        match c.kind.as_str() {
+            "modified" => {
+                out.push_str(&format!("    ~ {}  {}  →  {}\n", c.name, c.before, c.after))
+            }
+            "added" => out.push_str(&format!("    + {}  {}\n", c.name, c.after)),
+            _ => out.push_str(&format!("    - {}  {}\n", c.name, c.before)),
+        }
+    }
+    if report.truncated {
+        out.push_str("    … more signature changes omitted (cap reached)\n");
+    }
 }
 
 /// The most findings rendered verbatim; the rest are summarized as a count.

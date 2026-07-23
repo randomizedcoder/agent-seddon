@@ -2738,6 +2738,50 @@ impl From<pb::ReviewAnalysisReport> for agent_core::AnalysisReport {
     }
 }
 
+impl From<agent_core::SignatureChange> for pb::ReviewSignatureChange {
+    fn from(c: agent_core::SignatureChange) -> Self {
+        pb::ReviewSignatureChange {
+            file: c.file,
+            lang: c.lang,
+            kind: c.kind,
+            name: c.name,
+            before: c.before,
+            after: c.after,
+        }
+    }
+}
+impl From<pb::ReviewSignatureChange> for agent_core::SignatureChange {
+    fn from(c: pb::ReviewSignatureChange) -> Self {
+        agent_core::SignatureChange {
+            file: c.file,
+            lang: c.lang,
+            kind: c.kind,
+            name: c.name,
+            before: c.before,
+            after: c.after,
+        }
+    }
+}
+
+impl From<agent_core::SignatureReport> for pb::ReviewSignatureReport {
+    fn from(r: agent_core::SignatureReport) -> Self {
+        pb::ReviewSignatureReport {
+            changes: r.changes.into_iter().map(Into::into).collect(),
+            files_scanned: r.files_scanned,
+            truncated: r.truncated,
+        }
+    }
+}
+impl From<pb::ReviewSignatureReport> for agent_core::SignatureReport {
+    fn from(r: pb::ReviewSignatureReport) -> Self {
+        agent_core::SignatureReport {
+            changes: r.changes.into_iter().map(Into::into).collect(),
+            files_scanned: r.files_scanned,
+            truncated: r.truncated,
+        }
+    }
+}
+
 impl From<agent_core::ReviewFacts> for pb::ReviewFacts {
     fn from(f: agent_core::ReviewFacts) -> Self {
         pb::ReviewFacts {
@@ -2745,6 +2789,7 @@ impl From<agent_core::ReviewFacts> for pb::ReviewFacts {
             change: Some(f.change.into()),
             git_state: Some(f.git_state.into()),
             analysis: Some(f.analysis.into()),
+            signatures: Some(f.signatures.into()),
         }
     }
 }
@@ -2755,6 +2800,7 @@ impl From<pb::ReviewFacts> for agent_core::ReviewFacts {
             change: f.change.map(Into::into).unwrap_or_default(),
             git_state: f.git_state.map(Into::into).unwrap_or_default(),
             analysis: f.analysis.map(Into::into).unwrap_or_default(),
+            signatures: f.signatures.map(Into::into).unwrap_or_default(),
         }
     }
 }
