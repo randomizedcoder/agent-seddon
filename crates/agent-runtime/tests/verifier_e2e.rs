@@ -1,12 +1,12 @@
-//! End-to-end tests for the `Verifier` seam wired into the real loop, in SHADOW
-//! mode (increment 1): the verifier evaluates each allowed tool call and its
-//! verdict is observed, but it does NOT change the loop's behaviour yet.
+//! End-to-end tests for the `Verifier` seam wired into the real loop, driving the
+//! production path (`build_agent_with` → registry → loop) with a scripted model.
 //!
-//! These drive the production path (`build_agent_with` → registry → loop) with a
-//! scripted model, and prove three things: the seam is invoked for the calls that
-//! would run, shadow does not block (even on a Deny/Revise), and a denied call is
-//! never verified. The `SchemaVerifier`'s own logic is unit-tested in
-//! `agent-verifier`; here we prove the wiring.
+//! Covers both modes. **Shadow** (default): the seam is invoked for the calls that
+//! would run, a Revise/Deny does NOT block, and a policy-denied call is never
+//! verified. **Enforce**: a Revise blocks the call and the model can retry a
+//! corrected one, a Deny blocks outright, an Allow is transparent, and the real
+//! `schema` backend blocks a malformed call. The `SchemaVerifier`'s own logic is
+//! unit-tested in `agent-verifier`; here we prove the wiring and the mode contract.
 
 use agent_core::{
     CompletionResponse, LlmProvider, ToolCall, Verifier, VerifierReport, VerifyCtx, VerifyVerdict,
@@ -43,6 +43,10 @@ impl Verifier for RecordingVerifier {
 }
 
 fn config_toml(dir: &Path, verifier_backend: &str) -> String {
+    config_toml_mode(dir, verifier_backend, "shadow")
+}
+
+fn config_toml_mode(dir: &Path, verifier_backend: &str, mode: &str) -> String {
     let d = dir.display();
     format!(
         r#"
@@ -72,6 +76,7 @@ fn config_toml(dir: &Path, verifier_backend: &str) -> String {
 
         [verifier]
         backend = "{verifier_backend}"
+        mode = "{mode}"
     "#
     )
 }
@@ -91,7 +96,16 @@ async fn agent_with_recording_verifier(
     verdict: VerifyVerdict,
     script: Vec<CompletionResponse>,
 ) -> (agent_runtime::Agent, Arc<AtomicUsize>) {
-    let cfg = parse_config(&config_toml(dir, "recording")).expect("parse config");
+    agent_with_recording_verifier_mode(dir, verdict, "shadow", script).await
+}
+
+async fn agent_with_recording_verifier_mode(
+    dir: &Path,
+    verdict: VerifyVerdict,
+    mode: &str,
+    script: Vec<CompletionResponse>,
+) -> (agent_runtime::Agent, Arc<AtomicUsize>) {
+    let cfg = parse_config(&config_toml_mode(dir, "recording", mode)).expect("parse config");
     let mut registry = Registry::new();
     register_builtins(&mut registry);
 
@@ -296,5 +310,170 @@ async fn positive_schema_backend_wires_up_in_shadow() {
     assert!(
         answer.contains("handled"),
         "loop terminated normally: {answer}"
+    );
+}
+
+// --- enforce mode -----------------------------------------------------------
+
+/// **Enforce.** A `Revise` verdict blocks the call (the tool does NOT run) and
+/// the model can reissue a corrected call, which then executes.
+#[tokio::test]
+async fn positive_enforce_revise_blocks_then_model_retries() {
+    let dir = tempdir();
+    let seen = Arc::new(AtomicUsize::new(0));
+    let cfg = parse_config(&config_toml_mode(&dir, "recording", "enforce")).expect("parse");
+    let mut registry = Registry::new();
+    register_builtins(&mut registry);
+    // First the model makes a "bad" call (the verifier will Revise it, blocking
+    // it); then it reissues a good call which runs; then it answers.
+    let script = std::sync::Mutex::new(Some(vec![
+        tool_turn(vec![call(
+            "1",
+            "write_file",
+            json!({"path": "out.txt", "content": "v1"}),
+        )]),
+        tool_turn(vec![call(
+            "2",
+            "write_file",
+            json!({"path": "out.txt", "content": "v2"}),
+        )]),
+        final_turn("done"),
+    ]));
+    registry.provider("scripted", move |_ctx| {
+        Ok(Arc::new(agent_testkit::ScriptedProvider::new(
+            script.lock().unwrap().take().unwrap(),
+        )) as Arc<dyn LlmProvider>)
+    });
+    // A verifier that Revises the FIRST call only, then Allows.
+    let n = std::sync::Arc::new(AtomicUsize::new(0));
+    let n2 = n.clone();
+    let seen2 = seen.clone();
+    registry.verifier("recording", move |_ctx| {
+        Ok(Arc::new(FirstReviseThenAllow {
+            calls: n2.clone(),
+            seen: seen2.clone(),
+        }) as Arc<dyn Verifier>)
+    });
+    let agent = build_agent_with(&registry, cfg, None, "s".into(), Metrics::new())
+        .await
+        .expect("build");
+
+    let answer = agent.run("write").await.expect("run");
+
+    assert!(answer.contains("done"));
+    assert_eq!(seen.load(Ordering::SeqCst), 2, "both calls were verified");
+    // The blocked first call did NOT write v1; the retried second call wrote v2.
+    assert_eq!(
+        std::fs::read_to_string(dir.join("out.txt")).expect("written on retry"),
+        "v2",
+        "the Revise'd call must not run; the corrected retry must"
+    );
+}
+
+/// A verifier that returns Revise for the first call it sees and Allow after.
+struct FirstReviseThenAllow {
+    calls: Arc<AtomicUsize>,
+    seen: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Verifier for FirstReviseThenAllow {
+    fn name(&self) -> &str {
+        "recording"
+    }
+    async fn verify(&self, _ctx: &VerifyCtx<'_>) -> VerifierReport {
+        self.seen.fetch_add(1, Ordering::SeqCst);
+        let verdict = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            VerifyVerdict::Revise("fix it".into())
+        } else {
+            VerifyVerdict::Allow
+        };
+        VerifierReport {
+            verdict,
+            confidence: 1.0,
+            model: "recording".into(),
+        }
+    }
+}
+
+/// **Enforce.** A `Deny` verdict blocks the call outright — the tool does not run.
+#[tokio::test]
+async fn negative_enforce_deny_blocks_the_call() {
+    let dir = tempdir();
+    let script = vec![
+        tool_turn(vec![call(
+            "1",
+            "write_file",
+            json!({"path": "blocked.txt", "content": "should not exist"}),
+        )]),
+        final_turn("understood"),
+    ];
+    let (agent, _seen) = agent_with_recording_verifier_mode(
+        &dir,
+        VerifyVerdict::Deny("no".into()),
+        "enforce",
+        script,
+    )
+    .await;
+
+    agent.run("write").await.expect("run");
+
+    assert!(
+        !dir.join("blocked.txt").exists(),
+        "enforce must block a Deny'd call"
+    );
+}
+
+/// **Enforce.** An `Allow` verdict is transparent — the call runs as normal.
+#[tokio::test]
+async fn positive_enforce_allow_runs_the_call() {
+    let dir = tempdir();
+    let script = vec![
+        tool_turn(vec![call(
+            "1",
+            "write_file",
+            json!({"path": "ok.txt", "content": "ran"}),
+        )]),
+        final_turn("done"),
+    ];
+    let (agent, _seen) =
+        agent_with_recording_verifier_mode(&dir, VerifyVerdict::Allow, "enforce", script).await;
+
+    agent.run("write").await.expect("run");
+
+    assert_eq!(
+        std::fs::read_to_string(dir.join("ok.txt")).expect("written"),
+        "ran"
+    );
+}
+
+/// **Enforce + the real schema backend.** A schema-violating call is blocked, and
+/// the feedback message carries the schema hint so the model could correct it.
+#[tokio::test]
+async fn positive_enforce_schema_blocks_a_malformed_call() {
+    let dir = tempdir();
+    let cfg = parse_config(&config_toml_mode(&dir, "schema", "enforce")).expect("parse");
+    let mut registry = Registry::new();
+    register_builtins(&mut registry);
+    // write_file with `content` missing (required) — schema Revises, enforce
+    // blocks. The model then answers without a successful write.
+    let script = std::sync::Mutex::new(Some(vec![
+        tool_turn(vec![call("1", "write_file", json!({"path": "x.txt"}))]),
+        final_turn("could not write"),
+    ]));
+    registry.provider("scripted", move |_ctx| {
+        Ok(Arc::new(agent_testkit::ScriptedProvider::new(
+            script.lock().unwrap().take().unwrap(),
+        )) as Arc<dyn LlmProvider>)
+    });
+    let agent = build_agent_with(&registry, cfg, None, "s".into(), Metrics::new())
+        .await
+        .expect("build");
+
+    let answer = agent.run("write badly").await.expect("run");
+    assert!(answer.contains("could not write"));
+    assert!(
+        !dir.join("x.txt").exists(),
+        "the malformed call must be blocked in enforce mode"
     );
 }

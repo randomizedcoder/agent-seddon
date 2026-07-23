@@ -38,6 +38,10 @@ pub struct Metrics {
     context_tokens: IntGauge,
     context_messages: IntGauge,
     tool_calls: IntCounterVec,
+    // Tool-call verifier verdicts by verifier name, verdict (allow|revise|deny),
+    // and mode (shadow|enforce). Labels are bounded enums + built-in verifier
+    // names — never model-controlled free text.
+    verifier_verdicts: IntCounterVec,
     // Multimodal content accounting (parity spec 26): blocks sent to the model by
     // modality, and blocks dropped because the model lacks vision support.
     content_blocks: IntCounterVec,
@@ -223,6 +227,14 @@ impl Metrics {
         let tool_calls = IntCounterVec::new(
             Opts::new("agent_tool_calls_total", "Tool invocations"),
             &["tool", "status"],
+        )
+        .unwrap();
+        let verifier_verdicts = IntCounterVec::new(
+            Opts::new(
+                "agent_verifier_verdicts_total",
+                "Tool-call verifier verdicts",
+            ),
+            &["verifier", "verdict", "mode"],
         )
         .unwrap();
         let pty_active = IntGauge::new("agent_pty_active_sessions", "Live pty sessions").unwrap();
@@ -661,6 +673,7 @@ impl Metrics {
             Box::new(context_tokens.clone()),
             Box::new(context_messages.clone()),
             Box::new(tool_calls.clone()),
+            Box::new(verifier_verdicts.clone()),
             Box::new(pty_active.clone()),
             Box::new(pty_bytes.clone()),
             Box::new(pty_sessions.clone()),
@@ -742,6 +755,7 @@ impl Metrics {
             context_tokens,
             context_messages,
             tool_calls,
+            verifier_verdicts,
             pty_active,
             pty_bytes,
             pty_sessions,
@@ -972,6 +986,13 @@ impl Metrics {
     }
     pub fn on_tool(&self, tool: &str, status: &str) {
         self.tool_calls.with_label_values(&[tool, status]).inc();
+    }
+    /// One tool-call verifier verdict. `verdict` is `allow|revise|deny`; `mode` is
+    /// `shadow|enforce`. Labels are bounded — callers pass built-in verifier names.
+    pub fn on_verifier(&self, verifier: &str, verdict: &str, mode: &str) {
+        self.verifier_verdicts
+            .with_label_values(&[verifier, verdict, mode])
+            .inc();
     }
 
     // --- provider instrumentation -----------------------------------------
@@ -1261,6 +1282,7 @@ mod tests {
         m.add_cache_tokens("test-model", 80, 20);
         m.set_context(100, 4);
         m.on_tool("bash", "ok");
+        m.on_verifier("schema", "allow", "shadow");
         m.run_finished("success", 1.5);
 
         let text = m.encode_text();
@@ -1272,11 +1294,27 @@ mod tests {
             "agent_cache_tokens_total",
             "agent_context_tokens",
             "agent_tool_calls_total",
+            "agent_verifier_verdicts_total",
             "agent_runs_total",
         ] {
             assert!(text.contains(name), "missing metric `{name}` in:\n{text}");
         }
         assert!(text.contains("test-model"));
+    }
+
+    #[test]
+    fn on_verifier_records_verdict_by_verifier_mode() {
+        let m = Metrics::new();
+        m.on_verifier("schema", "revise", "enforce");
+        m.on_verifier("schema", "allow", "shadow");
+        let text = m.encode_text();
+        assert!(text.contains("agent_verifier_verdicts_total"), "{text}");
+        assert!(
+            text.contains("verifier=\"schema\"")
+                && text.contains("verdict=\"revise\"")
+                && text.contains("mode=\"enforce\""),
+            "labels missing: {text}"
+        );
     }
 
     #[test]
