@@ -64,6 +64,10 @@ pub struct Agent {
     /// can be hosted over gRPC (`agent --serve-scanner`); the loop reaches it
     /// through the policy guard and the `skill_write` / `session_export` tools.
     scanner: Option<Arc<dyn agent_core::Scanner>>,
+    /// The tool-call verifier, if the `verifier` seam is wired. Increment 1 runs
+    /// it in SHADOW: the verdict is logged, not enforced. See
+    /// docs/design/tool-call-verification.md.
+    verifier: Option<Arc<dyn agent_core::Verifier>>,
     /// The tokenizer, if wired. Held so it can be hosted over gRPC
     /// (`agent --serve-tokenizer`); the loop reaches it through the context
     /// strategy's budget calculation.
@@ -154,6 +158,7 @@ impl Agent {
             search: None,
             repo: None,
             scanner: None,
+            verifier: None,
             tokenizer: None,
             web: None,
             web_search: None,
@@ -531,6 +536,13 @@ impl Agent {
         self
     }
 
+    /// Attach a tool-call verifier (the `verifier` seam). Runs in shadow in
+    /// increment 1: verdicts are logged, not enforced.
+    pub fn with_verifier(mut self, v: Arc<dyn agent_core::Verifier>) -> Self {
+        self.verifier = Some(v);
+        self
+    }
+
     pub fn repo(&self) -> Option<Arc<dyn agent_core::RepoBackend>> {
         self.repo.clone()
     }
@@ -748,6 +760,67 @@ impl Agent {
                     other => other,
                 };
                 decisions.push(dec);
+            }
+
+            // Tool-call verification (SHADOW mode — increment 1): evaluate each
+            // allowed call and log the verdict, without changing behaviour.
+            // Enforcement (Revise/Deny affecting the loop) and the ClickHouse
+            // record land in a follow-up. See
+            // docs/design/tool-call-verification.md.
+            if let Some(verifier) = &self.verifier {
+                // Best-effort goal: the first user message. `run_loop` does not
+                // carry the goal explicitly, and the only shipped verifier
+                // (schema) does not use it — so this avoids a signature change.
+                let goal = working
+                    .messages
+                    .iter()
+                    .find(|m| matches!(m.role, agent_core::Role::User))
+                    .map(|m| m.content_text())
+                    .unwrap_or_default();
+                for (call, dec) in assistant.tool_calls.iter().zip(&decisions) {
+                    if !matches!(dec, Decision::Allow) {
+                        continue; // only shadow the calls that would actually run
+                    }
+                    // A `verifier` span with recorded fields, mirroring
+                    // `policy.authorize` — the verdict lands on the span while it is
+                    // open, giving an audit trail in the trace and a testable field.
+                    let span = tracing::info_span!(
+                        "verifier",
+                        iter,
+                        tool = %call.name,
+                        verifier = tracing::field::Empty,
+                        verdict = tracing::field::Empty,
+                    );
+                    let ctx = agent_core::VerifyCtx {
+                        call,
+                        goal: &goal,
+                        history: &working.messages,
+                        tool_schema: tool_schemas.iter().find(|s| s.name == call.name),
+                    };
+                    async {
+                        let report = verifier.verify(&ctx).await;
+                        let (verdict, hint) = match &report.verdict {
+                            agent_core::VerifyVerdict::Allow => ("allow", String::new()),
+                            agent_core::VerifyVerdict::Revise(h) => ("revise", h.clone()),
+                            agent_core::VerifyVerdict::Deny(h) => ("deny", h.clone()),
+                        };
+                        let s = tracing::Span::current();
+                        s.record("verifier", report.model.as_str());
+                        s.record("verdict", verdict);
+                        // SHADOW: the verdict is only observed. A non-allow verdict
+                        // logs its hint but does NOT block or revise the call yet —
+                        // enforcement is a follow-up increment.
+                        if !hint.is_empty() {
+                            tracing::info!(
+                                confidence = report.clamped_confidence() as f64,
+                                %hint,
+                                "verifier (shadow) would suggest a revision"
+                            );
+                        }
+                    }
+                    .instrument(span)
+                    .await;
+                }
             }
 
             let parallel = self.settings.parallel_tools

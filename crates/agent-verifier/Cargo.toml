@@ -1,0 +1,21 @@
+[package]
+name = "agent-verifier"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Deterministic argument/schema check (no model). The reference verifier: it
+# validates a tool call's arguments against the tool's JSON Schema and asks the
+# model to Revise on a mismatch. Cheap, model-free, always-safe.
+default = ["verifier-schema"]
+verifier-schema = []
+
+[dependencies]
+agent-core.workspace = true
+async-trait.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+rstest.workspace = true

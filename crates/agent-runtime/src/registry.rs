@@ -119,6 +119,9 @@ type ToolFactory = Box<dyn Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn Tool>> 
 type SearchFactory = Box<
     dyn Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn agent_core::SearchBackend>> + Send + Sync,
 >;
+#[cfg(feature = "verifier")]
+type VerifierFactory =
+    Box<dyn Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn agent_core::Verifier>> + Send + Sync>;
 #[cfg(feature = "forge")]
 type ForgeFactory =
     Box<dyn Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn agent_core::Forge>> + Send + Sync>;
@@ -145,6 +148,8 @@ pub struct Registry {
     tools: BTreeMap<&'static str, ToolFactory>,
     #[cfg(feature = "search")]
     searches: BTreeMap<&'static str, SearchFactory>,
+    #[cfg(feature = "verifier")]
+    verifiers: BTreeMap<&'static str, VerifierFactory>,
     #[cfg(feature = "forge")]
     forges: BTreeMap<&'static str, ForgeFactory>,
     #[cfg(feature = "web-search")]
@@ -193,6 +198,17 @@ impl Registry {
         f: impl Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn Policy>> + Send + Sync + 'static,
     ) {
         self.policies.insert(name, Box::new(f));
+    }
+    #[cfg(feature = "verifier")]
+    pub fn verifier(
+        &mut self,
+        name: &'static str,
+        f: impl Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn agent_core::Verifier>>
+            + Send
+            + Sync
+            + 'static,
+    ) {
+        self.verifiers.insert(name, Box::new(f));
     }
     pub fn memory(
         &mut self,
@@ -392,6 +408,18 @@ impl Registry {
             .ok_or_else(|| unknown("search backend", name, self.searches.keys().copied()))?;
         f(ctx)
     }
+    #[cfg(feature = "verifier")]
+    pub fn build_verifier(
+        &self,
+        name: &str,
+        ctx: &FactoryCtx<'_>,
+    ) -> anyhow::Result<Arc<dyn agent_core::Verifier>> {
+        let f = self
+            .verifiers
+            .get(name)
+            .ok_or_else(|| unknown("verifier", name, self.verifiers.keys().copied()))?;
+        f(ctx)
+    }
 
     #[cfg(feature = "forge")]
     pub fn build_forge(
@@ -540,6 +568,14 @@ pub fn register_builtins(r: &mut Registry) {
             .map(|r| (r.tool.clone(), r.arg.clone()))
             .collect();
         Ok(Arc::new(crate::policy::AllowList::new(rules)) as Arc<dyn Policy>)
+    });
+
+    // --- verifiers (the tool-call correctness gate; off unless selected) ---
+    #[cfg(feature = "verifier")]
+    r.verifier("schema", |_ctx| {
+        // Deterministic, model-free: validate a call's arguments against the
+        // tool's JSON Schema. See docs/design/tool-call-verification.md.
+        Ok(Arc::new(agent_verifier::SchemaVerifier::new()) as Arc<dyn agent_core::Verifier>)
     });
 
     // --- memory backends (whole-store + independently-swappable layers) ---

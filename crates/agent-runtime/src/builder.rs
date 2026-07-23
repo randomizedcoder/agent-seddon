@@ -514,6 +514,20 @@ pub async fn build_agent_with(
     let base_policy = registry
         .build_policy(&cfg.agent.policy, &full_ctx)
         .context("building policy")?;
+    // Tool-call verifier (the `verifier` seam): built here while `full_ctx` (which
+    // borrows `cfg`) is still valid; attached to the agent further down. Empty
+    // `[verifier] backend` ⇒ off. Runs in shadow in increment 1.
+    #[cfg(feature = "verifier")]
+    let shared_verifier: Option<Arc<dyn agent_core::Verifier>> = if cfg.verifier.backend.is_empty()
+    {
+        None
+    } else {
+        Some(
+            registry
+                .build_verifier(&cfg.verifier.backend, &full_ctx)
+                .context("building verifier")?,
+        )
+    };
     // Content scanner (parity spec 18): compose the configured rules into one
     // metered `DispatchScanner` and hand it to the guard, which maps the worst
     // finding's severity to a `Decision`.
@@ -606,6 +620,12 @@ pub async fn build_agent_with(
     // Hold the shared scanner so `agent --serve-scanner` can host it.
     let agent = match shared_scanner.clone() {
         Some(s) => agent.with_scanner(s),
+        None => agent,
+    };
+    // Attach the verifier built above (before `cfg` was consumed).
+    #[cfg(feature = "verifier")]
+    let agent = match shared_verifier {
+        Some(v) => agent.with_verifier(v),
         None => agent,
     };
     // …and the tokenizer / embedder, for `--serve-tokenizer` / `--serve-embed`.

@@ -41,6 +41,7 @@ One doc per seam or subsystem. The **config key** column is what you set in
 | Runtime and loop | — | [`runtime.md`](components/runtime.md) |
 | Tools | `[tools] enabled` | [`tools.md`](components/tools.md) |
 | Policy (approval gate) | `[agent] policy` | [`policy.md`](components/policy.md) |
+| Verifier (tool-call correctness gate) | `[verifier] backend` | [`verifier.md`](components/verifier.md) |
 | Context assembly | `[agent] context` | [`context.md`](components/context.md) |
 | Hooks | `[hooks] enabled` | [`hooks.md`](components/hooks.md) |
 

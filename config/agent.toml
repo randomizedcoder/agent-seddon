@@ -244,6 +244,20 @@ deny_at     = "high"
 allow_rules = []
 scope       = "context"
 
+# Tool-call verifier (the Verifier seam): a CORRECTNESS gate on a requested tool
+# call, checked before it runs — distinct from the Policy/Scanner SAFETY gates.
+# It sees the goal + history (which Policy does not) and returns allow / revise /
+# deny. `backend` selects the impl; EMPTY (default) ⇒ OFF (no verifier, no cost).
+#   "schema" — deterministic, model-free: validate the call's arguments against
+#              the tool's JSON Schema and ask the model to revise on a mismatch
+#              (e.g. a required argument missing). No model, always safe.
+# NOTE increment 1 runs the verifier in SHADOW: the verdict is logged, not yet
+# enforced. Enforcement (revise/deny affecting the loop), an LLM-backed verifier,
+# an ensemble, and ClickHouse recording of verdicts are follow-ups.
+# See docs/design/tool-call-verification.md and docs/components/verifier.md.
+[verifier]
+backend = ""
+
 # Prompt-cache breakpoint placement (the CacheStrategy seam). A turn is dominated
 # by a stable prefix (system prompt + tool defs + history); providers cache it,
 # but only if the anchors sit on a prefix that is byte-identical turn to turn.
