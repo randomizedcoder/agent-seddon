@@ -2622,6 +2622,91 @@ pub trait Policy: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// Supporting seam: Verifier (a correctness gate on a requested tool call)
+// ---------------------------------------------------------------------------
+//
+// A second opinion on a tool call the model asked for, checked BEFORE it runs.
+// Distinct from `Policy` in two ways that matter:
+//   - It sees CONTEXT — the goal, recent history, the tool's schema — not just the
+//     bare `ToolCall`, because judging "is this the right call" needs the goal.
+//   - It is about CORRECTNESS, not SAFETY. Dangerous-command / sensitive-path /
+//     secret screening stays with the `Policy` guard and the `Scanner`. A verifier
+//     must never be sold as a safety mechanism.
+// See docs/design/tool-call-verification.md for the full design and phasing.
+//
+// Fails OPEN, like the `Scanner`: a verifier that cannot run contributes no
+// opinion (`VerifyVerdict::Allow`) rather than blocking the loop.
+
+/// What the model requested plus the context a verifier needs to judge it.
+/// Borrows so the loop can build it cheaply per call.
+pub struct VerifyCtx<'a> {
+    /// The tool call under review.
+    pub call: &'a ToolCall,
+    /// The run's goal, so the verifier can judge relevance.
+    pub goal: &'a str,
+    /// Recent conversation, most-recent last. The loop budgets what it passes.
+    pub history: &'a [Message],
+    /// The called tool's schema, when the tool is known — lets a verifier check
+    /// the arguments against it. `None` for an unknown tool name.
+    pub tool_schema: Option<&'a ToolSchema>,
+}
+
+/// A verifier's judgement on a tool call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerifyVerdict {
+    /// No objection — let the call run.
+    Allow,
+    /// The call is probably wrong; feed this hint back to the model so it can fix
+    /// and retry, rather than hard-failing. The preferred non-Allow outcome.
+    Revise(String),
+    /// Block the call outright. Rare — safety stays with `Policy`/`Scanner`.
+    Deny(String),
+}
+
+/// A verifier's report on one call: the verdict, a self-reported confidence, and
+/// the model/impl that produced it (for the audit + trust-weighting record).
+#[derive(Debug, Clone)]
+pub struct VerifierReport {
+    pub verdict: VerifyVerdict,
+    /// 0.0..=1.0. Self-reported and therefore untrusted: callers clamp it before
+    /// using it (a hostile/degraded verifier can return NaN, inf, or out of range).
+    pub confidence: f32,
+    /// The verifier's name or model id — a metric/record label, not trusted input.
+    pub model: String,
+}
+
+impl VerifierReport {
+    /// An `Allow` with no objection, from a named verifier. The fail-open value.
+    pub fn allow(model: impl Into<String>) -> Self {
+        Self {
+            verdict: VerifyVerdict::Allow,
+            confidence: 1.0,
+            model: model.into(),
+        }
+    }
+
+    /// Clamp `confidence` into `0.0..=1.0`, mapping a non-finite value to 0.0.
+    /// A verifier's confidence is attacker-influenced (it can be model-produced),
+    /// so it is clamped before it reaches a metric total or a weighting.
+    pub fn clamped_confidence(&self) -> f32 {
+        if self.confidence.is_finite() {
+            self.confidence.clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    }
+}
+
+#[async_trait]
+pub trait Verifier: Send + Sync {
+    /// Backend name, used as a metric/span label.
+    fn name(&self) -> &str;
+    /// Judge a requested tool call. Fails open: return `VerifyVerdict::Allow` rather
+    /// than erroring when the verifier cannot form an opinion.
+    async fn verify(&self, ctx: &VerifyCtx<'_>) -> VerifierReport;
+}
+
+// ---------------------------------------------------------------------------
 // Seam 6: Search (high-performance code search)
 // ---------------------------------------------------------------------------
 //

@@ -317,6 +317,7 @@ dependencies = [
  "agent-tokenizer",
  "agent-tools",
  "agent-validate",
+ "agent-verifier",
  "agent-web",
  "agent-web-search",
  "anyhow",
@@ -497,6 +498,17 @@ dependencies = [
  "iai-callgrind",
  "rstest",
  "serde_json",
+]
+
+[[package]]
+name = "agent-verifier"
+version = "0.1.0"
+dependencies = [
+ "agent-core",
+ "async-trait",
+ "rstest",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

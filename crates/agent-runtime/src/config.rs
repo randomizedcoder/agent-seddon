@@ -50,6 +50,8 @@ pub struct Config {
     #[serde(default)]
     pub scanner: ScannerCfg,
     #[serde(default)]
+    pub verifier: VerifierCfg,
+    #[serde(default)]
     pub cache: CacheCfg,
     #[serde(default)]
     pub web_search: WebSearchCfg,
@@ -574,6 +576,17 @@ impl Default for TasksCfg {
 
 fn default_tasks_backend() -> String {
     "memory".to_string()
+}
+
+/// Tool-call verifier (the `Verifier` seam — a correctness gate on a requested
+/// tool call, checked before it runs). `backend` selects the impl and defaults to
+/// empty ⇒ **off** (no verifier, no cost). `"schema"` is the deterministic,
+/// model-free argument/schema check. Increment 1 runs in shadow: the verdict is
+/// logged, not yet enforced. See docs/design/tool-call-verification.md.
+#[derive(Debug, Deserialize, Default)]
+pub struct VerifierCfg {
+    #[serde(default)]
+    pub backend: String,
 }
 
 /// The `web_fetch` tool (the `WebBackend` seam, parity spec 11). `backend`
@@ -1291,6 +1304,7 @@ impl Config {
             session: SessionCfg::default(),
             reference: ReferenceCfg::default(),
             scanner: ScannerCfg::default(),
+            verifier: VerifierCfg::default(),
             cache: CacheCfg::default(),
             web_search: WebSearchCfg::default(),
             router: RouterCfg::default(),
