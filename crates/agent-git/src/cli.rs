@@ -531,6 +531,54 @@ impl RepoBackend for CliBackend {
         Ok(self.resolve_remote_url().await)
     }
 
+    async fn log_range(
+        &self,
+        base: &Revision,
+        head: &Revision,
+        limit: usize,
+    ) -> Result<Vec<CommitInfo>> {
+        // `git log base..head` — commits reachable from head but not base, newest
+        // first. Endpoints are resolved to oids first so a caller-supplied ref is
+        // validated by git; `--` terminates option parsing before the range.
+        let base_oid = self.resolve(base).await?;
+        let head_oid = self.resolve(head).await?;
+        let range = format!("{}..{}", base_oid.as_str(), head_oid.as_str());
+        let fmt = "%H%x1f%an%x1f%ae%x1f%ct%x1f%s%x1f%b%x1e";
+        let out = self
+            .git_str(
+                &self.root,
+                &[
+                    "log",
+                    &format!("--max-count={}", limit.max(1)),
+                    &format!("--format={fmt}"),
+                    &range,
+                    "--",
+                ],
+            )
+            .await?;
+        let mut commits = Vec::new();
+        for rec in out.split('\u{1e}') {
+            let rec = rec.trim_matches(['\n', '\r']);
+            if rec.is_empty() {
+                continue;
+            }
+            let f: Vec<&str> = rec.split('\u{1f}').collect();
+            if f.len() < 6 {
+                continue;
+            }
+            commits.push(CommitInfo {
+                oid: Oid(f[0].to_string()),
+                parents: Vec::new(),
+                author: f[1].to_string(),
+                author_email: f[2].to_string(),
+                committed_ms: f[3].parse::<u64>().unwrap_or(0).saturating_mul(1000),
+                summary: f[4].to_string(),
+                body: f[5].to_string(),
+            });
+        }
+        Ok(commits)
+    }
+
     async fn status(&self) -> Result<RepoStatus> {
         let live_worktrees = self
             .worktree_list()

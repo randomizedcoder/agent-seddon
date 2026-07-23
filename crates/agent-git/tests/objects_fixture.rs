@@ -219,6 +219,26 @@ async fn branches_lists_both() {
 }
 
 #[tokio::test]
+async fn log_range_is_directional() {
+    let dir = fixture();
+    let b = backend(&dir);
+    // `main..feature` has the one feature commit; the reverse is empty (main is an
+    // ancestor of feature).
+    let fwd = b
+        .log_range(&Revision::from("main"), &Revision::from("feature"), 10)
+        .await
+        .unwrap();
+    assert_eq!(fwd.len(), 1, "main..feature has the feature commit");
+    assert!(fwd[0].summary.contains("feature"));
+    assert!(!fwd[0].oid.as_str().is_empty());
+    let rev = b
+        .log_range(&Revision::from("feature"), &Revision::from("main"), 10)
+        .await
+        .unwrap();
+    assert!(rev.is_empty(), "feature..main is empty");
+}
+
+#[tokio::test]
 async fn mirror_bootstrap_and_worktree_from_mirror() {
     let source = fixture(); // stands in for the upstream remote
     let work = tempdir();

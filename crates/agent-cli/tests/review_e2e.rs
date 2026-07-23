@@ -60,7 +60,12 @@ fn positive_review_prints_grounded_facts() {
         "missing changed file in:\n{stdout}"
     );
     assert!(
-        stdout.contains("go project"),
+        stdout.contains("Repo: go ·"),
         "missing language fact in:\n{stdout}"
+    );
+    // The thickened context: the changed file's diff hunks are rendered.
+    assert!(
+        stdout.contains("Diffs:") && stdout.contains("fmt.Println"),
+        "missing diff content in:\n{stdout}"
     );
 }

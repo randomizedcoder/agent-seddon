@@ -2582,6 +2582,7 @@ impl From<agent_core::ChangedFile> for pb::ReviewChangedFile {
             deletions: f.deletions,
             is_binary: f.is_binary,
             lang: f.lang,
+            patch: f.patch,
         }
     }
 }
@@ -2594,6 +2595,30 @@ impl From<pb::ReviewChangedFile> for agent_core::ChangedFile {
             deletions: f.deletions,
             is_binary: f.is_binary,
             lang: f.lang,
+            patch: f.patch,
+        }
+    }
+}
+
+impl From<agent_core::ReviewCommit> for pb::ReviewCommit {
+    fn from(c: agent_core::ReviewCommit) -> Self {
+        pb::ReviewCommit {
+            short: c.short,
+            summary: c.summary,
+            body: c.body,
+            author: c.author,
+            age_days: c.age_days,
+        }
+    }
+}
+impl From<pb::ReviewCommit> for agent_core::ReviewCommit {
+    fn from(c: pb::ReviewCommit) -> Self {
+        agent_core::ReviewCommit {
+            short: c.short,
+            summary: c.summary,
+            body: c.body,
+            author: c.author,
+            age_days: c.age_days,
         }
     }
 }
@@ -2605,6 +2630,7 @@ impl From<agent_core::ChangeSet> for pb::ReviewChangeSet {
             head_rev: c.head_rev,
             files: c.files.into_iter().map(Into::into).collect(),
             repo_file_count: c.repo_file_count,
+            commits: c.commits.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -2615,6 +2641,7 @@ impl From<pb::ReviewChangeSet> for agent_core::ChangeSet {
             head_rev: c.head_rev,
             files: c.files.into_iter().map(Into::into).collect(),
             repo_file_count: c.repo_file_count,
+            commits: c.commits.into_iter().map(Into::into).collect(),
         }
     }
 }

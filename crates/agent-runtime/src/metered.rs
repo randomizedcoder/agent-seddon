@@ -981,6 +981,14 @@ impl RepoBackend for MeteredRepo {
         // Delegate the default method so it is not swallowed by the decorator.
         self.inner.remote_url().await
     }
+    async fn log_range(
+        &self,
+        base: &Revision,
+        head: &Revision,
+        limit: usize,
+    ) -> Result<Vec<CommitInfo>> {
+        self.inner.log_range(base, head, limit).await
+    }
     async fn status(&self) -> Result<RepoStatus> {
         let start = Instant::now();
         let out = self.inner.status().instrument(self.span("status")).await;
