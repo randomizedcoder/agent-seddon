@@ -1,0 +1,11 @@
+{
+  "groundedness": 5,
+  "readiness": 2,
+  "signal": 5,
+  "gaps": [
+    "Actual code diffs for the 7 modified files",
+    "Commit message or PR description explaining the intent of the change",
+    "Semantic context on what changed in agent.rs and verifier_e2e.rs",
+    "Test/build status to verify the e2e tests pass"
+  ]
+}
