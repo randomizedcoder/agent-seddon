@@ -89,6 +89,17 @@ fn call(id: &str, name: &str, args: serde_json::Value) -> ToolCall {
     }
 }
 
+/// Read the `verification` records the loop appended to the episodic JSONL — the
+/// same events the telemetry sink would route to `agent_verifications`. Lets a
+/// test assert the recording path black-box, without a live ClickHouse.
+fn read_verifications(dir: &Path) -> Vec<agent_core::VerificationRecord> {
+    let text = std::fs::read_to_string(dir.join(".agent/episodic.jsonl")).unwrap_or_default();
+    text.lines()
+        .filter_map(|l| serde_json::from_str::<agent_core::MemoryEvent>(l).ok())
+        .filter_map(|e| e.verification)
+        .collect()
+}
+
 /// Build the agent with the scripted model and a `RecordingVerifier` registered
 /// under `"recording"`, returning the shared call-counter so a test can assert it.
 async fn agent_with_recording_verifier(
@@ -475,5 +486,76 @@ async fn positive_enforce_schema_blocks_a_malformed_call() {
     assert!(
         !dir.join("x.txt").exists(),
         "the malformed call must be blocked in enforce mode"
+    );
+}
+
+// --- recording (increment 3) ------------------------------------------------
+
+/// **Recording.** Each verified call emits one `verification` record carrying the
+/// verdict, the coarse `task_type`, hashed (not raw) args, and — because the call
+/// ran in shadow — a known `call_errored` outcome proxy. The deferred proxies stay
+/// unset. This is the data the `agent_verifications` table is built from.
+#[tokio::test]
+async fn positive_shadow_records_a_verification_with_outcome() {
+    let dir = tempdir();
+    let script = vec![
+        tool_turn(vec![call(
+            "1",
+            "write_file",
+            json!({"path": "note.txt", "content": "hi"}),
+        )]),
+        final_turn("done"),
+    ];
+    let (agent, _seen) =
+        agent_with_recording_verifier(&dir, VerifyVerdict::Revise("hint".into()), script).await;
+
+    agent.run("write a note").await.expect("run");
+
+    let recs = read_verifications(&dir);
+    assert_eq!(recs.len(), 1, "one verified call ⇒ one verification record");
+    let v = &recs[0];
+    assert_eq!(v.tool_name, "write_file");
+    assert_eq!(v.task_type, "write_file", "coarse phase-1 task_type = tool");
+    assert_eq!(v.verdict, "revise");
+    assert_eq!(v.verifier_model, "recording");
+    assert!(!v.cached);
+    // Shadow ran the call and it succeeded, so the proxy is Some(false).
+    assert_eq!(v.call_errored, Some(false));
+    assert_eq!(v.revised_after, None, "deferred proxy stays unset");
+    assert_eq!(v.task_succeeded, None);
+    // Args are fingerprinted, not stored raw.
+    assert!(!v.args_hash.is_empty() && !v.args_hash.contains("note.txt"));
+}
+
+/// **Recording, blocked call.** A call the verifier blocks in enforce mode never
+/// runs, so its outcome proxy is NULL (`None`) — distinguishable in the data from a
+/// call that ran and did not error.
+#[tokio::test]
+async fn boundary_enforce_blocked_call_records_null_outcome() {
+    let dir = tempdir();
+    let script = vec![
+        tool_turn(vec![call(
+            "1",
+            "write_file",
+            json!({"path": "b.txt", "content": "x"}),
+        )]),
+        final_turn("understood"),
+    ];
+    let (agent, _seen) = agent_with_recording_verifier_mode(
+        &dir,
+        VerifyVerdict::Deny("no".into()),
+        "enforce",
+        script,
+    )
+    .await;
+
+    agent.run("write").await.expect("run");
+
+    let recs = read_verifications(&dir);
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0].verdict, "deny");
+    assert_eq!(
+        recs[0].call_errored, None,
+        "a blocked call never ran ⇒ NULL outcome proxy"
     );
 }

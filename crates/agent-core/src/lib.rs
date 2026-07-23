@@ -1786,6 +1786,12 @@ pub struct MemoryEvent {
     pub usage: Option<Usage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub iter: Option<u32>,
+    /// A tool-call verification record (routed to `agent_verifications` by the
+    /// telemetry sink). Telemetry-local: a side-channel on the event, like
+    /// [`usage`](Self::usage), and dropped at the gRPC memory boundary since it
+    /// is recorded through the local `CompositeMemory` mirror, not the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<VerificationRecord>,
 }
 
 /// The loop-facing memory facade. This is the whole store the agent loop talks
@@ -2704,6 +2710,63 @@ pub trait Verifier: Send + Sync {
     /// Judge a requested tool call. Fails open: return `VerifyVerdict::Allow` rather
     /// than erroring when the verifier cannot form an opinion.
     async fn verify(&self, ctx: &VerifyCtx<'_>) -> VerifierReport;
+}
+
+/// One tool-call verification, recorded for offline analysis (the
+/// `agent_verifications` ClickHouse table). The envelope fields — session, ts,
+/// iter — come from the enclosing [`MemoryEvent`]; this carries the
+/// verification-specific columns. The outcome proxies are `Option` because they
+/// are filled as they become known: `call_errored` after the tool runs (and
+/// stays `None` for a call the verifier blocked, which never executed), while
+/// `revised_after`/`task_succeeded` are deferred to a later increment and are
+/// `None` for now. See `docs/design/tool-call-verification.md`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerificationRecord {
+    pub tool_name: String,
+    /// A stable fingerprint of the call arguments — not the raw (model-produced,
+    /// possibly sensitive) text. See [`fnv1a_hex`].
+    pub args_hash: String,
+    /// A stable fingerprint of the goal text, for the same reason.
+    pub goal_hash: String,
+    /// Coarse classification of the call; currently the tool name (a phase-1
+    /// placeholder for a real taxonomy — see the design doc's open questions).
+    pub task_type: String,
+    /// The verifier's model/impl id (`VerifierReport::model`).
+    pub verifier_model: String,
+    /// JSON fingerprint of the verifier's config (name + mode), so the analysis
+    /// can separate "this model" from "this configuration of it".
+    pub verifier_cfg: String,
+    /// `allow` | `revise` | `deny`.
+    pub verdict: String,
+    /// The verifier's self-reported confidence, already clamped to `0.0..=1.0`.
+    pub confidence: f32,
+    /// Wall-clock latency of the `verify` call, in milliseconds.
+    pub latency_ms: u32,
+    /// Whether the verdict came from the verdict cache (always `false` until the
+    /// cache lands in a later increment).
+    pub cached: bool,
+    /// Did the executed tool return `is_error`? `None` if the call did not run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_errored: Option<bool>,
+    /// Did the agent revise the same target soon after? Deferred; `None` for now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revised_after: Option<bool>,
+    /// Did the run reach a good final state? Deferred; `None` for now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_succeeded: Option<bool>,
+}
+
+/// A short, stable, dependency-free content hash (FNV-1a, hex). Used for the
+/// `args_hash`/`goal_hash` grouping keys on a [`VerificationRecord`]: a grouping
+/// fingerprint, not a cryptographic digest, and it keeps raw model-produced
+/// (possibly sensitive) argument/goal text out of the analytics table.
+pub fn fnv1a_hex(bytes: &[u8]) -> String {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for b in bytes {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
 }
 
 // ---------------------------------------------------------------------------

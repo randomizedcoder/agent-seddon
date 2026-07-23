@@ -29,6 +29,7 @@ fn event(kind: &str, text: &str) -> MemoryEvent {
         session_id: "s1".into(),
         usage: None,
         iter: None,
+        verification: None,
     }
 }
 

@@ -56,11 +56,31 @@ Only calls the `Policy` already allowed reach the verifier (a policy-denied call
 is never verified). Every verdict increments `agent_verifier_verdicts_total`
 (labels: `verifier`, `verdict`, `mode`).
 
-Follow-ups, in order: an LLM-backed verifier, an ensemble with per-model
-trust-weighting, and a dedicated `agent_verifications` ClickHouse table recording
-verdicts + outcome proxies (shadow verdicts already reach `agent_logs` via the
-tracing layer meanwhile). gRPC serviceability is additive and remote-only (see the
-design doc).
+## Recording (the measurement platform)
+
+Every verified call also emits one **`verification` record** — routed by the
+telemetry sink to the `agent_verifications` ClickHouse table (alongside
+`agent_events`/`agent_usage`), through the same bounded-channel writer that drops
+rather than blocks. It carries the verdict, the verifier model + config
+fingerprint, `confidence` (clamped), `latency_ms`, and *outcome proxies* filled as
+they become known:
+
+- **`call_errored`** — did the executed tool return `is_error`? Known immediately;
+  `NULL` for a call the verifier blocked (which never ran).
+- **`revised_after`**, **`task_succeeded`** — deferred to a later increment; `NULL`
+  for now (the columns exist so the analysis can pick which proxy correlates with
+  real quality — see the design doc's "ground truth" section).
+
+Args and the goal are **hashed** (`fnv1a_hex`), not stored raw, keeping
+model-produced (possibly sensitive) text out of the analytics table. `task_type`
+is a coarse phase-1 placeholder (currently the tool name). Recording is
+best-effort telemetry: a dropped row never affects the loop. With telemetry off it
+still lands in the episodic JSONL, which is how the e2e tests assert it.
+
+Follow-ups, in order: an LLM-backed verifier; an ensemble with per-model
+trust-weighting plus the offline weight computation over this table; and filling
+the deferred outcome proxies. gRPC serviceability is additive and remote-only (see
+the design doc).
 
 ## Backends
 

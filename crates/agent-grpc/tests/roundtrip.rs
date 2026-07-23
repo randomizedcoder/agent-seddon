@@ -476,6 +476,7 @@ async fn memory_append_and_recall(#[case] transport: Transport) {
         session_id: "s1".into(),
         usage: None,
         iter: None,
+        verification: None,
     };
     client.append(event).await.unwrap();
 

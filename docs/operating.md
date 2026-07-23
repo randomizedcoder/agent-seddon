@@ -200,7 +200,9 @@ talked to a model.
 
 A pinned ClickHouse container holds the transaction history, logs and token usage.
 Schema: [`../nix/clickhouse/schema.sql`](../nix/clickhouse/schema.sql) —
-`agent_events`, `agent_logs`, `agent_usage`. Requires a running Docker daemon.
+`agent_events`, `agent_logs`, `agent_usage`, and `agent_verifications` (tool-call
+verifier verdicts + outcome proxies, see [`components/verifier.md`](components/verifier.md)).
+Requires a running Docker daemon.
 
 ```sh
 nix run .#clickhouse-up                                  # start + apply schema

@@ -584,6 +584,9 @@ impl TryFrom<pb::MemoryEvent> for agent_core::MemoryEvent {
             session_id: e.session_id,
             usage: e.usage.map(Into::into),
             iter: e.iter,
+            // Telemetry-local (recorded via the `CompositeMemory` mirror, not the
+            // wire); the gRPC `MemoryEvent` has no such field, so it is `None` here.
+            verification: None,
         })
     }
 }
@@ -2464,6 +2467,7 @@ mod tests {
             session_id: "sess".into(),
             usage,
             iter,
+            verification: None,
         };
         let p1 = pb::MemoryEvent::from(core);
         let back = agent_core::MemoryEvent::try_from(p1.clone()).unwrap();

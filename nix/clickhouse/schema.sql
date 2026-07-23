@@ -52,3 +52,32 @@ CREATE TABLE IF NOT EXISTS agent.agent_usage
 )
 ENGINE = MergeTree
 ORDER BY (session_id, ts);
+
+-- Tool-call verifications: one row per verified call, for offline analysis of
+-- which verifier/model is worth trusting per task_type (the measurement platform
+-- of docs/design/tool-call-verification.md). Hashes, not raw args/goal text, to
+-- keep model-produced (possibly sensitive) input out of the analytics table. The
+-- outcome proxies are Nullable — filled as they become known: call_errored after
+-- the tool runs (NULL for a call the verifier blocked), revised_after /
+-- task_succeeded deferred to a later increment.
+CREATE TABLE IF NOT EXISTS agent.agent_verifications
+(
+    session_id     String,
+    ts             DateTime64(3, 'UTC'),
+    iter           UInt32,
+    tool_name      String,
+    args_hash      String,
+    goal_hash      String,
+    task_type      String,                    -- coarse: currently the tool name
+    verifier_model String,
+    verifier_cfg   String,                    -- JSON config fingerprint
+    verdict        String,                    -- allow | revise | deny
+    confidence     Float32,
+    latency_ms     UInt32,
+    cached         UInt8,
+    call_errored   Nullable(UInt8),           -- did the executed tool return is_error?
+    revised_after  Nullable(UInt8),           -- did the agent revise this target soon after?
+    task_succeeded Nullable(UInt8)            -- did the run reach a good final state?
+)
+ENGINE = MergeTree
+ORDER BY (session_id, ts, iter);

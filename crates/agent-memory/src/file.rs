@@ -311,6 +311,7 @@ mod tests {
             session_id: String::new(),
             usage: None,
             iter: None,
+            verification: None,
         }
     }
 

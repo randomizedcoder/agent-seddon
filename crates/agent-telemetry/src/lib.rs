@@ -27,7 +27,7 @@ pub use layer::ClickHouseLayer;
 pub use memory::CompositeMemory;
 pub use otel::{otlp_layer, OtelConfig, OtelGuard};
 
-use rows::{EventRow, UsageRow};
+use rows::{EventRow, UsageRow, VerificationRow};
 use writer::{Msg, WriterConfig, TARGET};
 
 /// Bounded channel size. Overflow drops rows rather than blocking the loop.
@@ -81,11 +81,16 @@ impl TelemetryHandle {
     }
 
     /// Mirror a recorded event into ClickHouse. `kind = "usage"` rows route to
-    /// `agent_usage`; everything else becomes an `agent_events` row.
+    /// `agent_usage`, `kind = "verification"` to `agent_verifications`; everything
+    /// else becomes an `agent_events` row.
     pub fn record_event(&self, event: &MemoryEvent) {
         if event.kind == "usage" {
             if let Some(row) = UsageRow::from_event(event) {
                 self.send(Msg::Usage(row));
+            }
+        } else if event.kind == "verification" {
+            if let Some(row) = VerificationRow::from_event(event) {
+                self.send(Msg::Verification(row));
             }
         } else {
             let seq = self.seq.fetch_add(1, Ordering::Relaxed);

@@ -773,12 +773,19 @@ impl Agent {
             // reissue a corrected one. `verifier_feedback[i]` is Some(message) for a
             // call blocked in enforce mode. See docs/design/tool-call-verification.md.
             let mut verifier_feedback: Vec<Option<String>> = vec![None; assistant.tool_calls.len()];
+            // Parallel to `verifier_feedback`: the record for each verified call,
+            // its `call_errored` outcome filled in after the tool runs (below),
+            // then written to `agent_verifications`.
+            let mut verifications: Vec<Option<agent_core::VerificationRecord>> =
+                vec![None; assistant.tool_calls.len()];
             if let Some(verifier) = &self.verifier {
                 let mode = if self.verifier_enforce {
                     "enforce"
                 } else {
                     "shadow"
                 };
+                let verifier_cfg =
+                    format!("{{\"name\":\"{}\",\"mode\":\"{}\"}}", verifier.name(), mode);
                 // Best-effort goal: the first user message. `run_loop` does not
                 // carry the goal explicitly, and the only shipped verifier
                 // (schema) does not use it — so this avoids a signature change.
@@ -788,6 +795,7 @@ impl Agent {
                     .find(|m| matches!(m.role, agent_core::Role::User))
                     .map(|m| m.content_text())
                     .unwrap_or_default();
+                let goal_hash = agent_core::fnv1a_hex(goal.as_bytes());
                 for (i, (call, dec)) in assistant.tool_calls.iter().zip(&decisions).enumerate() {
                     if !matches!(dec, Decision::Allow) {
                         continue; // only verify the calls that would actually run
@@ -808,6 +816,7 @@ impl Agent {
                         history: &working.messages,
                         tool_schema: tool_schemas.iter().find(|s| s.name == call.name),
                     };
+                    let started = Instant::now();
                     let report = async {
                         let r = verifier.verify(&ctx).await;
                         let s = tracing::Span::current();
@@ -817,9 +826,34 @@ impl Agent {
                     }
                     .instrument(span)
                     .await;
+                    let latency_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
 
                     self.metrics
                         .on_verifier(&report.model, verdict_label(&report.verdict), mode);
+
+                    // Capture the analytics row now (verdict known); `call_errored`
+                    // is filled after the tool runs, in the result loop below.
+                    verifications[i] = Some(agent_core::VerificationRecord {
+                        tool_name: call.name.clone(),
+                        args_hash: agent_core::fnv1a_hex(
+                            serde_json::to_string(&call.arguments)
+                                .unwrap_or_default()
+                                .as_bytes(),
+                        ),
+                        goal_hash: goal_hash.clone(),
+                        // Coarse phase-1 task_type: the tool name. A real taxonomy
+                        // is a phase-2 open question (see the design doc).
+                        task_type: call.name.clone(),
+                        verifier_model: report.model.clone(),
+                        verifier_cfg: verifier_cfg.clone(),
+                        verdict: verdict_label(&report.verdict).to_string(),
+                        confidence: report.clamped_confidence(),
+                        latency_ms,
+                        cached: false,
+                        call_errored: None,
+                        revised_after: None,
+                        task_succeeded: None,
+                    });
 
                     match &report.verdict {
                         agent_core::VerifyVerdict::Allow => {}
@@ -916,6 +950,10 @@ impl Agent {
                 // no observation — handle it before the policy/observation match to
                 // avoid the `expect` below. Its feedback message flows through the
                 // same push + record path as any tool result.
+                // The verification outcome proxy: `Some(is_error)` for a call that
+                // actually ran, `None` for one blocked (by the verifier or policy)
+                // and so never executed.
+                let mut call_errored: Option<bool> = None;
                 let msg = if let Some(feedback) = &verifier_feedback[i] {
                     self.metrics.on_tool(&call.name, "verifier_blocked");
                     Message::tool(&call.id, feedback.clone())
@@ -929,6 +967,7 @@ impl Agent {
                             let observation = observations[i]
                                 .take()
                                 .expect("allowed tool call has an observation");
+                            call_errored = Some(observation.is_error);
                             self.metrics.on_tool(
                                 &call.name,
                                 if observation.is_error { "error" } else { "ok" },
@@ -954,6 +993,14 @@ impl Agent {
                 };
                 working.messages.push(msg.clone());
                 self.record("tool", msg).await;
+
+                // Emit the verification record for this call, now that its outcome
+                // proxy is known. Absent for a call the verifier never judged
+                // (policy-denied). Best-effort telemetry, like `record`.
+                if let Some(mut rec) = verifications[i].take() {
+                    rec.call_errored = call_errored;
+                    self.record_verification(iter as u32, rec).await;
+                }
             }
 
             // Keep the working set within budget before the next turn.
@@ -1042,6 +1089,7 @@ impl Agent {
             session_id: self.settings.session_id.clone(),
             usage: None,
             iter: None,
+            verification: None,
         })
         .await;
     }
@@ -1055,6 +1103,23 @@ impl Agent {
             session_id: self.settings.session_id.clone(),
             usage: Some(usage.clone()),
             iter: Some(iter),
+            verification: None,
+        })
+        .await;
+    }
+
+    /// Record one tool-call verification (routed to `agent_verifications` by the
+    /// sink). Telemetry-only, like [`record_usage`](Self::record_usage): a
+    /// dropped sink loses only the analytics row, never the loop.
+    async fn record_verification(&self, iter: u32, rec: agent_core::VerificationRecord) {
+        self.append_event(MemoryEvent {
+            kind: "verification".to_string(),
+            message: Message::assistant(String::new()),
+            ts_ms: now_ms(),
+            session_id: self.settings.session_id.clone(),
+            usage: None,
+            iter: Some(iter),
+            verification: Some(rec),
         })
         .await;
     }
