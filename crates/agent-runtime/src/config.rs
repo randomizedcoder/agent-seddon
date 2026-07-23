@@ -58,6 +58,10 @@ pub struct Config {
     #[serde(default)]
     pub router: RouterCfg,
     #[serde(default)]
+    pub pool: PoolCfg,
+    #[serde(default)]
+    pub review: ReviewCfg,
+    #[serde(default)]
     pub hooks: HooksCfg,
     #[serde(default)]
     pub skills: SkillsCfg,
@@ -258,6 +262,89 @@ fn default_breaker_threshold() -> usize {
 }
 fn default_breaker_cooldown() -> u64 {
     30
+}
+
+/// A health-checked, tiered pool of cheap providers (`docs/design/code-review/llm-pool.md`).
+/// `members` are registered provider names; `tiers` is a parallel list of
+/// `light|medium|heavy` (missing entries default to `medium`). Empty `members`
+/// ⇒ no pool is built, and mode detection degrades to the deterministic prefilter.
+#[derive(Debug, Deserialize)]
+pub struct PoolCfg {
+    #[serde(default)]
+    pub members: Vec<String>,
+    #[serde(default)]
+    pub tiers: Vec<String>,
+    /// Max concurrent members in a fan-out.
+    #[serde(default = "default_pool_fanout")]
+    pub fanout: usize,
+    /// Active liveness probe cadence (0 ⇒ no active probe; clamped [5, 3600]).
+    #[serde(default = "default_probe_interval")]
+    pub probe_interval_secs: u64,
+    /// Per-probe deadline (clamped [1, 60]).
+    #[serde(default = "default_probe_timeout")]
+    pub probe_timeout_secs: u64,
+    #[serde(default = "default_breaker_threshold")]
+    pub failure_threshold: usize,
+    #[serde(default = "default_breaker_cooldown")]
+    pub cooldown_secs: u64,
+}
+
+impl Default for PoolCfg {
+    fn default() -> Self {
+        Self {
+            members: Vec::new(),
+            tiers: Vec::new(),
+            fanout: default_pool_fanout(),
+            probe_interval_secs: default_probe_interval(),
+            probe_timeout_secs: default_probe_timeout(),
+            failure_threshold: default_breaker_threshold(),
+            cooldown_secs: default_breaker_cooldown(),
+        }
+    }
+}
+
+fn default_pool_fanout() -> usize {
+    3
+}
+fn default_probe_interval() -> u64 {
+    15
+}
+fn default_probe_timeout() -> u64 {
+    3
+}
+
+/// Code review flow (`docs/design/code-review/`). `backend` selects the
+/// `ReviewCollector` (`""` off | `local` | `grpc`); `classifier` selects the
+/// `TaskClassifier` (`hybrid` | `""`). `in_loop` enables auto-detecting a review
+/// task mid-conversation and injecting grounded facts.
+#[derive(Debug, Deserialize)]
+pub struct ReviewCfg {
+    #[serde(default)]
+    pub backend: String,
+    #[serde(default = "default_classifier")]
+    pub classifier: String,
+    #[serde(default = "default_review_deadline")]
+    pub deadline_secs: u64,
+    #[serde(default)]
+    pub in_loop: bool,
+}
+
+impl Default for ReviewCfg {
+    fn default() -> Self {
+        Self {
+            backend: String::new(),
+            classifier: default_classifier(),
+            deadline_secs: default_review_deadline(),
+            in_loop: false,
+        }
+    }
+}
+
+fn default_classifier() -> String {
+    "hybrid".to_string()
+}
+fn default_review_deadline() -> u64 {
+    60
 }
 
 /// Live web search (the `WebSearch` seam, parity spec 12). `backends` lists the
@@ -1327,6 +1414,8 @@ impl Config {
             cache: CacheCfg::default(),
             web_search: WebSearchCfg::default(),
             router: RouterCfg::default(),
+            pool: PoolCfg::default(),
+            review: ReviewCfg::default(),
             hooks: HooksCfg::default(),
             skills: SkillsCfg::default(),
             forge: ForgeCfg::default(),

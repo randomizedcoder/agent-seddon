@@ -499,6 +499,100 @@ pub trait LlmProvider: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// Seam: LlmPool (a health-checked, tiered pool of cheap providers)
+// ---------------------------------------------------------------------------
+//
+// The deployment target is a pool of cheap, heterogeneous, possibly-intermittent
+// model endpoints (a colocated GLM, a local MI50, a small RTX 3070). Two things
+// the single-pick `Router` (which is-a failover `LlmProvider`) cannot express and
+// this seam adds: an **active liveness view** (`health`) and a **parallel fan-out**
+// (`complete_all`) so a cheap classification or summary can ask several members at
+// once. Fails **soft** — a dead member is a slot in the result, never a batch
+// failure. See `docs/design/code-review/llm-pool.md`.
+
+/// Capability tier of a pool member — orders members by how much model they are,
+/// so a job can demand a floor (`Heavy` for hard reasoning) or accept anything
+/// cheap (`Light` for a classification vote). `Ord` runs `Light < Medium < Heavy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PoolTier {
+    Light,
+    Medium,
+    Heavy,
+}
+
+impl PoolTier {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PoolTier::Light => "light",
+            PoolTier::Medium => "medium",
+            PoolTier::Heavy => "heavy",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "light" => PoolTier::Light,
+            "medium" => PoolTier::Medium,
+            "heavy" => PoolTier::Heavy,
+            _ => return None,
+        })
+    }
+}
+
+/// Liveness of one pool member, as the pool's active probe currently sees it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoolMemberHealth {
+    pub name: String,
+    pub tier: PoolTier,
+    /// The circuit breaker is closed (the last probe or request succeeded).
+    pub alive: bool,
+    pub consecutive_failures: u32,
+    /// Duration of the most recent probe, for latency accounting.
+    pub last_probe_ms: u32,
+}
+
+/// A snapshot of every member's liveness.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HealthReport {
+    pub members: Vec<PoolMemberHealth>,
+}
+
+/// One member's settled result within a `complete_all` fan-out. Fail-soft: a dead
+/// member yields `error` (a class/status string, never a raw body) with no
+/// `response`, and never aborts the batch. `duration_ms` is the per-member
+/// wall-clock, the unit of the pool's parallelism accounting.
+#[derive(Debug, Clone)]
+pub struct PoolMemberResult {
+    pub member: String,
+    pub duration_ms: u32,
+    pub response: Option<CompletionResponse>,
+    pub error: Option<String>,
+}
+
+/// A pool of cheap providers with active health-checking and both failover
+/// (`complete`) and parallel fan-out (`complete_all`) dispatch. Distinct from
+/// `LlmProvider` because the fan-out and the liveness view have no single-answer
+/// analogue on the provider seam.
+#[async_trait]
+pub trait LlmPool: Send + Sync {
+    fn name(&self) -> &str;
+    /// Current liveness of every member (from the active probe). Cheap, no network.
+    async fn health(&self) -> HealthReport;
+    /// Fan out `req` to up to `fanout` healthy members at or above `tier`,
+    /// concurrently. Fail-soft: each member's outcome is a slot; the batch never
+    /// errors. Callers combine the results (e.g. a vote).
+    async fn complete_all(
+        &self,
+        req: CompletionRequest,
+        tier: PoolTier,
+        fanout: usize,
+    ) -> Vec<PoolMemberResult>;
+    /// Single-answer convenience: failover over the healthy members (Router-style),
+    /// so the pool can also stand in for a plain provider.
+    async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse>;
+}
+
+// ---------------------------------------------------------------------------
 // Seam: Tokenizer + cost model
 // ---------------------------------------------------------------------------
 //
@@ -3185,6 +3279,13 @@ pub trait RepoBackend: Send + Sync {
     ) -> Result<Vec<CommitInfo>>;
     /// All known branches with their resolved head oids.
     async fn branches(&self) -> Result<Vec<(String, Oid)>>;
+    /// The `origin` remote URL, if any. Default `Ok(None)` — a backend that cannot
+    /// (or a remote gRPC client that does not forward it) reports "unknown", never
+    /// an error. The review flow's git-state collector reads this; it is **hashed**
+    /// before it reaches a record, never stored or logged raw.
+    async fn remote_url(&self) -> Result<Option<String>> {
+        Ok(None)
+    }
 
     // --- mirror / worktree / ref lifecycle (side-effecting, session-scoped) ---
 
@@ -3202,6 +3303,250 @@ pub trait RepoBackend: Send + Sync {
     async fn checkpoint(&self, worktree_id: &str, name: &str) -> Result<Checkpoint>;
     /// Push a checkpoint to a remote ref. Policy-gated — the only sandbox escape.
     async fn push(&self, checkpoint: &Checkpoint, remote_ref: &str) -> Result<()>;
+}
+
+// ---------------------------------------------------------------------------
+// Seam: Code review (task-mode classification + grounded fact collection)
+// ---------------------------------------------------------------------------
+//
+// When a task turns into a code review, establish facts deterministically first
+// (file set, changed files, git state, …) so the model context is grounded and
+// cannot hallucinate the codebase. `TaskClassifier` detects the review mode;
+// `ReviewCollector` runs a concurrent fan-out of collectors into a grounded
+// `ReviewFacts` bundle. See `docs/design/code-review/`.
+
+/// A coarse task mode. Only `Review` is wired to a flow today; the rest name the
+/// taxonomy so a classifier can grow into them (and back-fill the verifier's
+/// `task_type` placeholder later).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskMode {
+    Review,
+    Implement,
+    Design,
+    Debug,
+    Explain,
+    #[default]
+    Other,
+}
+
+impl TaskMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TaskMode::Review => "review",
+            TaskMode::Implement => "implement",
+            TaskMode::Design => "design",
+            TaskMode::Debug => "debug",
+            TaskMode::Explain => "explain",
+            TaskMode::Other => "other",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "review" => TaskMode::Review,
+            "implement" => TaskMode::Implement,
+            "design" => TaskMode::Design,
+            "debug" => TaskMode::Debug,
+            "explain" => TaskMode::Explain,
+            "other" => TaskMode::Other,
+            _ => return None,
+        })
+    }
+}
+
+/// What a classifier saw the incoming work as. `confidence` is untrusted (a pool
+/// vote's self-report) — clamp before weighting.
+#[derive(Debug, Clone)]
+pub struct ModeVerdict {
+    pub mode: TaskMode,
+    pub confidence: f32,
+    pub reason: String,
+}
+
+/// Context a classifier judges. Borrowed so the runtime builds it cheaply.
+pub struct ClassifyCtx<'a> {
+    pub prompt: &'a str,
+    pub history: &'a [Message],
+}
+
+/// Detects the task mode of incoming work.
+#[async_trait]
+pub trait TaskClassifier: Send + Sync {
+    fn name(&self) -> &str;
+    /// Classify the incoming work. Fails **safe** — an unsure classifier returns
+    /// `TaskMode::Other` (the normal loop), never a spurious `Review`.
+    async fn classify(&self, ctx: &ClassifyCtx<'_>) -> ModeVerdict;
+}
+
+/// What to review.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewTarget {
+    /// A pull/merge request number (resolved to base/head via the `Forge` seam).
+    Pr(u64),
+    /// A branch, diffed against the repo's default branch.
+    Branch(String),
+    /// The current branch vs the default branch (the in-loop hand-off target).
+    WorkingTree,
+}
+
+/// One changed file in a review's change set.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChangedFile {
+    pub path: PathBuf,
+    pub change: ChangeKind,
+    pub additions: u32,
+    pub deletions: u32,
+    pub is_binary: bool,
+    pub lang: String,
+}
+
+/// The set of files a review touches, plus repo-size context.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ChangeSet {
+    pub base_rev: String,
+    pub head_rev: String,
+    pub files: Vec<ChangedFile>,
+    pub repo_file_count: u32,
+}
+
+/// Which forge a remote points at (parsed, closed set; fails closed to `Other`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ForgeHost {
+    GitHub,
+    GitLab,
+    Other,
+    #[default]
+    None,
+}
+
+impl ForgeHost {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ForgeHost::GitHub => "github",
+            ForgeHost::GitLab => "gitlab",
+            ForgeHost::Other => "other",
+            ForgeHost::None => "none",
+        }
+    }
+}
+
+/// Whether the repo is a clone or a fork (heuristic: an `upstream/*` remote ⇒ fork).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RepoRelation {
+    Clone,
+    Fork,
+    #[default]
+    Unknown,
+}
+
+impl RepoRelation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RepoRelation::Clone => "clone",
+            RepoRelation::Fork => "fork",
+            RepoRelation::Unknown => "unknown",
+        }
+    }
+}
+
+/// The repo's primary language/project type (from manifest-file probe + tally).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RepoLanguage {
+    Go,
+    Rust,
+    Mixed,
+    #[default]
+    Unknown,
+}
+
+impl RepoLanguage {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RepoLanguage::Go => "go",
+            RepoLanguage::Rust => "rust",
+            RepoLanguage::Mixed => "mixed",
+            RepoLanguage::Unknown => "unknown",
+        }
+    }
+}
+
+/// Durable, repo-identity facts (memory-worthy across reviews). The remote URL is
+/// carried only as a hash — never the raw URL.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GitState {
+    pub remote_url_hash: String,
+    pub host: ForgeHost,
+    pub relationship: RepoRelation,
+    pub default_branch: String,
+    pub project: RepoLanguage,
+}
+
+/// Outcome of one fact collector within the fan-out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CollectStatus {
+    Ok,
+    Partial,
+    Skipped,
+    Failed,
+}
+
+impl CollectStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CollectStatus::Ok => "ok",
+            CollectStatus::Partial => "partial",
+            CollectStatus::Skipped => "skipped",
+            CollectStatus::Failed => "failed",
+        }
+    }
+}
+
+/// A collector's self-describing result envelope (status + timing), so the
+/// orchestrator assembles without inference and the parallelism accounting is free.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollectorStatus {
+    pub collector: String,
+    pub status: CollectStatus,
+    /// Bounded; carries the reason for a skipped/failed collector, no raw content.
+    #[serde(default)]
+    pub reason: String,
+    pub duration_ms: u32,
+}
+
+/// Run-level metadata for a review: identity, revs, timing, per-collector status.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReviewMeta {
+    /// fnv1a of the remote/root — an identity key, never the URL.
+    pub repo_hash: String,
+    pub base_rev: String,
+    pub head_rev: String,
+    /// Wall-clock of the whole fan-out.
+    pub total_ms: u32,
+    pub collectors: Vec<CollectorStatus>,
+}
+
+/// The grounded fact bundle a reviewer reasons over. Everything here is a hard
+/// fact from a tool. Later increments add analysis / call-graph / style /
+/// summaries as additional fields.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReviewFacts {
+    pub meta: ReviewMeta,
+    pub change: ChangeSet,
+    pub git_state: GitState,
+}
+
+/// Runs a fan-out of deterministic collectors into a grounded [`ReviewFacts`].
+#[async_trait]
+pub trait ReviewCollector: Send + Sync {
+    fn name(&self) -> &str;
+    /// Collect grounded facts for a target. Fails **soft** — always assembles a
+    /// bundle from whatever collectors succeeded; only an unresolvable target is a
+    /// hard error.
+    async fn collect(&self, target: &ReviewTarget) -> Result<ReviewFacts>;
 }
 
 #[cfg(test)]

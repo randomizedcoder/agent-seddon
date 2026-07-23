@@ -25,3 +25,11 @@ pub use anthropic::{AnthropicConfig, AnthropicProvider};
 pub mod router;
 #[cfg(feature = "provider-router")]
 pub use router::{Candidate, RouteEvent, RoutePolicy, Router};
+
+/// A health-checked, tiered pool of cheap providers with an active liveness probe
+/// and parallel fan-out (`docs/design/code-review/llm-pool.md`). Reuses the
+/// router's circuit breaker, so `provider-pool` implies `provider-router`.
+#[cfg(feature = "provider-pool")]
+pub mod pool;
+#[cfg(feature = "provider-pool")]
+pub use pool::{PoolEvent, PoolObserver, PoolProvider, PoolSpec};

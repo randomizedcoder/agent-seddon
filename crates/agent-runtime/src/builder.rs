@@ -555,6 +555,94 @@ pub async fn build_agent_with(
         );
     }
 
+    // LLM pool + review seams (docs/design/code-review/). Built here — after the
+    // repo/search/forge seams and while `base_ctx` (which borrows `cfg`) is still
+    // usable, i.e. before `settings` moves `cfg.agent.system_prompt`.
+    #[cfg(feature = "provider-pool")]
+    let llm_pool_seam: Option<Arc<dyn agent_core::LlmPool>> = if cfg.pool.members.is_empty() {
+        None
+    } else {
+        let mut specs = Vec::new();
+        for (i, name) in cfg.pool.members.iter().enumerate() {
+            if name == "pool" {
+                anyhow::bail!("[pool] members must not include `pool` itself");
+            }
+            let inner = registry.build_provider(name, &base_ctx)?;
+            let tier = cfg
+                .pool
+                .tiers
+                .get(i)
+                .and_then(|t| agent_core::PoolTier::parse(t))
+                .unwrap_or(agent_core::PoolTier::Medium);
+            specs.push(agent_providers::PoolSpec {
+                candidate: agent_providers::Candidate {
+                    name: name.clone(),
+                    provider: crate::metered::provider(inner, metrics.clone(), name),
+                },
+                tier,
+                cost: 0.0,
+            });
+        }
+        let m = metrics.clone();
+        let pool = agent_providers::PoolProvider::new("pool", specs)?
+            .with_breaker(
+                cfg.pool.failure_threshold,
+                cfg.pool.cooldown_secs.saturating_mul(1_000),
+            )
+            .with_fanout(cfg.pool.fanout)
+            .with_observer(Arc::new(move |ev| {
+                crate::metered::record_pool_event(&m, ev)
+            }))
+            .with_probe(cfg.pool.probe_interval_secs, cfg.pool.probe_timeout_secs);
+        Some(Arc::new(pool) as Arc<dyn agent_core::LlmPool>)
+    };
+    #[cfg(not(feature = "provider-pool"))]
+    let llm_pool_seam: Option<Arc<dyn agent_core::LlmPool>> = None;
+
+    #[cfg(feature = "review")]
+    let task_classifier_seam: Option<Arc<dyn agent_core::TaskClassifier>> =
+        if cfg.review.classifier == "hybrid" {
+            Some(Arc::new(agent_review::HybridClassifier::new(
+                llm_pool_seam.clone(),
+            )))
+        } else {
+            None
+        };
+    #[cfg(not(feature = "review"))]
+    let task_classifier_seam: Option<Arc<dyn agent_core::TaskClassifier>> = None;
+
+    #[cfg(feature = "review")]
+    let review_collector_seam: Option<Arc<dyn agent_core::ReviewCollector>> =
+        if cfg.review.backend == "local" {
+            #[cfg(feature = "search")]
+            let review_search = Some(search_dispatch.clone() as Arc<dyn agent_core::SearchBackend>);
+            #[cfg(not(feature = "search"))]
+            let review_search: Option<Arc<dyn agent_core::SearchBackend>> = None;
+            #[cfg(feature = "forge")]
+            let review_forge = shared_forge.clone();
+            #[cfg(not(feature = "forge"))]
+            let review_forge: Option<Arc<dyn agent_core::Forge>> = None;
+            let m = metrics.clone();
+            // Root the collector at the same repo the RepoBackend uses (the git
+            // root of the process cwd), so the file set and the diff agree.
+            let review_root = crate::git::git_paths(&cfg)?.0;
+            let orch = agent_review::ReviewOrchestrator::new(
+                review_root,
+                repo_backend.clone(),
+                review_search,
+                review_forge,
+            )
+            .with_observer(Arc::new(move |ev| {
+                crate::metered::record_review_event(&m, ev)
+            }))
+            .with_deadline(std::time::Duration::from_secs(cfg.review.deadline_secs));
+            Some(Arc::new(orch) as Arc<dyn agent_core::ReviewCollector>)
+        } else {
+            None
+        };
+    #[cfg(not(feature = "review"))]
+    let review_collector_seam: Option<Arc<dyn agent_core::ReviewCollector>> = None;
+
     let settings = Settings {
         max_iterations: cfg.agent.max_iterations,
         max_tokens: cfg.agent.max_tokens,
@@ -575,6 +663,7 @@ pub async fn build_agent_with(
         session_id,
         context_prepend,
         context_append,
+        review_in_loop: cfg.review.in_loop,
     };
 
     // Subagents: register a `delegate` tool whose children reuse the worker tool
@@ -619,6 +708,18 @@ pub async fn build_agent_with(
     let agent = agent.with_search(search_dispatch.clone() as Arc<dyn agent_core::SearchBackend>);
     #[cfg(feature = "git")]
     let agent = agent.with_repo(repo_backend);
+    let agent = match llm_pool_seam {
+        Some(p) => agent.with_llm_pool(p),
+        None => agent,
+    };
+    let agent = match task_classifier_seam {
+        Some(c) => agent.with_task_classifier(c),
+        None => agent,
+    };
+    let agent = match review_collector_seam {
+        Some(r) => agent.with_review_collector(r),
+        None => agent,
+    };
     // Hold the shared scanner so `agent --serve-scanner` can host it.
     let agent = match shared_scanner.clone() {
         Some(s) => agent.with_scanner(s),

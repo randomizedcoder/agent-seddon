@@ -74,6 +74,17 @@ pub struct Metrics {
     forge_seconds: HistogramVec,
     hook_dispatches: IntCounterVec,
     route_decisions: IntCounterVec,
+    // LLM pool (docs/design/code-review/llm-pool.md).
+    pool_members_alive: IntGaugeVec,
+    pool_probe_seconds: HistogramVec,
+    pool_dispatch_seconds: HistogramVec,
+    pool_member_calls: IntCounterVec,
+    // Code review flow (docs/design/code-review/).
+    review_collect_seconds: Histogram,
+    review_collector_seconds: HistogramVec,
+    review_collectors: IntCounterVec,
+    review_change_files: Histogram,
+    review_gitstate: IntCounterVec,
     web_searches: IntCounterVec,
     web_search_seconds: HistogramVec,
     web_search_results: IntCounterVec,
@@ -285,6 +296,69 @@ impl Metrics {
                 "Router decisions, by target provider and outcome",
             ),
             &["target", "decision"],
+        )
+        .unwrap();
+        let pool_members_alive = IntGaugeVec::new(
+            Opts::new("agent_pool_members_alive", "Live LLM pool members, by tier"),
+            &["tier"],
+        )
+        .unwrap();
+        let pool_probe_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "agent_pool_probe_duration_seconds",
+                "LLM pool probe latency",
+            ),
+            &["member", "outcome"],
+        )
+        .unwrap();
+        let pool_dispatch_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "agent_pool_dispatch_duration_seconds",
+                "LLM pool dispatch latency, by mode",
+            ),
+            &["mode"],
+        )
+        .unwrap();
+        let pool_member_calls = IntCounterVec::new(
+            Opts::new(
+                "agent_pool_member_calls_total",
+                "LLM pool member calls, by member and outcome",
+            ),
+            &["member", "outcome"],
+        )
+        .unwrap();
+        let review_collect_seconds = Histogram::with_opts(HistogramOpts::new(
+            "agent_review_collect_duration_seconds",
+            "Whole review fact-collection fan-out wall-clock",
+        ))
+        .unwrap();
+        let review_collector_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "agent_review_collector_duration_seconds",
+                "Per-collector review fact-collection latency",
+            ),
+            &["collector", "status"],
+        )
+        .unwrap();
+        let review_collectors = IntCounterVec::new(
+            Opts::new(
+                "agent_review_collectors_total",
+                "Review fact collectors, by collector and status",
+            ),
+            &["collector", "status"],
+        )
+        .unwrap();
+        let review_change_files = Histogram::with_opts(HistogramOpts::new(
+            "agent_review_change_files",
+            "Changed-file count in a review's change set",
+        ))
+        .unwrap();
+        let review_gitstate = IntCounterVec::new(
+            Opts::new(
+                "agent_review_gitstate_total",
+                "Review git-state facts, by relationship, host and project",
+            ),
+            &["relationship", "host", "project"],
         )
         .unwrap();
         let web_searches = IntCounterVec::new(
@@ -683,6 +757,15 @@ impl Metrics {
             Box::new(forge_seconds.clone()),
             Box::new(hook_dispatches.clone()),
             Box::new(route_decisions.clone()),
+            Box::new(pool_members_alive.clone()),
+            Box::new(pool_probe_seconds.clone()),
+            Box::new(pool_dispatch_seconds.clone()),
+            Box::new(pool_member_calls.clone()),
+            Box::new(review_collect_seconds.clone()),
+            Box::new(review_collector_seconds.clone()),
+            Box::new(review_collectors.clone()),
+            Box::new(review_change_files.clone()),
+            Box::new(review_gitstate.clone()),
             Box::new(web_searches.clone()),
             Box::new(web_search_seconds.clone()),
             Box::new(web_search_results.clone()),
@@ -765,6 +848,15 @@ impl Metrics {
             forge_seconds,
             hook_dispatches,
             route_decisions,
+            pool_members_alive,
+            pool_probe_seconds,
+            pool_dispatch_seconds,
+            pool_member_calls,
+            review_collect_seconds,
+            review_collector_seconds,
+            review_collectors,
+            review_change_files,
+            review_gitstate,
             web_searches,
             web_search_seconds,
             web_search_results,
@@ -902,6 +994,51 @@ impl Metrics {
     pub fn on_route_decision(&self, target: &str, decision: &str) {
         self.route_decisions
             .with_label_values(&[target, decision])
+            .inc();
+    }
+    /// LLM pool: set the live-member gauge for a tier.
+    pub fn set_pool_members_alive(&self, tier: &str, n: i64) {
+        self.pool_members_alive.with_label_values(&[tier]).set(n);
+    }
+    /// LLM pool: one member probe (outcome `live`/`dead`) and its latency.
+    pub fn on_pool_probe(&self, member: &str, outcome: &str, seconds: f64) {
+        self.pool_probe_seconds
+            .with_label_values(&[member, outcome])
+            .observe(seconds);
+    }
+    /// LLM pool: one dispatch (`one`/`all`) and its wall-clock.
+    pub fn on_pool_dispatch(&self, mode: &str, seconds: f64) {
+        self.pool_dispatch_seconds
+            .with_label_values(&[mode])
+            .observe(seconds);
+    }
+    /// LLM pool: one member call outcome (`ok`/`error`).
+    pub fn on_pool_member_call(&self, member: &str, outcome: &str) {
+        self.pool_member_calls
+            .with_label_values(&[member, outcome])
+            .inc();
+    }
+    /// Review: the whole fact-collection fan-out wall-clock.
+    pub fn on_review_collect(&self, seconds: f64) {
+        self.review_collect_seconds.observe(seconds);
+    }
+    /// Review: one collector's status + latency (`collector`, `status`).
+    pub fn on_review_collector(&self, collector: &str, status: &str, seconds: f64) {
+        self.review_collectors
+            .with_label_values(&[collector, status])
+            .inc();
+        self.review_collector_seconds
+            .with_label_values(&[collector, status])
+            .observe(seconds);
+    }
+    /// Review: the changed-file count of one change set.
+    pub fn on_review_change_files(&self, n: u64) {
+        self.review_change_files.observe(n as f64);
+    }
+    /// Review: one git-state fact triple.
+    pub fn on_review_gitstate(&self, relationship: &str, host: &str, project: &str) {
+        self.review_gitstate
+            .with_label_values(&[relationship, host, project])
             .inc();
     }
     /// One web search: outcome, latency, and result count (parity spec 12).

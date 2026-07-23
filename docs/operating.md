@@ -48,6 +48,18 @@ into the conversation on demand.
 `RUST_LOG=debug` shows the model's `reasoning_content` length and compaction
 decisions.
 
+### Code review (`agent --review`)
+
+`agent --review <PR#|branch|.>` collects **grounded, tool-derived facts** about a
+change — the repo file set, the changed files + diff, and the git state (remote
+host, fork-vs-clone, default branch, language) — and prints them, so a review
+starts from fact rather than a model's guess about the codebase. `.` (or
+`worktree`) reviews the current branch against the default branch; a number is a
+PR (resolved via the `Forge` seam); anything else is a branch name. Enable it with
+`[review] backend = "local"`; a `[pool]` of cheap models powers the mode-detection
+vote and (with `[review] in_loop = true`) an in-conversation hand-off. Design:
+[`design/code-review/`](design/code-review/README.md).
+
 ## Configuration
 
 Wiring lives in [`../config/agent.toml`](../config/agent.toml). The string fields

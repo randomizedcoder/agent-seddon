@@ -85,8 +85,10 @@ impl CliBackend {
     }
 
     /// The upstream URL for the mirror: the configured `remote`, else the working
-    /// checkout's `origin` URL. `None` if neither is available.
-    async fn resolve_remote_url(&self) -> Option<String> {
+    /// checkout's `origin` URL. `None` if neither is available. `pub` so the
+    /// review flow's git-state collector can read it via the `RepoBackend::remote_url`
+    /// trait method (which this backs).
+    pub async fn resolve_remote_url(&self) -> Option<String> {
         if !self.remote.is_empty() {
             return Some(self.remote.clone());
         }
@@ -523,6 +525,10 @@ impl RepoBackend for CliBackend {
             }
         }
         Ok(branches)
+    }
+
+    async fn remote_url(&self) -> Result<Option<String>> {
+        Ok(self.resolve_remote_url().await)
     }
 
     async fn status(&self) -> Result<RepoStatus> {
