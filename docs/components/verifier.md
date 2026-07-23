@@ -39,18 +39,27 @@ correction back to the model, which retries, rather than hard-failing the turn. 
 verifier **fails open** like the `Scanner` — one that cannot form an opinion
 returns `Allow` rather than blocking the loop.
 
-## Status: shadow mode (increment 1)
+## Modes: shadow and enforce
 
-Today the verifier runs in **shadow**: it evaluates each *allowed* tool call and
-its verdict is recorded on a `verifier` span, but it does **not** change the
-loop's behaviour — a `Revise`/`Deny` does not yet block or rewrite the call. This
-is the measurement-first first step: prove the verifier produces sane verdicts
-before letting it enforce. Only calls the `Policy` already allowed are shadowed
-(a policy-denied call is never verified).
+`[verifier] mode` gates whether a non-allow verdict changes behaviour:
 
-Follow-ups, in order: enforcement (revise/deny affecting the loop), an LLM-backed
-verifier, an ensemble with per-model trust-weighting, and ClickHouse recording of
-verdicts + outcomes. gRPC serviceability is additive and remote-only (see the
+- **`shadow`** (default) — the verifier evaluates each *allowed* call and its
+  verdict is recorded (a `verifier` span + the `agent_verifier_verdicts_total`
+  metric), but behaviour is unchanged: a `Revise`/`Deny` does not block or rewrite
+  the call. Turning a verifier on stays safe. This is the measurement-first
+  default — prove the verifier produces sane verdicts before letting it enforce.
+- **`enforce`** — a `Revise`/`Deny` **blocks** the call (it never runs) and its
+  message is fed back to the model as the tool result, so the model can reissue a
+  corrected call. `Revise`'s hint is phrased as guidance; `Deny` as a block.
+
+Only calls the `Policy` already allowed reach the verifier (a policy-denied call
+is never verified). Every verdict increments `agent_verifier_verdicts_total`
+(labels: `verifier`, `verdict`, `mode`).
+
+Follow-ups, in order: an LLM-backed verifier, an ensemble with per-model
+trust-weighting, and a dedicated `agent_verifications` ClickHouse table recording
+verdicts + outcome proxies (shadow verdicts already reach `agent_logs` via the
+tracing layer meanwhile). gRPC serviceability is additive and remote-only (see the
 design doc).
 
 ## Backends

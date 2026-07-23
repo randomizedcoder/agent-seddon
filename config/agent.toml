@@ -251,12 +251,18 @@ scope       = "context"
 #   "schema" — deterministic, model-free: validate the call's arguments against
 #              the tool's JSON Schema and ask the model to revise on a mismatch
 #              (e.g. a required argument missing). No model, always safe.
-# NOTE increment 1 runs the verifier in SHADOW: the verdict is logged, not yet
-# enforced. Enforcement (revise/deny affecting the loop), an LLM-backed verifier,
-# an ensemble, and ClickHouse recording of verdicts are follow-ups.
-# See docs/design/tool-call-verification.md and docs/components/verifier.md.
+# `mode` gates whether a non-allow verdict changes behaviour:
+#   "shadow"  (default) — the verdict is only observed (logged + the
+#                         agent_verifier_verdicts_total metric). Turning a
+#                         verifier on stays safe.
+#   "enforce" — a revise/deny BLOCKS the call and feeds its message back to the
+#               model, which can reissue a corrected call.
+# An LLM-backed verifier, an ensemble, and a dedicated ClickHouse verdict table
+# are follow-ups. See docs/design/tool-call-verification.md and
+# docs/components/verifier.md.
 [verifier]
 backend = ""
+mode    = "shadow"
 
 # Prompt-cache breakpoint placement (the CacheStrategy seam). A turn is dominated
 # by a stable prefix (system prompt + tool defs + history); providers cache it,

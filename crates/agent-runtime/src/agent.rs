@@ -64,10 +64,12 @@ pub struct Agent {
     /// can be hosted over gRPC (`agent --serve-scanner`); the loop reaches it
     /// through the policy guard and the `skill_write` / `session_export` tools.
     scanner: Option<Arc<dyn agent_core::Scanner>>,
-    /// The tool-call verifier, if the `verifier` seam is wired. Increment 1 runs
-    /// it in SHADOW: the verdict is logged, not enforced. See
+    /// The tool-call verifier, if the `verifier` seam is wired. See
     /// docs/design/tool-call-verification.md.
     verifier: Option<Arc<dyn agent_core::Verifier>>,
+    /// `[verifier] mode = "enforce"`: a `Revise`/`Deny` verdict blocks the call and
+    /// feeds its message back. Default (`false`) is shadow — verdict observed only.
+    verifier_enforce: bool,
     /// The tokenizer, if wired. Held so it can be hosted over gRPC
     /// (`agent --serve-tokenizer`); the loop reaches it through the context
     /// strategy's budget calculation.
@@ -159,6 +161,7 @@ impl Agent {
             repo: None,
             scanner: None,
             verifier: None,
+            verifier_enforce: false,
             tokenizer: None,
             web: None,
             web_search: None,
@@ -536,10 +539,12 @@ impl Agent {
         self
     }
 
-    /// Attach a tool-call verifier (the `verifier` seam). Runs in shadow in
-    /// increment 1: verdicts are logged, not enforced.
-    pub fn with_verifier(mut self, v: Arc<dyn agent_core::Verifier>) -> Self {
+    /// Attach a tool-call verifier (the `verifier` seam). `enforce = false` runs
+    /// it in shadow (verdict logged/counted, behaviour unchanged); `true` blocks a
+    /// `Revise`/`Deny`'d call and feeds its message back to the model.
+    pub fn with_verifier(mut self, v: Arc<dyn agent_core::Verifier>, enforce: bool) -> Self {
         self.verifier = Some(v);
+        self.verifier_enforce = enforce;
         self
     }
 
@@ -762,12 +767,18 @@ impl Agent {
                 decisions.push(dec);
             }
 
-            // Tool-call verification (SHADOW mode — increment 1): evaluate each
-            // allowed call and log the verdict, without changing behaviour.
-            // Enforcement (Revise/Deny affecting the loop) and the ClickHouse
-            // record land in a follow-up. See
-            // docs/design/tool-call-verification.md.
+            // Tool-call verification: judge each allowed call. In SHADOW the
+            // verdict is only observed (logged + counted); in ENFORCE a Revise/Deny
+            // blocks the call and its message is fed back to the model so it can
+            // reissue a corrected one. `verifier_feedback[i]` is Some(message) for a
+            // call blocked in enforce mode. See docs/design/tool-call-verification.md.
+            let mut verifier_feedback: Vec<Option<String>> = vec![None; assistant.tool_calls.len()];
             if let Some(verifier) = &self.verifier {
+                let mode = if self.verifier_enforce {
+                    "enforce"
+                } else {
+                    "shadow"
+                };
                 // Best-effort goal: the first user message. `run_loop` does not
                 // carry the goal explicitly, and the only shipped verifier
                 // (schema) does not use it — so this avoids a signature change.
@@ -777,9 +788,9 @@ impl Agent {
                     .find(|m| matches!(m.role, agent_core::Role::User))
                     .map(|m| m.content_text())
                     .unwrap_or_default();
-                for (call, dec) in assistant.tool_calls.iter().zip(&decisions) {
+                for (i, (call, dec)) in assistant.tool_calls.iter().zip(&decisions).enumerate() {
                     if !matches!(dec, Decision::Allow) {
-                        continue; // only shadow the calls that would actually run
+                        continue; // only verify the calls that would actually run
                     }
                     // A `verifier` span with recorded fields, mirroring
                     // `policy.authorize` — the verdict lands on the span while it is
@@ -797,29 +808,51 @@ impl Agent {
                         history: &working.messages,
                         tool_schema: tool_schemas.iter().find(|s| s.name == call.name),
                     };
-                    async {
-                        let report = verifier.verify(&ctx).await;
-                        let (verdict, hint) = match &report.verdict {
-                            agent_core::VerifyVerdict::Allow => ("allow", String::new()),
-                            agent_core::VerifyVerdict::Revise(h) => ("revise", h.clone()),
-                            agent_core::VerifyVerdict::Deny(h) => ("deny", h.clone()),
-                        };
+                    let report = async {
+                        let r = verifier.verify(&ctx).await;
                         let s = tracing::Span::current();
-                        s.record("verifier", report.model.as_str());
-                        s.record("verdict", verdict);
-                        // SHADOW: the verdict is only observed. A non-allow verdict
-                        // logs its hint but does NOT block or revise the call yet —
-                        // enforcement is a follow-up increment.
-                        if !hint.is_empty() {
-                            tracing::info!(
-                                confidence = report.clamped_confidence() as f64,
-                                %hint,
-                                "verifier (shadow) would suggest a revision"
-                            );
-                        }
+                        s.record("verifier", r.model.as_str());
+                        s.record("verdict", verdict_label(&r.verdict));
+                        r
                     }
                     .instrument(span)
                     .await;
+
+                    self.metrics
+                        .on_verifier(&report.model, verdict_label(&report.verdict), mode);
+
+                    match &report.verdict {
+                        agent_core::VerifyVerdict::Allow => {}
+                        agent_core::VerifyVerdict::Revise(h) => {
+                            if self.verifier_enforce {
+                                verifier_feedback[i] = Some(format!(
+                                    "the `{}` call was not run — the verifier asks you to \
+                                     revise it: {h}",
+                                    call.name
+                                ));
+                            } else {
+                                tracing::info!(
+                                    confidence = report.clamped_confidence() as f64,
+                                    hint = %h,
+                                    "verifier (shadow) would ask for a revision"
+                                );
+                            }
+                        }
+                        agent_core::VerifyVerdict::Deny(r) => {
+                            if self.verifier_enforce {
+                                verifier_feedback[i] = Some(format!(
+                                    "the `{}` call was blocked by the verifier: {r}",
+                                    call.name
+                                ));
+                            } else {
+                                tracing::info!(
+                                    confidence = report.clamped_confidence() as f64,
+                                    reason = %r,
+                                    "verifier (shadow) would deny"
+                                );
+                            }
+                        }
+                    }
                 }
             }
 
@@ -834,11 +867,18 @@ impl Agent {
                 .tool_calls
                 .iter()
                 .zip(&decisions)
-                .map(|(call, dec)| {
+                .zip(&verifier_feedback)
+                .map(|((call, dec), vfb)| {
                     let tools = &self.tools;
                     let cwd = tool_ctx.cwd.clone();
+                    // A call the verifier blocked (enforce mode) does not run — its
+                    // feedback message is produced in the result loop below.
+                    let blocked = vfb.is_some();
                     let span = tracing::info_span!("tool.execute", iter, tool = %call.name);
                     async move {
+                        if blocked {
+                            return None;
+                        }
                         match dec {
                             Decision::Deny(_) => None,
                             Decision::Allow => Some(match tools.get(&call.name) {
@@ -872,35 +912,44 @@ impl Agent {
             };
 
             for (i, call) in assistant.tool_calls.iter().enumerate() {
-                let msg = match &decisions[i] {
-                    Decision::Deny(reason) => {
-                        self.metrics.on_tool(&call.name, "denied");
-                        Message::tool(&call.id, format!("denied by policy: {reason}"))
-                    }
-                    Decision::Allow => {
-                        let observation = observations[i]
-                            .take()
-                            .expect("allowed tool call has an observation");
-                        self.metrics.on_tool(
-                            &call.name,
-                            if observation.is_error { "error" } else { "ok" },
-                        );
-                        tracing::info!(
-                            tool = %call.name,
-                            is_error = observation.is_error,
-                            // Total payload, not just the text: a tool returning
-                            // an image would otherwise look ~free in telemetry.
-                            bytes = observation_bytes(&observation),
-                            media = observation.blocks.len(),
-                            "tool result"
-                        );
-                        if !self.hooks.is_empty() {
-                            self.hooks.post_tool(call, &observation).await;
+                // A verifier-blocked call (enforce mode) never executed, so it has
+                // no observation — handle it before the policy/observation match to
+                // avoid the `expect` below. Its feedback message flows through the
+                // same push + record path as any tool result.
+                let msg = if let Some(feedback) = &verifier_feedback[i] {
+                    self.metrics.on_tool(&call.name, "verifier_blocked");
+                    Message::tool(&call.id, feedback.clone())
+                } else {
+                    match &decisions[i] {
+                        Decision::Deny(reason) => {
+                            self.metrics.on_tool(&call.name, "denied");
+                            Message::tool(&call.id, format!("denied by policy: {reason}"))
                         }
-                        // Move the blocks through rather than flattening to text,
-                        // so a tool that produced an image (a screenshot, a PNG
-                        // read off disk) reaches the next request intact.
-                        Message::tool_with_blocks(&call.id, observation.into_blocks())
+                        Decision::Allow => {
+                            let observation = observations[i]
+                                .take()
+                                .expect("allowed tool call has an observation");
+                            self.metrics.on_tool(
+                                &call.name,
+                                if observation.is_error { "error" } else { "ok" },
+                            );
+                            tracing::info!(
+                                tool = %call.name,
+                                is_error = observation.is_error,
+                                // Total payload, not just the text: a tool returning
+                                // an image would otherwise look ~free in telemetry.
+                                bytes = observation_bytes(&observation),
+                                media = observation.blocks.len(),
+                                "tool result"
+                            );
+                            if !self.hooks.is_empty() {
+                                self.hooks.post_tool(call, &observation).await;
+                            }
+                            // Move the blocks through rather than flattening to text,
+                            // so a tool that produced an image (a screenshot, a PNG
+                            // read off disk) reaches the next request intact.
+                            Message::tool_with_blocks(&call.id, observation.into_blocks())
+                        }
                     }
                 };
                 working.messages.push(msg.clone());
@@ -1202,6 +1251,15 @@ fn now_ms() -> u64 {
 
 /// Total bytes an observation carries — its text plus any media payload. Used
 /// for telemetry so an image-bearing result isn't reported as near-zero.
+/// The metric/span label for a verifier verdict (a bounded enum, never free text).
+fn verdict_label(v: &agent_core::VerifyVerdict) -> &'static str {
+    match v {
+        agent_core::VerifyVerdict::Allow => "allow",
+        agent_core::VerifyVerdict::Revise(_) => "revise",
+        agent_core::VerifyVerdict::Deny(_) => "deny",
+    }
+}
+
 fn observation_bytes(o: &agent_core::Observation) -> usize {
     o.content.len()
         + o.blocks

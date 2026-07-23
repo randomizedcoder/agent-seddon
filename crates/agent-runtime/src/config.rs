@@ -581,12 +581,31 @@ fn default_tasks_backend() -> String {
 /// Tool-call verifier (the `Verifier` seam — a correctness gate on a requested
 /// tool call, checked before it runs). `backend` selects the impl and defaults to
 /// empty ⇒ **off** (no verifier, no cost). `"schema"` is the deterministic,
-/// model-free argument/schema check. Increment 1 runs in shadow: the verdict is
-/// logged, not yet enforced. See docs/design/tool-call-verification.md.
-#[derive(Debug, Deserialize, Default)]
+/// model-free argument/schema check. `mode` gates whether a non-allow verdict
+/// changes behaviour:
+/// `"shadow"` (default) observes the verdict only; `"enforce"` blocks a
+/// `Revise`/`Deny`'d call and feeds its message back to the model, which can
+/// reissue a corrected call. Turning a verifier on stays safe (shadow); enforcing
+/// is a deliberate second step. See docs/design/tool-call-verification.md.
+#[derive(Debug, Deserialize)]
 pub struct VerifierCfg {
     #[serde(default)]
     pub backend: String,
+    #[serde(default = "default_verifier_mode")]
+    pub mode: String,
+}
+
+impl Default for VerifierCfg {
+    fn default() -> Self {
+        Self {
+            backend: String::new(),
+            mode: default_verifier_mode(),
+        }
+    }
+}
+
+fn default_verifier_mode() -> String {
+    "shadow".to_string()
 }
 
 /// The `web_fetch` tool (the `WebBackend` seam, parity spec 11). `backend`

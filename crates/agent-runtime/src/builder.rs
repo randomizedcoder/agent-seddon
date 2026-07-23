@@ -516,7 +516,9 @@ pub async fn build_agent_with(
         .context("building policy")?;
     // Tool-call verifier (the `verifier` seam): built here while `full_ctx` (which
     // borrows `cfg`) is still valid; attached to the agent further down. Empty
-    // `[verifier] backend` ⇒ off. Runs in shadow in increment 1.
+    // `[verifier] backend` ⇒ off. `mode` captured now, before `cfg` is consumed.
+    #[cfg(feature = "verifier")]
+    let verifier_enforce = cfg.verifier.mode == "enforce";
     #[cfg(feature = "verifier")]
     let shared_verifier: Option<Arc<dyn agent_core::Verifier>> = if cfg.verifier.backend.is_empty()
     {
@@ -622,10 +624,11 @@ pub async fn build_agent_with(
         Some(s) => agent.with_scanner(s),
         None => agent,
     };
-    // Attach the verifier built above (before `cfg` was consumed).
+    // Attach the verifier built above (before `cfg` was consumed). `enforce`
+    // captured before `cfg` is moved.
     #[cfg(feature = "verifier")]
     let agent = match shared_verifier {
-        Some(v) => agent.with_verifier(v),
+        Some(v) => agent.with_verifier(v, verifier_enforce),
         None => agent,
     };
     // …and the tokenizer / embedder, for `--serve-tokenizer` / `--serve-embed`.
