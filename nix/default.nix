@@ -71,6 +71,17 @@ let
     }
   );
 
+  # The stdlib-only Go call-graph helper (crates/../helpers/go-ast), invoked by the
+  # review flow's call-graph collector via the Sandbox. No external Go deps, so
+  # `vendorHash = null` keeps the build hermetic + offline. Its own `src` (the
+  # crane `cleanedSrc` filter excludes `.go`). Binary: `agent-go-ast`.
+  go-ast = pkgs.buildGoModule {
+    pname = "agent-go-ast";
+    version = "0.1.0";
+    src = ../helpers/go-ast;
+    vendorHash = null;
+  };
+
   # The generated `crates/agent-grpc/src/constants.rs` (from nix/constants.nix).
   # One derivation, shared by the `gen-constants` app and the `constants-sync`
   # check so they can never disagree.
@@ -159,12 +170,16 @@ let
       versions
       constantsRs
       agent
+      go-ast
       reviewGoCorpus
       ;
   };
 
-  # Dev shell.
-  devshell = import ./devshell.nix { inherit pkgs lib versions; };
+  # Dev shell. `go-ast` (the review call-graph helper) is put on the shell PATH.
+  devshell = import ./devshell.nix {
+    inherit pkgs lib versions;
+    extraPackages = [ go-ast ];
+  };
 
   # ClickHouse container apps (up / down / client).
   clickhouse = import ./clickhouse { inherit pkgs lib versions; };
@@ -179,7 +194,7 @@ let
 in
 {
   packages = {
-    inherit agent;
+    inherit agent go-ast;
     default = agent;
   };
 

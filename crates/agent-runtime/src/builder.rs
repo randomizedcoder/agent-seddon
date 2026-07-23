@@ -666,6 +666,11 @@ pub async fn build_agent_with(
                 if cfg.review.signatures {
                     orch = orch.with_signatures();
                 }
+                // Call graph (Go blast radius) via the pinned helper — fail-soft.
+                if cfg.review.callgraph {
+                    orch = orch
+                        .with_callgraph(shared_sandbox.clone(), cfg.review.callgraph_timeout_secs);
+                }
                 Some(Arc::new(orch) as Arc<dyn agent_core::ReviewCollector>)
             }
             // A remote fact-collection host (CPU-heavy, worth distributing).

@@ -87,6 +87,8 @@ pub struct Metrics {
     review_gitstate: IntCounterVec,
     review_findings: IntCounterVec,
     review_signatures: IntCounterVec,
+    review_callgraph_nodes: Histogram,
+    review_callgraph_edges: Histogram,
     web_searches: IntCounterVec,
     web_search_seconds: HistogramVec,
     web_search_results: IntCounterVec,
@@ -378,6 +380,16 @@ impl Metrics {
             ),
             &["lang", "kind"],
         )
+        .unwrap();
+        let review_callgraph_nodes = Histogram::with_opts(HistogramOpts::new(
+            "agent_review_callgraph_nodes",
+            "Node count of a review's call graph",
+        ))
+        .unwrap();
+        let review_callgraph_edges = Histogram::with_opts(HistogramOpts::new(
+            "agent_review_callgraph_edges",
+            "Edge count of a review's call graph",
+        ))
         .unwrap();
         let web_searches = IntCounterVec::new(
             Opts::new(
@@ -786,6 +798,8 @@ impl Metrics {
             Box::new(review_gitstate.clone()),
             Box::new(review_findings.clone()),
             Box::new(review_signatures.clone()),
+            Box::new(review_callgraph_nodes.clone()),
+            Box::new(review_callgraph_edges.clone()),
             Box::new(web_searches.clone()),
             Box::new(web_search_seconds.clone()),
             Box::new(web_search_results.clone()),
@@ -879,6 +893,8 @@ impl Metrics {
             review_gitstate,
             review_findings,
             review_signatures,
+            review_callgraph_nodes,
+            review_callgraph_edges,
             web_searches,
             web_search_seconds,
             web_search_results,
@@ -1077,6 +1093,11 @@ impl Metrics {
         self.review_signatures
             .with_label_values(&[lang, kind])
             .inc_by(count);
+    }
+    /// Review: the size of one call graph (node + edge counts).
+    pub fn on_review_callgraph(&self, nodes: f64, edges: f64) {
+        self.review_callgraph_nodes.observe(nodes);
+        self.review_callgraph_edges.observe(edges);
     }
     /// One web search: outcome, latency, and result count (parity spec 12).
     pub fn on_web_search(&self, backend: &str, outcome: &str, seconds: f64, results: u64) {

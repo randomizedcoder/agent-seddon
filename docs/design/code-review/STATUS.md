@@ -26,7 +26,7 @@ followed).
 | 03 | Orchestrator + `ReviewFacts` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 | 04 | Repo / change / git-state | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 | 05 | Static analysis (Go + Rust) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
-| 06 | AST & call-graph | ✅ | ✅ | ✅ | 🟡 | 🟡 | ✅ | — |
+| 06 | AST & call-graph | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 | 07 | Code-style fingerprint | ✅ | ✅ | ✅ | ⬜ | ⬜ | ⬜ | — |
 | 08 | Cheap-LLM summaries | ✅ | ✅ | ✅ | ⬜ | ⬜ | ⬜ | — |
 | 09 | Grounded context + recording | ✅ | ✅ | ✅ | ⬜ | n/a | ⬜ | — |
@@ -35,9 +35,9 @@ followed).
 
 `⬜` not started · `🟡` in progress / partial · `✅` merged · `n/a` telemetry-local / no service.
 
-Component 06 is **partial**: the deterministic **signature-diff subset** shipped
-(`SignatureCollector`, riding `ReviewFacts`/`FactCollectorService`); the full
-Go-helper **call-graph** + dedicated `AstService` remain the deferred target.
+Component 06 ships both the **signature-diff subset** and the **Go call-graph /
+blast radius** (via a stdlib-only `agent-go-ast` helper). Precise `x/tools` CHA/RTA
+edges + a dedicated `AstService`/`--serve-ast` remain the deferred upgrade.
 
 ## Planned increments (build order)
 
@@ -66,6 +66,28 @@ are not separate increments — each increment lands its own slice of both.
 
 ## Change log
 
+- **2026-07-23** — **Go call-graph / blast radius (increment 7, completes component
+  06).** A stdlib-only Go helper (`helpers/go-ast`, `go/parser` + `go/ast`, **zero
+  external deps** → `buildGoModule vendorHash = null`, built + pinned by the flake as
+  `agent-go-ast`) walks a repo and emits JSON: nodes (fn/method), syntactic
+  name-resolved intra-repo edges, and package shapes. A `CallGraphCollector` runs it
+  via the `Sandbox` (skip-if-missing / timeout / fail-soft, like the analyzer),
+  parses defensively, and marks `changed_fns` Rust-side (so the command stays the
+  static `agent-go-ast --root .` — no untrusted input to the shell). Rendered as a
+  **`Call graph`** section: size summary + per changed function its direct in-repo
+  callers + callee count (`Target ← called by Caller, Other · calls 0`). Chosen
+  **stdlib-only over x/tools CHA/RTA** so it's hermetic/offline and works on any tree
+  (review targets frequently don't type-check). Default-on (`[review] callgraph =
+  true`, `callgraph_timeout_secs = 30`), Go-only. Untrusted JSON contained: node
+  paths `confine`d (dropped-with-edges on escape), strings `bound`ed, counts capped.
+  Wire: additive `ReviewCallGraphNode`/`ReviewCallEdge`/`ReviewPackageShape`/
+  `ReviewCallGraph` + `ReviewFacts` field 6 (rides `FactCollectorService`,
+  round-trip tested; no baseline bump). Metrics `agent_review_callgraph_nodes` /
+  `_edges` via `ReviewEvent::CallGraph`. Gate: hermetic `review-callgraph` check
+  (offline, prebuilt helper) + `adversarial_` parser tests. **First Go build in the
+  flake** (`nix/default.nix` `go-ast` + dev-shell `extraPackages` + checks arg).
+  Deferred: precise x/tools edges, `AstService`/`--serve-ast`, Rust call-graph,
+  one-hop scoping. Live-proven via `agent --review`.
 - **2026-07-23** — **Signature-diff (increment 6, component 06 — cheap subset).**
   A `SignatureCollector` joins the fan-out: for each changed Go/Rust file it reads
   the **full base/head blobs** (`RepoBackend::read_file` per revision) and extracts

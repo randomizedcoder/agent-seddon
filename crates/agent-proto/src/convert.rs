@@ -2782,6 +2782,92 @@ impl From<pb::ReviewSignatureReport> for agent_core::SignatureReport {
     }
 }
 
+impl From<agent_core::CallGraphNode> for pb::ReviewCallGraphNode {
+    fn from(n: agent_core::CallGraphNode) -> Self {
+        pb::ReviewCallGraphNode {
+            id: n.id,
+            package: n.package,
+            name: n.name,
+            exported: n.exported,
+            file: n.file,
+            line: n.line,
+        }
+    }
+}
+impl From<pb::ReviewCallGraphNode> for agent_core::CallGraphNode {
+    fn from(n: pb::ReviewCallGraphNode) -> Self {
+        agent_core::CallGraphNode {
+            id: n.id,
+            package: n.package,
+            name: n.name,
+            exported: n.exported,
+            file: n.file,
+            line: n.line,
+        }
+    }
+}
+
+impl From<agent_core::CallEdge> for pb::ReviewCallEdge {
+    fn from(e: agent_core::CallEdge) -> Self {
+        pb::ReviewCallEdge {
+            caller_id: e.caller_id,
+            callee_id: e.callee_id,
+        }
+    }
+}
+impl From<pb::ReviewCallEdge> for agent_core::CallEdge {
+    fn from(e: pb::ReviewCallEdge) -> Self {
+        agent_core::CallEdge {
+            caller_id: e.caller_id,
+            callee_id: e.callee_id,
+        }
+    }
+}
+
+impl From<agent_core::PackageShape> for pb::ReviewPackageShape {
+    fn from(p: agent_core::PackageShape) -> Self {
+        pb::ReviewPackageShape {
+            package: p.package,
+            files: p.files,
+            exported_fns: p.exported_fns,
+            types: p.types,
+        }
+    }
+}
+impl From<pb::ReviewPackageShape> for agent_core::PackageShape {
+    fn from(p: pb::ReviewPackageShape) -> Self {
+        agent_core::PackageShape {
+            package: p.package,
+            files: p.files,
+            exported_fns: p.exported_fns,
+            types: p.types,
+        }
+    }
+}
+
+impl From<agent_core::CallGraph> for pb::ReviewCallGraph {
+    fn from(g: agent_core::CallGraph) -> Self {
+        pb::ReviewCallGraph {
+            nodes: g.nodes.into_iter().map(Into::into).collect(),
+            edges: g.edges.into_iter().map(Into::into).collect(),
+            changed_fns: g.changed_fns,
+            packages: g.packages.into_iter().map(Into::into).collect(),
+            truncated: g.truncated,
+        }
+    }
+}
+impl From<pb::ReviewCallGraph> for agent_core::CallGraph {
+    fn from(g: pb::ReviewCallGraph) -> Self {
+        agent_core::CallGraph {
+            nodes: g.nodes.into_iter().map(Into::into).collect(),
+            edges: g.edges.into_iter().map(Into::into).collect(),
+            changed_fns: g.changed_fns,
+            packages: g.packages.into_iter().map(Into::into).collect(),
+            truncated: g.truncated,
+        }
+    }
+}
+
 impl From<agent_core::ReviewFacts> for pb::ReviewFacts {
     fn from(f: agent_core::ReviewFacts) -> Self {
         pb::ReviewFacts {
@@ -2790,6 +2876,7 @@ impl From<agent_core::ReviewFacts> for pb::ReviewFacts {
             git_state: Some(f.git_state.into()),
             analysis: Some(f.analysis.into()),
             signatures: Some(f.signatures.into()),
+            callgraph: Some(f.callgraph.into()),
         }
     }
 }
@@ -2801,6 +2888,7 @@ impl From<pb::ReviewFacts> for agent_core::ReviewFacts {
             git_state: f.git_state.map(Into::into).unwrap_or_default(),
             analysis: f.analysis.map(Into::into).unwrap_or_default(),
             signatures: f.signatures.map(Into::into).unwrap_or_default(),
+            callgraph: f.callgraph.map(Into::into).unwrap_or_default(),
         }
     }
 }

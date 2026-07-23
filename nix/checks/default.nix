@@ -15,6 +15,7 @@
   versions,
   constantsRs,
   agent,
+  go-ast,
   reviewGoCorpus,
 }:
 
@@ -64,4 +65,8 @@
   # signature changes + a new function appears, assert the `API signature changes`
   # section renders. Pure in-process (regex over blobs) — no toolchain, offline.
   review-signatures = import ./review-signatures.nix { inherit pkgs agent; };
+  # Call-graph coverage: a two-commit Go history where one function calls another
+  # and the callee changes; assert the `Call graph` blast-radius section shows the
+  # caller. Uses the flake-built `agent-go-ast` helper on PATH; offline.
+  review-callgraph = import ./review-callgraph.nix { inherit pkgs agent go-ast; };
 }

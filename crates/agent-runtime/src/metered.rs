@@ -1916,6 +1916,9 @@ pub(crate) fn record_review_event(m: &Metrics, ev: agent_review::ReviewEvent) {
         ReviewEvent::Signatures { lang, kind, count } => {
             m.on_review_signatures(&lang, &kind, count as u64);
         }
+        ReviewEvent::CallGraph { nodes, edges } => {
+            m.on_review_callgraph(nodes as f64, edges as f64);
+        }
     }
 }
 

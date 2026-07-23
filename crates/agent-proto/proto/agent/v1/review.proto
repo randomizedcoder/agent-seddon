@@ -147,10 +147,42 @@ message ReviewSignatureReport {
   bool truncated = 3;
 }
 
+// One function/method node in the call graph. Tool-derived + untrusted: `file`
+// is repo-relative + confined, strings bounded.
+message ReviewCallGraphNode {
+  uint32 id = 1;
+  string package = 2;
+  string name = 3;
+  bool exported = 4;
+  string file = 5;
+  uint32 line = 6;
+}
+
+message ReviewCallEdge {
+  uint32 caller_id = 1;
+  uint32 callee_id = 2;
+}
+
+message ReviewPackageShape {
+  string package = 1;
+  uint32 files = 2;
+  uint32 exported_fns = 3;
+  uint32 types = 4;
+}
+
+message ReviewCallGraph {
+  repeated ReviewCallGraphNode nodes = 1;
+  repeated ReviewCallEdge edges = 2;
+  repeated uint32 changed_fns = 3;
+  repeated ReviewPackageShape packages = 4;
+  bool truncated = 5;
+}
+
 message ReviewFacts {
   ReviewMeta meta = 1;
   ReviewChangeSet change = 2;
   ReviewGitState git_state = 3;
   ReviewAnalysisReport analysis = 4;
   ReviewSignatureReport signatures = 5;
+  ReviewCallGraph callgraph = 6;
 }

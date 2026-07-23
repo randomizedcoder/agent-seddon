@@ -1,8 +1,50 @@
 # 06 — AST & call-graph
 
-Status: **partially implemented** — the **signature-diff subset** ships (increment
-6); the full Go-helper call-graph below is the deferred target. See
-**Implementation** below.
+Status: **implemented** (increments 6 + 7) — both the **signature-diff subset** and
+the **Go call-graph / blast radius** ship. A stdlib-only helper (not `x/tools`
+CHA/RTA) provides *syntactic* edges; precise type-resolved edges remain the deferred
+upgrade. See **Implementation** below.
+
+## Implementation — Go call-graph / blast radius (increment 7)
+
+The full call graph now ships, delivering the design's headline value — *who calls
+the changed functions* (blast radius) — via a **stdlib-only Go helper**, chosen over
+`x/tools` CHA/RTA so the build stays hermetic/offline and the graph is produced on
+**any** tree (even one that doesn't type-check, which review targets often don't):
+
+- **`helpers/go-ast`** — a small Go program (`go/parser` + `go/ast`, **zero external
+  deps** → `buildGoModule` with `vendorHash = null`), built + pinned by the flake as
+  the `agent-go-ast` binary. It walks a repo, and emits compact JSON: **nodes**
+  (function/method: id, package, name, exported, file, line), **edges** (syntactic
+  name-resolved caller→callee, intra-repo only), and **package shapes** (files /
+  exported-fn / type counts). Bounded (file/node/edge caps → `truncated`).
+- **`CallGraphCollector`** (`agent-review/src/callgraph.rs`), a `FactCollector` that
+  runs the helper via the `Sandbox` (mirroring the analyzer: skip-if-missing on exit
+  127, timeout-bounded, fail-soft), parses the JSON defensively, and **marks
+  `changed_fns`** = nodes whose file the diff touched (computed Rust-side, so no
+  untrusted path reaches the shell — the command is the static `agent-go-ast
+  --root .`).
+- Rendered as a **`Call graph`** section: a one-line size summary, then per changed
+  function its **direct in-repo callers** + callee count (`Target ← called by
+  Caller, Other · calls 0`).
+- **Default-on** (`[review] callgraph = true`, `callgraph_timeout_secs = 30`),
+  **Go-only** (a Rust backend is a later slot-in). Untrusted helper JSON contained:
+  node paths `confine`d (dropped-with-their-edges on escape), strings `bound`ed,
+  node/edge counts capped.
+- **Wire:** additive `ReviewCallGraphNode` / `ReviewCallEdge` / `ReviewPackageShape`
+  / `ReviewCallGraph` + `ReviewFacts` field 6 (rides `FactCollectorService`,
+  round-trip tested; no baseline bump). **Metrics:** `agent_review_callgraph_nodes`
+  / `agent_review_callgraph_edges` histograms via `ReviewEvent::CallGraph`. **Gate:**
+  hermetic `nix/checks/review-callgraph.nix` (a two-commit Go history where `Caller`
+  calls a changed `Target`; the prebuilt helper on PATH; offline) + `adversarial_`
+  parser tests (escaping-path node dropped with its edges, hostile strings bounded,
+  garbage rejected, dangling edges dropped).
+
+**Still deferred (the design below):** precise **CHA/RTA** edges via `x/tools`
+(needs the target to build + vendoring x/tools); a dedicated `AstBackend` seam +
+`AstService`/`--serve-ast`; Rust call-graph; `signature_hash` on nodes; the
+one-hop-neighborhood scoping (the helper currently graphs the whole repo, bounded by
+caps). The stdlib helper is the deterministic, dependency-free first cut.
 
 ## Implementation — signature-diff subset (increment 6)
 

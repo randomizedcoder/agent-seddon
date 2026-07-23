@@ -3642,9 +3642,51 @@ pub struct SignatureReport {
     pub truncated: bool,
 }
 
+/// One function/method in the call graph (increment 6 — the AST subset). A
+/// deterministic node from the Go AST helper; `file` is confined, strings bounded.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CallGraphNode {
+    pub id: u32,
+    /// Repo-relative package dir (`""` = repo root).
+    pub package: String,
+    pub name: String,
+    pub exported: bool,
+    /// Repo-relative path (confined).
+    pub file: String,
+    pub line: u32,
+}
+
+/// A syntactic caller→callee edge between two [`CallGraphNode`]s (name-resolved;
+/// calls to the stdlib / other modules have no node and produce no edge).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CallEdge {
+    pub caller_id: u32,
+    pub callee_id: u32,
+}
+
+/// Coarse per-package hierarchy summary (the shape at a glance).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PackageShape {
+    pub package: String,
+    pub files: u32,
+    pub exported_fns: u32,
+    pub types: u32,
+}
+
+/// The call-graph contribution to a review: nodes + edges + the node ids the diff
+/// touched (`changed_fns`) + package shapes. Empty when off / no Go source changed /
+/// the helper isn't available. `truncated` when a size cap dropped part of it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CallGraph {
+    pub nodes: Vec<CallGraphNode>,
+    pub edges: Vec<CallEdge>,
+    pub changed_fns: Vec<u32>,
+    pub packages: Vec<PackageShape>,
+    pub truncated: bool,
+}
+
 /// The grounded fact bundle a reviewer reasons over. Everything here is a hard
-/// fact from a tool. Later increments add call-graph / style / summaries as
-/// additional fields.
+/// fact from a tool. Later increments add style / summaries as additional fields.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ReviewFacts {
     pub meta: ReviewMeta,
@@ -3656,6 +3698,9 @@ pub struct ReviewFacts {
     /// Changed function signatures (increment 6). Empty when off/no source changed.
     #[serde(default)]
     pub signatures: SignatureReport,
+    /// Call graph + blast radius (increment 6). Empty when off/no Go source changed.
+    #[serde(default)]
+    pub callgraph: CallGraph,
 }
 
 /// Runs a fan-out of deterministic collectors into a grounded [`ReviewFacts`].

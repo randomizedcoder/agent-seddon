@@ -162,6 +162,38 @@ impl ReviewCollector for FakeReview {
                 files_scanned: 1,
                 truncated: false,
             },
+            callgraph: agent_core::CallGraph {
+                nodes: vec![
+                    agent_core::CallGraphNode {
+                        id: 0,
+                        package: "".into(),
+                        name: "main".into(),
+                        exported: false,
+                        file: "main.go".into(),
+                        line: 5,
+                    },
+                    agent_core::CallGraphNode {
+                        id: 1,
+                        package: "".into(),
+                        name: "Run".into(),
+                        exported: true,
+                        file: "main.go".into(),
+                        line: 9,
+                    },
+                ],
+                edges: vec![agent_core::CallEdge {
+                    caller_id: 0,
+                    callee_id: 1,
+                }],
+                changed_fns: vec![1],
+                packages: vec![agent_core::PackageShape {
+                    package: "".into(),
+                    files: 1,
+                    exported_fns: 1,
+                    types: 0,
+                }],
+                truncated: false,
+            },
         })
     }
 }
@@ -232,6 +264,12 @@ async fn review_collect_roundtrips(#[case] transport: Transport) {
     assert_eq!(facts.signatures.changes[0].kind, "modified");
     assert_eq!(facts.signatures.changes[0].after, "func Run(x int)");
     assert_eq!(facts.signatures.files_scanned, 1);
+    // Call graph survives the wire round-trip.
+    assert_eq!(facts.callgraph.nodes.len(), 2);
+    assert_eq!(facts.callgraph.edges.len(), 1);
+    assert_eq!(facts.callgraph.edges[0].callee_id, 1);
+    assert_eq!(facts.callgraph.changed_fns, vec![1]);
+    assert_eq!(facts.callgraph.packages[0].exported_fns, 1);
 }
 
 /// A PR target survives the encode/decode round-trip through the wire string.
