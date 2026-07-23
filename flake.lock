@@ -71,7 +71,11 @@
         "crane": "crane",
         "flake-utils": "flake-utils",
         "nixpkgs": "nixpkgs",
-        "rust-overlay": "rust-overlay"
+        "rust-overlay": "rust-overlay",
+        "xtcp2-52-base": "xtcp2-52-base",
+        "xtcp2-52-head": "xtcp2-52-head",
+        "xtcp2-56-base": "xtcp2-56-base",
+        "xtcp2-56-head": "xtcp2-56-head"
       }
     },
     "rust-overlay": {
@@ -106,6 +110,74 @@
       "original": {
         "owner": "nix-systems",
         "repo": "default",
+        "type": "github"
+      }
+    },
+    "xtcp2-52-base": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1782412582,
+        "narHash": "sha256-PuR9sJw5NAdpMap8ijaWZFOmljOd/fWgEY5Alq+qWWs=",
+        "owner": "randomizedcoder",
+        "repo": "xtcp2",
+        "rev": "6903ea55b5b4585e77a67ba7dcaab6d943a99298",
+        "type": "github"
+      },
+      "original": {
+        "owner": "randomizedcoder",
+        "repo": "xtcp2",
+        "rev": "6903ea55b5b4585e77a67ba7dcaab6d943a99298",
+        "type": "github"
+      }
+    },
+    "xtcp2-52-head": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1782342934,
+        "narHash": "sha256-bAUaNoNopxAqtaR0sHRRTp2JBcTi+1rVFLMusW6mGJQ=",
+        "owner": "randomizedcoder",
+        "repo": "xtcp2",
+        "rev": "07f1469d40ac0642c2b27ecd49d5473fdf40a3b2",
+        "type": "github"
+      },
+      "original": {
+        "owner": "randomizedcoder",
+        "repo": "xtcp2",
+        "rev": "07f1469d40ac0642c2b27ecd49d5473fdf40a3b2",
+        "type": "github"
+      }
+    },
+    "xtcp2-56-base": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1782432745,
+        "narHash": "sha256-yETdXW0DKMIs6kBVigd0eNq3c9d8D0H/Rq9H7t2979Q=",
+        "owner": "randomizedcoder",
+        "repo": "xtcp2",
+        "rev": "a36a9334fbe5ef4007ef57c5b32a004dac4796fd",
+        "type": "github"
+      },
+      "original": {
+        "owner": "randomizedcoder",
+        "repo": "xtcp2",
+        "rev": "a36a9334fbe5ef4007ef57c5b32a004dac4796fd",
+        "type": "github"
+      }
+    },
+    "xtcp2-56-head": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1782437407,
+        "narHash": "sha256-z4FclWi/rrDeGmKzu9r1zAMu7JBlumqBfb/95tvcOlc=",
+        "owner": "randomizedcoder",
+        "repo": "xtcp2",
+        "rev": "6ea5ffd3821cfc1e404fae9d5637ceb393aec23f",
+        "type": "github"
+      },
+      "original": {
+        "owner": "randomizedcoder",
+        "repo": "xtcp2",
+        "rev": "6ea5ffd3821cfc1e404fae9d5637ceb393aec23f",
         "type": "github"
       }
     }

@@ -68,9 +68,43 @@ pub(crate) fn decode_target(s: &str) -> Result<ReviewTarget, String> {
     if let Some(b) = s.strip_prefix("branch:") {
         return Ok(ReviewTarget::Branch(b.to_string()));
     }
+    if let Some(range) = s.strip_prefix("revs:") {
+        let (base, head) = range
+            .split_once("..")
+            .ok_or_else(|| format!("malformed revs target `{s}` (want `revs:<base>..<head>`)"))?;
+        return Ok(ReviewTarget::Revs {
+            base: base.to_string(),
+            head: head.to_string(),
+        });
+    }
     Err(format!("unrecognized review target `{s}`"))
 }
 
 pub fn review_router(inner: Arc<dyn ReviewCollector>) -> Router {
     Server::builder().add_service(FactCollectorServiceSvc::new(inner).into_server())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_target;
+    use agent_core::ReviewTarget;
+    use rstest::rstest;
+
+    #[rstest]
+    #[case::worktree("worktree", ReviewTarget::WorkingTree)]
+    #[case::pr("pr:42", ReviewTarget::Pr(42))]
+    #[case::branch("branch:feature", ReviewTarget::Branch("feature".into()))]
+    #[case::revs("revs:main..HEAD", ReviewTarget::Revs { base: "main".into(), head: "HEAD".into() })]
+    fn positive_decodes_known_targets(#[case] wire: &str, #[case] want: ReviewTarget) {
+        assert_eq!(decode_target(wire).unwrap(), want);
+    }
+
+    #[rstest]
+    #[case::empty("")]
+    #[case::unknown("nonsense")]
+    #[case::pr_not_numeric("pr:abc")]
+    #[case::revs_no_range("revs:mainHEAD")]
+    fn adversarial_malformed_targets_are_rejected(#[case] wire: &str) {
+        assert!(decode_target(wire).is_err(), "must reject `{wire}`");
+    }
 }

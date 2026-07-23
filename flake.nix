@@ -33,6 +33,29 @@
       url = "github:rustsec/advisory-db";
       flake = false;
     };
+
+    # Pinned Go source trees for the code-review evaluation corpus
+    # (docs/design/code-review/eval/). Each is a hash-locked snapshot of a
+    # code-heavy xtcp2 change (base + head commit), so the Go base rate is
+    # reproducible and independent of any local clone. See the eval README.
+    # #56 feat/s3-secret-file (2 .go files):
+    xtcp2-56-base = {
+      url = "github:randomizedcoder/xtcp2/a36a9334fbe5ef4007ef57c5b32a004dac4796fd";
+      flake = false;
+    };
+    xtcp2-56-head = {
+      url = "github:randomizedcoder/xtcp2/6ea5ffd3821cfc1e404fae9d5637ceb393aec23f";
+      flake = false;
+    };
+    # #52 fix-ns-churn-thread-leak (5 .go files, incl. a race test):
+    xtcp2-52-base = {
+      url = "github:randomizedcoder/xtcp2/6903ea55b5b4585e77a67ba7dcaab6d943a99298";
+      flake = false;
+    };
+    xtcp2-52-head = {
+      url = "github:randomizedcoder/xtcp2/07f1469d40ac0642c2b27ecd49d5473fdf40a3b2";
+      flake = false;
+    };
   };
 
   outputs =
@@ -43,6 +66,10 @@
       rust-overlay,
       crane,
       advisory-db,
+      xtcp2-56-base,
+      xtcp2-56-head,
+      xtcp2-52-base,
+      xtcp2-52-head,
     }:
     flake-utils.lib.eachSystem [ "x86_64-linux" ] (
       system:
@@ -53,12 +80,26 @@
         };
         lib = nixpkgs.lib;
 
+        # The pinned Go review-eval corpus, as { label = { base; head; }; } store
+        # paths passed to the eval app + the review-go check.
+        reviewGoCorpus = {
+          "s3-secret-file" = {
+            base = xtcp2-56-base;
+            head = xtcp2-56-head;
+          };
+          "ns-churn-thread-leak" = {
+            base = xtcp2-52-base;
+            head = xtcp2-52-head;
+          };
+        };
+
         aggregator = import ./nix {
           inherit
             pkgs
             lib
             crane
             advisory-db
+            reviewGoCorpus
             ;
           src = ./.;
         };

@@ -1,0 +1,13 @@
+## Grounded review facts (tool-derived — not model-generated)
+
+Repo: rust project · clone · host github · default branch `main` · identity 83bfc4f41c572f95
+Change: `67f9fc3bdecd468f93f629cf802a0d8133f39539`..`c57a0d516fc7d36303474b653957467a03798c3b` — 7 changed file(s) of 403 tracked
+  modified  config/agent.toml (+10/-4)
+  modified  crates/agent-metrics/src/lib.rs (+38/-0)
+  modified  crates/agent-runtime/src/agent.rs (+118/-60)
+  modified  crates/agent-runtime/src/builder.rs (+6/-3)
+  modified  crates/agent-runtime/src/config.rs (+22/-3)
+  modified  crates/agent-runtime/tests/verifier_e2e.rs (+188/-9)
+  modified  docs/components/verifier.md (+21/-12)
+Collection: 50 ms — repo-change=ok(45ms)
+

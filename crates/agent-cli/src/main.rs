@@ -327,11 +327,17 @@ enum Mode {
     Review(agent_core::ReviewTarget),
 }
 
-/// Parse a `--review` target: all-digits ⇒ a PR number; `.`/`worktree`/`HEAD` ⇒
-/// the working tree (current branch vs default); otherwise a branch name.
+/// Parse a `--review` target: `<base>..<head>` ⇒ an explicit revision range;
+/// all-digits ⇒ a PR number; `.`/`worktree`/`HEAD` ⇒ the working tree (current
+/// branch vs default); otherwise a branch name.
 fn parse_review_target(s: &str) -> agent_core::ReviewTarget {
     let t = s.trim();
-    if t.is_empty()
+    if let Some((base, head)) = t.split_once("..") {
+        agent_core::ReviewTarget::Revs {
+            base: base.to_string(),
+            head: head.to_string(),
+        }
+    } else if t.is_empty()
         || t == "."
         || t.eq_ignore_ascii_case("worktree")
         || t.eq_ignore_ascii_case("head")

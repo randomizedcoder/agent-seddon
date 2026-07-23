@@ -3387,6 +3387,10 @@ pub enum ReviewTarget {
     Branch(String),
     /// The current branch vs the default branch (the in-loop hand-off target).
     WorkingTree,
+    /// Two explicit revisions (commit ids / refs), diffed `base..head`. The
+    /// evaluation harness feeds these; both are validated fail-closed before git
+    /// sees them.
+    Revs { base: String, head: String },
 }
 
 /// One changed file in a review's change set.
