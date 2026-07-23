@@ -25,8 +25,19 @@ Three things bite people, in the order they hit them:
   even for a local server that ignores it. Pass a placeholder.
 - **The model must support tool calling.** The loop cannot act without it. The
   symptom of a model that lacks it is an agent that answers in prose and never
-  touches a file. `qwen2.5-coder`, `llama3.1` and `mistral-nemo` work; many small
-  models do not.
+  touches a file. `llama3.1`, `llama3.3` and `mistral-nemo` work; many small models
+  do not — and see the Ollama caveat below, because "supports tools" is necessary
+  but not sufficient.
+- **On Ollama, prefer a llama-family model.** Ollama's OpenAI-compatible endpoint
+  (`/v1/chat/completions`, which this provider speaks) does **not** apply some
+  models' tool-call parsers, even when the model emits a perfectly good tool call.
+  Observed with `qwen3-coder` and `qwen2.5-coder`: the model returns
+  `<function=…><parameter=…>…</function>`, but Ollama hands it back as plain
+  `content` with `tool_calls: null`, so the agent sees prose and writes nothing.
+  Ollama's *native* `/api/chat` endpoint parses it; the OpenAI-compat one does not.
+  `llama3.x` and `llama3-groq-tool-use` use a format Ollama's OpenAI path *does*
+  translate, so they work. Test any model on a task whose result you can check
+  rather than trusting that it advertises `tools`.
 - **`[agent] context_window` must match the model**, not the largest model you
   once used. It is the budget compaction works against, so overstating it means
   the request overflows the real window rather than being compacted.
