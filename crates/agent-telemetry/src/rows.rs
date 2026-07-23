@@ -110,10 +110,57 @@ impl UsageRow {
     }
 }
 
+/// One tool-call verification (`agent_verifications`). `Nullable(UInt8)` columns
+/// map to `Option<u8>`; the `bool`s are stored `UInt8` (0/1).
+#[derive(Debug, Clone, Row)]
+pub struct VerificationRow {
+    pub session_id: String,
+    pub ts: DateTime64<3>,
+    pub iter: u32,
+    pub tool_name: String,
+    pub args_hash: String,
+    pub goal_hash: String,
+    pub task_type: String,
+    pub verifier_model: String,
+    pub verifier_cfg: String,
+    pub verdict: String,
+    pub confidence: f32,
+    pub latency_ms: u32,
+    pub cached: u8,
+    pub call_errored: Option<u8>,
+    pub revised_after: Option<u8>,
+    pub task_succeeded: Option<u8>,
+}
+
+impl VerificationRow {
+    /// Build a verification row from a `kind = "verification"` `MemoryEvent`.
+    pub fn from_event(event: &MemoryEvent) -> Option<Self> {
+        let v = event.verification.as_ref()?;
+        Some(Self {
+            session_id: event.session_id.clone(),
+            ts: dt64_from_ms(event.ts_ms),
+            iter: event.iter.unwrap_or(0),
+            tool_name: v.tool_name.clone(),
+            args_hash: v.args_hash.clone(),
+            goal_hash: v.goal_hash.clone(),
+            task_type: v.task_type.clone(),
+            verifier_model: v.verifier_model.clone(),
+            verifier_cfg: v.verifier_cfg.clone(),
+            verdict: v.verdict.clone(),
+            confidence: v.confidence,
+            latency_ms: v.latency_ms,
+            cached: v.cached as u8,
+            call_errored: v.call_errored.map(|b| b as u8),
+            revised_after: v.revised_after.map(|b| b as u8),
+            task_succeeded: v.task_succeeded.map(|b| b as u8),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::{Message, ToolCall, Usage};
+    use agent_core::{Message, ToolCall, Usage, VerificationRecord};
     use rstest::rstest;
     use serde_json::json;
 
@@ -125,6 +172,37 @@ mod tests {
             session_id: "s".into(),
             usage,
             iter: Some(2),
+            verification: None,
+        }
+    }
+
+    fn verification(rec: VerificationRecord) -> MemoryEvent {
+        MemoryEvent {
+            kind: "verification".into(),
+            message: Message::assistant(""),
+            ts_ms: 1,
+            session_id: "s".into(),
+            usage: None,
+            iter: Some(7),
+            verification: Some(rec),
+        }
+    }
+
+    fn sample_record() -> VerificationRecord {
+        VerificationRecord {
+            tool_name: "bash".into(),
+            args_hash: "aaaa".into(),
+            goal_hash: "bbbb".into(),
+            task_type: "bash".into(),
+            verifier_model: "schema".into(),
+            verifier_cfg: "{\"name\":\"schema\",\"mode\":\"shadow\"}".into(),
+            verdict: "revise".into(),
+            confidence: 1.0,
+            latency_ms: 3,
+            cached: false,
+            call_errored: Some(true),
+            revised_after: None,
+            task_succeeded: None,
         }
     }
 
@@ -173,5 +251,44 @@ mod tests {
             (None, None) => {}
             (r, exp) => panic!("got Some={}, expected {exp:?}", r.is_some()),
         }
+    }
+
+    // --- VerificationRow: envelope + payload mapping ----------------------
+    #[test]
+    fn positive_verification_row_maps_payload_and_envelope() {
+        let row = VerificationRow::from_event(&verification(sample_record()))
+            .expect("verification present");
+        assert_eq!(row.session_id, "s");
+        assert_eq!(row.iter, 7); // from the envelope, not the record
+        assert_eq!(row.tool_name, "bash");
+        assert_eq!(row.verdict, "revise");
+        assert_eq!(row.cached, 0); // bool false ⇒ UInt8 0
+        assert_eq!(row.call_errored, Some(1)); // Some(true) ⇒ Some(1)
+        assert_eq!(row.revised_after, None); // deferred proxy stays NULL
+        assert_eq!(row.task_succeeded, None);
+    }
+
+    // A non-verification event carries no record ⇒ no row (mirrors UsageRow).
+    #[test]
+    fn negative_verification_row_absent_without_record() {
+        assert!(VerificationRow::from_event(&ev("tool", Message::assistant(""), None)).is_none());
+    }
+
+    // Outcome proxy `None` (a blocked call that never ran) maps to a NULL column.
+    #[test]
+    fn boundary_verification_row_none_call_errored_is_null() {
+        let mut rec = sample_record();
+        rec.call_errored = None;
+        let row = VerificationRow::from_event(&verification(rec)).unwrap();
+        assert_eq!(row.call_errored, None);
+    }
+
+    // Adversarial: the payload is model-derived. A non-finite confidence must not
+    // reach the row (it is clamped at the source, but assert the row is finite so a
+    // regression that skips clamping is caught here too, before ClickHouse).
+    #[test]
+    fn adversarial_verification_row_confidence_is_finite() {
+        let row = VerificationRow::from_event(&verification(sample_record())).unwrap();
+        assert!(row.confidence.is_finite() && (0.0..=1.0).contains(&row.confidence));
     }
 }

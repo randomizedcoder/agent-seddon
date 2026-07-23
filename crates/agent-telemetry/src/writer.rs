@@ -6,7 +6,7 @@
 //! tracing layer doesn't feed itself) and the batch is dropped. Telemetry is
 //! best-effort; the JSONL episodic log remains the source of truth.
 
-use crate::rows::{EventRow, LogRow, UsageRow};
+use crate::rows::{EventRow, LogRow, UsageRow, VerificationRow};
 use klickhouse::{Client, ClientOptions, Row};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -19,6 +19,7 @@ pub(crate) enum Msg {
     Event(EventRow),
     Log(LogRow),
     Usage(UsageRow),
+    Verification(VerificationRow),
     /// Flush everything and stop; the ack fires once the final flush completes.
     /// Needed because the global tracing subscriber holds a `Sender` clone for
     /// the process lifetime, so channel-close can't be the shutdown signal.
@@ -55,6 +56,7 @@ pub(crate) async fn run(mut rx: mpsc::Receiver<Msg>, cfg: WriterConfig) {
     let mut events: Vec<EventRow> = Vec::new();
     let mut logs: Vec<LogRow> = Vec::new();
     let mut usage: Vec<UsageRow> = Vec::new();
+    let mut verifications: Vec<VerificationRow> = Vec::new();
 
     let mut ticker = tokio::time::interval(cfg.flush_interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -80,10 +82,17 @@ pub(crate) async fn run(mut rx: mpsc::Receiver<Msg>, cfg: WriterConfig) {
                         flush(&client, "agent_usage", &mut usage).await;
                     }
                 }
+                Some(Msg::Verification(r)) => {
+                    verifications.push(r);
+                    if verifications.len() >= cfg.batch_max_rows {
+                        flush(&client, "agent_verifications", &mut verifications).await;
+                    }
+                }
                 Some(Msg::Shutdown(ack)) => {
                     flush(&client, "agent_events", &mut events).await;
                     flush(&client, "agent_logs", &mut logs).await;
                     flush(&client, "agent_usage", &mut usage).await;
+                    flush(&client, "agent_verifications", &mut verifications).await;
                     let _ = ack.send(());
                     return;
                 }
@@ -94,6 +103,7 @@ pub(crate) async fn run(mut rx: mpsc::Receiver<Msg>, cfg: WriterConfig) {
                 flush(&client, "agent_events", &mut events).await;
                 flush(&client, "agent_logs", &mut logs).await;
                 flush(&client, "agent_usage", &mut usage).await;
+                flush(&client, "agent_verifications", &mut verifications).await;
             }
         }
     }
@@ -102,6 +112,7 @@ pub(crate) async fn run(mut rx: mpsc::Receiver<Msg>, cfg: WriterConfig) {
     flush(&client, "agent_events", &mut events).await;
     flush(&client, "agent_logs", &mut logs).await;
     flush(&client, "agent_usage", &mut usage).await;
+    flush(&client, "agent_verifications", &mut verifications).await;
 }
 
 async fn connect(cfg: &WriterConfig) -> klickhouse::Result<Client> {
