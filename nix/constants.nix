@@ -164,6 +164,13 @@
       socket = "/tmp/agent-seddon/review.sock";
       metrics_port = 9624;
     };
+    # General task-mode detection (docs/design/adaptive-cognition/01-mode.md): the
+    # `TaskClassifier` seam, servable so a remote host can answer `Classify`.
+    mode = {
+      port = 50075;
+      socket = "/tmp/agent-seddon/mode.sock";
+      metrics_port = 9625;
+    };
 
     # NOT a seam: the `agent --serve-all` gateway, which hosts every seam's
     # service in one process on one endpoint. A same-host deployment that wants

@@ -47,6 +47,7 @@ pub enum Seam {
     Semantic,
     LlmPool,
     Review,
+    Mode,
 }
 
 /// Every variant, so the table can be checked for completeness.
@@ -75,6 +76,7 @@ const ALL_SEAMS: &[Seam] = &[
     Seam::Semantic,
     Seam::LlmPool,
     Seam::Review,
+    Seam::Mode,
 ];
 
 /// The static facts about a seam served as its own process.
@@ -260,6 +262,13 @@ const SEAMS: &[SeamInfo] = &[
         service: "agent.v1.FactCollectorService",
         endpoint: constants::REVIEW,
     },
+    SeamInfo {
+        seam: Seam::Mode,
+        flag: "--serve-mode",
+        name: "mode",
+        service: "agent.v1.ModeService",
+        endpoint: constants::MODE,
+    },
 ];
 
 impl Seam {
@@ -327,6 +336,7 @@ impl Seam {
             Seam::Semantic => &cfg.grpc.semantic.listen,
             Seam::LlmPool => &cfg.grpc.llm_pool.listen,
             Seam::Review => &cfg.grpc.review.listen,
+            Seam::Mode => &cfg.grpc.mode.listen,
         }
     }
 }
@@ -523,6 +533,10 @@ fn add_seam_service(router: Router, agent: &Agent, seam: Seam) -> anyhow::Result
                 router.add_service(srv::FactCollectorServiceSvc::new(r).into_server()),
                 true,
             ),
+            None => (router, false),
+        },
+        Seam::Mode => match agent.task_classifier() {
+            Some(c) => (router.add_service(srv::ModeSvc::new(c).into_server()), true),
             None => (router, false),
         },
     })

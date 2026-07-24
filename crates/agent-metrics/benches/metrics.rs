@@ -37,7 +37,7 @@ fn new_registry() -> Metrics {
 // the number of registered families, so this ceiling steps up as seams land
 // rather than staying fixed; ~1.4x headroom over the observed value.
 #[library_benchmark(config = LibraryBenchmarkConfig::default()
-    .tool(Callgrind::default().hard_limits([(EventKind::Ir, 1_650_000u64)])))]
+    .tool(Callgrind::default().hard_limits([(EventKind::Ir, 1_700_000u64)])))]
 fn record_and_encode() -> String {
     let m = Metrics::new();
     for _ in 0..100 {

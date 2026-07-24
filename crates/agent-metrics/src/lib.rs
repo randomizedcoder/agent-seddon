@@ -79,6 +79,10 @@ pub struct Metrics {
     pool_probe_seconds: HistogramVec,
     pool_dispatch_seconds: HistogramVec,
     pool_member_calls: IntCounterVec,
+    // General task-mode detection (docs/design/adaptive-cognition/01-mode.md).
+    mode_classifications: IntCounterVec,
+    mode_switches: IntCounterVec,
+    mode_switch_confidence: Histogram,
     // Code review flow (docs/design/code-review/).
     review_collect_seconds: Histogram,
     review_collector_seconds: HistogramVec,
@@ -340,6 +344,27 @@ impl Metrics {
             ),
             &["member", "outcome"],
         )
+        .unwrap();
+        let mode_classifications = IntCounterVec::new(
+            Opts::new(
+                "agent_mode_classifications_total",
+                "Task-mode classifications, by detected mode and stage",
+            ),
+            &["mode", "via"],
+        )
+        .unwrap();
+        let mode_switches = IntCounterVec::new(
+            Opts::new(
+                "agent_mode_switches_total",
+                "Task-mode switches, by from/to mode",
+            ),
+            &["from", "to"],
+        )
+        .unwrap();
+        let mode_switch_confidence = Histogram::with_opts(HistogramOpts::new(
+            "agent_mode_switch_confidence",
+            "Confidence of a decided task-mode switch",
+        ))
         .unwrap();
         let review_collect_seconds = Histogram::with_opts(HistogramOpts::new(
             "agent_review_collect_duration_seconds",
@@ -875,6 +900,9 @@ impl Metrics {
             Box::new(pool_probe_seconds.clone()),
             Box::new(pool_dispatch_seconds.clone()),
             Box::new(pool_member_calls.clone()),
+            Box::new(mode_classifications.clone()),
+            Box::new(mode_switches.clone()),
+            Box::new(mode_switch_confidence.clone()),
             Box::new(review_collect_seconds.clone()),
             Box::new(review_collector_seconds.clone()),
             Box::new(review_collectors.clone()),
@@ -980,6 +1008,9 @@ impl Metrics {
             pool_probe_seconds,
             pool_dispatch_seconds,
             pool_member_calls,
+            mode_classifications,
+            mode_switches,
+            mode_switch_confidence,
             review_collect_seconds,
             review_collector_seconds,
             review_collectors,
@@ -1159,6 +1190,17 @@ impl Metrics {
         self.pool_member_calls
             .with_label_values(&[member, outcome])
             .inc();
+    }
+    /// Task mode: one per-turn classification (`via` = prefilter|vote|failsafe).
+    pub fn on_mode_classify(&self, mode: &str, via: &str) {
+        self.mode_classifications
+            .with_label_values(&[mode, via])
+            .inc();
+    }
+    /// Task mode: a decided switch and its confidence.
+    pub fn on_mode_switch(&self, from: &str, to: &str, confidence: f64) {
+        self.mode_switches.with_label_values(&[from, to]).inc();
+        self.mode_switch_confidence.observe(confidence);
     }
     /// Review: the whole fact-collection fan-out wall-clock.
     pub fn on_review_collect(&self, seconds: f64) {

@@ -2,11 +2,9 @@
 //! repo in a temp dir (mirrors `agent-git`'s `objects_fixture`). Requires `git`
 //! on `PATH` — supplied by the nix dev shell.
 
-use agent_core::{
-    ForgeHost, RepoLanguage, RepoRelation, ReviewCollector, ReviewTarget, TaskClassifier,
-};
+use agent_core::{ForgeHost, RepoLanguage, RepoRelation, ReviewCollector, ReviewTarget};
 use agent_git::CliBackend;
-use agent_review::{HybridClassifier, ReviewOrchestrator};
+use agent_review::ReviewOrchestrator;
 use agent_testkit::tempdir;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -168,20 +166,12 @@ async fn adversarial_unsafe_branch_name_is_rejected() {
     assert!(err.is_err(), "unsafe ref must be rejected, not resolved");
 }
 
-/// The classifier + orchestrator compose: a review prompt classifies as Review,
-/// and the orchestrator produces a grounded, hallucination-free bundle.
+/// The orchestrator produces a grounded, hallucination-free bundle end-to-end.
+/// (Task-mode detection — deciding the work *is* a review — is tested in
+/// `agent-mode`; here we exercise the collection it hands off to.)
 #[tokio::test]
-async fn positive_classify_then_collect_end_to_end() {
+async fn positive_collect_end_to_end() {
     let dir = fixture();
-    let classifier = HybridClassifier::new(None);
-    let verdict = classifier
-        .classify(&agent_core::ClassifyCtx {
-            prompt: "please review this branch",
-            history: &[],
-        })
-        .await;
-    assert_eq!(verdict.mode, agent_core::TaskMode::Review);
-
     let facts = orchestrator(&dir)
         .collect(&ReviewTarget::Branch("feature".into()))
         .await

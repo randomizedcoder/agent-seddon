@@ -1,0 +1,28 @@
+[package]
+name = "agent-mode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# dhat heap-profiling for the leak test (see tests/leak.rs).
+dhat-heap = ["dep:dhat"]
+
+[dependencies]
+agent-core.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+# Injects a dhat global allocator for the allocation-budget leak test only.
+dhat = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio.workspace = true
+rstest.workspace = true
+agent-testkit.workspace = true
+iai-callgrind.workspace = true
+
+# Guards the classifier's per-turn prefilter — it runs every turn.
+[[bench]]
+name = "classify"
+harness = false

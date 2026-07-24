@@ -3227,6 +3227,82 @@ impl From<pb::ReviewFacts> for agent_core::ReviewFacts {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Task mode (agent-mode / adaptive-cognition 01)
+// ---------------------------------------------------------------------------
+
+impl From<agent_core::TaskMode> for pb::TaskMode {
+    fn from(m: agent_core::TaskMode) -> Self {
+        match m {
+            agent_core::TaskMode::Review => pb::TaskMode::Review,
+            agent_core::TaskMode::Implement => pb::TaskMode::Implement,
+            agent_core::TaskMode::Design => pb::TaskMode::Design,
+            agent_core::TaskMode::Debug => pb::TaskMode::Debug,
+            agent_core::TaskMode::Explain => pb::TaskMode::Explain,
+            agent_core::TaskMode::Other => pb::TaskMode::Other,
+        }
+    }
+}
+
+impl From<pb::TaskMode> for agent_core::TaskMode {
+    fn from(m: pb::TaskMode) -> Self {
+        match m {
+            pb::TaskMode::Review => agent_core::TaskMode::Review,
+            pb::TaskMode::Implement => agent_core::TaskMode::Implement,
+            pb::TaskMode::Design => agent_core::TaskMode::Design,
+            pb::TaskMode::Debug => agent_core::TaskMode::Debug,
+            pb::TaskMode::Explain => agent_core::TaskMode::Explain,
+            // Absorbs OTHER and UNSPECIFIED — fail safe to the normal loop.
+            _ => agent_core::TaskMode::Other,
+        }
+    }
+}
+
+impl From<agent_core::ModeVerdict> for pb::ModeVerdict {
+    fn from(v: agent_core::ModeVerdict) -> Self {
+        pb::ModeVerdict {
+            mode: pb::TaskMode::from(v.mode) as i32,
+            confidence: v.confidence,
+            reason: v.reason,
+        }
+    }
+}
+
+impl From<pb::ModeVerdict> for agent_core::ModeVerdict {
+    fn from(v: pb::ModeVerdict) -> Self {
+        let mode = v.mode().into();
+        agent_core::ModeVerdict {
+            mode,
+            // Self-reported confidence is untrusted — clamp on receipt.
+            confidence: v.confidence.clamp(0.0, 1.0),
+            reason: v.reason,
+        }
+    }
+}
+
+impl From<agent_core::ModeSwitch> for pb::ModeSwitch {
+    fn from(s: agent_core::ModeSwitch) -> Self {
+        pb::ModeSwitch {
+            from: pb::TaskMode::from(s.from) as i32,
+            to: pb::TaskMode::from(s.to) as i32,
+            reason: s.reason,
+            confidence: s.confidence,
+        }
+    }
+}
+
+impl From<pb::ModeSwitch> for agent_core::ModeSwitch {
+    fn from(s: pb::ModeSwitch) -> Self {
+        let (from, to) = (s.from(), s.to());
+        agent_core::ModeSwitch {
+            from: from.into(),
+            to: to.into(),
+            reason: s.reason,
+            confidence: s.confidence.clamp(0.0, 1.0),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3270,6 +3346,52 @@ mod tests {
         assert_eq!(p1.tool_call_id.as_deref(), Some("call-9"));
         let back = agent_core::Message::try_from(p1.clone()).unwrap();
         assert_eq!(pb::Message::from(back), p1);
+    }
+
+    #[rstest]
+    #[case::positive_review(agent_core::TaskMode::Review)]
+    #[case::positive_implement(agent_core::TaskMode::Implement)]
+    #[case::positive_debug(agent_core::TaskMode::Debug)]
+    #[case::corner_other(agent_core::TaskMode::Other)]
+    fn positive_task_mode_roundtrips(#[case] m: agent_core::TaskMode) {
+        let wire: pb::TaskMode = m.into();
+        let back: agent_core::TaskMode = wire.into();
+        assert_eq!(back, m);
+    }
+
+    #[test]
+    fn adversarial_unspecified_mode_is_other() {
+        // A wire value the sender never set must fail safe, not panic.
+        let core: agent_core::TaskMode = pb::TaskMode::Unspecified.into();
+        assert_eq!(core, agent_core::TaskMode::Other);
+    }
+
+    #[test]
+    fn adversarial_mode_verdict_confidence_is_clamped() {
+        // A hostile server confidence outside 0..=1 is clamped on receipt.
+        let wire = pb::ModeVerdict {
+            mode: pb::TaskMode::Review as i32,
+            confidence: 9.0,
+            reason: "x".into(),
+        };
+        let core: agent_core::ModeVerdict = wire.into();
+        assert_eq!(core.mode, agent_core::TaskMode::Review);
+        assert_eq!(core.confidence, 1.0);
+    }
+
+    #[test]
+    fn positive_mode_switch_roundtrips() {
+        let core = agent_core::ModeSwitch {
+            from: agent_core::TaskMode::Implement,
+            to: agent_core::TaskMode::Debug,
+            reason: "cue".into(),
+            confidence: 0.95,
+        };
+        let wire: pb::ModeSwitch = core.into();
+        let back: agent_core::ModeSwitch = wire.into();
+        assert_eq!(back.from, agent_core::TaskMode::Implement);
+        assert_eq!(back.to, agent_core::TaskMode::Debug);
+        assert_eq!(back.confidence, 0.95);
     }
 
     #[rstest]

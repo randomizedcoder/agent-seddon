@@ -48,6 +48,12 @@ pub struct Settings {
     pub review_in_loop: bool,
     /// Byte budget for the rendered review context (`[review] context_budget_bytes`).
     pub review_context_budget: usize,
+    /// A candidate mode must reach this confidence before a switch is considered
+    /// (`[mode] confidence_floor`). See docs/design/adaptive-cognition/01-mode.md.
+    pub mode_confidence_floor: f32,
+    /// Consecutive turns a non-decisive candidate mode must win to switch
+    /// (`[mode] hysteresis`); a decisive deterministic signal switches immediately.
+    pub mode_hysteresis: usize,
 }
 
 pub struct Agent {
@@ -599,32 +605,19 @@ impl Agent {
         self.review_collector.clone()
     }
 
-    /// The in-loop review hand-off: classify the prompt and, if it is a review
-    /// with enough confidence, collect grounded facts for the working tree and
-    /// return them rendered as a context block. `None` when it is not a review,
-    /// the seams are not wired, or collection fails (best-effort).
+    /// Collect grounded review facts for the working tree and return them rendered
+    /// as a context block. Called by the loop when it has *entered* review mode
+    /// (the mode decision is made once, generally — see `Session::detect_mode`).
+    /// `None` when the collector isn't wired or collection fails (best-effort).
     #[cfg(feature = "review")]
-    async fn review_handoff(&self, input: &str) -> Option<String> {
-        let classifier = self.task_classifier.as_ref()?;
+    async fn review_collect(&self) -> Option<String> {
         let collector = self.review_collector.as_ref()?;
-        let verdict = classifier
-            .classify(&agent_core::ClassifyCtx {
-                prompt: input,
-                history: &[],
-            })
-            .await;
-        if verdict.mode != agent_core::TaskMode::Review || verdict.confidence < 0.6 {
-            return None;
-        }
         match collector
             .collect(&agent_core::ReviewTarget::WorkingTree)
             .await
         {
             Ok(facts) => {
-                tracing::info!(
-                    confidence = verdict.confidence,
-                    "entering review mode: injecting grounded facts"
-                );
+                tracing::info!("entering review mode: injecting grounded facts");
                 // Record the run — triggered by in-loop detection (`auto`).
                 self.record_review(agent_core::ReviewRecord::from_facts(&facts, "auto"))
                     .await;
@@ -675,6 +668,8 @@ impl Agent {
             tool_schemas: self.tools.describe_all(),
             started: false,
             pending_context: Vec::new(),
+            current_mode: agent_core::TaskMode::default(),
+            switch_history: std::collections::VecDeque::new(),
         }
     }
 
@@ -1282,6 +1277,62 @@ pub struct Session<'a> {
     /// Extra system context queued before the first turn (e.g. a loaded skill),
     /// injected once the initial context is assembled.
     pending_context: Vec<String>,
+    /// The task mode this conversation is currently in (adaptive-cognition 01).
+    /// Updated per turn by the classifier + hysteresis; drives the review hand-off
+    /// today, and mode-aware compaction / dimensional memory later.
+    current_mode: agent_core::TaskMode,
+    /// Recent per-turn mode proposals (bounded), for the switch hysteresis.
+    switch_history: std::collections::VecDeque<agent_core::TaskMode>,
+}
+
+/// Decide whether a per-turn verdict switches the session mode, updating the
+/// hysteresis `history` in place. Returns `Some(new_mode)` on a switch. Pure (no
+/// I/O) so the switch policy is unit-tested directly. Rules: the candidate must
+/// differ from `current` and clear `floor`; then a *decisive* verdict (confidence
+/// ≥ 0.9, i.e. a deterministic prefilter hit) switches immediately, while a weaker
+/// (vote) verdict needs the same candidate to win `hysteresis` consecutive turns.
+fn decide_switch(
+    current: agent_core::TaskMode,
+    candidate: agent_core::TaskMode,
+    confidence: f32,
+    floor: f32,
+    hysteresis: usize,
+    history: &mut std::collections::VecDeque<agent_core::TaskMode>,
+) -> Option<agent_core::TaskMode> {
+    let hysteresis = hysteresis.max(1);
+    // No change, or too weak to consider: reset the streak and stay.
+    if candidate == current || confidence < floor {
+        history.clear();
+        return None;
+    }
+    // Track consecutive proposals of this candidate (bounded to `hysteresis`).
+    history.push_back(candidate);
+    while history.len() > hysteresis {
+        history.pop_front();
+    }
+    let streak = history
+        .iter()
+        .rev()
+        .take_while(|m| **m == candidate)
+        .count();
+    let decisive = confidence >= 0.9;
+    if !decisive && streak < hysteresis {
+        return None;
+    }
+    history.clear();
+    Some(candidate)
+}
+
+/// Which classification stage produced a verdict, from its `reason` prefix — a
+/// metric label (`prefilter` | `vote` | `failsafe`), never the raw prompt.
+fn classify_via(reason: &str) -> &'static str {
+    if reason.starts_with("deterministic") {
+        "prefilter"
+    } else if reason.starts_with("pool vote") {
+        "vote"
+    } else {
+        "failsafe"
+    }
 }
 
 impl Session<'_> {
@@ -1316,6 +1367,73 @@ impl Session<'_> {
         result
     }
 
+    /// Per-turn, general mode detection (adaptive-cognition 01). Classifies the
+    /// incoming turn (history-aware) and, with hysteresis, decides whether to
+    /// switch the session mode. Returns `Some` iff the mode changed. Fail-safe: no
+    /// classifier wired, or any uncertainty, leaves `current_mode` unchanged.
+    async fn detect_mode(&mut self, input: &str) -> Option<agent_core::ModeSwitch> {
+        let classifier = self.agent.task_classifier.as_ref()?;
+        let span = tracing::info_span!(
+            "mode.classify",
+            via = tracing::field::Empty,
+            mode = tracing::field::Empty,
+            confidence = tracing::field::Empty,
+        );
+        let verdict = classifier
+            .classify(&agent_core::ClassifyCtx {
+                prompt: input,
+                history: &self.working.messages,
+            })
+            .instrument(span.clone())
+            .await;
+        let via = classify_via(&verdict.reason);
+        span.record("via", via);
+        span.record("mode", verdict.mode.as_str());
+        span.record("confidence", verdict.confidence);
+        self.agent
+            .metrics
+            .on_mode_classify(verdict.mode.as_str(), via);
+
+        let from = self.current_mode;
+        let to = decide_switch(
+            from,
+            verdict.mode,
+            verdict.confidence,
+            self.agent.settings.mode_confidence_floor,
+            self.agent.settings.mode_hysteresis,
+            &mut self.switch_history,
+        )?;
+        self.current_mode = to;
+        Some(agent_core::ModeSwitch {
+            from,
+            to,
+            reason: verdict.reason,
+            confidence: verdict.confidence,
+        })
+    }
+
+    /// Record a decided mode switch: a metric, a span, and an episodic event (which
+    /// the telemetry sink routes to ClickHouse `agent_events`). Mode-aware
+    /// compaction and dimensional memory will hook here in later increments.
+    async fn record_mode_switch(&self, sw: &agent_core::ModeSwitch) {
+        tracing::info_span!(
+            "mode.switch",
+            from = sw.from.as_str(),
+            to = sw.to.as_str(),
+            confidence = sw.confidence,
+        )
+        .in_scope(|| tracing::info!(reason = %sw.reason, "task mode switched"));
+        self.agent
+            .metrics
+            .on_mode_switch(sw.from.as_str(), sw.to.as_str(), sw.confidence as f64);
+        self.agent
+            .record(
+                "mode_switch",
+                Message::system(format!("mode: {} -> {}", sw.from.as_str(), sw.to.as_str())),
+            )
+            .await;
+    }
+
     async fn send_inner(&mut self, input: &str) -> anyhow::Result<String> {
         // Expand the prompt's `@file`/`@dir`/`@symbol`/`@url` mentions into
         // context blocks BEFORE assembly, so the model sees the exact bytes the
@@ -1337,15 +1455,32 @@ impl Session<'_> {
         #[cfg(not(feature = "reference"))]
         let expanded: Vec<ContextBlock> = Vec::new();
 
-        if !self.started {
-            // In-loop review hand-off: if this looks like a review task, collect
-            // grounded facts once and queue them as context (docs/design/code-review/).
-            #[cfg(feature = "review")]
-            if self.agent.settings.review_in_loop {
-                if let Some(block) = self.agent.review_handoff(input).await {
+        // General, always-on mode detection (adaptive-cognition 01): classify this
+        // turn (history-aware) and, on a decided switch, update the session mode and
+        // record it. Cheap — no classifier wired ⇒ a no-op.
+        let mode_switch = self.detect_mode(input).await;
+        if let Some(sw) = &mode_switch {
+            self.record_mode_switch(sw).await;
+        }
+        // Review is one consumer of the mode: when we *enter* review, collect
+        // grounded facts and inject them (docs/design/code-review/). First turn ⇒
+        // queue for after assembly; a mid-conversation switch ⇒ inject directly.
+        #[cfg(feature = "review")]
+        if self.agent.settings.review_in_loop
+            && mode_switch
+                .as_ref()
+                .is_some_and(|s| s.to == agent_core::TaskMode::Review)
+        {
+            if let Some(block) = self.agent.review_collect().await {
+                if self.started {
+                    self.working.messages.push(Message::system(block));
+                } else {
                     self.pending_context.push(block);
                 }
             }
+        }
+
+        if !self.started {
             // First turn: recall relevant memory and assemble the initial context.
             let recall_span = tracing::info_span!("memory.recall", items = tracing::field::Empty);
             let recalled = async {
@@ -1524,13 +1659,70 @@ async fn run_tool_guarded(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::ToolCall;
+    use agent_core::{TaskMode, ToolCall};
     use agent_testkit::{
         final_turn, tool_turn, EchoTool, FnProvider, RecordingMemory, ScriptedProvider,
         StaticContext,
     };
     use rstest::rstest;
     use serde_json::json;
+    use std::collections::VecDeque;
+
+    // ---- mode switch decision (hysteresis) ------------------------------
+
+    #[test]
+    fn positive_decisive_verdict_switches_immediately() {
+        let mut h = VecDeque::new();
+        // A deterministic prefilter hit (0.95) switches on the first turn.
+        let to = decide_switch(TaskMode::Other, TaskMode::Review, 0.95, 0.6, 2, &mut h);
+        assert_eq!(to, Some(TaskMode::Review));
+        assert!(h.is_empty(), "history cleared on a switch");
+    }
+
+    #[test]
+    fn negative_same_mode_never_switches() {
+        let mut h = VecDeque::new();
+        let to = decide_switch(TaskMode::Debug, TaskMode::Debug, 0.99, 0.6, 2, &mut h);
+        assert_eq!(to, None);
+    }
+
+    #[test]
+    fn negative_below_floor_never_switches() {
+        let mut h = VecDeque::new();
+        let to = decide_switch(TaskMode::Other, TaskMode::Implement, 0.5, 0.6, 2, &mut h);
+        assert_eq!(to, None);
+    }
+
+    #[test]
+    fn boundary_weak_vote_needs_consecutive_turns() {
+        // A weak (vote-level) verdict below the decisive bar must win `hysteresis`
+        // consecutive turns before it switches — one turn is not enough.
+        let mut h = VecDeque::new();
+        assert_eq!(
+            decide_switch(TaskMode::Other, TaskMode::Implement, 0.7, 0.6, 2, &mut h),
+            None,
+            "first weak turn does not switch"
+        );
+        assert_eq!(
+            decide_switch(TaskMode::Other, TaskMode::Implement, 0.7, 0.6, 2, &mut h),
+            Some(TaskMode::Implement),
+            "second consecutive weak turn switches"
+        );
+    }
+
+    #[test]
+    fn corner_alternating_weak_proposals_do_not_switch() {
+        // Thrash guard: two different weak candidates in a row build no streak.
+        let mut h = VecDeque::new();
+        assert_eq!(
+            decide_switch(TaskMode::Other, TaskMode::Implement, 0.7, 0.6, 2, &mut h),
+            None
+        );
+        assert_eq!(
+            decide_switch(TaskMode::Other, TaskMode::Debug, 0.7, 0.6, 2, &mut h),
+            None
+        );
+    }
 
     /// Emits three tool calls on the first turn, then a final answer. The
     /// `EchoTool` sleeps per `sleep_ms`, so completion order differs from call
@@ -1577,6 +1769,8 @@ mod tests {
             context_append: vec![],
             review_in_loop: false,
             review_context_budget: 24_000,
+            mode_confidence_floor: 0.6,
+            mode_hysteresis: 2,
         }
     }
 

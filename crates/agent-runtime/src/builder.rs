@@ -616,16 +616,26 @@ pub async fn build_agent_with(
     #[cfg(not(feature = "provider-pool"))]
     let llm_pool_seam: Option<Arc<dyn agent_core::LlmPool>> = None;
 
-    #[cfg(feature = "review")]
+    // General task-mode detection (docs/design/adaptive-cognition/01-mode.md).
+    // Decoupled from `review`: it runs every turn, and review is one consumer.
+    // `hybrid` builds the local classifier; `grpc` dials a remote `ModeService`.
+    #[cfg(feature = "mode")]
     let task_classifier_seam: Option<Arc<dyn agent_core::TaskClassifier>> =
-        if cfg.review.classifier == "hybrid" {
-            Some(Arc::new(agent_review::HybridClassifier::new(
+        match cfg.mode.classifier.as_str() {
+            "hybrid" => Some(Arc::new(agent_mode::HybridClassifier::new(
                 llm_pool_seam.clone(),
-            )))
-        } else {
-            None
+            ))),
+            #[cfg(feature = "grpc")]
+            "grpc" => {
+                let ep = crate::registry::grpc_client_endpoint(
+                    &cfg.grpc.mode.endpoint,
+                    agent_grpc::constants::MODE,
+                );
+                Some(Arc::new(agent_grpc::client::GrpcClassifier::connect(&ep)?))
+            }
+            _ => None,
         };
-    #[cfg(not(feature = "review"))]
+    #[cfg(not(feature = "mode"))]
     let task_classifier_seam: Option<Arc<dyn agent_core::TaskClassifier>> = None;
 
     #[cfg(feature = "review")]
@@ -728,6 +738,8 @@ pub async fn build_agent_with(
         context_append,
         review_in_loop: cfg.review.in_loop,
         review_context_budget: cfg.review.context_budget_bytes,
+        mode_confidence_floor: cfg.mode.confidence_floor,
+        mode_hysteresis: cfg.mode.hysteresis,
     };
 
     // Subagents: register a `delegate` tool whose children reuse the worker tool

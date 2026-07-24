@@ -224,6 +224,26 @@ async fn main() -> Result<()> {
                 "the review flow is not enabled — set `[review] backend = \"local\"` in the config"
             ),
         },
+        Mode::Detect(prompt) => match agent.task_classifier() {
+            Some(classifier) => {
+                let v = classifier
+                    .classify(&agent_core::ClassifyCtx {
+                        prompt: &prompt,
+                        history: &[],
+                    })
+                    .await;
+                println!(
+                    "mode={} confidence={:.2} reason={}",
+                    v.mode.as_str(),
+                    v.confidence,
+                    v.reason
+                );
+                Ok(None)
+            }
+            None => anyhow::bail!(
+                "mode detection is not enabled — set `[mode] classifier = \"hybrid\"` in the config"
+            ),
+        },
         Mode::ServeMcp => mcp_server::serve(&agent).await.map(|()| None),
         Mode::ServeGrpc(..) => {
             let (seam, listen) = serve_grpc.expect("serve target resolved above");
@@ -347,6 +367,10 @@ enum Mode {
     /// (`agent --review <PR#|branch|.>`). The bool is `--gate`: exit non-zero if the
     /// synthesized risk crosses the configured threshold. See docs/design/code-review/.
     Review(agent_core::ReviewTarget, bool),
+    /// Classify a prompt's task mode and print the verdict (`agent --detect-mode
+    /// "<prompt>"`). A thin, offline debug surface for the general mode detector —
+    /// the deterministic prefilter needs no model. See docs/design/adaptive-cognition/.
+    Detect(String),
 }
 
 /// Parse a `--review` target: `<base>..<head>` ⇒ an explicit revision range;
@@ -393,6 +417,7 @@ fn parse_args() -> Result<Args> {
     let mut listen: Option<String> = None;
     let mut review_target: Option<String> = None;
     let mut review_gate = false;
+    let mut detect_mode_prompt: Option<String> = None;
     let mut goal_parts: Vec<String> = Vec::new();
 
     let mut args = std::env::args().skip(1);
@@ -418,6 +443,12 @@ fn parse_args() -> Result<Args> {
                 );
             }
             "--gate" => review_gate = true,
+            "--detect-mode" => {
+                detect_mode_prompt = Some(
+                    args.next()
+                        .context("--detect-mode requires a prompt argument")?,
+                );
+            }
             "--listen" => {
                 listen = Some(args.next().context("--listen requires an address")?);
             }
@@ -434,6 +465,7 @@ fn parse_args() -> Result<Args> {
                      --scheduler         drive scheduled jobs (ticks until interrupted)\n  \
                      --review TARGET     collect + print grounded review facts (TARGET = PR#, branch, or `.`)\n  \
                      --gate              with --review: exit non-zero if risk ≥ the configured threshold\n  \
+                     --detect-mode P     classify prompt P's task mode and print the verdict\n  \
                      --serve-mcp         run as an MCP server over stdio (exposes a `run` tool)\n  \
                      --serve-<seam>      host one seam over gRPC; <seam> = {seams}\n  \
                      --serve-all         host every enabled seam over gRPC from one process\n  \
@@ -457,6 +489,8 @@ fn parse_args() -> Result<Args> {
         Mode::ServeMcp
     } else if let Some(t) = review_target {
         Mode::Review(parse_review_target(&t), review_gate)
+    } else if let Some(p) = detect_mode_prompt {
+        Mode::Detect(p)
     } else if goal.trim().is_empty() {
         Mode::Repl
     } else {

@@ -3419,6 +3419,19 @@ pub struct ClassifyCtx<'a> {
     pub history: &'a [Message],
 }
 
+/// A decided change of task mode, emitted by the runtime when the per-turn
+/// classification (plus hysteresis) moves the session to a new mode. It is the
+/// pivot the adaptive-cognition design keys off: it drives mode-aware compaction
+/// and dimensional memory. `confidence` is untrusted (a pool vote's self-report) —
+/// clamp before use. See `docs/design/adaptive-cognition/`.
+#[derive(Debug, Clone)]
+pub struct ModeSwitch {
+    pub from: TaskMode,
+    pub to: TaskMode,
+    pub reason: String,
+    pub confidence: f32,
+}
+
 /// Detects the task mode of incoming work.
 #[async_trait]
 pub trait TaskClassifier: Send + Sync {

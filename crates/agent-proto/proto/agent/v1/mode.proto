@@ -1,0 +1,46 @@
+// The `TaskClassifier` seam over gRPC: classify an incoming turn's task mode.
+// General, always-on detection (docs/design/adaptive-cognition/01-mode.md) — the
+// switch decision itself is runtime state, so only `Classify` is served here.
+syntax = "proto3";
+
+package agent.v1;
+
+import "agent/v1/common.proto";
+
+// The coarse task mode. Mirrors `agent_core::TaskMode`.
+enum TaskMode {
+  TASK_MODE_UNSPECIFIED = 0;
+  TASK_MODE_REVIEW = 1;
+  TASK_MODE_IMPLEMENT = 2;
+  TASK_MODE_DESIGN = 3;
+  TASK_MODE_DEBUG = 4;
+  TASK_MODE_EXPLAIN = 5;
+  TASK_MODE_OTHER = 6;
+}
+
+// What a classifier saw the incoming work as. `confidence` is untrusted (a pool
+// vote's self-report) — clamp to 0..=1 on receipt.
+message ModeVerdict {
+  TaskMode mode = 1;
+  float confidence = 2;
+  string reason = 3;
+}
+
+// A decided change of task mode (recorded; drives compaction + memory later).
+message ModeSwitch {
+  TaskMode from = 1;
+  TaskMode to = 2;
+  string reason = 3;
+  float confidence = 4;
+}
+
+// The context a classifier judges. The prompt/history are bounded server-side and
+// never logged verbatim (a hash stands in for the prompt).
+message ClassifyRequest {
+  string prompt = 1;
+  repeated Message history = 2;
+}
+
+service ModeService {
+  rpc Classify(ClassifyRequest) returns (ModeVerdict);
+}

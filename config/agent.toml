@@ -366,6 +366,16 @@ policy            = "in-order"    # in-order | round-robin
 failure_threshold = 3
 cooldown_secs     = 30
 
+# General task-mode detection (the TaskClassifier seam). Runs every turn to detect
+# when to switch to a more appropriate mode; drives the in-loop review hand-off, and
+# (later) mode-aware compaction + dimensional memory. ON by default — with no [pool]
+# configured only the free deterministic prefilter runs, so the per-turn cost is
+# near zero. See docs/components/mode.md + docs/design/adaptive-cognition/.
+[mode]
+classifier       = "hybrid"       # "hybrid" | "grpc" | "" (off)
+confidence_floor = 0.6            # a candidate mode must reach this to switch
+hysteresis       = 2              # consecutive turns a non-decisive candidate must win
+
 [web_search]
 backends          = []            # e.g. ["brave"] or ["searxng", "brave"]
 cache_ttl_secs    = 900
