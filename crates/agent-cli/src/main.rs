@@ -192,7 +192,7 @@ async fn main() -> Result<()> {
             }
             Ok(None)
         }
-        Mode::Review(target) => match agent.review_collector() {
+        Mode::Review(target, gate) => match agent.review_collector() {
             Some(collector) => {
                 let facts = collector
                     .collect(&target)
@@ -203,6 +203,21 @@ async fn main() -> Result<()> {
                     .record_review(agent_core::ReviewRecord::from_facts(&facts, "explicit"))
                     .await;
                 println!("{}", agent_review::render_facts_with(&facts, review_budget));
+                // `--gate`: a changed-files-only CI gate — fail the build (non-zero
+                // exit) when the synthesized risk crosses the configured threshold.
+                if gate && facts.risk.gate_failed {
+                    anyhow::bail!(
+                        "review gate FAILED: {} at risk {:.2} ≥ threshold {:.2}",
+                        facts
+                            .risk
+                            .files
+                            .first()
+                            .map(|f| f.file.as_str())
+                            .unwrap_or("(unknown)"),
+                        facts.risk.max_score,
+                        facts.risk.gate_threshold,
+                    );
+                }
                 Ok(None)
             }
             None => anyhow::bail!(
@@ -329,8 +344,9 @@ enum Mode {
     /// Drive the scheduler: tick on an interval, firing due jobs (parity spec 28).
     Scheduler,
     /// Collect grounded review facts for a target and print them
-    /// (`agent --review <PR#|branch|.>`). See docs/design/code-review/.
-    Review(agent_core::ReviewTarget),
+    /// (`agent --review <PR#|branch|.>`). The bool is `--gate`: exit non-zero if the
+    /// synthesized risk crosses the configured threshold. See docs/design/code-review/.
+    Review(agent_core::ReviewTarget, bool),
 }
 
 /// Parse a `--review` target: `<base>..<head>` ⇒ an explicit revision range;
@@ -376,6 +392,7 @@ fn parse_args() -> Result<Args> {
     let mut serve_grpc_all = false;
     let mut listen: Option<String> = None;
     let mut review_target: Option<String> = None;
+    let mut review_gate = false;
     let mut goal_parts: Vec<String> = Vec::new();
 
     let mut args = std::env::args().skip(1);
@@ -400,6 +417,7 @@ fn parse_args() -> Result<Args> {
                         .context("--review requires a target (a PR#, a branch, or `.`)")?,
                 );
             }
+            "--gate" => review_gate = true,
             "--listen" => {
                 listen = Some(args.next().context("--listen requires an address")?);
             }
@@ -415,6 +433,7 @@ fn parse_args() -> Result<Args> {
                      --resume ID         resume a specific session\n  \
                      --scheduler         drive scheduled jobs (ticks until interrupted)\n  \
                      --review TARGET     collect + print grounded review facts (TARGET = PR#, branch, or `.`)\n  \
+                     --gate              with --review: exit non-zero if risk ≥ the configured threshold\n  \
                      --serve-mcp         run as an MCP server over stdio (exposes a `run` tool)\n  \
                      --serve-<seam>      host one seam over gRPC; <seam> = {seams}\n  \
                      --serve-all         host every enabled seam over gRPC from one process\n  \
@@ -437,7 +456,7 @@ fn parse_args() -> Result<Args> {
     } else if serve_mcp {
         Mode::ServeMcp
     } else if let Some(t) = review_target {
-        Mode::Review(parse_review_target(&t))
+        Mode::Review(parse_review_target(&t), review_gate)
     } else if goal.trim().is_empty() {
         Mode::Repl
     } else {

@@ -14,8 +14,9 @@ budget-bounded diff hunks, **static-analysis findings** (golangci-lint + clippy)
 co-change** (which files usually move together, and which expected partner this
 change left behind), **churn & ownership** (per-file bus factor + churn trend),
 **salience** (a call-graph-centrality × churn blast-radius verdict per changed
-file), a **code-style fingerprint**, and **cheap-LLM function summaries** (the one
-soft layer, fanned over the pool) — with any collector that
+file), a reason-tagged **risk score** (with a `--gate` CI mode), a **code-style
+fingerprint**, and **cheap-LLM function summaries** (the one soft layer, fanned
+over the pool) — with any collector that
 couldn't run stated as an explicit gap, and every run **recorded** to ClickHouse
 (`agent_reviews` + `agent_review_collectors`) / `episodic.jsonl`. Driven by a
 health-checked LLM pool, with two gRPC services and a dual-judge (assistant +

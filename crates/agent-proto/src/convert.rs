@@ -3131,6 +3131,65 @@ impl From<pb::ReviewSalienceReport> for agent_core::SalienceReport {
     }
 }
 
+impl From<agent_core::RiskReason> for pb::ReviewRiskReason {
+    fn from(r: agent_core::RiskReason) -> Self {
+        pb::ReviewRiskReason {
+            kind: r.kind,
+            weight: r.weight,
+            detail: r.detail,
+        }
+    }
+}
+impl From<pb::ReviewRiskReason> for agent_core::RiskReason {
+    fn from(r: pb::ReviewRiskReason) -> Self {
+        agent_core::RiskReason {
+            kind: r.kind,
+            weight: r.weight,
+            detail: r.detail,
+        }
+    }
+}
+impl From<agent_core::FileRisk> for pb::ReviewFileRisk {
+    fn from(f: agent_core::FileRisk) -> Self {
+        pb::ReviewFileRisk {
+            file: f.file,
+            score: f.score,
+            level: f.level,
+            reasons: f.reasons.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+impl From<pb::ReviewFileRisk> for agent_core::FileRisk {
+    fn from(f: pb::ReviewFileRisk) -> Self {
+        agent_core::FileRisk {
+            file: f.file,
+            score: f.score,
+            level: f.level,
+            reasons: f.reasons.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+impl From<agent_core::RiskReport> for pb::ReviewRiskReport {
+    fn from(r: agent_core::RiskReport) -> Self {
+        pb::ReviewRiskReport {
+            files: r.files.into_iter().map(Into::into).collect(),
+            max_score: r.max_score,
+            gate_threshold: r.gate_threshold,
+            gate_failed: r.gate_failed,
+        }
+    }
+}
+impl From<pb::ReviewRiskReport> for agent_core::RiskReport {
+    fn from(r: pb::ReviewRiskReport) -> Self {
+        agent_core::RiskReport {
+            files: r.files.into_iter().map(Into::into).collect(),
+            max_score: r.max_score,
+            gate_threshold: r.gate_threshold,
+            gate_failed: r.gate_failed,
+        }
+    }
+}
+
 impl From<agent_core::ReviewFacts> for pb::ReviewFacts {
     fn from(f: agent_core::ReviewFacts) -> Self {
         pb::ReviewFacts {
@@ -3145,6 +3204,7 @@ impl From<agent_core::ReviewFacts> for pb::ReviewFacts {
             cochange: Some(f.cochange.into()),
             churn: Some(f.churn.into()),
             salience: Some(f.salience.into()),
+            risk: Some(f.risk.into()),
         }
     }
 }
@@ -3162,6 +3222,7 @@ impl From<pb::ReviewFacts> for agent_core::ReviewFacts {
             cochange: f.cochange.map(Into::into).unwrap_or_default(),
             churn: f.churn.map(Into::into).unwrap_or_default(),
             salience: f.salience.map(Into::into).unwrap_or_default(),
+            risk: f.risk.map(Into::into).unwrap_or_default(),
         }
     }
 }

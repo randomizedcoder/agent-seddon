@@ -165,8 +165,9 @@ hermetically gated:
 1. ✅ **`CoChangeCollector`** — highest value, self-contained, no new toolchain. *(PR #110.)*
 2. ✅ **`ChurnCollector`** (bus factor + churn velocity) — pure git; feeds #3. *(PR #112.)*
 3. ✅ **Salience synthesis** — PageRank centrality in the call graph + `classify_salience`
-   blending churn's bus factor, as a post-fan-out step (needs two collectors' facts). *(This PR.)*
-4. **`ReviewRisk`** synthesiser + `--review --gate` mode (one canonical formula over 1–3).
+   blending churn's bus factor, as a post-fan-out step (needs two collectors' facts). *(PR #113.)*
+4. ✅ **`RiskReport`** synthesiser + `--review --gate` mode — one canonical additive,
+   reason-tagged formula over every signal; non-zero exit past the threshold. *(This PR.)*
 5. **Tree-sitter extractor** — the multi-language upgrade for signatures + call-graph (separate track).
 
 Both #1 and #2 mine **prior** history from `base` (not `head`) via the shared

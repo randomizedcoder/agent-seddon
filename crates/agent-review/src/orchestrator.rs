@@ -87,6 +87,12 @@ pub enum ReviewEvent {
         files: u32,
         critical: u32,
     },
+    /// Risk accounting: at-risk files, the max score, and whether the gate failed.
+    Risk {
+        files: u32,
+        max_score: f64,
+        gate_failed: bool,
+    },
 }
 
 /// Observability hook (see [`ReviewEvent`]).
@@ -103,6 +109,8 @@ pub struct ReviewOrchestrator {
     deadline: Duration,
     sandbox: Option<Arc<dyn Sandbox>>,
     analyze_timeout_secs: u64,
+    /// Risk level a `--gate` run fails at (`0` disables the gate verdict).
+    gate_threshold: f64,
 }
 
 struct Resolved {
@@ -131,7 +139,15 @@ impl ReviewOrchestrator {
             deadline: Duration::from_secs(60),
             sandbox: None,
             analyze_timeout_secs: 45,
+            gate_threshold: 0.7,
         }
+    }
+
+    /// Set the risk level a `--gate` run fails at (default `0.7`; `0` disables it).
+    #[must_use]
+    pub fn with_gate_threshold(mut self, threshold: f64) -> Self {
+        self.gate_threshold = threshold.clamp(0.0, 1.0);
+        self
     }
 
     pub fn with_observer(mut self, o: ReviewObserver) -> Self {
@@ -409,6 +425,17 @@ impl ReviewCollector for ReviewOrchestrator {
             self.emit(ReviewEvent::Salience {
                 files: facts.salience.files.len() as u32,
                 critical,
+            });
+        }
+
+        // Risk synthesis: fold every signal into one canonical per-file score + the
+        // gate verdict. Also post-fan-out (it reads the other collectors' facts).
+        facts.risk = crate::risk::compute(&facts, self.gate_threshold);
+        if !facts.risk.files.is_empty() {
+            self.emit(ReviewEvent::Risk {
+                files: facts.risk.files.len() as u32,
+                max_score: facts.risk.max_score,
+                gate_failed: facts.risk.gate_failed,
             });
         }
 
