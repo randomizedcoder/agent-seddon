@@ -69,6 +69,27 @@ are not separate increments — each increment lands its own slice of both.
 
 ## Change log
 
+- **2026-07-23** — **Reason-tagged risk score + `--gate` CI mode (Homer design input
+  — 4th follow-on).** The second post-fan-out synthesis: `risk::compute` folds every
+  other signal — salience, churn/ownership, co-change, static findings, API changes —
+  into **one canonical per-file risk score**. Homer ships three inconsistent risk
+  formulas; we deliberately pick **one** — an additive sum of independent, typed reason
+  weights (`load_bearing` 0.35/0.25, `single_owner` 0.15 [suppressed under CriticalSilo,
+  no double-count], `churn_increasing` 0.10, `missing_cochange_partner` 0.20,
+  `static_finding` 0.20, `api_change` 0.15), capped at 1.0 → `high`/`medium`/`low` —
+  each reason carrying its weight + a human `detail`, so the score is **auditable**, not
+  a black box. Rendered as the **`Risk`** executive-summary section (first, since it
+  synthesizes everything below). New **`agent --review --gate`** flag: a changed-files-
+  only CI gate that exits non-zero when `max_score ≥ [review] gate_threshold` (default
+  0.7) — Homer's `risk-check --diff`. Metrics `agent_review_risk_total{kind}` +
+  `agent_review_risk_max_score` histogram via `ReviewEvent::Risk`. Wire: additive
+  `ReviewRiskReason`/`ReviewFileRisk`/`ReviewRiskReport` + `ReviewFacts` field 12
+  (round-trip tested; no baseline bump). Tests: 5 risk-`compute` unit cases (additive
+  sum, CriticalSilo suppression, cap + gate threshold, empty), a hermetic `review-gate`
+  gate (stacked reasons cross the threshold → `--gate` exits non-zero, offline, no
+  linter). **Deferred:** per-reason recommendations, outcome-proxy columns, a dedicated
+  risk-map JSON artifact. **Remaining design input:** the tree-sitter multi-language
+  extractor (the big separate track).
 - **2026-07-23** — **Salience / blast-radius synthesis (Homer design input — 3rd
   follow-on).** The first **post-fan-out synthesis** (not a collector): it needs two
   collectors' facts at once, so it runs after assembly. The call-graph collector now

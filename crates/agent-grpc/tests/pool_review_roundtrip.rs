@@ -267,6 +267,21 @@ impl ReviewCollector for FakeReview {
                     class: "CriticalSilo".into(),
                 }],
             },
+            risk: agent_core::RiskReport {
+                files: vec![agent_core::FileRisk {
+                    file: "main.go".into(),
+                    score: 0.8,
+                    level: "high".into(),
+                    reasons: vec![agent_core::RiskReason {
+                        kind: "load_bearing".into(),
+                        weight: 0.35,
+                        detail: "load-bearing and single-owner".into(),
+                    }],
+                }],
+                max_score: 0.8,
+                gate_threshold: 0.7,
+                gate_failed: true,
+            },
         })
     }
 }
@@ -370,6 +385,11 @@ async fn review_collect_roundtrips(#[case] transport: Transport) {
     assert_eq!(facts.callgraph.nodes[1].centrality, 1.0);
     assert_eq!(facts.salience.files.len(), 1);
     assert_eq!(facts.salience.files[0].class, "CriticalSilo");
+    // Risk report (score, level, reasons, gate verdict) survives the round-trip.
+    assert_eq!(facts.risk.files.len(), 1);
+    assert_eq!(facts.risk.files[0].level, "high");
+    assert_eq!(facts.risk.files[0].reasons[0].kind, "load_bearing");
+    assert!(facts.risk.gate_failed);
 }
 
 /// A PR target survives the encode/decode round-trip through the wire string.

@@ -375,6 +375,10 @@ pub struct ReviewCfg {
     /// History depth (commits) the churn collector mines. Clamped ≥ 1.
     #[serde(default = "default_churn_window")]
     pub churn_window: usize,
+    /// Risk level a `--review --gate` run fails at (`0.0..=1.0`; `0` disables the
+    /// gate verdict but still scores). Default `0.7`.
+    #[serde(default = "default_gate_threshold")]
+    pub gate_threshold: f64,
 }
 
 impl Default for ReviewCfg {
@@ -397,6 +401,7 @@ impl Default for ReviewCfg {
             cochange_window: default_cochange_window(),
             churn: true,
             churn_window: default_churn_window(),
+            gate_threshold: default_gate_threshold(),
         }
     }
 }
@@ -424,6 +429,9 @@ fn default_cochange_window() -> usize {
 }
 fn default_churn_window() -> usize {
     2000
+}
+fn default_gate_threshold() -> f64 {
+    0.7
 }
 
 /// Live web search (the `WebSearch` seam, parity spec 12). `backends` lists the

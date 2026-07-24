@@ -3897,6 +3897,46 @@ pub struct SalienceReport {
     pub files: Vec<FileSalience>,
 }
 
+/// One typed, weighted reason a changed file scored risk (Homer's reason-tagged
+/// risk-map schema, `risk_map.rs`). `kind` is a fixed slug (`load_bearing`,
+/// `single_owner`, `churn_increasing`, `missing_cochange_partner`, `static_finding`,
+/// `api_change`); `detail` is a bounded human explanation.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RiskReason {
+    pub kind: String,
+    pub weight: f64,
+    pub detail: String,
+}
+
+/// A changed file's composite risk: the additive sum of its reason weights (capped
+/// at `1.0`), a `high`/`medium`/`low` level, and the reasons that drove it — each
+/// with a weight and a human explanation, so the score is auditable, never a black
+/// box.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FileRisk {
+    /// Repo-relative path (confined).
+    pub file: String,
+    pub score: f64,
+    /// `high` (≥0.7) | `medium` (≥0.4) | `low` (>0).
+    pub level: String,
+    pub reasons: Vec<RiskReason>,
+}
+
+/// The risk synthesis (Homer design input): a post-fan-out fold of every other
+/// signal — salience, churn/ownership, co-change, static findings, API changes —
+/// into one canonical per-file risk score, plus a CI **gate** verdict. One additive
+/// formula (Homer ships three inconsistent ones; we pick one and make it explicit).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RiskReport {
+    /// At-risk files (score > 0), most-risky first.
+    pub files: Vec<FileRisk>,
+    pub max_score: f64,
+    /// The threshold this run gated on.
+    pub gate_threshold: f64,
+    /// `max_score >= gate_threshold` — a CI gate should fail the build.
+    pub gate_failed: bool,
+}
+
 /// The grounded fact bundle a reviewer reasons over. Everything here is a hard
 /// fact from a tool — except `summaries`, the one soft (model-generated) field,
 /// which is clearly labelled and never overwrites a fact. Later increments add
@@ -3933,6 +3973,10 @@ pub struct ReviewFacts {
     /// blend of the call graph + churn. Empty when the call graph is absent.
     #[serde(default)]
     pub salience: SalienceReport,
+    /// Per-file composite risk + gate verdict (Homer design input) — a derived fold
+    /// of every other signal. Empty when nothing scored risk.
+    #[serde(default)]
+    pub risk: RiskReport,
 }
 
 /// A flattened, analytics-shaped record of one review run — the telemetry-local

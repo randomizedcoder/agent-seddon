@@ -273,6 +273,26 @@ message ReviewSalienceReport {
   repeated ReviewFileSalience files = 1;
 }
 
+message ReviewRiskReason {
+  string kind = 1;
+  double weight = 2;
+  string detail = 3;
+}
+
+message ReviewFileRisk {
+  string file = 1;
+  double score = 2;
+  string level = 3;
+  repeated ReviewRiskReason reasons = 4;
+}
+
+message ReviewRiskReport {
+  repeated ReviewFileRisk files = 1;
+  double max_score = 2;
+  double gate_threshold = 3;
+  bool gate_failed = 4;
+}
+
 message ReviewFacts {
   ReviewMeta meta = 1;
   ReviewChangeSet change = 2;
@@ -285,4 +305,5 @@ message ReviewFacts {
   ReviewCoChangeReport cochange = 9;
   ReviewChurnReport churn = 10;
   ReviewSalienceReport salience = 11;
+  ReviewRiskReport risk = 12;
 }

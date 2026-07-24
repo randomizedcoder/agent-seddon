@@ -687,6 +687,8 @@ pub async fn build_agent_with(
                 if cfg.review.churn {
                     orch = orch.with_churn(cfg.review.churn_window);
                 }
+                // Risk synthesis threshold (post-fan-out; always computed).
+                orch = orch.with_gate_threshold(cfg.review.gate_threshold);
                 Some(Arc::new(orch) as Arc<dyn agent_core::ReviewCollector>)
             }
             // A remote fact-collection host (CPU-heavy, worth distributing).

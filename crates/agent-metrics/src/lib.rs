@@ -94,6 +94,8 @@ pub struct Metrics {
     review_cochange: IntCounterVec,
     review_churn: IntCounterVec,
     review_salience: IntCounterVec,
+    review_risk: IntCounterVec,
+    review_risk_score: Histogram,
     review_runs: IntCounterVec,
     review_total_duration: HistogramVec,
     review_parallelism: Histogram,
@@ -438,6 +440,19 @@ impl Metrics {
             ),
             &["kind"],
         )
+        .unwrap();
+        let review_risk = IntCounterVec::new(
+            Opts::new(
+                "agent_review_risk_total",
+                "Risk synthesis: at-risk files and gate-failing runs",
+            ),
+            &["kind"],
+        )
+        .unwrap();
+        let review_risk_score = Histogram::with_opts(HistogramOpts::new(
+            "agent_review_risk_max_score",
+            "The highest per-file risk score in a review run (0..1)",
+        ))
         .unwrap();
         let review_runs = IntCounterVec::new(
             Opts::new(
@@ -874,6 +889,8 @@ impl Metrics {
             Box::new(review_cochange.clone()),
             Box::new(review_churn.clone()),
             Box::new(review_salience.clone()),
+            Box::new(review_risk.clone()),
+            Box::new(review_risk_score.clone()),
             Box::new(review_runs.clone()),
             Box::new(review_total_duration.clone()),
             Box::new(review_parallelism.clone()),
@@ -977,6 +994,8 @@ impl Metrics {
             review_cochange,
             review_churn,
             review_salience,
+            review_risk,
+            review_risk_score,
             review_runs,
             review_total_duration,
             review_parallelism,
@@ -1227,6 +1246,16 @@ impl Metrics {
         self.review_salience
             .with_label_values(&["critical"])
             .inc_by(critical);
+    }
+    /// Review: risk synthesis — at-risk files, the max score, and gate failures.
+    pub fn on_review_risk(&self, files: u64, max_score: f64, gate_failed: bool) {
+        self.review_risk.with_label_values(&["files"]).inc_by(files);
+        if gate_failed {
+            self.review_risk.with_label_values(&["gate_failed"]).inc();
+        }
+        if max_score.is_finite() {
+            self.review_risk_score.observe(max_score.clamp(0.0, 1.0));
+        }
     }
     /// Review: one completed run — its count (by project/mode/outcome) + wall-clock.
     pub fn on_review_run(&self, project: &str, mode_via: &str, outcome: &str, seconds: f64) {

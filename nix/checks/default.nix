@@ -91,6 +91,11 @@
   # (call-graph centrality × churn ownership) yields a `CriticalSilo` verdict. Uses
   # the prebuilt `agent-go-ast` helper; offline.
   review-salience = import ./review-salience.nix { inherit pkgs agent go-ast; };
+  # Risk + gate coverage (Homer design input): a change that stacks CriticalSilo +
+  # missing-partner + api-change ≥ the 0.70 threshold; assert the `Risk` section
+  # renders GATE FAIL and `--review --gate` exits non-zero. Uses the `agent-go-ast`
+  # helper; offline (no linter — the score is reached without static findings).
+  review-gate = import ./review-gate.nix { inherit pkgs agent go-ast; };
   # Recording coverage: `agent --review` must persist a ReviewRecord to
   # episodic.jsonl (the durable fallback for the agent_reviews table). Offline.
   review-recording = import ./review-recording.nix { inherit pkgs agent; };

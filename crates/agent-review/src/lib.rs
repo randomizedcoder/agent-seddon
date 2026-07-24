@@ -14,6 +14,7 @@ mod cochange;
 mod collector;
 mod orchestrator;
 mod repo_facts;
+mod risk;
 mod salience;
 mod signatures;
 mod style;
@@ -109,6 +110,10 @@ pub fn render_facts_with(facts: &ReviewFacts, budget_bytes: usize) -> String {
         ));
     }
 
+    // Risk — the executive summary: one canonical per-file score + why, folded from
+    // every signal below. Rendered first so a reviewer sees the headline verdict.
+    render_risk(&mut out, &facts.risk);
+
     // Changed function signatures — the structural "what APIs moved" fact, read
     // before the findings and the raw hunks.
     render_signatures(&mut out, &facts.signatures);
@@ -197,6 +202,36 @@ fn render_cochange(out: &mut String, r: &agent_core::CoChangeReport) {
                 p.path, pct, p.co_occurrences, tag
             ));
         }
+    }
+}
+
+/// Render the risk summary: per at-risk file, its level + score + the reasons that
+/// drove it. The headline verdict; empty when nothing scored risk.
+fn render_risk(out: &mut String, r: &agent_core::RiskReport) {
+    if r.files.is_empty() {
+        return;
+    }
+    out.push_str(&format!(
+        "\nRisk (highest {:.2}{}):\n",
+        r.max_score,
+        if r.gate_failed {
+            format!(" — ⚠ GATE FAIL ≥ {:.2}", r.gate_threshold)
+        } else {
+            String::new()
+        }
+    ));
+    for f in &r.files {
+        out.push_str(&format!(
+            "  {} — {} ({:.2}): {}\n",
+            f.file,
+            f.level,
+            f.score,
+            f.reasons
+                .iter()
+                .map(|x| x.detail.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
     }
 }
 

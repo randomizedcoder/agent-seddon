@@ -1954,6 +1954,13 @@ pub(crate) fn record_review_event(m: &Metrics, ev: agent_review::ReviewEvent) {
         ReviewEvent::Salience { files, critical } => {
             m.on_review_salience(u64::from(files), u64::from(critical));
         }
+        ReviewEvent::Risk {
+            files,
+            max_score,
+            gate_failed,
+        } => {
+            m.on_review_risk(u64::from(files), max_score, gate_failed);
+        }
     }
 }
 
