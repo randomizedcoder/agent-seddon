@@ -3692,6 +3692,11 @@ pub struct CallGraphNode {
     /// Repo-relative path (confined).
     pub file: String,
     pub line: u32,
+    /// PageRank centrality over the call graph, min-max normalized to `0.0..=1.0`
+    /// (the most-called-into node is `1.0`). A load-bearing-ness / blast-radius
+    /// score: how much of the graph's importance flows into this function.
+    #[serde(default)]
+    pub centrality: f64,
 }
 
 /// A syntactic caller→callee edge between two [`CallGraphNode`]s (name-resolved;
@@ -3865,6 +3870,33 @@ pub struct ChurnReport {
     pub files: Vec<FileChurn>,
 }
 
+/// Composite-salience verdict for one changed file (Homer design input), blending
+/// the call-graph **centrality** (blast radius) with the churn collector's **churn
+/// trend** and **bus factor**. `class` is Homer's `classify_salience` taxonomy:
+/// `CriticalSilo` (load-bearing + single-owner — the highest-risk change),
+/// `FoundationalStable` (load-bearing but rarely-touched — the "quiescent
+/// high-centrality" case), `HotCritical`, `ActiveLocalized`, `Background`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FileSalience {
+    /// Repo-relative path (confined).
+    pub file: String,
+    /// Max normalized PageRank centrality among this file's changed functions.
+    pub centrality: f64,
+    pub bus_factor: u32,
+    pub churn_increasing: bool,
+    /// `CriticalSilo` | `HotCritical` | `FoundationalStable` | `ActiveLocalized` |
+    /// `Background`.
+    pub class: String,
+}
+
+/// The salience synthesis: a post-fan-out blend of the call-graph and churn facts
+/// into a per-file blast-radius/criticality verdict. Empty when the call graph is
+/// absent (no Go source / helper unavailable). Derived — not a collector.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SalienceReport {
+    pub files: Vec<FileSalience>,
+}
+
 /// The grounded fact bundle a reviewer reasons over. Everything here is a hard
 /// fact from a tool — except `summaries`, the one soft (model-generated) field,
 /// which is clearly labelled and never overwrites a fact. Later increments add
@@ -3897,6 +3929,10 @@ pub struct ReviewFacts {
     /// off / no history.
     #[serde(default)]
     pub churn: ChurnReport,
+    /// Composite-salience / blast-radius verdicts (Homer design input) — a derived
+    /// blend of the call graph + churn. Empty when the call graph is absent.
+    #[serde(default)]
+    pub salience: SalienceReport,
 }
 
 /// A flattened, analytics-shaped record of one review run — the telemetry-local

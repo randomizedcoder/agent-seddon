@@ -14,6 +14,7 @@ mod cochange;
 mod collector;
 mod orchestrator;
 mod repo_facts;
+mod salience;
 mod signatures;
 mod style;
 mod summaries;
@@ -115,6 +116,10 @@ pub fn render_facts_with(facts: &ReviewFacts, budget_bytes: usize) -> String {
     // Call graph — the blast radius of the changed functions (who calls them).
     render_callgraph(&mut out, &facts.callgraph);
 
+    // Salience — the composite blast-radius/criticality verdict per changed file
+    // (centrality × churn × ownership). Foregrounds load-bearing changes.
+    render_salience(&mut out, &facts.salience);
+
     // Historical co-change — which files usually move together, and which expected
     // partner this change left behind (the absent-partner signal).
     render_cochange(&mut out, &facts.cochange);
@@ -192,6 +197,29 @@ fn render_cochange(out: &mut String, r: &agent_core::CoChangeReport) {
                 p.path, pct, p.co_occurrences, tag
             ));
         }
+    }
+}
+
+/// Render the salience verdict: the load-bearing changed files first, with Homer's
+/// class. Only the notable classes are shown (Background is the quiet default).
+fn render_salience(out: &mut String, r: &agent_core::SalienceReport) {
+    let notable: Vec<&agent_core::FileSalience> =
+        r.files.iter().filter(|f| f.class != "Background").collect();
+    if notable.is_empty() {
+        return;
+    }
+    out.push_str("\nSalience (blast radius — centrality × churn × ownership):\n");
+    for f in notable {
+        let note = match f.class.as_str() {
+            "CriticalSilo" => " — ⚠ load-bearing AND single-owner",
+            "FoundationalStable" => " — ⚠ load-bearing, rarely changed (high blast radius)",
+            "HotCritical" => " — ⚠ load-bearing and churning",
+            _ => "",
+        };
+        out.push_str(&format!(
+            "  {} — {} (centrality {:.2}){}\n",
+            f.file, f.class, f.centrality, note
+        ));
     }
 }
 

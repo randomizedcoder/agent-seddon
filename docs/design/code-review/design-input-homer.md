@@ -163,8 +163,9 @@ One PR per collector, same cadence as 05–09 — fail-soft, `adversarial_`-test
 hermetically gated:
 
 1. ✅ **`CoChangeCollector`** — highest value, self-contained, no new toolchain. *(PR #110.)*
-2. ✅ **`ChurnCollector`** (bus factor + churn velocity) — pure git; feeds #3. *(This PR.)*
-3. **Salience ranking** folded into `CallGraphCollector` (PageRank + `classify_salience`).
+2. ✅ **`ChurnCollector`** (bus factor + churn velocity) — pure git; feeds #3. *(PR #112.)*
+3. ✅ **Salience synthesis** — PageRank centrality in the call graph + `classify_salience`
+   blending churn's bus factor, as a post-fan-out step (needs two collectors' facts). *(This PR.)*
 4. **`ReviewRisk`** synthesiser + `--review --gate` mode (one canonical formula over 1–3).
 5. **Tree-sitter extractor** — the multi-language upgrade for signatures + call-graph (separate track).
 

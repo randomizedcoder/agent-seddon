@@ -86,6 +86,11 @@
   # single-owner (bus factor 1); assert the `Churn & ownership` section foregrounds
   # it without leaking author identity. Pure git-history mining; offline, no toolchain.
   review-churn = import ./review-churn.nix { inherit pkgs agent; };
+  # Salience coverage (Homer design input): a Go repo where a load-bearing (called
+  # by three) + single-owner function changes; assert the post-fan-out synthesis
+  # (call-graph centrality × churn ownership) yields a `CriticalSilo` verdict. Uses
+  # the prebuilt `agent-go-ast` helper; offline.
+  review-salience = import ./review-salience.nix { inherit pkgs agent go-ast; };
   # Recording coverage: `agent --review` must persist a ReviewRecord to
   # episodic.jsonl (the durable fallback for the agent_reviews table). Offline.
   review-recording = import ./review-recording.nix { inherit pkgs agent; };

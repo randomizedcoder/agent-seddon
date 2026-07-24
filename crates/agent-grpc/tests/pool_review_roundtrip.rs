@@ -171,6 +171,7 @@ impl ReviewCollector for FakeReview {
                         exported: false,
                         file: "main.go".into(),
                         line: 5,
+                        centrality: 0.5,
                     },
                     agent_core::CallGraphNode {
                         id: 1,
@@ -179,6 +180,7 @@ impl ReviewCollector for FakeReview {
                         exported: true,
                         file: "main.go".into(),
                         line: 9,
+                        centrality: 1.0,
                     },
                 ],
                 edges: vec![agent_core::CallEdge {
@@ -254,6 +256,15 @@ impl ReviewCollector for FakeReview {
                     churn_trend: "increasing".into(),
                     churn_slope: 1.5,
                     total_churn: 340,
+                }],
+            },
+            salience: agent_core::SalienceReport {
+                files: vec![agent_core::FileSalience {
+                    file: "main.go".into(),
+                    centrality: 1.0,
+                    bus_factor: 1,
+                    churn_increasing: true,
+                    class: "CriticalSilo".into(),
                 }],
             },
         })
@@ -355,6 +366,10 @@ async fn review_collect_roundtrips(#[case] transport: Transport) {
     assert_eq!(facts.churn.files[0].bus_factor, 1);
     assert_eq!(facts.churn.files[0].churn_trend, "increasing");
     assert_eq!(facts.churn.files[0].total_churn, 340);
+    // Salience verdict + node centrality survive the wire round-trip.
+    assert_eq!(facts.callgraph.nodes[1].centrality, 1.0);
+    assert_eq!(facts.salience.files.len(), 1);
+    assert_eq!(facts.salience.files[0].class, "CriticalSilo");
 }
 
 /// A PR target survives the encode/decode round-trip through the wire string.

@@ -2792,6 +2792,7 @@ impl From<agent_core::CallGraphNode> for pb::ReviewCallGraphNode {
             exported: n.exported,
             file: n.file,
             line: n.line,
+            centrality: n.centrality,
         }
     }
 }
@@ -2804,6 +2805,7 @@ impl From<pb::ReviewCallGraphNode> for agent_core::CallGraphNode {
             exported: n.exported,
             file: n.file,
             line: n.line,
+            centrality: n.centrality,
         }
     }
 }
@@ -3092,6 +3094,43 @@ impl From<pb::ReviewChurnReport> for agent_core::ChurnReport {
     }
 }
 
+impl From<agent_core::FileSalience> for pb::ReviewFileSalience {
+    fn from(s: agent_core::FileSalience) -> Self {
+        pb::ReviewFileSalience {
+            file: s.file,
+            centrality: s.centrality,
+            bus_factor: s.bus_factor,
+            churn_increasing: s.churn_increasing,
+            class: s.class,
+        }
+    }
+}
+impl From<pb::ReviewFileSalience> for agent_core::FileSalience {
+    fn from(s: pb::ReviewFileSalience) -> Self {
+        agent_core::FileSalience {
+            file: s.file,
+            centrality: s.centrality,
+            bus_factor: s.bus_factor,
+            churn_increasing: s.churn_increasing,
+            class: s.class,
+        }
+    }
+}
+impl From<agent_core::SalienceReport> for pb::ReviewSalienceReport {
+    fn from(r: agent_core::SalienceReport) -> Self {
+        pb::ReviewSalienceReport {
+            files: r.files.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+impl From<pb::ReviewSalienceReport> for agent_core::SalienceReport {
+    fn from(r: pb::ReviewSalienceReport) -> Self {
+        agent_core::SalienceReport {
+            files: r.files.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
 impl From<agent_core::ReviewFacts> for pb::ReviewFacts {
     fn from(f: agent_core::ReviewFacts) -> Self {
         pb::ReviewFacts {
@@ -3105,6 +3144,7 @@ impl From<agent_core::ReviewFacts> for pb::ReviewFacts {
             summaries: Some(f.summaries.into()),
             cochange: Some(f.cochange.into()),
             churn: Some(f.churn.into()),
+            salience: Some(f.salience.into()),
         }
     }
 }
@@ -3121,6 +3161,7 @@ impl From<pb::ReviewFacts> for agent_core::ReviewFacts {
             summaries: f.summaries.map(Into::into).unwrap_or_default(),
             cochange: f.cochange.map(Into::into).unwrap_or_default(),
             churn: f.churn.map(Into::into).unwrap_or_default(),
+            salience: f.salience.map(Into::into).unwrap_or_default(),
         }
     }
 }

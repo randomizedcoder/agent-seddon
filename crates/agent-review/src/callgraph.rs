@@ -12,7 +12,7 @@
 use crate::collector::{CollectCtx, CollectorOutput, FactCollector, FactFragment};
 use crate::util::{bound, lang_of};
 use agent_core::{CallEdge, CallGraph, CallGraphNode, ExecSpec, PackageShape};
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 /// The pinned helper binary (on PATH via the flake dev shell / check inputs).
@@ -136,6 +136,7 @@ fn parse_graph(stdout: &str, root: &Path, changed: &BTreeSet<String>) -> Option<
                 exported: n.get("exported").and_then(|x| x.as_bool()).unwrap_or(false),
                 file: file.to_string(),
                 line: n.get("line").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+                centrality: 0.0, // filled by the PageRank pass below
             });
         }
     }
@@ -176,6 +177,11 @@ fn parse_graph(stdout: &str, root: &Path, changed: &BTreeSet<String>) -> Option<
         }
     }
 
+    // Blast-radius scoring: PageRank over the call graph, so each node carries how
+    // load-bearing it is (rank flows caller→callee; a function called by many
+    // important functions scores high). Min-max normalized to 0..=1.
+    apply_pagerank(&mut nodes, &edges);
+
     Some(CallGraph {
         nodes,
         edges,
@@ -183,6 +189,56 @@ fn parse_graph(stdout: &str, root: &Path, changed: &BTreeSet<String>) -> Option<
         packages,
         truncated,
     })
+}
+
+/// Set each node's `centrality` to its min-max-normalized PageRank over the call
+/// graph. Hand-rolled power iteration (dependency-free); edges are caller→callee,
+/// so rank accumulates on functions that are called into. A no-op for <2 nodes.
+fn apply_pagerank(nodes: &mut [CallGraphNode], edges: &[CallEdge]) {
+    let n = nodes.len();
+    if n < 2 {
+        return;
+    }
+    // Map sparse node ids → dense indices.
+    let index: HashMap<u32, usize> = nodes.iter().enumerate().map(|(i, nd)| (nd.id, i)).collect();
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut outdeg = vec![0usize; n];
+    for e in edges {
+        if let (Some(&u), Some(&v)) = (index.get(&e.caller_id), index.get(&e.callee_id)) {
+            adj[u].push(v);
+            outdeg[u] += 1;
+        }
+    }
+
+    const D: f64 = 0.85;
+    const ITERS: usize = 100;
+    let nf = n as f64;
+    let mut rank = vec![1.0 / nf; n];
+    for _ in 0..ITERS {
+        let mut next = vec![(1.0 - D) / nf; n];
+        // Dangling nodes (no out-edges) redistribute their rank across all nodes.
+        let dangling: f64 = (0..n).filter(|&u| outdeg[u] == 0).map(|u| rank[u]).sum();
+        let dangling_share = D * dangling / nf;
+        for u in 0..n {
+            if outdeg[u] > 0 {
+                let share = D * rank[u] / outdeg[u] as f64;
+                for &v in &adj[u] {
+                    next[v] += share;
+                }
+            }
+        }
+        for r in &mut next {
+            *r += dangling_share;
+        }
+        rank = next;
+    }
+
+    let max = rank.iter().copied().fold(0.0_f64, f64::max);
+    if max > 0.0 {
+        for (i, nd) in nodes.iter_mut().enumerate() {
+            nd.centrality = rank[i] / max;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -221,6 +277,34 @@ mod tests {
         );
         assert_eq!(g.packages.len(), 1);
         assert_eq!(g.packages[0].types, 1);
+    }
+
+    #[test]
+    fn positive_pagerank_scores_called_into_nodes_higher() {
+        // A hub called by two others should out-score its callers. Ids: 0,1 → 2.
+        let json = r#"{"nodes":[
+            {"id":0,"name":"A","file":"pkg/t.go","line":1},
+            {"id":1,"name":"B","file":"pkg/t.go","line":2},
+            {"id":2,"name":"Hub","file":"pkg/t.go","line":3}
+        ],"edges":[{"caller_id":0,"callee_id":2},{"caller_id":1,"callee_id":2}]}"#;
+        let g = parse_graph(json, &root(), &changed()).unwrap();
+        let hub = g.nodes.iter().find(|n| n.name == "Hub").unwrap();
+        let a = g.nodes.iter().find(|n| n.name == "A").unwrap();
+        assert!(
+            hub.centrality > a.centrality,
+            "the called-into hub is more central: hub={} a={}",
+            hub.centrality,
+            a.centrality
+        );
+        // Normalized: the most central node is exactly 1.0.
+        assert!((hub.centrality - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn corner_pagerank_noop_for_tiny_graph() {
+        let json = r#"{"nodes":[{"id":0,"name":"Solo","file":"pkg/t.go","line":1}],"edges":[]}"#;
+        let g = parse_graph(json, &root(), &changed()).unwrap();
+        assert_eq!(g.nodes[0].centrality, 0.0, "<2 nodes ⇒ no ranking");
     }
 
     #[test]
