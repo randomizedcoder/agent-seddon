@@ -587,6 +587,7 @@ impl TryFrom<pb::MemoryEvent> for agent_core::MemoryEvent {
             // Telemetry-local (recorded via the `CompositeMemory` mirror, not the
             // wire); the gRPC `MemoryEvent` has no such field, so it is `None` here.
             verification: None,
+            review: None,
         })
     }
 }
@@ -3142,6 +3143,7 @@ mod tests {
             usage,
             iter,
             verification: None,
+            review: None,
         };
         let p1 = pb::MemoryEvent::from(core);
         let back = agent_core::MemoryEvent::try_from(p1.clone()).unwrap();

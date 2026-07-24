@@ -91,6 +91,9 @@ pub struct Metrics {
     review_callgraph_edges: Histogram,
     review_style_conformance: IntCounterVec,
     review_summaries: IntCounterVec,
+    review_runs: IntCounterVec,
+    review_total_duration: HistogramVec,
+    review_parallelism: Histogram,
     web_searches: IntCounterVec,
     web_search_seconds: HistogramVec,
     web_search_results: IntCounterVec,
@@ -408,6 +411,27 @@ impl Metrics {
             ),
             &["outcome"],
         )
+        .unwrap();
+        let review_runs = IntCounterVec::new(
+            Opts::new(
+                "agent_review_runs_total",
+                "Completed review runs, by project, trigger mode and outcome",
+            ),
+            &["project", "mode_via", "outcome"],
+        )
+        .unwrap();
+        let review_total_duration = HistogramVec::new(
+            HistogramOpts::new(
+                "agent_review_total_duration_seconds",
+                "Whole review fan-out wall-clock, by project",
+            ),
+            &["project"],
+        )
+        .unwrap();
+        let review_parallelism = Histogram::with_opts(HistogramOpts::new(
+            "agent_review_parallelism_ratio",
+            "Review parallelism payoff (sum of collector work ÷ total wall-clock)",
+        ))
         .unwrap();
         let web_searches = IntCounterVec::new(
             Opts::new(
@@ -820,6 +844,9 @@ impl Metrics {
             Box::new(review_callgraph_edges.clone()),
             Box::new(review_style_conformance.clone()),
             Box::new(review_summaries.clone()),
+            Box::new(review_runs.clone()),
+            Box::new(review_total_duration.clone()),
+            Box::new(review_parallelism.clone()),
             Box::new(web_searches.clone()),
             Box::new(web_search_seconds.clone()),
             Box::new(web_search_results.clone()),
@@ -917,6 +944,9 @@ impl Metrics {
             review_callgraph_edges,
             review_style_conformance,
             review_summaries,
+            review_runs,
+            review_total_duration,
+            review_parallelism,
             web_searches,
             web_search_seconds,
             web_search_results,
@@ -1137,6 +1167,21 @@ impl Metrics {
         self.review_summaries
             .with_label_values(&["omitted"])
             .inc_by(omitted);
+    }
+    /// Review: one completed run — its count (by project/mode/outcome) + wall-clock.
+    pub fn on_review_run(&self, project: &str, mode_via: &str, outcome: &str, seconds: f64) {
+        self.review_runs
+            .with_label_values(&[project, mode_via, outcome])
+            .inc();
+        self.review_total_duration
+            .with_label_values(&[project])
+            .observe(seconds.max(0.0));
+    }
+    /// Review: the parallelism payoff (Σ collector work ÷ total wall-clock).
+    pub fn on_review_parallelism(&self, ratio: f64) {
+        if ratio.is_finite() && ratio >= 0.0 {
+            self.review_parallelism.observe(ratio);
+        }
     }
     /// One web search: outcome, latency, and result count (parity spec 12).
     pub fn on_web_search(&self, backend: &str, outcome: &str, seconds: f64, results: u64) {

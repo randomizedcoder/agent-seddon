@@ -123,6 +123,9 @@ pub fn render_facts_with(facts: &ReviewFacts, budget_bytes: usize) -> String {
     // Cheap-LLM summaries — the one SOFT section, clearly labelled as such.
     render_summaries(&mut out, &facts.summaries);
 
+    // Gaps — collectors that failed/skipped, so absence is never read as clean.
+    render_gaps(&mut out, &facts.meta.collectors);
+
     // Diff hunks — fill the remaining budget; omit (with a count) what doesn't fit.
     let with_patch: Vec<&agent_core::ChangedFile> =
         ch.files.iter().filter(|f| !f.patch.is_empty()).collect();
@@ -172,6 +175,29 @@ fn render_signatures(out: &mut String, report: &agent_core::SignatureReport) {
     }
     if report.truncated {
         out.push_str("    … more signature changes omitted (cap reached)\n");
+    }
+}
+
+/// Render a **gaps** section listing any collector that skipped or failed, with its
+/// reason — so the reviewer never mistakes an absent fact for a clean one. Nothing
+/// is emitted when every collector reported `ok`/`partial`.
+fn render_gaps(out: &mut String, collectors: &[agent_core::CollectorStatus]) {
+    use agent_core::CollectStatus::*;
+    let gaps: Vec<&agent_core::CollectorStatus> = collectors
+        .iter()
+        .filter(|c| matches!(c.status, Skipped | Failed))
+        .collect();
+    if gaps.is_empty() {
+        return;
+    }
+    out.push_str("\nNot established (collector did not produce facts):\n");
+    for c in gaps {
+        let why = if c.reason.is_empty() {
+            c.status.as_str().to_string()
+        } else {
+            format!("{} — {}", c.status.as_str(), c.reason)
+        };
+        out.push_str(&format!("  {}: {}\n", c.collector, why));
     }
 }
 

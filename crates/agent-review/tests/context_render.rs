@@ -3,8 +3,8 @@
 //! section degrades gracefully under a byte budget. Pure (no git).
 
 use agent_core::{
-    ChangeKind, ChangeSet, ChangedFile, ForgeHost, GitState, RepoLanguage, RepoRelation,
-    ReviewCommit, ReviewFacts, ReviewMeta,
+    ChangeKind, ChangeSet, ChangedFile, CollectStatus, CollectorStatus, ForgeHost, GitState,
+    RepoLanguage, RepoRelation, ReviewCommit, ReviewFacts, ReviewMeta,
 };
 use agent_review::{render_facts, render_facts_with};
 
@@ -49,6 +49,39 @@ fn facts(files: Vec<ChangedFile>, commits: Vec<ReviewCommit>) -> ReviewFacts {
         style: Default::default(),
         summaries: Default::default(),
     }
+}
+
+#[test]
+fn positive_render_states_gaps_for_skipped_and_failed_collectors() {
+    let mut f = facts(vec![file("src/x.rs", "@@ -1 +1 @@\n-old\n+new\n")], vec![]);
+    f.meta.collectors = vec![
+        CollectorStatus {
+            collector: "analyzer".into(),
+            status: CollectStatus::Skipped,
+            reason: "no linter on PATH".into(),
+            duration_ms: 1,
+        },
+        CollectorStatus {
+            collector: "repo-change".into(),
+            status: CollectStatus::Ok,
+            reason: String::new(),
+            duration_ms: 5,
+        },
+    ];
+    let out = render_facts(&f);
+    assert!(
+        out.contains("Not established"),
+        "gaps section missing: {out}"
+    );
+    assert!(
+        out.contains("analyzer: skipped — no linter on PATH"),
+        "skipped collector + reason not stated"
+    );
+    // An `ok` collector is not a gap.
+    assert!(
+        !out.contains("repo-change: "),
+        "ok collector should not appear as a gap"
+    );
 }
 
 #[test]

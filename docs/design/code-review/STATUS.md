@@ -6,7 +6,10 @@ tracks the transition from design → merged code, increment by increment (the s
 per-increment PR cadence the [tool-call-verifier](../tool-call-verification.md)
 followed).
 
-**Overall: design complete · components 01–05 implemented (seam + tests + gRPC).**
+**Overall: design complete · components 01–09 implemented (seam + tests + gRPC).**
+The full 9-component build order has shipped; remaining work is deferred refinements
+(precise `x/tools` call-graph, dedicated `--serve-*` services, git-state memories,
+test-execution results).
 
 ## Legend
 
@@ -29,7 +32,7 @@ followed).
 | 06 | AST & call-graph | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 | 07 | Code-style fingerprint | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 | 08 | Cheap-LLM summaries | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
-| 09 | Grounded context + recording | ✅ | ✅ | ✅ | ⬜ | n/a | ⬜ | — |
+| 09 | Grounded context + recording | ✅ | ✅ | ✅ | ✅ | n/a | ✅ | — |
 | 10 | Wire contracts (consolidation) | ✅ | — | — | — | — | — | — |
 | 11 | Observability (consolidation) | ✅ | — | — | — | — | — | — |
 
@@ -66,6 +69,25 @@ are not separate increments — each increment lands its own slice of both.
 
 ## Change log
 
+- **2026-07-23** — **Grounded context & recording (increment 10, component 09 —
+  completes the 9-component build order).** Two of the three destinations ship,
+  mirroring the verifier's recording exactly. **(a)** `render_facts` gains a **`Not
+  established`** section listing any Skipped/Failed collector with its reason (absence
+  ≠ clean). **(c)** A flattened `ReviewRecord` (hashes/counts/durations only — never
+  source/contents/URLs/summaries), derived via `ReviewRecord::from_facts(&facts,
+  mode_via)`, is recorded through the verifier pipeline: a `review:
+  Option<ReviewRecord>` side-channel on `MemoryEvent`, `Agent::record_review` →
+  `CompositeMemory` mirror → `TelemetryHandle` routes `kind=="review"` →
+  `Msg::Review`/`Msg::ReviewCollector` → batched writer → `agent_reviews` (headline) +
+  `agent_review_collectors` (per-collector drill-down). Telemetry-off ⇒ the record
+  still lands in `episodic.jsonl`. Metrics `agent_review_runs_total{project,mode_via,
+  outcome}` / `agent_review_total_duration_seconds{project}` /
+  `agent_review_parallelism_ratio`. Appended at `agent --review` (`explicit`) + the
+  in-loop handoff (`auto`). Two new ClickHouse tables in `schema.sql` (idempotent
+  `IF NOT EXISTS`). Row unit tests + a render-gaps test + hermetic `review-recording`
+  gate (real binary → episodic.jsonl, hashes only). **Deferred:** (b) git-state
+  `SemanticStore` memories; per-collector `items` beyond well-known collectors;
+  `records_dropped` backpressure counter; outcome-proxy columns.
 - **2026-07-23** — **Cheap-LLM summaries (increment 9, component 08).** The first
   **soft** collector and the first to reach the LLM pool. `SummaryCollector` reads
   the base+head blobs of each changed Go/Rust file, extracts each function's full

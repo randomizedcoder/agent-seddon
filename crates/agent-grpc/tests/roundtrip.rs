@@ -477,6 +477,7 @@ async fn memory_append_and_recall(#[case] transport: Transport) {
         usage: None,
         iter: None,
         verification: None,
+        review: None,
     };
     client.append(event).await.unwrap();
 

@@ -81,3 +81,42 @@ CREATE TABLE IF NOT EXISTS agent.agent_verifications
 )
 ENGINE = MergeTree
 ORDER BY (session_id, ts, iter);
+
+-- ── Code review (docs/design/code-review/, component 09) ────────────────────
+-- One row per review run: the headline (durations, sizes, mode, parallelism).
+-- Only hashes/revs/counts/durations — never raw source, contents, or URLs.
+-- total_ms vs sum_work_ms is the parallelism payoff; critical_path is the
+-- collector to optimize next.
+CREATE TABLE IF NOT EXISTS agent.agent_reviews
+(
+    session_id       String,
+    ts               DateTime64(3, 'UTC'),
+    repo_hash        String,                    -- fnv1a of the remote URL, not the URL
+    base_rev         String,
+    head_rev         String,
+    mode_via         String,                    -- prefilter | vote | explicit | auto
+    project          String,                    -- go | rust | mixed | unknown
+    is_fork          UInt8,
+    changed_files    UInt32,
+    findings         UInt32,
+    findings_in_diff UInt32,
+    summaries        UInt32,
+    total_ms         UInt32,                    -- whole fan-out wall-clock
+    sum_work_ms      UInt32,                    -- Σ per-collector durations
+    critical_path    String                     -- slowest collector's name
+)
+ENGINE = MergeTree
+ORDER BY (session_id, ts);
+
+-- One row per collector per review: the parallelism / optimization drill-down.
+CREATE TABLE IF NOT EXISTS agent.agent_review_collectors
+(
+    session_id  String,
+    ts          DateTime64(3, 'UTC'),
+    collector   String,
+    status      String,                         -- ok | partial | skipped | failed
+    duration_ms UInt32,
+    items       UInt32                          -- findings / nodes / summaries (well-known collectors)
+)
+ENGINE = MergeTree
+ORDER BY (session_id, ts, collector);

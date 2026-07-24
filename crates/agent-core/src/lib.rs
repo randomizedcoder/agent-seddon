@@ -1886,6 +1886,12 @@ pub struct MemoryEvent {
     /// is recorded through the local `CompositeMemory` mirror, not the wire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verification: Option<VerificationRecord>,
+    /// A code-review run record (routed to `agent_reviews` by the telemetry sink).
+    /// Telemetry-local side-channel, exactly like [`verification`](Self::verification):
+    /// dropped at the gRPC memory boundary, recorded through the `CompositeMemory`
+    /// mirror. Hashes/counts only — never raw source or URLs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<ReviewRecord>,
 }
 
 /// The loop-facing memory facade. This is the whole store the agent loop talks
@@ -3782,6 +3788,76 @@ pub struct ReviewFacts {
     /// Cheap-LLM function summaries (increment 8) — soft. Empty when off / no pool.
     #[serde(default)]
     pub summaries: SummaryReport,
+}
+
+/// A flattened, analytics-shaped record of one review run — the telemetry-local
+/// side-channel on [`MemoryEvent`] that routes to the `agent_reviews` table
+/// (component 09). Hashes/counts/durations only; never raw source, contents, URLs,
+/// or the model summaries — the table cannot leak repo content.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReviewRecord {
+    /// fnv1a of the remote URL (not the URL).
+    pub repo_hash: String,
+    pub base_rev: String,
+    pub head_rev: String,
+    /// How the review was triggered: `prefilter` | `vote` | `explicit` | `auto`.
+    pub mode_via: String,
+    /// `go` | `rust` | `mixed` | `unknown`.
+    pub project: String,
+    pub is_fork: bool,
+    pub changed_files: u32,
+    pub findings: u32,
+    pub findings_in_diff: u32,
+    pub summaries: u32,
+    /// Whole fan-out wall-clock.
+    pub total_ms: u32,
+    /// Σ of per-collector durations (with `total_ms`, the parallelism payoff).
+    pub sum_work_ms: u32,
+    /// Name of the slowest collector — what to optimize next.
+    pub critical_path: String,
+    pub collectors: Vec<CollectorStatus>,
+}
+
+impl ReviewRecord {
+    /// Flatten a grounded [`ReviewFacts`] into an analytics record. `mode_via` names
+    /// how the review was triggered (the facts don't carry it).
+    pub fn from_facts(f: &ReviewFacts, mode_via: &str) -> Self {
+        let findings_in_diff = f
+            .analysis
+            .findings
+            .iter()
+            .filter(|x| x.in_change)
+            .count()
+            .min(u32::MAX as usize) as u32;
+        let sum_work_ms = f
+            .meta
+            .collectors
+            .iter()
+            .fold(0u32, |acc, c| acc.saturating_add(c.duration_ms));
+        let critical_path = f
+            .meta
+            .collectors
+            .iter()
+            .max_by_key(|c| c.duration_ms)
+            .map(|c| c.collector.clone())
+            .unwrap_or_default();
+        ReviewRecord {
+            repo_hash: f.meta.repo_hash.clone(),
+            base_rev: f.meta.base_rev.clone(),
+            head_rev: f.meta.head_rev.clone(),
+            mode_via: mode_via.to_string(),
+            project: f.git_state.project.as_str().to_string(),
+            is_fork: matches!(f.git_state.relationship, RepoRelation::Fork),
+            changed_files: f.change.files.len().min(u32::MAX as usize) as u32,
+            findings: f.analysis.findings.len().min(u32::MAX as usize) as u32,
+            findings_in_diff,
+            summaries: f.summaries.produced,
+            total_ms: f.meta.total_ms,
+            sum_work_ms,
+            critical_path,
+            collectors: f.meta.collectors.clone(),
+        }
+    }
 }
 
 /// Runs a fan-out of deterministic collectors into a grounded [`ReviewFacts`].

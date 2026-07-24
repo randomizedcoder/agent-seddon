@@ -74,6 +74,12 @@ too but are telemetry-local (no service).
 >   `ReviewFacts` field 8 (the one **soft** field). Function identity is `name`/`file`
 >   (not a `CallGraph.fn_id` — collectors run in parallel). `SummarizerService` +
 >   `before_hash`/`after_hash` caching stay deferred. See [`08`](summarization.md).
+> - **09 (recording):** `ReviewRecord` is **telemetry-local** — a `review:
+>   Option<ReviewRecord>` side-channel on `MemoryEvent`, dropped at the gRPC memory
+>   boundary (the `verification` precedent), so it is a plain Rust struct with **no
+>   `.proto` message and no service**. It routes to the `agent_reviews` /
+>   `agent_review_collectors` ClickHouse tables via the telemetry sink. See
+>   [`09`](recording.md).
 >
 > All additive (no baseline bump); round-trip tested through `FactCollectorService`.
 
