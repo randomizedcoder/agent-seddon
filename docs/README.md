@@ -106,6 +106,7 @@ feature's implementation phase, distinct from the shipped `components/` docs.
 |---|---|
 | [`tool-call-verification.md`](design/tool-call-verification.md) | A measured, multi-model gate that inspects a tool call before it runs (Allow / Revise / Deny), records every verdict to ClickHouse, and learns which verifier to trust per task type |
 | [`code-review/`](design/code-review/README.md) | The **Code Review Flow**: detect a review task, then a parallel fan-out of mostly-deterministic collectors (file set, diff, Go static analysis, AST/call-graph, style, git state) builds a *grounded* fact-bundle a model can't hallucinate over — driven by a health-checked pool of cheap LLMs, deeply instrumented for duration + parallel-optimization accounting. A 12-doc set with a status table |
+| [`adaptive-cognition/`](design/adaptive-cognition/README.md) | **Adaptive Cognition**: spend cheap local LLMs (GLM-5.2 + MI50) on the agent's own meta-cognition — per-turn **mode** detection with a switch decision, **mode-aware compaction** that reshapes context on a switch (a before/after table of what to keep/shed/pull-in), and **dimensional memory** that summarizes each step *by dimension* into per-dimension histories. The mode switch is the pivot joining all three. Supersedes `code-review/mode-detection.md` |
 
 ## The parity program
 
