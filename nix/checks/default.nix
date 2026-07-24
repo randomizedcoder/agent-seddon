@@ -77,4 +77,7 @@
   # skip cleanly (no Summaries section, hard facts intact). The happy path is proven
   # offline by the in-process FakePool test (summaries_e2e.rs).
   review-summaries = import ./review-summaries.nix { inherit pkgs agent; };
+  # Recording coverage: `agent --review` must persist a ReviewRecord to
+  # episodic.jsonl (the durable fallback for the agent_reviews table). Offline.
+  review-recording = import ./review-recording.nix { inherit pkgs agent; };
 }

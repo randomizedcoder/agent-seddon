@@ -157,6 +157,92 @@ impl VerificationRow {
     }
 }
 
+/// One review run (`agent_reviews`) — the headline row. `is_fork` is stored `UInt8`.
+#[derive(Debug, Clone, Row)]
+pub struct ReviewRow {
+    pub session_id: String,
+    pub ts: DateTime64<3>,
+    pub repo_hash: String,
+    pub base_rev: String,
+    pub head_rev: String,
+    pub mode_via: String,
+    pub project: String,
+    pub is_fork: u8,
+    pub changed_files: u32,
+    pub findings: u32,
+    pub findings_in_diff: u32,
+    pub summaries: u32,
+    pub total_ms: u32,
+    pub sum_work_ms: u32,
+    pub critical_path: String,
+}
+
+impl ReviewRow {
+    /// Build the headline row from a `kind = "review"` `MemoryEvent`.
+    pub fn from_event(event: &MemoryEvent) -> Option<Self> {
+        let r = event.review.as_ref()?;
+        Some(Self {
+            session_id: event.session_id.clone(),
+            ts: dt64_from_ms(event.ts_ms),
+            repo_hash: r.repo_hash.clone(),
+            base_rev: r.base_rev.clone(),
+            head_rev: r.head_rev.clone(),
+            mode_via: r.mode_via.clone(),
+            project: r.project.clone(),
+            is_fork: r.is_fork as u8,
+            changed_files: r.changed_files,
+            findings: r.findings,
+            findings_in_diff: r.findings_in_diff,
+            summaries: r.summaries,
+            total_ms: r.total_ms,
+            sum_work_ms: r.sum_work_ms,
+            critical_path: r.critical_path.clone(),
+        })
+    }
+}
+
+/// One collector per review (`agent_review_collectors`) — the parallelism drill-down.
+#[derive(Debug, Clone, Row)]
+pub struct ReviewCollectorRow {
+    pub session_id: String,
+    pub ts: DateTime64<3>,
+    pub collector: String,
+    pub status: String,
+    pub duration_ms: u32,
+    pub items: u32,
+}
+
+impl ReviewCollectorRow {
+    /// One row per collector in a `kind = "review"` `MemoryEvent`. `items` reflects
+    /// the well-known collectors' aggregate counts (0 otherwise — a per-collector
+    /// count isn't carried on `CollectorStatus`).
+    pub fn rows_from_event(event: &MemoryEvent) -> Vec<Self> {
+        let Some(r) = event.review.as_ref() else {
+            return Vec::new();
+        };
+        let ts = dt64_from_ms(event.ts_ms);
+        r.collectors
+            .iter()
+            .map(|c| {
+                let items = match c.collector.as_str() {
+                    "analyzer" => r.findings,
+                    "summaries" => r.summaries,
+                    "repo-change" => r.changed_files,
+                    _ => 0,
+                };
+                ReviewCollectorRow {
+                    session_id: event.session_id.clone(),
+                    ts,
+                    collector: c.collector.clone(),
+                    status: c.status.as_str().to_string(),
+                    duration_ms: c.duration_ms,
+                    items,
+                }
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,6 +259,7 @@ mod tests {
             usage,
             iter: Some(2),
             verification: None,
+            review: None,
         }
     }
 
@@ -185,6 +272,7 @@ mod tests {
             usage: None,
             iter: Some(7),
             verification: Some(rec),
+            review: None,
         }
     }
 
@@ -290,5 +378,81 @@ mod tests {
     fn adversarial_verification_row_confidence_is_finite() {
         let row = VerificationRow::from_event(&verification(sample_record())).unwrap();
         assert!(row.confidence.is_finite() && (0.0..=1.0).contains(&row.confidence));
+    }
+
+    // --- ReviewRow / ReviewCollectorRow ------------------------------------
+    fn review_event(rec: agent_core::ReviewRecord) -> MemoryEvent {
+        MemoryEvent {
+            kind: "review".into(),
+            message: Message::assistant(""),
+            ts_ms: 5,
+            session_id: "s".into(),
+            usage: None,
+            iter: None,
+            verification: None,
+            review: Some(rec),
+        }
+    }
+
+    fn sample_review() -> agent_core::ReviewRecord {
+        agent_core::ReviewRecord {
+            repo_hash: "deadbeef".into(),
+            base_rev: "aaa".into(),
+            head_rev: "bbb".into(),
+            mode_via: "explicit".into(),
+            project: "rust".into(),
+            is_fork: true,
+            changed_files: 4,
+            findings: 3,
+            findings_in_diff: 2,
+            summaries: 1,
+            total_ms: 120,
+            sum_work_ms: 200,
+            critical_path: "analyzer".into(),
+            collectors: vec![
+                agent_core::CollectorStatus {
+                    collector: "analyzer".into(),
+                    status: agent_core::CollectStatus::Ok,
+                    reason: String::new(),
+                    duration_ms: 90,
+                },
+                agent_core::CollectorStatus {
+                    collector: "summaries".into(),
+                    status: agent_core::CollectStatus::Skipped,
+                    reason: "no pool".into(),
+                    duration_ms: 1,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn positive_review_row_maps_headline_and_bool() {
+        let row = ReviewRow::from_event(&review_event(sample_review())).expect("review present");
+        assert_eq!(row.session_id, "s");
+        assert_eq!(row.repo_hash, "deadbeef");
+        assert_eq!(row.is_fork, 1); // bool true ⇒ UInt8 1
+        assert_eq!(row.changed_files, 4);
+        assert_eq!(row.findings_in_diff, 2);
+        assert_eq!(row.critical_path, "analyzer");
+    }
+
+    #[test]
+    fn positive_review_collector_rows_one_per_collector_with_items() {
+        let rows = ReviewCollectorRow::rows_from_event(&review_event(sample_review()));
+        assert_eq!(rows.len(), 2);
+        let analyzer = rows.iter().find(|r| r.collector == "analyzer").unwrap();
+        assert_eq!(analyzer.status, "ok");
+        assert_eq!(analyzer.items, 3); // well-known collector ⇒ its aggregate count
+        let summaries = rows.iter().find(|r| r.collector == "summaries").unwrap();
+        assert_eq!(summaries.status, "skipped");
+        assert_eq!(summaries.items, 1);
+    }
+
+    #[test]
+    fn negative_review_rows_absent_without_record() {
+        let e = ev("tool", Message::assistant(""), None);
+        assert!(ReviewRow::from_event(&e).is_none());
+        assert!(ReviewCollectorRow::rows_from_event(&e).is_empty());
     }
 }

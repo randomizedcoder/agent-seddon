@@ -625,6 +625,9 @@ impl Agent {
                     confidence = verdict.confidence,
                     "entering review mode: injecting grounded facts"
                 );
+                // Record the run — triggered by in-loop detection (`auto`).
+                self.record_review(agent_core::ReviewRecord::from_facts(&facts, "auto"))
+                    .await;
                 Some(agent_review::render_facts_with(
                     &facts,
                     self.settings.review_context_budget,
@@ -1175,6 +1178,7 @@ impl Agent {
             usage: None,
             iter: None,
             verification: None,
+            review: None,
         })
         .await;
     }
@@ -1189,6 +1193,7 @@ impl Agent {
             usage: Some(usage.clone()),
             iter: Some(iter),
             verification: None,
+            review: None,
         })
         .await;
     }
@@ -1205,6 +1210,51 @@ impl Agent {
             usage: None,
             iter: Some(iter),
             verification: Some(rec),
+            review: None,
+        })
+        .await;
+    }
+
+    /// Record one code-review run (routed to `agent_reviews` by the sink) and fire
+    /// the review-run metrics. Telemetry-only, like [`record_verification`]: a
+    /// dropped sink loses only the analytics row, never the review. `mode_via` names
+    /// how the review was triggered (`explicit` for `agent --review`, `auto` in-loop).
+    pub async fn record_review(&self, rec: agent_core::ReviewRecord) {
+        let outcome = if rec
+            .collectors
+            .iter()
+            .any(|c| c.status == agent_core::CollectStatus::Failed)
+        {
+            "partial"
+        } else {
+            "ok"
+        };
+        self.metrics.on_review_run(
+            &rec.project,
+            &rec.mode_via,
+            outcome,
+            rec.total_ms as f64 / 1000.0,
+        );
+        if rec.total_ms > 0 {
+            self.metrics
+                .on_review_parallelism(rec.sum_work_ms as f64 / rec.total_ms as f64);
+        }
+        tracing::info!(
+            changed_files = rec.changed_files,
+            findings = rec.findings,
+            total_ms = rec.total_ms,
+            critical = %rec.critical_path,
+            "review recorded"
+        );
+        self.append_event(MemoryEvent {
+            kind: "review".to_string(),
+            message: Message::assistant(String::new()),
+            ts_ms: now_ms(),
+            session_id: self.settings.session_id.clone(),
+            usage: None,
+            iter: None,
+            verification: None,
+            review: Some(rec),
         })
         .await;
     }

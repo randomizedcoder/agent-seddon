@@ -1,6 +1,46 @@
 # 09 — Grounded context & recording
 
-Status: **design / pre-implementation.**
+Status: **implemented** (increment 10) — destinations (a) and (c) ship; the durable
+git-state memories (b) stay a deferred follow-up. See **Implementation** below.
+
+## Implementation (increment 10)
+
+The pipeline's end. Two of the three destinations ship, mirroring the verifier's
+recording exactly:
+
+- **(a) Grounded context + stated gaps.** `render_facts` already injects the
+  compact, sectioned context (hard facts first, soft summaries last, labelled). This
+  increment adds a **`Not established`** section: any collector that `Skipped`/
+  `Failed` is listed with its reason, so the reviewer never mistakes an absent fact
+  for a clean one.
+- **(c) ClickHouse recording.** A flattened **`ReviewRecord`** (hashes/counts/
+  durations only — never source, contents, URLs, or summaries) is derived from
+  `ReviewFacts` via `ReviewRecord::from_facts(&facts, mode_via)` and recorded through
+  the **exact verifier pipeline**: a `review: Option<ReviewRecord>` side-channel on
+  `MemoryEvent` (telemetry-local, dropped at the gRPC boundary), `Agent::record_review`
+  → `CompositeMemory` mirror → `TelemetryHandle` routes `kind == "review"` →
+  `Msg::Review`/`Msg::ReviewCollector` → the batched writer → **`agent_reviews`** (one
+  headline row) + **`agent_review_collectors`** (one row per collector, the
+  parallelism drill-down). With telemetry off the record still lands in
+  `.agent/episodic.jsonl` — how the gate + e2e assert it. Metrics:
+  `agent_review_runs_total{project,mode_via,outcome}`,
+  `agent_review_total_duration_seconds{project}`, `agent_review_parallelism_ratio`
+  (Σ collector work ÷ total wall-clock — the parallelism payoff). Appended at both
+  `collect()` sites: `agent --review` (`mode_via = explicit`) and the in-loop handoff
+  (`auto`).
+- **Verification:** telemetry-row unit tests (`ReviewRow`/`ReviewCollectorRow`
+  from_event) + a render-gaps test + the hermetic `nix/checks/review-recording.nix`
+  (runs the real binary and asserts the `ReviewRecord` in `episodic.jsonl`, with only
+  hashes/counts, no URL). Live-proven end-to-end.
+
+**Deferred:** (b) **durable git-state memories** via `SemanticStore` (needs the
+semantic store threaded to the review call site + injection-scan — a clean
+follow-up); per-collector `items` counts beyond the well-known collectors (not
+carried on `CollectorStatus`); the `agent_review_records_dropped_total` backpressure
+counter; and the outcome-proxy columns (`revised_after`-style) the table is shaped
+to add later.
+
+---
 
 Where the pipeline ends: turn `ReviewFacts` into (a) the **grounded context** the
 reviewer reasons over, (b) durable **memories** for the facts that persist across

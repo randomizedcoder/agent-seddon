@@ -198,6 +198,10 @@ async fn main() -> Result<()> {
                     .collect(&target)
                     .await
                     .context("collecting grounded review facts")?;
+                // Record the run (best-effort telemetry → agent_reviews / episodic).
+                agent
+                    .record_review(agent_core::ReviewRecord::from_facts(&facts, "explicit"))
+                    .await;
                 println!("{}", agent_review::render_facts_with(&facts, review_budget));
                 Ok(None)
             }
