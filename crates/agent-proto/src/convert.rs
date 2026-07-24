@@ -2388,6 +2388,8 @@ impl From<agent_core::PoolMemberHealth> for pb::PoolMemberHealth {
             last_probe_ms: h.last_probe_ms,
             in_flight: h.in_flight,
             weight: h.weight,
+            max_concurrency: h.max_concurrency,
+            saturated: h.saturated,
         }
     }
 }
@@ -2407,6 +2409,8 @@ impl From<pb::PoolMemberHealth> for agent_core::PoolMemberHealth {
             } else {
                 1.0
             },
+            max_concurrency: h.max_concurrency,
+            saturated: h.saturated,
         }
     }
 }

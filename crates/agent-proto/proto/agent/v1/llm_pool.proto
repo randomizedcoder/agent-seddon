@@ -36,6 +36,9 @@ message PoolMemberHealth {
   // receipt — a remote pool's reported load is untrusted.
   uint32 in_flight = 6;
   float weight = 7;
+  // Concurrency cap + current saturation (GPU pool 02), additive.
+  uint32 max_concurrency = 8;
+  bool saturated = 9;
 }
 
 message PoolHealthReport {

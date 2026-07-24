@@ -44,6 +44,7 @@ fn pool(n: usize) -> PoolProvider {
             tier: PoolTier::Medium,
             cost: 0.0,
             weight: 1.0,
+            max_concurrency: 0,
         })
         .collect();
     let p = PoolProvider::new("bench", specs)

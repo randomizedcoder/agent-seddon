@@ -83,6 +83,9 @@ pub struct Metrics {
     pool_member_inflight: IntGaugeVec,
     pool_member_latency: HistogramVec,
     pool_selects: IntCounterVec,
+    // Capacity / backpressure (docs/design/gpu-pool/02-capacity.md).
+    pool_member_saturated: IntGaugeVec,
+    pool_saturation_shed: IntCounter,
     // General task-mode detection (docs/design/adaptive-cognition/01-mode.md).
     mode_classifications: IntCounterVec,
     mode_switches: IntCounterVec,
@@ -380,6 +383,19 @@ impl Metrics {
                 "LLM pool selection dispatches, by policy",
             ),
             &["policy"],
+        )
+        .unwrap();
+        let pool_member_saturated = IntGaugeVec::new(
+            Opts::new(
+                "agent_pool_member_saturated",
+                "Whether an LLM pool member is at its concurrency cap (1) or not (0)",
+            ),
+            &["member"],
+        )
+        .unwrap();
+        let pool_saturation_shed = IntCounter::new(
+            "agent_pool_saturation_shed_total",
+            "Dispatches shed because every eligible pool member was saturated",
         )
         .unwrap();
         let mode_classifications = IntCounterVec::new(
@@ -983,6 +999,8 @@ impl Metrics {
             Box::new(pool_member_inflight.clone()),
             Box::new(pool_member_latency.clone()),
             Box::new(pool_selects.clone()),
+            Box::new(pool_member_saturated.clone()),
+            Box::new(pool_saturation_shed.clone()),
             Box::new(mode_classifications.clone()),
             Box::new(mode_switches.clone()),
             Box::new(mode_switch_confidence.clone()),
@@ -1100,6 +1118,8 @@ impl Metrics {
             pool_member_inflight,
             pool_member_latency,
             pool_selects,
+            pool_member_saturated,
+            pool_saturation_shed,
             mode_classifications,
             mode_switches,
             mode_switch_confidence,
@@ -1304,6 +1324,16 @@ impl Metrics {
     /// LLM pool: one selection dispatch, by policy.
     pub fn on_pool_select(&self, policy: &str) {
         self.pool_selects.with_label_values(&[policy]).inc();
+    }
+    /// LLM pool: a member's current saturation state (1 = at cap, 0 = has room).
+    pub fn set_pool_member_saturated(&self, member: &str, saturated: i64) {
+        self.pool_member_saturated
+            .with_label_values(&[member])
+            .set(saturated);
+    }
+    /// LLM pool: a dispatch shed because every eligible member was saturated.
+    pub fn on_pool_saturation_shed(&self) {
+        self.pool_saturation_shed.inc();
     }
     /// Task mode: one per-turn classification (`via` = prefilter|vote|failsafe).
     pub fn on_mode_classify(&self, mode: &str, via: &str) {

@@ -603,6 +603,7 @@ pub async fn build_agent_with(
                 .unwrap_or(agent_core::PoolTier::Medium);
             let weight = detailed.and_then(|c| c.weight).unwrap_or(1.0);
             let cost = detailed.and_then(|c| c.cost).unwrap_or(0.0);
+            let max_concurrency = detailed.and_then(|c| c.max_concurrency).unwrap_or(0);
             // An inline `endpoint` synthesizes an OpenAI-compatible provider (one
             // config block per GPU target); otherwise resolve `name` via the registry.
             let provider: Arc<dyn agent_core::LlmProvider> = match detailed {
@@ -634,6 +635,7 @@ pub async fn build_agent_with(
                 tier,
                 cost,
                 weight,
+                max_concurrency,
             });
         }
         let m = metrics.clone();
@@ -644,6 +646,10 @@ pub async fn build_agent_with(
             )
             .with_fanout(cfg.pool.fanout)
             .with_policy(agent_providers::PoolPolicy::parse(&cfg.pool.policy))
+            .with_saturation(
+                agent_providers::Saturation::parse(&cfg.pool.on_saturation),
+                cfg.pool.saturation_wait_ms,
+            )
             .with_observer(Arc::new(move |ev| {
                 crate::metered::record_pool_event(&m, ev)
             }))

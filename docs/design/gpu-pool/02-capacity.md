@@ -1,8 +1,14 @@
 # 02 — Capacity: per-target concurrency cap + backpressure
 
-Status: **design / pre-implementation.** Consumes [01](01-load-balance.md)'s
-in-flight counter: turn "prefer the idle target" into "**never overload** a target,"
-with a real per-GPU concurrency limit and graceful backpressure.
+Status: **implemented** (`max_concurrency`, `Saturation` {Shed, Wait}) — see
+[`STATUS.md`](STATUS.md). Consumes [01](01-load-balance.md)'s in-flight counter: turn
+"prefer the idle target" into "**never overload** a target," with a real per-GPU
+concurrency limit and graceful backpressure.
+
+> Implementation note: admission is an in-flight `< cap` **check** inside `eligible()`,
+> not a semaphore held across the await — so there is no lock-across-`.await` and no
+> deadlock surface. `wait` is a bounded poll loop (hard-capped tick count), never an
+> unbounded queue.
 
 ## Motivation
 

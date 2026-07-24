@@ -56,6 +56,8 @@ impl LlmPool for FakePool {
                 last_probe_ms: 7,
                 in_flight: 0,
                 weight: 1.0,
+                max_concurrency: 0,
+                saturated: false,
             }],
         }
     }

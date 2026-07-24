@@ -57,6 +57,28 @@ impl PoolPolicy {
     }
 }
 
+/// What the pool does when every eligible member is at its concurrency cap
+/// (GPU pool 02). Both are bounded and fail-soft — never an unbounded queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Saturation {
+    /// Shed immediately: a fan-out returns fewer/zero slots; a single `complete`
+    /// returns a `saturated` error the caller reads. The safe default.
+    #[default]
+    Shed,
+    /// Wait a **bounded** time for a permit to free, then re-select; on timeout,
+    /// fall through to `shed`.
+    Wait,
+}
+
+impl Saturation {
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "wait" => Saturation::Wait,
+            _ => Saturation::Shed,
+        }
+    }
+}
+
 /// A typed observation from the pool, for metrics/spans. Owned strings (not the
 /// borrowing `RouteEvent`) so the background probe task can emit without lifetime
 /// grief. The runtime turns these into metrics, keeping `agent-providers` off
@@ -78,8 +100,15 @@ pub enum PoolEvent {
         duration_ms: u32,
     },
     /// A member's in-flight count changed (a dispatch started or finished). Drives
-    /// the per-member load gauge (GPU pool 01).
-    MemberState { member: String, in_flight: u32 },
+    /// the per-member load gauge (GPU pool 01) and the saturation gauge (02).
+    MemberState {
+        member: String,
+        in_flight: u32,
+        saturated: bool,
+    },
+    /// A dispatch shed because every eligible member was at its concurrency cap
+    /// (GPU pool 02).
+    SaturationShed { mode: &'static str },
     /// One member was probed.
     Probe {
         member: String,
@@ -114,6 +143,9 @@ pub struct PoolSpec {
     /// Selection weight for the `weighted` policy (higher ⇒ more often). Clamped,
     /// never trusted; a non-positive/non-finite value falls back to 1.0.
     pub weight: f32,
+    /// Per-target concurrency cap; `0` ⇒ unbounded (GPU pool 02). A member at its
+    /// cap is skipped in selection.
+    pub max_concurrency: usize,
 }
 
 struct PoolMember {
@@ -121,6 +153,8 @@ struct PoolMember {
     tier: PoolTier,
     cost: f32,
     weight: f32,
+    /// Concurrency cap; `0` ⇒ unbounded.
+    max_concurrency: usize,
     health: Health,
     /// Requests currently in flight to this member — the live load signal.
     in_flight: AtomicUsize,
@@ -134,6 +168,10 @@ struct PoolInner {
     policy: PoolPolicy,
     /// Rotating cursor for the round-robin policy.
     rr_cursor: AtomicUsize,
+    /// What to do when every eligible member is saturated (GPU pool 02).
+    saturation: Saturation,
+    /// Bounded wait budget (ms) for the `wait` saturation policy; clamped.
+    saturation_wait_ms: u64,
     failure_threshold: usize,
     cooldown_ms: u64,
     fanout: usize,
@@ -175,10 +213,38 @@ impl PoolInner {
         }
     }
 
-    /// Indices of members at or above `tier` that are capable and healthy, **ordered
-    /// by the selection policy** and capped at `cap`. Fail-soft: an empty result is
-    /// fine — the caller decides whether it has enough. Runs on every call, so it is
-    /// kept allocation-light (guarded by the `pool_select` bench).
+    /// A member has room for another request (GPU pool 02). `max_concurrency == 0`
+    /// is unbounded.
+    fn has_capacity(&self, m: &PoolMember) -> bool {
+        m.max_concurrency == 0 || m.in_flight.load(Ordering::Acquire) < m.max_concurrency
+    }
+
+    /// A member is alive + capable + at/above `tier` but **at its cap** — the only
+    /// reason it was excluded is saturation, so waiting could admit it.
+    fn saturated_but_eligible(&self, req: &CompletionRequest, tier: PoolTier) -> bool {
+        let now = (self.now_ms)();
+        self.members.iter().any(|m| {
+            m.tier >= tier
+                && is_capable(&m.candidate.provider.capabilities(), req)
+                && !m.health.is_open(now, self.cooldown_ms)
+                && !self.has_capacity(m)
+        })
+    }
+
+    /// A `MemberState` event carrying the member's live load + saturation.
+    fn member_state(&self, m: &PoolMember) -> PoolEvent {
+        PoolEvent::MemberState {
+            member: m.candidate.name.clone(),
+            in_flight: m.in_flight.load(Ordering::Acquire).min(u32::MAX as usize) as u32,
+            saturated: !self.has_capacity(m),
+        }
+    }
+
+    /// Indices of members at or above `tier` that are capable, healthy, and **have
+    /// spare capacity** (GPU pool 02), **ordered by the selection policy** and capped
+    /// at `cap`. Fail-soft: an empty result is fine — the caller decides whether it
+    /// has enough. Runs on every call, so it is kept allocation-light (guarded by the
+    /// `pool_select` bench).
     fn eligible(&self, req: &CompletionRequest, tier: PoolTier, cap: usize) -> Vec<usize> {
         let now = (self.now_ms)();
         let mut healthy: Vec<usize> = (0..self.members.len())
@@ -187,6 +253,7 @@ impl PoolInner {
                 m.tier >= tier
                     && is_capable(&m.candidate.provider.capabilities(), req)
                     && !m.health.is_open(now, self.cooldown_ms)
+                    && self.has_capacity(m)
             })
             .collect();
         self.order(&mut healthy);
@@ -259,12 +326,9 @@ impl PoolInner {
     /// can never leak load that would exile a healthy member from selection.
     async fn call_member(&self, i: usize, req: CompletionRequest) -> PoolMemberResult {
         let m = &self.members[i];
-        let n_in = m.in_flight.fetch_add(1, Ordering::AcqRel) + 1;
+        let _n_in = m.in_flight.fetch_add(1, Ordering::AcqRel) + 1;
         let _guard = InFlightGuard(&m.in_flight);
-        self.emit(PoolEvent::MemberState {
-            member: m.candidate.name.clone(),
-            in_flight: n_in.min(u32::MAX as usize) as u32,
-        });
+        self.emit(self.member_state(m));
         let started = Instant::now();
         let outcome = m.candidate.provider.complete(req).await;
         let duration_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
@@ -287,10 +351,7 @@ impl PoolInner {
         });
         // Release the in-flight slot and report the settled count for the gauge.
         drop(_guard);
-        self.emit(PoolEvent::MemberState {
-            member: m.candidate.name.clone(),
-            in_flight: m.in_flight.load(Ordering::Acquire).min(u32::MAX as usize) as u32,
-        });
+        self.emit(self.member_state(m));
         PoolMemberResult {
             member: m.candidate.name.clone(),
             duration_ms,
@@ -325,6 +386,22 @@ impl PoolInner {
         });
         futures_util::future::join_all(futures).await;
     }
+
+    /// Poll for spare capacity up to the bounded wait budget (GPU pool 02, `wait`
+    /// saturation policy). Returns the first non-empty eligible order, or empty on
+    /// timeout. The tick count is hard-capped, so this can never wait unboundedly.
+    async fn wait_for_capacity(&self, req: &CompletionRequest) -> Vec<usize> {
+        const TICK_MS: u64 = 25;
+        let ticks = (self.saturation_wait_ms / TICK_MS).min(1_200); // ≤ 30s
+        for _ in 0..ticks {
+            tokio::time::sleep(Duration::from_millis(TICK_MS)).await;
+            let order = self.eligible(req, PoolTier::Light, self.members.len());
+            if !order.is_empty() {
+                return order;
+            }
+        }
+        Vec::new()
+    }
 }
 
 impl PoolProvider {
@@ -341,6 +418,7 @@ impl PoolProvider {
                 tier: s.tier,
                 cost: PoolInner::clamp_cost(s.cost),
                 weight: PoolInner::clamp_weight(s.weight),
+                max_concurrency: s.max_concurrency,
                 health: Health::new(),
                 in_flight: AtomicUsize::new(0),
                 last_probe_ms: AtomicU64::new(0),
@@ -352,6 +430,8 @@ impl PoolProvider {
                 members,
                 policy: PoolPolicy::default(),
                 rr_cursor: AtomicUsize::new(0),
+                saturation: Saturation::default(),
+                saturation_wait_ms: 0,
                 failure_threshold: 3,
                 cooldown_ms: 30_000,
                 fanout: 3,
@@ -384,6 +464,15 @@ impl PoolProvider {
     /// behaviour).
     pub fn with_policy(mut self, policy: PoolPolicy) -> Self {
         self.inner_mut().policy = policy;
+        self
+    }
+
+    /// Set the saturation policy + bounded wait budget (GPU pool 02). The wait is
+    /// clamped to a sane ceiling so a hostile config can't stall the loop.
+    pub fn with_saturation(mut self, saturation: Saturation, wait_ms: u64) -> Self {
+        let i = self.inner_mut();
+        i.saturation = saturation;
+        i.saturation_wait_ms = wait_ms.min(30_000);
         self
     }
 
@@ -454,6 +543,8 @@ impl LlmPool for PoolProvider {
                 last_probe_ms: m.last_probe_ms.load(Ordering::SeqCst).min(u32::MAX as u64) as u32,
                 in_flight: m.in_flight.load(Ordering::Acquire).min(u32::MAX as usize) as u32,
                 weight: m.weight,
+                max_concurrency: m.max_concurrency.min(u32::MAX as usize) as u32,
+                saturated: !self.inner.has_capacity(m),
             })
             .collect();
         HealthReport { members }
@@ -477,6 +568,12 @@ impl LlmPool for PoolProvider {
             requested: cap,
             alive: chosen.len(),
         });
+        // Fan-out is fail-soft: a saturated member is simply not dispatched to (the
+        // set shrinks). If nothing was admitted *because* everything is saturated,
+        // record a shed — the caller (e.g. the mode vote) degrades to fewer voters.
+        if chosen.is_empty() && self.inner.saturated_but_eligible(&req, tier) {
+            self.inner.emit(PoolEvent::SaturationShed { mode: "all" });
+        }
         let futures = chosen
             .into_iter()
             .map(|i| self.inner.call_member(i, req.clone()));
@@ -486,9 +583,17 @@ impl LlmPool for PoolProvider {
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse> {
         // Failover over the healthy members (any tier), stopping at the first
         // success or first terminal failure — Router semantics, single answer.
-        let order = self
+        let mut order = self
             .inner
             .eligible(&req, PoolTier::Light, self.inner.members.len());
+        // Saturation backpressure (GPU pool 02): in `wait` mode, poll a *bounded*
+        // time for a permit to free before giving up. Never an unbounded queue.
+        if order.is_empty()
+            && self.inner.saturation == Saturation::Wait
+            && self.inner.saturated_but_eligible(&req, PoolTier::Light)
+        {
+            order = self.inner.wait_for_capacity(&req).await;
+        }
         self.inner.emit(PoolEvent::Dispatch {
             mode: "one",
             tier: PoolTier::Light,
@@ -497,6 +602,13 @@ impl LlmPool for PoolProvider {
             alive: order.len(),
         });
         if order.is_empty() {
+            // Distinguish "all saturated" (a transient QoS shed) from "all dead".
+            if self.inner.saturated_but_eligible(&req, PoolTier::Light) {
+                self.inner.emit(PoolEvent::SaturationShed { mode: "one" });
+                return Err(Error::Provider(
+                    "pool saturated: all eligible members at capacity".into(),
+                ));
+            }
             return Err(Error::Provider(
                 "no pool member can serve this request (all unhealthy or incapable)".into(),
             ));
@@ -584,6 +696,7 @@ mod tests {
             tier,
             cost: 0.0,
             weight: 1.0,
+            max_concurrency: 0,
         }
     }
 
@@ -640,6 +753,7 @@ mod tests {
                 tier: PoolTier::Light,
                 cost: 0.0,
                 weight: 1.0,
+                max_concurrency: 0,
             },
             ok_member("good", PoolTier::Light),
         ]);
@@ -665,6 +779,7 @@ mod tests {
                 tier: PoolTier::Light,
                 cost: 0.0,
                 weight: 1.0,
+                max_concurrency: 0,
             },
             ok_member("good", PoolTier::Light),
         ]);
@@ -706,6 +821,7 @@ mod tests {
                 tier: PoolTier::Light,
                 cost: f32::NAN,
                 weight: 1.0,
+                max_concurrency: 0,
             },
             PoolSpec {
                 candidate: Candidate {
@@ -715,6 +831,7 @@ mod tests {
                 tier: PoolTier::Light,
                 cost: -100.0,
                 weight: 1.0,
+                max_concurrency: 0,
             },
         ]);
         let out = p.complete_all(req(), PoolTier::Light, 5).await;
@@ -736,9 +853,12 @@ mod tests {
             sink.lock().unwrap().push(match ev {
                 PoolEvent::Dispatch { mode, policy, .. } => format!("dispatch:{mode}:{policy}"),
                 PoolEvent::MemberCall { member, ok, .. } => format!("member:{member}:{ok}"),
-                PoolEvent::MemberState { member, in_flight } => {
+                PoolEvent::MemberState {
+                    member, in_flight, ..
+                } => {
                     format!("state:{member}:{in_flight}")
                 }
+                PoolEvent::SaturationShed { mode } => format!("shed:{mode}"),
                 PoolEvent::Probe { member, .. } => format!("probe:{member}"),
             });
         }));
@@ -818,6 +938,7 @@ mod tests {
             tier: PoolTier::Light,
             cost: 0.0,
             weight: w,
+            max_concurrency: 0,
         };
         let p = PoolProvider::new(
             "test",
@@ -863,6 +984,7 @@ mod tests {
                 tier: PoolTier::Light,
                 cost: 0.0,
                 weight: 1.0,
+                max_concurrency: 0,
             }],
         )
         .expect("pool");
@@ -877,5 +999,109 @@ mod tests {
             0,
             "in-flight released despite the panic"
         );
+    }
+
+    // --- capacity / backpressure (GPU pool 02) -----------------------------
+
+    fn capped_member(name: &str, cap: usize) -> PoolSpec {
+        PoolSpec {
+            candidate: Candidate {
+                name: name.into(),
+                provider: Arc::new(ScriptedProvider::new(vec![final_turn(name)])),
+            },
+            tier: PoolTier::Light,
+            cost: 0.0,
+            weight: 1.0,
+            max_concurrency: cap,
+        }
+    }
+
+    /// positive: a member at its cap is skipped; one with room is selected.
+    #[test]
+    fn positive_saturated_member_is_skipped() {
+        let p = PoolProvider::new(
+            "t",
+            vec![capped_member("busy", 1), capped_member("free", 1)],
+        )
+        .expect("pool");
+        p.bench_set_in_flight(0, 1); // `busy` at cap
+        let order = p.bench_select(&req(), PoolTier::Light, 5);
+        assert_eq!(order, vec![1], "only the member with spare capacity");
+    }
+
+    /// negative: an unbounded member (cap 0) is never skipped, however loaded.
+    #[test]
+    fn negative_unbounded_member_never_saturated() {
+        let p = PoolProvider::new("t", vec![capped_member("unbounded", 0)]).expect("pool");
+        p.bench_set_in_flight(0, 10_000);
+        assert_eq!(p.bench_select(&req(), PoolTier::Light, 5), vec![0]);
+    }
+
+    /// boundary: exactly at cap is skipped; one below is admitted.
+    #[test]
+    fn boundary_at_cap_vs_below() {
+        let p = PoolProvider::new("t", vec![capped_member("m", 2)]).expect("pool");
+        p.bench_set_in_flight(0, 1); // below cap → admitted
+        assert_eq!(p.bench_select(&req(), PoolTier::Light, 5), vec![0]);
+        p.bench_set_in_flight(0, 2); // at cap → skipped
+        assert!(p.bench_select(&req(), PoolTier::Light, 5).is_empty());
+    }
+
+    /// boundary: all members saturated → `complete` sheds a `saturated` error
+    /// (never a hang), and `complete_all` returns empty + emits a shed event.
+    #[tokio::test]
+    async fn boundary_all_saturated_sheds() {
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let p = PoolProvider::new("t", vec![capped_member("a", 1), capped_member("b", 1)])
+            .expect("pool")
+            .with_observer(Arc::new(move |ev| {
+                if let PoolEvent::SaturationShed { mode } = ev {
+                    sink.lock().unwrap().push(format!("shed:{mode}"));
+                }
+            }));
+        p.bench_set_in_flight(0, 1);
+        p.bench_set_in_flight(1, 1);
+
+        let out = p.complete_all(req(), PoolTier::Light, 5).await;
+        assert!(out.is_empty(), "all saturated → nothing dispatched");
+        let err = p.complete(req()).await.unwrap_err().to_string();
+        assert!(err.contains("saturated"), "got: {err}");
+        let got = seen.lock().unwrap().clone();
+        assert!(got.iter().any(|e| e == "shed:all"), "{got:?}");
+        assert!(got.iter().any(|e| e == "shed:one"), "{got:?}");
+    }
+
+    /// adversarial: `wait` mode with all members stuck-saturated must return within
+    /// the bounded budget — never hang or unbounded-queue.
+    #[tokio::test]
+    async fn adversarial_saturation_wait_is_bounded() {
+        let p = PoolProvider::new("t", vec![capped_member("a", 1)])
+            .expect("pool")
+            .with_saturation(Saturation::Wait, 40); // ~1-2 ticks
+        p.bench_set_in_flight(0, 1); // stuck saturated (never frees)
+        let res = tokio::time::timeout(std::time::Duration::from_secs(5), p.complete(req())).await;
+        assert!(res.is_ok(), "wait must be bounded, not hang");
+        assert!(res.unwrap().is_err(), "shed after the bounded wait");
+    }
+
+    /// adversarial: a hostile `saturation_wait_ms` is clamped, so `wait` can't be
+    /// steered into a long stall.
+    #[test]
+    fn adversarial_saturation_wait_clamped() {
+        let p = PoolProvider::new("t", vec![capped_member("a", 1)])
+            .expect("pool")
+            .with_saturation(Saturation::Wait, u64::MAX);
+        assert_eq!(p.inner.saturation_wait_ms, 30_000, "clamped to the ceiling");
+    }
+
+    /// health() surfaces per-member saturation + cap.
+    #[tokio::test]
+    async fn positive_health_reports_saturation() {
+        let p = PoolProvider::new("t", vec![capped_member("m", 1)]).expect("pool");
+        p.bench_set_in_flight(0, 1);
+        let h = p.health().await;
+        assert_eq!(h.members[0].max_concurrency, 1);
+        assert!(h.members[0].saturated, "at cap → saturated");
     }
 }

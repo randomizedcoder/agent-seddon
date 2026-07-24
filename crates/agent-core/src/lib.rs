@@ -559,6 +559,13 @@ pub struct PoolMemberHealth {
     /// the `weighted` policy). Additive; `0` from an older pool.
     #[serde(default)]
     pub weight: f32,
+    /// Per-target concurrency cap (`0` ⇒ unbounded) — GPU pool 02. Additive.
+    #[serde(default)]
+    pub max_concurrency: u32,
+    /// The member is at its concurrency cap right now and is skipped in selection
+    /// (GPU pool 02). Additive; `false` from an older pool.
+    #[serde(default)]
+    pub saturated: bool,
 }
 
 /// A snapshot of every member's liveness.

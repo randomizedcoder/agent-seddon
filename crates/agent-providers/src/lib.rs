@@ -32,4 +32,4 @@ pub use router::{Candidate, RouteEvent, RoutePolicy, Router};
 #[cfg(feature = "provider-pool")]
 pub mod pool;
 #[cfg(feature = "provider-pool")]
-pub use pool::{PoolEvent, PoolObserver, PoolPolicy, PoolProvider, PoolSpec};
+pub use pool::{PoolEvent, PoolObserver, PoolPolicy, PoolProvider, PoolSpec, Saturation};
