@@ -368,6 +368,41 @@ policy            = "in-order"    # in-order | round-robin
 failure_threshold = 3
 cooldown_secs     = 30
 
+# Health-checked, load-balanced pool of LLM/GPU targets (docs/design/gpu-pool/). An
+# active liveness probe + circuit breaker route around a target that is offline; the
+# selection policy routes around one that is busy. Empty ⇒ no pool.
+[pool]
+# `policy` orders the healthy, capable members before dispatch:
+#   cost (default, cheapest-first) | least-loaded (fewest in-flight — best for a
+#   heterogeneous GPU pool) | round-robin | weighted (by per-member `weight`).
+policy            = "cost"
+fanout            = 3              # max members a fan-out (e.g. the mode vote) touches
+probe_interval_secs = 15          # active liveness probe cadence (0 ⇒ off; clamped [5,3600])
+probe_timeout_secs  = 3           # per-probe deadline (clamped [1,60])
+failure_threshold   = 3           # consecutive failures that open a member's breaker
+cooldown_secs       = 30          # how long a breaker stays open before re-probing
+#
+# Two ways to declare members:
+#  (a) bare names resolved via the registry, tiers parallel by position:
+# members = ["glm", "mi50"]
+# tiers   = ["heavy", "medium"]   # light | medium | heavy (a >= floor); missing ⇒ medium
+#
+#  (b) detailed blocks — one config block per GPU target, with routing knobs. An
+#      inline `endpoint` synthesizes an OpenAI-compatible provider (no separate
+#      [provider.*] stanza needed):
+# [[pool.members]]
+# name = "mi50"
+# endpoint = "http://mi50:11434/v1"   # ollama/vLLM/… OpenAI-compatible base URL
+# model = "mistral-small:24b"
+# tier = "medium"
+# weight = 1.0                        # relative pick rate under `weighted`
+# # max_concurrency = 2              # per-target cap (enforced in gpu-pool increment 02)
+#
+# [[pool.members]]
+# name = "glm"                        # no endpoint ⇒ resolve via the registry
+# tier = "heavy"
+# weight = 4.0
+
 # General task-mode detection (the TaskClassifier seam). Runs every turn to detect
 # when to switch to a more appropriate mode; drives the in-loop review hand-off, and
 # (later) mode-aware compaction + dimensional memory. ON by default — with no [pool]

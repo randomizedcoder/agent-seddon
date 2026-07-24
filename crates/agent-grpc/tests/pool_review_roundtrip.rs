@@ -54,6 +54,8 @@ impl LlmPool for FakePool {
                 alive: true,
                 consecutive_failures: 0,
                 last_probe_ms: 7,
+                in_flight: 0,
+                weight: 1.0,
             }],
         }
     }

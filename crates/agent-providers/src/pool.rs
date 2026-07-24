@@ -16,9 +16,46 @@ use agent_core::{
     PoolMemberResult, PoolTier, Result,
 };
 use async_trait::async_trait;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
+
+/// How the pool orders the eligible members before dispatch (GPU pool 01). A
+/// **floor** filter (tier / capability / health) runs first; the policy only
+/// orders the survivors. Mirrors the router's `RoutePolicy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PoolPolicy {
+    /// Cheapest configured `cost` first, tie-break by index — the historical
+    /// behaviour and the back-compat default.
+    #[default]
+    Cost,
+    /// Rotate a cursor across the survivors — spread without a load signal.
+    RoundRobin,
+    /// Fewest in-flight requests first (tie-break cost, then index) — the
+    /// capacity-aware default for a heterogeneous GPU pool.
+    LeastLoaded,
+    /// Bias the pick by configured `weight` (higher ⇒ chosen more often).
+    Weighted,
+}
+
+impl PoolPolicy {
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "least-loaded" | "leastloaded" => PoolPolicy::LeastLoaded,
+            "round-robin" | "roundrobin" => PoolPolicy::RoundRobin,
+            "weighted" => PoolPolicy::Weighted,
+            _ => PoolPolicy::Cost,
+        }
+    }
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PoolPolicy::Cost => "cost",
+            PoolPolicy::RoundRobin => "round-robin",
+            PoolPolicy::LeastLoaded => "least-loaded",
+            PoolPolicy::Weighted => "weighted",
+        }
+    }
+}
 
 /// A typed observation from the pool, for metrics/spans. Owned strings (not the
 /// borrowing `RouteEvent`) so the background probe task can emit without lifetime
@@ -30,6 +67,7 @@ pub enum PoolEvent {
     Dispatch {
         mode: &'static str,
         tier: PoolTier,
+        policy: &'static str,
         requested: usize,
         alive: usize,
     },
@@ -39,6 +77,9 @@ pub enum PoolEvent {
         ok: bool,
         duration_ms: u32,
     },
+    /// A member's in-flight count changed (a dispatch started or finished). Drives
+    /// the per-member load gauge (GPU pool 01).
+    MemberState { member: String, in_flight: u32 },
     /// One member was probed.
     Probe {
         member: String,
@@ -50,6 +91,19 @@ pub enum PoolEvent {
 /// Observability hook (see [`PoolEvent`]).
 pub type PoolObserver = Arc<dyn Fn(PoolEvent) + Send + Sync>;
 
+/// Decrements a member's in-flight counter on drop, so the count is released on
+/// every path — including an early return or a panic in the provider call.
+struct InFlightGuard<'a>(&'a AtomicUsize);
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        // Saturating: never wrap below zero even under a spurious double-drop.
+        let prev = self.0.load(Ordering::Acquire);
+        if prev > 0 {
+            self.0.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
 /// How to add a member to a pool: an (already metered) candidate, its capability
 /// tier, and an optional cost hint (0.0 = free/local). Cost orders fan-out
 /// selection; it is clamped, never trusted.
@@ -57,13 +111,19 @@ pub struct PoolSpec {
     pub candidate: Candidate,
     pub tier: PoolTier,
     pub cost: f32,
+    /// Selection weight for the `weighted` policy (higher ⇒ more often). Clamped,
+    /// never trusted; a non-positive/non-finite value falls back to 1.0.
+    pub weight: f32,
 }
 
 struct PoolMember {
     candidate: Candidate,
     tier: PoolTier,
     cost: f32,
+    weight: f32,
     health: Health,
+    /// Requests currently in flight to this member — the live load signal.
+    in_flight: AtomicUsize,
     /// Duration of the most recent probe (ms), for the health snapshot.
     last_probe_ms: AtomicU64,
 }
@@ -71,6 +131,9 @@ struct PoolMember {
 struct PoolInner {
     name: String,
     members: Vec<PoolMember>,
+    policy: PoolPolicy,
+    /// Rotating cursor for the round-robin policy.
+    rr_cursor: AtomicUsize,
     failure_threshold: usize,
     cooldown_ms: u64,
     fanout: usize,
@@ -101,9 +164,21 @@ impl PoolInner {
         }
     }
 
-    /// Indices of members at or above `tier` that are capable and healthy, cheapest
-    /// first, capped at `cap`. Fail-soft: an empty result is fine — the caller
-    /// decides whether it has enough.
+    /// Weights are attacker-adjacent config; a non-finite or non-positive value
+    /// falls back to a neutral 1.0 so the weighted policy can't divide by zero or
+    /// be steered by a hostile `inf`/`NaN`.
+    fn clamp_weight(w: f32) -> f32 {
+        if w.is_finite() && w > 0.0 {
+            w.min(1_000_000.0)
+        } else {
+            1.0
+        }
+    }
+
+    /// Indices of members at or above `tier` that are capable and healthy, **ordered
+    /// by the selection policy** and capped at `cap`. Fail-soft: an empty result is
+    /// fine — the caller decides whether it has enough. Runs on every call, so it is
+    /// kept allocation-light (guarded by the `pool_select` bench).
     fn eligible(&self, req: &CompletionRequest, tier: PoolTier, cap: usize) -> Vec<usize> {
         let now = (self.now_ms)();
         let mut healthy: Vec<usize> = (0..self.members.len())
@@ -114,19 +189,82 @@ impl PoolInner {
                     && !m.health.is_open(now, self.cooldown_ms)
             })
             .collect();
-        healthy.sort_by(|&a, &b| {
-            Self::clamp_cost(self.members[a].cost)
-                .partial_cmp(&Self::clamp_cost(self.members[b].cost))
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(a.cmp(&b))
-        });
+        self.order(&mut healthy);
         healthy.truncate(cap);
         healthy
     }
 
-    /// Run one member's `complete`, timed and breaker-updated. Fail-soft.
+    /// Order the filtered survivors in place per the policy. Cost tie-break is
+    /// shared by cost/least-loaded so ordering is always deterministic (matters for
+    /// the bench and reproducible tests); weighted is the only randomised policy and
+    /// it varies by a counter, never a clock, so it stays resume-safe.
+    fn order(&self, ids: &mut [usize]) {
+        let cost = |i: usize| Self::clamp_cost(self.members[i].cost);
+        match self.policy {
+            PoolPolicy::Cost => ids.sort_by(|&a, &b| {
+                cost(a)
+                    .partial_cmp(&cost(b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.cmp(&b))
+            }),
+            PoolPolicy::LeastLoaded => {
+                let load = |i: usize| self.members[i].in_flight.load(Ordering::Acquire);
+                ids.sort_by(|&a, &b| {
+                    load(a)
+                        .cmp(&load(b))
+                        .then(
+                            cost(a)
+                                .partial_cmp(&cost(b))
+                                .unwrap_or(std::cmp::Ordering::Equal),
+                        )
+                        .then(a.cmp(&b))
+                });
+            }
+            PoolPolicy::RoundRobin => {
+                ids.sort_unstable();
+                if !ids.is_empty() {
+                    // Rotate the (index-sorted) survivors by a per-dispatch cursor.
+                    let start = self.rr_cursor.fetch_add(1, Ordering::Relaxed) % ids.len();
+                    ids.rotate_left(start);
+                }
+            }
+            PoolPolicy::Weighted => {
+                // A weighted shuffle: order by `-ln(u)/weight` (the standard
+                // weighted-random key), where `u` is a counter-derived pseudo-random
+                // in (0,1] — deterministic per process, no clock, higher weight ⇒
+                // earlier on average.
+                ids.sort_unstable();
+                let tick = self.rr_cursor.fetch_add(1, Ordering::Relaxed);
+                let key = |i: usize| {
+                    let w = Self::clamp_weight(self.members[i].weight);
+                    // Cheap counter hash → (0,1]; varies per member and per dispatch.
+                    let h = ((i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ tick as u64)
+                        .wrapping_mul(0xD1B5_4A32_D192_ED03);
+                    let u = ((h >> 11) as f64 / (1u64 << 53) as f64).max(1e-12);
+                    (-u.ln()) / w as f64
+                };
+                ids.sort_by(|&a, &b| {
+                    key(a)
+                        .partial_cmp(&key(b))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then(a.cmp(&b))
+                });
+            }
+        }
+    }
+
+    /// Run one member's `complete`, timed and breaker-updated. Fail-soft. The
+    /// in-flight count is raised for the duration via an RAII guard so it is
+    /// released on *every* path — success, error, or a panic in the provider — and
+    /// can never leak load that would exile a healthy member from selection.
     async fn call_member(&self, i: usize, req: CompletionRequest) -> PoolMemberResult {
         let m = &self.members[i];
+        let n_in = m.in_flight.fetch_add(1, Ordering::AcqRel) + 1;
+        let _guard = InFlightGuard(&m.in_flight);
+        self.emit(PoolEvent::MemberState {
+            member: m.candidate.name.clone(),
+            in_flight: n_in.min(u32::MAX as usize) as u32,
+        });
         let started = Instant::now();
         let outcome = m.candidate.provider.complete(req).await;
         let duration_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
@@ -146,6 +284,12 @@ impl PoolInner {
             member: m.candidate.name.clone(),
             ok: response.is_some(),
             duration_ms,
+        });
+        // Release the in-flight slot and report the settled count for the gauge.
+        drop(_guard);
+        self.emit(PoolEvent::MemberState {
+            member: m.candidate.name.clone(),
+            in_flight: m.in_flight.load(Ordering::Acquire).min(u32::MAX as usize) as u32,
         });
         PoolMemberResult {
             member: m.candidate.name.clone(),
@@ -196,7 +340,9 @@ impl PoolProvider {
                 candidate: s.candidate,
                 tier: s.tier,
                 cost: PoolInner::clamp_cost(s.cost),
+                weight: PoolInner::clamp_weight(s.weight),
                 health: Health::new(),
+                in_flight: AtomicUsize::new(0),
                 last_probe_ms: AtomicU64::new(0),
             })
             .collect();
@@ -204,6 +350,8 @@ impl PoolProvider {
             inner: Arc::new(PoolInner {
                 name: name.into(),
                 members,
+                policy: PoolPolicy::default(),
+                rr_cursor: AtomicUsize::new(0),
                 failure_threshold: 3,
                 cooldown_ms: 30_000,
                 fanout: 3,
@@ -230,6 +378,28 @@ impl PoolProvider {
     pub fn with_fanout(mut self, fanout: usize) -> Self {
         self.inner_mut().fanout = fanout.max(1);
         self
+    }
+
+    /// Set the selection policy (default [`PoolPolicy::Cost`], the historical
+    /// behaviour).
+    pub fn with_policy(mut self, policy: PoolPolicy) -> Self {
+        self.inner_mut().policy = policy;
+        self
+    }
+
+    /// Seed a member's in-flight count (for benches/tests of the selection order).
+    #[doc(hidden)]
+    pub fn bench_set_in_flight(&self, i: usize, n: usize) {
+        if let Some(m) = self.inner.members.get(i) {
+            m.in_flight.store(n, Ordering::SeqCst);
+        }
+    }
+
+    /// Benchmark hook: the per-call selection (`eligible`, ordered by policy) is the
+    /// hot path the `pool_select` Ir ceiling guards.
+    #[doc(hidden)]
+    pub fn bench_select(&self, req: &CompletionRequest, tier: PoolTier, cap: usize) -> Vec<usize> {
+        self.inner.eligible(req, tier, cap)
     }
 
     pub fn with_observer(mut self, o: PoolObserver) -> Self {
@@ -282,6 +452,8 @@ impl LlmPool for PoolProvider {
                 alive: !m.health.is_open(now, self.inner.cooldown_ms),
                 consecutive_failures: m.health.failures().min(u32::MAX as usize) as u32,
                 last_probe_ms: m.last_probe_ms.load(Ordering::SeqCst).min(u32::MAX as u64) as u32,
+                in_flight: m.in_flight.load(Ordering::Acquire).min(u32::MAX as usize) as u32,
+                weight: m.weight,
             })
             .collect();
         HealthReport { members }
@@ -301,6 +473,7 @@ impl LlmPool for PoolProvider {
         self.inner.emit(PoolEvent::Dispatch {
             mode: "all",
             tier,
+            policy: self.inner.policy.as_str(),
             requested: cap,
             alive: chosen.len(),
         });
@@ -319,6 +492,7 @@ impl LlmPool for PoolProvider {
         self.inner.emit(PoolEvent::Dispatch {
             mode: "one",
             tier: PoolTier::Light,
+            policy: self.inner.policy.as_str(),
             requested: 1,
             alive: order.len(),
         });
@@ -409,6 +583,7 @@ mod tests {
             },
             tier,
             cost: 0.0,
+            weight: 1.0,
         }
     }
 
@@ -464,6 +639,7 @@ mod tests {
                 },
                 tier: PoolTier::Light,
                 cost: 0.0,
+                weight: 1.0,
             },
             ok_member("good", PoolTier::Light),
         ]);
@@ -488,6 +664,7 @@ mod tests {
                 },
                 tier: PoolTier::Light,
                 cost: 0.0,
+                weight: 1.0,
             },
             ok_member("good", PoolTier::Light),
         ]);
@@ -528,6 +705,7 @@ mod tests {
                 },
                 tier: PoolTier::Light,
                 cost: f32::NAN,
+                weight: 1.0,
             },
             PoolSpec {
                 candidate: Candidate {
@@ -536,6 +714,7 @@ mod tests {
                 },
                 tier: PoolTier::Light,
                 cost: -100.0,
+                weight: 1.0,
             },
         ]);
         let out = p.complete_all(req(), PoolTier::Light, 5).await;
@@ -555,14 +734,148 @@ mod tests {
         let sink = seen.clone();
         let p = pool(vec![ok_member("a", PoolTier::Light)]).with_observer(Arc::new(move |ev| {
             sink.lock().unwrap().push(match ev {
-                PoolEvent::Dispatch { mode, .. } => format!("dispatch:{mode}"),
+                PoolEvent::Dispatch { mode, policy, .. } => format!("dispatch:{mode}:{policy}"),
                 PoolEvent::MemberCall { member, ok, .. } => format!("member:{member}:{ok}"),
+                PoolEvent::MemberState { member, in_flight } => {
+                    format!("state:{member}:{in_flight}")
+                }
                 PoolEvent::Probe { member, .. } => format!("probe:{member}"),
             });
         }));
         p.complete_all(req(), PoolTier::Light, 1).await;
         let got = seen.lock().unwrap().clone();
-        assert!(got.iter().any(|e| e == "dispatch:all"), "{got:?}");
+        assert!(got.iter().any(|e| e == "dispatch:all:cost"), "{got:?}");
         assert!(got.iter().any(|e| e == "member:a:true"), "{got:?}");
+        // The in-flight gauge is driven up (1) then back down (0) around the call.
+        assert!(got.iter().any(|e| e == "state:a:1"), "{got:?}");
+        assert!(got.iter().any(|e| e == "state:a:0"), "{got:?}");
+    }
+
+    // --- policy ordering ---------------------------------------------------
+
+    /// Build a pool whose members have set in-flight counts, for order tests.
+    fn loaded_pool(policy: PoolPolicy, loads: &[(&str, usize)]) -> PoolProvider {
+        let specs = loads
+            .iter()
+            .map(|(name, _)| ok_member(name, PoolTier::Light))
+            .collect();
+        let p = PoolProvider::new("test", specs)
+            .expect("pool")
+            .with_policy(policy);
+        // Seed in-flight via the internal counter (uniquely owned here).
+        for (i, (_, load)) in loads.iter().enumerate() {
+            p.inner.members[i].in_flight.store(*load, Ordering::SeqCst);
+        }
+        p
+    }
+
+    /// least-loaded picks the idlest member first.
+    #[test]
+    fn positive_least_loaded_prefers_idle() {
+        let p = loaded_pool(
+            PoolPolicy::LeastLoaded,
+            &[("busy", 5), ("idle", 0), ("mid", 2)],
+        );
+        let order = p.inner.eligible(&req(), PoolTier::Light, 3);
+        assert_eq!(order, vec![1, 2, 0], "idle < mid < busy");
+    }
+
+    /// cost policy (default) keeps index order at equal cost — back-compat.
+    #[test]
+    fn positive_cost_policy_is_index_order() {
+        let p = loaded_pool(PoolPolicy::Cost, &[("a", 9), ("b", 0), ("c", 3)]);
+        // Ignores load entirely; equal cost ⇒ index order.
+        assert_eq!(p.inner.eligible(&req(), PoolTier::Light, 3), vec![0, 1, 2]);
+    }
+
+    /// round-robin rotates the primary across dispatches.
+    #[test]
+    fn positive_round_robin_rotates() {
+        let p = loaded_pool(PoolPolicy::RoundRobin, &[("a", 0), ("b", 0), ("c", 0)]);
+        let first = p.inner.eligible(&req(), PoolTier::Light, 1)[0];
+        let second = p.inner.eligible(&req(), PoolTier::Light, 1)[0];
+        let third = p.inner.eligible(&req(), PoolTier::Light, 1)[0];
+        assert_ne!(first, second, "primary rotates");
+        assert_ne!(second, third);
+    }
+
+    /// corner: all-equal load under least-loaded falls back to deterministic order.
+    #[test]
+    fn corner_least_loaded_all_equal_is_deterministic() {
+        let p = loaded_pool(PoolPolicy::LeastLoaded, &[("a", 2), ("b", 2), ("c", 2)]);
+        assert_eq!(p.inner.eligible(&req(), PoolTier::Light, 3), vec![0, 1, 2]);
+    }
+
+    /// adversarial: a hostile weight (NaN / negative / inf) is clamped, and the
+    /// weighted policy neither panics nor drops a member.
+    #[tokio::test]
+    async fn adversarial_hostile_weight_is_clamped() {
+        let mk = |name: &str, w: f32| PoolSpec {
+            candidate: Candidate {
+                name: name.into(),
+                provider: Arc::new(ScriptedProvider::new(vec![final_turn(name)])),
+            },
+            tier: PoolTier::Light,
+            cost: 0.0,
+            weight: w,
+        };
+        let p = PoolProvider::new(
+            "test",
+            vec![
+                mk("nan", f32::NAN),
+                mk("neg", -3.0),
+                mk("inf", f32::INFINITY),
+            ],
+        )
+        .expect("pool")
+        .with_policy(PoolPolicy::Weighted);
+        let order = p.inner.eligible(&req(), PoolTier::Light, 3);
+        assert_eq!(order.len(), 3, "all members retained, no panic");
+        // Clamped to the neutral weight, so health reports a sane finite value.
+        let h = p.health().await;
+        assert!(h
+            .members
+            .iter()
+            .all(|m| m.weight.is_finite() && m.weight > 0.0));
+    }
+
+    /// adversarial: the in-flight guard releases even when the provider panics —
+    /// no leaked load that would exile a healthy member.
+    #[tokio::test]
+    async fn adversarial_in_flight_released_on_panic() {
+        struct PanicProvider;
+        #[async_trait]
+        impl LlmProvider for PanicProvider {
+            fn capabilities(&self) -> ModelCapabilities {
+                caps()
+            }
+            async fn complete(&self, _r: CompletionRequest) -> Result<CompletionResponse> {
+                panic!("boom")
+            }
+        }
+        let p = PoolProvider::new(
+            "test",
+            vec![PoolSpec {
+                candidate: Candidate {
+                    name: "panicky".into(),
+                    provider: Arc::new(PanicProvider),
+                },
+                tier: PoolTier::Light,
+                cost: 0.0,
+                weight: 1.0,
+            }],
+        )
+        .expect("pool");
+        // A panic in the member call unwinds through the guard's Drop.
+        use futures_util::future::FutureExt;
+        let res = std::panic::AssertUnwindSafe(p.complete_all(req(), PoolTier::Light, 1))
+            .catch_unwind()
+            .await;
+        assert!(res.is_err(), "the call panicked");
+        assert_eq!(
+            p.inner.members[0].in_flight.load(Ordering::SeqCst),
+            0,
+            "in-flight released despite the panic"
+        );
     }
 }

@@ -1891,17 +1891,20 @@ pub(crate) fn record_pool_event(m: &Metrics, ev: agent_providers::PoolEvent) {
         PoolEvent::Dispatch {
             mode,
             tier,
+            policy,
             requested,
             alive,
         } => {
             tracing::debug!(
                 mode,
                 tier = tier.as_str(),
+                policy,
                 requested,
                 alive,
                 "pool dispatch"
             );
             m.set_pool_members_alive(tier.as_str(), alive as i64);
+            m.on_pool_select(policy);
         }
         PoolEvent::MemberCall {
             member,
@@ -1910,6 +1913,10 @@ pub(crate) fn record_pool_event(m: &Metrics, ev: agent_providers::PoolEvent) {
         } => {
             m.on_pool_member_call(&member, if ok { "ok" } else { "error" });
             m.on_pool_dispatch("member", duration_ms as f64 / 1000.0);
+            m.on_pool_member_latency(&member, duration_ms as f64 / 1000.0);
+        }
+        PoolEvent::MemberState { member, in_flight } => {
+            m.set_pool_member_inflight(&member, in_flight as i64);
         }
         PoolEvent::Probe {
             member,

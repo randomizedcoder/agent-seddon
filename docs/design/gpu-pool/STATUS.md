@@ -8,10 +8,32 @@ tracing/tests/bench/leak) and must pass `nix develop -c nix flake check`.
 
 | # | Increment | Seam | Wire | Metrics | Tests | Bench+Leak | Status |
 |---|---|:--:|:--:|:--:|:--:|:--:|:--:|
-| — | Design directory | — | — | — | — | — | **this PR** |
-| 01 | Load balance (in-flight + policy) | — | — | — | — | — | designed |
+| — | Design directory | — | — | — | — | — | **merged** |
+| 01 | Load balance (in-flight + policy) | ✅ | ✅ | ✅ | ✅ | ✅ | **in review** |
 | 02 | Capacity (concurrency cap + backpressure) | — | — | — | — | — | designed |
 | 03 | GPU health (latency EWMA + graded state) | — | — | — | — | — | designed |
+
+## 01 — what shipped
+
+- **`PoolPolicy` {Cost, RoundRobin, LeastLoaded, Weighted}** (`agent-providers/pool.rs`),
+  default `Cost` (back-compat). `eligible()` keeps its filter (healthy ∩ capable ∩
+  `tier>=floor`) and orders the survivors by the policy — least-loaded = fewest
+  `in_flight`, tie-break cost then index.
+- **Per-member `in_flight: AtomicUsize`**, raised for a call's duration via an **RAII
+  `InFlightGuard`** so it is released on every path — success, error, or a **panic**
+  in the provider (proven by an adversarial test).
+- **Struct-per-member config** — `[[pool.members]]` (untagged with the old
+  `members = [...]` list, both parse) carrying endpoint/model/tier/weight/cost/
+  max_concurrency; an inline `endpoint` synthesizes an `OpenAiCompatProvider` (one
+  block per GPU target). `[pool] policy` selects the strategy.
+- **Contract**: additive `in_flight`/`weight` on `PoolMemberHealth` + proto (no buf
+  baseline bump) + `convert.rs` (remote-reported weight clamped);
+  `agent_pool_member_inflight{member}` gauge, `agent_pool_member_latency_seconds{member}`
+  histogram, `agent_pool_select_total{policy}` counter via the `PoolEvent` seam (new
+  `MemberState` event, `Dispatch` gains `policy`); `pool_select` bench (Ir ceiling) +
+  a dhat leak (in-flight released, no leak). Config documented in `config/agent.toml`.
+- **Security**: `weight`/`cost` and remote-reported `in_flight`/`weight` clamped;
+  selection panic-free (empty/all-dead/hostile numbers) and the guard deadlock-free.
 
 ## Build order = dependency order
 

@@ -1,8 +1,15 @@
 # 01 — Load balance: live in-flight + pluggable selection policy
 
-Status: **design / pre-implementation.** The headline increment: turn the pool from
-static cheapest-first into a **capacity-aware, load-balanced** router across many GPU
+Status: **implemented** (`PoolPolicy`, per-member `in_flight`, `[[pool.members]]`) —
+see [`STATUS.md`](STATUS.md). The headline increment: turn the pool from static
+cheapest-first into a **capacity-aware, load-balanced** router across many GPU
 targets, and give it a config shape that scales.
+
+> Implementation note: the per-member latency histogram + in-flight gauge + select
+> counter ride the existing `PoolEvent` → `record_pool_event` seam (a new
+> `MemberState` event; `Dispatch` gains `policy`), so `agent-providers` stays off
+> `agent-metrics`. The struct-per-member config is an **untagged** `members` list, so
+> the old `members = ["a"]` form still parses beside `[[pool.members]]` blocks.
 
 ## Motivation
 

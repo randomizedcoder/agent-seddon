@@ -15,6 +15,8 @@ default = ["provider-openai-compat"]
 provider-openai-compat = []
 # Anthropic-native Messages API.
 provider-anthropic = []
+# dhat-instrumented leak/allocation tests (tests/leak.rs).
+dhat-heap = ["dep:dhat"]
 
 [dependencies]
 agent-core.workspace = true
@@ -29,9 +31,22 @@ futures-util.workspace = true
 async-stream.workspace = true
 # `tokio::time::sleep` for the retry backoff (the runtime is already tokio).
 tokio = { workspace = true }
+dhat = { workspace = true, optional = true }
 
 [dev-dependencies]
 agent-testkit.workspace = true
 agent-cache.workspace = true
 rstest.workspace = true
 tokio = { workspace = true }
+iai-callgrind.workspace = true
+
+# Guards the per-call selection hot path (`eligible`, ordered by policy).
+[[bench]]
+name = "pool_select"
+harness = false
+required-features = ["provider-pool"]
+
+[[test]]
+name = "leak"
+harness = true
+required-features = ["dhat-heap", "provider-pool"]
