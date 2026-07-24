@@ -3185,6 +3185,29 @@ pub struct CommitInfo {
     pub body: String,
 }
 
+/// One file touched by a commit, with its line delta. The raw material for the
+/// history-mining review collectors (co-change, churn, bus factor). `added`/
+/// `deleted` are `0` for a binary file (git reports `-`/`-`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileTouch {
+    /// Repo-relative path as git reported it (unconfined — the caller confines).
+    pub path: PathBuf,
+    pub added: u64,
+    pub deleted: u64,
+}
+
+/// A commit paired with the files it touched — one `git log --numstat` record.
+/// The shared, bounded history feed the co-change / churn / bus-factor collectors
+/// mine, so history is walked once per review rather than once per collector.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitTouch {
+    pub oid: Oid,
+    pub author: String,
+    pub author_email: String,
+    pub committed_ms: u64,
+    pub files: Vec<FileTouch>,
+}
+
 /// A grep-at-revision hit (content search against the object DB, not a worktree).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GrepHit {
@@ -3302,6 +3325,15 @@ pub trait RepoBackend: Send + Sync {
         _head: &Revision,
         _limit: usize,
     ) -> Result<Vec<CommitInfo>> {
+        Ok(Vec::new())
+    }
+    /// History as (commit, touched files + line deltas), newest first, capped at
+    /// `limit` commits. One `git log --numstat` pass — the shared feed the review
+    /// flow's history-mining collectors (co-change, churn) consume. Default
+    /// `Ok(vec![])` — a backend (or a remote gRPC client that does not forward it)
+    /// reports "no history" rather than an error, and those collectors skip
+    /// fail-soft.
+    async fn log_touched(&self, _rev: &Revision, _limit: usize) -> Result<Vec<CommitTouch>> {
         Ok(Vec::new())
     }
 
@@ -3764,6 +3796,43 @@ pub struct SummaryReport {
     pub omitted: u32,
 }
 
+/// One file that historically co-changes with a changed file. `confidence` is the
+/// association-rule confidence `co_occurrences / min(commits_self, commits_partner)`
+/// (the metric Homer's behavioral analyzer actually uses — a conditional
+/// probability, not Jaccard), in `0.0..=1.0`. `in_diff` = the partner is also in
+/// this change set; the **absent** partners (`in_diff == false`) are the signal —
+/// history says they usually move together, and this change left one behind.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CoChangePartner {
+    /// Repo-relative path (confined).
+    pub path: String,
+    pub confidence: f64,
+    pub co_occurrences: u32,
+    pub in_diff: bool,
+}
+
+/// A changed file and its historical co-change partners (top-N by confidence).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CoChangeEntry {
+    /// Repo-relative path of the changed file (confined).
+    pub path: String,
+    pub partners: Vec<CoChangePartner>,
+}
+
+/// The co-change contribution to a review (component from the Homer design input):
+/// for each changed file, which files history says usually change with it — and
+/// whether each is present in this diff. `commits_scanned` records the history
+/// window actually walked; `truncated` = the window hit the cap. Empty when off /
+/// no history / no partners cleared the thresholds.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CoChangeReport {
+    pub commits_scanned: u32,
+    pub truncated: bool,
+    pub entries: Vec<CoChangeEntry>,
+    /// Count of surfaced partners absent from the diff (the headline signal).
+    pub missing_partners: u32,
+}
+
 /// The grounded fact bundle a reviewer reasons over. Everything here is a hard
 /// fact from a tool — except `summaries`, the one soft (model-generated) field,
 /// which is clearly labelled and never overwrites a fact. Later increments add
@@ -3788,6 +3857,10 @@ pub struct ReviewFacts {
     /// Cheap-LLM function summaries (increment 8) — soft. Empty when off / no pool.
     #[serde(default)]
     pub summaries: SummaryReport,
+    /// Historical co-change partners (Homer design input). Empty when off / no
+    /// history / no partners cleared the thresholds.
+    #[serde(default)]
+    pub cochange: CoChangeReport,
 }
 
 /// A flattened, analytics-shaped record of one review run — the telemetry-local

@@ -679,6 +679,10 @@ pub async fn build_agent_with(
                 if cfg.review.summaries {
                     orch = orch.with_summaries(llm_pool_seam.clone());
                 }
+                // Historical co-change — pure git-history mining, no toolchain.
+                if cfg.review.cochange {
+                    orch = orch.with_cochange(cfg.review.cochange_window);
+                }
                 Some(Arc::new(orch) as Arc<dyn agent_core::ReviewCollector>)
             }
             // A remote fact-collection host (CPU-heavy, worth distributing).

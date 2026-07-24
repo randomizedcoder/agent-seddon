@@ -3,6 +3,7 @@
 
 use crate::analyzer::AnalyzerCollector;
 use crate::callgraph::CallGraphCollector;
+use crate::cochange::CoChangeCollector;
 use crate::collector::{CollectCtx, CollectorOutput, FactCollector, FactFragment};
 use crate::repo_facts::RepoChangeCollector;
 use crate::signatures::SignatureCollector;
@@ -69,6 +70,11 @@ pub enum ReviewEvent {
         requested: u32,
         produced: u32,
         omitted: u32,
+    },
+    /// Co-change accounting: entries surfaced + partners missing from the diff.
+    CoChange {
+        entries: u32,
+        missing: u32,
     },
 }
 
@@ -169,6 +175,14 @@ impl ReviewOrchestrator {
     /// jobs over the pool; skips fail-soft when no pool / no healthy member.
     pub fn with_summaries(mut self, pool: Option<Arc<dyn LlmPool>>) -> Self {
         self.collectors.push(Box::new(SummaryCollector { pool }));
+        self
+    }
+
+    /// Add the co-change collector (historical coupling / missing-partner signal).
+    /// `window` is the history depth in commits (clamped ≥ 1).
+    #[must_use]
+    pub fn with_cochange(mut self, window: usize) -> Self {
+        self.collectors.push(Box::new(CoChangeCollector { window }));
         self
     }
 
@@ -342,6 +356,13 @@ impl ReviewCollector for ReviewOrchestrator {
                         omitted: report.omitted,
                     });
                     facts.summaries = report;
+                }
+                Some(FactFragment::CoChange { report }) => {
+                    self.emit(ReviewEvent::CoChange {
+                        entries: report.entries.len() as u32,
+                        missing: report.missing_partners,
+                    });
+                    facts.cochange = report;
                 }
                 None => {}
             }

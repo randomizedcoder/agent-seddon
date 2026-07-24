@@ -77,6 +77,11 @@
   # skip cleanly (no Summaries section, hard facts intact). The happy path is proven
   # offline by the in-process FakePool test (summaries_e2e.rs).
   review-summaries = import ./review-summaries.nix { inherit pkgs agent; };
+  # Co-change coverage (Homer design input): a history where two files habitually
+  # change together, then a change touches only one; assert the `Historical
+  # co-change` section foregrounds the absent partner. Pure in-process (git-history
+  # mining); offline, no toolchain.
+  review-cochange = import ./review-cochange.nix { inherit pkgs agent; };
   # Recording coverage: `agent --review` must persist a ReviewRecord to
   # episodic.jsonl (the durable fallback for the agent_reviews table). Offline.
   review-recording = import ./review-recording.nix { inherit pkgs agent; };

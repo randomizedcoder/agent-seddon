@@ -10,9 +10,9 @@
 
 use crate::cache::OidCache;
 use agent_core::{
-    BlobContent, ChangeKind, Checkpoint, CommitInfo, DiffResult, EntryKind, Error, FileDiff,
-    GrepHit, Oid, RepoBackend, RepoStatus, Result, Revision, TreeEntry, WorktreeHandle,
-    WorktreeSpec,
+    BlobContent, ChangeKind, Checkpoint, CommitInfo, CommitTouch, DiffResult, EntryKind, Error,
+    FileDiff, FileTouch, GrepHit, Oid, RepoBackend, RepoStatus, Result, Revision, TreeEntry,
+    WorktreeHandle, WorktreeSpec,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -22,6 +22,10 @@ use tokio::process::Command;
 /// Cap on how many changed files get a per-file patch fetched in one `diff`
 /// (the tool layer truncates the aggregate anyway).
 const MAX_PATCH_FILES: usize = 300;
+/// Cap on files recorded per commit in `log_touched` — a bulk/vendor commit that
+/// touches thousands of files shouldn't balloon the history feed (or pollute
+/// co-change with spurious pairings).
+const MAX_TOUCHED_FILES: usize = 500;
 
 /// A [`RepoBackend`] over the `git` CLI.
 pub struct CliBackend {
@@ -574,6 +578,79 @@ impl RepoBackend for CliBackend {
                 committed_ms: f[3].parse::<u64>().unwrap_or(0).saturating_mul(1000),
                 summary: f[4].to_string(),
                 body: f[5].to_string(),
+            });
+        }
+        Ok(commits)
+    }
+
+    async fn log_touched(&self, rev: &Revision, limit: usize) -> Result<Vec<CommitTouch>> {
+        // One `git log --numstat` pass. `%x1e` starts each commit record so we can
+        // split cleanly even though `--numstat` appends variable-length blocks; the
+        // header line carries the commit fields, the following lines are numstat.
+        // No `-M`: a rename shows as add+delete of two plain paths (no ` => `),
+        // which keeps parsing trivial and is correct for co-change (both paths
+        // co-occur). Binary files report `-`/`-`, parsed to 0.
+        let cap = if limit == 0 { 2000 } else { limit };
+        let fmt = "--format=%x1e%H%x1f%an%x1f%ae%x1f%ct";
+        let n = format!("-{cap}");
+        let out = self
+            .git_str(
+                &self.root,
+                &[
+                    // `quotePath=false` so numstat paths are raw UTF-8, matching the
+                    // `-z` diff paths the co-change collector compares them against.
+                    "-c",
+                    "core.quotePath=false",
+                    "log",
+                    "--no-color",
+                    "--numstat",
+                    n.as_str(),
+                    fmt,
+                    rev.as_str(),
+                ],
+            )
+            .await?;
+        let mut commits = Vec::new();
+        for rec in out.split('\u{1e}') {
+            let rec = rec.trim_start_matches(['\n', '\r']);
+            if rec.is_empty() {
+                continue;
+            }
+            let mut lines = rec.lines();
+            let Some(header) = lines.next() else { continue };
+            let h: Vec<&str> = header.split('\u{1f}').collect();
+            if h.len() < 4 {
+                continue;
+            }
+            let mut files = Vec::new();
+            for l in lines {
+                if l.is_empty() {
+                    continue;
+                }
+                if files.len() >= MAX_TOUCHED_FILES {
+                    break;
+                }
+                // `added\tdeleted\tpath` — `path` is the remaining field (git quotes
+                // any embedded tab/newline, so it never spills past the split).
+                let mut it = l.splitn(3, '\t');
+                let added = it.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+                let deleted = it.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+                let Some(path) = it.next() else { continue };
+                if path.is_empty() {
+                    continue;
+                }
+                files.push(FileTouch {
+                    path: PathBuf::from(path),
+                    added,
+                    deleted,
+                });
+            }
+            commits.push(CommitTouch {
+                oid: Oid(h[0].to_string()),
+                author: h[1].to_string(),
+                author_email: h[2].to_string(),
+                committed_ms: h[3].parse::<u64>().unwrap_or(0).saturating_mul(1000),
+                files,
             });
         }
         Ok(commits)

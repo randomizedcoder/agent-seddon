@@ -229,6 +229,20 @@ impl ReviewCollector for FakeReview {
                 produced: 1,
                 omitted: 2,
             },
+            cochange: agent_core::CoChangeReport {
+                commits_scanned: 500,
+                truncated: false,
+                entries: vec![agent_core::CoChangeEntry {
+                    path: "main.go".into(),
+                    partners: vec![agent_core::CoChangePartner {
+                        path: "schema.go".into(),
+                        confidence: 0.8,
+                        co_occurrences: 12,
+                        in_diff: false,
+                    }],
+                }],
+                missing_partners: 1,
+            },
         })
     }
 }
@@ -316,6 +330,13 @@ async fn review_collect_roundtrips(#[case] transport: Transport) {
     assert_eq!(facts.summaries.summaries[0].name, "Run");
     assert_eq!(facts.summaries.produced, 1);
     assert_eq!(facts.summaries.omitted, 2);
+    // Co-change report survives the wire round-trip (incl. the absent-partner flag).
+    assert_eq!(facts.cochange.commits_scanned, 500);
+    assert_eq!(facts.cochange.entries.len(), 1);
+    assert_eq!(facts.cochange.entries[0].path, "main.go");
+    assert_eq!(facts.cochange.entries[0].partners[0].path, "schema.go");
+    assert!(!facts.cochange.entries[0].partners[0].in_diff);
+    assert_eq!(facts.cochange.missing_partners, 1);
 }
 
 /// A PR target survives the encode/decode round-trip through the wire string.

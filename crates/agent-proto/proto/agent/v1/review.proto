@@ -225,6 +225,25 @@ message ReviewSummaryReport {
   uint32 omitted = 4;
 }
 
+message ReviewCoChangePartner {
+  string path = 1;
+  double confidence = 2;
+  uint32 co_occurrences = 3;
+  bool in_diff = 4;
+}
+
+message ReviewCoChangeEntry {
+  string path = 1;
+  repeated ReviewCoChangePartner partners = 2;
+}
+
+message ReviewCoChangeReport {
+  uint32 commits_scanned = 1;
+  bool truncated = 2;
+  repeated ReviewCoChangeEntry entries = 3;
+  uint32 missing_partners = 4;
+}
+
 message ReviewFacts {
   ReviewMeta meta = 1;
   ReviewChangeSet change = 2;
@@ -234,4 +253,5 @@ message ReviewFacts {
   ReviewCallGraph callgraph = 6;
   ReviewStyleFacts style = 7;
   ReviewSummaryReport summaries = 8;
+  ReviewCoChangeReport cochange = 9;
 }
