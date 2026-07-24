@@ -14,6 +14,7 @@ mod orchestrator;
 mod repo_facts;
 mod signatures;
 mod style;
+mod summaries;
 mod util;
 
 pub use classifier::HybridClassifier;
@@ -119,6 +120,9 @@ pub fn render_facts_with(facts: &ReviewFacts, budget_bytes: usize) -> String {
     // House-style fingerprint — so the review respects the repo's conventions.
     render_style(&mut out, &facts.style);
 
+    // Cheap-LLM summaries — the one SOFT section, clearly labelled as such.
+    render_summaries(&mut out, &facts.summaries);
+
     // Diff hunks — fill the remaining budget; omit (with a count) what doesn't fit.
     let with_patch: Vec<&agent_core::ChangedFile> =
         ch.files.iter().filter(|f| !f.patch.is_empty()).collect();
@@ -168,6 +172,32 @@ fn render_signatures(out: &mut String, report: &agent_core::SignatureReport) {
     }
     if report.truncated {
         out.push_str("    … more signature changes omitted (cap reached)\n");
+    }
+}
+
+/// Render the cheap-LLM function summaries — the **soft** section, explicitly
+/// labelled model-generated so it's never mistaken for a hard fact. Nothing is
+/// emitted when none were produced.
+fn render_summaries(out: &mut String, r: &agent_core::SummaryReport) {
+    if r.summaries.is_empty() {
+        return;
+    }
+    out.push_str(&format!(
+        "\nSummaries (soft — model-generated, {}/{} changed fns):\n",
+        r.produced, r.requested
+    ));
+    for s in &r.summaries {
+        let mark = if s.kind == "added" { "+" } else { "~" };
+        out.push_str(&format!(
+            "  {} {} ({}): {}\n",
+            mark, s.name, s.file, s.summary
+        ));
+    }
+    if r.omitted > 0 {
+        out.push_str(&format!(
+            "  … {} more changed fn(s) not summarized (job cap)\n",
+            r.omitted
+        ));
     }
 }
 

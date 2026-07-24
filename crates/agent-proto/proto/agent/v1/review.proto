@@ -208,6 +208,23 @@ message ReviewStyleFacts {
   uint32 files_scanned = 9;
 }
 
+// One cheap-LLM summary of a changed function — SOFT (model-generated), bounded.
+message ReviewFunctionSummary {
+  string name = 1;
+  string file = 2;
+  string kind = 3;      // added | modified
+  string summary = 4;
+  string model = 5;
+  uint32 duration_ms = 6;
+}
+
+message ReviewSummaryReport {
+  repeated ReviewFunctionSummary summaries = 1;
+  uint32 requested = 2;
+  uint32 produced = 3;
+  uint32 omitted = 4;
+}
+
 message ReviewFacts {
   ReviewMeta meta = 1;
   ReviewChangeSet change = 2;
@@ -216,4 +233,5 @@ message ReviewFacts {
   ReviewSignatureReport signatures = 5;
   ReviewCallGraph callgraph = 6;
   ReviewStyleFacts style = 7;
+  ReviewSummaryReport summaries = 8;
 }

@@ -1922,6 +1922,15 @@ pub(crate) fn record_review_event(m: &Metrics, ev: agent_review::ReviewEvent) {
         ReviewEvent::Style { diff_matches } => {
             m.on_review_style(diff_matches);
         }
+        ReviewEvent::Summaries {
+            requested,
+            produced,
+            omitted,
+        } => {
+            // requested = produced + failed + omitted (all non-negative by construction).
+            let failed = requested.saturating_sub(produced).saturating_sub(omitted);
+            m.on_review_summaries(produced as u64, failed as u64, omitted as u64);
+        }
     }
 }
 

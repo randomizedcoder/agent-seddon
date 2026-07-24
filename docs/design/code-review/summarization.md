@@ -1,6 +1,46 @@
 # 08 — Cheap-LLM summarization jobs
 
-Status: **design / pre-implementation.**
+Status: **implemented** (increment 9). A `SummaryCollector` fans jobs over the pool
+and folds function summaries into `ReviewFacts.summaries` (the one soft field). See
+**Implementation** below.
+
+## Implementation (increment 9)
+
+- **`SummaryCollector`** (`agent-review/src/summaries.rs`) — the first collector that
+  reaches the [`LlmPool`] (component 01), carried on the collector struct (not
+  `CollectCtx`). For each changed Go/Rust file it reads the base+head blobs, extracts
+  each top-level function's **full body** (brace-balanced, reusing the signature
+  collector's decl regexes), and diffs by name → **jobs** for the *modified*
+  (before→after) and *added* functions.
+- Each job → one `pool.complete(...)` with a bounded before/after prompt asking for a
+  one-sentence "what changed"; the answer becomes a `FunctionSummary { name, file,
+  kind, summary, model, duration_ms }`. Jobs fan out **concurrently** (`join_all`).
+- **Bounded + fail-soft, exactly as designed:** jobs capped at `MAX_JOBS = 20` with a
+  recorded `omitted`; per-side source capped (`MAX_SRC`); summary prose capped
+  (`MAX_SUMMARY`, untrusted model output). No pool / no healthy member (a `health()`
+  pre-check) / a dead job ⇒ fewer or zero summaries and a recorded count, **never** a
+  blocked bundle. The hard facts stand on their own.
+- Rendered as a **`Summaries (soft — model-generated, P/R changed fns)`** section —
+  explicitly labelled soft so it's never mistaken for a fact.
+- **Default-on** (`[review] summaries = true`); skips fail-soft in CI (no pool). Wire:
+  additive `ReviewFunctionSummary` / `ReviewSummaryReport` + `ReviewFacts` field 8
+  (rides `FactCollectorService`, round-trip tested; no baseline bump). Metric
+  `agent_review_summaries_total{outcome}` (produced/failed/omitted) via
+  `ReviewEvent::Summaries`.
+- **Verification (offline):** the happy path is proven by an **in-process `FakePool`
+  integration test** (`tests/summaries_e2e.rs`) — real git repo, canned pool, asserts
+  summaries produced + rendered soft, plus no-pool and dead-pool skips. The hermetic
+  `nix/checks/review-summaries.nix` asserts the pool-absent skip through the real
+  binary (the binary has no offline model to dial, so the fake lives in the Rust test).
+
+**Simplified from the design (deferred):** one `summary` field (the key "what
+changed") rather than separate before/after/what_changed prose + confidence;
+`name`/`file` identify the function rather than a `CallGraph.fn_id` (collectors run in
+parallel, so the AST node ids aren't visible); `before_hash`/`after_hash` caching,
+ensemble summaries, file/PR-level summaries, and a dedicated `SummarizerService`/
+`--serve-summarizer` all stay deferred.
+
+---
 
 The one *soft* collector. While the deterministic analyzers (05/06) run, fan out
 **cheap local-model** jobs over the pool ([`01`](llm-pool.md)) to summarize the

@@ -356,6 +356,10 @@ pub struct ReviewCfg {
     /// How many recent commits to sample for commit-message style facts (clamped).
     #[serde(default = "default_style_commit_sample")]
     pub style_commit_sample: usize,
+    /// Run the cheap-LLM summaries collector over the pool. On by default; skips
+    /// fail-soft when no pool / no healthy member is configured.
+    #[serde(default = "default_true")]
+    pub summaries: bool,
 }
 
 impl Default for ReviewCfg {
@@ -373,6 +377,7 @@ impl Default for ReviewCfg {
             callgraph_timeout_secs: default_callgraph_timeout(),
             style: true,
             style_commit_sample: default_style_commit_sample(),
+            summaries: true,
         }
     }
 }

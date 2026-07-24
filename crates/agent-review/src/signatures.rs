@@ -260,7 +260,9 @@ fn change(kind: &str, name: &str, before: &str, after: &str) -> SignatureChange 
     }
 }
 
-fn go_re() -> &'static regex::Regex {
+/// Shared with the summaries collector (`function_bodies`) — the top-level Go
+/// function/method decl anchor, capturing `recv` (optional) and `name`.
+pub(crate) fn go_re() -> &'static regex::Regex {
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     RE.get_or_init(|| {
         // Top-level Go funcs anchor at column 0; optional `(recv)` receiver group.
@@ -269,7 +271,8 @@ fn go_re() -> &'static regex::Regex {
     })
 }
 
-fn rust_re() -> &'static regex::Regex {
+/// Shared with the summaries collector — the Rust `fn` item decl anchor.
+pub(crate) fn rust_re() -> &'static regex::Regex {
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     RE.get_or_init(|| {
         // `fn` items at any indent (methods live inside `impl`); skip the modifiers.

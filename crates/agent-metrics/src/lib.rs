@@ -90,6 +90,7 @@ pub struct Metrics {
     review_callgraph_nodes: Histogram,
     review_callgraph_edges: Histogram,
     review_style_conformance: IntCounterVec,
+    review_summaries: IntCounterVec,
     web_searches: IntCounterVec,
     web_search_seconds: HistogramVec,
     web_search_results: IntCounterVec,
@@ -398,6 +399,14 @@ impl Metrics {
                 "Whether a change matched the repo's own style, by outcome",
             ),
             &["matches"],
+        )
+        .unwrap();
+        let review_summaries = IntCounterVec::new(
+            Opts::new(
+                "agent_review_summaries_total",
+                "Cheap-LLM function summaries, by outcome (produced/failed/omitted)",
+            ),
+            &["outcome"],
         )
         .unwrap();
         let web_searches = IntCounterVec::new(
@@ -810,6 +819,7 @@ impl Metrics {
             Box::new(review_callgraph_nodes.clone()),
             Box::new(review_callgraph_edges.clone()),
             Box::new(review_style_conformance.clone()),
+            Box::new(review_summaries.clone()),
             Box::new(web_searches.clone()),
             Box::new(web_search_seconds.clone()),
             Box::new(web_search_results.clone()),
@@ -906,6 +916,7 @@ impl Metrics {
             review_callgraph_nodes,
             review_callgraph_edges,
             review_style_conformance,
+            review_summaries,
             web_searches,
             web_search_seconds,
             web_search_results,
@@ -1114,6 +1125,18 @@ impl Metrics {
     pub fn on_review_style(&self, matches: bool) {
         let v = if matches { "true" } else { "false" };
         self.review_style_conformance.with_label_values(&[v]).inc();
+    }
+    /// Review: function-summary outcomes. Counts are trusted internal aggregates.
+    pub fn on_review_summaries(&self, produced: u64, failed: u64, omitted: u64) {
+        self.review_summaries
+            .with_label_values(&["produced"])
+            .inc_by(produced);
+        self.review_summaries
+            .with_label_values(&["failed"])
+            .inc_by(failed);
+        self.review_summaries
+            .with_label_values(&["omitted"])
+            .inc_by(omitted);
     }
     /// One web search: outcome, latency, and result count (parity spec 12).
     pub fn on_web_search(&self, backend: &str, outcome: &str, seconds: f64, results: u64) {

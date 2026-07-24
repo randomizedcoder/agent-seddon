@@ -675,6 +675,10 @@ pub async fn build_agent_with(
                 if cfg.review.style {
                     orch = orch.with_style(cfg.review.style_commit_sample);
                 }
+                // Cheap-LLM summaries over the pool — skips fail-soft without one.
+                if cfg.review.summaries {
+                    orch = orch.with_summaries(llm_pool_seam.clone());
+                }
                 Some(Arc::new(orch) as Arc<dyn agent_core::ReviewCollector>)
             }
             // A remote fact-collection host (CPU-heavy, worth distributing).

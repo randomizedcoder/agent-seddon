@@ -2943,6 +2943,52 @@ impl From<pb::ReviewStyleFacts> for agent_core::StyleFacts {
     }
 }
 
+impl From<agent_core::FunctionSummary> for pb::ReviewFunctionSummary {
+    fn from(s: agent_core::FunctionSummary) -> Self {
+        pb::ReviewFunctionSummary {
+            name: s.name,
+            file: s.file,
+            kind: s.kind,
+            summary: s.summary,
+            model: s.model,
+            duration_ms: s.duration_ms,
+        }
+    }
+}
+impl From<pb::ReviewFunctionSummary> for agent_core::FunctionSummary {
+    fn from(s: pb::ReviewFunctionSummary) -> Self {
+        agent_core::FunctionSummary {
+            name: s.name,
+            file: s.file,
+            kind: s.kind,
+            summary: s.summary,
+            model: s.model,
+            duration_ms: s.duration_ms,
+        }
+    }
+}
+
+impl From<agent_core::SummaryReport> for pb::ReviewSummaryReport {
+    fn from(r: agent_core::SummaryReport) -> Self {
+        pb::ReviewSummaryReport {
+            summaries: r.summaries.into_iter().map(Into::into).collect(),
+            requested: r.requested,
+            produced: r.produced,
+            omitted: r.omitted,
+        }
+    }
+}
+impl From<pb::ReviewSummaryReport> for agent_core::SummaryReport {
+    fn from(r: pb::ReviewSummaryReport) -> Self {
+        agent_core::SummaryReport {
+            summaries: r.summaries.into_iter().map(Into::into).collect(),
+            requested: r.requested,
+            produced: r.produced,
+            omitted: r.omitted,
+        }
+    }
+}
+
 impl From<agent_core::ReviewFacts> for pb::ReviewFacts {
     fn from(f: agent_core::ReviewFacts) -> Self {
         pb::ReviewFacts {
@@ -2953,6 +2999,7 @@ impl From<agent_core::ReviewFacts> for pb::ReviewFacts {
             signatures: Some(f.signatures.into()),
             callgraph: Some(f.callgraph.into()),
             style: Some(f.style.into()),
+            summaries: Some(f.summaries.into()),
         }
     }
 }
@@ -2966,6 +3013,7 @@ impl From<pb::ReviewFacts> for agent_core::ReviewFacts {
             signatures: f.signatures.map(Into::into).unwrap_or_default(),
             callgraph: f.callgraph.map(Into::into).unwrap_or_default(),
             style: f.style.map(Into::into).unwrap_or_default(),
+            summaries: f.summaries.map(Into::into).unwrap_or_default(),
         }
     }
 }

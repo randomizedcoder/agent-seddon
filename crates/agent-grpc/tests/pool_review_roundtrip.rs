@@ -216,6 +216,19 @@ impl ReviewCollector for FakeReview {
                 diff_matches_style: true,
                 files_scanned: 12,
             },
+            summaries: agent_core::SummaryReport {
+                summaries: vec![agent_core::FunctionSummary {
+                    name: "Run".into(),
+                    file: "main.go".into(),
+                    kind: "modified".into(),
+                    summary: "Adds a parameter x to Run.".into(),
+                    model: "pool".into(),
+                    duration_ms: 42,
+                }],
+                requested: 3,
+                produced: 1,
+                omitted: 2,
+            },
         })
     }
 }
@@ -298,6 +311,11 @@ async fn review_collect_roundtrips(#[case] transport: Transport) {
     assert_eq!(facts.style.commits.sampled_commits, 20);
     assert_eq!(facts.style.files_scanned, 12);
     assert!(facts.style.diff_matches_style);
+    // Summaries survive the wire round-trip (produced/requested/omitted accounting).
+    assert_eq!(facts.summaries.summaries.len(), 1);
+    assert_eq!(facts.summaries.summaries[0].name, "Run");
+    assert_eq!(facts.summaries.produced, 1);
+    assert_eq!(facts.summaries.omitted, 2);
 }
 
 /// A PR target survives the encode/decode round-trip through the wire string.

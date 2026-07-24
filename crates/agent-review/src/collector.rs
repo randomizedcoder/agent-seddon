@@ -2,7 +2,7 @@
 
 use agent_core::{
     AnalysisReport, CallGraph, ChangeSet, CollectStatus, GitState, RepoBackend, Revision, Sandbox,
-    SearchBackend, SignatureReport, StyleFacts,
+    SearchBackend, SignatureReport, StyleFacts, SummaryReport,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -45,6 +45,9 @@ pub(crate) enum FactFragment {
     },
     Style {
         facts: StyleFacts,
+    },
+    Summaries {
+        report: SummaryReport,
     },
 }
 
