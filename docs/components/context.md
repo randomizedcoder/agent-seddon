@@ -7,8 +7,10 @@ compacted when it grows past the token budget. Selected by `[agent] context`.
 - **Impl crate:** [`agent-context`](../../crates/agent-context)
 - **Shipped:** `sliding-window` (drop oldest turns — lossy but free),
   `summarizing-window` (keep head + recent tail, replace the middle with an
-  LLM-generated summary)
-- **Cargo features:** `context-sliding-window` (default), `context-summarizing`
+  LLM-generated summary), `mode-aware-window` (summarizing-window + a reshape on a
+  task-mode switch — see below)
+- **Cargo features:** `context-sliding-window` (default), `context-summarizing`,
+  `context-mode-aware`
 
 ## The trait
 
@@ -17,6 +19,10 @@ compacted when it grows past the token budget. Selected by `[agent] context`.
 pub trait ContextStrategy: Send + Sync {
     async fn assemble(&self, input: ContextInput) -> Result<Vec<Message>>;
     async fn compact(&self, working: &mut WorkingSet, budget: &TokenBudget) -> Result<()>;
+
+    // Optional capability (adaptive-cognition 02); default no-op / Budget.
+    fn on_mode_switch(&self, from: TaskMode, to: TaskMode) {}
+    fn last_compact_action(&self) -> CompactAction { CompactAction::Budget }
 }
 ```
 
@@ -24,6 +30,33 @@ pub trait ContextStrategy: Send + Sync {
 injected [context files](runtime.md), recalled [memory](memory.md), and the goal.
 `compact` must be **non-destructive** with respect to episodic memory — it only
 trims the live working set; the durable log is never mutated.
+
+## Mode-aware compaction (`mode-aware-window`)
+
+Context useful in one [task mode](mode.md) is noise in the next — the exploration
+transcript that found the files is dead weight once you are *implementing* them.
+`ModeAwareWindow` wraps `summarizing-window` and, when [mode detection](mode.md)
+decides a switch, **reshapes regardless of budget**: it re-summarizes the demoted
+middle **through the destination mode's lens** (a fixed, code-owned per-mode
+prompt) while keeping the system head and the recent tail verbatim.
+
+The switch reaches the strategy through the seam's two optional methods, not a new
+`compact` signature: the runtime calls `on_mode_switch(from, to)` (right after it
+records the switch), which *arms* the next `compact`; `last_compact_action()` lets
+the [metered decorator](metrics.md) label the result. Both are default methods, so
+`sliding-window`/`summarizing-window` are unaffected, and the `MeteredContext` /
+`GrpcContext` decorators forward them (a downcast couldn't reach the inner
+strategy). Over gRPC the switch rides the additive `from_mode`/`to_mode` fields on
+`CompactRequest`, and `CompactStats` reports what happened.
+
+**Fail-soft:** switch-lens summary → generic summary → drop the span, so the loop
+always makes progress. The summary is **untrusted model text** about to become a
+*system* message, so it is `scan_for_injection`-screened before insertion; a
+flagged summary is dropped, never obeyed. Metrics:
+`agent_context_switch_compactions_total{from,to}`,
+`agent_context_tokens_shed{trigger}`,
+`agent_context_summary_fallback_total{kind}`. Design:
+[adaptive-cognition/02-compaction.md](../design/adaptive-cognition/02-compaction.md).
 
 ## Design note: the factory context
 

@@ -134,6 +134,11 @@ pub struct Metrics {
     context_op_seconds: HistogramVec,
     context_compactions: IntCounter,
     context_compact_tokens: IntGaugeVec,
+    // Mode-aware compaction (adaptive-cognition 02): switch reshapes, tokens shed
+    // per trigger, and summary fallbacks.
+    context_switch_compactions: IntCounterVec,
+    context_tokens_shed: HistogramVec,
+    context_summary_fallback: IntCounterVec,
 
     // --- policy (recorded by the policy metrics wrapper) ------------------
     policy_authorize: IntCounterVec,
@@ -654,6 +659,28 @@ impl Metrics {
             &["when"],
         )
         .unwrap();
+        let context_switch_compactions = IntCounterVec::new(
+            Opts::new(
+                "agent_context_switch_compactions_total",
+                "Mode-switch context reshapes run",
+            ),
+            &["from", "to"],
+        )
+        .unwrap();
+        let context_tokens_shed = HistogramVec::new(
+            HistogramOpts::new("agent_context_tokens_shed", "Tokens shed by a compaction")
+                .buckets(prometheus::exponential_buckets(50.0, 2.0, 12).unwrap()),
+            &["trigger"],
+        )
+        .unwrap();
+        let context_summary_fallback = IntCounterVec::new(
+            Opts::new(
+                "agent_context_summary_fallback_total",
+                "Switch-compaction summary fallbacks (generic|drop)",
+            ),
+            &["kind"],
+        )
+        .unwrap();
 
         // --- policy -----------------------------------------------------------
         let policy_authorize = IntCounterVec::new(
@@ -946,6 +973,9 @@ impl Metrics {
             Box::new(context_op_seconds.clone()),
             Box::new(context_compactions.clone()),
             Box::new(context_compact_tokens.clone()),
+            Box::new(context_switch_compactions.clone()),
+            Box::new(context_tokens_shed.clone()),
+            Box::new(context_summary_fallback.clone()),
             Box::new(policy_authorize.clone()),
             Box::new(policy_authorize_seconds.clone()),
             Box::new(policy_guard.clone()),
@@ -1054,6 +1084,9 @@ impl Metrics {
             context_op_seconds,
             context_compactions,
             context_compact_tokens,
+            context_switch_compactions,
+            context_tokens_shed,
+            context_summary_fallback,
             policy_authorize,
             policy_authorize_seconds,
             policy_guard,
@@ -1475,6 +1508,24 @@ impl Metrics {
             .with_label_values(&["after"])
             .set(after);
     }
+    /// Mode-aware compaction (adaptive-cognition 02): a switch reshape ran.
+    pub fn on_switch_compaction(&self, from: &str, to: &str) {
+        self.context_switch_compactions
+            .with_label_values(&[from, to])
+            .inc();
+    }
+    /// Tokens shed by a compaction, labelled by `trigger` (`budget`|`switch`).
+    pub fn on_tokens_shed(&self, trigger: &str, shed: f64) {
+        self.context_tokens_shed
+            .with_label_values(&[trigger])
+            .observe(shed);
+    }
+    /// A switch-compaction summary fell back (`kind` = `generic`|`drop`).
+    pub fn on_summary_fallback(&self, kind: &str) {
+        self.context_summary_fallback
+            .with_label_values(&[kind])
+            .inc();
+    }
 
     // --- policy instrumentation -------------------------------------------
 
@@ -1763,6 +1814,9 @@ mod tests {
         m.on_memory_error("append");
         m.on_context_op("assemble", 0.001);
         m.on_compaction(9000, 4000);
+        m.on_switch_compaction("implement", "review");
+        m.on_tokens_shed("switch", 5000.0);
+        m.on_summary_fallback("drop");
         m.on_authorize("auto-approve", "approved", 0.0001);
         m.on_search_query("tantivy", "literal", 0.002, 5);
         m.observe_reindex("tantivy", 0.5, 120);
@@ -1788,6 +1842,9 @@ mod tests {
             "agent_context_op_seconds",
             "agent_context_compactions_total",
             "agent_context_compact_tokens",
+            "agent_context_switch_compactions_total",
+            "agent_context_tokens_shed",
+            "agent_context_summary_fallback_total",
             "agent_policy_authorize_total",
             "agent_policy_authorize_seconds",
             "agent_search_query_seconds",

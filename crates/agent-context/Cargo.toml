@@ -10,11 +10,17 @@ default = ["context-sliding-window"]
 context-sliding-window = []
 # LLM-summarizing compaction (keeps head + recent tail, summarizes the middle).
 context-summarizing = []
+# Mode-aware compaction: reshape context through the destination mode's lens on a
+# task-mode switch (adaptive-cognition 02). Wraps the summarizer.
+context-mode-aware = ["context-summarizing"]
+# dhat-instrumented leak/allocation tests (tests/leak.rs).
+dhat-heap = ["dep:dhat"]
 
 [dependencies]
 agent-core.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
+dhat = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio.workspace = true
@@ -27,3 +33,14 @@ iai-callgrind.workspace = true
 [[bench]]
 name = "context"
 harness = false
+
+# Guards the switch-compaction partition (which turn goes where) — its hot path.
+[[bench]]
+name = "mode_aware"
+harness = false
+required-features = ["context-mode-aware"]
+
+[[test]]
+name = "leak"
+harness = true
+required-features = ["dhat-heap", "context-mode-aware"]

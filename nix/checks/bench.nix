@@ -47,6 +47,7 @@ craneLib.mkCargoDerivation (
       cargo bench -p agent-scheduler --bench next_fire
       cargo bench -p agent-core --bench registry
       cargo bench -p agent-context --bench context
+      cargo bench -p agent-context --features context-mode-aware --bench mode_aware
       cargo bench -p agent-mode --bench classify
       cargo bench -p agent-tokenizer --bench tokenize
     '';

@@ -1426,6 +1426,11 @@ impl Session<'_> {
         self.agent
             .metrics
             .on_mode_switch(sw.from.as_str(), sw.to.as_str(), sw.confidence as f64);
+        // Arm the context strategy to reshape on the next compact through the new
+        // mode's lens (adaptive-cognition 02). A no-op for strategies that don't
+        // implement it (sliding/summarizing) — the default trait method. The
+        // `context.compact` span (in `run_loop`) then nests under `mode.switch`.
+        self.agent.context.on_mode_switch(sw.from, sw.to);
         self.agent
             .record(
                 "mode_switch",

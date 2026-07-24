@@ -6,6 +6,7 @@ syntax = "proto3";
 package agent.v1;
 
 import "agent/v1/common.proto";
+import "agent/v1/mode.proto";
 
 message AssembleResponse {
   repeated Message messages = 1;
@@ -14,10 +15,26 @@ message AssembleResponse {
 message CompactRequest {
   WorkingSet working = 1;
   TokenBudget budget = 2;
+  // Mode-aware compaction (adaptive-cognition 02), additive. UNSPECIFIED (the
+  // default for an old client) ⇒ an ordinary budget-triggered compaction. A
+  // switch reshape is requested when `to_mode` is set and differs from `from_mode`.
+  TaskMode from_mode = 3;
+  TaskMode to_mode = 4;
+}
+
+// How a compaction behaved, for the caller's accounting. `action` mirrors
+// `agent_core::CompactAction`: "budget" | "switch" | "fallback-generic" |
+// "fallback-drop". A compaction never errors on a dead summarizer — it returns a
+// fallback result so the caller can see the degradation.
+message CompactStats {
+  uint32 kept_tokens = 1;
+  uint32 shed_tokens = 2;
+  string action = 3;
 }
 
 message CompactResponse {
   WorkingSet working = 1;
+  CompactStats stats = 2; // additive
 }
 
 // Named `ContextService` (not `Context`) to avoid colliding with

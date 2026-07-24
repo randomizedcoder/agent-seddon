@@ -1,7 +1,15 @@
 # 02 — Mode-aware compaction
 
-Status: **design / pre-implementation.** Consumes the `ModeSwitch` event from
-[`01`](01-mode.md); pulls fresh context from [`03`](03-memory.md).
+Status: **implemented** (`ModeAwareWindow`, `context-mode-aware`) — see
+[`STATUS.md`](STATUS.md). Consumes the `ModeSwitch` event from
+[`01`](01-mode.md); the "pull in fresh" column lands with [`03`](03-memory.md).
+
+> Implementation note: the seam is threaded via two additive **default methods**
+> on `ContextStrategy` (`on_mode_switch` + `last_compact_action`), not the
+> separate-`ModeAware`-trait downcast this doc first sketched — a downcast can't
+> reach the inner strategy through the `MeteredContext`/`GrpcContext` decorator
+> chain, whereas a default method is forwarded by each decorator. The additive
+> `from_mode`/`to_mode` proto fields carry the switch to a remote strategy.
 
 ## Motivation
 

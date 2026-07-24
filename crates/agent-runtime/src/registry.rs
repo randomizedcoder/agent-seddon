@@ -527,6 +527,19 @@ pub fn register_builtins(r: &mut Registry) {
             .with_tokenizer(ctx.tokenizer().cloned(), ctx.cfg.provider.model.clone()),
         ) as Arc<dyn ContextStrategy>)
     });
+    // Mode-aware compaction (adaptive-cognition 02): summarizing between switches,
+    // a destination-lens reshape on one. The runtime arms it via `on_mode_switch`
+    // when the classifier (increment 01) decides a switch.
+    #[cfg(feature = "context-mode-aware")]
+    r.context("mode-aware-window", |ctx| {
+        Ok(Arc::new(
+            agent_context::ModeAwareWindow::new(
+                ctx.provider()?.clone(),
+                ctx.cfg.agent.keep_recent_tokens,
+            )
+            .with_tokenizer(ctx.tokenizer().cloned(), ctx.cfg.provider.model.clone()),
+        ) as Arc<dyn ContextStrategy>)
+    });
 
     // --- tokenizer seam (accurate counts + cost, parity spec 23) ---
     #[cfg(feature = "tokenizer")]

@@ -19,6 +19,7 @@ default = [
     "git",
     "context-sliding-window",
     "context-summarizing",
+    "context-mode-aware",
     "tokenizer",
     "memory-file",
     "mcp",
@@ -129,6 +130,7 @@ git = [
 ]
 context-sliding-window = ["agent-context/context-sliding-window"]
 context-summarizing = ["agent-context/context-summarizing"]
+context-mode-aware = ["agent-context/context-mode-aware", "context-summarizing"]
 # Tokenizer + cost seam: the approx backend, price table, accurate compaction
 # counts + USD/cache accounting (parity spec 23).
 tokenizer = ["dep:agent-tokenizer", "agent-tokenizer/tokenizer-approx"]

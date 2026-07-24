@@ -20,11 +20,12 @@ use iai_callgrind::{
 };
 
 // Constructing the shared registry (registers the metric families) — the
-// per-process startup cost of observability. Observed ~651k Ir with the full
-// 30-spec seam set. Like the encode bench below, this is linear in the number of
-// registered families and steps up as seams land; ~1.4x headroom.
+// per-process startup cost of observability. Observed ~909k Ir after
+// adaptive-cognition 02 added three `agent_context_*` switch-compaction families.
+// Like the encode bench below, this is linear in the number of registered
+// families and steps up as seams land; ~1.15x headroom.
 #[library_benchmark(config = LibraryBenchmarkConfig::default()
-    .tool(Callgrind::default().hard_limits([(EventKind::Ir, 900_000u64)])))]
+    .tool(Callgrind::default().hard_limits([(EventKind::Ir, 1_050_000u64)])))]
 fn new_registry() -> Metrics {
     black_box(Metrics::new())
 }

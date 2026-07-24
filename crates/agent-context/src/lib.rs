@@ -15,6 +15,13 @@ mod summarizing;
 #[cfg(feature = "context-summarizing")]
 pub use summarizing::SummarizingWindow;
 
+// Mode-aware compaction (adaptive-cognition 02) wraps the summarizer, so it always
+// implies `context-summarizing` (enforced by the feature declaration in Cargo.toml).
+#[cfg(feature = "context-mode-aware")]
+mod mode_aware;
+#[cfg(feature = "context-mode-aware")]
+pub use mode_aware::{bench_mode_partition, ModeAwareWindow};
+
 #[cfg(any(feature = "context-sliding-window", feature = "context-summarizing"))]
 use agent_core::{ContextInput, Message};
 
