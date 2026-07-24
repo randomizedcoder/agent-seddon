@@ -8,6 +8,7 @@
 
 mod analyzer;
 mod callgraph;
+mod churn;
 mod classifier;
 mod cochange;
 mod collector;
@@ -118,6 +119,9 @@ pub fn render_facts_with(facts: &ReviewFacts, budget_bytes: usize) -> String {
     // partner this change left behind (the absent-partner signal).
     render_cochange(&mut out, &facts.cochange);
 
+    // Churn & ownership — bus factor + churn trend per changed file (risk priors).
+    render_churn(&mut out, &facts.churn);
+
     // Static-analysis findings — higher-signal than raw hunks, so rendered *before*
     // the diffs. Per-tool run summary, then findings with changed-file hits first.
     render_analysis(&mut out, &facts.analysis);
@@ -188,6 +192,39 @@ fn render_cochange(out: &mut String, r: &agent_core::CoChangeReport) {
                 p.path, pct, p.co_occurrences, tag
             ));
         }
+    }
+}
+
+/// Render the churn/ownership section: per changed file, bus factor + churn trend,
+/// with single-owner / accelerating files foregrounded. No author identities.
+fn render_churn(out: &mut String, r: &agent_core::ChurnReport) {
+    if r.files.is_empty() {
+        return;
+    }
+    out.push_str(&format!(
+        "\nChurn & ownership (from {} commits):\n",
+        r.commits_scanned
+    ));
+    for f in &r.files {
+        let owner = if f.bus_factor <= 1 {
+            format!(
+                " — ⚠ single-owner ({}% by one author)",
+                (f.top_author_share * 100.0).round() as u32
+            )
+        } else {
+            String::new()
+        };
+        let churn = if f.churn_trend == "increasing" {
+            " — ⚠ churn increasing".to_string()
+        } else if f.churn_trend == "decreasing" {
+            " — churn decreasing".to_string()
+        } else {
+            String::new()
+        };
+        out.push_str(&format!(
+            "  {} — {} commit(s), bus factor {}, {} author(s){}{}\n",
+            f.path, f.commits, f.bus_factor, f.unique_authors, owner, churn
+        ));
     }
 }
 

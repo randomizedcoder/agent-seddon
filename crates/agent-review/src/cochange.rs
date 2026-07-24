@@ -80,10 +80,12 @@ impl FactCollector for CoChangeCollector {
             return CollectorOutput::skipped("no non-generated files changed");
         }
 
-        // The shared, bounded history feed. Absent ⇒ skip fail-soft.
+        // The shared, bounded history feed, mined from `base` (PRIOR history —
+        // excludes the change under review, so it can't reinforce its own signal).
+        // Absent ⇒ skip fail-soft.
         let history = ctx
             .repo
-            .log_touched(&ctx.head, self.window.max(1))
+            .log_touched(&ctx.base, self.window.max(1))
             .await
             .unwrap_or_default();
         if history.is_empty() {

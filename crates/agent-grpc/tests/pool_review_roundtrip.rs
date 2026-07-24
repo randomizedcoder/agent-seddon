@@ -243,6 +243,19 @@ impl ReviewCollector for FakeReview {
                 }],
                 missing_partners: 1,
             },
+            churn: agent_core::ChurnReport {
+                commits_scanned: 500,
+                files: vec![agent_core::FileChurn {
+                    path: "main.go".into(),
+                    commits: 12,
+                    unique_authors: 1,
+                    bus_factor: 1,
+                    top_author_share: 0.92,
+                    churn_trend: "increasing".into(),
+                    churn_slope: 1.5,
+                    total_churn: 340,
+                }],
+            },
         })
     }
 }
@@ -337,6 +350,11 @@ async fn review_collect_roundtrips(#[case] transport: Transport) {
     assert_eq!(facts.cochange.entries[0].partners[0].path, "schema.go");
     assert!(!facts.cochange.entries[0].partners[0].in_diff);
     assert_eq!(facts.cochange.missing_partners, 1);
+    // Churn/ownership survives the wire round-trip (bus factor + trend).
+    assert_eq!(facts.churn.files.len(), 1);
+    assert_eq!(facts.churn.files[0].bus_factor, 1);
+    assert_eq!(facts.churn.files[0].churn_trend, "increasing");
+    assert_eq!(facts.churn.files[0].total_churn, 340);
 }
 
 /// A PR target survives the encode/decode round-trip through the wire string.

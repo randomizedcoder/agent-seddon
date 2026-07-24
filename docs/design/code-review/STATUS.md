@@ -69,6 +69,28 @@ are not separate increments — each increment lands its own slice of both.
 
 ## Change log
 
+- **2026-07-23** — **Churn & ownership / bus factor (Homer design input — 2nd
+  follow-on collector).** Reuses the [co-change](design-input-homer.md) history
+  reader (`RepoBackend::log_touched`) for a second risk prior: a `ChurnCollector`
+  computes, per changed file, its **bus factor** (Homer's `compute_bus_factor` — the
+  min authors whose commits cover 80 % of the file's changes; `1` ⇒ single-owner) and
+  its **churn trend** (Homer's `compute_churn_velocity` — the sign of the OLS slope of
+  monthly churn). Rendered as a **`Churn & ownership`** section foregrounding
+  single-owner (`⚠ single-owner`) and accelerating (`⚠ churn increasing`) files.
+  **No author identity is carried** — counts and shares only, so the fact never leaks
+  who wrote what (a rendered-context + hermetic-gate assertion enforces it). Both
+  history-mining collectors now correctly mine **prior** history from `base` (not
+  `head`), so the change under review can't skew its own ownership/coupling signal.
+  Default-on (`[review] churn = true`, `churn_window = 2000`), pure git-history,
+  fail-soft. Untrusted history contained (paths `confine`d, entries capped ≤40).
+  Metric `agent_review_churn_total{kind=files|single_owner}` via `ReviewEvent::Churn`.
+  Wire: additive `ReviewFileChurn`/`ReviewChurnReport` + `ReviewFacts` field 10
+  (round-trip tested; no baseline bump). Tests: 6 pure-`compute` unit cases (bus
+  factor single/shared, churn trend inc/dec, single-bucket-stable, `adversarial_`
+  path-escape + no-author-leak), a real-git `churn_e2e.rs` (author-controlled bus
+  factor end-to-end), and a hermetic `review-churn` gate (offline, git-only,
+  no-author-leak assertion). **Next (Homer design input):** salience/blast-radius
+  ranking over the call graph, then the reason-tagged risk-gate.
 - **2026-07-23** — **Historical co-change (Homer design input — first follow-on
   collector).** After a source read of the peer tool [Homer](design-input-homer.md),
   the unanimous top idea: mine commit history for files that habitually change

@@ -3,6 +3,7 @@
 
 use crate::analyzer::AnalyzerCollector;
 use crate::callgraph::CallGraphCollector;
+use crate::churn::ChurnCollector;
 use crate::cochange::CoChangeCollector;
 use crate::collector::{CollectCtx, CollectorOutput, FactCollector, FactFragment};
 use crate::repo_facts::RepoChangeCollector;
@@ -75,6 +76,11 @@ pub enum ReviewEvent {
     CoChange {
         entries: u32,
         missing: u32,
+    },
+    /// Churn accounting: files with a churn entry + single-owner (bus factor ≤1) count.
+    Churn {
+        files: u32,
+        single_owner: u32,
     },
 }
 
@@ -183,6 +189,14 @@ impl ReviewOrchestrator {
     #[must_use]
     pub fn with_cochange(mut self, window: usize) -> Self {
         self.collectors.push(Box::new(CoChangeCollector { window }));
+        self
+    }
+
+    /// Add the churn/ownership collector (bus factor + churn trend per changed file).
+    /// `window` is the history depth in commits (clamped ≥ 1).
+    #[must_use]
+    pub fn with_churn(mut self, window: usize) -> Self {
+        self.collectors.push(Box::new(ChurnCollector { window }));
         self
     }
 
@@ -363,6 +377,14 @@ impl ReviewCollector for ReviewOrchestrator {
                         missing: report.missing_partners,
                     });
                     facts.cochange = report;
+                }
+                Some(FactFragment::Churn { report }) => {
+                    self.emit(ReviewEvent::Churn {
+                        files: report.files.len() as u32,
+                        single_owner: report.files.iter().filter(|f| f.bus_factor <= 1).count()
+                            as u32,
+                    });
+                    facts.churn = report;
                 }
                 None => {}
             }

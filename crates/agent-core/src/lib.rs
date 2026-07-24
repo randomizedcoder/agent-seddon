@@ -3833,6 +3833,38 @@ pub struct CoChangeReport {
     pub missing_partners: u32,
 }
 
+/// Ownership + churn risk for one changed file, mined from history (Homer design
+/// input). `bus_factor` is the minimum number of authors whose commits cover 80%
+/// of the file's changes (`1` ⇒ single-owner — scrutinise); `churn_trend` is the
+/// sign of the OLS slope of monthly churn (`increasing` ⇒ a fragile, accelerating
+/// area). No author identities are carried — counts and shares only, so the fact
+/// never leaks who wrote what.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FileChurn {
+    /// Repo-relative path (confined).
+    pub path: String,
+    /// Commits touching this file within the mined window.
+    pub commits: u32,
+    pub unique_authors: u32,
+    pub bus_factor: u32,
+    /// Fraction of the file's commits by its single top author, `0.0..=1.0`.
+    pub top_author_share: f64,
+    /// `increasing` | `decreasing` | `stable` (OLS slope of monthly churn).
+    pub churn_trend: String,
+    pub churn_slope: f64,
+    /// Total added+deleted lines across the window.
+    pub total_churn: u64,
+}
+
+/// The churn/ownership contribution to a review (Homer design input): per changed
+/// file, its bus factor + churn trend. Empty when off / no history. Reuses the
+/// same `log_touched` history feed as the co-change collector.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ChurnReport {
+    pub commits_scanned: u32,
+    pub files: Vec<FileChurn>,
+}
+
 /// The grounded fact bundle a reviewer reasons over. Everything here is a hard
 /// fact from a tool — except `summaries`, the one soft (model-generated) field,
 /// which is clearly labelled and never overwrites a fact. Later increments add
@@ -3861,6 +3893,10 @@ pub struct ReviewFacts {
     /// history / no partners cleared the thresholds.
     #[serde(default)]
     pub cochange: CoChangeReport,
+    /// Per-file churn + ownership / bus factor (Homer design input). Empty when
+    /// off / no history.
+    #[serde(default)]
+    pub churn: ChurnReport,
 }
 
 /// A flattened, analytics-shaped record of one review run — the telemetry-local

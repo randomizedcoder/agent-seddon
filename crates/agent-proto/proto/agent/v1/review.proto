@@ -244,6 +244,22 @@ message ReviewCoChangeReport {
   uint32 missing_partners = 4;
 }
 
+message ReviewFileChurn {
+  string path = 1;
+  uint32 commits = 2;
+  uint32 unique_authors = 3;
+  uint32 bus_factor = 4;
+  double top_author_share = 5;
+  string churn_trend = 6;
+  double churn_slope = 7;
+  uint64 total_churn = 8;
+}
+
+message ReviewChurnReport {
+  uint32 commits_scanned = 1;
+  repeated ReviewFileChurn files = 2;
+}
+
 message ReviewFacts {
   ReviewMeta meta = 1;
   ReviewChangeSet change = 2;
@@ -254,4 +270,5 @@ message ReviewFacts {
   ReviewStyleFacts style = 7;
   ReviewSummaryReport summaries = 8;
   ReviewCoChangeReport cochange = 9;
+  ReviewChurnReport churn = 10;
 }

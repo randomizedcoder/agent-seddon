@@ -368,6 +368,13 @@ pub struct ReviewCfg {
     /// History depth (commits) the co-change collector mines. Clamped ≥ 1.
     #[serde(default = "default_cochange_window")]
     pub cochange_window: usize,
+    /// Run the churn/ownership collector (bus factor + churn trend per changed file).
+    /// On by default; pure git-history mining, deadline-bounded, fail-soft.
+    #[serde(default = "default_true")]
+    pub churn: bool,
+    /// History depth (commits) the churn collector mines. Clamped ≥ 1.
+    #[serde(default = "default_churn_window")]
+    pub churn_window: usize,
 }
 
 impl Default for ReviewCfg {
@@ -388,6 +395,8 @@ impl Default for ReviewCfg {
             summaries: true,
             cochange: true,
             cochange_window: default_cochange_window(),
+            churn: true,
+            churn_window: default_churn_window(),
         }
     }
 }
@@ -411,6 +420,9 @@ fn default_style_commit_sample() -> usize {
     50
 }
 fn default_cochange_window() -> usize {
+    2000
+}
+fn default_churn_window() -> usize {
     2000
 }
 
