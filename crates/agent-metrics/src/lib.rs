@@ -92,6 +92,7 @@ pub struct Metrics {
     review_style_conformance: IntCounterVec,
     review_summaries: IntCounterVec,
     review_cochange: IntCounterVec,
+    review_churn: IntCounterVec,
     review_runs: IntCounterVec,
     review_total_duration: HistogramVec,
     review_parallelism: Histogram,
@@ -417,6 +418,14 @@ impl Metrics {
             Opts::new(
                 "agent_review_cochange_total",
                 "Co-change signal: surfaced entries and partners absent from the diff",
+            ),
+            &["kind"],
+        )
+        .unwrap();
+        let review_churn = IntCounterVec::new(
+            Opts::new(
+                "agent_review_churn_total",
+                "Churn/ownership signal: files with an entry and single-owner (bus≤1) files",
             ),
             &["kind"],
         )
@@ -854,6 +863,7 @@ impl Metrics {
             Box::new(review_style_conformance.clone()),
             Box::new(review_summaries.clone()),
             Box::new(review_cochange.clone()),
+            Box::new(review_churn.clone()),
             Box::new(review_runs.clone()),
             Box::new(review_total_duration.clone()),
             Box::new(review_parallelism.clone()),
@@ -955,6 +965,7 @@ impl Metrics {
             review_style_conformance,
             review_summaries,
             review_cochange,
+            review_churn,
             review_runs,
             review_total_duration,
             review_parallelism,
@@ -1187,6 +1198,15 @@ impl Metrics {
         self.review_cochange
             .with_label_values(&["missing_partners"])
             .inc_by(missing);
+    }
+    /// Review: churn/ownership signal — files with an entry and single-owner files.
+    pub fn on_review_churn(&self, files: u64, single_owner: u64) {
+        self.review_churn
+            .with_label_values(&["files"])
+            .inc_by(files);
+        self.review_churn
+            .with_label_values(&["single_owner"])
+            .inc_by(single_owner);
     }
     /// Review: one completed run — its count (by project/mode/outcome) + wall-clock.
     pub fn on_review_run(&self, project: &str, mode_via: &str, outcome: &str, seconds: f64) {

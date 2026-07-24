@@ -683,6 +683,10 @@ pub async fn build_agent_with(
                 if cfg.review.cochange {
                     orch = orch.with_cochange(cfg.review.cochange_window);
                 }
+                // Churn / ownership (bus factor + churn trend) — also git-history.
+                if cfg.review.churn {
+                    orch = orch.with_churn(cfg.review.churn_window);
+                }
                 Some(Arc::new(orch) as Arc<dyn agent_core::ReviewCollector>)
             }
             // A remote fact-collection host (CPU-heavy, worth distributing).
