@@ -2990,6 +2990,63 @@ impl From<pb::ReviewSummaryReport> for agent_core::SummaryReport {
     }
 }
 
+impl From<agent_core::CoChangePartner> for pb::ReviewCoChangePartner {
+    fn from(p: agent_core::CoChangePartner) -> Self {
+        pb::ReviewCoChangePartner {
+            path: p.path,
+            confidence: p.confidence,
+            co_occurrences: p.co_occurrences,
+            in_diff: p.in_diff,
+        }
+    }
+}
+impl From<pb::ReviewCoChangePartner> for agent_core::CoChangePartner {
+    fn from(p: pb::ReviewCoChangePartner) -> Self {
+        agent_core::CoChangePartner {
+            path: p.path,
+            confidence: p.confidence,
+            co_occurrences: p.co_occurrences,
+            in_diff: p.in_diff,
+        }
+    }
+}
+impl From<agent_core::CoChangeEntry> for pb::ReviewCoChangeEntry {
+    fn from(e: agent_core::CoChangeEntry) -> Self {
+        pb::ReviewCoChangeEntry {
+            path: e.path,
+            partners: e.partners.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+impl From<pb::ReviewCoChangeEntry> for agent_core::CoChangeEntry {
+    fn from(e: pb::ReviewCoChangeEntry) -> Self {
+        agent_core::CoChangeEntry {
+            path: e.path,
+            partners: e.partners.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+impl From<agent_core::CoChangeReport> for pb::ReviewCoChangeReport {
+    fn from(r: agent_core::CoChangeReport) -> Self {
+        pb::ReviewCoChangeReport {
+            commits_scanned: r.commits_scanned,
+            truncated: r.truncated,
+            entries: r.entries.into_iter().map(Into::into).collect(),
+            missing_partners: r.missing_partners,
+        }
+    }
+}
+impl From<pb::ReviewCoChangeReport> for agent_core::CoChangeReport {
+    fn from(r: pb::ReviewCoChangeReport) -> Self {
+        agent_core::CoChangeReport {
+            commits_scanned: r.commits_scanned,
+            truncated: r.truncated,
+            entries: r.entries.into_iter().map(Into::into).collect(),
+            missing_partners: r.missing_partners,
+        }
+    }
+}
+
 impl From<agent_core::ReviewFacts> for pb::ReviewFacts {
     fn from(f: agent_core::ReviewFacts) -> Self {
         pb::ReviewFacts {
@@ -3001,6 +3058,7 @@ impl From<agent_core::ReviewFacts> for pb::ReviewFacts {
             callgraph: Some(f.callgraph.into()),
             style: Some(f.style.into()),
             summaries: Some(f.summaries.into()),
+            cochange: Some(f.cochange.into()),
         }
     }
 }
@@ -3015,6 +3073,7 @@ impl From<pb::ReviewFacts> for agent_core::ReviewFacts {
             callgraph: f.callgraph.map(Into::into).unwrap_or_default(),
             style: f.style.map(Into::into).unwrap_or_default(),
             summaries: f.summaries.map(Into::into).unwrap_or_default(),
+            cochange: f.cochange.map(Into::into).unwrap_or_default(),
         }
     }
 }

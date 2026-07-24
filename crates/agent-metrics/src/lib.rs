@@ -91,6 +91,7 @@ pub struct Metrics {
     review_callgraph_edges: Histogram,
     review_style_conformance: IntCounterVec,
     review_summaries: IntCounterVec,
+    review_cochange: IntCounterVec,
     review_runs: IntCounterVec,
     review_total_duration: HistogramVec,
     review_parallelism: Histogram,
@@ -410,6 +411,14 @@ impl Metrics {
                 "Cheap-LLM function summaries, by outcome (produced/failed/omitted)",
             ),
             &["outcome"],
+        )
+        .unwrap();
+        let review_cochange = IntCounterVec::new(
+            Opts::new(
+                "agent_review_cochange_total",
+                "Co-change signal: surfaced entries and partners absent from the diff",
+            ),
+            &["kind"],
         )
         .unwrap();
         let review_runs = IntCounterVec::new(
@@ -844,6 +853,7 @@ impl Metrics {
             Box::new(review_callgraph_edges.clone()),
             Box::new(review_style_conformance.clone()),
             Box::new(review_summaries.clone()),
+            Box::new(review_cochange.clone()),
             Box::new(review_runs.clone()),
             Box::new(review_total_duration.clone()),
             Box::new(review_parallelism.clone()),
@@ -944,6 +954,7 @@ impl Metrics {
             review_callgraph_edges,
             review_style_conformance,
             review_summaries,
+            review_cochange,
             review_runs,
             review_total_duration,
             review_parallelism,
@@ -1167,6 +1178,15 @@ impl Metrics {
         self.review_summaries
             .with_label_values(&["omitted"])
             .inc_by(omitted);
+    }
+    /// Review: co-change signal — entries surfaced and usual partners absent.
+    pub fn on_review_cochange(&self, entries: u64, missing: u64) {
+        self.review_cochange
+            .with_label_values(&["entries"])
+            .inc_by(entries);
+        self.review_cochange
+            .with_label_values(&["missing_partners"])
+            .inc_by(missing);
     }
     /// Review: one completed run — its count (by project/mode/outcome) + wall-clock.
     pub fn on_review_run(&self, project: &str, mode_via: &str, outcome: &str, seconds: f64) {

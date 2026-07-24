@@ -9,6 +9,7 @@
 mod analyzer;
 mod callgraph;
 mod classifier;
+mod cochange;
 mod collector;
 mod orchestrator;
 mod repo_facts;
@@ -113,6 +114,10 @@ pub fn render_facts_with(facts: &ReviewFacts, budget_bytes: usize) -> String {
     // Call graph — the blast radius of the changed functions (who calls them).
     render_callgraph(&mut out, &facts.callgraph);
 
+    // Historical co-change — which files usually move together, and which expected
+    // partner this change left behind (the absent-partner signal).
+    render_cochange(&mut out, &facts.cochange);
+
     // Static-analysis findings — higher-signal than raw hunks, so rendered *before*
     // the diffs. Per-tool run summary, then findings with changed-file hits first.
     render_analysis(&mut out, &facts.analysis);
@@ -147,6 +152,43 @@ pub fn render_facts_with(facts: &ReviewFacts, budget_bytes: usize) -> String {
         }
     }
     out
+}
+
+/// Render the historical co-change section: for each changed file, the files that
+/// usually move with it, **absent partners foregrounded** (the signal). Nothing is
+/// emitted if no file had partners clear the thresholds.
+fn render_cochange(out: &mut String, r: &agent_core::CoChangeReport) {
+    if r.entries.is_empty() {
+        return;
+    }
+    let window = if r.truncated {
+        format!("last {} commits", r.commits_scanned)
+    } else {
+        format!("{} commits", r.commits_scanned)
+    };
+    out.push_str(&format!("\nHistorical co-change (from {window}"));
+    if r.missing_partners > 0 {
+        out.push_str(&format!(
+            "; {} usual partner(s) absent from this diff",
+            r.missing_partners
+        ));
+    }
+    out.push_str("):\n");
+    for e in &r.entries {
+        out.push_str(&format!("  {} usually changes with:\n", e.path));
+        for p in &e.partners {
+            let pct = (p.confidence * 100.0).round() as u32;
+            let tag = if p.in_diff {
+                "in diff"
+            } else {
+                "NOT in this diff"
+            };
+            out.push_str(&format!(
+                "    {} ({}%, {}×) — {}\n",
+                p.path, pct, p.co_occurrences, tag
+            ));
+        }
+    }
 }
 
 /// Render the changed-signature section, grouped by file: `~` modified (before →

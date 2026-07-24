@@ -69,6 +69,32 @@ are not separate increments — each increment lands its own slice of both.
 
 ## Change log
 
+- **2026-07-23** — **Historical co-change (Homer design input — first follow-on
+  collector).** After a source read of the peer tool [Homer](design-input-homer.md),
+  the unanimous top idea: mine commit history for files that habitually change
+  together and flag the partners **absent** from the diff — a deterministic,
+  diff-grounded fact an LLM reviewer can't infer from a diff-local bundle. A new
+  **shared, bounded history reader** `RepoBackend::log_touched` (one `git log
+  --numstat` pass → `Vec<CommitTouch>`, capped, `core.quotePath=false` so paths
+  match the `-z` diff; default `Ok(vec![])` so non-git/gRPC backends skip fail-soft)
+  feeds a `CoChangeCollector`: it scopes a co-occurrence matrix to the changed files,
+  scores each partner by Homer's actual metric — association-rule confidence
+  `co_occ / min(commits_self, commits_partner)` (a conditional probability, **not**
+  Jaccard, despite Homer's own docs) — keeps partners clearing `MIN_COOCCUR=3` +
+  `MIN_CONFIDENCE=0.3`, top-6 per file, capped at 40 entries, and tags each
+  `in_diff`. Rendered as a **`Historical co-change`** section with absent partners
+  foregrounded (`… — NOT in this diff`). Default-on (`[review] cochange = true`,
+  `cochange_window = 2000`), pure git-history mining (no toolchain), deadline-bounded,
+  fail-soft (no history ⇒ recorded skip). Untrusted history contained: partner paths
+  `confine`d (escapers dropped), bounded, capped; a bulk commit clamped to 500 files.
+  Metric `agent_review_cochange_total{kind=entries|missing_partners}` via
+  `ReviewEvent::CoChange`. Wire: additive `ReviewCoChangePartner`/`…Entry`/`…Report`
+  + `ReviewFacts` field 9 (round-trip tested; no baseline bump). Tests: 8 pure-`compute`
+  unit cases (incl. `adversarial_` path-escape + hostile/huge path bounding + flood
+  cap), a real-git `cochange_e2e.rs` (absent partner surfaces end-to-end; no-history
+  skip), and a hermetic `review-cochange` gate (offline, git-only). **Deferred:** the
+  churn/bus-factor + salience collectors and the risk-gate that the same design input
+  ranks next (increments 2–4 there).
 - **2026-07-23** — **Grounded context & recording (increment 10, component 09 —
   completes the 9-component build order).** Two of the three destinations ship,
   mirroring the verifier's recording exactly. **(a)** `render_facts` gains a **`Not

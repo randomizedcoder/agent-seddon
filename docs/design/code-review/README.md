@@ -10,13 +10,16 @@ original design; where the shipped code refined a detail, `STATUS.md` is authori
 **Shipped (merged):** `agent --review <PR#|branch|.|base..head>` produces a
 grounded, **compacted** context — repo/change/git-state, the range's commit intent,
 budget-bounded diff hunks, **static-analysis findings** (golangci-lint + clippy),
-**changed function signatures**, the **Go call graph / blast radius**, a
-**code-style fingerprint**, and **cheap-LLM function summaries** (the one soft
-layer, fanned over the pool) — with any collector that couldn't run stated as an
-explicit gap, and every run **recorded** to ClickHouse (`agent_reviews` +
-`agent_review_collectors`) / `episodic.jsonl`. Driven by a health-checked LLM pool,
-with two gRPC services and a dual-judge (assistant + GLM-5.2) evaluation harness that
-documents the base rate. **All 9 components shipped**; remaining work is deferred
+**changed function signatures**, the **Go call graph / blast radius**, **historical
+co-change** (which files usually move together, and which expected partner this
+change left behind), a **code-style fingerprint**, and **cheap-LLM function
+summaries** (the one soft layer, fanned over the pool) — with any collector that
+couldn't run stated as an explicit gap, and every run **recorded** to ClickHouse
+(`agent_reviews` + `agent_review_collectors`) / `episodic.jsonl`. Driven by a
+health-checked LLM pool, with two gRPC services and a dual-judge (assistant +
+GLM-5.2) evaluation harness that documents the base rate. **All 9 components
+shipped**, plus follow-on collectors mined from peer tools (see
+[`design-input-homer.md`](design-input-homer.md)); remaining work is deferred
 refinements (precise `x/tools` call-graph, dedicated `--serve-*` services, git-state
 memories, test-execution results).
 

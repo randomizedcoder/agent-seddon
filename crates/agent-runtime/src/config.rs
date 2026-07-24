@@ -360,6 +360,14 @@ pub struct ReviewCfg {
     /// fail-soft when no pool / no healthy member is configured.
     #[serde(default = "default_true")]
     pub summaries: bool,
+    /// Run the co-change collector (historical coupling / missing-partner signal).
+    /// On by default; pure git-history mining, deadline-bounded, fail-soft when the
+    /// backend forwards no history.
+    #[serde(default = "default_true")]
+    pub cochange: bool,
+    /// History depth (commits) the co-change collector mines. Clamped ≥ 1.
+    #[serde(default = "default_cochange_window")]
+    pub cochange_window: usize,
 }
 
 impl Default for ReviewCfg {
@@ -378,6 +386,8 @@ impl Default for ReviewCfg {
             style: true,
             style_commit_sample: default_style_commit_sample(),
             summaries: true,
+            cochange: true,
+            cochange_window: default_cochange_window(),
         }
     }
 }
@@ -399,6 +409,9 @@ fn default_callgraph_timeout() -> u64 {
 }
 fn default_style_commit_sample() -> usize {
     50
+}
+fn default_cochange_window() -> usize {
+    2000
 }
 
 /// Live web search (the `WebSearch` seam, parity spec 12). `backends` lists the

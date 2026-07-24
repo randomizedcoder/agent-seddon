@@ -15,8 +15,8 @@
 
 #[cfg(feature = "git")]
 use agent_core::{
-    BlobContent, Checkpoint, CommitInfo, DiffResult, GrepHit, Oid, RepoBackend, RepoStatus,
-    Revision, TreeEntry, WorktreeHandle, WorktreeSpec,
+    BlobContent, Checkpoint, CommitInfo, CommitTouch, DiffResult, GrepHit, Oid, RepoBackend,
+    RepoStatus, Revision, TreeEntry, WorktreeHandle, WorktreeSpec,
 };
 use agent_core::{
     ChunkStream, CompletionRequest, CompletionResponse, ContextInput, ContextStrategy, Decision,
@@ -989,6 +989,17 @@ impl RepoBackend for MeteredRepo {
     ) -> Result<Vec<CommitInfo>> {
         self.inner.log_range(base, head, limit).await
     }
+    async fn log_touched(&self, rev: &Revision, limit: usize) -> Result<Vec<CommitTouch>> {
+        // Delegate the default method so it is not swallowed by the decorator
+        // (else the co-change collector sees no history and skips).
+        let start = Instant::now();
+        let out = self
+            .inner
+            .log_touched(rev, limit)
+            .instrument(self.span("log_touched"))
+            .await;
+        self.record("log_touched", start, out)
+    }
     async fn status(&self) -> Result<RepoStatus> {
         let start = Instant::now();
         let out = self.inner.status().instrument(self.span("status")).await;
@@ -1930,6 +1941,9 @@ pub(crate) fn record_review_event(m: &Metrics, ev: agent_review::ReviewEvent) {
             // requested = produced + failed + omitted (all non-negative by construction).
             let failed = requested.saturating_sub(produced).saturating_sub(omitted);
             m.on_review_summaries(produced as u64, failed as u64, omitted as u64);
+        }
+        ReviewEvent::CoChange { entries, missing } => {
+            m.on_review_cochange(u64::from(entries), u64::from(missing));
         }
     }
 }
