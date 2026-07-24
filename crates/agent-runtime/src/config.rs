@@ -340,6 +340,13 @@ pub struct PoolCfg {
     /// Bounded wait budget (ms) for the `wait` saturation policy (clamped ≤ 30s).
     #[serde(default = "default_saturation_wait_ms")]
     pub saturation_wait_ms: u64,
+    /// Latency-EWMA smoothing factor in (0,1] for health grading (GPU pool 03).
+    #[serde(default = "default_latency_alpha")]
+    pub latency_alpha: f64,
+    /// Latency-EWMA (ms) above which a member is graded `degraded` and sorted after
+    /// the healthy ones; `0` disables grading (GPU pool 03).
+    #[serde(default)]
+    pub degraded_threshold_ms: u64,
     /// Max concurrent members in a fan-out.
     #[serde(default = "default_pool_fanout")]
     pub fanout: usize,
@@ -363,6 +370,8 @@ impl Default for PoolCfg {
             policy: default_pool_policy(),
             on_saturation: default_on_saturation(),
             saturation_wait_ms: default_saturation_wait_ms(),
+            latency_alpha: default_latency_alpha(),
+            degraded_threshold_ms: 0,
             fanout: default_pool_fanout(),
             probe_interval_secs: default_probe_interval(),
             probe_timeout_secs: default_probe_timeout(),
@@ -383,6 +392,9 @@ fn default_on_saturation() -> String {
 }
 fn default_saturation_wait_ms() -> u64 {
     500
+}
+fn default_latency_alpha() -> f64 {
+    0.3
 }
 fn default_probe_interval() -> u64 {
     15

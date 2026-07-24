@@ -23,9 +23,10 @@ use iai_callgrind::{
 // per-process startup cost of observability. Observed ~909k Ir after
 // adaptive-cognition 02 added three `agent_context_*` switch-compaction families.
 // Like the encode bench below, this is linear in the number of registered
-// families and steps up as seams land; ~1.15x headroom.
+// families and steps up as seams land. Observed ~1.06M Ir after the gpu-pool
+// load-balancing + capacity + graded-health families; ~1.08x headroom.
 #[library_benchmark(config = LibraryBenchmarkConfig::default()
-    .tool(Callgrind::default().hard_limits([(EventKind::Ir, 1_050_000u64)])))]
+    .tool(Callgrind::default().hard_limits([(EventKind::Ir, 1_150_000u64)])))]
 fn new_registry() -> Metrics {
     black_box(Metrics::new())
 }
@@ -37,9 +38,10 @@ fn new_registry() -> Metrics {
 // route decisions, hooks, forge, scheduled runs, and pty). Observed ~1.745M Ir
 // after adaptive-cognition added the context switch-compaction + dimensional-memory
 // families. Encoding is linear in the number of registered families, so this
-// ceiling steps up as seams land rather than staying fixed; ~1.06x headroom.
+// ceiling steps up as seams land rather than staying fixed. Observed ~1.89M Ir
+// after the gpu-pool families; ~1.06x headroom.
 #[library_benchmark(config = LibraryBenchmarkConfig::default()
-    .tool(Callgrind::default().hard_limits([(EventKind::Ir, 1_850_000u64)])))]
+    .tool(Callgrind::default().hard_limits([(EventKind::Ir, 2_000_000u64)])))]
 fn record_and_encode() -> String {
     let m = Metrics::new();
     for _ in 0..100 {

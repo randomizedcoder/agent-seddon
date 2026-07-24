@@ -2378,6 +2378,26 @@ pub fn pool_tier_from_i32(v: i32) -> agent_core::PoolTier {
         .unwrap_or(agent_core::PoolTier::Light)
 }
 
+impl From<agent_core::PoolMemberState> for pb::PoolMemberState {
+    fn from(s: agent_core::PoolMemberState) -> Self {
+        match s {
+            agent_core::PoolMemberState::Healthy => pb::PoolMemberState::Healthy,
+            agent_core::PoolMemberState::Degraded => pb::PoolMemberState::Degraded,
+            agent_core::PoolMemberState::Dead => pb::PoolMemberState::Dead,
+        }
+    }
+}
+
+/// A garbled/unspecified state decodes to `Healthy` (an old server that doesn't
+/// report grading shouldn't have its members treated as degraded/dead).
+fn pool_member_state_from_i32(v: i32) -> agent_core::PoolMemberState {
+    match pb::PoolMemberState::try_from(v) {
+        Ok(pb::PoolMemberState::Degraded) => agent_core::PoolMemberState::Degraded,
+        Ok(pb::PoolMemberState::Dead) => agent_core::PoolMemberState::Dead,
+        _ => agent_core::PoolMemberState::Healthy,
+    }
+}
+
 impl From<agent_core::PoolMemberHealth> for pb::PoolMemberHealth {
     fn from(h: agent_core::PoolMemberHealth) -> Self {
         pb::PoolMemberHealth {
@@ -2390,6 +2410,8 @@ impl From<agent_core::PoolMemberHealth> for pb::PoolMemberHealth {
             weight: h.weight,
             max_concurrency: h.max_concurrency,
             saturated: h.saturated,
+            state: pb::PoolMemberState::from(h.state) as i32,
+            latency_ms_ewma: h.latency_ms_ewma,
         }
     }
 }
@@ -2411,6 +2433,8 @@ impl From<pb::PoolMemberHealth> for agent_core::PoolMemberHealth {
             },
             max_concurrency: h.max_concurrency,
             saturated: h.saturated,
+            state: pool_member_state_from_i32(h.state),
+            latency_ms_ewma: h.latency_ms_ewma,
         }
     }
 }

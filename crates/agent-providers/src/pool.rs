@@ -13,7 +13,7 @@ use crate::router::{is_capable, wall_clock_ms, Health};
 use crate::Candidate;
 use agent_core::{
     CompletionRequest, CompletionResponse, Error, HealthReport, LlmPool, Message, PoolMemberHealth,
-    PoolMemberResult, PoolTier, Result,
+    PoolMemberResult, PoolMemberState, PoolTier, Result,
 };
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -109,6 +109,12 @@ pub enum PoolEvent {
     /// A dispatch shed because every eligible member was at its concurrency cap
     /// (GPU pool 02).
     SaturationShed { mode: &'static str },
+    /// A member's smoothed latency + graded state changed (GPU pool 03).
+    MemberGraded {
+        member: String,
+        state: &'static str,
+        latency_ms_ewma: u32,
+    },
     /// One member was probed.
     Probe {
         member: String,
@@ -160,6 +166,9 @@ struct PoolMember {
     in_flight: AtomicUsize,
     /// Duration of the most recent probe (ms), for the health snapshot.
     last_probe_ms: AtomicU64,
+    /// Smoothed request+probe latency (ms, EWMA), `0` until the first sample — the
+    /// signal that grades a member `degraded` (GPU pool 03).
+    latency_ewma_ms: AtomicU64,
 }
 
 struct PoolInner {
@@ -172,6 +181,10 @@ struct PoolInner {
     saturation: Saturation,
     /// Bounded wait budget (ms) for the `wait` saturation policy; clamped.
     saturation_wait_ms: u64,
+    /// EWMA smoothing factor in (0,1] for latency grading (GPU pool 03).
+    latency_alpha: f64,
+    /// Latency-EWMA (ms) above which a member is `degraded`; `0` disables grading.
+    degraded_threshold_ms: u64,
     failure_threshold: usize,
     cooldown_ms: u64,
     fanout: usize,
@@ -229,6 +242,59 @@ impl PoolInner {
                 && !m.health.is_open(now, self.cooldown_ms)
                 && !self.has_capacity(m)
         })
+    }
+
+    /// Fold a latency `sample_ms` into a member's EWMA (GPU pool 03). The first
+    /// sample seeds it; thereafter `ewma = α·sample + (1-α)·ewma`. Saturating +
+    /// bounded, so a hostile `u64::MAX` sample can't overflow the store.
+    fn record_latency(&self, m: &PoolMember, sample_ms: u64) {
+        let sample = sample_ms.min(u32::MAX as u64);
+        let cur = m.latency_ewma_ms.load(Ordering::Acquire);
+        let next = if cur == 0 {
+            sample
+        } else {
+            let a = self.latency_alpha;
+            ((a * sample as f64) + ((1.0 - a) * cur as f64)) as u64
+        };
+        m.latency_ewma_ms
+            .store(next.min(u32::MAX as u64), Ordering::Release);
+    }
+
+    /// A member's grade for ordering (GPU pool 03): `0` healthy, `1` degraded
+    /// (alive but its latency EWMA is over the threshold). Dead members are already
+    /// filtered out by `eligible`. `degraded_threshold_ms == 0` disables grading.
+    fn grade(&self, i: usize) -> u8 {
+        if self.degraded_threshold_ms == 0 {
+            return 0;
+        }
+        let ewma = self.members[i].latency_ewma_ms.load(Ordering::Acquire);
+        u8::from(ewma > self.degraded_threshold_ms)
+    }
+
+    /// The member's current graded state for the health snapshot.
+    fn member_state_grade(&self, m: &PoolMember, alive: bool) -> PoolMemberState {
+        if !alive {
+            PoolMemberState::Dead
+        } else if self.degraded_threshold_ms > 0
+            && m.latency_ewma_ms.load(Ordering::Acquire) > self.degraded_threshold_ms
+        {
+            PoolMemberState::Degraded
+        } else {
+            PoolMemberState::Healthy
+        }
+    }
+
+    /// A `MemberGraded` event carrying the member's smoothed latency + state.
+    fn member_graded(&self, m: &PoolMember) -> PoolEvent {
+        let alive = !m.health.is_open((self.now_ms)(), self.cooldown_ms);
+        PoolEvent::MemberGraded {
+            member: m.candidate.name.clone(),
+            state: self.member_state_grade(m, alive).as_str(),
+            latency_ms_ewma: m
+                .latency_ewma_ms
+                .load(Ordering::Acquire)
+                .min(u32::MAX as u64) as u32,
+        }
     }
 
     /// A `MemberState` event carrying the member's live load + saturation.
@@ -318,6 +384,12 @@ impl PoolInner {
                 });
             }
         }
+        // GPU pool 03: prefer healthy over degraded (alive-but-slow) members. A
+        // *stable* sort by grade preserves the policy order within each grade, so
+        // this composes with every policy uniformly. Dead members are already gone.
+        if self.degraded_threshold_ms > 0 {
+            ids.sort_by_key(|&i| self.grade(i));
+        }
     }
 
     /// Run one member's `complete`, timed and breaker-updated. Fail-soft. The
@@ -349,6 +421,9 @@ impl PoolInner {
             ok: response.is_some(),
             duration_ms,
         });
+        // Fold this call's latency into the EWMA and report the new grade (03).
+        self.record_latency(m, duration_ms as u64);
+        self.emit(self.member_graded(m));
         // Release the in-flight slot and report the settled count for the gauge.
         drop(_guard);
         self.emit(self.member_state(m));
@@ -383,6 +458,9 @@ impl PoolInner {
                 alive,
                 duration_ms,
             });
+            // A probe is also a latency sample (03) — fold it in + report the grade.
+            self.record_latency(m, duration_ms as u64);
+            self.emit(self.member_graded(m));
         });
         futures_util::future::join_all(futures).await;
     }
@@ -422,6 +500,7 @@ impl PoolProvider {
                 health: Health::new(),
                 in_flight: AtomicUsize::new(0),
                 last_probe_ms: AtomicU64::new(0),
+                latency_ewma_ms: AtomicU64::new(0),
             })
             .collect();
         Ok(Self {
@@ -432,6 +511,8 @@ impl PoolProvider {
                 rr_cursor: AtomicUsize::new(0),
                 saturation: Saturation::default(),
                 saturation_wait_ms: 0,
+                latency_alpha: 0.3,
+                degraded_threshold_ms: 0,
                 failure_threshold: 3,
                 cooldown_ms: 30_000,
                 fanout: 3,
@@ -476,11 +557,33 @@ impl PoolProvider {
         self
     }
 
+    /// Enable latency-graded health (GPU pool 03): the EWMA smoothing factor
+    /// (clamped to (0,1]) and the ms threshold above which an alive member is
+    /// `degraded` and sorted after the healthy ones. A `0` threshold disables it.
+    pub fn with_health_grading(mut self, alpha: f64, degraded_threshold_ms: u64) -> Self {
+        let i = self.inner_mut();
+        i.latency_alpha = if alpha.is_finite() && alpha > 0.0 {
+            alpha.min(1.0)
+        } else {
+            0.3
+        };
+        i.degraded_threshold_ms = degraded_threshold_ms;
+        self
+    }
+
     /// Seed a member's in-flight count (for benches/tests of the selection order).
     #[doc(hidden)]
     pub fn bench_set_in_flight(&self, i: usize, n: usize) {
         if let Some(m) = self.inner.members.get(i) {
             m.in_flight.store(n, Ordering::SeqCst);
+        }
+    }
+
+    /// Seed a member's latency EWMA (for tests/benches of the graded ordering).
+    #[doc(hidden)]
+    pub fn bench_set_latency(&self, i: usize, ms: u64) {
+        if let Some(m) = self.inner.members.get(i) {
+            m.latency_ewma_ms.store(ms, Ordering::SeqCst);
         }
     }
 
@@ -535,16 +638,25 @@ impl LlmPool for PoolProvider {
             .inner
             .members
             .iter()
-            .map(|m| PoolMemberHealth {
-                name: m.candidate.name.clone(),
-                tier: m.tier,
-                alive: !m.health.is_open(now, self.inner.cooldown_ms),
-                consecutive_failures: m.health.failures().min(u32::MAX as usize) as u32,
-                last_probe_ms: m.last_probe_ms.load(Ordering::SeqCst).min(u32::MAX as u64) as u32,
-                in_flight: m.in_flight.load(Ordering::Acquire).min(u32::MAX as usize) as u32,
-                weight: m.weight,
-                max_concurrency: m.max_concurrency.min(u32::MAX as usize) as u32,
-                saturated: !self.inner.has_capacity(m),
+            .map(|m| {
+                let alive = !m.health.is_open(now, self.inner.cooldown_ms);
+                PoolMemberHealth {
+                    name: m.candidate.name.clone(),
+                    tier: m.tier,
+                    alive,
+                    consecutive_failures: m.health.failures().min(u32::MAX as usize) as u32,
+                    last_probe_ms: m.last_probe_ms.load(Ordering::SeqCst).min(u32::MAX as u64)
+                        as u32,
+                    in_flight: m.in_flight.load(Ordering::Acquire).min(u32::MAX as usize) as u32,
+                    weight: m.weight,
+                    max_concurrency: m.max_concurrency.min(u32::MAX as usize) as u32,
+                    saturated: !self.inner.has_capacity(m),
+                    state: self.inner.member_state_grade(m, alive),
+                    latency_ms_ewma: m
+                        .latency_ewma_ms
+                        .load(Ordering::Acquire)
+                        .min(u32::MAX as u64) as u32,
+                }
             })
             .collect();
         HealthReport { members }
@@ -859,6 +971,7 @@ mod tests {
                     format!("state:{member}:{in_flight}")
                 }
                 PoolEvent::SaturationShed { mode } => format!("shed:{mode}"),
+                PoolEvent::MemberGraded { member, state, .. } => format!("grade:{member}:{state}"),
                 PoolEvent::Probe { member, .. } => format!("probe:{member}"),
             });
         }));
@@ -1103,5 +1216,93 @@ mod tests {
         let h = p.health().await;
         assert_eq!(h.members[0].max_concurrency, 1);
         assert!(h.members[0].saturated, "at cap → saturated");
+    }
+
+    // --- graded health / latency EWMA (GPU pool 03) ------------------------
+
+    fn graded_pool(threshold_ms: u64, names: &[&str]) -> PoolProvider {
+        let specs = names
+            .iter()
+            .map(|n| ok_member(n, PoolTier::Light))
+            .collect();
+        PoolProvider::new("t", specs)
+            .expect("pool")
+            .with_policy(PoolPolicy::LeastLoaded)
+            .with_health_grading(0.3, threshold_ms)
+    }
+
+    /// positive: a healthy (fast) member is preferred over a degraded (slow) one,
+    /// even when least-loaded would otherwise pick the slow one.
+    #[test]
+    fn positive_healthy_sorts_before_degraded() {
+        let p = graded_pool(1_000, &["slow", "fast"]);
+        p.bench_set_latency(0, 5_000); // slow → degraded
+        p.bench_set_in_flight(0, 0); //   …but idle
+        p.bench_set_latency(1, 100); // fast → healthy
+        p.bench_set_in_flight(1, 5); //   …but busier
+                                     // Grade beats load: the healthy member comes first despite more in-flight.
+        assert_eq!(p.bench_select(&req(), PoolTier::Light, 2), vec![1, 0]);
+    }
+
+    /// negative: with grading disabled (threshold 0), latency is ignored and the
+    /// policy alone decides (least-loaded picks the idle-but-slow member).
+    #[test]
+    fn negative_grading_disabled_ignores_latency() {
+        let p = graded_pool(0, &["slow", "fast"]);
+        p.bench_set_latency(0, 5_000);
+        p.bench_set_in_flight(0, 0);
+        p.bench_set_latency(1, 100);
+        p.bench_set_in_flight(1, 5);
+        assert_eq!(p.bench_select(&req(), PoolTier::Light, 2), vec![0, 1]);
+    }
+
+    /// corner: both under the threshold ⇒ both healthy ⇒ the policy decides.
+    #[test]
+    fn corner_both_healthy_policy_decides() {
+        let p = graded_pool(1_000, &["a", "b"]);
+        p.bench_set_latency(0, 200);
+        p.bench_set_in_flight(0, 3);
+        p.bench_set_latency(1, 300);
+        p.bench_set_in_flight(1, 1);
+        // Least-loaded: b (1 in-flight) before a (3).
+        assert_eq!(p.bench_select(&req(), PoolTier::Light, 2), vec![1, 0]);
+    }
+
+    /// boundary: all degraded ⇒ still served (degraded ≠ dead), ordered by policy.
+    #[test]
+    fn boundary_all_degraded_still_served() {
+        let p = graded_pool(1_000, &["a", "b"]);
+        p.bench_set_latency(0, 9_000);
+        p.bench_set_in_flight(0, 4);
+        p.bench_set_latency(1, 9_000);
+        p.bench_set_in_flight(1, 1);
+        let order = p.bench_select(&req(), PoolTier::Light, 2);
+        assert_eq!(order.len(), 2, "degraded members are still eligible");
+        assert_eq!(order, vec![1, 0], "same grade → least-loaded decides");
+    }
+
+    /// adversarial: a hostile huge latency is clamped in the health snapshot (no
+    /// overflow/panic) and simply grades the member degraded.
+    #[tokio::test]
+    async fn adversarial_hostile_latency_clamped() {
+        let p = graded_pool(1_000, &["m"]);
+        p.bench_set_latency(0, u64::MAX);
+        let h = p.health().await;
+        assert_eq!(
+            h.members[0].latency_ms_ewma,
+            u32::MAX,
+            "clamped, no overflow"
+        );
+        assert_eq!(h.members[0].state, PoolMemberState::Degraded);
+    }
+
+    /// health() reports the graded state + EWMA; a real call seeds the EWMA.
+    #[tokio::test]
+    async fn positive_call_seeds_ewma_and_grades() {
+        let p = graded_pool(1_000, &["m"]);
+        p.complete_all(req(), PoolTier::Light, 1).await;
+        let h = p.health().await;
+        // A scripted provider answers instantly, so it stays healthy.
+        assert_eq!(h.members[0].state, PoolMemberState::Healthy);
     }
 }

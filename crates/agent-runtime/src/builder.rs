@@ -650,6 +650,7 @@ pub async fn build_agent_with(
                 agent_providers::Saturation::parse(&cfg.pool.on_saturation),
                 cfg.pool.saturation_wait_ms,
             )
+            .with_health_grading(cfg.pool.latency_alpha, cfg.pool.degraded_threshold_ms)
             .with_observer(Arc::new(move |ev| {
                 crate::metered::record_pool_event(&m, ev)
             }))

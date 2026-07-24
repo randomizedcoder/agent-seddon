@@ -10,8 +10,33 @@ tracing/tests/bench/leak) and must pass `nix develop -c nix flake check`.
 |---|---|:--:|:--:|:--:|:--:|:--:|:--:|
 | — | Design directory | — | — | — | — | — | **merged** |
 | 01 | Load balance (in-flight + policy) | ✅ | ✅ | ✅ | ✅ | ✅ | **merged** |
-| 02 | Capacity (concurrency cap + backpressure) | ✅ | ✅ | ✅ | ✅ | ✅ | **in review** |
-| 03 | GPU health (latency EWMA + graded state) | — | — | — | — | — | designed |
+| 02 | Capacity (concurrency cap + backpressure) | ✅ | ✅ | ✅ | ✅ | ✅ | **merged** |
+| 03 | GPU health (latency EWMA + graded state) | ✅ | ✅ | ✅ | ✅ | ✅ | **in review** |
+
+## 03 — what shipped
+
+- **Per-member latency EWMA** (`latency_ewma_ms`, `ewma = α·sample + (1-α)·ewma`,
+  seeded on the first sample), fed by both real calls and probes.
+- **Graded state** `healthy | degraded | dead` (`PoolMemberState`): dead = breaker
+  open (unchanged); degraded = alive but the EWMA is over `degraded_threshold_ms`.
+  Grading feeds selection as a **stable sort by grade** at the end of `order()` — a
+  healthy member sorts before a degraded one, and the 01 policy order is preserved
+  *within* each grade (composes with every policy). Degraded ≠ dead: still eligible.
+- **Config** `[pool] latency_alpha` (clamped (0,1]) + `degraded_threshold_ms`
+  (`0` disables grading — the default, so behaviour is unchanged unless opted in).
+- **Contract**: additive `PoolMemberState` enum + `state`/`latency_ms_ewma` on
+  `PoolMemberHealth` + proto + `convert.rs` (unknown state → `healthy`);
+  `agent_pool_member_state{member,state}` + `agent_pool_member_latency_ewma_ms{member}`
+  gauges via a new `MemberGraded` event; table-driven + adversarial tests (healthy
+  sorts before degraded, grading-off ignores latency, all-degraded still served,
+  hostile latency clamped); the `pool_select` bench + dhat leak still hold.
+- **Security**: latency samples + the EWMA store are saturating/bounded; a remote
+  pool's reported latency/state is clamped/defaulted on receipt — a slow-lie can only
+  soft-shuffle order, never crash selection or exile a healthy target (the breaker,
+  not the grade, fails a target out).
+
+**The GPU-pool track is complete** — the deferred follow-up from adaptive-cognition
+(`route around an offline OR busy target; a pool of GPU resources`) is fully realized.
 
 ## 02 — what shipped
 

@@ -1,9 +1,15 @@
 # 03 — GPU health: latency EWMA + graded state
 
-Status: **design / pre-implementation.** Turns binary `alive`/`dead` into a **graded**
-`healthy | degraded | dead` signal, so the pool prefers a *fast* healthy target over a
-*slow* one — not just a live one over a dead one. Request-level signals only; real
-GPU-utilization probing is a documented hook, not built here.
+Status: **implemented** (latency EWMA + `PoolMemberState`) — see [`STATUS.md`](STATUS.md).
+Turns binary `alive`/`dead` into a **graded** `healthy | degraded | dead` signal, so
+the pool prefers a *fast* healthy target over a *slow* one — not just a live one over a
+dead one. Request-level signals only; real GPU-utilization probing is a documented
+hook, not built here.
+
+> Implementation note: grading feeds selection as a **stable sort by grade** appended
+> to `order()`, so it composes with every 01 policy uniformly (healthy before degraded,
+> policy order preserved within each grade) rather than threading grade into each
+> policy comparator. Off by default (`degraded_threshold_ms = 0`).
 
 ## Motivation
 

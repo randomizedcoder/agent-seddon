@@ -86,6 +86,9 @@ pub struct Metrics {
     // Capacity / backpressure (docs/design/gpu-pool/02-capacity.md).
     pool_member_saturated: IntGaugeVec,
     pool_saturation_shed: IntCounter,
+    // Graded health (docs/design/gpu-pool/03-gpu-health.md).
+    pool_member_state: IntGaugeVec,
+    pool_member_latency_ewma: IntGaugeVec,
     // General task-mode detection (docs/design/adaptive-cognition/01-mode.md).
     mode_classifications: IntCounterVec,
     mode_switches: IntCounterVec,
@@ -396,6 +399,22 @@ impl Metrics {
         let pool_saturation_shed = IntCounter::new(
             "agent_pool_saturation_shed_total",
             "Dispatches shed because every eligible pool member was saturated",
+        )
+        .unwrap();
+        let pool_member_state = IntGaugeVec::new(
+            Opts::new(
+                "agent_pool_member_state",
+                "Graded state of an LLM pool member (1 = in this state, 0 = not)",
+            ),
+            &["member", "state"],
+        )
+        .unwrap();
+        let pool_member_latency_ewma = IntGaugeVec::new(
+            Opts::new(
+                "agent_pool_member_latency_ewma_ms",
+                "Smoothed (EWMA) request latency per LLM pool member, milliseconds",
+            ),
+            &["member"],
         )
         .unwrap();
         let mode_classifications = IntCounterVec::new(
@@ -1001,6 +1020,8 @@ impl Metrics {
             Box::new(pool_selects.clone()),
             Box::new(pool_member_saturated.clone()),
             Box::new(pool_saturation_shed.clone()),
+            Box::new(pool_member_state.clone()),
+            Box::new(pool_member_latency_ewma.clone()),
             Box::new(mode_classifications.clone()),
             Box::new(mode_switches.clone()),
             Box::new(mode_switch_confidence.clone()),
@@ -1120,6 +1141,8 @@ impl Metrics {
             pool_selects,
             pool_member_saturated,
             pool_saturation_shed,
+            pool_member_state,
+            pool_member_latency_ewma,
             mode_classifications,
             mode_switches,
             mode_switch_confidence,
@@ -1334,6 +1357,21 @@ impl Metrics {
     /// LLM pool: a dispatch shed because every eligible member was saturated.
     pub fn on_pool_saturation_shed(&self) {
         self.pool_saturation_shed.inc();
+    }
+    /// LLM pool: a member's current graded state (sets 1 for `state`, 0 for the
+    /// others so a stale series can't linger).
+    pub fn set_pool_member_state(&self, member: &str, state: &str) {
+        for s in ["healthy", "degraded", "dead"] {
+            self.pool_member_state
+                .with_label_values(&[member, s])
+                .set(i64::from(s == state));
+        }
+    }
+    /// LLM pool: a member's smoothed latency EWMA (milliseconds).
+    pub fn set_pool_member_latency_ewma(&self, member: &str, ms: i64) {
+        self.pool_member_latency_ewma
+            .with_label_values(&[member])
+            .set(ms);
     }
     /// Task mode: one per-turn classification (`via` = prefilter|vote|failsafe).
     pub fn on_mode_classify(&self, mode: &str, via: &str) {

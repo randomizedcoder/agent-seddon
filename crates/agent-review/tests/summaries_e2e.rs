@@ -96,6 +96,8 @@ impl LlmPool for FakePool {
                 weight: 1.0,
                 max_concurrency: 0,
                 saturated: false,
+                state: agent_core::PoolMemberState::Healthy,
+                latency_ms_ewma: 0,
             }],
         }
     }
