@@ -24,6 +24,14 @@ enum PoolTier {
   POOL_TIER_HEAVY = 3;
 }
 
+// Graded liveness of a member (GPU pool 03).
+enum PoolMemberState {
+  POOL_MEMBER_STATE_UNSPECIFIED = 0;
+  POOL_MEMBER_STATE_HEALTHY = 1;
+  POOL_MEMBER_STATE_DEGRADED = 2;
+  POOL_MEMBER_STATE_DEAD = 3;
+}
+
 message PoolHealthRequest {}
 
 message PoolMemberHealth {
@@ -39,6 +47,9 @@ message PoolMemberHealth {
   // Concurrency cap + current saturation (GPU pool 02), additive.
   uint32 max_concurrency = 8;
   bool saturated = 9;
+  // Graded liveness + smoothed latency (GPU pool 03), additive.
+  PoolMemberState state = 10;
+  uint32 latency_ms_ewma = 11;
 }
 
 message PoolHealthReport {

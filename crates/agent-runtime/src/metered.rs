@@ -1930,6 +1930,14 @@ pub(crate) fn record_pool_event(m: &Metrics, ev: agent_providers::PoolEvent) {
             );
             m.on_pool_saturation_shed();
         }
+        PoolEvent::MemberGraded {
+            member,
+            state,
+            latency_ms_ewma,
+        } => {
+            m.set_pool_member_state(&member, state);
+            m.set_pool_member_latency_ewma(&member, latency_ms_ewma as i64);
+        }
         PoolEvent::Probe {
             member,
             alive,

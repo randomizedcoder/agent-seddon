@@ -510,6 +510,28 @@ pub trait LlmProvider: Send + Sync {
 // once. Fails **soft** — a dead member is a slot in the result, never a batch
 // failure. See `docs/design/code-review/llm-pool.md`.
 
+/// Graded liveness of a pool member (GPU pool 03). `Dead` is the breaker being
+/// open (hard fail-out); `Degraded` is alive-but-slow (a soft de-prioritisation —
+/// still eligible, but sorted after every `Healthy` member).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PoolMemberState {
+    #[default]
+    Healthy,
+    Degraded,
+    Dead,
+}
+
+impl PoolMemberState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PoolMemberState::Healthy => "healthy",
+            PoolMemberState::Degraded => "degraded",
+            PoolMemberState::Dead => "dead",
+        }
+    }
+}
+
 /// Capability tier of a pool member — orders members by how much model they are,
 /// so a job can demand a floor (`Heavy` for hard reasoning) or accept anything
 /// cheap (`Light` for a classification vote). `Ord` runs `Light < Medium < Heavy`.
@@ -566,6 +588,14 @@ pub struct PoolMemberHealth {
     /// (GPU pool 02). Additive; `false` from an older pool.
     #[serde(default)]
     pub saturated: bool,
+    /// Graded liveness (GPU pool 03): `healthy` | `degraded` (alive but slow) |
+    /// `dead`. Additive; defaults to `healthy` from an older pool.
+    #[serde(default)]
+    pub state: PoolMemberState,
+    /// Smoothed request latency (ms, EWMA) — the signal that grades `degraded`
+    /// (GPU pool 03). Additive; `0` from an older pool.
+    #[serde(default)]
+    pub latency_ms_ewma: u32,
 }
 
 /// A snapshot of every member's liveness.
