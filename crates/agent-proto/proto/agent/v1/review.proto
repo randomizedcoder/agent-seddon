@@ -156,6 +156,7 @@ message ReviewCallGraphNode {
   bool exported = 4;
   string file = 5;
   uint32 line = 6;
+  double centrality = 7;
 }
 
 message ReviewCallEdge {
@@ -260,6 +261,18 @@ message ReviewChurnReport {
   repeated ReviewFileChurn files = 2;
 }
 
+message ReviewFileSalience {
+  string file = 1;
+  double centrality = 2;
+  uint32 bus_factor = 3;
+  bool churn_increasing = 4;
+  string class = 5;
+}
+
+message ReviewSalienceReport {
+  repeated ReviewFileSalience files = 1;
+}
+
 message ReviewFacts {
   ReviewMeta meta = 1;
   ReviewChangeSet change = 2;
@@ -271,4 +284,5 @@ message ReviewFacts {
   ReviewSummaryReport summaries = 8;
   ReviewCoChangeReport cochange = 9;
   ReviewChurnReport churn = 10;
+  ReviewSalienceReport salience = 11;
 }

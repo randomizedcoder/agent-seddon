@@ -93,6 +93,7 @@ pub struct Metrics {
     review_summaries: IntCounterVec,
     review_cochange: IntCounterVec,
     review_churn: IntCounterVec,
+    review_salience: IntCounterVec,
     review_runs: IntCounterVec,
     review_total_duration: HistogramVec,
     review_parallelism: Histogram,
@@ -426,6 +427,14 @@ impl Metrics {
             Opts::new(
                 "agent_review_churn_total",
                 "Churn/ownership signal: files with an entry and single-owner (bus≤1) files",
+            ),
+            &["kind"],
+        )
+        .unwrap();
+        let review_salience = IntCounterVec::new(
+            Opts::new(
+                "agent_review_salience_total",
+                "Salience verdicts: files with a verdict and load-bearing (critical/foundational) files",
             ),
             &["kind"],
         )
@@ -864,6 +873,7 @@ impl Metrics {
             Box::new(review_summaries.clone()),
             Box::new(review_cochange.clone()),
             Box::new(review_churn.clone()),
+            Box::new(review_salience.clone()),
             Box::new(review_runs.clone()),
             Box::new(review_total_duration.clone()),
             Box::new(review_parallelism.clone()),
@@ -966,6 +976,7 @@ impl Metrics {
             review_summaries,
             review_cochange,
             review_churn,
+            review_salience,
             review_runs,
             review_total_duration,
             review_parallelism,
@@ -1207,6 +1218,15 @@ impl Metrics {
         self.review_churn
             .with_label_values(&["single_owner"])
             .inc_by(single_owner);
+    }
+    /// Review: salience verdicts — files with a verdict and load-bearing files.
+    pub fn on_review_salience(&self, files: u64, critical: u64) {
+        self.review_salience
+            .with_label_values(&["files"])
+            .inc_by(files);
+        self.review_salience
+            .with_label_values(&["critical"])
+            .inc_by(critical);
     }
     /// Review: one completed run — its count (by project/mode/outcome) + wall-clock.
     pub fn on_review_run(&self, project: &str, mode_via: &str, outcome: &str, seconds: f64) {

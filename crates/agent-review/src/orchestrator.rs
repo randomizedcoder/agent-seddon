@@ -82,6 +82,11 @@ pub enum ReviewEvent {
         files: u32,
         single_owner: u32,
     },
+    /// Salience accounting: files with a verdict + load-bearing (critical/foundational) count.
+    Salience {
+        files: u32,
+        critical: u32,
+    },
 }
 
 /// Observability hook (see [`ReviewEvent`]).
@@ -388,6 +393,23 @@ impl ReviewCollector for ReviewOrchestrator {
                 }
                 None => {}
             }
+        }
+
+        // Post-fan-out synthesis: blend the call graph (centrality) + churn (bus
+        // factor / trend) into per-file salience verdicts. Runs here, not as a
+        // collector, because it needs two collectors' facts at once.
+        facts.salience = crate::salience::compute(&facts);
+        if !facts.salience.files.is_empty() {
+            let critical = facts
+                .salience
+                .files
+                .iter()
+                .filter(|f| f.class == "CriticalSilo" || f.class == "FoundationalStable")
+                .count() as u32;
+            self.emit(ReviewEvent::Salience {
+                files: facts.salience.files.len() as u32,
+                critical,
+            });
         }
 
         let total_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;

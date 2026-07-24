@@ -1951,6 +1951,9 @@ pub(crate) fn record_review_event(m: &Metrics, ev: agent_review::ReviewEvent) {
         } => {
             m.on_review_churn(u64::from(files), u64::from(single_owner));
         }
+        ReviewEvent::Salience { files, critical } => {
+            m.on_review_salience(u64::from(files), u64::from(critical));
+        }
     }
 }
 

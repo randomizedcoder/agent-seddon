@@ -69,6 +69,26 @@ are not separate increments — each increment lands its own slice of both.
 
 ## Change log
 
+- **2026-07-23** — **Salience / blast-radius synthesis (Homer design input — 3rd
+  follow-on).** The first **post-fan-out synthesis** (not a collector): it needs two
+  collectors' facts at once, so it runs after assembly. The call-graph collector now
+  scores every node with **PageRank centrality** (hand-rolled power iteration,
+  dependency-free; rank flows caller→callee so a function called by many important
+  functions scores high; min-max normalized to `0..1`) — a standalone blast-radius
+  rank. Then `salience::compute` blends each changed file's max centrality with the
+  churn collector's **bus factor** + **churn trend** through Homer's `classify_salience`
+  taxonomy → **`CriticalSilo`** (load-bearing + single-owner), **`FoundationalStable`**
+  (the quiescent high-centrality case — load-bearing but rarely changed), `HotCritical`,
+  `ActiveLocalized`, `Background`. Rendered as a **`Salience (blast radius)`** section
+  foregrounding the load-bearing classes. Metric `agent_review_salience_total{kind}`
+  via `ReviewEvent::Salience`. Wire: additive `centrality` on `ReviewCallGraphNode`
+  (field 7) + `ReviewFileSalience`/`ReviewSalienceReport` + `ReviewFacts` field 11
+  (round-trip tested; no baseline bump). Tests: 5 salience-`compute` unit cases (the
+  full taxonomy + missing-churn default + no-callgraph empty), 2 PageRank unit cases
+  (called-into nodes score higher; <2-node no-op), and a hermetic `review-salience`
+  gate (a load-bearing single-owner Go change → `CriticalSilo`, offline). **Completes
+  the Homer top-3** (co-change, churn, salience). **Next (design input):** the
+  reason-tagged `--gate` risk mode, then the tree-sitter multi-language extractor.
 - **2026-07-23** — **Churn & ownership / bus factor (Homer design input — 2nd
   follow-on collector).** Reuses the [co-change](design-input-homer.md) history
   reader (`RepoBackend::log_touched`) for a second risk prior: a `ChurnCollector`
