@@ -243,6 +243,37 @@ impl ReviewCollectorRow {
     }
 }
 
+/// One per-dimension summary (`agent_dimension_summaries`) — adaptive-cognition 03.
+/// `summary_len` (not the body) is stored: counts/lengths only, never the text.
+#[derive(Debug, Clone, Row)]
+pub struct DimensionRow {
+    pub session_id: String,
+    pub ts: DateTime64<3>,
+    pub dimension: String,
+    pub is_new: u8,
+    pub summary_len: u32,
+}
+
+impl DimensionRow {
+    /// One row per accepted summary in a `kind = "dimension"` `MemoryEvent`.
+    pub fn rows_from_event(event: &MemoryEvent) -> Vec<Self> {
+        let Some(d) = event.dimensional.as_ref() else {
+            return Vec::new();
+        };
+        let ts = dt64_from_ms(event.ts_ms);
+        d.summaries
+            .iter()
+            .map(|s| DimensionRow {
+                session_id: event.session_id.clone(),
+                ts,
+                dimension: s.dimension.clone(),
+                is_new: s.is_new as u8,
+                summary_len: s.summary.chars().count() as u32,
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,6 +291,7 @@ mod tests {
             iter: Some(2),
             verification: None,
             review: None,
+            dimensional: None,
         }
     }
 
@@ -273,6 +305,7 @@ mod tests {
             iter: Some(7),
             verification: Some(rec),
             review: None,
+            dimensional: None,
         }
     }
 
@@ -391,6 +424,7 @@ mod tests {
             iter: None,
             verification: None,
             review: Some(rec),
+            dimensional: None,
         }
     }
 

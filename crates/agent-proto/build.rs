@@ -25,6 +25,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "proto/agent/v1/llm_pool.proto",
         "proto/agent/v1/mode.proto",
         "proto/agent/v1/review.proto",
+        "proto/agent/v1/dimension.proto",
     ];
     // Re-run only when a proto changes.
     for p in &protos {

@@ -1892,6 +1892,11 @@ pub struct MemoryEvent {
     /// mirror. Hashes/counts only — never raw source or URLs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<ReviewRecord>,
+    /// A per-step dimensional-memory record (routed to `agent_dimension_summaries`
+    /// by the telemetry sink). Telemetry-local side-channel like the others; dropped
+    /// at the gRPC memory boundary (adaptive-cognition 03).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dimensional: Option<DimensionalRecord>,
 }
 
 /// The loop-facing memory facade. This is the whole store the agent loop talks
@@ -1982,6 +1987,47 @@ impl MemoryStore for LayeredMemory {
         let events = self.episodic.recent(self.distill_window).await?;
         self.semantic.distill(&events).await
     }
+}
+
+/// One dimension's summary of a step (adaptive-cognition 03). A step may yield
+/// several — the "this was both *coding* and *git*" case. `dimension` is a slug
+/// that becomes a path component, so the store `safe_segment`-validates it before
+/// use; `summary` is untrusted model text, bounded + injection-screened before it
+/// is persisted, because a dimension file is recalled verbatim into future context.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DimensionSummary {
+    pub dimension: String,
+    pub summary: String,
+    /// The model proposed this as a *new* (emergent) dimension. Admission is gated
+    /// (K-recurrence + a total cap) by the store — this is only the proposal.
+    #[serde(default)]
+    pub is_new: bool,
+}
+
+/// Telemetry side-channel on a `kind = "dimension"` [`MemoryEvent`]: the accepted
+/// per-dimension summaries of a step, routed to `agent_dimension_summaries`. Like
+/// [`MemoryEvent::review`], it is dropped at the gRPC memory boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DimensionalRecord {
+    pub summaries: Vec<DimensionSummary>,
+}
+
+/// The dimensional-memory layer (adaptive-cognition 03): a cheap per-step pass
+/// files "what just happened" into **per-dimension histories**, and recall can
+/// fetch one axis — feeding the mode-switch "pull in fresh" bridge. A derived,
+/// curated layer over the durable episodic log (never rewrites it), like the
+/// semantic store.
+#[async_trait]
+pub trait DimensionStore: Send + Sync {
+    /// Review a recent episodic window, summarize it by dimension, and file each
+    /// accepted summary into its dimension's history. Returns the accepted
+    /// summaries. **Fail-soft:** no provider / dead pool / malformed output ⇒ an
+    /// empty vec, never an error — the loop is unaffected.
+    async fn summarize_step(&self, events: &[MemoryEvent]) -> Result<Vec<DimensionSummary>>;
+
+    /// A dimension's history, most-recent first, capped at `limit`. An unknown or
+    /// empty dimension ⇒ an empty vec (like semantic recall with no files).
+    async fn recall_dimension(&self, dimension: &str, limit: usize) -> Result<Vec<MemoryItem>>;
 }
 
 // ---------------------------------------------------------------------------

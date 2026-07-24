@@ -22,6 +22,7 @@ default = [
     "context-mode-aware",
     "tokenizer",
     "memory-file",
+    "dimensions",
     "mcp",
     "grpc",
     "subagents",
@@ -135,6 +136,7 @@ context-mode-aware = ["agent-context/context-mode-aware", "context-summarizing"]
 # counts + USD/cache accounting (parity spec 23).
 tokenizer = ["dep:agent-tokenizer", "agent-tokenizer/tokenizer-approx"]
 memory-file = ["agent-memory/memory-file"]
+dimensions = ["agent-memory/memory-dimensions"]
 # Connect to external MCP servers and register their tools.
 mcp = ["dep:agent-mcp"]
 # gRPC seam transports: `= "grpc"` client factories + remote tool workers.

@@ -378,6 +378,14 @@ classifier       = "hybrid"       # "hybrid" | "grpc" | "" (off)
 confidence_floor = 0.6            # a candidate mode must reach this to switch
 hysteresis       = 2              # consecutive turns a non-decisive candidate must win
 
+# Per-step dimensional memory (adaptive-cognition 03): a cheap per-turn pass files
+# "what just happened" into per-dimension histories (<memory.semantic_dir>/
+# dimensions/<dim>.md), and a mode switch recalls the destination mode's dimensions
+# as fresh context. OFF by default — unlike mode detection's free prefilter, the
+# per-step summarize is a real (cheap, local-tier) LLM call per turn.
+[dimensions]
+store = ""                        # "" / "off" (disabled) | "file" | "grpc"
+
 [web_search]
 backends          = []            # e.g. ["brave"] or ["searxng", "brave"]
 cache_ttl_secs    = 900

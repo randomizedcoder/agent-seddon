@@ -172,6 +172,14 @@
       metrics_port = 9625;
     };
 
+    # Per-step dimensional memory (docs/design/adaptive-cognition/03-memory.md):
+    # the `DimensionStore` seam — summarize a step by dimension + recall one axis.
+    dimension = {
+      port = 50076;
+      socket = "/tmp/agent-seddon/dimension.sock";
+      metrics_port = 9626;
+    };
+
     # NOT a seam: the `agent --serve-all` gateway, which hosts every seam's
     # service in one process on one endpoint. A same-host deployment that wants
     # all seams distributed would otherwise run one process (and one port) per

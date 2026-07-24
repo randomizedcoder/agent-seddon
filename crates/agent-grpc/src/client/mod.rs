@@ -18,6 +18,7 @@
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 mod context;
+mod dimension;
 mod embed;
 mod exec;
 mod forge;
@@ -39,6 +40,7 @@ mod tools;
 mod web;
 
 pub use context::*;
+pub use dimension::*;
 pub use embed::*;
 pub use exec::*;
 pub use forge::*;

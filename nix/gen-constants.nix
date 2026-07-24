@@ -64,6 +64,7 @@ let
     ${seamConst "LLM_POOL" g.llm_pool}
     ${seamConst "REVIEW" g.review}
     ${seamConst "MODE" g.mode}
+    ${seamConst "DIMENSION" g.dimension}
 
     /// The `agent --serve-all` gateway (not a seam — it hosts every seam).
     ${seamConst "GATEWAY" g.gateway}

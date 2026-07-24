@@ -313,6 +313,7 @@ mod tests {
             iter: None,
             verification: None,
             review: None,
+            dimensional: None,
         }
     }
 

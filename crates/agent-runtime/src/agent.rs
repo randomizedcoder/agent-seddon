@@ -77,6 +77,11 @@ pub struct Agent {
     /// The task-mode classifier, if the `review` seam is wired. Detects a review
     /// task for the in-loop hand-off.
     task_classifier: Option<Arc<dyn agent_core::TaskClassifier>>,
+    /// The dimensional-memory store, if the `dimensions` seam is wired
+    /// (adaptive-cognition 03). Runs a cheap per-turn summarize pass and answers
+    /// the mode-switch "pull in fresh" recall; hosted over gRPC
+    /// (`agent --serve-dimension`).
+    dimension_store: Option<Arc<dyn agent_core::DimensionStore>>,
     /// The review fact collector, if the `review` seam is wired. Produces the
     /// grounded `ReviewFacts`; hosted over gRPC (`agent --serve-fact-collector`).
     review_collector: Option<Arc<dyn agent_core::ReviewCollector>>,
@@ -181,6 +186,7 @@ impl Agent {
             repo: None,
             llm_pool: None,
             task_classifier: None,
+            dimension_store: None,
             review_collector: None,
             scanner: None,
             verifier: None,
@@ -414,6 +420,12 @@ impl Agent {
         self
     }
 
+    /// Attach the dimensional-memory store (adaptive-cognition 03).
+    pub fn with_dimension_store(mut self, d: Arc<dyn agent_core::DimensionStore>) -> Self {
+        self.dimension_store = Some(d);
+        self
+    }
+
     /// Attach the review fact collector.
     pub fn with_review_collector(mut self, r: Arc<dyn agent_core::ReviewCollector>) -> Self {
         self.review_collector = Some(r);
@@ -599,6 +611,10 @@ impl Agent {
 
     pub fn task_classifier(&self) -> Option<Arc<dyn agent_core::TaskClassifier>> {
         self.task_classifier.clone()
+    }
+
+    pub fn dimension_store(&self) -> Option<Arc<dyn agent_core::DimensionStore>> {
+        self.dimension_store.clone()
     }
 
     pub fn review_collector(&self) -> Option<Arc<dyn agent_core::ReviewCollector>> {
@@ -1174,6 +1190,7 @@ impl Agent {
             iter: None,
             verification: None,
             review: None,
+            dimensional: None,
         })
         .await;
     }
@@ -1189,6 +1206,7 @@ impl Agent {
             iter: Some(iter),
             verification: None,
             review: None,
+            dimensional: None,
         })
         .await;
     }
@@ -1206,6 +1224,7 @@ impl Agent {
             iter: Some(iter),
             verification: Some(rec),
             review: None,
+            dimensional: None,
         })
         .await;
     }
@@ -1250,6 +1269,7 @@ impl Agent {
             iter: None,
             verification: None,
             review: Some(rec),
+            dimensional: None,
         })
         .await;
     }
@@ -1321,6 +1341,46 @@ fn decide_switch(
     }
     history.clear();
     Some(candidate)
+}
+
+/// How many recent working messages the per-turn dimension pass reviews.
+const DIMENSION_WINDOW: usize = 16;
+/// How many bullets a per-dimension recall pulls in on a switch.
+const DIMENSION_RECALL_LIMIT: usize = 5;
+
+/// Wrap the recent working-set tail as synthetic `MemoryEvent`s for the per-step
+/// dimension pass (adaptive-cognition 03) — "what just happened" this turn.
+fn recent_events(messages: &[Message], n: usize) -> Vec<MemoryEvent> {
+    let start = messages.len().saturating_sub(n);
+    messages[start..]
+        .iter()
+        .map(|m| MemoryEvent {
+            kind: "step".to_string(),
+            message: m.clone(),
+            ts_ms: 0,
+            session_id: String::new(),
+            usage: None,
+            iter: None,
+            verification: None,
+            review: None,
+            dimensional: None,
+        })
+        .collect()
+}
+
+/// The dimensions worth recalling when *entering* a mode — the before/after
+/// table's "pull in fresh" column (docs/design/adaptive-cognition/02-compaction.md
+/// + 03-memory.md). `Other` pulls nothing.
+fn recall_dims_for(mode: agent_core::TaskMode) -> &'static [&'static str] {
+    use agent_core::TaskMode::*;
+    match mode {
+        Implement => &["coding", "testing"],
+        Debug => &["coding", "testing"],
+        Review => &["coding", "git", "project"],
+        Design => &["project", "docs"],
+        Explain => &["user"],
+        Other => &[],
+    }
 }
 
 /// Which classification stage produced a verdict, from its `reason` prefix — a
@@ -1466,6 +1526,18 @@ impl Session<'_> {
         let mode_switch = self.detect_mode(input).await;
         if let Some(sw) = &mode_switch {
             self.record_mode_switch(sw).await;
+            // Dimensional memory is the other consumer (adaptive-cognition 03):
+            // on a switch, pull the destination mode's dimensions back in as fresh
+            // context — the "pull in fresh" column of 02's before/after table. What
+            // 02 sheds from the working set was already flushed to dimensions, so
+            // recalling it here is what makes the shed safe.
+            if let Some(block) = self.recall_for_mode(sw.to).await {
+                if self.started {
+                    self.working.messages.push(Message::system(block));
+                } else {
+                    self.pending_context.push(block);
+                }
+            }
         }
         // Review is one consumer of the mode: when we *enter* review, collect
         // grounded facts and inject them (docs/design/code-review/). First turn ⇒
@@ -1544,14 +1616,100 @@ impl Session<'_> {
         }
 
         self.agent.record("goal", Message::user(input)).await;
-        self.agent
+        let answer = self
+            .agent
             .run_loop(
                 &mut self.working,
                 &self.budget,
                 &self.tool_ctx,
                 &self.tool_schemas,
             )
+            .await;
+        // Cheap per-turn dimensional summarize (adaptive-cognition 03): file "what
+        // just happened" into per-dimension histories, so a later switch can recall
+        // it. Fail-soft + best-effort — only after a turn that actually produced an
+        // answer, and never affecting the returned result.
+        if answer.is_ok() {
+            self.dimension_pass().await;
+        }
+        answer
+    }
+
+    /// Per-turn dimensional summarize pass. A no-op when no store is wired or the
+    /// pool is dead (the store fails soft). Records the accepted summaries for
+    /// telemetry (`kind = "dimension"` → `agent_dimension_summaries`).
+    async fn dimension_pass(&self) {
+        let Some(store) = &self.agent.dimension_store else {
+            return;
+        };
+        let events = recent_events(&self.working.messages, DIMENSION_WINDOW);
+        if events.is_empty() {
+            return;
+        }
+        let span = tracing::info_span!("memory.dimension.summarize");
+        let start = Instant::now();
+        let summaries = store
+            .summarize_step(&events)
+            .instrument(span)
             .await
+            .unwrap_or_default();
+        self.agent
+            .metrics
+            .on_dimension_summarize(start.elapsed().as_secs_f64());
+        if summaries.is_empty() {
+            return;
+        }
+        for s in &summaries {
+            self.agent
+                .metrics
+                .on_dimension_summary(&s.dimension, s.is_new);
+        }
+        let dims: Vec<&str> = summaries.iter().map(|s| s.dimension.as_str()).collect();
+        let marker = Message::system(format!("dimensions: {}", dims.join(", ")));
+        self.agent
+            .append_event(MemoryEvent {
+                kind: "dimension".to_string(),
+                message: marker,
+                ts_ms: now_ms(),
+                session_id: self.agent.settings.session_id.clone(),
+                usage: None,
+                iter: None,
+                verification: None,
+                review: None,
+                dimensional: Some(agent_core::DimensionalRecord { summaries }),
+            })
+            .await;
+    }
+
+    /// The "pull in fresh" bridge (adaptive-cognition 03): recall the dimensions
+    /// worth having when entering `mode`, rendered as one system block. `None` when
+    /// no store is wired or nothing is recalled.
+    async fn recall_for_mode(&self, mode: agent_core::TaskMode) -> Option<String> {
+        let store = self.agent.dimension_store.as_ref()?;
+        let dims = recall_dims_for(mode);
+        if dims.is_empty() {
+            return None;
+        }
+        let span = tracing::info_span!("memory.dimension.recall", to = mode.as_str());
+        let mut fresh = String::new();
+        for dim in dims {
+            let items = store
+                .recall_dimension(dim, DIMENSION_RECALL_LIMIT)
+                .instrument(span.clone())
+                .await
+                .unwrap_or_default();
+            for it in items {
+                self.agent.metrics.on_dimension_recall(dim);
+                fresh.push_str(&format!("### {} ({})\n{}\n", dim, it.source, it.content));
+            }
+        }
+        if fresh.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "## Relevant history for {} mode\n{fresh}",
+            mode.as_str()
+        ))
     }
 
     /// The current message history (for persistence / resume).

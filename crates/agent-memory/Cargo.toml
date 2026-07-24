@@ -8,14 +8,31 @@ license.workspace = true
 default = ["memory-file"]
 # JSONL episodic log + markdown semantic store (keyword recall).
 memory-file = []
+# Per-step dimensional histories (adaptive-cognition 03).
+memory-dimensions = []
+# dhat-instrumented leak/allocation tests (tests/leak.rs).
+dhat-heap = ["dep:dhat"]
 
 [dependencies]
 agent-core.workspace = true
 async-trait.workspace = true
+serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+dhat = { workspace = true, optional = true }
 
 [dev-dependencies]
 agent-testkit.workspace = true
 rstest.workspace = true
+iai-callgrind.workspace = true
+
+[[bench]]
+name = "dimensions"
+harness = false
+required-features = ["memory-dimensions"]
+
+[[test]]
+name = "leak"
+harness = true
+required-features = ["dhat-heap", "memory-dimensions"]
