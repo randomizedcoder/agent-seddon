@@ -10,10 +10,10 @@ original design; where the shipped code refined a detail, `STATUS.md` is authori
 **Shipped (merged):** `agent --review <PR#|branch|.|base..head>` produces a
 grounded, **compacted** context — repo/change/git-state, the range's commit intent,
 budget-bounded diff hunks, **static-analysis findings** (golangci-lint + clippy),
-**changed function signatures**, and the **Go call graph / blast radius** — driven
-by a health-checked LLM pool, with two gRPC services and a dual-judge (assistant +
-GLM-5.2) evaluation harness that documents the base rate. **Next:** code-style
-fingerprint (07), then cheap-LLM summaries (08) and recording (09).
+**changed function signatures**, the **Go call graph / blast radius**, and a
+**code-style fingerprint** — driven by a health-checked LLM pool, with two gRPC
+services and a dual-judge (assistant + GLM-5.2) evaluation harness that documents
+the base rate. **Next:** cheap-LLM summaries (08), then recording (09).
 
 ## The idea
 

@@ -27,7 +27,7 @@ followed).
 | 04 | Repo / change / git-state | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 | 05 | Static analysis (Go + Rust) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 | 06 | AST & call-graph | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
-| 07 | Code-style fingerprint | ✅ | ✅ | ✅ | ⬜ | ⬜ | ⬜ | — |
+| 07 | Code-style fingerprint | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 | 08 | Cheap-LLM summaries | ✅ | ✅ | ✅ | ⬜ | ⬜ | ⬜ | — |
 | 09 | Grounded context + recording | ✅ | ✅ | ✅ | ⬜ | n/a | ⬜ | — |
 | 10 | Wire contracts (consolidation) | ✅ | — | — | — | — | — | — |
@@ -66,6 +66,28 @@ are not separate increments — each increment lands its own slice of both.
 
 ## Change log
 
+- **2026-07-23** — **Code-style fingerprint (increment 8, component 07).** A pure
+  in-process `StyleCollector` folds a deterministic house-style fingerprint into
+  `ReviewFacts.style` — no external tool, no model. Over the repo's source files at
+  head (bounded `MAX_FILES = 200`, `Manifest::scan` / search-index file set,
+  binary/oversized/noisy skipped) it counts: comment density + doc-comment ratio,
+  indentation (tabs vs spaces), line-length p95 (fixed-size histogram — a 10 MB
+  minified line can't OOM), fn-length median (brace-balanced, Go/Rust), naming case
+  per decl-kind (regex + majority vote → `CaseStyle` verdict) + exported ratio, and
+  commit-message style over `RepoBackend::log` (conventional ratio, subject p50/p95,
+  body-present ratio; sample clamped). `diff_matches_style` recomputes indent +
+  fn-naming over the changed files and compares to the baseline. Rendered as a
+  compact `Code style` section (ratios + verdicts, no identifiers). Default-on
+  (`[review] style = true`, `style_commit_sample = 50`), fail-soft
+  (`files_scanned == 0` ⇒ skipped). Wire: additive `ReviewNamingFacts` /
+  `ReviewCommitStyleFacts` / `ReviewStyleFacts` + `ReviewFacts` field 7 (rides
+  `FactCollectorService`, round-trip tested; no baseline bump). Metric
+  `agent_review_style_diff_conformance_total{matches}` via `ReviewEvent::Style`.
+  Gate: hermetic `review-style` check (a Go repo with a deliberate consistent style,
+  offline) + `adversarial_` unit tests (10 MB line bounded). Live-proven on this
+  repo (correctly read Rust snake fns / SCREAMING_SNAKE consts / spaces /
+  conventional commits). Deferred: reuse 06's AST for naming, per-facet confidence,
+  `StyleService`/`--serve-style`.
 - **2026-07-23** — **Go call-graph / blast radius (increment 7, completes component
   06).** A stdlib-only Go helper (`helpers/go-ast`, `go/parser` + `go/ast`, **zero
   external deps** → `buildGoModule vendorHash = null`, built + pinned by the flake as
