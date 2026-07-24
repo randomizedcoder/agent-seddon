@@ -588,6 +588,7 @@ impl TryFrom<pb::MemoryEvent> for agent_core::MemoryEvent {
             // wire); the gRPC `MemoryEvent` has no such field, so it is `None` here.
             verification: None,
             review: None,
+            dimensional: None,
         })
     }
 }
@@ -3303,6 +3304,28 @@ impl From<pb::ModeSwitch> for agent_core::ModeSwitch {
     }
 }
 
+// --- DimensionSummary (adaptive-cognition 03) -------------------------------
+
+impl From<agent_core::DimensionSummary> for pb::DimensionSummary {
+    fn from(s: agent_core::DimensionSummary) -> Self {
+        pb::DimensionSummary {
+            dimension: s.dimension,
+            summary: s.summary,
+            is_new: s.is_new,
+        }
+    }
+}
+
+impl From<pb::DimensionSummary> for agent_core::DimensionSummary {
+    fn from(s: pb::DimensionSummary) -> Self {
+        agent_core::DimensionSummary {
+            dimension: s.dimension,
+            summary: s.summary,
+            is_new: s.is_new,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3474,6 +3497,7 @@ mod tests {
             iter,
             verification: None,
             review: None,
+            dimensional: None,
         };
         let p1 = pb::MemoryEvent::from(core);
         let back = agent_core::MemoryEvent::try_from(p1.clone()).unwrap();

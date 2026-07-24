@@ -34,11 +34,12 @@ fn new_registry() -> Metrics {
 // exposition once (what a `/metrics` scrape does). Grows as seams add metric
 // families. Observed ~1.17M Ir with the full 30-spec seam set (web/tasks/
 // structured/lsp/sandbox/embed, content blocks, scanner, cache breakpoints,
-// route decisions, hooks, forge, scheduled runs, and pty). Encoding is linear in
-// the number of registered families, so this ceiling steps up as seams land
-// rather than staying fixed; ~1.4x headroom over the observed value.
+// route decisions, hooks, forge, scheduled runs, and pty). Observed ~1.745M Ir
+// after adaptive-cognition added the context switch-compaction + dimensional-memory
+// families. Encoding is linear in the number of registered families, so this
+// ceiling steps up as seams land rather than staying fixed; ~1.06x headroom.
 #[library_benchmark(config = LibraryBenchmarkConfig::default()
-    .tool(Callgrind::default().hard_limits([(EventKind::Ir, 1_700_000u64)])))]
+    .tool(Callgrind::default().hard_limits([(EventKind::Ir, 1_850_000u64)])))]
 fn record_and_encode() -> String {
     let m = Metrics::new();
     for _ in 0..100 {

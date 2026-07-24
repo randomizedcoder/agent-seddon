@@ -638,6 +638,38 @@ pub async fn build_agent_with(
     #[cfg(not(feature = "mode"))]
     let task_classifier_seam: Option<Arc<dyn agent_core::TaskClassifier>> = None;
 
+    // Dimensional memory (adaptive-cognition 03), opt-in via `[dimensions] store`.
+    // `file` writes per-dimension histories under the semantic dir; `grpc` dials a
+    // remote `DimensionService`. The summarizer is the main provider (like distill).
+    #[cfg(feature = "dimensions")]
+    let dimension_store_seam: Option<Arc<dyn agent_core::DimensionStore>> =
+        if cfg.dimensions.enabled() {
+            match cfg.dimensions.store.as_str() {
+                "file" => {
+                    let dir = std::path::PathBuf::from(&cfg.memory.semantic_dir).join("dimensions");
+                    Some(Arc::new(
+                        agent_memory::FileDimensions::new(dir).with_provider(provider.clone()),
+                    ))
+                }
+                #[cfg(feature = "grpc")]
+                "grpc" => {
+                    let ep = crate::registry::grpc_client_endpoint(
+                        &cfg.grpc.dimension.endpoint,
+                        agent_grpc::constants::DIMENSION,
+                    );
+                    Some(Arc::new(agent_grpc::client::GrpcDimensions::connect(&ep)?))
+                }
+                other => {
+                    tracing::warn!("unknown [dimensions] store `{other}`; disabling");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+    #[cfg(not(feature = "dimensions"))]
+    let dimension_store_seam: Option<Arc<dyn agent_core::DimensionStore>> = None;
+
     #[cfg(feature = "review")]
     let review_collector_seam: Option<Arc<dyn agent_core::ReviewCollector>> =
         match cfg.review.backend.as_str() {
@@ -790,6 +822,10 @@ pub async fn build_agent_with(
     };
     let agent = match task_classifier_seam {
         Some(c) => agent.with_task_classifier(c),
+        None => agent,
+    };
+    let agent = match dimension_store_seam {
+        Some(d) => agent.with_dimension_store(d),
         None => agent,
     };
     let agent = match review_collector_seam {

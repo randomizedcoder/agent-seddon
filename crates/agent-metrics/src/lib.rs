@@ -83,6 +83,10 @@ pub struct Metrics {
     mode_classifications: IntCounterVec,
     mode_switches: IntCounterVec,
     mode_switch_confidence: Histogram,
+    // Dimensional memory (adaptive-cognition 03).
+    dimension_summaries: IntCounterVec,
+    dimension_summarize_seconds: Histogram,
+    dimension_recalls: IntCounterVec,
     // Code review flow (docs/design/code-review/).
     review_collect_seconds: Histogram,
     review_collector_seconds: HistogramVec,
@@ -370,6 +374,27 @@ impl Metrics {
             "agent_mode_switch_confidence",
             "Confidence of a decided task-mode switch",
         ))
+        .unwrap();
+        let dimension_summaries = IntCounterVec::new(
+            Opts::new(
+                "agent_dimension_summaries_total",
+                "Per-step dimension summaries filed, by dimension and novelty",
+            ),
+            &["dimension", "is_new"],
+        )
+        .unwrap();
+        let dimension_summarize_seconds = Histogram::with_opts(HistogramOpts::new(
+            "agent_dimension_summarize_duration_seconds",
+            "Per-step dimensional summarize-pass wall-clock",
+        ))
+        .unwrap();
+        let dimension_recalls = IntCounterVec::new(
+            Opts::new(
+                "agent_dimension_recall_total",
+                "Dimension-weighted recalls, by dimension",
+            ),
+            &["dimension"],
+        )
         .unwrap();
         let review_collect_seconds = Histogram::with_opts(HistogramOpts::new(
             "agent_review_collect_duration_seconds",
@@ -930,6 +955,9 @@ impl Metrics {
             Box::new(mode_classifications.clone()),
             Box::new(mode_switches.clone()),
             Box::new(mode_switch_confidence.clone()),
+            Box::new(dimension_summaries.clone()),
+            Box::new(dimension_summarize_seconds.clone()),
+            Box::new(dimension_recalls.clone()),
             Box::new(review_collect_seconds.clone()),
             Box::new(review_collector_seconds.clone()),
             Box::new(review_collectors.clone()),
@@ -1041,6 +1069,9 @@ impl Metrics {
             mode_classifications,
             mode_switches,
             mode_switch_confidence,
+            dimension_summaries,
+            dimension_summarize_seconds,
+            dimension_recalls,
             review_collect_seconds,
             review_collector_seconds,
             review_collectors,
@@ -1234,6 +1265,20 @@ impl Metrics {
     pub fn on_mode_switch(&self, from: &str, to: &str, confidence: f64) {
         self.mode_switches.with_label_values(&[from, to]).inc();
         self.mode_switch_confidence.observe(confidence);
+    }
+    /// Dimensional memory: one filed per-dimension summary (adaptive-cognition 03).
+    pub fn on_dimension_summary(&self, dimension: &str, is_new: bool) {
+        self.dimension_summaries
+            .with_label_values(&[dimension, if is_new { "true" } else { "false" }])
+            .inc();
+    }
+    /// Dimensional memory: the per-step summarize-pass wall-clock.
+    pub fn on_dimension_summarize(&self, seconds: f64) {
+        self.dimension_summarize_seconds.observe(seconds);
+    }
+    /// Dimensional memory: a dimension-weighted recall.
+    pub fn on_dimension_recall(&self, dimension: &str) {
+        self.dimension_recalls.with_label_values(&[dimension]).inc();
     }
     /// Review: the whole fact-collection fan-out wall-clock.
     pub fn on_review_collect(&self, seconds: f64) {
@@ -1817,6 +1862,9 @@ mod tests {
         m.on_switch_compaction("implement", "review");
         m.on_tokens_shed("switch", 5000.0);
         m.on_summary_fallback("drop");
+        m.on_dimension_summary("coding", true);
+        m.on_dimension_summarize(0.02);
+        m.on_dimension_recall("coding");
         m.on_authorize("auto-approve", "approved", 0.0001);
         m.on_search_query("tantivy", "literal", 0.002, 5);
         m.observe_reindex("tantivy", 0.5, 120);
@@ -1845,6 +1893,9 @@ mod tests {
             "agent_context_switch_compactions_total",
             "agent_context_tokens_shed",
             "agent_context_summary_fallback_total",
+            "agent_dimension_summaries_total",
+            "agent_dimension_summarize_duration_seconds",
+            "agent_dimension_recall_total",
             "agent_policy_authorize_total",
             "agent_policy_authorize_seconds",
             "agent_search_query_seconds",

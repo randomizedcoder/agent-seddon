@@ -120,3 +120,17 @@ CREATE TABLE IF NOT EXISTS agent.agent_review_collectors
 )
 ENGINE = MergeTree
 ORDER BY (session_id, ts, collector);
+
+-- One row per accepted per-dimension summary (adaptive-cognition 03). Counts and
+-- lengths only — never the summary body — so the dimension distribution and
+-- emergent-slug churn can be analysed offline without storing model text.
+CREATE TABLE IF NOT EXISTS agent.agent_dimension_summaries
+(
+    session_id  String,
+    ts          DateTime64(3, 'UTC'),
+    dimension   String,                         -- safe_segment'd slug (seed or admitted emergent)
+    is_new      UInt8,                          -- proposed as a new dimension
+    summary_len UInt32                          -- length of the summary, not its text
+)
+ENGINE = MergeTree
+ORDER BY (session_id, ts, dimension);

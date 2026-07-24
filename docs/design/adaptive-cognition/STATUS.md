@@ -8,8 +8,8 @@ increment, in dependency order (02 & 03 consume 01's `ModeSwitch`/`current_mode`
 | # | Increment | Seam | Wire | Metrics | Tests | Bench+Leak | Status |
 |---|---|:--:|:--:|:--:|:--:|:--:|:--:|
 | 01 | Mode detection & switching | ✅ | ✅ | ✅ | ✅ | ✅ | **merged** |
-| 02 | Mode-aware compaction | ✅ | ✅ | ✅ | ✅ | ✅ | **in review** |
-| 03 | Dimensional memory | — | — | — | — | — | designed |
+| 02 | Mode-aware compaction | ✅ | ✅ | ✅ | ✅ | ✅ | **merged** |
+| 03 | Dimensional memory | ✅ | ✅ | ✅ | ✅ | ✅ | **in review** |
 
 ## 01 — what shipped
 
@@ -52,6 +52,44 @@ increment, in dependency order (02 & 03 consume 01's `ModeSwitch`/`current_mode`
   metrics; enriched `context.compact`; table-driven + `adversarial_` tests (flagged
   summary dropped, huge message bounded); `mode_aware` partition bench (Ir ceiling) +
   dhat leak. Docs: `docs/components/context.md`.
+
+## 03 — what shipped
+
+- **`FileDimensions`** (`agent-memory`, `memory-dimensions`) + the **`DimensionStore`**
+  seam (`summarize_step` + `recall_dimension`). A cheap per-turn structured-output
+  pass files `{dimension, summary, is_new}` sets into `<semantic_dir>/dimensions/
+  <dim>.md`; a step may touch several axes at once.
+- **Hybrid taxonomy:** the closed seed set (`coding · git · user · project · testing
+  · tooling · docs`) plus emergent slugs admitted only after `K`-recurrence and under
+  `MAX_DIMENSIONS`; pending slugs file under `misc`. Growth bounded three ways
+  (`MAX_DIMS_PER_STEP`, `K`, `MAX_DIMENSIONS`). A size-cap **synthesis** pass
+  re-summarizes an over-large file (fail-soft to truncation).
+- **The bridge to 02:** on a mode switch the runtime recalls the destination mode's
+  dimensions (`recall_dims_for`) and injects them as fresh context — the before/after
+  table's "pull in fresh" column, which makes 02's shed safe.
+- **Fail-soft + opt-in:** off by default (`[dimensions] store`), since the per-step
+  pass is a real local-tier LLM call (unlike mode detection's free prefilter). No
+  provider / dead pool / malformed output ⇒ a no-op.
+- **Security:** emergent slugs pass `safe_segment` (no traversal); summaries are
+  bounded + `scan_for_injection`-screened before persisting (a dimension file is
+  recalled verbatim). The hard episodic log is never rewritten.
+- **Contract:** `dimension.proto` (`DimensionService.Summarize` + `Recall`, additive
+  — no buf baseline bump); `--serve-dimension` server+client; `dimension` port block;
+  `agent_dimension_*` metrics; `memory.dimension.*` spans; `agent_dimension_summaries`
+  ClickHouse table (counts/lengths only); table-driven + `adversarial_` tests;
+  `dimensions` parse bench (Ir ceiling) + dhat leak. Docs: `docs/components/dimensions.md`.
+
+## Deferred (from 03)
+
+- **Dimension-weighted recall via `RecallQuery.dimension`** on the existing
+  `MemoryService` — 03 recalls via the `DimensionStore` seam instead (self-contained,
+  no churn to every `RecallQuery` call site).
+- **Slug-rejected / active-dimension-count metrics** — need store→metrics plumbing;
+  the three core `agent_dimension_*` families ship.
+- **Heavy-tier synthesis routing** — the synthesis pass uses the main provider; a
+  dedicated GLM tier rides the pool when configured.
+- The design's own deferrals: embedding-based dimension recall, learned taxonomy,
+  learned mode→dimension weights.
 
 ## Deferred (from 02)
 

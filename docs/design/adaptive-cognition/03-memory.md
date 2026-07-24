@@ -1,9 +1,16 @@
 # 03 — Dimensional memory
 
-Status: **design / pre-implementation.** Closes the loop from [`01`](01-mode.md) /
-[`02`](02-compaction.md): a mode switch **flushes** the shed transcript into
-per-dimension histories, and **dimension-weighted recall** feeds the "pull in fresh"
-column of `02`'s before/after table.
+Status: **implemented** (`FileDimensions`, `memory-dimensions`) — see
+[`STATUS.md`](STATUS.md). Closes the loop from [`01`](01-mode.md) /
+[`02`](02-compaction.md): a per-step pass files the transcript into per-dimension
+histories, and on a mode switch **dimension-weighted recall** feeds the "pull in
+fresh" column of `02`'s before/after table.
+
+> Implementation notes: recall rides the **`DimensionStore` seam** (`recall_dimension`),
+> not `RecallQuery.dimension` on `MemoryService` as this doc sketched — self-contained,
+> and it avoids churning every `RecallQuery` call site (deferred). The per-step pass is
+> **off by default** (`[dimensions] store`), since it is a real local-tier LLM call per
+> turn, unlike mode detection's free prefilter.
 
 ## Motivation
 

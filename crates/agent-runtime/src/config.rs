@@ -62,6 +62,8 @@ pub struct Config {
     #[serde(default)]
     pub mode: ModeCfg,
     #[serde(default)]
+    pub dimensions: DimensionsCfg,
+    #[serde(default)]
     pub review: ReviewCfg,
     #[serde(default)]
     pub hooks: HooksCfg,
@@ -352,6 +354,23 @@ impl Default for ModeCfg {
             confidence_floor: default_confidence_floor(),
             hysteresis: default_hysteresis(),
         }
+    }
+}
+
+/// Per-step dimensional memory (adaptive-cognition 03). `store` selects the
+/// `DimensionStore` (`""`/`off` = disabled | `file` | `grpc`). **Off by default**:
+/// unlike mode detection's free prefilter, the per-step summarize is a real
+/// (cheap, local-tier) LLM call per turn, so it is opt-in like `[memory] distill`.
+#[derive(Debug, Deserialize, Default)]
+pub struct DimensionsCfg {
+    #[serde(default)]
+    pub store: String,
+}
+
+impl DimensionsCfg {
+    /// Whether a dimensional store is configured.
+    pub fn enabled(&self) -> bool {
+        !self.store.is_empty() && self.store != "off"
     }
 }
 
@@ -1108,6 +1127,8 @@ pub struct GrpcCfg {
     #[serde(default)]
     pub mode: GrpcSeamCfg,
     #[serde(default)]
+    pub dimension: GrpcSeamCfg,
+    #[serde(default)]
     pub review: GrpcSeamCfg,
     /// Not a seam: the `agent --serve-all` gateway, which hosts every enabled
     /// seam's service in one process. Only `listen` is meaningful — a client
@@ -1551,6 +1572,7 @@ impl Config {
             router: RouterCfg::default(),
             pool: PoolCfg::default(),
             mode: ModeCfg::default(),
+            dimensions: DimensionsCfg::default(),
             review: ReviewCfg::default(),
             hooks: HooksCfg::default(),
             skills: SkillsCfg::default(),

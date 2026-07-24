@@ -1,0 +1,43 @@
+// The `DimensionStore` seam over gRPC (adaptive-cognition 03): a cheap per-step
+// pass summarizes recent events **by dimension**, and recall fetches one axis.
+// `Summarize` never errors on a dead pool — it returns an empty `DimensionStep`,
+// so a caller degrades gracefully. All slugs/summaries are validated + bounded
+// server-side (a slug becomes a path component; a summary is recalled verbatim).
+syntax = "proto3";
+
+package agent.v1;
+
+import "agent/v1/common.proto";
+
+// One dimension's summary of a step. `dimension` is a `safe_segment`'d slug;
+// `summary` is bounded + injection-screened before it is persisted.
+message DimensionSummary {
+  string dimension = 1;
+  string summary = 2;
+  bool is_new = 3;
+}
+
+// The accepted per-dimension summaries of a step (capped server-side).
+message DimensionStep {
+  repeated DimensionSummary summaries = 1;
+}
+
+// A recent episodic window to summarize (bounded server-side).
+message SummarizeRequest {
+  repeated MemoryEvent events = 1;
+}
+
+// Recall one dimension's history, most-recent first, capped at `limit`.
+message DimensionRecallRequest {
+  string dimension = 1;
+  uint32 limit = 2;
+}
+
+message DimensionRecallResponse {
+  repeated MemoryItem items = 1;
+}
+
+service DimensionService {
+  rpc Summarize(SummarizeRequest) returns (DimensionStep);
+  rpc Recall(DimensionRecallRequest) returns (DimensionRecallResponse);
+}

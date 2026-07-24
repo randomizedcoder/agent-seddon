@@ -145,6 +145,11 @@ pub const MODE: SeamEndpoint = SeamEndpoint {
     uds_path: "/tmp/agent-seddon/mode.sock",
     metrics_port: 9625,
 };
+pub const DIMENSION: SeamEndpoint = SeamEndpoint {
+    tcp_port: 50076,
+    uds_path: "/tmp/agent-seddon/dimension.sock",
+    metrics_port: 9626,
+};
 
 /// The `agent --serve-all` gateway (not a seam — it hosts every seam).
 pub const GATEWAY: SeamEndpoint = SeamEndpoint {

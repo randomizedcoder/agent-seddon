@@ -6,3 +6,9 @@
 mod file;
 #[cfg(feature = "memory-file")]
 pub use file::{file_memory, FileEpisodic, FileSemantic};
+
+// Per-step dimensional histories (adaptive-cognition 03).
+#[cfg(feature = "memory-dimensions")]
+mod dimensions;
+#[cfg(feature = "memory-dimensions")]
+pub use dimensions::{bench_parse_step, file_dimensions, FileDimensions};
