@@ -7,10 +7,11 @@ use crate::collector::{CollectCtx, CollectorOutput, FactCollector, FactFragment}
 use crate::repo_facts::RepoChangeCollector;
 use crate::signatures::SignatureCollector;
 use crate::style::StyleCollector;
+use crate::summaries::SummaryCollector;
 use crate::util::{safe_rev, safe_segment};
 use agent_core::{
-    fnv1a_hex, CollectStatus, CollectorStatus, Error, Forge, GitState, RepoBackend, Result,
-    ReviewCollector, ReviewFacts, ReviewTarget, Revision, Sandbox, SearchBackend,
+    fnv1a_hex, CollectStatus, CollectorStatus, Error, Forge, GitState, LlmPool, RepoBackend,
+    Result, ReviewCollector, ReviewFacts, ReviewTarget, Revision, Sandbox, SearchBackend,
 };
 use async_trait::async_trait;
 use futures_util::FutureExt;
@@ -62,6 +63,12 @@ pub enum ReviewEvent {
     /// Whether the change conforms to the repo's own style (for the counter).
     Style {
         diff_matches: bool,
+    },
+    /// Summarization accounting (produced/requested/omitted, for metrics).
+    Summaries {
+        requested: u32,
+        produced: u32,
+        omitted: u32,
     },
 }
 
@@ -155,6 +162,13 @@ impl ReviewOrchestrator {
     pub fn with_style(mut self, commit_sample: usize) -> Self {
         self.collectors
             .push(Box::new(StyleCollector { commit_sample }));
+        self
+    }
+
+    /// Enable the cheap-LLM summaries collector (`[review] summaries = true`). Fans
+    /// jobs over the pool; skips fail-soft when no pool / no healthy member.
+    pub fn with_summaries(mut self, pool: Option<Arc<dyn LlmPool>>) -> Self {
+        self.collectors.push(Box::new(SummaryCollector { pool }));
         self
     }
 
@@ -320,6 +334,14 @@ impl ReviewCollector for ReviewOrchestrator {
                         diff_matches: style.diff_matches_style,
                     });
                     facts.style = style;
+                }
+                Some(FactFragment::Summaries { report }) => {
+                    self.emit(ReviewEvent::Summaries {
+                        requested: report.requested,
+                        produced: report.produced,
+                        omitted: report.omitted,
+                    });
+                    facts.summaries = report;
                 }
                 None => {}
             }

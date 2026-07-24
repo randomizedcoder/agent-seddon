@@ -70,6 +70,10 @@ too but are telemetry-local (no service).
 >   `ReviewStyleFacts` → `ReviewFacts` field 7 (`CaseStyle` is a **string** verdict,
 >   not a proto enum, matching the other review messages). A dedicated
 >   `style.proto`/`StyleService` stays deferred. See [`07`](code-style.md).
+> - **08 (summaries):** `ReviewFunctionSummary`, `ReviewSummaryReport` →
+>   `ReviewFacts` field 8 (the one **soft** field). Function identity is `name`/`file`
+>   (not a `CallGraph.fn_id` — collectors run in parallel). `SummarizerService` +
+>   `before_hash`/`after_hash` caching stay deferred. See [`08`](summarization.md).
 >
 > All additive (no baseline bump); round-trip tested through `FactCollectorService`.
 

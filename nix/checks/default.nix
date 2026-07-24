@@ -73,4 +73,8 @@
   # house style; assert the `Code style` section reports the right verdicts. Pure
   # in-process (counting over blobs + commit log); offline, no toolchain.
   review-style = import ./review-style.nix { inherit pkgs agent; };
+  # Cheap-LLM summaries fail-soft coverage: with an empty pool the collector must
+  # skip cleanly (no Summaries section, hard facts intact). The happy path is proven
+  # offline by the in-process FakePool test (summaries_e2e.rs).
+  review-summaries = import ./review-summaries.nix { inherit pkgs agent; };
 }

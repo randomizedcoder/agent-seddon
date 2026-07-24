@@ -28,7 +28,7 @@ followed).
 | 05 | Static analysis (Go + Rust) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 | 06 | AST & call-graph | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 | 07 | Code-style fingerprint | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
-| 08 | Cheap-LLM summaries | ✅ | ✅ | ✅ | ⬜ | ⬜ | ⬜ | — |
+| 08 | Cheap-LLM summaries | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 | 09 | Grounded context + recording | ✅ | ✅ | ✅ | ⬜ | n/a | ⬜ | — |
 | 10 | Wire contracts (consolidation) | ✅ | — | — | — | — | — | — |
 | 11 | Observability (consolidation) | ✅ | — | — | — | — | — | — |
@@ -66,6 +66,25 @@ are not separate increments — each increment lands its own slice of both.
 
 ## Change log
 
+- **2026-07-23** — **Cheap-LLM summaries (increment 9, component 08).** The first
+  **soft** collector and the first to reach the LLM pool. `SummaryCollector` reads
+  the base+head blobs of each changed Go/Rust file, extracts each function's full
+  body (brace-balanced, reusing the signature decl regexes), diffs by name → jobs for
+  modified (before→after) + added functions, and fans them concurrently over the pool
+  (`pool.complete`, bounded prompt) → `FunctionSummary { name, file, kind, summary,
+  model, duration_ms }`. Bounded + fail-soft exactly as designed: `MAX_JOBS = 20` with
+  a recorded `omitted`, per-side source capped, summary prose capped (untrusted model
+  output); no pool / no healthy member (`health()` pre-check) / dead job ⇒ fewer/zero
+  summaries + a recorded count, never a blocked bundle. Rendered as a `Summaries
+  (soft — model-generated, P/R)` section, explicitly labelled soft. Default-on
+  (`[review] summaries = true`). Wire: additive `ReviewFunctionSummary` /
+  `ReviewSummaryReport` + `ReviewFacts` field 8 (round-trip tested; no baseline bump).
+  Metric `agent_review_summaries_total{outcome}` via `ReviewEvent::Summaries`. Proven
+  offline by an in-process `FakePool` integration test (`summaries_e2e.rs`: produced +
+  rendered soft, no-pool skip, dead-pool skip) + the hermetic `review-summaries` gate
+  (pool-absent skip through the real binary). Simplified: single `summary` field,
+  `name`/`file` identity (not `fn_id` — parallel collectors); before/after prose,
+  confidence, hash-caching, ensemble, `SummarizerService` deferred.
 - **2026-07-23** — **Code-style fingerprint (increment 8, component 07).** A pure
   in-process `StyleCollector` folds a deterministic house-style fingerprint into
   `ReviewFacts.style` — no external tool, no model. Over the repo's source files at

@@ -3728,8 +3728,40 @@ pub struct StyleFacts {
     pub files_scanned: u32,
 }
 
+/// A cheap-LLM summary of one changed function (component 08 — the one **soft**
+/// fact). Model-generated prose, clearly labelled and bounded; it never overwrites a
+/// hard fact. `name`/`file` tie it to the change; `model` records which pool member
+/// produced it (for weighting), never trusted.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FunctionSummary {
+    pub name: String,
+    /// Repo-relative path (confined).
+    pub file: String,
+    /// `added` | `modified`.
+    pub kind: String,
+    /// Bounded soft prose — what the change does.
+    pub summary: String,
+    /// Which pool member produced it.
+    pub model: String,
+    pub duration_ms: u32,
+}
+
+/// The summarization contribution to a review: the produced summaries + honest
+/// accounting (`requested`/`produced`/`omitted`). Empty when off / no pool /
+/// no changed functions.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SummaryReport {
+    pub summaries: Vec<FunctionSummary>,
+    pub requested: u32,
+    pub produced: u32,
+    /// Changed functions past the job cap — truncation is a recorded fact.
+    pub omitted: u32,
+}
+
 /// The grounded fact bundle a reviewer reasons over. Everything here is a hard
-/// fact from a tool. Later increments add summaries / recording as additional fields.
+/// fact from a tool — except `summaries`, the one soft (model-generated) field,
+/// which is clearly labelled and never overwrites a fact. Later increments add
+/// recording.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ReviewFacts {
     pub meta: ReviewMeta,
@@ -3747,6 +3779,9 @@ pub struct ReviewFacts {
     /// Code-style fingerprint (increment 7). `files_scanned == 0` ⇒ off/not run.
     #[serde(default)]
     pub style: StyleFacts,
+    /// Cheap-LLM function summaries (increment 8) — soft. Empty when off / no pool.
+    #[serde(default)]
+    pub summaries: SummaryReport,
 }
 
 /// Runs a fan-out of deterministic collectors into a grounded [`ReviewFacts`].
