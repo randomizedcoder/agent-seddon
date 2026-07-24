@@ -1919,6 +1919,9 @@ pub(crate) fn record_review_event(m: &Metrics, ev: agent_review::ReviewEvent) {
         ReviewEvent::CallGraph { nodes, edges } => {
             m.on_review_callgraph(nodes as f64, edges as f64);
         }
+        ReviewEvent::Style { diff_matches } => {
+            m.on_review_style(diff_matches);
+        }
     }
 }
 

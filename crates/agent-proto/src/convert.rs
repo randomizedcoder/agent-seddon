@@ -2868,6 +2868,81 @@ impl From<pb::ReviewCallGraph> for agent_core::CallGraph {
     }
 }
 
+impl From<agent_core::NamingFacts> for pb::ReviewNamingFacts {
+    fn from(n: agent_core::NamingFacts) -> Self {
+        pb::ReviewNamingFacts {
+            functions: n.functions,
+            variables: n.variables,
+            constants: n.constants,
+            exported_ratio: n.exported_ratio,
+        }
+    }
+}
+impl From<pb::ReviewNamingFacts> for agent_core::NamingFacts {
+    fn from(n: pb::ReviewNamingFacts) -> Self {
+        agent_core::NamingFacts {
+            functions: n.functions,
+            variables: n.variables,
+            constants: n.constants,
+            exported_ratio: n.exported_ratio,
+        }
+    }
+}
+
+impl From<agent_core::CommitStyleFacts> for pb::ReviewCommitStyleFacts {
+    fn from(c: agent_core::CommitStyleFacts) -> Self {
+        pb::ReviewCommitStyleFacts {
+            conventional_ratio: c.conventional_ratio,
+            subject_len_p50: c.subject_len_p50,
+            subject_len_p95: c.subject_len_p95,
+            body_present_ratio: c.body_present_ratio,
+            sampled_commits: c.sampled_commits,
+        }
+    }
+}
+impl From<pb::ReviewCommitStyleFacts> for agent_core::CommitStyleFacts {
+    fn from(c: pb::ReviewCommitStyleFacts) -> Self {
+        agent_core::CommitStyleFacts {
+            conventional_ratio: c.conventional_ratio,
+            subject_len_p50: c.subject_len_p50,
+            subject_len_p95: c.subject_len_p95,
+            body_present_ratio: c.body_present_ratio,
+            sampled_commits: c.sampled_commits,
+        }
+    }
+}
+
+impl From<agent_core::StyleFacts> for pb::ReviewStyleFacts {
+    fn from(s: agent_core::StyleFacts) -> Self {
+        pb::ReviewStyleFacts {
+            comment_density: s.comment_density,
+            doccomment_ratio: s.doccomment_ratio,
+            indent_tabs: s.indent_tabs,
+            line_len_p95: s.line_len_p95,
+            fn_len_median: s.fn_len_median,
+            naming: Some(s.naming.into()),
+            commits: Some(s.commits.into()),
+            diff_matches_style: s.diff_matches_style,
+            files_scanned: s.files_scanned,
+        }
+    }
+}
+impl From<pb::ReviewStyleFacts> for agent_core::StyleFacts {
+    fn from(s: pb::ReviewStyleFacts) -> Self {
+        agent_core::StyleFacts {
+            comment_density: s.comment_density,
+            doccomment_ratio: s.doccomment_ratio,
+            indent_tabs: s.indent_tabs,
+            line_len_p95: s.line_len_p95,
+            fn_len_median: s.fn_len_median,
+            naming: s.naming.map(Into::into).unwrap_or_default(),
+            commits: s.commits.map(Into::into).unwrap_or_default(),
+            diff_matches_style: s.diff_matches_style,
+            files_scanned: s.files_scanned,
+        }
+    }
+}
+
 impl From<agent_core::ReviewFacts> for pb::ReviewFacts {
     fn from(f: agent_core::ReviewFacts) -> Self {
         pb::ReviewFacts {
@@ -2877,6 +2952,7 @@ impl From<agent_core::ReviewFacts> for pb::ReviewFacts {
             analysis: Some(f.analysis.into()),
             signatures: Some(f.signatures.into()),
             callgraph: Some(f.callgraph.into()),
+            style: Some(f.style.into()),
         }
     }
 }
@@ -2889,6 +2965,7 @@ impl From<pb::ReviewFacts> for agent_core::ReviewFacts {
             analysis: f.analysis.map(Into::into).unwrap_or_default(),
             signatures: f.signatures.map(Into::into).unwrap_or_default(),
             callgraph: f.callgraph.map(Into::into).unwrap_or_default(),
+            style: f.style.map(Into::into).unwrap_or_default(),
         }
     }
 }

@@ -13,6 +13,7 @@ mod collector;
 mod orchestrator;
 mod repo_facts;
 mod signatures;
+mod style;
 mod util;
 
 pub use classifier::HybridClassifier;
@@ -115,6 +116,9 @@ pub fn render_facts_with(facts: &ReviewFacts, budget_bytes: usize) -> String {
     // the diffs. Per-tool run summary, then findings with changed-file hits first.
     render_analysis(&mut out, &facts.analysis);
 
+    // House-style fingerprint — so the review respects the repo's conventions.
+    render_style(&mut out, &facts.style);
+
     // Diff hunks — fill the remaining budget; omit (with a count) what doesn't fit.
     let with_patch: Vec<&agent_core::ChangedFile> =
         ch.files.iter().filter(|f| !f.patch.is_empty()).collect();
@@ -165,6 +169,48 @@ fn render_signatures(out: &mut String, report: &agent_core::SignatureReport) {
     if report.truncated {
         out.push_str("    … more signature changes omitted (cap reached)\n");
     }
+}
+
+/// Render the house-style fingerprint as compact facts (ratios + verdicts). Nothing
+/// is emitted if the collector didn't run (`files_scanned == 0`).
+fn render_style(out: &mut String, s: &agent_core::StyleFacts) {
+    if s.files_scanned == 0 {
+        return;
+    }
+    let indent = if s.indent_tabs { "tabs" } else { "spaces" };
+    out.push_str(&format!(
+        "\nCode style ({} files sampled):\n",
+        s.files_scanned
+    ));
+    out.push_str(&format!(
+        "  indent {} · comment density {:.2} (doc {:.0}%) · line p95 {} · fn median {} lines\n",
+        indent,
+        s.comment_density,
+        s.doccomment_ratio * 100.0,
+        s.line_len_p95,
+        s.fn_len_median,
+    ));
+    out.push_str(&format!(
+        "  naming: fn {} · var {} · const {} · {:.0}% exported\n",
+        s.naming.functions,
+        s.naming.variables,
+        s.naming.constants,
+        s.naming.exported_ratio * 100.0,
+    ));
+    if s.commits.sampled_commits > 0 {
+        out.push_str(&format!(
+            "  commits ({} sampled): {:.0}% conventional · subject p50/p95 {}/{} · {:.0}% with body\n",
+            s.commits.sampled_commits,
+            s.commits.conventional_ratio * 100.0,
+            s.commits.subject_len_p50,
+            s.commits.subject_len_p95,
+            s.commits.body_present_ratio * 100.0,
+        ));
+    }
+    out.push_str(&format!(
+        "  change conforms to repo style: {}\n",
+        if s.diff_matches_style { "yes" } else { "no" }
+    ));
 }
 
 /// The most changed functions rendered with their blast radius.

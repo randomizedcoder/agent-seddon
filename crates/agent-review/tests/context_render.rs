@@ -46,6 +46,7 @@ fn facts(files: Vec<ChangedFile>, commits: Vec<ReviewCommit>) -> ReviewFacts {
         analysis: Default::default(),
         signatures: Default::default(),
         callgraph: Default::default(),
+        style: Default::default(),
     }
 }
 

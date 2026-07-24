@@ -6,6 +6,7 @@ use crate::callgraph::CallGraphCollector;
 use crate::collector::{CollectCtx, CollectorOutput, FactCollector, FactFragment};
 use crate::repo_facts::RepoChangeCollector;
 use crate::signatures::SignatureCollector;
+use crate::style::StyleCollector;
 use crate::util::{safe_rev, safe_segment};
 use agent_core::{
     fnv1a_hex, CollectStatus, CollectorStatus, Error, Forge, GitState, RepoBackend, Result,
@@ -57,6 +58,10 @@ pub enum ReviewEvent {
     CallGraph {
         nodes: u32,
         edges: u32,
+    },
+    /// Whether the change conforms to the repo's own style (for the counter).
+    Style {
+        diff_matches: bool,
     },
 }
 
@@ -142,6 +147,14 @@ impl ReviewOrchestrator {
         self.collectors.push(Box::new(CallGraphCollector {
             timeout_secs: timeout_secs.max(1),
         }));
+        self
+    }
+
+    /// Enable the code-style collector (`[review] style = true`). Pure in-process
+    /// (blob reads + counting + commit log); bounded by the fan-out deadline.
+    pub fn with_style(mut self, commit_sample: usize) -> Self {
+        self.collectors
+            .push(Box::new(StyleCollector { commit_sample }));
         self
     }
 
@@ -301,6 +314,12 @@ impl ReviewCollector for ReviewOrchestrator {
                         edges: graph.edges.len().min(u32::MAX as usize) as u32,
                     });
                     facts.callgraph = graph;
+                }
+                Some(FactFragment::Style { facts: style }) => {
+                    self.emit(ReviewEvent::Style {
+                        diff_matches: style.diff_matches_style,
+                    });
+                    facts.style = style;
                 }
                 None => {}
             }

@@ -66,6 +66,10 @@ too but are telemetry-local (no service).
 >   `ReviewPackageShape`, `ReviewCallGraph` → `ReviewFacts` field 6. The precise
 >   `x/tools` graph + a dedicated `ast.proto`/`AstService` stay the deferred target.
 >   See [`06`](ast-callgraph.md).
+> - **07 (code-style):** `ReviewNamingFacts`, `ReviewCommitStyleFacts`,
+>   `ReviewStyleFacts` → `ReviewFacts` field 7 (`CaseStyle` is a **string** verdict,
+>   not a proto enum, matching the other review messages). A dedicated
+>   `style.proto`/`StyleService` stays deferred. See [`07`](code-style.md).
 >
 > All additive (no baseline bump); round-trip tested through `FactCollectorService`.
 

@@ -178,6 +178,36 @@ message ReviewCallGraph {
   bool truncated = 5;
 }
 
+// Naming-convention verdicts (case-style strings, not identifier lists).
+message ReviewNamingFacts {
+  string functions = 1;
+  string variables = 2;
+  string constants = 3;
+  float exported_ratio = 4;
+}
+
+message ReviewCommitStyleFacts {
+  float conventional_ratio = 1;
+  uint32 subject_len_p50 = 2;
+  uint32 subject_len_p95 = 3;
+  float body_present_ratio = 4;
+  uint32 sampled_commits = 5;
+}
+
+// A deterministic house-style fingerprint — distributions/ratios only, no source
+// or identifiers. `files_scanned == 0` ⇒ the collector did not run.
+message ReviewStyleFacts {
+  float comment_density = 1;
+  float doccomment_ratio = 2;
+  bool indent_tabs = 3;
+  uint32 line_len_p95 = 4;
+  uint32 fn_len_median = 5;
+  ReviewNamingFacts naming = 6;
+  ReviewCommitStyleFacts commits = 7;
+  bool diff_matches_style = 8;
+  uint32 files_scanned = 9;
+}
+
 message ReviewFacts {
   ReviewMeta meta = 1;
   ReviewChangeSet change = 2;
@@ -185,4 +215,5 @@ message ReviewFacts {
   ReviewAnalysisReport analysis = 4;
   ReviewSignatureReport signatures = 5;
   ReviewCallGraph callgraph = 6;
+  ReviewStyleFacts style = 7;
 }

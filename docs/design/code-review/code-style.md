@@ -1,6 +1,43 @@
 # 07 — Code-style fingerprint
 
-Status: **design / pre-implementation.**
+Status: **implemented** (increment 8). A `StyleCollector` folds a deterministic
+fingerprint into `ReviewFacts.style`. See **Implementation** below.
+
+## Implementation (increment 8)
+
+- **`StyleCollector`** (`agent-review/src/style.rs`), a pure in-process
+  `FactCollector` — no external tool. It reads the repo's source files at head
+  (`RepoBackend::read_file` over the `Manifest::scan` / search-index file set,
+  bounded to `MAX_FILES = 200` blobs, skipping binary/oversized/noisy) and counts:
+  **comment density** + doc-comment ratio (per-language line/block comment
+  detection), **indentation** (tabs vs spaces), **line-length p95** (fixed-size
+  histogram, so a 10 MB minified line can't OOM), **fn-length median** (brace-balanced
+  spans, Go/Rust), **naming case** per decl-kind (functions/variables/constants via
+  `regex`, majority-voted into a `CaseStyle` verdict) + **exported ratio**, and
+  **commit-message style** over `RepoBackend::log` (conventional-commit ratio,
+  subject p50/p95, body-present ratio; sample clamped).
+- **`diff_matches_style`**: recomputes indentation + function-naming over the
+  *changed* files and compares to the baseline — "does the PR follow the repo's own
+  conventions?" (benefit of the doubt unless both sides exist and disagree).
+- Rendered as a compact **`Code style`** section (ratios + verdicts, no identifiers).
+  **Default-on** (`[review] style = true`, `style_commit_sample = 50`), fail-soft
+  (`files_scanned == 0` ⇒ skipped / not rendered), bounded. Verdicts are **strings**
+  (`camel`/`pascal`/`snake`/`screaming_snake`/`mixed`/`unknown`), not a proto enum,
+  matching the other review messages.
+- **Wire:** additive `ReviewNamingFacts` / `ReviewCommitStyleFacts` /
+  `ReviewStyleFacts` + `ReviewFacts` field 7 (rides `FactCollectorService`,
+  round-trip tested; no baseline bump). **Metric:**
+  `agent_review_style_diff_conformance_total{matches}` via `ReviewEvent::Style`.
+  **Gate:** hermetic `nix/checks/review-style.nix` (a Go repo with a deliberate
+  consistent style — tab-indented, PascalCase, conventional commits — asserted
+  offline) + unit tests incl. `adversarial_` (10 MB line bounded, no OOM).
+
+**Deferred:** reusing 06's AST nodes for naming (uses `regex` tokens instead — the
+documented fallback); per-facet confidence weighting by sample size; a dedicated
+`StyleService`/`--serve-style`; language-specific idiom checks (05's linters already
+cover the enforceable ones).
+
+---
 
 A **deterministic** fingerprint of the repo's house style, so the review respects
 existing conventions instead of imposing generic ones. Every fact here is

@@ -194,6 +194,28 @@ impl ReviewCollector for FakeReview {
                 }],
                 truncated: false,
             },
+            style: agent_core::StyleFacts {
+                comment_density: 0.25,
+                doccomment_ratio: 0.8,
+                indent_tabs: true,
+                line_len_p95: 92,
+                fn_len_median: 7,
+                naming: agent_core::NamingFacts {
+                    functions: "pascal".into(),
+                    variables: "camel".into(),
+                    constants: "screaming_snake".into(),
+                    exported_ratio: 0.5,
+                },
+                commits: agent_core::CommitStyleFacts {
+                    conventional_ratio: 0.9,
+                    subject_len_p50: 48,
+                    subject_len_p95: 70,
+                    body_present_ratio: 0.6,
+                    sampled_commits: 20,
+                },
+                diff_matches_style: true,
+                files_scanned: 12,
+            },
         })
     }
 }
@@ -270,6 +292,12 @@ async fn review_collect_roundtrips(#[case] transport: Transport) {
     assert_eq!(facts.callgraph.edges[0].callee_id, 1);
     assert_eq!(facts.callgraph.changed_fns, vec![1]);
     assert_eq!(facts.callgraph.packages[0].exported_fns, 1);
+    // Style fingerprint survives the wire round-trip.
+    assert!(facts.style.indent_tabs);
+    assert_eq!(facts.style.naming.functions, "pascal");
+    assert_eq!(facts.style.commits.sampled_commits, 20);
+    assert_eq!(facts.style.files_scanned, 12);
+    assert!(facts.style.diff_matches_style);
 }
 
 /// A PR target survives the encode/decode round-trip through the wire string.

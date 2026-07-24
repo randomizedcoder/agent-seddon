@@ -3685,8 +3685,51 @@ pub struct CallGraph {
     pub truncated: bool,
 }
 
+/// Naming-convention verdicts (increment 7 — code-style fingerprint). Each field is
+/// a `CaseStyle` verdict string (`camel`/`pascal`/`snake`/`screaming_snake`/`mixed`/
+/// `unknown`), never a list of identifiers — a fingerprint, not the source.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NamingFacts {
+    pub functions: String,
+    pub variables: String,
+    pub constants: String,
+    /// Exported ÷ total top-level functions.
+    pub exported_ratio: f32,
+}
+
+/// Commit-message conventions over a bounded, recent history sample.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CommitStyleFacts {
+    /// Share of subjects matching a `type:`/`type(scope):` conventional prefix.
+    pub conventional_ratio: f32,
+    pub subject_len_p50: u32,
+    pub subject_len_p95: u32,
+    pub body_present_ratio: f32,
+    pub sampled_commits: u32,
+}
+
+/// A deterministic fingerprint of the repo's house style — distributions and
+/// ratios, never raw lines or identifiers. `files_scanned == 0` means the collector
+/// did not run (off / no readable source).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StyleFacts {
+    /// Comment lines ÷ code lines.
+    pub comment_density: f32,
+    /// Leading (doc) comments ÷ all comments.
+    pub doccomment_ratio: f32,
+    /// Indentation is predominantly tabs (vs spaces).
+    pub indent_tabs: bool,
+    pub line_len_p95: u32,
+    pub fn_len_median: u32,
+    pub naming: NamingFacts,
+    pub commits: CommitStyleFacts,
+    /// Do the changed files follow the repo's own indent + function-naming?
+    pub diff_matches_style: bool,
+    pub files_scanned: u32,
+}
+
 /// The grounded fact bundle a reviewer reasons over. Everything here is a hard
-/// fact from a tool. Later increments add style / summaries as additional fields.
+/// fact from a tool. Later increments add summaries / recording as additional fields.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ReviewFacts {
     pub meta: ReviewMeta,
@@ -3701,6 +3744,9 @@ pub struct ReviewFacts {
     /// Call graph + blast radius (increment 6). Empty when off/no Go source changed.
     #[serde(default)]
     pub callgraph: CallGraph,
+    /// Code-style fingerprint (increment 7). `files_scanned == 0` ⇒ off/not run.
+    #[serde(default)]
+    pub style: StyleFacts,
 }
 
 /// Runs a fan-out of deterministic collectors into a grounded [`ReviewFacts`].

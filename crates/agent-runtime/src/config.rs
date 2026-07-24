@@ -349,6 +349,13 @@ pub struct ReviewCfg {
     /// Timeout for the call-graph helper (seconds). Bounds a large-repo walk.
     #[serde(default = "default_callgraph_timeout")]
     pub callgraph_timeout_secs: u64,
+    /// Run the code-style fingerprint collector. On by default; pure in-process,
+    /// deadline-bounded.
+    #[serde(default = "default_true")]
+    pub style: bool,
+    /// How many recent commits to sample for commit-message style facts (clamped).
+    #[serde(default = "default_style_commit_sample")]
+    pub style_commit_sample: usize,
 }
 
 impl Default for ReviewCfg {
@@ -364,6 +371,8 @@ impl Default for ReviewCfg {
             signatures: true,
             callgraph: true,
             callgraph_timeout_secs: default_callgraph_timeout(),
+            style: true,
+            style_commit_sample: default_style_commit_sample(),
         }
     }
 }
@@ -382,6 +391,9 @@ fn default_analyze_timeout() -> u64 {
 }
 fn default_callgraph_timeout() -> u64 {
     30
+}
+fn default_style_commit_sample() -> usize {
+    50
 }
 
 /// Live web search (the `WebSearch` seam, parity spec 12). `backends` lists the

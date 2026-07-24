@@ -69,4 +69,8 @@
   # and the callee changes; assert the `Call graph` blast-radius section shows the
   # caller. Uses the flake-built `agent-go-ast` helper on PATH; offline.
   review-callgraph = import ./review-callgraph.nix { inherit pkgs agent go-ast; };
+  # Code-style fingerprint coverage: a small Go repo with a deliberate consistent
+  # house style; assert the `Code style` section reports the right verdicts. Pure
+  # in-process (counting over blobs + commit log); offline, no toolchain.
+  review-style = import ./review-style.nix { inherit pkgs agent; };
 }

@@ -89,6 +89,7 @@ pub struct Metrics {
     review_signatures: IntCounterVec,
     review_callgraph_nodes: Histogram,
     review_callgraph_edges: Histogram,
+    review_style_conformance: IntCounterVec,
     web_searches: IntCounterVec,
     web_search_seconds: HistogramVec,
     web_search_results: IntCounterVec,
@@ -390,6 +391,14 @@ impl Metrics {
             "agent_review_callgraph_edges",
             "Edge count of a review's call graph",
         ))
+        .unwrap();
+        let review_style_conformance = IntCounterVec::new(
+            Opts::new(
+                "agent_review_style_diff_conformance_total",
+                "Whether a change matched the repo's own style, by outcome",
+            ),
+            &["matches"],
+        )
         .unwrap();
         let web_searches = IntCounterVec::new(
             Opts::new(
@@ -800,6 +809,7 @@ impl Metrics {
             Box::new(review_signatures.clone()),
             Box::new(review_callgraph_nodes.clone()),
             Box::new(review_callgraph_edges.clone()),
+            Box::new(review_style_conformance.clone()),
             Box::new(web_searches.clone()),
             Box::new(web_search_seconds.clone()),
             Box::new(web_search_results.clone()),
@@ -895,6 +905,7 @@ impl Metrics {
             review_signatures,
             review_callgraph_nodes,
             review_callgraph_edges,
+            review_style_conformance,
             web_searches,
             web_search_seconds,
             web_search_results,
@@ -1098,6 +1109,11 @@ impl Metrics {
     pub fn on_review_callgraph(&self, nodes: f64, edges: f64) {
         self.review_callgraph_nodes.observe(nodes);
         self.review_callgraph_edges.observe(edges);
+    }
+    /// Review: whether a change conformed to the repo's own style.
+    pub fn on_review_style(&self, matches: bool) {
+        let v = if matches { "true" } else { "false" };
+        self.review_style_conformance.with_label_values(&[v]).inc();
     }
     /// One web search: outcome, latency, and result count (parity spec 12).
     pub fn on_web_search(&self, backend: &str, outcome: &str, seconds: f64, results: u64) {
