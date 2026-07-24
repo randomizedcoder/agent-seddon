@@ -60,6 +60,8 @@ pub struct Config {
     #[serde(default)]
     pub pool: PoolCfg,
     #[serde(default)]
+    pub mode: ModeCfg,
+    #[serde(default)]
     pub review: ReviewCfg,
     #[serde(default)]
     pub hooks: HooksCfg,
@@ -311,6 +313,46 @@ fn default_probe_interval() -> u64 {
 }
 fn default_probe_timeout() -> u64 {
     3
+}
+
+/// General task-mode detection (`docs/design/adaptive-cognition/01-mode.md`). The
+/// classifier runs every turn; a switch updates the session mode and is recorded.
+/// `classifier` selects the `TaskClassifier` (`hybrid` | `""` off). ON by default —
+/// with no `[pool]` configured only the free deterministic prefilter runs, so the
+/// per-turn cost is near zero.
+#[derive(Debug, Deserialize)]
+pub struct ModeCfg {
+    #[serde(default = "default_mode_classifier")]
+    pub classifier: String,
+    /// A candidate mode must reach this confidence to be *considered* a switch.
+    #[serde(default = "default_confidence_floor")]
+    pub confidence_floor: f32,
+    /// Consecutive turns a new mode must win to switch on a non-decisive signal
+    /// (a decisive deterministic hit switches immediately). Guards against thrash.
+    #[serde(default = "default_hysteresis")]
+    pub hysteresis: usize,
+}
+
+fn default_mode_classifier() -> String {
+    "hybrid".to_string()
+}
+
+fn default_confidence_floor() -> f32 {
+    0.6
+}
+
+fn default_hysteresis() -> usize {
+    2
+}
+
+impl Default for ModeCfg {
+    fn default() -> Self {
+        Self {
+            classifier: default_mode_classifier(),
+            confidence_floor: default_confidence_floor(),
+            hysteresis: default_hysteresis(),
+        }
+    }
 }
 
 /// Code review flow (`docs/design/code-review/`). `backend` selects the
@@ -1064,6 +1106,8 @@ pub struct GrpcCfg {
     #[serde(default)]
     pub llm_pool: GrpcSeamCfg,
     #[serde(default)]
+    pub mode: GrpcSeamCfg,
+    #[serde(default)]
     pub review: GrpcSeamCfg,
     /// Not a seam: the `agent --serve-all` gateway, which hosts every enabled
     /// seam's service in one process. Only `listen` is meaningful — a client
@@ -1506,6 +1550,7 @@ impl Config {
             web_search: WebSearchCfg::default(),
             router: RouterCfg::default(),
             pool: PoolCfg::default(),
+            mode: ModeCfg::default(),
             review: ReviewCfg::default(),
             hooks: HooksCfg::default(),
             skills: SkillsCfg::default(),

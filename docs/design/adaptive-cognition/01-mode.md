@@ -1,6 +1,10 @@
 # 01 — Mode detection & switching
 
-Status: **design / pre-implementation.** Supersedes
+Status: **implemented** (detect + record; acts via the review hand-off — see
+[`STATUS.md`](STATUS.md)). The shipped seam is documented at
+[`docs/components/mode.md`](../../components/mode.md); this doc remains the design
+rationale. Mode-aware compaction (02) and dimensional memory (03) are the remaining
+consumers. Supersedes
 [`../code-review/mode-detection.md`](../code-review/mode-detection.md), which
 designed one-shot review detection; that doc's `TaskMode`/`TaskClassifier` seam
 **shipped** (its own status line is now stale). This doc generalises it to a

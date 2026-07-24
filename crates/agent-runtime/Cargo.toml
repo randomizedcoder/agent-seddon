@@ -37,6 +37,7 @@ default = [
     "web-search",
     "provider-router",
     "provider-pool",
+    "mode",
     "review",
     "session-export",
     "skill-write",
@@ -53,9 +54,13 @@ provider-router = ["agent-providers/provider-router"]
 # LlmPool: a health-checked, tiered pool with parallel fan-out (implies router).
 # See docs/design/code-review/llm-pool.md.
 provider-pool = ["provider-router", "agent-providers/provider-pool"]
-# Code review flow: the TaskClassifier + ReviewCollector seams. Needs `git` for
-# the RepoBackend the collector reads. See docs/design/code-review/.
-review = ["dep:agent-review", "git"]
+# General task-mode detection (the TaskClassifier seam), always-on. See
+# docs/design/adaptive-cognition/01-mode.md.
+mode = ["dep:agent-mode"]
+# Code review flow: the ReviewCollector seam. Needs `git` for the RepoBackend the
+# collector reads, and `mode` because the in-loop hand-off reads the current mode.
+# See docs/design/code-review/.
+review = ["dep:agent-review", "git", "mode"]
 tool-core = ["agent-tools/tool-core"]
 tool-edit = ["agent-tools/tool-edit"]
 tool-patch = ["agent-tools/tool-patch"]
@@ -169,6 +174,7 @@ agent-verifier = { workspace = true, optional = true }
 agent-cache = { workspace = true, optional = true }
 agent-web-search = { workspace = true, optional = true }
 agent-forge = { workspace = true, optional = true }
+agent-mode = { workspace = true, optional = true }
 agent-review = { workspace = true, optional = true }
 agent-scheduler = { workspace = true, optional = true }
 agent-pty = { workspace = true, optional = true }

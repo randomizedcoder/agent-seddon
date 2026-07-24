@@ -1,15 +1,15 @@
-//! Code-review flow: task-mode detection + grounded fact collection.
+//! Code-review flow: grounded fact collection.
 //!
-//! Implements the `agent-core` review seams — [`agent_core::TaskClassifier`]
-//! ([`HybridClassifier`]) and [`agent_core::ReviewCollector`]
+//! Implements the `agent-core` [`agent_core::ReviewCollector`] seam
 //! ([`ReviewOrchestrator`]). Everything here is deterministic over injected trait
-//! objects; the model is only ever asked to *vote* on the task mode, never to
-//! supply a fact. See `docs/design/code-review/`.
+//! objects; the model is only ever asked to summarize, never to supply a fact.
+//! Task-mode detection (which decides when work *is* a review) is a general
+//! capability that now lives in `agent-mode`. See `docs/design/code-review/` and
+//! `docs/design/adaptive-cognition/01-mode.md`.
 
 mod analyzer;
 mod callgraph;
 mod churn;
-mod classifier;
 mod cochange;
 mod collector;
 mod orchestrator;
@@ -21,7 +21,6 @@ mod style;
 mod summaries;
 mod util;
 
-pub use classifier::HybridClassifier;
 pub use orchestrator::{ReviewEvent, ReviewObserver, ReviewOrchestrator};
 
 use agent_core::ReviewFacts;

@@ -99,4 +99,8 @@
   # Recording coverage: `agent --review` must persist a ReviewRecord to
   # episodic.jsonl (the durable fallback for the agent_reviews table). Offline.
   review-recording = import ./review-recording.nix { inherit pkgs agent; };
+  # General mode-detection coverage (docs/design/adaptive-cognition/01-mode.md):
+  # `agent --detect-mode` classifies each taxonomy cue via the deterministic
+  # prefilter (no pool, no model). Offline, no toolchain.
+  mode-detect = import ./mode-detect.nix { inherit pkgs agent; };
 }
