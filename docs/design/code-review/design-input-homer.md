@@ -162,11 +162,15 @@ diff-scoped), semantic (needs the full populated graph).
 One PR per collector, same cadence as 05–09 — fail-soft, `adversarial_`-tested,
 hermetically gated:
 
-1. **`CoChangeCollector`** — highest value, self-contained, no new toolchain.
-2. **`ChurnCollector`** (bus factor + churn velocity) — pure git; feeds #3.
+1. ✅ **`CoChangeCollector`** — highest value, self-contained, no new toolchain. *(PR #110.)*
+2. ✅ **`ChurnCollector`** (bus factor + churn velocity) — pure git; feeds #3. *(This PR.)*
 3. **Salience ranking** folded into `CallGraphCollector` (PageRank + `classify_salience`).
 4. **`ReviewRisk`** synthesiser + `--review --gate` mode (one canonical formula over 1–3).
 5. **Tree-sitter extractor** — the multi-language upgrade for signatures + call-graph (separate track).
+
+Both #1 and #2 mine **prior** history from `base` (not `head`) via the shared
+`RepoBackend::log_touched` reader, so the change under review never reinforces its
+own coupling/ownership signal.
 
 ## The one new dependency
 

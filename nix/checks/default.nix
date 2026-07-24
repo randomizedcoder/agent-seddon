@@ -82,6 +82,10 @@
   # co-change` section foregrounds the absent partner. Pure in-process (git-history
   # mining); offline, no toolchain.
   review-cochange = import ./review-cochange.nix { inherit pkgs agent; };
+  # Churn/ownership coverage (Homer design input): a history where one file is
+  # single-owner (bus factor 1); assert the `Churn & ownership` section foregrounds
+  # it without leaking author identity. Pure git-history mining; offline, no toolchain.
+  review-churn = import ./review-churn.nix { inherit pkgs agent; };
   # Recording coverage: `agent --review` must persist a ReviewRecord to
   # episodic.jsonl (the durable fallback for the agent_reviews table). Offline.
   review-recording = import ./review-recording.nix { inherit pkgs agent; };
