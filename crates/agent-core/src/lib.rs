@@ -549,6 +549,16 @@ pub struct PoolMemberHealth {
     pub consecutive_failures: u32,
     /// Duration of the most recent probe, for latency accounting.
     pub last_probe_ms: u32,
+    /// Requests currently in flight to this member — the live load signal the
+    /// least-loaded policy balances on (adaptive-cognition GPU pool 01). Additive;
+    /// `0` from an older pool. When it arrives over the wire from a remote pool it
+    /// is untrusted and clamped on receipt.
+    #[serde(default)]
+    pub in_flight: u32,
+    /// The member's configured selection weight (higher ⇒ chosen more often under
+    /// the `weighted` policy). Additive; `0` from an older pool.
+    #[serde(default)]
+    pub weight: f32,
 }
 
 /// A snapshot of every member's liveness.

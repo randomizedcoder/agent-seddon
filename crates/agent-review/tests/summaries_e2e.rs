@@ -92,6 +92,8 @@ impl LlmPool for FakePool {
                 alive: self.alive,
                 consecutive_failures: 0,
                 last_probe_ms: 1,
+                in_flight: 0,
+                weight: 1.0,
             }],
         }
     }

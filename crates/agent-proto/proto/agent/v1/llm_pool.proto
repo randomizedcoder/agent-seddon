@@ -32,6 +32,10 @@ message PoolMemberHealth {
   bool alive = 3;
   uint32 consecutive_failures = 4;
   uint32 last_probe_ms = 5;
+  // Live load + configured weight (GPU pool 01), additive. Both are clamped on
+  // receipt — a remote pool's reported load is untrusted.
+  uint32 in_flight = 6;
+  float weight = 7;
 }
 
 message PoolHealthReport {

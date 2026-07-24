@@ -272,12 +272,67 @@ fn default_breaker_cooldown() -> u64 {
 /// `members` are registered provider names; `tiers` is a parallel list of
 /// `light|medium|heavy` (missing entries default to `medium`). Empty `members`
 /// ⇒ no pool is built, and mode detection degrades to the deterministic prefilter.
+/// One pool member. Either a bare provider name (resolved through the registry,
+/// with its tier taken from the parallel `tiers` list) or a detailed
+/// `[[pool.members]]` block carrying its own endpoint/tier/weight (GPU pool 01).
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum PoolMemberEntry {
+    /// `members = ["glm", "mi50"]` — a registry provider name.
+    Name(String),
+    /// `[[pool.members]]` with per-member routing knobs.
+    Detailed(Box<PoolMemberCfg>),
+}
+
+/// A detailed pool member (`[[pool.members]]`). An inline `endpoint` synthesizes an
+/// OpenAI-compatible provider (one config block per GPU target, no separate
+/// `[provider.*]` stanza); otherwise `name` is resolved through the registry.
+#[derive(Debug, Deserialize, Default)]
+pub struct PoolMemberCfg {
+    pub name: String,
+    /// OpenAI-compatible base URL (e.g. `http://mi50:11434/v1`). Empty ⇒ resolve
+    /// `name` via the registry instead.
+    #[serde(default)]
+    pub endpoint: String,
+    /// Model id for an inline `endpoint` (required when `endpoint` is set).
+    #[serde(default)]
+    pub model: String,
+    /// API key for an inline `endpoint` (optional; many local servers need none).
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub tier: String,
+    /// Selection weight for the `weighted` policy (default 1.0).
+    #[serde(default)]
+    pub weight: Option<f32>,
+    /// Cost hint for the `cost` policy (default 0.0).
+    #[serde(default)]
+    pub cost: Option<f32>,
+    /// Per-target concurrency cap (parsed here; enforced in GPU pool increment 02).
+    #[serde(default)]
+    pub max_concurrency: Option<usize>,
+}
+
+impl PoolMemberEntry {
+    pub fn name(&self) -> &str {
+        match self {
+            PoolMemberEntry::Name(n) => n,
+            PoolMemberEntry::Detailed(c) => &c.name,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct PoolCfg {
     #[serde(default)]
-    pub members: Vec<String>,
+    pub members: Vec<PoolMemberEntry>,
+    /// Tiers parallel to bare-name `members` (a detailed member carries its own).
     #[serde(default)]
     pub tiers: Vec<String>,
+    /// Selection policy: `cost` (default, back-compat) | `least-loaded` |
+    /// `round-robin` | `weighted`.
+    #[serde(default = "default_pool_policy")]
+    pub policy: String,
     /// Max concurrent members in a fan-out.
     #[serde(default = "default_pool_fanout")]
     pub fanout: usize,
@@ -298,6 +353,7 @@ impl Default for PoolCfg {
         Self {
             members: Vec::new(),
             tiers: Vec::new(),
+            policy: default_pool_policy(),
             fanout: default_pool_fanout(),
             probe_interval_secs: default_probe_interval(),
             probe_timeout_secs: default_probe_timeout(),
@@ -309,6 +365,9 @@ impl Default for PoolCfg {
 
 fn default_pool_fanout() -> usize {
     3
+}
+fn default_pool_policy() -> String {
+    "cost".to_string()
 }
 fn default_probe_interval() -> u64 {
     15
@@ -1580,5 +1639,64 @@ impl Config {
             scheduler: SchedulerCfg::default(),
             pty: PtyCfg::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bare-name pool form (back-compat) parses into `Name` entries.
+    #[test]
+    fn positive_pool_members_bare_names() {
+        let cfg: PoolCfg = toml::from_str(
+            r#"
+            members = ["glm", "mi50"]
+            tiers   = ["heavy", "medium"]
+            policy  = "least-loaded"
+        "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.members.len(), 2);
+        assert_eq!(cfg.members[0].name(), "glm");
+        assert!(matches!(cfg.members[1], PoolMemberEntry::Name(_)));
+        assert_eq!(cfg.policy, "least-loaded");
+    }
+
+    /// The detailed `[[members]]` form parses into `Detailed` entries with knobs.
+    #[test]
+    fn positive_pool_members_detailed() {
+        let cfg: PoolCfg = toml::from_str(
+            r#"
+            policy = "weighted"
+            [[members]]
+            name = "mi50"
+            endpoint = "http://mi50:11434/v1"
+            model = "mistral-small:24b"
+            tier = "medium"
+            weight = 2.5
+            max_concurrency = 2
+        "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.members.len(), 1);
+        match &cfg.members[0] {
+            PoolMemberEntry::Detailed(c) => {
+                assert_eq!(c.name, "mi50");
+                assert_eq!(c.endpoint, "http://mi50:11434/v1");
+                assert_eq!(c.tier, "medium");
+                assert_eq!(c.weight, Some(2.5));
+                assert_eq!(c.max_concurrency, Some(2));
+            }
+            PoolMemberEntry::Name(_) => panic!("expected a detailed member"),
+        }
+    }
+
+    /// Corner: an empty `[pool]` is a valid (disabled) pool, policy defaults to cost.
+    #[test]
+    fn corner_empty_pool_defaults() {
+        let cfg: PoolCfg = toml::from_str("").unwrap();
+        assert!(cfg.members.is_empty());
+        assert_eq!(cfg.policy, "cost");
     }
 }

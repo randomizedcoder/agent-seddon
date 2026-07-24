@@ -74,11 +74,15 @@ pub struct Metrics {
     forge_seconds: HistogramVec,
     hook_dispatches: IntCounterVec,
     route_decisions: IntCounterVec,
-    // LLM pool (docs/design/code-review/llm-pool.md).
+    // LLM pool (docs/design/code-review/llm-pool.md + gpu-pool/).
     pool_members_alive: IntGaugeVec,
     pool_probe_seconds: HistogramVec,
     pool_dispatch_seconds: HistogramVec,
     pool_member_calls: IntCounterVec,
+    // Load balancing (docs/design/gpu-pool/01-load-balance.md).
+    pool_member_inflight: IntGaugeVec,
+    pool_member_latency: HistogramVec,
+    pool_selects: IntCounterVec,
     // General task-mode detection (docs/design/adaptive-cognition/01-mode.md).
     mode_classifications: IntCounterVec,
     mode_switches: IntCounterVec,
@@ -352,6 +356,30 @@ impl Metrics {
                 "LLM pool member calls, by member and outcome",
             ),
             &["member", "outcome"],
+        )
+        .unwrap();
+        let pool_member_inflight = IntGaugeVec::new(
+            Opts::new(
+                "agent_pool_member_inflight",
+                "In-flight requests per LLM pool member (the load-balancing signal)",
+            ),
+            &["member"],
+        )
+        .unwrap();
+        let pool_member_latency = HistogramVec::new(
+            HistogramOpts::new(
+                "agent_pool_member_latency_seconds",
+                "Per-member LLM pool request latency",
+            ),
+            &["member"],
+        )
+        .unwrap();
+        let pool_selects = IntCounterVec::new(
+            Opts::new(
+                "agent_pool_select_total",
+                "LLM pool selection dispatches, by policy",
+            ),
+            &["policy"],
         )
         .unwrap();
         let mode_classifications = IntCounterVec::new(
@@ -952,6 +980,9 @@ impl Metrics {
             Box::new(pool_probe_seconds.clone()),
             Box::new(pool_dispatch_seconds.clone()),
             Box::new(pool_member_calls.clone()),
+            Box::new(pool_member_inflight.clone()),
+            Box::new(pool_member_latency.clone()),
+            Box::new(pool_selects.clone()),
             Box::new(mode_classifications.clone()),
             Box::new(mode_switches.clone()),
             Box::new(mode_switch_confidence.clone()),
@@ -1066,6 +1097,9 @@ impl Metrics {
             pool_probe_seconds,
             pool_dispatch_seconds,
             pool_member_calls,
+            pool_member_inflight,
+            pool_member_latency,
+            pool_selects,
             mode_classifications,
             mode_switches,
             mode_switch_confidence,
@@ -1254,6 +1288,22 @@ impl Metrics {
         self.pool_member_calls
             .with_label_values(&[member, outcome])
             .inc();
+    }
+    /// LLM pool: a member's live in-flight count (the load-balancing signal).
+    pub fn set_pool_member_inflight(&self, member: &str, n: i64) {
+        self.pool_member_inflight
+            .with_label_values(&[member])
+            .set(n);
+    }
+    /// LLM pool: one member's request latency.
+    pub fn on_pool_member_latency(&self, member: &str, seconds: f64) {
+        self.pool_member_latency
+            .with_label_values(&[member])
+            .observe(seconds);
+    }
+    /// LLM pool: one selection dispatch, by policy.
+    pub fn on_pool_select(&self, policy: &str) {
+        self.pool_selects.with_label_values(&[policy]).inc();
     }
     /// Task mode: one per-turn classification (`via` = prefilter|vote|failsafe).
     pub fn on_mode_classify(&self, mode: &str, via: &str) {

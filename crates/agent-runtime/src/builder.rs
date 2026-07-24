@@ -580,24 +580,60 @@ pub async fn build_agent_with(
         None
     } else {
         let mut specs = Vec::new();
-        for (i, name) in cfg.pool.members.iter().enumerate() {
+        for (i, entry) in cfg.pool.members.iter().enumerate() {
+            let name = entry.name();
             if name == "pool" {
                 anyhow::bail!("[pool] members must not include `pool` itself");
             }
-            let inner = registry.build_provider(name, &base_ctx)?;
-            let tier = cfg
-                .pool
-                .tiers
-                .get(i)
-                .and_then(|t| agent_core::PoolTier::parse(t))
+            // A detailed `[[pool.members]]` block carries per-member routing knobs;
+            // a bare name takes its tier from the parallel `tiers` list.
+            let detailed = match entry {
+                crate::config::PoolMemberEntry::Detailed(c) => Some(c.as_ref()),
+                crate::config::PoolMemberEntry::Name(_) => None,
+            };
+            let tier = detailed
+                .filter(|c| !c.tier.is_empty())
+                .and_then(|c| agent_core::PoolTier::parse(&c.tier))
+                .or_else(|| {
+                    cfg.pool
+                        .tiers
+                        .get(i)
+                        .and_then(|t| agent_core::PoolTier::parse(t))
+                })
                 .unwrap_or(agent_core::PoolTier::Medium);
+            let weight = detailed.and_then(|c| c.weight).unwrap_or(1.0);
+            let cost = detailed.and_then(|c| c.cost).unwrap_or(0.0);
+            // An inline `endpoint` synthesizes an OpenAI-compatible provider (one
+            // config block per GPU target); otherwise resolve `name` via the registry.
+            let provider: Arc<dyn agent_core::LlmProvider> = match detailed {
+                Some(c) if !c.endpoint.is_empty() => {
+                    if c.model.is_empty() {
+                        anyhow::bail!("[[pool.members]] `{name}` sets an endpoint but no model");
+                    }
+                    let p = agent_providers::OpenAiCompatProvider::new(
+                        agent_providers::OpenAiCompatConfig {
+                            base_url: c.endpoint.clone(),
+                            model: c.model.clone(),
+                            api_key: c.api_key.clone(),
+                            insecure_tls: false,
+                            context_window: cfg.agent.context_window,
+                            max_retries: 2,
+                            supports_vision: false,
+                        },
+                    )
+                    .map_err(|e| anyhow::anyhow!("building pool member `{name}`: {e}"))?;
+                    Arc::new(p) as Arc<dyn agent_core::LlmProvider>
+                }
+                _ => registry.build_provider(name, &base_ctx)?,
+            };
             specs.push(agent_providers::PoolSpec {
                 candidate: agent_providers::Candidate {
-                    name: name.clone(),
-                    provider: crate::metered::provider(inner, metrics.clone(), name),
+                    name: name.to_string(),
+                    provider: crate::metered::provider(provider, metrics.clone(), name),
                 },
                 tier,
-                cost: 0.0,
+                cost,
+                weight,
             });
         }
         let m = metrics.clone();
@@ -607,6 +643,7 @@ pub async fn build_agent_with(
                 cfg.pool.cooldown_secs.saturating_mul(1_000),
             )
             .with_fanout(cfg.pool.fanout)
+            .with_policy(agent_providers::PoolPolicy::parse(&cfg.pool.policy))
             .with_observer(Arc::new(move |ev| {
                 crate::metered::record_pool_event(&m, ev)
             }))

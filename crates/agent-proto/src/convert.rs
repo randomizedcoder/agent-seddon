@@ -2386,6 +2386,8 @@ impl From<agent_core::PoolMemberHealth> for pb::PoolMemberHealth {
             alive: h.alive,
             consecutive_failures: h.consecutive_failures,
             last_probe_ms: h.last_probe_ms,
+            in_flight: h.in_flight,
+            weight: h.weight,
         }
     }
 }
@@ -2397,6 +2399,14 @@ impl From<pb::PoolMemberHealth> for agent_core::PoolMemberHealth {
             alive: h.alive,
             consecutive_failures: h.consecutive_failures,
             last_probe_ms: h.last_probe_ms,
+            in_flight: h.in_flight,
+            // A remote pool's reported weight is untrusted: a non-finite/non-positive
+            // value falls back to the neutral 1.0 (matching the pool's own clamp).
+            weight: if h.weight.is_finite() && h.weight > 0.0 {
+                h.weight
+            } else {
+                1.0
+            },
         }
     }
 }
