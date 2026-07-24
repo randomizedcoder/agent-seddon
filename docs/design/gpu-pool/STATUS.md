@@ -9,9 +9,29 @@ tracing/tests/bench/leak) and must pass `nix develop -c nix flake check`.
 | # | Increment | Seam | Wire | Metrics | Tests | Bench+Leak | Status |
 |---|---|:--:|:--:|:--:|:--:|:--:|:--:|
 | — | Design directory | — | — | — | — | — | **merged** |
-| 01 | Load balance (in-flight + policy) | ✅ | ✅ | ✅ | ✅ | ✅ | **in review** |
-| 02 | Capacity (concurrency cap + backpressure) | — | — | — | — | — | designed |
+| 01 | Load balance (in-flight + policy) | ✅ | ✅ | ✅ | ✅ | ✅ | **merged** |
+| 02 | Capacity (concurrency cap + backpressure) | ✅ | ✅ | ✅ | ✅ | ✅ | **in review** |
 | 03 | GPU health (latency EWMA + graded state) | — | — | — | — | — | designed |
+
+## 02 — what shipped
+
+- **Per-target `max_concurrency`** (config `[[pool.members]] max_concurrency`, `0` ⇒
+  unbounded) enforced as an **admission check** in `eligible()` against 01's in-flight
+  counter — a member at its cap is skipped like a dead one. No semaphore held across an
+  await ⇒ no deadlock surface; the check-then-dispatch race self-corrects within one
+  request (a soft QoS bound, not a safety invariant).
+- **Backpressure** (`[pool] on_saturation`): `shed` (default) returns fewer/zero
+  fan-out slots and a `saturated` error from `complete`; `wait` polls a **bounded**
+  budget (`saturation_wait_ms`, clamped ≤ 30s, hard-capped tick count) for a permit,
+  then sheds. Never an unbounded queue.
+- **Contract**: additive `max_concurrency`/`saturated` on `PoolMemberHealth` + proto
+  (no buf bump) + `convert.rs`; `agent_pool_member_saturated{member}` gauge (via the
+  enriched `MemberState` event) + `agent_pool_saturation_shed_total` counter (new
+  `SaturationShed` event); table-driven + adversarial tests (skip-at-cap, all-saturated
+  sheds not hangs, bounded wait, hostile `wait_ms` clamped); the `pool_select` bench +
+  dhat leak still hold. Config documented in `config/agent.toml`.
+- **Security**: `max_concurrency`/`saturation_wait_ms` clamped; the all-saturated path
+  is bounded + fail-soft by construction (admission never blocks on a held permit).
 
 ## 01 — what shipped
 

@@ -376,6 +376,10 @@ cooldown_secs     = 30
 #   cost (default, cheapest-first) | least-loaded (fewest in-flight — best for a
 #   heterogeneous GPU pool) | round-robin | weighted (by per-member `weight`).
 policy            = "cost"
+# When every eligible member is at its concurrency cap: shed (fail-soft, default) or
+# wait (bounded wait for a permit, then shed). Never an unbounded queue.
+on_saturation     = "shed"        # shed | wait
+saturation_wait_ms = 500          # bounded wait budget for `wait` (clamped <= 30s)
 fanout            = 3              # max members a fan-out (e.g. the mode vote) touches
 probe_interval_secs = 15          # active liveness probe cadence (0 ⇒ off; clamped [5,3600])
 probe_timeout_secs  = 3           # per-probe deadline (clamped [1,60])
@@ -396,7 +400,7 @@ cooldown_secs       = 30          # how long a breaker stays open before re-prob
 # model = "mistral-small:24b"
 # tier = "medium"
 # weight = 1.0                        # relative pick rate under `weighted`
-# # max_concurrency = 2              # per-target cap (enforced in gpu-pool increment 02)
+# max_concurrency = 2                 # per-target concurrency cap (0/unset = unbounded)
 #
 # [[pool.members]]
 # name = "glm"                        # no endpoint ⇒ resolve via the registry

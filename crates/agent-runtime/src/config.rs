@@ -333,6 +333,13 @@ pub struct PoolCfg {
     /// `round-robin` | `weighted`.
     #[serde(default = "default_pool_policy")]
     pub policy: String,
+    /// What to do when every eligible member is at its concurrency cap (GPU pool
+    /// 02): `shed` (default, fail-soft) | `wait` (bounded wait for a permit).
+    #[serde(default = "default_on_saturation")]
+    pub on_saturation: String,
+    /// Bounded wait budget (ms) for the `wait` saturation policy (clamped ≤ 30s).
+    #[serde(default = "default_saturation_wait_ms")]
+    pub saturation_wait_ms: u64,
     /// Max concurrent members in a fan-out.
     #[serde(default = "default_pool_fanout")]
     pub fanout: usize,
@@ -354,6 +361,8 @@ impl Default for PoolCfg {
             members: Vec::new(),
             tiers: Vec::new(),
             policy: default_pool_policy(),
+            on_saturation: default_on_saturation(),
+            saturation_wait_ms: default_saturation_wait_ms(),
             fanout: default_pool_fanout(),
             probe_interval_secs: default_probe_interval(),
             probe_timeout_secs: default_probe_timeout(),
@@ -368,6 +377,12 @@ fn default_pool_fanout() -> usize {
 }
 fn default_pool_policy() -> String {
     "cost".to_string()
+}
+fn default_on_saturation() -> String {
+    "shed".to_string()
+}
+fn default_saturation_wait_ms() -> u64 {
+    500
 }
 fn default_probe_interval() -> u64 {
     15
@@ -1698,5 +1713,6 @@ mod tests {
         let cfg: PoolCfg = toml::from_str("").unwrap();
         assert!(cfg.members.is_empty());
         assert_eq!(cfg.policy, "cost");
+        assert_eq!(cfg.on_saturation, "shed");
     }
 }

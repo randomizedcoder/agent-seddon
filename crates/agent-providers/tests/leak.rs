@@ -44,6 +44,7 @@ fn member(name: &'static str) -> PoolSpec {
         tier: PoolTier::Light,
         cost: 0.0,
         weight: 1.0,
+        max_concurrency: 0,
     }
 }
 

@@ -1915,8 +1915,20 @@ pub(crate) fn record_pool_event(m: &Metrics, ev: agent_providers::PoolEvent) {
             m.on_pool_dispatch("member", duration_ms as f64 / 1000.0);
             m.on_pool_member_latency(&member, duration_ms as f64 / 1000.0);
         }
-        PoolEvent::MemberState { member, in_flight } => {
+        PoolEvent::MemberState {
+            member,
+            in_flight,
+            saturated,
+        } => {
             m.set_pool_member_inflight(&member, in_flight as i64);
+            m.set_pool_member_saturated(&member, saturated as i64);
+        }
+        PoolEvent::SaturationShed { mode } => {
+            tracing::warn!(
+                mode,
+                "pool saturated: all eligible members at capacity → shed"
+            );
+            m.on_pool_saturation_shed();
         }
         PoolEvent::Probe {
             member,
