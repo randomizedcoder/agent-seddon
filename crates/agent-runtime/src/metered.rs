@@ -1945,6 +1945,12 @@ pub(crate) fn record_review_event(m: &Metrics, ev: agent_review::ReviewEvent) {
         ReviewEvent::CoChange { entries, missing } => {
             m.on_review_cochange(u64::from(entries), u64::from(missing));
         }
+        ReviewEvent::Churn {
+            files,
+            single_owner,
+        } => {
+            m.on_review_churn(u64::from(files), u64::from(single_owner));
+        }
     }
 }
 

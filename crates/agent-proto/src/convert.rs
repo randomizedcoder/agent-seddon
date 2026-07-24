@@ -3047,6 +3047,51 @@ impl From<pb::ReviewCoChangeReport> for agent_core::CoChangeReport {
     }
 }
 
+impl From<agent_core::FileChurn> for pb::ReviewFileChurn {
+    fn from(c: agent_core::FileChurn) -> Self {
+        pb::ReviewFileChurn {
+            path: c.path,
+            commits: c.commits,
+            unique_authors: c.unique_authors,
+            bus_factor: c.bus_factor,
+            top_author_share: c.top_author_share,
+            churn_trend: c.churn_trend,
+            churn_slope: c.churn_slope,
+            total_churn: c.total_churn,
+        }
+    }
+}
+impl From<pb::ReviewFileChurn> for agent_core::FileChurn {
+    fn from(c: pb::ReviewFileChurn) -> Self {
+        agent_core::FileChurn {
+            path: c.path,
+            commits: c.commits,
+            unique_authors: c.unique_authors,
+            bus_factor: c.bus_factor,
+            top_author_share: c.top_author_share,
+            churn_trend: c.churn_trend,
+            churn_slope: c.churn_slope,
+            total_churn: c.total_churn,
+        }
+    }
+}
+impl From<agent_core::ChurnReport> for pb::ReviewChurnReport {
+    fn from(r: agent_core::ChurnReport) -> Self {
+        pb::ReviewChurnReport {
+            commits_scanned: r.commits_scanned,
+            files: r.files.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+impl From<pb::ReviewChurnReport> for agent_core::ChurnReport {
+    fn from(r: pb::ReviewChurnReport) -> Self {
+        agent_core::ChurnReport {
+            commits_scanned: r.commits_scanned,
+            files: r.files.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
 impl From<agent_core::ReviewFacts> for pb::ReviewFacts {
     fn from(f: agent_core::ReviewFacts) -> Self {
         pb::ReviewFacts {
@@ -3059,6 +3104,7 @@ impl From<agent_core::ReviewFacts> for pb::ReviewFacts {
             style: Some(f.style.into()),
             summaries: Some(f.summaries.into()),
             cochange: Some(f.cochange.into()),
+            churn: Some(f.churn.into()),
         }
     }
 }
@@ -3074,6 +3120,7 @@ impl From<pb::ReviewFacts> for agent_core::ReviewFacts {
             style: f.style.map(Into::into).unwrap_or_default(),
             summaries: f.summaries.map(Into::into).unwrap_or_default(),
             cochange: f.cochange.map(Into::into).unwrap_or_default(),
+            churn: f.churn.map(Into::into).unwrap_or_default(),
         }
     }
 }
