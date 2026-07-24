@@ -1,6 +1,12 @@
 # 02 — Task-mode detection
 
-Status: **design / pre-implementation.**
+Status: **implemented (one-shot review detection), and superseded for the general
+case.** The `TaskMode`/`TaskClassifier`/`HybridClassifier` seam described here
+shipped (it detects a review task once, at prompt entry). The generalisation — a
+per-turn, history-aware mode with an explicit *switch* decision that drives
+compaction and memory — is designed in
+[`../adaptive-cognition/01-mode.md`](../adaptive-cognition/01-mode.md). Read this doc
+for the review-detection rationale; read `01-mode.md` for where it is going.
 
 The trigger. Decides whether the incoming work is a **code review** and, if so,
 hands off to the orchestrator ([`03`](orchestration.md)). Cheap deterministic
