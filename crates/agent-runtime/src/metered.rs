@@ -689,7 +689,38 @@ impl ContextStrategy for MeteredContext {
         if after < before {
             self.metrics.on_compaction(before as i64, after as i64);
         }
+        // Mode-aware compaction (adaptive-cognition 02): the strategy self-reports
+        // how the last compact behaved. Budget vs switch labels the shed; a switch
+        // that had to fall back is counted so degradation is visible.
+        use agent_core::CompactAction;
+        let action = self.inner.last_compact_action();
+        let trigger = if action == CompactAction::Budget {
+            "budget"
+        } else {
+            "switch"
+        };
+        if before > after {
+            self.metrics
+                .on_tokens_shed(trigger, (before - after) as f64);
+        }
+        match action {
+            CompactAction::FallbackGeneric => self.metrics.on_summary_fallback("generic"),
+            CompactAction::FallbackDrop => self.metrics.on_summary_fallback("drop"),
+            _ => {}
+        }
         out
+    }
+
+    fn on_mode_switch(&self, from: agent_core::TaskMode, to: agent_core::TaskMode) {
+        // Count the intended switch here (it maps 1:1 to the next compact's
+        // reshape), then arm the wrapped strategy.
+        self.metrics
+            .on_switch_compaction(from.as_str(), to.as_str());
+        self.inner.on_mode_switch(from, to);
+    }
+
+    fn last_compact_action(&self) -> agent_core::CompactAction {
+        self.inner.last_compact_action()
     }
 }
 

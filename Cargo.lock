@@ -58,6 +58,7 @@ dependencies = [
  "agent-core",
  "agent-testkit",
  "async-trait",
+ "dhat",
  "iai-callgrind",
  "rstest",
  "serde_json",

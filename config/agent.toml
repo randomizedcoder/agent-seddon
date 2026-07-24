@@ -9,8 +9,10 @@ provider = "openai-compat"   # -> OpenAiCompatProvider ("anthropic" -> Anthropic
 # process (embedded/served use, or the agent working on a checkout). `~` expands.
 working_dir = ""
 # "sliding-window" drops oldest turns; "summarizing-window" LLM-summarizes them
-# (keeping the last `keep_recent_tokens` verbatim).
-context  = "sliding-window"  # -> SlidingWindow ("summarizing-window" -> SummarizingWindow)
+# (keeping the last `keep_recent_tokens` verbatim). "mode-aware-window" is
+# summarizing-window plus a reshape on a task-mode switch (adaptive-cognition 02):
+# on a switch it re-summarizes the middle through the destination mode's lens.
+context  = "sliding-window"  # SlidingWindow | summarizing-window | mode-aware-window
 # SECURITY: "auto-approve" runs every tool call (incl. bash) with NO confirmation.
 # Only safe for trusted goals/inputs. The built-in default is "interactive".
 # "allow-list" allows only the tool+arg patterns in the [policy] section below

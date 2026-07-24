@@ -79,23 +79,7 @@ impl ContextStrategy for SummarizingWindow {
 
         let msgs = &working.messages;
         let head = leading_system_count(msgs);
-
-        // Walk back from the end, keeping a recent tail of ~keep_recent_tokens.
-        let mut cut = msgs.len();
-        let mut acc = 0u32;
-        while cut > head {
-            acc += estimate_tokens(std::slice::from_ref(&msgs[cut - 1]));
-            if acc >= self.keep_recent_tokens {
-                break;
-            }
-            cut -= 1;
-        }
-        // Don't let the tail begin with an orphan tool result (no preceding
-        // assistant tool_call in the kept set): fold such messages into the
-        // summary instead.
-        while cut < msgs.len() && msgs[cut].role == Role::Tool {
-            cut += 1;
-        }
+        let cut = tail_cut(msgs, head, self.keep_recent_tokens);
 
         // Nothing meaningful to summarize → fall back to truncation.
         if cut <= head {
@@ -126,18 +110,30 @@ impl ContextStrategy for SummarizingWindow {
     }
 }
 
+/// The mode-agnostic compaction instruction (the ordinary, non-switch summary).
+pub(crate) const DEFAULT_INSTRUCTION: &str =
+    "You compress conversation history. Summarize the excerpt below concisely, \
+     preserving key facts, decisions, file paths, and tool outcomes. Output only \
+     the summary.";
+
 impl SummarizingWindow {
     async fn summarize(&self, messages: &[Message]) -> Result<String> {
+        self.summarize_with(messages, DEFAULT_INSTRUCTION).await
+    }
+
+    /// Summarize `messages` under a caller-supplied system `instruction`. Reused by
+    /// [`crate::ModeAwareWindow`] to summarize a demoted span through the
+    /// destination mode's lens (adaptive-cognition 02). The instruction is a fixed,
+    /// code-owned string per mode — never model- or repo-derived — so it carries no
+    /// injection surface; the *output* is screened by the caller before reuse.
+    pub(crate) async fn summarize_with(
+        &self,
+        messages: &[Message],
+        instruction: &str,
+    ) -> Result<String> {
         let rendered = render(messages);
         let req = CompletionRequest {
-            messages: vec![
-                Message::system(
-                    "You compress conversation history. Summarize the excerpt below concisely, \
-                     preserving key facts, decisions, file paths, and tool outcomes. Output only \
-                     the summary.",
-                ),
-                Message::user(rendered),
-            ],
+            messages: vec![Message::system(instruction), Message::user(rendered)],
             tools: vec![],
             max_tokens: self.summary_max_tokens,
             temperature: 0.0,
@@ -149,11 +145,33 @@ impl SummarizingWindow {
 }
 
 /// Count leading system messages (the head to preserve verbatim).
-fn leading_system_count(messages: &[Message]) -> usize {
+pub(crate) fn leading_system_count(messages: &[Message]) -> usize {
     messages
         .iter()
         .take_while(|m| m.role == Role::System)
         .count()
+}
+
+/// Walk back from the end keeping a recent tail of ~`keep_recent_tokens`, then
+/// nudge the cut forward so the tail never *starts* with an orphan tool result
+/// (a `Tool` message whose `tool_call` was left behind in the summarized middle).
+/// Returns the index where the kept tail begins; the span `head..cut` is the
+/// middle eligible for summarization. Shared by [`SummarizingWindow`] and
+/// [`crate::ModeAwareWindow`].
+pub(crate) fn tail_cut(msgs: &[Message], head: usize, keep_recent_tokens: u32) -> usize {
+    let mut cut = msgs.len();
+    let mut acc = 0u32;
+    while cut > head {
+        acc = acc.saturating_add(estimate_tokens(std::slice::from_ref(&msgs[cut - 1])));
+        if acc >= keep_recent_tokens {
+            break;
+        }
+        cut -= 1;
+    }
+    while cut < msgs.len() && msgs[cut].role == Role::Tool {
+        cut += 1;
+    }
+    cut
 }
 
 /// Render messages as plain text for the summarizer prompt.

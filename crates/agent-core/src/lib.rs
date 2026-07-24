@@ -2018,6 +2018,23 @@ pub struct TokenBudget {
     pub reserve_output: u32,
 }
 
+/// How the most recent `compact` behaved, for telemetry labelling
+/// (adaptive-cognition 02). A strategy that doesn't self-report leaves it
+/// `Budget` — the ordinary path — so decorators can still label a plain
+/// budget-triggered compaction. Only `ModeAwareWindow` distinguishes the rest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CompactAction {
+    /// Ordinary budget-triggered compaction (or a no-op under budget).
+    #[default]
+    Budget,
+    /// A mode-switch reshape ran (destination-lens summary of the middle).
+    Switch,
+    /// A switch whose destination-lens summary failed → generic summary.
+    FallbackGeneric,
+    /// A switch whose summary failed or was injection-flagged → drop the span.
+    FallbackDrop,
+}
+
 #[async_trait]
 pub trait ContextStrategy: Send + Sync {
     /// Build the initial model-ready message list.
@@ -2025,6 +2042,20 @@ pub trait ContextStrategy: Send + Sync {
     /// Compact when over budget. Must be non-destructive w.r.t. episodic memory
     /// (it only trims the working set).
     async fn compact(&self, working: &mut WorkingSet, budget: &TokenBudget) -> Result<()>;
+
+    /// Optional capability (adaptive-cognition 02): a task-mode switch fired, so
+    /// arm the *next* `compact` as a mode-aware reshape through the destination
+    /// mode's lens. Default no-op — `SlidingWindow`/`SummarizingWindow` behave
+    /// exactly as before; decorators (`MeteredContext`, `GrpcContext`) forward it.
+    /// A separate downcast trait can't reach the inner strategy through the
+    /// decorator chain, so this rides the seam as a default method instead.
+    fn on_mode_switch(&self, _from: TaskMode, _to: TaskMode) {}
+
+    /// How the most recent `compact` behaved, for telemetry. Default `Budget`;
+    /// `ModeAwareWindow` overrides it so a switch reshape / fallback is labelled.
+    fn last_compact_action(&self) -> CompactAction {
+        CompactAction::Budget
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -54,25 +54,76 @@ impl pb::context_service_server::ContextService for ContextSvc {
         let inner = self.inner.clone();
         async move {
             let req = request.into_inner();
-            let mut working = req
+            // Mode-aware compaction (adaptive-cognition 02): a switch is requested
+            // when `to_mode` is set (non-UNSPECIFIED) and differs from `from_mode`.
+            // Untrusted enum ints decode to the default (UNSPECIFIED→Other), so a
+            // hostile value can at worst request an ordinary or same-mode compaction.
+            let from: agent_core::TaskMode = req.from_mode().into();
+            let to_pb = req.to_mode();
+            let to: agent_core::TaskMode = to_pb.into();
+            let mut working: agent_core::WorkingSet = req
                 .working
                 .ok_or_else(|| missing("CompactRequest.working"))?
                 .try_into()?;
-            let budget = req
+            let budget: agent_core::TokenBudget = req
                 .budget
                 .ok_or_else(|| missing("CompactRequest.budget"))?
                 .into();
+            if to_pb != pb::TaskMode::Unspecified && from != to {
+                inner.on_mode_switch(from, to);
+            }
+            let before = rough_tokens(&working.messages);
+            // A compaction never errors on a dead summarizer — it falls back
+            // internally — so a real error here is a transport/decode fault.
             inner
                 .compact(&mut working, &budget)
                 .await
                 .map_err(|e| status_from_error(&e))?;
+            let after = rough_tokens(&working.messages);
+            let stats = pb::CompactStats {
+                kept_tokens: after,
+                shed_tokens: before.saturating_sub(after),
+                action: action_str(inner.last_compact_action()).to_string(),
+            };
             Ok(Response::new(pb::CompactResponse {
                 working: Some(working.into()),
+                stats: Some(stats),
             }))
         }
         .instrument(sp)
         .await
     }
+}
+
+/// Stable wire label for a `CompactAction` (matches the proto doc + metrics).
+fn action_str(a: agent_core::CompactAction) -> &'static str {
+    match a {
+        agent_core::CompactAction::Budget => "budget",
+        agent_core::CompactAction::Switch => "switch",
+        agent_core::CompactAction::FallbackGeneric => "fallback-generic",
+        agent_core::CompactAction::FallbackDrop => "fallback-drop",
+    }
+}
+
+/// Rough token estimate (~4 chars/token + per-message tax), mirroring
+/// `agent_context::estimate_tokens` — kept local so the server needs nothing from
+/// the context crate. Only used to fill `CompactStats`.
+fn rough_tokens(messages: &[agent_core::Message]) -> u32 {
+    let mut tokens = 0u32;
+    for m in messages {
+        let mut chars = 0usize;
+        for b in &m.content {
+            if let agent_core::ContentBlock::Text { text } = b {
+                chars += text.len();
+            }
+        }
+        for tc in &m.tool_calls {
+            chars += tc.name.len() + tc.arguments.to_string().len();
+        }
+        chars += 8;
+        tokens = tokens.saturating_add((chars / 4) as u32);
+    }
+    tokens
 }
 
 pub fn context_router(inner: Arc<dyn ContextStrategy>) -> Router {
