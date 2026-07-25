@@ -3549,6 +3549,73 @@ impl From<pb::PromResult> for agent_core::PromResult {
     }
 }
 
+// --- AgentSession observation (docs/design/portal) --------------------------
+// One-directional (server → client): the runtime produces these, the portal
+// renders them.
+
+impl From<agent_core::StatusSnapshot> for pb::StatusSnapshot {
+    fn from(s: agent_core::StatusSnapshot) -> Self {
+        pb::StatusSnapshot {
+            current_mode: s.current_mode,
+            context_tokens: s.context_tokens,
+            context_window: s.context_window,
+            context_messages: s.context_messages,
+            active: s.active,
+        }
+    }
+}
+
+impl From<agent_core::SessionEvent> for pb::SessionEvent {
+    fn from(e: agent_core::SessionEvent) -> Self {
+        use agent_core::SessionEvent as E;
+        use pb::session_event::Kind;
+        let kind = match e {
+            E::RunStarted { goal } => Kind::RunStarted(pb::RunStarted { goal }),
+            E::IterationStart { iter } => Kind::Iteration(pb::IterationStart { iter }),
+            E::TokenDelta { text } => Kind::Token(pb::TokenDelta { text }),
+            E::ToolCallStart { name, args } => Kind::ToolStart(pb::ToolCallStart { name, args }),
+            E::ToolCallResult {
+                name,
+                ok,
+                duration_ms,
+            } => Kind::ToolResult(pb::ToolCallResult {
+                name,
+                ok,
+                duration_ms,
+            }),
+            E::ModeSwitch {
+                from,
+                to,
+                reason,
+                confidence,
+            } => Kind::ModeSwitch(pb::SessionModeSwitch {
+                from,
+                to,
+                reason,
+                confidence,
+            }),
+            E::ContextUpdate {
+                prompt_tokens,
+                context_window,
+                messages,
+            } => Kind::ContextUpdate(pb::ContextUpdate {
+                prompt_tokens,
+                context_window,
+                messages,
+            }),
+            E::RunFinished { ok } => Kind::RunFinished(pb::RunFinished { ok }),
+        };
+        pb::SessionEvent { kind: Some(kind) }
+    }
+}
+
+/// Wrap a status snapshot as the leading `status_snapshot` event on a subscribe.
+pub fn snapshot_event(s: agent_core::StatusSnapshot) -> pb::SessionEvent {
+    pb::SessionEvent {
+        kind: Some(pb::session_event::Kind::StatusSnapshot(s.into())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

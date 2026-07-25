@@ -973,3 +973,91 @@ async fn metrics_proxy_roundtrips(#[case] transport: Transport) {
     assert_eq!(err.error, "upstream error (bad_data)");
     assert!(err.series.is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// AgentSession observation (docs/design/portal) — stream + snapshot, via a double
+// ---------------------------------------------------------------------------
+
+// A canned session source: a fixed snapshot + a short scripted event stream, so the
+// round-trip asserts the leading snapshot event, the oneof mapping, and the Snapshot
+// RPC survive the hop on TCP and UDS.
+struct FakeSession;
+
+impl agent_core::SessionSource for FakeSession {
+    fn snapshot(&self) -> agent_core::StatusSnapshot {
+        agent_core::StatusSnapshot {
+            current_mode: "debug".into(),
+            context_tokens: 42,
+            context_window: 8192,
+            context_messages: 5,
+            active: true,
+        }
+    }
+    fn subscribe(&self) -> agent_core::SessionEventStream {
+        let events = vec![
+            agent_core::SessionEvent::IterationStart { iter: 1 },
+            agent_core::SessionEvent::TokenDelta { text: "hi".into() },
+            agent_core::SessionEvent::RunFinished { ok: true },
+        ];
+        Box::pin(futures_util::stream::iter(events))
+    }
+}
+
+#[rstest]
+#[case::tcp(Transport::Tcp)]
+#[case::uds(Transport::Uds)]
+#[tokio::test]
+async fn agent_session_stream_and_snapshot_roundtrip(#[case] transport: Transport) {
+    use agent_proto::pb;
+    let (dial, _srv) = spawn(
+        transport,
+        agent_grpc::server::agent_session_router(Arc::new(FakeSession)),
+    )
+    .await;
+    let channel = dial.connect_lazy().unwrap();
+    let mut client = pb::agent_session_service_client::AgentSessionServiceClient::new(channel);
+
+    // Snapshot RPC: current state survives the hop.
+    let snap = client
+        .snapshot(pb::SnapshotRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(snap.current_mode, "debug");
+    assert_eq!(snap.context_tokens, 42);
+    assert!(snap.active);
+
+    // Subscribe: the first event is the status snapshot, then the scripted tail.
+    let mut stream = client
+        .subscribe(pb::SubscribeRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut kinds: Vec<&'static str> = Vec::new();
+    while let Some(ev) = stream.message().await.unwrap() {
+        match ev.kind.unwrap() {
+            pb::session_event::Kind::StatusSnapshot(s) => {
+                assert_eq!(s.current_mode, "debug");
+                kinds.push("snapshot");
+            }
+            pb::session_event::Kind::Iteration(i) => {
+                assert_eq!(i.iter, 1);
+                kinds.push("iteration");
+            }
+            pb::session_event::Kind::Token(t) => {
+                assert_eq!(t.text, "hi");
+                kinds.push("token");
+            }
+            pb::session_event::Kind::RunFinished(f) => {
+                assert!(f.ok);
+                kinds.push("run_finished");
+            }
+            other => panic!("unexpected event {other:?}"),
+        }
+    }
+    assert_eq!(
+        kinds,
+        vec!["snapshot", "iteration", "token", "run_finished"]
+    );
+}

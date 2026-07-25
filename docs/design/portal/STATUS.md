@@ -11,8 +11,8 @@ existing (02–04).
 |---|---|:--:|:--:|:--:|:--:|:--:|:--:|
 | 01 | Design docs (`docs/design/portal/`) | — | — | — | — | — | **merged** (#127) |
 | 02 | `PromptService` + mode-lens externalization | ✅ | ✅ | ✅ | ✅ | n/a | **merged** (#128) |
-| 03 | `MetricsProxyService` | ✅ | ✅ | ✅ | ✅ | n/a | **in review** |
-| 04 | `AgentSessionService` + broadcast event-sink | ☐ | ☐ | ☐ | ☐ | ☐ | pending |
+| 03 | `MetricsProxyService` | ✅ | ✅ | ✅ | ✅ | n/a | **merged** (#129) |
+| 04 | `AgentSessionService` + broadcast event-sink | ✅ | ✅ | ✅ | ✅ | n/a | **in review** |
 | 05 | Dart codegen + nix tooling (`buf.gen.yaml`, `gen-dart`, flutter/dart pins, proxy) | — | — | — | ☐ | ☐ | pending |
 | 06 | Flutter app (transport, Launcher, Prompts, Agent View) | — | — | — | ☐ | ☐ | pending |
 
@@ -65,6 +65,39 @@ existing (02–04).
   asserted on **TCP + UDS** via a double. Additive proto — no baseline bump.
 - **Docs/config.** `[metrics_proxy] prometheus_url` in `config/agent.toml`;
   component doc `docs/components/metrics-proxy.md`.
+
+## 04 — what shipped
+
+- **Event types + source.** `SessionEvent` / `StatusSnapshot` / `SessionSource` (+
+  `SessionEventStream`) in `agent-core`. `agent_runtime::SessionEvents` — a bounded
+  `tokio::sync::broadcast` sink + a shared `StatusSnapshot`, on the `Agent` (so
+  `&Agent`-only loop methods publish). Impl `SessionSource` (`snapshot` reads shared
+  state; `subscribe` → `BroadcastStream`, dropping `Lagged`).
+- **Publishing at existing sites — no new control flow.** Run start/finish
+  (`Session::send`), iteration (`on_iteration`), context (`set_context`), tool
+  start/result, mode switch (`record_mode_switch`), token deltas (streaming echo,
+  **guarded on `has_subscribers()`** so an unobserved run allocates nothing extra).
+  Snapshot-affecting events update the shared snapshot.
+- **Wire + serve.** `agent_session.proto` (`Subscribe` server-stream + `Snapshot`;
+  `SessionModeSwitch` renamed to dodge mode.proto's `ModeSwitch`), added to
+  `build.rs` + descriptor-set test; core→proto conversions + `snapshot_event`.
+  `AgentSessionSvc` server (snapshot-first then live tail); **no Rust client** —
+  `SessionSource::snapshot` is sync so a gRPC client couldn't implement it; only the
+  Dart portal consumes this. `session_stream` port claimed (**50078 / 9628**).
+  Served via `--serve-session-stream` / `--serve-all`. Round-trip (stream + snapshot,
+  oneof mapping) asserted on **TCP + UDS** via a double.
+- **Observe a *running* agent.** `grpc_server::serve_session_observe` hosts only the
+  service with no self-shutdown; a one-shot goal / the REPL runs it as a concurrent
+  `tokio::select!` branch (sharing the live source) when `[grpc.session_stream]
+  listen` is set — so the portal attaches to a running agent. Default off.
+- **Carried fix.** inc-03's `metrics-proxy` feature now enables
+  `agent-metrics-proxy/http` explicitly (it only compiled under full-workspace
+  feature unification before — `-p agent-runtime` alone was broken).
+- **Docs/config.** `[grpc.session_stream] listen` in `config/agent.toml`;
+  `docs/components/agent-session.md`.
+- **Deferred (documented):** a `Send` RPC to drive a goal remotely
+  (`--serve-mcp`-class); precise per-tool `duration_ms` (currently 0 — timing is in
+  `agent_tool_exec_seconds` via MetricsProxy).
 
 ## Dependency order
 

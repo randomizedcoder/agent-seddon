@@ -12,6 +12,7 @@ mod policy;
 mod registry;
 #[cfg(feature = "search")]
 mod search;
+mod session_events;
 pub mod session_store;
 pub mod skills;
 #[cfg(feature = "structured")]
@@ -24,6 +25,7 @@ pub use agent_metrics::Metrics;
 pub use builder::{build_agent, build_agent_with};
 pub use config::Config;
 pub use registry::{register_builtins, Registry};
+pub use session_events::SessionEvents;
 
 /// Parse a TOML config string into a [`Config`], **warning about keys it did not
 /// recognise**.

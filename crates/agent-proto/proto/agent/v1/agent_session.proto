@@ -1,0 +1,71 @@
+// The agent-session observation surface over gRPC (docs/design/portal): a live,
+// structured feed of the running loop for the "agent view" — assistant token
+// deltas, tool-call start/result, mode switches, and context-size updates — plus a
+// one-shot status snapshot for the status bar.
+//
+// Observe-only. It does not (in this increment) drive the agent; a future `Send`
+// RPC that runs a goal remotely would carry the `--serve-mcp`-class caveat.
+syntax = "proto3";
+
+package agent.v1;
+
+service AgentSessionService {
+  // Live event stream. The first item is a `status_snapshot`, then the tail.
+  rpc Subscribe(SubscribeRequest) returns (stream SessionEvent);
+  // The current session state, one-shot.
+  rpc Snapshot(SnapshotRequest) returns (StatusSnapshot);
+}
+
+message SubscribeRequest {}
+message SnapshotRequest {}
+
+message RunStarted { string goal = 1; }
+message IterationStart { uint32 iter = 1; }
+message TokenDelta { string text = 1; }
+message ToolCallStart {
+  string name = 1;
+  string args = 2; // JSON, as a string (display only)
+}
+message ToolCallResult {
+  string name = 1;
+  bool ok = 2;
+  uint64 duration_ms = 3;
+}
+// Named `Session`-prefixed: the flat `agent.v1` package already has a `ModeSwitch`
+// in mode.proto (see the same note in session.proto about global message names).
+message SessionModeSwitch {
+  string from = 1;
+  string to = 2;
+  string reason = 3;
+  float confidence = 4;
+}
+message ContextUpdate {
+  uint32 prompt_tokens = 1;
+  uint32 context_window = 2;
+  uint32 messages = 3;
+}
+message RunFinished { bool ok = 1; }
+
+message StatusSnapshot {
+  string current_mode = 1;
+  uint32 context_tokens = 2;
+  uint32 context_window = 3;
+  uint32 context_messages = 4;
+  bool active = 5;
+}
+
+message SessionEvent {
+  oneof kind {
+    RunStarted run_started = 1;
+    IterationStart iteration = 2;
+    TokenDelta token = 3;
+    ToolCallStart tool_start = 4;
+    ToolCallResult tool_result = 5;
+    SessionModeSwitch mode_switch = 6;
+    ContextUpdate context_update = 7;
+    RunFinished run_finished = 8;
+    // The initial snapshot delivered first on Subscribe, so a late joiner is
+    // consistent before the live tail arrives.
+    StatusSnapshot status_snapshot = 9;
+  }
+}

@@ -51,6 +51,7 @@ pub enum Seam {
     Dimension,
     Prompt,
     MetricsProxy,
+    SessionStream,
 }
 
 /// Every variant, so the table can be checked for completeness.
@@ -83,6 +84,7 @@ const ALL_SEAMS: &[Seam] = &[
     Seam::Dimension,
     Seam::Prompt,
     Seam::MetricsProxy,
+    Seam::SessionStream,
 ];
 
 /// The static facts about a seam served as its own process.
@@ -296,6 +298,13 @@ const SEAMS: &[SeamInfo] = &[
         service: "agent.v1.MetricsProxyService",
         endpoint: constants::METRICS_PROXY,
     },
+    SeamInfo {
+        seam: Seam::SessionStream,
+        flag: "--serve-session-stream",
+        name: "session-stream",
+        service: "agent.v1.AgentSessionService",
+        endpoint: constants::SESSION_STREAM,
+    },
 ];
 
 impl Seam {
@@ -367,6 +376,7 @@ impl Seam {
             Seam::Dimension => &cfg.grpc.dimension.listen,
             Seam::Prompt => &cfg.grpc.prompt.listen,
             Seam::MetricsProxy => &cfg.grpc.metrics_proxy.listen,
+            Seam::SessionStream => &cfg.grpc.session_stream.listen,
         }
     }
 }
@@ -590,6 +600,12 @@ fn add_seam_service(router: Router, agent: &Agent, seam: Seam) -> anyhow::Result
             ),
             None => (router, false),
         },
+        // The session source is always present; a serve-only process simply streams
+        // nothing until a loop publishes (docs/design/portal).
+        Seam::SessionStream => (
+            router.add_service(srv::AgentSessionSvc::new(agent.session_source()).into_server()),
+            true,
+        ),
     })
 }
 
@@ -606,6 +622,26 @@ pub async fn serve(agent: &Agent, seam: Seam, listen: Endpoint) -> anyhow::Resul
 /// gateway that refuses to start because one optional seam is off is not useful.
 pub async fn serve_all(agent: &Agent, listen: Endpoint) -> anyhow::Result<()> {
     serve_seams(agent, ALL_SEAMS, listen, /* skip_unavailable */ true).await
+}
+
+/// Host **only** the `AgentSessionService` on `listen`, to observe a *running*
+/// loop (docs/design/portal). Unlike [`serve`], it installs no ctrl-c shutdown of
+/// its own — it runs until the returned future is dropped, so a `tokio::select!`
+/// that also drives the run stops it exactly when the run ends. Shares the live
+/// agent's session source, so a portal sees the loop's events in real time.
+pub async fn serve_session_observe(agent: &Agent, listen: Endpoint) -> anyhow::Result<()> {
+    let (router, health) = agent_grpc::server::base_router().await;
+    let (router, added) = add_seam_service(router, agent, Seam::SessionStream)?;
+    if !added {
+        anyhow::bail!("session-stream seam not available in this build");
+    }
+    health.set_serving(Seam::SessionStream.service_name()).await;
+    let router = agent_grpc::server::with_reflection(router).map_err(anyhow::Error::msg)?;
+    let bound = listen.bind().await?;
+    tracing::info!(endpoint = ?bound.dial_endpoint()?, "session-observe server ready");
+    // No self-shutdown: `pending` keeps it alive until the caller drops the future.
+    bound.serve(router, std::future::pending::<()>()).await?;
+    Ok(())
 }
 
 async fn serve_seams(

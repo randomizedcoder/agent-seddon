@@ -399,6 +399,7 @@ dependencies = [
  "serde_ignored",
  "serde_json",
  "tokio",
+ "tokio-stream",
  "toml",
  "tracing",
  "url",
@@ -3433,6 +3434,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

@@ -188,8 +188,14 @@
       metrics_port = 9627;
     };
 
-    # 50078 / 9628 is reserved for the `session_stream` seam (docs/design/portal,
-    # increment 04 — a live structured feed of the agent loop), landing next.
+    # Live agent-session observation (docs/design/portal): the `AgentSessionService`
+    # — a structured server-stream of the running loop (token deltas, tool calls,
+    # mode switches, context updates) + a status snapshot.
+    session_stream = {
+      port = 50078;
+      socket = "/tmp/agent-seddon/session-stream.sock";
+      metrics_port = 9628;
+    };
 
     # Metrics proxy (docs/design/portal): the `MetricsProxy` seam — a generic
     # PromQL-over-gRPC proxy to Prometheus, so a gRPC-only client can read the

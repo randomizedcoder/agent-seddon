@@ -628,6 +628,14 @@ job         = "agent-seddon"
 # [grpc.semantic]
 # endpoint = "http://vector-host:50072"               # ([memory] semantic = "grpc")
 #
+# Live agent-session observation (docs/design/portal). Setting `listen` makes a
+# RUNNING agent (a one-shot goal or the REPL) also host `AgentSessionService` on
+# that endpoint, sharing the live loop's event stream + status snapshot — this is
+# how the portal's "agent view" attaches to a running agent. Empty ⇒ off (default);
+# observe-only, no way to drive the agent. Default port 50078.
+# [grpc.session_stream]
+# listen = "127.0.0.1:50078"                          # observe this running agent
+#
 # `agent --serve-all` hosts every enabled seam in ONE process on ONE endpoint,
 # so a same-host deployment isn't one process per seam. Seams whose impl is
 # disabled in this build/config are skipped with a warning rather than failing

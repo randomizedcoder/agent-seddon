@@ -2222,6 +2222,74 @@ pub trait MetricsProxy: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// Agent session observation (docs/design/portal): a live structured feed
+// ---------------------------------------------------------------------------
+
+/// One structured event from the running agent loop — the currency of the live
+/// "agent view". Emitted at the loop's existing recording sites (no new control
+/// flow); a portal renders the stream as a transcript + status bar.
+#[derive(Debug, Clone)]
+pub enum SessionEvent {
+    /// A run began for `goal`.
+    RunStarted { goal: String },
+    /// The loop entered iteration `iter` (1-based).
+    IterationStart { iter: u32 },
+    /// A chunk of assistant narration (streaming token text).
+    TokenDelta { text: String },
+    /// A tool call is about to run: its `name` and JSON `args`.
+    ToolCallStart { name: String, args: String },
+    /// A tool call settled: `ok` and how long it took.
+    ToolCallResult {
+        name: String,
+        ok: bool,
+        duration_ms: u64,
+    },
+    /// The session task mode switched (from/to are `TaskMode::as_str`).
+    ModeSwitch {
+        from: String,
+        to: String,
+        reason: String,
+        confidence: f32,
+    },
+    /// The context window changed size (prompt tokens / budget / message count).
+    ContextUpdate {
+        prompt_tokens: u32,
+        context_window: u32,
+        messages: u32,
+    },
+    /// The run finished; `ok` is whether it completed without error.
+    RunFinished { ok: bool },
+}
+
+/// A point-in-time snapshot of the running session, for a late subscriber (sent
+/// first on `subscribe`) and the one-shot `Snapshot` RPC.
+#[derive(Debug, Clone, Default)]
+pub struct StatusSnapshot {
+    /// The current [`TaskMode`] name.
+    pub current_mode: String,
+    pub context_tokens: u32,
+    pub context_window: u32,
+    pub context_messages: u32,
+    /// Whether a run is in progress right now.
+    pub active: bool,
+}
+
+/// A boxed stream of [`SessionEvent`]s (mirrors [`ChunkStream`]).
+pub type SessionEventStream =
+    std::pin::Pin<Box<dyn futures_core::Stream<Item = SessionEvent> + Send>>;
+
+/// An observation handle over the running loop (docs/design/portal). The loop
+/// publishes into it at its recording sites; a served `AgentSessionService` reads
+/// it. Observe-only — it never influences the loop. `subscribe` yields the live
+/// tail (bounded — a slow consumer lags and drops rather than stalling the loop).
+pub trait SessionSource: Send + Sync {
+    /// The current session state (also the first event a subscriber should see).
+    fn snapshot(&self) -> StatusSnapshot;
+    /// A live stream of subsequent events.
+    fn subscribe(&self) -> SessionEventStream;
+}
+
+// ---------------------------------------------------------------------------
 // Seam 4: Context assembly / compaction
 // ---------------------------------------------------------------------------
 
