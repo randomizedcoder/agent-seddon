@@ -231,17 +231,23 @@ execution or authenticated writes — read the warning there before exposing the
   anything reading untrusted input, `adversarial_` cases are **mandatory** and must
   assert the rejection — there are nearly 300 of them.
 - **The binary is tested as a process, not just as a library.** The loop is
-  covered in-process, and separately the shipped `agent` binary is spawned as a
-  subprocess against a scripted OpenAI-compatible server — so argv parsing, the
-  stdout contract, exit codes and the real request/response serialization are
-  covered too. A pty tier reaches the two surfaces a pipe cannot: the REPL's line
-  editor and the policy guard's operator prompt, which hard-denies without reading
-  when stdin is not a terminal.
+  covered in-process — including an end-to-end scenario where the agent scaffolds a
+  Go program and the code-review flow's risk gate decides whether to commit it — and
+  separately the shipped `agent` binary is spawned as a subprocess against a scripted
+  OpenAI-compatible server, so argv parsing, the stdout contract, exit codes and the
+  real request/response serialization are covered too. Two pty tiers reach the
+  surfaces a pipe cannot: a Rust (`rexpect`) tier covers the REPL's line editor and
+  the policy guard's operator prompt (which hard-denies without reading when stdin is
+  not a terminal), and a **tcl/expect** harness drives the real REPL directly — its
+  model-free slice (`expect-smoke`) runs inside the gate.
 - **And against a real model.** `nix run .#e2e-live` runs the whole thing on an
-  actual LLM, has it write a C program, then compiles and runs it. It reports a
-  harness failure and a model-quality failure as different exit codes, because
-  they have different owners. It is opt-in and outside the gate — it needs a
-  network the hermetic checks do not have.
+  actual LLM, has it write a C program, then compiles and runs it. Its companion
+  `nix run .#e2e-expect` goes further: a **tcl/expect** script holds a *multi-turn*
+  REPL conversation with a real model — write a file then edit it, fix a broken
+  build, pick tools to answer a question — and checks each result. Both split a
+  harness failure and a model-quality failure into different exit codes, because they
+  have different owners; both are opt-in and outside the gate — they need a network
+  the hermetic checks do not have.
 - **Instruction-count ceilings.** 22 iai-callgrind benchmarks measure deterministic
   instruction counts under valgrind, each with a hard ceiling. A regression fails
   the build like a lint, and raising a ceiling shows up in the diff.
