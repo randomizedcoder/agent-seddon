@@ -9,12 +9,41 @@ existing (02–04).
 
 | # | Increment | Proto | Seam | Wire | Tests | Nix | Status |
 |---|---|:--:|:--:|:--:|:--:|:--:|:--:|
-| 01 | Design docs (`docs/design/portal/`) | — | — | — | — | — | **this PR** |
-| 02 | `PromptService` + mode-lens externalization | ☐ | ☐ | ☐ | ☐ | ☐ | pending |
+| 01 | Design docs (`docs/design/portal/`) | — | — | — | — | — | **merged** (#127) |
+| 02 | `PromptService` + mode-lens externalization | ✅ | ✅ | ✅ | ✅ | n/a | **in review** |
 | 03 | `MetricsProxyService` | ☐ | ☐ | ☐ | ☐ | ☐ | pending |
 | 04 | `AgentSessionService` + broadcast event-sink | ☐ | ☐ | ☐ | ☐ | ☐ | pending |
 | 05 | Dart codegen + nix tooling (`buf.gen.yaml`, `gen-dart`, flutter/dart pins, proxy) | — | — | — | ☐ | ☐ | pending |
 | 06 | Flutter app (transport, Launcher, Prompts, Agent View) | — | — | — | ☐ | ☐ | pending |
+
+## 02 — what shipped
+
+- **Mode-lens externalization.** The compiled `lens_instruction` strings moved into
+  a feature-ungated `agent_context::lens` module (`GENERIC` + per-mode defaults +
+  `builtin_instruction` + `ALL_MODES`); `summarizing::DEFAULT_INSTRUCTION` is now an
+  alias to `lens::GENERIC` (one source of truth). `ModeAwareWindow` gained a
+  `with_lens_dir` builder + a `LensPrompts` resolver — an operator file at
+  `<prompts>/lens/<mode>.md` overrides the default, re-read **live** per
+  switch-compaction; no dir ⇒ allocation-free `Cow::Borrowed` default (partition
+  bench + leak budget unaffected). Behaviour with no files is byte-identical (57
+  agent-context tests + leak still green).
+- **`PromptStore` seam.** Trait + `PromptKind`/`PromptRef`/`PromptEntry` DTOs +
+  `Error::Prompt` in `agent-core`; `FilePromptStore` in the new **`agent-prompt`**
+  crate (CRUD over `context.d` + `prompts/`, `resolve_system_prompt` startup hook).
+  System/prepend/append edits take effect next run; mode-lens edits are live.
+- **Wire.** `prompt.proto` (`PromptService`: List/Get/Put/Delete/PreviewAssembled),
+  added to `build.rs` + the descriptor-set test; conversions in `convert.rs`;
+  `PromptSvc` server + `GrpcPrompts` client; `prompt` row in `constants.nix`
+  (50077 / 9627) regenerated into `constants.rs`. Served via `--serve-prompt` /
+  `--serve-all` (built in `builder.rs`, attached to the agent, `add_seam_service`
+  arm). Additive proto — no `buf.image.binpb` bump.
+- **Security.** `safe_prompt_file` + `confine` guard the untrusted `id`; content
+  size-capped; adversarial traversal/oversize/unknown-mode cases asserted, including
+  **over the wire on TCP + UDS** (`roundtrip.rs`).
+- **Docs/config.** `[prompts] dir` in `config/agent.toml`; component doc
+  `docs/components/prompt.md`.
+- Bench+leak: **n/a** — no new hot path (the default lens lookup is allocation-free
+  and off the compaction critical section).
 
 ## Dependency order
 

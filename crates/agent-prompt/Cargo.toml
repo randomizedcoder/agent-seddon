@@ -1,0 +1,18 @@
+[package]
+name = "agent-prompt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+agent-core.workspace = true
+# The per-mode lens defaults + resolver live in agent-context (the `lens` module is
+# feature-ungated), so the store serves exactly the text the summarizer uses.
+agent-context.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+rstest.workspace = true
+agent-testkit.workspace = true

@@ -537,7 +537,10 @@ pub fn register_builtins(r: &mut Registry) {
                 ctx.provider()?.clone(),
                 ctx.cfg.agent.keep_recent_tokens,
             )
-            .with_tokenizer(ctx.tokenizer().cloned(), ctx.cfg.provider.model.clone()),
+            .with_tokenizer(ctx.tokenizer().cloned(), ctx.cfg.provider.model.clone())
+            // Point the destination-mode lens at operator overrides under
+            // `<prompts>/lens/` (docs/design/portal); compiled defaults otherwise.
+            .with_lens_dir(Some(&ctx.cfg.prompts.dir)),
         ) as Arc<dyn ContextStrategy>)
     });
 

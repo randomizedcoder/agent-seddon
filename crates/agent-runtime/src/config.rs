@@ -20,6 +20,8 @@ pub struct Config {
     #[serde(default)]
     pub context_files: ContextFilesCfg,
     #[serde(default)]
+    pub prompts: PromptsCfg,
+    #[serde(default)]
     pub metrics: MetricsCfg,
     #[serde(default)]
     pub grpc: GrpcCfg,
@@ -1215,6 +1217,8 @@ pub struct GrpcCfg {
     #[serde(default)]
     pub dimension: GrpcSeamCfg,
     #[serde(default)]
+    pub prompt: GrpcSeamCfg,
+    #[serde(default)]
     pub review: GrpcSeamCfg,
     /// Not a seam: the `agent --serve-all` gateway, which hosts every enabled
     /// seam's service in one process. Only `listen` is meaningful — a client
@@ -1275,6 +1279,23 @@ impl Default for ContextFilesCfg {
     fn default() -> Self {
         Self {
             dir: default_context_dir(),
+        }
+    }
+}
+
+/// Prompt-store root (docs/design/portal): holds the `system.md` override and the
+/// per-mode `lens/<mode>.md` overrides the `PromptStore` seam manages, and the
+/// `ModeAwareWindow` reads. A missing dir simply means "compiled defaults".
+#[derive(Debug, Deserialize)]
+pub struct PromptsCfg {
+    #[serde(default = "default_prompts_dir")]
+    pub dir: String,
+}
+
+impl Default for PromptsCfg {
+    fn default() -> Self {
+        Self {
+            dir: default_prompts_dir(),
         }
     }
 }
@@ -1559,6 +1580,9 @@ fn default_recall_limit() -> usize {
 fn default_context_dir() -> String {
     "context.d".into()
 }
+fn default_prompts_dir() -> String {
+    "prompts".into()
+}
 fn default_metrics_listen() -> String {
     "127.0.0.1:9600".into()
 }
@@ -1632,6 +1656,7 @@ impl Config {
             mcp: McpCfg::default(),
             telemetry: TelemetryCfg::default(),
             context_files: ContextFilesCfg::default(),
+            prompts: PromptsCfg::default(),
             metrics: MetricsCfg::default(),
             grpc: GrpcCfg::default(),
             search: SearchCfg::default(),

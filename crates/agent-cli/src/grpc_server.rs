@@ -49,6 +49,7 @@ pub enum Seam {
     Review,
     Mode,
     Dimension,
+    Prompt,
 }
 
 /// Every variant, so the table can be checked for completeness.
@@ -79,6 +80,7 @@ const ALL_SEAMS: &[Seam] = &[
     Seam::Review,
     Seam::Mode,
     Seam::Dimension,
+    Seam::Prompt,
 ];
 
 /// The static facts about a seam served as its own process.
@@ -278,6 +280,13 @@ const SEAMS: &[SeamInfo] = &[
         service: "agent.v1.DimensionService",
         endpoint: constants::DIMENSION,
     },
+    SeamInfo {
+        seam: Seam::Prompt,
+        flag: "--serve-prompt",
+        name: "prompt",
+        service: "agent.v1.PromptService",
+        endpoint: constants::PROMPT,
+    },
 ];
 
 impl Seam {
@@ -347,6 +356,7 @@ impl Seam {
             Seam::Review => &cfg.grpc.review.listen,
             Seam::Mode => &cfg.grpc.mode.listen,
             Seam::Dimension => &cfg.grpc.dimension.listen,
+            Seam::Prompt => &cfg.grpc.prompt.listen,
         }
     }
 }
@@ -552,6 +562,13 @@ fn add_seam_service(router: Router, agent: &Agent, seam: Seam) -> anyhow::Result
         Seam::Dimension => match agent.dimension_store() {
             Some(d) => (
                 router.add_service(srv::DimensionSvc::new(d).into_server()),
+                true,
+            ),
+            None => (router, false),
+        },
+        Seam::Prompt => match agent.prompt_store() {
+            Some(p) => (
+                router.add_service(srv::PromptSvc::new(p).into_server()),
                 true,
             ),
             None => (router, false),

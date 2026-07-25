@@ -111,10 +111,9 @@ impl ContextStrategy for SummarizingWindow {
 }
 
 /// The mode-agnostic compaction instruction (the ordinary, non-switch summary).
-pub(crate) const DEFAULT_INSTRUCTION: &str =
-    "You compress conversation history. Summarize the excerpt below concisely, \
-     preserving key facts, decisions, file paths, and tool outcomes. Output only \
-     the summary.";
+/// The source of truth lives in [`crate::lens::GENERIC`] so the `PromptStore` seam
+/// serves the same text the summarizer uses; this is a crate-local alias.
+pub(crate) const DEFAULT_INSTRUCTION: &str = crate::lens::GENERIC;
 
 impl SummarizingWindow {
     async fn summarize(&self, messages: &[Message]) -> Result<String> {

@@ -18,6 +18,7 @@
 //! [`scan_for_injection`] before insertion; a flagged summary is dropped (the span
 //! is truncated) rather than obeyed.
 
+use crate::lens::LensPrompts;
 use crate::summarizing::{leading_system_count, tail_cut, SummarizingWindow, DEFAULT_INSTRUCTION};
 use agent_core::{
     scan_for_injection, CompactAction, ContextInput, ContextStrategy, LlmProvider, Message, Result,
@@ -35,6 +36,10 @@ pub struct ModeAwareWindow {
     pending: Mutex<Option<(TaskMode, TaskMode)>>,
     /// How the most recent `compact` behaved, for the metered decorator's labels.
     last_action: Mutex<CompactAction>,
+    /// Per-mode lens resolver (compiled defaults, or operator overrides under
+    /// `<prompts_dir>/lens/`). Defaults-only unless a dir is wired via
+    /// [`Self::with_lens_dir`], so existing call sites are unchanged.
+    lens: LensPrompts,
 }
 
 impl ModeAwareWindow {
@@ -44,7 +49,16 @@ impl ModeAwareWindow {
             keep_recent_tokens,
             pending: Mutex::new(None),
             last_action: Mutex::new(CompactAction::Budget),
+            lens: LensPrompts::defaults(),
         }
+    }
+
+    /// Point the destination-mode lens at operator override files under
+    /// `<prompts_dir>/lens/<mode>.md` (with the compiled defaults as fallback). An
+    /// empty/`None` dir keeps the defaults-only resolver.
+    pub fn with_lens_dir(mut self, prompts_dir: Option<&str>) -> Self {
+        self.lens = LensPrompts::new(prompts_dir);
+        self
     }
 
     /// Attach a [`Tokenizer`] for the over-budget gate, mirroring
@@ -74,11 +88,8 @@ impl ModeAwareWindow {
         }
 
         let middle = &working.messages[head..cut];
-        let (raw, action) = match self
-            .inner
-            .summarize_with(middle, lens_instruction(to))
-            .await
-        {
+        let instruction = self.lens.instruction(to);
+        let (raw, action) = match self.inner.summarize_with(middle, &instruction).await {
             Ok(s) => (Some(s), CompactAction::Switch),
             Err(e) => {
                 tracing::warn!(error = %e, "switch-lens summary failed; trying generic");
@@ -157,40 +168,6 @@ impl ContextStrategy for ModeAwareWindow {
 
     fn last_compact_action(&self) -> CompactAction {
         *self.last_action.lock().expect("last_action poisoned")
-    }
-}
-
-/// The destination-mode lens: a fixed, code-owned instruction that tells the
-/// summarizer what to keep and what to drop for the mode we are entering. Keying
-/// on the destination is the "useful in one mode, noise in the next" rule from the
-/// before/after table (docs/design/adaptive-cognition/02-compaction.md).
-fn lens_instruction(to: TaskMode) -> &'static str {
-    match to {
-        TaskMode::Implement => {
-            "Summarize the earlier conversation for an IMPLEMENTATION phase. Keep the chosen \
-             approach, the target file paths, and the goal. Drop exploration dead-ends, rejected \
-             files, and raw directory/grep listings already acted on. Output only the summary."
-        }
-        TaskMode::Debug => {
-            "Summarize the earlier conversation for DEBUGGING. Keep the failing test or error, the \
-             most recent changes, and the goal. Drop verbose build logs and superseded output. \
-             Output only the summary."
-        }
-        TaskMode::Review => {
-            "Summarize the earlier conversation for a CODE REVIEW. Keep the change and its intent \
-             and the changed-file set. Drop the step-by-step build process and intermediate \
-             broken states. Output only the summary."
-        }
-        TaskMode::Design => {
-            "Summarize the earlier conversation for a DESIGN phase. Keep the constraints, the goal, \
-             and the decisions made. Drop low-level implementation detail and rejected \
-             alternatives. Output only the summary."
-        }
-        TaskMode::Explain => {
-            "Summarize the earlier conversation to EXPLAIN what was done. Keep the goal and the \
-             answer-relevant facts. Drop tool noise and process detail. Output only the summary."
-        }
-        TaskMode::Other => DEFAULT_INSTRUCTION,
     }
 }
 

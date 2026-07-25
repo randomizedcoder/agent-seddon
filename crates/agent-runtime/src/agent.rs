@@ -82,6 +82,10 @@ pub struct Agent {
     /// the mode-switch "pull in fresh" recall; hosted over gRPC
     /// (`agent --serve-dimension`).
     dimension_store: Option<Arc<dyn agent_core::DimensionStore>>,
+    /// The prompt-management store, if the `prompt` seam is wired
+    /// (docs/design/portal). Operator/portal-facing — the loop does not consume it;
+    /// held only so it can be hosted over gRPC (`agent --serve-prompt`).
+    prompt_store: Option<Arc<dyn agent_core::PromptStore>>,
     /// The review fact collector, if the `review` seam is wired. Produces the
     /// grounded `ReviewFacts`; hosted over gRPC (`agent --serve-fact-collector`).
     review_collector: Option<Arc<dyn agent_core::ReviewCollector>>,
@@ -187,6 +191,7 @@ impl Agent {
             llm_pool: None,
             task_classifier: None,
             dimension_store: None,
+            prompt_store: None,
             review_collector: None,
             scanner: None,
             verifier: None,
@@ -420,6 +425,13 @@ impl Agent {
         self
     }
 
+    /// Attach the prompt-management store (docs/design/portal), so it can be hosted
+    /// over gRPC. Not consumed by the loop.
+    pub fn with_prompt_store(mut self, p: Arc<dyn agent_core::PromptStore>) -> Self {
+        self.prompt_store = Some(p);
+        self
+    }
+
     /// Attach the dimensional-memory store (adaptive-cognition 03).
     pub fn with_dimension_store(mut self, d: Arc<dyn agent_core::DimensionStore>) -> Self {
         self.dimension_store = Some(d);
@@ -615,6 +627,10 @@ impl Agent {
 
     pub fn dimension_store(&self) -> Option<Arc<dyn agent_core::DimensionStore>> {
         self.dimension_store.clone()
+    }
+
+    pub fn prompt_store(&self) -> Option<Arc<dyn agent_core::PromptStore>> {
+        self.prompt_store.clone()
     }
 
     pub fn review_collector(&self) -> Option<Arc<dyn agent_core::ReviewCollector>> {

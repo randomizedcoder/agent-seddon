@@ -138,6 +138,7 @@ version = "0.1.0"
 dependencies = [
  "agent-core",
  "agent-embed",
+ "agent-prompt",
  "agent-proto",
  "agent-pty",
  "agent-retry",
@@ -233,6 +234,19 @@ dependencies = [
  "async-trait",
  "dhat",
  "iai-callgrind",
+ "rstest",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "agent-prompt"
+version = "0.1.0"
+dependencies = [
+ "agent-context",
+ "agent-core",
+ "agent-testkit",
+ "async-trait",
  "rstest",
  "tokio",
  "tracing",
@@ -342,6 +356,7 @@ dependencies = [
  "agent-memory",
  "agent-metrics",
  "agent-mode",
+ "agent-prompt",
  "agent-providers",
  "agent-pty",
  "agent-reference",

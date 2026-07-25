@@ -535,6 +535,14 @@ flush_interval_ms = 1000
 [context_files]
 dir = "context.d"
 
+# Prompt-store root (docs/design/portal). Holds operator overrides the `PromptStore`
+# seam manages: <dir>/system.md (overrides [agent] system_prompt for the next run)
+# and <dir>/lens/<mode>.md (overrides a per-mode compaction lens — read live by the
+# mode-aware context strategy). A missing dir means "compiled defaults", so this is
+# purely opt-in. Serve the CRUD surface with `agent --serve-prompt` (or --serve-all).
+[prompts]
+dir = "prompts"
+
 # Prometheus metrics about the running agent: loop-level counters (API calls,
 # tokens, context size, tool calls, iterations, run outcome) plus per-component
 # series recorded at each seam (provider request/TTFT, tool exec latency, memory
