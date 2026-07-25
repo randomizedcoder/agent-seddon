@@ -86,6 +86,10 @@ pub struct Agent {
     /// (docs/design/portal). Operator/portal-facing — the loop does not consume it;
     /// held only so it can be hosted over gRPC (`agent --serve-prompt`).
     prompt_store: Option<Arc<dyn agent_core::PromptStore>>,
+    /// The metrics proxy, if the `metrics-proxy` seam is wired (docs/design/portal).
+    /// Portal-facing PromQL→Prometheus proxy; held only so it can be hosted over
+    /// gRPC (`agent --serve-metrics-proxy`). Not consumed by the loop.
+    metrics_proxy: Option<Arc<dyn agent_core::MetricsProxy>>,
     /// The review fact collector, if the `review` seam is wired. Produces the
     /// grounded `ReviewFacts`; hosted over gRPC (`agent --serve-fact-collector`).
     review_collector: Option<Arc<dyn agent_core::ReviewCollector>>,
@@ -192,6 +196,7 @@ impl Agent {
             task_classifier: None,
             dimension_store: None,
             prompt_store: None,
+            metrics_proxy: None,
             review_collector: None,
             scanner: None,
             verifier: None,
@@ -432,6 +437,13 @@ impl Agent {
         self
     }
 
+    /// Attach the metrics proxy (docs/design/portal), so it can be hosted over gRPC.
+    /// Not consumed by the loop.
+    pub fn with_metrics_proxy(mut self, m: Arc<dyn agent_core::MetricsProxy>) -> Self {
+        self.metrics_proxy = Some(m);
+        self
+    }
+
     /// Attach the dimensional-memory store (adaptive-cognition 03).
     pub fn with_dimension_store(mut self, d: Arc<dyn agent_core::DimensionStore>) -> Self {
         self.dimension_store = Some(d);
@@ -631,6 +643,10 @@ impl Agent {
 
     pub fn prompt_store(&self) -> Option<Arc<dyn agent_core::PromptStore>> {
         self.prompt_store.clone()
+    }
+
+    pub fn metrics_proxy(&self) -> Option<Arc<dyn agent_core::MetricsProxy>> {
+        self.metrics_proxy.clone()
     }
 
     pub fn review_collector(&self) -> Option<Arc<dyn agent_core::ReviewCollector>> {

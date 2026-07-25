@@ -55,6 +55,8 @@ pub enum Error {
     Session(String),
     #[error("prompt error: {0}")]
     Prompt(String),
+    #[error("metrics error: {0}")]
+    Metrics(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -2161,6 +2163,62 @@ pub trait PromptStore: Send + Sync {
     /// goal, assembled from the *current* prompts. `mode` is informational: initial
     /// assembly is mode-independent (the lens applies only at switch-compaction).
     async fn preview_assembled(&self, mode: TaskMode, goal: &str) -> Result<Vec<Message>>;
+}
+
+// ---------------------------------------------------------------------------
+// Metrics proxy (docs/design/portal): generic PromQL over gRPC
+// ---------------------------------------------------------------------------
+
+/// An instant PromQL query. `time_unix_ms` pins the evaluation instant (else now).
+#[derive(Debug, Clone)]
+pub struct PromQuery {
+    pub query: String,
+    pub time_unix_ms: Option<i64>,
+}
+
+/// A range PromQL query over `[start, end]` at `step_secs` resolution.
+#[derive(Debug, Clone)]
+pub struct PromRangeQuery {
+    pub query: String,
+    pub start_unix_ms: i64,
+    pub end_unix_ms: i64,
+    pub step_secs: u32,
+}
+
+/// One `(timestamp, value)` point. `value` may be non-finite (Prometheus emits
+/// `NaN`/`+Inf`); consumers clamp as needed.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PromSample {
+    pub t_unix_ms: i64,
+    pub value: f64,
+}
+
+/// One labelled series: the metric's label set plus its samples (one for an
+/// instant vector, many for a range matrix).
+#[derive(Debug, Clone, Default)]
+pub struct PromSeries {
+    pub labels: HashMap<String, String>,
+    pub samples: Vec<PromSample>,
+}
+
+/// A query result mirroring Prometheus' JSON envelope. `error` is a class-only
+/// message on failure (never a raw upstream body); `series` is empty then.
+#[derive(Debug, Clone, Default)]
+pub struct PromResult {
+    /// `"vector" | "matrix" | "scalar"` (empty on error).
+    pub result_type: String,
+    pub series: Vec<PromSeries>,
+    pub error: String,
+}
+
+/// A generic PromQL-over-gRPC proxy (docs/design/portal): so a gRPC-only client
+/// (the portal) can read the same metrics Grafana does, reusing any panel query
+/// verbatim. Fails **soft** — a bad/oversized/unreachable upstream yields an empty
+/// [`PromResult`] with `error` set, never a panic. Read-only: it never writes.
+#[async_trait]
+pub trait MetricsProxy: Send + Sync {
+    async fn query(&self, q: &PromQuery) -> Result<PromResult>;
+    async fn query_range(&self, q: &PromRangeQuery) -> Result<PromResult>;
 }
 
 // ---------------------------------------------------------------------------

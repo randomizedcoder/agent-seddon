@@ -155,6 +155,11 @@ pub const PROMPT: SeamEndpoint = SeamEndpoint {
     uds_path: "/tmp/agent-seddon/prompt.sock",
     metrics_port: 9627,
 };
+pub const METRICS_PROXY: SeamEndpoint = SeamEndpoint {
+    tcp_port: 50079,
+    uds_path: "/tmp/agent-seddon/metrics-proxy.sock",
+    metrics_port: 9629,
+};
 
 /// The `agent --serve-all` gateway (not a seam — it hosts every seam).
 pub const GATEWAY: SeamEndpoint = SeamEndpoint {

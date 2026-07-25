@@ -543,6 +543,13 @@ dir = "context.d"
 [prompts]
 dir = "prompts"
 
+# Metrics proxy (docs/design/portal): `agent --serve-metrics-proxy` forwards PromQL
+# to this Prometheus HTTP API, so a gRPC-only client (the portal) reads the same
+# series Grafana does — reusing any panel query verbatim. Read-only + fail-soft
+# (a bad/unreachable upstream yields an empty result with a class-only error).
+[metrics_proxy]
+prometheus_url = "http://127.0.0.1:9090"
+
 # Prometheus metrics about the running agent: loop-level counters (API calls,
 # tokens, context size, tool calls, iterations, run outcome) plus per-component
 # series recorded at each seam (provider request/TTFT, tool exec latency, memory

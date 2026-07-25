@@ -865,3 +865,111 @@ async fn adversarial_prompt_traversal_rejected_over_wire() {
     assert!(err.is_err(), "traversal must be rejected across the wire");
     assert!(!root.join("evil.md").exists());
 }
+
+// ---------------------------------------------------------------------------
+// MetricsProxy (docs/design/portal) — PromQL over gRPC, via a double
+// ---------------------------------------------------------------------------
+
+// A canned proxy (no real Prometheus in the sandbox): echoes a fixed vector for a
+// normal query and an error shape for the query carrying "boom", so the round-trip
+// asserts labels + samples + the class-only error survive the hop on TCP and UDS.
+struct StaticMetricsProxy;
+
+#[async_trait]
+impl agent_core::MetricsProxy for StaticMetricsProxy {
+    async fn query(&self, q: &agent_core::PromQuery) -> agent_core::Result<agent_core::PromResult> {
+        if q.query.contains("boom") {
+            return Ok(agent_core::PromResult {
+                error: "upstream error (bad_data)".into(),
+                ..Default::default()
+            });
+        }
+        let mut labels = std::collections::HashMap::new();
+        labels.insert("job".to_string(), "agent".to_string());
+        Ok(agent_core::PromResult {
+            result_type: "vector".into(),
+            series: vec![agent_core::PromSeries {
+                labels,
+                samples: vec![agent_core::PromSample {
+                    t_unix_ms: 1_700_000_000_000,
+                    value: 42.0,
+                }],
+            }],
+            error: String::new(),
+        })
+    }
+
+    async fn query_range(
+        &self,
+        _q: &agent_core::PromRangeQuery,
+    ) -> agent_core::Result<agent_core::PromResult> {
+        Ok(agent_core::PromResult {
+            result_type: "matrix".into(),
+            series: vec![agent_core::PromSeries {
+                labels: Default::default(),
+                samples: vec![
+                    agent_core::PromSample {
+                        t_unix_ms: 1000,
+                        value: 1.0,
+                    },
+                    agent_core::PromSample {
+                        t_unix_ms: 2000,
+                        value: 2.0,
+                    },
+                ],
+            }],
+            error: String::new(),
+        })
+    }
+}
+
+#[rstest]
+#[case::tcp(Transport::Tcp)]
+#[case::uds(Transport::Uds)]
+#[tokio::test]
+async fn metrics_proxy_roundtrips(#[case] transport: Transport) {
+    use agent_core::{MetricsProxy, PromQuery, PromRangeQuery};
+    let (dial, _srv) = spawn(
+        transport,
+        agent_grpc::server::metrics_proxy_router(Arc::new(StaticMetricsProxy)),
+    )
+    .await;
+    let client = agent_grpc::client::GrpcMetricsProxy::connect(&dial).unwrap();
+
+    // A vector result: labels + sample survive the hop.
+    let r = client
+        .query(&PromQuery {
+            query: "up".into(),
+            time_unix_ms: Some(1_700_000_000_000),
+        })
+        .await
+        .unwrap();
+    assert_eq!(r.result_type, "vector");
+    assert_eq!(r.series[0].labels.get("job").unwrap(), "agent");
+    assert_eq!(r.series[0].samples[0].value, 42.0);
+    assert!(r.error.is_empty());
+
+    // A range result: multiple samples survive.
+    let rr = client
+        .query_range(&PromRangeQuery {
+            query: "rate(x[5m])".into(),
+            start_unix_ms: 1000,
+            end_unix_ms: 2000,
+            step_secs: 15,
+        })
+        .await
+        .unwrap();
+    assert_eq!(rr.result_type, "matrix");
+    assert_eq!(rr.series[0].samples.len(), 2);
+
+    // A class-only error survives without a raw body.
+    let err = client
+        .query(&PromQuery {
+            query: "boom".into(),
+            time_unix_ms: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(err.error, "upstream error (bad_data)");
+    assert!(err.series.is_empty());
+}

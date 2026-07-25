@@ -22,6 +22,8 @@ pub struct Config {
     #[serde(default)]
     pub prompts: PromptsCfg,
     #[serde(default)]
+    pub metrics_proxy: MetricsProxyCfg,
+    #[serde(default)]
     pub metrics: MetricsCfg,
     #[serde(default)]
     pub grpc: GrpcCfg,
@@ -1219,6 +1221,8 @@ pub struct GrpcCfg {
     #[serde(default)]
     pub prompt: GrpcSeamCfg,
     #[serde(default)]
+    pub metrics_proxy: GrpcSeamCfg,
+    #[serde(default)]
     pub review: GrpcSeamCfg,
     /// Not a seam: the `agent --serve-all` gateway, which hosts every enabled
     /// seam's service in one process. Only `listen` is meaningful — a client
@@ -1296,6 +1300,22 @@ impl Default for PromptsCfg {
     fn default() -> Self {
         Self {
             dir: default_prompts_dir(),
+        }
+    }
+}
+
+/// The `MetricsProxy` seam (docs/design/portal): where `--serve-metrics-proxy`
+/// forwards PromQL. `prometheus_url` is the Prometheus HTTP API base.
+#[derive(Debug, Deserialize)]
+pub struct MetricsProxyCfg {
+    #[serde(default = "default_prometheus_url")]
+    pub prometheus_url: String,
+}
+
+impl Default for MetricsProxyCfg {
+    fn default() -> Self {
+        Self {
+            prometheus_url: default_prometheus_url(),
         }
     }
 }
@@ -1583,6 +1603,9 @@ fn default_context_dir() -> String {
 fn default_prompts_dir() -> String {
     "prompts".into()
 }
+fn default_prometheus_url() -> String {
+    "http://127.0.0.1:9090".into()
+}
 fn default_metrics_listen() -> String {
     "127.0.0.1:9600".into()
 }
@@ -1657,6 +1680,7 @@ impl Config {
             telemetry: TelemetryCfg::default(),
             context_files: ContextFilesCfg::default(),
             prompts: PromptsCfg::default(),
+            metrics_proxy: MetricsProxyCfg::default(),
             metrics: MetricsCfg::default(),
             grpc: GrpcCfg::default(),
             search: SearchCfg::default(),

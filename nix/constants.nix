@@ -188,6 +188,18 @@
       metrics_port = 9627;
     };
 
+    # 50078 / 9628 is reserved for the `session_stream` seam (docs/design/portal,
+    # increment 04 — a live structured feed of the agent loop), landing next.
+
+    # Metrics proxy (docs/design/portal): the `MetricsProxy` seam — a generic
+    # PromQL-over-gRPC proxy to Prometheus, so a gRPC-only client can read the
+    # same series Grafana does.
+    metrics_proxy = {
+      port = 50079;
+      socket = "/tmp/agent-seddon/metrics-proxy.sock";
+      metrics_port = 9629;
+    };
+
     # NOT a seam: the `agent --serve-all` gateway, which hosts every seam's
     # service in one process on one endpoint. A same-host deployment that wants
     # all seams distributed would otherwise run one process (and one port) per

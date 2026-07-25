@@ -1,0 +1,45 @@
+// The `MetricsProxy` seam over gRPC (docs/design/portal): a generic PromQL proxy
+// to a Prometheus HTTP API, so a gRPC-only client (the portal) can read the same
+// series Grafana does and reuse any panel query verbatim — no getter per number.
+//
+// The PromQL string is untrusted: the server caps its length and the returned
+// series/sample counts, bounds the upstream request, and returns a class-only
+// `error` (never a raw upstream body). It only ever *reads* Prometheus.
+syntax = "proto3";
+
+package agent.v1;
+
+service MetricsProxyService {
+  // Instant query at `time_unix_ms` (or now).
+  rpc Query(PromQuery) returns (PromResult);
+  // Range query over [start, end] at `step_secs` resolution.
+  rpc QueryRange(PromRangeQuery) returns (PromResult);
+}
+
+message PromQuery {
+  string query = 1;
+  optional int64 time_unix_ms = 2;
+}
+
+message PromRangeQuery {
+  string query = 1;
+  int64 start_unix_ms = 2;
+  int64 end_unix_ms = 3;
+  uint32 step_secs = 4;
+}
+
+message PromSample {
+  int64 t_unix_ms = 1;
+  double value = 2; // may be NaN / +-Inf, as Prometheus emits them
+}
+
+message PromSeries {
+  map<string, string> labels = 1;
+  repeated PromSample samples = 2;
+}
+
+message PromResult {
+  string result_type = 1; // "vector" | "matrix" | "scalar" (empty on error)
+  repeated PromSeries series = 2;
+  string error = 3; // class-only on failure; `series` is empty then
+}

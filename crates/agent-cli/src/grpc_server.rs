@@ -50,6 +50,7 @@ pub enum Seam {
     Mode,
     Dimension,
     Prompt,
+    MetricsProxy,
 }
 
 /// Every variant, so the table can be checked for completeness.
@@ -81,6 +82,7 @@ const ALL_SEAMS: &[Seam] = &[
     Seam::Mode,
     Seam::Dimension,
     Seam::Prompt,
+    Seam::MetricsProxy,
 ];
 
 /// The static facts about a seam served as its own process.
@@ -287,6 +289,13 @@ const SEAMS: &[SeamInfo] = &[
         service: "agent.v1.PromptService",
         endpoint: constants::PROMPT,
     },
+    SeamInfo {
+        seam: Seam::MetricsProxy,
+        flag: "--serve-metrics-proxy",
+        name: "metrics-proxy",
+        service: "agent.v1.MetricsProxyService",
+        endpoint: constants::METRICS_PROXY,
+    },
 ];
 
 impl Seam {
@@ -357,6 +366,7 @@ impl Seam {
             Seam::Mode => &cfg.grpc.mode.listen,
             Seam::Dimension => &cfg.grpc.dimension.listen,
             Seam::Prompt => &cfg.grpc.prompt.listen,
+            Seam::MetricsProxy => &cfg.grpc.metrics_proxy.listen,
         }
     }
 }
@@ -569,6 +579,13 @@ fn add_seam_service(router: Router, agent: &Agent, seam: Seam) -> anyhow::Result
         Seam::Prompt => match agent.prompt_store() {
             Some(p) => (
                 router.add_service(srv::PromptSvc::new(p).into_server()),
+                true,
+            ),
+            None => (router, false),
+        },
+        Seam::MetricsProxy => match agent.metrics_proxy() {
+            Some(m) => (
+                router.add_service(srv::MetricsProxySvc::new(m).into_server()),
                 true,
             ),
             None => (router, false),
