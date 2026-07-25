@@ -79,6 +79,7 @@ mod descriptor_tests {
             "LlmPoolService",
             "FactCollectorService",
             "PromptService",
+            "MetricsProxyService",
         ] {
             assert!(
                 services.contains(&expected),

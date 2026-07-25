@@ -728,6 +728,23 @@ pub async fn build_agent_with(
     #[cfg(not(feature = "prompt"))]
     let prompt_store_seam: Option<Arc<dyn agent_core::PromptStore>> = None;
 
+    // Metrics proxy (docs/design/portal): a PromQL→Prometheus proxy so a gRPC-only
+    // client reads the same series Grafana does. Always built (no loop consumer) so
+    // it can be hosted via `--serve-metrics-proxy` / `--serve-all`. A bad
+    // `prometheus_url` is a per-call fail-soft, not a startup failure — but building
+    // the HTTP client itself can fail, in which case the seam is simply not offered.
+    #[cfg(feature = "metrics-proxy")]
+    let metrics_proxy_seam: Option<Arc<dyn agent_core::MetricsProxy>> =
+        match agent_metrics_proxy::HttpMetricsProxy::new(&cfg.metrics_proxy.prometheus_url) {
+            Ok(p) => Some(Arc::new(p)),
+            Err(e) => {
+                tracing::warn!("metrics proxy disabled: {e}");
+                None
+            }
+        };
+    #[cfg(not(feature = "metrics-proxy"))]
+    let metrics_proxy_seam: Option<Arc<dyn agent_core::MetricsProxy>> = None;
+
     #[cfg(feature = "review")]
     let review_collector_seam: Option<Arc<dyn agent_core::ReviewCollector>> =
         match cfg.review.backend.as_str() {
@@ -897,6 +914,10 @@ pub async fn build_agent_with(
     };
     let agent = match prompt_store_seam {
         Some(p) => agent.with_prompt_store(p),
+        None => agent,
+    };
+    let agent = match metrics_proxy_seam {
+        Some(m) => agent.with_metrics_proxy(m),
         None => agent,
     };
     let agent = match review_collector_seam {

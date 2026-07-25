@@ -42,6 +42,7 @@ default = [
     "mode",
     "review",
     "prompt",
+    "metrics-proxy",
     "session-export",
     "skill-write",
     "forge",
@@ -140,6 +141,8 @@ memory-file = ["agent-memory/memory-file"]
 dimensions = ["agent-memory/memory-dimensions"]
 # Prompt management seam (docs/design/portal): see + CRUD every prompt.
 prompt = ["dep:agent-prompt"]
+# Metrics proxy seam (docs/design/portal): generic PromQL-over-gRPC to Prometheus.
+metrics-proxy = ["dep:agent-metrics-proxy"]
 # Connect to external MCP servers and register their tools.
 mcp = ["dep:agent-mcp"]
 # gRPC seam transports: `= "grpc"` client factories + remote tool workers.
@@ -171,6 +174,7 @@ agent-git = { workspace = true, optional = true }
 agent-memory.workspace = true
 agent-context.workspace = true
 agent-prompt = { workspace = true, optional = true }
+agent-metrics-proxy = { workspace = true, optional = true }
 agent-tokenizer = { workspace = true, optional = true }
 agent-web = { workspace = true, optional = true }
 agent-tasks = { workspace = true, optional = true }

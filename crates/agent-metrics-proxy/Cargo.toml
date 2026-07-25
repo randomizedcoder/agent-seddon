@@ -1,0 +1,23 @@
+[package]
+name = "agent-metrics-proxy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["http"]
+# The reqwest-backed proxy to a Prometheus HTTP API. Without it, only the pure
+# response parser + types compile (useful for a test-only build).
+http = ["dep:reqwest"]
+
+[dependencies]
+agent-core.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+serde_json.workspace = true
+reqwest = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio.workspace = true
+rstest.workspace = true
+serde_json.workspace = true

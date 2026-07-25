@@ -10,8 +10,8 @@ existing (02–04).
 | # | Increment | Proto | Seam | Wire | Tests | Nix | Status |
 |---|---|:--:|:--:|:--:|:--:|:--:|:--:|
 | 01 | Design docs (`docs/design/portal/`) | — | — | — | — | — | **merged** (#127) |
-| 02 | `PromptService` + mode-lens externalization | ✅ | ✅ | ✅ | ✅ | n/a | **in review** |
-| 03 | `MetricsProxyService` | ☐ | ☐ | ☐ | ☐ | ☐ | pending |
+| 02 | `PromptService` + mode-lens externalization | ✅ | ✅ | ✅ | ✅ | n/a | **merged** (#128) |
+| 03 | `MetricsProxyService` | ✅ | ✅ | ✅ | ✅ | n/a | **in review** |
 | 04 | `AgentSessionService` + broadcast event-sink | ☐ | ☐ | ☐ | ☐ | ☐ | pending |
 | 05 | Dart codegen + nix tooling (`buf.gen.yaml`, `gen-dart`, flutter/dart pins, proxy) | — | — | — | ☐ | ☐ | pending |
 | 06 | Flutter app (transport, Launcher, Prompts, Agent View) | — | — | — | ☐ | ☐ | pending |
@@ -44,6 +44,27 @@ existing (02–04).
   `docs/components/prompt.md`.
 - Bench+leak: **n/a** — no new hot path (the default lens lookup is allocation-free
   and off the compaction critical section).
+
+## 03 — what shipped
+
+- **`MetricsProxy` seam.** Trait + `PromQuery`/`PromRangeQuery`/`PromResult`/
+  `PromSeries`/`PromSample` + `Error::Metrics` in `agent-core`. New
+  **`agent-metrics-proxy`** crate: `HttpMetricsProxy` (reqwest → Prometheus
+  `/api/v1/query[_range]`) + a **pure** `parse_prom_response` (vector/matrix/scalar,
+  non-finite values, error/oversized/malformed) unit-tested against canned envelopes.
+- **Fail-soft, read-only, capped.** Query length + series + per-series sample counts
+  capped before buffering; upstream time-bounded; raw error body never forwarded
+  (`errorType` class only). Every failure folds into an empty `PromResult{error}` —
+  never `Err`, never a panic. Oversized-query + unreachable-upstream asserted.
+- **Wire + serve.** `metrics_proxy.proto` (`MetricsProxyService`: Query/QueryRange),
+  added to `build.rs` + the descriptor-set test; `From`/`From` conversions;
+  `MetricsProxySvc` server + `GrpcMetricsProxy` client (fail-soft end to end);
+  `metrics_proxy` row in `constants.nix` (**50079 / 9629**, with 50078/9628 reserved
+  for session_stream) regenerated into `constants.rs`. Built in `builder.rs`,
+  attached to the agent, served via `--serve-metrics-proxy` / `--serve-all`. Round-trip
+  asserted on **TCP + UDS** via a double. Additive proto — no baseline bump.
+- **Docs/config.** `[metrics_proxy] prometheus_url` in `config/agent.toml`;
+  component doc `docs/components/metrics-proxy.md`.
 
 ## Dependency order
 

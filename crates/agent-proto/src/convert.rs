@@ -157,6 +157,7 @@ pub fn status_from_error(e: &agent_core::Error) -> tonic::Status {
         Error::Session(m) => tonic::Status::internal(format!("session: {m}")),
         // A rejected prompt id / oversized body is a bad request, not a server fault.
         Error::Prompt(m) => tonic::Status::invalid_argument(format!("prompt: {m}")),
+        Error::Metrics(m) => tonic::Status::internal(format!("metrics: {m}")),
     }
 }
 
@@ -3446,6 +3447,104 @@ impl From<agent_core::Message> for pb::PreviewMessage {
         pb::PreviewMessage {
             role: m.role.as_str().to_string(),
             content: m.content_text(),
+        }
+    }
+}
+
+// --- MetricsProxy (docs/design/portal) -------------------------------------
+
+impl From<pb::PromQuery> for agent_core::PromQuery {
+    fn from(q: pb::PromQuery) -> Self {
+        agent_core::PromQuery {
+            query: q.query,
+            time_unix_ms: q.time_unix_ms,
+        }
+    }
+}
+
+impl From<agent_core::PromQuery> for pb::PromQuery {
+    fn from(q: agent_core::PromQuery) -> Self {
+        pb::PromQuery {
+            query: q.query,
+            time_unix_ms: q.time_unix_ms,
+        }
+    }
+}
+
+impl From<pb::PromRangeQuery> for agent_core::PromRangeQuery {
+    fn from(q: pb::PromRangeQuery) -> Self {
+        agent_core::PromRangeQuery {
+            query: q.query,
+            start_unix_ms: q.start_unix_ms,
+            end_unix_ms: q.end_unix_ms,
+            step_secs: q.step_secs,
+        }
+    }
+}
+
+impl From<agent_core::PromRangeQuery> for pb::PromRangeQuery {
+    fn from(q: agent_core::PromRangeQuery) -> Self {
+        pb::PromRangeQuery {
+            query: q.query,
+            start_unix_ms: q.start_unix_ms,
+            end_unix_ms: q.end_unix_ms,
+            step_secs: q.step_secs,
+        }
+    }
+}
+
+impl From<agent_core::PromSample> for pb::PromSample {
+    fn from(s: agent_core::PromSample) -> Self {
+        pb::PromSample {
+            t_unix_ms: s.t_unix_ms,
+            value: s.value,
+        }
+    }
+}
+
+impl From<pb::PromSample> for agent_core::PromSample {
+    fn from(s: pb::PromSample) -> Self {
+        agent_core::PromSample {
+            t_unix_ms: s.t_unix_ms,
+            value: s.value,
+        }
+    }
+}
+
+impl From<agent_core::PromSeries> for pb::PromSeries {
+    fn from(s: agent_core::PromSeries) -> Self {
+        pb::PromSeries {
+            labels: s.labels,
+            samples: s.samples.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<pb::PromSeries> for agent_core::PromSeries {
+    fn from(s: pb::PromSeries) -> Self {
+        agent_core::PromSeries {
+            labels: s.labels,
+            samples: s.samples.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<agent_core::PromResult> for pb::PromResult {
+    fn from(r: agent_core::PromResult) -> Self {
+        pb::PromResult {
+            result_type: r.result_type,
+            series: r.series.into_iter().map(Into::into).collect(),
+            error: r.error,
+        }
+    }
+}
+
+impl From<pb::PromResult> for agent_core::PromResult {
+    fn from(r: pb::PromResult) -> Self {
+        agent_core::PromResult {
+            result_type: r.result_type,
+            series: r.series.into_iter().map(Into::into).collect(),
+            error: r.error,
         }
     }
 }
