@@ -213,6 +213,44 @@ talked to a model.
 > a specific Rust version** — `nix/versions.nix` uses `rust-bin.stable.latest`.
 > Pin it there if you need a frozen toolchain.
 
+### Interactive capability tests (`nix run .#e2e-expect`)
+
+`e2e-live` is one-shot and single-file. The **tcl/expect** tier drives the real
+binary through a **multi-turn REPL conversation** with a real model — the
+iterative, tool-selecting, within-session paths a single prompt can't reach. It
+follows the [pcp](https://github.com/randomizedcoder/pcp) pattern (nix boots the
+environment, `expect` drives it); here `expect` `spawn`s the `agent` binary
+directly. The shared procs live in
+[`../test/expect/lib.exp`](../test/expect/lib.exp), the driver in
+[`repl_session.exp`](../test/expect/repl_session.exp).
+
+```sh
+ollama serve && ollama pull llama3.1:latest
+nix run .#e2e-expect          # EXPECT_DEBUG=1 to trace the matching
+```
+
+It runs a small scenario table, each a scripted conversation checked on its
+result: **multi-turn edit + within-session memory** (write `hello.c`, then a
+follow-up turn edits it), **red→green** (fix a seeded broken C file), and **tool
+selection + a response check** (ask it to count files and assert the answer). It
+reads the same `AGENT_E2E_*` variables as `e2e-live`, plus
+`AGENT_E2E_TURN_TIMEOUT` (seconds per turn, default `180`). Exit codes aggregate
+`e2e-live`'s contract over the table: `0` all passed, `1` any **harness** failure
+(a turn timed out or the agent errored), `2` **model-quality** only.
+
+> This tier is deliberately more demanding than `e2e-live`: multi-turn editing
+> and tool selection stress a model far harder than a single hello-world. A small
+> local model (`llama3.1:latest`) that passes `e2e-live` will typically come back
+> `2` here — it writes non-compiling C on the follow-up edit, loops on a failed
+> `edit`, or miscounts. That is the tier doing its job (surfacing the capability
+> gap), not a harness bug; a stronger model is what turns it green.
+
+The tcl/expect harness itself is CI-validated **model-free** by the
+`expect-smoke` check ([`../nix/checks/expect-smoke.nix`](../nix/checks/expect-smoke.nix)):
+it drives the REPL's slash commands (no provider round-trip) over a pty inside
+`nix flake check`, so a regression in the harness or the REPL contract fails the
+gate rather than the opt-in live tier silently.
+
 ### ClickHouse (run history)
 
 A pinned ClickHouse container holds the transaction history, logs and token usage.

@@ -1,0 +1,93 @@
+# test/expect/lib.exp
+#
+# Shared expect procs for driving the real `agent` binary interactively — the
+# pcp `vm-lib.exp` pattern, adapted: expect `spawn`s the binary directly and
+# gets the pty for free (no VM, no socat). The one rule carried over verbatim:
+# **every `expect` has a `timeout` arm that fails** — a hung agent must never
+# read as a pass.
+#
+# The caller sets TERM=dumb + NO_COLOR=1 in the environment so matches land on
+# text, not terminal control bytes (mirrors crates/agent-cli/tests/repl_pty.rs).
+# `agent` must be on PATH.
+#
+# Line terminator: send lines with "\n", NOT "\r" — the REPL's `rustyline` reader
+# accepts the line on newline here; a bare carriage return is echoed but never
+# submitted (the agent then sits until timeout, or exits on EOF).
+
+namespace eval agentlib {
+    # The REPL's readline prompt (crates/agent-cli/src/repl.rs:99) and banner
+    # (:92), both verified against repl_pty.rs. A turn is complete when the
+    # prompt returns — the pcp "resync on the prompt" idiom.
+    variable prompt_pattern "\n> "
+    variable banner_pattern "agent-seddon REPL"
+
+    # EXPECT_DEBUG=1 turns on expect's internal tracing (the pcp idiom) so a
+    # match failure can be diagnosed without editing the scripts.
+    proc init {} {
+        if {[info exists ::env(EXPECT_DEBUG)] && $::env(EXPECT_DEBUG) ne ""} {
+            exp_internal 1
+        }
+    }
+
+    # Spawn `agent --config $cfg` with no goal => the interactive REPL, then wait
+    # for the banner and the first prompt.
+    proc spawn_repl {cfg} {
+        variable banner_pattern
+        variable prompt_pattern
+        # `spawn` sets `spawn_id` in the current scope; declaring it global here is
+        # what lets the sibling procs (send_turn/slash/quit) talk to THIS process
+        # instead of expect's own stdin. Without it they default to exp0 and every
+        # match reads EOF. (This proc is the only spawner; the rest read the global.)
+        global spawn_id
+        spawn agent --config $cfg
+        expect {
+            $banner_pattern {}
+            timeout { puts "\nERROR: no REPL banner within timeout"; exit 1 }
+            eof     { puts "\nERROR: agent exited before the banner"; exit 1 }
+        }
+        expect {
+            $prompt_pattern {}
+            timeout { puts "\nERROR: no first prompt within timeout"; exit 1 }
+        }
+    }
+
+    # Send one REPL turn and resync on the next prompt. Returns 1 on success, 0
+    # if the turn timed out or the agent died mid-turn — the caller treats 0 as a
+    # harness failure (distinct from a model-quality miss, which is judged on the
+    # on-disk / response result by the shell wrapper).
+    proc send_turn {text} {
+        variable prompt_pattern
+        send -- "$text\n"
+        expect {
+            $prompt_pattern { return 1 }
+            timeout { puts "\nERROR: turn timed out: $text"; return 0 }
+            eof     { puts "\nERROR: agent exited mid-turn: $text"; return 0 }
+        }
+    }
+
+    # Send a slash command and assert a deterministic token in its (model-free)
+    # output, then resync on the prompt. Slash commands never call the provider,
+    # so this works with an unreachable model configured.
+    proc slash {cmd token} {
+        variable prompt_pattern
+        send -- "/$cmd\n"
+        expect {
+            -ex $token {}
+            timeout { puts "\nERROR: /$cmd did not print '$token'"; exit 1 }
+            eof     { puts "\nERROR: agent exited during /$cmd"; exit 1 }
+        }
+        expect {
+            $prompt_pattern {}
+            timeout { puts "\nERROR: no prompt after /$cmd"; exit 1 }
+        }
+    }
+
+    # Exit the REPL cleanly via /quit (a different code path from Ctrl-D).
+    proc quit {} {
+        send -- "/quit\n"
+        expect {
+            eof {}
+            timeout { puts "\nERROR: agent did not exit on /quit"; exit 1 }
+        }
+    }
+}

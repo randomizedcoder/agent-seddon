@@ -1,0 +1,46 @@
+#!/usr/bin/env expect
+#
+# repl_smoke.exp <cfg>
+#
+# Model-free smoke test of the tcl/expect harness against the REAL binary. It
+# drives only slash commands (`/tools`, `/model`, an unknown command, `/quit`) —
+# none of which call the provider — so it runs in the HERMETIC `nix flake check`
+# sandbox with an unreachable model configured (nix/checks/expect-smoke.nix).
+# Its value: it proves the expect harness itself drives the real REPL end to end
+# in CI, so the live tier (nix run .#e2e-expect) can be trusted to fail for real
+# reasons rather than a broken harness.
+#
+# Exit 0 — the harness drove the REPL and it behaved. Non-zero — see the message.
+
+source [file join [file dirname [info script]] lib.exp]
+
+if {$argc < 1} {
+    puts "usage: repl_smoke.exp <cfg>"
+    exit 2
+}
+set cfg [lindex $argv 0]
+set timeout 30
+
+agentlib::init
+agentlib::spawn_repl $cfg
+
+# /tools lists the registered tools (write_file is always present).
+agentlib::slash "tools" "write_file"
+# /model echoes the configured model.
+agentlib::slash "model" "model:"
+
+# An unknown command must be reported, not silently ignored.
+send -- "/nosuchcommand\n"
+expect {
+    -ex "unknown command" {}
+    timeout { puts "\nERROR: an unknown command was not reported"; exit 1 }
+    eof     { puts "\nERROR: agent exited on an unknown command"; exit 1 }
+}
+expect {
+    "\n> " {}
+    timeout { puts "\nERROR: no prompt after an unknown command"; exit 1 }
+}
+
+agentlib::quit
+puts "\nOK: expect harness drove the REPL (banner, /tools, /model, unknown, /quit)"
+exit 0

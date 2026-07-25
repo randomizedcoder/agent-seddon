@@ -103,4 +103,9 @@
   # `agent --detect-mode` classifies each taxonomy cue via the deterministic
   # prefilter (no pool, no model). Offline, no toolchain.
   mode-detect = import ./mode-detect.nix { inherit pkgs agent; };
+  # tcl/expect capability harness, model-free slice: drive the real `agent` REPL
+  # over a pty via test/expect/repl_smoke.exp (slash commands only, no provider
+  # round-trip), so the expect tooling is CI-validated. The live tier that talks
+  # to a real model is the opt-in `nix run .#e2e-expect` app (not a check).
+  expect-smoke = import ./expect-smoke.nix { inherit pkgs agent; };
 }

@@ -131,6 +131,18 @@ let
       ;
   };
 
+  # Drive the real agent through a MULTI-TURN REPL conversation with a real model
+  # via tcl/expect (`nix run .#e2e-expect`). The interactive companion to e2e-live;
+  # also not a check (needs a model + socket). See nix/e2e-expect.nix.
+  e2e-expect = import ./e2e-expect.nix {
+    inherit
+      pkgs
+      lib
+      versions
+      agent
+      ;
+  };
+
   # Code-review-flow evaluation harness (`nix run .#review-eval`). Not a check:
   # the Rust corpus is the real working tree's git history (stripped from the
   # hermetic sandbox) and `--judge` needs a network model endpoint. Generates
@@ -230,6 +242,10 @@ in
     e2e-live = {
       type = "app";
       program = "${e2e-live}/bin/e2e-live";
+    };
+    e2e-expect = {
+      type = "app";
+      program = "${e2e-expect}/bin/e2e-expect";
     };
     review-eval = {
       type = "app";

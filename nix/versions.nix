@@ -105,6 +105,11 @@ in
   docker = pkgs.docker;
   jq = pkgs.jq;
   curl = pkgs.curl;
+  # `expect`: drives the real `agent` binary over a pty in the tcl/expect
+  # capability harness (test/expect/, nix/checks/expect-smoke.nix,
+  # nix/e2e-expect.nix). Pinned so the dev shell and the hermetic check sandbox
+  # both have it.
+  expect = pkgs.expect;
 
   # `rg` (ripgrep): the `grep` tool's fast path shells out to it when present and
   # falls back to the in-process `ignore` walk otherwise. Pinned so the dev shell

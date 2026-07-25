@@ -1,0 +1,41 @@
+#!/usr/bin/env expect
+#
+# repl_session.exp <cfg> <timeout> <prompt1> [<prompt2> ...]
+#
+# Drive a multi-turn REPL conversation with the real agent + a real model. Each
+# argument after the timeout is one turn; the driver sends it and resyncs on the
+# prompt. The on-disk / response assertions live in the shell wrapper
+# (nix/e2e-expect.nix) — this script's job is to hold the conversation and prove
+# every turn completed without hanging (the pcp "one driver, args per scenario"
+# shape).
+#
+# Exit 0 — all turns completed and the REPL exited cleanly.
+# Exit 1 — a turn timed out or the agent died mid-conversation (a HARNESS bug).
+# Exit 2 — bad invocation.
+
+source [file join [file dirname [info script]] lib.exp]
+
+if {$argc < 3} {
+    puts "usage: repl_session.exp <cfg> <timeout> <prompt> \[<prompt> ...\]"
+    exit 2
+}
+set cfg     [lindex $argv 0]
+set timeout [lindex $argv 1]
+set prompts [lrange $argv 2 end]
+
+agentlib::init
+agentlib::spawn_repl $cfg
+
+set n 0
+foreach p $prompts {
+    incr n
+    puts "\n=== turn $n: $p ==="
+    if {![agentlib::send_turn $p]} {
+        puts "FAIL(harness): turn $n did not complete"
+        exit 1
+    }
+}
+
+agentlib::quit
+puts "\nOK: all $n turn(s) completed"
+exit 0
