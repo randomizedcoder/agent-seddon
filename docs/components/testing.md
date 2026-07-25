@@ -41,3 +41,25 @@ assert_eq!(memory.tool_order(), vec!["t0", "t1", "t2"]);
 `agent-testkit` depends only on `agent-core` + `agent-mcp` (the stable seam crates),
 and consumers pull it in as a **dev-dependency**, so the graph stays acyclic and no
 test double reaches a release build.
+
+## End-to-end tiers
+
+The doubles above back the hermetic tiers; a couple of live tiers use a real model.
+From fake to real:
+
+| Tier | Boundary | Model | Where |
+|------|----------|-------|-------|
+| `loop_e2e` | `LlmProvider` trait, real loop | `ScriptedProvider` | [`agent-runtime/tests/loop_e2e.rs`](../../crates/agent-runtime/tests/loop_e2e.rs) |
+| `cli_e2e` | process + HTTP wire | scripted OpenAI-compat server | [`agent-cli/tests/cli_e2e.rs`](../../crates/agent-cli/tests/cli_e2e.rs) |
+| `repl_pty` | real tty (Rust `rexpect`) | scripted server | [`agent-cli/tests/repl_pty.rs`](../../crates/agent-cli/tests/repl_pty.rs) |
+| `expect-smoke` | real tty (tcl/expect), model-free | none (slash commands) | [`nix/checks/expect-smoke.nix`](../../nix/checks/expect-smoke.nix), [`test/expect/`](../../test/expect) |
+| `e2e-live` | process + network | **real** | `nix run .#e2e-live` |
+| `e2e-expect` | real tty, **multi-turn REPL** | **real** | `nix run .#e2e-expect`, [`test/expect/`](../../test/expect) |
+
+The first four run hermetically under `nix flake check`; `e2e-live`/`e2e-expect`
+need a running model and are opt-in `nix run` apps. See
+[operating.md](../operating.md) for how to run the live tiers. The tcl/expect
+scripts under [`test/expect/`](../../test/expect) follow the
+[pcp](https://github.com/randomizedcoder/pcp) "nix boots it, expect drives it"
+pattern — every `expect` carries a `timeout` arm that fails, so a hung agent can
+never read as a pass.
