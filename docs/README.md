@@ -105,8 +105,8 @@ One doc per seam or subsystem. The **config key** column is what you set in
 Per-track design documents in [`design/`](design/) — the input to a feature's
 implementation phase, distinct from the shipped `components/` docs. Each carries a
 `STATUS.md` tracking which increments have merged; the tracks below are largely
-**implemented** (see each `STATUS.md`), while `tool-call-verification.md` remains a
-forward-looking note.
+**implemented** (see each `STATUS.md`), while `tool-call-verification.md` and
+`portal/` remain forward-looking (the latter **design / pre-implementation**).
 
 | Doc | About |
 |---|---|
@@ -114,6 +114,7 @@ forward-looking note.
 | [`code-review/`](design/code-review/README.md) | The **Code Review Flow**: detect a review task, then a parallel fan-out of mostly-deterministic collectors (file set, diff, Go static analysis, AST/call-graph, style, git state) builds a *grounded* fact-bundle a model can't hallucinate over — driven by a health-checked pool of cheap LLMs, deeply instrumented for duration + parallel-optimization accounting. A 12-doc set with a status table |
 | [`adaptive-cognition/`](design/adaptive-cognition/README.md) | **Adaptive Cognition**: spend cheap local LLMs (GLM-5.2 + MI50) on the agent's own meta-cognition — per-turn **mode** detection with a switch decision, **mode-aware compaction** that reshapes context on a switch (a before/after table of what to keep/shed/pull-in), and **dimensional memory** that summarizes each step *by dimension* into per-dimension histories. The mode switch is the pivot joining all three. Supersedes `code-review/mode-detection.md` |
 | [`gpu-pool/`](design/gpu-pool/README.md) | The **GPU/LLM pool**: extend the health-checked `LlmPool` into a capacity-aware load balancer across many local targets — in-flight-aware selection policies (least-loaded / weighted / round-robin), per-target concurrency cap + fail-soft backpressure, and latency-graded `healthy \| degraded \| dead` routing. Shipped component: [`pool.md`](components/pool.md) |
+| [`portal/`](design/portal/README.md) | The **Agent Portal**: a small Flutter, **gRPC-only** app that launches the observability UIs, lets the operator **see + CRUD every prompt per mode** (system · context.d pre/post-pends · externalized per-mode compaction lenses), and gives a live **agent view** — loop narration + a status bar (mode · context size · GPU pool · gRPC p50/p99). Adds three seams (`PromptService`, `AgentSessionService`, `MetricsProxyService`) + Dart codegen. **Design / pre-implementation** |
 
 ## The parity program
 
