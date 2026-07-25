@@ -1221,6 +1221,8 @@ pub struct GrpcCfg {
     #[serde(default)]
     pub prompt: GrpcSeamCfg,
     #[serde(default)]
+    pub session_stream: GrpcSeamCfg,
+    #[serde(default)]
     pub metrics_proxy: GrpcSeamCfg,
     #[serde(default)]
     pub review: GrpcSeamCfg,

@@ -155,6 +155,11 @@ pub const PROMPT: SeamEndpoint = SeamEndpoint {
     uds_path: "/tmp/agent-seddon/prompt.sock",
     metrics_port: 9627,
 };
+pub const SESSION_STREAM: SeamEndpoint = SeamEndpoint {
+    tcp_port: 50078,
+    uds_path: "/tmp/agent-seddon/session-stream.sock",
+    metrics_port: 9628,
+};
 pub const METRICS_PROXY: SeamEndpoint = SeamEndpoint {
     tcp_port: 50079,
     uds_path: "/tmp/agent-seddon/metrics-proxy.sock",

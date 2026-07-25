@@ -20,6 +20,7 @@ use tonic::Status;
 pub use tonic::transport::server::Router;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
+mod agent_session;
 mod context;
 mod dimension;
 mod embed;
@@ -45,6 +46,7 @@ mod tokenizer;
 mod tools;
 mod web;
 
+pub use agent_session::*;
 pub use context::*;
 pub use dimension::*;
 pub use embed::*;

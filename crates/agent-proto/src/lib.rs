@@ -35,7 +35,7 @@ pub const FILE_DESCRIPTOR_SET: &[u8] = tonic::include_file_descriptor_set!("agen
 pub mod convert;
 pub mod trace;
 
-pub use convert::{status_from_error, ConvertError};
+pub use convert::{snapshot_event, status_from_error, ConvertError};
 
 #[cfg(test)]
 mod descriptor_tests {
@@ -80,6 +80,7 @@ mod descriptor_tests {
             "FactCollectorService",
             "PromptService",
             "MetricsProxyService",
+            "AgentSessionService",
         ] {
             assert!(
                 services.contains(&expected),

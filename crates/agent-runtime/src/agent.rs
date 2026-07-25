@@ -64,6 +64,10 @@ pub struct Agent {
     policy: Arc<dyn Policy>,
     metrics: Metrics,
     settings: Settings,
+    /// Live agent-session observation sink (docs/design/portal). Always present
+    /// (cheap): the loop publishes into it at its recording sites, and a served
+    /// `AgentSessionService` reads it via [`Self::session_source`]. Observe-only.
+    event_sink: Arc<crate::SessionEvents>,
     /// The composed search backend, if the `search` seam is wired. Held so it can
     /// be hosted over gRPC (`agent --serve-search`); the loop reaches search
     /// through the `search` *tool*, not this field.
@@ -182,6 +186,7 @@ impl Agent {
         metrics: Metrics,
         settings: Settings,
     ) -> Self {
+        let event_sink = Arc::new(crate::SessionEvents::new(settings.context_window));
         Self {
             provider,
             tools,
@@ -190,6 +195,7 @@ impl Agent {
             policy,
             metrics,
             settings,
+            event_sink,
             search: None,
             repo: None,
             llm_pool: None,
@@ -649,6 +655,19 @@ impl Agent {
         self.metrics_proxy.clone()
     }
 
+    /// The live session-event sink, for publishing from the loop / a background
+    /// observe server (docs/design/portal).
+    pub fn event_sink(&self) -> Arc<crate::SessionEvents> {
+        self.event_sink.clone()
+    }
+
+    /// The observation handle a served `AgentSessionService` reads. Always available
+    /// (the sink is always built) — a serve-only process simply streams nothing
+    /// until a loop publishes.
+    pub fn session_source(&self) -> Arc<dyn agent_core::SessionSource> {
+        self.event_sink.clone()
+    }
+
     pub fn review_collector(&self) -> Option<Arc<dyn agent_core::ReviewCollector>> {
         self.review_collector.clone()
     }
@@ -748,6 +767,8 @@ impl Agent {
         let model = self.settings.model.as_str();
         for iter in 1..=self.settings.max_iterations {
             self.metrics.on_iteration();
+            self.event_sink
+                .publish(agent_core::SessionEvent::IterationStart { iter: iter as u32 });
             if !self.hooks.is_empty() {
                 self.hooks.pre_turn(working).await;
             }
@@ -821,6 +842,12 @@ impl Agent {
                     .add_tokens(model, u.prompt_tokens as u64, u.completion_tokens as u64);
                 self.metrics
                     .set_context(u.prompt_tokens as i64, msg_count as i64);
+                self.event_sink
+                    .publish(agent_core::SessionEvent::ContextUpdate {
+                        prompt_tokens: u.prompt_tokens,
+                        context_window: self.settings.context_window,
+                        messages: msg_count as u32,
+                    });
                 // Prompt-cache token split (Anthropic/OpenAI report these) + USD cost
                 // from the price table — the accounting half of the tokenizer seam.
                 self.metrics.add_cache_tokens(
@@ -1027,6 +1054,20 @@ impl Agent {
                     .iter()
                     .all(|c| self.tools.get(&c.name).is_none_or(|t| t.parallel_safe()));
 
+            // Publish tool-call starts to any live observer before execution
+            // (docs/design/portal). Guarded so an unobserved run does not stringify
+            // the args. Sequential + pre-execution, so ordering is deterministic even
+            // though the calls themselves may run in parallel below.
+            if self.event_sink.has_subscribers() {
+                for call in &assistant.tool_calls {
+                    self.event_sink
+                        .publish(agent_core::SessionEvent::ToolCallStart {
+                            name: call.name.clone(),
+                            args: call.arguments.to_string(),
+                        });
+                }
+            }
+
             let tool_timeout = self.settings.tool_timeout_secs;
             let futures = assistant
                 .tool_calls
@@ -1122,6 +1163,19 @@ impl Agent {
                         }
                     }
                 };
+                // Publish the settled outcome to any live observer. `ok` is false
+                // for a denied/blocked call (no observation) too. duration_ms is
+                // best-effort 0 here — precise per-tool latency is in
+                // `agent_tool_exec_seconds` (reachable via the MetricsProxy seam).
+                if self.event_sink.has_subscribers() {
+                    let ok = call_errored.map(|e| !e).unwrap_or(false);
+                    self.event_sink
+                        .publish(agent_core::SessionEvent::ToolCallResult {
+                            name: call.name.clone(),
+                            ok,
+                            duration_ms: 0,
+                        });
+                }
                 working.messages.push(msg.clone());
                 self.record("tool", msg).await;
 
@@ -1179,6 +1233,14 @@ impl Agent {
                 eprint!("{}", chunk.delta_text);
                 let _ = std::io::stderr().flush();
                 echoed = true;
+                // Publish the delta to any live observer (docs/design/portal). Guard
+                // on subscribers so the unobserved hot path allocates nothing extra.
+                if self.event_sink.has_subscribers() {
+                    self.event_sink
+                        .publish(agent_core::SessionEvent::TokenDelta {
+                            text: chunk.delta_text.clone(),
+                        });
+                }
                 content.push_str(&chunk.delta_text);
             }
             if let Some(tc) = chunk.tool_call {
@@ -1436,6 +1498,9 @@ impl Session<'_> {
         // Root span of the run's trace tree; every seam interaction below nests
         // under it, and OTLP exports the whole tree to the collector.
         let goal: String = input.chars().take(80).collect();
+        self.agent
+            .event_sink
+            .publish(agent_core::SessionEvent::RunStarted { goal: goal.clone() });
         let span = tracing::info_span!("agent.turn", goal = %goal);
         let result = self.send_inner(input).instrument(span).await;
         // Checkpoint the completed turn, so `restore`/`branch`/`undo` have
@@ -1456,6 +1521,9 @@ impl Session<'_> {
         self.agent
             .metrics
             .run_finished(outcome, start.elapsed().as_secs_f64());
+        self.agent
+            .event_sink
+            .publish(agent_core::SessionEvent::RunFinished { ok: result.is_ok() });
         result
     }
 
@@ -1518,6 +1586,14 @@ impl Session<'_> {
         self.agent
             .metrics
             .on_mode_switch(sw.from.as_str(), sw.to.as_str(), sw.confidence as f64);
+        self.agent
+            .event_sink
+            .publish(agent_core::SessionEvent::ModeSwitch {
+                from: sw.from.as_str().to_string(),
+                to: sw.to.as_str().to_string(),
+                reason: sw.reason.clone(),
+                confidence: sw.confidence,
+            });
         // Arm the context strategy to reshape on the next compact through the new
         // mode's lens (adaptive-cognition 02). A no-op for strategies that don't
         // implement it (sliding/summarizing) — the default trait method. The

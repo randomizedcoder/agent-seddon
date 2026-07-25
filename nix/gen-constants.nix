@@ -66,6 +66,7 @@ let
     ${seamConst "MODE" g.mode}
     ${seamConst "DIMENSION" g.dimension}
     ${seamConst "PROMPT" g.prompt}
+    ${seamConst "SESSION_STREAM" g.session_stream}
     ${seamConst "METRICS_PROXY" g.metrics_proxy}
 
     /// The `agent --serve-all` gateway (not a seam — it hosts every seam).

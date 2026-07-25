@@ -113,7 +113,7 @@ tonic-reflection = "0.12"
 # `tonic-reflection` above.
 tonic-health = "0.12"
 # gRPC transport plumbing: TCP + unix-domain-socket listeners/dialers.
-tokio-stream = { version = "0.1", features = ["net"] }
+tokio-stream = { version = "0.1", features = ["net", "sync"] }
 tower = { version = "0.5", features = ["util"] }
 hyper-util = "0.1"
 

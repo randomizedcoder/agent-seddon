@@ -122,6 +122,15 @@ async fn main() -> Result<()> {
         _ => None,
     };
 
+    // A non-empty `[grpc.session_stream] listen` makes a *running* agent observable:
+    // the OneShot/REPL run also hosts `AgentSessionService` on this endpoint, sharing
+    // the live session source, so a portal sees the loop's events in real time
+    // (docs/design/portal). Empty ⇒ no observe server (the default).
+    let observe_listen: Option<agent_grpc::Endpoint> = {
+        let l = &config.grpc.session_stream.listen;
+        (!l.is_empty()).then(|| agent_grpc::Endpoint::parse(l))
+    };
+
     let sessions_dir = session_store::default_dir();
     tracing::info!(session_id = %session_id, "starting agent");
     let agent = agent_runtime::build_agent(
@@ -157,6 +166,9 @@ async fn main() -> Result<()> {
                     eprintln!("\n^C — interrupted; saving session and cleaning up…");
                     Ok(None)
                 }
+                // Runs concurrently, sharing the live session source; resolves only
+                // if its bind fails. Dropped (server stops) when the run finishes.
+                res = run_observe(&agent, observe_listen) => res.map(|_| None),
             };
             // Always persist the transcript (success, error, or interrupt) so the
             // run is resumable with `--resume {id}` / `--continue`.
@@ -167,9 +179,10 @@ async fn main() -> Result<()> {
             }
             outcome
         }
-        Mode::Repl => repl::run(&agent, &sessions_dir, resumed)
-            .await
-            .map(|()| None),
+        Mode::Repl => tokio::select! {
+            r = repl::run(&agent, &sessions_dir, resumed) => r.map(|()| None),
+            res = run_observe(&agent, observe_listen) => res.map(|_| None),
+        },
         Mode::Scheduler => {
             // Tick until interrupted. Each due job runs as a fresh headless turn,
             // and the scheduler's own overlap guard is what stops a slow job
@@ -297,6 +310,21 @@ fn resolve_resume(
             eprintln!("could not resume session `{id}`: {e}");
             None
         }
+    }
+}
+
+/// Host the `AgentSessionService` alongside a running loop when a `listen` is set,
+/// else a future that never resolves (docs/design/portal). Meant as a
+/// `tokio::select!` branch next to the run: it shares `&agent` (a second shared
+/// borrow, alongside the session's), and is dropped — stopping the server — when
+/// the run's branch wins.
+async fn run_observe(
+    agent: &agent_runtime::Agent,
+    listen: Option<agent_grpc::Endpoint>,
+) -> Result<()> {
+    match listen {
+        Some(ep) => grpc_server::serve_session_observe(agent, ep).await,
+        None => std::future::pending().await,
     }
 }
 
