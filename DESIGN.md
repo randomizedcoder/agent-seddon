@@ -309,6 +309,34 @@ and `/skill:<name>` loads one skill's body into the conversation on demand
 skill's body enters context). Discovery/loading lives in `agent-runtime::skills`;
 injection is `Session::add_context`.
 
+### 4.8 Later seams: pool, cognition, verification, review
+
+Five seams landed after the original set above; each follows the same rules (a
+trait in `agent-core`, a config-selected impl, a gRPC service). Unlike §4.1–4.4, the
+first three are **wired in `agent-runtime::builder`** rather than via a `Registry`
+factory, because they compose other seams rather than being chosen by a single
+backend string:
+
+- **`LlmPool`** (`[pool]`) — a health-checked, load-balanced pool of `LlmProvider`
+  members: `health()`, a parallel `complete_all(tier, fanout)`, and a single-answer
+  `complete()` failover. In-flight-aware selection policies, per-target concurrency
+  caps + fail-soft backpressure, and latency-graded `healthy | degraded | dead`
+  routing. Hosted as `LlmPoolService`; see [`components/pool.md`](docs/components/pool.md)
+  and [`design/gpu-pool/`](docs/design/gpu-pool/README.md).
+- **`TaskClassifier`** (`[mode]`) — detects the current **task mode** every turn and
+  drives a switch decision; the mode is the pivot for mode-aware compaction (a
+  `ContextStrategy`, §4.4) and dimensional memory. `ModeService`;
+  [`components/mode.md`](docs/components/mode.md).
+- **`DimensionStore`** (`[dimensions]`) — a per-step pass that files what happened
+  into **per-dimension** histories, and dimension-weighted recall. `DimensionService`;
+  [`components/dimensions.md`](docs/components/dimensions.md).
+- **`Verifier`** (`[verifier]`) — a correctness gate that judges a tool call
+  (allow / revise / deny) before it runs, recording every verdict; see
+  [`components/verifier.md`](docs/components/verifier.md).
+- **`ReviewCollector`** (the code-review flow) — fans out grounded fact-collectors
+  over a diff; hosted as `FactCollectorService`;
+  [`design/code-review/`](docs/design/code-review/README.md).
+
 ---
 
 ## 5. Modularity mechanism — how swapping actually works
@@ -565,15 +593,15 @@ Two pieces make this concrete, and land in stages:
 
 - **Shipped now — the wire contract + tracing.** [`agent-proto`](crates/agent-proto)
   is the protobuf mirror of the shared message currency: every type in §4 has a
-  generated twin, **twenty-two** seam traits have a gRPC service (counting the two
-  memory layers, now hosted individually) — every seam except
-  the three whose primary operation is synchronous and whose work is a pure
-  local function (`Prices`, `OutputSchema`, `CacheStrategy`); see
+  generated twin, **twenty-six** seam traits have a gRPC service (counting the two
+  memory layers, now hosted individually). The synchronous, pure-local seams
+  (`Prices`, `OutputSchema`, `CacheStrategy`) deliberately have none — see
   [`docs/grpc.md`](docs/grpc.md#three-seams-are-deliberately-not-distributed) for
-  why distributing those would cost performance and buy nothing — (`Provider`,
+  why distributing those would cost performance and buy nothing — and `Hook` /
+  `Verifier` are simply not distributed yet. The services are (`Provider`,
   `ToolService`, `Memory`/`Episodic`/`Semantic`, `ContextService`, `Policy`,
   `SearchService` — incl. `ListFiles` for index-backed listing — `RepoService`,
-  `SessionService`, `ScannerService`, `ReferenceService`, `SchedulerService`, `TokenizerService`, `EmbedService`, `WebService`, `WebSearchService`, `SandboxService`, `PtyService`, `ForgeService`, `TaskService`, and `LspService`),
+  `SessionService`, `ScannerService`, `ReferenceService`, `SchedulerService`, `TokenizerService`, `EmbedService`, `WebService`, `WebSearchService`, `SandboxService`, `PtyService`, `ForgeService`, `TaskService`, `LspService`, `ModeService`, `DimensionService`, `LlmPoolService`, and the review `FactCollectorService`),
   and lossless
   `From`/`TryFrom` conversions bridge the two (proto depends on core, never the
   reverse — the acyclic graph holds). Everything is **binary protobuf** end to

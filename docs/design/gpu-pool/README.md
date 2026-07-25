@@ -1,7 +1,8 @@
 # GPU/LLM-target pool — health-checked, capacity-aware load balancing
 
-Status: **design / pre-implementation.** Built in gated per-increment PRs off `main`
-(the adaptive-cognition rhythm). See [`STATUS.md`](STATUS.md).
+Status: **implemented** — all three increments merged (see [`STATUS.md`](STATUS.md)).
+Shipped component doc: [`docs/components/pool.md`](../../components/pool.md). Built in
+gated per-increment PRs off `main` (the adaptive-cognition rhythm).
 
 ## The problem
 

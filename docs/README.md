@@ -42,7 +42,8 @@ One doc per seam or subsystem. The **config key** column is what you set in
 | Tools | `[tools] enabled` | [`tools.md`](components/tools.md) |
 | Policy (approval gate) | `[agent] policy` | [`policy.md`](components/policy.md) |
 | Verifier (tool-call correctness gate) | `[verifier] backend` | [`verifier.md`](components/verifier.md) |
-| Context assembly | `[agent] context` | [`context.md`](components/context.md) |
+| Task-mode detection | `[mode] classifier` | [`mode.md`](components/mode.md) |
+| Context assembly (incl. mode-aware) | `[agent] context` | [`context.md`](components/context.md) |
 | Hooks | `[hooks] enabled` | [`hooks.md`](components/hooks.md) |
 
 ### Model and provider
@@ -51,6 +52,7 @@ One doc per seam or subsystem. The **config key** column is what you set in
 |---|---|---|
 | Providers | `[agent] provider` | [`providers.md`](components/providers.md) |
 | Model routing and failover | `[router]` | [`router.md`](components/router.md) |
+| LLM/GPU pool (load-balanced) | `[pool]` | [`pool.md`](components/pool.md) |
 | Prompt-cache placement | `[cache] strategy` | [`prompt-cache.md`](components/prompt-cache.md) |
 | Tokenizer and cost | `[tokenizer] backend` | [`tokenizer.md`](components/tokenizer.md) |
 | Structured output | `[structured] validator` | [`structured-output.md`](components/structured-output.md) |
@@ -61,6 +63,7 @@ One doc per seam or subsystem. The **config key** column is what you set in
 | Component | Config key | Doc |
 |---|---|---|
 | Memory (episodic + semantic) | `[memory] backend`, `semantic` | [`memory.md`](components/memory.md) |
+| Dimensional memory (per-step, by dimension) | `[dimensions] store` | [`dimensions.md`](components/dimensions.md) |
 | Embedder | `[embedder] backend` | [`embedder.md`](components/embedder.md) |
 | Code search | `[agent] search` | [`search.md`](components/search.md) |
 | Git (multi-branch) | `[git]` | [`git.md`](components/git.md) |
@@ -97,16 +100,20 @@ One doc per seam or subsystem. The **config key** column is what you set in
 | Testing conventions | [`testing.md`](components/testing.md) |
 | Benchmarking and leak gate | [`benchmarking.md`](components/benchmarking.md) |
 
-## Design notes (forward-looking)
+## Design notes
 
-Pre-implementation design documents in [`design/`](design/) — the input to a
-feature's implementation phase, distinct from the shipped `components/` docs.
+Per-track design documents in [`design/`](design/) — the input to a feature's
+implementation phase, distinct from the shipped `components/` docs. Each carries a
+`STATUS.md` tracking which increments have merged; the tracks below are largely
+**implemented** (see each `STATUS.md`), while `tool-call-verification.md` remains a
+forward-looking note.
 
 | Doc | About |
 |---|---|
 | [`tool-call-verification.md`](design/tool-call-verification.md) | A measured, multi-model gate that inspects a tool call before it runs (Allow / Revise / Deny), records every verdict to ClickHouse, and learns which verifier to trust per task type |
 | [`code-review/`](design/code-review/README.md) | The **Code Review Flow**: detect a review task, then a parallel fan-out of mostly-deterministic collectors (file set, diff, Go static analysis, AST/call-graph, style, git state) builds a *grounded* fact-bundle a model can't hallucinate over — driven by a health-checked pool of cheap LLMs, deeply instrumented for duration + parallel-optimization accounting. A 12-doc set with a status table |
 | [`adaptive-cognition/`](design/adaptive-cognition/README.md) | **Adaptive Cognition**: spend cheap local LLMs (GLM-5.2 + MI50) on the agent's own meta-cognition — per-turn **mode** detection with a switch decision, **mode-aware compaction** that reshapes context on a switch (a before/after table of what to keep/shed/pull-in), and **dimensional memory** that summarizes each step *by dimension* into per-dimension histories. The mode switch is the pivot joining all three. Supersedes `code-review/mode-detection.md` |
+| [`gpu-pool/`](design/gpu-pool/README.md) | The **GPU/LLM pool**: extend the health-checked `LlmPool` into a capacity-aware load balancer across many local targets — in-flight-aware selection policies (least-loaded / weighted / round-robin), per-target concurrency cap + fail-soft backpressure, and latency-graded `healthy \| degraded \| dead` routing. Shipped component: [`pool.md`](components/pool.md) |
 
 ## The parity program
 

@@ -21,28 +21,35 @@ does something, you should be able to say which component did it, read the metri
 it emitted and the span it opened, and replace that component without forking the
 project.
 
-It is a single-author experimental project. There are 1,692 tests and a nine-target
-`nix flake check` gate — but **no CI**: the gate runs locally, by hand, so take the
-claims below as things you can verify yourself rather than things a badge asserts.
+It is a single-author experimental project. There are over 2,200 tests and a
+hermetic `nix flake check` gate — but **no CI**: the gate runs locally, by hand, so
+take the claims below as things you can verify yourself rather than things a badge
+asserts.
 
 ## What's different
 
-The five things below are all in service of that one thesis.
+The six things below are all in service of that one thesis.
 
 - **It was specified against its peers before it was built.** 30 per-feature specs
   in [`docs/parity/`](docs/parity/README.md), each written by reading the
   corresponding implementation *and its test suite* in three mature harnesses, then
   laying out a test plan to match them. The specs are in the repo, including the
   parts where the peers are still ahead.
-- **Every capability is a seam.** 26 traits in
+- **Every capability is a seam.** 31 traits in
   [`agent-core`](crates/agent-core/src/lib.rs), concrete impls in sibling crates
   behind cargo features, selected by config. Adding a backend is never a fork.
-- **Seams can become services.** 22 of the 26 have a gRPC service with a
+- **Seams can become services.** 26 of the 31 have a gRPC service with a
   buf-governed wire contract and server reflection, so a running seam can be
   introspected and called with plain JSON. The point is *structure and
   introspectability*, not speed — for a same-host seam a gRPC hop is slower than a
   direct call. See the honest scope [below](#running-seams-as-services).
-- **Observability on all of it.** 74 Prometheus metric families, a 37-panel Grafana
+- **The agent's own cognition is a seam too.** It detects its **task mode** every
+  turn (implement / debug / review / …) and switches when the work changes;
+  compaction reshapes the context through the destination mode's lens on a switch;
+  and a per-step pass files what happened into per-dimension memory. The mode switch
+  is the pivot joining the three — the same legibility, turned inward. See
+  [`docs/design/adaptive-cognition/`](docs/design/adaptive-cognition/README.md).
+- **Observability on all of it.** 114 Prometheus metric families, a Grafana
   dashboard provisioned in-tree, OpenTelemetry spans that follow a call across a
   process boundary, and the run history queryable in ClickHouse.
 - **Rust, for two specific reasons.** A single binary with no runtime or virtualenv
@@ -81,7 +88,10 @@ The `Status` column bounds the claim.
 
 | Capability | agent-seddon | Peers | Status |
 |---|---|---|---|
-| Seams as gRPC services | 22 `--serve-<seam>` + an all-in-one gateway, TCP or unix socket, reflection-introspectable | None ship this | Works and tested; **no container deployment** |
+| Seams as gRPC services | 26 `--serve-<seam>` + an all-in-one gateway, TCP or unix socket, reflection-introspectable | None ship this | Works and tested; **no container deployment** |
+| Load-balanced LLM/GPU pool | Health-checked pool across many local model targets — least-loaded / weighted / round-robin selection, per-target concurrency cap + fail-soft backpressure, latency-graded routing; `--serve-llm-pool` | None | Shipped |
+| Adaptive cognition | Detects its own task mode every turn and switches; mode-aware context compaction; per-step dimensional memory | None | Shipped |
+| Tool-call verification | A model-graded gate inspects each tool call (allow / revise / deny) before it runs, every verdict recorded to ClickHouse | None | Shipped |
 | Per-seam metrics | Every served seam exposes its own `/metrics`; ports generated from `nix/constants.nix` | None | Shipped, Grafana provisioned |
 | Queryable run history | ClickHouse `agent_events` / `agent_logs` / `agent_usage` | pi has an adapter interface | Shipped; best-effort, drops rather than blocks |
 | Traces across seams | OTLP span tree, W3C propagation into another process | None | Shipped |
@@ -136,16 +146,30 @@ are in [`docs/operating.md`](docs/operating.md).
 
 Providers are OpenAI-compatible and Anthropic-native, both streaming, with model
 routing and failover, prompt-cache breakpoint placement, and token/cost accounting.
-Memory is a layered episodic log plus semantic recall. Multimodal content, lifecycle
-hooks, and a content scanner that feeds the `Policy` gate are all seams too.
+Several local model targets (a heavy GLM, a medium MI50, a small card) can be grouped
+into a **health-checked, load-balanced pool** that routes around a target that is
+offline *or* busy and prefers a fast one over a slow one. Memory is a layered
+episodic log plus semantic recall. Multimodal content, lifecycle hooks, and a content
+scanner that feeds the `Policy` gate are all seams too.
+
+Two larger capabilities compose these seams. **Adaptive cognition** spends cheap local
+LLMs on the agent's own meta-cognition — per-turn task-mode detection with a switch
+decision, mode-aware compaction that reshapes context on a switch, and per-step
+dimensional memory ([design](docs/design/adaptive-cognition/README.md)). The
+**code-review flow** detects a review task, then fans out mostly-deterministic
+collectors (file set, diff, static analysis, call graph, git state) into a *grounded*
+fact bundle a model can't hallucinate over
+([design](docs/design/code-review/README.md)). A **tool-call verifier** seam can gate
+each call before it runs.
 
 ## Understanding what it's doing
 
 This is what the project is actually for.
 
-**Metrics.** 74 Prometheus families covering every seam — provider latency and
+**Metrics.** 114 Prometheus families covering every seam — provider latency and
 tokens, per-tool duration and outcome, context size and compactions, policy
-decisions, scanner findings, search and memory timings. The agent serves its own
+decisions, scanner findings, pool load and health, search and memory timings. The
+agent serves its own
 `/metrics`, and a `metrics` tool lets the model inspect its own performance
 mid-run. A Grafana dashboard and the Prometheus scrape config are generated from
 the same source of truth as the ports (`nix/constants.nix`), so they cannot drift:
@@ -169,7 +193,7 @@ Full three-signal overview: [`docs/observability.md`](docs/observability.md).
 
 ## Running seams as services
 
-22 seams have a gRPC service. Selecting one is a config change, not a code change —
+26 seams have a gRPC service. Selecting one is a config change, not a code change —
 the loop cannot tell a remote seam from a local one:
 
 ```toml
@@ -202,10 +226,10 @@ execution or authenticated writes — read the warning there before exposing the
 
 ## How it's kept honest
 
-- **Table-driven tests.** 1,692 tests over 1,096 `#[rstest]` cases, classified by
-  prefix: `positive_`, `negative_`, `corner_`, `boundary_`. For anything reading
-  untrusted input, `adversarial_` cases are **mandatory** and must assert the
-  rejection — there are 87 of them.
+- **Table-driven tests.** Over 2,200 tests, 1,514 of them `#[rstest]` cases,
+  classified by prefix: `positive_`, `negative_`, `corner_`, `boundary_`. For
+  anything reading untrusted input, `adversarial_` cases are **mandatory** and must
+  assert the rejection — there are nearly 300 of them.
 - **The binary is tested as a process, not just as a library.** The loop is
   covered in-process, and separately the shipped `agent` binary is spawned as a
   subprocess against a scripted OpenAI-compatible server — so argv parsing, the
@@ -218,10 +242,10 @@ execution or authenticated writes — read the warning there before exposing the
   harness failure and a model-quality failure as different exit codes, because
   they have different owners. It is opt-in and outside the gate — it needs a
   network the hermetic checks do not have.
-- **Instruction-count ceilings.** 17 iai-callgrind benchmarks measure deterministic
+- **Instruction-count ceilings.** 22 iai-callgrind benchmarks measure deterministic
   instruction counts under valgrind, each with a hard ceiling. A regression fails
   the build like a lint, and raising a ceiling shows up in the diff.
-- **Leak budgets.** 14 dhat tests assert hot paths free what they allocate.
+- **Leak budgets.** 18 dhat tests assert hot paths free what they allocate.
 - **One gate.** `nix flake check` runs nine checks: clippy (`-D warnings`), rustfmt,
   tests, `cargo-audit`, nix-fmt, generated-constant drift, buf lint, buf
   wire-compatibility, and the bench and leak suites.
@@ -258,6 +282,10 @@ Experimental, single-author, no CI. Known gaps, stated plainly:
 
 [**`docs/README.md`**](docs/README.md) indexes everything: design and architecture,
 per-component docs, the operating guides, and the 30 parity specs.
+[**`DESIGN.md`**](DESIGN.md) is the architecture reference (the loop, the seams, the
+gRPC layer); the [**`docs/design/`**](docs/design/) directories hold the per-track
+design docs and their status trackers (adaptive cognition, the GPU/LLM pool, the
+code-review flow, tool-call verification).
 
 ## License
 

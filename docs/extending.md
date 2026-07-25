@@ -32,6 +32,14 @@ The shared message protocol (`Message`, `ToolCall`, `Observation`, `ToolSchema`,
 one. Trait contracts live in [`crates/agent-core/src/lib.rs`](../crates/agent-core/src/lib.rs);
 all are object-safe and `#[async_trait]`.
 
+A few config-selected seams are **wired directly in `agent-runtime/src/builder.rs`**
+rather than through a `Registry` factory, because they compose other seams (a
+provider or the pool) rather than being chosen by a single backend string: the
+**LLM/GPU pool** (`[pool]`, see [pool](components/pool.md)), the **task-mode
+classifier** (`[mode]`, see [mode](components/mode.md)), and **dimensional memory**
+(`[dimensions]`, see [dimensions](components/dimensions.md)). To swap one of these,
+add a branch in the builder keyed on its config string — the trait is still the seam.
+
 ## In-tree (contribute a built-in)
 
 Example: a new provider `"my-llm"`.
