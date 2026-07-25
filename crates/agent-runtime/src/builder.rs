@@ -714,6 +714,20 @@ pub async fn build_agent_with(
     #[cfg(not(feature = "dimensions"))]
     let dimension_store_seam: Option<Arc<dyn agent_core::DimensionStore>> = None;
 
+    // Prompt management (docs/design/portal): a filesystem-backed store over the
+    // context.d dir + the prompts dir, serving the config system prompt as the
+    // System default. Always built (no `= "grpc"` loop consumer) so it can be
+    // hosted via `--serve-prompt` / `--serve-all`.
+    #[cfg(feature = "prompt")]
+    let prompt_store_seam: Option<Arc<dyn agent_core::PromptStore>> =
+        Some(Arc::new(agent_prompt::FilePromptStore::new(
+            cfg.context_files.dir.clone(),
+            cfg.prompts.dir.clone(),
+            cfg.agent.system_prompt.clone(),
+        )));
+    #[cfg(not(feature = "prompt"))]
+    let prompt_store_seam: Option<Arc<dyn agent_core::PromptStore>> = None;
+
     #[cfg(feature = "review")]
     let review_collector_seam: Option<Arc<dyn agent_core::ReviewCollector>> =
         match cfg.review.backend.as_str() {
@@ -798,7 +812,16 @@ pub async fn build_agent_with(
         temperature: cfg.agent.temperature,
         context_window: cfg.agent.context_window,
         reserve_output: cfg.agent.reserve_output,
-        system_prompt: cfg.agent.system_prompt,
+        // The effective system prompt is the `<prompts>/system.md` override if
+        // present, else the config value (docs/design/portal). A `Put(System)` thus
+        // takes effect on the next run.
+        #[cfg(feature = "prompt")]
+        system_prompt: agent_prompt::resolve_system_prompt(
+            &cfg.prompts.dir,
+            &cfg.agent.system_prompt,
+        ),
+        #[cfg(not(feature = "prompt"))]
+        system_prompt: cfg.agent.system_prompt.clone(),
         stream: cfg.agent.stream,
         parallel_tools: cfg.agent.parallel_tools,
         tool_timeout_secs: cfg.agent.tool_timeout_secs,
@@ -870,6 +893,10 @@ pub async fn build_agent_with(
     };
     let agent = match dimension_store_seam {
         Some(d) => agent.with_dimension_store(d),
+        None => agent,
+    };
+    let agent = match prompt_store_seam {
+        Some(p) => agent.with_prompt_store(p),
         None => agent,
     };
     let agent = match review_collector_seam {

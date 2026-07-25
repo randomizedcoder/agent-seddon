@@ -65,6 +65,7 @@ let
     ${seamConst "REVIEW" g.review}
     ${seamConst "MODE" g.mode}
     ${seamConst "DIMENSION" g.dimension}
+    ${seamConst "PROMPT" g.prompt}
 
     /// The `agent --serve-all` gateway (not a seam — it hosts every seam).
     ${seamConst "GATEWAY" g.gateway}

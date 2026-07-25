@@ -180,6 +180,14 @@
       metrics_port = 9626;
     };
 
+    # Prompt management (docs/design/portal): the `PromptStore` seam — see + CRUD
+    # the system prompt, context.d pre/post-pends, and per-mode compaction lenses.
+    prompt = {
+      port = 50077;
+      socket = "/tmp/agent-seddon/prompt.sock";
+      metrics_port = 9627;
+    };
+
     # NOT a seam: the `agent --serve-all` gateway, which hosts every seam's
     # service in one process on one endpoint. A same-host deployment that wants
     # all seams distributed would otherwise run one process (and one port) per

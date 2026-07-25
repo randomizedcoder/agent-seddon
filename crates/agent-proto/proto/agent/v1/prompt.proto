@@ -1,0 +1,75 @@
+// The `PromptStore` seam over gRPC (docs/design/portal): a unified read/write view
+// over the agent's prompts — the operator system prompt, the always-injected
+// `context.d` pre/post-pends, and the per-mode compaction lenses. Operator/portal
+// facing; the loop does not consume it.
+//
+// Every `id` is untrusted (it may become a filename): the server validates the
+// segment, confines the path, and caps content size — a bad request is
+// `InvalidArgument`, never a traversal.
+syntax = "proto3";
+
+package agent.v1;
+
+// Where a prompt lives. UNSPECIFIED in a List request means "every kind".
+enum PromptKind {
+  PROMPT_KIND_UNSPECIFIED = 0;
+  PROMPT_KIND_SYSTEM = 1;    // config [agent] system_prompt (override: prompts/system.md)
+  PROMPT_KIND_PREPEND = 2;   // context.d/prepend/NNNN_*.md
+  PROMPT_KIND_APPEND = 3;    // context.d/append/NNNN_*.md
+  PROMPT_KIND_MODE_LENS = 4; // prompts/lens/<mode>.md (default: compiled lens)
+}
+
+// Identifies one prompt. `id` is a context.d filename (prepend/append), a TaskMode
+// name (mode lens), or empty (the singleton system prompt).
+message PromptRef {
+  PromptKind kind = 1;
+  string id = 2;
+}
+
+// One prompt entry. `builtin` is true when `content` is the compiled/config default
+// (no operator override file yet). `order` is the numeric `NNNN` filename prefix for
+// a context.d entry (0 otherwise). `read_only` is reserved (always false today).
+message PromptEntry {
+  PromptKind kind = 1;
+  string id = 2;
+  string content = 3;
+  bool builtin = 4;
+  bool read_only = 5;
+  uint32 order = 6;
+}
+
+message PromptListRequest {
+  PromptKind kind = 1; // UNSPECIFIED ⇒ all kinds
+}
+
+message PromptList {
+  repeated PromptEntry entries = 1;
+}
+
+message DeleteReply {
+  bool deleted = 1; // false when there was no override file to remove (not an error)
+}
+
+// Preview the assembled context for a goal. `mode` is informational — initial
+// assembly is mode-independent (the lens applies only at switch-compaction).
+message PreviewRequest {
+  string mode = 1;
+  string goal = 2;
+}
+
+message PreviewMessage {
+  string role = 1;
+  string content = 2;
+}
+
+message AssembledContext {
+  repeated PreviewMessage messages = 1; // [system, user, (system-append)]
+}
+
+service PromptService {
+  rpc List(PromptListRequest) returns (PromptList);
+  rpc Get(PromptRef) returns (PromptEntry);
+  rpc Put(PromptEntry) returns (PromptEntry);
+  rpc Delete(PromptRef) returns (DeleteReply);
+  rpc PreviewAssembled(PreviewRequest) returns (AssembledContext);
+}

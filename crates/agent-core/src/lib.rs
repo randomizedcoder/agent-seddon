@@ -53,6 +53,8 @@ pub enum Error {
     Embed(String),
     #[error("session error: {0}")]
     Session(String),
+    #[error("prompt error: {0}")]
+    Prompt(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -2075,6 +2077,90 @@ pub trait DimensionStore: Send + Sync {
     /// A dimension's history, most-recent first, capped at `limit`. An unknown or
     /// empty dimension ⇒ an empty vec (like semantic recall with no files).
     async fn recall_dimension(&self, dimension: &str, limit: usize) -> Result<Vec<MemoryItem>>;
+}
+
+// ---------------------------------------------------------------------------
+// Prompt management (docs/design/portal): see + CRUD every prompt
+// ---------------------------------------------------------------------------
+
+/// Where a prompt lives, for the operator/portal-facing management surface. The
+/// loop does **not** consume this seam — it reads the system prompt, context.d
+/// pre/post-pends, and the per-mode compaction lenses through their own paths.
+/// This is a unified read/write view over those three homes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptKind {
+    /// The operator system prompt (`prompts/system.md` override → config default).
+    System,
+    /// An always-injected `context.d/prepend/NNNN_*.md` file (folded into system).
+    Prepend,
+    /// An always-injected `context.d/append/NNNN_*.md` file (trailing system msg).
+    Append,
+    /// A per-[`TaskMode`] compaction lens (`prompts/lens/<mode>.md` → compiled default).
+    ModeLens,
+}
+
+impl PromptKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PromptKind::System => "system",
+            PromptKind::Prepend => "prepend",
+            PromptKind::Append => "append",
+            PromptKind::ModeLens => "mode_lens",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "system" => PromptKind::System,
+            "prepend" => PromptKind::Prepend,
+            "append" => PromptKind::Append,
+            "mode_lens" => PromptKind::ModeLens,
+            _ => return None,
+        })
+    }
+}
+
+/// Identifies one prompt: its `kind` plus an `id` whose meaning is kind-specific —
+/// a `context.d` filename for prepend/append, a [`TaskMode`] name (`mode.as_str()`)
+/// for a mode lens, empty for the singleton system prompt.
+#[derive(Debug, Clone)]
+pub struct PromptRef {
+    pub kind: PromptKind,
+    pub id: String,
+}
+
+/// One prompt entry. `builtin` is true when the served `content` is the compiled /
+/// config default (no operator override file backs it yet); `order` is the numeric
+/// `NNNN` filename prefix for a context.d entry (0 otherwise). `read_only` is
+/// reserved for a future locked-entry class (always false today).
+#[derive(Debug, Clone)]
+pub struct PromptEntry {
+    pub kind: PromptKind,
+    pub id: String,
+    pub content: String,
+    pub builtin: bool,
+    pub read_only: bool,
+    pub order: u32,
+}
+
+/// A management surface over the agent's prompts. Every argument is untrusted (an
+/// `id` may become a filename), so implementations **fail closed**: validate the
+/// segment, confine the path, and cap content size before writing.
+#[async_trait]
+pub trait PromptStore: Send + Sync {
+    /// All entries, optionally filtered to one `kind` (`None` ⇒ every kind).
+    async fn list(&self, kind: Option<PromptKind>) -> Result<Vec<PromptEntry>>;
+    /// One entry; a mode lens / system prompt with no override returns its default.
+    async fn get(&self, r: &PromptRef) -> Result<PromptEntry>;
+    /// Create or update the backing override file; returns the stored entry.
+    async fn put(&self, entry: PromptEntry) -> Result<PromptEntry>;
+    /// Remove the backing override file (revert to default for system/mode-lens,
+    /// delete the file for prepend/append). Returns whether a file was removed.
+    async fn delete(&self, r: &PromptRef) -> Result<bool>;
+    /// The `[system, user, (system-append)]` message list the model would see for a
+    /// goal, assembled from the *current* prompts. `mode` is informational: initial
+    /// assembly is mode-independent (the lens applies only at switch-compaction).
+    async fn preview_assembled(&self, mode: TaskMode, goal: &str) -> Result<Vec<Message>>;
 }
 
 // ---------------------------------------------------------------------------

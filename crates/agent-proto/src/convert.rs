@@ -155,6 +155,8 @@ pub fn status_from_error(e: &agent_core::Error) -> tonic::Status {
         Error::Sandbox(m) => tonic::Status::internal(format!("sandbox: {m}")),
         Error::Embed(m) => tonic::Status::internal(format!("embed: {m}")),
         Error::Session(m) => tonic::Status::internal(format!("session: {m}")),
+        // A rejected prompt id / oversized body is a bad request, not a server fault.
+        Error::Prompt(m) => tonic::Status::invalid_argument(format!("prompt: {m}")),
     }
 }
 
@@ -3360,6 +3362,90 @@ impl From<pb::DimensionSummary> for agent_core::DimensionSummary {
             dimension: s.dimension,
             summary: s.summary,
             is_new: s.is_new,
+        }
+    }
+}
+
+// --- PromptStore (docs/design/portal) --------------------------------------
+
+impl From<agent_core::PromptKind> for pb::PromptKind {
+    fn from(k: agent_core::PromptKind) -> Self {
+        match k {
+            agent_core::PromptKind::System => pb::PromptKind::System,
+            agent_core::PromptKind::Prepend => pb::PromptKind::Prepend,
+            agent_core::PromptKind::Append => pb::PromptKind::Append,
+            agent_core::PromptKind::ModeLens => pb::PromptKind::ModeLens,
+        }
+    }
+}
+
+/// Saturating wire→core: an unknown/unspecified tag ⇒ `None` (which a List request
+/// reads as "every kind" and a required-kind context rejects as `MissingField`).
+fn prompt_kind_from_i32(v: i32) -> Option<agent_core::PromptKind> {
+    match pb::PromptKind::try_from(v) {
+        Ok(pb::PromptKind::System) => Some(agent_core::PromptKind::System),
+        Ok(pb::PromptKind::Prepend) => Some(agent_core::PromptKind::Prepend),
+        Ok(pb::PromptKind::Append) => Some(agent_core::PromptKind::Append),
+        Ok(pb::PromptKind::ModeLens) => Some(agent_core::PromptKind::ModeLens),
+        Ok(pb::PromptKind::Unspecified) | Err(_) => None,
+    }
+}
+
+impl From<agent_core::PromptEntry> for pb::PromptEntry {
+    fn from(e: agent_core::PromptEntry) -> Self {
+        pb::PromptEntry {
+            kind: pb::PromptKind::from(e.kind) as i32,
+            id: e.id,
+            content: e.content,
+            builtin: e.builtin,
+            read_only: e.read_only,
+            order: e.order,
+        }
+    }
+}
+
+impl TryFrom<pb::PromptEntry> for agent_core::PromptEntry {
+    type Error = ConvertError;
+    fn try_from(e: pb::PromptEntry) -> Result<Self, Self::Error> {
+        Ok(agent_core::PromptEntry {
+            kind: prompt_kind_from_i32(e.kind)
+                .ok_or(ConvertError::MissingField("PromptEntry.kind"))?,
+            id: e.id,
+            content: e.content,
+            builtin: e.builtin,
+            read_only: e.read_only,
+            order: e.order,
+        })
+    }
+}
+
+impl From<agent_core::PromptRef> for pb::PromptRef {
+    fn from(r: agent_core::PromptRef) -> Self {
+        pb::PromptRef {
+            kind: pb::PromptKind::from(r.kind) as i32,
+            id: r.id,
+        }
+    }
+}
+
+impl TryFrom<pb::PromptRef> for agent_core::PromptRef {
+    type Error = ConvertError;
+    fn try_from(r: pb::PromptRef) -> Result<Self, Self::Error> {
+        Ok(agent_core::PromptRef {
+            kind: prompt_kind_from_i32(r.kind)
+                .ok_or(ConvertError::MissingField("PromptRef.kind"))?,
+            id: r.id,
+        })
+    }
+}
+
+/// A previewed message is one-directional (server → client): the model-ready
+/// `[system, user, (system-append)]` rendered as `{role, content}` for display.
+impl From<agent_core::Message> for pb::PreviewMessage {
+    fn from(m: agent_core::Message) -> Self {
+        pb::PreviewMessage {
+            role: m.role.as_str().to_string(),
+            content: m.content_text(),
         }
     }
 }

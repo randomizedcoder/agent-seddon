@@ -22,6 +22,11 @@ mod mode_aware;
 #[cfg(feature = "context-mode-aware")]
 pub use mode_aware::{bench_mode_partition, ModeAwareWindow};
 
+// The per-mode compaction lens defaults + file resolver (docs/design/portal). Kept
+// feature-ungated so the `PromptStore` seam can read the same defaults it serves,
+// without pulling in the mode-aware compaction path.
+pub mod lens;
+
 #[cfg(any(feature = "context-sliding-window", feature = "context-summarizing"))]
 use agent_core::{ContextInput, Message};
 
@@ -82,6 +87,7 @@ pub(crate) fn estimate_tokens(messages: &[Message]) -> u32 {
 
 /// Benchmark hook: `estimate_tokens` is called repeatedly inside the compaction
 /// loop, so guard its cost. Exposed for `benches/context.rs` (the fn is crate-private).
+#[cfg(any(feature = "context-sliding-window", feature = "context-summarizing"))]
 #[doc(hidden)]
 pub fn bench_estimate_tokens(messages: &[Message]) -> u32 {
     estimate_tokens(messages)

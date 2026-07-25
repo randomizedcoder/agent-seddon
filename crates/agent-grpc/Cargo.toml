@@ -48,6 +48,9 @@ agent-pty = { workspace = true }
 # asserted across the wire rather than by a double that fakes it.
 agent-tasks = { workspace = true, features = ["tasks-memory"] }
 agent-testkit = { workspace = true }
+# The real prompt store, so the round-trip asserts CRUD + the id-validation
+# rejection surviving the hop rather than a double echoing what it was handed.
+agent-prompt = { workspace = true }
 # A real built-in tool, to prove a feature tool (not just EchoTool) roundtrips over
 # the ToolService seam. Only the patch tool is compiled in.
 agent-tools = { workspace = true, features = ["tool-core", "tool-patch"] }

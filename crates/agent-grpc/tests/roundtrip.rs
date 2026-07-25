@@ -762,3 +762,106 @@ async fn repo_worktree_lifecycle_over_the_wire(#[case] transport: Transport) {
     client.worktree_remove("cmp").await.unwrap();
     assert!(client.worktree_list().await.unwrap().is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Prompt (docs/design/portal) — the real FilePromptStore over the wire
+// ---------------------------------------------------------------------------
+
+// A put→get→list→delete cycle survives the hop, and a mode-lens default reads
+// back as `builtin`. The same assertions run over TCP and UDS.
+#[rstest]
+#[case::tcp(Transport::Tcp)]
+#[case::uds(Transport::Uds)]
+#[tokio::test]
+async fn prompt_crud_roundtrips(#[case] transport: Transport) {
+    use agent_core::{PromptEntry, PromptKind, PromptRef, PromptStore, TaskMode};
+    let root = tempdir();
+    let store = Arc::new(agent_prompt::FilePromptStore::new(
+        root.join("context.d"),
+        root.join("prompts"),
+        "CONFIG SYS",
+    ));
+    let (dial, _srv) = spawn(transport, agent_grpc::server::prompt_router(store)).await;
+    let client = agent_grpc::client::GrpcPrompts::connect(&dial).unwrap();
+
+    // A mode lens reads back as its compiled default (builtin) before any override.
+    let debug = client
+        .get(&PromptRef {
+            kind: PromptKind::ModeLens,
+            id: "debug".into(),
+        })
+        .await
+        .unwrap();
+    assert!(debug.builtin);
+    assert!(debug.content.contains("DEBUGGING"));
+
+    // Put a prepend file, then it appears in a filtered list, ordered, non-builtin.
+    client
+        .put(PromptEntry {
+            kind: PromptKind::Prepend,
+            id: "0001_persona.md".into(),
+            content: "You are helpful.".into(),
+            builtin: false,
+            read_only: false,
+            order: 0,
+        })
+        .await
+        .unwrap();
+    let pre = client.list(Some(PromptKind::Prepend)).await.unwrap();
+    assert_eq!(pre.len(), 1);
+    assert_eq!(pre[0].id, "0001_persona.md");
+    assert_eq!(pre[0].order, 1);
+    assert!(!pre[0].builtin);
+
+    // Preview assembles [system, user, system?] with the prepend folded into system.
+    let msgs = client
+        .preview_assembled(TaskMode::Implement, "GOAL")
+        .await
+        .unwrap();
+    assert!(msgs[0].content_text().contains("You are helpful."));
+    assert_eq!(msgs[1].content_text(), "GOAL");
+
+    // Delete removes it; a second delete is a benign `false`.
+    assert!(client
+        .delete(&PromptRef {
+            kind: PromptKind::Prepend,
+            id: "0001_persona.md".into()
+        })
+        .await
+        .unwrap());
+    assert!(!client
+        .delete(&PromptRef {
+            kind: PromptKind::Prepend,
+            id: "0001_persona.md".into()
+        })
+        .await
+        .unwrap());
+}
+
+// A traversing id is rejected server-side and surfaces as an Err across the wire —
+// the untrusted-input guard survives the hop.
+#[tokio::test]
+async fn adversarial_prompt_traversal_rejected_over_wire() {
+    use agent_core::{PromptEntry, PromptKind, PromptStore};
+    let root = tempdir();
+    let store = Arc::new(agent_prompt::FilePromptStore::new(
+        root.join("context.d"),
+        root.join("prompts"),
+        "CONFIG SYS",
+    ));
+    let (dial, _srv) = spawn(Transport::Tcp, agent_grpc::server::prompt_router(store)).await;
+    let client = agent_grpc::client::GrpcPrompts::connect(&dial).unwrap();
+
+    let err = client
+        .put(PromptEntry {
+            kind: PromptKind::Prepend,
+            id: "../../evil.md".into(),
+            content: "x".into(),
+            builtin: false,
+            read_only: false,
+            order: 0,
+        })
+        .await;
+    assert!(err.is_err(), "traversal must be rejected across the wire");
+    assert!(!root.join("evil.md").exists());
+}
