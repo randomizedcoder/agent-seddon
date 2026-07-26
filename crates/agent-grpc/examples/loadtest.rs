@@ -1,14 +1,24 @@
 //! Seam load / overload-conformance harness (docs/design/loadtest).
 //!
 //! Opt-in (`nix run .#loadtest`), never gated — throughput is machine-dependent, so
-//! the perf gate stays deterministic (iai-callgrind). Two scenarios:
+//! the perf gate stays deterministic (iai-callgrind). Four scenarios, each run over
+//! both TCP and UDS by default (`--transport tcp|uds` to pin one):
 //!
-//!   --scenario ramp      per-seam throughput + latency under a concurrency ramp,
-//!                        over TCP and UDS (quantifies the seam-boundary overhead).
-//!   --scenario overload  drive a seam past the admission cap and ASSERT the
-//!                        contract: the shed is RESOURCE_EXHAUSTED (not INTERNAL /
-//!                        a hang), some requests still succeed, and the process
-//!                        stays bounded. Exit 2 on a contract violation.
+//!   --scenario ramp        per-seam throughput + latency under a concurrency ramp
+//!                          (quantifies the seam-boundary overhead; UDS vs TCP).
+//!   --scenario overload    drive a seam past the admission cap and ASSERT the
+//!                          contract: the shed is RESOURCE_EXHAUSTED (not INTERNAL /
+//!                          a hang), some requests still succeed, and the process
+//!                          stays bounded. Exit 2 on a contract violation.
+//!   --scenario saturation  drive a pool past per-member capacity → assert the
+//!                          RESOURCE_EXHAUSTED shed (the inc-02 wire signal) holds
+//!                          under concurrent load.
+//!   --scenario streaming   many concurrent server-streams → assert none stall
+//!                          (a mid-stream error or a stall is the failure).
+//!
+//! The backpressure contract is transport-agnostic (the admission layer is a
+//! router-level tower layer, above the transport), so overload + the stress
+//! scenarios assert it on both TCP and UDS rather than trusting it transfers.
 //!
 //! It reuses the seam routers + agent-testkit doubles, so it drives seams
 //! hermetically with no model / index / network.
@@ -334,7 +344,7 @@ async fn timed<T>(fut: impl Future<Output = std::result::Result<T, agent_core::E
 // Overload: flood past the admission cap; assert RESOURCE_EXHAUSTED
 // ---------------------------------------------------------------------------
 
-async fn overload(cap: usize, conc: usize, requests: usize) -> LoadResult {
+async fn overload(cap: usize, transport: &'static str, conc: usize, requests: usize) -> LoadResult {
     let (router, _health) = srv::base_router(cap).await;
     let router = router.add_service(
         srv::ProviderService::new(Arc::new(SlowProvider {
@@ -342,10 +352,10 @@ async fn overload(cap: usize, conc: usize, requests: usize) -> LoadResult {
         }))
         .into_server(),
     );
-    let (dial, _s): (Endpoint, Server) = spawn(listen("tcp"), router).await;
+    let (dial, _s): (Endpoint, Server) = spawn(listen(transport), router).await;
     let ch = dial.connect_lazy().expect("channel");
     let req = pb::CompletionRequest::from(core_req());
-    run_load("provider", "tcp", conc, requests, move || {
+    run_load("provider", transport, conc, requests, move || {
         let ch = ch.clone();
         let req = req.clone();
         async move {
@@ -432,20 +442,25 @@ impl LlmPool for LoadPool {
     }
 }
 
-async fn saturation(cap: usize, conc: usize, requests: usize) -> LoadResult {
+async fn saturation(
+    cap: usize,
+    transport: &'static str,
+    conc: usize,
+    requests: usize,
+) -> LoadResult {
     let pool = Arc::new(LoadPool {
         cap,
         in_flight: AtomicUsize::new(0),
         delay: Duration::from_millis(50),
     });
-    let (dial, _s) = spawn(listen("tcp"), srv::llm_pool_router(pool)).await;
+    let (dial, _s) = spawn(listen(transport), srv::llm_pool_router(pool)).await;
     let ch = dial.connect_lazy().expect("channel");
     let req = pb::PoolCompleteRequest {
         req: Some(pb::CompletionRequest::from(core_req())),
         tier: pb::PoolTier::from(PoolTier::Light) as i32,
         fanout: 1,
     };
-    run_load("llm-pool", "tcp", conc, requests, move || {
+    run_load("llm-pool", transport, conc, requests, move || {
         let ch = ch.clone();
         let req = req.clone();
         async move {
@@ -465,17 +480,17 @@ async fn saturation(cap: usize, conc: usize, requests: usize) -> LoadResult {
 // Streaming: many concurrent server-streams; assert none stall
 // ---------------------------------------------------------------------------
 
-async fn streaming(conc: usize, streams: usize) -> LoadResult {
+async fn streaming(transport: &'static str, conc: usize, streams: usize) -> LoadResult {
     // ScriptedProvider replays its final turn as chunks over Provider.Stream.
     let provider = Arc::new(ScriptedProvider::new(vec![CompletionResponse {
         message: Message::assistant("streamed answer over several chunks"),
         finish_reason: "stop".into(),
         usage: Some(Usage::default()),
     }]));
-    let (dial, _s) = spawn(listen("tcp"), srv::provider_router(provider)).await;
+    let (dial, _s) = spawn(listen(transport), srv::provider_router(provider)).await;
     let ch = dial.connect_lazy().expect("channel");
     let req = pb::CompletionRequest::from(core_req());
-    run_load("provider.stream", "tcp", conc, streams, move || {
+    run_load("provider.stream", transport, conc, streams, move || {
         let ch = ch.clone();
         let req = req.clone();
         async move {
@@ -545,21 +560,30 @@ async fn main() {
                 }
             }
         }
+        // The backpressure contract is transport-agnostic (the admission layer is a
+        // router-level tower layer, above the transport), so we assert it on BOTH
+        // TCP and UDS rather than trusting it transfers.
         "overload" => {
-            for &c in &concurrency {
-                results.push(overload(cap, c.max(cap * 4), requests).await);
+            for &t in &transports {
+                for &c in &concurrency {
+                    results.push(overload(cap, t, c.max(cap * 4), requests).await);
+                }
             }
         }
         // Stress: the pool's saturation shed (now RESOURCE_EXHAUSTED on the wire).
         "saturation" => {
-            for &c in &concurrency {
-                results.push(saturation(cap, c.max(cap * 4), requests).await);
+            for &t in &transports {
+                for &c in &concurrency {
+                    results.push(saturation(cap, t, c.max(cap * 4), requests).await);
+                }
             }
         }
         // Stress: many concurrent server-streams; assert none stall.
         "streaming" => {
-            for &c in &concurrency {
-                results.push(streaming(c, requests).await);
+            for &t in &transports {
+                for &c in &concurrency {
+                    results.push(streaming(t, c, requests).await);
+                }
             }
         }
         other => {
