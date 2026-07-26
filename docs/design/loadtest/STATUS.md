@@ -8,8 +8,8 @@ One gated PR per increment, off `main`, checkpoint after each.
 | # | Increment | Server fix | Tests | Nix | Status |
 |---|---|:--:|:--:|:--:|:--:|
 | 01 | Uniform admission layer + `RESOURCE_EXHAUSTED` mapping | ✅ | ✅ | — | **merged** (#133) |
-| 02 | Pool saturation visible on the wire | ✅ | ✅ | — | **in review** |
-| 03 | Conformance harness core + per-seam ramp | — | ☐ | ☐ | pending |
+| 02 | Pool saturation visible on the wire | ✅ | ✅ | — | **merged** (#134) |
+| 03 | Conformance harness core + per-seam ramp | — | ✅ | ✅ | **in review** |
 | 04 | Stress: pool saturation + streaming scenarios | — | ☐ | ☐ | pending |
 | 05 | Full-loop e2e concurrency | — | ☐ | ☐ | pending |
 | 06 | `ghz` wire load + `/metrics` correlation | — | ☐ | ☐ | pending |
@@ -54,6 +54,24 @@ One gated PR per increment, off `main`, checkpoint after each.
   the `http_date → None` test say so), and the date form needs both a date lib and
   `SystemTime::now()`; the fallback (jittered backoff) is already safe, so the cost
   outweighs the value.
+
+## 03 — what shipped
+
+- **The harness** (`crates/agent-grpc/examples/loadtest.rs`, opt-in `nix run .#loadtest`):
+  a concurrency-driver (`run_load`) + **dep-free percentiles** (unit-tested:
+  empty/single/monotonic/unsorted), reusing a generic `spawn` + agent-testkit doubles.
+  - `--scenario ramp` — each seam × {TCP, UDS} × concurrency → a table (`req/s · p50 ·
+    p99 · p999 · shed · err`) + `--json`. Confirmed **UDS beats TCP** and surfaced a
+    periodic ~42 ms TCP loopback tail (Nagle/delayed-ack) that UDS avoids.
+  - `--scenario overload` — floods a seam past the admission cap through the **raw**
+    client and **asserts the contract**: every non-success must be `RESOURCE_EXHAUSTED`
+    (a non-shed error exits **2**), some succeed, no hang. Verified: cap 4 / conc 64 →
+    420 shed, 0 non-shed errors.
+  - Seams covered: provider, tokenizer, prompt, memory (the diverse light patterns;
+    more are mechanical registry additions).
+- **Gate:** `nix/checks/loadtest-smoke.nix` — a tiny model-free overload+ramp run
+  (`--require-shed`) asserting the harness compiles, sheds, and runs clean; **no perf
+  numbers asserted**. `nix run .#loadtest` app registered.
 
 ## Notes / decisions of record
 
