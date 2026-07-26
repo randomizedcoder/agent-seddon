@@ -1,0 +1,24 @@
+name: agent_portal
+description: "Agent Portal — a Flutter, gRPC-only client for agent-seddon (docs/design/portal)."
+publish_to: none
+version: 0.1.0
+
+environment:
+  sdk: ^3.4.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # gRPC transport: native (ClientChannel, dart:io HTTP/2) + web (GrpcWebClientChannel
+  # via the envoy proxy). The generated stubs import package:grpc/service_api.dart.
+  grpc: ^4.0.0
+  protobuf: ^4.0.0
+  fixnum: ^1.1.0
+  # Open Grafana / HyperDX / Prometheus in the system browser from the Launcher.
+  url_launcher: ^6.3.0
+
+dev_dependencies:
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true

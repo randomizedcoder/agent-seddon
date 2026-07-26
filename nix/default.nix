@@ -294,6 +294,10 @@ in
       type = "app";
       program = "${portal.gen-dart}/bin/gen-dart";
     };
+    portal = {
+      type = "app";
+      program = "${portal.portal}/bin/portal";
+    };
     grpc-web-up = {
       type = "app";
       program = "${portal.grpc-web-up}/bin/grpc-web-up";

@@ -1,0 +1,11 @@
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  exclude:
+    # Generated gRPC stubs (regenerate with `nix run .#gen-dart`) — not hand-maintained.
+    - lib/src/gen/**
+
+linter:
+  rules:
+    prefer_const_constructors: true
+    prefer_final_locals: true
