@@ -13,8 +13,8 @@ existing (02–04).
 | 02 | `PromptService` + mode-lens externalization | ✅ | ✅ | ✅ | ✅ | n/a | **merged** (#128) |
 | 03 | `MetricsProxyService` | ✅ | ✅ | ✅ | ✅ | n/a | **merged** (#129) |
 | 04 | `AgentSessionService` + broadcast event-sink | ✅ | ✅ | ✅ | ✅ | n/a | **merged** (#130) |
-| 05 | Dart codegen + nix tooling (`buf.gen.yaml`, `gen-dart`, proxy) | — | — | — | — | ✅ | **in review** |
-| 06 | Flutter app (transport, Launcher, Prompts, Agent View) | — | — | — | ☐ | ☐ | pending |
+| 05 | Dart codegen + nix tooling (`buf.gen.yaml`, `gen-dart`, proxy) | — | — | — | — | ✅ | **merged** (#131) |
+| 06 | Flutter app (transport, Launcher, Prompts, Agent View) | — | — | — | ✅ | ✅ | **in review** |
 
 ## 02 — what shipped
 
@@ -118,6 +118,35 @@ existing (02–04).
   code land with the app in **increment 06**.
 - **Verification.** `nix flake check` green (nixfmt + the apps build fast — docker +
   cached protoc-gen-dart, no source builds). `nix run .#gen-dart` regenerates cleanly.
+
+## 06 — what shipped (the finale)
+
+- **The Flutter app** (`portal/`): `pubspec.yaml` (grpc/protobuf/fixnum/url_launcher),
+  `analysis_options.yaml`, and `lib/`.
+- **Transport abstraction** (`lib/src/transport/`): conditional imports pick
+  `channel_io.dart` (native `ClientChannel` → gateway `:50100`) vs `channel_web.dart`
+  (`GrpcWebClientChannel` → the envoy proxy) at compile time, behind one
+  `createGatewayChannel`. `PortalClients` builds all four service clients
+  (Prompt/MetricsProxy/AgentSession/LlmPool) from the single channel.
+- **Three views** (`lib/src/pages/`) off a `NavigationRail`:
+  - **Launcher** — cards that open Grafana/HyperDX/Prometheus in the system browser
+    (`url_launcher`).
+  - **Prompts** — CRUD over `PromptService`: list grouped by kind (🔒 on defaults),
+    edit + Save/Reset, and "Preview assembled" (`PreviewAssembled`).
+  - **Agent View** — live transcript from `AgentSessionService.Subscribe` (token
+    deltas coalesced, tool/mode/run markers) + a status bar: mode & context from the
+    stream, GPU pool from `LlmPoolService.Health` (3s poll), gRPC p50/p99 from
+    `MetricsProxyService` (5s poll, canned `histogram_quantile`). Fails soft — a down
+    gateway greys the cell / offers reconnect.
+- **`nix run .#portal`** builds/launches it (native by default; `-- -d chrome` for
+  web); it bootstraps the git-ignored platform runners (`flutter create`) on demand,
+  so only `lib/` + pubspec are committed.
+- **Verification:** `flutter analyze` — **No issues found** (pub get resolved
+  grpc 4.2 / protobuf 4.2). The `nix flake check` gate is Rust/nix and does not
+  compile Dart, so `flutter analyze` is the app's verification.
+
+**The 6-increment Agent Portal track is complete** (design #127; PromptService #128;
+MetricsProxy #129; AgentSession #130; codegen+tooling #131; app #132).
 
 ## Dependency order
 

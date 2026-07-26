@@ -42,6 +42,21 @@ let
     '';
   };
 
+  # Build + launch the Flutter app. Native desktop by default (raw gRPC to :50100);
+  # `nix run .#portal -- -d chrome` for the web build (front it with grpc-web-up).
+  # The platform runner scaffolding (linux/, web/) is generated on demand — it is
+  # git-ignored boilerplate, so only lib/ + pubspec are committed.
+  portal = pkgs.writeShellApplication {
+    name = "portal";
+    runtimeInputs = [ versions.flutter ];
+    text = ''
+      cd portal
+      # Idempotent: adds linux/ + web/ runners if missing, keeps lib/ + pubspec.
+      flutter create --platforms=linux,web --project-name agent_portal . >/dev/null
+      exec flutter run "$@"
+    '';
+  };
+
   # Envoy grpc-web proxy: translates browser grpc-web on :8090 to raw gRPC on the
   # gateway :50100. Web build only.
   envoyConfig = pkgs.writeText "portal-envoy.yaml" ''
@@ -145,5 +160,10 @@ let
   };
 in
 {
-  inherit gen-dart grpc-web-up grpc-web-down;
+  inherit
+    gen-dart
+    portal
+    grpc-web-up
+    grpc-web-down
+    ;
 }
