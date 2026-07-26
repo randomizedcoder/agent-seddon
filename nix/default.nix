@@ -203,6 +203,9 @@ let
   # Prometheus scraper + Grafana dashboards for the agent's metrics.
   prometheus = import ./prometheus { inherit pkgs lib versions; };
   grafana = import ./grafana { inherit pkgs lib versions; };
+
+  # Agent Portal (docs/design/portal): Dart codegen + Flutter run + grpc-web proxy.
+  portal = import ./portal { inherit pkgs lib versions; };
 in
 {
   packages = {
@@ -286,6 +289,18 @@ in
     grafana-down = {
       type = "app";
       program = "${grafana.grafana-down}/bin/grafana-down";
+    };
+    gen-dart = {
+      type = "app";
+      program = "${portal.gen-dart}/bin/gen-dart";
+    };
+    grpc-web-up = {
+      type = "app";
+      program = "${portal.grpc-web-up}/bin/grpc-web-up";
+    };
+    grpc-web-down = {
+      type = "app";
+      program = "${portal.grpc-web-down}/bin/grpc-web-down";
     };
   };
 

@@ -1,0 +1,10 @@
+# Flutter / Dart build artifacts (the generated gRPC stubs under lib/src/gen/ ARE
+# committed — see gen-dart; everything below is build output that is not).
+.dart_tool/
+.packages
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+pubspec.lock
+*.iml
+.idea/

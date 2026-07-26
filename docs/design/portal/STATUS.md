@@ -12,8 +12,8 @@ existing (02–04).
 | 01 | Design docs (`docs/design/portal/`) | — | — | — | — | — | **merged** (#127) |
 | 02 | `PromptService` + mode-lens externalization | ✅ | ✅ | ✅ | ✅ | n/a | **merged** (#128) |
 | 03 | `MetricsProxyService` | ✅ | ✅ | ✅ | ✅ | n/a | **merged** (#129) |
-| 04 | `AgentSessionService` + broadcast event-sink | ✅ | ✅ | ✅ | ✅ | n/a | **in review** |
-| 05 | Dart codegen + nix tooling (`buf.gen.yaml`, `gen-dart`, flutter/dart pins, proxy) | — | — | — | ☐ | ☐ | pending |
+| 04 | `AgentSessionService` + broadcast event-sink | ✅ | ✅ | ✅ | ✅ | n/a | **merged** (#130) |
+| 05 | Dart codegen + nix tooling (`buf.gen.yaml`, `gen-dart`, proxy) | — | — | — | — | ✅ | **in review** |
 | 06 | Flutter app (transport, Launcher, Prompts, Agent View) | — | — | — | ☐ | ☐ | pending |
 
 ## 02 — what shipped
@@ -98,6 +98,26 @@ existing (02–04).
 - **Deferred (documented):** a `Send` RPC to drive a goal remotely
   (`--serve-mcp`-class); precise per-tool `duration_ms` (currently 0 — timing is in
   `agent_tool_exec_seconds` via MetricsProxy).
+
+## 05 — what shipped
+
+- **Dart codegen.** `buf.gen.yaml` (repo root) with a **local** `protoc-gen-dart`
+  plugin (`opt: grpc` → `*.pbgrpc.dart` service clients) — hermetic, no BSR/network.
+  buf's first *generation*; Rust stays on tonic-build. `nix run .#gen-dart`
+  regenerates the **committed** stubs under `portal/lib/src/gen/` (99 files; verified
+  the `AgentSessionServiceClient` / `PromptServiceClient` etc. generate correctly).
+- **Nix tooling.** `protoc-gen-dart` + `flutter` + `dart` pinned in `versions.nix`;
+  `envoyImage` a pinned docker tag. **Deliberately NOT in `allDevPackages`** — the
+  portal apps supply their toolchain via `runtimeInputs`, so the lean Rust dev shell
+  is unaffected (flutter/envoy would bloat it).
+- **Apps** (`nix/portal/default.nix`): `gen-dart`; `grpc-web-up`/`grpc-web-down` — the
+  web-only grpc-web proxy as an **envoy docker container** (prometheus/clickstack
+  pattern; CORS + HTTP/2 to gateway `:50100`), so the gate never source-builds envoy.
+- **Scaffold.** `portal/README.md` + `portal/.gitignore` (build artifacts ignored;
+  the generated stubs are committed). The `nix run .#portal` runner + pubspec + app
+  code land with the app in **increment 06**.
+- **Verification.** `nix flake check` green (nixfmt + the apps build fast — docker +
+  cached protoc-gen-dart, no source builds). `nix run .#gen-dart` regenerates cleanly.
 
 ## Dependency order
 

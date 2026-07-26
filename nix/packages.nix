@@ -21,10 +21,13 @@
   ++ [
 
     # Protobuf / gRPC (protoc for tonic-build codegen; grpcurl for poking servers;
-    # buf for proto lint + breaking-change checks).
+    # buf for proto lint + breaking-change checks + Dart codegen).
     versions.protobuf
     versions.grpcurl
     versions.buf
+    # NOTE: the Agent Portal's Flutter/Dart/protoc-gen-dart toolchain is deliberately
+    # NOT here — it would bloat the lean Rust dev shell (flutter is large). The portal
+    # apps (`nix run .#gen-dart` / `.#portal`) supply it lazily via runtimeInputs.
 
     # Benchmarks: valgrind runs the iai-callgrind benches; the runner binary must
     # match the `iai-callgrind` dev-dep version (see nix/versions.nix).

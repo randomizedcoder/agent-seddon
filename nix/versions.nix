@@ -61,8 +61,23 @@ in
   golangci-lint = pkgs.golangci-lint;
   gosec = pkgs.gosec;
   # `buf` lints the `.proto` wire contracts and gates wire-compatibility
-  # (`buf lint` + `buf breaking`); codegen stays on `tonic-build`. See buf.yaml.
+  # (`buf lint` + `buf breaking`); Rust codegen stays on `tonic-build`. buf *does*
+  # now drive **Dart** codegen for the portal via `buf.gen.yaml` (`nix run
+  # .#gen-dart`) — see buf.yaml and docs/design/portal.
   buf = pkgs.buf;
+
+  # Agent Portal (docs/design/portal): a Flutter/gRPC-only client. `protoc-gen-dart`
+  # (a small, cached plugin) generates the Dart stubs via `nix run .#gen-dart`;
+  # `flutter` + `dart` build the app (`nix run .#portal`, increment 06). These are
+  # referenced only by the opt-in portal apps' runtimeInputs — NOT added to the lean
+  # Rust dev shell, and not on the `nix flake check` path in a way that source-builds
+  # them (protoc-gen-dart is a cached binary; flutter is a cached download).
+  protoc-gen-dart = pkgs.protoc-gen-dart;
+  flutter = pkgs.flutter;
+  dart = pkgs.dart;
+  # The grpc-web proxy runs as a docker container (like prometheus/clickstack), so
+  # the gate never source-builds envoy. Web build only.
+  envoyImage = "envoyproxy/envoy:v1.31-latest";
 
   # ── Benchmarks: the performance + leak gate ───────────────────────────────
   # `iai-callgrind` runs each bench under callgrind for a *deterministic*

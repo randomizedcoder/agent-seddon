@@ -1,0 +1,12 @@
+# Dart / gRPC codegen for the Agent Portal (docs/design/portal). buf's first
+# *generation* — Rust codegen stays on `tonic-build` (crates/agent-proto/build.rs);
+# this only adds Dart stubs for the Flutter client. Run with `nix run .#gen-dart`
+# (protoc-gen-dart is pinned + on PATH there); output is committed under
+# portal/lib/src/gen/. `opt: grpc` makes protoc-gen-dart emit the *.pbgrpc.dart
+# service clients alongside the *.pb.dart messages.
+version: v2
+plugins:
+  - local: protoc-gen-dart
+    out: portal/lib/src/gen
+    opt:
+      - grpc

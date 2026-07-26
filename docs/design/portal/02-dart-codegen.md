@@ -17,14 +17,16 @@ and `nix/checks/buf.nix`). This is the first *generation* buf drives.
 
 ## `buf.gen.yaml`
 
-New file at the repo root, sibling to the existing `buf.yaml`:
+New file at the repo root, sibling to the existing `buf.yaml`. A **local**
+`protoc-gen-dart` plugin (pinned in `nix/`) keeps codegen hermetic — no BSR/network:
 
 ```yaml
 version: v2
 plugins:
-  - remote: buf.build/protocolbuffers/dart   # or a local protoc-gen-dart, see below
+  - local: protoc-gen-dart
     out: portal/lib/src/gen
-    include_imports: true
+    opt:
+      - grpc            # also emit the *.pbgrpc.dart service clients
 ```
 
 `protoc-gen-dart` emits, per proto:
