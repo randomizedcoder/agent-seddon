@@ -14,11 +14,13 @@
 //! hermetically with no model / index / network.
 
 use std::future::Future;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use agent_core::{
-    CompletionRequest, CompletionResponse, LlmProvider, MemoryStore, Message, ModelCapabilities,
+    CompletionRequest, CompletionResponse, HealthReport, LlmPool, LlmProvider, MemoryStore,
+    Message, ModelCapabilities, PoolMemberHealth, PoolMemberResult, PoolMemberState, PoolTier,
     PromptKind, PromptStore, RecallQuery, Result as CoreResult, Tokenizer, Usage,
 };
 use agent_grpc::client::{GrpcMemory, GrpcPrompts, GrpcProvider, GrpcTokenizer};
@@ -27,6 +29,7 @@ use agent_grpc::Endpoint;
 use agent_proto::pb;
 use agent_testkit::{tempdir, RecordingMemory, ScriptedProvider};
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use tokio::sync::oneshot;
 
 // ---------------------------------------------------------------------------
@@ -359,6 +362,144 @@ async fn overload(cap: usize, conc: usize, requests: usize) -> LoadResult {
 }
 
 // ---------------------------------------------------------------------------
+// Saturation: drive the pool past per-member capacity; assert RESOURCE_EXHAUSTED
+// ---------------------------------------------------------------------------
+
+/// A pool that models real per-member capacity under load: `complete_all` holds an
+/// in-flight slot (RAII) for a slow "generation", and returns an **empty batch when
+/// already at capacity** — exactly the condition `LlmPoolService.Complete` turns into
+/// a `RESOURCE_EXHAUSTED` shed (via `health()`). Exercises that wire signal under
+/// concurrent load, hermetically.
+struct LoadPool {
+    cap: usize,
+    in_flight: AtomicUsize,
+    delay: Duration,
+}
+
+#[async_trait]
+impl LlmPool for LoadPool {
+    fn name(&self) -> &str {
+        "load"
+    }
+    async fn health(&self) -> HealthReport {
+        let n = self.in_flight.load(Ordering::Relaxed);
+        HealthReport {
+            members: vec![PoolMemberHealth {
+                name: "m".into(),
+                tier: PoolTier::Medium,
+                alive: true,
+                consecutive_failures: 0,
+                last_probe_ms: 1,
+                in_flight: n as u32,
+                weight: 1.0,
+                max_concurrency: self.cap as u32,
+                saturated: n >= self.cap,
+                state: PoolMemberState::Healthy,
+                latency_ms_ewma: 0,
+            }],
+        }
+    }
+    async fn complete_all(
+        &self,
+        _req: CompletionRequest,
+        _tier: PoolTier,
+        _fanout: usize,
+    ) -> Vec<PoolMemberResult> {
+        // Admission check: at capacity → shed (empty batch), like the real pool.
+        if self.in_flight.fetch_add(1, Ordering::SeqCst) >= self.cap {
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            return Vec::new();
+        }
+        tokio::time::sleep(self.delay).await;
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        vec![PoolMemberResult {
+            member: "m".into(),
+            duration_ms: self.delay.as_millis() as u32,
+            response: Some(CompletionResponse {
+                message: Message::assistant("ok"),
+                finish_reason: "stop".into(),
+                usage: Some(Usage::default()),
+            }),
+            error: None,
+        }]
+    }
+    async fn complete(&self, req: CompletionRequest) -> CoreResult<CompletionResponse> {
+        self.complete_all(req, PoolTier::Light, 1)
+            .await
+            .into_iter()
+            .find_map(|r| r.response)
+            .ok_or_else(|| agent_core::Error::Overloaded("pool saturated".into()))
+    }
+}
+
+async fn saturation(cap: usize, conc: usize, requests: usize) -> LoadResult {
+    let pool = Arc::new(LoadPool {
+        cap,
+        in_flight: AtomicUsize::new(0),
+        delay: Duration::from_millis(50),
+    });
+    let (dial, _s) = spawn(listen("tcp"), srv::llm_pool_router(pool)).await;
+    let ch = dial.connect_lazy().expect("channel");
+    let req = pb::PoolCompleteRequest {
+        req: Some(pb::CompletionRequest::from(core_req())),
+        tier: pb::PoolTier::from(PoolTier::Light) as i32,
+        fanout: 1,
+    };
+    run_load("llm-pool", "tcp", conc, requests, move || {
+        let ch = ch.clone();
+        let req = req.clone();
+        async move {
+            let mut c = pb::llm_pool_service_client::LlmPoolServiceClient::new(ch);
+            let t = Instant::now();
+            match c.complete(req).await {
+                Ok(_) => Outcome::Ok(t.elapsed()),
+                Err(s) if s.code() == tonic::Code::ResourceExhausted => Outcome::Shed(t.elapsed()),
+                Err(s) => Outcome::Err(format!("{:?}: {}", s.code(), s.message())),
+            }
+        }
+    })
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// Streaming: many concurrent server-streams; assert none stall
+// ---------------------------------------------------------------------------
+
+async fn streaming(conc: usize, streams: usize) -> LoadResult {
+    // ScriptedProvider replays its final turn as chunks over Provider.Stream.
+    let provider = Arc::new(ScriptedProvider::new(vec![CompletionResponse {
+        message: Message::assistant("streamed answer over several chunks"),
+        finish_reason: "stop".into(),
+        usage: Some(Usage::default()),
+    }]));
+    let (dial, _s) = spawn(listen("tcp"), srv::provider_router(provider)).await;
+    let ch = dial.connect_lazy().expect("channel");
+    let req = pb::CompletionRequest::from(core_req());
+    run_load("provider.stream", "tcp", conc, streams, move || {
+        let ch = ch.clone();
+        let req = req.clone();
+        async move {
+            let mut c = pb::provider_client::ProviderClient::new(ch);
+            let t = Instant::now();
+            match c.stream(req).await {
+                Ok(resp) => {
+                    // Drain the whole stream; a stall/error here is the failure.
+                    let mut s = resp.into_inner();
+                    while let Some(item) = s.next().await {
+                        if let Err(e) = item {
+                            return Outcome::Err(format!("mid-stream: {}", e.message()));
+                        }
+                    }
+                    Outcome::Ok(t.elapsed())
+                }
+                Err(e) => Outcome::Err(format!("open: {}", e.message())),
+            }
+        }
+    })
+    .await
+}
+
+// ---------------------------------------------------------------------------
 // CLI + report
 // ---------------------------------------------------------------------------
 
@@ -409,33 +550,46 @@ async fn main() {
                 results.push(overload(cap, c.max(cap * 4), requests).await);
             }
         }
+        // Stress: the pool's saturation shed (now RESOURCE_EXHAUSTED on the wire).
+        "saturation" => {
+            for &c in &concurrency {
+                results.push(saturation(cap, c.max(cap * 4), requests).await);
+            }
+        }
+        // Stress: many concurrent server-streams; assert none stall.
+        "streaming" => {
+            for &c in &concurrency {
+                results.push(streaming(c, requests).await);
+            }
+        }
         other => {
-            eprintln!("unknown --scenario `{other}` (ramp|overload)");
+            eprintln!("unknown --scenario `{other}` (ramp|overload|saturation|streaming)");
             std::process::exit(1);
         }
     }
 
-    // Contract check for the overload scenario: every non-success must be a shed.
+    // Contract check. overload/saturation must shed only RESOURCE_EXHAUSTED; streaming
+    // must not error (a stalled/failed stream is the failure).
     let mut violated = false;
-    if scenario == "overload" {
-        for r in &results {
-            if r.errors > 0 {
-                eprintln!(
-                    "CONTRACT VIOLATION [{}]: {} non-RESOURCE_EXHAUSTED error(s), e.g. {}",
-                    r.seam,
-                    r.errors,
-                    r.err_sample.as_deref().unwrap_or("?")
-                );
+    let sheds_expected = scenario == "overload" || scenario == "saturation";
+    for r in &results {
+        if r.errors > 0 {
+            eprintln!(
+                "CONTRACT VIOLATION [{}/{}]: {} unexpected error(s), e.g. {}",
+                scenario,
+                r.seam,
+                r.errors,
+                r.err_sample.as_deref().unwrap_or("?")
+            );
+            violated = true;
+        }
+        if sheds_expected && r.shed == 0 {
+            eprintln!(
+                "WARN [{}/{}] cap={cap} conc={}: no shed — cap not reached",
+                scenario, r.seam, r.concurrency
+            );
+            if require_shed {
                 violated = true;
-            }
-            if r.shed == 0 {
-                eprintln!(
-                    "WARN [{}] cap={cap} conc={}: no shed — cap not reached",
-                    r.seam, r.concurrency
-                );
-                if require_shed {
-                    violated = true;
-                }
             }
         }
     }
