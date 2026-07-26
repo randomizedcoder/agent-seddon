@@ -1166,6 +1166,11 @@ impl SearchCfg {
 /// unix-domain socket (TCP-bypassing, same-host). See `docs/grpc.md`.
 #[derive(Debug, Default, Deserialize)]
 pub struct GrpcCfg {
+    /// Overload admission: cap on concurrent in-flight requests a served process
+    /// accepts before shedding new ones with `RESOURCE_EXHAUSTED` + a pushback hint
+    /// (docs/design/loadtest). Absent ⇒ a protective default; `0` ⇒ unbounded (off).
+    #[serde(default)]
+    pub max_in_flight: Option<usize>,
     #[serde(default)]
     pub provider: GrpcSeamCfg,
     #[serde(default)]

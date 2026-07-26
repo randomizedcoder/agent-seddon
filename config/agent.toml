@@ -574,6 +574,14 @@ job         = "agent-seddon"
 # semantic 50072).
 # Use `unix:/path` for a same-host, TCP-bypassing socket. See docs/grpc.md.
 #
+# Overload admission (docs/design/loadtest): a served process (`--serve-<seam>` /
+# `--serve-all`) caps concurrent in-flight requests; over the cap it sheds new ones
+# with gRPC RESOURCE_EXHAUSTED + a `grpc-retry-pushback-ms` hint, so clients back off
+# (bounded, jittered) instead of piling on. Absent ⇒ a protective default (1024);
+# `0` ⇒ unbounded (off). One process-wide cap, applied uniformly to every seam.
+# [grpc]
+# max_in_flight = 1024
+#
 # [grpc.provider]
 # endpoint = "unix:/tmp/agent-seddon/provider.sock"   # client dials this
 # listen   = "unix:/tmp/agent-seddon/provider.sock"   # --serve-provider binds this

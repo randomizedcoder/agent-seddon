@@ -54,6 +54,9 @@ pub struct Settings {
     /// Consecutive turns a non-decisive candidate mode must win to switch
     /// (`[mode] hysteresis`); a decisive deterministic signal switches immediately.
     pub mode_hysteresis: usize,
+    /// Overload admission cap for served gRPC seams (`[grpc] max_in_flight`): concurrent
+    /// in-flight requests before shedding with `RESOURCE_EXHAUSTED`. `0` = unbounded.
+    pub grpc_max_in_flight: usize,
 }
 
 pub struct Agent {
@@ -653,6 +656,12 @@ impl Agent {
 
     pub fn metrics_proxy(&self) -> Option<Arc<dyn agent_core::MetricsProxy>> {
         self.metrics_proxy.clone()
+    }
+
+    /// The overload admission cap for served seams (`[grpc] max_in_flight`); `0` =
+    /// unbounded. Read by the serve path when building the router.
+    pub fn grpc_max_in_flight(&self) -> usize {
+        self.settings.grpc_max_in_flight
     }
 
     /// The live session-event sink, for publishing from the loop / a background
@@ -2042,6 +2051,7 @@ mod tests {
             review_context_budget: 24_000,
             mode_confidence_floor: 0.6,
             mode_hysteresis: 2,
+            grpc_max_in_flight: 0,
         }
     }
 

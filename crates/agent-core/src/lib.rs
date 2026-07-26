@@ -57,6 +57,10 @@ pub enum Error {
     Prompt(String),
     #[error("metrics error: {0}")]
     Metrics(String),
+    /// The service is over capacity and is asking the caller to back off — maps to
+    /// gRPC `RESOURCE_EXHAUSTED`, which the client retries with backoff (not a fault).
+    #[error("overloaded: {0}")]
+    Overloaded(String),
 }
 
 // ---------------------------------------------------------------------------

@@ -16,7 +16,7 @@
 //! variant is added, so [`every_seam_has_a_table_row`] restores it: a new variant
 //! with no row fails the test rather than silently having no flag.
 
-use agent_grpc::server::Router;
+use agent_grpc::server::ServeRouter;
 use agent_grpc::{constants, Endpoint};
 use agent_runtime::{Agent, Config};
 
@@ -415,7 +415,11 @@ pub fn resolve_gateway_listen(cfg: &Config, override_addr: Option<&str>) -> Endp
 /// says so — so a gateway hosting everything can skip them instead of refusing
 /// to start. The router is returned either way (a `Router` is move-only, so
 /// handing it back unchanged is what keeps the skip path from losing it).
-fn add_seam_service(router: Router, agent: &Agent, seam: Seam) -> anyhow::Result<(Router, bool)> {
+fn add_seam_service(
+    router: ServeRouter,
+    agent: &Agent,
+    seam: Seam,
+) -> anyhow::Result<(ServeRouter, bool)> {
     use agent_grpc::server as srv;
     Ok(match seam {
         Seam::Provider => (
@@ -630,7 +634,7 @@ pub async fn serve_all(agent: &Agent, listen: Endpoint) -> anyhow::Result<()> {
 /// that also drives the run stops it exactly when the run ends. Shares the live
 /// agent's session source, so a portal sees the loop's events in real time.
 pub async fn serve_session_observe(agent: &Agent, listen: Endpoint) -> anyhow::Result<()> {
-    let (router, health) = agent_grpc::server::base_router().await;
+    let (router, health) = agent_grpc::server::base_router(agent.grpc_max_in_flight()).await;
     let (router, added) = add_seam_service(router, agent, Seam::SessionStream)?;
     if !added {
         anyhow::bail!("session-stream seam not available in this build");
@@ -652,7 +656,7 @@ async fn serve_seams(
 ) -> anyhow::Result<()> {
     // Health is the seed of the router, so hosting one seam and hosting all of
     // them are the same code path rather than two that can drift.
-    let (mut router, health) = agent_grpc::server::base_router().await;
+    let (mut router, health) = agent_grpc::server::base_router(agent.grpc_max_in_flight()).await;
     let mut hosted: Vec<&str> = Vec::new();
     for &seam in seams {
         let (next, added) = add_seam_service(router, agent, seam)?;

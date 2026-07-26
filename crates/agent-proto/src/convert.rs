@@ -158,6 +158,9 @@ pub fn status_from_error(e: &agent_core::Error) -> tonic::Status {
         // A rejected prompt id / oversized body is a bad request, not a server fault.
         Error::Prompt(m) => tonic::Status::invalid_argument(format!("prompt: {m}")),
         Error::Metrics(m) => tonic::Status::internal(format!("metrics: {m}")),
+        // Overload is a "slow down", not a fault: RESOURCE_EXHAUSTED is in the
+        // client's retryable set, so it backs off + retries rather than failing.
+        Error::Overloaded(m) => tonic::Status::resource_exhausted(format!("overloaded: {m}")),
     }
 }
 

@@ -18,8 +18,16 @@ use tonic::Status;
 /// Re-exported so callers (the CLI) can name a built router without taking a
 /// direct `tonic` dependency — the point of the `*_router` helpers.
 pub use tonic::transport::server::Router;
+
+/// The router type produced by [`base_router`] and threaded through the serve path:
+/// a `Router` carrying the uniform [`AdmissionLayer`] (overload shedding). The
+/// standalone `*_router` helpers keep the bare `Router` (tests don't need
+/// admission); [`crate::transport::Endpoint::serve`] is generic so it accepts both.
+pub type ServeRouter =
+    Router<tower::layer::util::Stack<admission::AdmissionLayer, tower::layer::util::Identity>>;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
+mod admission;
 mod agent_session;
 mod context;
 mod dimension;
@@ -46,6 +54,7 @@ mod tokenizer;
 mod tools;
 mod web;
 
+pub use admission::*;
 pub use agent_session::*;
 pub use context::*;
 pub use dimension::*;
@@ -95,8 +104,8 @@ pub(crate) fn missing(field: &'static str) -> Status {
 /// grpc.health.v1.Health/Check` fails with "server does not expose service" even
 /// though the service is running and answering generated clients perfectly well.
 pub fn with_reflection(
-    router: Router,
-) -> Result<Router, Box<dyn std::error::Error + Send + Sync + 'static>> {
+    router: ServeRouter,
+) -> Result<ServeRouter, Box<dyn std::error::Error + Send + Sync + 'static>> {
     let v1 = tonic_reflection::server::Builder::configure()
         .register_encoded_file_descriptor_set(agent_proto::FILE_DESCRIPTOR_SET)
         .register_encoded_file_descriptor_set(tonic_health::pb::FILE_DESCRIPTOR_SET)
