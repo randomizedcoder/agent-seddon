@@ -208,6 +208,8 @@ balancer works with no agent-specific knowledge:
 ```sh
 grpcurl -plaintext localhost:50055 grpc.health.v1.Health/Check
 grpcurl -plaintext -d '{"service":"agent.v1.Policy"}' localhost:50055 grpc.health.v1.Health/Check
+# over a unix socket: use the unix:// scheme (see Introspection below), not -unix
+grpcurl -plaintext unix:///tmp/agent-seddon/gateway.sock grpc.health.v1.Health/Check
 ```
 
 Both the **empty** service name (the protocol's "server as a whole", and what
@@ -310,6 +312,16 @@ grpcurl -plaintext 127.0.0.1:50056 describe agent.v1.SearchService
 grpcurl -plaintext -d '{"globs":["**/*.rs"]}' \
         127.0.0.1:50056 agent.v1.SearchService/ListFiles       # JSON in → binary → JSON out
 ```
+
+> **Poking a seam served over a unix socket?** Address it with the `unix://<path>`
+> **scheme**, *not* grpcurl's `-unix` flag — the flag expects a `host:port` and
+> fails with `missing port in address` on a bare path. The same `unix://<path>`
+> form works for `ghz` and any gRPC-Go-based tool, so prefer it everywhere:
+>
+> ```sh
+> agent --serve-all --listen unix:/tmp/agent-seddon/gateway.sock &
+> grpcurl -plaintext unix:///tmp/agent-seddon/gateway.sock list
+> ```
 
 The reflection descriptor is a `FileDescriptorSet` emitted by `agent-proto`'s
 `build.rs` and exposed as `agent_proto::FILE_DESCRIPTOR_SET`; `agent_grpc::server::with_reflection`
