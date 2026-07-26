@@ -205,21 +205,31 @@ pkgs.writeShellApplication {
       if [ "$rc" -ne 1 ]; then
         echo ""
         echo "loadtest-wire: [$transport] overload burst  (c=$OVERLOAD_CONC vs cap=$CAP) ..."
+        # Snapshot the server-side shed counter around the burst, so the delta is
+        # this burst's sheds (not any incidental sheds from the baseline runs).
+        local shed_before shed_after server_shed shed unav
+        shed_before="$(metric_sum '^agent_grpc_overload_shed_total ')"
         ghz --insecure --call agent.v1.Memory.Recall \
           -d '{"text":"load","limit":3}' \
           -c "$OVERLOAD_CONC" -n "$((OVERLOAD_CONC * 20))" --connections 16 \
           -O json -o "$work/overload.$transport.json" "$ghz_target" 2>/dev/null || true
-        local shed unav
+        shed_after="$(metric_sum '^agent_grpc_overload_shed_total ')"
+        server_shed="$(awk -v a="$shed_before" -v b="$shed_after" 'BEGIN{printf "%d", b-a}')"
         shed="$(jq -r '.statusCodeDistribution.ResourceExhausted // 0' "$work/overload.$transport.json")"
         unav="$(jq -r '.statusCodeDistribution.Unavailable // 0' "$work/overload.$transport.json")"
         echo "loadtest-wire: [$transport] overload status distribution:"
         jq -r '.statusCodeDistribution | to_entries[] | "  \(.key): \(.value)"' "$work/overload.$transport.json"
+        printf 'server (/metrics)  agent_grpc_overload_shed_total +%s   (ghz saw %s ResourceExhausted)\n' \
+          "$server_shed" "$shed"
         if [ "$shed" -le 0 ]; then
           echo "CONTRACT[$transport]: overload burst (c=$OVERLOAD_CONC, cap=$CAP) produced no RESOURCE_EXHAUSTED" >&2
           tail -n 20 "$work/server.$transport.log" >&2
           [ "$rc" -lt 2 ] && rc=2
+        elif [ "$server_shed" -le 0 ]; then
+          echo "CONTRACT[$transport]: ghz saw $shed sheds but agent_grpc_overload_shed_total did not move" >&2
+          [ "$rc" -lt 2 ] && rc=2
         else
-          echo "loadtest-wire: [$transport] shed $shed request(s) with RESOURCE_EXHAUSTED (+$unav Unavailable)."
+          echo "loadtest-wire: [$transport] shed $shed request(s) with RESOURCE_EXHAUSTED (+$unav Unavailable); server counter +$server_shed."
         fi
       fi
 

@@ -480,6 +480,12 @@ impl Agent {
     pub fn memory(&self) -> Arc<dyn MemoryStore> {
         self.memory.clone()
     }
+    /// The metrics registry the loop and seams record into — the same instance the
+    /// `/metrics` endpoint serves, so a serve process can wire cross-cutting counters
+    /// (e.g. the gRPC admission-layer shed count) into the scraped output.
+    pub fn metrics(&self) -> Metrics {
+        self.metrics.clone()
+    }
     pub fn context(&self) -> Arc<dyn ContextStrategy> {
         self.context.clone()
     }

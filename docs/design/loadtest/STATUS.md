@@ -136,11 +136,8 @@ One gated PR per increment, off `main`, checkpoint after each.
   ghz's OKs and the overload burst must shed `RESOURCE_EXHAUSTED` or exit 2.
 - **Pins:** `ghz` in `nix/versions.nix` (not in the dev shell / any check); the app
   also uses the already-pinned `grpcurl` (health probe) + `jq`/`curl`.
-- **Deferred (documented):** the admission layer's shed counter is an in-process
-  `AtomicU64` (read by the Rust `loadtest` example), **not** yet a Prometheus series,
-  so `agent_grpc_overload_shed_total` isn't on `/metrics` — the overload evidence here
-  is ghz's client-side `ResourceExhausted` count. Exposing that counter as a metric
-  (threading `Metrics` into `base_router`) is a clean, self-contained follow-up.
+- **~~Deferred~~ Done (follow-up below):** the admission shed counter is now also a
+  Prometheus series, `agent_grpc_overload_shed_total`, on `/metrics`.
 
 ## Transport parity (post-06 follow-up)
 
@@ -162,6 +159,25 @@ One gated PR per increment, off `main`, checkpoint after each.
   delayed-ack/Nagle tail the ramp first surfaced shows up everywhere: streaming p99 was
   ~25× lower on UDS (≈1.6 ms vs ≈41.8 ms), and the ghz wire tier saw ~2× throughput +
   a ~10× lower p99 on UDS. UDS sidesteps it entirely.
+
+## Overload shed metric (post-06 follow-up)
+
+- **`agent_grpc_overload_shed_total`** — the admission layer's shed count is now a
+  Prometheus counter on `/metrics`, not just an in-process `AtomicU64`. So an overloaded
+  seam is now observable **server-side** (Prometheus/Grafana already scrape `:9700`), not
+  only via a client's `RESOURCE_EXHAUSTED` responses.
+- **Kept the transport layer metrics-agnostic.** `agent-grpc` doesn't depend on
+  `agent-metrics`; instead the layer takes an optional `ShedObserver` callback
+  (`base_router_with_observer`), and the serve path bridges it to
+  `Metrics::on_grpc_overload_shed` via the new `Agent::metrics()` accessor. The many
+  test/example `base_router(cap)` callers are untouched. A unit test asserts the observer
+  fires exactly once per shed.
+- **The wire tier now correlates it.** `loadtest-wire` snapshots the counter around the
+  overload burst and prints `agent_grpc_overload_shed_total +N` next to ghz's client-side
+  `ResourceExhausted` count — a server↔client match on both transports, and a contract
+  failure if the counter doesn't move when ghz saw sheds.
+- **Not covered:** pool-internal sheds have their own `agent_pool_saturation_shed_total`;
+  the admission counter is specifically the process-wide in-flight layer.
 
 ## Notes / decisions of record
 
