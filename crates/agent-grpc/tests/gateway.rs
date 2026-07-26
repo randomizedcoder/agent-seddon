@@ -46,7 +46,7 @@ async fn check(dial: &agent_grpc::Endpoint, service: &str) -> Result<i32, tonic:
 #[case::uds(Transport::Uds)]
 #[tokio::test(flavor = "multi_thread")]
 async fn positive_health_reports_serving_for_a_hosted_seam(#[case] transport: Transport) {
-    let (router, health) = base_router().await;
+    let (router, health) = base_router(0).await;
     let router = router.add_service(PolicySvc::new(Arc::new(AllowAll)).into_server());
     health.set_serving("agent.v1.Policy").await;
     let (dial, _srv) = spawn(transport, router).await;
@@ -69,7 +69,7 @@ async fn positive_health_reports_serving_for_a_hosted_seam(#[case] transport: Tr
 /// This is the property that makes `--serve-all`'s skip path safe.
 #[tokio::test(flavor = "multi_thread")]
 async fn negative_unhosted_seam_is_not_reported_serving() {
-    let (router, health) = base_router().await;
+    let (router, health) = base_router(0).await;
     let router = router.add_service(PolicySvc::new(Arc::new(AllowAll)).into_server());
     health.set_serving("agent.v1.Policy").await;
     let (dial, _srv) = spawn(Transport::Tcp, router).await;
@@ -89,7 +89,7 @@ async fn negative_unhosted_seam_is_not_reported_serving() {
 /// listener goes away, so a balancer stops sending work first.
 #[tokio::test(flavor = "multi_thread")]
 async fn positive_drain_flips_to_not_serving() {
-    let (router, health) = base_router().await;
+    let (router, health) = base_router(0).await;
     let router = router.add_service(PolicySvc::new(Arc::new(AllowAll)).into_server());
     health.set_serving("agent.v1.Policy").await;
     let (dial, _srv) = spawn(Transport::Tcp, router).await;
@@ -130,7 +130,7 @@ async fn positive_health_is_discoverable_via_reflection() {
     use tonic_reflection::pb::v1::server_reflection_response::MessageResponse;
     use tonic_reflection::pb::v1::ServerReflectionRequest;
 
-    let (router, health) = base_router().await;
+    let (router, health) = base_router(0).await;
     let router = router.add_service(PolicySvc::new(Arc::new(AllowAll)).into_server());
     health.set_serving("agent.v1.Policy").await;
     let router = agent_grpc::server::with_reflection(router).expect("reflection");
@@ -175,7 +175,7 @@ async fn positive_health_is_discoverable_via_reflection() {
 #[case::uds(Transport::Uds)]
 #[tokio::test(flavor = "multi_thread")]
 async fn positive_one_router_hosts_several_seams(#[case] transport: Transport) {
-    let (router, health) = base_router().await;
+    let (router, health) = base_router(0).await;
     let router = router
         .add_service(PolicySvc::new(Arc::new(AllowAll)).into_server())
         .add_service(ContextSvc::new(Arc::new(StaticContext)).into_server());

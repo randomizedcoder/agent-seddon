@@ -12,6 +12,7 @@ use std::path::PathBuf;
 
 use tokio::net::{TcpListener, UnixListener};
 use tokio_stream::wrappers::{TcpListenerStream, UnixListenerStream};
+use tonic::codegen::http;
 use tonic::transport::server::Router;
 use tonic::transport::{Channel, Endpoint as TonicEndpoint, Uri};
 
@@ -153,12 +154,26 @@ impl Bound {
         }
     }
 
-    /// Serve `router` on this listener until `shutdown` resolves.
-    pub async fn serve(
+    /// Serve `router` on this listener until `shutdown` resolves. Generic over the
+    /// router's tower layer `L`, so it accepts both the bare `Router` (tests) and the
+    /// admission-layered [`crate::server::ServeRouter`] (the CLI serve path).
+    pub async fn serve<L>(
         self,
-        router: Router,
+        router: Router<L>,
         shutdown: impl std::future::Future<Output = ()> + Send,
-    ) -> Result<(), tonic::transport::Error> {
+    ) -> Result<(), tonic::transport::Error>
+    where
+        L: tower::Layer<tonic::service::Routes> + Clone + Send + 'static,
+        L::Service: tower::Service<
+                http::Request<tonic::body::BoxBody>,
+                Response = http::Response<tonic::body::BoxBody>,
+            > + Clone
+            + Send
+            + 'static,
+        <L::Service as tower::Service<http::Request<tonic::body::BoxBody>>>::Future: Send + 'static,
+        <L::Service as tower::Service<http::Request<tonic::body::BoxBody>>>::Error:
+            Into<Box<dyn std::error::Error + Send + Sync>> + Send,
+    {
         match self {
             Bound::Tcp(l) => {
                 router

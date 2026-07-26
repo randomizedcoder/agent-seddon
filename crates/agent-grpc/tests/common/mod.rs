@@ -10,6 +10,7 @@
 use agent_grpc::Endpoint;
 use agent_testkit::tempdir;
 use tokio::sync::oneshot;
+use tonic::codegen::http;
 use tonic::transport::server::Router;
 
 /// Which transport a test case uses.
@@ -47,7 +48,21 @@ impl Drop for TestServer {
 }
 
 /// Bind `router` on `transport` and spawn it; return the dial endpoint + a guard.
-pub async fn spawn(transport: Transport, router: Router) -> (Endpoint, TestServer) {
+/// Generic over the router's tower layer `L`, so it serves both the bare `Router`
+/// (most seam tests) and the admission-layered `ServeRouter` (the overload test).
+pub async fn spawn<L>(transport: Transport, router: Router<L>) -> (Endpoint, TestServer)
+where
+    L: tower::Layer<tonic::service::Routes> + Clone + Send + 'static,
+    L::Service: tower::Service<
+            http::Request<tonic::body::BoxBody>,
+            Response = http::Response<tonic::body::BoxBody>,
+        > + Clone
+        + Send
+        + 'static,
+    <L::Service as tower::Service<http::Request<tonic::body::BoxBody>>>::Future: Send + 'static,
+    <L::Service as tower::Service<http::Request<tonic::body::BoxBody>>>::Error:
+        Into<Box<dyn std::error::Error + Send + Sync>> + Send,
+{
     let bound = transport.listen().bind().await.expect("bind");
     let dial = bound.dial_endpoint().expect("dial endpoint");
     let (tx, rx) = oneshot::channel();

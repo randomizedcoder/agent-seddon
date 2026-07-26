@@ -28,8 +28,13 @@
 //! healthy. Marking a requested-but-absent seam SERVING would route traffic to a
 //! service that returns `UNIMPLEMENTED`.
 
-use tonic::transport::server::Router;
 use tonic::transport::Server;
+
+use super::{admission::AdmissionLayer, ServeRouter};
+
+/// Default retry hint advertised on a shed (`grpc-retry-pushback-ms`). The client
+/// clamps it; ~100 ms is long enough to relieve a transient burst without idling.
+const SHED_PUSHBACK_MS: i64 = 100;
 
 struct Inner {
     reporter: tonic_health::server::HealthReporter,
@@ -94,13 +99,17 @@ impl HealthHandle {
 /// The returned `Router` is the seed the seam services are added onto — which is
 /// what lets one process host several seams (`--serve-all`) through the same code
 /// path as one (`--serve-<seam>`).
-pub async fn base_router() -> (Router, HealthHandle) {
+pub async fn base_router(max_in_flight: usize) -> (ServeRouter, HealthHandle) {
     let (mut reporter, health_service) = tonic_health::server::health_reporter();
     reporter
         .set_service_status("", tonic_health::ServingStatus::Serving)
         .await;
     (
-        Server::builder().add_service(health_service),
+        // The admission layer wraps the whole routed service, so every seam added
+        // onto this router (and `--serve-all`) sheds overload uniformly.
+        Server::builder()
+            .layer(AdmissionLayer::new(max_in_flight, SHED_PUSHBACK_MS))
+            .add_service(health_service),
         HealthHandle {
             inner: tokio::sync::Mutex::new(Inner {
                 reporter,

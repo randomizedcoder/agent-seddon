@@ -183,6 +183,7 @@ mod tests {
             review_context_budget: 24_000,
             mode_confidence_floor: 0.6,
             mode_hysteresis: 2,
+            grpc_max_in_flight: 0,
         }
     }
 

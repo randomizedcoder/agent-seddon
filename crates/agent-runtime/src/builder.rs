@@ -8,6 +8,10 @@
 
 use crate::agent::{Agent, Settings};
 use crate::config::Config;
+
+/// Default overload admission cap when `[grpc] max_in_flight` is absent — high enough
+/// not to touch normal use, low enough to shed a runaway burst (docs/design/loadtest).
+const DEFAULT_GRPC_MAX_IN_FLIGHT: usize = 1024;
 #[cfg(any(feature = "provider-openai-compat", feature = "provider-anthropic"))]
 use crate::config::ProviderCfg;
 use crate::context_files;
@@ -856,6 +860,8 @@ pub async fn build_agent_with(
         review_context_budget: cfg.review.context_budget_bytes,
         mode_confidence_floor: cfg.mode.confidence_floor,
         mode_hysteresis: cfg.mode.hysteresis,
+        // Absent ⇒ a protective default cap; `Some(0)` ⇒ explicit opt-out (unbounded).
+        grpc_max_in_flight: cfg.grpc.max_in_flight.unwrap_or(DEFAULT_GRPC_MAX_IN_FLIGHT),
     };
 
     // Subagents: register a `delegate` tool whose children reuse the worker tool
