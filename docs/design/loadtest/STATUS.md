@@ -12,7 +12,7 @@ One gated PR per increment, off `main`, checkpoint after each.
 | 03 | Conformance harness core + per-seam ramp | — | ✅ | ✅ | **merged** (#135) |
 | 04 | Stress: pool saturation + streaming scenarios | — | ✅ | ✅ | **merged** (#136) |
 | 05 | Full-loop e2e concurrency | — | ✅ | ✅ | **merged** (#137) |
-| 06 | `ghz` wire load + `/metrics` correlation | — | ✅ | ✅ | **in review** |
+| 06 | `ghz` wire load + `/metrics` correlation | — | ✅ | ✅ | **merged** (#138) |
 
 ## 01 — what shipped
 
@@ -141,6 +141,20 @@ One gated PR per increment, off `main`, checkpoint after each.
   so `agent_grpc_overload_shed_total` isn't on `/metrics` — the overload evidence here
   is ghz's client-side `ResourceExhausted` count. Exposing that counter as a metric
   (threading `Metrics` into `base_router`) is a clean, self-contained follow-up.
+
+## Transport parity (post-06 follow-up)
+
+- **`overload` / `saturation` / `streaming` now run over BOTH TCP and UDS** (like the
+  `ramp` scenario), so the backpressure contract is *verified* on both transports, not
+  assumed to transfer. The admission layer is a router-level tower layer above the
+  transport, so it sheds identically — confirmed: cap 4 / conc 64 → 300 shed, 0 err on
+  both tcp and uds for overload + saturation; 224 streams drain clean on both. The
+  `loadtest-smoke` gate check drops its `--transport tcp` pin so both are exercised in
+  the gate. (The `loadtest-wire` ghz tier stays TCP-only for now — pointing ghz at the
+  `unix://` gateway socket is a small follow-up.)
+- **UDS beats TCP on streaming too.** Per-stream p99 was ~25× lower on UDS (≈1.6 ms vs
+  ≈41.8 ms) — the same TCP-loopback delayed-ack/Nagle tail the ramp first surfaced, now
+  visible on server-streams; UDS sidesteps it.
 
 ## Notes / decisions of record
 

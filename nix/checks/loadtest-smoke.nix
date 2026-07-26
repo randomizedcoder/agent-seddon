@@ -21,13 +21,16 @@ craneLib.mkCargoDerivation (
     version = "0.1.0";
     doInstallCargoArtifacts = false;
     buildPhaseCargoCommand = ''
-      echo "loadtest-smoke: overload contract (must shed RESOURCE_EXHAUSTED, no other error) ..."
+      # No --transport ⇒ each of these runs over BOTH tcp and uds, so the gate
+      # locks in the backpressure contract on both transports (the admission layer
+      # is transport-agnostic, but "should hold" ≠ "verified").
+      echo "loadtest-smoke: overload contract on tcp+uds (must shed RESOURCE_EXHAUSTED, no other error) ..."
       cargo run --release -p agent-grpc --example loadtest -- \
-        --scenario overload --cap 2 --concurrency 16 --requests 48 --require-shed --transport tcp
-      echo "loadtest-smoke: pool saturation sheds RESOURCE_EXHAUSTED ..."
+        --scenario overload --cap 2 --concurrency 16 --requests 48 --require-shed
+      echo "loadtest-smoke: pool saturation sheds RESOURCE_EXHAUSTED on tcp+uds ..."
       cargo run --release -p agent-grpc --example loadtest -- \
         --scenario saturation --cap 2 --concurrency 12 --requests 36 --require-shed
-      echo "loadtest-smoke: concurrent streams drain clean ..."
+      echo "loadtest-smoke: concurrent streams drain clean on tcp+uds ..."
       cargo run --release -p agent-grpc --example loadtest -- \
         --scenario streaming --concurrency 6 --requests 18
       echo "loadtest-smoke: ramp path runs clean ..."
