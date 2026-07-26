@@ -9,7 +9,7 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -2088,6 +2088,81 @@ pub trait DimensionStore: Send + Sync {
 // ---------------------------------------------------------------------------
 // Prompt management (docs/design/portal): see + CRUD every prompt
 // ---------------------------------------------------------------------------
+
+/// Largest number of tags accepted on a [`PromptContext`] (or, later, a fragment
+/// tag set). Tags are untrusted (`docs/design/prompts/04-selection.md`); this caps a
+/// hostile input before it reaches matching or storage.
+pub const MAX_PROMPT_TAGS: usize = 64;
+/// Largest length (bytes) of a single prompt tag. Tags are opaque labels, not prose.
+pub const MAX_PROMPT_TAG_LEN: usize = 128;
+
+/// The situation a system fragment is selected for: an opaque, **bounded** set of
+/// tags (e.g. `mode:review`, `language:rust`). A fragment is selected when its tags
+/// are a subset of this context — see [`Self::covers`] and
+/// `docs/design/prompts/04-selection.md`.
+///
+/// Tags are compared as **opaque strings**: a tag is never turned into a path
+/// segment or SQL — a hostile value like `../etc` or `'; DROP TABLE …` is simply a
+/// string that matches nothing. Insertion is bounded ([`MAX_PROMPT_TAGS`],
+/// [`MAX_PROMPT_TAG_LEN`]); an over-cap tag is dropped rather than stored, which is
+/// safe because a context is a *query* — a dropped tag only narrows the match, it is
+/// never itself a security decision.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PromptContext {
+    tags: BTreeSet<String>,
+}
+
+impl PromptContext {
+    /// An empty context — matches only the untagged base.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Insert a tag, best-effort. An empty tag, an over-long tag, or one that would
+    /// exceed [`MAX_PROMPT_TAGS`] is dropped. Returns whether it was newly accepted.
+    pub fn insert(&mut self, tag: impl Into<String>) -> bool {
+        let tag = tag.into();
+        if tag.is_empty() || tag.len() > MAX_PROMPT_TAG_LEN || self.tags.len() >= MAX_PROMPT_TAGS {
+            return false;
+        }
+        self.tags.insert(tag)
+    }
+
+    /// Builder form of [`Self::insert`].
+    #[must_use]
+    pub fn with_tag(mut self, tag: impl Into<String>) -> Self {
+        self.insert(tag);
+        self
+    }
+
+    /// Whether `tag` is present in the context.
+    pub fn contains(&self, tag: &str) -> bool {
+        self.tags.contains(tag)
+    }
+
+    /// The tags, sorted (the `BTreeSet` order), as string slices.
+    pub fn tags(&self) -> impl Iterator<Item = &str> {
+        self.tags.iter().map(String::as_str)
+    }
+
+    /// Number of tags in the context.
+    pub fn len(&self) -> usize {
+        self.tags.len()
+    }
+
+    /// Whether the context has no tags (matches only the untagged base).
+    pub fn is_empty(&self) -> bool {
+        self.tags.is_empty()
+    }
+
+    /// The **selection predicate**: `true` when every tag in `fragment_tags` is
+    /// present in this context — i.e. the fragment's requirements are all satisfied
+    /// (`fragment.tags ⊆ context`, `docs/design/prompts/04-selection.md`). An empty
+    /// requirement set (the untagged base) is always covered.
+    pub fn covers<'a>(&self, fragment_tags: impl IntoIterator<Item = &'a str>) -> bool {
+        fragment_tags.into_iter().all(|t| self.tags.contains(t))
+    }
+}
 
 /// Where a prompt lives, for the operator/portal-facing management surface. The
 /// loop does **not** consume this seam — it reads the system prompt, context.d
@@ -4657,5 +4732,96 @@ mod tests {
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0].as_text(), Some("Read image file [image/png]"));
         assert!(blocks[1].is_media());
+    }
+
+    // --- PromptContext: the subset selection predicate ----------------------
+
+    /// `covers` is the selection rule `fragment.tags ⊆ context`: every required tag
+    /// must be present. The untagged base (empty requirement) is always covered.
+    #[rstest]
+    #[case::positive_untagged_base_always_covered(&["mode:review"], &[], true)]
+    #[case::positive_single_tag_present(&["mode:review"], &["mode:review"], true)]
+    #[case::positive_superset_context_covers(&["mode:review", "language:rust"], &["mode:review"], true)]
+    #[case::positive_multi_tag_all_present(&["mode:review", "language:rust"], &["mode:review", "language:rust"], true)]
+    #[case::negative_missing_one_required(&["mode:review"], &["mode:review", "language:rust"], false)]
+    #[case::negative_tag_absent(&["mode:debug"], &["mode:review"], false)]
+    #[case::corner_empty_context_only_covers_base(&[], &["mode:review"], false)]
+    #[case::boundary_empty_context_covers_empty(&[], &[], true)]
+    fn prompt_context_covers(
+        #[case] ctx_tags: &[&str],
+        #[case] fragment_tags: &[&str],
+        #[case] expected: bool,
+    ) {
+        let mut ctx = PromptContext::new();
+        for t in ctx_tags {
+            ctx.insert(*t);
+        }
+        assert_eq!(ctx.covers(fragment_tags.iter().copied()), expected);
+    }
+
+    /// The builder + accessors round-trip; tags are sorted and de-duplicated.
+    #[test]
+    fn prompt_context_builder_and_accessors() {
+        let ctx = PromptContext::new()
+            .with_tag("mode:review")
+            .with_tag("language:rust")
+            .with_tag("mode:review"); // duplicate is a no-op
+        assert_eq!(ctx.len(), 2);
+        assert!(!ctx.is_empty());
+        assert!(ctx.contains("mode:review"));
+        // BTreeSet order: "language:rust" sorts before "mode:review".
+        assert_eq!(
+            ctx.tags().collect::<Vec<_>>(),
+            vec!["language:rust", "mode:review"]
+        );
+    }
+
+    // --- PromptContext: untrusted, fail-closed bounds -----------------------
+
+    /// An empty context matches only the untagged base.
+    #[test]
+    fn boundary_empty_context_is_empty() {
+        let ctx = PromptContext::new();
+        assert!(ctx.is_empty());
+        assert!(ctx.covers(std::iter::empty()));
+    }
+
+    /// `adversarial_`: an oversize tag is dropped, not stored — and a dropped tag
+    /// can never cause a spurious match.
+    #[test]
+    fn adversarial_oversize_tag_is_dropped() {
+        let mut ctx = PromptContext::new();
+        let huge = "x".repeat(MAX_PROMPT_TAG_LEN + 1);
+        assert!(!ctx.insert(huge.clone()));
+        assert!(ctx.is_empty());
+        assert!(!ctx.covers([huge.as_str()]));
+        // An empty tag is likewise refused.
+        assert!(!ctx.insert(""));
+        assert!(ctx.is_empty());
+    }
+
+    /// `adversarial_`: the tag count is capped — a flood cannot grow the set without
+    /// bound.
+    #[test]
+    fn adversarial_tag_count_is_capped() {
+        let mut ctx = PromptContext::new();
+        for i in 0..(MAX_PROMPT_TAGS + 50) {
+            ctx.insert(format!("t{i}"));
+        }
+        assert_eq!(ctx.len(), MAX_PROMPT_TAGS);
+    }
+
+    /// `adversarial_`: a tag carrying path/SQL metacharacters is stored verbatim and
+    /// only ever string-compared — it selects nothing unless a fragment declares the
+    /// exact same opaque string.
+    #[test]
+    fn adversarial_metachar_tag_is_opaque() {
+        let evil = "'; DROP TABLE prompts; --";
+        let ctx = PromptContext::new()
+            .with_tag(evil)
+            .with_tag("../../etc/passwd");
+        assert!(ctx.contains(evil));
+        assert!(ctx.covers([evil]));
+        assert!(!ctx.covers(["mode:review"]));
     }
 }

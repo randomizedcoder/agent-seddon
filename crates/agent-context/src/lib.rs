@@ -27,6 +27,11 @@ pub use mode_aware::{bench_mode_partition, ModeAwareWindow};
 // without pulling in the mode-aware compaction path.
 pub mod lens;
 
+// Situational system-prompt fragments selected by a `PromptContext`
+// (docs/design/prompts/). Feature-ungated for the same reason as `lens`: the runtime
+// injects the selected fragments regardless of which context strategy is active.
+pub mod system_fragments;
+
 #[cfg(any(feature = "context-sliding-window", feature = "context-summarizing"))]
 use agent_core::{ContextInput, Message};
 

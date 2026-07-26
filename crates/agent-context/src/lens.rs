@@ -13,6 +13,11 @@
 //! from a compiled default or an operator file, it is written by a human, never by
 //! the model or the repo under analysis. The summarizer *output* is still screened
 //! by the caller ([`crate::ModeAwareWindow`]) before it re-enters context.
+//!
+//! An override may be a single file (`lens/<mode>.md`, the shipped shape) or a
+//! **directory** of ordered fragments (`lens/<mode>/NNNN_*.md`), the same
+//! multi-fragment form the situational system prompts use (`docs/design/prompts/`);
+//! the directory form wins over the single file, which wins over the compiled default.
 
 use agent_core::TaskMode;
 use std::borrow::Cow;
@@ -100,16 +105,26 @@ impl LensPrompts {
         Self { lens_dir }
     }
 
-    /// The instruction for `mode`: a non-empty operator file if present, else the
-    /// compiled default. Best-effort — an unreadable/empty file falls back silently.
+    /// The instruction for `mode`, resolving in order: the **directory** form
+    /// `lens/<mode>/NNNN_*.md` (concatenated, `docs/design/prompts/`), else the
+    /// shipped **single-file** form `lens/<mode>.md`, else the compiled default.
+    /// Best-effort — an unreadable/empty file falls back silently.
     pub fn instruction(&self, mode: TaskMode) -> Cow<'static, str> {
         if let Some(dir) = &self.lens_dir {
-            let path = dir.join(format!("{}.md", mode.as_str()));
-            if let Ok(s) = std::fs::read_to_string(&path) {
-                let trimmed = s.trim();
-                if !trimmed.is_empty() {
-                    return Cow::Owned(trimmed.to_string());
+            // Directory form: multiple ordered fragments compose one instruction.
+            let mode_dir = dir.join(mode.as_str());
+            if mode_dir.is_dir() {
+                let mut parts = Vec::new();
+                crate::system_fragments::read_dir_fragments(&mode_dir, &mut parts);
+                if !parts.is_empty() {
+                    return Cow::Owned(parts.join("\n\n"));
                 }
+            }
+            // Single-file form (the shipped shape).
+            if let Some(s) =
+                crate::system_fragments::read_nonempty(&dir.join(format!("{}.md", mode.as_str())))
+            {
+                return Cow::Owned(s);
             }
         }
         Cow::Borrowed(builtin_instruction(mode))
@@ -176,5 +191,31 @@ mod tests {
     fn boundary_missing_dir_uses_defaults() {
         let lens = LensPrompts::new(Some("/nonexistent/prompts/xyz"));
         assert!(lens.instruction(TaskMode::Design).contains("DESIGN"));
+    }
+
+    // --- directory form: lens/<mode>/NNNN_*.md compose, and win over single-file
+    #[test]
+    fn positive_dir_form_composes_and_wins() {
+        let root = tempdir();
+        let review_dir = root.join("lens/review");
+        std::fs::create_dir_all(&review_dir).unwrap();
+        std::fs::write(review_dir.join("0001_a.md"), "FIRST\n").unwrap();
+        std::fs::write(review_dir.join("0002_b.md"), "SECOND\n").unwrap();
+        // A single-file form for the same mode must lose to the directory.
+        std::fs::write(root.join("lens/review.md"), "FROM-FILE\n").unwrap();
+        let lens = LensPrompts::new(Some(root.to_str().unwrap()));
+        assert_eq!(lens.instruction(TaskMode::Review), "FIRST\n\nSECOND");
+        // A mode with neither form still gets its compiled default.
+        assert!(lens.instruction(TaskMode::Debug).contains("DEBUGGING"));
+    }
+
+    // --- an empty directory form falls back to the single-file / default ----
+    #[test]
+    fn negative_empty_dir_form_falls_back_to_single_file() {
+        let root = tempdir();
+        std::fs::create_dir_all(root.join("lens/debug")).unwrap(); // dir exists, no fragments
+        std::fs::write(root.join("lens/debug.md"), "SINGLE DEBUG\n").unwrap();
+        let lens = LensPrompts::new(Some(root.to_str().unwrap()));
+        assert_eq!(lens.instruction(TaskMode::Debug), "SINGLE DEBUG");
     }
 }

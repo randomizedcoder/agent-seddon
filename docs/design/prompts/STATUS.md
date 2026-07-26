@@ -20,7 +20,7 @@ byte-identical to current behaviour when no fragments are present (so
 
 | # | Increment | Core | Context | Prompt seam | Runtime | Wire | Status |
 |---|---|:--:|:--:|:--:|:--:|:--:|:--:|
-| 01 | **Tag model + resolver** — `PromptContext`; `SystemFragments` resolver (`select(ctx)`, single-file + empty-default fallback); `LensPrompts` gains the dir form | ✅ | ✅ | — | — | — | **designed** |
+| 01 | **Tag model + resolver** — `PromptContext`; `SystemFragments` resolver (`select(ctx)`, single-file + empty-default fallback); `LensPrompts` gains the dir form | ✅ | ✅ | — | — | — | **in review** |
 | 02 | **File backend + management surface** — `PromptKind::SystemFragment`, `PromptEntry.tags`, `FilePromptStore` CRUD + directory/frontmatter tags (extend `skills.rs` parser), `PromptContext`-aware `preview_assembled` | ✅ | — | ✅ | — | ✅ (additive) | **designed** |
 | 03 | **Composition / runtime** — build the `mode:` context, inject/swap the volatile situational message at first-assembly + `record_mode_switch`; counter + span | — | — | — | ✅ | — | **designed** |
 | 04 | **Wire** — `PROMPT_KIND_SYSTEM_FRAGMENT=5`, `tags`, `PromptContext`, `Select`/preview-by-context (additive; no baseline bump) | — | — | ✅ | — | ✅ | **designed** |
@@ -62,6 +62,12 @@ independent increment:
 
 ## Notes / decisions of record
 
+- **As-built (01):** `SystemFragments::select` returns the **situational** fragments
+  only (`modes/<mode>/`) — *not* the untagged base. The base stays with
+  `agent_prompt::resolve_system_prompt` so it is never duplicated in the assembled
+  message; a multi-fragment base (`system/*`) is a later refinement of that startup
+  hook. This narrows the `01-layout.md` sketch (which described `select` reading base +
+  situational) to avoid a double-injected base.
 - **Base each PR off `main`** — do not stack (the lesson carried from the code-review
   and portal tracks).
 - **Opt-in, empty/compiled-default fallback** is load-bearing: no fragments ⇒ today's
