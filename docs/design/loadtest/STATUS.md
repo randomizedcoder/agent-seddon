@@ -150,11 +150,18 @@ One gated PR per increment, off `main`, checkpoint after each.
   transport, so it sheds identically — confirmed: cap 4 / conc 64 → 300 shed, 0 err on
   both tcp and uds for overload + saturation; 224 streams drain clean on both. The
   `loadtest-smoke` gate check drops its `--transport tcp` pin so both are exercised in
-  the gate. (The `loadtest-wire` ghz tier stays TCP-only for now — pointing ghz at the
-  `unix://` gateway socket is a small follow-up.)
-- **UDS beats TCP on streaming too.** Per-stream p99 was ~25× lower on UDS (≈1.6 ms vs
-  ≈41.8 ms) — the same TCP-loopback delayed-ack/Nagle tail the ramp first surfaced, now
-  visible on server-streams; UDS sidesteps it.
+  the gate.
+- **The `loadtest-wire` ghz tier also runs on both transports.** It brings up one
+  `agent --serve-all` per transport in turn (a single process binds one endpoint + one
+  `/metrics` port, so they can't share), driving each with ghz — grpcurl/ghz dial a UDS
+  via the `unix://<path>` scheme (grpcurl's `-unix` flag wants host:port and errors on a
+  bare path). `LOADTEST_WIRE_TRANSPORTS="tcp"` pins one. Verified: TCP ok=4975↔+4975 @
+  ~12.8k rps, 541 shed; UDS ok=4935↔+4935 @ **~24k rps** (avg 0.92 ms, p99 4.3 ms vs
+  TCP's 42 ms), 668 shed.
+- **UDS beats TCP across the board — on the real wire too.** The ~42 ms TCP-loopback
+  delayed-ack/Nagle tail the ramp first surfaced shows up everywhere: streaming p99 was
+  ~25× lower on UDS (≈1.6 ms vs ≈41.8 ms), and the ghz wire tier saw ~2× throughput +
+  a ~10× lower p99 on UDS. UDS sidesteps it entirely.
 
 ## Notes / decisions of record
 

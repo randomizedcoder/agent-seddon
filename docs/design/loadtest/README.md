@@ -73,4 +73,4 @@ compiling + behaving in `nix flake check`):
 |---|---|---|
 | `nix run .#loadtest` | in-process, wire seams | `--scenario {ramp,overload,saturation,streaming}` — hermetic hand-rolled clients over `spawn()` + testkit doubles; asserts the overload contract, reports ramp throughput, drives pool saturation + concurrent streams |
 | `nix run .#loadtest-loop` | in-process, full loop | N concurrent `agent.run()` on one real `Agent`; client latency vs the loop's own server-side metrics (`MetricsProbe`), no network |
-| `nix run .#loadtest-wire` | real wire | starts `agent --serve-all` and drives it with **`ghz`** via reflection; correlates ghz's client numbers with the scraped `/metrics` histogram, and bursts past the admission cap to see `RESOURCE_EXHAUSTED` on the wire |
+| `nix run .#loadtest-wire` | real wire (TCP + UDS) | starts `agent --serve-all` (once per transport) and drives it with **`ghz`** via reflection; correlates ghz's client numbers with the scraped `/metrics` histogram, and bursts past the admission cap to see `RESOURCE_EXHAUSTED` on the wire |
