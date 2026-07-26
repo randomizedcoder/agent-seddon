@@ -7,15 +7,18 @@ block.
 
 ## Tool pins
 
-`nixpkgs` is `nixos-unstable` (`flake.nix`), which carries `flutter`, `dart`, and
-`protoc-gen-dart`. In [`nix/versions.nix`](../../../nix/versions.nix) (the single
-source of truth for versions):
+`nixpkgs` carries `flutter`, `dart`, and `protoc-gen-dart`. In
+[`nix/versions.nix`](../../../nix/versions.nix) (the single source of truth):
 
-- add `flutter`, `dart` (a **desktop-Linux**-enabled Flutter),
-- add `protoc-gen-dart` (used by [`gen-dart`](02-dart-codegen.md)).
+- `protoc-gen-dart` — used by [`gen-dart`](02-dart-codegen.md) (small, cached binary),
+- `flutter` + `dart` — for the app (`nix run .#portal`, increment 06),
+- `envoyImage` — a **pinned docker image tag** for the grpc-web proxy (run as a
+  container, so the gate never source-builds envoy).
 
-Add them to `allDevPackages` in [`nix/packages.nix`](../../../nix/packages.nix) so
-`nix develop` has the SDK + plugin on `PATH`.
+**Deliberately NOT added to `allDevPackages`.** Flutter is a large toolchain;
+bloating the lean Rust dev shell with it (and envoy) is the wrong trade. The opt-in
+portal apps supply their tools lazily via `runtimeInputs`, so a Rust-only `nix
+develop` stays fast. (This corrects the earlier "add to allDevPackages" note.)
 
 ## Ports (`nix/constants.nix`)
 
@@ -28,11 +31,13 @@ Add three seam rows after `dimension` (50076) and one proxy port:
 | `prompt` | 50077 | `/tmp/agent-seddon/prompt.sock` | 9627 |
 | `session_stream` | 50078 | `/tmp/agent-seddon/session-stream.sock` | 9628 |
 | `metrics_proxy` | 50079 | `/tmp/agent-seddon/metrics-proxy.sock` | 9629 |
-| `grpc_web_proxy` | **8090** (HTTP/1.1 grpc-web) | — | — |
 
-The seam rows flow through `gen-constants` into `constants.rs` (and the Prometheus
-scrape config) like every other seam; the `grpc_web_proxy` port is UI-plumbing, read
-by the proxy app and the Flutter web `PortalConfig` default.
+The three seam rows (landed in increments 02–04) flow through `gen-constants` into
+`constants.rs` like every other seam. The **grpc-web proxy port (`8090`)** is *not* a
+seam — it is UI plumbing that would only clutter the seam table (which the
+`constants-sync` check renders verbatim), so it lives as a plain binding in
+[`nix/portal/default.nix`](../../../nix/portal/default.nix) instead, read by the
+proxy app and the Flutter web `PortalConfig` default.
 
 ## Run apps (`nix/portal/default.nix`, new)
 
@@ -40,25 +45,25 @@ Modelled on the existing docker-app / `writeShellApplication` pattern
 (`prometheus-up`, `grafana-up`, `buf-image`):
 
 ```sh
-nix run .#gen-dart        # regenerate Dart stubs (see 02)
-nix run .#portal          # build + launch the Flutter app
-nix run .#grpc-web-up     # OPTIONAL — web build only: grpc-web proxy in front of :50100
-nix run .#grpc-web-down
+nix run .#gen-dart        # regenerate the committed Dart stubs (see 02)
+nix run .#grpc-web-up     # OPTIONAL — web build only: envoy grpc-web proxy in front of :50100
+nix run .#grpc-web-down   # stop it
+nix run .#portal          # build + launch the Flutter app — increment 06
 ```
 
 ### The grpc-web proxy is web-only, and optional
 
 Browsers can't speak raw gRPC (HTTP/2 trailers), so the **web** build needs a
-grpc-web ↔ gRPC translator in front of the gateway. `grpc-web-up` runs a minimal
-`grpcwebproxy` (or Envoy) that:
+grpc-web ↔ gRPC translator in front of the gateway. `grpc-web-up` runs **envoy as a
+docker container** (the same docker-app pattern as `prometheus-up`/`clickstack-up`,
+so the gate never source-builds envoy) that:
 
-- listens on `:8090` (HTTP/1.1 + grpc-web),
-- forwards to the `--serve-all` gateway on `:50100`,
-- binds **loopback only** — no new trust boundary; it's a same-host protocol shim.
+- listens on `:8090` (HTTP/1.1 + grpc-web) with a CORS policy for browser preflight,
+- forwards to the `--serve-all` gateway on `:50100` over HTTP/2,
+- runs `--network host` (Linux), so it's reachable on host loopback.
 
 The **native desktop** build dials `:50100` directly and needs none of this — so the
-proxy is documented as an optional, web-only dependency, not part of the default run
-path.
+proxy is an optional, web-only dependency, not part of the default run path.
 
 ## Bringing it all up
 
