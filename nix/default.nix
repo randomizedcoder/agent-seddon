@@ -206,6 +206,9 @@ let
 
   # Agent Portal (docs/design/portal): Dart codegen + Flutter run + grpc-web proxy.
   portal = import ./portal { inherit pkgs lib versions; };
+
+  # Seam load / overload-conformance harness (docs/design/loadtest), opt-in.
+  loadtest = import ./loadtest.nix { inherit pkgs versions; };
 in
 {
   packages = {
@@ -305,6 +308,10 @@ in
     grpc-web-down = {
       type = "app";
       program = "${portal.grpc-web-down}/bin/grpc-web-down";
+    };
+    loadtest = {
+      type = "app";
+      program = "${loadtest}/bin/loadtest";
     };
   };
 

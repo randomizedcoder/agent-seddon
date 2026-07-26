@@ -42,6 +42,9 @@
       ;
   };
   leak = import ./leak.nix { inherit craneLib commonArgs cargoArtifacts; };
+  # Model-free smoke of the load/overload harness: it compiles, sheds
+  # RESOURCE_EXHAUSTED under overload, and the ramp path runs (no perf assertions).
+  loadtest-smoke = import ./loadtest-smoke.nix { inherit craneLib commonArgs cargoArtifacts; };
   nix-fmt = import ./nix-fmt.nix { inherit pkgs versions; };
   # `buf lint` + `buf breaking` over the .proto contracts (see buf.yaml). Breaking
   # is gated against the committed image; regenerate it with `nix run .#buf-image`.
