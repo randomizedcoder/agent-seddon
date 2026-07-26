@@ -211,6 +211,15 @@ let
   loadtest = import ./loadtest.nix { inherit pkgs versions; };
   # Full-loop concurrency probe (docs/design/loadtest inc 05), opt-in.
   loadtest-loop = import ./loadtest-loop.nix { inherit pkgs versions; };
+  # Real-wire ghz load + /metrics correlation (docs/design/loadtest inc 06), opt-in.
+  loadtest-wire = import ./loadtest-wire.nix {
+    inherit
+      pkgs
+      lib
+      versions
+      agent
+      ;
+  };
 in
 {
   packages = {
@@ -318,6 +327,10 @@ in
     loadtest-loop = {
       type = "app";
       program = "${loadtest-loop}/bin/loadtest-loop";
+    };
+    loadtest-wire = {
+      type = "app";
+      program = "${loadtest-wire}/bin/loadtest-wire";
     };
   };
 

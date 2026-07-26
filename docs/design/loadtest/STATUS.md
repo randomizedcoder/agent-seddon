@@ -11,8 +11,8 @@ One gated PR per increment, off `main`, checkpoint after each.
 | 02 | Pool saturation visible on the wire | ✅ | ✅ | — | **merged** (#134) |
 | 03 | Conformance harness core + per-seam ramp | — | ✅ | ✅ | **merged** (#135) |
 | 04 | Stress: pool saturation + streaming scenarios | — | ✅ | ✅ | **merged** (#136) |
-| 05 | Full-loop e2e concurrency | — | ✅ | ✅ | **in review** |
-| 06 | `ghz` wire load + `/metrics` correlation | — | ☐ | ☐ | pending |
+| 05 | Full-loop e2e concurrency | — | ✅ | ✅ | **merged** (#137) |
+| 06 | `ghz` wire load + `/metrics` correlation | — | ✅ | ✅ | **in review** |
 
 ## 01 — what shipped
 
@@ -114,6 +114,33 @@ One gated PR per increment, off `main`, checkpoint after each.
   (`agent_runs_total` delta < client oks) exits 2.
 - **Gate:** `loadtest-smoke` now also runs a tiny in-process loop (conc 4 / 20 runs),
   so the full-loop path + the metric correlation stay honest — still no perf assertion.
+
+## 06 — what shipped
+
+- **`nix/loadtest-wire.nix`** (opt-in `nix run .#loadtest-wire`): the real-wire tier.
+  Starts an actual `agent --serve-all` (light seams, `[metrics] enabled`, a small
+  `[grpc] max_in_flight` so overload is reachable), waits for `grpc.health.v1`, then
+  drives it with **`ghz`** over the network via **server reflection** — no `.proto`
+  needed. Model-free (memory over the file backend, tokenizer over approx are
+  CPU-only), so it runs anywhere the agent builds; not a check (needs a server +
+  socket, like `e2e-live`).
+- **Client-vs-server correlation across the wire.** ghz drives `agent.v1.Memory/Recall`;
+  the harness scrapes `:9700/metrics` and prints ghz's client numbers next to the
+  server's own `agent_memory_op_seconds_count{op="recall"}` delta for the same
+  requests. Verified: ghz ok=4960 @ ~12.3k rps ↔ server recorded **+4960** recalls
+  (exact). A tokenizer `Count` run adds a pure-throughput number (~15k rps).
+- **Overload on the real wire.** A burst at `c=200` against `cap=16` produced **347
+  `ResourceExhausted`** in ghz's status distribution — the admission layer sheds under
+  genuine network load, and the standard tool sees the standard gRPC signal.
+- **Contract:** server came up healthy or exit 1; scraped recall count must reflect
+  ghz's OKs and the overload burst must shed `RESOURCE_EXHAUSTED` or exit 2.
+- **Pins:** `ghz` in `nix/versions.nix` (not in the dev shell / any check); the app
+  also uses the already-pinned `grpcurl` (health probe) + `jq`/`curl`.
+- **Deferred (documented):** the admission layer's shed counter is an in-process
+  `AtomicU64` (read by the Rust `loadtest` example), **not** yet a Prometheus series,
+  so `agent_grpc_overload_shed_total` isn't on `/metrics` — the overload evidence here
+  is ghz's client-side `ResourceExhausted` count. Exposing that counter as a metric
+  (threading `Metrics` into `base_router`) is a clean, self-contained follow-up.
 
 ## Notes / decisions of record
 

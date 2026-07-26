@@ -55,6 +55,11 @@ in
   # checks. `grpcurl` is for manually poking gRPC servers once the transports land.
   protobuf = pkgs.protobuf;
   grpcurl = pkgs.grpcurl;
+  # `ghz` is the gRPC wire load generator for the opt-in `nix run .#loadtest-wire`
+  # app (docs/design/loadtest inc 06): drives a running `agent --serve-all` over the
+  # real wire via server reflection and reports throughput + p50/p99. Not in the dev
+  # shell or any check — the wire harness needs a running server + socket.
+  ghz = pkgs.ghz;
   # Go static-analysis toolchain for the code-review analyzer (increment 5). The
   # binaries are cached in /nix/store; the review flow shells out to them.
   go = pkgs.go_1_25 or pkgs.go;
