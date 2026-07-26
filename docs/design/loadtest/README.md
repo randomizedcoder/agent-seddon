@@ -63,3 +63,14 @@ Backpressure contract + fixes, **and** the full perf harness: per-seam
 throughput/latency ramp (TCP vs UDS), pool saturation, streaming concurrency,
 full-loop e2e, plus a `ghz` wire load against a real `--serve-all` with server-side
 `/metrics` correlation. Delivered across the increments in [`STATUS.md`](STATUS.md).
+
+## The opt-in apps
+
+Three harnesses, none gated (a model-free `loadtest-smoke` check keeps them
+compiling + behaving in `nix flake check`):
+
+| App | Tier | What it does |
+|---|---|---|
+| `nix run .#loadtest` | in-process, wire seams | `--scenario {ramp,overload,saturation,streaming}` — hermetic hand-rolled clients over `spawn()` + testkit doubles; asserts the overload contract, reports ramp throughput, drives pool saturation + concurrent streams |
+| `nix run .#loadtest-loop` | in-process, full loop | N concurrent `agent.run()` on one real `Agent`; client latency vs the loop's own server-side metrics (`MetricsProbe`), no network |
+| `nix run .#loadtest-wire` | real wire | starts `agent --serve-all` and drives it with **`ghz`** via reflection; correlates ghz's client numbers with the scraped `/metrics` histogram, and bursts past the admission cap to see `RESOURCE_EXHAUSTED` on the wire |
