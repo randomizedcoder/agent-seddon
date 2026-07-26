@@ -7,8 +7,8 @@ One gated PR per increment, off `main`, checkpoint after each.
 
 | # | Increment | Server fix | Tests | Nix | Status |
 |---|---|:--:|:--:|:--:|:--:|
-| 01 | Uniform admission layer + `RESOURCE_EXHAUSTED` mapping | ✅ | ✅ | — | **in review** |
-| 02 | Pool saturation visible on the wire (+ HTTP-date `Retry-After`) | ☐ | ☐ | — | pending |
+| 01 | Uniform admission layer + `RESOURCE_EXHAUSTED` mapping | ✅ | ✅ | — | **merged** (#133) |
+| 02 | Pool saturation visible on the wire | ✅ | ✅ | — | **in review** |
 | 03 | Conformance harness core + per-seam ramp | — | ☐ | ☐ | pending |
 | 04 | Stress: pool saturation + streaming scenarios | — | ☐ | ☐ | pending |
 | 05 | Full-loop e2e concurrency | — | ☐ | ☐ | pending |
@@ -34,6 +34,26 @@ One gated PR per increment, off `main`, checkpoint after each.
 - **Tests** (`agent-grpc/tests/admission.rs`): a flood past the cap sheds
   `RESOURCE_EXHAUSTED` + a pushback trailer (raw client, no retry); `cap = 0` never
   sheds. All 45 existing round-trips still pass under the generic `spawn`.
+
+## 02 — what shipped
+
+- **Pool saturation is now visible on the wire.** `LlmPoolService.Complete` returned a
+  fail-soft empty `OK` batch on saturation, so a remote client couldn't tell it was
+  overloaded. It now disambiguates via `health()`: an empty batch **with an alive,
+  saturated member** sheds with `RESOURCE_EXHAUSTED` + a `grpc-retry-pushback-ms` hint
+  (via the shared `overloaded_status` helper, extracted from the admission layer). A
+  genuinely empty/dead pool still returns the empty batch (not overload).
+- **No client change needed** — `GrpcLlmPool::complete_all` already routes through
+  `call_retry`, which retries `RESOURCE_EXHAUSTED` with bounded jittered backoff and
+  honors+clamps the pushback; a sustained shed still fails soft to an empty batch, but
+  now *after* backing off rather than hammering.
+- **Tests** (`agent-grpc/tests/pool_backpressure.rs`): a saturated pool → `RESOURCE_EXHAUSTED`
+  + pushback (raw client); an empty/dead pool → an empty `OK` batch (not overload).
+- **Deferred (documented):** teaching `parse_retry_after` the **HTTP-date** form was
+  scoped out — `agent-retry` is intentionally dep-free *and clock-free* (its own doc +
+  the `http_date → None` test say so), and the date form needs both a date lib and
+  `SystemTime::now()`; the fallback (jittered backoff) is already safe, so the cost
+  outweighs the value.
 
 ## Notes / decisions of record
 
