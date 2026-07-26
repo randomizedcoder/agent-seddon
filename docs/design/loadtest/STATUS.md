@@ -9,8 +9,8 @@ One gated PR per increment, off `main`, checkpoint after each.
 |---|---|:--:|:--:|:--:|:--:|
 | 01 | Uniform admission layer + `RESOURCE_EXHAUSTED` mapping | ✅ | ✅ | — | **merged** (#133) |
 | 02 | Pool saturation visible on the wire | ✅ | ✅ | — | **merged** (#134) |
-| 03 | Conformance harness core + per-seam ramp | — | ✅ | ✅ | **in review** |
-| 04 | Stress: pool saturation + streaming scenarios | — | ☐ | ☐ | pending |
+| 03 | Conformance harness core + per-seam ramp | — | ✅ | ✅ | **merged** (#135) |
+| 04 | Stress: pool saturation + streaming scenarios | — | ✅ | ✅ | **in review** |
 | 05 | Full-loop e2e concurrency | — | ☐ | ☐ | pending |
 | 06 | `ghz` wire load + `/metrics` correlation | — | ☐ | ☐ | pending |
 
@@ -72,6 +72,23 @@ One gated PR per increment, off `main`, checkpoint after each.
 - **Gate:** `nix/checks/loadtest-smoke.nix` — a tiny model-free overload+ramp run
   (`--require-shed`) asserting the harness compiles, sheds, and runs clean; **no perf
   numbers asserted**. `nix run .#loadtest` app registered.
+
+## 04 — what shipped
+
+- **`--scenario saturation`** — a self-contained `LoadPool` (tracks in-flight per
+  member, RAII slot + a slow "generation", returns an empty batch at capacity) driven
+  past its cap through the raw `LlmPoolService` client. Exercises the inc-02 wire
+  signal under **real concurrent load**: verified cap 4 / conc 64 → 300 shed
+  (`RESOURCE_EXHAUSTED`), 0 non-shed errors. No `agent-providers` dep needed (the real
+  `PoolProvider`'s saturation math is unit-tested in `pool.rs`; the harness proves the
+  *wire contract* under load).
+- **`--scenario streaming`** — M concurrent `Provider.Stream` server-streams
+  (`ScriptedProvider` chunked); each fully drained, a mid-stream error or stall is the
+  failure. Verified conc 32 → 224 streams drained, 0 errors — the producer never stalls.
+- **Gate:** `loadtest-smoke` now also runs tiny saturation (`--require-shed`) +
+  streaming micro-runs, so both stress paths are kept honest without perf assertions.
+- The contract check generalized: overload/saturation must shed only
+  `RESOURCE_EXHAUSTED`; streaming must not error (exit 2 on a violation).
 
 ## Notes / decisions of record
 
