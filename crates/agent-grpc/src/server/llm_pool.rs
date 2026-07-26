@@ -9,7 +9,12 @@ use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 use tracing::Instrument;
 
-use super::{missing, span};
+use super::{missing, overloaded_status, span};
+
+/// Retry hint (`grpc-retry-pushback-ms`) advertised when the pool sheds a fan-out
+/// because its members are saturated. The client clamps it; ~100 ms lets a busy
+/// member drain a slot without idling the caller.
+const POOL_SHED_PUSHBACK_MS: i64 = 100;
 
 pub struct LlmPoolServiceSvc {
     inner: Arc<dyn LlmPool>,
@@ -53,6 +58,24 @@ impl pb::llm_pool_service_server::LlmPoolService for LlmPoolServiceSvc {
             let results = inner
                 .complete_all(core_req, tier, req.fanout as usize)
                 .await;
+            // Make saturation visible on the wire. An empty batch is ambiguous —
+            // it can mean "everyone is at capacity" (overload → back off) or "no
+            // member could serve" (a down/misconfigured pool). `complete_all` is
+            // fail-soft (never errors), so we disambiguate via `health`: if the
+            // batch is empty *and* an alive member is saturated, shed with
+            // RESOURCE_EXHAUSTED + a pushback hint so the client backs off instead
+            // of seeing a silent empty `OK`. A genuinely empty/dead pool still
+            // returns the empty batch (not overload).
+            if results.is_empty() {
+                let health = inner.health().await;
+                let saturated = health.members.iter().any(|m| m.alive && m.saturated);
+                if saturated {
+                    return Err(overloaded_status(
+                        "pool saturated: all eligible members at capacity",
+                        POOL_SHED_PUSHBACK_MS,
+                    ));
+                }
+            }
             Ok(Response::new(pb::PoolCompleteResponse {
                 results: results.into_iter().map(Into::into).collect(),
             }))

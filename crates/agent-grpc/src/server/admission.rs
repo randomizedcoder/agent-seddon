@@ -107,12 +107,18 @@ where
     }
 }
 
-/// A `RESOURCE_EXHAUSTED` gRPC response carrying the pushback hint in its metadata,
-/// so the client backs off (and clamps) instead of failing fast.
-fn overloaded_response(pushback_ms: i64) -> http::Response<BoxBody> {
-    let mut status = tonic::Status::resource_exhausted("server overloaded");
+/// A `RESOURCE_EXHAUSTED` [`tonic::Status`] carrying the pushback hint in its
+/// metadata, so the client backs off (and clamps) instead of failing fast. Shared
+/// by the admission layer and by any handler that sheds internally (e.g. the pool).
+pub fn overloaded_status(message: &str, pushback_ms: i64) -> tonic::Status {
+    let mut status = tonic::Status::resource_exhausted(message.to_string());
     if let Ok(v) = tonic::metadata::MetadataValue::try_from(pushback_ms.to_string()) {
         status.metadata_mut().insert(PUSHBACK_KEY, v);
     }
-    status.into_http()
+    status
+}
+
+/// The shed as an HTTP response the tower layer returns directly.
+fn overloaded_response(pushback_ms: i64) -> http::Response<BoxBody> {
+    overloaded_status("server overloaded", pushback_ms).into_http()
 }
