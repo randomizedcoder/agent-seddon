@@ -4,8 +4,10 @@
 # harness compiling + running in `nix flake check` WITHOUT asserting any perf number
 # (throughput is machine-dependent — the perf gate stays iai-callgrind). It only
 # checks the harness's *behaviour*: a tiny overload run must shed with
-# RESOURCE_EXHAUSTED (and only that — a non-shed error exits 2), and the ramp path
-# runs clean. Fully hermetic (loopback + agent-testkit doubles, no model/network).
+# RESOURCE_EXHAUSTED (and only that — a non-shed error exits 2), pool saturation +
+# concurrent streaming run clean, the ramp path runs clean, and the in-process
+# full-loop concurrency probe correlates client vs server metrics without error.
+# Fully hermetic (loopback + agent-testkit doubles, no model/network).
 {
   craneLib,
   commonArgs,
@@ -31,6 +33,9 @@ craneLib.mkCargoDerivation (
       echo "loadtest-smoke: ramp path runs clean ..."
       cargo run --release -p agent-grpc --example loadtest -- \
         --scenario ramp --seams tokenizer,memory --concurrency 4 --requests 40 --transport uds
+      echo "loadtest-smoke: full-loop concurrency + metric correlation runs clean ..."
+      cargo run --release -p agent-runtime --example loadtest_loop -- \
+        --concurrency 4 --runs 20
     '';
     installPhaseCommand = "mkdir -p $out";
   }
