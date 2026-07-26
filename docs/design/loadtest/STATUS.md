@@ -10,8 +10,8 @@ One gated PR per increment, off `main`, checkpoint after each.
 | 01 | Uniform admission layer + `RESOURCE_EXHAUSTED` mapping | ✅ | ✅ | — | **merged** (#133) |
 | 02 | Pool saturation visible on the wire | ✅ | ✅ | — | **merged** (#134) |
 | 03 | Conformance harness core + per-seam ramp | — | ✅ | ✅ | **merged** (#135) |
-| 04 | Stress: pool saturation + streaming scenarios | — | ✅ | ✅ | **in review** |
-| 05 | Full-loop e2e concurrency | — | ☐ | ☐ | pending |
+| 04 | Stress: pool saturation + streaming scenarios | — | ✅ | ✅ | **merged** (#136) |
+| 05 | Full-loop e2e concurrency | — | ✅ | ✅ | **in review** |
 | 06 | `ghz` wire load + `/metrics` correlation | — | ☐ | ☐ | pending |
 
 ## 01 — what shipped
@@ -89,6 +89,31 @@ One gated PR per increment, off `main`, checkpoint after each.
   streaming micro-runs, so both stress paths are kept honest without perf assertions.
 - The contract check generalized: overload/saturation must shed only
   `RESOURCE_EXHAUSTED`; streaming must not error (exit 2 on a violation).
+
+## 05 — what shipped
+
+- **`crates/agent-runtime/examples/loadtest_loop.rs`** (opt-in `nix run .#loadtest-loop`):
+  drives the **whole agent loop** in-process under concurrency, not one seam over the
+  wire. Builds **one** production `Agent` (real `registry → builder → metered seams →
+  loop`, `auto-approve`, temp dirs) with a tool-capable scripted model, then fires **N
+  concurrent `agent.run()`**. Each `run` opens its own `Session`/`WorkingSet`, so the
+  runs are independent and the only shared mutable state is what a real deployment
+  shares — the memory store, the metrics registry, the seam `Arc`s.
+- **Client-vs-server correlation, no network.** Alongside client-side run latency
+  (p50/p99/p999/max) + throughput, it reads the loop's *own* instrumentation via
+  `agent_testkit::observe::MetricsProbe` (a snapshot diff over `Metrics`):
+  `agent_runs_total`, `agent_run_duration_seconds`, `agent_provider_request_seconds`.
+  Verified conc 16 / 256 runs → 0 err, ~5k runs/s, client p50 2.77 ms vs server mean
+  2.53 ms, and **exactly 2.0 provider calls/run** (tool turn + final) — the two-turn
+  loop genuinely iterated under load.
+- **Concurrency-safe model without a shared cursor.** The scripted turn is computed
+  from the *request* (answer once a tool observation is present, else ask to read the
+  seed file), so it's correct under any interleaving — a `ScriptedProvider`'s shared
+  `AtomicUsize` cursor would race across concurrent runs.
+- **Contract:** any run error exits 1; a client success the server didn't record
+  (`agent_runs_total` delta < client oks) exits 2.
+- **Gate:** `loadtest-smoke` now also runs a tiny in-process loop (conc 4 / 20 runs),
+  so the full-loop path + the metric correlation stay honest — still no perf assertion.
 
 ## Notes / decisions of record
 

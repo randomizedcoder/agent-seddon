@@ -209,6 +209,8 @@ let
 
   # Seam load / overload-conformance harness (docs/design/loadtest), opt-in.
   loadtest = import ./loadtest.nix { inherit pkgs versions; };
+  # Full-loop concurrency probe (docs/design/loadtest inc 05), opt-in.
+  loadtest-loop = import ./loadtest-loop.nix { inherit pkgs versions; };
 in
 {
   packages = {
@@ -312,6 +314,10 @@ in
     loadtest = {
       type = "app";
       program = "${loadtest}/bin/loadtest";
+    };
+    loadtest-loop = {
+      type = "app";
+      program = "${loadtest-loop}/bin/loadtest-loop";
     };
   };
 
