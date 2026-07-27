@@ -787,6 +787,7 @@ impl Agent {
             pending_context: Vec::new(),
             current_mode: agent_core::TaskMode::default(),
             switch_history: std::collections::VecDeque::new(),
+            pending_switch: None,
             situational_present: false,
         }
     }
@@ -825,6 +826,7 @@ impl Agent {
         budget: &TokenBudget,
         tool_ctx: &ToolContext,
         tool_schemas: &[ToolSchema],
+        pending_switch: &mut Option<(agent_core::TaskMode, agent_core::TaskMode)>,
     ) -> anyhow::Result<String> {
         let model = self.settings.model.as_str();
         for iter in 1..=self.settings.max_iterations {
@@ -1253,8 +1255,10 @@ impl Agent {
             // Keep the working set within budget before the next turn.
             let before = working.messages.len();
             let tokens_before = agent_context::bench_estimate_tokens(&working.messages);
+            // The armed switch (if any) is consumed on this first compact; later
+            // iterations pass `None` (an ordinary budget compaction).
             self.context
-                .compact(working, budget)
+                .compact(working, budget, pending_switch.take())
                 .instrument(tracing::info_span!("context.compact", iter))
                 .await?;
             if !self.hooks.is_empty() && before != working.messages.len() {
@@ -1528,6 +1532,11 @@ pub struct Session {
     current_mode: agent_core::TaskMode,
     /// Recent per-turn mode proposals (bounded), for the switch hysteresis.
     switch_history: std::collections::VecDeque<agent_core::TaskMode>,
+    /// A task-mode switch armed this turn, consumed by the next `compact` as a
+    /// mode-aware reshape (adaptive-cognition 02). Owned **here** rather than in the
+    /// shared context strategy, so concurrent sessions don't race over one armed
+    /// switch (docs/design/multi-session/03-hazards.md).
+    pending_switch: Option<(agent_core::TaskMode, agent_core::TaskMode)>,
     /// Whether a situational system-fragment message is currently present in
     /// `working.messages` (at index 1, right after the head). Tracked so a mode
     /// change can update or remove it (docs/design/prompts/02-composition.md).
@@ -1722,7 +1731,7 @@ impl Session {
     /// Record a decided mode switch: a metric, a span, and an episodic event (which
     /// the telemetry sink routes to ClickHouse `agent_events`). Mode-aware
     /// compaction and dimensional memory will hook here in later increments.
-    async fn record_mode_switch(&self, sw: &agent_core::ModeSwitch) {
+    async fn record_mode_switch(&mut self, sw: &agent_core::ModeSwitch) {
         tracing::info_span!(
             "mode.switch",
             from = sw.from.as_str(),
@@ -1741,11 +1750,12 @@ impl Session {
                 reason: sw.reason.clone(),
                 confidence: sw.confidence,
             });
-        // Arm the context strategy to reshape on the next compact through the new
-        // mode's lens (adaptive-cognition 02). A no-op for strategies that don't
-        // implement it (sliding/summarizing) — the default trait method. The
-        // `context.compact` span (in `run_loop`) then nests under `mode.switch`.
-        self.agent.context.on_mode_switch(sw.from, sw.to);
+        // Arm *this session's* pending switch; the next `compact` consumes it and
+        // reshapes through the new mode's lens (adaptive-cognition 02). Owning it on
+        // the session — not the shared strategy `Arc` — is what lets concurrent
+        // sessions each arm their own switch without racing
+        // (docs/design/multi-session/03-hazards.md).
+        self.pending_switch = Some((sw.from, sw.to));
         self.agent
             .record(
                 "mode_switch",
@@ -1939,6 +1949,7 @@ impl Session {
                 &self.budget,
                 &self.tool_ctx,
                 &self.tool_schemas,
+                &mut self.pending_switch,
             )
             .await;
         // Cheap per-turn dimensional summarize (adaptive-cognition 03): file "what
@@ -2056,9 +2067,11 @@ impl Session {
 
     /// Force a compaction pass on the working set now (e.g. a `/compact` command).
     pub async fn compact(&mut self) -> anyhow::Result<()> {
+        // A manual `/compact` consumes any armed switch too (usually none).
+        let switch = self.pending_switch.take();
         self.agent
             .context
-            .compact(&mut self.working, &self.budget)
+            .compact(&mut self.working, &self.budget, switch)
             .await?;
         Ok(())
     }

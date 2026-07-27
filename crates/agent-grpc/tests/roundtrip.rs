@@ -535,6 +535,7 @@ async fn context_assemble_and_compact(#[case] transport: Transport) {
                 max_context_tokens: 1000,
                 reserve_output: 100,
             },
+            None,
         )
         .await
         .unwrap();

@@ -69,21 +69,23 @@ impl pb::context_service_server::ContextService for ContextSvc {
                 .budget
                 .ok_or_else(|| missing("CompactRequest.budget"))?
                 .into();
-            if to_pb != pb::TaskMode::Unspecified && from != to {
-                inner.on_mode_switch(from, to);
-            }
+            let switch = if to_pb != pb::TaskMode::Unspecified && from != to {
+                Some((from, to))
+            } else {
+                None
+            };
             let before = rough_tokens(&working.messages);
             // A compaction never errors on a dead summarizer — it falls back
             // internally — so a real error here is a transport/decode fault.
-            inner
-                .compact(&mut working, &budget)
+            let action = inner
+                .compact(&mut working, &budget, switch)
                 .await
                 .map_err(|e| status_from_error(&e))?;
             let after = rough_tokens(&working.messages);
             let stats = pb::CompactStats {
                 kept_tokens: after,
                 shed_tokens: before.saturating_sub(after),
-                action: action_str(inner.last_compact_action()).to_string(),
+                action: action_str(action).to_string(),
             };
             Ok(Response::new(pb::CompactResponse {
                 working: Some(working.into()),

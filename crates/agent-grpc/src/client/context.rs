@@ -1,7 +1,5 @@
 //! The `ContextStrategy` seam over the wire.
 
-use std::sync::Mutex;
-
 use agent_core::{
     CompactAction, ContextInput, ContextStrategy, Message, Result, TaskMode, TokenBudget,
     WorkingSet,
@@ -16,12 +14,6 @@ use crate::transport::Endpoint;
 pub struct GrpcContext {
     client: pb::context_service_client::ContextServiceClient<Channel>,
     retry: agent_retry::RetryPolicy,
-    /// A switch armed by `on_mode_switch`, sent on the next `compact` as the
-    /// request's `from_mode`/`to_mode` (adaptive-cognition 02). Interior because
-    /// the seam methods take `&self`. Never held across an `.await`.
-    pending: Mutex<Option<(TaskMode, TaskMode)>>,
-    /// Last compaction's action, decoded from the server's `CompactStats`.
-    last_action: Mutex<CompactAction>,
 }
 
 impl GrpcContext {
@@ -32,8 +24,6 @@ impl GrpcContext {
         Ok(Self {
             client: pb::context_service_client::ContextServiceClient::new(channel),
             retry: grpc_retry_policy(),
-            pending: Mutex::new(None),
-            last_action: Mutex::new(CompactAction::Budget),
         })
     }
 }
@@ -57,9 +47,15 @@ impl ContextStrategy for GrpcContext {
             .map_err(|e: agent_proto::ConvertError| agent_core::Error::Provider(e.to_string()))
     }
 
-    async fn compact(&self, working: &mut WorkingSet, budget: &TokenBudget) -> Result<()> {
-        // Take the armed switch (if any) without holding the lock across the await.
-        let (from_mode, to_mode) = match self.pending.lock().expect("pending poisoned").take() {
+    async fn compact(
+        &self,
+        working: &mut WorkingSet,
+        budget: &TokenBudget,
+        switch: Option<(TaskMode, TaskMode)>,
+    ) -> Result<CompactAction> {
+        // The armed switch is a caller-owned parameter — send it as the request's
+        // `from_mode`/`to_mode` (adaptive-cognition 02).
+        let (from_mode, to_mode) = match switch {
             Some((f, t)) => (pb::TaskMode::from(f) as i32, pb::TaskMode::from(t) as i32),
             None => (
                 pb::TaskMode::Unspecified as i32,
@@ -80,25 +76,18 @@ impl ContextStrategy for GrpcContext {
         .await
         .map_err(|s| agent_core::Error::Provider(s.to_string()))?
         .into_inner();
-        if let Some(stats) = &resp.stats {
-            *self.last_action.lock().expect("last_action poisoned") =
-                action_from_str(&stats.action);
-        }
+        let action = resp
+            .stats
+            .as_ref()
+            .map(|s| action_from_str(&s.action))
+            .unwrap_or(CompactAction::Budget);
         let compacted = resp
             .working
             .ok_or_else(|| agent_core::Error::Provider("compact: missing working set".into()))?;
         *working = compacted
             .try_into()
             .map_err(|e: agent_proto::ConvertError| agent_core::Error::Provider(e.to_string()))?;
-        Ok(())
-    }
-
-    fn on_mode_switch(&self, from: TaskMode, to: TaskMode) {
-        *self.pending.lock().expect("pending poisoned") = Some((from, to));
-    }
-
-    fn last_compact_action(&self) -> CompactAction {
-        *self.last_action.lock().expect("last_action poisoned")
+        Ok(action)
     }
 }
 

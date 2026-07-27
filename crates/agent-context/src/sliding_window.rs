@@ -7,7 +7,8 @@
 
 use crate::{assemble_messages, estimate_tokens};
 use agent_core::{
-    ContextInput, ContextStrategy, Message, Result, Role, TokenBudget, Tokenizer, WorkingSet,
+    CompactAction, ContextInput, ContextStrategy, Message, Result, Role, TaskMode, TokenBudget,
+    Tokenizer, WorkingSet,
 };
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -59,7 +60,12 @@ impl ContextStrategy for SlidingWindow {
         Ok(assemble_messages(input))
     }
 
-    async fn compact(&self, working: &mut WorkingSet, budget: &TokenBudget) -> Result<()> {
+    async fn compact(
+        &self,
+        working: &mut WorkingSet,
+        budget: &TokenBudget,
+        _switch: Option<(TaskMode, TaskMode)>,
+    ) -> Result<CompactAction> {
         let target = budget
             .max_context_tokens
             .saturating_sub(budget.reserve_output);
@@ -89,7 +95,7 @@ impl ContextStrategy for SlidingWindow {
 
         let final_tokens = self.budget_tokens(&working.messages).await;
         tracing::debug!(tokens = final_tokens, target, "compacted working set");
-        Ok(())
+        Ok(CompactAction::Budget)
     }
 }
 
@@ -167,7 +173,7 @@ mod tests {
             reserve_output: 100,
         }; // target 300
         SlidingWindow::heuristic()
-            .compact(&mut w, &budget)
+            .compact(&mut w, &budget, None)
             .await
             .unwrap();
         assert!(estimate_tokens(&w.messages) <= 300, "still over target");
@@ -185,7 +191,7 @@ mod tests {
             reserve_output: 1000,
         };
         SlidingWindow::heuristic()
-            .compact(&mut w, &budget)
+            .compact(&mut w, &budget, None)
             .await
             .unwrap();
         assert_eq!(w.messages.len(), 2);
@@ -206,7 +212,7 @@ mod tests {
             reserve_output: 0,
         };
         SlidingWindow::heuristic()
-            .compact(&mut w, &budget)
+            .compact(&mut w, &budget, None)
             .await
             .unwrap();
         assert!(w.messages.len() >= 2);
@@ -239,7 +245,7 @@ mod tests {
         // Heuristic thinks we're under budget → no-op.
         let mut w_heur = msgs();
         SlidingWindow::heuristic()
-            .compact(&mut w_heur, &budget)
+            .compact(&mut w_heur, &budget, None)
             .await
             .unwrap();
         assert_eq!(
@@ -251,7 +257,7 @@ mod tests {
         // The real tokenizer knows we're over → it drops a turn.
         let mut w_tok = msgs();
         SlidingWindow::new(Some(Arc::new(FixedVocabTokenizer)), "fixed")
-            .compact(&mut w_tok, &budget)
+            .compact(&mut w_tok, &budget, None)
             .await
             .unwrap();
         assert!(
@@ -281,14 +287,14 @@ mod tests {
 
         let mut w_heur = msgs();
         SlidingWindow::heuristic()
-            .compact(&mut w_heur, &budget)
+            .compact(&mut w_heur, &budget, None)
             .await
             .unwrap();
         assert!(w_heur.messages.len() < 3, "heuristic over-counts and trims");
 
         let mut w_tok = msgs();
         SlidingWindow::new(Some(Arc::new(FixedVocabTokenizer)), "fixed")
-            .compact(&mut w_tok, &budget)
+            .compact(&mut w_tok, &budget, None)
             .await
             .unwrap();
         assert_eq!(
@@ -314,7 +320,7 @@ mod tests {
             reserve_output: 0,
         };
         SlidingWindow::heuristic()
-            .compact(&mut w, &budget)
+            .compact(&mut w, &budget, None)
             .await
             .unwrap();
         assert_eq!(w.messages[0].role, Role::System);

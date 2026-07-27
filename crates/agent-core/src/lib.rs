@@ -2647,21 +2647,22 @@ pub trait ContextStrategy: Send + Sync {
     async fn assemble(&self, input: ContextInput) -> Result<Vec<Message>>;
     /// Compact when over budget. Must be non-destructive w.r.t. episodic memory
     /// (it only trims the working set).
-    async fn compact(&self, working: &mut WorkingSet, budget: &TokenBudget) -> Result<()>;
-
-    /// Optional capability (adaptive-cognition 02): a task-mode switch fired, so
-    /// arm the *next* `compact` as a mode-aware reshape through the destination
-    /// mode's lens. Default no-op — `SlidingWindow`/`SummarizingWindow` behave
-    /// exactly as before; decorators (`MeteredContext`, `GrpcContext`) forward it.
-    /// A separate downcast trait can't reach the inner strategy through the
-    /// decorator chain, so this rides the seam as a default method instead.
-    fn on_mode_switch(&self, _from: TaskMode, _to: TaskMode) {}
-
-    /// How the most recent `compact` behaved, for telemetry. Default `Budget`;
-    /// `ModeAwareWindow` overrides it so a switch reshape / fallback is labelled.
-    fn last_compact_action(&self) -> CompactAction {
-        CompactAction::Budget
-    }
+    ///
+    /// `switch` carries an armed task-mode switch `(from, to)` for *this* compaction
+    /// (adaptive-cognition 02): when `Some`, a mode-aware strategy reshapes the
+    /// demoted middle through the destination mode's lens instead of the ordinary
+    /// budget trim; `None` is an ordinary budget-triggered compaction. Stateless
+    /// strategies ignore it. Returns how the compaction behaved, for telemetry.
+    ///
+    /// The switch is a **parameter**, not strategy state: the caller (a `Session`)
+    /// owns the armed switch, so one shared strategy `Arc` serves many concurrent
+    /// sessions without racing (docs/design/multi-session/03-hazards.md).
+    async fn compact(
+        &self,
+        working: &mut WorkingSet,
+        budget: &TokenBudget,
+        switch: Option<(TaskMode, TaskMode)>,
+    ) -> Result<CompactAction>;
 }
 
 // ---------------------------------------------------------------------------

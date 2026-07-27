@@ -10,8 +10,8 @@
 
 use crate::{assemble_messages, estimate_tokens};
 use agent_core::{
-    CompletionRequest, ContextInput, ContextStrategy, LlmProvider, Message, Result, Role,
-    TokenBudget, Tokenizer, WorkingSet,
+    CompactAction, CompletionRequest, ContextInput, ContextStrategy, LlmProvider, Message, Result,
+    Role, TaskMode, TokenBudget, Tokenizer, WorkingSet,
 };
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -69,12 +69,18 @@ impl ContextStrategy for SummarizingWindow {
         Ok(assemble_messages(input))
     }
 
-    async fn compact(&self, working: &mut WorkingSet, budget: &TokenBudget) -> Result<()> {
+    async fn compact(
+        &self,
+        working: &mut WorkingSet,
+        budget: &TokenBudget,
+        _switch: Option<(TaskMode, TaskMode)>,
+    ) -> Result<CompactAction> {
+        // Mode-agnostic: this strategy only ever does a budget-triggered trim.
         let target = budget
             .max_context_tokens
             .saturating_sub(budget.reserve_output);
         if self.budget_tokens(&working.messages).await <= target {
-            return Ok(());
+            return Ok(CompactAction::Budget);
         }
 
         let msgs = &working.messages;
@@ -84,7 +90,7 @@ impl ContextStrategy for SummarizingWindow {
         // Nothing meaningful to summarize → fall back to truncation.
         if cut <= head {
             drop_oldest(working, target);
-            return Ok(());
+            return Ok(CompactAction::Budget);
         }
 
         let to_summarize = &msgs[head..cut];
@@ -106,7 +112,7 @@ impl ContextStrategy for SummarizingWindow {
                 drop_oldest(working, target);
             }
         }
-        Ok(())
+        Ok(CompactAction::Budget)
     }
 }
 
@@ -329,7 +335,7 @@ mod tests {
             max_context_tokens: 500,
             reserve_output: 100,
         };
-        strat.compact(&mut working, &budget).await.unwrap();
+        strat.compact(&mut working, &budget, None).await.unwrap();
 
         // Head system preserved; a summary system message inserted right after.
         assert_eq!(working.messages[0].role, Role::System);
@@ -351,7 +357,7 @@ mod tests {
             max_context_tokens: 100_000,
             reserve_output: 1000,
         };
-        strat.compact(&mut working, &budget).await.unwrap();
+        strat.compact(&mut working, &budget, None).await.unwrap();
         assert_eq!(working.messages.len(), 2); // untouched
     }
 
@@ -388,7 +394,7 @@ mod tests {
             max_context_tokens: 500,
             reserve_output: 100,
         }; // target 400
-        strat.compact(&mut working, &budget).await.unwrap();
+        strat.compact(&mut working, &budget, None).await.unwrap();
         // No summary inserted; fell back to dropping oldest, under target, head kept.
         assert!(!working
             .messages
@@ -414,7 +420,7 @@ mod tests {
             max_context_tokens: 300,
             reserve_output: 50,
         }; // target 250
-        strat.compact(&mut working, &budget).await.unwrap();
+        strat.compact(&mut working, &budget, None).await.unwrap();
         assert!(!working
             .messages
             .iter()
@@ -438,7 +444,7 @@ mod tests {
             max_context_tokens: 300,
             reserve_output: 50,
         };
-        strat.compact(&mut working, &budget).await.unwrap();
+        strat.compact(&mut working, &budget, None).await.unwrap();
         // Whatever the kept set, no tool result is the first non-system message.
         let first_non_sys = working.messages.iter().find(|m| m.role != Role::System);
         assert!(
