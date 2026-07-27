@@ -116,7 +116,7 @@ impl Tool for DelegateTool {
             settings.system_prompt
         );
 
-        let child = Agent::new(
+        let child = Arc::new(Agent::new(
             self.ctx.provider.clone(),
             child_tools,
             self.ctx.memory.clone(),
@@ -124,7 +124,7 @@ impl Tool for DelegateTool {
             self.ctx.policy.clone(),
             self.ctx.metrics.clone(),
             settings,
-        );
+        ));
 
         tracing::info!(depth = self.depth + 1, goal, "delegating sub-task");
         let span = tracing::info_span!("agent.delegate", depth = self.depth + 1);
@@ -207,7 +207,7 @@ mod tests {
         let mut parent_tools = ToolRegistry::new();
         parent_tools.register(Arc::new(DelegateTool::root(ctx)));
 
-        let parent = Agent::new(
+        let parent = Arc::new(Agent::new(
             provider.clone(),
             parent_tools,
             memory,
@@ -215,7 +215,7 @@ mod tests {
             policy,
             Metrics::new(),
             settings(),
-        );
+        ));
 
         // parent delegates -> child returns "child-done" -> parent returns
         // "parent-done" (only reachable if the child loop actually ran).

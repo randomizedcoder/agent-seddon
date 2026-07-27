@@ -58,11 +58,17 @@ fn config_toml_iters(dir: &Path, max_iterations: usize) -> String {
 }
 
 /// Build the agent from a scripted turn sequence, on working dir `dir`.
-async fn agent_for(dir: &Path, script: Vec<CompletionResponse>) -> agent_runtime::Agent {
+async fn agent_for(
+    dir: &Path,
+    script: Vec<CompletionResponse>,
+) -> std::sync::Arc<agent_runtime::Agent> {
     agent_for_cfg(&config_toml(dir), script).await
 }
 
-async fn agent_for_cfg(cfg_toml: &str, script: Vec<CompletionResponse>) -> agent_runtime::Agent {
+async fn agent_for_cfg(
+    cfg_toml: &str,
+    script: Vec<CompletionResponse>,
+) -> std::sync::Arc<agent_runtime::Agent> {
     let cfg = parse_config(cfg_toml).expect("parse config");
     let mut registry = Registry::new();
     register_builtins(&mut registry);
@@ -433,10 +439,21 @@ async fn agent_with_hook(
     dir: &Path,
     script: Vec<CompletionResponse>,
     hook: std::sync::Arc<dyn agent_core::Hook>,
-) -> agent_runtime::Agent {
+) -> std::sync::Arc<agent_runtime::Agent> {
     let mut hooks = agent_core::HookRegistry::new();
     hooks.register(hook);
-    agent_for(dir, script).await.with_hooks(hooks)
+    with_hooks_arc(agent_for(dir, script).await, hooks)
+}
+
+/// Apply `hooks` to a freshly-built agent. The backend is `Arc`-shared post-build now
+/// (multi-session), so unwrap the unique `Arc` to add hooks, then re-share.
+fn with_hooks_arc(
+    agent: std::sync::Arc<agent_runtime::Agent>,
+    hooks: agent_core::HookRegistry,
+) -> std::sync::Arc<agent_runtime::Agent> {
+    let agent = std::sync::Arc::try_unwrap(agent)
+        .unwrap_or_else(|_| panic!("freshly built agent must be uniquely owned"));
+    std::sync::Arc::new(agent.with_hooks(hooks))
 }
 
 /// All five attachment points fire, in loop order.
@@ -531,7 +548,7 @@ async fn hook_cannot_widen_a_policy_denial() {
         events: events.clone(),
         veto_tool: None, // this hook would allow it
     }));
-    let agent = agent_for_cfg(&cfg, script).await.with_hooks(hooks);
+    let agent = with_hooks_arc(agent_for_cfg(&cfg, script).await, hooks);
     agent.run("go").await.expect("run");
 
     assert!(!dir.join("nope.txt").exists(), "policy denial must stand");

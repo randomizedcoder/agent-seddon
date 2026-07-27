@@ -13,12 +13,13 @@
 
 use agent_runtime::Agent;
 use serde_json::{json, Value};
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
 
 /// Serve until stdin closes. Each request is handled sequentially.
-pub async fn serve(agent: &Agent) -> anyhow::Result<()> {
+pub async fn serve(agent: &Arc<Agent>) -> anyhow::Result<()> {
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut stdout = tokio::io::stdout();
     tracing::info!("mcp server ready on stdio (tool: `run`)");
@@ -81,7 +82,7 @@ fn run_tool_schema() -> Value {
     })
 }
 
-async fn handle_call(agent: &Agent, id: Value, msg: &Value) -> Value {
+async fn handle_call(agent: &Arc<Agent>, id: Value, msg: &Value) -> Value {
     let params = msg.get("params");
     let name = params
         .and_then(|p| p.get("name"))

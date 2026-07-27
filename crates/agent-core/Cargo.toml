@@ -11,9 +11,11 @@ serde_json.workspace = true
 thiserror.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
+# For the `AGENT_IDENTITY` task-local carrier (multi-session identity propagation);
+# `task_local!` / `TaskLocalFuture` need no runtime feature.
+tokio = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true }
 rstest.workspace = true
 iai-callgrind.workspace = true
 

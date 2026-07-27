@@ -98,7 +98,7 @@ fn config_toml(dir: &Path) -> String {
 /// Build one production `Agent` on a fresh temp dir with the tool-capable scripted
 /// model. Returns the agent and the working-dir path (a leaked temp dir, as testkit's
 /// `tempdir()` gives — fine for an opt-in harness).
-async fn build(metrics: Metrics) -> (Agent, PathBuf) {
+async fn build(metrics: Metrics) -> (std::sync::Arc<Agent>, PathBuf) {
     let dir = tempdir();
     // Seed the file the loop's tool turn reads (concurrent reads are fine).
     std::fs::create_dir_all(dir.join(".agent")).expect("mkdir .agent");

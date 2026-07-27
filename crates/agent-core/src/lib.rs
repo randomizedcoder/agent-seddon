@@ -1313,6 +1313,34 @@ impl SessionKey {
     }
 }
 
+tokio::task_local! {
+    /// The ambient `(user, session)` identity of the task currently running — set by
+    /// the runtime around a session's turn and by a gRPC server around a handler, so
+    /// downstream `= "grpc"` seam calls can carry it in their metadata. Unset outside
+    /// a scope (e.g. a direct-dialed client in a test), in which case no identity is
+    /// injected and behaviour is exactly as before multi-session.
+    /// See docs/design/multi-session/01-identity.md.
+    pub static AGENT_IDENTITY: SessionKey;
+}
+
+/// The current ambient identity, or `None` when no scope is active.
+pub fn current_identity() -> Option<SessionKey> {
+    AGENT_IDENTITY.try_with(|id| id.clone()).ok()
+}
+
+/// Run `fut` with `identity` as the ambient identity (see [`AGENT_IDENTITY`]). Nested
+/// scopes shadow; a spawned task does *not* inherit the scope (deliberate — a gRPC
+/// server handler task must use its *caller's* identity, not the server's).
+pub fn scope<F>(
+    identity: SessionKey,
+    fut: F,
+) -> tokio::task::futures::TaskLocalFuture<SessionKey, F>
+where
+    F: std::future::Future,
+{
+    AGENT_IDENTITY.scope(identity, fut)
+}
+
 // ---------------------------------------------------------------------------
 // Seam: TaskTracker (structured, inspectable agent plan)
 // ---------------------------------------------------------------------------
@@ -5084,5 +5112,17 @@ mod tests {
             session: SessionId::new("../../root/.ssh"),
         };
         assert!(evil2.path_under(root).is_err());
+    }
+
+    #[tokio::test]
+    async fn positive_identity_scope_sets_and_clears() {
+        assert!(current_identity().is_none());
+        scope(SessionKey::local("sess-1"), async {
+            let got = current_identity().expect("in scope");
+            assert_eq!(got.session.as_str(), "sess-1");
+            assert_eq!(got.user.as_str(), UserId::LOCAL);
+        })
+        .await;
+        assert!(current_identity().is_none());
     }
 }

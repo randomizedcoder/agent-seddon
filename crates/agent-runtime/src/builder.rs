@@ -30,7 +30,7 @@ pub async fn build_agent(
     telemetry: Option<TelemetryHandle>,
     session_id: String,
     metrics: Metrics,
-) -> anyhow::Result<Agent> {
+) -> anyhow::Result<Arc<Agent>> {
     let registry = Registry::with_builtins();
     build_agent_with(&registry, cfg, telemetry, session_id, metrics).await
 }
@@ -44,7 +44,7 @@ pub async fn build_agent_with(
     telemetry: Option<TelemetryHandle>,
     session_id: String,
     metrics: Metrics,
-) -> anyhow::Result<Agent> {
+) -> anyhow::Result<Arc<Agent>> {
     // Wrap the provider in its metrics decorator up front, so every downstream
     // user (the loop, the summarizing context strategy, distillation) is
     // attributed the same way — including a remote `= "grpc"` client.
@@ -1091,7 +1091,9 @@ pub async fn build_agent_with(
             cfg.reference.budget_tokens,
         )
     };
-    Ok(agent)
+    // Share the built backend behind an `Arc` so many `Session`s can own it
+    // concurrently (docs/design/multi-session/02-runtime-split.md).
+    Ok(Arc::new(agent))
 }
 
 /// Resolve the enabled tools through the registry. Empty `[tools] enabled` means

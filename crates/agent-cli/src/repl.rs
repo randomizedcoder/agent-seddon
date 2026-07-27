@@ -11,6 +11,7 @@ use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::Path;
+use std::sync::Arc;
 
 /// A line source: rustyline in a terminal (arrow-key history + editing), or plain
 /// stdin when input is piped (so `printf … | agent` still works).
@@ -75,7 +76,7 @@ impl Input {
 /// Run the REPL until EOF or `/quit`. `initial` optionally seeds the session with
 /// a resumed transcript (its id + messages).
 pub async fn run(
-    agent: &Agent,
+    agent: &Arc<Agent>,
     sessions_dir: &Path,
     initial: Option<(String, Vec<Message>)>,
 ) -> anyhow::Result<()> {
@@ -147,10 +148,10 @@ enum Flow {
     Quit,
 }
 
-async fn handle_command<'a>(
+async fn handle_command(
     cmd: &str,
-    agent: &'a Agent,
-    session: &mut Session<'a>,
+    agent: &Arc<Agent>,
+    session: &mut Session,
     id: &mut String,
     sessions_dir: &Path,
     input: &mut Input,
@@ -214,9 +215,9 @@ async fn handle_command<'a>(
 }
 
 /// List saved sessions and load the one the user picks by index.
-fn resume_picker<'a>(
-    agent: &'a Agent,
-    session: &mut Session<'a>,
+fn resume_picker(
+    agent: &Arc<Agent>,
+    session: &mut Session,
     id: &mut String,
     sessions_dir: &Path,
     input: &mut Input,
@@ -280,7 +281,7 @@ fn list_skills() {
 }
 
 /// Load a skill's body into the session context (`/skill:<name>`).
-fn load_skill(session: &mut Session<'_>, name: &str) {
+fn load_skill(session: &mut Session, name: &str) {
     let dirs = skills::default_dirs();
     match skills::find(&dirs, name) {
         Some(info) => match skills::load_body(&info.path) {

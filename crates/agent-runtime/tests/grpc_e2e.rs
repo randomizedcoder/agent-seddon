@@ -159,7 +159,7 @@ fn config(
 async fn agent_with(
     cfg_toml: &str,
     script: Vec<CompletionResponse>,
-) -> anyhow::Result<agent_runtime::Agent> {
+) -> anyhow::Result<std::sync::Arc<agent_runtime::Agent>> {
     let cfg = parse_config(cfg_toml).expect("parse config");
     let mut registry = Registry::new();
     register_builtins(&mut registry);

@@ -8,8 +8,8 @@ design docs, this file records the refinement (the design docs stay the rational
 | # | Increment | Design doc | State |
 |---|---|---|---|
 | 00 | Design docs | this directory | **written** (pre-implementation) |
-| 01 | Identity foundations (`SessionKey`/`safe_segment`, metadata keys, task-local, inject/extract, span attrs) | [`01-identity.md`](01-identity.md) | **in PR** (`feat/multi-session-01-identity`) |
-| 02 | `Backend`/`Session`/`SessionManager` split; per-session cwd | [`02-runtime-split.md`](02-runtime-split.md) | pending |
+| 01 | Identity foundations (`SessionKey`/`safe_segment`, metadata keys, task-local, inject/extract, span attrs) | [`01-identity.md`](01-identity.md) | **merged** (#151) |
+| 02 | `Backend`/`Session`/`SessionManager` split; per-session cwd | [`02-runtime-split.md`](02-runtime-split.md) | **in PR** (`feat/multi-session-02-runtime-split`) |
 | 03 | Fix hazards: stateless `ContextStrategy::compact(switch)`; `SessionEventsRegistry` + selector | [`03-hazards.md`](03-hazards.md) | pending |
 | 04 | Per-user memory/dimension tenancy; stateful-seam keying; confined cwd/root | [`04-tenancy.md`](04-tenancy.md) | pending |
 | 05 | `SessionRegistry` lifecycle (server-mint, idle-GC) | [`05-lifecycle.md`](05-lifecycle.md) | pending |
@@ -34,6 +34,22 @@ design docs, this file records the refinement (the design docs stay the rational
   (`Arc<tokio::Mutex<Session>>` per key); single-session path zero-overhead.
 
 ## Refinements (authoritative over the design docs)
+
+- **Increment 02 shape.** `Session` now **owns `Arc<Agent>`** (field still named `agent`,
+  so the loop's `self.agent.<seam>` calls are unchanged via `Deref`) and carries its
+  `SessionKey`; `Session` dropped its `<'a>` lifetime. A `SessionManager`
+  (`HashMap<SessionKey, Arc<tokio::Mutex<Session>>>`) owns the map. **`Agent` plays the
+  `Backend` role directly** — the cosmetic rename to a separate `Backend` type is
+  deferred; the ownership split (not the rename) is what delivers concurrent sessions.
+  `Agent::run`/`session` take `self: &Arc<Self>`; **`build_agent`/`build_agent_with`
+  now return `Arc<Agent>`** (a public API change). The identity **carrier**
+  (`AGENT_IDENTITY` task-local + `scope`/`current_identity`) **moved to `agent-core`**
+  (which gained a `tokio` dep) from `agent-grpc`, because `agent-grpc` is an optional
+  dep of `agent-runtime` and the loop's `Session::send` must scope identity
+  unconditionally; `agent-proto::identity` (the wire keys) is unchanged.
+  `Session::send` scopes the turn's identity and stamps `session_id`/`user_id` on the
+  `agent.turn` span. **Per-user cwd namespacing is deferred to increment 04** (it pairs
+  with the memory/dimension rooting); 02 keeps the single process `working_dir`.
 
 - **Increment 01 scope.** The identity *mechanism* landed: `SessionKey`/`UserId`/
   `SessionId`/`safe_segment` in `agent-core`; `agent-proto::identity` metadata keys +

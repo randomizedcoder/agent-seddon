@@ -20,7 +20,7 @@ pub mod structured;
 #[cfg(feature = "subagents")]
 mod subagent;
 
-pub use agent::{Agent, Session, Settings};
+pub use agent::{Agent, Session, SessionManager, Settings};
 pub use agent_metrics::Metrics;
 pub use builder::{build_agent, build_agent_with};
 pub use config::Config;
