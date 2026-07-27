@@ -1,9 +1,10 @@
 # Prompt Library — implementation status
 
 The living tracker for the [Prompt Library](README.md) design. **Increments 01
-(`647add8`), 03 (PR #145), 02 (PR #146) and 04 (PR #147) are merged**; **increment 05
-(`sqlite` backend) is coded and in review**; 06 is pre-implementation. Where the shipped
-code refines a design detail, this file becomes authoritative (the same convention as
+(`647add8`), 03 (PR #145), 02 (PR #146), 04 (PR #147) and 05 (`48b0cc4`, PR #148) are
+merged**; **increment 06 (example content) is coded and in review** — the final
+increment, so the track is feature-complete once it lands. Where the shipped code
+refines a design detail, this file becomes authoritative (the same convention as
 [`../portal/STATUS.md`](../portal/STATUS.md) and
 [`../adaptive-cognition/STATUS.md`](../adaptive-cognition/STATUS.md)).
 
@@ -25,8 +26,8 @@ byte-identical to current behaviour when no fragments are present (so
 | 02 | **File backend + management surface** — `PromptKind::SystemFragment`, `PromptEntry.tags`, `FilePromptStore` CRUD + directory/frontmatter tags, `mode`-context `preview_assembled`; additive wire (`PROMPT_KIND_SYSTEM_FRAGMENT=5` + `PromptEntry.tags=7`) | ✅ | — | ✅ | — | ✅ (additive) | **merged** |
 | 03 | **Composition / runtime** — build the `mode:` context, inject/swap the volatile situational message at first-assembly + `record_mode_switch`; `agent_prompt_fragments_selected_total{mode,action}` counter | — | — | — | ✅ | — | **merged** |
 | 04 | **Wire** — `PromptContext` message + `Select(PromptContext)` / preview-by-context (the enum value + `PromptEntry.tags` already landed additively in 02; no baseline bump) | ✅ | — | ✅ | — | ✅ | **merged** |
-| 05 | **`sqlite` backend** — `[prompts] backend` + `db_path`; `SqlitePromptStore` (feature `prompt-sqlite`, first DB dep); backend `match` in `builder.rs`; the `file↔sqlite` bridge (`migrate`) | — | — | ✅ | ✅ | — | **in review** |
-| 06 | **Content** — ship the example fragments (`prompts/modes.example/…`) + `prompts/README.md`; component-doc update | — | — | — | — | — | **designed** |
+| 05 | **`sqlite` backend** — `[prompts] backend` + `db_path`; `SqlitePromptStore` (feature `prompt-sqlite`, first DB dep); backend `match` in `builder.rs`; the `file↔sqlite` bridge (`migrate`) | — | — | ✅ | ✅ | — | **merged** |
+| 06 | **Content** — ship the example fragments (`prompts/modes.example/…` + `system.example/`) + `prompts/README.md`; component-doc pointer | — | — | — | — | — | **in review** |
 
 **Build order rationale:** 01 is the pure, testable resolver + tag model (no wire, no
 loop, no backend). 02 makes fragments visible/editable through the existing portal with
@@ -156,6 +157,22 @@ independent increment:
     rule + no frontmatter-strip-on-inject; for the shipped no-frontmatter content it
     coincides with the store's `tags ⊆ ctx`, converging fully when the resolver is
     upgraded (a runtime change).
+- **As-built (06):** the drafted content of [`03-content.md`](03-content.md) ships as
+  **inert `.example/` templates** — `prompts/modes.example/<mode>/*.md` (implement,
+  debug, review, design, explain; no `other/` — the neutral base) + an illustrative
+  `prompts/system.example/` — plus a non-loaded `prompts/README.md`. The resolver only
+  reads `<dir>/modes/<mode>/`, so `.example/` trees are never selected; an operator
+  copies a file into the live slot to activate it. Byte-identical by construction (no
+  `prompts/modes/` shipped), and crane's source filter drops `prompts/**.md` from the
+  build entirely, so the gate is untouched. Two honesty refinements vs the sketch: the
+  multi-tag frontmatter examples stay as a README illustration (not copy-ready files)
+  with the loop-resolver caveat, so a naive copy can't silently mis-activate them; and
+  `system.example/` is labelled illustrative because the multi-fragment base (`system/`)
+  is still the one deferral from as-built 01 (the base is `system.md`/config today).
+  **This is the last increment — the track is feature-complete.** Remaining work is the
+  cross-track deferral: upgrading the loop resolver to the full `tags ⊆ ctx` model
+  (frontmatter read + strip-on-inject) so `language:`/`tier:` fragments go live once
+  their signal sources land.
 - **Base each PR off `main`** — do not stack (the lesson carried from the code-review
   and portal tracks).
 - **Opt-in, empty/compiled-default fallback** is load-bearing: no fragments ⇒ today's
