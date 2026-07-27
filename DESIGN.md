@@ -32,7 +32,11 @@ Design principles:
 
 Non-goals for the prototype: multi-user serving, a GUI, sandboxed tool execution
 hardening, and distributed subagents. These are noted where the design leaves room
-for them, but they are out of scope for v1.
+for them, but they are out of scope for v1. (§12 lifted the *distribution* part of
+"multi-user serving" — a seam can run in another process; the *session-isolation*
+part — many users/sessions sharing one process or service without leaking into each
+other — is designed in [`docs/design/multi-session/`](docs/design/multi-session/README.md),
+which also names authentication as an explicit follow-up.)
 
 ---
 
