@@ -34,13 +34,35 @@
 //! request is an `Error::Prompt`, never a traversal.
 
 use agent_context::lens::{builtin_instruction, ALL_MODES};
-use agent_context::system_fragments::SystemFragments;
 use agent_core::{
     ContextBlock, Error, Message, PromptContext, PromptEntry, PromptKind, PromptRef, PromptStore,
     Result, TaskMode, MAX_PROMPT_TAGS, MAX_PROMPT_TAG_LEN,
 };
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
+
+#[cfg(feature = "prompt-sqlite")]
+mod sqlite;
+#[cfg(feature = "prompt-sqlite")]
+pub use sqlite::SqlitePromptStore;
+
+/// Copy every *stored* (non-builtin) prompt from `from` into `to` — the file↔sqlite
+/// bridge (docs/design/prompts/05-storage.md): so an operator can snapshot a DB
+/// catalog into the git-legible file tree for review, or seed a DB from files, and
+/// neither backend traps the data. Compiled/config defaults (`builtin = true`) are
+/// skipped — they are not overrides to carry. Backend-agnostic: works file→sqlite,
+/// sqlite→file, or through the grpc client. Returns the number of entries copied.
+pub async fn migrate(from: &dyn PromptStore, to: &dyn PromptStore) -> Result<usize> {
+    let mut copied = 0;
+    for entry in from.list(None).await? {
+        if entry.builtin {
+            continue;
+        }
+        to.put(entry).await?;
+        copied += 1;
+    }
+    Ok(copied)
+}
 
 /// Largest prompt body accepted by `put`, in bytes. A prompt is operator prose
 /// destined for a system message; this bounds a hostile client, not real use.
@@ -208,14 +230,17 @@ impl FilePromptStore {
     /// the list is unchanged. The single-file back-compat form (`modes/<mode>.md`) is a
     /// resolver-only concern and is not surfaced here.
     fn system_fragment_entries(&self) -> Vec<PromptEntry> {
-        let mut out = Vec::new();
+        // Collect across every mode dir, then order **globally** by `(order, id)` — the
+        // composition rule of `04-selection.md` (order by `order`, ties broken by id),
+        // and the same order the sqlite backend's `ORDER BY ord, id` yields, so the two
+        // backends' `list`/`select` agree.
+        let mut files: Vec<(u32, String, TaskMode, String)> = Vec::new();
         for mode in ALL_MODES {
             let dir = self.prompts_dir.join("modes").join(mode.as_str());
             let entries = match std::fs::read_dir(&dir) {
                 Ok(e) => e,
                 Err(_) => continue,
             };
-            let mut files: Vec<(u32, String, String)> = Vec::new();
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().and_then(|e| e.to_str()) != Some("md") {
@@ -230,22 +255,23 @@ impl FilePromptStore {
                     Err(_) => continue,
                 };
                 let (front, _) = split_frontmatter(&content);
-                files.push((fragment_order(front, &name), name, content));
-            }
-            files.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-            for (order, name, content) in files {
-                out.push(PromptEntry {
-                    kind: PromptKind::SystemFragment,
-                    id: format!("{}/{}", mode.as_str(), name),
-                    tags: fragment_tags(mode, &content),
-                    content: content.trim_end().to_string(),
-                    builtin: false,
-                    read_only: false,
-                    order,
-                });
+                let id = format!("{}/{}", mode.as_str(), name);
+                files.push((fragment_order(front, &name), id, mode, content));
             }
         }
-        out
+        files.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        files
+            .into_iter()
+            .map(|(order, id, mode, content)| PromptEntry {
+                kind: PromptKind::SystemFragment,
+                tags: fragment_tags(mode, &content),
+                id,
+                content: content.trim_end().to_string(),
+                builtin: false,
+                read_only: false,
+                order,
+            })
+            .collect()
     }
 }
 
@@ -368,17 +394,14 @@ impl PromptStore for FilePromptStore {
     }
 
     async fn select(&self, ctx: &PromptContext) -> Result<Vec<PromptEntry>> {
-        // Mirror the runtime resolver: a `modes/<mode>/` fragment is selected when
-        // `mode:<mode>` is in the context. A fragment's finer frontmatter tags ride on
-        // the entry (for the catalog view) but are not yet part of selection — so this
-        // returns exactly what the loop would inject (`docs/design/prompts/`).
+        // `fragment.tags ⊆ context` (docs/design/prompts/04-selection.md): a fragment
+        // is selected when *every* one of its tags (the `mode:<mode>` directory tag ∪
+        // its frontmatter tags) is present in the context. This is the same rule the
+        // sqlite backend pushes into SQL, so the two backends are interchangeable.
         Ok(self
             .system_fragment_entries()
             .into_iter()
-            .filter(|e| {
-                e.id.split_once('/')
-                    .is_some_and(|(mode, _)| ctx.contains(&format!("mode:{mode}")))
-            })
+            .filter(|e| ctx.covers(e.tags.iter().map(String::as_str)))
             .collect())
     }
 
@@ -404,15 +427,21 @@ impl PromptStore for FilePromptStore {
             })
             .collect();
         let mut messages = assemble_preview(&system, &prepend, goal, &append);
-        // Fold the situational system fragments the loop would select for `ctx` — a
-        // leading system message right after the head, matching the runtime's index-1
-        // placement (docs/design/prompts/02-composition.md). This is what makes the
-        // preview answer *"show me the prompt for this situation"*. With no matching
-        // fragments the selection is empty and the shape is unchanged.
-        let situational = SystemFragments::new(self.prompts_dir.to_str()).select(ctx);
-        let situational = situational.trim();
+        // Fold the fragments selected for `ctx` in at index 1 (the runtime's leading
+        // system-message placement, docs/design/prompts/02-composition.md) — via
+        // `select`, so preview and `select` agree, and so do the file and sqlite
+        // backends. With no matching fragments the selection is empty and the shape is
+        // unchanged. This answers *"show me the prompt for this situation"*.
+        let situational = self
+            .select(ctx)
+            .await?
+            .into_iter()
+            .map(|e| e.content.trim().to_string())
+            .filter(|c| !c.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
         if !situational.is_empty() {
-            messages.insert(1, Message::system(situational.to_string()));
+            messages.insert(1, Message::system(situational));
         }
         Ok(messages)
     }
@@ -510,6 +539,9 @@ fn fragment_tags(mode: TaskMode, content: &str) -> Vec<String> {
             tags.push(t);
         }
     }
+    // Sorted for a deterministic, order-independent set — so the file and sqlite
+    // backends (the latter reads its tags `ORDER BY tag`) return identical `tags`.
+    tags.sort();
     tags
 }
 
@@ -949,7 +981,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             e.tags,
-            vec!["mode:review".to_string(), "language:rust".into()]
+            vec!["language:rust".to_string(), "mode:review".into()] // sorted
         );
         assert_eq!(e.order, 20);
         assert!(e.content.starts_with("---"), "content stored verbatim");
@@ -1153,7 +1185,10 @@ mod tests {
             !e.tags.iter().any(|t| t.len() > MAX_PROMPT_TAG_LEN),
             "no over-long tag stored"
         );
-        assert_eq!(e.tags[0], "mode:review");
+        assert!(
+            e.tags.iter().any(|t| t == "mode:review"),
+            "dir tag always present"
+        );
     }
 
     // --- boundary_: the frontmatter list/scalar parser ----------------------

@@ -141,6 +141,9 @@ memory-file = ["agent-memory/memory-file"]
 dimensions = ["agent-memory/memory-dimensions"]
 # Prompt management seam (docs/design/portal): see + CRUD every prompt.
 prompt = ["dep:agent-prompt"]
+# The `sqlite` PromptStore backend (docs/design/prompts/05-storage.md), off by
+# default. Forwards to agent-prompt's own feature (mirrors `session`→`session-file`).
+prompt-sqlite = ["prompt", "agent-prompt/prompt-sqlite"]
 # Metrics proxy seam (docs/design/portal): generic PromQL-over-gRPC to Prometheus.
 metrics-proxy = ["dep:agent-metrics-proxy", "agent-metrics-proxy/http"]
 # Connect to external MCP servers and register their tools.

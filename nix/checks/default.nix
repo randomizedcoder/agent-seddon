@@ -31,6 +31,10 @@
       ;
   };
   cargo-audit = import ./cargo-audit.nix { inherit craneLib commonArgs advisory-db; };
+  # Executes the sqlite PromptStore backend's tests (feature `prompt-sqlite`, off by
+  # default so the main `test` check never builds the DB dep). The dedicated,
+  # feature-scoped check that runs them in the gate. docs/design/prompts/05-storage.md.
+  prompt-sqlite = import ./prompt-sqlite.nix { inherit craneLib commonArgs cargoArtifacts; };
   # Deterministic perf gate (iai-callgrind under valgrind, absolute Ir ceilings)
   # + heap leak/allocation-budget gate (dhat). See docs/components/benchmarking.md.
   bench = import ./bench.nix {

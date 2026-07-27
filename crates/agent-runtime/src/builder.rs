@@ -718,17 +718,51 @@ pub async fn build_agent_with(
     #[cfg(not(feature = "dimensions"))]
     let dimension_store_seam: Option<Arc<dyn agent_core::DimensionStore>> = None;
 
-    // Prompt management (docs/design/portal): a filesystem-backed store over the
-    // context.d dir + the prompts dir, serving the config system prompt as the
-    // System default. Always built (no `= "grpc"` loop consumer) so it can be
-    // hosted via `--serve-prompt` / `--serve-all`.
+    // Prompt management (docs/design/portal): the `PromptStore` seam over the config
+    // system prompt + the context.d/prompts trees. Always built (no `= "grpc"` loop
+    // consumer) so it can be hosted via `--serve-prompt` / `--serve-all`. The backend
+    // is selected by `[prompts] backend` — the same `match cfg.<x>.backend` template
+    // the SessionStore uses (docs/design/prompts/05-storage.md).
     #[cfg(feature = "prompt")]
     let prompt_store_seam: Option<Arc<dyn agent_core::PromptStore>> =
-        Some(Arc::new(agent_prompt::FilePromptStore::new(
-            cfg.context_files.dir.clone(),
-            cfg.prompts.dir.clone(),
-            cfg.agent.system_prompt.clone(),
-        )));
+        Some(match cfg.prompts.backend.as_str() {
+            "file" => Arc::new(agent_prompt::FilePromptStore::new(
+                cfg.context_files.dir.clone(),
+                cfg.prompts.dir.clone(),
+                cfg.agent.system_prompt.clone(),
+            )) as Arc<dyn agent_core::PromptStore>,
+            // Embedded SQLite catalog (feature `prompt-sqlite`). Empty `db_path` ⇒
+            // `<working_dir>/.agent-seddon/prompts.db` (mirrors the session dir default).
+            #[cfg(feature = "prompt-sqlite")]
+            "sqlite" => {
+                let db = if cfg.prompts.db_path.is_empty() {
+                    std::path::PathBuf::from(&cfg.agent.working_dir)
+                        .join(".agent-seddon")
+                        .join("prompts.db")
+                } else {
+                    std::path::PathBuf::from(&cfg.prompts.db_path)
+                };
+                Arc::new(agent_prompt::SqlitePromptStore::open(
+                    &db,
+                    cfg.agent.system_prompt.clone(),
+                )?) as Arc<dyn agent_core::PromptStore>
+            }
+            // A shared/central catalog dialed over gRPC (the already-shipped client).
+            #[cfg(feature = "grpc")]
+            "grpc" => {
+                let ep = crate::registry::grpc_client_endpoint(
+                    &cfg.grpc.prompt.endpoint,
+                    agent_grpc::constants::PROMPT,
+                );
+                Arc::new(agent_grpc::client::GrpcPrompts::connect(&ep)?)
+                    as Arc<dyn agent_core::PromptStore>
+            }
+            other => {
+                anyhow::bail!(
+                    "unknown [prompts] backend `{other}` (built in: `file`, `sqlite`, `grpc`)"
+                )
+            }
+        });
     #[cfg(not(feature = "prompt"))]
     let prompt_store_seam: Option<Arc<dyn agent_core::PromptStore>> = None;
 

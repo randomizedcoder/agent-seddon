@@ -2252,11 +2252,13 @@ pub trait PromptStore: Send + Sync {
     /// delete the file for prepend/append). Returns whether a file was removed.
     async fn delete(&self, r: &PromptRef) -> Result<bool>;
     /// The situational [`PromptKind::SystemFragment`] entries selected for `ctx` — the
-    /// seam form of the loop's resolver (`docs/design/prompts/04-selection.md`), in
-    /// composition order. Each backend applies the same rule (file: in-memory filter;
-    /// sqlite: a SQL pushdown), so the store is interchangeable. Today selection keys
-    /// on the `mode:<mode>` directory tag (matching the shipped resolver); a fragment's
-    /// finer frontmatter tags are carried on the entry but not yet part of selection.
+    /// seam form of the situational tag model (`docs/design/prompts/04-selection.md`),
+    /// in composition order. A fragment is selected when `fragment.tags ⊆ ctx` (every
+    /// one of its tags — the `mode:<mode>` directory tag ∪ its frontmatter tags — is
+    /// present). Each backend applies the same rule (file: in-memory `covers`; sqlite:
+    /// a SQL pushdown), so the store is interchangeable. (The loop's own resolver still
+    /// keys on the `mode:` tag alone; for the shipped content — no extra frontmatter
+    /// tags — the two coincide, and converge fully when the resolver is upgraded.)
     async fn select(&self, ctx: &PromptContext) -> Result<Vec<PromptEntry>>;
     /// The `[system, (situational), user, (system-append)]` message list the model
     /// would see for a goal, assembled from the *current* prompts. `ctx` selects the

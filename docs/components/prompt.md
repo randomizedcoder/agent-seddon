@@ -114,12 +114,36 @@ same `[prompts] dir`.
   today's — the per-turn cost when unused is nil. See
   [`docs/design/prompts/02-composition.md`](../design/prompts/02-composition.md).
 
+## Storage backends
+
+The medium a prompt lives in is a **backend choice behind the seam** — every consumer
+reaches prompts through the same CRUD, so files or a database is invisible to them
+([`docs/design/prompts/05-storage.md`](../design/prompts/05-storage.md)). Selected by
+`[prompts] backend`, using the same `match cfg.<x>.backend` template as the
+`SessionStore`:
+
+| `backend` | Impl | Notes |
+|---|---|---|
+| `file` (default) | `FilePromptStore` | git-legible markdown under `<prompts>`/`<context.d>`; zero dependencies |
+| `sqlite` | `SqlitePromptStore` (feature `prompt-sqlite`) | embedded catalog; tags normalised into a `prompt_tags` table so `select` pushes down to SQL. The workspace's **only** DB dependency — off by default (`rusqlite`, `bundled`) |
+| `grpc` | `GrpcPrompts` client | dials a central `PromptService` (a shared catalog, itself backed by any store) |
+
+Selection semantics are identical across backends (`fragment.tags ⊆ context`); only
+*where the filter runs* differs (in-memory vs SQL vs remote). The `sqlite` store returns
+the same shape as the file store — `System`/`ModeLens` fall back to their
+compiled/config default when no override row exists, and a `SystemFragment`'s `tags` are
+derived from its content the same way — so the two are interchangeable. Move a catalog
+between them with `agent_prompt::migrate(&from, &to)` (skips builtins; works in either
+direction).
+
 ## Config
 
 ```toml
 [prompts]
-dir = "prompts"     # holds system.md + lens/<mode>.md overrides
+backend = "file"    # file (default) | sqlite (feature prompt-sqlite) | grpc
+dir = "prompts"     # file backend: holds system.md + lens/<mode>.md overrides
                     # + modes/<mode>/ situational fragments; missing ⇒ defaults
+db_path = ""        # sqlite backend: empty ⇒ <working_dir>/.agent-seddon/prompts.db
 ```
 
 ## Adding your own

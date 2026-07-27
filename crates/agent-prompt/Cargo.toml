@@ -4,6 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# The `sqlite` PromptStore backend (docs/design/prompts/05-storage.md) — the first
+# database dependency in the workspace, off by default so a normal build stays
+# dependency-free (mirrors agent-session's `session-file` two-tier feature).
+prompt-sqlite = ["dep:rusqlite"]
+
 [dependencies]
 agent-core.workspace = true
 # The per-mode lens defaults + resolver live in agent-context (the `lens` module is
@@ -11,6 +18,9 @@ agent-core.workspace = true
 agent-context.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
+# Embedded SQLite for the `sqlite` backend, behind `prompt-sqlite` (off by default).
+# `bundled` compiles vendored sqlite3.c — no system library. See the workspace dep.
+rusqlite = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio.workspace = true

@@ -544,7 +544,12 @@ dir = "context.d"
 # management surface — docs/design/prompts/). A missing dir means "compiled defaults",
 # so this is purely opt-in. Serve the CRUD surface with `agent --serve-prompt`.
 [prompts]
+# backend: "file" (git-legible default) | "sqlite" (embedded DB, feature
+# `prompt-sqlite`) | "grpc" (a central catalog). See docs/design/prompts/05-storage.md.
+backend = "file"
 dir = "prompts"
+# sqlite backend only: empty ⇒ <working_dir>/.agent-seddon/prompts.db
+db_path = ""
 
 # Metrics proxy (docs/design/portal): `agent --serve-metrics-proxy` forwards PromQL
 # to this Prometheus HTTP API, so a gRPC-only client (the portal) reads the same
