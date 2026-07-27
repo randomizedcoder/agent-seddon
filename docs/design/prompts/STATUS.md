@@ -1,10 +1,10 @@
 # Prompt Library — implementation status
 
 The living tracker for the [Prompt Library](README.md) design. **Increments 01
-(`647add8`) and 03 (`d99cfe9`, PR #145) are merged**; **increment 02 (file backend +
-management surface) is coded and in review**; the remaining increments are
-pre-implementation. Where the shipped code refines a design detail, this file becomes
-authoritative (the same convention as
+(`647add8`), 03 (`d99cfe9`, PR #145) and 02 (`2b9df21`, PR #146) are merged**;
+**increment 04 (wire — `PromptContext`/`Select`/preview-by-context) is coded and in
+review**; 05–06 are pre-implementation. Where the shipped code refines a design detail,
+this file becomes authoritative (the same convention as
 [`../portal/STATUS.md`](../portal/STATUS.md) and
 [`../adaptive-cognition/STATUS.md`](../adaptive-cognition/STATUS.md)).
 
@@ -25,7 +25,7 @@ byte-identical to current behaviour when no fragments are present (so
 | 01 | **Tag model + resolver** — `PromptContext`; `SystemFragments` resolver (`select(ctx)`, single-file + empty-default fallback); `LensPrompts` gains the dir form | ✅ | ✅ | — | — | — | **merged** |
 | 02 | **File backend + management surface** — `PromptKind::SystemFragment`, `PromptEntry.tags`, `FilePromptStore` CRUD + directory/frontmatter tags, `mode`-context `preview_assembled`; additive wire (`PROMPT_KIND_SYSTEM_FRAGMENT=5` + `PromptEntry.tags=7`) | ✅ | — | ✅ | — | ✅ (additive) | **in review** |
 | 03 | **Composition / runtime** — build the `mode:` context, inject/swap the volatile situational message at first-assembly + `record_mode_switch`; `agent_prompt_fragments_selected_total{mode,action}` counter | — | — | — | ✅ | — | **merged** |
-| 04 | **Wire** — `PromptContext` message + `Select(PromptContext)` / preview-by-context (the enum value + `PromptEntry.tags` already landed additively in 02; no baseline bump) | — | — | ✅ | — | ✅ | **designed** |
+| 04 | **Wire** — `PromptContext` message + `Select(PromptContext)` / preview-by-context (the enum value + `PromptEntry.tags` already landed additively in 02; no baseline bump) | ✅ | — | ✅ | — | ✅ | **in review** |
 | 05 | **`sqlite` backend** — `[prompts] backend`; `SqlitePromptStore` (feature `prompt-sqlite`, first DB dep); the `file↔sqlite` bridge | — | — | ✅ | ✅ | — | **designed** |
 | 06 | **Content** — ship the example fragments (`prompts/modes.example/…`) + `prompts/README.md`; component-doc update | — | — | — | — | — | **designed** |
 
@@ -108,6 +108,24 @@ independent increment:
   `FilePromptStore` unit tests + a `system_fragment_tags_roundtrip` wire test
   (TCP+UDS) cover the four case classes with mandatory `adversarial_` cases (id
   traversal, frontmatter tag-count/length overflow).
+- **As-built (04):** the wire adds a `PromptContext { repeated string tags }` message,
+  a `Select(PromptContext) returns (PromptList)` RPC, and a `context` field on
+  `PreviewRequest` (all additive — `buf breaking` green, no `buf.image.binpb` bump).
+  The `PromptStore` seam gains `select(&PromptContext)` and `preview_assembled` now
+  takes a `PromptContext` (was `TaskMode`); the server derives the context from the
+  request's tags, falling back to a `mode:<mode>` tag from the pre-04 scalar `mode`
+  field so old clients still work. `agent_core::PromptContext ↔ pb::PromptContext`
+  conversions insert through the **bounded** constructor (an over-cap/over-long tag is
+  dropped — safe, a context is a query). **Refinement of the sketch:** `select` and
+  `preview_assembled` reflect the *shipped resolver's* rule (a `modes/<mode>/` fragment
+  is selected when `mode:<mode> ∈ ctx`), not the full `tags ⊆ ctx` predicate — so they
+  return exactly what the loop injects. `Select` returns the selected fragments as
+  entries (the "which of their tags matched" annotation from `04-selection.md` is
+  derivable from `entry.tags ∩ ctx`, so no extra proto surface). **Deferred (unchanged
+  from 01/02):** full frontmatter-tag-subset *selection* + frontmatter-strip-on-inject
+  — that is a resolver (runtime) change in `agent-context`, out of this wire increment;
+  when it lands, `select`/`preview`/loop all follow the fuller predicate together.
+  Proven by a `prompt_select_and_preview_by_context_roundtrip` test on TCP + UDS.
 - **Base each PR off `main`** — do not stack (the lesson carried from the code-review
   and portal tracks).
 - **Opt-in, empty/compiled-default fallback** is load-bearing: no fragments ⇒ today's

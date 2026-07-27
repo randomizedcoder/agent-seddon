@@ -367,7 +367,22 @@ impl PromptStore for FilePromptStore {
         }
     }
 
-    async fn preview_assembled(&self, mode: TaskMode, goal: &str) -> Result<Vec<Message>> {
+    async fn select(&self, ctx: &PromptContext) -> Result<Vec<PromptEntry>> {
+        // Mirror the runtime resolver: a `modes/<mode>/` fragment is selected when
+        // `mode:<mode>` is in the context. A fragment's finer frontmatter tags ride on
+        // the entry (for the catalog view) but are not yet part of selection — so this
+        // returns exactly what the loop would inject (`docs/design/prompts/`).
+        Ok(self
+            .system_fragment_entries()
+            .into_iter()
+            .filter(|e| {
+                e.id.split_once('/')
+                    .is_some_and(|(mode, _)| ctx.contains(&format!("mode:{mode}")))
+            })
+            .collect())
+    }
+
+    async fn preview_assembled(&self, ctx: &PromptContext, goal: &str) -> Result<Vec<Message>> {
         let system = resolve_system_prompt(
             self.prompts_dir.to_str().unwrap_or_default(),
             &self.config_system_prompt,
@@ -389,13 +404,12 @@ impl PromptStore for FilePromptStore {
             })
             .collect();
         let mut messages = assemble_preview(&system, &prepend, goal, &append);
-        // Fold the situational system fragments the loop would select for this mode —
-        // a leading system message right after the head, matching the runtime's
-        // index-1 placement (docs/design/prompts/02-composition.md). This is what makes
-        // the preview answer *"show me the prompt for this situation"*. With no
-        // `modes/<mode>/` fragments the selection is empty and the shape is unchanged.
-        let ctx = PromptContext::new().with_tag(format!("mode:{}", mode.as_str()));
-        let situational = SystemFragments::new(self.prompts_dir.to_str()).select(&ctx);
+        // Fold the situational system fragments the loop would select for `ctx` — a
+        // leading system message right after the head, matching the runtime's index-1
+        // placement (docs/design/prompts/02-composition.md). This is what makes the
+        // preview answer *"show me the prompt for this situation"*. With no matching
+        // fragments the selection is empty and the shape is unchanged.
+        let situational = SystemFragments::new(self.prompts_dir.to_str()).select(ctx);
         let situational = situational.trim();
         if !situational.is_empty() {
             messages.insert(1, Message::system(situational.to_string()));
@@ -606,6 +620,11 @@ mod tests {
         FilePromptStore::new(root.join("context.d"), root.join("prompts"), "CONFIG SYS")
     }
 
+    /// A single-mode `PromptContext`, the situation the loop supplies today.
+    fn mode_ctx(mode: TaskMode) -> PromptContext {
+        PromptContext::new().with_tag(format!("mode:{}", mode.as_str()))
+    }
+
     // --- safe_prompt_file: the untrusted-id gate ---------------------------
     #[rstest]
     #[case::positive_ordered("0001_persona.md", true)]
@@ -786,7 +805,7 @@ mod tests {
         assert_eq!(pre[0].order, 1);
 
         let msgs = s
-            .preview_assembled(TaskMode::Implement, "GOAL")
+            .preview_assembled(&mode_ctx(TaskMode::Implement), "GOAL")
             .await
             .unwrap();
         assert_eq!(msgs.len(), 3); // system(+prepend) / user / system(append)
@@ -997,16 +1016,59 @@ mod tests {
         .unwrap();
 
         // Review previews with the fragment at index 1 (right after the head).
-        let msgs = s.preview_assembled(TaskMode::Review, "GOAL").await.unwrap();
+        let msgs = s
+            .preview_assembled(&mode_ctx(TaskMode::Review), "GOAL")
+            .await
+            .unwrap();
         assert_eq!(msgs.len(), 3);
         assert!(msgs[0].content_text().starts_with("CONFIG SYS"));
         assert_eq!(msgs[1].content_text(), "GROUND EVERY COMMENT");
         assert_eq!(msgs[2].content_text(), "GOAL");
 
         // A mode with no fragment folds nothing — the shape is unchanged.
-        let msgs = s.preview_assembled(TaskMode::Debug, "GOAL").await.unwrap();
+        let msgs = s
+            .preview_assembled(&mode_ctx(TaskMode::Debug), "GOAL")
+            .await
+            .unwrap();
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[1].content_text(), "GOAL");
+    }
+
+    // --- select: returns the fragments the loop would inject for a context ---
+    #[tokio::test]
+    async fn positive_select_returns_mode_fragments() {
+        let root = tempdir();
+        let s = store(&root);
+        for (id, body) in [
+            ("review/0001_focus.md", "REVIEW-FOCUS"),
+            ("review/0002_more.md", "REVIEW-MORE"),
+            ("debug/0001_method.md", "DEBUG-ONLY"),
+        ] {
+            s.put(PromptEntry {
+                kind: PromptKind::SystemFragment,
+                id: id.into(),
+                content: body.into(),
+                builtin: false,
+                read_only: false,
+                order: 0,
+                tags: Vec::new(),
+            })
+            .await
+            .unwrap();
+        }
+
+        // The Review context selects both review fragments, ordered, and no debug one.
+        let sel = s.select(&mode_ctx(TaskMode::Review)).await.unwrap();
+        assert_eq!(
+            sel.iter().map(|e| e.id.clone()).collect::<Vec<_>>(),
+            vec!["review/0001_focus.md", "review/0002_more.md"]
+        );
+        assert!(sel
+            .iter()
+            .all(|e| e.tags == vec!["mode:review".to_string()]));
+
+        // An empty context selects nothing situational (only the untagged base).
+        assert!(s.select(&PromptContext::new()).await.unwrap().is_empty());
     }
 
     // --- negative_: get of an absent fragment errors ------------------------

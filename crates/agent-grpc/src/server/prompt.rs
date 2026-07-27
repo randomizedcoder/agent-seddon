@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use agent_core::{PromptStore, TaskMode};
+use agent_core::{PromptContext, PromptStore, TaskMode};
 use agent_proto::{pb, status_from_error};
 use tonic::transport::server::Router;
 use tonic::transport::Server;
@@ -97,6 +97,26 @@ impl pb::prompt_service_server::PromptService for PromptSvc {
         .await
     }
 
+    async fn select(
+        &self,
+        request: Request<pb::PromptContext>,
+    ) -> Result<Response<pb::PromptList>, Status> {
+        let sp = span("prompt.select", request.metadata());
+        let inner = self.inner.clone();
+        async move {
+            let ctx = PromptContext::from(request.into_inner());
+            let entries = inner
+                .select(&ctx)
+                .await
+                .map_err(|e| status_from_error(&e))?;
+            Ok(Response::new(pb::PromptList {
+                entries: entries.into_iter().map(Into::into).collect(),
+            }))
+        }
+        .instrument(sp)
+        .await
+    }
+
     async fn preview_assembled(
         &self,
         request: Request<pb::PreviewRequest>,
@@ -105,10 +125,17 @@ impl pb::prompt_service_server::PromptService for PromptSvc {
         let inner = self.inner.clone();
         async move {
             let req = request.into_inner();
-            // An empty/unknown mode label is informational only ⇒ default to Other.
-            let mode = TaskMode::parse(&req.mode).unwrap_or_default();
+            // Prefer the explicit tag set; fall back to a `mode:<mode>` tag from the
+            // pre-04 scalar `mode` field (empty/unknown ⇒ Other) so old clients work.
+            let ctx = match req.context {
+                Some(c) if !c.tags.is_empty() => PromptContext::from(c),
+                _ => {
+                    let mode = TaskMode::parse(&req.mode).unwrap_or_default();
+                    PromptContext::new().with_tag(format!("mode:{}", mode.as_str()))
+                }
+            };
             let messages = inner
-                .preview_assembled(mode, &req.goal)
+                .preview_assembled(&ctx, &req.goal)
                 .await
                 .map_err(|e| status_from_error(&e))?;
             Ok(Response::new(pb::AssembledContext {

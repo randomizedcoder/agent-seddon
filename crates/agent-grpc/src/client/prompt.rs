@@ -3,7 +3,7 @@
 //! because a prompt read/write the operator asked for should not silently no-op.
 
 use agent_core::{
-    Error, Message, PromptEntry, PromptKind, PromptRef, PromptStore, Result, TaskMode,
+    Error, Message, PromptContext, PromptEntry, PromptKind, PromptRef, PromptStore, Result,
 };
 use agent_proto::pb;
 use async_trait::async_trait;
@@ -87,10 +87,27 @@ impl PromptStore for GrpcPrompts {
         Ok(resp.into_inner().deleted)
     }
 
-    async fn preview_assembled(&self, mode: TaskMode, goal: &str) -> Result<Vec<Message>> {
+    async fn select(&self, ctx: &PromptContext) -> Result<Vec<PromptEntry>> {
+        let req = pb::PromptContext::from(ctx.clone());
+        let resp = call_retry(&self.retry, || {
+            let mut client = self.client.clone();
+            let r = req.clone();
+            async move { client.select(outbound(r)).await }
+        })
+        .await
+        .map_err(status_to_err)?;
+        resp.into_inner()
+            .entries
+            .into_iter()
+            .map(|e| e.try_into().map_err(convert_err))
+            .collect()
+    }
+
+    async fn preview_assembled(&self, ctx: &PromptContext, goal: &str) -> Result<Vec<Message>> {
         let req = pb::PreviewRequest {
-            mode: mode.as_str().to_string(),
+            mode: String::new(),
             goal: goal.to_string(),
+            context: Some(pb::PromptContext::from(ctx.clone())),
         };
         let resp = call_retry(&self.retry, || {
             let mut client = self.client.clone();
