@@ -17,6 +17,7 @@ enum PromptKind {
   PROMPT_KIND_PREPEND = 2;   // context.d/prepend/NNNN_*.md
   PROMPT_KIND_APPEND = 3;    // context.d/append/NNNN_*.md
   PROMPT_KIND_MODE_LENS = 4; // prompts/lens/<mode>.md (default: compiled lens)
+  PROMPT_KIND_SYSTEM_FRAGMENT = 5; // prompts/modes/<mode>/NNNN_*.md — a tagged situational fragment
 }
 
 // Identifies one prompt. `id` is a context.d filename (prepend/append), a TaskMode
@@ -36,6 +37,7 @@ message PromptEntry {
   bool builtin = 4;
   bool read_only = 5;
   uint32 order = 6;
+  repeated string tags = 7; // selection tags (SystemFragment only): mode:<m>, language:<l>, …
 }
 
 message PromptListRequest {

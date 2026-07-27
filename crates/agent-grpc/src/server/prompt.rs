@@ -128,6 +128,7 @@ fn pb_kind_to_core(k: pb::PromptKind) -> Option<agent_core::PromptKind> {
         pb::PromptKind::Prepend => Some(agent_core::PromptKind::Prepend),
         pb::PromptKind::Append => Some(agent_core::PromptKind::Append),
         pb::PromptKind::ModeLens => Some(agent_core::PromptKind::ModeLens),
+        pb::PromptKind::SystemFragment => Some(agent_core::PromptKind::SystemFragment),
     }
 }
 

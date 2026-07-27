@@ -10,6 +10,17 @@
 //! | `Prepend`  | `<context.d>/prepend/NNNN_*.md` | — (each file *is* an entry) |
 //! | `Append`   | `<context.d>/append/NNNN_*.md`  | — |
 //! | `ModeLens` | `<prompts>/lens/<mode>.md` | compiled [`agent_context::lens`] default |
+//! | `SystemFragment` | `<prompts>/modes/<mode>/NNNN_*.md` | — (each file *is* a tagged entry) |
+//!
+//! **Tags (file backend).** A `SystemFragment`'s [`PromptEntry::tags`] is a **read
+//! projection**: the directory tag `mode:<mode>` unioned with any frontmatter
+//! `tags: [..]`, bounded by [`MAX_PROMPT_TAGS`]/[`MAX_PROMPT_TAG_LEN`]. It is not a
+//! separately stored column — a `put` persists tags by writing them into the
+//! fragment's content (frontmatter), and `get` re-derives them. The runtime resolver
+//! ([`agent_context::system_fragments`]) selects on the `mode:` directory tag only;
+//! frontmatter-driven *selection* is a later increment (see
+//! `docs/design/prompts/STATUS.md`). This seam only *manages* fragments — the loop
+//! consumes them through the resolver, not here.
 //!
 //! **When edits take effect.** A mode-lens edit is *live* — the resolver re-reads
 //! the file on the next switch-compaction. System/prepend/append are read into an
@@ -23,8 +34,10 @@
 //! request is an `Error::Prompt`, never a traversal.
 
 use agent_context::lens::{builtin_instruction, ALL_MODES};
+use agent_context::system_fragments::SystemFragments;
 use agent_core::{
-    ContextBlock, Error, Message, PromptEntry, PromptKind, PromptRef, PromptStore, Result, TaskMode,
+    ContextBlock, Error, Message, PromptContext, PromptEntry, PromptKind, PromptRef, PromptStore,
+    Result, TaskMode, MAX_PROMPT_TAGS, MAX_PROMPT_TAG_LEN,
 };
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
@@ -92,6 +105,7 @@ impl FilePromptStore {
             builtin,
             read_only: false,
             order: 0,
+            tags: Vec::new(),
         }
     }
 
@@ -107,6 +121,7 @@ impl FilePromptStore {
             builtin,
             read_only: false,
             order: 0,
+            tags: Vec::new(),
         }
     }
 
@@ -144,6 +159,7 @@ impl FilePromptStore {
                 builtin: false,
                 read_only: false,
                 order: order.min(u32::MAX as u64) as u32,
+                tags: Vec::new(),
             })
             .collect()
     }
@@ -167,6 +183,70 @@ impl FilePromptStore {
             Ok(subdir.join(id))
         }
     }
+
+    /// Validate + resolve the on-disk path for a system-fragment `id`
+    /// (`<mode>/<file>.md`). The `<mode>` is checked against the closed [`TaskMode`]
+    /// set (never raw attacker text, so it cannot traverse) and the `<file>` against
+    /// [`safe_prompt_file`]; the resolved path is then `confine`d to the mode dir
+    /// (symlink escape blocked) exactly as [`Self::context_file_path`] does.
+    fn fragment_path(&self, id: &str) -> Result<PathBuf> {
+        let (mode, file) = split_fragment_id(id)?;
+        let dir = self.prompts_dir.join("modes").join(mode.as_str());
+        if dir.exists() {
+            agent_core::confine(&dir, file)
+                .map_err(|e| Error::Prompt(format!("path rejected: {e}")))
+        } else {
+            Ok(dir.join(file))
+        }
+    }
+
+    /// Every `modes/<mode>/*.md` fragment as one `PromptEntry`, grouped by mode (in
+    /// [`ALL_MODES`] order) and within a mode by `order` then name — the same order the
+    /// resolver composes them in. Each entry's `tags` is the `mode:<mode>` directory
+    /// tag unioned with its frontmatter `tags:` ([`fragment_tags`]). An absent/empty
+    /// mode dir contributes nothing (like an empty prepend dir), so with no fragments
+    /// the list is unchanged. The single-file back-compat form (`modes/<mode>.md`) is a
+    /// resolver-only concern and is not surfaced here.
+    fn system_fragment_entries(&self) -> Vec<PromptEntry> {
+        let mut out = Vec::new();
+        for mode in ALL_MODES {
+            let dir = self.prompts_dir.join("modes").join(mode.as_str());
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let mut files: Vec<(u32, String, String)> = Vec::new();
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                    continue;
+                }
+                let name = match path.file_name().and_then(|n| n.to_str()) {
+                    Some(n) => n.to_string(),
+                    None => continue,
+                };
+                let content = match std::fs::read_to_string(&path) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+                let (front, _) = split_frontmatter(&content);
+                files.push((fragment_order(front, &name), name, content));
+            }
+            files.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+            for (order, name, content) in files {
+                out.push(PromptEntry {
+                    kind: PromptKind::SystemFragment,
+                    id: format!("{}/{}", mode.as_str(), name),
+                    tags: fragment_tags(mode, &content),
+                    content: content.trim_end().to_string(),
+                    builtin: false,
+                    read_only: false,
+                    order,
+                });
+            }
+        }
+        out
+    }
 }
 
 #[async_trait]
@@ -185,6 +265,9 @@ impl PromptStore for FilePromptStore {
         }
         if want(PromptKind::ModeLens) {
             out.extend(ALL_MODES.into_iter().map(|m| self.lens_entry(m)));
+        }
+        if want(PromptKind::SystemFragment) {
+            out.extend(self.system_fragment_entries());
         }
         Ok(out)
     }
@@ -208,6 +291,23 @@ impl PromptStore for FilePromptStore {
                     builtin: false,
                     read_only: false,
                     order: numeric_prefix(&r.id).min(u32::MAX as u64) as u32,
+                    tags: Vec::new(),
+                })
+            }
+            PromptKind::SystemFragment => {
+                let (mode, file) = split_fragment_id(&r.id)?;
+                let path = self.fragment_path(&r.id)?;
+                let content = read_nonempty(&path)
+                    .ok_or_else(|| Error::Prompt(format!("no such prompt `{}`", r.id)))?;
+                let (front, _) = split_frontmatter(&content);
+                Ok(PromptEntry {
+                    kind: PromptKind::SystemFragment,
+                    id: r.id.clone(),
+                    order: fragment_order(front, file),
+                    tags: fragment_tags(mode, &content),
+                    content: content.trim_end().to_string(),
+                    builtin: false,
+                    read_only: false,
                 })
             }
         }
@@ -230,6 +330,7 @@ impl PromptStore for FilePromptStore {
             PromptKind::Prepend | PromptKind::Append => {
                 self.context_file_path(entry.kind, &entry.id)?
             }
+            PromptKind::SystemFragment => self.fragment_path(&entry.id)?,
         };
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -254,6 +355,7 @@ impl PromptStore for FilePromptStore {
                 self.lens_path(mode)
             }
             PromptKind::Prepend | PromptKind::Append => self.context_file_path(r.kind, &r.id)?,
+            PromptKind::SystemFragment => self.fragment_path(&r.id)?,
         };
         match std::fs::remove_file(&path) {
             Ok(()) => {
@@ -265,7 +367,7 @@ impl PromptStore for FilePromptStore {
         }
     }
 
-    async fn preview_assembled(&self, _mode: TaskMode, goal: &str) -> Result<Vec<Message>> {
+    async fn preview_assembled(&self, mode: TaskMode, goal: &str) -> Result<Vec<Message>> {
         let system = resolve_system_prompt(
             self.prompts_dir.to_str().unwrap_or_default(),
             &self.config_system_prompt,
@@ -286,7 +388,19 @@ impl PromptStore for FilePromptStore {
                 content: e.content,
             })
             .collect();
-        Ok(assemble_preview(&system, &prepend, goal, &append))
+        let mut messages = assemble_preview(&system, &prepend, goal, &append);
+        // Fold the situational system fragments the loop would select for this mode —
+        // a leading system message right after the head, matching the runtime's
+        // index-1 placement (docs/design/prompts/02-composition.md). This is what makes
+        // the preview answer *"show me the prompt for this situation"*. With no
+        // `modes/<mode>/` fragments the selection is empty and the shape is unchanged.
+        let ctx = PromptContext::new().with_tag(format!("mode:{}", mode.as_str()));
+        let situational = SystemFragments::new(self.prompts_dir.to_str()).select(&ctx);
+        let situational = situational.trim();
+        if !situational.is_empty() {
+            messages.insert(1, Message::system(situational.to_string()));
+        }
+        Ok(messages)
     }
 }
 
@@ -342,6 +456,127 @@ fn read_nonempty(path: &Path) -> Option<String> {
 fn numeric_prefix(name: &str) -> u64 {
     let digits: String = name.chars().take_while(|c| c.is_ascii_digit()).collect();
     digits.parse().unwrap_or(u64::MAX)
+}
+
+/// Split a `SystemFragment` id (`<mode>/<file>.md`) into its validated parts. The
+/// `<mode>` is parsed against the closed [`TaskMode`] set (unknown ⇒ rejected, so a
+/// traversal-looking segment like `..` never becomes a path) and the `<file>` against
+/// [`safe_prompt_file`] (single `.md` segment, no separators/traversal). Any other
+/// shape — no `/`, an unknown mode, a nested/dotted file — is an `Error::Prompt`.
+fn split_fragment_id(id: &str) -> Result<(TaskMode, &str)> {
+    let (mode, file) = id.split_once('/').ok_or_else(|| {
+        Error::Prompt(format!(
+            "system-fragment id must be `<mode>/<file>.md`, got `{id}`"
+        ))
+    })?;
+    let mode =
+        TaskMode::parse(mode).ok_or_else(|| Error::Prompt(format!("unknown mode in id `{id}`")))?;
+    if !safe_prompt_file(file) {
+        return Err(Error::Prompt(format!("invalid fragment file in id `{id}`")));
+    }
+    Ok((mode, file))
+}
+
+/// A fragment's tag set (file backend): the directory tag `mode:<mode>` unioned with
+/// any frontmatter `tags: [..]`, de-duplicated and **bounded** — over-long tags are
+/// skipped and the set is capped at [`MAX_PROMPT_TAGS`], so a hostile fragment with a
+/// million tags cannot blow up matching/storage (`docs/design/prompts/04-selection.md`).
+/// Tags are opaque strings, never a path or SQL — derived here, screened at use.
+fn fragment_tags(mode: TaskMode, content: &str) -> Vec<String> {
+    let (front, _) = split_frontmatter(content);
+    let mut tags: Vec<String> = vec![format!("mode:{}", mode.as_str())];
+    for t in frontmatter_list(front, "tags") {
+        if t.is_empty() || t.len() > MAX_PROMPT_TAG_LEN {
+            continue;
+        }
+        if tags.len() >= MAX_PROMPT_TAGS {
+            break;
+        }
+        if !tags.contains(&t) {
+            tags.push(t);
+        }
+    }
+    tags
+}
+
+/// A fragment's composition order: an explicit frontmatter `order:` if present and
+/// numeric, else the `NNNN_` filename prefix (files without one sort last).
+fn fragment_order(front: &str, filename: &str) -> u32 {
+    frontmatter_scalar(front, "order")
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or_else(|| numeric_prefix(filename).min(u32::MAX as u64) as u32)
+}
+
+/// Split a leading `---\n … \n---\n` YAML-ish frontmatter block off `content`,
+/// returning `(frontmatter, body)`; no block ⇒ `("", content)`. Mirrors
+/// `agent-runtime::skills::split_frontmatter` (each crate copies its own small helper;
+/// `agent-prompt` cannot depend on `agent-runtime`). The invariant that a newline in a
+/// value cannot forge a frontmatter key is preserved — a key is only recognised at the
+/// start of a (trimmed) line inside the block.
+fn split_frontmatter(content: &str) -> (&str, &str) {
+    let c = content.strip_prefix('\u{feff}').unwrap_or(content);
+    let Some(rest) = c.strip_prefix("---\n") else {
+        return ("", content);
+    };
+    if let Some(idx) = rest.find("\n---\n") {
+        (&rest[..idx], &rest[idx + 5..])
+    } else if let Some(front) = rest.strip_suffix("\n---") {
+        (front, "")
+    } else {
+        ("", content)
+    }
+}
+
+/// The values of a frontmatter list field: an inline flow list `key: [a, b, c]`, or a
+/// bare scalar `key: v` (⇒ `[v]`). Absent ⇒ empty. This is the *only* structure added
+/// over the scalar parser — no block sequences, matching the documented `tags: [..]`
+/// form (`docs/design/prompts/01-layout.md`).
+fn frontmatter_list(front: &str, key: &str) -> Vec<String> {
+    for line in front.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix(key).and_then(|r| r.strip_prefix(':')) else {
+            continue;
+        };
+        let val = rest.trim();
+        if val.is_empty() {
+            return Vec::new();
+        }
+        return match val.strip_prefix('[').and_then(|v| v.strip_suffix(']')) {
+            Some(inner) => inner
+                .split(',')
+                .map(unquote_trim)
+                .filter(|s| !s.is_empty())
+                .collect(),
+            None => vec![unquote_trim(val)],
+        };
+    }
+    Vec::new()
+}
+
+/// A scalar frontmatter field (first match), unquoted, or `None` when absent/blank.
+fn frontmatter_scalar(front: &str, key: &str) -> Option<String> {
+    for line in front.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix(key).and_then(|r| r.strip_prefix(':')) else {
+            continue;
+        };
+        let v = unquote_trim(rest);
+        if !v.is_empty() {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// Trim whitespace and strip one balanced layer of `"`/`'` quotes.
+fn unquote_trim(s: &str) -> String {
+    let s = s.trim();
+    let unq = s
+        .strip_prefix('"')
+        .and_then(|x| x.strip_suffix('"'))
+        .or_else(|| s.strip_prefix('\'').and_then(|x| x.strip_suffix('\'')))
+        .unwrap_or(s);
+    unq.trim().to_string()
 }
 
 /// Validate a `context.d` filename `id`. Mirrors the `safe_segment`/`safe_slug`
@@ -410,6 +645,7 @@ mod tests {
             builtin: false,
             read_only: false,
             order: 0,
+            tags: Vec::new(),
         })
         .await
         .unwrap();
@@ -467,6 +703,7 @@ mod tests {
             builtin: false,
             read_only: false,
             order: 0,
+            tags: Vec::new(),
         })
         .await
         .unwrap();
@@ -514,6 +751,7 @@ mod tests {
             builtin: false,
             read_only: false,
             order: 0,
+            tags: Vec::new(),
         })
         .await
         .unwrap();
@@ -524,6 +762,7 @@ mod tests {
             builtin: false,
             read_only: false,
             order: 0,
+            tags: Vec::new(),
         })
         .await
         .unwrap();
@@ -534,6 +773,7 @@ mod tests {
             builtin: false,
             read_only: false,
             order: 0,
+            tags: Vec::new(),
         })
         .await
         .unwrap();
@@ -601,6 +841,7 @@ mod tests {
                 builtin: false,
                 read_only: false,
                 order: 0,
+                tags: Vec::new(),
             })
             .await
             .unwrap_err();
@@ -622,6 +863,7 @@ mod tests {
                 builtin: false,
                 read_only: false,
                 order: 0,
+                tags: Vec::new(),
             })
             .await
             .unwrap_err();
@@ -647,5 +889,239 @@ mod tests {
     #[test]
     fn corner_resolve_system_prompt_empty_dir() {
         assert_eq!(resolve_system_prompt("", "CFG"), "CFG");
+    }
+
+    // --- SystemFragment: put → get/list with derived tags + order, then delete -
+    #[tokio::test]
+    async fn positive_system_fragment_crud_list_tags_and_order() {
+        let root = tempdir();
+        let s = store(&root);
+        s.put(PromptEntry {
+            kind: PromptKind::SystemFragment,
+            id: "review/0002_output.md".into(),
+            content: "SECOND".into(),
+            builtin: false,
+            read_only: false,
+            order: 0,
+            tags: Vec::new(),
+        })
+        .await
+        .unwrap();
+        // Frontmatter adds a tag and overrides the composition order.
+        s.put(PromptEntry {
+            kind: PromptKind::SystemFragment,
+            id: "review/0001_focus.md".into(),
+            content: "---\ntags: [language:rust]\norder: 20\n---\nFIRST".into(),
+            builtin: false,
+            read_only: false,
+            order: 0,
+            tags: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+        // get: tags = dir tag ∪ frontmatter; order from frontmatter; content verbatim.
+        let e = s
+            .get(&PromptRef {
+                kind: PromptKind::SystemFragment,
+                id: "review/0001_focus.md".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            e.tags,
+            vec!["mode:review".to_string(), "language:rust".into()]
+        );
+        assert_eq!(e.order, 20);
+        assert!(e.content.starts_with("---"), "content stored verbatim");
+
+        // list: 0002 (prefix order 2) sorts before 0001 (frontmatter order 20).
+        let frags = s.list(Some(PromptKind::SystemFragment)).await.unwrap();
+        assert_eq!(frags.len(), 2);
+        assert_eq!(frags[0].id, "review/0002_output.md");
+        assert_eq!(frags[0].order, 2);
+        assert_eq!(frags[0].tags, vec!["mode:review".to_string()]);
+        assert_eq!(frags[1].id, "review/0001_focus.md");
+
+        // A whole-list read still has the shipped kinds unchanged (1 system + 6 lens).
+        let all = s.list(None).await.unwrap();
+        assert_eq!(
+            all.iter().filter(|e| e.kind == PromptKind::System).count(),
+            1
+        );
+        assert_eq!(
+            all.iter()
+                .filter(|e| e.kind == PromptKind::ModeLens)
+                .count(),
+            6
+        );
+
+        assert!(s
+            .delete(&PromptRef {
+                kind: PromptKind::SystemFragment,
+                id: "review/0002_output.md".into()
+            })
+            .await
+            .unwrap());
+        assert!(!s
+            .delete(&PromptRef {
+                kind: PromptKind::SystemFragment,
+                id: "review/0002_output.md".into()
+            })
+            .await
+            .unwrap());
+        assert_eq!(
+            s.list(Some(PromptKind::SystemFragment))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    // --- SystemFragment: preview folds the mode's fragment as a leading sys msg -
+    #[tokio::test]
+    async fn positive_system_fragment_preview_folds_situational() {
+        let root = tempdir();
+        let s = store(&root);
+        s.put(PromptEntry {
+            kind: PromptKind::SystemFragment,
+            id: "review/0001_focus.md".into(),
+            content: "GROUND EVERY COMMENT".into(),
+            builtin: false,
+            read_only: false,
+            order: 0,
+            tags: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+        // Review previews with the fragment at index 1 (right after the head).
+        let msgs = s.preview_assembled(TaskMode::Review, "GOAL").await.unwrap();
+        assert_eq!(msgs.len(), 3);
+        assert!(msgs[0].content_text().starts_with("CONFIG SYS"));
+        assert_eq!(msgs[1].content_text(), "GROUND EVERY COMMENT");
+        assert_eq!(msgs[2].content_text(), "GOAL");
+
+        // A mode with no fragment folds nothing — the shape is unchanged.
+        let msgs = s.preview_assembled(TaskMode::Debug, "GOAL").await.unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[1].content_text(), "GOAL");
+    }
+
+    // --- negative_: get of an absent fragment errors ------------------------
+    #[tokio::test]
+    async fn negative_system_fragment_missing_get_errors() {
+        let root = tempdir();
+        let s = store(&root);
+        let err = s
+            .get(&PromptRef {
+                kind: PromptKind::SystemFragment,
+                id: "review/0001_absent.md".into(),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Prompt(_)));
+    }
+
+    // --- adversarial_: a traversing / malformed fragment id is rejected ------
+    #[tokio::test]
+    async fn adversarial_system_fragment_traversal_rejected() {
+        let root = tempdir();
+        let s = store(&root);
+        for bad in [
+            "review/../../evil.md", // file escapes the mode dir
+            "../../etc/passwd.md",  // ".." is not a known mode
+            "notamode/x.md",        // unknown mode segment
+            "review/sub/x.md",      // nested file segment
+            "review",               // no `<mode>/<file>` shape
+        ] {
+            let err = s
+                .put(PromptEntry {
+                    kind: PromptKind::SystemFragment,
+                    id: bad.into(),
+                    content: "x".into(),
+                    builtin: false,
+                    read_only: false,
+                    order: 0,
+                    tags: Vec::new(),
+                })
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, Error::Prompt(_)),
+                "id `{bad}` must be rejected"
+            );
+        }
+        assert!(!root.join("evil.md").exists());
+    }
+
+    // --- adversarial_: a hostile frontmatter tag set is bounded on read ------
+    #[tokio::test]
+    async fn adversarial_frontmatter_tag_overflow_is_bounded() {
+        let root = tempdir();
+        let s = store(&root);
+        let long = "x".repeat(MAX_PROMPT_TAG_LEN + 1);
+        let many = (0..500)
+            .map(|i| format!("t{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        // The over-long tag is first, so it must be skipped, not merely truncated off.
+        let content = format!("---\ntags: [{long}, {many}]\n---\nBODY");
+        s.put(PromptEntry {
+            kind: PromptKind::SystemFragment,
+            id: "review/0001_x.md".into(),
+            content,
+            builtin: false,
+            read_only: false,
+            order: 0,
+            tags: Vec::new(),
+        })
+        .await
+        .unwrap();
+        let e = s
+            .get(&PromptRef {
+                kind: PromptKind::SystemFragment,
+                id: "review/0001_x.md".into(),
+            })
+            .await
+            .unwrap();
+        assert!(e.tags.len() <= MAX_PROMPT_TAGS, "tag count capped");
+        assert!(
+            !e.tags.iter().any(|t| t.len() > MAX_PROMPT_TAG_LEN),
+            "no over-long tag stored"
+        );
+        assert_eq!(e.tags[0], "mode:review");
+    }
+
+    // --- boundary_: the frontmatter list/scalar parser ----------------------
+    #[rstest]
+    #[case::inline_list("---\ntags: [a, b, c]\n---\nbody", vec!["a", "b", "c"])]
+    #[case::quoted("---\ntags: [\"mode:review\", 'language:rust']\n---\nx", vec!["mode:review", "language:rust"])]
+    #[case::scalar("---\ntags: solo\n---\nx", vec!["solo"])]
+    #[case::absent("---\norder: 3\n---\nx", Vec::<&str>::new())]
+    #[case::no_frontmatter("just body", Vec::<&str>::new())]
+    fn frontmatter_list_cases(#[case] content: &str, #[case] want: Vec<&str>) {
+        let (front, _) = split_frontmatter(content);
+        let got = frontmatter_list(front, "tags");
+        assert_eq!(got, want.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn boundary_split_frontmatter_and_order() {
+        let (front, body) = split_frontmatter("---\ntags: [a]\norder: 2\n---\nHELLO");
+        assert!(front.contains("tags: [a]"));
+        assert_eq!(body, "HELLO");
+        assert_eq!(fragment_order(front, "0100_late.md"), 2, "frontmatter wins");
+        // No block ⇒ empty front, whole body; order falls back to the prefix.
+        let (front, body) = split_frontmatter("no block here");
+        assert_eq!(front, "");
+        assert_eq!(body, "no block here");
+        assert_eq!(fragment_order(front, "0100_late.md"), 100);
+        assert_eq!(
+            fragment_order(front, "notes.md"),
+            u32::MAX,
+            "unprefixed sorts last"
+        );
     }
 }
