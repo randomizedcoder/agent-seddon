@@ -922,6 +922,12 @@ pub async fn build_agent_with(
         Some(p) => agent.with_prompt_store(p),
         None => agent,
     };
+    // Situational system-prompt fragments (docs/design/prompts/): the loop selects
+    // and injects the fragments matching the current mode. Rooted at the `prompts`
+    // dir — a missing dir ⇒ a no-op resolver ⇒ byte-identical behaviour.
+    let agent = agent.with_system_fragments(agent_context::system_fragments::SystemFragments::new(
+        Some(&cfg.prompts.dir),
+    ));
     let agent = match metrics_proxy_seam {
         Some(m) => agent.with_metrics_proxy(m),
         None => agent,

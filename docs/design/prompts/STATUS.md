@@ -1,8 +1,9 @@
 # Prompt Library — implementation status
 
-The living tracker for the [Prompt Library](README.md) design. **Design /
-pre-implementation** — nothing is coded yet. Where the shipped code later refines a
-detail, this file becomes authoritative (the same convention as
+The living tracker for the [Prompt Library](README.md) design. **Increment 01 is
+merged** (`647add8`); **increment 03 (composition / runtime) is coded and in review**;
+the remaining increments are pre-implementation. Where the shipped code refines a
+design detail, this file becomes authoritative (the same convention as
 [`../portal/STATUS.md`](../portal/STATUS.md) and
 [`../adaptive-cognition/STATUS.md`](../adaptive-cognition/STATUS.md)).
 
@@ -22,7 +23,7 @@ byte-identical to current behaviour when no fragments are present (so
 |---|---|:--:|:--:|:--:|:--:|:--:|:--:|
 | 01 | **Tag model + resolver** — `PromptContext`; `SystemFragments` resolver (`select(ctx)`, single-file + empty-default fallback); `LensPrompts` gains the dir form | ✅ | ✅ | — | — | — | **in review** |
 | 02 | **File backend + management surface** — `PromptKind::SystemFragment`, `PromptEntry.tags`, `FilePromptStore` CRUD + directory/frontmatter tags (extend `skills.rs` parser), `PromptContext`-aware `preview_assembled` | ✅ | — | ✅ | — | ✅ (additive) | **designed** |
-| 03 | **Composition / runtime** — build the `mode:` context, inject/swap the volatile situational message at first-assembly + `record_mode_switch`; counter + span | — | — | — | ✅ | — | **designed** |
+| 03 | **Composition / runtime** — build the `mode:` context, inject/swap the volatile situational message at first-assembly + `record_mode_switch`; `agent_prompt_fragments_selected_total{mode,action}` counter | — | — | — | ✅ | — | **in review** |
 | 04 | **Wire** — `PROMPT_KIND_SYSTEM_FRAGMENT=5`, `tags`, `PromptContext`, `Select`/preview-by-context (additive; no baseline bump) | — | — | ✅ | — | ✅ | **designed** |
 | 05 | **`sqlite` backend** — `[prompts] backend`; `SqlitePromptStore` (feature `prompt-sqlite`, first DB dep); the `file↔sqlite` bridge | — | — | ✅ | ✅ | — | **designed** |
 | 06 | **Content** — ship the example fragments (`prompts/modes.example/…`) + `prompts/README.md`; component-doc update | — | — | — | — | — | **designed** |
@@ -68,6 +69,19 @@ independent increment:
   message; a multi-fragment base (`system/*`) is a later refinement of that startup
   hook. This narrows the `01-layout.md` sketch (which described `select` reading base +
   situational) to avoid a double-injected base.
+- **As-built (03):** landed **before 02** (allowed — both depend only on 01). The
+  selected fragments are one system message held at **index 1** (right after the head),
+  swapped in place on a mode change and removed when nothing matches — a *leading*
+  system message, so compaction preserves it. `Session.situational_present` tracks it;
+  `SystemFragments` hangs off `Agent` (`with_system_fragments`, wired from
+  `[prompts] dir` in `builder.rs`). Only `mode:<current_mode>` fills the context today
+  (`Session::prompt_context`). e2e-proven end to end
+  (`tests/prompt_fragments_e2e.rs`): a fragment reaches the model for `Other`, a review
+  goal selects the `review` fragment, no `prompts` dir injects nothing, and a
+  mid-session mode switch **swaps the message in place** (`updated`) or **drops it**
+  (`removed`) — each asserting the index-1 leading-position invariant. The
+  loop-consumed behaviour is documented in
+  [`docs/components/prompt.md`](../../components/prompt.md) ("Situational fragments").
 - **Base each PR off `main`** — do not stack (the lesson carried from the code-review
   and portal tracks).
 - **Opt-in, empty/compiled-default fallback** is load-bearing: no fragments ⇒ today's

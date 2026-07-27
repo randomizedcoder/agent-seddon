@@ -59,11 +59,43 @@ size-capped before any write. A rejected request is `InvalidArgument`, never a
 traversal. Adversarial cases (traversal, oversized body, unknown mode) are covered
 and asserted, including across the wire ([`roundtrip.rs`](../../crates/agent-grpc/tests/roundtrip.rs)).
 
+## Situational fragments (consumed by the loop)
+
+Distinct from the management surface above, the loop **does** consume one class of
+prompt directly: *situational system fragments* — small per-mode markdown files that
+are appended to the system prompt when the situation matches them
+([`docs/design/prompts/`](../design/prompts/README.md)). The resolver is
+[`agent_context::system_fragments::SystemFragments`](../../crates/agent-context/src/system_fragments.rs),
+a sibling of the `LensPrompts` resolver in [`context.md`](context.md), rooted at the
+same `[prompts] dir`.
+
+- **What / where.** A fragment lives at `<prompts>/modes/<mode>/NNNN_*.md` (directory
+  form; multiple fragments, `NNNN_`-ordered) or `<prompts>/modes/<mode>.md`
+  (single-file, back-compat). It carries the tag `mode:<mode>`, and is selected when
+  that tag is a subset of the turn's `PromptContext`. Only the **current mode** is a
+  live context signal today; more tags (a wider catalog) land in later increments.
+- **Placement.** Selected fragments are concatenated into **one volatile system
+  message held at index 1** — right after the stable base head — so compaction
+  preserves it as a *leading* system message. The base prompt stays with
+  `agent_prompt::resolve_system_prompt` and is never duplicated into it.
+- **Lifecycle.** Injected on first assembly, **swapped in place** on a mode switch,
+  and **removed** when the new mode matches nothing. Reads are **live per turn**, so an
+  edit through `PromptService` applies on the next turn with no restart — unlike
+  system/prepend/append, which are next-*run*.
+- **Observability.** Each change bumps `agent_prompt_fragments_selected_total{mode,
+  action}`, `action ∈ {inserted, updated, removed}` — **counts and labels only, never
+  the fragment text or tags**.
+- **Byte-identical default.** With no `[prompts] dir` (or nothing selected) the
+  resolver returns `Cow::Borrowed("")`, no message is added, and behaviour is exactly
+  today's — the per-turn cost when unused is nil. See
+  [`docs/design/prompts/02-composition.md`](../design/prompts/02-composition.md).
+
 ## Config
 
 ```toml
 [prompts]
-dir = "prompts"     # holds system.md + lens/<mode>.md overrides; missing ⇒ defaults
+dir = "prompts"     # holds system.md + lens/<mode>.md overrides
+                    # + modes/<mode>/ situational fragments; missing ⇒ defaults
 ```
 
 ## Adding your own

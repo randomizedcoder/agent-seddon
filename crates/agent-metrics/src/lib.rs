@@ -93,6 +93,8 @@ pub struct Metrics {
     mode_classifications: IntCounterVec,
     mode_switches: IntCounterVec,
     mode_switch_confidence: Histogram,
+    // Situational system-prompt fragments (docs/design/prompts/).
+    prompt_fragments_selected: IntCounterVec,
     // Dimensional memory (adaptive-cognition 03).
     dimension_summaries: IntCounterVec,
     dimension_summarize_seconds: Histogram,
@@ -437,6 +439,14 @@ impl Metrics {
             "agent_mode_switch_confidence",
             "Confidence of a decided task-mode switch",
         ))
+        .unwrap();
+        let prompt_fragments_selected = IntCounterVec::new(
+            Opts::new(
+                "agent_prompt_fragments_selected_total",
+                "Situational system-prompt fragment updates, by mode and action",
+            ),
+            &["mode", "action"],
+        )
         .unwrap();
         let dimension_summaries = IntCounterVec::new(
             Opts::new(
@@ -1025,6 +1035,7 @@ impl Metrics {
             Box::new(mode_classifications.clone()),
             Box::new(mode_switches.clone()),
             Box::new(mode_switch_confidence.clone()),
+            Box::new(prompt_fragments_selected.clone()),
             Box::new(dimension_summaries.clone()),
             Box::new(dimension_summarize_seconds.clone()),
             Box::new(dimension_recalls.clone()),
@@ -1146,6 +1157,7 @@ impl Metrics {
             mode_classifications,
             mode_switches,
             mode_switch_confidence,
+            prompt_fragments_selected,
             dimension_summaries,
             dimension_summarize_seconds,
             dimension_recalls,
@@ -1383,6 +1395,13 @@ impl Metrics {
     pub fn on_mode_switch(&self, from: &str, to: &str, confidence: f64) {
         self.mode_switches.with_label_values(&[from, to]).inc();
         self.mode_switch_confidence.observe(confidence);
+    }
+    /// Situational system-prompt fragment update (docs/design/prompts/): `action` is
+    /// `inserted` | `updated` | `removed`. Records neither the tags nor the text.
+    pub fn on_prompt_fragments_selected(&self, mode: &str, action: &str) {
+        self.prompt_fragments_selected
+            .with_label_values(&[mode, action])
+            .inc();
     }
     /// Dimensional memory: one filed per-dimension summary (adaptive-cognition 03).
     pub fn on_dimension_summary(&self, dimension: &str, is_new: bool) {

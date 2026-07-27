@@ -93,6 +93,12 @@ pub struct Agent {
     /// (docs/design/portal). Operator/portal-facing — the loop does not consume it;
     /// held only so it can be hosted over gRPC (`agent --serve-prompt`).
     prompt_store: Option<Arc<dyn agent_core::PromptStore>>,
+    /// Situational system-prompt fragments selected by the current mode
+    /// (docs/design/prompts/). Unlike `prompt_store`, the loop **does** consume this:
+    /// each turn it selects the fragments whose tags match the situation and injects
+    /// them as a system message. Defaults to a no-op resolver (no `prompts` dir ⇒ no
+    /// fragments ⇒ byte-identical to today).
+    system_fragments: agent_context::system_fragments::SystemFragments,
     /// The metrics proxy, if the `metrics-proxy` seam is wired (docs/design/portal).
     /// Portal-facing PromQL→Prometheus proxy; held only so it can be hosted over
     /// gRPC (`agent --serve-metrics-proxy`). Not consumed by the loop.
@@ -205,6 +211,7 @@ impl Agent {
             task_classifier: None,
             dimension_store: None,
             prompt_store: None,
+            system_fragments: agent_context::system_fragments::SystemFragments::defaults(),
             metrics_proxy: None,
             review_collector: None,
             scanner: None,
@@ -443,6 +450,18 @@ impl Agent {
     /// over gRPC. Not consumed by the loop.
     pub fn with_prompt_store(mut self, p: Arc<dyn agent_core::PromptStore>) -> Self {
         self.prompt_store = Some(p);
+        self
+    }
+
+    /// Attach the situational system-fragment resolver (docs/design/prompts/). The
+    /// loop consumes this: it selects the fragments matching the current mode and
+    /// injects them as a system message. A no-op resolver (the default) changes
+    /// nothing.
+    pub fn with_system_fragments(
+        mut self,
+        sf: agent_context::system_fragments::SystemFragments,
+    ) -> Self {
+        self.system_fragments = sf;
         self
     }
 
@@ -746,6 +765,7 @@ impl Agent {
             pending_context: Vec::new(),
             current_mode: agent_core::TaskMode::default(),
             switch_history: std::collections::VecDeque::new(),
+            situational_present: false,
         }
     }
 
@@ -1406,6 +1426,10 @@ pub struct Session<'a> {
     current_mode: agent_core::TaskMode,
     /// Recent per-turn mode proposals (bounded), for the switch hysteresis.
     switch_history: std::collections::VecDeque<agent_core::TaskMode>,
+    /// Whether a situational system-fragment message is currently present in
+    /// `working.messages` (at index 1, right after the head). Tracked so a mode
+    /// change can update or remove it (docs/design/prompts/02-composition.md).
+    situational_present: bool,
 }
 
 /// Decide whether a per-turn verdict switches the session mode, updating the
@@ -1616,6 +1640,60 @@ impl Session<'_> {
             .await;
     }
 
+    /// The current situation as a tag set (docs/design/prompts/04-selection.md). Only
+    /// the mode is a live signal today; later increments add more tags here.
+    fn prompt_context(&self) -> agent_core::PromptContext {
+        agent_core::PromptContext::new().with_tag(format!("mode:{}", self.current_mode.as_str()))
+    }
+
+    /// Re-select the situational system-fragment message for the current context and
+    /// keep `working.messages` in sync. The message lives at index 1 (right after the
+    /// head), so it is preserved as a *leading system message* across compaction
+    /// (docs/design/prompts/02-composition.md). Inserts it when newly selected,
+    /// updates it in place, or removes it when nothing matches — so with no `prompts`
+    /// dir (the default) nothing is selected and the loop is byte-identical to today.
+    /// A no-op before the initial context is assembled.
+    fn update_situational_message(&mut self) {
+        if !self.started {
+            return;
+        }
+        // Defensive: if the tracked message cannot be at index 1, treat it as absent.
+        if self.situational_present && self.working.messages.len() < 2 {
+            self.situational_present = false;
+        }
+        let selected = self.agent.system_fragments.select(&self.prompt_context());
+        let selected = selected.trim();
+        let mode = self.current_mode.as_str();
+        match (self.situational_present, selected.is_empty()) {
+            (true, true) => {
+                self.working.messages.remove(1);
+                self.situational_present = false;
+                self.agent
+                    .metrics
+                    .on_prompt_fragments_selected(mode, "removed");
+            }
+            (true, false) => {
+                self.working.messages[1] = Message::system(selected.to_string());
+                self.agent
+                    .metrics
+                    .on_prompt_fragments_selected(mode, "updated");
+            }
+            (false, false) => {
+                if self.working.messages.is_empty() {
+                    return;
+                }
+                self.working
+                    .messages
+                    .insert(1, Message::system(selected.to_string()));
+                self.situational_present = true;
+                self.agent
+                    .metrics
+                    .on_prompt_fragments_selected(mode, "inserted");
+            }
+            (false, true) => {}
+        }
+    }
+
     async fn send_inner(&mut self, input: &str) -> anyhow::Result<String> {
         // Expand the prompt's `@file`/`@dir`/`@symbol`/`@url` mentions into
         // context blocks BEFORE assembly, so the model sees the exact bytes the
@@ -1643,6 +1721,10 @@ impl Session<'_> {
         let mode_switch = self.detect_mode(input).await;
         if let Some(sw) = &mode_switch {
             self.record_mode_switch(sw).await;
+            // Swap the situational system fragment to the new mode's (a no-op on the
+            // first turn, before assembly — the initial injection runs post-assembly
+            // below). docs/design/prompts/02-composition.md.
+            self.update_situational_message();
             // Dimensional memory is the other consumer (adaptive-cognition 03):
             // on a switch, pull the destination mode's dimensions back in as fresh
             // context — the "pull in fresh" column of 02's before/after table. What
@@ -1721,6 +1803,9 @@ impl Session<'_> {
                 self.working.messages.push(Message::system(ctx));
             }
             self.started = true;
+            // Fold in the situational system fragment for the initial mode, right
+            // after the head (docs/design/prompts/). No-op with no `prompts` dir.
+            self.update_situational_message();
         } else {
             // Continuation: assembly already happened, so expanded references are
             // injected as system context ahead of the new user message.
