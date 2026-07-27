@@ -3427,6 +3427,27 @@ impl TryFrom<pb::PromptEntry> for agent_core::PromptEntry {
     }
 }
 
+impl From<agent_core::PromptContext> for pb::PromptContext {
+    fn from(c: agent_core::PromptContext) -> Self {
+        pb::PromptContext {
+            tags: c.tags().map(str::to_string).collect(),
+        }
+    }
+}
+
+/// Wire→core: tags are inserted through the bounded [`agent_core::PromptContext`]
+/// constructor, so an over-cap / over-long / empty tag is dropped rather than stored —
+/// safe because the context is a *query* (a dropped tag only narrows the match).
+impl From<pb::PromptContext> for agent_core::PromptContext {
+    fn from(c: pb::PromptContext) -> Self {
+        let mut ctx = agent_core::PromptContext::new();
+        for tag in c.tags {
+            ctx.insert(tag);
+        }
+        ctx
+    }
+}
+
 impl From<agent_core::PromptRef> for pb::PromptRef {
     fn from(r: agent_core::PromptRef) -> Self {
         pb::PromptRef {

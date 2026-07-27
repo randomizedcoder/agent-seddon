@@ -774,7 +774,7 @@ async fn repo_worktree_lifecycle_over_the_wire(#[case] transport: Transport) {
 #[case::uds(Transport::Uds)]
 #[tokio::test]
 async fn prompt_crud_roundtrips(#[case] transport: Transport) {
-    use agent_core::{PromptEntry, PromptKind, PromptRef, PromptStore, TaskMode};
+    use agent_core::{PromptContext, PromptEntry, PromptKind, PromptRef, PromptStore};
     let root = tempdir();
     let store = Arc::new(agent_prompt::FilePromptStore::new(
         root.join("context.d"),
@@ -816,7 +816,7 @@ async fn prompt_crud_roundtrips(#[case] transport: Transport) {
 
     // Preview assembles [system, user, system?] with the prepend folded into system.
     let msgs = client
-        .preview_assembled(TaskMode::Implement, "GOAL")
+        .preview_assembled(&PromptContext::new().with_tag("mode:implement"), "GOAL")
         .await
         .unwrap();
     assert!(msgs[0].content_text().contains("You are helpful."));
@@ -916,6 +916,58 @@ async fn system_fragment_tags_roundtrip(#[case] transport: Transport) {
     assert_eq!(frags.len(), 1);
     assert_eq!(frags[0].id, "review/0001_focus.md");
     assert!(frags[0].tags.contains(&"language:rust".to_string()));
+}
+
+// The `Select(PromptContext)` RPC and preview-by-context survive the hop: a Review
+// context selects the review fragment and folds it into the previewed system message,
+// while an unrelated context selects nothing. Runs on TCP and UDS.
+#[rstest]
+#[case::tcp(Transport::Tcp)]
+#[case::uds(Transport::Uds)]
+#[tokio::test]
+async fn prompt_select_and_preview_by_context_roundtrip(#[case] transport: Transport) {
+    use agent_core::{PromptContext, PromptEntry, PromptKind, PromptStore};
+    let root = tempdir();
+    let store = Arc::new(agent_prompt::FilePromptStore::new(
+        root.join("context.d"),
+        root.join("prompts"),
+        "CONFIG SYS",
+    ));
+    let (dial, _srv) = spawn(transport, agent_grpc::server::prompt_router(store)).await;
+    let client = agent_grpc::client::GrpcPrompts::connect(&dial).unwrap();
+
+    client
+        .put(PromptEntry {
+            kind: PromptKind::SystemFragment,
+            id: "review/0001_focus.md".into(),
+            content: "GROUND EVERY COMMENT".into(),
+            builtin: false,
+            read_only: false,
+            order: 0,
+            tags: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+    // Select for the Review context returns the fragment as a full entry.
+    let review = PromptContext::new().with_tag("mode:review");
+    let sel = client.select(&review).await.unwrap();
+    assert_eq!(sel.len(), 1);
+    assert_eq!(sel[0].id, "review/0001_focus.md");
+    assert_eq!(sel[0].kind, PromptKind::SystemFragment);
+
+    // An unrelated context selects nothing.
+    let sel = client
+        .select(&PromptContext::new().with_tag("mode:debug"))
+        .await
+        .unwrap();
+    assert!(sel.is_empty());
+
+    // Preview-by-context folds the selected fragment in at index 1.
+    let msgs = client.preview_assembled(&review, "GOAL").await.unwrap();
+    assert_eq!(msgs.len(), 3);
+    assert_eq!(msgs[1].content_text(), "GROUND EVERY COMMENT");
+    assert_eq!(msgs[2].content_text(), "GOAL");
 }
 
 // ---------------------------------------------------------------------------

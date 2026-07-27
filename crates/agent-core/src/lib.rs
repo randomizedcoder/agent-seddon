@@ -2251,10 +2251,18 @@ pub trait PromptStore: Send + Sync {
     /// Remove the backing override file (revert to default for system/mode-lens,
     /// delete the file for prepend/append). Returns whether a file was removed.
     async fn delete(&self, r: &PromptRef) -> Result<bool>;
-    /// The `[system, user, (system-append)]` message list the model would see for a
-    /// goal, assembled from the *current* prompts. `mode` is informational: initial
-    /// assembly is mode-independent (the lens applies only at switch-compaction).
-    async fn preview_assembled(&self, mode: TaskMode, goal: &str) -> Result<Vec<Message>>;
+    /// The situational [`PromptKind::SystemFragment`] entries selected for `ctx` — the
+    /// seam form of the loop's resolver (`docs/design/prompts/04-selection.md`), in
+    /// composition order. Each backend applies the same rule (file: in-memory filter;
+    /// sqlite: a SQL pushdown), so the store is interchangeable. Today selection keys
+    /// on the `mode:<mode>` directory tag (matching the shipped resolver); a fragment's
+    /// finer frontmatter tags are carried on the entry but not yet part of selection.
+    async fn select(&self, ctx: &PromptContext) -> Result<Vec<PromptEntry>>;
+    /// The `[system, (situational), user, (system-append)]` message list the model
+    /// would see for a goal, assembled from the *current* prompts. `ctx` selects the
+    /// situational system fragments folded in right after the head (index 1), matching
+    /// the loop's placement — so this answers *"show me the prompt for this situation"*.
+    async fn preview_assembled(&self, ctx: &PromptContext, goal: &str) -> Result<Vec<Message>>;
 }
 
 // ---------------------------------------------------------------------------

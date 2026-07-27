@@ -26,11 +26,22 @@ return one entry per `modes/<mode>/*.md` file, id `<mode>/<file>.md`. Its `tags`
 **read projection** — the directory tag `mode:<mode>` unioned with any frontmatter
 `tags: [..]`, bounded by `MAX_PROMPT_TAGS`/`MAX_PROMPT_TAG_LEN`. The file backend has
 no separate tag column, so a `Put` persists tags by writing them into the fragment's
-content (frontmatter); `Get` re-derives them. `PreviewAssembled` for a mode folds that
-mode's selected fragment into the previewed system message (index 1), so the preview
-answers *"show me the prompt for this situation."* The `<mode>` in an id is validated
+content (frontmatter); `Get` re-derives them. The `<mode>` in an id is validated
 against the closed `TaskMode` set and the `<file>` via `safe_prompt_file`; a bad id is
 `InvalidArgument`, never a traversal.
+
+**Selecting by context.** `Select(PromptContext)` returns the situational fragments
+selected for a tag set — the seam form of the loop's resolver — each as a full entry
+(with its tags), so an operator sees exactly the set that composes and why.
+`PreviewAssembled` takes a `PromptContext` (the pre-04 scalar `mode` field is honoured
+as a fallback) and folds that selection into the previewed system message at index 1,
+matching the loop's placement — so the preview answers *"show me the prompt for this
+situation."* Both apply the same rule the loop uses today: a `modes/<mode>/` fragment
+is selected when `mode:<mode>` is in the context. A fragment's finer frontmatter tags
+ride on the entry for the catalog view but are not yet part of selection — so `Select`
+and `PreviewAssembled` reflect exactly what the loop injects. Tags travel the wire as a
+bounded, opaque `PromptContext { repeated string tags }`; a hostile tag is
+string-compared only and simply matches nothing.
 
 `builtin` on a returned entry means the served content is the compiled/config
 default (no override file yet). `Put` writes an override file; `Delete` removes it

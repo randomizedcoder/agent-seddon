@@ -48,15 +48,27 @@ message PromptList {
   repeated PromptEntry entries = 1;
 }
 
+// The situation a system fragment is selected for: an opaque, bounded tag set (e.g.
+// mode:review, language:rust). A fragment is selected when its tags are a subset of
+// this context (docs/design/prompts/04-selection.md). Tags are string-compared only —
+// never a path segment or SQL — so a hostile value simply matches nothing.
+message PromptContext {
+  repeated string tags = 1;
+}
+
 message DeleteReply {
   bool deleted = 1; // false when there was no override file to remove (not an error)
 }
 
-// Preview the assembled context for a goal. `mode` is informational — initial
-// assembly is mode-independent (the lens applies only at switch-compaction).
+// Preview the assembled context for a goal. `context` (a tag set) selects the
+// situational fragments folded into the previewed system message — so an operator can
+// ask "show me the prompt for {mode:review, language:rust}". `mode` is the pre-04
+// scalar form, honoured as a fallback when `context` is empty (the server derives a
+// `mode:<mode>` tag from it).
 message PreviewRequest {
   string mode = 1;
   string goal = 2;
+  PromptContext context = 3;
 }
 
 message PreviewMessage {
@@ -73,5 +85,9 @@ service PromptService {
   rpc Get(PromptRef) returns (PromptEntry);
   rpc Put(PromptEntry) returns (PromptEntry);
   rpc Delete(PromptRef) returns (DeleteReply);
+  // The situational fragments selected for a context — the wire form of the loop's
+  // resolver. Returns each selected fragment as a full entry (with its tags), so an
+  // operator sees exactly the set that composes and why.
+  rpc Select(PromptContext) returns (PromptList);
   rpc PreviewAssembled(PreviewRequest) returns (AssembledContext);
 }
