@@ -1,9 +1,10 @@
 # Prompt Library — implementation status
 
-The living tracker for the [Prompt Library](README.md) design. **Increment 01 is
-merged** (`647add8`); **increment 03 (composition / runtime) is coded and in review**;
-the remaining increments are pre-implementation. Where the shipped code refines a
-design detail, this file becomes authoritative (the same convention as
+The living tracker for the [Prompt Library](README.md) design. **Increments 01
+(`647add8`) and 03 (`d99cfe9`, PR #145) are merged**; **increment 02 (file backend +
+management surface) is coded and in review**; the remaining increments are
+pre-implementation. Where the shipped code refines a design detail, this file becomes
+authoritative (the same convention as
 [`../portal/STATUS.md`](../portal/STATUS.md) and
 [`../adaptive-cognition/STATUS.md`](../adaptive-cognition/STATUS.md)).
 
@@ -21,10 +22,10 @@ byte-identical to current behaviour when no fragments are present (so
 
 | # | Increment | Core | Context | Prompt seam | Runtime | Wire | Status |
 |---|---|:--:|:--:|:--:|:--:|:--:|:--:|
-| 01 | **Tag model + resolver** — `PromptContext`; `SystemFragments` resolver (`select(ctx)`, single-file + empty-default fallback); `LensPrompts` gains the dir form | ✅ | ✅ | — | — | — | **in review** |
-| 02 | **File backend + management surface** — `PromptKind::SystemFragment`, `PromptEntry.tags`, `FilePromptStore` CRUD + directory/frontmatter tags (extend `skills.rs` parser), `PromptContext`-aware `preview_assembled` | ✅ | — | ✅ | — | ✅ (additive) | **designed** |
-| 03 | **Composition / runtime** — build the `mode:` context, inject/swap the volatile situational message at first-assembly + `record_mode_switch`; `agent_prompt_fragments_selected_total{mode,action}` counter | — | — | — | ✅ | — | **in review** |
-| 04 | **Wire** — `PROMPT_KIND_SYSTEM_FRAGMENT=5`, `tags`, `PromptContext`, `Select`/preview-by-context (additive; no baseline bump) | — | — | ✅ | — | ✅ | **designed** |
+| 01 | **Tag model + resolver** — `PromptContext`; `SystemFragments` resolver (`select(ctx)`, single-file + empty-default fallback); `LensPrompts` gains the dir form | ✅ | ✅ | — | — | — | **merged** |
+| 02 | **File backend + management surface** — `PromptKind::SystemFragment`, `PromptEntry.tags`, `FilePromptStore` CRUD + directory/frontmatter tags, `mode`-context `preview_assembled`; additive wire (`PROMPT_KIND_SYSTEM_FRAGMENT=5` + `PromptEntry.tags=7`) | ✅ | — | ✅ | — | ✅ (additive) | **in review** |
+| 03 | **Composition / runtime** — build the `mode:` context, inject/swap the volatile situational message at first-assembly + `record_mode_switch`; `agent_prompt_fragments_selected_total{mode,action}` counter | — | — | — | ✅ | — | **merged** |
+| 04 | **Wire** — `PromptContext` message + `Select(PromptContext)` / preview-by-context (the enum value + `PromptEntry.tags` already landed additively in 02; no baseline bump) | — | — | ✅ | — | ✅ | **designed** |
 | 05 | **`sqlite` backend** — `[prompts] backend`; `SqlitePromptStore` (feature `prompt-sqlite`, first DB dep); the `file↔sqlite` bridge | — | — | ✅ | ✅ | — | **designed** |
 | 06 | **Content** — ship the example fragments (`prompts/modes.example/…`) + `prompts/README.md`; component-doc update | — | — | — | — | — | **designed** |
 
@@ -82,6 +83,31 @@ independent increment:
   (`removed`) — each asserting the index-1 leading-position invariant. The
   loop-consumed behaviour is documented in
   [`docs/components/prompt.md`](../../components/prompt.md) ("Situational fragments").
+- **As-built (02):** `FilePromptStore` gains `SystemFragment` CRUD over
+  `modes/<mode>/<file>.md` (id = `<mode>/<file>`, one entry per file — like
+  prepend/append, not a fixed per-mode row). Three refinements of the sketch:
+  - **`tags` is a read projection, not a stored column.** The file backend derives
+    `PromptEntry.tags` = `mode:<mode>` ∪ frontmatter `tags:` (bounded by
+    `MAX_PROMPT_TAGS`/`_LEN`); a `put` persists tags by writing them into the content
+    (frontmatter) and `get` re-derives them. The sqlite backend (05) gets a real tag
+    column. So a `put(entry)` **ignores** `entry.tags` — content is the source of truth.
+  - **Frontmatter parser is copied into `agent-prompt`, not shared from `skills.rs`.**
+    `agent-prompt` cannot depend on `agent-runtime` (cycle), so it carries its own
+    minimal `split_frontmatter`/`frontmatter_list`/`frontmatter_scalar` (inline
+    `tags: [a, b]` + scalar; no block sequences) — the repo's "each crate copies its
+    own small helper" convention. `skills.rs` is untouched.
+  - **Wire enum value + `tags` field landed here (additive).**
+    `PROMPT_KIND_SYSTEM_FRAGMENT = 5` and `PromptEntry.tags = 7` are in 02 (a
+    `SystemFragment` must roundtrip faithfully through gRPC in the increment that
+    introduces it), proven on TCP+UDS. 04 is now just the `PromptContext` message +
+    `Select`/preview-by-context.
+  - **Deferred to a later increment:** frontmatter-driven *selection* (the resolver is
+    still `mode:`-tag-only, per as-built 01) and frontmatter-stripping on inject; the
+    synthetic empty-per-mode list entry (not needed — the portal handles a multi-entry
+    kind like prepend/append); `[prompts] backend`/`db_path` config (05).
+  `FilePromptStore` unit tests + a `system_fragment_tags_roundtrip` wire test
+  (TCP+UDS) cover the four case classes with mandatory `adversarial_` cases (id
+  traversal, frontmatter tag-count/length overflow).
 - **Base each PR off `main`** — do not stack (the lesson carried from the code-review
   and portal tracks).
 - **Opt-in, empty/compiled-default fallback** is load-bearing: no fragments ⇒ today's

@@ -3379,6 +3379,7 @@ impl From<agent_core::PromptKind> for pb::PromptKind {
             agent_core::PromptKind::Prepend => pb::PromptKind::Prepend,
             agent_core::PromptKind::Append => pb::PromptKind::Append,
             agent_core::PromptKind::ModeLens => pb::PromptKind::ModeLens,
+            agent_core::PromptKind::SystemFragment => pb::PromptKind::SystemFragment,
         }
     }
 }
@@ -3391,6 +3392,7 @@ fn prompt_kind_from_i32(v: i32) -> Option<agent_core::PromptKind> {
         Ok(pb::PromptKind::Prepend) => Some(agent_core::PromptKind::Prepend),
         Ok(pb::PromptKind::Append) => Some(agent_core::PromptKind::Append),
         Ok(pb::PromptKind::ModeLens) => Some(agent_core::PromptKind::ModeLens),
+        Ok(pb::PromptKind::SystemFragment) => Some(agent_core::PromptKind::SystemFragment),
         Ok(pb::PromptKind::Unspecified) | Err(_) => None,
     }
 }
@@ -3404,6 +3406,7 @@ impl From<agent_core::PromptEntry> for pb::PromptEntry {
             builtin: e.builtin,
             read_only: e.read_only,
             order: e.order,
+            tags: e.tags,
         }
     }
 }
@@ -3419,6 +3422,7 @@ impl TryFrom<pb::PromptEntry> for agent_core::PromptEntry {
             builtin: e.builtin,
             read_only: e.read_only,
             order: e.order,
+            tags: e.tags,
         })
     }
 }

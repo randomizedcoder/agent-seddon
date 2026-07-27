@@ -18,6 +18,19 @@ See **and** edit every prompt the agent uses, from one surface. The loop does
 | `Prepend`  | `<context.d>/prepend/NNNN_*.md` | — (each file *is* an entry) |
 | `Append`   | `<context.d>/append/NNNN_*.md`  | — |
 | `ModeLens` | `<prompts>/lens/<mode>.md` | compiled per-mode lens (`agent_context::lens`) |
+| `SystemFragment` | `<prompts>/modes/<mode>/NNNN_*.md` | — (each file *is* a tagged entry) |
+
+A `SystemFragment` is the management view of the situational fragments the loop
+consumes (see "Situational fragments (consumed by the loop)" below): `list`/`get`
+return one entry per `modes/<mode>/*.md` file, id `<mode>/<file>.md`. Its `tags` is a
+**read projection** — the directory tag `mode:<mode>` unioned with any frontmatter
+`tags: [..]`, bounded by `MAX_PROMPT_TAGS`/`MAX_PROMPT_TAG_LEN`. The file backend has
+no separate tag column, so a `Put` persists tags by writing them into the fragment's
+content (frontmatter); `Get` re-derives them. `PreviewAssembled` for a mode folds that
+mode's selected fragment into the previewed system message (index 1), so the preview
+answers *"show me the prompt for this situation."* The `<mode>` in an id is validated
+against the closed `TaskMode` set and the `<file>` via `safe_prompt_file`; a bad id is
+`InvalidArgument`, never a traversal.
 
 `builtin` on a returned entry means the served content is the compiled/config
 default (no override file yet). `Put` writes an override file; `Delete` removes it

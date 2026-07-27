@@ -2179,6 +2179,12 @@ pub enum PromptKind {
     Append,
     /// A per-[`TaskMode`] compaction lens (`prompts/lens/<mode>.md` → compiled default).
     ModeLens,
+    /// A tagged **situational system fragment** (`prompts/modes/<mode>/NNNN_*.md`),
+    /// of which "a per-mode system prompt" is the `mode:<m>`-tagged case. Carries a
+    /// [`PromptEntry::tags`] set (`docs/design/prompts/04-selection.md`). Unlike the
+    /// three above, this one *is* selected into the loop's turn — but only through the
+    /// resolver, not this management seam.
+    SystemFragment,
 }
 
 impl PromptKind {
@@ -2188,6 +2194,7 @@ impl PromptKind {
             PromptKind::Prepend => "prepend",
             PromptKind::Append => "append",
             PromptKind::ModeLens => "mode_lens",
+            PromptKind::SystemFragment => "system_fragment",
         }
     }
     pub fn parse(s: &str) -> Option<Self> {
@@ -2196,6 +2203,7 @@ impl PromptKind {
             "prepend" => PromptKind::Prepend,
             "append" => PromptKind::Append,
             "mode_lens" => PromptKind::ModeLens,
+            "system_fragment" => PromptKind::SystemFragment,
             _ => return None,
         })
     }
@@ -2213,7 +2221,11 @@ pub struct PromptRef {
 /// One prompt entry. `builtin` is true when the served `content` is the compiled /
 /// config default (no operator override file backs it yet); `order` is the numeric
 /// `NNNN` filename prefix for a context.d entry (0 otherwise). `read_only` is
-/// reserved for a future locked-entry class (always false today).
+/// reserved for a future locked-entry class (always false today). `tags` is the
+/// fragment's selection tag set (`docs/design/prompts/04-selection.md`) — non-empty
+/// only for [`PromptKind::SystemFragment`]; in the file backend it is a read
+/// projection of the directory tag (`mode:<mode>`) unioned with any frontmatter
+/// `tags:`, so a `put` persists tags via the fragment's content, not this field.
 #[derive(Debug, Clone)]
 pub struct PromptEntry {
     pub kind: PromptKind,
@@ -2222,6 +2234,7 @@ pub struct PromptEntry {
     pub builtin: bool,
     pub read_only: bool,
     pub order: u32,
+    pub tags: Vec<String>,
 }
 
 /// A management surface over the agent's prompts. Every argument is untrusted (an

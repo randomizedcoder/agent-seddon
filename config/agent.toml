@@ -536,10 +536,13 @@ flush_interval_ms = 1000
 dir = "context.d"
 
 # Prompt-store root (docs/design/portal). Holds operator overrides the `PromptStore`
-# seam manages: <dir>/system.md (overrides [agent] system_prompt for the next run)
-# and <dir>/lens/<mode>.md (overrides a per-mode compaction lens — read live by the
-# mode-aware context strategy). A missing dir means "compiled defaults", so this is
-# purely opt-in. Serve the CRUD surface with `agent --serve-prompt` (or --serve-all).
+# seam manages: <dir>/system.md (overrides [agent] system_prompt for the next run),
+# <dir>/lens/<mode>.md (overrides a per-mode compaction lens — read live by the
+# mode-aware context strategy), and <dir>/modes/<mode>/NNNN_*.md (tagged situational
+# system fragments — a `mode:<mode>` fragment folded into the turn's system prompt,
+# read live by the resolver; frontmatter `tags: [..]` adds finer tags for the
+# management surface — docs/design/prompts/). A missing dir means "compiled defaults",
+# so this is purely opt-in. Serve the CRUD surface with `agent --serve-prompt`.
 [prompts]
 dir = "prompts"
 

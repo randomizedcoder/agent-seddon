@@ -804,6 +804,7 @@ async fn prompt_crud_roundtrips(#[case] transport: Transport) {
             builtin: false,
             read_only: false,
             order: 0,
+            tags: Vec::new(),
         })
         .await
         .unwrap();
@@ -860,10 +861,61 @@ async fn adversarial_prompt_traversal_rejected_over_wire() {
             builtin: false,
             read_only: false,
             order: 0,
+            tags: Vec::new(),
         })
         .await;
     assert!(err.is_err(), "traversal must be rejected across the wire");
     assert!(!root.join("evil.md").exists());
+}
+
+// A tagged system fragment survives the hop: the `SystemFragment` kind and the
+// derived `tags` (dir tag ∪ frontmatter) read back over the wire — the additive
+// wire (PROMPT_KIND_SYSTEM_FRAGMENT + PromptEntry.tags) is faithful on TCP and UDS.
+#[rstest]
+#[case::tcp(Transport::Tcp)]
+#[case::uds(Transport::Uds)]
+#[tokio::test]
+async fn system_fragment_tags_roundtrip(#[case] transport: Transport) {
+    use agent_core::{PromptEntry, PromptKind, PromptRef, PromptStore};
+    let root = tempdir();
+    let store = Arc::new(agent_prompt::FilePromptStore::new(
+        root.join("context.d"),
+        root.join("prompts"),
+        "CONFIG SYS",
+    ));
+    let (dial, _srv) = spawn(transport, agent_grpc::server::prompt_router(store)).await;
+    let client = agent_grpc::client::GrpcPrompts::connect(&dial).unwrap();
+
+    client
+        .put(PromptEntry {
+            kind: PromptKind::SystemFragment,
+            id: "review/0001_focus.md".into(),
+            content: "---\ntags: [language:rust]\n---\nGROUND IT".into(),
+            builtin: false,
+            read_only: false,
+            order: 0,
+            tags: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+    let e = client
+        .get(&PromptRef {
+            kind: PromptKind::SystemFragment,
+            id: "review/0001_focus.md".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(e.kind, PromptKind::SystemFragment);
+    assert_eq!(
+        e.tags,
+        vec!["mode:review".to_string(), "language:rust".into()]
+    );
+
+    let frags = client.list(Some(PromptKind::SystemFragment)).await.unwrap();
+    assert_eq!(frags.len(), 1);
+    assert_eq!(frags[0].id, "review/0001_focus.md");
+    assert!(frags[0].tags.contains(&"language:rust".to_string()));
 }
 
 // ---------------------------------------------------------------------------
