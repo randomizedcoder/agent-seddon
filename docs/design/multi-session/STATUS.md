@@ -11,8 +11,9 @@ design docs, this file records the refinement (the design docs stay the rational
 | 01 | Identity foundations (`SessionKey`/`safe_segment`, metadata keys, task-local, inject/extract, span attrs) | [`01-identity.md`](01-identity.md) | **merged** (#151) |
 | 02 | `Backend`/`Session`/`SessionManager` split; per-session cwd | [`02-runtime-split.md`](02-runtime-split.md) | **merged** (#152) |
 | 03 | Hazard A: stateless `ContextStrategy::compact(switch)` | [`03-hazards.md`](03-hazards.md) | **merged** (#153) |
-| 03b | Hazard B: `SessionEventsRegistry` + `session_id` selector on `AgentSessionService` | [`03-hazards.md`](03-hazards.md) | **in PR** (`feat/multi-session-03b-session-events`) |
-| 04 | Per-user memory/dimension tenancy; stateful-seam keying; confined cwd/root | [`04-tenancy.md`](04-tenancy.md) | pending |
+| 03b | Hazard B: `SessionEventsRegistry` + `session_id` selector on `AgentSessionService` | [`03-hazards.md`](03-hazards.md) | **merged** (#154) |
+| 04 | Per-user memory/dimension tenancy (in-process) | [`04-tenancy.md`](04-tenancy.md) | **in PR** (`feat/multi-session-04-tenancy`) |
+| 04b | Remaining stateful-seam keying: served-handler identity scoping, `SessionStore` ownership check, `Pty`/`TaskTracker` maps, per-call confined cwd/root | [`04-tenancy.md`](04-tenancy.md) | pending |
 | 05 | `SessionRegistry` lifecycle (server-mint, idle-GC) | [`05-lifecycle.md`](05-lifecycle.md) | pending |
 | 06 | Session-scoped observability (span attrs, curated metric label, eviction) | [`06-observability.md`](06-observability.md) | pending |
 | 07 | Security hardening (`bash` containment, UDS-per-user, adversarial sweep) | [`07-security.md`](07-security.md) | pending |
@@ -35,6 +36,31 @@ design docs, this file records the refinement (the design docs stay the rational
   (`Arc<tokio::Mutex<Session>>` per key); single-session path zero-overhead.
 
 ## Refinements (authoritative over the design docs)
+
+- **Increment 04 scoped to *in-process* per-user memory/dimension tenancy.** The
+  design's 04-tenancy.md enumerates every stateful seam; this PR ships the headline —
+  **the actual `recall` leak** — and defers the rest to **04b**. Mechanism: because the
+  loop shares one store `Arc` across sessions, per-user isolation is resolved **at call
+  time** from the ambient identity, not baked at construction. New
+  **`PerUserMemory`** (`MemoryStore`) and **`PerUserDimensions`** (`DimensionStore`) in
+  `agent-memory` read `agent_core::current_identity()` on each call and delegate to a
+  lazily-built, cached per-user file store rooted at `<base>/<user>/…`. **The default
+  `local` user maps to the un-namespaced base path**, so the single-user CLI is
+  byte-identical (no silent relocation of an existing `.agent/episodic.jsonl`); a named
+  user U roots at `.agent/<U>/episodic.jsonl`, `.agent/<U>/memory/`,
+  `.agent/<U>/memory/dimensions/`. The user segment is `safe_segment`-re-validated in
+  the wrapper (defense in depth over the wire validation) and a malformed segment falls
+  back to the base tenant, never escaping via `..`. Wired by swapping two `builder.rs`
+  factory sites (composed memory + the inline dimension build); the file backend only —
+  sqlite/grpc memory backends and the standalone `--serve-episodic`/`--serve-semantic`
+  layers are unchanged. **Deferred to 04b** (explicitly): the served
+  `MemoryService`/`DimensionSvc` handlers still don't `scope` the caller's identity into
+  the store, so a *remote* call resolves to the `local` tenant (same shared behaviour as
+  today — **no regression**, just not-yet-isolated); plus `SessionStore`
+  `restore`/`diff` ownership, `Pty`/`TaskTracker` keying, and per-call confined
+  cwd/root. **Note (`tokio::fs` gotcha):** `FileEpisodic::append` uses `tokio::fs`, whose
+  `write_all().await` returns before the bytes are durably flushed — a test must read
+  back through the store's own tokio reader (`recent`), not `std::fs`, or it flakes.
 
 - **Increment 03 split into 03 (hazard A) + 03b (hazard B).** The two hazards are
   independent, so they ship as separate PRs for reviewability. **03 (hazard A)** made
