@@ -1108,6 +1108,33 @@ impl agent_core::SessionSource for FakeSession {
     }
 }
 
+// A registry holding one named session, so the round-trip exercises the `session_id`
+// selector added in multi-session increment 03b (hazard B): an empty selector
+// resolves the sole session, an unknown id is NOT_FOUND, a malformed one is rejected.
+struct OneSessionRegistry {
+    id: String,
+    source: Arc<dyn agent_core::SessionSource>,
+}
+
+impl agent_core::SessionSourceRegistry for OneSessionRegistry {
+    fn source(&self, session_id: &str) -> Option<Arc<dyn agent_core::SessionSource>> {
+        (session_id == self.id).then(|| self.source.clone())
+    }
+    fn sole_source(&self) -> Option<Arc<dyn agent_core::SessionSource>> {
+        Some(self.source.clone())
+    }
+    fn live_session_ids(&self) -> Vec<String> {
+        vec![self.id.clone()]
+    }
+}
+
+fn one_session_registry() -> Arc<dyn agent_core::SessionSourceRegistry> {
+    Arc::new(OneSessionRegistry {
+        id: "sess-1".into(),
+        source: Arc::new(FakeSession),
+    })
+}
+
 #[rstest]
 #[case::tcp(Transport::Tcp)]
 #[case::uds(Transport::Uds)]
@@ -1116,15 +1143,17 @@ async fn agent_session_stream_and_snapshot_roundtrip(#[case] transport: Transpor
     use agent_proto::pb;
     let (dial, _srv) = spawn(
         transport,
-        agent_grpc::server::agent_session_router(Arc::new(FakeSession)),
+        agent_grpc::server::agent_session_router(one_session_registry()),
     )
     .await;
     let channel = dial.connect_lazy().unwrap();
     let mut client = pb::agent_session_service_client::AgentSessionServiceClient::new(channel);
 
-    // Snapshot RPC: current state survives the hop.
+    // Snapshot RPC: current state survives the hop (empty selector → sole session).
     let snap = client
-        .snapshot(pb::SnapshotRequest {})
+        .snapshot(pb::SnapshotRequest {
+            session_id: String::new(),
+        })
         .await
         .unwrap()
         .into_inner();
@@ -1132,9 +1161,38 @@ async fn agent_session_stream_and_snapshot_roundtrip(#[case] transport: Transpor
     assert_eq!(snap.context_tokens, 42);
     assert!(snap.active);
 
+    // The `session_id` selector survives the hop: naming the live session resolves it.
+    let by_id = client
+        .snapshot(pb::SnapshotRequest {
+            session_id: "sess-1".into(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(by_id.current_mode, "debug");
+
+    // Adversarial / miss cases: an unknown id is NOT_FOUND, a malformed one (path
+    // traversal) is rejected as INVALID_ARGUMENT before any lookup.
+    let unknown = client
+        .snapshot(pb::SnapshotRequest {
+            session_id: "ghost".into(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(unknown.code(), tonic::Code::NotFound);
+    let malformed = client
+        .snapshot(pb::SnapshotRequest {
+            session_id: "../../etc/passwd".into(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(malformed.code(), tonic::Code::InvalidArgument);
+
     // Subscribe: the first event is the status snapshot, then the scripted tail.
     let mut stream = client
-        .subscribe(pb::SubscribeRequest {})
+        .subscribe(pb::SubscribeRequest {
+            session_id: String::new(),
+        })
         .await
         .unwrap()
         .into_inner();

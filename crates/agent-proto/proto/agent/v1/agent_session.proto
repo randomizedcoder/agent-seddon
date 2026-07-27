@@ -16,8 +16,18 @@ service AgentSessionService {
   rpc Snapshot(SnapshotRequest) returns (StatusSnapshot);
 }
 
-message SubscribeRequest {}
-message SnapshotRequest {}
+// `session_id` selects which live session to observe when the server multiplexes
+// many (docs/design/multi-session/03-hazards.md, hazard B). Empty selects the sole
+// live session — the single-session observer convenience; empty against several
+// live sessions is ambiguous and rejected with INVALID_ARGUMENT. An unknown id is
+// NOT_FOUND. The field is additive: a pre-multi-session client sends it empty and
+// gets today's single-session behaviour.
+message SubscribeRequest {
+  string session_id = 1;
+}
+message SnapshotRequest {
+  string session_id = 1;
+}
 
 message RunStarted { string goal = 1; }
 message IterationStart { uint32 iter = 1; }

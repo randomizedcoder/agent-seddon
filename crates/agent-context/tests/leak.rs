@@ -67,17 +67,30 @@ async fn switch_compaction_does_not_leak() {
         reserve_output: 1000,
     };
 
-    // Warm up.
-    strat.on_mode_switch(TaskMode::Other, TaskMode::Implement);
+    // Warm up. The armed switch is now a caller-owned `compact` argument (hazard A,
+    // #153) rather than strategy state — pass it per call.
     let mut w = fixture();
-    strat.compact(&mut w, &budget).await.unwrap();
+    strat
+        .compact(
+            &mut w,
+            &budget,
+            Some((TaskMode::Other, TaskMode::Implement)),
+        )
+        .await
+        .unwrap();
 
     let base = dhat::HeapStats::get();
     const ITERS: u64 = 50;
     for _ in 0..ITERS {
-        strat.on_mode_switch(TaskMode::Implement, TaskMode::Review);
         let mut working = fixture();
-        strat.compact(&mut working, &budget).await.unwrap();
+        strat
+            .compact(
+                &mut working,
+                &budget,
+                Some((TaskMode::Implement, TaskMode::Review)),
+            )
+            .await
+            .unwrap();
         // `working` drops here — the reshaped set must be freed.
     }
     let after = dhat::HeapStats::get();

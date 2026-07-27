@@ -2590,6 +2590,28 @@ pub trait SessionSource: Send + Sync {
     fn subscribe(&self) -> SessionEventStream;
 }
 
+/// A registry of live [`SessionSource`]s keyed by session id — the multi-session
+/// generalization of a single `SessionSource`. Each concurrent session owns its own
+/// sink (one broadcast + snapshot), so a served `AgentSessionService` can resolve the
+/// requested `session_id` to exactly that session's stream rather than an interleaved
+/// firehose of every tenant's events (docs/design/multi-session/03-hazards.md,
+/// hazard B). Observe-only.
+///
+/// The `session_id` reaching [`Self::source`] is **attacker-controlled wire input**;
+/// the service validates it with [`safe_segment`] before it ever reaches a lookup, so
+/// this trait only ever sees well-formed segments. A miss returns `None` (the caller
+/// maps it to `NOT_FOUND`) — a registry never fabricates a session.
+pub trait SessionSourceRegistry: Send + Sync {
+    /// The source for `session_id`, or `None` when no such session is live.
+    fn source(&self, session_id: &str) -> Option<std::sync::Arc<dyn SessionSource>>;
+    /// The sole live session's source, or `None` when zero or more than one is live —
+    /// the empty-selector convenience for the single-session observer (an empty
+    /// selector against many sessions is ambiguous and rejected upstream).
+    fn sole_source(&self) -> Option<std::sync::Arc<dyn SessionSource>>;
+    /// Ids of the currently live sessions (diagnostics / a future `ListSessions`).
+    fn live_session_ids(&self) -> Vec<String>;
+}
+
 // ---------------------------------------------------------------------------
 // Seam 4: Context assembly / compaction
 // ---------------------------------------------------------------------------

@@ -25,7 +25,7 @@ pub use agent_metrics::Metrics;
 pub use builder::{build_agent, build_agent_with};
 pub use config::Config;
 pub use registry::{register_builtins, Registry};
-pub use session_events::SessionEvents;
+pub use session_events::{SessionEvents, SessionEventsRegistry};
 
 /// Parse a TOML config string into a [`Config`], **warning about keys it did not
 /// recognise**.

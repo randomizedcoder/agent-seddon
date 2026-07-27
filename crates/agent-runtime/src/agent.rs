@@ -67,10 +67,13 @@ pub struct Agent {
     policy: Arc<dyn Policy>,
     metrics: Metrics,
     settings: Settings,
-    /// Live agent-session observation sink (docs/design/portal). Always present
-    /// (cheap): the loop publishes into it at its recording sites, and a served
-    /// `AgentSessionService` reads it via [`Self::session_source`]. Observe-only.
-    event_sink: Arc<crate::SessionEvents>,
+    /// Live agent-session observation, **one sink per session** keyed by session id
+    /// (docs/design/multi-session/03-hazards.md, hazard B). Each `Session` draws its
+    /// own [`crate::SessionEvents`] from here at construction and publishes into that;
+    /// a served `AgentSessionService` reads this registry via
+    /// [`Self::session_source_registry`] and selects by `session_id`, so concurrent
+    /// tenants never share a stream. Observe-only.
+    events: Arc<crate::SessionEventsRegistry>,
     /// The composed search backend, if the `search` seam is wired. Held so it can
     /// be hosted over gRPC (`agent --serve-search`); the loop reaches search
     /// through the `search` *tool*, not this field.
@@ -195,7 +198,7 @@ impl Agent {
         metrics: Metrics,
         settings: Settings,
     ) -> Self {
-        let event_sink = Arc::new(crate::SessionEvents::new(settings.context_window));
+        let events = Arc::new(crate::SessionEventsRegistry::new(settings.context_window));
         Self {
             provider,
             tools,
@@ -204,7 +207,7 @@ impl Agent {
             policy,
             metrics,
             settings,
-            event_sink,
+            events,
             search: None,
             repo: None,
             llm_pool: None,
@@ -695,17 +698,12 @@ impl Agent {
         self.settings.grpc_max_in_flight
     }
 
-    /// The live session-event sink, for publishing from the loop / a background
-    /// observe server (docs/design/portal).
-    pub fn event_sink(&self) -> Arc<crate::SessionEvents> {
-        self.event_sink.clone()
-    }
-
-    /// The observation handle a served `AgentSessionService` reads. Always available
-    /// (the sink is always built) — a serve-only process simply streams nothing
-    /// until a loop publishes.
-    pub fn session_source(&self) -> Arc<dyn agent_core::SessionSource> {
-        self.event_sink.clone()
+    /// The registry a served `AgentSessionService` reads (docs/design/portal +
+    /// multi-session/03-hazards.md). Always available; a serve-only process simply
+    /// resolves no session until a loop registers one. The service selects by
+    /// `session_id` (empty ⇒ the sole live session, for the single-session observer).
+    pub fn session_source_registry(&self) -> Arc<dyn agent_core::SessionSourceRegistry> {
+        self.events.clone()
     }
 
     pub fn review_collector(&self) -> Option<Arc<dyn agent_core::ReviewCollector>> {
@@ -771,9 +769,13 @@ impl Agent {
     /// entry point used by the [`SessionManager`] / portal, so many sessions run over
     /// one shared backend (docs/design/multi-session/02-runtime-split.md).
     pub fn session_with(self: &Arc<Self>, id: agent_core::SessionKey) -> Session {
+        // This session's own event sink (created on first reference), so its
+        // `Subscribe`rs never see a concurrent session's events (hazard B).
+        let events = self.events.get_or_create(id.session.as_str());
         Session {
             agent: self.clone(),
             id,
+            events,
             working: WorkingSet::default(),
             budget: TokenBudget {
                 max_context_tokens: self.settings.context_window,
@@ -827,12 +829,12 @@ impl Agent {
         tool_ctx: &ToolContext,
         tool_schemas: &[ToolSchema],
         pending_switch: &mut Option<(agent_core::TaskMode, agent_core::TaskMode)>,
+        events: &crate::SessionEvents,
     ) -> anyhow::Result<String> {
         let model = self.settings.model.as_str();
         for iter in 1..=self.settings.max_iterations {
             self.metrics.on_iteration();
-            self.event_sink
-                .publish(agent_core::SessionEvent::IterationStart { iter: iter as u32 });
+            events.publish(agent_core::SessionEvent::IterationStart { iter: iter as u32 });
             if !self.hooks.is_empty() {
                 self.hooks.pre_turn(working).await;
             }
@@ -872,7 +874,7 @@ impl Agent {
             // echo); `stream=false` is the buffered path (an escape hatch for
             // servers that misbehave on SSE).
             let resp = if self.settings.stream {
-                self.complete_streaming(req)
+                self.complete_streaming(req, events)
                     .instrument(tracing::info_span!("provider.stream", iter, model))
                     .await?
             } else {
@@ -906,12 +908,11 @@ impl Agent {
                     .add_tokens(model, u.prompt_tokens as u64, u.completion_tokens as u64);
                 self.metrics
                     .set_context(u.prompt_tokens as i64, msg_count as i64);
-                self.event_sink
-                    .publish(agent_core::SessionEvent::ContextUpdate {
-                        prompt_tokens: u.prompt_tokens,
-                        context_window: self.settings.context_window,
-                        messages: msg_count as u32,
-                    });
+                events.publish(agent_core::SessionEvent::ContextUpdate {
+                    prompt_tokens: u.prompt_tokens,
+                    context_window: self.settings.context_window,
+                    messages: msg_count as u32,
+                });
                 // Prompt-cache token split (Anthropic/OpenAI report these) + USD cost
                 // from the price table — the accounting half of the tokenizer seam.
                 self.metrics.add_cache_tokens(
@@ -1122,13 +1123,12 @@ impl Agent {
             // (docs/design/portal). Guarded so an unobserved run does not stringify
             // the args. Sequential + pre-execution, so ordering is deterministic even
             // though the calls themselves may run in parallel below.
-            if self.event_sink.has_subscribers() {
+            if events.has_subscribers() {
                 for call in &assistant.tool_calls {
-                    self.event_sink
-                        .publish(agent_core::SessionEvent::ToolCallStart {
-                            name: call.name.clone(),
-                            args: call.arguments.to_string(),
-                        });
+                    events.publish(agent_core::SessionEvent::ToolCallStart {
+                        name: call.name.clone(),
+                        args: call.arguments.to_string(),
+                    });
                 }
             }
 
@@ -1231,14 +1231,13 @@ impl Agent {
                 // for a denied/blocked call (no observation) too. duration_ms is
                 // best-effort 0 here — precise per-tool latency is in
                 // `agent_tool_exec_seconds` (reachable via the MetricsProxy seam).
-                if self.event_sink.has_subscribers() {
+                if events.has_subscribers() {
                     let ok = call_errored.map(|e| !e).unwrap_or(false);
-                    self.event_sink
-                        .publish(agent_core::SessionEvent::ToolCallResult {
-                            name: call.name.clone(),
-                            ok,
-                            duration_ms: 0,
-                        });
+                    events.publish(agent_core::SessionEvent::ToolCallResult {
+                        name: call.name.clone(),
+                        ok,
+                        duration_ms: 0,
+                    });
                 }
                 working.messages.push(msg.clone());
                 self.record("tool", msg).await;
@@ -1285,6 +1284,7 @@ impl Agent {
     async fn complete_streaming(
         &self,
         req: CompletionRequest,
+        events: &crate::SessionEvents,
     ) -> anyhow::Result<CompletionResponse> {
         let mut stream = self.provider.stream(req).await?;
         let mut content = String::new();
@@ -1301,11 +1301,10 @@ impl Agent {
                 echoed = true;
                 // Publish the delta to any live observer (docs/design/portal). Guard
                 // on subscribers so the unobserved hot path allocates nothing extra.
-                if self.event_sink.has_subscribers() {
-                    self.event_sink
-                        .publish(agent_core::SessionEvent::TokenDelta {
-                            text: chunk.delta_text.clone(),
-                        });
+                if events.has_subscribers() {
+                    events.publish(agent_core::SessionEvent::TokenDelta {
+                        text: chunk.delta_text.clone(),
+                    });
                 }
                 content.push_str(&chunk.delta_text);
             }
@@ -1481,12 +1480,15 @@ impl SessionManager {
             .clone()
     }
 
-    /// Drop a finished session, freeing its state. Absent key is a no-op.
+    /// Drop a finished session, freeing its state. Absent key is a no-op. Also
+    /// retires the session's event sink from the backend registry, so a dead session
+    /// stops being observable and its broadcast channel is freed (hazard B eviction).
     pub fn remove(&self, key: &agent_core::SessionKey) {
         self.sessions
             .lock()
             .expect("session map poisoned")
             .remove(key);
+        self.backend.events.remove(key.session.as_str());
     }
 
     /// Number of live sessions.
@@ -1516,6 +1518,13 @@ pub struct Session {
     /// This conversation's `(user, session)` identity — scopes the turn's ambient
     /// identity (so `= "grpc"` seam calls carry it) and attributes the run's trace.
     id: agent_core::SessionKey,
+    /// This session's **own** event sink (from the backend's
+    /// [`crate::SessionEventsRegistry`], keyed by `id.session`). The loop publishes
+    /// here at its recording sites; a served `AgentSessionService` selecting this
+    /// `session_id` reads the same sink. Owning it per-session (not sharing the
+    /// backend's) is hazard B's fix — concurrent tenants can't cross-observe
+    /// (docs/design/multi-session/03-hazards.md).
+    events: Arc<crate::SessionEvents>,
     working: WorkingSet,
     budget: TokenBudget,
     tool_ctx: ToolContext,
@@ -1644,8 +1653,7 @@ impl Session {
         // tenant identity so a whole trace can be filtered by session/user
         // (docs/design/multi-session/06-observability.md).
         let goal: String = input.chars().take(80).collect();
-        self.agent
-            .event_sink
+        self.events
             .publish(agent_core::SessionEvent::RunStarted { goal: goal.clone() });
         let span = tracing::info_span!(
             "agent.turn",
@@ -1677,8 +1685,7 @@ impl Session {
         self.agent
             .metrics
             .run_finished(outcome, start.elapsed().as_secs_f64());
-        self.agent
-            .event_sink
+        self.events
             .publish(agent_core::SessionEvent::RunFinished { ok: result.is_ok() });
         result
     }
@@ -1742,14 +1749,12 @@ impl Session {
         self.agent
             .metrics
             .on_mode_switch(sw.from.as_str(), sw.to.as_str(), sw.confidence as f64);
-        self.agent
-            .event_sink
-            .publish(agent_core::SessionEvent::ModeSwitch {
-                from: sw.from.as_str().to_string(),
-                to: sw.to.as_str().to_string(),
-                reason: sw.reason.clone(),
-                confidence: sw.confidence,
-            });
+        self.events.publish(agent_core::SessionEvent::ModeSwitch {
+            from: sw.from.as_str().to_string(),
+            to: sw.to.as_str().to_string(),
+            reason: sw.reason.clone(),
+            confidence: sw.confidence,
+        });
         // Arm *this session's* pending switch; the next `compact` consumes it and
         // reshapes through the new mode's lens (adaptive-cognition 02). Owning it on
         // the session — not the shared strategy `Arc` — is what lets concurrent
@@ -1950,6 +1955,7 @@ impl Session {
                 &self.tool_ctx,
                 &self.tool_schemas,
                 &mut self.pending_switch,
+                &self.events,
             )
             .await;
         // Cheap per-turn dimensional summarize (adaptive-cognition 03): file "what
