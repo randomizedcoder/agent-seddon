@@ -633,8 +633,20 @@ pub async fn serve_all(agent: &Agent, listen: Endpoint) -> anyhow::Result<()> {
 /// its own — it runs until the returned future is dropped, so a `tokio::select!`
 /// that also drives the run stops it exactly when the run ends. Shares the live
 /// agent's session source, so a portal sees the loop's events in real time.
+/// A shed observer that bridges the admission layer's overload sheds into
+/// `agent_grpc_overload_shed_total` on this process's `/metrics` (the same
+/// registry the loop records into — see `Agent::metrics`).
+fn shed_observer(agent: &Agent) -> agent_grpc::server::ShedObserver {
+    let metrics = agent.metrics();
+    std::sync::Arc::new(move || metrics.on_grpc_overload_shed())
+}
+
 pub async fn serve_session_observe(agent: &Agent, listen: Endpoint) -> anyhow::Result<()> {
-    let (router, health) = agent_grpc::server::base_router(agent.grpc_max_in_flight()).await;
+    let (router, health) = agent_grpc::server::base_router_with_observer(
+        agent.grpc_max_in_flight(),
+        Some(shed_observer(agent)),
+    )
+    .await;
     let (router, added) = add_seam_service(router, agent, Seam::SessionStream)?;
     if !added {
         anyhow::bail!("session-stream seam not available in this build");
@@ -656,7 +668,11 @@ async fn serve_seams(
 ) -> anyhow::Result<()> {
     // Health is the seed of the router, so hosting one seam and hosting all of
     // them are the same code path rather than two that can drift.
-    let (mut router, health) = agent_grpc::server::base_router(agent.grpc_max_in_flight()).await;
+    let (mut router, health) = agent_grpc::server::base_router_with_observer(
+        agent.grpc_max_in_flight(),
+        Some(shed_observer(agent)),
+    )
+    .await;
     let mut hosted: Vec<&str> = Vec::new();
     for &seam in seams {
         let (next, added) = add_seam_service(router, agent, seam)?;

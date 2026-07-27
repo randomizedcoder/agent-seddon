@@ -86,6 +86,7 @@ pub struct Metrics {
     // Capacity / backpressure (docs/design/gpu-pool/02-capacity.md).
     pool_member_saturated: IntGaugeVec,
     pool_saturation_shed: IntCounter,
+    grpc_overload_shed: IntCounter,
     // Graded health (docs/design/gpu-pool/03-gpu-health.md).
     pool_member_state: IntGaugeVec,
     pool_member_latency_ewma: IntGaugeVec,
@@ -401,6 +402,11 @@ impl Metrics {
         let pool_saturation_shed = IntCounter::new(
             "agent_pool_saturation_shed_total",
             "Dispatches shed because every eligible pool member was saturated",
+        )
+        .unwrap();
+        let grpc_overload_shed = IntCounter::new(
+            "agent_grpc_overload_shed_total",
+            "gRPC requests shed under overload by the admission layer (RESOURCE_EXHAUSTED)",
         )
         .unwrap();
         let pool_member_state = IntGaugeVec::new(
@@ -1030,6 +1036,7 @@ impl Metrics {
             Box::new(pool_selects.clone()),
             Box::new(pool_member_saturated.clone()),
             Box::new(pool_saturation_shed.clone()),
+            Box::new(grpc_overload_shed.clone()),
             Box::new(pool_member_state.clone()),
             Box::new(pool_member_latency_ewma.clone()),
             Box::new(mode_classifications.clone()),
@@ -1152,6 +1159,7 @@ impl Metrics {
             pool_selects,
             pool_member_saturated,
             pool_saturation_shed,
+            grpc_overload_shed,
             pool_member_state,
             pool_member_latency_ewma,
             mode_classifications,
@@ -1367,6 +1375,12 @@ impl Metrics {
             .set(saturated);
     }
     /// LLM pool: a dispatch shed because every eligible member was saturated.
+    /// A request was shed by the gRPC admission layer under overload (the
+    /// server-side counterpart of the `RESOURCE_EXHAUSTED` the client sees).
+    pub fn on_grpc_overload_shed(&self) {
+        self.grpc_overload_shed.inc();
+    }
+
     pub fn on_pool_saturation_shed(&self) {
         self.pool_saturation_shed.inc();
     }
@@ -1927,6 +1941,7 @@ mod tests {
         m.on_tool("bash", "ok");
         m.on_verifier("schema", "allow", "shadow");
         m.run_finished("success", 1.5);
+        m.on_grpc_overload_shed();
 
         let text = m.encode_text();
         for name in [
@@ -1939,6 +1954,7 @@ mod tests {
             "agent_tool_calls_total",
             "agent_verifier_verdicts_total",
             "agent_runs_total",
+            "agent_grpc_overload_shed_total",
         ] {
             assert!(text.contains(name), "missing metric `{name}` in:\n{text}");
         }

@@ -127,3 +127,35 @@ async fn positive_unbounded_cap_never_sheds() {
         assert!(r.is_ok(), "unbounded cap (0) must not shed: {r:?}");
     }
 }
+
+// --- positive_: the shed observer fires exactly once per shed -----------------
+// The serve path wires this observer to `Metrics::on_grpc_overload_shed`, so this
+// is what keeps `agent_grpc_overload_shed_total` faithful to the wire behaviour.
+#[tokio::test]
+async fn positive_shed_observer_fires_once_per_shed() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let count = Arc::new(AtomicUsize::new(0));
+    let obs: agent_grpc::server::ShedObserver = {
+        let count = count.clone();
+        Arc::new(move || {
+            count.fetch_add(1, Ordering::Relaxed);
+        })
+    };
+    let (router, _health) = agent_grpc::server::base_router_with_observer(2, Some(obs)).await;
+    let router = router.add_service(
+        agent_grpc::server::ProviderService::new(Arc::new(SlowProvider {
+            delay: Duration::from_millis(300),
+        }))
+        .into_server(),
+    );
+    let (dial, _srv) = spawn(Transport::Tcp, router).await;
+
+    let shed = flood(&dial, 8).await.iter().filter(|r| r.is_err()).count();
+    assert!(shed >= 1, "some requests must be shed past the cap");
+    assert_eq!(
+        count.load(Ordering::Relaxed),
+        shed,
+        "the observer must fire exactly once per shed"
+    );
+}

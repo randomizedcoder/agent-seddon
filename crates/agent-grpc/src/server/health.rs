@@ -30,7 +30,10 @@
 
 use tonic::transport::Server;
 
-use super::{admission::AdmissionLayer, ServeRouter};
+use super::{
+    admission::{AdmissionLayer, ShedObserver},
+    ServeRouter,
+};
 
 /// Default retry hint advertised on a shed (`grpc-retry-pushback-ms`). The client
 /// clamps it; ~100 ms is long enough to relieve a transient burst without idling.
@@ -100,6 +103,17 @@ impl HealthHandle {
 /// what lets one process host several seams (`--serve-all`) through the same code
 /// path as one (`--serve-<seam>`).
 pub async fn base_router(max_in_flight: usize) -> (ServeRouter, HealthHandle) {
+    base_router_with_observer(max_in_flight, None).await
+}
+
+/// Like [`base_router`], but attaches a shed observer to the admission layer so a
+/// caller can count sheds as a metric (the serve path bridges it to
+/// `agent_grpc_overload_shed_total`). Kept as a separate entry point so the many
+/// test/example callers of `base_router` need no change.
+pub async fn base_router_with_observer(
+    max_in_flight: usize,
+    on_shed: Option<ShedObserver>,
+) -> (ServeRouter, HealthHandle) {
     let (mut reporter, health_service) = tonic_health::server::health_reporter();
     reporter
         .set_service_status("", tonic_health::ServingStatus::Serving)
@@ -108,7 +122,7 @@ pub async fn base_router(max_in_flight: usize) -> (ServeRouter, HealthHandle) {
         // The admission layer wraps the whole routed service, so every seam added
         // onto this router (and `--serve-all`) sheds overload uniformly.
         Server::builder()
-            .layer(AdmissionLayer::new(max_in_flight, SHED_PUSHBACK_MS))
+            .layer(AdmissionLayer::new(max_in_flight, SHED_PUSHBACK_MS).with_observer(on_shed))
             .add_service(health_service),
         HealthHandle {
             inner: tokio::sync::Mutex::new(Inner {

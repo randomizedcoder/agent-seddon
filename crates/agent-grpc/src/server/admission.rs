@@ -22,12 +22,18 @@ use tower::{Layer, Service};
 /// (`agent-retry` `parse_pushback`). Mirrors the gRPC pushback convention.
 const PUSHBACK_KEY: &str = "grpc-retry-pushback-ms";
 
+/// Called once per shed, so an owner can bridge the event to a metric without this
+/// transport-level layer depending on `agent-metrics`. The serve path wires it to
+/// `Metrics::on_grpc_overload_shed`; tests can pass their own.
+pub type ShedObserver = Arc<dyn Fn() + Send + Sync>;
+
 /// Applies [`Admission`] to a service. Cheap to clone (shared semaphore + counter).
 #[derive(Clone)]
 pub struct AdmissionLayer {
     sem: Option<Arc<Semaphore>>,
     pushback_ms: i64,
     shed: Arc<AtomicU64>,
+    on_shed: Option<ShedObserver>,
 }
 
 impl AdmissionLayer {
@@ -38,7 +44,15 @@ impl AdmissionLayer {
             sem: (max_in_flight > 0).then(|| Arc::new(Semaphore::new(max_in_flight))),
             pushback_ms,
             shed: Arc::new(AtomicU64::new(0)),
+            on_shed: None,
         }
+    }
+
+    /// Attach an observer invoked on every shed (in addition to the in-process
+    /// counter) — the serve path uses it to increment `agent_grpc_overload_shed_total`.
+    pub fn with_observer(mut self, on_shed: Option<ShedObserver>) -> Self {
+        self.on_shed = on_shed;
+        self
     }
 
     /// The shared shed counter, so a caller (the load harness) can read how many
@@ -56,6 +70,7 @@ impl<S> Layer<S> for AdmissionLayer {
             sem: self.sem.clone(),
             pushback_ms: self.pushback_ms,
             shed: self.shed.clone(),
+            on_shed: self.on_shed.clone(),
         }
     }
 }
@@ -68,6 +83,7 @@ pub struct Admission<S> {
     sem: Option<Arc<Semaphore>>,
     pushback_ms: i64,
     shed: Arc<AtomicU64>,
+    on_shed: Option<ShedObserver>,
 }
 
 impl<S> Service<http::Request<BoxBody>> for Admission<S>
@@ -91,6 +107,9 @@ where
                 Err(_) => {
                     // At capacity → shed now, without touching the inner service.
                     self.shed.fetch_add(1, Ordering::Relaxed);
+                    if let Some(obs) = &self.on_shed {
+                        obs();
+                    }
                     let resp = overloaded_response(self.pushback_ms);
                     return Box::pin(async move { Ok(resp) });
                 }
