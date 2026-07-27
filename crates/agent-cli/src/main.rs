@@ -145,130 +145,147 @@ async fn main() -> Result<()> {
     // Resolve an optional resume target to (id, transcript).
     let resumed = resolve_resume(&resume, &sessions_dir);
 
+    // Multi-session identity origin (docs/design/multi-session/01-identity.md). This
+    // process is a single (local) user; its session id is the telemetry session id
+    // when present, else a freshly-minted one so a `= "grpc"` seam call still carries
+    // a well-formed identity. Scoping the run means any remote seam the loop dials
+    // receives `(user, session)` in its metadata; server handler tasks are spawned by
+    // tonic and do *not* inherit this scope, so a hosted seam still uses its caller's
+    // identity, never this process's.
+    let run_session = if session_id.is_empty() {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        session_id.clone()
+    };
+    let identity = agent_core::SessionKey::local(run_session);
+
     // Run either one-shot or the REPL, capturing the answer (one-shot only).
-    let outcome: Result<Option<String>> = match mode {
-        Mode::OneShot(goal) => {
-            let mut session = agent.session();
-            let id = match resumed {
-                Some((rid, msgs)) => {
-                    session.load(msgs);
-                    rid
+    let outcome: Result<Option<String>> = agent_grpc::identity::scope(identity, async {
+        match mode {
+            Mode::OneShot(goal) => {
+                let mut session = agent.session();
+                let id = match resumed {
+                    Some((rid, msgs)) => {
+                        session.load(msgs);
+                        rid
+                    }
+                    None => repl::new_id(),
+                };
+                // Race the run against Ctrl-C: an interrupt should save the (partial)
+                // transcript and clean up rather than killing the process and orphaning
+                // state. Cancelling `send` drops its future; the working set it mutated
+                // in place is still readable via `messages()`.
+                let outcome: Result<Option<String>> = tokio::select! {
+                    r = session.send(&goal) => r.map(Some),
+                    _ = tokio::signal::ctrl_c() => {
+                        eprintln!("\n^C — interrupted; saving session and cleaning up…");
+                        Ok(None)
+                    }
+                    // Runs concurrently, sharing the live session source; resolves only
+                    // if its bind fails. Dropped (server stops) when the run finishes.
+                    res = run_observe(&agent, observe_listen) => res.map(|_| None),
+                };
+                // Always persist the transcript (success, error, or interrupt) so the
+                // run is resumable with `--resume {id}` / `--continue`.
+                if let Err(e) = session_store::save(&sessions_dir, &id, session.messages()) {
+                    tracing::warn!("could not save session `{id}`: {e}");
+                } else {
+                    tracing::info!("session saved as `{id}`");
                 }
-                None => repl::new_id(),
-            };
-            // Race the run against Ctrl-C: an interrupt should save the (partial)
-            // transcript and clean up rather than killing the process and orphaning
-            // state. Cancelling `send` drops its future; the working set it mutated
-            // in place is still readable via `messages()`.
-            let outcome: Result<Option<String>> = tokio::select! {
-                r = session.send(&goal) => r.map(Some),
-                _ = tokio::signal::ctrl_c() => {
-                    eprintln!("\n^C — interrupted; saving session and cleaning up…");
-                    Ok(None)
-                }
-                // Runs concurrently, sharing the live session source; resolves only
-                // if its bind fails. Dropped (server stops) when the run finishes.
-                res = run_observe(&agent, observe_listen) => res.map(|_| None),
-            };
-            // Always persist the transcript (success, error, or interrupt) so the
-            // run is resumable with `--resume {id}` / `--continue`.
-            if let Err(e) = session_store::save(&sessions_dir, &id, session.messages()) {
-                tracing::warn!("could not save session `{id}`: {e}");
-            } else {
-                tracing::info!("session saved as `{id}`");
+                outcome
             }
-            outcome
-        }
-        Mode::Repl => tokio::select! {
-            r = repl::run(&agent, &sessions_dir, resumed) => r.map(|()| None),
-            res = run_observe(&agent, observe_listen) => res.map(|_| None),
-        },
-        Mode::Scheduler => {
-            // Tick until interrupted. Each due job runs as a fresh headless turn,
-            // and the scheduler's own overlap guard is what stops a slow job
-            // stacking copies of itself.
-            let every = std::time::Duration::from_secs(cfg_tick_secs.max(1));
-            eprintln!("scheduler: ticking every {}s — ^C to stop", every.as_secs());
-            loop {
-                tokio::select! {
-                    _ = tokio::time::sleep(every) => {
-                        let n = agent.tick_scheduler().await;
-                        if n > 0 {
-                            tracing::info!(jobs = n, "scheduler fired due jobs");
+            Mode::Repl => tokio::select! {
+                r = repl::run(&agent, &sessions_dir, resumed) => r.map(|()| None),
+                res = run_observe(&agent, observe_listen) => res.map(|_| None),
+            },
+            Mode::Scheduler => {
+                // Tick until interrupted. Each due job runs as a fresh headless turn,
+                // and the scheduler's own overlap guard is what stops a slow job
+                // stacking copies of itself.
+                let every = std::time::Duration::from_secs(cfg_tick_secs.max(1));
+                eprintln!("scheduler: ticking every {}s — ^C to stop", every.as_secs());
+                loop {
+                    tokio::select! {
+                        _ = tokio::time::sleep(every) => {
+                            let n = agent.tick_scheduler().await;
+                            if n > 0 {
+                                tracing::info!(jobs = n, "scheduler fired due jobs");
+                            }
+                        }
+                        _ = tokio::signal::ctrl_c() => {
+                            eprintln!("\n^C — stopping the scheduler");
+                            break;
                         }
                     }
-                    _ = tokio::signal::ctrl_c() => {
-                        eprintln!("\n^C — stopping the scheduler");
-                        break;
-                    }
-                }
-            }
-            Ok(None)
-        }
-        Mode::Review(target, gate) => match agent.review_collector() {
-            Some(collector) => {
-                let facts = collector
-                    .collect(&target)
-                    .await
-                    .context("collecting grounded review facts")?;
-                // Record the run (best-effort telemetry → agent_reviews / episodic).
-                agent
-                    .record_review(agent_core::ReviewRecord::from_facts(&facts, "explicit"))
-                    .await;
-                println!("{}", agent_review::render_facts_with(&facts, review_budget));
-                // `--gate`: a changed-files-only CI gate — fail the build (non-zero
-                // exit) when the synthesized risk crosses the configured threshold.
-                if gate && facts.risk.gate_failed {
-                    anyhow::bail!(
-                        "review gate FAILED: {} at risk {:.2} ≥ threshold {:.2}",
-                        facts
-                            .risk
-                            .files
-                            .first()
-                            .map(|f| f.file.as_str())
-                            .unwrap_or("(unknown)"),
-                        facts.risk.max_score,
-                        facts.risk.gate_threshold,
-                    );
                 }
                 Ok(None)
             }
-            None => anyhow::bail!(
+            Mode::Review(target, gate) => match agent.review_collector() {
+                Some(collector) => {
+                    let facts = collector
+                        .collect(&target)
+                        .await
+                        .context("collecting grounded review facts")?;
+                    // Record the run (best-effort telemetry → agent_reviews / episodic).
+                    agent
+                        .record_review(agent_core::ReviewRecord::from_facts(&facts, "explicit"))
+                        .await;
+                    println!("{}", agent_review::render_facts_with(&facts, review_budget));
+                    // `--gate`: a changed-files-only CI gate — fail the build (non-zero
+                    // exit) when the synthesized risk crosses the configured threshold.
+                    if gate && facts.risk.gate_failed {
+                        anyhow::bail!(
+                            "review gate FAILED: {} at risk {:.2} ≥ threshold {:.2}",
+                            facts
+                                .risk
+                                .files
+                                .first()
+                                .map(|f| f.file.as_str())
+                                .unwrap_or("(unknown)"),
+                            facts.risk.max_score,
+                            facts.risk.gate_threshold,
+                        );
+                    }
+                    Ok(None)
+                }
+                None => anyhow::bail!(
                 "the review flow is not enabled — set `[review] backend = \"local\"` in the config"
             ),
-        },
-        Mode::Detect(prompt) => match agent.task_classifier() {
-            Some(classifier) => {
-                let v = classifier
-                    .classify(&agent_core::ClassifyCtx {
-                        prompt: &prompt,
-                        history: &[],
-                    })
-                    .await;
-                println!(
-                    "mode={} confidence={:.2} reason={}",
-                    v.mode.as_str(),
-                    v.confidence,
-                    v.reason
-                );
-                Ok(None)
-            }
-            None => anyhow::bail!(
+            },
+            Mode::Detect(prompt) => match agent.task_classifier() {
+                Some(classifier) => {
+                    let v = classifier
+                        .classify(&agent_core::ClassifyCtx {
+                            prompt: &prompt,
+                            history: &[],
+                        })
+                        .await;
+                    println!(
+                        "mode={} confidence={:.2} reason={}",
+                        v.mode.as_str(),
+                        v.confidence,
+                        v.reason
+                    );
+                    Ok(None)
+                }
+                None => anyhow::bail!(
                 "mode detection is not enabled — set `[mode] classifier = \"hybrid\"` in the config"
             ),
-        },
-        Mode::ServeMcp => mcp_server::serve(&agent).await.map(|()| None),
-        Mode::ServeGrpc(..) => {
-            let (seam, listen) = serve_grpc.expect("serve target resolved above");
-            grpc_server::serve(&agent, seam, listen)
-                .await
-                .map(|()| None)
+            },
+            Mode::ServeMcp => mcp_server::serve(&agent).await.map(|()| None),
+            Mode::ServeGrpc(..) => {
+                let (seam, listen) = serve_grpc.expect("serve target resolved above");
+                grpc_server::serve(&agent, seam, listen)
+                    .await
+                    .map(|()| None)
+            }
+            Mode::ServeGrpcAll(..) => {
+                let listen = serve_grpc_all_listen.expect("gateway target resolved above");
+                grpc_server::serve_all(&agent, listen).await.map(|()| None)
+            }
         }
-        Mode::ServeGrpcAll(..) => {
-            let listen = serve_grpc_all_listen.expect("gateway target resolved above");
-            grpc_server::serve_all(&agent, listen).await.map(|()| None)
-        }
-    };
+    })
+    .await;
 
     // Remove this session's disposable worktrees on every exit path (best-effort),
     // so an aborted or finished run doesn't leave them orphaned on disk.

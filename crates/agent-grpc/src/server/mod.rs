@@ -81,10 +81,30 @@ pub use tokenizer::*;
 pub use tools::*;
 pub use web::*;
 
-/// Build a per-call span parented on the caller's extracted trace context.
+/// Build a per-call span parented on the caller's extracted trace context, and
+/// attribute it to the calling tenant when a well-formed `(user, session)` identity
+/// is present in the metadata (docs/design/multi-session/01-identity.md).
+///
+/// The identity is attacker-controllable, so each segment is validated with
+/// `agent_core::safe_segment` before being recorded; a malformed or absent segment is
+/// simply not attributed here. Per-seam **fail-closed enforcement** for stateful RPCs
+/// (reject when identity is absent) lands with the stateful-seam keying, once the
+/// client side reliably sends identity — see docs/design/multi-session/04-tenancy.md.
 pub(crate) fn span(rpc: &'static str, meta: &tonic::metadata::MetadataMap) -> tracing::Span {
-    let s = tracing::info_span!("grpc.server", rpc);
+    let s = tracing::info_span!(
+        "grpc.server",
+        rpc,
+        session_id = tracing::field::Empty,
+        user_id = tracing::field::Empty,
+    );
     s.set_parent(agent_proto::trace::extract_context(meta));
+    let (user, session) = agent_proto::identity::extract_identity(meta);
+    if let Some(u) = user.as_deref().filter(|u| agent_core::safe_segment(u)) {
+        s.record("user_id", u);
+    }
+    if let Some(sess) = session.as_deref().filter(|s| agent_core::safe_segment(s)) {
+        s.record("session_id", sess);
+    }
     s
 }
 

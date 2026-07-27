@@ -29,16 +29,12 @@ pub(crate) fn lang_of(path: &Path) -> String {
     .to_string()
 }
 
-/// Fail-closed single-segment validator (a copy of `agent-git`'s `safe_segment`).
+/// Fail-closed single-segment validator — the shared `agent_core::safe_segment`
+/// (promoted there for multi-session; see docs/design/multi-session/01-identity.md).
 /// Rejects empty, `.`/`..`, a leading `-`, and anything outside `[A-Za-z0-9._-]`
 /// — blocking path traversal and ref injection in a caller-supplied branch name.
 pub(crate) fn safe_segment(s: &str) -> bool {
-    !s.is_empty()
-        && s != "."
-        && s != ".."
-        && !s.starts_with('-')
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    agent_core::safe_segment(s)
 }
 
 /// A "noisy" file whose *content diff* is low-signal for a reviewer — a lockfile

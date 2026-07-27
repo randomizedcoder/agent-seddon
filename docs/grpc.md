@@ -275,6 +275,35 @@ context into request metadata (`client.rs`'s `outbound()`); each gRPC **server**
 extracts it and `set_parent`s the handler's span on it (`server.rs`'s `span()`). The
 collector then stitches gateway → tool-worker → memory-service spans into one trace.
 
+## Session/user identity on the wire
+
+Multi-session identity rides the **same two choke-points** as trace context, as gRPC
+metadata (not a `.proto` field, so it is additive and `buf breaking` never sees it):
+
+| Metadata key | Carries |
+|---|---|
+| `x-agent-session-id` | the session id (a server-minted UUID in the multi-user flow) |
+| `x-agent-user-id` | the user id (`local` for the single-user CLI/REPL) |
+
+- [`agent-proto::identity`](../crates/agent-proto/src/identity.rs) defines the key
+  constants and `inject_identity` / `extract_identity` over tonic metadata.
+- The ambient `(user, session)` for the current task is a dedicated
+  [`tokio::task_local`](../crates/agent-grpc/src/identity.rs) (`AGENT_IDENTITY`) —
+  **not** OpenTelemetry baggage, so it flows whether or not telemetry is configured
+  (a security boundary must not depend on OTLP being on). `outbound()` injects it
+  alongside trace context; `server::span()` extracts it, validates each segment with
+  `agent_core::safe_segment`, and attributes the handler span (`session_id` /
+  `user_id`). A server-as-client (`--serve-all`) forwards the caller's identity via
+  the same task-local.
+
+> **Trust boundary (important).** These values are **attacker-controllable** — there
+> is no authentication layer yet. They are trusted only as routing/namespacing
+> labels, and only as far as the transport (UDS file perms / loopback) already trusts
+> the peer. Isolation is enforced *structurally* (per-tenant paths guarded by
+> `safe_segment` + `confine`), so even a spoofed identity cannot escape the namespace
+> it names. A real `auth-token → user_id` interceptor is a **named follow-up** — see
+> [`docs/design/multi-session/07-security.md`](design/multi-session/07-security.md).
+
 ## Deployment sketch (k8s)
 
 ```
