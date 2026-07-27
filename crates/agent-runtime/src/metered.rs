@@ -677,10 +677,21 @@ impl ContextStrategy for MeteredContext {
             .on_context_op("assemble", start.elapsed().as_secs_f64());
         out
     }
-    async fn compact(&self, working: &mut WorkingSet, budget: &TokenBudget) -> Result<()> {
+    async fn compact(
+        &self,
+        working: &mut WorkingSet,
+        budget: &TokenBudget,
+        switch: Option<(agent_core::TaskMode, agent_core::TaskMode)>,
+    ) -> Result<agent_core::CompactAction> {
+        use agent_core::CompactAction;
+        // Count the intended switch (it maps 1:1 to this compact's reshape).
+        if let Some((from, to)) = switch {
+            self.metrics
+                .on_switch_compaction(from.as_str(), to.as_str());
+        }
         let before = rough_tokens(&working.messages);
         let start = Instant::now();
-        let out = self.inner.compact(working, budget).await;
+        let action = self.inner.compact(working, budget, switch).await?;
         self.metrics
             .on_context_op("compact", start.elapsed().as_secs_f64());
         // `compact` is called every iteration; only record a compaction when it
@@ -689,11 +700,9 @@ impl ContextStrategy for MeteredContext {
         if after < before {
             self.metrics.on_compaction(before as i64, after as i64);
         }
-        // Mode-aware compaction (adaptive-cognition 02): the strategy self-reports
-        // how the last compact behaved. Budget vs switch labels the shed; a switch
-        // that had to fall back is counted so degradation is visible.
-        use agent_core::CompactAction;
-        let action = self.inner.last_compact_action();
+        // Mode-aware compaction (adaptive-cognition 02): the strategy reports how the
+        // compact behaved. Budget vs switch labels the shed; a switch that had to
+        // fall back is counted so degradation is visible.
         let trigger = if action == CompactAction::Budget {
             "budget"
         } else {
@@ -708,19 +717,7 @@ impl ContextStrategy for MeteredContext {
             CompactAction::FallbackDrop => self.metrics.on_summary_fallback("drop"),
             _ => {}
         }
-        out
-    }
-
-    fn on_mode_switch(&self, from: agent_core::TaskMode, to: agent_core::TaskMode) {
-        // Count the intended switch here (it maps 1:1 to the next compact's
-        // reshape), then arm the wrapped strategy.
-        self.metrics
-            .on_switch_compaction(from.as_str(), to.as_str());
-        self.inner.on_mode_switch(from, to);
-    }
-
-    fn last_compact_action(&self) -> agent_core::CompactAction {
-        self.inner.last_compact_action()
+        Ok(action)
     }
 }
 

@@ -1,11 +1,13 @@
 //! `context-mode-aware` — reshape context on a task-mode switch.
 //!
 //! Between switches this is exactly [`SummarizingWindow`]: budget-triggered,
-//! mode-agnostic summarize-the-middle. On a switch (armed by the runtime via
-//! [`ContextStrategy::on_mode_switch`]) it runs a **switch compaction** regardless
-//! of budget — it re-summarizes the demoted middle **through the destination
-//! mode's lens** so context useful in the old mode but noise in the new one is
-//! shed deliberately (docs/design/adaptive-cognition/02-compaction.md).
+//! mode-agnostic summarize-the-middle. On a switch (passed by the runtime as the
+//! `switch` argument to [`ContextStrategy::compact`]) it runs a **switch compaction**
+//! regardless of budget — it re-summarizes the demoted middle **through the
+//! destination mode's lens** so context useful in the old mode but noise in the new
+//! one is shed deliberately (docs/design/adaptive-cognition/02-compaction.md). The
+//! switch is a caller-owned parameter, not strategy state, so one shared `Arc` serves
+//! many concurrent sessions without racing (docs/design/multi-session/03-hazards.md).
 //!
 //! Invariants: the leading system head is always kept verbatim, and the recent
 //! tail (the turn that triggered the switch — the new mode's starting context) is
@@ -25,17 +27,11 @@ use agent_core::{
     TaskMode, TokenBudget, Tokenizer, WorkingSet,
 };
 use async_trait::async_trait;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 pub struct ModeAwareWindow {
     inner: SummarizingWindow,
     keep_recent_tokens: u32,
-    /// The pending switch armed by `on_mode_switch`, consumed by the next
-    /// `compact`. Behind a `Mutex` because `compact`/`on_mode_switch` take `&self`
-    /// (the strategy lives behind an `Arc`). Never held across an `.await`.
-    pending: Mutex<Option<(TaskMode, TaskMode)>>,
-    /// How the most recent `compact` behaved, for the metered decorator's labels.
-    last_action: Mutex<CompactAction>,
     /// Per-mode lens resolver (compiled defaults, or operator overrides under
     /// `<prompts_dir>/lens/`). Defaults-only unless a dir is wired via
     /// [`Self::with_lens_dir`], so existing call sites are unchanged.
@@ -47,8 +43,6 @@ impl ModeAwareWindow {
         Self {
             inner: SummarizingWindow::new(summarizer, keep_recent_tokens),
             keep_recent_tokens,
-            pending: Mutex::new(None),
-            last_action: Mutex::new(CompactAction::Budget),
             lens: LensPrompts::defaults(),
         }
     }
@@ -70,10 +64,6 @@ impl ModeAwareWindow {
     ) -> Self {
         self.inner = self.inner.with_tokenizer(tokenizer, model);
         self
-    }
-
-    fn set_action(&self, action: CompactAction) {
-        *self.last_action.lock().expect("last_action poisoned") = action;
     }
 
     /// Unconditionally reshape `working` through the destination mode's lens.
@@ -145,29 +135,18 @@ impl ContextStrategy for ModeAwareWindow {
         self.inner.assemble(input).await
     }
 
-    async fn compact(&self, working: &mut WorkingSet, budget: &TokenBudget) -> Result<()> {
-        // Take the armed switch without holding the lock across the await.
-        let armed = self.pending.lock().expect("pending poisoned").take();
-        match armed {
-            Some((_from, to)) => {
-                let action = self.switch_compact(working, to).await;
-                self.set_action(action);
-                Ok(())
-            }
-            None => {
-                let out = self.inner.compact(working, budget).await;
-                self.set_action(CompactAction::Budget);
-                out
-            }
+    async fn compact(
+        &self,
+        working: &mut WorkingSet,
+        budget: &TokenBudget,
+        switch: Option<(TaskMode, TaskMode)>,
+    ) -> Result<CompactAction> {
+        // The armed switch is a caller-owned parameter, not strategy state — so one
+        // shared `Arc` serves many sessions without racing.
+        match switch {
+            Some((_from, to)) => Ok(self.switch_compact(working, to).await),
+            None => self.inner.compact(working, budget, None).await,
         }
-    }
-
-    fn on_mode_switch(&self, from: TaskMode, to: TaskMode) {
-        *self.pending.lock().expect("pending poisoned") = Some((from, to));
-    }
-
-    fn last_compact_action(&self) -> CompactAction {
-        *self.last_action.lock().expect("last_action poisoned")
     }
 }
 
@@ -198,6 +177,7 @@ mod tests {
         Role, Usage,
     };
     use rstest::rstest;
+    use std::sync::Mutex;
 
     fn long(role: Role, n: usize) -> Message {
         let content = "x ".repeat(n);
@@ -243,10 +223,6 @@ mod tests {
         }
     }
 
-    fn armed(strat: &ModeAwareWindow, from: TaskMode, to: TaskMode) {
-        strat.on_mode_switch(from, to);
-    }
-
     fn fixture() -> WorkingSet {
         WorkingSet {
             messages: vec![
@@ -281,9 +257,11 @@ mod tests {
     ) {
         let spy = SpySummarizer::new();
         let strat = ModeAwareWindow::new(spy.clone(), 200);
-        armed(&strat, TaskMode::Other, to);
         let mut working = fixture();
-        strat.compact(&mut working, &roomy()).await.unwrap();
+        let action = strat
+            .compact(&mut working, &roomy(), Some((TaskMode::Other, to)))
+            .await
+            .unwrap();
 
         // Head system kept; a lens summary inserted; recent tail survived.
         assert_eq!(working.messages[0].role, Role::System);
@@ -296,7 +274,7 @@ mod tests {
             seen.iter().any(|s| s.contains(lens_marker)),
             "expected lens {lens_marker} in {seen:?}"
         );
-        assert_eq!(strat.last_compact_action(), CompactAction::Switch);
+        assert_eq!(action, CompactAction::Switch);
     }
 
     // --- negative_: no switch armed → ordinary budget behaviour (here: under
@@ -307,9 +285,9 @@ mod tests {
         let mut working = WorkingSet {
             messages: vec![Message::system("s"), Message::user("hi")],
         };
-        strat.compact(&mut working, &roomy()).await.unwrap();
+        let action = strat.compact(&mut working, &roomy(), None).await.unwrap();
         assert_eq!(working.messages.len(), 2);
-        assert_eq!(strat.last_compact_action(), CompactAction::Budget);
+        assert_eq!(action, CompactAction::Budget);
     }
 
     // --- corner_: an empty middle (huge keep_recent) → head+tail kept intact,
@@ -317,25 +295,37 @@ mod tests {
     #[tokio::test]
     async fn corner_empty_middle_keeps_all() {
         let strat = ModeAwareWindow::new(SpySummarizer::new(), 1_000_000);
-        armed(&strat, TaskMode::Other, TaskMode::Implement);
         let mut working = fixture();
         let before = working.messages.len();
-        strat.compact(&mut working, &roomy()).await.unwrap();
+        let action = strat
+            .compact(
+                &mut working,
+                &roomy(),
+                Some((TaskMode::Other, TaskMode::Implement)),
+            )
+            .await
+            .unwrap();
         assert_eq!(working.messages.len(), before, "nothing demoted");
-        assert_eq!(strat.last_compact_action(), CompactAction::Switch);
+        assert_eq!(action, CompactAction::Switch);
     }
 
     // --- boundary_: only head + tail present (no middle) → Switch, unchanged.
     #[tokio::test]
     async fn boundary_head_and_tail_only() {
         let strat = ModeAwareWindow::new(SpySummarizer::new(), 200);
-        armed(&strat, TaskMode::Other, TaskMode::Review);
         let mut working = WorkingSet {
             messages: vec![Message::system("head"), long(Role::Assistant, 5)],
         };
-        strat.compact(&mut working, &roomy()).await.unwrap();
+        let action = strat
+            .compact(
+                &mut working,
+                &roomy(),
+                Some((TaskMode::Other, TaskMode::Review)),
+            )
+            .await
+            .unwrap();
         assert_eq!(working.messages.len(), 2);
-        assert_eq!(strat.last_compact_action(), CompactAction::Switch);
+        assert_eq!(action, CompactAction::Switch);
     }
 
     /// Returns model text that itself carries an injection directive.
@@ -365,9 +355,15 @@ mod tests {
     #[tokio::test]
     async fn adversarial_flagged_summary_is_dropped_not_inserted() {
         let strat = ModeAwareWindow::new(Arc::new(InjectingSummarizer), 200);
-        armed(&strat, TaskMode::Other, TaskMode::Implement);
         let mut working = fixture();
-        strat.compact(&mut working, &roomy()).await.unwrap();
+        let action = strat
+            .compact(
+                &mut working,
+                &roomy(),
+                Some((TaskMode::Other, TaskMode::Implement)),
+            )
+            .await
+            .unwrap();
         // No message carries the injection text; the span was truncated instead.
         assert!(
             !working.messages.iter().any(|m| m
@@ -376,7 +372,7 @@ mod tests {
                 .contains("ignore all previous")),
             "flagged summary must not enter context"
         );
-        assert_eq!(strat.last_compact_action(), CompactAction::FallbackDrop);
+        assert_eq!(action, CompactAction::FallbackDrop);
         // Head + tail invariants still hold.
         assert_eq!(working.messages[0].role, Role::System);
         assert_eq!(working.messages.last().unwrap().role, Role::Assistant);
@@ -403,10 +399,16 @@ mod tests {
     #[tokio::test]
     async fn corner_summary_failure_falls_back_to_drop() {
         let strat = ModeAwareWindow::new(Arc::new(FailingSummarizer), 200);
-        armed(&strat, TaskMode::Other, TaskMode::Debug);
         let mut working = fixture();
-        strat.compact(&mut working, &roomy()).await.unwrap();
-        assert_eq!(strat.last_compact_action(), CompactAction::FallbackDrop);
+        let action = strat
+            .compact(
+                &mut working,
+                &roomy(),
+                Some((TaskMode::Other, TaskMode::Debug)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(action, CompactAction::FallbackDrop);
         assert!(!working
             .messages
             .iter()
@@ -420,7 +422,6 @@ mod tests {
     async fn adversarial_huge_message_is_bounded() {
         let spy = SpySummarizer::new();
         let strat = ModeAwareWindow::new(spy, 200);
-        armed(&strat, TaskMode::Other, TaskMode::Implement);
         let mut working = WorkingSet {
             messages: vec![
                 Message::system("head"),
@@ -428,10 +429,17 @@ mod tests {
                 long(Role::Assistant, 20),
             ],
         };
-        strat.compact(&mut working, &roomy()).await.unwrap();
+        let action = strat
+            .compact(
+                &mut working,
+                &roomy(),
+                Some((TaskMode::Other, TaskMode::Implement)),
+            )
+            .await
+            .unwrap();
         assert_eq!(working.messages[0].content_text(), "head");
         assert_eq!(working.messages.last().unwrap().role, Role::Assistant);
-        assert_eq!(strat.last_compact_action(), CompactAction::Switch);
+        assert_eq!(action, CompactAction::Switch);
     }
 
     // --- boundary_: a second compact after a switch (nothing armed) is an
@@ -439,12 +447,18 @@ mod tests {
     #[tokio::test]
     async fn boundary_switch_arms_once() {
         let strat = ModeAwareWindow::new(SpySummarizer::new(), 200);
-        armed(&strat, TaskMode::Other, TaskMode::Implement);
         let mut working = fixture();
-        strat.compact(&mut working, &roomy()).await.unwrap();
-        assert_eq!(strat.last_compact_action(), CompactAction::Switch);
+        let action = strat
+            .compact(
+                &mut working,
+                &roomy(),
+                Some((TaskMode::Other, TaskMode::Implement)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(action, CompactAction::Switch);
         // Second call: no arm → budget path, and under budget → no-op.
-        strat.compact(&mut working, &roomy()).await.unwrap();
-        assert_eq!(strat.last_compact_action(), CompactAction::Budget);
+        let action = strat.compact(&mut working, &roomy(), None).await.unwrap();
+        assert_eq!(action, CompactAction::Budget);
     }
 }

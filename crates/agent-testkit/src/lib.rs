@@ -248,8 +248,13 @@ impl ContextStrategy for StaticContext {
             Message::user(input.goal),
         ])
     }
-    async fn compact(&self, _working: &mut WorkingSet, _budget: &TokenBudget) -> Result<()> {
-        Ok(())
+    async fn compact(
+        &self,
+        _working: &mut WorkingSet,
+        _budget: &TokenBudget,
+        _switch: Option<(agent_core::TaskMode, agent_core::TaskMode)>,
+    ) -> Result<agent_core::CompactAction> {
+        Ok(agent_core::CompactAction::Budget)
     }
 }
 
