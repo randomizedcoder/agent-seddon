@@ -1,0 +1,67 @@
+# STATUS — multi-session / multi-user
+
+Authoritative tracker for the track. Where a shipped increment refines a detail in the
+design docs, this file records the refinement (the design docs stay the rationale).
+
+## Increments
+
+| # | Increment | Design doc | State |
+|---|---|---|---|
+| 00 | Design docs | this directory | **written** (pre-implementation) |
+| 01 | Identity foundations (`SessionKey`/`safe_segment`, metadata keys, task-local, inject/extract, fail-closed, span attrs) | [`01-identity.md`](01-identity.md) | pending |
+| 02 | `Backend`/`Session`/`SessionManager` split; per-session cwd | [`02-runtime-split.md`](02-runtime-split.md) | pending |
+| 03 | Fix hazards: stateless `ContextStrategy::compact(switch)`; `SessionEventsRegistry` + selector | [`03-hazards.md`](03-hazards.md) | pending |
+| 04 | Per-user memory/dimension tenancy; stateful-seam keying; confined cwd/root | [`04-tenancy.md`](04-tenancy.md) | pending |
+| 05 | `SessionRegistry` lifecycle (server-mint, idle-GC) | [`05-lifecycle.md`](05-lifecycle.md) | pending |
+| 06 | Session-scoped observability (span attrs, curated metric label, eviction) | [`06-observability.md`](06-observability.md) | pending |
+| 07 | Security hardening (`bash` containment, UDS-per-user, adversarial sweep) | [`07-security.md`](07-security.md) | pending |
+
+> Note: increments 04 and 06 map to two design docs each in some places (tenancy +
+> lifecycle share the confinement-root story; observability spans traces + metrics).
+> The PR breakdown may split or merge them; this table tracks the design docs.
+
+## Decisions locked (from the design review)
+
+- **Auth out of scope; isolation in scope.** Identity = routing/namespacing labels,
+  "only as trustworthy as the transport." Filesystem namespacing enforces isolation
+  even against a spoofed identity. Token→user_id auth is a named follow-up.
+- **Wire = hybrid.** Ambient identity via gRPC metadata (`x-agent-session-id`,
+  `x-agent-user-id`); typed fields only for `SessionRegistry`, `SessionStore`, and the
+  per-call confined cwd/root. All changes additive → **no `buf.image.binpb` bump**.
+- **Tenancy = per-user, cross-session within a user.** Memory/dimensions rooted at
+  `<root>/<user>/…`; dimensions key by user.
+- **Concurrency = shared `Backend` + owned `Session`s** in a `SessionManager` map
+  (`Arc<tokio::Mutex<Session>>` per key); single-session path zero-overhead.
+
+## Open decisions (settle at implementation)
+
+- **Concurrency shape** — `Arc<Mutex<Session>>` map (recommended) vs.
+  actor-per-session. Settle in **02**.
+- **`ContextStrategy` fix** — stateless `compact(switch)` (recommended; ripples the
+  `ContextService` proto additively) vs. `fn fork()` (no proto change, keeps
+  per-instance mutable state). Settle in **03**.
+- **Metric retention policy** — `remove_label_values` on session end **and/or** an LRU
+  cap; confirm the cap value. Settle in **06**.
+
+## Deferred / follow-ups (explicitly out of scope)
+
+- **Authentication interceptor** (token → verified `user_id`, ignoring client-supplied
+  header) — the prerequisite that upgrades identity labels to a real tenancy boundary.
+  Composes with the existing mTLS follow-up in [`grpc.md`](../../grpc.md#possible-follow-ups).
+- **Multi-tenant job *execution*** for `--serve-scheduler` (needs the off-trait
+  executor-claim protocol; today it gains storage only).
+- **Container/multi-host deployment** — unchanged non-goal (README "Running seams as
+  services").
+- **Cross-user memory sharing / team spaces** — the tenancy model is per-user; a shared
+  team namespace is a future extension of the rooting scheme.
+
+## Verification gate (per increment)
+
+- Table-driven tests with **mandatory `adversarial_`** cases for the identity/isolation
+  surface (traversal, spoofing, absent-identity fail-closed).
+- Isolation e2e: two sessions (`alice`/`bob`) over one `--serve-all` gateway assert no
+  cross-tenant read of memory/checkpoints/events/files.
+- Round-trip new/changed services over **TCP and UDS**.
+- `nix flake check` green (clippy `-D warnings`, tests, bench/leak); **confirm
+  `buf breaking` passes with no baseline bump** — `nix run .#buf-image` should not be
+  needed.
