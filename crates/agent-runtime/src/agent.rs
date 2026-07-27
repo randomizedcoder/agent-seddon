@@ -277,12 +277,18 @@ impl Agent {
     /// the scheduler, which is what keeps agent and scheduler from owning each
     /// other.
     #[cfg(feature = "scheduler")]
-    pub async fn tick_scheduler(&self) -> usize {
+    pub async fn tick_scheduler(self: &Arc<Self>) -> usize {
         let Some(s) = &self.scheduler else { return 0 };
-        s.tick_with(|goal| async move {
-            self.run(&goal)
-                .await
-                .map_err(|e| agent_core::Error::Scheduler(e.to_string()))
+        // Each due job runs as a fresh headless session; clone the `Arc` backend into
+        // the executor so the returned future owns it (no borrow of `self`).
+        let this = Arc::clone(self);
+        s.tick_with(move |goal| {
+            let this = Arc::clone(&this);
+            async move {
+                this.run(&goal)
+                    .await
+                    .map_err(|e| agent_core::Error::Scheduler(e.to_string()))
+            }
         })
         .await
     }
@@ -485,7 +491,7 @@ impl Agent {
     }
 
     /// Run a single goal to completion (one-shot): open a session and send it.
-    pub async fn run(&self, goal: &str) -> anyhow::Result<String> {
+    pub async fn run(self: &Arc<Self>, goal: &str) -> anyhow::Result<String> {
         self.session().send(goal).await
     }
 
@@ -755,9 +761,19 @@ impl Agent {
         }
     }
 
-    pub fn session(&self) -> Session<'_> {
+    /// Open a session under the process's default identity (the local user + this
+    /// run's session id). The single-session CLI/REPL entry point.
+    pub fn session(self: &Arc<Self>) -> Session {
+        self.session_with(self.default_session_key())
+    }
+
+    /// Open a session under an explicit `(user, session)` identity — the multi-tenant
+    /// entry point used by the [`SessionManager`] / portal, so many sessions run over
+    /// one shared backend (docs/design/multi-session/02-runtime-split.md).
+    pub fn session_with(self: &Arc<Self>, id: agent_core::SessionKey) -> Session {
         Session {
-            agent: self,
+            agent: self.clone(),
+            id,
             working: WorkingSet::default(),
             budget: TokenBudget {
                 max_context_tokens: self.settings.context_window,
@@ -773,6 +789,17 @@ impl Agent {
             switch_history: std::collections::VecDeque::new(),
             situational_present: false,
         }
+    }
+
+    /// The process default identity: the local user + this run's session id (or
+    /// `local` when telemetry is off and no id was minted).
+    fn default_session_key(&self) -> agent_core::SessionKey {
+        let sess = if self.settings.session_id.is_empty() {
+            agent_core::UserId::LOCAL.to_string()
+        } else {
+            self.settings.session_id.clone()
+        };
+        agent_core::SessionKey::local(sess)
     }
 
     /// The configured model name (for display, e.g. a `/model` command).
@@ -1410,12 +1437,81 @@ impl Agent {
     }
 }
 
+/// Owns the shared [`Agent`] backend and a map of live [`Session`]s keyed by
+/// `(user, session)`, so one process serves many concurrent sessions. Turns *within*
+/// a session are serialized by its per-session async mutex; *distinct* sessions run
+/// in parallel over the shared backend, which is `Send + Sync` and mostly functional
+/// (docs/design/multi-session/02-runtime-split.md).
+///
+/// The single-session CLI/REPL can ignore this and call [`Agent::session`] directly;
+/// the multi-tenant (portal) path drives sessions through [`Self::get_or_create`].
+pub struct SessionManager {
+    backend: Arc<Agent>,
+    sessions: std::sync::Mutex<
+        std::collections::HashMap<agent_core::SessionKey, Arc<tokio::sync::Mutex<Session>>>,
+    >,
+}
+
+impl SessionManager {
+    /// Wrap a built backend.
+    pub fn new(backend: Arc<Agent>) -> Self {
+        Self {
+            backend,
+            sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// The shared backend (for the `--serve-<seam>` accessors and cleanup).
+    pub fn backend(&self) -> &Arc<Agent> {
+        &self.backend
+    }
+
+    /// Look up the session for `key`, creating it on first use. Lock the returned
+    /// handle to take a turn (`handle.lock().await.send(goal).await`). The map lock is
+    /// held only for the lookup/insert, never across `.await`, so distinct sessions
+    /// never contend.
+    pub fn get_or_create(&self, key: agent_core::SessionKey) -> Arc<tokio::sync::Mutex<Session>> {
+        let mut map = self.sessions.lock().expect("session map poisoned");
+        map.entry(key.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(self.backend.session_with(key))))
+            .clone()
+    }
+
+    /// Drop a finished session, freeing its state. Absent key is a no-op.
+    pub fn remove(&self, key: &agent_core::SessionKey) {
+        self.sessions
+            .lock()
+            .expect("session map poisoned")
+            .remove(key);
+    }
+
+    /// Number of live sessions.
+    pub fn len(&self) -> usize {
+        self.sessions.lock().expect("session map poisoned").len()
+    }
+
+    /// Whether no sessions are live.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 /// A multi-turn conversation over an [`Agent`]. The working set (message history)
 /// persists across [`Session::send`] calls, so follow-up turns continue the
 /// conversation rather than starting fresh. The one-shot [`Agent::run`] is just a
 /// session that sends a single message.
-pub struct Session<'a> {
-    agent: &'a Agent,
+///
+/// A `Session` **owns** an `Arc<Agent>` (the shared, mostly-functional backend
+/// bundle) rather than borrowing it, so many sessions can run concurrently over one
+/// backend — the foundation for multi-session serving
+/// (docs/design/multi-session/02-runtime-split.md). The field is still named `agent`
+/// so the loop's `self.agent.<seam>` calls are unchanged (`Arc<Agent>` derefs to
+/// `Agent`).
+pub struct Session {
+    agent: Arc<Agent>,
+    /// This conversation's `(user, session)` identity — scopes the turn's ambient
+    /// identity (so `= "grpc"` seam calls carry it) and attributes the run's trace.
+    id: agent_core::SessionKey,
     working: WorkingSet,
     budget: TokenBudget,
     tool_ctx: ToolContext,
@@ -1528,20 +1624,32 @@ fn classify_via(reason: &str) -> &'static str {
     }
 }
 
-impl Session<'_> {
+impl Session {
     /// Send a user message and run the loop to the next final answer. Each send
     /// is recorded as one metrics "run".
     pub async fn send(&mut self, input: &str) -> anyhow::Result<String> {
         self.agent.metrics.run_started();
         let start = Instant::now();
         // Root span of the run's trace tree; every seam interaction below nests
-        // under it, and OTLP exports the whole tree to the collector.
+        // under it, and OTLP exports the whole tree to the collector. It carries the
+        // tenant identity so a whole trace can be filtered by session/user
+        // (docs/design/multi-session/06-observability.md).
         let goal: String = input.chars().take(80).collect();
         self.agent
             .event_sink
             .publish(agent_core::SessionEvent::RunStarted { goal: goal.clone() });
-        let span = tracing::info_span!("agent.turn", goal = %goal);
-        let result = self.send_inner(input).instrument(span).await;
+        let span = tracing::info_span!(
+            "agent.turn",
+            goal = %goal,
+            session_id = %self.id.session,
+            user_id = %self.id.user,
+        );
+        // Scope the turn's ambient identity so any `= "grpc"` seam call the loop makes
+        // carries this session's `(user, session)` in its metadata. In-process seams
+        // ignore it; a spawned server handler does not inherit it (it uses its own
+        // caller's identity). See docs/design/multi-session/01-identity.md.
+        let result =
+            agent_core::scope(self.id.clone(), self.send_inner(input).instrument(span)).await;
         // Checkpoint the completed turn, so `restore`/`branch`/`undo` have
         // something to work with (parity spec 19). Best-effort: a checkpoint
         // failure must not fail a turn that already succeeded.
@@ -2150,7 +2258,7 @@ mod tests {
         let memory = RecordingMemory::new();
         let mut tools = ToolRegistry::new();
         tools.register(Arc::new(EchoTool));
-        let agent = Agent::new(
+        let agent = Arc::new(Agent::new(
             Arc::new(seq_provider()),
             tools,
             Arc::new(memory.clone()),
@@ -2158,7 +2266,7 @@ mod tests {
             Arc::new(crate::policy::AutoApprove),
             Metrics::new(),
             settings(parallel),
-        );
+        ));
         let out = agent.run("go").await.unwrap();
         assert_eq!(out, "done");
         memory.tool_order()
@@ -2201,7 +2309,7 @@ mod tests {
             }]),
             final_turn("done"),
         ]);
-        let agent = Agent::new(
+        let agent = Arc::new(Agent::new(
             Arc::new(provider),
             tools,
             Arc::new(memory.clone()),
@@ -2209,7 +2317,7 @@ mod tests {
             Arc::new(DenyNamed("echo")),
             Metrics::new(),
             settings(false),
-        );
+        ));
         let out = agent.run("go").await.unwrap();
         assert_eq!(out, "done"); // a denial adapts; it does not abort the run
 
@@ -2241,7 +2349,7 @@ mod tests {
             let users = req.messages.iter().filter(|m| m.role == Role::User).count();
             final_turn(users.to_string())
         });
-        let agent = Agent::new(
+        let agent = Arc::new(Agent::new(
             Arc::new(counting),
             ToolRegistry::new(),
             Arc::new(RecordingMemory::new()),
@@ -2249,7 +2357,7 @@ mod tests {
             Arc::new(crate::policy::AutoApprove),
             Metrics::new(),
             settings(false),
-        );
+        ));
         let mut session = agent.session();
         // Turn 1 sees one user message; turn 2 sees two → history persisted.
         assert_eq!(session.send("hi").await.unwrap(), "1");
@@ -2364,7 +2472,7 @@ mod tests {
     ) -> Vec<(String, String)> {
         let memory = RecordingMemory::new();
         let provider = ScriptedProvider::new(vec![tool_turn(calls), final_turn("done")]);
-        let agent = Agent::new(
+        let agent = Arc::new(Agent::new(
             Arc::new(provider),
             tools,
             Arc::new(memory.clone()),
@@ -2372,7 +2480,7 @@ mod tests {
             policy,
             Metrics::new(),
             settings(false),
-        );
+        ));
         assert_eq!(agent.run("go").await.unwrap(), "done");
         memory
             .events()
@@ -2442,7 +2550,7 @@ mod tests {
         let provider = ScriptedProvider::new(vec![tool_turn(vec![tool_call("t0", "echo")])]);
         let mut s = settings(false);
         s.max_iterations = 3;
-        let agent = Agent::new(
+        let agent = Arc::new(Agent::new(
             Arc::new(provider),
             tools,
             Arc::new(RecordingMemory::new()),
@@ -2450,7 +2558,7 @@ mod tests {
             Arc::new(crate::policy::AutoApprove),
             Metrics::new(),
             s,
-        );
+        ));
         let err = agent
             .run("go")
             .await
@@ -2583,6 +2691,46 @@ mod tests {
             Metrics::new(),
             settings(false),
         )
+    }
+
+    /// `positive_`: the manager keys sessions by `(user, session)` — the same key
+    /// reuses one session, distinct keys get distinct ones, and `remove` frees it.
+    #[test]
+    fn session_manager_keys_reuses_and_removes() {
+        let mgr = SessionManager::new(Arc::new(bare_agent()));
+        assert!(mgr.is_empty());
+        let alice = agent_core::SessionKey::parse("alice", "s1").unwrap();
+        let bob = agent_core::SessionKey::parse("bob", "s1").unwrap();
+        let a1 = mgr.get_or_create(alice.clone());
+        let a2 = mgr.get_or_create(alice.clone());
+        assert!(Arc::ptr_eq(&a1, &a2), "same key reuses the session");
+        let b1 = mgr.get_or_create(bob.clone());
+        assert!(!Arc::ptr_eq(&a1, &b1), "distinct keys → distinct sessions");
+        assert_eq!(mgr.len(), 2);
+        mgr.remove(&alice);
+        assert_eq!(mgr.len(), 1);
+        mgr.remove(&alice); // absent key is a no-op
+        assert_eq!(mgr.len(), 1);
+    }
+
+    /// `positive_`: a manager-created session carries its `(user, session)` identity,
+    /// and distinct sessions keep independent transcripts over the shared backend.
+    #[tokio::test]
+    async fn session_manager_sessions_are_independent() {
+        let mgr = SessionManager::new(Arc::new(bare_agent()));
+        let alice = mgr.get_or_create(agent_core::SessionKey::parse("alice", "s1").unwrap());
+        let bob = mgr.get_or_create(agent_core::SessionKey::parse("bob", "s2").unwrap());
+        // Independent handles, each lockable for its own turn.
+        {
+            let a = alice.lock().await;
+            assert_eq!(a.id.user.as_str(), "alice");
+        }
+        {
+            let b = bob.lock().await;
+            assert_eq!(b.id.user.as_str(), "bob");
+            assert_eq!(b.id.session.as_str(), "s2");
+        }
+        assert!(!Arc::ptr_eq(&alice, &bob));
     }
 
     /// Cleanup must remove **exactly** what `worktree_list` reports (it can't reach
@@ -2740,7 +2888,7 @@ mod tests {
         let memory = RecordingMemory::new();
         let mut s = settings(false);
         s.tool_timeout_secs = 1; // fast timeout for the test
-        let agent = Agent::new(
+        let agent = Arc::new(Agent::new(
             Arc::new(provider),
             tools,
             Arc::new(memory.clone()),
@@ -2748,7 +2896,7 @@ mod tests {
             Arc::new(crate::policy::AutoApprove),
             Metrics::new(),
             s,
-        );
+        ));
 
         let out = agent.run("go").await.unwrap();
         assert_eq!(out, "recovered", "loop should recover past the timeout");
@@ -2784,7 +2932,7 @@ mod tests {
             ]),
             final_turn("done"),
         ]);
-        let agent = Agent::new(
+        let agent = Arc::new(Agent::new(
             Arc::new(provider),
             tools,
             Arc::new(RecordingMemory::new()),
@@ -2792,7 +2940,7 @@ mod tests {
             Arc::new(crate::policy::AutoApprove),
             Metrics::new(),
             settings(true),
-        );
+        ));
         assert_eq!(agent.run("go").await.unwrap(), "done");
         max.load(SeqCst)
     }

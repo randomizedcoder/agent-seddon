@@ -160,7 +160,7 @@ async fn main() -> Result<()> {
     let identity = agent_core::SessionKey::local(run_session);
 
     // Run either one-shot or the REPL, capturing the answer (one-shot only).
-    let outcome: Result<Option<String>> = agent_grpc::identity::scope(identity, async {
+    let outcome: Result<Option<String>> = agent_core::scope(identity, async {
         match mode {
             Mode::OneShot(goal) => {
                 let mut session = agent.session();

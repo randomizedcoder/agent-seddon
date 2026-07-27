@@ -95,7 +95,12 @@ impl LlmProvider for Capture {
 
 /// Build an agent whose model is the capturing provider; returns the agent and the
 /// shared buffer the provider writes each request's system messages into.
-async fn agent_and_capture(cfg_toml: &str) -> (agent_runtime::Agent, Arc<Mutex<Vec<String>>>) {
+async fn agent_and_capture(
+    cfg_toml: &str,
+) -> (
+    std::sync::Arc<agent_runtime::Agent>,
+    Arc<Mutex<Vec<String>>>,
+) {
     let seen = Arc::new(Mutex::new(Vec::<String>::new()));
     let cfg = parse_config(cfg_toml).expect("parse config");
     let mut registry = Registry::new();

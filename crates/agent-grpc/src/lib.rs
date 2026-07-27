@@ -12,7 +12,6 @@
 
 pub mod client;
 pub mod constants;
-pub mod identity;
 pub mod server;
 pub mod transport;
 

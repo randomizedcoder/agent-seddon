@@ -106,7 +106,7 @@ async fn agent_with_recording_verifier(
     dir: &Path,
     verdict: VerifyVerdict,
     script: Vec<CompletionResponse>,
-) -> (agent_runtime::Agent, Arc<AtomicUsize>) {
+) -> (std::sync::Arc<agent_runtime::Agent>, Arc<AtomicUsize>) {
     agent_with_recording_verifier_mode(dir, verdict, "shadow", script).await
 }
 
@@ -115,7 +115,7 @@ async fn agent_with_recording_verifier_mode(
     verdict: VerifyVerdict,
     mode: &str,
     script: Vec<CompletionResponse>,
-) -> (agent_runtime::Agent, Arc<AtomicUsize>) {
+) -> (std::sync::Arc<agent_runtime::Agent>, Arc<AtomicUsize>) {
     let cfg = parse_config(&config_toml_mode(dir, "recording", mode)).expect("parse config");
     let mut registry = Registry::new();
     register_builtins(&mut registry);

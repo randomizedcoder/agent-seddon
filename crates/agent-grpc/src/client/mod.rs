@@ -80,7 +80,7 @@ pub(crate) fn outbound<T>(msg: T) -> tonic::Request<T> {
     // Multi-session: carry the ambient `(user, session)` identity alongside trace
     // context, so a remote seam can namespace its per-tenant state. Absent outside a
     // scope (e.g. direct-dial tests) ⇒ nothing injected, exactly as before.
-    if let Some(id) = crate::identity::current_identity() {
+    if let Some(id) = agent_core::current_identity() {
         agent_proto::identity::inject_identity(
             id.user.as_str(),
             id.session.as_str(),
@@ -201,7 +201,7 @@ mod outbound_identity_tests {
     /// real client chokepoint every seam funnels through.
     #[tokio::test]
     async fn positive_scope_injects_identity_into_metadata() {
-        crate::identity::scope(SessionKey::parse("alice", "sess-1").unwrap(), async {
+        agent_core::scope(SessionKey::parse("alice", "sess-1").unwrap(), async {
             let req = outbound(());
             let m = req.metadata();
             assert_eq!(m.get(USER_ID_KEY).unwrap().to_str().unwrap(), "alice");
