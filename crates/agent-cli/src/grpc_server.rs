@@ -604,10 +604,13 @@ fn add_seam_service(
             ),
             None => (router, false),
         },
-        // The session source is always present; a serve-only process simply streams
-        // nothing until a loop publishes (docs/design/portal).
+        // The session-source registry is always present; a serve-only process simply
+        // resolves no session until a loop registers one. The service selects by
+        // `session_id` (docs/design/portal + multi-session/03-hazards.md).
         Seam::SessionStream => (
-            router.add_service(srv::AgentSessionSvc::new(agent.session_source()).into_server()),
+            router.add_service(
+                srv::AgentSessionSvc::new(agent.session_source_registry()).into_server(),
+            ),
             true,
         ),
     })

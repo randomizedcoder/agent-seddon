@@ -10,8 +10,8 @@ design docs, this file records the refinement (the design docs stay the rational
 | 00 | Design docs | this directory | **written** (pre-implementation) |
 | 01 | Identity foundations (`SessionKey`/`safe_segment`, metadata keys, task-local, inject/extract, span attrs) | [`01-identity.md`](01-identity.md) | **merged** (#151) |
 | 02 | `Backend`/`Session`/`SessionManager` split; per-session cwd | [`02-runtime-split.md`](02-runtime-split.md) | **merged** (#152) |
-| 03 | Hazard A: stateless `ContextStrategy::compact(switch)` | [`03-hazards.md`](03-hazards.md) | **in PR** (`feat/multi-session-03-hazards`) |
-| 03b | Hazard B: `SessionEventsRegistry` + `session_id` selector on `AgentSessionService` | [`03-hazards.md`](03-hazards.md) | pending |
+| 03 | Hazard A: stateless `ContextStrategy::compact(switch)` | [`03-hazards.md`](03-hazards.md) | **merged** (#153) |
+| 03b | Hazard B: `SessionEventsRegistry` + `session_id` selector on `AgentSessionService` | [`03-hazards.md`](03-hazards.md) | **in PR** (`feat/multi-session-03b-session-events`) |
 | 04 | Per-user memory/dimension tenancy; stateful-seam keying; confined cwd/root | [`04-tenancy.md`](04-tenancy.md) | pending |
 | 05 | `SessionRegistry` lifecycle (server-mint, idle-GC) | [`05-lifecycle.md`](05-lifecycle.md) | pending |
 | 06 | Session-scoped observability (span attrs, curated metric label, eviction) | [`06-observability.md`](06-observability.md) | pending |
@@ -47,8 +47,27 @@ design docs, this file records the refinement (the design docs stay the rational
   so the wire already threads the switch and returns the action; `GrpcContext`/
   `ContextService` just drop their `pending`/`last_action` `Mutex`es. `chosen`: the
   stateless option over `fork()` (recommended in 03-hazards.md), and it's free here
-  *and* correct for a `context = "grpc"` deployment. **03b (hazard B, pending)** is the
-  `SessionEvents` → keyed-registry + `session_id` selector work.
+  *and* correct for a `context = "grpc"` deployment. **03b (hazard B)** is the
+  `SessionEvents` → keyed-registry + `session_id` selector work (below).
+
+- **Increment 03b (hazard B).** `SessionEvents` is now minted **per session** by a
+  `SessionEventsRegistry` (`Mutex<HashMap<session_id, Arc<SessionEvents>>>`) held on the
+  shared `Agent` backend; `SessionEvents` itself is **unchanged**. `Session` draws its
+  own sink from the registry at construction (`session_with`) and **owns it as a field**,
+  and the loop threads `&SessionEvents` into `run_loop`/`complete_streaming` — so the hot
+  token-delta path does **no per-publish map lookup** (the design doc's stated goal). A
+  new **`SessionSourceRegistry`** trait in `agent-core` (impl'd by
+  `SessionEventsRegistry`) keeps the `agent-grpc` crate boundary: `AgentSessionSvc` now
+  holds `Arc<dyn SessionSourceRegistry>` and `resolve`s the request's `session_id` —
+  **empty ⇒ the sole live session** (single-session observer), empty-with-{zero,many} ⇒
+  `INVALID_ARGUMENT`, a `safe_segment`-**malformed** id ⇒ `INVALID_ARGUMENT` (fail closed,
+  validated before any lookup — the selector is attacker-controlled), a well-formed but
+  **unknown** id ⇒ `NOT_FOUND`. `SubscribeRequest`/`SnapshotRequest` gained
+  `string session_id = 1` — **additive, no `buf.image.binpb` bump**. `SessionManager::remove`
+  **retires** the sink (eviction). Keyed by the **session** segment alone (the wire
+  selector is a bare `session_id`; ids are unique per run, server-minted in 05); a
+  colliding id is a transport-trust question, consistent with the locked stance. Used
+  `Mutex` (not the doc's illustrative `RwLock`) to match the codebase's other lazy maps.
 
 - **Increment 02 shape.** `Session` now **owns `Arc<Agent>`** (field still named `agent`,
   so the loop's `self.agent.<seam>` calls are unchanged via `Deref`) and carries its
