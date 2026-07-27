@@ -113,6 +113,11 @@ same `[prompts] dir`.
   resolver returns `Cow::Borrowed("")`, no message is added, and behaviour is exactly
   today's — the per-turn cost when unused is nil. See
   [`docs/design/prompts/02-composition.md`](../design/prompts/02-composition.md).
+- **Example content.** Ready-to-use per-mode fragments (implement/debug/review/
+  design/explain) ship as **inert templates** under `prompts/modes.example/`; copy a
+  file into `prompts/modes/<mode>/` to activate it (live next context change). See
+  [`prompts/README.md`](../../prompts/README.md) for the layout, the resolution
+  ladder, and authoring guidance.
 
 ## Storage backends
 
