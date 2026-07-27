@@ -8,7 +8,7 @@ design docs, this file records the refinement (the design docs stay the rational
 | # | Increment | Design doc | State |
 |---|---|---|---|
 | 00 | Design docs | this directory | **written** (pre-implementation) |
-| 01 | Identity foundations (`SessionKey`/`safe_segment`, metadata keys, task-local, inject/extract, fail-closed, span attrs) | [`01-identity.md`](01-identity.md) | pending |
+| 01 | Identity foundations (`SessionKey`/`safe_segment`, metadata keys, task-local, inject/extract, span attrs) | [`01-identity.md`](01-identity.md) | **in PR** (`feat/multi-session-01-identity`) |
 | 02 | `Backend`/`Session`/`SessionManager` split; per-session cwd | [`02-runtime-split.md`](02-runtime-split.md) | pending |
 | 03 | Fix hazards: stateless `ContextStrategy::compact(switch)`; `SessionEventsRegistry` + selector | [`03-hazards.md`](03-hazards.md) | pending |
 | 04 | Per-user memory/dimension tenancy; stateful-seam keying; confined cwd/root | [`04-tenancy.md`](04-tenancy.md) | pending |
@@ -32,6 +32,18 @@ design docs, this file records the refinement (the design docs stay the rational
   `<root>/<user>/…`; dimensions key by user.
 - **Concurrency = shared `Backend` + owned `Session`s** in a `SessionManager` map
   (`Arc<tokio::Mutex<Session>>` per key); single-session path zero-overhead.
+
+## Refinements (authoritative over the design docs)
+
+- **Increment 01 scope.** The identity *mechanism* landed: `SessionKey`/`UserId`/
+  `SessionId`/`safe_segment` in `agent-core`; `agent-proto::identity` metadata keys +
+  inject/extract; the `AGENT_IDENTITY` `tokio::task_local` in `agent-grpc`; injection
+  in `client::outbound()`; extraction + `safe_segment`-validated span attributes in
+  `server::span()`; and the origin scope in `agent-cli/main.rs`. **Fail-closed
+  *rejection* of absent identity on stateful RPCs is deferred** to when the client
+  side reliably sends identity (increments 02+/04): enforcing it in 01 would break the
+  single-process gRPC path and the round-trip suite, which send no identity yet. 01
+  validates-when-present and never rejects, so it is fully backward-compatible.
 
 ## Open decisions (settle at implementation)
 

@@ -33,6 +33,7 @@ pub mod pb {
 pub const FILE_DESCRIPTOR_SET: &[u8] = tonic::include_file_descriptor_set!("agent_descriptor");
 
 pub mod convert;
+pub mod identity;
 pub mod trace;
 
 pub use convert::{snapshot_event, status_from_error, ConvertError};

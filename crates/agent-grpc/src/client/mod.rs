@@ -77,6 +77,16 @@ pub(crate) fn outbound<T>(msg: T) -> tonic::Request<T> {
     let mut req = tonic::Request::new(msg);
     let cx = tracing::Span::current().context();
     agent_proto::trace::inject_context(&cx, req.metadata_mut());
+    // Multi-session: carry the ambient `(user, session)` identity alongside trace
+    // context, so a remote seam can namespace its per-tenant state. Absent outside a
+    // scope (e.g. direct-dial tests) ⇒ nothing injected, exactly as before.
+    if let Some(id) = crate::identity::current_identity() {
+        agent_proto::identity::inject_identity(
+            id.user.as_str(),
+            id.session.as_str(),
+            req.metadata_mut(),
+        );
+    }
     req
 }
 
@@ -169,5 +179,34 @@ mod retry_decision_tests {
         #[case] expected: Option<Option<Duration>>,
     ) {
         assert_eq!(grpc_retry_decision(&status(code, pushback)), expected);
+    }
+}
+
+#[cfg(test)]
+mod outbound_identity_tests {
+    use super::outbound;
+    use agent_core::SessionKey;
+    use agent_proto::identity::{SESSION_ID_KEY, USER_ID_KEY};
+
+    /// Outside an identity scope, a request carries no identity metadata — behaviour
+    /// is exactly as before multi-session (so existing seams/tests are unaffected).
+    #[test]
+    fn negative_no_scope_injects_no_identity() {
+        let req = outbound(());
+        assert!(req.metadata().get(USER_ID_KEY).is_none());
+        assert!(req.metadata().get(SESSION_ID_KEY).is_none());
+    }
+
+    /// Inside a scope, the ambient `(user, session)` rides the request metadata — the
+    /// real client chokepoint every seam funnels through.
+    #[tokio::test]
+    async fn positive_scope_injects_identity_into_metadata() {
+        crate::identity::scope(SessionKey::parse("alice", "sess-1").unwrap(), async {
+            let req = outbound(());
+            let m = req.metadata();
+            assert_eq!(m.get(USER_ID_KEY).unwrap().to_str().unwrap(), "alice");
+            assert_eq!(m.get(SESSION_ID_KEY).unwrap().to_str().unwrap(), "sess-1");
+        })
+        .await;
     }
 }
