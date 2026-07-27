@@ -83,6 +83,14 @@ iai-callgrind = "0.16"
 # build (dev-only).
 dhat = "0.3"
 
+# The first (and only) database dependency in the workspace, deliberately behind the
+# non-default `prompt-sqlite` feature (agent-prompt) so a default build / `nix build
+# .#agent` stays dependency-free. `bundled` vendors + compiles sqlite3.c, so no system
+# libsqlite3 / pkg-config is needed; crane vendors the crate from Cargo.lock and
+# stdenv's `cc` compiles it hermetically. The real version pin is Cargo.lock (recorded
+# in nix/versions.nix). See docs/design/prompts/05-storage.md.
+rusqlite = { version = "0.32", features = ["bundled"] }
+
 # telemetry / ClickHouse (native protocol, port 9000)
 klickhouse = "0.13"
 uuid = { version = "1", features = ["v4"] }

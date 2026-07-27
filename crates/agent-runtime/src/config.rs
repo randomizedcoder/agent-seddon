@@ -1299,14 +1299,25 @@ impl Default for ContextFilesCfg {
 /// `ModeAwareWindow` reads. A missing dir simply means "compiled defaults".
 #[derive(Debug, Deserialize)]
 pub struct PromptsCfg {
+    /// Storage backend for the `PromptStore` seam: `"file"` (git-legible default),
+    /// `"sqlite"` (embedded DB catalog, feature `prompt-sqlite`), or `"grpc"` (a
+    /// central catalog). See docs/design/prompts/05-storage.md.
+    #[serde(default = "default_prompts_backend")]
+    pub backend: String,
     #[serde(default = "default_prompts_dir")]
     pub dir: String,
+    /// `sqlite` backend only: the DB file. Empty ⇒
+    /// `<working_dir>/.agent-seddon/prompts.db`.
+    #[serde(default)]
+    pub db_path: String,
 }
 
 impl Default for PromptsCfg {
     fn default() -> Self {
         Self {
+            backend: default_prompts_backend(),
             dir: default_prompts_dir(),
+            db_path: String::new(),
         }
     }
 }
@@ -1609,6 +1620,10 @@ fn default_context_dir() -> String {
 }
 fn default_prompts_dir() -> String {
     "prompts".into()
+}
+
+fn default_prompts_backend() -> String {
+    "file".into()
 }
 fn default_prometheus_url() -> String {
     "http://127.0.0.1:9090".into()

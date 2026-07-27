@@ -909,7 +909,7 @@ async fn system_fragment_tags_roundtrip(#[case] transport: Transport) {
     assert_eq!(e.kind, PromptKind::SystemFragment);
     assert_eq!(
         e.tags,
-        vec!["mode:review".to_string(), "language:rust".into()]
+        vec!["language:rust".to_string(), "mode:review".into()] // sorted
     );
 
     let frags = client.list(Some(PromptKind::SystemFragment)).await.unwrap();
