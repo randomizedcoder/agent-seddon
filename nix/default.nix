@@ -143,6 +143,19 @@ let
       ;
   };
 
+  # Run N agent sessions CONCURRENTLY (`nix run .#e2e-multi`), each writing hello-world
+  # or FizzBuzz in C/Go/Rust, then compile+run each and have GLM-5.2 grade correctness.
+  # Also not a check (needs a model, the judge endpoint, and a socket). See
+  # nix/e2e-multi.nix + test/e2e-multi/run.sh.
+  e2e-multi = import ./e2e-multi.nix {
+    inherit
+      pkgs
+      lib
+      versions
+      agent
+      ;
+  };
+
   # Code-review-flow evaluation harness (`nix run .#review-eval`). Not a check:
   # the Rust corpus is the real working tree's git history (stripped from the
   # hermetic sandbox) and `--judge` needs a network model endpoint. Generates
@@ -263,6 +276,10 @@ in
     e2e-expect = {
       type = "app";
       program = "${e2e-expect}/bin/e2e-expect";
+    };
+    e2e-multi = {
+      type = "app";
+      program = "${e2e-multi}/bin/e2e-multi";
     };
     review-eval = {
       type = "app";
