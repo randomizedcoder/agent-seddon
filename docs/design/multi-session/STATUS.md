@@ -16,11 +16,12 @@ design docs, this file records the refinement (the design docs stay the rational
 | 04b | Served-handler identity scoping (`MemoryService`/`DimensionSvc` route the caller's tenant) | [`04-tenancy.md`](04-tenancy.md) | **merged** (#156) |
 | 04c | `SessionStore` `restore`/`diff` ownership check (close the checkpoint-id read oracle) | [`04-tenancy.md`](04-tenancy.md) | **merged** (#157) |
 | 04d | Remaining stateful-seam keying: `Pty`/`TaskTracker` maps, per-call confined cwd/root | [`04-tenancy.md`](04-tenancy.md) | pending |
-| 05 | Lifecycle core: `SessionManager` idle-GC (`reap_idle`/`touch`) + capacity guard (`open`) | [`05-lifecycle.md`](05-lifecycle.md) | **in PR** (`feat/multi-session-05-lifecycle`) |
-| 05b | `SessionRegistry` gRPC service (`Open`/`Close`/`Heartbeat` + server-mint) | [`05-lifecycle.md`](05-lifecycle.md) | **in PR** (`feat/multi-session-05b-registry-service`) |
+| 05 | Lifecycle core: `SessionManager` idle-GC (`reap_idle`/`touch`) + capacity guard (`open`→`admit`) | [`05-lifecycle.md`](05-lifecycle.md) | **merged** (#159) |
+| 05b | `SessionRegistry` gRPC service (`Open`/`Close`/`Heartbeat` + server-mint) | [`05-lifecycle.md`](05-lifecycle.md) | **merged** (#160) |
 | 05c | `--serve-session-registry` CLI wiring + `nix/constants.nix` port + idle-GC reaper task | [`05-lifecycle.md`](05-lifecycle.md) | pending |
-| 06 | Session-scoped observability — `(session, user)` on the curated metric families + retire | [`06-observability.md`](06-observability.md) | **in PR** (`feat/multi-session-06-observability`) |
-| 07 | Security hardening (`bash` containment, UDS-per-user, adversarial sweep) | [`07-security.md`](07-security.md) | pending |
+| 06 | Session-scoped observability — `(session, user)` on the curated metric families + retire | [`06-observability.md`](06-observability.md) | **merged** (#158) |
+| 07 | Security hardening: `safe_segment` over-length cap + trust-boundary / exec-containment docs | [`07-security.md`](07-security.md) | **in PR** (`feat/multi-session-07-security`) |
+| 07b | `bash` per-user `Policy` disable + cross-seam adversarial isolation e2e (needs a serving harness) | [`07-security.md`](07-security.md) | pending |
 
 > Note: increments 04 and 06 map to two design docs each in some places (tenancy +
 > lifecycle share the confinement-root story; observability spans traces + metrics).
@@ -40,6 +41,24 @@ design docs, this file records the refinement (the design docs stay the rational
   (`Arc<tokio::Mutex<Session>>` per key); single-session path zero-overhead.
 
 ## Refinements (authoritative over the design docs)
+
+- **Increment 07 — security hardening (validator + docs).** Most of the 07 design's
+  defenses already landed structurally across earlier increments (`safe_segment` +
+  `confine` namespacing in 01/04, the checkpoint read-oracle in 04c, the amplification
+  guard in 05, server-minted ids in 05b). This increment closes the remaining concrete
+  **over-length** vector and documents the boundary: `safe_segment` gains a
+  `MAX_SEGMENT_LEN` (128) cap — an attacker-controlled `user_id`/`session_id` becomes a
+  Prometheus label value and a path component, so an unbounded one is a memory/
+  cardinality DoS; a UUID is 36, so the cap is generous. `docs/grpc.md`'s identity
+  section gains the **"isolation is not containment"** caveat — `bash` and the
+  `--serve-sandbox`/`--serve-pty`/`--serve-forge` exec seams are *not* contained by
+  per-tenant paths, with the recommended pre-auth hardening (**one UDS socket per user**,
+  `0o600`/`0o700`; or disable `bash` per-user by `Policy`). The mandatory adversarial
+  sweep for the shared validator is extended (over-length at/over the cap, newline/tab
+  control chars, unicode); the per-seam adversarial cases (traversal/spoof/absent-fail-
+  closed, Bob-can't-read-Alice) already live with their increments. **Deferred to 07b:**
+  the actual `bash`-disabling `Policy` (needs a multi-user-mode config signal) and the
+  single-gateway cross-seam isolation e2e (needs a `--serve-all` two-tenant harness).
 
 - **Increment 05b — the `SessionRegistry` gRPC service.** New `session_registry.proto`
   (`SessionRegistryService` / `Open`·`Close`·`Heartbeat`) — **additive, no
