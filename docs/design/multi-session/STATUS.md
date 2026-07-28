@@ -16,7 +16,8 @@ design docs, this file records the refinement (the design docs stay the rational
 | 04b | Served-handler identity scoping (`MemoryService`/`DimensionSvc` route the caller's tenant) | [`04-tenancy.md`](04-tenancy.md) | **merged** (#156) |
 | 04c | `SessionStore` `restore`/`diff` ownership check (close the checkpoint-id read oracle) | [`04-tenancy.md`](04-tenancy.md) | **merged** (#157) |
 | 04d | Remaining stateful-seam keying: `Pty`/`TaskTracker` maps, per-call confined cwd/root | [`04-tenancy.md`](04-tenancy.md) | pending |
-| 05 | `SessionRegistry` lifecycle (server-mint, idle-GC) | [`05-lifecycle.md`](05-lifecycle.md) | pending |
+| 05 | Lifecycle core: `SessionManager` idle-GC (`reap_idle`/`touch`) + capacity guard (`open`) | [`05-lifecycle.md`](05-lifecycle.md) | **in PR** (`feat/multi-session-05-lifecycle`) |
+| 05b | `SessionRegistry` gRPC service (server-mint id, `Open`/`Close`/`Heartbeat`, reaper task, CLI wiring) | [`05-lifecycle.md`](05-lifecycle.md) | pending |
 | 06 | Session-scoped observability — `(session, user)` on the curated metric families + retire | [`06-observability.md`](06-observability.md) | **in PR** (`feat/multi-session-06-observability`) |
 | 07 | Security hardening (`bash` containment, UDS-per-user, adversarial sweep) | [`07-security.md`](07-security.md) | pending |
 
@@ -38,6 +39,24 @@ design docs, this file records the refinement (the design docs stay the rational
   (`Arc<tokio::Mutex<Session>>` per key); single-session path zero-overhead.
 
 ## Refinements (authoritative over the design docs)
+
+- **Increment 05 scoped to the in-process lifecycle *core*; the gRPC `SessionRegistry`
+  service is 05b.** The design's "real guarantee" is idle-GC, and its amplification
+  guard is a live-session cap — both are `SessionManager` mechanics, independent of the
+  wire. This PR adds them: an `Entry { session, last_used }` map; `touch(key)` (the
+  `Heartbeat` primitive) resets the idle timer; `reap_idle(idle_after)` frees sessions
+  quiet past the window (running the full `remove` cleanup — events sink + metric
+  retire), and **skips a session mid-turn** (`try_lock` Ok ⇒ no turn in flight) so a long
+  turn is never reaped out from under itself; `open(key)` is the capacity-checked entry
+  point (the wire `Open`) that rejects a **new** id with `OpenError::{PerUserLimit,
+  TotalLimit}` when `with_limits(max_total, max_per_user)` is set — but always returns an
+  **existing** session (a legit re-entry is never throttled; only a hostile new-id spray
+  is). The lazy `get_or_create` stays **infallible** — the correctness path for a split
+  deployment where a seam sees a session another process `Open`ed. **Deferred to 05b:**
+  the new `session_registry.proto` + service + client, **server-minted `session_id`**
+  (`Uuid::new_v4`, which also hardens 04c's spoofable-session-id residual), the spawned
+  reaper task + its interval/window config, `nix/constants.nix` port row, and the
+  `--serve-session-registry` / `--serve-all` CLI wiring. No proto change in 05.
 
 - **Increment 06 — session-scoped observability (metrics half).** The **tracing** half
   (the `session_id`/`user_id` span attrs on `agent.turn` and `grpc.server`) already
