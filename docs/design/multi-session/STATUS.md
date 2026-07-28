@@ -12,8 +12,9 @@ design docs, this file records the refinement (the design docs stay the rational
 | 02 | `Backend`/`Session`/`SessionManager` split; per-session cwd | [`02-runtime-split.md`](02-runtime-split.md) | **merged** (#152) |
 | 03 | Hazard A: stateless `ContextStrategy::compact(switch)` | [`03-hazards.md`](03-hazards.md) | **merged** (#153) |
 | 03b | Hazard B: `SessionEventsRegistry` + `session_id` selector on `AgentSessionService` | [`03-hazards.md`](03-hazards.md) | **merged** (#154) |
-| 04 | Per-user memory/dimension tenancy (in-process) | [`04-tenancy.md`](04-tenancy.md) | **in PR** (`feat/multi-session-04-tenancy`) |
-| 04b | Remaining stateful-seam keying: served-handler identity scoping, `SessionStore` ownership check, `Pty`/`TaskTracker` maps, per-call confined cwd/root | [`04-tenancy.md`](04-tenancy.md) | pending |
+| 04 | Per-user memory/dimension tenancy (in-process) | [`04-tenancy.md`](04-tenancy.md) | **merged** (#155) |
+| 04b | Served-handler identity scoping (`MemoryService`/`DimensionSvc` route the caller's tenant) | [`04-tenancy.md`](04-tenancy.md) | **in PR** (`feat/multi-session-04b-served-tenancy`) |
+| 04c | Remaining stateful-seam keying: `SessionStore` ownership check, `Pty`/`TaskTracker` maps, per-call confined cwd/root | [`04-tenancy.md`](04-tenancy.md) | pending |
 | 05 | `SessionRegistry` lifecycle (server-mint, idle-GC) | [`05-lifecycle.md`](05-lifecycle.md) | pending |
 | 06 | Session-scoped observability (span attrs, curated metric label, eviction) | [`06-observability.md`](06-observability.md) | pending |
 | 07 | Security hardening (`bash` containment, UDS-per-user, adversarial sweep) | [`07-security.md`](07-security.md) | pending |
@@ -36,6 +37,26 @@ design docs, this file records the refinement (the design docs stay the rational
   (`Arc<tokio::Mutex<Session>>` per key); single-session path zero-overhead.
 
 ## Refinements (authoritative over the design docs)
+
+- **Increment 04b — served-handler identity scoping.** Completes 04's tenancy across the
+  wire: the served `MemoryService` and `DimensionSvc` handlers now `scope` the caller's
+  `(user, session)` around the store call, so a per-user backend (`PerUserMemory`/
+  `PerUserDimensions`) routes a *remote* `recall`/`append` to **the caller's** tenant
+  rather than the default `local` one. Two `pub(crate)` helpers in `agent-grpc`'s
+  `server/mod.rs`: **`identity_key(meta)`** extracts `(user, session)` and returns a
+  `SessionKey` **only when both segments are `safe_segment`-valid** (fail closed to
+  `None` on absent/malformed — the selector is attacker-controlled); **`run_scoped(key,
+  fut)`** runs the handler future under `agent_core::scope` when a key is present, else
+  unscoped (the default tenant — a client that sends no identity keeps today's behaviour;
+  per-seam *rejection* of absent identity stays deferred). Compute the key from
+  `request.metadata()` *before* `into_inner()`. This is the reusable seam other served
+  stateful seams (tools/search/repo/session-store) will adopt in 04c/05. **No proto
+  change.** The standalone `--serve-episodic`/`--serve-semantic` layer services wrap
+  non-per-user backends, so they're left unscoped (scoping is a no-op there). Tested:
+  `identity_key` unit incl. adversarial malformed/one-segment/absent → `None`; and an
+  end-to-end roundtrip (TCP+UDS) where a scoped client's identity rides the wire, the
+  handler re-scopes it, and a probe store observes the caller's tenant (and `None` when
+  unscoped).
 
 - **Increment 04 scoped to *in-process* per-user memory/dimension tenancy.** The
   design's 04-tenancy.md enumerates every stateful seam; this PR ships the headline —

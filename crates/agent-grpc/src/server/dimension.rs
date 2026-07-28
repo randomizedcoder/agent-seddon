@@ -30,9 +30,12 @@ impl pb::dimension_service_server::DimensionService for DimensionSvc {
         &self,
         request: Request<pb::SummarizeRequest>,
     ) -> Result<Response<pb::DimensionStep>, Status> {
+        // Scope the caller's tenant so a per-user dimension store routes to *their*
+        // histories (docs/design/multi-session/04-tenancy.md).
+        let key = super::identity_key(request.metadata());
         let sp = span("memory.dimension.summarize", request.metadata());
         let inner = self.inner.clone();
-        async move {
+        let work = async move {
             let req = request.into_inner();
             // Untrusted events: drop any malformed one rather than failing.
             let events: Vec<agent_core::MemoryEvent> = req
@@ -47,17 +50,18 @@ impl pb::dimension_service_server::DimensionService for DimensionSvc {
                 summaries: summaries.into_iter().map(Into::into).collect(),
             }))
         }
-        .instrument(sp)
-        .await
+        .instrument(sp);
+        super::run_scoped(key, work).await
     }
 
     async fn recall(
         &self,
         request: Request<pb::DimensionRecallRequest>,
     ) -> Result<Response<pb::DimensionRecallResponse>, Status> {
+        let key = super::identity_key(request.metadata());
         let sp = span("memory.dimension.recall", request.metadata());
         let inner = self.inner.clone();
-        async move {
+        let work = async move {
             let req = request.into_inner();
             // The dimension is validated inside the store (untrusted path arg).
             let items = inner
@@ -68,8 +72,8 @@ impl pb::dimension_service_server::DimensionService for DimensionSvc {
                 items: items.into_iter().map(Into::into).collect(),
             }))
         }
-        .instrument(sp)
-        .await
+        .instrument(sp);
+        super::run_scoped(key, work).await
     }
 }
 

@@ -498,6 +498,66 @@ async fn memory_append_and_recall(#[case] transport: Transport) {
     assert_eq!(events[0].ts_ms, 42);
 }
 
+// A store that records the ambient tenant (`current_identity().user`) seen at each
+// call — proves the served handler scopes the caller's wire identity into the store,
+// so a per-user backend (docs/design/multi-session/04-tenancy.md) routes to the right
+// tenant instead of the default (increment 04b).
+#[derive(Default)]
+struct TenantProbeMemory {
+    seen: Arc<std::sync::Mutex<Vec<Option<String>>>>,
+}
+
+#[async_trait]
+impl MemoryStore for TenantProbeMemory {
+    async fn recall(&self, _q: &RecallQuery) -> agent_core::Result<Vec<agent_core::MemoryItem>> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push(agent_core::current_identity().map(|k| k.user.as_str().to_string()));
+        Ok(vec![])
+    }
+    async fn append(&self, _e: MemoryEvent) -> agent_core::Result<()> {
+        Ok(())
+    }
+    async fn distill(&self) -> agent_core::Result<usize> {
+        Ok(0)
+    }
+}
+
+#[rstest]
+#[case::tcp(Transport::Tcp)]
+#[case::uds(Transport::Uds)]
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_recall_scopes_caller_tenant(#[case] transport: Transport) {
+    let probe = Arc::new(TenantProbeMemory::default());
+    let (dial, _srv) = spawn(transport, memory_router(probe.clone())).await;
+    let client = GrpcMemory::connect(&dial).unwrap();
+    let q = RecallQuery {
+        text: "x".into(),
+        limit: 1,
+    };
+
+    // A scoped caller's identity rides the wire (the client injects it) and the handler
+    // re-scopes it, so the per-user store sees *this* tenant.
+    agent_core::scope(
+        agent_core::SessionKey::parse("alice", "s1").unwrap(),
+        async {
+            client.recall(&q).await.unwrap();
+        },
+    )
+    .await;
+
+    // No ambient identity → nothing injected → the store runs under the default tenant.
+    client.recall(&q).await.unwrap();
+
+    let seen = probe.seen.lock().unwrap().clone();
+    assert_eq!(
+        seen,
+        vec![Some("alice".to_string()), None],
+        "handler scopes a present identity, leaves an absent one as the default tenant"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Context
 // ---------------------------------------------------------------------------
