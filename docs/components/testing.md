@@ -55,9 +55,22 @@ From fake to real:
 | `expect-smoke` | real tty (tcl/expect), model-free | none (slash commands) | [`nix/checks/expect-smoke.nix`](../../nix/checks/expect-smoke.nix), [`test/expect/`](../../test/expect) |
 | `e2e-live` | process + network | **real** | `nix run .#e2e-live` |
 | `e2e-expect` | real tty, **multi-turn REPL** | **real** | `nix run .#e2e-expect`, [`test/expect/`](../../test/expect) |
+| `e2e-multi` | **N concurrent sessions**, model-judged | **real** ×2 | `nix run .#e2e-multi`, [`test/e2e-multi/`](../../test/e2e-multi) |
 
-The first four run hermetically under `nix flake check`; `e2e-live`/`e2e-expect`
-need a running model and are opt-in `nix run` apps. See
+The first four run hermetically under `nix flake check`; `e2e-live`/`e2e-expect`/`e2e-multi`
+need a running model and are opt-in `nix run` apps.
+
+`e2e-multi` launches **N agent sessions at once** (default 10), each writing hello-world
+or FizzBuzz — round-robin across **C, Go, and Rust** — via the agent's tools; the harness
+compiles and runs each, then a strong external **judge model (GLM-5.2 by default)** grades
+correctness as the final check. It exercises the multi-session machinery under real
+concurrent load, the three toolchains, and an independent quality gate; its exit-code
+contract matches `e2e-live` (0 all-pass, 1 harness failure, 2 model-quality only). The
+generator defaults to `llama3.1` — the local model that reliably emits structured tool
+calls through ollama; point `AGENT_E2E_MODEL` at a stronger coder once its tool template
+is fixed. Judge + generator endpoints are env-configurable (`AGENT_E2E_JUDGE_*`,
+`AGENT_E2E_{BASE_URL,MODEL}`); a missing/unreachable judge degrades to a deterministic
+output check. See
 [operating.md](../operating.md) for how to run the live tiers. The tcl/expect
 scripts under [`test/expect/`](../../test/expect) follow the
 [pcp](https://github.com/randomizedcoder/pcp) "nix boots it, expect drives it"
