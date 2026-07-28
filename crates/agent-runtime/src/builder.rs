@@ -694,10 +694,15 @@ pub async fn build_agent_with(
         if cfg.dimensions.enabled() {
             match cfg.dimensions.store.as_str() {
                 "file" => {
-                    let dir = std::path::PathBuf::from(&cfg.memory.semantic_dir).join("dimensions");
-                    Some(Arc::new(
-                        agent_memory::FileDimensions::new(dir).with_provider(provider.clone()),
-                    ))
+                    // Per-user: each tenant's dimensional histories live under
+                    // `<semantic_dir>/<user>/dimensions/` (the `local` user keeps
+                    // today's `<semantic_dir>/dimensions/`) — cross-session within a
+                    // user, isolated across users
+                    // (docs/design/multi-session/04-tenancy.md).
+                    Some(Arc::new(agent_memory::PerUserDimensions::new(
+                        &cfg.memory.semantic_dir,
+                        Some(provider.clone()),
+                    )))
                 }
                 #[cfg(feature = "grpc")]
                 "grpc" => {
@@ -1311,7 +1316,12 @@ pub(crate) fn file_memory(
         true => Some(ctx.provider()?.clone()),
         false => None,
     };
-    Ok(Arc::new(agent_memory::file_memory(
+    // Route by the ambient `(user, session)` identity so each user's episodic +
+    // semantic memory is rooted at `<base>/<user>/…` — accumulating across their own
+    // sessions but isolated from other users (docs/design/multi-session/04-tenancy.md).
+    // The default `local` user maps to the un-namespaced base, so the single-user CLI
+    // path is byte-identical.
+    Ok(Arc::new(agent_memory::PerUserMemory::new(
         &cfg.memory.episodic_path,
         &cfg.memory.semantic_dir,
         distill_provider,

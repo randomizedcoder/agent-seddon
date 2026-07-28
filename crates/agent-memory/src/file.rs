@@ -61,6 +61,11 @@ impl EpisodicStore for FileEpisodic {
             .open(&self.path)
             .await?;
         file.write_all(line.as_bytes()).await?;
+        // Flush before returning: `tokio::fs::File` completes writes on a background
+        // blocking task, so `write_all().await` can return before the bytes reach the
+        // OS. Without this, a crash right after `append` loses the event, and a
+        // `recent()` read immediately after can miss it under blocking-pool contention.
+        file.flush().await?;
         Ok(())
     }
 
