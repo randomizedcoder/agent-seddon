@@ -301,8 +301,29 @@ metadata (not a `.proto` field, so it is additive and `buf breaking` never sees 
 > labels, and only as far as the transport (UDS file perms / loopback) already trusts
 > the peer. Isolation is enforced *structurally* (per-tenant paths guarded by
 > `safe_segment` + `confine`), so even a spoofed identity cannot escape the namespace
-> it names. A real `auth-token → user_id` interceptor is a **named follow-up** — see
+> it names. `safe_segment` also **bounds each segment's length** (`MAX_SEGMENT_LEN`),
+> so an over-long id can't blow up a metric label or path. A real
+> `auth-token → user_id` interceptor is a **named follow-up** — see
 > [`docs/design/multi-session/07-security.md`](design/multi-session/07-security.md).
+
+### Isolation is not containment: `bash` and the exec seams
+
+Per-tenant paths isolate the *confined* file tools (`edit`/`read`/`write`/`search`).
+They do **not** contain `bash`, which is the deliberate *unconfined* escape hatch
+([`CLAUDE.md`](../CLAUDE.md)): in a multi-user deployment, `bash` under one session can
+read another user's files or the host. The same applies with more force to
+`--serve-sandbox` / `--serve-pty` / `--serve-forge`, which host arbitrary execution and
+whose `Policy` gate stays **client-side**
+([above](#--serve-sandbox-and---serve-pty-are-a-different-class-of-grant)). Until the auth
+follow-up lands, harden exec-capable multi-user deployments at the transport:
+
+- **One UDS socket per user**, with OS file permissions (`0o600` inside a `0o700` dir),
+  so the socket itself enforces the user boundary and `x-agent-user-id` becomes advisory.
+  Session namespacing still isolates that user's own sessions within the socket.
+- Or **disable `bash` per-user by `Policy`** in multi-user configs.
+
+These are deployment choices, not defaults — the single-process CLI/REPL (one `local`
+user) needs none of it.
 
 ## Deployment sketch (k8s)
 

@@ -1153,15 +1153,24 @@ pub fn confine(
 // routing/namespacing label, and every use as a path component or map key is
 // validated fail-closed via [`safe_segment`].
 
+/// Upper bound on a validated segment's length. Caps the blast radius of an
+/// attacker-controlled identity: a `user_id`/`session_id` becomes a Prometheus label
+/// value and a filesystem path component, so an unbounded one is a memory/cardinality
+/// vector (docs/design/multi-session/07-security.md, the "over-length" sweep case).
+/// Generous for real ids — a UUID is 36 chars — so a longer segment is pathological.
+pub const MAX_SEGMENT_LEN: usize = 128;
+
 /// Fail-closed single path/id segment validator. Rejects empty, `.`/`..`, a leading
-/// `-`, and anything outside `[A-Za-z0-9._-]` — blocking path traversal and
-/// ref/argument injection when a caller-supplied string becomes a path component or
-/// key. Promoted here (from `agent-git`/`agent-review`) so every seam shares one
-/// audited validator. **Security-critical**: pair it with [`confine`] whenever the
-/// segment becomes a real filesystem path (this rejects `..`/separators; `confine`
-/// additionally defeats symlink escape).
+/// `-`, over-[`MAX_SEGMENT_LEN`], and anything outside `[A-Za-z0-9._-]` — blocking path
+/// traversal, ref/argument injection, and the over-length DoS when a caller-supplied
+/// string becomes a path component, metric label, or key. Promoted here (from
+/// `agent-git`/`agent-review`) so every seam shares one audited validator.
+/// **Security-critical**: pair it with [`confine`] whenever the segment becomes a real
+/// filesystem path (this rejects `..`/separators; `confine` additionally defeats
+/// symlink escape).
 pub fn safe_segment(s: &str) -> bool {
     !s.is_empty()
+        && s.len() <= MAX_SEGMENT_LEN
         && s != "."
         && s != ".."
         && !s.starts_with('-')
@@ -5109,8 +5118,28 @@ mod tests {
     #[case::traversal("../bob", false)]
     #[case::space("a b", false)]
     #[case::nul("a\0b", false)]
+    #[case::newline("a\nb", false)]
+    #[case::tab("a\tb", false)]
+    #[case::unicode("café", false)]
     fn boundary_safe_segment(#[case] s: &str, #[case] ok: bool) {
         assert_eq!(safe_segment(s), ok);
+    }
+
+    // Over-length is a DoS/cardinality vector (an id becomes a metric label + path
+    // component): accept up to `MAX_SEGMENT_LEN`, reject beyond
+    // (docs/design/multi-session/07-security.md).
+    #[test]
+    fn adversarial_safe_segment_length_is_bounded() {
+        assert!(
+            safe_segment(&"a".repeat(MAX_SEGMENT_LEN)),
+            "at the cap is fine"
+        );
+        assert!(
+            !safe_segment(&"a".repeat(MAX_SEGMENT_LEN + 1)),
+            "one over the cap is rejected"
+        );
+        // A huge otherwise-valid spray must not slip through.
+        assert!(!safe_segment(&"x".repeat(10_000)));
     }
 
     #[test]
