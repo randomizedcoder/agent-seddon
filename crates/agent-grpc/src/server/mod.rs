@@ -112,6 +112,36 @@ pub(crate) fn missing(field: &'static str) -> Status {
     Status::invalid_argument(format!("missing required field `{field}`"))
 }
 
+/// The caller's `(user, session)` identity from request metadata, **only when both
+/// segments are present and `safe_segment`-valid**. The values are attacker-controlled
+/// (there is no auth layer — see docs/design/multi-session/07-security.md), so this
+/// fails closed to `None` on anything malformed rather than sanitizing.
+///
+/// `None` means "run under the default `local` tenant" — a client that sends no
+/// identity keeps today's single-tenant behaviour (back-compat). Per-seam *rejection*
+/// of absent identity is a later increment; here absence is simply the default tenant.
+pub(crate) fn identity_key(meta: &tonic::metadata::MetadataMap) -> Option<agent_core::SessionKey> {
+    let (user, session) = agent_proto::identity::extract_identity(meta);
+    let user = user.filter(|u| agent_core::safe_segment(u))?;
+    let session = session.filter(|s| agent_core::safe_segment(s))?;
+    agent_core::SessionKey::parse(&user, &session).ok()
+}
+
+/// Run `fut` with the caller's ambient identity scoped, so a stateful backend that
+/// keys by `agent_core::current_identity()` — e.g. the per-user memory/dimension stores
+/// (docs/design/multi-session/04-tenancy.md) — routes to the caller's tenant. With no
+/// well-formed identity (`key = None`) the future runs unscoped, i.e. under the default
+/// `local` tenant. Compute `key` from `request.metadata()` *before* `into_inner()`.
+pub(crate) async fn run_scoped<F: std::future::Future>(
+    key: Option<agent_core::SessionKey>,
+    fut: F,
+) -> F::Output {
+    match key {
+        Some(k) => agent_core::scope(k, fut).await,
+        None => fut.await,
+    }
+}
+
 /// Add gRPC server reflection to a seam's `Router`, so a `--serve-<seam>` process
 /// can be introspected (`grpcurl … list` / `describe`) and called with JSON without
 /// the `.proto` files on hand. Registers both the `v1` and `v1alpha` reflection
@@ -135,4 +165,56 @@ pub fn with_reflection(
         .register_encoded_file_descriptor_set(tonic_health::pb::FILE_DESCRIPTOR_SET)
         .build_v1alpha()?;
     Ok(router.add_service(v1).add_service(v1alpha))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::identity_key;
+    use agent_proto::identity::{inject_identity, SESSION_ID_KEY, USER_ID_KEY};
+    use tonic::metadata::{MetadataMap, MetadataValue};
+
+    fn meta_with(user: &str, session: &str) -> MetadataMap {
+        let mut m = MetadataMap::new();
+        inject_identity(user, session, &mut m);
+        m
+    }
+
+    #[test]
+    fn positive_well_formed_identity_becomes_a_key() {
+        let key = identity_key(&meta_with("alice", "sess-1")).expect("a key");
+        assert_eq!(key.user.as_str(), "alice");
+        assert_eq!(key.session.as_str(), "sess-1");
+    }
+
+    #[test]
+    fn boundary_absent_identity_is_none() {
+        assert!(identity_key(&MetadataMap::new()).is_none());
+    }
+
+    #[test]
+    fn boundary_only_one_segment_present_is_none() {
+        // A user with no session (or vice-versa) is not a complete key.
+        let mut m = MetadataMap::new();
+        m.insert(USER_ID_KEY, MetadataValue::from_static("alice"));
+        assert!(identity_key(&m).is_none());
+    }
+
+    // A malformed segment is attacker-controlled and must fail closed to `None`
+    // (→ the default tenant), never sanitized into a usable key.
+    #[rstest::rstest]
+    #[case::user_traversal("../../etc", "sess-1")]
+    #[case::user_separator("a/b", "sess-1")]
+    #[case::user_leading_dash("-rf", "sess-1")]
+    #[case::session_traversal("alice", "..")]
+    #[case::session_separator("alice", "a/b")]
+    fn adversarial_malformed_segment_is_none(#[case] user: &str, #[case] session: &str) {
+        // The values are valid ASCII (so they ride the wire) but fail `safe_segment`.
+        let mut m = MetadataMap::new();
+        m.insert(USER_ID_KEY, MetadataValue::try_from(user).unwrap());
+        m.insert(SESSION_ID_KEY, MetadataValue::try_from(session).unwrap());
+        assert!(
+            identity_key(&m).is_none(),
+            "malformed ({user:?},{session:?}) must not become a key"
+        );
+    }
 }

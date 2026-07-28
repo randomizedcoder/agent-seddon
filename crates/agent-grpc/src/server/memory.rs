@@ -31,26 +31,31 @@ impl pb::memory_server::Memory for MemoryService {
         &self,
         request: Request<pb::RecallQuery>,
     ) -> Result<Response<pb::RecallResponse>, Status> {
+        // Scope the caller's tenant so a per-user store routes to *their* memory, not
+        // the default tenant (docs/design/multi-session/04-tenancy.md). Read the key
+        // before `into_inner()` consumes the request.
+        let key = super::identity_key(request.metadata());
         let sp = span("memory.recall", request.metadata());
         let inner = self.inner.clone();
-        async move {
+        let work = async move {
             let q = request.into_inner().into();
             let items = inner.recall(&q).await.map_err(|e| status_from_error(&e))?;
             Ok(Response::new(pb::RecallResponse {
                 items: items.into_iter().map(Into::into).collect(),
             }))
         }
-        .instrument(sp)
-        .await
+        .instrument(sp);
+        super::run_scoped(key, work).await
     }
 
     async fn append(
         &self,
         request: Request<pb::MemoryEvent>,
     ) -> Result<Response<pb::AppendResponse>, Status> {
+        let key = super::identity_key(request.metadata());
         let sp = span("memory.append", request.metadata());
         let inner = self.inner.clone();
-        async move {
+        let work = async move {
             let event = request.into_inner().try_into()?;
             inner
                 .append(event)
@@ -58,22 +63,23 @@ impl pb::memory_server::Memory for MemoryService {
                 .map_err(|e| status_from_error(&e))?;
             Ok(Response::new(pb::AppendResponse {}))
         }
-        .instrument(sp)
-        .await
+        .instrument(sp);
+        super::run_scoped(key, work).await
     }
 
     async fn distill(
         &self,
         request: Request<pb::DistillRequest>,
     ) -> Result<Response<pb::DistillResponse>, Status> {
+        let key = super::identity_key(request.metadata());
         let sp = span("memory.distill", request.metadata());
         let inner = self.inner.clone();
-        async move {
+        let work = async move {
             let count = inner.distill().await.map_err(|e| status_from_error(&e))? as u64;
             Ok(Response::new(pb::DistillResponse { count }))
         }
-        .instrument(sp)
-        .await
+        .instrument(sp);
+        super::run_scoped(key, work).await
     }
 }
 
