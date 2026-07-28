@@ -13,8 +13,9 @@ design docs, this file records the refinement (the design docs stay the rational
 | 03 | Hazard A: stateless `ContextStrategy::compact(switch)` | [`03-hazards.md`](03-hazards.md) | **merged** (#153) |
 | 03b | Hazard B: `SessionEventsRegistry` + `session_id` selector on `AgentSessionService` | [`03-hazards.md`](03-hazards.md) | **merged** (#154) |
 | 04 | Per-user memory/dimension tenancy (in-process) | [`04-tenancy.md`](04-tenancy.md) | **merged** (#155) |
-| 04b | Served-handler identity scoping (`MemoryService`/`DimensionSvc` route the caller's tenant) | [`04-tenancy.md`](04-tenancy.md) | **in PR** (`feat/multi-session-04b-served-tenancy`) |
-| 04c | Remaining stateful-seam keying: `SessionStore` ownership check, `Pty`/`TaskTracker` maps, per-call confined cwd/root | [`04-tenancy.md`](04-tenancy.md) | pending |
+| 04b | Served-handler identity scoping (`MemoryService`/`DimensionSvc` route the caller's tenant) | [`04-tenancy.md`](04-tenancy.md) | **merged** (#156) |
+| 04c | `SessionStore` `restore`/`diff` ownership check (close the checkpoint-id read oracle) | [`04-tenancy.md`](04-tenancy.md) | **in PR** (`feat/multi-session-04c-sessionstore-ownership`) |
+| 04d | Remaining stateful-seam keying: `Pty`/`TaskTracker` maps, per-call confined cwd/root | [`04-tenancy.md`](04-tenancy.md) | pending |
 | 05 | `SessionRegistry` lifecycle (server-mint, idle-GC) | [`05-lifecycle.md`](05-lifecycle.md) | pending |
 | 06 | Session-scoped observability (span attrs, curated metric label, eviction) | [`06-observability.md`](06-observability.md) | pending |
 | 07 | Security hardening (`bash` containment, UDS-per-user, adversarial sweep) | [`07-security.md`](07-security.md) | pending |
@@ -37,6 +38,28 @@ design docs, this file records the refinement (the design docs stay the rational
   (`Arc<tokio::Mutex<Session>>` per key); single-session path zero-overhead.
 
 ## Refinements (authoritative over the design docs)
+
+- **Increment 04c — `SessionStore` `restore`/`diff` ownership check.** `restore(id)` and
+  `diff(a, b)` took a bare content-addressed `CheckpointId` with **no scoping** — and ids
+  are guessable FNV hashes of content, so a stray id let any caller read any checkpoint
+  (a cross-tenant read oracle). Fix (**no trait or proto change** — the design's "trait/
+  impl, not wire" claim holds via the *ambient* identity): `FileSessionStore` gained an
+  `authorize_read(id)` gate that, **when an identity is scoped**, requires the id
+  reachable from the caller's session's branch heads (`reachable_from_session`, the same
+  head-chain walk `list`/`prune` already do). The two served handlers (`server/session.rs`
+  `restore`/`diff`) adopt 04b's `run_scoped(identity_key(meta), …)` so the store sees the
+  caller's identity. **Denial returns the same `checkpoint not found` as a truly-absent
+  id** (no existence oracle), and an **unscoped** in-process caller (the single-user CLI,
+  or a client that sends no identity) is unaffected (back-compat).
+  - **Residual (documented, deferred to auth follow-up / 07-security):** the check gates
+    on the caller's `session` id, which is *itself* attacker-controlled metadata "only as
+    trustworthy as the transport." So this closes the easy "obtain a stray id and read it"
+    oracle but does **not** stop an attacker who knows a victim's (server-minted, 05)
+    session id from spoofing it — that needs the token→user auth interceptor. Ownership is
+    keyed by `session` (not `user`): checkpoints are inherently session-scoped snapshots,
+    so per-user cross-session sharing (the memory model) does **not** apply. Namespacing
+    the checkpoint store by `user` and aligning the runtime's bare `settings.session_id`
+    checkpoint namespace with the tenant `SessionKey` remain follow-ups.
 
 - **Increment 04b — served-handler identity scoping.** Completes 04's tenancy across the
   wire: the served `MemoryService` and `DimensionSvc` handlers now `scope` the caller's

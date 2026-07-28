@@ -69,17 +69,20 @@ impl pb::session_service_server::SessionService for SessionServiceSvc {
         &self,
         request: Request<pb::SessionCheckpointRef>,
     ) -> Result<Response<pb::WorkingSet>, Status> {
+        // Scope the caller's tenant so the store can authorize the read by bare id
+        // (a checkpoint id is a guessable capability — see `authorize_read`; 04c).
+        let key = super::identity_key(request.metadata());
         let sp = span("session.restore", request.metadata());
         let inner = self.inner.clone();
-        async move {
+        let work = async move {
             let ws = inner
                 .restore(&request.into_inner().id)
                 .await
                 .map_err(|e| status_from_error(&e))?;
             Ok(Response::new(ws.into()))
         }
-        .instrument(sp)
-        .await
+        .instrument(sp);
+        super::run_scoped(key, work).await
     }
 
     async fn branch(
@@ -139,9 +142,10 @@ impl pb::session_service_server::SessionService for SessionServiceSvc {
         &self,
         request: Request<pb::SessionDiffRequest>,
     ) -> Result<Response<pb::SessionCheckpointDiff>, Status> {
+        let key = super::identity_key(request.metadata());
         let sp = span("session.diff", request.metadata());
         let inner = self.inner.clone();
-        async move {
+        let work = async move {
             let req = request.into_inner();
             let d = inner
                 .diff(&req.a, &req.b)
@@ -149,8 +153,8 @@ impl pb::session_service_server::SessionService for SessionServiceSvc {
                 .map_err(|e| status_from_error(&e))?;
             Ok(Response::new(d.into()))
         }
-        .instrument(sp)
-        .await
+        .instrument(sp);
+        super::run_scoped(key, work).await
     }
 
     async fn prune(
