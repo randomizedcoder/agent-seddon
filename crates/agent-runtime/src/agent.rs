@@ -1458,20 +1458,64 @@ impl Agent {
 ///
 /// The single-session CLI/REPL can ignore this and call [`Agent::session`] directly;
 /// the multi-tenant (portal) path drives sessions through [`Self::get_or_create`].
+/// Rejected [`SessionManager::open`] — a *new* session would exceed a capacity cap.
+/// The amplification guard against a hostile client spraying session ids
+/// (docs/design/multi-session/05-lifecycle.md); a wire `SessionRegistry.Open` maps
+/// this to `RESOURCE_EXHAUSTED`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenError {
+    /// The per-user live-session cap (the contained value) is full.
+    PerUserLimit(usize),
+    /// The global live-session cap (the contained value) is full.
+    TotalLimit(usize),
+}
+
+impl std::fmt::Display for OpenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OpenError::PerUserLimit(n) => write!(f, "per-user session limit reached ({n})"),
+            OpenError::TotalLimit(n) => write!(f, "global session limit reached ({n})"),
+        }
+    }
+}
+
+impl std::error::Error for OpenError {}
+
+/// One live session plus its idle-GC bookkeeping.
+struct Entry {
+    session: Arc<tokio::sync::Mutex<Session>>,
+    /// Wall-clock of the last dispatch/heartbeat, for idle reaping.
+    last_used: std::time::Instant,
+}
+
 pub struct SessionManager {
     backend: Arc<Agent>,
-    sessions: std::sync::Mutex<
-        std::collections::HashMap<agent_core::SessionKey, Arc<tokio::sync::Mutex<Session>>>,
-    >,
+    sessions: std::sync::Mutex<std::collections::HashMap<agent_core::SessionKey, Entry>>,
+    /// Global live-session cap (`0` = unbounded). See [`Self::open`].
+    max_total: usize,
+    /// Per-user live-session cap (`0` = unbounded).
+    max_per_user: usize,
 }
 
 impl SessionManager {
-    /// Wrap a built backend.
+    /// Wrap a built backend, with no capacity caps (the caps are for the multi-tenant
+    /// serve path — [`Self::with_limits`]).
     pub fn new(backend: Arc<Agent>) -> Self {
         Self {
             backend,
             sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+            max_total: 0,
+            max_per_user: 0,
         }
+    }
+
+    /// Set the amplification-guard caps: at most `max_total` live sessions overall and
+    /// `max_per_user` per user (`0` = unbounded). Only [`Self::open`] enforces them;
+    /// the lazy [`Self::get_or_create`] correctness path never rejects.
+    pub fn with_limits(mut self, max_total: usize, max_per_user: usize) -> Self {
+        self.max_total = max_total;
+        self.max_per_user = max_per_user;
+        self
     }
 
     /// The shared backend (for the `--serve-<seam>` accessors and cleanup).
@@ -1479,20 +1523,71 @@ impl SessionManager {
         &self.backend
     }
 
-    /// Look up the session for `key`, creating it on first use. Lock the returned
-    /// handle to take a turn (`handle.lock().await.send(goal).await`). The map lock is
-    /// held only for the lookup/insert, never across `.await`, so distinct sessions
-    /// never contend.
+    /// Look up the session for `key`, creating it on first use, and mark it used. Lock
+    /// the returned handle to take a turn. The map lock is held only for the
+    /// lookup/insert, never across `.await`, so distinct sessions never contend.
+    ///
+    /// This is the **lazy correctness path** and never rejects: in a split deployment a
+    /// seam may receive its first request for a session another process `Open`ed, and
+    /// must allocate on demand (docs/design/multi-session/05-lifecycle.md). Capacity is
+    /// enforced only at the trusted entry point, [`Self::open`].
     pub fn get_or_create(&self, key: agent_core::SessionKey) -> Arc<tokio::sync::Mutex<Session>> {
         let mut map = self.sessions.lock().expect("session map poisoned");
-        map.entry(key.clone())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(self.backend.session_with(key))))
-            .clone()
+        let entry = map.entry(key.clone()).or_insert_with(|| Entry {
+            session: Arc::new(tokio::sync::Mutex::new(self.backend.session_with(key))),
+            last_used: std::time::Instant::now(),
+        });
+        entry.last_used = std::time::Instant::now();
+        entry.session.clone()
+    }
+
+    /// Capacity-checked entry point (the wire `SessionRegistry.Open`): return the
+    /// session for `key`, but if it does **not** already exist, reject when creating it
+    /// would exceed the total or per-user cap. An existing session is always returned
+    /// (and touched), so a legitimate client re-entering its own session is never
+    /// throttled — only a hostile *new*-id spray is (docs/design/multi-session/05).
+    #[allow(clippy::result_large_err)]
+    pub fn open(
+        &self,
+        key: agent_core::SessionKey,
+    ) -> Result<Arc<tokio::sync::Mutex<Session>>, OpenError> {
+        let mut map = self.sessions.lock().expect("session map poisoned");
+        if !map.contains_key(&key) {
+            if self.max_total > 0 && map.len() >= self.max_total {
+                return Err(OpenError::TotalLimit(self.max_total));
+            }
+            if self.max_per_user > 0 {
+                let per_user = map.keys().filter(|k| k.user == key.user).count();
+                if per_user >= self.max_per_user {
+                    return Err(OpenError::PerUserLimit(self.max_per_user));
+                }
+            }
+        }
+        let entry = map.entry(key.clone()).or_insert_with(|| Entry {
+            session: Arc::new(tokio::sync::Mutex::new(self.backend.session_with(key))),
+            last_used: std::time::Instant::now(),
+        });
+        entry.last_used = std::time::Instant::now();
+        Ok(entry.session.clone())
+    }
+
+    /// Reset a session's idle timer (the wire `Heartbeat`), keeping a long-lived but
+    /// quiet session warm. Returns whether the session was live.
+    pub fn touch(&self, key: &agent_core::SessionKey) -> bool {
+        let mut map = self.sessions.lock().expect("session map poisoned");
+        match map.get_mut(key) {
+            Some(e) => {
+                e.last_used = std::time::Instant::now();
+                true
+            }
+            None => false,
+        }
     }
 
     /// Drop a finished session, freeing its state. Absent key is a no-op. Also
     /// retires the session's event sink from the backend registry, so a dead session
-    /// stops being observable and its broadcast channel is freed (hazard B eviction).
+    /// stops being observable and its broadcast channel is freed (hazard B eviction),
+    /// and retires its per-tenant gauge series (06-observability).
     pub fn remove(&self, key: &agent_core::SessionKey) {
         self.sessions
             .lock()
@@ -1505,6 +1600,28 @@ impl SessionManager {
             .metrics
             .for_session(key.session.as_str(), key.user.as_str())
             .retire();
+    }
+
+    /// Reap sessions idle for at least `idle_after`, freeing their state — the real
+    /// resource-use guarantee, since `Close` is best-effort and a crashed client never
+    /// sends it (docs/design/multi-session/05-lifecycle.md). A session **currently
+    /// mid-turn** (its handle is locked) is skipped, so a long turn that hasn't touched
+    /// `last_used` is never reaped out from under itself. Returns how many were reaped.
+    pub fn reap_idle(&self, idle_after: std::time::Duration) -> usize {
+        let now = std::time::Instant::now();
+        let stale: Vec<agent_core::SessionKey> = {
+            let map = self.sessions.lock().expect("session map poisoned");
+            map.iter()
+                .filter(|(_, e)| now.duration_since(e.last_used) >= idle_after)
+                // `try_lock` Ok ⇒ no turn in progress ⇒ safe to reap.
+                .filter(|(_, e)| e.session.try_lock().is_ok())
+                .map(|(k, _)| k.clone())
+                .collect()
+        };
+        for k in &stale {
+            self.remove(k);
+        }
+        stale.len()
     }
 
     /// Number of live sessions.
@@ -2770,6 +2887,67 @@ mod tests {
             assert_eq!(b.id.session.as_str(), "s2");
         }
         assert!(!Arc::ptr_eq(&alice, &bob));
+    }
+
+    /// `adversarial_`: the capacity caps guard against a hostile new-id spray, per
+    /// user and overall — but a client re-entering an *existing* session is never
+    /// throttled, and the lazy `get_or_create` path never rejects.
+    #[test]
+    fn adversarial_open_enforces_per_user_and_total_caps() {
+        let mgr = SessionManager::new(Arc::new(bare_agent())).with_limits(3, 2);
+        let k = |u, s| agent_core::SessionKey::parse(u, s).unwrap();
+
+        // Alice may open up to 2 (per-user cap).
+        assert!(mgr.open(k("alice", "s1")).is_ok());
+        assert!(mgr.open(k("alice", "s2")).is_ok());
+        assert_eq!(
+            mgr.open(k("alice", "s3")).map(|_| ()).unwrap_err(),
+            OpenError::PerUserLimit(2),
+            "3rd alice session is rejected"
+        );
+        // Re-opening an existing session is always allowed (not a new allocation).
+        assert!(mgr.open(k("alice", "s1")).is_ok());
+
+        // Bob opens one; the next new session hits the *global* cap (3) before bob's
+        // own per-user cap.
+        assert!(mgr.open(k("bob", "b1")).is_ok());
+        assert_eq!(
+            mgr.open(k("bob", "b2")).map(|_| ()).unwrap_err(),
+            OpenError::TotalLimit(3)
+        );
+
+        // The lazy correctness path never rejects (a split-deployment first-use).
+        let _ = mgr.get_or_create(k("carol", "c1"));
+        assert_eq!(mgr.len(), 4);
+    }
+
+    /// `boundary_`: idle-GC reaps a quiet session, `touch` keeps it warm, and a session
+    /// mid-turn (locked handle) is never reaped out from under itself.
+    #[tokio::test]
+    async fn boundary_reap_idle_frees_quiet_sessions_and_touch_keeps_warm() {
+        use std::time::Duration;
+        let mgr = SessionManager::new(Arc::new(bare_agent()));
+        let alice = agent_core::SessionKey::parse("alice", "s1").unwrap();
+        let bob = agent_core::SessionKey::parse("bob", "s2").unwrap();
+        let _ = mgr.get_or_create(alice.clone());
+        let bob_handle = mgr.get_or_create(bob.clone());
+        assert_eq!(mgr.len(), 2);
+
+        // Nothing is idle yet under a long window.
+        assert_eq!(mgr.reap_idle(Duration::from_secs(3600)), 0);
+
+        // A zero window reaps everything not currently locked. Hold bob's handle to
+        // model a turn in progress — it must survive.
+        let guard = bob_handle.lock().await;
+        let reaped = mgr.reap_idle(Duration::ZERO);
+        drop(guard);
+        assert_eq!(
+            reaped, 1,
+            "only the idle, unlocked session (alice) is reaped"
+        );
+        assert!(mgr.touch(&bob), "bob is still live");
+        assert!(!mgr.touch(&alice), "alice was reaped");
+        assert_eq!(mgr.len(), 1);
     }
 
     /// `boundary_`: a run records the curated families under its `(session, user)`
