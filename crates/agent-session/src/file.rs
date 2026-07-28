@@ -89,6 +89,51 @@ impl FileSessionStore {
         std::fs::write(path, serde_json::to_vec(st)?)?;
         Ok(())
     }
+    /// Whether `id` is reachable from any branch head of `session` — i.e. it belongs
+    /// to that session's checkpoint history (the same head-chain walk `list`/`prune`
+    /// do). Used to authorize reads: a bare content-addressed id is otherwise a
+    /// cross-tenant read oracle.
+    fn reachable_from_session(&self, session: &str, id: &str) -> bool {
+        let st = self.load_session(session);
+        let mut seen = BTreeSet::new();
+        let mut queue: VecDeque<CheckpointId> = st.branches.values().cloned().collect();
+        while let Some(cur) = queue.pop_front() {
+            if cur == id {
+                return true;
+            }
+            if !seen.insert(cur.clone()) {
+                continue;
+            }
+            if let Ok(obj) = self.read_object(&cur) {
+                if let Some(p) = obj.parent {
+                    queue.push_back(p);
+                }
+            }
+        }
+        false
+    }
+
+    /// Fail-closed authorization for a read by content-addressed `id`. `restore`/
+    /// `diff` take a bare id, and ids are guessable capabilities (an FNV hash of
+    /// content), so an unauthorized `restore(id)` is a cross-tenant read oracle
+    /// (docs/design/multi-session/04-tenancy.md). When an **ambient identity** is
+    /// scoped (the served path, via `run_scoped` — 04b), the id must be reachable
+    /// from the caller's session heads; an unscoped in-process caller (the
+    /// single-user CLI) is unaffected. Denial returns the **same** "not found" as a
+    /// truly-absent id, so it is not an existence oracle.
+    ///
+    /// The session id is only as trustworthy as the transport — spoofing a known
+    /// victim session id still needs the auth-token follow-up (07-security.md); this
+    /// closes the far easier "obtain a stray id and read it" oracle.
+    fn authorize_read(&self, id: &str) -> Result<()> {
+        if let Some(key) = agent_core::current_identity() {
+            if !self.reachable_from_session(key.session.as_str(), id) {
+                return Err(Error::Session(format!("checkpoint not found: {id}")));
+            }
+        }
+        Ok(())
+    }
+
     fn all_session_ids(&self) -> Vec<String> {
         let dir = self.root.join("sessions");
         std::fs::read_dir(dir)
@@ -191,6 +236,7 @@ impl SessionStore for FileSessionStore {
     }
 
     async fn restore(&self, id: &CheckpointId) -> Result<WorkingSet> {
+        self.authorize_read(id)?;
         let obj = self.read_object(id)?;
         Ok(WorkingSet {
             messages: obj.messages,
@@ -248,6 +294,9 @@ impl SessionStore for FileSessionStore {
     }
 
     async fn diff(&self, a: &CheckpointId, b: &CheckpointId) -> Result<CheckpointDiff> {
+        // Both operands are reads by bare id — authorize each (same oracle as restore).
+        self.authorize_read(a)?;
+        self.authorize_read(b)?;
         let am = self.read_object(a)?.messages;
         let bm = self.read_object(b)?.messages;
         // `Message` is not `PartialEq`; compare by canonical serialization.
@@ -457,6 +506,78 @@ mod tests {
         let d = s.diff(&a, &b).await.unwrap();
         assert_eq!(d.added, 1);
         assert_eq!(d.removed, 0);
+    }
+
+    // --- ownership: a bare checkpoint id is not a cross-tenant read oracle (04c) ---
+
+    use agent_core::{scope, SessionKey};
+
+    // Bob cannot `restore` a checkpoint that belongs to Alice's session, even though
+    // the content-addressed id is guessable. Denial is the same "not found" as an
+    // absent id (no existence oracle). Alice restoring her own succeeds.
+    #[tokio::test]
+    async fn adversarial_restore_foreign_checkpoint_denied() {
+        let (s, _d) = store().await;
+        let id = s
+            .checkpoint("alice-s1", &ws(&[(Role::User, "secret")]), "t1")
+            .await
+            .unwrap();
+
+        // Bob (a different session identity) is denied — indistinguishable from absent.
+        let bob = SessionKey::parse("bob", "bob-s1").unwrap();
+        let err = scope(bob, s.restore(&id)).await.unwrap_err().to_string();
+        assert!(
+            err.contains("not found"),
+            "denial must look like absence: {err}"
+        );
+
+        // Alice, whose session owns it, restores it.
+        let alice = SessionKey::parse("alice", "alice-s1").unwrap();
+        let restored = scope(alice, s.restore(&id)).await.unwrap();
+        assert_eq!(restored.messages.len(), 1);
+    }
+
+    // `diff` reads by two bare ids — both must be authorized. Bob is denied even when
+    // one operand would be reachable from his own (empty) session.
+    #[tokio::test]
+    async fn adversarial_diff_foreign_checkpoint_denied() {
+        let (s, _d) = store().await;
+        let a = s
+            .checkpoint("alice-s1", &ws(&[(Role::User, "a")]), "t1")
+            .await
+            .unwrap();
+        let b = s
+            .checkpoint(
+                "alice-s1",
+                &ws(&[(Role::User, "a"), (Role::Assistant, "b")]),
+                "t2",
+            )
+            .await
+            .unwrap();
+
+        let bob = SessionKey::parse("bob", "bob-s1").unwrap();
+        assert!(
+            scope(bob, s.diff(&a, &b)).await.is_err(),
+            "bob cannot diff alice's checkpoints"
+        );
+
+        let alice = SessionKey::parse("alice", "alice-s1").unwrap();
+        let d = scope(alice, s.diff(&a, &b)).await.unwrap();
+        assert_eq!(d.added, 1);
+    }
+
+    // Back-compat: with no ambient identity scoped (the single-user CLI, or a client
+    // that sends no identity), the read is unauthenticated pass-through — today's
+    // behaviour, so the check never breaks the single-session path.
+    #[tokio::test]
+    async fn boundary_restore_without_identity_is_passthrough() {
+        let (s, _d) = store().await;
+        let id = s
+            .checkpoint("whoever", &ws(&[(Role::User, "x")]), "t1")
+            .await
+            .unwrap();
+        // No `scope(...)` wrapper ⇒ `current_identity()` is `None` ⇒ no gate.
+        assert!(s.restore(&id).await.is_ok());
     }
 
     // GC keeps reachable checkpoints, collects orphans.

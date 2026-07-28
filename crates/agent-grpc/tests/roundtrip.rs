@@ -559,6 +559,43 @@ async fn memory_recall_scopes_caller_tenant(#[case] transport: Transport) {
 }
 
 // ---------------------------------------------------------------------------
+// SessionStore ownership (04c): a bare checkpoint id is not a cross-tenant read
+// oracle over the wire — the served handler scopes the caller's identity and the
+// store authorizes the read by session-reachability.
+// ---------------------------------------------------------------------------
+
+#[rstest]
+#[case::tcp(Transport::Tcp)]
+#[case::uds(Transport::Uds)]
+#[tokio::test(flavor = "multi_thread")]
+async fn session_restore_denies_foreign_checkpoint_over_the_wire(#[case] transport: Transport) {
+    use agent_core::{scope, SessionKey, SessionStore};
+    use agent_grpc::client::GrpcSession;
+    use agent_grpc::server::session_router;
+
+    let store = Arc::new(agent_session::FileSessionStore::new(tempdir()));
+    let (dial, _srv) = spawn(transport, session_router(store)).await;
+    let client = GrpcSession::connect(&dial).unwrap();
+
+    // Alice checkpoints under her session (the id is content-addressed / guessable).
+    let ws = WorkingSet {
+        messages: vec![Message::user("alice's secret working set")],
+    };
+    let id = client.checkpoint("alice-s1", &ws, "t1").await.unwrap();
+
+    // Bob, scoped to his own identity (which the client injects into metadata), is
+    // denied — and the error is indistinguishable from an absent id.
+    let bob = SessionKey::parse("bob", "bob-s1").unwrap();
+    let denied = scope(bob, client.restore(&id)).await;
+    assert!(denied.is_err(), "bob must not restore alice's checkpoint");
+
+    // Alice, whose session owns it, restores it.
+    let alice = SessionKey::parse("alice", "alice-s1").unwrap();
+    let restored = scope(alice, client.restore(&id)).await.unwrap();
+    assert_eq!(restored.messages.len(), 1);
+}
+
+// ---------------------------------------------------------------------------
 // Context
 // ---------------------------------------------------------------------------
 
