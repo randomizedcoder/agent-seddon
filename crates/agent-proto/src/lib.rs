@@ -82,6 +82,7 @@ mod descriptor_tests {
             "PromptService",
             "MetricsProxyService",
             "AgentSessionService",
+            "SessionRegistryService",
         ] {
             assert!(
                 services.contains(&expected),
