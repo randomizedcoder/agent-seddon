@@ -35,8 +35,8 @@ pub struct Metrics {
     // (cache_read / (cache_read + input)) is derivable in PromQL.
     cost_usd: CounterVec,
     cache_tokens: IntCounterVec,
-    context_tokens: IntGauge,
-    context_messages: IntGauge,
+    context_tokens: IntGaugeVec,
+    context_messages: IntGaugeVec,
     tool_calls: IntCounterVec,
     // Tool-call verifier verdicts by verifier name, verdict (allow|revise|deny),
     // and mode (shadow|enforce). Labels are bounded enums + built-in verifier
@@ -127,10 +127,10 @@ pub struct Metrics {
     scanner_findings: IntCounterVec,
     scan_seconds: Histogram,
     content_blocks_dropped: IntCounter,
-    iterations: IntCounter,
+    iterations: IntCounterVec,
     runs: IntCounterVec,
-    run_seconds: Histogram,
-    active: IntGauge,
+    run_seconds: HistogramVec,
+    active: IntGaugeVec,
 
     // --- provider (recorded inside agent-providers) -----------------------
     provider_request_seconds: HistogramVec,
@@ -237,9 +237,15 @@ impl Metrics {
         let registry = Registry::new();
 
         // --- loop-level -------------------------------------------------------
+        // The curated loop-level families carry a per-tenant `(session, user)` label
+        // pair so a run's spend/activity is attributable per session
+        // (docs/design/multi-session/06-observability.md). Recorded only via
+        // `SessionMetrics`; the seam-health families below stay label-less. `user` is
+        // functionally dependent on `session`, so the pair ≈ session count, not a
+        // product — within the low-hundreds-sessions budget.
         let api_calls = IntCounterVec::new(
             Opts::new("agent_api_calls_total", "LLM completion calls"),
-            &["model", "finish_reason"],
+            &["model", "finish_reason", "session", "user"],
         )
         .unwrap();
         let api_call_seconds = HistogramVec::new(
@@ -249,12 +255,12 @@ impl Metrics {
         .unwrap();
         let tokens = IntCounterVec::new(
             Opts::new("agent_tokens_total", "Tokens consumed"),
-            &["model", "kind"],
+            &["model", "kind", "session", "user"],
         )
         .unwrap();
         let cost_usd = CounterVec::new(
             Opts::new("agent_cost_usd_total", "Cumulative USD cost by billed line"),
-            &["model", "kind"],
+            &["model", "kind", "session", "user"],
         )
         .unwrap();
         let cache_tokens = IntCounterVec::new(
@@ -262,22 +268,28 @@ impl Metrics {
                 "agent_cache_tokens_total",
                 "Prompt-cache tokens (read = hit, write = created)",
             ),
-            &["model", "kind"],
+            &["model", "kind", "session", "user"],
         )
         .unwrap();
-        let context_tokens = IntGauge::new(
-            "agent_context_tokens",
-            "Prompt tokens of the last request (context size)",
+        let context_tokens = IntGaugeVec::new(
+            Opts::new(
+                "agent_context_tokens",
+                "Prompt tokens of the last request (context size)",
+            ),
+            &["session", "user"],
         )
         .unwrap();
-        let context_messages = IntGauge::new(
-            "agent_context_messages",
-            "Messages in the working set of the last request",
+        let context_messages = IntGaugeVec::new(
+            Opts::new(
+                "agent_context_messages",
+                "Messages in the working set of the last request",
+            ),
+            &["session", "user"],
         )
         .unwrap();
         let tool_calls = IntCounterVec::new(
             Opts::new("agent_tool_calls_total", "Tool invocations"),
-            &["tool", "status"],
+            &["tool", "status", "session", "user"],
         )
         .unwrap();
         let verifier_verdicts = IntCounterVec::new(
@@ -438,7 +450,7 @@ impl Metrics {
                 "agent_mode_switches_total",
                 "Task-mode switches, by from/to mode",
             ),
-            &["from", "to"],
+            &["from", "to", "session", "user"],
         )
         .unwrap();
         let mode_switch_confidence = Histogram::with_opts(HistogramOpts::new(
@@ -664,19 +676,29 @@ impl Metrics {
             "Media blocks dropped because the selected model has no vision support",
         )
         .unwrap();
-        let iterations =
-            IntCounter::new("agent_iterations_total", "Agent loop iterations").unwrap();
-        let runs = IntCounterVec::new(
-            Opts::new("agent_runs_total", "Completed agent runs"),
-            &["outcome"],
+        let iterations = IntCounterVec::new(
+            Opts::new("agent_iterations_total", "Agent loop iterations"),
+            &["session", "user"],
         )
         .unwrap();
-        let run_seconds = Histogram::with_opts(HistogramOpts::new(
-            "agent_run_duration_seconds",
-            "Wall-clock duration of an agent run",
-        ))
+        let runs = IntCounterVec::new(
+            Opts::new("agent_runs_total", "Completed agent runs"),
+            &["outcome", "session", "user"],
+        )
         .unwrap();
-        let active = IntGauge::new("agent_active", "1 while a run is in progress").unwrap();
+        let run_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "agent_run_duration_seconds",
+                "Wall-clock duration of an agent run",
+            ),
+            &["session", "user"],
+        )
+        .unwrap();
+        let active = IntGaugeVec::new(
+            Opts::new("agent_active", "1 while a run is in progress"),
+            &["session", "user"],
+        )
+        .unwrap();
 
         // --- provider ---------------------------------------------------------
         let provider_request_seconds = HistogramVec::new(
@@ -1260,19 +1282,23 @@ impl Metrics {
         String::from_utf8(buf).unwrap_or_default()
     }
 
-    // --- loop-level instrumentation ---------------------------------------
+    /// A per-tenant recorder view over the curated loop-level families, binding
+    /// `(session, user)` once so the loop records spend/activity attributed to this
+    /// session (docs/design/multi-session/06-observability.md). The seam-health
+    /// families stay on the label-less `Metrics`. Cheap: `Metrics` is a shallow clone.
+    pub fn for_session(&self, session: &str, user: &str) -> SessionMetrics {
+        SessionMetrics {
+            inner: self.clone(),
+            session: session.to_string(),
+            user: user.to_string(),
+        }
+    }
 
-    pub fn run_started(&self) {
-        self.active.set(1);
-    }
-    pub fn run_finished(&self, outcome: &str, seconds: f64) {
-        self.active.set(0);
-        self.runs.with_label_values(&[outcome]).inc();
-        self.run_seconds.observe(seconds);
-    }
-    pub fn on_iteration(&self) {
-        self.iterations.inc();
-    }
+    // --- loop-level instrumentation ---------------------------------------
+    // The curated per-tenant families (`runs`/`tokens`/`cost`/`active`/…) are recorded
+    // through [`SessionMetrics`] (see `for_session`), which binds `(session, user)`;
+    // they intentionally have no label-less recorder here.
+
     /// Count one content block about to be sent, by modality (parity spec 26).
     /// Takes the label rather than a `Message` so this stays a leaf crate.
     pub fn on_content_block(&self, modality: &str) {
@@ -1406,10 +1432,6 @@ impl Metrics {
             .inc();
     }
     /// Task mode: a decided switch and its confidence.
-    pub fn on_mode_switch(&self, from: &str, to: &str, confidence: f64) {
-        self.mode_switches.with_label_values(&[from, to]).inc();
-        self.mode_switch_confidence.observe(confidence);
-    }
     /// Situational system-prompt fragment update (docs/design/prompts/): `action` is
     /// `inserted` | `updated` | `removed`. Records neither the tags nor the text.
     pub fn on_prompt_fragments_selected(&self, mode: &str, action: &str) {
@@ -1560,71 +1582,6 @@ impl Metrics {
         self.cache_breakpoints
             .with_label_values(&[strategy])
             .inc_by(n);
-    }
-    pub fn on_api_call(&self, model: &str, finish_reason: &str, seconds: f64) {
-        self.api_calls
-            .with_label_values(&[model, finish_reason])
-            .inc();
-        self.api_call_seconds
-            .with_label_values(&[model])
-            .observe(seconds);
-    }
-    pub fn add_tokens(&self, model: &str, prompt: u64, completion: u64) {
-        self.tokens
-            .with_label_values(&[model, "prompt"])
-            .inc_by(prompt);
-        self.tokens
-            .with_label_values(&[model, "completion"])
-            .inc_by(completion);
-    }
-    /// Record a turn's USD cost, one line per billed `kind`
-    /// (`input`/`output`/`cache_read`/`cache_write`). Zero lines are still
-    /// recorded (a `0` increment is a no-op) so the series exists for a model.
-    pub fn add_cost(
-        &self,
-        model: &str,
-        input: f64,
-        output: f64,
-        cache_read: f64,
-        cache_write: f64,
-    ) {
-        for (kind, usd) in [
-            ("input", input),
-            ("output", output),
-            ("cache_read", cache_read),
-            ("cache_write", cache_write),
-        ] {
-            // Only record a finite, positive amount: `inc_by` panics on a negative
-            // value, and a non-finite (NaN/inf) — from a malformed/hostile price row
-            // — would poison the counter. Both are dropped defensively.
-            if usd.is_finite() && usd > 0.0 {
-                self.cost_usd.with_label_values(&[model, kind]).inc_by(usd);
-            }
-        }
-    }
-
-    /// Record prompt-cache token counts for a turn: `read` = tokens served from the
-    /// cache (a hit), `write` = tokens written into it. The cache-hit ratio is
-    /// derived downstream as `cache_read / (cache_read + input)`.
-    pub fn add_cache_tokens(&self, model: &str, read: u64, write: u64) {
-        if read > 0 {
-            self.cache_tokens
-                .with_label_values(&[model, "read"])
-                .inc_by(read);
-        }
-        if write > 0 {
-            self.cache_tokens
-                .with_label_values(&[model, "write"])
-                .inc_by(write);
-        }
-    }
-
-    pub fn set_context(&self, prompt_tokens: i64, messages: i64) {
-        self.context_tokens.set(prompt_tokens);
-        self.context_messages.set(messages);
-    }
-    pub fn on_tool(&self, tool: &str, status: &str) {
-        self.tool_calls.with_label_values(&[tool, status]).inc();
     }
     /// One tool-call verifier verdict. `verdict` is `allow|revise|deny`; `mode` is
     /// `shadow|enforce`. Labels are bounded — callers pass built-in verifier names.
@@ -1911,6 +1868,152 @@ impl Metrics {
     }
 }
 
+/// A per-tenant recorder over the curated loop-level families, binding `(session,
+/// user)` once (built via [`Metrics::for_session`]). The agent loop holds one per
+/// session and records spend/activity through it, so a run is attributable per tenant
+/// without threading labels to every call (docs/design/multi-session/06-observability.md).
+/// The seam-health families are recorded through the plain label-less [`Metrics`].
+#[derive(Clone)]
+pub struct SessionMetrics {
+    inner: Metrics,
+    session: String,
+    user: String,
+}
+
+impl SessionMetrics {
+    /// This session's `(session, user)` label pair, appended to each curated family.
+    fn tenant(&self) -> [&str; 2] {
+        [self.session.as_str(), self.user.as_str()]
+    }
+
+    pub fn run_started(&self) {
+        self.inner.active.with_label_values(&self.tenant()).set(1);
+    }
+    pub fn run_finished(&self, outcome: &str, seconds: f64) {
+        let (s, u) = (self.session.as_str(), self.user.as_str());
+        self.inner.active.with_label_values(&[s, u]).set(0);
+        self.inner.runs.with_label_values(&[outcome, s, u]).inc();
+        self.inner
+            .run_seconds
+            .with_label_values(&[s, u])
+            .observe(seconds);
+    }
+    pub fn on_iteration(&self) {
+        self.inner
+            .iterations
+            .with_label_values(&self.tenant())
+            .inc();
+    }
+    pub fn on_api_call(&self, model: &str, finish_reason: &str, seconds: f64) {
+        let (s, u) = (self.session.as_str(), self.user.as_str());
+        self.inner
+            .api_calls
+            .with_label_values(&[model, finish_reason, s, u])
+            .inc();
+        // Latency stays a per-model health histogram (un-tenanted).
+        self.inner
+            .api_call_seconds
+            .with_label_values(&[model])
+            .observe(seconds);
+    }
+    pub fn add_tokens(&self, model: &str, prompt: u64, completion: u64) {
+        let (s, u) = (self.session.as_str(), self.user.as_str());
+        self.inner
+            .tokens
+            .with_label_values(&[model, "prompt", s, u])
+            .inc_by(prompt);
+        self.inner
+            .tokens
+            .with_label_values(&[model, "completion", s, u])
+            .inc_by(completion);
+    }
+    /// Record a turn's USD cost, one line per billed `kind`
+    /// (`input`/`output`/`cache_read`/`cache_write`).
+    pub fn add_cost(
+        &self,
+        model: &str,
+        input: f64,
+        output: f64,
+        cache_read: f64,
+        cache_write: f64,
+    ) {
+        let (s, u) = (self.session.as_str(), self.user.as_str());
+        for (kind, usd) in [
+            ("input", input),
+            ("output", output),
+            ("cache_read", cache_read),
+            ("cache_write", cache_write),
+        ] {
+            // Only a finite, positive amount: `inc_by` panics on a negative value, and
+            // a non-finite (NaN/inf) from a malformed/hostile price row would poison the
+            // counter. Both are dropped defensively.
+            if usd.is_finite() && usd > 0.0 {
+                self.inner
+                    .cost_usd
+                    .with_label_values(&[model, kind, s, u])
+                    .inc_by(usd);
+            }
+        }
+    }
+    /// Prompt-cache token counts for a turn: `read` = served from cache (a hit),
+    /// `write` = written into it.
+    pub fn add_cache_tokens(&self, model: &str, read: u64, write: u64) {
+        let (s, u) = (self.session.as_str(), self.user.as_str());
+        if read > 0 {
+            self.inner
+                .cache_tokens
+                .with_label_values(&[model, "read", s, u])
+                .inc_by(read);
+        }
+        if write > 0 {
+            self.inner
+                .cache_tokens
+                .with_label_values(&[model, "write", s, u])
+                .inc_by(write);
+        }
+    }
+    pub fn set_context(&self, prompt_tokens: i64, messages: i64) {
+        self.inner
+            .context_tokens
+            .with_label_values(&self.tenant())
+            .set(prompt_tokens);
+        self.inner
+            .context_messages
+            .with_label_values(&self.tenant())
+            .set(messages);
+    }
+    pub fn on_tool(&self, tool: &str, status: &str) {
+        let (s, u) = (self.session.as_str(), self.user.as_str());
+        self.inner
+            .tool_calls
+            .with_label_values(&[tool, status, s, u])
+            .inc();
+    }
+    pub fn on_mode_switch(&self, from: &str, to: &str, confidence: f64) {
+        let (s, u) = (self.session.as_str(), self.user.as_str());
+        self.inner
+            .mode_switches
+            .with_label_values(&[from, to, s, u])
+            .inc();
+        // Confidence stays an un-tenanted distribution.
+        self.inner.mode_switch_confidence.observe(confidence);
+    }
+
+    /// Retire this session's **gauge** series on session end
+    /// ([`crate::Metrics`] is process-global, so Prometheus would otherwise retain a
+    /// dead session's `agent_active = 1` until restart — an over-count of live
+    /// sessions). Removing the `(session, user)`-only gauges is exact; the cumulative
+    /// counter families are left to accumulate (harmless frozen series, bounded under
+    /// the locked low-hundreds-sessions constraint — see 06-observability.md).
+    /// Idempotent: a missing series is a no-op.
+    pub fn retire(&self) {
+        let t = self.tenant();
+        let _ = self.inner.active.remove_label_values(&t);
+        let _ = self.inner.context_tokens.remove_label_values(&t);
+        let _ = self.inner.context_messages.remove_label_values(&t);
+    }
+}
+
 fn bool_label(b: bool) -> &'static str {
     if b {
         "true"
@@ -1932,15 +2035,16 @@ mod tests {
     #[test]
     fn encodes_incremented_metrics() {
         let m = Metrics::new();
-        m.on_iteration();
-        m.on_api_call("test-model", "stop", 0.5);
-        m.add_tokens("test-model", 100, 20);
-        m.add_cost("test-model", 0.003, 0.015, 0.0003, 0.0);
-        m.add_cache_tokens("test-model", 80, 20);
-        m.set_context(100, 4);
-        m.on_tool("bash", "ok");
+        let sm = m.for_session("sess-1", "alice");
+        sm.on_iteration();
+        sm.on_api_call("test-model", "stop", 0.5);
+        sm.add_tokens("test-model", 100, 20);
+        sm.add_cost("test-model", 0.003, 0.015, 0.0003, 0.0);
+        sm.add_cache_tokens("test-model", 80, 20);
+        sm.set_context(100, 4);
+        sm.on_tool("bash", "ok");
         m.on_verifier("schema", "allow", "shadow");
-        m.run_finished("success", 1.5);
+        sm.run_finished("success", 1.5);
         m.on_grpc_overload_shed();
 
         let text = m.encode_text();
@@ -1981,7 +2085,8 @@ mod tests {
         let m = Metrics::new();
         // Must not panic (inc_by panics on negatives; NaN/inf would poison the
         // counter). Only the one finite-positive line is recorded.
-        m.add_cost("m", f64::NAN, -1.0, f64::INFINITY, 0.003);
+        m.for_session("s", "u")
+            .add_cost("m", f64::NAN, -1.0, f64::INFINITY, 0.003);
         let text = m.encode_text();
         assert!(text.contains("kind=\"cache_write\""), "{text}");
         assert!(
@@ -2064,6 +2169,84 @@ mod tests {
             "agent_repo_fetch_seconds",
         ] {
             assert!(text.contains(name), "missing metric `{name}` in:\n{text}");
+        }
+    }
+
+    // --- multi-session: per-tenant labels + retire (increment 06) -----------
+
+    #[test]
+    fn positive_session_metrics_carry_tenant_labels() {
+        let m = Metrics::new();
+        let alice = m.for_session("sess-1", "alice");
+        alice.run_started();
+        alice.on_api_call("gpt", "stop", 0.1);
+        alice.add_tokens("gpt", 10, 5);
+        alice.set_context(10, 2);
+        alice.on_tool("bash", "ok");
+        let text = m.encode_text();
+
+        // Every curated family a run touches carries this session's `(session, user)`.
+        for fam in [
+            "agent_active",
+            "agent_api_calls_total",
+            "agent_tokens_total",
+            "agent_context_tokens",
+            "agent_tool_calls_total",
+        ] {
+            let line = text
+                .lines()
+                .find(|l| l.starts_with(&format!("{fam}{{")))
+                .unwrap_or_else(|| panic!("no series for {fam} in:\n{text}"));
+            assert!(
+                line.contains("session=\"sess-1\"") && line.contains("user=\"alice\""),
+                "{fam} missing tenant labels: {line}"
+            );
+        }
+        // The active gauge reads 1 for the live session.
+        let active = text
+            .lines()
+            .find(|l| l.starts_with("agent_active{"))
+            .unwrap();
+        assert!(active.trim_end().ends_with(" 1"), "active not 1: {active}");
+    }
+
+    #[test]
+    fn boundary_retire_removes_the_gauge_series() {
+        let m = Metrics::new();
+        let alice = m.for_session("sess-1", "alice");
+        alice.run_started();
+        alice.add_tokens("gpt", 10, 5); // a cumulative counter
+        assert!(m.encode_text().contains("agent_active{session=\"sess-1\""));
+
+        alice.retire();
+        let after = m.encode_text();
+        // The gauge series is gone (no stale `agent_active = 1` for a dead session)…
+        assert!(
+            !after.lines().any(|l| l.starts_with("agent_active{")),
+            "active gauge not retired:\n{after}"
+        );
+        // …while the cumulative counter is intentionally kept (frozen, not removed).
+        assert!(
+            after.contains("agent_tokens_total"),
+            "counters should persist:\n{after}"
+        );
+    }
+
+    #[test]
+    fn negative_seam_health_families_stay_label_less() {
+        // Regression guard: metrics recorded through the plain `Metrics` (seam health)
+        // must NEVER gain a session/user label — only the curated loop families do.
+        let m = Metrics::new();
+        m.on_tool_exec("edit", 0.001);
+        let text = m.encode_text();
+        for line in text
+            .lines()
+            .filter(|l| l.starts_with("agent_tool_exec_seconds"))
+        {
+            assert!(
+                !line.contains("session=") && !line.contains("user="),
+                "a health metric leaked a tenant label: {line}"
+            );
         }
     }
 }

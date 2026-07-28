@@ -47,6 +47,23 @@ Because the wrapper sits at the seam boundary, a remote `= "grpc"` seam is timed
 on the loop side (label `provider="grpc"`, etc.), and the same wrapper on a
 `--serve-<seam>` process captures that seam's **server-side** latency.
 
+### Per-tenant labels (multi-session)
+
+The **curated loop-level families** — `agent_runs_total`, `agent_run_duration_seconds`,
+`agent_active`, `agent_iterations_total`, `agent_api_calls_total`, `agent_tokens_total`,
+`agent_cost_usd_total`, `agent_cache_tokens_total`, `agent_context_tokens`,
+`agent_context_messages`, `agent_tool_calls_total`, `agent_mode_switches_total` — carry a
+`(session, user)` label pair, so a multi-session process attributes spend and activity per
+tenant: `sum by (session) (agent_cost_usd_total)`, `agent_active{user="alice"}`. They are
+recorded through a per-session `SessionMetrics` view (`Metrics::for_session`); the
+seam-health families above stay **label-less** (per-tenant attribution there is
+meaningless). `user` is functionally dependent on `session`, so the pair ≈ session count,
+within the low-hundreds-sessions budget. On session end the three **gauge** series
+(`agent_active`/`agent_context_*`) are retired (`remove_label_values`) so a finished
+session doesn't leave a stale `agent_active = 1`; the cumulative counters are kept.
+See [docs/design/multi-session/06-observability.md](design/multi-session/06-observability.md).
+The single-user CLI records everything under `session="<run id>", user="local"`.
+
 ## Quick start (single process)
 
 Metrics are enabled by default in [`config/agent.toml`](../config/agent.toml)
