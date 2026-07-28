@@ -204,6 +204,8 @@ agent-telemetry.workspace = true
 async-trait.workspace = true
 futures-util.workspace = true
 async-stream.workspace = true
+# Server-minted session ids for the SessionRegistry seam (05-lifecycle).
+uuid.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true

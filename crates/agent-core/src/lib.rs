@@ -2522,6 +2522,30 @@ pub trait MetricsProxy: Send + Sync {
     async fn query_range(&self, q: &PromRangeQuery) -> Result<PromResult>;
 }
 
+/// The session lifecycle seam (docs/design/multi-session/05-lifecycle.md): a remote
+/// client Opens a session to get a **server-minted** id, Heartbeats to keep it warm, and
+/// Closes it when done. The in-process [`SessionManager`](../agent_runtime) implements it
+/// over its live-session map; a `--serve-session-registry` process is its wire face for
+/// the portal.
+///
+/// Lifecycle is a cleanup/optimization signal, **not** a correctness dependency — per-seam
+/// state is lazily allocated on first use and idle-GC'd, so a lost `close` (or a seam that
+/// never saw an `open`, in a split deployment) is reclaimed by the reaper. Fails **hard**
+/// (returns `Err` on capacity/validation failure), unlike the fail-soft read seams.
+#[async_trait]
+pub trait SessionRegistry: Send + Sync {
+    /// Mint a fresh server-side session id for `user` (advisory until auth) and
+    /// pre-allocate the session. `Err` when a capacity cap is reached (→
+    /// `RESOURCE_EXHAUSTED`) or `user` is not a valid segment (→ `INVALID_ARGUMENT`).
+    async fn open(&self, user: &str) -> Result<SessionId>;
+    /// Free a session's state. Best-effort — idle-GC is the real guarantee — so an
+    /// absent session is `Ok`, not an error.
+    async fn close(&self, key: &SessionKey) -> Result<()>;
+    /// Reset a session's idle timer. `Err` if the session isn't live (a client
+    /// heart-beating a reaped/unknown session should re-`open`).
+    async fn heartbeat(&self, key: &SessionKey) -> Result<()>;
+}
+
 // ---------------------------------------------------------------------------
 // Agent session observation (docs/design/portal): a live structured feed
 // ---------------------------------------------------------------------------

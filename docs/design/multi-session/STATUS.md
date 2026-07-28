@@ -17,7 +17,8 @@ design docs, this file records the refinement (the design docs stay the rational
 | 04c | `SessionStore` `restore`/`diff` ownership check (close the checkpoint-id read oracle) | [`04-tenancy.md`](04-tenancy.md) | **merged** (#157) |
 | 04d | Remaining stateful-seam keying: `Pty`/`TaskTracker` maps, per-call confined cwd/root | [`04-tenancy.md`](04-tenancy.md) | pending |
 | 05 | Lifecycle core: `SessionManager` idle-GC (`reap_idle`/`touch`) + capacity guard (`open`) | [`05-lifecycle.md`](05-lifecycle.md) | **in PR** (`feat/multi-session-05-lifecycle`) |
-| 05b | `SessionRegistry` gRPC service (server-mint id, `Open`/`Close`/`Heartbeat`, reaper task, CLI wiring) | [`05-lifecycle.md`](05-lifecycle.md) | pending |
+| 05b | `SessionRegistry` gRPC service (`Open`/`Close`/`Heartbeat` + server-mint) | [`05-lifecycle.md`](05-lifecycle.md) | **in PR** (`feat/multi-session-05b-registry-service`) |
+| 05c | `--serve-session-registry` CLI wiring + `nix/constants.nix` port + idle-GC reaper task | [`05-lifecycle.md`](05-lifecycle.md) | pending |
 | 06 | Session-scoped observability — `(session, user)` on the curated metric families + retire | [`06-observability.md`](06-observability.md) | **in PR** (`feat/multi-session-06-observability`) |
 | 07 | Security hardening (`bash` containment, UDS-per-user, adversarial sweep) | [`07-security.md`](07-security.md) | pending |
 
@@ -39,6 +40,29 @@ design docs, this file records the refinement (the design docs stay the rational
   (`Arc<tokio::Mutex<Session>>` per key); single-session path zero-overhead.
 
 ## Refinements (authoritative over the design docs)
+
+- **Increment 05b — the `SessionRegistry` gRPC service.** New `session_registry.proto`
+  (`SessionRegistryService` / `Open`·`Close`·`Heartbeat`) — **additive, no
+  `buf.image.binpb` bump**; added to `build.rs` + the descriptor-set allow-list. A new
+  `agent-core::SessionRegistry` trait (`open(user) -> SessionId`, `close(key)`,
+  `heartbeat(key)`; fails **hard**), impl'd by **`SessionManager`**: `open` **server-mints**
+  the id (`Uuid::new_v4` — closing 04c's spoofable-id residual: a minted id is
+  unguessable), then admits under 05's caps (a rejection → `Error::Overloaded` →
+  `RESOURCE_EXHAUSTED`); `close` is best-effort (absent = `Ok`); `heartbeat` errors on an
+  unknown session (client should re-open). 05's inherent `SessionManager::open(key)` was
+  **renamed `admit`** to free the name for the trait method. `agent-grpc` gains
+  `server/session_registry.rs` (validates the caller-named `(user, session)` via
+  `SessionKey::parse` → `INVALID_ARGUMENT`) and `client/session_registry.rs` (`open` is
+  **not retried** — each call mints a fresh id, so a retry would orphan a second session,
+  the `checkpoint` reasoning). `OpenRequest` carries only `user` (advisory until auth);
+  **`working_dir`/confinement-root registration is deferred to 04d** (per-session cwd
+  isn't wired yet, so an accepted-but-unvalidated field would be a footgun — omitted
+  rather than faked). **Deferred to 05c:** `--serve-session-registry` CLI wiring,
+  `nix/constants.nix` port row + `constants.rs` regen, the runtime accessor, and the
+  spawned idle-GC reaper task. Tests: roundtrip (TCP+UDS, fake registry) — Open mints,
+  Close/Heartbeat name the session, capacity → error over the wire; `SessionManager`
+  unit — mint distinct ids, heartbeat unknown errors, per-user cap → `Overloaded`,
+  malformed user rejected, double-close is a no-op.
 
 - **Increment 05 scoped to the in-process lifecycle *core*; the gRPC `SessionRegistry`
   service is 05b.** The design's "real guarantee" is idle-GC, and its amplification

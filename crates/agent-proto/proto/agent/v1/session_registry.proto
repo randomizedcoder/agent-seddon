@@ -1,0 +1,48 @@
+// Session lifecycle association (docs/design/multi-session/05-lifecycle.md): a remote
+// client (the portal) Opens a session to get a server-minted id, Heartbeats to keep it
+// warm, and Closes it when done. Distinct from `agent_session.proto` (the live-event
+// SessionSource) and `session.proto` (the content-addressed SessionStore).
+//
+// Lifecycle is an optimization/cleanup signal, NOT a correctness dependency: per-seam
+// state is still lazily allocated on first use and idle-GC'd, so a lost Close (or a
+// seam that never saw an Open, in a split deployment) is reclaimed by the reaper.
+syntax = "proto3";
+
+package agent.v1;
+
+service SessionRegistryService {
+  // Mint a fresh **server-side** session id for `user` and pre-allocate the session.
+  // Rejected with RESOURCE_EXHAUSTED when a capacity cap is reached.
+  rpc Open(OpenRequest) returns (OpenResponse);
+  // Free a session's state (best-effort; idle-GC is the real guarantee).
+  rpc Close(CloseRequest) returns (CloseResponse);
+  // Reset a session's idle timer, keeping a long-lived but quiet session warm.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+}
+
+// `user` is advisory until the auth follow-up (07-security.md) — the server MAY
+// override it from a verified token. `session_id` is **never** client-supplied on Open;
+// the server mints it (removing client-chosen-id collision/prediction) and returns it,
+// to be carried in `x-agent-session-id` metadata on every later RPC (01-identity.md).
+message OpenRequest {
+  string user = 1;
+}
+message OpenResponse {
+  string session_id = 1;
+}
+
+// Close/Heartbeat name the session by its `(user, session_id)` — both validated as
+// path-safe segments server-side. A server-minted id is an unguessable UUID, so knowing
+// one implies it was handed to you; this is "only as trustworthy as the transport" until
+// auth (07-security.md).
+message CloseRequest {
+  string user = 1;
+  string session_id = 2;
+}
+message CloseResponse {}
+
+message HeartbeatRequest {
+  string user = 1;
+  string session_id = 2;
+}
+message HeartbeatResponse {}

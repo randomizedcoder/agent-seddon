@@ -596,6 +596,82 @@ async fn session_restore_denies_foreign_checkpoint_over_the_wire(#[case] transpo
 }
 
 // ---------------------------------------------------------------------------
+// SessionRegistry lifecycle (05b): Open server-mints an id; Close/Heartbeat name it;
+// a capacity rejection maps to RESOURCE_EXHAUSTED across the wire.
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct FakeRegistry {
+    opened: Arc<std::sync::Mutex<Vec<String>>>,
+    closed: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    beats: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+}
+
+#[async_trait]
+impl agent_core::SessionRegistry for FakeRegistry {
+    async fn open(&self, user: &str) -> agent_core::Result<agent_core::SessionId> {
+        if user == "over" {
+            return Err(agent_core::Error::Overloaded("per-user limit".into()));
+        }
+        self.opened.lock().unwrap().push(user.to_string());
+        Ok(agent_core::SessionId::new(format!("minted-{user}")))
+    }
+    async fn close(&self, key: &agent_core::SessionKey) -> agent_core::Result<()> {
+        self.closed
+            .lock()
+            .unwrap()
+            .push((key.user.as_str().into(), key.session.as_str().into()));
+        Ok(())
+    }
+    async fn heartbeat(&self, key: &agent_core::SessionKey) -> agent_core::Result<()> {
+        self.beats
+            .lock()
+            .unwrap()
+            .push((key.user.as_str().into(), key.session.as_str().into()));
+        Ok(())
+    }
+}
+
+#[rstest]
+#[case::tcp(Transport::Tcp)]
+#[case::uds(Transport::Uds)]
+#[tokio::test(flavor = "multi_thread")]
+async fn session_registry_lifecycle_roundtrip(#[case] transport: Transport) {
+    use agent_core::{SessionKey, SessionRegistry};
+    use agent_grpc::client::GrpcSessionRegistry;
+    use agent_grpc::server::session_registry_router;
+
+    let reg = Arc::new(FakeRegistry::default());
+    let (dial, _srv) = spawn(transport, session_registry_router(reg.clone())).await;
+    let client = GrpcSessionRegistry::connect(&dial).unwrap();
+
+    // Open returns the server-minted id (the client never chooses it).
+    let id = client.open("alice").await.unwrap();
+    assert_eq!(id.as_str(), "minted-alice");
+    assert_eq!(
+        reg.opened.lock().unwrap().as_slice(),
+        &["alice".to_string()]
+    );
+
+    // Close + Heartbeat name the session by `(user, session_id)`.
+    let key = SessionKey::parse("alice", "s1").unwrap();
+    client.close(&key).await.unwrap();
+    client.heartbeat(&key).await.unwrap();
+    assert_eq!(
+        reg.closed.lock().unwrap().as_slice(),
+        &[("alice".to_string(), "s1".to_string())]
+    );
+    assert_eq!(reg.beats.lock().unwrap().len(), 1);
+
+    // A capacity rejection surfaces as an error across the wire (RESOURCE_EXHAUSTED).
+    let err = client.open("over").await.unwrap_err().to_string();
+    assert!(
+        err.contains("overloaded"),
+        "capacity error not surfaced: {err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Context
 // ---------------------------------------------------------------------------
 

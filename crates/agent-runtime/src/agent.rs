@@ -1541,13 +1541,13 @@ impl SessionManager {
         entry.session.clone()
     }
 
-    /// Capacity-checked entry point (the wire `SessionRegistry.Open`): return the
+    /// Capacity-checked admission (backs the wire `SessionRegistry.Open`): return the
     /// session for `key`, but if it does **not** already exist, reject when creating it
     /// would exceed the total or per-user cap. An existing session is always returned
     /// (and touched), so a legitimate client re-entering its own session is never
     /// throttled — only a hostile *new*-id spray is (docs/design/multi-session/05).
     #[allow(clippy::result_large_err)]
-    pub fn open(
+    pub fn admit(
         &self,
         key: agent_core::SessionKey,
     ) -> Result<Arc<tokio::sync::Mutex<Session>>, OpenError> {
@@ -1632,6 +1632,41 @@ impl SessionManager {
     /// Whether no sessions are live.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+/// The wire lifecycle seam over the live-session map (docs/design/multi-session/05):
+/// `open` **server-mints** the session id (an unguessable `Uuid`, removing client-chosen
+/// id collision/prediction), `close` frees state, `heartbeat` keeps a quiet session warm.
+#[async_trait::async_trait]
+impl agent_core::SessionRegistry for SessionManager {
+    async fn open(&self, user: &str) -> agent_core::Result<agent_core::SessionId> {
+        // Mint the id server-side, then admit under the capacity caps. The minted id is
+        // always a valid segment; `user` is validated by `SessionKey::parse`.
+        let session = uuid::Uuid::new_v4().to_string();
+        let key = agent_core::SessionKey::parse(user, &session)
+            .map_err(|e| agent_core::Error::Config(format!("invalid user: {e}")))?;
+        // Capacity rejection → `Overloaded` (maps to gRPC RESOURCE_EXHAUSTED).
+        self.admit(key)
+            .map_err(|e| agent_core::Error::Overloaded(e.to_string()))?;
+        Ok(agent_core::SessionId::new(session))
+    }
+
+    async fn close(&self, key: &agent_core::SessionKey) -> agent_core::Result<()> {
+        // Best-effort: an absent session is not an error (idle-GC may have reaped it).
+        self.remove(key);
+        Ok(())
+    }
+
+    async fn heartbeat(&self, key: &agent_core::SessionKey) -> agent_core::Result<()> {
+        if self.touch(key) {
+            Ok(())
+        } else {
+            Err(agent_core::Error::Config(format!(
+                "no live session `{}` for `{}` (reaped? re-open)",
+                key.session, key.user
+            )))
+        }
     }
 }
 
@@ -2898,27 +2933,62 @@ mod tests {
         let k = |u, s| agent_core::SessionKey::parse(u, s).unwrap();
 
         // Alice may open up to 2 (per-user cap).
-        assert!(mgr.open(k("alice", "s1")).is_ok());
-        assert!(mgr.open(k("alice", "s2")).is_ok());
+        assert!(mgr.admit(k("alice", "s1")).is_ok());
+        assert!(mgr.admit(k("alice", "s2")).is_ok());
         assert_eq!(
-            mgr.open(k("alice", "s3")).map(|_| ()).unwrap_err(),
+            mgr.admit(k("alice", "s3")).map(|_| ()).unwrap_err(),
             OpenError::PerUserLimit(2),
             "3rd alice session is rejected"
         );
         // Re-opening an existing session is always allowed (not a new allocation).
-        assert!(mgr.open(k("alice", "s1")).is_ok());
+        assert!(mgr.admit(k("alice", "s1")).is_ok());
 
         // Bob opens one; the next new session hits the *global* cap (3) before bob's
         // own per-user cap.
-        assert!(mgr.open(k("bob", "b1")).is_ok());
+        assert!(mgr.admit(k("bob", "b1")).is_ok());
         assert_eq!(
-            mgr.open(k("bob", "b2")).map(|_| ()).unwrap_err(),
+            mgr.admit(k("bob", "b2")).map(|_| ()).unwrap_err(),
             OpenError::TotalLimit(3)
         );
 
         // The lazy correctness path never rejects (a split-deployment first-use).
         let _ = mgr.get_or_create(k("carol", "c1"));
         assert_eq!(mgr.len(), 4);
+    }
+
+    /// `positive_`/`adversarial_`: the `SessionRegistry` trait impl mints a fresh
+    /// server-side id per `open`, `close` frees it, `heartbeat` touches it (and errors
+    /// for an unknown session), and a capacity cap surfaces as `Overloaded`.
+    #[tokio::test]
+    async fn session_registry_open_mints_and_close_heartbeat() {
+        use agent_core::SessionRegistry as _;
+        let mgr = SessionManager::new(Arc::new(bare_agent())).with_limits(0, 1);
+
+        // Each open mints a *distinct* id and pre-allocates the session.
+        let id1 = mgr.open("alice").await.unwrap();
+        assert_eq!(mgr.len(), 1);
+        let key1 = agent_core::SessionKey::parse("alice", id1.as_str()).unwrap();
+        assert!(mgr.touch(&key1), "the minted session is live");
+
+        // Heartbeat touches a live session; an unknown one errors (client should re-open).
+        mgr.heartbeat(&key1).await.unwrap();
+        let ghost = agent_core::SessionKey::parse("alice", "ghost").unwrap();
+        assert!(mgr.heartbeat(&ghost).await.is_err());
+
+        // The per-user cap (1) rejects a *second* alice open as Overloaded.
+        let err = mgr.open("alice").await.unwrap_err();
+        assert!(
+            matches!(err, agent_core::Error::Overloaded(_)),
+            "capacity rejection: {err:?}"
+        );
+
+        // A malformed user is rejected before minting.
+        assert!(mgr.open("../etc").await.is_err());
+
+        // Close frees it; a second close is a no-op (best-effort).
+        mgr.close(&key1).await.unwrap();
+        assert_eq!(mgr.len(), 0);
+        mgr.close(&key1).await.unwrap();
     }
 
     /// `boundary_`: idle-GC reaps a quiet session, `touch` keeps it warm, and a session
