@@ -10,7 +10,7 @@ use agent_core::{
     LlmProvider, MemoryEvent, MemoryStore, Message, Observation, Policy, RecallQuery, Role,
     TokenBudget, Tool, ToolContext, ToolRegistry, ToolSchema, WorkingSet,
 };
-use agent_metrics::Metrics;
+use agent_metrics::{Metrics, SessionMetrics};
 use futures_util::StreamExt;
 use std::io::Write;
 use std::path::PathBuf;
@@ -772,10 +772,16 @@ impl Agent {
         // This session's own event sink (created on first reference), so its
         // `Subscribe`rs never see a concurrent session's events (hazard B).
         let events = self.events.get_or_create(id.session.as_str());
+        // Per-tenant metrics recorder: the curated loop-level families carry this
+        // session's `(session, user)` label (docs/design/multi-session/06-observability.md).
+        let session_metrics = self
+            .metrics
+            .for_session(id.session.as_str(), id.user.as_str());
         Session {
             agent: self.clone(),
             id,
             events,
+            session_metrics,
             working: WorkingSet::default(),
             budget: TokenBudget {
                 max_context_tokens: self.settings.context_window,
@@ -822,6 +828,11 @@ impl Agent {
     /// The core iteration loop over an existing working set: model call → tool
     /// dispatch → record → compact, until the model stops asking for tools (or
     /// `max_iterations`). Mutates `working` in place and returns the final answer.
+    // A core private loop with several genuinely-distinct per-turn params (state,
+    // budget, tool ctx, the armed switch, and the two per-session observation sinks
+    // `events`/`metrics`); bundling them only to satisfy the arg-count lint would
+    // obscure more than it helps.
+    #[allow(clippy::too_many_arguments)]
     async fn run_loop(
         &self,
         working: &mut WorkingSet,
@@ -830,10 +841,11 @@ impl Agent {
         tool_schemas: &[ToolSchema],
         pending_switch: &mut Option<(agent_core::TaskMode, agent_core::TaskMode)>,
         events: &crate::SessionEvents,
+        metrics: &SessionMetrics,
     ) -> anyhow::Result<String> {
         let model = self.settings.model.as_str();
         for iter in 1..=self.settings.max_iterations {
-            self.metrics.on_iteration();
+            metrics.on_iteration();
             events.publish(agent_core::SessionEvent::IterationStart { iter: iter as u32 });
             if !self.hooks.is_empty() {
                 self.hooks.pre_turn(working).await;
@@ -883,7 +895,7 @@ impl Agent {
                     .instrument(tracing::info_span!("provider.complete", iter, model))
                     .await?
             };
-            self.metrics.on_api_call(
+            metrics.on_api_call(
                 model,
                 &resp.finish_reason,
                 call_start.elapsed().as_secs_f64(),
@@ -904,10 +916,8 @@ impl Agent {
                     completion_tokens = u.completion_tokens,
                     "model turn"
                 );
-                self.metrics
-                    .add_tokens(model, u.prompt_tokens as u64, u.completion_tokens as u64);
-                self.metrics
-                    .set_context(u.prompt_tokens as i64, msg_count as i64);
+                metrics.add_tokens(model, u.prompt_tokens as u64, u.completion_tokens as u64);
+                metrics.set_context(u.prompt_tokens as i64, msg_count as i64);
                 events.publish(agent_core::SessionEvent::ContextUpdate {
                     prompt_tokens: u.prompt_tokens,
                     context_window: self.settings.context_window,
@@ -915,7 +925,7 @@ impl Agent {
                 });
                 // Prompt-cache token split (Anthropic/OpenAI report these) + USD cost
                 // from the price table — the accounting half of the tokenizer seam.
-                self.metrics.add_cache_tokens(
+                metrics.add_cache_tokens(
                     model,
                     u.cache_read_tokens as u64,
                     u.cache_write_tokens as u64,
@@ -924,7 +934,7 @@ impl Agent {
                 {
                     let prices = agent_tokenizer::PriceTable::builtin();
                     let (cost, _status) = agent_core::calculate_cost(model, u, &prices);
-                    self.metrics.add_cost(
+                    metrics.add_cost(
                         model,
                         cost.input,
                         cost.output,
@@ -1191,12 +1201,12 @@ impl Agent {
                 // and so never executed.
                 let mut call_errored: Option<bool> = None;
                 let msg = if let Some(feedback) = &verifier_feedback[i] {
-                    self.metrics.on_tool(&call.name, "verifier_blocked");
+                    metrics.on_tool(&call.name, "verifier_blocked");
                     Message::tool(&call.id, feedback.clone())
                 } else {
                     match &decisions[i] {
                         Decision::Deny(reason) => {
-                            self.metrics.on_tool(&call.name, "denied");
+                            metrics.on_tool(&call.name, "denied");
                             Message::tool(&call.id, format!("denied by policy: {reason}"))
                         }
                         Decision::Allow => {
@@ -1204,7 +1214,7 @@ impl Agent {
                                 .take()
                                 .expect("allowed tool call has an observation");
                             call_errored = Some(observation.is_error);
-                            self.metrics.on_tool(
+                            metrics.on_tool(
                                 &call.name,
                                 if observation.is_error { "error" } else { "ok" },
                             );
@@ -1489,6 +1499,12 @@ impl SessionManager {
             .expect("session map poisoned")
             .remove(key);
         self.backend.events.remove(key.session.as_str());
+        // Retire this session's per-tenant gauge series, so Prometheus doesn't retain a
+        // dead session's `agent_active = 1` (docs/design/multi-session/06-observability.md).
+        self.backend
+            .metrics
+            .for_session(key.session.as_str(), key.user.as_str())
+            .retire();
     }
 
     /// Number of live sessions.
@@ -1525,6 +1541,11 @@ pub struct Session {
     /// backend's) is hazard B's fix — concurrent tenants can't cross-observe
     /// (docs/design/multi-session/03-hazards.md).
     events: Arc<crate::SessionEvents>,
+    /// This session's per-tenant metrics recorder view (curated loop-level families
+    /// labeled with this `(session, user)`), built from the shared `Metrics` in
+    /// `session_with` and retired on `SessionManager::remove`
+    /// (docs/design/multi-session/06-observability.md).
+    session_metrics: SessionMetrics,
     working: WorkingSet,
     budget: TokenBudget,
     tool_ctx: ToolContext,
@@ -1646,7 +1667,7 @@ impl Session {
     /// Send a user message and run the loop to the next final answer. Each send
     /// is recorded as one metrics "run".
     pub async fn send(&mut self, input: &str) -> anyhow::Result<String> {
-        self.agent.metrics.run_started();
+        self.session_metrics.run_started();
         let start = Instant::now();
         // Root span of the run's trace tree; every seam interaction below nests
         // under it, and OTLP exports the whole tree to the collector. It carries the
@@ -1682,8 +1703,7 @@ impl Session {
             }
         }
         let outcome = if result.is_ok() { "success" } else { "error" };
-        self.agent
-            .metrics
+        self.session_metrics
             .run_finished(outcome, start.elapsed().as_secs_f64());
         self.events
             .publish(agent_core::SessionEvent::RunFinished { ok: result.is_ok() });
@@ -1746,8 +1766,7 @@ impl Session {
             confidence = sw.confidence,
         )
         .in_scope(|| tracing::info!(reason = %sw.reason, "task mode switched"));
-        self.agent
-            .metrics
+        self.session_metrics
             .on_mode_switch(sw.from.as_str(), sw.to.as_str(), sw.confidence as f64);
         self.events.publish(agent_core::SessionEvent::ModeSwitch {
             from: sw.from.as_str().to_string(),
@@ -1956,6 +1975,7 @@ impl Session {
                 &self.tool_schemas,
                 &mut self.pending_switch,
                 &self.events,
+                &self.session_metrics,
             )
             .await;
         // Cheap per-turn dimensional summarize (adaptive-cognition 03): file "what
@@ -2750,6 +2770,40 @@ mod tests {
             assert_eq!(b.id.session.as_str(), "s2");
         }
         assert!(!Arc::ptr_eq(&alice, &bob));
+    }
+
+    /// `boundary_`: a run records the curated families under its `(session, user)`
+    /// label, and `SessionManager::remove` retires the session's gauge series so a
+    /// dead session leaves no stale `agent_active` (docs/design/multi-session/06).
+    #[tokio::test]
+    async fn session_manager_remove_retires_session_metrics() {
+        let mgr = SessionManager::new(Arc::new(bare_agent()));
+        let key = agent_core::SessionKey::parse("alice", "s1").unwrap();
+        mgr.get_or_create(key.clone())
+            .lock()
+            .await
+            .send("hi")
+            .await
+            .unwrap();
+
+        // The run is attributed to this tenant.
+        let text = mgr.backend().metrics().encode_text();
+        assert!(
+            text.lines().any(|l| l.starts_with("agent_runs_total{")
+                && l.contains("session=\"s1\"")
+                && l.contains("user=\"alice\"")),
+            "run not tenant-labeled:\n{text}"
+        );
+
+        // After removal the gauge series is gone (retired).
+        mgr.remove(&key);
+        let after = mgr.backend().metrics().encode_text();
+        assert!(
+            !after
+                .lines()
+                .any(|l| l.starts_with("agent_active{session=\"s1\"")),
+            "active gauge not retired on remove:\n{after}"
+        );
     }
 
     /// Cleanup must remove **exactly** what `worktree_list` reports (it can't reach

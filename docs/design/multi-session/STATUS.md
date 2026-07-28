@@ -14,10 +14,10 @@ design docs, this file records the refinement (the design docs stay the rational
 | 03b | Hazard B: `SessionEventsRegistry` + `session_id` selector on `AgentSessionService` | [`03-hazards.md`](03-hazards.md) | **merged** (#154) |
 | 04 | Per-user memory/dimension tenancy (in-process) | [`04-tenancy.md`](04-tenancy.md) | **merged** (#155) |
 | 04b | Served-handler identity scoping (`MemoryService`/`DimensionSvc` route the caller's tenant) | [`04-tenancy.md`](04-tenancy.md) | **merged** (#156) |
-| 04c | `SessionStore` `restore`/`diff` ownership check (close the checkpoint-id read oracle) | [`04-tenancy.md`](04-tenancy.md) | **in PR** (`feat/multi-session-04c-sessionstore-ownership`) |
+| 04c | `SessionStore` `restore`/`diff` ownership check (close the checkpoint-id read oracle) | [`04-tenancy.md`](04-tenancy.md) | **merged** (#157) |
 | 04d | Remaining stateful-seam keying: `Pty`/`TaskTracker` maps, per-call confined cwd/root | [`04-tenancy.md`](04-tenancy.md) | pending |
 | 05 | `SessionRegistry` lifecycle (server-mint, idle-GC) | [`05-lifecycle.md`](05-lifecycle.md) | pending |
-| 06 | Session-scoped observability (span attrs, curated metric label, eviction) | [`06-observability.md`](06-observability.md) | pending |
+| 06 | Session-scoped observability — `(session, user)` on the curated metric families + retire | [`06-observability.md`](06-observability.md) | **in PR** (`feat/multi-session-06-observability`) |
 | 07 | Security hardening (`bash` containment, UDS-per-user, adversarial sweep) | [`07-security.md`](07-security.md) | pending |
 
 > Note: increments 04 and 06 map to two design docs each in some places (tenancy +
@@ -38,6 +38,32 @@ design docs, this file records the refinement (the design docs stay the rational
   (`Arc<tokio::Mutex<Session>>` per key); single-session path zero-overhead.
 
 ## Refinements (authoritative over the design docs)
+
+- **Increment 06 — session-scoped observability (metrics half).** The **tracing** half
+  (the `session_id`/`user_id` span attrs on `agent.turn` and `grpc.server`) already
+  landed in 01/02, so this increment is the **Prometheus** half. Twelve curated
+  loop-level families now carry a `(session, user)` label pair: the counters
+  `runs`/`tokens`/`cost_usd`/`cache_tokens`/`tool_calls`/`api_calls`/`iterations`/
+  `mode_switches` gained the two labels; the three plain gauges
+  `active`/`context_tokens`/`context_messages` became **`IntGaugeVec`**; `runs`/
+  `iterations`/`run_seconds` were promoted from label-less `IntCounter`/`Histogram` to
+  `*Vec`. The seam-health families (`metered.rs`, ~120 of them) stay **label-less** — a
+  regression test guards that. Recording goes through a new **`SessionMetrics`** view
+  (`Metrics::for_session(session, user)`): the ~10 curated recorder methods **moved off
+  `Metrics` onto `SessionMetrics`** (which binds the pair once); `Session` holds one,
+  built in `session_with` and threaded into `run_loop` as `&SessionMetrics` (the same
+  pattern as `events`). **Retire:** `SessionManager::remove` calls
+  `SessionMetrics::retire()`, which `remove_label_values` the three **gauge** series —
+  the ones whose staleness is a *correctness* bug (a dead session's `agent_active = 1`
+  over-counts live sessions). The cumulative **counter** series are intentionally left
+  (frozen, not removed): per the locked **low-hundreds-sessions** constraint their
+  accumulation is within budget, and `remove_label_values` on a multi-label counter
+  needs the full `(model, kind, …)` tuple the session didn't track. `MetricsProxy` and
+  the two histograms `api_call_seconds`/`mode_switch_confidence` are unchanged (health).
+  Bench ceilings held (`new_registry` 1.12M < 1.15M, `record_and_encode` 1.92M < 2.0M) —
+  **no bump needed**. **Deferred:** the Grafana tenant dashboard row (generated
+  provisioning; visual, no code path); full counter-series LRU/tuple-retirement (not
+  needed at low-hundreds).
 
 - **Increment 04c — `SessionStore` `restore`/`diff` ownership check.** `restore(id)` and
   `diff(a, b)` took a bare content-addressed `CheckpointId` with **no scoping** — and ids
