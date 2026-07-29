@@ -21,3 +21,6 @@ iai-callgrind.workspace = true
 [[bench]]
 name = "next_fire"
 harness = false
+
+[lints]
+workspace = true

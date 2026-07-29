@@ -16,3 +16,6 @@ reqwest = { workspace = true, features = ["stream"] }
 [dev-dependencies]
 tokio = { workspace = true }
 rstest.workspace = true
+
+[lints]
+workspace = true

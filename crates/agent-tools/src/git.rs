@@ -547,7 +547,7 @@ mod tests {
                 path: PathBuf::from("a.txt"),
                 oid: Oid("b".repeat(40)),
                 kind: agent_core::EntryKind::Blob,
-                mode: 0o100644,
+                mode: 0o100_644,
                 size: Some(5),
             }])
         }

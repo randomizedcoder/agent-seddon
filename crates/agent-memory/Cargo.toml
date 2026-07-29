@@ -36,3 +36,6 @@ required-features = ["memory-dimensions"]
 name = "leak"
 harness = true
 required-features = ["dhat-heap", "memory-dimensions"]
+
+[lints]
+workspace = true

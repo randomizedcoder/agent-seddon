@@ -26,3 +26,6 @@ rusqlite = { workspace = true, optional = true }
 tokio.workspace = true
 rstest.workspace = true
 agent-testkit.workspace = true
+
+[lints]
+workspace = true

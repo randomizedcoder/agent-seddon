@@ -209,7 +209,10 @@ fn parse_golangci(stdout: &str, root: &Path, changed: &BTreeSet<String>) -> Vec<
             let text = iss.get("Text").and_then(|t| t.as_str()).unwrap_or("");
             let pos = iss.get("Pos")?;
             let file = pos.get("Filename")?.as_str()?.to_string();
-            let line = pos.get("Line").and_then(|l| l.as_u64()).unwrap_or(0) as u32;
+            let line = pos
+                .get("Line")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as u32;
             let sev = iss
                 .get("Severity")
                 .and_then(|s| s.as_str())
@@ -267,7 +270,7 @@ fn parse_clippy(stdout: &str, root: &Path, changed: &BTreeSet<String>) -> Vec<An
             .and_then(|ss| {
                 ss.iter().find(|s| {
                     s.get("is_primary")
-                        .and_then(|b| b.as_bool())
+                        .and_then(serde_json::Value::as_bool)
                         .unwrap_or(false)
                 })
             })
@@ -277,7 +280,9 @@ fn parse_clippy(stdout: &str, root: &Path, changed: &BTreeSet<String>) -> Vec<An
                         .and_then(|f| f.as_str())
                         .unwrap_or("")
                         .to_string(),
-                    s.get("line_start").and_then(|l| l.as_u64()).unwrap_or(0) as u32,
+                    s.get("line_start")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0) as u32,
                 )
             })
             .unwrap_or_default();

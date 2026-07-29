@@ -82,7 +82,10 @@ impl FileDimensions {
     /// Admitted dimensions right now: the seed set plus every emergent slug that
     /// already has a history file.
     async fn admitted_set(&self) -> BTreeSet<String> {
-        let mut set: BTreeSet<String> = SEED_DIMENSIONS.iter().map(|s| s.to_string()).collect();
+        let mut set: BTreeSet<String> = SEED_DIMENSIONS
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
         if let Ok(mut entries) = tokio::fs::read_dir(&self.dir).await {
             while let Ok(Some(e)) = entries.next_entry().await {
                 let name = e.file_name();

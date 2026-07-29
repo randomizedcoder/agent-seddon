@@ -88,3 +88,6 @@ required-features = ["tool-edit"]
 name = "web"
 harness = false
 required-features = ["tool-web"]
+
+[lints]
+workspace = true

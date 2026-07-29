@@ -44,3 +44,6 @@ required-features = ["context-mode-aware"]
 name = "leak"
 harness = true
 required-features = ["dhat-heap", "context-mode-aware"]
+
+[lints]
+workspace = true

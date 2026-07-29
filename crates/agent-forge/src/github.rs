@@ -57,7 +57,10 @@ fn to_pr(v: &serde_json::Value) -> PullRequest {
         url: s(v, "html_url"),
         source_branch: nested(v, "head", "ref"),
         target_branch: nested(v, "base", "ref"),
-        draft: v.get("draft").and_then(|d| d.as_bool()).unwrap_or(false),
+        draft: v
+            .get("draft")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
     }
 }
 

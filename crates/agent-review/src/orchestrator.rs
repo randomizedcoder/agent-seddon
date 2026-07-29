@@ -491,7 +491,7 @@ fn pick_default(names: &[String]) -> String {
     }
     locals
         .first()
-        .map(|s| s.to_string())
+        .map(|s| (*s).clone())
         .or_else(|| names.first().cloned())
         .unwrap_or_else(|| "main".to_string())
 }

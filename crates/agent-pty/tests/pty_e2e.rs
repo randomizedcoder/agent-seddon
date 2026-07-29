@@ -14,7 +14,7 @@ use std::time::Duration;
 fn spec(cmd: &str, args: &[&str]) -> PtySpec {
     PtySpec {
         command: cmd.into(),
-        args: args.iter().map(|s| s.to_string()).collect(),
+        args: args.iter().map(std::string::ToString::to_string).collect(),
         ..Default::default()
     }
 }

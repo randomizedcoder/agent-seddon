@@ -89,7 +89,10 @@ fn to_mr(v: &serde_json::Value) -> PullRequest {
         url: s(v, "web_url"),
         source_branch: s(v, "source_branch"),
         target_branch: s(v, "target_branch"),
-        draft: v.get("draft").and_then(|d| d.as_bool()).unwrap_or(false),
+        draft: v
+            .get("draft")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
     }
 }
 

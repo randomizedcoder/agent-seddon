@@ -341,7 +341,10 @@ impl Tool for EchoTool {
         }
     }
     async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> Result<Observation> {
-        let ms = args.get("sleep_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+        let ms = args
+            .get("sleep_ms")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
         if ms > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
         }

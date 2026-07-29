@@ -372,12 +372,12 @@ fn case_of(name: &str) -> usize {
     if letters.is_empty() {
         return MIXED;
     }
-    let has_upper = letters.chars().any(|c| c.is_uppercase());
-    let has_lower = letters.chars().any(|c| c.is_lowercase());
+    let has_upper = letters.chars().any(char::is_uppercase);
+    let has_lower = letters.chars().any(char::is_lowercase);
     let first_upper = name
         .chars()
         .find(|c| c.is_alphabetic())
-        .map(|c| c.is_uppercase())
+        .map(char::is_uppercase)
         .unwrap_or(false);
     if name.contains('_') {
         if !has_upper {
@@ -443,11 +443,7 @@ fn functions(text: &str, lang: &str) -> Vec<(String, bool)> {
             for cap in go_fn_re().captures_iter(text) {
                 if let Some(m) = cap.name("name") {
                     let name = m.as_str().to_string();
-                    let exported = name
-                        .chars()
-                        .next()
-                        .map(|c| c.is_uppercase())
-                        .unwrap_or(false);
+                    let exported = name.chars().next().map(char::is_uppercase).unwrap_or(false);
                     out.push((name, exported));
                 }
             }

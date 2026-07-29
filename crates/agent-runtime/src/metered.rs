@@ -43,7 +43,9 @@ pub(crate) static CALLSITE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::n
 
 #[cfg(test)]
 pub(crate) fn callsite_guard() -> std::sync::MutexGuard<'static, ()> {
-    CALLSITE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    CALLSITE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Wrap each seam of a built agent in its metrics decorator. `provider_name`,
@@ -864,7 +866,7 @@ impl SearchBackend for MeteredSearch {
         match &out {
             Ok(hits) => {
                 self.metrics
-                    .on_search_query(&self.name, q.mode.as_str(), seconds, hits.len())
+                    .on_search_query(&self.name, q.mode.as_str(), seconds, hits.len());
             }
             Err(_) => self.metrics.on_search_error(&self.name, "query"),
         }
@@ -881,7 +883,7 @@ impl SearchBackend for MeteredSearch {
         match &out {
             Ok(paths) => {
                 self.metrics
-                    .on_search_query(&self.name, "list_files", seconds, paths.len())
+                    .on_search_query(&self.name, "list_files", seconds, paths.len());
             }
             Err(_) => self.metrics.on_search_error(&self.name, "list_files"),
         }

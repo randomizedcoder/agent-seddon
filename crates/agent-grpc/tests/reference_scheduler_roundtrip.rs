@@ -162,7 +162,7 @@ async fn positive_schedule_list_cancel_round_trips(#[case] transport: Transport)
 #[case::cron("cron: 0 6 * * *", agent_core::Schedule::Cron { expr: "0 6 * * *".into() })]
 // Far future on purpose: the scheduler rejects a one-shot already in the past
 // (correctly — it would never fire), so a fixed past instant would rot the test.
-#[case::once_absolute("once: 4102444800000", agent_core::Schedule::Once { at_ms: 4102444800000 })]
+#[case::once_absolute("once: 4102444800000", agent_core::Schedule::Once { at_ms: 4_102_444_800_000 })]
 #[tokio::test(flavor = "multi_thread")]
 async fn positive_every_schedule_variant_round_trips(
     #[case] spec: &str,

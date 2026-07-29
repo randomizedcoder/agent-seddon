@@ -106,7 +106,10 @@ async fn call(
     let (dial, _srv) = spawn(Transport::Tcp, agent_grpc::server::llm_pool_router(pool)).await;
     let ch = dial.connect_lazy().unwrap();
     let mut client = pb::llm_pool_service_client::LlmPoolServiceClient::new(ch);
-    client.complete(req()).await.map(|r| r.into_inner())
+    client
+        .complete(req())
+        .await
+        .map(tonic::Response::into_inner)
 }
 
 // --- positive_: a saturated pool sheds RESOURCE_EXHAUSTED + pushback ----------

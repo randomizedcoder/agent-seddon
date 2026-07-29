@@ -114,7 +114,7 @@ mod tests {
                 assert!(
                     !out.stderr.is_empty() || out.exit_code != 0,
                     "expected failure signal"
-                )
+                );
             }
             Err(sub) if sub.starts_with("exit:") => {
                 let want: i32 = sub[5..].parse().unwrap();

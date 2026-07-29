@@ -194,7 +194,7 @@ fn entry_kind(ty: &str, mode: u32) -> EntryKind {
     match ty {
         "tree" => EntryKind::Tree,
         "commit" => EntryKind::Submodule,
-        _ if mode == 0o120000 => EntryKind::Symlink,
+        _ if mode == 0o120_000 => EntryKind::Symlink,
         _ => EntryKind::Blob,
     }
 }

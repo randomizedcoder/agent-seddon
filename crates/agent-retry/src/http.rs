@@ -52,7 +52,7 @@ mod tests {
     #[case::empty("", None)]
     // adversarial: a huge but valid delta-seconds parses (the clamp is downstream);
     // a negative or u64-overflowing value fails to parse → fall back to backoff.
-    #[case::adversarial_huge("99999999999", Some(99999999999))]
+    #[case::adversarial_huge("99999999999", Some(99_999_999_999))]
     #[case::negative("-1", None)]
     #[case::overflow("999999999999999999999999999", None)]
     fn parse_retry_after_cases(#[case] value: &str, #[case] expected_secs: Option<u64>) {

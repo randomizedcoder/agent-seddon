@@ -27,3 +27,6 @@ iai-callgrind.workspace = true
 [[bench]]
 name = "parse"
 harness = false
+
+[lints]
+workspace = true

@@ -39,3 +39,6 @@ rstest.workspace = true
 # prompt, neither of which a pipe can exercise.
 [target.'cfg(unix)'.dev-dependencies]
 rexpect.workspace = true
+
+[lints]
+workspace = true

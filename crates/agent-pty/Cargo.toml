@@ -21,3 +21,6 @@ async-trait.workspace = true
 tokio.workspace = true
 futures-lite = "2"
 rstest.workspace = true
+
+[lints]
+workspace = true

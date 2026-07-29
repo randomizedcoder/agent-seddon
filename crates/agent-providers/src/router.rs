@@ -110,7 +110,7 @@ pub(crate) fn is_capable(caps: &ModelCapabilities, req: &CompletionRequest) -> b
     if !req.tools.is_empty() && !caps.supports_tools {
         return false;
     }
-    if req.messages.iter().any(|m| m.has_media()) && !caps.supports_vision {
+    if req.messages.iter().any(agent_core::Message::has_media) && !caps.supports_vision {
         return false;
     }
     true

@@ -49,7 +49,7 @@ fn body_text(m: &Message) -> String {
         match b {
             ContentBlock::Text { text } => out.push_str(text),
             ContentBlock::Image { media_type, data } => {
-                out.push_str(&format!("[image: {media_type}, {} bytes]", data.len()))
+                out.push_str(&format!("[image: {media_type}, {} bytes]", data.len()));
             }
             ContentBlock::Document {
                 media_type,

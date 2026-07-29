@@ -34,3 +34,6 @@ tiny_http.workspace = true
 [[bench]]
 name = "rank"
 harness = false
+
+[lints]
+workspace = true

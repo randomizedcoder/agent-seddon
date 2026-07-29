@@ -27,3 +27,6 @@ iai-callgrind.workspace = true
 [[bench]]
 name = "metrics"
 harness = false
+
+[lints]
+workspace = true

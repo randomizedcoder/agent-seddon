@@ -469,7 +469,7 @@ pub fn classify(message: &str) -> Class {
 fn extract_http_status(lower: &str) -> Option<u16> {
     let idx = lower.find("http ")?;
     let rest = &lower[idx + 5..];
-    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
     if digits.is_empty() {
         return None;
     }
