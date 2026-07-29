@@ -175,7 +175,7 @@ mod tests {
     #[case::negative_additionalprops_then_repaired(
         strict_schema(), vec![r#"{"n":1,"junk":2}"#, r#"{"n":1}"#], 1, Want::ValueAfter(json!({"n": 1}), 2))]
     #[case::negative_no_repair_budget(
-        schema(), vec![r#"{}"#], 0, Want::Error("schema"))]
+        schema(), vec![r"{}"], 0, Want::Error("schema"))]
     #[case::negative_unparseable_no_budget(
         schema(), vec!["not json at all"], 0, Want::Error("JSON"))]
     #[tokio::test]
@@ -231,7 +231,7 @@ mod tests {
             .await
             .unwrap();
         // exhausted (no budget)
-        let p3 = ScriptedProvider::new(vec![final_turn(r#"{}"#)]);
+        let p3 = ScriptedProvider::new(vec![final_turn(r"{}")]);
         let _ = complete_structured(&p3, &validator, req(), &sch, 0, &metrics).await;
 
         let d = |o: &str| probe.delta(&metrics, "agent_structured_total", Some(o));

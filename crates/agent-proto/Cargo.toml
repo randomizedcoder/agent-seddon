@@ -23,3 +23,6 @@ rstest = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 # decode the emitted FileDescriptorSet in the reflection descriptor test
 prost-types = { workspace = true }
+
+[lints]
+workspace = true

@@ -67,7 +67,7 @@ impl SystemFragments {
                 } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
                     path.file_stem()
                         .and_then(|s| s.to_str())
-                        .map(|s| s.to_string())
+                        .map(std::string::ToString::to_string)
                 } else {
                     None
                 };
@@ -146,7 +146,7 @@ pub(crate) fn read_nonempty(path: &Path) -> Option<String> {
 /// mirroring `agent-prompt`/`context_files` (each crate copies its own — the
 /// convention for these small helpers).
 fn numeric_prefix(name: &str) -> u64 {
-    let digits: String = name.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let digits: String = name.chars().take_while(char::is_ascii_digit).collect();
     digits.parse().unwrap_or(u64::MAX)
 }
 

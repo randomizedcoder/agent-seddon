@@ -26,3 +26,6 @@ iai-callgrind.workspace = true
 name = "validate"
 harness = false
 required-features = ["validate-draft07"]
+
+[lints]
+workspace = true

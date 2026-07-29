@@ -23,3 +23,6 @@ agent-git = { workspace = true, features = ["git-cli"] }
 agent-testkit.workspace = true
 rstest.workspace = true
 tokio = { workspace = true }
+
+[lints]
+workspace = true

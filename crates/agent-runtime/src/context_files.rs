@@ -62,7 +62,7 @@ fn load_subdir(dir: &Path) -> Vec<ContextBlock> {
 
 /// Parse the leading run of ASCII digits; files without one sort last.
 fn numeric_prefix(name: &str) -> u64 {
-    let digits: String = name.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let digits: String = name.chars().take_while(char::is_ascii_digit).collect();
     digits.parse().unwrap_or(u64::MAX)
 }
 

@@ -24,3 +24,6 @@ iai-callgrind.workspace = true
 [[bench]]
 name = "place"
 harness = false
+
+[lints]
+workspace = true

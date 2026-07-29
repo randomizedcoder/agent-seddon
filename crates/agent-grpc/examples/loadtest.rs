@@ -531,7 +531,7 @@ async fn main() {
     let scenario = get("--scenario").unwrap_or_else(|| "ramp".into());
     let seams: Vec<String> = get("--seams")
         .map(|s| s.split(',').map(str::to_string).collect())
-        .unwrap_or_else(|| SEAMS.iter().map(|s| s.to_string()).collect());
+        .unwrap_or_else(|| SEAMS.iter().map(std::string::ToString::to_string).collect());
     let concurrency: Vec<usize> = get("--concurrency")
         .map(|s| s.split(',').filter_map(|c| c.parse().ok()).collect())
         .unwrap_or_else(|| vec![1, 8, 64]);

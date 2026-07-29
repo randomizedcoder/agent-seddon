@@ -31,3 +31,6 @@ iai-callgrind.workspace = true
 name = "checkpoint"
 harness = false
 required-features = ["session-file"]
+
+[lints]
+workspace = true

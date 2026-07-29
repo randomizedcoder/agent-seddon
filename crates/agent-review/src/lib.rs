@@ -308,7 +308,7 @@ fn render_signatures(out: &mut String, report: &agent_core::SignatureReport) {
         }
         match c.kind.as_str() {
             "modified" => {
-                out.push_str(&format!("    ~ {}  {}  →  {}\n", c.name, c.before, c.after))
+                out.push_str(&format!("    ~ {}  {}  →  {}\n", c.name, c.before, c.after));
             }
             "added" => out.push_str(&format!("    + {}  {}\n", c.name, c.after)),
             _ => out.push_str(&format!("    - {}  {}\n", c.name, c.before)),

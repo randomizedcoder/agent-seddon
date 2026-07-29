@@ -189,7 +189,7 @@ mod tests {
             "data": {
                 "resultType": "vector",
                 "result": [
-                    { "metric": {"__name__": "up", "job": "agent"}, "value": [1700000000.0, "1"] }
+                    { "metric": {"__name__": "up", "job": "agent"}, "value": [1_700_000_000.0, "1"] }
                 ]
             }
         });

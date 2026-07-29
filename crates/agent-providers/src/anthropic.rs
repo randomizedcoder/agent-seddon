@@ -264,7 +264,7 @@ impl LlmProvider for AnthropicProvider {
                 buf.push_str(&String::from_utf8_lossy(&b));
                 while let Some(pos) = buf.find('\n') {
                     let line = buf[..pos].trim_end_matches('\r').to_string();
-                    buf.drain(..pos + 1);
+                    buf.drain(..=pos);
                     let Some(data) = line.strip_prefix("data:") else { continue };
                     let data = data.trim();
                     if data.is_empty() {

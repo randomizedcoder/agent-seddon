@@ -228,7 +228,7 @@ fn tokenize(html: &str) -> Vec<Event<'_>> {
             }
             if j == name_start {
                 // A stray `<` (e.g. `a < b`) — emit it as literal text.
-                out.push(Event::Text(&html[i..i + 1]));
+                out.push(Event::Text(&html[i..=i]));
                 i += 1;
                 continue;
             }

@@ -42,7 +42,7 @@ impl ContextStrategy for GrpcContext {
         resp.into_inner()
             .messages
             .into_iter()
-            .map(|m| m.try_into())
+            .map(std::convert::TryInto::try_into)
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e: agent_proto::ConvertError| agent_core::Error::Provider(e.to_string()))
     }

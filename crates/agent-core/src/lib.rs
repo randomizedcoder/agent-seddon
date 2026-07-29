@@ -1334,7 +1334,7 @@ tokio::task_local! {
 
 /// The current ambient identity, or `None` when no scope is active.
 pub fn current_identity() -> Option<SessionKey> {
-    AGENT_IDENTITY.try_with(|id| id.clone()).ok()
+    AGENT_IDENTITY.try_with(std::clone::Clone::clone).ok()
 }
 
 /// Run `fut` with `identity` as the ambient identity (see [`AGENT_IDENTITY`]). Nested

@@ -196,10 +196,10 @@ where
     match tokio::time::timeout(FLUSH_TIMEOUT, client.insert_native_block(query, rows)).await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
-            tracing::warn!(target: TARGET, "clickhouse insert into {table} failed ({n} rows dropped): {e}")
+            tracing::warn!(target: TARGET, "clickhouse insert into {table} failed ({n} rows dropped): {e}");
         }
         Err(_) => {
-            tracing::warn!(target: TARGET, "clickhouse insert into {table} timed out ({n} rows dropped)")
+            tracing::warn!(target: TARGET, "clickhouse insert into {table} timed out ({n} rows dropped)");
         }
     }
 }

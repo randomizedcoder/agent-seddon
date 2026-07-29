@@ -128,7 +128,7 @@ mod tests {
 
     fn svc(ids: &[&str]) -> AgentSessionSvc {
         AgentSessionSvc::new(Arc::new(FakeRegistry {
-            ids: ids.iter().map(|s| s.to_string()).collect(),
+            ids: ids.iter().map(std::string::ToString::to_string).collect(),
         }))
     }
 

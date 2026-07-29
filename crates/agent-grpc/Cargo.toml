@@ -51,3 +51,6 @@ agent-prompt = { workspace = true }
 # the ToolService seam. Only the patch tool is compiled in.
 agent-tools = { workspace = true, features = ["tool-core", "tool-patch"] }
 rstest = { workspace = true }
+
+[lints]
+workspace = true

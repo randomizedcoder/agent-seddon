@@ -437,7 +437,7 @@ fn snippet_of(line: &str) -> String {
 fn tokenize(s: &str) -> Vec<String> {
     s.split(|c: char| !c.is_alphanumeric())
         .filter(|t| !t.is_empty())
-        .map(|t| t.to_lowercase())
+        .map(str::to_lowercase)
         .collect()
 }
 
@@ -654,7 +654,7 @@ mod tests {
         });
         let results = join_all(queries).await;
         assert!(
-            results.iter().all(|r| r.is_ok()),
+            results.iter().all(std::result::Result::is_ok),
             "all queries must succeed"
         );
         assert!(reindexer.await.unwrap().is_ok());

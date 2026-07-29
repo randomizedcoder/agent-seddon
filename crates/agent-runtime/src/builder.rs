@@ -656,7 +656,7 @@ pub async fn build_agent_with(
             )
             .with_health_grading(cfg.pool.latency_alpha, cfg.pool.degraded_threshold_ms)
             .with_observer(Arc::new(move |ev| {
-                crate::metered::record_pool_event(&m, ev)
+                crate::metered::record_pool_event(&m, ev);
             }))
             .with_probe(cfg.pool.probe_interval_secs, cfg.pool.probe_timeout_secs);
         Some(Arc::new(pool) as Arc<dyn agent_core::LlmPool>)
@@ -812,7 +812,7 @@ pub async fn build_agent_with(
                     review_forge,
                 )
                 .with_observer(Arc::new(move |ev| {
-                    crate::metered::record_review_event(&m, ev)
+                    crate::metered::record_review_event(&m, ev);
                 }))
                 .with_deadline(std::time::Duration::from_secs(cfg.review.deadline_secs));
                 // Static analysis runs by default; it shells out to the linters via

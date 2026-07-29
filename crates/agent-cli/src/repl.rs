@@ -250,7 +250,7 @@ fn resume_picker(
         Ok(msgs) => {
             *session = agent.session();
             session.load(msgs);
-            *id = info.id.clone();
+            id.clone_from(&info.id);
             println!("resumed session {} ({} turns)", info.id, info.turns);
         }
         Err(e) => eprintln!("could not load session: {e}"),

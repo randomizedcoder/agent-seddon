@@ -497,7 +497,7 @@ fn read_nonempty(path: &Path) -> Option<String> {
 /// Leading run of ASCII digits as an ordering key (files without one sort last),
 /// mirroring `agent-runtime::context_files::numeric_prefix`.
 fn numeric_prefix(name: &str) -> u64 {
-    let digits: String = name.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let digits: String = name.chars().take_while(char::is_ascii_digit).collect();
     digits.parse().unwrap_or(u64::MAX)
 }
 
@@ -1201,7 +1201,12 @@ mod tests {
     fn frontmatter_list_cases(#[case] content: &str, #[case] want: Vec<&str>) {
         let (front, _) = split_frontmatter(content);
         let got = frontmatter_list(front, "tags");
-        assert_eq!(got, want.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(
+            got,
+            want.iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

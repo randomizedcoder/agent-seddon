@@ -325,7 +325,7 @@ mod tests {
             let mem = PerUserMemory::new(&ep, &sem, None);
 
             scope(SessionKey::local("s1"), async {
-                mem.append(ev("local-one")).await.unwrap()
+                mem.append(ev("local-one")).await.unwrap();
             })
             .await;
 

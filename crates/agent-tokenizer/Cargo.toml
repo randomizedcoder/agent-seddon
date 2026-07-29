@@ -32,3 +32,6 @@ iai-callgrind.workspace = true
 [[bench]]
 name = "tokenize"
 harness = false
+
+[lints]
+workspace = true

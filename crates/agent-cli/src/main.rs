@@ -183,7 +183,7 @@ async fn main() -> Result<()> {
                     }
                     // Runs concurrently, sharing the live session source; resolves only
                     // if its bind fails. Dropped (server stops) when the run finishes.
-                    res = run_observe(&agent, observe_listen) => res.map(|_| None),
+                    res = run_observe(&agent, observe_listen) => res.map(|()| None),
                 };
                 // Always persist the transcript (success, error, or interrupt) so the
                 // run is resumable with `--resume {id}` / `--continue`.
@@ -196,7 +196,7 @@ async fn main() -> Result<()> {
             }
             Mode::Repl => tokio::select! {
                 r = repl::run(&agent, &sessions_dir, resumed) => r.map(|()| None),
-                res = run_observe(&agent, observe_listen) => res.map(|_| None),
+                res = run_observe(&agent, observe_listen) => res.map(|()| None),
             },
             Mode::Scheduler => {
                 // Tick until interrupted. Each due job runs as a fresh headless turn,
@@ -206,7 +206,7 @@ async fn main() -> Result<()> {
                 eprintln!("scheduler: ticking every {}s — ^C to stop", every.as_secs());
                 loop {
                     tokio::select! {
-                        _ = tokio::time::sleep(every) => {
+                        () = tokio::time::sleep(every) => {
                             let n = agent.tick_scheduler().await;
                             if n > 0 {
                                 tracing::info!(jobs = n, "scheduler fired due jobs");

@@ -50,3 +50,6 @@ required-features = ["provider-pool"]
 name = "leak"
 harness = true
 required-features = ["dhat-heap", "provider-pool"]
+
+[lints]
+workspace = true

@@ -191,9 +191,9 @@ mod tests {
     /// The model chooses these numbers, so they are clamped rather than trusted —
     /// and clamped rather than rejected, since failing wastes an iteration.
     #[rstest]
-    #[case::adversarial_huge_limit(json!({"query":"q","limit": 100000}))]
+    #[case::adversarial_huge_limit(json!({"query":"q","limit": 100_000}))]
     #[case::adversarial_zero_limit(json!({"query":"q","limit": 0}))]
-    #[case::adversarial_huge_freshness(json!({"query":"q","freshness_days": 99999999}))]
+    #[case::adversarial_huge_freshness(json!({"query":"q","freshness_days": 99_999_999}))]
     #[case::corner_negative_limit_ignored(json!({"query":"q","limit": -5}))]
     #[tokio::test]
     async fn adversarial_bounds_are_clamped_not_rejected(#[case] args: Value) {

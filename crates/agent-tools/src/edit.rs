@@ -258,7 +258,7 @@ fn fuzzy_replace(
         match hits.as_slice() {
             [] => continue, // nothing at this level — loosen and retry
             [i] => {
-                let mut out: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
+                let mut out: Vec<String> = lines.iter().map(std::string::ToString::to_string).collect();
                 let repl = match level {
                     FuzzLevel::Fold => new.split('\n').map(str::to_string).collect(),
                     // Collapse ignored indentation to match, so re-anchor the

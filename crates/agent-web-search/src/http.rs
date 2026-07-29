@@ -254,7 +254,7 @@ pub(crate) fn parse_searxng(body: &str) -> Result<Vec<WebResult>> {
             // back to rank order rather than trusting it into the sort.
             let score = it
                 .get("score")
-                .and_then(|s| s.as_f64())
+                .and_then(serde_json::Value::as_f64)
                 .filter(|s| s.is_finite() && *s >= 0.0)
                 .map(|s| (s as f32).min(1.0))
                 .unwrap_or_else(|| score_from_rank(i, total));

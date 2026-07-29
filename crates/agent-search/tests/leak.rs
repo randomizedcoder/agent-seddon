@@ -39,11 +39,7 @@ async fn vector_query_does_not_leak() {
         )
         .unwrap();
     }
-    let b = VectorBackend::new(
-        root.to_path_buf(),
-        idx.to_path_buf(),
-        Arc::new(LocalEmbedder::new(128)),
-    );
+    let b = VectorBackend::new(root.clone(), idx.clone(), Arc::new(LocalEmbedder::new(128)));
     b.reindex(&|_| {}).await.unwrap();
 
     let _ = b.query(&sem("retry backoff")).await.unwrap(); // warm up

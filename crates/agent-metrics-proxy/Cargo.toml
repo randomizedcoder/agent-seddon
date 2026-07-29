@@ -21,3 +21,6 @@ reqwest = { workspace = true, optional = true }
 tokio.workspace = true
 rstest.workspace = true
 serde_json.workspace = true
+
+[lints]
+workspace = true

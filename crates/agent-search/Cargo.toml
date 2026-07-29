@@ -48,3 +48,6 @@ agent-embed = { workspace = true, features = ["embed-local"] }
 name = "vector"
 harness = false
 required-features = ["search-vector"]
+
+[lints]
+workspace = true

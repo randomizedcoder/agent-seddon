@@ -128,7 +128,7 @@ async fn positive_embed_docs_preserves_order_and_arity() {
 
     let docs: Vec<String> = ["alpha", "beta", "gamma"]
         .iter()
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
         .collect();
     let got = client.embed_docs(&docs).await.unwrap();
 
@@ -187,7 +187,10 @@ async fn adversarial_wrong_width_vector_is_rejected_at_the_boundary() {
         client.embed_query("x").await.is_err(),
         "a wrong-width vector must not reach the index"
     );
-    let docs: Vec<String> = ["a", "b"].iter().map(|s| s.to_string()).collect();
+    let docs: Vec<String> = ["a", "b"]
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
     assert!(
         client.embed_docs(&docs).await.is_err(),
         "a short batch must not be silently misaligned with its documents"

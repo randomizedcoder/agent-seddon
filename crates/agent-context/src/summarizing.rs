@@ -198,7 +198,7 @@ fn render(messages: &[Message]) -> String {
             match b {
                 agent_core::ContentBlock::Text { text } => out.push_str(text),
                 agent_core::ContentBlock::Image { media_type, .. } => {
-                    out.push_str(&format!("[image: {media_type}]"))
+                    out.push_str(&format!("[image: {media_type}]"));
                 }
                 agent_core::ContentBlock::Document {
                     media_type, name, ..

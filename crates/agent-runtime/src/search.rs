@@ -117,12 +117,12 @@ pub fn spawn_freshness(dispatch: Arc<DispatchSearch>, metrics: Metrics) {
                             "search index rebuilt"
                         ),
                         Err(e) => {
-                            tracing::warn!(backend = %name, error = %e, "search reindex failed")
+                            tracing::warn!(backend = %name, error = %e, "search reindex failed");
                         }
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(backend = %name, error = %e, "search status check failed")
+                    tracing::warn!(backend = %name, error = %e, "search status check failed");
                 }
             }
         }

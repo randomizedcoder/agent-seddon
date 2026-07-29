@@ -28,3 +28,6 @@ iai-callgrind.workspace = true
 [[bench]]
 name = "lsp_parse"
 harness = false
+
+[lints]
+workspace = true

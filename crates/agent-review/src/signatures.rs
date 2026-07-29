@@ -90,8 +90,8 @@ impl FactCollector for SignatureCollector {
                 if agent_core::confine(&ctx.repo_root, &file_disp).is_err() {
                     continue;
                 }
-                c.file = file_disp.clone();
-                c.lang = lang.clone();
+                c.file.clone_from(&file_disp);
+                c.lang.clone_from(&lang);
                 if changes.len() >= MAX_CHANGES {
                     truncated = true;
                     break;

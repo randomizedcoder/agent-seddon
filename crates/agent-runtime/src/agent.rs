@@ -1026,7 +1026,7 @@ impl Agent {
                     .messages
                     .iter()
                     .find(|m| matches!(m.role, agent_core::Role::User))
-                    .map(|m| m.content_text())
+                    .map(agent_core::Message::content_text)
                     .unwrap_or_default();
                 let goal_hash = agent_core::fnv1a_hex(goal.as_bytes());
                 for (i, (call, dec)) in assistant.tool_calls.iter().zip(&decisions).enumerate() {
@@ -2695,7 +2695,7 @@ mod tests {
         )
         .await;
         assert_eq!(events.len(), 1);
-        assert!(events[0].1.contains("unknown tool `nope`"), "{:?}", events);
+        assert!(events[0].1.contains("unknown tool `nope`"), "{events:?}");
     }
 
     #[tokio::test]
@@ -2711,8 +2711,7 @@ mod tests {
         // Wrapped as `tool errored: {e}`, where `e` is `Error::Tool`'s Display.
         assert!(
             events[0].1.contains("tool errored") && events[0].1.contains("kaboom"),
-            "{:?}",
-            events
+            "{events:?}"
         );
     }
 

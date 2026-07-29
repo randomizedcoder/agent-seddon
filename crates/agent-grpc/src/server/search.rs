@@ -84,7 +84,7 @@ impl pb::search_service_server::SearchService for SearchServiceSvc {
                 let tx_progress = tx.clone();
                 let progress = move |p: agent_core::ReindexProgress| {
                     let mut pp = pb::ReindexProgress::from(p);
-                    pp.backend = label.clone();
+                    pp.backend.clone_from(&label);
                     let _ = tx_progress.send(Ok(pp));
                 };
                 if let Err(e) = inner.reindex(&progress).await {

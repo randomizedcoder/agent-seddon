@@ -212,7 +212,7 @@ pub fn take_page(v: serde_json::Value) -> (Vec<serde_json::Value>, Option<u32>) 
     if let Some(items) = v.get("__items").and_then(|i| i.as_array()) {
         let next = v
             .get("__next_page")
-            .and_then(|n| n.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .map(|n| n as u32);
         return (items.clone(), next);
     }
@@ -237,7 +237,9 @@ pub fn nested(v: &serde_json::Value, a: &str, b: &str) -> String {
 }
 
 pub fn n(v: &serde_json::Value, key: &str) -> u64 {
-    v.get(key).and_then(|x| x.as_u64()).unwrap_or_default()
+    v.get(key)
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

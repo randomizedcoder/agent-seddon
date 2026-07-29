@@ -36,3 +36,6 @@ dhat = { workspace = true, optional = true }
 tokio.workspace = true
 rstest.workspace = true
 tiny_http.workspace = true
+
+[lints]
+workspace = true

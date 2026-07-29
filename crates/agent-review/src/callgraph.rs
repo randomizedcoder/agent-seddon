@@ -105,7 +105,7 @@ fn parse_graph(stdout: &str, root: &Path, changed: &BTreeSet<String>) -> Option<
     let v: serde_json::Value = serde_json::from_str(stdout).ok()?;
     let truncated = v
         .get("truncated")
-        .and_then(|t| t.as_bool())
+        .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
 
     // Nodes — keep the helper's ids (edges reference them); drop path-escaping ones.
@@ -114,7 +114,7 @@ fn parse_graph(stdout: &str, root: &Path, changed: &BTreeSet<String>) -> Option<
     let mut changed_fns = Vec::new();
     if let Some(arr) = v.get("nodes").and_then(|n| n.as_array()) {
         for n in arr.iter().take(MAX_NODES) {
-            let id = n.get("id").and_then(|x| x.as_u64())? as u32;
+            let id = n.get("id").and_then(serde_json::Value::as_u64)? as u32;
             let file = n.get("file").and_then(|x| x.as_str()).unwrap_or("");
             if file.is_empty() || agent_core::confine(root, file).is_err() {
                 continue; // untrusted path escapes the repo — drop the node
@@ -133,9 +133,15 @@ fn parse_graph(stdout: &str, root: &Path, changed: &BTreeSet<String>) -> Option<
                     n.get("name").and_then(|x| x.as_str()).unwrap_or(""),
                     MAX_STR,
                 ),
-                exported: n.get("exported").and_then(|x| x.as_bool()).unwrap_or(false),
+                exported: n
+                    .get("exported")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
                 file: file.to_string(),
-                line: n.get("line").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+                line: n
+                    .get("line")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0) as u32,
                 centrality: 0.0, // filled by the PageRank pass below
             });
         }
@@ -147,11 +153,11 @@ fn parse_graph(stdout: &str, root: &Path, changed: &BTreeSet<String>) -> Option<
         for e in arr.iter().take(MAX_EDGES) {
             let caller = e
                 .get("caller_id")
-                .and_then(|x| x.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .unwrap_or(u64::MAX) as u32;
             let callee = e
                 .get("callee_id")
-                .and_then(|x| x.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .unwrap_or(u64::MAX) as u32;
             if kept.contains(&caller) && kept.contains(&callee) {
                 edges.push(CallEdge {
@@ -170,9 +176,18 @@ fn parse_graph(stdout: &str, root: &Path, changed: &BTreeSet<String>) -> Option<
                     p.get("package").and_then(|x| x.as_str()).unwrap_or(""),
                     MAX_STR,
                 ),
-                files: p.get("files").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
-                exported_fns: p.get("exported_fns").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
-                types: p.get("types").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+                files: p
+                    .get("files")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0) as u32,
+                exported_fns: p
+                    .get("exported_fns")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0) as u32,
+                types: p
+                    .get("types")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0) as u32,
             });
         }
     }

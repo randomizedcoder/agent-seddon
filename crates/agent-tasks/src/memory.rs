@@ -24,7 +24,7 @@ impl TaskTracker for MemoryTaskTracker {
         validate_invariant(&todos)?;
         let sorted = sort_by_priority(todos);
         // Commit only after validation — a rejected write never mutates.
-        *self.plan.lock().expect("tasks plan poisoned") = sorted.clone();
+        (*self.plan.lock().expect("tasks plan poisoned")).clone_from(&sorted);
         Ok(sorted)
     }
 
@@ -44,7 +44,7 @@ impl TaskTracker for MemoryTaskTracker {
         }
         validate_invariant(&candidate)?;
         let sorted = sort_by_priority(candidate);
-        *plan = sorted.clone();
+        (*plan).clone_from(&sorted);
         Ok(sorted)
     }
 

@@ -25,3 +25,6 @@ iai-callgrind.workspace = true
 [[bench]]
 name = "classify"
 harness = false
+
+[lints]
+workspace = true

@@ -172,7 +172,7 @@ impl ReviewCollector for FakeReview {
                 nodes: vec![
                     agent_core::CallGraphNode {
                         id: 0,
-                        package: "".into(),
+                        package: String::new(),
                         name: "main".into(),
                         exported: false,
                         file: "main.go".into(),
@@ -181,7 +181,7 @@ impl ReviewCollector for FakeReview {
                     },
                     agent_core::CallGraphNode {
                         id: 1,
-                        package: "".into(),
+                        package: String::new(),
                         name: "Run".into(),
                         exported: true,
                         file: "main.go".into(),
@@ -195,7 +195,7 @@ impl ReviewCollector for FakeReview {
                 }],
                 changed_fns: vec![1],
                 packages: vec![agent_core::PackageShape {
-                    package: "".into(),
+                    package: String::new(),
                     files: 1,
                     exported_fns: 1,
                     types: 0,

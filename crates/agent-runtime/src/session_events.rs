@@ -65,7 +65,7 @@ impl SessionEvents {
         match event {
             SessionEvent::RunStarted { .. } => s.active = true,
             SessionEvent::RunFinished { .. } => s.active = false,
-            SessionEvent::ModeSwitch { to, .. } => s.current_mode = to.clone(),
+            SessionEvent::ModeSwitch { to, .. } => s.current_mode.clone_from(to),
             SessionEvent::ContextUpdate {
                 prompt_tokens,
                 context_window,
@@ -87,7 +87,7 @@ impl SessionSource for SessionEvents {
 
     fn subscribe(&self) -> SessionEventStream {
         // Drop `Lagged` items (slow-consumer backpressure = drop, not stall).
-        let stream = BroadcastStream::new(self.tx.subscribe()).filter_map(|r| r.ok());
+        let stream = BroadcastStream::new(self.tx.subscribe()).filter_map(std::result::Result::ok);
         Box::pin(stream)
     }
 }
