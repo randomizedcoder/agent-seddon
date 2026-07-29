@@ -4015,15 +4015,111 @@ mod tests {
         assert_eq!(pb::SearchCapabilities::from(back), p1);
     }
 
+    // Every `agent_core::Error` variant maps to a deliberate gRPC code: a bad
+    // *request* is INVALID_ARGUMENT, overload is the retryable RESOURCE_EXHAUSTED,
+    // I/O is UNAVAILABLE, and every server-side fault is INTERNAL. A new variant
+    // that forgets its mapping fails here.
     #[test]
-    fn error_maps_to_status_codes() {
+    fn status_from_error_maps_every_variant() {
+        use agent_core::Error;
+        use tonic::Code;
+        let io_err = std::io::Error::other("disk gone");
+        let json_err = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+        let cases: Vec<(Error, Code)> = vec![
+            (Error::Provider("m".into()), Code::Internal),
+            (Error::Tool("m".into()), Code::Internal),
+            (Error::Memory("m".into()), Code::Internal),
+            (Error::Config("m".into()), Code::InvalidArgument),
+            (Error::Io(io_err), Code::Unavailable),
+            (Error::Json(json_err), Code::InvalidArgument),
+            (Error::Search("m".into()), Code::Internal),
+            (Error::Repo("m".into()), Code::Internal),
+            (Error::Tokenizer("m".into()), Code::Internal),
+            (Error::Web("m".into()), Code::Internal),
+            (Error::Tasks("m".into()), Code::Internal),
+            (Error::Scheduler("m".into()), Code::Internal),
+            (Error::Pty("m".into()), Code::Internal),
+            (Error::Structured("m".into()), Code::InvalidArgument),
+            (Error::Lsp("m".into()), Code::Internal),
+            (Error::Sandbox("m".into()), Code::Internal),
+            (Error::Embed("m".into()), Code::Internal),
+            (Error::Session("m".into()), Code::Internal),
+            (Error::Prompt("m".into()), Code::InvalidArgument),
+            (Error::Metrics("m".into()), Code::Internal),
+            (Error::Overloaded("m".into()), Code::ResourceExhausted),
+        ];
+        for (err, want) in cases {
+            assert_eq!(
+                status_from_error(&err).code(),
+                want,
+                "wrong code for {err:?}"
+            );
+        }
+    }
+
+    // A `ConvertError` (a malformed inbound message) is a client bad request.
+    #[test]
+    fn convert_error_becomes_invalid_argument() {
+        let s: tonic::Status = ConvertError::MissingField("field").into();
+        assert_eq!(s.code(), tonic::Code::InvalidArgument);
+        assert!(s.message().contains("missing required field"));
+    }
+
+    // JsonValue lossless roundtrip, including the u64-beyond-i64 (`UintValue`) path.
+    #[test]
+    fn json_value_roundtrip_covers_uint_and_containers() {
+        let v = serde_json::json!({
+            "n": serde_json::Value::Null,
+            "b": true,
+            "i": -5,
+            "u": u64::MAX,
+            "f": 1.5,
+            "s": "x",
+            "arr": [1, "y", null],
+            "obj": {"k": [true]},
+        });
+        let pb1 = pb::JsonValue::from(v.clone());
+        let back = serde_json::Value::try_from(pb1.clone()).unwrap();
+        assert_eq!(back, v);
+        assert_eq!(pb::JsonValue::from(back), pb1);
+    }
+
+    // An unset oneof and a non-representable double both fail safe to JSON null.
+    #[test]
+    fn corner_json_value_unset_and_nan_are_null() {
+        use pb::json_value::Kind;
+        let unset = pb::JsonValue { kind: None };
         assert_eq!(
-            status_from_error(&agent_core::Error::Config("bad".into())).code(),
-            tonic::Code::InvalidArgument
+            serde_json::Value::try_from(unset).unwrap(),
+            serde_json::Value::Null
         );
+        let nan = pb::JsonValue {
+            kind: Some(Kind::DoubleValue(f64::NAN)),
+        };
         assert_eq!(
-            status_from_error(&agent_core::Error::Provider("x".into())).code(),
-            tonic::Code::Internal
+            serde_json::Value::try_from(nan).unwrap(),
+            serde_json::Value::Null
         );
+    }
+
+    // `big_number` carries an exact literal; a hostile one that isn't valid JSON
+    // must error (not panic).
+    #[test]
+    fn json_value_big_number_parses_and_rejects() {
+        use pb::json_value::Kind;
+        let good = pb::JsonValue {
+            kind: Some(Kind::BigNumber("123".into())),
+        };
+        assert_eq!(
+            serde_json::Value::try_from(good).unwrap(),
+            serde_json::json!(123)
+        );
+        let bad = pb::JsonValue {
+            kind: Some(Kind::BigNumber("not-a-number".into())),
+        };
+        assert!(matches!(
+            serde_json::Value::try_from(bad).unwrap_err(),
+            ConvertError::Json { .. }
+        ));
     }
 }
