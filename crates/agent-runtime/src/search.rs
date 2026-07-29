@@ -128,3 +128,103 @@ pub fn spawn_freshness(dispatch: Arc<DispatchSearch>, metrics: Metrics) {
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_core::{IndexStatus, SearchBackend};
+    use agent_testkit::FixtureSearch;
+    use std::time::Duration;
+
+    // ---- build_embedder: `[embedder] backend` resolution -------------------
+
+    #[cfg(feature = "semantic-search")]
+    #[test]
+    fn positive_build_embedder_local_backend() {
+        // `minimal_for_test` defaults `embedder.backend = "local"`.
+        let cfg = crate::config::Config::minimal_for_test();
+        assert!(build_embedder(&cfg).is_ok());
+    }
+
+    // Untrusted config string: an unknown backend must fail closed with a legible,
+    // built-in-listing error — never panic or silently fall back to a default.
+    #[cfg(feature = "semantic-search")]
+    #[rstest::rstest]
+    #[case::garbage("bogus")]
+    #[case::empty("")]
+    #[case::path_traversal("../../etc/passwd")]
+    #[case::uppercased_known("LOCAL")]
+    fn adversarial_unknown_embedder_backend_bails(#[case] backend: &str) {
+        let mut cfg = crate::config::Config::minimal_for_test();
+        cfg.embedder.backend = backend.into();
+        // `Arc<dyn Embedder>` isn't Debug, so match rather than `expect_err`.
+        let err = match build_embedder(&cfg) {
+            Ok(_) => panic!("an unknown embedder backend `{backend}` must fail, not build"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("unknown [embedder] backend"),
+            "expected a legible unknown-backend error, got: {err}"
+        );
+    }
+
+    // ---- build_vector: composes a metered local embedder + index dir -------
+
+    #[cfg(feature = "semantic-search")]
+    #[test]
+    fn positive_build_vector_builds_local_embedder_when_none_prebuilt() {
+        let dir = agent_testkit::tempdir();
+        let mut cfg = crate::config::Config::minimal_for_test();
+        cfg.agent.working_dir = dir.display().to_string();
+        cfg.search.index_dir = dir.join("idx").display().to_string();
+        let metrics = Metrics::new();
+        let ctx = crate::registry::FactoryCtx::new(&cfg, &metrics);
+        assert!(build_vector(&ctx).is_ok());
+    }
+
+    // ---- spawn_freshness: fresh short-circuits; stale reindexes ------------
+
+    fn dispatch_of(fx: Arc<FixtureSearch>) -> Arc<DispatchSearch> {
+        Arc::new(
+            DispatchSearch::new(vec![("fixture".into(), fx as Arc<dyn SearchBackend>)]).unwrap(),
+        )
+    }
+
+    async fn wait_until(pred: impl Fn() -> bool) -> bool {
+        for _ in 0..50 {
+            if pred() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        pred()
+    }
+
+    // A fresh index reports fresh and is left alone — no background reindex.
+    #[tokio::test]
+    async fn positive_fresh_index_is_not_reindexed() {
+        let fx = Arc::new(FixtureSearch::new()); // Default status = Fresh.
+        spawn_freshness(dispatch_of(fx.clone()), Metrics::new());
+        // Let the detached task run; a fresh index must never reindex.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(fx.reindex_count(), 0, "a fresh index must not be reindexed");
+    }
+
+    // A stale index triggers exactly one background reindex.
+    #[tokio::test]
+    async fn positive_stale_index_triggers_background_reindex() {
+        let stale = IndexStatus {
+            state: IndexState::Stale,
+            indexed_files: 0,
+            last_indexed_ms: 0,
+            manifest_digest: "stale".into(),
+        };
+        let fx = Arc::new(FixtureSearch::new().with_status(stale));
+        spawn_freshness(dispatch_of(fx.clone()), Metrics::new());
+        assert!(
+            wait_until(|| fx.reindex_count() > 0).await,
+            "a stale index must trigger a background reindex"
+        );
+        assert_eq!(fx.reindex_count(), 1);
+    }
+}
