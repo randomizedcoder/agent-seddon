@@ -60,6 +60,23 @@ From fake to real:
 The first four run hermetically under `nix flake check`; `e2e-live`/`e2e-expect`/`e2e-multi`
 need a running model and are opt-in `nix run` apps.
 
+## Coverage
+
+Source-based test coverage via [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov)
+(the pinned toolchain carries the required `llvm-tools` component):
+
+| Form | What | Where |
+|------|------|-------|
+| `nix run .#coverage` | Runs the tests once, then writes `lcov.info` + an HTML report + a printed line-% summary against your working tree. Pass-through args scope it (`-- -p agent-tools`). | [`nix/coverage.nix`](../../nix/coverage.nix) |
+| `coverage` check | Builds instrumented and runs the default-feature tests under `nix flake check`, emitting `lcov.info` as its output. **Non-gating on the number** — no `--fail-under`, so it keeps the coverage path alive without pinning a threshold to an unknown baseline. | [`nix/checks/coverage.nix`](../../nix/checks/coverage.nix) |
+
+Both run the **default-feature** test set (mirroring the `test` check) — *not*
+`--all-features`: the `dhat-heap` feature installs a `#[global_allocator]` that conflicts
+with coverage instrumentation, and the non-default backends aren't the runnable set.
+Generated code is excluded (proto stubs live in `OUT_DIR` and are auto-dropped; the
+committed `@generated` `constants.rs`, the benches, and the dev-only `agent-testkit` are
+regex-ignored). A `--fail-under-lines` ratchet can be added later once a baseline is known.
+
 `e2e-multi` launches **N agent sessions at once** (default 10), each writing hello-world
 or FizzBuzz — round-robin across **C, Go, and Rust** — via the agent's tools; the harness
 compiles and runs each, then a strong external **judge model (GLM-5.2 by default)** grades

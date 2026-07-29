@@ -24,6 +24,9 @@ in
       "clippy"
       "rustfmt"
       "rust-src"
+      # `llvm-tools` ships `llvm-profdata`/`llvm-cov`, which `cargo-llvm-cov`
+      # (the coverage app + check) shells out to for source-based coverage.
+      "llvm-tools"
     ];
   };
 
@@ -35,6 +38,10 @@ in
   cargo-audit = pkgs.cargo-audit;
   cargo-nextest = pkgs.cargo-nextest;
   rust-analyzer = pkgs.rust-analyzer;
+  # `cargo-llvm-cov`: source-based test-coverage. Drives the `nix run .#coverage`
+  # app (local lcov + HTML report) and the non-gating `coverage` check. Needs the
+  # `llvm-tools` toolchain component (added above).
+  cargo-llvm-cov = pkgs.cargo-llvm-cov;
 
   # Language servers for the `LspBackend` seam (parity spec 13). Pinned + supplied
   # by the flake so the `lsp` tool has real servers on `PATH` inside `nix develop`

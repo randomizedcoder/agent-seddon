@@ -170,6 +170,11 @@ let
       ;
   };
 
+  # `nix run .#coverage` — on-demand source-based coverage report (lcov + HTML +
+  # summary) against the working tree. Reporting only; the gate keeps the
+  # instrumented path building via the non-gating `coverage` check.
+  coverage = import ./coverage.nix { inherit pkgs versions; };
+
   # Regenerate the committed buf baseline image after an *intentional* wire change.
   # The `buf` check gates `buf breaking` against this image, so bumping it is the
   # deliberate "accept this as the new wire contract" step (reviewed in the diff).
@@ -268,6 +273,10 @@ in
     bench = {
       type = "app";
       program = "${bench}/bin/bench";
+    };
+    coverage = {
+      type = "app";
+      program = "${coverage}/bin/coverage";
     };
     e2e-live = {
       type = "app";

@@ -46,6 +46,11 @@
       ;
   };
   leak = import ./leak.nix { inherit craneLib commonArgs cargoArtifacts; };
+  # Source-based test-coverage (cargo-llvm-cov): runs the default-feature test
+  # suite instrumented and emits lcov.info. Non-gating on the number (no
+  # `--fail-under`); the human report is `nix run .#coverage`. See
+  # docs/components/testing.md.
+  coverage = import ./coverage.nix { inherit pkgs craneLib commonArgs; };
   # Model-free smoke of the load/overload harness: it compiles, sheds
   # RESOURCE_EXHAUSTED under overload, and the ramp path runs (no perf assertions).
   loadtest-smoke = import ./loadtest-smoke.nix { inherit craneLib commonArgs cargoArtifacts; };

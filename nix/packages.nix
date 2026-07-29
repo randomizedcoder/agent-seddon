@@ -13,6 +13,7 @@
     # Rust dev/CI tooling.
     versions.cargo-audit
     versions.cargo-nextest
+    versions.cargo-llvm-cov # test coverage (`coverage` helper / `nix run .#coverage`)
     versions.rust-analyzer
   ]
   # Language servers for the `lsp` tool (LspBackend seam) — real gopls / clangd /
