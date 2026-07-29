@@ -31,6 +31,10 @@
       ;
   };
   cargo-audit = import ./cargo-audit.nix { inherit craneLib commonArgs advisory-db; };
+  # `cargo deny check licenses bans sources` — supply-chain/licensing static
+  # analysis over the dep graph (config in deny.toml at the repo root). Offline;
+  # RustSec advisories stay with cargo-audit above.
+  cargo-deny = import ./cargo-deny.nix { inherit craneLib commonArgs; };
   # Executes the sqlite PromptStore backend's tests (feature `prompt-sqlite`, off by
   # default so the main `test` check never builds the DB dep). The dedicated,
   # feature-scoped check that runs them in the gate. docs/design/prompts/05-storage.md.
