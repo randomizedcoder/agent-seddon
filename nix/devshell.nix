@@ -51,6 +51,7 @@ pkgs.mkShell {
       lint                                    cargo clippy --all-targets -D warnings
       test                                    cargo nextest run (fallback: cargo test)
       audit                                   cargo-audit against RustSec advisories
+      coverage                                cargo-llvm-cov -> lcov.info + HTML report
       nix flake check                         Run clippy + rustfmt + tests + audit + nix-fmt
 
     ClickHouse (docker):
@@ -91,6 +92,10 @@ pkgs.mkShell {
 
         audit() {
           ${versions.cargo-audit}/bin/cargo-audit audit
+        }
+
+        coverage() {
+          nix run .#coverage -- "$@"
         }
 
         run-agent() {
