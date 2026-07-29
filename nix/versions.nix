@@ -41,6 +41,10 @@ in
   # `deny.toml`. The gate runs only the offline checks; advisories stay with
   # cargo-audit. Drives nix/checks/cargo-deny.nix.
   cargo-deny = pkgs.cargo-deny;
+  # `cargo-machete`: unused-dependency detector. Parses each Cargo.toml + scans
+  # source (no compile), so the check is a cheap hermetic runCommand. Drives
+  # nix/checks/cargo-machete.nix.
+  cargo-machete = pkgs.cargo-machete;
   cargo-nextest = pkgs.cargo-nextest;
   rust-analyzer = pkgs.rust-analyzer;
   # `cargo-llvm-cov`: source-based test-coverage. Drives the `nix run .#coverage`

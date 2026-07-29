@@ -12,7 +12,6 @@ dhat-heap = ["dep:dhat"]
 [dependencies]
 agent-core.workspace = true
 async-trait.workspace = true
-tracing.workspace = true
 # Injects a dhat global allocator for the allocation-budget leak test only.
 dhat = { workspace = true, optional = true }
 

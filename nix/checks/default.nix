@@ -35,6 +35,10 @@
   # analysis over the dep graph (config in deny.toml at the repo root). Offline;
   # RustSec advisories stay with cargo-audit above.
   cargo-deny = import ./cargo-deny.nix { inherit craneLib commonArgs; };
+  # `cargo-machete` — fails the gate on a dependency declared but unused in a crate.
+  # Cheap runCommand (manifest parse + source scan, no compile). Per-crate false
+  # positives are suppressed via `[package.metadata.cargo-machete] ignored`.
+  cargo-machete = import ./cargo-machete.nix { inherit pkgs versions; };
   # Executes the sqlite PromptStore backend's tests (feature `prompt-sqlite`, off by
   # default so the main `test` check never builds the DB dep). The dedicated,
   # feature-scoped check that runs them in the gate. docs/design/prompts/05-storage.md.

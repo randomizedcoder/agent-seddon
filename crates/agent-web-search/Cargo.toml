@@ -18,7 +18,6 @@ dhat-heap = ["dep:dhat"]
 agent-core.workspace = true
 agent-retry.workspace = true
 async-trait.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 reqwest = { workspace = true, optional = true }
 dhat = { workspace = true, optional = true }
