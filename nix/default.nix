@@ -28,6 +28,9 @@ let
     filter =
       path: type:
       (lib.hasSuffix ".proto" path)
+      # `deny.toml` (cargo-deny config) is not a cargo source file, so the default
+      # filter would drop it — keep it for the `cargo-deny` check.
+      || (lib.hasSuffix "/deny.toml" path)
       || (lib.hasInfix "/tests/fixtures/" path)
       || (craneLib.filterCargoSources path type);
     name = "source";

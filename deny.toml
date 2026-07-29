@@ -1,0 +1,58 @@
+# deny.toml — cargo-deny configuration.
+#
+# The nix gate (nix/checks/cargo-deny.nix) runs only the OFFLINE checks:
+#   cargo deny check licenses bans sources
+# so it stays hermetic under `nix flake check`. RustSec **advisories** are owned by
+# cargo-audit (nix/checks/cargo-audit.nix), which already gates against the pinned
+# `advisory-db` flake input — so there is deliberately no [advisories] enforcement
+# here (avoids a redundant, network-needing scan).
+
+[licenses]
+# Permissive-only allow-list, derived from the actual dependency tree
+# (`cargo deny list`). The only copyleft tokens present (LGPL-2.1-or-later, MPL-2.0)
+# appear solely as OR-alternatives on dual-licensed crates that MIT/Apache-2.0
+# already satisfy, so they are intentionally NOT allowed — a genuinely copyleft
+# dependency should fail the gate.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "ISC",
+  "Unicode-3.0",
+  "Unlicense",
+  "Zlib",
+  "zlib-acknowledgement",
+  "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+
+# First-party workspace crates are MIT (see [workspace.package] in Cargo.toml) but
+# ship no LICENSE file; skip them — we are not auditing our own license here.
+[licenses.private]
+ignore = true
+
+[bans]
+# The tree currently carries many transitive duplicate versions (syn 2/3,
+# hashbrown x3, windows-sys x3, thiserror 1/2, tower 0.4/0.5, ...), so start at
+# `warn` — the gate must not block on pre-existing duplication. Tightening to
+# `deny` (after a dedupe pass) is a documented follow-up.
+multiple-versions = "warn"
+# Advisory, not enforced. The workspace's own crates depend on each other by path
+# with `version = "*"` (the standard intra-workspace pattern), and cargo-deny's
+# `allow-wildcard-paths` only exempts crates marked `publish = false` — which these
+# aren't. Enforcing `deny` would therefore require marking the whole workspace
+# non-publishable (a separate change). The real risk `wildcards = "deny"` guards
+# against — an unpinned *registry* dep — can't arise here anyway: every external
+# dependency is centrally pinned in `[workspace.dependencies]`. So this stays a
+# `warn`; the enforced gates are licenses + sources.
+wildcards = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# The one first-party git dependency: the pinned tantivy fork (rev tracked in
+# Cargo.lock + nix/versions.nix `search.tantivy`).
+allow-git = ["https://github.com/quickwit-oss/tantivy"]

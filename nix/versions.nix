@@ -36,6 +36,11 @@ in
 
   # Rust dev/CI tooling.
   cargo-audit = pkgs.cargo-audit;
+  # `cargo-deny`: supply-chain / licensing static analysis (licenses, banned +
+  # duplicate crates, source allow-list) over the dependency graph — config in
+  # `deny.toml`. The gate runs only the offline checks; advisories stay with
+  # cargo-audit. Drives nix/checks/cargo-deny.nix.
+  cargo-deny = pkgs.cargo-deny;
   cargo-nextest = pkgs.cargo-nextest;
   rust-analyzer = pkgs.rust-analyzer;
   # `cargo-llvm-cov`: source-based test-coverage. Drives the `nix run .#coverage`
