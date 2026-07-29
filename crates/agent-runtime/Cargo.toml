@@ -216,7 +216,6 @@ tokio.workspace = true
 tokio-stream.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
-prometheus.workspace = true
 # Robust URL host/scheme extraction for the SSRF guard (parity spec 11).
 url.workspace = true
 

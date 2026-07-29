@@ -23,7 +23,6 @@ async-trait.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
 tokio.workspace = true
-tracing.workspace = true
 # gitignore-aware tree walking (shared with the grep/find/ls tools) + regex for
 # regex-mode queries and glob→regex path filtering.
 ignore.workspace = true

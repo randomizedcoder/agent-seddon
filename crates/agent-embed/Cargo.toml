@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[package.metadata.cargo-machete]
+# `dhat` is an optional dep behind the `dhat-heap` feature (leak-test allocator
+# scaffolding, per the repo-wide dhat-heap convention). cargo-machete can't see
+# through `dep:dhat`, so ignore it here rather than drop the gate.
+ignored = ["dhat"]
+
 [features]
 # The `local` feature-hashing embedder is dependency-free + deterministic — the
 # default. Real semantic models (`embed-openai` API, `embed-grpc` remote worker)
