@@ -36,6 +36,31 @@ pkgs.mkShell {
         export CARGO_HOME="$PWD/.cargo-home"
         mkdir -p "$CARGO_HOME"
 
+        # Compilation cache. sccache reuses compiled units across feature-set
+        # changes and `cargo clean` (the local cargo world can't share crane's
+        # /nix/store cache), with a hard size cap so it never balloons like the
+        # incremental cache did. sccache no-ops on incremental builds, so
+        # CARGO_INCREMENTAL=0 is a REQUIRED companion — not an independent choice.
+        # (Only affects interactive `cargo` in this shell; crane `nix build`s and a
+        # rust-analyzer launched outside the shell are unaffected — the warn-on-large
+        # -target nudge below and `clean` cover their output.)
+        export RUSTC_WRAPPER="${versions.sccache}/bin/sccache"
+        export CARGO_INCREMENTAL=0
+        export SCCACHE_CACHE_SIZE="''${SCCACHE_CACHE_SIZE:-20G}"
+
+        # Non-blocking nudge so `target/` can't silently regrow to hundreds of GB.
+        # Run in the background: `du` over a large target/ can take a few seconds and
+        # must not delay the prompt.
+        if [ -d target ]; then
+          (
+            used=$(du -sBG target 2>/dev/null | cut -f1 | tr -dc '0-9')
+            if [ -n "$used" ] && [ "$used" -ge 40 ]; then
+              printf '\n⚠ target/ is %sG — run `clean` to prune the incremental cache (or `clean --hard` for a full reset)\n' "$used"
+            fi
+          ) &
+          disown 2>/dev/null || true
+        fi
+
         agent-help() {
           cat <<'EOF'
 
@@ -53,6 +78,11 @@ pkgs.mkShell {
       audit                                   cargo-audit against RustSec advisories
       coverage                                cargo-llvm-cov -> lcov.info + HTML report
       nix flake check                         Run clippy + rustfmt + tests + audit + nix-fmt
+
+    Disk hygiene (target/ is the non-nix cargo build tree):
+      clean                                   Prune target/*/incremental (keeps deps/)
+      clean --hard                            cargo clean (full target/ reset)
+      (sccache caches builds, capped at $SCCACHE_CACHE_SIZE; shell warns if target/ > 40G)
 
     ClickHouse (docker):
       ch-up                                   Start the ClickHouse container + apply schema
@@ -96,6 +126,10 @@ pkgs.mkShell {
 
         coverage() {
           nix run .#coverage -- "$@"
+        }
+
+        clean() {
+          nix run .#clean -- "$@"
         }
 
         run-agent() {
