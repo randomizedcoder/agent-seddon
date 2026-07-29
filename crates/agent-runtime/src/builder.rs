@@ -1535,3 +1535,88 @@ pub(crate) fn build_cache_strategy(
     };
     Ok(Some(crate::metered::cache(inner, ctx.metrics.clone())))
 }
+
+#[cfg(test)]
+mod seam_builder_tests {
+    use super::*;
+
+    // ---- build_scanner: `[scanner] rules` resolution ----------------------
+
+    // Scanning is off by default (a control, not a default-on cost).
+    #[cfg(feature = "scanner")]
+    #[test]
+    fn positive_build_scanner_empty_rules_is_none() {
+        let cfg = crate::config::Config::minimal_for_test();
+        let metrics = Metrics::new();
+        assert!(build_scanner(&cfg, &metrics).unwrap().is_none());
+    }
+
+    #[cfg(feature = "scanner")]
+    #[rstest::rstest]
+    #[case::secret(&["secret"])]
+    #[case::threat(&["threat"])]
+    #[case::composed(&["secret", "threat"])]
+    fn positive_build_scanner_known_rules(#[case] rules: &[&str]) {
+        let mut cfg = crate::config::Config::minimal_for_test();
+        cfg.scanner.rules = rules.iter().copied().map(String::from).collect();
+        let metrics = Metrics::new();
+        assert!(build_scanner(&cfg, &metrics).unwrap().is_some());
+    }
+
+    // Untrusted config: an unknown scanner rule fails closed, listing the built-ins.
+    #[cfg(feature = "scanner")]
+    #[rstest::rstest]
+    #[case::garbage("bogus")]
+    #[case::empty("")]
+    #[case::uppercased_known("SECRET")]
+    fn adversarial_unknown_scanner_rule_bails(#[case] rule: &str) {
+        let mut cfg = crate::config::Config::minimal_for_test();
+        cfg.scanner.rules = vec![rule.to_string()];
+        let metrics = Metrics::new();
+        let err = match build_scanner(&cfg, &metrics) {
+            Ok(_) => panic!("an unknown scanner rule `{rule}` must fail"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("unknown [scanner] rule"), "got: {err}");
+    }
+
+    // ---- build_cache_strategy: `[cache] strategy` resolution --------------
+
+    #[cfg(feature = "cache")]
+    #[rstest::rstest]
+    #[case::stable_prefix("stable-prefix")]
+    #[case::tail_window("tail-window")]
+    fn positive_build_cache_strategy_known(#[case] strategy: &str) {
+        let mut cfg = crate::config::Config::minimal_for_test();
+        cfg.cache.strategy = strategy.into();
+        let metrics = Metrics::new();
+        let ctx = crate::registry::FactoryCtx::new(&cfg, &metrics);
+        assert!(build_cache_strategy(&ctx).unwrap().is_some());
+    }
+
+    #[cfg(feature = "cache")]
+    #[test]
+    fn positive_build_cache_strategy_off_is_none() {
+        let mut cfg = crate::config::Config::minimal_for_test();
+        cfg.cache.strategy = "off".into();
+        let metrics = Metrics::new();
+        let ctx = crate::registry::FactoryCtx::new(&cfg, &metrics);
+        assert!(build_cache_strategy(&ctx).unwrap().is_none());
+    }
+
+    #[cfg(feature = "cache")]
+    #[rstest::rstest]
+    #[case::garbage("bogus")]
+    #[case::empty("")]
+    fn adversarial_unknown_cache_strategy_bails(#[case] strategy: &str) {
+        let mut cfg = crate::config::Config::minimal_for_test();
+        cfg.cache.strategy = strategy.into();
+        let metrics = Metrics::new();
+        let ctx = crate::registry::FactoryCtx::new(&cfg, &metrics);
+        let err = match build_cache_strategy(&ctx) {
+            Ok(_) => panic!("an unknown cache strategy `{strategy}` must fail"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("unknown [cache] strategy"), "got: {err}");
+    }
+}
