@@ -14,6 +14,7 @@
     versions.cargo-audit
     versions.cargo-nextest
     versions.cargo-llvm-cov # test coverage (`coverage` helper / `nix run .#coverage`)
+    versions.sccache # compilation cache (RUSTC_WRAPPER; see devshell.nix)
     versions.rust-analyzer
   ]
   # Language servers for the `lsp` tool (LspBackend seam) — real gopls / clangd /

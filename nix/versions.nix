@@ -42,6 +42,12 @@ in
   # app (local lcov + HTML report) and the non-gating `coverage` check. Needs the
   # `llvm-tools` toolchain component (added above).
   cargo-llvm-cov = pkgs.cargo-llvm-cov;
+  # `sccache`: a compilation cache used in the dev shell as `RUSTC_WRAPPER`. Reuses
+  # compiled units across feature-set changes and `cargo clean`, with a hard size
+  # cap so it can't balloon like the incremental cache did. Requires
+  # `CARGO_INCREMENTAL=0` (sccache no-ops on incremental builds) — set together in
+  # devshell.nix.
+  sccache = pkgs.sccache;
 
   # Language servers for the `LspBackend` seam (parity spec 13). Pinned + supplied
   # by the flake so the `lsp` tool has real servers on `PATH` inside `nix develop`
