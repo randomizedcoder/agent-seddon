@@ -41,9 +41,10 @@ pkgs.mkShell {
         # /nix/store cache), with a hard size cap so it never balloons like the
         # incremental cache did. sccache no-ops on incremental builds, so
         # CARGO_INCREMENTAL=0 is a REQUIRED companion — not an independent choice.
-        # (Only affects interactive `cargo` in this shell; crane `nix build`s and a
-        # rust-analyzer launched outside the shell are unaffected — the warn-on-large
-        # -target nudge below and `clean` cover their output.)
+        # (RUSTC_WRAPPER only affects interactive `cargo` in this shell; crane
+        # `nix build`s are unaffected. Incremental-off now also covers a rust-analyzer
+        # launched OUTSIDE the shell, via the committed `.cargo/config.toml`
+        # `build.incremental = false` — so the editor no longer balloons `target/`.)
         export RUSTC_WRAPPER="${versions.sccache}/bin/sccache"
         export CARGO_INCREMENTAL=0
         export SCCACHE_CACHE_SIZE="''${SCCACHE_CACHE_SIZE:-20G}"
