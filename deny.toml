@@ -35,20 +35,29 @@ confidence-threshold = 0.8
 ignore = true
 
 [bans]
-# The tree currently carries many transitive duplicate versions (syn 2/3,
-# hashbrown x3, windows-sys x3, thiserror 1/2, tower 0.4/0.5, ...), so start at
-# `warn` — the gate must not block on pre-existing duplication. Tightening to
-# `deny` (after a dedupe pass) is a documented follow-up.
-multiple-versions = "warn"
-# Advisory, not enforced. The workspace's own crates depend on each other by path
-# with `version = "*"` (the standard intra-workspace pattern), and cargo-deny's
-# `allow-wildcard-paths` only exempts crates marked `publish = false` — which these
-# aren't. Enforcing `deny` would therefore require marking the whole workspace
-# non-publishable (a separate change). The real risk `wildcards = "deny"` guards
-# against — an unpinned *registry* dep — can't arise here anyway: every external
-# dependency is centrally pinned in `[workspace.dependencies]`. So this stays a
-# `warn`; the enforced gates are licenses + sources.
-wildcards = "warn"
+# Deny duplicate crate versions — except the current unavoidable ones. The `skip`
+# list below grandfathers today's transitive major-version splits (different deps
+# require different majors — not dedupable); a NEW duplicate of any other crate now
+# fails the gate. Trim `skip` as upstream crates converge.
+multiple-versions = "deny"
+skip = [
+  "getrandom",
+  "hashbrown",
+  "indexmap",
+  "socket2",
+  "syn",
+  "thiserror",
+  "thiserror-impl",
+  "tower",
+  "windows-sys",
+]
+# Deny wildcard (`= "*"`) version requirements — an unpinned registry dep is the
+# real risk. The workspace's own crates depend on each other by path with
+# `version = "*"` (the standard intra-workspace pattern); `allow-wildcard-paths`
+# exempts those PATH deps, which works now that every member is `publish = false`
+# ([workspace.package] in Cargo.toml).
+wildcards = "deny"
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"

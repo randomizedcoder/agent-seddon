@@ -44,6 +44,7 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+publish = false
 
 # Curated clippy tightening (inherited by every crate via `[lints] workspace = true`).
 # A SPECIFIC allow-list of high-signal, mostly machine-fixable pedantic lints — NOT
