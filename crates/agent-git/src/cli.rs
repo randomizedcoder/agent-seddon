@@ -229,18 +229,15 @@ fn sanitize(s: &str) -> String {
 /// `refs/heads/main` and hijack a branch). A value must be a single, non-empty
 /// `[A-Za-z0-9._-]` segment that is not `.`/`..` and does not start with `-`.
 fn safe_segment(kind: &str, s: &str) -> Result<()> {
-    let valid = !s.is_empty()
-        && s != "."
-        && s != ".."
-        && !s.starts_with('-')
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
-    if valid {
+    // Delegate to the one audited validator in agent-core rather than re-encoding
+    // the rule (which had drifted here — it was missing the MAX_SEGMENT_LEN cap).
+    if agent_core::safe_segment(s) {
         Ok(())
     } else {
         Err(Error::Repo(format!(
             "invalid {kind} `{s}`: must be a single `[A-Za-z0-9._-]` segment \
-             (no path separators, `..`, or leading `-`)"
+             (no path separators, `..`, leading `-`, or over {} chars)",
+            agent_core::MAX_SEGMENT_LEN
         )))
     }
 }
@@ -836,6 +833,23 @@ mod tests {
     #[case::corner_unicode("café", false)]
     fn safe_segment_cases(#[case] s: &str, #[case] ok: bool) {
         assert_eq!(safe_segment("id", s).is_ok(), ok, "input {s:?}");
+    }
+
+    // The length cap is `agent_core::MAX_SEGMENT_LEN` — the drift this validator had
+    // (it re-encoded the rule locally but omitted the cap, so an over-length segment
+    // slipped through here while the canonical validator rejected it).
+    #[test]
+    fn adversarial_over_length_segment_is_rejected() {
+        let at_cap = "a".repeat(agent_core::MAX_SEGMENT_LEN);
+        assert!(
+            safe_segment("id", &at_cap).is_ok(),
+            "a segment at the cap is allowed"
+        );
+        let over_cap = "a".repeat(agent_core::MAX_SEGMENT_LEN + 1);
+        assert!(
+            safe_segment("id", &over_cap).is_err(),
+            "an over-length segment must be rejected"
+        );
     }
 
     fn backend() -> CliBackend {
