@@ -1153,6 +1153,506 @@ impl agent_core::ReferenceResolver for MeteredReference {
     }
 }
 
+/// Wrap a [`Scanner`](agent_core::Scanner) so each `scan` emits a `scanner.scan`
+/// span (`kind`, finding count, max severity) and counts findings by
+/// `(severity, rule, kind)`. Labels are the bounded rule/severity/kind enums —
+/// never the scanned content or the matched bytes.
+#[cfg(feature = "scanner")]
+pub(crate) fn scanner(
+    inner: Arc<dyn agent_core::Scanner>,
+    m: Metrics,
+) -> Arc<dyn agent_core::Scanner> {
+    Arc::new(MeteredScanner { inner, metrics: m })
+}
+
+#[cfg(feature = "scanner")]
+struct MeteredScanner {
+    inner: Arc<dyn agent_core::Scanner>,
+    metrics: Metrics,
+}
+
+#[cfg(feature = "scanner")]
+#[async_trait]
+impl agent_core::Scanner for MeteredScanner {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    async fn scan(&self, kind: agent_core::ScanKind, content: &str) -> Vec<agent_core::Finding> {
+        let span = tracing::info_span!(
+            "scanner.scan",
+            kind = kind.as_str(),
+            findings = tracing::field::Empty,
+            max_severity = tracing::field::Empty,
+        );
+        let start = Instant::now();
+        let findings = self
+            .inner
+            .scan(kind, content)
+            .instrument(span.clone())
+            .await;
+        self.metrics.on_scan(start.elapsed().as_secs_f64());
+        span.record("findings", findings.len());
+        if let Some(worst) = agent_core::max_severity(&findings) {
+            span.record("max_severity", worst.as_str());
+        }
+        for f in &findings {
+            self.metrics
+                .on_scanner_finding(f.severity.as_str(), &f.rule, kind.as_str());
+        }
+        findings
+    }
+}
+
+/// Wrap a [`CacheStrategy`](agent_core::CacheStrategy) so each placement emits a
+/// `cache.place` span carrying `strategy`, `breakpoints`, and whether the
+/// provider supports caching at all.
+///
+/// Also counts the anchors placed (`agent_cache_breakpoints_total{strategy}`),
+/// which read alongside `agent_cache_tokens_total` distinguishes a low hit-rate
+/// caused by bad *placement* from one caused by a merely cold cache.
+#[cfg(feature = "cache")]
+pub(crate) fn cache(
+    inner: Arc<dyn agent_core::CacheStrategy>,
+    m: Metrics,
+) -> Arc<dyn agent_core::CacheStrategy> {
+    Arc::new(TracedCache { inner, metrics: m })
+}
+
+#[cfg(feature = "cache")]
+struct TracedCache {
+    inner: Arc<dyn agent_core::CacheStrategy>,
+    metrics: Metrics,
+}
+
+#[cfg(feature = "cache")]
+impl agent_core::CacheStrategy for TracedCache {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn place(
+        &self,
+        prompt: &agent_core::PromptShape<'_>,
+        caps: &agent_core::CacheCapabilities,
+    ) -> agent_core::CacheMarks {
+        let span = tracing::info_span!(
+            "cache.place",
+            strategy = self.inner.name(),
+            breakpoints = tracing::field::Empty,
+            supported = !caps.is_noop(),
+        );
+        let _e = span.enter();
+        let marks = self.inner.place(prompt, caps);
+        span.record("breakpoints", marks.count());
+        self.metrics
+            .on_cache_breakpoints(self.inner.name(), marks.count() as u64);
+        marks
+    }
+}
+
+/// Wrap a [`WebSearch`](agent_core::WebSearch) so each search emits a
+/// `web_search.query` span (`backend`, result count, cache state) and records
+/// per-backend latency, result counts, and cache hits.
+///
+/// Wraps each backend *before* composition, so metrics are attributed to the
+/// concrete provider rather than to the dispatcher — mirroring `metered::search`.
+/// Labels are the configured backend name; the query text and the API key never
+/// appear.
+#[cfg(feature = "web-search")]
+pub(crate) fn web_search(
+    inner: Arc<dyn agent_core::WebSearch>,
+    m: Metrics,
+    backend: &str,
+) -> Arc<dyn agent_core::WebSearch> {
+    Arc::new(MeteredWebSearch {
+        inner,
+        metrics: m,
+        backend: backend.to_string(),
+    })
+}
+
+#[cfg(feature = "web-search")]
+struct MeteredWebSearch {
+    inner: Arc<dyn agent_core::WebSearch>,
+    metrics: Metrics,
+    backend: String,
+}
+
+#[cfg(feature = "web-search")]
+#[async_trait]
+impl agent_core::WebSearch for MeteredWebSearch {
+    fn capabilities(&self) -> agent_core::WebSearchCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn status(&self, q: &agent_core::WebQuery) -> agent_core::Result<agent_core::CacheState> {
+        self.inner.status(q).await
+    }
+
+    async fn search(
+        &self,
+        q: &agent_core::WebQuery,
+    ) -> agent_core::Result<Vec<agent_core::WebResult>> {
+        let span = tracing::info_span!(
+            "web_search.query",
+            backend = %self.backend,
+            results = tracing::field::Empty,
+            outcome = tracing::field::Empty,
+        );
+        let start = Instant::now();
+        let out = self.inner.search(q).instrument(span.clone()).await;
+        let outcome = if out.is_ok() { "ok" } else { "error" };
+        span.record("outcome", outcome);
+        if let Ok(r) = &out {
+            span.record("results", r.len());
+        }
+        self.metrics.on_web_search(
+            &self.backend,
+            outcome,
+            start.elapsed().as_secs_f64(),
+            out.as_ref().map(|r| r.len() as u64).unwrap_or(0),
+        );
+        out
+    }
+}
+
+/// Record a router decision (parity spec 25).
+///
+/// `agent-providers` does not depend on `agent-metrics`, so the router emits
+/// typed events through a callback and the runtime turns them into metrics —
+/// keeping the dependency direction intact rather than inverting it for
+/// observability.
+#[cfg(feature = "provider-router")]
+pub(crate) fn record_route_event(m: &Metrics, ev: agent_providers::RouteEvent<'_>) {
+    use agent_providers::RouteEvent;
+    match ev {
+        RouteEvent::Routed { target } => {
+            tracing::debug!(target, "routed request");
+            m.on_route_decision(target, "routed");
+        }
+        RouteEvent::FellOver { from, reason } => {
+            tracing::info!(from, reason, "provider fallover");
+            m.on_route_decision(from, "fellover");
+        }
+        RouteEvent::SkippedUnhealthy { target } => {
+            tracing::debug!(target, "skipped unhealthy provider");
+            m.on_route_decision(target, "skipped_unhealthy");
+        }
+        RouteEvent::Exhausted => {
+            tracing::warn!("router exhausted every candidate");
+            m.on_route_decision("-", "exhausted");
+        }
+    }
+}
+
+/// Turn a typed `PoolEvent` into pool metrics (same inversion-avoiding pattern as
+/// the router — `agent-providers` stays off `agent-metrics`).
+#[cfg(feature = "provider-pool")]
+pub(crate) fn record_pool_event(m: &Metrics, ev: agent_providers::PoolEvent) {
+    use agent_providers::PoolEvent;
+    match ev {
+        PoolEvent::Dispatch {
+            mode,
+            tier,
+            policy,
+            requested,
+            alive,
+        } => {
+            tracing::debug!(
+                mode,
+                tier = tier.as_str(),
+                policy,
+                requested,
+                alive,
+                "pool dispatch"
+            );
+            m.set_pool_members_alive(tier.as_str(), alive as i64);
+            m.on_pool_select(policy);
+        }
+        PoolEvent::MemberCall {
+            member,
+            ok,
+            duration_ms,
+        } => {
+            m.on_pool_member_call(&member, if ok { "ok" } else { "error" });
+            m.on_pool_dispatch("member", duration_ms as f64 / 1000.0);
+            m.on_pool_member_latency(&member, duration_ms as f64 / 1000.0);
+        }
+        PoolEvent::MemberState {
+            member,
+            in_flight,
+            saturated,
+        } => {
+            m.set_pool_member_inflight(&member, in_flight as i64);
+            m.set_pool_member_saturated(&member, saturated as i64);
+        }
+        PoolEvent::SaturationShed { mode } => {
+            tracing::warn!(
+                mode,
+                "pool saturated: all eligible members at capacity → shed"
+            );
+            m.on_pool_saturation_shed();
+        }
+        PoolEvent::MemberGraded {
+            member,
+            state,
+            latency_ms_ewma,
+        } => {
+            m.set_pool_member_state(&member, state);
+            m.set_pool_member_latency_ewma(&member, latency_ms_ewma as i64);
+        }
+        PoolEvent::Probe {
+            member,
+            alive,
+            duration_ms,
+        } => {
+            let outcome = if alive { "live" } else { "dead" };
+            m.on_pool_probe(&member, outcome, duration_ms as f64 / 1000.0);
+        }
+    }
+}
+
+/// Turn a typed `ReviewEvent` into review metrics.
+#[cfg(feature = "review")]
+pub(crate) fn record_review_event(m: &Metrics, ev: agent_review::ReviewEvent) {
+    use agent_review::ReviewEvent;
+    match ev {
+        ReviewEvent::Collect { total_ms } => {
+            m.on_review_collect(total_ms as f64 / 1000.0);
+        }
+        ReviewEvent::Collector {
+            collector,
+            status,
+            duration_ms,
+        } => {
+            m.on_review_collector(&collector, status.as_str(), duration_ms as f64 / 1000.0);
+        }
+        ReviewEvent::ChangeFiles { n } => {
+            m.on_review_change_files(n as u64);
+        }
+        ReviewEvent::GitState {
+            relationship,
+            host,
+            project,
+        } => {
+            m.on_review_gitstate(relationship, host, project);
+        }
+        ReviewEvent::Findings {
+            tool,
+            severity,
+            in_change,
+            count,
+        } => {
+            m.on_review_findings(&tool, &severity, in_change, count as u64);
+        }
+        ReviewEvent::Signatures { lang, kind, count } => {
+            m.on_review_signatures(&lang, &kind, count as u64);
+        }
+        ReviewEvent::CallGraph { nodes, edges } => {
+            m.on_review_callgraph(nodes as f64, edges as f64);
+        }
+        ReviewEvent::Style { diff_matches } => {
+            m.on_review_style(diff_matches);
+        }
+        ReviewEvent::Summaries {
+            requested,
+            produced,
+            omitted,
+        } => {
+            // requested = produced + failed + omitted (all non-negative by construction).
+            let failed = requested.saturating_sub(produced).saturating_sub(omitted);
+            m.on_review_summaries(produced as u64, failed as u64, omitted as u64);
+        }
+        ReviewEvent::CoChange { entries, missing } => {
+            m.on_review_cochange(u64::from(entries), u64::from(missing));
+        }
+        ReviewEvent::Churn {
+            files,
+            single_owner,
+        } => {
+            m.on_review_churn(u64::from(files), u64::from(single_owner));
+        }
+        ReviewEvent::Salience { files, critical } => {
+            m.on_review_salience(u64::from(files), u64::from(critical));
+        }
+        ReviewEvent::Risk {
+            files,
+            max_score,
+            gate_failed,
+        } => {
+            m.on_review_risk(u64::from(files), max_score, gate_failed);
+        }
+    }
+}
+
+/// Wrap a [`Forge`](agent_core::Forge) so each API call emits a `forge.request`
+/// span (`backend`, `op`, `outcome`) and a per-op counter.
+///
+/// Labels are the backend name and the fixed op set — never a token, a URL, or
+/// remote content.
+#[cfg(feature = "forge")]
+pub(crate) fn forge(inner: Arc<dyn agent_core::Forge>, m: Metrics) -> Arc<dyn agent_core::Forge> {
+    Arc::new(MeteredForge { inner, metrics: m })
+}
+
+#[cfg(feature = "forge")]
+struct MeteredForge {
+    inner: Arc<dyn agent_core::Forge>,
+    metrics: Metrics,
+}
+
+#[cfg(feature = "forge")]
+impl MeteredForge {
+    async fn record<T>(
+        &self,
+        op: &'static str,
+        fut: impl std::future::Future<Output = agent_core::Result<T>>,
+    ) -> agent_core::Result<T> {
+        let span = tracing::info_span!(
+            "forge.request",
+            backend = self.inner.name(),
+            op,
+            outcome = tracing::field::Empty,
+        );
+        let start = Instant::now();
+        let out = fut.instrument(span.clone()).await;
+        let outcome = if out.is_ok() { "ok" } else { "error" };
+        span.record("outcome", outcome);
+        self.metrics.on_forge_call(
+            self.inner.name(),
+            op,
+            outcome,
+            start.elapsed().as_secs_f64(),
+        );
+        out
+    }
+}
+
+#[cfg(feature = "forge")]
+#[async_trait]
+impl agent_core::Forge for MeteredForge {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+    async fn get_pr(&self, n: u64) -> agent_core::Result<agent_core::PullRequest> {
+        self.record("get_pr", self.inner.get_pr(n)).await
+    }
+    async fn list_prs(
+        &self,
+        p: u32,
+    ) -> agent_core::Result<agent_core::Page<agent_core::PullRequest>> {
+        self.record("list_prs", self.inner.list_prs(p)).await
+    }
+    async fn list_issues(&self, p: u32) -> agent_core::Result<agent_core::Page<agent_core::Issue>> {
+        self.record("list_issues", self.inner.list_issues(p)).await
+    }
+    async fn import_issue(&self, n: u64) -> agent_core::Result<agent_core::Issue> {
+        self.record("import_issue", self.inner.import_issue(n))
+            .await
+    }
+    async fn create_pr(
+        &self,
+        r: &agent_core::CreatePrRequest,
+    ) -> agent_core::Result<agent_core::PullRequest> {
+        self.record("create_pr", self.inner.create_pr(r)).await
+    }
+    async fn comment(&self, n: u64, b: &str) -> agent_core::Result<agent_core::Comment> {
+        self.record("comment", self.inner.comment(n, b)).await
+    }
+    async fn review_pr(
+        &self,
+        n: u64,
+        v: agent_core::ReviewVerdict,
+        b: &str,
+    ) -> agent_core::Result<agent_core::Comment> {
+        self.record("review_pr", self.inner.review_pr(n, v, b))
+            .await
+    }
+}
+
+/// Wrap a [`Pty`](agent_core::Pty) so sessions and byte volumes are visible.
+///
+/// A live terminal is the most powerful thing the agent holds, so its usage
+/// being observable matters more here than for a read-only seam.
+#[cfg(feature = "pty")]
+pub(crate) fn pty(inner: Arc<dyn agent_core::Pty>, m: Metrics) -> Arc<dyn agent_core::Pty> {
+    Arc::new(MeteredPty { inner, metrics: m })
+}
+
+#[cfg(feature = "pty")]
+struct MeteredPty {
+    inner: Arc<dyn agent_core::Pty>,
+    metrics: Metrics,
+}
+
+#[cfg(feature = "pty")]
+#[async_trait]
+impl agent_core::Pty for MeteredPty {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    async fn open(&self, spec: &agent_core::PtySpec) -> agent_core::Result<String> {
+        let span = tracing::info_span!(
+            "pty.session",
+            command = %spec.command,
+            cols = spec.cols,
+            rows = spec.rows,
+        );
+        let out = self.inner.open(spec).instrument(span).await;
+        if out.is_ok() {
+            self.metrics.on_pty_open();
+        }
+        out
+    }
+
+    async fn write(&self, id: &str, bytes: &[u8]) -> agent_core::Result<()> {
+        let out = self.inner.write(id, bytes).await;
+        if out.is_ok() {
+            self.metrics.on_pty_bytes("in", bytes.len() as u64);
+        }
+        out
+    }
+
+    async fn read(
+        &self,
+        id: &str,
+        cursor: Option<u64>,
+    ) -> agent_core::Result<agent_core::PtyOutput> {
+        let out = self.inner.read(id, cursor).await;
+        if let Ok(o) = &out {
+            self.metrics.on_pty_bytes("out", o.data.len() as u64);
+        }
+        out
+    }
+
+    async fn resize(&self, id: &str, cols: u16, rows: u16) -> agent_core::Result<()> {
+        self.inner.resize(id, cols, rows).await
+    }
+
+    async fn close(&self, id: &str) -> agent_core::Result<bool> {
+        let out = self.inner.close(id).await;
+        if matches!(out, Ok(true)) {
+            self.metrics.on_pty_close("closed");
+        }
+        out
+    }
+
+    async fn list(&self) -> agent_core::Result<Vec<agent_core::PtySessionInfo>> {
+        self.inner.list().await
+    }
+
+    async fn get(&self, id: &str) -> agent_core::Result<agent_core::PtySessionInfo> {
+        self.inner.get(id).await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests for the decorators above. Kept together at the end of the file so the
+// production decorators read as one contiguous block, not split by a wall of
+// tests in the middle (CLAUDE.md: the test module goes at the end).
+// ---------------------------------------------------------------------------
 #[cfg(all(test, feature = "tool-patch"))]
 mod tests {
     use super::*;
@@ -1685,500 +2185,5 @@ mod tokenizer_span_tests {
             });
         });
         assert!(spans.contains(&"tokenizer.count".to_string()), "{spans:?}");
-    }
-}
-
-/// Wrap a [`Scanner`](agent_core::Scanner) so each `scan` emits a `scanner.scan`
-/// span (`kind`, finding count, max severity) and counts findings by
-/// `(severity, rule, kind)`. Labels are the bounded rule/severity/kind enums —
-/// never the scanned content or the matched bytes.
-#[cfg(feature = "scanner")]
-pub(crate) fn scanner(
-    inner: Arc<dyn agent_core::Scanner>,
-    m: Metrics,
-) -> Arc<dyn agent_core::Scanner> {
-    Arc::new(MeteredScanner { inner, metrics: m })
-}
-
-#[cfg(feature = "scanner")]
-struct MeteredScanner {
-    inner: Arc<dyn agent_core::Scanner>,
-    metrics: Metrics,
-}
-
-#[cfg(feature = "scanner")]
-#[async_trait]
-impl agent_core::Scanner for MeteredScanner {
-    fn name(&self) -> &str {
-        self.inner.name()
-    }
-
-    async fn scan(&self, kind: agent_core::ScanKind, content: &str) -> Vec<agent_core::Finding> {
-        let span = tracing::info_span!(
-            "scanner.scan",
-            kind = kind.as_str(),
-            findings = tracing::field::Empty,
-            max_severity = tracing::field::Empty,
-        );
-        let start = Instant::now();
-        let findings = self
-            .inner
-            .scan(kind, content)
-            .instrument(span.clone())
-            .await;
-        self.metrics.on_scan(start.elapsed().as_secs_f64());
-        span.record("findings", findings.len());
-        if let Some(worst) = agent_core::max_severity(&findings) {
-            span.record("max_severity", worst.as_str());
-        }
-        for f in &findings {
-            self.metrics
-                .on_scanner_finding(f.severity.as_str(), &f.rule, kind.as_str());
-        }
-        findings
-    }
-}
-
-/// Wrap a [`CacheStrategy`](agent_core::CacheStrategy) so each placement emits a
-/// `cache.place` span carrying `strategy`, `breakpoints`, and whether the
-/// provider supports caching at all.
-///
-/// Also counts the anchors placed (`agent_cache_breakpoints_total{strategy}`),
-/// which read alongside `agent_cache_tokens_total` distinguishes a low hit-rate
-/// caused by bad *placement* from one caused by a merely cold cache.
-#[cfg(feature = "cache")]
-pub(crate) fn cache(
-    inner: Arc<dyn agent_core::CacheStrategy>,
-    m: Metrics,
-) -> Arc<dyn agent_core::CacheStrategy> {
-    Arc::new(TracedCache { inner, metrics: m })
-}
-
-#[cfg(feature = "cache")]
-struct TracedCache {
-    inner: Arc<dyn agent_core::CacheStrategy>,
-    metrics: Metrics,
-}
-
-#[cfg(feature = "cache")]
-impl agent_core::CacheStrategy for TracedCache {
-    fn name(&self) -> &str {
-        self.inner.name()
-    }
-
-    fn place(
-        &self,
-        prompt: &agent_core::PromptShape<'_>,
-        caps: &agent_core::CacheCapabilities,
-    ) -> agent_core::CacheMarks {
-        let span = tracing::info_span!(
-            "cache.place",
-            strategy = self.inner.name(),
-            breakpoints = tracing::field::Empty,
-            supported = !caps.is_noop(),
-        );
-        let _e = span.enter();
-        let marks = self.inner.place(prompt, caps);
-        span.record("breakpoints", marks.count());
-        self.metrics
-            .on_cache_breakpoints(self.inner.name(), marks.count() as u64);
-        marks
-    }
-}
-
-/// Wrap a [`WebSearch`](agent_core::WebSearch) so each search emits a
-/// `web_search.query` span (`backend`, result count, cache state) and records
-/// per-backend latency, result counts, and cache hits.
-///
-/// Wraps each backend *before* composition, so metrics are attributed to the
-/// concrete provider rather than to the dispatcher — mirroring `metered::search`.
-/// Labels are the configured backend name; the query text and the API key never
-/// appear.
-#[cfg(feature = "web-search")]
-pub(crate) fn web_search(
-    inner: Arc<dyn agent_core::WebSearch>,
-    m: Metrics,
-    backend: &str,
-) -> Arc<dyn agent_core::WebSearch> {
-    Arc::new(MeteredWebSearch {
-        inner,
-        metrics: m,
-        backend: backend.to_string(),
-    })
-}
-
-#[cfg(feature = "web-search")]
-struct MeteredWebSearch {
-    inner: Arc<dyn agent_core::WebSearch>,
-    metrics: Metrics,
-    backend: String,
-}
-
-#[cfg(feature = "web-search")]
-#[async_trait]
-impl agent_core::WebSearch for MeteredWebSearch {
-    fn capabilities(&self) -> agent_core::WebSearchCapabilities {
-        self.inner.capabilities()
-    }
-
-    async fn status(&self, q: &agent_core::WebQuery) -> agent_core::Result<agent_core::CacheState> {
-        self.inner.status(q).await
-    }
-
-    async fn search(
-        &self,
-        q: &agent_core::WebQuery,
-    ) -> agent_core::Result<Vec<agent_core::WebResult>> {
-        let span = tracing::info_span!(
-            "web_search.query",
-            backend = %self.backend,
-            results = tracing::field::Empty,
-            outcome = tracing::field::Empty,
-        );
-        let start = Instant::now();
-        let out = self.inner.search(q).instrument(span.clone()).await;
-        let outcome = if out.is_ok() { "ok" } else { "error" };
-        span.record("outcome", outcome);
-        if let Ok(r) = &out {
-            span.record("results", r.len());
-        }
-        self.metrics.on_web_search(
-            &self.backend,
-            outcome,
-            start.elapsed().as_secs_f64(),
-            out.as_ref().map(|r| r.len() as u64).unwrap_or(0),
-        );
-        out
-    }
-}
-
-/// Record a router decision (parity spec 25).
-///
-/// `agent-providers` does not depend on `agent-metrics`, so the router emits
-/// typed events through a callback and the runtime turns them into metrics —
-/// keeping the dependency direction intact rather than inverting it for
-/// observability.
-#[cfg(feature = "provider-router")]
-pub(crate) fn record_route_event(m: &Metrics, ev: agent_providers::RouteEvent<'_>) {
-    use agent_providers::RouteEvent;
-    match ev {
-        RouteEvent::Routed { target } => {
-            tracing::debug!(target, "routed request");
-            m.on_route_decision(target, "routed");
-        }
-        RouteEvent::FellOver { from, reason } => {
-            tracing::info!(from, reason, "provider fallover");
-            m.on_route_decision(from, "fellover");
-        }
-        RouteEvent::SkippedUnhealthy { target } => {
-            tracing::debug!(target, "skipped unhealthy provider");
-            m.on_route_decision(target, "skipped_unhealthy");
-        }
-        RouteEvent::Exhausted => {
-            tracing::warn!("router exhausted every candidate");
-            m.on_route_decision("-", "exhausted");
-        }
-    }
-}
-
-/// Turn a typed `PoolEvent` into pool metrics (same inversion-avoiding pattern as
-/// the router — `agent-providers` stays off `agent-metrics`).
-#[cfg(feature = "provider-pool")]
-pub(crate) fn record_pool_event(m: &Metrics, ev: agent_providers::PoolEvent) {
-    use agent_providers::PoolEvent;
-    match ev {
-        PoolEvent::Dispatch {
-            mode,
-            tier,
-            policy,
-            requested,
-            alive,
-        } => {
-            tracing::debug!(
-                mode,
-                tier = tier.as_str(),
-                policy,
-                requested,
-                alive,
-                "pool dispatch"
-            );
-            m.set_pool_members_alive(tier.as_str(), alive as i64);
-            m.on_pool_select(policy);
-        }
-        PoolEvent::MemberCall {
-            member,
-            ok,
-            duration_ms,
-        } => {
-            m.on_pool_member_call(&member, if ok { "ok" } else { "error" });
-            m.on_pool_dispatch("member", duration_ms as f64 / 1000.0);
-            m.on_pool_member_latency(&member, duration_ms as f64 / 1000.0);
-        }
-        PoolEvent::MemberState {
-            member,
-            in_flight,
-            saturated,
-        } => {
-            m.set_pool_member_inflight(&member, in_flight as i64);
-            m.set_pool_member_saturated(&member, saturated as i64);
-        }
-        PoolEvent::SaturationShed { mode } => {
-            tracing::warn!(
-                mode,
-                "pool saturated: all eligible members at capacity → shed"
-            );
-            m.on_pool_saturation_shed();
-        }
-        PoolEvent::MemberGraded {
-            member,
-            state,
-            latency_ms_ewma,
-        } => {
-            m.set_pool_member_state(&member, state);
-            m.set_pool_member_latency_ewma(&member, latency_ms_ewma as i64);
-        }
-        PoolEvent::Probe {
-            member,
-            alive,
-            duration_ms,
-        } => {
-            let outcome = if alive { "live" } else { "dead" };
-            m.on_pool_probe(&member, outcome, duration_ms as f64 / 1000.0);
-        }
-    }
-}
-
-/// Turn a typed `ReviewEvent` into review metrics.
-#[cfg(feature = "review")]
-pub(crate) fn record_review_event(m: &Metrics, ev: agent_review::ReviewEvent) {
-    use agent_review::ReviewEvent;
-    match ev {
-        ReviewEvent::Collect { total_ms } => {
-            m.on_review_collect(total_ms as f64 / 1000.0);
-        }
-        ReviewEvent::Collector {
-            collector,
-            status,
-            duration_ms,
-        } => {
-            m.on_review_collector(&collector, status.as_str(), duration_ms as f64 / 1000.0);
-        }
-        ReviewEvent::ChangeFiles { n } => {
-            m.on_review_change_files(n as u64);
-        }
-        ReviewEvent::GitState {
-            relationship,
-            host,
-            project,
-        } => {
-            m.on_review_gitstate(relationship, host, project);
-        }
-        ReviewEvent::Findings {
-            tool,
-            severity,
-            in_change,
-            count,
-        } => {
-            m.on_review_findings(&tool, &severity, in_change, count as u64);
-        }
-        ReviewEvent::Signatures { lang, kind, count } => {
-            m.on_review_signatures(&lang, &kind, count as u64);
-        }
-        ReviewEvent::CallGraph { nodes, edges } => {
-            m.on_review_callgraph(nodes as f64, edges as f64);
-        }
-        ReviewEvent::Style { diff_matches } => {
-            m.on_review_style(diff_matches);
-        }
-        ReviewEvent::Summaries {
-            requested,
-            produced,
-            omitted,
-        } => {
-            // requested = produced + failed + omitted (all non-negative by construction).
-            let failed = requested.saturating_sub(produced).saturating_sub(omitted);
-            m.on_review_summaries(produced as u64, failed as u64, omitted as u64);
-        }
-        ReviewEvent::CoChange { entries, missing } => {
-            m.on_review_cochange(u64::from(entries), u64::from(missing));
-        }
-        ReviewEvent::Churn {
-            files,
-            single_owner,
-        } => {
-            m.on_review_churn(u64::from(files), u64::from(single_owner));
-        }
-        ReviewEvent::Salience { files, critical } => {
-            m.on_review_salience(u64::from(files), u64::from(critical));
-        }
-        ReviewEvent::Risk {
-            files,
-            max_score,
-            gate_failed,
-        } => {
-            m.on_review_risk(u64::from(files), max_score, gate_failed);
-        }
-    }
-}
-
-/// Wrap a [`Forge`](agent_core::Forge) so each API call emits a `forge.request`
-/// span (`backend`, `op`, `outcome`) and a per-op counter.
-///
-/// Labels are the backend name and the fixed op set — never a token, a URL, or
-/// remote content.
-#[cfg(feature = "forge")]
-pub(crate) fn forge(inner: Arc<dyn agent_core::Forge>, m: Metrics) -> Arc<dyn agent_core::Forge> {
-    Arc::new(MeteredForge { inner, metrics: m })
-}
-
-#[cfg(feature = "forge")]
-struct MeteredForge {
-    inner: Arc<dyn agent_core::Forge>,
-    metrics: Metrics,
-}
-
-#[cfg(feature = "forge")]
-impl MeteredForge {
-    async fn record<T>(
-        &self,
-        op: &'static str,
-        fut: impl std::future::Future<Output = agent_core::Result<T>>,
-    ) -> agent_core::Result<T> {
-        let span = tracing::info_span!(
-            "forge.request",
-            backend = self.inner.name(),
-            op,
-            outcome = tracing::field::Empty,
-        );
-        let start = Instant::now();
-        let out = fut.instrument(span.clone()).await;
-        let outcome = if out.is_ok() { "ok" } else { "error" };
-        span.record("outcome", outcome);
-        self.metrics.on_forge_call(
-            self.inner.name(),
-            op,
-            outcome,
-            start.elapsed().as_secs_f64(),
-        );
-        out
-    }
-}
-
-#[cfg(feature = "forge")]
-#[async_trait]
-impl agent_core::Forge for MeteredForge {
-    fn name(&self) -> &str {
-        self.inner.name()
-    }
-    async fn get_pr(&self, n: u64) -> agent_core::Result<agent_core::PullRequest> {
-        self.record("get_pr", self.inner.get_pr(n)).await
-    }
-    async fn list_prs(
-        &self,
-        p: u32,
-    ) -> agent_core::Result<agent_core::Page<agent_core::PullRequest>> {
-        self.record("list_prs", self.inner.list_prs(p)).await
-    }
-    async fn list_issues(&self, p: u32) -> agent_core::Result<agent_core::Page<agent_core::Issue>> {
-        self.record("list_issues", self.inner.list_issues(p)).await
-    }
-    async fn import_issue(&self, n: u64) -> agent_core::Result<agent_core::Issue> {
-        self.record("import_issue", self.inner.import_issue(n))
-            .await
-    }
-    async fn create_pr(
-        &self,
-        r: &agent_core::CreatePrRequest,
-    ) -> agent_core::Result<agent_core::PullRequest> {
-        self.record("create_pr", self.inner.create_pr(r)).await
-    }
-    async fn comment(&self, n: u64, b: &str) -> agent_core::Result<agent_core::Comment> {
-        self.record("comment", self.inner.comment(n, b)).await
-    }
-    async fn review_pr(
-        &self,
-        n: u64,
-        v: agent_core::ReviewVerdict,
-        b: &str,
-    ) -> agent_core::Result<agent_core::Comment> {
-        self.record("review_pr", self.inner.review_pr(n, v, b))
-            .await
-    }
-}
-
-/// Wrap a [`Pty`](agent_core::Pty) so sessions and byte volumes are visible.
-///
-/// A live terminal is the most powerful thing the agent holds, so its usage
-/// being observable matters more here than for a read-only seam.
-#[cfg(feature = "pty")]
-pub(crate) fn pty(inner: Arc<dyn agent_core::Pty>, m: Metrics) -> Arc<dyn agent_core::Pty> {
-    Arc::new(MeteredPty { inner, metrics: m })
-}
-
-#[cfg(feature = "pty")]
-struct MeteredPty {
-    inner: Arc<dyn agent_core::Pty>,
-    metrics: Metrics,
-}
-
-#[cfg(feature = "pty")]
-#[async_trait]
-impl agent_core::Pty for MeteredPty {
-    fn name(&self) -> &str {
-        self.inner.name()
-    }
-
-    async fn open(&self, spec: &agent_core::PtySpec) -> agent_core::Result<String> {
-        let span = tracing::info_span!(
-            "pty.session",
-            command = %spec.command,
-            cols = spec.cols,
-            rows = spec.rows,
-        );
-        let out = self.inner.open(spec).instrument(span).await;
-        if out.is_ok() {
-            self.metrics.on_pty_open();
-        }
-        out
-    }
-
-    async fn write(&self, id: &str, bytes: &[u8]) -> agent_core::Result<()> {
-        let out = self.inner.write(id, bytes).await;
-        if out.is_ok() {
-            self.metrics.on_pty_bytes("in", bytes.len() as u64);
-        }
-        out
-    }
-
-    async fn read(
-        &self,
-        id: &str,
-        cursor: Option<u64>,
-    ) -> agent_core::Result<agent_core::PtyOutput> {
-        let out = self.inner.read(id, cursor).await;
-        if let Ok(o) = &out {
-            self.metrics.on_pty_bytes("out", o.data.len() as u64);
-        }
-        out
-    }
-
-    async fn resize(&self, id: &str, cols: u16, rows: u16) -> agent_core::Result<()> {
-        self.inner.resize(id, cols, rows).await
-    }
-
-    async fn close(&self, id: &str) -> agent_core::Result<bool> {
-        let out = self.inner.close(id).await;
-        if matches!(out, Ok(true)) {
-            self.metrics.on_pty_close("closed");
-        }
-        out
-    }
-
-    async fn list(&self) -> agent_core::Result<Vec<agent_core::PtySessionInfo>> {
-        self.inner.list().await
-    }
-
-    async fn get(&self, id: &str) -> agent_core::Result<agent_core::PtySessionInfo> {
-        self.inner.get(id).await
     }
 }
