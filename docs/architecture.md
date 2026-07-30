@@ -49,11 +49,79 @@ or store.
 | Memory — semantic | `SemanticStore` | `[memory] semantic` | `Registry::semantic` | [memory](components/memory.md) |
 | MCP transport | `McpTransport` | `[[mcp.servers]] kind` | `Registry::transport` | [mcp](components/mcp.md) |
 | Search | `SearchBackend` | `[search] backends` | `Registry::search` | [search](components/search.md) |
+| Tokenizer | `Tokenizer` (+ `Prices`) | `[tokenizer] backend` | `Registry::tokenizer` | [tokenizer](components/tokenizer.md) |
+| Repo (git) | `RepoBackend` | `[git] backend` | `Registry::repo` | [git](components/git.md) |
+| Verifier | `Verifier` | `[verifier] backend` | `Registry::verifier` | [verifier](components/verifier.md) |
+| Forge | `Forge` | `[forge] backend` | `Registry::forge` | [forge](components/forge.md) |
+| Web search | `WebSearch` | `[web_search] backend` | `Registry::web_search` | [web-search](components/web-search.md) |
 
-Every seam is uniform: a config string selects a named factory from a registry, and
-out-of-tree code can register its own factory on the `Registry` passed to
-`build_agent_with` without forking — MCP transports included (the runtime `Registry`
-owns the `TransportRegistry`).
+A registry seam is uniform: a config string selects a named factory, and out-of-tree
+code can register its own on the `Registry` passed to `build_agent_with` without
+forking — MCP transports included (the runtime `Registry` owns the `TransportRegistry`).
+
+### Beyond the registry — composed and optional seams
+
+`agent-core` defines **36 seam traits** in total (the authoritative list is
+`crates/agent-core/src/lib.rs`, one `// Seam:` banner each). The scorecard above is the
+config-string-selected subset; the rest are wired two other ways:
+
+- **Composed in the builder** (they compose other seams rather than being picked by a
+  single backend string — see [extending.md](extending.md)): `LlmPool` (`[pool]`,
+  [pool](components/pool.md)), `TaskClassifier` (`[mode]`, [mode](components/mode.md)),
+  `DimensionStore` (`[dimensions]`, [dimensions](components/dimensions.md)).
+- **Optional capabilities**, config-gated and attached via `Agent::with_*`:
+  `Sandbox` ([sandbox](components/sandbox.md)), `Pty` ([pty](components/pty.md)),
+  `LspBackend` ([lsp](components/lsp.md)), `WebBackend` ([web-fetch](components/web-fetch.md)),
+  `TaskTracker` ([tasks](components/tasks.md)), `Embedder` ([embedder](components/embedder.md)),
+  `PromptStore` ([prompt](components/prompt.md)), `MetricsProxy` ([metrics-proxy](components/metrics-proxy.md)),
+  `ReferenceResolver` ([reference](components/reference.md)), `SessionStore` ([session](components/session.md)),
+  `Scanner` ([scanner](components/scanner.md)), `CacheStrategy` ([prompt-cache](components/prompt-cache.md)),
+  `ReviewCollector` (code-review flow), `OutputSchema` ([structured-output](components/structured-output.md)),
+  `Hook` ([hooks](components/hooks.md)), `Scheduler` ([scheduler](components/scheduler.md)).
+- **Session / identity infrastructure**: `SessionRegistry`, `SessionSource`,
+  `SessionSourceRegistry` ([session](components/session.md)), plus the supporting
+  `Prices` (paired with the tokenizer) and the memory layer traits `EpisodicStore` /
+  `SemanticStore`.
+
+Every seam — however wired — is still just an `agent-core` trait, and any of them can be
+hosted over gRPC (`agent --serve-<seam>`) or dialed with `= "grpc"`.
+
+## Crate map
+
+The 37 crates, by role. Dependency direction is unchanged from DESIGN.md §7: everything
+depends on `agent-core`; `agent-runtime` depends on the (feature-gated) impl crates;
+`agent-cli` depends on `agent-runtime`; `agent-core` depends on nothing internal.
+
+**Core & runtime**
+- `agent-core` — the seam traits + shared vocabulary (`Message`/`ToolCall`/…), identity
+  newtypes, and the audited path/injection validators. No impls.
+- `agent-runtime` — the agent loop, the plugin `Registry` + `builder`, `Policy`, the
+  `metered` decorators, sessions/`SessionManager`, and `config`. The biggest crate.
+- `agent-cli` — the `agent` binary: CLI/REPL, `--serve-<seam>`, MCP + metrics servers.
+
+**Seam impl crates** (one seam-family each)
+- `agent-providers` (`LlmProvider`/`LlmPool`: openai-compat, anthropic, router, pool) ·
+  `agent-tools` (`Tool` built-ins + seam-dialing tools) · `agent-context`
+  (`ContextStrategy`) · `agent-memory` (`Episodic`/`Semantic`/`Dimension` stores) ·
+  `agent-search` (`SearchBackend`: tantivy + vector) · `agent-git` (`RepoBackend`) ·
+  `agent-tokenizer` (`Tokenizer`/`Prices`) · `agent-mcp` (MCP client + transports) ·
+  `agent-review` (`ReviewCollector`) · `agent-verifier` (`Verifier`) · `agent-mode`
+  (`TaskClassifier`) · `agent-forge` (`Forge`) · `agent-lsp` (`LspBackend`) ·
+  `agent-sandbox` (`Sandbox`) · `agent-pty` (`Pty`) · `agent-scanner` (`Scanner`) ·
+  `agent-web` (`WebBackend`) · `agent-web-search` (`WebSearch`) · `agent-embed`
+  (`Embedder`) · `agent-session` (`SessionStore`/`SessionRegistry`) · `agent-reference`
+  (`ReferenceResolver`) · `agent-tasks` (`TaskTracker`) · `agent-prompt` (`PromptStore`)
+  · `agent-cache` (`CacheStrategy`) · `agent-validate` (`OutputSchema`) · `agent-scheduler`
+  (`Scheduler`) · `agent-metrics-proxy` (`MetricsProxy`) · `agent-export` (session export).
+
+**Infrastructure & cross-cutting**
+- `agent-grpc` (per-seam gRPC servers/clients over TCP/UDS) · `agent-proto` (protobuf
+  wire contracts + core↔pb conversions) · `agent-metrics` (the Prometheus registry) ·
+  `agent-telemetry` (OTLP + ClickHouse sinks) · `agent-retry` (the one retry/backoff
+  library).
+
+**Dev**
+- `agent-testkit` — shared test doubles (a dev-dependency only).
 
 ## Components
 

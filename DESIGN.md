@@ -423,6 +423,12 @@ the trait sketches, and the workspace layout are intentionally one-to-one.
 
 ## 7. Proposed workspace layout
 
+> **Historical (v1 proposal).** This is the original ~9-crate sketch. The workspace has
+> since grown to **37 crates** (one per seam-family + infrastructure). For the current,
+> authoritative map see the **Crate map** in [docs/architecture.md](docs/architecture.md)
+> and the full **seam index** there; `crates/agent-core/src/lib.rs` lists all 36 seam
+> traits. The shape below still describes the *dependency direction*, which is unchanged.
+
 A Cargo workspace with one crate per seam, so implementations can be added or swapped
 in isolation and features can gate them independently.
 
