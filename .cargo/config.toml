@@ -1,0 +1,11 @@
+# Project-wide cargo config.
+#
+# Turn OFF incremental compilation for the whole workspace. This extends the
+# dev-shell's `CARGO_INCREMENTAL=0` (nix/devshell.nix) to EVERY cargo invocation —
+# including a rust-analyzer launched outside `nix develop` (the editor's
+# check-on-save), which is the main writer of `target/` that the shell env can't
+# reach. Incremental compilation is what ballooned `target/debug/incremental` to
+# 130GB; disabling it keeps `target/` bounded and pairs with sccache (which no-ops
+# on incremental builds anyway). See the `clean` app + the large-target warning.
+[build]
+incremental = false
