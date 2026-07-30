@@ -2394,6 +2394,112 @@ mod tests {
         );
     }
 
+    // ---- pure helpers ------------------------------------------------------
+
+    #[test]
+    fn recent_events_takes_last_n_saturating() {
+        let msgs = vec![Message::user("a"), Message::user("b"), Message::user("c")];
+        let last2 = recent_events(&msgs, 2);
+        assert_eq!(last2.len(), 2);
+        assert_eq!(last2[0].message.content_text(), "b");
+        assert_eq!(last2[1].message.content_text(), "c");
+        assert_eq!(last2[0].kind, "step");
+        // n larger than the slice saturates to the whole slice; n == 0 is empty.
+        assert_eq!(recent_events(&msgs, 99).len(), 3);
+        assert!(recent_events(&msgs, 0).is_empty());
+        assert!(recent_events(&[], 5).is_empty());
+    }
+
+    #[rstest]
+    #[case::implement(TaskMode::Implement, &["coding", "testing"][..])]
+    #[case::debug(TaskMode::Debug, &["coding", "testing"][..])]
+    #[case::review(TaskMode::Review, &["coding", "git", "project"][..])]
+    #[case::design(TaskMode::Design, &["project", "docs"][..])]
+    #[case::explain(TaskMode::Explain, &["user"][..])]
+    #[case::other_pulls_nothing(TaskMode::Other, &[][..])]
+    fn recall_dims_for_each_mode(#[case] mode: TaskMode, #[case] want: &[&str]) {
+        assert_eq!(recall_dims_for(mode), want);
+    }
+
+    #[rstest]
+    #[case::prefilter("deterministic prefilter matched", "prefilter")]
+    #[case::vote("pool vote 3/5 for review", "vote")]
+    #[case::failsafe("kept current mode on a tie", "failsafe")]
+    #[case::empty_is_failsafe("", "failsafe")]
+    fn classify_via_labels_by_reason_prefix(#[case] reason: &str, #[case] want: &str) {
+        assert_eq!(classify_via(reason), want);
+    }
+
+    // ---- mode detection integration (detect_mode -> record_mode_switch) ----
+
+    /// A classifier that always votes one mode at a fixed confidence.
+    struct FixedClassifier(TaskMode, f32);
+    #[async_trait::async_trait]
+    impl agent_core::TaskClassifier for FixedClassifier {
+        fn name(&self) -> &str {
+            "fixed"
+        }
+        async fn classify(&self, _ctx: &agent_core::ClassifyCtx<'_>) -> agent_core::ModeVerdict {
+            agent_core::ModeVerdict {
+                mode: self.0,
+                confidence: self.1,
+                reason: "deterministic test verdict".into(),
+            }
+        }
+    }
+
+    fn agent_with_classifier(
+        mode: TaskMode,
+        confidence: f32,
+        memory: RecordingMemory,
+    ) -> Arc<Agent> {
+        Arc::new(
+            Agent::new(
+                Arc::new(FnProvider::new(|_req: &CompletionRequest| final_turn("ok"))),
+                ToolRegistry::new(),
+                Arc::new(memory),
+                Arc::new(StaticContext),
+                Arc::new(crate::policy::AutoApprove),
+                Metrics::new(),
+                settings(false),
+            )
+            .with_task_classifier(Arc::new(FixedClassifier(mode, confidence))),
+        )
+    }
+
+    // A decisive verdict switches the session mode and records the switch.
+    #[tokio::test]
+    async fn positive_decisive_classification_switches_mode() {
+        let memory = RecordingMemory::new();
+        let agent = agent_with_classifier(TaskMode::Review, 0.95, memory.clone());
+        let mut session = agent.session();
+        assert_eq!(session.send("please review this").await.unwrap(), "ok");
+        let switches: Vec<String> = memory
+            .events()
+            .into_iter()
+            .filter(|e| e.kind == "mode_switch")
+            .map(|e| e.message.content_text())
+            .collect();
+        assert!(
+            switches.iter().any(|c| c.contains("review")),
+            "expected a recorded switch into review, got: {switches:?}"
+        );
+    }
+
+    // A below-floor verdict is not trusted: the mode stays put, nothing is recorded.
+    #[tokio::test]
+    async fn negative_low_confidence_does_not_switch_mode() {
+        let memory = RecordingMemory::new();
+        // 0.5 is below the 0.6 floor in `settings()`.
+        let agent = agent_with_classifier(TaskMode::Review, 0.5, memory.clone());
+        let mut session = agent.session();
+        assert_eq!(session.send("maybe review?").await.unwrap(), "ok");
+        assert!(
+            !memory.events().into_iter().any(|e| e.kind == "mode_switch"),
+            "a below-floor verdict must not switch the mode"
+        );
+    }
+
     /// Emits three tool calls on the first turn, then a final answer. The
     /// `EchoTool` sleeps per `sleep_ms`, so completion order differs from call
     /// order (t0 sleeps longest yet is requested first).
