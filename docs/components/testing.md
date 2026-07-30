@@ -68,14 +68,15 @@ Source-based test coverage via [`cargo-llvm-cov`](https://github.com/taiki-e/car
 | Form | What | Where |
 |------|------|-------|
 | `nix run .#coverage` | Runs the tests once, then writes `lcov.info` + an HTML report + a printed line-% summary against your working tree. Pass-through args scope it (`-- -p agent-tools`). | [`nix/coverage.nix`](../../nix/coverage.nix) |
-| `coverage` check | Builds instrumented and runs the default-feature tests under `nix flake check`, emitting `lcov.info` as its output. **Non-gating on the number** — no `--fail-under`, so it keeps the coverage path alive without pinning a threshold to an unknown baseline. | [`nix/checks/coverage.nix`](../../nix/checks/coverage.nix) |
+| `coverage` check | Builds instrumented and runs the default-feature tests under `nix flake check`, emitting `lcov.info`. **Ratchet floor** via `--fail-under-lines` (currently 80, conservative vs the ~85% baseline): a coverage regression fails the check. Raise the floor as coverage improves; never lower it to green a red check. | [`nix/checks/coverage.nix`](../../nix/checks/coverage.nix) |
 
 Both run the **default-feature** test set (mirroring the `test` check) — *not*
 `--all-features`: the `dhat-heap` feature installs a `#[global_allocator]` that conflicts
 with coverage instrumentation, and the non-default backends aren't the runnable set.
 Generated code is excluded (proto stubs live in `OUT_DIR` and are auto-dropped; the
 committed `@generated` `constants.rs`, the benches, and the dev-only `agent-testkit` are
-regex-ignored). A `--fail-under-lines` ratchet can be added later once a baseline is known.
+regex-ignored). The check enforces a conservative `--fail-under-lines` floor; ratchet it
+up as coverage improves.
 
 `e2e-multi` launches **N agent sessions at once** (default 10), each writing hello-world
 or FizzBuzz — round-robin across **C, Go, and Rust** — via the agent's tools; the harness

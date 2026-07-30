@@ -3,11 +3,12 @@
 # Test-coverage check (source-based, via `cargo-llvm-cov`). Runs the workspace
 # tests **instrumented** and emits `lcov.info` as the derivation output.
 #
-# Non-gating on the *number*: there is deliberately no `--fail-under-*`, so this
-# only asserts that the instrumented build + default-feature tests pass and that
-# a report can be produced — it keeps the coverage path alive in `nix flake check`
-# without pinning a threshold to an unknown baseline. The human-facing report
-# (HTML + summary) is the on-demand `nix run .#coverage` app.
+# Gated with a **ratchet floor**: `--fail-under-lines` fails the check if line
+# coverage drops below the floor, so a regression (e.g. a big test deletion) is
+# caught like a lint. The floor is set CONSERVATIVELY below the observed baseline
+# (~85% at the time of writing) to leave headroom for noise; raise it as coverage
+# improves — never lower it to make a red check pass. The human-facing report
+# (HTML + per-file summary) is the on-demand `nix run .#coverage` app.
 #
 # Feature set mirrors the `test` check: **default features** (NOT `--all-features`)
 # — `dhat-heap` installs a `#[global_allocator]` that conflicts with coverage
@@ -38,6 +39,9 @@ craneLib.cargoLlvmCov (
     cargoLlvmCovExtraArgs =
       "--workspace "
       + "--ignore-filename-regex '(/constants\\.rs$|/benches/|/agent-testkit/)' "
+      # Ratchet floor: fail if line coverage regresses below this. Conservative vs
+      # the ~85% baseline; raise over time, never lower to green a red check.
+      + "--fail-under-lines 80 "
       + "--lcov --output-path $out";
   }
 )
