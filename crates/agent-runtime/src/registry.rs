@@ -103,61 +103,36 @@ impl<'a> FactoryCtx<'a> {
     }
 }
 
-type ProviderFactory =
-    Box<dyn Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn LlmProvider>> + Send + Sync>;
-type ContextFactory =
-    Box<dyn Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn ContextStrategy>> + Send + Sync>;
-type PolicyFactory = Box<dyn Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn Policy>> + Send + Sync>;
-type MemoryFactory =
-    Box<dyn Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn MemoryStore>> + Send + Sync>;
-type EpisodicFactory =
-    Box<dyn Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn EpisodicStore>> + Send + Sync>;
-type SemanticFactory =
-    Box<dyn Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn SemanticStore>> + Send + Sync>;
-type ToolFactory = Box<dyn Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn Tool>> + Send + Sync>;
-#[cfg(feature = "search")]
-type SearchFactory = Box<
-    dyn Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn agent_core::SearchBackend>> + Send + Sync,
->;
-#[cfg(feature = "verifier")]
-type VerifierFactory =
-    Box<dyn Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn agent_core::Verifier>> + Send + Sync>;
-#[cfg(feature = "forge")]
-type ForgeFactory =
-    Box<dyn Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn agent_core::Forge>> + Send + Sync>;
-#[cfg(feature = "web-search")]
-type WebSearchFactory =
-    Box<dyn Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn agent_core::WebSearch>> + Send + Sync>;
-#[cfg(feature = "git")]
-type RepoFactory =
-    Box<dyn Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn agent_core::RepoBackend>> + Send + Sync>;
-#[cfg(feature = "tokenizer")]
-type TokenizerFactory =
-    Box<dyn Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn agent_core::Tokenizer>> + Send + Sync>;
+/// A boxed seam factory: given the shared [`FactoryCtx`], produce the (metered)
+/// impl. Generic over the seam's unsized trait object (`dyn LlmProvider`,
+/// `dyn Tool`, …), so every seam shares this one alias rather than a per-seam
+/// `XFactory` type.
+type Factory<T /* the seam's unsized trait object */> =
+    Box<dyn Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<T>> + Send + Sync>;
 
 /// Name → factory maps for every swappable seam. Keys are `&'static str` and the
 /// maps are ordered so error messages list known names deterministically.
 #[derive(Default)]
 pub struct Registry {
-    providers: BTreeMap<&'static str, ProviderFactory>,
-    contexts: BTreeMap<&'static str, ContextFactory>,
-    policies: BTreeMap<&'static str, PolicyFactory>,
-    memories: BTreeMap<&'static str, MemoryFactory>,
-    episodics: BTreeMap<&'static str, EpisodicFactory>,
-    semantics: BTreeMap<&'static str, SemanticFactory>,
-    tools: BTreeMap<&'static str, ToolFactory>,
+    providers: BTreeMap<&'static str, Factory<dyn LlmProvider>>,
+    contexts: BTreeMap<&'static str, Factory<dyn ContextStrategy>>,
+    policies: BTreeMap<&'static str, Factory<dyn Policy>>,
+    memories: BTreeMap<&'static str, Factory<dyn MemoryStore>>,
+    episodics: BTreeMap<&'static str, Factory<dyn EpisodicStore>>,
+    semantics: BTreeMap<&'static str, Factory<dyn SemanticStore>>,
+    tools: BTreeMap<&'static str, Factory<dyn Tool>>,
     #[cfg(feature = "search")]
-    searches: BTreeMap<&'static str, SearchFactory>,
+    searches: BTreeMap<&'static str, Factory<dyn agent_core::SearchBackend>>,
     #[cfg(feature = "verifier")]
-    verifiers: BTreeMap<&'static str, VerifierFactory>,
+    verifiers: BTreeMap<&'static str, Factory<dyn agent_core::Verifier>>,
     #[cfg(feature = "forge")]
-    forges: BTreeMap<&'static str, ForgeFactory>,
+    forges: BTreeMap<&'static str, Factory<dyn agent_core::Forge>>,
     #[cfg(feature = "web-search")]
-    web_searches: BTreeMap<&'static str, WebSearchFactory>,
+    web_searches: BTreeMap<&'static str, Factory<dyn agent_core::WebSearch>>,
     #[cfg(feature = "git")]
-    repos: BTreeMap<&'static str, RepoFactory>,
+    repos: BTreeMap<&'static str, Factory<dyn agent_core::RepoBackend>>,
     #[cfg(feature = "tokenizer")]
-    tokenizers: BTreeMap<&'static str, TokenizerFactory>,
+    tokenizers: BTreeMap<&'static str, Factory<dyn agent_core::Tokenizer>>,
     // MCP transports live behind their own registry in `agent-mcp`; the runtime
     // owns one so a custom transport is registrable out-of-tree like any seam.
     #[cfg(feature = "mcp")]
@@ -322,73 +297,45 @@ impl Registry {
         name: &str,
         ctx: &FactoryCtx<'_>,
     ) -> anyhow::Result<Arc<dyn LlmProvider>> {
-        let f = self
-            .providers
-            .get(name)
-            .ok_or_else(|| unknown("provider", name, self.providers.keys().copied()))?;
-        f(ctx)
+        build_from(&self.providers, "provider", name, ctx)
     }
     pub fn build_context(
         &self,
         name: &str,
         ctx: &FactoryCtx<'_>,
     ) -> anyhow::Result<Arc<dyn ContextStrategy>> {
-        let f = self
-            .contexts
-            .get(name)
-            .ok_or_else(|| unknown("context strategy", name, self.contexts.keys().copied()))?;
-        f(ctx)
+        build_from(&self.contexts, "context strategy", name, ctx)
     }
     pub fn build_policy(
         &self,
         name: &str,
         ctx: &FactoryCtx<'_>,
     ) -> anyhow::Result<Arc<dyn Policy>> {
-        let f = self
-            .policies
-            .get(name)
-            .ok_or_else(|| unknown("policy", name, self.policies.keys().copied()))?;
-        f(ctx)
+        build_from(&self.policies, "policy", name, ctx)
     }
     pub fn build_memory(
         &self,
         name: &str,
         ctx: &FactoryCtx<'_>,
     ) -> anyhow::Result<Arc<dyn MemoryStore>> {
-        let f = self
-            .memories
-            .get(name)
-            .ok_or_else(|| unknown("memory backend", name, self.memories.keys().copied()))?;
-        f(ctx)
+        build_from(&self.memories, "memory backend", name, ctx)
     }
     pub fn build_episodic(
         &self,
         name: &str,
         ctx: &FactoryCtx<'_>,
     ) -> anyhow::Result<Arc<dyn EpisodicStore>> {
-        let f = self
-            .episodics
-            .get(name)
-            .ok_or_else(|| unknown("episodic backend", name, self.episodics.keys().copied()))?;
-        f(ctx)
+        build_from(&self.episodics, "episodic backend", name, ctx)
     }
     pub fn build_semantic(
         &self,
         name: &str,
         ctx: &FactoryCtx<'_>,
     ) -> anyhow::Result<Arc<dyn SemanticStore>> {
-        let f = self
-            .semantics
-            .get(name)
-            .ok_or_else(|| unknown("semantic backend", name, self.semantics.keys().copied()))?;
-        f(ctx)
+        build_from(&self.semantics, "semantic backend", name, ctx)
     }
     pub fn build_tool(&self, name: &str, ctx: &FactoryCtx<'_>) -> anyhow::Result<Arc<dyn Tool>> {
-        let f = self
-            .tools
-            .get(name)
-            .ok_or_else(|| unknown("tool", name, self.tools.keys().copied()))?;
-        f(ctx)
+        build_from(&self.tools, "tool", name, ctx)
     }
 
     /// All registered tool names (used when `[tools] enabled` is empty ⇒ all).
@@ -402,11 +349,7 @@ impl Registry {
         name: &str,
         ctx: &FactoryCtx<'_>,
     ) -> anyhow::Result<Arc<dyn agent_core::SearchBackend>> {
-        let f = self
-            .searches
-            .get(name)
-            .ok_or_else(|| unknown("search backend", name, self.searches.keys().copied()))?;
-        f(ctx)
+        build_from(&self.searches, "search backend", name, ctx)
     }
     #[cfg(feature = "verifier")]
     pub fn build_verifier(
@@ -414,11 +357,7 @@ impl Registry {
         name: &str,
         ctx: &FactoryCtx<'_>,
     ) -> anyhow::Result<Arc<dyn agent_core::Verifier>> {
-        let f = self
-            .verifiers
-            .get(name)
-            .ok_or_else(|| unknown("verifier", name, self.verifiers.keys().copied()))?;
-        f(ctx)
+        build_from(&self.verifiers, "verifier", name, ctx)
     }
 
     #[cfg(feature = "forge")]
@@ -427,11 +366,7 @@ impl Registry {
         name: &str,
         ctx: &FactoryCtx<'_>,
     ) -> anyhow::Result<Arc<dyn agent_core::Forge>> {
-        let f = self
-            .forges
-            .get(name)
-            .ok_or_else(|| unknown("forge backend", name, self.forges.keys().copied()))?;
-        f(ctx)
+        build_from(&self.forges, "forge backend", name, ctx)
     }
 
     /// Names of every registered web-search backend.
@@ -445,14 +380,7 @@ impl Registry {
         name: &str,
         ctx: &FactoryCtx<'_>,
     ) -> anyhow::Result<Arc<dyn agent_core::WebSearch>> {
-        let f = self.web_searches.get(name).ok_or_else(|| {
-            unknown(
-                "web-search backend",
-                name,
-                self.web_searches.keys().copied(),
-            )
-        })?;
-        f(ctx)
+        build_from(&self.web_searches, "web-search backend", name, ctx)
     }
     #[cfg(feature = "git")]
     pub fn build_repo(
@@ -460,11 +388,7 @@ impl Registry {
         name: &str,
         ctx: &FactoryCtx<'_>,
     ) -> anyhow::Result<Arc<dyn agent_core::RepoBackend>> {
-        let f = self
-            .repos
-            .get(name)
-            .ok_or_else(|| unknown("git backend", name, self.repos.keys().copied()))?;
-        f(ctx)
+        build_from(&self.repos, "git backend", name, ctx)
     }
 
     #[cfg(feature = "tokenizer")]
@@ -473,11 +397,7 @@ impl Registry {
         name: &str,
         ctx: &FactoryCtx<'_>,
     ) -> anyhow::Result<Arc<dyn agent_core::Tokenizer>> {
-        let f = self
-            .tokenizers
-            .get(name)
-            .ok_or_else(|| unknown("tokenizer", name, self.tokenizers.keys().copied()))?;
-        f(ctx)
+        build_from(&self.tokenizers, "tokenizer", name, ctx)
     }
 }
 
@@ -491,6 +411,21 @@ fn unknown(kind: &str, name: &str, known: impl Iterator<Item = &'static str>) ->
             names.join(", ")
         }
     )
+}
+
+/// Look up `name` in a seam's factory map and invoke it, or return an
+/// [`unknown`] error listing the registered names. Shared by every `build_*`
+/// method so the lookup/error pattern lives in one place.
+fn build_from<T: ?Sized>(
+    map: &BTreeMap<&'static str, Factory<T>>,
+    kind: &str,
+    name: &str,
+    ctx: &FactoryCtx<'_>,
+) -> anyhow::Result<Arc<T>> {
+    let f = map
+        .get(name)
+        .ok_or_else(|| unknown(kind, name, map.keys().copied()))?;
+    f(ctx)
 }
 
 /// Wire every built-in module into the registry. This is the one place a
