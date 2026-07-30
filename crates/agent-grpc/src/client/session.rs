@@ -72,13 +72,7 @@ impl SessionStore for GrpcSession {
         let req = pb::SessionRef {
             session: session.to_string(),
         };
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.list(outbound(r)).await }
-        })
-        .await
-        .map_err(err)?;
+        let resp = unary!(self, list, req).map_err(err)?;
         Ok(resp
             .into_inner()
             .checkpoints
@@ -89,13 +83,7 @@ impl SessionStore for GrpcSession {
 
     async fn restore(&self, id: &CheckpointId) -> Result<WorkingSet> {
         let req = pb::SessionCheckpointRef { id: id.clone() };
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.restore(outbound(r)).await }
-        })
-        .await
-        .map_err(err)?;
+        let resp = unary!(self, restore, req).map_err(err)?;
         resp.into_inner()
             .try_into()
             .map_err(|e: agent_proto::ConvertError| agent_core::Error::Session(e.to_string()))
@@ -107,13 +95,7 @@ impl SessionStore for GrpcSession {
             from: from.clone(),
             name: name.to_string(),
         };
-        call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.branch(outbound(r)).await }
-        })
-        .await
-        .map_err(err)?;
+        unary!(self, branch, req).map_err(err)?;
         Ok(())
     }
 
@@ -146,13 +128,7 @@ impl SessionStore for GrpcSession {
             a: a.clone(),
             b: b.clone(),
         };
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.diff(outbound(r)).await }
-        })
-        .await
-        .map_err(err)?;
+        let resp = unary!(self, diff, req).map_err(err)?;
         Ok(resp.into_inner().into())
     }
 
@@ -164,13 +140,7 @@ impl SessionStore for GrpcSession {
         // the *count* it returns is not — a retry reports what the second pass
         // reclaimed, which may be zero. Retried anyway: converging on the right
         // state matters more than the count, which is advisory.
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.prune(outbound(r)).await }
-        })
-        .await
-        .map_err(err)?;
+        let resp = unary!(self, prune, req).map_err(err)?;
         Ok(usize::try_from(resp.into_inner().reclaimed).unwrap_or(usize::MAX))
     }
 }

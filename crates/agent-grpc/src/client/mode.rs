@@ -38,12 +38,7 @@ impl TaskClassifier for GrpcClassifier {
             prompt: ctx.prompt.to_string(),
             history: ctx.history.iter().cloned().map(Into::into).collect(),
         };
-        let res = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.classify(outbound(r)).await }
-        })
-        .await;
+        let res = unary!(self, classify, req);
         match res {
             Ok(resp) => resp.into_inner().into(),
             Err(s) => {

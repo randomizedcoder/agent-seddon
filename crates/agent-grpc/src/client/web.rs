@@ -49,13 +49,7 @@ impl WebBackend for GrpcWeb {
         // A GET is idempotent, so retrying a transport blip is safe. Note this
         // retries the *transport*, not an HTTP error status — a 500 from the
         // origin comes back as a successful RPC carrying that status.
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = pbreq.clone();
-            async move { client.fetch(outbound(r)).await }
-        })
-        .await
-        .map_err(|s| agent_core::Error::Web(s.to_string()))?;
+        let resp = unary!(self, fetch, pbreq).map_err(|s| agent_core::Error::Web(s.to_string()))?;
 
         let out: WebResponse = resp.into_inner().into();
         // The caller asked for a byte ceiling; a remote that ignores it must not
@@ -114,13 +108,7 @@ impl WebSearch for GrpcWebSearch {
 
     async fn status(&self, q: &WebQuery) -> Result<CacheState> {
         let req = pb::WebSearchRequest::from(q.clone());
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.status(outbound(r)).await }
-        })
-        .await
-        .map_err(|s| agent_core::Error::Web(s.to_string()))?;
+        let resp = unary!(self, status, req).map_err(|s| agent_core::Error::Web(s.to_string()))?;
         Ok(agent_proto::convert::web_cache_state_from_i32(
             resp.into_inner().state,
         ))
@@ -128,13 +116,7 @@ impl WebSearch for GrpcWebSearch {
 
     async fn search(&self, q: &WebQuery) -> Result<Vec<WebResult>> {
         let req = pb::WebSearchRequest::from(q.clone());
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.search(outbound(r)).await }
-        })
-        .await
-        .map_err(|s| agent_core::Error::Web(s.to_string()))?;
+        let resp = unary!(self, search, req).map_err(|s| agent_core::Error::Web(s.to_string()))?;
 
         let mut results: Vec<WebResult> = resp
             .into_inner()

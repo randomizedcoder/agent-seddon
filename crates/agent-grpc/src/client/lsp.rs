@@ -75,13 +75,7 @@ impl LspBackend for GrpcLsp {
         };
         // Idempotent: `open` states a file's current contents, so a repeat sets
         // the same contents rather than accumulating buffers.
-        call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.open(outbound(r)).await }
-        })
-        .await
-        .map_err(err)?;
+        unary!(self, open, req).map_err(err)?;
         Ok(())
     }
 
@@ -90,13 +84,7 @@ impl LspBackend for GrpcLsp {
         // Queries are pure reads. `rename` returns a WorkspaceEdit describing
         // edits rather than applying them, so it is a read here too — the caller
         // applies it.
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = pbreq.clone();
-            async move { client.request(outbound(r)).await }
-        })
-        .await
-        .map_err(err)?;
+        let resp = unary!(self, request, pbreq).map_err(err)?;
         LspResult::try_from(resp.into_inner()).map_err(|e| agent_core::Error::Lsp(e.to_string()))
     }
 

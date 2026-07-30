@@ -53,13 +53,7 @@ impl SessionRegistry for GrpcSessionRegistry {
             user: key.user.as_str().to_string(),
             session_id: key.session.as_str().to_string(),
         };
-        call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.close(outbound(r)).await }
-        })
-        .await
-        .map_err(err)?;
+        unary!(self, close, req).map_err(err)?;
         Ok(())
     }
 
@@ -68,13 +62,7 @@ impl SessionRegistry for GrpcSessionRegistry {
             user: key.user.as_str().to_string(),
             session_id: key.session.as_str().to_string(),
         };
-        call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.heartbeat(outbound(r)).await }
-        })
-        .await
-        .map_err(err)?;
+        unary!(self, heartbeat, req).map_err(err)?;
         Ok(())
     }
 }

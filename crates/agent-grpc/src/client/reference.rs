@@ -41,12 +41,7 @@ impl ReferenceResolver for GrpcReference {
         };
         // A pure read with no side effects, so a transient blip is worth retrying
         // before degrading to an unexpanded prompt.
-        let out = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.resolve(outbound(r)).await }
-        })
-        .await;
+        let out = unary!(self, resolve, req);
 
         match out {
             Ok(resp) => resp.into_inner().into(),

@@ -53,13 +53,7 @@ impl Tokenizer for GrpcTokenizer {
             model: model.to_string(),
         };
         // Pure and side-effect free, so retrying a blip is free.
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.count(outbound(r)).await }
-        })
-        .await
-        .map_err(err)?;
+        let resp = unary!(self, count, req).map_err(err)?;
         Ok(resp.into_inner().tokens)
     }
 
@@ -71,13 +65,7 @@ impl Tokenizer for GrpcTokenizer {
             messages: messages.iter().cloned().map(Into::into).collect(),
             model: model.to_string(),
         };
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.count_messages(outbound(r)).await }
-        })
-        .await
-        .map_err(err)?;
+        let resp = unary!(self, count_messages, req).map_err(err)?;
         Ok(resp.into_inner().tokens)
     }
 }

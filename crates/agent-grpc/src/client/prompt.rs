@@ -53,49 +53,25 @@ impl PromptStore for GrpcPrompts {
 
     async fn get(&self, r: &PromptRef) -> Result<PromptEntry> {
         let req = pb::PromptRef::from(r.clone());
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.get(outbound(r)).await }
-        })
-        .await
-        .map_err(status_to_err)?;
+        let resp = unary!(self, get, req).map_err(status_to_err)?;
         resp.into_inner().try_into().map_err(convert_err)
     }
 
     async fn put(&self, entry: PromptEntry) -> Result<PromptEntry> {
         let req = pb::PromptEntry::from(entry);
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.put(outbound(r)).await }
-        })
-        .await
-        .map_err(status_to_err)?;
+        let resp = unary!(self, put, req).map_err(status_to_err)?;
         resp.into_inner().try_into().map_err(convert_err)
     }
 
     async fn delete(&self, r: &PromptRef) -> Result<bool> {
         let req = pb::PromptRef::from(r.clone());
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.delete(outbound(r)).await }
-        })
-        .await
-        .map_err(status_to_err)?;
+        let resp = unary!(self, delete, req).map_err(status_to_err)?;
         Ok(resp.into_inner().deleted)
     }
 
     async fn select(&self, ctx: &PromptContext) -> Result<Vec<PromptEntry>> {
         let req = pb::PromptContext::from(ctx.clone());
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.select(outbound(r)).await }
-        })
-        .await
-        .map_err(status_to_err)?;
+        let resp = unary!(self, select, req).map_err(status_to_err)?;
         resp.into_inner()
             .entries
             .into_iter()
@@ -109,13 +85,7 @@ impl PromptStore for GrpcPrompts {
             goal: goal.to_string(),
             context: Some(pb::PromptContext::from(ctx.clone())),
         };
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.preview_assembled(outbound(r)).await }
-        })
-        .await
-        .map_err(status_to_err)?;
+        let resp = unary!(self, preview_assembled, req).map_err(status_to_err)?;
         // Server → client only: reconstruct a display message from role + content.
         Ok(resp
             .into_inner()

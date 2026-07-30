@@ -93,13 +93,8 @@ impl SearchBackend for GrpcSearch {
             query: Some(pb::SearchQuery::from(q.clone())),
             backend: String::new(),
         };
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.search(outbound(r)).await }
-        })
-        .await
-        .map_err(|s| agent_core::Error::Search(s.to_string()))?;
+        let resp =
+            unary!(self, search, req).map_err(|s| agent_core::Error::Search(s.to_string()))?;
         Ok(resp.into_inner().hits.into_iter().map(Into::into).collect())
     }
 
@@ -108,13 +103,8 @@ impl SearchBackend for GrpcSearch {
             globs: globs.to_vec(),
             backend: String::new(),
         };
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.list_files(outbound(r)).await }
-        })
-        .await
-        .map_err(|s| agent_core::Error::Search(s.to_string()))?;
+        let resp =
+            unary!(self, list_files, req).map_err(|s| agent_core::Error::Search(s.to_string()))?;
         Ok(resp
             .into_inner()
             .paths

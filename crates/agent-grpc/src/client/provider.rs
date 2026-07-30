@@ -40,13 +40,8 @@ impl LlmProvider for GrpcProvider {
 
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse> {
         let pbreq = pb::CompletionRequest::from(req);
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = pbreq.clone();
-            async move { client.complete(outbound(r)).await }
-        })
-        .await
-        .map_err(|s| agent_core::Error::Provider(s.to_string()))?;
+        let resp = unary!(self, complete, pbreq)
+            .map_err(|s| agent_core::Error::Provider(s.to_string()))?;
         resp.into_inner()
             .try_into()
             .map_err(|e: agent_proto::ConvertError| agent_core::Error::Provider(e.to_string()))

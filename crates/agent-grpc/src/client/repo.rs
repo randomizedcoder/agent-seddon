@@ -40,13 +40,7 @@ impl RepoBackend for GrpcRepo {
         let req = pb::ResolveRequest {
             revision: rev.0.clone(),
         };
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.resolve(outbound(r)).await }
-        })
-        .await
-        .map_err(repo_err)?;
+        let resp = unary!(self, resolve, req).map_err(repo_err)?;
         Ok(Oid(resp.into_inner().oid))
     }
 
@@ -55,13 +49,7 @@ impl RepoBackend for GrpcRepo {
             revision: rev.0.clone(),
             path: path.to_string_lossy().into_owned(),
         };
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.read_file(outbound(r)).await }
-        })
-        .await
-        .map_err(repo_err)?;
+        let resp = unary!(self, read_file, req).map_err(repo_err)?;
         Ok(resp.into_inner().into())
     }
 
@@ -76,13 +64,7 @@ impl RepoBackend for GrpcRepo {
             path: path.to_string_lossy().into_owned(),
             recursive,
         };
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.list_tree(outbound(r)).await }
-        })
-        .await
-        .map_err(repo_err)?;
+        let resp = unary!(self, list_tree, req).map_err(repo_err)?;
         Ok(resp
             .into_inner()
             .entries
@@ -102,13 +84,7 @@ impl RepoBackend for GrpcRepo {
             target: target.0.clone(),
             path_globs: path_globs.to_vec(),
         };
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.diff(outbound(r)).await }
-        })
-        .await
-        .map_err(repo_err)?;
+        let resp = unary!(self, diff, req).map_err(repo_err)?;
         Ok(resp.into_inner().into())
     }
 
@@ -125,13 +101,7 @@ impl RepoBackend for GrpcRepo {
             path_globs: path_globs.to_vec(),
             limit: limit as u64,
         };
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.grep(outbound(r)).await }
-        })
-        .await
-        .map_err(repo_err)?;
+        let resp = unary!(self, grep, req).map_err(repo_err)?;
         Ok(resp.into_inner().hits.into_iter().map(Into::into).collect())
     }
 
@@ -146,13 +116,7 @@ impl RepoBackend for GrpcRepo {
             path: path.map(|p| p.to_string_lossy().into_owned()),
             limit: limit as u64,
         };
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.log(outbound(r)).await }
-        })
-        .await
-        .map_err(repo_err)?;
+        let resp = unary!(self, log, req).map_err(repo_err)?;
         Ok(resp
             .into_inner()
             .commits
@@ -198,13 +162,7 @@ impl RepoBackend for GrpcRepo {
 
     async fn worktree_add(&self, spec: &WorktreeSpec) -> Result<WorktreeHandle> {
         let req = pb::WorktreeSpec::from(spec.clone());
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.worktree_add(outbound(r)).await }
-        })
-        .await
-        .map_err(repo_err)?;
+        let resp = unary!(self, worktree_add, req).map_err(repo_err)?;
         Ok(resp.into_inner().into())
     }
 
@@ -229,13 +187,7 @@ impl RepoBackend for GrpcRepo {
 
     async fn worktree_remove(&self, id: &str) -> Result<()> {
         let req = pb::WorktreeRemoveRequest { id: id.to_string() };
-        call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.worktree_remove(outbound(r)).await }
-        })
-        .await
-        .map_err(repo_err)?;
+        unary!(self, worktree_remove, req).map_err(repo_err)?;
         Ok(())
     }
 
@@ -244,13 +196,7 @@ impl RepoBackend for GrpcRepo {
             worktree_id: worktree_id.to_string(),
             name: name.to_string(),
         };
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.create_checkpoint(outbound(r)).await }
-        })
-        .await
-        .map_err(repo_err)?;
+        let resp = unary!(self, create_checkpoint, req).map_err(repo_err)?;
         Ok(resp.into_inner().into())
     }
 
@@ -259,13 +205,7 @@ impl RepoBackend for GrpcRepo {
             checkpoint: Some(pb::Checkpoint::from(checkpoint.clone())),
             remote_ref: remote_ref.to_string(),
         };
-        call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.push(outbound(r)).await }
-        })
-        .await
-        .map_err(repo_err)?;
+        unary!(self, push, req).map_err(repo_err)?;
         Ok(())
     }
 }

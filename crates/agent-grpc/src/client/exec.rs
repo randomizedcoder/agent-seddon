@@ -148,14 +148,7 @@ impl Pty for GrpcPty {
         };
         // Safe to retry: reads are by absolute cursor, so a repeat returns the
         // same bytes rather than consuming a stream.
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.read(outbound(r)).await }
-        })
-        .await
-        .map_err(err)?
-        .into_inner();
+        let resp = unary!(self, read, req).map_err(err)?.into_inner();
 
         Ok(PtyOutput {
             data: resp.data,
@@ -178,26 +171,14 @@ impl Pty for GrpcPty {
             rows: rows as u32,
         };
         // Idempotent — resizing to the same dimensions twice is a no-op.
-        call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.resize(outbound(r)).await }
-        })
-        .await
-        .map_err(err)?;
+        unary!(self, resize, req).map_err(err)?;
         Ok(())
     }
 
     async fn close(&self, id: &str) -> Result<bool> {
         let req = pb::PtySessionRef { id: id.to_string() };
         // Idempotent: closing twice reports `false` the second time.
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.close(outbound(r)).await }
-        })
-        .await
-        .map_err(err)?;
+        let resp = unary!(self, close, req).map_err(err)?;
         Ok(resp.into_inner().closed)
     }
 
@@ -228,13 +209,7 @@ impl Pty for GrpcPty {
 
     async fn get(&self, id: &str) -> Result<PtySessionInfo> {
         let req = pb::PtySessionRef { id: id.to_string() };
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.get(outbound(r)).await }
-        })
-        .await
-        .map_err(err)?;
+        let resp = unary!(self, get, req).map_err(err)?;
         PtySessionInfo::try_from(resp.into_inner())
             .map_err(|e| agent_core::Error::Pty(e.to_string()))
     }

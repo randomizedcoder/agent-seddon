@@ -17,6 +17,27 @@
 
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
+/// Drive a **unary** RPC through the canonical retry driver, awaiting the result.
+///
+/// Expands to exactly the closure every seam client used to hand-write: clone the
+/// client and the request per attempt (so `call_retry` can replay), wrap the
+/// request with trace + identity metadata via [`outbound`], and call
+/// `$self.client.$method`. Assumes the caller's struct has the conventional
+/// `client` + `retry` fields (every seam client does). Streaming RPCs and the rare
+/// move-not-clone request stay hand-written — they can't use this.
+///
+/// `let resp = unary!(self, complete, pbreq);` ⇢ `Result<Response, tonic::Status>`.
+macro_rules! unary {
+    ($self:expr, $method:ident, $req:expr) => {
+        call_retry(&$self.retry, || {
+            let mut client = $self.client.clone();
+            let r = $req.clone();
+            async move { client.$method(outbound(r)).await }
+        })
+        .await
+    };
+}
+
 mod context;
 mod dimension;
 mod embed;
