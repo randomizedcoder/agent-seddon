@@ -2500,6 +2500,215 @@ mod tests {
         );
     }
 
+    // ---- dimensional memory (dimension_pass + recall_for_mode) --------------
+
+    /// A DimensionStore that returns fixed summaries + recall items.
+    struct FixtureDimensions {
+        summaries: Vec<agent_core::DimensionSummary>,
+        recall: Vec<agent_core::MemoryItem>,
+    }
+    #[async_trait::async_trait]
+    impl agent_core::DimensionStore for FixtureDimensions {
+        async fn summarize_step(
+            &self,
+            _events: &[MemoryEvent],
+        ) -> agent_core::Result<Vec<agent_core::DimensionSummary>> {
+            Ok(self.summaries.clone())
+        }
+        async fn recall_dimension(
+            &self,
+            _dimension: &str,
+            _limit: usize,
+        ) -> agent_core::Result<Vec<agent_core::MemoryItem>> {
+            Ok(self.recall.clone())
+        }
+    }
+
+    // After a successful turn, the dimensional summarize pass files each accepted
+    // summary as a `kind = "dimension"` episodic event.
+    #[tokio::test]
+    async fn dimension_pass_records_summaries_after_a_turn() {
+        let memory = RecordingMemory::new();
+        let dims = FixtureDimensions {
+            summaries: vec![agent_core::DimensionSummary {
+                dimension: "coding".into(),
+                summary: "wrote a parser".into(),
+                is_new: false,
+            }],
+            recall: vec![],
+        };
+        let agent = Arc::new(
+            Agent::new(
+                Arc::new(FnProvider::new(|_req: &CompletionRequest| final_turn("ok"))),
+                ToolRegistry::new(),
+                Arc::new(memory.clone()),
+                Arc::new(StaticContext),
+                Arc::new(crate::policy::AutoApprove),
+                Metrics::new(),
+                settings(false),
+            )
+            .with_dimension_store(Arc::new(dims)),
+        );
+        agent.run("do work").await.unwrap();
+        let dim_events: Vec<String> = memory
+            .events()
+            .into_iter()
+            .filter(|e| e.kind == "dimension")
+            .map(|e| e.message.content_text())
+            .collect();
+        assert!(
+            dim_events.iter().any(|c| c.contains("coding")),
+            "dimension summary not recorded: {dim_events:?}"
+        );
+    }
+
+    // Entering a mode pulls that mode's dimensions back in as a fresh system block.
+    #[tokio::test]
+    async fn mode_switch_recalls_dimensional_history() {
+        let dims = FixtureDimensions {
+            summaries: vec![],
+            recall: vec![agent_core::MemoryItem {
+                source: "dim:coding".into(),
+                content: "a prior coding note".into(),
+            }],
+        };
+        let agent = Arc::new(
+            Agent::new(
+                Arc::new(FnProvider::new(|_req: &CompletionRequest| final_turn("ok"))),
+                ToolRegistry::new(),
+                Arc::new(RecordingMemory::new()),
+                Arc::new(StaticContext),
+                Arc::new(crate::policy::AutoApprove),
+                Metrics::new(),
+                settings(false),
+            )
+            .with_task_classifier(Arc::new(FixedClassifier(TaskMode::Review, 0.95)))
+            .with_dimension_store(Arc::new(dims)),
+        );
+        let mut session = agent.session();
+        session.send("review this").await.unwrap();
+        let joined: String = session
+            .messages()
+            .iter()
+            .map(Message::content_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("Relevant history for review mode"),
+            "recalled dimensional block missing from the working set"
+        );
+        assert!(joined.contains("a prior coding note"));
+    }
+
+    // ---- SessionManager lifecycle ------------------------------------------
+
+    fn base_agent() -> Arc<Agent> {
+        Arc::new(Agent::new(
+            Arc::new(FnProvider::new(|_req: &CompletionRequest| final_turn("ok"))),
+            ToolRegistry::new(),
+            Arc::new(RecordingMemory::new()),
+            Arc::new(StaticContext),
+            Arc::new(crate::policy::AutoApprove),
+            Metrics::new(),
+            settings(false),
+        ))
+    }
+    fn key(user: &str, sess: &str) -> agent_core::SessionKey {
+        agent_core::SessionKey::parse(user, sess).unwrap()
+    }
+
+    #[test]
+    fn session_manager_get_or_create_is_idempotent() {
+        let mgr = SessionManager::new(base_agent());
+        assert!(mgr.is_empty());
+        let a = mgr.get_or_create(key("alice", "s1"));
+        let b = mgr.get_or_create(key("alice", "s1"));
+        assert!(Arc::ptr_eq(&a, &b), "same key must return the same session");
+        assert_eq!(mgr.len(), 1);
+        mgr.get_or_create(key("alice", "s2"));
+        assert_eq!(mgr.len(), 2);
+    }
+
+    #[test]
+    fn session_manager_total_cap_rejects_new_but_not_existing() {
+        let mgr = SessionManager::new(base_agent()).with_limits(1, 0);
+        assert!(mgr.admit(key("alice", "s1")).is_ok());
+        // A brand-new id beyond the cap is rejected (an amplification-spray guard)...
+        assert!(matches!(
+            mgr.admit(key("alice", "s2")),
+            Err(OpenError::TotalLimit(1))
+        ));
+        // ...but re-entering an already-live session is never throttled.
+        assert!(mgr.admit(key("alice", "s1")).is_ok());
+    }
+
+    #[test]
+    fn session_manager_per_user_cap_is_isolated() {
+        let mgr = SessionManager::new(base_agent()).with_limits(0, 1);
+        assert!(mgr.admit(key("alice", "s1")).is_ok());
+        assert!(matches!(
+            mgr.admit(key("alice", "s2")),
+            Err(OpenError::PerUserLimit(1))
+        ));
+        // A different user has its own budget.
+        assert!(mgr.admit(key("bob", "s1")).is_ok());
+    }
+
+    #[test]
+    fn session_manager_touch_and_remove() {
+        let mgr = SessionManager::new(base_agent());
+        mgr.get_or_create(key("alice", "s1"));
+        assert!(mgr.touch(&key("alice", "s1")));
+        assert!(!mgr.touch(&key("alice", "nope")), "absent key is not live");
+        mgr.remove(&key("alice", "s1"));
+        assert!(mgr.is_empty());
+        mgr.remove(&key("alice", "s1")); // absent remove is a no-op
+    }
+
+    #[test]
+    fn session_manager_reap_idle() {
+        let mgr = SessionManager::new(base_agent());
+        mgr.get_or_create(key("alice", "s1"));
+        // Nothing is idle beyond a long threshold.
+        assert_eq!(mgr.reap_idle(std::time::Duration::from_secs(3600)), 0);
+        assert_eq!(mgr.len(), 1);
+        // Everything is idle beyond zero → reaped.
+        assert_eq!(mgr.reap_idle(std::time::Duration::ZERO), 1);
+        assert!(mgr.is_empty());
+    }
+
+    #[tokio::test]
+    async fn session_registry_open_close_heartbeat() {
+        use agent_core::SessionRegistry;
+        let mgr = SessionManager::new(base_agent());
+        let sid = mgr.open("alice").await.unwrap();
+        assert_eq!(mgr.len(), 1);
+        let k = key("alice", sid.as_str());
+        assert!(mgr.heartbeat(&k).await.is_ok());
+        mgr.close(&k).await.unwrap();
+        assert!(mgr.is_empty());
+        // Heartbeat on a reaped/absent session errors; close stays best-effort Ok.
+        assert!(mgr.heartbeat(&k).await.is_err());
+        assert!(mgr.close(&k).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn session_registry_open_enforces_cap_and_rejects_bad_user() {
+        use agent_core::SessionRegistry;
+        let mgr = SessionManager::new(base_agent()).with_limits(1, 0);
+        assert!(mgr.open("alice").await.is_ok());
+        // Beyond the total cap → Overloaded (maps to gRPC RESOURCE_EXHAUSTED).
+        let err = mgr.open("bob").await.unwrap_err();
+        assert!(
+            matches!(err, agent_core::Error::Overloaded(_)),
+            "got {err:?}"
+        );
+        // Adversarial: a user id that isn't a safe path segment is rejected as Config.
+        let mgr2 = SessionManager::new(base_agent());
+        let bad = mgr2.open("../etc").await.unwrap_err();
+        assert!(matches!(bad, agent_core::Error::Config(_)), "got {bad:?}");
+    }
+
     /// Emits three tool calls on the first turn, then a final answer. The
     /// `EchoTool` sleeps per `sleep_ms`, so completion order differs from call
     /// order (t0 sleeps longest yet is requested first).
