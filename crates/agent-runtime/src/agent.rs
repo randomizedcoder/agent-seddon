@@ -2919,6 +2919,140 @@ mod tests {
         );
     }
 
+    // ---- Session state methods (load / add_context / is_started / compact) --
+
+    #[tokio::test]
+    async fn session_load_sets_started_and_messages() {
+        let agent = base_agent();
+        let mut session = agent.session();
+        assert!(!session.is_started());
+        session.load(vec![Message::system("s"), Message::user("hi")]);
+        assert!(session.is_started());
+        assert_eq!(session.messages().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn session_add_context_queues_before_start_then_applies_after() {
+        let agent = base_agent();
+        let mut session = agent.session();
+        // Before the first turn: queued, not yet in the working set.
+        session.add_context("skill body".into());
+        assert!(
+            session.messages().is_empty(),
+            "queued before the first turn"
+        );
+        session.send("go").await.unwrap();
+        // The queued block was drained into the working set during assembly.
+        let joined: String = session
+            .messages()
+            .iter()
+            .map(Message::content_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("skill body"), "queued context not applied");
+        // After start, add_context applies immediately.
+        let before = session.messages().len();
+        session.add_context("more".into());
+        assert_eq!(session.messages().len(), before + 1);
+    }
+
+    #[tokio::test]
+    async fn session_compact_runs_cleanly() {
+        let agent = base_agent();
+        let mut session = agent.session();
+        session.send("go").await.unwrap();
+        // StaticContext never compacts, but the manual `/compact` path must run.
+        session.compact().await.unwrap();
+    }
+
+    // ---- @-reference expansion ---------------------------------------------
+
+    #[cfg(feature = "reference")]
+    struct FixtureResolver;
+    #[cfg(feature = "reference")]
+    #[async_trait::async_trait]
+    impl agent_core::ReferenceResolver for FixtureResolver {
+        async fn resolve(&self, _prompt: &str, _budget: usize) -> agent_core::Resolution {
+            agent_core::Resolution {
+                blocks: vec![agent_core::ContextBlock {
+                    source: "@file.rs".into(),
+                    content: "fn main() {}".into(),
+                }],
+                warnings: vec!["one reference was truncated".into()],
+                blocked: false,
+            }
+        }
+    }
+
+    #[cfg(feature = "reference")]
+    #[tokio::test]
+    async fn reference_expansion_injects_resolved_blocks_on_continuation() {
+        let agent = Arc::new(
+            Agent::new(
+                Arc::new(FnProvider::new(|_req: &CompletionRequest| final_turn("ok"))),
+                ToolRegistry::new(),
+                Arc::new(RecordingMemory::new()),
+                Arc::new(StaticContext),
+                Arc::new(crate::policy::AutoApprove),
+                Metrics::new(),
+                settings(false),
+            )
+            .with_reference_resolver(Arc::new(FixtureResolver), 1000),
+        );
+        let mut session = agent.session();
+        session.send("first").await.unwrap();
+        // On a continuation turn, resolved references are injected as system context
+        // ahead of the new user message.
+        session.send("see @file.rs").await.unwrap();
+        let joined: String = session
+            .messages()
+            .iter()
+            .map(Message::content_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("fn main() {}"),
+            "the resolved reference block was not injected"
+        );
+    }
+
+    // ---- hooks (pre_turn fires) --------------------------------------------
+
+    struct CountingHook(Arc<std::sync::atomic::AtomicUsize>);
+    #[async_trait::async_trait]
+    impl agent_core::Hook for CountingHook {
+        fn name(&self) -> &str {
+            "counting"
+        }
+        async fn pre_turn(&self, _working: &WorkingSet) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn hooks_pre_turn_fires_each_iteration() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut hooks = agent_core::HookRegistry::new();
+        hooks.register(Arc::new(CountingHook(calls.clone())));
+        let agent = Arc::new(
+            Agent::new(
+                Arc::new(FnProvider::new(|_req: &CompletionRequest| final_turn("ok"))),
+                ToolRegistry::new(),
+                Arc::new(RecordingMemory::new()),
+                Arc::new(StaticContext),
+                Arc::new(crate::policy::AutoApprove),
+                Metrics::new(),
+                settings(false),
+            )
+            .with_hooks(hooks),
+        );
+        agent.run("go").await.unwrap();
+        assert!(
+            calls.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "the pre_turn hook did not fire"
+        );
+    }
+
     /// Emits three tool calls on the first turn, then a final answer. The
     /// `EchoTool` sleeps per `sleep_ms`, so completion order differs from call
     /// order (t0 sleeps longest yet is requested first).
