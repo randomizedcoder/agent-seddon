@@ -3,7 +3,7 @@
 //! walk. This is the cheapest, highest-value grounded fact (increment 3).
 
 use crate::collector::{CollectCtx, CollectorOutput, FactCollector, FactFragment};
-use crate::util::{bound, forge_host, is_noisy, lang_of, parse_remote};
+use crate::util::{bound, confined_relative, forge_host, is_noisy, lang_of, parse_remote};
 use agent_core::{
     fnv1a_hex, ChangeSet, ChangedFile, ForgeHost, GitState, RepoLanguage, RepoRelation,
     ReviewCommit,
@@ -151,13 +151,6 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
-}
-
-/// Validate a repo-relative path stays inside the repo (via `confine`), returning
-/// the original relative path for display. `None` ⇒ it escapes and is dropped.
-fn confined_relative(root: &Path, rel: &Path) -> Option<PathBuf> {
-    let s = rel.to_str()?;
-    agent_core::confine(root, s).ok().map(|_| rel.to_path_buf())
 }
 
 async fn build_git_state(ctx: &CollectCtx, files: &[PathBuf]) -> GitState {

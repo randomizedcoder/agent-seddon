@@ -3,7 +3,7 @@
 //! widening those crates' public surface for an ~18-line map and a validator.
 
 use agent_core::ForgeHost;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Extension → coarse language label (a copy of `agent-search`'s private map).
 pub(crate) fn lang_of(path: &Path) -> String {
@@ -35,6 +35,24 @@ pub(crate) fn lang_of(path: &Path) -> String {
 /// — blocking path traversal and ref injection in a caller-supplied branch name.
 pub(crate) fn safe_segment(s: &str) -> bool {
     agent_core::safe_segment(s)
+}
+
+/// Confine a git-reported repo-relative path to the repo (blocks symlink/`..`
+/// escape from untrusted history via `agent_core::confine`) and return the
+/// *original relative* string for display/matching. `None` ⇒ it escapes and is
+/// dropped.
+pub(crate) fn confined(root: &Path, rel: &Path) -> Option<String> {
+    let s = rel.to_str()?;
+    if agent_core::confine(root, s).is_err() {
+        return None;
+    }
+    Some(s.to_string())
+}
+
+/// Like [`confined`], but returns the confined path as a [`PathBuf`]. `None` ⇒
+/// it escapes and is dropped.
+pub(crate) fn confined_relative(root: &Path, rel: &Path) -> Option<PathBuf> {
+    confined(root, rel).map(PathBuf::from)
 }
 
 /// A "noisy" file whose *content diff* is low-signal for a reviewer — a lockfile

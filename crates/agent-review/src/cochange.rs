@@ -22,7 +22,7 @@
 //! `skipped`, never a blocked bundle.
 
 use crate::collector::{CollectCtx, CollectorOutput, FactCollector, FactFragment};
-use crate::util::{bound, is_noisy};
+use crate::util::{bound, confined, is_noisy};
 use agent_core::{CoChangeEntry, CoChangePartner, CoChangeReport, CommitTouch};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -215,17 +215,6 @@ fn compute(
         entries,
         missing_partners,
     }
-}
-
-/// Confine a git-reported repo-relative path to the repo (blocks symlink/`..`
-/// escape from untrusted history) and return the *original relative* string for
-/// display/matching. `None` ⇒ it escapes and is dropped.
-fn confined(root: &Path, rel: &Path) -> Option<String> {
-    let s = rel.to_str()?;
-    if agent_core::confine(root, s).is_err() {
-        return None;
-    }
-    Some(s.to_string())
 }
 
 #[cfg(test)]
