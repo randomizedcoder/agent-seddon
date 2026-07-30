@@ -29,13 +29,8 @@ impl GrpcMemory {
 impl MemoryStore for GrpcMemory {
     async fn recall(&self, query: &RecallQuery) -> Result<Vec<MemoryItem>> {
         let pbreq = pb::RecallQuery::from(query.clone());
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = pbreq.clone();
-            async move { client.recall(outbound(r)).await }
-        })
-        .await
-        .map_err(|s| agent_core::Error::Memory(s.to_string()))?;
+        let resp =
+            unary!(self, recall, pbreq).map_err(|s| agent_core::Error::Memory(s.to_string()))?;
         Ok(resp
             .into_inner()
             .items
@@ -46,13 +41,7 @@ impl MemoryStore for GrpcMemory {
 
     async fn append(&self, event: MemoryEvent) -> Result<()> {
         let pbreq = pb::MemoryEvent::from(event);
-        call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = pbreq.clone();
-            async move { client.append(outbound(r)).await }
-        })
-        .await
-        .map_err(|s| agent_core::Error::Memory(s.to_string()))?;
+        unary!(self, append, pbreq).map_err(|s| agent_core::Error::Memory(s.to_string()))?;
         Ok(())
     }
 
@@ -159,13 +148,8 @@ impl agent_core::SemanticStore for GrpcSemantic {
     async fn recall(&self, query: &RecallQuery) -> Result<Vec<MemoryItem>> {
         let req = pb::RecallQuery::from(query.clone());
         // A pure read, so retrying a blip is free.
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.recall(outbound(r)).await }
-        })
-        .await
-        .map_err(|s| agent_core::Error::Memory(s.to_string()))?;
+        let resp =
+            unary!(self, recall, req).map_err(|s| agent_core::Error::Memory(s.to_string()))?;
         Ok(resp
             .into_inner()
             .items

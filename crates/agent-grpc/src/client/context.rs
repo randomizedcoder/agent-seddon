@@ -32,13 +32,8 @@ impl GrpcContext {
 impl ContextStrategy for GrpcContext {
     async fn assemble(&self, input: ContextInput) -> Result<Vec<Message>> {
         let pbreq = pb::ContextInput::from(input);
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = pbreq.clone();
-            async move { client.assemble(outbound(r)).await }
-        })
-        .await
-        .map_err(|s| agent_core::Error::Provider(s.to_string()))?;
+        let resp = unary!(self, assemble, pbreq)
+            .map_err(|s| agent_core::Error::Provider(s.to_string()))?;
         resp.into_inner()
             .messages
             .into_iter()
@@ -68,14 +63,9 @@ impl ContextStrategy for GrpcContext {
             from_mode,
             to_mode,
         };
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.compact(outbound(r)).await }
-        })
-        .await
-        .map_err(|s| agent_core::Error::Provider(s.to_string()))?
-        .into_inner();
+        let resp = unary!(self, compact, req)
+            .map_err(|s| agent_core::Error::Provider(s.to_string()))?
+            .into_inner();
         let action = resp
             .stats
             .as_ref()

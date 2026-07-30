@@ -52,13 +52,8 @@ impl ReviewCollector for GrpcReview {
         let req = pb::ReviewCollectRequest {
             target: encode_target(target),
         };
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.collect(outbound(r)).await }
-        })
-        .await
-        .map_err(|s| Error::Repo(format!("review collect: {s}")))?;
+        let resp =
+            unary!(self, collect, req).map_err(|s| Error::Repo(format!("review collect: {s}")))?;
         Ok(resp.into_inner().into())
     }
 }

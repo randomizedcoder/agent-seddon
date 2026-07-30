@@ -62,12 +62,7 @@ impl Scanner for GrpcScanner {
         // Scanning is a pure read with no side effects, so retrying a transient
         // blip is free and strictly reduces how often we fall through to the
         // fail-open path below.
-        let out = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.scan(outbound(r)).await }
-        })
-        .await;
+        let out = unary!(self, scan, req);
 
         match out {
             Ok(resp) => {

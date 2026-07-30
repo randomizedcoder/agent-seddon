@@ -31,23 +31,13 @@ impl GrpcMetricsProxy {
 impl MetricsProxy for GrpcMetricsProxy {
     async fn query(&self, q: &PromQuery) -> Result<PromResult> {
         let req = pb::PromQuery::from(q.clone());
-        let res = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.query(outbound(r)).await }
-        })
-        .await;
+        let res = unary!(self, query, req);
         Ok(soft(res))
     }
 
     async fn query_range(&self, q: &PromRangeQuery) -> Result<PromResult> {
         let req = pb::PromRangeQuery::from(q.clone());
-        let res = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.query_range(outbound(r)).await }
-        })
-        .await;
+        let res = unary!(self, query_range, req);
         Ok(soft(res))
     }
 }

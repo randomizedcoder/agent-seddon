@@ -88,25 +88,13 @@ impl Scheduler for GrpcScheduler {
         let req = pb::SchedJobRef { id: id.to_string() };
         // Idempotent: cancelling twice is a no-op that reports `false` the second
         // time, so a retry is safe.
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.cancel(outbound(r)).await }
-        })
-        .await
-        .map_err(err)?;
+        let resp = unary!(self, cancel, req).map_err(err)?;
         Ok(resp.into_inner().cancelled)
     }
 
     async fn history(&self, id: &str) -> Result<Vec<Run>> {
         let req = pb::SchedJobRef { id: id.to_string() };
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.history(outbound(r)).await }
-        })
-        .await
-        .map_err(err)?;
+        let resp = unary!(self, history, req).map_err(err)?;
         Ok(resp.into_inner().runs.into_iter().map(Into::into).collect())
     }
 }

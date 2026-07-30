@@ -106,13 +106,8 @@ impl Embedder for GrpcEmbed {
             text: text.to_string(),
         };
         // Deterministic and side-effect free, so a retry is free.
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.embed_query(outbound(r)).await }
-        })
-        .await
-        .map_err(|s| agent_core::Error::Search(format!("embed_query: {s}")))?;
+        let resp = unary!(self, embed_query, req)
+            .map_err(|s| agent_core::Error::Search(format!("embed_query: {s}")))?;
         self.check(resp.into_inner().values)
     }
 
@@ -120,13 +115,8 @@ impl Embedder for GrpcEmbed {
         let req = pb::EmbDocsRequest {
             texts: texts.to_vec(),
         };
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.embed_docs(outbound(r)).await }
-        })
-        .await
-        .map_err(|s| agent_core::Error::Search(format!("embed_docs: {s}")))?;
+        let resp = unary!(self, embed_docs, req)
+            .map_err(|s| agent_core::Error::Search(format!("embed_docs: {s}")))?;
         let vectors = resp.into_inner().vectors;
         // A short or long batch would silently misalign vectors with their
         // documents — every subsequent recall would return the wrong text.

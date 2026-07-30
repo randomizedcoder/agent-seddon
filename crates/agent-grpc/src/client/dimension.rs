@@ -33,12 +33,7 @@ impl DimensionStore for GrpcDimensions {
         let req = pb::SummarizeRequest {
             events: events.iter().cloned().map(Into::into).collect(),
         };
-        let res = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.summarize(outbound(r)).await }
-        })
-        .await;
+        let res = unary!(self, summarize, req);
         match res {
             Ok(resp) => Ok(resp
                 .into_inner()
@@ -58,12 +53,7 @@ impl DimensionStore for GrpcDimensions {
             dimension: dimension.to_string(),
             limit: limit as u32,
         };
-        let res = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.recall(outbound(r)).await }
-        })
-        .await;
+        let res = unary!(self, recall, req);
         match res {
             Ok(resp) => Ok(resp
                 .into_inner()

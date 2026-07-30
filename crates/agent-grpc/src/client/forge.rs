@@ -178,13 +178,7 @@ impl TaskTracker for GrpcTasks {
         };
         // Idempotent: `write` swaps the whole list, so a repeat sets the same
         // state rather than accumulating.
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.write(outbound(r)).await }
-        })
-        .await
-        .map_err(terr)?;
+        let resp = unary!(self, write, req).map_err(terr)?;
         Ok(resp
             .into_inner()
             .todos
@@ -197,13 +191,7 @@ impl TaskTracker for GrpcTasks {
         let req = pb::TaskUpdateRequest::from(patch);
         // Also idempotent: a patch sets fields to given values rather than
         // incrementing anything.
-        let resp = call_retry(&self.retry, || {
-            let mut client = self.client.clone();
-            let r = req.clone();
-            async move { client.update(outbound(r)).await }
-        })
-        .await
-        .map_err(terr)?;
+        let resp = unary!(self, update, req).map_err(terr)?;
         Ok(resp
             .into_inner()
             .todos
