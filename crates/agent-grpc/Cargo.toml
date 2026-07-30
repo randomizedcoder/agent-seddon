@@ -1,6 +1,7 @@
 [package]
 name = "agent-grpc"
 version.workspace = true
+publish.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "gRPC transport for the agent-seddon seams: per-seam servers + clients over TCP or unix domain sockets"
