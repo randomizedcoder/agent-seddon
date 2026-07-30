@@ -2709,6 +2709,216 @@ mod tests {
         assert!(matches!(bad, agent_core::Error::Config(_)), "got {bad:?}");
     }
 
+    // ---- seam accessors (--serve-<seam>) -----------------------------------
+
+    // Every accessor is a clone-and-return; call them all on a base agent so the
+    // lines are exercised and none panics. The confirmed-optional seams are None
+    // when unwired.
+    #[test]
+    fn seam_accessors_are_callable_on_a_base_agent() {
+        let agent = base_agent();
+        let _ = agent.provider();
+        let _ = agent.memory();
+        let _ = agent.metrics();
+        let _ = agent.context();
+        let _ = agent.policy();
+        let _ = agent.tools();
+        let _ = agent.grpc_max_in_flight();
+        let _ = agent.semantic();
+        let _ = agent.episodic();
+        let _ = agent.session_source_registry();
+        let _ = agent.repo();
+        let _ = agent.tokenizer();
+        let _ = agent.web();
+        let _ = agent.web_search();
+        let _ = agent.sandbox();
+        let _ = agent.pty();
+        let _ = agent.forge();
+        let _ = agent.tasks();
+        let _ = agent.lsp();
+        let _ = agent.embedder();
+        let _ = agent.llm_pool();
+        let _ = agent.metrics_proxy();
+        let _ = agent.prompt_store();
+        let _ = agent.dimension_store();
+        let _ = agent.task_classifier();
+        // Confirmed-optional, unwired ⇒ None.
+        assert!(agent.search().is_none());
+        assert!(agent.scanner().is_none());
+        assert!(agent.review_collector().is_none());
+    }
+
+    // ---- tool-call verifier (enforce vs shadow) ----------------------------
+
+    struct FixedVerifier(agent_core::VerifyVerdict);
+    #[async_trait::async_trait]
+    impl agent_core::Verifier for FixedVerifier {
+        fn name(&self) -> &str {
+            "fixed-verifier"
+        }
+        async fn verify(&self, _ctx: &agent_core::VerifyCtx<'_>) -> agent_core::VerifierReport {
+            agent_core::VerifierReport {
+                verdict: self.0.clone(),
+                confidence: 0.9,
+                model: "fixed".into(),
+            }
+        }
+    }
+
+    fn agent_with_verifier(
+        verdict: agent_core::VerifyVerdict,
+        enforce: bool,
+        memory: RecordingMemory,
+    ) -> Arc<Agent> {
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(EchoTool));
+        Arc::new(
+            Agent::new(
+                Arc::new(ScriptedProvider::new(vec![
+                    tool_turn(vec![ToolCall {
+                        id: "t0".into(),
+                        name: "echo".into(),
+                        arguments: json!({"val": "ran"}),
+                    }]),
+                    final_turn("done"),
+                ])),
+                tools,
+                Arc::new(memory),
+                Arc::new(StaticContext),
+                Arc::new(crate::policy::AutoApprove),
+                Metrics::new(),
+                settings(false),
+            )
+            .with_verifier(Arc::new(FixedVerifier(verdict)), enforce),
+        )
+    }
+
+    fn tool_result_texts(memory: &RecordingMemory) -> Vec<String> {
+        memory
+            .events()
+            .into_iter()
+            .filter(|e| e.kind == "tool")
+            .map(|e| e.message.content_text())
+            .collect()
+    }
+
+    // Enforce + Deny: the call never runs; the block message is fed back.
+    #[tokio::test]
+    async fn verifier_enforce_deny_blocks_the_call() {
+        let memory = RecordingMemory::new();
+        let agent = agent_with_verifier(
+            agent_core::VerifyVerdict::Deny("nope".into()),
+            true,
+            memory.clone(),
+        );
+        assert_eq!(agent.run("go").await.unwrap(), "done");
+        let msgs = tool_result_texts(&memory);
+        assert!(
+            msgs.iter().any(|c| c.contains("blocked by the verifier")),
+            "expected a verifier block, got: {msgs:?}"
+        );
+        assert!(
+            !msgs.iter().any(|c| c.contains("ran")),
+            "the tool ran despite an enforce-mode deny"
+        );
+    }
+
+    // Enforce + Revise: the call is skipped and the revise hint is fed back.
+    #[tokio::test]
+    async fn verifier_enforce_revise_feeds_back_and_skips() {
+        let memory = RecordingMemory::new();
+        let agent = agent_with_verifier(
+            agent_core::VerifyVerdict::Revise("tighten the args".into()),
+            true,
+            memory.clone(),
+        );
+        assert_eq!(agent.run("go").await.unwrap(), "done");
+        let msgs = tool_result_texts(&memory);
+        assert!(
+            msgs.iter()
+                .any(|c| c.contains("asks you to revise") && c.contains("tighten the args")),
+            "expected a revise hint, got: {msgs:?}"
+        );
+        assert!(
+            !msgs.iter().any(|c| c.contains("ran")),
+            "the tool ran despite an enforce-mode revise"
+        );
+    }
+
+    // Shadow: a Deny verdict is only observed — the call still runs.
+    #[tokio::test]
+    async fn verifier_shadow_observes_but_allows_the_call() {
+        let memory = RecordingMemory::new();
+        let agent = agent_with_verifier(
+            agent_core::VerifyVerdict::Deny("nope".into()),
+            false,
+            memory.clone(),
+        );
+        assert_eq!(agent.run("go").await.unwrap(), "done");
+        let msgs = tool_result_texts(&memory);
+        assert!(
+            msgs.iter().any(|c| c.contains("ran")),
+            "shadow mode must not block the call, got: {msgs:?}"
+        );
+    }
+
+    // ---- review-in-loop (collect grounded facts on entering Review) ---------
+
+    #[cfg(feature = "review")]
+    struct FixtureReview;
+    #[cfg(feature = "review")]
+    #[async_trait::async_trait]
+    impl agent_core::ReviewCollector for FixtureReview {
+        fn name(&self) -> &str {
+            "fixture-review"
+        }
+        async fn collect(
+            &self,
+            _target: &agent_core::ReviewTarget,
+        ) -> agent_core::Result<agent_core::ReviewFacts> {
+            Ok(agent_core::ReviewFacts::default())
+        }
+    }
+
+    #[cfg(feature = "review")]
+    #[tokio::test]
+    async fn review_in_loop_collects_on_switch_to_review() {
+        let memory = RecordingMemory::new();
+        let mut s = settings(false);
+        s.review_in_loop = true;
+        let agent = Arc::new(
+            Agent::new(
+                Arc::new(FnProvider::new(|_req: &CompletionRequest| final_turn("ok"))),
+                ToolRegistry::new(),
+                Arc::new(memory.clone()),
+                Arc::new(StaticContext),
+                Arc::new(crate::policy::AutoApprove),
+                Metrics::new(),
+                s,
+            )
+            .with_task_classifier(Arc::new(FixedClassifier(TaskMode::Review, 0.95)))
+            .with_review_collector(Arc::new(FixtureReview)),
+        );
+        let mut session = agent.session();
+        session.send("review this").await.unwrap();
+        // Entering review recorded a review run...
+        assert!(
+            memory.events().into_iter().any(|e| e.kind == "review"),
+            "entering review must record a review run"
+        );
+        // ...and injected the rendered grounded-facts block into the working set.
+        let joined: String = session
+            .messages()
+            .iter()
+            .map(Message::content_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("Grounded review facts"),
+            "review facts were not injected into the working set"
+        );
+    }
+
     /// Emits three tool calls on the first turn, then a final answer. The
     /// `EchoTool` sleeps per `sleep_ms`, so completion order differs from call
     /// order (t0 sleeps longest yet is requested first).
