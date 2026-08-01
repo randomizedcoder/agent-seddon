@@ -9,6 +9,8 @@ mod git;
 pub mod hooks;
 mod metered;
 mod policy;
+#[cfg(feature = "recall")]
+pub mod recall;
 mod registry;
 #[cfg(feature = "search")]
 mod search;
