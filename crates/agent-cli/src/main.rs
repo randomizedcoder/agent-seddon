@@ -95,6 +95,9 @@ async fn main() -> Result<()> {
             Mode::ServeGrpcAll(_) => {
                 format!("127.0.0.1:{}", agent_grpc::constants::GATEWAY.metrics_port)
             }
+            Mode::ServeSessions(_) => {
+                format!("127.0.0.1:{}", agent_grpc::constants::SESSIONS.metrics_port)
+            }
             _ => config.metrics.listen.clone(),
         };
         metrics_server::serve(metrics.clone(), &listen);
@@ -116,6 +119,13 @@ async fn main() -> Result<()> {
     };
     let serve_grpc_all_listen: Option<agent_grpc::Endpoint> = match &mode {
         Mode::ServeGrpcAll(listen) => Some(grpc_server::resolve_gateway_listen(
+            &config,
+            listen.as_deref(),
+        )),
+        _ => None,
+    };
+    let serve_sessions_listen: Option<agent_grpc::Endpoint> = match &mode {
+        Mode::ServeSessions(listen) => Some(grpc_server::resolve_sessions_listen(
             &config,
             listen.as_deref(),
         )),
@@ -283,6 +293,12 @@ async fn main() -> Result<()> {
                 let listen = serve_grpc_all_listen.expect("gateway target resolved above");
                 grpc_server::serve_all(&agent, listen).await.map(|()| None)
             }
+            Mode::ServeSessions(..) => {
+                let listen = serve_sessions_listen.expect("sessions target resolved above");
+                grpc_server::serve_sessions(agent.clone(), listen)
+                    .await
+                    .map(|()| None)
+            }
         }
     })
     .await;
@@ -406,6 +422,10 @@ enum Mode {
     /// Host **every** seam over gRPC from one process (`--serve-all`), with an
     /// optional listen override. Seams whose impl is disabled are skipped.
     ServeGrpcAll(Option<String>),
+    /// Host the opt-in **sessions gateway** (`--serve-sessions`): the
+    /// `SessionRegistryService` + a *driving* `AgentSessionService` (the `Send` RPC)
+    /// + the idle-GC reaper. `--serve-mcp`-class; loopback/UDS-gated (docs/design/portal).
+    ServeSessions(Option<String>),
     /// Drive the scheduler: tick on an interval, firing due jobs (parity spec 28).
     Scheduler,
     /// Collect grounded review facts for a target and print them
@@ -459,6 +479,7 @@ fn parse_args() -> Result<Args> {
     let mut serve_mcp = false;
     let mut serve_grpc: Option<grpc_server::Seam> = None;
     let mut serve_grpc_all = false;
+    let mut serve_sessions = false;
     let mut listen: Option<String> = None;
     let mut review_target: Option<String> = None;
     let mut review_gate = false;
@@ -481,6 +502,7 @@ fn parse_args() -> Result<Args> {
             "--scheduler" => scheduler_mode = true,
             "--serve-mcp" => serve_mcp = true,
             "--serve-all" => serve_grpc_all = true,
+            "--serve-sessions" => serve_sessions = true,
             "--review" => {
                 review_target = Some(
                     args.next()
@@ -514,6 +536,7 @@ fn parse_args() -> Result<Args> {
                      --serve-mcp         run as an MCP server over stdio (exposes a `run` tool)\n  \
                      --serve-<seam>      host one seam over gRPC; <seam> = {seams}\n  \
                      --serve-all         host every enabled seam over gRPC from one process\n  \
+                     --serve-sessions    host the sessions gateway (SessionRegistry + driving AgentSession + reaper)\n  \
                      --listen ADDR       override the gRPC listen address (host:port or unix:/path)",
                     seams = grpc_server::Seam::flag_names()
                 );
@@ -528,6 +551,8 @@ fn parse_args() -> Result<Args> {
         Mode::Scheduler
     } else if serve_grpc_all {
         Mode::ServeGrpcAll(listen)
+    } else if serve_sessions {
+        Mode::ServeSessions(listen)
     } else if let Some(seam) = serve_grpc {
         Mode::ServeGrpc(seam, listen)
     } else if serve_mcp {

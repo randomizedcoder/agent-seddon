@@ -206,6 +206,18 @@
       metrics_port = 9629;
     };
 
+    # NOT a seam: the opt-in `agent --serve-sessions` gateway (docs/design/portal),
+    # which hosts the `SessionRegistryService` (open/close/heartbeat) plus a
+    # *driving* `AgentSessionService` (the `Send` RPC — submit a goal, stream the
+    # run) over a `SessionManager`, and runs the idle-GC reaper. Kept off the seam
+    # range and off `--serve-all` because `Send` is `--serve-mcp`-class arbitrary
+    # execution; its own socket lets the operator gate it with file permissions.
+    sessions = {
+      port = 50080;
+      socket = "/tmp/agent-seddon/sessions.sock";
+      metrics_port = 9630;
+    };
+
     # NOT a seam: the `agent --serve-all` gateway, which hosts every seam's
     # service in one process on one endpoint. A same-host deployment that wants
     # all seams distributed would otherwise run one process (and one port) per
