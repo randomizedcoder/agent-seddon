@@ -103,7 +103,7 @@ session-export = ["agent-tools/tool-session-export"]
 # Cross-session recall: a tantivy index over saved session transcripts (the
 # `SessionCorpus` document source), reusing the `search` seam. See parity spec 20.
 # The `session_recall` tool is added in the next increment.
-recall = ["search", "dep:agent-export"]
+recall = ["search", "dep:agent-export", "agent-tools/tool-session-recall"]
 # Skill authoring: the agent writes a reusable SKILL.md (parity spec 30).
 skill-write = ["agent-tools/tool-skill-write"]
 # Forge: GitHub/GitLab PRs, issues, reviews. See parity spec 27.

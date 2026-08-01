@@ -185,6 +185,23 @@ pub async fn build_agent_with(
         dispatch
     };
 
+    // Cross-session recall (parity spec 20): a tantivy index over the agent's own
+    // past session transcripts, exposed as the `session_recall` tool. Opt-in — a
+    // fresh checkout has no history worth searching. The backend is metered under
+    // the `recall` label (reusing the search families) and its startup freshness
+    // reindex is kicked off below. Registered before the subagent set is captured.
+    #[cfg(feature = "recall")]
+    if cfg.recall.enabled {
+        let backend = crate::recall::build_recall_backend(&cfg.recall, &cfg.agent.working_dir)
+            .context("building cross-session recall backend")?;
+        let backend = crate::metered::search(backend, metrics.clone(), "recall");
+        let tool = Arc::new(agent_tools::SessionRecallTool::new(backend.clone()));
+        tools.register(crate::metered::tool(tool, metrics.clone()));
+        if cfg.recall.auto_index {
+            crate::recall::spawn_freshness(backend);
+        }
+    }
+
     // Git: build the configured RepoBackend (scoped to this session's run dir) and
     // expose the multi-branch git tools (git_read/git_diff/git_worktree/…).
     // Registered before the subagent set is captured so child agents inherit them;
@@ -1142,6 +1159,7 @@ fn is_builder_registered_tool(name: &str) -> bool {
     (cfg!(feature = "tool-core") && name == "bash")
         || (cfg!(feature = "tool-metrics") && name == "metrics")
         || (cfg!(feature = "search") && (name == "search" || name == "index_ls"))
+        || (cfg!(feature = "recall") && name == "session_recall")
         || (cfg!(feature = "subagents") && name == "delegate")
         || (cfg!(feature = "git") && name.starts_with("git_"))
         || (cfg!(feature = "web") && name == "web_fetch")

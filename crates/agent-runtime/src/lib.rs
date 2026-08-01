@@ -26,6 +26,8 @@ pub use agent::{Agent, OpenError, Session, SessionManager, Settings};
 pub use agent_metrics::Metrics;
 pub use builder::{build_agent, build_agent_with};
 pub use config::Config;
+#[cfg(feature = "recall")]
+pub use config::RecallCfg;
 pub use registry::{register_builtins, Registry};
 pub use session_events::{SessionEvents, SessionEventsRegistry};
 

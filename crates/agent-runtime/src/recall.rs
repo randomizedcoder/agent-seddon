@@ -138,6 +138,28 @@ pub fn build_recall_backend(
     Ok(Arc::new(backend))
 }
 
+/// Kick off a background freshness check for the recall `backend`: reindex if the
+/// corpus has changed since the last build. The backend is already metered, so
+/// `status`/`reindex` emit their metrics; queries serve the last committed
+/// snapshot meanwhile (serve-stale). Mirrors [`crate::search::spawn_freshness`]
+/// for the single recall backend.
+pub fn spawn_freshness(backend: Arc<dyn SearchBackend>) {
+    tokio::spawn(async move {
+        match backend.status().await {
+            Ok(st) if st.state == agent_core::IndexState::Fresh => {
+                tracing::debug!(files = st.indexed_files, "recall index fresh");
+            }
+            Ok(st) => {
+                tracing::info!(state = ?st.state, "recall index not fresh — reindexing sessions");
+                if let Err(e) = backend.reindex(&|_p| {}).await {
+                    tracing::warn!(error = %e, "recall reindex failed");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "recall status check failed"),
+        }
+    });
+}
+
 fn stamp(meta: &std::fs::Metadata) -> FileStamp {
     let mtime_ms = meta
         .modified()

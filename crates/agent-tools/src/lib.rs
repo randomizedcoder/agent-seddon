@@ -45,6 +45,11 @@ mod search_index;
 #[cfg(feature = "tool-search-index")]
 pub use search_index::{IndexLsTool, SearchTool};
 
+#[cfg(feature = "tool-session-recall")]
+mod session_recall;
+#[cfg(feature = "tool-session-recall")]
+pub use session_recall::SessionRecallTool;
+
 #[cfg(feature = "tool-git")]
 mod git;
 #[cfg(feature = "tool-git")]
