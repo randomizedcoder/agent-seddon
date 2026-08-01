@@ -322,6 +322,46 @@ impl SessionManager {
     }
 }
 
+/// Fire-and-forget goal submission for the portal's `Send` RPC (observed via the event
+/// sink, not the return value). The returned [`agent_core::RunHandle`] owns the run's
+/// cancel channel, so dropping it — which the `Send` response stream does on client
+/// disconnect — cancels the in-flight run.
+impl agent_core::RunStarter for SessionHandle {
+    fn start(&self, goal: String) -> agent_core::RunHandle {
+        let (cancel_tx, cancel) = oneshot::channel();
+        // `done` is ignored — run completion is observed as a `RunFinished` event.
+        let (done, _done_rx) = oneshot::channel();
+        // Best-effort enqueue: if the actor is gone or its queue is full the run simply
+        // does not start (the stream then carries only the snapshot). Dropping the
+        // returned handle drops `cancel_tx`, which the actor observes as cancellation.
+        let _ = self.tx.try_send(SessionCommand::Run { goal, cancel, done });
+        agent_core::RunHandle::new(cancel_tx)
+    }
+}
+
+/// The **write** seam behind the portal's `AgentSessionService.Send` (docs/design/portal):
+/// admit-or-resolve the session for `key` and hand back its live event source + a run
+/// starter. Capacity rejection maps to [`agent_core::DriverError`] (→ `RESOURCE_EXHAUSTED`).
+impl agent_core::SessionDriver for SessionManager {
+    fn session_for(
+        &self,
+        key: agent_core::SessionKey,
+    ) -> std::result::Result<agent_core::DriverSession, agent_core::DriverError> {
+        let handle = self.admit(key.clone()).map_err(|e| match e {
+            OpenError::PerUserLimit(n) => agent_core::DriverError::PerUserLimit(n),
+            OpenError::TotalLimit(n) => agent_core::DriverError::TotalLimit(n),
+        })?;
+        // The session's actor built its sink via `session_with` → `events.get_or_create`,
+        // so this resolves the *same* sink the loop publishes into (idempotent lookup).
+        let source: Arc<dyn agent_core::SessionSource> =
+            self.backend.events.get_or_create(key.session.as_str());
+        Ok(agent_core::DriverSession {
+            source,
+            runner: Arc::new(handle),
+        })
+    }
+}
+
 /// The wire lifecycle seam over the live-session map (docs/design/multi-session/05):
 /// `open` **server-mints** the session id (an unguessable `Uuid`, removing client-chosen
 /// id collision/prediction), `close` frees state, `heartbeat` keeps a quiet session warm.
