@@ -3,8 +3,11 @@
 // deltas, tool-call start/result, mode switches, and context-size updates — plus a
 // one-shot status snapshot for the status bar.
 //
-// Observe-only. It does not (in this increment) drive the agent; a future `Send`
-// RPC that runs a goal remotely would carry the `--serve-mcp`-class caveat.
+// `Subscribe`/`Snapshot` are observe-only. `Send` additionally *drives* the agent —
+// submit a goal and stream the run — and carries the `--serve-mcp`-class caveat
+// (arbitrary agent execution): it is opt-in (only the `--serve-sessions` gateway
+// enables it, never `--serve-all`), loopback/UDS-gated, and its `(user, session)`
+// identity rides gRPC metadata (docs/design/multi-session/07-security.md).
 syntax = "proto3";
 
 package agent.v1;
@@ -14,6 +17,11 @@ service AgentSessionService {
   rpc Subscribe(SubscribeRequest) returns (stream SessionEvent);
   // The current session state, one-shot.
   rpc Snapshot(SnapshotRequest) returns (StatusSnapshot);
+  // Submit a goal and stream the run live (same `SessionEvent` shape as Subscribe,
+  // beginning with a `status_snapshot` and ending on `run_finished`). Dropping the
+  // stream (client disconnect) cancels the in-flight run. `--serve-mcp`-class — see
+  // the header note. UNIMPLEMENTED on an observe-only endpoint (no session driver).
+  rpc Send(GoalRequest) returns (stream SessionEvent);
 }
 
 // `session_id` selects which live session to observe when the server multiplexes
@@ -27,6 +35,14 @@ message SubscribeRequest {
 }
 message SnapshotRequest {
   string session_id = 1;
+}
+
+// The goal to run, for `Send`. The driven session's `(user, session)` identity comes
+// from gRPC metadata (the capacity-attributed tenant key); `session_id` is reserved
+// for a future explicit-selector path and must be empty in this increment.
+message GoalRequest {
+  string goal = 1;
+  string session_id = 2;
 }
 
 message RunStarted { string goal = 1; }

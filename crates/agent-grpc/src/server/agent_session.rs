@@ -8,7 +8,7 @@
 use std::pin::Pin;
 use std::sync::Arc;
 
-use agent_core::{SessionSource, SessionSourceRegistry};
+use agent_core::{SessionDriver, SessionSource, SessionSourceRegistry};
 use agent_proto::{pb, snapshot_event};
 use futures_util::{Stream, StreamExt};
 use tonic::transport::server::Router;
@@ -20,11 +20,26 @@ use super::span;
 
 pub struct AgentSessionSvc {
     registry: Arc<dyn SessionSourceRegistry>,
+    /// The optional **write** side: admit-or-resolve a session and drive a goal. `None`
+    /// on an observe-only endpoint (`--serve-all`, the observe sidecar) ⇒ `Send` is
+    /// `UNIMPLEMENTED`. Only the opt-in `--serve-sessions` gateway sets it (via
+    /// [`Self::with_driver`]), because `Send` is `--serve-mcp`-class arbitrary execution.
+    driver: Option<Arc<dyn SessionDriver>>,
 }
 
 impl AgentSessionSvc {
     pub fn new(registry: Arc<dyn SessionSourceRegistry>) -> Self {
-        Self { registry }
+        Self {
+            registry,
+            driver: None,
+        }
+    }
+    /// Enable the driving `Send` RPC by attaching a [`SessionDriver`] (the runtime's
+    /// `SessionManager`). Kept opt-in — the observe-only serve paths never call this.
+    #[must_use]
+    pub fn with_driver(mut self, driver: Arc<dyn SessionDriver>) -> Self {
+        self.driver = Some(driver);
+        self
     }
     pub fn into_server(self) -> pb::agent_session_service_server::AgentSessionServiceServer<Self> {
         pb::agent_session_service_server::AgentSessionServiceServer::new(self)
@@ -85,6 +100,30 @@ impl pb::agent_session_service_server::AgentSessionService for AgentSessionSvc {
             .instrument(sp)
             .await
     }
+
+    type SendStream = Pin<Box<dyn Stream<Item = Result<pb::SessionEvent, Status>> + Send>>;
+
+    /// Drive a goal and stream the run. **Opt-in**: only an endpoint given a
+    /// [`SessionDriver`] via [`AgentSessionSvc::with_driver`] can run this; an
+    /// observe-only endpoint returns `UNIMPLEMENTED`. The run-driving body
+    /// (subscribe-before-run + cancel-on-disconnect) lands with the driver in a later
+    /// increment — until then this is `UNIMPLEMENTED` everywhere (no endpoint wires a
+    /// driver yet). Reading `self.driver` keeps the field + `with_driver` live.
+    #[allow(clippy::result_large_err)]
+    async fn send(
+        &self,
+        request: Request<pb::GoalRequest>,
+    ) -> Result<Response<Self::SendStream>, Status> {
+        let _sp = span("agent_session.send", request.metadata());
+        if self.driver.is_none() {
+            return Err(Status::unimplemented(
+                "Send is not enabled on this endpoint (observe-only; no session driver)",
+            ));
+        }
+        Err(Status::unimplemented(
+            "Send (drive a goal) is wired but its body lands in a later increment",
+        ))
+    }
 }
 
 pub fn agent_session_router(registry: Arc<dyn SessionSourceRegistry>) -> Router {
@@ -95,6 +134,8 @@ pub fn agent_session_router(registry: Arc<dyn SessionSourceRegistry>) -> Router 
 mod tests {
     use super::*;
     use agent_core::{SessionEvent, SessionEventStream, StatusSnapshot};
+    // The generated service trait, so tests can call the `send` RPC method directly.
+    use pb::agent_session_service_server::AgentSessionService as _;
 
     // A stub source (its contents are irrelevant to selector resolution).
     struct StubSource;
@@ -175,5 +216,20 @@ mod tests {
             tonic::Code::InvalidArgument,
             "malformed selector {bad:?} must fail closed"
         );
+    }
+
+    // Send is opt-in: an endpoint built without a driver (every observe-only serve path)
+    // must refuse to drive a goal, never silently no-op.
+    #[tokio::test]
+    async fn negative_send_without_driver_is_unimplemented() {
+        let err = svc(&["s1"])
+            .send(Request::new(pb::GoalRequest {
+                goal: "do a thing".into(),
+                session_id: String::new(),
+            }))
+            .await
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unimplemented);
     }
 }
