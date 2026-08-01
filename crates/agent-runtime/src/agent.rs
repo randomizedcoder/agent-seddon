@@ -1910,20 +1910,20 @@ mod tests {
         agent_core::SessionKey::parse(user, sess).unwrap()
     }
 
-    #[test]
-    fn session_manager_get_or_create_is_idempotent() {
+    #[tokio::test]
+    async fn session_manager_get_or_create_is_idempotent() {
         let mgr = SessionManager::new(base_agent());
         assert!(mgr.is_empty());
         let a = mgr.get_or_create(key("alice", "s1"));
         let b = mgr.get_or_create(key("alice", "s1"));
-        assert!(Arc::ptr_eq(&a, &b), "same key must return the same session");
+        assert!(a.same_session(&b), "same key must return the same session");
         assert_eq!(mgr.len(), 1);
         mgr.get_or_create(key("alice", "s2"));
         assert_eq!(mgr.len(), 2);
     }
 
-    #[test]
-    fn session_manager_total_cap_rejects_new_but_not_existing() {
+    #[tokio::test]
+    async fn session_manager_total_cap_rejects_new_but_not_existing() {
         let mgr = SessionManager::new(base_agent()).with_limits(1, 0);
         assert!(mgr.admit(key("alice", "s1")).is_ok());
         // A brand-new id beyond the cap is rejected (an amplification-spray guard)...
@@ -1935,8 +1935,8 @@ mod tests {
         assert!(mgr.admit(key("alice", "s1")).is_ok());
     }
 
-    #[test]
-    fn session_manager_per_user_cap_is_isolated() {
+    #[tokio::test]
+    async fn session_manager_per_user_cap_is_isolated() {
         let mgr = SessionManager::new(base_agent()).with_limits(0, 1);
         assert!(mgr.admit(key("alice", "s1")).is_ok());
         assert!(matches!(
@@ -1947,8 +1947,8 @@ mod tests {
         assert!(mgr.admit(key("bob", "s1")).is_ok());
     }
 
-    #[test]
-    fn session_manager_touch_and_remove() {
+    #[tokio::test]
+    async fn session_manager_touch_and_remove() {
         let mgr = SessionManager::new(base_agent());
         mgr.get_or_create(key("alice", "s1"));
         assert!(mgr.touch(&key("alice", "s1")));
@@ -1958,8 +1958,8 @@ mod tests {
         mgr.remove(&key("alice", "s1")); // absent remove is a no-op
     }
 
-    #[test]
-    fn session_manager_reap_idle() {
+    #[tokio::test]
+    async fn session_manager_reap_idle() {
         let mgr = SessionManager::new(base_agent());
         mgr.get_or_create(key("alice", "s1"));
         // Nothing is idle beyond a long threshold.
@@ -2837,17 +2837,17 @@ mod tests {
 
     /// `positive_`: the manager keys sessions by `(user, session)` — the same key
     /// reuses one session, distinct keys get distinct ones, and `remove` frees it.
-    #[test]
-    fn session_manager_keys_reuses_and_removes() {
+    #[tokio::test]
+    async fn session_manager_keys_reuses_and_removes() {
         let mgr = SessionManager::new(Arc::new(bare_agent()));
         assert!(mgr.is_empty());
         let alice = agent_core::SessionKey::parse("alice", "s1").unwrap();
         let bob = agent_core::SessionKey::parse("bob", "s1").unwrap();
         let a1 = mgr.get_or_create(alice.clone());
         let a2 = mgr.get_or_create(alice.clone());
-        assert!(Arc::ptr_eq(&a1, &a2), "same key reuses the session");
+        assert!(a1.same_session(&a2), "same key reuses the session");
         let b1 = mgr.get_or_create(bob.clone());
-        assert!(!Arc::ptr_eq(&a1, &b1), "distinct keys → distinct sessions");
+        assert!(!a1.same_session(&b1), "distinct keys → distinct sessions");
         assert_eq!(mgr.len(), 2);
         mgr.remove(&alice);
         assert_eq!(mgr.len(), 1);
@@ -2862,24 +2862,19 @@ mod tests {
         let mgr = SessionManager::new(Arc::new(bare_agent()));
         let alice = mgr.get_or_create(agent_core::SessionKey::parse("alice", "s1").unwrap());
         let bob = mgr.get_or_create(agent_core::SessionKey::parse("bob", "s2").unwrap());
-        // Independent handles, each lockable for its own turn.
-        {
-            let a = alice.lock().await;
-            assert_eq!(a.id.user.as_str(), "alice");
-        }
-        {
-            let b = bob.lock().await;
-            assert_eq!(b.id.user.as_str(), "bob");
-            assert_eq!(b.id.session.as_str(), "s2");
-        }
-        assert!(!Arc::ptr_eq(&alice, &bob));
+        // Each handle carries its own `(user, session)` identity (the manager built each
+        // session with `session_with(key)`), and they are distinct live sessions.
+        assert_eq!(alice.key().user.as_str(), "alice");
+        assert_eq!(bob.key().user.as_str(), "bob");
+        assert_eq!(bob.key().session.as_str(), "s2");
+        assert!(!alice.same_session(&bob));
     }
 
     /// `adversarial_`: the capacity caps guard against a hostile new-id spray, per
     /// user and overall — but a client re-entering an *existing* session is never
     /// throttled, and the lazy `get_or_create` path never rejects.
-    #[test]
-    fn adversarial_open_enforces_per_user_and_total_caps() {
+    #[tokio::test]
+    async fn adversarial_open_enforces_per_user_and_total_caps() {
         let mgr = SessionManager::new(Arc::new(bare_agent())).with_limits(3, 2);
         let k = |u, s| agent_core::SessionKey::parse(u, s).unwrap();
 
@@ -2942,33 +2937,109 @@ mod tests {
         mgr.close(&key1).await.unwrap();
     }
 
-    /// `boundary_`: idle-GC reaps a quiet session, `touch` keeps it warm, and a session
-    /// mid-turn (locked handle) is never reaped out from under itself.
+    /// A provider whose `complete` parks until released — so a run stays *in-flight*
+    /// (the session's `busy` flag set) while the test does something concurrently.
+    /// `entered` fires (permit stored) the instant the loop reaches the provider, so the
+    /// test can wait until the run is genuinely mid-turn without a sleep.
+    struct GateProvider {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+    #[async_trait::async_trait]
+    impl LlmProvider for GateProvider {
+        fn capabilities(&self) -> agent_core::ModelCapabilities {
+            agent_core::ModelCapabilities {
+                supports_tools: false,
+                context_window: 1000,
+                supports_response_format: false,
+                supports_vision: false,
+            }
+        }
+        async fn complete(
+            &self,
+            _req: agent_core::CompletionRequest,
+        ) -> agent_core::Result<agent_core::CompletionResponse> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(final_turn("done"))
+        }
+    }
+
+    fn gated_manager(
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    ) -> Arc<SessionManager> {
+        let agent = Agent::new(
+            Arc::new(GateProvider { entered, release }),
+            ToolRegistry::new(),
+            Arc::new(RecordingMemory::new()),
+            Arc::new(StaticContext),
+            Arc::new(crate::policy::AutoApprove),
+            Metrics::new(),
+            settings(false),
+        );
+        Arc::new(SessionManager::new(Arc::new(agent)))
+    }
+
+    /// `positive_`: `reap_idle` frees a quiet session but **skips one mid-turn** — the
+    /// `busy` flag replaces the old `try_lock` probe. Driven by a real in-flight run.
     #[tokio::test]
-    async fn boundary_reap_idle_frees_quiet_sessions_and_touch_keeps_warm() {
+    async fn positive_reap_skips_busy_and_removes_idle() {
         use std::time::Duration;
-        let mgr = SessionManager::new(Arc::new(bare_agent()));
-        let alice = agent_core::SessionKey::parse("alice", "s1").unwrap();
-        let bob = agent_core::SessionKey::parse("bob", "s2").unwrap();
-        let _ = mgr.get_or_create(alice.clone());
-        let bob_handle = mgr.get_or_create(bob.clone());
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let mgr = gated_manager(entered.clone(), release.clone());
+
+        let busy = key("alice", "busy");
+        let idle = key("bob", "idle");
+        mgr.get_or_create(idle.clone()); // a quiet session
+        let busy_handle = mgr.get_or_create(busy.clone());
         assert_eq!(mgr.len(), 2);
 
-        // Nothing is idle yet under a long window.
-        assert_eq!(mgr.reap_idle(Duration::from_secs(3600)), 0);
+        // Drive a run on `busy` that parks in the provider; wait until it is mid-turn.
+        let run = tokio::spawn(async move { busy_handle.run("go").await });
+        entered.notified().await; // the run is now in the provider ⇒ busy = true
 
-        // A zero window reaps everything not currently locked. Hold bob's handle to
-        // model a turn in progress — it must survive.
-        let guard = bob_handle.lock().await;
-        let reaped = mgr.reap_idle(Duration::ZERO);
-        drop(guard);
+        // A zero window would reap everything idle, but the busy session is skipped.
         assert_eq!(
-            reaped, 1,
-            "only the idle, unlocked session (alice) is reaped"
+            mgr.reap_idle(Duration::ZERO),
+            1,
+            "only the idle one is reaped"
         );
-        assert!(mgr.touch(&bob), "bob is still live");
-        assert!(!mgr.touch(&alice), "alice was reaped");
-        assert_eq!(mgr.len(), 1);
+        assert!(mgr.touch(&busy), "the busy session is still live");
+        assert!(!mgr.touch(&idle), "the idle session was reaped");
+
+        // Release the run; it finishes and the session goes idle again.
+        release.notify_one();
+        run.await.unwrap().unwrap();
+        assert_eq!(
+            mgr.reap_idle(Duration::ZERO),
+            1,
+            "now the finished run is reapable"
+        );
+    }
+
+    /// `positive_`: `remove` aborts a session that is **mid-turn** — the run task is
+    /// stopped (its result channel drops), not left running after the session is gone.
+    #[tokio::test]
+    async fn positive_remove_aborts_inflight_run() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let mgr = gated_manager(entered.clone(), release);
+
+        let k = key("alice", "s1");
+        let handle = mgr.get_or_create(k.clone());
+        let run = tokio::spawn(async move { handle.run("go").await });
+        entered.notified().await; // run is mid-turn
+
+        mgr.remove(&k); // abort the actor out from under the in-flight run
+        assert!(mgr.is_empty());
+        // The parked run does not complete normally — its actor was aborted, so the
+        // result channel drops and `run` returns an error (never hangs).
+        assert!(
+            run.await.unwrap().is_err(),
+            "an aborted run resolves to Err"
+        );
     }
 
     /// `boundary_`: a run records the curated families under its `(session, user)`
@@ -2978,12 +3049,7 @@ mod tests {
     async fn session_manager_remove_retires_session_metrics() {
         let mgr = SessionManager::new(Arc::new(bare_agent()));
         let key = agent_core::SessionKey::parse("alice", "s1").unwrap();
-        mgr.get_or_create(key.clone())
-            .lock()
-            .await
-            .send("hi")
-            .await
-            .unwrap();
+        mgr.get_or_create(key.clone()).run("hi").await.unwrap();
 
         // The run is attributed to this tenant.
         let text = mgr.backend().metrics().encode_text();
