@@ -353,6 +353,7 @@ dependencies = [
  "agent-context",
  "agent-core",
  "agent-embed",
+ "agent-export",
  "agent-forge",
  "agent-git",
  "agent-grpc",

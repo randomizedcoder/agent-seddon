@@ -49,6 +49,7 @@ default = [
     "forge",
     "scheduler",
     "pty",
+    "recall",
 ]
 
 # Each feature forwards to the owning impl crate + drives `register_builtins`.
@@ -99,6 +100,10 @@ cache = ["dep:agent-cache", "agent-cache/cache-strategies"]
 # Live web search: the WebSearch seam + the `web_search` tool. See parity spec 12.
 # Session export: deterministic transcript render + redaction (parity spec 20).
 session-export = ["agent-tools/tool-session-export"]
+# Cross-session recall: a tantivy index over saved session transcripts (the
+# `SessionCorpus` document source), reusing the `search` seam. See parity spec 20.
+# The `session_recall` tool is added in the next increment.
+recall = ["search", "dep:agent-export"]
 # Skill authoring: the agent writes a reusable SKILL.md (parity spec 30).
 skill-write = ["agent-tools/tool-skill-write"]
 # Forge: GitHub/GitLab PRs, issues, reviews. See parity spec 27.
@@ -176,6 +181,8 @@ agent-metrics.workspace = true
 agent-providers.workspace = true
 agent-tools.workspace = true
 agent-search = { workspace = true, optional = true }
+# Redaction reuse for the cross-session recall corpus (spec 20).
+agent-export = { workspace = true, optional = true }
 agent-git = { workspace = true, optional = true }
 agent-memory.workspace = true
 agent-context.workspace = true

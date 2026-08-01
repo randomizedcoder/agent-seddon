@@ -79,6 +79,40 @@ pub struct Config {
     pub scheduler: SchedulerCfg,
     #[serde(default)]
     pub pty: PtyCfg,
+    #[serde(default)]
+    pub recall: RecallCfg,
+}
+
+/// Cross-session recall (parity spec 20): a full-text index over *past* saved
+/// session transcripts, so the agent can search its own history. Reuses the
+/// `search` tantivy backend over a `SessionCorpus` document source. OFF by default
+/// (the `session_recall` tool only appears when enabled).
+#[derive(Debug, Deserialize)]
+pub struct RecallCfg {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Sessions directory to index (empty ⇒ `<working_dir>/.agent/sessions`, the
+    /// same transcripts the REPL saves).
+    #[serde(default)]
+    pub sessions_dir: String,
+    /// Override the recall index directory (empty ⇒ `<sessions_dir>/.recall/index`).
+    #[serde(default)]
+    pub index_dir: String,
+    /// On start, check the recall index's freshness and reindex in the background
+    /// if stale.
+    #[serde(default = "default_true")]
+    pub auto_index: bool,
+}
+
+impl Default for RecallCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            sessions_dir: String::new(),
+            index_dir: String::new(),
+            auto_index: true,
+        }
+    }
 }
 
 /// Interactive terminal sessions (the `Pty` seam, parity spec 29). A live tty
@@ -1750,6 +1784,7 @@ impl Config {
             forge: ForgeCfg::default(),
             scheduler: SchedulerCfg::default(),
             pty: PtyCfg::default(),
+            recall: RecallCfg::default(),
         }
     }
 }
