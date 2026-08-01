@@ -1963,6 +1963,90 @@ pub trait SessionSourceRegistry: Send + Sync {
     fn live_session_ids(&self) -> Vec<String>;
 }
 
+/// The **write** counterpart to [`SessionSourceRegistry`]: admit-or-resolve a session
+/// and *drive a goal* on it. Implemented by the runtime's `SessionManager`; a served
+/// `AgentSessionService` holds it as `Option<Arc<dyn SessionDriver>>`, so the driving
+/// `Send` RPC is **opt-in** — `None` on an observe-only endpoint yields `UNIMPLEMENTED`
+/// (docs/design/portal, docs/design/multi-session/02-runtime-split.md). Fails **hard**:
+/// a capacity cap returns [`DriverError`] (→ `RESOURCE_EXHAUSTED`).
+pub trait SessionDriver: Send + Sync {
+    /// Capacity-checked admit-or-resolve of the session for `key`. Returns a
+    /// [`DriverSession`]: the live observation [`SessionSource`] (the *same* sink the
+    /// loop publishes into, so the caller can subscribe before starting the run) plus a
+    /// [`RunStarter`]. `Err` when creating a new session would exceed a cap — an
+    /// existing session is always returned, so a client re-entering its own session is
+    /// never throttled (only a hostile new-id spray is).
+    fn session_for(&self, key: SessionKey) -> std::result::Result<DriverSession, DriverError>;
+}
+
+/// One admitted session, as the driving `Send` handler needs it: an observation
+/// `source` to subscribe to and a `runner` to submit the goal.
+pub struct DriverSession {
+    /// The live event source (subscribe here *before* [`RunStarter::start`] so the
+    /// leading `RunStarted` is not missed).
+    pub source: std::sync::Arc<dyn SessionSource>,
+    /// Submits the goal to this session.
+    pub runner: std::sync::Arc<dyn RunStarter>,
+}
+
+/// Submits a goal to one session's run loop. Split from [`SessionDriver`] so the
+/// handle can be handed to the response stream independent of the manager.
+pub trait RunStarter: Send + Sync {
+    /// Submit `goal` to the session's run loop. Run events (`RunStarted` … `RunFinished`)
+    /// surface on the paired [`DriverSession::source`] — this does **not** return them.
+    /// The returned [`RunHandle`] **cancels the in-flight run when dropped**, so a
+    /// client disconnect (which drops the `Send` response stream, which owns the handle)
+    /// cleanly stops the run.
+    fn start(&self, goal: String) -> RunHandle;
+}
+
+/// A cancel-on-drop guard for a driven run. Opaque: the runtime boxes whatever drop
+/// glue fires the cancel (so `agent-core` stays runtime/tokio-free). The `Send` handler
+/// keeps it alive inside the response stream for the stream's whole lifetime.
+pub struct RunHandle {
+    /// The runtime's cancel guard, kept solely so its `Drop` fires on `RunHandle` drop
+    /// (never read — the effect is the drop).
+    _guard: Box<dyn Send + Sync>,
+}
+
+impl RunHandle {
+    /// Wrap the runtime's cancel guard. Dropping the `RunHandle` drops `guard`, which is
+    /// what actually signals cancellation.
+    pub fn new(guard: impl Send + Sync + 'static) -> Self {
+        Self {
+            _guard: Box::new(guard),
+        }
+    }
+}
+
+impl std::fmt::Debug for RunHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RunHandle(..)")
+    }
+}
+
+/// Why [`SessionDriver::session_for`] refused to admit a new session — a capacity cap
+/// (the amplification guard against a hostile client spraying goals). Mirrors the
+/// runtime's `OpenError`; the wire maps it to `RESOURCE_EXHAUSTED`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DriverError {
+    /// The per-user live-session cap (the contained value) is full.
+    PerUserLimit(usize),
+    /// The global live-session cap (the contained value) is full.
+    TotalLimit(usize),
+}
+
+impl std::fmt::Display for DriverError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DriverError::PerUserLimit(n) => write!(f, "per-user session limit reached ({n})"),
+            DriverError::TotalLimit(n) => write!(f, "global session limit reached ({n})"),
+        }
+    }
+}
+
+impl std::error::Error for DriverError {}
+
 // ---------------------------------------------------------------------------
 // Seam 4: Context assembly / compaction
 // ---------------------------------------------------------------------------
