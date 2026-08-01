@@ -11,6 +11,9 @@ license.workspace = true
 # model to Revise on a mismatch. Cheap, model-free, always-safe.
 default = ["verifier-schema"]
 verifier-schema = []
+# Model-backed verifier: ask an `LlmProvider` to judge a tool call's correctness.
+# Catches semantic slips a schema check can't, at the cost of a model call.
+verifier-llm = []
 
 [dependencies]
 agent-core.workspace = true
@@ -20,6 +23,7 @@ serde_json.workspace = true
 [dev-dependencies]
 tokio.workspace = true
 rstest.workspace = true
+agent-testkit.workspace = true
 
 [lints]
 workspace = true

@@ -906,7 +906,9 @@ fn default_tasks_backend() -> String {
 /// Tool-call verifier (the `Verifier` seam — a correctness gate on a requested
 /// tool call, checked before it runs). `backend` selects the impl and defaults to
 /// empty ⇒ **off** (no verifier, no cost). `"schema"` is the deterministic,
-/// model-free argument/schema check. `mode` gates whether a non-allow verdict
+/// model-free argument/schema check; `"llm"` asks the built provider to judge the
+/// call's correctness (catches semantic slips, at the cost of a model call). `mode`
+/// gates whether a non-allow verdict
 /// changes behaviour:
 /// `"shadow"` (default) observes the verdict only; `"enforce"` blocks a
 /// `Revise`/`Deny`'d call and feeds its message back to the model, which can

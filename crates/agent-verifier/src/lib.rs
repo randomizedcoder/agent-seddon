@@ -12,3 +12,8 @@
 mod schema;
 #[cfg(feature = "verifier-schema")]
 pub use schema::SchemaVerifier;
+
+#[cfg(feature = "verifier-llm")]
+mod llm;
+#[cfg(feature = "verifier-llm")]
+pub use llm::LlmVerifier;
