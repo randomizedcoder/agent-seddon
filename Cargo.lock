@@ -567,6 +567,7 @@ dependencies = [
  "agent-core",
  "agent-testkit",
  "async-trait",
+ "futures-util",
  "rstest",
  "serde_json",
  "tokio",
