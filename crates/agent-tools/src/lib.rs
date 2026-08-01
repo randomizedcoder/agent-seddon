@@ -148,6 +148,27 @@ pub(crate) fn truncate(mut s: String) -> String {
     s
 }
 
+/// Largest file the model-facing tools read *whole* into memory. The path is
+/// attacker-chosen (the model picks it), so an unbounded read (`read_file`, `edit`,
+/// `apply_patch`) could point at a multi-gigabyte file and OOM the process **before**
+/// any output cap applies. A hard cap, checked by `stat` before the read (adversarial
+/// audit — DoS caps).
+pub(crate) const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Reject an oversized file *before* reading it whole. `Err(message)` when the file
+/// exceeds [`MAX_FILE_BYTES`]; `Ok(())` otherwise — including a missing/unstattable
+/// file, so the subsequent read reports the real I/O error unchanged. `path` must
+/// already be `confine`d.
+pub(crate) async fn guard_file_size(path: &std::path::Path) -> std::result::Result<(), String> {
+    match tokio::fs::metadata(path).await {
+        Ok(m) if m.len() > MAX_FILE_BYTES => Err(format!(
+            "file too large to read ({} bytes; limit {MAX_FILE_BYTES})",
+            m.len()
+        )),
+        _ => Ok(()),
+    }
+}
+
 pub(crate) fn arg_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     args.get(key)
         .and_then(Value::as_str)
@@ -302,6 +323,28 @@ mod tests {
         assert!(out.ends_with("[output truncated]"));
         // The kept prefix is valid UTF-8 (no torn char): the 'é' was dropped whole.
         assert!(out.starts_with(&"a".repeat(MAX_OUTPUT - 1)));
+    }
+
+    // --- guard_file_size: DoS cap before a whole-file read ------------------
+    /// `boundary_`/`adversarial_`: a file over `MAX_FILE_BYTES` is rejected by `stat`
+    /// *before* it is read whole (the OOM guard); a small file and a missing file pass
+    /// (the read itself reports a real I/O error).
+    #[tokio::test]
+    async fn guard_file_size_cases() {
+        let dir = agent_testkit::tempdir();
+        let small = dir.join("small.txt");
+        std::fs::write(&small, b"hello").unwrap();
+        assert!(guard_file_size(&small).await.is_ok(), "a small file passes");
+
+        assert!(
+            guard_file_size(&dir.join("missing.txt")).await.is_ok(),
+            "a missing file passes (the read reports the real error)"
+        );
+
+        let big = dir.join("big.bin");
+        std::fs::write(&big, vec![0u8; MAX_FILE_BYTES as usize + 1]).unwrap();
+        let err = guard_file_size(&big).await.unwrap_err();
+        assert!(err.contains("too large"), "oversized file rejected: {err}");
     }
 
     // --- arg extractors -----------------------------------------------------
