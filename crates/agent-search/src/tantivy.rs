@@ -11,14 +11,16 @@
 //! incremental (delete-by-path + re-add the changed files) when a prior manifest
 //! exists, and a full rebuild otherwise.
 
-use crate::{manifest, Manifest};
+use crate::source::{DocumentSource, FsDocumentSource};
+use crate::Manifest;
 use agent_core::{
     Error, IndexState, IndexStatus, ProgressFn, Result, SearchBackend, SearchCapabilities,
     SearchHit, SearchMode, SearchQuery,
 };
 use async_trait::async_trait;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tantivy::collector::{DocSetCollector, TopDocs};
 use tantivy::directory::MmapDirectory;
 use tantivy::query::{
@@ -43,10 +45,10 @@ struct Fields {
     lang: Field,
 }
 
-/// A tantivy-backed [`SearchBackend`] for a repo rooted at `root`, with its index
+/// A tantivy-backed [`SearchBackend`] over a [`DocumentSource`], with its index
 /// under `index_dir` (typically `<root>/.agent-seddon/index/tantivy`).
 pub struct TantivyBackend {
-    root: PathBuf,
+    source: Arc<dyn DocumentSource>,
     index_dir: PathBuf,
     // The `IndexReader`/`IndexWriter` own everything the backend needs, so the
     // `Index` itself is not retained.
@@ -57,8 +59,17 @@ pub struct TantivyBackend {
 }
 
 impl TantivyBackend {
-    /// Open (or create) the index for `root` at `index_dir`.
+    /// Open (or create) the index for the filesystem tree rooted at `root` at
+    /// `index_dir` — the code-search corpus. Thin wrapper over
+    /// [`open_with_source`](Self::open_with_source) with an [`FsDocumentSource`].
     pub fn open(root: PathBuf, index_dir: PathBuf) -> Result<Self> {
+        Self::open_with_source(Arc::new(FsDocumentSource::new(root)), index_dir)
+    }
+
+    /// Open (or create) the index at `index_dir` over an arbitrary `source` — the
+    /// seam that lets non-filesystem corpora (e.g. session transcripts, spec 20)
+    /// reuse the same index/query/freshness machinery.
+    pub fn open_with_source(source: Arc<dyn DocumentSource>, index_dir: PathBuf) -> Result<Self> {
         std::fs::create_dir_all(&index_dir)?;
         let mut sb = Schema::builder();
         sb.add_text_field("path", STRING | STORED);
@@ -82,7 +93,7 @@ impl TantivyBackend {
         let writer = index.writer(WRITER_HEAP_BYTES).map_err(se)?;
 
         Ok(Self {
-            root,
+            source,
             index_dir,
             reader,
             writer: Mutex::new(writer),
@@ -115,7 +126,7 @@ impl SearchBackend for TantivyBackend {
     }
 
     async fn status(&self) -> Result<IndexStatus> {
-        let root = self.root.clone();
+        let source = self.source.clone();
         let mpath = self.manifest_path();
         let building = self.building.load(Ordering::Relaxed);
         let status = tokio::task::spawn_blocking(move || {
@@ -123,7 +134,7 @@ impl SearchBackend for TantivyBackend {
             let state = if building {
                 IndexState::Building
             } else {
-                manifest::compare(&root, stored.as_ref())
+                source.compare(stored.as_ref())
             };
             let (files, last, digest) = match &stored {
                 Some(m) => (m.entries.len() as u64, m.built_ms, m.digest()),
@@ -187,9 +198,9 @@ impl SearchBackend for TantivyBackend {
 
 impl TantivyBackend {
     async fn reindex_inner(&self, progress: ProgressFn<'_>) -> Result<IndexStatus> {
-        // Walk the tree off the async executor — it can be large.
-        let root = self.root.clone();
-        let current = tokio::task::spawn_blocking(move || Manifest::scan(&root))
+        // Scan the corpus off the async executor — it can be large.
+        let source = self.source.clone();
+        let current = tokio::task::spawn_blocking(move || source.scan())
             .await
             .map_err(|e| Error::Search(format!("scan task panicked: {e}")))?;
 
@@ -204,16 +215,16 @@ impl TantivyBackend {
         }
 
         let total = upserts.len() as u64;
-        for (i, rel) in upserts.iter().enumerate() {
-            let rel_str = rel.to_string_lossy().to_string();
+        for (i, id) in upserts.iter().enumerate() {
+            let id_str = id.to_string_lossy().to_string();
             // Delete-then-add makes the upsert idempotent (incremental update).
-            writer.delete_term(Term::from_field_text(self.fields.path, &rel_str));
-            if let Ok(content) = std::fs::read_to_string(self.root.join(rel)) {
+            writer.delete_term(Term::from_field_text(self.fields.path, &id_str));
+            if let Some(rendered) = self.source.load(id) {
                 writer
                     .add_document(doc!(
-                        self.fields.path => rel_str,
-                        self.fields.content => content,
-                        self.fields.lang => lang_of(rel),
+                        self.fields.path => id_str,
+                        self.fields.content => rendered.text,
+                        self.fields.lang => rendered.lang,
                     ))
                     .map_err(se)?;
             }
@@ -441,30 +452,6 @@ fn tokenize(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// Map a file extension to a coarse language label (stored for the `lang` filter).
-fn lang_of(path: &Path) -> String {
-    match path.extension().and_then(|e| e.to_str()).unwrap_or("") {
-        "rs" => "rust",
-        "nix" => "nix",
-        "py" => "python",
-        "js" | "jsx" => "javascript",
-        "ts" | "tsx" => "typescript",
-        "go" => "go",
-        "c" | "h" => "c",
-        "cc" | "cpp" | "cxx" | "hpp" => "cpp",
-        "java" => "java",
-        "rb" => "ruby",
-        "sh" | "bash" => "shell",
-        "toml" => "toml",
-        "json" => "json",
-        "yaml" | "yml" => "yaml",
-        "md" | "markdown" => "markdown",
-        "txt" => "text",
-        other => other,
-    }
-    .to_string()
-}
-
 fn compile_globs(globs: &[String]) -> Result<Vec<regex::Regex>> {
     globs.iter().map(|g| glob_to_regex(g)).collect()
 }
@@ -660,17 +647,83 @@ mod tests {
         assert!(reindexer.await.unwrap().is_ok());
     }
 
-    // --- pure helpers ------------------------------------------------------
-    #[rstest]
-    #[case::rs("a/b.rs", "rust")]
-    #[case::nix("flake.nix", "nix")]
-    #[case::md("README.md", "markdown")]
-    #[case::unknown("x.zzz", "zzz")]
-    #[case::none("Makefile", "")]
-    fn lang_of_cases(#[case] path: &str, #[case] expected: &str) {
-        assert_eq!(lang_of(Path::new(path)), expected);
+    // A tiny in-memory corpus keyed by opaque ids (not paths) — proves the
+    // backend indexes documents from any `DocumentSource`, not just the tree.
+    struct MemSource {
+        docs: Vec<(String, String)>, // (id, rendered text)
+    }
+    impl DocumentSource for MemSource {
+        fn scan(&self) -> Manifest {
+            let entries = self
+                .docs
+                .iter()
+                .map(|(id, text)| {
+                    (
+                        PathBuf::from(id),
+                        crate::manifest::FileStamp {
+                            mtime_ms: 1,
+                            size: text.len() as u64,
+                        },
+                    )
+                })
+                .collect();
+            Manifest {
+                entries,
+                git_head: None,
+                built_ms: 1,
+            }
+        }
+        fn compare(&self, stored: Option<&Manifest>) -> IndexState {
+            if stored.is_some() {
+                IndexState::Fresh
+            } else {
+                IndexState::Missing
+            }
+        }
+        fn load(&self, id: &std::path::Path) -> Option<crate::source::SourceDoc> {
+            let key = id.to_string_lossy();
+            self.docs
+                .iter()
+                .find(|(i, _)| i.as_str() == key)
+                .map(|(_, text)| crate::source::SourceDoc {
+                    text: text.clone(),
+                    lang: "session".into(),
+                })
+        }
     }
 
+    // The seam end-to-end: a non-filesystem source is indexed and queried, and a
+    // hit's `path` carries the source's opaque id (a session id here).
+    #[tokio::test]
+    async fn open_with_source_indexes_custom_corpus() {
+        let dir = tempdir();
+        let src = Arc::new(MemSource {
+            docs: vec![
+                (
+                    "s_fix".into(),
+                    "we fixed the tantivy segment merge bug".into(),
+                ),
+                ("s_other".into(), "unrelated notes about coffee".into()),
+            ],
+        });
+        let backend = TantivyBackend::open_with_source(src, dir.join("idx")).unwrap();
+        backend.reindex(&|_p| {}).await.unwrap();
+        let hits = backend
+            .query(&query("segment", SearchMode::Literal))
+            .await
+            .unwrap();
+        assert!(
+            hits.iter().any(|h| h.path.to_string_lossy() == "s_fix"),
+            "the matching session id must be the hit path, got {:?}",
+            hits.iter().map(|h| h.path.clone()).collect::<Vec<_>>()
+        );
+        assert!(
+            !hits.iter().any(|h| h.path.to_string_lossy() == "s_other"),
+            "the non-matching session must not appear"
+        );
+    }
+
+    // --- pure helpers ------------------------------------------------------
     #[rstest]
     #[case::ext("**/*.rs", "src/main.rs", true)]
     #[case::ext_root("**/*.nix", "flake.nix", true)]
