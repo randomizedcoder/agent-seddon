@@ -528,6 +528,14 @@ pub fn register_builtins(r: &mut Registry) {
         // tool's JSON Schema. See docs/design/tool-call-verification.md.
         Ok(Arc::new(agent_verifier::SchemaVerifier::new()) as Arc<dyn agent_core::Verifier>)
     });
+    #[cfg(feature = "verifier")]
+    r.verifier("llm", |ctx| {
+        // Model-backed: ask the built provider to judge the call's correctness. Uses
+        // the same provider as the loop (self-verification); a distinct verifier model
+        // is a follow-up (per-member providers under the `ensemble` backend).
+        let provider = ctx.provider()?.clone();
+        Ok(Arc::new(agent_verifier::LlmVerifier::new(provider)) as Arc<dyn agent_core::Verifier>)
+    });
 
     // --- memory backends (whole-store + independently-swappable layers) ---
     #[cfg(feature = "memory-file")]
