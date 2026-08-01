@@ -7,8 +7,9 @@
 
 use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
-use agent_core::{SessionDriver, SessionSource, SessionSourceRegistry};
+use agent_core::{DriverError, SessionDriver, SessionSource, SessionSourceRegistry};
 use agent_proto::{pb, snapshot_event};
 use futures_util::{Stream, StreamExt};
 use tonic::transport::server::Router;
@@ -16,7 +17,21 @@ use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 use tracing::Instrument;
 
-use super::span;
+use super::{identity_key, span};
+
+/// A `Send` response stream that owns the run's [`agent_core::RunHandle`]: when the
+/// stream is dropped (client disconnect) the handle drops, cancelling the in-flight run.
+struct GuardedStream {
+    inner: Pin<Box<dyn Stream<Item = Result<pb::SessionEvent, Status>> + Send>>,
+    _guard: agent_core::RunHandle,
+}
+
+impl Stream for GuardedStream {
+    type Item = Result<pb::SessionEvent, Status>;
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.get_mut().inner.as_mut().poll_next(cx)
+    }
+}
 
 pub struct AgentSessionSvc {
     registry: Arc<dyn SessionSourceRegistry>,
@@ -103,26 +118,65 @@ impl pb::agent_session_service_server::AgentSessionService for AgentSessionSvc {
 
     type SendStream = Pin<Box<dyn Stream<Item = Result<pb::SessionEvent, Status>> + Send>>;
 
-    /// Drive a goal and stream the run. **Opt-in**: only an endpoint given a
-    /// [`SessionDriver`] via [`AgentSessionSvc::with_driver`] can run this; an
-    /// observe-only endpoint returns `UNIMPLEMENTED`. The run-driving body
-    /// (subscribe-before-run + cancel-on-disconnect) lands with the driver in a later
-    /// increment — until then this is `UNIMPLEMENTED` everywhere (no endpoint wires a
-    /// driver yet). Reading `self.driver` keeps the field + `with_driver` live.
+    /// Drive a goal and stream the run. **Opt-in and `--serve-mcp`-class**: only an
+    /// endpoint given a [`SessionDriver`] via [`AgentSessionSvc::with_driver`] can run
+    /// this (an observe-only endpoint returns `UNIMPLEMENTED`). The `(user, session)`
+    /// identity rides gRPC metadata (fail-closed: absent ⇒ `UNAUTHENTICATED`); an empty
+    /// goal is `INVALID_ARGUMENT`; a capacity cap is `RESOURCE_EXHAUSTED`.
+    ///
+    /// Like `Subscribe`, the stream leads with a `status_snapshot` taken **before**
+    /// the run starts, so `RunStarted` is never missed; it then carries the live tail
+    /// and ends after `RunFinished`. The returned [`GuardedStream`] owns the run's
+    /// cancel handle, so a client disconnect cancels the run.
     #[allow(clippy::result_large_err)]
     async fn send(
         &self,
         request: Request<pb::GoalRequest>,
     ) -> Result<Response<Self::SendStream>, Status> {
         let _sp = span("agent_session.send", request.metadata());
-        if self.driver.is_none() {
+        let Some(driver) = self.driver.as_ref() else {
             return Err(Status::unimplemented(
                 "Send is not enabled on this endpoint (observe-only; no session driver)",
             ));
+        };
+        // Identity is the tenant key; there is no auth layer, so it is only as
+        // trustworthy as the transport (docs/design/multi-session/07-security.md), but a
+        // driven run must still be attributable — fail closed when it is absent.
+        let key = identity_key(request.metadata())
+            .ok_or_else(|| Status::unauthenticated("Send requires (user, session) identity"))?;
+        let goal = request.into_inner().goal;
+        if goal.trim().is_empty() {
+            return Err(Status::invalid_argument("goal must not be empty"));
         }
-        Err(Status::unimplemented(
-            "Send (drive a goal) is wired but its body lands in a later increment",
-        ))
+
+        let ds = driver.session_for(key).map_err(|e| match e {
+            DriverError::PerUserLimit(_) | DriverError::TotalLimit(_) => {
+                Status::resource_exhausted(e.to_string())
+            }
+        })?;
+
+        // Subscribe *before* starting the run so the leading `RunStarted` is captured
+        // (the snapshot is taken first, exactly as `subscribe` does).
+        let snapshot = snapshot_event(ds.source.snapshot());
+        let tail = ds.source.subscribe();
+        let guard = ds.runner.start(goal); // RunHandle — drop == cancel
+
+        // Emit events until (and including) `RunFinished`, then end the stream.
+        let body = tail.map(pb::SessionEvent::from).scan(false, |done, ev| {
+            if *done {
+                return std::future::ready(None);
+            }
+            if matches!(ev.kind, Some(pb::session_event::Kind::RunFinished(_))) {
+                *done = true;
+            }
+            std::future::ready(Some(Ok::<_, Status>(ev)))
+        });
+        let inner = futures_util::stream::once(async move { Ok(snapshot) }).chain(body);
+        let stream = GuardedStream {
+            inner: Box::pin(inner),
+            _guard: guard,
+        };
+        Ok(Response::new(Box::pin(stream) as Self::SendStream))
     }
 }
 
@@ -231,5 +285,137 @@ mod tests {
             .map(|_| ())
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unimplemented);
+    }
+
+    // --- Send driving (fake driver, since agent-grpc can't depend on agent-runtime) ---
+
+    use agent_core::{DriverError, DriverSession, RunHandle, RunStarter, SessionDriver};
+
+    /// A source that replays a fixed event script (the run's events would normally be
+    /// published by the loop; here they are scripted to drive the handler's assembly).
+    struct ScriptSource {
+        events: Vec<SessionEvent>,
+    }
+    impl SessionSource for ScriptSource {
+        fn snapshot(&self) -> StatusSnapshot {
+            StatusSnapshot::default()
+        }
+        fn subscribe(&self) -> SessionEventStream {
+            Box::pin(futures_util::stream::iter(self.events.clone()))
+        }
+    }
+    struct NoopRunner;
+    impl RunStarter for NoopRunner {
+        fn start(&self, _goal: String) -> RunHandle {
+            RunHandle::new(())
+        }
+    }
+    /// Admits and hands back a scripted source.
+    struct OkDriver {
+        events: Vec<SessionEvent>,
+    }
+    impl SessionDriver for OkDriver {
+        fn session_for(&self, _key: agent_core::SessionKey) -> Result<DriverSession, DriverError> {
+            Ok(DriverSession {
+                source: Arc::new(ScriptSource {
+                    events: self.events.clone(),
+                }),
+                runner: Arc::new(NoopRunner),
+            })
+        }
+    }
+    /// Always over capacity.
+    struct FullDriver;
+    impl SessionDriver for FullDriver {
+        fn session_for(&self, _key: agent_core::SessionKey) -> Result<DriverSession, DriverError> {
+            Err(DriverError::TotalLimit(1))
+        }
+    }
+
+    fn driving_svc(driver: Arc<dyn SessionDriver>) -> AgentSessionSvc {
+        AgentSessionSvc::new(Arc::new(FakeRegistry { ids: vec![] })).with_driver(driver)
+    }
+    fn goal_req(goal: &str, ident: Option<(&str, &str)>) -> Request<pb::GoalRequest> {
+        let mut req = Request::new(pb::GoalRequest {
+            goal: goal.into(),
+            session_id: String::new(),
+        });
+        if let Some((u, s)) = ident {
+            agent_proto::identity::inject_identity(u, s, req.metadata_mut());
+        }
+        req
+    }
+
+    /// `positive_`: the stream leads with a snapshot, carries the run's events, and ends
+    /// **at** `RunFinished` — a later event is not delivered.
+    #[tokio::test]
+    async fn positive_send_streams_snapshot_then_run_until_finished() {
+        let events = vec![
+            SessionEvent::RunStarted { goal: "go".into() },
+            SessionEvent::RunFinished { ok: true },
+            // Must NOT be delivered — the stream ends at RunFinished.
+            SessionEvent::TokenDelta {
+                text: "after".into(),
+            },
+        ];
+        let svc = driving_svc(Arc::new(OkDriver { events }));
+        let resp = svc
+            .send(goal_req("go", Some(("alice", "s1"))))
+            .await
+            .unwrap();
+        let kinds: Vec<_> = resp
+            .into_inner()
+            .map(|r| r.unwrap().kind.unwrap())
+            .collect()
+            .await;
+        assert_eq!(
+            kinds.len(),
+            3,
+            "snapshot + RunStarted + RunFinished, nothing after"
+        );
+        assert!(matches!(
+            kinds[0],
+            pb::session_event::Kind::StatusSnapshot(_)
+        ));
+        assert!(matches!(kinds[1], pb::session_event::Kind::RunStarted(_)));
+        assert!(matches!(kinds[2], pb::session_event::Kind::RunFinished(_)));
+    }
+
+    /// `negative_`: a driven run must be attributable — absent identity metadata fails
+    /// closed (there is no auth layer, but the tenant key is still required).
+    #[tokio::test]
+    async fn negative_send_without_identity_is_unauthenticated() {
+        let svc = driving_svc(Arc::new(OkDriver { events: vec![] }));
+        let err = svc
+            .send(goal_req("go", None))
+            .await
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+    }
+
+    /// `corner_`: an empty (or whitespace) goal is rejected before any session work.
+    #[tokio::test]
+    async fn corner_send_empty_goal_is_invalid_argument() {
+        let svc = driving_svc(Arc::new(OkDriver { events: vec![] }));
+        let err = svc
+            .send(goal_req("   ", Some(("alice", "s1"))))
+            .await
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    /// `adversarial_`: a spray of new goals that would exceed a capacity cap is shed with
+    /// RESOURCE_EXHAUSTED (the amplification guard, via the driver's `DriverError`).
+    #[tokio::test]
+    async fn adversarial_send_over_capacity_is_resource_exhausted() {
+        let svc = driving_svc(Arc::new(FullDriver));
+        let err = svc
+            .send(goal_req("go", Some(("alice", "s1"))))
+            .await
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::ResourceExhausted);
     }
 }
