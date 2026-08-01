@@ -22,6 +22,9 @@ use std::sync::Arc;
 pub mod manifest;
 pub use manifest::Manifest;
 
+pub mod source;
+pub use source::{DocumentSource, FsDocumentSource, SourceDoc};
+
 #[cfg(feature = "search-tantivy")]
 mod tantivy;
 #[cfg(feature = "search-tantivy")]
