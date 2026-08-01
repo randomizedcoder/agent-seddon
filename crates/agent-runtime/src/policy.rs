@@ -561,44 +561,72 @@ fn patch_paths(patch: &str) -> Vec<String> {
         .collect()
 }
 
-/// Sensitive path names/segments that are dangerous to write regardless of where
-/// they sit in the tree.
-const SENSITIVE_SEGMENTS: &[&str] = &[".ssh", ".aws", ".gnupg", ".git"];
+/// Sensitive directory segments that are dangerous to write regardless of where
+/// they sit in the tree (lowercase — matching is case-folded).
+const SENSITIVE_SEGMENTS: &[&str] = &[
+    ".ssh", ".aws", ".gnupg", ".git", ".kube", ".gcloud", ".docker",
+];
+/// Sensitive file names — credentials, and shell/tool startup files that are a
+/// persistence/exfil vector when written (lowercase — matching is case-folded).
 const SENSITIVE_FILENAMES: &[&str] = &[
     ".netrc",
     ".npmrc",
     ".pypirc",
     ".pgpass",
     ".htpasswd",
+    ".envrc",
+    ".gitconfig",
+    ".git-credentials",
+    ".dockercfg",
+    ".bashrc",
+    ".zshrc",
+    ".bash_profile",
+    ".zprofile",
+    ".profile",
     "id_rsa",
     "id_ed25519",
     "id_dsa",
     "credentials",
     "authorized_keys",
 ];
+/// Private-key / certificate / keystore extensions, flagged wherever they sit.
+const SENSITIVE_EXTENSIONS: &[&str] = &[".pem", ".key", ".p12", ".pfx"];
 /// Absolute-path prefixes that are always off-limits for writes.
 const SENSITIVE_ABS_PREFIXES: &[&str] = &["/etc/", "/boot/", "/sys/", "/proc/", "/dev/"];
 
 /// Decide whether writing `path` is sensitive. `allow` globs exempt a path
 /// first; then built-ins + `extra_deny` globs flag it.
+///
+/// Built-in matching is **case-folded** and `.`-segment-normalized: a
+/// case-insensitive filesystem (macOS/Windows) resolves `.SSH`/`.ENV` to the same
+/// secret, and `./.ssh/config` names `.ssh/config`, so the guard must see through
+/// both. This is best-effort defense-in-depth over the raw target string — the
+/// canonical protection against symlink/`..` escape is `confine()` in the tool.
 fn path_is_sensitive(path: &str, extra_deny: &[String], allow: &[String]) -> Option<String> {
     let norm = path.replace('\\', "/");
     if allow.iter().any(|g| glob_match(g, &norm)) {
         return None;
     }
-    let file = norm.rsplit('/').next().unwrap_or(&norm);
-    let segments: Vec<&str> = norm.split('/').filter(|s| !s.is_empty()).collect();
+    let lower = norm.to_lowercase();
+    let file = lower.rsplit('/').next().unwrap_or(&lower);
+    let segments: Vec<&str> = lower
+        .split('/')
+        .filter(|s| !s.is_empty() && *s != ".")
+        .collect();
 
     if file == ".env" || file.starts_with(".env.") {
         return Some(format!("environment file (`{file}`)"));
     }
     if SENSITIVE_FILENAMES.contains(&file) {
-        return Some(format!("credential file (`{file}`)"));
+        return Some(format!("sensitive file (`{file}`)"));
+    }
+    if SENSITIVE_EXTENSIONS.iter().any(|e| file.ends_with(e)) {
+        return Some(format!("private key or certificate (`{file}`)"));
     }
     if segments.iter().any(|s| SENSITIVE_SEGMENTS.contains(s)) {
         return Some(format!("secret directory in `{path}`"));
     }
-    if SENSITIVE_ABS_PREFIXES.iter().any(|p| norm.starts_with(p)) {
+    if SENSITIVE_ABS_PREFIXES.iter().any(|p| lower.starts_with(p)) {
         return Some(format!("system path (`{path}`)"));
     }
     if extra_deny.iter().any(|g| glob_match(g, &norm)) {
@@ -851,9 +879,29 @@ mod tests {
     #[case::etc("write_file", "/etc/passwd", true)]
     #[case::npmrc("write_file", ".npmrc", true)]
     #[case::authorized_keys("write_file", "/home/u/.ssh/authorized_keys", true)]
+    // adversarial: case-folding — a case-insensitive FS resolves these to the secret.
+    #[case::adversarial_ssh_upper("write_file", "/home/u/.SSH/id_rsa", true)]
+    #[case::adversarial_env_upper("write_file", ".ENV", true)]
+    #[case::adversarial_gitconfig_mixed("edit", "~/.GitConfig", true)]
+    // corner: a `.` segment must normalize away (`./.ssh/config` names `.ssh/config`).
+    #[case::corner_dot_segment("write_file", "./.ssh/config", true)]
+    // broadened directories + files + key/cert extensions.
+    #[case::kube("write_file", "/home/u/.kube/config", true)]
+    #[case::gcloud("write_file", ".gcloud/credentials.db", true)]
+    #[case::docker_cfg("write_file", "/home/u/.docker/config.json", true)]
+    #[case::envrc("write_file", ".envrc", true)]
+    #[case::gitconfig("edit", "~/.gitconfig", true)]
+    #[case::bashrc("write_file", "/home/u/.bashrc", true)]
+    #[case::pem("write_file", "certs/server.pem", true)]
+    #[case::key("write_file", "deploy/prod.key", true)]
+    #[case::p12("write_file", "keystore.p12", true)]
     #[case::ok_src("write_file", "src/main.rs", false)]
     #[case::ok_readme("edit", "README.md", false)]
     #[case::ok_nested("write_file", "a/b/c.txt", false)]
+    // negative: a "key"/"env" substring in a normal name must NOT trip the guard.
+    #[case::ok_keyboard("write_file", "src/keyboard.rs", false)]
+    #[case::ok_config_dir("write_file", "config/app.toml", false)]
+    #[case::ok_environment_word("write_file", "docs/environment.md", false)]
     fn scan_sensitive_path_cases(#[case] tool: &str, #[case] path: &str, #[case] flagged: bool) {
         let c = call(tool, json!({ "path": path, "content": "x" }));
         assert_eq!(
