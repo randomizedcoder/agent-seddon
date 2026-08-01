@@ -16,9 +16,11 @@
 //! variant is added, so [`every_seam_has_a_table_row`] restores it: a new variant
 //! with no row fails the test rather than silently having no flag.
 
+use std::sync::Arc;
+
 use agent_grpc::server::ServeRouter;
 use agent_grpc::{constants, Endpoint};
-use agent_runtime::{Agent, Config};
+use agent_runtime::{Agent, Config, SessionManager};
 
 /// Which seam to serve.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -663,6 +665,81 @@ pub async fn serve_session_observe(agent: &Agent, listen: Endpoint) -> anyhow::R
     Ok(())
 }
 
+/// Host the opt-in **sessions gateway** (`--serve-sessions`, docs/design/portal): the
+/// `SessionRegistryService` (open/close/heartbeat) **and** a *driving*
+/// `AgentSessionService` (the `Send` RPC — submit a goal, stream the run) over one
+/// [`SessionManager`], plus the idle-GC reaper (the deferred multi-session `05c`).
+///
+/// This is `--serve-mcp`-class — it runs arbitrary goals — so it is deliberately its
+/// own endpoint and **never** part of `--serve-all`; loopback/UDS + socket file
+/// permissions are the only access control (docs/design/multi-session/07-security.md).
+pub async fn serve_sessions(agent: Arc<Agent>, listen: Endpoint) -> anyhow::Result<()> {
+    use agent_grpc::server as srv;
+    // Unbounded caps for the single-operator local gateway; a `[grpc.sessions]`
+    // capacity knob (`SessionManager::with_limits`) is a follow-up.
+    let mgr = Arc::new(SessionManager::new(agent.clone()));
+
+    // The reaper is the real resource guarantee — a crashed portal never sends `Close`,
+    // so idle sessions are GC'd here (docs/design/multi-session/05-lifecycle.md).
+    {
+        let mgr = mgr.clone();
+        tokio::spawn(async move {
+            const IDLE_AFTER: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                let n = mgr.reap_idle(IDLE_AFTER);
+                if n > 0 {
+                    tracing::info!(reaped = n, "reaped idle sessions");
+                }
+            }
+        });
+    }
+
+    let (router, health) = agent_grpc::server::base_router_with_observer(
+        agent.grpc_max_in_flight(),
+        Some(shed_observer(&agent)),
+    )
+    .await;
+    let router = router.add_service(
+        srv::SessionRegistrySvc::new(mgr.clone() as Arc<dyn agent_core::SessionRegistry>)
+            .into_server(),
+    );
+    health.set_serving("agent.v1.SessionRegistryService").await;
+    let router = router.add_service(
+        srv::AgentSessionSvc::new(agent.session_source_registry())
+            .with_driver(mgr.clone() as Arc<dyn agent_core::SessionDriver>)
+            .into_server(),
+    );
+    health.set_serving(Seam::SessionStream.service_name()).await;
+
+    let router = agent_grpc::server::with_reflection(router).map_err(anyhow::Error::msg)?;
+    let bound = listen.bind().await?;
+    tracing::info!(
+        endpoint = ?bound.dial_endpoint()?,
+        "sessions gateway ready (SessionRegistry + driving AgentSession + reaper)"
+    );
+    let shutdown = async {
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::info!("shutting down sessions gateway");
+    };
+    bound.serve(router, shutdown).await?;
+    Ok(())
+}
+
+/// Resolve the `--serve-sessions` endpoint: `--listen` override, else
+/// `[grpc.sessions] listen`, else a loopback default on the generated port.
+pub fn resolve_sessions_listen(cfg: &Config, override_addr: Option<&str>) -> Endpoint {
+    if let Some(addr) = override_addr {
+        return Endpoint::parse(addr);
+    }
+    if cfg.grpc.sessions.listen.is_empty() {
+        Endpoint::parse(&format!("127.0.0.1:{}", constants::SESSIONS.tcp_port))
+    } else {
+        Endpoint::parse(&cfg.grpc.sessions.listen)
+    }
+}
+
 async fn serve_seams(
     agent: &Agent,
     seams: &[Seam],
@@ -755,6 +832,34 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The `--serve-sessions` gateway is a composite (not in `SEAMS`), so the
+    /// per-seam uniqueness test can't cover it — assert its 50080/9630/sessions.sock
+    /// endpoint collides with no seam and not the `--serve-all` gateway.
+    #[test]
+    fn positive_sessions_gateway_endpoint_is_distinct() {
+        use constants::{GATEWAY, SESSIONS};
+        for s in SEAMS {
+            assert_ne!(
+                SESSIONS.tcp_port, s.endpoint.tcp_port,
+                "sessions shares a TCP port with {}",
+                s.name
+            );
+            assert_ne!(
+                SESSIONS.metrics_port, s.endpoint.metrics_port,
+                "sessions shares a metrics port with {}",
+                s.name
+            );
+            assert_ne!(
+                SESSIONS.uds_path, s.endpoint.uds_path,
+                "sessions shares a socket with {}",
+                s.name
+            );
+        }
+        assert_ne!(SESSIONS.tcp_port, GATEWAY.tcp_port);
+        assert_ne!(SESSIONS.metrics_port, GATEWAY.metrics_port);
+        assert_ne!(SESSIONS.uds_path, GATEWAY.uds_path);
     }
 
     /// A service name that doesn't match the `.proto` makes the health probe and

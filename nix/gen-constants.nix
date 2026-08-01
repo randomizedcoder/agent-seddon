@@ -69,6 +69,10 @@ let
     ${seamConst "SESSION_STREAM" g.session_stream}
     ${seamConst "METRICS_PROXY" g.metrics_proxy}
 
+    /// The opt-in `agent --serve-sessions` gateway (not a seam — it hosts the
+    /// session registry + a driving `AgentSessionService`).
+    ${seamConst "SESSIONS" g.sessions}
+
     /// The `agent --serve-all` gateway (not a seam — it hosts every seam).
     ${seamConst "GATEWAY" g.gateway}
   '';

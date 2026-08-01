@@ -166,6 +166,14 @@ pub const METRICS_PROXY: SeamEndpoint = SeamEndpoint {
     metrics_port: 9629,
 };
 
+/// The opt-in `agent --serve-sessions` gateway (not a seam — it hosts the
+/// session registry + a driving `AgentSessionService`).
+pub const SESSIONS: SeamEndpoint = SeamEndpoint {
+    tcp_port: 50080,
+    uds_path: "/tmp/agent-seddon/sessions.sock",
+    metrics_port: 9630,
+};
+
 /// The `agent --serve-all` gateway (not a seam — it hosts every seam).
 pub const GATEWAY: SeamEndpoint = SeamEndpoint {
     tcp_port: 50100,

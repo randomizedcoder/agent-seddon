@@ -1231,6 +1231,12 @@ pub struct GrpcCfg {
     pub metrics_proxy: GrpcSeamCfg,
     #[serde(default)]
     pub review: GrpcSeamCfg,
+    /// Not a seam: the opt-in `agent --serve-sessions` gateway (docs/design/portal),
+    /// which hosts the `SessionRegistryService` + a *driving* `AgentSessionService`
+    /// (the `Send` RPC) and runs the idle-GC reaper. Only `listen` is meaningful.
+    /// Kept off `--serve-all` because `Send` is `--serve-mcp`-class arbitrary execution.
+    #[serde(default)]
+    pub sessions: GrpcSeamCfg,
     /// Not a seam: the `agent --serve-all` gateway, which hosts every enabled
     /// seam's service in one process. Only `listen` is meaningful — a client
     /// dials an individual seam's service, not the gateway as a whole.
