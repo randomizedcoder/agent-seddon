@@ -907,8 +907,9 @@ fn default_tasks_backend() -> String {
 /// tool call, checked before it runs). `backend` selects the impl and defaults to
 /// empty ⇒ **off** (no verifier, no cost). `"schema"` is the deterministic,
 /// model-free argument/schema check; `"llm"` asks the built provider to judge the
-/// call's correctness (catches semantic slips, at the cost of a model call). `mode`
-/// gates whether a non-allow verdict
+/// call's correctness (catches semantic slips, at the cost of a model call);
+/// `"ensemble"` runs the `members` verifiers and combines their verdicts by a
+/// confidence-weighted vote (any `Deny` wins). `mode` gates whether a non-allow verdict
 /// changes behaviour:
 /// `"shadow"` (default) observes the verdict only; `"enforce"` blocks a
 /// `Revise`/`Deny`'d call and feeds its message back to the model, which can
@@ -920,6 +921,10 @@ pub struct VerifierCfg {
     pub backend: String,
     #[serde(default = "default_verifier_mode")]
     pub mode: String,
+    /// Registered verifier names composed by `backend = "ensemble"` (e.g.
+    /// `members = ["schema", "llm"]`). Ignored by the other backends.
+    #[serde(default)]
+    pub members: Vec<String>,
 }
 
 impl Default for VerifierCfg {
@@ -927,6 +932,7 @@ impl Default for VerifierCfg {
         Self {
             backend: String::new(),
             mode: default_verifier_mode(),
+            members: Vec::new(),
         }
     }
 }

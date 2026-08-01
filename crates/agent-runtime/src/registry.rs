@@ -536,6 +536,31 @@ pub fn register_builtins(r: &mut Registry) {
         let provider = ctx.provider()?.clone();
         Ok(Arc::new(agent_verifier::LlmVerifier::new(provider)) as Arc<dyn agent_core::Verifier>)
     });
+    #[cfg(feature = "verifier")]
+    r.verifier("ensemble", |ctx| {
+        // A COMPOSING factory (like the `router` provider): build each member back
+        // through the registry, so an ensemble can span schema + llm + a `grpc` member.
+        let members = &ctx.cfg.verifier.members;
+        if members.is_empty() {
+            anyhow::bail!(
+                "[verifier] members must list at least one verifier name when \
+                 `[verifier] backend = \"ensemble\"`"
+            );
+        }
+        let registry = ctx.registry()?;
+        let mut built = Vec::new();
+        for name in members {
+            if name == "ensemble" {
+                anyhow::bail!("[verifier] members must not include `ensemble` itself");
+            }
+            built.push(
+                registry
+                    .build_verifier(name, ctx)
+                    .with_context(|| format!("building ensemble member `{name}`"))?,
+            );
+        }
+        Ok(Arc::new(agent_verifier::Ensemble::new(built)) as Arc<dyn agent_core::Verifier>)
+    });
 
     // --- memory backends (whole-store + independently-swappable layers) ---
     #[cfg(feature = "memory-file")]

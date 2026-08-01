@@ -126,6 +126,7 @@ verifier = [
     "dep:agent-verifier",
     "agent-verifier/verifier-schema",
     "agent-verifier/verifier-llm",
+    "agent-verifier/verifier-ensemble",
 ]
 # Multi-branch git seam: the RepoBackend backend (CLI by default) + the git tools.
 git = [

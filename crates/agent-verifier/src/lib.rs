@@ -17,3 +17,8 @@ pub use schema::SchemaVerifier;
 mod llm;
 #[cfg(feature = "verifier-llm")]
 pub use llm::LlmVerifier;
+
+#[cfg(feature = "verifier-ensemble")]
+mod ensemble;
+#[cfg(feature = "verifier-ensemble")]
+pub use ensemble::Ensemble;
