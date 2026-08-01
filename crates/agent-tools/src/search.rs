@@ -316,7 +316,15 @@ fn ls_walk(root: &Path, cwd: &Path, recursive: bool) -> String {
         Ok(r) => r,
         Err(e) => return format!("could not list `{}`: {e}", rel(root, cwd)),
     };
+    // Cap the collection: a pathological directory (millions of entries) would
+    // otherwise collect + sort them all into memory. `MAX_HITS` bounds it like the
+    // grep path; a normal directory is unaffected (adversarial audit — DoS caps).
+    let mut truncated = false;
     for entry in read.flatten() {
+        if names.len() >= MAX_HITS {
+            truncated = true;
+            break;
+        }
         let mut name = entry.file_name().to_string_lossy().into_owned();
         if entry.file_type().is_ok_and(|t| t.is_dir()) {
             name.push('/');
@@ -326,6 +334,11 @@ fn ls_walk(root: &Path, cwd: &Path, recursive: bool) -> String {
     names.sort();
     if names.is_empty() {
         "(empty)".into()
+    } else if truncated {
+        format!(
+            "{}\n... [truncated at {MAX_HITS} entries]",
+            names.join("\n")
+        )
     } else {
         names.join("\n")
     }
@@ -455,6 +468,25 @@ mod tests {
             obs.content
         );
         assert!(obs.content.contains("a.txt"));
+    }
+
+    /// `adversarial_`/`boundary_`: a directory with more than `MAX_HITS` entries is
+    /// capped (a pathological dir must not collect + sort unbounded into memory).
+    #[tokio::test]
+    async fn adversarial_ls_caps_at_max_hits() {
+        let dir = tempdir();
+        for i in 0..(MAX_HITS + 25) {
+            std::fs::write(dir.join(format!("f{i:04}.txt")), b"x").unwrap();
+        }
+        let obs = LsTool.execute(json!({}), &ctx(&dir)).await.unwrap();
+        assert!(!obs.is_error);
+        assert!(
+            obs.content.contains("truncated at"),
+            "an over-cap listing is marked truncated:\n{}",
+            &obs.content[..obs.content.len().min(200)]
+        );
+        // At most MAX_HITS names (+ the marker line).
+        assert!(obs.content.lines().count() <= MAX_HITS + 1);
     }
 
     // --- gitignore / hidden / case / truncation extensions -----------------

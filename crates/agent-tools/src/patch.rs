@@ -80,6 +80,11 @@ impl Tool for ApplyPatchTool {
                         Ok(p) => p,
                         Err(e) => return Ok(Observation::error(e)),
                     };
+                    if let Err(e) = crate::guard_file_size(&full).await {
+                        return Ok(Observation::error(format!(
+                            "validation failed: `{path}`: {e}"
+                        )));
+                    }
                     let raw = match tokio::fs::read_to_string(&full).await {
                         Ok(c) => c,
                         Err(_) => {
@@ -118,6 +123,11 @@ impl Tool for ApplyPatchTool {
                         Ok(p) => p,
                         Err(e) => return Ok(Observation::error(e)),
                     };
+                    if let Err(e) = crate::guard_file_size(&full).await {
+                        return Ok(Observation::error(format!(
+                            "validation failed: `{path}`: {e}"
+                        )));
+                    }
                     let raw = match tokio::fs::read_to_string(&full).await {
                         Ok(c) => c,
                         Err(_) => {

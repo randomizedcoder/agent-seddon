@@ -133,6 +133,9 @@ impl Tool for ReadFileTool {
             Ok(p) => p,
             Err(e) => return Ok(Observation::error(e)),
         };
+        if let Err(e) = crate::guard_file_size(&full).await {
+            return Ok(Observation::error(format!("`{path}`: {e}")));
+        }
         let bytes = match tokio::fs::read(&full).await {
             Ok(b) => b,
             Err(e) => return Ok(Observation::error(format!("could not read `{path}`: {e}"))),

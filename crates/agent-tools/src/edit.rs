@@ -96,6 +96,9 @@ impl Tool for EditTool {
             Ok(p) => p,
             Err(e) => return Ok(Observation::error(e)),
         };
+        if let Err(e) = crate::guard_file_size(&full).await {
+            return Ok(Observation::error(format!("`{path}`: {e}")));
+        }
         let raw = match tokio::fs::read_to_string(&full).await {
             Ok(c) => c,
             Err(e) => return Ok(Observation::error(io_err_msg("read", path, &e))),
