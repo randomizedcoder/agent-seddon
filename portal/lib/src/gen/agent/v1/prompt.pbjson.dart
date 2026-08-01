@@ -24,6 +24,7 @@ const PromptKind$json = {
     {'1': 'PROMPT_KIND_PREPEND', '2': 2},
     {'1': 'PROMPT_KIND_APPEND', '2': 3},
     {'1': 'PROMPT_KIND_MODE_LENS', '2': 4},
+    {'1': 'PROMPT_KIND_SYSTEM_FRAGMENT', '2': 5},
   ],
 };
 
@@ -31,7 +32,8 @@ const PromptKind$json = {
 final $typed_data.Uint8List promptKindDescriptor = $convert.base64Decode(
     'CgpQcm9tcHRLaW5kEhsKF1BST01QVF9LSU5EX1VOU1BFQ0lGSUVEEAASFgoSUFJPTVBUX0tJTk'
     'RfU1lTVEVNEAESFwoTUFJPTVBUX0tJTkRfUFJFUEVORBACEhYKElBST01QVF9LSU5EX0FQUEVO'
-    'RBADEhkKFVBST01QVF9LSU5EX01PREVfTEVOUxAE');
+    'RBADEhkKFVBST01QVF9LSU5EX01PREVfTEVOUxAEEh8KG1BST01QVF9LSU5EX1NZU1RFTV9GUk'
+    'FHTUVOVBAF');
 
 @$core.Deprecated('Use promptRefDescriptor instead')
 const PromptRef$json = {
@@ -71,6 +73,7 @@ const PromptEntry$json = {
     {'1': 'builtin', '3': 4, '4': 1, '5': 8, '10': 'builtin'},
     {'1': 'read_only', '3': 5, '4': 1, '5': 8, '10': 'readOnly'},
     {'1': 'order', '3': 6, '4': 1, '5': 13, '10': 'order'},
+    {'1': 'tags', '3': 7, '4': 3, '5': 9, '10': 'tags'},
   ],
 };
 
@@ -79,7 +82,7 @@ final $typed_data.Uint8List promptEntryDescriptor = $convert.base64Decode(
     'CgtQcm9tcHRFbnRyeRIoCgRraW5kGAEgASgOMhQuYWdlbnQudjEuUHJvbXB0S2luZFIEa2luZB'
     'IOCgJpZBgCIAEoCVICaWQSGAoHY29udGVudBgDIAEoCVIHY29udGVudBIYCgdidWlsdGluGAQg'
     'ASgIUgdidWlsdGluEhsKCXJlYWRfb25seRgFIAEoCFIIcmVhZE9ubHkSFAoFb3JkZXIYBiABKA'
-    '1SBW9yZGVy');
+    '1SBW9yZGVyEhIKBHRhZ3MYByADKAlSBHRhZ3M=');
 
 @$core.Deprecated('Use promptListRequestDescriptor instead')
 const PromptListRequest$json = {
@@ -121,6 +124,18 @@ final $typed_data.Uint8List promptListDescriptor = $convert.base64Decode(
     'CgpQcm9tcHRMaXN0Ei8KB2VudHJpZXMYASADKAsyFS5hZ2VudC52MS5Qcm9tcHRFbnRyeVIHZW'
     '50cmllcw==');
 
+@$core.Deprecated('Use promptContextDescriptor instead')
+const PromptContext$json = {
+  '1': 'PromptContext',
+  '2': [
+    {'1': 'tags', '3': 1, '4': 3, '5': 9, '10': 'tags'},
+  ],
+};
+
+/// Descriptor for `PromptContext`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List promptContextDescriptor =
+    $convert.base64Decode('Cg1Qcm9tcHRDb250ZXh0EhIKBHRhZ3MYASADKAlSBHRhZ3M=');
+
 @$core.Deprecated('Use deleteReplyDescriptor instead')
 const DeleteReply$json = {
   '1': 'DeleteReply',
@@ -139,13 +154,21 @@ const PreviewRequest$json = {
   '2': [
     {'1': 'mode', '3': 1, '4': 1, '5': 9, '10': 'mode'},
     {'1': 'goal', '3': 2, '4': 1, '5': 9, '10': 'goal'},
+    {
+      '1': 'context',
+      '3': 3,
+      '4': 1,
+      '5': 11,
+      '6': '.agent.v1.PromptContext',
+      '10': 'context'
+    },
   ],
 };
 
 /// Descriptor for `PreviewRequest`. Decode as a `google.protobuf.DescriptorProto`.
 final $typed_data.Uint8List previewRequestDescriptor = $convert.base64Decode(
     'Cg5QcmV2aWV3UmVxdWVzdBISCgRtb2RlGAEgASgJUgRtb2RlEhIKBGdvYWwYAiABKAlSBGdvYW'
-    'w=');
+    'wSMQoHY29udGV4dBgDIAEoCzIXLmFnZW50LnYxLlByb21wdENvbnRleHRSB2NvbnRleHQ=');
 
 @$core.Deprecated('Use previewMessageDescriptor instead')
 const PreviewMessage$json = {

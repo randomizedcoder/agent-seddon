@@ -8,3 +8,8 @@ import '../config.dart';
 /// `nix run .#grpc-web-up`.
 ClientChannel createGatewayChannel(PortalConfig cfg) =>
     GrpcWebClientChannel.xhr(Uri.parse(cfg.grpcWebUrl));
+
+/// Web build: dial a second grpc-web proxy in front of the `--serve-sessions`
+/// gateway (a second envoy → `:50080`). See the portal README.
+ClientChannel createSessionsChannel(PortalConfig cfg) =>
+    GrpcWebClientChannel.xhr(Uri.parse(cfg.sessionsGrpcWebUrl));

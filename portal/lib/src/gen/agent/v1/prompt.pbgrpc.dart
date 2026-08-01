@@ -60,6 +60,16 @@ class PromptServiceClient extends $grpc.Client {
     return $createUnaryCall(_$delete, request, options: options);
   }
 
+  /// The situational fragments selected for a context — the wire form of the loop's
+  /// resolver. Returns each selected fragment as a full entry (with its tags), so an
+  /// operator sees exactly the set that composes and why.
+  $grpc.ResponseFuture<$0.PromptList> select(
+    $0.PromptContext request, {
+    $grpc.CallOptions? options,
+  }) {
+    return $createUnaryCall(_$select, request, options: options);
+  }
+
   $grpc.ResponseFuture<$0.AssembledContext> previewAssembled(
     $0.PreviewRequest request, {
     $grpc.CallOptions? options,
@@ -85,6 +95,10 @@ class PromptServiceClient extends $grpc.Client {
       '/agent.v1.PromptService/Delete',
       ($0.PromptRef value) => value.writeToBuffer(),
       $0.DeleteReply.fromBuffer);
+  static final _$select = $grpc.ClientMethod<$0.PromptContext, $0.PromptList>(
+      '/agent.v1.PromptService/Select',
+      ($0.PromptContext value) => value.writeToBuffer(),
+      $0.PromptList.fromBuffer);
   static final _$previewAssembled =
       $grpc.ClientMethod<$0.PreviewRequest, $0.AssembledContext>(
           '/agent.v1.PromptService/PreviewAssembled',
@@ -125,6 +139,13 @@ abstract class PromptServiceBase extends $grpc.Service {
         false,
         ($core.List<$core.int> value) => $0.PromptRef.fromBuffer(value),
         ($0.DeleteReply value) => value.writeToBuffer()));
+    $addMethod($grpc.ServiceMethod<$0.PromptContext, $0.PromptList>(
+        'Select',
+        select_Pre,
+        false,
+        false,
+        ($core.List<$core.int> value) => $0.PromptContext.fromBuffer(value),
+        ($0.PromptList value) => value.writeToBuffer()));
     $addMethod($grpc.ServiceMethod<$0.PreviewRequest, $0.AssembledContext>(
         'PreviewAssembled',
         previewAssembled_Pre,
@@ -165,6 +186,14 @@ abstract class PromptServiceBase extends $grpc.Service {
 
   $async.Future<$0.DeleteReply> delete(
       $grpc.ServiceCall call, $0.PromptRef request);
+
+  $async.Future<$0.PromptList> select_Pre(
+      $grpc.ServiceCall $call, $async.Future<$0.PromptContext> $request) async {
+    return select($call, await $request);
+  }
+
+  $async.Future<$0.PromptList> select(
+      $grpc.ServiceCall call, $0.PromptContext request);
 
   $async.Future<$0.AssembledContext> previewAssembled_Pre(
       $grpc.ServiceCall $call,

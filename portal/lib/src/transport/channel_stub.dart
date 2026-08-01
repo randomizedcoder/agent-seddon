@@ -6,3 +6,6 @@ import '../config.dart';
 /// targets native desktop + web, so this should never be reached.
 ClientChannel createGatewayChannel(PortalConfig cfg) =>
     throw UnsupportedError('no gRPC transport available on this platform');
+
+ClientChannel createSessionsChannel(PortalConfig cfg) =>
+    throw UnsupportedError('no gRPC transport available on this platform');

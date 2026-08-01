@@ -50,6 +50,18 @@ class AgentSessionServiceClient extends $grpc.Client {
     return $createUnaryCall(_$snapshot, request, options: options);
   }
 
+  /// Submit a goal and stream the run live (same `SessionEvent` shape as Subscribe,
+  /// beginning with a `status_snapshot` and ending on `run_finished`). Dropping the
+  /// stream (client disconnect) cancels the in-flight run. `--serve-mcp`-class — see
+  /// the header note. UNIMPLEMENTED on an observe-only endpoint (no session driver).
+  $grpc.ResponseStream<$0.SessionEvent> send(
+    $0.GoalRequest request, {
+    $grpc.CallOptions? options,
+  }) {
+    return $createStreamingCall(_$send, $async.Stream.fromIterable([request]),
+        options: options);
+  }
+
   // method descriptors
 
   static final _$subscribe =
@@ -62,6 +74,10 @@ class AgentSessionServiceClient extends $grpc.Client {
           '/agent.v1.AgentSessionService/Snapshot',
           ($0.SnapshotRequest value) => value.writeToBuffer(),
           $0.StatusSnapshot.fromBuffer);
+  static final _$send = $grpc.ClientMethod<$0.GoalRequest, $0.SessionEvent>(
+      '/agent.v1.AgentSessionService/Send',
+      ($0.GoalRequest value) => value.writeToBuffer(),
+      $0.SessionEvent.fromBuffer);
 }
 
 @$pb.GrpcServiceName('agent.v1.AgentSessionService')
@@ -83,6 +99,13 @@ abstract class AgentSessionServiceBase extends $grpc.Service {
         false,
         ($core.List<$core.int> value) => $0.SnapshotRequest.fromBuffer(value),
         ($0.StatusSnapshot value) => value.writeToBuffer()));
+    $addMethod($grpc.ServiceMethod<$0.GoalRequest, $0.SessionEvent>(
+        'Send',
+        send_Pre,
+        false,
+        true,
+        ($core.List<$core.int> value) => $0.GoalRequest.fromBuffer(value),
+        ($0.SessionEvent value) => value.writeToBuffer()));
   }
 
   $async.Stream<$0.SessionEvent> subscribe_Pre($grpc.ServiceCall $call,
@@ -100,4 +123,12 @@ abstract class AgentSessionServiceBase extends $grpc.Service {
 
   $async.Future<$0.StatusSnapshot> snapshot(
       $grpc.ServiceCall call, $0.SnapshotRequest request);
+
+  $async.Stream<$0.SessionEvent> send_Pre(
+      $grpc.ServiceCall $call, $async.Future<$0.GoalRequest> $request) async* {
+    yield* send($call, await $request);
+  }
+
+  $async.Stream<$0.SessionEvent> send(
+      $grpc.ServiceCall call, $0.GoalRequest request);
 }

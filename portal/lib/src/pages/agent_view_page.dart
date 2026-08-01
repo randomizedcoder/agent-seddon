@@ -1,11 +1,13 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:grpc/service_api.dart' as grpc;
 
 import '../clients.dart';
 import '../gen/agent/v1/agent_session.pb.dart';
 import '../gen/agent/v1/llm_pool.pb.dart';
 import '../gen/agent/v1/metrics_proxy.pb.dart';
+import '../gen/agent/v1/session_registry.pb.dart';
 
 /// The Agent View: a live transcript of the running loop (from `AgentSessionService`)
 /// over a status bar — mode + context from the same stream, GPU pool from
@@ -42,6 +44,12 @@ class _AgentViewPageState extends State<AgentViewPage> {
   Timer? _poolTimer;
   Timer? _metricsTimer;
 
+  // Driving state: the goal input, and the session this portal drives (minted once
+  // via SessionRegistry.Open, then reused so follow-up goals continue the conversation).
+  final _goalInput = TextEditingController();
+  String? _sessionId;
+  bool _sending = false;
+
   @override
   void initState() {
     super.initState();
@@ -59,6 +67,7 @@ class _AgentViewPageState extends State<AgentViewPage> {
     _sub?.cancel();
     _poolTimer?.cancel();
     _metricsTimer?.cancel();
+    _goalInput.dispose();
     _scroll.dispose();
     super.dispose();
   }
@@ -71,6 +80,46 @@ class _AgentViewPageState extends State<AgentViewPage> {
       onError: (Object e) => setState(() => _streamDown = true),
       onDone: () => setState(() => _streamDown = true),
     );
+  }
+
+  /// Submit a goal to the agent and stream the run. Mirrors [_subscribe], but drives
+  /// via `Send` (which returns the same `SessionEvent` stream, so [_onEvent] renders
+  /// it unchanged). The `(user, session)` identity rides call metadata — the sessions
+  /// gateway requires it — with the session minted once via `SessionRegistry.Open` and
+  /// reused, so follow-up goals continue the same conversation. Cancelling the stream
+  /// (navigating away / a new goal) cancels the in-flight run server-side.
+  Future<void> _send(String goal) async {
+    final g = goal.trim();
+    if (g.isEmpty || _sending) return;
+    setState(() => _sending = true);
+    try {
+      _sessionId ??=
+          (await widget.clients.registry.open(OpenRequest(user: 'portal')))
+              .sessionId;
+    } catch (_) {
+      setState(() {
+        _sending = false;
+        _streamDown = true; // couldn't reach the --serve-sessions gateway
+      });
+      return;
+    }
+    final opts = grpc.CallOptions(metadata: {
+      'x-agent-user-id': 'portal',
+      'x-agent-session-id': _sessionId!,
+    });
+    _sub?.cancel();
+    _goalInput.clear();
+    setState(() {
+      _streamDown = false;
+      _sending = false;
+    });
+    _sub = widget.clients.session
+        .send(GoalRequest(goal: g), options: opts)
+        .listen(
+          _onEvent,
+          onError: (Object e) => setState(() => _streamDown = true),
+          onDone: () {}, // the run ended; keep the transcript (session is reusable)
+        );
   }
 
   void _onEvent(SessionEvent ev) {
@@ -187,8 +236,39 @@ class _AgentViewPageState extends State<AgentViewPage> {
       children: [
         Expanded(child: _transcript()),
         const Divider(height: 1),
+        _goalBar(),
+        const Divider(height: 1),
         _statusBar(),
       ],
+    );
+  }
+
+  /// The goal input: type a goal, press Enter or Send, and watch it run. Drives the
+  /// `--serve-sessions` gateway (arbitrary agent execution — loopback/UDS only).
+  Widget _goalBar() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      child: Row(
+        children: [
+          Expanded(
+            child: TextField(
+              controller: _goalInput,
+              decoration: const InputDecoration(
+                hintText: 'Send a goal to the agent…',
+                isDense: true,
+                border: OutlineInputBorder(),
+              ),
+              onSubmitted: _send,
+            ),
+          ),
+          const SizedBox(width: 8),
+          FilledButton.icon(
+            onPressed: _sending ? null : () => _send(_goalInput.text),
+            icon: const Icon(Icons.send, size: 18),
+            label: const Text('Send'),
+          ),
+        ],
+      ),
     );
   }
 
@@ -201,7 +281,8 @@ class _AgentViewPageState extends State<AgentViewPage> {
             const Icon(Icons.cloud_off, size: 40),
             const SizedBox(height: 8),
             const Text('Not receiving events.\n'
-                'Run an agent with [grpc.session_stream] listen set.'),
+                'Start the sessions gateway: `agent --serve-sessions`,\n'
+                'then send a goal below or Reconnect to observe.'),
             const SizedBox(height: 8),
             FilledButton(onPressed: _subscribe, child: const Text('Reconnect')),
           ],
