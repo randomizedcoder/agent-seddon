@@ -5,21 +5,39 @@ import 'gen/agent/v1/agent_session.pbgrpc.dart';
 import 'gen/agent/v1/llm_pool.pbgrpc.dart';
 import 'gen/agent/v1/metrics_proxy.pbgrpc.dart';
 import 'gen/agent/v1/prompt.pbgrpc.dart';
+import 'gen/agent/v1/session_registry.pbgrpc.dart';
 import 'transport/channel_factory.dart';
 
-/// One channel to the gateway (`:50100` native, or the grpc-web proxy on web),
-/// and the service clients built from it. Add a seam to the gateway → it is
-/// reachable here with no transport work.
+/// The portal's gRPC clients, over **two** channels:
+///
+/// - the `--serve-all` **gateway** (`:50100`) for the read-only seams the portal
+///   consumes — prompts, metrics, and the GPU pool; and
+/// - the opt-in `--serve-sessions` **sessions gateway** (`:50080`) for everything
+///   session-related — the driving [AgentSessionServiceClient] (`Send` + observe) and
+///   the [SessionRegistryServiceClient] (mint a session to attribute a `Send` to).
+///
+/// Observe (`Subscribe`) and drive (`Send`) share the sessions channel because a
+/// driven session's events live in that process (docs/design/portal).
 class PortalClients {
-  final ClientChannel channel;
-  late final PromptServiceClient prompts = PromptServiceClient(channel);
+  final ClientChannel gatewayChannel;
+  final ClientChannel sessionsChannel;
+
+  late final PromptServiceClient prompts = PromptServiceClient(gatewayChannel);
   late final MetricsProxyServiceClient metrics =
-      MetricsProxyServiceClient(channel);
+      MetricsProxyServiceClient(gatewayChannel);
+  late final LlmPoolServiceClient pool = LlmPoolServiceClient(gatewayChannel);
+
   late final AgentSessionServiceClient session =
-      AgentSessionServiceClient(channel);
-  late final LlmPoolServiceClient pool = LlmPoolServiceClient(channel);
+      AgentSessionServiceClient(sessionsChannel);
+  late final SessionRegistryServiceClient registry =
+      SessionRegistryServiceClient(sessionsChannel);
 
-  PortalClients(PortalConfig cfg) : channel = createGatewayChannel(cfg);
+  PortalClients(PortalConfig cfg)
+      : gatewayChannel = createGatewayChannel(cfg),
+        sessionsChannel = createSessionsChannel(cfg);
 
-  Future<void> shutdown() => channel.shutdown();
+  Future<void> shutdown() async {
+    await gatewayChannel.shutdown();
+    await sessionsChannel.shutdown();
+  }
 }

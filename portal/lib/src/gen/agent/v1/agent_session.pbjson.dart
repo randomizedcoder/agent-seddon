@@ -18,20 +18,40 @@ import 'dart:typed_data' as $typed_data;
 @$core.Deprecated('Use subscribeRequestDescriptor instead')
 const SubscribeRequest$json = {
   '1': 'SubscribeRequest',
+  '2': [
+    {'1': 'session_id', '3': 1, '4': 1, '5': 9, '10': 'sessionId'},
+  ],
 };
 
 /// Descriptor for `SubscribeRequest`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List subscribeRequestDescriptor =
-    $convert.base64Decode('ChBTdWJzY3JpYmVSZXF1ZXN0');
+final $typed_data.Uint8List subscribeRequestDescriptor = $convert.base64Decode(
+    'ChBTdWJzY3JpYmVSZXF1ZXN0Eh0KCnNlc3Npb25faWQYASABKAlSCXNlc3Npb25JZA==');
 
 @$core.Deprecated('Use snapshotRequestDescriptor instead')
 const SnapshotRequest$json = {
   '1': 'SnapshotRequest',
+  '2': [
+    {'1': 'session_id', '3': 1, '4': 1, '5': 9, '10': 'sessionId'},
+  ],
 };
 
 /// Descriptor for `SnapshotRequest`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List snapshotRequestDescriptor =
-    $convert.base64Decode('Cg9TbmFwc2hvdFJlcXVlc3Q=');
+final $typed_data.Uint8List snapshotRequestDescriptor = $convert.base64Decode(
+    'Cg9TbmFwc2hvdFJlcXVlc3QSHQoKc2Vzc2lvbl9pZBgBIAEoCVIJc2Vzc2lvbklk');
+
+@$core.Deprecated('Use goalRequestDescriptor instead')
+const GoalRequest$json = {
+  '1': 'GoalRequest',
+  '2': [
+    {'1': 'goal', '3': 1, '4': 1, '5': 9, '10': 'goal'},
+    {'1': 'session_id', '3': 2, '4': 1, '5': 9, '10': 'sessionId'},
+  ],
+};
+
+/// Descriptor for `GoalRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List goalRequestDescriptor = $convert.base64Decode(
+    'CgtHb2FsUmVxdWVzdBISCgRnb2FsGAEgASgJUgRnb2FsEh0KCnNlc3Npb25faWQYAiABKAlSCX'
+    'Nlc3Npb25JZA==');
 
 @$core.Deprecated('Use runStartedDescriptor instead')
 const RunStarted$json = {

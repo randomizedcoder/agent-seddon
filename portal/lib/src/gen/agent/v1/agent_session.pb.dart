@@ -17,8 +17,20 @@ import 'package:protobuf/protobuf.dart' as $pb;
 
 export 'package:protobuf/protobuf.dart' show GeneratedMessageGenericExtensions;
 
+/// `session_id` selects which live session to observe when the server multiplexes
+/// many (docs/design/multi-session/03-hazards.md, hazard B). Empty selects the sole
+/// live session — the single-session observer convenience; empty against several
+/// live sessions is ambiguous and rejected with INVALID_ARGUMENT. An unknown id is
+/// NOT_FOUND. The field is additive: a pre-multi-session client sends it empty and
+/// gets today's single-session behaviour.
 class SubscribeRequest extends $pb.GeneratedMessage {
-  factory SubscribeRequest() => create();
+  factory SubscribeRequest({
+    $core.String? sessionId,
+  }) {
+    final result = create();
+    if (sessionId != null) result.sessionId = sessionId;
+    return result;
+  }
 
   SubscribeRequest._();
 
@@ -33,6 +45,7 @@ class SubscribeRequest extends $pb.GeneratedMessage {
       _omitMessageNames ? '' : 'SubscribeRequest',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
       createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'sessionId')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -53,10 +66,25 @@ class SubscribeRequest extends $pb.GeneratedMessage {
   static SubscribeRequest getDefault() => _defaultInstance ??=
       $pb.GeneratedMessage.$_defaultFor<SubscribeRequest>(create);
   static SubscribeRequest? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get sessionId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set sessionId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasSessionId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearSessionId() => $_clearField(1);
 }
 
 class SnapshotRequest extends $pb.GeneratedMessage {
-  factory SnapshotRequest() => create();
+  factory SnapshotRequest({
+    $core.String? sessionId,
+  }) {
+    final result = create();
+    if (sessionId != null) result.sessionId = sessionId;
+    return result;
+  }
 
   SnapshotRequest._();
 
@@ -71,6 +99,7 @@ class SnapshotRequest extends $pb.GeneratedMessage {
       _omitMessageNames ? '' : 'SnapshotRequest',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
       createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'sessionId')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -91,6 +120,84 @@ class SnapshotRequest extends $pb.GeneratedMessage {
   static SnapshotRequest getDefault() => _defaultInstance ??=
       $pb.GeneratedMessage.$_defaultFor<SnapshotRequest>(create);
   static SnapshotRequest? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get sessionId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set sessionId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasSessionId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearSessionId() => $_clearField(1);
+}
+
+/// The goal to run, for `Send`. The driven session's `(user, session)` identity comes
+/// from gRPC metadata (the capacity-attributed tenant key); `session_id` is reserved
+/// for a future explicit-selector path and must be empty in this increment.
+class GoalRequest extends $pb.GeneratedMessage {
+  factory GoalRequest({
+    $core.String? goal,
+    $core.String? sessionId,
+  }) {
+    final result = create();
+    if (goal != null) result.goal = goal;
+    if (sessionId != null) result.sessionId = sessionId;
+    return result;
+  }
+
+  GoalRequest._();
+
+  factory GoalRequest.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory GoalRequest.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'GoalRequest',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'goal')
+    ..aOS(2, _omitFieldNames ? '' : 'sessionId')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  GoalRequest clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  GoalRequest copyWith(void Function(GoalRequest) updates) =>
+      super.copyWith((message) => updates(message as GoalRequest))
+          as GoalRequest;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static GoalRequest create() => GoalRequest._();
+  @$core.override
+  GoalRequest createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static GoalRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<GoalRequest>(create);
+  static GoalRequest? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get goal => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set goal($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasGoal() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearGoal() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get sessionId => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set sessionId($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasSessionId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearSessionId() => $_clearField(2);
 }
 
 class RunStarted extends $pb.GeneratedMessage {

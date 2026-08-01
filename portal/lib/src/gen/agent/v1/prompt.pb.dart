@@ -99,6 +99,7 @@ class PromptEntry extends $pb.GeneratedMessage {
     $core.bool? builtin,
     $core.bool? readOnly,
     $core.int? order,
+    $core.Iterable<$core.String>? tags,
   }) {
     final result = create();
     if (kind != null) result.kind = kind;
@@ -107,6 +108,7 @@ class PromptEntry extends $pb.GeneratedMessage {
     if (builtin != null) result.builtin = builtin;
     if (readOnly != null) result.readOnly = readOnly;
     if (order != null) result.order = order;
+    if (tags != null) result.tags.addAll(tags);
     return result;
   }
 
@@ -130,6 +132,7 @@ class PromptEntry extends $pb.GeneratedMessage {
     ..aOB(4, _omitFieldNames ? '' : 'builtin')
     ..aOB(5, _omitFieldNames ? '' : 'readOnly')
     ..aI(6, _omitFieldNames ? '' : 'order', fieldType: $pb.PbFieldType.OU3)
+    ..pPS(7, _omitFieldNames ? '' : 'tags')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -204,6 +207,9 @@ class PromptEntry extends $pb.GeneratedMessage {
   $core.bool hasOrder() => $_has(5);
   @$pb.TagNumber(6)
   void clearOrder() => $_clearField(6);
+
+  @$pb.TagNumber(7)
+  $pb.PbList<$core.String> get tags => $_getList(6);
 }
 
 class PromptListRequest extends $pb.GeneratedMessage {
@@ -309,6 +315,58 @@ class PromptList extends $pb.GeneratedMessage {
   $pb.PbList<PromptEntry> get entries => $_getList(0);
 }
 
+/// The situation a system fragment is selected for: an opaque, bounded tag set (e.g.
+/// mode:review, language:rust). A fragment is selected when its tags are a subset of
+/// this context (docs/design/prompts/04-selection.md). Tags are string-compared only —
+/// never a path segment or SQL — so a hostile value simply matches nothing.
+class PromptContext extends $pb.GeneratedMessage {
+  factory PromptContext({
+    $core.Iterable<$core.String>? tags,
+  }) {
+    final result = create();
+    if (tags != null) result.tags.addAll(tags);
+    return result;
+  }
+
+  PromptContext._();
+
+  factory PromptContext.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory PromptContext.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'PromptContext',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
+      createEmptyInstance: create)
+    ..pPS(1, _omitFieldNames ? '' : 'tags')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  PromptContext clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  PromptContext copyWith(void Function(PromptContext) updates) =>
+      super.copyWith((message) => updates(message as PromptContext))
+          as PromptContext;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static PromptContext create() => PromptContext._();
+  @$core.override
+  PromptContext createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static PromptContext getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<PromptContext>(create);
+  static PromptContext? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $pb.PbList<$core.String> get tags => $_getList(0);
+}
+
 class DeleteReply extends $pb.GeneratedMessage {
   factory DeleteReply({
     $core.bool? deleted,
@@ -363,16 +421,21 @@ class DeleteReply extends $pb.GeneratedMessage {
   void clearDeleted() => $_clearField(1);
 }
 
-/// Preview the assembled context for a goal. `mode` is informational — initial
-/// assembly is mode-independent (the lens applies only at switch-compaction).
+/// Preview the assembled context for a goal. `context` (a tag set) selects the
+/// situational fragments folded into the previewed system message — so an operator can
+/// ask "show me the prompt for {mode:review, language:rust}". `mode` is the pre-04
+/// scalar form, honoured as a fallback when `context` is empty (the server derives a
+/// `mode:<mode>` tag from it).
 class PreviewRequest extends $pb.GeneratedMessage {
   factory PreviewRequest({
     $core.String? mode,
     $core.String? goal,
+    PromptContext? context,
   }) {
     final result = create();
     if (mode != null) result.mode = mode;
     if (goal != null) result.goal = goal;
+    if (context != null) result.context = context;
     return result;
   }
 
@@ -391,6 +454,8 @@ class PreviewRequest extends $pb.GeneratedMessage {
       createEmptyInstance: create)
     ..aOS(1, _omitFieldNames ? '' : 'mode')
     ..aOS(2, _omitFieldNames ? '' : 'goal')
+    ..aOM<PromptContext>(3, _omitFieldNames ? '' : 'context',
+        subBuilder: PromptContext.create)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -429,6 +494,17 @@ class PreviewRequest extends $pb.GeneratedMessage {
   $core.bool hasGoal() => $_has(1);
   @$pb.TagNumber(2)
   void clearGoal() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  PromptContext get context => $_getN(2);
+  @$pb.TagNumber(3)
+  set context(PromptContext value) => $_setField(3, value);
+  @$pb.TagNumber(3)
+  $core.bool hasContext() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearContext() => $_clearField(3);
+  @$pb.TagNumber(3)
+  PromptContext ensureContext() => $_ensure(2);
 }
 
 class PreviewMessage extends $pb.GeneratedMessage {

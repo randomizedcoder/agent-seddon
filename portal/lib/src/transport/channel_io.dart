@@ -13,3 +13,13 @@ ClientChannel createGatewayChannel(PortalConfig cfg) => native.ClientChannel(
         credentials: native.ChannelCredentials.insecure(),
       ),
     );
+
+/// Native desktop: dial the `--serve-sessions` gateway directly (registry + driving
+/// `AgentSessionService`, incl. `Send`).
+ClientChannel createSessionsChannel(PortalConfig cfg) => native.ClientChannel(
+      cfg.sessionsHost,
+      port: cfg.sessionsPort,
+      options: const native.ChannelOptions(
+        credentials: native.ChannelCredentials.insecure(),
+      ),
+    );

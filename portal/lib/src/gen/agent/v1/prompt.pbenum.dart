@@ -26,6 +26,8 @@ class PromptKind extends $pb.ProtobufEnum {
       PromptKind._(3, _omitEnumNames ? '' : 'PROMPT_KIND_APPEND');
   static const PromptKind PROMPT_KIND_MODE_LENS =
       PromptKind._(4, _omitEnumNames ? '' : 'PROMPT_KIND_MODE_LENS');
+  static const PromptKind PROMPT_KIND_SYSTEM_FRAGMENT =
+      PromptKind._(5, _omitEnumNames ? '' : 'PROMPT_KIND_SYSTEM_FRAGMENT');
 
   static const $core.List<PromptKind> values = <PromptKind>[
     PROMPT_KIND_UNSPECIFIED,
@@ -33,10 +35,11 @@ class PromptKind extends $pb.ProtobufEnum {
     PROMPT_KIND_PREPEND,
     PROMPT_KIND_APPEND,
     PROMPT_KIND_MODE_LENS,
+    PROMPT_KIND_SYSTEM_FRAGMENT,
   ];
 
   static final $core.List<PromptKind?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 4);
+      $pb.ProtobufEnum.$_initByValueList(values, 5);
   static PromptKind? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
