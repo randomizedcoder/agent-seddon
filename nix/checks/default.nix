@@ -128,4 +128,11 @@
   # round-trip), so the expect tooling is CI-validated. The live tier that talks
   # to a real model is the opt-in `nix run .#e2e-expect` app (not a check).
   expect-smoke = import ./expect-smoke.nix { inherit pkgs agent; };
+  # CLI-surface smoke (hermes-style): `agent --help` stays runnable and keeps
+  # advertising the full `--serve-<seam>` / serve interface. Offline.
+  cli-help = import ./cli-help.nix { inherit pkgs agent; };
+  # Config-roundtrip (hermes-style): representative `agent.toml` fixtures load +
+  # build via `agent --check-config` and select the right impls; broken ones fail
+  # closed. Offline (dry run — no model, no socket).
+  config-roundtrip = import ./config-roundtrip.nix { inherit pkgs agent; };
 }
