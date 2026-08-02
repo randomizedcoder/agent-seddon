@@ -60,6 +60,16 @@ From fake to real:
 The first four run hermetically under `nix flake check`; `e2e-live`/`e2e-expect`/`e2e-multi`
 need a running model and are opt-in `nix run` apps.
 
+`cli_e2e` also injects **wire faults** the in-process doubles can't reach, proving the
+shipped provider's HTTP layer is resilient over a real socket: a transient `503` is
+retried and recovered (so `agent-retry` is verified *wired in*, not just unit-tested);
+a hostile `Retry-After` can't pin the process; and a connection reset or a stream
+truncated mid-body fails cleanly (nonzero exit, no false answer) rather than hanging.
+The retry/backoff arithmetic itself stays unit-tested in `agent-retry`; these cases pin
+the end-to-end behaviour. Faults that tiny_http can't express (a real reset, a truncated
+chunked stream) use a small raw-`TcpListener` `FaultServer` in
+[`agent-cli/tests/common/mod.rs`](../../crates/agent-cli/tests/common/mod.rs).
+
 ## Coverage
 
 Source-based test coverage via [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov)
