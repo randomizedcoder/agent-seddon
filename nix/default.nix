@@ -246,6 +246,16 @@ let
       agent
       ;
   };
+  # Real-wire seam-surface breadth probe: `--serve-all` + grpcurl reflection over
+  # tcp+uds — every advertised seam describes + a critical subset round-trips. Opt-in.
+  serve-smoke = import ./serve-smoke.nix {
+    inherit
+      pkgs
+      lib
+      versions
+      agent
+      ;
+  };
 in
 {
   packages = {
@@ -369,6 +379,10 @@ in
     loadtest-wire = {
       type = "app";
       program = "${loadtest-wire}/bin/loadtest-wire";
+    };
+    serve-smoke = {
+      type = "app";
+      program = "${serve-smoke}/bin/serve-smoke";
     };
   };
 
