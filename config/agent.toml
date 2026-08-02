@@ -134,6 +134,17 @@ backends   = ["tantivy"]
 index_dir  = ""              # empty ⇒ per-repo .agent-seddon/index/<backend>
 auto_index = true
 
+# Cross-session recall (parity spec 20): a tantivy index over the agent's own PAST
+# saved transcripts, exposed as the `session_recall` tool so it can search its
+# history ("how did we fix X?"). Transcripts are rendered + secret-redacted before
+# indexing. OFF by default — a fresh checkout has no history worth searching. See
+# docs/components/search.md (DocumentSource) and docs/components/session-export.md.
+[recall]
+enabled      = false
+sessions_dir = ""            # empty ⇒ <working_dir>/.agent/sessions (the REPL's)
+index_dir    = ""            # empty ⇒ <sessions_dir>/.recall/index
+auto_index   = true
+
 # Tokenizer (the Tokenizer seam): accurate per-model token counts that drive
 # compaction budgeting + USD/cache cost accounting, replacing the ~chars/4
 # heuristic. "approx" is the dependency-free default; unset/unknown ⇒ heuristic
