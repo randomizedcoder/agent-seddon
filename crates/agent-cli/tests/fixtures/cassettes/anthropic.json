@@ -1,0 +1,41 @@
+[
+  {
+    "id": "msg_vcr",
+    "type": "message",
+    "role": "assistant",
+    "model": "claude-haiku-4-5",
+    "content": [
+      {
+        "type": "tool_use",
+        "id": "toolu_1",
+        "name": "write_file",
+        "input": {
+          "path": "hello.c",
+          "content": "#include <stdio.h>\nint main(void) {\n    printf(\"Hello, World!\\n\");\n    return 0;\n}\n"
+        }
+      }
+    ],
+    "stop_reason": "tool_use",
+    "usage": {
+      "input_tokens": 20,
+      "output_tokens": 15
+    }
+  },
+  {
+    "id": "msg_vcr2",
+    "type": "message",
+    "role": "assistant",
+    "model": "claude-haiku-4-5",
+    "content": [
+      {
+        "type": "text",
+        "text": "Wrote hello.c."
+      }
+    ],
+    "stop_reason": "end_turn",
+    "usage": {
+      "input_tokens": 25,
+      "output_tokens": 5
+    }
+  }
+]

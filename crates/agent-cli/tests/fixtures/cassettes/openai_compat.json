@@ -1,0 +1,50 @@
+[
+  {
+    "id": "chatcmpl-vcr",
+    "object": "chat.completion",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [
+            {
+              "id": "call_1",
+              "type": "function",
+              "function": {
+                "name": "write_file",
+                "arguments": "{\"path\": \"hello.c\", \"content\": \"#include <stdio.h>\\nint main(void) {\\n    printf(\\\"Hello, World!\\\\n\\\");\\n    return 0;\\n}\\n\"}"
+              }
+            }
+          ]
+        },
+        "finish_reason": "tool_calls"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 20,
+      "completion_tokens": 15,
+      "total_tokens": 35
+    }
+  },
+  {
+    "id": "chatcmpl-vcr",
+    "object": "chat.completion",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "Wrote hello.c."
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 30,
+      "completion_tokens": 5,
+      "total_tokens": 35
+    }
+  }
+]

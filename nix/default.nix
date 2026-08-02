@@ -256,6 +256,9 @@ let
       agent
       ;
   };
+  # Refresh the provider cassettes replayed by the hermetic `vcr_matrix` test from a
+  # real endpoint (opt-in; writes response bodies only, never a secret).
+  vcr-record = import ./vcr-record.nix { inherit pkgs; };
 in
 {
   packages = {
@@ -383,6 +386,10 @@ in
     serve-smoke = {
       type = "app";
       program = "${serve-smoke}/bin/serve-smoke";
+    };
+    vcr-record = {
+      type = "app";
+      program = "${vcr-record}/bin/vcr-record";
     };
   };
 
