@@ -12,8 +12,21 @@
 
 mod common;
 
-use common::{run_agent, status, text, tool, write_config, FakeLlm, TempWorkspace};
+use common::{
+    run_agent, status, status_retry_after, text, tool, write_config, FakeLlm, Fault, FaultServer,
+    TempWorkspace,
+};
 use serde_json::json;
+
+/// Adjust the retry budget and stream flag of a freshly written config (whose
+/// defaults are `max_retries = 0`, `stream = false`) — used by the wire-fault
+/// tests below.
+fn set_provider(cfg: &std::path::Path, max_retries: u32, stream: bool) {
+    let raw = std::fs::read_to_string(cfg).unwrap();
+    let raw = raw.replace("max_retries = 0", &format!("max_retries = {max_retries}"));
+    let raw = raw.replace("stream = false", &format!("stream = {stream}"));
+    std::fs::write(cfg, raw).unwrap();
+}
 
 /// The headline: a goal goes in, a real tool call comes out, a file lands on
 /// disk, the answer is on stdout, and the process exits 0.
@@ -438,5 +451,117 @@ fn adversarial_quote_heavy_content_survives_as_data() {
         std::fs::read_to_string(ws.path("nasty.txt")).expect("nasty.txt must exist"),
         nasty,
         "quote-heavy content must round-trip byte for byte"
+    );
+}
+
+// --- wire fault injection ---------------------------------------------------
+//
+// The tests above prove the happy path and the *terminal* failures (dead port,
+// HTTP 500). These prove the TRANSIENT path: that `agent-retry` is actually wired
+// into the shipped provider's HTTP layer (re-send on 5xx), that a hostile
+// `Retry-After` cannot pin the process, and that a reset / truncated stream fails
+// cleanly instead of hanging or falsely succeeding. `agent-retry`'s own unit tests
+// prove the backoff/clamp arithmetic; these prove the binary *uses* it, over a
+// real socket — coverage no in-process double can give.
+
+/// A transient 5xx is not fatal when retries are budgeted: the loop re-sends over
+/// the wire and still completes. With `max_retries = 0` the same script fails
+/// (see `negative_provider_http_error_exits_nonzero`), so success here *is* the
+/// proof that a retry happened.
+#[test]
+fn positive_retries_transient_503_then_succeeds() {
+    let ws = TempWorkspace::new("retry503");
+    let llm = FakeLlm::start(vec![
+        status(503, "try again later"),
+        tool(
+            "write_file",
+            json!({ "path": "ok.txt", "content": "recovered\n" }),
+        ),
+        text("recovered after a retry"),
+    ]);
+    let cfg = write_config(&ws, llm.base_url(), "");
+    set_provider(&cfg, 2, false);
+
+    let (code, _out, err) = run_agent(&cfg, &ws, &["write ok.txt"]);
+    assert_eq!(
+        code, 0,
+        "a retried-through 503 must succeed; stderr:\n{err}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(ws.path("ok.txt")).expect("ok.txt must exist"),
+        "recovered\n"
+    );
+    assert!(
+        llm.requests().len() >= 2,
+        "the loop must have re-sent after the 503, saw {} request(s)",
+        llm.requests().len()
+    );
+}
+
+/// **Adversarial.** A hostile `Retry-After` (here an hour) is attacker-influenced
+/// input — the model can't set it, but a compromised or malicious proxy can. With
+/// no retry budget the loop must fail fast and **never** sleep on the hint: a run
+/// that honoured it unclamped would hang for an hour. The clamp arithmetic itself
+/// is unit-tested in `agent-retry` (`clamp_hint_cases`); this pins the end-to-end
+/// property that the shipped binary can't be stalled by the header.
+#[test]
+fn adversarial_hostile_retry_after_does_not_pin_the_process() {
+    let ws = TempWorkspace::new("retryafter");
+    let llm = FakeLlm::start(vec![status_retry_after(503, "come back in an hour", 3600)]);
+    let cfg = write_config(&ws, llm.base_url(), ""); // max_retries = 0
+
+    let started = std::time::Instant::now();
+    let (code, stdout, _err) = run_agent(&cfg, &ws, &["anything"]);
+    let elapsed = started.elapsed();
+
+    assert_ne!(code, 0, "a 503 with no retry budget must fail");
+    assert!(
+        !stdout.contains("=== ANSWER ==="),
+        "no answer may be printed on failure, got:\n{stdout}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "the hostile 3600s Retry-After must not delay the process; took {elapsed:?}"
+    );
+}
+
+/// **Adversarial.** A provider that accepts the request then hangs up with no
+/// response (a connection reset) must fail cleanly — nonzero, no answer banner,
+/// diagnosable on stderr — never a hang. Exercises the buffered `send` path's
+/// transport-error arm.
+#[test]
+fn adversarial_connection_reset_exits_nonzero() {
+    let ws = TempWorkspace::new("reset");
+    let server = FaultServer::start(Fault::ResetBeforeResponse);
+    let cfg = write_config(&ws, server.base_url(), ""); // stream = false, max_retries = 0
+
+    let (code, stdout, stderr) = run_agent(&cfg, &ws, &["anything"]);
+    assert_ne!(code, 0, "a connection reset must not report success");
+    assert!(
+        !stdout.contains("=== ANSWER ==="),
+        "no answer may be printed on failure, got:\n{stdout}"
+    );
+    assert!(
+        stderr.to_lowercase().contains("error"),
+        "the failure must be diagnosable from stderr, got:\n{stderr}"
+    );
+}
+
+/// **Adversarial.** The streaming default's own failure mode: a `200` event-stream
+/// that resets mid-body without the chunked terminator. The SSE parser must surface
+/// that as an error the loop propagates (nonzero exit), not swallow the partial
+/// content as a false answer.
+#[test]
+fn adversarial_truncated_stream_exits_nonzero() {
+    let ws = TempWorkspace::new("truncstream");
+    let server = FaultServer::start(Fault::TruncateMidStream);
+    let cfg = write_config(&ws, server.base_url(), "");
+    set_provider(&cfg, 0, true); // stream = true
+
+    let (code, stdout, _err) = run_agent(&cfg, &ws, &["anything"]);
+    assert_ne!(code, 0, "a truncated stream must not report success");
+    assert!(
+        !stdout.contains("=== ANSWER ==="),
+        "a partial stream must not surface as an answer, got:\n{stdout}"
     );
 }

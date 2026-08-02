@@ -12,7 +12,11 @@
 #![allow(dead_code)] // each test file uses a subset
 
 use serde_json::{json, Value};
+use std::io::{Read, Write};
+use std::net::{Shutdown, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tiny_http::{Header, Response, Server};
 
 /// One scripted assistant turn.
@@ -24,6 +28,9 @@ pub enum Reply {
     Tool { name: String, args: Value },
     /// A raw HTTP status with a body, for failure injection.
     Status(u16, String),
+    /// A raw HTTP status plus extra response headers — e.g. a `Retry-After` on a
+    /// 429/503 — for exercising the retry/backoff path over the wire.
+    StatusWithHeaders(u16, String, Vec<(String, String)>),
 }
 
 pub fn text(s: &str) -> Reply {
@@ -39,6 +46,16 @@ pub fn tool(name: &str, args: Value) -> Reply {
 
 pub fn status(code: u16, body: &str) -> Reply {
     Reply::Status(code, body.to_string())
+}
+
+/// A retryable status carrying a `Retry-After: <secs>` header — the server backoff
+/// hint the provider must read, honour, and (crucially) *clamp*.
+pub fn status_retry_after(code: u16, body: &str, secs: u64) -> Reply {
+    Reply::StatusWithHeaders(
+        code,
+        body.to_string(),
+        vec![("Retry-After".to_string(), secs.to_string())],
+    )
 }
 
 /// A scripted OpenAI-compatible `/chat/completions` server on an ephemeral
@@ -85,6 +102,13 @@ impl FakeLlm {
                 let _ = match reply {
                     Reply::Status(code, body) => {
                         request.respond(Response::from_string(body).with_status_code(code))
+                    }
+                    Reply::StatusWithHeaders(code, body, headers) => {
+                        let mut resp = Response::from_string(body).with_status_code(code);
+                        for (k, v) in &headers {
+                            resp.add_header(header(k, v));
+                        }
+                        request.respond(resp)
                     }
                     r if streaming => request.respond(
                         Response::from_string(sse_body(&r))
@@ -142,7 +166,9 @@ fn buffered_body(reply: &Reply) -> String {
                 "function": { "name": name, "arguments": args.to_string() }
             }]
         }),
-        Reply::Status(..) => unreachable!("handled by the caller"),
+        Reply::Status(..) | Reply::StatusWithHeaders(..) => {
+            unreachable!("handled by the caller")
+        }
     };
     json!({
         "id": "chatcmpl-test",
@@ -169,7 +195,9 @@ fn sse_body(reply: &Reply) -> String {
                 "function": { "name": name, "arguments": args.to_string() }
             }]
         }),
-        Reply::Status(..) => unreachable!("handled by the caller"),
+        Reply::Status(..) | Reply::StatusWithHeaders(..) => {
+            unreachable!("handled by the caller")
+        }
     };
     let finish = if matches!(reply, Reply::Tool { .. }) {
         "tool_calls"
@@ -284,4 +312,118 @@ pub fn run_agent(
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
     )
+}
+
+/// A transport-level fault the scripted `FakeLlm` (tiny_http) cannot express:
+/// dropping a tiny_http `Request` sends a courtesy `500`, so a genuine reset or a
+/// truncated stream needs raw socket control.
+#[derive(Clone, Copy)]
+pub enum Fault {
+    /// Accept the request, drain it, then hang up with **no** HTTP response — a
+    /// connection reset. Exercises the provider's transport-error arm (the `send`
+    /// path that turns a dead socket into a failed turn, not a hang).
+    ResetBeforeResponse,
+    /// Return a `200 text/event-stream`, emit one well-formed SSE chunk, then reset
+    /// **mid-body** without the chunked terminator. Exercises the SSE parser's
+    /// `stream error` arm — the `Err` chunk the loop propagates via `?`.
+    TruncateMidStream,
+}
+
+/// A raw-`TcpListener` LLM stand-in for the faults above. One accept loop, polled
+/// non-blocking so a test can never hang on it, torn down when dropped.
+pub struct FaultServer {
+    base_url: String,
+    stop: Arc<AtomicBool>,
+}
+
+impl FaultServer {
+    pub fn start(fault: Fault) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fault server");
+        let port = listener.local_addr().unwrap().port();
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking fault listener");
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_t = stop.clone();
+        std::thread::spawn(move || {
+            while !stop_t.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).ok();
+                        // Let the client finish POSTing before we misbehave, so the
+                        // fault lands where we intend (response side), not as a
+                        // write-side reset while the request is still in flight.
+                        drain_request(&mut stream);
+                        if let Fault::TruncateMidStream = fault {
+                            let head = "HTTP/1.1 200 OK\r\n\
+                                Content-Type: text/event-stream\r\n\
+                                Transfer-Encoding: chunked\r\n\r\n";
+                            let _ = stream.write_all(head.as_bytes());
+                            // One valid SSE chunk, then NO terminating `0\r\n\r\n`:
+                            // the body ends abruptly, so reqwest yields a stream
+                            // error rather than a clean EOF.
+                            let payload =
+                                "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n";
+                            let chunk = format!("{:x}\r\n{payload}\r\n", payload.len());
+                            let _ = stream.write_all(chunk.as_bytes());
+                            let _ = stream.flush();
+                        }
+                        // Reset: hang up now, with no (further) response.
+                        let _ = stream.shutdown(Shutdown::Both);
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Self {
+            base_url: format!("http://127.0.0.1:{port}/v1"),
+            stop,
+        }
+    }
+
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+}
+
+impl Drop for FaultServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Read an HTTP request head + its `Content-Length` body off `stream`, so the
+/// client's write side is complete before the caller injects a response-side
+/// fault. Bounded by a read timeout so a partial request can't wedge the thread.
+fn drain_request(stream: &mut TcpStream) {
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    let mut data = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                data.extend_from_slice(&buf[..n]);
+                if let Some(end) = find_subslice(&data, b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&data[..end]).to_ascii_lowercase();
+                    let clen = head
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    if data.len() - (end + 4) >= clen {
+                        break;
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
