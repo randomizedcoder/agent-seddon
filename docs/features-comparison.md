@@ -140,7 +140,8 @@ impl) · ❌ Missing · ➖ N/A.
 | Prompt-cache breakpoint placement | Yes (`CacheStrategy` seam) | Yes (Anthropic) | Partial | Yes | ✅ |
 | Content scanner feeding the policy gate | Yes (secrets + injection, severity → `Decision`) | No | Partial | No | ✅ |
 | `@`-reference expansion in prompts | Yes (`@file`/`@dir`/`@symbol`/`@url`, budgeted) | Yes | No | Yes | ✅ |
-| Session export | Yes (deterministic render, scanner-redacted) | No | Partial | No | 🟡 |
+| Session export | Yes (deterministic render, scanner-redacted) | No | Partial | No | ✅ |
+| Cross-session recall | Yes (`session_recall` — FTS over past transcripts via the `DocumentSource` seam) | No | FTS5 recall | No | ✅ |
 | Config system | TOML | JSON | YAML | JSON | ✅ |
 | User context files (project rules) | Yes (`context.d/`) | Skills/templates | `.hermes/context` | Yes (`AGENTS.md`) | ✅ |
 | Multi-platform messaging | No | No | 19 platforms | No | ➖ |
@@ -428,7 +429,6 @@ Effort key: **S** ≈ hours–1 day · **M** ≈ a few days · **L** ≈ 1–2 w
 | Line-ending / BOM-safe editing | Plain UTF-8 rewrite | CRLF/LF + BOM preservation + stale-file detection | S |
 | Fuzzy hunk matching in `apply_patch` | Exact + line-oriented fuzzy chain | Offset-tolerant hunk application | M |
 | Distillation pipeline *(seam exists)* | No-op stub | Episodic→semantic promotion via the model | M |
-| Cross-session export recall | Export renders; recall across sessions unbuilt | Index the session corpus | M |
 | Secret-path write deny-list | Guard screens dangerous paths; no explicit deny-list | hermes-style deny-list in `Policy` | S |
 | More providers | 2 hand-rolled + a `Router` | `genai`-style wrapper for breadth (DESIGN.md §9) | M |
 | Full-screen TUI | Line-based REPL | Differential-render multi-turn TUI | L |

@@ -5,19 +5,32 @@ Per-feature parity spec for turning a saved session into a shareable transcript
 about X last week?") via a full-text index. Pairs with spec 19 (`SessionStore`),
 which owns the checkpoint/branch model these read from.
 
-> **Status: export implemented; cross-session recall deferred.** The spec is
-> explicitly two capabilities and they are landing separately. Shipped: the
-> `agent-export` crate (byte-stable md/json/html render, redaction via the
-> spec-18 `Scanner` with a built-in fallback, HTML escaping + self-contained
-> page) and the `session_export` tool; doc in
+> **Status: implemented — both export and cross-session recall.** The spec is
+> two capabilities; both have now landed.
+>
+> *Export* (shipped earlier): the `agent-export` crate (byte-stable md/json/html
+> render, redaction via the spec-18 `Scanner` with a built-in fallback, HTML
+> escaping + self-contained page) and the `session_export` tool; doc in
 > `docs/components/session-export.md`. Notes: the real determinism hazard turned
 > out to be tool-call arguments — they are `serde_json::Value`, which is
 > map-backed, so keys are sorted explicitly. Redaction defaults ON, since a
-> transcript is the artifact people paste into bug reports. **Deferred:**
-> cross-session recall, because `SearchBackend::reindex` walks a filesystem tree
-> (`Manifest::scan`) — indexing the session corpus needs either a second tantivy
-> backend rooted at the sessions dir (the intended path) or a document-source
-> abstraction in `agent-search`.
+> transcript is the artifact people paste into bug reports.
+>
+> *Cross-session recall* (PRs #197–#200): built the **document-source
+> abstraction** — the intended path. A `DocumentSource` seam in `agent-search`
+> (the filesystem walk became the default `FsDocumentSource`; `TantivyBackend`
+> gained `open_with_source`) lets a **`SessionCorpus`** (`agent-runtime/recall.rs`)
+> feed rendered, secret-redacted transcripts into the *same*
+> reindex/query/freshness machinery — no bespoke index. Each session is one
+> document keyed by its id; redaction reuses `agent-export`'s synchronous fallback
+> matcher. The `session_recall` tool (`{query, limit}` → ranked past sessions with
+> snippets) is opt-in via `[recall] enabled`, metered under the `recall` search
+> label, and kept out of the code-search dispatch. **Deferred within recall:**
+> automation-source demotion (no transcript marker yet), per-message
+> window/bookend anchors, semantic/hybrid recall over the corpus, the async
+> `Scanner` redaction path (needs an async `load`), per-user scoping (follows the
+> session-store), and a `--serve-recall` gRPC worker (additive — the backend is
+> already a `SearchBackend`).
 >
 > Original plan follows. Two capabilities, one spec. (1) **Export**
 > — render a session transcript to `md` / `json` / `html` as a **deterministic,

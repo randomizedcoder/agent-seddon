@@ -112,6 +112,38 @@ r.search("mine", |ctx| Ok(Arc::new(MyBackend::open(...)?) as Arc<dyn SearchBacke
 Add `"mine"` to `[search] backends`. Out-of-tree, register on a `Registry` before
 `build_agent_with`. See the general [extension model](../extending.md).
 
+## Indexing non-code corpora (`DocumentSource`) & cross-session recall
+
+`TantivyBackend` does not assume its documents are files. It indexes a
+**`DocumentSource`** — a small seam that yields a freshness `Manifest`, compares a
+stored manifest against the live corpus, and renders one document (`text` + `lang`)
+by id:
+
+```rust
+pub trait DocumentSource: Send + Sync {
+    fn scan(&self) -> Manifest;                       // stamps, keyed by doc id
+    fn compare(&self, stored: Option<&Manifest>) -> IndexState;
+    fn load(&self, id: &Path) -> Option<SourceDoc>;   // rendered text + lang
+}
+```
+
+The default `FsDocumentSource` is the code-search corpus (walk the tree,
+`read_to_string`, extension-derived `lang`) and `TantivyBackend::open(root, dir)`
+is a thin wrapper over `open_with_source(FsDocumentSource, dir)`. A doc's id is
+stored in the `path` field and returned as `SearchHit::path`.
+
+**Cross-session recall** (parity spec 20) is the first alternative source:
+`SessionCorpus` (`agent-runtime/src/recall.rs`) renders each saved transcript
+(`.agent/sessions/<id>.jsonl`) into one **secret-redacted** document keyed by the
+session id, so the agent can search its own history through the same
+reindex/query/freshness path — no bespoke index. It is exposed as the opt-in
+`session_recall` tool (`{query, limit}` → ranked past sessions + snippets), wired
+by the builder behind `[recall] enabled` and metered under the `recall` backend
+label (kept out of the code-search dispatch). See
+[session-export.md](session-export.md) and the spec doc for the deferrals
+(automation demotion, per-message anchors, semantic recall, a `--serve-recall`
+worker).
+
 ## Listing files from the index (`index_ls`)
 
 Besides `query`, the `SearchBackend` seam exposes `list_files(globs)` — the
