@@ -39,6 +39,9 @@ tool-schedule = ["dep:agent-scheduler"]
 tool-pty = ["dep:agent-pty"]
 # `session_export` over the deterministic renderer (parity spec 20).
 tool-session-export = ["dep:agent-export"]
+# `session_recall` over the SearchBackend seam: search past sessions (parity
+# spec 20). The corpus backend is wired by the runtime; this only compiles the tool.
+tool-session-recall = []
 # The `todo_write` tool over the TaskTracker seam (structured plan). The tracker
 # is wired by the runtime; this feature only compiles the tool.
 tool-todo = []
