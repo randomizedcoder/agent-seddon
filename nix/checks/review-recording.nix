@@ -12,49 +12,20 @@
   pkgs,
   agent,
 }:
-pkgs.runCommand "agent-review-recording"
-  {
-    nativeBuildInputs = [
-      agent
-      pkgs.git
-      pkgs.jq
-      pkgs.coreutils
-    ];
-  }
-  ''
-    export HOME="$(mktemp -d)"
-    epi="$HOME/.agent/episodic.jsonl"
-    cfg="$HOME/agent.toml"
-    cat > "$cfg" <<TOML
-    [agent]
-    provider = "openai-compat"
-    policy   = "auto-approve"
-    [provider]
-    base_url = "http://127.0.0.1:1/v1"
-    model    = "none"
-    api_key  = "none"
-    [memory]
-    backend = "file"
-    episodic_path = "$epi"
-    [search]
-    auto_index = false
-    [review]
-    backend = "local"
+import ../lib/mk-review-check.nix { inherit pkgs agent; } {
+  name = "recording";
+  extraInputs = [ pkgs.jq ];
+  # `$epi` is set by the shared skeleton to `$HOME/.agent/episodic.jsonl`.
+  memoryExtra = ''episodic_path = "$epi"'';
+  reviewConfig = ''
     # Collectors off — the record is built from the base facts regardless; keep fast.
     analyze = false
     signatures = false
     callgraph = false
     style = false
     summaries = false
-    [pool]
-    members = []
-    TOML
-
-    wd="$(mktemp -d)"
-    cd "$wd"
-    git init -q -b main
-    git config user.email t@e
-    git config user.name t
+  '';
+  setup = ''
     printf 'package app\nfunc A() int { return 1 }\n' > a.go
     git add -A -f && git commit -q -m base
     base="$(git rev-parse HEAD)"
@@ -63,8 +34,8 @@ pkgs.runCommand "agent-review-recording"
     head="$(git rev-parse HEAD)"
 
     agent --config "$cfg" --review "$base..$head" >/dev/null
-
-    fail() { echo "FAIL: $1" >&2; exit 1; }
+  '';
+  asserts = ''
     [ -f "$epi" ] || fail "no episodic.jsonl written"
     rec="$(jq -c 'select(.kind == "review") | .review' "$epi" | head -1)"
     echo "----- recorded ReviewRecord -----"
@@ -79,6 +50,6 @@ pkgs.runCommand "agent-review-recording"
     echo "$rec" | jq -e '(.collectors | length) >= 1' >/dev/null || fail "no per-collector statuses"
     # Security: the record must carry no raw source / URL — only hashes/counts/revs.
     echo "$rec" | jq -e 'has("repo_url") | not'       >/dev/null || fail "record leaked a URL field"
-
-    echo "OK: review run recorded to episodic.jsonl (hashes/counts only)" > "$out"
-  ''
+  '';
+  okMsg = "OK: review run recorded to episodic.jsonl (hashes/counts only)";
+}

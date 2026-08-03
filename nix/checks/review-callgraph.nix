@@ -14,46 +14,16 @@
   agent,
   go-ast,
 }:
-pkgs.runCommand "agent-review-callgraph"
-  {
-    nativeBuildInputs = [
-      agent
-      go-ast
-      pkgs.git
-      pkgs.coreutils
-    ];
-  }
-  ''
-    export HOME="$(mktemp -d)"
-    cfg="$HOME/agent.toml"
-    cat > "$cfg" <<'TOML'
-    [agent]
-    provider = "openai-compat"
-    policy   = "auto-approve"
-    [provider]
-    base_url = "http://127.0.0.1:1/v1"
-    model    = "none"
-    api_key  = "none"
-    [memory]
-    backend = "file"
-    [search]
-    auto_index = false
-    [review]
-    backend = "local"
+import ../lib/mk-review-check.nix { inherit pkgs agent; } {
+  name = "callgraph";
+  extraInputs = [ go-ast ];
+  reviewConfig = ''
     # Isolate the call-graph collector.
     analyze = false
     signatures = false
     callgraph = true
-    [pool]
-    members = []
-    TOML
-
-    wd="$(mktemp -d)"
-    cd "$wd"
-    git init -q -b main
-    git config user.email t@e
-    git config user.name t
-
+  '';
+  setup = ''
     # A caller in one file, the callee in another.
     cat > caller.go <<'GO'
     package app
@@ -87,12 +57,12 @@ pkgs.runCommand "agent-review-callgraph"
     echo "----- generated review context (call graph) -----"
     echo "$ctx"
     echo "-------------------------------------------------"
-
-    fail() { echo "FAIL: $1" >&2; exit 1; }
+  '';
+  asserts = ''
     echo "$ctx" | grep -q "Grounded review facts"      || fail "no grounded facts block"
     echo "$ctx" | grep -q "Call graph"                 || fail "no call-graph section"
     echo "$ctx" | grep -qE "Target .*called by .*Caller" \
       || fail "blast radius did not surface Caller → Target"
-
-    echo "OK: call graph (blast radius) folded into the grounded review context" > "$out"
-  ''
+  '';
+  okMsg = "OK: call graph (blast radius) folded into the grounded review context";
+}

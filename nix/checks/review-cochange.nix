@@ -13,31 +13,9 @@
   pkgs,
   agent,
 }:
-pkgs.runCommand "agent-review-cochange"
-  {
-    nativeBuildInputs = [
-      agent
-      pkgs.git
-      pkgs.coreutils
-    ];
-  }
-  ''
-    export HOME="$(mktemp -d)"
-    cfg="$HOME/agent.toml"
-    cat > "$cfg" <<'TOML'
-    [agent]
-    provider = "openai-compat"
-    policy   = "auto-approve"
-    [provider]
-    base_url = "http://127.0.0.1:1/v1"
-    model    = "none"
-    api_key  = "none"
-    [memory]
-    backend = "file"
-    [search]
-    auto_index = false
-    [review]
-    backend = "local"
+import ../lib/mk-review-check.nix { inherit pkgs agent; } {
+  name = "cochange";
+  reviewConfig = ''
     # Isolate the co-change collector: analyzer/callgraph need tools not on PATH here.
     analyze = false
     callgraph = false
@@ -45,16 +23,8 @@ pkgs.runCommand "agent-review-cochange"
     style = false
     summaries = false
     cochange = true
-    [pool]
-    members = []
-    TOML
-
-    wd="$(mktemp -d)"
-    cd "$wd"
-    git init -q -b main
-    git config user.email t@e
-    git config user.name t
-
+  '';
+  setup = ''
     # Seed all three files.
     printf 'package p\n\nfunc H() int { return 0 }\n' > handler.go
     printf 'package p\n\ntype S struct{ V int }\n' > schema.go
@@ -84,8 +54,8 @@ pkgs.runCommand "agent-review-cochange"
     echo "----- generated review context (co-change) -----"
     echo "$ctx"
     echo "------------------------------------------------"
-
-    fail() { echo "FAIL: $1" >&2; exit 1; }
+  '';
+  asserts = ''
     echo "$ctx" | grep -q "Grounded review facts"     || fail "no grounded facts block"
     echo "$ctx" | grep -q "Historical co-change"      || fail "no co-change section"
     echo "$ctx" | grep -q "handler.go usually changes with" \
@@ -94,6 +64,6 @@ pkgs.runCommand "agent-review-cochange"
       || fail "absent partner (schema.go) not foregrounded"
     # util.go moved independently → it must NOT appear as a handler.go partner.
     echo "$ctx" | grep -q "util.go" && fail "independent util.go leaked as a partner"
-
-    echo "OK: historical co-change + absent partner folded into the review context" > "$out"
-  ''
+  '';
+  okMsg = "OK: historical co-change + absent partner folded into the review context";
+}

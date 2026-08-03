@@ -14,44 +14,15 @@
 let
   c = reviewGoCorpus."s3-secret-file"; # #56 feat/s3-secret-file (2 .go files)
 in
-pkgs.runCommand "agent-review-go"
-  {
-    nativeBuildInputs = [
-      agent
-      pkgs.git
-      pkgs.coreutils
-    ];
-  }
-  ''
-    export HOME="$(mktemp -d)"
-    cfg="$HOME/agent.toml"
-    cat > "$cfg" <<'TOML'
-    [agent]
-    provider = "openai-compat"
-    policy   = "auto-approve"
-    [provider]
-    base_url = "http://127.0.0.1:1/v1"
-    model    = "none"
-    api_key  = "none"
-    [memory]
-    backend = "file"
-    [search]
-    auto_index = false
-    [review]
-    backend = "local"
+import ../lib/mk-review-check.nix { inherit pkgs agent; } {
+  name = "go";
+  reviewConfig = ''
     # This check is scoped to repo/change/git-state facts; the analyzer + signature
     # collectors have their own dedicated checks (review-analyze, review-signatures).
     analyze = false
     signatures = false
-    [pool]
-    members = []
-    TOML
-
-    wd="$(mktemp -d)"
-    cd "$wd"
-    git init -q -b main
-    git config user.email t@e
-    git config user.name t
+  '';
+  setup = ''
     cp -r ${c.base}/. .
     chmod -R u+w .
     git add -A -f && git commit -q -m base
@@ -67,13 +38,13 @@ pkgs.runCommand "agent-review-go"
     echo "----- generated Go review context -----"
     echo "$ctx"
     echo "----------------------------------------"
-
-    fail() { echo "FAIL: $1" >&2; exit 1; }
+  '';
+  asserts = ''
     echo "$ctx" | grep -q "Grounded review facts" || fail "no grounded facts block"
     echo "$ctx" | grep -q "Repo: go ·"            || fail "not detected as a Go project"
     echo "$ctx" | grep -q "· clone ·"             || fail "remote relationship not clone"
     echo "$ctx" | grep -q "cmd/xtcp2/xtcp2.go"    || fail "missing the changed .go file"
     echo "$ctx" | grep -q "^Diffs:"               || fail "diff hunks not rendered"
-
-    echo "OK: pinned Go change reconstructed; review facts correct" > "$out"
-  ''
+  '';
+  okMsg = "OK: pinned Go change reconstructed; review facts correct";
+}

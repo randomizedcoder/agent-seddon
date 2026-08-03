@@ -16,32 +16,10 @@
   agent,
   go-ast,
 }:
-pkgs.runCommand "agent-review-gate"
-  {
-    nativeBuildInputs = [
-      agent
-      go-ast
-      pkgs.git
-      pkgs.coreutils
-    ];
-  }
-  ''
-    export HOME="$(mktemp -d)"
-    cfg="$HOME/agent.toml"
-    cat > "$cfg" <<'TOML'
-    [agent]
-    provider = "openai-compat"
-    policy   = "auto-approve"
-    [provider]
-    base_url = "http://127.0.0.1:1/v1"
-    model    = "none"
-    api_key  = "none"
-    [memory]
-    backend = "file"
-    [search]
-    auto_index = false
-    [review]
-    backend = "local"
+import ../lib/mk-review-check.nix { inherit pkgs agent; } {
+  name = "gate";
+  extraInputs = [ go-ast ];
+  reviewConfig = ''
     analyze = false
     style = false
     summaries = false
@@ -52,14 +30,8 @@ pkgs.runCommand "agent-review-gate"
     # Threshold below the stacked score (~0.70) so the gate fires with margin, not
     # on a floating-point boundary.
     gate_threshold = 0.5
-    [pool]
-    members = []
-    TOML
-
-    wd="$(mktemp -d)"
-    cd "$wd"
-    git init -q -b main
-
+  '';
+  setup = ''
     commit_as() { author="$1"; shift
       GIT_AUTHOR_NAME="$author" GIT_AUTHOR_EMAIL="$author@e" \
       GIT_COMMITTER_NAME="$author" GIT_COMMITTER_EMAIL="$author@e" \
@@ -97,7 +69,8 @@ pkgs.runCommand "agent-review-gate"
     echo "----- review context (risk) -----"
     echo "$ctx"
     echo "---------------------------------"
-    fail() { echo "FAIL: $1" >&2; exit 1; }
+  '';
+  asserts = ''
     echo "$ctx" | grep -q "Grounded review facts" || fail "no grounded facts block"
     echo "$ctx" | grep -qE "Risk .*GATE FAIL"      || fail "risk section did not reach the gate threshold"
     echo "$ctx" | grep -qE "core.go — (high|medium)" || fail "core.go not scored"
@@ -108,6 +81,6 @@ pkgs.runCommand "agent-review-gate"
       fail "--gate should have exited non-zero but returned 0"
     fi
     grep -q "review gate FAILED" gate.out || { cat gate.out; fail "no gate-failure message on stderr"; }
-
-    echo "OK: stacked risk reasons cross the threshold; --gate exits non-zero" > "$out"
-  ''
+  '';
+  okMsg = "OK: stacked risk reasons cross the threshold; --gate exits non-zero";
+}

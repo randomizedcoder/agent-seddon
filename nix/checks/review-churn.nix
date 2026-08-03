@@ -13,31 +13,9 @@
   pkgs,
   agent,
 }:
-pkgs.runCommand "agent-review-churn"
-  {
-    nativeBuildInputs = [
-      agent
-      pkgs.git
-      pkgs.coreutils
-    ];
-  }
-  ''
-    export HOME="$(mktemp -d)"
-    cfg="$HOME/agent.toml"
-    cat > "$cfg" <<'TOML'
-    [agent]
-    provider = "openai-compat"
-    policy   = "auto-approve"
-    [provider]
-    base_url = "http://127.0.0.1:1/v1"
-    model    = "none"
-    api_key  = "none"
-    [memory]
-    backend = "file"
-    [search]
-    auto_index = false
-    [review]
-    backend = "local"
+import ../lib/mk-review-check.nix { inherit pkgs agent; } {
+  name = "churn";
+  reviewConfig = ''
     analyze = false
     callgraph = false
     signatures = false
@@ -45,14 +23,8 @@ pkgs.runCommand "agent-review-churn"
     summaries = false
     cochange = false
     churn = true
-    [pool]
-    members = []
-    TOML
-
-    wd="$(mktemp -d)"
-    cd "$wd"
-    git init -q -b main
-
+  '';
+  setup = ''
     commit_as() {
       # $1 = author, rest = message
       author="$1"; shift
@@ -82,14 +54,14 @@ pkgs.runCommand "agent-review-churn"
     echo "----- generated review context (churn) -----"
     echo "$ctx"
     echo "--------------------------------------------"
-
-    fail() { echo "FAIL: $1" >&2; exit 1; }
+  '';
+  asserts = ''
     echo "$ctx" | grep -q "Grounded review facts" || fail "no grounded facts block"
     echo "$ctx" | grep -q "Churn & ownership"      || fail "no churn section"
     echo "$ctx" | grep -qE "owned.go .*single-owner" \
       || fail "single-owner file not foregrounded"
     # No author identity may leak into the rendered context.
     echo "$ctx" | grep -qi "alice" && fail "author identity leaked into context"
-
-    echo "OK: bus-factor / single-owner folded into the review context (no author leak)" > "$out"
-  ''
+  '';
+  okMsg = "OK: bus-factor / single-owner folded into the review context (no author leak)";
+}

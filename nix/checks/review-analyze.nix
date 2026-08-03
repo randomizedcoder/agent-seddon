@@ -15,18 +15,17 @@
   versions,
   agent,
 }:
-pkgs.runCommand "agent-review-analyze"
-  {
-    nativeBuildInputs = [
-      agent
-      pkgs.git
-      pkgs.coreutils
-      versions.go
-      versions.golangci-lint
-    ];
-  }
-  ''
-    export HOME="$(mktemp -d)"
+import ../lib/mk-review-check.nix { inherit pkgs agent; } {
+  name = "analyze";
+  extraInputs = [
+    versions.go
+    versions.golangci-lint
+  ];
+  reviewConfig = ''
+    analyze = true
+    analyze_timeout_secs = 120
+  '';
+  setup = ''
     # golangci-lint drives the go toolchain + its own cache; point every cache at a
     # writable temp dir and disable the network so the run is fully offline.
     export GOCACHE="$(mktemp -d)"
@@ -37,32 +36,6 @@ pkgs.runCommand "agent-review-analyze"
     export GOFLAGS=-mod=mod
     export GOSUMDB=off
 
-    cfg="$HOME/agent.toml"
-    cat > "$cfg" <<'TOML'
-    [agent]
-    provider = "openai-compat"
-    policy   = "auto-approve"
-    [provider]
-    base_url = "http://127.0.0.1:1/v1"
-    model    = "none"
-    api_key  = "none"
-    [memory]
-    backend = "file"
-    [search]
-    auto_index = false
-    [review]
-    backend = "local"
-    analyze = true
-    analyze_timeout_secs = 120
-    [pool]
-    members = []
-    TOML
-
-    wd="$(mktemp -d)"
-    cd "$wd"
-    git init -q -b main
-    git config user.email t@e
-    git config user.name t
     # Base: an empty commit, so the whole module lands in the diff (⇒ scoped).
     git commit -q --allow-empty -m base
     base="$(git rev-parse HEAD)"
@@ -91,13 +64,13 @@ pkgs.runCommand "agent-review-analyze"
     echo "----- generated review context (Go static analysis) -----"
     echo "$ctx"
     echo "----------------------------------------------------------"
-
-    fail() { echo "FAIL: $1" >&2; exit 1; }
+  '';
+  asserts = ''
     echo "$ctx" | grep -q "Grounded review facts"  || fail "no grounded facts block"
     echo "$ctx" | grep -q "Analysis (static):"     || fail "no static-analysis section"
     echo "$ctx" | grep -q "golangci-lint: ok"      || fail "golangci-lint did not run cleanly"
     echo "$ctx" | grep -q "ineffassign"            || fail "the deliberate lint hit was not surfaced"
     echo "$ctx" | grep -q "compute.go"             || fail "finding not tied to the changed file"
-
-    echo "OK: golangci-lint finding folded into the grounded review context" > "$out"
-  ''
+  '';
+  okMsg = "OK: golangci-lint finding folded into the grounded review context";
+}

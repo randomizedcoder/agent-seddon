@@ -12,45 +12,15 @@
   pkgs,
   agent,
 }:
-pkgs.runCommand "agent-review-style"
-  {
-    nativeBuildInputs = [
-      agent
-      pkgs.git
-      pkgs.coreutils
-    ];
-  }
-  ''
-    export HOME="$(mktemp -d)"
-    cfg="$HOME/agent.toml"
-    cat > "$cfg" <<'TOML'
-    [agent]
-    provider = "openai-compat"
-    policy   = "auto-approve"
-    [provider]
-    base_url = "http://127.0.0.1:1/v1"
-    model    = "none"
-    api_key  = "none"
-    [memory]
-    backend = "file"
-    [search]
-    auto_index = false
-    [review]
-    backend = "local"
+import ../lib/mk-review-check.nix { inherit pkgs agent; } {
+  name = "style";
+  reviewConfig = ''
     analyze = false
     signatures = false
     callgraph = false
     style = true
-    [pool]
-    members = []
-    TOML
-
-    wd="$(mktemp -d)"
-    cd "$wd"
-    git init -q -b main
-    git config user.email t@e
-    git config user.name t
-
+  '';
+  setup = ''
     # Tab-indented, PascalCase exported functions, a doc comment. printf keeps the
     # leading tabs literal (a heredoc through nixfmt would mangle them).
     write_src() {
@@ -68,8 +38,8 @@ pkgs.runCommand "agent-review-style"
     echo "----- generated review context (code style) -----"
     echo "$ctx"
     echo "-------------------------------------------------"
-
-    fail() { echo "FAIL: $1" >&2; exit 1; }
+  '';
+  asserts = ''
     echo "$ctx" | grep -q "Grounded review facts"        || fail "no grounded facts block"
     echo "$ctx" | grep -q "Code style"                   || fail "no code-style section"
     echo "$ctx" | grep -q "indent tabs"                  || fail "tab indentation not detected"
@@ -77,6 +47,6 @@ pkgs.runCommand "agent-review-style"
     echo "$ctx" | grep -q "conventional"                 || fail "conventional-commit ratio missing"
     echo "$ctx" | grep -q "change conforms to repo style: yes" \
       || fail "change should conform to the repo's own style"
-
-    echo "OK: code-style fingerprint folded into the grounded review context" > "$out"
-  ''
+  '';
+  okMsg = "OK: code-style fingerprint folded into the grounded review context";
+}
