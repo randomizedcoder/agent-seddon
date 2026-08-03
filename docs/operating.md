@@ -251,6 +251,41 @@ it drives the REPL's slash commands (no provider round-trip) over a pty inside
 `nix flake check`, so a regression in the harness or the REPL contract fails the
 gate rather than the opt-in live tier silently.
 
+### Run the whole integration tier (`nix run .#integration`)
+
+The socket/model-driving harnesses are kept out of `nix flake check` (they need a
+server, a socket, or a real model). **`nix run .#integration`** is the single entry
+point that runs them all — it orchestrates the existing apps as black boxes on the
+shared `0`/`1`/`2` exit-code contract:
+
+```sh
+nix run .#integration                 # model-free tier always; model tier if AGENT_E2E_* is reachable
+nix run .#integration -- --no-model   # only loadtest / loadtest-loop / loadtest-wire / serve-smoke
+nix run .#integration -- --model-only # only e2e-live / e2e-expect / e2e-multi (needs a model)
+```
+
+The **model-free tier** (`loadtest`, `loadtest-loop`, `loadtest-wire`,
+`serve-smoke`) always runs; the **model tier** runs only when a model answers at
+`AGENT_E2E_BASE_URL`, else it is skipped with a notice (so the aggregate is runnable
+with no model). Exit `0` all clean, `1` a harness failure, `2` a contract /
+model-quality failure — the worst across all steps.
+
+### Soak (`nix run .#soak`)
+
+The load harnesses run a fixed batch then exit; **`nix run .#soak`** wraps each in a
+wall-clock loop that re-runs the batch until `SOAK_DURATION` seconds pass — ~1 hour
+each by default — to surface leaks, fd exhaustion and latency drift a short run
+misses.
+
+```sh
+nix run .#soak                                   # loadtest, loadtest-loop, loadtest-wire — ~1h each (~3h)
+SOAK_DURATION=300 nix run .#soak                 # 5 min each
+SOAK_HARNESSES="loadtest-wire" nix run .#soak    # just one, still SOAK_DURATION
+```
+
+Model-free by design (it loops the CPU-only load tiers, not the one-shot breadth
+probe or the model tiers). Same `0`/`1`/`2` contract, worst across all iterations.
+
 ### ClickHouse (run history)
 
 A pinned ClickHouse container holds the transaction history, logs and token usage.

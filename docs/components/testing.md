@@ -102,6 +102,12 @@ server + dial a socket, so — like `e2e-live` — they are opt-in apps, not gat
 seam health-checks, reflects (`grpcurl describe`), and round-trips
 ([`nix/serve-smoke.nix`](../../nix/serve-smoke.nix), [grpc.md](../grpc.md)).
 
+**`nix run .#integration`** runs the whole opt-in tier in one shot — the model-free
+harnesses always, the model tier (`e2e-live`/`e2e-expect`/`e2e-multi`) when
+`AGENT_E2E_*` is reachable — aggregating the shared `0`/`1`/`2` contract; **`nix run
+.#soak`** loops the load harnesses for ~1h each (`SOAK_DURATION`). See
+[operating.md](../operating.md).
+
 ## Coverage
 
 Source-based test coverage via [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov)
