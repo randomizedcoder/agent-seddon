@@ -27,4 +27,12 @@
       type = "app";
       program = "${drv}/bin/${bins.${name} or name}";
     }) drvs;
+
+  # Sourced bash snippets for the opt-in shell harnesses, concatenated into a
+  # `writeShellApplication`'s `text` (after `set -uo pipefail`) so shellcheck sees
+  # the whole script — no runtime `source`, no SC1091. See each file's header.
+  harness = {
+    contract = builtins.readFile ./contract.sh; # worst / note_fail / contract_exit
+    serveWire = builtins.readFile ./serve-wire.sh; # work + serve-all boot/health/dial
+  };
 }

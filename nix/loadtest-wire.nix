@@ -14,6 +14,9 @@
 # can't share a process and are exercised sequentially. Set
 # `LOADTEST_WIRE_TRANSPORTS="tcp"` (or `"uds"`) to pin one.
 #
+# The server boot / health-wait / dial / teardown and the exit-code contract are the
+# shared nix/lib/{serve-wire,contract}.sh snippets (also used by serve-smoke).
+#
 # NOT a check: it needs a running server + a socket, which the hermetic check
 # sandbox forbids (like `e2e-live`). It needs no model, though — the target seams
 # (memory over the file backend, tokenizer over the approx backend) are CPU-only,
@@ -32,6 +35,7 @@
   lib,
   versions,
   agent,
+  harness,
 }:
 pkgs.writeShellApplication {
   name = "loadtest-wire";
@@ -53,15 +57,10 @@ pkgs.writeShellApplication {
     OVERLOAD_CONC="''${LOADTEST_WIRE_OVERLOAD_CONC:-200}"
     TRANSPORTS="''${LOADTEST_WIRE_TRANSPORTS:-tcp uds}"
     METRICS_ADDR="127.0.0.1:9700"             # GATEWAY.metrics_port
-
-    work="$(mktemp -d)"
-    srv_pid=""
-    # shellcheck disable=SC2329  # invoked indirectly via the EXIT trap
-    cleanup() {
-      [ -n "$srv_pid" ] && kill "$srv_pid" 2>/dev/null || true
-      rm -rf "$work"
-    }
-    trap cleanup EXIT
+  ''
+  + harness.contract
+  + harness.serveWire
+  + ''
 
     # A hermetic, model-free config: light seams only, metrics on, a small in-flight
     # cap so an overload burst is reachable on a laptop.
@@ -103,62 +102,14 @@ pkgs.writeShellApplication {
     # p99 latency (ms) out of a ghz JSON report.
     ghz_p99_ms() { jq -r '(.latencyDistribution[]? | select(.percentage==99) | .latency) // 0 | ./1e6' "$1"; }
 
-    worst=0                                   # 0 ok, 1 harness, 2 contract (max wins)
-    note_fail() { [ "$1" -gt "$worst" ] && worst="$1"; }
-
     # Run the full ghz sequence against one transport. Echoes results; returns
     # 0 ok / 1 harness / 2 contract.
     run_transport() {
-      local transport="$1" listen ghz_target
-      local -a grpcurl_dial
-      case "$transport" in
-        tcp)
-          listen="127.0.0.1:50100"
-          ghz_target="127.0.0.1:50100"
-          grpcurl_dial=(-plaintext "127.0.0.1:50100")
-          ;;
-        uds)
-          listen="unix:$work/gw.sock"
-          ghz_target="unix://$work/gw.sock"
-          # grpcurl dials a UDS via the `unix://` address scheme, NOT its `-unix`
-          # flag (which expects host:port and errors on a bare path).
-          grpcurl_dial=(-plaintext "unix://$work/gw.sock")
-          ;;
-        *)
-          echo "unknown transport: $transport" >&2
-          return 1
-          ;;
-      esac
+      local transport="$1"
+      dial_for "$transport" || return 1
 
       echo "loadtest-wire: starting 'agent --serve-all' on $transport ($listen, cap=$CAP) ..."
-      agent --config "$work/agent.toml" --serve-all --listen "$listen" \
-        > "$work/server.$transport.log" 2>&1 &
-      srv_pid=$!
-
-      # Wait for grpc.health.v1 to report SERVING (up to ~10s). Refuse rather than
-      # race: a load run against a not-yet-bound server is a false failure.
-      local ready=0
-      for _ in $(seq 1 50); do
-        if ! kill -0 "$srv_pid" 2>/dev/null; then
-          echo "FAIL(harness): $transport server exited during startup" >&2
-          tail -n 30 "$work/server.$transport.log" >&2
-          srv_pid=""
-          return 1
-        fi
-        if grpcurl "''${grpcurl_dial[@]}" grpc.health.v1.Health/Check >/dev/null 2>&1; then
-          ready=1
-          break
-        fi
-        sleep 0.2
-      done
-      if [ "$ready" -ne 1 ]; then
-        echo "FAIL(harness): $transport server never became healthy" >&2
-        tail -n 30 "$work/server.$transport.log" >&2
-        kill "$srv_pid" 2>/dev/null || true
-        wait "$srv_pid" 2>/dev/null || true
-        srv_pid=""
-        return 1
-      fi
+      start_serve_all "$transport" || return 1
       echo "loadtest-wire: $transport server healthy."
 
       local rc=0
@@ -234,9 +185,7 @@ pkgs.writeShellApplication {
       fi
 
       # Tear down this transport's server before the next binds :9700 / the port.
-      kill "$srv_pid" 2>/dev/null || true
-      wait "$srv_pid" 2>/dev/null || true
-      srv_pid=""
+      stop_server
       return "$rc"
     }
 
@@ -247,18 +196,7 @@ pkgs.writeShellApplication {
     done
 
     echo ""
-    case "$worst" in
-      0)
-        echo "PASS: ghz drove the seams over [$TRANSPORTS], /metrics reflected the load,"
-        echo "      and the overload burst shed RESOURCE_EXHAUSTED on each transport."
-        echo ""
-        echo "Point a dashboard at the live server while it runs:"
-        echo "  nix run .#prometheus-up   # scrapes :9700"
-        echo "  nix run .#grafana-up      # agent-seddon dashboard"
-        ;;
-      2) echo "FAIL(contract): see CONTRACT lines above." >&2 ;;
-      *) echo "FAIL(harness): see FAIL lines above." >&2 ;;
-    esac
-    exit "$worst"
+    contract_exit "PASS: ghz drove the seams over [$TRANSPORTS], /metrics reflected the load, and the overload burst shed RESOURCE_EXHAUSTED on each transport.
+    Point a dashboard at the live server while it runs:  nix run .#prometheus-up  (scrapes :9700)  |  nix run .#grafana-up  (agent-seddon dashboard)"
   '';
 }
