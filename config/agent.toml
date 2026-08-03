@@ -147,10 +147,25 @@ auto_index   = true
 
 # Tokenizer (the Tokenizer seam): accurate per-model token counts that drive
 # compaction budgeting + USD/cache cost accounting, replacing the ~chars/4
-# heuristic. "approx" is the dependency-free default; unset/unknown ⇒ heuristic
-# fallback. See docs/components/tokenizer.md.
+# heuristic. Backends (config-selected like every seam):
+#   "approx"   — dependency-free Unicode segmenter (the default; always available)
+#   "tiktoken" — exact OpenAI-family BPE (offline, vendored ranks); build with the
+#                `tokenizer-tiktoken` feature. Unknown models fall back to approx.
+#   "hf"       — a local model's tokenizer.json (Qwen/GLM/Llama); build with the
+#                `tokenizer-hf` feature and set [tokenizer.hf] below.
+#   "grpc"     — dial a remote tokenizer seam (see [grpc.tokenizer]); one count for
+#                a fleet.
+# See docs/components/tokenizer.md.
 [tokenizer]
 backend = "approx"
+
+# For backend = "hf": a catch-all `default` tokenizer.json plus optional per-model
+# overrides keyed by model-id PREFIX (longest match wins). A file that is missing,
+# oversized (>64 MiB), or unparseable is skipped and those models use approx.
+# [tokenizer.hf]
+# default = "/models/qwen2.5-coder/tokenizer.json"
+# [tokenizer.hf.models]
+# "llama" = "/models/llama-3/tokenizer.json"
 
 # The web_fetch tool (the WebBackend seam). GET a URL → sanitized markdown/text/
 # html under size/timeout/redirect caps. `backend` = "local" (in-process reqwest).
