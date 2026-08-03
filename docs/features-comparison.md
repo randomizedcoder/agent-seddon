@@ -44,9 +44,9 @@ pi = disciplined minimalism, hermes = maximalism, opencode = a polished
 fundamentals-first daily driver. `agent-seddon` now covers the coding
 fundamentals all three ship, still sits below them in raw breadth (providers,
 tools, UI surfaces), and has a genuinely differentiated observability +
-distributed-seam stack. Where it is *behind* is worth naming too: real
-tokenization (hermes uses tiktoken; ours is a heuristic), sandbox confinement, and
-learned embeddings are all unbuilt.
+distributed-seam stack. Where it is *behind* is worth naming too: sandbox
+confinement and learned embeddings are the notable unbuilt backends (real
+tokenization now ships — exact BPE / local `tokenizer.json` backends, see below).
 
 ---
 
@@ -64,10 +64,10 @@ streaming) plus **distributed gRPC seams**, which none of the three reference
 harnesses ships out of the box.
 
 What's left is mostly breadth and a handful of backends that are seams with
-placeholder implementations: real tokenization, sandbox confinement, learned
-embeddings, model-invocable skill loading, more providers, a full-screen TUI, and
-activating the distillation (episodic→semantic) pipeline. See **Remaining** below,
-which is the maintained list.
+placeholder implementations: sandbox confinement, learned embeddings,
+model-invocable skill loading, more providers, a full-screen TUI, and activating
+the distillation (episodic→semantic) pipeline. See **Remaining** below, which is
+the maintained list.
 
 ---
 
@@ -420,7 +420,7 @@ Effort key: **S** ≈ hours–1 day · **M** ≈ a few days · **L** ≈ 1–2 w
 
 | Feature | Current | Target | Effort |
 |---|---|---|---|
-| **Real tokenization** | Heuristic; the shipped backend ignores the model — hermes uses tiktoken, so we are **behind** here | BPE/HF backends behind the existing `Tokenizer` seam | M |
+| ~~**Real tokenization**~~ ✅ | **Shipped**: exact OpenAI-family BPE (`tiktoken`, offline `tiktoken-rs`) + a local model's `tokenizer.json` (`hf`, HuggingFace) behind the `Tokenizer` seam, feature-gated with per-backend gate checks; unmapped models fall back to `approx` | done (#211, #212) | ✅ |
 | **Sandbox with teeth** | The `nix` backend gives reproducibility, **not confinement** (`network_off: false`) | Network/mount enforcement via sandboxed derivations or a container backend | L |
 | **Real embeddings** | `LocalEmbedder` is feature hashing, not a learned model | A hosted or local model behind the `Embedder` seam | M |
 | Deployment for distributed seams | Transport, health and tests exist; nothing to deploy with | Container images + a compose/k8s example | M |

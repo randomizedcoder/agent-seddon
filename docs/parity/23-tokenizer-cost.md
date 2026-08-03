@@ -17,15 +17,26 @@ metrics and fed back into `ContextStrategy` compaction.
 > this as a swappable, gRPC-served, metered seam. The §7 plan is the design of
 > record.
 >
-> **Implemented (core).** The `Tokenizer` seam is in `agent-core`, with the
+> **Status: ✅ merged.** The `Tokenizer` seam is in `agent-core`, with the
 > dependency-free **`approx`** backend + `PriceTable` + cost model in
 > `agent-tokenizer`; `Usage` gained `cache_read_tokens`/`cache_write_tokens`/`cost`
 > (populated by both providers); compaction (`SlidingWindow`/`SummarizingWindow`)
 > budgets with real counts and the crossover-vs-heuristic is pinned by tests;
 > `agent_cost_usd_total` / `agent_cache_tokens_total` + a `tokenizer.count` span are
-> wired; iai bench + dhat leak gate it. **Deferred to follow-ups:** the gRPC
-> transport (`tokenizer.proto` / `--serve-tokenizer` / wire `Usage` cache fields)
-> and the real BPE/HF/provider backends (the seam accepts them unchanged).
+> wired; iai bench + dhat leak gate it (PR #46). The **gRPC transport**
+> (`tokenizer.proto` `Count`/`CountMessages`, `--serve-tokenizer`, reflection)
+> shipped in PR #80. The two **real backends** then filled the last gap, each behind
+> its own non-default cargo feature (so the default build stays hermetic — no bundled
+> vocab, no download) with a dedicated `nix flake check` gate:
+> - **`tiktoken`** (PR #211) — exact OpenAI-family BPE counts via the offline
+>   `tiktoken-rs` crate (vendored `cl100k_base`/`o200k_base` ranks).
+> - **`hf`** (PR #212) — a local model's `tokenizer.json` (Qwen/GLM/Llama) via the
+>   HuggingFace `tokenizers` crate (pure-Rust `fancy-regex`, no `onig` C dep).
+>
+> Both fall back to `approx` for an unmapped or hostile `model` (never panic/error).
+> **Deferred (sole tail):** the `provider` count-tokens backend (e.g. Anthropic
+> `/messages/count_tokens`) — it needs network + an API key, so it is not
+> hermetically gate-testable; the seam accepts it unchanged when added.
 
 ## Feature & why it matters
 
