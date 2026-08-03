@@ -199,6 +199,15 @@ Internally this is the same code path as `--serve-<seam>`: both fold seam
 services onto the router returned by `server::base_router()`, so the one-seam and
 all-seams paths cannot drift.
 
+The **`nix run .#serve-smoke`** app is the real-wire breadth probe of this surface:
+it boots `--serve-all` over **TCP and UDS** and, via server reflection, asserts the
+gateway reports `grpc.health.v1` SERVING, that every advertised seam can be
+`grpcurl describe`d, that a CPU-only critical subset is present, and that two seams
+(`Memory/Recall`, `TokenizerService/Count`) round-trip. Like `e2e-live` /
+`loadtest-wire` it needs a running server + a socket, so it is an opt-in app, not a
+hermetic `nix flake check` gate (it needs no model, though). See
+[`nix/serve-smoke.nix`](../nix/serve-smoke.nix).
+
 ### Health checking
 
 Every seam process serves the standard **`grpc.health.v1.Health`** service, so a

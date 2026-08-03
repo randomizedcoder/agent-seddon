@@ -84,6 +84,13 @@ than its loop:
   unknown-backend config must fail closed. Catches config-schema drift no in-process
   test sees.
 
+Two model-free **real-wire** apps probe the gRPC seam surface directly (they spawn a
+server + dial a socket, so — like `e2e-live` — they are opt-in apps, not gates):
+`nix run .#loadtest-wire` drives two seams hard for throughput/overload, and
+`nix run .#serve-smoke` boots `--serve-all` over TCP+UDS and asserts every advertised
+seam health-checks, reflects (`grpcurl describe`), and round-trips
+([`nix/serve-smoke.nix`](../../nix/serve-smoke.nix), [grpc.md](../grpc.md)).
+
 ## Coverage
 
 Source-based test coverage via [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov)
