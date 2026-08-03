@@ -51,13 +51,14 @@ From fake to real:
 |------|----------|-------|-------|
 | `loop_e2e` | `LlmProvider` trait, real loop | `ScriptedProvider` | [`agent-runtime/tests/loop_e2e.rs`](../../crates/agent-runtime/tests/loop_e2e.rs) |
 | `cli_e2e` | process + HTTP wire | scripted OpenAI-compat server | [`agent-cli/tests/cli_e2e.rs`](../../crates/agent-cli/tests/cli_e2e.rs) |
+| `vcr_matrix` | process + HTTP wire, **openai-compat × Anthropic** | cassette replay | [`agent-cli/tests/vcr_matrix.rs`](../../crates/agent-cli/tests/vcr_matrix.rs) |
 | `repl_pty` | real tty (Rust `rexpect`) | scripted server | [`agent-cli/tests/repl_pty.rs`](../../crates/agent-cli/tests/repl_pty.rs) |
 | `expect-smoke` | real tty (tcl/expect), model-free | none (slash commands) | [`nix/checks/expect-smoke.nix`](../../nix/checks/expect-smoke.nix), [`test/expect/`](../../test/expect) |
 | `e2e-live` | process + network | **real** | `nix run .#e2e-live` |
 | `e2e-expect` | real tty, **multi-turn REPL** | **real** | `nix run .#e2e-expect`, [`test/expect/`](../../test/expect) |
 | `e2e-multi` | **N concurrent sessions**, model-judged | **real** ×2 | `nix run .#e2e-multi`, [`test/e2e-multi/`](../../test/e2e-multi) |
 
-The first four run hermetically under `nix flake check`; `e2e-live`/`e2e-expect`/`e2e-multi`
+The first five run hermetically under `nix flake check`; `e2e-live`/`e2e-expect`/`e2e-multi`
 need a running model and are opt-in `nix run` apps.
 
 `cli_e2e` also injects **wire faults** the in-process doubles can't reach, proving the
@@ -69,6 +70,16 @@ The retry/backoff arithmetic itself stays unit-tested in `agent-retry`; these ca
 the end-to-end behaviour. Faults that tiny_http can't express (a real reset, a truncated
 chunked stream) use a small raw-`TcpListener` `FaultServer` in
 [`agent-cli/tests/common/mod.rs`](../../crates/agent-cli/tests/common/mod.rs).
+
+`vcr_matrix` is the **provider × protocol matrix**: the canonical "write hello.c"
+tool-loop replayed through the binary against BOTH the openai-compat
+`/chat/completions` and the Anthropic `/messages` wire, from committed **cassettes**
+(the providers' own response bodies) under
+[`tests/fixtures/cassettes/`](../../crates/agent-cli/tests/fixtures/cassettes). It
+drives the Anthropic request serialization + `tool_use`/`tool_result` block handling
+over the wire for the first time; a missing cassette fails hard (never a silent skip).
+Refresh cassettes from a real endpoint with **`nix run .#vcr-record`** (opt-in; writes
+response bodies only, never a secret).
 
 Two offline `nix flake check` gates smoke-test the shipped binary's *surface* rather
 than its loop:
