@@ -11,45 +11,16 @@
   pkgs,
   agent,
 }:
-pkgs.runCommand "agent-review-summaries"
-  {
-    nativeBuildInputs = [
-      agent
-      pkgs.git
-      pkgs.coreutils
-    ];
-  }
-  ''
-    export HOME="$(mktemp -d)"
-    cfg="$HOME/agent.toml"
-    cat > "$cfg" <<'TOML'
-    [agent]
-    provider = "openai-compat"
-    policy   = "auto-approve"
-    [provider]
-    base_url = "http://127.0.0.1:1/v1"
-    model    = "none"
-    api_key  = "none"
-    [memory]
-    backend = "file"
-    [search]
-    auto_index = false
-    [review]
-    backend = "local"
+import ../lib/mk-review-check.nix { inherit pkgs agent; } {
+  name = "summaries";
+  reviewConfig = ''
     analyze = false
     signatures = false
     callgraph = false
     style = false
     summaries = true
-    [pool]
-    members = []
-    TOML
-
-    wd="$(mktemp -d)"
-    cd "$wd"
-    git init -q -b main
-    git config user.email t@e
-    git config user.name t
+  '';
+  setup = ''
     printf 'package app\n\nfunc Handle() int {\n\treturn 1\n}\n' > app.go
     git add -A -f && git commit -q -m base
     base="$(git rev-parse HEAD)"
@@ -61,12 +32,12 @@ pkgs.runCommand "agent-review-summaries"
     echo "----- generated review context (summaries, no pool) -----"
     echo "$ctx"
     echo "----------------------------------------------------------"
-
-    fail() { echo "FAIL: $1" >&2; exit 1; }
+  '';
+  asserts = ''
     echo "$ctx" | grep -q "Grounded review facts" || fail "no grounded facts block"
     echo "$ctx" | grep -q "app.go"                || fail "hard facts (change set) missing"
     # The soft section must be ABSENT when no pool is configured (fail-soft skip).
     echo "$ctx" | grep -q "Summaries (soft" && fail "summaries rendered despite empty pool" || true
-
-    echo "OK: summaries collector skipped fail-soft with no pool; hard facts intact" > "$out"
-  ''
+  '';
+  okMsg = "OK: summaries collector skipped fail-soft with no pool; hard facts intact";
+}

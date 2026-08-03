@@ -14,32 +14,10 @@
   agent,
   go-ast,
 }:
-pkgs.runCommand "agent-review-salience"
-  {
-    nativeBuildInputs = [
-      agent
-      go-ast
-      pkgs.git
-      pkgs.coreutils
-    ];
-  }
-  ''
-    export HOME="$(mktemp -d)"
-    cfg="$HOME/agent.toml"
-    cat > "$cfg" <<'TOML'
-    [agent]
-    provider = "openai-compat"
-    policy   = "auto-approve"
-    [provider]
-    base_url = "http://127.0.0.1:1/v1"
-    model    = "none"
-    api_key  = "none"
-    [memory]
-    backend = "file"
-    [search]
-    auto_index = false
-    [review]
-    backend = "local"
+import ../lib/mk-review-check.nix { inherit pkgs agent; } {
+  name = "salience";
+  extraInputs = [ go-ast ];
+  reviewConfig = ''
     analyze = false
     signatures = false
     style = false
@@ -47,14 +25,8 @@ pkgs.runCommand "agent-review-salience"
     cochange = false
     callgraph = true
     churn = true
-    [pool]
-    members = []
-    TOML
-
-    wd="$(mktemp -d)"
-    cd "$wd"
-    git init -q -b main
-
+  '';
+  setup = ''
     commit_as() { author="$1"; shift
       GIT_AUTHOR_NAME="$author" GIT_AUTHOR_EMAIL="$author@e" \
       GIT_COMMITTER_NAME="$author" GIT_COMMITTER_EMAIL="$author@e" \
@@ -91,12 +63,12 @@ pkgs.runCommand "agent-review-salience"
     echo "----- generated review context (salience) -----"
     echo "$ctx"
     echo "-----------------------------------------------"
-
-    fail() { echo "FAIL: $1" >&2; exit 1; }
+  '';
+  asserts = ''
     echo "$ctx" | grep -q "Grounded review facts" || fail "no grounded facts block"
     echo "$ctx" | grep -q "Salience"              || fail "no salience section"
     echo "$ctx" | grep -qE "core.go .*CriticalSilo" \
       || fail "load-bearing single-owner change not classified CriticalSilo"
-
-    echo "OK: call-graph centrality × churn ownership → CriticalSilo salience verdict" > "$out"
-  ''
+  '';
+  okMsg = "OK: call-graph centrality × churn ownership → CriticalSilo salience verdict";
+}
