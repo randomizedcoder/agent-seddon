@@ -249,6 +249,7 @@ let
       versions
       agent
       ;
+    inherit (nixLib) harness;
   };
   # Real-wire seam-surface breadth probe: `--serve-all` + grpcurl reflection over
   # tcp+uds — every advertised seam describes + a critical subset round-trips. Opt-in.
@@ -259,6 +260,7 @@ let
       versions
       agent
       ;
+    inherit (nixLib) harness;
   };
   # Refresh the provider cassettes replayed by the hermetic `vcr_matrix` test from a
   # real endpoint (opt-in; writes response bodies only, never a secret).
