@@ -31,14 +31,26 @@ observable. See parity spec [`23-tokenizer-cost.md`](../parity/23-tokenizer-cost
     untrusted text as ordinary bytes (a hostile prompt can't understate its size).
     Enabled with the `tokenizer-tiktoken` runtime feature; executed in the gate by
     `nix/checks/tokenizer-tiktoken.nix`.
+  - `hf` (`tokenizer-hf`, **off by default**) — **exact** counts from a local
+    model's `tokenizer.json` (Qwen / GLM / Llama / …, which are *not* tiktoken),
+    via the HuggingFace [`tokenizers`] crate (pulled with `default-features =
+    false` + `fancy-regex`, so pure-Rust and no `onig` C dependency). Files come
+    from `[tokenizer.hf]` (a `default` plus a model-prefix → path map, longest
+    match wins); nothing is downloaded — the vocab is a local file the operator
+    points at. A file that is **missing, oversized (> 64 MiB), or unparseable is
+    skipped** with a warning and those models fall back to `approx`, so a bad path
+    or hostile `model` string is never fatal. Executed in the gate by
+    `nix/checks/tokenizer-hf.nix` (a tiny WordLevel fixture vocab, fully offline).
 - **Price table:** `agent_tokenizer::PriceTable` (implements `agent_core::Prices`) —
   exact-then-longest-prefix model lookup; `builtin()` ships a small illustrative
   `$/MTok` set; an unknown model → zero-priced `CostStatus::Estimated`, never a
   panic.
 - **Runtime feature:** `tokenizer` (default) — registers the `approx` backend and
-  enables USD/cache recording in the loop. `tokenizer-tiktoken` adds the real BPE
-  backend on top (forwards to `agent-tokenizer/tokenizer-tiktoken`).
-- **Config:** `[tokenizer] backend = "approx"` (or `"tiktoken"` / `"grpc"`).
+  enables USD/cache recording in the loop. `tokenizer-tiktoken` / `tokenizer-hf`
+  add the real backends on top (each forwards to the matching `agent-tokenizer`
+  feature).
+- **Config:** `[tokenizer] backend = "approx"` (or `"tiktoken"` / `"hf"` /
+  `"grpc"`); `hf` also reads `[tokenizer.hf]` (`default` + `models` prefix→path).
 - **Metrics:** `agent_cost_usd_total{model,kind}`,
   `agent_cache_tokens_total{model,kind}` (kind = read/write); the cache-hit ratio
   is derived in PromQL as `cache_read / (cache_read + input)`.
@@ -58,11 +70,10 @@ and the reverse.
 
 ## Follow-ups
 
-- **Remaining backend:** `tokenizer-hf` (a local model's `tokenizer.json`, for the
-  Qwen/GLM/Llama family this repo actually runs) lands next; `tokenizer-provider`
-  (Anthropic `count_tokens`, needs network + an API key so it is not hermetically
-  gate-testable) stays deferred. The `approx` backend is the always-available
-  default; both drop in behind the seam without touching callers.
+- **Remaining backend:** `tokenizer-provider` (Anthropic `count_tokens`) — needs
+  network + an API key, so it is not hermetically gate-testable; it stays deferred.
+  The `approx` backend is the always-available default; a provider backend would
+  drop in behind the seam without touching callers.
 - **Config-loaded price table** on the agent (the loop builds `PriceTable::builtin()`
   today).
 
@@ -71,6 +82,7 @@ reflection — already shipped; see "Over gRPC" below.)
 
 [`MESSAGE_TOKEN_OVERHEAD`]: ../../crates/agent-core/src/lib.rs
 [`tiktoken-rs`]: https://crates.io/crates/tiktoken-rs
+[`tokenizers`]: https://crates.io/crates/tokenizers
 
 ## Over gRPC — one count for a fleet
 

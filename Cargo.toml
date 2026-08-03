@@ -121,6 +121,12 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # ranks via `include_bytes!`, so no vocab download at build or runtime. crane
 # vendors it from Cargo.lock. See parity spec 23 / docs/components/tokenizer.md.
 tiktoken-rs = "0.6"
+# HuggingFace tokenizer, behind agent-tokenizer's non-default `tokenizer-hf`
+# feature — loads a local model's `tokenizer.json` (Qwen/GLM/Llama/…) for exact
+# counts. `default-features = false` drops the `onig` C dependency (pure-Rust
+# regex path) + the progress bar, keeping the build hermetic and offline: no
+# model download, the vocab is a local file the operator points at. See spec 23.
+tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
 
 # telemetry / ClickHouse (native protocol, port 9000)
 klickhouse = "0.13"

@@ -48,6 +48,10 @@ in
   # feature-scoped check that runs them in the gate. Parity spec 23; offline
   # (vendored ranks). docs/components/tokenizer.md.
   tokenizer-tiktoken = craneCheck ./tokenizer-tiktoken.nix { inherit cargoArtifacts; };
+  # Executes the `hf` tokenizer backend's tests (feature `tokenizer-hf`, off by
+  # default). Counts with a local model's `tokenizer.json` via the HuggingFace
+  # `tokenizers` crate; offline (tiny fixture vocab). Parity spec 23.
+  tokenizer-hf = craneCheck ./tokenizer-hf.nix { inherit cargoArtifacts; };
   # Deterministic perf gate (iai-callgrind under valgrind, absolute Ir ceilings)
   # + heap leak/allocation-budget gate (dhat). See docs/components/benchmarking.md.
   bench = craneCheck ./bench.nix { inherit cargoArtifacts versions; };
