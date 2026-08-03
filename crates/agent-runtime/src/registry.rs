@@ -484,6 +484,12 @@ pub fn register_builtins(r: &mut Registry) {
     r.tokenizer("approx", |_ctx| {
         Ok(Arc::new(agent_tokenizer::ApproxTokenizer::new()) as Arc<dyn agent_core::Tokenizer>)
     });
+    // Real OpenAI-family BPE counts (offline, vendored ranks); unrecognised models
+    // fall back to `approx` inside the backend. See parity spec 23.
+    #[cfg(feature = "tokenizer-tiktoken")]
+    r.tokenizer("tiktoken", |_ctx| {
+        Ok(Arc::new(agent_tokenizer::TiktokenTokenizer::new()?) as Arc<dyn agent_core::Tokenizer>)
+    });
     // One tokenizer for a fleet: identical counts everywhere, so budget and
     // compaction decisions stay consistent across agents.
     #[cfg(feature = "grpc")]

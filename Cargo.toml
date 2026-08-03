@@ -115,6 +115,13 @@ dhat = "0.3"
 # in nix/versions.nix). See docs/design/prompts/05-storage.md.
 rusqlite = { version = "0.32", features = ["bundled"] }
 
+# Real OpenAI-family BPE tokenizer, behind agent-tokenizer's non-default
+# `tokenizer-tiktoken` feature so the default build stays hermetic (approx backend
+# only). Pure Rust and OFFLINE — it embeds the `cl100k_base`/`o200k_base` merge
+# ranks via `include_bytes!`, so no vocab download at build or runtime. crane
+# vendors it from Cargo.lock. See parity spec 23 / docs/components/tokenizer.md.
+tiktoken-rs = "0.6"
+
 # telemetry / ClickHouse (native protocol, port 9000)
 klickhouse = "0.13"
 uuid = { version = "1", features = ["v4"] }
