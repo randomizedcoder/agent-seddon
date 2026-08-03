@@ -21,6 +21,9 @@ let
 
   provisioning = ./provisioning;
   dashboards = ./dashboards;
+
+  # Shared container-lifecycle apps (the identical *-down/*-client/*-logs bodies).
+  c = import ../lib/mk-container-app.nix { inherit pkgs versions; };
 in
 {
   grafana-up = pkgs.writeShellApplication {
@@ -79,18 +82,8 @@ in
     '';
   };
 
-  grafana-down = pkgs.writeShellApplication {
-    name = "grafana-down";
-    runtimeInputs = [ versions.docker ];
-    text = ''
-      set -euo pipefail
-      if docker ps -a --format '{{.Names}}' | grep -qx "${name}"; then
-        echo "==> removing container '${name}' (data is discarded)"
-        docker rm -f "${name}" >/dev/null
-        echo "done"
-      else
-        echo "container '${name}' not found — nothing to do"
-      fi
-    '';
+  grafana-down = c.down {
+    name = "grafana";
+    container = name;
   };
 }

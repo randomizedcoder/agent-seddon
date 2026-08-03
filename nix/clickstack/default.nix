@@ -20,6 +20,9 @@ let
   uiPort = toString versions.clickstackUiPort;
   otlpGrpcPort = toString versions.clickstackOtlpGrpcPort;
   otlpHttpPort = toString versions.clickstackOtlpHttpPort;
+
+  # Shared container-lifecycle apps (the identical *-down/*-client/*-logs bodies).
+  c = import ../lib/mk-container-app.nix { inherit pkgs versions; };
 in
 {
   clickstack-up = pkgs.writeShellApplication {
@@ -79,42 +82,21 @@ in
     '';
   };
 
-  clickstack-down = pkgs.writeShellApplication {
-    name = "clickstack-down";
-    runtimeInputs = [ versions.docker ];
-    text = ''
-      set -euo pipefail
-      if docker ps -a --format '{{.Names}}' | grep -qx "${name}"; then
-        echo "==> removing container '${name}' (data is discarded)"
-        docker rm -f "${name}" >/dev/null
-        echo "done"
-      else
-        echo "container '${name}' not found — nothing to do"
-      fi
-    '';
+  clickstack-down = c.down {
+    name = "clickstack";
+    container = name;
   };
 
-  clickstack-logs = pkgs.writeShellApplication {
-    name = "clickstack-logs";
-    runtimeInputs = [ versions.docker ];
-    text = ''
-      set -euo pipefail
-      exec docker logs -f "${name}"
-    '';
+  clickstack-logs = c.logs {
+    name = "clickstack";
+    container = name;
   };
 
   # `nix run .#clickstack-client -- <args>` → clickhouse-client inside the
   # all-in-one, e.g. `-- -q 'SELECT count() FROM default.otel_traces'`.
-  clickstack-client = pkgs.writeShellApplication {
-    name = "clickstack-client-wrapper";
-    runtimeInputs = [ versions.docker ];
-    text = ''
-      set -euo pipefail
-      if ! docker ps --format '{{.Names}}' | grep -qx "${name}"; then
-        echo "clickstack-client: container '${name}' is not running — run 'nix run .#clickstack-up' first" >&2
-        exit 1
-      fi
-      exec docker exec -i "${name}" clickhouse-client "$@"
-    '';
+  clickstack-client = c.client {
+    name = "clickstack";
+    container = name;
+    exec = "clickhouse-client";
   };
 }

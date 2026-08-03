@@ -23,6 +23,9 @@ let
   port = toString versions.prometheusPort;
   g = versions.grpc;
 
+  # Shared container-lifecycle apps (the identical *-down/*-client/*-logs bodies).
+  c = import ../lib/mk-container-app.nix { inherit pkgs versions; };
+
   # One scrape job per seam server. Built as an explicit-indent plain string
   # (not a `''` block) so the 2-space indentation under `scrape_configs:` survives
   # verbatim — Nix's `''` common-indent stripping would otherwise flatten it.
@@ -130,18 +133,8 @@ in
     '';
   };
 
-  prometheus-down = pkgs.writeShellApplication {
-    name = "prometheus-down";
-    runtimeInputs = [ versions.docker ];
-    text = ''
-      set -euo pipefail
-      if docker ps -a --format '{{.Names}}' | grep -qx "${name}"; then
-        echo "==> removing container '${name}' (data is discarded)"
-        docker rm -f "${name}" >/dev/null
-        echo "done"
-      else
-        echo "container '${name}' not found — nothing to do"
-      fi
-    '';
+  prometheus-down = c.down {
+    name = "prometheus";
+    container = name;
   };
 }
