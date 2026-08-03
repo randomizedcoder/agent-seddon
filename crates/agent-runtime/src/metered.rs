@@ -551,6 +551,49 @@ impl agent_core::Tokenizer for MeteredTokenizer {
         }
         out
     }
+
+    // Delegate the batch methods to the inner backend (rather than inheriting the
+    // trait default, which would loop `self.count` and both bypass the backend's
+    // parallel `count_batch` and — for the gRPC client — its single-RPC
+    // `count_messages` override). One span per batch op, not one per field.
+    async fn count_batch(&self, texts: &[&str], model: &str) -> Result<Vec<u32>> {
+        let span = tracing::info_span!(
+            "tokenizer.count_batch",
+            backend = self.inner.backend(),
+            model,
+            inputs = texts.len(),
+            tokens = tracing::field::Empty,
+        );
+        let out = self
+            .inner
+            .count_batch(texts, model)
+            .instrument(span.clone())
+            .await;
+        if let Ok(counts) = &out {
+            let total = counts.iter().copied().fold(0u32, u32::saturating_add);
+            span.record("tokens", total);
+        }
+        out
+    }
+
+    async fn count_messages(&self, messages: &[Message], model: &str) -> Result<u32> {
+        let span = tracing::info_span!(
+            "tokenizer.count_messages",
+            backend = self.inner.backend(),
+            model,
+            messages = messages.len(),
+            tokens = tracing::field::Empty,
+        );
+        let out = self
+            .inner
+            .count_messages(messages, model)
+            .instrument(span.clone())
+            .await;
+        if let Ok(n) = &out {
+            span.record("tokens", *n);
+        }
+        out
+    }
 }
 
 // --- provider --------------------------------------------------------------
@@ -2185,5 +2228,38 @@ mod tokenizer_span_tests {
             });
         });
         assert!(spans.contains(&"tokenizer.count".to_string()), "{spans:?}");
+    }
+
+    // The batch methods must delegate to the inner backend (so its parallel
+    // `count_batch` / gRPC single-RPC `count_messages` is reached, not the trait
+    // default that loops `count`), each emitting its own span.
+    #[test]
+    fn metered_tokenizer_batch_methods_emit_spans_and_delegate() {
+        let mut total = 0;
+        let spans = captured_spans(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let tok = super::tokenizer(Arc::new(FixedVocabTokenizer));
+                let _ = tok.count_batch(&["one two", "three"], "m").await;
+                total = tok
+                    .count_messages(&[Message::user("one two three")], "m")
+                    .await
+                    .unwrap();
+            });
+        });
+        assert!(
+            spans.contains(&"tokenizer.count_batch".to_string()),
+            "{spans:?}"
+        );
+        assert!(
+            spans.contains(&"tokenizer.count_messages".to_string()),
+            "{spans:?}"
+        );
+        assert!(
+            total > 0,
+            "count_messages delegated and returned a real count"
+        );
     }
 }

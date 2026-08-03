@@ -34,6 +34,10 @@ metrics and fed back into `ContextStrategy` compaction.
 >   HuggingFace `tokenizers` crate (pure-Rust `fancy-regex`, no `onig` C dep).
 >
 > Both fall back to `approx` for an unmapped or hostile `model` (never panic/error).
+> The seam also gained a **batch primitive** `count_batch(&[&str])`: `count_messages`
+> now gathers the whole history's text fields into one call, and the real backends
+> tokenize them **in parallel** above a size threshold (`tiktoken` via rayon, `hf`
+> via `encode_batch`) — identical counts, ~12× faster on a large context.
 > **Deferred (sole tail):** the `provider` count-tokens backend (e.g. Anthropic
 > `/messages/count_tokens`) — it needs network + an API key, so it is not
 > hermetically gate-testable; the seam accepts it unchanged when added.

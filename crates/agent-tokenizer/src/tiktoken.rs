@@ -95,7 +95,32 @@ impl TiktokenTokenizer {
             None => self.fallback.count_text(text),
         }
     }
+
+    /// Count each of `texts` for one `model`. The inputs are independent BPE encodes,
+    /// so above a work threshold they run in parallel across rayon's pool; below it,
+    /// the dispatch/join overhead would cost more than it saves, so it stays
+    /// sequential. The result is **identical either way** (`map` preserves order and
+    /// each count is deterministic) — only the wall-clock changes.
+    pub fn count_texts(&self, texts: &[&str], model: &str) -> Vec<u32> {
+        let total_bytes: usize = texts.iter().map(|t| t.len()).sum();
+        if texts.len() >= PAR_MIN_ITEMS && total_bytes >= PAR_MIN_BYTES {
+            use rayon::prelude::*;
+            texts
+                .par_iter()
+                .map(|t| self.count_text(t, model))
+                .collect()
+        } else {
+            texts.iter().map(|t| self.count_text(t, model)).collect()
+        }
+    }
 }
+
+/// Fan out to rayon only once a batch is big enough to repay the ~µs dispatch/join
+/// cost: at least this many inputs AND this many total bytes of text. Chosen from a
+/// wall-clock sweep (see the PR) and deliberately conservative; the counts are the
+/// same at any threshold, so tuning it trades only latency, never correctness.
+const PAR_MIN_ITEMS: usize = 8;
+const PAR_MIN_BYTES: usize = 32 * 1024;
 
 #[async_trait]
 impl Tokenizer for TiktokenTokenizer {
@@ -105,6 +130,10 @@ impl Tokenizer for TiktokenTokenizer {
 
     async fn count(&self, text: &str, model: &str) -> Result<u32> {
         Ok(self.count_text(text, model))
+    }
+
+    async fn count_batch(&self, texts: &[&str], model: &str) -> Result<Vec<u32>> {
+        Ok(self.count_texts(texts, model))
     }
 }
 
@@ -203,5 +232,68 @@ mod tests {
     fn special_tokens_counted_as_ordinary_text() {
         let t = tok();
         assert!(t.count_text("<|endoftext|>", "gpt-4o") > 1);
+    }
+
+    // --- batch counting is identical to per-text, on BOTH paths ------------
+    // The parallel path must be a pure optimisation: same counts, same order.
+    // A small batch stays sequential; a big one (≥ PAR_MIN_ITEMS and ≥ PAR_MIN_BYTES)
+    // fans out to rayon. Assert equivalence across the threshold.
+    #[rstest]
+    #[case::sequential_small(vec!["hello".into(), "world of code".into(), String::new()])]
+    #[case::parallel_large(large_batch())]
+    fn count_batch_matches_sequential(#[case] texts: Vec<String>) {
+        let t = tok();
+        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let batched = t.count_texts(&refs, "gpt-4o");
+        let seq: Vec<u32> = refs.iter().map(|s| t.count_text(s, "gpt-4o")).collect();
+        assert_eq!(batched, seq, "batch must equal per-text");
+    }
+
+    // 12 chunks × ~4 KiB = ~48 KiB over 12 items → crosses both thresholds.
+    fn large_batch() -> Vec<String> {
+        (0..12)
+            .map(|i| format!("fn item_{i}(x: i32) -> i32 {{ x + {i} }}\n").repeat(120))
+            .collect()
+    }
+
+    // Manual wall-clock probe (not gated — the iai/valgrind gate serialises threads
+    // and can't show a parallel win). Run: `cargo test -p agent-tokenizer
+    // --features tokenizer-tiktoken -- --ignored --nocapture wallclock`.
+    #[ignore = "manual wall-clock probe; run with --ignored --nocapture"]
+    #[test]
+    fn wallclock_seq_vs_par() {
+        let t = tok();
+        // 400 chunks × ~4 KiB ≈ 1.6 MiB of code — the shape of a large history.
+        let owned: Vec<String> = (0..400)
+            .map(|i| format!("fn item_{i}(x: i32) -> i32 {{ x + {i} }}\n").repeat(120))
+            .collect();
+        let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+
+        let t0 = std::time::Instant::now();
+        let seq: Vec<u32> = refs.iter().map(|s| t.count_text(s, "gpt-4o")).collect();
+        let seq_ms = t0.elapsed().as_secs_f64() * 1e3;
+
+        let t1 = std::time::Instant::now();
+        let par = t.count_texts(&refs, "gpt-4o"); // crosses the threshold → rayon
+        let par_ms = t1.elapsed().as_secs_f64() * 1e3;
+
+        assert_eq!(seq, par);
+        println!(
+            "tiktoken batch of {} ({} KiB): sequential {seq_ms:.1} ms, parallel {par_ms:.1} ms, speedup {:.2}x",
+            refs.len(),
+            refs.iter().map(|s| s.len()).sum::<usize>() / 1024,
+            seq_ms / par_ms,
+        );
+    }
+
+    // `count_batch` (the async seam) matches the sync core.
+    #[tokio::test]
+    async fn count_batch_seam_matches_core() {
+        let t = tok();
+        let texts = ["a", "bb cc", "dddd"];
+        assert_eq!(
+            t.count_batch(&texts, "gpt-4o").await.unwrap(),
+            t.count_texts(&texts, "gpt-4o")
+        );
     }
 }

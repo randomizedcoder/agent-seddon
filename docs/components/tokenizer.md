@@ -55,7 +55,35 @@ observable. See parity spec [`23-tokenizer-cost.md`](../parity/23-tokenizer-cost
   `agent_cache_tokens_total{model,kind}` (kind = read/write); the cache-hit ratio
   is derived in PromQL as `cache_read / (cache_read + input)`.
 - **Span:** `tokenizer.count` with `backend`/`model`/`text_bytes`/`tokens`
-  attributes (metered decorator).
+  attributes (metered decorator); `tokenizer.count_batch` / `tokenizer.count_messages`
+  for the batch paths below.
+
+## Batch & parallel counting
+
+`count_messages` — the per-turn compaction/cost hot path — gathers **every** text
+field across the whole history (message text, tool-call names, tool-call arguments)
+into one `count_batch(&[&str], model)` call, then adds the per-message overhead and
+the size-based estimate for media blocks. The inputs are independent, so the real
+backends tokenize them **in parallel** once a batch is large enough to repay the
+dispatch cost:
+
+- **`tiktoken`** fans the per-string BPE encodes across `rayon` above a threshold
+  (≥ 8 inputs **and** ≥ 32 KiB total); a smaller batch stays sequential.
+- **`hf`** routes a large batch through HuggingFace `encode_batch` (rayon, internal
+  to the crate).
+- **`approx`** stays sequential (allocation-free; parallelism would only add
+  overhead). The `grpc` client keeps its single-RPC `count_messages`.
+
+The result is **identical to counting field-by-field** — `count_batch` preserves
+order and each count is deterministic, so parallelism changes only wall-clock, never
+the number. The threshold is a pure latency knob. Measured effect on a ~1.8 MiB
+batch (24 cores): **~12× faster** than sequential — the win grows with the context.
+
+> The perf gate is iai-callgrind under valgrind, which **serialises threads** and
+> counts instructions, so it cannot show this wall-clock speedup (it would show the
+> rayon overhead as *more* instructions). The equivalence is covered by tests; the
+> speedup is a manual wall-clock probe (`--ignored --nocapture wallclock` in
+> `tiktoken.rs`). Determinism, not throughput, is what the gate guards.
 
 ## How compaction uses it
 

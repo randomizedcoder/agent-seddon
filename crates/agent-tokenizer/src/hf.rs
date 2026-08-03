@@ -95,7 +95,35 @@ impl HfTokenizer {
             None => self.fallback.count_text(text),
         }
     }
+
+    /// Count each of `texts` for one `model`. When a `tokenizer.json` matches the
+    /// model and the batch is large enough, HuggingFace `encode_batch` tokenizes the
+    /// whole slice in parallel (rayon, internal to the crate); a small batch, an
+    /// unmatched model, or a batch-encode error falls back to per-text counting.
+    /// Identical result either way.
+    pub fn count_texts(&self, texts: &[&str], model: &str) -> Vec<u32> {
+        match self.tokenizer_for(model) {
+            Some(tk) if texts.len() >= PAR_MIN_ITEMS => {
+                match tk.encode_batch(texts.to_vec(), false) {
+                    Ok(encs) => encs
+                        .iter()
+                        .map(|e| u32::try_from(e.len()).unwrap_or(u32::MAX))
+                        .collect(),
+                    Err(e) => {
+                        tracing::warn!(model, error = %e, "hf encode_batch failed; using per-text");
+                        texts.iter().map(|t| self.count_text(t, model)).collect()
+                    }
+                }
+            }
+            _ => texts.iter().map(|t| self.count_text(t, model)).collect(),
+        }
+    }
 }
+
+/// Minimum batch size before using the parallel `encode_batch` path; a smaller
+/// batch is counted per-text (the crate's batch machinery isn't worth it). Counts
+/// are identical either way, so this only trades latency.
+const PAR_MIN_ITEMS: usize = 8;
 
 /// Load and validate one `tokenizer.json`, or `None` (logged) if it is missing,
 /// not a regular file, too large, or unparseable.
@@ -137,6 +165,10 @@ impl Tokenizer for HfTokenizer {
 
     async fn count(&self, text: &str, model: &str) -> Result<u32> {
         Ok(self.count_text(text, model))
+    }
+
+    async fn count_batch(&self, texts: &[&str], model: &str) -> Result<Vec<u32>> {
+        Ok(self.count_texts(texts, model))
     }
 }
 
@@ -230,5 +262,39 @@ mod tests {
             let n = t.count("hello world", model).await.unwrap();
             assert!(n <= 2); // routed to the fixture or approx, always finite
         }
+    }
+
+    // --- batch counting is identical to per-text, on BOTH paths ------------
+    // A batch of ≥ PAR_MIN_ITEMS routes through `encode_batch`; a smaller one is
+    // per-text. Assert both equal individual counts (the batch path is a pure
+    // optimisation), for a matched model and for the approx-fallback model.
+    #[rstest]
+    #[case::small_batch_matched(3, "tiny-model")]
+    #[case::large_batch_matched(16, "tiny-model")]
+    #[case::large_batch_fallback(16, "qwen")] // no default here → approx path
+    fn count_batch_matches_sequential(#[case] n: usize, #[case] model: &str) {
+        // `qwen` must miss, so build a backend WITHOUT the empty default for it.
+        let t = if model == "qwen" {
+            HfTokenizer::new(&[("tiny".to_string(), fixture())])
+        } else {
+            tok()
+        };
+        let owned: Vec<String> = (0..n)
+            .map(|i| ["hello world", "foo bar", "hello zzz foo"][i % 3].to_string())
+            .collect();
+        let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+        let batched = t.count_texts(&refs, model);
+        let seq: Vec<u32> = refs.iter().map(|s| t.count_text(s, model)).collect();
+        assert_eq!(batched, seq, "batch must equal per-text (model={model})");
+    }
+
+    #[tokio::test]
+    async fn count_batch_seam_matches_core() {
+        let t = tok();
+        let texts = ["hello world", "foo", "bar hello"];
+        assert_eq!(
+            t.count_batch(&texts, "tiny").await.unwrap(),
+            t.count_texts(&texts, "tiny")
+        );
     }
 }

@@ -405,31 +405,55 @@ pub trait Tokenizer: Send + Sync {
     /// Count the tokens in `text` as the given `model` would tokenize it.
     async fn count(&self, text: &str, model: &str) -> Result<u32>;
 
+    /// Count the tokens in each of `texts` (all for the same `model`), one count
+    /// per input, in order. This is the seam's **batch** primitive: the inputs are
+    /// independent, so a backend can override this to tokenize the whole slice in
+    /// parallel, and [`count_messages`](Self::count_messages) routes through it so a
+    /// growing history is counted in a single batched (potentially parallel) call.
+    /// Default: `count` each input in turn — identical result, no parallelism.
+    async fn count_batch(&self, texts: &[&str], model: &str) -> Result<Vec<u32>> {
+        let mut out = Vec::with_capacity(texts.len());
+        for t in texts {
+            out.push(self.count(t, model).await?);
+        }
+        Ok(out)
+    }
+
     /// Count tokens across a message array, adding per-message +
-    /// per-tool-call name/argument overhead. Default: sum `count` over every
-    /// content and tool-call field plus [`MESSAGE_TOKEN_OVERHEAD`] per message —
-    /// the accurate analogue of what `estimate_tokens` approximated.
+    /// per-tool-call name/argument overhead. Default: gather every text field into
+    /// a single [`count_batch`](Self::count_batch) call (so an overriding backend
+    /// tokenizes them in parallel), then add the per-message overhead and the
+    /// size-based estimate for non-text (media) blocks. The total is identical to
+    /// summing `count` field-by-field — only the work is batched.
     async fn count_messages(&self, messages: &[Message], model: &str) -> Result<u32> {
-        let mut total: u32 = 0;
+        // Text pieces to tokenize; `non_text` accumulates what must NOT be
+        // tokenized as text — media blocks (a size-based estimate; counting only
+        // their text would under-count an image turn and overflow the window) plus
+        // the per-message overhead.
+        let mut pieces: Vec<std::borrow::Cow<'_, str>> = Vec::new();
+        let mut non_text: u32 = 0;
         for m in messages {
             for block in &m.content {
-                total = total.saturating_add(match block {
-                    ContentBlock::Text { text } => self.count(text, model).await?,
-                    // A media block is not text and must not be tokenized as if it
-                    // were: counting only the text would silently under-count an
-                    // image-carrying turn and overflow the provider's window.
-                    // `media_block_tokens` is the shared, deliberately conservative
-                    // size-based estimate.
-                    other => media_block_tokens(other),
-                });
+                match block {
+                    ContentBlock::Text { text } => {
+                        pieces.push(std::borrow::Cow::Borrowed(text.as_str()));
+                    }
+                    other => non_text = non_text.saturating_add(media_block_tokens(other)),
+                }
             }
             for tc in &m.tool_calls {
-                total = total.saturating_add(self.count(&tc.name, model).await?);
-                total = total.saturating_add(self.count(&tc.arguments.to_string(), model).await?);
+                pieces.push(std::borrow::Cow::Borrowed(tc.name.as_str()));
+                pieces.push(std::borrow::Cow::Owned(tc.arguments.to_string()));
             }
-            total = total.saturating_add(MESSAGE_TOKEN_OVERHEAD);
+            non_text = non_text.saturating_add(MESSAGE_TOKEN_OVERHEAD);
         }
-        Ok(total)
+        let refs: Vec<&str> = pieces.iter().map(|c| &**c).collect();
+        let text_total = self
+            .count_batch(&refs, model)
+            .await?
+            .into_iter()
+            .fold(0u32, u32::saturating_add);
+        Ok(text_total.saturating_add(non_text))
     }
 }
 
