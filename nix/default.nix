@@ -15,6 +15,10 @@
 let
   versions = import ./versions.nix { inherit pkgs; };
 
+  # Shared flake helpers (mkApp/mkApps + harness snippets + mk*Check factories).
+  nixLib = import ./lib { inherit pkgs lib versions; };
+  inherit (nixLib) mkApps;
+
   # crane, bound to our pinned Rust toolchain.
   craneLib = (crane.mkLib pkgs).overrideToolchain versions.rustToolchain;
 
@@ -270,128 +274,35 @@ in
 
   inherit checks;
 
-  apps = {
-    agent = {
-      type = "app";
-      program = "${agent}/bin/agent";
-    };
-    clickhouse-up = {
-      type = "app";
-      program = "${clickhouse.clickhouse-up}/bin/clickhouse-up";
-    };
-    clickhouse-down = {
-      type = "app";
-      program = "${clickhouse.clickhouse-down}/bin/clickhouse-down";
-    };
-    clickhouse-client = {
-      type = "app";
-      program = "${clickhouse.clickhouse-client}/bin/clickhouse-client-wrapper";
-    };
-    gen-constants = {
-      type = "app";
-      program = "${gen-constants}/bin/gen-constants";
-    };
-    bench = {
-      type = "app";
-      program = "${bench}/bin/bench";
-    };
-    coverage = {
-      type = "app";
-      program = "${coverage}/bin/coverage";
-    };
-    clean = {
-      type = "app";
-      program = "${clean}/bin/clean";
-    };
-    e2e-live = {
-      type = "app";
-      program = "${e2e-live}/bin/e2e-live";
-    };
-    e2e-expect = {
-      type = "app";
-      program = "${e2e-expect}/bin/e2e-expect";
-    };
-    e2e-multi = {
-      type = "app";
-      program = "${e2e-multi}/bin/e2e-multi";
-    };
-    review-eval = {
-      type = "app";
-      program = "${review-eval}/bin/review-eval";
-    };
-    buf-image = {
-      type = "app";
-      program = "${buf-image}/bin/buf-image";
-    };
-    clickstack-up = {
-      type = "app";
-      program = "${clickstack.clickstack-up}/bin/clickstack-up";
-    };
-    clickstack-down = {
-      type = "app";
-      program = "${clickstack.clickstack-down}/bin/clickstack-down";
-    };
-    clickstack-logs = {
-      type = "app";
-      program = "${clickstack.clickstack-logs}/bin/clickstack-logs";
-    };
-    clickstack-client = {
-      type = "app";
-      program = "${clickstack.clickstack-client}/bin/clickstack-client-wrapper";
-    };
-    prometheus-up = {
-      type = "app";
-      program = "${prometheus.prometheus-up}/bin/prometheus-up";
-    };
-    prometheus-down = {
-      type = "app";
-      program = "${prometheus.prometheus-down}/bin/prometheus-down";
-    };
-    grafana-up = {
-      type = "app";
-      program = "${grafana.grafana-up}/bin/grafana-up";
-    };
-    grafana-down = {
-      type = "app";
-      program = "${grafana.grafana-down}/bin/grafana-down";
-    };
-    gen-dart = {
-      type = "app";
-      program = "${portal.gen-dart}/bin/gen-dart";
-    };
-    portal = {
-      type = "app";
-      program = "${portal.portal}/bin/portal";
-    };
-    grpc-web-up = {
-      type = "app";
-      program = "${portal.grpc-web-up}/bin/grpc-web-up";
-    };
-    grpc-web-down = {
-      type = "app";
-      program = "${portal.grpc-web-down}/bin/grpc-web-down";
-    };
-    loadtest = {
-      type = "app";
-      program = "${loadtest}/bin/loadtest";
-    };
-    loadtest-loop = {
-      type = "app";
-      program = "${loadtest-loop}/bin/loadtest-loop";
-    };
-    loadtest-wire = {
-      type = "app";
-      program = "${loadtest-wire}/bin/loadtest-wire";
-    };
-    serve-smoke = {
-      type = "app";
-      program = "${serve-smoke}/bin/serve-smoke";
-    };
-    vcr-record = {
-      type = "app";
-      program = "${vcr-record}/bin/vcr-record";
-    };
-  };
+  # Every app is `{ type = "app"; program = "${drv}/bin/${bin}"; }`; `mkApps` builds
+  # that from a `{ name = derivation; }` table (bin = name unless overridden). The
+  # container/portal modules already return their sub-apps as such tables, so they
+  # fold in directly — the only bin≠name cases are the two `-client` wrappers.
+  apps =
+    mkApps { } {
+      inherit
+        agent
+        bench
+        coverage
+        clean
+        gen-constants
+        buf-image
+        e2e-live
+        e2e-expect
+        e2e-multi
+        review-eval
+        loadtest
+        loadtest-loop
+        loadtest-wire
+        serve-smoke
+        vcr-record
+        ;
+    }
+    // mkApps { clickhouse-client = "clickhouse-client-wrapper"; } clickhouse
+    // mkApps { clickstack-client = "clickstack-client-wrapper"; } clickstack
+    // mkApps { } prometheus
+    // mkApps { } grafana
+    // mkApps { } portal;
 
   formatter = versions.nixfmt;
 }
