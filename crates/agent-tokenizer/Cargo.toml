@@ -12,6 +12,11 @@ license.workspace = true
 # hermetic (no bundled vocab / network). See docs/components/tokenizer.md.
 default = ["tokenizer-approx"]
 tokenizer-approx = []
+# Exact OpenAI-family BPE counts via the offline `tiktoken-rs` crate (vendored
+# `cl100k_base`/`o200k_base` ranks). Off by default so `nix build .#agent` stays
+# dependency-free; a model tiktoken has no vocab for falls back to `approx`.
+# Executed in the gate by `nix/checks/tokenizer-tiktoken.nix`.
+tokenizer-tiktoken = ["tokenizer-approx", "dep:tiktoken-rs"]
 # Injects a dhat global allocator for the allocation-budget leak test only; never
 # in a normal build. Mirrors the other crates' `dhat-heap` gate.
 dhat-heap = ["dep:dhat"]
@@ -19,6 +24,7 @@ dhat-heap = ["dep:dhat"]
 [dependencies]
 agent-core.workspace = true
 async-trait.workspace = true
+tiktoken-rs = { workspace = true, optional = true }
 dhat = { workspace = true, optional = true }
 
 [dev-dependencies]

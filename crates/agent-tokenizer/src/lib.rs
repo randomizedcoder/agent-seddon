@@ -18,5 +18,10 @@ mod approx;
 #[cfg(feature = "tokenizer-approx")]
 pub use approx::ApproxTokenizer;
 
+#[cfg(feature = "tokenizer-tiktoken")]
+mod tiktoken;
+#[cfg(feature = "tokenizer-tiktoken")]
+pub use tiktoken::TiktokenTokenizer;
+
 pub mod cost;
 pub use cost::PriceTable;

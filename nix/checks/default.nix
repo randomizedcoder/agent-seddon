@@ -43,6 +43,11 @@ in
   # default so the main `test` check never builds the DB dep). The dedicated,
   # feature-scoped check that runs them in the gate. docs/design/prompts/05-storage.md.
   prompt-sqlite = craneCheck ./prompt-sqlite.nix { inherit cargoArtifacts; };
+  # Executes the real `tiktoken` BPE tokenizer backend's tests (feature
+  # `tokenizer-tiktoken`, off by default so the standard build ships no vocab). The
+  # feature-scoped check that runs them in the gate. Parity spec 23; offline
+  # (vendored ranks). docs/components/tokenizer.md.
+  tokenizer-tiktoken = craneCheck ./tokenizer-tiktoken.nix { inherit cargoArtifacts; };
   # Deterministic perf gate (iai-callgrind under valgrind, absolute Ir ceilings)
   # + heap leak/allocation-budget gate (dhat). See docs/components/benchmarking.md.
   bench = craneCheck ./bench.nix { inherit cargoArtifacts versions; };

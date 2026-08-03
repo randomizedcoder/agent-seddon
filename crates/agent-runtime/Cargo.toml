@@ -145,6 +145,10 @@ context-mode-aware = ["agent-context/context-mode-aware", "context-summarizing"]
 # Tokenizer + cost seam: the approx backend, price table, accurate compaction
 # counts + USD/cache accounting (parity spec 23).
 tokenizer = ["dep:agent-tokenizer", "agent-tokenizer/tokenizer-approx"]
+# The real OpenAI-family BPE backend (`backend = "tiktoken"`), off by default so
+# the standard build stays hermetic. Forwards to agent-tokenizer's own feature
+# (mirrors `prompt-sqlite`→`agent-prompt/prompt-sqlite`). See parity spec 23.
+tokenizer-tiktoken = ["tokenizer", "agent-tokenizer/tokenizer-tiktoken"]
 memory-file = ["agent-memory/memory-file"]
 dimensions = ["agent-memory/memory-dimensions"]
 # Prompt management seam (docs/design/portal): see + CRUD every prompt.

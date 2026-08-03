@@ -15,18 +15,30 @@ observable. See parity spec [`23-tokenizer-cost.md`](../parity/23-tokenizer-cost
   fields (Anthropic `cache_creation`/`cache_read_input_tokens`, OpenAI
   `prompt_tokens_details.cached_tokens`).
 - **Impl crate:** [`agent-tokenizer`](../../crates/agent-tokenizer).
-- **Shipped backend:** `approx` (`tokenizer-approx`) — a dependency-free,
-  deterministic, **Unicode-aware** segmenter: word runs cost `ceil(chars/4)`,
-  punctuation 1 each, whitespace 0, counted by `char` not byte. A real improvement
-  over the byte heuristic that ships no vocab and needs no network (so the default
-  build stays hermetic under Nix).
+- **Shipped backends:**
+  - `approx` (`tokenizer-approx`, the default) — a dependency-free, deterministic,
+    **Unicode-aware** segmenter: word runs cost `ceil(chars/4)`, punctuation 1
+    each, whitespace 0, counted by `char` not byte. A real improvement over the
+    byte heuristic that ships no vocab and needs no network (so the default build
+    stays hermetic under Nix). Model-agnostic — the same count for every model.
+  - `tiktoken` (`tokenizer-tiktoken`, **off by default**) — **exact** byte-pair
+    counts for the OpenAI model family via the offline [`tiktoken-rs`] crate, which
+    embeds the `cl100k_base` (GPT-4 / GPT-3.5) and `o200k_base` (GPT-4o / o-series /
+    GPT-5) merge ranks, so there is still **no vocab download**. A model tiktoken
+    ships no vocabulary for — including an unmapped or hostile `model` string —
+    falls back to `approx` inside the backend, so a bad model can never panic or
+    error. Counting uses `encode_ordinary`, which treats special-token strings in
+    untrusted text as ordinary bytes (a hostile prompt can't understate its size).
+    Enabled with the `tokenizer-tiktoken` runtime feature; executed in the gate by
+    `nix/checks/tokenizer-tiktoken.nix`.
 - **Price table:** `agent_tokenizer::PriceTable` (implements `agent_core::Prices`) —
   exact-then-longest-prefix model lookup; `builtin()` ships a small illustrative
   `$/MTok` set; an unknown model → zero-priced `CostStatus::Estimated`, never a
   panic.
 - **Runtime feature:** `tokenizer` (default) — registers the `approx` backend and
-  enables USD/cache recording in the loop.
-- **Config:** `[tokenizer] backend = "approx"`.
+  enables USD/cache recording in the loop. `tokenizer-tiktoken` adds the real BPE
+  backend on top (forwards to `agent-tokenizer/tokenizer-tiktoken`).
+- **Config:** `[tokenizer] backend = "approx"` (or `"tiktoken"` / `"grpc"`).
 - **Metrics:** `agent_cost_usd_total{model,kind}`,
   `agent_cache_tokens_total{model,kind}` (kind = read/write); the cache-hit ratio
   is derived in PromQL as `cache_read / (cache_read + input)`.
@@ -44,19 +56,21 @@ budgeting never hard-fails. Tests pin the crossover both ways: a window the
 heuristic thinks fits but the real count does not (→ a drop the heuristic skips),
 and the reverse.
 
-## Follow-ups (not in this PR)
+## Follow-ups
 
-- **Higher-fidelity backends** behind the seam: `tokenizer-tiktoken` (BPE),
-  `tokenizer-hf` (a model's `tokenizer.json`), and `tokenizer-provider` (Anthropic
-  `count_tokens`). The `approx` backend is the always-available default; these drop
-  in without touching callers.
-- **gRPC:** a `tokenizer.proto` (`Count`/`CountMessages`) + `--serve-tokenizer` +
-  reflection + `roundtrip.rs`, and extending `pb::Usage` to carry the cache/cost
-  fields over the wire (they default on the wire today).
+- **Remaining backend:** `tokenizer-hf` (a local model's `tokenizer.json`, for the
+  Qwen/GLM/Llama family this repo actually runs) lands next; `tokenizer-provider`
+  (Anthropic `count_tokens`, needs network + an API key so it is not hermetically
+  gate-testable) stays deferred. The `approx` backend is the always-available
+  default; both drop in behind the seam without touching callers.
 - **Config-loaded price table** on the agent (the loop builds `PriceTable::builtin()`
   today).
 
+(The gRPC transport — `tokenizer.proto` `Count`/`CountMessages`, `--serve-tokenizer`,
+reflection — already shipped; see "Over gRPC" below.)
+
 [`MESSAGE_TOKEN_OVERHEAD`]: ../../crates/agent-core/src/lib.rs
+[`tiktoken-rs`]: https://crates.io/crates/tiktoken-rs
 
 ## Over gRPC — one count for a fleet
 
