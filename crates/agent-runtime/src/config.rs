@@ -1170,24 +1170,45 @@ impl Default for SearchCfg {
 
 /// `[tokenizer]` — selects the [`agent_core::Tokenizer`] backend that counts tokens
 /// for compaction budgeting and cost accounting. `approx` (the default) is the
-/// dependency-free segmenter; `grpc` dials a remote tokenizer seam (follow-up).
-/// See parity spec 23 and `docs/components/tokenizer.md`.
+/// dependency-free segmenter; `tiktoken` is the real OpenAI-family BPE backend;
+/// `hf` counts with a local model's `tokenizer.json` (see [`HfCfg`]); `grpc` dials
+/// a remote tokenizer seam. See parity spec 23 and `docs/components/tokenizer.md`.
 #[derive(Debug, Deserialize)]
 pub struct TokenizerCfg {
     #[serde(default = "default_tokenizer")]
     pub backend: String,
+    /// Files for the `hf` backend; ignored by the other backends.
+    #[serde(default)]
+    pub hf: HfCfg,
 }
 
 impl Default for TokenizerCfg {
     fn default() -> Self {
         Self {
             backend: default_tokenizer(),
+            hf: HfCfg::default(),
         }
     }
 }
 
 fn default_tokenizer() -> String {
     "approx".to_string()
+}
+
+/// `[tokenizer.hf]` — HuggingFace `tokenizer.json` files for the `hf` backend
+/// (parity spec 23), for counting with the exact tokenizer of a local model
+/// (Qwen/GLM/Llama/…). `default` is used for any model without a more specific
+/// match; `models` maps a model-id **prefix** → its `tokenizer.json` path, and the
+/// longest matching prefix wins. A file that is missing, oversized, or unparseable
+/// is skipped (those models fall back to the `approx` heuristic), never fatal.
+#[derive(Debug, Default, Deserialize)]
+pub struct HfCfg {
+    /// Catch-all `tokenizer.json` used when no `models` prefix matches.
+    #[serde(default)]
+    pub default: Option<String>,
+    /// model-id prefix → `tokenizer.json` path (longest matching prefix wins).
+    #[serde(default)]
+    pub models: HashMap<String, String>,
 }
 
 impl SearchCfg {

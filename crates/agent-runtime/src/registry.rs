@@ -490,6 +490,23 @@ pub fn register_builtins(r: &mut Registry) {
     r.tokenizer("tiktoken", |_ctx| {
         Ok(Arc::new(agent_tokenizer::TiktokenTokenizer::new()?) as Arc<dyn agent_core::Tokenizer>)
     });
+    // Count with a local model's `tokenizer.json` (Qwen/GLM/Llama/…). Paths come
+    // from `[tokenizer.hf]`; a missing/oversized/unparseable file is skipped inside
+    // the backend and those models fall back to `approx`. See parity spec 23.
+    #[cfg(feature = "tokenizer-hf")]
+    r.tokenizer("hf", |ctx| {
+        let hf = &ctx.cfg.tokenizer.hf;
+        let mut files: Vec<(String, std::path::PathBuf)> = hf
+            .models
+            .iter()
+            .map(|(prefix, path)| (prefix.clone(), std::path::PathBuf::from(path)))
+            .collect();
+        // The catch-all default is keyed by the empty prefix (sorts last).
+        if let Some(default) = &hf.default {
+            files.push((String::new(), std::path::PathBuf::from(default)));
+        }
+        Ok(Arc::new(agent_tokenizer::HfTokenizer::new(&files)) as Arc<dyn agent_core::Tokenizer>)
+    });
     // One tokenizer for a fleet: identical counts everywhere, so budget and
     // compaction decisions stay consistent across agents.
     #[cfg(feature = "grpc")]

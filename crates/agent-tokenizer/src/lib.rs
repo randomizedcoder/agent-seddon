@@ -23,5 +23,10 @@ mod tiktoken;
 #[cfg(feature = "tokenizer-tiktoken")]
 pub use tiktoken::TiktokenTokenizer;
 
+#[cfg(feature = "tokenizer-hf")]
+mod hf;
+#[cfg(feature = "tokenizer-hf")]
+pub use hf::HfTokenizer;
+
 pub mod cost;
 pub use cost::PriceTable;

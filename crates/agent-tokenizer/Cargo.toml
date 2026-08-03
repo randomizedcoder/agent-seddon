@@ -17,6 +17,10 @@ tokenizer-approx = []
 # dependency-free; a model tiktoken has no vocab for falls back to `approx`.
 # Executed in the gate by `nix/checks/tokenizer-tiktoken.nix`.
 tokenizer-tiktoken = ["tokenizer-approx", "dep:tiktoken-rs"]
+# Exact counts from a local model's `tokenizer.json` (Qwen/GLM/Llama/…) via the
+# HuggingFace `tokenizers` crate. Off by default; a model with no configured/loadable
+# file falls back to `approx`. Executed in the gate by `nix/checks/tokenizer-hf.nix`.
+tokenizer-hf = ["tokenizer-approx", "dep:tokenizers"]
 # Injects a dhat global allocator for the allocation-budget leak test only; never
 # in a normal build. Mirrors the other crates' `dhat-heap` gate.
 dhat-heap = ["dep:dhat"]
@@ -25,6 +29,8 @@ dhat-heap = ["dep:dhat"]
 agent-core.workspace = true
 async-trait.workspace = true
 tiktoken-rs = { workspace = true, optional = true }
+tokenizers = { workspace = true, optional = true }
+tracing.workspace = true
 dhat = { workspace = true, optional = true }
 
 [dev-dependencies]
