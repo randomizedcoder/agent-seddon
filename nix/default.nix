@@ -265,6 +265,36 @@ let
   # Refresh the provider cassettes replayed by the hermetic `vcr_matrix` test from a
   # real endpoint (opt-in; writes response bodies only, never a secret).
   vcr-record = import ./vcr-record.nix { inherit pkgs; };
+
+  # `nix run .#integration` — run the whole opt-in integration tier in one shot
+  # (the model-free harnesses always, the model tier when AGENT_E2E_* is reachable),
+  # orchestrating the apps below as black boxes on the shared 0/1/2 contract.
+  integration = import ./integration.nix {
+    inherit
+      pkgs
+      lib
+      loadtest
+      loadtest-loop
+      loadtest-wire
+      serve-smoke
+      e2e-live
+      e2e-expect
+      e2e-multi
+      ;
+    inherit (nixLib) harness;
+  };
+
+  # `nix run .#soak` — loop each model-free load harness for ~1h (SOAK_DURATION).
+  soak = import ./soak.nix {
+    inherit
+      pkgs
+      lib
+      loadtest
+      loadtest-loop
+      loadtest-wire
+      ;
+    inherit (nixLib) harness;
+  };
 in
 {
   packages = {
@@ -298,6 +328,8 @@ in
         loadtest-wire
         serve-smoke
         vcr-record
+        integration
+        soak
         ;
     }
     // mkApps { clickhouse-client = "clickhouse-client-wrapper"; } clickhouse
