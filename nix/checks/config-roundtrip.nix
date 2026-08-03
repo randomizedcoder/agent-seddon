@@ -1,0 +1,139 @@
+# nix/checks/config-roundtrip.nix
+#
+# Config-roundtrip coverage (mirrors hermes' `nix/checks.nix` config-roundtrip):
+# feed representative `agent.toml` fixtures through the REAL loader via
+# `agent --check-config` — which parses the config and BUILDS the agent, so every
+# selected seam impl must resolve to a registered factory — then assert the printed
+# selections, and that a broken config fails closed.
+#
+# `--check-config` is a dry run: it prints the chosen impls and exits 0 before any
+# model call, socket, or REPL. So this runs fully offline in the hermetic
+# `nix flake check` sandbox with just `agent`. It catches config-schema drift (a
+# renamed field, a selector with no factory) that no in-process test sees, because
+# only the shipped binary wires config → registry → agent.
+{
+  pkgs,
+  agent,
+}:
+pkgs.runCommand "agent-config-roundtrip"
+  {
+    nativeBuildInputs = [
+      agent
+      pkgs.coreutils
+    ];
+  }
+  ''
+    export HOME="$(mktemp -d)"
+    work="$HOME/work"
+    mkdir -p "$work"
+
+    # A config that must load AND build, then match the expected selections.
+    # $1 = fixture name, $2 = file, rest = "key = value" substrings to require.
+    expect_ok() {
+      local name="$1" cfg="$2"; shift 2
+      local out
+      if ! out="$(agent --config "$cfg" --check-config 2>"$HOME/$name.err")"; then
+        echo "FAIL($name): a valid config must check clean; stderr:" >&2
+        cat "$HOME/$name.err" >&2
+        exit 1
+      fi
+      echo "--- $name ---"; echo "$out"
+      for want in "$@"; do
+        case "$out" in
+          *"$want"*) : ;;
+          *) echo "FAIL($name): expected '$want' in the selections, got:" >&2
+             echo "$out" >&2; exit 1 ;;
+        esac
+      done
+    }
+
+    # A config that must FAIL closed (nonzero, no selections banner).
+    expect_fail() {
+      local name="$1" cfg="$2"
+      if agent --config "$cfg" --check-config >"$HOME/$name.out" 2>&1; then
+        echo "FAIL($name): a broken config must not check clean:" >&2
+        cat "$HOME/$name.out" >&2
+        exit 1
+      fi
+      echo "--- $name (correctly rejected) ---"
+    }
+
+    # 1) The shipped default shape: openai-compat provider, file memory.
+    cat > "$HOME/default.toml" <<TOML
+    [agent]
+    provider    = "openai-compat"
+    context     = "sliding-window"
+    policy      = "auto-approve"
+    working_dir = "$work"
+    [provider]
+    base_url = "http://127.0.0.1:1/v1"
+    model    = "none"
+    api_key  = "none"
+    [memory]
+    backend = "file"
+    [tools]
+    enabled = ["read_file", "write_file", "ls"]
+    [metrics]
+    enabled = false
+    [search]
+    auto_index = false
+    [git]
+    auto_fetch_secs = 0
+    TOML
+    expect_ok default "$HOME/default.toml" \
+      "config: OK" \
+      "provider  = openai-compat" \
+      "policy    = auto-approve" \
+      "memory    = file" \
+      "tokenizer = approx" \
+      "tools     = 3 enabled"
+
+    # 2) A different provider must select a different impl — both are built into the
+    #    default feature set, so swapping is a one-line config change.
+    cat > "$HOME/anthropic.toml" <<TOML
+    [agent]
+    provider    = "anthropic"
+    policy      = "auto-approve"
+    working_dir = "$work"
+    [provider]
+    model   = "claude-haiku-4-5"
+    api_key = "none"
+    [memory]
+    backend = "file"
+    [metrics]
+    enabled = false
+    [search]
+    auto_index = false
+    [git]
+    auto_fetch_secs = 0
+    TOML
+    expect_ok anthropic "$HOME/anthropic.toml" \
+      "config: OK" \
+      "provider  = anthropic"
+
+    # 3) Adversarial: a selector with no factory must fail at build, not silently
+    #    fall back to a default.
+    cat > "$HOME/bad-provider.toml" <<TOML
+    [agent]
+    provider    = "does-not-exist"
+    policy      = "auto-approve"
+    working_dir = "$work"
+    [provider]
+    base_url = "http://127.0.0.1:1/v1"
+    model    = "none"
+    api_key  = "none"
+    [metrics]
+    enabled = false
+    [search]
+    auto_index = false
+    [git]
+    auto_fetch_secs = 0
+    TOML
+    expect_fail bad-provider "$HOME/bad-provider.toml"
+
+    # 4) Adversarial: malformed TOML must be a hard parse failure.
+    printf '[agent\nprovider = "openai-compat"\n' > "$HOME/broken.toml"
+    expect_fail broken "$HOME/broken.toml"
+
+    echo "OK: representative configs load, build, and select the right impls; broken ones fail closed" > "$out"
+  ''

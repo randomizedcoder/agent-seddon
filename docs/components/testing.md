@@ -70,6 +70,20 @@ the end-to-end behaviour. Faults that tiny_http can't express (a real reset, a t
 chunked stream) use a small raw-`TcpListener` `FaultServer` in
 [`agent-cli/tests/common/mod.rs`](../../crates/agent-cli/tests/common/mod.rs).
 
+Two offline `nix flake check` gates smoke-test the shipped binary's *surface* rather
+than its loop:
+
+- **`cli-help`** ([`nix/checks/cli-help.nix`](../../nix/checks/cli-help.nix)) — `agent
+  --help` must stay runnable and keep advertising the full serve interface
+  (`--serve-mcp`/`--serve-all`/`--serve-sessions`/`--serve-<seam>`/`--check-config`
+  and the per-seam list). Catches a `--help` regression or a seam dropped from the CLI.
+- **`config-roundtrip`** ([`nix/checks/config-roundtrip.nix`](../../nix/checks/config-roundtrip.nix))
+  — representative `agent.toml` fixtures are loaded *and built* through the real
+  binary via **`agent --check-config`** (a dry run that resolves every selected seam
+  impl, prints the selections, and exits before any model call), and a malformed /
+  unknown-backend config must fail closed. Catches config-schema drift no in-process
+  test sees.
+
 ## Coverage
 
 Source-based test coverage via [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov)

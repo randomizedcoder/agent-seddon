@@ -143,6 +143,21 @@ async fn main() -> Result<()> {
 
     let sessions_dir = session_store::default_dir();
     tracing::info!(session_id = %session_id, "starting agent");
+
+    // `--check-config`: capture the selected impls before `config` is consumed by
+    // the builder, so we can report them once the build proves every selector
+    // resolves to a registered factory.
+    let check_config = matches!(mode, Mode::CheckConfig);
+    let selections = check_config.then(|| ConfigSelections {
+        provider: config.agent.provider.clone(),
+        context: config.agent.context.clone(),
+        policy: config.agent.policy.clone(),
+        memory: config.memory.backend.clone(),
+        tokenizer: config.tokenizer.backend.clone(),
+        search: config.search.backend_names().join(","),
+        tools: config.tools.enabled.len(),
+    });
+
     let agent = agent_runtime::build_agent(
         config,
         telemetry.clone(),
@@ -151,6 +166,21 @@ async fn main() -> Result<()> {
     )
     .await
     .context("building agent")?;
+
+    // A validated config is the whole job for `--check-config`: the build above
+    // resolved every seam, so print the selections and exit before running.
+    if check_config {
+        let s = selections.expect("selections are captured whenever check_config is set");
+        println!("config: OK ({})", config_path.display());
+        println!("  provider  = {}", s.provider);
+        println!("  context   = {}", s.context);
+        println!("  policy    = {}", s.policy);
+        println!("  memory    = {}", s.memory);
+        println!("  tokenizer = {}", s.tokenizer);
+        println!("  search    = {}", s.search);
+        println!("  tools     = {} enabled", s.tools);
+        return Ok(());
+    }
 
     // Resolve an optional resume target to (id, transcript).
     let resumed = resolve_resume(&resume, &sessions_dir);
@@ -299,6 +329,9 @@ async fn main() -> Result<()> {
                     .await
                     .map(|()| None)
             }
+            // Handled before the run: the build above validated the config and we
+            // already returned.
+            Mode::CheckConfig => unreachable!("--check-config returns before the run"),
         }
     })
     .await;
@@ -436,6 +469,23 @@ enum Mode {
     /// "<prompt>"`). A thin, offline debug surface for the general mode detector —
     /// the deterministic prefilter needs no model. See docs/design/adaptive-cognition/.
     Detect(String),
+    /// Validate the config end to end without running (`agent --check-config`):
+    /// load it through the real loader, build the agent so every selected seam impl
+    /// must resolve, print the chosen impls, and exit 0. A dry run for CI /
+    /// operators — no model, no network. Backs the `config-roundtrip` check.
+    CheckConfig,
+}
+
+/// The seam impls a config selects — captured before `Config` is consumed by the
+/// builder, then printed by `--check-config` once the build proves they resolve.
+struct ConfigSelections {
+    provider: String,
+    context: String,
+    policy: String,
+    memory: String,
+    tokenizer: String,
+    search: String,
+    tools: usize,
 }
 
 /// Parse a `--review` target: `<base>..<head>` ⇒ an explicit revision range;
@@ -484,6 +534,7 @@ fn parse_args() -> Result<Args> {
     let mut review_target: Option<String> = None;
     let mut review_gate = false;
     let mut detect_mode_prompt: Option<String> = None;
+    let mut check_config = false;
     let mut goal_parts: Vec<String> = Vec::new();
 
     let mut args = std::env::args().skip(1);
@@ -500,6 +551,7 @@ fn parse_args() -> Result<Args> {
                 ));
             }
             "--scheduler" => scheduler_mode = true,
+            "--check-config" => check_config = true,
             "--serve-mcp" => serve_mcp = true,
             "--serve-all" => serve_grpc_all = true,
             "--serve-sessions" => serve_sessions = true,
@@ -533,6 +585,7 @@ fn parse_args() -> Result<Args> {
                      --review TARGET     collect + print grounded review facts (TARGET = PR#, branch, or `.`)\n  \
                      --gate              with --review: exit non-zero if risk ≥ the configured threshold\n  \
                      --detect-mode P     classify prompt P's task mode and print the verdict\n  \
+                     --check-config      load + validate the config, print the selected impls, and exit\n  \
                      --serve-mcp         run as an MCP server over stdio (exposes a `run` tool)\n  \
                      --serve-<seam>      host one seam over gRPC; <seam> = {seams}\n  \
                      --serve-all         host every enabled seam over gRPC from one process\n  \
@@ -547,7 +600,9 @@ fn parse_args() -> Result<Args> {
     }
 
     let goal = goal_parts.join(" ");
-    let mode = if scheduler_mode {
+    let mode = if check_config {
+        Mode::CheckConfig
+    } else if scheduler_mode {
         Mode::Scheduler
     } else if serve_grpc_all {
         Mode::ServeGrpcAll(listen)
