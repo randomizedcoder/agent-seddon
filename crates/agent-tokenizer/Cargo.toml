@@ -16,7 +16,7 @@ tokenizer-approx = []
 # `cl100k_base`/`o200k_base` ranks). Off by default so `nix build .#agent` stays
 # dependency-free; a model tiktoken has no vocab for falls back to `approx`.
 # Executed in the gate by `nix/checks/tokenizer-tiktoken.nix`.
-tokenizer-tiktoken = ["tokenizer-approx", "dep:tiktoken-rs"]
+tokenizer-tiktoken = ["tokenizer-approx", "dep:tiktoken-rs", "dep:rayon"]
 # Exact counts from a local model's `tokenizer.json` (Qwen/GLM/Llama/…) via the
 # HuggingFace `tokenizers` crate. Off by default; a model with no configured/loadable
 # file falls back to `approx`. Executed in the gate by `nix/checks/tokenizer-hf.nix`.
@@ -30,6 +30,7 @@ agent-core.workspace = true
 async-trait.workspace = true
 tiktoken-rs = { workspace = true, optional = true }
 tokenizers = { workspace = true, optional = true }
+rayon = { workspace = true, optional = true }
 tracing.workspace = true
 dhat = { workspace = true, optional = true }
 

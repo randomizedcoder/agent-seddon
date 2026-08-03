@@ -127,6 +127,10 @@ tiktoken-rs = "0.6"
 # regex path) + the progress bar, keeping the build hermetic and offline: no
 # model download, the vocab is a local file the operator points at. See spec 23.
 tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
+# Data-parallelism for the tiktoken backend's batch counting (independent inputs),
+# threshold-gated so small batches stay sequential. Already in-tree transitively via
+# `tokenizers`; declared here so the `tokenizer-tiktoken` feature can use it directly.
+rayon = "1"
 
 # telemetry / ClickHouse (native protocol, port 9000)
 klickhouse = "0.13"

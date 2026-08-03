@@ -523,6 +523,7 @@ dependencies = [
  "async-trait",
  "dhat",
  "iai-callgrind",
+ "rayon",
  "rstest",
  "serde_json",
  "tiktoken-rs",
