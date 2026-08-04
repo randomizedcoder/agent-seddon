@@ -56,9 +56,34 @@ impl Embedder for LocalEmbedder {
         Ok(self.embed_one(text))
     }
     async fn embed_docs(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        Ok(texts.iter().map(|t| self.embed_one(t)).collect())
+        Ok(self.embed_batch(texts))
     }
 }
+
+impl LocalEmbedder {
+    /// Embed each of `texts`, one vector per input in order. The per-document
+    /// feature hashing is independent, so above a work threshold the batch runs in
+    /// parallel across rayon's pool (this is the corpus-indexing hot path — the
+    /// vector backend calls it once per `max_batch` chunk); below it, the
+    /// dispatch/join overhead outweighs the gain, so it stays sequential. The
+    /// result is **identical either way** (`map` preserves order and `embed_one` is
+    /// deterministic) — only the wall-clock changes.
+    fn embed_batch(&self, texts: &[String]) -> Vec<Vec<f32>> {
+        let total_bytes: usize = texts.iter().map(String::len).sum();
+        if texts.len() >= PAR_MIN_ITEMS && total_bytes >= PAR_MIN_BYTES {
+            use rayon::prelude::*;
+            texts.par_iter().map(|t| self.embed_one(t)).collect()
+        } else {
+            texts.iter().map(|t| self.embed_one(t)).collect()
+        }
+    }
+}
+
+/// Fan out to rayon only once a batch is big enough to repay the ~µs dispatch/join
+/// cost: at least this many documents AND this many total bytes. The vectors are
+/// identical at any threshold, so tuning it trades only latency, never output.
+const PAR_MIN_ITEMS: usize = 8;
+const PAR_MIN_BYTES: usize = 8 * 1024;
 
 /// Add a **signed** feature (the hash's high bit picks the sign, reducing the
 /// collision bias of unsigned feature hashing).
@@ -134,5 +159,50 @@ mod tests {
     #[tokio::test]
     async fn dims_clamped_to_minimum() {
         assert_eq!(LocalEmbedder::new(1).dimensions(), 16);
+    }
+
+    // --- parallel batch is identical to sequential, on BOTH paths ----------
+    // The parallel path must be a pure optimisation: same vectors, same order.
+    // Below the threshold it stays sequential; above it fans out to rayon.
+    #[rstest::rstest]
+    #[case::sequential_small(3)]
+    #[case::parallel_large(200)]
+    fn embed_batch_matches_sequential(#[case] n: usize) {
+        let e = LocalEmbedder::new(128);
+        // Distinct, non-trivial docs (≥ the byte floor once n is large).
+        let docs: Vec<String> = (0..n)
+            .map(|i| format!("document number {i} about retry backoff and json parsing"))
+            .collect();
+        let batched = e.embed_batch(&docs);
+        let seq: Vec<Vec<f32>> = docs.iter().map(|t| e.embed_one(t)).collect();
+        assert_eq!(batched, seq, "parallel batch must equal per-doc (n={n})");
+    }
+
+    // Manual wall-clock probe (not gated — the iai/valgrind gate serialises
+    // threads). Run: `cargo test -p agent-embed -- --ignored --nocapture wallclock`.
+    #[ignore = "manual wall-clock probe; run with --ignored --nocapture"]
+    #[test]
+    fn wallclock_seq_vs_par() {
+        let e = LocalEmbedder::new(256);
+        // 4000 docs × ~1 KiB — the shape of indexing a sizeable corpus.
+        let docs: Vec<String> = (0..4000)
+            .map(|i| format!("chunk {i}: ").repeat(64) + "retry backoff json parse config")
+            .collect();
+
+        let t0 = std::time::Instant::now();
+        let seq: Vec<Vec<f32>> = docs.iter().map(|t| e.embed_one(t)).collect();
+        let seq_ms = t0.elapsed().as_secs_f64() * 1e3;
+
+        let t1 = std::time::Instant::now();
+        let par = e.embed_batch(&docs);
+        let par_ms = t1.elapsed().as_secs_f64() * 1e3;
+
+        assert_eq!(seq, par);
+        println!(
+            "embed batch of {} ({} KiB): sequential {seq_ms:.1} ms, parallel {par_ms:.1} ms, speedup {:.2}x",
+            docs.len(),
+            docs.iter().map(String::len).sum::<usize>() / 1024,
+            seq_ms / par_ms,
+        );
     }
 }

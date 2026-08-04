@@ -24,6 +24,16 @@ metrics are all inherited.
   (token + morphological overlap) it's a real swap-in default; true semantic models
   (`text-embedding-3-small`, a local BERT) drop in behind the same seam as the
   `embed-openai` / `embed-grpc` follow-ups.
+- **Parallel batch embedding:** `embed_docs` — the index-time hot path, called once
+  per `max_batch` chunk — hashes each document independently, so above a work
+  threshold (≥ 8 docs **and** ≥ 8 KiB total) it embeds the batch in parallel across
+  `rayon`; a smaller batch stays sequential. The vectors are **identical either
+  way** (order-preserving, deterministic) — only the wall-clock changes, and it
+  scales with corpus size: ~11× faster on a ~3 MiB batch (24 cores). The gRPC /
+  future API backends batch at the wire and don't use this. (Same pattern as the
+  tokenizer's parallel `count_batch`; the iai gate serialises threads and can't
+  measure it, so tests guard the equivalence and the speedup is a manual
+  `--ignored` probe.)
 - **Vector backend:** `agent_search::VectorBackend` (`search-vector`) — a
   `SearchBackend` that embeds each file and answers a `SearchMode::Semantic` query
   by **exact** brute-force cosine (deterministic, fine for repo-sized corpora; an
