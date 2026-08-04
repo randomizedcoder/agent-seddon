@@ -36,6 +36,12 @@ use tokio::sync::Mutex;
 const WRITER_HEAP_BYTES: usize = 100_000_000;
 /// Cap a hit's snippet so results stay compact in the model's context.
 const SNIPPET_MAX: usize = 200;
+/// Files whose contents are read in parallel per reindex batch. Bounds peak memory
+/// (only one batch is held at once) while keeping tantivy's indexing threads fed.
+const REINDEX_READ_BATCH: usize = 64;
+/// Below this many files in a batch, read sequentially — rayon's dispatch/join
+/// cost wouldn't be repaid. Counts/index contents are identical either way.
+const REINDEX_PAR_MIN: usize = 8;
 
 /// The three indexed fields (all `Copy`).
 #[derive(Clone, Copy)]
@@ -215,24 +221,49 @@ impl TantivyBackend {
         }
 
         let total = upserts.len() as u64;
-        for (i, id) in upserts.iter().enumerate() {
-            let id_str = id.to_string_lossy().to_string();
-            // Delete-then-add makes the upsert idempotent (incremental update).
-            writer.delete_term(Term::from_field_text(self.fields.path, &id_str));
-            if let Some(rendered) = self.source.load(id) {
-                writer
-                    .add_document(doc!(
-                        self.fields.path => id_str,
-                        self.fields.content => rendered.text,
-                        self.fields.lang => rendered.lang,
-                    ))
-                    .map_err(se)?;
+        // tantivy's `IndexWriter` already parallelises the actual indexing across
+        // its own threads, so the bottleneck was the *serial* per-file read
+        // (`source.load` → a blocking `read_to_string`) that starved those threads.
+        // Read each batch's files in parallel (independent I/O) and then feed the
+        // writer sequentially. Batching bounds peak memory (only one batch of file
+        // contents is held at once — the old code held one file); a small batch is
+        // read sequentially since rayon's dispatch wouldn't repay. The set of
+        // documents indexed — and therefore every query result — is unchanged.
+        let source = self.source.clone();
+        let mut done: u64 = 0;
+        for batch in upserts.chunks(REINDEX_READ_BATCH) {
+            let loaded: Vec<(String, Option<crate::source::SourceDoc>)> =
+                if batch.len() >= REINDEX_PAR_MIN {
+                    use rayon::prelude::*;
+                    batch
+                        .par_iter()
+                        .map(|id| (id.to_string_lossy().into_owned(), source.load(id)))
+                        .collect()
+                } else {
+                    batch
+                        .iter()
+                        .map(|id| (id.to_string_lossy().into_owned(), source.load(id)))
+                        .collect()
+                };
+            for (id_str, rendered) in loaded {
+                // Delete-then-add makes the upsert idempotent (incremental update).
+                writer.delete_term(Term::from_field_text(self.fields.path, &id_str));
+                if let Some(rendered) = rendered {
+                    writer
+                        .add_document(doc!(
+                            self.fields.path => id_str,
+                            self.fields.content => rendered.text,
+                            self.fields.lang => rendered.lang,
+                        ))
+                        .map_err(se)?;
+                }
+                done += 1;
+                progress(agent_core::ReindexProgress {
+                    files_done: done,
+                    files_total: total,
+                    done: false,
+                });
             }
-            progress(agent_core::ReindexProgress {
-                files_done: (i + 1) as u64,
-                files_total: total,
-                done: false,
-            });
         }
         for rel in &deletes {
             writer.delete_term(Term::from_field_text(
@@ -721,6 +752,44 @@ mod tests {
             !hits.iter().any(|h| h.path.to_string_lossy() == "s_other"),
             "the non-matching session must not appear"
         );
+    }
+
+    // A corpus larger than REINDEX_PAR_MIN exercises the parallel batched-read path.
+    // Every document must still be indexed exactly once and be queryable — the
+    // parallel reads are a pure optimisation over the sequential loop.
+    #[tokio::test]
+    async fn parallel_reindex_indexes_every_document() {
+        let dir = tempdir();
+        // 40 docs (> REINDEX_PAR_MIN = 8) so the rayon path runs; each carries a
+        // unique term so we can prove all were indexed.
+        let docs: Vec<(String, String)> = (0..40)
+            .map(|i| (format!("doc_{i}"), format!("alpha uniqueterm{i} omega")))
+            .collect();
+        let backend = TantivyBackend::open_with_source(
+            Arc::new(MemSource { docs: docs.clone() }),
+            dir.join("idx"),
+        )
+        .unwrap();
+        backend.reindex(&|_p| {}).await.unwrap();
+
+        // Every unique term resolves to exactly its document.
+        for (id, _) in &docs {
+            let i = id.strip_prefix("doc_").unwrap();
+            let hits = backend
+                .query(&query(&format!("uniqueterm{i}"), SearchMode::Literal))
+                .await
+                .unwrap();
+            assert!(
+                hits.iter().any(|h| h.path.to_string_lossy() == id.as_str()),
+                "doc {id} missing from the parallel-reindexed corpus"
+            );
+        }
+        // A shared term returns all 40 (nothing dropped or duplicated into one).
+        // Use a limit above the corpus size so the count isn't clipped by top-K.
+        let mut all_q = query("alpha", SearchMode::Literal);
+        all_q.limit = 100;
+        let all = backend.query(&all_q).await.unwrap();
+        assert_eq!(all.len(), 40, "every doc should match the shared term once");
     }
 
     // --- pure helpers ------------------------------------------------------

@@ -9,8 +9,9 @@ license.workspace = true
 # Tantivy is the default (and, for now, only) backend. A DeepSearch backend is
 # reserved behind `search-deepsearch` for a follow-up (see docs/components/search.md).
 default = ["search-tantivy", "search-vector"]
-# Full-text code search via the tantivy library (on-disk inverted index).
-search-tantivy = ["dep:tantivy"]
+# Full-text code search via the tantivy library (on-disk inverted index). `rayon`
+# reads a reindex batch's files in parallel to keep tantivy's indexing threads fed.
+search-tantivy = ["dep:tantivy", "dep:rayon"]
 # Semantic (embeddings) code search: a brute-force exact-cosine vector backend
 # over the Embedder seam. Dependency-free (reuses agent-core cosine + the shared
 # Manifest). See parity spec 15 + docs/components/embedder.md.
@@ -28,6 +29,8 @@ tokio.workspace = true
 # regex-mode queries and glob→regex path filtering.
 ignore.workspace = true
 regex.workspace = true
+# Parallel per-file reads during a tantivy reindex batch (only under `search-tantivy`).
+rayon = { workspace = true, optional = true }
 # Optional heap profiler for tests/leak.rs (only under the `dhat-heap` feature).
 dhat = { workspace = true, optional = true }
 
