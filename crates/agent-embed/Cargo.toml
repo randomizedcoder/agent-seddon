@@ -17,13 +17,17 @@ ignored = ["dhat"]
 # are follow-ups so the default build stays hermetic (no model/network). See
 # docs/components/embedder.md and parity spec 15.
 default = ["embed-local"]
-embed-local = []
+# The local feature-hashing embedder; `rayon` lets it embed a large document
+# batch in parallel (independent per-doc work), threshold-gated so small batches
+# stay sequential.
+embed-local = ["dep:rayon"]
 # Injects a dhat global allocator for the allocation-budget leak test only.
 dhat-heap = ["dep:dhat"]
 
 [dependencies]
 agent-core.workspace = true
 async-trait.workspace = true
+rayon = { workspace = true, optional = true }
 dhat = { workspace = true, optional = true }
 
 [dev-dependencies]
