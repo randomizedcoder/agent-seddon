@@ -153,11 +153,22 @@ auto_index   = true
 #                `tokenizer-tiktoken` feature. Unknown models fall back to approx.
 #   "hf"       — a local model's tokenizer.json (Qwen/GLM/Llama); build with the
 #                `tokenizer-hf` feature and set [tokenizer.hf] below.
+#   "provider" — count via a provider's messages/count_tokens endpoint (network +
+#                key); build with `tokenizer-provider` and set [tokenizer.provider].
 #   "grpc"     — dial a remote tokenizer seam (see [grpc.tokenizer]); one count for
 #                a fleet.
 # See docs/components/tokenizer.md.
 [tokenizer]
 backend = "approx"
+
+# For backend = "provider": an Anthropic-style count-tokens endpoint. The key is
+# read from `api_key_env` (preferred) or `api_key`; it never appears in a result,
+# error, or log. On any failure the agent falls back to the heuristic.
+# [tokenizer.provider]
+# base_url    = "https://api.anthropic.com/v1"
+# api_key_env = "ANTHROPIC_API_KEY"
+# version     = "2023-06-01"
+# timeout_secs = 30
 
 # For backend = "hf": a catch-all `default` tokenizer.json plus optional per-model
 # overrides keyed by model-id PREFIX (longest match wins). A file that is missing,

@@ -28,5 +28,10 @@ mod hf;
 #[cfg(feature = "tokenizer-hf")]
 pub use hf::HfTokenizer;
 
+#[cfg(feature = "tokenizer-provider")]
+mod provider;
+#[cfg(feature = "tokenizer-provider")]
+pub use provider::ProviderTokenizer;
+
 pub mod cost;
 pub use cost::PriceTable;

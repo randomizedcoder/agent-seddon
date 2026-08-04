@@ -38,9 +38,14 @@ metrics and fed back into `ContextStrategy` compaction.
 > now gathers the whole history's text fields into one call, and the real backends
 > tokenize them **in parallel** above a size threshold (`tiktoken` via rayon, `hf`
 > via `encode_batch`) — identical counts, ~12× faster on a large context.
-> **Deferred (sole tail):** the `provider` count-tokens backend (e.g. Anthropic
-> `/messages/count_tokens`) — it needs network + an API key, so it is not
-> hermetically gate-testable; the seam accepts it unchanged when added.
+> The **`provider`** backend then landed too: it counts via a provider's
+> Anthropic-style `messages/count_tokens` endpoint (network + key at runtime),
+> gate-tested against a `tiny_http` loopback server — the key never leaks into a
+> result/error/log, a hostile count is clamped, and any failure falls back to the
+> heuristic. **All backends are now shipped** (`approx`/`tiktoken`/`hf`/`provider`
+> + the `grpc` client); no backend tail remains. Residual refinements only: a
+> config-loaded price table, and exact multimodal fidelity for the `provider`
+> backend (it counts media via `media_block_tokens` on top of a text-only call).
 
 ## Feature & why it matters
 

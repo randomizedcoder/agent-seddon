@@ -52,6 +52,10 @@ in
   # default). Counts with a local model's `tokenizer.json` via the HuggingFace
   # `tokenizers` crate; offline (tiny fixture vocab). Parity spec 23.
   tokenizer-hf = craneCheck ./tokenizer-hf.nix { inherit cargoArtifacts; };
+  # Executes the `provider` tokenizer backend's tests (feature `tokenizer-provider`,
+  # off by default) against a tiny_http loopback server — hermetic, no real endpoint.
+  # Covers auth-header, response clamping, and the key/body no-leak error path.
+  tokenizer-provider = craneCheck ./tokenizer-provider.nix { inherit cargoArtifacts; };
   # Deterministic perf gate (iai-callgrind under valgrind, absolute Ir ceilings)
   # + heap leak/allocation-budget gate (dhat). See docs/components/benchmarking.md.
   bench = craneCheck ./bench.nix { inherit cargoArtifacts versions; };

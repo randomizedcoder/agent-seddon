@@ -41,6 +41,15 @@ observable. See parity spec [`23-tokenizer-cost.md`](../parity/23-tokenizer-cost
     skipped** with a warning and those models fall back to `approx`, so a bad path
     or hostile `model` string is never fatal. Executed in the gate by
     `nix/checks/tokenizer-hf.nix` (a tiny WordLevel fixture vocab, fully offline).
+  - `provider` (`tokenizer-provider`, **off by default**) — the most authoritative
+    count for a hosted model: POSTs to a provider's Anthropic-style
+    `…/messages/count_tokens` endpoint and reads `input_tokens`. Needs **network + an
+    API key** at runtime (from `[tokenizer.provider]`; key inline or `api_key_env`,
+    never logged/returned). Fails closed without a key; on any request/HTTP/parse
+    failure it returns `Err` and the caller falls back to the heuristic (a count is
+    never fabricated); a hostile `input_tokens` is clamped to `u32`, the response is
+    size-capped, and the client is timeout-bounded. Gate-tested against a `tiny_http`
+    loopback server (`nix/checks/tokenizer-provider.nix`) — never the real endpoint.
 - **Price table:** `agent_tokenizer::PriceTable` (implements `agent_core::Prices`) —
   exact-then-longest-prefix model lookup; `builtin()` ships a small illustrative
   `$/MTok` set; an unknown model → zero-priced `CostStatus::Estimated`, never a
@@ -50,7 +59,9 @@ observable. See parity spec [`23-tokenizer-cost.md`](../parity/23-tokenizer-cost
   add the real backends on top (each forwards to the matching `agent-tokenizer`
   feature).
 - **Config:** `[tokenizer] backend = "approx"` (or `"tiktoken"` / `"hf"` /
-  `"grpc"`); `hf` also reads `[tokenizer.hf]` (`default` + `models` prefix→path).
+  `"provider"` / `"grpc"`); `hf` reads `[tokenizer.hf]` (`default` + `models`
+  prefix→path), `provider` reads `[tokenizer.provider]` (`base_url` + `api_key` /
+  `api_key_env`).
 - **Metrics:** `agent_cost_usd_total{model,kind}`,
   `agent_cache_tokens_total{model,kind}` (kind = read/write); the cache-hit ratio
   is derived in PromQL as `cache_read / (cache_read + input)`.
@@ -98,12 +109,13 @@ and the reverse.
 
 ## Follow-ups
 
-- **Remaining backend:** `tokenizer-provider` (Anthropic `count_tokens`) — needs
-  network + an API key, so it is not hermetically gate-testable; it stays deferred.
-  The `approx` backend is the always-available default; a provider backend would
-  drop in behind the seam without touching callers.
+- **All backends shipped** — `approx` (default), `tiktoken`, `hf`, `provider`, and
+  the `grpc` client. No backend tail remains.
 - **Config-loaded price table** on the agent (the loop builds `PriceTable::builtin()`
   today).
+- **`provider` fidelity:** `count_messages` sends a text-flattened message array and
+  adds `media_block_tokens` for media (the endpoint sees text only); a future
+  refinement could send image/document blocks for an exact multimodal count.
 
 (The gRPC transport — `tokenizer.proto` `Count`/`CountMessages`, `--serve-tokenizer`,
 reflection — already shipped; see "Over gRPC" below.)

@@ -21,6 +21,10 @@ tokenizer-tiktoken = ["tokenizer-approx", "dep:tiktoken-rs", "dep:rayon"]
 # HuggingFace `tokenizers` crate. Off by default; a model with no configured/loadable
 # file falls back to `approx`. Executed in the gate by `nix/checks/tokenizer-hf.nix`.
 tokenizer-hf = ["tokenizer-approx", "dep:tokenizers"]
+# Counts via a provider's `messages/count_tokens` endpoint (Anthropic-style). Needs
+# network + an API key at runtime; off by default and gate-tested against a loopback
+# server (tests/provider_e2e.rs), never the real endpoint. See parity spec 23.
+tokenizer-provider = ["tokenizer-approx", "dep:reqwest", "dep:serde_json"]
 # Injects a dhat global allocator for the allocation-budget leak test only; never
 # in a normal build. Mirrors the other crates' `dhat-heap` gate.
 dhat-heap = ["dep:dhat"]
@@ -31,6 +35,8 @@ async-trait.workspace = true
 tiktoken-rs = { workspace = true, optional = true }
 tokenizers = { workspace = true, optional = true }
 rayon = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 tracing.workspace = true
 dhat = { workspace = true, optional = true }
 
@@ -40,6 +46,7 @@ rstest.workspace = true
 serde_json.workspace = true
 agent-testkit.workspace = true
 iai-callgrind.workspace = true
+tiny_http.workspace = true
 
 # Guards the CPU hot path — `count_text` runs inside the compaction loop and per
 # turn on the assembled prompt.

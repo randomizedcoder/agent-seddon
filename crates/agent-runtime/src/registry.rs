@@ -507,6 +507,20 @@ pub fn register_builtins(r: &mut Registry) {
         }
         Ok(Arc::new(agent_tokenizer::HfTokenizer::new(&files)) as Arc<dyn agent_core::Tokenizer>)
     });
+    // Count via a provider's `messages/count_tokens` endpoint (network + key). The
+    // key is resolved inline > env and never logged; construction fails closed if
+    // base_url/key are unset. See parity spec 23.
+    #[cfg(feature = "tokenizer-provider")]
+    r.tokenizer("provider", |ctx| {
+        let p = &ctx.cfg.tokenizer.provider;
+        let key = resolve_ws_key(&p.api_key, &p.api_key_env);
+        Ok(Arc::new(agent_tokenizer::ProviderTokenizer::new(
+            &p.base_url,
+            &key,
+            &p.version,
+            p.timeout_secs,
+        )?) as Arc<dyn agent_core::Tokenizer>)
+    });
     // One tokenizer for a fleet: identical counts everywhere, so budget and
     // compaction decisions stay consistent across agents.
     #[cfg(feature = "grpc")]
