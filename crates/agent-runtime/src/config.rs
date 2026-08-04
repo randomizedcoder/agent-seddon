@@ -1171,8 +1171,10 @@ impl Default for SearchCfg {
 /// `[tokenizer]` — selects the [`agent_core::Tokenizer`] backend that counts tokens
 /// for compaction budgeting and cost accounting. `approx` (the default) is the
 /// dependency-free segmenter; `tiktoken` is the real OpenAI-family BPE backend;
-/// `hf` counts with a local model's `tokenizer.json` (see [`HfCfg`]); `grpc` dials
-/// a remote tokenizer seam. See parity spec 23 and `docs/components/tokenizer.md`.
+/// `hf` counts with a local model's `tokenizer.json` (see [`HfCfg`]); `provider`
+/// calls a provider's count-tokens endpoint (see [`TokenizerProviderCfg`]); `grpc`
+/// dials a remote tokenizer seam. See parity spec 23 and
+/// `docs/components/tokenizer.md`.
 #[derive(Debug, Deserialize)]
 pub struct TokenizerCfg {
     #[serde(default = "default_tokenizer")]
@@ -1180,6 +1182,9 @@ pub struct TokenizerCfg {
     /// Files for the `hf` backend; ignored by the other backends.
     #[serde(default)]
     pub hf: HfCfg,
+    /// Endpoint for the `provider` backend; ignored by the other backends.
+    #[serde(default)]
+    pub provider: TokenizerProviderCfg,
 }
 
 impl Default for TokenizerCfg {
@@ -1187,6 +1192,7 @@ impl Default for TokenizerCfg {
         Self {
             backend: default_tokenizer(),
             hf: HfCfg::default(),
+            provider: TokenizerProviderCfg::default(),
         }
     }
 }
@@ -1209,6 +1215,47 @@ pub struct HfCfg {
     /// model-id prefix → `tokenizer.json` path (longest matching prefix wins).
     #[serde(default)]
     pub models: HashMap<String, String>,
+}
+
+/// `[tokenizer.provider]` — the `provider` tokenizer backend (parity spec 23): count
+/// tokens via a provider's Anthropic-style `…/messages/count_tokens` endpoint. Needs
+/// network + a key at runtime. The key is `api_key` (inline) or read from the
+/// `api_key_env` env var when `api_key` is empty — it never appears in a result,
+/// error, span, or log.
+#[derive(Debug, Deserialize)]
+pub struct TokenizerProviderCfg {
+    /// API base, e.g. `https://api.anthropic.com/v1` (the `/messages/count_tokens`
+    /// path is appended).
+    #[serde(default)]
+    pub base_url: String,
+    /// Inline API key (prefer `api_key_env` so a secret isn't committed).
+    #[serde(default)]
+    pub api_key: String,
+    /// Read the key from this env var when `api_key` is empty.
+    #[serde(default)]
+    pub api_key_env: String,
+    /// The `anthropic-version` header.
+    #[serde(default = "default_anthropic_version")]
+    pub version: String,
+    /// Request timeout in seconds (clamped to 1..=600).
+    #[serde(default = "default_tokenizer_timeout")]
+    pub timeout_secs: u64,
+}
+
+impl Default for TokenizerProviderCfg {
+    fn default() -> Self {
+        Self {
+            base_url: String::new(),
+            api_key: String::new(),
+            api_key_env: String::new(),
+            version: default_anthropic_version(),
+            timeout_secs: default_tokenizer_timeout(),
+        }
+    }
+}
+
+fn default_tokenizer_timeout() -> u64 {
+    30
 }
 
 impl SearchCfg {
