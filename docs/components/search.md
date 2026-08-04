@@ -71,6 +71,16 @@ walking up for `.git`). Override the parent with `[search] index_dir`.
   snapshot while the single `IndexWriter` builds the new one, then `reload`s.
 - **Reindex is incremental** where supported (tantivy: delete-by-path + re-add the
   changed files, one commit); a full rebuild only when the index is missing.
+- **Parallel file reads.** Tantivy's `IndexWriter` already parallelises the actual
+  indexing across its own threads, so the bottleneck was the *serial* per-file read
+  (`DocumentSource::load` → a blocking `read_to_string`) that starved them. The
+  reindex now reads each batch's files in parallel (`rayon`), then feeds the writer,
+  keeping its threads fed. Reads happen in batches (`REINDEX_READ_BATCH`) so peak
+  memory stays bounded, and a batch below `REINDEX_PAR_MIN` is read sequentially.
+  The set of documents indexed — and every query result — is unchanged; the benefit
+  is **I/O-bound** (it grows with file count and storage latency, and is smallest
+  when everything is already in the page cache), not a fixed CPU speedup. An
+  incremental one-file update takes the sequential path.
 
 ## High query concurrency
 

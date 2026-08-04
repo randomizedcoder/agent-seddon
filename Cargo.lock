@@ -447,6 +447,7 @@ dependencies = [
  "futures-util",
  "iai-callgrind",
  "ignore",
+ "rayon",
  "regex",
  "rstest",
  "serde",
