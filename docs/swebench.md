@@ -104,7 +104,8 @@ SWE-bench specific:
 | `SWEBENCH_MIN_RESOLVED` | `0` | Regression floor (count of resolved instances). |
 | `SWEBENCH_OUTPUT_DIR` | — | If set, `predictions.jsonl` + the report + per-instance agent `logs/` are copied here to keep. |
 | `SWEBENCH_INSTANCE_TIMEOUT` | `900` | Per-instance agent wall-clock seconds. |
-| `SWEBENCH_AGENT_RETRIES` | `0` | Re-run the agent (from a pristine tree) when it crashes with an empty patch — mitigates transient provider blips. A clean empty patch is not retried. |
+| `SWEBENCH_AGENT_RETRIES` | `0` | Re-run the agent (from a pristine tree) on a **transient** crash with an empty patch — mitigates provider blips. A clean empty patch, or hitting the iteration cap, is not retried. |
+| `SWEBENCH_MAX_ITERATIONS` | `75` | Agent tool-call turns per instance. The main lever on the fix rate: some models never emit a clean final answer and run to this cap, and large repos need many turns to locate + fix. |
 
 ## The datasets, the smoke set, and validation
 

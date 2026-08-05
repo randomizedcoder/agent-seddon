@@ -26,7 +26,8 @@ Env (generator knobs shared with the e2e/eval harnesses; SWEBENCH_* set by the h
   SWEBENCH_CACHE_DIR    repo-clone cache (default ./repos)
   SWEBENCH_MODEL_NAME   the `model_name_or_path` recorded (default "agent-seddon")
   SWEBENCH_INSTANCE_TIMEOUT  per-instance agent wall-clock seconds (default 900)
-  SWEBENCH_AGENT_RETRIES     re-run the agent on a crash+empty patch (default 0)
+  SWEBENCH_AGENT_RETRIES     re-run the agent on a TRANSIENT crash+empty patch (default 0)
+  SWEBENCH_MAX_ITERATIONS    agent tool-call turns per instance (default 75)
 
 Per-instance agent stdout+stderr is written to ./logs/<instance>.attempt<N>.log.
 """
@@ -103,6 +104,10 @@ def write_agent_toml(toml_path: Path, work_dir: Path, scratch: Path) -> None:
     api_key = os.environ.get("AGENT_E2E_API_KEY", "ollama")
     max_tokens = os.environ.get("AGENT_E2E_MAX_TOKENS", "4096")
     context_window = os.environ.get("AGENT_E2E_CONTEXT_WINDOW", "32768")
+    # Real bug-fixes on large repos need many turns; the default is a starting point, not a
+    # ceiling. Some models (e.g. GLM) never emit a clean final answer and run to the cap, so
+    # raising this is the main lever on the fix rate — SWEBENCH_MAX_ITERATIONS tunes it.
+    max_iterations = os.environ.get("SWEBENCH_MAX_ITERATIONS", "75")
     tls_line = "insecure_tls = true" if os.environ.get("AGENT_E2E_INSECURE_TLS", "0") == "1" else ""
     system_prompt = (
         "You are an expert software engineer fixing a real bug in an existing repository. "
@@ -116,7 +121,7 @@ provider = "openai-compat"
 context  = "sliding-window"
 policy   = "auto-approve"
 working_dir = "{work_dir}"
-max_iterations = 40
+max_iterations = {max_iterations}
 max_tokens = {max_tokens}
 context_window = {context_window}
 reserve_output = {max_tokens}
@@ -238,6 +243,7 @@ def main() -> int:
                         git(["clean", "-fdxq"], cwd=repo_dir)
                     alog = log_dir / f"{iid}.attempt{attempt}.log"
                     rc = 0
+                    capped = False
                     try:
                         proc = run(
                             ["agent", "--config", str(toml_path), build_prompt(inst)],
@@ -246,18 +252,25 @@ def main() -> int:
                             check=False,
                         )
                         rc = proc.returncode
-                        alog.write_text((proc.stdout or "") + "\n--- STDERR ---\n" + (proc.stderr or ""))
+                        stderr = proc.stderr or ""
+                        alog.write_text((proc.stdout or "") + "\n--- STDERR ---\n" + stderr)
+                        # Hitting the iteration cap is a NON-zero exit, but it isn't a crash:
+                        # the agent ran fine, it just never emitted a final answer (common with
+                        # models that keep calling tools). Distinguish it — and don't retry it,
+                        # since it isn't transient (unlike a provider/network error).
+                        capped = "reached max_iterations" in stderr
                         if rc != 0:
-                            tail = _ANSI.sub("", (proc.stderr or "").strip())[-1200:]
-                            log(f"    agent exit {rc} (attempt {attempt}); full log {alog}\n    stderr tail: {tail}")
+                            tail = _ANSI.sub("", stderr.strip())[-1200:]
+                            kind = "hit iteration cap (max_iterations) — not a crash" if capped else "crash"
+                            log(f"    agent exit {rc} [{kind}] (attempt {attempt}); full log {alog}\n    stderr tail: {tail}")
                     except subprocess.TimeoutExpired as e:
                         rc = -1
                         alog.write_text("TIMEOUT\n--- STDERR ---\n" + ((e.stderr or b"").decode("utf-8", "replace")))
                         log(f"    agent TIMEOUT after {inst_timeout}s (attempt {attempt}); full log {alog}")
                     patch = compute_patch(repo_dir, inst["base_commit"])
-                    if patch or rc == 0 or attempt == agent_retries + 1:
+                    if patch or rc == 0 or capped or attempt == agent_retries + 1:
                         break
-                    log(f"    retrying (crash + empty patch) ...")
+                    log(f"    retrying (transient crash + empty patch) ...")
                 log(f"    patch: {len(patch)} bytes, {patch.count(chr(10))} lines")
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
                 # Record an empty patch (counts as unresolved) rather than aborting the run.
