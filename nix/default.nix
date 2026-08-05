@@ -215,6 +215,20 @@ let
     inherit (nixLib) harness;
   };
 
+  # `nix run .#inspect` — grade the real agent with UK AISI's Inspect AI framework: a
+  # custom solver drives the agent per sample; the default task set is our own hermetic,
+  # deterministically-graded samples, and INSPECT_TASK can point at any inspect_evals
+  # benchmark. Not a check: needs a model + network. See nix/inspect-harness.nix.
+  inspect = import ./inspect-harness.nix {
+    inherit
+      pkgs
+      lib
+      versions
+      agent
+      ;
+    inherit (nixLib) harness;
+  };
+
   # `nix run .#coverage` — on-demand source-based coverage report (lcov + HTML +
   # summary) against the working tree. Reporting only; the gate keeps the
   # instrumented path building via the non-gating `coverage` check.
@@ -338,7 +352,12 @@ in
 {
   packages = {
     inherit agent go-ast;
-    inherit (versions) promptfoo swebench;
+    inherit (versions)
+      promptfoo
+      swebench
+      inspect-ai
+      inspect-evals
+      ;
     default = agent;
   };
 
@@ -366,6 +385,7 @@ in
         eval
         redteam
         swebench
+        inspect
         loadtest
         loadtest-loop
         loadtest-wire

@@ -400,7 +400,9 @@ gate sit opt-in, model-driven harnesses that grade the **real** agent: `nix run 
 / `.#redteam` (promptfoo quality + red-team, [`docs/eval.md`](eval.md)) and
 `nix run .#swebench` — the standard SWE-bench benchmark, driving the agent to patch a
 real repo and Docker-grading the patch for a **% resolved** figure
-([`docs/swebench.md`](swebench.md)).
+([`docs/swebench.md`](swebench.md)); and `nix run .#inspect` — UK AISI's Inspect AI,
+driving the agent through a custom solver over hermetic tasks or any `inspect_evals`
+benchmark ([`docs/inspect.md`](inspect.md)).
 
 ---
 
