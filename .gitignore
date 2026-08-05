@@ -45,3 +45,7 @@ dhat-heap.json
 
 # coverage artifacts (nix run .#coverage / cargo-llvm-cov)
 /lcov.info
+
+# Python bytecode (test/swebench/predict.py is run by the swebench harness)
+__pycache__/
+*.pyc

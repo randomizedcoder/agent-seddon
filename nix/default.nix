@@ -202,6 +202,19 @@ let
     inherit (nixLib) harness;
   };
 
+  # `nix run .#swebench` — benchmark the real agent on SWE-bench: drive it to patch a
+  # checked-out repo, then Docker-grade the patch against FAIL_TO_PASS/PASS_TO_PASS.
+  # Not a check: needs Docker + a model + network + large disk. See nix/swebench-harness.nix.
+  swebench = import ./swebench-harness.nix {
+    inherit
+      pkgs
+      lib
+      versions
+      agent
+      ;
+    inherit (nixLib) harness;
+  };
+
   # `nix run .#coverage` — on-demand source-based coverage report (lcov + HTML +
   # summary) against the working tree. Reporting only; the gate keeps the
   # instrumented path building via the non-gating `coverage` check.
@@ -325,7 +338,7 @@ in
 {
   packages = {
     inherit agent go-ast;
-    inherit (versions) promptfoo;
+    inherit (versions) promptfoo swebench;
     default = agent;
   };
 
@@ -352,6 +365,7 @@ in
         review-eval
         eval
         redteam
+        swebench
         loadtest
         loadtest-loop
         loadtest-wire

@@ -395,7 +395,12 @@ numerically ordered project instructions (`crates/agent-runtime/src/context_file
 ### Testing — proportionate
 Unit tests across crates + an MCP client↔server integration test, all run under the
 Nix flake checks (clippy `-D warnings`, rustfmt, `cargo test`, cargo-audit,
-nix-fmt). Far smaller than pi's vitest suites or hermes's ~17k tests.
+nix-fmt). Far smaller than pi's vitest suites or hermes's ~17k tests. On top of the
+gate sit opt-in, model-driven harnesses that grade the **real** agent: `nix run .#eval`
+/ `.#redteam` (promptfoo quality + red-team, [`docs/eval.md`](eval.md)) and
+`nix run .#swebench` — the standard SWE-bench benchmark, driving the agent to patch a
+real repo and Docker-grading the patch for a **% resolved** figure
+([`docs/swebench.md`](swebench.md)).
 
 ---
 

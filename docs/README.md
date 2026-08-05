@@ -29,6 +29,7 @@ Everything in `docs/`, grouped by what you are trying to do. Three entry points:
 | [`grpc.md`](grpc.md) | Running seams as services: contract, transports, health, security warnings, and why three seams are deliberately not distributed |
 | [`benchmarking.md`](benchmarking.md) | The performance and leak gate — iai-callgrind ceilings and dhat budgets |
 | [`eval.md`](eval.md) | Evaluating the agent with promptfoo — the `nix run .#eval` quality harness and `nix run .#redteam` security harness (opt-in, model-graded) |
+| [`swebench.md`](swebench.md) | Benchmarking the agent on SWE-bench — `nix run .#swebench` drives it to patch a real repo, then Docker-grades the patch against `FAIL_TO_PASS`/`PASS_TO_PASS` (opt-in; % resolved) |
 
 ## Components
 
