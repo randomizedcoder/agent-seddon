@@ -402,7 +402,9 @@ gate sit opt-in, model-driven harnesses that grade the **real** agent: `nix run 
 real repo and Docker-grading the patch for a **% resolved** figure
 ([`docs/swebench.md`](swebench.md)); and `nix run .#inspect` — UK AISI's Inspect AI,
 driving the agent through a custom solver over hermetic tasks or any `inspect_evals`
-benchmark ([`docs/inspect.md`](inspect.md)).
+benchmark ([`docs/inspect.md`](inspect.md)); and `nix run .#openai-evals` — OpenAI Evals,
+driving the agent through a custom completion function over a registry eval
+([`docs/openai-evals.md`](openai-evals.md)).
 
 ---
 
