@@ -28,6 +28,9 @@
 #   SWEBENCH_SPLIT (default test) / SWEBENCH_NAMESPACE (default swebench; ""=build local) /
 #     SWEBENCH_MAX_WORKERS (default 4) / SWEBENCH_RUN_ID (default swe-agent-baseline).
 #   SWE_AGENT_CALL_LIMIT     per-instance model call cap (default 0 = unlimited).
+#   SWE_AGENT_CONFIG         SWE-agent run config (default: the shipped simple DefaultAgentConfig
+#                            `config/default.yaml`; without a --config, run-batch defaults to a
+#                            RetryAgentConfig the `--agent.model.*` overrides don't fit).
 #   SWE_AGENT_MIN_RESOLVED   regression floor (count). SWEBENCH_OUTPUT_DIR keeps preds+report.
 # Extra args are forwarded to `sweagent run-batch`.
 {
@@ -119,10 +122,29 @@ pkgs.writeShellApplication {
     # Honor a self-signed generator (best-effort; litellm reads SSL_VERIFY).
     [ "''${AGENT_E2E_INSECURE_TLS:-0}" = 1 ] && export SSL_VERIFY="False"
 
+    # SWE-ReX zips the shipped tool bundles to upload into the sandbox, and Python's zipfile
+    # rejects the 1970 mtimes nix-store files carry ("ZIP does not support timestamps before
+    # 1980"). Stage a WRITABLE copy of the shipped config+tools with fresh mtimes and point the
+    # SWE-agent path env at it. `cp` gives current mtimes; `touch` is belt-and-suspenders.
+    cfg_root="$work/swe-agent-cfg"
+    cp -rL ${versions.swe-agent}/share/swe-agent "$cfg_root"
+    chmod -R u+w "$cfg_root"
+    find "$cfg_root" -exec touch {} +
+    export SWE_AGENT_CONFIG_ROOT="$cfg_root"
+    export SWE_AGENT_TOOLS_DIR="$cfg_root/tools"
+
+    # Without a `--config`, `run-batch` defaults to a RetryAgentConfig (which wants
+    # `agent_configs`/`retry_loop`), so the top-level `--agent.model.*` overrides don't fit its
+    # schema (pydantic extra_forbidden). Point it at a shipped SIMPLE DefaultAgentConfig — its
+    # `agent.model` is what our `--agent.model.*` flags override. Operator-overridable.
+    RUN_CONFIG="''${SWE_AGENT_CONFIG:-$cfg_root/config/default.yaml}"
+
     echo "swe-agent[baseline]: model $LLM_NAME @ $GEN_BASE_URL   instances=$denom  split=$SPLIT"
+    echo "swe-agent[baseline]: config $RUN_CONFIG"
     echo "swe-agent[baseline]: [1/2] inference — SWE-agent scaffold over the instances ..."
     set +e
     sweagent run-batch \
+      --config "$RUN_CONFIG" \
       --instances.type swe_bench \
       --instances.subset lite \
       --instances.split "$SPLIT" \

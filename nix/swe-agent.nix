@@ -70,6 +70,11 @@ py.buildPythonPackage {
   # (read-only data) under $out/share and point the env vars (honored by BOTH the import
   # asserts and the CLI) at them. trajectories/ is an output dir; provide a default so a bare
   # import passes, and let the harness override SWE_AGENT_TRAJECTORY_DIR with a writable path.
+  #
+  # SWE_AGENT_CONFIG_ROOT is the base a config's RELATIVE paths (e.g. a bundle `tools/registry`
+  # in the shipped configs) resolve against (`_convert_path_to_abspath`); it defaults to the
+  # package dir, where `tools/` isn't. Point it at $out/share/swe-agent so the shipped configs
+  # find their tool bundles.
   postInstall = ''
     mkdir -p $out/share/swe-agent/trajectories
     cp -r config tools $out/share/swe-agent/
@@ -79,6 +84,7 @@ py.buildPythonPackage {
     SWE_AGENT_CONFIG_DIR = "${placeholder "out"}/share/swe-agent/config";
     SWE_AGENT_TOOLS_DIR = "${placeholder "out"}/share/swe-agent/tools";
     SWE_AGENT_TRAJECTORY_DIR = "${placeholder "out"}/share/swe-agent/trajectories";
+    SWE_AGENT_CONFIG_ROOT = "${placeholder "out"}/share/swe-agent";
   };
 
   # Bake the same defaults into the `sweagent` console script so the CLI works out of the box;
@@ -87,6 +93,7 @@ py.buildPythonPackage {
     "--set-default SWE_AGENT_CONFIG_DIR ${placeholder "out"}/share/swe-agent/config"
     "--set-default SWE_AGENT_TOOLS_DIR ${placeholder "out"}/share/swe-agent/tools"
     "--set-default SWE_AGENT_TRAJECTORY_DIR ${placeholder "out"}/share/swe-agent/trajectories"
+    "--set-default SWE_AGENT_CONFIG_ROOT ${placeholder "out"}/share/swe-agent"
   ];
 
   pythonImportsCheck = [ "sweagent" ];

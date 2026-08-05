@@ -22,6 +22,7 @@ sandbox *and* the swebench grader containerize), a model, network, and disk.
 
    ```
    sweagent run-batch \
+     --config <shipped default.yaml> \
      --instances.type swe_bench --instances.subset lite --instances.split test \
      --instances.filter '^(<id1>|<id2>|…)$' \
      --agent.model.name openai/<model> \
@@ -31,7 +32,10 @@ sandbox *and* the swebench grader containerize), a model, network, and disk.
    ```
 
    litellm routes the OpenAI-compatible endpoint via the `openai/<model>` provider prefix.
-   SWE-agent merges the per-instance patches into `<dir>/preds.json` (swebench format).
+   The `--config` selects a simple `DefaultAgentConfig` (shipped `config/default.yaml`) whose
+   `agent.model` the `--agent.model.*` flags override — without it, `run-batch` defaults to a
+   `RetryAgentConfig` those flags don't fit. SWE-agent merges the per-instance patches into
+   `<dir>/preds.json` (swebench format).
 
 2. **Evaluation** — the **same** grader as `nix run .#swebench`:
 
@@ -78,6 +82,7 @@ comparison): `AGENT_E2E_BASE_URL` / `_MODEL` / `_API_KEY`, `AGENT_E2E_INSECURE_T
 | `SWEBENCH_MAX_WORKERS` | `4` | Parallel workers (inference + grading). |
 | `SWEBENCH_RUN_ID` | `swe-agent-baseline` | Names the report + Docker artifacts. |
 | `SWE_AGENT_CALL_LIMIT` | `0` (unlimited) | Per-instance model call cap (SWE-agent's `per_instance_call_limit`). |
+| `SWE_AGENT_CONFIG` | shipped `config/default.yaml` | The SWE-agent run config (a simple `DefaultAgentConfig`). |
 | `SWE_AGENT_MIN_RESOLVED` | `0` | Regression floor (count of resolved instances). |
 | `SWEBENCH_OUTPUT_DIR` | — | If set, the report + `preds.json` are copied here to keep. |
 
