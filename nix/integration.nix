@@ -105,6 +105,9 @@ pkgs.writeShellApplication {
           echo ""
           echo "integration: SKIP eval — no judge key (set AGENT_E2E_JUDGE_API_KEY_FILE)."
         fi
+        # `swebench` is deliberately NOT part of the integration tier: a run needs Docker
+        # plus hundreds of GB of images and hours of wall-clock. It stays a standalone
+        # opt-in (`nix run .#swebench`, docs/swebench.md).
       else
         echo ""
         echo "integration: SKIP model tier — no reachable model at AGENT_E2E_BASE_URL."

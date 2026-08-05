@@ -16,6 +16,9 @@ let
   # promptfoo pin — a `let` binding so both the exported `promptfooVersion` attr and
   # the `promptfoo` derivation below can reference it (the attrset is not `rec`).
   promptfooVersion = "0.122.0";
+
+  # SWE-bench pin — same `let`-binding rationale as promptfoo. Drives `nix run .#swebench`.
+  swebenchVersion = "4.1.0";
 in
 {
   inherit (constants) socketDir grpc;
@@ -173,6 +176,19 @@ in
     inherit pkgs;
     lib = pkgs.lib;
     version = promptfooVersion;
+  };
+
+  # `swebench`: the official SWE-bench benchmark package (buildPythonPackage LIBRARY),
+  # pulled into a `python3.withPackages` by the `nix run .#swebench` harness to run
+  # `python -m swebench.harness.run_evaluation` (docs/swebench.md). Vendored + pinned HERE
+  # (via nix/swebench.nix) because nixpkgs has no swebench. Bump `swebenchVersion` + the
+  # `src.hash` in nix/swebench.nix together. Not on the `nix flake check` path (the harness
+  # needs Docker + a model + network + large disk, like the e2e apps).
+  inherit swebenchVersion;
+  swebench = import ./swebench.nix {
+    inherit pkgs;
+    lib = pkgs.lib;
+    version = swebenchVersion;
   };
 
   # ── ClickHouse container settings ──────────────────────────────────────────
