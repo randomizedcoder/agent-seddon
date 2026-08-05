@@ -243,6 +243,19 @@ let
     inherit (nixLib) harness;
   };
 
+  # `nix run .#swe-agent` — a COMPARISON BASELINE (not an eval of our agent): run Princeton's
+  # SWE-agent scaffold with the SAME model on the SAME SWE-bench instances, grade with the
+  # swebench Docker harness, and read resolved% against `nix run .#swebench` (our agent). Takes
+  # no `agent` — it runs a third-party scaffold. Not a check: needs Docker + a model + network.
+  swe-agent = import ./swe-agent-harness.nix {
+    inherit
+      pkgs
+      lib
+      versions
+      ;
+    inherit (nixLib) harness;
+  };
+
   # `nix run .#coverage` — on-demand source-based coverage report (lcov + HTML +
   # summary) against the working tree. Reporting only; the gate keeps the
   # instrumented path building via the non-gating `coverage` check.
@@ -372,6 +385,8 @@ in
       inspect-ai
       inspect-evals
       openai-evals
+      swe-rex
+      swe-agent
       ;
     default = agent;
   };
@@ -402,6 +417,7 @@ in
         swebench
         inspect
         openai-evals
+        swe-agent
         loadtest
         loadtest-loop
         loadtest-wire

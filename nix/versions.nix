@@ -37,6 +37,17 @@ let
   # OpenAI Evals pin — the `evals`/`oaieval` framework, drives `nix run .#openai-evals`.
   # Bare version tag; same `let`-binding rationale as the others.
   openaiEvalsVersion = "3.0.1";
+
+  # SWE-agent pin — Princeton's reference scaffold, the `nix run .#swe-agent` COMPARISON
+  # BASELINE. `swe-rex` is its sandbox runtime (also not in nixpkgs) — built once here and
+  # threaded into `swe-agent` (attrset is not `rec`). Same `let`-binding rationale.
+  sweRexVersion = "1.4.0";
+  sweAgentVersion = "1.1.0";
+  sweRexPkg = import ./swe-rex.nix {
+    inherit pkgs;
+    lib = pkgs.lib;
+    version = sweRexVersion;
+  };
 in
 {
   inherit (constants) socketDir grpc;
@@ -236,6 +247,21 @@ in
     inherit pkgs;
     lib = pkgs.lib;
     version = openaiEvalsVersion;
+  };
+
+  # `swe-rex` + `swe-agent`: SWE-agent's sandbox runtime and the reference scaffold itself
+  # (buildPythonPackage; `swe-agent` provides the `sweagent` CLI), pulled into a
+  # `python3.withPackages` by the `nix run .#swe-agent` COMPARISON BASELINE alongside
+  # `swebench` for grading (docs/swe-agent.md). Vendored + pinned HERE (nix/swe-rex.nix,
+  # nix/swe-agent.nix) because nixpkgs has neither. Bump the versions + `src.hash`es together.
+  # Not on the `nix flake check` path (needs Docker + a model + network).
+  inherit sweRexVersion sweAgentVersion;
+  swe-rex = sweRexPkg;
+  swe-agent = import ./swe-agent.nix {
+    inherit pkgs;
+    lib = pkgs.lib;
+    version = sweAgentVersion;
+    swe-rex = sweRexPkg;
   };
 
   # ── ClickHouse container settings ──────────────────────────────────────────

@@ -32,6 +32,7 @@ Everything in `docs/`, grouped by what you are trying to do. Three entry points:
 | [`swebench.md`](swebench.md) | Benchmarking the agent on SWE-bench — `nix run .#swebench` drives it to patch a real repo, then Docker-grades the patch against `FAIL_TO_PASS`/`PASS_TO_PASS` (opt-in; % resolved) |
 | [`inspect.md`](inspect.md) | Grading the agent with UK AISI's Inspect AI — `nix run .#inspect` drives it through a custom solver over hermetic tasks or any `inspect_evals` benchmark (opt-in; % score) |
 | [`openai-evals.md`](openai-evals.md) | Grading the agent with OpenAI Evals — `nix run .#openai-evals` drives it through a custom completion function over a hermetic registry eval or any registry eval (opt-in; % accuracy) |
+| [`swe-agent.md`](swe-agent.md) | The SWE-agent comparison baseline — `nix run .#swe-agent` runs Princeton's scaffold with the same model on the same SWE-bench instances and grades with the swebench harness, for a resolved% next to our agent (opt-in) |
 
 ## Components
 
