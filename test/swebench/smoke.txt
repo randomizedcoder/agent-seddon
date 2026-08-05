@@ -1,0 +1,17 @@
+# Curated hermetic SWE-bench Lite instances for `SWEBENCH_DATASET=smoke`
+# (and the default scope of `SWEBENCH_MODE=validate`).
+#
+# These instances' test suites are self-contained — they do NOT reach the network
+# (unlike, e.g., psf/requests, whose tests call httpbin.org). So a correct patch actually
+# RESOLVES here, which makes this the reliable fast default for a smoke run and a sound
+# target for gold-patch validation (`SWEBENCH_MODE=validate` expects every one to resolve).
+#
+# Kept small on purpose (pallets/flask images are tiny, pylint/xarray/sympy are pure-pytest).
+# Grow it as needed; validate any additions with `SWEBENCH_MODE=validate`.
+#
+# One instance id per line; blank lines and `#` comments are ignored.
+pallets__flask-4045
+pallets__flask-5063
+pylint-dev__pylint-5859
+pydata__xarray-4094
+sympy__sympy-11400
