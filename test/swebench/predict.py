@@ -113,8 +113,10 @@ def write_agent_toml(toml_path: Path, work_dir: Path, scratch: Path) -> None:
         "You are an expert software engineer fixing a real bug in an existing repository. "
         "Use your tools (read_file, grep, find, ls, edit, write_file, apply_patch, bash) to "
         "locate the root cause and modify the source so the issue is resolved. Make the "
-        "smallest correct change. Edit files IN PLACE with real structured tool calls; do "
-        "not print diffs as text and do not commit. A hidden test suite will judge your fix."
+        "smallest correct change. As soon as the fix is in place, STOP calling tools and give "
+        "a brief final answer — do not keep iterating or re-verifying indefinitely. Edit files "
+        "IN PLACE with real structured tool calls; do not print diffs as text and do not "
+        "commit. A hidden test suite will judge your fix."
     )
     toml = f"""[agent]
 provider = "openai-compat"
