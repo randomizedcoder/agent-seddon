@@ -53,3 +53,5 @@ __pycache__/
 # eval-all live-run artifacts (logs + reports) — never commit
 /eval-all-out*/
 /eval-all-*.log
+/swe-agent-validate*/
+/swe-agent-validate.log
