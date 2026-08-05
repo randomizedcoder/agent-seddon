@@ -404,7 +404,10 @@ real repo and Docker-grading the patch for a **% resolved** figure
 driving the agent through a custom solver over hermetic tasks or any `inspect_evals`
 benchmark ([`docs/inspect.md`](inspect.md)); and `nix run .#openai-evals` — OpenAI Evals,
 driving the agent through a custom completion function over a registry eval
-([`docs/openai-evals.md`](openai-evals.md)).
+([`docs/openai-evals.md`](openai-evals.md)). Alongside them, `nix run .#swe-agent` is a
+**comparison baseline**: it runs Princeton's SWE-agent scaffold with the same model on the
+same SWE-bench instances and grades with the swebench harness, for a resolved% next to our
+agent ([`docs/swe-agent.md`](swe-agent.md)).
 
 ---
 
