@@ -68,8 +68,13 @@ pkgs.writeShellApplication {
       shift
       echo ""
       echo "############### integration: $label ###############"
+      # Suspend errexit (writeShellApplication sets it) so a failing sub-harness is aggregated
+      # via note_fail rather than aborting the whole suite — as this file's header promises.
+      set +e
       "$@"
-      note_fail "$?"
+      local rc=$?
+      set -e
+      note_fail "$rc"
     }
 
     # Is a model endpoint reachable? A cheap GET — used only to decide whether to
@@ -100,7 +105,9 @@ pkgs.writeShellApplication {
         # `eval` (promptfoo quality) additionally needs a judge key — include it only
         # when that is present, else note the skip (its own run would refuse hard).
         if [ -r "''${AGENT_E2E_JUDGE_API_KEY_FILE:-$HOME/Downloads/runpod/glm/glm-api-key}" ]; then
-          run_step "eval — promptfoo coding-task quality" eval
+          # `eval` is a shell builtin — invoke the promptfoo app by its explicit path so the
+          # step doesn't silently run the no-op builtin instead.
+          run_step "eval — promptfoo coding-task quality" ${eval}/bin/eval
         else
           echo ""
           echo "integration: SKIP eval — no judge key (set AGENT_E2E_JUDGE_API_KEY_FILE)."
