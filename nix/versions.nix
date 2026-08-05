@@ -19,6 +19,20 @@ let
 
   # SWE-bench pin — same `let`-binding rationale as promptfoo. Drives `nix run .#swebench`.
   swebenchVersion = "4.1.0";
+
+  # Inspect AI pin — UK AISI's eval framework, drives `nix run .#inspect`. inspect_ai has
+  # a normal version tag; inspect_evals ships from git so it's pinned by commit rev + a
+  # synthetic version string (for setuptools_scm). Same `let`-binding rationale.
+  inspectAiVersion = "0.3.252";
+  inspectEvalsRev = "b31daf3f6f74ce48cb905d185a4c2afc524205b2";
+  inspectEvalsVersion = "0.1.0-unstable-2026-08-05"; # no upstream release number; date of the pinned rev
+  # Built once here so both the exported `inspect-ai` attr and `inspect-evals` (which
+  # depends on it) share the SAME derivation (the attrset is not `rec`).
+  inspectAiPkg = import ./inspect-ai.nix {
+    inherit pkgs;
+    lib = pkgs.lib;
+    version = inspectAiVersion;
+  };
 in
 {
   inherit (constants) socketDir grpc;
@@ -189,6 +203,23 @@ in
     inherit pkgs;
     lib = pkgs.lib;
     version = swebenchVersion;
+  };
+
+  # `inspect-ai` + `inspect-evals`: UK AISI's eval framework and benchmark suite
+  # (buildPythonPackage LIBRARIES), pulled into a `python3.withPackages` by the
+  # `nix run .#inspect` harness to run `inspect eval` with our agent solver
+  # (docs/inspect.md). Vendored + pinned HERE (nix/inspect-ai.nix, nix/inspect-evals.nix)
+  # because nixpkgs has neither. Bump `inspectAiVersion` / `inspectEvalsRev` + the
+  # `src.hash`es together. Not on the `nix flake check` path (needs a model + network).
+  inherit inspectAiVersion inspectEvalsRev inspectEvalsVersion;
+  inspect-ai = inspectAiPkg;
+  inspect-evals = import ./inspect-evals.nix {
+    inherit pkgs;
+    lib = pkgs.lib;
+    version = inspectEvalsVersion;
+    rev = inspectEvalsRev;
+    hash = "sha256-/rd5zy3dg7ou6FY1jd7aaMB0O/frMygRgugICjs2fwA=";
+    inspect-ai = inspectAiPkg;
   };
 
   # ── ClickHouse container settings ──────────────────────────────────────────
