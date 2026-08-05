@@ -1,0 +1,29 @@
+# promptfoo config for `nix run .#eval` — the coding-task QUALITY harness (docs/eval.md).
+#
+# The provider drives the REAL agent one-shot via `agent_provider.sh`; each task in
+# tasks.yaml is graded deterministically (assert_compiles.js) AND by an `llm-rubric`.
+#
+# `__JUDGE_MODEL__` is substituted by nix/eval.nix with the judge model name; the judge
+# endpoint + key are supplied via the OPENAI_BASE_URL / OPENAI_API_KEY env the harness
+# exports (reusing the repo's GLM judge convention). Paths are relative — the harness
+# copies this directory to a scratch dir and runs promptfoo from there.
+description: agent-seddon coding-task quality eval
+
+# The rendered prompt IS the task instruction; the exec provider passes it to the agent.
+prompts:
+  - "{{task}}"
+
+providers:
+  - id: "exec: bash agent_provider.sh"
+    label: agent-seddon
+
+# Default grader for every `llm-rubric` assertion: an OpenAI-compatible model at the
+# judge endpoint (base URL + key come from OPENAI_BASE_URL / OPENAI_API_KEY in the env).
+defaultTest:
+  options:
+    provider:
+      id: "openai:chat:__JUDGE_MODEL__"
+      config:
+        temperature: 0
+
+tests: file://tasks.yaml

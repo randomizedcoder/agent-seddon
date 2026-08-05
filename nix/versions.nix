@@ -12,6 +12,10 @@ let
   # so every nix module reads them via `versions.grpc` / `versions.socketDir`,
   # while the Rust side gets them from the generated `constants.rs`.
   constants = import ./constants.nix;
+
+  # promptfoo pin — a `let` binding so both the exported `promptfooVersion` attr and
+  # the `promptfoo` derivation below can reference it (the attrset is not `rec`).
+  promptfooVersion = "0.122.0";
 in
 {
   inherit (constants) socketDir grpc;
@@ -157,6 +161,19 @@ in
   # falls back to the in-process `ignore` walk otherwise. Pinned so the dev shell
   # and the hermetic test sandbox (which has no host PATH) exercise the `rg` path.
   ripgrep = pkgs.ripgrep;
+
+  # `promptfoo`: the LLM eval + red-team harness that drives the real agent as an
+  # `exec:` provider in `nix run .#eval` / `.#redteam` (docs/eval.md). Vendored +
+  # pinned HERE (via nix/promptfoo.nix) so we track the latest release independently
+  # of nixpkgs, which lags. Bump `promptfooVersion` + the two hashes in
+  # nix/promptfoo.nix together. Not on the `nix flake check` path (the harnesses need
+  # a model + network, like the e2e apps).
+  inherit promptfooVersion;
+  promptfoo = import ./promptfoo.nix {
+    inherit pkgs;
+    lib = pkgs.lib;
+    version = promptfooVersion;
+  };
 
   # ── ClickHouse container settings ──────────────────────────────────────────
   # Pin the server image so an upstream bump is an explicit change here.
