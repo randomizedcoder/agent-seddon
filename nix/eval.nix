@@ -57,6 +57,9 @@ pkgs.writeShellApplication {
     GEN_MODEL="''${AGENT_E2E_MODEL:-llama3.1:latest}"
     GEN_API_KEY="''${AGENT_E2E_API_KEY:-ollama}"
     gopt=(-sf -m 10)
+    # Honor a self-signed generator (the agent connects with insecure_tls to match) — else the
+    # preflight rejects a valid endpoint the agent itself can reach.
+    [ "''${AGENT_E2E_INSECURE_TLS:-0}" = 1 ] && gopt+=(-k)
     if ! curl "''${gopt[@]}" -H "Authorization: Bearer $GEN_API_KEY" "$GEN_BASE_URL/models" >/dev/null 2>&1 \
        && ! curl "''${gopt[@]}" "''${GEN_BASE_URL%/v1}/api/tags" >/dev/null 2>&1; then
       echo "FAIL(harness): no generator model at $GEN_BASE_URL" >&2

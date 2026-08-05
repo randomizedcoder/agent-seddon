@@ -49,3 +49,7 @@ dhat-heap.json
 # Python bytecode (test/swebench/predict.py is run by the swebench harness)
 __pycache__/
 *.pyc
+
+# eval-all live-run artifacts (logs + reports) — never commit
+/eval-all-out*/
+/eval-all-*.log

@@ -407,7 +407,8 @@ driving the agent through a custom completion function over a registry eval
 ([`docs/openai-evals.md`](openai-evals.md)). Alongside them, `nix run .#swe-agent` is a
 **comparison baseline**: it runs Princeton's SWE-agent scaffold with the same model on the
 same SWE-bench instances and grades with the swebench harness, for a resolved% next to our
-agent ([`docs/swe-agent.md`](swe-agent.md)).
+agent ([`docs/swe-agent.md`](swe-agent.md)). `nix run .#eval-all` runs the whole family in one
+shot and prints a comparison table ([`docs/eval-all.md`](eval-all.md)).
 
 ---
 

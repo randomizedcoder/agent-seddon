@@ -375,6 +375,22 @@ let
       ;
     inherit (nixLib) harness;
   };
+
+  # `nix run .#eval-all` — run the whole model-driven eval/benchmark family in one shot and
+  # print a comparison table (the eval-family companion to `integration`). See nix/eval-all.nix.
+  eval-all = import ./eval-all.nix {
+    inherit
+      pkgs
+      lib
+      inspect
+      openai-evals
+      eval
+      redteam
+      swebench
+      swe-agent
+      ;
+    inherit (nixLib) harness;
+  };
 in
 {
   packages = {
@@ -425,6 +441,7 @@ in
         vcr-record
         integration
         soak
+        eval-all
         ;
     }
     // mkApps { clickhouse-client = "clickhouse-client-wrapper"; } clickhouse
