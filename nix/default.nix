@@ -229,6 +229,20 @@ let
     inherit (nixLib) harness;
   };
 
+  # `nix run .#openai-evals` — grade the real agent with OpenAI Evals: a custom completion
+  # function routes each prompt through the agent one-shot; the default eval is our own
+  # hermetic, deterministically-graded set, and OPENAI_EVALS_EVAL selects any registry eval.
+  # Not a check: needs a model + network. See nix/openai-evals-harness.nix.
+  openai-evals = import ./openai-evals-harness.nix {
+    inherit
+      pkgs
+      lib
+      versions
+      agent
+      ;
+    inherit (nixLib) harness;
+  };
+
   # `nix run .#coverage` — on-demand source-based coverage report (lcov + HTML +
   # summary) against the working tree. Reporting only; the gate keeps the
   # instrumented path building via the non-gating `coverage` check.
@@ -357,6 +371,7 @@ in
       swebench
       inspect-ai
       inspect-evals
+      openai-evals
       ;
     default = agent;
   };
@@ -386,6 +401,7 @@ in
         redteam
         swebench
         inspect
+        openai-evals
         loadtest
         loadtest-loop
         loadtest-wire

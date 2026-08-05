@@ -1,0 +1,4 @@
+# The agent-seddon completion function: routes each prompt through the REAL agent one-shot.
+# `agent_completion_fn` is importable because the harness puts this kit's root on PYTHONPATH.
+agent-seddon:
+  class: agent_completion_fn:AgentCompletionFn

@@ -1,0 +1,11 @@
+# A small, hermetic, deterministic eval graded by `Includes` (the ideal string must appear
+# in the agent's answer) — no judge model needed, matching the Inspect harness's default set.
+# The default eval of `nix run .#openai-evals`.
+agent-smoke:
+  id: agent-smoke.test.v1
+  description: Hermetic deterministic smoke tasks for the agent-seddon completion fn.
+  metrics: [accuracy]
+agent-smoke.test.v1:
+  class: evals.elsuite.basic.includes:Includes
+  args:
+    samples_jsonl: agent-smoke/samples.jsonl

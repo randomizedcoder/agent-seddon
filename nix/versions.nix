@@ -33,6 +33,10 @@ let
     lib = pkgs.lib;
     version = inspectAiVersion;
   };
+
+  # OpenAI Evals pin — the `evals`/`oaieval` framework, drives `nix run .#openai-evals`.
+  # Bare version tag; same `let`-binding rationale as the others.
+  openaiEvalsVersion = "3.0.1";
 in
 {
   inherit (constants) socketDir grpc;
@@ -220,6 +224,18 @@ in
     rev = inspectEvalsRev;
     hash = "sha256-/rd5zy3dg7ou6FY1jd7aaMB0O/frMygRgugICjs2fwA=";
     inspect-ai = inspectAiPkg;
+  };
+
+  # `openai-evals`: the OpenAI Evals framework (buildPythonPackage; provides the `oaieval`
+  # CLI), pulled into a `python3.withPackages` by the `nix run .#openai-evals` harness with a
+  # custom completion function that routes prompts through the agent (docs/openai-evals.md).
+  # Vendored + pinned HERE (nix/openai-evals.nix) because nixpkgs has no `evals`. Bump
+  # `openaiEvalsVersion` + the `src.hash` together. Not on the `nix flake check` path.
+  inherit openaiEvalsVersion;
+  openai-evals = import ./openai-evals.nix {
+    inherit pkgs;
+    lib = pkgs.lib;
+    version = openaiEvalsVersion;
   };
 
   # ── ClickHouse container settings ──────────────────────────────────────────
