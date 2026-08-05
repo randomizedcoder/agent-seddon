@@ -1,12 +1,15 @@
 # Coding-fundamentals parity — specs & status
 
-Per-feature specs measuring agent-seddon against three reference harnesses —
-**pi**, **hermes-agent**, and **opencode** — with a focus on *tests*. Each doc mines
-the peers' own test suites and lays out a table-driven `#[rstest]` plan to **match
-and exceed** them. Specs **01–10** cover the **top-10 coding fundamentals** (all
-merged); specs **11–30** ([below](#next-20-1130--beyond-fundamentals-differentiators))
-cover the next **top-20 beyond-fundamentals** capabilities, each introducing or
-extending a distributed, inspectable **seam**.
+Per-feature specs measuring agent-seddon against four reference harnesses —
+**pi**, **hermes-agent**, **opencode**, and **codex** (OpenAI's ~130-crate Rust
+agent, added this round — by far the deepest peer) — with a focus on *tests*. Each
+doc mines the peers' own test suites and lays out a table-driven `#[rstest]` plan to
+**match and exceed** them. Specs **01–10** cover the **top-10 coding fundamentals**
+(all merged); specs **11–30** ([below](#next-20-1130--beyond-fundamentals-differentiators))
+cover the next **top-20 beyond-fundamentals** capabilities (all merged); specs
+**31–50** ([below](#next-20-3150--codex-driven-depth)) are the **next-20 codex-driven
+depth** gaps, written as design-of-record. Every spec introduces or extends a
+distributed, inspectable **seam**.
 
 The specs were written first (design of record); most are now **implemented**, one
 PR per feature, each green under `nix flake check`. Each doc's top carries a
@@ -111,6 +114,66 @@ feature per PR, each green under `nix flake check`. Remaining work is the per-sp
 "deferred" tails noted in each row (mostly a `gRPC worker` for the seams that skipped
 it), not any unbuilt spec.
 
+## Next 20 (31–50) — codex-driven depth
+
+A fourth reference harness — **codex** (OpenAI's ~130-crate Rust agent) — was added
+this round; it is by far the deepest peer and surfaces a set of seam-shaped
+capabilities the other three lack and agent-seddon does not yet have. Specs **31–50**
+are those gaps, **verified against the code** (each "agent-seddon today" is an honest
+ABSENT/PARTIAL verdict), grouped as clusters **E–H** and written as full
+design-of-record specs (the same 8-section shape as 01–30), each a **four-peer**
+comparison. They are to be built one-PR-each in the 11–30 order (earliest value +
+lowest coupling first).
+
+Legend: ✅ merged · 🔶 in review · ⬜ spec written, not started.
+
+**E — Multi-agent & interactive control**
+
+| # | Feature | Status | Differentiator (vs pi / hermes / opencode / codex) |
+|---|---------|--------|---------|
+| 31 | [sub-agent orchestration graph](31-subagent-graph.md) | ⬜ | Upgrades today's fire-and-wait `delegate` boomerang into a handle-based **spawn/wait/send/interrupt/resume/close** graph. codex `multi_agents_v2` + `agent-graph-store` is the anchor (opencode `task`, hermes `delegate_task`, pi example-only) — none exposes the graph as a distributed, benched, leak-tested, metered+traced seam |
+| 32 | [elicitation / `request_user_input`](32-elicitation.md) | ⬜ | A model-invocable `request_user_input` (schema-typed question → **validated answer**, fails closed off a TTY). codex anchor, opencode `question` a strong second, hermes MCP-client routing, pi —; agent-seddon adds answer-validation + prompt-sanitization + a served/metered seam none expose |
+| 33 | [tool search / dynamic tool catalog](33-tool-search.md) | ⬜ | A `ToolCatalog` + `tool_search` (BM25) so a large/plugin/MCP tool set stops bloating every prompt (today `describe_all` dumps all specs each turn). codex + hermes are the anchors, pi does provider-native deferral, opencode's code-mode is the analogue |
+
+**F — Sandbox & execution depth**
+
+| # | Feature | Status | Differentiator |
+|---|---------|--------|---------|
+| 34 | [OS-level sandbox backends](34-os-sandbox.md) | ⬜ | seatbelt / landlock+seccomp / bwrap / Windows AppContainer **joining** agent-seddon's unique reproducible **nix** backend under one config-selected, capability-probed, metered seam. codex `sandboxing/` anchor; hermes Docker envs; pi micro-VM; opencode — |
+| 35 | [execpolicy command-safety DSL](35-execpolicy.md) | ⬜ | A user-editable **rule-DSL** classifier (allow/ask/deny + reason) feeding the Policy decision, replacing the fixed Rust `scan_dangerous` heuristics. codex Starlark `execpolicy` anchor; hermes regex denylist (adversarial anchor); opencode wildcard rules; pi — |
+| 36 | [unified-exec escalation](36-unified-exec.md) | ⬜ | One `Exec` seam with a **run → approval → sandbox-narrow → PTY** escalation ladder whose retry only ever *narrows* privilege. codex `unified_exec` anchor; hermes PTY→pipe degrade; opencode pty; pi (no PTY) |
+| 37 | [network egress policy / proxy](37-network-policy.md) | ⬜ | A `NetworkPolicy` **egress allow-list + loopback proxy** for sandboxed exec, reusing the spec-11 two-layer SSRF screen (checked-IP pinned vs DNS rebinding). codex `network-proxy` anchor; hermes coarse `--network=none`; opencode/pi — |
+| 38 | [shell environment snapshot](38-shell-snapshot.md) | ⬜ | Capture the login shell's rc env/PATH/aliases **once**, **secret-scanned** (spec-18) before reuse. codex anchor; opencode/hermes source a login shell but don't redact; pi —. Documented tension with the hermetic-nix philosophy |
+
+**G — Session & memory depth**
+
+| # | Feature | Status | Differentiator |
+|---|---------|--------|---------|
+| 39 | [SQLite rollout / resume-last / fork](39-rollout-sqlite.md) | ⬜ | A **sqlite-indexed** SessionStore backend + reverse-JSONL scan + `resume --last` + fast fork/archive, over spec-19's content-addressed checkpoints. codex rollout + `state_db` anchor; hermes/opencode sqlite session tables; pi mtime dir-scan |
+| 40 | [turn-diff tracker + apply](40-turn-diff-apply.md) | ⬜ | A `TurnDiff` seam accumulating a turn's **net** file diff + an `apply` tool/CLI that git-applies the agent's last change set (checkpoints hold *conversation*, not file edits, today). codex `turn_diff_tracker` + `codex apply` anchor; opencode snapshot diff; hermes display diff; pi — |
+| 41 | [structured cited memories](41-cited-memories.md) | ⬜ | **Cited** multi-phase memory writes (citations + workspace roots) + explicit update/drop, injection-scanned on write **and** recall. codex `memories/` anchor; hermes mem0 (no citations); opencode/pi session-only |
+| 42 | [pre/post-compact hooks + remote fallback](42-compact-hooks.md) | ⬜ | **pre/post-compact Hook** points + a **remote-compaction fallback** (auto-trigger on token budget already ships; only telemetry surrounds it today). codex hooks + `compact_remote` anchor; opencode/pi before-compact events; hermes summarizer-fallback |
+
+**H — Platform, provider & operability**
+
+| # | Feature | Status | Differentiator |
+|---|---------|--------|---------|
+| 43 | [MCP depth: resources/prompts/OAuth/SSE](43-mcp-depth.md) | ⬜ | Full MCP **client** (resources / prompts / OAuth / real SSE / sampling) + a rich **server** exposing individual tools, over today's tool-only client and single-`run` server. codex rmcp anchor; opencode OAuth; hermes SSRF/injection guards; pi — |
+| 44 | [config profiles + runtime flags](44-config-profiles.md) | ⬜ | Named **runtime profiles** (readonly / review / yolo) + a flag registry that can only ever **narrow** compile-time cargo features. codex profiles + `features` anchor; opencode agents + flags; hermes home-profiles; pi — |
+| 45 | [doctor / self-diagnostics](45-doctor.md) | ⬜ | A `Diagnostic` seam + a `doctor` subcommand running env/config health checks (pass/warn/fail, **secret-safe**), beyond today's file-only `--check-config`. codex `codex doctor` anchor; hermes `hermes doctor`; opencode/pi — |
+| 46 | [guardian — runtime action safety gate](46-guardian.md) | ⬜ | An LLM **safety review** of a tool call *before* execution (allow / block / needs-approval + rationale), composing Verifier + Scanner + Policy, failing **closed**. codex `guardian/` anchor; hermes `_smart_approve`; opencode/pi — |
+| 47 | [reasoning-effort / thinking controls](47-reasoning-controls.md) | ⬜ | A provider-agnostic **`reasoning`** request contract (effort + summary) mapped to Anthropic extended-thinking / OpenAI reasoning, with reasoning-token accounting — agent-seddon has none today (all three other peers ship it; codex is the Rust anchor) |
+| 48 | [granular / tiered approval + elevate](48-granular-approval.md) | ⬜ | A **tiered** `AskForApproval` Policy variant (never / on-failure / on-request / unless-trusted / granular) + a scoped, non-persistent **`elevate`** + remembered trust — the *how/when you're asked* layer (distinct from 35's classifier and 36's ladder). codex anchor; opencode last-match rules; hermes manual/smart/off; pi — |
+| 49 | [fuzzy file-search / @-completion](49-file-search.md) | ⬜ | A ranked, typo-tolerant **fuzzy filename** matcher powering `@`-mention completion (bench-gated hot path), routing into spec-17 resolution. codex `file-search` anchor; pi TUI fuzzy; opencode native matcher; hermes — |
+| 50 | [secret store / keyring credentials](50-secret-store.md) | ⬜ | **Keyring-backed** credentials + OAuth login, lifting the "hand out a secret, never leak it" invariant into a typed, seam-wide, metered guarantee. codex keyring + OAuth anchor; opencode/pi plaintext `auth.json`; hermes keychain-read |
+
+**Status: the next-20 (31–50) is spec-complete** — every doc is a ⬜ four-peer
+design-of-record (codex is the anchor for most), one file each, ready to implement
+one-PR-each. **Deliberately not mirrored** (outside the seam / benchmark / leak-test
+model this program is built on): code-mode / V8 programmatic tool-calls, the
+plugin·apps marketplace & connectors, realtime / voice, the desktop app-server,
+personality / pets / theming, image-generation, and cloud-tasks.
+
 ## Open follow-ups (accumulated, small)
 
 - **edit fuzzy** — currently line-oriented with ASCII-class folds (quotes, dashes,
@@ -135,4 +198,5 @@ it), not any unbuilt spec.
   asserts in ONE `#[test]`); async/`tokio::fs` pools buffers, so leak tests are
   **iteration-based** (flat live blocks across N runs), not one-shot.
 - Gate stays `nix flake check`. Peer sources are read-only clones under
-  `/home/das/Downloads/{pi,hermes-agent,opencode}`.
+  `/home/das/Downloads/{pi,hermes-agent,opencode,codex}` (codex's Rust workspace is
+  under `codex/codex-rs/`).

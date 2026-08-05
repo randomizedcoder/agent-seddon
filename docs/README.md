@@ -15,7 +15,7 @@ Everything in `docs/`, grouped by what you are trying to do. Three entry points:
 | [`../DESIGN.md`](../DESIGN.md) | You want the rationale — why the seams are where they are, the loop, the layered memory model |
 | [`architecture.md`](architecture.md) | You want the boundary map: which crate owns what |
 | [`extending.md`](extending.md) | You want to add a provider, tool, memory, context strategy, policy or transport |
-| [`features-comparison.md`](features-comparison.md) | You want the full comparison against pi, hermes-agent and opencode (dated snapshot) |
+| [`features-comparison.md`](features-comparison.md) | You want the full comparison against pi, hermes-agent, opencode and codex (dated snapshot) |
 | [`../CLAUDE.md`](../CLAUDE.md) | You are contributing — conventions, the security model, the PR shape |
 
 ## Operating it
@@ -121,14 +121,18 @@ implementation phase, distinct from the shipped `components/` docs. Each carries
 
 ## The parity program
 
-Thirty per-feature specs in [`parity/`](parity/README.md). Each was written by
-reading the corresponding implementation **and its test suite** in pi,
-hermes-agent and opencode, then laying out an `#[rstest]` plan intended to match
-them — so each spec doubles as an honest record of where the peers were ahead.
+Fifty per-feature specs in [`parity/`](parity/README.md). Each was written by
+reading the corresponding implementation **and its test suite** in the peer
+harnesses — pi, hermes-agent, opencode, and (for specs 31–50) **codex**, the
+~130-crate Rust agent that is by far the deepest peer — then laying out an
+`#[rstest]` plan intended to match them, so each spec doubles as an honest record of
+where the peers were ahead.
 
-They are design-of-record: written before implementation, and the status table in
-[`parity/README.md`](parity/README.md) tracks which shipped, which are partial, and
-what remains. The accumulated open follow-ups are at the foot of that page.
+Specs **01–30** are shipped; specs **31–50** are the **codex-driven depth** round —
+design-of-record only, not yet built. They are design-of-record: written before
+implementation, and the status table in [`parity/README.md`](parity/README.md)
+tracks which shipped, which are partial, and what remains. The accumulated open
+follow-ups are at the foot of that page.
 
 ## Conventions
 
