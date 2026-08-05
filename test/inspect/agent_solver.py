@@ -46,9 +46,10 @@ def _agent_toml(work_dir: Path, scratch: Path, tools: str) -> str:
     tools_toml = ", ".join(f'"{t.strip()}"' for t in tools.split(",") if t.strip())
     system_prompt = (
         "You are a capable coding/reasoning agent. Use your tools when they help "
-        "(read_file, write_file, edit, ls, grep, find, bash), then, after the "
-        "'=== ANSWER ===' banner, give ONLY the final answer the task asked for — no "
-        "preamble, no explanation."
+        "(read_file, write_file, edit, ls, grep, find, bash). As soon as you know the "
+        "answer, STOP calling tools and finish the turn — do not keep exploring or "
+        "re-checking once the answer is determined. Then, after the '=== ANSWER ===' "
+        "banner, give ONLY the final answer the task asked for — no preamble, no explanation."
     )
     return f"""[agent]
 provider = "openai-compat"
@@ -92,21 +93,20 @@ enabled = false
 def _extract_answer(stdout: str) -> str:
     """Return the text after the `=== ANSWER ===` banner (telemetry line dropped).
 
-    Falls back to the whole stdout if the banner is absent (defensive — matches the
-    promptfoo bridge's behaviour).
+    Takes text after the LAST banner occurrence: models often echo the banner phrase in
+    their own answer (the system prompt names it), so the harness banner + the echoed one
+    both appear — the real answer is after the last. Falls back to the whole stdout if the
+    banner is absent (defensive — matches the promptfoo bridge's behaviour).
     """
     lines = stdout.splitlines()
-    out: list[str] = []
-    seen = False
-    for line in lines:
-        if not seen:
-            if _ANSI.sub("", line).strip() == _ANSWER_BANNER:
-                seen = True
-            continue
-        if _TELEMETRY.match(line.strip()):
-            continue
-        out.append(line)
-    answer = "\n".join(out).strip()
+    last = -1
+    for i, line in enumerate(lines):
+        if _ANSI.sub("", line).strip() == _ANSWER_BANNER:
+            last = i
+    if last < 0:
+        return stdout.strip()
+    tail = [line for line in lines[last + 1 :] if not _TELEMETRY.match(line.strip())]
+    answer = "\n".join(tail).strip()
     return answer if answer else stdout.strip()
 
 
