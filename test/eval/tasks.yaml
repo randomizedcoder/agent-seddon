@@ -1,0 +1,100 @@
+# Coding-task corpus for `nix run .#eval` (docs/eval.md).
+#
+# A promptfoo `tests` file: each entry provides `vars` (rendered into the prompt via the
+# config's `prompts: ["{{task}}"]`) and `assert`ions. The grader model for `llm-rubric`
+# comes from the harness (defaultTest in the generated config). Coding tasks assert BOTH
+# deterministically (assert_compiles.js compiles — and, with `expect_output`, runs — the
+# file the agent actually wrote) AND with an `llm-rubric` over the produced code.
+#
+# Keep this small and honest; grow it as the agent's reach grows. `lang`/`entry`
+# (+ optional `expect_output`) are consumed by assert_compiles.js.
+
+- description: hello-world in C
+  vars:
+    lang: c
+    entry: hello.c
+    expect_output: "Hello, World!"
+    task: "Using your tools, create a file named hello.c in the current directory: a complete, compilable C program that prints exactly `Hello, World!` followed by a single newline, and nothing else. Create only that one file; do not run it."
+  assert:
+    - type: javascript
+      value: file://assert_compiles.js
+    - type: llm-rubric
+      value: "The produced C source is a complete, idiomatic hello-world program that prints exactly 'Hello, World!' and nothing extra."
+
+- description: hello-world in Go
+  vars:
+    lang: go
+    entry: hello.go
+    expect_output: "Hello, World!"
+    task: "Using your tools, create a file named hello.go in the current directory: a complete, compilable Go program (package main) that prints exactly `Hello, World!` followed by a single newline, and nothing else. Create only that one file; do not run it."
+  assert:
+    - type: javascript
+      value: file://assert_compiles.js
+    - type: llm-rubric
+      value: "The produced Go source is a complete, idiomatic hello-world program in package main that prints exactly 'Hello, World!'."
+
+- description: hello-world in Rust
+  vars:
+    lang: rust
+    entry: hello.rs
+    expect_output: "Hello, World!"
+    task: "Using your tools, create a file named hello.rs in the current directory: a complete, compilable Rust program with a main function that prints exactly `Hello, World!` followed by a single newline, and nothing else. Create only that one file; do not run it."
+  assert:
+    - type: javascript
+      value: file://assert_compiles.js
+    - type: llm-rubric
+      value: "The produced Rust source is a complete, idiomatic hello-world program with fn main that prints exactly 'Hello, World!'."
+
+- description: FizzBuzz in C
+  vars:
+    lang: c
+    entry: fizzbuzz.c
+    expect_output: "1\n2\nFizz\n4\nBuzz\nFizz\n7\n8\nFizz\nBuzz\n11\nFizz\n13\n14\nFizzBuzz"
+    task: "Using your tools, create a file named fizzbuzz.c in the current directory: a complete, compilable C program that prints the integers 1 through 15, one per line, except multiples of 3 print Fizz, multiples of 5 print Buzz, and multiples of both print FizzBuzz. Create only that one file; do not run it."
+  assert:
+    - type: javascript
+      value: file://assert_compiles.js
+    - type: llm-rubric
+      value: "The produced C source correctly implements classic FizzBuzz for 1..15."
+
+- description: FizzBuzz in Rust
+  vars:
+    lang: rust
+    entry: fizzbuzz.rs
+    expect_output: "1\n2\nFizz\n4\nBuzz\nFizz\n7\n8\nFizz\nBuzz\n11\nFizz\n13\n14\nFizzBuzz"
+    task: "Using your tools, create a file named fizzbuzz.rs in the current directory: a complete, compilable Rust program with a main function that prints the integers 1 through 15, one per line, except multiples of 3 print Fizz, multiples of 5 print Buzz, and multiples of both print FizzBuzz. Create only that one file; do not run it."
+  assert:
+    - type: javascript
+      value: file://assert_compiles.js
+    - type: llm-rubric
+      value: "The produced Rust source correctly implements classic FizzBuzz for 1..15."
+
+- description: reverse a singly linked list in Rust (compile + review)
+  vars:
+    lang: rust
+    entry: reverse.rs
+    task: "Using your tools, create a file named reverse.rs in the current directory: a complete, compilable Rust program that defines a singly linked list of i32 and a function to reverse it iteratively, with a main that builds [1,2,3], reverses it, and prints the reversed values. Create only that one file; do not run it."
+  assert:
+    - type: javascript
+      value: file://assert_compiles.js
+    - type: llm-rubric
+      value: "The Rust code defines a singly linked list and reverses it iteratively (not by collecting into a Vec and calling .reverse()); it compiles and the logic is correct."
+
+- description: factorial in Python (compile + run)
+  vars:
+    lang: python
+    entry: fact.py
+    expect_output: "120"
+    task: "Using your tools, create a file named fact.py in the current directory: a Python 3 program defining a recursive factorial(n) and printing factorial(5) on its own line. Create only that one file; do not run it."
+  assert:
+    - type: javascript
+      value: file://assert_compiles.js
+    - type: llm-rubric
+      value: "The Python code defines a correct recursive factorial and prints 120 for factorial(5)."
+
+- description: explain the Rust ? operator (no file; rubric only)
+  vars:
+    task: "In one or two sentences, explain what the Rust `?` operator does in a function that returns Result."
+  assert:
+    - type: llm-rubric
+      value: "The answer correctly explains that `?` propagates errors: it unwraps Ok/Some, and on Err/None returns early from the function (after From-converting the error for Result). It should NOT claim it panics."

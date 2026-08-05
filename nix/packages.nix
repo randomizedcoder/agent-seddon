@@ -45,6 +45,7 @@
     versions.curl
     versions.ripgrep # `grep` tool's fast path (falls back to the in-process walk)
     versions.expect # drives the real agent over a pty (test/expect/, `nix run .#e2e-expect`)
+    versions.promptfoo # LLM eval + red-team (`nix run .#eval` / `.#redteam`; test/eval/)
 
     # Nix.
     versions.nixfmt

@@ -31,6 +31,7 @@
   e2e-live,
   e2e-expect,
   e2e-multi,
+  eval,
 }:
 pkgs.writeShellApplication {
   name = "integration";
@@ -44,6 +45,7 @@ pkgs.writeShellApplication {
     e2e-live
     e2e-expect
     e2e-multi
+    eval
   ];
   text = ''
     set -uo pipefail
@@ -95,6 +97,14 @@ pkgs.writeShellApplication {
         run_step "e2e-live — one-shot real model"    e2e-live
         run_step "e2e-expect — multi-turn REPL"      e2e-expect
         run_step "e2e-multi — concurrent + judge"    e2e-multi
+        # `eval` (promptfoo quality) additionally needs a judge key — include it only
+        # when that is present, else note the skip (its own run would refuse hard).
+        if [ -r "''${AGENT_E2E_JUDGE_API_KEY_FILE:-$HOME/Downloads/runpod/glm/glm-api-key}" ]; then
+          run_step "eval — promptfoo coding-task quality" eval
+        else
+          echo ""
+          echo "integration: SKIP eval — no judge key (set AGENT_E2E_JUDGE_API_KEY_FILE)."
+        fi
       else
         echo ""
         echo "integration: SKIP model tier — no reachable model at AGENT_E2E_BASE_URL."

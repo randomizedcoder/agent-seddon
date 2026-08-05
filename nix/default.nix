@@ -177,6 +177,31 @@ let
       ;
   };
 
+  # `nix run .#eval` — grade the real agent on a coding-task corpus with promptfoo
+  # (exec-provider one-shot + deterministic compile assert + GLM llm-rubric). Not a
+  # check: needs a generator model, a judge endpoint, and a socket. See nix/eval.nix.
+  eval = import ./eval.nix {
+    inherit
+      pkgs
+      lib
+      versions
+      agent
+      ;
+    inherit (nixLib) harness;
+  };
+
+  # `nix run .#redteam` — adversarially probe the agent (defenses active) with
+  # promptfoo's untrusted-model suite. Not a check (same reasons). See nix/redteam.nix.
+  redteam = import ./redteam.nix {
+    inherit
+      pkgs
+      lib
+      versions
+      agent
+      ;
+    inherit (nixLib) harness;
+  };
+
   # `nix run .#coverage` — on-demand source-based coverage report (lcov + HTML +
   # summary) against the working tree. Reporting only; the gate keeps the
   # instrumented path building via the non-gating `coverage` check.
@@ -280,6 +305,7 @@ let
       e2e-live
       e2e-expect
       e2e-multi
+      eval
       ;
     inherit (nixLib) harness;
   };
@@ -299,6 +325,7 @@ in
 {
   packages = {
     inherit agent go-ast;
+    inherit (versions) promptfoo;
     default = agent;
   };
 
@@ -323,6 +350,8 @@ in
         e2e-expect
         e2e-multi
         review-eval
+        eval
+        redteam
         loadtest
         loadtest-loop
         loadtest-wire
