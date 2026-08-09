@@ -3370,6 +3370,50 @@ impl From<pb::DimensionSummary> for agent_core::DimensionSummary {
     }
 }
 
+// --- Digest ledger (cognition-graph 02/04) ----------------------------------
+
+impl From<agent_core::Digest> for pb::Digest {
+    fn from(d: agent_core::Digest) -> Self {
+        pb::Digest {
+            session_id: d.session_id,
+            user_id: d.user_id,
+            seq: d.seq,
+            kind: d.kind.as_str().to_string(),
+            text: d.text,
+            keywords: d.keywords,
+            mode: d.mode,
+            model: d.model,
+            ts_ms: d.ts_ms,
+            duration_ms: d.duration_ms,
+            tokens: d.tokens,
+        }
+    }
+}
+
+/// Wire→core is fallible: an unknown `kind` is rejected (fail closed — the wire
+/// peer is untrusted; a discriminator we don't know must never be stored or
+/// re-injected). Ids/sizes are re-validated by the store's sanitizers.
+impl TryFrom<pb::Digest> for agent_core::Digest {
+    type Error = ConvertError;
+    fn try_from(d: pb::Digest) -> Result<Self, Self::Error> {
+        let kind = agent_core::DigestKind::parse(&d.kind)
+            .ok_or(ConvertError::MissingField("Digest.kind"))?;
+        Ok(agent_core::Digest {
+            session_id: d.session_id,
+            user_id: d.user_id,
+            seq: d.seq,
+            kind,
+            text: d.text,
+            keywords: d.keywords,
+            mode: d.mode,
+            model: d.model,
+            ts_ms: d.ts_ms,
+            duration_ms: d.duration_ms,
+            tokens: d.tokens,
+        })
+    }
+}
+
 // --- PromptStore (docs/design/portal) --------------------------------------
 
 impl From<agent_core::PromptKind> for pb::PromptKind {

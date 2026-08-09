@@ -26,6 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "proto/agent/v1/mode.proto",
         "proto/agent/v1/review.proto",
         "proto/agent/v1/dimension.proto",
+        "proto/agent/v1/digest.proto",
         "proto/agent/v1/prompt.proto",
         "proto/agent/v1/metrics_proxy.proto",
         "proto/agent/v1/agent_session.proto",

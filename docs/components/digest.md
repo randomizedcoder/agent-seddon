@@ -40,7 +40,7 @@ transcript stays ground truth; digests are a cache.
 
 ```toml
 [digest]
-store = "clickhouse"     # "" | "clickhouse" | "sqlite"
+store = "clickhouse"     # "" | "clickhouse" | "sqlite" | "grpc" (central ledger)
 path = ".agent/digests.sqlite3"
 summary_max_tokens = 512
 facts_max_tokens = 256
@@ -64,4 +64,4 @@ pure functions of `(session, seq)`); sqlite in-memory is the ephemeral harness
 
 Deferred (STATUS): gate-alternatives rows + `role = summarize` routing (land
 with the increment-04 anchor executor); telemetry mirror for sqlite
-deployments; `DigestService` gRPC backend (increment 04).
+deployments; ~~`DigestService` gRPC backend~~ — shipped: `--serve-digest` + `[digest] store = "grpc"`.

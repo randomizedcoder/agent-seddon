@@ -527,7 +527,7 @@ cooldown_secs       = 30          # how long a breaker stays open before re-prob
 # runs. See docs/design/cognition-graph/02-background-distiller.md.
 #
 # [digest]
-# store = "clickhouse"               # "" (off) | "clickhouse" | "sqlite"
+# store = "clickhouse"               # "" (off) | "clickhouse" | "sqlite" | "grpc"
 # path = ".agent/digests.sqlite3"    # sqlite backend only
 # summary_max_tokens = 512
 # facts_max_tokens = 256

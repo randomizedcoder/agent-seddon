@@ -530,6 +530,14 @@ pub async fn build_agent_with(
         "sqlite" => Some(Arc::new(agent_digest::SqliteDigests::open(expand_tilde(
             &cfg.digest.path,
         ))?)),
+        #[cfg(feature = "grpc")]
+        "grpc" => {
+            let ep = crate::registry::grpc_client_endpoint(
+                &cfg.grpc.digest.endpoint,
+                agent_grpc::constants::DIGEST,
+            );
+            Some(Arc::new(agent_grpc::client::GrpcDigests::connect(&ep)?))
+        }
         other => anyhow::bail!("unknown [digest] store `{other}`"),
     };
     #[cfg(not(feature = "digest"))]

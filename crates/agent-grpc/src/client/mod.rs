@@ -39,6 +39,7 @@ macro_rules! unary {
 }
 
 mod context;
+mod digest;
 mod dimension;
 mod embed;
 mod exec;
@@ -64,6 +65,7 @@ mod tools;
 mod web;
 
 pub use context::*;
+pub use digest::*;
 pub use dimension::*;
 pub use embed::*;
 pub use exec::*;

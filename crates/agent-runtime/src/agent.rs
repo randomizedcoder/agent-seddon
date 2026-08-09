@@ -704,6 +704,11 @@ impl Agent {
         self.dimension_store.clone()
     }
 
+    /// The digest ledger, if `[digest] store` is configured (`--serve-digest`).
+    pub fn digest_store(&self) -> Option<Arc<dyn agent_core::DigestStore>> {
+        self.digests.clone()
+    }
+
     pub fn prompt_store(&self) -> Option<Arc<dyn agent_core::PromptStore>> {
         self.prompt_store.clone()
     }

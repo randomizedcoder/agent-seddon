@@ -1590,6 +1590,8 @@ pub struct GrpcCfg {
     #[serde(default)]
     pub metrics_proxy: GrpcSeamCfg,
     #[serde(default)]
+    pub digest: GrpcSeamCfg,
+    #[serde(default)]
     pub review: GrpcSeamCfg,
     /// Not a seam: the opt-in `agent --serve-sessions` gateway (docs/design/portal),
     /// which hosts the `SessionRegistryService` + a *driving* `AgentSessionService`
