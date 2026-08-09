@@ -185,7 +185,7 @@ mod tests {
     async fn positive_node_types_lists_the_builtin_palette() {
         let dir = tempdir();
         let types = store_in(&dir).node_types().await.unwrap();
-        assert_eq!(types.len(), 6);
+        assert_eq!(types.len(), 9);
         assert!(types.iter().any(|t| t.node_type == "critic_gate"));
     }
 }

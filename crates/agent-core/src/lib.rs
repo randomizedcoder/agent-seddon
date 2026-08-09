@@ -1758,6 +1758,19 @@ pub const MAX_GRAPH_PARAMS_BYTES: usize = 16 * 1024;
 /// Size cap on a graph document **before parsing** (textproto bombs).
 pub const MAX_GRAPH_DOC_BYTES: usize = 256 * 1024;
 
+/// Branch fan-out bounds (increment 05): branches multiply LLM spend, so a
+/// hostile/buggy document must not fan a turn into an unbounded fleet.
+/// Hard ceiling on one `split`'s out-degree.
+pub const MAX_SPLIT_BRANCHES: usize = 5;
+/// A `split` without a `max_branches` param allows this many branches.
+pub const DEFAULT_SPLIT_BRANCHES: usize = 3;
+/// Total branches across every split in a document (the nested-split budget;
+/// v1 rejects nesting outright, but the cap is the standing contract).
+pub const MAX_ANCHOR_BRANCHES: usize = 8;
+/// Clamp on a `join` node's `timeout_ms` (attacker-controlled config must
+/// never program an unbounded wait).
+pub const MAX_JOIN_TIMEOUT_MS: u64 = 300_000;
+
 /// The three fixed slots in the run loop where a sub-graph executes. Edge
 /// endpoints may name an anchor; nodes may not (the `anchor.` prefix is
 /// reserved).
@@ -1891,6 +1904,10 @@ pub enum GraphIssueCode {
     BadCapabilityRef,
     /// The `main` edges form a cycle between nodes.
     MainCycle,
+    /// A malformed fork: over-cap fan-out, branches not meeting at one shared
+    /// `join`, a cross-branch edge, a nested `split` (deferred), an orphan
+    /// `join`/`merge`, or a `quorum` larger than the branch count.
+    BadBranching,
 }
 
 impl GraphIssueCode {
@@ -1906,6 +1923,7 @@ impl GraphIssueCode {
             Self::BackgroundNotFromDelivery => "background_not_from_delivery",
             Self::BadCapabilityRef => "bad_capability_ref",
             Self::MainCycle => "main_cycle",
+            Self::BadBranching => "bad_branching",
         }
     }
     /// Parse a wire discriminator; unknown ⇒ `None` (fail closed).
@@ -1921,6 +1939,7 @@ impl GraphIssueCode {
             "background_not_from_delivery" => Some(Self::BackgroundNotFromDelivery),
             "bad_capability_ref" => Some(Self::BadCapabilityRef),
             "main_cycle" => Some(Self::MainCycle),
+            "bad_branching" => Some(Self::BadBranching),
             _ => None,
         }
     }
@@ -4982,6 +5001,7 @@ mod tests {
             GraphIssueCode::BackgroundNotFromDelivery,
             GraphIssueCode::BadCapabilityRef,
             GraphIssueCode::MainCycle,
+            GraphIssueCode::BadBranching,
         ] {
             assert_eq!(GraphIssueCode::parse(code.as_str()), Some(code));
         }

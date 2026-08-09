@@ -79,7 +79,7 @@ async fn positive_describe_node_types_serves_the_palette(#[case] transport: Tran
     let client = GrpcGraphs::connect(&dial).unwrap();
 
     let types = client.node_types().await.expect("palette");
-    assert_eq!(types.len(), 6);
+    assert_eq!(types.len(), 9);
     let gate = types.iter().find(|t| t.node_type == "critic_gate").unwrap();
     assert_eq!(gate.type_version, 1);
     // The params JSON Schema survives the JsonValue hop as a closed object.

@@ -26,6 +26,11 @@ enum ParamKind {
     UInt { min: u64, max: u64 },
     /// A number within `[0.0, 1.0]`.
     Fraction,
+    /// Free prose (a branch lens, a rubric line) — length-capped, and always
+    /// treated as quoted DATA at use, never instructions to trust.
+    Text { max_len: usize },
+    /// A boolean flag.
+    Bool,
 }
 
 /// One accepted param key. Every param is optional — node factories fall back
@@ -131,6 +136,25 @@ fn check_value(spec: &ParamSpec, v: &Value) -> Result<(), String> {
             }
             Ok(())
         }
+        ParamKind::Text { max_len } => {
+            let s = v
+                .as_str()
+                .ok_or_else(|| format!("`{}` must be a string", spec.key))?;
+            if s.len() > max_len {
+                return Err(format!(
+                    "`{}` is {} bytes (cap {max_len})",
+                    spec.key,
+                    s.len()
+                ));
+            }
+            Ok(())
+        }
+        ParamKind::Bool => {
+            if !v.is_boolean() {
+                return Err(format!("`{}` must be a boolean", spec.key));
+            }
+            Ok(())
+        }
     }
 }
 
@@ -159,6 +183,13 @@ fn params_schema(specs: &[ParamSpec]) -> Value {
                 p.insert("minimum".into(), json!(0.0));
                 p.insert("maximum".into(), json!(1.0));
             }
+            ParamKind::Text { max_len } => {
+                p.insert("type".into(), json!("string"));
+                p.insert("maxLength".into(), json!(max_len));
+            }
+            ParamKind::Bool => {
+                p.insert("type".into(), json!("boolean"));
+            }
         }
         props.insert(s.key.to_string(), Value::Object(p));
     }
@@ -176,8 +207,9 @@ fn port(name: &str, kind: &str) -> NodePort {
     }
 }
 
-/// The registry of node types this build understands. v1 ships the six types
-/// that re-express increments 01–03; increment 05 adds `split`/`join`/`merge`.
+/// The registry of node types this build understands: the six types that
+/// re-express increments 01–03 plus increment 05's fork/join set
+/// (`split`/`join`/`merge`).
 /// New types follow the seam-impl recipe: implement the node, add its table
 /// here, and `every_node_type_has_a_schema` keeps the palette honest.
 pub struct NodeTypeRegistry {
@@ -210,11 +242,20 @@ impl NodeTypeRegistry {
             );
         };
 
-        const GENERATE: &[ParamSpec] = &[ParamSpec {
-            key: "provider",
-            kind: ParamKind::Name,
-            doc: "Configured provider name; empty = the session's main provider.",
-        }];
+        const GENERATE: &[ParamSpec] = &[
+            ParamSpec {
+                key: "provider",
+                kind: ParamKind::Name,
+                doc: "Configured provider name; empty = the session's main provider.",
+            },
+            ParamSpec {
+                key: "lens",
+                kind: ParamKind::Text { max_len: 2048 },
+                doc: "Branch focus appended at the prompt TAIL (cache-safe), e.g. \
+                      \"correctness and strict safety\". Quoted data, never trusted \
+                      instructions.",
+            },
+        ];
         add(
             "generate",
             "Generate",
@@ -322,6 +363,96 @@ impl NodeTypeRegistry {
             COMPACT_ASSEMBLE,
         );
 
+        const SPLIT: &[ParamSpec] = &[ParamSpec {
+            key: "max_branches",
+            kind: ParamKind::UInt {
+                min: 1,
+                max: agent_core::MAX_SPLIT_BRANCHES as u64,
+            },
+            doc: "Fan-out allowance for this split (out-degree must not exceed it; \
+                  branches multiply LLM spend).",
+        }];
+        add(
+            "split",
+            "Split",
+            "Fork: duplicate the flowing context down each main out-edge as a concurrent \
+             branch (lenses live on the branches' own nodes).",
+            vec![port("context", "context")],
+            vec![port("branch", "context")],
+            SPLIT,
+        );
+
+        const JOIN: &[ParamSpec] = &[
+            ParamSpec {
+                key: "policy",
+                kind: ParamKind::Choice(&["all", "any", "quorum"]),
+                doc: "Activation: wait for every branch, the first, or `quorum_k` of them; \
+                      satisfied ⇒ stragglers are cancelled.",
+            },
+            ParamSpec {
+                key: "quorum_k",
+                kind: ParamKind::UInt {
+                    min: 1,
+                    max: agent_core::MAX_ANCHOR_BRANCHES as u64,
+                },
+                doc: "Branches required when policy = quorum.",
+            },
+            ParamSpec {
+                key: "timeout_ms",
+                kind: ParamKind::UInt {
+                    min: 1,
+                    max: agent_core::MAX_JOIN_TIMEOUT_MS,
+                },
+                doc: "Wall-clock bound on the wait (clamped server-side).",
+            },
+            ParamSpec {
+                key: "on_timeout",
+                kind: ParamKind::Choice(&["partial", "fail"]),
+                doc: "At the deadline: proceed with the finished branches (≥1), or fall \
+                      back to the anchor's built-in behavior.",
+            },
+        ];
+        add(
+            "join",
+            "Join",
+            "Fan-in: Go-style wait on the split's branches per the activation policy; \
+             unfinished branches are cancelled once it is satisfied.",
+            vec![port("branch", "context")],
+            vec![port("branches", "branches")],
+            JOIN,
+        );
+
+        const MERGE: &[ParamSpec] = &[
+            ParamSpec {
+                key: "strategy",
+                kind: ParamKind::Choice(&["compare", "synthesize", "concat"]),
+                doc: "compare = a judge picks the best branch (position-swapped); \
+                      synthesize = an aggregator combines the strongest elements; \
+                      concat = mechanical, no LLM.",
+            },
+            ParamSpec {
+                key: "judge",
+                kind: ParamKind::Name,
+                doc: "Configured provider name of the judge/aggregator (also attachable \
+                      via a capability edge). Should be a different model family.",
+            },
+            ParamSpec {
+                key: "record_losers",
+                kind: ParamKind::Bool,
+                doc: "File non-chosen branches as `alternatives` digest rows with a \
+                      reconsider-when trigger (a forked exploration is never wasted).",
+            },
+        ];
+        add(
+            "merge",
+            "Merge",
+            "Consume the joined branch results into one outcome: pick the best, combine \
+             ideas from several, or concatenate.",
+            vec![port("branches", "branches")],
+            vec![port("response", "response")],
+            MERGE,
+        );
+
         Self { types }
     }
 
@@ -350,7 +481,7 @@ mod tests {
     fn positive_every_node_type_has_a_schema() {
         let reg = NodeTypeRegistry::builtin();
         let schemas = reg.schemas();
-        assert_eq!(schemas.len(), 6);
+        assert_eq!(schemas.len(), 9);
         for s in &schemas {
             assert!(!s.title.is_empty() && !s.doc.is_empty(), "{}", s.node_type);
             assert_eq!(s.type_version, 1);

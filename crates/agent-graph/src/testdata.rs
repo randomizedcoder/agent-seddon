@@ -1,9 +1,9 @@
 //! Deterministic graph-document corpus (the standing testdata obligation):
-//! the graded valid documents (`simple`/`intermediate` — `advanced` lands with
-//! increment 05's `split`/`join`/`merge` node set) plus **one invalid document
-//! per typed load-error class**, shared by the local validation tables, the
-//! gRPC `Validate` round-trips, and the load/validate bench. Pure functions —
-//! no clock, no randomness — so iai instruction counts reproduce.
+//! the graded valid documents (`simple`/`intermediate`/`advanced`) plus **one
+//! invalid document per typed load-error class**, shared by the local
+//! validation tables, the gRPC `Validate` round-trips, and the load/validate
+//! bench. Pure functions — no clock, no randomness — so iai instruction counts
+//! reproduce.
 
 use agent_core::{
     GraphDoc, GraphEdge, GraphEdgeKind, GraphIssueCode, GraphNode, GRAPH_ANCHOR_COMPACTION,
@@ -80,6 +80,89 @@ pub fn intermediate() -> GraphDoc {
     doc
 }
 
+/// The canonical fork/join document (increment 05,
+/// `config/cognition/advanced.textproto`): the implementation forks into a
+/// **correctness & strict safety** branch (carrying its own gate loop —
+/// branches need not be symmetric) and a **performance optimization** branch;
+/// the join waits for both; the merge synthesizes (losers filed as
+/// alternatives); the merged result still passes the final consensus gate, and
+/// the full background/compaction flow from [`intermediate`] applies.
+pub fn advanced() -> GraphDoc {
+    let mut doc = GraphDoc {
+        version: GRAPH_VERSION,
+        ..GraphDoc::default()
+    };
+    doc.nodes
+        .insert("split_impl".into(), node("split", serde_json::Value::Null));
+    doc.nodes.insert(
+        "gen_safe".into(),
+        node(
+            "generate",
+            json!({ "lens": "correctness and strict safety" }),
+        ),
+    );
+    doc.nodes.insert(
+        "gate_safe".into(),
+        node("critic_gate", json!({ "critic": "glm", "max_rounds": 2 })),
+    );
+    doc.nodes.insert(
+        "gen_perf".into(),
+        node("generate", json!({ "lens": "performance optimization" })),
+    );
+    doc.nodes.insert(
+        "join_impl".into(),
+        node(
+            "join",
+            json!({ "policy": "all", "timeout_ms": 120_000, "on_timeout": "partial" }),
+        ),
+    );
+    doc.nodes.insert(
+        "merge_impl".into(),
+        node(
+            "merge",
+            json!({ "strategy": "synthesize", "judge": "glm", "record_losers": true }),
+        ),
+    );
+    doc.nodes.insert(
+        "gate".into(),
+        node("critic_gate", json!({ "critic": "glm", "max_rounds": 2 })),
+    );
+    doc.nodes.insert(
+        "summarize".into(),
+        node("distill_summary", json!({ "max_tokens": 512 })),
+    );
+    doc.nodes.insert(
+        "facts".into(),
+        node("distill_facts", json!({ "max_tokens": 256 })),
+    );
+    doc.nodes.insert(
+        "compact".into(),
+        node(
+            "compact_assemble",
+            json!({ "relevance": "keyword", "min_coverage": 0.6 }),
+        ),
+    );
+    doc.edges = vec![
+        edge(GRAPH_ANCHOR_RESPONSE, "split_impl", GraphEdgeKind::Main),
+        edge("split_impl", "gen_safe", GraphEdgeKind::Main),
+        edge("gen_safe", "gate_safe", GraphEdgeKind::Main),
+        edge("gate_safe", "join_impl", GraphEdgeKind::Main),
+        edge("split_impl", "gen_perf", GraphEdgeKind::Main),
+        edge("gen_perf", "join_impl", GraphEdgeKind::Main),
+        edge("join_impl", "merge_impl", GraphEdgeKind::Main),
+        edge("merge_impl", "gate", GraphEdgeKind::Main),
+        edge("glm", "gate", GraphEdgeKind::Capability),
+        edge(
+            GRAPH_ANCHOR_DELIVERY,
+            "summarize",
+            GraphEdgeKind::Background,
+        ),
+        edge(GRAPH_ANCHOR_DELIVERY, "facts", GraphEdgeKind::Background),
+        edge(GRAPH_ANCHOR_COMPACTION, "compact", GraphEdgeKind::Main),
+    ];
+    doc
+}
+
 /// One invalid document per typed load-error class, labelled with the exact
 /// [`GraphIssueCode`] it must produce. The order is fixed (stable test names).
 pub fn invalid_docs() -> Vec<(GraphIssueCode, GraphDoc)> {
@@ -146,6 +229,14 @@ pub fn invalid_docs() -> Vec<(GraphIssueCode, GraphDoc)> {
         .push(edge("gate", "generate", GraphEdgeKind::Main));
     docs.push((GraphIssueCode::MainCycle, cycle));
 
+    // A cross-branch edge: the safety branch's gate feeding the perf branch's
+    // generator (branches must stay isolated until the join).
+    let mut cross_branch = advanced();
+    cross_branch
+        .edges
+        .push(edge("gate_safe", "gen_perf", GraphEdgeKind::Main));
+    docs.push((GraphIssueCode::BadBranching, cross_branch));
+
     docs
 }
 
@@ -167,7 +258,8 @@ mod tests {
     fn positive_corpus_is_deterministic() {
         assert_eq!(simple(), simple());
         assert_eq!(intermediate(), intermediate());
-        assert_eq!(invalid_docs().len(), 10, "one per typed class");
+        assert_eq!(advanced(), advanced());
+        assert_eq!(invalid_docs().len(), 11, "one per typed class");
     }
 
     #[test]
@@ -184,6 +276,7 @@ mod tests {
             GraphIssueCode::BackgroundNotFromDelivery,
             GraphIssueCode::BadCapabilityRef,
             GraphIssueCode::MainCycle,
+            GraphIssueCode::BadBranching,
         ] {
             assert!(covered.contains(&code), "corpus missing {code:?}");
         }
