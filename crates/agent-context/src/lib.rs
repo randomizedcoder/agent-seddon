@@ -22,6 +22,13 @@ mod mode_aware;
 #[cfg(feature = "context-mode-aware")]
 pub use mode_aware::{bench_mode_partition, ModeAwareWindow};
 
+// Instant compaction (cognition-graph 03): assemble from the pre-computed digest
+// ledger; falls back to the wrapped summarizer on any miss.
+#[cfg(feature = "context-instant")]
+mod instant;
+#[cfg(feature = "context-instant")]
+pub use instant::{InstantCfg, InstantWindow, Relevance};
+
 // The per-mode compaction lens defaults + file resolver (docs/design/portal). Kept
 // feature-ungated so the `PromptStore` seam can read the same defaults it serves,
 // without pulling in the mode-aware compaction path.
