@@ -27,9 +27,16 @@ pub mod router;
 pub use router::{Candidate, RouteEvent, RoutePolicy, Router};
 
 /// Declarative task-aware routing — the pure decision engine (model-router
-/// increment 02). Depends only on `agent_core::PoolTier`, so it is always compiled;
-/// wiring it to a `TaskRouter` seam comes in a later slice.
+/// increment 02). Depends only on `agent_core::PoolTier`, so it is always compiled.
 pub mod route;
+
+/// `TaskRouter` — a provider that routes each request to a declaratively-preferred,
+/// capable upstream (via [`route::Policy`]) and fails over on a retryable error.
+/// Reuses the router's circuit breaker, so it is gated on `provider-router`.
+#[cfg(feature = "provider-router")]
+pub mod task_router;
+#[cfg(feature = "provider-router")]
+pub use task_router::{RouterUpstream, TaskRouter};
 
 /// A health-checked, tiered pool of cheap providers with an active liveness probe
 /// and parallel fan-out (`docs/design/code-review/llm-pool.md`). Reuses the
