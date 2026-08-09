@@ -64,8 +64,10 @@ state, caller falls back), not a fabricated empty graph.
 ## Node types
 
 `generate` (with a `lens` for branches), `critic_gate` (loop-until),
-`distill_summary`, `distill_facts`, `objective`, `compact_assemble`, plus the
-fork set — `split`, `join`, `merge` — each registered in
+`distill_summary`, `distill_facts`, `objective` (all three take a `provider`
+param or capability edge — role routing: the graph decides which model does
+which job, see `config/cognition/economical.textproto`), `compact_assemble`,
+plus the fork set — `split`, `join`, `merge` — each registered in
 `agent-graph/src/schema.rs` with ports + a `ParamSpec` table. Adding a type =
 implement + one table entry (`every_node_type_has_a_schema` keeps the palette
 honest).

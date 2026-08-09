@@ -62,8 +62,15 @@ pure functions of `(session, seq)`); sqlite in-memory is the ephemeral harness
 (`nix/checks/leak.nix`), and an `#[ignore]`d live ClickHouse round-trip
 (`clickhouse-up` + `cargo test -p agent-digest --all-features -- --ignored`).
 
-Deferred (STATUS): gate-alternatives rows + `role = summarize` routing (need a
-delivery-path view of `GateOutcome` — the increment-04 compile-time executor
-does not create one; lands with the dataflow interpreter or a dedicated
-side-channel); telemetry mirror for sqlite deployments; ~~`DigestService` gRPC
-backend~~ — shipped: `--serve-digest` + `[digest] store = "grpc"`.
+Role routing: `[digest] provider` (or a distill node's `provider` param /
+capability edge in a cognition graph) routes the summary/facts calls to a
+dedicated — typically cheap/local — model instead of the main generator; see
+`config/cognition/economical.textproto`. Gate/fork **alternatives** also land
+here as `kind = alternatives` rows (filed by the observers under the session's
+ambient identity, injection-screened, ms-ordinal seq), so instant compaction
+re-surfaces the roads not taken.
+
+Deferred (STATUS): telemetry mirror for sqlite deployments;
+~~`DigestService` gRPC backend~~ — shipped: `--serve-digest` +
+`[digest] store = "grpc"`; ~~gate-alternatives rows + role routing~~ — shipped
+(above).

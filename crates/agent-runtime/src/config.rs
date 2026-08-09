@@ -532,6 +532,12 @@ pub struct DigestCfg {
     /// "" (off) | "clickhouse" | "sqlite".
     #[serde(default)]
     pub store: String,
+    /// Role routing: the provider the distiller's summary/facts calls use — a
+    /// `[[route.upstreams]]` name or a registry provider type. "" = the main
+    /// provider. Distillation is background cache work: a cheap/local model
+    /// here keeps the expensive generator for the turn itself.
+    #[serde(default)]
+    pub provider: String,
     /// SQLite ledger path (`sqlite` backend only).
     #[serde(default = "default_digest_path")]
     pub path: String,
@@ -545,6 +551,7 @@ impl Default for DigestCfg {
     fn default() -> Self {
         Self {
             store: String::new(),
+            provider: String::new(),
             path: default_digest_path(),
             summary_max_tokens: default_digest_summary_tokens(),
             facts_max_tokens: default_digest_facts_tokens(),
@@ -561,6 +568,11 @@ pub struct InstantCfg {
     /// "keyword" (zero extra LLM calls) | "all" (no filtering).
     #[serde(default)]
     pub relevance: String,
+    /// Role routing: the provider the objective/relevance calls use — a
+    /// `[[route.upstreams]]` name or a registry provider type. "" = the main
+    /// provider.
+    #[serde(default)]
+    pub provider: String,
     #[serde(default = "default_instant_objective_tokens")]
     pub objective_max_tokens: u32,
     /// Minimum ledger coverage of the compacted span; below it → fall back to
@@ -577,6 +589,7 @@ impl Default for InstantCfg {
     fn default() -> Self {
         Self {
             relevance: String::new(),
+            provider: String::new(),
             objective_max_tokens: default_instant_objective_tokens(),
             min_coverage: default_instant_min_coverage(),
             facts_max_chars: default_instant_facts_chars(),

@@ -163,6 +163,54 @@ pub fn advanced() -> GraphDoc {
     doc
 }
 
+/// Role-routed economical flow (`config/cognition/economical.textproto`):
+/// the gate keeps the expensive generator×critic pair for the answer itself,
+/// but every background/compaction call — summary, facts, objective — routes
+/// to a cheap provider named `local` (a distill node's `provider` param, plus
+/// a capability edge on the objective node for variety). The graph decides
+/// WHICH model does WHICH job.
+pub fn economical() -> GraphDoc {
+    let mut doc = simple();
+    doc.nodes.insert(
+        "summarize".into(),
+        node(
+            "distill_summary",
+            json!({ "max_tokens": 512, "provider": "local" }),
+        ),
+    );
+    doc.nodes.insert(
+        "facts".into(),
+        node(
+            "distill_facts",
+            json!({ "max_tokens": 256, "provider": "local" }),
+        ),
+    );
+    doc.nodes.insert(
+        "objective".into(),
+        node("objective", json!({ "max_tokens": 128 })),
+    );
+    doc.nodes.insert(
+        "compact".into(),
+        node(
+            "compact_assemble",
+            json!({ "relevance": "keyword", "min_coverage": 0.6 }),
+        ),
+    );
+    doc.edges.extend([
+        edge(
+            GRAPH_ANCHOR_DELIVERY,
+            "summarize",
+            GraphEdgeKind::Background,
+        ),
+        edge(GRAPH_ANCHOR_DELIVERY, "facts", GraphEdgeKind::Background),
+        edge(GRAPH_ANCHOR_COMPACTION, "objective", GraphEdgeKind::Main),
+        edge("objective", "compact", GraphEdgeKind::Main),
+        // The objective's role provider as a capability attachment.
+        edge("local", "objective", GraphEdgeKind::Capability),
+    ]);
+    doc
+}
+
 /// One invalid document per typed load-error class, labelled with the exact
 /// [`GraphIssueCode`] it must produce. The order is fixed (stable test names).
 pub fn invalid_docs() -> Vec<(GraphIssueCode, GraphDoc)> {
@@ -259,6 +307,7 @@ mod tests {
         assert_eq!(simple(), simple());
         assert_eq!(intermediate(), intermediate());
         assert_eq!(advanced(), advanced());
+        assert_eq!(economical(), economical());
         assert_eq!(invalid_docs().len(), 11, "one per typed class");
     }
 

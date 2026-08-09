@@ -98,7 +98,27 @@ pub async fn build_agent_with(
     // attributed the same way — including a remote `= "grpc"` client.
     // The factory context. `provider`/`tokenizer` are filled in as they become
     // available — see `FactoryCtx` on why those two are optional.
-    let base_ctx = crate::registry::FactoryCtx::new(&cfg, &metrics).with_registry(registry);
+    // `built_digests` rides along from the start: the consensus factory's
+    // observer files gate-verdict alternatives to the ledger, so the provider
+    // build needs the store the same way `instant-window` does.
+    let base_ctx = crate::registry::FactoryCtx::new(&cfg, &metrics)
+        .with_registry(registry)
+        .with_digests(digest_store.as_ref());
+    // Role routing (`[digest] provider`): the distiller's summary/facts calls
+    // go to a dedicated (typically cheap/local) provider instead of the main
+    // generator. Resolved like any provider reference; attached further down.
+    #[cfg(feature = "digest")]
+    let distill_provider: Option<Arc<dyn agent_core::LlmProvider>> =
+        if cfg.digest.provider.is_empty() {
+            None
+        } else {
+            Some(
+                crate::registry::resolve_provider_ref(&cfg.digest.provider, &base_ctx)
+                    .context("[digest] provider (distiller role routing)")?,
+            )
+        };
+    #[cfg(not(feature = "digest"))]
+    let distill_provider: Option<Arc<dyn agent_core::LlmProvider>> = None;
     // A graph fork owns the response path: the builder composes the
     // BranchingProvider chain (branches, judge, post-merge gate) directly.
     #[cfg(feature = "graph")]
@@ -1079,6 +1099,10 @@ pub async fn build_agent_with(
         Some((summary, facts)) => agent.with_distill_kinds(summary, facts),
         None => agent,
     };
+    let agent = match distill_provider {
+        Some(p) => agent.with_distill_provider(p),
+        None => agent,
+    };
     let agent = match prompt_store_seam {
         Some(p) => agent.with_prompt_store(p),
         None => agent,
@@ -1787,11 +1811,13 @@ fn compose_fork_provider(
      -> anyhow::Result<Arc<dyn LlmProvider>> {
         let (critic, gc) = gate_parts(g)?;
         let m = metrics.clone();
+        let d = digests.clone();
         Ok(Arc::new(
             ConsensusProvider::new(inner, critic)
                 .with_cfg(gc)
                 .with_observer(Arc::new(move |o| {
                     crate::metered::record_gate_outcome(&m, o);
+                    crate::distiller::file_alternatives(&d, &m, "gate", &o.alternatives);
                 })),
         ))
     };
@@ -1839,9 +1865,10 @@ fn compose_fork_provider(
     };
 
     let m = metrics.clone();
+    let d = digests.clone();
     let observer: agent_providers::BranchObserver = Arc::new(move |r| {
         crate::metered::record_branch_report(&m, r);
-        file_fork_alternatives(&digests, &m, r);
+        crate::distiller::file_alternatives(&d, &m, &r.split, &r.alternatives);
     });
     let mut bp = BranchingProvider::new(&fork.split, base, branches)
         .with_cfg(bc)
@@ -1855,70 +1882,6 @@ fn compose_fork_provider(
     match &plan.gate {
         Some(g) => gated(branching, g),
         None => Ok(branching),
-    }
-}
-
-/// File a fork's loser alternatives as `kind = alternatives` digest rows —
-/// the road not taken, with its reconsideration trigger (a forked exploration
-/// is never wasted). Fire-and-forget: never on the reply path's error surface.
-#[cfg(feature = "graph")]
-fn file_fork_alternatives(
-    digests: &Option<Arc<dyn agent_core::DigestStore>>,
-    metrics: &Metrics,
-    r: &agent_providers::BranchReport,
-) {
-    let Some(store) = digests else { return };
-    if r.alternatives.is_empty() {
-        return;
-    }
-    // The observer runs inside the session's identity scope; without one
-    // (a bare provider call) there is nothing to file the rows under.
-    let Some(key) = agent_core::current_identity() else {
-        return;
-    };
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    for (i, alt) in r.alternatives.iter().enumerate() {
-        let text = format!(
-            "Option: {}\nSummary: {}\nReconsider when: {}",
-            alt.option, alt.summary, alt.reconsider_when
-        );
-        // Judge output is model output: screen before it enters the ledger
-        // (the same write discipline as the distiller).
-        if let Some(reason) = agent_core::scan_for_injection(&text) {
-            tracing::warn!(reason, split = %r.split, "alternatives row flagged — dropped");
-            metrics.on_distill("alternatives", "injection_flagged", 0.0);
-            continue;
-        }
-        let row = agent_core::Digest {
-            session_id: key.session.as_str().to_string(),
-            user_id: key.user.as_str().to_string(),
-            // The delivery-path `agreed_seq` is not visible at the provider
-            // layer; a millisecond ordinal keys the row uniquely and keeps
-            // ledger reads seq-ordered (recorded STATUS deviation).
-            seq: ts.saturating_add(i as u64),
-            kind: agent_core::DigestKind::Alternatives,
-            text,
-            keywords: Vec::new(),
-            mode: String::new(),
-            model: String::new(),
-            ts_ms: ts,
-            duration_ms: 0,
-            tokens: 0,
-        };
-        let store = store.clone();
-        let metrics = metrics.clone();
-        tokio::spawn(async move {
-            match store.put(row).await {
-                Ok(()) => metrics.on_distill("alternatives", "succeeded", 0.0),
-                Err(e) => {
-                    tracing::warn!(error = %e, "alternatives row store put failed");
-                    metrics.on_distill("alternatives", "store_failed", 0.0);
-                }
-            }
-        });
     }
 }
 

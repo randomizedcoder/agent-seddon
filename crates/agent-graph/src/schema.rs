@@ -297,11 +297,20 @@ impl NodeTypeRegistry {
             CRITIC_GATE,
         );
 
-        const DISTILL_SUMMARY: &[ParamSpec] = &[ParamSpec {
-            key: "max_tokens",
-            kind: ParamKind::UInt { min: 16, max: 4096 },
-            doc: "Output-token budget for the rolling summary.",
-        }];
+        const DISTILL_SUMMARY: &[ParamSpec] = &[
+            ParamSpec {
+                key: "max_tokens",
+                kind: ParamKind::UInt { min: 16, max: 4096 },
+                doc: "Output-token budget for the rolling summary.",
+            },
+            ParamSpec {
+                key: "provider",
+                kind: ParamKind::Name,
+                doc: "Role routing: the provider this distillation uses (also attachable \
+                      via a capability edge); empty = the main provider. Background cache \
+                      work — a cheap/local model fits.",
+            },
+        ];
         add(
             "distill_summary",
             "Distill: summary",
@@ -311,11 +320,19 @@ impl NodeTypeRegistry {
             DISTILL_SUMMARY,
         );
 
-        const DISTILL_FACTS: &[ParamSpec] = &[ParamSpec {
-            key: "max_tokens",
-            kind: ParamKind::UInt { min: 16, max: 4096 },
-            doc: "Output-token budget for the key-facts extraction.",
-        }];
+        const DISTILL_FACTS: &[ParamSpec] = &[
+            ParamSpec {
+                key: "max_tokens",
+                kind: ParamKind::UInt { min: 16, max: 4096 },
+                doc: "Output-token budget for the key-facts extraction.",
+            },
+            ParamSpec {
+                key: "provider",
+                kind: ParamKind::Name,
+                doc: "Role routing: the provider this distillation uses (also attachable \
+                      via a capability edge); empty = the main provider.",
+            },
+        ];
         add(
             "distill_facts",
             "Distill: key facts",
@@ -326,11 +343,19 @@ impl NodeTypeRegistry {
             DISTILL_FACTS,
         );
 
-        const OBJECTIVE: &[ParamSpec] = &[ParamSpec {
-            key: "max_tokens",
-            kind: ParamKind::UInt { min: 16, max: 512 },
-            doc: "Output-token budget for the current-objective statement.",
-        }];
+        const OBJECTIVE: &[ParamSpec] = &[
+            ParamSpec {
+                key: "max_tokens",
+                kind: ParamKind::UInt { min: 16, max: 512 },
+                doc: "Output-token budget for the current-objective statement.",
+            },
+            ParamSpec {
+                key: "provider",
+                kind: ParamKind::Name,
+                doc: "Role routing: the provider the objective/relevance calls use; \
+                      empty = the main provider.",
+            },
+        ];
         add(
             "objective",
             "Current objective",
