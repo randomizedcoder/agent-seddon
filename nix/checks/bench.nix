@@ -48,6 +48,7 @@ craneLib.mkCargoDerivation (
       cargo bench -p agent-core --bench registry
       cargo bench -p agent-context --bench context
       cargo bench -p agent-context --features context-mode-aware --bench mode_aware
+      cargo bench -p agent-context --features context-instant --bench instant_assemble
       cargo bench -p agent-mode --bench classify
       cargo bench -p agent-memory --features memory-dimensions --bench dimensions
       cargo bench -p agent-providers --features provider-pool --bench pool_select

@@ -38,6 +38,13 @@ iai-callgrind.workspace = true
 # with the deterministic corpus.
 agent-digest = { workspace = true, features = ["digest-sqlite"] }
 
+# Guards instant compaction's assembly path (the point of increment 03 is that
+# this path is cheap; the ceiling keeps it so).
+[[bench]]
+name = "instant_assemble"
+harness = false
+required-features = ["context-instant"]
+
 # Guards `estimate_tokens` — called in the compaction loop.
 [[bench]]
 name = "context"
