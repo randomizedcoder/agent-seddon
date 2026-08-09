@@ -16,6 +16,13 @@ default = ["provider-openai-compat"]
 provider-openai-compat = []
 # Anthropic-native Messages API.
 provider-anthropic = []
+# Consensus gate: generator × critic response gate with a bounded convergence loop
+# (cognition-graph increment 01). Pure composition — no extra deps.
+provider-consensus = []
+# Parallel branches: split → concurrent lens branches → policy join → merge
+# (cognition-graph increment 05). Reuses the gate's judge machinery, so it
+# implies `provider-consensus`.
+provider-branching = ["provider-consensus"]
 # dhat-instrumented leak/allocation tests (tests/leak.rs).
 dhat-heap = ["dep:dhat"]
 
@@ -38,7 +45,9 @@ dhat = { workspace = true, optional = true }
 agent-testkit.workspace = true
 agent-cache.workspace = true
 rstest.workspace = true
-tokio = { workspace = true }
+# `test-util` enables `start_paused` — the branching join/timeout tests drive
+# laggard branches on a paused clock instead of real sleeps.
+tokio = { workspace = true, features = ["test-util"] }
 iai-callgrind.workspace = true
 
 # Guards the per-call selection hot path (`eligible`, ordered by policy).
@@ -53,10 +62,28 @@ required-features = ["provider-pool"]
 name = "route_resolve"
 harness = false
 
+# Guards the consensus gate's per-round verdict parse/sanitize + no-progress compare.
+[[bench]]
+name = "gate_verdict"
+harness = false
+required-features = ["provider-consensus"]
+
+# Guards the fork engine's dispatch path (clone/spawn/join/merge bookkeeping,
+# concat merge — no LLM in the measurement).
+[[bench]]
+name = "branch_dispatch"
+harness = false
+required-features = ["provider-branching"]
+
 [[test]]
 name = "leak"
 harness = true
 required-features = ["dhat-heap", "provider-pool"]
+
+[[test]]
+name = "branch_leak"
+harness = true
+required-features = ["dhat-heap", "provider-branching"]
 
 [lints]
 workspace = true

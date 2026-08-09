@@ -9,7 +9,7 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -57,6 +57,8 @@ pub enum Error {
     Prompt(String),
     #[error("metrics error: {0}")]
     Metrics(String),
+    #[error("graph error: {0}")]
+    Graph(String),
     /// The service is over capacity and is asking the caller to back off — maps to
     /// gRPC `RESOURCE_EXHAUSTED`, which the client retries with backoff (not a fault).
     #[error("overloaded: {0}")]
@@ -1633,6 +1635,342 @@ pub trait DimensionStore: Send + Sync {
     /// A dimension's history, most-recent first, capped at `limit`. An unknown or
     /// empty dimension ⇒ an empty vec (like semantic recall with no files).
     async fn recall_dimension(&self, dimension: &str, limit: usize) -> Result<Vec<MemoryItem>>;
+}
+
+// --- digest ledger (cognition-graph increment 02) --------------------------
+//
+// The per-session, per-delivered-response ledger the background distiller fills
+// (summary + key-facts + gate alternatives) and instant compaction reads. Session-
+// scoped by design — distinct from `MemoryStore` (cross-session); the raw transcript
+// stays ground truth, digests are a cache. docs/design/cognition-graph/.
+
+/// What a [`Digest`] row holds. A **closed** set — the kind becomes a storage
+/// discriminator and a metric label, so it is never an open string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DigestKind {
+    /// A section-locked rolling summary of the exchange ending at `seq`.
+    Summary,
+    /// The tiny key-facts extraction for the same exchange.
+    Facts,
+    /// A current-objective statement (written at compaction time).
+    Objective,
+    /// Gate-recorded alternatives (the road not taken + reconsider-when).
+    Alternatives,
+}
+
+impl DigestKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Summary => "summary",
+            Self::Facts => "facts",
+            Self::Objective => "objective",
+            Self::Alternatives => "alternatives",
+        }
+    }
+    /// Parse a stored discriminator; unknown ⇒ `None` (fail closed — a store is
+    /// untrusted input once a `grpc` backend exists).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "summary" => Some(Self::Summary),
+            "facts" => Some(Self::Facts),
+            "objective" => Some(Self::Objective),
+            "alternatives" => Some(Self::Alternatives),
+            _ => None,
+        }
+    }
+}
+
+/// One ledger row: a distilled artifact for the delivered response `seq` of
+/// `session_id`. Text/keywords are model output — screened and size-capped
+/// *before* `put`, and screened again at read (injection can survive storage).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Digest {
+    pub session_id: String,
+    pub user_id: String,
+    /// The per-session agreed-response ordinal this digest belongs to.
+    pub seq: u64,
+    pub kind: DigestKind,
+    pub text: String,
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    /// `TaskMode::as_str()` at delivery time (labels, relevance hints).
+    #[serde(default)]
+    pub mode: String,
+    /// The model that produced the distillation (cost/quality attribution).
+    #[serde(default)]
+    pub model: String,
+    pub ts_ms: u64,
+    /// Distillation wall time, milliseconds (clamped by the writer).
+    #[serde(default)]
+    pub duration_ms: u32,
+    /// Output tokens spent producing it (clamped by the writer).
+    #[serde(default)]
+    pub tokens: u32,
+}
+
+/// A ledger read: digests for one session, ordered by `seq` ascending.
+#[derive(Debug, Clone, Default)]
+pub struct DigestQuery {
+    pub session_id: String,
+    /// Restrict to one kind; `None` = all kinds.
+    pub kind: Option<DigestKind>,
+    /// Only rows with `seq >= since_seq`.
+    pub since_seq: Option<u64>,
+    /// Keep rows sharing at least one keyword (case-insensitive); empty = keep all.
+    /// A cheap store-side prefilter, not relevance ranking.
+    pub keywords_any: Vec<String>,
+    /// Row cap; backends also cap server-side (a hostile limit cannot unbound a read).
+    pub limit: usize,
+}
+
+/// The digest ledger seam. Append-mostly: a `put` for an existing
+/// `(session_id, seq, kind)` **replaces** that row (re-distillation), reads return
+/// the latest version. Implementations must validate ids (`safe_segment`) and cap
+/// text/keyword/limit sizes — the writer is an LLM and the reader may be remote.
+#[async_trait]
+pub trait DigestStore: Send + Sync {
+    async fn put(&self, digest: Digest) -> Result<()>;
+    /// Matching digests ordered by `seq` ascending (stable read for assembly).
+    async fn query(&self, q: &DigestQuery) -> Result<Vec<Digest>>;
+}
+
+// ---------------------------------------------------------------------------
+// Cognition graph document (docs/design/cognition-graph/04-graph-config.md):
+// the declarative node graph that re-expresses the consensus gate, background
+// distillation, and instant compaction as user-configurable wiring. The
+// document is DATA (flat node map + typed edges, zero layout, params reference
+// resources by NAME only — never secrets/endpoints); the executor hosts it at
+// three fixed anchor slots in the run loop.
+// ---------------------------------------------------------------------------
+
+/// The document format version this build understands.
+pub const GRAPH_VERSION: u32 = 1;
+/// Caps on the document, enforced before any per-node work — the document may
+/// arrive over gRPC or from a model-suggested edit, so it is untrusted input.
+pub const MAX_GRAPH_NODES: usize = 64;
+pub const MAX_GRAPH_EDGES: usize = 256;
+/// Longest node id (a human-chosen label that becomes a metric label and a job
+/// tag — never a path, but bounded like one).
+pub const MAX_GRAPH_NODE_ID_LEN: usize = 64;
+/// Largest serialized `params` object per node.
+pub const MAX_GRAPH_PARAMS_BYTES: usize = 16 * 1024;
+/// Size cap on a graph document **before parsing** (textproto bombs).
+pub const MAX_GRAPH_DOC_BYTES: usize = 256 * 1024;
+
+/// Branch fan-out bounds (increment 05): branches multiply LLM spend, so a
+/// hostile/buggy document must not fan a turn into an unbounded fleet.
+/// Hard ceiling on one `split`'s out-degree.
+pub const MAX_SPLIT_BRANCHES: usize = 5;
+/// A `split` without a `max_branches` param allows this many branches.
+pub const DEFAULT_SPLIT_BRANCHES: usize = 3;
+/// Total branches across every split in a document (the nested-split budget;
+/// v1 rejects nesting outright, but the cap is the standing contract).
+pub const MAX_ANCHOR_BRANCHES: usize = 8;
+/// Clamp on a `join` node's `timeout_ms` (attacker-controlled config must
+/// never program an unbounded wait).
+pub const MAX_JOIN_TIMEOUT_MS: u64 = 300_000;
+
+/// The three fixed slots in the run loop where a sub-graph executes. Edge
+/// endpoints may name an anchor; nodes may not (the `anchor.` prefix is
+/// reserved).
+pub const GRAPH_ANCHOR_RESPONSE: &str = "anchor.response";
+pub const GRAPH_ANCHOR_DELIVERY: &str = "anchor.delivery";
+pub const GRAPH_ANCHOR_COMPACTION: &str = "anchor.compaction";
+pub const GRAPH_ANCHORS: [&str; 3] = [
+    GRAPH_ANCHOR_RESPONSE,
+    GRAPH_ANCHOR_DELIVERY,
+    GRAPH_ANCHOR_COMPACTION,
+];
+
+/// Edge kinds — a **closed** set (the executor dispatches on it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphEdgeKind {
+    /// Data flow on the turn path (acyclic between nodes; loops live inside
+    /// loop-until nodes such as `critic_gate`).
+    Main,
+    /// Fire-and-forget hand-off to the background distiller worker; delivery
+    /// never waits. Only valid from [`GRAPH_ANCHOR_DELIVERY`].
+    Background,
+    /// Attachment: which judge/summarizer/store a node uses. `from` names a
+    /// configured resource (provider/store), `to` is the consuming node.
+    Capability,
+}
+
+impl GraphEdgeKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Main => "main",
+            Self::Background => "background",
+            Self::Capability => "capability",
+        }
+    }
+    /// Parse a stored discriminator; unknown ⇒ `None` (fail closed — the
+    /// document is untrusted input once a `grpc` backend exists).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "main" => Some(Self::Main),
+            "background" => Some(Self::Background),
+            "capability" => Some(Self::Capability),
+            _ => None,
+        }
+    }
+}
+
+/// One node instance: a registered type + version and its parameters. Params
+/// reference upstreams/providers/stores **by name** — never secrets, never
+/// endpoints (those stay in `[route]`/`[provider]`/`[digest]` config).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GraphNode {
+    /// A registered node type (e.g. `critic_gate`); unknown types fail load.
+    pub node_type: String,
+    /// Schema version of this node instance; migrations live registry-side —
+    /// schemas are never embedded in documents.
+    pub type_version: u32,
+    /// Type-specific parameters, validated against the type's schema at load.
+    #[serde(default)]
+    pub params: serde_json::Value,
+}
+
+/// A typed edge between two endpoints (node ids, or an anchor as the `from` of
+/// a `Main`/`Background` edge / a resource name as the `from` of `Capability`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphEdge {
+    pub from: String,
+    pub to: String,
+    pub kind: GraphEdgeKind,
+}
+
+/// The cognition graph document: a flat node map with stable human-chosen ids
+/// (deterministic order → clean diffs) and typed edges. Layout is a GUI-owned
+/// sidecar file, never part of this document.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct GraphDoc {
+    pub version: u32,
+    pub nodes: BTreeMap<String, GraphNode>,
+    pub edges: Vec<GraphEdge>,
+}
+
+/// A named, nominally-typed port on a node type (ComfyUI-style type strings —
+/// the editor uses them to constrain connections; the executor to route data).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodePort {
+    pub name: String,
+    pub kind: String,
+}
+
+/// Everything an editor needs to render a node type from data alone (the
+/// `/object_info` analog): title/doc, typed ports, and a JSON Schema for the
+/// params form. Served by `GraphService::DescribeNodeTypes` so custom nodes
+/// need zero frontend code.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NodeTypeSchema {
+    pub node_type: String,
+    pub type_version: u32,
+    pub title: String,
+    pub doc: String,
+    pub inputs: Vec<NodePort>,
+    pub outputs: Vec<NodePort>,
+    /// JSON Schema (+ UI hints) for `GraphNode::params`.
+    pub params_schema: serde_json::Value,
+}
+
+/// Typed validation-failure classes — a **closed** set (each becomes a wire
+/// discriminator and a metric label; the GUI keys remediation hints off it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphIssueCode {
+    /// `version` is 0 or newer than this build understands.
+    BadVersion,
+    /// A document-level cap was exceeded (nodes/edges/params/doc bytes).
+    TooLarge,
+    /// A node id is empty, over-long, not a safe segment, or uses the reserved
+    /// `anchor.` prefix.
+    BadNodeId,
+    /// The node's `type` is not registered.
+    UnknownNodeType,
+    /// The node's `type_version` is not supported by the registered type.
+    UnknownTypeVersion,
+    /// The node's `params` failed its type's schema.
+    BadParams,
+    /// A `main`/`background` edge endpoint names neither a node nor a valid
+    /// anchor.
+    DanglingEdge,
+    /// A `background` edge whose `from` is not `anchor.delivery`.
+    BackgroundNotFromDelivery,
+    /// A `capability` edge whose `to` is not a node, or whose `from` is not a
+    /// safe resource name.
+    BadCapabilityRef,
+    /// The `main` edges form a cycle between nodes.
+    MainCycle,
+    /// A malformed fork: over-cap fan-out, branches not meeting at one shared
+    /// `join`, a cross-branch edge, a nested `split` (deferred), an orphan
+    /// `join`/`merge`, or a `quorum` larger than the branch count.
+    BadBranching,
+}
+
+impl GraphIssueCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BadVersion => "bad_version",
+            Self::TooLarge => "too_large",
+            Self::BadNodeId => "bad_node_id",
+            Self::UnknownNodeType => "unknown_node_type",
+            Self::UnknownTypeVersion => "unknown_type_version",
+            Self::BadParams => "bad_params",
+            Self::DanglingEdge => "dangling_edge",
+            Self::BackgroundNotFromDelivery => "background_not_from_delivery",
+            Self::BadCapabilityRef => "bad_capability_ref",
+            Self::MainCycle => "main_cycle",
+            Self::BadBranching => "bad_branching",
+        }
+    }
+    /// Parse a wire discriminator; unknown ⇒ `None` (fail closed).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "bad_version" => Some(Self::BadVersion),
+            "too_large" => Some(Self::TooLarge),
+            "bad_node_id" => Some(Self::BadNodeId),
+            "unknown_node_type" => Some(Self::UnknownNodeType),
+            "unknown_type_version" => Some(Self::UnknownTypeVersion),
+            "bad_params" => Some(Self::BadParams),
+            "dangling_edge" => Some(Self::DanglingEdge),
+            "background_not_from_delivery" => Some(Self::BackgroundNotFromDelivery),
+            "bad_capability_ref" => Some(Self::BadCapabilityRef),
+            "main_cycle" => Some(Self::MainCycle),
+            "bad_branching" => Some(Self::BadBranching),
+            _ => None,
+        }
+    }
+}
+
+/// One validation finding: the offending node id (or edge endpoint / `""` for a
+/// document-level finding), the typed class, and a human detail line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphIssue {
+    pub node: String,
+    pub code: GraphIssueCode,
+    pub detail: String,
+}
+
+/// The graph-document seam: holds the active document, validates candidates,
+/// and describes the node-type registry. `put` MUST validate before accepting
+/// (a stored document is trusted at execution time only because nothing invalid
+/// can be stored). Backends: file (textproto on disk), grpc (a central editor
+/// service, e.g. driven by the portal).
+#[async_trait]
+pub trait GraphStore: Send + Sync {
+    /// The current document. Implementations re-validate on read (the file may
+    /// have been edited out-of-band) and fail closed on any issue.
+    async fn get(&self) -> Result<GraphDoc>;
+    /// Validate-then-persist; rejected wholesale if any issue is found.
+    async fn put(&self, doc: GraphDoc) -> Result<()>;
+    /// Typed findings for a candidate document; empty = valid. Never errors on
+    /// *content* (a broken document is a `Vec` of issues, not an `Err`).
+    async fn validate(&self, doc: &GraphDoc) -> Result<Vec<GraphIssue>>;
+    /// Schemas for every registered node type (the editor's palette).
+    async fn node_types(&self) -> Result<Vec<NodeTypeSchema>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -4626,5 +4964,46 @@ mod tests {
         })
         .await;
         assert!(current_identity().is_none());
+    }
+
+    // Closed graph discriminators round-trip; anything else fails closed — they
+    // become wire discriminators and metric labels once GraphService exists.
+    #[rstest]
+    #[case::main(Some(GraphEdgeKind::Main), "main")]
+    #[case::background(Some(GraphEdgeKind::Background), "background")]
+    #[case::capability(Some(GraphEdgeKind::Capability), "capability")]
+    fn positive_graph_edge_kind_roundtrips(#[case] kind: Option<GraphEdgeKind>, #[case] s: &str) {
+        let k = kind.expect("closed set");
+        assert_eq!(k.as_str(), s);
+        assert_eq!(GraphEdgeKind::parse(s), Some(k));
+    }
+
+    #[rstest]
+    #[case::unknown("weaponized")]
+    #[case::empty("")]
+    #[case::case_shifted("MAIN")]
+    #[case::padded(" main ")]
+    fn adversarial_graph_edge_kind_unknown_rejected(#[case] s: &str) {
+        assert_eq!(GraphEdgeKind::parse(s), None);
+        assert_eq!(GraphIssueCode::parse(s), None);
+    }
+
+    #[test]
+    fn positive_graph_issue_codes_roundtrip() {
+        for code in [
+            GraphIssueCode::BadVersion,
+            GraphIssueCode::TooLarge,
+            GraphIssueCode::BadNodeId,
+            GraphIssueCode::UnknownNodeType,
+            GraphIssueCode::UnknownTypeVersion,
+            GraphIssueCode::BadParams,
+            GraphIssueCode::DanglingEdge,
+            GraphIssueCode::BackgroundNotFromDelivery,
+            GraphIssueCode::BadCapabilityRef,
+            GraphIssueCode::MainCycle,
+            GraphIssueCode::BadBranching,
+        ] {
+            assert_eq!(GraphIssueCode::parse(code.as_str()), Some(code));
+        }
     }
 }

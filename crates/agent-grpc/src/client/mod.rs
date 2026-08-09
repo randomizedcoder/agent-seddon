@@ -39,10 +39,12 @@ macro_rules! unary {
 }
 
 mod context;
+mod digest;
 mod dimension;
 mod embed;
 mod exec;
 mod forge;
+mod graph;
 mod llm_pool;
 mod lsp;
 mod memory;
@@ -64,10 +66,12 @@ mod tools;
 mod web;
 
 pub use context::*;
+pub use digest::*;
 pub use dimension::*;
 pub use embed::*;
 pub use exec::*;
 pub use forge::*;
+pub use graph::*;
 pub use llm_pool::*;
 pub use lsp::*;
 pub use memory::*;

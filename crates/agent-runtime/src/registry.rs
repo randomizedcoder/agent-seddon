@@ -45,6 +45,10 @@ pub struct FactoryCtx<'a> {
     /// their own (a real embedder loads a model).
     #[cfg(feature = "semantic-search")]
     pub built_embedder: Option<&'a Arc<dyn agent_core::Embedder>>,
+    /// The already-built digest ledger (cognition-graph 02) — absent until it is
+    /// built, and `None` when `[digest] store` is off. The `instant-window`
+    /// context strategy reads it.
+    pub built_digests: Option<&'a Arc<dyn agent_core::DigestStore>>,
     /// The registry itself, so a **composing** factory can build its children by
     /// config name (the `router` provider builds its candidates this way). The
     /// borrow is immutable and re-entrant: `build_*` takes `&self`, so a factory
@@ -62,6 +66,7 @@ impl<'a> FactoryCtx<'a> {
             built_tokenizer: None,
             #[cfg(feature = "semantic-search")]
             built_embedder: None,
+            built_digests: None,
             registry: None,
         }
     }
@@ -94,6 +99,15 @@ impl<'a> FactoryCtx<'a> {
     /// The built tokenizer, if one is configured and already built.
     pub fn tokenizer(&self) -> Option<&'a Arc<dyn agent_core::Tokenizer>> {
         self.built_tokenizer
+    }
+    /// Inject the already-built digest ledger (see [`FactoryCtx::built_digests`]).
+    pub fn with_digests(mut self, d: Option<&'a Arc<dyn agent_core::DigestStore>>) -> Self {
+        self.built_digests = d;
+        self
+    }
+    /// The built digest ledger, if `[digest] store` is configured.
+    pub fn digests(&self) -> Option<&'a Arc<dyn agent_core::DigestStore>> {
+        self.built_digests
     }
     /// The registry, for a factory that composes other seams by config name.
     pub fn registry(&self) -> anyhow::Result<&'a Registry> {
@@ -479,6 +493,42 @@ pub fn register_builtins(r: &mut Registry) {
         ) as Arc<dyn ContextStrategy>)
     });
 
+    // Instant compaction (cognition-graph 03): assemble from the pre-computed
+    // digest ledger; the classic summarizer is the built-in fail-soft fallback.
+    // Requires `[digest] store` — an instant window with no ledger would silently
+    // be a slow summarizing window, so that misconfiguration fails closed.
+    #[cfg(feature = "context-instant")]
+    r.context("instant-window", |ctx| {
+        let Some(digests) = ctx.digests() else {
+            anyhow::bail!(
+                "[agent] context = \"instant-window\" requires [digest] store to be \
+                 configured (the ledger it assembles from)"
+            );
+        };
+        let cfg = &ctx.cfg.instant;
+        let relevance = match cfg.relevance.as_str() {
+            "" | "llm" => agent_context::Relevance::Llm,
+            "keyword" => agent_context::Relevance::Keyword,
+            "all" => agent_context::Relevance::All,
+            other => anyhow::bail!("[instant] relevance: unknown value `{other}`"),
+        };
+        Ok(Arc::new(
+            agent_context::InstantWindow::new(
+                ctx.provider()?.clone(),
+                digests.clone(),
+                ctx.cfg.agent.keep_recent_tokens,
+            )
+            .with_cfg(agent_context::InstantCfg {
+                relevance,
+                objective_max_tokens: cfg.objective_max_tokens,
+                min_coverage: cfg.min_coverage,
+                facts_max_chars: cfg.facts_max_chars,
+                alternatives_max_chars: cfg.alternatives_max_chars,
+            })
+            .with_tokenizer(ctx.tokenizer().cloned(), ctx.cfg.provider.model.clone()),
+        ) as Arc<dyn ContextStrategy>)
+    });
+
     // --- tokenizer seam (accurate counts + cost, parity spec 23) ---
     #[cfg(feature = "tokenizer")]
     r.tokenizer("approx", |_ctx| {
@@ -762,6 +812,69 @@ pub fn register_builtins(r: &mut Registry) {
         Ok(Arc::new(router) as Arc<dyn LlmProvider>)
     });
 
+    // --- consensus: generator × critic response gate (cognition-graph 01) ---
+    //
+    // Composing factory: `[consensus] generator/critic` each resolve like a route
+    // upstream — a `[[route.upstreams]]` entry by name (inline endpoint synthesized
+    // secret-safely, empty endpoint via the registry) — else as a registry provider
+    // type. The critic should be a different model family; same-name is allowed but
+    // warned (it defeats the self-preference mitigation).
+    #[cfg(feature = "provider-consensus")]
+    r.provider("consensus", |ctx| {
+        let cfg = &ctx.cfg.consensus;
+        if cfg.generator.is_empty() || cfg.critic.is_empty() {
+            anyhow::bail!(
+                "[consensus] generator and critic must both be set when \
+                 `[agent] provider = \"consensus\"`"
+            );
+        }
+        if cfg.generator == cfg.critic {
+            tracing::warn!(
+                upstream = %cfg.generator,
+                "[consensus] generator and critic are the SAME upstream — \
+                 self-critique loses the cross-family bias mitigation"
+            );
+        }
+        let resolve = |name: &str| -> anyhow::Result<Arc<dyn LlmProvider>> {
+            if name == "consensus" {
+                anyhow::bail!("[consensus] must not reference `consensus` itself");
+            }
+            resolve_provider_ref(name, ctx)
+        };
+        let generator = resolve(&cfg.generator)?;
+        let critic = resolve(&cfg.critic)?;
+
+        let mut gate = agent_providers::GateCfg {
+            max_rounds: cfg.max_rounds,
+            critic_max_tokens: cfg.critic_max_tokens,
+            max_alternatives: cfg.max_alternatives,
+            ..agent_providers::GateCfg::default()
+        };
+        gate.scope = match cfg.scope.as_str() {
+            "" | "final" => agent_providers::GateScope::Final,
+            "every-iteration" => agent_providers::GateScope::EveryIteration,
+            other => anyhow::bail!("[consensus] scope: unknown value `{other}`"),
+        };
+        gate.on_exhaustion = match cfg.on_exhaustion.as_str() {
+            "" | "deliver-with-note" => agent_providers::Exhaustion::DeliverWithNote,
+            "fail" => agent_providers::Exhaustion::Fail,
+            other => anyhow::bail!("[consensus] on_exhaustion: unknown value `{other}`"),
+        };
+        if !cfg.rubric_file.is_empty() {
+            let text = std::fs::read_to_string(&cfg.rubric_file)
+                .with_context(|| format!("[consensus] rubric_file `{}`", cfg.rubric_file))?;
+            gate.rubric = Some(text);
+        }
+
+        let metrics = ctx.metrics.clone();
+        let provider = agent_providers::ConsensusProvider::new(generator, critic)
+            .with_cfg(gate)
+            .with_observer(Arc::new(move |o: &agent_providers::GateOutcome| {
+                crate::metered::record_gate_outcome(&metrics, o);
+            }));
+        Ok(Arc::new(provider) as Arc<dyn LlmProvider>)
+    });
+
     // --- forge backends (the Forge seam, parity spec 27) ---
     #[cfg(feature = "forge-github")]
     r.forge("github", |ctx| {
@@ -947,6 +1060,29 @@ fn search_paths(
 /// Resolve a `[grpc]` client endpoint: the configured string, or a loopback TCP
 /// default on the seam's generated port. Set the config to `unix:/path` for UDS.
 #[cfg(feature = "grpc")]
+/// Resolve a provider *reference* the way composing factories do (the
+/// consensus gate, the fork's branches/judge): a `[[route.upstreams]]` entry by
+/// name (inline endpoint synthesized secret-safely), else a registry provider
+/// type — wrapped in the metrics decorator under its own name.
+#[cfg(any(feature = "provider-consensus", feature = "graph"))]
+pub(crate) fn resolve_provider_ref(
+    name: &str,
+    ctx: &FactoryCtx<'_>,
+) -> anyhow::Result<Arc<dyn LlmProvider>> {
+    let built: Arc<dyn LlmProvider> = match ctx.cfg.route.upstreams.iter().find(|u| u.name == name)
+    {
+        Some(u) if !u.endpoint.is_empty() => Arc::new(crate::builder::build_route_upstream(
+            u,
+            ctx.cfg.agent.context_window,
+        )?),
+        _ => ctx
+            .registry()?
+            .build_provider(name, ctx)
+            .with_context(|| format!("building provider reference `{name}`"))?,
+    };
+    Ok(crate::metered::provider(built, ctx.metrics.clone(), name))
+}
+
 pub(crate) fn grpc_client_endpoint(
     configured: &str,
     default: agent_grpc::constants::SeamEndpoint,

@@ -1,0 +1,55 @@
+# The smallest useful cognition graph: consensus gate only.
+#
+#   anchor.response ── generate ── critic_gate (judged by "glm")
+#
+# Every final answer is generated, then cross-checked by the critic model,
+# revising until agreement (docs/design/cognition-graph/01-consensus-gate.md).
+# No background distillation, no instant compaction — those anchors keep their
+# built-in behavior. Run with:
+#
+#   agent --cognition-graph config/cognition/simple.textproto "<goal>"
+#
+# `glm` must be a configured provider name (a `[[route.upstreams]]` entry or a
+# registry provider type) — the document references resources by NAME only.
+version: 1
+nodes {
+  key: "gate"
+  value {
+    type: "critic_gate"
+    type_version: 1
+    params {
+      object_value {
+        fields {
+          key: "critic"
+          value { string_value: "glm" }
+        }
+        fields {
+          key: "max_rounds"
+          value { uint_value: 2 }
+        }
+      }
+    }
+  }
+}
+nodes {
+  key: "generate"
+  value {
+    type: "generate"
+    type_version: 1
+  }
+}
+edges {
+  from: "anchor.response"
+  to: "generate"
+  kind: KIND_MAIN
+}
+edges {
+  from: "generate"
+  to: "gate"
+  kind: KIND_MAIN
+}
+edges {
+  from: "glm"
+  to: "gate"
+  kind: KIND_CAPABILITY
+}

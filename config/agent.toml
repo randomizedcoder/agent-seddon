@@ -498,6 +498,66 @@ cooldown_secs       = 30          # how long a breaker stays open before re-prob
 # upstreams = ["kimi", "glm"]
 # # failure_threshold = 3 / cooldown_secs = 30  (breaker, same as [router]/[pool])
 
+# The consensus gate (cognition-graph increment 01): every final answer is generated
+# by `generator` and challenged by `critic` (ideally a DIFFERENT model family) in a
+# bounded revise loop; preference-shaped disagreement is recorded as "Open
+# alternatives" with reconsider-when triggers instead of argued to capitulation.
+# Select with `[agent] provider = "consensus"`. `generator`/`critic` resolve like
+# route upstreams: a `[[route.upstreams]]` name (key via api_key_file/env — never
+# inline), else a registry provider type. Streaming bypasses the gate — run
+# `stream = false`. See docs/design/cognition-graph/01-consensus-gate.md.
+#
+# [consensus]
+# generator = "kimi"
+# critic    = "glm"
+# max_rounds = 2                      # critic rounds before exhaustion (ceiling 5)
+# scope = "final"                     # "final" | "every-iteration"
+# on_exhaustion = "deliver-with-note" # "deliver-with-note" | "fail"
+# critic_max_tokens = 512
+# max_alternatives = 3
+# rubric_file = ""                    # operator rubric (overrides the built-in)
+
+# The digest ledger + background distiller (cognition-graph 02): every delivered
+# response is summarized + fact-extracted in the background (per-session FIFO
+# worker; the reply path never waits) into rows keyed (session_id, agreed_seq),
+# which instant compaction later assembles instead of summarizing on the critical
+# path. "clickhouse" (the default deployment target) reuses the [telemetry]
+# connection with DURABLE writes (async_insert + wait_for_async_insert — not the
+# lossy telemetry channel); "sqlite" keeps a single-file ledger for server-less
+# runs. See docs/design/cognition-graph/02-background-distiller.md.
+#
+# [digest]
+# store = "clickhouse"               # "" (off) | "clickhouse" | "sqlite" | "grpc"
+# path = ".agent/digests.sqlite3"    # sqlite backend only
+# summary_max_tokens = 512
+# facts_max_tokens = 256
+
+# Instant compaction (cognition-graph 03): select with
+# `[agent] context = "instant-window"` (requires [digest] store). Compaction
+# ASSEMBLES from the pre-computed ledger — one small current-objective call +
+# relevance selection over the summaries + the facts block + open alternatives —
+# instead of summarizing the whole history on the critical path; any miss falls
+# back to the classic summarizing window, then truncation.
+#
+# [instant]
+# relevance = "llm"                  # "llm" | "keyword" (zero extra calls) | "all"
+# objective_max_tokens = 128
+# min_coverage = 0.6                 # ledger coverage of the span; below → fallback
+# facts_max_chars = 4096
+# alternatives_max_chars = 2048
+
+# The cognition-graph document (cognition-graph 04): the declarative node graph
+# re-expressing the gate/distiller/compaction wiring above, editable as data
+# (and, served via --serve-graph, by the portal's drag-drop editor). Off by
+# default — with no [graph] store the increments behave exactly as their own
+# blocks configure them. The file backend re-validates the textproto document
+# on every read and rejects invalid documents wholesale (typed per-node
+# issues). See docs/design/cognition-graph/04-graph-config.md.
+#
+# [graph]
+# store = "file"                     # "" (off) | "file" | "grpc" (central editor service)
+# file = ".agent/graph.textproto"    # file backend only; see config/cognition/ examples
+
 # General task-mode detection (the TaskClassifier seam). Runs every turn to detect
 # when to switch to a more appropriate mode; drives the in-loop review hand-off, and
 # (later) mode-aware compaction + dimensional memory. ON by default — with no [pool]

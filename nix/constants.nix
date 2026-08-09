@@ -206,6 +206,24 @@
       metrics_port = 9629;
     };
 
+    # The per-session digest ledger (cognition-graph 02/04): the `DigestStore`
+    # seam — the background distiller's summary/facts rows, assembled by instant
+    # compaction. Served so many agents can share one central ledger.
+    digest = {
+      port = 50081;
+      socket = "/tmp/agent-seddon/digest.sock";
+      metrics_port = 9631;
+    };
+
+    # The cognition-graph document (cognition-graph 04): the `GraphStore` seam —
+    # get/put/validate the declarative node graph + `DescribeNodeTypes`, the
+    # schema registry a graph editor (the portal) renders from.
+    graph = {
+      port = 50082;
+      socket = "/tmp/agent-seddon/graph.sock";
+      metrics_port = 9632;
+    };
+
     # NOT a seam: the opt-in `agent --serve-sessions` gateway (docs/design/portal),
     # which hosts the `SessionRegistryService` (open/close/heartbeat) plus a
     # *driving* `AgentSessionService` (the `Send` RPC — submit a goal, stream the

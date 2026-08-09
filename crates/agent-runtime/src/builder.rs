@@ -45,12 +45,74 @@ pub async fn build_agent_with(
     session_id: String,
     metrics: Metrics,
 ) -> anyhow::Result<Arc<Agent>> {
+    // The cognition-graph document (cognition-graph 04), resolved FIRST: a
+    // non-empty document is the wiring authority for its three anchor slots,
+    // applied as a config overlay the factories below read (`critic_gate` →
+    // `[consensus]`, background distill nodes → the distiller, `compact` →
+    // `instant-window`). An unloadable/invalid document is a startup error
+    // (fail closed); a shape this executor cannot express warns and falls back
+    // to the anchor's built-in behavior (fail soft).
+    #[allow(unused_mut)]
+    let mut cfg = cfg;
+    #[cfg(feature = "graph")]
+    let (graph_store, graph_distill_kinds, graph_plan) = resolve_cognition_graph(&mut cfg).await?;
+    #[cfg(not(feature = "graph"))]
+    let (graph_store, graph_distill_kinds): (
+        Option<Arc<dyn agent_core::GraphStore>>,
+        Option<(bool, bool)>,
+    ) = (None, None);
+    let cfg = cfg;
+
+    // The digest ledger (cognition-graph 02), opt-in via `[digest] store`. Built
+    // BEFORE the provider so the fork observer can file loser alternatives, and
+    // before the context strategy so `instant-window` reads it via the factory
+    // ctx. The `clickhouse` backend reuses the `[telemetry]` connection params
+    // (one server, two write disciplines — digests durable, telemetry lossy).
+    #[cfg(feature = "digest")]
+    let digest_store: Option<Arc<dyn agent_core::DigestStore>> = match cfg.digest.store.as_str() {
+        "" => None,
+        "clickhouse" => Some(Arc::new(agent_digest::ClickHouseDigests::new(
+            cfg.telemetry.clickhouse_url.clone(),
+            cfg.telemetry.database.clone(),
+            cfg.telemetry.user.clone(),
+            cfg.telemetry.password.clone(),
+        ))),
+        "sqlite" => Some(Arc::new(agent_digest::SqliteDigests::open(expand_tilde(
+            &cfg.digest.path,
+        ))?)),
+        #[cfg(feature = "grpc")]
+        "grpc" => {
+            let ep = crate::registry::grpc_client_endpoint(
+                &cfg.grpc.digest.endpoint,
+                agent_grpc::constants::DIGEST,
+            );
+            Some(Arc::new(agent_grpc::client::GrpcDigests::connect(&ep)?))
+        }
+        other => anyhow::bail!("unknown [digest] store `{other}`"),
+    };
+    #[cfg(not(feature = "digest"))]
+    let digest_store: Option<Arc<dyn agent_core::DigestStore>> = None;
+
     // Wrap the provider in its metrics decorator up front, so every downstream
     // user (the loop, the summarizing context strategy, distillation) is
     // attributed the same way — including a remote `= "grpc"` client.
     // The factory context. `provider`/`tokenizer` are filled in as they become
     // available — see `FactoryCtx` on why those two are optional.
     let base_ctx = crate::registry::FactoryCtx::new(&cfg, &metrics).with_registry(registry);
+    // A graph fork owns the response path: the builder composes the
+    // BranchingProvider chain (branches, judge, post-merge gate) directly.
+    #[cfg(feature = "graph")]
+    let provider = match graph_plan.as_ref().filter(|p| p.fork.is_some()) {
+        Some(plan) => compose_fork_provider(plan, &base_ctx, &cfg, &metrics, digest_store.clone())?,
+        None => crate::metered::provider(
+            registry
+                .build_provider(&cfg.agent.provider, &base_ctx)
+                .context("building provider")?,
+            metrics.clone(),
+            &cfg.agent.provider,
+        ),
+    };
+    #[cfg(not(feature = "graph"))]
     let provider = crate::metered::provider(
         registry
             .build_provider(&cfg.agent.provider, &base_ctx)
@@ -517,7 +579,8 @@ pub async fn build_agent_with(
     #[allow(unused_mut)]
     let mut full_ctx = crate::registry::FactoryCtx::new(&cfg, &metrics)
         .with_provider(&provider)
-        .with_tokenizer(tokenizer.as_ref());
+        .with_tokenizer(tokenizer.as_ref())
+        .with_digests(digest_store.as_ref());
     #[cfg(feature = "semantic-search")]
     {
         full_ctx = full_ctx.with_embedder(embedder.as_ref());
@@ -958,6 +1021,22 @@ pub async fn build_agent_with(
     };
     let agent = match dimension_store_seam {
         Some(d) => agent.with_dimension_store(d),
+        None => agent,
+    };
+    let agent = match &digest_store {
+        Some(s) => agent.with_digests(
+            s.clone(),
+            cfg.digest.summary_max_tokens,
+            cfg.digest.facts_max_tokens,
+        ),
+        None => agent,
+    };
+    let agent = match &graph_store {
+        Some(g) => agent.with_graph(g.clone()),
+        None => agent,
+    };
+    let agent = match graph_distill_kinds {
+        Some((summary, facts)) => agent.with_distill_kinds(summary, facts),
         None => agent,
     };
     let agent = match prompt_store_seam {
@@ -1526,10 +1605,272 @@ pub(crate) fn build_route_policy(cfg: &crate::config::RouteCfg) -> agent_provide
     }
 }
 
+/// Build the `[graph] store` backend and, for a non-empty document, compile it
+/// and overlay the plan onto the config (cognition-graph 04's anchor-slot
+/// executor: the graph drives the same engines the TOML blocks drive). Returns
+/// the store (held for `--serve-graph`) and the distill-kind restriction the
+/// delivery anchor's background nodes imply (`None` = keep the built-in
+/// both-kinds behavior).
+#[cfg(feature = "graph")]
+async fn resolve_cognition_graph(
+    cfg: &mut Config,
+) -> anyhow::Result<(
+    Option<Arc<dyn agent_core::GraphStore>>,
+    Option<(bool, bool)>,
+    Option<crate::cognition::GraphPlan>,
+)> {
+    let store: Option<Arc<dyn agent_core::GraphStore>> = match cfg.graph.store.as_str() {
+        "" => None,
+        "file" => Some(Arc::new(agent_graph::FileGraphs::new(expand_tilde(
+            &cfg.graph.file,
+        )))),
+        #[cfg(feature = "grpc")]
+        "grpc" => {
+            let ep = crate::registry::grpc_client_endpoint(
+                &cfg.grpc.graph.endpoint,
+                agent_grpc::constants::GRAPH,
+            );
+            Some(Arc::new(agent_grpc::client::GrpcGraphs::connect(&ep)?))
+        }
+        other => anyhow::bail!("unknown [graph] store `{other}`"),
+    };
+    let Some(s) = &store else {
+        return Ok((None, None, None));
+    };
+    // The store re-validates on read, so an invalid document fails closed HERE
+    // — a startup error naming the typed issues — never at the executor.
+    let doc = s
+        .get()
+        .await
+        .context("loading the cognition-graph document")?;
+    if doc.nodes.is_empty() {
+        // An empty document = the built-in, graph-less behavior.
+        return Ok((store, None, None));
+    }
+    let plan = crate::cognition::compile(&doc);
+    for w in &plan.warnings {
+        tracing::warn!(target: "cognition", "graph compile: {w}");
+    }
+    let kinds = crate::cognition::distill_kinds(&plan);
+    for w in crate::cognition::apply_to_config(&plan, cfg) {
+        tracing::warn!(target: "cognition", "graph apply: {w}");
+    }
+    tracing::info!(
+        target: "cognition",
+        gate = plan.gate.is_some(),
+        fork = plan.fork.is_some(),
+        summary = kinds.0,
+        facts = kinds.1,
+        compact = plan.compact.is_some(),
+        "cognition graph applied"
+    );
+    Ok((store, Some(kinds), Some(plan)))
+}
+
+/// Compose the fork's provider chain from a compiled [`ForkPlan`]: per-branch
+/// generators (name-resolved or the base) each optionally wrapped in a
+/// branch-local consensus gate, the `BranchingProvider` with its join/merge
+/// config and judge, and the post-merge gate around the whole fork. The
+/// observer bridges to the `agent_graph_*` families and files loser
+/// alternatives to the digest ledger.
+#[cfg(feature = "graph")]
+fn compose_fork_provider(
+    plan: &crate::cognition::GraphPlan,
+    ctx: &crate::registry::FactoryCtx<'_>,
+    cfg: &Config,
+    metrics: &Metrics,
+    digests: Option<Arc<dyn agent_core::DigestStore>>,
+) -> anyhow::Result<Arc<dyn agent_core::LlmProvider>> {
+    use agent_core::LlmProvider;
+    use agent_providers::{
+        BranchCfg, BranchSpec, BranchingProvider, ConsensusProvider, GateCfg, GateScope,
+        JoinPolicy, MergeStrategy, OnTimeout,
+    };
+    let fork = plan.fork.as_ref().expect("caller checked fork.is_some()");
+
+    // The base provider: the configured main provider — every branch without
+    // its own `provider` param, the fallback single path, the default judge.
+    let base = crate::metered::provider(
+        ctx.registry()?
+            .build_provider(&cfg.agent.provider, ctx)
+            .context("building the fork's base provider")?,
+        metrics.clone(),
+        &cfg.agent.provider,
+    );
+
+    // A gate plan → (critic, GateCfg), sharing the `[consensus]` token/
+    // alternatives budgets (the graph names WHAT runs; budgets stay config).
+    let gate_parts =
+        |g: &crate::cognition::GatePlan| -> anyhow::Result<(Arc<dyn LlmProvider>, GateCfg)> {
+            let critic = crate::registry::resolve_provider_ref(&g.critic, ctx)?;
+            let mut gc = GateCfg {
+                critic_max_tokens: cfg.consensus.critic_max_tokens,
+                max_alternatives: cfg.consensus.max_alternatives,
+                ..GateCfg::default()
+            };
+            if let Some(r) = g.max_rounds {
+                gc.max_rounds = r;
+            }
+            gc.scope = match g.scope.as_deref() {
+                None | Some("") | Some("final") => GateScope::Final,
+                Some("every-iteration") => GateScope::EveryIteration,
+                Some(other) => anyhow::bail!("graph gate: unknown scope `{other}`"),
+            };
+            gc.on_exhaustion = match g.on_exhaustion.as_deref() {
+                None | Some("") | Some("deliver-with-note") => {
+                    agent_providers::Exhaustion::DeliverWithNote
+                }
+                Some("fail") => agent_providers::Exhaustion::Fail,
+                Some(other) => anyhow::bail!("graph gate: unknown on_exhaustion `{other}`"),
+            };
+            Ok((critic, gc))
+        };
+    let gated = |inner: Arc<dyn LlmProvider>,
+                 g: &crate::cognition::GatePlan|
+     -> anyhow::Result<Arc<dyn LlmProvider>> {
+        let (critic, gc) = gate_parts(g)?;
+        let m = metrics.clone();
+        Ok(Arc::new(
+            ConsensusProvider::new(inner, critic)
+                .with_cfg(gc)
+                .with_observer(Arc::new(move |o| {
+                    crate::metered::record_gate_outcome(&m, o);
+                })),
+        ))
+    };
+
+    let mut branches = Vec::new();
+    for b in &fork.branches {
+        let generator: Arc<dyn LlmProvider> = match &b.provider {
+            Some(name) => crate::registry::resolve_provider_ref(name, ctx)?,
+            None => base.clone(),
+        };
+        let provider = match &b.gate {
+            Some(g) => gated(generator, g)?,
+            None => generator,
+        };
+        branches.push(BranchSpec {
+            label: b.label.clone(),
+            lens: b.lens.clone(),
+            provider,
+        });
+    }
+
+    let mut bc = BranchCfg {
+        record_losers: fork.record_losers.unwrap_or(true),
+        ..BranchCfg::default()
+    };
+    bc.policy = match fork.policy.as_str() {
+        "" | "all" => JoinPolicy::All,
+        "any" => JoinPolicy::Any,
+        "quorum" => JoinPolicy::Quorum(fork.quorum_k.unwrap_or(1)),
+        other => anyhow::bail!("graph join: unknown policy `{other}`"),
+    };
+    if let Some(t) = fork.timeout_ms {
+        bc.timeout_ms = t;
+    }
+    bc.on_timeout = match fork.on_timeout.as_str() {
+        "" | "partial" => OnTimeout::Partial,
+        "fail" => OnTimeout::Fail,
+        other => anyhow::bail!("graph join: unknown on_timeout `{other}`"),
+    };
+    bc.strategy = match fork.strategy.as_str() {
+        "" | "compare" => MergeStrategy::Compare,
+        "synthesize" => MergeStrategy::Synthesize,
+        "concat" => MergeStrategy::Concat,
+        other => anyhow::bail!("graph merge: unknown strategy `{other}`"),
+    };
+
+    let m = metrics.clone();
+    let observer: agent_providers::BranchObserver = Arc::new(move |r| {
+        crate::metered::record_branch_report(&m, r);
+        file_fork_alternatives(&digests, &m, r);
+    });
+    let mut bp = BranchingProvider::new(&fork.split, base, branches)
+        .with_cfg(bc)
+        .with_observer(observer);
+    if let Some(j) = &fork.judge {
+        bp = bp.with_judge(crate::registry::resolve_provider_ref(j, ctx)?);
+    }
+    let branching: Arc<dyn LlmProvider> = Arc::new(bp);
+
+    // The merged result still passes the post-merge consensus gate, if any.
+    match &plan.gate {
+        Some(g) => gated(branching, g),
+        None => Ok(branching),
+    }
+}
+
+/// File a fork's loser alternatives as `kind = alternatives` digest rows —
+/// the road not taken, with its reconsideration trigger (a forked exploration
+/// is never wasted). Fire-and-forget: never on the reply path's error surface.
+#[cfg(feature = "graph")]
+fn file_fork_alternatives(
+    digests: &Option<Arc<dyn agent_core::DigestStore>>,
+    metrics: &Metrics,
+    r: &agent_providers::BranchReport,
+) {
+    let Some(store) = digests else { return };
+    if r.alternatives.is_empty() {
+        return;
+    }
+    // The observer runs inside the session's identity scope; without one
+    // (a bare provider call) there is nothing to file the rows under.
+    let Some(key) = agent_core::current_identity() else {
+        return;
+    };
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    for (i, alt) in r.alternatives.iter().enumerate() {
+        let text = format!(
+            "Option: {}\nSummary: {}\nReconsider when: {}",
+            alt.option, alt.summary, alt.reconsider_when
+        );
+        // Judge output is model output: screen before it enters the ledger
+        // (the same write discipline as the distiller).
+        if let Some(reason) = agent_core::scan_for_injection(&text) {
+            tracing::warn!(reason, split = %r.split, "alternatives row flagged — dropped");
+            metrics.on_distill("alternatives", "injection_flagged", 0.0);
+            continue;
+        }
+        let row = agent_core::Digest {
+            session_id: key.session.as_str().to_string(),
+            user_id: key.user.as_str().to_string(),
+            // The delivery-path `agreed_seq` is not visible at the provider
+            // layer; a millisecond ordinal keys the row uniquely and keeps
+            // ledger reads seq-ordered (recorded STATUS deviation).
+            seq: ts.saturating_add(i as u64),
+            kind: agent_core::DigestKind::Alternatives,
+            text,
+            keywords: Vec::new(),
+            mode: String::new(),
+            model: String::new(),
+            ts_ms: ts,
+            duration_ms: 0,
+            tokens: 0,
+        };
+        let store = store.clone();
+        let metrics = metrics.clone();
+        tokio::spawn(async move {
+            match store.put(row).await {
+                Ok(()) => metrics.on_distill("alternatives", "succeeded", 0.0),
+                Err(e) => {
+                    tracing::warn!(error = %e, "alternatives row store put failed");
+                    metrics.on_distill("alternatives", "store_failed", 0.0);
+                }
+            }
+        });
+    }
+}
+
 #[cfg(any(
     feature = "provider-openai-compat",
     feature = "provider-anthropic",
-    feature = "provider-pool"
+    feature = "provider-pool",
+    feature = "digest",
+    feature = "graph"
 ))]
 fn expand_tilde(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/") {

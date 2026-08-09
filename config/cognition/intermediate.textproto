@@ -1,0 +1,120 @@
+# The full increments-01–03 cognition flow, expressed as a document:
+#
+#   anchor.response ──── generate ── critic_gate (judged by "glm")
+#   anchor.delivery ──── distill_summary   (background, never blocks delivery)
+#                   \─── distill_facts     (background)
+#   anchor.compaction ── compact_assemble  (instant compaction from the ledger)
+#
+# Every delivered answer is gate-checked, then background-distilled into the
+# `[digest]` ledger (summary + key facts per agreed_seq); compaction ASSEMBLES
+# from those pre-computed rows instead of summarizing on the critical path.
+# Requires `[digest] store` to be configured — the document names WHAT runs,
+# the config owns connections. Run with:
+#
+#   agent --cognition-graph config/cognition/intermediate.textproto "<goal>"
+version: 1
+nodes {
+  key: "compact"
+  value {
+    type: "compact_assemble"
+    type_version: 1
+    params {
+      object_value {
+        fields {
+          key: "relevance"
+          value { string_value: "keyword" }
+        }
+        fields {
+          key: "min_coverage"
+          value { double_value: 0.6 }
+        }
+      }
+    }
+  }
+}
+nodes {
+  key: "facts"
+  value {
+    type: "distill_facts"
+    type_version: 1
+    params {
+      object_value {
+        fields {
+          key: "max_tokens"
+          value { uint_value: 256 }
+        }
+      }
+    }
+  }
+}
+nodes {
+  key: "gate"
+  value {
+    type: "critic_gate"
+    type_version: 1
+    params {
+      object_value {
+        fields {
+          key: "critic"
+          value { string_value: "glm" }
+        }
+        fields {
+          key: "max_rounds"
+          value { uint_value: 2 }
+        }
+      }
+    }
+  }
+}
+nodes {
+  key: "generate"
+  value {
+    type: "generate"
+    type_version: 1
+  }
+}
+nodes {
+  key: "summarize"
+  value {
+    type: "distill_summary"
+    type_version: 1
+    params {
+      object_value {
+        fields {
+          key: "max_tokens"
+          value { uint_value: 512 }
+        }
+      }
+    }
+  }
+}
+edges {
+  from: "anchor.response"
+  to: "generate"
+  kind: KIND_MAIN
+}
+edges {
+  from: "generate"
+  to: "gate"
+  kind: KIND_MAIN
+}
+edges {
+  from: "glm"
+  to: "gate"
+  kind: KIND_CAPABILITY
+}
+edges {
+  from: "anchor.delivery"
+  to: "summarize"
+  kind: KIND_BACKGROUND
+}
+edges {
+  from: "anchor.delivery"
+  to: "facts"
+  kind: KIND_BACKGROUND
+}
+edges {
+  from: "anchor.compaction"
+  to: "compact"
+  kind: KIND_MAIN
+}

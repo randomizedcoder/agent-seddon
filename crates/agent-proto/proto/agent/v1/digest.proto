@@ -1,0 +1,56 @@
+// The `DigestStore` seam over gRPC (cognition-graph 02/04): the per-session
+// digest ledger the background distiller fills (summary + key-facts + gate
+// alternatives per delivered response) and instant compaction assembles from.
+// Lets many agents share one central ledger. Everything crossing this wire is
+// untrusted in BOTH directions: the server re-validates ids (`safe_segment`),
+// caps text/keyword/limit sizes, and rejects unknown kinds (fail closed); the
+// client treats returned rows as model output (re-screened before reuse).
+syntax = "proto3";
+
+package agent.v1;
+
+// One ledger row. `kind` is a CLOSED set ("summary" | "facts" | "objective" |
+// "alternatives") — an unknown discriminator is rejected/skipped, never stored.
+message Digest {
+  string session_id = 1;
+  string user_id = 2;
+  // The per-session agreed-response ordinal this digest belongs to.
+  uint64 seq = 3;
+  string kind = 4;
+  string text = 5;
+  repeated string keywords = 6;
+  // `TaskMode` at delivery time (labels / relevance hints).
+  string mode = 7;
+  // The model that produced the distillation (cost/quality attribution).
+  string model = 8;
+  uint64 ts_ms = 9;
+  uint32 duration_ms = 10;
+  uint32 tokens = 11;
+}
+
+message PutDigestRequest {
+  Digest digest = 1;
+}
+
+message PutDigestResponse {}
+
+// A ledger read: digests for one session, ordered by `seq` ascending.
+// `kind` empty = all kinds; `since_seq` 0 = from the start; `keywords_any`
+// empty = no keyword prefilter; `limit` 0 = the server cap (also the ceiling —
+// a hostile limit cannot unbound a read).
+message QueryDigestsRequest {
+  string session_id = 1;
+  string kind = 2;
+  uint64 since_seq = 3;
+  repeated string keywords_any = 4;
+  uint32 limit = 5;
+}
+
+message QueryDigestsResponse {
+  repeated Digest digests = 1;
+}
+
+service DigestService {
+  rpc Put(PutDigestRequest) returns (PutDigestResponse);
+  rpc Query(QueryDigestsRequest) returns (QueryDigestsResponse);
+}

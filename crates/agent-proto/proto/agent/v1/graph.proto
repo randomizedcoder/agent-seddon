@@ -1,0 +1,113 @@
+// The `GraphStore` seam over gRPC (cognition-graph 04): the declarative
+// cognition-graph document — a flat node map + typed edges re-expressing the
+// consensus gate / background distillation / instant compaction as
+// user-configurable wiring — plus the node-type schema registry the Flutter
+// editor renders from (`DescribeNodeTypes` is the `/object_info` analog).
+//
+// Everything crossing this wire is untrusted in BOTH directions: the server
+// re-validates the whole document before storing (`Put` = validate-then-accept,
+// typed per-node issues), caps node/edge/params sizes, and rejects unknown
+// discriminators (edge kinds, issue codes) at conversion — fail closed. Params
+// reference resources by NAME only; secrets and endpoints never ride here.
+syntax = "proto3";
+
+package agent.v1;
+
+import "agent/v1/common.proto";
+
+// One node instance: a registered type + schema version + parameters
+// (`agent-core GraphNode`). Schemas are never embedded in documents.
+message GraphNode {
+  string type = 1;
+  uint32 type_version = 2;
+  JsonValue params = 3;
+}
+
+// A typed edge. `KIND_UNSPECIFIED` is never valid — conversions reject it.
+message GraphEdge {
+  string from = 1;
+  string to = 2;
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    // Data flow on the turn path (acyclic between nodes).
+    KIND_MAIN = 1;
+    // Fire-and-forget hand-off to the distiller; only from `anchor.delivery`.
+    KIND_BACKGROUND = 2;
+    // Attachment: `from` names a configured resource, `to` the consuming node.
+    KIND_CAPABILITY = 3;
+  }
+  Kind kind = 3;
+}
+
+// The document (`agent-core GraphDoc`): flat node map, stable human-chosen
+// ids, typed edges, zero layout (layout is a GUI-owned sidecar).
+message CognitionGraph {
+  uint32 version = 1;
+  map<string, GraphNode> nodes = 2;
+  repeated GraphEdge edges = 3;
+}
+
+// A named, nominally-typed port on a node type (editor connection rules).
+message NodePort {
+  string name = 1;
+  string kind = 2;
+}
+
+// Everything an editor needs to render one node type from data alone:
+// title/doc, typed ports, and a JSON Schema for the params form.
+message NodeTypeSchema {
+  string type = 1;
+  uint32 type_version = 2;
+  string title = 3;
+  string doc = 4;
+  repeated NodePort inputs = 5;
+  repeated NodePort outputs = 6;
+  // JSON Schema (+ UI hints) for `GraphNode.params`.
+  JsonValue params_schema = 7;
+}
+
+// One validation finding. `code` is a CLOSED set (see `agent-core
+// GraphIssueCode`) — an unknown code is rejected at conversion, never stored.
+message GraphIssue {
+  // The offending node id / edge endpoint; "" = a document-level finding.
+  string node = 1;
+  string code = 2;
+  string detail = 3;
+}
+
+message GetGraphRequest {}
+
+message GetGraphResponse {
+  CognitionGraph graph = 1;
+}
+
+message PutGraphRequest {
+  CognitionGraph graph = 1;
+}
+
+message PutGraphResponse {}
+
+message ValidateGraphRequest {
+  CognitionGraph graph = 1;
+}
+
+// Typed findings; empty = valid. A broken document is a list of issues, not an
+// RPC error (the editor shows them inline while dragging).
+message ValidateGraphResponse {
+  repeated GraphIssue issues = 1;
+}
+
+message DescribeNodeTypesRequest {}
+
+message DescribeNodeTypesResponse {
+  repeated NodeTypeSchema node_types = 1;
+}
+
+service GraphService {
+  rpc Get(GetGraphRequest) returns (GetGraphResponse);
+  // Validates before accepting; an invalid document is rejected wholesale
+  // (`INVALID_ARGUMENT` carrying the first issues), never partially stored.
+  rpc Put(PutGraphRequest) returns (PutGraphResponse);
+  rpc Validate(ValidateGraphRequest) returns (ValidateGraphResponse);
+  rpc DescribeNodeTypes(DescribeNodeTypesRequest) returns (DescribeNodeTypesResponse);
+}

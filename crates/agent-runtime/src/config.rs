@@ -66,6 +66,14 @@ pub struct Config {
     #[serde(default)]
     pub route: RouteCfg,
     #[serde(default)]
+    pub consensus: ConsensusCfg,
+    #[serde(default)]
+    pub digest: DigestCfg,
+    #[serde(default)]
+    pub instant: InstantCfg,
+    #[serde(default)]
+    pub graph: GraphCfg,
+    #[serde(default)]
     pub mode: ModeCfg,
     #[serde(default)]
     pub dimensions: DimensionsCfg,
@@ -472,6 +480,158 @@ impl Default for RouteCfg {
             cooldown_secs: default_breaker_cooldown(),
         }
     }
+}
+
+/// The consensus gate (`[consensus]`, cognition-graph increment 01). Selected with
+/// `[agent] provider = "consensus"`: the `generator` answers, the `critic` judges,
+/// bounded revise loop. Both names resolve like route upstreams — a
+/// `[[route.upstreams]]` entry by name, else a registry provider type.
+/// See docs/design/cognition-graph/01-consensus-gate.md.
+#[derive(Debug, Deserialize, Default)]
+pub struct ConsensusCfg {
+    #[serde(default)]
+    pub generator: String,
+    #[serde(default)]
+    pub critic: String,
+    /// Critic rounds before exhaustion (clamped to a hard ceiling in the provider).
+    #[serde(default = "default_gate_rounds")]
+    pub max_rounds: u8,
+    /// "final" (default: gate only no-tool-call answers) | "every-iteration".
+    #[serde(default)]
+    pub scope: String,
+    /// "deliver-with-note" (default) | "fail".
+    #[serde(default)]
+    pub on_exhaustion: String,
+    #[serde(default = "default_gate_critic_tokens")]
+    pub critic_max_tokens: u32,
+    #[serde(default = "default_gate_alternatives")]
+    pub max_alternatives: u8,
+    /// Optional path to an operator rubric (overrides the compiled default).
+    #[serde(default)]
+    pub rubric_file: String,
+}
+
+fn default_gate_rounds() -> u8 {
+    2
+}
+fn default_gate_critic_tokens() -> u32 {
+    512
+}
+fn default_gate_alternatives() -> u8 {
+    3
+}
+
+/// The digest ledger + background distiller (`[digest]`, cognition-graph 02).
+/// Empty `store` = off. `clickhouse` reuses the `[telemetry]` connection
+/// parameters (one server, two write disciplines: telemetry is lossy-batched,
+/// digests are durable). See docs/design/cognition-graph/02-background-distiller.md.
+#[derive(Debug, Deserialize)]
+pub struct DigestCfg {
+    /// "" (off) | "clickhouse" | "sqlite".
+    #[serde(default)]
+    pub store: String,
+    /// SQLite ledger path (`sqlite` backend only).
+    #[serde(default = "default_digest_path")]
+    pub path: String,
+    #[serde(default = "default_digest_summary_tokens")]
+    pub summary_max_tokens: u32,
+    #[serde(default = "default_digest_facts_tokens")]
+    pub facts_max_tokens: u32,
+}
+
+impl Default for DigestCfg {
+    fn default() -> Self {
+        Self {
+            store: String::new(),
+            path: default_digest_path(),
+            summary_max_tokens: default_digest_summary_tokens(),
+            facts_max_tokens: default_digest_facts_tokens(),
+        }
+    }
+}
+
+/// Instant compaction (`[instant]`, cognition-graph 03). Selected with
+/// `[agent] context = "instant-window"`; needs `[digest] store` configured.
+/// See docs/design/cognition-graph/03-instant-compaction.md.
+#[derive(Debug, Deserialize)]
+pub struct InstantCfg {
+    /// "llm" (default: keyword prefilter + one batch keep/drop pass) |
+    /// "keyword" (zero extra LLM calls) | "all" (no filtering).
+    #[serde(default)]
+    pub relevance: String,
+    #[serde(default = "default_instant_objective_tokens")]
+    pub objective_max_tokens: u32,
+    /// Minimum ledger coverage of the compacted span; below it → fall back to
+    /// the classic summarizer.
+    #[serde(default = "default_instant_min_coverage")]
+    pub min_coverage: f32,
+    #[serde(default = "default_instant_facts_chars")]
+    pub facts_max_chars: usize,
+    #[serde(default = "default_instant_alternatives_chars")]
+    pub alternatives_max_chars: usize,
+}
+
+impl Default for InstantCfg {
+    fn default() -> Self {
+        Self {
+            relevance: String::new(),
+            objective_max_tokens: default_instant_objective_tokens(),
+            min_coverage: default_instant_min_coverage(),
+            facts_max_chars: default_instant_facts_chars(),
+            alternatives_max_chars: default_instant_alternatives_chars(),
+        }
+    }
+}
+
+fn default_instant_objective_tokens() -> u32 {
+    128
+}
+
+/// The cognition-graph document (`[graph]`, cognition-graph 04). Empty `store`
+/// = off — the increments behave exactly as their own TOML blocks wired them
+/// (the graph is a re-expression, not a prerequisite).
+/// See docs/design/cognition-graph/04-graph-config.md.
+#[derive(Debug, Deserialize)]
+pub struct GraphCfg {
+    /// "" (off) | "file" (textproto on disk) | "grpc" (a central document
+    /// service, e.g. edited by the portal).
+    #[serde(default)]
+    pub store: String,
+    /// Textproto document path (`file` backend only).
+    #[serde(default = "default_graph_file")]
+    pub file: String,
+}
+
+impl Default for GraphCfg {
+    fn default() -> Self {
+        Self {
+            store: String::new(),
+            file: default_graph_file(),
+        }
+    }
+}
+
+fn default_graph_file() -> String {
+    ".agent/graph.textproto".to_string()
+}
+fn default_instant_min_coverage() -> f32 {
+    0.6
+}
+fn default_instant_facts_chars() -> usize {
+    4_096
+}
+fn default_instant_alternatives_chars() -> usize {
+    2_048
+}
+
+fn default_digest_path() -> String {
+    ".agent/digests.sqlite3".into()
+}
+fn default_digest_summary_tokens() -> u32 {
+    512
+}
+fn default_digest_facts_tokens() -> u32 {
+    256
 }
 
 /// One routable upstream. Connection + auth mirror `[[pool.members]]` (key never in
@@ -1460,6 +1620,10 @@ pub struct GrpcCfg {
     #[serde(default)]
     pub metrics_proxy: GrpcSeamCfg,
     #[serde(default)]
+    pub digest: GrpcSeamCfg,
+    #[serde(default)]
+    pub graph: GrpcSeamCfg,
+    #[serde(default)]
     pub review: GrpcSeamCfg,
     /// Not a seam: the opt-in `agent --serve-sessions` gateway (docs/design/portal),
     /// which hosts the `SessionRegistryService` + a *driving* `AgentSessionService`
@@ -1965,6 +2129,10 @@ impl Config {
             router: RouterCfg::default(),
             pool: PoolCfg::default(),
             route: RouteCfg::default(),
+            consensus: ConsensusCfg::default(),
+            digest: DigestCfg::default(),
+            instant: InstantCfg::default(),
+            graph: GraphCfg::default(),
             mode: ModeCfg::default(),
             dimensions: DimensionsCfg::default(),
             review: ReviewCfg::default(),
@@ -2191,5 +2359,93 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.upstreams[0].name, "glm");
         assert!(cfg.upstreams[0].endpoint.is_empty() && cfg.upstreams[0].tags.is_empty());
+    }
+
+    /// The `[consensus]` surface parses the gate knobs (cognition-graph 01).
+    #[test]
+    fn positive_consensus_config_parses() {
+        let cfg: ConsensusCfg = toml::from_str(
+            r#"
+            generator = "kimi"
+            critic = "glm"
+            max_rounds = 3
+            scope = "final"
+            on_exhaustion = "fail"
+            critic_max_tokens = 256
+            max_alternatives = 2
+            rubric_file = "prompts/gate/rubric.md"
+        "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.generator, "kimi");
+        assert_eq!(cfg.critic, "glm");
+        assert_eq!(cfg.max_rounds, 3);
+        assert_eq!(cfg.on_exhaustion, "fail");
+        assert_eq!(cfg.critic_max_tokens, 256);
+        assert_eq!(cfg.max_alternatives, 2);
+        assert_eq!(cfg.rubric_file, "prompts/gate/rubric.md");
+    }
+
+    /// The `[instant]` surface parses the assembly knobs (cognition-graph 03).
+    #[test]
+    fn positive_instant_config_parses() {
+        let cfg: InstantCfg = toml::from_str(
+            r#"
+            relevance = "keyword"
+            objective_max_tokens = 96
+            min_coverage = 0.8
+            facts_max_chars = 2048
+            alternatives_max_chars = 1024
+        "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.relevance, "keyword");
+        assert_eq!(cfg.objective_max_tokens, 96);
+        assert!((cfg.min_coverage - 0.8).abs() < f32::EPSILON);
+        assert_eq!(cfg.facts_max_chars, 2048);
+        assert_eq!(cfg.alternatives_max_chars, 1024);
+    }
+
+    /// Boundary: an empty `[instant]` is a valid config with the design defaults.
+    #[test]
+    fn boundary_empty_instant_defaults() {
+        let cfg: InstantCfg = toml::from_str("").unwrap();
+        assert!(cfg.relevance.is_empty());
+        assert_eq!(cfg.objective_max_tokens, 128);
+        assert!((cfg.min_coverage - 0.6).abs() < f32::EPSILON);
+        assert_eq!(cfg.facts_max_chars, 4096);
+    }
+
+    #[test]
+    fn positive_graph_config_parses() {
+        let cfg: GraphCfg = toml::from_str(
+            r#"
+            store = "file"
+            file = "config/cognition/intermediate.textproto"
+        "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.store, "file");
+        assert_eq!(cfg.file, "config/cognition/intermediate.textproto");
+    }
+
+    /// Boundary: an empty `[graph]` is off, with the default document path.
+    #[test]
+    fn boundary_empty_graph_defaults() {
+        let cfg: GraphCfg = toml::from_str("").unwrap();
+        assert!(cfg.store.is_empty());
+        assert_eq!(cfg.file, ".agent/graph.textproto");
+    }
+
+    /// Boundary: an empty `[consensus]` is a valid (unused) config with defaults —
+    /// the factory rejects it only when actually selected as the provider.
+    #[test]
+    fn boundary_empty_consensus_defaults() {
+        let cfg: ConsensusCfg = toml::from_str("").unwrap();
+        assert!(cfg.generator.is_empty() && cfg.critic.is_empty());
+        assert_eq!(cfg.max_rounds, 2);
+        assert_eq!(cfg.critic_max_tokens, 512);
+        assert_eq!(cfg.max_alternatives, 3);
+        assert!(cfg.scope.is_empty() && cfg.on_exhaustion.is_empty());
     }
 }
