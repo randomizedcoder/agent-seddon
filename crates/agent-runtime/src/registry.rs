@@ -45,6 +45,10 @@ pub struct FactoryCtx<'a> {
     /// their own (a real embedder loads a model).
     #[cfg(feature = "semantic-search")]
     pub built_embedder: Option<&'a Arc<dyn agent_core::Embedder>>,
+    /// The already-built digest ledger (cognition-graph 02) — absent until it is
+    /// built, and `None` when `[digest] store` is off. The `instant-window`
+    /// context strategy reads it.
+    pub built_digests: Option<&'a Arc<dyn agent_core::DigestStore>>,
     /// The registry itself, so a **composing** factory can build its children by
     /// config name (the `router` provider builds its candidates this way). The
     /// borrow is immutable and re-entrant: `build_*` takes `&self`, so a factory
@@ -62,6 +66,7 @@ impl<'a> FactoryCtx<'a> {
             built_tokenizer: None,
             #[cfg(feature = "semantic-search")]
             built_embedder: None,
+            built_digests: None,
             registry: None,
         }
     }
@@ -94,6 +99,15 @@ impl<'a> FactoryCtx<'a> {
     /// The built tokenizer, if one is configured and already built.
     pub fn tokenizer(&self) -> Option<&'a Arc<dyn agent_core::Tokenizer>> {
         self.built_tokenizer
+    }
+    /// Inject the already-built digest ledger (see [`FactoryCtx::built_digests`]).
+    pub fn with_digests(mut self, d: Option<&'a Arc<dyn agent_core::DigestStore>>) -> Self {
+        self.built_digests = d;
+        self
+    }
+    /// The built digest ledger, if `[digest] store` is configured.
+    pub fn digests(&self) -> Option<&'a Arc<dyn agent_core::DigestStore>> {
+        self.built_digests
     }
     /// The registry, for a factory that composes other seams by config name.
     pub fn registry(&self) -> anyhow::Result<&'a Registry> {
@@ -476,6 +490,42 @@ pub fn register_builtins(r: &mut Registry) {
             // Point the destination-mode lens at operator overrides under
             // `<prompts>/lens/` (docs/design/portal); compiled defaults otherwise.
             .with_lens_dir(Some(&ctx.cfg.prompts.dir)),
+        ) as Arc<dyn ContextStrategy>)
+    });
+
+    // Instant compaction (cognition-graph 03): assemble from the pre-computed
+    // digest ledger; the classic summarizer is the built-in fail-soft fallback.
+    // Requires `[digest] store` — an instant window with no ledger would silently
+    // be a slow summarizing window, so that misconfiguration fails closed.
+    #[cfg(feature = "context-instant")]
+    r.context("instant-window", |ctx| {
+        let Some(digests) = ctx.digests() else {
+            anyhow::bail!(
+                "[agent] context = \"instant-window\" requires [digest] store to be \
+                 configured (the ledger it assembles from)"
+            );
+        };
+        let cfg = &ctx.cfg.instant;
+        let relevance = match cfg.relevance.as_str() {
+            "" | "llm" => agent_context::Relevance::Llm,
+            "keyword" => agent_context::Relevance::Keyword,
+            "all" => agent_context::Relevance::All,
+            other => anyhow::bail!("[instant] relevance: unknown value `{other}`"),
+        };
+        Ok(Arc::new(
+            agent_context::InstantWindow::new(
+                ctx.provider()?.clone(),
+                digests.clone(),
+                ctx.cfg.agent.keep_recent_tokens,
+            )
+            .with_cfg(agent_context::InstantCfg {
+                relevance,
+                objective_max_tokens: cfg.objective_max_tokens,
+                min_coverage: cfg.min_coverage,
+                facts_max_chars: cfg.facts_max_chars,
+                alternatives_max_chars: cfg.alternatives_max_chars,
+            })
+            .with_tokenizer(ctx.tokenizer().cloned(), ctx.cfg.provider.model.clone()),
         ) as Arc<dyn ContextStrategy>)
     });
 

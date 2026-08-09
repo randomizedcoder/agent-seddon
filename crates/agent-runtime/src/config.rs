@@ -70,6 +70,8 @@ pub struct Config {
     #[serde(default)]
     pub digest: DigestCfg,
     #[serde(default)]
+    pub instant: InstantCfg,
+    #[serde(default)]
     pub mode: ModeCfg,
     #[serde(default)]
     pub dimensions: DimensionsCfg,
@@ -544,6 +546,52 @@ impl Default for DigestCfg {
             facts_max_tokens: default_digest_facts_tokens(),
         }
     }
+}
+
+/// Instant compaction (`[instant]`, cognition-graph 03). Selected with
+/// `[agent] context = "instant-window"`; needs `[digest] store` configured.
+/// See docs/design/cognition-graph/03-instant-compaction.md.
+#[derive(Debug, Deserialize)]
+pub struct InstantCfg {
+    /// "llm" (default: keyword prefilter + one batch keep/drop pass) |
+    /// "keyword" (zero extra LLM calls) | "all" (no filtering).
+    #[serde(default)]
+    pub relevance: String,
+    #[serde(default = "default_instant_objective_tokens")]
+    pub objective_max_tokens: u32,
+    /// Minimum ledger coverage of the compacted span; below it → fall back to
+    /// the classic summarizer.
+    #[serde(default = "default_instant_min_coverage")]
+    pub min_coverage: f32,
+    #[serde(default = "default_instant_facts_chars")]
+    pub facts_max_chars: usize,
+    #[serde(default = "default_instant_alternatives_chars")]
+    pub alternatives_max_chars: usize,
+}
+
+impl Default for InstantCfg {
+    fn default() -> Self {
+        Self {
+            relevance: String::new(),
+            objective_max_tokens: default_instant_objective_tokens(),
+            min_coverage: default_instant_min_coverage(),
+            facts_max_chars: default_instant_facts_chars(),
+            alternatives_max_chars: default_instant_alternatives_chars(),
+        }
+    }
+}
+
+fn default_instant_objective_tokens() -> u32 {
+    128
+}
+fn default_instant_min_coverage() -> f32 {
+    0.6
+}
+fn default_instant_facts_chars() -> usize {
+    4_096
+}
+fn default_instant_alternatives_chars() -> usize {
+    2_048
 }
 
 fn default_digest_path() -> String {
@@ -2049,6 +2097,7 @@ impl Config {
             route: RouteCfg::default(),
             consensus: ConsensusCfg::default(),
             digest: DigestCfg::default(),
+            instant: InstantCfg::default(),
             mode: ModeCfg::default(),
             dimensions: DimensionsCfg::default(),
             review: ReviewCfg::default(),
@@ -2300,6 +2349,36 @@ mod tests {
         assert_eq!(cfg.critic_max_tokens, 256);
         assert_eq!(cfg.max_alternatives, 2);
         assert_eq!(cfg.rubric_file, "prompts/gate/rubric.md");
+    }
+
+    /// The `[instant]` surface parses the assembly knobs (cognition-graph 03).
+    #[test]
+    fn positive_instant_config_parses() {
+        let cfg: InstantCfg = toml::from_str(
+            r#"
+            relevance = "keyword"
+            objective_max_tokens = 96
+            min_coverage = 0.8
+            facts_max_chars = 2048
+            alternatives_max_chars = 1024
+        "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.relevance, "keyword");
+        assert_eq!(cfg.objective_max_tokens, 96);
+        assert!((cfg.min_coverage - 0.8).abs() < f32::EPSILON);
+        assert_eq!(cfg.facts_max_chars, 2048);
+        assert_eq!(cfg.alternatives_max_chars, 1024);
+    }
+
+    /// Boundary: an empty `[instant]` is a valid config with the design defaults.
+    #[test]
+    fn boundary_empty_instant_defaults() {
+        let cfg: InstantCfg = toml::from_str("").unwrap();
+        assert!(cfg.relevance.is_empty());
+        assert_eq!(cfg.objective_max_tokens, 128);
+        assert!((cfg.min_coverage - 0.6).abs() < f32::EPSILON);
+        assert_eq!(cfg.facts_max_chars, 4096);
     }
 
     /// Boundary: an empty `[consensus]` is a valid (unused) config with defaults —

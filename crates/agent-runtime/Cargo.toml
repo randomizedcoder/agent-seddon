@@ -21,6 +21,7 @@ default = [
     "context-sliding-window",
     "context-summarizing",
     "context-mode-aware",
+    "context-instant",
     "tokenizer",
     "memory-file",
     "dimensions",
@@ -155,6 +156,13 @@ git = [
 context-sliding-window = ["agent-context/context-sliding-window"]
 context-summarizing = ["agent-context/context-summarizing"]
 context-mode-aware = ["agent-context/context-mode-aware", "context-summarizing"]
+# Instant compaction (cognition-graph 03): assemble from the digest ledger. Needs
+# the ledger, so it implies `digest`.
+context-instant = [
+    "agent-context/context-instant",
+    "context-summarizing",
+    "digest",
+]
 # Tokenizer + cost seam: the approx backend, price table, accurate compaction
 # counts + USD/cache accounting (parity spec 23).
 tokenizer = ["dep:agent-tokenizer", "agent-tokenizer/tokenizer-approx"]

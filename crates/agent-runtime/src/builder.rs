@@ -514,10 +514,32 @@ pub async fn build_agent_with(
     #[cfg(not(feature = "semantic-search"))]
     let embedder: Option<Arc<dyn agent_core::Embedder>> = None;
 
+    // The digest ledger (cognition-graph 02), opt-in via `[digest] store`. Built
+    // BEFORE the context strategy so `instant-window` can read it via the factory
+    // ctx. The `clickhouse` backend reuses the `[telemetry]` connection parameters
+    // (one server, two write disciplines — digests are durable, telemetry is lossy).
+    #[cfg(feature = "digest")]
+    let digest_store: Option<Arc<dyn agent_core::DigestStore>> = match cfg.digest.store.as_str() {
+        "" => None,
+        "clickhouse" => Some(Arc::new(agent_digest::ClickHouseDigests::new(
+            cfg.telemetry.clickhouse_url.clone(),
+            cfg.telemetry.database.clone(),
+            cfg.telemetry.user.clone(),
+            cfg.telemetry.password.clone(),
+        ))),
+        "sqlite" => Some(Arc::new(agent_digest::SqliteDigests::open(expand_tilde(
+            &cfg.digest.path,
+        ))?)),
+        other => anyhow::bail!("unknown [digest] store `{other}`"),
+    };
+    #[cfg(not(feature = "digest"))]
+    let digest_store: Option<Arc<dyn agent_core::DigestStore>> = None;
+
     #[allow(unused_mut)]
     let mut full_ctx = crate::registry::FactoryCtx::new(&cfg, &metrics)
         .with_provider(&provider)
-        .with_tokenizer(tokenizer.as_ref());
+        .with_tokenizer(tokenizer.as_ref())
+        .with_digests(digest_store.as_ref());
     #[cfg(feature = "semantic-search")]
     {
         full_ctx = full_ctx.with_embedder(embedder.as_ref());
@@ -725,26 +747,6 @@ pub async fn build_agent_with(
         };
     #[cfg(not(feature = "dimensions"))]
     let dimension_store_seam: Option<Arc<dyn agent_core::DimensionStore>> = None;
-
-    // The digest ledger (cognition-graph 02), opt-in via `[digest] store`. The
-    // `clickhouse` backend reuses the `[telemetry]` connection parameters (one
-    // server, two write disciplines — digests are durable, telemetry is lossy).
-    #[cfg(feature = "digest")]
-    let digest_store: Option<Arc<dyn agent_core::DigestStore>> = match cfg.digest.store.as_str() {
-        "" => None,
-        "clickhouse" => Some(Arc::new(agent_digest::ClickHouseDigests::new(
-            cfg.telemetry.clickhouse_url.clone(),
-            cfg.telemetry.database.clone(),
-            cfg.telemetry.user.clone(),
-            cfg.telemetry.password.clone(),
-        ))),
-        "sqlite" => Some(Arc::new(agent_digest::SqliteDigests::open(expand_tilde(
-            &cfg.digest.path,
-        ))?)),
-        other => anyhow::bail!("unknown [digest] store `{other}`"),
-    };
-    #[cfg(not(feature = "digest"))]
-    let digest_store: Option<Arc<dyn agent_core::DigestStore>> = None;
 
     // Prompt management (docs/design/portal): the `PromptStore` seam over the config
     // system prompt + the context.d/prompts trees. Always built (no `= "grpc"` loop
@@ -980,9 +982,9 @@ pub async fn build_agent_with(
         Some(d) => agent.with_dimension_store(d),
         None => agent,
     };
-    let agent = match digest_store {
+    let agent = match &digest_store {
         Some(s) => agent.with_digests(
-            s,
+            s.clone(),
             cfg.digest.summary_max_tokens,
             cfg.digest.facts_max_tokens,
         ),
