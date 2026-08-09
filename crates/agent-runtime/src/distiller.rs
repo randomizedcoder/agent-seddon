@@ -195,7 +195,12 @@ async fn summarize(ctx: &DistillerCtx, job: &DistillJob, prev: Option<&str>) -> 
     ));
     let resp = complete(ctx, SUMMARY_SYSTEM, user, ctx.summary_max_tokens).await;
     let outcome = match resp {
-        Err(_) => ("failed", None),
+        // Swallowed (distillation must never fail the turn) but never silent —
+        // a misconfigured role provider was invisible without this line.
+        Err(e) => {
+            tracing::warn!(error = %e, "distill summary call failed");
+            ("failed", None)
+        }
         Ok(text) => {
             let (body, keywords) = split_keywords(&text);
             if body.trim().is_empty() {
@@ -240,7 +245,10 @@ async fn extract_facts(ctx: &DistillerCtx, job: &DistillJob) {
     );
     let resp = complete(ctx, FACTS_SYSTEM, user, ctx.facts_max_tokens).await;
     let outcome = match resp {
-        Err(_) => "failed",
+        Err(e) => {
+            tracing::warn!(error = %e, "distill facts call failed");
+            "failed"
+        }
         Ok(text) => {
             let t = text.trim();
             // The NO-OP gate: an empty/none answer is success-without-output.
