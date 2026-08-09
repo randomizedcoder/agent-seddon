@@ -359,6 +359,33 @@ it (the parity-spec-31 pattern):
   responses. Doubles from `agent-testkit` (`ScriptedProvider`,
   `RecordingMemory`, `tempdir()`); test the composition and the
   error/fallback branches, not just the parts.
+- **Deterministic testdata corpora (every DB-backed surface).** Each seam with
+  a database backend ships a **`testdata` module in its owning impl crate**
+  (the `agent_digest::testdata` template): corpora as **pure functions of
+  ids** — no randomness, no clock — so iai counts reproduce and failures
+  replay; **realistic shapes** (the actual templates/prompts the writers use,
+  content that *drifts* the way real sessions do, since drift is what
+  filtering/relevance logic must be tested against); an **ephemeral
+  sqlite/in-memory population helper** (create → test/bench → drop, no
+  cleanup) as the default harness; and the **same corpus reused** for an
+  `#[ignore]`d live round-trip against the heavyweight backend (ClickHouse /
+  gRPC), so hermetic CI and live verification exercise identical data.
+  Per-surface plan in this track:
+  - **digests** (inc 02) — shipped: `agent_digest::testdata` (phase-shaped
+    sessions; sqlite ephemeral; ClickHouse live round-trip).
+  - **instant compaction** (inc 03) — consumes the digest corpus; its phase
+    drift is the fixture for objective-relevance selection (an `explore`-phase
+    summary must drop when the objective says `debug`).
+  - **graph documents** (inc 04) — a corpus of **valid graphs + one invalid
+    document per typed load-error class** (unknown type, dangling edge, MAIN
+    cycle, over-cap branches, hostile params), shared by `Validate` tests, the
+    gRPC round-trips, and the load/dispatch bench.
+  - **`DigestService` gRPC** (inc 04) — TCP+UDS round-trips seed the digest
+    corpus through the wire (client → server → store → back).
+  - The pattern generalizes beyond this track when other planned DB-backed
+    seams get built (parity 39 rollout-sqlite session index, parity 41 cited
+    memories): corpus module in the impl crate, sqlite-ephemeral first, live
+    backend reuses it.
 - **Benchmarks + leak checks.** iai-callgrind benches per hot path — verdict
   parse + issue-set comparison (01), digest query-shaping + row decode (02),
   compaction assembly (03), graph load/validate + anchor dispatch (04) — each

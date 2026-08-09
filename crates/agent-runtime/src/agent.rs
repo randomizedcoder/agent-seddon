@@ -189,6 +189,18 @@ pub struct Agent {
     /// (parity spec 28).
     #[cfg(feature = "scheduler")]
     scheduler: Option<Arc<agent_scheduler::LocalScheduler>>,
+    /// The digest ledger the per-session background distiller writes and instant
+    /// compaction reads (cognition-graph 02). `None` ⇒ distillation is off.
+    digests: Option<Arc<dyn agent_core::DigestStore>>,
+    /// `(summary_max_tokens, facts_max_tokens)` for the distiller's completions.
+    distill_tokens: (u32, u32),
+    /// `(summary, facts)` — which distill kinds run. `(true, true)` under the
+    /// TOML wiring; a cognition graph enables only the kinds whose background
+    /// nodes exist.
+    pub(crate) distill_kinds: (bool, bool),
+    /// The cognition-graph document store (cognition-graph 04). `None` ⇒ the
+    /// graph-less built-in behavior.
+    graph: Option<Arc<dyn agent_core::GraphStore>>,
 }
 
 impl Agent {
@@ -249,7 +261,37 @@ impl Agent {
             auto_checkpoint: false,
             #[cfg(feature = "scheduler")]
             scheduler: None,
+            digests: None,
+            distill_tokens: (512, 256),
+            distill_kinds: (true, true),
+            graph: None,
         }
+    }
+
+    /// Attach the digest ledger + distiller budgets (cognition-graph 02): every
+    /// delivered response gets background-summarized into `store`.
+    pub fn with_digests(
+        mut self,
+        store: Arc<dyn agent_core::DigestStore>,
+        summary_max_tokens: u32,
+        facts_max_tokens: u32,
+    ) -> Self {
+        self.digests = Some(store);
+        self.distill_tokens = (summary_max_tokens, facts_max_tokens);
+        self
+    }
+
+    /// Attach the cognition-graph document store (cognition-graph 04).
+    pub fn with_graph(mut self, store: Arc<dyn agent_core::GraphStore>) -> Self {
+        self.graph = Some(store);
+        self
+    }
+
+    /// Restrict which distill kinds run (cognition-graph 04: with a non-empty
+    /// graph, a kind runs only if its background node exists).
+    pub fn with_distill_kinds(mut self, summary: bool, facts: bool) -> Self {
+        self.distill_kinds = (summary, facts);
+        self
     }
 
     /// Attach the scheduler (parity spec 28).
@@ -699,6 +741,17 @@ impl Agent {
         self.dimension_store.clone()
     }
 
+    /// The digest ledger, if `[digest] store` is configured (`--serve-digest`).
+    pub fn digest_store(&self) -> Option<Arc<dyn agent_core::DigestStore>> {
+        self.digests.clone()
+    }
+
+    /// The cognition-graph document store, if `[graph] store` is configured
+    /// (`--serve-graph`).
+    pub fn graph_store(&self) -> Option<Arc<dyn agent_core::GraphStore>> {
+        self.graph.clone()
+    }
+
     pub fn prompt_store(&self) -> Option<Arc<dyn agent_core::PromptStore>> {
         self.prompt_store.clone()
     }
@@ -812,6 +865,8 @@ impl Agent {
             switch_history: std::collections::VecDeque::new(),
             pending_switch: None,
             situational_present: false,
+            agreed_seq: 0,
+            distiller: None,
         }
     }
 

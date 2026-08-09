@@ -1,0 +1,251 @@
+# The full cognition flow with a fork (increment 05) — the canonical graph:
+#
+#                        ┌─ gen_safe (lens: correctness & strict safety) ─ gate_safe ─┐
+#   anchor.response ─ split_impl                                                      join_impl ─ merge_impl ─ gate
+#                        └─ gen_perf (lens: performance optimization) ────────────────┘
+#   anchor.delivery ──── distill_summary + distill_facts   (background)
+#   anchor.compaction ── compact_assemble                  (instant compaction)
+#
+# The implementation forks: one branch generates under a correctness/safety
+# lens AND carries its own consensus-gate loop (branches need not be
+# symmetric); the other generates under a performance lens. The join waits for
+# both (120 s, stragglers → partial); the merge SYNTHESIZES — adopt the safe
+# structure, keep the performance ideas that survive scrutiny — and files
+# non-chosen branches to the alternatives ledger with a reconsider-when
+# trigger. The merged result still passes the final consensus gate, and the
+# full background-distillation + instant-compaction flow applies. Run with:
+#
+#   agent --cognition-graph config/cognition/advanced.textproto "<goal>"
+#
+# Needs a provider named `glm` (critic/judge) and `[digest] store` configured.
+version: 1
+nodes {
+  key: "compact"
+  value {
+    type: "compact_assemble"
+    type_version: 1
+    params {
+      object_value {
+        fields {
+          key: "relevance"
+          value { string_value: "keyword" }
+        }
+        fields {
+          key: "min_coverage"
+          value { double_value: 0.6 }
+        }
+      }
+    }
+  }
+}
+nodes {
+  key: "facts"
+  value {
+    type: "distill_facts"
+    type_version: 1
+    params {
+      object_value {
+        fields {
+          key: "max_tokens"
+          value { uint_value: 256 }
+        }
+      }
+    }
+  }
+}
+nodes {
+  key: "gate"
+  value {
+    type: "critic_gate"
+    type_version: 1
+    params {
+      object_value {
+        fields {
+          key: "critic"
+          value { string_value: "glm" }
+        }
+        fields {
+          key: "max_rounds"
+          value { uint_value: 2 }
+        }
+      }
+    }
+  }
+}
+nodes {
+  key: "gate_safe"
+  value {
+    type: "critic_gate"
+    type_version: 1
+    params {
+      object_value {
+        fields {
+          key: "critic"
+          value { string_value: "glm" }
+        }
+        fields {
+          key: "max_rounds"
+          value { uint_value: 2 }
+        }
+      }
+    }
+  }
+}
+nodes {
+  key: "gen_perf"
+  value {
+    type: "generate"
+    type_version: 1
+    params {
+      object_value {
+        fields {
+          key: "lens"
+          value { string_value: "performance optimization" }
+        }
+      }
+    }
+  }
+}
+nodes {
+  key: "gen_safe"
+  value {
+    type: "generate"
+    type_version: 1
+    params {
+      object_value {
+        fields {
+          key: "lens"
+          value { string_value: "correctness and strict safety" }
+        }
+      }
+    }
+  }
+}
+nodes {
+  key: "join_impl"
+  value {
+    type: "join"
+    type_version: 1
+    params {
+      object_value {
+        fields {
+          key: "policy"
+          value { string_value: "all" }
+        }
+        fields {
+          key: "timeout_ms"
+          value { uint_value: 120000 }
+        }
+        fields {
+          key: "on_timeout"
+          value { string_value: "partial" }
+        }
+      }
+    }
+  }
+}
+nodes {
+  key: "merge_impl"
+  value {
+    type: "merge"
+    type_version: 1
+    params {
+      object_value {
+        fields {
+          key: "strategy"
+          value { string_value: "synthesize" }
+        }
+        fields {
+          key: "judge"
+          value { string_value: "glm" }
+        }
+        fields {
+          key: "record_losers"
+          value { bool_value: true }
+        }
+      }
+    }
+  }
+}
+nodes {
+  key: "split_impl"
+  value {
+    type: "split"
+    type_version: 1
+  }
+}
+nodes {
+  key: "summarize"
+  value {
+    type: "distill_summary"
+    type_version: 1
+    params {
+      object_value {
+        fields {
+          key: "max_tokens"
+          value { uint_value: 512 }
+        }
+      }
+    }
+  }
+}
+edges {
+  from: "anchor.response"
+  to: "split_impl"
+  kind: KIND_MAIN
+}
+edges {
+  from: "split_impl"
+  to: "gen_safe"
+  kind: KIND_MAIN
+}
+edges {
+  from: "gen_safe"
+  to: "gate_safe"
+  kind: KIND_MAIN
+}
+edges {
+  from: "gate_safe"
+  to: "join_impl"
+  kind: KIND_MAIN
+}
+edges {
+  from: "split_impl"
+  to: "gen_perf"
+  kind: KIND_MAIN
+}
+edges {
+  from: "gen_perf"
+  to: "join_impl"
+  kind: KIND_MAIN
+}
+edges {
+  from: "join_impl"
+  to: "merge_impl"
+  kind: KIND_MAIN
+}
+edges {
+  from: "merge_impl"
+  to: "gate"
+  kind: KIND_MAIN
+}
+edges {
+  from: "glm"
+  to: "gate"
+  kind: KIND_CAPABILITY
+}
+edges {
+  from: "anchor.delivery"
+  to: "summarize"
+  kind: KIND_BACKGROUND
+}
+edges {
+  from: "anchor.delivery"
+  to: "facts"
+  kind: KIND_BACKGROUND
+}
+edges {
+  from: "anchor.compaction"
+  to: "compact"
+  kind: KIND_MAIN
+}

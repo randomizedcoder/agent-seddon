@@ -140,6 +140,27 @@ Startup: `agent --cognition-graph <file.textproto>` (scenario files, mirroring
 increments behave exactly as their TOML config wired them (the graph is a
 *re-expression*, not a prerequisite).
 
+## Example graphs (shipped as scenario files + integration tests)
+
+Three graded examples under `config/cognition/`, each a working document AND an
+integration-test fixture (a `nix run .#graph-examples`-style check loads,
+validates, and dry-runs each against scripted providers — the graphs *are* the
+integration tests of the whole feature):
+
+1. **`simple.textproto`** — gate only: `generate → critic_gate` on the response
+   anchor. The smallest useful graph; validates the anchor plumbing.
+2. **`intermediate.textproto`** — gate + background distillation: adds the two
+   `BACKGROUND` edges (`distill_summary`, `distill_facts`) off delivery and
+   `compact_assemble` on the compaction anchor — the full increments 01–03
+   behavior, expressed as a document.
+3. **`advanced.textproto`** — the flow as originally described plus increment
+   05: a `split` into safety-lens and performance-lens implementation branches
+   (the safety branch carrying its own gate loop), `join policy: all`, a
+   `synthesize` merge recording the loser to the alternatives ledger, the
+   merged result through the final consensus gate, background distillation on
+   delivery, instant compaction assembling summaries + facts + open
+   alternatives.
+
 ## GUI (portal track, out of scope here — kept unbroken)
 
 What this increment guarantees the future editor: stable node ids + named typed
@@ -150,12 +171,18 @@ round-trip, `Put` guarded by full validation. The editor itself lands in
 
 ## Tests / verification
 
+Fixtures: a **graph-document corpus** (`testdata` module, README §Harness
+obligations) — the default graph, scenario variants, and **one invalid document
+per typed load-error class** — shared by the local `Validate` tables, the gRPC
+round-trips, and the load/dispatch bench; the `DigestService` round-trips seed
+`agent_digest::testdata` through the wire.
+
 - Document: parse/validate tables — `positive_` the default graph; `negative_`
-  each typed load error; `corner_` empty graph (= built-in behavior), node with
-  no edges; `boundary_` version 0/max, param at schema bounds; `adversarial_`
-  cyclic MAIN graph, dangling ids, hostile params (path-like provider names
-  rejected by `safe_segment` discipline, huge Struct capped), textproto bombs
-  (size cap before parse).
+  each typed load error (one corpus file each); `corner_` empty graph (=
+  built-in behavior), node with no edges; `boundary_` version 0/max, param at
+  schema bounds; `adversarial_` cyclic MAIN graph, dangling ids, hostile params
+  (path-like provider names rejected by `safe_segment` discipline, huge Struct
+  capped), textproto bombs (size cap before parse).
 - Executor: anchor behavior parity — graph-configured gate produces byte-identical
   requests to increment 01's provider (`ScriptedProvider`); BACKGROUND edges
   never delay delivery; MAIN node error → anchor fallback.

@@ -14,6 +14,10 @@ context-summarizing = []
 # Mode-aware compaction: reshape context through the destination mode's lens on a
 # task-mode switch (adaptive-cognition 02). Wraps the summarizer.
 context-mode-aware = ["context-summarizing"]
+# Instant compaction (cognition-graph 03): assemble from the pre-computed digest
+# ledger instead of summarizing on the critical path. Wraps the summarizer as its
+# fail-soft fallback.
+context-instant = ["context-summarizing", "dep:serde_json"]
 # dhat-instrumented leak/allocation tests (tests/leak.rs).
 dhat-heap = ["dep:dhat"]
 
@@ -21,6 +25,7 @@ dhat-heap = ["dep:dhat"]
 agent-core.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
+serde_json = { workspace = true, optional = true }
 dhat = { workspace = true, optional = true }
 
 [dev-dependencies]
@@ -29,6 +34,16 @@ rstest.workspace = true
 serde_json.workspace = true
 agent-testkit.workspace = true
 iai-callgrind.workspace = true
+# The instant-compaction tests run against a real (in-memory) ledger populated
+# with the deterministic corpus.
+agent-digest = { workspace = true, features = ["digest-sqlite"] }
+
+# Guards instant compaction's assembly path (the point of increment 03 is that
+# this path is cheap; the ceiling keeps it so).
+[[bench]]
+name = "instant_assemble"
+harness = false
+required-features = ["context-instant"]
 
 # Guards `estimate_tokens` — called in the compaction loop.
 [[bench]]

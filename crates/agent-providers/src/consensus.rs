@@ -31,6 +31,12 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use tracing::Instrument;
+
+/// Millis since `t`, saturating (a hostile clock can't underflow/panic).
+pub(crate) fn elapsed_ms(t: std::time::Instant) -> u64 {
+    u64::try_from(t.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
 
 /// Hard ceilings (compile-time; config clamps against these).
 const MAX_ROUNDS_CEILING: u8 = 5;
@@ -148,9 +154,10 @@ pub struct AlternativeOption {
 }
 
 /// How a gated completion concluded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GateOutcomeKind {
     /// Passed first round, nothing recorded.
+    #[default]
     Pass,
     /// Passed after at least one revise round.
     Fixed,
@@ -176,7 +183,7 @@ impl GateOutcomeKind {
 
 /// The observer surface: metrics today, the digest ledger (increment 02) tomorrow —
 /// alternatives ride here so they can be persisted without another LLM call.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct GateOutcome {
     pub kind: GateOutcomeKind,
     pub rounds: u8,
@@ -184,6 +191,16 @@ pub struct GateOutcome {
     pub alternatives: Vec<AlternativeOption>,
     /// The critic's last self-reported confidence, clamped to `0.0..=1.0`.
     pub confidence: f32,
+    /// Wall time spent in generator calls (initial + revisions), milliseconds.
+    pub generate_ms: u64,
+    /// Wall time spent in critic calls, milliseconds.
+    pub critique_ms: u64,
+    /// Issues the critic raised across all rounds (post-sanitization).
+    pub issues_raised: usize,
+    /// Raised issues that disappeared after a revision — the resolution numerator.
+    pub issues_resolved: usize,
+    /// Issues the sanitizer dropped for missing evidence (critic quality signal).
+    pub dropped_no_evidence: usize,
 }
 
 pub type GateObserver = Arc<dyn Fn(&GateOutcome) + Send + Sync>;
@@ -317,6 +334,8 @@ struct Verdict {
     issues: Vec<Issue>,
     alternatives: Vec<AlternativeOption>,
     confidence: f32,
+    /// Issues the sanitizer dropped for an empty claim/evidence.
+    dropped_no_evidence: usize,
 }
 
 /// Parse the critic's answer; `None` (⇒ fail open) on missing/invalid JSON or a
@@ -336,16 +355,22 @@ fn parse_verdict(text: &str, max_alternatives: usize) -> Option<Verdict> {
         0.0
     };
 
+    let mut dropped_no_evidence = 0usize;
     let issues = v
         .get("issues")
         .and_then(Value::as_array)
         .map(|arr| {
             arr.iter()
                 .filter_map(|i| {
-                    let claim = i.get("claim")?.as_str()?.trim();
-                    let evidence = i.get("evidence")?.as_str()?.trim();
+                    let claim = i.get("claim").and_then(Value::as_str).unwrap_or("").trim();
+                    let evidence = i
+                        .get("evidence")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim();
                     // An objection without evidence is noise (debate literature).
                     if claim.is_empty() || evidence.is_empty() {
+                        dropped_no_evidence += 1;
                         return None;
                     }
                     Some(Issue {
@@ -398,6 +423,7 @@ fn parse_verdict(text: &str, max_alternatives: usize) -> Option<Verdict> {
         issues,
         alternatives,
         confidence,
+        dropped_no_evidence,
     })
 }
 
@@ -418,13 +444,13 @@ fn issue_set(issues: &[Issue]) -> BTreeSet<String> {
         .collect()
 }
 
-fn extract_json_object(text: &str) -> Option<&str> {
+pub(crate) fn extract_json_object(text: &str) -> Option<&str> {
     let start = text.find('{')?;
     let end = text.rfind('}')?;
     (end > start).then(|| &text[start..=end])
 }
 
-fn cap(s: &str, max: usize) -> String {
+pub(crate) fn cap(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
     }
@@ -467,7 +493,12 @@ impl LlmProvider for ConsensusProvider {
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse> {
         let task = Self::task_of(&req);
         let mut work = req.clone();
+        let t0 = std::time::Instant::now();
         let mut resp = self.generator.complete(req).await?;
+        let mut tally = GateOutcome {
+            generate_ms: elapsed_ms(t0),
+            ..GateOutcome::default()
+        };
 
         // Tool-call iterations pass through under `Final` scope — the verifier seam
         // already gates them per call.
@@ -482,17 +513,35 @@ impl LlmProvider for ConsensusProvider {
         loop {
             rounds += 1;
             let candidate = resp.message.content_text();
-            let Some(verdict) = self.critique(&task, &candidate).await else {
+            let span = tracing::info_span!(
+                "gate.round",
+                round = rounds,
+                verdict = tracing::field::Empty,
+                issues = tracing::field::Empty,
+                alternatives = tracing::field::Empty,
+                confidence = tracing::field::Empty,
+            );
+            let tc = std::time::Instant::now();
+            let verdict = self
+                .critique(&task, &candidate)
+                .instrument(span.clone())
+                .await;
+            tally.critique_ms += elapsed_ms(tc);
+            let Some(verdict) = verdict else {
                 // Broken critic → fail open: deliver, but count it.
-                self.emit(&GateOutcome {
-                    kind: GateOutcomeKind::CriticError,
-                    rounds,
-                    outstanding_issues: 0,
-                    alternatives: alternatives.clone(),
-                    confidence: 0.0,
-                });
+                span.record("verdict", "critic_error");
+                tally.kind = GateOutcomeKind::CriticError;
+                tally.rounds = rounds;
+                tally.alternatives = alternatives;
+                self.emit(&tally);
                 return Ok(resp);
             };
+            span.record("verdict", if verdict.pass { "pass" } else { "fail" });
+            span.record("issues", verdict.issues.len());
+            span.record("alternatives", verdict.alternatives.len());
+            span.record("confidence", f64::from(verdict.confidence));
+            tally.issues_raised += verdict.issues.len();
+            tally.dropped_no_evidence += verdict.dropped_no_evidence;
 
             // Accumulate alternatives across rounds, deduped by option name.
             for a in verdict.alternatives {
@@ -505,7 +554,9 @@ impl LlmProvider for ConsensusProvider {
             // pass — or a failing verdict whose every issue was dropped as
             // evidence-free (nothing actionable to revise against).
             if verdict.pass || verdict.issues.is_empty() {
-                let kind = if !alternatives.is_empty() {
+                // Everything the previous round raised is gone — resolved.
+                tally.issues_resolved += prev.as_ref().map_or(0, BTreeSet::len);
+                tally.kind = if !alternatives.is_empty() {
                     GateOutcomeKind::Alternatives
                 } else if rounds > 1 {
                     GateOutcomeKind::Fixed
@@ -515,27 +566,27 @@ impl LlmProvider for ConsensusProvider {
                 if !alternatives.is_empty() && resp.message.tool_calls.is_empty() {
                     Self::append_note(&mut resp, &Self::alternatives_note(&alternatives));
                 }
-                self.emit(&GateOutcome {
-                    kind,
-                    rounds,
-                    outstanding_issues: 0,
-                    alternatives: alternatives.clone(),
-                    confidence: verdict.confidence,
-                });
+                tally.rounds = rounds;
+                tally.confidence = verdict.confidence;
+                tally.alternatives = alternatives;
+                self.emit(&tally);
                 return Ok(resp);
             }
 
             // Failing verdict with real issues: exhausted, stalled, or revise.
             let set = issue_set(&verdict.issues);
             let stalled = prev.as_ref() == Some(&set);
+            // A previously-raised issue absent from this round's set was resolved.
+            if let Some(p) = &prev {
+                tally.issues_resolved += p.difference(&set).count();
+            }
             if rounds >= self.cfg.max_rounds || stalled {
-                self.emit(&GateOutcome {
-                    kind: GateOutcomeKind::Exhausted,
-                    rounds,
-                    outstanding_issues: verdict.issues.len(),
-                    alternatives: alternatives.clone(),
-                    confidence: verdict.confidence,
-                });
+                tally.kind = GateOutcomeKind::Exhausted;
+                tally.rounds = rounds;
+                tally.outstanding_issues = verdict.issues.len();
+                tally.confidence = verdict.confidence;
+                tally.alternatives = alternatives.clone();
+                self.emit(&tally);
                 return match self.cfg.on_exhaustion {
                     Exhaustion::DeliverWithNote => {
                         Self::append_note(
@@ -561,7 +612,9 @@ impl LlmProvider for ConsensusProvider {
             work.messages.push(resp.message.clone());
             work.messages
                 .push(Message::user(Self::feedback(&verdict.issues)));
+            let tg = std::time::Instant::now();
             resp = self.generator.complete(work.clone()).await?;
+            tally.generate_ms += elapsed_ms(tg);
             if self.cfg.scope == GateScope::Final && !resp.message.tool_calls.is_empty() {
                 // The revision chose to call tools — hand back to the loop (the
                 // verifier gates those); this gate's job here is done.
@@ -690,8 +743,12 @@ mod tests {
         let resp = p.complete(req()).await.unwrap();
         assert_eq!(resp.message.content_text(), "4294967296");
         assert_eq!(g.calls.load(Ordering::SeqCst), 2, "one revise round");
-        assert_eq!(seen.lock().unwrap()[0].kind, GateOutcomeKind::Fixed);
-        assert_eq!(seen.lock().unwrap()[0].rounds, 2);
+        let o = seen.lock().unwrap()[0].clone();
+        assert_eq!(o.kind, GateOutcomeKind::Fixed);
+        assert_eq!(o.rounds, 2);
+        assert_eq!(o.issues_raised, 1, "round 1 raised one issue");
+        assert_eq!(o.issues_resolved, 1, "the revision resolved it");
+        assert_eq!(o.dropped_no_evidence, 0);
     }
 
     #[tokio::test]
@@ -866,6 +923,7 @@ mod tests {
             "alternatives": [{"option":"x","summary":"s","reconsider_when":""}]}"#;
         let v = parse_verdict(text, 3).unwrap();
         assert_eq!(v.issues.len(), 1, "evidence-free issue dropped");
+        assert_eq!(v.dropped_no_evidence, 1, "and the drop is counted");
         assert_eq!(v.issues[0].severity, "medium", "unknown severity bounded");
         assert!(v.alternatives.is_empty(), "triggerless alternative dropped");
     }

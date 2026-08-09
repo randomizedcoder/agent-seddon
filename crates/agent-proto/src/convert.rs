@@ -159,6 +159,9 @@ pub fn status_from_error(e: &agent_core::Error) -> tonic::Status {
         // A rejected prompt id / oversized body is a bad request, not a server fault.
         Error::Prompt(m) => tonic::Status::invalid_argument(format!("prompt: {m}")),
         Error::Metrics(m) => tonic::Status::internal(format!("metrics: {m}")),
+        // An invalid/oversized/unparseable graph document is a bad request —
+        // the caller's document is at fault, not the server.
+        Error::Graph(m) => tonic::Status::invalid_argument(format!("graph: {m}")),
         // Overload is a "slow down", not a fault: RESOURCE_EXHAUSTED is in the
         // client's retryable set, so it backs off + retries rather than failing.
         Error::Overloaded(m) => tonic::Status::resource_exhausted(format!("overloaded: {m}")),
@@ -3534,6 +3537,223 @@ impl From<pb::DimensionSummary> for agent_core::DimensionSummary {
             summary: s.summary,
             is_new: s.is_new,
         }
+    }
+}
+
+// --- Digest ledger (cognition-graph 02/04) ----------------------------------
+
+impl From<agent_core::Digest> for pb::Digest {
+    fn from(d: agent_core::Digest) -> Self {
+        pb::Digest {
+            session_id: d.session_id,
+            user_id: d.user_id,
+            seq: d.seq,
+            kind: d.kind.as_str().to_string(),
+            text: d.text,
+            keywords: d.keywords,
+            mode: d.mode,
+            model: d.model,
+            ts_ms: d.ts_ms,
+            duration_ms: d.duration_ms,
+            tokens: d.tokens,
+        }
+    }
+}
+
+/// Wire→core is fallible: an unknown `kind` is rejected (fail closed — the wire
+/// peer is untrusted; a discriminator we don't know must never be stored or
+/// re-injected). Ids/sizes are re-validated by the store's sanitizers.
+impl TryFrom<pb::Digest> for agent_core::Digest {
+    type Error = ConvertError;
+    fn try_from(d: pb::Digest) -> Result<Self, Self::Error> {
+        let kind = agent_core::DigestKind::parse(&d.kind)
+            .ok_or(ConvertError::MissingField("Digest.kind"))?;
+        Ok(agent_core::Digest {
+            session_id: d.session_id,
+            user_id: d.user_id,
+            seq: d.seq,
+            kind,
+            text: d.text,
+            keywords: d.keywords,
+            mode: d.mode,
+            model: d.model,
+            ts_ms: d.ts_ms,
+            duration_ms: d.duration_ms,
+            tokens: d.tokens,
+        })
+    }
+}
+
+// --- Cognition graph document (cognition-graph 04) --------------------------
+
+impl From<agent_core::GraphEdgeKind> for pb::graph_edge::Kind {
+    fn from(k: agent_core::GraphEdgeKind) -> Self {
+        match k {
+            agent_core::GraphEdgeKind::Main => pb::graph_edge::Kind::Main,
+            agent_core::GraphEdgeKind::Background => pb::graph_edge::Kind::Background,
+            agent_core::GraphEdgeKind::Capability => pb::graph_edge::Kind::Capability,
+        }
+    }
+}
+
+impl From<agent_core::GraphEdge> for pb::GraphEdge {
+    fn from(e: agent_core::GraphEdge) -> Self {
+        pb::GraphEdge {
+            from: e.from,
+            to: e.to,
+            kind: pb::graph_edge::Kind::from(e.kind) as i32,
+        }
+    }
+}
+
+/// Wire→core is fallible: `KIND_UNSPECIFIED` (or an unknown tag) is rejected —
+/// an edge whose kind we don't understand must never be stored or executed.
+impl TryFrom<pb::GraphEdge> for agent_core::GraphEdge {
+    type Error = ConvertError;
+    fn try_from(e: pb::GraphEdge) -> Result<Self, Self::Error> {
+        let kind = match pb::graph_edge::Kind::try_from(e.kind) {
+            Ok(pb::graph_edge::Kind::Main) => agent_core::GraphEdgeKind::Main,
+            Ok(pb::graph_edge::Kind::Background) => agent_core::GraphEdgeKind::Background,
+            Ok(pb::graph_edge::Kind::Capability) => agent_core::GraphEdgeKind::Capability,
+            Ok(pb::graph_edge::Kind::Unspecified) | Err(_) => {
+                return Err(ConvertError::MissingField("GraphEdge.kind"))
+            }
+        };
+        Ok(agent_core::GraphEdge {
+            from: e.from,
+            to: e.to,
+            kind,
+        })
+    }
+}
+
+impl From<agent_core::GraphNode> for pb::GraphNode {
+    fn from(n: agent_core::GraphNode) -> Self {
+        pb::GraphNode {
+            r#type: n.node_type,
+            type_version: n.type_version,
+            params: Some(value_to_pb(&n.params)),
+        }
+    }
+}
+
+impl TryFrom<pb::GraphNode> for agent_core::GraphNode {
+    type Error = ConvertError;
+    fn try_from(n: pb::GraphNode) -> Result<Self, Self::Error> {
+        Ok(agent_core::GraphNode {
+            node_type: n.r#type,
+            type_version: n.type_version,
+            // An absent params message is an empty object's null — the
+            // validator treats both as "no params".
+            params: match n.params {
+                Some(v) => pb_to_value(v, "GraphNode.params")?,
+                None => serde_json::Value::Null,
+            },
+        })
+    }
+}
+
+impl From<agent_core::GraphDoc> for pb::CognitionGraph {
+    fn from(d: agent_core::GraphDoc) -> Self {
+        pb::CognitionGraph {
+            version: d.version,
+            nodes: d.nodes.into_iter().map(|(k, v)| (k, v.into())).collect(),
+            edges: d.edges.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl TryFrom<pb::CognitionGraph> for agent_core::GraphDoc {
+    type Error = ConvertError;
+    fn try_from(g: pb::CognitionGraph) -> Result<Self, Self::Error> {
+        Ok(agent_core::GraphDoc {
+            version: g.version,
+            nodes: g
+                .nodes
+                .into_iter()
+                .map(|(k, v)| Ok((k, v.try_into()?)))
+                .collect::<Result<_, ConvertError>>()?,
+            edges: g
+                .edges
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, ConvertError>>()?,
+        })
+    }
+}
+
+impl From<agent_core::NodePort> for pb::NodePort {
+    fn from(p: agent_core::NodePort) -> Self {
+        pb::NodePort {
+            name: p.name,
+            kind: p.kind,
+        }
+    }
+}
+
+impl From<pb::NodePort> for agent_core::NodePort {
+    fn from(p: pb::NodePort) -> Self {
+        agent_core::NodePort {
+            name: p.name,
+            kind: p.kind,
+        }
+    }
+}
+
+impl From<agent_core::NodeTypeSchema> for pb::NodeTypeSchema {
+    fn from(s: agent_core::NodeTypeSchema) -> Self {
+        pb::NodeTypeSchema {
+            r#type: s.node_type,
+            type_version: s.type_version,
+            title: s.title,
+            doc: s.doc,
+            inputs: s.inputs.into_iter().map(Into::into).collect(),
+            outputs: s.outputs.into_iter().map(Into::into).collect(),
+            params_schema: Some(value_to_pb(&s.params_schema)),
+        }
+    }
+}
+
+impl TryFrom<pb::NodeTypeSchema> for agent_core::NodeTypeSchema {
+    type Error = ConvertError;
+    fn try_from(s: pb::NodeTypeSchema) -> Result<Self, Self::Error> {
+        Ok(agent_core::NodeTypeSchema {
+            node_type: s.r#type,
+            type_version: s.type_version,
+            title: s.title,
+            doc: s.doc,
+            inputs: s.inputs.into_iter().map(Into::into).collect(),
+            outputs: s.outputs.into_iter().map(Into::into).collect(),
+            params_schema: match s.params_schema {
+                Some(v) => pb_to_value(v, "NodeTypeSchema.params_schema")?,
+                None => serde_json::Value::Null,
+            },
+        })
+    }
+}
+
+impl From<agent_core::GraphIssue> for pb::GraphIssue {
+    fn from(i: agent_core::GraphIssue) -> Self {
+        pb::GraphIssue {
+            node: i.node,
+            code: i.code.as_str().to_string(),
+            detail: i.detail,
+        }
+    }
+}
+
+/// Wire→core is fallible: an unknown issue `code` is rejected (the codes key
+/// remediation logic and metric labels — an open string must not leak in).
+impl TryFrom<pb::GraphIssue> for agent_core::GraphIssue {
+    type Error = ConvertError;
+    fn try_from(i: pb::GraphIssue) -> Result<Self, Self::Error> {
+        let code = agent_core::GraphIssueCode::parse(&i.code)
+            .ok_or(ConvertError::MissingField("GraphIssue.code"))?;
+        Ok(agent_core::GraphIssue {
+            node: i.node,
+            code,
+            detail: i.detail,
+        })
     }
 }
 

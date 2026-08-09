@@ -52,7 +52,7 @@ impl SummarizingWindow {
 
     /// Tokens in `messages` under the configured tokenizer, or the heuristic when
     /// none is set (or it errors — budgeting must never hard-fail).
-    async fn budget_tokens(&self, messages: &[Message]) -> u32 {
+    pub(crate) async fn budget_tokens(&self, messages: &[Message]) -> u32 {
         match &self.tokenizer {
             Some(t) => t
                 .count_messages(messages, &self.model)

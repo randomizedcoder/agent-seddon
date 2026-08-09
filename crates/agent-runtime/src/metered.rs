@@ -1520,6 +1520,58 @@ impl agent_core::WebSearch for MeteredWebSearch {
 /// keeping the dependency direction intact rather than inverting it for
 /// observability.
 #[cfg(feature = "provider-router")]
+/// One completed fork (split → join → merge) → the `agent_graph_*` fork
+/// families + a structured log line. Fates/outcomes are closed vocabularies
+/// from the provider; the split label is a validated node id.
+#[cfg(feature = "graph")]
+pub(crate) fn record_branch_report(m: &Metrics, r: &agent_providers::BranchReport) {
+    tracing::info!(
+        split = %r.split,
+        policy = r.policy,
+        strategy = r.strategy,
+        merge_outcome = r.merge_outcome,
+        join_wait_ms = r.join_wait_ms,
+        branches = ?r.branches,
+        alternatives = r.alternatives.len(),
+        "cognition fork"
+    );
+    for (_, fate, _) in &r.branches {
+        m.on_graph_branch(&r.split, fate);
+    }
+    m.on_graph_join_wait(r.policy, r.join_wait_ms as f64 / 1_000.0);
+    m.on_graph_merge(r.strategy, r.merge_outcome);
+}
+
+/// One completed consensus-gate run → the `agent_gate_*` families + a structured
+/// log line. Counts and durations come pre-clamped/bounded from the provider.
+#[cfg(feature = "provider-consensus")]
+pub(crate) fn record_gate_outcome(m: &Metrics, o: &agent_providers::GateOutcome) {
+    tracing::info!(
+        outcome = o.kind.as_str(),
+        rounds = o.rounds,
+        outstanding = o.outstanding_issues,
+        alternatives = o.alternatives.len(),
+        confidence = o.confidence,
+        generate_ms = o.generate_ms,
+        critique_ms = o.critique_ms,
+        issues_raised = o.issues_raised,
+        issues_resolved = o.issues_resolved,
+        "consensus gate"
+    );
+    let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+    m.on_gate(
+        o.kind.as_str(),
+        o.rounds,
+        o.generate_ms as f64 / 1_000.0,
+        o.critique_ms as f64 / 1_000.0,
+        count(o.issues_raised),
+        count(o.issues_resolved),
+        count(o.outstanding_issues),
+        count(o.dropped_no_evidence),
+        count(o.alternatives.len()),
+    );
+}
+
 pub(crate) fn record_route_event(m: &Metrics, ev: agent_providers::RouteEvent<'_>) {
     use agent_providers::RouteEvent;
     match ev {

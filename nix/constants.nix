@@ -206,15 +206,35 @@
       metrics_port = 9629;
     };
 
+    # The per-session digest ledger (cognition-graph 02/04): the `DigestStore`
+    # seam — the background distiller's summary/facts rows, assembled by instant
+    # compaction. Served so many agents can share one central ledger.
+    digest = {
+      port = 50081;
+      socket = "/tmp/agent-seddon/digest.sock";
+      metrics_port = 9631;
+    };
+
+    # The cognition-graph document (cognition-graph 04): the `GraphStore` seam —
+    # get/put/validate the declarative node graph + `DescribeNodeTypes`, the
+    # schema registry a graph editor (the portal) renders from.
+    graph = {
+      port = 50082;
+      socket = "/tmp/agent-seddon/graph.sock";
+      metrics_port = 9632;
+    };
+
     # Type-aware code graph (docs/design/code-graph/): the `AstBackend` seam — Go
     # call graph, interface implementations, and package dependency paths over the
     # pinned `agent-go-graph` helper. Servable so a remote host can answer graph
     # queries; the helper runs in the Sandbox, so the socket-permission caveat that
     # applies to sandbox/pty applies here too.
+    # (Merge note: originally allocated 50081/9631 on its branch; renumbered —
+    # the digest seam landed on main first and owns that slot.)
     ast = {
-      port = 50081;
+      port = 50083;
       socket = "/tmp/agent-seddon/ast.sock";
-      metrics_port = 9631;
+      metrics_port = 9633;
     };
 
     # NOT a seam: the opt-in `agent --serve-sessions` gateway (docs/design/portal),

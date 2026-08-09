@@ -1,0 +1,39 @@
+[package]
+name = "agent-graph"
+version.workspace = true
+publish.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# dhat-instrumented leak/allocation tests (tests/leak.rs).
+dhat-heap = ["dep:dhat"]
+
+[dependencies]
+agent-core.workspace = true
+# The wire twin (`pb::CognitionGraph`) + the emitted descriptor set drive the
+# textproto parse/print — one schema, three encodings (binary, text, Rust).
+agent-proto.workspace = true
+async-trait.workspace = true
+prost.workspace = true
+prost-reflect.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+dhat = { workspace = true, optional = true }
+
+[dev-dependencies]
+agent-testkit.workspace = true
+rstest.workspace = true
+tokio = { workspace = true }
+iai-callgrind.workspace = true
+
+# Guards the document load path (textproto parse → wire→core decode → typed
+# validation) over the shipped example document.
+[[bench]]
+name = "graph_load"
+harness = false
+
+[[test]]
+name = "leak"
+harness = true
+required-features = ["dhat-heap"]

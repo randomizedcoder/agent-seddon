@@ -54,6 +54,8 @@ pub enum Seam {
     Dimension,
     Prompt,
     MetricsProxy,
+    Digest,
+    Graph,
     SessionStream,
 }
 
@@ -88,6 +90,8 @@ const ALL_SEAMS: &[Seam] = &[
     Seam::Dimension,
     Seam::Prompt,
     Seam::MetricsProxy,
+    Seam::Digest,
+    Seam::Graph,
     Seam::SessionStream,
 ];
 
@@ -310,6 +314,20 @@ const SEAMS: &[SeamInfo] = &[
         endpoint: constants::METRICS_PROXY,
     },
     SeamInfo {
+        seam: Seam::Digest,
+        flag: "--serve-digest",
+        name: "digest",
+        service: "agent.v1.DigestService",
+        endpoint: constants::DIGEST,
+    },
+    SeamInfo {
+        seam: Seam::Graph,
+        flag: "--serve-graph",
+        name: "graph",
+        service: "agent.v1.GraphService",
+        endpoint: constants::GRAPH,
+    },
+    SeamInfo {
         seam: Seam::SessionStream,
         flag: "--serve-session-stream",
         name: "session-stream",
@@ -388,6 +406,8 @@ impl Seam {
             Seam::Dimension => &cfg.grpc.dimension.listen,
             Seam::Prompt => &cfg.grpc.prompt.listen,
             Seam::MetricsProxy => &cfg.grpc.metrics_proxy.listen,
+            Seam::Digest => &cfg.grpc.digest.listen,
+            Seam::Graph => &cfg.grpc.graph.listen,
             Seam::SessionStream => &cfg.grpc.session_stream.listen,
         }
     }
@@ -612,6 +632,20 @@ fn add_seam_service(
         Seam::Prompt => match agent.prompt_store() {
             Some(p) => (
                 router.add_service(srv::PromptSvc::new(p).into_server()),
+                true,
+            ),
+            None => (router, false),
+        },
+        Seam::Digest => match agent.digest_store() {
+            Some(d) => (
+                router.add_service(srv::DigestSvc::new(d).into_server()),
+                true,
+            ),
+            None => (router, false),
+        },
+        Seam::Graph => match agent.graph_store() {
+            Some(g) => (
+                router.add_service(srv::GraphSvc::new(g).into_server()),
                 true,
             ),
             None => (router, false),

@@ -23,6 +23,7 @@ default = [
     "context-sliding-window",
     "context-summarizing",
     "context-mode-aware",
+    "context-instant",
     "tokenizer",
     "memory-file",
     "dimensions",
@@ -43,6 +44,8 @@ default = [
     "provider-router",
     "provider-pool",
     "provider-consensus",
+    "digest",
+    "graph",
     "mode",
     "review",
     "prompt",
@@ -67,6 +70,22 @@ provider-pool = ["provider-router", "agent-providers/provider-pool"]
 # route upstreams, so it implies `provider-router`.
 # See docs/design/cognition-graph/01-consensus-gate.md.
 provider-consensus = ["provider-router", "agent-providers/provider-consensus"]
+# Digest ledger + background distiller (cognition-graph 02): both store backends
+# link so `[digest] store` picks at runtime, matching the seam philosophy.
+digest = [
+    "dep:agent-digest",
+    "agent-digest/digest-sqlite",
+    "agent-digest/digest-clickhouse",
+]
+# Cognition-graph document (cognition-graph 04/05): the declarative node graph
+# + node-type schema registry (`[graph] store`, `--serve-graph`), plus the fork
+# executor — the builder composes branch chains from `provider-branching` and
+# per-branch/post-merge gates from `provider-consensus`.
+graph = [
+    "dep:agent-graph",
+    "provider-consensus",
+    "agent-providers/provider-branching",
+]
 # General task-mode detection (the TaskClassifier seam), always-on. See
 # docs/design/adaptive-cognition/01-mode.md.
 mode = ["dep:agent-mode"]
@@ -164,6 +183,13 @@ git = [
 context-sliding-window = ["agent-context/context-sliding-window"]
 context-summarizing = ["agent-context/context-summarizing"]
 context-mode-aware = ["agent-context/context-mode-aware", "context-summarizing"]
+# Instant compaction (cognition-graph 03): assemble from the digest ledger. Needs
+# the ledger, so it implies `digest`.
+context-instant = [
+    "agent-context/context-instant",
+    "context-summarizing",
+    "digest",
+]
 # Tokenizer + cost seam: the approx backend, price table, accurate compaction
 # counts + USD/cache accounting (parity spec 23).
 tokenizer = ["dep:agent-tokenizer", "agent-tokenizer/tokenizer-approx"]
@@ -220,6 +246,8 @@ agent-git = { workspace = true, optional = true }
 agent-memory.workspace = true
 agent-context.workspace = true
 agent-prompt = { workspace = true, optional = true }
+agent-digest = { workspace = true, optional = true }
+agent-graph = { workspace = true, optional = true }
 agent-metrics-proxy = { workspace = true, optional = true }
 agent-tokenizer = { workspace = true, optional = true }
 agent-web = { workspace = true, optional = true }
@@ -265,6 +293,8 @@ url.workspace = true
 [dev-dependencies]
 agent-testkit.workspace = true
 rstest.workspace = true
+# The distiller tests drive a real (in-memory) ledger.
+agent-digest = { workspace = true, features = ["digest-sqlite"] }
 
 [lints]
 workspace = true
