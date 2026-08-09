@@ -100,8 +100,16 @@ alternatives_max_chars = 2048
 
 ## Tests / verification
 
+Fixtures come from `agent_digest::testdata` (README §Harness obligations): the
+corpus's phase drift (explore → implement → debug → document) is exactly the
+relevance-selection fixture — an `explore`-phase summary must drop from
+assembly when the current objective says `debug`; `populated_sqlite` gives an
+ephemeral ledger per test, and the same scenarios re-run live against
+ClickHouse via the ignored round-trip pattern.
+
 - `positive_`: over-budget compaction assembles objective + relevant summaries +
-  facts + tail; relevance drops the off-objective summary (scripted keep/drop).
+  facts + tail; relevance drops the off-objective summary (scripted keep/drop,
+  and a corpus-driven case keyed on phase keywords).
 - `negative_`: digest store erroring → inner fallback (and metric); objective
   call error → session-goal fallback, assembly proceeds.
 - `corner_`: empty facts; summaries present but all dropped by relevance (still

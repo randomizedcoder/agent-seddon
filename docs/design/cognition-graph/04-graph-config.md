@@ -150,12 +150,18 @@ round-trip, `Put` guarded by full validation. The editor itself lands in
 
 ## Tests / verification
 
+Fixtures: a **graph-document corpus** (`testdata` module, README §Harness
+obligations) — the default graph, scenario variants, and **one invalid document
+per typed load-error class** — shared by the local `Validate` tables, the gRPC
+round-trips, and the load/dispatch bench; the `DigestService` round-trips seed
+`agent_digest::testdata` through the wire.
+
 - Document: parse/validate tables — `positive_` the default graph; `negative_`
-  each typed load error; `corner_` empty graph (= built-in behavior), node with
-  no edges; `boundary_` version 0/max, param at schema bounds; `adversarial_`
-  cyclic MAIN graph, dangling ids, hostile params (path-like provider names
-  rejected by `safe_segment` discipline, huge Struct capped), textproto bombs
-  (size cap before parse).
+  each typed load error (one corpus file each); `corner_` empty graph (=
+  built-in behavior), node with no edges; `boundary_` version 0/max, param at
+  schema bounds; `adversarial_` cyclic MAIN graph, dangling ids, hostile params
+  (path-like provider names rejected by `safe_segment` discipline, huge Struct
+  capped), textproto bombs (size cap before parse).
 - Executor: anchor behavior parity — graph-configured gate produces byte-identical
   requests to increment 01's provider (`ScriptedProvider`); BACKGROUND edges
   never delay delivery; MAIN node error → anchor fallback.

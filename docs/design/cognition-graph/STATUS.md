@@ -63,6 +63,14 @@ designed (and why). Update both with every increment PR.
 - **02 / ClickHouse keyword pushdown deferred**: the keyword prefilter runs
   client-side in both backends (no untrusted string ever enters SQL text);
   `hasAny` pushdown is the named scale upgrade.
+- **testdata elevated to a standing harness obligation** (user request
+  2026-08-09): every DB-backed surface ships a `testdata` module in its impl
+  crate — pure-function-of-ids corpora, realistic drifting shapes,
+  sqlite/in-memory ephemeral harness, same corpus reused for the live
+  heavyweight-backend round-trip. Per-surface plan in README §Harness
+  obligations (digests ✅; inc 03 reuses the digest corpus; inc 04 adds a
+  graph-document corpus incl. one file per typed load error + wire-seeded
+  DigestService round-trips; generalizes to parity 39/41 when built).
 
 ## Bench baselines (filled per increment, after the optimization pass)
 
