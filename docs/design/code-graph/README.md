@@ -40,6 +40,11 @@ The seam is **language-neutral**; engines are selected by config string:
 - **Increment 3 — `structural_search` (orthogonal):** an `ast-grep`-backed tool for
   multi-language structural pattern search (`$X.Close()`), via the Sandbox. Not a full
   seam.
+- **Increment 4 — `rust` (deep, native):** the precise Rust analogue of `go` — the
+  pinned `charon` MIR extractor → a typed, dispatch-resolved Rust call graph + trait
+  implementations, lowered into the same shared `Graph`. Needs the target to build
+  under charon's toolchain + `charon` at runtime; fail-soft. See
+  [`04-rust-native.md`](04-rust-native.md).
 
 ## Design specifics
 

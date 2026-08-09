@@ -38,6 +38,26 @@ pub fn build_ast(
                     crate::metered::ast(Arc::new(go), metrics.clone(), "go"),
                 ));
             }
+            #[cfg(feature = "ast-rust")]
+            "rust" => {
+                let Some(sandbox) = sandbox else {
+                    tracing::warn!("ast backend `rust` needs a sandbox; skipping");
+                    continue;
+                };
+                // charon does a full MIR build, so it gets a far larger timeout than
+                // the Go helper's default (the engine's internal default is generous;
+                // `helper_timeout_secs` overrides only when explicitly raised above it).
+                let rust = agent_ast::RustAst::new(sandbox.clone(), root.clone());
+                let rust = if cfg.ast.helper_timeout_secs > rust.timeout_secs() {
+                    rust.with_timeout(cfg.ast.helper_timeout_secs)
+                } else {
+                    rust
+                };
+                backends.push((
+                    "rust".to_string(),
+                    crate::metered::ast(Arc::new(rust), metrics.clone(), "rust"),
+                ));
+            }
             #[cfg(feature = "ast-scip")]
             "scip" => {
                 let Some(sandbox) = sandbox else {

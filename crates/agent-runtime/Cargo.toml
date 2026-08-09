@@ -98,6 +98,11 @@ ast = [
 # Off by default (heavier deps + slower indexers); opt in + set `[ast] backends` and
 # `[ast] scip_langs`.
 ast-scip = ["ast", "agent-ast/ast-scip"]
+# The deep native Rust engine for the code-graph seam: a precise, typed Rust call
+# graph + trait implementations via the pinned `charon` MIR extractor. Off by default
+# (heavy — charon does a full MIR build and needs a Rust toolchain at runtime); opt in
+# + set `[ast] backends = ["rust", …]`. See docs/components/ast.md.
+ast-rust = ["ast", "agent-ast/ast-rust"]
 # The `structural_search` tool (ast-grep, via the Sandbox) — multi-language AST-pattern
 # search. Needs `ast-grep` on PATH at runtime. See docs/components/ast.md.
 structural-search = ["agent-tools/tool-structural-search"]

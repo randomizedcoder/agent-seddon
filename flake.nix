@@ -28,6 +28,16 @@
 
     crane.url = "github:ipetkov/crane";
 
+    # Charon (AeneasVerif) — the rustc-driver MIR extractor behind the `rust`
+    # AstBackend engine (docs/components/ast.md). It dumps a crate's type decls,
+    # function bodies (with resolved call sites), and trait implementations to a
+    # JSON `.llbc`, which the engine ingests for the precise Rust call graph +
+    # implementations. Not in nixpkgs, so pinned as a flake input (frozen via
+    # flake.lock); the flake bundles its own rustc toolchain, so its build is
+    # independent of our pinned stable toolchain. We consume only the `charon`
+    # binary (put on PATH for the engine's `Sandbox` invocation), never its lib.
+    charon.url = "github:AeneasVerif/charon";
+
     # RustSec advisory database for the hermetic `cargo-audit` check.
     advisory-db = {
       url = "github:rustsec/advisory-db";
@@ -65,6 +75,7 @@
       flake-utils,
       rust-overlay,
       crane,
+      charon,
       advisory-db,
       xtcp2-56-base,
       xtcp2-56-head,
@@ -101,6 +112,9 @@
             advisory-db
             reviewGoCorpus
             ;
+          # The charon binary for this system (the `rust` AstBackend engine's MIR
+          # extractor). Passed through to nix/versions.nix as the single pin point.
+          charonPkg = charon.packages.${system}.charon;
           src = ./.;
         };
       in

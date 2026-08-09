@@ -98,4 +98,31 @@ fn ast_graph_paths_do_not_leak() {
     );
     let per_iter = (qafter.total_blocks - qbase.total_blocks) / QUERY_ITERS;
     dhat::assert!(per_iter < 4096, "query: allocated {per_iter} blocks/run");
+
+    // The Rust engine's charon `.llbc` → graph ingest hot path (feature `ast-rust`):
+    // lowering the real fixture + building the graph repeatedly frees everything. Same
+    // process-wide profiler (dhat allows only one), so it lives inside this one test.
+    #[cfg(feature = "ast-rust")]
+    {
+        const FIXTURE: &str = include_str!("fixtures/greeter.ullbc.json");
+        let build = || {
+            let v = agent_ast::lower_llbc(FIXTURE, root).unwrap();
+            Graph::parse_value(v, root)
+        };
+        let _warm = build();
+        let rbase = dhat::HeapStats::get();
+        const INGEST_ITERS: u64 = 40;
+        for _ in 0..INGEST_ITERS {
+            let g = build();
+            assert!(g.symbol_count() > 0);
+            drop(g);
+        }
+        let rafter = dhat::HeapStats::get();
+        dhat::assert!(
+            rafter.curr_blocks <= rbase.curr_blocks + 8,
+            "rust ingest: live blocks grew (leak?): {} -> {}",
+            rbase.curr_blocks,
+            rafter.curr_blocks
+        );
+    }
 }

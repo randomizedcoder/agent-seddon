@@ -10,10 +10,13 @@
   advisory-db,
   # Pinned Go review-eval corpus: { <label> = { base; head; }; } store paths.
   reviewGoCorpus,
+  # The charon binary (rust AstBackend engine's MIR extractor), from the charon
+  # flake input; threaded to versions.nix as the single pin point.
+  charonPkg,
 }:
 
 let
-  versions = import ./versions.nix { inherit pkgs; };
+  versions = import ./versions.nix { inherit pkgs charonPkg; };
 
   # Shared flake helpers (mkApp/mkApps + harness snippets + mk*Check factories).
   nixLib = import ./lib { inherit pkgs lib versions; };
@@ -311,7 +314,7 @@ let
 
   # Dev shell. `go-ast` (review call-graph helper) + `go-graph` (AstBackend Go engine)
   # go on PATH, plus the SCIP indexer + ast-grep for the AstBackend `scip` engine and
-  # `structural_search` tool.
+  # `structural_search` tool, and `charon` for the AstBackend `rust` engine.
   devshell = import ./devshell.nix {
     inherit pkgs lib versions;
     extraPackages = [
@@ -319,7 +322,10 @@ let
       go-graph
       versions.scip-go
       versions.ast-grep
-    ];
+    ]
+    # charon (rust AstBackend engine's MIR extractor) — only when the flake injected
+    # it (always, on the flake path; guarded so a standalone versions import is safe).
+    ++ lib.optional (versions.charon != null) versions.charon;
   };
 
   # ClickHouse container apps (up / down / client).

@@ -68,12 +68,23 @@ impl Graph {
         &self.packages
     }
 
-    /// Parse the helper's JSON into a bounded, confined graph. Defensive over
-    /// `serde_json::Value`; a symbol whose file escapes `root` is dropped (and its
-    /// edges/relations with it). Returns `None` only when the top-level JSON is
-    /// unparseable — a structurally-valid but empty document yields an empty graph.
+    /// Parse the helper's JSON text into a bounded, confined graph. Returns `None`
+    /// only when the top-level JSON is unparseable — a structurally-valid but empty
+    /// document yields an empty graph. Thin wrapper over [`Graph::parse_value`].
     pub fn parse(stdout: &str, root: &Path) -> Option<Graph> {
         let v: serde_json::Value = serde_json::from_str(stdout).ok()?;
+        Some(Self::parse_value(v, root))
+    }
+
+    /// Build a bounded, confined graph from an already-decoded JSON value in the
+    /// **`agent-go-graph` intermediate schema** (`symbols`/`edges`/`implements`/
+    /// `imports`/`packages`). This is the shared ingestion core: the Go engine feeds
+    /// the helper's stdout via [`parse`](Graph::parse); the Rust engine
+    /// (`crate::rust`) lowers charon's `.llbc` into this same shape and feeds it here,
+    /// so both reuse the identical `confine`/bound/cap/index logic. Defensive over
+    /// `serde_json::Value`; a symbol whose file escapes `root` is dropped (with its
+    /// edges/relations).
+    pub fn parse_value(v: serde_json::Value, root: &Path) -> Graph {
         let mut g = Graph {
             truncated: v
                 .get("truncated")
@@ -164,7 +175,7 @@ impl Graph {
             }
         }
 
-        Some(g)
+        g
     }
 
     fn sym(&self, id: u32) -> Option<&Symbol> {
