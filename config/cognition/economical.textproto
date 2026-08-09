@@ -1,0 +1,155 @@
+# Role-routed economical flow: the graph decides WHICH model does WHICH job.
+#
+#   anchor.response ──── generate ── critic_gate (judged by "glm")
+#   anchor.delivery ──── distill_summary ── provider: "local"   (background)
+#                   \─── distill_facts ──── provider: "local"   (background)
+#   anchor.compaction ── objective (◄ capability: "local") ── compact_assemble
+#
+# The expensive generator × critic pair is spent ONLY on the answer itself;
+# every background/compaction call — the rolling summary, the key-facts
+# extraction, the current-objective statement — routes to a cheap provider
+# named `local` (e.g. an ollama box declared as a [[route.upstreams]] entry).
+# Same cognition, a fraction of the token bill. Run with:
+#
+#   agent --cognition-graph config/cognition/economical.textproto "<goal>"
+#
+# Needs providers named `glm` and `local`, and `[digest] store` configured.
+version: 1
+nodes {
+  key: "compact"
+  value {
+    type: "compact_assemble"
+    type_version: 1
+    params {
+      object_value {
+        fields {
+          key: "relevance"
+          value { string_value: "keyword" }
+        }
+        fields {
+          key: "min_coverage"
+          value { double_value: 0.6 }
+        }
+      }
+    }
+  }
+}
+nodes {
+  key: "facts"
+  value {
+    type: "distill_facts"
+    type_version: 1
+    params {
+      object_value {
+        fields {
+          key: "max_tokens"
+          value { uint_value: 256 }
+        }
+        fields {
+          key: "provider"
+          value { string_value: "local" }
+        }
+      }
+    }
+  }
+}
+nodes {
+  key: "gate"
+  value {
+    type: "critic_gate"
+    type_version: 1
+    params {
+      object_value {
+        fields {
+          key: "critic"
+          value { string_value: "glm" }
+        }
+        fields {
+          key: "max_rounds"
+          value { uint_value: 2 }
+        }
+      }
+    }
+  }
+}
+nodes {
+  key: "generate"
+  value {
+    type: "generate"
+    type_version: 1
+  }
+}
+nodes {
+  key: "objective"
+  value {
+    type: "objective"
+    type_version: 1
+    params {
+      object_value {
+        fields {
+          key: "max_tokens"
+          value { uint_value: 128 }
+        }
+      }
+    }
+  }
+}
+nodes {
+  key: "summarize"
+  value {
+    type: "distill_summary"
+    type_version: 1
+    params {
+      object_value {
+        fields {
+          key: "max_tokens"
+          value { uint_value: 512 }
+        }
+        fields {
+          key: "provider"
+          value { string_value: "local" }
+        }
+      }
+    }
+  }
+}
+edges {
+  from: "anchor.response"
+  to: "generate"
+  kind: KIND_MAIN
+}
+edges {
+  from: "generate"
+  to: "gate"
+  kind: KIND_MAIN
+}
+edges {
+  from: "glm"
+  to: "gate"
+  kind: KIND_CAPABILITY
+}
+edges {
+  from: "anchor.delivery"
+  to: "summarize"
+  kind: KIND_BACKGROUND
+}
+edges {
+  from: "anchor.delivery"
+  to: "facts"
+  kind: KIND_BACKGROUND
+}
+edges {
+  from: "anchor.compaction"
+  to: "objective"
+  kind: KIND_MAIN
+}
+edges {
+  from: "objective"
+  to: "compact"
+  kind: KIND_MAIN
+}
+edges {
+  from: "local"
+  to: "objective"
+  kind: KIND_CAPABILITY
+}

@@ -512,9 +512,17 @@ pub fn register_builtins(r: &mut Registry) {
             "all" => agent_context::Relevance::All,
             other => anyhow::bail!("[instant] relevance: unknown value `{other}`"),
         };
+        // Role routing (`[instant] provider`): the objective/relevance calls
+        // are small classification work — a cheap/local model fits.
+        let provider = if cfg.provider.is_empty() {
+            ctx.provider()?.clone()
+        } else {
+            resolve_provider_ref(&cfg.provider, ctx)
+                .context("[instant] provider (objective/relevance role routing)")?
+        };
         Ok(Arc::new(
             agent_context::InstantWindow::new(
-                ctx.provider()?.clone(),
+                provider,
                 digests.clone(),
                 ctx.cfg.agent.keep_recent_tokens,
             )
@@ -867,10 +875,16 @@ pub fn register_builtins(r: &mut Registry) {
         }
 
         let metrics = ctx.metrics.clone();
+        // Alternatives from the verdict file straight to the digest ledger
+        // (concept 6: the road not taken, persisted without another LLM call).
+        // `built_digests` is populated by the builder before the provider is
+        // constructed; `None` (no ledger configured) files nothing.
+        let digests = ctx.digests().cloned();
         let provider = agent_providers::ConsensusProvider::new(generator, critic)
             .with_cfg(gate)
             .with_observer(Arc::new(move |o: &agent_providers::GateOutcome| {
                 crate::metered::record_gate_outcome(&metrics, o);
+                crate::distiller::file_alternatives(&digests, &metrics, "gate", &o.alternatives);
             }));
         Ok(Arc::new(provider) as Arc<dyn LlmProvider>)
     });
@@ -1061,25 +1075,38 @@ fn search_paths(
 /// default on the seam's generated port. Set the config to `unix:/path` for UDS.
 #[cfg(feature = "grpc")]
 /// Resolve a provider *reference* the way composing factories do (the
-/// consensus gate, the fork's branches/judge): a `[[route.upstreams]]` entry by
-/// name (inline endpoint synthesized secret-safely), else a registry provider
-/// type — wrapped in the metrics decorator under its own name.
-#[cfg(any(feature = "provider-consensus", feature = "graph"))]
+/// consensus gate's critic, the fork's branches/judge, the distiller's and
+/// objective call's role providers): a `[[route.upstreams]]` entry by name
+/// (inline endpoint synthesized secret-safely), else a registry provider type
+/// — wrapped in the metrics decorator under its own name.
+#[cfg(any(
+    feature = "provider-consensus",
+    feature = "graph",
+    feature = "digest",
+    feature = "context-instant"
+))]
 pub(crate) fn resolve_provider_ref(
     name: &str,
     ctx: &FactoryCtx<'_>,
 ) -> anyhow::Result<Arc<dyn LlmProvider>> {
-    let built: Arc<dyn LlmProvider> = match ctx.cfg.route.upstreams.iter().find(|u| u.name == name)
+    #[cfg(feature = "provider-router")]
+    if let Some(u) = ctx
+        .cfg
+        .route
+        .upstreams
+        .iter()
+        .find(|u| u.name == name && !u.endpoint.is_empty())
     {
-        Some(u) if !u.endpoint.is_empty() => Arc::new(crate::builder::build_route_upstream(
+        let built = Arc::new(crate::builder::build_route_upstream(
             u,
             ctx.cfg.agent.context_window,
-        )?),
-        _ => ctx
-            .registry()?
-            .build_provider(name, ctx)
-            .with_context(|| format!("building provider reference `{name}`"))?,
-    };
+        )?);
+        return Ok(crate::metered::provider(built, ctx.metrics.clone(), name));
+    }
+    let built = ctx
+        .registry()?
+        .build_provider(name, ctx)
+        .with_context(|| format!("building provider reference `{name}`"))?;
     Ok(crate::metered::provider(built, ctx.metrics.clone(), name))
 }
 

@@ -149,8 +149,24 @@ designed (and why). Update both with every increment PR.
 - **05 / loser-alternatives rows use a millisecond seq**: the delivery-path
   `agreed_seq` is not visible at the provider layer, so fork alternatives key
   on `ts_ms` (+index) — unique and seq-ordered for assembly. Unify when a
-  delivery-path side-channel exists. Gate-verdict alternatives (increment 01's
-  observer) remain deferred on the same missing side-channel.
+  delivery-path side-channel exists.
+- **Follow-up (post-merge) / gate-verdict alternatives SHIPPED**: the missing
+  "side-channel" was never needed — the fork observer's technique (ambient
+  `current_identity()` + fire-and-forget put) works identically for the gate.
+  `file_alternatives` is now one shared helper in `distiller.rs`, called by
+  the consensus factory's observer, the fork's branch-local and post-merge
+  gates, and the fork merge — every producer of `AlternativeOption`s files to
+  the ledger.
+- **Follow-up (post-merge) / role routing SHIPPED as named references, not
+  RouteHint**: `[digest] provider` + `[instant] provider` in TOML, and a
+  `provider` param (or capability edge) on `distill_summary`/`distill_facts`/
+  `objective` nodes — resolved via the shared `resolve_provider_ref` (route
+  upstreams secret-safely, registry types otherwise). The critic/judge were
+  already name-routed, so this completes per-role model selection without
+  waiting for the model-router track's `RouteHint` threading (which remains
+  the richer future mechanism). One distiller worker serves both kinds, so it
+  takes ONE provider — a summary/facts conflict warns, summary wins.
+  `config/cognition/economical.textproto` is the showcase example.
 - **05 / branch fan-out multiplies cost on EVERY completion**, including
   tool-call iterations (the fork cannot know pre-generation whether a
   completion will be final, unlike the gate's post-generation `Final` scope).

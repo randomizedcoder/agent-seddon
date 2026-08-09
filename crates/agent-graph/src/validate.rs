@@ -461,6 +461,7 @@ mod tests {
     #[case::simple(testdata::simple())]
     #[case::intermediate(testdata::intermediate())]
     #[case::advanced(testdata::advanced())]
+    #[case::economical(testdata::economical())]
     fn positive_corpus_graphs_validate_clean(#[case] doc: GraphDoc) {
         let issues = validate(&doc, &reg());
         assert!(issues.is_empty(), "{issues:?}");

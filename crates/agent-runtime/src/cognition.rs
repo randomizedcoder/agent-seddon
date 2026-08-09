@@ -29,13 +29,15 @@ pub(crate) struct GraphPlan {
     pub gate: Option<GatePlan>,
     /// `distill_summary` / `distill_facts` background nodes off delivery.
     /// Presence decides whether the kind runs at all (the graph is the wiring
-    /// authority for its anchors); the inner value overrides the token budget.
-    pub summary: Option<Option<u32>>,
-    pub facts: Option<Option<u32>>,
+    /// authority for its anchors); the inner plan overrides budget/provider.
+    pub summary: Option<DistillNodePlan>,
+    pub facts: Option<DistillNodePlan>,
     /// A `compact_assemble` node on the compaction anchor.
     pub compact: Option<CompactPlan>,
     /// An `objective` node on the compaction chain (its token budget).
     pub objective_tokens: Option<u32>,
+    /// The `objective` node's role provider (param or capability edge).
+    pub objective_provider: Option<String>,
     /// A `split → branches → join → merge` fork on the response anchor
     /// (increment 05). When present, the builder composes the
     /// `BranchingProvider` chain directly — the gate/generator config overlay
@@ -43,6 +45,14 @@ pub(crate) struct GraphPlan {
     pub fork: Option<ForkPlan>,
     /// Fail-soft notes: fragments the executor could not express.
     pub warnings: Vec<String>,
+}
+
+/// A `distill_summary`/`distill_facts` node's settings: token budget and the
+/// role provider its background calls use (param or capability edge).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct DistillNodePlan {
+    pub tokens: Option<u32>,
+    pub provider: Option<String>,
 }
 
 /// One branch of a fork: the chain `generate [→ critic_gate]` between the
@@ -94,6 +104,20 @@ pub(crate) struct CompactPlan {
 
 fn param_str(doc: &GraphDoc, node: &str, key: &str) -> Option<String> {
     doc.nodes[node].params.get(key)?.as_str().map(String::from)
+}
+
+/// A node's role-provider reference: the `provider` param, else a capability
+/// edge into the node (`from` names the provider). Params win — the same
+/// resolution order as the gate's critic.
+fn provider_ref_of(doc: &GraphDoc, node: &str) -> Option<String> {
+    param_str(doc, node, "provider")
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            doc.edges
+                .iter()
+                .find(|e| e.kind == GraphEdgeKind::Capability && e.to == node)
+                .map(|e| e.from.clone())
+        })
 }
 
 fn param_u32(doc: &GraphDoc, node: &str, key: &str) -> Option<u32> {
@@ -182,14 +206,20 @@ pub(crate) fn compile(doc: &GraphDoc) -> GraphPlan {
                         "duplicate distill_summary node `{id}` — first wins"
                     ));
                 } else {
-                    plan.summary = Some(param_u32(doc, id, "max_tokens"));
+                    plan.summary = Some(DistillNodePlan {
+                        tokens: param_u32(doc, id, "max_tokens"),
+                        provider: provider_ref_of(doc, id),
+                    });
                 }
             }
             "distill_facts" => {
                 if plan.facts.is_some() {
                     w.push(format!("duplicate distill_facts node `{id}` — first wins"));
                 } else {
-                    plan.facts = Some(param_u32(doc, id, "max_tokens"));
+                    plan.facts = Some(DistillNodePlan {
+                        tokens: param_u32(doc, id, "max_tokens"),
+                        provider: provider_ref_of(doc, id),
+                    });
                 }
             }
             other => w.push(format!(
@@ -213,7 +243,10 @@ pub(crate) fn compile(doc: &GraphDoc) -> GraphPlan {
                     min_coverage: param_u32_as_f32(doc, &id, "min_coverage"),
                 });
             }
-            "objective" => plan.objective_tokens = param_u32(doc, &id, "max_tokens"),
+            "objective" => {
+                plan.objective_tokens = param_u32(doc, &id, "max_tokens");
+                plan.objective_provider = provider_ref_of(doc, &id);
+            }
             other => w.push(format!(
                 "node `{id}` (type `{other}`) is not supported on the compaction anchor — skipped"
             )),
@@ -420,11 +453,26 @@ pub(crate) fn apply_to_config(plan: &GraphPlan, cfg: &mut Config) -> Vec<String>
 
 /// The delivery/compaction overlays — shared by the plain and fork paths.
 fn apply_non_response(plan: &GraphPlan, cfg: &mut Config, warnings: &mut Vec<String>) {
-    if let Some(tokens) = plan.summary.flatten() {
+    if let Some(tokens) = plan.summary.as_ref().and_then(|d| d.tokens) {
         cfg.digest.summary_max_tokens = tokens;
     }
-    if let Some(tokens) = plan.facts.flatten() {
+    if let Some(tokens) = plan.facts.as_ref().and_then(|d| d.tokens) {
         cfg.digest.facts_max_tokens = tokens;
+    }
+    // Role routing: one distiller worker serves both kinds, so it takes ONE
+    // provider — on a conflict the summary node's choice wins (warned).
+    let summary_provider = plan.summary.as_ref().and_then(|d| d.provider.clone());
+    let facts_provider = plan.facts.as_ref().and_then(|d| d.provider.clone());
+    if let (Some(a), Some(b)) = (&summary_provider, &facts_provider) {
+        if a != b {
+            warnings.push(format!(
+                "distill_summary routes to `{a}` but distill_facts to `{b}` — the \
+                 distiller worker takes one provider; `{a}` wins"
+            ));
+        }
+    }
+    if let Some(p) = summary_provider.or(facts_provider) {
+        cfg.digest.provider = p;
     }
     if (plan.summary.is_some() || plan.facts.is_some()) && cfg.digest.store.is_empty() {
         warnings.push(
@@ -444,6 +492,9 @@ fn apply_non_response(plan: &GraphPlan, cfg: &mut Config, warnings: &mut Vec<Str
         }
         if let Some(t) = plan.objective_tokens {
             cfg.instant.objective_max_tokens = t;
+        }
+        if let Some(p) = &plan.objective_provider {
+            cfg.instant.provider.clone_from(p);
         }
         if cfg.digest.store.is_empty() {
             warnings.push(
@@ -496,8 +547,14 @@ mod tests {
         let plan = compile(&testdata::intermediate());
         assert_eq!(distill_kinds(&plan), (true, true));
         assert!(plan.gate.is_some());
-        assert_eq!(plan.summary, Some(Some(512)));
-        assert_eq!(plan.facts, Some(Some(256)));
+        assert_eq!(
+            plan.summary,
+            Some(DistillNodePlan {
+                tokens: Some(512),
+                provider: None
+            })
+        );
+        assert_eq!(plan.facts.as_ref().unwrap().tokens, Some(256));
         assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
         let compact = plan.compact.expect("compact");
         assert_eq!(compact.relevance.as_deref(), Some("keyword"));
@@ -614,6 +671,47 @@ mod tests {
         // …while the non-response anchors still overlay.
         assert_eq!(cfg.agent.context, "instant-window");
         assert_eq!(cfg.digest.summary_max_tokens, 512);
+    }
+
+    #[test]
+    fn positive_economical_routes_background_roles() {
+        let plan = compile(&testdata::economical());
+        assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
+        assert_eq!(
+            plan.summary.as_ref().unwrap().provider.as_deref(),
+            Some("local")
+        );
+        assert_eq!(
+            plan.facts.as_ref().unwrap().provider.as_deref(),
+            Some("local")
+        );
+        // The objective's provider came from its capability edge.
+        assert_eq!(plan.objective_provider.as_deref(), Some("local"));
+
+        let mut cfg = Config::minimal_for_test();
+        cfg.digest.store = "sqlite".into();
+        let warnings = apply_to_config(&plan, &mut cfg);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(cfg.digest.provider, "local");
+        assert_eq!(cfg.instant.provider, "local");
+        assert_eq!(cfg.instant.objective_max_tokens, 128);
+        // The gate itself still runs on the main pair.
+        assert_eq!(cfg.consensus.critic, "glm");
+    }
+
+    #[test]
+    fn corner_conflicting_distill_providers_warn_summary_wins() {
+        let mut doc = testdata::economical();
+        doc.nodes.get_mut("facts").unwrap().params = serde_json::json!({ "provider": "other" });
+        let plan = compile(&doc);
+        let mut cfg = Config::minimal_for_test();
+        cfg.digest.store = "sqlite".into();
+        let warnings = apply_to_config(&plan, &mut cfg);
+        assert!(
+            warnings.iter().any(|w| w.contains("`local` wins")),
+            "{warnings:?}"
+        );
+        assert_eq!(cfg.digest.provider, "local");
     }
 
     #[test]

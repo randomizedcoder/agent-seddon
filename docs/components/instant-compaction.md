@@ -45,6 +45,7 @@ context = "instant-window"     # requires [digest] store (fails closed otherwise
 
 [instant]
 relevance = "llm"              # "llm" | "keyword" | "all"
+provider = ""                  # role routing: objective/relevance model ("" = main)
 objective_max_tokens = 128
 min_coverage = 0.6
 facts_max_chars = 4096

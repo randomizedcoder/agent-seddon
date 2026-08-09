@@ -426,7 +426,13 @@ impl Session {
             let (summary_max_tokens, facts_max_tokens) = self.agent.distill_tokens;
             crate::distiller::Distiller::spawn(crate::distiller::DistillerCtx {
                 store,
-                provider: self.agent.provider.clone(),
+                // Role routing: a configured distill provider (a cheap/local
+                // model) beats burning the main generator on cache work.
+                provider: self
+                    .agent
+                    .distill_provider
+                    .clone()
+                    .unwrap_or_else(|| self.agent.provider.clone()),
                 session_id: self.id.session.as_str().to_string(),
                 user_id: self.id.user.as_str().to_string(),
                 summary_max_tokens,

@@ -543,6 +543,9 @@ cooldown_secs       = 30          # how long a breaker stays open before re-prob
 #
 # [digest]
 # store = "clickhouse"               # "" (off) | "clickhouse" | "sqlite" | "grpc"
+# provider = ""                      # role routing: distiller model ("" = main provider;
+#                                    # a [[route.upstreams]] name or registry type —
+#                                    # background cache work suits a cheap/local model)
 # path = ".agent/digests.sqlite3"    # sqlite backend only
 # summary_max_tokens = 512
 # facts_max_tokens = 256
@@ -556,6 +559,7 @@ cooldown_secs       = 30          # how long a breaker stays open before re-prob
 #
 # [instant]
 # relevance = "llm"                  # "llm" | "keyword" (zero extra calls) | "all"
+# provider = ""                      # role routing: objective/relevance model ("" = main)
 # objective_max_tokens = 128
 # min_coverage = 0.6                 # ledger coverage of the span; below → fallback
 # facts_max_chars = 4096

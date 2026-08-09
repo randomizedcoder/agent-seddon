@@ -14,7 +14,7 @@ and the generator revises: fix each issue, or rebut it with evidence.
 |---|---|---|
 | pass | verdict `pass: true` | deliver |
 | fixed | pass after ≥1 revise round | deliver |
-| alternatives | 2–3 defensible options, undecidable with current info | deliver + "Open alternatives" tail note (each with `reconsider_when`); recorded on the observer for the digest ledger (increment 02) |
+| alternatives | 2–3 defensible options, undecidable with current info | deliver + "Open alternatives" tail note (each with `reconsider_when`); **persisted**: the observer files each as a `kind = alternatives` digest-ledger row (injection-screened, under the session's identity), which instant compaction re-surfaces |
 | exhausted | `max_rounds` hit or identical issue set twice (no progress) | `deliver-with-note` (default: outstanding issues appended) or `fail` |
 | critic_error | critic errored / unparseable verdict | **fail open**: deliver, counted |
 

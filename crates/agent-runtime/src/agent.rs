@@ -198,6 +198,10 @@ pub struct Agent {
     /// TOML wiring; a cognition graph enables only the kinds whose background
     /// nodes exist.
     pub(crate) distill_kinds: (bool, bool),
+    /// Role routing (`[digest] provider` / a distill node's `provider`): the
+    /// provider the distiller uses. `None` = the main provider — distillation
+    /// is background cache work, so a cheap/local model fits here.
+    pub(crate) distill_provider: Option<Arc<dyn LlmProvider>>,
     /// The cognition-graph document store (cognition-graph 04). `None` ⇒ the
     /// graph-less built-in behavior.
     graph: Option<Arc<dyn agent_core::GraphStore>>,
@@ -264,6 +268,7 @@ impl Agent {
             digests: None,
             distill_tokens: (512, 256),
             distill_kinds: (true, true),
+            distill_provider: None,
             graph: None,
         }
     }
@@ -291,6 +296,13 @@ impl Agent {
     /// graph, a kind runs only if its background node exists).
     pub fn with_distill_kinds(mut self, summary: bool, facts: bool) -> Self {
         self.distill_kinds = (summary, facts);
+        self
+    }
+
+    /// Route the distiller's summary/facts calls to a dedicated provider
+    /// (`[digest] provider` — role routing).
+    pub fn with_distill_provider(mut self, p: Arc<dyn LlmProvider>) -> Self {
+        self.distill_provider = Some(p);
         self
     }
 
