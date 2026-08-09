@@ -71,14 +71,24 @@ model = "mistral-small:24b"
 tier = "medium"
 max_concurrency = 2
 
-[[pool.members]]
-name = "glm"                            # no endpoint → resolved via the provider registry
+[[pool.members]]                        # an authenticated / self-signed HOSTED upstream,
+name = "glm"                            # no secret in the file (model-router increment 01)
+endpoint = "https://213.173.96.56:8000/v1"
+model = "/model"
+api_key_file = "~/Downloads/runpod/glm/glm-api-key"  # api_key > api_key_env > api_key_file
+insecure_tls = true                     # self-signed dev endpoint ONLY (warns; MITM risk)
+context_window = 131072                 # per-member; unset ⇒ global [agent] context_window
 tier = "heavy"
 weight = 4.0
 ```
 
-The older parallel-list form (`members = ["glm", "mi50"]` + `tiers = [...]`) still
-parses. See [`config/agent.toml`](../../config/agent.toml) for the annotated block.
+An inline `endpoint` member takes per-member **auth** (`api_key` / `api_key_env` /
+`api_key_file` — all empty ⇒ keyless, for a local server that ignores the key), a
+per-member **`insecure_tls`** (self-signed dev endpoints only — it warns), and a
+per-member **`context_window`** (a fleet of different-sized models isn't forced to
+share the one global window). The older parallel-list form (`members = ["glm", "mi50"]`
++ `tiers = [...]`) still parses. See [`config/agent.toml`](../../config/agent.toml) for
+the annotated block.
 
 ## Observability
 

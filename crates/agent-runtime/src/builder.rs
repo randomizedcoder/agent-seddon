@@ -629,22 +629,8 @@ pub async fn build_agent_with(
             // config block per GPU target); otherwise resolve `name` via the registry.
             let provider: Arc<dyn agent_core::LlmProvider> = match detailed {
                 Some(c) if !c.endpoint.is_empty() => {
-                    if c.model.is_empty() {
-                        anyhow::bail!("[[pool.members]] `{name}` sets an endpoint but no model");
-                    }
-                    let p = agent_providers::OpenAiCompatProvider::new(
-                        agent_providers::OpenAiCompatConfig {
-                            base_url: c.endpoint.clone(),
-                            model: c.model.clone(),
-                            api_key: c.api_key.clone(),
-                            insecure_tls: false,
-                            context_window: cfg.agent.context_window,
-                            max_retries: 2,
-                            supports_vision: false,
-                        },
-                    )
-                    .map_err(|e| anyhow::anyhow!("building pool member `{name}`: {e}"))?;
-                    Arc::new(p) as Arc<dyn agent_core::LlmProvider>
+                    Arc::new(build_inline_pool_member(c, cfg.agent.context_window)?)
+                        as Arc<dyn agent_core::LlmProvider>
                 }
                 _ => registry.build_provider(name, &base_ctx)?,
             };
@@ -1385,32 +1371,89 @@ fn file_dir_prep(cfg: &Config) {
     let _ = std::fs::create_dir_all(&cfg.memory.semantic_dir);
 }
 
-/// Resolve the API key without ever storing it in the repo: inline > env > file.
-/// Shared by every provider factory that needs a key.
-#[cfg(any(feature = "provider-openai-compat", feature = "provider-anthropic"))]
-fn resolve_api_key(p: &ProviderCfg) -> anyhow::Result<String> {
-    if !p.api_key.is_empty() {
-        return Ok(p.api_key.clone());
+/// Resolve an API key with the standard precedence — inline > env > file — WITHOUT
+/// requiring one: returns `""` when none is configured, so a keyless local pool
+/// member (a server that ignores the key) stays valid. Errors only when a
+/// configured `api_key_file` can't be read (fail closed on a real misconfig).
+#[cfg(any(
+    feature = "provider-openai-compat",
+    feature = "provider-anthropic",
+    feature = "provider-pool"
+))]
+fn resolve_key_opt(inline: &str, env: &str, file: &str) -> anyhow::Result<String> {
+    if !inline.is_empty() {
+        return Ok(inline.to_string());
     }
-    if !p.api_key_env.is_empty() {
-        if let Ok(v) = std::env::var(&p.api_key_env) {
+    if !env.is_empty() {
+        if let Ok(v) = std::env::var(env) {
             if !v.is_empty() {
                 return Ok(v);
             }
         }
     }
-    if !p.api_key_file.is_empty() {
-        let expanded = expand_tilde(&p.api_key_file);
+    if !file.is_empty() {
+        let expanded = expand_tilde(file);
         let v = std::fs::read_to_string(&expanded)
             .with_context(|| format!("reading api_key_file `{expanded}`"))?;
         return Ok(v.trim().to_string());
     }
-    Err(anyhow::anyhow!(
-        "no API key: set provider.api_key, provider.api_key_env, or provider.api_key_file"
-    ))
+    Ok(String::new())
 }
 
+/// Resolve the API key without ever storing it in the repo: inline > env > file.
+/// Shared by every provider factory that needs a key; unlike `resolve_key_opt` it
+/// **requires** one (the top-level `[provider]` can't be keyless).
 #[cfg(any(feature = "provider-openai-compat", feature = "provider-anthropic"))]
+fn resolve_api_key(p: &ProviderCfg) -> anyhow::Result<String> {
+    let key = resolve_key_opt(&p.api_key, &p.api_key_env, &p.api_key_file)?;
+    if key.is_empty() {
+        return Err(anyhow::anyhow!(
+            "no API key: set provider.api_key, provider.api_key_env, or provider.api_key_file"
+        ));
+    }
+    Ok(key)
+}
+
+/// Build an inline `[[pool.members]]` endpoint into an OpenAI-compatible provider —
+/// resolving the member key (inline > env > file, keyless allowed), honoring the
+/// per-member `insecure_tls` (warns) and `context_window` (unset ⇒ the global one).
+/// Extracted so the synth is unit-testable (model-router increment 01).
+#[cfg(feature = "provider-pool")]
+fn build_inline_pool_member(
+    c: &crate::config::PoolMemberCfg,
+    global_context_window: u32,
+) -> anyhow::Result<agent_providers::OpenAiCompatProvider> {
+    let name = &c.name;
+    if c.model.is_empty() {
+        anyhow::bail!("[[pool.members]] `{name}` sets an endpoint but no model");
+    }
+    if c.insecure_tls {
+        tracing::warn!(
+            "[[pool.members]] `{name}` insecure_tls=true: TLS verification is \
+             DISABLED (for a self-signed dev endpoint you control). This exposes \
+             the API key and traffic to man-in-the-middle attacks — do not use \
+             over untrusted networks."
+        );
+    }
+    let api_key = resolve_key_opt(&c.api_key, &c.api_key_env, &c.api_key_file)
+        .with_context(|| format!("pool member `{name}` api key"))?;
+    agent_providers::OpenAiCompatProvider::new(agent_providers::OpenAiCompatConfig {
+        base_url: c.endpoint.clone(),
+        model: c.model.clone(),
+        api_key,
+        insecure_tls: c.insecure_tls,
+        context_window: c.context_window.unwrap_or(global_context_window),
+        max_retries: 2,
+        supports_vision: false,
+    })
+    .map_err(|e| anyhow::anyhow!("building pool member `{name}`: {e}"))
+}
+
+#[cfg(any(
+    feature = "provider-openai-compat",
+    feature = "provider-anthropic",
+    feature = "provider-pool"
+))]
 fn expand_tilde(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/") {
         if let Ok(home) = std::env::var("HOME") {
@@ -1493,6 +1536,163 @@ mod tests {
     #[test]
     fn resolve_api_key_errors_when_none_configured() {
         assert!(resolve_api_key(&pcfg("", "", "")).is_err());
+    }
+
+    // --- resolve_key_opt: same precedence, but keyless is ALLOWED (pool members) --
+    #[test]
+    fn positive_resolve_key_opt_prefers_inline() {
+        assert_eq!(
+            resolve_key_opt("INLINE", "UNSET_ENV_NAME", "").unwrap(),
+            "INLINE"
+        );
+    }
+
+    #[test]
+    fn positive_resolve_key_opt_reads_file_trimmed() {
+        let dir = agent_testkit::tempdir();
+        let f = dir.join("key");
+        std::fs::write(&f, "  FILEKEY\n").unwrap();
+        assert_eq!(
+            resolve_key_opt("", "", f.to_str().unwrap()).unwrap(),
+            "FILEKEY"
+        );
+    }
+
+    #[test]
+    fn positive_resolve_key_opt_env_over_file() {
+        // env beats file when both are set (precedence inline > env > file).
+        let var = "AGENT_SEDDON_TEST_KEY_OPT_PREC";
+        std::env::set_var(var, "FROMENV");
+        let dir = agent_testkit::tempdir();
+        let f = dir.join("key");
+        std::fs::write(&f, "FROMFILE").unwrap();
+        let got = resolve_key_opt("", var, f.to_str().unwrap()).unwrap();
+        std::env::remove_var(var);
+        assert_eq!(got, "FROMENV");
+    }
+
+    #[test]
+    fn negative_resolve_key_opt_unset_env_falls_through_to_file() {
+        // An env name whose var is UNSET is skipped gracefully — precedence continues
+        // to the file (absent input handled, not treated as the literal name).
+        let dir = agent_testkit::tempdir();
+        let f = dir.join("key");
+        std::fs::write(&f, "FROMFILE").unwrap();
+        std::env::remove_var("AGENT_SEDDON_TEST_KEY_OPT_UNSET");
+        assert_eq!(
+            resolve_key_opt("", "AGENT_SEDDON_TEST_KEY_OPT_UNSET", f.to_str().unwrap()).unwrap(),
+            "FROMFILE"
+        );
+    }
+
+    #[test]
+    fn corner_resolve_key_opt_empty_env_value_falls_through() {
+        // An env var set to the EMPTY string counts as absent (not a real key), so
+        // precedence falls through to the file.
+        let var = "AGENT_SEDDON_TEST_KEY_OPT_EMPTY";
+        std::env::set_var(var, "");
+        let dir = agent_testkit::tempdir();
+        let f = dir.join("key");
+        std::fs::write(&f, "FROMFILE").unwrap();
+        let got = resolve_key_opt("", var, f.to_str().unwrap()).unwrap();
+        std::env::remove_var(var);
+        assert_eq!(got, "FROMFILE");
+    }
+
+    #[test]
+    fn corner_resolve_key_opt_whitespace_file_trims_to_empty() {
+        // A present-but-blank key file trims to "" (keyless), not whitespace.
+        let dir = agent_testkit::tempdir();
+        let f = dir.join("key");
+        std::fs::write(&f, "  \n\t\n").unwrap();
+        assert_eq!(resolve_key_opt("", "", f.to_str().unwrap()).unwrap(), "");
+    }
+
+    #[test]
+    fn boundary_resolve_key_opt_none_is_empty_not_error() {
+        // A keyless local member is valid — unlike the top-level provider, no error.
+        assert_eq!(resolve_key_opt("", "", "").unwrap(), "");
+    }
+
+    #[test]
+    fn adversarial_resolve_key_opt_missing_file_fails_closed() {
+        // A configured-but-unreadable key file is a real misconfig → error, not "".
+        let err = resolve_key_opt("", "", "/no/such/agent-seddon/key-file").unwrap_err();
+        assert!(err.to_string().contains("api_key_file"));
+    }
+}
+
+/// Integration coverage for the inline `[[pool.members]]` synth: config knobs must
+/// actually reach the built provider (per-member context window / key / TLS), not
+/// just parse. Gated on `provider-pool` (a default feature) so `nix flake check`'s
+/// workspace `cargo test` runs it (model-router increment 01).
+#[cfg(all(test, feature = "provider-pool"))]
+mod pool_member_synth_tests {
+    use super::*;
+    use crate::config::PoolMemberCfg;
+    use agent_core::LlmProvider;
+
+    fn member(name: &str) -> PoolMemberCfg {
+        PoolMemberCfg {
+            name: name.into(),
+            endpoint: "http://host:11434/v1".into(),
+            model: "m".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn positive_inline_member_uses_per_member_context_window() {
+        let mut c = member("kimi");
+        c.api_key = "k".into();
+        c.context_window = Some(131_072);
+        let p = build_inline_pool_member(&c, 8192).unwrap();
+        // The per-member window reaches the provider's capabilities, not the global.
+        assert_eq!(p.capabilities().context_window, 131_072);
+    }
+
+    #[test]
+    fn corner_inline_member_falls_back_to_global_window() {
+        let p = build_inline_pool_member(&member("mi50"), 8192).unwrap();
+        assert_eq!(p.capabilities().context_window, 8192);
+    }
+
+    #[test]
+    fn positive_inline_member_self_signed_key_from_file_builds() {
+        // A self-signed hosted upstream (GLM shape): key from a file + insecure_tls
+        // → the provider builds with no secret in the config.
+        let dir = agent_testkit::tempdir();
+        let f = dir.join("key");
+        std::fs::write(&f, "SECRET\n").unwrap();
+        let mut c = member("glm");
+        c.api_key_file = f.to_str().unwrap().into();
+        c.insecure_tls = true;
+        assert!(build_inline_pool_member(&c, 8192).is_ok());
+    }
+
+    #[test]
+    fn boundary_keyless_inline_member_builds() {
+        // No key fields → a keyless local member still builds (no GPU-box regression).
+        assert!(build_inline_pool_member(&member("local"), 8192).is_ok());
+    }
+
+    #[test]
+    fn negative_inline_member_without_model_errors() {
+        let mut c = member("x");
+        c.model = String::new();
+        assert!(build_inline_pool_member(&c, 8192).is_err());
+    }
+
+    #[test]
+    fn adversarial_inline_member_missing_key_file_fails_closed() {
+        let mut c = member("x");
+        c.api_key_file = "/no/such/agent-seddon/key-file".into();
+        // `.err()` (not `.unwrap_err()`) — the Ok type isn't `Debug`.
+        let msg = build_inline_pool_member(&c, 8192)
+            .err()
+            .expect("missing key file must fail")
+            .to_string();
+        assert!(msg.contains("api key"));
     }
 }
 

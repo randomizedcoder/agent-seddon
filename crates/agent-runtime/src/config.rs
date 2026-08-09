@@ -335,9 +335,28 @@ pub struct PoolMemberCfg {
     /// Model id for an inline `endpoint` (required when `endpoint` is set).
     #[serde(default)]
     pub model: String,
-    /// API key for an inline `endpoint` (optional; many local servers need none).
+    /// Inline API key for an inline `endpoint` (optional; many local servers need
+    /// none). Prefer `api_key_env` / `api_key_file` so a secret isn't committed.
     #[serde(default)]
     pub api_key: String,
+    /// …read the key from this env var when `api_key` is empty.
+    #[serde(default)]
+    pub api_key_env: String,
+    /// …or from a file outside the repo (tilde-expanded). Member key resolution
+    /// order: `api_key` > `api_key_env` > `api_key_file`; all empty ⇒ keyless (fine
+    /// for a local server that ignores the key). Lets a hosted upstream (GLM/Kimi)
+    /// be a pool member without committing its key (model-router increment 01).
+    #[serde(default)]
+    pub api_key_file: String,
+    /// Skip TLS verification for THIS member — ONLY for a self-signed dev endpoint
+    /// you control (e.g. the GLM box). Off by default; warns when on.
+    #[serde(default)]
+    pub insecure_tls: bool,
+    /// Context-window budget for an inline `endpoint`; unset ⇒ the global
+    /// `[agent] context_window`. Per-member so a fleet of different-sized models
+    /// isn't forced to share one window (model-router increment 01).
+    #[serde(default)]
+    pub context_window: Option<u32>,
     #[serde(default)]
     pub tier: String,
     /// Selection weight for the `weighted` policy (default 1.0).
@@ -1914,5 +1933,92 @@ mod tests {
         assert!(cfg.members.is_empty());
         assert_eq!(cfg.policy, "cost");
         assert_eq!(cfg.on_saturation, "shed");
+    }
+
+    /// A hosted member carries the model-router-01 knobs: key-from-file, per-member
+    /// TLS + context window — so an authenticated/self-signed upstream is a member
+    /// with no secret in the config.
+    #[test]
+    fn positive_pool_member_hosted_upstream_fields() {
+        let cfg: PoolCfg = toml::from_str(
+            r#"
+            [[members]]
+            name = "glm"
+            endpoint = "https://213.173.96.56:8000/v1"
+            model = "/model"
+            api_key_file = "~/Downloads/runpod/glm/glm-api-key"
+            insecure_tls = true
+            context_window = 131072
+        "#,
+        )
+        .unwrap();
+        match &cfg.members[0] {
+            PoolMemberEntry::Detailed(c) => {
+                assert_eq!(c.api_key_file, "~/Downloads/runpod/glm/glm-api-key");
+                assert!(c.api_key.is_empty() && c.api_key_env.is_empty());
+                assert!(c.insecure_tls);
+                assert_eq!(c.context_window, Some(131_072));
+            }
+            PoolMemberEntry::Name(_) => panic!("expected a detailed member"),
+        }
+    }
+
+    /// Corner: the `api_key_env` key path parses (the other secret-safe form), and an
+    /// inline `api_key` may coexist with a file — the precedence is resolved at build
+    /// time, both just parse here.
+    #[test]
+    fn corner_pool_member_api_key_env_and_coexist() {
+        let cfg: PoolCfg = toml::from_str(
+            r#"
+            [[members]]
+            name = "kimi"
+            endpoint = "https://host/v1"
+            model = "moonshotai/Kimi-K3"
+            api_key = "inline"
+            api_key_env = "KIMI_KEY"
+            api_key_file = "~/k"
+        "#,
+        )
+        .unwrap();
+        match &cfg.members[0] {
+            PoolMemberEntry::Detailed(c) => {
+                assert_eq!(c.api_key, "inline");
+                assert_eq!(c.api_key_env, "KIMI_KEY");
+                assert_eq!(c.api_key_file, "~/k");
+            }
+            PoolMemberEntry::Name(_) => panic!("expected a detailed member"),
+        }
+    }
+
+    /// Negative: a bare-name member (no endpoint) carries none of the inline knobs —
+    /// it resolves via the registry, so the new fields simply don't apply.
+    #[test]
+    fn negative_pool_member_bare_name_has_no_inline_knobs() {
+        let cfg: PoolCfg = toml::from_str(r#"members = ["glm"]"#).unwrap();
+        assert!(matches!(cfg.members[0], PoolMemberEntry::Name(_)));
+        assert_eq!(cfg.members[0].name(), "glm");
+    }
+
+    /// Boundary: the new member knobs all default off — a keyless local member with
+    /// no TLS/window override still parses (no regression for the GPU-box case).
+    #[test]
+    fn boundary_pool_member_new_fields_default_off() {
+        let cfg: PoolCfg = toml::from_str(
+            r#"
+            [[members]]
+            name = "mi50"
+            endpoint = "http://mi50:11434/v1"
+            model = "mistral-small:24b"
+        "#,
+        )
+        .unwrap();
+        match &cfg.members[0] {
+            PoolMemberEntry::Detailed(c) => {
+                assert!(c.api_key_file.is_empty() && c.api_key_env.is_empty());
+                assert!(!c.insecure_tls);
+                assert_eq!(c.context_window, None);
+            }
+            PoolMemberEntry::Name(_) => panic!("expected a detailed member"),
+        }
     }
 }

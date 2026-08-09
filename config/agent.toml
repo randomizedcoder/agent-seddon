@@ -444,10 +444,22 @@ cooldown_secs       = 30          # how long a breaker stays open before re-prob
 # weight = 1.0                        # relative pick rate under `weighted`
 # max_concurrency = 2                 # per-target concurrency cap (0/unset = unbounded)
 #
+# An AUTHENTICATED / self-signed HOSTED upstream is a member too, with NO secret in
+# this file (model-router increment 01). Key resolution: api_key > api_key_env >
+# api_key_file; all empty ⇒ keyless (a local server that ignores it).
 # [[pool.members]]
-# name = "glm"                        # no endpoint ⇒ resolve via the registry
+# name = "glm"
+# endpoint = "https://213.173.96.56:8000/v1"
+# model = "/model"
+# api_key_file = "~/Downloads/runpod/glm/glm-api-key"  # or api_key_env = "GLM_KEY"
+# insecure_tls = true                 # self-signed dev endpoint ONLY (warns; MITM risk)
+# context_window = 131072             # per-member; unset ⇒ the global [agent] context_window
 # tier = "heavy"
 # weight = 4.0
+#
+# [[pool.members]]
+# name = "local-registry-member"      # no endpoint ⇒ resolve `name` via the registry
+# tier = "light"
 
 # General task-mode detection (the TaskClassifier seam). Runs every turn to detect
 # when to switch to a more appropriate mode; drives the in-loop review hand-off, and
