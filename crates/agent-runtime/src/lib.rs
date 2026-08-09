@@ -4,6 +4,7 @@ mod agent;
 mod builder;
 mod config;
 mod context_files;
+mod distiller;
 #[cfg(feature = "git")]
 mod git;
 pub mod hooks;

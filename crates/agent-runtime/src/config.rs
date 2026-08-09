@@ -68,6 +68,8 @@ pub struct Config {
     #[serde(default)]
     pub consensus: ConsensusCfg,
     #[serde(default)]
+    pub digest: DigestCfg,
+    #[serde(default)]
     pub mode: ModeCfg,
     #[serde(default)]
     pub dimensions: DimensionsCfg,
@@ -513,6 +515,45 @@ fn default_gate_critic_tokens() -> u32 {
 }
 fn default_gate_alternatives() -> u8 {
     3
+}
+
+/// The digest ledger + background distiller (`[digest]`, cognition-graph 02).
+/// Empty `store` = off. `clickhouse` reuses the `[telemetry]` connection
+/// parameters (one server, two write disciplines: telemetry is lossy-batched,
+/// digests are durable). See docs/design/cognition-graph/02-background-distiller.md.
+#[derive(Debug, Deserialize)]
+pub struct DigestCfg {
+    /// "" (off) | "clickhouse" | "sqlite".
+    #[serde(default)]
+    pub store: String,
+    /// SQLite ledger path (`sqlite` backend only).
+    #[serde(default = "default_digest_path")]
+    pub path: String,
+    #[serde(default = "default_digest_summary_tokens")]
+    pub summary_max_tokens: u32,
+    #[serde(default = "default_digest_facts_tokens")]
+    pub facts_max_tokens: u32,
+}
+
+impl Default for DigestCfg {
+    fn default() -> Self {
+        Self {
+            store: String::new(),
+            path: default_digest_path(),
+            summary_max_tokens: default_digest_summary_tokens(),
+            facts_max_tokens: default_digest_facts_tokens(),
+        }
+    }
+}
+
+fn default_digest_path() -> String {
+    ".agent/digests.sqlite3".into()
+}
+fn default_digest_summary_tokens() -> u32 {
+    512
+}
+fn default_digest_facts_tokens() -> u32 {
+    256
 }
 
 /// One routable upstream. Connection + auth mirror `[[pool.members]]` (key never in
@@ -2007,6 +2048,7 @@ impl Config {
             pool: PoolCfg::default(),
             route: RouteCfg::default(),
             consensus: ConsensusCfg::default(),
+            digest: DigestCfg::default(),
             mode: ModeCfg::default(),
             dimensions: DimensionsCfg::default(),
             review: ReviewCfg::default(),

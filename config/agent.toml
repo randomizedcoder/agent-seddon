@@ -517,6 +517,21 @@ cooldown_secs       = 30          # how long a breaker stays open before re-prob
 # max_alternatives = 3
 # rubric_file = ""                    # operator rubric (overrides the built-in)
 
+# The digest ledger + background distiller (cognition-graph 02): every delivered
+# response is summarized + fact-extracted in the background (per-session FIFO
+# worker; the reply path never waits) into rows keyed (session_id, agreed_seq),
+# which instant compaction later assembles instead of summarizing on the critical
+# path. "clickhouse" (the default deployment target) reuses the [telemetry]
+# connection with DURABLE writes (async_insert + wait_for_async_insert — not the
+# lossy telemetry channel); "sqlite" keeps a single-file ledger for server-less
+# runs. See docs/design/cognition-graph/02-background-distiller.md.
+#
+# [digest]
+# store = "clickhouse"               # "" (off) | "clickhouse" | "sqlite"
+# path = ".agent/digests.sqlite3"    # sqlite backend only
+# summary_max_tokens = 512
+# facts_max_tokens = 256
+
 # General task-mode detection (the TaskClassifier seam). Runs every turn to detect
 # when to switch to a more appropriate mode; drives the in-loop review hand-off, and
 # (later) mode-aware compaction + dimensional memory. ON by default — with no [pool]

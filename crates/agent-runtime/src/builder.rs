@@ -726,6 +726,26 @@ pub async fn build_agent_with(
     #[cfg(not(feature = "dimensions"))]
     let dimension_store_seam: Option<Arc<dyn agent_core::DimensionStore>> = None;
 
+    // The digest ledger (cognition-graph 02), opt-in via `[digest] store`. The
+    // `clickhouse` backend reuses the `[telemetry]` connection parameters (one
+    // server, two write disciplines — digests are durable, telemetry is lossy).
+    #[cfg(feature = "digest")]
+    let digest_store: Option<Arc<dyn agent_core::DigestStore>> = match cfg.digest.store.as_str() {
+        "" => None,
+        "clickhouse" => Some(Arc::new(agent_digest::ClickHouseDigests::new(
+            cfg.telemetry.clickhouse_url.clone(),
+            cfg.telemetry.database.clone(),
+            cfg.telemetry.user.clone(),
+            cfg.telemetry.password.clone(),
+        ))),
+        "sqlite" => Some(Arc::new(agent_digest::SqliteDigests::open(expand_tilde(
+            &cfg.digest.path,
+        ))?)),
+        other => anyhow::bail!("unknown [digest] store `{other}`"),
+    };
+    #[cfg(not(feature = "digest"))]
+    let digest_store: Option<Arc<dyn agent_core::DigestStore>> = None;
+
     // Prompt management (docs/design/portal): the `PromptStore` seam over the config
     // system prompt + the context.d/prompts trees. Always built (no `= "grpc"` loop
     // consumer) so it can be hosted via `--serve-prompt` / `--serve-all`. The backend
@@ -958,6 +978,14 @@ pub async fn build_agent_with(
     };
     let agent = match dimension_store_seam {
         Some(d) => agent.with_dimension_store(d),
+        None => agent,
+    };
+    let agent = match digest_store {
+        Some(s) => agent.with_digests(
+            s,
+            cfg.digest.summary_max_tokens,
+            cfg.digest.facts_max_tokens,
+        ),
         None => agent,
     };
     let agent = match prompt_store_seam {
@@ -1529,7 +1557,8 @@ pub(crate) fn build_route_policy(cfg: &crate::config::RouteCfg) -> agent_provide
 #[cfg(any(
     feature = "provider-openai-compat",
     feature = "provider-anthropic",
-    feature = "provider-pool"
+    feature = "provider-pool",
+    feature = "digest"
 ))]
 fn expand_tilde(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/") {

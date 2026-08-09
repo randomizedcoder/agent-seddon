@@ -65,6 +65,11 @@ pub struct Session {
     /// `working.messages` (at index 1, right after the head). Tracked so a mode
     /// change can update or remove it (docs/design/prompts/02-composition.md).
     pub(super) situational_present: bool,
+    /// Per-session agreed-response ordinal (cognition-graph 02): minted once per
+    /// delivered final answer; keys the digest ledger.
+    pub(super) agreed_seq: u64,
+    /// The lazily-spawned background distiller for this session.
+    pub(super) distiller: Option<crate::distiller::Distiller>,
 }
 
 impl Session {
@@ -388,8 +393,43 @@ impl Session {
         // answer, and never affecting the returned result.
         if answer.is_ok() {
             self.dimension_pass().await;
+            self.distill_pass(input);
         }
         answer
+    }
+
+    /// Fire-and-forget distillation of the just-delivered response (cognition-graph
+    /// 02). Mints the per-session `agreed_seq`, lazily spawns the FIFO worker, and
+    /// `try_send`s the job — **never blocks or fails the reply path**; a full queue
+    /// drops the job, counted.
+    fn distill_pass(&mut self, input: &str) {
+        let Some(store) = self.agent.digests.clone() else {
+            return;
+        };
+        self.agreed_seq += 1;
+        let distiller = self.distiller.get_or_insert_with(|| {
+            let (summary_max_tokens, facts_max_tokens) = self.agent.distill_tokens;
+            crate::distiller::Distiller::spawn(crate::distiller::DistillerCtx {
+                store,
+                provider: self.agent.provider.clone(),
+                session_id: self.id.session.as_str().to_string(),
+                user_id: self.id.user.as_str().to_string(),
+                summary_max_tokens,
+                facts_max_tokens,
+                metrics: self.agent.metrics.clone(),
+            })
+        });
+        let job = crate::distiller::DistillJob {
+            seq: self.agreed_seq,
+            mode: self.current_mode.as_str().to_string(),
+            goal: input.chars().take(1_000).collect(),
+            window: crate::distiller::render_window(&self.working.messages, 12),
+            delivered_ms: super::now_ms(),
+        };
+        if !distiller.enqueue(job) {
+            self.agent.metrics.on_distill("summary", "dropped", 0.0);
+            self.agent.metrics.on_distill("facts", "dropped", 0.0);
+        }
     }
 
     /// Per-turn dimensional summarize pass. A no-op when no store is wired or the

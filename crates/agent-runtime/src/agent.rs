@@ -185,6 +185,11 @@ pub struct Agent {
     /// (parity spec 28).
     #[cfg(feature = "scheduler")]
     scheduler: Option<Arc<agent_scheduler::LocalScheduler>>,
+    /// The digest ledger the per-session background distiller writes and instant
+    /// compaction reads (cognition-graph 02). `None` ⇒ distillation is off.
+    digests: Option<Arc<dyn agent_core::DigestStore>>,
+    /// `(summary_max_tokens, facts_max_tokens)` for the distiller's completions.
+    distill_tokens: (u32, u32),
 }
 
 impl Agent {
@@ -244,7 +249,22 @@ impl Agent {
             auto_checkpoint: false,
             #[cfg(feature = "scheduler")]
             scheduler: None,
+            digests: None,
+            distill_tokens: (512, 256),
         }
+    }
+
+    /// Attach the digest ledger + distiller budgets (cognition-graph 02): every
+    /// delivered response gets background-summarized into `store`.
+    pub fn with_digests(
+        mut self,
+        store: Arc<dyn agent_core::DigestStore>,
+        summary_max_tokens: u32,
+        facts_max_tokens: u32,
+    ) -> Self {
+        self.digests = Some(store);
+        self.distill_tokens = (summary_max_tokens, facts_max_tokens);
+        self
     }
 
     /// Attach the scheduler (parity spec 28).
@@ -797,6 +817,8 @@ impl Agent {
             switch_history: std::collections::VecDeque::new(),
             pending_switch: None,
             situational_present: false,
+            agreed_seq: 0,
+            distiller: None,
         }
     }
 

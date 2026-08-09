@@ -79,6 +79,8 @@ pub struct Metrics {
     gate_phase_seconds: HistogramVec,
     gate_issues: IntCounterVec,
     gate_alternatives: IntCounter,
+    distill_jobs: IntCounterVec,
+    distill_lag_seconds: HistogramVec,
     // LLM pool (docs/design/code-review/llm-pool.md + gpu-pool/).
     pool_members_alive: IntGaugeVec,
     pool_probe_seconds: HistogramVec,
@@ -390,6 +392,23 @@ impl Metrics {
         let gate_alternatives = IntCounter::new(
             "agent_gate_alternatives_total",
             "Alternatives recorded by the consensus gate (the roads not taken)",
+        )
+        .unwrap();
+        let distill_jobs = IntCounterVec::new(
+            Opts::new(
+                "agent_distill_jobs_total",
+                "Background distiller jobs by kind and outcome (succeeded_no_output \
+                 is a success; dropped means the queue was full)",
+            ),
+            &["kind", "outcome"],
+        )
+        .unwrap();
+        let distill_lag_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "agent_distill_lag_seconds",
+                "Delivery → digest-row-durable lag, per kind",
+            ),
+            &["kind"],
         )
         .unwrap();
         let pool_members_alive = IntGaugeVec::new(
@@ -1096,6 +1115,8 @@ impl Metrics {
             Box::new(gate_phase_seconds.clone()),
             Box::new(gate_issues.clone()),
             Box::new(gate_alternatives.clone()),
+            Box::new(distill_jobs.clone()),
+            Box::new(distill_lag_seconds.clone()),
             Box::new(pool_members_alive.clone()),
             Box::new(pool_probe_seconds.clone()),
             Box::new(pool_dispatch_seconds.clone()),
@@ -1224,6 +1245,8 @@ impl Metrics {
             gate_phase_seconds,
             gate_issues,
             gate_alternatives,
+            distill_jobs,
+            distill_lag_seconds,
             pool_members_alive,
             pool_probe_seconds,
             pool_dispatch_seconds,
@@ -1448,6 +1471,21 @@ impl Metrics {
         if alternatives > 0 {
             self.gate_alternatives.inc_by(alternatives);
         }
+    }
+    /// One background-distiller job. `kind` is `summary|facts|alternatives`;
+    /// `outcome` is a closed set (`succeeded|succeeded_no_output|failed|
+    /// store_failed|injection_flagged|dropped`). `lag_seconds` = delivery → row
+    /// durable; clamped (a poisoned histogram corrupts every later quantile).
+    pub fn on_distill(&self, kind: &str, outcome: &str, lag_seconds: f64) {
+        self.distill_jobs.with_label_values(&[kind, outcome]).inc();
+        let lag = if lag_seconds.is_finite() && lag_seconds >= 0.0 {
+            lag_seconds
+        } else {
+            0.0
+        };
+        self.distill_lag_seconds
+            .with_label_values(&[kind])
+            .observe(lag);
     }
     /// LLM pool: set the live-member gauge for a tier.
     pub fn set_pool_members_alive(&self, tier: &str, n: i64) {
