@@ -495,8 +495,11 @@ impl LlmProvider for BranchingProvider {
                     arrivals.push(Arrival { idx, resp, ms });
                 }
                 Ok(Some(Ok((idx, Err(e), ms)))) => {
+                    // Same log-leak caution as the distiller: provider errors
+                    // can embed response bodies — cap before logging.
                     tracing::warn!(split = %self.split, branch = %self.branches[idx].label,
-                        error = %e, "branch failed (fail-soft: it lost)");
+                        error = %cap(&e.to_string().replace(['\n', '\r'], " "), 160),
+                        "branch failed (fail-soft: it lost)");
                     fates[idx] = Some(BranchFate::Error);
                     let _ = ms;
                 }

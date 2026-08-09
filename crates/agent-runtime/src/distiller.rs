@@ -198,7 +198,7 @@ async fn summarize(ctx: &DistillerCtx, job: &DistillJob, prev: Option<&str>) -> 
         // Swallowed (distillation must never fail the turn) but never silent —
         // a misconfigured role provider was invisible without this line.
         Err(e) => {
-            tracing::warn!(error = %e, "distill summary call failed");
+            tracing::warn!(error = %log_err(&e), "distill summary call failed");
             ("failed", None)
         }
         Ok(text) => {
@@ -246,7 +246,7 @@ async fn extract_facts(ctx: &DistillerCtx, job: &DistillJob) {
     let resp = complete(ctx, FACTS_SYSTEM, user, ctx.facts_max_tokens).await;
     let outcome = match resp {
         Err(e) => {
-            tracing::warn!(error = %e, "distill facts call failed");
+            tracing::warn!(error = %log_err(&e), "distill facts call failed");
             "failed"
         }
         Ok(text) => {
@@ -342,6 +342,15 @@ fn cap(s: &str, max: usize) -> String {
         cut -= 1;
     }
     format!("{}…", &s[..cut])
+}
+
+/// Bounded, single-line error rendering for logs. Provider errors can embed
+/// the full HTTP/response body — which on a decode failure is the raw LLM
+/// output over the user's transcript — and log lines flow to the telemetry
+/// sink. Cap and flatten before anything reaches an observability surface.
+fn log_err(e: &agent_core::Error) -> String {
+    let s = e.to_string().replace(['\n', '\r'], " ");
+    cap(&s, 160)
 }
 
 fn elapsed_ms32(t: std::time::Instant) -> u32 {
