@@ -140,6 +140,27 @@ Startup: `agent --cognition-graph <file.textproto>` (scenario files, mirroring
 increments behave exactly as their TOML config wired them (the graph is a
 *re-expression*, not a prerequisite).
 
+## Example graphs (shipped as scenario files + integration tests)
+
+Three graded examples under `config/cognition/`, each a working document AND an
+integration-test fixture (a `nix run .#graph-examples`-style check loads,
+validates, and dry-runs each against scripted providers — the graphs *are* the
+integration tests of the whole feature):
+
+1. **`simple.textproto`** — gate only: `generate → critic_gate` on the response
+   anchor. The smallest useful graph; validates the anchor plumbing.
+2. **`intermediate.textproto`** — gate + background distillation: adds the two
+   `BACKGROUND` edges (`distill_summary`, `distill_facts`) off delivery and
+   `compact_assemble` on the compaction anchor — the full increments 01–03
+   behavior, expressed as a document.
+3. **`advanced.textproto`** — the flow as originally described plus increment
+   05: a `split` into safety-lens and performance-lens implementation branches
+   (the safety branch carrying its own gate loop), `join policy: all`, a
+   `synthesize` merge recording the loser to the alternatives ledger, the
+   merged result through the final consensus gate, background distillation on
+   delivery, instant compaction assembling summaries + facts + open
+   alternatives.
+
 ## GUI (portal track, out of scope here — kept unbroken)
 
 What this increment guarantees the future editor: stable node ids + named typed

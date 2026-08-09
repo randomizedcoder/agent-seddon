@@ -97,6 +97,14 @@ designed (and why). Update both with every increment PR.
 | 01 | `gate_verdict::verdict_round_full_lists` | 199,786 → 199,786 (reviewed: serde-dominated single parse ×2 + sanitize + set compare, once per critic round — no fruit worth taking) | 500,000 (~2.5×) |
 | 02 | `digest_query::query_summaries_and_keywords` | 2,064,651 → 2,053,229 (fruit: `prepare_cached` — constant SQL, skip re-parse on repeated compaction reads; remaining = rusqlite row stepping + per-row keyword decode, load-bearing) | 5,200,000 (~2.5×) |
 
+## Planned once the graph works (user, 2026-08-09)
+
+Three graded example graphs under `config/cognition/` — `simple` (gate only),
+`intermediate` (gate + background distillation + instant compaction),
+`advanced` (fork/join safety×performance branches + synthesize merge + full
+flow) — shipped as scenario files **and** used as integration tests of the
+whole system (04-graph-config.md §Example graphs).
+
 ## Deferred (explicit, from README)
 
 - Generalizing the executor beyond the three anchor slots (Option C — full
