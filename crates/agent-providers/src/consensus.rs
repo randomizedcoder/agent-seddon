@@ -34,7 +34,7 @@ use std::sync::Arc;
 use tracing::Instrument;
 
 /// Millis since `t`, saturating (a hostile clock can't underflow/panic).
-fn elapsed_ms(t: std::time::Instant) -> u64 {
+pub(crate) fn elapsed_ms(t: std::time::Instant) -> u64 {
     u64::try_from(t.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
@@ -444,13 +444,13 @@ fn issue_set(issues: &[Issue]) -> BTreeSet<String> {
         .collect()
 }
 
-fn extract_json_object(text: &str) -> Option<&str> {
+pub(crate) fn extract_json_object(text: &str) -> Option<&str> {
     let start = text.find('{')?;
     let end = text.rfind('}')?;
     (end > start).then(|| &text[start..=end])
 }
 
-fn cap(s: &str, max: usize) -> String {
+pub(crate) fn cap(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
     }

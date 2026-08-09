@@ -56,3 +56,14 @@ pub use consensus::{
     AlternativeOption, ConsensusProvider, Exhaustion, GateCfg, GateObserver, GateOutcome,
     GateOutcomeKind, GateScope,
 };
+
+/// Parallel branches: split → concurrent lens branches → policy join → merge
+/// (cognition-graph increment 05,
+/// docs/design/cognition-graph/05-parallel-branches.md).
+#[cfg(feature = "provider-branching")]
+pub mod branching;
+#[cfg(feature = "provider-branching")]
+pub use branching::{
+    BranchCfg, BranchFate, BranchObserver, BranchReport, BranchSpec, BranchingProvider, JoinPolicy,
+    MergeStrategy, OnTimeout,
+};
