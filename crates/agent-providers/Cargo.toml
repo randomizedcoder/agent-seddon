@@ -16,6 +16,9 @@ default = ["provider-openai-compat"]
 provider-openai-compat = []
 # Anthropic-native Messages API.
 provider-anthropic = []
+# Consensus gate: generator × critic response gate with a bounded convergence loop
+# (cognition-graph increment 01). Pure composition — no extra deps.
+provider-consensus = []
 # dhat-instrumented leak/allocation tests (tests/leak.rs).
 dhat-heap = ["dep:dhat"]
 

@@ -7,7 +7,7 @@ designed (and why). Update both with every increment PR.
 | Piece | Doc | Status |
 |---|---|---|
 | Design of record (prior art, options A–E, architecture) | [`README.md`](README.md) | ✅ written |
-| 01 Consensus gate (`provider = "consensus"`, Kimi × GLM live) | [`01-consensus-gate.md`](01-consensus-gate.md) | ⬜ not started |
+| 01 Consensus gate (`provider = "consensus"`, Kimi × GLM live) | [`01-consensus-gate.md`](01-consensus-gate.md) | 🔨 in progress — provider core + 19 tests landed; registry/config wiring, bench + optimization pass, live check remain |
 | 02 `agreed_seq` + `DigestStore` (clickhouse default / sqlite / grpc) + background distiller | [`02-background-distiller.md`](02-background-distiller.md) | ⬜ not started |
 | 03 Instant compaction (`instant-window` strategy) | [`03-instant-compaction.md`](03-instant-compaction.md) | ⬜ not started |
 | 04 Graph document (textproto) + anchor executor + `graph.proto`/`digest.proto` services | [`04-graph-config.md`](04-graph-config.md) | ⬜ not started |
@@ -21,7 +21,18 @@ designed (and why). Update both with every increment PR.
 > The design docs stay as-written (they are the record of intent); this log is
 > the record of what actually happened.
 
-- _(empty — implementation not started)_
+- **01 / streaming is ungated.** `ConsensusProvider::stream` passes through to the
+  generator: buffering a whole stream to critique it would defeat streaming.
+  Operators enabling the gate should run `stream = false`; a buffered-gated
+  stream is an explicit deferral. (The spec didn't address streaming.)
+- **01 / deterministic-checks conjunct moved to increment 04.** The provider
+  layer has no access to verifier/validator outcomes, so the "critic pass with
+  deterministic-red still blocked" rule (and its adversarial case) belongs to
+  the anchor-slot re-expression where those signals are in scope — not inside
+  the provider.
+- **01 / evidence-free failing verdict delivers.** A `pass: false` verdict whose
+  every issue was dropped as evidence-free leaves nothing actionable to revise
+  against — the gate delivers (spec implied but didn't state this branch).
 
 ## Bench baselines (filled per increment, after the optimization pass)
 

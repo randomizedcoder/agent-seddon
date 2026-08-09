@@ -45,3 +45,14 @@ pub use task_router::{RouterUpstream, TaskRouter};
 pub mod pool;
 #[cfg(feature = "provider-pool")]
 pub use pool::{PoolEvent, PoolObserver, PoolPolicy, PoolProvider, PoolSpec, Saturation};
+
+/// `ConsensusProvider` — the response-level generator × critic gate with a bounded
+/// convergence loop and an alternatives ledger (cognition-graph increment 01,
+/// docs/design/cognition-graph/01-consensus-gate.md).
+#[cfg(feature = "provider-consensus")]
+pub mod consensus;
+#[cfg(feature = "provider-consensus")]
+pub use consensus::{
+    AlternativeOption, ConsensusProvider, Exhaustion, GateCfg, GateObserver, GateOutcome,
+    GateOutcomeKind, GateScope,
+};
