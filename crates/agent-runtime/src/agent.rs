@@ -190,6 +190,10 @@ pub struct Agent {
     digests: Option<Arc<dyn agent_core::DigestStore>>,
     /// `(summary_max_tokens, facts_max_tokens)` for the distiller's completions.
     distill_tokens: (u32, u32),
+    /// `(summary, facts)` — which distill kinds run. `(true, true)` under the
+    /// TOML wiring; a cognition graph enables only the kinds whose background
+    /// nodes exist.
+    pub(crate) distill_kinds: (bool, bool),
     /// The cognition-graph document store (cognition-graph 04). `None` ⇒ the
     /// graph-less built-in behavior.
     graph: Option<Arc<dyn agent_core::GraphStore>>,
@@ -254,6 +258,7 @@ impl Agent {
             scheduler: None,
             digests: None,
             distill_tokens: (512, 256),
+            distill_kinds: (true, true),
             graph: None,
         }
     }
@@ -274,6 +279,13 @@ impl Agent {
     /// Attach the cognition-graph document store (cognition-graph 04).
     pub fn with_graph(mut self, store: Arc<dyn agent_core::GraphStore>) -> Self {
         self.graph = Some(store);
+        self
+    }
+
+    /// Restrict which distill kinds run (cognition-graph 04: with a non-empty
+    /// graph, a kind runs only if its background node exists).
+    pub fn with_distill_kinds(mut self, summary: bool, facts: bool) -> Self {
+        self.distill_kinds = (summary, facts);
         self
     }
 

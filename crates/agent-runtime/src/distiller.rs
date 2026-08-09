@@ -72,6 +72,10 @@ pub(crate) struct DistillerCtx {
     pub user_id: String,
     pub summary_max_tokens: u32,
     pub facts_max_tokens: u32,
+    /// `(summary, facts)` — which kinds this worker runs. Always `(true, true)`
+    /// under the TOML wiring; a cognition graph enables only the kinds whose
+    /// background nodes exist (the document is the wiring authority).
+    pub kinds: (bool, bool),
     pub metrics: agent_metrics::Metrics,
 }
 
@@ -148,10 +152,14 @@ async fn run(
             seq = job.seq,
         );
         let _guard = span.enter();
-        if let Some(s) = summarize(&ctx, &job, prev_summary.as_deref()).await {
-            prev_summary = Some(s);
+        if ctx.kinds.0 {
+            if let Some(s) = summarize(&ctx, &job, prev_summary.as_deref()).await {
+                prev_summary = Some(s);
+            }
         }
-        extract_facts(&ctx, &job).await;
+        if ctx.kinds.1 {
+            extract_facts(&ctx, &job).await;
+        }
         done.send_modify(|n| *n += 1);
     }
 }
@@ -357,6 +365,7 @@ mod tests {
             user_id: "local".into(),
             summary_max_tokens: 512,
             facts_max_tokens: 256,
+            kinds: (true, true),
             metrics: agent_metrics::Metrics::new(),
         }
     }
@@ -531,6 +540,32 @@ mod tests {
             1,
             "NO_FACTS ⇒ no facts row, no retry loop"
         );
+    }
+
+    #[tokio::test]
+    async fn corner_disabled_kind_never_runs() {
+        // A cognition graph with only a distill_summary node: the facts step
+        // must not even call the provider (the script has ONE turn — a facts
+        // call would panic the ScriptedProvider on script exhaustion).
+        let store = Arc::new(SqliteDigests::in_memory().unwrap());
+        let provider = Arc::new(ScriptedProvider::new(vec![final_turn(summary_answer(
+            "solo",
+        ))]));
+        let mut c = ctx(store.clone(), provider);
+        c.kinds = (true, false);
+        let d = Distiller::spawn(c);
+        assert!(d.enqueue(job(1)));
+        let rows = wait_rows(&store, 1).await;
+        assert_eq!(rows[0].kind, DigestKind::Summary);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let all = store
+            .query(&DigestQuery {
+                session_id: "s1".into(),
+                ..DigestQuery::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 1, "no facts row for a disabled kind");
     }
 
     #[tokio::test]

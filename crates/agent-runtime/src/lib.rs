@@ -2,6 +2,8 @@
 
 mod agent;
 mod builder;
+#[cfg(feature = "graph")]
+mod cognition;
 mod config;
 mod context_files;
 mod distiller;

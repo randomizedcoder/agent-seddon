@@ -237,12 +237,12 @@ impl NodeTypeRegistry {
             },
             ParamSpec {
                 key: "scope",
-                kind: ParamKind::Choice(&["final", "all"]),
+                kind: ParamKind::Choice(&["final", "every-iteration"]),
                 doc: "Gate only final answers, or every completion.",
             },
             ParamSpec {
                 key: "on_exhaustion",
-                kind: ParamKind::Choice(&["deliver", "error"]),
+                kind: ParamKind::Choice(&["deliver-with-note", "fail"]),
                 doc: "Deliver-with-note or fail the turn when rounds run out.",
             },
         ];
@@ -364,7 +364,7 @@ mod tests {
     #[case::no_params("critic_gate", serde_json::Value::Null, true)]
     #[case::empty_object("critic_gate", serde_json::json!({}), true)]
     #[case::full("critic_gate", serde_json::json!({
-        "critic": "glm", "max_rounds": 2, "scope": "final", "on_exhaustion": "deliver"
+        "critic": "glm", "max_rounds": 2, "scope": "final", "on_exhaustion": "deliver-with-note"
     }), true)]
     #[case::generate_provider("generate", serde_json::json!({"provider": "task-router"}), true)]
     #[case::fraction_bounds("compact_assemble", serde_json::json!({"min_coverage": 1.0}), true)]

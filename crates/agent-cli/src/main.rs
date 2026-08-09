@@ -26,6 +26,7 @@ async fn main() -> Result<()> {
         config_path,
         mode,
         resume,
+        cognition_graph,
     } = parse_args()?;
 
     let toml_str = std::fs::read_to_string(&config_path)
@@ -34,8 +35,14 @@ async fn main() -> Result<()> {
     // log it: this runs BEFORE `init_tracing` below, so a `tracing::warn!` here
     // would have no subscriber and be swallowed. The warnings are emitted once
     // tracing is up, further down.
-    let (config, unknown_config_keys) =
+    let (mut config, unknown_config_keys) =
         agent_runtime::parse_config_reporting_unknown(&toml_str).context("parsing config")?;
+    // `--cognition-graph FILE` = `[graph] store = "file", file = FILE` — the
+    // scenario-file form (config/cognition/*.textproto).
+    if let Some(file) = cognition_graph {
+        config.graph.store = "file".to_string();
+        config.graph.file = file;
+    }
     // Captured before `config` is consumed by the builder.
     let cfg_tick_secs = config.scheduler.tick_secs;
     // Captured before `config` moves into `build_agent` (see the metrics note below).
@@ -526,6 +533,9 @@ struct Args {
     config_path: PathBuf,
     mode: Mode,
     resume: Option<ResumeArg>,
+    /// `--cognition-graph FILE`: run with this cognition-graph document
+    /// (equivalent to `[graph] store = "file", file = FILE`).
+    cognition_graph: Option<String>,
 }
 
 fn parse_args() -> Result<Args> {
@@ -541,6 +551,7 @@ fn parse_args() -> Result<Args> {
     let mut review_gate = false;
     let mut detect_mode_prompt: Option<String> = None;
     let mut check_config = false;
+    let mut cognition_graph: Option<String> = None;
     let mut goal_parts: Vec<String> = Vec::new();
 
     let mut args = std::env::args().skip(1);
@@ -577,6 +588,12 @@ fn parse_args() -> Result<Args> {
             "--listen" => {
                 listen = Some(args.next().context("--listen requires an address")?);
             }
+            "--cognition-graph" => {
+                cognition_graph = Some(
+                    args.next()
+                        .context("--cognition-graph requires a textproto file path")?,
+                );
+            }
             flag if grpc_server::Seam::from_flag(flag).is_some() => {
                 serve_grpc = grpc_server::Seam::from_flag(flag);
             }
@@ -596,7 +613,8 @@ fn parse_args() -> Result<Args> {
                      --serve-<seam>      host one seam over gRPC; <seam> = {seams}\n  \
                      --serve-all         host every enabled seam over gRPC from one process\n  \
                      --serve-sessions    host the sessions gateway (SessionRegistry + driving AgentSession + reaper)\n  \
-                     --listen ADDR       override the gRPC listen address (host:port or unix:/path)",
+                     --listen ADDR       override the gRPC listen address (host:port or unix:/path)\n  \
+                     --cognition-graph F run with cognition-graph document F (see config/cognition/)",
                     seams = grpc_server::Seam::flag_names()
                 );
                 std::process::exit(0);
@@ -631,5 +649,6 @@ fn parse_args() -> Result<Args> {
         config_path,
         mode,
         resume,
+        cognition_graph,
     })
 }

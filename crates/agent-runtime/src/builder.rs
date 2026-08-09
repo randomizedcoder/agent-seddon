@@ -45,6 +45,24 @@ pub async fn build_agent_with(
     session_id: String,
     metrics: Metrics,
 ) -> anyhow::Result<Arc<Agent>> {
+    // The cognition-graph document (cognition-graph 04), resolved FIRST: a
+    // non-empty document is the wiring authority for its three anchor slots,
+    // applied as a config overlay the factories below read (`critic_gate` →
+    // `[consensus]`, background distill nodes → the distiller, `compact` →
+    // `instant-window`). An unloadable/invalid document is a startup error
+    // (fail closed); a shape this executor cannot express warns and falls back
+    // to the anchor's built-in behavior (fail soft).
+    #[allow(unused_mut)]
+    let mut cfg = cfg;
+    #[cfg(feature = "graph")]
+    let (graph_store, graph_distill_kinds) = resolve_cognition_graph(&mut cfg).await?;
+    #[cfg(not(feature = "graph"))]
+    let (graph_store, graph_distill_kinds): (
+        Option<Arc<dyn agent_core::GraphStore>>,
+        Option<(bool, bool)>,
+    ) = (None, None);
+    let cfg = cfg;
+
     // Wrap the provider in its metrics decorator up front, so every downstream
     // user (the loop, the summarizing context strategy, distillation) is
     // attributed the same way — including a remote `= "grpc"` client.
@@ -543,28 +561,6 @@ pub async fn build_agent_with(
     #[cfg(not(feature = "digest"))]
     let digest_store: Option<Arc<dyn agent_core::DigestStore>> = None;
 
-    // The cognition-graph document (cognition-graph 04), opt-in via
-    // `[graph] store`. The file backend re-validates on every read, so a
-    // hand-edited invalid document fails closed here, not at the executor.
-    #[cfg(feature = "graph")]
-    let graph_store: Option<Arc<dyn agent_core::GraphStore>> = match cfg.graph.store.as_str() {
-        "" => None,
-        "file" => Some(Arc::new(agent_graph::FileGraphs::new(expand_tilde(
-            &cfg.graph.file,
-        )))),
-        #[cfg(feature = "grpc")]
-        "grpc" => {
-            let ep = crate::registry::grpc_client_endpoint(
-                &cfg.grpc.graph.endpoint,
-                agent_grpc::constants::GRAPH,
-            );
-            Some(Arc::new(agent_grpc::client::GrpcGraphs::connect(&ep)?))
-        }
-        other => anyhow::bail!("unknown [graph] store `{other}`"),
-    };
-    #[cfg(not(feature = "graph"))]
-    let graph_store: Option<Arc<dyn agent_core::GraphStore>> = None;
-
     #[allow(unused_mut)]
     let mut full_ctx = crate::registry::FactoryCtx::new(&cfg, &metrics)
         .with_provider(&provider)
@@ -1022,6 +1018,10 @@ pub async fn build_agent_with(
     };
     let agent = match &graph_store {
         Some(g) => agent.with_graph(g.clone()),
+        None => agent,
+    };
+    let agent = match graph_distill_kinds {
+        Some((summary, facts)) => agent.with_distill_kinds(summary, facts),
         None => agent,
     };
     let agent = match prompt_store_seam {
@@ -1588,6 +1588,66 @@ pub(crate) fn build_route_policy(cfg: &crate::config::RouteCfg) -> agent_provide
             .collect(),
         default_prefer: prefer(&cfg.default_prefer),
     }
+}
+
+/// Build the `[graph] store` backend and, for a non-empty document, compile it
+/// and overlay the plan onto the config (cognition-graph 04's anchor-slot
+/// executor: the graph drives the same engines the TOML blocks drive). Returns
+/// the store (held for `--serve-graph`) and the distill-kind restriction the
+/// delivery anchor's background nodes imply (`None` = keep the built-in
+/// both-kinds behavior).
+#[cfg(feature = "graph")]
+async fn resolve_cognition_graph(
+    cfg: &mut Config,
+) -> anyhow::Result<(
+    Option<Arc<dyn agent_core::GraphStore>>,
+    Option<(bool, bool)>,
+)> {
+    let store: Option<Arc<dyn agent_core::GraphStore>> = match cfg.graph.store.as_str() {
+        "" => None,
+        "file" => Some(Arc::new(agent_graph::FileGraphs::new(expand_tilde(
+            &cfg.graph.file,
+        )))),
+        #[cfg(feature = "grpc")]
+        "grpc" => {
+            let ep = crate::registry::grpc_client_endpoint(
+                &cfg.grpc.graph.endpoint,
+                agent_grpc::constants::GRAPH,
+            );
+            Some(Arc::new(agent_grpc::client::GrpcGraphs::connect(&ep)?))
+        }
+        other => anyhow::bail!("unknown [graph] store `{other}`"),
+    };
+    let Some(s) = &store else {
+        return Ok((None, None));
+    };
+    // The store re-validates on read, so an invalid document fails closed HERE
+    // — a startup error naming the typed issues — never at the executor.
+    let doc = s
+        .get()
+        .await
+        .context("loading the cognition-graph document")?;
+    if doc.nodes.is_empty() {
+        // An empty document = the built-in, graph-less behavior.
+        return Ok((store, None));
+    }
+    let plan = crate::cognition::compile(&doc);
+    for w in &plan.warnings {
+        tracing::warn!(target: "cognition", "graph compile: {w}");
+    }
+    let kinds = crate::cognition::distill_kinds(&plan);
+    for w in crate::cognition::apply_to_config(&plan, cfg) {
+        tracing::warn!(target: "cognition", "graph apply: {w}");
+    }
+    tracing::info!(
+        target: "cognition",
+        gate = plan.gate.is_some(),
+        summary = kinds.0,
+        facts = kinds.1,
+        compact = plan.compact.is_some(),
+        "cognition graph applied"
+    );
+    Ok((store, Some(kinds)))
 }
 
 #[cfg(any(

@@ -416,6 +416,11 @@ impl Session {
         let Some(store) = self.agent.digests.clone() else {
             return;
         };
+        // A cognition graph may disable both kinds (no background nodes off
+        // delivery) — then nothing runs and no seq is minted.
+        if self.agent.distill_kinds == (false, false) {
+            return;
+        }
         self.agreed_seq += 1;
         let distiller = self.distiller.get_or_insert_with(|| {
             let (summary_max_tokens, facts_max_tokens) = self.agent.distill_tokens;
@@ -426,6 +431,7 @@ impl Session {
                 user_id: self.id.user.as_str().to_string(),
                 summary_max_tokens,
                 facts_max_tokens,
+                kinds: self.agent.distill_kinds,
                 metrics: self.agent.metrics.clone(),
             })
         });
