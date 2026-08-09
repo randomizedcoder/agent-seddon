@@ -498,6 +498,25 @@ cooldown_secs       = 30          # how long a breaker stays open before re-prob
 # upstreams = ["kimi", "glm"]
 # # failure_threshold = 3 / cooldown_secs = 30  (breaker, same as [router]/[pool])
 
+# The consensus gate (cognition-graph increment 01): every final answer is generated
+# by `generator` and challenged by `critic` (ideally a DIFFERENT model family) in a
+# bounded revise loop; preference-shaped disagreement is recorded as "Open
+# alternatives" with reconsider-when triggers instead of argued to capitulation.
+# Select with `[agent] provider = "consensus"`. `generator`/`critic` resolve like
+# route upstreams: a `[[route.upstreams]]` name (key via api_key_file/env — never
+# inline), else a registry provider type. Streaming bypasses the gate — run
+# `stream = false`. See docs/design/cognition-graph/01-consensus-gate.md.
+#
+# [consensus]
+# generator = "kimi"
+# critic    = "glm"
+# max_rounds = 2                      # critic rounds before exhaustion (ceiling 5)
+# scope = "final"                     # "final" | "every-iteration"
+# on_exhaustion = "deliver-with-note" # "deliver-with-note" | "fail"
+# critic_max_tokens = 512
+# max_alternatives = 3
+# rubric_file = ""                    # operator rubric (overrides the built-in)
+
 # General task-mode detection (the TaskClassifier seam). Runs every turn to detect
 # when to switch to a more appropriate mode; drives the in-loop review hand-off, and
 # (later) mode-aware compaction + dimensional memory. ON by default — with no [pool]

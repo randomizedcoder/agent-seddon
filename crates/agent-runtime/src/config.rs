@@ -66,6 +66,8 @@ pub struct Config {
     #[serde(default)]
     pub route: RouteCfg,
     #[serde(default)]
+    pub consensus: ConsensusCfg,
+    #[serde(default)]
     pub mode: ModeCfg,
     #[serde(default)]
     pub dimensions: DimensionsCfg,
@@ -472,6 +474,45 @@ impl Default for RouteCfg {
             cooldown_secs: default_breaker_cooldown(),
         }
     }
+}
+
+/// The consensus gate (`[consensus]`, cognition-graph increment 01). Selected with
+/// `[agent] provider = "consensus"`: the `generator` answers, the `critic` judges,
+/// bounded revise loop. Both names resolve like route upstreams — a
+/// `[[route.upstreams]]` entry by name, else a registry provider type.
+/// See docs/design/cognition-graph/01-consensus-gate.md.
+#[derive(Debug, Deserialize, Default)]
+pub struct ConsensusCfg {
+    #[serde(default)]
+    pub generator: String,
+    #[serde(default)]
+    pub critic: String,
+    /// Critic rounds before exhaustion (clamped to a hard ceiling in the provider).
+    #[serde(default = "default_gate_rounds")]
+    pub max_rounds: u8,
+    /// "final" (default: gate only no-tool-call answers) | "every-iteration".
+    #[serde(default)]
+    pub scope: String,
+    /// "deliver-with-note" (default) | "fail".
+    #[serde(default)]
+    pub on_exhaustion: String,
+    #[serde(default = "default_gate_critic_tokens")]
+    pub critic_max_tokens: u32,
+    #[serde(default = "default_gate_alternatives")]
+    pub max_alternatives: u8,
+    /// Optional path to an operator rubric (overrides the compiled default).
+    #[serde(default)]
+    pub rubric_file: String,
+}
+
+fn default_gate_rounds() -> u8 {
+    2
+}
+fn default_gate_critic_tokens() -> u32 {
+    512
+}
+fn default_gate_alternatives() -> u8 {
+    3
 }
 
 /// One routable upstream. Connection + auth mirror `[[pool.members]]` (key never in
@@ -1965,6 +2006,7 @@ impl Config {
             router: RouterCfg::default(),
             pool: PoolCfg::default(),
             route: RouteCfg::default(),
+            consensus: ConsensusCfg::default(),
             mode: ModeCfg::default(),
             dimensions: DimensionsCfg::default(),
             review: ReviewCfg::default(),
@@ -2191,5 +2233,42 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.upstreams[0].name, "glm");
         assert!(cfg.upstreams[0].endpoint.is_empty() && cfg.upstreams[0].tags.is_empty());
+    }
+
+    /// The `[consensus]` surface parses the gate knobs (cognition-graph 01).
+    #[test]
+    fn positive_consensus_config_parses() {
+        let cfg: ConsensusCfg = toml::from_str(
+            r#"
+            generator = "kimi"
+            critic = "glm"
+            max_rounds = 3
+            scope = "final"
+            on_exhaustion = "fail"
+            critic_max_tokens = 256
+            max_alternatives = 2
+            rubric_file = "prompts/gate/rubric.md"
+        "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.generator, "kimi");
+        assert_eq!(cfg.critic, "glm");
+        assert_eq!(cfg.max_rounds, 3);
+        assert_eq!(cfg.on_exhaustion, "fail");
+        assert_eq!(cfg.critic_max_tokens, 256);
+        assert_eq!(cfg.max_alternatives, 2);
+        assert_eq!(cfg.rubric_file, "prompts/gate/rubric.md");
+    }
+
+    /// Boundary: an empty `[consensus]` is a valid (unused) config with defaults —
+    /// the factory rejects it only when actually selected as the provider.
+    #[test]
+    fn boundary_empty_consensus_defaults() {
+        let cfg: ConsensusCfg = toml::from_str("").unwrap();
+        assert!(cfg.generator.is_empty() && cfg.critic.is_empty());
+        assert_eq!(cfg.max_rounds, 2);
+        assert_eq!(cfg.critic_max_tokens, 512);
+        assert_eq!(cfg.max_alternatives, 3);
+        assert!(cfg.scope.is_empty() && cfg.on_exhaustion.is_empty());
     }
 }

@@ -762,6 +762,85 @@ pub fn register_builtins(r: &mut Registry) {
         Ok(Arc::new(router) as Arc<dyn LlmProvider>)
     });
 
+    // --- consensus: generator × critic response gate (cognition-graph 01) ---
+    //
+    // Composing factory: `[consensus] generator/critic` each resolve like a route
+    // upstream — a `[[route.upstreams]]` entry by name (inline endpoint synthesized
+    // secret-safely, empty endpoint via the registry) — else as a registry provider
+    // type. The critic should be a different model family; same-name is allowed but
+    // warned (it defeats the self-preference mitigation).
+    #[cfg(feature = "provider-consensus")]
+    r.provider("consensus", |ctx| {
+        let cfg = &ctx.cfg.consensus;
+        if cfg.generator.is_empty() || cfg.critic.is_empty() {
+            anyhow::bail!(
+                "[consensus] generator and critic must both be set when \
+                 `[agent] provider = \"consensus\"`"
+            );
+        }
+        if cfg.generator == cfg.critic {
+            tracing::warn!(
+                upstream = %cfg.generator,
+                "[consensus] generator and critic are the SAME upstream — \
+                 self-critique loses the cross-family bias mitigation"
+            );
+        }
+        let resolve = |name: &str| -> anyhow::Result<Arc<dyn LlmProvider>> {
+            if name == "consensus" {
+                anyhow::bail!("[consensus] must not reference `consensus` itself");
+            }
+            let built: Arc<dyn LlmProvider> =
+                match ctx.cfg.route.upstreams.iter().find(|u| u.name == name) {
+                    Some(u) if !u.endpoint.is_empty() => Arc::new(
+                        crate::builder::build_route_upstream(u, ctx.cfg.agent.context_window)?,
+                    ),
+                    _ => ctx
+                        .registry()?
+                        .build_provider(name, ctx)
+                        .with_context(|| format!("building consensus member `{name}`"))?,
+                };
+            Ok(crate::metered::provider(built, ctx.metrics.clone(), name))
+        };
+        let generator = resolve(&cfg.generator)?;
+        let critic = resolve(&cfg.critic)?;
+
+        let mut gate = agent_providers::GateCfg {
+            max_rounds: cfg.max_rounds,
+            critic_max_tokens: cfg.critic_max_tokens,
+            max_alternatives: cfg.max_alternatives,
+            ..agent_providers::GateCfg::default()
+        };
+        gate.scope = match cfg.scope.as_str() {
+            "" | "final" => agent_providers::GateScope::Final,
+            "every-iteration" => agent_providers::GateScope::EveryIteration,
+            other => anyhow::bail!("[consensus] scope: unknown value `{other}`"),
+        };
+        gate.on_exhaustion = match cfg.on_exhaustion.as_str() {
+            "" | "deliver-with-note" => agent_providers::Exhaustion::DeliverWithNote,
+            "fail" => agent_providers::Exhaustion::Fail,
+            other => anyhow::bail!("[consensus] on_exhaustion: unknown value `{other}`"),
+        };
+        if !cfg.rubric_file.is_empty() {
+            let text = std::fs::read_to_string(&cfg.rubric_file)
+                .with_context(|| format!("[consensus] rubric_file `{}`", cfg.rubric_file))?;
+            gate.rubric = Some(text);
+        }
+
+        let provider = agent_providers::ConsensusProvider::new(generator, critic)
+            .with_cfg(gate)
+            .with_observer(Arc::new(|o: &agent_providers::GateOutcome| {
+                tracing::info!(
+                    outcome = o.kind.as_str(),
+                    rounds = o.rounds,
+                    outstanding = o.outstanding_issues,
+                    alternatives = o.alternatives.len(),
+                    confidence = o.confidence,
+                    "consensus gate"
+                );
+            }));
+        Ok(Arc::new(provider) as Arc<dyn LlmProvider>)
+    });
+
     // --- forge backends (the Forge seam, parity spec 27) ---
     #[cfg(feature = "forge-github")]
     r.forge("github", |ctx| {
