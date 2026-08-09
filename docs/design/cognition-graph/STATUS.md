@@ -7,7 +7,7 @@ designed (and why). Update both with every increment PR.
 | Piece | Doc | Status |
 |---|---|---|
 | Design of record (prior art, options A–E, architecture) | [`README.md`](README.md) | ✅ written |
-| 01 Consensus gate (`provider = "consensus"`, Kimi × GLM live) | [`01-consensus-gate.md`](01-consensus-gate.md) | 🔨 in progress — provider core + 19 tests, registry/config wiring, bench + ceiling all landed; live Kimi × GLM check + component doc remain |
+| 01 Consensus gate (`provider = "consensus"`, Kimi × GLM live) | [`01-consensus-gate.md`](01-consensus-gate.md) | ✅ **done** — provider core (19 tests), registry/config wiring, `gate_verdict` bench + ceiling, live Kimi × GLM verified (`pass` on math + trade-off prompts; `critic_error` root-caused to reasoning budget → ceiling 4096), [component doc](../../components/consensus.md). Dedicated `gate_*` metric families land with increment 04 |
 | 02 `agreed_seq` + `DigestStore` (clickhouse default / sqlite / grpc) + background distiller | [`02-background-distiller.md`](02-background-distiller.md) | ⬜ not started |
 | 03 Instant compaction (`instant-window` strategy) | [`03-instant-compaction.md`](03-instant-compaction.md) | ⬜ not started |
 | 04 Graph document (textproto) + anchor executor + `graph.proto`/`digest.proto` services | [`04-graph-config.md`](04-graph-config.md) | ⬜ not started |
@@ -33,6 +33,20 @@ designed (and why). Update both with every increment PR.
 - **01 / evidence-free failing verdict delivers.** A `pass: false` verdict whose
   every issue was dropped as evidence-free leaves nothing actionable to revise
   against — the gate delivers (spec implied but didn't state this branch).
+- **01 / config lives at `[consensus]`, not `[provider.consensus]`.** Keeps
+  `ProviderCfg` untouched and mirrors `[route]`/`[verifier]`.
+- **01 / reasoning-model critics need output headroom** (live finding). GLM
+  spends `max_tokens` on `reasoning_content` before the verdict; at 512–2048 a
+  longer judgment truncated to empty content → `critic_error` fail-open every
+  round. `MAX_CRITIC_TOKENS_CEILING` raised 2048 → 4096; operators should size
+  `critic_max_tokens` at 2048–4096 for reasoning critics (component doc).
+- **01 / gate metric families deferred to increment 04.** Outcomes log via the
+  observer (`tracing` under `provider.complete`); the `gate_*` Prometheus
+  families land with the anchor-slot re-expression rather than growing
+  `agent-metrics` twice.
+- **01 / live schema drift observed, handled**: GLM once returned
+  `alternatives` as an array of *strings* (not objects); the sanitizer drops
+  non-conforming entries safely — exactly the fail-closed shape intended.
 
 ## Bench baselines (filled per increment, after the optimization pass)
 

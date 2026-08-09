@@ -35,7 +35,11 @@ use std::sync::Arc;
 /// Hard ceilings (compile-time; config clamps against these).
 const MAX_ROUNDS_CEILING: u8 = 5;
 const MAX_ALTERNATIVES_CEILING: u8 = 4;
-const MAX_CRITIC_TOKENS_CEILING: u32 = 2_048;
+// Reasoning-model critics (GLM, Kimi) spend output budget on reasoning_content
+// BEFORE emitting the verdict; too small a cap truncates to empty content and the
+// gate fails open every round. 4096 leaves thinking headroom (live-observed: a
+// trade-off judgment burned >2k reasoning tokens).
+const MAX_CRITIC_TOKENS_CEILING: u32 = 4_096;
 /// Bounds on untrusted content quoted into prompts/notes.
 const MAX_ISSUES: usize = 8;
 const MAX_ISSUE_CHARS: usize = 400;
