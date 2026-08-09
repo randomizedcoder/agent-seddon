@@ -1414,39 +1414,116 @@ fn resolve_api_key(p: &ProviderCfg) -> anyhow::Result<String> {
     Ok(key)
 }
 
-/// Build an inline `[[pool.members]]` endpoint into an OpenAI-compatible provider —
-/// resolving the member key (inline > env > file, keyless allowed), honoring the
-/// per-member `insecure_tls` (warns) and `context_window` (unset ⇒ the global one).
-/// Extracted so the synth is unit-testable (model-router increment 01).
+/// The knobs for synthesizing an OpenAI-compatible upstream from config, borrowed so
+/// both `[[pool.members]]` and `[[route.upstreams]]` can share one builder.
+#[cfg(any(feature = "provider-pool", feature = "provider-router"))]
+struct UpstreamParams<'a> {
+    name: &'a str,
+    endpoint: &'a str,
+    model: &'a str,
+    api_key: &'a str,
+    api_key_env: &'a str,
+    api_key_file: &'a str,
+    insecure_tls: bool,
+    context_window: u32,
+}
+
+/// Build an inline endpoint into an OpenAI-compatible provider — resolving the key
+/// (inline > env > file, keyless allowed), honoring per-upstream `insecure_tls`
+/// (warns) and `context_window`. Shared by the pool synth and the task-router factory
+/// (model-router increments 01/02).
+#[cfg(any(feature = "provider-pool", feature = "provider-router"))]
+fn build_openai_upstream(
+    p: &UpstreamParams<'_>,
+) -> anyhow::Result<agent_providers::OpenAiCompatProvider> {
+    let name = p.name;
+    if p.model.is_empty() {
+        anyhow::bail!("upstream `{name}` sets an endpoint but no model");
+    }
+    if p.insecure_tls {
+        tracing::warn!(
+            "upstream `{name}` insecure_tls=true: TLS verification is DISABLED (for a \
+             self-signed dev endpoint you control). This exposes the API key and \
+             traffic to man-in-the-middle attacks — do not use over untrusted networks."
+        );
+    }
+    let api_key = resolve_key_opt(p.api_key, p.api_key_env, p.api_key_file)
+        .with_context(|| format!("upstream `{name}` api key"))?;
+    agent_providers::OpenAiCompatProvider::new(agent_providers::OpenAiCompatConfig {
+        base_url: p.endpoint.to_string(),
+        model: p.model.to_string(),
+        api_key,
+        insecure_tls: p.insecure_tls,
+        context_window: p.context_window,
+        max_retries: 2,
+        supports_vision: false,
+    })
+    .map_err(|e| anyhow::anyhow!("building upstream `{name}`: {e}"))
+}
+
+/// Build an inline `[[pool.members]]` endpoint (unit-testable; model-router 01).
 #[cfg(feature = "provider-pool")]
 fn build_inline_pool_member(
     c: &crate::config::PoolMemberCfg,
     global_context_window: u32,
 ) -> anyhow::Result<agent_providers::OpenAiCompatProvider> {
-    let name = &c.name;
-    if c.model.is_empty() {
-        anyhow::bail!("[[pool.members]] `{name}` sets an endpoint but no model");
-    }
-    if c.insecure_tls {
-        tracing::warn!(
-            "[[pool.members]] `{name}` insecure_tls=true: TLS verification is \
-             DISABLED (for a self-signed dev endpoint you control). This exposes \
-             the API key and traffic to man-in-the-middle attacks — do not use \
-             over untrusted networks."
-        );
-    }
-    let api_key = resolve_key_opt(&c.api_key, &c.api_key_env, &c.api_key_file)
-        .with_context(|| format!("pool member `{name}` api key"))?;
-    agent_providers::OpenAiCompatProvider::new(agent_providers::OpenAiCompatConfig {
-        base_url: c.endpoint.clone(),
-        model: c.model.clone(),
-        api_key,
+    build_openai_upstream(&UpstreamParams {
+        name: &c.name,
+        endpoint: &c.endpoint,
+        model: &c.model,
+        api_key: &c.api_key,
+        api_key_env: &c.api_key_env,
+        api_key_file: &c.api_key_file,
         insecure_tls: c.insecure_tls,
         context_window: c.context_window.unwrap_or(global_context_window),
-        max_retries: 2,
-        supports_vision: false,
     })
-    .map_err(|e| anyhow::anyhow!("building pool member `{name}`: {e}"))
+}
+
+/// Build one `[[route.upstreams]]` inline endpoint into an OpenAI-compatible provider
+/// (model-router increment 02). `pub(crate)` so the registry's task-router factory
+/// builds upstreams the same secret-safe way the pool builds members.
+#[cfg(feature = "provider-router")]
+pub(crate) fn build_route_upstream(
+    u: &crate::config::RouteUpstreamCfg,
+    global_context_window: u32,
+) -> anyhow::Result<agent_providers::OpenAiCompatProvider> {
+    build_openai_upstream(&UpstreamParams {
+        name: &u.name,
+        endpoint: &u.endpoint,
+        model: &u.model,
+        api_key: &u.api_key,
+        api_key_env: &u.api_key_env,
+        api_key_file: &u.api_key_file,
+        insecure_tls: u.insecure_tls,
+        context_window: u.context_window.unwrap_or(global_context_window),
+    })
+}
+
+/// Map the `[route]` config into the pure `route::Policy` the `TaskRouter` runs
+/// (model-router increment 02). Unknown tier/role strings degrade gracefully:
+/// an unparseable prefer-tier ⇒ no tier bias; an unknown match-role ⇒ matches any.
+#[cfg(feature = "provider-router")]
+pub(crate) fn build_route_policy(cfg: &crate::config::RouteCfg) -> agent_providers::route::Policy {
+    use agent_providers::route::{Match, Policy, Prefer, Role, Rule};
+    let prefer = |p: &crate::config::RoutePreferCfg| Prefer {
+        tags: p.tags.clone(),
+        tier: agent_core::PoolTier::parse(&p.tier),
+        upstreams: p.upstreams.clone(),
+    };
+    Policy {
+        rules: cfg
+            .rules
+            .iter()
+            .map(|r| Rule {
+                match_: Match {
+                    role: Role::parse(&r.match_.role),
+                    min_context: r.match_.min_context,
+                },
+                prefer: prefer(&r.prefer),
+            })
+            .collect(),
+        default_prefer: prefer(&cfg.default_prefer),
+    }
 }
 
 #[cfg(any(
@@ -1693,6 +1770,68 @@ mod pool_member_synth_tests {
             .expect("missing key file must fail")
             .to_string();
         assert!(msg.contains("api key"));
+    }
+}
+
+/// The `[route]` config → `route::Policy` mapping (model-router increment 02).
+#[cfg(all(test, feature = "provider-router"))]
+mod route_policy_tests {
+    use super::*;
+    use crate::config::{RouteCfg, RouteMatchCfg, RoutePreferCfg, RouteRuleCfg};
+
+    #[test]
+    fn positive_maps_roles_tiers_tags_and_default() {
+        let cfg = RouteCfg {
+            rules: vec![RouteRuleCfg {
+                match_: RouteMatchCfg {
+                    role: "review".into(),
+                    min_context: 32_000,
+                },
+                prefer: RoutePreferCfg {
+                    tags: vec!["reasoning".into()],
+                    tier: "heavy".into(),
+                    upstreams: vec![],
+                },
+            }],
+            default_prefer: RoutePreferCfg {
+                upstreams: vec!["kimi".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let policy = build_route_policy(&cfg);
+        assert_eq!(policy.rules.len(), 1);
+        assert_eq!(
+            policy.rules[0].match_.role,
+            Some(agent_providers::route::Role::Review)
+        );
+        assert_eq!(policy.rules[0].match_.min_context, 32_000);
+        assert_eq!(
+            policy.rules[0].prefer.tier,
+            Some(agent_core::PoolTier::Heavy)
+        );
+        assert_eq!(policy.default_prefer.upstreams, vec!["kimi"]);
+    }
+
+    #[test]
+    fn corner_unknown_role_and_tier_degrade_to_none() {
+        let cfg = RouteCfg {
+            rules: vec![RouteRuleCfg {
+                match_: RouteMatchCfg {
+                    role: "bogus".into(),
+                    min_context: 0,
+                },
+                prefer: RoutePreferCfg {
+                    tier: "huge".into(),
+                    ..Default::default()
+                },
+            }],
+            ..Default::default()
+        };
+        let policy = build_route_policy(&cfg);
+        // Unknown role ⇒ matches any; unknown tier ⇒ no tier bias (graceful).
+        assert_eq!(policy.rules[0].match_.role, None);
+        assert_eq!(policy.rules[0].prefer.tier, None);
     }
 }
 

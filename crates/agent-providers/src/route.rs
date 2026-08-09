@@ -31,6 +31,22 @@ pub enum Role {
     Review,
 }
 
+impl Role {
+    /// Parse a config role name; unknown / empty ⇒ `None` (a rule with no role
+    /// constraint matches any role rather than silently defaulting to `Main`).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "main" => Some(Role::Main),
+            "judge" => Some(Role::Judge),
+            "classify" => Some(Role::Classify),
+            "summarize" => Some(Role::Summarize),
+            "verify" => Some(Role::Verify),
+            "review" => Some(Role::Review),
+            _ => None,
+        }
+    }
+}
+
 /// Per-request routing signals: the request's hard requirements, its role, and an
 /// optional explicit override. (The classified `TaskMode` joins this once it is
 /// threaded onto the request in a later slice.)
@@ -369,5 +385,19 @@ mod tests {
         assert!(Policy::default()
             .resolve(&Hint::default(), &dead)
             .is_empty());
+    }
+
+    // --- Role::parse --------------------------------------------------------
+    #[test]
+    fn positive_role_parse_roundtrips_known_names() {
+        assert_eq!(Role::parse("review"), Some(Role::Review));
+        assert_eq!(Role::parse("  CLASSIFY "), Some(Role::Classify));
+        assert_eq!(Role::parse("main"), Some(Role::Main));
+    }
+
+    #[test]
+    fn negative_role_parse_unknown_or_empty_is_none() {
+        assert_eq!(Role::parse(""), None);
+        assert_eq!(Role::parse("bogus"), None);
     }
 }
