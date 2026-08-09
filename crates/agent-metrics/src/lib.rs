@@ -81,6 +81,9 @@ pub struct Metrics {
     gate_alternatives: IntCounter,
     distill_jobs: IntCounterVec,
     distill_lag_seconds: HistogramVec,
+    graph_branches: IntCounterVec,
+    graph_join_wait_seconds: HistogramVec,
+    graph_merges: IntCounterVec,
     // LLM pool (docs/design/code-review/llm-pool.md + gpu-pool/).
     pool_members_alive: IntGaugeVec,
     pool_probe_seconds: HistogramVec,
@@ -409,6 +412,32 @@ impl Metrics {
                 "Delivery → digest-row-durable lag, per kind",
             ),
             &["kind"],
+        )
+        .unwrap();
+        let graph_branches = IntCounterVec::new(
+            Opts::new(
+                "agent_graph_branches_total",
+                "Cognition-graph fork branches by split node and fate (won/merged/\
+                 lost/cancelled/timeout/error) — the split's cost multiplier, visible",
+            ),
+            &["split", "fate"],
+        )
+        .unwrap();
+        let graph_join_wait_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "agent_graph_join_wait_seconds",
+                "Fork join wait (split → policy satisfied), per activation policy",
+            ),
+            &["policy"],
+        )
+        .unwrap();
+        let graph_merges = IntCounterVec::new(
+            Opts::new(
+                "agent_graph_merge_total",
+                "Fork merges by strategy and outcome (picked/synthesized/concat/\
+                 single_survivor/tie_order/judge_error/degraded_compare/fallback_single)",
+            ),
+            &["strategy", "outcome"],
         )
         .unwrap();
         let pool_members_alive = IntGaugeVec::new(
@@ -1117,6 +1146,9 @@ impl Metrics {
             Box::new(gate_alternatives.clone()),
             Box::new(distill_jobs.clone()),
             Box::new(distill_lag_seconds.clone()),
+            Box::new(graph_branches.clone()),
+            Box::new(graph_join_wait_seconds.clone()),
+            Box::new(graph_merges.clone()),
             Box::new(pool_members_alive.clone()),
             Box::new(pool_probe_seconds.clone()),
             Box::new(pool_dispatch_seconds.clone()),
@@ -1247,6 +1279,9 @@ impl Metrics {
             gate_alternatives,
             distill_jobs,
             distill_lag_seconds,
+            graph_branches,
+            graph_join_wait_seconds,
+            graph_merges,
             pool_members_alive,
             pool_probe_seconds,
             pool_dispatch_seconds,
@@ -1486,6 +1521,29 @@ impl Metrics {
         self.distill_lag_seconds
             .with_label_values(&[kind])
             .observe(lag);
+    }
+    /// Cognition-graph fork (increment 05): one branch fate. `split` is a
+    /// validated node id (bounded, safe segment) — cardinality is document-sized.
+    pub fn on_graph_branch(&self, split: &str, fate: &str) {
+        self.graph_branches.with_label_values(&[split, fate]).inc();
+    }
+    /// Cognition-graph fork: the join wait, per activation policy. Hostile
+    /// numbers are zeroed, never observed (a NaN panics `observe`).
+    pub fn on_graph_join_wait(&self, policy: &str, seconds: f64) {
+        let s = if seconds.is_finite() && seconds >= 0.0 {
+            seconds
+        } else {
+            0.0
+        };
+        self.graph_join_wait_seconds
+            .with_label_values(&[policy])
+            .observe(s);
+    }
+    /// Cognition-graph fork: one merge, by strategy and outcome.
+    pub fn on_graph_merge(&self, strategy: &str, outcome: &str) {
+        self.graph_merges
+            .with_label_values(&[strategy, outcome])
+            .inc();
     }
     /// LLM pool: set the live-member gauge for a tier.
     pub fn set_pool_members_alive(&self, tier: &str, n: i64) {
@@ -2251,6 +2309,38 @@ mod tests {
             text.contains("agent_gate_phase_duration_seconds_count"),
             "{text}"
         );
+        assert!(!text.contains("NaN"), "NaN leaked into export: {text}");
+    }
+
+    #[test]
+    fn positive_graph_fork_families_record() {
+        let m = Metrics::new();
+        m.on_graph_branch("split_impl", "won");
+        m.on_graph_branch("split_impl", "lost");
+        m.on_graph_join_wait("all", 1.25);
+        m.on_graph_merge("compare", "picked");
+        let text = m.encode_text();
+        assert!(
+            text.contains(r#"agent_graph_branches_total{fate="won",split="split_impl"} 1"#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#"agent_graph_merge_total{outcome="picked",strategy="compare"} 1"#),
+            "{text}"
+        );
+        assert!(
+            text.contains("agent_graph_join_wait_seconds_count"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn adversarial_graph_join_wait_hostile_seconds_zeroed() {
+        let m = Metrics::new();
+        m.on_graph_join_wait("any", f64::NAN);
+        m.on_graph_join_wait("any", -3.0);
+        m.on_graph_join_wait("any", f64::INFINITY);
+        let text = m.encode_text();
         assert!(!text.contains("NaN"), "NaN leaked into export: {text}");
     }
 

@@ -10,7 +10,7 @@ validates clean, and parses to its deterministic `testdata` twin):
 |---|---|---|
 | [`simple.textproto`](simple.textproto) | consensus gate only (`generate → critic_gate`) | a provider named `glm` |
 | [`intermediate.textproto`](intermediate.textproto) | gate + background summary/facts distillation + instant compaction — the full increments 01–03 behavior as a document | `glm` + `[digest] store` |
-| `advanced.textproto` | fork/join safety×performance branches + synthesize merge — lands with increment 05's `split`/`join`/`merge` node set | — |
+| [`advanced.textproto`](advanced.textproto) | the full flow + a fork: safety-lens branch (with its own gate loop) × performance-lens branch, `all` join, synthesize merge (losers → the alternatives ledger), final gate, background distillation, instant compaction | `glm` + `[digest] store` |
 
 Run one with:
 

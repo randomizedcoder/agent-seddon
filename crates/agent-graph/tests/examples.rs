@@ -18,6 +18,7 @@ fn example(name: &str) -> PathBuf {
 #[rstest]
 #[case::simple("simple.textproto", testdata::simple())]
 #[case::intermediate("intermediate.textproto", testdata::intermediate())]
+#[case::advanced("advanced.textproto", testdata::advanced())]
 #[tokio::test]
 async fn positive_example_loads_validates_and_matches_its_corpus_twin(
     #[case] file: &str,

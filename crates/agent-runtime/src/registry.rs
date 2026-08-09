@@ -839,17 +839,7 @@ pub fn register_builtins(r: &mut Registry) {
             if name == "consensus" {
                 anyhow::bail!("[consensus] must not reference `consensus` itself");
             }
-            let built: Arc<dyn LlmProvider> =
-                match ctx.cfg.route.upstreams.iter().find(|u| u.name == name) {
-                    Some(u) if !u.endpoint.is_empty() => Arc::new(
-                        crate::builder::build_route_upstream(u, ctx.cfg.agent.context_window)?,
-                    ),
-                    _ => ctx
-                        .registry()?
-                        .build_provider(name, ctx)
-                        .with_context(|| format!("building consensus member `{name}`"))?,
-                };
-            Ok(crate::metered::provider(built, ctx.metrics.clone(), name))
+            resolve_provider_ref(name, ctx)
         };
         let generator = resolve(&cfg.generator)?;
         let critic = resolve(&cfg.critic)?;
@@ -1070,6 +1060,29 @@ fn search_paths(
 /// Resolve a `[grpc]` client endpoint: the configured string, or a loopback TCP
 /// default on the seam's generated port. Set the config to `unix:/path` for UDS.
 #[cfg(feature = "grpc")]
+/// Resolve a provider *reference* the way composing factories do (the
+/// consensus gate, the fork's branches/judge): a `[[route.upstreams]]` entry by
+/// name (inline endpoint synthesized secret-safely), else a registry provider
+/// type — wrapped in the metrics decorator under its own name.
+#[cfg(any(feature = "provider-consensus", feature = "graph"))]
+pub(crate) fn resolve_provider_ref(
+    name: &str,
+    ctx: &FactoryCtx<'_>,
+) -> anyhow::Result<Arc<dyn LlmProvider>> {
+    let built: Arc<dyn LlmProvider> = match ctx.cfg.route.upstreams.iter().find(|u| u.name == name)
+    {
+        Some(u) if !u.endpoint.is_empty() => Arc::new(crate::builder::build_route_upstream(
+            u,
+            ctx.cfg.agent.context_window,
+        )?),
+        _ => ctx
+            .registry()?
+            .build_provider(name, ctx)
+            .with_context(|| format!("building provider reference `{name}`"))?,
+    };
+    Ok(crate::metered::provider(built, ctx.metrics.clone(), name))
+}
+
 pub(crate) fn grpc_client_endpoint(
     configured: &str,
     default: agent_grpc::constants::SeamEndpoint,

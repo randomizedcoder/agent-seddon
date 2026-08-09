@@ -36,8 +36,46 @@ pub(crate) struct GraphPlan {
     pub compact: Option<CompactPlan>,
     /// An `objective` node on the compaction chain (its token budget).
     pub objective_tokens: Option<u32>,
+    /// A `split → branches → join → merge` fork on the response anchor
+    /// (increment 05). When present, the builder composes the
+    /// `BranchingProvider` chain directly — the gate/generator config overlay
+    /// is skipped (the fork owns the whole response path).
+    pub fork: Option<ForkPlan>,
     /// Fail-soft notes: fragments the executor could not express.
     pub warnings: Vec<String>,
+}
+
+/// One branch of a fork: the chain `generate [→ critic_gate]` between the
+/// split and the join.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct BranchPlan {
+    /// The branch head's node id (the metric/span label).
+    pub label: String,
+    /// The `generate` node's lens (quoted data at the prompt tail).
+    pub lens: String,
+    /// The `generate` node's provider name (`None` = the base provider).
+    pub provider: Option<String>,
+    /// A branch-local gate loop (branches need not be symmetric).
+    pub gate: Option<GatePlan>,
+}
+
+/// The compiled fork: what the builder needs to construct a
+/// `BranchingProvider` (params validated upstream; names resolve at build).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct ForkPlan {
+    pub split: String,
+    pub branches: Vec<BranchPlan>,
+    /// `""`/`"all"` | `"any"` | `"quorum"`.
+    pub policy: String,
+    pub quorum_k: Option<u8>,
+    pub timeout_ms: Option<u64>,
+    /// `""`/`"partial"` | `"fail"`.
+    pub on_timeout: String,
+    /// `""`/`"compare"` | `"synthesize"` | `"concat"`.
+    pub strategy: String,
+    /// The merge's judge/aggregator (param or capability edge).
+    pub judge: Option<String>,
+    pub record_losers: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -107,27 +145,20 @@ pub(crate) fn compile(doc: &GraphDoc) -> GraphPlan {
                 plan.generator = param_str(doc, &id, "provider").filter(|s| !s.is_empty());
             }
             "critic_gate" => {
-                // Critic: the `critic` param, else a capability edge into the
-                // node (`from` names the provider). Params win.
-                let critic = param_str(doc, &id, "critic").or_else(|| {
-                    doc.edges
-                        .iter()
-                        .find(|e| e.kind == GraphEdgeKind::Capability && e.to == id)
-                        .map(|e| e.from.clone())
-                });
-                match critic {
-                    Some(critic) => {
-                        plan.gate = Some(GatePlan {
-                            critic,
-                            max_rounds: param_u32(doc, &id, "max_rounds").map(|n| n.min(255) as u8),
-                            scope: param_str(doc, &id, "scope"),
-                            on_exhaustion: param_str(doc, &id, "on_exhaustion"),
-                        });
+                if let Some(g) = gate_plan_of(doc, &id, w) {
+                    plan.gate = Some(g);
+                }
+            }
+            "split" => {
+                // The fork: split → branches → join → merge; the walk resumes
+                // after the merge (e.g. a final consensus gate).
+                match compile_fork(doc, &id, w) {
+                    Some((fork, resume)) => {
+                        plan.fork = Some(fork);
+                        cursor = resume;
+                        continue;
                     }
-                    None => w.push(format!(
-                        "gate node `{id}` names no critic (no `critic` param, no capability \
-                         edge) — gate skipped"
-                    )),
+                    None => break, // warned inside; the rest of the chain is unreachable
                 }
             }
             other => w.push(format!(
@@ -193,6 +224,139 @@ pub(crate) fn compile(doc: &GraphDoc) -> GraphPlan {
     plan
 }
 
+/// A `critic_gate` node's plan: the critic from the `critic` param, else from
+/// a capability edge into the node (params win). `None` + warning when neither
+/// names a critic — the gate is skipped (fail soft).
+fn gate_plan_of(doc: &GraphDoc, id: &str, w: &mut Vec<String>) -> Option<GatePlan> {
+    let critic = param_str(doc, id, "critic").or_else(|| {
+        doc.edges
+            .iter()
+            .find(|e| e.kind == GraphEdgeKind::Capability && e.to == id)
+            .map(|e| e.from.clone())
+    });
+    match critic {
+        Some(critic) => Some(GatePlan {
+            critic,
+            max_rounds: param_u32(doc, id, "max_rounds").map(|n| n.min(255) as u8),
+            scope: param_str(doc, id, "scope"),
+            on_exhaustion: param_str(doc, id, "on_exhaustion"),
+        }),
+        None => {
+            w.push(format!(
+                "gate node `{id}` names no critic (no `critic` param, no capability edge) — \
+                 gate skipped"
+            ));
+            None
+        }
+    }
+}
+
+/// Compile a validated fork starting at `split_id`: walk each branch chain to
+/// the shared join, read the join/merge params, and hand back where the outer
+/// chain resumes (the merge's successor). `None` = an inexpressible shape
+/// (warned) — the response anchor falls back to built-in behavior.
+fn compile_fork(
+    doc: &GraphDoc,
+    split_id: &str,
+    w: &mut Vec<String>,
+) -> Option<(ForkPlan, Option<String>)> {
+    let heads: Vec<String> = doc
+        .edges
+        .iter()
+        .filter(|e| e.kind == GraphEdgeKind::Main && e.from == split_id)
+        .map(|e| e.to.clone())
+        .collect();
+
+    let mut fork = ForkPlan {
+        split: split_id.to_string(),
+        ..ForkPlan::default()
+    };
+    let mut join_id: Option<String> = None;
+
+    for head in heads {
+        let mut branch = BranchPlan {
+            label: head.clone(),
+            ..BranchPlan::default()
+        };
+        let mut cur = head;
+        let mut hops = 0usize;
+        loop {
+            hops += 1;
+            if hops > doc.nodes.len() {
+                w.push(format!("branch `{}` never reaches a join", branch.label));
+                return None;
+            }
+            let Some(node) = doc.nodes.get(&cur) else {
+                w.push(format!("branch `{}` hits a dangling node", branch.label));
+                return None;
+            };
+            match node.node_type.as_str() {
+                "join" => {
+                    join_id = Some(cur);
+                    break;
+                }
+                "generate" => {
+                    branch.lens = param_str(doc, &cur, "lens").unwrap_or_default();
+                    branch.provider = param_str(doc, &cur, "provider").filter(|s| !s.is_empty());
+                }
+                "critic_gate" => branch.gate = gate_plan_of(doc, &cur, w),
+                other => w.push(format!(
+                    "node `{cur}` (type `{other}`) is not supported inside a branch — skipped"
+                )),
+            }
+            let mut outs = doc
+                .edges
+                .iter()
+                .filter(|e| e.kind == GraphEdgeKind::Main && e.from == cur)
+                .map(|e| e.to.clone());
+            match (outs.next(), outs.next()) {
+                (Some(next), None) => cur = next,
+                _ => {
+                    w.push(format!(
+                        "branch `{}` is not a linear chain to the join — fork skipped",
+                        branch.label
+                    ));
+                    return None;
+                }
+            }
+        }
+        fork.branches.push(branch);
+    }
+
+    let join_id = join_id?;
+    fork.policy = param_str(doc, &join_id, "policy").unwrap_or_default();
+    fork.quorum_k = param_u32(doc, &join_id, "quorum_k").map(|k| k.min(255) as u8);
+    fork.timeout_ms = doc.nodes[&join_id]
+        .params
+        .get("timeout_ms")
+        .and_then(serde_json::Value::as_u64);
+    fork.on_timeout = param_str(doc, &join_id, "on_timeout").unwrap_or_default();
+
+    let merge_id = doc
+        .edges
+        .iter()
+        .find(|e| e.kind == GraphEdgeKind::Main && e.from == join_id)
+        .map(|e| e.to.clone())?;
+    fork.strategy = param_str(doc, &merge_id, "strategy").unwrap_or_default();
+    fork.judge = param_str(doc, &merge_id, "judge").or_else(|| {
+        doc.edges
+            .iter()
+            .find(|e| e.kind == GraphEdgeKind::Capability && e.to == merge_id)
+            .map(|e| e.from.clone())
+    });
+    fork.record_losers = doc.nodes[&merge_id]
+        .params
+        .get("record_losers")
+        .and_then(serde_json::Value::as_bool);
+
+    let resume = doc
+        .edges
+        .iter()
+        .find(|e| e.kind == GraphEdgeKind::Main && e.from == merge_id)
+        .map(|e| e.to.clone());
+    Some((fork, resume))
+}
+
 fn param_u32_as_f32(doc: &GraphDoc, node: &str, key: &str) -> Option<f32> {
     let f = doc.nodes[node].params.get(key)?.as_f64()?;
     // Schema validation bounds this to 0..=1; clamp anyway (hostile NaN → drop).
@@ -208,6 +372,13 @@ fn param_u32_as_f32(doc: &GraphDoc, node: &str, key: &str) -> Option<f32> {
 /// Returns fail-soft warnings (the caller logs them).
 pub(crate) fn apply_to_config(plan: &GraphPlan, cfg: &mut Config) -> Vec<String> {
     let mut warnings = Vec::new();
+
+    // A fork owns the whole response path — the builder composes the
+    // BranchingProvider (+ post-merge gate) directly; no provider overlay.
+    if plan.fork.is_some() {
+        apply_non_response(plan, cfg, &mut warnings);
+        return warnings;
+    }
 
     match &plan.gate {
         Some(gate) => {
@@ -243,6 +414,12 @@ pub(crate) fn apply_to_config(plan: &GraphPlan, cfg: &mut Config) -> Vec<String>
         }
     }
 
+    apply_non_response(plan, cfg, &mut warnings);
+    warnings
+}
+
+/// The delivery/compaction overlays — shared by the plain and fork paths.
+fn apply_non_response(plan: &GraphPlan, cfg: &mut Config, warnings: &mut Vec<String>) {
     if let Some(tokens) = plan.summary.flatten() {
         cfg.digest.summary_max_tokens = tokens;
     }
@@ -276,8 +453,6 @@ pub(crate) fn apply_to_config(plan: &GraphPlan, cfg: &mut Config) -> Vec<String>
             );
         }
     }
-
-    warnings
 }
 
 /// Which distill kinds the delivery anchor runs: with a non-empty graph the
@@ -397,6 +572,48 @@ mod tests {
         doc.nodes.get_mut("compact").unwrap().params = serde_json::json!({ "min_coverage": v });
         let plan = compile(&doc);
         assert_eq!(plan.compact.expect("compact").min_coverage, None);
+    }
+
+    #[test]
+    fn positive_advanced_compiles_the_full_fork() {
+        let plan = compile(&testdata::advanced());
+        assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
+        let fork = plan.fork.as_ref().expect("fork");
+        assert_eq!(fork.split, "split_impl");
+        assert_eq!(fork.branches.len(), 2);
+        let safe = &fork.branches[0];
+        assert_eq!(safe.label, "gen_safe");
+        assert_eq!(safe.lens, "correctness and strict safety");
+        assert_eq!(safe.gate.as_ref().expect("branch gate").critic, "glm");
+        let perf = &fork.branches[1];
+        assert_eq!(perf.lens, "performance optimization");
+        assert!(perf.gate.is_none(), "asymmetric by design");
+        assert_eq!(fork.policy, "all");
+        assert_eq!(fork.timeout_ms, Some(120_000));
+        assert_eq!(fork.on_timeout, "partial");
+        assert_eq!(fork.strategy, "synthesize");
+        assert_eq!(fork.judge.as_deref(), Some("glm"));
+        assert_eq!(fork.record_losers, Some(true));
+        // The walk resumed after the merge: the final gate was still compiled.
+        assert_eq!(plan.gate.as_ref().expect("post-merge gate").critic, "glm");
+        // And the delivery/compaction anchors compiled as usual.
+        assert_eq!(distill_kinds(&plan), (true, true));
+        assert!(plan.compact.is_some());
+    }
+
+    #[test]
+    fn positive_apply_with_fork_skips_the_provider_overlay() {
+        let mut cfg = Config::minimal_for_test();
+        cfg.digest.store = "sqlite".into();
+        let before_provider = cfg.agent.provider.clone();
+        let plan = compile(&testdata::advanced());
+        let warnings = apply_to_config(&plan, &mut cfg);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        // The builder composes the fork; the config keeps the base provider…
+        assert_eq!(cfg.agent.provider, before_provider);
+        // …while the non-response anchors still overlay.
+        assert_eq!(cfg.agent.context, "instant-window");
+        assert_eq!(cfg.digest.summary_max_tokens, 512);
     }
 
     #[test]

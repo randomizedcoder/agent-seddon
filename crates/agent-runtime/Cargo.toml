@@ -75,9 +75,15 @@ digest = [
     "agent-digest/digest-sqlite",
     "agent-digest/digest-clickhouse",
 ]
-# Cognition-graph document (cognition-graph 04): the declarative node graph +
-# node-type schema registry (`[graph] store`, `--serve-graph`).
-graph = ["dep:agent-graph"]
+# Cognition-graph document (cognition-graph 04/05): the declarative node graph
+# + node-type schema registry (`[graph] store`, `--serve-graph`), plus the fork
+# executor — the builder composes branch chains from `provider-branching` and
+# per-branch/post-merge gates from `provider-consensus`.
+graph = [
+    "dep:agent-graph",
+    "provider-consensus",
+    "agent-providers/provider-branching",
+]
 # General task-mode detection (the TaskClassifier seam), always-on. See
 # docs/design/adaptive-cognition/01-mode.md.
 mode = ["dep:agent-mode"]
