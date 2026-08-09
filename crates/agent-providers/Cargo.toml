@@ -47,6 +47,12 @@ name = "pool_select"
 harness = false
 required-features = ["provider-pool"]
 
+# Guards the task-router decision hot path (`route::Policy::resolve`). The `route`
+# module is always compiled, so this bench needs no feature.
+[[bench]]
+name = "route_resolve"
+harness = false
+
 [[test]]
 name = "leak"
 harness = true

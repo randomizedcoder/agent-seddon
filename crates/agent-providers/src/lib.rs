@@ -26,6 +26,11 @@ pub mod router;
 #[cfg(feature = "provider-router")]
 pub use router::{Candidate, RouteEvent, RoutePolicy, Router};
 
+/// Declarative task-aware routing — the pure decision engine (model-router
+/// increment 02). Depends only on `agent_core::PoolTier`, so it is always compiled;
+/// wiring it to a `TaskRouter` seam comes in a later slice.
+pub mod route;
+
 /// A health-checked, tiered pool of cheap providers with an active liveness probe
 /// and parallel fan-out (`docs/design/code-review/llm-pool.md`). Reuses the
 /// router's circuit breaker, so `provider-pool` implies `provider-router`.
