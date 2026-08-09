@@ -826,17 +826,11 @@ pub fn register_builtins(r: &mut Registry) {
             gate.rubric = Some(text);
         }
 
+        let metrics = ctx.metrics.clone();
         let provider = agent_providers::ConsensusProvider::new(generator, critic)
             .with_cfg(gate)
-            .with_observer(Arc::new(|o: &agent_providers::GateOutcome| {
-                tracing::info!(
-                    outcome = o.kind.as_str(),
-                    rounds = o.rounds,
-                    outstanding = o.outstanding_issues,
-                    alternatives = o.alternatives.len(),
-                    confidence = o.confidence,
-                    "consensus gate"
-                );
+            .with_observer(Arc::new(move |o: &agent_providers::GateOutcome| {
+                crate::metered::record_gate_outcome(&metrics, o);
             }));
         Ok(Arc::new(provider) as Arc<dyn LlmProvider>)
     });

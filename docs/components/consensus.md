@@ -55,6 +55,26 @@ rubric_file = ""        # operator rubric; empty = compiled default
   parse/sanitize layer itself is benched (`gate_verdict`, Ir ceiling in
   `nix/checks/bench.nix`).
 
-Observability: gate outcomes log under the `provider.complete` span
-(`consensus gate outcome=… rounds=… alternatives=… confidence=…`); dedicated
-`gate_*` metric families land with the graph-node re-expression (increment 04).
+## Observability
+
+Every gated completion emits a structured outcome line under
+`provider.complete` (`consensus gate outcome=… rounds=… generate_ms=…
+critique_ms=… issues_raised=… issues_resolved=…`), a per-round **`gate.round`
+span** (fields: `round`, `verdict`, `issues`, `alternatives`, `confidence`)
+that flows to OTel/ClickHouse via the existing tracing layers, and five
+Prometheus families:
+
+| Family | Type | Labels |
+|---|---|---|
+| `agent_gate_verdicts_total` | counter | `outcome = pass \| fixed \| alternatives \| exhausted \| critic_error` |
+| `agent_gate_rounds` | histogram (buckets 1–5) | — |
+| `agent_gate_phase_duration_seconds` | histogram | `phase = generate \| critique` |
+| `agent_gate_issues_total` | counter | `result = raised \| resolved \| outstanding \| dropped_no_evidence` |
+| `agent_gate_alternatives_total` | counter | — |
+
+Panels worth building: **resolution rate** = `resolved / raised` (the gate's
+headline quality signal — is the critique actually improving answers?);
+**gate overhead** = `phase_duration{critique}` vs `{generate}` (what the gate
+costs on top of generation); **critic health** = `critic_error` rate +
+`dropped_no_evidence` rate (a rising either means the critic model is
+misbehaving or under-budgeted).

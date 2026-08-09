@@ -74,6 +74,11 @@ pub struct Metrics {
     forge_seconds: HistogramVec,
     hook_dispatches: IntCounterVec,
     route_decisions: IntCounterVec,
+    gate_verdicts: IntCounterVec,
+    gate_rounds: Histogram,
+    gate_phase_seconds: HistogramVec,
+    gate_issues: IntCounterVec,
+    gate_alternatives: IntCounter,
     // LLM pool (docs/design/code-review/llm-pool.md + gpu-pool/).
     pool_members_alive: IntGaugeVec,
     pool_probe_seconds: HistogramVec,
@@ -348,6 +353,43 @@ impl Metrics {
                 "Router decisions, by target provider and outcome",
             ),
             &["target", "decision"],
+        )
+        .unwrap();
+        let gate_verdicts = IntCounterVec::new(
+            Opts::new(
+                "agent_gate_verdicts_total",
+                "Consensus-gate outcomes (pass|fixed|alternatives|exhausted|critic_error)",
+            ),
+            &["outcome"],
+        )
+        .unwrap();
+        let gate_rounds = Histogram::with_opts(
+            HistogramOpts::new(
+                "agent_gate_rounds",
+                "Critic rounds per gated completion (ceiling 5)",
+            )
+            .buckets(vec![1.0, 2.0, 3.0, 4.0, 5.0]),
+        )
+        .unwrap();
+        let gate_phase_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "agent_gate_phase_duration_seconds",
+                "Wall time per gate phase (generate|critique), per gated completion",
+            ),
+            &["phase"],
+        )
+        .unwrap();
+        let gate_issues = IntCounterVec::new(
+            Opts::new(
+                "agent_gate_issues_total",
+                "Critic issues by fate (raised|resolved|outstanding|dropped_no_evidence)",
+            ),
+            &["result"],
+        )
+        .unwrap();
+        let gate_alternatives = IntCounter::new(
+            "agent_gate_alternatives_total",
+            "Alternatives recorded by the consensus gate (the roads not taken)",
         )
         .unwrap();
         let pool_members_alive = IntGaugeVec::new(
@@ -1049,6 +1091,11 @@ impl Metrics {
             Box::new(forge_seconds.clone()),
             Box::new(hook_dispatches.clone()),
             Box::new(route_decisions.clone()),
+            Box::new(gate_verdicts.clone()),
+            Box::new(gate_rounds.clone()),
+            Box::new(gate_phase_seconds.clone()),
+            Box::new(gate_issues.clone()),
+            Box::new(gate_alternatives.clone()),
             Box::new(pool_members_alive.clone()),
             Box::new(pool_probe_seconds.clone()),
             Box::new(pool_dispatch_seconds.clone()),
@@ -1172,6 +1219,11 @@ impl Metrics {
             forge_seconds,
             hook_dispatches,
             route_decisions,
+            gate_verdicts,
+            gate_rounds,
+            gate_phase_seconds,
+            gate_issues,
+            gate_alternatives,
             pool_members_alive,
             pool_probe_seconds,
             pool_dispatch_seconds,
@@ -1355,6 +1407,47 @@ impl Metrics {
         self.route_decisions
             .with_label_values(&[target, decision])
             .inc();
+    }
+    /// One completed consensus-gate run. `outcome` is a closed set
+    /// (`pass|fixed|alternatives|exhausted|critic_error`); phase times are the wall
+    /// totals across rounds. Issue counters feed the resolution-rate panel
+    /// (`resolved / raised`); `dropped_no_evidence` is a critic-quality signal.
+    #[allow(clippy::too_many_arguments)]
+    pub fn on_gate(
+        &self,
+        outcome: &str,
+        rounds: u8,
+        generate_seconds: f64,
+        critique_seconds: f64,
+        issues_raised: u64,
+        issues_resolved: u64,
+        issues_outstanding: u64,
+        dropped_no_evidence: u64,
+        alternatives: u64,
+    ) {
+        self.gate_verdicts.with_label_values(&[outcome]).inc();
+        self.gate_rounds.observe(f64::from(rounds));
+        // Hostile/degenerate durations are clamped non-negative-finite before observe.
+        let clamp = |s: f64| if s.is_finite() && s >= 0.0 { s } else { 0.0 };
+        self.gate_phase_seconds
+            .with_label_values(&["generate"])
+            .observe(clamp(generate_seconds));
+        self.gate_phase_seconds
+            .with_label_values(&["critique"])
+            .observe(clamp(critique_seconds));
+        for (result, n) in [
+            ("raised", issues_raised),
+            ("resolved", issues_resolved),
+            ("outstanding", issues_outstanding),
+            ("dropped_no_evidence", dropped_no_evidence),
+        ] {
+            if n > 0 {
+                self.gate_issues.with_label_values(&[result]).inc_by(n);
+            }
+        }
+        if alternatives > 0 {
+            self.gate_alternatives.inc_by(alternatives);
+        }
     }
     /// LLM pool: set the live-member gauge for a tier.
     pub fn set_pool_members_alive(&self, tier: &str, n: i64) {
@@ -2078,6 +2171,49 @@ mod tests {
                 && text.contains("mode=\"enforce\""),
             "labels missing: {text}"
         );
+    }
+
+    #[test]
+    fn on_gate_records_outcome_rounds_phases_issues_alternatives() {
+        let m = Metrics::new();
+        m.on_gate("fixed", 2, 1.5, 0.8, 3, 2, 0, 1, 0);
+        m.on_gate("alternatives", 1, 0.9, 0.4, 0, 0, 0, 0, 2);
+        let text = m.encode_text();
+        for name in [
+            "agent_gate_verdicts_total",
+            "agent_gate_rounds",
+            "agent_gate_phase_duration_seconds",
+            "agent_gate_issues_total",
+            "agent_gate_alternatives_total",
+        ] {
+            assert!(text.contains(name), "missing metric `{name}` in:\n{text}");
+        }
+        assert!(
+            text.contains("outcome=\"fixed\"")
+                && text.contains("outcome=\"alternatives\"")
+                && text.contains("phase=\"critique\"")
+                && text.contains("result=\"resolved\""),
+            "labels missing: {text}"
+        );
+        assert!(
+            text.contains("agent_gate_alternatives_total 2"),
+            "alternatives count: {text}"
+        );
+    }
+
+    #[test]
+    fn adversarial_on_gate_hostile_durations_do_not_poison() {
+        let m = Metrics::new();
+        // NaN / negative / infinite phase times are clamped to 0 before observe —
+        // a histogram fed NaN would poison every quantile after it.
+        m.on_gate("pass", 1, f64::NAN, -5.0, 0, 0, 0, 0, 0);
+        m.on_gate("pass", 1, f64::INFINITY, 0.1, 0, 0, 0, 0, 0);
+        let text = m.encode_text();
+        assert!(
+            text.contains("agent_gate_phase_duration_seconds_count"),
+            "{text}"
+        );
+        assert!(!text.contains("NaN"), "NaN leaked into export: {text}");
     }
 
     #[test]
