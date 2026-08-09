@@ -38,6 +38,7 @@ craneLib.mkCargoDerivation (
       cargo bench -p agent-validate --features validate-draft07 --bench validate
       cargo bench -p agent-lsp --bench lsp_parse
       cargo bench -p agent-search --features search-vector --bench vector
+      cargo bench -p agent-ast --bench ast
       cargo bench -p agent-session --bench checkpoint
       cargo bench -p agent-reference --bench parse
       cargo bench -p agent-scanner --bench scan

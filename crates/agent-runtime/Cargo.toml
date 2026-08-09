@@ -17,6 +17,8 @@ default = [
     "tool-search",
     "tool-metrics",
     "search",
+    "ast",
+    "structural-search",
     "git",
     "context-sliding-window",
     "context-summarizing",
@@ -84,6 +86,21 @@ search = [
     "agent-search/search-tantivy",
     "agent-tools/tool-search-index",
 ]
+# Type-aware code-graph seam: the Go engine (via the `agent-go-graph` helper) + the
+# `find_*` code-graph tools. See docs/components/ast.md.
+ast = [
+    "dep:agent-ast",
+    "agent-ast/ast-go",
+    "agent-tools/tool-ast-graph",
+]
+# The SCIP breadth engine for the code-graph seam: cross-language symbols /
+# implementations via scip-go / rust-analyzer scip / scip-typescript / scip-python.
+# Off by default (heavier deps + slower indexers); opt in + set `[ast] backends` and
+# `[ast] scip_langs`.
+ast-scip = ["ast", "agent-ast/ast-scip"]
+# The `structural_search` tool (ast-grep, via the Sandbox) — multi-language AST-pattern
+# search. Needs `ast-grep` on PATH at runtime. See docs/components/ast.md.
+structural-search = ["agent-tools/tool-structural-search"]
 # Semantic (embeddings) code search: the Embedder seam + the vector SearchBackend
 # + hybrid RRF fusion. Requires `search`. See parity spec 15.
 semantic-search = [
@@ -196,6 +213,7 @@ agent-metrics.workspace = true
 agent-providers.workspace = true
 agent-tools.workspace = true
 agent-search = { workspace = true, optional = true }
+agent-ast = { workspace = true, optional = true }
 # Redaction reuse for the cross-session recall corpus (spec 20).
 agent-export = { workspace = true, optional = true }
 agent-git = { workspace = true, optional = true }

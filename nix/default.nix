@@ -89,6 +89,18 @@ let
     vendorHash = null;
   };
 
+  # The type-aware Go code-graph extractor (crates/../helpers/go-graph), invoked by
+  # the AstBackend `go` engine via the Sandbox. Unlike go-ast it uses
+  # golang.org/x/tools (go/packages + go/types.Implements + go/callgraph/cha over
+  # SSA), so it vendors those deps — hence a real `vendorHash` (bump it with the
+  # error-reported hash when go.mod changes). Binary: `agent-go-graph`.
+  go-graph = pkgs.buildGoModule {
+    pname = "agent-go-graph";
+    version = "0.1.0";
+    src = ../helpers/go-graph;
+    vendorHash = "sha256-XZRy+J+JY9zELD9kydqOz+YdNSLyiVN+uxlvqD5yfkE=";
+  };
+
   # The generated `crates/agent-grpc/src/constants.rs` (from nix/constants.nix).
   # One derivation, shared by the `gen-constants` app and the `constants-sync`
   # check so they can never disagree.
@@ -292,14 +304,22 @@ let
       constantsRs
       agent
       go-ast
+      go-graph
       reviewGoCorpus
       ;
   };
 
-  # Dev shell. `go-ast` (the review call-graph helper) is put on the shell PATH.
+  # Dev shell. `go-ast` (review call-graph helper) + `go-graph` (AstBackend Go engine)
+  # go on PATH, plus the SCIP indexer + ast-grep for the AstBackend `scip` engine and
+  # `structural_search` tool.
   devshell = import ./devshell.nix {
     inherit pkgs lib versions;
-    extraPackages = [ go-ast ];
+    extraPackages = [
+      go-ast
+      go-graph
+      versions.scip-go
+      versions.ast-grep
+    ];
   };
 
   # ClickHouse container apps (up / down / client).
@@ -394,7 +414,7 @@ let
 in
 {
   packages = {
-    inherit agent go-ast;
+    inherit agent go-ast go-graph;
     inherit (versions)
       promptfoo
       swebench

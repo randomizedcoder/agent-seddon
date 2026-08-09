@@ -13,6 +13,10 @@
 //! counters; these wrappers add the per-component detail (provider TTFT, recall
 //! item counts, compaction deltas, authorize decisions, per-tool latency).
 
+#[cfg(feature = "ast")]
+use agent_core::{
+    AstBackend, AstCallGraph, AstCapabilities, CallPath, Symbol, SymbolQuery, SymbolRef,
+};
 #[cfg(feature = "git")]
 use agent_core::{
     BlobContent, Checkpoint, CommitInfo, CommitTouch, DiffResult, GrepHit, Oid, RepoBackend,
@@ -93,6 +97,155 @@ pub(crate) fn search(
         name: name.to_string(),
     })
 }
+/// Wrap an [`AstBackend`] so each verb records `agent_ast_query_seconds` /
+/// `agent_ast_result_nodes` / `agent_ast_errors_total` (labelled `backend`+`verb`)
+/// and emits an `ast.<verb>` span carrying `backend` + the result size (counts only,
+/// never source or signatures). `name` is the config-selected engine (`go`/`grpc`).
+#[cfg(feature = "ast")]
+pub(crate) fn ast(inner: Arc<dyn AstBackend>, m: Metrics, name: &str) -> Arc<dyn AstBackend> {
+    Arc::new(MeteredAst {
+        inner,
+        metrics: m,
+        name: name.to_string(),
+    })
+}
+
+#[cfg(feature = "ast")]
+struct MeteredAst {
+    inner: Arc<dyn AstBackend>,
+    metrics: Metrics,
+    name: String,
+}
+
+#[cfg(feature = "ast")]
+impl MeteredAst {
+    /// Record latency + result size on success, an error otherwise. `span` gets the
+    /// result count so a trace carries the shape without the source.
+    fn record<T>(
+        &self,
+        verb: &str,
+        start: Instant,
+        span: &tracing::Span,
+        out: &Result<T>,
+        size: impl Fn(&T) -> usize,
+    ) {
+        match out {
+            Ok(v) => {
+                let n = size(v);
+                span.record("nodes", n);
+                self.metrics
+                    .on_ast_query(&self.name, verb, start.elapsed().as_secs_f64(), n);
+            }
+            Err(_) => self.metrics.on_ast_error(&self.name, verb),
+        }
+    }
+}
+
+#[cfg(feature = "ast")]
+#[async_trait]
+impl AstBackend for MeteredAst {
+    fn capabilities(&self) -> AstCapabilities {
+        self.inner.capabilities()
+    }
+    async fn status(&self) -> Result<IndexStatus> {
+        self.inner
+            .status()
+            .instrument(tracing::info_span!("ast.status", backend = %self.name))
+            .await
+    }
+    async fn reindex(&self, progress: ProgressFn<'_>) -> Result<IndexStatus> {
+        self.inner
+            .reindex(progress)
+            .instrument(tracing::info_span!("ast.reindex", backend = %self.name))
+            .await
+    }
+    async fn find_symbol(&self, q: &SymbolQuery) -> Result<Vec<Symbol>> {
+        let span = tracing::info_span!("ast.find_symbol", backend = %self.name, nodes = tracing::field::Empty);
+        let start = Instant::now();
+        let out = self.inner.find_symbol(q).instrument(span.clone()).await;
+        self.record("find_symbol", start, &span, &out, Vec::len);
+        out
+    }
+    async fn implementations(&self, iface: &SymbolRef) -> Result<Vec<Symbol>> {
+        let span = tracing::info_span!("ast.implementations", backend = %self.name, nodes = tracing::field::Empty);
+        let start = Instant::now();
+        let out = self
+            .inner
+            .implementations(iface)
+            .instrument(span.clone())
+            .await;
+        self.record("implementations", start, &span, &out, Vec::len);
+        out
+    }
+    async fn interface_of(&self, ty: &SymbolRef) -> Result<Vec<Symbol>> {
+        let span = tracing::info_span!("ast.interface_of", backend = %self.name, nodes = tracing::field::Empty);
+        let start = Instant::now();
+        let out = self.inner.interface_of(ty).instrument(span.clone()).await;
+        self.record("interface_of", start, &span, &out, Vec::len);
+        out
+    }
+    async fn callers(&self, target: &SymbolRef, hops: u32) -> Result<AstCallGraph> {
+        let span = tracing::info_span!("ast.callers", backend = %self.name, hops, nodes = tracing::field::Empty);
+        let start = Instant::now();
+        let out = self
+            .inner
+            .callers(target, hops)
+            .instrument(span.clone())
+            .await;
+        self.record("callers", start, &span, &out, |g| g.nodes.len());
+        out
+    }
+    async fn callees(&self, target: &SymbolRef, hops: u32) -> Result<AstCallGraph> {
+        let span = tracing::info_span!("ast.callees", backend = %self.name, hops, nodes = tracing::field::Empty);
+        let start = Instant::now();
+        let out = self
+            .inner
+            .callees(target, hops)
+            .instrument(span.clone())
+            .await;
+        self.record("callees", start, &span, &out, |g| g.nodes.len());
+        out
+    }
+    async fn callchain(
+        &self,
+        from: &SymbolRef,
+        to: &SymbolRef,
+        max_paths: u32,
+    ) -> Result<Vec<CallPath>> {
+        let span = tracing::info_span!("ast.callchain", backend = %self.name, nodes = tracing::field::Empty);
+        let start = Instant::now();
+        let out = self
+            .inner
+            .callchain(from, to, max_paths)
+            .instrument(span.clone())
+            .await;
+        self.record("callchain", start, &span, &out, Vec::len);
+        out
+    }
+    async fn blast_radius(&self, changed: &[String], hops: u32) -> Result<AstCallGraph> {
+        let span = tracing::info_span!("ast.blast_radius", backend = %self.name, n_changed = changed.len(), hops, nodes = tracing::field::Empty);
+        let start = Instant::now();
+        let out = self
+            .inner
+            .blast_radius(changed, hops)
+            .instrument(span.clone())
+            .await;
+        self.record("blast_radius", start, &span, &out, |g| g.nodes.len());
+        out
+    }
+    async fn dependency_path(&self, from_pkg: &str, to_pkg: &str) -> Result<Vec<String>> {
+        let span = tracing::info_span!("ast.dependency_path", backend = %self.name, nodes = tracing::field::Empty);
+        let start = Instant::now();
+        let out = self
+            .inner
+            .dependency_path(from_pkg, to_pkg)
+            .instrument(span.clone())
+            .await;
+        self.record("dependency_path", start, &span, &out, Vec::len);
+        out
+    }
+}
+
 /// Wrap the git backend. `name` is the config-selected impl (`cli`/`hybrid`/`grpc`),
 /// the metric label so a remote seam reads distinctly from a local one.
 #[cfg(feature = "git")]

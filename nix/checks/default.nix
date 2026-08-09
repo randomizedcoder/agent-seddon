@@ -16,6 +16,7 @@
   constantsRs,
   agent,
   go-ast,
+  go-graph,
   reviewGoCorpus,
 }:
 
@@ -95,6 +96,16 @@ in
   # and the callee changes; assert the `Call graph` blast-radius section shows the
   # caller. Uses the flake-built `agent-go-ast` helper on PATH; offline.
   review-callgraph = agentCheck ./review-callgraph.nix { inherit go-ast; };
+
+  # AstBackend Go engine: the type-aware `agent-go-graph` helper resolves the
+  # implicit interface-satisfaction relation + precise call edges over a fixture Go
+  # module. Offline/hermetic (stdlib-only fixture; the Go toolchain resolves types
+  # locally). See docs/components/ast.md.
+  ast-go = import ./ast-go.nix { inherit pkgs versions go-graph; };
+
+  # AstBackend SCIP engine: end-to-end `scip-go` indexing → ingestion → implicit
+  # interface-implementation query over a fixture Go module. Offline/hermetic.
+  ast-scip = craneCheck ./ast-scip.nix { inherit cargoArtifacts versions; };
   # Code-style fingerprint coverage: a small Go repo with a deliberate consistent
   # house style; assert the `Code style` section reports the right verdicts. Pure
   # in-process (counting over blobs + commit log); offline, no toolchain.

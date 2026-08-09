@@ -30,6 +30,8 @@ pub struct Config {
     #[serde(default)]
     pub search: SearchCfg,
     #[serde(default)]
+    pub ast: AstCfg,
+    #[serde(default)]
     pub tokenizer: TokenizerCfg,
     #[serde(default)]
     pub git: GitCfg,
@@ -1329,6 +1331,53 @@ impl Default for SearchCfg {
     }
 }
 
+/// `[ast]` — the type-aware code-graph seam ([`agent_core::AstBackend`]). `backends`
+/// selects which engines to wire behind the single graph interface (the first is the
+/// default); empty ⇒ just `["go"]`. `auto_index` builds the graph in the background
+/// on start so the first query is warm. `helper_timeout_secs` bounds the
+/// `agent-go-graph` run. See `docs/components/ast.md`.
+#[derive(Debug, Deserialize)]
+pub struct AstCfg {
+    #[serde(default)]
+    pub backends: Vec<String>,
+    #[serde(default = "default_true")]
+    pub auto_index: bool,
+    #[serde(default = "default_ast_timeout")]
+    pub helper_timeout_secs: u64,
+    /// Languages the `scip` backend indexes (each maps to a built-in indexer command:
+    /// `go` → scip-go, `rust` → rust-analyzer scip, `typescript`/`python` → scip-*).
+    /// Empty ⇒ the `scip` backend is skipped. Only consulted when `"scip"` is in
+    /// `backends` (and the `ast-scip` build feature is on).
+    #[serde(default)]
+    pub scip_langs: Vec<String>,
+}
+
+impl Default for AstCfg {
+    fn default() -> Self {
+        Self {
+            backends: Vec::new(),
+            auto_index: true,
+            helper_timeout_secs: default_ast_timeout(),
+            scip_langs: Vec::new(),
+        }
+    }
+}
+
+impl AstCfg {
+    /// The configured backend names, defaulting to `["go"]` when empty.
+    pub fn backend_names(&self) -> Vec<String> {
+        if self.backends.is_empty() {
+            vec!["go".to_string()]
+        } else {
+            self.backends.clone()
+        }
+    }
+}
+
+fn default_ast_timeout() -> u64 {
+    30
+}
+
 /// `[tokenizer]` — selects the [`agent_core::Tokenizer`] backend that counts tokens
 /// for compaction budgeting and cost accounting. `approx` (the default) is the
 /// dependency-free segmenter; `tiktoken` is the real OpenAI-family BPE backend;
@@ -1456,6 +1505,8 @@ pub struct GrpcCfg {
     pub policy: GrpcSeamCfg,
     #[serde(default)]
     pub search: GrpcSeamCfg,
+    #[serde(default)]
+    pub ast: GrpcSeamCfg,
     #[serde(default)]
     pub repo: GrpcSeamCfg,
     #[serde(default)]
@@ -1983,6 +2034,7 @@ impl Config {
             metrics: MetricsCfg::default(),
             grpc: GrpcCfg::default(),
             search: SearchCfg::default(),
+            ast: AstCfg::default(),
             tokenizer: TokenizerCfg::default(),
             git: GitCfg::default(),
             // Guard off in tests: full-agent tests stay hermetic and never block on

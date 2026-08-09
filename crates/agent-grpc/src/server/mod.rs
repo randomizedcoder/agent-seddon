@@ -29,6 +29,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 mod admission;
 mod agent_session;
+mod ast;
 mod context;
 mod dimension;
 mod embed;
@@ -57,6 +58,7 @@ mod web;
 
 pub use admission::*;
 pub use agent_session::*;
+pub use ast::*;
 pub use context::*;
 pub use dimension::*;
 pub use embed::*;

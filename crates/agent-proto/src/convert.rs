@@ -152,6 +152,7 @@ pub fn status_from_error(e: &agent_core::Error) -> tonic::Status {
         Error::Pty(m) => tonic::Status::internal(format!("pty: {m}")),
         Error::Structured(m) => tonic::Status::invalid_argument(format!("structured: {m}")),
         Error::Lsp(m) => tonic::Status::internal(format!("lsp: {m}")),
+        Error::Ast(m) => tonic::Status::internal(format!("ast: {m}")),
         Error::Sandbox(m) => tonic::Status::internal(format!("sandbox: {m}")),
         Error::Embed(m) => tonic::Status::internal(format!("embed: {m}")),
         Error::Session(m) => tonic::Status::internal(format!("session: {m}")),
@@ -896,6 +897,172 @@ impl From<pb::ReindexProgress> for agent_core::ReindexProgress {
             files_done: p.files_done,
             files_total: p.files_total,
             done: p.done,
+        }
+    }
+}
+
+// --- Ast: SymbolKind / Symbol / SymbolRef / call graph ---------------------
+
+impl From<agent_core::SymbolKind> for pb::SymbolKind {
+    fn from(k: agent_core::SymbolKind) -> Self {
+        match k {
+            agent_core::SymbolKind::Func => pb::SymbolKind::Func,
+            agent_core::SymbolKind::Method => pb::SymbolKind::Method,
+            agent_core::SymbolKind::Interface => pb::SymbolKind::Interface,
+            agent_core::SymbolKind::Struct => pb::SymbolKind::Struct,
+            agent_core::SymbolKind::Type => pb::SymbolKind::Type,
+            agent_core::SymbolKind::Field => pb::SymbolKind::Field,
+            agent_core::SymbolKind::Unknown => pb::SymbolKind::Unknown,
+        }
+    }
+}
+
+/// Wire `SymbolKind` tag → core. An unknown tag decodes to `Unknown` (the zero
+/// value), keeping the enum additive.
+fn symbol_kind_from_i32(v: i32) -> agent_core::SymbolKind {
+    match pb::SymbolKind::try_from(v) {
+        Ok(pb::SymbolKind::Func) => agent_core::SymbolKind::Func,
+        Ok(pb::SymbolKind::Method) => agent_core::SymbolKind::Method,
+        Ok(pb::SymbolKind::Interface) => agent_core::SymbolKind::Interface,
+        Ok(pb::SymbolKind::Struct) => agent_core::SymbolKind::Struct,
+        Ok(pb::SymbolKind::Type) => agent_core::SymbolKind::Type,
+        Ok(pb::SymbolKind::Field) => agent_core::SymbolKind::Field,
+        Ok(pb::SymbolKind::Unknown) | Err(_) => agent_core::SymbolKind::Unknown,
+    }
+}
+
+impl From<agent_core::Symbol> for pb::Symbol {
+    fn from(s: agent_core::Symbol) -> Self {
+        pb::Symbol {
+            id: s.id,
+            kind: pb::SymbolKind::from(s.kind) as i32,
+            name: s.name,
+            recv: s.recv,
+            package: s.package,
+            file: s.file,
+            line: s.line,
+            exported: s.exported,
+        }
+    }
+}
+
+impl From<pb::Symbol> for agent_core::Symbol {
+    fn from(s: pb::Symbol) -> Self {
+        agent_core::Symbol {
+            id: s.id,
+            kind: symbol_kind_from_i32(s.kind),
+            name: s.name,
+            recv: s.recv,
+            package: s.package,
+            file: s.file,
+            line: s.line,
+            exported: s.exported,
+        }
+    }
+}
+
+impl From<pb::SymbolRef> for agent_core::SymbolRef {
+    fn from(r: pb::SymbolRef) -> Self {
+        agent_core::SymbolRef {
+            id: r.id,
+            name: r.name,
+            package: r.package,
+            recv: r.recv,
+        }
+    }
+}
+
+impl From<agent_core::SymbolRef> for pb::SymbolRef {
+    fn from(r: agent_core::SymbolRef) -> Self {
+        pb::SymbolRef {
+            id: r.id,
+            name: r.name,
+            package: r.package,
+            recv: r.recv,
+        }
+    }
+}
+
+impl From<agent_core::CallEdge> for pb::CallEdge {
+    fn from(e: agent_core::CallEdge) -> Self {
+        pb::CallEdge {
+            caller_id: e.caller_id,
+            callee_id: e.callee_id,
+        }
+    }
+}
+
+impl From<agent_core::AstCallGraph> for pb::AstCallGraph {
+    fn from(g: agent_core::AstCallGraph) -> Self {
+        pb::AstCallGraph {
+            nodes: g.nodes.into_iter().map(Into::into).collect(),
+            edges: g.edges.into_iter().map(Into::into).collect(),
+            roots: g.roots,
+            truncated: g.truncated,
+            backend: String::new(),
+        }
+    }
+}
+
+impl From<agent_core::CallPath> for pb::CallPath {
+    fn from(p: agent_core::CallPath) -> Self {
+        pb::CallPath {
+            nodes: p.nodes.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<pb::CallEdge> for agent_core::CallEdge {
+    fn from(e: pb::CallEdge) -> Self {
+        agent_core::CallEdge {
+            caller_id: e.caller_id,
+            callee_id: e.callee_id,
+        }
+    }
+}
+
+impl From<pb::AstCallGraph> for agent_core::AstCallGraph {
+    fn from(g: pb::AstCallGraph) -> Self {
+        agent_core::AstCallGraph {
+            nodes: g.nodes.into_iter().map(Into::into).collect(),
+            edges: g.edges.into_iter().map(Into::into).collect(),
+            roots: g.roots,
+            truncated: g.truncated,
+        }
+    }
+}
+
+impl From<pb::CallPath> for agent_core::CallPath {
+    fn from(p: pb::CallPath) -> Self {
+        agent_core::CallPath {
+            nodes: p.nodes.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<pb::FindSymbolRequest> for agent_core::SymbolQuery {
+    fn from(r: pb::FindSymbolRequest) -> Self {
+        agent_core::SymbolQuery {
+            name: r.name,
+            kind: r.kind.map(symbol_kind_from_i32),
+            package: r.package,
+            exact: r.exact,
+            limit: r.limit as usize,
+        }
+    }
+}
+
+impl From<agent_core::AstCapabilities> for pb::AstCapabilities {
+    fn from(c: agent_core::AstCapabilities) -> Self {
+        pb::AstCapabilities {
+            backend: c.backend,
+            languages: c.languages,
+            verbs: c
+                .verbs
+                .into_iter()
+                .map(|v| v.as_str().to_string())
+                .collect(),
+            incremental: c.incremental,
         }
     }
 }

@@ -1,0 +1,49 @@
+[package]
+name = "agent-ast"
+version.workspace = true
+publish.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# The Go engine (via the `agent-go-graph` helper) is the default. The SCIP substrate
+# (`ast-scip`) is a breadth engine over `.scip` indexes from scip-go / rust-analyzer /
+# scip-typescript / scip-python. See docs/components/ast.md.
+default = ["ast-go"]
+# Type-aware Go code graph: runs the `agent-go-graph` helper through the Sandbox seam
+# and answers call-graph / interface-implementation queries over its typed output.
+ast-go = []
+# Cross-language symbols / def / implementations via the SCIP index format: runs a
+# per-language indexer (scip-go, rust-analyzer scip, …) through the Sandbox and
+# ingests the resulting `.scip` protobuf. No call edges in SCIP (those route to `go`).
+ast-scip = ["dep:scip", "dep:protobuf"]
+# Injects a dhat global allocator for the allocation-budget leak test only.
+dhat-heap = ["dep:dhat"]
+
+[dependencies]
+agent-core.workspace = true
+async-trait.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+# Optional heap profiler for tests/leak.rs (only under the `dhat-heap` feature).
+dhat = { workspace = true, optional = true }
+# The SCIP Code Intelligence Protocol bindings (Index/Document/SymbolInformation +
+# symbol-string parsing). Only under `ast-scip`. `protobuf` is scip's codec (pinned to
+# the same version so the `Message` trait matches).
+scip = { version = "0.9", optional = true }
+protobuf = { version = "3.7", optional = true }
+
+[dev-dependencies]
+rstest.workspace = true
+agent-testkit.workspace = true
+iai-callgrind.workspace = true
+
+# Deterministic instruction-count benches for the graph parse + hot query verbs.
+[[bench]]
+name = "ast"
+harness = false
+
+[lints]
+workspace = true

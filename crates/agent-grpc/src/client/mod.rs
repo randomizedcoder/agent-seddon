@@ -38,6 +38,7 @@ macro_rules! unary {
     };
 }
 
+mod ast;
 mod context;
 mod dimension;
 mod embed;
@@ -63,6 +64,7 @@ mod tokenizer;
 mod tools;
 mod web;
 
+pub use ast::*;
 pub use context::*;
 pub use dimension::*;
 pub use embed::*;

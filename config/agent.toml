@@ -119,6 +119,8 @@ recall_limit  = 5
 # built-ins.
 enabled = [
     "bash", "read_file", "write_file", "edit", "apply_patch", "grep", "find", "ls", "search", "index_ls", "metrics",
+    "find_symbol", "find_implementations", "find_interface", "find_callers", "find_callees",
+    "find_callchain", "find_changed_callers", "find_dependency_path", "structural_search",
     "git_read", "git_tree", "git_diff", "git_grep", "git_log", "git_branches", "git_status",
     "git_worktree", "git_checkpoint",
 ]
@@ -133,6 +135,19 @@ enabled = [
 backends   = ["tantivy"]
 index_dir  = ""              # empty ⇒ per-repo .agent-seddon/index/<backend>
 auto_index = true
+
+# Type-aware code graph (the AstBackend seam). `backends` selects which engines front
+# the single graph interface (first = default; empty ⇒ ["go"]). The `go` engine runs
+# the pinned `agent-go-graph` helper (x/tools: precise call graph + implicit interface
+# satisfaction) through the Sandbox; add "grpc" to dial a remote `--serve-ast`.
+# `auto_index` warms the graph in the background on start. Exposes the `find_*` tools
+# (find_callers/callees/callchain/implementations/interface/symbol/dependency_path/
+# changed_callers). See docs/components/ast.md.
+[ast]
+backends            = ["go"]   # add "scip" for cross-language symbols/impls (needs the ast-scip build)
+auto_index          = true
+helper_timeout_secs = 30
+scip_langs          = []       # e.g. ["go", "rust"] — indexers for the "scip" backend
 
 # Cross-session recall (parity spec 20): a tantivy index over the agent's own PAST
 # saved transcripts, exposed as the `session_recall` tool so it can search its

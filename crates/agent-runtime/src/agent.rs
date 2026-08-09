@@ -78,6 +78,10 @@ pub struct Agent {
     /// be hosted over gRPC (`agent --serve-search`); the loop reaches search
     /// through the `search` *tool*, not this field.
     search: Option<Arc<dyn agent_core::SearchBackend>>,
+    /// The composed code-graph backend (the `AstBackend` seam), if wired. Held so it
+    /// can be hosted over gRPC (`agent --serve-ast`); the loop reaches it through the
+    /// `find_*` tools.
+    ast: Option<Arc<dyn agent_core::AstBackend>>,
     /// The git backend, if the `git` seam is wired. Held so it can be hosted over
     /// gRPC (`agent --serve-git`); the loop reaches it through the `git_*` tools.
     repo: Option<Arc<dyn agent_core::RepoBackend>>,
@@ -209,6 +213,7 @@ impl Agent {
             settings,
             events,
             search: None,
+            ast: None,
             repo: None,
             llm_pool: None,
             task_classifier: None,
@@ -312,6 +317,12 @@ impl Agent {
     /// Attach the composed search backend (so `--serve-search` can host it).
     pub fn with_search(mut self, search: Arc<dyn agent_core::SearchBackend>) -> Self {
         self.search = Some(search);
+        self
+    }
+
+    /// Attach the composed code-graph backend (so `--serve-ast` can host it).
+    pub fn with_ast(mut self, ast: Arc<dyn agent_core::AstBackend>) -> Self {
+        self.ast = Some(ast);
         self
     }
 
@@ -526,6 +537,10 @@ impl Agent {
     /// The composed search backend, if wired (for `agent --serve-search`).
     pub fn search(&self) -> Option<Arc<dyn agent_core::SearchBackend>> {
         self.search.clone()
+    }
+    /// The composed code-graph backend, if wired (for `agent --serve-ast`).
+    pub fn ast(&self) -> Option<Arc<dyn agent_core::AstBackend>> {
+        self.ast.clone()
     }
     /// The git backend, if wired (for `agent --serve-git`).
     /// The content scanner, if wired (for `agent --serve-scanner`).

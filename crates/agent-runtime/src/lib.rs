@@ -1,6 +1,8 @@
 //! `agent-runtime` — wires the seams and runs the loop.
 
 mod agent;
+#[cfg(feature = "ast")]
+mod ast;
 mod builder;
 mod config;
 mod context_files;

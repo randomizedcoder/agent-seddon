@@ -47,6 +47,8 @@ pub enum Error {
     Structured(String),
     #[error("lsp error: {0}")]
     Lsp(String),
+    #[error("ast error: {0}")]
+    Ast(String),
     #[error("sandbox error: {0}")]
     Sandbox(String),
     #[error("embed error: {0}")]
@@ -3162,6 +3164,262 @@ pub trait SearchBackend: Send + Sync {
         Err(Error::Search(
             "this search backend does not support listing files".into(),
         ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Seam 6b: AstBackend (type-aware code graph — see docs/components/ast.md)
+// ---------------------------------------------------------------------------
+//
+// Where `SearchBackend` retrieves *text* and `LspBackend` answers *position*
+// queries, `AstBackend` answers whole-repo *structural* questions: who calls a
+// function, what it reaches, which concrete types satisfy an interface (implicit in
+// Go), the package path between two components. Concrete engines live in `agent-ast`
+// (`GoAst`, via the pinned `agent-go-graph` helper; a SCIP substrate later),
+// dispatched over named backends exactly like `SearchBackend`, and served over gRPC
+// as `AstService` (`agent --serve-ast`). Language-neutral: a verb a backend can't
+// serve returns `Error::Ast` (capability-gated), mirroring `SearchBackend::list_files`.
+
+/// The kind of a code [`Symbol`]. Serialized lowercase; `Unknown` is the additive
+/// fallback so an engine emitting a kind this build doesn't know never fails a parse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SymbolKind {
+    Func,
+    Method,
+    Interface,
+    Struct,
+    Type,
+    Field,
+    #[default]
+    Unknown,
+}
+
+impl SymbolKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SymbolKind::Func => "func",
+            SymbolKind::Method => "method",
+            SymbolKind::Interface => "interface",
+            SymbolKind::Struct => "struct",
+            SymbolKind::Type => "type",
+            SymbolKind::Field => "field",
+            SymbolKind::Unknown => "unknown",
+        }
+    }
+    /// Parse a kind label; unknown labels map to [`SymbolKind::Unknown`] (never `None`)
+    /// so untrusted engine output stays additive.
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "func" => SymbolKind::Func,
+            "method" => SymbolKind::Method,
+            "interface" => SymbolKind::Interface,
+            "struct" => SymbolKind::Struct,
+            "type" => SymbolKind::Type,
+            "field" => SymbolKind::Field,
+            _ => SymbolKind::Unknown,
+        }
+    }
+}
+
+/// A code symbol — a function/method/type/interface with a stable id within one
+/// graph build. `file` is repo-relative and confined; strings are bounded. Ids are
+/// stable until a `reindex`, so a [`SymbolRef::id`] from a prior result stays valid.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Symbol {
+    pub id: u32,
+    pub kind: SymbolKind,
+    pub name: String,
+    /// Receiver type name for methods (`""` otherwise).
+    #[serde(default)]
+    pub recv: String,
+    /// Import/module path of the symbol's package.
+    pub package: String,
+    /// Repo-relative path (confined).
+    pub file: String,
+    pub line: u32,
+    pub exported: bool,
+}
+
+/// How a query names a target symbol: by its stable graph `id` (from a prior result)
+/// or by `name` narrowed with optional `package`/`recv`, which the backend resolves.
+/// Model-supplied strings are untrusted — backends *match* them, never interpolate
+/// them into a shell command or a path.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SymbolRef {
+    #[serde(default)]
+    pub id: Option<u32>,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub package: Option<String>,
+    #[serde(default)]
+    pub recv: Option<String>,
+}
+
+impl SymbolRef {
+    /// A ref that matches by bare name.
+    pub fn name(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            ..Default::default()
+        }
+    }
+    /// A ref that matches a known graph id.
+    pub fn id(id: u32) -> Self {
+        Self {
+            id: Some(id),
+            ..Default::default()
+        }
+    }
+}
+
+/// A symbol-search request: a `name` (substring, or exact when `exact`) narrowed by
+/// optional `kind`/`package`, capped by `limit`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SymbolQuery {
+    pub name: String,
+    #[serde(default)]
+    pub kind: Option<SymbolKind>,
+    #[serde(default)]
+    pub package: Option<String>,
+    #[serde(default)]
+    pub exact: bool,
+    pub limit: usize,
+}
+
+/// A subgraph result: the `nodes` involved, the caller→callee `edges` among them,
+/// and the `roots` the query started from (e.g. the target of a `callers` query).
+/// Reuses [`CallEdge`]; ids reference [`Symbol::id`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AstCallGraph {
+    pub nodes: Vec<Symbol>,
+    pub edges: Vec<CallEdge>,
+    pub roots: Vec<u32>,
+    pub truncated: bool,
+}
+
+/// One ordered call path — a chain of symbols from a source to a target, as produced
+/// by [`AstBackend::callchain`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CallPath {
+    pub nodes: Vec<Symbol>,
+}
+
+/// A code-graph verb — advertised in [`AstCapabilities`] and used as a metric label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AstVerb {
+    FindSymbol,
+    Implementations,
+    InterfaceOf,
+    Callers,
+    Callees,
+    Callchain,
+    BlastRadius,
+    DependencyPath,
+}
+
+impl AstVerb {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AstVerb::FindSymbol => "find_symbol",
+            AstVerb::Implementations => "implementations",
+            AstVerb::InterfaceOf => "interface_of",
+            AstVerb::Callers => "callers",
+            AstVerb::Callees => "callees",
+            AstVerb::Callchain => "callchain",
+            AstVerb::BlastRadius => "blast_radius",
+            AstVerb::DependencyPath => "dependency_path",
+        }
+    }
+}
+
+/// A backend's advertised code-graph feature set — which verbs it serves and which
+/// languages it covers. The dispatcher and tools consult it to route a query or to
+/// reject a verb the backend can't serve (the call-graph verbs on a SCIP backend).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AstCapabilities {
+    pub backend: String,
+    /// Language labels covered, e.g. `["go"]`.
+    pub languages: Vec<String>,
+    /// Verbs served.
+    pub verbs: Vec<AstVerb>,
+    /// Supports incremental reindex (vs. full rebuild only).
+    pub incremental: bool,
+}
+
+impl AstCapabilities {
+    pub fn supports(&self, verb: AstVerb) -> bool {
+        self.verbs.contains(&verb)
+    }
+}
+
+/// The error a backend returns for a verb it does not serve (capability-gated
+/// default). A distinct helper so the dispatcher can recognise "unsupported here,
+/// try another backend" vs. a real failure.
+fn ast_unsupported(verb: &str) -> Error {
+    Error::Ast(format!("this ast backend does not support `{verb}`"))
+}
+
+/// A replaceable type-aware code-graph backend. `status` is a cheap freshness probe;
+/// `reindex` is long-running (driven off the request path); the query verbs must be
+/// safe to call concurrently, including while a reindex runs (serve-stale). Every
+/// query verb but `find_symbol` has a capability-gated default returning
+/// [`Error::Ast`], so an engine (e.g. a SCIP substrate) implements only what it can.
+#[async_trait]
+pub trait AstBackend: Send + Sync {
+    fn capabilities(&self) -> AstCapabilities;
+
+    /// Cheap, read-only staleness probe. Never triggers a rebuild.
+    async fn status(&self) -> Result<IndexStatus>;
+
+    /// Build/refresh the code graph, reporting progress. Long-running.
+    async fn reindex(&self, progress: ProgressFn<'_>) -> Result<IndexStatus>;
+
+    /// Find symbols by name (see [`SymbolQuery`]).
+    async fn find_symbol(&self, q: &SymbolQuery) -> Result<Vec<Symbol>>;
+
+    /// Concrete types that satisfy the given interface (implicit satisfaction in Go).
+    async fn implementations(&self, _iface: &SymbolRef) -> Result<Vec<Symbol>> {
+        Err(ast_unsupported("implementations"))
+    }
+
+    /// Interfaces the given concrete type satisfies.
+    async fn interface_of(&self, _ty: &SymbolRef) -> Result<Vec<Symbol>> {
+        Err(ast_unsupported("interface_of"))
+    }
+
+    /// Callers of the target, out to `hops` levels (`hops` is clamped by the backend).
+    async fn callers(&self, _target: &SymbolRef, _hops: u32) -> Result<AstCallGraph> {
+        Err(ast_unsupported("callers"))
+    }
+
+    /// Callees of the target, out to `hops` levels.
+    async fn callees(&self, _target: &SymbolRef, _hops: u32) -> Result<AstCallGraph> {
+        Err(ast_unsupported("callees"))
+    }
+
+    /// Up to `max_paths` distinct call paths from `from` to `to`.
+    async fn callchain(
+        &self,
+        _from: &SymbolRef,
+        _to: &SymbolRef,
+        _max_paths: u32,
+    ) -> Result<Vec<CallPath>> {
+        Err(ast_unsupported("callchain"))
+    }
+
+    /// Blast radius: the callers (out to `hops`) of every symbol defined in the
+    /// `changed` files — "what a change to these files could affect".
+    async fn blast_radius(&self, _changed: &[String], _hops: u32) -> Result<AstCallGraph> {
+        Err(ast_unsupported("blast_radius"))
+    }
+
+    /// An import path from one package to another (dependency reachability); empty if
+    /// unreachable.
+    async fn dependency_path(&self, _from_pkg: &str, _to_pkg: &str) -> Result<Vec<String>> {
+        Err(ast_unsupported("dependency_path"))
     }
 }
 
