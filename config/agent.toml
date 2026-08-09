@@ -444,10 +444,59 @@ cooldown_secs       = 30          # how long a breaker stays open before re-prob
 # weight = 1.0                        # relative pick rate under `weighted`
 # max_concurrency = 2                 # per-target concurrency cap (0/unset = unbounded)
 #
+# An AUTHENTICATED / self-signed HOSTED upstream is a member too, with NO secret in
+# this file (model-router increment 01). Key resolution: api_key > api_key_env >
+# api_key_file; all empty ⇒ keyless (a local server that ignores it).
 # [[pool.members]]
-# name = "glm"                        # no endpoint ⇒ resolve via the registry
+# name = "glm"
+# endpoint = "https://213.173.96.56:8000/v1"
+# model = "/model"
+# api_key_file = "~/Downloads/runpod/glm/glm-api-key"  # or api_key_env = "GLM_KEY"
+# insecure_tls = true                 # self-signed dev endpoint ONLY (warns; MITM risk)
+# context_window = 131072             # per-member; unset ⇒ the global [agent] context_window
 # tier = "heavy"
 # weight = 4.0
+#
+# [[pool.members]]
+# name = "local-registry-member"      # no endpoint ⇒ resolve `name` via the registry
+# tier = "light"
+
+# Task-aware routing (the TaskRouter — model-router increment 02). Selected with
+# `[agent] provider = "task-router"`. Routes each request to a declaratively-preferred,
+# CAPABLE upstream and fails over on a retryable error — a fleet as one provider (e.g.
+# Kimi preferred, GLM fallback). An upstream's capability facts (context window, tools,
+# vision) are read live from the provider; tags/tier/input_cost are your routing
+# metadata. Keys are NEVER in this file: api_key > api_key_env > api_key_file.
+# [route]
+# [[route.upstreams]]
+# name = "kimi"                        # inline endpoint ⇒ OpenAI-compatible provider
+# endpoint = "https://…-4000.proxy.runpod.net/v1"
+# model = "moonshotai/Kimi-K3"
+# api_key_file = "~/Downloads/runpod/glm/kimi-api-key"
+# context_window = 131072             # per-upstream; unset ⇒ the global [agent] one
+# tags = ["reasoning", "long-context"]
+# tier = "heavy"
+# input_cost = 3.0                    # per-Mtok hint for cost-aware ordering
+#
+# [[route.upstreams]]
+# name = "glm"
+# endpoint = "https://213.173.96.56:8000/v1"
+# model = "/model"
+# api_key_file = "~/Downloads/runpod/glm/glm-api-key"
+# insecure_tls = true                 # self-signed dev endpoint ONLY (warns)
+# tags = ["reasoning"]
+# tier = "heavy"
+# input_cost = 1.0
+#
+# # Ordered rules — the first whose `match` holds sets the ordering preference.
+# [[route.rules]]
+# match  = { role = "review" }        # role: main|judge|classify|summarize|verify|review
+# prefer = { tags = ["reasoning"], tier = "heavy" }
+#
+# # Applied when no rule matches — here: prefer kimi, fall back to glm.
+# [route.default_prefer]
+# upstreams = ["kimi", "glm"]
+# # failure_threshold = 3 / cooldown_secs = 30  (breaker, same as [router]/[pool])
 
 # General task-mode detection (the TaskClassifier seam). Runs every turn to detect
 # when to switch to a more appropriate mode; drives the in-loop review hand-off, and

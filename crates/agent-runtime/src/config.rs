@@ -64,6 +64,8 @@ pub struct Config {
     #[serde(default)]
     pub pool: PoolCfg,
     #[serde(default)]
+    pub route: RouteCfg,
+    #[serde(default)]
     pub mode: ModeCfg,
     #[serde(default)]
     pub dimensions: DimensionsCfg,
@@ -335,9 +337,28 @@ pub struct PoolMemberCfg {
     /// Model id for an inline `endpoint` (required when `endpoint` is set).
     #[serde(default)]
     pub model: String,
-    /// API key for an inline `endpoint` (optional; many local servers need none).
+    /// Inline API key for an inline `endpoint` (optional; many local servers need
+    /// none). Prefer `api_key_env` / `api_key_file` so a secret isn't committed.
     #[serde(default)]
     pub api_key: String,
+    /// …read the key from this env var when `api_key` is empty.
+    #[serde(default)]
+    pub api_key_env: String,
+    /// …or from a file outside the repo (tilde-expanded). Member key resolution
+    /// order: `api_key` > `api_key_env` > `api_key_file`; all empty ⇒ keyless (fine
+    /// for a local server that ignores the key). Lets a hosted upstream (GLM/Kimi)
+    /// be a pool member without committing its key (model-router increment 01).
+    #[serde(default)]
+    pub api_key_file: String,
+    /// Skip TLS verification for THIS member — ONLY for a self-signed dev endpoint
+    /// you control (e.g. the GLM box). Off by default; warns when on.
+    #[serde(default)]
+    pub insecure_tls: bool,
+    /// Context-window budget for an inline `endpoint`; unset ⇒ the global
+    /// `[agent] context_window`. Per-member so a fleet of different-sized models
+    /// isn't forced to share one window (model-router increment 01).
+    #[serde(default)]
+    pub context_window: Option<u32>,
     #[serde(default)]
     pub tier: String,
     /// Selection weight for the `weighted` policy (default 1.0).
@@ -417,6 +438,105 @@ impl Default for PoolCfg {
             cooldown_secs: default_breaker_cooldown(),
         }
     }
+}
+
+/// Task-aware routing (`[route]`, model-router increment 02). Selected with
+/// `[agent] provider = "task-router"`. Lists the upstream fleet + the declarative
+/// routing rules the `TaskRouter` runs. See docs/design/model-router/.
+#[derive(Debug, Deserialize)]
+pub struct RouteCfg {
+    /// The upstreams to route across. Each with an inline `endpoint` synthesizes an
+    /// OpenAI-compatible provider (like `[[pool.members]]`); an empty `endpoint`
+    /// resolves `name` via the registry.
+    #[serde(default)]
+    pub upstreams: Vec<RouteUpstreamCfg>,
+    /// Ordered rules — the first whose `match` holds sets the ordering preference.
+    #[serde(default)]
+    pub rules: Vec<RouteRuleCfg>,
+    /// The preference applied when no rule matches.
+    #[serde(default)]
+    pub default_prefer: RoutePreferCfg,
+    #[serde(default = "default_breaker_threshold")]
+    pub failure_threshold: usize,
+    #[serde(default = "default_breaker_cooldown")]
+    pub cooldown_secs: u64,
+}
+
+impl Default for RouteCfg {
+    fn default() -> Self {
+        Self {
+            upstreams: Vec::new(),
+            rules: Vec::new(),
+            default_prefer: RoutePreferCfg::default(),
+            failure_threshold: default_breaker_threshold(),
+            cooldown_secs: default_breaker_cooldown(),
+        }
+    }
+}
+
+/// One routable upstream. Connection + auth mirror `[[pool.members]]` (key never in
+/// the repo: `api_key` > `api_key_env` > `api_key_file`); `tags`/`tier`/`input_cost`
+/// are the routing metadata the policy matches and orders on.
+#[derive(Debug, Deserialize, Default)]
+pub struct RouteUpstreamCfg {
+    pub name: String,
+    #[serde(default)]
+    pub endpoint: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub api_key_env: String,
+    #[serde(default)]
+    pub api_key_file: String,
+    #[serde(default)]
+    pub insecure_tls: bool,
+    /// Per-upstream context window; unset ⇒ the global `[agent] context_window`.
+    #[serde(default)]
+    pub context_window: Option<u32>,
+    /// Free-form capability tags (`reasoning`, `long-context`, `cheap`, …).
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// `light` | `medium` | `heavy` (missing ⇒ medium).
+    #[serde(default)]
+    pub tier: String,
+    /// Per-Mtok input cost hint (clamped non-negative on build).
+    #[serde(default)]
+    pub input_cost: Option<f32>,
+}
+
+/// The `match` half of a `[[route.rules]]` — present conditions must all hold.
+#[derive(Debug, Deserialize, Default)]
+pub struct RouteMatchCfg {
+    /// `main`|`judge`|`classify`|`summarize`|`verify`|`review`; empty ⇒ any role.
+    #[serde(default)]
+    pub role: String,
+    /// Fires only when the request needs at least this much context.
+    #[serde(default)]
+    pub min_context: u32,
+}
+
+/// The `prefer` half — how to order the survivors once a rule matches.
+#[derive(Debug, Deserialize, Default)]
+pub struct RoutePreferCfg {
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Preferred tier floor; empty ⇒ no tier bias.
+    #[serde(default)]
+    pub tier: String,
+    /// Explicit upstream-id order (a listed id sorts ahead of the unlisted).
+    #[serde(default)]
+    pub upstreams: Vec<String>,
+}
+
+/// One routing rule (`[[route.rules]]`): when `match` holds, order by `prefer`.
+#[derive(Debug, Deserialize, Default)]
+pub struct RouteRuleCfg {
+    #[serde(default, rename = "match")]
+    pub match_: RouteMatchCfg,
+    #[serde(default)]
+    pub prefer: RoutePreferCfg,
 }
 
 fn default_pool_fanout() -> usize {
@@ -1844,6 +1964,7 @@ impl Config {
             web_search: WebSearchCfg::default(),
             router: RouterCfg::default(),
             pool: PoolCfg::default(),
+            route: RouteCfg::default(),
             mode: ModeCfg::default(),
             dimensions: DimensionsCfg::default(),
             review: ReviewCfg::default(),
@@ -1914,5 +2035,161 @@ mod tests {
         assert!(cfg.members.is_empty());
         assert_eq!(cfg.policy, "cost");
         assert_eq!(cfg.on_saturation, "shed");
+    }
+
+    /// A hosted member carries the model-router-01 knobs: key-from-file, per-member
+    /// TLS + context window — so an authenticated/self-signed upstream is a member
+    /// with no secret in the config.
+    #[test]
+    fn positive_pool_member_hosted_upstream_fields() {
+        let cfg: PoolCfg = toml::from_str(
+            r#"
+            [[members]]
+            name = "glm"
+            endpoint = "https://213.173.96.56:8000/v1"
+            model = "/model"
+            api_key_file = "~/Downloads/runpod/glm/glm-api-key"
+            insecure_tls = true
+            context_window = 131072
+        "#,
+        )
+        .unwrap();
+        match &cfg.members[0] {
+            PoolMemberEntry::Detailed(c) => {
+                assert_eq!(c.api_key_file, "~/Downloads/runpod/glm/glm-api-key");
+                assert!(c.api_key.is_empty() && c.api_key_env.is_empty());
+                assert!(c.insecure_tls);
+                assert_eq!(c.context_window, Some(131_072));
+            }
+            PoolMemberEntry::Name(_) => panic!("expected a detailed member"),
+        }
+    }
+
+    /// Corner: the `api_key_env` key path parses (the other secret-safe form), and an
+    /// inline `api_key` may coexist with a file — the precedence is resolved at build
+    /// time, both just parse here.
+    #[test]
+    fn corner_pool_member_api_key_env_and_coexist() {
+        let cfg: PoolCfg = toml::from_str(
+            r#"
+            [[members]]
+            name = "kimi"
+            endpoint = "https://host/v1"
+            model = "moonshotai/Kimi-K3"
+            api_key = "inline"
+            api_key_env = "KIMI_KEY"
+            api_key_file = "~/k"
+        "#,
+        )
+        .unwrap();
+        match &cfg.members[0] {
+            PoolMemberEntry::Detailed(c) => {
+                assert_eq!(c.api_key, "inline");
+                assert_eq!(c.api_key_env, "KIMI_KEY");
+                assert_eq!(c.api_key_file, "~/k");
+            }
+            PoolMemberEntry::Name(_) => panic!("expected a detailed member"),
+        }
+    }
+
+    /// Negative: a bare-name member (no endpoint) carries none of the inline knobs —
+    /// it resolves via the registry, so the new fields simply don't apply.
+    #[test]
+    fn negative_pool_member_bare_name_has_no_inline_knobs() {
+        let cfg: PoolCfg = toml::from_str(r#"members = ["glm"]"#).unwrap();
+        assert!(matches!(cfg.members[0], PoolMemberEntry::Name(_)));
+        assert_eq!(cfg.members[0].name(), "glm");
+    }
+
+    /// Boundary: the new member knobs all default off — a keyless local member with
+    /// no TLS/window override still parses (no regression for the GPU-box case).
+    #[test]
+    fn boundary_pool_member_new_fields_default_off() {
+        let cfg: PoolCfg = toml::from_str(
+            r#"
+            [[members]]
+            name = "mi50"
+            endpoint = "http://mi50:11434/v1"
+            model = "mistral-small:24b"
+        "#,
+        )
+        .unwrap();
+        match &cfg.members[0] {
+            PoolMemberEntry::Detailed(c) => {
+                assert!(c.api_key_file.is_empty() && c.api_key_env.is_empty());
+                assert!(!c.insecure_tls);
+                assert_eq!(c.context_window, None);
+            }
+            PoolMemberEntry::Name(_) => panic!("expected a detailed member"),
+        }
+    }
+
+    /// The `[route]` surface parses the fleet + rules + default preference — the
+    /// Kimi/GLM shape, no secret in the config (keys via api_key_file).
+    #[test]
+    fn positive_route_config_parses_fleet_and_rules() {
+        let cfg: RouteCfg = toml::from_str(
+            r#"
+            [[upstreams]]
+            name = "kimi"
+            endpoint = "https://host/v1"
+            model = "moonshotai/Kimi-K3"
+            api_key_file = "~/k"
+            context_window = 131072
+            tags = ["reasoning", "long-context"]
+            tier = "heavy"
+            input_cost = 3.0
+
+            [[upstreams]]
+            name = "glm"
+            endpoint = "https://213/v1"
+            model = "/model"
+            api_key_file = "~/g"
+            insecure_tls = true
+            tags = ["reasoning"]
+            tier = "heavy"
+            input_cost = 1.0
+
+            [[rules]]
+            match = { role = "review" }
+            prefer = { tags = ["reasoning"], tier = "heavy" }
+
+            [default_prefer]
+            upstreams = ["kimi", "glm"]
+        "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.upstreams.len(), 2);
+        assert_eq!(cfg.upstreams[0].name, "kimi");
+        assert_eq!(cfg.upstreams[0].tags, vec!["reasoning", "long-context"]);
+        assert_eq!(cfg.upstreams[0].context_window, Some(131_072));
+        assert_eq!(cfg.upstreams[0].input_cost, Some(3.0));
+        assert!(cfg.upstreams[1].insecure_tls);
+        assert_eq!(cfg.rules.len(), 1);
+        assert_eq!(cfg.rules[0].match_.role, "review");
+        assert_eq!(cfg.default_prefer.upstreams, vec!["kimi", "glm"]);
+    }
+
+    /// Boundary: an empty `[route]` is a valid (unused) config with breaker defaults.
+    #[test]
+    fn boundary_empty_route_defaults() {
+        let cfg: RouteCfg = toml::from_str("").unwrap();
+        assert!(cfg.upstreams.is_empty() && cfg.rules.is_empty());
+        assert_eq!(cfg.failure_threshold, 3);
+        assert_eq!(cfg.cooldown_secs, 30);
+    }
+
+    /// Corner: a registry-resolved upstream (no endpoint) with no metadata parses.
+    #[test]
+    fn corner_route_upstream_bare_name_parses() {
+        let cfg: RouteCfg = toml::from_str(
+            r#"
+            [[upstreams]]
+            name = "glm"
+        "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.upstreams[0].name, "glm");
+        assert!(cfg.upstreams[0].endpoint.is_empty() && cfg.upstreams[0].tags.is_empty());
     }
 }

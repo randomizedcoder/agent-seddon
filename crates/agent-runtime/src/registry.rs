@@ -708,6 +708,60 @@ pub fn register_builtins(r: &mut Registry) {
         Ok(Arc::new(router) as Arc<dyn LlmProvider>)
     });
 
+    // --- task-router: metadata-driven, declaratively-routed generator (model-router 02) ---
+    //
+    // Like `router` it composes providers, but picks by running the declarative
+    // `[route]` policy over each upstream's live capabilities + configured
+    // tags/tier/cost against the request's requirements. An inline `endpoint` builds
+    // an OpenAI-compatible provider (no secret in the config — key via
+    // api_key_file/env); an empty endpoint resolves the name through the registry.
+    #[cfg(feature = "provider-router")]
+    r.provider("task-router", |ctx| {
+        let cfg = &ctx.cfg.route;
+        if cfg.upstreams.is_empty() {
+            anyhow::bail!(
+                "[route] upstreams must list at least one upstream when \
+                 `[agent] provider = \"task-router\"`"
+            );
+        }
+        let registry = ctx.registry()?;
+        let mut upstreams = Vec::new();
+        for u in &cfg.upstreams {
+            if u.name == "task-router" {
+                anyhow::bail!("[route] upstreams must not include `task-router` itself");
+            }
+            let provider: Arc<dyn LlmProvider> = if u.endpoint.is_empty() {
+                registry
+                    .build_provider(&u.name, ctx)
+                    .with_context(|| format!("building route upstream `{}`", u.name))?
+            } else {
+                Arc::new(crate::builder::build_route_upstream(
+                    u,
+                    ctx.cfg.agent.context_window,
+                )?) as Arc<dyn LlmProvider>
+            };
+            let tier = agent_core::PoolTier::parse(&u.tier).unwrap_or(agent_core::PoolTier::Medium);
+            upstreams.push(agent_providers::RouterUpstream {
+                id: u.name.clone(),
+                tags: u.tags.clone(),
+                tier,
+                input_cost: u.input_cost.unwrap_or(0.0),
+                provider: crate::metered::provider(provider, ctx.metrics.clone(), &u.name),
+            });
+        }
+        let metrics = ctx.metrics.clone();
+        let router =
+            agent_providers::TaskRouter::new(upstreams, crate::builder::build_route_policy(cfg))?
+                .with_breaker(
+                    cfg.failure_threshold,
+                    cfg.cooldown_secs.saturating_mul(1_000),
+                )
+                .with_observer(Arc::new(move |ev| {
+                    crate::metered::record_route_event(&metrics, ev);
+                }));
+        Ok(Arc::new(router) as Arc<dyn LlmProvider>)
+    });
+
     // --- forge backends (the Forge seam, parity spec 27) ---
     #[cfg(feature = "forge-github")]
     r.forge("github", |ctx| {
