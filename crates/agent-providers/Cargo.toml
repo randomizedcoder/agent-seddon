@@ -68,10 +68,22 @@ name = "gate_verdict"
 harness = false
 required-features = ["provider-consensus"]
 
+# Guards the fork engine's dispatch path (clone/spawn/join/merge bookkeeping,
+# concat merge — no LLM in the measurement).
+[[bench]]
+name = "branch_dispatch"
+harness = false
+required-features = ["provider-branching"]
+
 [[test]]
 name = "leak"
 harness = true
 required-features = ["dhat-heap", "provider-pool"]
+
+[[test]]
+name = "branch_leak"
+harness = true
+required-features = ["dhat-heap", "provider-branching"]
 
 [lints]
 workspace = true

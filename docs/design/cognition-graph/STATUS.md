@@ -11,7 +11,7 @@ designed (and why). Update both with every increment PR.
 | 02 `agreed_seq` + `DigestStore` (clickhouse default / sqlite / grpc) + background distiller | [`02-background-distiller.md`](02-background-distiller.md) | ✅ **done** — seam + both backends (durable CH writes, schema.sql provisioned, live CH round-trip), testdata corpus + `digest_query` bench + dhat leak test, `agreed_seq` + FIFO worker + `[digest]` wiring + one-shot drain, live-verified ledger rows, [component doc](../../components/digest.md). Deferred to inc 04: alternatives rows, role routing, grpc backend, telemetry mirror for sqlite deployments |
 | 03 Instant compaction (`instant-window` strategy) | [`03-instant-compaction.md`](03-instant-compaction.md) | ✅ **done** — engine (8 corpus tests incl. phase-drift relevance + planted-hostile-row), wiring (`FactoryCtx.built_digests`, `[instant]` config, fails closed without `[digest]`), **live-verified** (3 real ledger assemblies under a stress budget), `instant_assemble` bench with a path-guard assert (2.6M Ir, ceiling 6.5M), [component doc](../../components/instant-compaction.md) |
 | 04 Graph document (textproto) + anchor executor + `graph.proto`/`digest.proto` services | [`04-graph-config.md`](04-graph-config.md) | ✅ **done** — `DigestService` (port 50081, 7 round-trips) + the full document layer (`agent-graph`: schema registry with derived JSON Schemas, 10 typed issue classes, textproto via prost-reflect over the reflection descriptor set, `FileGraphs`, graph-document corpus), `GraphService` (port 50082, `--serve-graph`, 10 round-trips incl. validate-then-accept + raw-pb kind rejection), the anchor-slot executor (compile → config overlay driving the increment-01/02/03 engines, per-kind distiller enablement, `--cognition-graph` flag), example graphs `config/cognition/{simple,intermediate}.textproto` as integration fixtures, `graph_load` bench + dhat leak gate, [component doc](../../components/graph.md) |
-| 05 Parallel branches — `split`/`join`/`merge`, all/any/quorum joins, compare/synthesize merge | [`05-parallel-branches.md`](05-parallel-branches.md) | ⬜ not started |
+| 05 Parallel branches — `split`/`join`/`merge`, all/any/quorum joins, compare/synthesize merge | [`05-parallel-branches.md`](05-parallel-branches.md) | ✅ **done** — document layer (3 new node types + `generate.lens`, `bad_branching` structure validation: shared-join/linear-chain/no-cross-branch/no-nesting, fan-out ≤ 5 per split / ≤ 8 per document), the `BranchingProvider` engine (17 tests: paused-clock races, position-swapped compare, tool-call degradation, hostile judge verdicts), builder fork composition (`resolve_provider_ref` shared with the consensus factory, branch/post-merge gates, judge), **loser alternatives → the ledger** (injection-screened `kind=alternatives` rows), 3 `agent_graph_*` metric families, `advanced.textproto` example + fixture, `branch_dispatch` bench + fork-cancel dhat leak gate |
 
 ## Implementation log (deviations from design, discoveries, decisions)
 
@@ -127,6 +127,40 @@ designed (and why). Update both with every increment PR.
   `GateOutcome` (the observer lives at the registry); these land with the
   Option C interpreter or a dedicated side-channel, whichever comes first.
 
+- **05 / fork wiring is graph-only** — no `[fork]` TOML block. The other
+  increments re-express TOML config; a fork has no non-graph equivalent, so
+  the document is its only description (the graph feature earning its keep).
+- **05 / v1 branch bodies are linear chains; nested splits rejected** at
+  validation (`bad_branching`), not silently ignored — the total-branches cap
+  (8/document) is the standing contract for when nesting lands.
+- **05 / join-policy shortfalls proceed, they don't fall back**: an error or
+  `partial` timeout reduces the arrived set; merge proceeds with ≥ 1 arrival
+  (`single_survivor` counted). Only ZERO arrivals — or a `fail` timeout —
+  falls back to the single-path completion. Softer than a literal reading of
+  the design ("policy unsatisfiable → fallback"), and never worse than the
+  single path it would fall back to anyway.
+- **05 / compare judges once per order, not pairwise**: one call in branch
+  order + one reversed (any N); both must agree or the pick falls back to
+  stable branch order. Pairwise round-robins at N=3 cost 6 judge calls for
+  little marginal bias control.
+- **05 / synthesize with tool calls degrades to compare** (counted
+  `degraded_compare`): tool invocations cannot be textually blended; the
+  winner's response returns verbatim, tool calls intact.
+- **05 / loser-alternatives rows use a millisecond seq**: the delivery-path
+  `agreed_seq` is not visible at the provider layer, so fork alternatives key
+  on `ts_ms` (+index) — unique and seq-ordered for assembly. Unify when a
+  delivery-path side-channel exists. Gate-verdict alternatives (increment 01's
+  observer) remain deferred on the same missing side-channel.
+- **05 / branch fan-out multiplies cost on EVERY completion**, including
+  tool-call iterations (the fork cannot know pre-generation whether a
+  completion will be final, unlike the gate's post-generation `Final` scope).
+  Compare-pick keeps agentic loops coherent (one branch's response returns
+  verbatim). This is the track's stated philosophy — spend models heavily —
+  but operators should mind `agent_graph_branches_total` × per-branch cost.
+- **05 / branching tests caught a real bug pre-commit**: the single-survivor
+  merge arm consumed the arrival before fates were recorded, mislabelling the
+  race winner as `cancelled` — the `any`-join corner test flagged it.
+
 ## Bench baselines (filled per increment, after the optimization pass)
 
 | Increment | Bench | Ir before → after fruit | Ceiling set |
@@ -135,16 +169,18 @@ designed (and why). Update both with every increment PR.
 | 02 | `digest_query::query_summaries_and_keywords` | 2,064,651 → 2,053,229 (fruit: `prepare_cached` — constant SQL, skip re-parse on repeated compaction reads; remaining = rusqlite row stepping + per-row keyword decode, load-bearing) | 5,200,000 (~2.5×) |
 | 03 | `instant_assemble::instant_assemble` | 2,612,735 (reviewed: 3 ledger queries + per-row injection re-screens + assembly, profile matches digest_query, compaction-time only — no fruit taken). **Lesson: the in-bench path-guard assert is load-bearing — an unguarded first run silently measured the drop-oldest fallback at 64k Ir** | 6,500,000 (~2.5×) |
 | 04 | `graph_load::load_and_validate` | 599,480 (reviewed: marginal textproto parse + wire→core decode + typed validation of the shipped ~5-node example; the once-per-process descriptor-pool build lands in setup, mirroring the store's long-lived registry. prost-reflect text parsing dominates; startup/edit-time only — no fruit worth taking) | 1,500,000 (~2.5×) |
+| 05 | `branch_dispatch::fork_dispatch` | 48,496 (reviewed: runtime setup + 3 spawns + request clones + concat merge + fate bookkeeping, path-guarded so the full three-section merge is provably measured; once per forked completion, dwarfed by the N LLM calls — no fruit worth taking) | 125,000 (~2.5×) |
 
 ## Example graphs (user, 2026-08-09)
 
-`config/cognition/` — `simple` (gate only) and `intermediate` (gate +
-background distillation + instant compaction) are **shipped**, as scenario
-files AND integration fixtures (`agent-graph/tests/examples.rs` asserts each
-file loads through the real store and equals its `testdata` twin; the executor
-compile tables run over the same corpus). `advanced` (fork/join
-safety×performance branches + synthesize merge) lands with increment 05's
-`split`/`join`/`merge` node set.
+`config/cognition/` — **all three shipped**: `simple` (gate only),
+`intermediate` (gate + background distillation + instant compaction), and
+`advanced` (the asymmetric safety×performance fork with a branch-local gate,
+`all` join, synthesize merge with losers → the alternatives ledger, final
+gate, full background/compaction flow). Each is a runnable scenario file AND
+an integration fixture (`agent-graph/tests/examples.rs` asserts each file
+loads through the real store and equals its `testdata` twin; the executor
+compile tables and the fork-composition path run over the same corpus).
 
 ## Deferred (explicit, from README)
 

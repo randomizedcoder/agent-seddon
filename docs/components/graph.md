@@ -61,13 +61,44 @@ cannot drift). The Flutter portal renders palette + forms entirely from this
 response. `Get` of a broken stored document is `FAILED_PRECONDITION` (server
 state, caller falls back), not a fabricated empty graph.
 
-## Node types (v1)
+## Node types
 
-`generate`, `critic_gate` (loop-until), `distill_summary`, `distill_facts`,
-`objective`, `compact_assemble` — each registered in
-`agent-graph/src/schema.rs` with ports + a `ParamSpec` table. Increment 05 adds
-`split`/`join`/`merge`. Adding a type = implement + one table entry
-(`every_node_type_has_a_schema` keeps the palette honest).
+`generate` (with a `lens` for branches), `critic_gate` (loop-until),
+`distill_summary`, `distill_facts`, `objective`, `compact_assemble`, plus the
+fork set — `split`, `join`, `merge` — each registered in
+`agent-graph/src/schema.rs` with ports + a `ParamSpec` table. Adding a type =
+implement + one table entry (`every_node_type_has_a_schema` keeps the palette
+honest).
+
+## Parallel branches (increment 05)
+
+A `split` duplicates the flowing request down N concurrent branches (each its
+own chain: a lens-focused `generate`, optionally with a branch-local
+`critic_gate` — branches need not be symmetric); the `join` waits Go-style per
+its activation policy (`all` / `any` / `quorum(k)`, deadline clamped,
+stragglers cancelled and counted); the `merge` decides — `compare` (a
+position-swapped judge picks; disagreement/judge failure falls back to stable
+branch order), `synthesize` (an aggregator combines the strongest elements;
+degrades to compare when a candidate carries tool calls), or `concat`. The
+builder composes this as a `BranchingProvider` (feature `provider-branching`)
+around the configured base provider; branch/judge names resolve like route
+upstreams. **Fork wiring is graph-only** — there is no TOML block; the
+document is the only way to describe a fork.
+
+Fail-soft: a branch error means that branch lost, never the turn; zero
+arrivals falls back to a plain single-path completion. **Losers are never
+wasted**: non-chosen branches are filed to the digest ledger as
+`kind = alternatives` rows (injection-screened, under the session's identity)
+with a reconsider-when trigger from the judge — instant compaction re-surfaces
+them. Structure is validated at load (`bad_branching`): linear branch chains
+meeting at one shared join, one merge after it, per-split fan-out ≤ 5,
+document total ≤ 8, no cross-branch edges, no nested splits (deferred).
+
+Observability: `agent_graph_branches_total{split, fate}` (won/merged/lost/
+cancelled/timeout/error — the split's cost multiplier, visible),
+`agent_graph_join_wait_seconds{policy}`, `agent_graph_merge_total{strategy,
+outcome}`; alternatives-row writes count on `agent_distill_jobs_total
+{kind="alternatives"}`.
 
 ## Testing / harness
 
