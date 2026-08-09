@@ -43,6 +43,7 @@ default = [
     "provider-pool",
     "provider-consensus",
     "digest",
+    "graph",
     "mode",
     "review",
     "prompt",
@@ -74,6 +75,9 @@ digest = [
     "agent-digest/digest-sqlite",
     "agent-digest/digest-clickhouse",
 ]
+# Cognition-graph document (cognition-graph 04): the declarative node graph +
+# node-type schema registry (`[graph] store`, `--serve-graph`).
+graph = ["dep:agent-graph"]
 # General task-mode detection (the TaskClassifier seam), always-on. See
 # docs/design/adaptive-cognition/01-mode.md.
 mode = ["dep:agent-mode"]
@@ -219,6 +223,7 @@ agent-memory.workspace = true
 agent-context.workspace = true
 agent-prompt = { workspace = true, optional = true }
 agent-digest = { workspace = true, optional = true }
+agent-graph = { workspace = true, optional = true }
 agent-metrics-proxy = { workspace = true, optional = true }
 agent-tokenizer = { workspace = true, optional = true }
 agent-web = { workspace = true, optional = true }

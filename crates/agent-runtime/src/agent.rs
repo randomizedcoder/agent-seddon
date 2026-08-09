@@ -190,6 +190,9 @@ pub struct Agent {
     digests: Option<Arc<dyn agent_core::DigestStore>>,
     /// `(summary_max_tokens, facts_max_tokens)` for the distiller's completions.
     distill_tokens: (u32, u32),
+    /// The cognition-graph document store (cognition-graph 04). `None` ⇒ the
+    /// graph-less built-in behavior.
+    graph: Option<Arc<dyn agent_core::GraphStore>>,
 }
 
 impl Agent {
@@ -251,6 +254,7 @@ impl Agent {
             scheduler: None,
             digests: None,
             distill_tokens: (512, 256),
+            graph: None,
         }
     }
 
@@ -264,6 +268,12 @@ impl Agent {
     ) -> Self {
         self.digests = Some(store);
         self.distill_tokens = (summary_max_tokens, facts_max_tokens);
+        self
+    }
+
+    /// Attach the cognition-graph document store (cognition-graph 04).
+    pub fn with_graph(mut self, store: Arc<dyn agent_core::GraphStore>) -> Self {
+        self.graph = Some(store);
         self
     }
 
@@ -707,6 +717,12 @@ impl Agent {
     /// The digest ledger, if `[digest] store` is configured (`--serve-digest`).
     pub fn digest_store(&self) -> Option<Arc<dyn agent_core::DigestStore>> {
         self.digests.clone()
+    }
+
+    /// The cognition-graph document store, if `[graph] store` is configured
+    /// (`--serve-graph`).
+    pub fn graph_store(&self) -> Option<Arc<dyn agent_core::GraphStore>> {
+        self.graph.clone()
     }
 
     pub fn prompt_store(&self) -> Option<Arc<dyn agent_core::PromptStore>> {

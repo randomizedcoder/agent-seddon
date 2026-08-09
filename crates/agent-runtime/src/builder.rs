@@ -543,6 +543,28 @@ pub async fn build_agent_with(
     #[cfg(not(feature = "digest"))]
     let digest_store: Option<Arc<dyn agent_core::DigestStore>> = None;
 
+    // The cognition-graph document (cognition-graph 04), opt-in via
+    // `[graph] store`. The file backend re-validates on every read, so a
+    // hand-edited invalid document fails closed here, not at the executor.
+    #[cfg(feature = "graph")]
+    let graph_store: Option<Arc<dyn agent_core::GraphStore>> = match cfg.graph.store.as_str() {
+        "" => None,
+        "file" => Some(Arc::new(agent_graph::FileGraphs::new(expand_tilde(
+            &cfg.graph.file,
+        )))),
+        #[cfg(feature = "grpc")]
+        "grpc" => {
+            let ep = crate::registry::grpc_client_endpoint(
+                &cfg.grpc.graph.endpoint,
+                agent_grpc::constants::GRAPH,
+            );
+            Some(Arc::new(agent_grpc::client::GrpcGraphs::connect(&ep)?))
+        }
+        other => anyhow::bail!("unknown [graph] store `{other}`"),
+    };
+    #[cfg(not(feature = "graph"))]
+    let graph_store: Option<Arc<dyn agent_core::GraphStore>> = None;
+
     #[allow(unused_mut)]
     let mut full_ctx = crate::registry::FactoryCtx::new(&cfg, &metrics)
         .with_provider(&provider)
@@ -996,6 +1018,10 @@ pub async fn build_agent_with(
             cfg.digest.summary_max_tokens,
             cfg.digest.facts_max_tokens,
         ),
+        None => agent,
+    };
+    let agent = match &graph_store {
+        Some(g) => agent.with_graph(g.clone()),
         None => agent,
     };
     let agent = match prompt_store_seam {
@@ -1568,7 +1594,8 @@ pub(crate) fn build_route_policy(cfg: &crate::config::RouteCfg) -> agent_provide
     feature = "provider-openai-compat",
     feature = "provider-anthropic",
     feature = "provider-pool",
-    feature = "digest"
+    feature = "digest",
+    feature = "graph"
 ))]
 fn expand_tilde(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/") {

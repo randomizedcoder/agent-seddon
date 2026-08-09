@@ -546,6 +546,18 @@ cooldown_secs       = 30          # how long a breaker stays open before re-prob
 # facts_max_chars = 4096
 # alternatives_max_chars = 2048
 
+# The cognition-graph document (cognition-graph 04): the declarative node graph
+# re-expressing the gate/distiller/compaction wiring above, editable as data
+# (and, served via --serve-graph, by the portal's drag-drop editor). Off by
+# default — with no [graph] store the increments behave exactly as their own
+# blocks configure them. The file backend re-validates the textproto document
+# on every read and rejects invalid documents wholesale (typed per-node
+# issues). See docs/design/cognition-graph/04-graph-config.md.
+#
+# [graph]
+# store = "file"                     # "" (off) | "file" | "grpc" (central editor service)
+# file = ".agent/graph.textproto"    # file backend only; see config/cognition/ examples
+
 # General task-mode detection (the TaskClassifier seam). Runs every turn to detect
 # when to switch to a more appropriate mode; drives the in-loop review hand-off, and
 # (later) mode-aware compaction + dimensional memory. ON by default — with no [pool]

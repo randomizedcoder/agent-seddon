@@ -215,6 +215,15 @@
       metrics_port = 9631;
     };
 
+    # The cognition-graph document (cognition-graph 04): the `GraphStore` seam —
+    # get/put/validate the declarative node graph + `DescribeNodeTypes`, the
+    # schema registry a graph editor (the portal) renders from.
+    graph = {
+      port = 50082;
+      socket = "/tmp/agent-seddon/graph.sock";
+      metrics_port = 9632;
+    };
+
     # NOT a seam: the opt-in `agent --serve-sessions` gateway (docs/design/portal),
     # which hosts the `SessionRegistryService` (open/close/heartbeat) plus a
     # *driving* `AgentSessionService` (the `Send` RPC — submit a goal, stream the

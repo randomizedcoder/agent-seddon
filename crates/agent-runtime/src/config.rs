@@ -72,6 +72,8 @@ pub struct Config {
     #[serde(default)]
     pub instant: InstantCfg,
     #[serde(default)]
+    pub graph: GraphCfg,
+    #[serde(default)]
     pub mode: ModeCfg,
     #[serde(default)]
     pub dimensions: DimensionsCfg,
@@ -583,6 +585,34 @@ impl Default for InstantCfg {
 
 fn default_instant_objective_tokens() -> u32 {
     128
+}
+
+/// The cognition-graph document (`[graph]`, cognition-graph 04). Empty `store`
+/// = off — the increments behave exactly as their own TOML blocks wired them
+/// (the graph is a re-expression, not a prerequisite).
+/// See docs/design/cognition-graph/04-graph-config.md.
+#[derive(Debug, Deserialize)]
+pub struct GraphCfg {
+    /// "" (off) | "file" (textproto on disk) | "grpc" (a central document
+    /// service, e.g. edited by the portal).
+    #[serde(default)]
+    pub store: String,
+    /// Textproto document path (`file` backend only).
+    #[serde(default = "default_graph_file")]
+    pub file: String,
+}
+
+impl Default for GraphCfg {
+    fn default() -> Self {
+        Self {
+            store: String::new(),
+            file: default_graph_file(),
+        }
+    }
+}
+
+fn default_graph_file() -> String {
+    ".agent/graph.textproto".to_string()
 }
 fn default_instant_min_coverage() -> f32 {
     0.6
@@ -1592,6 +1622,8 @@ pub struct GrpcCfg {
     #[serde(default)]
     pub digest: GrpcSeamCfg,
     #[serde(default)]
+    pub graph: GrpcSeamCfg,
+    #[serde(default)]
     pub review: GrpcSeamCfg,
     /// Not a seam: the opt-in `agent --serve-sessions` gateway (docs/design/portal),
     /// which hosts the `SessionRegistryService` + a *driving* `AgentSessionService`
@@ -2100,6 +2132,7 @@ impl Config {
             consensus: ConsensusCfg::default(),
             digest: DigestCfg::default(),
             instant: InstantCfg::default(),
+            graph: GraphCfg::default(),
             mode: ModeCfg::default(),
             dimensions: DimensionsCfg::default(),
             review: ReviewCfg::default(),
@@ -2381,6 +2414,27 @@ mod tests {
         assert_eq!(cfg.objective_max_tokens, 128);
         assert!((cfg.min_coverage - 0.6).abs() < f32::EPSILON);
         assert_eq!(cfg.facts_max_chars, 4096);
+    }
+
+    #[test]
+    fn positive_graph_config_parses() {
+        let cfg: GraphCfg = toml::from_str(
+            r#"
+            store = "file"
+            file = "config/cognition/intermediate.textproto"
+        "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.store, "file");
+        assert_eq!(cfg.file, "config/cognition/intermediate.textproto");
+    }
+
+    /// Boundary: an empty `[graph]` is off, with the default document path.
+    #[test]
+    fn boundary_empty_graph_defaults() {
+        let cfg: GraphCfg = toml::from_str("").unwrap();
+        assert!(cfg.store.is_empty());
+        assert_eq!(cfg.file, ".agent/graph.textproto");
     }
 
     /// Boundary: an empty `[consensus]` is a valid (unused) config with defaults —
