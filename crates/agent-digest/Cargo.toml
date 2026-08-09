@@ -27,3 +27,11 @@ tokio = { workspace = true, optional = true }
 agent-testkit.workspace = true
 rstest.workspace = true
 tokio = { workspace = true }
+iai-callgrind.workspace = true
+
+# Guards the ledger read path (fetch → decode → keyword filter → cap) over the
+# deterministic testdata corpus; sqlite in-memory is the ephemeral harness.
+[[bench]]
+name = "digest_query"
+harness = false
+required-features = ["digest-sqlite"]

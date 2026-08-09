@@ -52,12 +52,24 @@ designed (and why). Update both with every increment PR.
 - **01 / live schema drift observed, handled**: GLM once returned
   `alternatives` as an array of *strings* (not objects); the sanitizer drops
   non-conforming entries safely — exactly the fail-closed shape intended.
+- **02 / deterministic testdata corpus added** (user request 2026-08-09):
+  `agent_digest::testdata` — phase-shaped session corpora (section-locked
+  summaries whose content/keywords shift explore → implement → debug →
+  document; facts; periodic alternatives/objectives), pure functions of
+  `(session, seq)` so iai counts reproduce. SQLite is the ephemeral harness
+  (`populated_sqlite` builds an in-memory ledger, drops with the test);
+  ClickHouse gets an `#[ignore]`d live round-trip seeding the same corpus
+  (versioned replace + all filters), passed against the provisioned server.
+- **02 / ClickHouse keyword pushdown deferred**: the keyword prefilter runs
+  client-side in both backends (no untrusted string ever enters SQL text);
+  `hasAny` pushdown is the named scale upgrade.
 
 ## Bench baselines (filled per increment, after the optimization pass)
 
 | Increment | Bench | Ir before → after fruit | Ceiling set |
 |---|---|---|---|
 | 01 | `gate_verdict::verdict_round_full_lists` | 199,786 → 199,786 (reviewed: serde-dominated single parse ×2 + sanitize + set compare, once per critic round — no fruit worth taking) | 500,000 (~2.5×) |
+| 02 | `digest_query::query_summaries_and_keywords` | 2,064,651 → 2,053,229 (fruit: `prepare_cached` — constant SQL, skip re-parse on repeated compaction reads; remaining = rusqlite row stepping + per-row keyword decode, load-bearing) | 5,200,000 (~2.5×) |
 
 ## Deferred (explicit, from README)
 

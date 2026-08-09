@@ -260,4 +260,67 @@ mod tests {
             .expect_err("rejected");
         assert!(err.to_string().contains("invalid session_id"));
     }
+
+    /// Live round-trip of the standard corpus against a real server. Run with:
+    /// `nix run .#clickhouse-up`, then
+    /// `nix develop -c cargo test -p agent-digest --all-features -- --ignored`.
+    #[tokio::test]
+    #[ignore = "needs a running clickhouse (nix run .#clickhouse-up)"]
+    async fn live_corpus_round_trip_versioned_replace_and_filters() {
+        let s = ClickHouseDigests::new("localhost:9000", "agent", "default", "");
+        // A unique-ish session id per run keeps re-runs independent (append-only
+        // table; deterministic corpus would otherwise collide on ts dedupe).
+        let session = format!(
+            "live-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        );
+        for mut row in crate::testdata::session_rows(&session, 12) {
+            row.session_id = session.clone();
+            s.put(row).await.expect("live put");
+        }
+        // Re-distill exchange 3's summary: a versioned insert with a newer ts.
+        let mut redo = crate::testdata::digest(&session, 3, DigestKind::Summary);
+        redo.text = "re-distilled".into();
+        redo.ts_ms += 1_000_000;
+        s.put(redo).await.expect("versioned put");
+
+        let all = s
+            .query(&DigestQuery {
+                session_id: session.clone(),
+                ..DigestQuery::default()
+            })
+            .await
+            .expect("live query");
+        // 12 exchanges → 12+12+2+1 rows; the replace must NOT add a 28th.
+        assert_eq!(all.len(), 27, "newest-wins dedupe");
+        assert!(all.windows(2).all(|w| w[0].seq <= w[1].seq), "seq order");
+        let redone = all
+            .iter()
+            .find(|d| d.seq == 3 && d.kind == DigestKind::Summary)
+            .unwrap();
+        assert_eq!(redone.text, "re-distilled");
+
+        let facts = s
+            .query(&DigestQuery {
+                session_id: session.clone(),
+                kind: Some(DigestKind::Facts),
+                since_seq: Some(10),
+                ..DigestQuery::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(facts.len(), 3, "kind + since filters");
+        let kw = s
+            .query(&DigestQuery {
+                session_id: session,
+                keywords_any: vec!["alternatives".into()],
+                ..DigestQuery::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(kw.len(), 2, "keyword prefilter");
+    }
 }

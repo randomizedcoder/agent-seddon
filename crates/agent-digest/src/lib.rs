@@ -25,6 +25,11 @@ mod clickhouse;
 #[cfg(feature = "digest-clickhouse")]
 pub use clickhouse::ClickHouseDigests;
 
+/// Deterministic, realistic corpora for tests and benches (phase-shaped summaries
+/// on the section-locked template, facts, alternatives, objectives). Also used by
+/// downstream crates (instant compaction) to exercise a populated ledger.
+pub mod testdata;
+
 /// Caps applied to every row before it reaches a backend (LLM output is unbounded
 /// until someone bounds it).
 pub const MAX_TEXT_BYTES: usize = 16 * 1024;
