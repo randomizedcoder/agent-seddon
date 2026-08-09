@@ -183,6 +183,13 @@ pub struct Metrics {
     search_errors: IntCounterVec,
     search_reindex: IntCounterVec,
 
+    // --- ast / code graph (recorded by the ast metrics wrapper) -----------
+    // Labelled by `backend` (go/scip/grpc) + `verb` so each code-graph query
+    // reads distinctly under the same interface.
+    ast_query_seconds: HistogramVec,
+    ast_result_nodes: HistogramVec,
+    ast_errors: IntCounterVec,
+
     // --- git / repo (recorded by the repo metrics wrapper) ----------------
     // Labelled by `backend` (cli/hybrid/grpc), like the search families.
     repo_op_seconds: HistogramVec,
@@ -966,6 +973,29 @@ impl Metrics {
         )
         .unwrap();
 
+        // --- ast / code graph -------------------------------------------------
+        let ast_query_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "agent_ast_query_seconds",
+                "Code-graph query latency (measured inside the backend)",
+            ),
+            &["backend", "verb"],
+        )
+        .unwrap();
+        let ast_result_nodes = HistogramVec::new(
+            HistogramOpts::new(
+                "agent_ast_result_nodes",
+                "Symbols/nodes returned by a code-graph query",
+            ),
+            &["backend", "verb"],
+        )
+        .unwrap();
+        let ast_errors = IntCounterVec::new(
+            Opts::new("agent_ast_errors_total", "Code-graph query errors"),
+            &["backend", "verb"],
+        )
+        .unwrap();
+
         // --- git / repo -------------------------------------------------------
         let repo_op_seconds = HistogramVec::new(
             HistogramOpts::new(
@@ -1224,6 +1254,9 @@ impl Metrics {
             Box::new(search_index_fresh.clone()),
             Box::new(search_errors.clone()),
             Box::new(search_reindex.clone()),
+            Box::new(ast_query_seconds.clone()),
+            Box::new(ast_result_nodes.clone()),
+            Box::new(ast_errors.clone()),
             Box::new(repo_op_seconds.clone()),
             Box::new(repo_errors.clone()),
             Box::new(repo_worktrees.clone()),
@@ -1357,6 +1390,9 @@ impl Metrics {
             search_index_fresh,
             search_errors,
             search_reindex,
+            ast_query_seconds,
+            ast_result_nodes,
+            ast_errors,
             repo_op_seconds,
             repo_errors,
             repo_worktrees,
@@ -1933,6 +1969,22 @@ impl Metrics {
         self.search_errors.with_label_values(&[backend, op]).inc();
     }
 
+    // --- ast (code-graph seam) instrumentation ----------------------------
+
+    /// Record a code-graph query's latency + result size, labelled by backend + verb.
+    pub fn on_ast_query(&self, backend: &str, verb: &str, seconds: f64, nodes: usize) {
+        self.ast_query_seconds
+            .with_label_values(&[backend, verb])
+            .observe(seconds);
+        self.ast_result_nodes
+            .with_label_values(&[backend, verb])
+            .observe(nodes as f64);
+    }
+    /// Count a code-graph query error, tagged with the verb.
+    pub fn on_ast_error(&self, backend: &str, verb: &str) {
+        self.ast_errors.with_label_values(&[backend, verb]).inc();
+    }
+
     // --- repo (git seam) instrumentation ----------------------------------
 
     /// Record a RepoBackend operation's latency, labelled by backend + op name.
@@ -2393,6 +2445,8 @@ mod tests {
         m.on_search_reindex("tantivy", "startup");
         m.set_search_fresh("tantivy", true);
         m.on_search_error("tantivy", "query");
+        m.on_ast_query("go", "callers", 0.002, 7);
+        m.on_ast_error("go", "callers");
         m.on_repo_op("cli", "diff", 0.01);
         m.on_repo_error("cli", "read_file");
         m.set_repo_worktrees("cli", 2);
@@ -2427,6 +2481,9 @@ mod tests {
             "agent_search_index_fresh",
             "agent_search_errors_total",
             "agent_search_reindex_total",
+            "agent_ast_query_seconds",
+            "agent_ast_result_nodes",
+            "agent_ast_errors_total",
             "agent_repo_op_seconds",
             "agent_repo_errors_total",
             "agent_repo_worktrees_live",

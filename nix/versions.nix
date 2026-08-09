@@ -123,6 +123,13 @@ in
   go = pkgs.go_1_25 or pkgs.go;
   golangci-lint = pkgs.golangci-lint;
   gosec = pkgs.gosec;
+  # SCIP indexers for the AstBackend `scip` engine (docs/components/ast.md). `scip-go`
+  # emits a `.scip` index (symbols + implicit interface implementations) the engine
+  # ingests; `rust-analyzer scip` covers Rust (reuses the pin above). Others
+  # (scip-typescript/scip-python) are added here when wired.
+  scip-go = pkgs.scip-go;
+  # Structural (tree-sitter) pattern search for the `structural_search` tool.
+  ast-grep = pkgs.ast-grep;
   # `buf` lints the `.proto` wire contracts and gates wire-compatibility
   # (`buf lint` + `buf breaking`); Rust codegen stays on `tonic-build`. buf *does*
   # now drive **Dart** codegen for the portal via `buf.gen.yaml` (`nix run

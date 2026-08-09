@@ -45,6 +45,19 @@ mod search_index;
 #[cfg(feature = "tool-search-index")]
 pub use search_index::{IndexLsTool, SearchTool};
 
+#[cfg(feature = "tool-ast-graph")]
+mod ast_graph;
+#[cfg(feature = "tool-ast-graph")]
+pub use ast_graph::{
+    FindCallchainTool, FindCalleesTool, FindCallersTool, FindChangedCallersTool,
+    FindDependencyPathTool, FindImplementationsTool, FindInterfaceTool, FindSymbolTool,
+};
+
+#[cfg(feature = "tool-structural-search")]
+mod structural_search;
+#[cfg(feature = "tool-structural-search")]
+pub use structural_search::StructuralSearchTool;
+
 #[cfg(feature = "tool-session-recall")]
 mod session_recall;
 #[cfg(feature = "tool-session-recall")]

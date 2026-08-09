@@ -224,6 +224,19 @@
       metrics_port = 9632;
     };
 
+    # Type-aware code graph (docs/design/code-graph/): the `AstBackend` seam — Go
+    # call graph, interface implementations, and package dependency paths over the
+    # pinned `agent-go-graph` helper. Servable so a remote host can answer graph
+    # queries; the helper runs in the Sandbox, so the socket-permission caveat that
+    # applies to sandbox/pty applies here too.
+    # (Merge note: originally allocated 50081/9631 on its branch; renumbered —
+    # the digest seam landed on main first and owns that slot.)
+    ast = {
+      port = 50083;
+      socket = "/tmp/agent-seddon/ast.sock";
+      metrics_port = 9633;
+    };
+
     # NOT a seam: the opt-in `agent --serve-sessions` gateway (docs/design/portal),
     # which hosts the `SessionRegistryService` (open/close/heartbeat) plus a
     # *driving* `AgentSessionService` (the `Send` RPC — submit a goal, stream the

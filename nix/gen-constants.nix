@@ -70,6 +70,7 @@ let
     ${seamConst "METRICS_PROXY" g.metrics_proxy}
     ${seamConst "DIGEST" g.digest}
     ${seamConst "GRAPH" g.graph}
+    ${seamConst "AST" g.ast}
 
     /// The opt-in `agent --serve-sessions` gateway (not a seam — it hosts the
     /// session registry + a driving `AgentSessionService`).

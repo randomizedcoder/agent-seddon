@@ -31,6 +31,7 @@ pub enum Seam {
     Context,
     Policy,
     Search,
+    Ast,
     Repo,
     Session,
     Scanner,
@@ -66,6 +67,7 @@ const ALL_SEAMS: &[Seam] = &[
     Seam::Context,
     Seam::Policy,
     Seam::Search,
+    Seam::Ast,
     Seam::Repo,
     Seam::Session,
     Seam::Scanner,
@@ -149,6 +151,13 @@ const SEAMS: &[SeamInfo] = &[
         name: "search",
         service: "agent.v1.SearchService",
         endpoint: constants::SEARCH,
+    },
+    SeamInfo {
+        seam: Seam::Ast,
+        flag: "--serve-ast",
+        name: "ast",
+        service: "agent.v1.AstService",
+        endpoint: constants::AST,
     },
     SeamInfo {
         seam: Seam::Repo,
@@ -374,6 +383,7 @@ impl Seam {
             Seam::Context => &cfg.grpc.context.listen,
             Seam::Policy => &cfg.grpc.policy.listen,
             Seam::Search => &cfg.grpc.search.listen,
+            Seam::Ast => &cfg.grpc.ast.listen,
             Seam::Repo => &cfg.grpc.repo.listen,
             Seam::Session => &cfg.grpc.session.listen,
             Seam::Scanner => &cfg.grpc.scanner.listen,
@@ -469,6 +479,13 @@ fn add_seam_service(
         Seam::Search => match agent.search() {
             Some(s) => (
                 router.add_service(srv::SearchServiceSvc::new(s).into_server()),
+                true,
+            ),
+            None => (router, false),
+        },
+        Seam::Ast => match agent.ast() {
+            Some(a) => (
+                router.add_service(srv::AstServiceSvc::new(a).into_server()),
                 true,
             ),
             None => (router, false),

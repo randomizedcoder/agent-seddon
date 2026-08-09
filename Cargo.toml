@@ -7,6 +7,7 @@ members = [
     "crates/agent-providers",
     "crates/agent-tools",
     "crates/agent-search",
+    "crates/agent-ast",
     "crates/agent-git",
     "crates/agent-memory",
     "crates/agent-context",
@@ -187,6 +188,7 @@ agent-retry = { path = "crates/agent-retry" }
 agent-providers = { path = "crates/agent-providers", default-features = false }
 agent-tools = { path = "crates/agent-tools", default-features = false }
 agent-search = { path = "crates/agent-search", default-features = false }
+agent-ast = { path = "crates/agent-ast", default-features = false }
 agent-git = { path = "crates/agent-git", default-features = false }
 agent-memory = { path = "crates/agent-memory", default-features = false }
 agent-context = { path = "crates/agent-context", default-features = false }

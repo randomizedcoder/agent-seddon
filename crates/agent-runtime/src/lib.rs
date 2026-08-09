@@ -1,6 +1,8 @@
 //! `agent-runtime` — wires the seams and runs the loop.
 
 mod agent;
+#[cfg(feature = "ast")]
+mod ast;
 mod builder;
 #[cfg(feature = "graph")]
 mod cognition;

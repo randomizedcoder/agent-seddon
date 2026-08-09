@@ -1,0 +1,183 @@
+// The `AstBackend` seam over gRPC — a type-aware code-graph gateway. Where
+// SearchService retrieves text and LspService answers position queries, AstService
+// answers whole-repo *structural* questions: callers/callees, call chains, interface
+// implementations (implicit in Go), and package dependency paths. One service can
+// front several named backends (go, scip, …); the `backend` selector on a request
+// routes to a named backend (empty ⇒ the server's default). `Reindex` is
+// server-streaming, the wire form of the reindex progress callback. Fail-soft: an
+// engine that can't parse/build a tree yields a partial/empty result, never a fault.
+syntax = "proto3";
+
+package agent.v1;
+
+// Reuse IndexState / IndexStatus / ReindexProgress (freshness + progress currency).
+import "agent/v1/search.proto";
+
+// The kind of a code symbol. `SYMBOL_KIND_UNKNOWN` is the proto3 zero value and the
+// additive fallback for a kind a peer doesn't recognise.
+enum SymbolKind {
+  SYMBOL_KIND_UNKNOWN = 0;
+  SYMBOL_KIND_FUNC = 1;
+  SYMBOL_KIND_METHOD = 2;
+  SYMBOL_KIND_INTERFACE = 3;
+  SYMBOL_KIND_STRUCT = 4;
+  SYMBOL_KIND_TYPE = 5;
+  SYMBOL_KIND_FIELD = 6;
+}
+
+message Symbol {
+  uint32 id = 1;
+  SymbolKind kind = 2;
+  string name = 3;
+  string recv = 4; // receiver type for methods; "" otherwise
+  string package = 5;
+  string file = 6; // repo-relative, confined
+  uint32 line = 7;
+  bool exported = 8;
+}
+
+// How a query names a target symbol: by stable graph id, or by name + optional
+// package/receiver. Model-supplied strings are matched, never interpolated.
+message SymbolRef {
+  optional uint32 id = 1;
+  string name = 2;
+  optional string package = 3;
+  optional string recv = 4;
+}
+
+message CallEdge {
+  uint32 caller_id = 1;
+  uint32 callee_id = 2;
+}
+
+// A subgraph result: nodes, the caller→callee edges among them, and the roots the
+// query started from.
+message AstCallGraph {
+  repeated Symbol nodes = 1;
+  repeated CallEdge edges = 2;
+  repeated uint32 roots = 3;
+  bool truncated = 4;
+  string backend = 5; // echoed for attribution
+}
+
+// One ordered call path (a chain of symbols).
+message CallPath {
+  repeated Symbol nodes = 1;
+}
+
+message AstCapabilities {
+  string backend = 1;
+  repeated string languages = 2; // e.g. ["go"]
+  repeated string verbs = 3;     // e.g. ["callers","implementations",...]
+  bool incremental = 4;
+}
+
+message AstStatusRequest {
+  string backend = 1;
+}
+message AstStatusResponse {
+  repeated IndexStatus backends = 1;
+}
+
+message AstCapabilitiesRequest {
+  string backend = 1;
+}
+message AstCapabilitiesResponse {
+  repeated AstCapabilities backends = 1;
+}
+
+message AstReindexRequest {
+  string backend = 1;
+}
+
+message FindSymbolRequest {
+  string name = 1;
+  optional SymbolKind kind = 2;
+  optional string package = 3;
+  bool exact = 4;
+  uint64 limit = 5; // agent-core `usize`
+  string backend = 6;
+}
+
+// The shared symbol-list response for the symbol-producing verbs (FindSymbol,
+// Implementations, InterfaceOf).
+message SymbolList {
+  repeated Symbol symbols = 1;
+  string backend = 2;
+}
+
+message ImplementationsRequest {
+  SymbolRef iface = 1;
+  string backend = 2;
+}
+
+message InterfaceOfRequest {
+  SymbolRef concrete_type = 1;
+  string backend = 2;
+}
+
+message CallersRequest {
+  SymbolRef target = 1;
+  uint32 hops = 2; // clamped server-side
+  string backend = 3;
+}
+
+message CalleesRequest {
+  SymbolRef target = 1;
+  uint32 hops = 2;
+  string backend = 3;
+}
+
+message CallchainRequest {
+  SymbolRef from = 1;
+  SymbolRef to = 2;
+  uint32 max_paths = 3; // clamped server-side
+  string backend = 4;
+}
+
+message CallchainResponse {
+  repeated CallPath paths = 1;
+  string backend = 2;
+}
+
+message BlastRadiusRequest {
+  repeated string changed = 1; // repo-relative paths
+  uint32 hops = 2;
+  string backend = 3;
+}
+
+message DependencyPathRequest {
+  string from_package = 1;
+  string to_package = 2;
+  string backend = 3;
+}
+
+message DependencyPathResponse {
+  repeated string packages = 1; // the import path, empty if unreachable
+  string backend = 2;
+}
+
+service AstService {
+  // Index freshness (one entry per served backend, or the selected one).
+  rpc Status(AstStatusRequest) returns (AstStatusResponse);
+  // Advertised verbs + languages per backend.
+  rpc Capabilities(AstCapabilitiesRequest) returns (AstCapabilitiesResponse);
+  // Build/refresh the code graph, streaming progress.
+  rpc Reindex(AstReindexRequest) returns (stream ReindexProgress);
+  // Find symbols by name.
+  rpc FindSymbol(FindSymbolRequest) returns (SymbolList);
+  // Concrete types that satisfy an interface (implicit satisfaction in Go).
+  rpc Implementations(ImplementationsRequest) returns (SymbolList);
+  // Interfaces a concrete type satisfies.
+  rpc InterfaceOf(InterfaceOfRequest) returns (SymbolList);
+  // Callers of the target, out to `hops` levels.
+  rpc Callers(CallersRequest) returns (AstCallGraph);
+  // Callees of the target, out to `hops` levels.
+  rpc Callees(CalleesRequest) returns (AstCallGraph);
+  // Distinct call paths from one symbol to another.
+  rpc Callchain(CallchainRequest) returns (CallchainResponse);
+  // Blast radius: callers of every symbol in the changed files.
+  rpc BlastRadius(BlastRadiusRequest) returns (AstCallGraph);
+  // An import path from one package to another.
+  rpc DependencyPath(DependencyPathRequest) returns (DependencyPathResponse);
+}

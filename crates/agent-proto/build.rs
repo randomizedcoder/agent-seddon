@@ -11,6 +11,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "proto/agent/v1/context.proto",
         "proto/agent/v1/policy.proto",
         "proto/agent/v1/search.proto",
+        "proto/agent/v1/ast.proto",
         "proto/agent/v1/repo.proto",
         "proto/agent/v1/session.proto",
         "proto/agent/v1/scanner.proto",

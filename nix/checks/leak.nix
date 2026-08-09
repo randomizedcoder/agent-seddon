@@ -30,6 +30,7 @@ craneLib.mkCargoDerivation (
       cargo test -p agent-lsp --features dhat-heap --test leak
       cargo test -p agent-sandbox --features dhat-heap --test leak
       cargo test -p agent-search --features dhat-heap,search-vector,search-tantivy --test leak
+      cargo test -p agent-ast --features dhat-heap --test leak
       cargo test -p agent-session --features dhat-heap --test leak
       cargo test -p agent-reference --features dhat-heap --test leak
       cargo test -p agent-scanner --features dhat-heap --test leak

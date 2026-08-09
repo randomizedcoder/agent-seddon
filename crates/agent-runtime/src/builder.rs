@@ -247,6 +247,33 @@ pub async fn build_agent_with(
         dispatch
     };
 
+    // Code graph: compose the configured AstBackend engines into one DispatchAst and
+    // expose the `find_*` structural-query tools (registered before the subagent set
+    // is captured, so child agents inherit them). Keep the handle to host over gRPC
+    // (`--serve-ast`) and to kick the background freshness build below. Skipped when
+    // no engine could be built (e.g. `go` selected but no sandbox).
+    #[cfg(feature = "ast")]
+    let ast_dispatch = {
+        match crate::ast::build_ast(&cfg, shared_sandbox.as_ref(), &metrics)? {
+            Some(dispatch) => {
+                let backend = dispatch.clone() as Arc<dyn agent_core::AstBackend>;
+                for tool in ast_tools(backend) {
+                    tools.register(crate::metered::tool(tool, metrics.clone()));
+                }
+                Some(dispatch)
+            }
+            None => None,
+        }
+    };
+
+    // `structural_search`: ast-grep AST-pattern search over the Sandbox (needs
+    // `ast-grep` on PATH). Registered before the subagent set is captured.
+    #[cfg(feature = "structural-search")]
+    if let Some(sandbox) = shared_sandbox.clone() {
+        let tool = Arc::new(agent_tools::StructuralSearchTool::new(sandbox));
+        tools.register(crate::metered::tool(tool, metrics.clone()));
+    }
+
     // Cross-session recall (parity spec 20): a tantivy index over the agent's own
     // past session transcripts, exposed as the `session_recall` tool. Opt-in — a
     // fresh checkout has no history worth searching. The backend is metered under
@@ -994,6 +1021,14 @@ pub async fn build_agent_with(
         crate::search::spawn_freshness(search_dispatch.clone(), metrics.clone());
     }
 
+    // Warm the code graph in the background so the first `find_*` query is fast.
+    #[cfg(feature = "ast")]
+    if cfg.ast.auto_index {
+        if let Some(dispatch) = &ast_dispatch {
+            crate::ast::spawn_freshness(dispatch.clone());
+        }
+    }
+
     // Keep the shared git mirror fresh in the background (opt-in via auto_fetch_secs).
     #[cfg(feature = "git")]
     crate::git::spawn_fetch(repo_backend.clone(), cfg.git.auto_fetch_secs);
@@ -1009,6 +1044,11 @@ pub async fn build_agent_with(
     );
     #[cfg(feature = "search")]
     let agent = agent.with_search(search_dispatch.clone() as Arc<dyn agent_core::SearchBackend>);
+    #[cfg(feature = "ast")]
+    let agent = match &ast_dispatch {
+        Some(d) => agent.with_ast(d.clone() as Arc<dyn agent_core::AstBackend>),
+        None => agent,
+    };
     #[cfg(feature = "git")]
     let agent = agent.with_repo(repo_backend);
     let agent = match llm_pool_seam {
@@ -1220,10 +1260,27 @@ fn build_tools(
 /// so `[tools] enabled` can list them without tripping the typo check. They are
 /// added unconditionally when their feature is compiled in, so the allowlist only
 /// filters the registry-built tools (see `config/agent.toml`).
+/// The `find_*` code-graph tools over one composed [`AstBackend`](agent_core::AstBackend).
+#[cfg(feature = "ast")]
+fn ast_tools(backend: Arc<dyn agent_core::AstBackend>) -> Vec<Arc<dyn agent_core::Tool>> {
+    vec![
+        Arc::new(agent_tools::FindSymbolTool::new(backend.clone())),
+        Arc::new(agent_tools::FindImplementationsTool::new(backend.clone())),
+        Arc::new(agent_tools::FindInterfaceTool::new(backend.clone())),
+        Arc::new(agent_tools::FindCallersTool::new(backend.clone())),
+        Arc::new(agent_tools::FindCalleesTool::new(backend.clone())),
+        Arc::new(agent_tools::FindCallchainTool::new(backend.clone())),
+        Arc::new(agent_tools::FindChangedCallersTool::new(backend.clone())),
+        Arc::new(agent_tools::FindDependencyPathTool::new(backend)),
+    ]
+}
+
 fn is_builder_registered_tool(name: &str) -> bool {
     (cfg!(feature = "tool-core") && name == "bash")
         || (cfg!(feature = "tool-metrics") && name == "metrics")
         || (cfg!(feature = "search") && (name == "search" || name == "index_ls"))
+        || (cfg!(feature = "ast") && name.starts_with("find_"))
+        || (cfg!(feature = "structural-search") && name == "structural_search")
         || (cfg!(feature = "recall") && name == "session_recall")
         || (cfg!(feature = "subagents") && name == "delegate")
         || (cfg!(feature = "git") && name.starts_with("git_"))
