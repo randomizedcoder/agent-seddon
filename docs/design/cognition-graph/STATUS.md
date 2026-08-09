@@ -10,7 +10,7 @@ designed (and why). Update both with every increment PR.
 | 01 Consensus gate (`provider = "consensus"`, Kimi × GLM live) | [`01-consensus-gate.md`](01-consensus-gate.md) | ✅ **done** — provider core (19 tests), registry/config wiring, `gate_verdict` bench + ceiling, live Kimi × GLM verified (`pass` on math + trade-off prompts; `critic_error` root-caused to reasoning budget → ceiling 4096), [component doc](../../components/consensus.md), full observability (5 `agent_gate_*` families + `gate.round` spans + phase timings, pulled forward from inc 04) |
 | 02 `agreed_seq` + `DigestStore` (clickhouse default / sqlite / grpc) + background distiller | [`02-background-distiller.md`](02-background-distiller.md) | ✅ **done** — seam + both backends (durable CH writes, schema.sql provisioned, live CH round-trip), testdata corpus + `digest_query` bench + dhat leak test, `agreed_seq` + FIFO worker + `[digest]` wiring + one-shot drain, live-verified ledger rows, [component doc](../../components/digest.md). Deferred to inc 04: alternatives rows, role routing, grpc backend, telemetry mirror for sqlite deployments |
 | 03 Instant compaction (`instant-window` strategy) | [`03-instant-compaction.md`](03-instant-compaction.md) | ✅ **done** — engine (8 corpus tests incl. phase-drift relevance + planted-hostile-row), wiring (`FactoryCtx.built_digests`, `[instant]` config, fails closed without `[digest]`), **live-verified** (3 real ledger assemblies under a stress budget), `instant_assemble` bench with a path-guard assert (2.6M Ir, ceiling 6.5M), [component doc](../../components/instant-compaction.md) |
-| 04 Graph document (textproto) + anchor executor + `graph.proto`/`digest.proto` services | [`04-graph-config.md`](04-graph-config.md) | 🔨 in progress — **`DigestService` shipped**: digest.proto (additive), server/client, `--serve-digest` (port 50081), `[digest] store = "grpc"`, 7 TCP+UDS round-trips seeded with the testdata corpus (incl. hostile-id + unknown-kind rejection). Remaining: graph.proto + document + anchor executor + `DescribeNodeTypes` + example graphs |
+| 04 Graph document (textproto) + anchor executor + `graph.proto`/`digest.proto` services | [`04-graph-config.md`](04-graph-config.md) | ✅ **done** — `DigestService` (port 50081, 7 round-trips) + the full document layer (`agent-graph`: schema registry with derived JSON Schemas, 10 typed issue classes, textproto via prost-reflect over the reflection descriptor set, `FileGraphs`, graph-document corpus), `GraphService` (port 50082, `--serve-graph`, 10 round-trips incl. validate-then-accept + raw-pb kind rejection), the anchor-slot executor (compile → config overlay driving the increment-01/02/03 engines, per-kind distiller enablement, `--cognition-graph` flag), example graphs `config/cognition/{simple,intermediate}.textproto` as integration fixtures, `graph_load` bench + dhat leak gate, [component doc](../../components/graph.md) |
 | 05 Parallel branches — `split`/`join`/`merge`, all/any/quorum joins, compare/synthesize merge | [`05-parallel-branches.md`](05-parallel-branches.md) | ⬜ not started |
 
 ## Implementation log (deviations from design, discoveries, decisions)
@@ -90,6 +90,43 @@ designed (and why). Update both with every increment PR.
   The distiller uses the main provider (the dimensions/distill precedent)
   until RouteHint role threading lands.
 
+- **04 / node params ride `JsonValue`, not `google.protobuf.Struct`.** The
+  design sketch showed `Struct`; the repo's `common.proto` deliberately rejects
+  it (numbers forced to `double`, losing 64-bit integers) — the same rationale
+  applies to node params (`max_tokens: 4096` must stay an integer). Wire names
+  are prefixed (`GraphNode`/`GraphEdge`/`NodePort`) because `package agent.v1`
+  is shared across every proto file.
+- **04 / gen-constants enumerates seams explicitly** (re-discovered): a new
+  `nix/constants.nix` block generates NOTHING until its `seamConst` line is
+  added to `nix/gen-constants.nix`.
+- **04 / `GraphService` error split**: `Put`/`Validate` failures are
+  `INVALID_ARGUMENT` (the caller's document), but `Get` of a broken *stored*
+  document is `FAILED_PRECONDITION` (server state) — the executor must fall
+  back to graph-less behavior explicitly, never treat a transport/state error
+  as "empty graph".
+- **04 / executor = compile-to-config-overlay, not a per-turn interpreter**
+  (design Option E, stated precisely): a non-empty document is compiled at
+  build time onto the config the factories read — `critic_gate` → the
+  `[consensus]` provider, background nodes → distiller kind enablement +
+  budgets, `compact_assemble`/`objective` → `instant-window`. The runtime
+  guarantees are inherited from those engines rather than re-implemented. The
+  Option C dataflow interpreter remains the deferral; increment 05's
+  `split`/`join` will force the first real generalization.
+- **04 / a non-empty graph is the wiring authority for its anchors**: a
+  document with only a gate node runs *no* background distillation (its
+  delivery anchor has no nodes) even if `[digest]` is configured — the
+  document describes the whole cognition flow, not a diff. An *empty* document
+  (and an absent `[graph]`) keeps the built-in TOML-wired behavior. Distiller
+  gained per-kind enablement (`DistillerCtx.kinds`) for this.
+- **04 / gate-node param vocab aligned to `[consensus]`** (`"every-iteration"`,
+  `"deliver-with-note"`/`"fail"`), replacing the design sketch's
+  `"all"`/`"deliver"`/`"error"` — the document and the TOML must speak one
+  language, because the overlay writes these strings straight into the config.
+- **04 / alternatives rows + role=summarize routing remain deferred**: the
+  compile-to-overlay executor still has no delivery-path view of
+  `GateOutcome` (the observer lives at the registry); these land with the
+  Option C interpreter or a dedicated side-channel, whichever comes first.
+
 ## Bench baselines (filled per increment, after the optimization pass)
 
 | Increment | Bench | Ir before → after fruit | Ceiling set |
@@ -97,14 +134,17 @@ designed (and why). Update both with every increment PR.
 | 01 | `gate_verdict::verdict_round_full_lists` | 199,786 → 199,786 (reviewed: serde-dominated single parse ×2 + sanitize + set compare, once per critic round — no fruit worth taking) | 500,000 (~2.5×) |
 | 02 | `digest_query::query_summaries_and_keywords` | 2,064,651 → 2,053,229 (fruit: `prepare_cached` — constant SQL, skip re-parse on repeated compaction reads; remaining = rusqlite row stepping + per-row keyword decode, load-bearing) | 5,200,000 (~2.5×) |
 | 03 | `instant_assemble::instant_assemble` | 2,612,735 (reviewed: 3 ledger queries + per-row injection re-screens + assembly, profile matches digest_query, compaction-time only — no fruit taken). **Lesson: the in-bench path-guard assert is load-bearing — an unguarded first run silently measured the drop-oldest fallback at 64k Ir** | 6,500,000 (~2.5×) |
+| 04 | `graph_load::load_and_validate` | 599,480 (reviewed: marginal textproto parse + wire→core decode + typed validation of the shipped ~5-node example; the once-per-process descriptor-pool build lands in setup, mirroring the store's long-lived registry. prost-reflect text parsing dominates; startup/edit-time only — no fruit worth taking) | 1,500,000 (~2.5×) |
 
-## Planned once the graph works (user, 2026-08-09)
+## Example graphs (user, 2026-08-09)
 
-Three graded example graphs under `config/cognition/` — `simple` (gate only),
-`intermediate` (gate + background distillation + instant compaction),
-`advanced` (fork/join safety×performance branches + synthesize merge + full
-flow) — shipped as scenario files **and** used as integration tests of the
-whole system (04-graph-config.md §Example graphs).
+`config/cognition/` — `simple` (gate only) and `intermediate` (gate +
+background distillation + instant compaction) are **shipped**, as scenario
+files AND integration fixtures (`agent-graph/tests/examples.rs` asserts each
+file loads through the real store and equals its `testdata` twin; the executor
+compile tables run over the same corpus). `advanced` (fork/join
+safety×performance branches + synthesize merge) lands with increment 05's
+`split`/`join`/`merge` node set.
 
 ## Deferred (explicit, from README)
 

@@ -25,3 +25,15 @@ dhat = { workspace = true, optional = true }
 agent-testkit.workspace = true
 rstest.workspace = true
 tokio = { workspace = true }
+iai-callgrind.workspace = true
+
+# Guards the document load path (textproto parse → wire→core decode → typed
+# validation) over the shipped example document.
+[[bench]]
+name = "graph_load"
+harness = false
+
+[[test]]
+name = "leak"
+harness = true
+required-features = ["dhat-heap"]

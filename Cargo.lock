@@ -160,6 +160,7 @@ dependencies = [
  "agent-testkit",
  "async-trait",
  "dhat",
+ "iai-callgrind",
  "prost",
  "prost-reflect",
  "rstest",
