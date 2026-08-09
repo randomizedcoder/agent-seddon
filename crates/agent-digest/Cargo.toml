@@ -11,6 +11,8 @@ digest-sqlite = ["dep:rusqlite"]
 # ClickHouse ledger (the default deployment target) — native protocol, durable
 # async_insert writes, reuses the pinned klickhouse the telemetry writer uses.
 digest-clickhouse = ["dep:klickhouse", "dep:tokio"]
+# dhat-instrumented leak/allocation tests (tests/leak.rs).
+dhat-heap = ["dep:dhat"]
 
 [dependencies]
 agent-core.workspace = true
@@ -22,6 +24,7 @@ tracing.workspace = true
 rusqlite = { workspace = true, optional = true }
 klickhouse = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
+dhat = { workspace = true, optional = true }
 
 [dev-dependencies]
 agent-testkit.workspace = true
@@ -35,3 +38,8 @@ iai-callgrind.workspace = true
 name = "digest_query"
 harness = false
 required-features = ["digest-sqlite"]
+
+[[test]]
+name = "leak"
+harness = true
+required-features = ["dhat-heap", "digest-sqlite"]

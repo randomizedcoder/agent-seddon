@@ -8,7 +8,7 @@ designed (and why). Update both with every increment PR.
 |---|---|---|
 | Design of record (prior art, options A–E, architecture) | [`README.md`](README.md) | ✅ written |
 | 01 Consensus gate (`provider = "consensus"`, Kimi × GLM live) | [`01-consensus-gate.md`](01-consensus-gate.md) | ✅ **done** — provider core (19 tests), registry/config wiring, `gate_verdict` bench + ceiling, live Kimi × GLM verified (`pass` on math + trade-off prompts; `critic_error` root-caused to reasoning budget → ceiling 4096), [component doc](../../components/consensus.md), full observability (5 `agent_gate_*` families + `gate.round` spans + phase timings, pulled forward from inc 04) |
-| 02 `agreed_seq` + `DigestStore` (clickhouse default / sqlite / grpc) + background distiller | [`02-background-distiller.md`](02-background-distiller.md) | 🔨 in progress — store layer DONE (core seam + agent-digest crate: clickhouse durable-async_insert + sqlite backends, schema.sql provisioned, 19 tests); remaining: `agreed_seq`, FIFO distiller worker, config/registry wiring, telemetry mirror, bench/leak, live check |
+| 02 `agreed_seq` + `DigestStore` (clickhouse default / sqlite / grpc) + background distiller | [`02-background-distiller.md`](02-background-distiller.md) | ✅ **done** — seam + both backends (durable CH writes, schema.sql provisioned, live CH round-trip), testdata corpus + `digest_query` bench + dhat leak test, `agreed_seq` + FIFO worker + `[digest]` wiring + one-shot drain, live-verified ledger rows, [component doc](../../components/digest.md). Deferred to inc 04: alternatives rows, role routing, grpc backend, telemetry mirror for sqlite deployments |
 | 03 Instant compaction (`instant-window` strategy) | [`03-instant-compaction.md`](03-instant-compaction.md) | ⬜ not started |
 | 04 Graph document (textproto) + anchor executor + `graph.proto`/`digest.proto` services | [`04-graph-config.md`](04-graph-config.md) | ⬜ not started |
 | 05 Parallel branches — `split`/`join`/`merge`, all/any/quorum joins, compare/synthesize merge | [`05-parallel-branches.md`](05-parallel-branches.md) | ⬜ not started |
@@ -80,6 +80,10 @@ designed (and why). Update both with every increment PR.
   `2^16/65536/16-bit/tcp ports/unicode bmp`, 17 s distill) and the facts step
   answered `NO_FACTS` on the trivia exchange — the NO-OP gate working live.
   REPL/served processes never needed the drain (process outlives sessions).
+- **02 / telemetry mirror scoped down to a deferral**: the default store IS
+  ClickHouse, where ledger and analytics are already the same table; the
+  mirror only adds fleet analytics for sqlite deployments — deferred alongside
+  the inc-04 `DigestService` work rather than growing `MemoryEvent` now.
 - **02 / alternatives rows + role=summarize routing deferred to inc 04**: the
   `GateOutcome` observer lives at the registry (metrics); the session delivery
   path cannot see it without a side-channel — the anchor executor owns both.
