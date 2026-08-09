@@ -134,3 +134,27 @@ CREATE TABLE IF NOT EXISTS agent.agent_dimension_summaries
 )
 ENGINE = MergeTree
 ORDER BY (session_id, ts, dimension);
+
+-- The per-session digest ledger (cognition-graph 02): one summary + one facts row
+-- per delivered response (+ gate alternatives / compaction objectives), written
+-- DURABLY by the background distiller (async_insert + wait_for_async_insert — not
+-- the drop-on-full telemetry channel) and read back by instant compaction. The
+-- sorting key makes "digests for session X ordered by seq" a range scan; a
+-- re-distillation is a versioned insert (readers keep the newest ts per key).
+CREATE TABLE IF NOT EXISTS agent.agent_turn_digests
+(
+    session_id  String,                         -- safe_segment'd
+    user_id     String,                         -- safe_segment'd; 'local' default
+    seq         UInt64,                         -- per-session agreed-response ordinal
+    kind        LowCardinality(String),         -- summary | facts | objective | alternatives
+    text        String CODEC(ZSTD),             -- capped + injection-screened before store
+    keywords    Array(String),                  -- lowercased, capped 16 × 64B
+    mode        LowCardinality(String),         -- TaskMode at delivery
+    model       LowCardinality(String),         -- distilling model
+    ts          DateTime64(3, 'UTC') CODEC(Delta, ZSTD),
+    duration_ms UInt32,
+    tokens      UInt32
+)
+ENGINE = MergeTree
+PARTITION BY toDate(ts)
+ORDER BY (session_id, seq, kind);

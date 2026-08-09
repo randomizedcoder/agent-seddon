@@ -1,0 +1,29 @@
+[package]
+name = "agent-digest"
+version.workspace = true
+publish.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# SQLite ledger — server-less environments (dev shells, CI, hermetic tests).
+digest-sqlite = ["dep:rusqlite"]
+# ClickHouse ledger (the default deployment target) — native protocol, durable
+# async_insert writes, reuses the pinned klickhouse the telemetry writer uses.
+digest-clickhouse = ["dep:klickhouse", "dep:tokio"]
+
+[dependencies]
+agent-core.workspace = true
+# The one canonical retry/backoff library — never hand-roll a retry loop.
+agent-retry.workspace = true
+async-trait.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+rusqlite = { workspace = true, optional = true }
+klickhouse = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+
+[dev-dependencies]
+agent-testkit.workspace = true
+rstest.workspace = true
+tokio = { workspace = true }

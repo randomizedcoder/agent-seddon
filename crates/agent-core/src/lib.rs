@@ -1635,6 +1635,104 @@ pub trait DimensionStore: Send + Sync {
     async fn recall_dimension(&self, dimension: &str, limit: usize) -> Result<Vec<MemoryItem>>;
 }
 
+// --- digest ledger (cognition-graph increment 02) --------------------------
+//
+// The per-session, per-delivered-response ledger the background distiller fills
+// (summary + key-facts + gate alternatives) and instant compaction reads. Session-
+// scoped by design — distinct from `MemoryStore` (cross-session); the raw transcript
+// stays ground truth, digests are a cache. docs/design/cognition-graph/.
+
+/// What a [`Digest`] row holds. A **closed** set — the kind becomes a storage
+/// discriminator and a metric label, so it is never an open string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DigestKind {
+    /// A section-locked rolling summary of the exchange ending at `seq`.
+    Summary,
+    /// The tiny key-facts extraction for the same exchange.
+    Facts,
+    /// A current-objective statement (written at compaction time).
+    Objective,
+    /// Gate-recorded alternatives (the road not taken + reconsider-when).
+    Alternatives,
+}
+
+impl DigestKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Summary => "summary",
+            Self::Facts => "facts",
+            Self::Objective => "objective",
+            Self::Alternatives => "alternatives",
+        }
+    }
+    /// Parse a stored discriminator; unknown ⇒ `None` (fail closed — a store is
+    /// untrusted input once a `grpc` backend exists).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "summary" => Some(Self::Summary),
+            "facts" => Some(Self::Facts),
+            "objective" => Some(Self::Objective),
+            "alternatives" => Some(Self::Alternatives),
+            _ => None,
+        }
+    }
+}
+
+/// One ledger row: a distilled artifact for the delivered response `seq` of
+/// `session_id`. Text/keywords are model output — screened and size-capped
+/// *before* `put`, and screened again at read (injection can survive storage).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Digest {
+    pub session_id: String,
+    pub user_id: String,
+    /// The per-session agreed-response ordinal this digest belongs to.
+    pub seq: u64,
+    pub kind: DigestKind,
+    pub text: String,
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    /// `TaskMode::as_str()` at delivery time (labels, relevance hints).
+    #[serde(default)]
+    pub mode: String,
+    /// The model that produced the distillation (cost/quality attribution).
+    #[serde(default)]
+    pub model: String,
+    pub ts_ms: u64,
+    /// Distillation wall time, milliseconds (clamped by the writer).
+    #[serde(default)]
+    pub duration_ms: u32,
+    /// Output tokens spent producing it (clamped by the writer).
+    #[serde(default)]
+    pub tokens: u32,
+}
+
+/// A ledger read: digests for one session, ordered by `seq` ascending.
+#[derive(Debug, Clone, Default)]
+pub struct DigestQuery {
+    pub session_id: String,
+    /// Restrict to one kind; `None` = all kinds.
+    pub kind: Option<DigestKind>,
+    /// Only rows with `seq >= since_seq`.
+    pub since_seq: Option<u64>,
+    /// Keep rows sharing at least one keyword (case-insensitive); empty = keep all.
+    /// A cheap store-side prefilter, not relevance ranking.
+    pub keywords_any: Vec<String>,
+    /// Row cap; backends also cap server-side (a hostile limit cannot unbound a read).
+    pub limit: usize,
+}
+
+/// The digest ledger seam. Append-mostly: a `put` for an existing
+/// `(session_id, seq, kind)` **replaces** that row (re-distillation), reads return
+/// the latest version. Implementations must validate ids (`safe_segment`) and cap
+/// text/keyword/limit sizes — the writer is an LLM and the reader may be remote.
+#[async_trait]
+pub trait DigestStore: Send + Sync {
+    async fn put(&self, digest: Digest) -> Result<()>;
+    /// Matching digests ordered by `seq` ascending (stable read for assembly).
+    async fn query(&self, q: &DigestQuery) -> Result<Vec<Digest>>;
+}
+
 // ---------------------------------------------------------------------------
 // Prompt management (docs/design/portal): see + CRUD every prompt
 // ---------------------------------------------------------------------------
