@@ -77,26 +77,62 @@ pub(crate) struct DistillerCtx {
 
 /// The session-side handle: a bounded sender. Dropping it lets the worker drain
 /// its remaining queue and exit — session teardown never waits on distillation.
+/// A **one-shot process** must call [`Distiller::drain`] before exiting, or the
+/// runtime drops mid-job and nothing lands (live-observed).
 pub(crate) struct Distiller {
     tx: mpsc::Sender<DistillJob>,
+    enqueued: std::sync::atomic::AtomicU64,
+    processed: tokio::sync::watch::Receiver<u64>,
 }
 
 impl Distiller {
     /// Spawn the per-session worker.
     pub fn spawn(ctx: DistillerCtx) -> Self {
         let (tx, rx) = mpsc::channel(QUEUE_CAP);
-        tokio::spawn(run(rx, ctx));
-        Self { tx }
+        let (done_tx, processed) = tokio::sync::watch::channel(0u64);
+        tokio::spawn(run(rx, ctx, done_tx));
+        Self {
+            tx,
+            enqueued: std::sync::atomic::AtomicU64::new(0),
+            processed,
+        }
     }
 
     /// Non-blocking enqueue. A full queue drops the job (counted by the caller
     /// via the returned flag) — the reply path is never delayed.
     pub fn enqueue(&self, job: DistillJob) -> bool {
-        self.tx.try_send(job).is_ok()
+        let ok = self.tx.try_send(job).is_ok();
+        if ok {
+            self.enqueued
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        ok
+    }
+
+    /// Wait (bounded) until every enqueued job has been processed — the one-shot
+    /// exit path. Best-effort: a hit deadline just means some digests are lost
+    /// (they are a cache); never an error.
+    pub async fn drain(&self, timeout: std::time::Duration) {
+        let target = self.enqueued.load(std::sync::atomic::Ordering::SeqCst);
+        let mut rx = self.processed.clone();
+        let wait = async {
+            while *rx.borrow() < target {
+                if rx.changed().await.is_err() {
+                    return; // worker gone — nothing more will land
+                }
+            }
+        };
+        if tokio::time::timeout(timeout, wait).await.is_err() {
+            tracing::warn!("distiller drain deadline hit; pending digests dropped");
+        }
     }
 }
 
-async fn run(mut rx: mpsc::Receiver<DistillJob>, ctx: DistillerCtx) {
+async fn run(
+    mut rx: mpsc::Receiver<DistillJob>,
+    ctx: DistillerCtx,
+    done: tokio::sync::watch::Sender<u64>,
+) {
     // The anchored-merge state: seeded lazily from the ledger (a restarted
     // session continues its chain), then carried in-worker.
     let mut prev_summary: Option<String> = None;
@@ -116,6 +152,7 @@ async fn run(mut rx: mpsc::Receiver<DistillJob>, ctx: DistillerCtx) {
             prev_summary = Some(s);
         }
         extract_facts(&ctx, &job).await;
+        done.send_modify(|n| *n += 1);
     }
 }
 

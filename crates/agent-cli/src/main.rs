@@ -232,6 +232,12 @@ async fn main() -> Result<()> {
                 } else {
                     tracing::info!("session saved as `{id}`");
                 }
+                // One-shot exit would kill the background distiller mid-job —
+                // bounded drain so the delivered turn's digest rows land
+                // (cognition-graph 02; no-op when nothing is pending).
+                session
+                    .drain_background(std::time::Duration::from_secs(60))
+                    .await;
                 outcome
             }
             Mode::Repl => tokio::select! {

@@ -398,6 +398,16 @@ impl Session {
         answer
     }
 
+    /// Bounded wait for this session's background distillation to finish — the
+    /// **one-shot exit path** (a process that exits right after `send` would kill
+    /// the worker mid-job; live-observed). No-op when nothing is pending; a hit
+    /// deadline just loses cache rows, never errors.
+    pub async fn drain_background(&self, timeout: std::time::Duration) {
+        if let Some(d) = &self.distiller {
+            d.drain(timeout).await;
+        }
+    }
+
     /// Fire-and-forget distillation of the just-delivered response (cognition-graph
     /// 02). Mints the per-session `agreed_seq`, lazily spawns the FIFO worker, and
     /// `try_send`s the job — **never blocks or fails the reply path**; a full queue

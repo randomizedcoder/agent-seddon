@@ -72,6 +72,20 @@ designed (and why). Update both with every increment PR.
   graph-document corpus incl. one file per typed load error + wire-seeded
   DigestService round-trips; generalizes to parity 39/41 when built).
 
+- **02 / one-shot exit kills the distiller — bounded drain added** (live
+  finding: first one-shot run exited before the background jobs ran, ledger
+  empty). `Distiller::drain` (enqueued vs processed watch counter) +
+  `Session::drain_background`, called by the CLI one-shot path with a 60 s
+  deadline. Re-run landed a real summary row (456 chars, keywords
+  `2^16/65536/16-bit/tcp ports/unicode bmp`, 17 s distill) and the facts step
+  answered `NO_FACTS` on the trivia exchange — the NO-OP gate working live.
+  REPL/served processes never needed the drain (process outlives sessions).
+- **02 / alternatives rows + role=summarize routing deferred to inc 04**: the
+  `GateOutcome` observer lives at the registry (metrics); the session delivery
+  path cannot see it without a side-channel — the anchor executor owns both.
+  The distiller uses the main provider (the dimensions/distill precedent)
+  until RouteHint role threading lands.
+
 ## Bench baselines (filled per increment, after the optimization pass)
 
 | Increment | Bench | Ir before → after fruit | Ceiling set |
