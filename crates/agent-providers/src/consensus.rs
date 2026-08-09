@@ -435,6 +435,24 @@ fn floor_boundary(s: &str, max: usize) -> usize {
     cut
 }
 
+/// Bench-only entry (iai, like `agent_context::bench_estimate_tokens`): the per-round
+/// verdict hot path — parse + sanitize a critic answer, then compute the no-progress
+/// issue-set key and compare it to a previous round's. Returns a checksum so the
+/// optimizer can't elide the work. Not part of the supported API.
+#[doc(hidden)]
+pub fn bench_verdict_round(text: &str, prev: &str, max_alternatives: usize) -> usize {
+    let cur = parse_verdict(text, max_alternatives);
+    let before = parse_verdict(prev, max_alternatives);
+    match (cur, before) {
+        (Some(c), Some(b)) => {
+            let stalled = issue_set(&c.issues) == issue_set(&b.issues);
+            c.issues.len() + c.alternatives.len() + usize::from(stalled)
+        }
+        (Some(c), None) => c.issues.len() + c.alternatives.len(),
+        _ => 0,
+    }
+}
+
 #[async_trait]
 impl LlmProvider for ConsensusProvider {
     /// The generator's capabilities — the critic never serves the request.

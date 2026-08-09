@@ -56,6 +56,12 @@ required-features = ["provider-pool"]
 name = "route_resolve"
 harness = false
 
+# Guards the consensus gate's per-round verdict parse/sanitize + no-progress compare.
+[[bench]]
+name = "gate_verdict"
+harness = false
+required-features = ["provider-consensus"]
+
 [[test]]
 name = "leak"
 harness = true

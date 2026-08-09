@@ -52,6 +52,7 @@ craneLib.mkCargoDerivation (
       cargo bench -p agent-memory --features memory-dimensions --bench dimensions
       cargo bench -p agent-providers --features provider-pool --bench pool_select
       cargo bench -p agent-providers --bench route_resolve
+      cargo bench -p agent-providers --features provider-consensus --bench gate_verdict
       cargo bench -p agent-tokenizer --bench tokenize
     '';
     installPhaseCommand = "mkdir -p $out";

@@ -7,7 +7,7 @@ designed (and why). Update both with every increment PR.
 | Piece | Doc | Status |
 |---|---|---|
 | Design of record (prior art, options A–E, architecture) | [`README.md`](README.md) | ✅ written |
-| 01 Consensus gate (`provider = "consensus"`, Kimi × GLM live) | [`01-consensus-gate.md`](01-consensus-gate.md) | 🔨 in progress — provider core + 19 tests landed; registry/config wiring, bench + optimization pass, live check remain |
+| 01 Consensus gate (`provider = "consensus"`, Kimi × GLM live) | [`01-consensus-gate.md`](01-consensus-gate.md) | 🔨 in progress — provider core + 19 tests, registry/config wiring, bench + ceiling all landed; live Kimi × GLM check + component doc remain |
 | 02 `agreed_seq` + `DigestStore` (clickhouse default / sqlite / grpc) + background distiller | [`02-background-distiller.md`](02-background-distiller.md) | ⬜ not started |
 | 03 Instant compaction (`instant-window` strategy) | [`03-instant-compaction.md`](03-instant-compaction.md) | ⬜ not started |
 | 04 Graph document (textproto) + anchor executor + `graph.proto`/`digest.proto` services | [`04-graph-config.md`](04-graph-config.md) | ⬜ not started |
@@ -38,7 +38,7 @@ designed (and why). Update both with every increment PR.
 
 | Increment | Bench | Ir before → after fruit | Ceiling set |
 |---|---|---|---|
-| _(none yet)_ | | | |
+| 01 | `gate_verdict::verdict_round_full_lists` | 199,786 → 199,786 (reviewed: serde-dominated single parse ×2 + sanitize + set compare, once per critic round — no fruit worth taking) | 500,000 (~2.5×) |
 
 ## Deferred (explicit, from README)
 
