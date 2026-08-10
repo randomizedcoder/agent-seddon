@@ -179,3 +179,82 @@ prefer = { upstreams = ["glm"] }
     );
     assert!(kimi.requests().is_empty() && glm.requests().is_empty());
 }
+
+#[test]
+fn positive_model_router_config_textproto_replaces_the_toml_fleet() {
+    // The 03 startup loader through the shipped binary: the TOML `[route]`
+    // prefers kimi, but `--model-router-config` points at a textproto scenario
+    // preferring glm — the flag's fleet must be THE authority (wholesale
+    // replace, never a merge), proven by which endpoint the bytes reached.
+    let ws = TempWorkspace::new("route-textproto");
+    let kimi = FakeLlm::start(vec![text("from-kimi")]);
+    let glm = FakeLlm::start(vec![text("from-glm")]);
+    let cfg = route_config(&ws, kimi.base_url(), glm.base_url(), "");
+
+    let mrc = ws.path("scenario.textproto");
+    std::fs::write(
+        &mrc,
+        format!(
+            r#"
+upstreams {{
+  id: "kimi"
+  kind: "openai-compat"
+  enabled: true
+  base_url: "{}"
+  model: "test-model"
+}}
+upstreams {{
+  id: "glm"
+  kind: "openai-compat"
+  enabled: true
+  base_url: "{}"
+  model: "test-model"
+}}
+policy {{
+  default_prefer {{ upstreams: "glm" upstreams: "kimi" }}
+}}
+"#,
+            kimi.base_url(),
+            glm.base_url()
+        ),
+    )
+    .expect("write scenario");
+
+    let (code, stdout, stderr) = common::run_agent(
+        &cfg,
+        &ws,
+        &["--model-router-config", mrc.to_str().unwrap(), "say done"],
+    );
+    assert_eq!(code, 0, "stderr:\n{stderr}");
+    assert!(stdout.contains("from-glm"), "got:\n{stdout}");
+    assert!(
+        kimi.requests().is_empty(),
+        "the textproto's preference replaced the TOML's"
+    );
+    assert!(!glm.requests().is_empty());
+}
+
+#[test]
+fn adversarial_malformed_model_router_config_fails_closed() {
+    // A truncated/garbled scenario file must abort the BUILD: nonzero exit, a
+    // clear error naming the file, and zero bytes to any upstream.
+    let ws = TempWorkspace::new("route-textproto-bad");
+    let kimi = FakeLlm::start(vec![text("never")]);
+    let glm = FakeLlm::start(vec![text("never")]);
+    let cfg = route_config(&ws, kimi.base_url(), glm.base_url(), "");
+
+    let mrc = ws.path("broken.textproto");
+    std::fs::write(&mrc, "upstreams { id: \"a\" bogus_field: 1").expect("write");
+
+    let (code, _stdout, stderr) = common::run_agent(
+        &cfg,
+        &ws,
+        &["--model-router-config", mrc.to_str().unwrap(), "say done"],
+    );
+    assert_ne!(code, 0, "a malformed scenario file must fail the build");
+    assert!(
+        stderr.contains("model-router config"),
+        "the error must name the loader, got:\n{stderr}"
+    );
+    assert!(kimi.requests().is_empty() && glm.requests().is_empty());
+}

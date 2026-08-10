@@ -524,6 +524,13 @@ cooldown_secs       = 30          # how long a breaker stays open before re-prob
 # [route.default_prefer]
 # upstreams = ["kimi", "glm"]
 # # failure_threshold = 3 / cooldown_secs = 30  (breaker, same as [router]/[pool])
+#
+# TEXTPROTO SCENARIO FILES (model-router 03): the whole fleet + policy can live in
+# ONE `ModelRouterConfig` textproto instead of this [route] block — point
+# `model_router_config = "config/model-router/example.textproto"` at it (or
+# `--model-router-config FILE` / AGENT_MODEL_ROUTER_CONFIG). The file REPLACES
+# [route] wholesale; keys stay references (`api_key_ref: "file:~/…"` / `"env:NAME"`).
+# The same file is the `file` store behind `--serve-provider-registry`.
 
 # The consensus gate (cognition-graph increment 01): every final answer is generated
 # by `generator` and challenged by `critic` (ideally a DIFFERENT model family) in a

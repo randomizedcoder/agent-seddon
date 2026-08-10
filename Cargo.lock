@@ -448,6 +448,7 @@ dependencies = [
  "agent-providers",
  "agent-pty",
  "agent-reference",
+ "agent-registry",
  "agent-review",
  "agent-sandbox",
  "agent-scanner",

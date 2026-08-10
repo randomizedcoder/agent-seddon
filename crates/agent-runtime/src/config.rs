@@ -1888,6 +1888,13 @@ pub struct AgentCfg {
     /// context. Off by default (nested loops multiply cost).
     #[serde(default)]
     pub subagents: bool,
+    /// Path to a `ModelRouterConfig` **textproto** scenario file (model-router
+    /// 03): loads the whole task-router fleet + `[route]` policy at startup —
+    /// replacing the TOML `[route]` block — with no gRPC server involved. Also
+    /// settable as `--model-router-config FILE` / `AGENT_MODEL_ROUTER_CONFIG`.
+    /// Empty = off. A missing/invalid file is a startup error (fail closed).
+    #[serde(default)]
+    pub model_router_config: String,
     /// Maximum delegation depth (levels of nested `delegate`).
     #[serde(default = "default_subagent_depth")]
     pub subagent_max_depth: usize,
@@ -2158,6 +2165,7 @@ impl Config {
                 parallel_tools: true,
                 tool_timeout_secs: default_tool_timeout(),
                 subagents: false,
+                model_router_config: String::new(),
                 subagent_max_depth: default_subagent_depth(),
             },
             provider: ProviderCfg {

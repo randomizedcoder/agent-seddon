@@ -49,6 +49,7 @@ default = [
     "mode",
     "review",
     "prompt",
+    "registry",
     "metrics-proxy",
     "session-export",
     "skill-write",
@@ -210,6 +211,11 @@ prompt = ["dep:agent-prompt"]
 # The `sqlite` PromptStore backend (docs/design/prompts/05-storage.md), off by
 # default. Forwards to agent-prompt's own feature (mirrors `session`→`session-file`).
 prompt-sqlite = ["prompt", "agent-prompt/prompt-sqlite"]
+# Provider-registry seam (model-router 03): the ProviderRegistry stores + the
+# `--model-router-config` textproto startup loader.
+registry = ["dep:agent-registry"]
+# The `sqlite` registry backend, off by default (mirrors `prompt-sqlite`).
+registry-sqlite = ["registry", "agent-registry/registry-sqlite"]
 # Metrics proxy seam (docs/design/portal): generic PromQL-over-gRPC to Prometheus.
 metrics-proxy = ["dep:agent-metrics-proxy", "agent-metrics-proxy/http"]
 # Connect to external MCP servers and register their tools.
@@ -246,6 +252,7 @@ agent-git = { workspace = true, optional = true }
 agent-memory.workspace = true
 agent-context.workspace = true
 agent-prompt = { workspace = true, optional = true }
+agent-registry = { workspace = true, optional = true }
 agent-digest = { workspace = true, optional = true }
 agent-graph = { workspace = true, optional = true }
 agent-metrics-proxy = { workspace = true, optional = true }
