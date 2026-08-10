@@ -199,9 +199,31 @@ leak) and must pass `nix develop -c nix flake check`.
   classifier vote with no strict majority triggers exactly one heavy-tier
   tie-breaker (the request carries the tier floor in its `RouteHint` too);
   fail-soft — a dead/garbled heavy answer keeps the plurality verdict. The
-  adaptive when-to-escalate policy stays deferred. Still deferred from 04:
-  judge-env unification, runtime synthesis of non-openai-compat cards,
-  snapshot-version span attribution.
+  adaptive when-to-escalate policy stays deferred.
+- **04 tails** (branch `feat/model-router-04-tails`): the last three concrete
+  deferrals landed. **Snapshot-version attribution** — `RegistryRouter` stamps
+  the config fingerprint into every rebuilt inner router; the decision path
+  emits it (`route.select` tracing target, `snapshot_version` field, `0` =
+  static fleet), so a routing choice is reproducible against the exact fleet
+  version that produced it. **Judge-env bridge** — `[route] judge_from_env`
+  (off by default): with `AGENT_E2E_JUDGE_BASE_URL` set, a `judge-env` upstream
+  (+ a lowest-precedence `role = "judge"` rule) is appended at build; explicit
+  TOML always wins, the knob survives the `--model-router-config` wholesale
+  replace (deployment-local, not fleet config), garbled/oversized env fails
+  closed, missing env is a warned no-op. **Non-openai-compat synthesis** —
+  `synth_route_upstream` now builds `anthropic` cards (public-endpoint default,
+  card `version`/`max_retries`, `insecure_tls` refused — no cert bypass in that
+  client) and `grpc` cards (lazily-dialed remote provider seam, card-declared
+  capabilities, `base_url` required — no implicit localhost). **As-built
+  deviation**: registered-**name** cards flip from "deferred" to a documented
+  fail-closed *refusal* — a registry entry (a remote peer may have written it)
+  must never reach the local factory graph, where a card naming `task-router`
+  itself would recurse into the router being rebuilt; the static TOML list (a
+  local file) keeps supporting names. The static textproto loader still cannot
+  carry anthropic/grpc kinds (the `[route]` form has no `kind` field) — its
+  error now points them at a control-plane `Put` with
+  `[route] source = "registry"`; lossless textproto→registry seeding of such
+  cards is a possible later tail.
 
 ## Cross-cutting invariants (every increment)
 

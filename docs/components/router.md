@@ -199,6 +199,31 @@ mid-refresh registry error keeps the last good fleet; hostile or unbuildable
 cards are skipped with a warning, re-validated + re-clamped before any build.
 A raw inline `api_key` refuses to seed (the registry stores references only).
 
+Three registry-native card kinds synthesize at runtime, connection +
+capabilities read straight off the model card: `openai-compat` (endpoint
+required), `anthropic` (empty `base_url` = the public endpoint; `insecure_tls`
+refused — the client has no cert bypass, and silently ignoring a TLS flag would
+masquerade as a connect failure), and `grpc` (a lazily-dialed remote provider
+seam; `base_url` required — no implicit localhost for a fleet entry).
+Registered-**name** cards (`kind = ""`) are deliberately *not*
+runtime-buildable: a registry entry — possibly written by a remote peer — must
+never reach the local factory graph (a card naming `task-router` itself would
+recurse into the router being rebuilt). They still work in the static TOML
+`[route]` list, which is a local file.
+
+Every registry-built fleet is stamped with its snapshot **fingerprint**: the
+decision path emits it (`route.select` tracing target, `snapshot_version`
+field; `0` = static fleet) so any routing choice is attributable to the exact
+fleet version that produced it.
+
+**Judge-env bridge** (opt-in): `[route] judge_from_env = true` maps the eval
+harnesses' `AGENT_E2E_JUDGE_*` convention onto an appended `judge-env`
+upstream plus a **lowest-precedence** `role = "judge"` rule — the harness
+judge becomes a routed upstream instead of an env island. Explicit
+upstreams/rules always win; without the env it is a warned no-op; the knob
+survives a `--model-router-config` wholesale replace (deployment-local, not
+fleet config); garbled or oversized env values fail closed.
+
 **Live-signal ordering** (04, the 02-deferred `prefer.policy`):
 `cost | latency | least-loaded` breaks ties among equally-preferred survivors
 using the router's own dispatch accounting (an RAII in-flight counter + an
