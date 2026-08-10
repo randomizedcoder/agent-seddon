@@ -626,6 +626,9 @@ cooldown_secs       = 30          # how long a breaker stays open before re-prob
 classifier       = "hybrid"       # "hybrid" | "grpc" | "" (off)
 confidence_floor = 0.6            # a candidate mode must reach this to switch
 hysteresis       = 2              # consecutive turns a non-decisive candidate must win
+# escalate = true                 # split light-tier vote → ONE heavy-tier tie-breaker
+#                                 # (model-router 04 follow-up; off by default — one
+#                                 # extra heavy call per ambiguous prompt)
 
 # Per-step dimensional memory (adaptive-cognition 03): a cheap per-turn pass files
 # "what just happened" into per-dimension histories (<memory.semantic_dir>/

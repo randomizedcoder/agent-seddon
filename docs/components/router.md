@@ -205,8 +205,10 @@ using the router's own dispatch accounting (an RAII in-flight counter + an
 α=0.3 latency EWMA per upstream) — a *tie-break*, never an override: an
 explicitly preferred upstream still wins regardless of its live numbers, and
 unknown (`0`) values are neutral. Per-upstream dispatch is metered:
-`agent_router_dispatch_total{role,upstream,outcome}` and
-`agent_router_failover_total{from,to,reason}`. The classifier vote and review
+`agent_router_dispatch_total{role,upstream,outcome}`,
+`agent_router_failover_total{from,to,reason}`, and the
+`agent_router_upstream_inflight{upstream}` gauge (fed from both edges of the
+RAII in-flight guard, so it drains to 0 even for cancelled calls). The classifier vote and review
 fan-out stamp `classify`/`review` role hints on their requests (the fan-out
 mechanism itself stays the pool's — a vote wants N independent answers).
 

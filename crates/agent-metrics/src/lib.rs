@@ -80,6 +80,7 @@ pub struct Metrics {
     registry_mutations: IntCounterVec,
     router_dispatch: IntCounterVec,
     router_failover: IntCounterVec,
+    router_inflight: IntGaugeVec,
     gate_verdicts: IntCounterVec,
     gate_rounds: Histogram,
     gate_phase_seconds: HistogramVec,
@@ -419,6 +420,14 @@ impl Metrics {
                 "Task-router failover hops, by from/to upstream and reason",
             ),
             &["from", "to", "reason"],
+        )
+        .unwrap();
+        let router_inflight = IntGaugeVec::new(
+            Opts::new(
+                "agent_router_upstream_inflight",
+                "Requests currently in flight per task-router upstream",
+            ),
+            &["upstream"],
         )
         .unwrap();
         let gate_verdicts = IntCounterVec::new(
@@ -1229,6 +1238,7 @@ impl Metrics {
             Box::new(registry_mutations.clone()),
             Box::new(router_dispatch.clone()),
             Box::new(router_failover.clone()),
+            Box::new(router_inflight.clone()),
             Box::new(gate_verdicts.clone()),
             Box::new(gate_rounds.clone()),
             Box::new(gate_phase_seconds.clone()),
@@ -1371,6 +1381,7 @@ impl Metrics {
             registry_mutations,
             router_dispatch,
             router_failover,
+            router_inflight,
             gate_verdicts,
             gate_rounds,
             gate_phase_seconds,
@@ -1598,6 +1609,15 @@ impl Metrics {
         self.router_failover
             .with_label_values(&[from, to, reason])
             .inc();
+    }
+    /// The per-upstream in-flight gauge (04 follow-up). Fed from both edges of
+    /// the router's RAII guard — the release fires in Drop, so the gauge
+    /// drains to 0 even for cancelled calls (last-writer-wins under
+    /// concurrency; the drained state is exact).
+    pub fn set_router_inflight(&self, upstream: &str, count: u32) {
+        self.router_inflight
+            .with_label_values(&[upstream])
+            .set(i64::from(count));
     }
     /// The registry fleet size after a mutation (counts are clamped upstream by
     /// the store's `MAX_REGISTRY_UPSTREAMS` cap, so the cast is safe).

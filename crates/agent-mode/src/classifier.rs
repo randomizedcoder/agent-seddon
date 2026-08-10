@@ -519,8 +519,7 @@ mod tests {
             heavy: Some("debug"),
             calls: std::sync::Mutex::new(vec![]),
         });
-        let c = HybridClassifier::new(Some(pool.clone() as Arc<dyn LlmPool>))
-            .with_escalation(true);
+        let c = HybridClassifier::new(Some(pool.clone() as Arc<dyn LlmPool>)).with_escalation(true);
         let v = c.classify(&ctx("look at the thing")).await;
         assert_eq!(v.mode, TaskMode::Debug);
         assert_eq!(v.confidence, 0.7);
@@ -544,8 +543,7 @@ mod tests {
             heavy: Some("design"),
             calls: std::sync::Mutex::new(vec![]),
         });
-        let c = HybridClassifier::new(Some(pool.clone() as Arc<dyn LlmPool>))
-            .with_escalation(true);
+        let c = HybridClassifier::new(Some(pool.clone() as Arc<dyn LlmPool>)).with_escalation(true);
         let v = c.classify(&ctx("look at the thing")).await;
         assert_eq!(v.mode, TaskMode::Debug, "2/3 is a strict majority");
         assert_eq!(pool.calls.lock().unwrap().len(), 1, "no heavy call");
@@ -574,8 +572,7 @@ mod tests {
                 heavy,
                 calls: std::sync::Mutex::new(vec![]),
             });
-            let c = HybridClassifier::new(Some(pool as Arc<dyn LlmPool>))
-                .with_escalation(true);
+            let c = HybridClassifier::new(Some(pool as Arc<dyn LlmPool>)).with_escalation(true);
             let v = c.classify(&ctx("look at the thing")).await;
             // Fail-soft: the split-vote plurality (last-tied MODES-order
             // tie-break) stands; escalation never makes the outcome worse.
