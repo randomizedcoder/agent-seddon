@@ -12,8 +12,8 @@ leak) and must pass `nix develop -c nix flake check`.
 | 01 | [Rich metadata](01-metadata.md) (context/cost/tags + pool key-file/TLS) | ✅ | — | — | ✅ | ✅ | ✅ **merged** (PR #229) |
 | 02 | [Task-aware routing](02-routing.md) (routing engine + `TaskRouter` + `[route]` policy) | ✅ | — | ✅ | ✅ | ✅ | ✅ **merged** (PR #229) |
 | 02b | [`RouteHint` threading](02b-hint-threading.md) (hint on the request · task-mode axis · per-call roles · decision metrics) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ **merged** (PR #236) |
-| 03 | [Config + registry control plane](03-registry-proto.md) (textproto bootstrap + `ProviderRegistryService`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ **built** (`feat/model-router-03`) |
-| 04 | [Registry-backed routing](04-registry-backed.md) (consume + seed + live-signal ordering + per-upstream metrics) | ✅ | — | ✅ | ✅ | ✅ | ✅ **built** (`feat/model-router-04`) |
+| 03 | [Config + registry control plane](03-registry-proto.md) (textproto bootstrap + `ProviderRegistryService`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ **merged** (PR #237) |
+| 04 | [Registry-backed routing](04-registry-backed.md) (consume + seed + live-signal ordering + per-upstream metrics) | ✅ | — | ✅ | ✅ | ✅ | ✅ **merged** (PR #238, promoted to main via #239) |
 
 ## Build order = dependency order
 
@@ -190,6 +190,18 @@ leak) and must pass `nix develop -c nix flake check`.
   registered-name/anthropic/grpc cards (endpoint openai-compat only — the synth
   has no factory-registry access after startup), and snapshot-version span
   attribution.
+- **04 follow-ups** (branch `feat/model-router-followups`): two deferrals landed.
+  **In-flight gauge** — `agent_router_upstream_inflight{upstream}` via a new
+  `RouteEvent::InFlight` emitted from BOTH edges of the router's RAII guard (the
+  release fires in `Drop`, so a cancelled/panicked call still reports and the
+  gauge drains to 0; last-writer-wins under concurrency, drained state exact).
+  **Escalation hook** — `[mode] escalate = true` (off by default): a light-tier
+  classifier vote with no strict majority triggers exactly one heavy-tier
+  tie-breaker (the request carries the tier floor in its `RouteHint` too);
+  fail-soft — a dead/garbled heavy answer keeps the plurality verdict. The
+  adaptive when-to-escalate policy stays deferred. Still deferred from 04:
+  judge-env unification, runtime synthesis of non-openai-compat cards,
+  snapshot-version span attribution.
 
 ## Cross-cutting invariants (every increment)
 

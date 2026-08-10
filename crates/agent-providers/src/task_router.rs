@@ -71,17 +71,34 @@ impl LiveStats {
 }
 
 /// RAII in-flight guard: decrements on every exit path (incl. panic/cancel), so
-/// the least-loaded signal can never drift upward from a lost decrement.
-struct InFlightGuard<'a>(&'a AtomicU32);
+/// the least-loaded signal can never drift upward from a lost decrement — and
+/// emits the [`RouteEvent::InFlight`] gauge event from BOTH edges (the release
+/// fires in `Drop`, so a cancelled call still reports and the gauge drains to
+/// 0 rather than sticking at its last value).
+struct InFlightGuard<'a> {
+    router: &'a TaskRouter,
+    i: usize,
+}
 impl<'a> InFlightGuard<'a> {
-    fn enter(counter: &'a AtomicU32) -> Self {
-        counter.fetch_add(1, Ordering::Relaxed);
-        Self(counter)
+    fn enter(router: &'a TaskRouter, i: usize) -> Self {
+        let n = router.live[i].in_flight.fetch_add(1, Ordering::Relaxed) + 1;
+        router.emit(RouteEvent::InFlight {
+            upstream: &router.upstreams[i].id,
+            count: n,
+        });
+        Self { router, i }
     }
 }
 impl Drop for InFlightGuard<'_> {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::Relaxed);
+        let n = self.router.live[self.i]
+            .in_flight
+            .fetch_sub(1, Ordering::Relaxed)
+            .saturating_sub(1);
+        self.router.emit(RouteEvent::InFlight {
+            upstream: &self.router.upstreams[self.i].id,
+            count: n,
+        });
     }
 }
 
@@ -258,7 +275,7 @@ impl TaskRouter {
             self.emit(RouteEvent::Routed { target: &u.id });
             let started = (self.now_ms)();
             let outcome = {
-                let _in_flight = InFlightGuard::enter(&self.live[i].in_flight);
+                let _in_flight = InFlightGuard::enter(self, i);
                 op(u.provider.clone()).await
             };
             match outcome {
@@ -984,6 +1001,53 @@ mod tests {
             router.live[0].snapshot().1,
             0,
             "failed attempt records no latency"
+        );
+    }
+
+    #[tokio::test]
+    async fn positive_inflight_events_fire_on_both_edges_including_failover() {
+        // A failed-then-successful dispatch emits 1,0 per attempted upstream —
+        // the release edge fires even for the failed attempt (RAII), so a
+        // gauge fed from these events always drains to 0.
+        let fail = FailProvider::new("http 500: transient");
+        let failing = RouterUpstream {
+            id: "bad".into(),
+            tags: vec![],
+            tier: PoolTier::Medium,
+            input_cost: 0.0,
+            provider: Arc::new(fail),
+        };
+        let ok = RouterUpstream {
+            id: "ok".into(),
+            tags: vec![],
+            tier: PoolTier::Medium,
+            input_cost: 0.0,
+            provider: Arc::new(OkProvider {
+                answer: "fine".into(),
+                caps: caps(true, false, 1000),
+            }),
+        };
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let router = TaskRouter::new(vec![failing, ok], prefer(&["bad", "ok"]))
+            .unwrap()
+            .with_observer(Arc::new(move |ev| {
+                if let RouteEvent::InFlight { upstream, count } = ev {
+                    sink.lock().unwrap().push((upstream.to_string(), count));
+                }
+            }));
+        router
+            .complete(CompletionRequest::default())
+            .await
+            .expect("fails over");
+        assert_eq!(
+            events.lock().unwrap().clone(),
+            vec![
+                ("bad".to_string(), 1),
+                ("bad".to_string(), 0),
+                ("ok".to_string(), 1),
+                ("ok".to_string(), 0),
+            ]
         );
     }
 }

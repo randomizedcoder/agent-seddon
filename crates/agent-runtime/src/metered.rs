@@ -1676,6 +1676,9 @@ pub(crate) fn record_route_event(m: &Metrics, ev: agent_providers::RouteEvent<'_
         } => {
             m.on_router_dispatch(role, upstream, outcome);
         }
+        RouteEvent::InFlight { upstream, count } => {
+            m.set_router_inflight(upstream, count);
+        }
         RouteEvent::FellOver { from, to, reason } => {
             m.on_router_failover(from, to, reason);
             tracing::info!(from, reason, "provider fallover");
@@ -2731,6 +2734,59 @@ mod registry_metrics_tests {
             probe.delta(&m, "agent_registry_mutations_total", None),
             0.0,
             "a rejected mutation must not count"
+        );
+    }
+}
+
+// The in-flight gauge fed by RouteEvent::InFlight (model-router 04 follow-up).
+#[cfg(all(test, feature = "provider-router"))]
+mod router_inflight_tests {
+    use super::*;
+    use agent_providers::RouteEvent;
+    use agent_testkit::observe::MetricsProbe;
+
+    #[test]
+    fn positive_inflight_gauge_tracks_both_edges_and_drains_to_zero() {
+        let _lock = callsite_guard();
+        let m = Metrics::new();
+        let probe = MetricsProbe::new(&m);
+        record_route_event(
+            &m,
+            RouteEvent::InFlight {
+                upstream: "kimi",
+                count: 1,
+            },
+        );
+        record_route_event(
+            &m,
+            RouteEvent::InFlight {
+                upstream: "kimi",
+                count: 2,
+            },
+        );
+        assert_eq!(
+            probe.delta(
+                &m,
+                "agent_router_upstream_inflight",
+                Some("upstream=\"kimi\"")
+            ),
+            2.0
+        );
+        record_route_event(
+            &m,
+            RouteEvent::InFlight {
+                upstream: "kimi",
+                count: 0,
+            },
+        );
+        assert_eq!(
+            probe.delta(
+                &m,
+                "agent_router_upstream_inflight",
+                Some("upstream=\"kimi\"")
+            ),
+            0.0,
+            "the gauge drains to zero"
         );
     }
 }

@@ -147,6 +147,12 @@ pub enum RouteEvent<'a> {
         upstream: &'a str,
         outcome: &'a str,
     },
+    /// The upstream's in-flight count changed (model-router 04 follow-up):
+    /// emitted on dispatch entry AND on release — the release fires from the
+    /// RAII guard's Drop, so a cancelled/panicked call still reports its
+    /// decrement and the gauge drains to 0. Under concurrency the events are
+    /// last-writer-wins per upstream; the drained state is always exact.
+    InFlight { upstream: &'a str, count: u32 },
     /// `target` was skipped because its breaker is open.
     SkippedUnhealthy { target: &'a str },
     /// Every candidate was exhausted.
@@ -587,6 +593,9 @@ mod tests {
                     RouteEvent::Dispatched {
                         upstream, outcome, ..
                     } => format!("dispatched:{upstream}:{outcome}"),
+                    RouteEvent::InFlight { upstream, count } => {
+                        format!("inflight:{upstream}:{count}")
+                    }
                     RouteEvent::FellOver { from, .. } => format!("fellover:{from}"),
                     RouteEvent::SkippedUnhealthy { target } => format!("skipped:{target}"),
                     RouteEvent::Exhausted => "exhausted".into(),

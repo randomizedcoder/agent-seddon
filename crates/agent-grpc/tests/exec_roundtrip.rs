@@ -212,7 +212,16 @@ async fn positive_cursor_reads_are_repeatable_and_resume() {
 
     let a = client.read(&id, None).await.unwrap();
     let b = client.read(&id, None).await.unwrap();
-    assert_eq!(a.data, b.data, "the same cursor must return the same bytes");
+    // Replay-stability, not frozen length: the pty may emit MORE bytes (the
+    // shell prompt) between the two reads, so the re-read may legitimately be
+    // longer — but everything the first read returned must reappear unchanged
+    // at the same offsets (the retry-safety the cursor contract promises).
+    assert!(
+        b.data.starts_with(&a.data),
+        "a re-read from the same cursor must replay the same prefix\n left: {:?}\nright: {:?}",
+        a.data,
+        b.data
+    );
 
     // Resuming from the returned cursor yields only what is new.
     let c = client.read(&id, Some(a.next_cursor)).await.unwrap();

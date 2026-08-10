@@ -800,9 +800,10 @@ pub async fn build_agent_with(
     #[cfg(feature = "mode")]
     let task_classifier_seam: Option<Arc<dyn agent_core::TaskClassifier>> =
         match cfg.mode.classifier.as_str() {
-            "hybrid" => Some(Arc::new(agent_mode::HybridClassifier::new(
-                llm_pool_seam.clone(),
-            ))),
+            "hybrid" => Some(Arc::new(
+                agent_mode::HybridClassifier::new(llm_pool_seam.clone())
+                    .with_escalation(cfg.mode.escalate),
+            )),
             #[cfg(feature = "grpc")]
             "grpc" => {
                 let ep = crate::registry::grpc_client_endpoint(
