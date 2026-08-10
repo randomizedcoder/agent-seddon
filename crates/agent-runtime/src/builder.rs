@@ -2081,12 +2081,14 @@ fn route_cfg_from(
                 }
                 u.base_url.clone()
             }
-            // Stored + served by the registry, but the startup loader cannot
-            // synthesize these yet (recorded in STATUS.md; additive later).
+            // The static loader's `[route]` form cannot carry a kind — these
+            // cards are registry-native: set `[route] source = "registry"` and
+            // Put them into the store (the runtime synth builds them there).
             other => anyhow::bail!(
-                "model-router config `{path}`: upstream `{}`: kind {other:?} is not yet \
-                 buildable by the startup loader (use \"openai-compat\" or a registered \
-                 provider name)",
+                "model-router config `{path}`: upstream `{}`: kind {other:?} is not \
+                 buildable by the static startup loader (use \"openai-compat\" or a \
+                 registered provider name here; anthropic/grpc cards are registry-native — \
+                 Put them into the [registry] store with [route] source = \"registry\")",
                 u.id
             ),
         };
@@ -2154,38 +2156,170 @@ pub(crate) fn synth_route_upstream(
     metrics: &Metrics,
 ) -> agent_core::Result<Arc<dyn agent_core::LlmProvider>> {
     use agent_core::Error;
-    if card.kind != "openai-compat" || card.base_url.is_empty() {
-        return Err(Error::Registry(format!(
-            "card `{}`: only endpoint-carrying openai-compat cards are registry-buildable",
+    let provider: Arc<dyn agent_core::LlmProvider> = match card.kind.as_str() {
+        "openai-compat" => {
+            if card.base_url.is_empty() {
+                return Err(Error::Registry(format!(
+                    "card `{}`: kind \"openai-compat\" requires base_url",
+                    card.id
+                )));
+            }
+            let (api_key_env, api_key_file) = synth_key_refs(card)?;
+            let ucfg = crate::config::RouteUpstreamCfg {
+                name: card.id.clone(),
+                endpoint: card.base_url.clone(),
+                model: card.model.clone(),
+                api_key: String::new(),
+                api_key_env,
+                api_key_file,
+                insecure_tls: card.insecure_tls,
+                context_window: (card.context_window != 0).then_some(card.context_window),
+                ..Default::default()
+            };
+            Arc::new(
+                build_route_upstream(&ucfg, global_context_window)
+                    .map_err(|e| Error::Registry(format!("card `{}`: {e:#}", card.id)))?,
+            )
+        }
+        "anthropic" => synth_anthropic_upstream(card, global_context_window)?,
+        "grpc" => synth_grpc_upstream(card, global_context_window)?,
+        // `""` = a registered provider name. Deliberately NOT runtime-buildable:
+        // a registry entry (a remote peer may have written it) must never reach
+        // the local factory graph — a card naming `task-router` or `consensus`
+        // would recurse into the very router being rebuilt. Fail closed.
+        "" => {
+            return Err(Error::Registry(format!(
+                "card `{}`: registered-name cards are not runtime-buildable (a registry \
+                 entry must not reach local factories) — use an endpoint-carrying kind",
+                card.id
+            )))
+        }
+        other => {
+            return Err(Error::Registry(format!(
+                "card `{}`: unknown kind `{other}`",
+                card.id
+            )))
+        }
+    };
+    Ok(crate::metered::provider(provider, metrics.clone(), &card.id))
+}
+
+/// Split a card's `api_key_ref` into the (env, file) pair the provider builders
+/// take — never a raw value (`ApiKeyRef::parse` already refused those without
+/// echoing them).
+#[cfg(all(feature = "registry", feature = "provider-router"))]
+fn synth_key_refs(card: &agent_core::Upstream) -> agent_core::Result<(String, String)> {
+    match agent_core::ApiKeyRef::parse(&card.api_key_ref) {
+        Ok(agent_core::ApiKeyRef::Env(n)) => Ok((n.to_string(), String::new())),
+        Ok(agent_core::ApiKeyRef::File(f)) => Ok((String::new(), f.to_string())),
+        Ok(agent_core::ApiKeyRef::None) => Ok((String::new(), String::new())),
+        Err(e) => Err(agent_core::Error::Registry(format!(
+            "card `{}`: {e}",
             card.id
-        )));
+        ))),
     }
-    let (api_key_env, api_key_file) = match agent_core::ApiKeyRef::parse(&card.api_key_ref) {
-        Ok(agent_core::ApiKeyRef::Env(n)) => (n.to_string(), String::new()),
-        Ok(agent_core::ApiKeyRef::File(f)) => (String::new(), f.to_string()),
-        Ok(agent_core::ApiKeyRef::None) => (String::new(), String::new()),
-        Err(e) => return Err(Error::Registry(format!("card `{}`: {e}", card.id))),
-    };
-    let ucfg = crate::config::RouteUpstreamCfg {
-        name: card.id.clone(),
-        endpoint: card.base_url.clone(),
-        model: card.model.clone(),
-        api_key: String::new(),
-        api_key_env,
-        api_key_file,
-        insecure_tls: card.insecure_tls,
-        context_window: (card.context_window != 0).then_some(card.context_window),
-        tags: Vec::new(),
-        tier: String::new(),
-        input_cost: None,
-    };
-    let provider = build_route_upstream(&ucfg, global_context_window)
-        .map_err(|e| Error::Registry(format!("card `{}`: {e:#}", card.id)))?;
-    Ok(crate::metered::provider(
-        Arc::new(provider),
-        metrics.clone(),
-        &card.id,
-    ))
+}
+
+/// An `anthropic`-kind card: the Messages API client built straight from the
+/// card (an empty `base_url` means the public endpoint, mirroring the
+/// `[provider]` factory). `insecure_tls` is refused — the Anthropic client has
+/// no cert-bypass, and silently ignoring a TLS-relevant flag would surface as
+/// an inexplicable connect failure instead of a config error.
+#[cfg(all(feature = "registry", feature = "provider-router"))]
+fn synth_anthropic_upstream(
+    card: &agent_core::Upstream,
+    global_context_window: u32,
+) -> agent_core::Result<Arc<dyn agent_core::LlmProvider>> {
+    use agent_core::Error;
+    #[cfg(not(feature = "provider-anthropic"))]
+    {
+        let _ = global_context_window;
+        Err(Error::Registry(format!(
+            "card `{}`: built without the provider-anthropic feature",
+            card.id
+        )))
+    }
+    #[cfg(feature = "provider-anthropic")]
+    {
+        if card.insecure_tls {
+            return Err(Error::Registry(format!(
+                "card `{}`: kind \"anthropic\" does not support insecure_tls",
+                card.id
+            )));
+        }
+        let (env, file) = synth_key_refs(card)?;
+        let api_key = resolve_key_opt("", &env, &file)
+            .map_err(|e| Error::Registry(format!("card `{}`: {e:#}", card.id)))?;
+        let base_url = if card.base_url.is_empty() {
+            "https://api.anthropic.com/v1".to_string()
+        } else {
+            card.base_url.clone()
+        };
+        let version = if card.version.is_empty() {
+            crate::config::default_anthropic_version()
+        } else {
+            card.version.clone()
+        };
+        let provider = agent_providers::AnthropicProvider::new(agent_providers::AnthropicConfig {
+            base_url,
+            model: card.model.clone(),
+            api_key,
+            version,
+            context_window: if card.context_window != 0 {
+                card.context_window
+            } else {
+                global_context_window
+            },
+            max_retries: card.max_retries,
+        })
+        .map_err(|e| Error::Registry(format!("card `{}`: {e}", card.id)))?;
+        Ok(Arc::new(provider))
+    }
+}
+
+/// A `grpc`-kind card: a lazily-dialed remote `LlmProvider` seam. Capabilities
+/// come from the card — the card IS the fleet's metadata authority; the real
+/// model sits behind the gateway.
+#[cfg(all(feature = "registry", feature = "provider-router"))]
+fn synth_grpc_upstream(
+    card: &agent_core::Upstream,
+    global_context_window: u32,
+) -> agent_core::Result<Arc<dyn agent_core::LlmProvider>> {
+    use agent_core::Error;
+    #[cfg(not(feature = "grpc"))]
+    {
+        let _ = global_context_window;
+        Err(Error::Registry(format!(
+            "card `{}`: built without the grpc feature",
+            card.id
+        )))
+    }
+    #[cfg(feature = "grpc")]
+    {
+        if card.base_url.is_empty() {
+            // No localhost default here: a registry card must say where it
+            // dials — an implicit local port would be a surprising fallback
+            // for a fleet entry.
+            return Err(Error::Registry(format!(
+                "card `{}`: kind \"grpc\" requires base_url",
+                card.id
+            )));
+        }
+        let ep = agent_grpc::Endpoint::parse(&card.base_url);
+        let caps = agent_core::ModelCapabilities {
+            supports_tools: card.supports_tools,
+            context_window: if card.context_window != 0 {
+                card.context_window
+            } else {
+                global_context_window
+            },
+            supports_response_format: card.supports_response_format,
+            supports_vision: card.supports_vision,
+        };
+        let provider = agent_grpc::client::GrpcProvider::connect(&ep, caps)
+            .map_err(|e| Error::Registry(format!("card `{}`: {e}", card.id)))?;
+        Ok(Arc::new(provider))
+    }
 }
 
 /// Map one `[[route.upstreams]]` TOML entry onto a registry card — the seeding
@@ -3415,8 +3549,8 @@ mod model_router_config_tests {
         for kind in ["anthropic", "grpc"] {
             let mut mrc = parsed();
             mrc.upstreams[0].kind = kind.into();
-            let err = route_cfg_from(&mrc, "t").expect_err("not yet buildable");
-            assert!(err.to_string().contains("not yet buildable"), "{err}");
+            let err = route_cfg_from(&mrc, "t").expect_err("static loader refuses");
+            assert!(err.to_string().contains("registry-native"), "{err}");
         }
         // openai-compat without a base_url is likewise an error, not a guess.
         let mut mrc = parsed();
@@ -3611,10 +3745,63 @@ mod registry_seed_tests {
         let mut keyless = card.clone();
         keyless.api_key_ref = String::new();
         assert!(synth_route_upstream(&keyless, 8_192, &m).is_ok());
-        // A registered-name card is not registry-buildable (skipped upstream).
+        // A registered-name card is not registry-buildable (skipped upstream):
+        // a registry entry must never reach the local factory graph (recursion
+        // + trust hazard) — a deliberate refusal, not a missing feature.
         let mut named = card;
         named.kind = String::new();
         named.base_url = String::new();
-        assert!(synth_route_upstream(&named, 8_192, &m).is_err());
+        let err = match synth_route_upstream(&named, 8_192, &m) {
+            Err(e) => e,
+            Ok(_) => panic!("a registered-name card must not build"),
+        };
+        assert!(err.to_string().contains("not runtime-buildable"), "{err}");
+    }
+
+    /// `anthropic`- and `grpc`-kind cards synthesize straight from the card
+    /// (04 tail) — connection + capabilities are ON the card, no factory
+    /// registry involved. Both clients dial lazily, so building is offline
+    /// (the grpc channel still wants a runtime context, as at real call sites).
+    #[tokio::test]
+    async fn positive_synth_builds_anthropic_and_grpc_cards() {
+        let m = Metrics::new();
+        let mut card = route_upstream_card(&ucfg("claude")).unwrap();
+        card.kind = "anthropic".into();
+        card.api_key_ref = "env:UNSET_ANTHROPIC_KEY".into(); // env-miss = keyless
+        #[cfg(feature = "provider-anthropic")]
+        assert!(synth_route_upstream(&card, 8_192, &m).is_ok());
+        // The public-endpoint default mirrors the [provider] factory.
+        let mut no_url = card.clone();
+        no_url.base_url = String::new();
+        #[cfg(feature = "provider-anthropic")]
+        assert!(synth_route_upstream(&no_url, 8_192, &m).is_ok());
+
+        let mut remote = route_upstream_card(&ucfg("far")).unwrap();
+        remote.kind = "grpc".into();
+        remote.base_url = "127.0.0.1:2".into();
+        #[cfg(feature = "grpc")]
+        assert!(synth_route_upstream(&remote, 8_192, &m).is_ok());
+    }
+
+    #[rstest::rstest]
+    #[case::negative_anthropic_insecure_tls("anthropic", "https://a.example/v1", true, "insecure_tls")]
+    #[case::negative_grpc_needs_endpoint("grpc", "", false, "requires base_url")]
+    #[case::adversarial_unknown_kind("local-exec", "http://x/v1", false, "unknown kind")]
+    fn negative_synth_refuses_bad_kind_shapes(
+        #[case] kind: &str,
+        #[case] base_url: &str,
+        #[case] insecure: bool,
+        #[case] want: &str,
+    ) {
+        let m = Metrics::new();
+        let mut card = route_upstream_card(&ucfg("x")).unwrap();
+        card.kind = kind.into();
+        card.base_url = base_url.into();
+        card.insecure_tls = insecure;
+        let err = match synth_route_upstream(&card, 8_192, &m) {
+            Err(e) => e,
+            Ok(_) => panic!("kind `{kind}` with this shape must not build"),
+        };
+        assert!(err.to_string().contains(want), "{err}");
     }
 }

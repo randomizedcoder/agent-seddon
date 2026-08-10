@@ -2160,7 +2160,7 @@ fn default_system_prompt() -> String {
      do not call any more tools."
         .into()
 }
-fn default_anthropic_version() -> String {
+pub(crate) fn default_anthropic_version() -> String {
     "2023-06-01".into()
 }
 fn default_max_retries() -> u32 {
