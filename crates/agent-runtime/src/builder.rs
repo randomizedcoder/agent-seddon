@@ -1995,7 +1995,10 @@ fn apply_judge_env_with(
             agent_core::MAX_UPSTREAM_URL_LEN
         );
     }
-    if base_url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+    if base_url
+        .chars()
+        .any(|c| c.is_control() || c.is_whitespace())
+    {
         anyhow::bail!("AGENT_E2E_JUDGE_BASE_URL contains whitespace or control characters");
     }
     if cfg.route.upstreams.iter().any(|u| u.name == "judge-env") {
@@ -2201,7 +2204,11 @@ pub(crate) fn synth_route_upstream(
             )))
         }
     };
-    Ok(crate::metered::provider(provider, metrics.clone(), &card.id))
+    Ok(crate::metered::provider(
+        provider,
+        metrics.clone(),
+        &card.id,
+    ))
 }
 
 /// Split a card's `api_key_ref` into the (env, file) pair the provider builders
@@ -3399,7 +3406,10 @@ mod judge_env_tests {
     #[test]
     fn adversarial_oversized_base_url_fails_closed() {
         let mut cfg = cfg_with_knob(true);
-        let huge: String = "https://".chars().chain("x".repeat(3_000).chars()).collect();
+        let huge: String = "https://"
+            .chars()
+            .chain("x".repeat(3_000).chars())
+            .collect();
         let huge: &'static str = Box::leak(huge.into_boxed_str());
         let env = [("AGENT_E2E_JUDGE_BASE_URL", huge)];
         let err = apply_judge_env_with(&mut cfg, &lookup(&env)).expect_err("over the cap");
@@ -3415,10 +3425,7 @@ mod judge_env_tests {
         let mut cfg = cfg_with_knob(true);
         let env = [("AGENT_E2E_JUDGE_BASE_URL", url)];
         let err = apply_judge_env_with(&mut cfg, &lookup(&env)).expect_err("garbled");
-        assert!(
-            err.to_string().contains("whitespace or control"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("whitespace or control"), "{err}");
     }
 
     #[test]
@@ -3784,7 +3791,12 @@ mod registry_seed_tests {
     }
 
     #[rstest::rstest]
-    #[case::negative_anthropic_insecure_tls("anthropic", "https://a.example/v1", true, "insecure_tls")]
+    #[case::negative_anthropic_insecure_tls(
+        "anthropic",
+        "https://a.example/v1",
+        true,
+        "insecure_tls"
+    )]
     #[case::negative_grpc_needs_endpoint("grpc", "", false, "requires base_url")]
     #[case::adversarial_unknown_kind("local-exec", "http://x/v1", false, "unknown kind")]
     fn negative_synth_refuses_bad_kind_shapes(
