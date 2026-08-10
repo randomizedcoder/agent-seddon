@@ -1,9 +1,17 @@
 # 01 — Rich per-upstream metadata
 
-Status: **planned** — see [`STATUS.md`](STATUS.md). The foundation increment: give every
+Status: ✅ **merged** (PR #229) — see [`STATUS.md`](STATUS.md), including the as-built
+deviations. The foundation increment: give every
 upstream a **model card** (per-upstream context window, cost, capability tags) and, along the
 way, make the pool usable for **authenticated / self-signed hosted endpoints** — which is what
 lets Kimi + GLM go into one pool secret-safely (the immediate motivation).
+
+> **As built:** `PoolMemberCfg` gained the enabler fields (`api_key_env`/`api_key_file`/
+> `insecure_tls`/per-member `context_window`); the routing metadata (`tags`/`tier`/`input_cost`)
+> landed on the new `[[route.upstreams]]` (`RouteUpstreamCfg`) rather than on
+> `ModelCapabilities`/`PoolMember` — capability *facts* stay on `provider.capabilities()`,
+> routing *preferences* on config. `PriceTable` plumbing did not land (`input_cost` is a manual
+> hint; revisit in [03](03-registry-proto.md)).
 
 > Implementation note: this increment is **in-process + TOML only** — no proto control plane yet
 > (that is [03](03-registry-proto.md)). It widens the metadata the *existing* pool/router carry,

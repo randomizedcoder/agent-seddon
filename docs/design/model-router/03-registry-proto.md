@@ -1,6 +1,8 @@
 # 03 — Config + registry control plane: textproto + `ProviderRegistryService`
 
-Status: **planned** — see [`STATUS.md`](STATUS.md). This is the **TOML → protobuf + gRPC**
+Status: **planned** — see [`STATUS.md`](STATUS.md). Depends on
+[02b](02b-hint-threading.md), which lands `RouteHint`/`RouteRole` in `common.proto` (this
+increment **imports** them, it does not define them). This is the **TOML → protobuf + gRPC**
 migration. The fleet + routing policy become one proto message, `ModelRouterConfig`, whose
 **human-readable form is protobuf text (textproto)**: point `agent --model-router-config <file>`
 at it to load the whole model router at startup — **no gRPC server needed** — and keep several
@@ -77,13 +79,8 @@ message UpstreamHealth {          // live state — NOT persisted
   uint32 latency_ms_ewma = 4; bool saturated = 5; uint32 consecutive_failures = 6;
 }
 
-enum RouteRole { ROUTE_ROLE_MAIN = 0; JUDGE = 1; CLASSIFY = 2; SUMMARIZE = 3; VERIFY = 4; REVIEW = 5; }
+// RouteHint + RouteRole land in common.proto with 02b — imported here, not redefined.
 
-message RouteHint {
-  TaskMode task_mode = 1; RouteRole role = 2; uint32 min_context = 3;
-  bool needs_vision = 4; bool needs_tools = 5; float max_cost = 6;
-  uint32 latency_target_ms = 7; string override_upstream = 8;
-}
 message RouteMatch  { TaskMode task_mode = 1; RouteRole role = 2; uint32 min_context = 3; repeated string tags_required = 4; }
 message RoutePrefer { repeated string tags = 1; PoolTier tier = 2; repeated string upstreams = 3; string policy = 4; }
 message RouteRule   { RouteMatch match = 1; RoutePrefer prefer = 2; }
@@ -143,7 +140,10 @@ json` variant is trivial if a JSON file is ever preferred — same schema, same 
   control-plane `Put`, one format for both), `sqlite`, and `grpc` (a remote registry). Registered
   in `register_builtins`.
 - `agent --serve-provider-registry` + a `SEAMS` row (`service = "agent.v1.ProviderRegistryService"`,
-  a `constants::PROVIDER_REGISTRY` port); `every_seam_has_a_table_row` restores exhaustiveness.
+  a `constants::PROVIDER_REGISTRY` port — **50084**, metrics **9634**, the next free slots after
+  digest/graph/ast took 50081-3/9631-3; remember `nix/gen-constants.nix` enumerates seams
+  **explicitly** — add the `seamConst` line or nothing generates);
+  `every_seam_has_a_table_row` restores exhaustiveness.
 - Server + client wrappers mirror `llm_pool.rs`; conversions in `convert.rs`; a `"grpc"` client
   factory so a `TaskRouter` can be backed by a remote registry (`= "grpc"`).
 
@@ -161,8 +161,8 @@ The registry is a **new** seam; the existing traits are untouched. `TaskRouter` 
 
 ## Protobuf (additive — no baseline bump)
 
-A new `upstream.proto` file + service + messages, plus the 02 `RouteHint` field already on
-`CompletionRequest`. Nothing in `llm_pool.proto`/`provider.proto`/`common.proto` is renumbered.
+A new `upstream.proto` file + service + messages, plus the [02b](02b-hint-threading.md)
+`RouteHint` field already on `CompletionRequest`. Nothing in `llm_pool.proto`/`provider.proto`/`common.proto` is renumbered.
 `nix/checks/buf.nix` `buf breaking` passes against the committed baseline unchanged; run
 `nix run .#buf-image` **only** if a later edit must touch an existing field.
 
