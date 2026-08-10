@@ -74,6 +74,8 @@ pub struct Metrics {
     forge_seconds: HistogramVec,
     hook_dispatches: IntCounterVec,
     route_decisions: IntCounterVec,
+    router_decided: IntCounterVec,
+    router_no_candidate: IntCounterVec,
     gate_verdicts: IntCounterVec,
     gate_rounds: Histogram,
     gate_phase_seconds: HistogramVec,
@@ -365,6 +367,22 @@ impl Metrics {
                 "Router decisions, by target provider and outcome",
             ),
             &["target", "decision"],
+        )
+        .unwrap();
+        let router_decided = IntCounterVec::new(
+            Opts::new(
+                "agent_router_decisions_total",
+                "Task-router policy decisions, by role, task mode, chosen upstream and rule",
+            ),
+            &["role", "task_mode", "chosen", "rule"],
+        )
+        .unwrap();
+        let router_no_candidate = IntCounterVec::new(
+            Opts::new(
+                "agent_router_no_candidate_total",
+                "Task-router requests every upstream was filtered out for, by role",
+            ),
+            &["role"],
         )
         .unwrap();
         let gate_verdicts = IntCounterVec::new(
@@ -1169,6 +1187,8 @@ impl Metrics {
             Box::new(forge_seconds.clone()),
             Box::new(hook_dispatches.clone()),
             Box::new(route_decisions.clone()),
+            Box::new(router_decided.clone()),
+            Box::new(router_no_candidate.clone()),
             Box::new(gate_verdicts.clone()),
             Box::new(gate_rounds.clone()),
             Box::new(gate_phase_seconds.clone()),
@@ -1305,6 +1325,8 @@ impl Metrics {
             forge_seconds,
             hook_dispatches,
             route_decisions,
+            router_decided,
+            router_no_candidate,
             gate_verdicts,
             gate_rounds,
             gate_phase_seconds,
@@ -1501,6 +1523,19 @@ impl Metrics {
         self.route_decisions
             .with_label_values(&[target, decision])
             .inc();
+    }
+    /// One task-router policy decision (model-router 02b). `role`/`task_mode`
+    /// are closed enum names, `chosen` a configured upstream id, `rule` the
+    /// matched rule index (`rule0`…) or `default` — all bounded cardinality.
+    pub fn on_router_decided(&self, role: &str, task_mode: &str, chosen: &str, rule: &str) {
+        self.router_decided
+            .with_label_values(&[role, task_mode, chosen, rule])
+            .inc();
+    }
+    /// The task-router's hard filter rejected every upstream for `role` —
+    /// nothing was dialed (distinct from dispatch exhaustion).
+    pub fn on_router_no_candidate(&self, role: &str) {
+        self.router_no_candidate.with_label_values(&[role]).inc();
     }
     /// One completed consensus-gate run. `outcome` is a closed set
     /// (`pass|fixed|alternatives|exhausted|critic_error`); phase times are the wall

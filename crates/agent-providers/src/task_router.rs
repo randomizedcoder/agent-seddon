@@ -11,10 +11,12 @@
 //! requirements, so a preferred model is used first and a request that needs a
 //! capability lands only on an upstream that has it.
 //!
-//! This slice derives the [`Hint`] from the request's EXACT requirements
-//! (needs-tools / needs-vision) with a fixed role; threading the classified task mode,
-//! per-call role, and explicit override onto the request is a following slice. See
-//! docs/design/model-router/02-routing.md.
+//! The [`Hint`] merges **per-request** signals (a `CompletionRequest`'s
+//! [`agent_core::RouteHint`]: classified task mode, per-call role, override,
+//! cost/tier caps — model-router 02b) with **derived facts** (needs-tools /
+//! needs-vision from the request shape, a cheap context estimate). Derived facts
+//! always win: a hint can narrow the fleet but can never clear a real
+//! requirement. See docs/design/model-router/02b-hint-threading.md.
 
 use crate::route::{Hint, Policy, Role, UpstreamMeta};
 use crate::router::{Health, RouteEvent, RouteObserver};
@@ -103,14 +105,28 @@ impl TaskRouter {
         }
     }
 
-    /// The per-request hint, from the request's EXACT requirements (no estimation):
-    /// tool/media presence force capability filters; the role is fixed for now.
+    /// The per-request hint: the request's carried [`agent_core::RouteHint`]
+    /// merged with derived facts. The carried hint is re-sanitized here (defense
+    /// in depth — wire decode sanitizes too, but an in-process caller may not);
+    /// `needs_tools`/`needs_vision` are ALWAYS derived from the request itself,
+    /// so a hostile hint can't steer a tool-call request onto a tool-less
+    /// upstream; `min_context` falls back to a cheap chars/4 estimate.
     fn hint(&self, req: &CompletionRequest) -> Hint {
+        let mut carried = req.route.clone().unwrap_or_default();
+        carried.sanitize();
         Hint {
-            role: self.role,
+            role: carried.role.unwrap_or(self.role),
+            task_mode: carried.task_mode,
             needs_tools: !req.tools.is_empty(),
             needs_vision: req.messages.iter().any(agent_core::Message::has_media),
-            ..Default::default()
+            min_context: if carried.min_context > 0 {
+                carried.min_context
+            } else {
+                estimate_min_context(req)
+            },
+            max_cost: carried.max_cost,
+            tier: carried.tier,
+            override_upstream: carried.override_upstream,
         }
     }
 
@@ -133,11 +149,12 @@ impl TaskRouter {
     }
 
     /// Indices to try, in order: the policy's preferred-and-capable order, with open
-    /// breakers moved to the back (skipped-then-tried-last).
-    fn order(&self, req: &CompletionRequest) -> Vec<usize> {
+    /// breakers moved to the back (skipped-then-tried-last). Also returns which
+    /// rule decided (for the `Decided` event).
+    fn order(&self, hint: &Hint) -> (Vec<usize>, Option<usize>) {
         let now = (self.now_ms)();
         let fleet: Vec<UpstreamMeta> = self.upstreams.iter().map(|u| self.meta(u)).collect();
-        let ordered = self.policy.resolve(&self.hint(req), &fleet);
+        let (ordered, rule) = self.policy.resolve_with_rule(hint, &fleet);
 
         let mut healthy = Vec::new();
         let mut unhealthy = Vec::new();
@@ -154,7 +171,7 @@ impl TaskRouter {
             }
         }
         healthy.extend(unhealthy);
-        healthy
+        (healthy, rule)
     }
 
     /// Try each chosen upstream in turn, stopping at the first success or the first
@@ -164,12 +181,23 @@ impl TaskRouter {
         F: Fn(Arc<dyn LlmProvider>) -> Fut,
         Fut: std::future::Future<Output = Result<T>>,
     {
-        let order = self.order(req);
+        let hint = self.hint(req);
+        let (order, rule) = self.order(&hint);
+        let mode = hint.task_mode.map_or("-", |m| m.as_str());
         if order.is_empty() {
+            self.emit(RouteEvent::NoCandidate {
+                role: hint.role.as_str(),
+            });
             return Err(Error::Provider(
                 "no upstream can serve this request (capability/requirement mismatch)".into(),
             ));
         }
+        self.emit(RouteEvent::Decided {
+            role: hint.role.as_str(),
+            task_mode: mode,
+            rule,
+            chosen: &self.upstreams[order[0]].id,
+        });
         let mut last: Option<Error> = None;
         for (attempt, &i) in order.iter().enumerate() {
             let u = &self.upstreams[i];
@@ -198,6 +226,24 @@ impl TaskRouter {
         self.emit(RouteEvent::Exhausted);
         Err(last.unwrap_or_else(|| Error::Provider("task-router exhausted all upstreams".into())))
     }
+}
+
+/// A cheap context floor for a request that carries no `min_context`: total text
+/// chars / 4 (the usual ~4-chars-per-token heuristic), allocation-free, capped
+/// to [`agent_core::MAX_ROUTE_MIN_CONTEXT`]. A floor *filter* only — an
+/// upstream with an unknown (`0`) window is never filtered out, so an
+/// over-estimate fails soft.
+fn estimate_min_context(req: &CompletionRequest) -> u32 {
+    let chars: usize = req
+        .messages
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .filter_map(|b| b.as_text())
+        .map(str::len)
+        .sum();
+    u32::try_from(chars / 4)
+        .unwrap_or(agent_core::MAX_ROUTE_MIN_CONTEXT)
+        .min(agent_core::MAX_ROUTE_MIN_CONTEXT)
 }
 
 #[async_trait]
@@ -488,5 +534,280 @@ mod tests {
         let r = TaskRouter::new(vec![u], Policy::default()).unwrap();
         // NaN cost would poison any cost ordering; it is zeroed on build.
         assert_eq!(r.upstreams[0].input_cost, 0.0);
+    }
+
+    // --- 02b: the per-request RouteHint --------------------------------------
+
+    /// A rule steering `role` to an explicit upstream order.
+    fn role_rule(role: Role, ids: &[&str]) -> crate::route::Rule {
+        crate::route::Rule {
+            match_: crate::route::Match {
+                role: Some(role),
+                ..Default::default()
+            },
+            prefer: Prefer {
+                upstreams: ids.iter().map(|s| (*s).to_string()).collect(),
+                ..Default::default()
+            },
+        }
+    }
+
+    fn hinted(mut r: CompletionRequest, hint: agent_core::RouteHint) -> CompletionRequest {
+        r.route = Some(hint);
+        r
+    }
+
+    #[tokio::test]
+    async fn positive_carried_role_beats_the_fixed_default() {
+        let policy = Policy {
+            rules: vec![role_rule(Role::Judge, &["glm", "kimi"])],
+            default_prefer: Prefer {
+                upstreams: vec!["kimi".into(), "glm".into()],
+                ..Default::default()
+            },
+        };
+        let r = router(
+            vec![
+                up("kimi", ok("from-kimi", true, false)),
+                up("glm", ok("from-glm", true, false)),
+            ],
+            policy,
+        );
+        // No hint ⇒ the router's fixed role (Main) ⇒ the default preference.
+        assert_eq!(
+            r.complete(req()).await.unwrap().message.content_text(),
+            "from-kimi"
+        );
+        // A carried Judge role fires the Judge rule per call, same router.
+        let judged = hinted(
+            req(),
+            agent_core::RouteHint {
+                role: Some(agent_core::RouteRole::Judge),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            r.complete(judged).await.unwrap().message.content_text(),
+            "from-glm"
+        );
+    }
+
+    #[tokio::test]
+    async fn positive_carried_task_mode_fires_mode_rule() {
+        let policy = Policy {
+            rules: vec![crate::route::Rule {
+                match_: crate::route::Match {
+                    task_mode: Some(agent_core::TaskMode::Review),
+                    ..Default::default()
+                },
+                prefer: Prefer {
+                    upstreams: vec!["glm".into()],
+                    ..Default::default()
+                },
+            }],
+            default_prefer: Prefer {
+                upstreams: vec!["kimi".into(), "glm".into()],
+                ..Default::default()
+            },
+        };
+        let r = router(
+            vec![
+                up("kimi", ok("from-kimi", true, false)),
+                up("glm", ok("from-glm", true, false)),
+            ],
+            policy,
+        );
+        let review = hinted(
+            req(),
+            agent_core::RouteHint {
+                task_mode: Some(agent_core::TaskMode::Review),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            r.complete(review).await.unwrap().message.content_text(),
+            "from-glm"
+        );
+        // Without the mode the rule must not fire.
+        assert_eq!(
+            r.complete(req()).await.unwrap().message.content_text(),
+            "from-kimi"
+        );
+    }
+
+    #[tokio::test]
+    async fn positive_decided_event_carries_role_mode_rule_and_choice() {
+        let events: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+        let sink = events.clone();
+        let policy = Policy {
+            rules: vec![role_rule(Role::Judge, &["glm"])],
+            default_prefer: Prefer::default(),
+        };
+        let r = router(
+            vec![
+                up("kimi", ok("k", true, false)),
+                up("glm", ok("g", true, false)),
+            ],
+            policy,
+        )
+        .with_observer(Arc::new(move |ev| {
+            if let RouteEvent::Decided {
+                role,
+                task_mode,
+                rule,
+                chosen,
+            } = ev
+            {
+                sink.lock()
+                    .unwrap()
+                    .push(format!("{role}/{task_mode}/{rule:?}/{chosen}"));
+            }
+        }));
+        let judged = hinted(
+            req(),
+            agent_core::RouteHint {
+                role: Some(agent_core::RouteRole::Judge),
+                task_mode: Some(agent_core::TaskMode::Debug),
+                ..Default::default()
+            },
+        );
+        r.complete(judged).await.unwrap();
+        assert_eq!(
+            events.lock().unwrap().clone(),
+            vec!["judge/debug/Some(0)/glm".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn corner_min_context_is_estimated_when_unset() {
+        // ~40k chars ⇒ ~10k token floor: the 1k-window upstream is filtered out,
+        // the roomy one serves it even though the preference lists "small" first.
+        let small = Arc::new(OkProvider {
+            answer: "from-small".into(),
+            caps: caps(true, false, 1_000),
+        });
+        let big = Arc::new(OkProvider {
+            answer: "from-big".into(),
+            caps: caps(true, false, 100_000),
+        });
+        let r = router(
+            vec![up("small", small), up("big", big)],
+            prefer(&["small", "big"]),
+        );
+        let mut long = req();
+        long.messages = vec![agent_core::Message::user("x".repeat(40_000))];
+        assert_eq!(
+            r.complete(long).await.unwrap().message.content_text(),
+            "from-big"
+        );
+        // A short prompt keeps the preferred small upstream eligible.
+        assert_eq!(
+            r.complete(req()).await.unwrap().message.content_text(),
+            "from-small"
+        );
+    }
+
+    #[tokio::test]
+    async fn boundary_carried_min_context_overrides_the_estimate() {
+        let small = Arc::new(OkProvider {
+            answer: "from-small".into(),
+            caps: caps(true, false, 1_000),
+        });
+        let big = Arc::new(OkProvider {
+            answer: "from-big".into(),
+            caps: caps(true, false, 100_000),
+        });
+        let r = router(
+            vec![up("small", small), up("big", big)],
+            prefer(&["small", "big"]),
+        );
+        // A short prompt but an asserted 50k floor ⇒ only the big one fits.
+        let asserted = hinted(
+            req(),
+            agent_core::RouteHint {
+                min_context: 50_000,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            r.complete(asserted).await.unwrap().message.content_text(),
+            "from-big"
+        );
+    }
+
+    #[tokio::test]
+    async fn adversarial_hint_cannot_clear_derived_needs_tools() {
+        // The request carries tools; a hint (whatever it says) cannot steer it
+        // onto a tool-less upstream — needs_tools is derived, never hint-set.
+        let r = router(
+            vec![
+                up("kimi", ok("from-kimi", false, false)), // no tools
+                up("glm", ok("from-glm", true, false)),
+            ],
+            prefer(&["kimi", "glm"]),
+        );
+        let sneaky = hinted(
+            req_with_tools(),
+            agent_core::RouteHint {
+                override_upstream: Some("kimi".into()),
+                ..Default::default()
+            },
+        );
+        // Even the explicit override can't select the ineligible upstream.
+        assert_eq!(
+            r.complete(sneaky).await.unwrap().message.content_text(),
+            "from-glm"
+        );
+    }
+
+    #[tokio::test]
+    async fn adversarial_hostile_hint_numbers_fail_soft_with_no_candidate() {
+        let events: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+        let sink = events.clone();
+        let r = router(
+            vec![up("kimi", ok("k", true, false))], // window 1000
+            Policy::default(),
+        )
+        .with_observer(Arc::new(move |ev| {
+            if let RouteEvent::NoCandidate { role } = ev {
+                sink.lock().unwrap().push(role.to_string());
+            }
+        }));
+        let hostile = hinted(
+            req(),
+            agent_core::RouteHint {
+                min_context: u32::MAX, // sanitized to the cap, still unservable
+                max_cost: Some(f32::NAN),
+                override_upstream: Some("z".repeat(4096)),
+                ..Default::default()
+            },
+        );
+        let err = r.complete(hostile).await.expect_err("no candidate");
+        assert!(err.to_string().contains("capability"), "{err}");
+        assert_eq!(events.lock().unwrap().clone(), vec!["main".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn adversarial_overlong_override_is_dropped_not_dialed() {
+        // An over-long override id is dropped wholesale; routing proceeds
+        // normally instead of comparing (or logging) a hostile 4KiB string.
+        let r = router(
+            vec![
+                up("kimi", ok("from-kimi", true, false)),
+                up("glm", ok("from-glm", true, false)),
+            ],
+            prefer(&["kimi", "glm"]),
+        );
+        let sneaky = hinted(
+            req(),
+            agent_core::RouteHint {
+                override_upstream: Some("k".repeat(4096)),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            r.complete(sneaky).await.unwrap().message.content_text(),
+            "from-kimi"
+        );
     }
 }

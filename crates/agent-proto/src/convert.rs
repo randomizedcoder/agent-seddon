@@ -457,8 +457,13 @@ impl From<agent_core::RouteRole> for pb::RouteRole {
 impl From<agent_core::RouteHint> for pb::RouteHint {
     fn from(h: agent_core::RouteHint) -> Self {
         pb::RouteHint {
-            task_mode: h.task_mode.map_or(pb::TaskMode::Unspecified, pb::TaskMode::from) as i32,
-            role: h.role.map_or(pb::RouteRole::Unspecified, pb::RouteRole::from) as i32,
+            task_mode: h
+                .task_mode
+                .map_or(pb::TaskMode::Unspecified, pb::TaskMode::from)
+                as i32,
+            role: h
+                .role
+                .map_or(pb::RouteRole::Unspecified, pb::RouteRole::from) as i32,
             min_context: h.min_context,
             max_cost: h.max_cost,
             tier: h.tier.map_or(pb::PoolTier::Unspecified, pb::PoolTier::from) as i32,

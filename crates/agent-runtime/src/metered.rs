@@ -1591,6 +1591,24 @@ pub(crate) fn record_route_event(m: &Metrics, ev: agent_providers::RouteEvent<'_
             tracing::warn!("router exhausted every candidate");
             m.on_route_decision("-", "exhausted");
         }
+        // 02b decision-level observability. The `rule` label is the matched
+        // index or "default" — bounded; config text never becomes a label. The
+        // debug event lands inside the metered `provider.complete` span, giving
+        // the `route.select` attribution without a per-call span.
+        RouteEvent::Decided {
+            role,
+            task_mode,
+            rule,
+            chosen,
+        } => {
+            let rule = rule.map_or_else(|| "default".to_string(), |i| format!("rule{i}"));
+            tracing::debug!(role, task_mode, rule, chosen, "route.select");
+            m.on_router_decided(role, task_mode, chosen, &rule);
+        }
+        RouteEvent::NoCandidate { role } => {
+            tracing::warn!(role, "task-router: no upstream can serve this request");
+            m.on_router_no_candidate(role);
+        }
     }
 }
 

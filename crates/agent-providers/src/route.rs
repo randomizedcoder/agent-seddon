@@ -133,6 +133,18 @@ impl Policy {
     /// *no upstream can serve this request* (fail-soft — the caller decides), never a
     /// panic, even on a degenerate fleet or hostile requirement.
     pub fn resolve(&self, hint: &Hint, fleet: &[UpstreamMeta]) -> Vec<String> {
+        self.resolve_with_rule(hint, fleet).0
+    }
+
+    /// [`Self::resolve`] plus *which* rule ordered the result — `Some(index)` of
+    /// the first matching rule, `None` for the default preference (or an
+    /// override win, where no rule was consulted). Feeds the decision
+    /// observability (02b): the index is a bounded metric label, config text is not.
+    pub fn resolve_with_rule(
+        &self,
+        hint: &Hint,
+        fleet: &[UpstreamMeta],
+    ) -> (Vec<String>, Option<usize>) {
         // 1. Hard filter: only upstreams that CAN serve the request survive.
         let mut eligible: Vec<&UpstreamMeta> = fleet
             .iter()
@@ -152,21 +164,18 @@ impl Policy {
         // model-supplied id can never dial an ineligible/unknown upstream.
         if let Some(ov) = &hint.override_upstream {
             if let Some(u) = eligible.iter().find(|u| &u.id == ov) {
-                return vec![u.id.clone()];
+                return (vec![u.id.clone()], None);
             }
         }
 
         // 2. The first matching rule sets the ordering (else the default preference).
-        let prefer = self
-            .rules
-            .iter()
-            .find(|r| r.match_.matches(hint))
-            .map_or(&self.default_prefer, |r| &r.prefer);
+        let rule = self.rules.iter().position(|r| r.match_.matches(hint));
+        let prefer = rule.map_or(&self.default_prefer, |i| &self.rules[i].prefer);
 
         // 3. Order the survivors by preference (stable, deterministic). Cached-key so
         // each upstream's rank (which allocates its id for the tie-break) is built once.
         eligible.sort_by_cached_key(|u| prefer.rank(u));
-        eligible.into_iter().map(|u| u.id.clone()).collect()
+        (eligible.into_iter().map(|u| u.id.clone()).collect(), rule)
     }
 }
 
