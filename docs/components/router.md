@@ -143,8 +143,16 @@ slot's role; a pin may itself name `"task-router"` (self-reference inside
 Decisions are observable: `agent_router_decisions_total{role,task_mode,chosen,
 rule}` (`rule` = matched index or `default` — bounded, never config text),
 `agent_router_no_candidate_total{role}`, and a `route.select` debug event inside
-the metered provider span. The decision hot path is benched
-(`route_resolve`, two cases ~132k/133k Ir, ceiling 330k).
+the metered provider span. The decision hot path is benched, hardened, and
+budgeted: `route_resolve` measures the whole path (~115k Ir), the isolated
+decision (~34k), and the **production index path** `resolve_indices` (~22.7k —
+the borrowed-view/index pass cut the decision 2.6×: `UpstreamMeta` borrows
+id/tags, ordering resolves to fleet indices, no per-call `String` clones), plus
+the chars/4 estimate (~3.8k for 24KiB). A concurrency stress test
+(`route_stress`: 1,600 calls across 32 tasks over a 30-member flapping fleet
+with hostile hints — liveness + exact decision accounting + post-storm
+recovery) and a dhat leak budget (`route_leak`: failover path frees all
+scratch, <120 blocks/call) gate it alongside the Ir ceilings.
 
 ## Deferred
 

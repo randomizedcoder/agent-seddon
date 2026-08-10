@@ -74,7 +74,23 @@ leak) and must pass `nix develop -c nix flake check`.
   attribution, no span overhead). Strictness tightened beyond the spec: a typo'd
   `match` role **or** task_mode is a startup config error (the earlier
   degrade-to-match-any behaviour is gone); `prefer` stays lenient.
-- **02b live-verified** against the runpod endpoints (Kimi + GLM, keys via
+- **02b hardening pass** (same branch, post-live-verify): coverage/bench/stress sweep.
+  Tests grew to cover the full four-class table per surface (engine rule-index
+  reporting incl. override-reports-no-rule; cost/tier boundary equality; estimate
+  cases incl. media-only and clamp-at-cap; `-0.0` cost pinned as kept — IEEE;
+  per-variant wire roundtrips for every role/mode/tier; `RoleScoped` roleless-hint
+  passthrough + double-wrap outer-wins; empty-match-strings-are-unconstrained;
+  metered Decided/NoCandidate land in the right families with bounded labels).
+  Bench isolation showed the whole-path number was ~55% input construction —
+  the isolated decision was 58k Ir; the **borrowed-view + index pass**
+  (`UpstreamMeta<'a>` borrows id/tags; `resolve_indices` sorts fleet indices with
+  the id tie-break borrowed, override/order() lose their by-id searches; the
+  TaskRouter no longer clones every upstream's id+tags per call) cut it to
+  **22.7k Ir (2.6×)** with byte-identical ordering (all prior tests unchanged).
+  New `route_stress` (1,600 calls / 32 tasks / 30-member flapping fleet / hostile
+  hints: liveness, exact Decided+NoCandidate accounting, post-storm recovery) and
+  `route_leak` dhat budget (failover path frees all scratch, <120 blocks/call,
+  registered in `nix/checks/leak.nix`). (Kimi + GLM, keys via
   `api_key_file`): (1) a debug-cue prompt flipped the classifier (`mode.switch
   other→debug`) and the MAIN turn matched the `task_mode = "debug"` rule —
   `route.select role=main task_mode=debug rule=rule1 chosen=glm`, overriding the

@@ -5427,6 +5427,13 @@ mod tests {
         RouteHint { override_upstream: Some("x".repeat(MAX_ROUTE_OVERRIDE_LEN)), ..Default::default() },
         RouteHint { override_upstream: Some("x".repeat(MAX_ROUTE_OVERRIDE_LEN)), ..Default::default() },
     )]
+    #[case::corner_negative_zero_cost_kept(
+        // IEEE: -0.0 < 0.0 is FALSE, so -0.0 survives as a (harmless) zero cap —
+        // pinned so a future `< 0.0` → `<= -0.0`-style refactor can't silently
+        // change which requests a zero-cost fleet serves.
+        RouteHint { max_cost: Some(-0.0), ..Default::default() },
+        RouteHint { max_cost: Some(-0.0), ..Default::default() },
+    )]
     fn route_hint_sanitize(#[case] mut hint: RouteHint, #[case] expect: RouteHint) {
         hint.sanitize();
         assert_eq!(hint, expect);

@@ -18,7 +18,7 @@
 //! always win: a hint can narrow the fleet but can never clear a real
 //! requirement. See docs/design/model-router/02b-hint-threading.md.
 
-use crate::route::{Hint, Policy, Role, UpstreamMeta};
+use crate::route::{estimate_min_context, Hint, Policy, Role, UpstreamMeta};
 use crate::router::{Health, RouteEvent, RouteObserver};
 use agent_core::{
     ChunkStream, CompletionRequest, CompletionResponse, Error, LlmProvider, ModelCapabilities,
@@ -131,14 +131,16 @@ impl TaskRouter {
     }
 
     /// A live view of one upstream: capability facts from the provider, routing
-    /// metadata from config. `healthy = true` here (config-enabled); the circuit
-    /// breaker is applied as a reorder in [`Self::order`], not as a hard filter, so a
-    /// dead upstream is tried last rather than dropped.
-    fn meta(&self, u: &RouterUpstream) -> UpstreamMeta {
+    /// metadata **borrowed** from config (the decision path allocates no id/tag
+    /// clones — it runs on every routed call). `healthy = true` here
+    /// (config-enabled); the circuit breaker is applied as a reorder in
+    /// [`Self::order`], not as a hard filter, so a dead upstream is tried last
+    /// rather than dropped.
+    fn meta<'a>(u: &'a RouterUpstream) -> UpstreamMeta<'a> {
         let caps = u.provider.capabilities();
         UpstreamMeta {
-            id: u.id.clone(),
-            tags: u.tags.clone(),
+            id: &u.id,
+            tags: &u.tags,
             tier: u.tier,
             context_window: caps.context_window,
             input_cost: u.input_cost,
@@ -150,24 +152,23 @@ impl TaskRouter {
 
     /// Indices to try, in order: the policy's preferred-and-capable order, with open
     /// breakers moved to the back (skipped-then-tried-last). Also returns which
-    /// rule decided (for the `Decided` event).
+    /// rule decided (for the `Decided` event). The engine resolves straight to
+    /// fleet indices (same order as `self.upstreams`) — no by-id re-lookup.
     fn order(&self, hint: &Hint) -> (Vec<usize>, Option<usize>) {
         let now = (self.now_ms)();
-        let fleet: Vec<UpstreamMeta> = self.upstreams.iter().map(|u| self.meta(u)).collect();
-        let (ordered, rule) = self.policy.resolve_with_rule(hint, &fleet);
+        let fleet: Vec<UpstreamMeta<'_>> = self.upstreams.iter().map(Self::meta).collect();
+        let (ordered, rule) = self.policy.resolve_indices(hint, &fleet);
 
         let mut healthy = Vec::new();
         let mut unhealthy = Vec::new();
-        for id in ordered {
-            if let Some(i) = self.upstreams.iter().position(|u| u.id == id) {
-                if self.health[i].is_open(now, self.cooldown_ms) {
-                    self.emit(RouteEvent::SkippedUnhealthy {
-                        target: &self.upstreams[i].id,
-                    });
-                    unhealthy.push(i);
-                } else {
-                    healthy.push(i);
-                }
+        for i in ordered {
+            if self.health[i].is_open(now, self.cooldown_ms) {
+                self.emit(RouteEvent::SkippedUnhealthy {
+                    target: &self.upstreams[i].id,
+                });
+                unhealthy.push(i);
+            } else {
+                healthy.push(i);
             }
         }
         healthy.extend(unhealthy);
@@ -226,24 +227,6 @@ impl TaskRouter {
         self.emit(RouteEvent::Exhausted);
         Err(last.unwrap_or_else(|| Error::Provider("task-router exhausted all upstreams".into())))
     }
-}
-
-/// A cheap context floor for a request that carries no `min_context`: total text
-/// chars / 4 (the usual ~4-chars-per-token heuristic), allocation-free, capped
-/// to [`agent_core::MAX_ROUTE_MIN_CONTEXT`]. A floor *filter* only — an
-/// upstream with an unknown (`0`) window is never filtered out, so an
-/// over-estimate fails soft.
-fn estimate_min_context(req: &CompletionRequest) -> u32 {
-    let chars: usize = req
-        .messages
-        .iter()
-        .flat_map(|m| m.content.iter())
-        .filter_map(|b| b.as_text())
-        .map(str::len)
-        .sum();
-    u32::try_from(chars / 4)
-        .unwrap_or(agent_core::MAX_ROUTE_MIN_CONTEXT)
-        .min(agent_core::MAX_ROUTE_MIN_CONTEXT)
 }
 
 #[async_trait]

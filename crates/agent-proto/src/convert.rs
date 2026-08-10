@@ -4332,6 +4332,63 @@ mod tests {
         assert_eq!(hint, agent_core::RouteHint::default());
     }
 
+    // Every closed-set variant must survive the wire — a missing match arm in
+    // either direction silently reroutes a role/mode to the default.
+    #[rstest]
+    #[case::main(agent_core::RouteRole::Main)]
+    #[case::judge(agent_core::RouteRole::Judge)]
+    #[case::classify(agent_core::RouteRole::Classify)]
+    #[case::summarize(agent_core::RouteRole::Summarize)]
+    #[case::verify(agent_core::RouteRole::Verify)]
+    #[case::review(agent_core::RouteRole::Review)]
+    fn positive_every_route_role_roundtrips(#[case] role: agent_core::RouteRole) {
+        let hint = agent_core::RouteHint {
+            role: Some(role),
+            ..Default::default()
+        };
+        let back = agent_core::RouteHint::from(pb::RouteHint::from(hint));
+        assert_eq!(back.role, Some(role));
+    }
+
+    #[rstest]
+    #[case::review(agent_core::TaskMode::Review)]
+    #[case::implement(agent_core::TaskMode::Implement)]
+    #[case::design(agent_core::TaskMode::Design)]
+    #[case::debug(agent_core::TaskMode::Debug)]
+    #[case::explain(agent_core::TaskMode::Explain)]
+    #[case::other(agent_core::TaskMode::Other)]
+    fn positive_every_task_mode_roundtrips_on_the_hint(#[case] mode: agent_core::TaskMode) {
+        let hint = agent_core::RouteHint {
+            task_mode: Some(mode),
+            ..Default::default()
+        };
+        let back = agent_core::RouteHint::from(pb::RouteHint::from(hint));
+        assert_eq!(back.task_mode, Some(mode));
+    }
+
+    #[rstest]
+    #[case::light(agent_core::PoolTier::Light)]
+    #[case::medium(agent_core::PoolTier::Medium)]
+    #[case::heavy(agent_core::PoolTier::Heavy)]
+    fn positive_every_tier_floor_roundtrips_on_the_hint(#[case] tier: agent_core::PoolTier) {
+        let hint = agent_core::RouteHint {
+            tier: Some(tier),
+            ..Default::default()
+        };
+        let back = agent_core::RouteHint::from(pb::RouteHint::from(hint));
+        assert_eq!(back.tier, Some(tier));
+    }
+
+    #[test]
+    fn boundary_route_hint_min_context_at_cap_survives_the_wire() {
+        let hint = agent_core::RouteHint {
+            min_context: agent_core::MAX_ROUTE_MIN_CONTEXT,
+            ..Default::default()
+        };
+        let back = agent_core::RouteHint::from(pb::RouteHint::from(hint));
+        assert_eq!(back.min_context, agent_core::MAX_ROUTE_MIN_CONTEXT);
+    }
+
     // The request is attacker-controlled on a served seam: hostile numbers and
     // out-of-range enums must be dropped/absorbed at the decode boundary, never
     // passed into selection math.

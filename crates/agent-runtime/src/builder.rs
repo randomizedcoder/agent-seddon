@@ -1777,6 +1777,42 @@ mod role_scoped_tests {
             "a caller's own hint must never be overwritten by the slot stamp"
         );
     }
+
+    #[tokio::test]
+    async fn corner_present_but_roleless_hint_is_not_stamped() {
+        // Documents the stamp's granularity: it is all-or-nothing on the WHOLE
+        // hint. A caller that set a hint without a role said "route on my other
+        // signals, default role" — the slot must not partially rewrite it.
+        let inner = Arc::new(CaptureProvider::default());
+        let p = role_scoped(inner.clone(), RouteRole::Judge);
+        let partial = RouteHint {
+            min_context: 4_096,
+            ..Default::default()
+        };
+        let req = CompletionRequest {
+            route: Some(partial.clone()),
+            ..Default::default()
+        };
+        p.complete(req).await.unwrap();
+        assert_eq!(inner.seen.lock().unwrap()[0], Some(partial));
+    }
+
+    #[tokio::test]
+    async fn boundary_double_wrap_outer_stamp_wins() {
+        // Two nested slots (e.g. a judge slot resolving a provider that is
+        // itself role-scoped): the OUTER stamp fills first, the inner sees a
+        // present hint and leaves it — deterministic, no double-stamping.
+        let inner = Arc::new(CaptureProvider::default());
+        let p = role_scoped(
+            role_scoped(inner.clone(), RouteRole::Summarize),
+            RouteRole::Judge,
+        );
+        p.complete(CompletionRequest::default()).await.unwrap();
+        assert_eq!(
+            inner.seen.lock().unwrap()[0].as_ref().and_then(|h| h.role),
+            Some(RouteRole::Judge)
+        );
+    }
 }
 
 pub(crate) fn build_route_upstream(
@@ -2412,6 +2448,26 @@ mod route_policy_tests {
         };
         let policy = build_route_policy(&cfg).expect("lenient prefer");
         assert_eq!(policy.rules[0].prefer.tier, None);
+    }
+
+    #[test]
+    fn boundary_empty_match_strings_mean_unconstrained() {
+        // Empty (or whitespace) role/task_mode = "no constraint", NOT an error —
+        // the strictness applies only to non-empty text that fails to parse.
+        let cfg = RouteCfg {
+            rules: vec![RouteRuleCfg {
+                match_: RouteMatchCfg {
+                    role: "  ".into(),
+                    task_mode: String::new(),
+                    min_context: 0,
+                },
+                prefer: RoutePreferCfg::default(),
+            }],
+            ..Default::default()
+        };
+        let policy = build_route_policy(&cfg).expect("empty = unconstrained");
+        assert_eq!(policy.rules[0].match_.role, None);
+        assert_eq!(policy.rules[0].match_.task_mode, None);
     }
 }
 

@@ -2486,3 +2486,67 @@ mod tokenizer_span_tests {
         );
     }
 }
+
+// The 02b decision metrics: the RouteEvent bridge must label bounded values
+// only and must move the RIGHT family per event (a Decided landing in
+// no_candidate — or vice versa — would corrupt both panels).
+#[cfg(all(test, feature = "provider-router"))]
+mod route_event_tests {
+    use super::*;
+    use agent_providers::RouteEvent;
+    use agent_testkit::observe::MetricsProbe;
+
+    #[test]
+    fn positive_decided_event_increments_the_decisions_family() {
+        let m = Metrics::new();
+        let probe = MetricsProbe::new(&m);
+        record_route_event(
+            &m,
+            RouteEvent::Decided {
+                role: "judge",
+                task_mode: "debug",
+                rule: Some(3),
+                chosen: "glm",
+            },
+        );
+        assert!(
+            probe.delta(&m, "agent_router_decisions_total", Some("rule=\"rule3\"")) >= 1.0,
+            "rule index must render as the bounded rule3 label"
+        );
+        assert!(
+            probe.delta(&m, "agent_router_no_candidate_total", None) == 0.0,
+            "a decision is not a no-candidate"
+        );
+    }
+
+    #[test]
+    fn corner_default_rule_renders_as_default_label() {
+        let m = Metrics::new();
+        let probe = MetricsProbe::new(&m);
+        record_route_event(
+            &m,
+            RouteEvent::Decided {
+                role: "main",
+                task_mode: "-",
+                rule: None,
+                chosen: "kimi",
+            },
+        );
+        assert!(probe.delta(&m, "agent_router_decisions_total", Some("rule=\"default\"")) >= 1.0);
+    }
+
+    #[test]
+    fn negative_no_candidate_event_increments_only_its_family() {
+        let m = Metrics::new();
+        let probe = MetricsProbe::new(&m);
+        record_route_event(&m, RouteEvent::NoCandidate { role: "verify" });
+        assert!(
+            probe.delta(
+                &m,
+                "agent_router_no_candidate_total",
+                Some("role=\"verify\"")
+            ) >= 1.0
+        );
+        assert!(probe.delta(&m, "agent_router_decisions_total", None) == 0.0);
+    }
+}

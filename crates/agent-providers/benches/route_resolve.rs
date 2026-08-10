@@ -15,15 +15,19 @@ use iai_callgrind::{
 
 /// An `n`-upstream fleet with varied tags / tiers / windows / costs / health — the
 /// mix the filter and the tag/tier/cost ordering actually have to chew through.
-fn fleet(n: usize) -> Vec<UpstreamMeta> {
+/// Backing storage is leaked (bench-only, bounded) for the borrowed-view metas.
+fn fleet(n: usize) -> Vec<UpstreamMeta<'static>> {
     (0..n)
         .map(|i| UpstreamMeta {
-            id: format!("u{i}"),
-            tags: match i % 3 {
-                0 => vec!["reasoning".into(), "long-context".into()],
-                1 => vec!["cheap".into()],
-                _ => vec!["coding".into()],
-            },
+            id: Box::leak(format!("u{i}").into_boxed_str()),
+            tags: Box::leak(
+                match i % 3 {
+                    0 => vec!["reasoning".to_string(), "long-context".to_string()],
+                    1 => vec!["cheap".to_string()],
+                    _ => vec!["coding".to_string()],
+                }
+                .into_boxed_slice(),
+            ),
             tier: match i % 3 {
                 0 => PoolTier::Heavy,
                 1 => PoolTier::Light,
@@ -78,7 +82,9 @@ fn policy() -> Policy {
 
 // Resolve a Review hint (needs 16k context) over a 50-upstream fleet + 8 rules — the
 // full filter+match+order path (incl. building the 50-member fleet + 8 rules). Observed
-// ~132k Ir; ceiling ~2.5×. Bump deliberately when a change legitimately moves it.
+// ~132k Ir at 02 landing; ~115k after the borrowed-view/index pass (the decision alone
+// dropped 58k → 22.7k — see `resolve_indices_only`). Ceiling kept at the original
+// ~2.5×. Bump deliberately when a change legitimately moves it.
 #[library_benchmark(config = LibraryBenchmarkConfig::default()
     .tool(Callgrind::default().hard_limits([(EventKind::Ir, 330_000u64)])))]
 fn resolve_50_upstreams_8_rules() -> Vec<String> {
@@ -124,6 +130,63 @@ fn resolve_with_mode_constrained_rules() -> Vec<String> {
     black_box(p.resolve(black_box(&hint), black_box(&f)))
 }
 
+/// Setup-excluded inputs, so the measurement is the DECISION alone (the two
+/// whole-path benches above keep their history; this one answers "where do the
+/// instructions actually go" — input construction vs resolve).
+fn inputs() -> (Vec<UpstreamMeta<'static>>, Policy, Hint) {
+    (
+        fleet(50),
+        policy_with_modes(),
+        Hint {
+            role: Role::Review,
+            task_mode: Some(TaskMode::Debug),
+            min_context: 16_000,
+            ..Default::default()
+        },
+    )
+}
+
+#[library_benchmark(config = LibraryBenchmarkConfig::default()
+    .tool(Callgrind::default().hard_limits([(EventKind::Ir, 150_000u64)])))]
+#[bench::decision_only(setup = inputs)]
+fn resolve_only((f, p, hint): (Vec<UpstreamMeta<'static>>, Policy, Hint)) -> Vec<String> {
+    black_box(p.resolve(black_box(&hint), black_box(&f)))
+}
+
+// The PRODUCTION per-call path (what `TaskRouter::order` actually runs):
+// indices out, no id `String` mapping. The gap to `resolve_only` is the cost
+// of the owned-id compatibility wrapper.
+#[library_benchmark(config = LibraryBenchmarkConfig::default()
+    .tool(Callgrind::default().hard_limits([(EventKind::Ir, 90_000u64)])))]
+#[bench::decision_indices(setup = inputs)]
+fn resolve_indices_only(
+    (f, p, hint): (Vec<UpstreamMeta<'static>>, Policy, Hint),
+) -> (Vec<usize>, Option<usize>) {
+    black_box(p.resolve_indices(black_box(&hint), black_box(&f)))
+}
+
+/// The 02b per-call context estimate over a realistic multi-message request
+/// (~24KiB of text across 12 messages) — it runs on every routed call that
+/// doesn't assert its own floor.
+fn estimate_input() -> agent_core::CompletionRequest {
+    agent_core::CompletionRequest {
+        messages: (0..12)
+            .map(|i| agent_core::Message::user("x".repeat(2_048 + i)))
+            .collect(),
+        ..Default::default()
+    }
+}
+
+#[library_benchmark(config = LibraryBenchmarkConfig::default()
+    .tool(Callgrind::default().hard_limits([(EventKind::Ir, 10_000u64)])))]
+#[bench::twelve_messages(setup = estimate_input)]
+fn estimate(req: agent_core::CompletionRequest) -> u32 {
+    black_box(agent_providers::route::estimate_min_context(black_box(
+        &req,
+    )))
+}
+
 library_benchmark_group!(name = route_resolve;
-    benchmarks = resolve_50_upstreams_8_rules, resolve_with_mode_constrained_rules);
+    benchmarks = resolve_50_upstreams_8_rules, resolve_with_mode_constrained_rules,
+    resolve_only, resolve_indices_only, estimate);
 main!(library_benchmark_groups = route_resolve);
