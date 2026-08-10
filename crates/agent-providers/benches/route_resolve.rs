@@ -56,6 +56,7 @@ fn policy() -> Policy {
         .map(|(i, role)| Rule {
             match_: Match {
                 role: Some(*role),
+                task_mode: None,
                 min_context: (i as u32) * 4_096,
             },
             prefer: Prefer {

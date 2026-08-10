@@ -1663,27 +1663,50 @@ pub(crate) fn build_route_upstream(
 /// (model-router increment 02). Unknown tier/role strings degrade gracefully:
 /// an unparseable prefer-tier ⇒ no tier bias; an unknown match-role ⇒ matches any.
 #[cfg(feature = "provider-router")]
-pub(crate) fn build_route_policy(cfg: &crate::config::RouteCfg) -> agent_providers::route::Policy {
+/// `match` constraints parse **strictly** — a non-empty `role`/`task_mode` that
+/// doesn't name a known value is a config error, not a rule that silently
+/// matches everything (02b). `prefer` stays lenient (an unknown tier is just no
+/// tier preference): a bad preference mis-sorts, a bad constraint mis-fires.
+pub(crate) fn build_route_policy(
+    cfg: &crate::config::RouteCfg,
+) -> anyhow::Result<agent_providers::route::Policy> {
     use agent_providers::route::{Match, Policy, Prefer, Role, Rule};
     let prefer = |p: &crate::config::RoutePreferCfg| Prefer {
         tags: p.tags.clone(),
         tier: agent_core::PoolTier::parse(&p.tier),
         upstreams: p.upstreams.clone(),
     };
-    Policy {
-        rules: cfg
-            .rules
-            .iter()
-            .map(|r| Rule {
+    let rules = cfg
+        .rules
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let role = match r.match_.role.trim() {
+                "" => None,
+                s => Some(Role::parse(s).ok_or_else(|| {
+                    anyhow::anyhow!("[[route.rules]] #{i}: unknown match role {s:?}")
+                })?),
+            };
+            let task_mode = match r.match_.task_mode.trim() {
+                "" => None,
+                s => Some(agent_core::TaskMode::parse(s).ok_or_else(|| {
+                    anyhow::anyhow!("[[route.rules]] #{i}: unknown match task_mode {s:?}")
+                })?),
+            };
+            Ok(Rule {
                 match_: Match {
-                    role: Role::parse(&r.match_.role),
+                    role,
+                    task_mode,
                     min_context: r.match_.min_context,
                 },
                 prefer: prefer(&r.prefer),
             })
-            .collect(),
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(Policy {
+        rules,
         default_prefer: prefer(&cfg.default_prefer),
-    }
+    })
 }
 
 /// Build the `[graph] store` backend and, for a non-empty document, compile it
@@ -2165,6 +2188,7 @@ mod route_policy_tests {
             rules: vec![RouteRuleCfg {
                 match_: RouteMatchCfg {
                     role: "review".into(),
+                    task_mode: "debug".into(),
                     min_context: 32_000,
                 },
                 prefer: RoutePreferCfg {
@@ -2179,11 +2203,15 @@ mod route_policy_tests {
             },
             ..Default::default()
         };
-        let policy = build_route_policy(&cfg);
+        let policy = build_route_policy(&cfg).expect("valid config");
         assert_eq!(policy.rules.len(), 1);
         assert_eq!(
             policy.rules[0].match_.role,
             Some(agent_providers::route::Role::Review)
+        );
+        assert_eq!(
+            policy.rules[0].match_.task_mode,
+            Some(agent_core::TaskMode::Debug)
         );
         assert_eq!(policy.rules[0].match_.min_context, 32_000);
         assert_eq!(
@@ -2193,14 +2221,46 @@ mod route_policy_tests {
         assert_eq!(policy.default_prefer.upstreams, vec!["kimi"]);
     }
 
+    // A typo'd `match` constraint must fail the build, not silently match every
+    // request (02b tightened this from the earlier degrade-to-any behaviour).
+    // `prefer` stays lenient: a bad preference mis-sorts, it can't mis-fire.
     #[test]
-    fn corner_unknown_role_and_tier_degrade_to_none() {
+    fn negative_unknown_match_role_is_a_config_error() {
         let cfg = RouteCfg {
             rules: vec![RouteRuleCfg {
                 match_: RouteMatchCfg {
                     role: "bogus".into(),
-                    min_context: 0,
+                    ..Default::default()
                 },
+                prefer: RoutePreferCfg::default(),
+            }],
+            ..Default::default()
+        };
+        let err = build_route_policy(&cfg).expect_err("unknown role must fail");
+        assert!(err.to_string().contains("unknown match role"), "{err}");
+    }
+
+    #[test]
+    fn negative_unknown_match_task_mode_is_a_config_error() {
+        let cfg = RouteCfg {
+            rules: vec![RouteRuleCfg {
+                match_: RouteMatchCfg {
+                    task_mode: "reveiw".into(),
+                    ..Default::default()
+                },
+                prefer: RoutePreferCfg::default(),
+            }],
+            ..Default::default()
+        };
+        let err = build_route_policy(&cfg).expect_err("unknown task_mode must fail");
+        assert!(err.to_string().contains("unknown match task_mode"), "{err}");
+    }
+
+    #[test]
+    fn corner_unknown_prefer_tier_degrades_to_none() {
+        let cfg = RouteCfg {
+            rules: vec![RouteRuleCfg {
+                match_: RouteMatchCfg::default(),
                 prefer: RoutePreferCfg {
                     tier: "huge".into(),
                     ..Default::default()
@@ -2208,9 +2268,7 @@ mod route_policy_tests {
             }],
             ..Default::default()
         };
-        let policy = build_route_policy(&cfg);
-        // Unknown role ⇒ matches any; unknown tier ⇒ no tier bias (graceful).
-        assert_eq!(policy.rules[0].match_.role, None);
+        let policy = build_route_policy(&cfg).expect("lenient prefer");
         assert_eq!(policy.rules[0].prefer.tier, None);
     }
 }

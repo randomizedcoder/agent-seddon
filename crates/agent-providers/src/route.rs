@@ -15,44 +15,23 @@
 //! Named under a `route` module (not re-exported) so it doesn't collide with the
 //! failover `RoutePolicy` in [`crate::router`].
 
-use agent_core::PoolTier;
+use agent_core::{PoolTier, TaskMode};
 
 /// The internal call-site a request originates from — one of the routing signals a
 /// rule can match on, so each subsystem is steerable to a fit-for-purpose model
 /// (a cheap model for `Classify`, a long-context one for `Summarize`, …).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Role {
-    #[default]
-    Main,
-    Judge,
-    Classify,
-    Summarize,
-    Verify,
-    Review,
-}
+/// Unified with the core taxonomy in 02b so a `CompletionRequest`'s
+/// `RouteHint` carries the same closed set the rules match on.
+pub use agent_core::RouteRole as Role;
 
-impl Role {
-    /// Parse a config role name; unknown / empty ⇒ `None` (a rule with no role
-    /// constraint matches any role rather than silently defaulting to `Main`).
-    pub fn parse(s: &str) -> Option<Self> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "main" => Some(Role::Main),
-            "judge" => Some(Role::Judge),
-            "classify" => Some(Role::Classify),
-            "summarize" => Some(Role::Summarize),
-            "verify" => Some(Role::Verify),
-            "review" => Some(Role::Review),
-            _ => None,
-        }
-    }
-}
-
-/// Per-request routing signals: the request's hard requirements, its role, and an
-/// optional explicit override. (The classified `TaskMode` joins this once it is
-/// threaded onto the request in a later slice.)
+/// Per-request routing signals: the request's hard requirements, its role and
+/// classified task mode, and an optional explicit override.
 #[derive(Debug, Clone, Default)]
 pub struct Hint {
     pub role: Role,
+    /// The classified task mode; `None` = not carried ⇒ mode-constrained rules
+    /// don't match (fail to the default, never guess).
+    pub task_mode: Option<TaskMode>,
     /// Minimum context window the request needs; `0` = unknown ⇒ not filtered on.
     pub min_context: u32,
     pub needs_vision: bool,
@@ -87,13 +66,19 @@ pub struct UpstreamMeta {
 #[derive(Debug, Clone, Default)]
 pub struct Match {
     pub role: Option<Role>,
+    /// Fires only for this classified task mode. A hint that carries NO mode
+    /// never matches a mode-constrained rule — absent evidence falls through to
+    /// the default preference rather than guessing (02b).
+    pub task_mode: Option<TaskMode>,
     /// Fires only when the request needs at least this much context.
     pub min_context: u32,
 }
 
 impl Match {
     fn matches(&self, hint: &Hint) -> bool {
-        self.role.is_none_or(|r| r == hint.role) && hint.min_context >= self.min_context
+        self.role.is_none_or(|r| r == hint.role)
+            && self.task_mode.is_none_or(|m| hint.task_mode == Some(m))
+            && hint.min_context >= self.min_context
     }
 }
 
@@ -220,7 +205,7 @@ mod tests {
         Rule {
             match_: Match {
                 role: Some(role),
-                min_context: 0,
+                ..Default::default()
             },
             prefer,
         }
@@ -248,6 +233,91 @@ mod tests {
         // reasoning+heavy upstreams sort ahead of the cheap light one; the two
         // reasoning members tie on tags+tier, so the id breaks it deterministically.
         assert_eq!(order, vec!["glm", "kimi", "mi50"]);
+    }
+
+    #[test]
+    fn positive_task_mode_rule_fires_for_carried_mode() {
+        let policy = Policy {
+            rules: vec![Rule {
+                match_: Match {
+                    task_mode: Some(TaskMode::Review),
+                    ..Default::default()
+                },
+                prefer: Prefer {
+                    upstreams: vec!["kimi".into()],
+                    ..Default::default()
+                },
+            }],
+            default_prefer: Prefer {
+                upstreams: vec!["mi50".into()],
+                ..Default::default()
+            },
+        };
+        let hint = Hint {
+            task_mode: Some(TaskMode::Review),
+            ..Default::default()
+        };
+        assert_eq!(policy.resolve(&hint, &fleet())[0], "kimi");
+    }
+
+    #[test]
+    fn negative_mode_rule_never_fires_without_a_carried_mode() {
+        let policy = Policy {
+            rules: vec![Rule {
+                match_: Match {
+                    task_mode: Some(TaskMode::Review),
+                    ..Default::default()
+                },
+                prefer: Prefer {
+                    upstreams: vec!["kimi".into()],
+                    ..Default::default()
+                },
+            }],
+            default_prefer: Prefer {
+                upstreams: vec!["mi50".into()],
+                ..Default::default()
+            },
+        };
+        // No mode on the hint ⇒ fall to the default, never guess.
+        assert_eq!(policy.resolve(&Hint::default(), &fleet())[0], "mi50");
+        // A different mode ⇒ same.
+        let other = Hint {
+            task_mode: Some(TaskMode::Debug),
+            ..Default::default()
+        };
+        assert_eq!(policy.resolve(&other, &fleet())[0], "mi50");
+    }
+
+    #[test]
+    fn corner_role_and_mode_constraints_must_both_hold() {
+        let policy = Policy {
+            rules: vec![Rule {
+                match_: Match {
+                    role: Some(Role::Judge),
+                    task_mode: Some(TaskMode::Review),
+                    min_context: 0,
+                },
+                prefer: Prefer {
+                    upstreams: vec!["kimi".into()],
+                    ..Default::default()
+                },
+            }],
+            default_prefer: Prefer {
+                upstreams: vec!["mi50".into()],
+                ..Default::default()
+            },
+        };
+        let both = Hint {
+            role: Role::Judge,
+            task_mode: Some(TaskMode::Review),
+            ..Default::default()
+        };
+        assert_eq!(policy.resolve(&both, &fleet())[0], "kimi");
+        let role_only = Hint {
+            role: Role::Judge,
+            ..Default::default()
+        };
+        assert_eq!(policy.resolve(&role_only, &fleet())[0], "mi50");
     }
 
     #[test]

@@ -809,7 +809,7 @@ pub fn register_builtins(r: &mut Registry) {
         }
         let metrics = ctx.metrics.clone();
         let router =
-            agent_providers::TaskRouter::new(upstreams, crate::builder::build_route_policy(cfg))?
+            agent_providers::TaskRouter::new(upstreams, crate::builder::build_route_policy(cfg)?)?
                 .with_breaker(
                     cfg.failure_threshold,
                     cfg.cooldown_secs.saturating_mul(1_000),

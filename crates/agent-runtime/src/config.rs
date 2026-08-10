@@ -688,11 +688,18 @@ pub struct RouteUpstreamCfg {
 }
 
 /// The `match` half of a `[[route.rules]]` — present conditions must all hold.
+/// Non-empty `role`/`task_mode` strings that don't parse are a **config error**
+/// at build (a typo'd constraint silently matching everything is the failure
+/// mode we refuse; 02b tightened this).
 #[derive(Debug, Deserialize, Default)]
 pub struct RouteMatchCfg {
     /// `main`|`judge`|`classify`|`summarize`|`verify`|`review`; empty ⇒ any role.
     #[serde(default)]
     pub role: String,
+    /// `review`|`implement`|`design`|`debug`|`explain`|`other`; empty ⇒ any
+    /// mode. Fires only when the request *carries* that classified mode (02b).
+    #[serde(default)]
+    pub task_mode: String,
     /// Fires only when the request needs at least this much context.
     #[serde(default)]
     pub min_context: u32,
