@@ -14,6 +14,7 @@ members = [
     "crates/agent-prompt",
     "crates/agent-digest",
     "crates/agent-graph",
+    "crates/agent-registry",
     "crates/agent-metrics-proxy",
     "crates/agent-tokenizer",
     "crates/agent-web",
@@ -195,6 +196,7 @@ agent-context = { path = "crates/agent-context", default-features = false }
 agent-prompt = { path = "crates/agent-prompt" }
 agent-digest = { path = "crates/agent-digest" }
 agent-graph = { path = "crates/agent-graph" }
+agent-registry = { path = "crates/agent-registry" }
 agent-metrics-proxy = { path = "crates/agent-metrics-proxy", default-features = false }
 agent-tokenizer = { path = "crates/agent-tokenizer", default-features = false }
 agent-web = { path = "crates/agent-web", default-features = false }

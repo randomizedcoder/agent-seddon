@@ -1,0 +1,51 @@
+[package]
+name = "agent-registry"
+version.workspace = true
+publish.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# The `sqlite` ProviderRegistry backend — cards/policy as prost-encoded blobs in
+# embedded SQLite, off by default so a normal build stays dependency-free
+# (mirrors agent-prompt's `prompt-sqlite`).
+registry-sqlite = ["dep:rusqlite"]
+# dhat-instrumented leak/allocation tests (tests/leak.rs).
+dhat-heap = ["dep:dhat"]
+
+[dependencies]
+agent-core.workspace = true
+# The wire twin (`pb::ModelRouterConfig`) + the emitted descriptor set drive the
+# textproto parse/print — one schema, three encodings (binary, text, Rust) —
+# and the sqlite backend stores cards as prost-encoded blobs.
+agent-proto.workspace = true
+# The routing engine (`route::Policy`) answers the `Route` introspection RPC with
+# exactly the ordering the TaskRouter would produce (the module is feature-free).
+agent-providers.workspace = true
+async-trait.workspace = true
+prost.workspace = true
+prost-reflect.workspace = true
+tracing.workspace = true
+rusqlite = { workspace = true, optional = true }
+dhat = { workspace = true, optional = true }
+
+[dev-dependencies]
+agent-testkit.workspace = true
+rstest.workspace = true
+tokio.workspace = true
+iai-callgrind.workspace = true
+
+# Guards the `Route` introspection path (decide over a 50-card fleet) — the
+# registry-served twin of the task-router decision bench.
+[[bench]]
+name = "registry_route"
+harness = false
+
+[[test]]
+name = "leak"
+harness = true
+required-features = ["dhat-heap"]
+
+[lints]
+workspace = true
