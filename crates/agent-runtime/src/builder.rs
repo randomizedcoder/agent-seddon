@@ -1855,11 +1855,25 @@ pub(crate) fn build_route_upstream(
 pub(crate) fn build_route_policy(
     cfg: &crate::config::RouteCfg,
 ) -> anyhow::Result<agent_providers::route::Policy> {
-    use agent_providers::route::{Match, Policy, Prefer, Role, Rule};
+    use agent_providers::route::{Match, OrderPolicy, Policy, Prefer, Role, Rule};
     let prefer = |p: &crate::config::RoutePreferCfg| Prefer {
         tags: p.tags.clone(),
         tier: agent_core::PoolTier::parse(&p.tier),
         upstreams: p.upstreams.clone(),
+        policy: match p.policy.trim() {
+            "" => None,
+            s => {
+                let parsed = OrderPolicy::parse(s);
+                if parsed.is_none() {
+                    // Lenient like the rest of `prefer`: mis-sorts, never mis-fires.
+                    tracing::warn!(
+                        policy = %s,
+                        "unknown prefer.policy — ignoring (cost | latency | least-loaded)"
+                    );
+                }
+                parsed
+            }
+        },
     };
     let rules = cfg
         .rules
@@ -1984,19 +1998,13 @@ fn route_cfg_from(
             input_cost: (u.input_cost != 0.0).then_some(u.input_cost),
         });
     }
-    let prefer = |p: &agent_core::RoutePreferSpec| {
-        if !p.policy.is_empty() {
-            tracing::warn!(
-                policy = %p.policy,
-                "prefer.policy is live-signal ordering for the registry-backed router \
-                 (model-router 04); the startup loader ignores it"
-            );
-        }
-        RoutePreferCfg {
-            tags: p.tags.clone(),
-            tier: p.tier.map(|t| t.as_str().to_string()).unwrap_or_default(),
-            upstreams: p.upstreams.clone(),
-        }
+    let prefer = |p: &agent_core::RoutePreferSpec| RoutePreferCfg {
+        tags: p.tags.clone(),
+        tier: p.tier.map(|t| t.as_str().to_string()).unwrap_or_default(),
+        upstreams: p.upstreams.clone(),
+        // Validated to the closed set by ModelRouterConfig::validate (04
+        // consumes it as the live-signal tie-break).
+        policy: p.policy.clone(),
     };
     for r in &mrc.policy.rules {
         out.rules.push(RouteRuleCfg {

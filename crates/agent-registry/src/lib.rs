@@ -56,6 +56,11 @@ pub fn decide(cfg: &ModelRouterConfig, hint: &RouteHint) -> RouteDecision {
             healthy: true,
             supports_vision: u.supports_vision,
             supports_tools: u.supports_tools,
+            // A plain store has no live traffic view; 0 is the neutral
+            // ordering value (the router's own dispatch accounting feeds real
+            // numbers in the registry-backed path, model-router 04).
+            in_flight: 0,
+            latency_ewma_ms: 0,
         })
         .collect();
     let engine_hint = route::Hint {
@@ -106,6 +111,8 @@ fn engine_policy(spec: &RoutePolicySpec) -> route::Policy {
         tags: p.tags.clone(),
         tier: p.tier,
         upstreams: p.upstreams.clone(),
+        // Validated to the closed set on ingest; unknown never reaches here.
+        policy: route::OrderPolicy::parse(&p.policy),
     };
     route::Policy {
         rules: spec

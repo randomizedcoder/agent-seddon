@@ -758,6 +758,12 @@ pub struct RoutePreferCfg {
     /// Explicit upstream-id order (a listed id sorts ahead of the unlisted).
     #[serde(default)]
     pub upstreams: Vec<String>,
+    /// Live-signal tie-break among equally-preferred survivors (model-router
+    /// 04): `"cost"` | `"latency"` | `"least-loaded"`; empty ⇒ none. Lenient
+    /// like the rest of `prefer` (an unknown value warns and orders nothing —
+    /// it can mis-sort, never mis-fire).
+    #[serde(default)]
+    pub policy: String,
 }
 
 /// One routing rule (`[[route.rules]]`): when `match` holds, order by `prefer`.

@@ -25,6 +25,7 @@ use agent_core::{
     PoolTier, Result,
 };
 use async_trait::async_trait;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 /// One routable upstream: the (already metered) provider plus the operator's routing
@@ -40,11 +41,56 @@ pub struct RouterUpstream {
     pub provider: Arc<dyn LlmProvider>,
 }
 
+/// Per-upstream live dispatch accounting (model-router 04): requests currently
+/// in flight and a smoothed latency, fed by the router's own dispatch path and
+/// read by the [`crate::route::OrderPolicy`] live-signal ordering. Lock-free —
+/// this sits on the per-call hot path.
+#[derive(Default)]
+pub(crate) struct LiveStats {
+    in_flight: AtomicU32,
+    latency_ewma_ms: AtomicU32,
+}
+
+impl LiveStats {
+    pub(crate) fn snapshot(&self) -> (u32, u32) {
+        (
+            self.in_flight.load(Ordering::Relaxed),
+            self.latency_ewma_ms.load(Ordering::Relaxed),
+        )
+    }
+    /// EWMA with α=0.3 in integer math; the first sample seeds the average.
+    fn record_latency(&self, sample_ms: u32) {
+        let old = self.latency_ewma_ms.load(Ordering::Relaxed);
+        let new = if old == 0 {
+            sample_ms
+        } else {
+            (old.saturating_mul(7) + sample_ms.saturating_mul(3)) / 10
+        };
+        self.latency_ewma_ms.store(new, Ordering::Relaxed);
+    }
+}
+
+/// RAII in-flight guard: decrements on every exit path (incl. panic/cancel), so
+/// the least-loaded signal can never drift upward from a lost decrement.
+struct InFlightGuard<'a>(&'a AtomicU32);
+impl<'a> InFlightGuard<'a> {
+    fn enter(counter: &'a AtomicU32) -> Self {
+        counter.fetch_add(1, Ordering::Relaxed);
+        Self(counter)
+    }
+}
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 /// A provider that routes each request to a declaratively-preferred, capable upstream
 /// and fails over on a retryable error — the drop-in generator for task-aware routing.
 pub struct TaskRouter {
     upstreams: Vec<RouterUpstream>,
     health: Vec<Health>,
+    live: Vec<LiveStats>,
     policy: Policy,
     role: Role,
     failure_threshold: usize,
@@ -69,9 +115,11 @@ impl TaskRouter {
             }
         }
         let health = upstreams.iter().map(|_| Health::new()).collect();
+        let live = upstreams.iter().map(|_| LiveStats::default()).collect();
         Ok(Self {
             upstreams,
             health,
+            live,
             policy,
             role: Role::Main,
             failure_threshold: 3,
@@ -136,8 +184,10 @@ impl TaskRouter {
     /// (config-enabled); the circuit breaker is applied as a reorder in
     /// [`Self::order`], not as a hard filter, so a dead upstream is tried last
     /// rather than dropped.
-    fn meta<'a>(u: &'a RouterUpstream) -> UpstreamMeta<'a> {
+    fn meta(&self, i: usize) -> UpstreamMeta<'_> {
+        let u = &self.upstreams[i];
         let caps = u.provider.capabilities();
+        let (in_flight, latency_ewma_ms) = self.live[i].snapshot();
         UpstreamMeta {
             id: &u.id,
             tags: &u.tags,
@@ -147,6 +197,8 @@ impl TaskRouter {
             healthy: true,
             supports_vision: caps.supports_vision,
             supports_tools: caps.supports_tools,
+            in_flight,
+            latency_ewma_ms,
         }
     }
 
@@ -156,7 +208,8 @@ impl TaskRouter {
     /// fleet indices (same order as `self.upstreams`) — no by-id re-lookup.
     fn order(&self, hint: &Hint) -> (Vec<usize>, Option<usize>) {
         let now = (self.now_ms)();
-        let fleet: Vec<UpstreamMeta<'_>> = self.upstreams.iter().map(Self::meta).collect();
+        let fleet: Vec<UpstreamMeta<'_>> =
+            (0..self.upstreams.len()).map(|i| self.meta(i)).collect();
         let (ordered, rule) = self.policy.resolve_indices(hint, &fleet);
 
         let mut healthy = Vec::new();
@@ -203,9 +256,16 @@ impl TaskRouter {
         for (attempt, &i) in order.iter().enumerate() {
             let u = &self.upstreams[i];
             self.emit(RouteEvent::Routed { target: &u.id });
-            match op(u.provider.clone()).await {
+            let started = (self.now_ms)();
+            let outcome = {
+                let _in_flight = InFlightGuard::enter(&self.live[i].in_flight);
+                op(u.provider.clone()).await
+            };
+            match outcome {
                 Ok(v) => {
                     self.health[i].record_success();
+                    let elapsed = (self.now_ms)().saturating_sub(started);
+                    self.live[i].record_latency(u32::try_from(elapsed).unwrap_or(u32::MAX));
                     return Ok(v);
                 }
                 Err(e) => {
@@ -387,6 +447,7 @@ mod tests {
                 tags: vec![],
                 tier: None,
                 upstreams: ids.iter().map(|s| (*s).to_string()).collect(),
+                policy: None,
             },
         }
     }
@@ -791,6 +852,122 @@ mod tests {
         assert_eq!(
             r.complete(sneaky).await.unwrap().message.content_text(),
             "from-kimi"
+        );
+    }
+
+    // --- live-signal dispatch accounting (model-router 04) ------------------
+
+    /// A provider that advances a shared fake clock by `cost_ms` per call and
+    /// records which ids served (for latency-policy steering assertions).
+    struct TimedProvider {
+        id: &'static str,
+        cost_ms: u64,
+        clock: Arc<std::sync::atomic::AtomicU64>,
+        served: Arc<std::sync::Mutex<Vec<&'static str>>>,
+    }
+    #[async_trait]
+    impl LlmProvider for TimedProvider {
+        fn capabilities(&self) -> ModelCapabilities {
+            caps(true, false, 100_000)
+        }
+        async fn complete(&self, r: CompletionRequest) -> Result<CompletionResponse> {
+            self.clock
+                .fetch_add(self.cost_ms, std::sync::atomic::Ordering::SeqCst);
+            self.served.lock().unwrap().push(self.id);
+            ScriptedProvider::new(vec![final_turn("ok")])
+                .complete(r)
+                .await
+        }
+        async fn stream(&self, _r: CompletionRequest) -> Result<ChunkStream> {
+            Err(Error::Provider("no stream".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn positive_latency_policy_steers_to_the_faster_upstream() {
+        let clock = Arc::new(std::sync::atomic::AtomicU64::new(1));
+        let served = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mk = |id: &'static str, cost_ms: u64| RouterUpstream {
+            id: id.into(),
+            tags: vec![],
+            tier: PoolTier::Medium,
+            input_cost: 0.0,
+            provider: Arc::new(TimedProvider {
+                id,
+                cost_ms,
+                clock: clock.clone(),
+                served: served.clone(),
+            }),
+        };
+        let policy = Policy {
+            rules: vec![],
+            default_prefer: Prefer {
+                policy: Some(crate::route::OrderPolicy::Latency),
+                ..Default::default()
+            },
+        };
+        let c = clock.clone();
+        let router = TaskRouter::new(vec![mk("slow", 500), mk("fast", 10)], policy)
+            .unwrap()
+            .with_clock(Arc::new(move || -> u64 {
+                c.load(std::sync::atomic::Ordering::SeqCst)
+            }));
+        let req = CompletionRequest::default();
+        // 1st: both unknown (0 = neutral) -> id order picks "fast"; it records 10ms.
+        // 2nd: fast has 10ms, slow has 0 (unknown = neutral-best) -> "slow"; 500ms.
+        // 3rd+: both known -> the measured-faster "fast" wins from here on.
+        for _ in 0..4 {
+            router.complete(req.clone()).await.expect("completes");
+        }
+        let got = served.lock().unwrap().clone();
+        assert_eq!(got, vec!["fast", "slow", "fast", "fast"]);
+    }
+
+    #[tokio::test]
+    async fn positive_in_flight_guard_returns_to_zero_after_every_outcome() {
+        let ok = RouterUpstream {
+            id: "ok".into(),
+            tags: vec![],
+            tier: PoolTier::Medium,
+            input_cost: 0.0,
+            provider: Arc::new(OkProvider {
+                answer: "fine".into(),
+                caps: caps(true, false, 1000),
+            }),
+        };
+        let fail = FailProvider::new("http 500: transient");
+        let failing = RouterUpstream {
+            id: "bad".into(),
+            tags: vec![],
+            tier: PoolTier::Medium,
+            input_cost: 0.0,
+            provider: Arc::new(fail),
+        };
+        let policy = Policy {
+            rules: vec![],
+            default_prefer: Prefer {
+                upstreams: vec!["bad".into(), "ok".into()],
+                policy: Some(crate::route::OrderPolicy::LeastLoaded),
+                ..Default::default()
+            },
+        };
+        let router = TaskRouter::new(vec![failing, ok], policy).unwrap();
+        // Success after a failover: both the failed and the successful attempt
+        // must release their in-flight slots.
+        router
+            .complete(CompletionRequest::default())
+            .await
+            .expect("fails over to ok");
+        for live in &router.live {
+            assert_eq!(live.snapshot().0, 0, "in-flight must return to zero");
+        }
+        // And the successful upstream recorded a latency sample (wall clock:
+        // >= 0 is all we can assert deterministically; the seeded value only
+        // matters to ordering, covered by the fake-clock test above).
+        assert_eq!(
+            router.live[0].snapshot().1,
+            0,
+            "failed attempt records no latency"
         );
     }
 }
