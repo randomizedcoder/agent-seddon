@@ -1,6 +1,8 @@
 # 03 — Config + registry control plane: textproto + `ProviderRegistryService`
 
-Status: **planned** — see [`STATUS.md`](STATUS.md). Depends on
+Status: ✅ **built** (branch `feat/model-router-03`) — see [`STATUS.md`](STATUS.md) for the
+as-built deviations (RoutePolicy shape, no `tags_required`, string `kind`, loader-unbuildable
+kinds, `prefer.policy` deferred to 04). Depends on
 [02b](02b-hint-threading.md), which lands `RouteHint`/`RouteRole` in `common.proto` (this
 increment **imports** them, it does not define them). This is the **TOML → protobuf + gRPC**
 migration. The fleet + routing policy become one proto message, `ModelRouterConfig`, whose

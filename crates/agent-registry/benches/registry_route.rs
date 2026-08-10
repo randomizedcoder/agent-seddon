@@ -1,14 +1,17 @@
 //! iai-callgrind bench for the `Route` introspection path: `decide` over a
 //! 50-card fleet (the design's scale target) — the registry-served twin of the
 //! task-router decision bench. Deterministic instruction counts under valgrind;
-//! the absolute Ir ceiling lives in `nix/checks/bench.nix`.
+//! the absolute Ir ceiling is a `hard_limits` on the bench (run by
+//! `nix/checks/bench.nix`).
 
 use agent_core::{
     ModelRouterConfig, PoolTier, RouteHint, RouteMatchSpec, RoutePolicySpec, RoutePreferSpec,
     RouteRole, RouteRuleSpec, TaskMode, Upstream,
 };
 use agent_registry::decide;
-use iai_callgrind::{library_benchmark, library_benchmark_group, main};
+use iai_callgrind::{
+    library_benchmark, library_benchmark_group, main, Callgrind, EventKind, LibraryBenchmarkConfig,
+};
 use std::hint::black_box;
 
 fn fleet(n: usize) -> ModelRouterConfig {
@@ -84,7 +87,10 @@ fn judge_setup() -> (ModelRouterConfig, RouteHint) {
     )
 }
 
-#[library_benchmark]
+// ~79k Ir measured (spec-to-engine mapping + the resolve itself over 50 cards).
+// The ceiling (~3x) is a major-regression gate, not a micro-noise tripwire.
+#[library_benchmark(config = LibraryBenchmarkConfig::default()
+    .tool(Callgrind::default().hard_limits([(EventKind::Ir, 250_000u64)])))]
 #[bench::fleet50(setup = judge_setup)]
 fn route_over_50_cards(input: (ModelRouterConfig, RouteHint)) -> agent_core::RouteDecision {
     let (cfg, hint) = input;

@@ -176,6 +176,7 @@ agent --serve-sandbox ; agent --serve-pty      # see the warning below
 agent --serve-forge ; agent --serve-tasks     # forge writes to the platform
 agent --serve-lsp
 agent --serve-episodic ; agent --serve-semantic   # the memory layers, individually
+agent --serve-provider-registry   # the model-router fleet control plane (:50084)
 ```
 
 ### One process, every seam — `--serve-all`

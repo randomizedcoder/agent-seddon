@@ -187,5 +187,55 @@ pkgs.runCommand "agent-config-roundtrip"
     sed 's/name = "glm"/name = "task-router"/' "$HOME/route.toml" > "$HOME/route-self.toml"
     expect_fail route-self "$HOME/route-self.toml"
 
+    # 8) The textproto scenario loader (model-router 03): the fleet + policy as
+    #    ONE ModelRouterConfig file must load through the shipped binary's real
+    #    loader (parse -> validate -> [route] overlay -> task-router factory).
+    cat > "$HOME/mrc.textproto" <<TEXTPROTO
+    upstreams {
+      id: "kimi"
+      kind: "openai-compat"
+      enabled: true
+      base_url: "http://127.0.0.1:1/v1"
+      model: "m"
+      tags: "reasoning"
+      tier: POOL_TIER_HEAVY
+    }
+    upstreams {
+      id: "glm"
+      kind: "openai-compat"
+      enabled: true
+      base_url: "http://127.0.0.1:2/v1"
+      model: "m"
+    }
+    policy {
+      rules {
+        match { role: ROUTE_ROLE_JUDGE task_mode: TASK_MODE_DEBUG }
+        prefer { tags: "reasoning" }
+      }
+      default_prefer { upstreams: "kimi" upstreams: "glm" }
+    }
+    TEXTPROTO
+    sed "s|\[route\]|[route]\n    # replaced by the scenario file|" "$HOME/route.toml" > "$HOME/route-mrc.toml"
+    printf '\n' >> "$HOME/route-mrc.toml"
+    if ! out="$(agent --config "$HOME/route-mrc.toml" --model-router-config "$HOME/mrc.textproto" --check-config 2>"$HOME/mrc.err")"; then
+      echo "FAIL(mrc): a valid scenario file must check clean; stderr:" >&2
+      cat "$HOME/mrc.err" >&2
+      exit 1
+    fi
+    echo "--- mrc ---"; echo "$out"
+    case "$out" in
+      *"provider  = task-router"*) : ;;
+      *) echo "FAIL(mrc): expected task-router selection, got:" >&2; echo "$out" >&2; exit 1 ;;
+    esac
+
+    # 9) Adversarial: a malformed scenario file must fail the build closed.
+    printf 'upstreams { id: "a" bogus: 1' > "$HOME/mrc-bad.textproto"
+    if agent --config "$HOME/route-mrc.toml" --model-router-config "$HOME/mrc-bad.textproto" --check-config >"$HOME/mrc-bad.out" 2>&1; then
+      echo "FAIL(mrc-bad): a malformed scenario file must not check clean:" >&2
+      cat "$HOME/mrc-bad.out" >&2
+      exit 1
+    fi
+    echo "--- mrc-bad (correctly rejected) ---"
+
     echo "OK: representative configs load, build, and select the right impls; broken ones fail closed" > "$out"
   ''
