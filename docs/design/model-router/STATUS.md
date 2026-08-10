@@ -153,6 +153,14 @@ leak) and must pass `nix develop -c nix flake check`.
   leak.nix. Live-verified with grpcurl: Route explains rule+why, Health lists the
   fleet, a traversal id gets `InvalidArgument`, and a dangling `file:` key ref fails
   the provider build closed.
+- **FIXED a second pre-existing hermetic break on main** (exposed by the 03
+  full-gate run, same caching phenomenon as the `.textproto` filter break):
+  `checks.cargo-machete` fails on pristine `8d33a3b` — `agent-graph` (`prost`,
+  `tracing`), `agent-digest` (`agent-retry`, `tracing`) and `agent-ast`
+  (`serde`) declare dependencies nothing references (verified by sweep across
+  src/tests/benches); cached check results had masked it. Removed the six dead
+  dep lines (plus `tracing` from the new `agent-registry`, and `prost` moved
+  behind `registry-sqlite` where its only use lives).
 
 ## Cross-cutting invariants (every increment)
 

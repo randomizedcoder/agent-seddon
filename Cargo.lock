@@ -29,7 +29,6 @@ dependencies = [
  "protobuf",
  "rstest",
  "scip",
- "serde",
  "serde_json",
  "tokio",
  "tracing",
@@ -105,7 +104,6 @@ name = "agent-digest"
 version = "0.1.0"
 dependencies = [
  "agent-core",
- "agent-retry",
  "agent-testkit",
  "async-trait",
  "dhat",
@@ -115,7 +113,6 @@ dependencies = [
  "rusqlite",
  "serde_json",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -179,12 +176,10 @@ dependencies = [
  "async-trait",
  "dhat",
  "iai-callgrind",
- "prost",
  "prost-reflect",
  "rstest",
  "serde_json",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -395,7 +390,6 @@ dependencies = [
  "rstest",
  "rusqlite",
  "tokio",
- "tracing",
 ]
 
 [[package]]

@@ -26,7 +26,6 @@ agent-providers.workspace = true
 async-trait.workspace = true
 prost = { workspace = true, optional = true }
 prost-reflect.workspace = true
-tracing.workspace = true
 rusqlite = { workspace = true, optional = true }
 dhat = { workspace = true, optional = true }
 

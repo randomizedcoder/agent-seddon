@@ -16,11 +16,8 @@ dhat-heap = ["dep:dhat"]
 
 [dependencies]
 agent-core.workspace = true
-# The one canonical retry/backoff library — never hand-roll a retry loop.
-agent-retry.workspace = true
 async-trait.workspace = true
 serde_json.workspace = true
-tracing.workspace = true
 rusqlite = { workspace = true, optional = true }
 klickhouse = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
