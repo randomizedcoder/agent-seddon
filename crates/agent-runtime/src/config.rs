@@ -468,6 +468,13 @@ pub struct RouteCfg {
     /// The preference applied when no rule matches.
     #[serde(default)]
     pub default_prefer: RoutePreferCfg,
+    /// Where the router's fleet + policy come from (model-router 04):
+    /// `""` (default) — the static startup list above; `"registry"` — the
+    /// live `[registry]` store (this TOML *seeds* it when empty, and a
+    /// `Put`/`Delete`/`Enable`/`PutPolicy` takes effect within
+    /// `[registry] refresh_secs`, no restart).
+    #[serde(default)]
+    pub source: String,
     #[serde(default = "default_breaker_threshold")]
     pub failure_threshold: usize,
     #[serde(default = "default_breaker_cooldown")]
@@ -480,6 +487,7 @@ impl Default for RouteCfg {
             upstreams: Vec::new(),
             rules: Vec::new(),
             default_prefer: RoutePreferCfg::default(),
+            source: String::new(),
             failure_threshold: default_breaker_threshold(),
             cooldown_secs: default_breaker_cooldown(),
         }
@@ -656,6 +664,11 @@ pub struct RegistryCfg {
     /// SQLite path (`sqlite` backend only).
     #[serde(default = "default_registry_path")]
     pub path: String,
+    /// Registry-backed router snapshot interval in seconds (model-router 04):
+    /// how quickly a control-plane mutation reaches routing. `0` = check on
+    /// every call.
+    #[serde(default = "default_registry_refresh")]
+    pub refresh_secs: u64,
 }
 
 impl Default for RegistryCfg {
@@ -664,8 +677,13 @@ impl Default for RegistryCfg {
             store: default_registry_store(),
             file: default_registry_file(),
             path: default_registry_path(),
+            refresh_secs: default_registry_refresh(),
         }
     }
+}
+
+fn default_registry_refresh() -> u64 {
+    5
 }
 
 fn default_registry_store() -> String {
@@ -758,6 +776,12 @@ pub struct RoutePreferCfg {
     /// Explicit upstream-id order (a listed id sorts ahead of the unlisted).
     #[serde(default)]
     pub upstreams: Vec<String>,
+    /// Live-signal tie-break among equally-preferred survivors (model-router
+    /// 04): `"cost"` | `"latency"` | `"least-loaded"`; empty ⇒ none. Lenient
+    /// like the rest of `prefer` (an unknown value warns and orders nothing —
+    /// it can mis-sort, never mis-fire).
+    #[serde(default)]
+    pub policy: String,
 }
 
 /// One routing rule (`[[route.rules]]`): when `match` holds, order by `prefer`.

@@ -521,9 +521,18 @@ cooldown_secs       = 30          # how long a breaker stays open before re-prob
 # prefer = { tags = ["reasoning"], tier = "heavy" }
 #
 # # Applied when no rule matches — here: prefer kimi, fall back to glm.
+# # `policy` (model-router 04) breaks ties among equally-preferred survivors by a
+# # LIVE signal: "cost" | "latency" | "least-loaded" (a tie-break, never an override).
 # [route.default_prefer]
 # upstreams = ["kimi", "glm"]
+# # policy = "latency"
 # # failure_threshold = 3 / cooldown_secs = 30  (breaker, same as [router]/[pool])
+#
+# # source = "registry" (model-router 04): the fleet + policy come from the LIVE
+# # [registry] store — this TOML seeds it when empty, and a control-plane
+# # Put/Delete/Enable/PutPolicy takes effect within [registry] refresh_secs,
+# # no restart. Default "" = the static list above.
+# # source = "registry"
 #
 # TEXTPROTO SCENARIO FILES (model-router 03): the whole fleet + policy can live in
 # ONE `ModelRouterConfig` textproto instead of this [route] block — point
@@ -541,6 +550,7 @@ cooldown_secs       = 30          # how long a breaker stays open before re-prob
 # store = "file"                      # "file" (default) | "sqlite" | "grpc" | "" (off)
 # file  = ".agent/model-router.textproto"  # file backend; model_router_config wins when set
 # path  = ".agent/model-router.sqlite3"    # sqlite backend (feature registry-sqlite)
+# refresh_secs = 5                    # registry-backed router snapshot interval (0 = every call)
 
 # The consensus gate (cognition-graph increment 01): every final answer is generated
 # by `generator` and challenged by `critic` (ideally a DIFFERENT model family) in a

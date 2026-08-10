@@ -62,6 +62,12 @@ pub struct UpstreamMeta<'a> {
     pub healthy: bool,
     pub supports_vision: bool,
     pub supports_tools: bool,
+    /// Live signals (model-router 04): requests currently in flight and the
+    /// smoothed latency, fed by the caller from its own dispatch accounting (or
+    /// a registry health snapshot — clamped there; a remote's numbers are
+    /// untrusted). `0` = unknown, which is also the neutral ordering value.
+    pub in_flight: u32,
+    pub latency_ewma_ms: u32,
 }
 
 /// A cheap context floor for a request that carries no `min_context`: total text
@@ -102,6 +108,31 @@ impl Match {
     }
 }
 
+/// Live-signal ordering (model-router 04): after the explicit
+/// position/tag/tier preferences, break remaining ties by a live number —
+/// cheapest first, fastest first, or least-loaded first. `None` keeps the
+/// stable id ordering. A *tie-break*, not an override: an explicitly preferred
+/// upstream still wins regardless of its live numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderPolicy {
+    Cost,
+    Latency,
+    LeastLoaded,
+}
+
+impl OrderPolicy {
+    /// Parse the config string (`cost | latency | least-loaded`); unknown /
+    /// empty ⇒ `None` (callers decide whether that warns or errors).
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s.trim() {
+            "cost" => OrderPolicy::Cost,
+            "latency" => OrderPolicy::Latency,
+            "least-loaded" => OrderPolicy::LeastLoaded,
+            _ => return None,
+        })
+    }
+}
+
 /// The `prefer` half — how to ORDER the survivors once a rule matches.
 #[derive(Debug, Clone, Default)]
 pub struct Prefer {
@@ -111,13 +142,18 @@ pub struct Prefer {
     pub tier: Option<PoolTier>,
     /// Explicit id order — a listed id sorts by its position, ahead of the unlisted.
     pub upstreams: Vec<String>,
+    /// Live-signal tie-break among equally-preferred survivors (04).
+    pub policy: Option<OrderPolicy>,
 }
 
 impl Prefer {
     /// A total, deterministic sort key; **lower is more-preferred**:
-    /// (explicit-position, −tag-overlap, −preferred-tier, id) — the trailing id makes
-    /// ties stable and reproducible (important for the bench + tests).
-    fn rank(&self, u: &UpstreamMeta<'_>) -> (usize, i64, i64) {
+    /// (explicit-position, −tag-overlap, −preferred-tier, live-signal, id) — the
+    /// trailing id makes ties stable and reproducible (important for the bench +
+    /// tests). The live-signal key (04) only separates survivors the explicit
+    /// preferences left tied, and is `0` (neutral) with no `policy` — so a
+    /// policy-less rank is byte-identical to the 02b ordering.
+    fn rank(&self, u: &UpstreamMeta<'_>) -> (usize, i64, i64, i64) {
         let pos = self
             .upstreams
             .iter()
@@ -128,7 +164,15 @@ impl Prefer {
             Some(t) if u.tier >= t => u.tier as i64,
             _ => 0,
         };
-        (pos, -tag_overlap, -tier_bonus)
+        let live = match self.policy {
+            // milli-dollar per Mtok: keeps sub-cent differences ordinal without
+            // float keys (the cost was clamped finite + non-negative on build).
+            Some(OrderPolicy::Cost) => (f64::from(u.input_cost) * 1_000.0) as i64,
+            Some(OrderPolicy::Latency) => i64::from(u.latency_ewma_ms),
+            Some(OrderPolicy::LeastLoaded) => i64::from(u.in_flight),
+            None => 0,
+        };
+        (pos, -tag_overlap, -tier_bonus, live)
     }
 }
 
@@ -148,6 +192,34 @@ pub struct Policy {
 }
 
 impl Policy {
+    /// Map the seam-currency policy spec (`agent_core::RoutePolicySpec` — what
+    /// the provider registry stores and serves) onto the engine. Typed on both
+    /// sides — nothing can fail; the spec's `prefer.policy` string was
+    /// validated to the closed set on ingest.
+    pub fn from_spec(spec: &agent_core::RoutePolicySpec) -> Self {
+        let prefer = |p: &agent_core::RoutePreferSpec| Prefer {
+            tags: p.tags.clone(),
+            tier: p.tier,
+            upstreams: p.upstreams.clone(),
+            policy: OrderPolicy::parse(&p.policy),
+        };
+        Policy {
+            rules: spec
+                .rules
+                .iter()
+                .map(|r| Rule {
+                    match_: Match {
+                        role: r.match_.role,
+                        task_mode: r.match_.task_mode,
+                        min_context: r.match_.min_context,
+                    },
+                    prefer: prefer(&r.prefer),
+                })
+                .collect(),
+            default_prefer: prefer(&spec.default_prefer),
+        }
+    }
+
     /// Resolve `hint` against the `fleet`, returning eligible upstream ids
     /// most-preferred first. Pure, deterministic, and total: an empty result means
     /// *no upstream can serve this request* (fail-soft — the caller decides), never a
@@ -205,7 +277,7 @@ impl Policy {
         // 3. Rank each survivor once (the non-id key), then order — ties broken
         // by the borrowed id, so the result is byte-identical to the old
         // String-keyed sort without its per-member allocation.
-        let mut ranked: Vec<((usize, i64, i64), usize)> =
+        let mut ranked: Vec<((usize, i64, i64, i64), usize)> =
             eligible.map(|i| (prefer.rank(&fleet[i]), i)).collect();
 
         // An explicit override wins outright — but only if it passed the filter, so a
@@ -249,6 +321,8 @@ mod tests {
             healthy: true,
             supports_vision: false,
             supports_tools: true,
+            in_flight: 0,
+            latency_ewma_ms: 0,
         }
     }
 
@@ -286,6 +360,7 @@ mod tests {
                     tags: vec!["reasoning".into()],
                     tier: Some(PoolTier::Heavy),
                     upstreams: vec![],
+                    policy: None,
                 },
             )],
             default_prefer: Prefer::default(),
@@ -703,5 +778,114 @@ mod tests {
             estimate_min_context(&req),
             agent_core::MAX_ROUTE_MIN_CONTEXT
         );
+    }
+
+    // --- live-signal ordering (model-router 04) -----------------------------
+
+    /// Fixture with live numbers: equal tags/tier so ONLY the policy separates.
+    fn live(id: &'static str, cost: f32, in_flight: u32, ewma: u32) -> UpstreamMeta<'static> {
+        UpstreamMeta {
+            in_flight,
+            latency_ewma_ms: ewma,
+            input_cost: cost,
+            ..up(id, &[], PoolTier::Medium, 100_000, cost)
+        }
+    }
+
+    fn policy_only(policy: Option<OrderPolicy>) -> Policy {
+        Policy {
+            rules: vec![],
+            default_prefer: Prefer {
+                policy,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::positive_cost_cheapest_first(
+        Some(OrderPolicy::Cost), vec!["cheap", "mid", "dear"])]
+    #[case::positive_latency_fastest_first(
+        Some(OrderPolicy::Latency), vec!["dear", "cheap", "mid"])]
+    #[case::positive_least_loaded_first(
+        Some(OrderPolicy::LeastLoaded), vec!["mid", "dear", "cheap"])]
+    #[case::corner_no_policy_keeps_stable_id_order(
+        None, vec!["cheap", "dear", "mid"])]
+    fn live_policy_orders_equally_preferred_survivors(
+        #[case] policy: Option<OrderPolicy>,
+        #[case] want: Vec<&str>,
+    ) {
+        // cheap: cost 0.1, 9 in flight, 80ms · mid: cost 0.5, 1 in flight,
+        // 200ms · dear: cost 2.0, 4 in flight, 20ms — each policy picks a
+        // different winner, and no-policy keeps the id tie-break.
+        let fleet = vec![
+            live("cheap", 0.1, 9, 80),
+            live("mid", 0.5, 1, 200),
+            live("dear", 2.0, 4, 20),
+        ];
+        let got = policy_only(policy).resolve(&Hint::default(), &fleet);
+        assert_eq!(got, want.into_iter().map(String::from).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn positive_explicit_preference_beats_live_signal() {
+        // The policy is a TIE-break: an explicitly listed id still wins even
+        // with the worst live numbers.
+        let fleet = vec![live("slow", 5.0, 50, 5_000), live("fast", 0.0, 0, 1)];
+        let p = Policy {
+            rules: vec![],
+            default_prefer: Prefer {
+                upstreams: vec!["slow".into()],
+                policy: Some(OrderPolicy::Latency),
+                ..Default::default()
+            },
+        };
+        assert_eq!(p.resolve(&Hint::default(), &fleet)[0], "slow");
+    }
+
+    #[test]
+    fn boundary_all_zero_live_values_are_neutral() {
+        // Unknown (0) live numbers order exactly like no policy at all.
+        let fleet = vec![live("b", 0.0, 0, 0), live("a", 0.0, 0, 0)];
+        for pol in [
+            Some(OrderPolicy::Cost),
+            Some(OrderPolicy::Latency),
+            Some(OrderPolicy::LeastLoaded),
+            None,
+        ] {
+            assert_eq!(
+                policy_only(pol).resolve(&Hint::default(), &fleet),
+                vec!["a".to_string(), "b".to_string()],
+                "{pol:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn adversarial_extreme_live_numbers_never_panic() {
+        // A hostile/miscounted u32::MAX just sorts last — no overflow, no panic.
+        let fleet = vec![
+            live("evil", f32::MAX, u32::MAX, u32::MAX),
+            live("ok", 0.1, 1, 10),
+        ];
+        for pol in [
+            OrderPolicy::Cost,
+            OrderPolicy::Latency,
+            OrderPolicy::LeastLoaded,
+        ] {
+            let got = policy_only(Some(pol)).resolve(&Hint::default(), &fleet);
+            assert_eq!(got[0], "ok", "{pol:?}");
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::positive_cost("cost", Some(OrderPolicy::Cost))]
+    #[case::positive_latency("latency", Some(OrderPolicy::Latency))]
+    #[case::positive_least_loaded("least-loaded", Some(OrderPolicy::LeastLoaded))]
+    #[case::positive_padded("  cost  ", Some(OrderPolicy::Cost))]
+    #[case::negative_unknown("weighted", None)]
+    #[case::corner_empty("", None)]
+    fn order_policy_parse(#[case] s: &str, #[case] want: Option<OrderPolicy>) {
+        assert_eq!(OrderPolicy::parse(s), want);
     }
 }

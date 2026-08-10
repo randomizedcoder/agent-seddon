@@ -1669,7 +1669,15 @@ pub(crate) fn record_route_event(m: &Metrics, ev: agent_providers::RouteEvent<'_
             tracing::debug!(target, "routed request");
             m.on_route_decision(target, "routed");
         }
-        RouteEvent::FellOver { from, reason } => {
+        RouteEvent::Dispatched {
+            role,
+            upstream,
+            outcome,
+        } => {
+            m.on_router_dispatch(role, upstream, outcome);
+        }
+        RouteEvent::FellOver { from, to, reason } => {
+            m.on_router_failover(from, to, reason);
             tracing::info!(from, reason, "provider fallover");
             m.on_route_decision(from, "fellover");
         }
