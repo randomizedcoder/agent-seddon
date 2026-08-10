@@ -922,6 +922,7 @@ impl Agent {
         tool_ctx: &ToolContext,
         tool_schemas: &[ToolSchema],
         pending_switch: &mut Option<(agent_core::TaskMode, agent_core::TaskMode)>,
+        mode: agent_core::TaskMode,
         events: &crate::SessionEvents,
         metrics: &SessionMetrics,
     ) -> anyhow::Result<String> {
@@ -960,7 +961,14 @@ impl Agent {
                 // The main loop uses free-text completions; structured output is a
                 // separate helper path (parity spec 16).
                 response_format: None,
-                route: None,
+                // The per-request routing signals (model-router 02b): the turn's
+                // classified task mode + the Main role. Ignored by non-routing
+                // providers; a `task-router` provider routes on them.
+                route: Some(agent_core::RouteHint {
+                    task_mode: Some(mode),
+                    role: Some(agent_core::RouteRole::Main),
+                    ..Default::default()
+                }),
             };
 
             let call_start = Instant::now();

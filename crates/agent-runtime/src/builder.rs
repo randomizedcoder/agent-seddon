@@ -112,10 +112,11 @@ pub async fn build_agent_with(
         if cfg.digest.provider.is_empty() {
             None
         } else {
-            Some(
+            Some(role_scoped(
                 crate::registry::resolve_provider_ref(&cfg.digest.provider, &base_ctx)
                     .context("[digest] provider (distiller role routing)")?,
-            )
+                agent_core::RouteRole::Summarize,
+            ))
         };
     #[cfg(not(feature = "digest"))]
     let distill_provider: Option<Arc<dyn agent_core::LlmProvider>> = None;
@@ -1053,6 +1054,7 @@ pub async fn build_agent_with(
     #[cfg(feature = "git")]
     crate::git::spawn_fetch(repo_backend.clone(), cfg.git.auto_fetch_secs);
 
+    let main_provider = provider.clone();
     let agent = Agent::new(
         provider,
         tools,
@@ -1101,7 +1103,13 @@ pub async fn build_agent_with(
     };
     let agent = match distill_provider {
         Some(p) => agent.with_distill_provider(p),
-        None => agent,
+        // No `[digest] provider` pin: the distiller uses the main provider, but
+        // still under its Summarize role, so a `task-router` main provider can
+        // steer background distillation independently (02b).
+        None => {
+            let p = role_scoped(main_provider.clone(), agent_core::RouteRole::Summarize);
+            agent.with_distill_provider(p)
+        }
     };
     let agent = match prompt_store_seam {
         Some(p) => agent.with_prompt_store(p),
@@ -1477,7 +1485,12 @@ pub(crate) fn file_memory(
     let cfg = ctx.cfg;
     file_dir_prep(cfg);
     let distill_provider = match cfg.memory.distill {
-        true => Some(ctx.provider()?.clone()),
+        // The episodic→semantic distiller is background summarization work —
+        // stamp the Summarize role so a routing main provider steers it (02b).
+        true => Some(role_scoped(
+            ctx.provider()?.clone(),
+            agent_core::RouteRole::Summarize,
+        )),
         false => None,
     };
     // Route by the ambient `(user, session)` identity so each user's episodic +
@@ -1643,6 +1656,129 @@ fn build_inline_pool_member(
 /// (model-router increment 02). `pub(crate)` so the registry's task-router factory
 /// builds upstreams the same secret-safe way the pool builds members.
 #[cfg(feature = "provider-router")]
+/// The 02b role-slot wrapper: stamp `role` onto any request that carries **no**
+/// hint, then delegate. An explicit per-call hint always survives untouched, a
+/// non-routing inner provider simply ignores the stamp, and a named-reference
+/// pin stays a pin — this wraps whatever provider the slot resolved. See
+/// docs/design/model-router/02b-hint-threading.md (precedence contract).
+struct RoleScoped {
+    inner: Arc<dyn agent_core::LlmProvider>,
+    role: agent_core::RouteRole,
+}
+
+impl RoleScoped {
+    fn stamp(&self, req: &mut agent_core::CompletionRequest) {
+        if req.route.is_none() {
+            req.route = Some(agent_core::RouteHint {
+                role: Some(self.role),
+                ..Default::default()
+            });
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl agent_core::LlmProvider for RoleScoped {
+    fn capabilities(&self) -> agent_core::ModelCapabilities {
+        self.inner.capabilities()
+    }
+    async fn complete(
+        &self,
+        mut req: agent_core::CompletionRequest,
+    ) -> agent_core::Result<agent_core::CompletionResponse> {
+        self.stamp(&mut req);
+        self.inner.complete(req).await
+    }
+    async fn stream(
+        &self,
+        mut req: agent_core::CompletionRequest,
+    ) -> agent_core::Result<agent_core::ChunkStream> {
+        self.stamp(&mut req);
+        self.inner.stream(req).await
+    }
+}
+
+/// Wrap a role slot's resolved provider so its calls carry the slot's
+/// [`agent_core::RouteRole`] by default.
+pub(crate) fn role_scoped(
+    inner: Arc<dyn agent_core::LlmProvider>,
+    role: agent_core::RouteRole,
+) -> Arc<dyn agent_core::LlmProvider> {
+    Arc::new(RoleScoped { inner, role })
+}
+
+#[cfg(test)]
+mod role_scoped_tests {
+    use super::*;
+    use agent_core::{
+        ChunkStream, CompletionRequest, CompletionResponse, LlmProvider, Message,
+        ModelCapabilities, RouteHint, RouteRole,
+    };
+    use std::sync::Mutex;
+
+    /// Captures the request each call actually delivered downstream.
+    #[derive(Default)]
+    struct CaptureProvider {
+        seen: Mutex<Vec<Option<RouteHint>>>,
+    }
+    #[async_trait::async_trait]
+    impl LlmProvider for CaptureProvider {
+        fn capabilities(&self) -> ModelCapabilities {
+            ModelCapabilities::default()
+        }
+        async fn complete(&self, req: CompletionRequest) -> agent_core::Result<CompletionResponse> {
+            self.seen.lock().unwrap().push(req.route);
+            Ok(CompletionResponse {
+                message: Message::assistant("ok"),
+                finish_reason: "stop".into(),
+                usage: None,
+            })
+        }
+        async fn stream(&self, req: CompletionRequest) -> agent_core::Result<ChunkStream> {
+            self.seen.lock().unwrap().push(req.route);
+            Err(agent_core::Error::Provider("no stream".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn positive_stamps_role_when_request_carries_no_hint() {
+        let inner = Arc::new(CaptureProvider::default());
+        let p = role_scoped(inner.clone(), RouteRole::Judge);
+        p.complete(CompletionRequest::default()).await.unwrap();
+        let _ = p.stream(CompletionRequest::default()).await;
+        let seen = inner.seen.lock().unwrap();
+        for hint in seen.iter() {
+            assert_eq!(
+                hint.as_ref().and_then(|h| h.role),
+                Some(RouteRole::Judge),
+                "both complete and stream must stamp the slot role"
+            );
+        }
+        assert_eq!(seen.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn negative_explicit_per_call_hint_survives_untouched() {
+        let inner = Arc::new(CaptureProvider::default());
+        let p = role_scoped(inner.clone(), RouteRole::Judge);
+        let explicit = RouteHint {
+            role: Some(RouteRole::Review),
+            min_context: 9,
+            ..Default::default()
+        };
+        let req = CompletionRequest {
+            route: Some(explicit.clone()),
+            ..Default::default()
+        };
+        p.complete(req).await.unwrap();
+        assert_eq!(
+            inner.seen.lock().unwrap()[0],
+            Some(explicit),
+            "a caller's own hint must never be overwritten by the slot stamp"
+        );
+    }
+}
+
 pub(crate) fn build_route_upstream(
     u: &crate::config::RouteUpstreamCfg,
     global_context_window: u32,
@@ -1825,7 +1961,10 @@ fn compose_fork_provider(
     // alternatives budgets (the graph names WHAT runs; budgets stay config).
     let gate_parts =
         |g: &crate::cognition::GatePlan| -> anyhow::Result<(Arc<dyn LlmProvider>, GateCfg)> {
-            let critic = crate::registry::resolve_provider_ref(&g.critic, ctx)?;
+            let critic = role_scoped(
+                crate::registry::resolve_provider_ref(&g.critic, ctx)?,
+                agent_core::RouteRole::Judge,
+            );
             let mut gc = GateCfg {
                 critic_max_tokens: cfg.consensus.critic_max_tokens,
                 max_alternatives: cfg.consensus.max_alternatives,
@@ -1916,7 +2055,10 @@ fn compose_fork_provider(
         .with_cfg(bc)
         .with_observer(observer);
     if let Some(j) = &fork.judge {
-        bp = bp.with_judge(crate::registry::resolve_provider_ref(j, ctx)?);
+        bp = bp.with_judge(role_scoped(
+            crate::registry::resolve_provider_ref(j, ctx)?,
+            agent_core::RouteRole::Judge,
+        ));
     }
     let branching: Arc<dyn LlmProvider> = Arc::new(bp);
 

@@ -513,13 +513,17 @@ pub fn register_builtins(r: &mut Registry) {
             other => anyhow::bail!("[instant] relevance: unknown value `{other}`"),
         };
         // Role routing (`[instant] provider`): the objective/relevance calls
-        // are small classification work — a cheap/local model fits.
-        let provider = if cfg.provider.is_empty() {
-            ctx.provider()?.clone()
-        } else {
-            resolve_provider_ref(&cfg.provider, ctx)
-                .context("[instant] provider (objective/relevance role routing)")?
-        };
+        // are small classification work — a cheap/local model fits. Either way
+        // the slot is Summarize-stamped so a routing provider steers it (02b).
+        let provider = crate::builder::role_scoped(
+            if cfg.provider.is_empty() {
+                ctx.provider()?.clone()
+            } else {
+                resolve_provider_ref(&cfg.provider, ctx)
+                    .context("[instant] provider (objective/relevance role routing)")?
+            },
+            agent_core::RouteRole::Summarize,
+        );
         Ok(Arc::new(
             agent_context::InstantWindow::new(
                 provider,
@@ -627,8 +631,10 @@ pub fn register_builtins(r: &mut Registry) {
     r.verifier("llm", |ctx| {
         // Model-backed: ask the built provider to judge the call's correctness. Uses
         // the same provider as the loop (self-verification); a distinct verifier model
-        // is a follow-up (per-member providers under the `ensemble` backend).
-        let provider = ctx.provider()?.clone();
+        // is a follow-up (per-member providers under the `ensemble` backend). The
+        // slot is Verify-stamped so a routing provider steers it (02b).
+        let provider =
+            crate::builder::role_scoped(ctx.provider()?.clone(), agent_core::RouteRole::Verify);
         Ok(Arc::new(agent_verifier::LlmVerifier::new(provider)) as Arc<dyn agent_core::Verifier>)
     });
     #[cfg(feature = "verifier")]
@@ -850,7 +856,10 @@ pub fn register_builtins(r: &mut Registry) {
             resolve_provider_ref(name, ctx)
         };
         let generator = resolve(&cfg.generator)?;
-        let critic = resolve(&cfg.critic)?;
+        // The critic is a Judge role slot (02b): stamped so a routing provider
+        // can steer critique to a fit model; the generator keeps the caller's hint.
+        let critic =
+            crate::builder::role_scoped(resolve(&cfg.critic)?, agent_core::RouteRole::Judge);
 
         let mut gate = agent_providers::GateCfg {
             max_rounds: cfg.max_rounds,
