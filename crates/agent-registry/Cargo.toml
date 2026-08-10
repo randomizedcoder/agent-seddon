@@ -10,7 +10,7 @@ default = []
 # The `sqlite` ProviderRegistry backend — cards/policy as prost-encoded blobs in
 # embedded SQLite, off by default so a normal build stays dependency-free
 # (mirrors agent-prompt's `prompt-sqlite`).
-registry-sqlite = ["dep:rusqlite"]
+registry-sqlite = ["dep:rusqlite", "dep:prost"]
 # dhat-instrumented leak/allocation tests (tests/leak.rs).
 dhat-heap = ["dep:dhat"]
 
@@ -24,7 +24,7 @@ agent-proto.workspace = true
 # exactly the ordering the TaskRouter would produce (the module is feature-free).
 agent-providers.workspace = true
 async-trait.workspace = true
-prost.workspace = true
+prost = { workspace = true, optional = true }
 prost-reflect.workspace = true
 tracing.workspace = true
 rusqlite = { workspace = true, optional = true }
