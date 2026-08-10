@@ -114,6 +114,10 @@ pub struct TaskRouter {
     cooldown_ms: u64,
     now_ms: Arc<dyn Fn() -> u64 + Send + Sync>,
     observer: Option<RouteObserver>,
+    /// The registry snapshot fingerprint this fleet was built from (model-router
+    /// 04 tail): `0` = a static (TOML-built) fleet. Carried on every decision
+    /// event so a routing choice is attributable to a fleet version.
+    snapshot_version: u64,
 }
 
 impl TaskRouter {
@@ -143,6 +147,7 @@ impl TaskRouter {
             cooldown_ms: 30_000,
             now_ms: Arc::new(crate::router::wall_clock_ms),
             observer: None,
+            snapshot_version: 0,
         })
     }
 
@@ -162,6 +167,15 @@ impl TaskRouter {
     pub fn with_observer(mut self, observer: RouteObserver) -> Self {
         self.observer = Some(observer);
         self
+    }
+    /// Stamp the registry snapshot fingerprint this fleet was built from
+    /// (`RegistryRouter` sets it on every rebuild; `0` = static fleet).
+    pub fn with_snapshot_version(mut self, version: u64) -> Self {
+        self.snapshot_version = version;
+        self
+    }
+    pub fn snapshot_version(&self) -> u64 {
+        self.snapshot_version
     }
 
     fn emit(&self, ev: RouteEvent<'_>) {
@@ -269,6 +283,17 @@ impl TaskRouter {
             rule,
             chosen: &self.upstreams[order[0]].id,
         });
+        // Attaches to the caller's current span, so a decision is reproducible
+        // against the exact fleet version that produced it (0 = static fleet).
+        tracing::debug!(
+            target: "route.select",
+            snapshot_version = self.snapshot_version,
+            role = hint.role.as_str(),
+            task_mode = mode,
+            rule = ?rule,
+            chosen = %self.upstreams[order[0]].id,
+            "route decided"
+        );
         let mut last: Option<Error> = None;
         for (attempt, &i) in order.iter().enumerate() {
             let u = &self.upstreams[i];
@@ -504,6 +529,15 @@ mod tests {
         );
         let resp = r.complete(req()).await.expect("routes");
         assert_eq!(resp.message.content_text(), "from-kimi");
+    }
+
+    /// A static (TOML-built) fleet reports version 0; `RegistryRouter` stamps
+    /// the snapshot fingerprint via the builder.
+    #[test]
+    fn positive_snapshot_version_defaults_static_and_is_stampable() {
+        let r = router(vec![up("glm", ok("x", true, false))], prefer(&["glm"]));
+        assert_eq!(r.snapshot_version(), 0);
+        assert_eq!(r.with_snapshot_version(7).snapshot_version(), 7);
     }
 
     #[tokio::test]

@@ -534,6 +534,13 @@ cooldown_secs       = 30          # how long a breaker stays open before re-prob
 # # no restart. Default "" = the static list above.
 # # source = "registry"
 #
+# # judge_from_env = true (opt-in, model-router 04 tail): bridge the eval-harness
+# # judge convention — when AGENT_E2E_JUDGE_BASE_URL is set, a `judge-env`
+# # upstream (model from AGENT_E2E_JUDGE_MODEL, key from _API_KEY_FILE, TLS from
+# # _INSECURE_TLS) plus a LOWEST-precedence `role = "judge"` rule are appended at
+# # build, so the harness judge is a routed upstream instead of an env island.
+# # Explicit upstreams/rules here always win; without the env it is a no-op.
+#
 # TEXTPROTO SCENARIO FILES (model-router 03): the whole fleet + policy can live in
 # ONE `ModelRouterConfig` textproto instead of this [route] block — point
 # `model_router_config = "config/model-router/example.textproto"` at it (or

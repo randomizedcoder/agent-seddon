@@ -152,11 +152,12 @@ impl RegistryRouter {
         if fp == self.fingerprint.load(Ordering::Acquire) {
             return;
         }
-        match self.build_router(&cards, &policy) {
+        match self.build_router(&cards, &policy, fp) {
             Some(router) => {
                 *current = Some(Arc::new(router));
                 self.fingerprint.store(fp, Ordering::Release);
                 tracing::info!(
+                    snapshot_version = fp,
                     upstreams = cards.iter().filter(|c| c.enabled).count(),
                     rules = policy.rules.len(),
                     "registry snapshot applied"
@@ -174,7 +175,14 @@ impl RegistryRouter {
     }
 
     /// Build an inner router from a snapshot; `None` when no card is buildable.
-    fn build_router(&self, cards: &[Upstream], policy: &RoutePolicySpec) -> Option<TaskRouter> {
+    /// `fingerprint` is stamped onto the router so every decision it makes is
+    /// attributable to this exact snapshot (the `route.select` trail).
+    fn build_router(
+        &self,
+        cards: &[Upstream],
+        policy: &RoutePolicySpec,
+        fingerprint: u64,
+    ) -> Option<TaskRouter> {
         let mut upstreams = Vec::new();
         let mut cache = self
             .providers
@@ -229,7 +237,8 @@ impl RegistryRouter {
         let mut router = TaskRouter::new(upstreams, Policy::from_spec(policy))
             .expect("non-empty upstream list")
             .with_breaker(self.breaker_threshold, self.breaker_cooldown_ms)
-            .with_clock(self.now_ms.clone());
+            .with_clock(self.now_ms.clone())
+            .with_snapshot_version(fingerprint);
         if let Some(o) = &self.observer {
             router = router.with_observer(o.clone());
         }
@@ -433,6 +442,32 @@ mod tests {
             2,
             "only the new card was built"
         );
+    }
+
+    /// Every registry-built fleet carries a non-zero snapshot version, and a
+    /// config change moves it — the attribution the `route.select` trail needs.
+    #[tokio::test]
+    async fn positive_snapshot_version_tracks_the_fleet_fingerprint() {
+        let reg = registry_with(vec![card("a")]);
+        let (synth, _) = counting_synth("ok");
+        let (t, now) = clock();
+        let router = RegistryRouter::new(reg.clone(), synth)
+            .with_refresh_ms(0) // check every call
+            .with_clock(now);
+
+        let v1 = router.snapshot().await.expect("fleet").snapshot_version();
+        assert_ne!(v1, 0, "a registry-built fleet is never the static sentinel");
+
+        // Same config re-snapshotted ⇒ same version (no phantom rebuilds) …
+        t.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(router.snapshot().await.unwrap().snapshot_version(), v1);
+
+        // … while any visible change mints a new one.
+        reg.put(card("b")).await.unwrap();
+        t.fetch_add(1, Ordering::SeqCst);
+        let v2 = router.snapshot().await.expect("fleet").snapshot_version();
+        assert_ne!(v2, v1, "a fleet edit must be attributable to a new version");
+        assert_ne!(v2, 0);
     }
 
     #[tokio::test]
