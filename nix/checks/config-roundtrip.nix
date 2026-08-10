@@ -217,15 +217,16 @@ pkgs.runCommand "agent-config-roundtrip"
     TEXTPROTO
     sed "s|\[route\]|[route]\n    # replaced by the scenario file|" "$HOME/route.toml" > "$HOME/route-mrc.toml"
     printf '\n' >> "$HOME/route-mrc.toml"
-    if ! out="$(agent --config "$HOME/route-mrc.toml" --model-router-config "$HOME/mrc.textproto" --check-config 2>"$HOME/mrc.err")"; then
+    # NB: not `out` — that is the derivation's output path, written at the end.
+    if ! mrc_out="$(agent --config "$HOME/route-mrc.toml" --model-router-config "$HOME/mrc.textproto" --check-config 2>"$HOME/mrc.err")"; then
       echo "FAIL(mrc): a valid scenario file must check clean; stderr:" >&2
       cat "$HOME/mrc.err" >&2
       exit 1
     fi
-    echo "--- mrc ---"; echo "$out"
-    case "$out" in
+    echo "--- mrc ---"; echo "$mrc_out"
+    case "$mrc_out" in
       *"provider  = task-router"*) : ;;
-      *) echo "FAIL(mrc): expected task-router selection, got:" >&2; echo "$out" >&2; exit 1 ;;
+      *) echo "FAIL(mrc): expected task-router selection, got:" >&2; echo "$mrc_out" >&2; exit 1 ;;
     esac
 
     # 9) Adversarial: a malformed scenario file must fail the build closed.
