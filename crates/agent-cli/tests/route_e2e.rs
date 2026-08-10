@@ -258,3 +258,83 @@ fn adversarial_malformed_model_router_config_fails_closed() {
     );
     assert!(kimi.requests().is_empty() && glm.requests().is_empty());
 }
+
+#[test]
+fn positive_registry_source_seeds_routes_and_persists_the_fleet() {
+    // Model-router 04 through the shipped binary: `[route] source = "registry"`
+    // seeds the (empty) file store from the TOML fleet at boot, the
+    // RegistryRouter routes off the live snapshot — proven at the wire — and
+    // the seeded bundle lands on disk as diffable textproto, ready for
+    // control-plane edits.
+    let ws = TempWorkspace::new("route-registry");
+    let kimi = FakeLlm::start(vec![text("from-kimi")]);
+    let glm = FakeLlm::start(vec![text("from-glm")]);
+    let cfg = route_config(&ws, kimi.base_url(), glm.base_url(), "");
+    let mut toml = std::fs::read_to_string(&cfg).unwrap();
+    toml = toml.replace(
+        "[route]\n",
+        &format!(
+            "[route]\nsource = \"registry\"\n\n[registry]\nstore = \"file\"\nfile = \"{}\"\nrefresh_secs = 0\n",
+            ws.path("fleet.textproto").display()
+        ),
+    );
+    std::fs::write(&cfg, toml).unwrap();
+
+    let (code, stdout, stderr) = common::run_agent(&cfg, &ws, &["say done"]);
+    assert_eq!(code, 0, "stderr:\n{stderr}");
+    assert!(stdout.contains("from-kimi"), "got:\n{stdout}");
+    assert!(!kimi.requests().is_empty(), "preferred upstream served");
+    assert!(glm.requests().is_empty(), "fallback untouched");
+
+    // The seed persisted: the bundle exists, holds both cards, and NO secret.
+    let bundle = std::fs::read_to_string(ws.path("fleet.textproto")).expect("seeded bundle");
+    assert!(
+        bundle.contains("id: \"kimi\"") && bundle.contains("id: \"glm\""),
+        "{bundle}"
+    );
+    assert!(
+        !bundle.contains("api_key:"),
+        "no raw key field in a card: {bundle}"
+    );
+}
+
+#[test]
+fn positive_registry_source_control_plane_edit_reroutes_without_restart_shape() {
+    // The no-restart contract, exercised at the store level the binary uses: a
+    // first run seeds the bundle; the "operator" then disables kimi in the
+    // bundle (what a control-plane Enable(false) writes); the SECOND run must
+    // route to glm purely from the mutated registry — the TOML (which still
+    // prefers kimi) no longer decides.
+    let ws = TempWorkspace::new("route-registry-edit");
+    let kimi = FakeLlm::start(vec![text("from-kimi"), text("from-kimi")]);
+    let glm = FakeLlm::start(vec![text("from-glm"), text("from-glm")]);
+    let cfg = route_config(&ws, kimi.base_url(), glm.base_url(), "");
+    let mut toml = std::fs::read_to_string(&cfg).unwrap();
+    toml = toml.replace(
+        "[route]\n",
+        &format!(
+            "[route]\nsource = \"registry\"\n\n[registry]\nstore = \"file\"\nfile = \"{}\"\nrefresh_secs = 0\n",
+            ws.path("fleet.textproto").display()
+        ),
+    );
+    std::fs::write(&cfg, toml).unwrap();
+
+    let (code, _out, stderr) = common::run_agent(&cfg, &ws, &["say done"]);
+    assert_eq!(code, 0, "seed run; stderr:\n{stderr}");
+    assert!(!kimi.requests().is_empty());
+
+    // The control-plane edit: disable kimi in the persisted bundle.
+    let bundle = std::fs::read_to_string(ws.path("fleet.textproto")).unwrap();
+    std::fs::write(
+        ws.path("fleet.textproto"),
+        bundle.replacen("enabled: true", "enabled: false", 1),
+    )
+    .unwrap();
+
+    let (code, stdout, stderr) = common::run_agent(&cfg, &ws, &["say done"]);
+    assert_eq!(code, 0, "stderr:\n{stderr}");
+    assert!(stdout.contains("from-glm"), "got:\n{stdout}");
+    // The seed did NOT overwrite the edit (idempotence): kimi stays disabled.
+    let bundle = std::fs::read_to_string(ws.path("fleet.textproto")).unwrap();
+    assert!(bundle.contains("enabled: false"), "{bundle}");
+}

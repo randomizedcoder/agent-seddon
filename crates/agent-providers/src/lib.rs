@@ -38,6 +38,13 @@ pub mod task_router;
 #[cfg(feature = "provider-router")]
 pub use task_router::{RouterUpstream, TaskRouter};
 
+// The registry-backed task router (model-router 04): fleet + policy from a live
+// `ProviderRegistry` snapshot, rebuilt only when the config fingerprint changes.
+#[cfg(feature = "provider-router")]
+pub mod registry_router;
+#[cfg(feature = "provider-router")]
+pub use registry_router::{RegistryRouter, UpstreamSynth};
+
 /// A health-checked, tiered pool of cheap providers with an active liveness probe
 /// and parallel fan-out (`docs/design/code-review/llm-pool.md`). Reuses the
 /// router's circuit breaker, so `provider-pool` implies `provider-router`.

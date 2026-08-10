@@ -266,17 +266,33 @@ impl TaskRouter {
                     self.health[i].record_success();
                     let elapsed = (self.now_ms)().saturating_sub(started);
                     self.live[i].record_latency(u32::try_from(elapsed).unwrap_or(u32::MAX));
+                    self.emit(RouteEvent::Dispatched {
+                        role: hint.role.as_str(),
+                        upstream: &u.id,
+                        outcome: "ok",
+                    });
                     return Ok(v);
                 }
                 Err(e) => {
                     let msg = e.to_string();
                     self.health[i].record_failure((self.now_ms)(), self.failure_threshold);
                     if agent_retry::classify(&msg) == agent_retry::Class::Terminal {
+                        self.emit(RouteEvent::Dispatched {
+                            role: hint.role.as_str(),
+                            upstream: &u.id,
+                            outcome: "terminal",
+                        });
                         return Err(e);
                     }
+                    self.emit(RouteEvent::Dispatched {
+                        role: hint.role.as_str(),
+                        upstream: &u.id,
+                        outcome: "retryable",
+                    });
                     if attempt + 1 < order.len() {
                         self.emit(RouteEvent::FellOver {
                             from: &u.id,
+                            to: &self.upstreams[order[attempt + 1]].id,
                             reason: "retryable",
                         });
                     }

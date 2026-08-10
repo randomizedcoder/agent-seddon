@@ -60,6 +60,16 @@ pub async fn build_agent_with(
     // file is a startup error — fail closed, never a partially-loaded fleet.
     #[cfg(feature = "registry")]
     apply_model_router_config(&mut cfg)?;
+    // Registry-backed routing (model-router 04): with `[route] source =
+    // "registry"`, the TOML fleet SEEDS the store once (empty store only) and
+    // the task-router factory below builds the live-refreshing router.
+    #[cfg(feature = "registry")]
+    if cfg.agent.provider == "task-router" && cfg.route.source == "registry" {
+        let store = resolve_provider_registry(&cfg, &metrics)?.ok_or_else(|| {
+            anyhow::anyhow!("[route] source = \"registry\" requires a [registry] store")
+        })?;
+        seed_registry_from_toml(&cfg, store.as_ref()).await?;
+    }
     #[cfg(feature = "graph")]
     let (graph_store, graph_distill_kinds, graph_plan) = resolve_cognition_graph(&mut cfg).await?;
     #[cfg(not(feature = "graph"))]
@@ -2034,6 +2044,190 @@ fn route_cfg_from(
     Ok(out)
 }
 
+/// Build one registry card into a concrete provider (model-router 04): the
+/// synthesizer the `RegistryRouter` calls for a card it has not seen. Only
+/// endpoint-carrying `openai-compat` cards are buildable here (a registered-name
+/// card needs the factory registry, which is not available after startup — use
+/// the static `[route]` path for those; recorded in STATUS.md). The key
+/// resolves LOCALLY from `api_key_ref`; a dangling ref is an error, never a
+/// silently keyless provider.
+#[cfg(all(feature = "registry", feature = "provider-router"))]
+pub(crate) fn synth_route_upstream(
+    card: &agent_core::Upstream,
+    global_context_window: u32,
+    metrics: &Metrics,
+) -> agent_core::Result<Arc<dyn agent_core::LlmProvider>> {
+    use agent_core::Error;
+    if card.kind != "openai-compat" || card.base_url.is_empty() {
+        return Err(Error::Registry(format!(
+            "card `{}`: only endpoint-carrying openai-compat cards are registry-buildable",
+            card.id
+        )));
+    }
+    let (api_key_env, api_key_file) = match agent_core::ApiKeyRef::parse(&card.api_key_ref) {
+        Ok(agent_core::ApiKeyRef::Env(n)) => (n.to_string(), String::new()),
+        Ok(agent_core::ApiKeyRef::File(f)) => (String::new(), f.to_string()),
+        Ok(agent_core::ApiKeyRef::None) => (String::new(), String::new()),
+        Err(e) => return Err(Error::Registry(format!("card `{}`: {e}", card.id))),
+    };
+    let ucfg = crate::config::RouteUpstreamCfg {
+        name: card.id.clone(),
+        endpoint: card.base_url.clone(),
+        model: card.model.clone(),
+        api_key: String::new(),
+        api_key_env,
+        api_key_file,
+        insecure_tls: card.insecure_tls,
+        context_window: (card.context_window != 0).then_some(card.context_window),
+        tags: Vec::new(),
+        tier: String::new(),
+        input_cost: None,
+    };
+    let provider = build_route_upstream(&ucfg, global_context_window)
+        .map_err(|e| Error::Registry(format!("card `{}`: {e:#}", card.id)))?;
+    Ok(crate::metered::provider(
+        Arc::new(provider),
+        metrics.clone(),
+        &card.id,
+    ))
+}
+
+/// Map one `[[route.upstreams]]` TOML entry onto a registry card — the seeding
+/// direction (04). A raw inline `api_key` is REFUSED: the registry stores key
+/// *references* only, and silently dropping the key would strand the upstream
+/// unauthenticated; the error tells the operator to switch to
+/// `api_key_env`/`api_key_file`.
+#[cfg(feature = "registry")]
+fn route_upstream_card(
+    u: &crate::config::RouteUpstreamCfg,
+) -> anyhow::Result<agent_core::Upstream> {
+    if !u.api_key.is_empty() {
+        anyhow::bail!(
+            "[[route.upstreams]] `{}`: an inline api_key cannot be seeded into the registry \
+             (it stores references, never secrets) — use api_key_env or api_key_file",
+            u.name
+        );
+    }
+    let api_key_ref = if !u.api_key_env.is_empty() {
+        format!("env:{}", u.api_key_env)
+    } else if !u.api_key_file.is_empty() {
+        format!("file:{}", u.api_key_file)
+    } else {
+        String::new()
+    };
+    let mut card = agent_core::Upstream {
+        id: u.name.clone(),
+        kind: if u.endpoint.is_empty() {
+            String::new()
+        } else {
+            "openai-compat".to_string()
+        },
+        enabled: true,
+        base_url: u.endpoint.clone(),
+        model: u.model.clone(),
+        api_key_ref,
+        insecure_tls: u.insecure_tls,
+        context_window: u.context_window.unwrap_or(0),
+        // The chat endpoints the router fronts speak tools; capability FACTS
+        // for actual routing are read live from the provider — these fields
+        // only inform the store's Route introspection.
+        supports_tools: true,
+        tags: u.tags.clone(),
+        input_cost: u.input_cost.unwrap_or(0.0),
+        tier: agent_core::PoolTier::parse(&u.tier),
+        ..Default::default()
+    };
+    card.sanitize();
+    card.validate().map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(card)
+}
+
+/// The typed policy spec for seeding — same strict `match` parsing as
+/// [`build_route_policy`] (a typo'd constraint must not seed a match-anything
+/// rule), `prefer` lenient as ever.
+#[cfg(feature = "registry")]
+fn route_policy_spec_from_toml(
+    cfg: &crate::config::RouteCfg,
+) -> anyhow::Result<agent_core::RoutePolicySpec> {
+    let prefer = |p: &crate::config::RoutePreferCfg| agent_core::RoutePreferSpec {
+        tags: p.tags.clone(),
+        tier: agent_core::PoolTier::parse(&p.tier),
+        upstreams: p.upstreams.clone(),
+        policy: p.policy.clone(),
+    };
+    let mut rules = Vec::new();
+    for (i, r) in cfg.rules.iter().enumerate() {
+        let role = match r.match_.role.trim() {
+            "" => None,
+            s => Some(agent_core::RouteRole::parse(s).ok_or_else(|| {
+                anyhow::anyhow!("[[route.rules]] #{i}: unknown match role {s:?}")
+            })?),
+        };
+        let task_mode = match r.match_.task_mode.trim() {
+            "" => None,
+            s => Some(agent_core::TaskMode::parse(s).ok_or_else(|| {
+                anyhow::anyhow!("[[route.rules]] #{i}: unknown match task_mode {s:?}")
+            })?),
+        };
+        rules.push(agent_core::RouteRuleSpec {
+            match_: agent_core::RouteMatchSpec {
+                role,
+                task_mode,
+                min_context: r.match_.min_context,
+            },
+            prefer: prefer(&r.prefer),
+        });
+    }
+    let mut spec = agent_core::RoutePolicySpec {
+        rules,
+        default_prefer: prefer(&cfg.default_prefer),
+        failure_threshold: u32::try_from(cfg.failure_threshold).unwrap_or(u32::MAX),
+        cooldown_secs: u32::try_from(cfg.cooldown_secs).unwrap_or(u32::MAX),
+    };
+    spec.sanitize();
+    spec.validate().map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(spec)
+}
+
+/// Seed the registry from the TOML `[route]` block at boot (model-router 04's
+/// back-compat contract): only when the store is EMPTY — the registry is the
+/// source of truth once populated, so the seed is idempotent and never
+/// overwrites a control-plane edit.
+#[cfg(feature = "registry")]
+pub(crate) async fn seed_registry_from_toml(
+    cfg: &Config,
+    store: &dyn agent_core::ProviderRegistry,
+) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    let existing = store
+        .list()
+        .await
+        .context("reading the registry for seeding")?;
+    if !existing.is_empty() {
+        return Ok(());
+    }
+    if cfg.route.upstreams.is_empty() {
+        return Ok(());
+    }
+    for u in &cfg.route.upstreams {
+        let card = route_upstream_card(u)?;
+        store
+            .put(card)
+            .await
+            .with_context(|| format!("seeding upstream `{}`", u.name))?;
+    }
+    store
+        .put_policy(route_policy_spec_from_toml(&cfg.route)?)
+        .await
+        .context("seeding the route policy")?;
+    tracing::info!(
+        upstreams = cfg.route.upstreams.len(),
+        rules = cfg.route.rules.len(),
+        "seeded the provider registry from [route] TOML"
+    );
+    Ok(())
+}
+
 /// Build the `[registry] store` backend (model-router 03) — the provider
 /// registry control plane held for `--serve-provider-registry`, metered so
 /// mutations count and the fleet gauge stays current. `file` (the default)
@@ -2041,7 +2235,7 @@ fn route_cfg_from(
 /// is set, THAT file is served — one file for both the startup loader and the
 /// control plane.
 #[cfg(feature = "registry")]
-fn resolve_provider_registry(
+pub(crate) fn resolve_provider_registry(
     cfg: &Config,
     metrics: &Metrics,
 ) -> anyhow::Result<Option<Arc<dyn agent_core::ProviderRegistry>>> {
@@ -2568,6 +2762,7 @@ mod route_policy_tests {
                     tags: vec!["reasoning".into()],
                     tier: "heavy".into(),
                     upstreams: vec![],
+                    policy: String::new(),
                 },
             }],
             default_prefer: RoutePreferCfg {
@@ -3041,5 +3236,126 @@ mod model_router_config_tests {
             "one authority, never a merge"
         );
         assert_eq!(cfg.route.upstreams.len(), 2);
+    }
+}
+
+// TOML → registry seeding + card synthesis (model-router 04).
+#[cfg(all(test, feature = "registry"))]
+mod registry_seed_tests {
+    use super::*;
+    use agent_core::ProviderRegistry as _;
+
+    fn ucfg(name: &str) -> crate::config::RouteUpstreamCfg {
+        crate::config::RouteUpstreamCfg {
+            name: name.into(),
+            endpoint: "http://127.0.0.1:1/v1".into(),
+            model: "m".into(),
+            api_key_env: "TEST_KEY".into(),
+            context_window: Some(64_000),
+            tags: vec!["reasoning".into()],
+            tier: "heavy".into(),
+            input_cost: Some(1.5),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn positive_route_upstream_maps_onto_a_card() {
+        let card = route_upstream_card(&ucfg("kimi")).expect("maps");
+        assert_eq!(card.id, "kimi");
+        assert_eq!(card.kind, "openai-compat");
+        assert_eq!(card.api_key_ref, "env:TEST_KEY");
+        assert_eq!(card.context_window, 64_000);
+        assert_eq!(card.tier, Some(agent_core::PoolTier::Heavy));
+        assert_eq!(card.input_cost, 1.5);
+        assert!(card.enabled);
+        // file-key form maps to the file: scheme.
+        let mut u = ucfg("glm");
+        u.api_key_env = String::new();
+        u.api_key_file = "~/keys/glm".into();
+        assert_eq!(
+            route_upstream_card(&u).unwrap().api_key_ref,
+            "file:~/keys/glm"
+        );
+    }
+
+    #[test]
+    fn adversarial_raw_inline_key_refuses_to_seed_and_never_echoes() {
+        let mut u = ucfg("leaky");
+        u.api_key = "sk-live-supersecret".into();
+        let err = route_upstream_card(&u).expect_err("raw key refused");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("api_key_env or api_key_file"), "{msg}");
+        assert!(!msg.contains("supersecret"), "never echo the value: {msg}");
+    }
+
+    #[test]
+    fn negative_policy_seed_keeps_strict_match_parsing() {
+        let mut cfg = crate::config::RouteCfg::default();
+        cfg.rules.push(crate::config::RouteRuleCfg {
+            match_: crate::config::RouteMatchCfg {
+                task_mode: "reveiw".into(),
+                ..Default::default()
+            },
+            prefer: Default::default(),
+        });
+        let err = route_policy_spec_from_toml(&cfg).expect_err("typo fails seed");
+        assert!(format!("{err:#}").contains("unknown match task_mode"));
+    }
+
+    #[tokio::test]
+    async fn positive_seed_fills_an_empty_store_and_is_idempotent() {
+        let store = agent_registry::MemoryRegistry::empty();
+        let mut cfg = Config::minimal_for_test();
+        cfg.route.upstreams = vec![ucfg("kimi"), ucfg_named("glm")];
+        cfg.route.default_prefer.upstreams = vec!["kimi".into(), "glm".into()];
+        seed_registry_from_toml(&cfg, &store).await.expect("seeds");
+        assert_eq!(store.list().await.unwrap().len(), 2);
+        assert_eq!(
+            store.get_policy().await.unwrap().default_prefer.upstreams,
+            vec!["kimi", "glm"]
+        );
+
+        // The registry is now the source of truth: a control-plane edit …
+        store.delete("glm").await.unwrap();
+        // … must NOT be overwritten by a reboot's re-seed.
+        seed_registry_from_toml(&cfg, &store).await.expect("skips");
+        assert_eq!(
+            store.list().await.unwrap().len(),
+            1,
+            "seed never overwrites"
+        );
+    }
+
+    fn ucfg_named(name: &str) -> crate::config::RouteUpstreamCfg {
+        let mut u = ucfg(name);
+        u.endpoint = format!("http://127.0.0.1:2/{name}");
+        u
+    }
+
+    #[test]
+    fn positive_synth_builds_only_endpoint_cards() {
+        let m = Metrics::new();
+        let card = route_upstream_card(&ucfg("kimi")).unwrap();
+        // env-key semantics follow the ONE shared resolver (`resolve_key_opt`,
+        // model-router 01): an unset env var degrades to keyless (a local
+        // endpoint that ignores auth), while a dangling FILE ref fails closed.
+        assert!(synth_route_upstream(&card, 8_192, &m).is_ok());
+        let mut file_ref = card.clone();
+        file_ref.api_key_ref = "file:/nonexistent/key-file".into();
+        let err = match synth_route_upstream(&file_ref, 8_192, &m) {
+            Err(e) => e,
+            Ok(_) => panic!("a dangling file ref must not build"),
+        };
+        assert!(err.to_string().contains("key-file"), "{err}");
+        // A keyless local endpoint builds.
+        let mut keyless = card.clone();
+        keyless.api_key_ref = String::new();
+        assert!(synth_route_upstream(&keyless, 8_192, &m).is_ok());
+        // A registered-name card is not registry-buildable (skipped upstream).
+        let mut named = card;
+        named.kind = String::new();
+        named.base_url = String::new();
+        assert!(synth_route_upstream(&named, 8_192, &m).is_err());
     }
 }

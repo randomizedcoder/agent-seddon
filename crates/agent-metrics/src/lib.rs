@@ -78,6 +78,8 @@ pub struct Metrics {
     router_no_candidate: IntCounterVec,
     registry_upstreams: IntGaugeVec,
     registry_mutations: IntCounterVec,
+    router_dispatch: IntCounterVec,
+    router_failover: IntCounterVec,
     gate_verdicts: IntCounterVec,
     gate_rounds: Histogram,
     gate_phase_seconds: HistogramVec,
@@ -401,6 +403,22 @@ impl Metrics {
                 "Provider-registry control-plane mutations, by op (put|delete|enable|put_policy)",
             ),
             &["op"],
+        )
+        .unwrap();
+        let router_dispatch = IntCounterVec::new(
+            Opts::new(
+                "agent_router_dispatch_total",
+                "Task-router dispatch attempts, by role, upstream and outcome (ok|retryable|terminal)",
+            ),
+            &["role", "upstream", "outcome"],
+        )
+        .unwrap();
+        let router_failover = IntCounterVec::new(
+            Opts::new(
+                "agent_router_failover_total",
+                "Task-router failover hops, by from/to upstream and reason",
+            ),
+            &["from", "to", "reason"],
         )
         .unwrap();
         let gate_verdicts = IntCounterVec::new(
@@ -1209,6 +1227,8 @@ impl Metrics {
             Box::new(router_no_candidate.clone()),
             Box::new(registry_upstreams.clone()),
             Box::new(registry_mutations.clone()),
+            Box::new(router_dispatch.clone()),
+            Box::new(router_failover.clone()),
             Box::new(gate_verdicts.clone()),
             Box::new(gate_rounds.clone()),
             Box::new(gate_phase_seconds.clone()),
@@ -1349,6 +1369,8 @@ impl Metrics {
             router_no_candidate,
             registry_upstreams,
             registry_mutations,
+            router_dispatch,
+            router_failover,
             gate_verdicts,
             gate_rounds,
             gate_phase_seconds,
@@ -1563,6 +1585,19 @@ impl Metrics {
     /// a closed set (`put|delete|enable|put_policy`) — bounded cardinality.
     pub fn on_registry_mutation(&self, op: &str) {
         self.registry_mutations.with_label_values(&[op]).inc();
+    }
+    /// One task-router dispatch attempt (model-router 04). All three labels are
+    /// bounded: closed role set, configured upstream ids, closed outcome set.
+    pub fn on_router_dispatch(&self, role: &str, upstream: &str, outcome: &str) {
+        self.router_dispatch
+            .with_label_values(&[role, upstream, outcome])
+            .inc();
+    }
+    /// One task-router failover hop (04); `to` is empty for the plain Router.
+    pub fn on_router_failover(&self, from: &str, to: &str, reason: &str) {
+        self.router_failover
+            .with_label_values(&[from, to, reason])
+            .inc();
     }
     /// The registry fleet size after a mutation (counts are clamped upstream by
     /// the store's `MAX_REGISTRY_UPSTREAMS` cap, so the cast is safe).

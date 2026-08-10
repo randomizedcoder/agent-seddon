@@ -103,32 +103,11 @@ pub fn decide(cfg: &ModelRouterConfig, hint: &RouteHint) -> RouteDecision {
     }
 }
 
-/// Map the seam-currency policy spec onto the pure routing engine's types.
-/// Typed on both sides — nothing can fail (the TOML path's typo problem does
-/// not exist here).
+/// The engine mapping lives with the engine ([`route::Policy::from_spec`]) so
+/// the registry's `Route` introspection and the registry-backed router can
+/// never diverge.
 fn engine_policy(spec: &RoutePolicySpec) -> route::Policy {
-    let prefer = |p: &agent_core::RoutePreferSpec| route::Prefer {
-        tags: p.tags.clone(),
-        tier: p.tier,
-        upstreams: p.upstreams.clone(),
-        // Validated to the closed set on ingest; unknown never reaches here.
-        policy: route::OrderPolicy::parse(&p.policy),
-    };
-    route::Policy {
-        rules: spec
-            .rules
-            .iter()
-            .map(|r| route::Rule {
-                match_: route::Match {
-                    role: r.match_.role,
-                    task_mode: r.match_.task_mode,
-                    min_context: r.match_.min_context,
-                },
-                prefer: prefer(&r.prefer),
-            })
-            .collect(),
-        default_prefer: prefer(&spec.default_prefer),
-    }
+    route::Policy::from_spec(spec)
 }
 
 /// The static health view a plain store reports: every enabled card `Healthy`

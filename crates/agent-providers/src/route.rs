@@ -192,6 +192,34 @@ pub struct Policy {
 }
 
 impl Policy {
+    /// Map the seam-currency policy spec (`agent_core::RoutePolicySpec` — what
+    /// the provider registry stores and serves) onto the engine. Typed on both
+    /// sides — nothing can fail; the spec's `prefer.policy` string was
+    /// validated to the closed set on ingest.
+    pub fn from_spec(spec: &agent_core::RoutePolicySpec) -> Self {
+        let prefer = |p: &agent_core::RoutePreferSpec| Prefer {
+            tags: p.tags.clone(),
+            tier: p.tier,
+            upstreams: p.upstreams.clone(),
+            policy: OrderPolicy::parse(&p.policy),
+        };
+        Policy {
+            rules: spec
+                .rules
+                .iter()
+                .map(|r| Rule {
+                    match_: Match {
+                        role: r.match_.role,
+                        task_mode: r.match_.task_mode,
+                        min_context: r.match_.min_context,
+                    },
+                    prefer: prefer(&r.prefer),
+                })
+                .collect(),
+            default_prefer: prefer(&spec.default_prefer),
+        }
+    }
+
     /// Resolve `hint` against the `fleet`, returning eligible upstream ids
     /// most-preferred first. Pure, deterministic, and total: an empty result means
     /// *no upstream can serve this request* (fail-soft — the caller decides), never a
