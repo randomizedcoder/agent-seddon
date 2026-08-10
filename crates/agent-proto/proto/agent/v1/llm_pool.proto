@@ -17,12 +17,8 @@ service LlmPoolService {
   rpc Complete(PoolCompleteRequest) returns (PoolCompleteResponse);
 }
 
-enum PoolTier {
-  POOL_TIER_UNSPECIFIED = 0;
-  POOL_TIER_LIGHT = 1;
-  POOL_TIER_MEDIUM = 2;
-  POOL_TIER_HEAVY = 3;
-}
+// `PoolTier` moved to common.proto (same package, wire/JSON-identical) so
+// `RouteHint` can carry a tier floor without an import cycle (model-router 02b).
 
 // Graded liveness of a member (GPU pool 03).
 enum PoolMemberState {

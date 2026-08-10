@@ -7,16 +7,8 @@ package agent.v1;
 
 import "agent/v1/common.proto";
 
-// The coarse task mode. Mirrors `agent_core::TaskMode`.
-enum TaskMode {
-  TASK_MODE_UNSPECIFIED = 0;
-  TASK_MODE_REVIEW = 1;
-  TASK_MODE_IMPLEMENT = 2;
-  TASK_MODE_DESIGN = 3;
-  TASK_MODE_DEBUG = 4;
-  TASK_MODE_EXPLAIN = 5;
-  TASK_MODE_OTHER = 6;
-}
+// `TaskMode` moved to common.proto (same package, wire/JSON-identical) so
+// `RouteHint` can carry it without an import cycle (model-router 02b).
 
 // What a classifier saw the incoming work as. `confidence` is untrusted (a pool
 // vote's self-report) — clamp to 0..=1 on receipt.

@@ -441,6 +441,65 @@ impl From<pb::Usage> for agent_core::Usage {
 
 // --- CompletionRequest -----------------------------------------------------
 
+impl From<agent_core::RouteRole> for pb::RouteRole {
+    fn from(r: agent_core::RouteRole) -> Self {
+        match r {
+            agent_core::RouteRole::Main => pb::RouteRole::Main,
+            agent_core::RouteRole::Judge => pb::RouteRole::Judge,
+            agent_core::RouteRole::Classify => pb::RouteRole::Classify,
+            agent_core::RouteRole::Summarize => pb::RouteRole::Summarize,
+            agent_core::RouteRole::Verify => pb::RouteRole::Verify,
+            agent_core::RouteRole::Review => pb::RouteRole::Review,
+        }
+    }
+}
+
+impl From<agent_core::RouteHint> for pb::RouteHint {
+    fn from(h: agent_core::RouteHint) -> Self {
+        pb::RouteHint {
+            task_mode: h.task_mode.map_or(pb::TaskMode::Unspecified, pb::TaskMode::from) as i32,
+            role: h.role.map_or(pb::RouteRole::Unspecified, pb::RouteRole::from) as i32,
+            min_context: h.min_context,
+            max_cost: h.max_cost,
+            tier: h.tier.map_or(pb::PoolTier::Unspecified, pb::PoolTier::from) as i32,
+            override_upstream: h.override_upstream.unwrap_or_default(),
+        }
+    }
+}
+
+/// Wire → core is total and fail-soft: an out-of-range/UNSPECIFIED enum decodes
+/// to `None` (never a guess), and the result is [`agent_core::RouteHint::sanitize`]d
+/// — the hint is attacker-controlled (a served seam's peer), so hostile numbers
+/// and over-long override ids are dropped at the boundary.
+impl From<pb::RouteHint> for agent_core::RouteHint {
+    fn from(h: pb::RouteHint) -> Self {
+        let mut out = agent_core::RouteHint {
+            task_mode: match h.task_mode() {
+                pb::TaskMode::Unspecified => None,
+                m => Some(agent_core::TaskMode::from(m)),
+            },
+            role: match h.role() {
+                pb::RouteRole::Unspecified => None,
+                pb::RouteRole::Main => Some(agent_core::RouteRole::Main),
+                pb::RouteRole::Judge => Some(agent_core::RouteRole::Judge),
+                pb::RouteRole::Classify => Some(agent_core::RouteRole::Classify),
+                pb::RouteRole::Summarize => Some(agent_core::RouteRole::Summarize),
+                pb::RouteRole::Verify => Some(agent_core::RouteRole::Verify),
+                pb::RouteRole::Review => Some(agent_core::RouteRole::Review),
+            },
+            min_context: h.min_context,
+            max_cost: h.max_cost,
+            tier: match h.tier() {
+                pb::PoolTier::Unspecified => None,
+                t => Some(agent_core::PoolTier::from(t)),
+            },
+            override_upstream: (!h.override_upstream.is_empty()).then_some(h.override_upstream),
+        };
+        out.sanitize();
+        out
+    }
+}
+
 impl From<agent_core::CompletionRequest> for pb::CompletionRequest {
     fn from(r: agent_core::CompletionRequest) -> Self {
         pb::CompletionRequest {
@@ -448,6 +507,7 @@ impl From<agent_core::CompletionRequest> for pb::CompletionRequest {
             tools: r.tools.into_iter().map(Into::into).collect(),
             max_tokens: r.max_tokens,
             temperature: r.temperature,
+            route_hint: r.route.map(Into::into),
         }
     }
 }
@@ -471,7 +531,7 @@ impl TryFrom<pb::CompletionRequest> for agent_core::CompletionRequest {
             // `response_format` is not yet on the wire — the Validator gRPC service
             // + proto field are a documented follow-up (parity spec 16).
             response_format: None,
-            route: None,
+            route: r.route_hint.map(Into::into),
         })
     }
 }
@@ -4240,6 +4300,53 @@ mod tests {
         let p1 = pb::CompletionRequest::from(core);
         let back = agent_core::CompletionRequest::try_from(p1.clone()).unwrap();
         assert_eq!(pb::CompletionRequest::from(back), p1);
+    }
+
+    #[test]
+    fn positive_route_hint_roundtrip() {
+        let core = agent_core::CompletionRequest {
+            messages: vec![agent_core::Message::user("go")],
+            route: Some(agent_core::RouteHint {
+                task_mode: Some(agent_core::TaskMode::Review),
+                role: Some(agent_core::RouteRole::Judge),
+                min_context: 32_000,
+                max_cost: Some(2.5),
+                tier: Some(agent_core::PoolTier::Heavy),
+                override_upstream: Some("kimi".into()),
+            }),
+            ..Default::default()
+        };
+        let p1 = pb::CompletionRequest::from(core.clone());
+        let back = agent_core::CompletionRequest::try_from(p1).unwrap();
+        assert_eq!(back.route, core.route);
+    }
+
+    #[test]
+    fn corner_route_hint_all_unset_decodes_to_defaults() {
+        let hint = agent_core::RouteHint::from(pb::RouteHint::default());
+        assert_eq!(hint, agent_core::RouteHint::default());
+    }
+
+    // The request is attacker-controlled on a served seam: hostile numbers and
+    // out-of-range enums must be dropped/absorbed at the decode boundary, never
+    // passed into selection math.
+    #[test]
+    fn adversarial_route_hint_decode_sanitizes() {
+        let hostile = pb::RouteHint {
+            task_mode: 999,
+            role: -7,
+            min_context: u32::MAX,
+            max_cost: Some(f32::NEG_INFINITY),
+            tier: 999,
+            override_upstream: "x".repeat(agent_core::MAX_ROUTE_OVERRIDE_LEN + 1),
+        };
+        let hint = agent_core::RouteHint::from(hostile);
+        assert_eq!(hint.task_mode, None);
+        assert_eq!(hint.role, None);
+        assert_eq!(hint.min_context, agent_core::MAX_ROUTE_MIN_CONTEXT);
+        assert_eq!(hint.max_cost, None);
+        assert_eq!(hint.tier, None);
+        assert_eq!(hint.override_upstream, None);
     }
 
     #[test]

@@ -142,11 +142,62 @@ message Usage {
   uint32 total_tokens = 3;
 }
 
+// The coarse task mode. Mirrors `agent_core::TaskMode`. Lives here (not
+// mode.proto) so `RouteHint` below can carry it without an import cycle —
+// a same-package move, wire/JSON-identical (`breaking: WIRE_JSON`).
+enum TaskMode {
+  TASK_MODE_UNSPECIFIED = 0;
+  TASK_MODE_REVIEW = 1;
+  TASK_MODE_IMPLEMENT = 2;
+  TASK_MODE_DESIGN = 3;
+  TASK_MODE_DEBUG = 4;
+  TASK_MODE_EXPLAIN = 5;
+  TASK_MODE_OTHER = 6;
+}
+
+// Pool member weight class. Mirrors `agent_core::PoolTier`. Moved here from
+// llm_pool.proto (same package, wire/JSON-identical) so `RouteHint` can carry a
+// tier floor without an import cycle.
+enum PoolTier {
+  POOL_TIER_UNSPECIFIED = 0;
+  POOL_TIER_LIGHT = 1;
+  POOL_TIER_MEDIUM = 2;
+  POOL_TIER_HEAVY = 3;
+}
+
+// The internal call-site a request originates from. Mirrors
+// `agent_core::RouteRole` (model-router 02b); UNSPECIFIED ⇒ `None` (the routing
+// provider applies its own default).
+enum RouteRole {
+  ROUTE_ROLE_UNSPECIFIED = 0;
+  ROUTE_ROLE_MAIN = 1;
+  ROUTE_ROLE_JUDGE = 2;
+  ROUTE_ROLE_CLASSIFY = 3;
+  ROUTE_ROLE_SUMMARIZE = 4;
+  ROUTE_ROLE_VERIFY = 5;
+  ROUTE_ROLE_REVIEW = 6;
+}
+
+// Per-request routing signals (model-router 02b). Mirrors
+// `agent_core::RouteHint`; advisory and fail-soft — the receiver sanitizes every
+// value (hostile numbers dropped/clamped, over-long override ids dropped) and a
+// hint can only narrow selection over the receiver's configured fleet.
+message RouteHint {
+  TaskMode task_mode = 1;
+  RouteRole role = 2;
+  uint32 min_context = 3;
+  optional float max_cost = 4;
+  PoolTier tier = 5;
+  string override_upstream = 6;
+}
+
 message CompletionRequest {
   repeated Message messages = 1;
   repeated ToolSchema tools = 2;
   uint32 max_tokens = 3;
   float temperature = 4;
+  // Routing signals for a routing provider; absent = today's behaviour.
+  RouteHint route_hint = 5;
 }
 
 message CompletionResponse {
