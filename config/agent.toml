@@ -532,6 +532,16 @@ cooldown_secs       = 30          # how long a breaker stays open before re-prob
 # [route] wholesale; keys stay references (`api_key_ref: "file:~/…"` / `"env:NAME"`).
 # The same file is the `file` store behind `--serve-provider-registry`.
 
+# The provider-registry control plane (model-router 03): the task-router fleet +
+# policy served over gRPC (`agent --serve-provider-registry`, port 50084) — CRUD
+# over upstream cards, PutPolicy, Route introspection ("what would you pick and
+# why"), Health. Cards carry `api_key_ref` REFERENCES (env:NAME / file:/path),
+# never secrets — keys resolve on the host that builds the provider.
+# [registry]
+# store = "file"                      # "file" (default) | "sqlite" | "grpc" | "" (off)
+# file  = ".agent/model-router.textproto"  # file backend; model_router_config wins when set
+# path  = ".agent/model-router.sqlite3"    # sqlite backend (feature registry-sqlite)
+
 # The consensus gate (cognition-graph increment 01): every final answer is generated
 # by `generator` and challenged by `critic` (ideally a DIFFERENT model family) in a
 # bounded revise loop; preference-shaped disagreement is recorded as "Open

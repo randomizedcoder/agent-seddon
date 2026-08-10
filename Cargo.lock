@@ -199,6 +199,7 @@ dependencies = [
  "agent-proto",
  "agent-providers",
  "agent-pty",
+ "agent-registry",
  "agent-retry",
  "agent-sandbox",
  "agent-scanner",

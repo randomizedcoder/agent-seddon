@@ -180,6 +180,11 @@ pub const AST: SeamEndpoint = SeamEndpoint {
     uds_path: "/tmp/agent-seddon/ast.sock",
     metrics_port: 9633,
 };
+pub const PROVIDER_REGISTRY: SeamEndpoint = SeamEndpoint {
+    tcp_port: 50084,
+    uds_path: "/tmp/agent-seddon/provider-registry.sock",
+    metrics_port: 9634,
+};
 
 /// The opt-in `agent --serve-sessions` gateway (not a seam — it hosts the
 /// session registry + a driving `AgentSessionService`).

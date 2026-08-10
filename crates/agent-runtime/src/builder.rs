@@ -1121,6 +1121,13 @@ pub async fn build_agent_with(
         Some(p) => agent.with_prompt_store(p),
         None => agent,
     };
+    // The provider-registry control plane (model-router 03), held for
+    // `--serve-provider-registry`; the loop consumes it in increment 04.
+    #[cfg(feature = "registry")]
+    let agent = match resolve_provider_registry(&cfg, &metrics)? {
+        Some(r) => agent.with_provider_registry(r),
+        None => agent,
+    };
     // Situational system-prompt fragments (docs/design/prompts/): the loop selects
     // and injects the fragments matching the current mode. Rooted at the `prompts`
     // dir — a missing dir ⇒ a no-op resolver ⇒ byte-identical behaviour.
@@ -2017,6 +2024,48 @@ fn route_cfg_from(
         out.cooldown_secs = u64::from(mrc.policy.cooldown_secs);
     }
     Ok(out)
+}
+
+/// Build the `[registry] store` backend (model-router 03) — the provider
+/// registry control plane held for `--serve-provider-registry`, metered so
+/// mutations count and the fleet gauge stays current. `file` (the default)
+/// serves the model-router textproto bundle; when `[agent] model_router_config`
+/// is set, THAT file is served — one file for both the startup loader and the
+/// control plane.
+#[cfg(feature = "registry")]
+fn resolve_provider_registry(
+    cfg: &Config,
+    metrics: &Metrics,
+) -> anyhow::Result<Option<Arc<dyn agent_core::ProviderRegistry>>> {
+    let store: Option<Arc<dyn agent_core::ProviderRegistry>> = match cfg.registry.store.as_str() {
+        "" => None,
+        "file" => {
+            let path = if cfg.agent.model_router_config.is_empty() {
+                expand_tilde(&cfg.registry.file)
+            } else {
+                expand_tilde(&cfg.agent.model_router_config)
+            };
+            Some(Arc::new(agent_registry::FileRegistry::new(path)))
+        }
+        #[cfg(feature = "registry-sqlite")]
+        "sqlite" => Some(Arc::new(agent_registry::SqliteRegistry::open(
+            expand_tilde(&cfg.registry.path),
+        )?)),
+        #[cfg(not(feature = "registry-sqlite"))]
+        "sqlite" => anyhow::bail!(
+            "[registry] store = \"sqlite\" requires building with the `registry-sqlite` feature"
+        ),
+        #[cfg(feature = "grpc")]
+        "grpc" => {
+            let ep = crate::registry::grpc_client_endpoint(
+                &cfg.grpc.provider_registry.endpoint,
+                agent_grpc::constants::PROVIDER_REGISTRY,
+            );
+            Some(Arc::new(agent_grpc::client::GrpcRegistry::connect(&ep)?))
+        }
+        other => anyhow::bail!("unknown [registry] store `{other}`"),
+    };
+    Ok(store.map(|s| crate::metered::registry(s, metrics.clone())))
 }
 
 /// Build the `[graph] store` backend and, for a non-empty document, compile it

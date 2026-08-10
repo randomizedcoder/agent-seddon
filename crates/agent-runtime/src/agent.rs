@@ -100,6 +100,10 @@ pub struct Agent {
     /// (docs/design/portal). Operator/portal-facing — the loop does not consume it;
     /// held only so it can be hosted over gRPC (`agent --serve-prompt`).
     prompt_store: Option<Arc<dyn agent_core::PromptStore>>,
+    /// The provider-registry control plane (model-router 03), held for
+    /// `--serve-provider-registry`; the loop itself does not consume it until
+    /// the registry-backed router (increment 04).
+    provider_registry: Option<Arc<dyn agent_core::ProviderRegistry>>,
     /// Situational system-prompt fragments selected by the current mode
     /// (docs/design/prompts/). Unlike `prompt_store`, the loop **does** consume this:
     /// each turn it selects the fragments whose tags match the situation and injects
@@ -235,6 +239,7 @@ impl Agent {
             task_classifier: None,
             dimension_store: None,
             prompt_store: None,
+            provider_registry: None,
             system_fragments: agent_context::system_fragments::SystemFragments::defaults(),
             metrics_proxy: None,
             review_collector: None,
@@ -522,6 +527,11 @@ impl Agent {
 
     /// Attach the prompt-management store (docs/design/portal), so it can be hosted
     /// over gRPC. Not consumed by the loop.
+    pub fn with_provider_registry(mut self, r: Arc<dyn agent_core::ProviderRegistry>) -> Self {
+        self.provider_registry = Some(r);
+        self
+    }
+
     pub fn with_prompt_store(mut self, p: Arc<dyn agent_core::PromptStore>) -> Self {
         self.prompt_store = Some(p);
         self
@@ -766,6 +776,12 @@ impl Agent {
 
     pub fn prompt_store(&self) -> Option<Arc<dyn agent_core::PromptStore>> {
         self.prompt_store.clone()
+    }
+
+    /// The provider-registry store, if `[registry] store` is configured
+    /// (`--serve-provider-registry`).
+    pub fn provider_registry(&self) -> Option<Arc<dyn agent_core::ProviderRegistry>> {
+        self.provider_registry.clone()
     }
 
     pub fn metrics_proxy(&self) -> Option<Arc<dyn agent_core::MetricsProxy>> {

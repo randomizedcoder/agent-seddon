@@ -71,6 +71,7 @@ let
     ${seamConst "DIGEST" g.digest}
     ${seamConst "GRAPH" g.graph}
     ${seamConst "AST" g.ast}
+    ${seamConst "PROVIDER_REGISTRY" g.provider_registry}
 
     /// The opt-in `agent --serve-sessions` gateway (not a seam — it hosts the
     /// session registry + a driving `AgentSessionService`).

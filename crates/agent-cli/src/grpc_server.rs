@@ -56,6 +56,7 @@ pub enum Seam {
     MetricsProxy,
     Digest,
     Graph,
+    ProviderRegistry,
     SessionStream,
 }
 
@@ -92,6 +93,7 @@ const ALL_SEAMS: &[Seam] = &[
     Seam::MetricsProxy,
     Seam::Digest,
     Seam::Graph,
+    Seam::ProviderRegistry,
     Seam::SessionStream,
 ];
 
@@ -328,6 +330,13 @@ const SEAMS: &[SeamInfo] = &[
         endpoint: constants::GRAPH,
     },
     SeamInfo {
+        seam: Seam::ProviderRegistry,
+        flag: "--serve-provider-registry",
+        name: "provider-registry",
+        service: "agent.v1.ProviderRegistryService",
+        endpoint: constants::PROVIDER_REGISTRY,
+    },
+    SeamInfo {
         seam: Seam::SessionStream,
         flag: "--serve-session-stream",
         name: "session-stream",
@@ -408,6 +417,7 @@ impl Seam {
             Seam::MetricsProxy => &cfg.grpc.metrics_proxy.listen,
             Seam::Digest => &cfg.grpc.digest.listen,
             Seam::Graph => &cfg.grpc.graph.listen,
+            Seam::ProviderRegistry => &cfg.grpc.provider_registry.listen,
             Seam::SessionStream => &cfg.grpc.session_stream.listen,
         }
     }
@@ -646,6 +656,13 @@ fn add_seam_service(
         Seam::Graph => match agent.graph_store() {
             Some(g) => (
                 router.add_service(srv::GraphSvc::new(g).into_server()),
+                true,
+            ),
+            None => (router, false),
+        },
+        Seam::ProviderRegistry => match agent.provider_registry() {
+            Some(r) => (
+                router.add_service(srv::ProviderRegistrySvc::new(r).into_server()),
                 true,
             ),
             None => (router, false),

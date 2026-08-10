@@ -76,6 +76,8 @@ pub struct Metrics {
     route_decisions: IntCounterVec,
     router_decided: IntCounterVec,
     router_no_candidate: IntCounterVec,
+    registry_upstreams: IntGaugeVec,
+    registry_mutations: IntCounterVec,
     gate_verdicts: IntCounterVec,
     gate_rounds: Histogram,
     gate_phase_seconds: HistogramVec,
@@ -383,6 +385,22 @@ impl Metrics {
                 "Task-router requests every upstream was filtered out for, by role",
             ),
             &["role"],
+        )
+        .unwrap();
+        let registry_upstreams = IntGaugeVec::new(
+            Opts::new(
+                "agent_registry_upstreams",
+                "Provider-registry fleet size, by enabled state (model-router 03)",
+            ),
+            &["enabled"],
+        )
+        .unwrap();
+        let registry_mutations = IntCounterVec::new(
+            Opts::new(
+                "agent_registry_mutations_total",
+                "Provider-registry control-plane mutations, by op (put|delete|enable|put_policy)",
+            ),
+            &["op"],
         )
         .unwrap();
         let gate_verdicts = IntCounterVec::new(
@@ -1189,6 +1207,8 @@ impl Metrics {
             Box::new(route_decisions.clone()),
             Box::new(router_decided.clone()),
             Box::new(router_no_candidate.clone()),
+            Box::new(registry_upstreams.clone()),
+            Box::new(registry_mutations.clone()),
             Box::new(gate_verdicts.clone()),
             Box::new(gate_rounds.clone()),
             Box::new(gate_phase_seconds.clone()),
@@ -1327,6 +1347,8 @@ impl Metrics {
             route_decisions,
             router_decided,
             router_no_candidate,
+            registry_upstreams,
+            registry_mutations,
             gate_verdicts,
             gate_rounds,
             gate_phase_seconds,
@@ -1536,6 +1558,21 @@ impl Metrics {
     /// nothing was dialed (distinct from dispatch exhaustion).
     pub fn on_router_no_candidate(&self, role: &str) {
         self.router_no_candidate.with_label_values(&[role]).inc();
+    }
+    /// One provider-registry control-plane mutation (model-router 03). `op` is
+    /// a closed set (`put|delete|enable|put_policy`) — bounded cardinality.
+    pub fn on_registry_mutation(&self, op: &str) {
+        self.registry_mutations.with_label_values(&[op]).inc();
+    }
+    /// The registry fleet size after a mutation (counts are clamped upstream by
+    /// the store's `MAX_REGISTRY_UPSTREAMS` cap, so the cast is safe).
+    pub fn set_registry_upstreams(&self, enabled: usize, disabled: usize) {
+        self.registry_upstreams
+            .with_label_values(&["true"])
+            .set(enabled as i64);
+        self.registry_upstreams
+            .with_label_values(&["false"])
+            .set(disabled as i64);
     }
     /// One completed consensus-gate run. `outcome` is a closed set
     /// (`pass|fixed|alternatives|exhausted|critic_error`); phase times are the wall
