@@ -1,0 +1,160 @@
+// The `ProviderRegistry` seam over gRPC (model-router increment 03): the model
+// router's fleet + routing policy as one proto contract. `ModelRouterConfig` is
+// the whole config as a single message — its textproto rendering is the
+// human-readable config file `agent --model-router-config <file>` loads at
+// startup, and the same messages are served by `ProviderRegistryService`
+// (CRUD + Route introspection + Health) for live/remote management.
+//
+// Security contract:
+//   - `Upstream.api_key_ref` is a kind-prefixed REFERENCE (`env:NAME` or
+//     `file:/path`) — never the secret. Keys resolve on the host that builds
+//     the concrete provider; the registry stores and serves only the reference,
+//     so a compromised registry has no key to exfiltrate.
+//   - Every `id` is untrusted (it may become a storage path segment): the
+//     server validates it (`safe_segment`) and rejects with `InvalidArgument`.
+//   - Every number is clamped on ingest (a remote registry / peer is untrusted).
+syntax = "proto3";
+
+package agent.v1;
+
+import "agent/v1/common.proto"; // TaskMode, PoolTier, RouteRole, RouteHint
+import "agent/v1/llm_pool.proto"; // PoolMemberState
+
+// One routable upstream definition + metadata — the "model card". Mirrors
+// `agent_core::Upstream`. Persisted by the registry stores; `UpstreamHealth`
+// (live state) deliberately lives in a separate, never-persisted message.
+message Upstream {
+  // Identity. `id` is a path-safe segment (server-validated).
+  string id = 1;
+  // "openai-compat" | "anthropic" | "grpc" | "" (resolve `id` as a registered
+  // provider name, like a `[[route.upstreams]]` entry with no endpoint).
+  string kind = 2;
+  bool enabled = 3;
+  // Connection.
+  string base_url = 4;
+  string model = 5;
+  // Kind-prefixed key reference: `env:NAME` or `file:/path` — NEVER the secret.
+  string api_key_ref = 6;
+  bool insecure_tls = 7;
+  string version = 8;
+  uint32 max_retries = 9;
+  // Capabilities (the model card).
+  uint32 context_window = 10;
+  uint32 max_output_tokens = 11;
+  bool supports_tools = 12;
+  bool supports_vision = 13;
+  bool supports_response_format = 14;
+  repeated string tags = 15;
+  // Economics / perf. Costs are per-Mtok hints (clamped non-negative on ingest).
+  float input_cost = 16;
+  float output_cost = 17;
+  PoolTier tier = 18; // UNSPECIFIED ⇒ medium (matches the TOML default)
+  float weight = 19;
+  uint32 max_concurrency = 20;
+}
+
+// Live state of one upstream — runtime-only, NEVER persisted by any store.
+message UpstreamHealth {
+  string id = 1;
+  PoolMemberState state = 2;
+  uint32 in_flight = 3;
+  uint32 latency_ms_ewma = 4;
+  bool saturated = 5;
+  uint32 consecutive_failures = 6;
+}
+
+// RouteHint + RouteRole live in common.proto (02b) — imported, not redefined.
+
+// The `match` half of a rule: present conditions must all hold. Mirrors the
+// `[[route.rules]] match` TOML (02); typed enums here, so a typo'd role/mode is
+// impossible at this layer rather than a startup error.
+message RouteMatch {
+  TaskMode task_mode = 1; // UNSPECIFIED ⇒ any mode
+  RouteRole role = 2; // UNSPECIFIED ⇒ any role
+  uint32 min_context = 3; // 0 ⇒ no context condition
+}
+
+// The `prefer` half: how to order the survivors once a rule matches.
+message RoutePrefer {
+  repeated string tags = 1;
+  PoolTier tier = 2; // UNSPECIFIED ⇒ no tier bias
+  repeated string upstreams = 3; // explicit id order, ahead of the unlisted
+  // Live-signal ordering policy: "" | "cost" | "latency" | "least-loaded".
+  // Validated on ingest; consumed by the registry-backed router (increment 04).
+  string policy = 4;
+}
+
+message RouteRule {
+  RouteMatch match = 1;
+  RoutePrefer prefer = 2;
+}
+
+// The declarative routing policy: ordered rules + the default preference, plus
+// the router-wide breaker settings (0 ⇒ the built-in default).
+message RoutePolicy {
+  repeated RouteRule rules = 1;
+  RoutePrefer default_prefer = 2;
+  uint32 failure_threshold = 3;
+  uint32 cooldown_secs = 4;
+}
+
+// The whole model-router config as ONE message: this is what a `*.textproto`
+// scenario file deserializes into at startup, and what the `file` storage
+// backend reads/writes (one format, hand-edited or control-plane-written).
+message ModelRouterConfig {
+  repeated Upstream upstreams = 1;
+  RoutePolicy policy = 2;
+}
+
+// What the router would pick for a hint, and why — pure introspection.
+message RouteDecision {
+  string chosen = 1; // "" ⇒ no eligible upstream
+  repeated string order = 2; // eligible ids, most-preferred first
+  string rule = 3; // "ruleN" | "default" | "override" (bounded, label-safe)
+  string why = 4; // one human-readable sentence (never config/prompt text)
+}
+
+message UpstreamListRequest {}
+
+message UpstreamList {
+  repeated Upstream upstreams = 1;
+}
+
+message UpstreamRef {
+  string id = 1;
+}
+
+message UpstreamDeleteReply {
+  bool deleted = 1; // false when the id was absent (not an error)
+}
+
+message UpstreamEnableRequest {
+  string id = 1;
+  bool enabled = 2;
+}
+
+message RoutePolicyRef {}
+
+message RouteRequest {
+  RouteHint hint = 1;
+}
+
+message UpstreamHealthRequest {}
+
+message UpstreamHealthList {
+  repeated UpstreamHealth entries = 1;
+}
+
+// The registry control plane (mirrors PromptService / SchedulerService: one
+// process holds the fleet while any number of agents drive it).
+service ProviderRegistryService {
+  rpc List(UpstreamListRequest) returns (UpstreamList);
+  rpc Get(UpstreamRef) returns (Upstream);
+  rpc Put(Upstream) returns (Upstream); // upsert = create + update
+  rpc Delete(UpstreamRef) returns (UpstreamDeleteReply);
+  rpc Enable(UpstreamEnableRequest) returns (Upstream); // toggle without a full Put
+  rpc GetPolicy(RoutePolicyRef) returns (RoutePolicy);
+  rpc PutPolicy(RoutePolicy) returns (RoutePolicy);
+  rpc Route(RouteRequest) returns (RouteDecision); // introspection: no dispatch
+  rpc Health(UpstreamHealthRequest) returns (UpstreamHealthList);
+}
