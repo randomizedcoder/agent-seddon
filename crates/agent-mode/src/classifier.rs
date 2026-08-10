@@ -62,7 +62,14 @@ impl HybridClassifier {
             max_tokens: 4,
             temperature: 0.0,
             response_format: None,
-            route: None,
+            // The per-call role (model-router 04): a routing member (or a
+            // future role-aware pool) steers the vote to Classify-fit models;
+            // a plain member ignores it. The fan-out MECHANISM stays the
+            // pool's (a vote wants N independent answers).
+            route: Some(agent_core::RouteHint {
+                role: Some(agent_core::RouteRole::Classify),
+                ..Default::default()
+            }),
         };
         let results = pool
             .complete_all(req, PoolTier::Light, self.vote_fanout)

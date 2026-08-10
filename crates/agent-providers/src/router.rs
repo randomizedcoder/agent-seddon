@@ -133,7 +133,20 @@ pub enum RouteEvent<'a> {
     /// A request was sent to `target`.
     Routed { target: &'a str },
     /// `from` failed retryably; the router advanced to another candidate.
-    FellOver { from: &'a str, reason: &'a str },
+    FellOver {
+        from: &'a str,
+        /// The next upstream tried (04); `""` for the plain Router (no id order
+        /// beyond the candidate chain) or when nothing is left.
+        to: &'a str,
+        reason: &'a str,
+    },
+    /// One dispatch attempt's outcome, per upstream (model-router 04):
+    /// `ok | retryable | terminal`. Emitted by the task-router only.
+    Dispatched {
+        role: &'a str,
+        upstream: &'a str,
+        outcome: &'a str,
+    },
     /// `target` was skipped because its breaker is open.
     SkippedUnhealthy { target: &'a str },
     /// Every candidate was exhausted.
@@ -280,6 +293,7 @@ impl Router {
                     }
                     if attempt + 1 < order.len() {
                         self.emit(RouteEvent::FellOver {
+                            to: "",
                             from: &c.name,
                             reason: "retryable",
                         });
@@ -570,6 +584,9 @@ mod tests {
             Arc::new(move |ev| {
                 sink.lock().unwrap().push(match ev {
                     RouteEvent::Routed { target } => format!("routed:{target}"),
+                    RouteEvent::Dispatched {
+                        upstream, outcome, ..
+                    } => format!("dispatched:{upstream}:{outcome}"),
                     RouteEvent::FellOver { from, .. } => format!("fellover:{from}"),
                     RouteEvent::SkippedUnhealthy { target } => format!("skipped:{target}"),
                     RouteEvent::Exhausted => "exhausted".into(),

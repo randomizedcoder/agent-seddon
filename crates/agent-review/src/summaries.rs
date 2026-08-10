@@ -169,6 +169,12 @@ async fn summarize(pool: Arc<dyn LlmPool>, job: Job) -> Option<FunctionSummary> 
         messages: vec![Message::system(sys), Message::user(user)],
         max_tokens: 200,
         temperature: 0.0,
+        // The per-call role (model-router 04): a routing member steers review
+        // summaries to Review-fit models; a plain member ignores it.
+        route: Some(agent_core::RouteHint {
+            role: Some(agent_core::RouteRole::Review),
+            ..Default::default()
+        }),
         ..Default::default()
     };
     let started = std::time::Instant::now();

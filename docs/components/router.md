@@ -187,10 +187,28 @@ sizes and counts are capped (`MAX_REGISTRY_UPSTREAMS`, rule/tag caps, a 1 MiB
 textproto cap applied before parsing). All three stores share one `ops` module,
 so validation cannot drift between backends.
 
-In 03 the registry is the control plane only — the router still builds its
-fleet at startup (the loader). [04](../design/model-router/04-registry-backed.md)
-makes the router *consume* the registry live (watch/poll, TOML seeding,
-live-signal ordering).
+**Registry-backed routing** ([04](../design/model-router/04-registry-backed.md)):
+`[route] source = "registry"` swaps the static startup list for the live store —
+the TOML `[route]` fleet *seeds* an empty registry once (idempotent; a
+control-plane edit is never overwritten by a reboot), and a
+`Put`/`Delete`/`Enable`/`PutPolicy` takes effect within
+`[registry] refresh_secs` (0 = per call), no restart. The `RegistryRouter`
+rebuilds its inner router only when the snapshot *fingerprint* changes, reusing
+unchanged cards' provider instances (re-tagging never drops a connection); a
+mid-refresh registry error keeps the last good fleet; hostile or unbuildable
+cards are skipped with a warning, re-validated + re-clamped before any build.
+A raw inline `api_key` refuses to seed (the registry stores references only).
+
+**Live-signal ordering** (04, the 02-deferred `prefer.policy`):
+`cost | latency | least-loaded` breaks ties among equally-preferred survivors
+using the router's own dispatch accounting (an RAII in-flight counter + an
+α=0.3 latency EWMA per upstream) — a *tie-break*, never an override: an
+explicitly preferred upstream still wins regardless of its live numbers, and
+unknown (`0`) values are neutral. Per-upstream dispatch is metered:
+`agent_router_dispatch_total{role,upstream,outcome}` and
+`agent_router_failover_total{from,to,reason}`. The classifier vote and review
+fan-out stamp `classify`/`review` role hints on their requests (the fan-out
+mechanism itself stays the pool's — a vote wants N independent answers).
 
 ## Deferred
 

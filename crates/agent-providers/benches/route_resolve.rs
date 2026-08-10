@@ -38,6 +38,8 @@ fn fleet(n: usize) -> Vec<UpstreamMeta<'static>> {
             healthy: i % 7 != 0, // a few unhealthy, filtered out
             supports_vision: i % 4 == 0,
             supports_tools: true,
+            in_flight: 0,
+            latency_ewma_ms: 0,
         })
         .collect()
 }
@@ -67,6 +69,7 @@ fn policy() -> Policy {
                 tags: vec!["reasoning".into()],
                 tier: Some(PoolTier::Heavy),
                 upstreams: vec![],
+                policy: None,
             },
         })
         .collect();
@@ -76,6 +79,7 @@ fn policy() -> Policy {
             tags: vec!["cheap".into()],
             tier: None,
             upstreams: vec![],
+            policy: None,
         },
     }
 }

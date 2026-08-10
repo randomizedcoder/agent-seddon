@@ -782,6 +782,33 @@ pub fn register_builtins(r: &mut Registry) {
     #[cfg(feature = "provider-router")]
     r.provider("task-router", |ctx| {
         let cfg = &ctx.cfg.route;
+        // Registry-backed mode (model-router 04): the fleet + policy come from
+        // the live [registry] store (seeded from this TOML at boot); cards are
+        // synthesized on demand and a control-plane edit lands within
+        // [registry] refresh_secs. The static path below stays byte-identical
+        // for source = "".
+        #[cfg(feature = "registry")]
+        if cfg.source == "registry" {
+            let store = crate::builder::resolve_provider_registry(ctx.cfg, ctx.metrics)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("[route] source = \"registry\" requires a [registry] store")
+                })?;
+            let metrics = ctx.metrics.clone();
+            let window = ctx.cfg.agent.context_window;
+            let synth: agent_providers::UpstreamSynth =
+                Arc::new(move |card| crate::builder::synth_route_upstream(card, window, &metrics));
+            let obs = ctx.metrics.clone();
+            let router = agent_providers::RegistryRouter::new(store, synth)
+                .with_refresh_ms(ctx.cfg.registry.refresh_secs.saturating_mul(1_000))
+                .with_breaker(
+                    cfg.failure_threshold,
+                    cfg.cooldown_secs.saturating_mul(1_000),
+                )
+                .with_observer(Arc::new(move |ev| {
+                    crate::metered::record_route_event(&obs, ev);
+                }));
+            return Ok(Arc::new(router) as Arc<dyn LlmProvider>);
+        }
         if cfg.upstreams.is_empty() {
             anyhow::bail!(
                 "[route] upstreams must list at least one upstream when \

@@ -13,7 +13,7 @@ leak) and must pass `nix develop -c nix flake check`.
 | 02 | [Task-aware routing](02-routing.md) (routing engine + `TaskRouter` + `[route]` policy) | ✅ | — | ✅ | ✅ | ✅ | ✅ **merged** (PR #229) |
 | 02b | [`RouteHint` threading](02b-hint-threading.md) (hint on the request · task-mode axis · per-call roles · decision metrics) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ **merged** (PR #236) |
 | 03 | [Config + registry control plane](03-registry-proto.md) (textproto bootstrap + `ProviderRegistryService`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ **built** (`feat/model-router-03`) |
-| 04 | [Registry-backed routing](04-registry-backed.md) (consume + seed + live-signal ordering + per-upstream metrics) | ✅ | — | ✅ | ✅ | ✅ | **planned** |
+| 04 | [Registry-backed routing](04-registry-backed.md) (consume + seed + live-signal ordering + per-upstream metrics) | ✅ | — | ✅ | ✅ | ✅ | ✅ **built** (`feat/model-router-04`) |
 
 ## Build order = dependency order
 
@@ -161,6 +161,35 @@ leak) and must pass `nix develop -c nix flake check`.
   src/tests/benches); cached check results had masked it. Removed the six dead
   dep lines (plus `tracing` from the new `agent-registry`, and `prost` moved
   behind `registry-sqlite` where its only use lives).
+- **04 as built** (branch `feat/model-router-04`, stacked on 03): four phases.
+  **Live signals** — `UpstreamMeta` gains `in_flight`/`latency_ewma_ms`; `Prefer` a
+  typed `OrderPolicy` (`cost|latency|least-loaded`) appended to the rank key, so it
+  only separates survivors the explicit preferences left tied and `None`/`0` is
+  neutral (policy-less ordering byte-identical to 02b); the TaskRouter feeds them
+  from its own dispatch (RAII in-flight guard, α=0.3 integer EWMA on success).
+  **RegistryRouter** — a refresh shell around a rebuildable inner TaskRouter:
+  fingerprint-gated rebuilds, per-card provider cache keyed by *connection
+  identity* (re-tagging keeps the client; retired cards drop theirs), bounded
+  refresh (`[registry] refresh_secs`, 0 = per call), mid-refresh error keeps the
+  last good fleet, hostile/unbuildable cards skipped never fatal, cards
+  re-validated + re-clamped before any build. Selected by **`[route] source =
+  "registry"`** (default `""` keeps the static path byte-identical — the spec
+  implied default-on; opt-in was chosen so 02b behavior can't shift under anyone).
+  **Seeding** — TOML `[route]` fills an EMPTY store once (idempotent; control-plane
+  edits never overwritten); a raw inline `api_key` REFUSES to seed (references
+  only, error never echoes). **Per-upstream metrics** —
+  `agent_router_dispatch_total{role,upstream,outcome}` +
+  `agent_router_failover_total{from,to,reason}` via new `RouteEvent::Dispatched` /
+  `FellOver.to`. **Stragglers** — the classifier vote and review fan-out now stamp
+  `Classify`/`Review` role hints on their requests; the fan-out *mechanism* stays
+  the pool's (a vote wants N independent answers) — a routing member is steered,
+  a plain member ignores the stamp. **Deferred from the 04 spec**: the
+  `agent_router_upstream_inflight` gauge (the signal exists internally; exposing
+  it via the event seam adds per-call gauge churn), the escalation hook (nothing
+  consumes it yet), the opt-in eval-judge env unification, runtime synthesis of
+  registered-name/anthropic/grpc cards (endpoint openai-compat only — the synth
+  has no factory-registry access after startup), and snapshot-version span
+  attribution.
 
 ## Cross-cutting invariants (every increment)
 
