@@ -4,12 +4,14 @@
 //! callers/callees, call chains, interface implementations, package dependency paths.
 //! This crate ships [`GoAst`] (feature `ast-go`): a type-aware Go engine that runs
 //! the pinned `agent-go-graph` helper through the `Sandbox` seam and answers those
-//! verbs over its typed output. A SCIP substrate for other languages is a follow-up
-//! (feature `ast-scip`).
+//! verbs over its typed output; [`RustAst`] (feature `ast-rust`): the precise Rust
+//! analogue over charon's MIR; and a SCIP breadth substrate (feature `ast-scip`).
 //!
-//! [`DispatchAst`] composes several named backends into one — routing call-graph
-//! verbs to the first backend that serves them and fanning symbol/implementation
-//! lookups across all of them — exactly as `DispatchSearch` composes search backends.
+//! [`DispatchAst`] composes several named backends into one — fanning
+//! symbol/implementation lookups across all of them, and routing each call-graph verb
+//! to the first backend that actually **resolves the target** (results can't be merged
+//! across engines: symbol ids are per-engine) — exactly as `DispatchSearch` composes
+//! search backends.
 
 use agent_core::{
     AstBackend, AstCallGraph, AstCapabilities, AstVerb, CallPath, Error, IndexState, IndexStatus,
@@ -33,6 +35,20 @@ pub mod model;
 mod go;
 #[cfg(feature = "ast-go")]
 pub use go::GoAst;
+
+#[cfg(feature = "ast-rust")]
+mod rust;
+#[cfg(feature = "ast-rust")]
+pub use rust::RustAst;
+
+/// Lower a charon `.llbc` JSON into the intermediate graph schema — exposed
+/// `#[doc(hidden)]` so the ingest bench (`benches/rust_ingest.rs`) can measure the
+/// charon→graph transform without a `Sandbox`/`charon`. Not a stable API.
+#[cfg(feature = "ast-rust")]
+#[doc(hidden)]
+pub fn lower_llbc(json: &str, root: &std::path::Path) -> Option<serde_json::Value> {
+    rust::lower_llbc(json, root)
+}
 
 #[cfg(feature = "ast-scip")]
 mod scip;
@@ -73,18 +89,55 @@ impl DispatchAst {
             .map(|(_, b)| b)
     }
 
-    /// The first backend advertising `verb`, for routing the single-answer verbs.
-    fn route(&self, verb: AstVerb) -> Result<&Arc<dyn AstBackend>> {
-        self.backends
+    /// Route a call-graph verb to the backend that actually **resolves the target**.
+    ///
+    /// The call-graph verbs are served by more than one engine now (`go` *and*
+    /// `rust`), and their results can't be merged: symbol ids are per-engine, so
+    /// concatenating two graphs would alias unrelated nodes/edges. Instead, try every
+    /// backend advertising `verb` in config order and return the **first non-empty**
+    /// result — a Rust symbol doesn't exist in the Go engine (empty graph) and vice
+    /// versa, so this picks the owning engine without merging. Falls back to the first
+    /// `Ok` (empty) result when no backend resolves the target, and to the first error
+    /// only when every capable backend errors. `None`-serving verbs surface the same
+    /// "no backend serves" error as before.
+    async fn route_first<'a, T, E, F, Fut>(&'a self, verb: AstVerb, is_empty: E, f: F) -> Result<T>
+    where
+        E: Fn(&T) -> bool,
+        F: Fn(&'a Arc<dyn AstBackend>) -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        let capable: Vec<&'a Arc<dyn AstBackend>> = self
+            .backends
             .iter()
-            .find(|(_, b)| b.capabilities().supports(verb))
+            .filter(|(_, b)| b.capabilities().supports(verb))
             .map(|(_, b)| b)
-            .ok_or_else(|| {
-                Error::Ast(format!(
-                    "no configured ast backend serves `{}`",
-                    verb.as_str()
-                ))
-            })
+            .collect();
+        if capable.is_empty() {
+            return Err(Error::Ast(format!(
+                "no configured ast backend serves `{}`",
+                verb.as_str()
+            )));
+        }
+        let mut first_ok: Option<T> = None;
+        let mut first_err: Option<Error> = None;
+        for b in capable {
+            match f(b).await {
+                Ok(v) if !is_empty(&v) => return Ok(v),
+                Ok(v) => {
+                    if first_ok.is_none() {
+                        first_ok = Some(v);
+                    }
+                }
+                Err(e) => {
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                }
+            }
+        }
+        first_ok.ok_or_else(|| {
+            first_err.unwrap_or_else(|| Error::Ast("no ast backends configured".into()))
+        })
     }
 
     /// Fan a symbol-producing lookup across every backend and merge (dedup by
@@ -183,11 +236,21 @@ impl AstBackend for DispatchAst {
     }
 
     async fn callers(&self, target: &SymbolRef, hops: u32) -> Result<AstCallGraph> {
-        self.route(AstVerb::Callers)?.callers(target, hops).await
+        self.route_first(
+            AstVerb::Callers,
+            |g: &AstCallGraph| g.nodes.is_empty(),
+            |b| b.callers(target, hops),
+        )
+        .await
     }
 
     async fn callees(&self, target: &SymbolRef, hops: u32) -> Result<AstCallGraph> {
-        self.route(AstVerb::Callees)?.callees(target, hops).await
+        self.route_first(
+            AstVerb::Callees,
+            |g: &AstCallGraph| g.nodes.is_empty(),
+            |b| b.callees(target, hops),
+        )
+        .await
     }
 
     async fn callchain(
@@ -196,20 +259,25 @@ impl AstBackend for DispatchAst {
         to: &SymbolRef,
         max_paths: u32,
     ) -> Result<Vec<CallPath>> {
-        self.route(AstVerb::Callchain)?
-            .callchain(from, to, max_paths)
-            .await
+        self.route_first(AstVerb::Callchain, Vec::is_empty, |b| {
+            b.callchain(from, to, max_paths)
+        })
+        .await
     }
 
     async fn blast_radius(&self, changed: &[String], hops: u32) -> Result<AstCallGraph> {
-        self.route(AstVerb::BlastRadius)?
-            .blast_radius(changed, hops)
-            .await
+        self.route_first(
+            AstVerb::BlastRadius,
+            |g: &AstCallGraph| g.nodes.is_empty(),
+            |b| b.blast_radius(changed, hops),
+        )
+        .await
     }
 
     async fn dependency_path(&self, from_pkg: &str, to_pkg: &str) -> Result<Vec<String>> {
-        self.route(AstVerb::DependencyPath)?
-            .dependency_path(from_pkg, to_pkg)
-            .await
+        self.route_first(AstVerb::DependencyPath, Vec::is_empty, |b| {
+            b.dependency_path(from_pkg, to_pkg)
+        })
+        .await
     }
 }

@@ -106,6 +106,12 @@ in
   # AstBackend SCIP engine: end-to-end `scip-go` indexing → ingestion → implicit
   # interface-implementation query over a fixture Go module. Offline/hermetic.
   ast-scip = craneCheck ./ast-scip.nix { inherit cargoArtifacts versions; };
+
+  # AstBackend Rust engine: the pinned `charon` MIR extractor resolves both trait
+  # implementations + a precise static call edge over a fixture Rust crate. Offline/
+  # hermetic (charon bundles its nightly toolchain + full-MIR sysroot; std-only
+  # fixture). See docs/components/ast.md.
+  ast-rust = import ./ast-rust.nix { inherit pkgs versions; };
   # Code-style fingerprint coverage: a small Go repo with a deliberate consistent
   # house style; assert the `Code style` section reports the right verdicts. Pure
   # in-process (counting over blobs + commit log); offline, no toolchain.

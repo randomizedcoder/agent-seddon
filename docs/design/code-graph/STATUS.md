@@ -87,3 +87,46 @@ Multi-language structural (AST-pattern) search.
   `Sandbox`; `structural_search` in the config tools list. `ast-grep` pinned in
   `nix/versions.nix` + on the dev-shell PATH (needs `ast-grep` on PATH at runtime).
 - **Not a seam** — stateless structural grep, like the live `grep` tool.
+
+## Increment 04 — `rust` engine (deep, native) via charon — **DONE**
+
+The precise Rust analogue of the Go engine — a typed, dispatch-resolved Rust call
+graph + trait implementations. See [`04-rust-native.md`](04-rust-native.md).
+
+- **Extractor**: `charon` (AeneasVerif MIR extractor, v0.1.232) pinned as a **flake
+  input** (`flake.nix` → `charonPkg` → `nix/versions.nix` `charon`; not in nixpkgs).
+  Bundles its own nightly toolchain + full-MIR sysroot, so it builds a crate fully
+  offline. On the dev-shell + `ast-rust` check PATH.
+- **Engine** (`agent-ast`, feature `ast-rust`): `RustAst` runs `charon cargo --ullbc
+  --no-dedup-serialized-ast` through the `Sandbox`, then **lowers** the `.llbc` JSON
+  (`src/rust.rs`) into the *shared* `Graph` (`Graph::parse_value`, factored out of the
+  Go path) — so all traversal + containment is reused. Extracts symbols, trait
+  implementations (`trait_impls` → Self `TypeDeclId` + `TraitDeclId`), precise static
+  call edges (`func.Regular.kind.Fun.Regular`), and generic trait-bound calls resolved
+  CHA-style (`func.Regular.kind.Trait`). Parses charon JSON defensively as
+  `serde_json::Value` (no `charon_lib` dep). Fail-soft; every verb served.
+- **Dispatch**: `DispatchAst` gained `route_first` — call-graph verbs now route to the
+  first engine that **resolves the target** (not merely serves the verb), since two
+  engines (`go` + `rust`) serve them and per-engine ids can't be merged.
+- **Runtime feature** `ast-rust` (off by default — heavy: full MIR build + Rust
+  toolchain at runtime); `build_ast` `rust` arm (generous charon timeout); `metered::ast`
+  labels it `rust`. `[ast] backends = ["rust", …]`.
+- **Tests / gates**: table-driven `rstest` over a **real** checked-in charon fixture
+  (`tests/fixtures/greeter.ullbc.json`) — implementations, static + CHA edges, receiver
+  disambiguation, the documented `dyn`-dispatch gap (`corner_`), `adversarial_`
+  (garbage/path-escape/hostile), and fake-`Sandbox` fail-soft. Hermetic
+  `nix/checks/ast-rust.nix` (real `charon` on a fixture crate, offline).
+  `benches/rust_ingest.rs` (iai, Ir ceiling 27M; lowering measured ~21.9M) +
+  `tests/leak.rs` Rust-ingest scenario (dhat).
+
+### Implementation notes / deviations
+
+- **`--no-dedup-serialized-ast` is load-bearing.** Without it charon serializes types
+  as hashcons `Deduplicated` indices with no in-file table, so a trait impl's Self type
+  can't be resolved. The flag inlines types (`Adt.id.Adt` = `TypeDeclId`).
+- **`dyn Trait` calls are the one gap.** charon renders them as `func.Dynamic` vtable
+  projections with no cheap trait id; static + generic trait dispatch resolve, pure
+  `dyn` chains don't. Pinned by a `corner_` test + documented in `ast.md`.
+- **No proto/CLI/gRPC changes** — the seam is language-neutral; a new engine needs no
+  wire change (`GrpcAst` / `AstService` serve it unchanged).
+- **No new metrics** — the `metered::ast` decorator is engine-generic (backend label).

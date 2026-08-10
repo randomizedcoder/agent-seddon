@@ -8,10 +8,12 @@ satisfy an interface (implicit in Go), and the package path between two componen
 - **Trait**: `agent_core::AstBackend` (`crates/agent-core/src/lib.rs`)
 - **Impl crate**: `agent-ast` (`crates/agent-ast/`)
 - **Engines**: `go` — `GoAst`, feature `ast-go` (precise, via the pinned
-  `agent-go-graph` helper); `scip` — `ScipAst`, feature `ast-scip` (cross-language
-  symbols/implementations via `.scip` indexes)
-- **Runtime features**: `ast` (Go engine + tools, default), `ast-scip` (SCIP engine,
-  opt-in), `structural-search` (the `ast-grep` tool, default)
+  `agent-go-graph` helper); `rust` — `RustAst`, feature `ast-rust` (precise, via the
+  pinned `charon` MIR extractor); `scip` — `ScipAst`, feature `ast-scip`
+  (cross-language symbols/implementations via `.scip` indexes)
+- **Runtime features**: `ast` (Go engine + tools, default), `ast-rust` (Rust engine,
+  opt-in), `ast-scip` (SCIP engine, opt-in), `structural-search` (the `ast-grep` tool,
+  default)
 - **Tools**: `find_symbol`, `find_implementations`, `find_interface`, `find_callers`,
   `find_callees`, `find_callchain`, `find_changed_callers`, `find_dependency_path`,
   and `structural_search` (ast-grep, orthogonal)
@@ -71,6 +73,44 @@ surfaces as `Error::Ast`, never a panic. The graph is built lazily on first quer
 cached; `reindex` rebuilds it, and `[ast] auto_index` warms it in the background on
 start.
 
+## The Rust engine (`RustAst`)
+
+`RustAst` (feature `ast-rust`, opt-in) is the precise Rust analogue of `GoAst`. It
+runs the pinned **`charon`** MIR extractor (`charon cargo --ullbc
+--no-dedup-serialized-ast`) through the `Sandbox`, then **lowers** charon's `.llbc`
+JSON into the *same* bounded `Graph` the Go helper feeds — so all the traversal verbs
+(`callers`/`callees`/`callchain`/`blast_radius`/`dependency_path`) and the
+`confine`/bound/cap containment are shared, not reimplemented (`Graph::parse_value`).
+
+Rust has no first-party whole-program call-graph tool (unlike Go's `x/tools`), so this
+is built on charon (the AeneasVerif verification project's `rustc` driver), which
+dumps a crate's `type_decls`, `fun_decls` (function bodies with resolved call sites),
+`trait_decls`, and `trait_impls` to a single JSON. One run yields every verb:
+
+- `trait_impls` → **implementations** / **interface_of** (`impl_trait.id` = the trait,
+  the inlined Self type's `TypeDeclId` = the implementing type — including generic and
+  blanket impls).
+- a `Call` terminator's `func.Regular.kind.Fun.Regular` → a **precise static call
+  edge** (the compiler already resolved dispatch).
+- a generic trait-bound call (`func.Regular.kind.Trait = [trait_ref, idx]`) → resolved
+  **CHA-style** to every implementer's method via the `trait_impls` method table.
+
+Because charon works at the MIR level, the call graph is typed, not name-matched.
+charon's JSON is parsed **defensively** as `serde_json::Value` (no `charon_lib`
+dependency), so a schema we don't recognise degrades to fewer edges, never a panic.
+
+**The one honest gap.** A pure `dyn Trait` call is rendered by charon as a vtable
+projection (`func.Dynamic`) with no cheap trait id, so its edge is **not** resolved —
+static and generic (monomorphizable) trait dispatch is; `dyn`-only call chains are the
+documented limitation (a covered corner test pins this).
+
+**Cost, like `GoAst`'s "needs the Go toolchain".** charon does a full **MIR build** of
+the target with its own bundled nightly toolchain: the target must type-check under it
+(else a partial graph + diagnostics — **fail-soft**), it is heavier/slower than SCIP or
+the Go helper, and it needs **`charon` on PATH at runtime**. The charon pin is a flake
+input frozen in `flake.lock`, so its nightly + wire format move only on a deliberate
+bump. Enable with `[ast] backends = ["rust", …]` and raise `[ast] helper_timeout_secs`.
+
 ## The SCIP engine (`ScipAst`, breadth to many languages)
 
 `ScipAst` (feature `ast-scip`, opt-in) serves **symbols / implementations across
@@ -108,7 +148,7 @@ PATH at runtime.
 ## Metrics & tracing
 
 Recorded by the `metered::ast` decorator (one per configured engine, labelled
-`backend` = `go`/`grpc`):
+`backend` = `go`/`rust`/`scip`/`grpc`):
 
 | Metric | Type | Labels |
 |---|---|---|
@@ -138,7 +178,9 @@ loop on another. See [grpc.md](../grpc.md).
    defaults and advertise the served set in `capabilities()`.
 2. Wire it in `agent-runtime/src/ast.rs::build_ast` (it composes named engines into
    one `DispatchAst`, which fans symbol/implementation lookups across engines and
-   routes call-graph verbs to the first engine that serves them).
+   routes each call-graph verb to the first engine that actually **resolves the
+   target** — a Rust symbol isn't in the Go engine and vice versa, and per-engine
+   symbol ids mean the graphs can't be merged, so first-non-empty wins).
 3. Add the backend name to `[ast] backends`.
 
 See [extending.md](../extending.md).
@@ -149,14 +191,22 @@ See [extending.md](../extending.md).
   `crates/agent-ast/src/graph.rs` (`positive_`/`negative_`/`boundary_`/`corner_` +
   mandatory `adversarial_`: path escape, hostile counts, cyclic termination, `hops`
   clamp). Engine fail-soft branches use a fake `Sandbox` in `go.rs`.
+- Rust `.llbc` lowering is table-driven `rstest` in `src/rust.rs` over a **real**
+  checked-in charon fixture (`tests/fixtures/greeter.ullbc.json`): implementations,
+  static + CHA call edges, receiver disambiguation, the `dyn`-dispatch gap
+  (`corner_`), plus `adversarial_` (garbage JSON, path-escape drop, hostile decls) and
+  fake-`Sandbox` engine fail-soft (127 / timeout / nonzero-with-index).
 - SCIP ingestion is table-driven `rstest` over an in-memory `Index`
   (`src/model.rs`), plus a real-output end-to-end test (`tests/scip_e2e.rs`,
   self-skips without `scip-go`).
 - `structural_search` has fake-`Sandbox` tests incl. `adversarial_` shell-injection
   quoting.
 - End-to-end the pinned helpers are gated by hermetic checks: `nix/checks/ast-go.nix`
-  (Go engine — interface, two implicit implementers, a call chain) and
-  `nix/checks/ast-scip.nix` (`scip-go` → ingestion → implementation query); both
-  offline.
-- `benches/ast.rs` (iai-callgrind, Ir ceilings in `nix/checks/bench.nix`) and
-  `tests/leak.rs` (dhat, in `nix/checks/leak.nix`) gate the parse + query hot paths.
+  (Go engine — interface, two implicit implementers, a call chain),
+  `nix/checks/ast-rust.nix` (Rust engine — `charon` on a fixture crate → 2 trait impls
+  + a precise static call edge), and `nix/checks/ast-scip.nix` (`scip-go` → ingestion
+  → implementation query); all offline.
+- `benches/ast.rs` (parse + query verbs) and `benches/rust_ingest.rs` (the charon
+  `.llbc` lowering, feature `ast-rust`) — iai-callgrind, Ir ceilings in
+  `nix/checks/bench.nix`; `tests/leak.rs` (dhat, in `nix/checks/leak.nix`) gates the
+  parse/ingest/query hot paths (incl. the Rust ingest under `ast-rust`).

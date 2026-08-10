@@ -5,7 +5,13 @@
 # Single source of truth — every other module reads from here.
 # Changing a version here propagates to dev shell, build derivations, and checks.
 #
-{ pkgs }:
+{
+  pkgs,
+  # The charon binary (rust AstBackend engine's MIR extractor), injected from the
+  # `charon` flake input via nix/default.nix. `null` when versions.nix is imported
+  # standalone (e.g. ad-hoc tooling) — the `rust` engine's nix pieces guard on it.
+  charonPkg ? null,
+}:
 
 let
   # Per-service gRPC ports + UDS paths (single source of truth). Re-exported here
@@ -128,6 +134,11 @@ in
   # ingests; `rust-analyzer scip` covers Rust (reuses the pin above). Others
   # (scip-typescript/scip-python) are added here when wired.
   scip-go = pkgs.scip-go;
+  # Charon — the MIR extractor behind the `rust` AstBackend engine (precise Rust
+  # call graph + trait implementations). Pinned via the `charon` flake input (not
+  # in nixpkgs), injected as `charonPkg`. `null` when versions.nix is imported
+  # standalone; the devshell + ast-rust check reference it only when non-null.
+  charon = charonPkg;
   # Structural (tree-sitter) pattern search for the `structural_search` tool.
   ast-grep = pkgs.ast-grep;
   # `buf` lints the `.proto` wire contracts and gates wire-compatibility

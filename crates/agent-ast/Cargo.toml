@@ -8,11 +8,19 @@ license.workspace = true
 [features]
 # The Go engine (via the `agent-go-graph` helper) is the default. The SCIP substrate
 # (`ast-scip`) is a breadth engine over `.scip` indexes from scip-go / rust-analyzer /
-# scip-typescript / scip-python. See docs/components/ast.md.
+# scip-typescript / scip-python. The Rust engine (`ast-rust`) is a deep native engine
+# over charon's `.llbc` MIR. See docs/components/ast.md.
 default = ["ast-go"]
 # Type-aware Go code graph: runs the `agent-go-graph` helper through the Sandbox seam
 # and answers call-graph / interface-implementation queries over its typed output.
 ast-go = []
+# Type-aware Rust code graph: runs the pinned `charon` MIR extractor through the
+# Sandbox, lowers its `.llbc` JSON (type decls / function bodies with resolved call
+# sites / trait impls) into the shared `Graph`, and answers every verb — the precise
+# Rust analogue of the Go engine. No new deps: charon's JSON is parsed defensively as
+# `serde_json::Value`, like the go-graph output, so we stay decoupled from charon's
+# internal Rust types. Needs `charon` + a Rust toolchain at runtime.
+ast-rust = []
 # Cross-language symbols / def / implementations via the SCIP index format: runs a
 # per-language indexer (scip-go, rust-analyzer scip, …) through the Sandbox and
 # ingests the resulting `.scip` protobuf. No call edges in SCIP (those route to `go`).
@@ -43,6 +51,12 @@ iai-callgrind.workspace = true
 # Deterministic instruction-count benches for the graph parse + hot query verbs.
 [[bench]]
 name = "ast"
+harness = false
+
+# The Rust engine's charon `.llbc` → graph lowering hot path (feature `ast-rust`;
+# an empty `main` without it). Run with `--features ast-rust`.
+[[bench]]
+name = "rust_ingest"
 harness = false
 
 [lints]
