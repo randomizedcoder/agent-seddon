@@ -107,11 +107,52 @@ registry invoked may call back into it.
 A router listing itself would recurse until the stack blows, so that is rejected
 at build time with a clear message.
 
+## The task-router (`provider = "task-router"`)
+
+The declaratively-routed sibling ([model-router](../design/model-router/README.md)
+increments 02 + 02b): same is-a-`LlmProvider` drop-in, same failover/breaker
+discipline (open breakers are *reordered to the back*, not dropped), but the
+*decision* runs a `[route]` policy — ordered rules matched against each request's
+signals, survivors ordered by tag/tier/explicit preference — over the fleet's
+**live** capability facts (context window, tools, vision read from each provider)
+plus configured metadata (`tags`/`tier`/`input_cost` on `[[route.upstreams]]`).
+
+Since 02b every request carries a **`RouteHint`** (additive on
+`CompletionRequest`, also on the wire): the turn's classified **task mode**
+(stamped by the main loop), the calling **role** (`main` — the loop;
+`summarize` — digest/memory distiller + instant objective; `verify` — the llm
+verifier; `judge` — consensus critic + fork judge; each slot wrapped by a
+`RoleScoped` stamp that never overwrites an explicit per-call hint), an optional
+context floor / cost cap / tier floor, and an `override_upstream`. Rules match
+`role`, `task_mode`, and `min_context`; a typo'd constraint is a **config error
+at startup**, never a silently-match-anything rule.
+
+The hint **narrows, never widens**: tools/vision requirements are derived from
+the request itself (a hostile hint can't clear them), numbers are sanitized at
+wire decode *and* again before resolution, an over-long override id is dropped
+wholesale, and an override can only pick an *already-eligible* upstream. When no
+`min_context` is asserted, a cheap chars/4 estimate stands in as the floor
+filter (fail-soft: an upstream with an unknown window is never filtered out).
+
+Precedence with named-reference role routing (`[digest] provider`,
+`[instant] provider`, graph capability edges): a named pin always wins; an
+unpinned slot routing through the task-router is decided by the policy under the
+slot's role; a pin may itself name `"task-router"` (self-reference inside
+`[route] upstreams` stays rejected).
+
+Decisions are observable: `agent_router_decisions_total{role,task_mode,chosen,
+rule}` (`rule` = matched index or `default` — bounded, never config text),
+`agent_router_no_candidate_total{role}`, and a `route.select` debug event inside
+the metered provider span. The decision hot path is benched
+(`route_resolve`, two cases ~132k/133k Ir, ceiling 330k).
+
 ## Deferred
 
 - **Cost- and latency-based policies.** `in-order` and `round-robin` are
   implemented; cost-minimising routing needs per-candidate price metadata, which
   lives in `agent-tokenizer`'s `PriceTable` and is not yet plumbed to candidates.
+  (For the task-router, live-signal `prefer.policy` ordering is
+  [model-router 04](../design/model-router/04-registry-backed.md).)
 - **Structured provider errors.** Classification is message-based (see above);
   a `status` on `Error::Provider` would make it exact.
 - **Mid-stream failover**, which requires replay semantics the seam does not have.

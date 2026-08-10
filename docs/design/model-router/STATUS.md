@@ -11,7 +11,7 @@ leak) and must pass `nix develop -c nix flake check`.
 | — | Design directory | — | — | — | — | — | ✅ **merged** (PR #229) |
 | 01 | [Rich metadata](01-metadata.md) (context/cost/tags + pool key-file/TLS) | ✅ | — | — | ✅ | ✅ | ✅ **merged** (PR #229) |
 | 02 | [Task-aware routing](02-routing.md) (routing engine + `TaskRouter` + `[route]` policy) | ✅ | — | ✅ | ✅ | ✅ | ✅ **merged** (PR #229) |
-| 02b | [`RouteHint` threading](02b-hint-threading.md) (hint on the request · task-mode axis · per-call roles · decision metrics) | ✅ | ✅ | ✅ | ✅ | ✅ | **planned** |
+| 02b | [`RouteHint` threading](02b-hint-threading.md) (hint on the request · task-mode axis · per-call roles · decision metrics) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ **built** (`feat/model-router-02b`) |
 | 03 | [Config + registry control plane](03-registry-proto.md) (textproto bootstrap + `ProviderRegistryService`) | ✅ | ✅ | ✅ | ✅ | ✅ | **planned** |
 | 04 | [Registry-backed routing](04-registry-backed.md) (consume + seed + live-signal ordering + per-upstream metrics) | ✅ | — | ✅ | ✅ | ✅ | **planned** |
 
@@ -60,6 +60,27 @@ leak) and must pass `nix develop -c nix flake check`.
   route through the `TaskRouter` policy; a reference may itself name `"task-router"`.
 - **Ports fixed for 03**: the `ProviderRegistryService` seam takes **50084** (metrics **9634**) —
   digest/graph/ast took 50081-3/9631-3 while the design was in flight.
+- **02b as built** (branch `feat/model-router-02b`): `RouteRole` lives in `agent-core`
+  (`route::Role` is a re-export); `TaskMode` + `PoolTier` **moved** from
+  mode.proto/llm_pool.proto into common.proto so `RouteHint` avoids an import cycle —
+  same-package, wire/JSON-identical, `buf breaking` (WIRE_JSON) green with **no baseline
+  bump**. `needs_vision`/`needs_tools` are NOT on the core/wire hint at all (always
+  request-derived — stronger than the spec's "derivable"). The spec's **review** role
+  slot is NOT wired: the review fan-out dispatches via `LlmPool::complete_all` (a
+  pool-tier path, like the classifier vote) — both recorded for 04's straggler pass.
+  The digest distiller's no-pin fallback is now Summarize-stamped main provider (a
+  routing main provider steers background distillation). `route.select` ships as a
+  debug event inside the metered provider span rather than a per-call span (same
+  attribution, no span overhead). Strictness tightened beyond the spec: a typo'd
+  `match` role **or** task_mode is a startup config error (the earlier
+  degrade-to-match-any behaviour is gone); `prefer` stays lenient.
+- **02b live-verified** against the runpod endpoints (Kimi + GLM, keys via
+  `api_key_file`): (1) a debug-cue prompt flipped the classifier (`mode.switch
+  other→debug`) and the MAIN turn matched the `task_mode = "debug"` rule —
+  `route.select role=main task_mode=debug rule=rule1 chosen=glm`, overriding the
+  default Kimi preference per call; (2) the background distiller routed by its
+  stamped role with **no named pin** — `route.select role=summarize rule=rule0
+  chosen=glm` inside the `distill.exchange` span while the main turn used Kimi.
 
 ## Cross-cutting invariants (every increment)
 

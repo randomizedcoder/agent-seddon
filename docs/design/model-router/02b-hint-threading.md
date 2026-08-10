@@ -1,6 +1,9 @@
 # 02b — `RouteHint` threading: per-call, task-aware routing end-to-end
 
-Status: **planned** — see [`STATUS.md`](STATUS.md). The follow-on slice [02](02-routing.md)
+Status: ✅ **built** (branch `feat/model-router-02b`) — see the as-built notes in the
+[STATUS](STATUS.md) implementation log (review role → 04 with the classifier; enum moves
+into common.proto; strict-both `match` parsing; `route.select` as a span-scoped debug
+event). The follow-on slice [02](02-routing.md)
 deliberately carved out (its code says so: *"threading the classified task mode, per-call role,
 and explicit override onto the request is a following slice"*). 02 shipped the **engine** —
 `route::Policy::resolve` over `Hint`/`UpstreamMeta` — and a `TaskRouter` whose hint is derived
@@ -101,11 +104,11 @@ provider (stamps `role` + passthrough when `req.route` is `None` — one struct,
 | instant objective/relevance | `Summarize` | builder wraps the `[instant]` provider |
 | verifier (`llm`/`ensemble`) | `Verify` | builder wraps the verifier's provider |
 | consensus critic / fork judge | `Judge` | builder wraps the critic/judge provider |
-| review fan-out | `Review` | review builder wraps its provider |
+| memory episodic distiller | `Summarize` | memory factory wraps its provider |
 
-The classifier vote is **not** in scope: it dispatches through `LlmPool::complete_all` with a
-`PoolTier` (a pool-trait path, not a provider call) — moving it onto hints is
-[04](04-registry-backed.md)'s escalation-hook territory.
+The classifier vote **and the review fan-out** are not in scope: both dispatch through
+`LlmPool::complete_all` with a `PoolTier` (a pool-trait path, not a provider call) — moving
+them onto hints is [04](04-registry-backed.md)'s escalation-hook territory.
 
 ### Composition with named-reference role routing (precedence contract)
 

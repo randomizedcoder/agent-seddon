@@ -7,7 +7,7 @@
 
 use std::hint::black_box;
 
-use agent_core::PoolTier;
+use agent_core::{PoolTier, TaskMode};
 use agent_providers::route::{Hint, Match, Policy, Prefer, Role, Rule, UpstreamMeta};
 use iai_callgrind::{
     library_benchmark, library_benchmark_group, main, Callgrind, EventKind, LibraryBenchmarkConfig,
@@ -92,5 +92,38 @@ fn resolve_50_upstreams_8_rules() -> Vec<String> {
     black_box(p.resolve(black_box(&hint), black_box(&f)))
 }
 
-library_benchmark_group!(name = route_resolve; benchmarks = resolve_50_upstreams_8_rules);
+/// The 02b shape: half the rules also constrain the classified task mode, and the
+/// hint carries one — the added per-rule comparison is the cost under test. The
+/// mode-mismatched Review rules are skipped, so the walk reaches deeper into the
+/// rule list than the role-only bench.
+fn policy_with_modes() -> Policy {
+    let mut p = policy();
+    for (i, r) in p.rules.iter_mut().enumerate() {
+        if i % 2 == 0 {
+            r.match_.task_mode = Some(if i % 4 == 0 {
+                TaskMode::Review
+            } else {
+                TaskMode::Debug
+            });
+        }
+    }
+    p
+}
+
+#[library_benchmark(config = LibraryBenchmarkConfig::default()
+    .tool(Callgrind::default().hard_limits([(EventKind::Ir, 330_000u64)])))]
+fn resolve_with_mode_constrained_rules() -> Vec<String> {
+    let f = fleet(black_box(50));
+    let p = policy_with_modes();
+    let hint = Hint {
+        role: Role::Review,
+        task_mode: Some(TaskMode::Debug),
+        min_context: 16_000,
+        ..Default::default()
+    };
+    black_box(p.resolve(black_box(&hint), black_box(&f)))
+}
+
+library_benchmark_group!(name = route_resolve;
+    benchmarks = resolve_50_upstreams_8_rules, resolve_with_mode_constrained_rules);
 main!(library_benchmark_groups = route_resolve);
