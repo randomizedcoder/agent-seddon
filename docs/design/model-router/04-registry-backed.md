@@ -1,6 +1,9 @@
 # 04 — Registry-backed routing at scale
 
-Status: **planned** — see [`STATUS.md`](STATUS.md). The increment that makes it real: the
+Status: ✅ **built** (branch `feat/model-router-04`) — see [`STATUS.md`](STATUS.md) for
+as-built deviations (opt-in `[route] source = "registry"`, rebuild-on-fingerprint
+architecture, pool-mechanism stragglers, deferred inflight gauge / escalation hook /
+judge-env unification). The increment that makes it real: the
 `TaskRouter` (and the pool) **consume the [03](03-registry-proto.md) registry** as their source
 of truth for 10–50 upstreams, TOML **seeds** the registry at boot, the **live-signal ordering
 policies** (`cost | latency | least-loaded` — carved out of 02 as built) finally land against
