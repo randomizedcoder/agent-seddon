@@ -45,6 +45,11 @@ The seam is **language-neutral**; engines are selected by config string:
   implementations, lowered into the same shared `Graph`. Needs the target to build
   under charon's toolchain + `charon` at runtime; fail-soft. See
   [`04-rust-native.md`](04-rust-native.md).
+- **Increment 5 — `cpp` (C/C++), two layers:** an in-crate `tree-sitter-c`/
+  `tree-sitter-cpp` engine (syntactic call graph + inheritance + `#include` graph, works
+  on any tree with no build) plus the pinned prebuilt `scip-clang` via the SCIP substrate
+  (precise symbols + C++ implementations where a `compile_commands.json` exists). See
+  [`05-cpp-native.md`](05-cpp-native.md).
 
 ## Design specifics
 

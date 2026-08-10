@@ -40,6 +40,7 @@ craneLib.mkCargoDerivation (
       cargo bench -p agent-search --features search-vector --bench vector
       cargo bench -p agent-ast --bench ast
       cargo bench -p agent-ast --features ast-rust --bench rust_ingest
+      cargo bench -p agent-ast --features ast-cpp --bench cpp_ingest
       cargo bench -p agent-session --bench checkpoint
       cargo bench -p agent-reference --bench parse
       cargo bench -p agent-scanner --bench scan

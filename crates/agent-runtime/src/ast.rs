@@ -38,6 +38,17 @@ pub fn build_ast(
                     crate::metered::ast(Arc::new(go), metrics.clone(), "go"),
                 ));
             }
+            #[cfg(feature = "ast-cpp")]
+            "cpp" => {
+                // The C/C++ engine parses the tree in-process with tree-sitter — no
+                // Sandbox, no external tool, no compile DB. Precise C/C++
+                // symbols/implementations come from `scip-clang` via the `scip` engine.
+                let cpp = agent_ast::CppAst::new(root.clone());
+                backends.push((
+                    "cpp".to_string(),
+                    crate::metered::ast(Arc::new(cpp), metrics.clone(), "cpp"),
+                ));
+            }
             #[cfg(feature = "ast-rust")]
             "rust" => {
                 let Some(sandbox) = sandbox else {

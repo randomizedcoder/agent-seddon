@@ -122,6 +122,13 @@ ast-scip = ["ast", "agent-ast/ast-scip"]
 # (heavy — charon does a full MIR build and needs a Rust toolchain at runtime); opt in
 # + set `[ast] backends = ["rust", …]`. See docs/components/ast.md.
 ast-rust = ["ast", "agent-ast/ast-rust"]
+# The syntactic C/C++ engine for the code-graph seam: an in-crate tree-sitter call
+# graph + class-inheritance + `#include` graph. Works on any C/C++ tree with no build /
+# no compile DB (parses in-process — no external tool at runtime). Opt in + set
+# `[ast] backends = ["cpp", …]`; pair with `[ast] scip_langs = ["cpp"]` (scip-clang) for
+# precise symbols/implementations where a compile_commands.json exists. See
+# docs/components/ast.md.
+ast-cpp = ["ast", "agent-ast/ast-cpp"]
 # The `structural_search` tool (ast-grep, via the Sandbox) — multi-language AST-pattern
 # search. Needs `ast-grep` on PATH at runtime. See docs/components/ast.md.
 structural-search = ["agent-tools/tool-structural-search"]

@@ -147,12 +147,16 @@ auto_index = true
 # "go"   — deep native Go engine (agent-go-graph helper)
 # "rust" — deep native Rust engine (charon MIR: precise call graph + trait impls;
 #          needs the ast-rust build + charon & a Rust toolchain at runtime)
+# "cpp"  — syntactic C/C++ engine (in-crate tree-sitter: call graph + inheritance +
+#          #include graph; needs the ast-cpp build; no external tool / no compile DB)
 # "scip" — cross-language symbols/impls breadth engine (needs the ast-scip build)
 # Order = default engine + call-graph routing priority (first that resolves wins).
 backends            = ["go"]
 auto_index          = true
 helper_timeout_secs = 30       # raise for "rust": charon does a full MIR build
-scip_langs          = []       # e.g. ["go", "rust"] — indexers for the "scip" backend
+# indexers for the "scip" backend: go→scip-go, rust→rust-analyzer, cpp→scip-clang
+# (precise C/C++, needs compile_commands.json), typescript/python→scip-*
+scip_langs          = []       # e.g. ["go", "cpp"]
 
 # Cross-session recall (parity spec 20): a tantivy index over the agent's own PAST
 # saved transcripts, exposed as the `session_recall` tool so it can search its

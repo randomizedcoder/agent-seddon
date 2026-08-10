@@ -130,3 +130,44 @@ graph + trait implementations. See [`04-rust-native.md`](04-rust-native.md).
 - **No proto/CLI/gRPC changes** — the seam is language-neutral; a new engine needs no
   wire change (`GrpcAst` / `AstService` serve it unchanged).
 - **No new metrics** — the `metered::ast` decorator is engine-generic (backend label).
+
+## Increment 05 — C/C++ engine (syntactic tree-sitter + precise scip-clang) — **DONE**
+
+C/C++ gets the full verb surface, split across two layers because precise C/C++ needs a
+`compile_commands.json` many repos lack. See [`05-cpp-native.md`](05-cpp-native.md).
+
+- **`cpp` engine** (`agent-ast`, feature `ast-cpp`): `CppAst` parses the tree
+  **in-process** with the pinned `tree-sitter-c`/`tree-sitter-cpp` grammars — no
+  external tool, no build, no compile DB — via a **manual recursive tree walk**
+  (version-stable, not the QueryCursor streaming API). Extracts function/method symbols,
+  name-resolved call edges, C++ class inheritance → `implements`, and the `#include`
+  graph, lowering into the **shared `Graph`** (`Graph::parse_value`). Reads files
+  directly (no `Sandbox`); `walkdir`-enumerated, capped, `confine`d, fail-soft. The call
+  graph is **syntactic** (macros/overloads/virtual-dispatch/fn-pointers unresolved) —
+  the documented limitation, pinned by a `corner_` test.
+- **`scip-clang` layer** (existing `scip` engine): a `"cpp"|"c"|"c++"` arm in
+  `ScipIndexer::builtin` runs the pinned prebuilt `scip-clang` over a
+  `compile_commands.json` → precise symbols + C++ inheritance/override `is_implementation`
+  relations flow into `find_implementations`/`interface_of` with **no ingestion change**
+  (language-agnostic). Pinned as a prebuilt Linux binary (v0.4.0, `fetchurl` +
+  `autoPatchelfHook`; needs `clang` on PATH). Fail-soft when no compile DB is present.
+- **Dispatch**: no change — `DispatchAst` fans symbols across `cpp` + `scip` and merges;
+  `route_first` routes call-graph verbs to `cpp`.
+- **Runtime feature** `ast-cpp` (off by default); `build_ast` `cpp` arm (no `Sandbox`);
+  `metered::ast` labels it `cpp`. `[ast] backends = ["cpp", …]`,
+  `scip_langs = ["cpp"]`.
+- **Tests / gates**: table-driven `rstest` over C/C++ fixtures (all four classes +
+  `adversarial_`); hermetic `nix/checks/ast-cpp.nix` (in-crate test suite) +
+  `ast-scip-cpp.nix` (real `scip-clang` on a C++ fixture, offline). `benches/cpp_ingest.rs`
+  (iai, Ir ceiling 54M; parse+lower measured ~44M) + `tests/leak.rs` cpp scenario (dhat).
+
+### Implementation notes / deviations
+
+- **Manual tree walk, not tree-sitter `Query`.** tree-sitter 0.25's `QueryCursor` uses
+  a streaming-iterator API; a plain recursive descent over `Node` (depth-capped) is
+  version-stable and gives natural enter/leave scoping for the caller/receiver context.
+- **`semcode` rejected as an engine** (the user's suggestion): no bulk call-graph JSON
+  export, experimental/unreleased, unpackaged, LanceDB-stateful. In-crate tree-sitter
+  does the same parsing without the baggage.
+- **`scip-clang` is a prebuilt-binary pin** (not a source build): its release binary is
+  glibc-dynamic, so `autoPatchelfHook` fixes the interpreter/rpath in the store.

@@ -9,11 +9,12 @@ satisfy an interface (implicit in Go), and the package path between two componen
 - **Impl crate**: `agent-ast` (`crates/agent-ast/`)
 - **Engines**: `go` — `GoAst`, feature `ast-go` (precise, via the pinned
   `agent-go-graph` helper); `rust` — `RustAst`, feature `ast-rust` (precise, via the
-  pinned `charon` MIR extractor); `scip` — `ScipAst`, feature `ast-scip`
-  (cross-language symbols/implementations via `.scip` indexes)
+  pinned `charon` MIR extractor); `cpp` — `CppAst`, feature `ast-cpp` (syntactic C/C++,
+  in-crate tree-sitter); `scip` — `ScipAst`, feature `ast-scip` (cross-language
+  symbols/implementations via `.scip` indexes, incl. `scip-clang` for precise C/C++)
 - **Runtime features**: `ast` (Go engine + tools, default), `ast-rust` (Rust engine,
-  opt-in), `ast-scip` (SCIP engine, opt-in), `structural-search` (the `ast-grep` tool,
-  default)
+  opt-in), `ast-cpp` (C/C++ engine, opt-in), `ast-scip` (SCIP engine, opt-in),
+  `structural-search` (the `ast-grep` tool, default)
 - **Tools**: `find_symbol`, `find_implementations`, `find_interface`, `find_callers`,
   `find_callees`, `find_callchain`, `find_changed_callers`, `find_dependency_path`,
   and `structural_search` (ast-grep, orthogonal)
@@ -111,12 +112,46 @@ the Go helper, and it needs **`charon` on PATH at runtime**. The charon pin is a
 input frozen in `flake.lock`, so its nightly + wire format move only on a deliberate
 bump. Enable with `[ast] backends = ["rust", …]` and raise `[ast] helper_timeout_secs`.
 
+## The C/C++ engine (`CppAst`)
+
+`CppAst` (feature `ast-cpp`, opt-in) is the odd one out: it parses the tree
+**in-process** with the pinned `tree-sitter-c` / `tree-sitter-cpp` grammars — **no
+external tool, no build, no `compile_commands.json`** — and lowers into the same shared
+`Graph`. It walks the source tree (`walkdir`, capped, `confine`d), and per file extracts:
+
+- `function_definition` → **function / method symbols** (`static` ⇒ not exported;
+  method receiver = the enclosing `class`/`struct`).
+- `call_expression` → **call edges** (caller = enclosing function; callee resolved by
+  name), for `find_callers`/`callees`/`callchain`/`find_changed_callers`.
+- `class_specifier` base clauses → **inheritance** → `implements` edges, so
+  `find_implementations(Base)` returns subclasses and `find_interface(Derived)` the bases.
+- `preproc_include` → the **`#include` graph** for `find_dependency_path`.
+
+**The honest limitation.** Because it is purely syntactic, the call graph is
+**name-resolved**: a call to `foo` links to *every* function named `foo` (capped),
+macros are opaque, and C++ overloads / virtual dispatch / templates / function pointers
+are not resolved. `find_symbol`, class inheritance, and the `#include` graph are
+reliable; the *precise* C/C++ symbols/implementations come from the `scip-clang` layer
+below (where a compile DB exists). This is the same tree-sitter parsing tools like
+`semcode` do, but in-crate — no external process at runtime. Fail-soft: an
+unreadable/oversized/non-UTF-8 file is skipped, never a panic. Enable with
+`[ast] backends = ["cpp", …]`.
+
+**Precise C/C++ via `scip-clang`.** Add `"cpp"` to `[ast] scip_langs` (with the `scip`
+backend + `ast-scip` build) to run the pinned **`scip-clang`** — a precise Clang-based
+SCIP indexer — over a `compile_commands.json`. Its symbols + C++ inheritance/override
+`is_implementation` relations flow into `find_implementations`/`interface_of` through
+the SCIP substrate unchanged, and `DispatchAst` merges them with the tree-sitter
+symbols. `scip-clang` **needs a `compile_commands.json`** (CMake/Bazel/Meson/`bear`) and
+`clang` on PATH (for its resource dir); absent a compile DB it fail-soft-skips, leaving
+the tree-sitter `cpp` engine as the always-available layer.
+
 ## The SCIP engine (`ScipAst`, breadth to many languages)
 
 `ScipAst` (feature `ast-scip`, opt-in) serves **symbols / implementations across
 languages** through the SCIP index format. It runs a per-language indexer via the
-`Sandbox` — `scip-go`, `rust-analyzer scip`, `scip-typescript`, `scip-python`
-(`ScipIndexer::builtin`) — reads the produced `.scip` protobuf, and folds it into the
+`Sandbox` — `scip-go`, `rust-analyzer scip`, `scip-clang` (C/C++), `scip-typescript`,
+`scip-python` (`ScipIndexer::builtin`) — reads the produced `.scip` protobuf, folds it into the
 shared `SymbolModel`: each `SymbolInformation` becomes a symbol; each SCIP
 `Relationship { is_implementation }` becomes an implementation edge (which is how it
 answers `find_implementations` for interfaces, even implicit ones, in any indexed
@@ -148,7 +183,7 @@ PATH at runtime.
 ## Metrics & tracing
 
 Recorded by the `metered::ast` decorator (one per configured engine, labelled
-`backend` = `go`/`rust`/`scip`/`grpc`):
+`backend` = `go`/`rust`/`cpp`/`scip`/`grpc`):
 
 | Metric | Type | Labels |
 |---|---|---|
