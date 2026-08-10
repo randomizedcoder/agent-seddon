@@ -258,6 +258,7 @@ fn core_req() -> CompletionRequest {
         max_tokens: 8,
         temperature: 0.0,
         response_format: None,
+        route: None,
     }
 }
 

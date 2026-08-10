@@ -94,6 +94,7 @@ fn req() -> pb::PoolCompleteRequest {
             max_tokens: 8,
             temperature: 0.0,
             response_format: None,
+            route: None,
         })),
         tier: pb::PoolTier::from(PoolTier::Light) as i32,
         fanout: 3,

@@ -350,6 +350,7 @@ impl BranchingProvider {
             max_tokens: self.cfg.judge_max_tokens,
             temperature: 0.0,
             response_format: None,
+            route: None,
         };
         let resp = self.judge_provider().complete(req).await.ok()?;
         parse_judge(&resp.message.content_text(), order.len())
@@ -384,6 +385,7 @@ impl BranchingProvider {
             max_tokens: self.cfg.judge_max_tokens,
             temperature: 0.0,
             response_format: None,
+            route: None,
         };
         let resp = self.judge_provider().complete(req).await.ok()?;
         (!resp.message.content_text().trim().is_empty()).then_some(resp)
@@ -762,6 +764,7 @@ mod tests {
             max_tokens: 256,
             temperature: 0.0,
             response_format: None,
+            route: None,
         }
     }
 

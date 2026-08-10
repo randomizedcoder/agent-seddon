@@ -143,6 +143,7 @@ impl SummarizingWindow {
             max_tokens: self.summary_max_tokens,
             temperature: 0.0,
             response_format: None,
+            route: None,
         };
         let resp = self.summarizer.complete(req).await?;
         Ok(resp.message.content_text())

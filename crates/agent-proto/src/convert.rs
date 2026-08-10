@@ -471,6 +471,7 @@ impl TryFrom<pb::CompletionRequest> for agent_core::CompletionRequest {
             // `response_format` is not yet on the wire — the Validator gRPC service
             // + proto field are a documented follow-up (parity spec 16).
             response_format: None,
+            route: None,
         })
     }
 }
@@ -4234,6 +4235,7 @@ mod tests {
             max_tokens: 256,
             temperature: 0.5,
             response_format: None,
+            route: None,
         };
         let p1 = pb::CompletionRequest::from(core);
         let back = agent_core::CompletionRequest::try_from(p1.clone()).unwrap();

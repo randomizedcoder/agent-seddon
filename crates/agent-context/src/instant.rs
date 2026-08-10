@@ -154,6 +154,7 @@ impl InstantWindow {
             max_tokens: self.cfg.objective_max_tokens,
             temperature: 0.0,
             response_format: None,
+            route: None,
         };
         match self.provider.complete(req).await {
             Ok(r) => {
@@ -204,6 +205,7 @@ impl InstantWindow {
             max_tokens: 128,
             temperature: 0.0,
             response_format: None,
+            route: None,
         };
         let Ok(resp) = self.provider.complete(req).await else {
             return keyword_kept; // fail-soft: keyword survivors

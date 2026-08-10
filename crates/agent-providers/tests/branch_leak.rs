@@ -77,6 +77,7 @@ async fn fork_cancel_cycle_does_not_leak() {
         max_tokens: 64,
         temperature: 0.0,
         response_format: None,
+        route: None,
     };
 
     // Warm-up: runtime/task-queue scratch counts as baseline, not growth.

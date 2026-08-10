@@ -380,6 +380,7 @@ mod tests {
             max_tokens: 16,
             temperature: 0.0,
             response_format: None,
+            route: None,
         }
     }
 

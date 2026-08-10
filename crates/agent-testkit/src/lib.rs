@@ -911,6 +911,7 @@ mod tests {
             max_tokens: 10,
             temperature: 0.0,
             response_format: None,
+            route: None,
         };
         // turn 0: tool call
         let r0 = p.complete(req.clone()).await.unwrap();

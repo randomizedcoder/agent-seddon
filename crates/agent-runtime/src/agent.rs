@@ -960,6 +960,7 @@ impl Agent {
                 // The main loop uses free-text completions; structured output is a
                 // separate helper path (parity spec 16).
                 response_format: None,
+                route: None,
             };
 
             let call_start = Instant::now();

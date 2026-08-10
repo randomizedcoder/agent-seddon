@@ -195,6 +195,7 @@ impl SemanticStore for FileSemantic {
             max_tokens: 1024,
             temperature: 0.0,
             response_format: None,
+            route: None,
         };
         let resp = provider
             .complete(req)

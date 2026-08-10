@@ -266,6 +266,7 @@ impl ConsensusProvider {
             max_tokens: self.cfg.critic_max_tokens,
             temperature: 0.0,
             response_format: None,
+            route: None,
         };
         let resp = self.critic.complete(req).await.ok()?;
         parse_verdict(
@@ -643,6 +644,7 @@ mod tests {
             max_tokens: 64,
             temperature: 0.0,
             response_format: None,
+            route: None,
         }
     }
 

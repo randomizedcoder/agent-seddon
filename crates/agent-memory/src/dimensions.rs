@@ -128,6 +128,7 @@ impl FileDimensions {
                 strict: true,
                 name: Some("dimension_step".into()),
             }),
+            route: None,
         };
         // Providers that can't constrain natively get the schema in the prompt.
         if !provider.capabilities().supports_response_format {
@@ -244,6 +245,7 @@ impl FileDimensions {
             max_tokens: 1024,
             temperature: 0.0,
             response_format: None,
+            route: None,
         };
         let out = match provider.complete(req).await {
             Ok(resp) => resp.message.content_text(),

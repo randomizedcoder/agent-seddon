@@ -100,6 +100,102 @@ pub struct CompletionRequest {
     /// otherwise the structured helper injects the schema into the prompt. `None`
     /// ⇒ today's free-text behaviour, unchanged.
     pub response_format: Option<ResponseFormat>,
+    /// Per-request routing signals for a routing provider (`task-router`); every
+    /// other provider ignores it. `None` ⇒ exactly today's behaviour
+    /// (model-router increment 02b). The hint can only *narrow* selection over
+    /// the configured fleet — capability requirements (tools/vision) are derived
+    /// from the request itself, never asserted or cleared by the hint.
+    pub route: Option<RouteHint>,
+}
+
+/// The upper bound a [`RouteHint::min_context`] is clamped to — generous beyond
+/// any real window today, but finite so a hostile `u32::MAX` can't masquerade as
+/// a plausible requirement in logs/metrics (selection itself fails soft either way).
+pub const MAX_ROUTE_MIN_CONTEXT: u32 = 2_000_000;
+/// Longest `override_upstream` id considered at all; anything longer is dropped
+/// wholesale before comparison (fleet ids are short; an over-long value is hostile).
+pub const MAX_ROUTE_OVERRIDE_LEN: usize = 128;
+
+/// The internal call-site a request originates from — one of the routing signals
+/// a `[[route.rules]]` entry can match on, so each subsystem is steerable to a
+/// fit-for-purpose model (model-router increment 02b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RouteRole {
+    #[default]
+    Main,
+    Judge,
+    Classify,
+    Summarize,
+    Verify,
+    Review,
+}
+
+impl RouteRole {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RouteRole::Main => "main",
+            RouteRole::Judge => "judge",
+            RouteRole::Classify => "classify",
+            RouteRole::Summarize => "summarize",
+            RouteRole::Verify => "verify",
+            RouteRole::Review => "review",
+        }
+    }
+    /// Parse a config role name; unknown / empty ⇒ `None` (callers decide whether
+    /// that means "any role" (a rule) or an error (a typo'd config)).
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s.trim().to_ascii_lowercase().as_str() {
+            "main" => RouteRole::Main,
+            "judge" => RouteRole::Judge,
+            "classify" => RouteRole::Classify,
+            "summarize" => RouteRole::Summarize,
+            "verify" => RouteRole::Verify,
+            "review" => RouteRole::Review,
+            _ => return None,
+        })
+    }
+}
+
+/// Per-request routing signals carried on a [`CompletionRequest`] (model-router
+/// increment 02b). Every field is a *filter or preference* over the
+/// already-configured fleet — a hostile hint (the model is untrusted, and so is
+/// a gRPC peer) can at worst re-order or shed within it, never widen it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RouteHint {
+    /// The classified task mode (from `session.current_mode`).
+    pub task_mode: Option<TaskMode>,
+    /// Which internal subsystem is asking; `None` ⇒ the router's own default.
+    pub role: Option<RouteRole>,
+    /// Minimum context window the request needs; `0` = unset ⇒ the router derives
+    /// a cheap estimate. A floor *filter* only — fail-soft.
+    pub min_context: u32,
+    /// Per-Mtok input-cost ceiling; `None` = no cap.
+    pub max_cost: Option<f32>,
+    /// Tier floor; `None` = any tier.
+    pub tier: Option<PoolTier>,
+    /// An explicit upstream id that wins *when eligible* — it can never select an
+    /// upstream the hard filter rejected.
+    pub override_upstream: Option<String>,
+}
+
+impl RouteHint {
+    /// Clamp/drop hostile values in place: NaN/negative/infinite `max_cost` ⇒
+    /// `None`, `min_context` capped to [`MAX_ROUTE_MIN_CONTEXT`], an over-long
+    /// `override_upstream` dropped wholesale. Applied at wire decode AND again
+    /// before resolution (defense in depth — the request is attacker-controlled).
+    pub fn sanitize(&mut self) {
+        if self.max_cost.is_some_and(|c| !c.is_finite() || c < 0.0) {
+            self.max_cost = None;
+        }
+        self.min_context = self.min_context.min(MAX_ROUTE_MIN_CONTEXT);
+        if self
+            .override_upstream
+            .as_ref()
+            .is_some_and(|o| o.len() > MAX_ROUTE_OVERRIDE_LEN || o.is_empty())
+        {
+            self.override_upstream = None;
+        }
+    }
 }
 
 /// A JSON-schema contract attached to a [`CompletionRequest`].
@@ -4856,6 +4952,7 @@ mod tests {
             max_tokens: 10,
             temperature: 0.0,
             response_format: None,
+            route: None,
         };
         let mut s = provider.stream(req).await.unwrap();
         let (mut text, mut calls, mut got_finish, mut got_usage) =
@@ -5263,5 +5360,75 @@ mod tests {
         ] {
             assert_eq!(GraphIssueCode::parse(code.as_str()), Some(code));
         }
+    }
+
+    // Route roles round-trip (they become wire enums + metric labels in 02b);
+    // parse is forgiving on case/padding, closed on anything else.
+    #[rstest]
+    #[case::main(RouteRole::Main, "main")]
+    #[case::judge(RouteRole::Judge, "judge")]
+    #[case::classify(RouteRole::Classify, "classify")]
+    #[case::summarize(RouteRole::Summarize, "summarize")]
+    #[case::verify(RouteRole::Verify, "verify")]
+    #[case::review(RouteRole::Review, "review")]
+    fn positive_route_role_roundtrips(#[case] role: RouteRole, #[case] s: &str) {
+        assert_eq!(role.as_str(), s);
+        assert_eq!(RouteRole::parse(s), Some(role));
+        assert_eq!(RouteRole::parse(&s.to_ascii_uppercase()), Some(role));
+    }
+
+    #[rstest]
+    #[case::unknown("orchestrator")]
+    #[case::empty("")]
+    #[case::traversal("../judge")]
+    fn negative_route_role_unknown_rejected(#[case] s: &str) {
+        assert_eq!(RouteRole::parse(s), None);
+    }
+
+    #[rstest]
+    #[case::untouched_default(RouteHint::default(), RouteHint::default())]
+    #[case::valid_cost_kept(
+        RouteHint { max_cost: Some(2.5), ..Default::default() },
+        RouteHint { max_cost: Some(2.5), ..Default::default() },
+    )]
+    #[case::boundary_zero_cost_kept(
+        RouteHint { max_cost: Some(0.0), ..Default::default() },
+        RouteHint { max_cost: Some(0.0), ..Default::default() },
+    )]
+    #[case::boundary_min_context_at_cap(
+        RouteHint { min_context: MAX_ROUTE_MIN_CONTEXT, ..Default::default() },
+        RouteHint { min_context: MAX_ROUTE_MIN_CONTEXT, ..Default::default() },
+    )]
+    #[case::adversarial_nan_cost_dropped(
+        RouteHint { max_cost: Some(f32::NAN), ..Default::default() },
+        RouteHint::default(),
+    )]
+    #[case::adversarial_negative_cost_dropped(
+        RouteHint { max_cost: Some(-1.0), ..Default::default() },
+        RouteHint::default(),
+    )]
+    #[case::adversarial_inf_cost_dropped(
+        RouteHint { max_cost: Some(f32::INFINITY), ..Default::default() },
+        RouteHint::default(),
+    )]
+    #[case::adversarial_huge_min_context_clamped(
+        RouteHint { min_context: u32::MAX, ..Default::default() },
+        RouteHint { min_context: MAX_ROUTE_MIN_CONTEXT, ..Default::default() },
+    )]
+    #[case::adversarial_overlong_override_dropped(
+        RouteHint { override_upstream: Some("x".repeat(MAX_ROUTE_OVERRIDE_LEN + 1)), ..Default::default() },
+        RouteHint::default(),
+    )]
+    #[case::corner_empty_override_dropped(
+        RouteHint { override_upstream: Some(String::new()), ..Default::default() },
+        RouteHint::default(),
+    )]
+    #[case::boundary_override_at_cap_kept(
+        RouteHint { override_upstream: Some("x".repeat(MAX_ROUTE_OVERRIDE_LEN)), ..Default::default() },
+        RouteHint { override_upstream: Some("x".repeat(MAX_ROUTE_OVERRIDE_LEN)), ..Default::default() },
+    )]
+    fn route_hint_sanitize(#[case] mut hint: RouteHint, #[case] expect: RouteHint) {
+        hint.sanitize();
+        assert_eq!(hint, expect);
     }
 }

@@ -63,6 +63,7 @@ async fn provider_complete(#[case] transport: Transport) {
         max_tokens: 16,
         temperature: 0.0,
         response_format: None,
+        route: None,
     };
     let resp = client.complete(req).await.unwrap();
     assert_eq!(resp.message.content_text(), "hello from gateway");
@@ -124,6 +125,7 @@ async fn message_blocks_roundtrip(#[case] transport: Transport, #[case] with_ima
             max_tokens: 16,
             temperature: 0.0,
             response_format: None,
+            route: None,
         })
         .await
         .unwrap();
@@ -239,6 +241,7 @@ async fn complete_via(faulty: FaultyProvider) -> (std::result::Result<String, St
             max_tokens: 16,
             temperature: 0.0,
             response_format: None,
+            route: None,
         })
         .await
         .map(|r| r.message.content_text())
@@ -308,6 +311,7 @@ async fn provider_stream(#[case] transport: Transport) {
         max_tokens: 16,
         temperature: 0.0,
         response_format: None,
+        route: None,
     };
     let mut stream = client.stream(req).await.unwrap();
     let mut text = String::new();
