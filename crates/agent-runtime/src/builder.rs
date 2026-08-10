@@ -60,6 +60,9 @@ pub async fn build_agent_with(
     // file is a startup error — fail closed, never a partially-loaded fleet.
     #[cfg(feature = "registry")]
     apply_model_router_config(&mut cfg)?;
+    // Opt-in judge-env bridge (after the textproto replace, so the appended
+    // upstream+rule survive it and also reach registry seeding below).
+    apply_judge_env(&mut cfg)?;
     // Registry-backed routing (model-router 04): with `[route] source =
     // "registry"`, the TOML fleet SEEDS the store once (empty store only) and
     // the task-router factory below builds the live-refreshing router.
@@ -1946,7 +1949,99 @@ pub(crate) fn apply_model_router_config(cfg: &mut Config) -> anyhow::Result<()> 
              the loaded fleet only routes through the task-router"
         );
     }
+    // `judge_from_env` is a deployment-local knob, not fleet config — the
+    // textproto has no say in it, so the wholesale replace preserves it.
+    let judge_from_env = cfg.route.judge_from_env;
     cfg.route = route_cfg_from(&mrc, &path)?;
+    cfg.route.judge_from_env = judge_from_env;
+    Ok(())
+}
+
+/// Opt-in judge-env unification (model-router 04 tail): map the eval harnesses'
+/// `AGENT_E2E_JUDGE_*` convention onto a routed `judge-env` upstream plus a
+/// **lowest-precedence** `role = "judge"` rule (appended last — the first
+/// matching rule wins, so explicit TOML rules keep beating it). The harnesses
+/// themselves keep reading the env directly; this only lets an agent under the
+/// same env reach the same judge through the route table.
+pub(crate) fn apply_judge_env(cfg: &mut Config) -> anyhow::Result<()> {
+    apply_judge_env_with(cfg, &|name| std::env::var(name).ok())
+}
+
+/// The env lookup is injected so tests never depend on ambient process env.
+fn apply_judge_env_with(
+    cfg: &mut Config,
+    get: &dyn Fn(&str) -> Option<String>,
+) -> anyhow::Result<()> {
+    if !cfg.route.judge_from_env {
+        return Ok(());
+    }
+    let base_url = get("AGENT_E2E_JUDGE_BASE_URL")
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if base_url.is_empty() {
+        // The knob may be baked into a config that also runs outside a harness:
+        // no env, no bridge — the judge role falls back to the normal policy.
+        tracing::warn!(
+            "[route] judge_from_env is on but AGENT_E2E_JUDGE_BASE_URL is unset — skipping"
+        );
+        return Ok(());
+    }
+    // The env is operator-controlled, but a garbled value is still a config
+    // error — fail closed rather than build an upstream that can't dial.
+    if base_url.len() > agent_core::MAX_UPSTREAM_URL_LEN {
+        anyhow::bail!(
+            "AGENT_E2E_JUDGE_BASE_URL is longer than {} bytes",
+            agent_core::MAX_UPSTREAM_URL_LEN
+        );
+    }
+    if base_url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        anyhow::bail!("AGENT_E2E_JUDGE_BASE_URL contains whitespace or control characters");
+    }
+    if cfg.route.upstreams.iter().any(|u| u.name == "judge-env") {
+        tracing::warn!(
+            "[route] upstreams already defines `judge-env` — keeping the explicit entry"
+        );
+        return Ok(());
+    }
+    let api_key_file = get("AGENT_E2E_JUDGE_API_KEY_FILE")
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if api_key_file.len() > agent_core::MAX_API_KEY_REF_LEN {
+        anyhow::bail!(
+            "AGENT_E2E_JUDGE_API_KEY_FILE is longer than {} bytes",
+            agent_core::MAX_API_KEY_REF_LEN
+        );
+    }
+    let model = get("AGENT_E2E_JUDGE_MODEL")
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty())
+        // The harness default (a litellm/vLLM proxy serves its one model as `/model`).
+        .unwrap_or_else(|| "/model".to_string());
+    let insecure_tls = get("AGENT_E2E_JUDGE_INSECURE_TLS")
+        .map(|v| matches!(v.trim(), "1" | "true"))
+        .unwrap_or(false);
+    cfg.route.upstreams.push(crate::config::RouteUpstreamCfg {
+        name: "judge-env".into(),
+        endpoint: base_url,
+        model,
+        api_key_file,
+        insecure_tls,
+        tags: vec!["judge".into()],
+        ..Default::default()
+    });
+    cfg.route.rules.push(crate::config::RouteRuleCfg {
+        match_: crate::config::RouteMatchCfg {
+            role: "judge".into(),
+            ..Default::default()
+        },
+        prefer: crate::config::RoutePreferCfg {
+            upstreams: vec!["judge-env".into()],
+            ..Default::default()
+        },
+    });
+    tracing::info!("judge-env upstream bridged from AGENT_E2E_JUDGE_* (opt-in judge_from_env)");
     Ok(())
 }
 
@@ -3058,6 +3153,154 @@ mod seam_builder_tests {
     }
 }
 
+// The opt-in judge-env bridge (model-router 04 tail): `AGENT_E2E_JUDGE_*` →
+// a routed `judge-env` upstream + a lowest-precedence judge rule. The env
+// lookup is a closure over a table, never the ambient process env.
+#[cfg(test)]
+mod judge_env_tests {
+    use super::*;
+    use rstest::rstest;
+
+    fn lookup(pairs: &[(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+        let pairs = pairs.to_vec();
+        move |name: &str| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| (*v).to_string())
+        }
+    }
+
+    fn cfg_with_knob(on: bool) -> crate::config::Config {
+        let mut cfg = crate::config::Config::minimal_for_test();
+        cfg.route.judge_from_env = on;
+        cfg
+    }
+
+    #[test]
+    fn positive_appends_upstream_and_lowest_precedence_rule() {
+        let mut cfg = cfg_with_knob(true);
+        cfg.route.rules.push(crate::config::RouteRuleCfg::default());
+        let env = [
+            ("AGENT_E2E_JUDGE_BASE_URL", "https://judge.example/v1"),
+            ("AGENT_E2E_JUDGE_MODEL", "glm-5.2"),
+            ("AGENT_E2E_JUDGE_API_KEY_FILE", "~/keys/judge"),
+            ("AGENT_E2E_JUDGE_INSECURE_TLS", "1"),
+        ];
+        apply_judge_env_with(&mut cfg, &lookup(&env)).expect("bridges");
+        let u = cfg.route.upstreams.last().expect("appended");
+        assert_eq!(u.name, "judge-env");
+        assert_eq!(u.endpoint, "https://judge.example/v1");
+        assert_eq!(u.model, "glm-5.2");
+        assert_eq!(u.api_key_file, "~/keys/judge");
+        assert!(u.api_key.is_empty(), "never a raw key");
+        assert!(u.insecure_tls);
+        assert_eq!(u.tags, vec!["judge"]);
+        // Appended LAST: the pre-existing rule keeps first-match precedence.
+        assert_eq!(cfg.route.rules.len(), 2);
+        let r = cfg.route.rules.last().unwrap();
+        assert_eq!(r.match_.role, "judge");
+        assert_eq!(r.prefer.upstreams, vec!["judge-env"]);
+    }
+
+    #[test]
+    fn positive_model_defaults_to_the_harness_convention() {
+        let mut cfg = cfg_with_knob(true);
+        let env = [("AGENT_E2E_JUDGE_BASE_URL", "https://j.example/v1")];
+        apply_judge_env_with(&mut cfg, &lookup(&env)).expect("bridges");
+        let u = cfg.route.upstreams.last().unwrap();
+        assert_eq!(u.model, "/model");
+        assert!(!u.insecure_tls, "TLS verification stays on by default");
+        assert!(u.api_key_file.is_empty(), "keyless when no file is given");
+    }
+
+    #[test]
+    fn negative_knob_off_touches_nothing() {
+        let mut cfg = cfg_with_knob(false);
+        let env = [("AGENT_E2E_JUDGE_BASE_URL", "https://j.example/v1")];
+        apply_judge_env_with(&mut cfg, &lookup(&env)).expect("no-op");
+        assert!(cfg.route.upstreams.is_empty());
+        assert!(cfg.route.rules.is_empty());
+    }
+
+    #[test]
+    fn corner_missing_base_url_is_a_warned_noop() {
+        let mut cfg = cfg_with_knob(true);
+        apply_judge_env_with(&mut cfg, &lookup(&[])).expect("no env, no bridge");
+        assert!(cfg.route.upstreams.is_empty());
+        assert!(cfg.route.rules.is_empty());
+    }
+
+    #[test]
+    fn corner_explicit_judge_env_upstream_wins() {
+        let mut cfg = cfg_with_knob(true);
+        cfg.route.upstreams.push(crate::config::RouteUpstreamCfg {
+            name: "judge-env".into(),
+            endpoint: "https://mine.example/v1".into(),
+            ..Default::default()
+        });
+        let env = [("AGENT_E2E_JUDGE_BASE_URL", "https://j.example/v1")];
+        apply_judge_env_with(&mut cfg, &lookup(&env)).expect("kept explicit");
+        assert_eq!(cfg.route.upstreams.len(), 1);
+        assert_eq!(cfg.route.upstreams[0].endpoint, "https://mine.example/v1");
+        assert!(cfg.route.rules.is_empty(), "no shadow rule either");
+    }
+
+    #[rstest]
+    #[case::boundary_one("1", true)]
+    #[case::boundary_true("true", true)]
+    #[case::boundary_zero("0", false)]
+    #[case::adversarial_yes("yes", false)]
+    #[case::adversarial_garbage("TRUE!", false)]
+    fn boundary_insecure_tls_parses_strictly(#[case] v: &'static str, #[case] want: bool) {
+        let mut cfg = cfg_with_knob(true);
+        let env = [
+            ("AGENT_E2E_JUDGE_BASE_URL", "https://j.example/v1"),
+            ("AGENT_E2E_JUDGE_INSECURE_TLS", v),
+        ];
+        apply_judge_env_with(&mut cfg, &lookup(&env)).expect("bridges");
+        assert_eq!(cfg.route.upstreams.last().unwrap().insecure_tls, want);
+    }
+
+    #[test]
+    fn adversarial_oversized_base_url_fails_closed() {
+        let mut cfg = cfg_with_knob(true);
+        let huge: String = "https://".chars().chain("x".repeat(3_000).chars()).collect();
+        let huge: &'static str = Box::leak(huge.into_boxed_str());
+        let env = [("AGENT_E2E_JUDGE_BASE_URL", huge)];
+        let err = apply_judge_env_with(&mut cfg, &lookup(&env)).expect_err("over the cap");
+        assert!(err.to_string().contains("longer than"), "{err}");
+        assert!(cfg.route.upstreams.is_empty(), "nothing half-appended");
+    }
+
+    #[rstest]
+    #[case::adversarial_embedded_space("https://j.example/v1 --danger")]
+    #[case::adversarial_newline("https://j.example/v1\nX: y")]
+    #[case::adversarial_control("https://j.example/v1\u{7}")]
+    fn adversarial_garbled_base_url_fails_closed(#[case] url: &'static str) {
+        let mut cfg = cfg_with_knob(true);
+        let env = [("AGENT_E2E_JUDGE_BASE_URL", url)];
+        let err = apply_judge_env_with(&mut cfg, &lookup(&env)).expect_err("garbled");
+        assert!(
+            err.to_string().contains("whitespace or control"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn adversarial_oversized_key_file_fails_closed() {
+        let mut cfg = cfg_with_knob(true);
+        let long: &'static str = Box::leak("k".repeat(600).into_boxed_str());
+        let env = [
+            ("AGENT_E2E_JUDGE_BASE_URL", "https://j.example/v1"),
+            ("AGENT_E2E_JUDGE_API_KEY_FILE", long),
+        ];
+        let err = apply_judge_env_with(&mut cfg, &lookup(&env)).expect_err("over the cap");
+        assert!(err.to_string().contains("longer than"), "{err}");
+        assert!(cfg.route.upstreams.is_empty());
+    }
+}
+
 // The `--model-router-config` textproto startup loader (model-router 03):
 // scenario file → the same `[route]` config the TOML path builds from.
 #[cfg(all(test, feature = "registry"))]
@@ -3237,6 +3480,21 @@ mod model_router_config_tests {
             "one authority, never a merge"
         );
         assert_eq!(cfg.route.upstreams.len(), 2);
+    }
+
+    /// `judge_from_env` is a deployment-local knob, not fleet config — the
+    /// wholesale route replace must not wipe it.
+    #[test]
+    fn positive_judge_knob_survives_the_wholesale_replace() {
+        let dir = agent_testkit::tempdir();
+        let path = dir.join("mrc.textproto");
+        std::fs::write(&path, mrc_text()).unwrap();
+        let mut cfg = Config::minimal_for_test();
+        cfg.agent.provider = "task-router".into();
+        cfg.route.judge_from_env = true;
+        cfg.agent.model_router_config = path.to_string_lossy().into_owned();
+        apply_model_router_config(&mut cfg).expect("loads");
+        assert!(cfg.route.judge_from_env, "local knob survives");
     }
 }
 

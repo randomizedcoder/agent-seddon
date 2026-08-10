@@ -475,6 +475,13 @@ pub struct RouteCfg {
     /// `[registry] refresh_secs`, no restart).
     #[serde(default)]
     pub source: String,
+    /// Opt-in bridge to the eval-harness judge convention (model-router 04
+    /// tail): when true and `AGENT_E2E_JUDGE_BASE_URL` is set, a `judge-env`
+    /// upstream (+ a lowest-precedence `role = "judge"` rule) is appended at
+    /// build, so the harnesses' judge endpoint is a routed upstream instead of
+    /// a separate env island. Explicit TOML upstreams/rules always win.
+    #[serde(default)]
+    pub judge_from_env: bool,
     #[serde(default = "default_breaker_threshold")]
     pub failure_threshold: usize,
     #[serde(default = "default_breaker_cooldown")]
@@ -488,6 +495,7 @@ impl Default for RouteCfg {
             rules: Vec::new(),
             default_prefer: RoutePreferCfg::default(),
             source: String::new(),
+            judge_from_env: false,
             failure_threshold: default_breaker_threshold(),
             cooldown_secs: default_breaker_cooldown(),
         }
