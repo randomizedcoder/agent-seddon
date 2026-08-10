@@ -1464,7 +1464,8 @@ pub struct AstCfg {
     #[serde(default = "default_ast_timeout")]
     pub helper_timeout_secs: u64,
     /// Languages the `scip` backend indexes (each maps to a built-in indexer command:
-    /// `go` → scip-go, `rust` → rust-analyzer scip, `typescript`/`python` → scip-*).
+    /// `go` → scip-go, `rust` → rust-analyzer scip, `cpp`/`c` → scip-clang (precise
+    /// C/C++, needs a `compile_commands.json`), `typescript`/`python` → scip-*).
     /// Empty ⇒ the `scip` backend is skipped. Only consulted when `"scip"` is in
     /// `backends` (and the `ast-scip` build feature is on).
     #[serde(default)]

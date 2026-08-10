@@ -21,6 +21,12 @@ ast-go = []
 # `serde_json::Value`, like the go-graph output, so we stay decoupled from charon's
 # internal Rust types. Needs `charon` + a Rust toolchain at runtime.
 ast-rust = []
+# Syntactic C/C++ code graph: parses the tree in-process with the pinned tree-sitter
+# C/C++ grammars (no external tool, no build, no compile DB) and lowers functions /
+# calls / class inheritance / #include edges into the shared `Graph`. The call graph is
+# name-resolved (macros / overloads / fn-pointers / virtual dispatch not resolved); the
+# precise symbols/implementations come from `scip-clang` via the `ast-scip` engine.
+ast-cpp = ["dep:tree-sitter", "dep:tree-sitter-c", "dep:tree-sitter-cpp", "dep:walkdir"]
 # Cross-language symbols / def / implementations via the SCIP index format: runs a
 # per-language indexer (scip-go, rust-analyzer scip, …) through the Sandbox and
 # ingests the resulting `.scip` protobuf. No call edges in SCIP (those route to `go`).
@@ -42,6 +48,13 @@ dhat = { workspace = true, optional = true }
 # the same version so the `Message` trait matches).
 scip = { version = "0.9", optional = true }
 protobuf = { version = "3.7", optional = true }
+# In-crate C/C++ parsing for the `ast-cpp` engine. tree-sitter is the runtime; the two
+# grammar crates provide the C and C++ `Language`s. `walkdir` enumerates the source
+# tree. All optional (only under `ast-cpp`).
+tree-sitter = { version = "0.25", optional = true }
+tree-sitter-c = { version = "0.24", optional = true }
+tree-sitter-cpp = { version = "0.23", optional = true }
+walkdir = { version = "2", optional = true }
 
 [dev-dependencies]
 rstest.workspace = true
@@ -57,6 +70,12 @@ harness = false
 # an empty `main` without it). Run with `--features ast-rust`.
 [[bench]]
 name = "rust_ingest"
+harness = false
+
+# The C/C++ engine's tree-sitter parse + extract + lower hot path (feature `ast-cpp`;
+# an empty `main` without it). Run with `--features ast-cpp`.
+[[bench]]
+name = "cpp_ingest"
 harness = false
 
 [lints]

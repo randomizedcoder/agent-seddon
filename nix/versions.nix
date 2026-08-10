@@ -134,6 +134,36 @@ in
   # ingests; `rust-analyzer scip` covers Rust (reuses the pin above). Others
   # (scip-typescript/scip-python) are added here when wired.
   scip-go = pkgs.scip-go;
+  # scip-clang — the precise C/C++ SCIP indexer behind the `scip` engine's `cpp`/`c`
+  # arm (docs/components/ast.md). Not in nixpkgs; Sourcegraph ships a prebuilt Linux
+  # x86_64 binary (glibc-dynamic), so we pin the release binary and autoPatchelf it
+  # into the store rather than source-building against Clang 21. It needs a
+  # `compile_commands.json` at runtime + `clang` on PATH (for the resource dir). Bump
+  # `version` + `sha256` together (recompute by setting sha256 to "" and reading nix's
+  # "got:" line).
+  scip-clang =
+    let
+      version = "0.4.0";
+    in
+    pkgs.stdenvNoCC.mkDerivation {
+      pname = "scip-clang";
+      inherit version;
+      src = pkgs.fetchurl {
+        url = "https://github.com/sourcegraph/scip-clang/releases/download/v${version}/scip-clang-x86_64-linux";
+        sha256 = "06fd18c576f979a726c651594644ec4a35db4f471f2160b3f72eb89fa6001784";
+      };
+      dontUnpack = true;
+      nativeBuildInputs = [ pkgs.autoPatchelfHook ];
+      buildInputs = [
+        pkgs.stdenv.cc.cc.lib # libstdc++ / libgcc_s
+        pkgs.zlib
+      ];
+      installPhase = ''
+        runHook preInstall
+        install -Dm755 "$src" "$out/bin/scip-clang"
+        runHook postInstall
+      '';
+    };
   # Charon — the MIR extractor behind the `rust` AstBackend engine (precise Rust
   # call graph + trait implementations). Pinned via the `charon` flake input (not
   # in nixpkgs), injected as `charonPkg`. `null` when versions.nix is imported

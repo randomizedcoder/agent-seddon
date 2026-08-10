@@ -313,14 +313,18 @@ let
   };
 
   # Dev shell. `go-ast` (review call-graph helper) + `go-graph` (AstBackend Go engine)
-  # go on PATH, plus the SCIP indexer + ast-grep for the AstBackend `scip` engine and
-  # `structural_search` tool, and `charon` for the AstBackend `rust` engine.
+  # go on PATH, plus the SCIP indexers (`scip-go`, `scip-clang`) + ast-grep for the
+  # AstBackend `scip` engine and `structural_search` tool, `clang` (scip-clang's
+  # resource dir), and `charon` for the `rust` engine. The `cpp` engine is in-crate
+  # tree-sitter — no tool needed.
   devshell = import ./devshell.nix {
     inherit pkgs lib versions;
     extraPackages = [
       go-ast
       go-graph
       versions.scip-go
+      versions.scip-clang
+      pkgs.clang
       versions.ast-grep
     ]
     # charon (rust AstBackend engine's MIR extractor) — only when the flake injected

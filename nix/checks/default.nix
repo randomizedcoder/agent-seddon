@@ -112,6 +112,17 @@ in
   # hermetic (charon bundles its nightly toolchain + full-MIR sysroot; std-only
   # fixture). See docs/components/ast.md.
   ast-rust = import ./ast-rust.nix { inherit pkgs versions; };
+
+  # AstBackend C/C++ engine (syntactic, in-crate tree-sitter): the table-driven test
+  # suite over C/C++ source fixtures — call edges, C++ inheritance → implementations,
+  # #include dependency path, adversarial cases. No external tool; fully offline.
+  ast-cpp = craneCheck ./ast-cpp.nix { inherit cargoArtifacts; };
+
+  # AstBackend C/C++ SCIP layer: the pinned prebuilt `scip-clang` indexes a fixture
+  # C/C++ project (with a hand-written compile_commands.json + `clang` on PATH) and we
+  # assert it produces a non-empty index carrying the fixture's symbols. Offline.
+  ast-scip-cpp = import ./ast-scip-cpp.nix { inherit pkgs versions; };
+
   # Code-style fingerprint coverage: a small Go repo with a deliberate consistent
   # house style; assert the `Code style` section reports the right verdicts. Pure
   # in-process (counting over blobs + commit log); offline, no toolchain.

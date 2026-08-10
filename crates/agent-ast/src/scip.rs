@@ -50,6 +50,14 @@ impl ScipIndexer {
                 "scip-python index . --output index.scip.py",
                 "index.scip.py",
             ),
+            // scip-clang is precise but needs a JSON compilation database; if
+            // `compile_commands.json` is absent it exits nonzero and the fail-soft
+            // build path skips it. C++ inheritance/override relations arrive as SCIP
+            // `is_implementation` and flow into `find_implementations` unchanged.
+            "cpp" | "c" | "c++" => (
+                "scip-clang --compdb-path compile_commands.json --index-output-path index.scip.cpp",
+                "index.scip.cpp",
+            ),
             _ => return None,
         };
         Some(ScipIndexer {

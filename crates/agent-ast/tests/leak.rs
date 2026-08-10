@@ -125,4 +125,38 @@ fn ast_graph_paths_do_not_leak() {
             rafter.curr_blocks
         );
     }
+
+    // The C/C++ engine's tree-sitter parse → graph ingest hot path (feature `ast-cpp`):
+    // parsing a small C corpus + building the graph repeatedly frees everything.
+    #[cfg(feature = "ast-cpp")]
+    {
+        let dir = agent_testkit::tempdir();
+        for i in 0..8 {
+            std::fs::write(
+                dir.join(format!("f{i}.c")),
+                format!(
+                    "static int leaf{i}(int x){{return x+{i};}}\n\
+                     int top{i}(int x){{return leaf{i}(x)+leaf{i}(x);}}\n\
+                     struct T{i}{{int a;}};\n"
+                ),
+            )
+            .unwrap();
+        }
+        let build = || Graph::parse_value(agent_ast::lower_cpp_tree(&dir), &dir);
+        let _warm = build();
+        let cbase = dhat::HeapStats::get();
+        const CPP_ITERS: u64 = 30;
+        for _ in 0..CPP_ITERS {
+            let g = build();
+            assert!(g.symbol_count() > 0);
+            drop(g);
+        }
+        let cafter = dhat::HeapStats::get();
+        dhat::assert!(
+            cafter.curr_blocks <= cbase.curr_blocks + 8,
+            "cpp ingest: live blocks grew (leak?): {} -> {}",
+            cbase.curr_blocks,
+            cafter.curr_blocks
+        );
+    }
 }

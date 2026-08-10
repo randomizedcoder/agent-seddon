@@ -41,6 +41,20 @@ mod rust;
 #[cfg(feature = "ast-rust")]
 pub use rust::RustAst;
 
+#[cfg(feature = "ast-cpp")]
+mod cpp;
+#[cfg(feature = "ast-cpp")]
+pub use cpp::CppAst;
+
+/// Parse a C/C++ tree and lower it into the intermediate graph schema — exposed
+/// `#[doc(hidden)]` so the ingest bench (`benches/cpp_ingest.rs`) can measure the
+/// tree-sitter parse+extract+lower without wiring an engine. Not a stable API.
+#[cfg(feature = "ast-cpp")]
+#[doc(hidden)]
+pub fn lower_cpp_tree(root: &std::path::Path) -> serde_json::Value {
+    cpp::lower_tree(root)
+}
+
 /// Lower a charon `.llbc` JSON into the intermediate graph schema — exposed
 /// `#[doc(hidden)]` so the ingest bench (`benches/rust_ingest.rs`) can measure the
 /// charon→graph transform without a `Sandbox`/`charon`. Not a stable API.
