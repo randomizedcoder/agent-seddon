@@ -162,6 +162,12 @@ pub fn status_from_error(e: &agent_core::Error) -> tonic::Status {
         // An invalid/oversized/unparseable graph document is a bad request —
         // the caller's document is at fault, not the server.
         Error::Graph(m) => tonic::Status::invalid_argument(format!("graph: {m}")),
+        // A rejected card/id/policy is a bad request; an unknown id (the seam
+        // contract prefixes those messages with `not found`) is NotFound.
+        Error::Registry(m) if m.starts_with("not found") => {
+            tonic::Status::not_found(format!("registry: {m}"))
+        }
+        Error::Registry(m) => tonic::Status::invalid_argument(format!("registry: {m}")),
         // Overload is a "slow down", not a fault: RESOURCE_EXHAUSTED is in the
         // client's retryable set, so it backs off + retries rather than failing.
         Error::Overloaded(m) => tonic::Status::resource_exhausted(format!("overloaded: {m}")),
@@ -2681,6 +2687,254 @@ impl From<pb::PoolMemberHealth> for agent_core::PoolMemberHealth {
     }
 }
 
+// --- Provider registry (model-router 03) -----------------------------------
+//
+// Core → wire is lossless. Wire → core is total and **fail-soft on numbers**
+// (every count/cost is `sanitize`d — the peer is untrusted) while structural
+// validation (ids, kinds, caps) stays the store's fail-closed job, so a bad
+// card is *rejected* with a clear message rather than silently mangled here.
+
+/// `UNSPECIFIED`/garbled ⇒ `None` (never a guess) — the shared decode rule for
+/// optional enum fields on registry messages.
+fn route_role_opt(r: pb::RouteRole) -> Option<agent_core::RouteRole> {
+    match r {
+        pb::RouteRole::Unspecified => None,
+        pb::RouteRole::Main => Some(agent_core::RouteRole::Main),
+        pb::RouteRole::Judge => Some(agent_core::RouteRole::Judge),
+        pb::RouteRole::Classify => Some(agent_core::RouteRole::Classify),
+        pb::RouteRole::Summarize => Some(agent_core::RouteRole::Summarize),
+        pb::RouteRole::Verify => Some(agent_core::RouteRole::Verify),
+        pb::RouteRole::Review => Some(agent_core::RouteRole::Review),
+    }
+}
+
+fn task_mode_opt(m: pb::TaskMode) -> Option<agent_core::TaskMode> {
+    match m {
+        pb::TaskMode::Unspecified => None,
+        m => Some(agent_core::TaskMode::from(m)),
+    }
+}
+
+fn pool_tier_opt(t: pb::PoolTier) -> Option<agent_core::PoolTier> {
+    match t {
+        pb::PoolTier::Unspecified => None,
+        t => Some(agent_core::PoolTier::from(t)),
+    }
+}
+
+impl From<agent_core::Upstream> for pb::Upstream {
+    fn from(u: agent_core::Upstream) -> Self {
+        pb::Upstream {
+            id: u.id,
+            kind: u.kind,
+            enabled: u.enabled,
+            base_url: u.base_url,
+            model: u.model,
+            api_key_ref: u.api_key_ref,
+            insecure_tls: u.insecure_tls,
+            version: u.version,
+            max_retries: u.max_retries,
+            context_window: u.context_window,
+            max_output_tokens: u.max_output_tokens,
+            supports_tools: u.supports_tools,
+            supports_vision: u.supports_vision,
+            supports_response_format: u.supports_response_format,
+            tags: u.tags,
+            input_cost: u.input_cost,
+            output_cost: u.output_cost,
+            tier: u.tier.map_or(pb::PoolTier::Unspecified, pb::PoolTier::from) as i32,
+            weight: u.weight,
+            max_concurrency: u.max_concurrency,
+        }
+    }
+}
+
+impl From<pb::Upstream> for agent_core::Upstream {
+    fn from(u: pb::Upstream) -> Self {
+        let tier = pool_tier_opt(u.tier());
+        let mut out = agent_core::Upstream {
+            id: u.id,
+            kind: u.kind,
+            enabled: u.enabled,
+            base_url: u.base_url,
+            model: u.model,
+            api_key_ref: u.api_key_ref,
+            insecure_tls: u.insecure_tls,
+            version: u.version,
+            max_retries: u.max_retries,
+            context_window: u.context_window,
+            max_output_tokens: u.max_output_tokens,
+            supports_tools: u.supports_tools,
+            supports_vision: u.supports_vision,
+            supports_response_format: u.supports_response_format,
+            tags: u.tags,
+            input_cost: u.input_cost,
+            output_cost: u.output_cost,
+            tier,
+            weight: u.weight,
+            max_concurrency: u.max_concurrency,
+        };
+        out.sanitize();
+        out
+    }
+}
+
+impl From<agent_core::UpstreamHealth> for pb::UpstreamHealth {
+    fn from(h: agent_core::UpstreamHealth) -> Self {
+        pb::UpstreamHealth {
+            id: h.id,
+            state: pb::PoolMemberState::from(h.state) as i32,
+            in_flight: h.in_flight,
+            latency_ms_ewma: h.latency_ms_ewma,
+            saturated: h.saturated,
+            consecutive_failures: h.consecutive_failures,
+        }
+    }
+}
+
+impl From<pb::UpstreamHealth> for agent_core::UpstreamHealth {
+    fn from(h: pb::UpstreamHealth) -> Self {
+        agent_core::UpstreamHealth {
+            id: h.id,
+            state: pool_member_state_from_i32(h.state),
+            in_flight: h.in_flight,
+            latency_ms_ewma: h.latency_ms_ewma,
+            saturated: h.saturated,
+            consecutive_failures: h.consecutive_failures,
+        }
+    }
+}
+
+impl From<agent_core::RouteMatchSpec> for pb::RouteMatch {
+    fn from(m: agent_core::RouteMatchSpec) -> Self {
+        pb::RouteMatch {
+            task_mode: m
+                .task_mode
+                .map_or(pb::TaskMode::Unspecified, pb::TaskMode::from)
+                as i32,
+            role: m
+                .role
+                .map_or(pb::RouteRole::Unspecified, pb::RouteRole::from) as i32,
+            min_context: m.min_context,
+        }
+    }
+}
+
+impl From<pb::RouteMatch> for agent_core::RouteMatchSpec {
+    fn from(m: pb::RouteMatch) -> Self {
+        agent_core::RouteMatchSpec {
+            task_mode: task_mode_opt(m.task_mode()),
+            role: route_role_opt(m.role()),
+            min_context: m.min_context,
+        }
+    }
+}
+
+impl From<agent_core::RoutePreferSpec> for pb::RoutePrefer {
+    fn from(p: agent_core::RoutePreferSpec) -> Self {
+        pb::RoutePrefer {
+            tags: p.tags,
+            tier: p.tier.map_or(pb::PoolTier::Unspecified, pb::PoolTier::from) as i32,
+            upstreams: p.upstreams,
+            policy: p.policy,
+        }
+    }
+}
+
+impl From<pb::RoutePrefer> for agent_core::RoutePreferSpec {
+    fn from(p: pb::RoutePrefer) -> Self {
+        let tier = pool_tier_opt(p.tier());
+        agent_core::RoutePreferSpec {
+            tags: p.tags,
+            tier,
+            upstreams: p.upstreams,
+            policy: p.policy,
+        }
+    }
+}
+
+impl From<agent_core::RouteRuleSpec> for pb::RouteRule {
+    fn from(r: agent_core::RouteRuleSpec) -> Self {
+        pb::RouteRule {
+            r#match: Some(r.match_.into()),
+            prefer: Some(r.prefer.into()),
+        }
+    }
+}
+
+impl From<pb::RouteRule> for agent_core::RouteRuleSpec {
+    fn from(r: pb::RouteRule) -> Self {
+        agent_core::RouteRuleSpec {
+            match_: r.r#match.map(Into::into).unwrap_or_default(),
+            prefer: r.prefer.map(Into::into).unwrap_or_default(),
+        }
+    }
+}
+
+impl From<agent_core::RoutePolicySpec> for pb::RoutePolicy {
+    fn from(p: agent_core::RoutePolicySpec) -> Self {
+        pb::RoutePolicy {
+            rules: p.rules.into_iter().map(Into::into).collect(),
+            default_prefer: Some(p.default_prefer.into()),
+            failure_threshold: p.failure_threshold,
+            cooldown_secs: p.cooldown_secs,
+        }
+    }
+}
+
+impl From<pb::RoutePolicy> for agent_core::RoutePolicySpec {
+    fn from(p: pb::RoutePolicy) -> Self {
+        let mut out = agent_core::RoutePolicySpec {
+            rules: p.rules.into_iter().map(Into::into).collect(),
+            default_prefer: p.default_prefer.map(Into::into).unwrap_or_default(),
+            failure_threshold: p.failure_threshold,
+            cooldown_secs: p.cooldown_secs,
+        };
+        out.sanitize();
+        out
+    }
+}
+
+impl From<agent_core::ModelRouterConfig> for pb::ModelRouterConfig {
+    fn from(c: agent_core::ModelRouterConfig) -> Self {
+        pb::ModelRouterConfig {
+            upstreams: c.upstreams.into_iter().map(Into::into).collect(),
+            policy: Some(c.policy.into()),
+        }
+    }
+}
+
+impl From<pb::ModelRouterConfig> for agent_core::ModelRouterConfig {
+    fn from(c: pb::ModelRouterConfig) -> Self {
+        agent_core::ModelRouterConfig {
+            upstreams: c.upstreams.into_iter().map(Into::into).collect(),
+            policy: c.policy.map(Into::into).unwrap_or_default(),
+        }
+    }
+}
+
+impl From<agent_core::RouteDecision> for pb::RouteDecision {
+    fn from(d: agent_core::RouteDecision) -> Self {
+        pb::RouteDecision {
+            chosen: d.chosen,
+            order: d.order,
+            rule: d.rule,
+            why: d.why,
+        }
+    }
+}
+
+impl From<pb::RouteDecision> for agent_core::RouteDecision {
+    fn from(d: pb::RouteDecision) -> Self {
+        agent_core::RouteDecision {
+            chosen: d.chosen,
+            order: d.order,
+            rule: d.rule,
+            why: d.why,
+        }
+    }
+}
+
 impl From<agent_core::HealthReport> for pb::PoolHealthReport {
     fn from(r: agent_core::HealthReport) -> Self {
         pb::PoolHealthReport {
@@ -4679,5 +4933,154 @@ mod tests {
             serde_json::Value::try_from(bad).unwrap_err(),
             ConvertError::Json { .. }
         ));
+    }
+
+    // --- Provider registry (model-router 03) -------------------------------
+
+    fn full_card() -> agent_core::Upstream {
+        agent_core::Upstream {
+            id: "kimi".into(),
+            kind: "openai-compat".into(),
+            enabled: true,
+            base_url: "https://kimi.example/v1".into(),
+            model: "kimi-k3".into(),
+            api_key_ref: "file:~/keys/kimi".into(),
+            insecure_tls: false,
+            version: "2024-06".into(),
+            max_retries: 3,
+            context_window: 262_144,
+            max_output_tokens: 8_192,
+            supports_tools: true,
+            supports_vision: false,
+            supports_response_format: true,
+            tags: vec!["reasoning".into(), "long-context".into()],
+            input_cost: 0.6,
+            output_cost: 2.4,
+            tier: Some(agent_core::PoolTier::Heavy),
+            weight: 1.0,
+            max_concurrency: 8,
+        }
+    }
+
+    fn full_config() -> agent_core::ModelRouterConfig {
+        agent_core::ModelRouterConfig {
+            upstreams: vec![full_card()],
+            policy: agent_core::RoutePolicySpec {
+                rules: vec![agent_core::RouteRuleSpec {
+                    match_: agent_core::RouteMatchSpec {
+                        task_mode: Some(agent_core::TaskMode::Debug),
+                        role: Some(agent_core::RouteRole::Judge),
+                        min_context: 4_096,
+                    },
+                    prefer: agent_core::RoutePreferSpec {
+                        tags: vec!["reasoning".into()],
+                        tier: Some(agent_core::PoolTier::Heavy),
+                        upstreams: vec!["kimi".into()],
+                        policy: "cost".into(),
+                    },
+                }],
+                default_prefer: agent_core::RoutePreferSpec {
+                    upstreams: vec!["kimi".into()],
+                    ..Default::default()
+                },
+                failure_threshold: 3,
+                cooldown_secs: 30,
+            },
+        }
+    }
+
+    #[test]
+    fn positive_upstream_card_roundtrip() {
+        let card = full_card();
+        let back = agent_core::Upstream::from(pb::Upstream::from(card.clone()));
+        assert_eq!(back, card);
+    }
+
+    #[test]
+    fn positive_model_router_config_roundtrip() {
+        let cfg = full_config();
+        let back = agent_core::ModelRouterConfig::from(pb::ModelRouterConfig::from(cfg.clone()));
+        assert_eq!(back, cfg);
+    }
+
+    #[test]
+    fn corner_default_config_decodes_to_default() {
+        let cfg = agent_core::ModelRouterConfig::from(pb::ModelRouterConfig::default());
+        assert_eq!(cfg, agent_core::ModelRouterConfig::default());
+        // A card with UNSPECIFIED tier decodes to `None`, not a guessed tier.
+        let card = agent_core::Upstream::from(pb::Upstream::default());
+        assert_eq!(card.tier, None);
+    }
+
+    /// `adversarial_`: a hostile wire card is number-clamped at decode — the
+    /// peer is untrusted — while structural validation stays the store's job.
+    #[test]
+    fn adversarial_upstream_decode_clamps_hostile_numbers() {
+        let wire = pb::Upstream {
+            id: "evil".into(),
+            input_cost: f32::NAN,
+            output_cost: f32::INFINITY,
+            weight: -1.0,
+            context_window: u32::MAX,
+            max_retries: u32::MAX,
+            max_concurrency: u32::MAX,
+            tier: 999, // out-of-range enum
+            ..Default::default()
+        };
+        let card = agent_core::Upstream::from(wire);
+        assert_eq!(card.input_cost, 0.0);
+        assert_eq!(card.output_cost, 0.0);
+        assert_eq!(card.weight, 0.0);
+        assert_eq!(card.context_window, agent_core::MAX_ROUTE_MIN_CONTEXT);
+        assert_eq!(card.max_retries, agent_core::MAX_UPSTREAM_RETRIES);
+        assert_eq!(card.max_concurrency, agent_core::MAX_UPSTREAM_CONCURRENCY);
+        assert_eq!(card.tier, None);
+    }
+
+    /// `adversarial_`: out-of-range enums in a policy decode to `None` (match
+    /// nothing / no bias), and a hostile rule `min_context` is capped.
+    #[test]
+    fn adversarial_route_policy_decode_fails_soft() {
+        let wire = pb::RoutePolicy {
+            rules: vec![pb::RouteRule {
+                r#match: Some(pb::RouteMatch {
+                    task_mode: 999,
+                    role: -1,
+                    min_context: u32::MAX,
+                }),
+                prefer: None,
+            }],
+            default_prefer: None,
+            failure_threshold: 0,
+            cooldown_secs: 0,
+        };
+        let spec = agent_core::RoutePolicySpec::from(wire);
+        assert_eq!(spec.rules[0].match_.task_mode, None);
+        assert_eq!(spec.rules[0].match_.role, None);
+        assert_eq!(
+            spec.rules[0].match_.min_context,
+            agent_core::MAX_ROUTE_MIN_CONTEXT
+        );
+        assert_eq!(spec.rules[0].prefer, agent_core::RoutePreferSpec::default());
+        assert_eq!(spec.default_prefer, agent_core::RoutePreferSpec::default());
+    }
+
+    #[test]
+    fn positive_route_decision_roundtrip() {
+        let d = agent_core::RouteDecision {
+            chosen: "kimi".into(),
+            order: vec!["kimi".into(), "glm".into()],
+            rule: "rule0".into(),
+            why: "judge rule preferred reasoning tags".into(),
+        };
+        let back = agent_core::RouteDecision::from(pb::RouteDecision::from(d.clone()));
+        assert_eq!(back, d);
+    }
+
+    #[rstest]
+    #[case::not_found(agent_core::Error::Registry("not found: upstream `x`".into()), tonic::Code::NotFound)]
+    #[case::bad_card(agent_core::Error::Registry("upstream id `..` is not a path-safe segment".into()), tonic::Code::InvalidArgument)]
+    fn registry_error_status_mapping(#[case] err: agent_core::Error, #[case] code: tonic::Code) {
+        assert_eq!(status_from_error(&err).code(), code);
     }
 }

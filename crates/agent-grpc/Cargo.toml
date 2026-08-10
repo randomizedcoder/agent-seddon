@@ -55,6 +55,9 @@ agent-testkit = { workspace = true }
 # The real prompt store, so the round-trip asserts CRUD + the id-validation
 # rejection surviving the hop rather than a double echoing what it was handed.
 agent-prompt = { workspace = true }
+# The real provider-registry store, so card CRUD + hostile-number clamps + the
+# not-found/invalid-id status mapping are asserted across the wire.
+agent-registry = { workspace = true }
 # A real built-in tool, to prove a feature tool (not just EchoTool) roundtrips over
 # the ToolService seam. Only the patch tool is compiled in.
 agent-tools = { workspace = true, features = ["tool-core", "tool-patch"] }

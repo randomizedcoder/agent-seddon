@@ -1,0 +1,66 @@
+# An `agent.v1.ModelRouterConfig` scenario file (model-router increment 03):
+# the task-router's whole fleet + routing policy as ONE textproto document.
+#
+#   agent --model-router-config config/model-router/example.textproto "goal"
+#
+# (also `[agent] model_router_config` or `AGENT_MODEL_ROUTER_CONFIG`). The file
+# REPLACES the TOML `[route]` block wholesale — keep several scenario files
+# under version control and switch fleets atomically by pointing the flag at
+# one. Requires `[agent] provider = "task-router"`.
+#
+# SECURITY: `api_key_ref` is a kind-prefixed REFERENCE — `env:NAME` or
+# `file:/path` (tilde-expanded) — never the key itself. A raw value here is
+# rejected at startup.
+
+upstreams {
+  id: "kimi"
+  kind: "openai-compat"
+  enabled: true
+  base_url: "https://kimi.example.com/v1"
+  model: "kimi-k3"
+  api_key_ref: "file:~/keys/kimi-api-key"
+  context_window: 262144
+  supports_tools: true
+  tags: "reasoning"
+  tags: "long-context"
+  tier: POOL_TIER_HEAVY
+  input_cost: 0.6
+}
+
+upstreams {
+  id: "glm"
+  kind: "openai-compat"
+  enabled: true
+  base_url: "https://glm.example.com/v1"
+  model: "glm-5.2"
+  api_key_ref: "env:GLM_API_KEY"
+  insecure_tls: true # self-signed endpoint
+  context_window: 131072
+  supports_tools: true
+  tags: "cheap"
+  tier: POOL_TIER_MEDIUM
+  input_cost: 0.2
+}
+
+policy {
+  # Ordered rules: the first whose `match` holds sets the ordering preference.
+  # Judged calls (consensus critic, fork judge) go to the heavy reasoner.
+  rules {
+    match { role: ROUTE_ROLE_JUDGE }
+    prefer { tags: "reasoning" tier: POOL_TIER_HEAVY }
+  }
+  # Background summarization (digest/memory distiller, instant objective) is
+  # cache work — keep it on the cheap upstream.
+  rules {
+    match { role: ROUTE_ROLE_SUMMARIZE }
+    prefer { tags: "cheap" }
+  }
+  # Debugging turns want the strongest model regardless of the default.
+  rules {
+    match { task_mode: TASK_MODE_DEBUG }
+    prefer { upstreams: "kimi" }
+  }
+  default_prefer { upstreams: "kimi" upstreams: "glm" }
+  failure_threshold: 3
+  cooldown_secs: 30
+}

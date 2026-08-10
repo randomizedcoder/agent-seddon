@@ -15,10 +15,8 @@ agent-core.workspace = true
 # textproto parse/print — one schema, three encodings (binary, text, Rust).
 agent-proto.workspace = true
 async-trait.workspace = true
-prost.workspace = true
 prost-reflect.workspace = true
 serde_json.workspace = true
-tracing.workspace = true
 dhat = { workspace = true, optional = true }
 
 [dev-dependencies]

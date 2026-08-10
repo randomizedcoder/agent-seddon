@@ -27,6 +27,7 @@ async fn main() -> Result<()> {
         mode,
         resume,
         cognition_graph,
+        model_router_config,
     } = parse_args()?;
 
     let toml_str = std::fs::read_to_string(&config_path)
@@ -42,6 +43,17 @@ async fn main() -> Result<()> {
     if let Some(file) = cognition_graph {
         config.graph.store = "file".to_string();
         config.graph.file = file;
+    }
+    // `--model-router-config FILE` > `AGENT_MODEL_ROUTER_CONFIG` > the
+    // `[agent] model_router_config` key — the model-router textproto scenario
+    // file (model-router 03, config/model-router/*.textproto). The builder
+    // loads it fail-closed.
+    if let Some(file) = model_router_config {
+        config.agent.model_router_config = file;
+    } else if let Ok(file) = std::env::var("AGENT_MODEL_ROUTER_CONFIG") {
+        if !file.is_empty() {
+            config.agent.model_router_config = file;
+        }
     }
     // Captured before `config` is consumed by the builder.
     let cfg_tick_secs = config.scheduler.tick_secs;
@@ -536,6 +548,9 @@ struct Args {
     /// `--cognition-graph FILE`: run with this cognition-graph document
     /// (equivalent to `[graph] store = "file", file = FILE`).
     cognition_graph: Option<String>,
+    /// `--model-router-config FILE`: load the task-router fleet + policy from
+    /// this textproto scenario file (equivalent to `[agent] model_router_config`).
+    model_router_config: Option<String>,
 }
 
 fn parse_args() -> Result<Args> {
@@ -552,6 +567,7 @@ fn parse_args() -> Result<Args> {
     let mut detect_mode_prompt: Option<String> = None;
     let mut check_config = false;
     let mut cognition_graph: Option<String> = None;
+    let mut model_router_config: Option<String> = None;
     let mut goal_parts: Vec<String> = Vec::new();
 
     let mut args = std::env::args().skip(1);
@@ -594,6 +610,12 @@ fn parse_args() -> Result<Args> {
                         .context("--cognition-graph requires a textproto file path")?,
                 );
             }
+            "--model-router-config" => {
+                model_router_config = Some(
+                    args.next()
+                        .context("--model-router-config requires a textproto file path")?,
+                );
+            }
             flag if grpc_server::Seam::from_flag(flag).is_some() => {
                 serve_grpc = grpc_server::Seam::from_flag(flag);
             }
@@ -614,7 +636,8 @@ fn parse_args() -> Result<Args> {
                      --serve-all         host every enabled seam over gRPC from one process\n  \
                      --serve-sessions    host the sessions gateway (SessionRegistry + driving AgentSession + reaper)\n  \
                      --listen ADDR       override the gRPC listen address (host:port or unix:/path)\n  \
-                     --cognition-graph F run with cognition-graph document F (see config/cognition/)",
+                     --cognition-graph F run with cognition-graph document F (see config/cognition/)\n  \
+                     --model-router-config F  load the task-router fleet+policy from textproto F (see config/model-router/)",
                     seams = grpc_server::Seam::flag_names()
                 );
                 std::process::exit(0);
@@ -650,5 +673,6 @@ fn parse_args() -> Result<Args> {
         mode,
         resume,
         cognition_graph,
+        model_router_config,
     })
 }

@@ -237,6 +237,17 @@
       metrics_port = 9633;
     };
 
+    # Provider registry (model-router 03): the `ProviderRegistry` seam — the
+    # model router's fleet + routing policy as a CRUD control plane
+    # (upstream cards, RoutePolicy, Route introspection, Health), so upstreams
+    # are added/updated/enabled at runtime and one registry can serve a whole
+    # fleet of agents. Cards carry `api_key_ref` references, never secrets.
+    provider_registry = {
+      port = 50084;
+      socket = "/tmp/agent-seddon/provider-registry.sock";
+      metrics_port = 9634;
+    };
+
     # NOT a seam: the opt-in `agent --serve-sessions` gateway (docs/design/portal),
     # which hosts the `SessionRegistryService` (open/close/heartbeat) plus a
     # *driving* `AgentSessionService` (the `Send` RPC — submit a goal, stream the

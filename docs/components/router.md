@@ -154,6 +154,44 @@ with hostile hints — liveness + exact decision accounting + post-storm
 recovery) and a dhat leak budget (`route_leak`: failover path frees all
 scratch, <120 blocks/call) gate it alongside the Ir ceilings.
 
+## The provider registry (`[registry]`, `--serve-provider-registry`)
+
+[Model-router 03](../design/model-router/03-registry-proto.md): the task-router's
+fleet + policy as one proto contract, `agent.v1.ModelRouterConfig`, with two
+faces over the same messages:
+
+- **The textproto scenario file** — `agent --model-router-config FILE` (or
+  `[agent] model_router_config` / `AGENT_MODEL_ROUTER_CONFIG`) parses a
+  `config/model-router/*.textproto` at startup and **replaces** the TOML
+  `[route]` block wholesale, then builds through the *same* factory chain (one
+  build path — the two forms cannot route differently). Fail closed: a
+  missing/unparseable/invalid file aborts the build; no partial fleet. Keep
+  several scenario files under version control and swap fleets atomically.
+- **`ProviderRegistryService`** (port 50084, metrics 9634) — the live control
+  plane over the same messages: `List/Get/Put/Delete/Enable` on upstream cards,
+  `GetPolicy/PutPolicy`, `Route` introspection (*what would you pick and why* —
+  it runs the same `route::Policy` engine, so the answer is the router's), and
+  `Health`. Swappable storage behind `[registry] store`: `file` (the same
+  textproto bundle — hand-edited or `Put`-rewritten, one format), `sqlite`
+  (feature `registry-sqlite`, prost-encoded blobs), `grpc` (a central registry),
+  `""` (off). `agent_registry_mutations_total{op}` +
+  `agent_registry_upstreams{enabled}` meter the control plane.
+
+**Security.** A card's `api_key_ref` is a kind-prefixed *reference* —
+`env:NAME` / `file:/path` — never a secret: keys resolve on the host that
+builds the concrete provider, so a compromised registry has no key to serve; a
+raw value is rejected (without being echoed). Every id is `safe_segment`-gated
+before it can become a storage path or label; every number (cost, window,
+weight, retries, concurrency) is clamped at wire decode *and* on store ingest;
+sizes and counts are capped (`MAX_REGISTRY_UPSTREAMS`, rule/tag caps, a 1 MiB
+textproto cap applied before parsing). All three stores share one `ops` module,
+so validation cannot drift between backends.
+
+In 03 the registry is the control plane only — the router still builds its
+fleet at startup (the loader). [04](../design/model-router/04-registry-backed.md)
+makes the router *consume* the registry live (watch/poll, TOML seeding,
+live-signal ordering).
+
 ## Deferred
 
 - **Cost- and latency-based policies.** `in-order` and `round-robin` are

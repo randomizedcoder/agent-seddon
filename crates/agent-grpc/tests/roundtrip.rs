@@ -1491,3 +1491,128 @@ async fn agent_session_stream_and_snapshot_roundtrip(#[case] transport: Transpor
         vec!["snapshot", "iteration", "token", "run_finished"]
     );
 }
+
+// ---------------------------------------------------------------------------
+// Provider registry (model-router 03)
+// ---------------------------------------------------------------------------
+
+fn registry_card(id: &str) -> agent_core::Upstream {
+    agent_core::Upstream {
+        id: id.into(),
+        kind: "openai-compat".into(),
+        enabled: true,
+        base_url: "http://127.0.0.1:1/v1".into(),
+        model: "m".into(),
+        api_key_ref: "env:TEST_KEY".into(),
+        context_window: 128_000,
+        supports_tools: true,
+        tags: vec!["reasoning".into()],
+        tier: Some(agent_core::PoolTier::Heavy),
+        ..Default::default()
+    }
+}
+
+#[rstest]
+#[case::tcp(Transport::Tcp)]
+#[case::uds(Transport::Uds)]
+#[tokio::test(flavor = "multi_thread")]
+async fn provider_registry_crud_policy_and_route_roundtrip(#[case] transport: Transport) {
+    use agent_core::ProviderRegistry;
+    let store = Arc::new(agent_registry::MemoryRegistry::empty());
+    let (dial, _srv) = spawn(
+        transport,
+        agent_grpc::server::provider_registry_router(store),
+    )
+    .await;
+    let client = agent_grpc::client::GrpcRegistry::connect(&dial).unwrap();
+
+    // Put → Get round-trips the full card (including the key REFERENCE, which
+    // must survive verbatim — it is a pointer, never a secret).
+    let stored = client.put(registry_card("kimi")).await.expect("put");
+    assert_eq!(stored, registry_card("kimi"));
+    assert_eq!(
+        client.get("kimi").await.expect("get"),
+        registry_card("kimi")
+    );
+    client.put(registry_card("glm")).await.expect("put glm");
+    assert_eq!(client.list().await.expect("list").len(), 2);
+
+    // Policy round-trips; the Route introspection answers over the wire.
+    let policy = agent_core::RoutePolicySpec {
+        rules: vec![agent_core::RouteRuleSpec {
+            match_: agent_core::RouteMatchSpec {
+                role: Some(agent_core::RouteRole::Judge),
+                ..Default::default()
+            },
+            prefer: agent_core::RoutePreferSpec {
+                upstreams: vec!["glm".into()],
+                ..Default::default()
+            },
+        }],
+        ..Default::default()
+    };
+    let stored = client.put_policy(policy.clone()).await.expect("put_policy");
+    assert_eq!(stored, policy);
+    assert_eq!(client.get_policy().await.expect("get_policy"), policy);
+    let d = client
+        .route(&agent_core::RouteHint {
+            role: Some(agent_core::RouteRole::Judge),
+            ..Default::default()
+        })
+        .await
+        .expect("route");
+    assert_eq!(d.chosen, "glm");
+    assert_eq!(d.rule, "rule0");
+
+    // Enable(false) drops it from health but keeps the definition.
+    assert!(!client.enable("glm", false).await.expect("disable").enabled);
+    let health = client.health().await.expect("health");
+    assert!(health.iter().all(|h| h.id != "glm"));
+    assert_eq!(client.list().await.expect("list").len(), 2);
+
+    // Delete: true, then false (absent ≠ error).
+    assert!(client.delete("glm").await.expect("delete"));
+    assert!(!client.delete("glm").await.expect("re-delete"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn adversarial_registry_hostile_input_rejected_over_wire() {
+    use agent_core::ProviderRegistry;
+    let store = Arc::new(agent_registry::MemoryRegistry::empty());
+    let (dial, _srv) = spawn(
+        Transport::Tcp,
+        agent_grpc::server::provider_registry_router(store),
+    )
+    .await;
+    let client = agent_grpc::client::GrpcRegistry::connect(&dial).unwrap();
+    client.put(registry_card("ok")).await.expect("seed");
+
+    // A traversal id is InvalidArgument at the server — for every entry point.
+    for id in ["../../etc/passwd", "a/b", "-rf"] {
+        assert!(client.get(id).await.is_err(), "get {id:?}");
+        assert!(client.delete(id).await.is_err(), "delete {id:?}");
+        let mut bad = registry_card("ok");
+        bad.id = id.into();
+        assert!(client.put(bad).await.is_err(), "put {id:?}");
+    }
+    // A raw secret in api_key_ref is rejected AND never echoed in the status.
+    let mut secret = registry_card("s");
+    secret.api_key_ref = "sk-live-supersecret".into();
+    let err = client.put(secret).await.expect_err("raw key rejected");
+    assert!(
+        !err.to_string().contains("supersecret"),
+        "status must not echo the value: {err}"
+    );
+    // Unknown id → the not-found contract survives the wire.
+    let err = client.get("ghost").await.expect_err("unknown id");
+    assert!(err.to_string().contains("not found"), "{err}");
+    // A hostile card is clamped at the seam (numbers), not stored hostile.
+    let mut evil = registry_card("evil");
+    evil.input_cost = f32::NAN;
+    evil.context_window = u32::MAX;
+    let stored = client.put(evil).await.expect("clamped, stored");
+    assert_eq!(stored.input_cost, 0.0);
+    assert_eq!(stored.context_window, agent_core::MAX_ROUTE_MIN_CONTEXT);
+    // The fleet is intact after all the rejected attempts.
+    assert_eq!(client.list().await.expect("list").len(), 2);
+}

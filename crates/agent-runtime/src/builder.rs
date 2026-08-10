@@ -54,6 +54,12 @@ pub async fn build_agent_with(
     // to the anchor's built-in behavior (fail soft).
     #[allow(unused_mut)]
     let mut cfg = cfg;
+    // The model-router textproto scenario file (model-router 03), applied
+    // before any factory reads `[route]`: it REPLACES the TOML fleet+policy
+    // wholesale (one authority, never a merge). A missing/unparseable/invalid
+    // file is a startup error — fail closed, never a partially-loaded fleet.
+    #[cfg(feature = "registry")]
+    apply_model_router_config(&mut cfg)?;
     #[cfg(feature = "graph")]
     let (graph_store, graph_distill_kinds, graph_plan) = resolve_cognition_graph(&mut cfg).await?;
     #[cfg(not(feature = "graph"))]
@@ -1115,6 +1121,13 @@ pub async fn build_agent_with(
         Some(p) => agent.with_prompt_store(p),
         None => agent,
     };
+    // The provider-registry control plane (model-router 03), held for
+    // `--serve-provider-registry`; the loop consumes it in increment 04.
+    #[cfg(feature = "registry")]
+    let agent = match resolve_provider_registry(&cfg, &metrics)? {
+        Some(r) => agent.with_provider_registry(r),
+        None => agent,
+    };
     // Situational system-prompt fragments (docs/design/prompts/): the loop selects
     // and injects the fragments matching the current mode. Rooted at the `prompts`
     // dir — a missing dir ⇒ a no-op resolver ⇒ byte-identical behaviour.
@@ -1879,6 +1892,180 @@ pub(crate) fn build_route_policy(
         rules,
         default_prefer: prefer(&cfg.default_prefer),
     })
+}
+
+/// Load the `[agent] model_router_config` textproto scenario file (model-router
+/// 03) and overlay it as THE `[route]` config — the TOML→proto migration's
+/// bootstrap path: the whole fleet + policy swaps atomically with the file, no
+/// gRPC server involved. Empty setting = off (TOML `[route]` stands).
+///
+/// Fail closed: a missing file, a parse error, or a card that fails validation
+/// (bad id, raw secret in `api_key_ref`, unknown kind) aborts the build with a
+/// clear message — never a partially-loaded fleet.
+#[cfg(feature = "registry")]
+pub(crate) fn apply_model_router_config(cfg: &mut Config) -> anyhow::Result<()> {
+    if cfg.agent.model_router_config.is_empty() {
+        return Ok(());
+    }
+    let path = expand_tilde(&cfg.agent.model_router_config);
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading model-router config `{path}`"))?;
+    let mrc = agent_registry::textproto::parse(&text)
+        .with_context(|| format!("parsing model-router config `{path}`"))?;
+    mrc.validate()
+        .with_context(|| format!("validating model-router config `{path}`"))?;
+    if cfg.agent.provider != "task-router" {
+        tracing::warn!(
+            provider = %cfg.agent.provider,
+            "model_router_config is set but [agent] provider is not \"task-router\" — \
+             the loaded fleet only routes through the task-router"
+        );
+    }
+    cfg.route = route_cfg_from(&mrc, &path)?;
+    Ok(())
+}
+
+/// Map a validated [`agent_core::ModelRouterConfig`] onto the `[route]` config
+/// the existing task-router factory chain builds from — one build path, so the
+/// textproto and TOML forms can never route differently.
+#[cfg(feature = "registry")]
+fn route_cfg_from(
+    mrc: &agent_core::ModelRouterConfig,
+    path: &str,
+) -> anyhow::Result<crate::config::RouteCfg> {
+    use crate::config::{RouteCfg, RouteMatchCfg, RoutePreferCfg, RouteRuleCfg, RouteUpstreamCfg};
+    let mut out = RouteCfg::default();
+    for u in &mrc.upstreams {
+        if !u.enabled {
+            // The card stays in the registry; a disabled upstream is simply not
+            // built into the routed fleet.
+            continue;
+        }
+        let (api_key_env, api_key_file) = match agent_core::ApiKeyRef::parse(&u.api_key_ref) {
+            Ok(agent_core::ApiKeyRef::Env(n)) => (n.to_string(), String::new()),
+            Ok(agent_core::ApiKeyRef::File(p)) => (String::new(), p.to_string()),
+            Ok(agent_core::ApiKeyRef::None) => (String::new(), String::new()),
+            // Unreachable after validate(); kept as a hard error for defense.
+            Err(e) => anyhow::bail!("model-router config `{path}`: upstream `{}`: {e}", u.id),
+        };
+        let endpoint = match u.kind.as_str() {
+            // Resolve `id` as a registered provider name (no inline endpoint).
+            "" => String::new(),
+            "openai-compat" => {
+                if u.base_url.is_empty() {
+                    anyhow::bail!(
+                        "model-router config `{path}`: upstream `{}`: kind \"openai-compat\" \
+                         requires base_url",
+                        u.id
+                    );
+                }
+                u.base_url.clone()
+            }
+            // Stored + served by the registry, but the startup loader cannot
+            // synthesize these yet (recorded in STATUS.md; additive later).
+            other => anyhow::bail!(
+                "model-router config `{path}`: upstream `{}`: kind {other:?} is not yet \
+                 buildable by the startup loader (use \"openai-compat\" or a registered \
+                 provider name)",
+                u.id
+            ),
+        };
+        out.upstreams.push(RouteUpstreamCfg {
+            name: u.id.clone(),
+            endpoint,
+            model: u.model.clone(),
+            api_key: String::new(),
+            api_key_env,
+            api_key_file,
+            insecure_tls: u.insecure_tls,
+            context_window: (u.context_window != 0).then_some(u.context_window),
+            tags: u.tags.clone(),
+            tier: u.tier.map(|t| t.as_str().to_string()).unwrap_or_default(),
+            input_cost: (u.input_cost != 0.0).then_some(u.input_cost),
+        });
+    }
+    let prefer = |p: &agent_core::RoutePreferSpec| {
+        if !p.policy.is_empty() {
+            tracing::warn!(
+                policy = %p.policy,
+                "prefer.policy is live-signal ordering for the registry-backed router \
+                 (model-router 04); the startup loader ignores it"
+            );
+        }
+        RoutePreferCfg {
+            tags: p.tags.clone(),
+            tier: p.tier.map(|t| t.as_str().to_string()).unwrap_or_default(),
+            upstreams: p.upstreams.clone(),
+        }
+    };
+    for r in &mrc.policy.rules {
+        out.rules.push(RouteRuleCfg {
+            match_: RouteMatchCfg {
+                role: r
+                    .match_
+                    .role
+                    .map(|x| x.as_str().to_string())
+                    .unwrap_or_default(),
+                task_mode: r
+                    .match_
+                    .task_mode
+                    .map(|m| m.as_str().to_string())
+                    .unwrap_or_default(),
+                min_context: r.match_.min_context,
+            },
+            prefer: prefer(&r.prefer),
+        });
+    }
+    out.default_prefer = prefer(&mrc.policy.default_prefer);
+    if mrc.policy.failure_threshold != 0 {
+        out.failure_threshold = mrc.policy.failure_threshold as usize;
+    }
+    if mrc.policy.cooldown_secs != 0 {
+        out.cooldown_secs = u64::from(mrc.policy.cooldown_secs);
+    }
+    Ok(out)
+}
+
+/// Build the `[registry] store` backend (model-router 03) — the provider
+/// registry control plane held for `--serve-provider-registry`, metered so
+/// mutations count and the fleet gauge stays current. `file` (the default)
+/// serves the model-router textproto bundle; when `[agent] model_router_config`
+/// is set, THAT file is served — one file for both the startup loader and the
+/// control plane.
+#[cfg(feature = "registry")]
+fn resolve_provider_registry(
+    cfg: &Config,
+    metrics: &Metrics,
+) -> anyhow::Result<Option<Arc<dyn agent_core::ProviderRegistry>>> {
+    let store: Option<Arc<dyn agent_core::ProviderRegistry>> = match cfg.registry.store.as_str() {
+        "" => None,
+        "file" => {
+            let path = if cfg.agent.model_router_config.is_empty() {
+                expand_tilde(&cfg.registry.file)
+            } else {
+                expand_tilde(&cfg.agent.model_router_config)
+            };
+            Some(Arc::new(agent_registry::FileRegistry::new(path)))
+        }
+        #[cfg(feature = "registry-sqlite")]
+        "sqlite" => Some(Arc::new(agent_registry::SqliteRegistry::open(
+            expand_tilde(&cfg.registry.path),
+        )?)),
+        #[cfg(not(feature = "registry-sqlite"))]
+        "sqlite" => anyhow::bail!(
+            "[registry] store = \"sqlite\" requires building with the `registry-sqlite` feature"
+        ),
+        #[cfg(feature = "grpc")]
+        "grpc" => {
+            let ep = crate::registry::grpc_client_endpoint(
+                &cfg.grpc.provider_registry.endpoint,
+                agent_grpc::constants::PROVIDER_REGISTRY,
+            );
+            Some(Arc::new(agent_grpc::client::GrpcRegistry::connect(&ep)?))
+        }
+        other => anyhow::bail!("unknown [registry] store `{other}`"),
+    };
+    Ok(store.map(|s| crate::metered::registry(s, metrics.clone())))
 }
 
 /// Build the `[graph] store` backend and, for a non-empty document, compile it
@@ -2664,5 +2851,187 @@ mod seam_builder_tests {
             "gate-only doc: no distillation"
         );
         assert_eq!(cfg.agent.provider, "consensus", "gate overlay applied");
+    }
+}
+
+// The `--model-router-config` textproto startup loader (model-router 03):
+// scenario file → the same `[route]` config the TOML path builds from.
+#[cfg(all(test, feature = "registry"))]
+mod model_router_config_tests {
+    use super::*;
+
+    fn mrc_text() -> &'static str {
+        r#"
+        upstreams {
+          id: "kimi"
+          kind: "openai-compat"
+          enabled: true
+          base_url: "https://kimi.example/v1"
+          model: "kimi-k3"
+          api_key_ref: "file:~/keys/kimi"
+          context_window: 262144
+          tags: "reasoning"
+          tier: POOL_TIER_HEAVY
+          input_cost: 0.6
+        }
+        upstreams {
+          id: "glm"
+          kind: "openai-compat"
+          enabled: true
+          base_url: "https://glm.example/v1"
+          model: "glm-5.2"
+          api_key_ref: "env:GLM_KEY"
+          insecure_tls: true
+        }
+        upstreams {
+          id: "benched"
+          kind: "openai-compat"
+          enabled: false
+          base_url: "https://benched.example/v1"
+          model: "m"
+        }
+        policy {
+          rules {
+            match { role: ROUTE_ROLE_JUDGE task_mode: TASK_MODE_DEBUG min_context: 4096 }
+            prefer { tags: "reasoning" tier: POOL_TIER_HEAVY }
+          }
+          default_prefer { upstreams: "kimi" upstreams: "glm" }
+          failure_threshold: 5
+          cooldown_secs: 60
+        }
+        "#
+    }
+
+    fn parsed() -> agent_core::ModelRouterConfig {
+        let cfg = agent_registry::textproto::parse(mrc_text()).expect("parses");
+        cfg.validate().expect("valid");
+        cfg
+    }
+
+    #[test]
+    fn positive_full_mapping_onto_route_cfg() {
+        let rc = route_cfg_from(&parsed(), "test.textproto").expect("maps");
+        assert_eq!(rc.upstreams.len(), 2, "the disabled card is not built");
+        let kimi = &rc.upstreams[0];
+        assert_eq!(kimi.name, "kimi");
+        assert_eq!(kimi.endpoint, "https://kimi.example/v1");
+        assert_eq!(kimi.model, "kimi-k3");
+        assert_eq!(kimi.api_key_file, "~/keys/kimi");
+        assert!(kimi.api_key_env.is_empty());
+        assert!(kimi.api_key.is_empty(), "never a raw key");
+        assert_eq!(kimi.context_window, Some(262_144));
+        assert_eq!(kimi.tags, vec!["reasoning"]);
+        assert_eq!(kimi.tier, "heavy");
+        assert_eq!(kimi.input_cost, Some(0.6));
+        let glm = &rc.upstreams[1];
+        assert_eq!(glm.api_key_env, "GLM_KEY");
+        assert!(glm.insecure_tls);
+        assert_eq!(glm.context_window, None, "0 = inherit the global window");
+        // Policy: typed enums → the canonical strings the strict parser accepts.
+        assert_eq!(rc.rules.len(), 1);
+        assert_eq!(rc.rules[0].match_.role, "judge");
+        assert_eq!(rc.rules[0].match_.task_mode, "debug");
+        assert_eq!(rc.rules[0].match_.min_context, 4096);
+        assert_eq!(rc.rules[0].prefer.tier, "heavy");
+        assert_eq!(rc.default_prefer.upstreams, vec!["kimi", "glm"]);
+        assert_eq!(rc.failure_threshold, 5);
+        assert_eq!(rc.cooldown_secs, 60);
+        // The mapped config passes the SAME strict policy build the TOML uses.
+        build_route_policy(&rc).expect("one build path");
+    }
+
+    #[test]
+    fn positive_zero_breaker_settings_keep_defaults() {
+        let mut mrc = parsed();
+        mrc.policy.failure_threshold = 0;
+        mrc.policy.cooldown_secs = 0;
+        let rc = route_cfg_from(&mrc, "t").expect("maps");
+        let dflt = crate::config::RouteCfg::default();
+        assert_eq!(rc.failure_threshold, dflt.failure_threshold);
+        assert_eq!(rc.cooldown_secs, dflt.cooldown_secs);
+    }
+
+    #[test]
+    fn positive_registered_name_kind_maps_to_empty_endpoint() {
+        let mut mrc = parsed();
+        mrc.upstreams[0].kind = String::new();
+        mrc.upstreams[0].base_url = String::new();
+        let rc = route_cfg_from(&mrc, "t").expect("maps");
+        assert!(
+            rc.upstreams[0].endpoint.is_empty(),
+            "registry-name resolution"
+        );
+    }
+
+    #[test]
+    fn negative_unbuildable_kinds_fail_closed() {
+        for kind in ["anthropic", "grpc"] {
+            let mut mrc = parsed();
+            mrc.upstreams[0].kind = kind.into();
+            let err = route_cfg_from(&mrc, "t").expect_err("not yet buildable");
+            assert!(err.to_string().contains("not yet buildable"), "{err}");
+        }
+        // openai-compat without a base_url is likewise an error, not a guess.
+        let mut mrc = parsed();
+        mrc.upstreams[0].base_url = String::new();
+        assert!(route_cfg_from(&mrc, "t").is_err());
+    }
+
+    #[test]
+    fn negative_missing_file_is_a_startup_error() {
+        let mut cfg = Config::minimal_for_test();
+        cfg.agent.model_router_config = "/nonexistent/mrc.textproto".into();
+        let err = apply_model_router_config(&mut cfg).expect_err("missing file");
+        assert!(
+            err.to_string().contains("reading model-router config"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn adversarial_malformed_file_fails_closed_and_route_untouched() {
+        let dir = agent_testkit::tempdir();
+        let path = dir.join("bad.textproto");
+        std::fs::write(&path, "upstreams { id: \"a\" bogus: 1 }").unwrap();
+        let mut cfg = Config::minimal_for_test();
+        cfg.agent.model_router_config = path.to_string_lossy().into_owned();
+        assert!(apply_model_router_config(&mut cfg).is_err());
+        assert!(cfg.route.upstreams.is_empty(), "no partial load");
+    }
+
+    #[test]
+    fn adversarial_raw_secret_in_file_fails_validation() {
+        let dir = agent_testkit::tempdir();
+        let path = dir.join("secret.textproto");
+        std::fs::write(
+            &path,
+            r#"upstreams { id: "a" kind: "openai-compat" enabled: true base_url: "http://h/v1" api_key_ref: "sk-raw-secret" }"#,
+        )
+        .unwrap();
+        let mut cfg = Config::minimal_for_test();
+        cfg.agent.model_router_config = path.to_string_lossy().into_owned();
+        let err = apply_model_router_config(&mut cfg).expect_err("raw key");
+        assert!(!err.to_string().contains("sk-raw"), "never echoed: {err}");
+    }
+
+    #[test]
+    fn positive_loader_replaces_the_toml_route_block_wholesale() {
+        let dir = agent_testkit::tempdir();
+        let path = dir.join("mrc.textproto");
+        std::fs::write(&path, mrc_text()).unwrap();
+        let mut cfg = Config::minimal_for_test();
+        cfg.agent.provider = "task-router".into();
+        cfg.route.upstreams.push(crate::config::RouteUpstreamCfg {
+            name: "toml-legacy".into(),
+            endpoint: "http://old/v1".into(),
+            ..Default::default()
+        });
+        cfg.agent.model_router_config = path.to_string_lossy().into_owned();
+        apply_model_router_config(&mut cfg).expect("loads");
+        assert!(
+            cfg.route.upstreams.iter().all(|u| u.name != "toml-legacy"),
+            "one authority, never a merge"
+        );
+        assert_eq!(cfg.route.upstreams.len(), 2);
     }
 }

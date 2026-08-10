@@ -11,8 +11,8 @@ leak) and must pass `nix develop -c nix flake check`.
 | — | Design directory | — | — | — | — | — | ✅ **merged** (PR #229) |
 | 01 | [Rich metadata](01-metadata.md) (context/cost/tags + pool key-file/TLS) | ✅ | — | — | ✅ | ✅ | ✅ **merged** (PR #229) |
 | 02 | [Task-aware routing](02-routing.md) (routing engine + `TaskRouter` + `[route]` policy) | ✅ | — | ✅ | ✅ | ✅ | ✅ **merged** (PR #229) |
-| 02b | [`RouteHint` threading](02b-hint-threading.md) (hint on the request · task-mode axis · per-call roles · decision metrics) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ **built** (`feat/model-router-02b`) |
-| 03 | [Config + registry control plane](03-registry-proto.md) (textproto bootstrap + `ProviderRegistryService`) | ✅ | ✅ | ✅ | ✅ | ✅ | **planned** |
+| 02b | [`RouteHint` threading](02b-hint-threading.md) (hint on the request · task-mode axis · per-call roles · decision metrics) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ **merged** (PR #236) |
+| 03 | [Config + registry control plane](03-registry-proto.md) (textproto bootstrap + `ProviderRegistryService`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ **built** (`feat/model-router-03`) |
 | 04 | [Registry-backed routing](04-registry-backed.md) (consume + seed + live-signal ordering + per-upstream metrics) | ✅ | — | ✅ | ✅ | ✅ | **planned** |
 
 ## Build order = dependency order
@@ -121,6 +121,46 @@ leak) and must pass `nix develop -c nix flake check`.
   default Kimi preference per call; (2) the background distiller routed by its
   stamped role with **no named pin** — `route.select role=summarize rule=rule0
   chosen=glm` inside the `distill.exchange` span while the main turn used Kimi.
+
+- **03 as built** (branch `feat/model-router-03`): the full control plane in five gated
+  phases. As-built deviations from the spec: **`RoutePolicy` carries
+  `default_prefer` + breaker fields** (the spec's thin `default_policy` string lost
+  the TOML's expressiveness); **`RouteMatch` has no `tags_required`** (the 02 engine
+  has no tag *constraint*, only tag preference — additive later if the engine grows
+  one); **kind is a string** (`openai-compat`/`anthropic`/`grpc`/`""`, matching the
+  config-string→factory philosophy; a new `Upstream` message + `ProviderRegistryService`
+  in `upstream.proto`, additive, **no buf baseline bump**). The seam currency lives in
+  `agent-core` (`Upstream`/`RoutePolicySpec`/… + `ApiKeyRef::parse`, which rejects raw
+  values *without echoing them*); `Error::Registry` maps `not found…` → `NotFound`,
+  rest → `InvalidArgument`. **agent-registry** crate: memory/file/sqlite stores share one
+  `ops` module (validate→clamp→cap can't drift); the file store is the *same* textproto
+  bundle the loader reads (absent = empty registry, invalid = every op fails closed,
+  atomic temp+rename); sqlite stores prost-encoded blobs behind `registry-sqlite`.
+  **Loader**: `--model-router-config` (> env > config key) REPLACES `[route]` wholesale
+  and builds through the existing factory chain — one build path; kinds
+  `anthropic`/`grpc` are stored but **not yet loader-buildable** (fail closed with a
+  clear message); a non-empty `prefer.policy` (`cost|latency|least-loaded`) is
+  validated + stored but warns-ignored until 04's live signals; `route()`/`health()`
+  on a plain store answer with static health (live numbers arrive in 04).
+  Shipped scenario files in `config/model-router/` with an `examples.rs` fixture gate
+  (the crane `.textproto` filter's regression test). Serve/dial on **50084/9634**
+  (`--serve-provider-registry`, `[registry] store`, `[grpc.provider_registry]`),
+  `MeteredRegistry` → `agent_registry_mutations_total{op}` +
+  `agent_registry_upstreams{enabled}`. Gates: four-class+adversarial tables at every
+  layer (core validate, textproto shape-vs-meaning, store CRUD, wire roundtrips tcp+uds,
+  CLI e2e over real HTTP, config-roundtrip fixtures 8+9), `registry_route` iai bench
+  (~79k Ir / 250k ceiling over a 50-card fleet), dhat put/route/delete churn budget in
+  leak.nix. Live-verified with grpcurl: Route explains rule+why, Health lists the
+  fleet, a traversal id gets `InvalidArgument`, and a dangling `file:` key ref fails
+  the provider build closed.
+- **FIXED a second pre-existing hermetic break on main** (exposed by the 03
+  full-gate run, same caching phenomenon as the `.textproto` filter break):
+  `checks.cargo-machete` fails on pristine `8d33a3b` — `agent-graph` (`prost`,
+  `tracing`), `agent-digest` (`agent-retry`, `tracing`) and `agent-ast`
+  (`serde`) declare dependencies nothing references (verified by sweep across
+  src/tests/benches); cached check results had masked it. Removed the six dead
+  dep lines (plus `tracing` from the new `agent-registry`, and `prost` moved
+  behind `registry-sqlite` where its only use lives).
 
 ## Cross-cutting invariants (every increment)
 

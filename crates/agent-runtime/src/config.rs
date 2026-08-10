@@ -76,6 +76,8 @@ pub struct Config {
     #[serde(default)]
     pub graph: GraphCfg,
     #[serde(default)]
+    pub registry: RegistryCfg,
+    #[serde(default)]
     pub mode: ModeCfg,
     #[serde(default)]
     pub dimensions: DimensionsCfg,
@@ -634,6 +636,46 @@ fn default_graph_store() -> String {
 
 pub(crate) fn default_graph_file() -> String {
     ".agent/graph.textproto".to_string()
+}
+
+/// The provider-registry seam (`[registry]`, model-router 03): the model
+/// router's fleet + policy control plane behind `--serve-provider-registry`.
+/// Default: `store = "file"` — the seam is live out of the box over the
+/// model-router textproto bundle (an ABSENT file is simply an empty registry;
+/// when `[agent] model_router_config` is set, THAT file is served — one file,
+/// both jobs). `store = ""` switches the seam off entirely.
+#[derive(Debug, Deserialize)]
+pub struct RegistryCfg {
+    /// "file" (default) | "sqlite" (feature `registry-sqlite`) | "grpc" (a
+    /// central registry service) | "" (off).
+    #[serde(default = "default_registry_store")]
+    pub store: String,
+    /// Textproto bundle path (`file` backend only).
+    #[serde(default = "default_registry_file")]
+    pub file: String,
+    /// SQLite path (`sqlite` backend only).
+    #[serde(default = "default_registry_path")]
+    pub path: String,
+}
+
+impl Default for RegistryCfg {
+    fn default() -> Self {
+        Self {
+            store: default_registry_store(),
+            file: default_registry_file(),
+            path: default_registry_path(),
+        }
+    }
+}
+
+fn default_registry_store() -> String {
+    "file".to_string()
+}
+fn default_registry_file() -> String {
+    ".agent/model-router.textproto".to_string()
+}
+fn default_registry_path() -> String {
+    ".agent/model-router.sqlite3".to_string()
 }
 fn default_instant_min_coverage() -> f32 {
     0.6
@@ -1701,6 +1743,8 @@ pub struct GrpcCfg {
     #[serde(default)]
     pub graph: GrpcSeamCfg,
     #[serde(default)]
+    pub provider_registry: GrpcSeamCfg,
+    #[serde(default)]
     pub review: GrpcSeamCfg,
     /// Not a seam: the opt-in `agent --serve-sessions` gateway (docs/design/portal),
     /// which hosts the `SessionRegistryService` + a *driving* `AgentSessionService`
@@ -1888,6 +1932,13 @@ pub struct AgentCfg {
     /// context. Off by default (nested loops multiply cost).
     #[serde(default)]
     pub subagents: bool,
+    /// Path to a `ModelRouterConfig` **textproto** scenario file (model-router
+    /// 03): loads the whole task-router fleet + `[route]` policy at startup —
+    /// replacing the TOML `[route]` block — with no gRPC server involved. Also
+    /// settable as `--model-router-config FILE` / `AGENT_MODEL_ROUTER_CONFIG`.
+    /// Empty = off. A missing/invalid file is a startup error (fail closed).
+    #[serde(default)]
+    pub model_router_config: String,
     /// Maximum delegation depth (levels of nested `delegate`).
     #[serde(default = "default_subagent_depth")]
     pub subagent_max_depth: usize,
@@ -2158,6 +2209,7 @@ impl Config {
                 parallel_tools: true,
                 tool_timeout_secs: default_tool_timeout(),
                 subagents: false,
+                model_router_config: String::new(),
                 subagent_max_depth: default_subagent_depth(),
             },
             provider: ProviderCfg {
@@ -2211,6 +2263,7 @@ impl Config {
             digest: DigestCfg::default(),
             instant: InstantCfg::default(),
             graph: GraphCfg::default(),
+            registry: RegistryCfg::default(),
             mode: ModeCfg::default(),
             dimensions: DimensionsCfg::default(),
             review: ReviewCfg::default(),

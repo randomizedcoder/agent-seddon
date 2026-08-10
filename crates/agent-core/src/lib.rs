@@ -61,6 +61,11 @@ pub enum Error {
     Metrics(String),
     #[error("graph error: {0}")]
     Graph(String),
+    /// Provider-registry seam (model-router 03): a rejected card / id / policy
+    /// or a store failure. Messages starting with `not found` map to gRPC
+    /// `NotFound`; the rest to `InvalidArgument` (a bad request, not a fault).
+    #[error("registry error: {0}")]
+    Registry(String),
     /// The service is over capacity and is asking the caller to back off — maps to
     /// gRPC `RESOURCE_EXHAUSTED`, which the client retries with backoff (not a fault).
     #[error("overloaded: {0}")]
@@ -2251,6 +2256,380 @@ pub trait PromptStore: Send + Sync {
     /// situational system fragments folded in right after the head (index 1), matching
     /// the loop's placement — so this answers *"show me the prompt for this situation"*.
     async fn preview_assembled(&self, ctx: &PromptContext, goal: &str) -> Result<Vec<Message>>;
+}
+
+// ---------------------------------------------------------------------------
+// Seam: ProviderRegistry (model-router 03) — the fleet + routing policy
+// ---------------------------------------------------------------------------
+
+/// Longest `base_url` accepted on an [`Upstream`] card.
+pub const MAX_UPSTREAM_URL_LEN: usize = 2_048;
+/// Longest `api_key_ref` (`env:NAME` / `file:/path`) accepted on a card.
+pub const MAX_API_KEY_REF_LEN: usize = 512;
+/// Longest `model` / `version` string accepted on a card.
+pub const MAX_UPSTREAM_MODEL_LEN: usize = 256;
+/// Most capability tags per card, and the longest single tag.
+pub const MAX_UPSTREAM_TAGS: usize = 32;
+pub const MAX_UPSTREAM_TAG_LEN: usize = 64;
+/// Most upstream cards one registry holds (a fleet of 10–50 is the design
+/// target; 512 is generous headroom, not an invitation).
+pub const MAX_REGISTRY_UPSTREAMS: usize = 512;
+/// Most rules a [`RoutePolicySpec`] may carry.
+pub const MAX_ROUTE_RULES: usize = 128;
+/// Ceiling on `max_retries` / `max_concurrency` after clamping (hostile or
+/// fat-fingered values must not turn into unbounded retry storms or FD use).
+pub const MAX_UPSTREAM_RETRIES: u32 = 16;
+pub const MAX_UPSTREAM_CONCURRENCY: u32 = 4_096;
+/// Size cap on a `ModelRouterConfig` textproto file, applied before parsing.
+pub const MAX_MODEL_ROUTER_CONFIG_BYTES: usize = 1024 * 1024;
+
+/// One routable upstream definition + metadata — the "model card" the provider
+/// registry stores and the model router routes over (model-router 03).
+///
+/// `api_key_ref` is a kind-prefixed *reference* (`env:NAME` / `file:/path`),
+/// **never** the secret value: keys resolve on the host that builds the concrete
+/// provider (see [`ApiKeyRef`]), so no secret is ever at rest in a store or on
+/// the wire.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Upstream {
+    /// Path-safe segment (it may become a storage path / metric label).
+    pub id: String,
+    /// `"openai-compat"` | `"anthropic"` | `"grpc"` | `""` (resolve `id` as a
+    /// registered provider name, like a `[[route.upstreams]]` entry with no
+    /// endpoint).
+    pub kind: String,
+    pub enabled: bool,
+    pub base_url: String,
+    pub model: String,
+    /// `env:NAME` or `file:/path` — never a key. Empty = unauthenticated.
+    pub api_key_ref: String,
+    pub insecure_tls: bool,
+    /// Optional API version tag (provider-kind specific).
+    pub version: String,
+    pub max_retries: u32,
+    /// Per-upstream context window; `0` = unknown (never filtered on context).
+    pub context_window: u32,
+    pub max_output_tokens: u32,
+    pub supports_tools: bool,
+    pub supports_vision: bool,
+    pub supports_response_format: bool,
+    /// Free-form capability tags (`reasoning`, `long-context`, `cheap`, …).
+    pub tags: Vec<String>,
+    /// Per-Mtok cost hints (clamped non-negative).
+    pub input_cost: f32,
+    pub output_cost: f32,
+    /// `None` ⇒ medium (matches the TOML default).
+    pub tier: Option<PoolTier>,
+    pub weight: f32,
+    pub max_concurrency: u32,
+}
+
+impl Upstream {
+    /// Clamp hostile *numbers* in place, fail-soft (mirrors
+    /// [`RouteHint::sanitize`]): NaN/negative/infinite costs and weight ⇒ `0.0`,
+    /// windows capped to [`MAX_ROUTE_MIN_CONTEXT`], retries/concurrency capped.
+    /// Structural problems (a bad id, an over-long field) are [`Self::validate`]'s
+    /// job and fail closed instead.
+    pub fn sanitize(&mut self) {
+        for v in [
+            &mut self.input_cost,
+            &mut self.output_cost,
+            &mut self.weight,
+        ] {
+            if !v.is_finite() || *v < 0.0 {
+                *v = 0.0;
+            }
+        }
+        self.context_window = self.context_window.min(MAX_ROUTE_MIN_CONTEXT);
+        self.max_output_tokens = self.max_output_tokens.min(MAX_ROUTE_MIN_CONTEXT);
+        self.max_retries = self.max_retries.min(MAX_UPSTREAM_RETRIES);
+        self.max_concurrency = self.max_concurrency.min(MAX_UPSTREAM_CONCURRENCY);
+    }
+
+    /// Fail-closed structural validation: the id must be a path-safe segment,
+    /// the kind one of the known set, every string within its cap, and the
+    /// `api_key_ref` a well-formed reference. Every field is untrusted (a gRPC
+    /// peer or a hand-edited file wrote it).
+    pub fn validate(&self) -> Result<()> {
+        let err = |m: String| Err(Error::Registry(m));
+        if !safe_segment(&self.id) {
+            return err(format!(
+                "upstream id {:?} is not a path-safe segment",
+                truncate_for_log(&self.id)
+            ));
+        }
+        if !matches!(
+            self.kind.as_str(),
+            "" | "openai-compat" | "anthropic" | "grpc"
+        ) {
+            return err(format!(
+                "upstream `{}`: unknown kind {:?}",
+                self.id,
+                truncate_for_log(&self.kind)
+            ));
+        }
+        if self.base_url.len() > MAX_UPSTREAM_URL_LEN {
+            return err(format!("upstream `{}`: base_url too long", self.id));
+        }
+        if self.model.len() > MAX_UPSTREAM_MODEL_LEN || self.version.len() > MAX_UPSTREAM_MODEL_LEN
+        {
+            return err(format!("upstream `{}`: model/version too long", self.id));
+        }
+        if self.tags.len() > MAX_UPSTREAM_TAGS {
+            return err(format!(
+                "upstream `{}`: {} tags (cap {MAX_UPSTREAM_TAGS})",
+                self.id,
+                self.tags.len()
+            ));
+        }
+        if let Some(t) = self.tags.iter().find(|t| t.len() > MAX_UPSTREAM_TAG_LEN) {
+            return err(format!(
+                "upstream `{}`: tag {:?} too long",
+                self.id,
+                truncate_for_log(t)
+            ));
+        }
+        ApiKeyRef::parse(&self.api_key_ref)
+            .map_err(|e| Error::Registry(format!("upstream `{}`: {e}", self.id)))?;
+        Ok(())
+    }
+}
+
+/// A parsed [`Upstream::api_key_ref`]: where the key lives, never the key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApiKeyRef<'a> {
+    /// No key (an unauthenticated / local endpoint).
+    None,
+    /// Resolve from this environment variable on the consuming host.
+    Env(&'a str),
+    /// Resolve from this file path (tilde-expanded) on the consuming host.
+    File(&'a str),
+}
+
+impl<'a> ApiKeyRef<'a> {
+    /// Parse the kind-prefixed form. Anything that is neither empty nor
+    /// `env:`/`file:`-prefixed is rejected — a raw value here is exactly the
+    /// "secret in the config" mistake this type exists to prevent, so it fails
+    /// closed (and the error never echoes the value).
+    pub fn parse(s: &'a str) -> std::result::Result<Self, String> {
+        if s.len() > MAX_API_KEY_REF_LEN {
+            return Err("api_key_ref too long".into());
+        }
+        if s.is_empty() {
+            return Ok(ApiKeyRef::None);
+        }
+        if let Some(name) = s.strip_prefix("env:") {
+            if name.is_empty() {
+                return Err("api_key_ref `env:` names no variable".into());
+            }
+            return Ok(ApiKeyRef::Env(name));
+        }
+        if let Some(path) = s.strip_prefix("file:") {
+            if path.is_empty() {
+                return Err("api_key_ref `file:` names no path".into());
+            }
+            return Ok(ApiKeyRef::File(path));
+        }
+        // Never echo the value: it may BE a pasted secret.
+        Err("api_key_ref must be `env:NAME` or `file:/path` (never a raw key)".into())
+    }
+}
+
+/// Bound an untrusted string for an error message (never echo unbounded input).
+fn truncate_for_log(s: &str) -> String {
+    const CAP: usize = 64;
+    if s.len() <= CAP {
+        s.to_string()
+    } else {
+        let mut end = CAP;
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &s[..end])
+    }
+}
+
+/// Live state of one upstream — runtime-only, never persisted by any store.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct UpstreamHealth {
+    pub id: String,
+    pub state: PoolMemberState,
+    pub in_flight: u32,
+    pub latency_ms_ewma: u32,
+    pub saturated: bool,
+    pub consecutive_failures: u32,
+}
+
+/// The `match` half of a routing rule — the seam currency mirroring the
+/// `[[route.rules]] match` TOML (typed here, so a typo'd role/mode cannot
+/// exist at this layer).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RouteMatchSpec {
+    pub task_mode: Option<TaskMode>,
+    pub role: Option<RouteRole>,
+    pub min_context: u32,
+}
+
+/// The `prefer` half — ordering preferences for the survivors.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RoutePreferSpec {
+    pub tags: Vec<String>,
+    pub tier: Option<PoolTier>,
+    pub upstreams: Vec<String>,
+    /// Live-signal ordering policy: `""` | `"cost"` | `"latency"` |
+    /// `"least-loaded"`. Validated on ingest; consumed by the registry-backed
+    /// router (model-router 04).
+    pub policy: String,
+}
+
+impl RoutePreferSpec {
+    fn validate(&self, ctx: &str) -> Result<()> {
+        if !matches!(
+            self.policy.as_str(),
+            "" | "cost" | "latency" | "least-loaded"
+        ) {
+            return Err(Error::Registry(format!(
+                "{ctx}: unknown prefer.policy {:?}",
+                truncate_for_log(&self.policy)
+            )));
+        }
+        if self.tags.len() > MAX_UPSTREAM_TAGS || self.upstreams.len() > MAX_REGISTRY_UPSTREAMS {
+            return Err(Error::Registry(format!("{ctx}: prefer lists too long")));
+        }
+        if self.tags.iter().any(|t| t.len() > MAX_UPSTREAM_TAG_LEN)
+            || self.upstreams.iter().any(|u| u.len() > MAX_SEGMENT_LEN)
+        {
+            return Err(Error::Registry(format!("{ctx}: prefer entry too long")));
+        }
+        Ok(())
+    }
+}
+
+/// One routing rule: when `match_` holds, order survivors by `prefer`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RouteRuleSpec {
+    pub match_: RouteMatchSpec,
+    pub prefer: RoutePreferSpec,
+}
+
+/// The declarative routing policy plus the router-wide breaker settings
+/// (`0` ⇒ the built-in default at build time).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RoutePolicySpec {
+    pub rules: Vec<RouteRuleSpec>,
+    pub default_prefer: RoutePreferSpec,
+    pub failure_threshold: u32,
+    pub cooldown_secs: u32,
+}
+
+impl RoutePolicySpec {
+    /// Clamp hostile numbers fail-soft (rule `min_context` capped).
+    pub fn sanitize(&mut self) {
+        for r in &mut self.rules {
+            r.match_.min_context = r.match_.min_context.min(MAX_ROUTE_MIN_CONTEXT);
+        }
+    }
+
+    /// Fail-closed structural validation (rule count, prefer shapes). A prefer
+    /// naming an unknown upstream stays *lenient* — it mis-sorts, it cannot
+    /// mis-fire — matching the TOML contract (02b).
+    pub fn validate(&self) -> Result<()> {
+        if self.rules.len() > MAX_ROUTE_RULES {
+            return Err(Error::Registry(format!(
+                "{} route rules (cap {MAX_ROUTE_RULES})",
+                self.rules.len()
+            )));
+        }
+        for (i, r) in self.rules.iter().enumerate() {
+            r.prefer.validate(&format!("rule #{i}"))?;
+        }
+        self.default_prefer.validate("default_prefer")
+    }
+}
+
+/// The whole model-router config — the message a `*.textproto` scenario file
+/// deserializes into, and the unit the `file` store persists atomically.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ModelRouterConfig {
+    pub upstreams: Vec<Upstream>,
+    pub policy: RoutePolicySpec,
+}
+
+impl ModelRouterConfig {
+    /// Clamp every hostile number in place (cards + policy), fail-soft.
+    pub fn sanitize(&mut self) {
+        for u in &mut self.upstreams {
+            u.sanitize();
+        }
+        self.policy.sanitize();
+    }
+
+    /// Fail-closed whole-config validation: the count cap, every card, unique
+    /// ids, no self-reference, and the policy. A config that fails here must
+    /// never be partially loaded.
+    pub fn validate(&self) -> Result<()> {
+        if self.upstreams.len() > MAX_REGISTRY_UPSTREAMS {
+            return Err(Error::Registry(format!(
+                "{} upstreams (cap {MAX_REGISTRY_UPSTREAMS})",
+                self.upstreams.len()
+            )));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for u in &self.upstreams {
+            u.validate()?;
+            if u.id == "task-router" {
+                return Err(Error::Registry(
+                    "an upstream must not be named `task-router` (the router itself)".into(),
+                ));
+            }
+            if !seen.insert(u.id.as_str()) {
+                return Err(Error::Registry(format!("duplicate upstream id `{}`", u.id)));
+            }
+        }
+        self.policy.validate()
+    }
+}
+
+/// What the router would pick for a hint, and why — pure introspection, no
+/// dispatch. `rule` is the bounded label form (`"ruleN"` / `"default"` /
+/// `"override"`) shared with the `agent_router_decisions_total` metric.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RouteDecision {
+    /// `""` ⇒ no eligible upstream.
+    pub chosen: String,
+    /// Eligible ids, most-preferred first.
+    pub order: Vec<String>,
+    pub rule: String,
+    /// One human-readable sentence (never config or prompt text).
+    pub why: String,
+}
+
+/// The provider-registry seam (model-router 03): the control plane holding the
+/// upstream fleet + routing policy, mirroring [`PromptStore`]'s CRUD discipline.
+/// Every argument is untrusted (an `id` may become a storage path): stores
+/// validate fail-closed and clamp numbers on ingest. `get`/`enable` of an
+/// unknown id is an `Err` whose message starts with `not found` (the wire layer
+/// maps it to `NotFound`); `delete` of an unknown id is `Ok(false)`, not an
+/// error.
+#[async_trait]
+pub trait ProviderRegistry: Send + Sync {
+    /// Every card, enabled or not (the fleet view).
+    async fn list(&self) -> Result<Vec<Upstream>>;
+    async fn get(&self, id: &str) -> Result<Upstream>;
+    /// Upsert; returns the stored (sanitized) card.
+    async fn put(&self, card: Upstream) -> Result<Upstream>;
+    async fn delete(&self, id: &str) -> Result<bool>;
+    /// Toggle without a full `put`; returns the updated card.
+    async fn enable(&self, id: &str, enabled: bool) -> Result<Upstream>;
+    async fn get_policy(&self) -> Result<RoutePolicySpec>;
+    async fn put_policy(&self, policy: RoutePolicySpec) -> Result<RoutePolicySpec>;
+    /// What would the router pick for `hint` right now, and why. Introspection
+    /// only — nothing is dialed.
+    async fn route(&self, hint: &RouteHint) -> Result<RouteDecision>;
+    /// Live state per upstream. A plain store (no traffic flowing through it)
+    /// reports every enabled card `Healthy` with zero counters — the live
+    /// numbers arrive when the router itself feeds the registry (increment 04).
+    async fn health(&self) -> Result<Vec<UpstreamHealth>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -5437,5 +5816,152 @@ mod tests {
     fn route_hint_sanitize(#[case] mut hint: RouteHint, #[case] expect: RouteHint) {
         hint.sanitize();
         assert_eq!(hint, expect);
+    }
+
+    // --- ProviderRegistry cards + config (model-router 03) ---
+
+    fn card(id: &str) -> Upstream {
+        Upstream {
+            id: id.into(),
+            kind: "openai-compat".into(),
+            enabled: true,
+            base_url: "http://127.0.0.1:1/v1".into(),
+            model: "m".into(),
+            ..Default::default()
+        }
+    }
+
+    #[rstest]
+    #[case::positive_empty("", ApiKeyRef::None)]
+    #[case::positive_env("env:MY_KEY", ApiKeyRef::Env("MY_KEY"))]
+    #[case::positive_file("file:/run/secrets/key", ApiKeyRef::File("/run/secrets/key"))]
+    #[case::positive_file_tilde("file:~/keys/k", ApiKeyRef::File("~/keys/k"))]
+    fn api_key_ref_parses(#[case] s: &str, #[case] expect: ApiKeyRef<'_>) {
+        assert_eq!(ApiKeyRef::parse(s).expect("parses"), expect);
+    }
+
+    #[rstest]
+    #[case::negative_raw_value("sk-abc123-secret")]
+    #[case::negative_bare_env_prefix("env:")]
+    #[case::negative_bare_file_prefix("file:")]
+    #[case::negative_wrong_scheme("vault:secret/llm")]
+    fn api_key_ref_rejects_malformed(#[case] s: &str) {
+        assert!(ApiKeyRef::parse(s).is_err());
+    }
+
+    /// `adversarial_`: a pasted secret must be rejected AND never echoed back in
+    /// the error (the message would land in logs).
+    #[test]
+    fn adversarial_api_key_ref_never_echoes_the_value() {
+        let secret = "sk-live-abcdef0123456789";
+        let err = ApiKeyRef::parse(secret).expect_err("raw value rejected");
+        assert!(
+            !err.contains(secret),
+            "error must not echo the value: {err}"
+        );
+        let overlong = format!("env:{}", "x".repeat(MAX_API_KEY_REF_LEN));
+        let err = ApiKeyRef::parse(&overlong).expect_err("over-length rejected");
+        assert!(
+            !err.contains("xxxx"),
+            "error must not echo the value: {err}"
+        );
+    }
+
+    #[rstest]
+    #[case::positive_minimal(card("kimi"), true)]
+    #[case::positive_registered_kind(
+        Upstream { kind: String::new(), ..card("local") }, true)]
+    #[case::negative_unknown_kind(
+        Upstream { kind: "carrier-pigeon".into(), ..card("x") }, false)]
+    #[case::negative_raw_key(
+        Upstream { api_key_ref: "sk-raw-secret".into(), ..card("x") }, false)]
+    #[case::adversarial_traversal_id(card("../../etc/passwd"), false)]
+    #[case::adversarial_separator_id(card("a/b"), false)]
+    #[case::adversarial_leading_dash_id(card("-rf"), false)]
+    #[case::adversarial_empty_id(card(""), false)]
+    #[case::boundary_id_at_cap(card(&"a".repeat(MAX_SEGMENT_LEN)), true)]
+    #[case::adversarial_id_over_cap(card(&"a".repeat(MAX_SEGMENT_LEN + 1)), false)]
+    #[case::adversarial_overlong_url(
+        Upstream { base_url: "x".repeat(MAX_UPSTREAM_URL_LEN + 1), ..card("x") }, false)]
+    #[case::adversarial_tag_flood(
+        Upstream { tags: (0..=MAX_UPSTREAM_TAGS).map(|i| format!("t{i}")).collect(), ..card("x") },
+        false)]
+    fn upstream_validate(#[case] u: Upstream, #[case] ok: bool) {
+        assert_eq!(u.validate().is_ok(), ok, "{u:?}");
+    }
+
+    /// `adversarial_`: hostile numbers are clamped fail-soft, never kept.
+    #[test]
+    fn adversarial_upstream_sanitize_clamps_hostile_numbers() {
+        let mut u = card("x");
+        u.input_cost = f32::NAN;
+        u.output_cost = f32::NEG_INFINITY;
+        u.weight = -3.0;
+        u.context_window = u32::MAX;
+        u.max_retries = u32::MAX;
+        u.max_concurrency = u32::MAX;
+        u.sanitize();
+        assert_eq!(u.input_cost, 0.0);
+        assert_eq!(u.output_cost, 0.0);
+        assert_eq!(u.weight, 0.0);
+        assert_eq!(u.context_window, MAX_ROUTE_MIN_CONTEXT);
+        assert_eq!(u.max_retries, MAX_UPSTREAM_RETRIES);
+        assert_eq!(u.max_concurrency, MAX_UPSTREAM_CONCURRENCY);
+    }
+
+    #[rstest]
+    #[case::positive_empty_policy("", true)]
+    #[case::positive_cost("cost", true)]
+    #[case::positive_latency("latency", true)]
+    #[case::positive_least_loaded("least-loaded", true)]
+    #[case::negative_typo("least-loded", false)]
+    #[case::negative_llm("ask-an-llm", false)]
+    fn route_prefer_policy_strings(#[case] policy: &str, #[case] ok: bool) {
+        let spec = RoutePolicySpec {
+            default_prefer: RoutePreferSpec {
+                policy: policy.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(spec.validate().is_ok(), ok);
+    }
+
+    #[test]
+    fn corner_model_router_config_rejects_duplicates_and_self() {
+        let dup = ModelRouterConfig {
+            upstreams: vec![card("a"), card("a")],
+            ..Default::default()
+        };
+        assert!(dup
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate"));
+        let selfref = ModelRouterConfig {
+            upstreams: vec![card("task-router")],
+            ..Default::default()
+        };
+        assert!(selfref.validate().is_err());
+    }
+
+    #[test]
+    fn boundary_model_router_config_upstream_count_cap() {
+        let fleet = |n: usize| ModelRouterConfig {
+            upstreams: (0..n).map(|i| card(&format!("u{i}"))).collect(),
+            ..Default::default()
+        };
+        assert!(fleet(MAX_REGISTRY_UPSTREAMS).validate().is_ok());
+        assert!(fleet(MAX_REGISTRY_UPSTREAMS + 1).validate().is_err());
+    }
+
+    #[test]
+    fn boundary_route_rules_cap() {
+        let rules = |n: usize| RoutePolicySpec {
+            rules: (0..n).map(|_| RouteRuleSpec::default()).collect(),
+            ..Default::default()
+        };
+        assert!(rules(MAX_ROUTE_RULES).validate().is_ok());
+        assert!(rules(MAX_ROUTE_RULES + 1).validate().is_err());
     }
 }

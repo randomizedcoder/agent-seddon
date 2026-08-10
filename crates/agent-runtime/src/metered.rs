@@ -441,6 +441,96 @@ impl agent_core::Sandbox for MeteredSandbox {
     }
 }
 
+/// Wrap a [`ProviderRegistry`](agent_core::ProviderRegistry) so each
+/// control-plane mutation emits a `registry.<op>` span, counts under
+/// `agent_registry_mutations_total{op}`, and refreshes the
+/// `agent_registry_upstreams{enabled}` fleet gauge (model-router 03). Reads
+/// delegate untouched — this is a low-traffic operator surface, not a hot path.
+#[cfg(feature = "registry")]
+pub(crate) fn registry(
+    inner: Arc<dyn agent_core::ProviderRegistry>,
+    m: Metrics,
+) -> Arc<dyn agent_core::ProviderRegistry> {
+    Arc::new(MeteredRegistry { inner, metrics: m })
+}
+
+#[cfg(feature = "registry")]
+struct MeteredRegistry {
+    inner: Arc<dyn agent_core::ProviderRegistry>,
+    metrics: Metrics,
+}
+
+#[cfg(feature = "registry")]
+impl MeteredRegistry {
+    /// Refresh the fleet gauge after a successful mutation (best-effort — a
+    /// failed re-list must not fail the mutation that already succeeded).
+    async fn refresh_gauge(&self) {
+        if let Ok(cards) = self.inner.list().await {
+            let enabled = cards.iter().filter(|c| c.enabled).count();
+            self.metrics
+                .set_registry_upstreams(enabled, cards.len() - enabled);
+        }
+    }
+}
+
+#[cfg(feature = "registry")]
+#[async_trait]
+impl agent_core::ProviderRegistry for MeteredRegistry {
+    async fn list(&self) -> Result<Vec<agent_core::Upstream>> {
+        self.inner.list().await
+    }
+    async fn get(&self, id: &str) -> Result<agent_core::Upstream> {
+        self.inner.get(id).await
+    }
+    async fn put(&self, card: agent_core::Upstream) -> Result<agent_core::Upstream> {
+        let span = tracing::info_span!("registry.put", id = %card.id);
+        let out = self.inner.put(card).instrument(span).await;
+        if out.is_ok() {
+            self.metrics.on_registry_mutation("put");
+            self.refresh_gauge().await;
+        }
+        out
+    }
+    async fn delete(&self, id: &str) -> Result<bool> {
+        let span = tracing::info_span!("registry.delete", id = %id);
+        let out = self.inner.delete(id).instrument(span).await;
+        if out.is_ok() {
+            self.metrics.on_registry_mutation("delete");
+            self.refresh_gauge().await;
+        }
+        out
+    }
+    async fn enable(&self, id: &str, enabled: bool) -> Result<agent_core::Upstream> {
+        let span = tracing::info_span!("registry.enable", id = %id, enabled);
+        let out = self.inner.enable(id, enabled).instrument(span).await;
+        if out.is_ok() {
+            self.metrics.on_registry_mutation("enable");
+            self.refresh_gauge().await;
+        }
+        out
+    }
+    async fn get_policy(&self) -> Result<agent_core::RoutePolicySpec> {
+        self.inner.get_policy().await
+    }
+    async fn put_policy(
+        &self,
+        policy: agent_core::RoutePolicySpec,
+    ) -> Result<agent_core::RoutePolicySpec> {
+        let span = tracing::info_span!("registry.put_policy");
+        let out = self.inner.put_policy(policy).instrument(span).await;
+        if out.is_ok() {
+            self.metrics.on_registry_mutation("put_policy");
+        }
+        out
+    }
+    async fn route(&self, hint: &agent_core::RouteHint) -> Result<agent_core::RouteDecision> {
+        self.inner.route(hint).await
+    }
+    async fn health(&self) -> Result<Vec<agent_core::UpstreamHealth>> {
+        self.inner.health().await
+    }
+}
+
 /// Wrap a [`SessionStore`](agent_core::SessionStore) so each mutation emits a
 /// `session.<op>` span (`session`/`id` attrs) + counts the op; `prune` also counts
 /// reclaimed objects.
@@ -2548,5 +2638,91 @@ mod route_event_tests {
             ) >= 1.0
         );
         assert!(probe.delta(&m, "agent_router_decisions_total", None) == 0.0);
+    }
+}
+
+// The metered provider-registry decorator (model-router 03): mutations count
+// under `agent_registry_mutations_total{op}` and refresh the
+// `agent_registry_upstreams{enabled}` fleet gauge; reads stay unmetered.
+#[cfg(all(test, feature = "registry"))]
+mod registry_metrics_tests {
+    use super::*;
+    use agent_testkit::observe::MetricsProbe;
+
+    /// Sync tests + an internal runtime (like the other metered tests): the
+    /// callsite guard must not be held across an async fn's await points.
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("rt")
+            .block_on(f)
+    }
+
+    fn card(id: &str) -> agent_core::Upstream {
+        agent_core::Upstream {
+            id: id.into(),
+            kind: "openai-compat".into(),
+            enabled: true,
+            base_url: "http://127.0.0.1:1/v1".into(),
+            model: "m".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn positive_mutations_count_and_fleet_gauge_tracks() {
+        let _guard = callsite_guard();
+        let m = Metrics::new();
+        let reg = registry(
+            std::sync::Arc::new(agent_registry::MemoryRegistry::empty()),
+            m.clone(),
+        );
+        let probe = MetricsProbe::new(&m);
+        block_on(async {
+            reg.put(card("a")).await.expect("put");
+            reg.put(card("b")).await.expect("put");
+            reg.enable("b", false).await.expect("disable");
+            reg.delete("a").await.expect("delete");
+        });
+        assert_eq!(
+            probe.delta(&m, "agent_registry_mutations_total", Some("op=\"put\"")),
+            2.0
+        );
+        assert_eq!(
+            probe.delta(&m, "agent_registry_mutations_total", Some("op=\"enable\"")),
+            1.0
+        );
+        assert_eq!(
+            probe.delta(&m, "agent_registry_mutations_total", Some("op=\"delete\"")),
+            1.0
+        );
+        // Final fleet: only the disabled `b` remains.
+        assert_eq!(
+            probe.delta(&m, "agent_registry_upstreams", Some("enabled=\"false\"")),
+            1.0
+        );
+        assert_eq!(
+            probe.delta(&m, "agent_registry_upstreams", Some("enabled=\"true\"")),
+            0.0
+        );
+    }
+
+    #[test]
+    fn negative_rejected_mutation_counts_nothing() {
+        let _guard = callsite_guard();
+        let m = Metrics::new();
+        let reg = registry(
+            std::sync::Arc::new(agent_registry::MemoryRegistry::empty()),
+            m.clone(),
+        );
+        let probe = MetricsProbe::new(&m);
+        let mut bad = card("x");
+        bad.api_key_ref = "raw-secret".into();
+        assert!(block_on(reg.put(bad)).is_err());
+        assert_eq!(
+            probe.delta(&m, "agent_registry_mutations_total", None),
+            0.0,
+            "a rejected mutation must not count"
+        );
     }
 }
