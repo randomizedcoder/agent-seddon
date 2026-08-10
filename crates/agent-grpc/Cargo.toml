@@ -26,6 +26,9 @@ tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 
 [dev-dependencies]
+# The real task-router, so the loadtest example can drive a ROUTED provider
+# behind the served seam (model-router 02b: hints + policy under wire load).
+agent-providers = { workspace = true, features = ["provider-router"] }
 # The real session store, so the round-trip asserts the store's own properties
 # (content-addressed dedup, undo-as-pointer-move) across the wire, not a double.
 agent-session = { workspace = true, features = ["session-file"] }

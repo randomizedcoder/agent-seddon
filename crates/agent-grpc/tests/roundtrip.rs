@@ -70,6 +70,96 @@ async fn provider_complete(#[case] transport: Transport) {
     assert!(client.capabilities().supports_tools);
 }
 
+/// Records the request the SERVER-side provider actually received, so a test
+/// can assert on what survived the wire decode.
+struct HintCapture {
+    seen: std::sync::Mutex<Vec<Option<agent_core::RouteHint>>>,
+}
+#[async_trait]
+impl LlmProvider for HintCapture {
+    fn capabilities(&self) -> ModelCapabilities {
+        caps()
+    }
+    async fn complete(
+        &self,
+        req: CompletionRequest,
+    ) -> agent_core::Result<agent_core::CompletionResponse> {
+        self.seen.lock().unwrap().push(req.route);
+        Ok(agent_core::CompletionResponse {
+            message: Message::assistant("seen"),
+            finish_reason: "stop".into(),
+            usage: None,
+        })
+    }
+}
+
+/// A benign 02b `RouteHint` survives the provider seam intact — the routing
+/// signals a remote task-router needs all arrive.
+#[rstest]
+#[case::tcp(Transport::Tcp)]
+#[case::uds(Transport::Uds)]
+#[tokio::test(flavor = "multi_thread")]
+async fn positive_route_hint_survives_the_provider_seam(#[case] transport: Transport) {
+    let provider = Arc::new(HintCapture {
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+    let (dial, _srv) = spawn(transport, provider_router(provider.clone())).await;
+    let client = GrpcProvider::connect(&dial, caps()).unwrap();
+
+    let hint = agent_core::RouteHint {
+        task_mode: Some(agent_core::TaskMode::Debug),
+        role: Some(agent_core::RouteRole::Judge),
+        min_context: 32_000,
+        max_cost: Some(2.5),
+        tier: Some(agent_core::PoolTier::Heavy),
+        override_upstream: Some("kimi".into()),
+    };
+    let req = CompletionRequest {
+        messages: vec![Message::user("hi")],
+        route: Some(hint.clone()),
+        ..Default::default()
+    };
+    client.complete(req).await.unwrap();
+    assert_eq!(provider.seen.lock().unwrap()[0], Some(hint));
+}
+
+/// A hostile hint is sanitized AT the wire boundary (the peer is untrusted):
+/// hostile numbers and an over-long override are gone before the server-side
+/// provider ever sees the request; the valid enum signals survive.
+#[rstest]
+#[case::tcp(Transport::Tcp)]
+#[case::uds(Transport::Uds)]
+#[tokio::test(flavor = "multi_thread")]
+async fn adversarial_hostile_route_hint_sanitized_at_the_wire(#[case] transport: Transport) {
+    let provider = Arc::new(HintCapture {
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+    let (dial, _srv) = spawn(transport, provider_router(provider.clone())).await;
+    let client = GrpcProvider::connect(&dial, caps()).unwrap();
+
+    let req = CompletionRequest {
+        messages: vec![Message::user("hi")],
+        route: Some(agent_core::RouteHint {
+            task_mode: Some(agent_core::TaskMode::Review),
+            role: Some(agent_core::RouteRole::Verify),
+            min_context: u32::MAX,
+            max_cost: Some(f32::NAN),
+            tier: None,
+            override_upstream: Some("x".repeat(64 * 1024)),
+        }),
+        ..Default::default()
+    };
+    client.complete(req).await.unwrap();
+
+    let seen = provider.seen.lock().unwrap();
+    let got = seen[0].as_ref().expect("hint arrived");
+    assert_eq!(got.role, Some(agent_core::RouteRole::Verify));
+    assert_eq!(got.task_mode, Some(agent_core::TaskMode::Review));
+    assert_eq!(got.min_context, agent_core::MAX_ROUTE_MIN_CONTEXT, "capped");
+    assert_eq!(got.max_cost, None, "NaN dropped at decode");
+    assert_eq!(got.override_upstream, None, "over-long override dropped");
+}
+
 /// The 67-byte minimal 1x1 PNG (deterministic fixture, no assets).
 const TINY_PNG: &[u8] = &[
     0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,

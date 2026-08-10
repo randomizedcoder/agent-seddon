@@ -282,6 +282,66 @@ async fn ramp(seam: &str, transport: &'static str, conc: usize, requests: usize)
             })
             .await
         }
+        // The ROUTED provider seam (model-router 02b): a real `TaskRouter` over
+        // three scripted upstreams behind the served seam, every request carrying
+        // a `RouteHint` (role + task mode) that crosses the wire, is sanitized at
+        // decode, and drives the per-call policy decision under load. The rule
+        // steers Judge-role calls to the "judge" upstream — so the whole
+        // hint → decode → resolve → dispatch chain is on the measured path.
+        "provider-routed" => {
+            use agent_providers::route::{Match, Policy, Prefer, Role, Rule};
+            use agent_providers::{RouterUpstream, TaskRouter};
+            let scripted = || -> Arc<dyn LlmProvider> {
+                Arc::new(ScriptedProvider::new(vec![CompletionResponse {
+                    message: Message::assistant("ok"),
+                    finish_reason: "stop".into(),
+                    usage: Some(Usage::default()),
+                }]))
+            };
+            let ups = ["gen", "judge", "cheap"]
+                .into_iter()
+                .map(|id| RouterUpstream {
+                    id: id.into(),
+                    tags: vec![],
+                    tier: agent_core::PoolTier::Medium,
+                    input_cost: 1.0,
+                    provider: scripted(),
+                })
+                .collect();
+            let policy = Policy {
+                rules: vec![Rule {
+                    match_: Match {
+                        role: Some(Role::Judge),
+                        ..Default::default()
+                    },
+                    prefer: Prefer {
+                        upstreams: vec!["judge".into()],
+                        ..Default::default()
+                    },
+                }],
+                default_prefer: Prefer {
+                    upstreams: vec!["gen".into()],
+                    ..Default::default()
+                },
+            };
+            let router: Arc<dyn LlmProvider> =
+                Arc::new(TaskRouter::new(ups, policy).expect("router"));
+            let (dial, _s) = spawn(listen(transport), srv::provider_router(router)).await;
+            let client = Arc::new(GrpcProvider::connect(&dial, caps()).unwrap());
+            run_load(seam, transport, conc, requests, move || {
+                let client = client.clone();
+                async move {
+                    let mut req = core_req();
+                    req.route = Some(agent_core::RouteHint {
+                        role: Some(agent_core::RouteRole::Judge),
+                        task_mode: Some(agent_core::TaskMode::Review),
+                        ..Default::default()
+                    });
+                    timed(client.complete(req)).await
+                }
+            })
+            .await
+        }
         "tokenizer" => {
             let tok = Arc::new(agent_tokenizer::ApproxTokenizer::new());
             let (dial, _s) = spawn(listen(transport), srv::tokenizer_router(tok)).await;
@@ -519,7 +579,13 @@ async fn streaming(transport: &'static str, conc: usize, streams: usize) -> Load
 // CLI + report
 // ---------------------------------------------------------------------------
 
-const SEAMS: &[&str] = &["provider", "tokenizer", "prompt", "memory"];
+const SEAMS: &[&str] = &[
+    "provider",
+    "provider-routed",
+    "tokenizer",
+    "prompt",
+    "memory",
+];
 
 #[tokio::main]
 async fn main() {

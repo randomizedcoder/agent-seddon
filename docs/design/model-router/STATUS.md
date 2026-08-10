@@ -90,7 +90,31 @@ leak) and must pass `nix develop -c nix flake check`.
   New `route_stress` (1,600 calls / 32 tasks / 30-member flapping fleet / hostile
   hints: liveness, exact Decided+NoCandidate accounting, post-storm recovery) and
   `route_leak` dhat budget (failover path frees all scratch, <120 blocks/call,
-  registered in `nix/checks/leak.nix`). (Kimi + GLM, keys via
+  registered in `nix/checks/leak.nix`).
+- **02b infrastructure round** (same branch): every existing test tier covers the
+  routed path in its own idiom. **CLI e2e over real HTTP**
+  (`agent-cli/tests/route_e2e.rs`, `FakeLlm` harness): the shipped binary routes to
+  the preferred upstream only (the fallback sees zero bytes), fails over between
+  real endpoints on 429s, a `role = "main"` rule flips the choice (the 02b stamped
+  hint reaches the policy through the binary), and a typo'd rule exits nonzero
+  with zero requests sent. **config-roundtrip.nix**: a task-router fixture with
+  role+mode rules must `--check-config` clean; a typo'd task_mode and a
+  self-referencing upstream must fail closed — through the shipped binary's real
+  loader/factory chain. **gRPC wire boundary** (`roundtrip.rs`, tcp+uds): a benign
+  hint survives the provider seam intact; a hostile one is sanitized at decode
+  (NaN cost dropped, min_context capped, 64KiB override gone) before the
+  server-side provider sees it. **Wire load** (`loadtest` example +
+  loadtest-smoke): new `provider-routed` ramp seam — a real `TaskRouter` over
+  scripted upstreams behind the served seam, every request carrying a role+mode
+  hint, so hint→decode→resolve→dispatch is the measured path (clean at conc 16,
+  0 shed/err, ~25k req/s UDS loopback).
+- **FIXED a pre-existing hermetic break on main** (exposed by the
+  config-roundtrip extension): the crane source filter dropped `.textproto`, so
+  `config/cognition/` was EMPTY in filtered sources and
+  `agent-graph/tests/examples.rs` failed any fresh `nix build .#agent` /
+  `.#checks…test` (verified failing on pristine `b781cf8`; caching had masked it
+  since the cognition-graph merge). One-line filter clause in `nix/default.nix`.
+- **02b live-verified** against the runpod endpoints (Kimi + GLM, keys via
   `api_key_file`): (1) a debug-cue prompt flipped the classifier (`mode.switch
   other→debug`) and the MAIN turn matched the `task_mode = "debug"` rule —
   `route.select role=main task_mode=debug rule=rule1 chosen=glm`, overriding the
