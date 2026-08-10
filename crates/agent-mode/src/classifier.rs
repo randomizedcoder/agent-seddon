@@ -31,6 +31,7 @@ const MODES: [TaskMode; 6] = [
 pub struct HybridClassifier {
     pool: Option<Arc<dyn LlmPool>>,
     vote_fanout: usize,
+    escalate: bool,
 }
 
 impl HybridClassifier {
@@ -38,14 +39,27 @@ impl HybridClassifier {
         Self {
             pool,
             vote_fanout: 3,
+            escalate: false,
         }
     }
 
-    /// Ask the light tier to label the mode, tally, and return the plurality.
-    async fn vote(&self, pool: &Arc<dyn LlmPool>, prompt: &str) -> Option<ModeVerdict> {
-        // Bound the untrusted prompt before it reaches a model.
-        let excerpt: String = prompt.chars().take(MAX_PROMPT_CHARS).collect();
-        let req = CompletionRequest {
+    /// The escalation hook (model-router 04's deferred mechanism, `[mode]
+    /// escalate`): when the light-tier vote SPLITS (no strict majority), ask
+    /// ONE heavy-tier member to break the tie. Off by default — one extra
+    /// heavy call per ambiguous prompt is a real cost; the adaptive
+    /// when-to-escalate policy stays deferred (design README).
+    pub fn with_escalation(mut self, on: bool) -> Self {
+        self.escalate = on;
+        self
+    }
+
+    /// The one classify request shape, at either tier. The per-call role
+    /// (model-router 04) lets a routing member steer the vote to Classify-fit
+    /// models; the escalated form also carries the tier FLOOR in the hint so a
+    /// routing member honors it like the pool does. The fan-out MECHANISM
+    /// stays the pool's (a vote wants N independent answers).
+    fn classify_req(excerpt: &str, tier_floor: Option<PoolTier>) -> CompletionRequest {
+        CompletionRequest {
             messages: vec![Message::user(format!(
                 "Classify the user's request into exactly ONE task mode. Reply with a single \
                  lowercase word from this list and nothing else:\n\
@@ -62,17 +76,24 @@ impl HybridClassifier {
             max_tokens: 4,
             temperature: 0.0,
             response_format: None,
-            // The per-call role (model-router 04): a routing member (or a
-            // future role-aware pool) steers the vote to Classify-fit models;
-            // a plain member ignores it. The fan-out MECHANISM stays the
-            // pool's (a vote wants N independent answers).
             route: Some(agent_core::RouteHint {
                 role: Some(agent_core::RouteRole::Classify),
+                tier: tier_floor,
                 ..Default::default()
             }),
-        };
+        }
+    }
+
+    /// Ask the light tier to label the mode, tally, and return the plurality.
+    async fn vote(&self, pool: &Arc<dyn LlmPool>, prompt: &str) -> Option<ModeVerdict> {
+        // Bound the untrusted prompt before it reaches a model.
+        let excerpt: String = prompt.chars().take(MAX_PROMPT_CHARS).collect();
         let results = pool
-            .complete_all(req, PoolTier::Light, self.vote_fanout)
+            .complete_all(
+                Self::classify_req(&excerpt, None),
+                PoolTier::Light,
+                self.vote_fanout,
+            )
             .await;
         // One vote per member that answered with a recognizable label.
         let mut votes: Vec<TaskMode> = Vec::new();
@@ -93,6 +114,36 @@ impl HybridClassifier {
             .max_by_key(|m| votes.iter().filter(|v| *v == *m).count())
             .expect("MODES is non-empty");
         let count = votes.iter().filter(|v| **v == winner).count() as u32;
+        // The escalation hook: a SPLIT vote (no strict majority) is exactly the
+        // "classifier disagreement" signal — one heavy-tier member breaks the
+        // tie. Fail-soft: a dead/unparseable heavy answer keeps the plurality
+        // verdict below, never a worse outcome than not escalating.
+        if self.escalate && u64::from(count) * 2 <= u64::from(voters) {
+            let heavy = pool
+                .complete_all(
+                    Self::classify_req(&excerpt, Some(PoolTier::Heavy)),
+                    PoolTier::Heavy,
+                    1,
+                )
+                .await;
+            let tie_break = heavy.iter().find_map(|r| {
+                r.response
+                    .as_ref()
+                    .and_then(|resp| parse_mode_label(&resp.message.content_text()))
+            });
+            if let Some(mode) = tie_break {
+                return Some(ModeVerdict {
+                    mode,
+                    // Above the default confidence floor by design: an
+                    // escalated verdict exists to be actionable.
+                    confidence: 0.7,
+                    reason: format!(
+                        "escalated: split vote {count}/{voters}, heavy said {}",
+                        mode.as_str()
+                    ),
+                });
+            }
+        }
         Some(ModeVerdict {
             mode: winner,
             confidence: (count as f32 / voters as f32).clamp(0.0, 1.0),
@@ -406,5 +457,130 @@ mod tests {
         let c = HybridClassifier::new(Some(pool(vec![Some("other")])));
         let v = c.classify(&ctx(&huge)).await;
         assert_eq!(v.mode, TaskMode::Other);
+    }
+
+    // ---- escalation hook (model-router 04 follow-up) ---------------------
+
+    /// A tier-aware double: light-tier fan-out answers `light`; a heavy-tier
+    /// request answers `heavy`. Records the tiers + hint tiers requested.
+    struct TieredPool {
+        light: Vec<Option<&'static str>>,
+        heavy: Option<&'static str>,
+        calls: std::sync::Mutex<Vec<(PoolTier, Option<PoolTier>)>>,
+    }
+
+    #[async_trait]
+    impl LlmPool for TieredPool {
+        fn name(&self) -> &str {
+            "tiered"
+        }
+        async fn health(&self) -> HealthReport {
+            HealthReport::default()
+        }
+        async fn complete_all(
+            &self,
+            req: CompletionRequest,
+            tier: PoolTier,
+            _fanout: usize,
+        ) -> Vec<PoolMemberResult> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((tier, req.route.as_ref().and_then(|h| h.tier)));
+            let answers: Vec<Option<&'static str>> = match tier {
+                PoolTier::Heavy => vec![self.heavy],
+                _ => self.light.clone(),
+            };
+            answers
+                .iter()
+                .enumerate()
+                .map(|(i, a)| PoolMemberResult {
+                    member: format!("m{i}"),
+                    duration_ms: 1,
+                    response: a.map(|text| CompletionResponse {
+                        message: Message::assistant(text),
+                        finish_reason: "stop".into(),
+                        usage: None,
+                    }),
+                    error: a.is_none().then(|| "dead".to_string()),
+                })
+                .collect()
+        }
+        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse> {
+            unreachable!("classifier only fans out")
+        }
+    }
+
+    #[tokio::test]
+    async fn positive_split_vote_escalates_to_heavy_tie_breaker() {
+        let pool = Arc::new(TieredPool {
+            // 1-1-1 split: no strict majority.
+            light: vec![Some("debug"), Some("implement"), Some("design")],
+            heavy: Some("debug"),
+            calls: std::sync::Mutex::new(vec![]),
+        });
+        let c = HybridClassifier::new(Some(pool.clone() as Arc<dyn LlmPool>))
+            .with_escalation(true);
+        let v = c.classify(&ctx("look at the thing")).await;
+        assert_eq!(v.mode, TaskMode::Debug);
+        assert_eq!(v.confidence, 0.7);
+        assert!(v.reason.contains("escalated"), "{}", v.reason);
+        // Exactly one Light fan-out + one Heavy tie-breaker, and the escalated
+        // request carries the tier FLOOR in its hint for routing members.
+        let calls = pool.calls.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec![
+                (PoolTier::Light, None),
+                (PoolTier::Heavy, Some(PoolTier::Heavy))
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn negative_majority_vote_never_escalates() {
+        let pool = Arc::new(TieredPool {
+            light: vec![Some("debug"), Some("debug"), Some("implement")],
+            heavy: Some("design"),
+            calls: std::sync::Mutex::new(vec![]),
+        });
+        let c = HybridClassifier::new(Some(pool.clone() as Arc<dyn LlmPool>))
+            .with_escalation(true);
+        let v = c.classify(&ctx("look at the thing")).await;
+        assert_eq!(v.mode, TaskMode::Debug, "2/3 is a strict majority");
+        assert_eq!(pool.calls.lock().unwrap().len(), 1, "no heavy call");
+    }
+
+    #[tokio::test]
+    async fn corner_escalation_off_by_default_keeps_the_plurality() {
+        let pool = Arc::new(TieredPool {
+            light: vec![Some("debug"), Some("implement"), Some("design")],
+            heavy: Some("review"),
+            calls: std::sync::Mutex::new(vec![]),
+        });
+        let c = HybridClassifier::new(Some(pool.clone() as Arc<dyn LlmPool>));
+        let v = c.classify(&ctx("look at the thing")).await;
+        // Deterministic tie-break (the LAST tied mode in MODES order — the
+        // pinned max_by_key behaviour), no heavy call.
+        assert_eq!(v.mode, TaskMode::Design);
+        assert_eq!(pool.calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn adversarial_dead_or_garbled_heavy_falls_back_to_the_plurality() {
+        for heavy in [None, Some("quantum-vibes")] {
+            let pool = Arc::new(TieredPool {
+                light: vec![Some("debug"), Some("implement"), Some("design")],
+                heavy,
+                calls: std::sync::Mutex::new(vec![]),
+            });
+            let c = HybridClassifier::new(Some(pool as Arc<dyn LlmPool>))
+                .with_escalation(true);
+            let v = c.classify(&ctx("look at the thing")).await;
+            // Fail-soft: the split-vote plurality (last-tied MODES-order
+            // tie-break) stands; escalation never makes the outcome worse.
+            assert_eq!(v.mode, TaskMode::Design, "heavy={heavy:?}");
+            assert!(v.reason.contains("pool vote"), "{}", v.reason);
+        }
     }
 }

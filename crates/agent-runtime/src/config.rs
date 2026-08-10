@@ -831,6 +831,11 @@ pub struct ModeCfg {
     /// (a decisive deterministic hit switches immediately). Guards against thrash.
     #[serde(default = "default_hysteresis")]
     pub hysteresis: usize,
+    /// The escalation hook (model-router 04 follow-up): when the light-tier
+    /// vote SPLITS (no strict majority), ask ONE heavy-tier member to break
+    /// the tie. Off by default — one extra heavy call per ambiguous prompt.
+    #[serde(default)]
+    pub escalate: bool,
 }
 
 fn default_mode_classifier() -> String {
@@ -851,6 +856,7 @@ impl Default for ModeCfg {
             classifier: default_mode_classifier(),
             confidence_floor: default_confidence_floor(),
             hysteresis: default_hysteresis(),
+            escalate: false,
         }
     }
 }
