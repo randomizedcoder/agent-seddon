@@ -383,6 +383,7 @@ impl Session {
                 &self.tool_ctx,
                 &self.tool_schemas,
                 &mut self.pending_switch,
+                self.current_mode,
                 &self.events,
                 &self.session_metrics,
             )

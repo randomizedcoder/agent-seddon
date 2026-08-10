@@ -100,6 +100,7 @@ impl Verifier for LlmVerifier {
             max_tokens: VERIFY_MAX_TOKENS,
             temperature: 0.0,
             response_format: None,
+            route: None,
         };
         // Fail open on any provider error — a broken verifier must not block the loop.
         let Ok(resp) = self.provider.complete(req).await else {

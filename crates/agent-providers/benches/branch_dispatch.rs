@@ -65,6 +65,7 @@ fn setup() -> (BranchingProvider, CompletionRequest) {
         max_tokens: 256,
         temperature: 0.0,
         response_format: None,
+        route: None,
     };
     (provider, req)
 }

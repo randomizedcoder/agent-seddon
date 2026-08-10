@@ -476,12 +476,17 @@ cooldown_secs       = 30          # how long a breaker stays open before re-prob
 # name = "local-registry-member"      # no endpoint ⇒ resolve `name` via the registry
 # tier = "light"
 
-# Task-aware routing (the TaskRouter — model-router increment 02). Selected with
+# Task-aware routing (the TaskRouter — model-router increments 02 + 02b). Selected with
 # `[agent] provider = "task-router"`. Routes each request to a declaratively-preferred,
 # CAPABLE upstream and fails over on a retryable error — a fleet as one provider (e.g.
 # Kimi preferred, GLM fallback). An upstream's capability facts (context window, tools,
 # vision) are read live from the provider; tags/tier/input_cost are your routing
 # metadata. Keys are NEVER in this file: api_key > api_key_env > api_key_file.
+# Every request carries per-call signals (02b): the turn's classified task mode +
+# the calling role (main loop = main; distiller/objective = summarize; verifier =
+# verify; consensus critic / fork judge = judge) — rules can match both. A
+# named-reference pin ([digest]/[instant] provider, graph capability edge) always
+# beats the policy; a pin may itself name "task-router".
 # [route]
 # [[route.upstreams]]
 # name = "kimi"                        # inline endpoint ⇒ OpenAI-compatible provider
@@ -504,8 +509,15 @@ cooldown_secs       = 30          # how long a breaker stays open before re-prob
 # input_cost = 1.0
 #
 # # Ordered rules — the first whose `match` holds sets the ordering preference.
+# # A typo'd role/task_mode is a CONFIG ERROR at startup (never silently match-any).
 # [[route.rules]]
 # match  = { role = "review" }        # role: main|judge|classify|summarize|verify|review
+# prefer = { tags = ["reasoning"], tier = "heavy" }
+#
+# # Match the turn's classified task mode (02b) — e.g. debugging turns go to the
+# # strong reasoning model even when a cheaper one is generally preferred.
+# [[route.rules]]
+# match  = { task_mode = "debug" }    # review|implement|design|debug|explain|other
 # prefer = { tags = ["reasoning"], tier = "heavy" }
 #
 # # Applied when no rule matches — here: prefer kimi, fall back to glm.

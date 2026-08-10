@@ -62,6 +62,7 @@ impl HybridClassifier {
             max_tokens: 4,
             temperature: 0.0,
             response_format: None,
+            route: None,
         };
         let results = pool
             .complete_all(req, PoolTier::Light, self.vote_fanout)

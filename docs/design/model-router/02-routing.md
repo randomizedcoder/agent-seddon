@@ -1,9 +1,20 @@
 # 02 — Task-aware routing: `RouteHint`, `TaskRouter`, declarative policy
 
-Status: **planned** — see [`STATUS.md`](STATUS.md). Builds on [01](01-metadata.md)'s metadata.
+Status: ✅ **merged** (PR #229) — **as the engine slice only**; see [`STATUS.md`](STATUS.md).
+Builds on [01](01-metadata.md)'s metadata.
 This is the increment where the layer starts **routing by task**: a per-request `RouteHint`, a
 declarative `RoutePolicy` you author, and a `TaskRouter` `LlmProvider` that resolves the two
 against 01's model cards + the live pool signals.
+
+> **As built** (`agent-providers/src/route.rs` + `task_router.rs`): the deterministic
+> `Policy::resolve` engine, `[route]` TOML (`[[route.upstreams]]` + `[[route.rules]]` +
+> `[route.default_prefer]`), and the `TaskRouter` wired as `[agent] provider = "task-router"` —
+> but the hint is **derived from request shape** (tools/media presence) with a **fixed role per
+> router**, `Match` has no `task_mode`, `Prefer` has no live-signal `policy` ordering, and
+> `RouteHint` is **not** on `CompletionRequest`. The threading below (§"`RouteHint` on the
+> request", §"Wiring the hint at the call sites") is specified in
+> [02b](02b-hint-threading.md); live-signal ordering moved to [04](04-registry-backed.md).
+> The breaker is a reorder-to-back, not a hard filter — a dead upstream is tried last.
 
 > Still **in-process + TOML** — the policy lives in `[route]` config; [03](03-registry-proto.md)
 > lifts both the fleet and the policy into the gRPC control plane. Here we prove the routing
@@ -175,5 +186,8 @@ Via a new `RouterEvent` mapped in `record_pool_event`'s neighbour — `agent-pro
 
 ## Deferred to later increments
 
+- **Hint threading** — `RouteHint` on `CompletionRequest`, the `task_mode` axis, per-call roles,
+  override wiring, decision metrics ([02b](02b-hint-threading.md)).
 - The fleet + policy as gRPC-managed objects ([03](03-registry-proto.md)) — 02 reads TOML `[route]`.
-- Per-role internal-caller wiring at scale + per-upstream metrics ([04](04-registry-backed.md)).
+- Live-signal `prefer.policy` ordering, per-role wiring at scale + per-upstream metrics
+  ([04](04-registry-backed.md)).

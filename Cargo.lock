@@ -197,6 +197,7 @@ dependencies = [
  "agent-graph",
  "agent-prompt",
  "agent-proto",
+ "agent-providers",
  "agent-pty",
  "agent-retry",
  "agent-sandbox",

@@ -138,6 +138,18 @@ pub enum RouteEvent<'a> {
     SkippedUnhealthy { target: &'a str },
     /// Every candidate was exhausted.
     Exhausted,
+    /// The task-router's policy decision (02b): `chosen` won for this
+    /// `role`/`task_mode` under `rule` (`Some(index)` = the matched
+    /// `[[route.rules]]` entry, `None` = default preference or an override win).
+    Decided {
+        role: &'a str,
+        task_mode: &'a str,
+        rule: Option<usize>,
+        chosen: &'a str,
+    },
+    /// The hard filter rejected every upstream for this `role` — nothing was
+    /// even dialed (distinct from `Exhausted`, where dispatch failed).
+    NoCandidate { role: &'a str },
 }
 
 pub struct Router {
@@ -380,6 +392,7 @@ mod tests {
             max_tokens: 16,
             temperature: 0.0,
             response_format: None,
+            route: None,
         }
     }
 
@@ -560,6 +573,8 @@ mod tests {
                     RouteEvent::FellOver { from, .. } => format!("fellover:{from}"),
                     RouteEvent::SkippedUnhealthy { target } => format!("skipped:{target}"),
                     RouteEvent::Exhausted => "exhausted".into(),
+                    RouteEvent::Decided { chosen, .. } => format!("decided:{chosen}"),
+                    RouteEvent::NoCandidate { role } => format!("no-candidate:{role}"),
                 });
             }),
         );

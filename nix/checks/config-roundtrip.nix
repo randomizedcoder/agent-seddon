@@ -135,5 +135,57 @@ pkgs.runCommand "agent-config-roundtrip"
     printf '[agent\nprovider = "openai-compat"\n' > "$HOME/broken.toml"
     expect_fail broken "$HOME/broken.toml"
 
+    # 5) The task-router (model-router 02+02b): a routed fleet with role AND
+    #    task_mode rules must load and build through the real factory chain.
+    cat > "$HOME/route.toml" <<TOML
+    [agent]
+    provider    = "task-router"
+    policy      = "auto-approve"
+    working_dir = "$work"
+    [provider]
+    base_url = "http://127.0.0.1:1/v1"
+    model    = "unused"
+    api_key  = "unused"
+    [route]
+    [[route.upstreams]]
+    name = "kimi"
+    endpoint = "http://127.0.0.1:1/v1"
+    model = "m"
+    tags = ["reasoning"]
+    tier = "heavy"
+    [[route.upstreams]]
+    name = "glm"
+    endpoint = "http://127.0.0.1:2/v1"
+    model = "m"
+    [[route.rules]]
+    match  = { role = "judge" }
+    prefer = { tags = ["reasoning"], tier = "heavy" }
+    [[route.rules]]
+    match  = { task_mode = "debug", min_context = 4096 }
+    prefer = { upstreams = ["kimi"] }
+    [route.default_prefer]
+    upstreams = ["kimi", "glm"]
+    [memory]
+    backend = "file"
+    [metrics]
+    enabled = false
+    [search]
+    auto_index = false
+    [git]
+    auto_fetch_secs = 0
+    TOML
+    expect_ok route "$HOME/route.toml" \
+      "config: OK" \
+      "provider  = task-router"
+
+    # 6) Adversarial: a typo'd match constraint must fail the BUILD (02b strict
+    #    parsing) — never a rule that silently matches everything.
+    sed 's/task_mode = "debug"/task_mode = "reveiw"/' "$HOME/route.toml" > "$HOME/route-typo.toml"
+    expect_fail route-typo "$HOME/route-typo.toml"
+
+    # 7) Adversarial: the router must reject routing to itself.
+    sed 's/name = "glm"/name = "task-router"/' "$HOME/route.toml" > "$HOME/route-self.toml"
+    expect_fail route-self "$HOME/route-self.toml"
+
     echo "OK: representative configs load, build, and select the right impls; broken ones fail closed" > "$out"
   ''

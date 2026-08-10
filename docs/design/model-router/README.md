@@ -1,6 +1,9 @@
 # Model router & upstream registry — task-aware routing over a fleet of LLMs
 
-Status: **design** — not yet built. One gated PR per increment, based off `main` (do not
+Status: **in progress** — increments [01](01-metadata.md) + [02](02-routing.md) merged
+(PR #229, as the engine slice — see the [STATUS](STATUS.md) implementation log for the as-built
+deviations); [02b](02b-hint-threading.md)/[03](03-registry-proto.md)/[04](04-registry-backed.md)
+remain. One gated PR per increment, based off `main` (do not
 stack) — the [gpu-pool](../gpu-pool/README.md) / adaptive-cognition rhythm. Living tracker:
 [`STATUS.md`](STATUS.md).
 
@@ -59,6 +62,12 @@ Three gaps, one design:
   *"outlives an individual agent process … one process holds the registry while any number of
   agents drive it"*). `SessionRegistry` mints server-side UUIDs. A `ProviderRegistryService` is a
   direct mirror.
+- **Named-reference role routing** (cognition follow-ups, PR #232 — shipped after this design
+  was written): `[digest] provider`, `[instant] provider`, and graph node `provider` params /
+  capability edges pin a role slot to a *named* provider via `resolve_provider_ref`
+  (`registry.rs:1088`). Static pins, no policy or live signals — exactly the mechanism the
+  per-call `RouteHint` upgrades; the precedence contract (named pin wins; unpinned slots route
+  by policy; a pin may name `"task-router"`) is defined in [02b](02b-hint-threading.md).
 
 ## The design
 
@@ -94,13 +103,17 @@ The fleet lives in a service, not a TOML file (mirrors `PromptService`):
 ### 3. `RouteHint` — per-request routing signals (all four)
 
 Added as an optional field on `CompletionRequest` (core + `common.proto`, additive) so it
-travels with the request, including to a remote router:
+travels with the request, including to a remote router (lands in
+[02b](02b-hint-threading.md); the 02 engine already resolves all of these):
 
 - `task_mode` — the classified `TaskMode` (from `session.current_mode`).
 - `role` — the internal call-site (`main` | `judge` | `classify` | `summarize` | `verify` |
   `review`), so each subsystem routes to a fit model.
 - **Request requirements** — `min_context` (the prompt won't fit smaller models),
-  `needs_vision`, `needs_tools`, `max_cost`, `latency_target` — hard filters.
+  `needs_vision`, `needs_tools`, `max_cost`, `latency_target` — hard filters. (As refined in
+  [02b](02b-hint-threading.md): tools/vision are **derived from the request**, never asserted
+  by the hint — a hint can narrow the fleet but never clear a real requirement;
+  `latency_target` waits for the live snapshot in [04](04-registry-backed.md).)
 - `override_upstream` — an explicit id that bypasses classification when a caller already knows.
 
 ### 4. `RoutePolicy` — "tell it how to route"
@@ -218,10 +231,11 @@ Routing runs on **every** LLM call, and a registry dialed as `= "grpc"` reports 
 
 | # | Increment | What it adds |
 |---|---|---|
-| **01** | [Rich metadata](01-metadata.md) | per-upstream `context_window` + cost + capability `tags` on caps/member/config · pool-member `api_key_file`/`env` + `insecure_tls` (the Kimi+GLM enabler) · `PriceTable` plumbed · context-aware `is_capable` |
-| **02** | [Task-aware routing](02-routing.md) | `RouteHint` on `CompletionRequest` · `TaskRouter` `LlmProvider` · declarative `RoutePolicy` (TOML) · `session.current_mode` + requirements → hint |
-| **03** | [Registry control plane](03-registry-proto.md) | `upstream.proto` + **`ModelRouterConfig` textproto** loaded at startup (`--model-router-config <file>`, scenario files) · `ProviderRegistryService` (CRUD + Route + Health) · textproto/sqlite/grpc storage · `--serve-provider-registry` · SEAMS row |
-| **04** | [Registry-backed routing](04-registry-backed.md) | router/pool consume the registry (10–50) · TOML seeds it · per-role internal routing · per-upstream metrics |
+| **01** ✅ | [Rich metadata](01-metadata.md) | per-upstream `context_window` · pool-member `api_key_file`/`env` + `insecure_tls` (the Kimi+GLM enabler) · `tags`/`tier`/`input_cost` on `[[route.upstreams]]` (as-built split — see STATUS) |
+| **02** ✅ | [Task-aware routing](02-routing.md) | deterministic `route::Policy` engine · `TaskRouter` `LlmProvider` (fixed role, shape-derived hint) · declarative `[route]` TOML · breaker-as-reorder failover |
+| **02b** | [`RouteHint` threading](02b-hint-threading.md) | `RouteHint` on `CompletionRequest` (core + proto) · `task_mode` axis on `Match` · per-call roles at every internal call site (`RoleScoped`) · named-reference precedence contract · decision metrics + `route.select` span |
+| **03** | [Registry control plane](03-registry-proto.md) | `upstream.proto` + **`ModelRouterConfig` textproto** loaded at startup (`--model-router-config <file>`, scenario files) · `ProviderRegistryService` (CRUD + Route + Health, port 50084) · textproto/sqlite/grpc storage · `--serve-provider-registry` · SEAMS row |
+| **04** | [Registry-backed routing](04-registry-backed.md) | router/pool consume the registry (10–50) · TOML seeds it · live-signal `prefer.policy` ordering (`cost`/`latency`/`least-loaded`) · per-upstream metrics · escalation hook |
 
 Each is its own PR off `main` — **do not stack** (the code-review-flow lesson).
 

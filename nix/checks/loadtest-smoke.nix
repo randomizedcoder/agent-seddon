@@ -36,6 +36,9 @@ craneLib.mkCargoDerivation (
       echo "loadtest-smoke: ramp path runs clean ..."
       cargo run --release -p agent-grpc --example loadtest -- \
         --scenario ramp --seams tokenizer,memory --concurrency 4 --requests 40 --transport uds
+      echo "loadtest-smoke: ROUTED provider seam under wire load (02b hints on every request) ..."
+      cargo run --release -p agent-grpc --example loadtest -- \
+        --scenario ramp --seams provider-routed --concurrency 8 --requests 80 --transport uds
       echo "loadtest-smoke: full-loop concurrency + metric correlation runs clean ..."
       cargo run --release -p agent-runtime --example loadtest_loop -- \
         --concurrency 4 --runs 20

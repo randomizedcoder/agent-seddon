@@ -15,44 +15,23 @@
 //! Named under a `route` module (not re-exported) so it doesn't collide with the
 //! failover `RoutePolicy` in [`crate::router`].
 
-use agent_core::PoolTier;
+use agent_core::{PoolTier, TaskMode};
 
 /// The internal call-site a request originates from — one of the routing signals a
 /// rule can match on, so each subsystem is steerable to a fit-for-purpose model
 /// (a cheap model for `Classify`, a long-context one for `Summarize`, …).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Role {
-    #[default]
-    Main,
-    Judge,
-    Classify,
-    Summarize,
-    Verify,
-    Review,
-}
+/// Unified with the core taxonomy in 02b so a `CompletionRequest`'s
+/// `RouteHint` carries the same closed set the rules match on.
+pub use agent_core::RouteRole as Role;
 
-impl Role {
-    /// Parse a config role name; unknown / empty ⇒ `None` (a rule with no role
-    /// constraint matches any role rather than silently defaulting to `Main`).
-    pub fn parse(s: &str) -> Option<Self> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "main" => Some(Role::Main),
-            "judge" => Some(Role::Judge),
-            "classify" => Some(Role::Classify),
-            "summarize" => Some(Role::Summarize),
-            "verify" => Some(Role::Verify),
-            "review" => Some(Role::Review),
-            _ => None,
-        }
-    }
-}
-
-/// Per-request routing signals: the request's hard requirements, its role, and an
-/// optional explicit override. (The classified `TaskMode` joins this once it is
-/// threaded onto the request in a later slice.)
+/// Per-request routing signals: the request's hard requirements, its role and
+/// classified task mode, and an optional explicit override.
 #[derive(Debug, Clone, Default)]
 pub struct Hint {
     pub role: Role,
+    /// The classified task mode; `None` = not carried ⇒ mode-constrained rules
+    /// don't match (fail to the default, never guess).
+    pub task_mode: Option<TaskMode>,
     /// Minimum context window the request needs; `0` = unknown ⇒ not filtered on.
     pub min_context: u32,
     pub needs_vision: bool,
@@ -68,11 +47,13 @@ pub struct Hint {
 
 /// A lightweight, already-clamped view of one upstream the policy filters and orders
 /// over. The caller (the `TaskRouter`) builds these from live pool members + config,
-/// clamping hostile numbers before they reach here.
-#[derive(Debug, Clone)]
-pub struct UpstreamMeta {
-    pub id: String,
-    pub tags: Vec<String>,
+/// clamping hostile numbers before they reach here. A **borrowed view** since the
+/// low-hanging-fruit pass: building the fleet for a decision allocates nothing
+/// (the decision runs on every routed LLM call).
+#[derive(Debug, Clone, Copy)]
+pub struct UpstreamMeta<'a> {
+    pub id: &'a str,
+    pub tags: &'a [String],
     pub tier: PoolTier,
     /// `0` = unknown window (never filtered out on context).
     pub context_window: u32,
@@ -83,17 +64,41 @@ pub struct UpstreamMeta {
     pub supports_tools: bool,
 }
 
+/// A cheap context floor for a request that carries no `min_context`: total text
+/// chars / 4 (the usual ~4-chars-per-token heuristic), allocation-free, capped
+/// to [`agent_core::MAX_ROUTE_MIN_CONTEXT`]. A floor *filter* only — an
+/// upstream with an unknown (`0`) window is never filtered out, so an
+/// over-estimate fails soft.
+pub fn estimate_min_context(req: &agent_core::CompletionRequest) -> u32 {
+    let chars: usize = req
+        .messages
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .filter_map(|b| b.as_text())
+        .map(str::len)
+        .sum();
+    u32::try_from(chars / 4)
+        .unwrap_or(agent_core::MAX_ROUTE_MIN_CONTEXT)
+        .min(agent_core::MAX_ROUTE_MIN_CONTEXT)
+}
+
 /// The `match` half of a rule — every present condition must hold for it to fire.
 #[derive(Debug, Clone, Default)]
 pub struct Match {
     pub role: Option<Role>,
+    /// Fires only for this classified task mode. A hint that carries NO mode
+    /// never matches a mode-constrained rule — absent evidence falls through to
+    /// the default preference rather than guessing (02b).
+    pub task_mode: Option<TaskMode>,
     /// Fires only when the request needs at least this much context.
     pub min_context: u32,
 }
 
 impl Match {
     fn matches(&self, hint: &Hint) -> bool {
-        self.role.is_none_or(|r| r == hint.role) && hint.min_context >= self.min_context
+        self.role.is_none_or(|r| r == hint.role)
+            && self.task_mode.is_none_or(|m| hint.task_mode == Some(m))
+            && hint.min_context >= self.min_context
     }
 }
 
@@ -112,18 +117,18 @@ impl Prefer {
     /// A total, deterministic sort key; **lower is more-preferred**:
     /// (explicit-position, −tag-overlap, −preferred-tier, id) — the trailing id makes
     /// ties stable and reproducible (important for the bench + tests).
-    fn rank(&self, u: &UpstreamMeta) -> (usize, i64, i64, String) {
+    fn rank(&self, u: &UpstreamMeta<'_>) -> (usize, i64, i64) {
         let pos = self
             .upstreams
             .iter()
-            .position(|id| id == &u.id)
+            .position(|id| id == u.id)
             .unwrap_or(self.upstreams.len());
         let tag_overlap = u.tags.iter().filter(|t| self.tags.contains(t)).count() as i64;
         let tier_bonus = match self.tier {
             Some(t) if u.tier >= t => u.tier as i64,
             _ => 0,
         };
-        (pos, -tag_overlap, -tier_bonus, u.id.clone())
+        (pos, -tag_overlap, -tier_bonus)
     }
 }
 
@@ -147,41 +152,73 @@ impl Policy {
     /// most-preferred first. Pure, deterministic, and total: an empty result means
     /// *no upstream can serve this request* (fail-soft — the caller decides), never a
     /// panic, even on a degenerate fleet or hostile requirement.
-    pub fn resolve(&self, hint: &Hint, fleet: &[UpstreamMeta]) -> Vec<String> {
+    pub fn resolve(&self, hint: &Hint, fleet: &[UpstreamMeta<'_>]) -> Vec<String> {
+        self.resolve_with_rule(hint, fleet).0
+    }
+
+    /// [`Self::resolve`] plus *which* rule ordered the result — see
+    /// [`Self::resolve_indices`].
+    pub fn resolve_with_rule(
+        &self,
+        hint: &Hint,
+        fleet: &[UpstreamMeta<'_>],
+    ) -> (Vec<String>, Option<usize>) {
+        let (idx, rule) = self.resolve_indices(hint, fleet);
+        (
+            idx.into_iter().map(|i| fleet[i].id.to_string()).collect(),
+            rule,
+        )
+    }
+
+    /// The allocation-light core: eligible **fleet indices** most-preferred
+    /// first, plus *which* rule ordered them — `Some(index)` of the first
+    /// matching rule, `None` for the default preference (or an override win,
+    /// where no rule was consulted; the index is a bounded metric label for the
+    /// 02b decision observability). Index-based so the per-call hot path (this
+    /// runs on every routed LLM call) allocates only the index vectors — no id
+    /// `String`s — and the caller (the `TaskRouter`) maps indices straight onto
+    /// its upstream slots without a by-id search.
+    pub fn resolve_indices(
+        &self,
+        hint: &Hint,
+        fleet: &[UpstreamMeta<'_>],
+    ) -> (Vec<usize>, Option<usize>) {
         // 1. Hard filter: only upstreams that CAN serve the request survive.
-        let mut eligible: Vec<&UpstreamMeta> = fleet
-            .iter()
-            .filter(|u| u.healthy)
-            .filter(|u| !hint.needs_vision || u.supports_vision)
-            .filter(|u| !hint.needs_tools || u.supports_tools)
-            .filter(|u| {
-                hint.min_context == 0
+        let eligible = (0..fleet.len()).filter(|&i| {
+            let u = &fleet[i];
+            u.healthy
+                && (!hint.needs_vision || u.supports_vision)
+                && (!hint.needs_tools || u.supports_tools)
+                && (hint.min_context == 0
                     || u.context_window == 0
-                    || u.context_window >= hint.min_context
-            })
-            .filter(|u| hint.tier.is_none_or(|t| u.tier >= t))
-            .filter(|u| hint.max_cost.is_none_or(|mc| u.input_cost <= mc))
-            .collect();
+                    || u.context_window >= hint.min_context)
+                && hint.tier.is_none_or(|t| u.tier >= t)
+                && hint.max_cost.is_none_or(|mc| u.input_cost <= mc)
+        });
+
+        // 2. The first matching rule sets the ordering (else the default
+        // preference). Computed before the override check only to keep this
+        // pure-per-hint; an override win reports `rule = None` (no rule ordered it).
+        let rule = self.rules.iter().position(|r| r.match_.matches(hint));
+        let prefer = rule.map_or(&self.default_prefer, |i| &self.rules[i].prefer);
+
+        // 3. Rank each survivor once (the non-id key), then order — ties broken
+        // by the borrowed id, so the result is byte-identical to the old
+        // String-keyed sort without its per-member allocation.
+        let mut ranked: Vec<((usize, i64, i64), usize)> =
+            eligible.map(|i| (prefer.rank(&fleet[i]), i)).collect();
 
         // An explicit override wins outright — but only if it passed the filter, so a
         // model-supplied id can never dial an ineligible/unknown upstream.
         if let Some(ov) = &hint.override_upstream {
-            if let Some(u) = eligible.iter().find(|u| &u.id == ov) {
-                return vec![u.id.clone()];
+            if let Some(&(_, i)) = ranked.iter().find(|&&(_, i)| fleet[i].id == ov) {
+                return (vec![i], None);
             }
         }
 
-        // 2. The first matching rule sets the ordering (else the default preference).
-        let prefer = self
-            .rules
-            .iter()
-            .find(|r| r.match_.matches(hint))
-            .map_or(&self.default_prefer, |r| &r.prefer);
-
-        // 3. Order the survivors by preference (stable, deterministic). Cached-key so
-        // each upstream's rank (which allocates its id for the tie-break) is built once.
-        eligible.sort_by_cached_key(|u| prefer.rank(u));
-        eligible.into_iter().map(|u| u.id.clone()).collect()
+        ranked
+            .sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| fleet[a.1].id.cmp(fleet[b.1].id)));
+        (ranked.into_iter().map(|(_, i)| i).collect(), rule)
     }
 }
 
@@ -189,10 +226,23 @@ impl Policy {
 mod tests {
     use super::*;
 
-    fn up(id: &str, tags: &[&str], tier: PoolTier, window: u32, cost: f32) -> UpstreamMeta {
+    /// Test fixture for the borrowed view: backing storage is leaked (bounded,
+    /// test-only) so the metas can be `'static`.
+    fn up(
+        id: &'static str,
+        tags: &[&str],
+        tier: PoolTier,
+        window: u32,
+        cost: f32,
+    ) -> UpstreamMeta<'static> {
         UpstreamMeta {
-            id: id.into(),
-            tags: tags.iter().map(|s| (*s).to_string()).collect(),
+            id,
+            tags: Box::leak(
+                tags.iter()
+                    .map(|s| (*s).to_string())
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            ),
             tier,
             context_window: window,
             input_cost: cost,
@@ -202,7 +252,7 @@ mod tests {
         }
     }
 
-    fn fleet() -> Vec<UpstreamMeta> {
+    fn fleet() -> Vec<UpstreamMeta<'static>> {
         vec![
             up(
                 "kimi",
@@ -220,7 +270,7 @@ mod tests {
         Rule {
             match_: Match {
                 role: Some(role),
-                min_context: 0,
+                ..Default::default()
             },
             prefer,
         }
@@ -248,6 +298,91 @@ mod tests {
         // reasoning+heavy upstreams sort ahead of the cheap light one; the two
         // reasoning members tie on tags+tier, so the id breaks it deterministically.
         assert_eq!(order, vec!["glm", "kimi", "mi50"]);
+    }
+
+    #[test]
+    fn positive_task_mode_rule_fires_for_carried_mode() {
+        let policy = Policy {
+            rules: vec![Rule {
+                match_: Match {
+                    task_mode: Some(TaskMode::Review),
+                    ..Default::default()
+                },
+                prefer: Prefer {
+                    upstreams: vec!["kimi".into()],
+                    ..Default::default()
+                },
+            }],
+            default_prefer: Prefer {
+                upstreams: vec!["mi50".into()],
+                ..Default::default()
+            },
+        };
+        let hint = Hint {
+            task_mode: Some(TaskMode::Review),
+            ..Default::default()
+        };
+        assert_eq!(policy.resolve(&hint, &fleet())[0], "kimi");
+    }
+
+    #[test]
+    fn negative_mode_rule_never_fires_without_a_carried_mode() {
+        let policy = Policy {
+            rules: vec![Rule {
+                match_: Match {
+                    task_mode: Some(TaskMode::Review),
+                    ..Default::default()
+                },
+                prefer: Prefer {
+                    upstreams: vec!["kimi".into()],
+                    ..Default::default()
+                },
+            }],
+            default_prefer: Prefer {
+                upstreams: vec!["mi50".into()],
+                ..Default::default()
+            },
+        };
+        // No mode on the hint ⇒ fall to the default, never guess.
+        assert_eq!(policy.resolve(&Hint::default(), &fleet())[0], "mi50");
+        // A different mode ⇒ same.
+        let other = Hint {
+            task_mode: Some(TaskMode::Debug),
+            ..Default::default()
+        };
+        assert_eq!(policy.resolve(&other, &fleet())[0], "mi50");
+    }
+
+    #[test]
+    fn corner_role_and_mode_constraints_must_both_hold() {
+        let policy = Policy {
+            rules: vec![Rule {
+                match_: Match {
+                    role: Some(Role::Judge),
+                    task_mode: Some(TaskMode::Review),
+                    min_context: 0,
+                },
+                prefer: Prefer {
+                    upstreams: vec!["kimi".into()],
+                    ..Default::default()
+                },
+            }],
+            default_prefer: Prefer {
+                upstreams: vec!["mi50".into()],
+                ..Default::default()
+            },
+        };
+        let both = Hint {
+            role: Role::Judge,
+            task_mode: Some(TaskMode::Review),
+            ..Default::default()
+        };
+        assert_eq!(policy.resolve(&both, &fleet())[0], "kimi");
+        let role_only = Hint {
+            role: Role::Judge,
+            ..Default::default()
+        };
+        assert_eq!(policy.resolve(&role_only, &fleet())[0], "mi50");
     }
 
     #[test]
@@ -399,5 +534,174 @@ mod tests {
     fn negative_role_parse_unknown_or_empty_is_none() {
         assert_eq!(Role::parse(""), None);
         assert_eq!(Role::parse("bogus"), None);
+    }
+
+    // --- resolve_indices: the rule report + index mapping --------------------
+
+    fn two_rule_policy() -> Policy {
+        Policy {
+            rules: vec![
+                rule_role(
+                    Role::Judge,
+                    Prefer {
+                        upstreams: vec!["glm".into()],
+                        ..Default::default()
+                    },
+                ),
+                rule_role(
+                    Role::Review,
+                    Prefer {
+                        upstreams: vec!["kimi".into()],
+                        ..Default::default()
+                    },
+                ),
+            ],
+            default_prefer: Prefer::default(),
+        }
+    }
+
+    #[test]
+    fn positive_rule_index_reports_the_matched_rule_not_the_first() {
+        let hint = Hint {
+            role: Role::Review,
+            ..Default::default()
+        };
+        let (order, rule) = two_rule_policy().resolve_indices(&hint, &fleet());
+        assert_eq!(rule, Some(1), "the SECOND rule matched");
+        assert_eq!(order[0], 0, "kimi is fleet index 0");
+    }
+
+    #[test]
+    fn negative_no_match_reports_no_rule() {
+        let hint = Hint {
+            role: Role::Classify,
+            ..Default::default()
+        };
+        let (_, rule) = two_rule_policy().resolve_indices(&hint, &fleet());
+        assert_eq!(rule, None, "default preference ⇒ no rule index");
+    }
+
+    #[test]
+    fn corner_override_win_reports_no_rule() {
+        // The override bypasses rule ordering entirely, so the decision label
+        // must not credit a rule that never ordered anything.
+        let hint = Hint {
+            role: Role::Judge, // rule 0 WOULD match…
+            override_upstream: Some("mi50".into()),
+            ..Default::default()
+        };
+        let (order, rule) = two_rule_policy().resolve_indices(&hint, &fleet());
+        assert_eq!(order, vec![2], "mi50 is fleet index 2");
+        assert_eq!(rule, None, "…but the override won, no rule ordered it");
+    }
+
+    #[test]
+    fn boundary_indices_and_ids_agree() {
+        // The owned-id wrapper and the index core must tell the same story
+        // (the TaskRouter dispatches by index; tests/logs read ids).
+        let hint = Hint {
+            role: Role::Review,
+            ..Default::default()
+        };
+        let f = fleet();
+        let p = two_rule_policy();
+        let (ids, r1) = p.resolve_with_rule(&hint, &f);
+        let (idx, r2) = p.resolve_indices(&hint, &f);
+        assert_eq!(r1, r2);
+        assert_eq!(
+            ids,
+            idx.iter().map(|&i| f[i].id.to_string()).collect::<Vec<_>>()
+        );
+    }
+
+    // --- filter boundaries ----------------------------------------------------
+
+    #[test]
+    fn boundary_max_cost_exactly_at_input_cost_passes() {
+        // kimi costs 3.0; a ceiling of exactly 3.0 keeps it (≤, not <).
+        let hint = Hint {
+            max_cost: Some(3.0),
+            ..Default::default()
+        };
+        let order = Policy::default().resolve(&hint, &fleet());
+        assert!(order.contains(&"kimi".to_string()), "{order:?}");
+    }
+
+    #[test]
+    fn boundary_tier_floor_exactly_at_member_tier_passes() {
+        // mi50 is Light; a Light floor keeps it, a Medium floor drops it.
+        let at = Hint {
+            tier: Some(PoolTier::Light),
+            ..Default::default()
+        };
+        assert!(Policy::default()
+            .resolve(&at, &fleet())
+            .contains(&"mi50".to_string()));
+        let above = Hint {
+            tier: Some(PoolTier::Medium),
+            ..Default::default()
+        };
+        let order = Policy::default().resolve(&above, &fleet());
+        assert!(!order.contains(&"mi50".to_string()), "{order:?}");
+    }
+
+    #[test]
+    fn corner_tier_floor_and_cost_cap_compose() {
+        // Heavy floor + cost ≤ 1.0 leaves exactly glm (kimi too pricey, mi50 too light).
+        let hint = Hint {
+            tier: Some(PoolTier::Heavy),
+            max_cost: Some(1.0),
+            ..Default::default()
+        };
+        assert_eq!(Policy::default().resolve(&hint, &fleet()), vec!["glm"]);
+    }
+
+    // --- estimate_min_context -------------------------------------------------
+
+    #[rstest::rstest]
+    #[case::corner_empty_request(vec![], 0)]
+    #[case::positive_four_chars_per_token(vec!["x".repeat(4_000)], 1_000)]
+    #[case::boundary_three_chars_rounds_down(vec!["abc".to_string()], 0)]
+    #[case::positive_sums_across_messages(vec!["x".repeat(2_000), "y".repeat(2_000)], 1_000)]
+    fn estimate_min_context_cases(#[case] texts: Vec<String>, #[case] expect: u32) {
+        let req = agent_core::CompletionRequest {
+            messages: texts.into_iter().map(agent_core::Message::user).collect(),
+            ..Default::default()
+        };
+        assert_eq!(estimate_min_context(&req), expect);
+    }
+
+    #[test]
+    fn corner_estimate_ignores_media_blocks() {
+        // A media-only message contributes nothing (media has no text length);
+        // the estimate must not filter windowed upstreams on its behalf.
+        let msg = agent_core::Message::with_blocks(
+            agent_core::Role::User,
+            vec![agent_core::ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: vec![0u8; 100_000],
+            }],
+        );
+        let req = agent_core::CompletionRequest {
+            messages: vec![msg],
+            ..Default::default()
+        };
+        assert_eq!(estimate_min_context(&req), 0);
+    }
+
+    #[test]
+    fn adversarial_estimate_clamps_at_the_cap() {
+        // A pathologically huge prompt cannot report a floor beyond the cap
+        // (which would look hostile in logs/metrics); selection stays fail-soft.
+        let req = agent_core::CompletionRequest {
+            messages: vec![agent_core::Message::user(
+                "x".repeat((agent_core::MAX_ROUTE_MIN_CONTEXT as usize) * 4 + 64),
+            )],
+            ..Default::default()
+        };
+        assert_eq!(
+            estimate_min_context(&req),
+            agent_core::MAX_ROUTE_MIN_CONTEXT
+        );
     }
 }

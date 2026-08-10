@@ -6,7 +6,6 @@ syntax = "proto3";
 package agent.v1;
 
 import "agent/v1/common.proto";
-import "agent/v1/mode.proto";
 
 message AssembleResponse {
   repeated Message messages = 1;

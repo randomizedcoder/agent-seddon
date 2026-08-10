@@ -296,6 +296,7 @@ async fn complete(
         max_tokens,
         temperature: 0.0,
         response_format: None,
+        route: None,
     };
     Ok(ctx.provider.complete(req).await?.message.content_text())
 }

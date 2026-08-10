@@ -2,8 +2,11 @@
 
 Status: **planned** — see [`STATUS.md`](STATUS.md). The increment that makes it real: the
 `TaskRouter` (and the pool) **consume the [03](03-registry-proto.md) registry** as their source
-of truth for 10–50 upstreams, TOML **seeds** the registry at boot, the internal model-callers
-each route by **role**, and every upstream gets **per-upstream observability**.
+of truth for 10–50 upstreams, TOML **seeds** the registry at boot, the **live-signal ordering
+policies** (`cost | latency | least-loaded` — carved out of 02 as built) finally land against
+the registry's health snapshot, and every upstream gets **per-upstream observability**.
+Per-call role wiring itself moved earlier, to [02b](02b-hint-threading.md) — it needs no
+registry; 04 scales it and picks up the stragglers (classifier vote, judge env-island).
 
 > After 04, adding or retiring an upstream is a `Put`/`Delete` against a running registry — no
 > code edit, no restart — and each subsystem (main loop, judge, classifier, summarizer, verifier,
@@ -18,10 +21,11 @@ that today all reuse `[agent] provider` stop competing for one model.
 
 ## What already exists (and its gaps)
 
-- `TaskRouter` (02) resolves a `RoutePolicy` over in-process cards from `[route]` TOML.
+- `TaskRouter` (02) resolves a `RoutePolicy` over in-process cards from `[route]` TOML; per-call
+  roles + `task_mode` on the request (02b).
 - `ProviderRegistryService` + `ProviderRegistry` seam (03) — the fleet + policy, CRUD, storage.
-- Internal callers still passing the **main** provider: `summarizing.rs:147`, `llm.rs:105`,
-  `dimensions.rs:140`, `structured.rs:58`, `classifier.rs:67`, `summaries.rs:175`.
+- Still outside the role system after 02b: the classifier vote (`classifier.rs:67`,
+  pool-tier path) and the eval-judge env convention.
 - The pool builds members from the fixed TOML `[[pool.members]]` list (`builder.rs:604-649`).
 
 ## Design
@@ -43,22 +47,28 @@ At boot, if the registry store is empty, the existing config is **imported**: ea
 of truth, seeded from the old one. Removing TOML is **out of scope**; the seed is idempotent and
 skipped once the store is populated.
 
-### Per-role internal routing
+### Live-signal ordering policies (moved here from 02)
 
-Give each internal caller a `Role` so it routes independently through the same `TaskRouter`
-(they already hold an `Arc<dyn LlmProvider>`; make it the router and pass the role in the hint):
+`Prefer` gains the spec'd `policy: cost | latency | least-loaded` tail — as built, 02 orders by
+explicit position/tags/tier only, because the engine has no live view. The registry snapshot
+brings one: `UpstreamMeta` gains `in_flight` / `latency_ewma` (clamped on every refresh), and
+the matched rule's `policy` breaks ties among equally-preferred survivors against those live
+numbers plus the configured `input_cost`. Deterministic given a snapshot; the snapshot is
+versioned so a decision is reproducible in the `route.select` span.
 
-| Caller | Role | Typical target |
-|---|---|---|
-| main loop (`agent.rs:893`) | `Main` | the task-appropriate model (by `TaskMode`) |
-| classifier vote (`classifier.rs:67`) | `Classify` | cheap `light` |
-| compaction summarizer (`summarizing.rs:147`) | `Summarize` | cheap `long-context` |
-| verifier (`llm.rs:105`) | `Verify` | cheap/strict |
-| review fan-out (`summaries.rs:175`) | `Review` | `reasoning`/`heavy` |
+### Per-role routing at scale (roles landed in 02b)
 
-The eval-harness **judge** convention (GLM by default, via `AGENT_E2E_JUDGE_*`) maps cleanly to a
-`Judge` role / a `judge`-tagged upstream — optionally unified here so the judge is a registry
-entry, not a separate env island. (Kept opt-in; the harnesses still accept the env override.)
+[02b](02b-hint-threading.md) wired the per-call roles (main loop + distiller + instant +
+verifier + judge + review, plus the named-reference precedence contract). 04 scales that over
+the registry fleet and picks up the two stragglers:
+
+- **Classifier vote** (`classifier.rs:67`) — dispatches through `LlmPool::complete_all` with a
+  hardcoded `PoolTier::Light`; becomes a `Classify`-role policy decision (and the escalation
+  hook below).
+- The eval-harness **judge** convention (GLM by default, via `AGENT_E2E_JUDGE_*`) maps cleanly
+  to the `Judge` role / a `judge`-tagged upstream — optionally unified here so the judge is a
+  registry entry, not a separate env island. (Kept opt-in; the harnesses still accept the env
+  override.)
 
 ### Escalation hook (designed, deferred)
 
