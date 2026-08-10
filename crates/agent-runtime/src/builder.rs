@@ -1700,11 +1700,21 @@ async fn resolve_cognition_graph(
     Option<(bool, bool)>,
     Option<crate::cognition::GraphPlan>,
 )> {
+    // `absent`: the FILE backend's document does not exist. At the DEFAULT
+    // path that is the normal out-of-the-box state — the seam stays live (a
+    // portal `Put` via --serve-graph creates the document) and the run keeps
+    // built-in behavior. An explicitly configured path that is missing stays a
+    // startup error below: the operator asked for a specific graph, and
+    // silently running without it would be a footgun.
+    let mut absent_default = false;
     let store: Option<Arc<dyn agent_core::GraphStore>> = match cfg.graph.store.as_str() {
         "" => None,
-        "file" => Some(Arc::new(agent_graph::FileGraphs::new(expand_tilde(
-            &cfg.graph.file,
-        )))),
+        "file" => {
+            let path = expand_tilde(&cfg.graph.file);
+            absent_default = !std::path::Path::new(&path).exists()
+                && cfg.graph.file == crate::config::default_graph_file();
+            Some(Arc::new(agent_graph::FileGraphs::new(path)))
+        }
         #[cfg(feature = "grpc")]
         "grpc" => {
             let ep = crate::registry::grpc_client_endpoint(
@@ -1718,6 +1728,15 @@ async fn resolve_cognition_graph(
     let Some(s) = &store else {
         return Ok((None, None, None));
     };
+    if absent_default {
+        tracing::info!(
+            target: "cognition",
+            file = %cfg.graph.file,
+            "no cognition-graph document yet — built-in behavior (create one via \
+             --cognition-graph or a --serve-graph Put)"
+        );
+        return Ok((store, None, None));
+    }
     // The store re-validates on read, so an invalid document fails closed HERE
     // — a startup error naming the typed issues — never at the executor.
     let doc = s
@@ -2336,5 +2355,58 @@ mod seam_builder_tests {
             Err(e) => e.to_string(),
         };
         assert!(err.contains("unknown [cache] strategy"), "got: {err}");
+    }
+
+    // --- the default-on graph store (cognition follow-up) -------------------
+
+    /// Out of the box (`store = "file"`, default path, no document written
+    /// yet): the seam is live — the store attaches for `--serve-graph` — and
+    /// the run keeps built-in behavior instead of failing closed.
+    #[cfg(feature = "graph")]
+    #[tokio::test]
+    async fn corner_default_graph_store_with_absent_document_is_builtin_behavior() {
+        let mut cfg = Config::minimal_for_test();
+        assert_eq!(cfg.graph.store, "file", "the seam defaults on");
+        let (store, kinds, plan) = resolve_cognition_graph(&mut cfg).await.expect("no error");
+        assert!(store.is_some(), "store attached for --serve-graph");
+        assert!(kinds.is_none() && plan.is_none(), "no document = builtin");
+        assert_ne!(cfg.agent.provider, "consensus", "no overlay applied");
+    }
+
+    /// An EXPLICITLY configured document path that is missing stays a loud
+    /// startup error — the operator asked for a specific graph.
+    #[cfg(feature = "graph")]
+    #[tokio::test]
+    async fn negative_explicit_missing_document_fails_closed() {
+        let mut cfg = Config::minimal_for_test();
+        cfg.graph.file = agent_testkit::tempdir()
+            .join("nope.textproto")
+            .to_string_lossy()
+            .into_owned();
+        let err = match resolve_cognition_graph(&mut cfg).await {
+            Ok(_) => panic!("missing explicit document must fail"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(err.contains("cognition-graph document"), "{err}");
+    }
+
+    /// A present document at an explicit path loads and overlays as before.
+    #[cfg(feature = "graph")]
+    #[tokio::test]
+    async fn positive_present_document_still_overlays() {
+        let dir = agent_testkit::tempdir();
+        let path = dir.join("graph.textproto");
+        let text = agent_graph::textproto::print(&agent_graph::testdata::simple()).unwrap();
+        std::fs::write(&path, text).unwrap();
+        let mut cfg = Config::minimal_for_test();
+        cfg.graph.file = path.to_string_lossy().into_owned();
+        let (store, kinds, plan) = resolve_cognition_graph(&mut cfg).await.expect("loads");
+        assert!(store.is_some() && plan.is_some());
+        assert_eq!(
+            kinds,
+            Some((false, false)),
+            "gate-only doc: no distillation"
+        );
+        assert_eq!(cfg.agent.provider, "consensus", "gate overlay applied");
     }
 }

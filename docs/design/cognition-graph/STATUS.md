@@ -177,6 +177,14 @@ designed (and why). Update both with every increment PR.
   merge arm consumed the arrival before fates were recorded, mislabelling the
   race winner as `cancelled` — the `any`-join corner test flagged it.
 
+- **Follow-up (post-merge) / graph seam defaults ON** (user, 2026-08-09):
+  `[graph] store = "file"` is now the default, so `--serve-graph` /
+  `--serve-all` work out of the box and the portal always has a document
+  endpoint. The safety split that makes this possible: an ABSENT document at
+  the DEFAULT path = "no document yet" (seam live, built-in behavior, `Put`
+  creates it); a missing document at an EXPLICIT path, or any invalid
+  document, still fails closed at startup.
+
 ## Bench baselines (filled per increment, after the optimization pass)
 
 | Increment | Bench | Ir before → after fruit | Ceiling set |

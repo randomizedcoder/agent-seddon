@@ -11,9 +11,15 @@ stores **by name only** — endpoints and keys stay in config.
 
 ```toml
 [graph]
-store = "file"                    # "" (off) | "file" | "grpc" (central editor service)
+store = "file"                    # "file" (default) | "grpc" (central editor service) | "" (off)
 file = ".agent/graph.textproto"
 ```
+
+**On by default**: the seam is live out of the box — `--serve-graph` /
+`--serve-all` serve it and the portal can `Put` a document. An **absent**
+document at the default path is simply built-in behavior; an **invalid**
+document, or a missing document at an explicitly configured path (including
+`--cognition-graph FILE`), fails closed at startup.
 
 `agent --cognition-graph config/cognition/intermediate.textproto "<goal>"` is
 the scenario-file shorthand; graded examples (each also an integration-test

@@ -602,15 +602,17 @@ fn default_instant_objective_tokens() -> u32 {
     128
 }
 
-/// The cognition-graph document (`[graph]`, cognition-graph 04). Empty `store`
-/// = off — the increments behave exactly as their own TOML blocks wired them
-/// (the graph is a re-expression, not a prerequisite).
+/// The cognition-graph document (`[graph]`, cognition-graph 04). Default:
+/// `store = "file"` — the seam is live out of the box (`--serve-graph` /
+/// `--serve-all` serve it; the portal can `Put` a document), and an ABSENT
+/// document at the default path simply means built-in behavior. `store = ""`
+/// switches the seam off entirely.
 /// See docs/design/cognition-graph/04-graph-config.md.
 #[derive(Debug, Deserialize)]
 pub struct GraphCfg {
-    /// "" (off) | "file" (textproto on disk) | "grpc" (a central document
-    /// service, e.g. edited by the portal).
-    #[serde(default)]
+    /// "file" (default: textproto on disk) | "grpc" (a central document
+    /// service, e.g. edited by the portal) | "" (off).
+    #[serde(default = "default_graph_store")]
     pub store: String,
     /// Textproto document path (`file` backend only).
     #[serde(default = "default_graph_file")]
@@ -620,13 +622,17 @@ pub struct GraphCfg {
 impl Default for GraphCfg {
     fn default() -> Self {
         Self {
-            store: String::new(),
+            store: default_graph_store(),
             file: default_graph_file(),
         }
     }
 }
 
-fn default_graph_file() -> String {
+fn default_graph_store() -> String {
+    "file".to_string()
+}
+
+pub(crate) fn default_graph_file() -> String {
     ".agent/graph.textproto".to_string()
 }
 fn default_instant_min_coverage() -> f32 {
@@ -2494,12 +2500,16 @@ mod tests {
         assert_eq!(cfg.file, "config/cognition/intermediate.textproto");
     }
 
-    /// Boundary: an empty `[graph]` is off, with the default document path.
+    /// Boundary: an empty `[graph]` defaults the seam ON (file store at the
+    /// default path — an absent file is built-in behavior, not an error), and
+    /// an explicit `store = ""` switches it off.
     #[test]
     fn boundary_empty_graph_defaults() {
         let cfg: GraphCfg = toml::from_str("").unwrap();
-        assert!(cfg.store.is_empty());
+        assert_eq!(cfg.store, "file");
         assert_eq!(cfg.file, ".agent/graph.textproto");
+        let off: GraphCfg = toml::from_str("store = \"\"").unwrap();
+        assert!(off.store.is_empty());
     }
 
     /// Boundary: an empty `[consensus]` is a valid (unused) config with defaults —
