@@ -1957,6 +1957,75 @@ pub(crate) fn apply_model_router_config(cfg: &mut Config) -> anyhow::Result<()> 
     Ok(())
 }
 
+/// The gate's ground-truth evidence source from `[consensus] evidence`
+/// (gate-evidence follow-up): `""`/`"auto"` = the working tree's `git diff`
+/// plus untracked-file names — the critic judges what actually CHANGED, not
+/// the answer's prose about it — degrading silently to `None` on a non-repo;
+/// `"off"` = prose-only critique. Shared by the `[consensus]` factory and
+/// every graph-built gate.
+#[cfg(feature = "provider-consensus")]
+pub(crate) fn gate_evidence(
+    cfg: &Config,
+) -> anyhow::Result<Option<agent_providers::EvidenceSource>> {
+    match cfg.consensus.evidence.as_str() {
+        "off" => Ok(None),
+        "" | "auto" => {
+            let dir = cfg.agent.working_dir.clone();
+            Ok(Some(Arc::new(move || git_diff_evidence(&dir))))
+        }
+        other => anyhow::bail!("[consensus] evidence: unknown value `{other}` (auto | off)"),
+    }
+}
+
+/// One evidence snapshot: the full `git diff HEAD` when the change is small
+/// enough, a `--stat` summary when it is not (the numstat pre-check bounds
+/// what we buffer — never read an unbounded diff first and cap after), plus
+/// the names of untracked (new) files, which no diff shows. `None` = not a
+/// repo / no commits / nothing changed.
+#[cfg(feature = "provider-consensus")]
+fn git_diff_evidence(dir: &str) -> Option<String> {
+    let git = |args: &[&str]| -> Option<String> {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    // Bound the buffer BEFORE asking for the full diff.
+    const MAX_FULL_DIFF_LINES: u64 = 4_000;
+    let numstat = git(&["diff", "HEAD", "--numstat"])?;
+    let changed_lines: u64 = numstat
+        .lines()
+        .flat_map(|l| l.split_whitespace().take(2))
+        .filter_map(|n| n.parse::<u64>().ok())
+        .sum();
+    let mut ev = if changed_lines > MAX_FULL_DIFF_LINES {
+        format!(
+            "(change too large for a full diff — {changed_lines} lines; summary)\n{}",
+            git(&["diff", "HEAD", "--stat"])?
+        )
+    } else {
+        git(&["diff", "HEAD", "--no-color"])?
+    };
+    if let Some(status) = git(&["status", "--porcelain"]) {
+        let untracked: Vec<&str> = status
+            .lines()
+            .filter_map(|l| l.strip_prefix("?? "))
+            .take(50)
+            .collect();
+        if !untracked.is_empty() {
+            ev.push_str("\nUntracked (new) files: ");
+            ev.push_str(&untracked.join(", "));
+        }
+    }
+    let trimmed = ev.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
 /// Opt-in judge-env unification (model-router 04 tail): map the eval harnesses'
 /// `AGENT_E2E_JUDGE_*` convention onto a routed `judge-env` upstream plus a
 /// **lowest-precedence** `role = "judge"` rule (appended last — the first
@@ -2630,6 +2699,7 @@ fn compose_fork_provider(
             let mut gc = GateCfg {
                 critic_max_tokens: cfg.consensus.critic_max_tokens,
                 max_alternatives: cfg.consensus.max_alternatives,
+                evidence: gate_evidence(cfg)?,
                 ..GateCfg::default()
             };
             if let Some(r) = g.max_rounds {
@@ -3291,6 +3361,88 @@ mod seam_builder_tests {
             "gate-only doc: no distillation"
         );
         assert_eq!(cfg.agent.provider, "consensus", "gate overlay applied");
+    }
+}
+
+// The gate's git-diff evidence source (gate-evidence follow-up): ground truth
+// for the critic, degrading silently outside a repo.
+#[cfg(all(test, feature = "provider-consensus"))]
+mod gate_evidence_tests {
+    use super::*;
+
+    fn sh(dir: &std::path::Path, args: &[&str]) {
+        let st = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .status()
+            .expect("git runs");
+        assert!(st.success(), "git {args:?} failed");
+    }
+
+    fn repo_with_commit() -> std::path::PathBuf {
+        let dir = agent_testkit::tempdir();
+        sh(&dir, &["init", "-q"]);
+        std::fs::write(dir.join("a.py"), "print('hi')\n").unwrap();
+        sh(&dir, &["add", "."]);
+        sh(&dir, &["commit", "-qm", "base"]);
+        dir
+    }
+
+    #[test]
+    fn positive_modified_and_untracked_files_appear_in_evidence() {
+        let dir = repo_with_commit();
+        std::fs::write(dir.join("a.py"), "print('changed')\n").unwrap();
+        std::fs::write(dir.join("new_test.py"), "def test(): pass\n").unwrap();
+        let ev = git_diff_evidence(&dir.to_string_lossy()).expect("evidence");
+        assert!(ev.contains("a.py"), "{ev}");
+        assert!(ev.contains("print('changed')"), "the actual + line: {ev}");
+        assert!(ev.contains("Untracked (new) files: new_test.py"), "{ev}");
+    }
+
+    #[test]
+    fn corner_clean_tree_and_non_repo_yield_none() {
+        let clean = repo_with_commit();
+        assert_eq!(git_diff_evidence(&clean.to_string_lossy()), None);
+        let plain = agent_testkit::tempdir();
+        assert_eq!(git_diff_evidence(&plain.to_string_lossy()), None);
+    }
+
+    /// A huge change is summarized (`--stat`), never buffered in full — the
+    /// numstat pre-check bounds the read.
+    #[test]
+    fn boundary_huge_change_degrades_to_a_stat_summary() {
+        let dir = repo_with_commit();
+        let big: String = (0..6_000).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(dir.join("a.py"), big).unwrap();
+        let ev = git_diff_evidence(&dir.to_string_lossy()).expect("evidence");
+        assert!(ev.contains("too large for a full diff"), "{ev}");
+        assert!(!ev.contains("line 5999"), "full body must not be included");
+    }
+
+    #[test]
+    fn negative_unknown_evidence_value_fails_closed() {
+        let mut cfg = crate::config::Config::minimal_for_test();
+        cfg.consensus.evidence = "prose++".into();
+        let err = match gate_evidence(&cfg) {
+            Err(e) => e,
+            Ok(_) => panic!("an unknown evidence value must not build"),
+        };
+        assert!(err.to_string().contains("unknown value"), "{err}");
+        cfg.consensus.evidence = "off".into();
+        assert!(gate_evidence(&cfg).expect("off is valid").is_none());
+        for auto in ["", "auto"] {
+            cfg.consensus.evidence = auto.into();
+            assert!(gate_evidence(&cfg).expect("auto is valid").is_some());
+        }
     }
 }
 

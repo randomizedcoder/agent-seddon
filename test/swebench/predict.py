@@ -28,6 +28,12 @@ Env (generator knobs shared with the e2e/eval harnesses; SWEBENCH_* set by the h
   SWEBENCH_INSTANCE_TIMEOUT  per-instance agent wall-clock seconds (default 900)
   SWEBENCH_AGENT_RETRIES     re-run the agent on a TRANSIENT crash+empty patch (default 0)
   SWEBENCH_MAX_ITERATIONS    agent tool-call turns per instance (default 75)
+  SWEBENCH_COGNITION_GRAPH   path to a cognition-graph textproto (config/cognition/*);
+                             when set the generated agent.toml also wires the providers
+                             the shipped documents name — `glm`/`local` from the
+                             AGENT_E2E_JUDGE_* env — and a sqlite [digest] ledger in
+                             the scratch dir. Unset = the plain built-in loop (byte-
+                             identical config to before this knob existed).
 
 Per-instance agent stdout+stderr is written to ./logs/<instance>.attempt<N>.log.
 """
@@ -155,6 +161,48 @@ auto_index = false
 [metrics]
 enabled = false
 """
+    graph = os.environ.get("SWEBENCH_COGNITION_GRAPH", "").strip()
+    if graph:
+        graph_path = Path(graph).resolve()
+        if not graph_path.is_file():
+            raise SystemExit(f"SWEBENCH_COGNITION_GRAPH not readable: {graph_path}")
+        # The shipped documents reference providers BY NAME (`glm` critic/judge,
+        # `local` cheap background model) — connections stay here. Both map to
+        # the judge endpoint the eval harnesses already share (AGENT_E2E_JUDGE_*),
+        # keys as file references, never inline.
+        judge_url = os.environ.get("AGENT_E2E_JUDGE_BASE_URL", "https://213.173.96.56:8000/v1")
+        judge_model = os.environ.get("AGENT_E2E_JUDGE_MODEL", "/model")
+        judge_key_file = os.environ.get(
+            "AGENT_E2E_JUDGE_API_KEY_FILE",
+            str(Path.home() / "Downloads/runpod/glm/glm-api-key"),
+        )
+        judge_tls = (
+            "insecure_tls = true"
+            if os.environ.get("AGENT_E2E_JUDGE_INSECURE_TLS", "1") == "1"
+            else ""
+        )
+        upstream = f"""
+[[route.upstreams]]
+name = "{{name}}"
+endpoint = "{judge_url}"
+model = "{judge_model}"
+api_key_file = "{judge_key_file}"
+{judge_tls}
+"""
+        toml += f"""
+[graph]
+store = "file"
+file = "{graph_path}"
+
+# The judge (GLM) reasons inline before its JSON verdict; the 512-token gate
+# default can truncate that mid-verdict on a long candidate answer.
+[consensus]
+critic_max_tokens = 2048
+
+[digest]
+store = "sqlite"
+path = "{scratch}/digests.sqlite3"
+{upstream.format(name="glm")}{upstream.format(name="local")}"""
     toml_path.write_text(toml)
 
 

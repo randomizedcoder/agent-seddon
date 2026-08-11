@@ -892,6 +892,7 @@ pub fn register_builtins(r: &mut Registry) {
             max_rounds: cfg.max_rounds,
             critic_max_tokens: cfg.critic_max_tokens,
             max_alternatives: cfg.max_alternatives,
+            evidence: crate::builder::gate_evidence(ctx.cfg)?,
             ..agent_providers::GateCfg::default()
         };
         gate.scope = match cfg.scope.as_str() {
