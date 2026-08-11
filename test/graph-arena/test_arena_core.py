@@ -640,3 +640,138 @@ class EvidenceReportTables(unittest.TestCase):
         self.assertEqual(out.get("alt"), 2)
         self.assertNotIn("facts", out, "negative counts dropped")
         self.assertTrue(all(len(k) <= 32 for k in out))
+
+
+# ---------------------------------------------------------------------------
+# Harness increment 3: judge packets/verdicts, local endpoint, paired signs
+# ---------------------------------------------------------------------------
+
+
+class JudgeTables(unittest.TestCase):
+    def test_positive_packet_contains_only_the_allowed_evidence(self):
+        pkt = core.judge_packet(
+            "README documents usage",
+            "rubric text here",
+            {"README.md": "# lockbox\nUsage: ...", "MISSING.md": None},
+            "diff --git a/README.md b/README.md\n+Usage",
+        )
+        for want in ("Requirement:", "rubric text here", "# lockbox",
+                     "File MISSING.md: MISSING", "Change diff"):
+            self.assertIn(want, pkt)
+
+    def test_adversarial_packet_blindness_no_forbidden_channels(self):
+        # Blindness is BY CONSTRUCTION — but assert the packet never sprouts
+        # arm/config/transcript vocabulary from the harness itself.
+        pkt = core.judge_packet("req", "rubric", {"a.md": "content"}, "diff")
+        for forbidden in ("arm", "baseline", "simple", "advanced", "graph",
+                          "agent.toml", ".agent", "transcript"):
+            self.assertNotIn(forbidden, pkt, forbidden)
+
+    def test_boundary_packet_caps_every_quoted_input(self):
+        pkt = core.judge_packet(
+            "r" * 100_000, "b" * 100_000,
+            {"big.md": "x" * 200_000}, "d" * 200_000,
+        )
+        self.assertLess(len(pkt), 80_000)
+        self.assertIn("truncated", pkt)
+
+    def verdict_cases(self):
+        return [
+            ("positive_plain", '{"met": true, "reason": "covers it"}', (True, "covers it")),
+            ("positive_fenced", 'Sure!\n```json\n{"met": false, "reason": "no"}\n```', (False, "no")),
+            ("positive_reason_missing", '{"met": true}', (True, "")),
+            ("corner_prefix_chatter", 'thinking... {"not":"it"} then {"met": true, "reason": "ok"}', (True, "ok")),
+            ("negative_empty", "", None),
+            ("negative_no_json", "the requirement is met", None),
+            ("negative_met_not_bool", '{"met": "yes"}', None),
+            ("adversarial_reason_bomb", '{"met": true, "reason": "' + "r" * 10_000 + '"}',
+             (True, "r" * core.MAX_JUDGE_REASON_CHARS)),
+            # A nested met:bool object is SALVAGED (the scanner keeps looking for
+            # the first object whose "met" is a real bool) — pinned behavior.
+            ("adversarial_nested_salvage", '{"met": {"met": true}}', (True, "")),
+            ("adversarial_no_bool_anywhere", '{"met": {"deep": "no"}}', None),
+        ]
+
+    def test_verdict_parse_table(self):
+        for name, text, want in self.verdict_cases():
+            with self.subTest(name):
+                self.assertEqual(core.parse_judge_verdict(text), want, name)
+
+    def test_boundary_majority(self):
+        self.assertTrue(core.majority([True, False, True]))
+        self.assertFalse(core.majority([True, False, False]))
+        self.assertTrue(core.majority([True]))
+        self.assertFalse(core.majority([]))
+
+
+class LocalEndpointTables(unittest.TestCase):
+    TIER = ArmConfigTables.TIER
+
+    def env(self, **over):
+        base = dict(ArmConfigTables.ENV.__dict__)
+        base.update(over)
+        return core.ArmEnv(**base)
+
+    def test_positive_real_local_endpoint_lands_in_economical(self):
+        env = self.env(local_base_url="http://l2:11434/v1", local_model="qwen3:32b")
+        t = core.arm_agent_toml("economical", "/cog", "/w", "/s", self.TIER, env)
+        local_block = t.split('name = "local"')[1]
+        self.assertIn('endpoint = "http://l2:11434/v1"', local_block)
+        self.assertIn('model = "qwen3:32b"', local_block)
+        self.assertNotIn("insecure_tls", local_block.split("[")[0])
+
+    def test_corner_no_local_falls_back_to_judge_simulated(self):
+        t = core.arm_agent_toml("economical", "/cog", "/w", "/s", self.TIER, self.env())
+        local_block = t.split('name = "local"')[1]
+        self.assertIn('endpoint = "https://judge.example/v1"', local_block)
+
+    def test_positive_fairness_holds_with_local_endpoint(self):
+        env = self.env(local_base_url="http://l2:11434/v1", local_model="m")
+        base = core.arm_agent_toml("baseline", "/cog", "/w", "/s", self.TIER, env)
+        arm = core.arm_agent_toml("economical", "/cog", "/w", "/s", self.TIER, env)
+        self.assertIsNone(core.fairness_violation(base, "/r", "economical", arm, "/r"))
+
+
+class PairedSignTables(unittest.TestCase):
+    def s(self, arm, rep, k, valid=True, dnf=None):
+        v = core.Validity(valid, "ok" if valid else "gate dead", {})
+        met = tuple(f"r{i}" for i in range(k))
+        return core.RunScore(arm=arm, rep=rep, met=met, dnf=dnf, validity=v)
+
+    def test_positive_pairing_and_counts(self):
+        scores = [
+            self.s("baseline", 1, 5), self.s("baseline", 2, 4),
+            self.s("simple", 1, 7), self.s("simple", 2, 3),
+            self.s("advanced", 1, 5),
+        ]
+        out = core.paired_signs(scores)
+        self.assertIn("simple", out)
+        self.assertIn(">= baseline in 1/2 paired rep(s) (+2, -1)", out)
+        self.assertIn("advanced", out)
+        self.assertIn("1/1 paired rep(s) (+0)", out)
+
+    def test_corner_invalid_and_dnf_runs_never_pair(self):
+        scores = [
+            self.s("baseline", 1, 5),
+            self.s("simple", 1, 7, valid=False),
+            self.s("simple", 2, 6, dnf="timeout"),
+        ]
+        self.assertNotIn("simple", core.paired_signs(scores))
+
+    def test_corner_no_baseline_no_output(self):
+        self.assertEqual(core.paired_signs([self.s("simple", 1, 3)]), "")
+
+
+class UpstreamTokenTables(unittest.TestCase):
+    def test_positive_upstream_family_reaches_evidence(self):
+        expo = EXPO_HEALTHY_SIMPLE + """
+agent_upstream_tokens_total{upstream="glm",kind="prompt"} 800
+agent_upstream_tokens_total{upstream="glm",kind="completion"} 150
+agent_upstream_tokens_total{upstream="local",kind="completion"} 60
+"""
+        v = core.classify_validity("simple", "S", core.parse_exposition(expo))
+        self.assertEqual(v.evidence["upstream_tokens"], {"glm": 950, "local": 60})
+        s = core.RunScore(arm="simple", rep=1, met=("a",), validity=v)
+        out = core.format_evidence([s])
+        self.assertIn("up[glm]=950", out)
+        self.assertIn("up[local]=60", out)

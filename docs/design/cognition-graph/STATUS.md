@@ -12,7 +12,7 @@ designed (and why). Update both with every increment PR.
 | 03 Instant compaction (`instant-window` strategy) | [`03-instant-compaction.md`](03-instant-compaction.md) | ✅ **done** — engine (8 corpus tests incl. phase-drift relevance + planted-hostile-row), wiring (`FactoryCtx.built_digests`, `[instant]` config, fails closed without `[digest]`), **live-verified** (3 real ledger assemblies under a stress budget), `instant_assemble` bench with a path-guard assert (2.6M Ir, ceiling 6.5M), [component doc](../../components/instant-compaction.md) |
 | 04 Graph document (textproto) + anchor executor + `graph.proto`/`digest.proto` services | [`04-graph-config.md`](04-graph-config.md) | ✅ **done** — `DigestService` (port 50081, 7 round-trips) + the full document layer (`agent-graph`: schema registry with derived JSON Schemas, 10 typed issue classes, textproto via prost-reflect over the reflection descriptor set, `FileGraphs`, graph-document corpus), `GraphService` (port 50082, `--serve-graph`, 10 round-trips incl. validate-then-accept + raw-pb kind rejection), the anchor-slot executor (compile → config overlay driving the increment-01/02/03 engines, per-kind distiller enablement, `--cognition-graph` flag), example graphs `config/cognition/{simple,intermediate}.textproto` as integration fixtures, `graph_load` bench + dhat leak gate, [component doc](../../components/graph.md) |
 | 05 Parallel branches — `split`/`join`/`merge`, all/any/quorum joins, compare/synthesize merge | [`05-parallel-branches.md`](05-parallel-branches.md) | ✅ **done** — document layer (3 new node types + `generate.lens`, `bad_branching` structure validation: shared-join/linear-chain/no-cross-branch/no-nesting, fan-out ≤ 5 per split / ≤ 8 per document), the `BranchingProvider` engine (17 tests: paused-clock races, position-swapped compare, tool-call degradation, hostile judge verdicts), builder fork composition (`resolve_provider_ref` shared with the consensus factory, branch/post-merge gates, judge), **loser alternatives → the ledger** (injection-screened `kind=alternatives` rows), 3 `agent_graph_*` metric families, `advanced.textproto` example + fixture, `branch_dispatch` bench + fork-cancel dhat leak gate |
-| 06 Graph arena — A/B/n value harness (baseline + every document, per-requirement k/n, validity gate, tiers S/M/L) | [`06-graph-arena.md`](06-graph-arena.md) | 🟨 **harness increment 1 built** — manifest schema + fail-closed validator + declarative step interpreter + `lockbox` S objective (7 requirements, pass + 7 fail fixtures) + A/B driver (`nix run .#graph-arena`, baseline/simple arms, git-seeded workdirs, interleaved reps, JSONL + k/n table) + the `graph-arena-tests` flake check (23 four-class tables + check-the-checks matrix). Live acceptance: 4/4 valid runs, baseline 7/7+7/7 (65/74 s) vs simple 7/7+7/7 (191/224 s). Increments 2–4 (validity gate/metrics sink, judge + all arms, M/L tiers) remain |
+| 06 Graph arena — A/B/n value harness (baseline + every document, per-requirement k/n, validity gate, tiers S/M/L) | [`06-graph-arena.md`](06-graph-arena.md) | 🟨 **harness increments 1–3 built** — manifest schema + fail-closed validator + declarative step interpreter + `lockbox` S objective (7 requirements, pass + 7 fail fixtures) + A/B driver (`nix run .#graph-arena`, baseline/simple arms, git-seeded workdirs, interleaved reps, JSONL + k/n table) + the `graph-arena-tests` flake check (23 four-class tables + check-the-checks matrix). Live acceptance: 4/4 valid runs, baseline 7/7+7/7 (65/74 s) vs simple 7/7+7/7 (191/224 s). Increments 2–4 (validity gate/metrics sink, judge + all arms, M/L tiers) remain |
 
 ## Implementation log (deviations from design, discoveries, decisions)
 
@@ -200,6 +200,26 @@ designed (and why). Update both with every increment PR.
   resumed the full session (10.9k prompt tokens), answered from prior-session
   facts, and re-gated the new turn — the L-tier sequential-goal mechanism is
   viable as designed.
+- **06 / harness increments 2+3 as-built.** Increment 2: per-run stdlib push
+  sink (`metrics.prom`), hostile-safe exposition parser (label-bomb capped —
+  also quadratic to scan), the R6 validity gate (treatment-failed runs listed
+  with reason, excluded from the headline, never hidden), runtime config-
+  fairness refusal (per-run paths/ports normalized), digest-ledger cross-check.
+  Also: the crane source filter now EXCLUDES `test/graph-arena/` (crane keeps
+  any `*.toml`, so an objective manifest was invalidating the whole cargo
+  dependency build), and the `branch_leak` fork-cancel test polls for teardown
+  settle instead of sampling once (live flake). Increment 3: blind judge
+  packets (rubric + named `judge_files` + seed-diff, capped; arm identity is
+  not an input) with strict-JSON verdicts, one retry, M/L 3-vote majority, and
+  judge-failure = harness failure (R9); all five arms with the economical arm
+  gated on a REAL cheap endpoint (`ARENA_LOCAL_BASE_URL`, hard preflight) or an
+  explicit `ARENA_ALLOW_SIMULATED_LOCAL=1` escape hatch; paired sign counts vs
+  baseline (R11); `agent_upstream_tokens_total{upstream,kind}` — recorded by
+  the metered provider wrapper, closing the gap where internal role calls
+  (gate critic, distiller) had invisible cost — feeding `up[glm]`/`up[local]`
+  evidence columns; a cheap baseline-vs-simple slice joined `nix run
+  .#eval-all`. Deviation: the later-wave S objectives (csv-slice, crc-tool)
+  moved to harness increment 4 with the tiers.
 - **06 / live finding — the 4096 critic ceiling saturates on evidence packets.**
   In the acceptance sweep every `simple`-arm gate round ended `critic_error`:
   GLM returned empty content at 2048, the (working) empty-reply retry escalated

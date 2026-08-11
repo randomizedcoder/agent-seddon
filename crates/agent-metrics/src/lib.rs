@@ -29,6 +29,7 @@ pub struct Metrics {
     api_calls: IntCounterVec,
     api_call_seconds: HistogramVec,
     tokens: IntCounterVec,
+    upstream_tokens: IntCounterVec,
     // USD cost + cache-token accounting (recorded once a price table is applied,
     // see agent-tokenizer + parity spec 23). `cost_usd` is a float counter (money);
     // `cache_tokens` splits prompt-cache reads/writes so the cache-hit ratio
@@ -280,6 +281,20 @@ impl Metrics {
         let tokens = IntCounterVec::new(
             Opts::new("agent_tokens_total", "Tokens consumed"),
             &["model", "kind", "session", "user"],
+        )
+        .unwrap();
+        // Per-upstream attribution (graph-arena R8 / cognition-graph 06): the
+        // main loop's `agent_tokens_total` is labeled by the response's MODEL
+        // id and only covers the main provider; internal role calls (gate
+        // critic, distiller, judge slots) go through named metered providers —
+        // this family records their usage under the config-selected upstream
+        // NAME, so "what did the critic/local model cost" is answerable.
+        let upstream_tokens = IntCounterVec::new(
+            Opts::new(
+                "agent_upstream_tokens_total",
+                "Tokens consumed per named upstream provider",
+            ),
+            &["upstream", "kind"],
         )
         .unwrap();
         let cost_usd = CounterVec::new(
@@ -1217,6 +1232,7 @@ impl Metrics {
             Box::new(api_calls.clone()),
             Box::new(api_call_seconds.clone()),
             Box::new(tokens.clone()),
+            Box::new(upstream_tokens.clone()),
             Box::new(cost_usd.clone()),
             Box::new(cache_tokens.clone()),
             Box::new(context_tokens.clone()),
@@ -1360,6 +1376,7 @@ impl Metrics {
             api_calls,
             api_call_seconds,
             tokens,
+            upstream_tokens,
             cost_usd,
             cache_tokens,
             context_tokens,
@@ -1945,6 +1962,21 @@ impl Metrics {
 
     // --- provider instrumentation -----------------------------------------
 
+    /// Per-upstream token attribution (`agent_upstream_tokens_total`): recorded
+    /// by the metered provider WRAPPER, so internal role calls — gate critic,
+    /// distiller, judge slots — are attributed under the config-selected
+    /// upstream name (`glm`, `local`, …), which `agent_tokens_total` (main-loop
+    /// only, model-id label) cannot see. Un-tenanted: a per-upstream cost view,
+    /// like the provider health families.
+    pub fn add_upstream_tokens(&self, upstream: &str, prompt: u64, completion: u64) {
+        self.upstream_tokens
+            .with_label_values(&[upstream, "prompt"])
+            .inc_by(prompt);
+        self.upstream_tokens
+            .with_label_values(&[upstream, "completion"])
+            .inc_by(completion);
+    }
+
     /// Record a completed provider request. `stream` distinguishes the streaming
     /// path from the buffered one.
     pub fn on_provider_request(&self, provider: &str, stream: bool, seconds: f64) {
@@ -2431,6 +2463,24 @@ mod tests {
             assert!(text.contains(name), "missing metric `{name}` in:\n{text}");
         }
         assert!(text.contains("test-model"));
+    }
+
+    /// Per-upstream attribution: the wrapper-recorded family must expose the
+    /// NAMED upstream — the arena's cost columns scrape these exact strings.
+    #[test]
+    fn add_upstream_tokens_labels_by_upstream_name() {
+        let m = Metrics::new();
+        m.add_upstream_tokens("glm", 120, 40);
+        m.add_upstream_tokens("local", 5, 7);
+        let text = m.encode_text();
+        assert!(
+            text.contains(r#"agent_upstream_tokens_total{kind="prompt",upstream="glm"} 120"#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#"agent_upstream_tokens_total{kind="completion",upstream="local"} 7"#),
+            "{text}"
+        );
     }
 
     #[test]
