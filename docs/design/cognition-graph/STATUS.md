@@ -259,6 +259,15 @@ designed (and why). Update both with every increment PR.
   increment 2's validity gate MUST classify such runs treatment-failed, and the
   gate needs a follow-up: a bigger ceiling, thinking-off for judge calls, or
   tighter evidence truncation for reasoning critics.
+- **Gate-side fixes for both 06 findings (2026-08-11).** (1) The one-shot exit
+  drain deadline is now config: `[digest] drain_timeout_s` (default 60,
+  clamped to 900; `DigestCfg::drain_timeout()`), and the deadline-hit warn
+  logs the pending count and names the knob. The arena's graph arms set 300 s
+  — what stood between the 0/11→11/11 M result and a validity-clean headline.
+  (2) `MAX_CRITIC_TOKENS_CEILING` raised 4096 → 8192, so the empty-reply
+  retry escalates past the saturation point live-observed on diff-bearing
+  evidence prompts. Still open if 8192 also saturates: thinking-off for
+  critic calls, or tighter evidence truncation for reasoning critics.
 
 ## Bench baselines (filled per increment, after the optimization pass)
 

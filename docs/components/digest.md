@@ -16,9 +16,13 @@ transcript stays ground truth; digests are a cache.
   the job, counted. Jobs process strictly in order (the anchored merge needs seq
   N before N+1); the summary chain re-seeds from the ledger after a restart.
 - **One-shot processes drain**: the CLI one-shot path calls
-  `Session::drain_background` (60 s bounded) before exit — without it the
-  process dies mid-job and nothing lands (live-observed). REPL/served processes
-  don't need it. A hit deadline loses cache rows, never errors.
+  `Session::drain_background` before exit — without it the process dies mid-job
+  and nothing lands (live-observed). The deadline is `[digest] drain_timeout_s`
+  (default 60, clamped to 900): a slow reasoning model routed as the distiller
+  can need minutes per job, and the graph-arena live-observed a 60 s deadline
+  dropping the only digest of a one-goal run. REPL/served processes don't need
+  it. A hit deadline loses cache rows (logged with the pending count), never
+  errors.
 - **Everything stored is untrusted model output**: `scan_for_injection` before
   every put (flagged ⇒ dropped + counted), text capped at 16 KiB, keywords
   16 × 64 B, ids `safe_segment`-validated, query limits capped server-side (512).
@@ -44,6 +48,9 @@ store = "clickhouse"     # "" | "clickhouse" | "sqlite" | "grpc" (central ledger
 path = ".agent/digests.sqlite3"
 summary_max_tokens = 512
 facts_max_tokens = 256
+drain_timeout_s = 60     # one-shot exit drain deadline (clamp 900); raise for
+                         # slow reasoning distillers, or route [digest] provider
+                         # to a faster model
 ```
 
 ## Observability

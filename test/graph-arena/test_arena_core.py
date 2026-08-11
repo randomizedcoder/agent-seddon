@@ -379,6 +379,15 @@ class ArmConfigTables(unittest.TestCase):
         self.assertIn("context_window = 32768", t)
         self.assertIn("max_iterations = 75", t)
 
+    def test_positive_graph_arms_extend_the_distill_drain_deadline(self):
+        # The 60s default exit drain dropped a slow GLM distill job and cost an
+        # otherwise-winning run its validity (live M-tier finding) — every graph
+        # arm must carry the longer deadline; baseline has no [digest] at all.
+        self.assertNotIn("drain_timeout_s", self.toml_for("baseline"))
+        for arm in ("simple", "intermediate", "economical", "advanced"):
+            with self.subTest(arm):
+                self.assertIn("drain_timeout_s = 300", self.toml_for(arm))
+
 
 class ScoringTables(unittest.TestCase):
     def score(self, arm, rep, met, dnf=None, failed=None):

@@ -543,6 +543,9 @@ critic_max_tokens = 2048
 [digest]
 store = "sqlite"
 path = "{scratch_dir}/digests.sqlite3"
+# A reasoning-model distiller can need minutes per job; the default 60s exit
+# drain dropped the only digest of a one-goal M run (validity-excluded 11/11).
+drain_timeout_s = 300
 {upstream.format(name="glm", url=env.judge_base_url, model=env.judge_model, key=env.judge_key_file, tls=tls_line)}{upstream.format(name="local", url=local_url, model=local_model, key=local_key, tls=local_tls)}"""
     return toml
 
