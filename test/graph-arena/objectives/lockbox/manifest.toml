@@ -1,0 +1,105 @@
+# lockbox — file-backed KV CLI in Go (graph-arena S-tier objective).
+#
+# The multi-requirement completeness probe: 7 stated requirements, all but the
+# README mechanically checkable — exactly the shape where the consensus gate
+# should catch a partially-done delivery. Fixtures are OVERLAYS on seed/ (the
+# fixture matrix composes seed + overlay; see test_fixtures.py).
+
+[objective]
+id = "lockbox"
+summary = "file-backed key-value CLI in Go with a strict exit-code contract"
+toolchains = ["go", "grep"]
+seed = "seed"
+
+[tiers.S]
+goals = ["""Build a small Go command-line tool named `lockbox` in the current directory \
+(the module `lockbox` is already initialized in go.mod). It is a file-backed \
+key-value store. Requirements — you will be graded on EACH one:
+1. `go build -o lockbox .` must succeed. (build)
+2. `./lockbox --db FILE set KEY VALUE` stores KEY=VALUE in FILE and exits 0; \
+state must persist across separate invocations of the program. (persist)
+3. `./lockbox --db FILE get KEY` prints the value followed by a newline and \
+exits 0; for a missing key it prints exactly `not found` on stderr and exits \
+with code 2. `delete` of a missing key prints the same and also exits 2. (exitcodes)
+4. Keys must match [A-Za-z0-9_.-]+; any other key must make the command print \
+`invalid key` on stderr and exit with code 1. (key-validation)
+5. `./lockbox --db FILE list` prints all stored keys sorted ascending, one per \
+line. (list-sorted)
+6. The shipped test suite must pass unchanged: `go test ./...`. Do NOT modify \
+integration/integration_test.go. (tests-pass)
+7. Write a README.md documenting the usage of every subcommand. (readme)
+Verify your own work with bash (compile it, run the tests) before finishing."""]
+context_window = 32768
+timeout_s = 900
+max_iterations = 75
+requirements = [
+  "build",
+  "persist",
+  "exitcodes",
+  "key-validation",
+  "list-sorted",
+  "tests-pass",
+  "readme",
+]
+
+[[requirement]]
+id = "build"
+text = "`go build -o lockbox .` succeeds"
+kind = "completeness"
+steps = [{ run = ["go", "build", "-o", "lockbox", "."], expect_exit = 0, timeout_s = 120 }]
+
+[[requirement]]
+id = "persist"
+text = "set stores KEY=VALUE in the --db file; state persists across separate invocations"
+kind = "completeness"
+steps = [
+  { run = ["go", "build", "-o", "lockbox", "."], expect_exit = 0, timeout_s = 120 },
+  { run = ["./lockbox", "--db", "arena-persist.db", "set", "alpha", "one"], expect_exit = 0 },
+  { run = ["./lockbox", "--db", "arena-persist.db", "get", "alpha"], expect_exit = 0, stdout_matches = "^one$" },
+]
+
+[[requirement]]
+id = "exitcodes"
+text = "get/delete of a missing key prints exactly `not found` on stderr and exits 2"
+kind = "completeness"
+steps = [
+  { run = ["go", "build", "-o", "lockbox", "."], expect_exit = 0, timeout_s = 120 },
+  { run = ["./lockbox", "--db", "arena-exit.db", "get", "missing"], expect_exit = 2, stderr_matches = "^not found$" },
+  { run = ["./lockbox", "--db", "arena-exit.db", "delete", "missing"], expect_exit = 2, stderr_matches = "^not found$" },
+]
+
+[[requirement]]
+id = "key-validation"
+text = "a key outside [A-Za-z0-9_.-]+ prints `invalid key` on stderr and exits 1"
+kind = "safety"
+steps = [
+  { run = ["go", "build", "-o", "lockbox", "."], expect_exit = 0, timeout_s = 120 },
+  { run = ["./lockbox", "--db", "arena-val.db", "set", "bad/key", "v"], expect_exit = 1, stderr_matches = "invalid key" },
+]
+
+[[requirement]]
+id = "list-sorted"
+text = "list prints all stored keys sorted ascending, one per line"
+kind = "completeness"
+steps = [
+  { run = ["go", "build", "-o", "lockbox", "."], expect_exit = 0, timeout_s = 120 },
+  { run = ["./lockbox", "--db", "arena-list.db", "set", "bravo", "2"], expect_exit = 0 },
+  { run = ["./lockbox", "--db", "arena-list.db", "set", "alpha", "1"], expect_exit = 0 },
+  { run = ["./lockbox", "--db", "arena-list.db", "set", "charlie", "3"], expect_exit = 0 },
+  { run = ["./lockbox", "--db", "arena-list.db", "list"], expect_exit = 0, stdout_matches = "^alpha\\nbravo\\ncharlie$" },
+]
+
+[[requirement]]
+id = "tests-pass"
+text = "the shipped `go test ./...` suite passes unchanged"
+kind = "completeness"
+steps = [{ run = ["go", "test", "./..."], expect_exit = 0, timeout_s = 300 }]
+
+[[requirement]]
+id = "readme"
+text = "README.md documents the usage of every subcommand"
+kind = "completeness"
+steps = [
+  { run = ["grep", "-qi", "usage", "README.md"], expect_exit = 0 },
+  { run = ["grep", "-qi", "lockbox", "README.md"], expect_exit = 0 },
+]
