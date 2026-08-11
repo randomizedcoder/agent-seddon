@@ -153,6 +153,11 @@ def setup_workdir(objective_dir: Path, manifest: core.Manifest, workdir: Path) -
         if not seed.is_dir():
             refuse(f"objective seed dir missing: {seed}")
         shutil.copytree(seed, workdir, dirs_exist_ok=True)
+        # The packaged objective lives in the read-only nix store and copytree
+        # preserves its 0555/0444 modes — the agent (and git) must be able to
+        # write here.
+        for p in [workdir, *workdir.rglob("*")]:
+            p.chmod(p.stat().st_mode | 0o200)
     git(workdir, "init", "-q")
     git(workdir, "add", "-A")
     git(workdir, "commit", "-qm", "arena seed", "--allow-empty")
