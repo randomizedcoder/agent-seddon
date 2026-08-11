@@ -92,11 +92,20 @@ async fn fork_cancel_cycle_does_not_leak() {
         let r = provider.complete(req.clone()).await.expect("winner");
         assert_eq!(r.message.content_text(), "quick");
     }
-    tokio::task::yield_now().await;
-    let end = dhat::HeapStats::get();
-
     // Every cycle spawned two tasks and aborted one mid-sleep: all of it must
     // be freed again (an abort that strands the branch would show up here).
+    // The CONTRACT is eventually-freed — an aborted task's teardown runs at
+    // the scheduler's leisure, so a single yield can sample mid-release under
+    // load (live-observed flake: 10.7k -> 19.4k that a re-run freed). Poll for
+    // the settle; a REAL strand never converges and still fails.
+    let mut end = dhat::HeapStats::get();
+    for _ in 0..100 {
+        if end.curr_bytes <= base.curr_bytes + 4 * 1024 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        end = dhat::HeapStats::get();
+    }
     assert!(
         end.curr_bytes <= base.curr_bytes + 4 * 1024,
         "live heap grew across {ITERS} fork/cancel cycles: {} -> {} bytes",
