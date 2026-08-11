@@ -858,8 +858,20 @@ impl LlmProvider for MeteredProvider {
         let out = self.inner.complete(req).await;
         self.metrics
             .on_provider_request(&self.name, false, start.elapsed().as_secs_f64());
-        if out.is_err() {
-            self.metrics.on_provider_error(&self.name, "complete");
+        match &out {
+            // Attribute usage to the NAMED upstream — internal role calls
+            // (critic/distiller/judge) never pass the main loop's model-labeled
+            // token recorder, so this wrapper is their only accounting.
+            Ok(resp) => {
+                if let Some(u) = &resp.usage {
+                    self.metrics.add_upstream_tokens(
+                        &self.name,
+                        u64::from(u.prompt_tokens),
+                        u64::from(u.completion_tokens),
+                    );
+                }
+            }
+            Err(_) => self.metrics.on_provider_error(&self.name, "complete"),
         }
         out
     }
