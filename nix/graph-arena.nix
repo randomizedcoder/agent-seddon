@@ -35,6 +35,10 @@ pkgs.writeShellApplication {
   ];
   text = ''
     export ARENA_COGNITION_DIR="${../config/cognition}"
+    # Pure-Go builds: the shim carries no C compiler, and objectives importing
+    # `net` (relay) must build for the agent's own in-run verification exactly
+    # as they do for scoring (driver.py sets the same for its step executor).
+    export CGO_ENABLED=0
     exec python3 "${../test/graph-arena}/driver.py" "$@"
   '';
 }

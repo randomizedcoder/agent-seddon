@@ -1,0 +1,221 @@
+# relay — TCP line-protocol message relay in Go (graph-arena L-tier objective).
+#
+# The long-horizon probe: THREE sequential goals in one session (`--continue`),
+# each stated only in its own goal text, all graded at the END. G1's exact wire
+# protocol and CONSTRAINTS.md rules must survive two more goals of context churn
+# — the cross-goal memory probe the digest ledger + compaction arms claim to win;
+# baseline's sliding window has typically truncated goal 1 away by goal 3.
+
+[objective]
+id = "relay"
+summary = "3-goal TCP relay: protocol+auth, then persistence/replay, then metrics+rate limiting — G1 behavior re-graded at the end"
+toolchains = ["go", "grep"]
+seed = "seed"
+
+[tiers.L]
+goals = ["""Build a Go TCP message-relay server named `relay` in the current directory \
+(module `relay` is initialized; read CONSTRAINTS.md — its rules are graded, some \
+only at the end of this multi-goal session). This is goal 1 of 3; later goals \
+extend this server, and EVERYTHING from this goal is re-graded after the final \
+goal. Requirements — you will be graded on EACH one:
+1. `go build -o relay .` succeeds. (build)
+2. `./relay --listen 127.0.0.1:0 --tokens FILE` starts a TCP server and prints \
+`LISTENING <actual-host:port>` as its first stdout line. FILE holds one valid \
+auth token per line.
+3. The wire protocol is newline-terminated text lines. The first command on \
+every connection must be `AUTH <token>`: a token from the tokens file gets the \
+reply `OK`; anything else gets exactly `ERR unauthorized` and the connection is \
+closed. Any other command before a successful AUTH also gets `ERR unauthorized` \
+and the connection is closed. (auth)
+4. After AUTH: `SUB <topic>` replies `OK` and subscribes the connection; \
+`PUB <topic> <text>` (text may contain spaces) replies `OK` to the publisher \
+and delivers one line `MSG <topic> <text>` to every currently subscribed \
+connection for that topic. (pubsub)
+5. After AUTH: `PING` replies `PONG`. (ping)
+6. Any unknown or malformed command after AUTH replies exactly `ERR bad command` \
+and the connection STAYS open; hostile input must never crash the server \
+(CONSTRAINTS.md). (malformed — graded at the end)
+The shipped suite integration/g1_test.go covers this goal: verify with \
+`go build -o relay .` then \
+`go test -run 'TestAuth|TestPubSub$|TestPing' ./integration` (do NOT modify \
+anything under integration/).""",
+"""Goal 2 of 3: extend `relay` with durable persistence and replay. G1's \
+protocol and behavior must remain EXACTLY intact — the goal-1 tests are \
+re-graded after the final goal. New requirements:
+1. `--journal FILE` makes the server append one line `<topic> <text>` to FILE \
+for every accepted PUB, flushed/synced per publish (a killed process must not \
+lose accepted messages). (journal)
+2. After AUTH: `REPLAY <topic> <n>` replies with up to n most recent journaled \
+messages for that topic, OLDEST FIRST, each as a `MSG <topic> <text>` line, \
+followed by a final `OK` line. (replay)
+3. Replay serves from the journal: a NEW server process started with the same \
+--journal FILE must answer REPLAY with the messages published before the \
+restart. (replay-restart)
+Verify with `go build -o relay .` then \
+`go test -run 'TestJournal$|TestReplay$|TestReplayRestart' ./integration`, and \
+re-run the goal-1 tests to prove nothing regressed (integration/ stays \
+unmodified).""",
+"""Goal 3 of 3: add observability and overload protection to `relay`, then \
+finish the project. Everything from goals 1 and 2 is graded NOW, alongside:
+1. `--metrics 127.0.0.1:0` serves HTTP on that address, printing \
+`METRICS <actual-host:port>` on stdout (after the LISTENING line). \
+`GET /metrics` returns plain text containing the lines \
+`relay_published_total <N>` (accepted publishes) and \
+`relay_connections_total <N>` (accepted TCP connections). (metrics)
+2. `--rate N` enforces a per-connection PUB token bucket: burst N, refilled at \
+N per second. A PUB over budget replies exactly `ERR rate limited`, is NOT \
+published or journaled, and the connection stays open. (ratelimit)
+3. The ENTIRE shipped suite passes unchanged: `go test ./...` — this re-grades \
+every goal-1 and goal-2 behavior too. (tests-pass)
+4. Write a README.md documenting the usage: every flag, every wire-protocol \
+command with its exact replies, replay, metrics, and rate limiting. (readme)
+5. Remember CONSTRAINTS.md: standard library only, exact `ERR <reason>` \
+replies, hostile input must never crash the server — these are graded now. \
+(stdlib-only, malformed)
+Verify your own work with bash (build it, run `go test ./...`) before \
+finishing."""]
+# 16384 (not logtriage's 12288): a 3-goal --continue session forces compaction
+# by ACCUMULATION; at 12288 the intermediate arm compacted 61× in goal 2 alone
+# (thrash) and both arms ran out of iterations. 200 iterations: goal 2/3 carry
+# the whole session's state — 120 was calibrated on single-goal tiers.
+context_window = 16384
+timeout_s = 2400
+max_iterations = 200
+requirements = [
+  "build",
+  "auth",
+  "pubsub",
+  "ping",
+  "journal",
+  "replay",
+  "replay-restart",
+  "metrics",
+  "ratelimit",
+  "malformed",
+  "stdlib-only",
+  "tests-pass",
+  "readme",
+]
+
+[[requirement]]
+id = "build"
+text = "`go build -o relay .` succeeds"
+kind = "completeness"
+steps = [{ run = ["go", "build", "-o", "relay", "."], expect_exit = 0, timeout_s = 120 }]
+
+[[requirement]]
+id = "auth"
+text = "AUTH gate: valid token OK, invalid exactly `ERR unauthorized` + close, no commands pre-auth"
+kind = "completeness"
+steps = [
+  { run = ["go", "build", "-o", "relay", "."], expect_exit = 0, timeout_s = 120 },
+  { run = ["go", "test", "-run", "TestAuth", "./integration"], expect_exit = 0, timeout_s = 300 },
+]
+
+[[requirement]]
+id = "pubsub"
+text = "SUB/PUB fan-out: subscriber receives `MSG <topic> <text>`, publisher gets OK"
+kind = "completeness"
+steps = [
+  { run = ["go", "build", "-o", "relay", "."], expect_exit = 0, timeout_s = 120 },
+  { run = ["go", "test", "-run", "TestPubSub$", "./integration"], expect_exit = 0, timeout_s = 300 },
+]
+
+[[requirement]]
+id = "ping"
+text = "PING replies PONG"
+kind = "completeness"
+steps = [
+  { run = ["go", "build", "-o", "relay", "."], expect_exit = 0, timeout_s = 120 },
+  { run = ["go", "test", "-run", "TestPing", "./integration"], expect_exit = 0, timeout_s = 300 },
+]
+
+[[requirement]]
+id = "journal"
+text = "--journal appends `<topic> <text>` per accepted PUB, flushed per publish"
+kind = "completeness"
+after_goal = 2
+steps = [
+  { run = ["go", "build", "-o", "relay", "."], expect_exit = 0, timeout_s = 120 },
+  { run = ["go", "test", "-run", "TestJournal$", "./integration"], expect_exit = 0, timeout_s = 300 },
+]
+
+[[requirement]]
+id = "replay"
+text = "REPLAY <topic> <n>: up to n most recent messages oldest-first, then OK"
+kind = "completeness"
+after_goal = 2
+steps = [
+  { run = ["go", "build", "-o", "relay", "."], expect_exit = 0, timeout_s = 120 },
+  { run = ["go", "test", "-run", "TestReplay$", "./integration"], expect_exit = 0, timeout_s = 300 },
+]
+
+[[requirement]]
+id = "replay-restart"
+text = "a restarted server (same --journal) still replays pre-restart messages"
+kind = "completeness"
+after_goal = 2
+steps = [
+  { run = ["go", "build", "-o", "relay", "."], expect_exit = 0, timeout_s = 120 },
+  { run = ["go", "test", "-run", "TestReplayRestart", "./integration"], expect_exit = 0, timeout_s = 300 },
+]
+
+[[requirement]]
+id = "metrics"
+text = "--metrics serves /metrics with relay_published_total + relay_connections_total"
+kind = "completeness"
+after_goal = 3
+steps = [
+  { run = ["go", "build", "-o", "relay", "."], expect_exit = 0, timeout_s = 120 },
+  { run = ["go", "test", "-run", "TestMetrics", "./integration"], expect_exit = 0, timeout_s = 300 },
+]
+
+[[requirement]]
+id = "ratelimit"
+text = "--rate N: over-budget PUB replies exactly `ERR rate limited`, not published, conn open"
+kind = "perf"
+after_goal = 3
+steps = [
+  { run = ["go", "build", "-o", "relay", "."], expect_exit = 0, timeout_s = 120 },
+  { run = ["go", "test", "-run", "TestRateLimit", "./integration"], expect_exit = 0, timeout_s = 300 },
+]
+
+[[requirement]]
+id = "malformed"
+text = "unknown input after AUTH: exactly `ERR bad command`, conn open, server survives (CONSTRAINTS.md, stated in goal 1)"
+kind = "memory"
+after_goal = 3
+steps = [
+  { run = ["go", "build", "-o", "relay", "."], expect_exit = 0, timeout_s = 120 },
+  { run = ["go", "test", "-run", "TestMalformed", "./integration"], expect_exit = 0, timeout_s = 300 },
+]
+
+[[requirement]]
+id = "stdlib-only"
+text = "the delivered, building program uses the standard library only (CONSTRAINTS.md)"
+kind = "memory"
+after_goal = 3
+steps = [
+  # The build step keeps this non-vacuous (a bare seed must not score it).
+  { run = ["go", "build", "-o", "relay", "."], expect_exit = 0, timeout_s = 120 },
+  { run = ["grep", "-c", "require", "go.mod"], expect_exit = 1, stdout_matches = "^0$" },
+]
+
+[[requirement]]
+id = "tests-pass"
+text = "the whole shipped `go test ./...` suite passes unchanged (re-grades every goal)"
+kind = "memory"
+after_goal = 3
+steps = [{ run = ["go", "test", "./..."], expect_exit = 0, timeout_s = 600 }]
+
+[[requirement]]
+id = "readme"
+text = "README.md documents every flag, every command with exact replies, replay, metrics, rate limiting"
+kind = "completeness"
+after_goal = 3
+steps = [
+  { run = ["grep", "-qi", "usage", "README.md"], expect_exit = 0 },
+  { run = ["grep", "-qi", "relay", "README.md"], expect_exit = 0 },
+]
+judge = "rubrics/readme.md"
+judge_files = ["README.md"]
