@@ -50,9 +50,15 @@ const MAX_CRITIC_TOKENS_CEILING: u32 = 4_096;
 const MAX_ISSUES: usize = 8;
 const MAX_ISSUE_CHARS: usize = 400;
 const MAX_ALT_CHARS: usize = 600;
-const MAX_TASK_CHARS: usize = 2_000;
+// The task is the critic's requirements source: truncating it hides trailing
+// requirements and the critic then passes a partial fix (live-observed on a
+// multi-requirement GitHub issue). Generous, but still bounded.
+const MAX_TASK_CHARS: usize = 6_000;
 const MAX_CANDIDATE_CHARS: usize = 6_000;
 const MAX_RUBRIC_CHARS: usize = 2_000;
+/// Ground-truth evidence (e.g. the working tree's `git diff`) quoted into the
+/// critic prompt; capped gate-side regardless of what the source returns.
+const MAX_EVIDENCE_CHARS: usize = 20_000;
 
 const SYSTEM_PROMPT: &str = "\
 You are a response critic for an autonomous coding agent. You will be given the task, \
@@ -74,6 +80,9 @@ reconsidered. Return pass=true with empty lists when the answer is sound.";
 const DEFAULT_RUBRIC: &str = "\
 - Claims about code, commands, or APIs are correct as far as the answer shows.\n\
 - The answer actually addresses the stated task (no bait-and-switch).\n\
+- EVERY distinct requirement in the task is addressed — a fix that satisfies only \
+the headline requirement while ignoring a second stated case is a failure; \
+enumerate the task's requirements and check each one.\n\
 - No unverified assertions presented as verified fact.\n\
 - Paths, commands, and identifiers are plausible and self-consistent.";
 
@@ -99,7 +108,14 @@ pub enum Exhaustion {
     Fail,
 }
 
-#[derive(Debug, Clone)]
+/// Ground-truth evidence gathered fresh per critique — e.g. the working tree's
+/// `git diff` — so the critic judges what actually CHANGED, not the candidate's
+/// prose about it. `None` = nothing to add for this round. The closure may
+/// block briefly (it runs under `spawn_blocking`); its output is capped
+/// gate-side ([`MAX_EVIDENCE_CHARS`]) — the source is not trusted to bound it.
+pub type EvidenceSource = Arc<dyn Fn() -> Option<String> + Send + Sync>;
+
+#[derive(Clone)]
 pub struct GateCfg {
     pub max_rounds: u8,
     pub scope: GateScope,
@@ -108,6 +124,22 @@ pub struct GateCfg {
     pub max_alternatives: u8,
     /// Operator-editable rubric text; `None` uses the compiled default.
     pub rubric: Option<String>,
+    /// Optional ground-truth evidence for the critic (prose-only without it).
+    pub evidence: Option<EvidenceSource>,
+}
+
+impl std::fmt::Debug for GateCfg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GateCfg")
+            .field("max_rounds", &self.max_rounds)
+            .field("scope", &self.scope)
+            .field("on_exhaustion", &self.on_exhaustion)
+            .field("critic_max_tokens", &self.critic_max_tokens)
+            .field("max_alternatives", &self.max_alternatives)
+            .field("rubric", &self.rubric)
+            .field("evidence", &self.evidence.as_ref().map(|_| "<fn>"))
+            .finish()
+    }
 }
 
 impl Default for GateCfg {
@@ -119,6 +151,7 @@ impl Default for GateCfg {
             critic_max_tokens: 512,
             max_alternatives: 3,
             rubric: None,
+            evidence: None,
         }
     }
 }
@@ -256,23 +289,79 @@ impl ConsensusProvider {
             .as_deref()
             .unwrap_or(DEFAULT_RUBRIC)
             .to_string();
+        // Ground truth beats prose: with an evidence source wired, the critic
+        // judges the actual changes, and the prompt says so. A panicking or
+        // erroring source degrades to a prose-only critique, never a crash.
+        let evidence = match &self.cfg.evidence {
+            Some(src) => {
+                let src = src.clone();
+                tokio::task::spawn_blocking(move || src())
+                    .await
+                    .ok()
+                    .flatten()
+            }
+            None => None,
+        };
+        let evidence_section = evidence
+            .filter(|e| !e.trim().is_empty())
+            .map(|e| {
+                format!(
+                    "Actual changes made (ground truth — judge the candidate against \
+                     these AND against every requirement in the task; prose claiming \
+                     work the changes do not show is a failure):\n{}\n\n",
+                    cap(&e, MAX_EVIDENCE_CHARS)
+                )
+            })
+            .unwrap_or_default();
         let user = format!(
-            "Task:\n{task}\n\nRubric:\n{rubric}\n\nCandidate answer to judge:\n{}",
+            "Task:\n{task}\n\nRubric:\n{rubric}\n\n{evidence_section}Candidate answer to judge:\n{}",
             cap(candidate, MAX_CANDIDATE_CHARS)
         );
-        let req = CompletionRequest {
-            messages: vec![Message::system(SYSTEM_PROMPT), Message::user(user)],
-            tools: Vec::new(),
-            max_tokens: self.cfg.critic_max_tokens,
-            temperature: 0.0,
-            response_format: None,
-            route: None,
-        };
-        let resp = self.critic.complete(req).await.ok()?;
-        parse_verdict(
-            &resp.message.content_text(),
-            self.cfg.max_alternatives as usize,
-        )
+        let mut max_tokens = self.cfg.critic_max_tokens;
+        // Two attempts at most: a reasoning critic (GLM/Kimi) can burn the whole
+        // output budget on reasoning_content and return EMPTY visible content —
+        // one retry with an escalated budget recovers that; anything else fails
+        // open. Fail-open is the gate's contract, but NEVER silently: a broken
+        // critic that logs nothing looks exactly like a passing one.
+        for attempt in 0..2 {
+            let req = CompletionRequest {
+                messages: vec![Message::system(SYSTEM_PROMPT), Message::user(user.clone())],
+                tools: Vec::new(),
+                max_tokens,
+                temperature: 0.0,
+                response_format: None,
+                route: None,
+            };
+            let resp = match self.critic.complete(req).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(error = %e, "consensus critic call failed — delivering ungated");
+                    return None;
+                }
+            };
+            let text = resp.message.content_text();
+            let escalated = (max_tokens.saturating_mul(4)).min(MAX_CRITIC_TOKENS_CEILING);
+            if text.trim().is_empty() && attempt == 0 && escalated > max_tokens {
+                tracing::warn!(
+                    max_tokens,
+                    retry_max_tokens = escalated,
+                    "consensus critic returned empty content (reasoning likely ate \
+                     the budget) — retrying once with more headroom"
+                );
+                max_tokens = escalated;
+                continue;
+            }
+            let verdict = parse_verdict(&text, self.cfg.max_alternatives as usize);
+            if verdict.is_none() {
+                tracing::warn!(
+                    reply_chars = text.len(),
+                    reply_head = %cap(&text, 200),
+                    "consensus critic reply did not parse as a verdict — delivering ungated"
+                );
+            }
+            return verdict;
+        }
+        None
     }
 
     /// The tail feedback message driving a revision round: issues quoted verbatim
@@ -983,6 +1072,160 @@ mod tests {
         let resp = p.complete(req()).await.unwrap();
         assert_eq!(resp.message.content_text(), "answer");
         assert_eq!(seen.lock().unwrap()[0].kind, GateOutcomeKind::CriticError);
+    }
+
+    // --- evidence + reasoning-budget robustness (gate-evidence follow-up) ---
+
+    /// A critic that records every request it saw and replies from a script.
+    struct RecordingCritic {
+        reqs: Mutex<Vec<CompletionRequest>>,
+        replies: Mutex<Vec<String>>,
+    }
+    impl RecordingCritic {
+        fn new(replies: &[&str]) -> Arc<Self> {
+            Arc::new(Self {
+                reqs: Mutex::new(Vec::new()),
+                replies: Mutex::new(replies.iter().rev().map(ToString::to_string).collect()),
+            })
+        }
+        fn user_prompt(&self, i: usize) -> String {
+            self.reqs.lock().unwrap()[i]
+                .messages
+                .iter()
+                .find(|m| m.role == agent_core::Role::User)
+                .map(agent_core::Message::content_text)
+                .unwrap_or_default()
+        }
+        fn max_tokens(&self, i: usize) -> u32 {
+            self.reqs.lock().unwrap()[i].max_tokens
+        }
+    }
+    #[async_trait]
+    impl LlmProvider for RecordingCritic {
+        fn capabilities(&self) -> ModelCapabilities {
+            ModelCapabilities::default()
+        }
+        async fn complete(&self, r: CompletionRequest) -> Result<CompletionResponse> {
+            self.reqs.lock().unwrap().push(r);
+            let text = self.replies.lock().unwrap().pop().unwrap_or_default();
+            Ok(CompletionResponse {
+                message: Message::assistant(&text),
+                finish_reason: "stop".into(),
+                usage: None,
+            })
+        }
+        async fn stream(&self, _r: CompletionRequest) -> Result<ChunkStream> {
+            Err(Error::Provider("no stream".into()))
+        }
+    }
+
+    fn with_evidence(ev: EvidenceSource) -> GateCfg {
+        GateCfg {
+            evidence: Some(ev),
+            ..GateCfg::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn positive_evidence_reaches_the_critic_prompt() {
+        let g = SeqProvider::new(&["done, I fixed it"]);
+        let c = RecordingCritic::new(&[&pass()]);
+        let cfg = with_evidence(Arc::new(|| {
+            Some("diff --git a/src/x.py b/src/x.py\n+raise ValueError".into())
+        }));
+        let (p, _) = gate(g, c.clone(), cfg);
+        p.complete(req()).await.unwrap();
+        let prompt = c.user_prompt(0);
+        assert!(prompt.contains("Actual changes made"), "{prompt}");
+        assert!(prompt.contains("diff --git a/src/x.py"), "{prompt}");
+        assert!(
+            prompt.contains("every requirement in the task"),
+            "the completeness contract must ride with the evidence"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::corner_none(None)]
+    #[case::corner_blank(Some("   \n".to_string()))]
+    #[tokio::test]
+    async fn corner_absent_evidence_keeps_prose_only_prompt(#[case] ev: Option<String>) {
+        let g = SeqProvider::new(&["answer"]);
+        let c = RecordingCritic::new(&[&pass()]);
+        let (p, _) = gate(g, c.clone(), with_evidence(Arc::new(move || ev.clone())));
+        p.complete(req()).await.unwrap();
+        assert!(
+            !c.user_prompt(0).contains("Actual changes made"),
+            "no evidence section without evidence"
+        );
+    }
+
+    #[tokio::test]
+    async fn boundary_huge_evidence_is_capped_gate_side() {
+        let g = SeqProvider::new(&["answer"]);
+        let c = RecordingCritic::new(&[&pass()]);
+        let cfg = with_evidence(Arc::new(|| Some("x".repeat(500_000))));
+        let (p, _) = gate(g, c.clone(), cfg);
+        p.complete(req()).await.unwrap();
+        let prompt = c.user_prompt(0);
+        assert!(
+            prompt.len() < MAX_EVIDENCE_CHARS + 10_000,
+            "evidence must be capped regardless of the source ({} chars)",
+            prompt.len()
+        );
+    }
+
+    /// A panicking source degrades to prose-only critique — never a crash, and
+    /// never a skipped gate.
+    #[tokio::test]
+    async fn adversarial_panicking_evidence_source_degrades_to_prose() {
+        let g = SeqProvider::new(&["answer"]);
+        let c = RecordingCritic::new(&[&pass()]);
+        let cfg = with_evidence(Arc::new(|| panic!("evidence source blew up")));
+        let (p, seen) = gate(g, c.clone(), cfg);
+        let resp = p.complete(req()).await.unwrap();
+        assert_eq!(resp.message.content_text(), "answer");
+        assert_eq!(seen.lock().unwrap()[0].kind, GateOutcomeKind::Pass);
+        assert!(!c.user_prompt(0).contains("Actual changes made"));
+    }
+
+    /// Empty critic content = a reasoning model that spent the whole budget
+    /// thinking; ONE retry with 4× headroom (clamped to the ceiling) recovers it.
+    #[tokio::test]
+    async fn positive_empty_critic_reply_retries_with_bigger_budget() {
+        let g = SeqProvider::new(&["answer"]);
+        let c = RecordingCritic::new(&["", &pass()]);
+        let (p, seen) = gate(g, c.clone(), GateCfg::default());
+        let resp = p.complete(req()).await.unwrap();
+        assert_eq!(resp.message.content_text(), "answer");
+        assert_eq!(seen.lock().unwrap()[0].kind, GateOutcomeKind::Pass);
+        assert_eq!(c.max_tokens(0), 512, "first attempt at the configured cap");
+        assert_eq!(c.max_tokens(1), 2_048, "retry escalates 4x");
+    }
+
+    #[tokio::test]
+    async fn negative_twice_empty_critic_fails_open_once_logged() {
+        let g = SeqProvider::new(&["answer"]);
+        let c = RecordingCritic::new(&["", ""]);
+        let (p, seen) = gate(g, c.clone(), GateCfg::default());
+        let resp = p.complete(req()).await.unwrap();
+        assert_eq!(resp.message.content_text(), "answer", "fail open, deliver");
+        assert_eq!(seen.lock().unwrap()[0].kind, GateOutcomeKind::CriticError);
+        assert_eq!(c.reqs.lock().unwrap().len(), 2, "exactly one retry");
+    }
+
+    /// At the ceiling there is no headroom to escalate into — no pointless retry.
+    #[tokio::test]
+    async fn boundary_empty_reply_at_ceiling_does_not_retry() {
+        let g = SeqProvider::new(&["answer"]);
+        let c = RecordingCritic::new(&[""]);
+        let cfg = GateCfg {
+            critic_max_tokens: MAX_CRITIC_TOKENS_CEILING,
+            ..GateCfg::default()
+        };
+        let (p, seen) = gate(g, c.clone(), cfg);
+        p.complete(req()).await.unwrap();
+        assert_eq!(seen.lock().unwrap()[0].kind, GateOutcomeKind::CriticError);
+        assert_eq!(c.reqs.lock().unwrap().len(), 1, "no retry at the ceiling");
     }
 
     // Keep ScriptedProvider linked for parity with sibling test modules.

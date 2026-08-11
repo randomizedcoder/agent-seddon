@@ -60,8 +60,8 @@ pub use pool::{PoolEvent, PoolObserver, PoolPolicy, PoolProvider, PoolSpec, Satu
 pub mod consensus;
 #[cfg(feature = "provider-consensus")]
 pub use consensus::{
-    AlternativeOption, ConsensusProvider, Exhaustion, GateCfg, GateObserver, GateOutcome,
-    GateOutcomeKind, GateScope,
+    AlternativeOption, ConsensusProvider, EvidenceSource, Exhaustion, GateCfg, GateObserver,
+    GateOutcome, GateOutcomeKind, GateScope,
 };
 
 /// Parallel branches: split → concurrent lens branches → policy join → merge
