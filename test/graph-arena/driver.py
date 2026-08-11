@@ -147,6 +147,15 @@ def git(workdir: Path, *args: str) -> None:
 def setup_workdir(objective_dir: Path, manifest: core.Manifest, workdir: Path) -> None:
     """Copy the seed and make the workdir a git repo with a base commit — the
     gate's evidence is `git diff`, a bare directory would blind it (R3)."""
+    if workdir.exists():
+        # A rerun into the same output dir: wipe the stale run (store-copied
+        # files may be read-only — restore u+w first so rmtree succeeds).
+        for p in [workdir, *workdir.rglob("*")]:
+            try:
+                p.chmod(p.stat().st_mode | 0o200)
+            except OSError:
+                pass
+        shutil.rmtree(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
     if manifest.seed:
         seed = objective_dir / manifest.seed
