@@ -78,7 +78,12 @@ def preflight_endpoint(base_url: str, api_key: str, insecure: bool, what: str) -
         ctx.verify_mode = ssl.CERT_NONE
     req = urllib.request.Request(
         f"{base_url.rstrip('/')}/models",
-        headers={"Authorization": f"Bearer {api_key}"},
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            # The runpod edge proxy 403s python's default UA (live-observed:
+            # curl passed, urllib failed on the same URL+key) — send our own.
+            "User-Agent": "graph-arena/1",
+        },
     )
     try:
         with urllib.request.urlopen(req, timeout=20, context=ctx) as resp:
