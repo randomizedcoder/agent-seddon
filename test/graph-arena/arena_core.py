@@ -753,6 +753,10 @@ def classify_validity(arm: str, tier_name: str, samples: Samples | None) -> Vali
     )
     critic_errors = metric_sum(samples, "agent_gate_verdicts_total", outcome="critic_error")
     distilled = metric_sum(samples, "agent_distill_jobs_total", outcome="succeeded")
+    distill_lost = sum(
+        metric_sum(samples, "agent_distill_jobs_total", outcome=o)
+        for o in ("failed", "store_failed", "dropped")
+    )
     branches = metric_sum(samples, "agent_graph_branches_total")
     merges = metric_sum(samples, "agent_graph_merge_total")
     compactions = metric_sum(samples, "agent_context_compactions_total")
@@ -760,6 +764,7 @@ def classify_validity(arm: str, tier_name: str, samples: Samples | None) -> Vali
         "gate_delivered": int(delivered),
         "gate_critic_errors": int(critic_errors),
         "distill_succeeded": int(distilled),
+        "distill_lost": int(distill_lost),
         "branches": int(branches),
         "merges": int(merges),
         "compactions": int(compactions),
@@ -774,7 +779,10 @@ def classify_validity(arm: str, tier_name: str, samples: Samples | None) -> Vali
         )
         return Validity(False, why, evidence)
     if arm in ("intermediate", "economical") and distilled <= 0:
-        return Validity(False, "no successful distillation", evidence)
+        why = "no successful distillation"
+        if distill_lost > 0:
+            why += f" ({int(distill_lost)} job(s) failed/dropped — see the drain deadline)"
+        return Validity(False, why, evidence)
     if arm == "advanced" and (branches <= 0 or merges <= 0):
         return Validity(False, "fork never ran (zero branches/merges)", evidence)
     if tier_name in ("M", "L") and arm != "simple" and compactions <= 0:

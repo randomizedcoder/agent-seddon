@@ -37,7 +37,7 @@ integration/integration_test.go. This includes a performance floor: 1,000,000 \
 lines aggregated in under 5 seconds. (tests-pass, perf)
 10. Write a README.md documenting the usage of every subcommand and flag. (readme)
 Verify your own work with bash (build it, run the tests) before finishing."""]
-context_window = 16384
+context_window = 12288
 timeout_s = 2400
 max_iterations = 120
 requirements = [

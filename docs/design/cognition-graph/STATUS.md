@@ -236,6 +236,20 @@ designed (and why). Update both with every increment PR.
   moved to harness increment 5 — its seed test suites are an increment-sized
   authoring job of their own; the `--continue` mechanism itself is
   live-verified. Docs page: `docs/graph-arena.md`.
+- **06 / first real A/B delta — and two treatment-delivery findings (M spot-check).**
+  `logtriage` M, Kimi, one rep: **baseline 0/11 in 93 s** (rushed to "done";
+  `go build` fails) vs **intermediate 11/11 in 305 s** — the strongest quality
+  signal the arena has produced. The validity gate (strictly, correctly)
+  excluded the winning run from the headline: `agent_distill_jobs_total`
+  showed no successes because **the one-shot drain deadline dropped the
+  pending digest** (`distiller drain deadline hit; pending digests dropped` —
+  a slow GLM distill call cannot finish inside the deadline), and
+  `agent_context_compactions_total` was 0 — a 16k window did not force
+  compaction for this objective, so the M-tier compaction criterion would
+  also have failed. Actions: evidence now carries `distill_lost` and the
+  validity reason names the drain deadline; logtriage's window tightened
+  16384→12288. Gate-side follow-ups (config knob for the drain deadline /
+  faster distill model) belong to the cognition-graph track, not the arena.
 - **06 / live finding — the 4096 critic ceiling saturates on evidence packets.**
   In the acceptance sweep every `simple`-arm gate round ended `critic_error`:
   GLM returned empty content at 2048, the (working) empty-reply retry escalated
