@@ -577,6 +577,11 @@ cooldown_secs       = 30          # how long a breaker stays open before re-prob
 # critic_max_tokens = 512
 # max_alternatives = 3
 # rubric_file = ""                    # operator rubric (overrides the built-in)
+# evidence = "auto"                   # "auto" (default): every critique also gets the
+#                                     # working tree's git diff + untracked-file names,
+#                                     # so the critic judges what actually CHANGED, not
+#                                     # the answer's prose (silently nothing on a
+#                                     # non-repo); "off" = prose-only critique
 
 # The digest ledger + background distiller (cognition-graph 02): every delivered
 # response is summarized + fact-extracted in the background (per-session FIFO

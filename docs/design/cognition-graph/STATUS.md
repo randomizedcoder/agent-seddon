@@ -206,6 +206,32 @@ an integration fixture (`agent-graph/tests/examples.rs` asserts each file
 loads through the real store and equals its `testdata` twin; the executor
 compile tables and the fork-composition path run over the same corpus).
 
+## Gate-evidence follow-up (2026-08-10, from the swebench head-to-head)
+
+Running all four documents against SWE-bench `pallets__flask-4045` (Kimi
+generator × GLM critic) scored 0/1 across the board — identical to the
+graph-less baseline — and exposed two critic failure modes, both fixed on
+branch `feat/gate-evidence`:
+
+- **Silent fail-open + reasoning truncation.** GLM burns the critic's output
+  budget on `reasoning_content`; at the 512 default EVERY critique returned
+  empty content, parse failed, and the gate fail-opened without a log line.
+  Fixed: `critique()` warn-logs every fail-open (call error / unparseable /
+  empty), and an empty reply retries exactly once at 4× budget (clamped to the
+  4096 ceiling). `MAX_TASK_CHARS` 2_000 → 6_000 (a truncated task hides
+  trailing requirements from the critic).
+- **Prose blindness.** With a healthy verdict the critic PASSED the incomplete
+  patch (0.85–0.90, zero issues) — it judged the agent's summary, not the
+  change. Fixed: `GateCfg.evidence` (`EvidenceSource` closure) + `[consensus]
+  evidence = "auto"` — every critique gets the working tree's `git diff`
+  (numstat-bounded; `--stat` summary beyond ~4k lines) + untracked-file names,
+  with a judge-the-changes + every-requirement contract in the prompt and
+  rubric. Wired into the `[consensus]` factory and all graph-built gates.
+
+Harness support: `SWEBENCH_COGNITION_GRAPH` env on `test/swebench/predict.py`
+wires any `config/cognition/*.textproto` (+ `glm`/`local` upstreams from
+`AGENT_E2E_JUDGE_*`, sqlite digest ledger) into the swebench agent config.
+
 ## Deferred (explicit, from README)
 
 - Generalizing the executor beyond the three anchor slots (Option C — full

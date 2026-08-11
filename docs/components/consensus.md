@@ -34,16 +34,35 @@ on_exhaustion = "deliver-with-note"   # | "fail"
 critic_max_tokens = 512 # ceiling 4096 — see the reasoning-model note below
 max_alternatives = 3    # ceiling 4
 rubric_file = ""        # operator rubric; empty = compiled default
+evidence = "auto"       # "auto" | "off" — see "Evidence-based critique" below
 ```
+
+## Evidence-based critique (`evidence = "auto"`, the default)
+
+A critic that only sees the candidate's **prose** cannot tell a complete fix
+from a well-narrated partial one — live-observed on a multi-requirement GitHub
+issue: the agent fixed the headline case, wrote a confident summary, and the
+critic passed it at 0.85–0.90 confidence. With `evidence = "auto"`, every
+critique also receives **ground truth**: the working tree's `git diff` (a
+`--stat` summary when the change exceeds ~4k lines — bounded *before* the full
+diff is read) plus untracked-file names, and the prompt instructs the critic to
+judge the candidate against those changes and against **every requirement** in
+the task. Outside a git repo the section is silently absent (prose-only);
+`"off"` disables it. The gate caps quoted evidence regardless of source, and a
+failing/panicking evidence source degrades to prose-only — never a crash.
+Applies to the `[consensus]` factory **and** every graph-built gate (the graph
+names what runs; evidence, like token budgets, stays config).
 
 ## Operational notes
 
 - **Reasoning-model critics need output headroom.** GLM/Kimi-style critics spend
   `max_tokens` on `reasoning_content` *before* the verdict text; too small a
-  budget truncates to empty content and every round fails open
+  budget truncates to empty content and the round fails open
   (`outcome="critic_error"`). Live-observed: a trade-off judgment burned >2k
   reasoning tokens. Size `critic_max_tokens` generously (2048–4096) for
-  reasoning critics.
+  reasoning critics. As a backstop, an **empty** critic reply triggers exactly
+  one retry at 4× the budget (clamped to the ceiling) before failing open, and
+  every fail-open is logged (`WARN`) — a broken critic is never silent.
 - **Streaming bypasses the gate** (buffering a stream to critique it defeats
   streaming) — run `stream = false` when gating matters.
 - Same-id generator/critic is allowed but warned: self-critique loses the
