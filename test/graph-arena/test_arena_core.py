@@ -775,3 +775,70 @@ agent_upstream_tokens_total{upstream="local",kind="completion"} 60
         out = core.format_evidence([s])
         self.assertIn("up[glm]=950", out)
         self.assertIn("up[local]=60", out)
+
+
+# ---------------------------------------------------------------------------
+# Harness increment 4: sample merging, resume-on-rerun, rehydration
+# ---------------------------------------------------------------------------
+
+
+class MergeAndResumeTables(unittest.TestCase):
+    def test_positive_merge_sums_across_goal_pushes(self):
+        a = core.parse_exposition('agent_context_compactions_total 1\nagent_x{l="v"} 2')
+        b = core.parse_exposition('agent_context_compactions_total 2\nagent_y 5')
+        m = core.merge_samples([a, b])
+        self.assertEqual(core.metric_sum(m, "agent_context_compactions_total"), 3.0)
+        self.assertEqual(core.metric_sum(m, "agent_x"), 2.0)
+        self.assertEqual(core.metric_sum(m, "agent_y"), 5.0)
+        self.assertEqual(core.merge_samples([]), {})
+
+    def test_positive_already_recorded_filters_matching_runs(self):
+        import json
+        lines = [
+            json.dumps({"objective": "lockbox", "tier": "S", "arm": "baseline", "rep": 1}),
+            json.dumps({"objective": "lockbox", "tier": "S", "arm": "simple", "rep": 1, "dnf": "timeout"}),
+            json.dumps({"objective": "lockbox", "tier": "M", "arm": "simple", "rep": 1}),
+            json.dumps({"objective": "other", "tier": "S", "arm": "simple", "rep": 2}),
+        ]
+        done = core.already_recorded(lines, "lockbox", "S")
+        self.assertEqual(done, {("baseline", 1), ("simple", 1)},
+                         "a recorded DNF is a result; other tiers/objectives aren't")
+
+    def adversarial_lines(self):
+        return [
+            "not json at all",
+            "[1,2,3]",
+            '{"objective": "lockbox", "tier": "S", "arm": "chaos", "rep": 1}',
+            '{"objective": "lockbox", "tier": "S", "arm": "simple", "rep": "one"}',
+            '{"objective": "lockbox", "tier": "S"}',
+        ]
+
+    def test_adversarial_garbage_jsonl_never_blocks_or_admits(self):
+        self.assertEqual(core.already_recorded(self.adversarial_lines(), "lockbox", "S"), set())
+
+    def test_positive_rehydration_round_trip(self):
+        rec = {
+            "objective": "lockbox", "tier": "S", "arm": "simple", "rep": 2,
+            "met": ["build", "persist"], "failed": {"readme": "judge: thin"},
+            "dnf": None, "wall_s": 123.4,
+            "validity": {"valid": True, "reason": "ok", "evidence": {"gate_delivered": 1}},
+            "ledger": {"summary": 2},
+        }
+        s = core.score_from_record(rec)
+        self.assertIsNotNone(s)
+        self.assertEqual(s.k, 2)
+        self.assertTrue(s.headline)
+        self.assertEqual(s.ledger, {"summary": 2})
+
+    def test_corner_rehydration_fail_soft(self):
+        self.assertIsNone(core.score_from_record({"arm": "chaos", "rep": 1}))
+        self.assertIsNone(core.score_from_record({"arm": "simple", "rep": "x"}))
+        hostile = {
+            "arm": "simple", "rep": 1, "met": [{"nested": 1}, "ok"],
+            "wall_s": -5, "validity": {"valid": "yes", "evidence": ["not", "dict"]},
+        }
+        s = core.score_from_record(hostile)
+        self.assertIsNotNone(s, "salvageable fields salvage")
+        self.assertEqual(s.met, ("ok",))
+        self.assertEqual(s.wall_s, 0.0)
+        self.assertEqual(s.validity.evidence, {})

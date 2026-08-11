@@ -30,7 +30,7 @@ integration/integration_test.go. (tests-pass)
 7. Write a README.md documenting the usage of every subcommand. (readme)
 Verify your own work with bash (compile it, run the tests) before finishing."""]
 context_window = 32768
-timeout_s = 900
+timeout_s = 1800
 max_iterations = 75
 requirements = [
   "build",

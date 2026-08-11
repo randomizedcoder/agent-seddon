@@ -1,0 +1,148 @@
+# logtriage — log aggregator in Go (graph-arena M-tier objective).
+#
+# The mid-horizon probe: a seed CONSTRAINTS.md whose rules bite LATE in the
+# work (stdlib-only, include safety, malformed tolerance — `memory`-kind
+# requirements), a real safety requirement, and a perf floor — under a
+# context_window sized to force compaction, which is what the digest/compaction
+# arms claim to survive better than sliding-window truncation.
+
+[objective]
+id = "logtriage"
+summary = "log aggregator with late-biting constraints, include safety, and a perf floor"
+toolchains = ["go", "grep"]
+seed = "seed"
+
+[tiers.M]
+goals = ["""Build a Go command-line tool named `logtriage` in the current directory \
+(module `logtriage` is initialized; read CONSTRAINTS.md — its rules are graded). \
+Input is log files of `RFC3339-TIMESTAMP LEVEL message` lines. Requirements — \
+you will be graded on EACH one:
+1. `go build -o logtriage .` succeeds. (build)
+2. `./logtriage --input FILE levels` prints per-level counts, sorted by level \
+name ascending, one `LEVEL COUNT` per line. (levels)
+3. `./logtriage --input FILE buckets` prints per-UTC-hour counts, sorted, one \
+`YYYY-MM-DDTHH COUNT` per line. (buckets)
+4. `--format json` makes either subcommand print the same data as a single \
+JSON object instead. (json)
+5. `./logtriage --config CFG <subcommand>` reads `include=RELATIVE_PATH` lines \
+from CFG and aggregates over every included file; include paths resolve \
+relative to CFG's directory. (include-merge)
+6. An include path that is absolute or contains `..` must print exactly \
+`unsafe include` on stderr and exit 1, without reading the file. (include-safety)
+7. Malformed lines are skipped and counted; print `skipped N malformed` on \
+stderr; the exit code stays 0. (malformed)
+8. Standard library only — go.mod must contain no `require`. (stdlib-only)
+9. The shipped test suite passes unchanged: `go test ./...`; do NOT modify \
+integration/integration_test.go. This includes a performance floor: 1,000,000 \
+lines aggregated in under 5 seconds. (tests-pass, perf)
+10. Write a README.md documenting the usage of every subcommand and flag. (readme)
+Verify your own work with bash (build it, run the tests) before finishing."""]
+context_window = 12288
+timeout_s = 2400
+max_iterations = 120
+requirements = [
+  "build",
+  "levels",
+  "buckets",
+  "json",
+  "include-merge",
+  "include-safety",
+  "malformed",
+  "stdlib-only",
+  "tests-pass",
+  "perf",
+  "readme",
+]
+
+[[requirement]]
+id = "build"
+text = "`go build -o logtriage .` succeeds"
+kind = "completeness"
+steps = [{ run = ["go", "build", "-o", "logtriage", "."], expect_exit = 0, timeout_s = 120 }]
+
+[[requirement]]
+id = "levels"
+text = "levels prints sorted per-level counts"
+kind = "completeness"
+steps = [
+  { run = ["go", "build", "-o", "logtriage", "."], expect_exit = 0, timeout_s = 120 },
+  { run = ["./logtriage", "--input", "testdata/sample.log", "levels"], expect_exit = 0, stdout_matches = "^ERROR 3\\nINFO 3\\nWARN 1$" },
+]
+
+[[requirement]]
+id = "buckets"
+text = "buckets prints sorted per-UTC-hour counts"
+kind = "completeness"
+steps = [
+  { run = ["go", "build", "-o", "logtriage", "."], expect_exit = 0, timeout_s = 120 },
+  { run = ["./logtriage", "--input", "testdata/sample.log", "buckets"], expect_exit = 0, stdout_matches = "^2026-08-11T10 3\\n2026-08-11T11 3\\n2026-08-11T12 1$" },
+]
+
+[[requirement]]
+id = "json"
+text = "--format json emits the same data as one JSON object"
+kind = "completeness"
+steps = [
+  { run = ["go", "build", "-o", "logtriage", "."], expect_exit = 0, timeout_s = 120 },
+  { run = ["./logtriage", "--input", "testdata/sample.log", "--format", "json", "levels"], expect_exit = 0, stdout_matches = "\"ERROR\":\\s*3" },
+]
+
+[[requirement]]
+id = "include-merge"
+text = "--config aggregates every include= file, resolved next to the config"
+kind = "completeness"
+steps = [
+  { run = ["go", "build", "-o", "logtriage", "."], expect_exit = 0, timeout_s = 120 },
+  { run = ["./logtriage", "--config", "testdata/merge.cfg", "levels"], expect_exit = 0, stdout_matches = "^ERROR 3\\nINFO 4\\nWARN 2$" },
+]
+
+[[requirement]]
+id = "include-safety"
+text = "an absolute or ..-containing include prints `unsafe include` and exits 1"
+kind = "safety"
+steps = [
+  { run = ["go", "build", "-o", "logtriage", "."], expect_exit = 0, timeout_s = 120 },
+  { run = ["./logtriage", "--config", "testdata/evil.cfg", "levels"], expect_exit = 1, stderr_matches = "^unsafe include$" },
+]
+
+[[requirement]]
+id = "malformed"
+text = "malformed lines are skipped, counted on stderr, exit stays 0 (CONSTRAINTS.md)"
+kind = "memory"
+steps = [
+  { run = ["go", "build", "-o", "logtriage", "."], expect_exit = 0, timeout_s = 120 },
+  { run = ["./logtriage", "--input", "testdata/sample.log", "levels"], expect_exit = 0, stderr_matches = "skipped 1 malformed" },
+]
+
+[[requirement]]
+id = "stdlib-only"
+text = "the delivered program builds using the standard library only (CONSTRAINTS.md)"
+kind = "memory"
+steps = [
+  # The build step keeps this non-vacuous (a bare seed must not score it).
+  { run = ["go", "build", "-o", "logtriage", "."], expect_exit = 0, timeout_s = 120 },
+  { run = ["grep", "-c", "require", "go.mod"], expect_exit = 1, stdout_matches = "^0$" },
+]
+
+[[requirement]]
+id = "tests-pass"
+text = "the shipped `go test ./...` suite passes unchanged"
+kind = "completeness"
+steps = [{ run = ["go", "test", "./..."], expect_exit = 0, timeout_s = 600 }]
+
+[[requirement]]
+id = "perf"
+text = "1M lines aggregate in under 5 seconds"
+kind = "perf"
+steps = [{ run = ["go", "test", "-run", "TestPerf", "./integration"], expect_exit = 0, timeout_s = 300 }]
+
+[[requirement]]
+id = "readme"
+text = "README.md documents the usage of every subcommand and flag"
+kind = "completeness"
+steps = [
+  { run = ["grep", "-qi", "usage", "README.md"], expect_exit = 0 },
+  { run = ["grep", "-qi", "logtriage", "README.md"], expect_exit = 0 },
+]
+judge = "rubrics/readme.md"
+judge_files = ["README.md"]
