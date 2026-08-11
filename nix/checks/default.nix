@@ -152,4 +152,9 @@ in
   # build via `agent --check-config` and select the right impls; broken ones fail
   # closed. Offline (dry run — no model, no socket).
   config-roundtrip = agentCheck ./config-roundtrip.nix { };
+  # The graph-arena harness's own test suite (R13, cognition-graph 06): four-class
+  # unittest tables over the pure core + the check-the-checks fixture matrix
+  # (every objective requirement must accept its pass fixture AND reject its fail
+  # fixture). Offline: go runs with GOPROXY=off on stdlib-only modules.
+  graph-arena-tests = import ./graph-arena-tests.nix { inherit pkgs versions; };
 }
