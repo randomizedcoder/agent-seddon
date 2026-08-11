@@ -98,6 +98,64 @@ def preflight_endpoint(base_url: str, api_key: str, insecure: bool, what: str) -
         refuse(f"{what} endpoint {base_url} unreachable: {e}")
 
 
+def judge_call(env: core.ArmEnv, packet: str) -> str:
+    """One judge chat completion; returns raw reply text (may be empty)."""
+    key = Path(env.judge_key_file).read_text().strip()
+    ctx = None
+    if env.judge_insecure_tls:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    body = json.dumps(
+        {
+            "model": env.judge_model,
+            "temperature": 0.0,
+            "max_tokens": 4096,  # reasoning judges burn budget before the JSON
+            "messages": [
+                {"role": "system", "content": core.JUDGE_SYSTEM_PROMPT},
+                {"role": "user", "content": packet},
+            ],
+        }
+    ).encode()
+    req = urllib.request.Request(
+        f"{env.judge_base_url.rstrip('/')}/chat/completions",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "User-Agent": "graph-arena/1",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=240, context=ctx) as resp:
+        reply = json.load(resp)
+    return (reply.get("choices") or [{}])[0].get("message", {}).get("content") or ""
+
+
+def judge_requirement(env: core.ArmEnv, packet: str, panel: int) -> tuple[bool, str]:
+    """Judge one requirement with a `panel`-sized majority; every panel member
+    retries once on an empty/unparseable reply. Persistent failure is a HARNESS
+    failure (R9) — a judge that cannot answer must never become a score."""
+    votes: list[bool] = []
+    reason = ""
+    for _ in range(panel):
+        verdict = None
+        for _attempt in range(2):
+            try:
+                verdict = core.parse_judge_verdict(judge_call(env, packet))
+            except Exception as e:  # noqa: BLE001 — network/HTTP: retry once, then refuse
+                log(f"judge call failed: {e}")
+                verdict = None
+            if verdict is not None:
+                break
+        if verdict is None:
+            refuse("judge returned no usable verdict after a retry (R9: never a score)")
+        met, why = verdict
+        votes.append(met)
+        if why and not reason:
+            reason = why
+    return core.majority(votes), reason
+
+
 def resolve_env(arms: list[str]) -> core.ArmEnv:
     gen_base = os.environ.get("AGENT_E2E_BASE_URL", "").strip()
     gen_model = os.environ.get("AGENT_E2E_MODEL", "").strip()
@@ -114,12 +172,36 @@ def resolve_env(arms: list[str]) -> core.ArmEnv:
     ).strip()
     judge_insecure = os.environ.get("AGENT_E2E_JUDGE_INSECURE_TLS", "1").strip() == "1"
     preflight_endpoint(gen_base, gen_key, insecure=False, what="generator")
-    if any(a != "baseline" for a in arms):
-        # Graph arms dial the glm critic from inside the agent.
-        if not Path(judge_key_file).expanduser().is_file():
-            refuse(f"judge key file not readable: {judge_key_file}")
-        judge_key = Path(judge_key_file).expanduser().read_text().strip()
-        preflight_endpoint(judge_base, judge_key, judge_insecure, what="judge/critic")
+    # The scoring judge grades EVERY arm (judged requirements), and graph arms
+    # additionally dial the glm critic from inside the agent — both hard (R9).
+    _ = arms  # arm list currently changes no judge requirement — kept for clarity
+    if not Path(judge_key_file).expanduser().is_file():
+        refuse(f"judge key file not readable: {judge_key_file}")
+    judge_key = Path(judge_key_file).expanduser().read_text().strip()
+    preflight_endpoint(judge_base, judge_key, judge_insecure, what="judge/critic")
+    # Economical's whole claim is a REAL cost split (R8): a distinct cheap
+    # endpoint, or an explicit simulated-run escape hatch — never silently.
+    local_base = os.environ.get("ARENA_LOCAL_BASE_URL", "").strip() or None
+    local_model = os.environ.get("ARENA_LOCAL_MODEL", "").strip()
+    local_key_file = os.environ.get("ARENA_LOCAL_API_KEY_FILE", "").strip()
+    if "economical" in arms:
+        if local_base:
+            key = (
+                Path(local_key_file).expanduser().read_text().strip()
+                if local_key_file
+                else "ollama"
+            )
+            preflight_endpoint(local_base, key, insecure=False, what="local (economical)")
+        elif os.environ.get("ARENA_ALLOW_SIMULATED_LOCAL", "") != "1":
+            refuse(
+                "the economical arm needs a real cheap endpoint: set "
+                "ARENA_LOCAL_BASE_URL (+ ARENA_LOCAL_MODEL) for the l2 ollama box, "
+                "or drop the arm (--arms), or explicitly accept a simulated split "
+                "with ARENA_ALLOW_SIMULATED_LOCAL=1 (same pod as the judge; the "
+                "token-split claim is then simulated and reported as such)"
+            )
+        else:
+            log("economical: SIMULATED local (same pod as the judge) — cost split is not real")
     return core.ArmEnv(
         gen_base_url=gen_base,
         gen_model=gen_model,
@@ -128,6 +210,11 @@ def resolve_env(arms: list[str]) -> core.ArmEnv:
         judge_model=judge_model,
         judge_key_file=str(Path(judge_key_file).expanduser()),
         judge_insecure_tls=judge_insecure,
+        local_base_url=local_base,
+        local_model=local_model,
+        local_api_key_file=(
+            str(Path(local_key_file).expanduser()) if local_key_file else ""
+        ),
     )
 
 
@@ -291,28 +378,60 @@ def make_executor(workdir: Path, gocache: Path | None = None):
     return execute
 
 
+def judge_evidence(
+    objective_dir: Path, req: core.Requirement, workdir: Path
+) -> str:
+    """Assemble the blind packet (R9): rubric + the named files + the diff vs
+    the seed commit. Nothing else — no configs, no transcripts, no `.agent*`."""
+    rubric = (objective_dir / req.judge).read_text()
+    files: dict[str, str | None] = {}
+    for name in req.judge_files:
+        f = workdir / name
+        files[name] = f.read_text(errors="replace") if f.is_file() else None
+    diff = subprocess.run(
+        ["git", "-C", str(workdir), "diff", "HEAD", "--no-color", "--", ".",
+         ":(exclude).agent*"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    ).stdout
+    return core.judge_packet(req.text, rubric, files, diff)
+
+
 def score_workdir(
-    manifest: core.Manifest, tier: core.Tier, workdir: Path, goals_done: int
-) -> tuple[dict[str, str], list[str], list[str]]:
-    """Run every steps-carrying requirement; returns (failed, met, judge_only)."""
+    manifest: core.Manifest,
+    tier: core.Tier,
+    objective_dir: Path,
+    workdir: Path,
+    goals_done: int,
+    env: core.ArmEnv,
+    panel: int,
+) -> tuple[dict[str, str], list[str]]:
+    """Score every tier requirement: declarative steps AND (when present) the
+    blind judge verdict. Returns (failed, met)."""
     execute = make_executor(workdir)
     met: list[str] = []
     failed: dict[str, str] = {}
-    judged: list[str] = []
     for rid in tier.requirements:
         req = manifest.requirements[rid]
         if req.after_goal > goals_done:
             failed[rid] = f"unreached (needs goal {req.after_goal})"
             continue
-        if not req.steps:
-            judged.append(rid)
-            continue
-        outcome = core.run_requirement(req.steps, execute)
-        if outcome.ok:
-            met.append(rid)
-        else:
-            failed[rid] = outcome.detail
-    return failed, met, judged
+        if req.steps:
+            outcome = core.run_requirement(req.steps, execute)
+            if not outcome.ok:
+                failed[rid] = outcome.detail
+                continue
+        if req.judge is not None:
+            ok, reason = judge_requirement(
+                env, judge_evidence(objective_dir, req, workdir), panel
+            )
+            if not ok:
+                failed[rid] = f"judge: {reason or 'requirement not met'}"
+                continue
+        met.append(rid)
+    return failed, met
 
 
 # ---------------------------------------------------------------------------
@@ -324,12 +443,19 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="graph-arena A/B/n sweep (increment 1)")
     ap.add_argument("--objective", default="lockbox")
     ap.add_argument("--tier", default="S", choices=list(core.TIER_NAMES))
-    ap.add_argument("--arms", default="baseline,simple")
+    ap.add_argument(
+        "--arms",
+        default="all",
+        help="comma list or 'all' (baseline + every graph document)",
+    )
     ap.add_argument("--reps", type=int, default=2)
     ap.add_argument("--out", default=os.environ.get("ARENA_OUTPUT_DIR", ""))
     args = ap.parse_args()
 
-    arms = [a.strip() for a in args.arms.split(",") if a.strip()]
+    if args.arms.strip() == "all":
+        arms = list(core.ARM_NAMES)
+    else:
+        arms = [a.strip() for a in args.arms.split(",") if a.strip()]
     for a in arms:
         if a not in core.ARM_NAMES:
             refuse(f"unknown arm `{a}` (valid: {', '.join(core.ARM_NAMES)})")
@@ -366,8 +492,8 @@ def main() -> int:
     results_path = out / "results.jsonl"
     log(f"objective={manifest.id} tier={tier.name} arms={','.join(arms)} reps={args.reps} out={out}")
 
-    n_mech = core.mechanical_n(tier, manifest)
-    n_judged = len(tier.requirements) - n_mech
+    n_total = len(tier.requirements)
+    panel = 3 if tier.name in ("M", "L") else 1  # judged-requirement majority (R9)
     scores: list[core.RunScore] = []
     # Interleave: rep 1 all arms, then rep 2 … (R10 — drift lands evenly).
     for rep in range(1, args.reps + 1):
@@ -428,13 +554,15 @@ def main() -> int:
                     validity=validity, ledger=ledger,
                 )
             else:
-                failed, met, judged = score_workdir(manifest, tier, workdir, goals_done=1)
+                failed, met = score_workdir(
+                    manifest, tier, objective_dir, workdir,
+                    goals_done=1, env=run_env, panel=panel,
+                )
                 score = core.RunScore(
                     arm=arm,
                     rep=rep,
                     met=tuple(met),
                     failed=failed,
-                    judged_pending=tuple(judged),
                     wall_s=wall,
                     validity=validity,
                     ledger=ledger,
@@ -450,7 +578,6 @@ def main() -> int:
                             "rep": score.rep,
                             "met": list(score.met),
                             "failed": score.failed,
-                            "judged_pending": list(score.judged_pending),
                             "dnf": score.dnf,
                             "wall_s": round(score.wall_s, 1),
                             "validity": {
@@ -463,16 +590,20 @@ def main() -> int:
                     )
                     + "\n"
                 )
-            note = f"DNF {dnf}" if dnf else f"{score.k}/{n_mech} met"
+            note = f"DNF {dnf}" if dnf else f"{score.k}/{n_total} met"
             if not validity.valid:
                 note += f" [INVALID: {validity.reason}]"
             log(f"  arm={arm} rep={rep}: {note} ({wall:.0f}s)")
 
-    table = core.format_table(scores, n_mech, n_judged)
+    table = core.format_table(scores, n_total, 0)
     print(table)
     evidence = core.format_evidence(scores)
     if evidence.count("\n"):
         print("\n" + evidence)
+    signs = core.paired_signs(scores)
+    if signs:
+        print("\npaired vs baseline (headline runs, rep-index pairing):")
+        print(signs)
     headline = sum(1 for s in scores if s.headline)
     print(
         f"\n=== graph-arena summary ===  objective={manifest.id} tier={tier.name} "

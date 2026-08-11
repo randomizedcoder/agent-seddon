@@ -433,6 +433,7 @@ let
       redteam
       swebench
       swe-agent
+      graph-arena
       ;
     inherit (nixLib) harness;
   };

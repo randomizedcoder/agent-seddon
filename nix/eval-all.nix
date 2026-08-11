@@ -34,6 +34,7 @@
   redteam,
   swebench,
   swe-agent,
+  graph-arena,
 }:
 pkgs.writeShellApplication {
   name = "eval-all";
@@ -49,6 +50,7 @@ pkgs.writeShellApplication {
     redteam
     swebench
     swe-agent
+    graph-arena
   ];
   text = ''
     set -uo pipefail
@@ -76,6 +78,7 @@ pkgs.writeShellApplication {
     REDTEAM_BIN=${redteam}/bin/redteam
     SWEBENCH_BIN=${swebench}/bin/swebench
     SWE_AGENT_BIN=${swe-agent}/bin/swe-agent
+    GRAPH_ARENA_BIN=${graph-arena}/bin/graph-arena
   ''
   + harness.contract
   + ''
@@ -140,6 +143,16 @@ pkgs.writeShellApplication {
     else
       skip_eval eval "no judge key (set AGENT_E2E_JUDGE_API_KEY_FILE)"
       skip_eval redteam "no judge key (set AGENT_E2E_JUDGE_API_KEY_FILE)"
+    fi
+
+    # graph-arena (cognition-graph 06): a CHEAP baseline-vs-gate A/B slice —
+    # one rep, two arms — so eval-all stays tractable; the full 5-arm sweep is
+    # `nix run .#graph-arena` directly. Needs the judge (critic + rubric judge).
+    if [ -r "$JUDGE_KEY" ]; then
+      export ARENA_OUTPUT_DIR="$OUT/graph-arena"
+      run_eval graph-arena "$GRAPH_ARENA_BIN" --arms baseline,simple --reps 1
+    else
+      skip_eval graph-arena "no judge key (set AGENT_E2E_JUDGE_API_KEY_FILE)"
     fi
 
     # ---- Tier B: model + Docker (slow) ----

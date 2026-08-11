@@ -212,7 +212,8 @@ class Requirement:
     text: str
     kind: str
     steps: tuple[Step, ...] = ()
-    judge: str | None = None  # rubric path; judged in harness increment 3
+    judge: str | None = None  # rubric path (relative to the objective dir)
+    judge_files: tuple[str, ...] = ()  # workdir files quoted into the packet
     after_goal: int = 1
 
 
@@ -281,7 +282,7 @@ def load_manifest(text: str) -> Manifest:
     for r in raw_reqs:
         if not isinstance(r, dict):
             _fail("[[requirement]] entries must be tables")
-        unknown = set(r) - {"id", "text", "kind", "steps", "check_fn", "judge", "after_goal"}
+        unknown = set(r) - {"id", "text", "kind", "steps", "check_fn", "judge", "judge_files", "after_goal"}
         if unknown:
             _fail(f"[[requirement]]: unknown keys {sorted(unknown)}")
         rid = _safe_id(r.get("id"), "[[requirement]]")
@@ -307,13 +308,20 @@ def load_manifest(text: str) -> Manifest:
         judge = r.get("judge")
         if judge is not None:
             judge = _rel_path(judge, f"{where}: judge")
+        raw_jf = r.get("judge_files", [])
+        if not isinstance(raw_jf, list) or len(raw_jf) > MAX_JUDGE_FILES:
+            _fail(f"{where}: judge_files must be a list of at most {MAX_JUDGE_FILES} paths")
+        judge_files = tuple(_rel_path(f, f"{where}: judge_files") for f in raw_jf)
+        if judge_files and judge is None:
+            _fail(f"{where}: judge_files without a judge rubric")
         if not steps and judge is None:
             _fail(f"{where}: needs steps and/or a judge rubric — an uncheckable requirement is not a requirement")
         after_goal = r.get("after_goal", 1)
         if not isinstance(after_goal, int) or isinstance(after_goal, bool) or after_goal < 1:
             _fail(f"{where}: after_goal must be a positive integer")
         requirements[rid] = Requirement(
-            id=rid, text=text_, kind=kind, steps=steps, judge=judge, after_goal=after_goal
+            id=rid, text=text_, kind=kind, steps=steps, judge=judge,
+            judge_files=judge_files, after_goal=after_goal,
         )
 
     raw_tiers = raw.get("tiers")
@@ -418,6 +426,12 @@ class ArmEnv:
     # arm (fairness normalization masks the per-run ports).
     metrics_push_url: str | None = None
     metrics_listen: str | None = None
+    # Harness increment 3 (R8): the `local` upstream's REAL cheap endpoint
+    # (l2 ollama). None = fall back to the judge endpoint — a SIMULATED cost
+    # split the driver only permits behind an explicit escape hatch.
+    local_base_url: str | None = None
+    local_model: str = ""
+    local_api_key_file: str = ""
 
 
 # Filenames under the cognition-documents dir (the driver resolves the dir:
@@ -501,6 +515,14 @@ job = "graph-arena"
 enabled = false
 """
     if arm != "baseline":
+        if env.local_base_url:
+            local_url, local_model = env.local_base_url, env.local_model or "llama3.1:latest"
+            local_key, local_tls = env.local_api_key_file, ""
+        else:
+            # Simulated split: same pod as the judge (driver gates this behind
+            # an explicit escape hatch and labels the report).
+            local_url, local_model = env.judge_base_url, env.judge_model
+            local_key, local_tls = env.judge_key_file, tls_line
         doc = f"{cognition_dir}/{GRAPH_DOCS[arm]}"
         upstream = """
 [[route.upstreams]]
@@ -521,7 +543,7 @@ critic_max_tokens = 2048
 [digest]
 store = "sqlite"
 path = "{scratch_dir}/digests.sqlite3"
-{upstream.format(name="glm", url=env.judge_base_url, model=env.judge_model, key=env.judge_key_file, tls=tls_line)}{upstream.format(name="local", url=env.judge_base_url, model=env.judge_model, key=env.judge_key_file, tls=tls_line)}"""
+{upstream.format(name="glm", url=env.judge_base_url, model=env.judge_model, key=env.judge_key_file, tls=tls_line)}{upstream.format(name="local", url=local_url, model=local_model, key=local_key, tls=local_tls)}"""
     return toml
 
 
@@ -619,8 +641,10 @@ def format_evidence(scores: list[RunScore]) -> str:
             continue
         ev = dict(s.validity.evidence)
         tokens = ev.pop("tokens", {}) or {}
+        upstream = ev.pop("upstream_tokens", {}) or {}
         parts = [f"{k}={v}" for k, v in sorted(ev.items()) if v]
         parts += [f"tokens[{m}]={n}" for m, n in sorted(tokens.items())]
+        parts += [f"up[{m}]={n}" for m, n in sorted(upstream.items())]
         if s.ledger:
             parts.append("ledger " + ",".join(f"{k}:{v}" for k, v in sorted(s.ledger.items())))
         lines.append(f"{s.arm:<14} {s.rep:<4} " + ("; ".join(parts) or "-"))
@@ -712,7 +736,14 @@ def classify_validity(arm: str, tier_name: str, samples: Samples | None) -> Vali
     if arm not in ARM_NAMES:
         _fail(f"unknown arm `{arm}`")
     if arm == "baseline":
-        ev = {} if samples is None else {"tokens": tokens_by_model(samples)}
+        ev = (
+        {}
+        if samples is None
+        else {
+            "tokens": tokens_by_model(samples),
+            "upstream_tokens": upstream_tokens_by_name(samples),
+        }
+    )
         return Validity(True, "ok", ev)
     if samples is None:
         return Validity(False, "no metrics pushed (crash or push failure)", {})
@@ -733,6 +764,7 @@ def classify_validity(arm: str, tier_name: str, samples: Samples | None) -> Vali
         "merges": int(merges),
         "compactions": int(compactions),
         "tokens": tokens_by_model(samples),
+        "upstream_tokens": upstream_tokens_by_name(samples),
     }
     if delivered <= 0:
         why = (
@@ -796,3 +828,129 @@ def summarize_ledger(rows: list[tuple[str, int]]) -> dict[str, int]:
         if isinstance(kind, str) and isinstance(count, int) and count >= 0:
             out[kind[:32]] = count
     return out
+
+
+# ---------------------------------------------------------------------------
+# Judge scoring (harness increment 3, R9): blind packets, strict verdicts
+# ---------------------------------------------------------------------------
+
+MAX_JUDGE_FILE_CHARS = 12_000
+MAX_JUDGE_FILES = 8
+MAX_JUDGE_DIFF_CHARS = 12_000
+MAX_JUDGE_REASON_CHARS = 300
+
+JUDGE_SYSTEM_PROMPT = (
+    "You are a strict requirement judge for a graded software deliverable. "
+    "You will be given ONE requirement, a rubric, and evidence (file contents "
+    "and the change diff). Judge ONLY whether the requirement is met by the "
+    "evidence — not style, not other requirements. Reply with ONLY a JSON "
+    'object and nothing else: {"met": true|false, "reason": "<one sentence>"}'
+)
+
+
+def judge_packet(
+    requirement_text: str,
+    rubric: str,
+    files: dict[str, str | None],
+    diff: str,
+) -> str:
+    """The judge's ONLY view of the run (R9): requirement + rubric + named file
+    contents + the change diff. Blind by construction — arm identity, configs,
+    and transcripts are simply not inputs. Everything quoted is capped."""
+    parts = [
+        f"Requirement:\n{cap(requirement_text, MAX_GOAL_CHARS)}",
+        f"Rubric:\n{cap(rubric, 4_000)}",
+    ]
+    for name, content in sorted(files.items())[:MAX_JUDGE_FILES]:
+        if content is None:
+            parts.append(f"File {name}: MISSING")
+        else:
+            parts.append(f"File {name}:\n{cap(content, MAX_JUDGE_FILE_CHARS)}")
+    if diff.strip():
+        parts.append(f"Change diff (vs the seed):\n{cap(diff, MAX_JUDGE_DIFF_CHARS)}")
+    return "\n\n".join(parts)
+
+
+def cap(s: str, n: int) -> str:
+    if len(s) <= n:
+        return s
+    return s[:n] + f"\n…[truncated at {n} chars]"
+
+
+def parse_judge_verdict(text: str) -> tuple[bool, str] | None:
+    """Extract the strict-JSON verdict from a (possibly chatty/fenced) judge
+    reply. `None` = unusable — the caller retries, then treats persistent
+    failure as a HARNESS failure, never a score."""
+    import json as _json
+
+    s = text[:100_000]
+    start = s.find("{")
+    while start != -1:
+        depth = 0
+        for i in range(start, len(s)):
+            if s[i] == "{":
+                depth += 1
+            elif s[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        obj = _json.loads(s[start : i + 1])
+                    except _json.JSONDecodeError:
+                        break
+                    met = obj.get("met")
+                    if isinstance(met, bool):
+                        reason = obj.get("reason")
+                        reason = reason if isinstance(reason, str) else ""
+                        return met, reason[:MAX_JUDGE_REASON_CHARS]
+                    break
+        start = s.find("{", start + 1)
+    return None
+
+
+def majority(verdicts: list[bool]) -> bool:
+    """Majority of an odd panel; an empty panel is a caller bug → False."""
+    return sum(verdicts) * 2 > len(verdicts)
+
+
+def upstream_tokens_by_name(samples: Samples) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for (name, labels), v in samples.items():
+        if name != "agent_upstream_tokens_total":
+            continue
+        up = dict(labels).get("upstream", "?")
+        out[up] = out.get(up, 0) + int(v)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Paired sign counts (R11): the strongest honest claim at tiny R
+# ---------------------------------------------------------------------------
+
+
+def paired_signs(scores: list[RunScore]) -> str:
+    """Per-arm, per-rep deltas vs the SAME rep's baseline run, headline runs
+    only (interleaved scheduling makes rep-index pairing meaningful under
+    endpoint drift). Returns printable lines; empty string when there is no
+    baseline to pair against or fewer than two arms."""
+    base_by_rep = {
+        s.rep: s.k for s in scores if s.arm == "baseline" and s.headline
+    }
+    if not base_by_rep:
+        return ""
+    lines = []
+    for arm in ARM_NAMES:
+        if arm == "baseline":
+            continue
+        deltas = [
+            (s.rep, s.k - base_by_rep[s.rep])
+            for s in sorted(scores, key=lambda s: s.rep)
+            if s.arm == arm and s.headline and s.rep in base_by_rep
+        ]
+        if not deltas:
+            continue
+        ge = sum(1 for _, d in deltas if d >= 0)
+        shown = ", ".join(f"{'+' if d >= 0 else ''}{d}" for _, d in deltas)
+        lines.append(
+            f"{arm:<14} >= baseline in {ge}/{len(deltas)} paired rep(s) ({shown})"
+        )
+    return "\n".join(lines)

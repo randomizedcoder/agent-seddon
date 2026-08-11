@@ -103,3 +103,6 @@ steps = [
   { run = ["grep", "-qi", "usage", "README.md"], expect_exit = 0 },
   { run = ["grep", "-qi", "lockbox", "README.md"], expect_exit = 0 },
 ]
+# AND: the blind judge checks the docs actually teach the contract (increment 3).
+judge = "rubrics/readme.md"
+judge_files = ["README.md"]
