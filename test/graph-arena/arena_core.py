@@ -488,7 +488,10 @@ guard = "off"
 base_url = "{env.gen_base_url}"
 model    = "{env.gen_model}"
 api_key  = "{env.gen_api_key}"
-max_retries = 2
+# 4, not 2: the runpod edge proxy 524s any completion over ~100s, and L-tier
+# late-goal completions (accumulated --continue context) cross that line on a
+# loaded pod; retries usually land on a warm prefix cache and finish in time.
+max_retries = 4
 
 [memory]
 backend       = "file"

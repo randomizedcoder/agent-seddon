@@ -259,6 +259,29 @@ designed (and why). Update both with every increment PR.
   increment 2's validity gate MUST classify such runs treatment-failed, and the
   gate needs a follow-up: a bigger ceiling, thinking-off for judge calls, or
   tighter evidence truncation for reasoning critics.
+- **06 / harness increment 5 — the `relay` L objective (2026-08-11).** The
+  deferred long-horizon probe, authored as data: 13 requirements across THREE
+  sequential `--continue` goals (G1 TCP line-protocol pub/sub + file auth, G2
+  journal/replay/restart-durability, G3 metrics + rate limiting + README),
+  every goal-1 requirement re-graded at the end (`after_goal` gating) — the
+  cross-goal memory probe. Seed ships a process-driving `integration/` suite
+  (spawns the built binary, real TCP; `LISTENING`/`METRICS` stdout
+  announcements make 127.0.0.1:0 testable) + CONSTRAINTS.md rules that bite in
+  goal 3. Reference impl + 13 single-defect fail overlays (exact-match
+  mutations, authoring script asserts each pattern exists and is unique);
+  check-the-checks matrix green first run. Findings while shipping it:
+  (1) relay is the first objective importing `net` — Go builds it with cgo by
+  default and the hermetic check carries no C compiler; `CGO_ENABLED=0` now
+  set in the step executor AND the nix shim (agent in-run builds match
+  scoring). (2) Tier calibration from live DNFs: at logtriage's 12288 window,
+  baseline degenerate-looped goal 1 (identical read-loop until
+  max_iterations=120) while intermediate finished goal 1 in NINE iterations
+  (2 compactions) then thrashed 61 compactions in goal 2 — L now runs 16384 /
+  200 iterations: a 3-goal session forces compaction by accumulation, not
+  per-iteration thrash. (3) The runpod edge proxy 524s any completion over
+  ~100s — L-tier late-goal completions cross that line on a loaded pod; arm
+  configs now run `max_retries = 4` (warm prefix cache usually rescues the
+  retry), and a degraded pod is visible as DNF-with-reason, never a zero.
 - **Gate-side fixes for both 06 findings (2026-08-11).** (1) The one-shot exit
   drain deadline is now config: `[digest] drain_timeout_s` (default 60,
   clamped to 900; `DigestCfg::drain_timeout()`), and the deadline-hit warn

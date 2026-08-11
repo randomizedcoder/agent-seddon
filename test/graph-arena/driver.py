@@ -367,9 +367,13 @@ def make_executor(workdir: Path, gocache: Path | None = None):
                 capture_output=True,
                 timeout=step.timeout_s,
                 check=False,
+                # CGO_ENABLED=0: objectives importing `net` (relay) must build
+                # in the hermetic flake check, whose inputs carry no C compiler
+                # — and pure-Go builds keep scoring deterministic everywhere.
                 env={**os.environ, "GOFLAGS": "-mod=mod", "GOPROXY": "off",
                      "GOCACHE": str(gocache),
-                     "GOPATH": str(workdir / ".gopath")},
+                     "GOPATH": str(workdir / ".gopath"),
+                     "CGO_ENABLED": "0"},
             )
             return core.ExecResult(
                 exit_code=r.returncode,
