@@ -419,3 +419,224 @@ class ScoringTables(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# Harness increment 2: exposition parsing, validity gate, fairness, evidence
+# ---------------------------------------------------------------------------
+
+EXPO_HEALTHY_SIMPLE = """
+# HELP agent_gate_verdicts_total gate verdicts
+# TYPE agent_gate_verdicts_total counter
+agent_gate_verdicts_total{outcome="pass"} 2
+agent_gate_verdicts_total{outcome="critic_error"} 1
+agent_tokens_total{model="kimi",kind="prompt"} 1200
+agent_tokens_total{model="kimi",kind="completion"} 300
+agent_tokens_total{model="glm",kind="completion"} 90
+"""
+
+EXPO_CRITIC_DEAD = """
+agent_gate_verdicts_total{outcome="critic_error"} 3
+agent_tokens_total{model="kimi",kind="prompt"} 500
+"""
+
+EXPO_INTERMEDIATE_OK = EXPO_HEALTHY_SIMPLE + """
+agent_distill_jobs_total{kind="summary",outcome="succeeded"} 4
+agent_context_compactions_total 2
+"""
+
+EXPO_ADVANCED_OK = EXPO_INTERMEDIATE_OK + """
+agent_graph_branches_total{split="split_impl",fate="won"} 1
+agent_graph_branches_total{split="split_impl",fate="lost"} 1
+agent_graph_merge_total{strategy="synthesize",outcome="synthesized"} 1
+"""
+
+
+class ExpositionParserTables(unittest.TestCase):
+    def test_positive_families_labels_values(self):
+        s = core.parse_exposition(EXPO_HEALTHY_SIMPLE)
+        self.assertEqual(
+            core.metric_sum(s, "agent_gate_verdicts_total", outcome="pass"), 2.0)
+        self.assertEqual(
+            core.metric_sum(s, "agent_gate_verdicts_total"), 3.0, "sum across series")
+        self.assertEqual(core.tokens_by_model(s), {"kimi": 1500, "glm": 90})
+
+    def negative_cases(self):
+        return [
+            ("empty", ""),
+            ("comments_only", "# HELP x\n# TYPE x counter"),
+            ("word_salad", "the metrics are lovely today"),
+            ("value_missing", "agent_gate_verdicts_total{outcome=\"pass\"}"),
+            ("value_not_number", "agent_x hello"),
+        ]
+
+    def test_negative_unparseable_yields_no_samples(self):
+        for name, text in self.negative_cases():
+            with self.subTest(name):
+                self.assertEqual(core.parse_exposition(text), {})
+
+    def adversarial_cases(self):
+        return [
+            ("nan", "agent_x NaN"),
+            ("inf", "agent_x +Inf"),
+            ("neg_inf", "agent_x -Inf"),
+            ("binary_garbage", "\x00\xff{==}\n" * 50),
+            ("giant_line", "agent_x{" + "a" * 100_000 + "} 1"),
+        ]
+
+    def test_adversarial_hostile_exposition_never_crashes_or_scores(self):
+        for name, text in self.adversarial_cases():
+            with self.subTest(name):
+                s = core.parse_exposition(text)
+                self.assertEqual(core.metric_sum(s, "agent_x"), 0.0, name)
+
+    def test_boundary_input_and_sample_caps(self):
+        flood = "\n".join(f'agent_x{{i="{i}"}} 1' for i in range(core.MAX_SAMPLES * 2))
+        s = core.parse_exposition(flood)
+        self.assertLessEqual(len(s), core.MAX_SAMPLES)
+        bomb = "agent_y 1\n" + ("z" * core.MAX_EXPOSITION_CHARS) + "\nagent_tail 1\n"
+        s2 = core.parse_exposition(bomb)
+        self.assertEqual(core.metric_sum(s2, "agent_tail"), 0.0, "past the char cap")
+        self.assertEqual(core.metric_sum(s2, "agent_y"), 1.0)
+
+    def test_corner_duplicate_series_last_wins(self):
+        s = core.parse_exposition("agent_x 1\nagent_x 5\n")
+        self.assertEqual(core.metric_sum(s, "agent_x"), 5.0)
+
+
+class ValidityTables(unittest.TestCase):
+    def cases(self):
+        healthy = core.parse_exposition
+        return [
+            # name, arm, tier, exposition text or None, want_valid, want_in_reason
+            ("positive_baseline_no_proof_needed", "baseline", "S", None, True, "ok"),
+            ("positive_simple_delivered", "simple", "S", EXPO_HEALTHY_SIMPLE, True, "ok"),
+            ("negative_simple_critic_dead", "simple", "S", EXPO_CRITIC_DEAD, False,
+             "critic_error"),
+            ("negative_simple_gate_never_engaged", "simple", "S",
+             "agent_tokens_total{model=\"kimi\"} 5", False, "never engaged"),
+            ("negative_graph_arm_no_push", "simple", "S", None, False, "no metrics"),
+            ("positive_intermediate_full", "intermediate", "S", EXPO_INTERMEDIATE_OK,
+             True, "ok"),
+            ("negative_intermediate_no_distill", "intermediate", "S",
+             EXPO_HEALTHY_SIMPLE, False, "distillation"),
+            ("positive_advanced_full", "advanced", "S", EXPO_ADVANCED_OK, True, "ok"),
+            ("negative_advanced_no_fork", "advanced", "S", EXPO_INTERMEDIATE_OK, False,
+             "fork never ran"),
+            ("corner_s_tier_needs_no_compaction", "intermediate", "S",
+             EXPO_INTERMEDIATE_OK.replace("agent_context_compactions_total 2", ""),
+             True, "ok"),
+            ("boundary_m_tier_requires_compaction", "intermediate", "M",
+             EXPO_INTERMEDIATE_OK.replace("agent_context_compactions_total 2", ""),
+             False, "no compaction"),
+            ("corner_simple_exempt_from_compaction_rule", "simple", "M",
+             EXPO_HEALTHY_SIMPLE, True, "ok"),
+            ("adversarial_garbage_metrics_never_validate", "advanced", "S",
+             "\x00garbage{==}", False, ""),
+        ]
+
+    def test_validity_table(self):
+        for name, arm, tier, expo, want_valid, want_reason in self.cases():
+            with self.subTest(name):
+                samples = None if expo is None else core.parse_exposition(expo)
+                v = core.classify_validity(arm, tier, samples)
+                self.assertEqual(v.valid, want_valid, f"{name}: {v.reason}")
+                if want_reason:
+                    self.assertIn(want_reason, v.reason, name)
+
+    def test_positive_evidence_carries_counts_and_tokens(self):
+        v = core.classify_validity("simple", "S", core.parse_exposition(EXPO_HEALTHY_SIMPLE))
+        self.assertEqual(v.evidence["gate_delivered"], 2)
+        self.assertEqual(v.evidence["gate_critic_errors"], 1)
+        self.assertEqual(v.evidence["tokens"], {"kimi": 1500, "glm": 90})
+
+    def test_negative_unknown_arm_rejects(self):
+        with self.assertRaises(core.ManifestError):
+            core.classify_validity("chaos", "S", None)
+
+
+class FairnessTables(unittest.TestCase):
+    ENV = ArmConfigTables.ENV
+    TIER = ArmConfigTables.TIER
+
+    def toml_for(self, arm: str, run_dir: str = "/run1") -> str:
+        env = core.ArmEnv(**{
+            **self.ENV.__dict__,
+            "metrics_push_url": f"http://127.0.0.1:{hash(run_dir) % 1000 + 10000}",
+            "metrics_listen": f"127.0.0.1:{hash(run_dir) % 1000 + 20000}",
+        })
+        return core.arm_agent_toml(arm, "/cog", f"{run_dir}/work", f"{run_dir}/scratch", self.TIER, env)
+
+    def test_positive_generated_arms_are_fair(self):
+        base = self.toml_for("baseline")
+        for arm in ("simple", "intermediate", "economical", "advanced"):
+            with self.subTest(arm):
+                self.assertIsNone(core.fairness_violation(
+                    base, "/run1", arm, self.toml_for(arm), "/run1"))
+
+    def test_positive_cross_run_ports_and_paths_normalize(self):
+        # Different run dirs + different sink ports must still compare fair.
+        base = self.toml_for("baseline", "/runA")
+        arm = self.toml_for("simple", "/runB")
+        self.assertIsNone(core.fairness_violation(base, "/runA", "simple", arm, "/runB"))
+
+    def negative_cases(self):
+        base = self.toml_for("baseline")
+        smuggled_window = self.toml_for("simple").replace(
+            "context_window = 32768", "context_window = 131072")
+        extra_section = self.toml_for("simple") + "\n[web_search]\nbackends = [\"brave\"]\n"
+        return [
+            ("smuggled_context_window", smuggled_window, "not baseline-plus-additions"),
+            ("non_whitelisted_section", extra_section, "non-whitelisted section"),
+        ]
+
+    def test_negative_and_adversarial_smuggled_diffs_refuse(self):
+        base = self.toml_for("baseline")
+        for name, arm_toml, want in self.negative_cases():
+            with self.subTest(name):
+                v = core.fairness_violation(base, "/run1", "simple", arm_toml, "/run1")
+                self.assertIsNotNone(v, name)
+                self.assertIn(want, v, name)
+
+    def test_corner_baseline_vs_baseline_must_match(self):
+        a = self.toml_for("baseline", "/runA")
+        b = self.toml_for("baseline", "/runB")
+        self.assertIsNone(core.fairness_violation(a, "/runA", "baseline", b, "/runB"))
+        mutated = b.replace("temperature = 0.0", "temperature = 1.0")
+        self.assertIsNotNone(core.fairness_violation(a, "/runA", "baseline", mutated, "/runB"))
+
+
+class EvidenceReportTables(unittest.TestCase):
+    def test_positive_invalid_runs_leave_the_headline(self):
+        ok = core.Validity(True, "ok", {"gate_delivered": 2, "tokens": {}})
+        bad = core.Validity(False, "gate delivered no verdict (3 critic_error fail-open(s))", {})
+        scores = [
+            core.RunScore(arm="baseline", rep=1, met=("a", "b"), validity=core.Validity(True, "ok", {})),
+            core.RunScore(arm="simple", rep=1, met=("a", "b"), validity=ok),
+            core.RunScore(arm="simple", rep=2, met=("a",), validity=bad),
+        ]
+        table = core.format_table(scores, n_mech=2, n_judged=0)
+        self.assertIn("gate delivered no verdict", table)
+        self.assertIn("1/2", table, "invalid rep leaves the simple headline")
+        self.assertNotIn("1 (1-1)", table, "the invalid rep's k must not average in")
+
+    def test_positive_evidence_lines_render(self):
+        s = core.RunScore(
+            arm="simple", rep=1, met=("a",),
+            validity=core.Validity(True, "ok", {
+                "gate_delivered": 2, "gate_critic_errors": 0, "compactions": 0,
+                "tokens": {"kimi": 1500, "glm": 90}}),
+            ledger={"summary": 4, "facts": 3},
+        )
+        out = core.format_evidence([s])
+        self.assertIn("gate_delivered=2", out)
+        self.assertIn("tokens[glm]=90", out)
+        self.assertIn("ledger facts:3,summary:4", out)
+
+    def test_corner_summarize_ledger_bounds_hostile_rows(self):
+        rows = [("summary", 3), ("x" * 100, 1), ("facts", -2), (7, 1), ("alt", 2)]
+        out = core.summarize_ledger(rows)  # type: ignore[arg-type]
+        self.assertEqual(out.get("summary"), 3)
+        self.assertEqual(out.get("alt"), 2)
+        self.assertNotIn("facts", out, "negative counts dropped")
+        self.assertTrue(all(len(k) <= 32 for k in out))

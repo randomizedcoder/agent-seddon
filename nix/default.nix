@@ -31,16 +31,24 @@ let
     inherit src;
     filter =
       path: type:
-      (lib.hasSuffix ".proto" path)
-      # The shipped example cognition graphs (`config/cognition/*.textproto`) are
-      # integration fixtures — `agent-graph/tests/examples.rs` reads them — so the
-      # hermetic test/package builds need them in the filtered source.
-      || (lib.hasSuffix ".textproto" path)
-      # `deny.toml` (cargo-deny config) is not a cargo source file, so the default
-      # filter would drop it — keep it for the `cargo-deny` check.
-      || (lib.hasSuffix "/deny.toml" path)
-      || (lib.hasInfix "/tests/fixtures/" path)
-      || (craneLib.filterCargoSources path type);
+      # graph-arena objectives carry manifest.toml / seed *.go files that crane's
+      # default filter would sweep into the Rust source (any *.toml), so a new
+      # eval objective would needlessly rebuild the whole cargo dependency tree.
+      # The Rust build needs nothing from the arena; its files reach the
+      # `graph-arena` app and `graph-arena-tests` check by direct path reference.
+      !(lib.hasInfix "/test/graph-arena/" path)
+      && (
+        (lib.hasSuffix ".proto" path)
+        # The shipped example cognition graphs (`config/cognition/*.textproto`) are
+        # integration fixtures — `agent-graph/tests/examples.rs` reads them — so the
+        # hermetic test/package builds need them in the filtered source.
+        || (lib.hasSuffix ".textproto" path)
+        # `deny.toml` (cargo-deny config) is not a cargo source file, so the default
+        # filter would drop it — keep it for the `cargo-deny` check.
+        || (lib.hasSuffix "/deny.toml" path)
+        || (lib.hasInfix "/tests/fixtures/" path)
+        || (craneLib.filterCargoSources path type)
+      );
     name = "source";
   };
 

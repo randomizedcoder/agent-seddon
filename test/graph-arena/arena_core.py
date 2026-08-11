@@ -414,7 +414,10 @@ class ArmEnv:
     judge_model: str
     judge_key_file: str
     judge_insecure_tls: bool
-    metrics_push_url: str | None = None  # harness increment 2
+    # Harness increment 2: per-run metrics plumbing — identical POLICY in every
+    # arm (fairness normalization masks the per-run ports).
+    metrics_push_url: str | None = None
+    metrics_listen: str | None = None
 
 
 # Filenames under the cognition-documents dir (the driver resolves the dir:
@@ -483,7 +486,17 @@ enabled = ["read_file", "write_file", "edit", "apply_patch", "ls", "grep", "find
 
 [search]
 auto_index = false
-
+"""
+    if env.metrics_push_url:
+        toml += f"""
+[metrics]
+enabled = true
+listen = "{env.metrics_listen or "127.0.0.1:0"}"
+pushgateway = "{env.metrics_push_url}"
+job = "graph-arena"
+"""
+    else:
+        toml += """
 [metrics]
 enabled = false
 """
@@ -526,10 +539,21 @@ class RunScore:
     judged_pending: tuple[str, ...] = ()  # judge-only reqs (increment 3)
     dnf: str | None = None  # "timeout" | "agent-crash" | None
     wall_s: float = 0.0
+    # Harness increment 2: treatment-delivered proof + ledger cross-check.
+    # `None` = validity not assessed (increment-1 shape); assessed runs carry
+    # the classification and its evidence.
+    validity: "Validity | None" = None
+    ledger: dict = field(default_factory=dict)
 
     @property
     def k(self) -> int:
         return len(self.met)
+
+    @property
+    def headline(self) -> bool:
+        """Counts toward the per-arm aggregate: finished AND (if assessed)
+        treatment-delivered — an invalid graph run is baseline in a costume."""
+        return self.dnf is None and (self.validity is None or self.validity.valid)
 
 
 def mechanical_n(tier: Tier, manifest: Manifest) -> int:
@@ -548,10 +572,12 @@ def mean_minmax(values: list[int]) -> str:
 
 
 def format_table(scores: list[RunScore], n_mech: int, n_judged: int) -> str:
-    """The per-arm comparison table. DNF runs are listed but excluded from the
-    aggregate line (a timeout is a finding, not a zero)."""
+    """The per-arm comparison table. DNF and treatment-failed runs are LISTED
+    (with the reason) but excluded from the headline aggregate — a timeout is a
+    finding and an invalid graph run is baseline in a costume; neither is a
+    zero and neither is hidden (R6/R11)."""
     lines = [
-        f"{'ARM':<14} {'REP':<4} {'MET':<8} {'WALL_S':<8} NOTES",
+        f"{'ARM':<14} {'REP':<4} {'MET':<8} {'WALL_S':<8} {'VALID':<28} NOTES",
     ]
     by_arm: dict[str, list[int]] = {}
     for s in sorted(scores, key=lambda s: (ARM_NAMES.index(s.arm), s.rep)):
@@ -559,13 +585,19 @@ def format_table(scores: list[RunScore], n_mech: int, n_judged: int) -> str:
             note = f"DNF: {s.dnf}"
         else:
             note = ", ".join(f"{rid}: {why}" for rid, why in sorted(s.failed.items())) or "all met"
+        if s.validity is None:
+            valid_col = "-"
+        elif s.validity.valid:
+            valid_col = "ok"
+        else:
+            valid_col = s.validity.reason[:28]
         lines.append(
-            f"{s.arm:<14} {s.rep:<4} {s.k}/{n_mech:<6} {s.wall_s:<8.0f} {note}"
+            f"{s.arm:<14} {s.rep:<4} {s.k}/{n_mech:<6} {s.wall_s:<8.0f} {valid_col:<28} {note}"
         )
-        if s.dnf is None:
+        if s.headline:
             by_arm.setdefault(s.arm, []).append(s.k)
     lines.append("")
-    lines.append(f"{'ARM':<14} {'MEAN k/n (min-max)':<22} VALID_REPS")
+    lines.append(f"{'ARM':<14} {'MEAN k/n (min-max)':<22} HEADLINE_REPS")
     for arm in ARM_NAMES:
         if any(s.arm == arm for s in scores):
             vals = by_arm.get(arm, [])
@@ -576,3 +608,191 @@ def format_table(scores: list[RunScore], n_mech: int, n_judged: int) -> str:
             f"(+{n_judged} judge-only requirement(s) not scored — harness increment 3)"
         )
     return "\n".join(lines)
+
+
+def format_evidence(scores: list[RunScore]) -> str:
+    """Cognition-activity evidence per run: what the graph PROVABLY did, plus
+    token spend by model label and the ledger cross-check."""
+    lines = [f"{'ARM':<14} {'REP':<4} EVIDENCE"]
+    for s in sorted(scores, key=lambda s: (ARM_NAMES.index(s.arm), s.rep)):
+        if s.validity is None:
+            continue
+        ev = dict(s.validity.evidence)
+        tokens = ev.pop("tokens", {}) or {}
+        parts = [f"{k}={v}" for k, v in sorted(ev.items()) if v]
+        parts += [f"tokens[{m}]={n}" for m, n in sorted(tokens.items())]
+        if s.ledger:
+            parts.append("ledger " + ",".join(f"{k}:{v}" for k, v in sorted(s.ledger.items())))
+        lines.append(f"{s.arm:<14} {s.rep:<4} " + ("; ".join(parts) or "-"))
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Metrics exposition parsing (harness increment 2)
+# ---------------------------------------------------------------------------
+
+MAX_EXPOSITION_CHARS = 2_000_000
+MAX_SAMPLES = 10_000
+_SAMPLE_RE = re.compile(
+    r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{([^}]*)\})?\s+([^\s]+)\s*$"
+)
+_LABEL_RE = re.compile(r'([a-zA-Z_][a-zA-Z0-9_]*)="((?:[^"\\]|\\.)*)"')
+
+Samples = dict[tuple[str, frozenset[tuple[str, str]]], float]
+
+
+def parse_exposition(text: str) -> Samples:
+    """Minimal, hostile-input-safe Prometheus text-format parser: keeps the
+    (family, labelset) → value samples we report on, skips anything malformed,
+    caps input and sample count, and never raises. Duplicate series: last wins
+    (a pushed exposition has unique series; garbage repeats must not inflate)."""
+    samples: Samples = {}
+    for line in text[:MAX_EXPOSITION_CHARS].splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = _SAMPLE_RE.match(line)
+        if m is None:
+            continue
+        name, raw_labels, raw_value = m.groups()
+        if raw_labels is not None and len(raw_labels) > 4_096:
+            continue  # a label bomb is hostile — and quadratic to even scan
+        try:
+            value = float(raw_value)
+        except ValueError:
+            continue
+        if value != value or value in (float("inf"), float("-inf")):
+            continue  # NaN/Inf: hostile numbers never enter scoring
+        labels: frozenset[tuple[str, str]] = frozenset(
+            (k, v) for k, v in _LABEL_RE.findall(raw_labels or "")
+        )
+        samples[(name, labels)] = value
+        if len(samples) >= MAX_SAMPLES:
+            break
+    return samples
+
+
+def metric_sum(samples: Samples, family: str, **where: str) -> float:
+    """Sum of a family's series whose labels include every `where` pair."""
+    want = set(where.items())
+    return sum(
+        v for (name, labels), v in samples.items()
+        if name == family and want <= set(labels)
+    )
+
+
+def tokens_by_model(samples: Samples) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for (name, labels), v in samples.items():
+        if name != "agent_tokens_total":
+            continue
+        model = dict(labels).get("model", "?")
+        out[model] = out.get(model, 0) + int(v)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Validity gate (R6): treatment-delivered vs treatment-failed
+# ---------------------------------------------------------------------------
+
+_GATE_DELIVERED_OUTCOMES = ("pass", "fixed", "alternatives", "exhausted")
+
+
+@dataclass(frozen=True)
+class Validity:
+    valid: bool
+    reason: str  # "ok" or why the treatment failed
+    evidence: dict = field(default_factory=dict)
+
+
+def classify_validity(arm: str, tier_name: str, samples: Samples | None) -> Validity:
+    """A graph-arm run must PROVE its treatment ran, or its score is baseline
+    in a costume and must not enter the headline delta. Baseline needs no
+    proof. `samples = None` = no metrics were pushed (crash, push failure)."""
+    if arm not in ARM_NAMES:
+        _fail(f"unknown arm `{arm}`")
+    if arm == "baseline":
+        ev = {} if samples is None else {"tokens": tokens_by_model(samples)}
+        return Validity(True, "ok", ev)
+    if samples is None:
+        return Validity(False, "no metrics pushed (crash or push failure)", {})
+    delivered = sum(
+        metric_sum(samples, "agent_gate_verdicts_total", outcome=o)
+        for o in _GATE_DELIVERED_OUTCOMES
+    )
+    critic_errors = metric_sum(samples, "agent_gate_verdicts_total", outcome="critic_error")
+    distilled = metric_sum(samples, "agent_distill_jobs_total", outcome="succeeded")
+    branches = metric_sum(samples, "agent_graph_branches_total")
+    merges = metric_sum(samples, "agent_graph_merge_total")
+    compactions = metric_sum(samples, "agent_context_compactions_total")
+    evidence = {
+        "gate_delivered": int(delivered),
+        "gate_critic_errors": int(critic_errors),
+        "distill_succeeded": int(distilled),
+        "branches": int(branches),
+        "merges": int(merges),
+        "compactions": int(compactions),
+        "tokens": tokens_by_model(samples),
+    }
+    if delivered <= 0:
+        why = (
+            f"gate delivered no verdict ({int(critic_errors)} critic_error fail-open(s))"
+            if critic_errors > 0
+            else "gate never engaged (zero verdicts)"
+        )
+        return Validity(False, why, evidence)
+    if arm in ("intermediate", "economical") and distilled <= 0:
+        return Validity(False, "no successful distillation", evidence)
+    if arm == "advanced" and (branches <= 0 or merges <= 0):
+        return Validity(False, "fork never ran (zero branches/merges)", evidence)
+    if tier_name in ("M", "L") and arm != "simple" and compactions <= 0:
+        return Validity(False, "no compaction under a forcing tier", evidence)
+    return Validity(True, "ok", evidence)
+
+
+# ---------------------------------------------------------------------------
+# Config fairness (R2): the arm diff must be whitelisted sections only
+# ---------------------------------------------------------------------------
+
+_METRICS_VALUE_RE = re.compile(
+    r'^(listen|pushgateway)\s*=\s*"[^"]*"', flags=re.MULTILINE
+)
+
+
+def normalize_config(toml: str, run_dir: str) -> str:
+    """Mask the per-run facts (workdir/scratch paths, metrics ports) so two
+    runs' configs compare on POLICY, not on where they happened to live."""
+    masked = toml.replace(run_dir.rstrip("/"), "@RUN@")
+    return _METRICS_VALUE_RE.sub(r'\1 = "@NET@"', masked)
+
+
+def fairness_violation(
+    base_toml: str, base_run_dir: str, arm: str, arm_toml: str, arm_run_dir: str
+) -> str | None:
+    """`None` = fair; otherwise a message naming the smuggled difference. The
+    graph arm's config must be the baseline config plus ONLY whitelisted
+    sections (`ARM_ONLY_SECTIONS`) — anything else (a different context
+    window, an extra tool…) invalidates the whole comparison."""
+    base = normalize_config(base_toml, base_run_dir)
+    ours = normalize_config(arm_toml, arm_run_dir)
+    if arm == "baseline":
+        return None if ours == base else "baseline configs differ between runs"
+    if not ours.startswith(base):
+        return "arm config is not baseline-plus-additions (something inside changed)"
+    extra = ours[len(base):]
+    for line in extra.splitlines():
+        line = line.strip()
+        if line.startswith("[") and not any(
+            line == s or (s.startswith("[[") and line == s) for s in ARM_ONLY_SECTIONS
+        ):
+            return f"non-whitelisted section `{line}` in the arm diff"
+    return None
+
+
+def summarize_ledger(rows: list[tuple[str, int]]) -> dict[str, int]:
+    """Digest-ledger cross-check: `(kind, count)` rows → bounded dict."""
+    out: dict[str, int] = {}
+    for kind, count in rows[:64]:
+        if isinstance(kind, str) and isinstance(count, int) and count >= 0:
+            out[kind[:32]] = count
+    return out

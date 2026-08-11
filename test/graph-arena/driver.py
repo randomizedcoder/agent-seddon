@@ -23,12 +23,17 @@ Env (shared with the other eval harnesses):
 from __future__ import annotations
 
 import argparse
+import dataclasses
+import http.server
 import json
 import os
 import shutil
+import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
 import ssl
@@ -124,6 +129,64 @@ def resolve_env(arms: list[str]) -> core.ArmEnv:
         judge_key_file=str(Path(judge_key_file).expanduser()),
         judge_insecure_tls=judge_insecure,
     )
+
+
+# ---------------------------------------------------------------------------
+# Metrics push sink (harness increment 2, R7): the agent's `[metrics]
+# pushgateway` push-on-exit is a plain HTTP POST of the Prometheus text
+# format — this stdlib sink receives it, no Pushgateway infrastructure.
+# ---------------------------------------------------------------------------
+
+MAX_PUSH_BYTES = 4 * 1024 * 1024
+
+
+class MetricsSink:
+    def __init__(self) -> None:
+        self.body: bytes | None = None
+        sink = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def _take(self):  # noqa: N802
+                length = min(int(self.headers.get("Content-Length", 0)), MAX_PUSH_BYTES)
+                sink.body = self.rfile.read(length) if length > 0 else b""
+                self.send_response(200)
+                self.end_headers()
+
+            do_POST = _take  # noqa: N815 — the agent POSTs; PUT kept for protocol parity
+            do_PUT = _take  # noqa: N815
+
+            def log_message(self, *_args) -> None:  # quiet
+                pass
+
+        self._server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def alloc_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def read_ledger_counts(db_path: Path) -> dict[str, int]:
+    """Digest-ledger cross-check; absent/broken db = empty (the metrics are
+    the primary channel — this corroborates, it never scores)."""
+    if not db_path.is_file():
+        return {}
+    try:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+            rows = conn.execute(
+                "SELECT kind, COUNT(*) FROM digests GROUP BY kind"
+            ).fetchall()
+        return core.summarize_ledger([(str(k), int(c)) for k, c in rows])
+    except sqlite3.Error:
+        return {}
 
 
 # ---------------------------------------------------------------------------
@@ -314,25 +377,56 @@ def main() -> int:
             scratch = run_dir / "scratch"
             scratch.mkdir(parents=True, exist_ok=True)
             setup_workdir(objective_dir, manifest, workdir)
-            config_path = run_dir / "agent.toml"
-            config_path.write_text(
-                core.arm_agent_toml(
-                    arm, str(COGNITION_DIR), str(workdir), str(scratch), tier, env
-                )
+            # Per-run metrics plumbing: the sink receives the push-on-exit,
+            # the listen port keeps concurrent sweeps from colliding.
+            sink = MetricsSink()
+            run_env = dataclasses.replace(
+                env,
+                metrics_push_url=f"http://127.0.0.1:{sink.port}",
+                metrics_listen=f"127.0.0.1:{alloc_port()}",
             )
+            config_text = core.arm_agent_toml(
+                arm, str(COGNITION_DIR), str(workdir), str(scratch), tier, run_env
+            )
+            # Fairness (R2): the arm config must be the baseline config for the
+            # SAME run dirs plus only whitelisted sections — anything else
+            # invalidates the whole comparison, so the sweep refuses.
+            base_ref = core.arm_agent_toml(
+                "baseline", str(COGNITION_DIR), str(workdir), str(scratch), tier, run_env
+            )
+            violation = core.fairness_violation(
+                base_ref, str(run_dir), arm, config_text, str(run_dir)
+            )
+            if violation is not None:
+                sink.stop()
+                refuse(f"arm `{arm}` config fairness: {violation}")
+            config_path = run_dir / "agent.toml"
+            config_path.write_text(config_text)
             log(f"run arm={arm} rep={rep} …")
             t0 = time.monotonic()
             rc, timed_out = run_agent(
                 agent_bin, config_path, workdir, tier.goals[0], tier.timeout_s
             )
             wall = time.monotonic() - t0
+            sink.stop()
+            samples = None
+            if sink.body:
+                (run_dir / "metrics.prom").write_bytes(sink.body)
+                samples = core.parse_exposition(
+                    sink.body.decode("utf-8", errors="replace")
+                )
+            validity = core.classify_validity(arm, tier.name, samples)
+            ledger = read_ledger_counts(scratch / "digests.sqlite3")
             dnf = None
             if timed_out:
                 dnf = "timeout"
             elif rc != 0:
                 dnf = f"agent-exit-{rc}"
             if dnf:
-                score = core.RunScore(arm=arm, rep=rep, met=(), dnf=dnf, wall_s=wall)
+                score = core.RunScore(
+                    arm=arm, rep=rep, met=(), dnf=dnf, wall_s=wall,
+                    validity=validity, ledger=ledger,
+                )
             else:
                 failed, met, judged = score_workdir(manifest, tier, workdir, goals_done=1)
                 score = core.RunScore(
@@ -342,6 +436,8 @@ def main() -> int:
                     failed=failed,
                     judged_pending=tuple(judged),
                     wall_s=wall,
+                    validity=validity,
+                    ledger=ledger,
                 )
             scores.append(score)
             with results_path.open("a") as f:
@@ -357,18 +453,30 @@ def main() -> int:
                             "judged_pending": list(score.judged_pending),
                             "dnf": score.dnf,
                             "wall_s": round(score.wall_s, 1),
+                            "validity": {
+                                "valid": validity.valid,
+                                "reason": validity.reason,
+                                "evidence": validity.evidence,
+                            },
+                            "ledger": ledger,
                         }
                     )
                     + "\n"
                 )
-            log(f"  arm={arm} rep={rep}: " + (f"DNF {dnf}" if dnf else f"{score.k}/{n_mech} met") + f" ({wall:.0f}s)")
+            note = f"DNF {dnf}" if dnf else f"{score.k}/{n_mech} met"
+            if not validity.valid:
+                note += f" [INVALID: {validity.reason}]"
+            log(f"  arm={arm} rep={rep}: {note} ({wall:.0f}s)")
 
     table = core.format_table(scores, n_mech, n_judged)
     print(table)
-    valid = sum(1 for s in scores if s.dnf is None)
+    evidence = core.format_evidence(scores)
+    if evidence.count("\n"):
+        print("\n" + evidence)
+    headline = sum(1 for s in scores if s.headline)
     print(
         f"\n=== graph-arena summary ===  objective={manifest.id} tier={tier.name} "
-        f"arms={len(arms)} reps={args.reps} valid_runs={valid}/{len(scores)}  artifacts={out}"
+        f"arms={len(arms)} reps={args.reps} headline_runs={headline}/{len(scores)}  artifacts={out}"
     )
     print("PASS: graph-arena — sweep completed (measurement mode; see the table).")
     return 0
