@@ -449,6 +449,7 @@ existing usage path with the node label, so per-node USD cost lands in
 | 03 | **Instant compaction** — `instant-window` strategy, objective summary, relevance selection, facts append, fallback chain | compaction leaves the critical path |
 | 04 | **Graph document + services** — `cognition.textproto`, anchor-slot executor, `graph.proto` + `digest.proto`, `--serve-graph`/`--serve-digest`, `DescribeNodeTypes` schema registry | user-configurable graph; GUI substrate |
 | 05 | **Parallel branches** — `split`/`join`/`merge` nodes, concurrent branch tasks, all/any/quorum joins, compare/synthesize merge, losers → alternatives ledger | diverse-lens exploration (safety × performance) in one turn |
+| 06 | **Graph arena** ([spec](06-graph-arena.md)) — A/B/n value harness: purpose-built multi-requirement objectives under baseline + every shipped document, per-requirement k/n + cost + a validity gate proving the graph engaged, duration tiers S/M/L | the "does it deliver value" question gets a measured answer |
 
 Deferred (documented, not built): generalizing the executor beyond the three
 anchors (Option C); the Flutter drag-drop editor itself (portal track); Mem0-style
