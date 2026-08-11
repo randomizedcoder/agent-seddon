@@ -529,6 +529,17 @@ pub struct ConsensusCfg {
     /// Optional path to an operator rubric (overrides the compiled default).
     #[serde(default)]
     pub rubric_file: String,
+    /// Ground-truth evidence for the critic: `"auto"` (default) hands every
+    /// critique the working tree's `git diff` (+ untracked-file names) when
+    /// `[agent] working_dir` is a git repo — the critic judges what actually
+    /// CHANGED, not the answer's prose about it; silently nothing on a non-repo.
+    /// `"off"` = prose-only critique.
+    #[serde(default = "default_gate_evidence")]
+    pub evidence: String,
+}
+
+fn default_gate_evidence() -> String {
+    "auto".into()
 }
 
 fn default_gate_rounds() -> u8 {
