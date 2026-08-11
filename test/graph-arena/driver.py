@@ -485,6 +485,15 @@ def main() -> int:
     preflight_binary("git")
     for tool in manifest.toolchains:
         preflight_binary(tool)
+    # Judge rubrics are packaged data — verify BEFORE any expensive run (a
+    # mid-sweep traceback on a missing file wastes every arm before it).
+    for rid in tier.requirements:
+        req = manifest.requirements[rid]
+        if req.judge is not None and not (objective_dir / req.judge).is_file():
+            refuse(
+                f"requirement `{rid}`: rubric {req.judge} missing from the packaged "
+                "objective (untracked files are invisible to nix — git add it)"
+            )
     env = resolve_env(arms)
 
     out = Path(args.out) if args.out else Path(tempfile.mkdtemp(prefix="graph-arena-"))
