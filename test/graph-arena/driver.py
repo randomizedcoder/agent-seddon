@@ -323,20 +323,26 @@ def setup_workdir(objective_dir: Path, manifest: core.Manifest, workdir: Path) -
 
 
 def run_agent(
-    agent_bin: str, config_path: Path, workdir: Path, goal: str, timeout_s: int
+    agent_bin: str,
+    config_path: Path,
+    workdir: Path,
+    goal: str,
+    timeout_s: int,
+    extra: tuple[str, ...] = (),
 ) -> tuple[int, bool]:
     """One agent invocation; returns (exit_code, timed_out)."""
     try:
         r = subprocess.run(
-            [agent_bin, "--config", str(config_path), goal],
+            [agent_bin, "--config", str(config_path), *extra, goal],
             cwd=workdir,
             capture_output=True,
             text=True,
             timeout=timeout_s,
             check=False,
         )
-        (config_path.parent / "agent.out").write_text(r.stdout)
-        (config_path.parent / "agent.err").write_text(r.stderr)
+        n = len(list(config_path.parent.glob("agent*.out"))) + 1
+        (config_path.parent / f"agent{n}.out").write_text(r.stdout)
+        (config_path.parent / f"agent{n}.err").write_text(r.stderr)
         return r.returncode, False
     except subprocess.TimeoutExpired:
         return -1, True
@@ -478,8 +484,6 @@ def main() -> int:
         tier = manifest.tier(args.tier)
     except core.ManifestError as e:
         refuse(str(e))
-    if len(tier.goals) > 1:
-        refuse("multi-goal tiers land in harness increment 4 (L)")
 
     agent_bin = os.environ.get("AGENT_BIN") or preflight_binary("agent")
     preflight_binary("git")
@@ -499,14 +503,38 @@ def main() -> int:
     out = Path(args.out) if args.out else Path(tempfile.mkdtemp(prefix="graph-arena-"))
     out.mkdir(parents=True, exist_ok=True)
     results_path = out / "results.jsonl"
+    # Resume-on-rerun: recorded (arm, rep) runs — including DNFs, which are
+    # findings — are skipped and their rows rehydrated into the final table.
+    done: set[tuple[str, int]] = set()
+    prior: list[core.RunScore] = []
+    if results_path.is_file():
+        lines = results_path.read_text().splitlines()
+        done = core.already_recorded(lines, manifest.id, tier.name)
+        for line in lines:
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if (
+                isinstance(rec, dict)
+                and rec.get("objective") == manifest.id
+                and rec.get("tier") == tier.name
+            ):
+                s = core.score_from_record(rec)
+                if s is not None:
+                    prior.append(s)
+        if done:
+            log(f"resume: {len(done)} recorded run(s) skipped")
     log(f"objective={manifest.id} tier={tier.name} arms={','.join(arms)} reps={args.reps} out={out}")
 
     n_total = len(tier.requirements)
     panel = 3 if tier.name in ("M", "L") else 1  # judged-requirement majority (R9)
-    scores: list[core.RunScore] = []
+    scores: list[core.RunScore] = list(prior)
     # Interleave: rep 1 all arms, then rep 2 … (R10 — drift lands evenly).
     for rep in range(1, args.reps + 1):
         for arm in arms:
+            if (arm, rep) in done:
+                continue
             run_dir = out / arm / f"rep{rep}"
             workdir = run_dir / "work"
             scratch = run_dir / "scratch"
@@ -537,26 +565,39 @@ def main() -> int:
                 refuse(f"arm `{arm}` config fairness: {violation}")
             config_path = run_dir / "agent.toml"
             config_path.write_text(config_text)
-            log(f"run arm={arm} rep={rep} …")
+            log(f"run arm={arm} rep={rep} ({len(tier.goals)} goal(s)) …")
             t0 = time.monotonic()
-            rc, timed_out = run_agent(
-                agent_bin, config_path, workdir, tier.goals[0], tier.timeout_s
-            )
+            goal_samples: list[core.Samples] = []
+            goals_done = 0
+            dnf = None
+            for gi, goal in enumerate(tier.goals):
+                # Goals 2..n resume the SAME session (`--continue`): transcript
+                # + digest ledger carry over, so compaction is load-bearing
+                # across goals (R4). timeout_s is a PER-GOAL budget.
+                extra = ("--continue",) if gi else ()
+                sink.body = None
+                rc, timed_out = run_agent(
+                    agent_bin, config_path, workdir, goal, tier.timeout_s, extra
+                )
+                if sink.body:
+                    (run_dir / f"metrics.goal{gi + 1}.prom").write_bytes(sink.body)
+                    goal_samples.append(
+                        core.parse_exposition(
+                            sink.body.decode("utf-8", errors="replace")
+                        )
+                    )
+                if timed_out:
+                    dnf = f"goal{gi + 1}-timeout"
+                    break
+                if rc != 0:
+                    dnf = f"goal{gi + 1}-agent-exit-{rc}"
+                    break
+                goals_done += 1
             wall = time.monotonic() - t0
             sink.stop()
-            samples = None
-            if sink.body:
-                (run_dir / "metrics.prom").write_bytes(sink.body)
-                samples = core.parse_exposition(
-                    sink.body.decode("utf-8", errors="replace")
-                )
+            samples = core.merge_samples(goal_samples) if goal_samples else None
             validity = core.classify_validity(arm, tier.name, samples)
             ledger = read_ledger_counts(scratch / "digests.sqlite3")
-            dnf = None
-            if timed_out:
-                dnf = "timeout"
-            elif rc != 0:
-                dnf = f"agent-exit-{rc}"
             if dnf:
                 score = core.RunScore(
                     arm=arm, rep=rep, met=(), dnf=dnf, wall_s=wall,
@@ -565,7 +606,7 @@ def main() -> int:
             else:
                 failed, met = score_workdir(
                     manifest, tier, objective_dir, workdir,
-                    goals_done=1, env=run_env, panel=panel,
+                    goals_done=goals_done, env=run_env, panel=panel,
                 )
                 score = core.RunScore(
                     arm=arm,

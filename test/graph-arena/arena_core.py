@@ -954,3 +954,75 @@ def paired_signs(scores: list[RunScore]) -> str:
             f"{arm:<14} >= baseline in {ge}/{len(deltas)} paired rep(s) ({shown})"
         )
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Multi-goal runs + resume-on-rerun (harness increment 4)
+# ---------------------------------------------------------------------------
+
+
+def merge_samples(parts: list[Samples]) -> Samples:
+    """A multi-goal (L-tier) run is several agent PROCESSES, each pushing its
+    own counters from zero — the run's total is the sum across goal pushes."""
+    out: Samples = {}
+    for s in parts:
+        for k, v in s.items():
+            out[k] = out.get(k, 0.0) + v
+    return out
+
+
+def already_recorded(
+    jsonl_lines: list[str], objective: str, tier: str
+) -> set[tuple[str, int]]:
+    """Resume-on-rerun: the (arm, rep) pairs already in results.jsonl for this
+    objective+tier. A recorded DNF/invalid run is a RESULT (a finding) and is
+    also skipped — delete the artifact dir to redo a run. Malformed lines are
+    ignored: a corrupt artifact must not block resuming the rest."""
+    import json as _json
+
+    done: set[tuple[str, int]] = set()
+    for line in jsonl_lines[:10_000]:
+        try:
+            o = _json.loads(line)
+        except _json.JSONDecodeError:
+            continue
+        if not isinstance(o, dict):
+            continue
+        if o.get("objective") != objective or o.get("tier") != tier:
+            continue
+        arm, rep = o.get("arm"), o.get("rep")
+        if isinstance(arm, str) and arm in ARM_NAMES and isinstance(rep, int):
+            done.add((arm, rep))
+    return done
+
+
+def score_from_record(o: dict) -> RunScore | None:
+    """Rehydrate a prior run's JSONL record so a resumed sweep's final table
+    includes it. Fail-soft: an unusable record returns None (already_recorded
+    still skips the rerun; the table just loses that row)."""
+    try:
+        arm, rep = o["arm"], o["rep"]
+        if arm not in ARM_NAMES or not isinstance(rep, int):
+            return None
+        met = tuple(str(x) for x in o.get("met", []) if isinstance(x, str))[:64]
+        failed = {
+            str(k)[:64]: str(v)[:200]
+            for k, v in (o.get("failed") or {}).items()
+        }
+        dnf = o.get("dnf")
+        dnf = dnf if isinstance(dnf, str) else None
+        v = o.get("validity") or {}
+        validity = Validity(
+            bool(v.get("valid", False)),
+            str(v.get("reason", ""))[:200],
+            v.get("evidence") if isinstance(v.get("evidence"), dict) else {},
+        )
+        wall = o.get("wall_s", 0.0)
+        wall = float(wall) if isinstance(wall, (int, float)) and wall >= 0 else 0.0
+        ledger = o.get("ledger") if isinstance(o.get("ledger"), dict) else {}
+        return RunScore(
+            arm=arm, rep=rep, met=met, failed=failed, dnf=dnf,
+            wall_s=wall, validity=validity, ledger=ledger,
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
