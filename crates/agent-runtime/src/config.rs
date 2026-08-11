@@ -574,6 +574,22 @@ pub struct DigestCfg {
     pub summary_max_tokens: u32,
     #[serde(default = "default_digest_facts_tokens")]
     pub facts_max_tokens: u32,
+    /// One-shot exit drain deadline, seconds: how long `agent` waits at exit
+    /// for pending background distillation before dropping it (digests are a
+    /// cache — a hit deadline loses rows, never errors). Reasoning models
+    /// routed as the distiller can need minutes per job (live-observed: a
+    /// 60s deadline dropped the only digest of a one-goal run).
+    #[serde(default = "default_digest_drain_timeout_s")]
+    pub drain_timeout_s: u64,
+}
+
+impl DigestCfg {
+    /// The drain deadline as a [`Duration`](std::time::Duration), clamped —
+    /// config is operator input, but an absurd/hostile value must not hold
+    /// process exit for hours (`0` = don't wait at all).
+    pub fn drain_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.drain_timeout_s.min(MAX_DIGEST_DRAIN_TIMEOUT_S))
+    }
 }
 
 impl Default for DigestCfg {
@@ -584,6 +600,7 @@ impl Default for DigestCfg {
             path: default_digest_path(),
             summary_max_tokens: default_digest_summary_tokens(),
             facts_max_tokens: default_digest_facts_tokens(),
+            drain_timeout_s: default_digest_drain_timeout_s(),
         }
     }
 }
@@ -733,6 +750,12 @@ fn default_digest_summary_tokens() -> u32 {
 fn default_digest_facts_tokens() -> u32 {
     256
 }
+fn default_digest_drain_timeout_s() -> u64 {
+    60
+}
+/// Ceiling for `[digest] drain_timeout_s` (15 min — well past any sane
+/// distill model, well short of "the process hangs").
+const MAX_DIGEST_DRAIN_TIMEOUT_S: u64 = 900;
 
 /// One routable upstream. Connection + auth mirror `[[pool.members]]` (key never in
 /// the repo: `api_key` > `api_key_env` > `api_key_file`); `tags`/`tier`/`input_cost`
@@ -2374,6 +2397,39 @@ mod tests {
             }
             PoolMemberEntry::Name(_) => panic!("expected a detailed member"),
         }
+    }
+
+    /// `[digest] drain_timeout_s` parses and converts; the default is 60 s.
+    #[test]
+    fn positive_digest_drain_timeout_parses() {
+        let cfg: DigestCfg = toml::from_str("drain_timeout_s = 300").unwrap();
+        assert_eq!(cfg.drain_timeout(), std::time::Duration::from_secs(300));
+        let default: DigestCfg = toml::from_str("").unwrap();
+        assert_eq!(default.drain_timeout(), std::time::Duration::from_secs(60));
+    }
+
+    /// Boundary: exactly the ceiling passes through; one past it clamps.
+    #[test]
+    fn boundary_digest_drain_timeout_ceiling() {
+        let at: DigestCfg = toml::from_str("drain_timeout_s = 900").unwrap();
+        assert_eq!(at.drain_timeout(), std::time::Duration::from_secs(900));
+        let over: DigestCfg = toml::from_str("drain_timeout_s = 901").unwrap();
+        assert_eq!(over.drain_timeout(), std::time::Duration::from_secs(900));
+    }
+
+    /// Corner: zero is honored — "don't wait at exit" is a valid choice.
+    #[test]
+    fn corner_digest_drain_timeout_zero() {
+        let cfg: DigestCfg = toml::from_str("drain_timeout_s = 0").unwrap();
+        assert_eq!(cfg.drain_timeout(), std::time::Duration::ZERO);
+    }
+
+    /// Adversarial: an absurd value (i64::MAX — TOML's integer ceiling) cannot
+    /// hold process exit for hours.
+    #[test]
+    fn adversarial_digest_drain_timeout_huge_clamped() {
+        let cfg: DigestCfg = toml::from_str("drain_timeout_s = 9223372036854775807").unwrap();
+        assert_eq!(cfg.drain_timeout(), std::time::Duration::from_secs(900));
     }
 
     /// Corner: an empty `[pool]` is a valid (disabled) pool, policy defaults to cost.

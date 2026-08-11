@@ -43,9 +43,11 @@ const MAX_ROUNDS_CEILING: u8 = 5;
 const MAX_ALTERNATIVES_CEILING: u8 = 4;
 // Reasoning-model critics (GLM, Kimi) spend output budget on reasoning_content
 // BEFORE emitting the verdict; too small a cap truncates to empty content and the
-// gate fails open every round. 4096 leaves thinking headroom (live-observed: a
-// trade-off judgment burned >2k reasoning tokens).
-const MAX_CRITIC_TOKENS_CEILING: u32 = 4_096;
+// gate fails open every round. 8192 leaves thinking headroom: live-observed, a
+// trade-off judgment burned >2k reasoning tokens, and a diff-bearing evidence
+// prompt (graph-arena) saturated the previous 4096 ceiling and still returned
+// empty content — the empty-reply retry escalates toward this ceiling.
+const MAX_CRITIC_TOKENS_CEILING: u32 = 8_192;
 /// Bounds on untrusted content quoted into prompts/notes.
 const MAX_ISSUES: usize = 8;
 const MAX_ISSUE_CHARS: usize = 400;

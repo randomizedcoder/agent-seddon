@@ -31,7 +31,7 @@ max_rounds = 2          # ceiling 5
 scope = "final"         # "final" | "every-iteration" — final: tool-call iterations
                         # pass through (the verifier seam already gates those)
 on_exhaustion = "deliver-with-note"   # | "fail"
-critic_max_tokens = 512 # ceiling 4096 — see the reasoning-model note below
+critic_max_tokens = 512 # ceiling 8192 — see the reasoning-model note below
 max_alternatives = 3    # ceiling 4
 rubric_file = ""        # operator rubric; empty = compiled default
 evidence = "auto"       # "auto" | "off" — see "Evidence-based critique" below
@@ -59,7 +59,8 @@ names what runs; evidence, like token budgets, stays config).
   `max_tokens` on `reasoning_content` *before* the verdict text; too small a
   budget truncates to empty content and the round fails open
   (`outcome="critic_error"`). Live-observed: a trade-off judgment burned >2k
-  reasoning tokens. Size `critic_max_tokens` generously (2048–4096) for
+  reasoning tokens, and a diff-bearing evidence prompt saturated a 4096 budget
+  outright. Size `critic_max_tokens` generously (2048–4096; ceiling 8192) for
   reasoning critics. As a backstop, an **empty** critic reply triggers exactly
   one retry at 4× the budget (clamped to the ceiling) before failing open, and
   every fail-open is logged (`WARN`) — a broken critic is never silent.

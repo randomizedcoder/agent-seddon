@@ -600,6 +600,10 @@ cooldown_secs       = 30          # how long a breaker stays open before re-prob
 # path = ".agent/digests.sqlite3"    # sqlite backend only
 # summary_max_tokens = 512
 # facts_max_tokens = 256
+# drain_timeout_s = 60               # one-shot exit drain deadline (clamped to 900):
+#                                    # how long `agent` waits for pending background
+#                                    # distillation before dropping it — raise for a
+#                                    # slow reasoning distiller
 
 # Instant compaction (cognition-graph 03): select with
 # `[agent] context = "instant-window"` (requires [digest] store). Compaction

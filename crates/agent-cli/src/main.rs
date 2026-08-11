@@ -57,6 +57,9 @@ async fn main() -> Result<()> {
     }
     // Captured before `config` is consumed by the builder.
     let cfg_tick_secs = config.scheduler.tick_secs;
+    // One-shot exit drain deadline for background distillation (clamped in
+    // `drain_timeout()`); captured for the same reason.
+    let digest_drain_timeout = config.digest.drain_timeout();
     // Captured before `config` moves into `build_agent` (see the metrics note below).
     let review_budget = config.review.context_budget_bytes;
 
@@ -253,10 +256,10 @@ async fn main() -> Result<()> {
                 }
                 // One-shot exit would kill the background distiller mid-job —
                 // bounded drain so the delivered turn's digest rows land
-                // (cognition-graph 02; no-op when nothing is pending).
-                session
-                    .drain_background(std::time::Duration::from_secs(60))
-                    .await;
+                // (cognition-graph 02; no-op when nothing is pending). Deadline
+                // from `[digest] drain_timeout_s` — slow reasoning distillers
+                // need more than the old fixed 60s (live-observed drop).
+                session.drain_background(digest_drain_timeout).await;
                 outcome
             }
             Mode::Repl => tokio::select! {

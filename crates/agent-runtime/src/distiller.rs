@@ -127,7 +127,14 @@ impl Distiller {
             }
         };
         if tokio::time::timeout(timeout, wait).await.is_err() {
-            tracing::warn!("distiller drain deadline hit; pending digests dropped");
+            let pending = target.saturating_sub(*self.processed.borrow());
+            tracing::warn!(
+                pending,
+                timeout_s = timeout.as_secs(),
+                "distiller drain deadline hit; pending digests dropped \
+                 (raise [digest] drain_timeout_s or route [digest] provider \
+                 to a faster model)"
+            );
         }
     }
 }

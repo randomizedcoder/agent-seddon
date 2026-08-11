@@ -77,5 +77,8 @@ verdicts and an M/L 3-vote majority.
 - `test/graph-arena/` is excluded from the crane Rust source filter — objective
   edits never rebuild the cargo tree.
 - A GLM critic can burn its whole token budget on reasoning over diff-bearing
-  gate prompts (empty content → fail-open, run classified invalid). Gate-side
-  follow-ups are tracked in the cognition-graph STATUS.
+  gate prompts (empty content → fail-open, run classified invalid). The gate's
+  empty-reply retry now escalates to an 8192 ceiling, and graph arms extend the
+  one-shot distill drain deadline (`[digest] drain_timeout_s = 300`) so a slow
+  distiller no longer costs a run its validity; residual follow-ups are tracked
+  in the cognition-graph STATUS.
