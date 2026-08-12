@@ -63,7 +63,11 @@ names what runs; evidence, like token budgets, stays config).
   outright. Size `critic_max_tokens` generously (2048–4096; ceiling 8192) for
   reasoning critics. As a backstop, an **empty** critic reply triggers exactly
   one retry at 4× the budget (clamped to the ceiling) before failing open, and
-  every fail-open is logged (`WARN`) — a broken critic is never silent.
+  every fail-open is logged (`WARN`) — a broken critic is never silent. If a
+  reasoning critic still saturates the ceiling (live-observed on diff-bearing
+  evidence prompts), route the critic to a **non-reasoning model** instead —
+  the `economical` cognition document does exactly this (`critic: "local"`,
+  qwen3-30B-A3B via llama.cpp): the whole budget goes to the verdict.
 - **Streaming bypasses the gate** (buffering a stream to critique it defeats
   streaming) — run `stream = false` when gating matters.
 - Same-id generator/critic is allowed but warned: self-critique loses the
