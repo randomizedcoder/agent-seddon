@@ -202,6 +202,19 @@ def resolve_env(arms: list[str]) -> core.ArmEnv:
             )
         else:
             log("economical: SIMULATED local (same pod as the judge) — cost split is not real")
+    # The telemetry witness (campaign 2c) is opt-in; when the operator asks for
+    # it, a dead ClickHouse is a hard refusal (a silently absent witness would
+    # look like clean telemetry).
+    ch_http = os.environ.get("ARENA_CLICKHOUSE", "").strip() or None
+    ch_native = os.environ.get("ARENA_CLICKHOUSE_NATIVE", "localhost:9000").strip()
+    if ch_http:
+        try:
+            with urllib.request.urlopen(ch_http.rstrip("/") + "/ping", timeout=10) as resp:
+                pong = resp.read(16).decode("utf-8", errors="replace").strip()
+        except Exception as e:  # noqa: BLE001
+            refuse(f"ARENA_CLICKHOUSE set but {ch_http}/ping failed: {e}")
+        if pong != "Ok.":
+            refuse(f"ARENA_CLICKHOUSE set but /ping returned {pong!r}, not Ok.")
     return core.ArmEnv(
         gen_base_url=gen_base,
         gen_model=gen_model,
@@ -215,7 +228,49 @@ def resolve_env(arms: list[str]) -> core.ArmEnv:
         local_api_key_file=(
             str(Path(local_key_file).expanduser()) if local_key_file else ""
         ),
+        clickhouse_http=ch_http,
+        clickhouse_native=ch_native,
     )
+
+
+def ch_query(base_url: str, sql: str) -> str:
+    """One ClickHouse HTTP query (stdlib only); the reply body is size-capped."""
+    req = urllib.request.Request(
+        base_url.rstrip("/") + "/",
+        data=sql.encode(),
+        headers={"Content-Type": "text/plain", "User-Agent": "graph-arena/1"},
+    )
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return resp.read(core.MAX_CH_BODY_CHARS).decode("utf-8", errors="replace")
+
+
+def collect_trace_witness(env: core.ArmEnv, run_dir: Path) -> core.TraceWitness | None:
+    """Query the telemetry tables for this run's session id(s). Lossy-batched
+    writes → poll until two consecutive reads agree (bounded). Fail-soft: the
+    witness annotates evidence, it never fails a run."""
+    if not env.clickhouse_http:
+        return None
+    text = "".join(
+        p.read_text(errors="replace") for p in sorted(run_dir.glob("agent*.err"))
+    )
+    queries = core.ch_witness_queries(core.session_ids_from_log(text))
+    if queries is None:
+        log("trace witness: no session id in the agent logs")
+        return None
+    prev: core.TraceWitness | None = None
+    for _ in range(10):
+        try:
+            usage = core.parse_ch_json(ch_query(env.clickhouse_http, queries["usage"]))
+            tools = core.parse_ch_json(ch_query(env.clickhouse_http, queries["tools"]))
+        except Exception as e:  # noqa: BLE001 — the witness never fails the run
+            log(f"trace witness query failed: {e}")
+            return None
+        witness = core.trace_witness(usage, tools)
+        if witness == prev:
+            return witness
+        prev = witness
+        time.sleep(1)
+    return prev
 
 
 # ---------------------------------------------------------------------------
@@ -628,6 +683,18 @@ def main(argv: list[str] | None = None) -> int:
                     wall_s=wall,
                     validity=validity,
                     ledger=ledger,
+                )
+            # Campaign 2c: the independent trace witness, annotated into the
+            # evidence BEFORE the record is written (never a validity verdict).
+            witness = collect_trace_witness(run_env, run_dir)
+            if witness is not None:
+                validity.evidence.update(
+                    {
+                        "trace_iters": witness.iters,
+                        "trace_tok": witness.tokens,
+                        "trace_tools": witness.tool_calls,
+                        "trace": core.compare_witness(core.run_cost(score), witness),
+                    }
                 )
             scores.append(score)
             cost = core.run_cost(score)

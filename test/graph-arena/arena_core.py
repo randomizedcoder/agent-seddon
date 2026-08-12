@@ -433,6 +433,12 @@ class ArmEnv:
     local_base_url: str | None = None
     local_model: str = ""
     local_api_key_file: str = ""
+    # Campaign 2c: the telemetry witness. HTTP url enables it (harness-side
+    # queries); the native address is what every arm's [telemetry] writes to.
+    # Identical in all arms — the base template carries it (fairness-safe by
+    # construction).
+    clickhouse_http: str | None = None
+    clickhouse_native: str = "localhost:9000"
 
 
 # Filenames under the cognition-documents dir (the driver resolves the dir:
@@ -533,6 +539,17 @@ job = "graph-arena"
         toml += """
 [metrics]
 enabled = false
+"""
+    if env.clickhouse_http:
+        # The witness channel (campaign 2c): every arm writes usage/events to
+        # ClickHouse identically (base section — fairness-safe); the harness
+        # reads them back over HTTP as an independent cross-check of the
+        # pushed metrics. Log streaming stays off (usage/events suffice).
+        toml += f"""
+[telemetry]
+enabled = true
+clickhouse_url = "{env.clickhouse_native}"
+stream_logs = false
 """
     if arm != "baseline":
         if env.local_base_url:
@@ -1255,3 +1272,133 @@ def plan_resume(
         if score is not None:
             prior.append(score)
     return done, prior
+
+
+# ---------------------------------------------------------------------------
+# Telemetry witness (campaign 2c): the ClickHouse channel cross-checks the
+# pushed metrics — an INDEPENDENT witness of what actually ran. Annotates,
+# never validity-excludes (telemetry writes are deliberately lossy-batched).
+# ---------------------------------------------------------------------------
+
+CH_DATABASE = "agent"  # the [telemetry] default; the arena never overrides it
+MAX_CH_BODY_CHARS = 2_000_000
+MAX_CH_ROWS = 10_000
+# A per-process telemetry session id, minted by the CLI and logged at startup.
+_SESSION_ID_RE = re.compile(r"^[0-9a-f-]{8,64}$")
+# tracing's fmt layer wraps the field name/value in ANSI sequences — the real
+# line is `starting agent [3msession_id[0m[2m=[0m<uuid>` (TWO sequences
+# between the name and `=`, one after) — allow any run of them on both sides.
+_SESSION_LOG_RE = re.compile(
+    r"starting agent.{0,40}?session_id(?:\x1b\[[0-9;]*m)*=(?:\x1b\[[0-9;]*m)*([0-9a-f-]{8,64})"
+)
+# Tokens cross-check tolerances: the two channels count at different layers
+# (usage events vs metrics counters) — flag only a REAL divergence.
+TRACE_TOKEN_TOLERANCE = 0.25
+TRACE_TOKEN_SLACK = 5_000
+
+
+@dataclass(frozen=True)
+class TraceWitness:
+    """What the telemetry tables witnessed for one run's session id(s)."""
+
+    iters: int
+    tokens: int
+    tool_calls: int
+
+
+def session_ids_from_log(text: str) -> list[str]:
+    """Extract the per-process telemetry session ids from agent stderr (a
+    multi-goal run is several processes — several ids). The log is agent
+    output: bounded scan, strict charset, order-preserving dedupe."""
+    ids: list[str] = []
+    for m in _SESSION_LOG_RE.finditer(text[:2_000_000]):
+        sid = m.group(1)
+        if _SESSION_ID_RE.fullmatch(sid) and sid not in ids:
+            ids.append(sid)
+    return ids[:32]
+
+
+def ch_witness_queries(session_ids: list[str]) -> dict[str, str] | None:
+    """The two witness queries, or None when no usable session id exists.
+    Ids are re-validated against the strict charset here (no quotes can pass),
+    so the quoted IN-list cannot be escaped — reject, never sanitize."""
+    ids = [s for s in session_ids if isinstance(s, str) and _SESSION_ID_RE.fullmatch(s)]
+    if not ids:
+        return None
+    quoted = ", ".join(f"'{s}'" for s in ids[:32])
+    return {
+        "usage": (
+            f"SELECT count() AS iters, sum(total_tokens) AS tokens "
+            f"FROM {CH_DATABASE}.agent_usage WHERE session_id IN ({quoted}) "
+            f"FORMAT JSON"
+        ),
+        "tools": (
+            f"SELECT count() AS tool_calls "
+            f"FROM {CH_DATABASE}.agent_events "
+            f"WHERE kind = 'tool' AND session_id IN ({quoted}) "
+            f"FORMAT JSON"
+        ),
+    }
+
+
+def parse_ch_json(body: str) -> list[dict]:
+    """Rows from a ClickHouse FORMAT JSON reply. Hostile-input walls mirror
+    parse_exposition: size cap, row cap, dict rows only, never raises."""
+    import json as _json
+
+    if not isinstance(body, str) or len(body) > MAX_CH_BODY_CHARS:
+        return []
+    try:
+        o = _json.loads(body)
+    except _json.JSONDecodeError:
+        return []
+    data = o.get("data") if isinstance(o, dict) else None
+    if not isinstance(data, list):
+        return []
+    return [r for r in data[:MAX_CH_ROWS] if isinstance(r, dict)]
+
+
+def _row_int(rows: list[dict], key: str) -> int:
+    """First row's value at `key` as a clamped non-negative int (ClickHouse
+    JSON renders numbers as strings for 64-bit types — accept both)."""
+    if not rows:
+        return 0
+    v = rows[0].get(key)
+    if isinstance(v, bool):
+        return 0
+    if isinstance(v, (int, float)):
+        return min(max(int(v), 0), MAX_COST_TOKENS) if math.isfinite(v) else 0
+    if isinstance(v, str):
+        try:
+            return min(max(int(v), 0), MAX_COST_TOKENS)
+        except ValueError:
+            return 0
+    return 0
+
+
+def trace_witness(usage_rows: list[dict], event_rows: list[dict]) -> TraceWitness:
+    return TraceWitness(
+        iters=_row_int(usage_rows, "iters"),
+        tokens=_row_int(usage_rows, "tokens"),
+        tool_calls=_row_int(event_rows, "tool_calls"),
+    )
+
+
+def compare_witness(cost: RunCost | None, witness: TraceWitness) -> str:
+    """The cross-check verdict: `no-data` (empty channel — lossy, not a lie),
+    `ok`, or `mismatch: …` naming both numbers. Never a validity verdict —
+    the caller annotates evidence with it."""
+    if witness.iters == 0 and witness.tokens == 0:
+        return "no-data"
+    if cost is None:
+        return "ok (no metrics cost to compare)"
+    diff = abs(witness.tokens - cost.gen_tokens)
+    if diff <= TRACE_TOKEN_SLACK:
+        return "ok"
+    base = max(witness.tokens, cost.gen_tokens, 1)
+    if diff / base <= TRACE_TOKEN_TOLERANCE:
+        return "ok"
+    return (
+        f"mismatch: trace {ktok(witness.tokens)}k vs metrics "
+        f"{ktok(cost.gen_tokens)}k gen tokens"
+    )
