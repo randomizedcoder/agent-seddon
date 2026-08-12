@@ -164,13 +164,24 @@ pub fn advanced() -> GraphDoc {
 }
 
 /// Role-routed economical flow (`config/cognition/economical.textproto`):
-/// the gate keeps the expensive generator×critic pair for the answer itself,
-/// but every background/compaction call — summary, facts, objective — routes
-/// to a cheap provider named `local` (a distill node's `provider` param, plus
-/// a capability edge on the objective node for variety). The graph decides
-/// WHICH model does WHICH job.
+/// the expensive generator is spent only on the answer; ALL cognition — the
+/// critic gate (campaign PR 1: `local`, not `glm` — a reasoning critic burns
+/// its whole budget on reasoning over evidence prompts and fail-opens; the
+/// local model is non-reasoning and answers the strict-JSON verdict), the
+/// summary, facts, and objective calls — routes to a cheap provider named
+/// `local` (a distill node's `provider` param, plus capability edges). The
+/// graph decides WHICH model does WHICH job.
 pub fn economical() -> GraphDoc {
     let mut doc = simple();
+    doc.nodes.insert(
+        "gate".into(),
+        node("critic_gate", json!({ "critic": "local", "max_rounds": 2 })),
+    );
+    for e in &mut doc.edges {
+        if e.from == "glm" && e.to == "gate" {
+            e.from = "local".into();
+        }
+    }
     doc.nodes.insert(
         "summarize".into(),
         node(

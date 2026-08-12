@@ -695,8 +695,11 @@ mod tests {
         assert_eq!(cfg.digest.provider, "local");
         assert_eq!(cfg.instant.provider, "local");
         assert_eq!(cfg.instant.objective_max_tokens, 128);
-        // The gate itself still runs on the main pair.
-        assert_eq!(cfg.consensus.critic, "glm");
+        // Campaign PR 1: the gate critic ALSO routes to `local` — a reasoning
+        // critic (glm) burns its budget on reasoning over evidence prompts and
+        // fail-opens; the whole point of `economical` is cognition on the
+        // cheap endpoint.
+        assert_eq!(cfg.consensus.critic, "local");
     }
 
     #[test]

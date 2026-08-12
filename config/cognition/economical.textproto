@@ -1,19 +1,19 @@
 # Role-routed economical flow: the graph decides WHICH model does WHICH job.
 #
-#   anchor.response ──── generate ── critic_gate (judged by "glm")
+#   anchor.response ──── generate ── critic_gate (judged by "local")
 #   anchor.delivery ──── distill_summary ── provider: "local"   (background)
 #                   \─── distill_facts ──── provider: "local"   (background)
 #   anchor.compaction ── objective (◄ capability: "local") ── compact_assemble
 #
-# The expensive generator × critic pair is spent ONLY on the answer itself;
-# every background/compaction call — the rolling summary, the key-facts
-# extraction, the current-objective statement — routes to a cheap provider
-# named `local` (e.g. an ollama box declared as a [[route.upstreams]] entry).
+# The expensive generator is spent ONLY on the answer itself; ALL cognition —
+# the critic gate, the rolling summary, the key-facts extraction, the
+# current-objective statement — routes to a cheap provider named `local`
+# (e.g. a llama.cpp/ollama box declared as a [[route.upstreams]] entry).
 # Same cognition, a fraction of the token bill. Run with:
 #
 #   agent --cognition-graph config/cognition/economical.textproto "<goal>"
 #
-# Needs providers named `glm` and `local`, and `[digest] store` configured.
+# Needs a provider named `local`, and `[digest] store` configured.
 version: 1
 nodes {
   key: "compact"
@@ -62,7 +62,14 @@ nodes {
       object_value {
         fields {
           key: "critic"
-          value { string_value: "glm" }
+          # "local", not "glm" (campaign PR 1, live 2026-08-12): a reasoning
+          # critic burns its whole output budget on reasoning over diff-bearing
+          # evidence prompts — GLM returned empty content even at the 8192
+          # ceiling and the gate fail-opened (critic_error). The economical
+          # document's premise is cognition on the cheap endpoint anyway, and
+          # the local model (qwen3-30B-A3B via llama.cpp --jinja) is
+          # non-reasoning and emits the strict-JSON verdict reliably.
+          value { string_value: "local" }
         }
         fields {
           key: "max_rounds"
@@ -124,7 +131,7 @@ edges {
   kind: KIND_MAIN
 }
 edges {
-  from: "glm"
+  from: "local"
   to: "gate"
   kind: KIND_CAPABILITY
 }
