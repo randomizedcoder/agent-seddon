@@ -13,6 +13,12 @@ nix run .#graph-arena -- --objective lockbox --tier S --reps 2   # all five arms
 nix run .#graph-arena -- --arms baseline,simple --reps 1         # cheap slice
 nix run .#graph-arena -- --reps 5 --retry-dnf                    # resume: re-run DNF
                                                                  # casualties only
+
+# The FULL statistical ladder (campaign spec 07-arena-campaign.md): lockbox S,
+# logtriage M, csv-slice M (all arms R=5), relay L (R=3) — ~12-13 pod-hours,
+# one resumable root. Re-running the SAME command is the recovery pass.
+ARENA_OUTPUT_DIR=~/campaign-$(date +%F) nix run .#graph-arena-campaign
+nix run .#graph-arena-campaign -- --only lockbox,relay           # a rung subset
 ```
 
 ## Env

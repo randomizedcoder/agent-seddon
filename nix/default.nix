@@ -200,6 +200,18 @@ let
       ;
   };
 
+  # `nix run .#graph-arena-campaign` — the FULL statistical ladder (campaign
+  # spec 07-arena-campaign.md) as one resumable command; re-running it is the
+  # recovery pass. ~12-13 pod-hours — deliberately standalone (not in eval-all).
+  graph-arena-campaign = import ./graph-arena-campaign.nix {
+    inherit
+      pkgs
+      lib
+      versions
+      agent
+      ;
+  };
+
   # Code-review-flow evaluation harness (`nix run .#review-eval`). Not a check:
   # the Rust corpus is the real working tree's git history (stripped from the
   # hermetic sandbox) and `--judge` needs a network model endpoint. Generates
@@ -474,6 +486,7 @@ in
         e2e-expect
         e2e-multi
         graph-arena
+        graph-arena-campaign
         review-eval
         eval
         redteam

@@ -13,7 +13,7 @@ design and this doc for where reality is.
 | 2 | increment 6: cost/time statistics + `--retry-dnf` | ⬜ planned |
 | 2b | contamination hardening: logtriage quirk-pack + `csv-slice` (C) | ⬜ planned |
 | 2c | telemetry witness (`ARENA_CLICKHOUSE`) | ⬜ planned |
-| 2d | `nix run .#graph-arena-campaign` | ⬜ planned |
+| 2d | `nix run .#graph-arena-campaign` | 🟨 in review |
 | — | campaign night(s) | ⬜ planned |
 | 3 | Results of record + STATUS headline | ⬜ planned |
 
@@ -25,6 +25,13 @@ design and this doc for where reality is.
   training-memorization risk; trace witness added after the user proposed
   cross-checking metrics against the ClickHouse telemetry channel; the campaign must
   be a one-command repeatable nix app.
+
+- *(2026-08-12, PR 2d)* The campaign is an in-process orchestrator
+  (`campaign.py` calls `driver.main(argv)` per rung — no subprocess layer), and
+  `--retry-dnf` is passed unconditionally: on a fresh dir it is a no-op, on a
+  rerun it makes the same command the recovery pass. A harness refusal stops
+  the ladder (it poisons every later rung); ARENA_OUTPUT_DIR is REQUIRED (a
+  mktemp root would orphan an overnight run's resume state).
 
 ## Campaign-run ledger
 
