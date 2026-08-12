@@ -28,6 +28,7 @@ pkgs.writeShellApplication {
   runtimeInputs = [
     agent
     versions.go
+    pkgs.gcc # the C objective (csv-slice) — agent in-run builds + scoring
     pkgs.git
     pkgs.python3
     pkgs.gnugrep

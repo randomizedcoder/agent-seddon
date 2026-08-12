@@ -36,7 +36,8 @@ rejects its fail fixture, and scores nothing on the bare seed).
 | Objective | Tier | Probe |
 |---|---|---|
 | `lockbox` (Go KV CLI, 7 reqs) | S | multi-requirement completeness — the gate's home turf |
-| `logtriage` (Go log aggregator, 11 reqs) | M | late-biting `CONSTRAINTS.md` rules (`memory` kind), include-path safety, a 1M-line perf floor — under a 12k context window sized to force compaction |
+| `logtriage` (Go log aggregator, 13 reqs) | M | late-biting `CONSTRAINTS.md` rules (`memory` kind), include-path safety, a 1M-line perf floor, plus contamination quirks (an exact `--version` string; an `E: `/exit-3 config-error contract deliberately DIFFERENT from the adjacent unsafe-include contract) — under a 12k context window sized to force compaction |
+| `csv-slice` (C CSV slicer, 11 reqs) | M | the **fresh-language memorization control**: every graded detail is an arbitrary dialect quirk (exact error strings + exit codes 64/65/66, NUL rejection, short-row tolerance, a version string), plus an ASAN re-compile among the graded checks and a 1M-row perf floor — a delta that replicates here is not training contamination |
 | `relay` (Go TCP pub/sub server, 13 reqs, **3 sequential goals**) | L | cross-goal memory: goal 1's exact wire protocol + `CONSTRAINTS.md` rules are re-graded after goals 2 (journal/replay) and 3 (metrics/rate-limit) — `after_goal` gates each requirement, everything scores at the end |
 
 Tiers set goal size, `context_window` (identical across arms), a **per-goal**

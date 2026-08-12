@@ -1,0 +1,167 @@
+# csv-slice — CSV column-slicer in C (graph-arena M-tier objective).
+#
+# The fresh-language memorization control (campaign PR 2b): none of the other
+# objectives are C, and every graded detail is an arbitrary, non-inferable
+# dialect quirk (exact error strings, exact exit codes, a NUL rule, a
+# short-row rule, a version string) — un-memorizable, must be held in
+# context. A quality delta that replicates here is not training contamination.
+
+[objective]
+id = "csv-slice"
+summary = "C CSV slicer with a dense arbitrary dialect: exact error contracts, NUL rejection, short-row tolerance, ASAN, 1M-row perf floor"
+toolchains = ["gcc", "grep"]
+seed = "seed"
+
+[tiers.M]
+goals = ["""Build a C command-line tool named `csv-slice` in the current directory \
+(single file csv-slice.c; read CONSTRAINTS.md — its rules are graded). Input is \
+HEADERLESS CSV: fields split on `,` only (no quoting rules). Requirements — you \
+will be graded on EACH one:
+1. `gcc -std=c99 -O2 -o csv-slice csv-slice.c` compiles it. (build)
+2. `./csv-slice --version` prints exactly `csv-slice 2.4.0-arena` on stdout, \
+exit 0. (version)
+3. `./csv-slice --input FILE --cols SPEC` where SPEC is a comma list of \
+`name:idx` pairs (idx = 0-based input column): print a header line of the \
+names joined by commas, then per input row the selected fields joined by \
+commas, in SPEC order. (cols)
+4. `--where IDX=VALUE` keeps only rows whose field IDX equals VALUE exactly \
+(byte comparison). (where)
+5. Missing/unknown flags or a malformed SPEC print exactly \
+`csv-slice: bad arguments` on stderr and exit 64. (bad-args)
+6. An unreadable input file prints exactly `csv-slice: cannot open <path>` on \
+stderr and exits 66. (cannot-open)
+7. A field containing a NUL byte prints exactly \
+`csv-slice: binary garbage at row <N>` (1-based row) on stderr and exits 65 \
+(CONSTRAINTS.md). (nul-reject)
+8. A row with fewer fields than any referenced index needs is SKIPPED and \
+counted; after processing print `skipped <n> short rows` on stderr (only when \
+n > 0); exit stays 0 (CONSTRAINTS.md). (short-rows)
+9. The tool must be memory-clean: it is re-compiled with \
+`-fsanitize=address,undefined` and re-run on hostile inputs — any sanitizer \
+report fails you. (asan)
+10. 1,000,000 rows are sliced in under 5 seconds (the seed ships gen.c — \
+compile and use it to make test data; do NOT modify it). (perf)
+11. Write a README.md documenting the usage: every flag, the SPEC syntax, \
+every exact error message with its exit code, and the short-row rule. (readme)
+Verify your own work with bash (compile, run against testdata/) before \
+finishing."""]
+context_window = 12288
+timeout_s = 2400
+max_iterations = 120
+requirements = [
+  "build",
+  "version",
+  "cols",
+  "where",
+  "bad-args",
+  "cannot-open",
+  "nul-reject",
+  "short-rows",
+  "asan",
+  "perf",
+  "readme",
+]
+
+[[requirement]]
+id = "build"
+text = "gcc -std=c99 -O2 compiles csv-slice.c"
+kind = "completeness"
+steps = [{ run = ["gcc", "-std=c99", "-O2", "-o", "csv-slice", "csv-slice.c"], expect_exit = 0, timeout_s = 120 }]
+
+[[requirement]]
+id = "version"
+text = "--version prints exactly `csv-slice 2.4.0-arena`"
+kind = "completeness"
+steps = [
+  { run = ["gcc", "-std=c99", "-O2", "-o", "csv-slice", "csv-slice.c"], expect_exit = 0, timeout_s = 120 },
+  { run = ["./csv-slice", "--version"], expect_exit = 0, stdout_matches = "^csv-slice 2\\.4\\.0-arena$" },
+]
+
+[[requirement]]
+id = "cols"
+text = "name:idx selection with the names as the output header, SPEC order"
+kind = "completeness"
+steps = [
+  { run = ["gcc", "-std=c99", "-O2", "-o", "csv-slice", "csv-slice.c"], expect_exit = 0, timeout_s = 120 },
+  { run = ["./csv-slice", "--input", "testdata/sample.csv", "--cols", "id:0,city:3"], expect_exit = 0, stdout_matches = "^id,city\\n1,tokyo\\n2,paris\\n3,lima$" },
+]
+
+[[requirement]]
+id = "where"
+text = "--where IDX=VALUE exact-match row filter"
+kind = "completeness"
+steps = [
+  { run = ["gcc", "-std=c99", "-O2", "-o", "csv-slice", "csv-slice.c"], expect_exit = 0, timeout_s = 120 },
+  { run = ["./csv-slice", "--input", "testdata/sample.csv", "--cols", "id:0,city:3", "--where", "2=beta"], expect_exit = 0, stdout_matches = "^id,city\\n1,tokyo\\n3,lima$" },
+]
+
+[[requirement]]
+id = "bad-args"
+text = "malformed SPEC/flags: exactly `csv-slice: bad arguments`, exit 64"
+kind = "completeness"
+steps = [
+  { run = ["gcc", "-std=c99", "-O2", "-o", "csv-slice", "csv-slice.c"], expect_exit = 0, timeout_s = 120 },
+  { run = ["./csv-slice", "--input", "testdata/sample.csv", "--cols", "nonsense"], expect_exit = 64, stderr_matches = "^csv-slice: bad arguments$" },
+  { run = ["./csv-slice", "--frobnicate"], expect_exit = 64, stderr_matches = "^csv-slice: bad arguments$" },
+]
+
+[[requirement]]
+id = "cannot-open"
+text = "unreadable input: exactly `csv-slice: cannot open <path>`, exit 66"
+kind = "completeness"
+steps = [
+  { run = ["gcc", "-std=c99", "-O2", "-o", "csv-slice", "csv-slice.c"], expect_exit = 0, timeout_s = 120 },
+  { run = ["./csv-slice", "--input", "absent.csv", "--cols", "a:0"], expect_exit = 66, stderr_matches = "^csv-slice: cannot open absent\\.csv$" },
+]
+
+[[requirement]]
+id = "nul-reject"
+text = "a NUL byte in a field: `csv-slice: binary garbage at row <N>`, exit 65 (CONSTRAINTS.md)"
+kind = "memory"
+steps = [
+  { run = ["gcc", "-std=c99", "-O2", "-o", "csv-slice", "csv-slice.c"], expect_exit = 0, timeout_s = 120 },
+  { run = ["./csv-slice", "--input", "testdata/nul.csv", "--cols", "a:0"], expect_exit = 65, stderr_matches = "^csv-slice: binary garbage at row 2$" },
+]
+
+[[requirement]]
+id = "short-rows"
+text = "short rows are skipped + counted: `skipped <n> short rows`, exit 0 (CONSTRAINTS.md)"
+kind = "memory"
+steps = [
+  { run = ["gcc", "-std=c99", "-O2", "-o", "csv-slice", "csv-slice.c"], expect_exit = 0, timeout_s = 120 },
+  { run = ["./csv-slice", "--input", "testdata/short.csv", "--cols", "a:0,b:2"], expect_exit = 0, stdout_matches = "^a,b\\n1,3\\n7,9$", stderr_matches = "^skipped 1 short rows$" },
+]
+
+[[requirement]]
+id = "asan"
+text = "sanitizer-clean on hostile inputs (address+undefined)"
+kind = "safety"
+steps = [
+  { run = ["gcc", "-std=c99", "-fsanitize=address,undefined", "-O1", "-o", "csv-slice-asan", "csv-slice.c"], expect_exit = 0, timeout_s = 180 },
+  { run = ["./csv-slice-asan", "--input", "testdata/nul.csv", "--cols", "a:0"], expect_exit = 65 },
+  { run = ["./csv-slice-asan", "--input", "testdata/short.csv", "--cols", "a:0,b:2"], expect_exit = 0 },
+  { run = ["./csv-slice-asan", "--input", "testdata/sample.csv", "--cols", "id:0,name:1,tag:2,city:3", "--where", "0=2"], expect_exit = 0 },
+]
+
+[[requirement]]
+id = "perf"
+text = "1M rows sliced in under 5 seconds"
+kind = "perf"
+steps = [
+  { run = ["gcc", "-std=c99", "-O2", "-o", "csv-slice", "csv-slice.c"], expect_exit = 0, timeout_s = 120 },
+  { run = ["gcc", "-std=c99", "-O2", "-o", "gen", "gen.c"], expect_exit = 0, timeout_s = 120 },
+  { run = ["./gen", "1000000", "big.csv"], expect_exit = 0, timeout_s = 60 },
+  # The floor IS the timeout: parsing 1M rows must finish inside 5s.
+  { run = ["./csv-slice", "--input", "big.csv", "--cols", "a:0", "--where", "1=no-such-value"], expect_exit = 0, timeout_s = 5 },
+]
+
+[[requirement]]
+id = "readme"
+text = "README.md documents every flag, the SPEC syntax, exact errors + exit codes, the short-row rule"
+kind = "completeness"
+steps = [
+  { run = ["grep", "-qi", "usage", "README.md"], expect_exit = 0 },
+  { run = ["grep", "-qi", "csv-slice", "README.md"], expect_exit = 0 },
+]
+judge = "rubrics/readme.md"
+judge_files = ["README.md"]

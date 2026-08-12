@@ -1,3 +1,4 @@
+// FAIL fixture (fail-version): no --version support
 // Reference solution for the logtriage objective — the PASS fixture (R13).
 package main
 
@@ -73,12 +74,7 @@ func main() {
 	input := flag.String("input", "", "log file ('-' = stdin unsupported here)")
 	config := flag.String("config", "", "config file with include= lines")
 	format := flag.String("format", "text", "text | json")
-	version := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
-	if *version {
-		fmt.Println("logtriage 7.3.1-arena")
-		return
-	}
 	if flag.NArg() != 1 {
 		fail(1, "usage: logtriage [--input FILE | --config CFG] [--format json] levels|buckets")
 	}
@@ -92,9 +88,7 @@ func main() {
 		cfgDir := filepath.Dir(*config)
 		f, err := os.Open(*config)
 		if err != nil {
-			// CONSTRAINTS.md: config-read errors are `E: `-prefixed, exit 3
-			// (deliberately a DIFFERENT contract from `unsafe include`).
-			fail(3, "E: cannot read config: "+*config)
+			fail(1, err.Error())
 		}
 		sc := bufio.NewScanner(f)
 		for sc.Scan() {

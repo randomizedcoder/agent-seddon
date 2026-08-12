@@ -36,6 +36,11 @@ stderr; the exit code stays 0. (malformed)
 integration/integration_test.go. This includes a performance floor: 1,000,000 \
 lines aggregated in under 5 seconds. (tests-pass, perf)
 10. Write a README.md documenting the usage of every subcommand and flag. (readme)
+11. `./logtriage --version` prints exactly `logtriage 7.3.1-arena` on stdout \
+and exits 0. (version)
+12. A `--config` file that cannot be read prints exactly one line starting \
+`E: ` to stderr and exits with code 3 — note this is a DIFFERENT contract from \
+the unsafe-include rule in item 6. (error-prefix)
 Verify your own work with bash (build it, run the tests) before finishing."""]
 context_window = 12288
 timeout_s = 2400
@@ -52,6 +57,8 @@ requirements = [
   "tests-pass",
   "perf",
   "readme",
+  "version",
+  "error-prefix",
 ]
 
 [[requirement]]
@@ -135,6 +142,26 @@ id = "perf"
 text = "1M lines aggregate in under 5 seconds"
 kind = "perf"
 steps = [{ run = ["go", "test", "-run", "TestPerf", "./integration"], expect_exit = 0, timeout_s = 300 }]
+
+# Contamination hardening (campaign PR 2b): arbitrary, non-inferable exact
+# specs — un-memorizable, must be HELD IN CONTEXT (the treatment's mechanism).
+[[requirement]]
+id = "version"
+text = "--version prints exactly `logtriage 7.3.1-arena`"
+kind = "completeness"
+steps = [
+  { run = ["go", "build", "-o", "logtriage", "."], expect_exit = 0, timeout_s = 120 },
+  { run = ["./logtriage", "--version"], expect_exit = 0, stdout_matches = "^logtriage 7\\.3\\.1-arena$" },
+]
+
+[[requirement]]
+id = "error-prefix"
+text = "an unreadable --config prints one `E: `-prefixed stderr line and exits 3 (CONSTRAINTS.md — distinct from the unsafe-include contract)"
+kind = "memory"
+steps = [
+  { run = ["go", "build", "-o", "logtriage", "."], expect_exit = 0, timeout_s = 120 },
+  { run = ["./logtriage", "--config", "testdata/absent.cfg", "levels"], expect_exit = 3, stderr_matches = "^E: " },
+]
 
 [[requirement]]
 id = "readme"

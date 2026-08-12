@@ -6,3 +6,6 @@
    read the file.
 3. **Malformed tolerance.** Lines that don't parse are skipped and counted;
    report `skipped N malformed` on stderr; still exit 0.
+4. **Config-read errors.** A `--config` file that cannot be read prints exactly
+   one line starting `E: ` to stderr and exits with code **3**. This is a
+   DIFFERENT contract from include safety (rule 2) — do not merge the two.
