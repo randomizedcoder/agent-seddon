@@ -450,6 +450,7 @@ existing usage path with the node label, so per-node USD cost lands in
 | 04 | **Graph document + services** — `cognition.textproto`, anchor-slot executor, `graph.proto` + `digest.proto`, `--serve-graph`/`--serve-digest`, `DescribeNodeTypes` schema registry | user-configurable graph; GUI substrate |
 | 05 | **Parallel branches** — `split`/`join`/`merge` nodes, concurrent branch tasks, all/any/quorum joins, compare/synthesize merge, losers → alternatives ledger | diverse-lens exploration (safety × performance) in one turn |
 | 06 | **Graph arena** ([spec](06-graph-arena.md)) — A/B/n value harness: purpose-built multi-requirement objectives under baseline + every shipped document, per-requirement k/n + cost + a validity gate proving the graph engaged, duration tiers S/M/L | the "does it deliver value" question gets a measured answer |
+| 07 | **Arena campaign** ([spec](07-arena-campaign.md), [status](07-arena-campaign-status.md)) — statistically strong A/B/n: R=5 across the full ladder, wall + per-endpoint token cost as paired first-class metrics, per-kind breakouts, contamination controls (arbitrary-spec quirks + a C objective), ClickHouse trace witness, all as one repeatable `nix run .#graph-arena-campaign` | the measured answer gains error bars an operator can act on |
 
 Deferred (documented, not built): generalizing the executor beyond the three
 anchors (Option C); the Flutter drag-drop editor itself (portal track); Mem0-style
