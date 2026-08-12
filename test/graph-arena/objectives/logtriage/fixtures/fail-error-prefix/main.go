@@ -1,3 +1,5 @@
+// FAIL fixture (fail-error-prefix): plain error text, exit 1 — the
+// CONSTRAINTS.md `E: `/exit-3 contract is forgotten
 // Reference solution for the logtriage objective — the PASS fixture (R13).
 package main
 
@@ -92,9 +94,7 @@ func main() {
 		cfgDir := filepath.Dir(*config)
 		f, err := os.Open(*config)
 		if err != nil {
-			// CONSTRAINTS.md: config-read errors are `E: `-prefixed, exit 3
-			// (deliberately a DIFFERENT contract from `unsafe include`).
-			fail(3, "E: cannot read config: "+*config)
+			fail(1, err.Error())
 		}
 		sc := bufio.NewScanner(f)
 		for sc.Scan() {
