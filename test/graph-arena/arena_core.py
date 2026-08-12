@@ -15,6 +15,7 @@ mis-scoring an arm) — fail closed with a message naming the field.
 
 from __future__ import annotations
 
+import math
 import re
 import string
 import tomllib
@@ -447,6 +448,22 @@ GRAPH_DOCS = {
 # enforced by diffing in harness increment 2, but generation already conforms).
 ARM_ONLY_SECTIONS = ("[graph]", "[consensus]", "[digest]", "[[route.upstreams]]")
 
+# Real endpoints an arm dials: arm_agent_toml writes exactly these upstream
+# names, and cost accounting (increment 6) reads ONLY these labels.
+UPSTREAM_CRITIC = "glm"
+UPSTREAM_LOCAL = "local"
+# CAVEAT, live-observed (docs/graph-arena.md "Reading the output"): composite
+# providers re-record inner usage under their own label — the `consensus`
+# model label and the `openai-compat` upstream label OVERLAP the real
+# endpoints above, so summing across every label double-counts. Generator
+# tokens therefore DENYLIST these composites (the generator's own label is
+# env-dynamic, e.g. "moonshotai/Kimi-K3"); upstream tokens ALLOWLIST exactly
+# UPSTREAM_CRITIC / UPSTREAM_LOCAL.
+COMPOSITE_TOKEN_LABELS = frozenset({"consensus", "openai-compat"})
+# Clamp for hostile evidence values — results.jsonl is a rehydrated artifact,
+# not a trusted input.
+MAX_COST_TOKENS = 10**12
+
 
 def arm_agent_toml(
     arm: str,
@@ -549,7 +566,7 @@ path = "{scratch_dir}/digests.sqlite3"
 # A reasoning-model distiller can need minutes per job; the default 60s exit
 # drain dropped the only digest of a one-goal M run (validity-excluded 11/11).
 drain_timeout_s = 300
-{upstream.format(name="glm", url=env.judge_base_url, model=env.judge_model, key=env.judge_key_file, tls=tls_line)}{upstream.format(name="local", url=local_url, model=local_model, key=local_key, tls=local_tls)}"""
+{upstream.format(name=UPSTREAM_CRITIC, url=env.judge_base_url, model=env.judge_model, key=env.judge_key_file, tls=tls_line)}{upstream.format(name=UPSTREAM_LOCAL, url=local_url, model=local_model, key=local_key, tls=local_tls)}"""
     return toml
 
 
@@ -584,6 +601,59 @@ class RunScore:
         return self.dnf is None and (self.validity is None or self.validity.valid)
 
 
+@dataclass(frozen=True)
+class RunCost:
+    """Per-run cost from the pushed-metrics evidence — REAL endpoints only
+    (composite labels excluded; see COMPOSITE_TOKEN_LABELS)."""
+
+    gen_tokens: int  # agent_tokens_total minus composite labels
+    critic_tokens: int  # agent_upstream_tokens_total{upstream=UPSTREAM_CRITIC}
+    local_tokens: int  # agent_upstream_tokens_total{upstream=UPSTREAM_LOCAL}
+    wall_s: float
+
+
+def _clean_counts(raw: object) -> dict[str, int]:
+    """Hostile-evidence wall (rehydrated results.jsonl passes through here):
+    str→number entries only, bools/NaN/Inf/junk dropped, values clamped to
+    0..MAX_COST_TOKENS, keys length-capped."""
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, int] = {}
+    for k, v in raw.items():
+        if not isinstance(k, str) or not k or len(k) > 64:
+            continue
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            continue
+        if isinstance(v, float) and not math.isfinite(v):
+            continue
+        out[k] = min(max(int(v), 0), MAX_COST_TOKENS)
+    return out
+
+
+def run_cost(score: RunScore) -> RunCost | None:
+    """`None` = no token data (validity never assessed, or the evidence has no
+    `tokens` dict) — unknown must never render as a zero."""
+    if score.validity is None:
+        return None
+    ev = score.validity.evidence
+    if not isinstance(ev, dict) or not isinstance(ev.get("tokens"), dict):
+        return None
+    tokens = _clean_counts(ev.get("tokens"))
+    upstream = _clean_counts(ev.get("upstream_tokens"))
+    gen = sum(v for k, v in tokens.items() if k not in COMPOSITE_TOKEN_LABELS)
+    return RunCost(
+        gen_tokens=min(gen, MAX_COST_TOKENS),
+        critic_tokens=upstream.get(UPSTREAM_CRITIC, 0),
+        local_tokens=upstream.get(UPSTREAM_LOCAL, 0),
+        wall_s=score.wall_s,
+    )
+
+
+def ktok(n: int) -> int:
+    """Display unit for token totals: integer thousands (no fake precision)."""
+    return round(n / 1000)
+
+
 def mechanical_n(tier: Tier, manifest: Manifest) -> int:
     """Requirements scoreable in this harness increment (steps-carrying)."""
     return sum(1 for rid in tier.requirements if manifest.requirements[rid].steps)
@@ -608,6 +678,8 @@ def format_table(scores: list[RunScore], n_mech: int, n_judged: int) -> str:
         f"{'ARM':<14} {'REP':<4} {'MET':<8} {'WALL_S':<8} {'VALID':<28} NOTES",
     ]
     by_arm: dict[str, list[int]] = {}
+    wall_by_arm: dict[str, list[int]] = {}
+    tok_by_arm: dict[str, list[int]] = {}
     for s in sorted(scores, key=lambda s: (ARM_NAMES.index(s.arm), s.rep)):
         if s.dnf is not None:
             note = f"DNF: {s.dnf}"
@@ -624,13 +696,25 @@ def format_table(scores: list[RunScore], n_mech: int, n_judged: int) -> str:
         )
         if s.headline:
             by_arm.setdefault(s.arm, []).append(s.k)
+            # Increment 6: cost aggregates over the SAME headline predicate.
+            wall_by_arm.setdefault(s.arm, []).append(int(round(s.wall_s)))
+            cost = run_cost(s)
+            if cost is not None:
+                tok_by_arm.setdefault(s.arm, []).append(ktok(cost.gen_tokens))
     lines.append("")
-    lines.append(f"{'ARM':<14} {'MEAN k/n (min-max)':<22} HEADLINE_REPS")
+    lines.append(
+        f"{'ARM':<14} {'MEAN k/n (min-max)':<22} {'WALL_S (min-max)':<18} "
+        f"{'GEN_KTOK (min-max)':<20} HEADLINE_REPS"
+    )
     for arm in ARM_NAMES:
         if any(s.arm == arm for s in scores):
             vals = by_arm.get(arm, [])
             total = sum(1 for s in scores if s.arm == arm)
-            lines.append(f"{arm:<14} {mean_minmax(vals) + '/' + str(n_mech):<22} {len(vals)}/{total}")
+            lines.append(
+                f"{arm:<14} {mean_minmax(vals) + '/' + str(n_mech):<22} "
+                f"{mean_minmax(wall_by_arm.get(arm, [])):<18} "
+                f"{mean_minmax(tok_by_arm.get(arm, [])):<20} {len(vals)}/{total}"
+            )
     if n_judged:
         lines.append(
             f"(+{n_judged} judge-only requirement(s) not scored — harness increment 3)"
@@ -970,6 +1054,88 @@ def paired_signs(scores: list[RunScore]) -> str:
     return "\n".join(lines)
 
 
+def paired_cost_signs(scores: list[RunScore]) -> str:
+    """The cost mirror of [`paired_signs`] (increment 6): per-rep wall-seconds
+    and generator-k-token deltas vs the SAME rep's baseline. LOWER is better
+    (`<=`); a rep pairs only when BOTH sides are headline and carry cost data.
+    Deliberately a separate function — the quality line's output is pinned and
+    the two differ in direction, units, and data availability."""
+    base: dict[int, RunCost] = {}
+    for s in scores:
+        if s.arm == "baseline" and s.headline:
+            cost = run_cost(s)
+            if cost is not None:
+                base[s.rep] = cost
+    if not base:
+        return ""
+    lines = []
+    for arm in ARM_NAMES:
+        if arm == "baseline":
+            continue
+        pairs: list[tuple[int, int]] = []
+        for s in sorted((x for x in scores if x.arm == arm), key=lambda x: x.rep):
+            if not s.headline or s.rep not in base:
+                continue
+            cost = run_cost(s)
+            if cost is None:
+                continue
+            b = base[s.rep]
+            pairs.append(
+                (
+                    int(round(cost.wall_s)) - int(round(b.wall_s)),
+                    ktok(cost.gen_tokens) - ktok(b.gen_tokens),
+                )
+            )
+        if not pairs:
+            continue
+        for label, idx, unit in (("wall", 0, "s"), ("gen-tok", 1, "k")):
+            deltas = [p[idx] for p in pairs]
+            le = sum(1 for d in deltas if d <= 0)
+            shown = ", ".join(f"{'+' if d >= 0 else ''}{d}{unit}" for d in deltas)
+            lines.append(
+                f"{arm:<14} {label:<8} <= baseline in {le}/{len(deltas)} rep(s) ({shown})"
+            )
+    return "\n".join(lines)
+
+
+def format_kind_breakout(scores: list[RunScore], kinds: dict[str, str]) -> str:
+    """Per-arm `mean (min-max)/n` met count per requirement kind, headline
+    runs only (increment 6, R11's per-kind clause): each kind maps to the
+    mechanism it probes (memory → digests/compaction, completeness → the
+    gate), so a delta is attributed or it is not claimed. `kinds` maps
+    requirement id → kind for the tier; met ids outside the map (stale JSONL)
+    are ignored. Empty string when there is nothing to break out."""
+    n_by_kind = {k: sum(1 for v in kinds.values() if v == k) for k in REQUIREMENT_KINDS}
+    cols = [k for k in REQUIREMENT_KINDS if n_by_kind[k]]
+    if not cols:
+        return ""
+    per_arm: dict[str, dict[str, list[int]]] = {}
+    for s in scores:
+        if not s.headline:
+            continue
+        counts = dict.fromkeys(cols, 0)
+        for rid in s.met:
+            kind = kinds.get(rid)
+            if kind in counts:
+                counts[kind] += 1
+        arm_lists = per_arm.setdefault(s.arm, {c: [] for c in cols})
+        for c in cols:
+            arm_lists[c].append(counts[c])
+    if not per_arm:
+        return ""
+    width = 18
+    lines = [f"{'ARM':<14} " + " ".join(f"{c:<{width}}" for c in cols)]
+    for arm in ARM_NAMES:
+        if arm not in per_arm:
+            continue
+        cells = [
+            f"{mean_minmax(per_arm[arm][c]) + '/' + str(n_by_kind[c]):<{width}}"
+            for c in cols
+        ]
+        lines.append(f"{arm:<14} " + " ".join(cells))
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Multi-goal runs + resume-on-rerun (harness increment 4)
 # ---------------------------------------------------------------------------
@@ -991,7 +1157,11 @@ def already_recorded(
     """Resume-on-rerun: the (arm, rep) pairs already in results.jsonl for this
     objective+tier. A recorded DNF/invalid run is a RESULT (a finding) and is
     also skipped — delete the artifact dir to redo a run. Malformed lines are
-    ignored: a corrupt artifact must not block resuming the rest."""
+    ignored: a corrupt artifact must not block resuming the rest.
+
+    Superseded for the driver by [`resume_records`] + [`plan_resume`]
+    (increment 6, `--retry-dnf`); kept for compatibility and its pinned
+    behavior tables."""
     import json as _json
 
     done: set[tuple[str, int]] = set()
@@ -1040,3 +1210,48 @@ def score_from_record(o: dict) -> RunScore | None:
         )
     except (KeyError, TypeError, ValueError):
         return None
+
+
+def resume_records(
+    jsonl_lines: list[str], objective: str, tier: str
+) -> dict[tuple[str, int], dict]:
+    """Resume input, LAST record per (arm, rep) wins: a `--retry-dnf` rerun
+    APPENDS a fresh row that supersedes its casualty row — no file is ever
+    rewritten, old artifacts stay valid, and a file holding a DNF row plus its
+    retry reads correctly forever. Malformed lines are ignored (the same wall
+    as [`already_recorded`])."""
+    import json as _json
+
+    out: dict[tuple[str, int], dict] = {}
+    for line in jsonl_lines[:10_000]:
+        try:
+            o = _json.loads(line)
+        except _json.JSONDecodeError:
+            continue
+        if not isinstance(o, dict):
+            continue
+        if o.get("objective") != objective or o.get("tier") != tier:
+            continue
+        arm, rep = o.get("arm"), o.get("rep")
+        if isinstance(arm, str) and arm in ARM_NAMES and isinstance(rep, int):
+            out[(arm, rep)] = o
+    return out
+
+
+def plan_resume(
+    records: dict[tuple[str, int], dict], retry_dnf: bool
+) -> tuple[set[tuple[str, int]], list[RunScore]]:
+    """`(done, prior)`: the (arm, rep) runs to skip, and the prior rows that
+    seed the table. With `retry_dnf`, recorded DNF casualties leave BOTH — the
+    rerun replaces them cleanly. Treatment-failed runs are FINDINGS, not DNFs:
+    they always stay recorded."""
+    done: set[tuple[str, int]] = set()
+    prior: list[RunScore] = []
+    for key, rec in records.items():
+        if retry_dnf and isinstance(rec.get("dnf"), str):
+            continue
+        done.add(key)
+        score = score_from_record(rec)
+        if score is not None:
+            prior.append(score)
+    return done, prior

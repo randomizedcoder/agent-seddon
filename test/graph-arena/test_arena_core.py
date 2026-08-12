@@ -9,6 +9,7 @@ strings; the injected executor is a fake. Run via `python3 -m unittest` — the
 
 from __future__ import annotations
 
+import json
 import unittest
 
 import arena_core as core
@@ -851,3 +852,308 @@ class MergeAndResumeTables(unittest.TestCase):
         self.assertEqual(s.met, ("ok",))
         self.assertEqual(s.wall_s, 0.0)
         self.assertEqual(s.validity.evidence, {})
+
+
+# ---------------------------------------------------------------------------
+# Harness increment 6: cost accounting, paired cost signs, kind breakout,
+# retry-dnf resume
+# ---------------------------------------------------------------------------
+
+
+def _cost_score(arm, rep, met=("a",), wall=100.0, tokens=None, upstream=None,
+                valid=True, dnf=None, validity_none=False):
+    if validity_none:
+        validity = None
+    else:
+        ev = {}
+        if tokens is not None:
+            ev["tokens"] = tokens
+        if upstream is not None:
+            ev["upstream_tokens"] = upstream
+        validity = core.Validity(valid, "ok" if valid else "nope", ev)
+    return core.RunScore(arm=arm, rep=rep, met=tuple(met), dnf=dnf,
+                         wall_s=wall, validity=validity)
+
+
+class CostTables(unittest.TestCase):
+    def test_positive_real_labels_only(self):
+        # Composite labels (consensus / openai-compat) OVERLAP the real
+        # endpoints — the generator sum must exclude them, and upstreams are
+        # read at exactly the two harness-authored names.
+        s = _cost_score(
+            "economical", 1,
+            tokens={"moonshotai/Kimi-K3": 84_847, "consensus": 84_847},
+            upstream={"glm": 3_052, "local": 4_304, "openai-compat": 84_847},
+        )
+        c = core.run_cost(s)
+        self.assertEqual(c.gen_tokens, 84_847)
+        self.assertEqual(c.critic_tokens, 3_052)
+        self.assertEqual(c.local_tokens, 4_304)
+        self.assertEqual(c.wall_s, 100.0)
+
+    def test_positive_baseline_zero_upstreams(self):
+        s = _cost_score("baseline", 1, tokens={"kimi": 1_000}, upstream={})
+        c = core.run_cost(s)
+        self.assertEqual((c.gen_tokens, c.critic_tokens, c.local_tokens),
+                         (1_000, 0, 0))
+
+    def test_negative_validity_none_is_none(self):
+        self.assertIsNone(core.run_cost(_cost_score("baseline", 1, validity_none=True)))
+
+    def test_negative_no_tokens_dict_is_none(self):
+        # Evidence without a tokens dict = unknown, NEVER zero.
+        self.assertIsNone(core.run_cost(_cost_score("baseline", 1)))
+        self.assertIsNone(core.run_cost(_cost_score("baseline", 1, upstream={"glm": 5})))
+
+    def test_corner_empty_tokens_dict_is_zero_not_none(self):
+        c = core.run_cost(_cost_score("baseline", 1, tokens={}))
+        self.assertIsNotNone(c)
+        self.assertEqual(c.gen_tokens, 0)
+
+    def test_boundary_clamp_at_max_cost_tokens(self):
+        s = _cost_score("simple", 1,
+                        tokens={"kimi": core.MAX_COST_TOKENS + 5},
+                        upstream={"glm": -3})
+        c = core.run_cost(s)
+        self.assertEqual(c.gen_tokens, core.MAX_COST_TOKENS)
+        self.assertEqual(c.critic_tokens, 0, "negatives clamp to zero")
+
+    def test_boundary_ktok_rounds(self):
+        self.assertEqual(core.ktok(0), 0)
+        self.assertEqual(core.ktok(400), 0)
+        self.assertEqual(core.ktok(500), 0)  # banker's rounding: 0.5 -> 0
+        self.assertEqual(core.ktok(1_501), 2)
+        self.assertEqual(core.ktok(84_847), 85)
+
+    def test_adversarial_hostile_evidence_never_raises(self):
+        hostile = {
+            "tokens": {
+                "ok": 10, "": 1, "x" * 100: 2, 7: 3, "bool": True,
+                "nan": float("nan"), "inf": float("inf"), "neg": -50,
+                "nested": {"deep": 1}, "text": "9999",
+            },
+            "upstream_tokens": "not-a-dict",
+        }
+        s = core.RunScore(arm="simple", rep=1, met=(),
+                          validity=core.Validity(True, "ok", hostile))
+        c = core.run_cost(s)
+        self.assertIsNotNone(c)
+        self.assertEqual(c.gen_tokens, 10, "only the clean entry survives")
+        self.assertEqual((c.critic_tokens, c.local_tokens), (0, 0))
+
+    def test_positive_upstream_names_are_the_config_names(self):
+        # The constants are load-bearing: arm_agent_toml writes these exact
+        # upstream names, so cost accounting cannot drift from the config.
+        env = ArmConfigTables.ENV
+        toml = core.arm_agent_toml(
+            "economical", "/cog", "/work", "/scratch", ArmConfigTables.TIER, env
+        )
+        self.assertIn(f'name = "{core.UPSTREAM_CRITIC}"', toml)
+        self.assertIn(f'name = "{core.UPSTREAM_LOCAL}"', toml)
+
+
+class CostColumnTables(unittest.TestCase):
+    def test_positive_summary_cost_columns(self):
+        scores = [
+            _cost_score("baseline", 1, met=("a",), wall=78.0, tokens={"kimi": 69_000}),
+            _cost_score("baseline", 2, met=("a",), wall=91.0, tokens={"kimi": 80_000}),
+        ]
+        table = core.format_table(scores, n_mech=1, n_judged=0)
+        self.assertIn("84.5 (78-91)", table)
+        self.assertIn("74.5 (69-80)", table)
+
+    def test_corner_no_cost_data_renders_dash(self):
+        scores = [core.RunScore(arm="baseline", rep=1, met=("a",), wall_s=50.0)]
+        table = core.format_table(scores, n_mech=1, n_judged=0)
+        self.assertIn(" - ", table, "unknown tokens render as -, never 0")
+
+    def test_positive_pinned_kn_strings_survive(self):
+        # The increment-2/3 pins must hold byte-identical after the new columns.
+        scores = [
+            core.RunScore(arm="baseline", rep=1, met=("a", "b")),
+            core.RunScore(arm="baseline", rep=2, met=("a",)),
+            core.RunScore(arm="simple", rep=1, met=("a", "b", "c")),
+            core.RunScore(arm="simple", rep=2, met=(), dnf="timeout"),
+        ]
+        table = core.format_table(scores, n_mech=3, n_judged=1)
+        self.assertIn("DNF: timeout", table)
+        self.assertIn("1.5 (1-2)/3", table)
+        self.assertIn("3/3", table)
+        self.assertIn("1/2", table)
+        self.assertIn("judge-only", table)
+
+
+class PairedCostTables(unittest.TestCase):
+    def base(self, rep, wall, tok):
+        return _cost_score("baseline", rep, wall=wall, tokens={"kimi": tok})
+
+    def test_positive_lower_is_better_counts(self):
+        scores = [
+            self.base(1, 100, 50_000), self.base(2, 100, 50_000), self.base(3, 100, 50_000),
+            _cost_score("simple", 1, wall=226, tokens={"kimi": 91_000}),
+            _cost_score("simple", 2, wall=217, tokens={"kimi": 48_000}),
+            _cost_score("simple", 3, wall=240, tokens={"kimi": 62_000}),
+        ]
+        out = core.paired_cost_signs(scores)
+        self.assertIn("wall     <= baseline in 0/3 rep(s) (+126s, +117s, +140s)", out)
+        self.assertIn("gen-tok  <= baseline in 1/3 rep(s) (+41k, -2k, +12k)", out)
+
+    def test_corner_tie_counts_for_arm(self):
+        scores = [
+            self.base(1, 100, 50_000),
+            _cost_score("simple", 1, wall=100.4, tokens={"kimi": 50_000}),
+        ]
+        out = core.paired_cost_signs(scores)
+        self.assertIn("wall     <= baseline in 1/1 rep(s) (+0s)", out)
+        self.assertIn("gen-tok  <= baseline in 1/1 rep(s) (+0k)", out)
+
+    def test_corner_missing_cost_side_does_not_pair(self):
+        scores = [
+            self.base(1, 100, 50_000),
+            # Headline but no token data: must not pair (not a zero-cost win).
+            core.RunScore(arm="simple", rep=1, met=("a",), wall_s=10.0),
+        ]
+        self.assertEqual(core.paired_cost_signs(scores), "")
+
+    def test_corner_no_baseline_cost_empty_string(self):
+        scores = [
+            core.RunScore(arm="baseline", rep=1, met=("a",)),  # no cost data
+            _cost_score("simple", 1, tokens={"kimi": 1_000}),
+        ]
+        self.assertEqual(core.paired_cost_signs(scores), "")
+
+    def test_corner_dnf_and_invalid_never_pair(self):
+        scores = [
+            self.base(1, 100, 50_000),
+            _cost_score("simple", 1, tokens={"kimi": 1_000}, dnf="goal1-timeout"),
+            _cost_score("advanced", 1, tokens={"kimi": 1_000}, valid=False),
+        ]
+        self.assertEqual(core.paired_cost_signs(scores), "")
+
+    def test_boundary_small_token_delta_rounds_to_zero_k(self):
+        scores = [
+            self.base(1, 100, 50_000),
+            _cost_score("simple", 1, wall=100, tokens={"kimi": 50_400}),
+        ]
+        out = core.paired_cost_signs(scores)
+        self.assertIn("gen-tok  <= baseline in 1/1 rep(s) (+0k)", out)
+
+
+class KindBreakoutTables(unittest.TestCase):
+    KINDS = {
+        "r-build": "completeness", "r-json": "completeness",
+        "r-safe": "safety", "r-perf": "perf",
+        "r-mem1": "memory", "r-mem2": "memory",
+    }
+
+    def test_positive_per_kind_means(self):
+        scores = [
+            core.RunScore(arm="baseline", rep=1,
+                          met=("r-build", "r-json", "r-safe")),
+            core.RunScore(arm="baseline", rep=2, met=("r-build",)),
+            core.RunScore(arm="intermediate", rep=1,
+                          met=("r-build", "r-json", "r-safe", "r-perf",
+                               "r-mem1", "r-mem2")),
+        ]
+        out = core.format_kind_breakout(scores, self.KINDS)
+        self.assertIn("completeness", out)
+        self.assertIn("1.5 (1-2)/2", out, "baseline completeness mean")
+        self.assertIn("0/2", out, "baseline memory zero is a real zero")
+        self.assertIn("2/2", out, "intermediate memory full marks")
+
+    def test_corner_absent_kind_omitted(self):
+        kinds = {"r-build": "completeness"}
+        out = core.format_kind_breakout(
+            [core.RunScore(arm="baseline", rep=1, met=("r-build",))], kinds
+        )
+        self.assertIn("completeness", out)
+        for absent in ("safety", "perf", "memory"):
+            self.assertNotIn(absent, out)
+
+    def test_negative_empty_kinds_empty_output(self):
+        self.assertEqual(
+            core.format_kind_breakout(
+                [core.RunScore(arm="baseline", rep=1, met=("a",))], {}
+            ),
+            "",
+        )
+
+    def test_corner_non_headline_runs_excluded(self):
+        scores = [
+            core.RunScore(arm="baseline", rep=1, met=("r-build",), dnf="timeout"),
+        ]
+        self.assertEqual(core.format_kind_breakout(scores, self.KINDS), "")
+
+    def test_adversarial_met_ids_outside_kinds_ignored(self):
+        scores = [
+            core.RunScore(arm="baseline", rep=1,
+                          met=("r-build", "../../etc/passwd", "unknown-rid")),
+        ]
+        out = core.format_kind_breakout(scores, self.KINDS)
+        self.assertIn("1/2", out, "only the mapped id counts")
+        self.assertNotIn("passwd", out)
+
+
+class RetryDnfResumeTables(unittest.TestCase):
+    def rec(self, arm, rep, dnf=None, met=("a",)):
+        return json.dumps({
+            "objective": "lockbox", "tier": "S", "arm": arm, "rep": rep,
+            "met": list(met), "dnf": dnf, "wall_s": 10.0,
+            "validity": {"valid": True, "reason": "ok", "evidence": {}},
+        })
+
+    def test_positive_last_record_wins(self):
+        lines = [
+            self.rec("simple", 1, dnf="goal1-agent-exit-1", met=()),
+            self.rec("simple", 1, dnf=None, met=("a", "b")),
+        ]
+        records = core.resume_records(lines, "lockbox", "S")
+        self.assertEqual(len(records), 1)
+        done, prior = core.plan_resume(records, retry_dnf=False)
+        self.assertEqual(done, {("simple", 1)})
+        self.assertEqual(prior[0].k, 2, "the retry's row superseded the casualty")
+
+    def test_positive_retry_dnf_excludes_casualties(self):
+        lines = [
+            self.rec("baseline", 1),
+            self.rec("simple", 1, dnf="goal2-timeout", met=()),
+        ]
+        records = core.resume_records(lines, "lockbox", "S")
+        done, prior = core.plan_resume(records, retry_dnf=True)
+        self.assertEqual(done, {("baseline", 1)}, "the DNF re-runs")
+        self.assertEqual([s.arm for s in prior], ["baseline"],
+                         "the casualty row leaves the table too")
+
+    def test_corner_retry_dnf_false_matches_old_behavior(self):
+        lines = [
+            self.rec("baseline", 1),
+            self.rec("simple", 1, dnf="goal2-timeout", met=()),
+        ]
+        records = core.resume_records(lines, "lockbox", "S")
+        done, _ = core.plan_resume(records, retry_dnf=False)
+        self.assertEqual(done, core.already_recorded(lines, "lockbox", "S"),
+                         "without the flag, resume semantics are unchanged")
+
+    def test_corner_treatment_failed_findings_always_stay(self):
+        line = json.dumps({
+            "objective": "lockbox", "tier": "S", "arm": "simple", "rep": 1,
+            "met": ["a"], "dnf": None, "wall_s": 10.0,
+            "validity": {"valid": False, "reason": "critic_error only", "evidence": {}},
+        })
+        records = core.resume_records([line], "lockbox", "S")
+        done, prior = core.plan_resume(records, retry_dnf=True)
+        self.assertEqual(done, {("simple", 1)},
+                         "invalid-but-finished is a FINDING, not a DNF — no retry")
+        self.assertFalse(prior[0].headline)
+
+    def test_adversarial_garbage_lines_ignored(self):
+        lines = [
+            "not json at all {{{",
+            json.dumps(["a", "list"]),
+            json.dumps({"objective": "other", "tier": "S", "arm": "simple", "rep": 1}),
+            json.dumps({"objective": "lockbox", "tier": "S", "arm": "evil", "rep": 1}),
+            json.dumps({"objective": "lockbox", "tier": "S", "arm": "simple", "rep": "x"}),
+            self.rec("simple", 2),
+        ]
+        records = core.resume_records(lines, "lockbox", "S")
+        self.assertEqual(set(records), {("simple", 2)})
