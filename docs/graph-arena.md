@@ -30,6 +30,8 @@ nix run .#graph-arena-campaign -- --only lockbox,relay           # a rung subset
 | `ARENA_LOCAL_BASE_URL/_MODEL[/­_API_KEY_FILE]` | the economical arm's REAL cheap endpoint (l2 ollama) |
 | `ARENA_ALLOW_SIMULATED_LOCAL=1` | explicit escape hatch: `local` = the judge pod, loudly labeled |
 | `ARENA_OUTPUT_DIR` | artifacts (default mktemp); rerunning into it **resumes** — recorded (arm, rep) runs incl. DNFs are skipped (`--retry-dnf` re-runs the DNF casualties; last record per (arm, rep) wins, append-only); delete the dir to redo everything |
+| `ARENA_CLICKHOUSE` | opt-in trace witness: the `ch-up` HTTP url (e.g. `http://127.0.0.1:8123`) — every arm then writes `[telemetry]` identically and the harness cross-checks the pushed metrics against `agent_usage`/`agent_events`. Set-but-dead = hard refusal |
+| `ARENA_CLICKHOUSE_NATIVE` | the native address arms write to (default `localhost:9000`) |
 | `AGENT_BIN` | agent binary override |
 
 ## Objectives and tiers
@@ -83,6 +85,12 @@ timeout, and iterations. L-tier objectives chain sequential goals via
   (completeness/safety/perf/memory) — each kind probes a claimed mechanism
   (memory → digests/compaction, completeness → the gate), so deltas get
   attributed to the mechanism or not claimed at all.
+- **Trace witness** (with `ARENA_CLICKHOUSE`): evidence lines gain
+  `trace=ok|no-data|mismatch(…)` plus `trace_iters`/`trace_tok`/`trace_tools`
+  from the telemetry tables, scoped to the run's session id(s) — an
+  INDEPENDENT channel witnessing the pushed metrics. The tokens cross-check
+  tolerates 25%/5k (the channels count at different layers); it annotates,
+  never validity-excludes (telemetry is deliberately lossy-batched).
 
 Exit contract: `0` = sweep completed (measurement mode), `1` = harness failure
 (unreachable endpoint, missing rubric, config-fairness violation, judge that

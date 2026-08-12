@@ -1157,3 +1157,156 @@ class RetryDnfResumeTables(unittest.TestCase):
         ]
         records = core.resume_records(lines, "lockbox", "S")
         self.assertEqual(set(records), {("simple", 2)})
+
+
+# ---------------------------------------------------------------------------
+# Campaign 2c: the telemetry witness (session ids, CH queries, cross-check)
+# ---------------------------------------------------------------------------
+
+
+class SessionIdTables(unittest.TestCase):
+    def test_positive_ids_extracted_in_order_deduped(self):
+        text = (
+            "INFO starting agent session_id=aaaa1111-2222-3333-4444-555566667777\n"
+            "noise\n"
+            "INFO starting agent session_id=bbbb1111-2222-3333-4444-555566667777\n"
+            "INFO starting agent session_id=aaaa1111-2222-3333-4444-555566667777\n"
+        )
+        self.assertEqual(
+            core.session_ids_from_log(text),
+            [
+                "aaaa1111-2222-3333-4444-555566667777",
+                "bbbb1111-2222-3333-4444-555566667777",
+            ],
+        )
+
+    def test_negative_no_line_no_ids(self):
+        self.assertEqual(core.session_ids_from_log("just logs, no session"), [])
+
+    def test_corner_ansi_decorated_line_still_matches(self):
+        # The REAL tracing format (live-captured): TWO sequences between the
+        # field name and `=`, one after — `[3msession_id[0m[2m=[0m<uuid>`.
+        text = (
+            "starting agent \x1b[3msession_id\x1b[0m\x1b[2m=\x1b[0m"
+            "cccc1111-2222-3333-4444-555566667777"
+        )
+        self.assertEqual(
+            core.session_ids_from_log(text),
+            ["cccc1111-2222-3333-4444-555566667777"],
+        )
+
+    def test_adversarial_hostile_ids_rejected(self):
+        text = (
+            "starting agent session_id=abc'; DROP TABLE agent_usage;--\n"
+            "starting agent session_id=short\n"
+            "starting agent session_id=" + "a" * 500 + "\n"
+        )
+        # The quote/space stops the charset match; `abc` alone is too short.
+        for sid in core.session_ids_from_log(text):
+            self.assertRegex(sid, r"^[0-9a-f-]{8,64}$")
+
+
+class WitnessQueryTables(unittest.TestCase):
+    SID = "aaaa1111-2222-3333-4444-555566667777"
+
+    def test_positive_queries_scope_to_ids(self):
+        q = core.ch_witness_queries([self.SID])
+        self.assertIn(f"'{self.SID}'", q["usage"])
+        self.assertIn("agent.agent_usage", q["usage"])
+        self.assertIn("kind = 'tool'", q["tools"])
+        self.assertIn("FORMAT JSON", q["tools"])
+
+    def test_negative_no_ids_none(self):
+        self.assertIsNone(core.ch_witness_queries([]))
+
+    def test_adversarial_injection_ids_dropped(self):
+        q = core.ch_witness_queries(["x' OR 1=1 --", self.SID, 123, "‮evil"])
+        self.assertIsNotNone(q)
+        for sql in q.values():
+            self.assertNotIn("OR 1=1", sql)
+            self.assertNotIn("evil", sql)
+
+    def test_adversarial_all_hostile_none(self):
+        self.assertIsNone(core.ch_witness_queries(["'; DROP TABLE x;--", "UPPER-CASE"]))
+
+
+class ChJsonTables(unittest.TestCase):
+    def test_positive_rows_parsed(self):
+        body = json.dumps({"data": [{"iters": "34", "tokens": "92000"}]})
+        rows = core.parse_ch_json(body)
+        self.assertEqual(core._row_int(rows, "iters"), 34)
+        self.assertEqual(core._row_int(rows, "tokens"), 92000)
+
+    def test_negative_garbage_empty(self):
+        for bad in ("not json", json.dumps(["list"]), json.dumps({"data": "x"})):
+            self.assertEqual(core.parse_ch_json(bad), [])
+
+    def test_boundary_body_and_row_caps(self):
+        self.assertEqual(core.parse_ch_json("x" * (core.MAX_CH_BODY_CHARS + 1)), [])
+        many = json.dumps({"data": [{"n": 1}] * (core.MAX_CH_ROWS + 100)})
+        self.assertEqual(len(core.parse_ch_json(many)), core.MAX_CH_ROWS)
+
+    def test_adversarial_hostile_values_clamp(self):
+        rows = [{"iters": True, "tokens": -5, "t2": "NaN", "t3": {"deep": 1}}]
+        self.assertEqual(core._row_int(rows, "iters"), 0)
+        self.assertEqual(core._row_int(rows, "tokens"), 0)
+        self.assertEqual(core._row_int(rows, "t2"), 0)
+        self.assertEqual(core._row_int(rows, "t3"), 0)
+        self.assertEqual(core._row_int([], "any"), 0)
+
+
+class CompareWitnessTables(unittest.TestCase):
+    def cost(self, gen):
+        return core.RunCost(gen_tokens=gen, critic_tokens=0, local_tokens=0, wall_s=1.0)
+
+    def test_positive_within_tolerance_ok(self):
+        w = core.TraceWitness(iters=30, tokens=80_000, tool_calls=50)
+        self.assertEqual(core.compare_witness(self.cost(75_000), w), "ok")
+
+    def test_positive_mismatch_names_both_numbers(self):
+        w = core.TraceWitness(iters=30, tokens=200_000, tool_calls=50)
+        out = core.compare_witness(self.cost(75_000), w)
+        self.assertIn("mismatch", out)
+        self.assertIn("200k", out)
+        self.assertIn("75k", out)
+
+    def test_corner_empty_channel_is_no_data_not_mismatch(self):
+        w = core.TraceWitness(iters=0, tokens=0, tool_calls=0)
+        self.assertEqual(core.compare_witness(self.cost(75_000), w), "no-data")
+
+    def test_corner_no_cost_side_still_ok(self):
+        w = core.TraceWitness(iters=3, tokens=1_000, tool_calls=2)
+        self.assertIn("ok", core.compare_witness(None, w))
+
+    def test_boundary_absolute_slack_floor(self):
+        # Tiny runs never flag: below the absolute slack no relative rule fires.
+        w = core.TraceWitness(iters=2, tokens=4_000, tool_calls=1)
+        self.assertEqual(core.compare_witness(self.cost(100), w), "ok")
+
+
+class TelemetrySectionTables(unittest.TestCase):
+    def env(self, ch):
+        import dataclasses as dc
+        return dc.replace(ArmConfigTables.ENV, clickhouse_http=ch)
+
+    def test_positive_every_arm_gets_identical_telemetry(self):
+        # Fairness by construction: the base template carries the section.
+        for arm in core.ARM_NAMES:
+            with self.subTest(arm):
+                t = core.arm_agent_toml(
+                    arm, "/cog", "/work", "/scratch", ArmConfigTables.TIER,
+                    self.env("http://127.0.0.1:8123"),
+                )
+                self.assertIn("[telemetry]", t)
+                self.assertIn('clickhouse_url = "localhost:9000"', t)
+                self.assertIn("stream_logs = false", t)
+
+    def test_negative_absent_without_the_env(self):
+        for arm in core.ARM_NAMES:
+            self.assertNotIn(
+                "[telemetry]",
+                core.arm_agent_toml(
+                    arm, "/cog", "/work", "/scratch", ArmConfigTables.TIER,
+                    self.env(None),
+                ),
+            )
