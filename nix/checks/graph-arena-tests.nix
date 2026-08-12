@@ -30,6 +30,8 @@ pkgs.runCommand "graph-arena-tests"
     cd arena
     echo "graph-arena-tests: core tables ..."
     python3 -m unittest test_arena_core -v
+    echo "graph-arena-tests: campaign tables ..."
+    python3 -m unittest test_campaign -v
     echo "graph-arena-tests: check-the-checks fixture matrix ..."
     python3 -m unittest test_fixtures -v
     touch "$out"

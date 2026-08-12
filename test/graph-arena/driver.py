@@ -449,7 +449,9 @@ def score_workdir(
 # ---------------------------------------------------------------------------
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    # `argv` lets the campaign orchestrator (campaign.py) drive rungs
+    # in-process; None = sys.argv, the CLI behavior, unchanged.
     ap = argparse.ArgumentParser(description="graph-arena A/B/n sweep (increment 1)")
     ap.add_argument("--objective", default="lockbox")
     ap.add_argument("--tier", default="S", choices=list(core.TIER_NAMES))
@@ -466,7 +468,7 @@ def main() -> int:
         help="on resume, re-run recorded DNF casualties (endpoint flakes); "
         "finished runs and treatment-failed findings still skip",
     )
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     if args.arms.strip() == "all":
         arms = list(core.ARM_NAMES)
