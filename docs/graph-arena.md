@@ -11,6 +11,8 @@ and costs are attributed per upstream. Design of record:
 ```sh
 nix run .#graph-arena -- --objective lockbox --tier S --reps 2   # all five arms
 nix run .#graph-arena -- --arms baseline,simple --reps 1         # cheap slice
+nix run .#graph-arena -- --reps 5 --retry-dnf                    # resume: re-run DNF
+                                                                 # casualties only
 ```
 
 ## Env
@@ -21,7 +23,7 @@ nix run .#graph-arena -- --arms baseline,simple --reps 1         # cheap slice
 | `AGENT_E2E_JUDGE_*` | judge + in-graph critic (GLM); key by file reference |
 | `ARENA_LOCAL_BASE_URL/_MODEL[/­_API_KEY_FILE]` | the economical arm's REAL cheap endpoint (l2 ollama) |
 | `ARENA_ALLOW_SIMULATED_LOCAL=1` | explicit escape hatch: `local` = the judge pod, loudly labeled |
-| `ARENA_OUTPUT_DIR` | artifacts (default mktemp); rerunning into it **resumes** — recorded (arm, rep) runs incl. DNFs are skipped; delete the dir to redo |
+| `ARENA_OUTPUT_DIR` | artifacts (default mktemp); rerunning into it **resumes** — recorded (arm, rep) runs incl. DNFs are skipped (`--retry-dnf` re-runs the DNF casualties; last record per (arm, rep) wins, append-only); delete the dir to redo everything |
 | `AGENT_BIN` | agent binary override |
 
 ## Objectives and tiers
@@ -56,10 +58,24 @@ timeout, and iterations. L-tier objectives chain sequential goals via
   `tokens[<model>]` (main loop) and `up[<upstream>]`
   (`agent_upstream_tokens_total` — critic/distiller cost, per config-selected
   name; composite providers like `consensus` re-record inner usage under their
-  own label, so read specific labels, never sum across all of them), plus the
+  own label, so read specific labels, never sum across all of them — enforced
+  in code by `COMPOSITE_TOKEN_LABELS` in `arena_core.py`), plus the
   digest-ledger cross-check.
+- **Cost** (increment 6): the summary table carries `WALL_S (min-max)` and
+  `GEN_KTOK (min-max)` per arm (headline runs only). Cost is derived per run
+  (`RunCost`): generator tokens = `agent_tokens_total` minus the composite
+  labels; critic/local tokens = the two harness-authored upstream names. A run
+  without token evidence shows `-` — unknown never renders as zero. The
+  summary line totals the sweep (`wall_sum=…s gen_tok_sum=…k` — the number
+  that converts to rented pod-hours).
 - **Paired signs** (multi-rep): per-rep deltas vs the same rep's baseline with
   a `>= baseline in k/n` count — the honest small-R claim; no stddev theater.
+  The cost mirror uses `<= baseline in k/n` (lower is better) for wall seconds
+  and generator k-tokens; a rep pairs only when both sides carry cost data.
+- **Per-kind k/n**: met counts broken out by requirement kind
+  (completeness/safety/perf/memory) — each kind probes a claimed mechanism
+  (memory → digests/compaction, completeness → the gate), so deltas get
+  attributed to the mechanism or not claimed at all.
 
 Exit contract: `0` = sweep completed (measurement mode), `1` = harness failure
 (unreachable endpoint, missing rubric, config-fairness violation, judge that

@@ -460,6 +460,12 @@ def main() -> int:
     )
     ap.add_argument("--reps", type=int, default=2)
     ap.add_argument("--out", default=os.environ.get("ARENA_OUTPUT_DIR", ""))
+    ap.add_argument(
+        "--retry-dnf",
+        action="store_true",
+        help="on resume, re-run recorded DNF casualties (endpoint flakes); "
+        "finished runs and treatment-failed findings still skip",
+    )
     args = ap.parse_args()
 
     if args.arms.strip() == "all":
@@ -507,38 +513,38 @@ def main() -> int:
     out = Path(args.out) if args.out else Path(tempfile.mkdtemp(prefix="graph-arena-"))
     out.mkdir(parents=True, exist_ok=True)
     results_path = out / "results.jsonl"
-    # Resume-on-rerun: recorded (arm, rep) runs — including DNFs, which are
-    # findings — are skipped and their rows rehydrated into the final table.
+    # Resume-on-rerun (increment 6 shape): last record per (arm, rep) wins, so
+    # a retried casualty's fresh row supersedes its DNF row append-only. With
+    # --retry-dnf, recorded DNFs re-run; finished runs and treatment-failed
+    # FINDINGS always skip.
     done: set[tuple[str, int]] = set()
     prior: list[core.RunScore] = []
     if results_path.is_file():
-        lines = results_path.read_text().splitlines()
-        done = core.already_recorded(lines, manifest.id, tier.name)
-        for line in lines:
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if (
-                isinstance(rec, dict)
-                and rec.get("objective") == manifest.id
-                and rec.get("tier") == tier.name
-            ):
-                s = core.score_from_record(rec)
-                if s is not None:
-                    prior.append(s)
-        if done:
-            log(f"resume: {len(done)} recorded run(s) skipped")
+        records = core.resume_records(
+            results_path.read_text().splitlines(), manifest.id, tier.name
+        )
+        done, prior = core.plan_resume(records, args.retry_dnf)
+        retrying = len(records) - len(done)
+        if done or retrying:
+            log(f"resume: {len(done)} recorded run(s) skipped, {retrying} DNF retry(ies)")
     log(f"objective={manifest.id} tier={tier.name} arms={','.join(arms)} reps={args.reps} out={out}")
 
     n_total = len(tier.requirements)
     panel = 3 if tier.name in ("M", "L") else 1  # judged-requirement majority (R9)
     scores: list[core.RunScore] = list(prior)
+    planned = [
+        (arm, rep)
+        for rep in range(1, args.reps + 1)
+        for arm in arms
+        if (arm, rep) not in done
+    ]
+    run_no = 0
     # Interleave: rep 1 all arms, then rep 2 … (R10 — drift lands evenly).
     for rep in range(1, args.reps + 1):
         for arm in arms:
             if (arm, rep) in done:
                 continue
+            run_no += 1
             run_dir = out / arm / f"rep{rep}"
             workdir = run_dir / "work"
             scratch = run_dir / "scratch"
@@ -569,7 +575,7 @@ def main() -> int:
                 refuse(f"arm `{arm}` config fairness: {violation}")
             config_path = run_dir / "agent.toml"
             config_path.write_text(config_text)
-            log(f"run arm={arm} rep={rep} ({len(tier.goals)} goal(s)) …")
+            log(f"run {run_no}/{len(planned)} arm={arm} rep={rep} ({len(tier.goals)} goal(s)) …")
             t0 = time.monotonic()
             goal_samples: list[core.Samples] = []
             goals_done = 0
@@ -622,6 +628,7 @@ def main() -> int:
                     ledger=ledger,
                 )
             scores.append(score)
+            cost = core.run_cost(score)
             with results_path.open("a") as f:
                 f.write(
                     json.dumps(
@@ -640,6 +647,9 @@ def main() -> int:
                                 "evidence": validity.evidence,
                             },
                             "ledger": ledger,
+                            # Derived (jq/STATUS convenience; the evidence dicts
+                            # stay the source of truth for rehydration).
+                            "cost": dataclasses.asdict(cost) if cost else None,
                         }
                     )
                     + "\n"
@@ -647,7 +657,14 @@ def main() -> int:
             note = f"DNF {dnf}" if dnf else f"{score.k}/{n_total} met"
             if not validity.valid:
                 note += f" [INVALID: {validity.reason}]"
-            log(f"  arm={arm} rep={rep}: {note} ({wall:.0f}s)")
+            spend = f"{wall:.0f}s"
+            if cost is not None:
+                spend += (
+                    f", gen {core.ktok(cost.gen_tokens)}k"
+                    f", {core.UPSTREAM_CRITIC} {core.ktok(cost.critic_tokens)}k"
+                    f", {core.UPSTREAM_LOCAL} {core.ktok(cost.local_tokens)}k"
+                )
+            log(f"  arm={arm} rep={rep}: {note} ({spend})")
 
     table = core.format_table(scores, n_total, 0)
     print(table)
@@ -658,10 +675,24 @@ def main() -> int:
     if signs:
         print("\npaired vs baseline (headline runs, rep-index pairing):")
         print(signs)
+    cost_signs = core.paired_cost_signs(scores)
+    if cost_signs:
+        print("\npaired cost vs baseline (headline runs, rep-index pairing; lower is better):")
+        print(cost_signs)
+    kinds = {rid: manifest.requirements[rid].kind for rid in tier.requirements}
+    breakout = core.format_kind_breakout(scores, kinds)
+    if breakout:
+        print("\nper-kind k/n (headline runs, mean (min-max)):")
+        print(breakout)
     headline = sum(1 for s in scores if s.headline)
+    wall_sum = int(round(sum(s.wall_s for s in scores)))
+    gen_tok_sum = sum(
+        c.gen_tokens for c in (core.run_cost(s) for s in scores) if c is not None
+    )
     print(
         f"\n=== graph-arena summary ===  objective={manifest.id} tier={tier.name} "
-        f"arms={len(arms)} reps={args.reps} headline_runs={headline}/{len(scores)}  artifacts={out}"
+        f"arms={len(arms)} reps={args.reps} headline_runs={headline}/{len(scores)} "
+        f"wall_sum={wall_sum}s gen_tok_sum={core.ktok(gen_tok_sum)}k  artifacts={out}"
     )
     print("PASS: graph-arena — sweep completed (measurement mode; see the table).")
     return 0
