@@ -226,6 +226,14 @@ class Tier:
     timeout_s: int
     max_iterations: int
     requirements: tuple[str, ...]
+    # Does this objective's tier actually PRESSURE the context window enough to
+    # force compaction? True (default) for M/L keeps the validity gate's
+    # compaction requirement — but a small objective (csv-slice: a few short
+    # files) never fills 12288 even with a compaction node, so requiring
+    # compactions>0 would wrongly exclude a run that scored full marks. Such an
+    # objective declares `forces_compaction = false`; the compaction claim is
+    # then made by the objectives that DO force it (logtriage M, relay L).
+    forces_compaction: bool = True
 
 
 @dataclass(frozen=True)
@@ -339,9 +347,19 @@ def load_manifest(text: str) -> Manifest:
         where = f"tier {name}"
         if not isinstance(t, dict):
             _fail(f"{where}: must be a table")
-        unknown = set(t) - {"goals", "context_window", "timeout_s", "max_iterations", "requirements"}
+        unknown = set(t) - {
+            "goals",
+            "context_window",
+            "timeout_s",
+            "max_iterations",
+            "requirements",
+            "forces_compaction",
+        }
         if unknown:
             _fail(f"{where}: unknown keys {sorted(unknown)}")
+        forces_compaction = t.get("forces_compaction", True)
+        if not isinstance(forces_compaction, bool):
+            _fail(f"{where}: forces_compaction must be a boolean")
         goals = t.get("goals")
         if not isinstance(goals, list) or not goals or not all(isinstance(g, str) and g.strip() for g in goals):
             _fail(f"{where}: goals must be a non-empty list of non-empty strings")
@@ -387,6 +405,7 @@ def load_manifest(text: str) -> Manifest:
             timeout_s=timeout_s,
             max_iterations=max_iterations,
             requirements=tuple(req_ids),
+            forces_compaction=forces_compaction,
         )
     # Tier comparability: S ⊆ M ⊆ L by requirement id.
     order = [tiers[n] for n in TIER_NAMES if n in tiers]
@@ -836,10 +855,18 @@ class Validity:
     evidence: dict = field(default_factory=dict)
 
 
-def classify_validity(arm: str, tier_name: str, samples: Samples | None) -> Validity:
+def classify_validity(
+    arm: str,
+    tier_name: str,
+    samples: Samples | None,
+    forces_compaction: bool = True,
+) -> Validity:
     """A graph-arm run must PROVE its treatment ran, or its score is baseline
     in a costume and must not enter the headline delta. Baseline needs no
-    proof. `samples = None` = no metrics were pushed (crash, push failure)."""
+    proof. `samples = None` = no metrics were pushed (crash, push failure).
+    `forces_compaction=False` (a small objective) drops the M/L compaction
+    requirement — the window was never pressured, so its absence is honest,
+    not treatment failure."""
     if arm not in ARM_NAMES:
         _fail(f"unknown arm `{arm}`")
     if arm == "baseline":
@@ -892,7 +919,12 @@ def classify_validity(arm: str, tier_name: str, samples: Samples | None) -> Vali
         return Validity(False, why, evidence)
     if arm == "advanced" and (branches <= 0 or merges <= 0):
         return Validity(False, "fork never ran (zero branches/merges)", evidence)
-    if tier_name in ("M", "L") and arm != "simple" and compactions <= 0:
+    if (
+        forces_compaction
+        and tier_name in ("M", "L")
+        and arm != "simple"
+        and compactions <= 0
+    ):
         return Validity(False, "no compaction under a forcing tier", evidence)
     return Validity(True, "ok", evidence)
 

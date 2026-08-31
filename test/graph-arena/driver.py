@@ -663,7 +663,9 @@ def main(argv: list[str] | None = None) -> int:
             wall = time.monotonic() - t0
             sink.stop()
             samples = core.merge_samples(goal_samples) if goal_samples else None
-            validity = core.classify_validity(arm, tier.name, samples)
+            validity = core.classify_validity(
+                arm, tier.name, samples, forces_compaction=tier.forces_compaction
+            )
             ledger = read_ledger_counts(scratch / "digests.sqlite3")
             if dnf:
                 score = core.RunScore(
