@@ -154,9 +154,138 @@ nix run .#graph-arena-campaign        # runs the whole ladder, sequentially
 | 2b | contamination hardening: logtriage quirk-pack + `csv-slice` (C) |
 | 2c | telemetry witness (`ARENA_CLICKHOUSE`) |
 | 2d | `nix run .#graph-arena-campaign` (exec shim + python orchestrator, tested) |
-| 3 | **Results of record** section appended here, with the claim-discipline reading |
+| 2e | per-objective `forces_compaction` — a small M objective (csv-slice) that never pressures its window is no longer wrongly excluded for `compactions==0`; logtriage/relay keep the requirement (harness fix the campaign surfaced) |
+| 3 | **Results of record** section (above), with the claim-discipline reading |
+
+**Recorded follow-ups from the run of record:**
+
+- The report aggregates **stored** `validity.valid`, so a later classifier change
+  (like 2e's `forces_compaction`) does not retroactively reclassify already-recorded
+  runs — the csv-slice numbers above were re-derived from the stored evidence dicts by
+  hand. A `--reclassify` report mode that re-derives validity from evidence against the
+  current manifests would make historical corrections reproducible.
+- Long runs must be launched from a **durable gcroot**; `nix run` alone lets GC collect
+  the lazily-read `-graph-arena` seed source mid-ladder. Either document the gcroot
+  step in *How to repeat*, or have the campaign plant its own root at startup.
+- **advanced** is timeout-bound at every tier; a dedicated run with its timeouts raised
+  would measure its quality when allowed to finish.
 
 ## Results of record
 
-*(appended by PR 3 after the campaign runs — see the status doc's run ledger until
-then.)*
+**Run of record:** `2026-08-31`, `nix run .#graph-arena-campaign`, Kimi-K3 generator +
+GLM judge + l2 qwen3 local critic, ClickHouse trace witness on. Ladder completed
+`rungs=4/4` (`CAMPAIGN-RC=0`). Totals: **≈ 16.4 pod-hours**, **≈ 22.5 M generated
+tokens**. Artifacts: `~/graph-arena-campaigns/2026-08-12/<objective>/results.jsonl` +
+per-run dirs. Operational note: the seeds are read lazily per rung, so the multi-hour
+run must be launched from a **durable gcroot** (`nix run` alone lets GC collect the
+`-graph-arena` source mid-run — see the status doc). csv-slice validity below is
+**re-derived** from the stored evidence through the `forces_compaction=false` rule
+(the report trusts *stored* validity, so the classifier fix does not retroactively
+reclassify old records — a recorded follow-up).
+
+Aggregates are valid runs only, **mean (min–max)**; paired blocks are rep-matched vs
+baseline; DNF ≠ invalid ≠ zero.
+
+### lockbox S (/7) — ceiling, no signal
+| arm | valid | scores | mean | wall | gen |
+|---|---|---|---|---|---|
+| baseline | 5 | 7,7,7,7,7 | 7.0 | 93 s | 64 k |
+| simple | 3 | 7,7,7 | 7.0 | 206 s | 70 k |
+| intermediate | 5 | 7,7,7,7,7 | 7.0 | 417 s | 70 k |
+| economical | 5 | 7,7,7,7,7 | 7.0 | 93 s | 78 k |
+| advanced | 1 | 7 | 7.0 | 1787 s | 189 k |
+
+Every arm at ceiling; **every paired delta is +0**. No quality claim is possible — S
+is too easy for this generator (the memorization ceiling the contamination section
+predicted). What the tier *does* show is **cost**: intermediate spends ~4.5× baseline
+wall for the same 7/7, and advanced 19× (into DNF, below). economical matches baseline
+wall (93 s) — the non-reasoning local critic is nearly free. DNF/invalid: advanced
+4 DNF (timeout, below); simple 2 invalid (`critic_error` gate fail-open).
+
+### logtriage M (/13, familiar-task control) — near-ceiling, claim nothing
+| arm | valid | scores | mean | wall | gen |
+|---|---|---|---|---|---|
+| baseline | 5 | 13,12,12,12,12 | 12.2 | 180 s | 136 k |
+| simple | 1 | 12 | 12.0 | 541 s | 187 k |
+| intermediate | 4 | 13,13,12,12 | 12.5 | 714 s | 112 k |
+| economical | 5 | 13,13,12,12,12 | 12.4 | 120 s | 89 k |
+
+Paired quality vs baseline: intermediate `>= 3/4` (2 strict wins), economical
+`>= 4/5` (2 strict wins). Two strict wins out of four–five reps sits at the **"report
+the numbers, claim nothing"** rung — the baseline is already near-ceiling on a
+memorized task even with the quirk-pack, so there is little headroom to win. The one
+real signal is efficiency: **economical matches-or-beats baseline quality at *lower*
+wall** (120 s vs 180 s) and fewer tokens. DNF/invalid: 6 DNF (endpoint casualties);
+advanced 3 invalid `no compaction under a forcing tier` — **correctly** excluded
+(logtriage *does* force compaction, so an advanced run that never compacted is not a
+valid treatment; the `forces_compaction` fix keeps this exclusion while dropping it
+for csv-slice).
+
+### csv-slice M (/11, fresh-language C control) — the headline
+| arm | valid | scores | mean | wall | gen |
+|---|---|---|---|---|---|
+| **baseline** | 5 | **0,0,0,0,0** | **0.0** | 180 s | 27 k |
+| simple | 4 | 10,0,0,0 | 2.5 | 373 s | 71 k |
+| **intermediate** | 5 | **11,10,10,0,0** | **6.2** | 628 s | 156 k |
+| economical | 5 | 11,0,0,0,0 | 2.2 | 153 s | 41 k |
+| advanced | 5 | 0,0,0,0,0 | 0.0 | 633 s | 32 k |
+
+Paired quality vs baseline: intermediate `+0, +10, +11, +10, +0` (**3 strict wins**,
+2 ties, 0 losses); economical and simple each **1** strict win of `+10/+11`; advanced
+all ties at 0.
+
+This is the result the ladder was built to isolate. **The base agent categorically
+cannot do the unfamiliar C task — 0/11 in all five reps.** The intermediate graph
+*can*: it solves 3 of 5 reps at 10–11/11. Because csv-slice is the fresh-language
+control (every graded detail is an arbitrary, un-inferable dialect quirk), this delta
+**cannot be training contamination** — it is a genuine capability lift from holding
+the spec in context. Honest bounds: the lift is **large where it lands (+10/+11) but
+only partially reliable** (intermediate 3/5; economical/simple 1/5) — the claim is
+"baseline cannot, the graph sometimes can," not "the graph solves it." advanced never
+solves it (overhead → no completion, below).
+
+### relay L (/13, R=3) — directional graph benefit, mechanism-attributed
+| arm | valid | scores | mean | wall | gen |
+|---|---|---|---|---|---|
+| baseline | 3 | 12,0,0 | 4.0 | 322 s | 281 k |
+| simple | 2 | 12,12 | 12.0 | 1454 s | 1650 k |
+| intermediate | 2 | 13,13 | 13.0 | 1498 s | 617 k |
+| economical | 3 | 13,12,12 | 12.3 | 760 s | 682 k |
+
+Paired quality vs baseline: economical `+13, +0, +12` (`>= 3/3`), intermediate
+`+13, +1` (`>= 2/2`), simple `+12, +0` (`>= 2/2`). Per the claim ladder, R=3 is
+**directional only** — but the direction is stark: **baseline is unreliable on the
+complex task (mean 4.0/13, solves only 1 of 3 reps), while the graph arms are reliable
+(12–13/13).** The per-kind breakout attributes it: baseline `completeness 2.7/9`,
+**`memory 1/3`**; the graph arms `completeness 8–9/9`, **`memory 3/3`**. The
+memory-kind jump is exactly the digest/compaction mechanism the graph claims. DNF:
+advanced 3/3 (timeout, below).
+
+### The advanced arm — timeout-bound at every tier
+advanced DNF'd or was excluded on **all four** objectives: lockbox S 4/5 DNF at the
+1800 s wall, logtriage M and relay L at 2400 s, csv-slice all-zero. It is not hung —
+run dirs show compiled binaries and live edits at kill time — it is **too slow to
+finish**: parallel Kimi×GLM branches + a consensus critic + a distiller on *every*
+iteration make each step so expensive the wall expires before completion, so no
+metrics are pushed (INVALID). This is a real, honestly-negative result: **more graph
+machinery carries a wall-clock cost that can make it impractical at time-boxed
+budgets.** A follow-up run with advanced's timeouts raised would measure its quality
+when allowed to finish.
+
+### Reading (claim discipline)
+- **csv-slice (fresh language):** a genuine capability lift — baseline 0/11 across
+  5/5 reps, the intermediate graph solves 3/5 at 10–11/11. Large effect, partial
+  reliability. **Not contamination** (it is the memorization control).
+- **relay L (complex):** **directional** (R=3) but stark — baseline mean 4.0/13 and
+  unreliable; graph arms 12–13/13; the win localizes to the **memory kind** (1/3 →
+  3/3), matching the claimed mechanism.
+- **logtriage M (familiar) / lockbox S (easy):** ceiling / near-ceiling, **no quality
+  claim** — precisely where memorized competence leaves no headroom.
+- **Cost, everywhere:** the graph arms trade wall-clock and tokens for those wins;
+  **economical** is the efficiency sweet spot (competitive-or-better quality at
+  baseline-or-lower wall via the local critic), **intermediate** is the quality
+  leader, **advanced** overspends into DNF.
+- **Synthesis:** value is **complexity- and familiarity-dependent** — it concentrates
+  on unfamiliar (csv-slice) and complex (relay L) work and disappears on easy or
+  memorized tasks. The ladder + the fresh-language control let that dependence *show*
+  rather than average away (why 06 forbids compositing across objectives).

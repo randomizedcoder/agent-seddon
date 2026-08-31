@@ -12,10 +12,11 @@ design and this doc for where reality is.
 | 1 | economical critic → `local` (treatment fix) | ✅ merged (#251) |
 | 2 | increment 6: cost/time statistics + `--retry-dnf` | ✅ merged (#252) |
 | 2b | contamination hardening: logtriage quirk-pack + `csv-slice` (C) | ✅ merged (#253) |
-| 2c | telemetry witness (`ARENA_CLICKHOUSE`) | 🟨 in review |
+| 2c | telemetry witness (`ARENA_CLICKHOUSE`) | ✅ merged (#254) |
 | 2d | `nix run .#graph-arena-campaign` | ✅ merged (#255) |
-| — | campaign night(s) | ⬜ planned |
-| 3 | Results of record + STATUS headline | ⬜ planned |
+| 2e | per-objective `forces_compaction` (harness fix) | 🟨 this PR |
+| — | campaign night(s) | ✅ done (2026-08-31, ladder 4/4, RC=0) |
+| 3 | Results of record + STATUS headline | 🟨 this PR |
 
 ## Implementation log (as-built findings and deviations)
 
