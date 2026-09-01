@@ -13,6 +13,9 @@ nix run .#graph-arena -- --objective lockbox --tier S --reps 2   # all five arms
 nix run .#graph-arena -- --arms baseline,simple --reps 1         # cheap slice
 nix run .#graph-arena -- --reps 5 --retry-dnf                    # resume: re-run DNF
                                                                  # casualties only
+nix run .#graph-arena -- --reclassify --objective csv-slice \
+  --tier M --out ~/campaign/csv-slice                            # re-score recorded
+                                                                 # runs, no re-run
 
 # The FULL statistical ladder (campaign spec 07-arena-campaign.md): lockbox S,
 # logtriage M, csv-slice M (all arms R=5), relay L (R=3) — ~12-13 pod-hours,
@@ -91,6 +94,21 @@ timeout, and iterations. L-tier objectives chain sequential goals via
   INDEPENDENT channel witnessing the pushed metrics. The tokens cross-check
   tolerates 25%/5k (the channels count at different layers); it annotates,
   never validity-excludes (telemetry is deliberately lossy-batched).
+
+## Reclassify (re-score without re-running)
+
+Validity is **stored** per run (the classification plus the evidence scalars it
+was derived from). When the classifier itself changes — e.g. an objective flips
+`forces_compaction` — already-recorded runs keep their old verdict until
+re-derived. `--reclassify` does exactly that, **read-only**: it reads
+`results.jsonl` under `--out`, re-derives each run's validity from its stored
+evidence under the *current* manifest/classifier (`classify_from_evidence`, which
+mirrors the live path exactly), and re-prints the whole comparison block. No
+agent runs, no endpoints, no record mutation — so it needs no keys and no pod.
+This is how the campaign's csv-slice numbers were corrected: the same
+`intermediate` records that read invalid under the default forcing rule re-score
+valid once csv-slice declares `forces_compaction = false` (mean `6.2/11`), while
+a genuinely dead-critic run stays invalid.
 
 Exit contract: `0` = sweep completed (measurement mode), `1` = harness failure
 (unreachable endpoint, missing rubric, config-fairness violation, judge that

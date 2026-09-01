@@ -504,6 +504,49 @@ def score_workdir(
 # ---------------------------------------------------------------------------
 
 
+def print_report(
+    scores: list[core.RunScore],
+    manifest: core.Manifest,
+    tier: core.Tier,
+    arms: list[str],
+    reps: int,
+    out: Path,
+) -> None:
+    """The comparison block: table + evidence + paired signs + cost signs +
+    per-kind breakout + summary line. Shared by the live sweep and `--reclassify`
+    so both render identically — the only difference is where `scores` came
+    from (fresh runs vs re-derived from stored records)."""
+    n_total = len(tier.requirements)
+    print(core.format_table(scores, n_total, 0))
+    evidence = core.format_evidence(scores)
+    if evidence.count("\n"):
+        print("\n" + evidence)
+    signs = core.paired_signs(scores)
+    if signs:
+        print("\npaired vs baseline (headline runs, rep-index pairing):")
+        print(signs)
+    cost_signs = core.paired_cost_signs(scores)
+    if cost_signs:
+        print("\npaired cost vs baseline (headline runs, rep-index pairing; lower is better):")
+        print(cost_signs)
+    kinds = {rid: manifest.requirements[rid].kind for rid in tier.requirements}
+    breakout = core.format_kind_breakout(scores, kinds)
+    if breakout:
+        print("\nper-kind k/n (headline runs, mean (min-max)):")
+        print(breakout)
+    headline = sum(1 for s in scores if s.headline)
+    wall_sum = int(round(sum(s.wall_s for s in scores)))
+    gen_tok_sum = sum(
+        c.gen_tokens for c in (core.run_cost(s) for s in scores) if c is not None
+    )
+    print(
+        f"\n=== graph-arena summary ===  objective={manifest.id} tier={tier.name} "
+        f"arms={len(arms)} reps={reps} headline_runs={headline}/{len(scores)} "
+        f"wall_sum={wall_sum}s gen_tok_sum={core.ktok(gen_tok_sum)}k  artifacts={out}"
+    )
+    print("PASS: graph-arena — sweep completed (measurement mode; see the table).")
+
+
 def main(argv: list[str] | None = None) -> int:
     # `argv` lets the campaign orchestrator (campaign.py) drive rungs
     # in-process; None = sys.argv, the CLI behavior, unchanged.
@@ -522,6 +565,13 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="on resume, re-run recorded DNF casualties (endpoint flakes); "
         "finished runs and treatment-failed findings still skip",
+    )
+    ap.add_argument(
+        "--reclassify",
+        action="store_true",
+        help="read-only: re-derive validity for the recorded runs in --out under "
+        "the CURRENT classifier and re-print the table (no agent runs, no endpoints, "
+        "no record mutation) — how a classifier change corrects a finished sweep",
     )
     args = ap.parse_args(argv)
 
@@ -551,6 +601,34 @@ def main(argv: list[str] | None = None) -> int:
         tier = manifest.tier(args.tier)
     except core.ManifestError as e:
         refuse(str(e))
+
+    # --reclassify: read-only re-derivation. No agent, no endpoints, no record
+    # mutation — just re-score the already-recorded runs under the current
+    # classifier (e.g. after a manifest `forces_compaction` flip) and re-print.
+    if args.reclassify:
+        if not args.out:
+            refuse("--reclassify needs --out (or ARENA_OUTPUT_DIR): the recorded sweep to re-score")
+        results_path = Path(args.out) / "results.jsonl"
+        if not results_path.is_file():
+            refuse(f"--reclassify: no recorded sweep at {results_path}")
+        records = core.resume_records(
+            results_path.read_text().splitlines(), manifest.id, tier.name
+        )
+        if not records:
+            refuse(
+                f"--reclassify: {results_path} holds no runs for "
+                f"objective={manifest.id} tier={tier.name}"
+            )
+        _, prior = core.plan_resume(records, retry_dnf=False)
+        rescored = core.reclassify_scores(prior, tier.name, tier.forces_compaction)
+        present = sorted({s.arm for s in rescored}, key=core.ARM_NAMES.index)
+        log(
+            f"reclassify: {len(rescored)} recorded run(s) re-scored under the current "
+            f"classifier (forces_compaction={tier.forces_compaction})"
+        )
+        reps = max((s.rep for s in rescored), default=0)
+        print_report(rescored, manifest, tier, present, reps, Path(args.out))
+        return 0
 
     agent_bin = os.environ.get("AGENT_BIN") or preflight_binary("agent")
     preflight_binary("git")
@@ -737,35 +815,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             log(f"  arm={arm} rep={rep}: {note} ({spend})")
 
-    table = core.format_table(scores, n_total, 0)
-    print(table)
-    evidence = core.format_evidence(scores)
-    if evidence.count("\n"):
-        print("\n" + evidence)
-    signs = core.paired_signs(scores)
-    if signs:
-        print("\npaired vs baseline (headline runs, rep-index pairing):")
-        print(signs)
-    cost_signs = core.paired_cost_signs(scores)
-    if cost_signs:
-        print("\npaired cost vs baseline (headline runs, rep-index pairing; lower is better):")
-        print(cost_signs)
-    kinds = {rid: manifest.requirements[rid].kind for rid in tier.requirements}
-    breakout = core.format_kind_breakout(scores, kinds)
-    if breakout:
-        print("\nper-kind k/n (headline runs, mean (min-max)):")
-        print(breakout)
-    headline = sum(1 for s in scores if s.headline)
-    wall_sum = int(round(sum(s.wall_s for s in scores)))
-    gen_tok_sum = sum(
-        c.gen_tokens for c in (core.run_cost(s) for s in scores) if c is not None
-    )
-    print(
-        f"\n=== graph-arena summary ===  objective={manifest.id} tier={tier.name} "
-        f"arms={len(arms)} reps={args.reps} headline_runs={headline}/{len(scores)} "
-        f"wall_sum={wall_sum}s gen_tok_sum={core.ktok(gen_tok_sum)}k  artifacts={out}"
-    )
-    print("PASS: graph-arena — sweep completed (measurement mode; see the table).")
+    print_report(scores, manifest, tier, arms, args.reps, out)
     return 0
 
 
