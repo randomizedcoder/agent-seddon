@@ -28,10 +28,11 @@ provider = "consensus"
 generator = "kimi"      # resolve like route upstreams: a [[route.upstreams]] name
 critic    = "glm"       # (inline endpoint, key via api_key_file/env) or a registry type
 max_rounds = 2          # ceiling 5
+                        # (critic_max_tokens ceiling is 65536 — see below)
 scope = "final"         # "final" | "every-iteration" — final: tool-call iterations
                         # pass through (the verifier seam already gates those)
 on_exhaustion = "deliver-with-note"   # | "fail"
-critic_max_tokens = 512 # ceiling 8192 — see the reasoning-model note below
+critic_max_tokens = 512 # ceiling 65536 — see the reasoning-model note below
 max_alternatives = 3    # ceiling 4
 rubric_file = ""        # operator rubric; empty = compiled default
 evidence = "auto"       # "auto" | "off" — see "Evidence-based critique" below
@@ -58,16 +59,22 @@ names what runs; evidence, like token budgets, stays config).
 - **Reasoning-model critics need output headroom.** GLM/Kimi-style critics spend
   `max_tokens` on `reasoning_content` *before* the verdict text; too small a
   budget truncates to empty content and the round fails open
-  (`outcome="critic_error"`). Live-observed: a trade-off judgment burned >2k
-  reasoning tokens, and a diff-bearing evidence prompt saturated a 4096 budget
-  outright. Size `critic_max_tokens` generously (2048–4096; ceiling 8192) for
-  reasoning critics. As a backstop, an **empty** critic reply triggers exactly
-  one retry at 4× the budget (clamped to the ceiling) before failing open, and
-  every fail-open is logged (`WARN`) — a broken critic is never silent. If a
-  reasoning critic still saturates the ceiling (live-observed on diff-bearing
-  evidence prompts), route the critic to a **non-reasoning model** instead —
-  the `economical` cognition document does exactly this (`critic: "local"`,
-  qwen3-30B-A3B via llama.cpp): the whole budget goes to the verdict.
+  (`outcome="critic_error"`). This is a limit on the critic's **output** tokens,
+  not its context — [GLM-5.2](../llm-endpoints.md) serves a 1M-token window, so
+  only the completion budget starves the verdict. Live-observed: a trade-off
+  judgment burned >2k reasoning tokens, and the graph-arena campaign (2026-08-31)
+  found a diff-bearing evidence prompt still saturated the previous **8192**
+  ceiling and fail-opened. So the ceiling is now **65536** — size
+  `critic_max_tokens` generously for reasoning critics (the arena uses 24576; the
+  operator's own GLM smoke uses 20000). As a backstop, an **empty** critic reply
+  triggers exactly one retry at 4× the budget (clamped to the ceiling) before
+  failing open, and every fail-open is logged (`WARN`) — a broken critic is never
+  silent. Two escape hatches if a critic still saturates even 65536: route the
+  critic to a **non-reasoning model** (the `economical` document does this —
+  `critic: "local"`, qwen3-30B-A3B via llama.cpp), or **disable thinking** for the
+  critic call — GLM's SGLang honors `chat_template_kwargs.enable_thinking=false`
+  (see [reasoning controls](../parity/47-reasoning-controls.md)); either way the
+  whole budget goes to the verdict.
 - **Streaming bypasses the gate** (buffering a stream to critique it defeats
   streaming) — run `stream = false` when gating matters.
 - Same-id generator/critic is allowed but warned: self-critique loses the

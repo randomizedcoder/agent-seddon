@@ -546,7 +546,12 @@ fn default_gate_rounds() -> u8 {
     2
 }
 fn default_gate_critic_tokens() -> u32 {
-    512
+    // Output-token budget for the critic's completion (not context). A reasoning
+    // critic (GLM/Kimi) spends this on reasoning_content before the verdict, so a
+    // small cap fail-opens the gate; 4096 gives the first attempt real headroom and
+    // the empty-reply retry escalates toward MAX_CRITIC_TOKENS_CEILING. A
+    // non-reasoning critic simply never uses the slack.
+    4096
 }
 fn default_gate_alternatives() -> u8 {
     3
@@ -2684,7 +2689,7 @@ mod tests {
         let cfg: ConsensusCfg = toml::from_str("").unwrap();
         assert!(cfg.generator.is_empty() && cfg.critic.is_empty());
         assert_eq!(cfg.max_rounds, 2);
-        assert_eq!(cfg.critic_max_tokens, 512);
+        assert_eq!(cfg.critic_max_tokens, 4096);
         assert_eq!(cfg.max_alternatives, 3);
         assert!(cfg.scope.is_empty() && cfg.on_exhaustion.is_empty());
     }
