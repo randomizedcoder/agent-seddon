@@ -730,6 +730,72 @@ class ReclassifyTables(unittest.TestCase):
         self.assertTrue(out.headline)
 
 
+class ArmTimeoutTables(unittest.TestCase):
+    """F3: `arm_timeout_s` — the advanced-arm-only subprocess-wall override.
+    Pure and total: only `advanced` is affected, absolute wins over scale, the
+    result clamps to 60..=MAX_RUN_TIMEOUT_S, and every hostile env falls back to
+    the tier default (a poisoned env can never zero or unbound the deadline)."""
+
+    TIER = core.Tier(
+        name="M", goals=("g",), context_window=12288, timeout_s=600,
+        max_iterations=120, requirements=("build",),
+    )
+
+    def t(self, arm, env):
+        return core.arm_timeout_s(arm, self.TIER, env)
+
+    def test_positive_default_is_tier_timeout(self):
+        self.assertEqual(self.t("advanced", {}), 600)
+        for arm in ("baseline", "simple", "intermediate", "economical"):
+            self.assertEqual(self.t(arm, {}), 600)
+
+    def test_positive_scale_multiplies_for_advanced_only(self):
+        env = {"ARENA_TIMEOUT_SCALE_ADVANCED": "2.5"}
+        self.assertEqual(self.t("advanced", env), 1500)
+        # every other arm ignores the advanced knob — comparability preserved
+        for arm in ("baseline", "simple", "intermediate", "economical"):
+            self.assertEqual(self.t(arm, env), 600)
+
+    def test_positive_absolute_overrides_and_wins_over_scale(self):
+        self.assertEqual(self.t("advanced", {"ARENA_ARM_TIMEOUT_ADVANCED": "1800"}), 1800)
+        both = {"ARENA_ARM_TIMEOUT_ADVANCED": "1200", "ARENA_TIMEOUT_SCALE_ADVANCED": "9"}
+        self.assertEqual(self.t("advanced", both), 1200, "absolute takes precedence")
+
+    def test_negative_junk_env_falls_back_to_tier(self):
+        for bad in ("", "  ", "abc", "1e", "None", "0x10"):
+            self.assertEqual(self.t("advanced", {"ARENA_ARM_TIMEOUT_ADVANCED": bad}), 600, bad)
+            self.assertEqual(self.t("advanced", {"ARENA_TIMEOUT_SCALE_ADVANCED": bad}), 600, bad)
+
+    def test_corner_scale_below_one_shrinks_but_clamps_at_60(self):
+        self.assertEqual(self.t("advanced", {"ARENA_TIMEOUT_SCALE_ADVANCED": "0.5"}), 300)
+        # 600 * 0.01 = 6 → clamped up to the 60s floor
+        self.assertEqual(self.t("advanced", {"ARENA_TIMEOUT_SCALE_ADVANCED": "0.01"}), 60)
+
+    def test_boundary_clamps_to_min_and_max(self):
+        self.assertEqual(self.t("advanced", {"ARENA_ARM_TIMEOUT_ADVANCED": "1"}), 60)
+        self.assertEqual(self.t("advanced", {"ARENA_ARM_TIMEOUT_ADVANCED": "60"}), 60)
+        big = str(core.MAX_RUN_TIMEOUT_S * 10)
+        self.assertEqual(self.t("advanced", {"ARENA_ARM_TIMEOUT_ADVANCED": big}),
+                         core.MAX_RUN_TIMEOUT_S)
+        self.assertEqual(
+            self.t("advanced", {"ARENA_ARM_TIMEOUT_ADVANCED": str(core.MAX_RUN_TIMEOUT_S)}),
+            core.MAX_RUN_TIMEOUT_S,
+        )
+
+    def test_adversarial_hostile_env_never_zeroes_or_unbounds(self):
+        hostile = [
+            "nan", "inf", "-inf", "-1", "0", "-9999999", "1e999",
+            "99999999999999999999", "\x00", "600; rm -rf /", "6e2\n",
+        ]
+        for val in hostile:
+            for key in ("ARENA_ARM_TIMEOUT_ADVANCED", "ARENA_TIMEOUT_SCALE_ADVANCED"):
+                with self.subTest(key=key, val=val):
+                    got = self.t("advanced", {key: val})
+                    self.assertTrue(60 <= got <= core.MAX_RUN_TIMEOUT_S, f"{val!r}->{got}")
+        # a non-mapping env must not raise
+        self.assertEqual(core.arm_timeout_s("advanced", self.TIER, None), 600)
+
+
 class FairnessTables(unittest.TestCase):
     ENV = ArmConfigTables.ENV
     TIER = ArmConfigTables.TIER

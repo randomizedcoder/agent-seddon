@@ -710,7 +710,15 @@ def main(argv: list[str] | None = None) -> int:
                 refuse(f"arm `{arm}` config fairness: {violation}")
             config_path = run_dir / "agent.toml"
             config_path.write_text(config_text)
-            log(f"run {run_no}/{len(planned)} arm={arm} rep={rep} ({len(tier.goals)} goal(s)) …")
+            # Per-arm subprocess wall (F3): advanced forks branches and can need
+            # a longer deadline; the knob touches only run_agent's timeout, never
+            # the (fairness-gated) config. Other arms get tier.timeout_s exactly.
+            arm_wall = core.arm_timeout_s(arm, tier, os.environ)
+            wall_note = f" wall={arm_wall}s" if arm_wall != tier.timeout_s else ""
+            log(
+                f"run {run_no}/{len(planned)} arm={arm} rep={rep} "
+                f"({len(tier.goals)} goal(s)){wall_note} …"
+            )
             t0 = time.monotonic()
             goal_samples: list[core.Samples] = []
             goals_done = 0
@@ -722,7 +730,7 @@ def main(argv: list[str] | None = None) -> int:
                 extra = ("--continue",) if gi else ()
                 sink.body = None
                 rc, timed_out = run_agent(
-                    agent_bin, config_path, workdir, goal, tier.timeout_s, extra
+                    agent_bin, config_path, workdir, goal, arm_wall, extra
                 )
                 if sink.body:
                     (run_dir / f"metrics.goal{gi + 1}.prom").write_bytes(sink.body)
