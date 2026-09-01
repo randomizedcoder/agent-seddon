@@ -23,6 +23,7 @@ Everything in `docs/`, grouped by what you are trying to do. Three entry points:
 | Doc | Covers |
 |---|---|
 | [`operating.md`](operating.md) | Config reference, API-key precedence, the REPL and its slash commands, `context.d/`, runtime state, the Nix apps |
+| [`llm-endpoints.md`](llm-endpoints.md) | The dev LLM endpoints — GLM-5.2 (SGLang/MI300X, judge + reasoning critic), Kimi-K3 (generator), qwen3 (local critic/distiller): models, TLS/auth, thinking/tool-call config, and the `AGENT_E2E_*` env that points at them |
 | [`observability.md`](observability.md) | The three signals together — metrics, traces, logs — and how the agent inspects itself |
 | [`metrics.md`](metrics.md) | Prometheus + Grafana runbook, single-process and distributed |
 | [`tracing.md`](tracing.md) | OpenTelemetry + ClickStack runbook, including the two-process distributed trace |

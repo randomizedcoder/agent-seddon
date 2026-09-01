@@ -43,11 +43,17 @@ const MAX_ROUNDS_CEILING: u8 = 5;
 const MAX_ALTERNATIVES_CEILING: u8 = 4;
 // Reasoning-model critics (GLM, Kimi) spend output budget on reasoning_content
 // BEFORE emitting the verdict; too small a cap truncates to empty content and the
-// gate fails open every round. 8192 leaves thinking headroom: live-observed, a
-// trade-off judgment burned >2k reasoning tokens, and a diff-bearing evidence
-// prompt (graph-arena) saturated the previous 4096 ceiling and still returned
-// empty content — the empty-reply retry escalates toward this ceiling.
-const MAX_CRITIC_TOKENS_CEILING: u32 = 8_192;
+// gate fails open every round. This is a limit on the critic's OUTPUT tokens, NOT
+// its context: GLM-5.2 (SGLang on 8x MI300X) serves a 1M-token context, so the
+// only thing that starves the verdict is the completion budget. The graph-arena
+// campaign (2026-08-31) found GLM still saturated the previous 8192 ceiling on
+// diff-bearing evidence prompts and fail-opened — so the ceiling is 65536 to leave
+// real headroom for reasoning AND the verdict (the operator's own GLM smoke uses
+// max_tokens=20000). The empty-reply retry escalates 4x toward this ceiling; keep
+// reasoning ON (its reasoning is the value). If a future model's reasoning is truly
+// unbounded, disable thinking per-call instead (SGLang honors
+// chat_template_kwargs.enable_thinking=false) rather than chasing the ceiling up.
+const MAX_CRITIC_TOKENS_CEILING: u32 = 65_536;
 /// Bounds on untrusted content quoted into prompts/notes.
 const MAX_ISSUES: usize = 8;
 const MAX_ISSUE_CHARS: usize = 400;

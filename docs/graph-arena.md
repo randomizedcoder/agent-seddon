@@ -26,7 +26,7 @@ nix run .#graph-arena-campaign -- --only lockbox,relay           # a rung subset
 | Var | Meaning |
 |---|---|
 | `AGENT_E2E_BASE_URL/_MODEL/_API_KEY` | generator (Kimi) — required |
-| `AGENT_E2E_JUDGE_*` | judge + in-graph critic (GLM); key by file reference |
+| `AGENT_E2E_JUDGE_*` | judge + in-graph critic (GLM); key by file reference — see [llm-endpoints.md](llm-endpoints.md) |
 | `ARENA_LOCAL_BASE_URL/_MODEL[/­_API_KEY_FILE]` | the economical arm's REAL cheap endpoint (l2 ollama) |
 | `ARENA_ALLOW_SIMULATED_LOCAL=1` | explicit escape hatch: `local` = the judge pod, loudly labeled |
 | `ARENA_OUTPUT_DIR` | artifacts (default mktemp); rerunning into it **resumes** — recorded (arm, rep) runs incl. DNFs are skipped (`--retry-dnf` re-runs the DNF casualties; last record per (arm, rep) wins, append-only); delete the dir to redo everything |
@@ -106,9 +106,12 @@ verdicts and an M/L 3-vote majority.
   sends `graph-arena/1`.
 - `test/graph-arena/` is excluded from the crane Rust source filter — objective
   edits never rebuild the cargo tree.
-- A GLM critic can burn its whole token budget on reasoning over diff-bearing
-  gate prompts (empty content → fail-open, run classified invalid). The gate's
-  empty-reply retry now escalates to an 8192 ceiling, and graph arms extend the
-  one-shot distill drain deadline (`[digest] drain_timeout_s = 300`) so a slow
-  distiller no longer costs a run its validity; residual follow-ups are tracked
-  in the cognition-graph STATUS.
+- A GLM critic can burn its whole **output** budget on reasoning over
+  diff-bearing gate prompts (empty content → fail-open, run classified invalid).
+  The critic ceiling is **65536** and the arena sizes the critic at **24576**
+  (attempt 0 has real room; the empty-reply retry escalates 4× to the ceiling) —
+  see [llm-endpoints.md](llm-endpoints.md) and
+  [consensus.md](components/consensus.md). Graph arms also extend the one-shot
+  distill drain deadline (`[digest] drain_timeout_s = 300`) so a slow distiller
+  no longer costs a run its validity; residual follow-ups are tracked in the
+  cognition-graph STATUS.

@@ -594,7 +594,11 @@ store = "file"
 file = "{doc}"
 
 [consensus]
-critic_max_tokens = 2048
+# Output-token budget for the GLM critic's completion (NOT context — GLM serves a
+# 1M window). GLM spends this on reasoning_content before the verdict; the campaign
+# (2026-08-31) found 2048 (escalating to 8192 on retry) still fail-opened, so give
+# it real headroom: 24576 on the first attempt, escalating toward the 65536 ceiling.
+critic_max_tokens = 24576
 
 [digest]
 store = "sqlite"
