@@ -142,3 +142,15 @@ verdicts and an M/L 3-vote majority.
   distill drain deadline (`[digest] drain_timeout_s = 300`) so a slow distiller
   no longer costs a run its validity; residual follow-ups are tracked in the
   cognition-graph STATUS.
+- A model that tries to emit a whole ~10KB source file in one completion can hit
+  the generator's **output-token cap** (`finish_reason = length`) mid tool call —
+  the write is cut off, parses to zero tool calls, and *used to* be scored as a
+  "valid 0" (a completed run that wrote no file). The fix is in the **loop**, not
+  the cap: the agent no longer treats a truncated turn as a final answer — it
+  nudges the model to finish and continues, failing fast (→ an honest DNF, never a
+  silent zero) only if the model truncates repeatedly (see
+  [tool-calling-loop](parity/06-tool-calling-loop.md)). `max_tokens` is
+  deliberately **kept at 8192**: raising it (32768 was tried) makes the write turn
+  overrun the runpod edge proxy's ~100s ceiling and **524** through all retries — a
+  fatal DNF — whereas an 8192 truncation returns in ~40s and the loop recovers.
+  Small cap + recoverable truncation beats big cap + 524.

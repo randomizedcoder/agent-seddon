@@ -395,6 +395,17 @@ class ArmConfigTables(unittest.TestCase):
         self.assertIn("context_window = 32768", t)
         self.assertIn("max_iterations = 75", t)
 
+    def test_positive_generator_output_cap_stays_proxy_safe(self):
+        # max_tokens is kept at 8192, NOT raised: a truncation there is recoverable
+        # (the loop nudges + continues), while a 32768 write turn overruns the
+        # runpod ~100s proxy limit and 524s to a fatal DNF. reserve_output stays
+        # 8192 so M-tier compaction is still forced.
+        for arm in core.ARM_NAMES:
+            with self.subTest(arm):
+                t = self.toml_for(arm)
+                self.assertIn("max_tokens = 8192", t)
+                self.assertIn("reserve_output = 8192", t)
+
     def test_positive_graph_arms_extend_the_distill_drain_deadline(self):
         # The 60s default exit drain dropped a slow GLM distill job and cost an
         # otherwise-winning run its validity (live M-tier finding) — every graph
