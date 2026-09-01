@@ -427,6 +427,65 @@ def load_manifest(text: str) -> Manifest:
 
 
 # ---------------------------------------------------------------------------
+# Per-arm wall-clock override (F3): the `advanced` arm forks parallel branches
+# and legitimately needs more wall to finish than the single-line arms. This is
+# the SUBPROCESS wall the driver applies OUTSIDE agent.toml (run_agent's
+# `timeout=`), so raising it for one arm does NOT touch the generated config and
+# so does NOT trip the config-fairness gate — comparability of the MEASURED work
+# is preserved; only the deadline before a DNF moves. The result is apples-to-
+# oranges on wall and must be labeled as such in any write-up.
+# ---------------------------------------------------------------------------
+
+
+def arm_timeout_s(arm: str, tier: Tier, env: dict) -> int:
+    """The per-goal subprocess wall for one arm. Default = `tier.timeout_s`; for
+    the `advanced` arm only, an operator may override it via env:
+
+      ARENA_ARM_TIMEOUT_ADVANCED   absolute seconds (takes precedence)
+      ARENA_TIMEOUT_SCALE_ADVANCED float multiplier on tier.timeout_s
+
+    The result is clamped to `60..=MAX_RUN_TIMEOUT_S`. Every hostile input —
+    non-advanced arm, unset/blank env, NaN/inf, negative, zero, junk, an absurd
+    value — falls back to `tier.timeout_s` (or the clamp bound), so a poisoned
+    env can never zero the deadline or unbound the run. Pure and total."""
+    base = tier.timeout_s
+    if arm != "advanced":
+        return base
+    absolute = _env_num(env, "ARENA_ARM_TIMEOUT_ADVANCED")
+    if absolute is not None:
+        return _clamp_timeout(absolute, base)
+    scale = _env_num(env, "ARENA_TIMEOUT_SCALE_ADVANCED")
+    if scale is not None and scale > 0:
+        return _clamp_timeout(base * scale, base)
+    return base
+
+
+def _env_num(env: dict, key: str) -> float | None:
+    """Parse one env var as a finite positive number, else None. Never raises."""
+    try:
+        raw = env.get(key)
+    except AttributeError:
+        return None
+    if raw is None:
+        return None
+    try:
+        v = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    if v != v or v in (float("inf"), float("-inf")) or v <= 0:
+        return None
+    return v
+
+
+def _clamp_timeout(value: float, fallback: int) -> int:
+    """Clamp a candidate wall to 60..=MAX_RUN_TIMEOUT_S; a non-finite candidate
+    falls back to the caller's base (already a valid tier value)."""
+    if value != value or value in (float("inf"), float("-inf")):
+        return fallback
+    return int(max(60, min(MAX_RUN_TIMEOUT_S, value)))
+
+
+# ---------------------------------------------------------------------------
 # Arm configuration (generated agent.toml — pure text function)
 # ---------------------------------------------------------------------------
 

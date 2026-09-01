@@ -29,11 +29,30 @@ pkgs.writeShellApplication {
     pkgs.python3
     pkgs.gnugrep
     pkgs.coreutils
+    pkgs.nix # self-plant a durable gcroot (see below)
   ];
   text = ''
     export ARENA_COGNITION_DIR="${../config/cognition}"
     # Pure-Go / pure-C builds match the hermetic check (no ambient cc/cgo).
     export CGO_ENABLED=0
+
+    # Durable gcroot (F3, root cause of the #256 recovery): `nix run` plants no
+    # persistent root, so a ~12h campaign whose seed sources are read lazily can
+    # have them garbage-collected mid-run (a parallel `nix` GC collected the
+    # `-graph-arena` store path and the driver then failed "objective seed dir
+    # missing"). Best-effort self-root both source store paths under the output
+    # dir so GC cannot collect them while the campaign runs. Never fail the run
+    # because rooting failed (read-only store, no daemon perms, absent nix).
+    plant_gcroot() {
+      nix-store --add-root "$2" --indirect --realise "$1" >/dev/null 2>&1 \
+        || echo "graph-arena-campaign: warning: could not gcroot $1 (continuing)" >&2
+    }
+    if [ -n "''${ARENA_OUTPUT_DIR:-}" ]; then
+      mkdir -p "$ARENA_OUTPUT_DIR" 2>/dev/null || true
+      plant_gcroot "${../test/graph-arena}" "$ARENA_OUTPUT_DIR/.gcroot-graph-arena"
+      plant_gcroot "${../config/cognition}" "$ARENA_OUTPUT_DIR/.gcroot-cognition"
+    fi
+
     exec python3 "${../test/graph-arena}/campaign.py" "$@"
   '';
 }

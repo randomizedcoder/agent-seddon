@@ -35,6 +35,7 @@ nix run .#graph-arena-campaign -- --only lockbox,relay           # a rung subset
 | `ARENA_OUTPUT_DIR` | artifacts (default mktemp); rerunning into it **resumes** — recorded (arm, rep) runs incl. DNFs are skipped (`--retry-dnf` re-runs the DNF casualties; last record per (arm, rep) wins, append-only); delete the dir to redo everything |
 | `ARENA_CLICKHOUSE` | opt-in trace witness: the `ch-up` HTTP url (e.g. `http://127.0.0.1:8123`) — every arm then writes `[telemetry]` identically and the harness cross-checks the pushed metrics against `agent_usage`/`agent_events`. Set-but-dead = hard refusal |
 | `ARENA_CLICKHOUSE_NATIVE` | the native address arms write to (default `localhost:9000`) |
+| `ARENA_ARM_TIMEOUT_ADVANCED` / `ARENA_TIMEOUT_SCALE_ADVANCED` | **advanced arm only**: raise its per-goal subprocess wall — an absolute seconds value, or a float multiplier on the tier timeout (absolute wins). Clamped `60..=14400`; any hostile/blank value falls back to the tier default. It moves only the DNF deadline (a `run_agent` timeout, never the fairness-gated config), so other arms are untouched — but wall/cost become apples-to-oranges vs the other arms and any write-up must label it |
 | `AGENT_BIN` | agent binary override |
 
 ## Objectives and tiers
@@ -124,6 +125,14 @@ verdicts and an M/L 3-vote majority.
   sends `graph-arena/1`.
 - `test/graph-arena/` is excluded from the crane Rust source filter — objective
   edits never rebuild the cargo tree.
+- `nix run` plants no durable gcroot, so a long sweep whose seed sources are read
+  lazily can have them garbage-collected mid-run (a parallel `nix` GC once
+  collected the `-graph-arena` store path and the driver then failed with the
+  seed dir missing). Both apps now **self-plant** an indirect gcroot on the two
+  source store paths under `ARENA_OUTPUT_DIR` (`.gcroot-graph-arena`,
+  `.gcroot-cognition`) — best-effort, warn-but-continue. Confirm with `nix-store
+  --query --roots "$ARENA_OUTPUT_DIR/.gcroot-graph-arena"`; the roots are cleaned
+  up when the output dir is deleted.
 - A GLM critic can burn its whole **output** budget on reasoning over
   diff-bearing gate prompts (empty content → fail-open, run classified invalid).
   The critic ceiling is **65536** and the arena sizes the critic at **24576**

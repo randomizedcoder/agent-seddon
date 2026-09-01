@@ -33,6 +33,7 @@ pkgs.writeShellApplication {
     pkgs.python3
     pkgs.gnugrep
     pkgs.coreutils
+    pkgs.nix # self-plant a durable gcroot (see below)
   ];
   text = ''
     export ARENA_COGNITION_DIR="${../config/cognition}"
@@ -40,6 +41,21 @@ pkgs.writeShellApplication {
     # `net` (relay) must build for the agent's own in-run verification exactly
     # as they do for scoring (driver.py sets the same for its step executor).
     export CGO_ENABLED=0
+
+    # Durable gcroot (F3): `nix run` plants no persistent root, so a long sweep
+    # whose seed sources are read lazily can have them GC'd mid-run (root cause
+    # of the #256 recovery). Best-effort self-root both source store paths when
+    # an output dir is set; never fail the run because rooting failed.
+    plant_gcroot() {
+      nix-store --add-root "$2" --indirect --realise "$1" >/dev/null 2>&1 \
+        || echo "graph-arena: warning: could not gcroot $1 (continuing)" >&2
+    }
+    if [ -n "''${ARENA_OUTPUT_DIR:-}" ]; then
+      mkdir -p "$ARENA_OUTPUT_DIR" 2>/dev/null || true
+      plant_gcroot "${../test/graph-arena}" "$ARENA_OUTPUT_DIR/.gcroot-graph-arena"
+      plant_gcroot "${../config/cognition}" "$ARENA_OUTPUT_DIR/.gcroot-cognition"
+    fi
+
     exec python3 "${../test/graph-arena}/driver.py" "$@"
   '';
 }
