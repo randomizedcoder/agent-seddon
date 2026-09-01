@@ -19,7 +19,7 @@ import math
 import re
 import string
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 # ---------------------------------------------------------------------------
 # Bounds (hard ceilings; a manifest cannot unbound the harness)
@@ -905,9 +905,49 @@ def classify_validity(
         "tokens": tokens_by_model(samples),
         "upstream_tokens": upstream_tokens_by_name(samples),
     }
+    return _decide_validity(arm, tier_name, evidence, forces_compaction)
+
+
+def _ev_int(evidence: dict, key: str) -> int:
+    """Read one scalar from a (possibly stored, possibly hostile) evidence dict.
+    Anything that is not a clean integer — missing, NaN/inf, a string, a nested
+    object — reads as 0. The classifier fails CLOSED (a graph arm that can't
+    prove its treatment ran is invalid), so 0 is the safe default."""
+    try:
+        v = evidence.get(key, 0)
+    except AttributeError:  # evidence not a mapping
+        return 0
+    try:
+        if isinstance(v, bool):  # bool is an int subclass — treat as its 0/1
+            return int(v)
+        f = float(v)
+    except (TypeError, ValueError):
+        return 0
+    if f != f or f in (float("inf"), float("-inf")):  # NaN / inf
+        return 0
+    return int(f)
+
+
+def _decide_validity(
+    arm: str,
+    tier_name: str,
+    evidence: dict,
+    forces_compaction: bool,
+) -> Validity:
+    """The validity DECISION over an evidence dict of scalar counts — the single
+    source of truth shared by `classify_validity` (fresh metrics) and
+    `classify_from_evidence` (stored records). Reads only the scalar keys, so it
+    is pure and re-runnable; hostile/missing scalars coerce to 0 (fail closed)."""
+    delivered = _ev_int(evidence, "gate_delivered")
+    critic_errors = _ev_int(evidence, "gate_critic_errors")
+    distilled = _ev_int(evidence, "distill_succeeded")
+    distill_lost = _ev_int(evidence, "distill_lost")
+    branches = _ev_int(evidence, "branches")
+    merges = _ev_int(evidence, "merges")
+    compactions = _ev_int(evidence, "compactions")
     if delivered <= 0:
         why = (
-            f"gate delivered no verdict ({int(critic_errors)} critic_error fail-open(s))"
+            f"gate delivered no verdict ({critic_errors} critic_error fail-open(s))"
             if critic_errors > 0
             else "gate never engaged (zero verdicts)"
         )
@@ -915,7 +955,7 @@ def classify_validity(
     if arm in ("intermediate", "economical") and distilled <= 0:
         why = "no successful distillation"
         if distill_lost > 0:
-            why += f" ({int(distill_lost)} job(s) failed/dropped — see the drain deadline)"
+            why += f" ({distill_lost} job(s) failed/dropped — see the drain deadline)"
         return Validity(False, why, evidence)
     if arm == "advanced" and (branches <= 0 or merges <= 0):
         return Validity(False, "fork never ran (zero branches/merges)", evidence)
@@ -927,6 +967,29 @@ def classify_validity(
     ):
         return Validity(False, "no compaction under a forcing tier", evidence)
     return Validity(True, "ok", evidence)
+
+
+def classify_from_evidence(
+    arm: str,
+    tier_name: str,
+    evidence: dict,
+    forces_compaction: bool = True,
+) -> Validity:
+    """Re-derive validity from a STORED evidence dict — the reclassify path.
+    Mirrors `classify_validity` exactly: unknown arm refuses; baseline is always
+    valid (its stored evidence carries no gate scalars, and it needs none); a
+    non-baseline record with no gate scalars means no metrics were ever pushed
+    (crash / push failure), the stored-record equivalent of `samples is None`.
+    Every other case defers to `_decide_validity`, so a classifier change (e.g. a
+    `forces_compaction` flip) reproducibly re-scores already-recorded runs."""
+    if arm not in ARM_NAMES:
+        _fail(f"unknown arm `{arm}`")
+    ev = evidence if isinstance(evidence, dict) else {}
+    if arm == "baseline":
+        return Validity(True, "ok", ev)
+    if "gate_delivered" not in ev:
+        return Validity(False, "no metrics pushed (crash or push failure)", ev)
+    return _decide_validity(arm, tier_name, ev, forces_compaction)
 
 
 # ---------------------------------------------------------------------------
@@ -1304,6 +1367,28 @@ def plan_resume(
         if score is not None:
             prior.append(score)
     return done, prior
+
+
+def reclassify_scores(
+    scores: list[RunScore], tier_name: str, forces_compaction: bool
+) -> list[RunScore]:
+    """Re-derive each rehydrated run's Validity from its STORED evidence under
+    the CURRENT classifier (`classify_from_evidence`) — the read-only reclassify
+    path. A run whose validity was never assessed (increment-1 record) is left
+    untouched; every metrics-bearing run (baseline or graph) is re-scored, so a
+    classifier change — e.g. a manifest `forces_compaction` flip — reproducibly
+    corrects an already-recorded sweep without re-running an agent. Met counts,
+    wall, and ledger are preserved verbatim; only `validity` is recomputed."""
+    out: list[RunScore] = []
+    for s in scores:
+        if s.validity is None:
+            out.append(s)
+            continue
+        v = classify_from_evidence(
+            s.arm, tier_name, s.validity.evidence, forces_compaction
+        )
+        out.append(replace(s, validity=v))
+    return out
 
 
 # ---------------------------------------------------------------------------

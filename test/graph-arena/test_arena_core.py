@@ -601,6 +601,135 @@ class ValidityTables(unittest.TestCase):
             core.classify_validity("chaos", "S", None)
 
 
+class ReclassifyTables(unittest.TestCase):
+    """F2: `--reclassify` re-derives validity from STORED evidence under the
+    current classifier — reproducing the by-hand csv-slice correction from the
+    campaign run of record. `classify_from_evidence` must mirror
+    `classify_validity` exactly, and `reclassify_scores` must correct rehydrated
+    runs read-only (met/wall/ledger preserved, only validity recomputed)."""
+
+    def _intermediate_ev(self, compactions=2):
+        return {
+            "gate_delivered": 3, "gate_critic_errors": 0,
+            "distill_succeeded": 2, "distill_lost": 0,
+            "branches": 0, "merges": 0, "compactions": compactions,
+            "tokens": {"kimi": 1500}, "upstream_tokens": {"glm": 90},
+        }
+
+    def test_positive_parity_with_classify_validity(self):
+        # For every ValidityTables case (excluding the unknown-arm raise), the
+        # stored evidence re-derives to the IDENTICAL verdict + reason under both
+        # forces_compaction settings — the reclassify path is not a re-run.
+        for name, arm, tier, expo, _wv, _wr in ValidityTables().cases():
+            if arm not in core.ARM_NAMES:
+                continue
+            with self.subTest(name):
+                samples = None if expo is None else core.parse_exposition(expo)
+                for fc in (True, False):
+                    v = core.classify_validity(arm, tier, samples, forces_compaction=fc)
+                    r = core.classify_from_evidence(
+                        arm, tier, v.evidence, forces_compaction=fc
+                    )
+                    self.assertEqual(r.valid, v.valid, f"{name} fc={fc}: {r.reason}")
+                    self.assertEqual(r.reason, v.reason, f"{name} fc={fc}")
+
+    def test_positive_delivered_graph_run_valid(self):
+        v = core.classify_from_evidence("intermediate", "M", self._intermediate_ev())
+        self.assertTrue(v.valid, v.reason)
+
+    def test_negative_critic_dead_invalid(self):
+        ev = self._intermediate_ev()
+        ev["gate_delivered"], ev["gate_critic_errors"] = 0, 2
+        v = core.classify_from_evidence("intermediate", "M", ev)
+        self.assertFalse(v.valid)
+        self.assertIn("critic_error", v.reason)
+
+    def test_corner_forces_compaction_flip_flips_verdict(self):
+        # The csv-slice correction itself: the SAME record (gate + distill, no
+        # compaction) is invalid under a forcing tier and valid once the
+        # objective declares forces_compaction=false.
+        ev = self._intermediate_ev(compactions=0)
+        excluded = core.classify_from_evidence(
+            "intermediate", "M", ev, forces_compaction=True
+        )
+        self.assertFalse(excluded.valid)
+        self.assertIn("compaction", excluded.reason)
+        included = core.classify_from_evidence(
+            "intermediate", "M", ev, forces_compaction=False
+        )
+        self.assertTrue(included.valid, included.reason)
+
+    def test_boundary_gate_delivered_zero_vs_one(self):
+        ev = self._intermediate_ev()
+        ev["gate_delivered"] = 0
+        self.assertFalse(core.classify_from_evidence("intermediate", "M", ev).valid)
+        ev["gate_delivered"] = 1
+        self.assertTrue(core.classify_from_evidence("intermediate", "M", ev).valid)
+
+    def test_corner_baseline_always_valid_even_empty_evidence(self):
+        self.assertTrue(core.classify_from_evidence("baseline", "M", {}).valid)
+
+    def test_negative_graph_arm_no_gate_scalars_is_no_metrics(self):
+        # No gate_delivered key = the stored equivalent of samples-None (crash /
+        # push failure): invalid, never silently valid.
+        v = core.classify_from_evidence("simple", "S", {"tokens": {"kimi": 5}})
+        self.assertFalse(v.valid)
+        self.assertIn("no metrics", v.reason)
+
+    def test_negative_unknown_arm_rejects(self):
+        with self.assertRaises(core.ManifestError):
+            core.classify_from_evidence("chaos", "S", {})
+
+    def test_adversarial_hostile_evidence_never_crashes(self):
+        hostile = [
+            {"gate_delivered": float("nan"), "distill_succeeded": float("inf")},
+            {"gate_delivered": "3", "distill_succeeded": "two"},
+            {"gate_delivered": [1, 2], "compactions": {"x": 1}},
+            {"gate_delivered": None},
+            {"gate_delivered": -999999999999, "compactions": -1},
+            {"gate_delivered": True},  # bool is an int subclass
+        ]
+        for ev in hostile:
+            for arm in ("intermediate", "advanced", "simple", "baseline"):
+                with self.subTest(arm=arm, ev=ev):
+                    v = core.classify_from_evidence(arm, "M", ev)
+                    self.assertIsInstance(v.valid, bool)
+        # a non-dict evidence blob coerces to {} — never raises, fails closed
+        self.assertFalse(core.classify_from_evidence("simple", "S", None).valid)
+        self.assertFalse(
+            core.classify_from_evidence("simple", "S", ["not", "a", "dict"]).valid
+        )
+
+    def test_positive_reclassify_scores_flips_headline(self):
+        # A rehydrated intermediate-M run with gate + distill but no compaction,
+        # recorded valid under an older classifier, is demoted out of the
+        # headline once re-scored under forces_compaction=True — met preserved.
+        ev = self._intermediate_ev(compactions=0)
+        rec = core.RunScore(
+            arm="intermediate", rep=1, met=("a", "b"),
+            validity=core.Validity(True, "ok", ev),
+        )
+        [out] = core.reclassify_scores([rec], "M", forces_compaction=True)
+        self.assertFalse(out.headline, "no compaction under a forcing tier")
+        self.assertEqual(out.met, ("a", "b"), "met preserved verbatim")
+        [ok] = core.reclassify_scores([rec], "M", forces_compaction=False)
+        self.assertTrue(ok.headline)
+
+    def test_corner_reclassify_leaves_unassessed_runs_untouched(self):
+        none_v = core.RunScore(arm="simple", rep=1, met=("a",), validity=None)
+        [out] = core.reclassify_scores([none_v], "M", forces_compaction=True)
+        self.assertIsNone(out.validity)
+        self.assertTrue(out.headline)
+
+    def test_corner_reclassify_baseline_stays_valid(self):
+        base = core.RunScore(
+            arm="baseline", rep=1, met=("a",),
+            validity=core.Validity(True, "ok", {"tokens": {"kimi": 5}}),
+        )
+        [out] = core.reclassify_scores([base], "M", forces_compaction=True)
+        self.assertTrue(out.headline)
+
+
 class FairnessTables(unittest.TestCase):
     ENV = ArmConfigTables.ENV
     TIER = ArmConfigTables.TIER
