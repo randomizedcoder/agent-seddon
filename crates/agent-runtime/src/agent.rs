@@ -943,6 +943,11 @@ impl Agent {
         metrics: &SessionMetrics,
     ) -> anyhow::Result<String> {
         let model = self.settings.model.as_str();
+        // Back-to-back truncated completions (finish_reason = output-cap) seen so
+        // far; any productive turn clears it. Bounds the continue-on-truncation
+        // recovery so a perpetually-truncating model fails fast, not at the
+        // max_iterations ceiling.
+        let mut consecutive_truncations = 0u32;
         for iter in 1..=self.settings.max_iterations {
             metrics.on_iteration();
             events.publish(agent_core::SessionEvent::IterationStart { iter: iter as u32 });
@@ -1052,11 +1057,39 @@ impl Agent {
                 self.record_usage(iter as u32, u).await;
             }
 
-            // No tools requested → this is the final answer.
+            // A completion with no tool calls is the final answer — UNLESS the
+            // provider truncated it at the output-token cap (finish_reason =
+            // length/max_tokens). A truncated turn was cut off mid-emission, often
+            // mid tool call (e.g. a large file write), so it parses to zero tool
+            // calls; returning it would score a cut-off fragment as a successful
+            // answer and silently drop the pending action. Instead, nudge the model
+            // to finish and continue the loop. A model that keeps truncating fails
+            // after MAX_CONSECUTIVE_TRUNCATIONS so the caller records a DNF rather
+            // than a fake answer.
             if assistant.tool_calls.is_empty() {
+                if is_truncated_finish(&resp.finish_reason) {
+                    consecutive_truncations += 1;
+                    if consecutive_truncations > MAX_CONSECUTIVE_TRUNCATIONS {
+                        anyhow::bail!(
+                            "model truncated {consecutive_truncations} responses in a row at the \
+                             output-token limit without completing a tool call or a final answer"
+                        );
+                    }
+                    tracing::warn!(
+                        iter,
+                        consecutive_truncations,
+                        finish = %resp.finish_reason,
+                        "completion truncated at max_tokens with no tool call — nudging to continue \
+                         (a truncated response is not a final answer)"
+                    );
+                    working.messages.push(Message::user(TRUNCATION_NUDGE));
+                    continue;
+                }
                 self.memory.distill().await.ok();
                 return Ok(assistant.content_text());
             }
+            // A productive (tool-call) turn clears the truncation streak.
+            consecutive_truncations = 0;
 
             // Dispatch the requested tool calls. Authorization runs sequentially
             // (interactive prompts must not interleave); execution runs
@@ -1662,6 +1695,29 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// The nudge appended after a truncated turn so the model resumes where it was
+/// cut off (e.g. finishes a large file-write tool call) rather than restarting.
+const TRUNCATION_NUDGE: &str = "Your previous message was cut off at the output-token \
+limit before it was complete. Continue exactly where you left off and finish it — if you \
+were emitting a tool call (for example writing a file), send the whole tool call this time.";
+
+/// How many back-to-back truncated completions the loop will nudge through
+/// before giving up. A truncated response is never a final answer, so we let
+/// the model continue — but a model that truncates *every* turn must fail
+/// honestly (the caller records a DNF) instead of spinning to `max_iterations`
+/// burning tokens on a response that never lands.
+const MAX_CONSECUTIVE_TRUNCATIONS: u32 = 3;
+
+/// Whether a provider's `finish_reason` means the completion was truncated at
+/// the output-token cap rather than finished. OpenAI-family servers report
+/// `"length"`; Anthropic reports `"max_tokens"`. The value is provider-
+/// controlled (untrusted), so match case-insensitively and treat anything else
+/// as a normal stop — the fail-safe direction (a mislabelled stop is returned,
+/// never silently looped).
+fn is_truncated_finish(finish_reason: &str) -> bool {
+    finish_reason.eq_ignore_ascii_case("length") || finish_reason.eq_ignore_ascii_case("max_tokens")
+}
+
 /// Total bytes an observation carries — its text plus any media payload. Used
 /// for telemetry so an image-bearing result isn't reported as near-zero.
 /// The metric/span label for a verifier verdict (a bounded enum, never free text).
@@ -1731,8 +1787,8 @@ mod tests {
     use super::*;
     use agent_core::{TaskMode, ToolCall};
     use agent_testkit::{
-        final_turn, tool_turn, EchoTool, FnProvider, RecordingMemory, ScriptedProvider,
-        StaticContext,
+        final_turn, tool_turn, truncated_turn, truncated_turn_with, EchoTool, FnProvider,
+        RecordingMemory, ScriptedProvider, StaticContext,
     };
     use rstest::rstest;
     use serde_json::json;
@@ -3209,6 +3265,108 @@ mod tests {
     async fn cleanup_is_a_noop_without_a_repo() {
         // No git backend wired → cleanup does nothing and doesn't panic.
         bare_agent().cleanup().await;
+    }
+
+    // ---- truncation handling (finish_reason = length / max_tokens) ----------
+    //
+    // A completion truncated at the output-token cap parses to zero tool calls; the
+    // loop must NOT mistake it for a final answer (that scored a cut-off file-write
+    // as a "successful" 0 in the graph-arena campaign). It nudges + continues, and
+    // fails fast if the model truncates forever.
+
+    /// The classifier: exactly `length`/`max_tokens` (case-insensitive), nothing
+    /// else — an unrecognised (or hostile) reason is a normal stop, the fail-safe
+    /// direction.
+    #[rstest]
+    #[case::positive_openai_length("length", true)]
+    #[case::positive_anthropic_max_tokens("max_tokens", true)]
+    #[case::corner_uppercase("LENGTH", true)]
+    #[case::corner_mixed_case("Max_Tokens", true)]
+    #[case::negative_stop("stop", false)]
+    #[case::negative_tool_calls("tool_calls", false)]
+    #[case::negative_end_turn("end_turn", false)]
+    #[case::boundary_empty("", false)]
+    #[case::adversarial_trailing_space("length ", false)]
+    #[case::adversarial_injection("length; DROP TABLE", false)]
+    #[case::adversarial_unicode_lookalike("lëngth", false)]
+    fn is_truncated_finish_cases(#[case] finish: &str, #[case] want: bool) {
+        assert_eq!(is_truncated_finish(finish), want);
+    }
+
+    fn agent_over(provider: Arc<dyn LlmProvider>, max_iterations: usize) -> Arc<Agent> {
+        let mut s = settings(false);
+        s.max_iterations = max_iterations;
+        Arc::new(Agent::new(
+            provider,
+            ToolRegistry::new(),
+            Arc::new(RecordingMemory::new()),
+            Arc::new(StaticContext),
+            Arc::new(crate::policy::AutoApprove),
+            Metrics::new(),
+            s,
+        ))
+    }
+
+    /// `boundary_`: exactly `MAX_CONSECUTIVE_TRUNCATIONS` truncations in a row are
+    /// tolerated — the model is nudged each time and its next, complete answer wins.
+    #[tokio::test]
+    async fn boundary_max_truncations_then_answer_recovers() {
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            truncated_turn("partial 1"),
+            truncated_turn("partial 2"),
+            truncated_turn("partial 3"),
+            final_turn("done"),
+        ]));
+        let script = provider.clone();
+        let out = agent_over(provider, 10).run("go").await.unwrap();
+        assert_eq!(
+            out, "done",
+            "a truncated turn is a continuation, not the answer"
+        );
+        assert_eq!(
+            script.calls(),
+            (MAX_CONSECUTIVE_TRUNCATIONS + 1) as usize,
+            "three nudged continuations, then the real answer"
+        );
+    }
+
+    /// `corner_`: a model that truncates forever fails fast (an honest error the
+    /// caller turns into a DNF) on the (MAX+1)th truncation — never silently
+    /// returning a fragment, and never spinning to the far-higher iteration cap.
+    #[tokio::test]
+    async fn corner_persistent_truncation_fails_fast() {
+        // ScriptedProvider repeats its last response, so this truncates every turn.
+        let provider = Arc::new(ScriptedProvider::new(vec![truncated_turn("still cut off")]));
+        let script = provider.clone();
+        let err = agent_over(provider, 50).run("go").await.unwrap_err();
+        assert!(
+            err.to_string().contains("truncated"),
+            "expected a truncation error, got: {err}"
+        );
+        assert_eq!(
+            script.calls(),
+            (MAX_CONSECUTIVE_TRUNCATIONS + 1) as usize,
+            "bails on the 4th truncation, far below the 50-iteration ceiling"
+        );
+    }
+
+    /// `positive_`: the streak is CONSECUTIVE — a productive (tool-call) turn resets
+    /// it, so truncations either side of real work never sum to a false bail. Also
+    /// covers Anthropic's `max_tokens` spelling.
+    #[tokio::test]
+    async fn positive_productive_turn_resets_truncation_streak() {
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            truncated_turn_with("a", "max_tokens"),
+            truncated_turn_with("b", "max_tokens"),
+            truncated_turn("c"),
+            tool_turn(vec![tool_call("t0", "noop")]), // productive → streak resets
+            truncated_turn("d"),
+            truncated_turn("e"),
+            truncated_turn("f"),
+            final_turn("done"),
+        ]));
+        let out = agent_over(provider, 50).run("go").await.unwrap();
+        assert_eq!(out, "done", "6 truncations but never 4 in a row → no bail");
     }
 
     // ---- tool timeout + panic isolation ------------------------------------

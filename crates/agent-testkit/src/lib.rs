@@ -185,6 +185,24 @@ pub fn final_turn(text: impl Into<String>) -> CompletionResponse {
     }
 }
 
+/// A response the provider cut off at the output-token cap: partial `text`, no
+/// tool calls, finish reason `length` (OpenAI-family). This is the shape that
+/// must NOT be mistaken for a final answer — the loop should continue, not
+/// return it. Anthropic reports the same condition as `max_tokens`; pass that to
+/// [`truncated_turn_with`] to model it.
+pub fn truncated_turn(text: impl Into<String>) -> CompletionResponse {
+    truncated_turn_with(text, "length")
+}
+
+/// A truncated response with an explicit `finish_reason` (e.g. `"max_tokens"`).
+pub fn truncated_turn_with(text: impl Into<String>, finish_reason: &str) -> CompletionResponse {
+    CompletionResponse {
+        message: Message::assistant(text),
+        finish_reason: finish_reason.into(),
+        usage: None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Memory
 // ---------------------------------------------------------------------------

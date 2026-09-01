@@ -54,8 +54,18 @@ component was chosen by the factory in `builder.rs`. One iteration:
    `working.messages` + `tool_schemas` and call the provider (`stream` when
    `settings.stream`, else buffered `complete`). Push the assistant message onto
    the working set and `record("assistant", …)`.
-2. **Terminate check.** If `assistant.tool_calls.is_empty()`, this is the final
-   answer: `memory.distill()` then return `assistant.content`.
+2. **Terminate check.** If `assistant.tool_calls.is_empty()`, this is normally the
+   final answer: `memory.distill()` then return `assistant.content`. **Exception —
+   truncation:** if the provider stopped at the output-token cap
+   (`finish_reason` = `length` for OpenAI-family, `max_tokens` for Anthropic —
+   `is_truncated_finish`), the turn was cut off mid-emission and parses to zero tool
+   calls; it is **not** a final answer. Returning it would score a cut-off fragment
+   as success and silently drop a pending action (e.g. a large file-write tool call
+   truncated before its closing brace — the failure that scored graph-arena graph
+   arms a "valid 0"). Instead the loop appends a short "continue where you left off"
+   user nudge and loops. A model that truncates `MAX_CONSECUTIVE_TRUNCATIONS` (3)
+   times in a row `bail!`s (→ an honest DNF), so it fails fast rather than spinning
+   to `max_iterations`; any productive (tool-call) turn resets the streak.
 3. **Authorize (sequential).** For each requested call, `policy.authorize(call)
    .await`, collected into `decisions` in call order. Authorization runs
    sequentially on purpose — interactive approval prompts must not interleave.

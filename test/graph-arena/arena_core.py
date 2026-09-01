@@ -575,8 +575,18 @@ context  = "sliding-window"
 policy   = "auto-approve"
 working_dir = "{work_dir}"
 max_iterations = {tier.max_iterations}
+# The generator's per-completion OUTPUT cap, DELIBERATELY kept at 8192. A model
+# that tries to emit a whole ~10KB source file in one turn overruns it
+# (finish_reason=length) — but that truncation is now RECOVERABLE: the agent loop
+# treats a truncated turn as continue-not-final and nudges the model to finish
+# (agent.rs is_truncated_finish). Raising the cap to 32768 was tried and REVERTED:
+# a bigger write turn then runs past the runpod edge proxy's ~100s ceiling and
+# 524s through all retries (a fatal DNF), whereas an 8192 truncation returns in
+# ~40s and recovers. Small-cap + recoverable-truncation beats big-cap + 524.
 max_tokens = 8192
 context_window = {tier.context_window}
+# History budget = context_window - reserve_output; the M-tier 12288 window leaves
+# ~4096 for history so compaction stays forced. reserve_output caps history, not output.
 reserve_output = 8192
 stream = false
 temperature = 0.0
