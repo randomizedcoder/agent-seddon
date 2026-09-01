@@ -143,6 +143,21 @@ requirements = ["readme"]
             core.load_manifest(bad)
         self.assertIn("after_goal", str(cm.exception))
 
+    def test_positive_forces_compaction_parses_default_true(self):
+        m = core.load_manifest(manifest_text())
+        self.assertTrue(m.tier("S").forces_compaction, "default is True")
+        m2 = core.load_manifest(
+            manifest_text(tiers='requirements = ["build"]\nforces_compaction = false')
+        )
+        self.assertFalse(m2.tier("S").forces_compaction)
+
+    def test_negative_forces_compaction_must_be_bool(self):
+        with self.assertRaises(core.ManifestError) as cm:
+            core.load_manifest(
+                manifest_text(tiers='requirements = ["build"]\nforces_compaction = "no"')
+            )
+        self.assertIn("forces_compaction must be a boolean", str(cm.exception))
+
     def boundary_cases(self):
         return [
             ("context_window_floor", "context_window = 4096", True),
@@ -559,6 +574,27 @@ class ValidityTables(unittest.TestCase):
         self.assertEqual(v.evidence["gate_delivered"], 2)
         self.assertEqual(v.evidence["gate_critic_errors"], 1)
         self.assertEqual(v.evidence["tokens"], {"kimi": 1500, "glm": 90})
+
+    def test_positive_non_forcing_objective_drops_compaction_requirement(self):
+        # csv-slice M: a small objective never pressures the window, so a
+        # full-marks run with gate + distill but no compaction is VALID.
+        expo = core.parse_exposition(
+            EXPO_INTERMEDIATE_OK.replace("agent_context_compactions_total 2", "")
+        )
+        excluded = core.classify_validity("intermediate", "M", expo)
+        self.assertFalse(excluded.valid, "default forcing still requires compaction")
+        ok = core.classify_validity("intermediate", "M", expo, forces_compaction=False)
+        self.assertTrue(ok.valid, ok.reason)
+
+    def test_corner_non_forcing_still_requires_gate_and_distill(self):
+        # forces_compaction=False relaxes ONLY the compaction rule — a dead
+        # critic or missing distill still invalidates.
+        dead = core.classify_validity(
+            "intermediate", "M", core.parse_exposition(EXPO_CRITIC_DEAD),
+            forces_compaction=False,
+        )
+        self.assertFalse(dead.valid)
+        self.assertIn("critic_error", dead.reason)
 
     def test_negative_unknown_arm_rejects(self):
         with self.assertRaises(core.ManifestError):

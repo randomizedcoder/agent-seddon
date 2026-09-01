@@ -48,6 +48,14 @@ finishing."""]
 context_window = 12288
 timeout_s = 2400
 max_iterations = 120
+# csv-slice is the fresh-LANGUAGE control, not a compaction probe: a few short
+# files never pressure the 12288 window, so a compaction node has nothing to
+# compact. Requiring compactions>0 would wrongly exclude full-marks runs
+# (live-observed campaign 2026-08-12: 9 graph runs scoring 10-11/11 excluded).
+# The compaction mechanism is validated by logtriage M and relay L, which DO
+# force it. (default is true — set only where the window is genuinely not
+# pressured.)
+forces_compaction = false
 requirements = [
   "build",
   "version",
