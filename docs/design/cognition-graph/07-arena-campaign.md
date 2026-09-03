@@ -289,3 +289,113 @@ when allowed to finish.
   on unfamiliar (csv-slice) and complex (relay L) work and disappears on easy or
   memorized tasks. The ladder + the fresh-language control let that dependence *show*
   rather than average away (why 06 forbids compositing across objectives).
+
+## Results of record — 2026-09-01/02 refresh (reliable critic · gcroot · honest DNFs)
+
+**Why a refresh.** The four recorded follow-ups above were built and merged: the GLM
+critic reasoning-output ceiling raised so it stops failing open (F1, #257); a
+`--reclassify` report mode that re-derives validity from stored evidence (F2, #258);
+the campaign self-planting a durable gcroot + an advanced-arm timeout knob (F3, #259);
+and the agent loop no longer treating a *truncated* completion as a final answer
+(F4, #260). This run re-ran the full ladder with all four in place,
+`ARENA_TIMEOUT_SCALE_ADVANCED=2.0` (advanced gets 2× its wall, to answer the
+"allowed to finish" follow-up), ClickHouse witness on.
+
+**Run:** `2026-09-01/02`, `nix run .#graph-arena-campaign`, same generator/judge/local
+stack, ladder `rungs=4/4`, **≈ 29.6 M generated tokens** (wall dominated by the
+advanced arm's 2× DNF walls). A mid-run host reboot (environmental — memory pressure,
+*not* a harness fault) interrupted it; the F3 self-planted gcroot held and the same
+command resumed cleanly. Every number below is the **canonical `--reclassify` output**
+(F2) against the current manifests, so it reproduces:
+`graph-arena --reclassify --objective <obj> --tier <T> --out <dir>`.
+
+**Headline: the refresh CORRECTS the flagship — it does not strengthen it.** The run of
+record's csv-slice "+10, baseline categorically cannot do the fresh-language task, the
+graph can" **does not reproduce** under the corrected harness. The durable, reconfirmed
+result is narrower and about *reliability + cost*, not a capability ceiling.
+
+### csv-slice M (/11) — the flagship, revised
+| arm | run-of-record valid / scores | **fresh** valid / scores |
+|---|---|---|
+| baseline | 5 / 0,0,0,0,0 (**0.0**) | **1/5** / 10 — 4 runaway DNFs |
+| simple | 4 / 10,0,0,0 (2.5) | 1/5 / 6 |
+| intermediate | 5 / 11,10,10,0,0 (**6.2**) | 1/5 / 10 |
+| economical | 5 / 11,0,0,0,0 (2.2) | **3/5** / 10,11,11 (**10.7**) |
+| advanced | 5 / 0,0,0,0,0 | 0/5 |
+
+Paired vs baseline: RoR intermediate `+0,+10,+11,+10,+0` (3 strict wins); **fresh:
+economical `+0` on the single rep where both arms are valid — a tie at 10–11/11.**
+Two harness-fix consequences moved the picture:
+
+- **F4 reclassifies baseline's failures from valid-zeros to honest DNFs.** In the run
+  of record baseline "completed" five csv-slice reps with a wrong build (0/11, counted
+  valid) — those zeros are exactly what produced the `+10` paired deltas. With F4 the
+  same non-convergence is caught as a runaway `agent-exit-1` (the agent loops to the
+  120-iteration cap and is excluded), so baseline's zeros drop out of the paired set.
+- **When baseline *does* complete, it scores 10/11** (rep2), not 0. So the fresh data
+  shows **no categorical baseline failure** on csv-slice. The task is hard for *every*
+  arm to *complete* (baseline / simple / intermediate each 1/5, economical 3/5); when
+  they complete they all land at 10–11/11.
+
+Revised claim: **csv-slice is a completion-reliability discriminator, not a
+capability-ceiling one.** economical completes it 3/5 vs everyone else's 1/5 — that
+reliability edge is the graph value that survives; the "baseline can't, graph can"
+capability gap does not, at this rep count. Whether the RoR's five baseline 0/11
+completions were generator variance or the valid-zero classification F4 removed is
+unresolved; either reading kills the strong `+10` claim. **Paired-N is thin (n=1)** —
+this rung needs more reps for any confident quality claim.
+
+### relay L (/13, R=3) — reconfirmed: economical reliable *and* cheaper
+| arm | run-of-record valid / mean | **fresh** valid / mean |
+|---|---|---|
+| baseline | 3 / 4.0 (12,0,0) | 2/3 / 12.0 (12,12) |
+| intermediate | 2 / 13.0 | 1/3 / 12.0 |
+| economical | 3 / 12.3 | **3/3 / 12.7** (13,13,12) |
+
+Fresh paired: **economical ≥ baseline 2/2 (+1, +0)** and **cheaper on both:
+−444 s / −272 s wall, −323 k / −150 k tokens.** This is the campaign's cleanest
+surviving positive — economical matches-or-beats baseline quality on the complex task
+at ~half the cost, and is the only arm valid on all three reps. Caveat vs RoR: the
+*mechanism attribution* weakened — RoR read the win off a baseline **memory 1/3 →
+graph 3/3** per-kind jump, but in the fresh run **baseline also scores memory 3/3**, so
+that localization does not reproduce; the win is efficiency + reliability, not a
+memory-kind capability gap.
+
+### logtriage M (/13) — near-ceiling, economical edges baseline cheaply
+Fresh (valid / mean): baseline 4/5 / 12.0, intermediate 2/5 / 13.0, economical 5/5 /
+12.8. Paired vs baseline: intermediate `+1, +1` (≥ 2/2), economical `+0,+1,+1,+1`
+(≥ 4/4) with **wall ≤ baseline on 3/4**. Unchanged story — baseline near-ceiling on the
+familiar task, economical a small consistent quality edge at lower wall; report the
+numbers, claim nothing strong.
+
+### lockbox S (/7) — unchanged: ceiling, no signal
+All four non-advanced arms 5/5 @ 7/7, every paired delta +0. advanced 0/5 (below). F1
+cleaned up the run of record's two `critic_error` invalids here — simple is now 5/5.
+
+### advanced — the "allowed to finish" follow-up, answered (negative)
+Given **2× the per-goal wall on every tier**, advanced still produced **0 valid runs
+across all four objectives** — S/M timeouts even at 3600 / 4800 s, and on relay it
+fast-fails goal1 (~17 k tokens). Its evidence dicts show it *is* doing the work
+(branches 240+, merges 120+, distill 110+ on M) — it is simply too expensive per step
+to finish inside any practical wall. **Doubling the budget does not rescue it.** This
+closes the follow-up: advanced is impractical at time-boxed budgets, and its 2× wall
+makes its cost apples-to-oranges vs the other arms.
+
+### Reading (claim discipline) — what the refresh changes
+- **csv-slice:** the strong `+10` capability claim **does not survive** the corrected
+  harness; downgraded to a **completion-reliability** edge (economical 3/5 vs 1/5),
+  n=1 paired — needs more reps.
+- **relay L:** the efficiency + reliability win **survives and is the headline now**
+  (economical 3/3, ≥ baseline, ~half the cost); the memory-kind mechanism attribution
+  does **not** reproduce (baseline memory 3/3 too).
+- **logtriage / lockbox:** unchanged (near-ceiling / ceiling, no quality claim).
+- **economical is the one durable winner** — reliable and cheap on every rung it can
+  engage; **intermediate** is now the *least* reliable engager (valid 1–2/5 on M),
+  because F1's honest critic no longer passes its non-engaging runs; **advanced** is
+  conclusively impractical.
+- **Net:** F1 + F4 make the measurement *honest*, and honesty **shrinks** the flagship
+  claim — fewer, more-trustworthy valid runs, not more. The A/B/n apparatus did its job:
+  it caught its own earlier over-claim. The robust surviving statement is *"the
+  economical cognition arm matches baseline quality on complex work at roughly half the
+  cost and completes it more reliably; a categorical fresh-language capability gap is
+  not established at this rep count."*

@@ -14,9 +14,19 @@ design and this doc for where reality is.
 | 2b | contamination hardening: logtriage quirk-pack + `csv-slice` (C) | ✅ merged (#253) |
 | 2c | telemetry witness (`ARENA_CLICKHOUSE`) | ✅ merged (#254) |
 | 2d | `nix run .#graph-arena-campaign` | ✅ merged (#255) |
-| 2e | per-objective `forces_compaction` (harness fix) | 🟨 this PR |
+| 2e | per-objective `forces_compaction` (harness fix) | ✅ merged (#256) |
 | — | campaign night(s) | ✅ done (2026-08-31, ladder 4/4, RC=0) |
-| 3 | Results of record + STATUS headline | 🟨 this PR |
+| 3 | Results of record + STATUS headline | ✅ merged (#256) |
+
+**Post-record follow-ups (the four the run of record recorded, + the re-run):**
+
+| PR | Deliverable | State |
+|---|---|---|
+| F1 | GLM critic reliability — reasoning-output ceiling → 65536 + endpoint docs | ✅ merged (#257) |
+| F2 | `--reclassify` report mode (re-derive validity from stored evidence) | ✅ merged (#258) |
+| F3 | campaign operability — durable self-planted gcroot + advanced-arm timeout knob | ✅ merged (#259) |
+| F4 | agent loop — a truncated completion is not a final answer | ✅ merged (#260) |
+| R | 2026-09-01/02 full-ladder re-run + **`Results of record — refresh`** section | 🟨 this PR |
 
 ## Implementation log (as-built findings and deviations)
 
@@ -100,3 +110,5 @@ design and this doc for where reality is.
 | 2026-08-12 | `nix run .#graph-arena-campaign` | `~/graph-arena-campaigns/2026-08-12` | rungs 1–3 done (lockbox 19/25, logtriage 13/25, csv-slice 12/25 headline); ~13 Kimi-pod `agent-exit-1` DNFs; rung 4 relay refused (seed dir missing — see log) |
 | 2026-08-13 | same (resume) | same | recovery pass attempt: refused at logtriage — `-graph-arena` store path GC'd mid-run (nix run keeps no durable gcroot); see log |
 | 2026-08-13 | same (resume, **gcroot-pinned**) | same | durable indirect gcroot planted on the campaign closure (`.gcroot-campaign`) so GC can't strip the seeds; live run confirmed reading the rooted `7c07y5…-graph-arena`. lockbox 19/25 preserved; logtriage/csv-slice/relay continue |
+| 2026-09-01 | `nix run .#graph-arena-campaign` (F1+F3+F4, witness on, `ARENA_TIMEOUT_SCALE_ADVANCED=2.0`) | `~/graph-arena-campaigns/2026-09-01` | full-ladder re-run with the four follow-ups in place. F3's self-planted gcroot held (no seed-GC refusal). A mid-run **host reboot** (environmental memory pressure, not a harness fault) interrupted at lockbox rep5; the same command resumed, recovered the DNFs, and completed. Headline counts: lockbox 20/25, logtriage 15/25, csv-slice 6/25, relay 6/15 |
+| 2026-09-02 | `graph-arena --reclassify` (F2) over the four rungs | same | canonical re-score → **`Results of record — refresh`** section in `07-arena-campaign.md`. Key finding: the flagship csv-slice `+10` **does not reproduce** (F4 reclassifies baseline's failures from valid-zeros to honest DNFs; baseline's one completion scores 10/11) — downgraded to a completion-reliability edge (economical 3/5 vs 1/5). relay's economical reliability+cost win reconfirmed (3/3, ≥ baseline, ~half the cost). advanced still 0-valid at 2× walls (negative follow-up closed). Refresh written on l2 after migrating this session there |
