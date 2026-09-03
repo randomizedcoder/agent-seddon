@@ -41,10 +41,40 @@ in
           exit 1
         fi
 
+        # Optional env for LAN use (default off / localhost):
+        #   CLICKSTACK_FRONTEND_URL   HyperDX's own app/redirect URL. Its session
+        #                             cookie binds to this host, so login from
+        #                             another box needs this = http://<lan-ip>:${uiPort}
+        #                             (else the browser logs in then bounces to /login).
+        #   CLICKSTACK_INGESTION_API_KEY  pin the OTLP ingestion key so it survives
+        #                             container recreation (agent's otlp_headers =
+        #                             "authorization=<this>"). Empty ⇒ HyperDX mints one.
+        #
+        # NOTE on disabling auth: this image (HYPERDX_IMAGE=all-in-one-auth) bakes
+        # login into the frontend, so the runtime IS_LOCAL_APP_MODE flag can't turn it
+        # off. A no-auth deployment needs HyperDX's separate all-in-one-noauth image
+        # (not published under the all-in-one repo tags). On a trusted LAN, either set
+        # CLICKSTACK_FRONTEND_URL and log in, or reach the UI over an SSH tunnel.
+        env_args=()
+        if [ -n "''${CLICKSTACK_FRONTEND_URL:-}" ]; then
+          env_args+=(-e "FRONTEND_URL=''${CLICKSTACK_FRONTEND_URL}")
+        fi
+        if [ -n "''${CLICKSTACK_INGESTION_API_KEY:-}" ]; then
+          env_args+=(-e "INGESTION_API_KEY=''${CLICKSTACK_INGESTION_API_KEY}")
+        fi
+
         if "$runtime" ps -a --format '{{.Names}}' | grep -qx "${name}"; then
-          echo "==> container '${name}' already exists; (re)starting it"
-          "$runtime" start "${name}" >/dev/null
-        else
+          # Env only applies at create time. If the caller wants new env, recreate.
+          if [ "''${#env_args[@]}" -gt 0 ]; then
+            echo "==> recreating '${name}' to apply CLICKSTACK_* env"
+            "$runtime" rm -f "${name}" >/dev/null 2>&1 || true
+          else
+            echo "==> container '${name}' already exists; (re)starting it"
+            "$runtime" start "${name}" >/dev/null
+          fi
+        fi
+
+        if ! "$runtime" ps -a --format '{{.Names}}' | grep -qx "${name}"; then
           echo "==> starting ClickStack / HyperDX all-in-one (${image})"
           # UI publishes on CLICKSTACK_UI_HOST (default 127.0.0.1; set 0.0.0.0 to
           # reach the HyperDX UI from the LAN). OTLP receivers stay host-local —
@@ -55,6 +85,7 @@ in
             -p "''${CLICKSTACK_UI_HOST:-127.0.0.1}:${uiPort}:8080" \
             -p 127.0.0.1:${otlpGrpcPort}:4317 \
             -p 127.0.0.1:${otlpHttpPort}:4318 \
+            ''${env_args[@]+"''${env_args[@]}"} \
             "${image}" >/dev/null
         fi
 
