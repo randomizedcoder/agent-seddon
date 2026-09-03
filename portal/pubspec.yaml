@@ -11,14 +11,14 @@ dependencies:
     sdk: flutter
   # gRPC transport: native (ClientChannel, dart:io HTTP/2) + web (GrpcWebClientChannel
   # via the envoy proxy). The generated stubs import package:grpc/service_api.dart.
-  grpc: ^4.0.0
-  protobuf: ^4.0.0
+  grpc: ^5.1.0
+  protobuf: ^6.0.0
   fixnum: ^1.1.0
   # Open Grafana / HyperDX / Prometheus in the system browser from the Launcher.
   url_launcher: ^6.3.0
 
 dev_dependencies:
-  flutter_lints: ^5.0.0
+  flutter_lints: ^6.0.0
 
 flutter:
   uses-material-design: true

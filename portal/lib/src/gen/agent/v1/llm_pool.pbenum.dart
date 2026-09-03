@@ -14,31 +14,6 @@ import 'dart:core' as $core;
 
 import 'package:protobuf/protobuf.dart' as $pb;
 
-class PoolTier extends $pb.ProtobufEnum {
-  static const PoolTier POOL_TIER_UNSPECIFIED =
-      PoolTier._(0, _omitEnumNames ? '' : 'POOL_TIER_UNSPECIFIED');
-  static const PoolTier POOL_TIER_LIGHT =
-      PoolTier._(1, _omitEnumNames ? '' : 'POOL_TIER_LIGHT');
-  static const PoolTier POOL_TIER_MEDIUM =
-      PoolTier._(2, _omitEnumNames ? '' : 'POOL_TIER_MEDIUM');
-  static const PoolTier POOL_TIER_HEAVY =
-      PoolTier._(3, _omitEnumNames ? '' : 'POOL_TIER_HEAVY');
-
-  static const $core.List<PoolTier> values = <PoolTier>[
-    POOL_TIER_UNSPECIFIED,
-    POOL_TIER_LIGHT,
-    POOL_TIER_MEDIUM,
-    POOL_TIER_HEAVY,
-  ];
-
-  static final $core.List<PoolTier?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 3);
-  static PoolTier? valueOf($core.int value) =>
-      value < 0 || value >= _byValue.length ? null : _byValue[value];
-
-  const PoolTier._(super.value, super.name);
-}
-
 /// Graded liveness of a member (GPU pool 03).
 class PoolMemberState extends $pb.ProtobufEnum {
   static const PoolMemberState POOL_MEMBER_STATE_UNSPECIFIED =

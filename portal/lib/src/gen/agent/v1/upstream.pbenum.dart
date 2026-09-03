@@ -1,6 +1,6 @@
 // This is a generated file - do not edit.
 //
-// Generated from agent/v1/mode.proto.
+// Generated from agent/v1/upstream.proto.
 
 // @dart = 3.3
 

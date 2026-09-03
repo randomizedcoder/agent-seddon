@@ -44,6 +44,64 @@ const NullValue$json = {
 final $typed_data.Uint8List nullValueDescriptor =
     $convert.base64Decode('CglOdWxsVmFsdWUSDgoKTlVMTF9WQUxVRRAA');
 
+@$core.Deprecated('Use taskModeDescriptor instead')
+const TaskMode$json = {
+  '1': 'TaskMode',
+  '2': [
+    {'1': 'TASK_MODE_UNSPECIFIED', '2': 0},
+    {'1': 'TASK_MODE_REVIEW', '2': 1},
+    {'1': 'TASK_MODE_IMPLEMENT', '2': 2},
+    {'1': 'TASK_MODE_DESIGN', '2': 3},
+    {'1': 'TASK_MODE_DEBUG', '2': 4},
+    {'1': 'TASK_MODE_EXPLAIN', '2': 5},
+    {'1': 'TASK_MODE_OTHER', '2': 6},
+  ],
+};
+
+/// Descriptor for `TaskMode`. Decode as a `google.protobuf.EnumDescriptorProto`.
+final $typed_data.Uint8List taskModeDescriptor = $convert.base64Decode(
+    'CghUYXNrTW9kZRIZChVUQVNLX01PREVfVU5TUEVDSUZJRUQQABIUChBUQVNLX01PREVfUkVWSU'
+    'VXEAESFwoTVEFTS19NT0RFX0lNUExFTUVOVBACEhQKEFRBU0tfTU9ERV9ERVNJR04QAxITCg9U'
+    'QVNLX01PREVfREVCVUcQBBIVChFUQVNLX01PREVfRVhQTEFJThAFEhMKD1RBU0tfTU9ERV9PVE'
+    'hFUhAG');
+
+@$core.Deprecated('Use poolTierDescriptor instead')
+const PoolTier$json = {
+  '1': 'PoolTier',
+  '2': [
+    {'1': 'POOL_TIER_UNSPECIFIED', '2': 0},
+    {'1': 'POOL_TIER_LIGHT', '2': 1},
+    {'1': 'POOL_TIER_MEDIUM', '2': 2},
+    {'1': 'POOL_TIER_HEAVY', '2': 3},
+  ],
+};
+
+/// Descriptor for `PoolTier`. Decode as a `google.protobuf.EnumDescriptorProto`.
+final $typed_data.Uint8List poolTierDescriptor = $convert.base64Decode(
+    'CghQb29sVGllchIZChVQT09MX1RJRVJfVU5TUEVDSUZJRUQQABITCg9QT09MX1RJRVJfTElHSF'
+    'QQARIUChBQT09MX1RJRVJfTUVESVVNEAISEwoPUE9PTF9USUVSX0hFQVZZEAM=');
+
+@$core.Deprecated('Use routeRoleDescriptor instead')
+const RouteRole$json = {
+  '1': 'RouteRole',
+  '2': [
+    {'1': 'ROUTE_ROLE_UNSPECIFIED', '2': 0},
+    {'1': 'ROUTE_ROLE_MAIN', '2': 1},
+    {'1': 'ROUTE_ROLE_JUDGE', '2': 2},
+    {'1': 'ROUTE_ROLE_CLASSIFY', '2': 3},
+    {'1': 'ROUTE_ROLE_SUMMARIZE', '2': 4},
+    {'1': 'ROUTE_ROLE_VERIFY', '2': 5},
+    {'1': 'ROUTE_ROLE_REVIEW', '2': 6},
+  ],
+};
+
+/// Descriptor for `RouteRole`. Decode as a `google.protobuf.EnumDescriptorProto`.
+final $typed_data.Uint8List routeRoleDescriptor = $convert.base64Decode(
+    'CglSb3V0ZVJvbGUSGgoWUk9VVEVfUk9MRV9VTlNQRUNJRklFRBAAEhMKD1JPVVRFX1JPTEVfTU'
+    'FJThABEhQKEFJPVVRFX1JPTEVfSlVER0UQAhIXChNST1VURV9ST0xFX0NMQVNTSUZZEAMSGAoU'
+    'Uk9VVEVfUk9MRV9TVU1NQVJJWkUQBBIVChFST1VURV9ST0xFX1ZFUklGWRAFEhUKEVJPVVRFX1'
+    'JPTEVfUkVWSUVXEAY=');
+
 @$core.Deprecated('Use jsonValueDescriptor instead')
 const JsonValue$json = {
   '1': 'JsonValue',
@@ -403,6 +461,65 @@ final $typed_data.Uint8List usageDescriptor = $convert.base64Decode(
     'lvbl90b2tlbnMYAiABKA1SEGNvbXBsZXRpb25Ub2tlbnMSIQoMdG90YWxfdG9rZW5zGAMgASgN'
     'Ugt0b3RhbFRva2Vucw==');
 
+@$core.Deprecated('Use routeHintDescriptor instead')
+const RouteHint$json = {
+  '1': 'RouteHint',
+  '2': [
+    {
+      '1': 'task_mode',
+      '3': 1,
+      '4': 1,
+      '5': 14,
+      '6': '.agent.v1.TaskMode',
+      '10': 'taskMode'
+    },
+    {
+      '1': 'role',
+      '3': 2,
+      '4': 1,
+      '5': 14,
+      '6': '.agent.v1.RouteRole',
+      '10': 'role'
+    },
+    {'1': 'min_context', '3': 3, '4': 1, '5': 13, '10': 'minContext'},
+    {
+      '1': 'max_cost',
+      '3': 4,
+      '4': 1,
+      '5': 2,
+      '9': 0,
+      '10': 'maxCost',
+      '17': true
+    },
+    {
+      '1': 'tier',
+      '3': 5,
+      '4': 1,
+      '5': 14,
+      '6': '.agent.v1.PoolTier',
+      '10': 'tier'
+    },
+    {
+      '1': 'override_upstream',
+      '3': 6,
+      '4': 1,
+      '5': 9,
+      '10': 'overrideUpstream'
+    },
+  ],
+  '8': [
+    {'1': '_max_cost'},
+  ],
+};
+
+/// Descriptor for `RouteHint`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List routeHintDescriptor = $convert.base64Decode(
+    'CglSb3V0ZUhpbnQSLwoJdGFza19tb2RlGAEgASgOMhIuYWdlbnQudjEuVGFza01vZGVSCHRhc2'
+    'tNb2RlEicKBHJvbGUYAiABKA4yEy5hZ2VudC52MS5Sb3V0ZVJvbGVSBHJvbGUSHwoLbWluX2Nv'
+    'bnRleHQYAyABKA1SCm1pbkNvbnRleHQSHgoIbWF4X2Nvc3QYBCABKAJIAFIHbWF4Q29zdIgBAR'
+    'ImCgR0aWVyGAUgASgOMhIuYWdlbnQudjEuUG9vbFRpZXJSBHRpZXISKwoRb3ZlcnJpZGVfdXBz'
+    'dHJlYW0YBiABKAlSEG92ZXJyaWRlVXBzdHJlYW1CCwoJX21heF9jb3N0');
+
 @$core.Deprecated('Use completionRequestDescriptor instead')
 const CompletionRequest$json = {
   '1': 'CompletionRequest',
@@ -425,6 +542,14 @@ const CompletionRequest$json = {
     },
     {'1': 'max_tokens', '3': 3, '4': 1, '5': 13, '10': 'maxTokens'},
     {'1': 'temperature', '3': 4, '4': 1, '5': 2, '10': 'temperature'},
+    {
+      '1': 'route_hint',
+      '3': 5,
+      '4': 1,
+      '5': 11,
+      '6': '.agent.v1.RouteHint',
+      '10': 'routeHint'
+    },
   ],
 };
 
@@ -433,7 +558,8 @@ final $typed_data.Uint8List completionRequestDescriptor = $convert.base64Decode(
     'ChFDb21wbGV0aW9uUmVxdWVzdBItCghtZXNzYWdlcxgBIAMoCzIRLmFnZW50LnYxLk1lc3NhZ2'
     'VSCG1lc3NhZ2VzEioKBXRvb2xzGAIgAygLMhQuYWdlbnQudjEuVG9vbFNjaGVtYVIFdG9vbHMS'
     'HQoKbWF4X3Rva2VucxgDIAEoDVIJbWF4VG9rZW5zEiAKC3RlbXBlcmF0dXJlGAQgASgCUgt0ZW'
-    '1wZXJhdHVyZQ==');
+    '1wZXJhdHVyZRIyCgpyb3V0ZV9oaW50GAUgASgLMhMuYWdlbnQudjEuUm91dGVIaW50Uglyb3V0'
+    'ZUhpbnQ=');
 
 @$core.Deprecated('Use completionResponseDescriptor instead')
 const CompletionResponse$json = {

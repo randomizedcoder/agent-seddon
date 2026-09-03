@@ -62,7 +62,7 @@ class PoolHealthRequest extends $pb.GeneratedMessage {
 class PoolMemberHealth extends $pb.GeneratedMessage {
   factory PoolMemberHealth({
     $core.String? name,
-    PoolTier? tier,
+    $1.PoolTier? tier,
     $core.bool? alive,
     $core.int? consecutiveFailures,
     $core.int? lastProbeMs,
@@ -103,8 +103,8 @@ class PoolMemberHealth extends $pb.GeneratedMessage {
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
       createEmptyInstance: create)
     ..aOS(1, _omitFieldNames ? '' : 'name')
-    ..aE<PoolTier>(2, _omitFieldNames ? '' : 'tier',
-        enumValues: PoolTier.values)
+    ..aE<$1.PoolTier>(2, _omitFieldNames ? '' : 'tier',
+        enumValues: $1.PoolTier.values)
     ..aOB(3, _omitFieldNames ? '' : 'alive')
     ..aI(4, _omitFieldNames ? '' : 'consecutiveFailures',
         fieldType: $pb.PbFieldType.OU3)
@@ -150,9 +150,9 @@ class PoolMemberHealth extends $pb.GeneratedMessage {
   void clearName() => $_clearField(1);
 
   @$pb.TagNumber(2)
-  PoolTier get tier => $_getN(1);
+  $1.PoolTier get tier => $_getN(1);
   @$pb.TagNumber(2)
-  set tier(PoolTier value) => $_setField(2, value);
+  set tier($1.PoolTier value) => $_setField(2, value);
   @$pb.TagNumber(2)
   $core.bool hasTier() => $_has(1);
   @$pb.TagNumber(2)
@@ -296,7 +296,7 @@ class PoolHealthReport extends $pb.GeneratedMessage {
 class PoolCompleteRequest extends $pb.GeneratedMessage {
   factory PoolCompleteRequest({
     $1.CompletionRequest? req,
-    PoolTier? tier,
+    $1.PoolTier? tier,
     $core.int? fanout,
   }) {
     final result = create();
@@ -321,8 +321,8 @@ class PoolCompleteRequest extends $pb.GeneratedMessage {
       createEmptyInstance: create)
     ..aOM<$1.CompletionRequest>(1, _omitFieldNames ? '' : 'req',
         subBuilder: $1.CompletionRequest.create)
-    ..aE<PoolTier>(2, _omitFieldNames ? '' : 'tier',
-        enumValues: PoolTier.values)
+    ..aE<$1.PoolTier>(2, _omitFieldNames ? '' : 'tier',
+        enumValues: $1.PoolTier.values)
     ..aI(3, _omitFieldNames ? '' : 'fanout', fieldType: $pb.PbFieldType.OU3)
     ..hasRequiredFields = false;
 
@@ -357,9 +357,9 @@ class PoolCompleteRequest extends $pb.GeneratedMessage {
   $1.CompletionRequest ensureReq() => $_ensure(0);
 
   @$pb.TagNumber(2)
-  PoolTier get tier => $_getN(1);
+  $1.PoolTier get tier => $_getN(1);
   @$pb.TagNumber(2)
-  set tier(PoolTier value) => $_setField(2, value);
+  set tier($1.PoolTier value) => $_setField(2, value);
   @$pb.TagNumber(2)
   $core.bool hasTier() => $_has(1);
   @$pb.TagNumber(2)
