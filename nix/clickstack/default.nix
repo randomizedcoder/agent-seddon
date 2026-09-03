@@ -29,26 +29,30 @@ in
     name = "clickstack-up";
     runtimeInputs = [
       versions.docker
+      versions.podman
       versions.curl
     ];
     text = ''
         set -euo pipefail
+        runtime="''${CONTAINER_RUNTIME:-docker}"
 
-        if ! docker info >/dev/null 2>&1; then
-          echo "clickstack-up: docker daemon not reachable — is it running?" >&2
+        if ! "$runtime" info >/dev/null 2>&1; then
+          echo "clickstack-up: '$runtime' not reachable — is it installed/running?" >&2
           exit 1
         fi
 
-        if docker ps -a --format '{{.Names}}' | grep -qx "${name}"; then
+        if "$runtime" ps -a --format '{{.Names}}' | grep -qx "${name}"; then
           echo "==> container '${name}' already exists; (re)starting it"
-          docker start "${name}" >/dev/null
+          "$runtime" start "${name}" >/dev/null
         else
           echo "==> starting ClickStack / HyperDX all-in-one (${image})"
-          # Publish only the UI + OTLP receivers on 127.0.0.1 (host-local). The
-          # bundled ClickHouse stays internal (query it via clickstack-client).
-          docker run -d \
+          # UI publishes on CLICKSTACK_UI_HOST (default 127.0.0.1; set 0.0.0.0 to
+          # reach the HyperDX UI from the LAN). OTLP receivers stay host-local —
+          # the agent exports to them over loopback. Bundled ClickHouse stays
+          # internal (query it via clickstack-client).
+          "$runtime" run -d \
             --name "${name}" \
-            -p 127.0.0.1:${uiPort}:8080 \
+            -p "''${CLICKSTACK_UI_HOST:-127.0.0.1}:${uiPort}:8080" \
             -p 127.0.0.1:${otlpGrpcPort}:4317 \
             -p 127.0.0.1:${otlpHttpPort}:4318 \
             "${image}" >/dev/null

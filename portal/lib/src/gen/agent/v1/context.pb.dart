@@ -15,7 +15,6 @@ import 'dart:core' as $core;
 import 'package:protobuf/protobuf.dart' as $pb;
 
 import 'common.pb.dart' as $0;
-import 'mode.pbenum.dart' as $2;
 
 export 'package:protobuf/protobuf.dart' show GeneratedMessageGenericExtensions;
 
@@ -72,8 +71,8 @@ class CompactRequest extends $pb.GeneratedMessage {
   factory CompactRequest({
     $0.WorkingSet? working,
     $0.TokenBudget? budget,
-    $2.TaskMode? fromMode,
-    $2.TaskMode? toMode,
+    $0.TaskMode? fromMode,
+    $0.TaskMode? toMode,
   }) {
     final result = create();
     if (working != null) result.working = working;
@@ -100,10 +99,10 @@ class CompactRequest extends $pb.GeneratedMessage {
         subBuilder: $0.WorkingSet.create)
     ..aOM<$0.TokenBudget>(2, _omitFieldNames ? '' : 'budget',
         subBuilder: $0.TokenBudget.create)
-    ..aE<$2.TaskMode>(3, _omitFieldNames ? '' : 'fromMode',
-        enumValues: $2.TaskMode.values)
-    ..aE<$2.TaskMode>(4, _omitFieldNames ? '' : 'toMode',
-        enumValues: $2.TaskMode.values)
+    ..aE<$0.TaskMode>(3, _omitFieldNames ? '' : 'fromMode',
+        enumValues: $0.TaskMode.values)
+    ..aE<$0.TaskMode>(4, _omitFieldNames ? '' : 'toMode',
+        enumValues: $0.TaskMode.values)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -151,18 +150,18 @@ class CompactRequest extends $pb.GeneratedMessage {
   /// default for an old client) ⇒ an ordinary budget-triggered compaction. A
   /// switch reshape is requested when `to_mode` is set and differs from `from_mode`.
   @$pb.TagNumber(3)
-  $2.TaskMode get fromMode => $_getN(2);
+  $0.TaskMode get fromMode => $_getN(2);
   @$pb.TagNumber(3)
-  set fromMode($2.TaskMode value) => $_setField(3, value);
+  set fromMode($0.TaskMode value) => $_setField(3, value);
   @$pb.TagNumber(3)
   $core.bool hasFromMode() => $_has(2);
   @$pb.TagNumber(3)
   void clearFromMode() => $_clearField(3);
 
   @$pb.TagNumber(4)
-  $2.TaskMode get toMode => $_getN(3);
+  $0.TaskMode get toMode => $_getN(3);
   @$pb.TagNumber(4)
-  set toMode($2.TaskMode value) => $_setField(4, value);
+  set toMode($0.TaskMode value) => $_setField(4, value);
   @$pb.TagNumber(4)
   $core.bool hasToMode() => $_has(3);
   @$pb.TagNumber(4)

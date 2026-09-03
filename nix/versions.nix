@@ -145,9 +145,14 @@ in
   protoc-gen-dart = pkgs.protoc-gen-dart;
   flutter = pkgs.flutter;
   dart = pkgs.dart;
-  # The grpc-web proxy runs as a docker container (like prometheus/clickstack), so
-  # the gate never source-builds envoy. Web build only.
+  # The grpc-web proxy runs as a container (like prometheus/clickstack), so the gate
+  # never source-builds envoy. Web build only. Referenced fully-qualified
+  # (`docker.io/...`) in nix/portal so podman — whose unqualified-search list can be
+  # empty (e.g. the headless l2 box) — resolves it too.
   envoyImage = "envoyproxy/envoy:v1.31-latest";
+  # Serves the headless Flutter *web* bundle (`nix run .#portal-web`); a static file
+  # server, no browser needed. In the pin as `static-web-server`.
+  static-web-server = pkgs.static-web-server;
 
   # ── Benchmarks: the performance + leak gate ───────────────────────────────
   # `iai-callgrind` runs each bench under callgrind for a *deterministic*
@@ -188,6 +193,9 @@ in
   # Runtime / ops tooling.
   clickhouse = pkgs.clickhouse; # provides `clickhouse-client` in the dev shell
   docker = pkgs.docker;
+  # A rootless alternative to `docker` for the portal grpc-web proxy: the headless
+  # l2 box is podman-only. `nix run .#grpc-web-up` honours `CONTAINER_RUNTIME=podman`.
+  podman = pkgs.podman;
   jq = pkgs.jq;
   curl = pkgs.curl;
   # `expect`: drives the real `agent` binary over a pty in the tcl/expect

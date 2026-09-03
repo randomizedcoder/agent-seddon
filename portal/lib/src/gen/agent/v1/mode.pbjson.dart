@@ -15,27 +15,6 @@ import 'dart:convert' as $convert;
 import 'dart:core' as $core;
 import 'dart:typed_data' as $typed_data;
 
-@$core.Deprecated('Use taskModeDescriptor instead')
-const TaskMode$json = {
-  '1': 'TaskMode',
-  '2': [
-    {'1': 'TASK_MODE_UNSPECIFIED', '2': 0},
-    {'1': 'TASK_MODE_REVIEW', '2': 1},
-    {'1': 'TASK_MODE_IMPLEMENT', '2': 2},
-    {'1': 'TASK_MODE_DESIGN', '2': 3},
-    {'1': 'TASK_MODE_DEBUG', '2': 4},
-    {'1': 'TASK_MODE_EXPLAIN', '2': 5},
-    {'1': 'TASK_MODE_OTHER', '2': 6},
-  ],
-};
-
-/// Descriptor for `TaskMode`. Decode as a `google.protobuf.EnumDescriptorProto`.
-final $typed_data.Uint8List taskModeDescriptor = $convert.base64Decode(
-    'CghUYXNrTW9kZRIZChVUQVNLX01PREVfVU5TUEVDSUZJRUQQABIUChBUQVNLX01PREVfUkVWSU'
-    'VXEAESFwoTVEFTS19NT0RFX0lNUExFTUVOVBACEhQKEFRBU0tfTU9ERV9ERVNJR04QAxITCg9U'
-    'QVNLX01PREVfREVCVUcQBBIVChFUQVNLX01PREVfRVhQTEFJThAFEhMKD1RBU0tfTU9ERV9PVE'
-    'hFUhAG');
-
 @$core.Deprecated('Use modeVerdictDescriptor instead')
 const ModeVerdict$json = {
   '1': 'ModeVerdict',

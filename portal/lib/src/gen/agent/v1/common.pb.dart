@@ -1214,18 +1214,140 @@ class Usage extends $pb.GeneratedMessage {
   void clearTotalTokens() => $_clearField(3);
 }
 
+/// Per-request routing signals (model-router 02b). Mirrors
+/// `agent_core::RouteHint`; advisory and fail-soft — the receiver sanitizes every
+/// value (hostile numbers dropped/clamped, over-long override ids dropped) and a
+/// hint can only narrow selection over the receiver's configured fleet.
+class RouteHint extends $pb.GeneratedMessage {
+  factory RouteHint({
+    TaskMode? taskMode,
+    RouteRole? role,
+    $core.int? minContext,
+    $core.double? maxCost,
+    PoolTier? tier,
+    $core.String? overrideUpstream,
+  }) {
+    final result = create();
+    if (taskMode != null) result.taskMode = taskMode;
+    if (role != null) result.role = role;
+    if (minContext != null) result.minContext = minContext;
+    if (maxCost != null) result.maxCost = maxCost;
+    if (tier != null) result.tier = tier;
+    if (overrideUpstream != null) result.overrideUpstream = overrideUpstream;
+    return result;
+  }
+
+  RouteHint._();
+
+  factory RouteHint.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory RouteHint.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'RouteHint',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
+      createEmptyInstance: create)
+    ..aE<TaskMode>(1, _omitFieldNames ? '' : 'taskMode',
+        enumValues: TaskMode.values)
+    ..aE<RouteRole>(2, _omitFieldNames ? '' : 'role',
+        enumValues: RouteRole.values)
+    ..aI(3, _omitFieldNames ? '' : 'minContext', fieldType: $pb.PbFieldType.OU3)
+    ..aD(4, _omitFieldNames ? '' : 'maxCost', fieldType: $pb.PbFieldType.OF)
+    ..aE<PoolTier>(5, _omitFieldNames ? '' : 'tier',
+        enumValues: PoolTier.values)
+    ..aOS(6, _omitFieldNames ? '' : 'overrideUpstream')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  RouteHint clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  RouteHint copyWith(void Function(RouteHint) updates) =>
+      super.copyWith((message) => updates(message as RouteHint)) as RouteHint;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static RouteHint create() => RouteHint._();
+  @$core.override
+  RouteHint createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static RouteHint getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<RouteHint>(create);
+  static RouteHint? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  TaskMode get taskMode => $_getN(0);
+  @$pb.TagNumber(1)
+  set taskMode(TaskMode value) => $_setField(1, value);
+  @$pb.TagNumber(1)
+  $core.bool hasTaskMode() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearTaskMode() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  RouteRole get role => $_getN(1);
+  @$pb.TagNumber(2)
+  set role(RouteRole value) => $_setField(2, value);
+  @$pb.TagNumber(2)
+  $core.bool hasRole() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearRole() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.int get minContext => $_getIZ(2);
+  @$pb.TagNumber(3)
+  set minContext($core.int value) => $_setUnsignedInt32(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasMinContext() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearMinContext() => $_clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.double get maxCost => $_getN(3);
+  @$pb.TagNumber(4)
+  set maxCost($core.double value) => $_setFloat(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasMaxCost() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearMaxCost() => $_clearField(4);
+
+  @$pb.TagNumber(5)
+  PoolTier get tier => $_getN(4);
+  @$pb.TagNumber(5)
+  set tier(PoolTier value) => $_setField(5, value);
+  @$pb.TagNumber(5)
+  $core.bool hasTier() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearTier() => $_clearField(5);
+
+  @$pb.TagNumber(6)
+  $core.String get overrideUpstream => $_getSZ(5);
+  @$pb.TagNumber(6)
+  set overrideUpstream($core.String value) => $_setString(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasOverrideUpstream() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearOverrideUpstream() => $_clearField(6);
+}
+
 class CompletionRequest extends $pb.GeneratedMessage {
   factory CompletionRequest({
     $core.Iterable<Message>? messages,
     $core.Iterable<ToolSchema>? tools,
     $core.int? maxTokens,
     $core.double? temperature,
+    RouteHint? routeHint,
   }) {
     final result = create();
     if (messages != null) result.messages.addAll(messages);
     if (tools != null) result.tools.addAll(tools);
     if (maxTokens != null) result.maxTokens = maxTokens;
     if (temperature != null) result.temperature = temperature;
+    if (routeHint != null) result.routeHint = routeHint;
     return result;
   }
 
@@ -1248,6 +1370,8 @@ class CompletionRequest extends $pb.GeneratedMessage {
         subBuilder: ToolSchema.create)
     ..aI(3, _omitFieldNames ? '' : 'maxTokens', fieldType: $pb.PbFieldType.OU3)
     ..aD(4, _omitFieldNames ? '' : 'temperature', fieldType: $pb.PbFieldType.OF)
+    ..aOM<RouteHint>(5, _omitFieldNames ? '' : 'routeHint',
+        subBuilder: RouteHint.create)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -1292,6 +1416,18 @@ class CompletionRequest extends $pb.GeneratedMessage {
   $core.bool hasTemperature() => $_has(3);
   @$pb.TagNumber(4)
   void clearTemperature() => $_clearField(4);
+
+  /// Routing signals for a routing provider; absent = today's behaviour.
+  @$pb.TagNumber(5)
+  RouteHint get routeHint => $_getN(4);
+  @$pb.TagNumber(5)
+  set routeHint(RouteHint value) => $_setField(5, value);
+  @$pb.TagNumber(5)
+  $core.bool hasRouteHint() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearRouteHint() => $_clearField(5);
+  @$pb.TagNumber(5)
+  RouteHint ensureRouteHint() => $_ensure(4);
 }
 
 class CompletionResponse extends $pb.GeneratedMessage {

@@ -1,10 +1,14 @@
 # nix/lib/mk-container-app.nix
 #
-# The container-lifecycle apps that are byte-identical across the docker modules
+# The container-lifecycle apps that are byte-identical across the container modules
 # (clickhouse / clickstack / prometheus / grafana): the `*-down` remover, the
 # `*-client` exec wrapper, and the `*-logs` follower. Only the `*-up` app is
 # genuinely per-service (network mode, port maps, schema/dashboard provisioning),
 # so it stays in each module.
+#
+# Runtime: each app honours `CONTAINER_RUNTIME` (default `docker`), so a
+# docker-less, podman-only host (e.g. the headless l2 box) runs the same apps with
+# `CONTAINER_RUNTIME=podman`. podman's CLI is drop-in for run/ps/rm/exec/logs.
 #
 #   c = import ../lib/mk-container-app.nix { inherit pkgs versions; };
 #   { name = "clickhouse"; container = versions.clickhouseContainerName; }
@@ -14,7 +18,12 @@
   versions,
 }:
 let
-  docker = versions.docker;
+  runtimes = [
+    versions.docker
+    versions.podman
+  ];
+  # Shell prelude: resolve the runtime once per app.
+  pickRuntime = ''runtime="''${CONTAINER_RUNTIME:-docker}"'';
 in
 {
   # `<name>-down` — remove the container (data discarded), idempotent.
@@ -25,12 +34,13 @@ in
     }:
     pkgs.writeShellApplication {
       name = "${name}-down";
-      runtimeInputs = [ docker ];
+      runtimeInputs = runtimes;
       text = ''
         set -euo pipefail
-        if docker ps -a --format '{{.Names}}' | grep -qx "${container}"; then
+        ${pickRuntime}
+        if "$runtime" ps -a --format '{{.Names}}' | grep -qx "${container}"; then
           echo "==> removing container '${container}' (data is discarded)"
-          docker rm -f "${container}" >/dev/null
+          "$runtime" rm -f "${container}" >/dev/null
           echo "done"
         else
           echo "container '${container}' not found — nothing to do"
@@ -48,14 +58,15 @@ in
     }:
     pkgs.writeShellApplication {
       name = "${name}-client-wrapper";
-      runtimeInputs = [ docker ];
+      runtimeInputs = runtimes;
       text = ''
         set -euo pipefail
-        if ! docker ps --format '{{.Names}}' | grep -qx "${container}"; then
+        ${pickRuntime}
+        if ! "$runtime" ps --format '{{.Names}}' | grep -qx "${container}"; then
           echo "${name}-client: container '${container}' is not running — run 'nix run .#${name}-up' first" >&2
           exit 1
         fi
-        exec docker exec -i "${container}" ${exec} "$@"
+        exec "$runtime" exec -i "${container}" ${exec} "$@"
       '';
     };
 
@@ -67,10 +78,11 @@ in
     }:
     pkgs.writeShellApplication {
       name = "${name}-logs";
-      runtimeInputs = [ docker ];
+      runtimeInputs = runtimes;
       text = ''
         set -euo pipefail
-        exec docker logs -f "${container}"
+        ${pickRuntime}
+        exec "$runtime" logs -f "${container}"
       '';
     };
 }

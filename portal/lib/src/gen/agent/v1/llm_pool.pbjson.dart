@@ -15,22 +15,6 @@ import 'dart:convert' as $convert;
 import 'dart:core' as $core;
 import 'dart:typed_data' as $typed_data;
 
-@$core.Deprecated('Use poolTierDescriptor instead')
-const PoolTier$json = {
-  '1': 'PoolTier',
-  '2': [
-    {'1': 'POOL_TIER_UNSPECIFIED', '2': 0},
-    {'1': 'POOL_TIER_LIGHT', '2': 1},
-    {'1': 'POOL_TIER_MEDIUM', '2': 2},
-    {'1': 'POOL_TIER_HEAVY', '2': 3},
-  ],
-};
-
-/// Descriptor for `PoolTier`. Decode as a `google.protobuf.EnumDescriptorProto`.
-final $typed_data.Uint8List poolTierDescriptor = $convert.base64Decode(
-    'CghQb29sVGllchIZChVQT09MX1RJRVJfVU5TUEVDSUZJRUQQABITCg9QT09MX1RJRVJfTElHSF'
-    'QQARIUChBQT09MX1RJRVJfTUVESVVNEAISEwoPUE9PTF9USUVSX0hFQVZZEAM=');
-
 @$core.Deprecated('Use poolMemberStateDescriptor instead')
 const PoolMemberState$json = {
   '1': 'PoolMemberState',

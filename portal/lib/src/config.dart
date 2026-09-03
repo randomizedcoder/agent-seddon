@@ -25,15 +25,47 @@ class PortalConfig {
   final String hyperdxUrl;
   final String prometheusUrl;
 
+  // Every endpoint is overridable at build time via `--dart-define=<KEY>=<value>`
+  // (threaded through `nix run .#portal` / `.#portal-web` from env vars or flags —
+  // see nix/portal/default.nix). `fromEnvironment` bakes the value at compile time,
+  // so the defaults below are what ships unless a define overrides them; they still
+  // match nix/constants.nix (gateway) and the documented obs ports.
   const PortalConfig({
-    this.gatewayHost = '127.0.0.1',
-    this.gatewayPort = 50100,
-    this.sessionsHost = '127.0.0.1',
-    this.sessionsPort = 50080,
-    this.grpcWebUrl = 'http://localhost:8090',
-    this.sessionsGrpcWebUrl = 'http://localhost:8091',
-    this.grafanaUrl = 'http://localhost:3000',
-    this.hyperdxUrl = 'http://localhost:8080',
-    this.prometheusUrl = 'http://localhost:9090',
+    this.gatewayHost = const String.fromEnvironment(
+      'PORTAL_GATEWAY_HOST',
+      defaultValue: '127.0.0.1',
+    ),
+    this.gatewayPort = const int.fromEnvironment(
+      'PORTAL_GATEWAY_PORT',
+      defaultValue: 50100,
+    ),
+    this.sessionsHost = const String.fromEnvironment(
+      'PORTAL_SESSIONS_HOST',
+      defaultValue: '127.0.0.1',
+    ),
+    this.sessionsPort = const int.fromEnvironment(
+      'PORTAL_SESSIONS_PORT',
+      defaultValue: 50080,
+    ),
+    this.grpcWebUrl = const String.fromEnvironment(
+      'PORTAL_GRPC_WEB_URL',
+      defaultValue: 'http://localhost:8090',
+    ),
+    this.sessionsGrpcWebUrl = const String.fromEnvironment(
+      'PORTAL_SESSIONS_GRPC_WEB_URL',
+      defaultValue: 'http://localhost:8091',
+    ),
+    this.grafanaUrl = const String.fromEnvironment(
+      'PORTAL_GRAFANA_URL',
+      defaultValue: 'http://localhost:3000',
+    ),
+    this.hyperdxUrl = const String.fromEnvironment(
+      'PORTAL_HYPERDX_URL',
+      defaultValue: 'http://localhost:8080',
+    ),
+    this.prometheusUrl = const String.fromEnvironment(
+      'PORTAL_PROMETHEUS_URL',
+      defaultValue: 'http://localhost:9090',
+    ),
   });
 }

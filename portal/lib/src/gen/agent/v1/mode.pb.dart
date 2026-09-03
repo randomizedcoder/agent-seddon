@@ -15,17 +15,14 @@ import 'dart:core' as $core;
 import 'package:protobuf/protobuf.dart' as $pb;
 
 import 'common.pb.dart' as $1;
-import 'mode.pbenum.dart';
 
 export 'package:protobuf/protobuf.dart' show GeneratedMessageGenericExtensions;
-
-export 'mode.pbenum.dart';
 
 /// What a classifier saw the incoming work as. `confidence` is untrusted (a pool
 /// vote's self-report) — clamp to 0..=1 on receipt.
 class ModeVerdict extends $pb.GeneratedMessage {
   factory ModeVerdict({
-    TaskMode? mode,
+    $1.TaskMode? mode,
     $core.double? confidence,
     $core.String? reason,
   }) {
@@ -49,8 +46,8 @@ class ModeVerdict extends $pb.GeneratedMessage {
       _omitMessageNames ? '' : 'ModeVerdict',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
       createEmptyInstance: create)
-    ..aE<TaskMode>(1, _omitFieldNames ? '' : 'mode',
-        enumValues: TaskMode.values)
+    ..aE<$1.TaskMode>(1, _omitFieldNames ? '' : 'mode',
+        enumValues: $1.TaskMode.values)
     ..aD(2, _omitFieldNames ? '' : 'confidence', fieldType: $pb.PbFieldType.OF)
     ..aOS(3, _omitFieldNames ? '' : 'reason')
     ..hasRequiredFields = false;
@@ -75,9 +72,9 @@ class ModeVerdict extends $pb.GeneratedMessage {
   static ModeVerdict? _defaultInstance;
 
   @$pb.TagNumber(1)
-  TaskMode get mode => $_getN(0);
+  $1.TaskMode get mode => $_getN(0);
   @$pb.TagNumber(1)
-  set mode(TaskMode value) => $_setField(1, value);
+  set mode($1.TaskMode value) => $_setField(1, value);
   @$pb.TagNumber(1)
   $core.bool hasMode() => $_has(0);
   @$pb.TagNumber(1)
@@ -105,8 +102,8 @@ class ModeVerdict extends $pb.GeneratedMessage {
 /// A decided change of task mode (recorded; drives compaction + memory later).
 class ModeSwitch extends $pb.GeneratedMessage {
   factory ModeSwitch({
-    TaskMode? from,
-    TaskMode? to,
+    $1.TaskMode? from,
+    $1.TaskMode? to,
     $core.String? reason,
     $core.double? confidence,
   }) {
@@ -131,9 +128,10 @@ class ModeSwitch extends $pb.GeneratedMessage {
       _omitMessageNames ? '' : 'ModeSwitch',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
       createEmptyInstance: create)
-    ..aE<TaskMode>(1, _omitFieldNames ? '' : 'from',
-        enumValues: TaskMode.values)
-    ..aE<TaskMode>(2, _omitFieldNames ? '' : 'to', enumValues: TaskMode.values)
+    ..aE<$1.TaskMode>(1, _omitFieldNames ? '' : 'from',
+        enumValues: $1.TaskMode.values)
+    ..aE<$1.TaskMode>(2, _omitFieldNames ? '' : 'to',
+        enumValues: $1.TaskMode.values)
     ..aOS(3, _omitFieldNames ? '' : 'reason')
     ..aD(4, _omitFieldNames ? '' : 'confidence', fieldType: $pb.PbFieldType.OF)
     ..hasRequiredFields = false;
@@ -157,18 +155,18 @@ class ModeSwitch extends $pb.GeneratedMessage {
   static ModeSwitch? _defaultInstance;
 
   @$pb.TagNumber(1)
-  TaskMode get from => $_getN(0);
+  $1.TaskMode get from => $_getN(0);
   @$pb.TagNumber(1)
-  set from(TaskMode value) => $_setField(1, value);
+  set from($1.TaskMode value) => $_setField(1, value);
   @$pb.TagNumber(1)
   $core.bool hasFrom() => $_has(0);
   @$pb.TagNumber(1)
   void clearFrom() => $_clearField(1);
 
   @$pb.TagNumber(2)
-  TaskMode get to => $_getN(1);
+  $1.TaskMode get to => $_getN(1);
   @$pb.TagNumber(2)
-  set to(TaskMode value) => $_setField(2, value);
+  set to($1.TaskMode value) => $_setField(2, value);
   @$pb.TagNumber(2)
   $core.bool hasTo() => $_has(1);
   @$pb.TagNumber(2)
