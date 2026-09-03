@@ -1019,6 +1019,20 @@ impl Agent {
                 self.hooks.post_turn(&assistant).await;
             }
 
+            // The buffered path (`stream=false`) emits no incremental TokenDeltas,
+            // so a live subscriber (the portal Agent view) would see the run
+            // scaffolding but never the answer. Publish the assistant's text as a
+            // single delta so it renders, mirroring the streaming echo. (The
+            // streaming path already published its deltas as content arrived.)
+            // Reasoning models keep their chain-of-thought in a separate field the
+            // provider drops, so only the answer is surfaced.
+            if !self.settings.stream && events.has_subscribers() {
+                let text = assistant.content_text();
+                if !text.is_empty() {
+                    events.publish(agent_core::SessionEvent::TokenDelta { text });
+                }
+            }
+
             if let Some(u) = &resp.usage {
                 tracing::info!(
                     iter,
@@ -1954,6 +1968,69 @@ mod tests {
             !memory.events().into_iter().any(|e| e.kind == "mode_switch"),
             "a below-floor verdict must not switch the mode"
         );
+    }
+
+    // ---- buffered turn surfaces its answer to a live subscriber -------------
+
+    fn agent_for_buffered(answer: &'static str) -> Arc<Agent> {
+        Arc::new(Agent::new(
+            Arc::new(FnProvider::new(move |_req: &CompletionRequest| {
+                final_turn(answer)
+            })),
+            ToolRegistry::new(),
+            Arc::new(RecordingMemory::new()),
+            Arc::new(StaticContext),
+            Arc::new(crate::policy::AutoApprove),
+            Metrics::new(),
+            settings(false), // stream = false → the buffered path
+        ))
+    }
+
+    // The buffered path (`stream=false`) emits no incremental deltas, so without an
+    // explicit publish a subscriber (the portal Agent view) would see the run
+    // scaffolding but never the answer. A subscribed session must receive the
+    // assistant's text as a `TokenDelta`.
+    #[tokio::test]
+    async fn positive_buffered_turn_publishes_answer_to_subscriber() {
+        use agent_core::SessionSource;
+        use futures_util::StreamExt;
+
+        let key = agent_core::SessionKey::parse("u", "s-buffered").unwrap();
+        let agent = agent_for_buffered("BUFFERED_ANSWER");
+        // Subscribe BEFORE the run so `has_subscribers()` holds during the turn.
+        let sink = agent.events.get_or_create(key.session.as_str());
+        let mut stream = sink.subscribe();
+        assert!(sink.has_subscribers());
+
+        let mut session = agent.session_with(key.clone());
+        assert_eq!(session.send("q").await.unwrap(), "BUFFERED_ANSWER");
+
+        let mut saw_answer = false;
+        while let Ok(Some(ev)) =
+            tokio::time::timeout(std::time::Duration::from_millis(100), stream.next()).await
+        {
+            if let agent_core::SessionEvent::TokenDelta { text } = ev {
+                if text.contains("BUFFERED_ANSWER") {
+                    saw_answer = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            saw_answer,
+            "a buffered turn must publish its answer as a TokenDelta for live observers"
+        );
+    }
+
+    // Guard the subscriber check: a buffered turn with NO subscriber must not
+    // publish (the unobserved hot path stays allocation-free). The snapshot's
+    // context is untouched by a delta, so we simply assert the run still returns
+    // its answer without a subscriber attached.
+    #[tokio::test]
+    async fn boundary_buffered_turn_without_subscriber_still_answers() {
+        let agent = agent_for_buffered("NO_SUB");
+        let mut session = agent.session();
+        assert_eq!(session.send("q").await.unwrap(), "NO_SUB");
     }
 
     // ---- dimensional memory (dimension_pass + recall_for_mode) --------------

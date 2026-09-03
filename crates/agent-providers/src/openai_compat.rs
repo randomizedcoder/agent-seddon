@@ -134,6 +134,11 @@ impl OpenAiCompatProvider {
             max_tokens: req.max_tokens,
             temperature: req.temperature,
             stream,
+            // Ask for a terminal usage chunk in stream mode so streamed responses
+            // report token counts (buffered responses already carry `usage`).
+            stream_options: stream.then_some(StreamOptions {
+                include_usage: true,
+            }),
             prompt_cache_key: self.cache_key(req),
         }
     }
@@ -224,17 +229,7 @@ impl LlmProvider for OpenAiCompatProvider {
         Ok(CompletionResponse {
             message,
             finish_reason: choice.finish_reason.unwrap_or_else(|| "stop".into()),
-            usage: parsed.usage.map(|u| Usage {
-                prompt_tokens: u.prompt_tokens,
-                completion_tokens: u.completion_tokens,
-                total_tokens: u.total_tokens,
-                // OpenAI reports prompt-cache hits under `prompt_tokens_details.
-                // cached_tokens`; there is no separate cache-write line (writes are
-                // billed as normal input), so `cache_write_tokens` stays 0.
-                cache_read_tokens: u.prompt_tokens_details.cached_tokens,
-                cache_write_tokens: 0,
-                cost: None,
-            }),
+            usage: parsed.usage.map(to_core_usage),
         })
     }
 
@@ -248,13 +243,15 @@ impl LlmProvider for OpenAiCompatProvider {
         }
 
         // Text streams directly; tool-call `arguments` arrive as fragments keyed
-        // by `index` and are finalized when the stream ends. (Usage is not
-        // requested in stream mode; use `stream=false` for token counts.)
+        // by `index` and are finalized when the stream ends. Token `usage` arrives
+        // in a terminal chunk (requested via `stream_options.include_usage`) and is
+        // forwarded on the final `CompletionChunk`.
         let stream = async_stream::stream! {
             let mut bytes = resp.bytes_stream();
             let mut buf = String::new();
             let mut tools_acc: BTreeMap<u32, ToolAcc> = BTreeMap::new();
             let mut finish: Option<String> = None;
+            let mut usage: Option<Usage> = None;
 
             'read: while let Some(next) = bytes.next().await {
                 let b = match next {
@@ -280,6 +277,10 @@ impl LlmProvider for OpenAiCompatProvider {
                         Ok(ev) => ev,
                         Err(_) => continue,
                     };
+                    // The terminal usage chunk (include_usage) carries no choices.
+                    if let Some(u) = ev.usage {
+                        usage = Some(to_core_usage(u));
+                    }
                     for choice in ev.choices {
                         if let Some(delta) = choice.delta {
                             if let Some(text) = delta.content {
@@ -318,6 +319,7 @@ impl LlmProvider for OpenAiCompatProvider {
             }
             yield Ok(CompletionChunk {
                 finish_reason: Some(finish.unwrap_or_else(|| "stop".into())),
+                usage,
                 ..Default::default()
             });
         };
@@ -361,6 +363,10 @@ fn parse_tool_args(raw: &str) -> Value {
 struct StreamEvent {
     #[serde(default)]
     choices: Vec<StreamChoice>,
+    /// Present only in the terminal chunk when `stream_options.include_usage` was
+    /// requested (that chunk carries no choices). Carries the streamed token counts.
+    #[serde(default)]
+    usage: Option<WireUsage>,
 }
 
 #[derive(Deserialize)]
@@ -409,10 +415,24 @@ struct WireReq<'a> {
     temperature: f32,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     stream: bool,
+    /// `{ include_usage: true }` in stream mode requests a terminal usage chunk
+    /// (token counts). Omitted — and thus absent from the body — for buffered
+    /// requests, which already report `usage`. See [`StreamOptions`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptions>,
     /// Routing affinity for the provider's automatic prefix cache (parity spec
     /// 24). Omitted when no strategy is wired, so the body is unchanged.
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_key: Option<String>,
+}
+
+/// `stream_options` — asks an OpenAI-compatible server to append a terminal chunk
+/// carrying token `usage` to a streamed response (the OpenAI streaming
+/// convention). Without it, streamed responses report no token counts. Sent only
+/// when streaming; unknown to servers that ignore it (skipped when buffered).
+#[derive(Serialize)]
+struct StreamOptions {
+    include_usage: bool,
 }
 
 /// Render message content for the wire. A text-only message stays a plain
@@ -590,12 +610,56 @@ struct PromptTokensDetails {
     cached_tokens: u32,
 }
 
+/// Map the wire `usage` block to the core [`Usage`]. Shared by the buffered
+/// decoder and the streaming terminal-chunk decoder so the cache-token mapping
+/// lives in one place.
+fn to_core_usage(u: WireUsage) -> Usage {
+    Usage {
+        prompt_tokens: u.prompt_tokens,
+        completion_tokens: u.completion_tokens,
+        total_tokens: u.total_tokens,
+        // OpenAI reports prompt-cache hits under `prompt_tokens_details.
+        // cached_tokens`; there is no separate cache-write line (writes are billed
+        // as normal input), so `cache_write_tokens` stays 0.
+        cache_read_tokens: u.prompt_tokens_details.cached_tokens,
+        cache_write_tokens: 0,
+        cost: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{parse_tool_args, to_openai_content, WireContent};
-    use agent_core::ContentBlock;
+    use super::{
+        parse_tool_args, to_core_usage, to_openai_content, OpenAiCompatConfig,
+        OpenAiCompatProvider, PromptTokensDetails, StreamEvent, WireContent, WireUsage,
+    };
+    use agent_core::{CompletionRequest, ContentBlock, Message};
     use rstest::rstest;
     use serde_json::{json, Value};
+
+    fn test_provider() -> OpenAiCompatProvider {
+        OpenAiCompatProvider::new(OpenAiCompatConfig {
+            base_url: "http://localhost/v1".into(),
+            model: "test-model".into(),
+            api_key: "k".into(),
+            insecure_tls: false,
+            context_window: 8192,
+            max_retries: 0,
+            supports_vision: false,
+        })
+        .expect("provider builds")
+    }
+
+    fn test_request() -> CompletionRequest {
+        CompletionRequest {
+            messages: vec![Message::user("hi")],
+            tools: Vec::new(),
+            max_tokens: 16,
+            temperature: 0.0,
+            response_format: None,
+            route: None,
+        }
+    }
 
     /// The 67-byte minimal 1x1 PNG (deterministic fixture, no assets).
     const TINY_PNG: &[u8] = &[
@@ -647,5 +711,114 @@ mod tests {
     #[case::corner_partial_json("{oops", Value::String("{oops".into()))]
     fn parse_tool_args_cases(#[case] raw: &str, #[case] expected: Value) {
         assert_eq!(parse_tool_args(raw), expected);
+    }
+
+    // --- stream_options.include_usage: the streamed request body ---------------
+
+    /// A streamed request must ask for a terminal usage chunk; a buffered request
+    /// must not carry `stream_options` at all (it already reports usage, and the
+    /// key is skipped when `None`).
+    #[rstest]
+    #[case::positive_stream_requests_usage(true)]
+    #[case::negative_buffered_omits_stream_options(false)]
+    fn build_wire_stream_options(#[case] stream: bool) {
+        let p = test_provider();
+        let wire = p.build_wire(&test_request(), stream);
+        let body = serde_json::to_value(&wire).unwrap();
+        if stream {
+            assert_eq!(body["stream"], json!(true));
+            assert_eq!(body["stream_options"]["include_usage"], json!(true));
+        } else {
+            // `stream` and `stream_options` are both skip_serializing_if here.
+            assert!(body.get("stream").is_none(), "buffered body: {body}");
+            assert!(
+                body.get("stream_options").is_none(),
+                "buffered body must not carry stream_options: {body}"
+            );
+        }
+    }
+
+    // --- to_core_usage: wire usage → core Usage --------------------------------
+
+    fn wire_usage(prompt: u32, completion: u32, total: u32, cached: u32) -> WireUsage {
+        WireUsage {
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            total_tokens: total,
+            prompt_tokens_details: PromptTokensDetails {
+                cached_tokens: cached,
+            },
+        }
+    }
+
+    /// `cached_tokens` maps to `cache_read_tokens`; there is no cache-write line.
+    #[rstest]
+    #[case::positive_all_fields(100, 20, 120, 7)]
+    #[case::boundary_zeros(0, 0, 0, 0)]
+    #[case::boundary_max_u32(u32::MAX, u32::MAX, u32::MAX, u32::MAX)]
+    #[case::corner_cache_only(0, 0, 0, 9)]
+    fn to_core_usage_maps(
+        #[case] prompt: u32,
+        #[case] completion: u32,
+        #[case] total: u32,
+        #[case] cached: u32,
+    ) {
+        let u = to_core_usage(wire_usage(prompt, completion, total, cached));
+        assert_eq!(u.prompt_tokens, prompt);
+        assert_eq!(u.completion_tokens, completion);
+        assert_eq!(u.total_tokens, total);
+        assert_eq!(u.cache_read_tokens, cached);
+        assert_eq!(u.cache_write_tokens, 0);
+        assert!(u.cost.is_none());
+    }
+
+    // --- streamed usage chunk parsing (the server response is untrusted) -------
+
+    /// The terminal `include_usage` chunk carries `usage` and no choices; ordinary
+    /// content chunks carry no `usage`.
+    #[rstest]
+    #[case::positive_terminal_usage(
+        r#"{"choices":[],"usage":{"prompt_tokens":94,"completion_tokens":11,"total_tokens":105}}"#,
+        Some((94, 11, 105))
+    )]
+    #[case::boundary_content_chunk_has_no_usage(
+        r#"{"choices":[{"delta":{"content":"hi"}}]}"#,
+        None
+    )]
+    #[case::corner_usage_defaults_missing_fields(
+        r#"{"choices":[],"usage":{"prompt_tokens":5,"prompt_tokens_details":{"cached_tokens":3}}}"#,
+        Some((5, 0, 0))
+    )]
+    #[case::boundary_max_u32(
+        r#"{"choices":[],"usage":{"prompt_tokens":4294967295,"total_tokens":4294967295}}"#,
+        Some((4_294_967_295, 0, 4_294_967_295))
+    )]
+    fn stream_event_usage_parse(#[case] data: &str, #[case] expect: Option<(u32, u32, u32)>) {
+        let ev: StreamEvent = serde_json::from_str(data).expect("well-formed chunk parses");
+        match (ev.usage, expect) {
+            (Some(u), Some((p, c, t))) => {
+                assert_eq!(
+                    (u.prompt_tokens, u.completion_tokens, u.total_tokens),
+                    (p, c, t)
+                );
+            }
+            (None, None) => {}
+            (got, want) => panic!("usage mismatch: got_some={} want={want:?}", got.is_some()),
+        }
+    }
+
+    /// Hostile token counts (negative / float / non-numeric) must fail to parse so
+    /// the stream loop skips the chunk (fail-closed: no bogus count leaks through),
+    /// per the "hostile numbers" rule for attacker-controlled server values.
+    #[rstest]
+    #[case::adversarial_negative(r#"{"choices":[],"usage":{"prompt_tokens":-5}}"#)]
+    #[case::adversarial_float(r#"{"choices":[],"usage":{"prompt_tokens":3.9}}"#)]
+    #[case::adversarial_string(r#"{"choices":[],"usage":{"prompt_tokens":"lots"}}"#)]
+    #[case::adversarial_overflow(r#"{"choices":[],"usage":{"prompt_tokens":99999999999999}}"#)]
+    fn stream_event_hostile_usage_is_rejected(#[case] data: &str) {
+        assert!(
+            serde_json::from_str::<StreamEvent>(data).is_err(),
+            "hostile usage chunk must be rejected, not silently coerced: {data}"
+        );
     }
 }
