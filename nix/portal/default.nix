@@ -137,7 +137,7 @@ let
                               allow_origin_string_match:
                                 - prefix: "*"
                               allow_methods: GET, PUT, DELETE, POST, OPTIONS
-                              allow_headers: keep-alive,user-agent,cache-control,content-type,content-transfer-encoding,x-grpc-web,x-user-agent,grpc-timeout
+                              allow_headers: keep-alive,user-agent,cache-control,content-type,content-transfer-encoding,x-grpc-web,x-user-agent,grpc-timeout,x-agent-user-id,x-agent-session-id
                               max_age: "1728000"
                               expose_headers: grpc-status,grpc-message
                           routes:
@@ -174,7 +174,7 @@ let
                               allow_origin_string_match:
                                 - prefix: "*"
                               allow_methods: GET, PUT, DELETE, POST, OPTIONS
-                              allow_headers: keep-alive,user-agent,cache-control,content-type,content-transfer-encoding,x-grpc-web,x-user-agent,grpc-timeout
+                              allow_headers: keep-alive,user-agent,cache-control,content-type,content-transfer-encoding,x-grpc-web,x-user-agent,grpc-timeout,x-agent-user-id,x-agent-session-id
                               max_age: "1728000"
                               expose_headers: grpc-status,grpc-message
                           routes:
