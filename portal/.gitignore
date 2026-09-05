@@ -1,9 +1,13 @@
-# Only lib/, pubspec.yaml, analysis_options.yaml, and the committed generated stubs
-# (lib/src/gen/) are tracked. Everything below is generated on demand — the platform
-# runner scaffolding by `nix run .#portal` (flutter create), the rest by pub/build.
+# Only lib/, pubspec.yaml, pubspec.lock, analysis_options.yaml, and the committed
+# generated stubs (lib/src/gen/) are tracked. Everything below is generated on demand
+# — the platform runner scaffolding by `nix run .#portal` (flutter create), the rest
+# by pub/build.
+#
+# pubspec.lock IS tracked (not ignored): the hermetic `dart-analyze` flake check
+# (nix/checks/dart-analyze.nix) vendors pub deps offline from it — reproducible
+# analysis needs the resolution pinned, exactly as Dart recommends for an app.
 .dart_tool/
 .packages
-pubspec.lock
 build/
 .flutter-plugins
 .flutter-plugins-dependencies
