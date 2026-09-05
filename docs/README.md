@@ -102,6 +102,19 @@ One doc per seam or subsystem. The **config key** column is what you set in
 | MCP (client and server) | `[[mcp.servers]]` | [`mcp.md`](components/mcp.md) |
 | Retry and backoff | `[provider] max_retries` | [`retry.md`](components/retry.md) |
 
+### Portal / management seams
+
+Operator/portal-facing seams the loop does **not** consume — served over gRPC for
+the [Agent Portal](design/portal/README.md). They have no impl-swap key; the column
+below is the service flag / `[grpc.<seam>]` block that hosts them.
+
+| Component | Service / config | Doc |
+|---|---|---|
+| Prompt management | `--serve-prompt`, `[prompts]` | [`prompt.md`](components/prompt.md) |
+| Config management | `--serve-config`, `[grpc.config]` | [`config.md`](components/config.md) |
+| Metrics proxy (PromQL over gRPC) | `--serve-metrics-proxy`, `[metrics_proxy]` | [`metrics-proxy.md`](components/metrics-proxy.md) |
+| Live agent-session feed | `--serve-session-stream`, `[grpc.session_stream]` | [`agent-session.md`](components/agent-session.md) |
+
 ### Cross-cutting
 
 | Component | Doc |
@@ -114,8 +127,8 @@ One doc per seam or subsystem. The **config key** column is what you set in
 Per-track design documents in [`design/`](design/) — the input to a feature's
 implementation phase, distinct from the shipped `components/` docs. Each carries a
 `STATUS.md` tracking which increments have merged; the tracks below are largely
-**implemented** (see each `STATUS.md`), while `tool-call-verification.md` and
-`portal/` remain forward-looking (the latter **design / pre-implementation**).
+**implemented** (see each `STATUS.md`), while `tool-call-verification.md` remains
+forward-looking.
 
 | Doc | About |
 |---|---|
@@ -125,7 +138,7 @@ implementation phase, distinct from the shipped `components/` docs. Each carries
 | [`gpu-pool/`](design/gpu-pool/README.md) | The **GPU/LLM pool**: extend the health-checked `LlmPool` into a capacity-aware load balancer across many local targets — in-flight-aware selection policies (least-loaded / weighted / round-robin), per-target concurrency cap + fail-soft backpressure, and latency-graded `healthy \| degraded \| dead` routing. Shipped component: [`pool.md`](components/pool.md) |
 | [`model-router/`](design/model-router/README.md) | The **Model Router & Upstream Registry**: evolve the pool from a local-GPU load balancer into a **task-aware router over 10–50 upstream LLMs**. Each upstream carries a **model card** (per-upstream context window, cost, latency, capability tags); a declarative **`RoutePolicy`** you author + live health/load signals decide the pick; a `RouteHint` (TaskMode · role · request requirements · explicit override) rides each request; and the fleet migrates from TOML to a gRPC **`ProviderRegistryService`** control plane (CRUD + swappable storage), with TOML kept as a back-compat seed. Extends `gpu-pool/`. **Design / pre-implementation** |
 | [`loadtest/`](design/loadtest/README.md) | **Overload/backpressure conformance + seam load harness**: a uniform admission layer so every seam sheds overload with `RESOURCE_EXHAUSTED` + a `grpc-retry-pushback-ms` hint (the client already backs off + clamps), plus an opt-in load/conformance harness that drives each service into overload, asserts the contract, and reports throughput/latency. **In progress** |
-| [`portal/`](design/portal/README.md) | The **Agent Portal**: a small Flutter, **gRPC-only** app that launches the observability UIs, lets the operator **see + CRUD every prompt per mode** (system · context.d pre/post-pends · externalized per-mode compaction lenses), and gives a live **agent view** — loop narration + a status bar (mode · context size · GPU pool · gRPC p50/p99). Adds three seams (`PromptService`, `AgentSessionService`, `MetricsProxyService`) + Dart codegen. **Design / pre-implementation** |
+| [`portal/`](design/portal/README.md) | The **Agent Portal**: a small Flutter, **gRPC-only** app that launches the observability UIs, lets the operator **see + CRUD every prompt per mode** (system · context.d pre/post-pends · externalized per-mode compaction lenses), gives a live **agent view** (loop narration + a status bar: mode · context · GPU pool · gRPC p50/p99), and — increment [05](design/portal/05-config-and-router.md) — a schema-driven **Settings** editor over the whole `config/agent.toml` (new `ConfigService` seam: `schemars` schema + `toml_edit` write-back, restart-to-apply) and a live **Router** editor over the model-router registry (applies immediately). Adds four seams (`PromptService`, `AgentSessionService`, `MetricsProxyService`, `ConfigService`) + Dart codegen. **Core merged; config/router on a branch** |
 | [`prompts/`](design/prompts/README.md) | The **Prompt Library**: a pre-created, editable library of prompt fragments **selected by the situation** — a base always applied plus **tagged fragments** chosen when the situation supplies their tags (`mode:review` today; `language:`/`tier:`/… as the signals land), composed additively behind a cache-stable base. Stored behind a **swappable backend** (`file` git-legible default · embedded `sqlite` · `grpc`→central catalog), all behind the portal's one `PromptService` CRUD. Realises the portal's deferred *per-mode system prompts* item; drafts the content for all six modes and contrasts hermes/pi/opencode. **Design / pre-implementation** |
 | [`multi-session/`](design/multi-session/README.md) | **Multi-session / multi-user**: make every seam serve many users and concurrent sessions over the existing gRPC architecture — a `(user_id, session_id)` identity that rides gRPC **metadata** (hybrid with typed fields for `SessionRegistry`/`SessionStore`/confined cwd), per-user memory tenancy, a `Backend`/`Session`/`SessionManager` split, fixes for two single-loop state hazards, and session-attributed traces + a curated per-session metric label. Isolation via `confine`/`safe_segment` holds even against a spoofed identity; **authentication is a named follow-up**, not this track. An 8-doc set with a status table. **Design / pre-implementation** |
 | [`cognition-graph/`](design/cognition-graph/README.md) | The **Cognition Graph**: spend the model-router fleet *as we go* — an asymmetric **consensus gate** (generator × cross-family critic, structured verdicts, bounded feedback loop) on every response; a per-session background **distiller** writing per-turn summary + key-facts digests to a `(session_id, seq)` ledger (`DigestStore`: **ClickHouse default** (append-only MergeTree, durable async_insert) · sqlite · grpc); **instant compaction** that assembles from the pre-computed ledger filtered by a current-objective summary instead of summarizing on the critical path; all re-expressed as a user-configurable **node graph** (textproto; MAIN/BACKGROUND/CAPABILITY edges; fork/join **parallel branches** — diverse-lens exploration with all/any/quorum joins and compare/synthesize merges; `DescribeNodeTypes` schema registry sized for a future Flutter drag-drop editor). Weighs five architectures against pi/hermes/opencode/codex + LangGraph/AutoGen/ComfyUI prior art. **Design / pre-implementation** |

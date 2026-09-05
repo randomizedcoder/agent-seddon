@@ -876,6 +876,14 @@ job         = "agent-seddon"
 # [grpc.session_stream]
 # listen = "127.0.0.1:50078"                          # observe this running agent
 #
+# The agent config file as a seam (docs/design/portal): the portal's Settings tab
+# reads the schema + values and writes edits back to THIS file (comments
+# preserved), effect on restart. Setting `listen` makes a running agent also host
+# ConfigService; it is also hosted by `--serve-config` / `--serve-all`. Default
+# port 50085. Operator/portal facing — keep it loopback / a unix socket.
+# [grpc.config]
+# listen = "127.0.0.1:50085"                          # --serve-config binds this
+#
 # `agent --serve-all` hosts every enabled seam in ONE process on ONE endpoint,
 # so a same-host deployment isn't one process per seam. Seams whose impl is
 # disabled in this build/config are skipped with a warning rather than failing

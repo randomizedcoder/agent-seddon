@@ -1135,6 +1135,19 @@ pub async fn build_agent_with(
         Some(p) => agent.with_prompt_store(p),
         None => agent,
     };
+    // The config-management store (portal settings): exposes `config/agent.toml`
+    // as schema + values and writes edits back in place. Only wired when the CLI
+    // recorded the source path; embedded/test callers build a `Config` in memory
+    // (no path) and simply get no store, like a feature-off seam.
+    #[cfg(feature = "config")]
+    let agent = match cfg.source_path.clone() {
+        Some(path) => {
+            let snapshot = serde_json::to_value(&cfg).unwrap_or(serde_json::Value::Null);
+            agent.with_config_store(Arc::new(crate::FileConfigStore::new(path, snapshot))
+                as Arc<dyn agent_core::ConfigStore>)
+        }
+        None => agent,
+    };
     // The provider-registry control plane (model-router 03), held for
     // `--serve-provider-registry`; the loop consumes it in increment 04.
     #[cfg(feature = "registry")]

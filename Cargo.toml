@@ -84,6 +84,15 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # URL parsing for the SSRF guard (robust host/scheme extraction; already in-tree via reqwest).
 url = "2"
 toml = "0.8"
+# Format- and comment-preserving TOML editing for the ConfigStore write-back
+# (portal settings): applies a sparse patch to `config/agent.toml` in place so
+# the annotated reference file keeps its comments. Already in-tree via `toml`.
+toml_edit = "0.22"
+# JSON-Schema generation for the ConfigStore schema (portal settings): derives a
+# schema for the whole `Config` (types, doc-comment descriptions, defaults),
+# enriched by an enum-choices + secret overlay in `agent-config`. Optional, only
+# pulled in under the `config-schema` feature.
+schemars = "0.8"
 # Collects the config keys serde IGNORED during deserialization, so a misplaced
 # or misspelled key can be warned about instead of silently doing nothing. See
 # `parse_config`.

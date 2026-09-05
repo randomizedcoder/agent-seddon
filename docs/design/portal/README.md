@@ -1,11 +1,13 @@
 # Design: Agent Portal (Flutter · gRPC-only)
 
-Status: **design / pre-implementation.** This directory is the design of record for
-a small Flutter "Agent Portal" that makes the harness's existing legibility
-*reachable from one place*, and closes two gaps in it. It is a draft to refine;
-where the shipped code later refines a detail, [`STATUS.md`](STATUS.md) becomes
-authoritative — the same convention as [`../adaptive-cognition/`](../adaptive-cognition/README.md)
-and [`../code-review/`](../code-review/README.md).
+Status: **largely implemented** — the six-increment core (Launcher · Prompts ·
+Agent View + the three seams) has merged, and a **configuration & router** increment
+([`05-config-and-router.md`](05-config-and-router.md)) is implemented on a branch;
+[`STATUS.md`](STATUS.md) is the authoritative tracker. This directory is the design
+of record for a small Flutter "Agent Portal" that makes the harness's existing
+legibility *reachable from one place*, and closes the gaps in it — the same
+convention as [`../adaptive-cognition/`](../adaptive-cognition/README.md) and
+[`../code-review/`](../code-review/README.md).
 
 ## The idea
 
@@ -115,6 +117,19 @@ moment they're served.
   agent-view panel layout.
 - [`04-nix-tooling.md`](04-nix-tooling.md) — flutter/dart pins, the optional
   web-only grpc-web proxy, run apps, and the new port block in `nix/constants.nix`.
+
+## Configuration & the model router (increment 05)
+
+- [`05-config-and-router.md`](05-config-and-router.md) — two more tabs that close the
+  **configuration** legibility gap and surface the one live control plane that had no
+  UI. **Settings**: a schema-driven editor over the *entire* `config/agent.toml` via a
+  new **`ConfigService`** seam (`GetSchema`/`GetValues`/`Validate`/`Put`/`Status`) —
+  `schemars` schema + enum/secret overlay, `toml_edit` comment-preserving write-back,
+  effect on **restart** (a drift banner says so). **Router**: live CRUD over the
+  existing [`ProviderRegistryService`](../model-router/03-registry-proto.md) — upstream
+  cards, routing policy, health, and a route tester — which **applies immediately**.
+  The two opposite apply-models are the doc's organizing idea. Adds a reusable
+  `SchemaForm` widget (generalises the graph page's `_ParamsEditor`).
 
 ## Security posture (inherited, not invented)
 

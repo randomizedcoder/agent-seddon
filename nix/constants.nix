@@ -248,6 +248,16 @@
       metrics_port = 9634;
     };
 
+    # The agent config file as a seam (docs/design/portal): the `ConfigStore` —
+    # GetSchema/GetValues/Validate/Put/Status over `config/agent.toml`. The
+    # portal's Settings tab renders a schema-driven form and writes edits back
+    # (comments preserved); effect on restart.
+    config = {
+      port = 50085;
+      socket = "/tmp/agent-seddon/config.sock";
+      metrics_port = 9635;
+    };
+
     # NOT a seam: the opt-in `agent --serve-sessions` gateway (docs/design/portal),
     # which hosts the `SessionRegistryService` (open/close/heartbeat) plus a
     # *driving* `AgentSessionService` (the `Send` RPC — submit a goal, stream the

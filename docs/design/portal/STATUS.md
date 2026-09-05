@@ -15,6 +15,8 @@ existing (02–04).
 | 04 | `AgentSessionService` + broadcast event-sink | ✅ | ✅ | ✅ | ✅ | n/a | **merged** (#130) |
 | 05 | Dart codegen + nix tooling (`buf.gen.yaml`, `gen-dart`, proxy) | — | — | — | — | ✅ | **merged** (#131) |
 | 06 | Flutter app (transport, Launcher, Prompts, Agent View) | — | — | — | ✅ | ✅ | **in review** |
+| 07 | `ConfigService` seam + `FileConfigStore` (schema · write-back · drift) — [05](05-config-and-router.md) | ✅ | ✅ | ✅ | ✅ | ✅ | **implemented** (branch `feat/portal-config-settings`) |
+| 08 | Router tab (ProviderRegistry CRUD) + Settings tab (`SchemaForm`) — [05](05-config-and-router.md) | — | — | — | ✅ | — | **implemented** (branch `feat/portal-config-settings`) |
 
 ## 02 — what shipped
 
@@ -147,6 +149,35 @@ existing (02–04).
 
 **The 6-increment Agent Portal track is complete** (design #127; PromptService #128;
 MetricsProxy #129; AgentSession #130; codegen+tooling #131; app #132).
+
+## 07–08 — configuration & the model router (what shipped)
+
+Design of record: [`05-config-and-router.md`](05-config-and-router.md). Two more
+tabs on the finished app, both **verified live** against a gateway with the Playwright
+MCP; on branch `feat/portal-config-settings` (not yet merged).
+
+- **07 · `ConfigService` seam.** New `config.proto` (`GetSchema`/`GetValues`/
+  `Validate`/`Put`/`Status`, values as `JsonValue`); `ConfigStore` trait + typed
+  `ConfigEdit`/`ConfigIssue`/`ConfigIssueCode`/`ConfigStatus` + `MAX_CONFIG_*` in
+  `agent-core`; `FileConfigStore` + `config_schema` (schemars draft-07 + enum-choices
+  and `x-secret` overlay + `validate_config`) in **`agent-runtime`** (folded in to
+  avoid an `agent-config`→`agent-runtime` cycle). `toml_edit` sparse, comment-preserving,
+  atomic write-back; validate-then-write; secret masking + empty-secret no-op; path
+  allowlist + caps. Port **50085 / 9635 / `config.sock`**, `--serve-config` +
+  `--serve-all`; additive proto (no baseline bump); 71 roundtrip cases (TCP+UDS, mock
+  store). `[grpc.config]` in `config/agent.toml`.
+- **08 · Router + Settings tabs.** `SchemaForm` widget (generalises `_ParamsEditor`:
+  `$ref`/`allOf` resolution, enum dropdowns, `x-secret` masking, nested objects,
+  raw-JSON escape hatch). `settings_page.dart` (two-pane, per-section diff→`Put`,
+  Validate dialog, restart-required banner from `Status`). `router_page.dart` (typed
+  CRUD over `ProviderRegistryService` — Upstreams · Health · Route tester, applies
+  live). `config` + `providers` clients wired in `clients.dart`; two nav destinations.
+  `flutter analyze` clean.
+- **Deviations / v1 limits** (see the doc): store folded into `agent-runtime`;
+  `GetValues` shows the running snapshot (form shows live value + pending banner after
+  Save); array-element enums are free-text (whole-array replacement, no indexed paths);
+  only inline secrets masked; no restart button; `schemars 0.8` pulls the unmaintained
+  `proc-macro-error2` (gates stay green; `schemars 1.0` is the escape hatch).
 
 ## Dependency order
 

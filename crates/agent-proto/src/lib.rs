@@ -86,6 +86,7 @@ mod descriptor_tests {
             "DigestService",
             "GraphService",
             "ProviderRegistryService",
+            "ConfigService",
         ] {
             assert!(
                 services.contains(&expected),

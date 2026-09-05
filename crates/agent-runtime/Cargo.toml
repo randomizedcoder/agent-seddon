@@ -57,6 +57,7 @@ default = [
     "scheduler",
     "pty",
     "recall",
+    "config",
 ]
 
 # Each feature forwards to the owning impl crate + drives `register_builtins`.
@@ -237,6 +238,14 @@ structured = ["dep:agent-validate", "agent-validate/validate-draft07"]
 # the tool + diagnostics/navigation metrics. Off unless `[lsp] servers` is set.
 # See parity spec 13.
 lsp = ["dep:agent-lsp", "agent-lsp/lsp-stdio", "agent-tools/tool-lsp"]
+# Config schema generation (portal settings): adds `Serialize` +
+# `schemars::JsonSchema` derives to every config struct so the config schema and
+# effective values can be emitted. Off by default so a minimal build stays lean.
+config-schema = ["dep:schemars"]
+# The ConfigStore seam (portal settings): the file-backed `FileConfigStore` that
+# serves the schema/values and writes edits back to `config/agent.toml` in place
+# (via toml_edit), hosted over gRPC (`agent --serve-config` / `--serve-all`).
+config = ["config-schema", "dep:toml_edit"]
 
 [dependencies]
 agent-core.workspace = true
@@ -287,6 +296,10 @@ uuid.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
+# JSON-Schema derive for the config structs, gated by `config-schema`.
+schemars = { workspace = true, optional = true }
+# Comment-preserving TOML write-back for the ConfigStore seam, gated by `config`.
+toml_edit = { workspace = true, optional = true }
 serde_ignored.workspace = true
 tokio.workspace = true
 # `BroadcastStream` wraps the session-event broadcast receiver as a Stream

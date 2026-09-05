@@ -6,6 +6,10 @@ use serde::Deserialize;
 use std::collections::HashMap;
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct Config {
     pub agent: AgentCfg,
     pub provider: ProviderCfg,
@@ -95,6 +99,12 @@ pub struct Config {
     pub pty: PtyCfg,
     #[serde(default)]
     pub recall: RecallCfg,
+    /// Path the config was read from, set by the CLI after parse (never a TOML
+    /// key — `serde(skip)`). Held so the `ConfigStore` seam (portal settings) can
+    /// write edits back to the same file. `None` for embedded/test callers that
+    /// build a `Config` in memory.
+    #[serde(skip)]
+    pub source_path: Option<std::path::PathBuf>,
 }
 
 /// Cross-session recall (parity spec 20): a full-text index over *past* saved
@@ -102,6 +112,10 @@ pub struct Config {
 /// `search` tantivy backend over a `SessionCorpus` document source. OFF by default
 /// (the `session_recall` tool only appears when enabled).
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct RecallCfg {
     #[serde(default)]
     pub enabled: bool,
@@ -133,6 +147,10 @@ impl Default for RecallCfg {
 /// the agent holds across turns is strictly more powerful than one-shot `bash`,
 /// so this is OFF by default. See docs/components/pty.md.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct PtyCfg {
     #[serde(default)]
     pub enabled: bool,
@@ -165,6 +183,10 @@ fn default_max_pty_sessions() -> usize {
 /// registers the `schedule` tool; jobs only actually fire while a driver is
 /// ticking (`agent --scheduler`). See docs/components/scheduler.md.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct SchedulerCfg {
     #[serde(default)]
     pub enabled: bool,
@@ -207,6 +229,10 @@ fn default_claim_ttl_secs() -> u64 {
 /// request shape until an operator turns it off. Token resolution mirrors the
 /// provider `api_key` (inline > env var). See docs/components/forge.md.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct ForgeCfg {
     #[serde(default)]
     pub backend: String,
@@ -263,6 +289,10 @@ fn default_forge_retries() -> u32 {
 /// persistent action. `write_dir` is where authored skills land (empty ⇒
 /// `<working_dir>/.agent/skills`). See docs/components/skill-authoring.md.
 #[derive(Debug, Default, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct SkillsCfg {
     #[serde(default)]
     pub write: bool,
@@ -274,6 +304,10 @@ pub struct SkillsCfg {
 /// `enabled` lists built-in hooks in dispatch order; empty ⇒ no hooks and no
 /// per-turn cost. See docs/components/hooks.md.
 #[derive(Debug, Default, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct HooksCfg {
     #[serde(default)]
     pub enabled: Vec<String>,
@@ -285,6 +319,10 @@ pub struct HooksCfg {
 /// itself be a `grpc` client — one router can span local and remote providers.
 /// See docs/components/router.md.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct RouterCfg {
     #[serde(default)]
     pub providers: Vec<String>,
@@ -328,6 +366,10 @@ fn default_breaker_cooldown() -> u64 {
 /// with its tier taken from the parallel `tiers` list) or a detailed
 /// `[[pool.members]]` block carrying its own endpoint/tier/weight (GPU pool 01).
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 #[serde(untagged)]
 pub enum PoolMemberEntry {
     /// `members = ["glm", "mi50"]` — a registry provider name.
@@ -340,6 +382,10 @@ pub enum PoolMemberEntry {
 /// OpenAI-compatible provider (one config block per GPU target, no separate
 /// `[provider.*]` stanza); otherwise `name` is resolved through the registry.
 #[derive(Debug, Deserialize, Default)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct PoolMemberCfg {
     pub name: String,
     /// OpenAI-compatible base URL (e.g. `http://mi50:11434/v1`). Empty ⇒ resolve
@@ -394,6 +440,10 @@ impl PoolMemberEntry {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct PoolCfg {
     #[serde(default)]
     pub members: Vec<PoolMemberEntry>,
@@ -456,6 +506,10 @@ impl Default for PoolCfg {
 /// `[agent] provider = "task-router"`. Lists the upstream fleet + the declarative
 /// routing rules the `TaskRouter` runs. See docs/design/model-router/.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct RouteCfg {
     /// The upstreams to route across. Each with an inline `endpoint` synthesizes an
     /// OpenAI-compatible provider (like `[[pool.members]]`); an empty `endpoint`
@@ -508,6 +562,10 @@ impl Default for RouteCfg {
 /// `[[route.upstreams]]` entry by name, else a registry provider type.
 /// See docs/design/cognition-graph/01-consensus-gate.md.
 #[derive(Debug, Deserialize, Default)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct ConsensusCfg {
     #[serde(default)]
     pub generator: String,
@@ -562,6 +620,10 @@ fn default_gate_alternatives() -> u8 {
 /// parameters (one server, two write disciplines: telemetry is lossy-batched,
 /// digests are durable). See docs/design/cognition-graph/02-background-distiller.md.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct DigestCfg {
     /// "" (off) | "clickhouse" | "sqlite".
     #[serde(default)]
@@ -614,6 +676,10 @@ impl Default for DigestCfg {
 /// `[agent] context = "instant-window"`; needs `[digest] store` configured.
 /// See docs/design/cognition-graph/03-instant-compaction.md.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct InstantCfg {
     /// "llm" (default: keyword prefilter + one batch keep/drop pass) |
     /// "keyword" (zero extra LLM calls) | "all" (no filtering).
@@ -660,6 +726,10 @@ fn default_instant_objective_tokens() -> u32 {
 /// switches the seam off entirely.
 /// See docs/design/cognition-graph/04-graph-config.md.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct GraphCfg {
     /// "file" (default: textproto on disk) | "grpc" (a central document
     /// service, e.g. edited by the portal) | "" (off).
@@ -694,6 +764,10 @@ pub(crate) fn default_graph_file() -> String {
 /// when `[agent] model_router_config` is set, THAT file is served — one file,
 /// both jobs). `store = ""` switches the seam off entirely.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct RegistryCfg {
     /// "file" (default) | "sqlite" (feature `registry-sqlite`) | "grpc" (a
     /// central registry service) | "" (off).
@@ -766,6 +840,10 @@ const MAX_DIGEST_DRAIN_TIMEOUT_S: u64 = 900;
 /// the repo: `api_key` > `api_key_env` > `api_key_file`); `tags`/`tier`/`input_cost`
 /// are the routing metadata the policy matches and orders on.
 #[derive(Debug, Deserialize, Default)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct RouteUpstreamCfg {
     pub name: String,
     #[serde(default)]
@@ -799,6 +877,10 @@ pub struct RouteUpstreamCfg {
 /// at build (a typo'd constraint silently matching everything is the failure
 /// mode we refuse; 02b tightened this).
 #[derive(Debug, Deserialize, Default)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct RouteMatchCfg {
     /// `main`|`judge`|`classify`|`summarize`|`verify`|`review`; empty ⇒ any role.
     #[serde(default)]
@@ -814,6 +896,10 @@ pub struct RouteMatchCfg {
 
 /// The `prefer` half — how to order the survivors once a rule matches.
 #[derive(Debug, Deserialize, Default)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct RoutePreferCfg {
     #[serde(default)]
     pub tags: Vec<String>,
@@ -833,6 +919,10 @@ pub struct RoutePreferCfg {
 
 /// One routing rule (`[[route.rules]]`): when `match` holds, order by `prefer`.
 #[derive(Debug, Deserialize, Default)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct RouteRuleCfg {
     #[serde(default, rename = "match")]
     pub match_: RouteMatchCfg,
@@ -868,6 +958,10 @@ fn default_probe_timeout() -> u64 {
 /// with no `[pool]` configured only the free deterministic prefilter runs, so the
 /// per-turn cost is near zero.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct ModeCfg {
     #[serde(default = "default_mode_classifier")]
     pub classifier: String,
@@ -913,6 +1007,10 @@ impl Default for ModeCfg {
 /// unlike mode detection's free prefilter, the per-step summarize is a real
 /// (cheap, local-tier) LLM call per turn, so it is opt-in like `[memory] distill`.
 #[derive(Debug, Deserialize, Default)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct DimensionsCfg {
     #[serde(default)]
     pub store: String,
@@ -930,6 +1028,10 @@ impl DimensionsCfg {
 /// `TaskClassifier` (`hybrid` | `""`). `in_loop` enables auto-detecting a review
 /// task mid-conversation and injecting grounded facts.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct ReviewCfg {
     #[serde(default)]
     pub backend: String,
@@ -1052,6 +1154,10 @@ fn default_gate_threshold() -> f64 {
 /// Results are cached for `cache_ttl_secs`, keyed by (backend, normalized query,
 /// options). See docs/components/web-search.md.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct WebSearchCfg {
     #[serde(default)]
     pub backends: Vec<String>,
@@ -1115,6 +1221,10 @@ fn default_ws_retries() -> u32 {
 /// `strategy` = "stable-prefix" (default) | "tail-window" | "off". Placement is a
 /// no-op on providers with no prompt cache. See docs/components/prompt-cache.md.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct CacheCfg {
     #[serde(default = "default_cache_strategy")]
     pub strategy: String,
@@ -1145,6 +1255,10 @@ fn default_cache_tail_back() -> usize {
 /// waives specific rule ids (e.g. a known fixture secret) without disabling the
 /// scanner. See docs/components/scanner.md.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct ScannerCfg {
     #[serde(default)]
     pub rules: Vec<String>,
@@ -1179,6 +1293,10 @@ fn default_scanner_scope() -> String {
 /// `backend` = `"file"` (immutable objects under `dir`); `dir` empty ⇒
 /// `<working_dir>/.agent-seddon/session`. See docs/components/session.md.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct SessionCfg {
     #[serde(default = "default_session_backend")]
     pub backend: String,
@@ -1211,6 +1329,10 @@ fn default_session_backend() -> String {
 /// unbounded); `per_block_max_chars` truncates a single oversized block. See
 /// docs/components/reference.md.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct ReferenceCfg {
     #[serde(default = "default_reference_backend")]
     pub backend: String,
@@ -1245,6 +1367,10 @@ fn default_reference_block_chars() -> usize {
 /// sizes its vectors. Enable the vector backend via `[search] backends =
 /// ["tantivy", "vector"]`. See docs/components/embedder.md.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct EmbedderCfg {
     #[serde(default = "default_embedder_backend")]
     pub backend: String,
@@ -1273,6 +1399,10 @@ fn default_embedder_dims() -> usize {
 /// repo's pinned flake closure — reproducible + content-addressed). See
 /// docs/components/sandbox.md.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct SandboxCfg {
     #[serde(default = "default_sandbox_backend")]
     pub backend: String,
@@ -1294,6 +1424,10 @@ fn default_sandbox_backend() -> String {
 /// (no daemons spawned). Each entry maps a language + file extensions to a server
 /// command. See docs/components/lsp.md.
 #[derive(Debug, Default, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct LspCfg {
     /// `"local"` (stdio language servers on this host) or `"grpc"` (a shared
     /// host holding the warm index). `servers` still lists the languages: with
@@ -1310,6 +1444,10 @@ fn default_lsp_backend() -> String {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct LspServerCfg {
     pub language: String,
     pub command: Vec<String>,
@@ -1320,6 +1458,10 @@ pub struct LspServerCfg {
 /// selects the impl (`"draft07"`); `max_repairs` bounds the one-shot repair loop.
 /// See docs/components/structured-output.md.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct StructuredCfg {
     #[serde(default = "default_validator")]
     pub validator: String,
@@ -1347,6 +1489,10 @@ fn default_max_repairs() -> usize {
 /// selects the impl (`"memory"` = an in-process plan for the session; a
 /// `SessionStore`-backed backend is a follow-up). See docs/components/tasks.md.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct TasksCfg {
     #[serde(default = "default_tasks_backend")]
     pub backend: String,
@@ -1377,6 +1523,10 @@ fn default_tasks_backend() -> String {
 /// reissue a corrected call. Turning a verifier on stays safe (shadow); enforcing
 /// is a deliberate second step. See docs/design/tool-call-verification.md.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct VerifierCfg {
     #[serde(default)]
     pub backend: String,
@@ -1409,6 +1559,10 @@ fn default_verifier_mode() -> String {
 /// loopback/private/link-local/metadata targets, and `allow_hosts` globs
 /// exempt named hosts. See `docs/components/web-fetch.md`.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct WebCfg {
     #[serde(default = "default_web_backend")]
     pub backend: String,
@@ -1474,6 +1628,10 @@ fn default_web_max_redirects() -> u32 {
 /// (default) asks the operator to confirm a flagged call — a hard deny when
 /// stdin isn't a TTY; `"deny"` blocks outright; `"off"` disables the screen.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct PolicyCfg {
     #[serde(default)]
     pub allow: Vec<AllowRule>,
@@ -1505,6 +1663,10 @@ pub(crate) fn default_guard() -> String {
 
 /// One `allow-list` rule: `{ tool = "git_*", arg = "..." }` (arg optional).
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct AllowRule {
     pub tool: String,
     #[serde(default)]
@@ -1518,6 +1680,10 @@ pub struct AllowRule {
 /// "grpc" = a remote seam). `push_policy` gates the only operation that leaves
 /// the sandbox. See `docs/components/git.md`.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct GitCfg {
     /// "cli" (default) | "hybrid" | "grpc". Empty ⇒ "cli".
     #[serde(default)]
@@ -1574,6 +1740,10 @@ impl GitCfg {
 /// `<repo>/.agent-seddon/index/<backend>` unless `index_dir` overrides it. See
 /// `docs/components/search.md`.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct SearchCfg {
     #[serde(default)]
     pub backends: Vec<String>,
@@ -1601,6 +1771,10 @@ impl Default for SearchCfg {
 /// on start so the first query is warm. `helper_timeout_secs` bounds the
 /// `agent-go-graph` run. See `docs/components/ast.md`.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct AstCfg {
     #[serde(default)]
     pub backends: Vec<String>,
@@ -1650,6 +1824,10 @@ fn default_ast_timeout() -> u64 {
 /// dials a remote tokenizer seam. See parity spec 23 and
 /// `docs/components/tokenizer.md`.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct TokenizerCfg {
     #[serde(default = "default_tokenizer")]
     pub backend: String,
@@ -1682,6 +1860,10 @@ fn default_tokenizer() -> String {
 /// longest matching prefix wins. A file that is missing, oversized, or unparseable
 /// is skipped (those models fall back to the `approx` heuristic), never fatal.
 #[derive(Debug, Default, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct HfCfg {
     /// Catch-all `tokenizer.json` used when no `models` prefix matches.
     #[serde(default)]
@@ -1697,6 +1879,10 @@ pub struct HfCfg {
 /// `api_key_env` env var when `api_key` is empty — it never appears in a result,
 /// error, span, or log.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct TokenizerProviderCfg {
     /// API base, e.g. `https://api.anthropic.com/v1` (the `/messages/count_tokens`
     /// path is appended).
@@ -1749,6 +1935,10 @@ impl SearchCfg {
 /// `agent_grpc::constants`; set `endpoint`/`listen` to `unix:/path` to use a
 /// unix-domain socket (TCP-bypassing, same-host). See `docs/grpc.md`.
 #[derive(Debug, Default, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct GrpcCfg {
     /// Overload admission: cap on concurrent in-flight requests a served process
     /// accepts before shedding new ones with `RESOURCE_EXHAUSTED` + a pushback hint
@@ -1822,6 +2012,8 @@ pub struct GrpcCfg {
     #[serde(default)]
     pub provider_registry: GrpcSeamCfg,
     #[serde(default)]
+    pub config: GrpcSeamCfg,
+    #[serde(default)]
     pub review: GrpcSeamCfg,
     /// Not a seam: the opt-in `agent --serve-sessions` gateway (docs/design/portal),
     /// which hosts the `SessionRegistryService` + a *driving* `AgentSessionService`
@@ -1837,6 +2029,10 @@ pub struct GrpcCfg {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct GrpcSeamCfg {
     /// Endpoint a `= "grpc"` client dials. Empty ⇒ `127.0.0.1:<default port>`.
     #[serde(default)]
@@ -1850,12 +2046,20 @@ pub struct GrpcSeamCfg {
 /// startup and registered as `mcp_<server>_<tool>`. A server is stdio if it has
 /// a `command`, or HTTP if it has a `url`.
 #[derive(Debug, Default, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct McpCfg {
     #[serde(default)]
     pub servers: Vec<McpServerCfg>,
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct McpServerCfg {
     pub name: String,
     /// Transport kind. Empty ⇒ inferred (`command` → stdio, `url` → http). Set to a
@@ -1879,6 +2083,10 @@ pub struct McpServerCfg {
 
 /// User context injected from `<dir>/prepend/` and `<dir>/append/` (NNNN_*.md).
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct ContextFilesCfg {
     #[serde(default = "default_context_dir")]
     pub dir: String,
@@ -1896,6 +2104,10 @@ impl Default for ContextFilesCfg {
 /// per-mode `lens/<mode>.md` overrides the `PromptStore` seam manages, and the
 /// `ModeAwareWindow` reads. A missing dir simply means "compiled defaults".
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct PromptsCfg {
     /// Storage backend for the `PromptStore` seam: `"file"` (git-legible default),
     /// `"sqlite"` (embedded DB catalog, feature `prompt-sqlite`), or `"grpc"` (a
@@ -1923,6 +2135,10 @@ impl Default for PromptsCfg {
 /// The `MetricsProxy` seam (docs/design/portal): where `--serve-metrics-proxy`
 /// forwards PromQL. `prometheus_url` is the Prometheus HTTP API base.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct MetricsProxyCfg {
     #[serde(default = "default_prometheus_url")]
     pub prometheus_url: String,
@@ -1938,6 +2154,10 @@ impl Default for MetricsProxyCfg {
 
 /// Prometheus metrics. Off by default.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct MetricsCfg {
     #[serde(default)]
     pub enabled: bool,
@@ -1962,6 +2182,10 @@ impl Default for MetricsCfg {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct AgentCfg {
     /// Which `LlmProvider` impl, e.g. "openai-compat".
     pub provider: String,
@@ -2022,6 +2246,10 @@ pub struct AgentCfg {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct ProviderCfg {
     /// Base URL of the API. Optional for providers with a well-known default
     /// (e.g. Anthropic → `https://api.anthropic.com/v1`); required for
@@ -2057,6 +2285,10 @@ pub struct ProviderCfg {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct MemoryCfg {
     /// Which `MemoryStore` backend, e.g. "file". Selected via the registry.
     #[serde(default = "default_memory_backend")]
@@ -2094,6 +2326,10 @@ impl Default for MemoryCfg {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct ToolsCfg {
     #[serde(default)]
     pub enabled: Vec<String>,
@@ -2102,6 +2338,10 @@ pub struct ToolsCfg {
 /// Streaming telemetry into ClickHouse. Off by default — behavior is unchanged
 /// unless `enabled = true`.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
 pub struct TelemetryCfg {
     #[serde(default)]
     pub enabled: bool,
@@ -2350,6 +2590,7 @@ impl Config {
             scheduler: SchedulerCfg::default(),
             pty: PtyCfg::default(),
             recall: RecallCfg::default(),
+            source_path: None,
         }
     }
 }

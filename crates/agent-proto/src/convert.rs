@@ -4077,6 +4077,63 @@ impl TryFrom<pb::GraphIssue> for agent_core::GraphIssue {
     }
 }
 
+// --- Config seam (portal settings) -----------------------------------------
+
+impl From<agent_core::ConfigIssue> for pb::ConfigIssue {
+    fn from(i: agent_core::ConfigIssue) -> Self {
+        pb::ConfigIssue {
+            path: i.path,
+            code: i.code.as_str().to_string(),
+            detail: i.detail,
+        }
+    }
+}
+
+impl From<agent_core::ConfigEdit> for pb::ConfigEdit {
+    fn from(e: agent_core::ConfigEdit) -> Self {
+        pb::ConfigEdit {
+            path: e.path,
+            value: e.value.map(Into::into),
+        }
+    }
+}
+
+/// Wire→core: the path is passed through as-is (the store allowlists it against
+/// the schema and returns typed issues for a bad path — a hostile path must not
+/// become an RPC error). A missing/null `value` means **delete** (revert to
+/// default); only a `big_number` that fails to parse can error here.
+impl TryFrom<pb::ConfigEdit> for agent_core::ConfigEdit {
+    type Error = ConvertError;
+    fn try_from(e: pb::ConfigEdit) -> Result<Self, Self::Error> {
+        let value = match e.value {
+            None => None,
+            Some(jv) => {
+                let v = serde_json::Value::try_from(jv)?;
+                if v.is_null() {
+                    None
+                } else {
+                    Some(v)
+                }
+            }
+        };
+        Ok(agent_core::ConfigEdit {
+            path: e.path,
+            value,
+        })
+    }
+}
+
+impl From<agent_core::ConfigStatus> for pb::ConfigStatus {
+    fn from(s: agent_core::ConfigStatus) -> Self {
+        pb::ConfigStatus {
+            restart_required: s.restart_required,
+            pending: s.pending.into_iter().map(Into::into).collect(),
+            loaded_hash: s.loaded_hash,
+            ondisk_hash: s.ondisk_hash,
+        }
+    }
+}
+
 // --- PromptStore (docs/design/portal) --------------------------------------
 
 impl From<agent_core::PromptKind> for pb::PromptKind {

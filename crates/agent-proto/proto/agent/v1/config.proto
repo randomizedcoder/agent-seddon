@@ -1,0 +1,86 @@
+// The `ConfigStore` seam over gRPC (docs/design/portal): see + edit the agent's
+// config file. The portal renders a schema-driven form from `GetSchema` +
+// `GetValues`, validates candidate edits, and `Put`s a sparse patch that is
+// written back to `config/agent.toml` in place (comments preserved). Edits take
+// effect on the **next agent start** — the running `Config` is immutable — so
+// `Status` reports the on-disk-vs-running drift that drives a "restart required"
+// banner. Operator/portal facing; the loop does not consume it.
+//
+// Every edit is untrusted: the server allowlists the path against the schema,
+// caps sizes/counts, masks secrets on read, and validates-then-writes (a bad
+// patch is returned as a list of issues with nothing written), never a partial
+// or unparseable file.
+syntax = "proto3";
+
+package agent.v1;
+
+import "agent/v1/common.proto";
+
+service ConfigService {
+  rpc GetSchema(GetSchemaRequest) returns (ConfigSchema);
+  rpc GetValues(GetValuesRequest) returns (ConfigValues);
+  rpc Validate(ValidateConfigRequest) returns (ValidateConfigResponse);
+  rpc Put(PutConfigRequest) returns (PutConfigResponse);
+  rpc Status(ConfigStatusRequest) returns (ConfigStatus);
+}
+
+message GetSchemaRequest {}
+
+// A JSON-Schema (draft 2020-12) describing every config field: type, enum
+// choices, description (from the struct's doc-comments), default, and an
+// `x-secret` flag on secret fields.
+message ConfigSchema {
+  JsonValue schema = 1;
+}
+
+message GetValuesRequest {}
+
+// The effective config (defaults filled) as a JSON object, secrets masked.
+message ConfigValues {
+  JsonValue values = 1;
+}
+
+// One edit: a dotted key-path (e.g. `agent.context`, `pool.members`) and its new
+// value. A null/absent `value` means delete the key — revert it to the default.
+message ConfigEdit {
+  string path = 1;
+  JsonValue value = 2;
+}
+
+// One validation finding: the offending path (`""` for a whole-document
+// finding), a typed `code` (the closed `ConfigIssueCode` set, snake_case), and a
+// human detail line.
+message ConfigIssue {
+  string path = 1;
+  string code = 2;
+  string detail = 3;
+}
+
+message ValidateConfigRequest {
+  repeated ConfigEdit edits = 1;
+}
+
+message ValidateConfigResponse {
+  repeated ConfigIssue issues = 1;
+}
+
+message PutConfigRequest {
+  repeated ConfigEdit edits = 1;
+}
+
+// Non-empty `issues` means the patch was rejected and **nothing was written**.
+message PutConfigResponse {
+  bool restart_required = 1;
+  repeated ConfigIssue issues = 2;
+}
+
+message ConfigStatusRequest {}
+
+// Drift between the on-disk file and the running snapshot: `pending` is the set
+// of leaf paths that differ, `restart_required` is `!pending.is_empty()`.
+message ConfigStatus {
+  bool restart_required = 1;
+  repeated ConfigEdit pending = 2;
+  string loaded_hash = 3;
+  string ondisk_hash = 4;
+}

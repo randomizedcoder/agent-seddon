@@ -100,6 +100,10 @@ pub struct Agent {
     /// (docs/design/portal). Operator/portal-facing — the loop does not consume it;
     /// held only so it can be hosted over gRPC (`agent --serve-prompt`).
     prompt_store: Option<Arc<dyn agent_core::PromptStore>>,
+    /// The config-management store (portal settings), if the `config` seam is
+    /// wired. Operator/portal-facing — the loop does not consume it; held only so
+    /// it can be hosted over gRPC (`agent --serve-config`).
+    config_store: Option<Arc<dyn agent_core::ConfigStore>>,
     /// The provider-registry control plane (model-router 03), held for
     /// `--serve-provider-registry`; the loop itself does not consume it until
     /// the registry-backed router (increment 04).
@@ -239,6 +243,7 @@ impl Agent {
             task_classifier: None,
             dimension_store: None,
             prompt_store: None,
+            config_store: None,
             provider_registry: None,
             system_fragments: agent_context::system_fragments::SystemFragments::defaults(),
             metrics_proxy: None,
@@ -537,6 +542,13 @@ impl Agent {
         self
     }
 
+    /// Attach the config-management store (portal settings), so it can be hosted
+    /// over gRPC (`agent --serve-config`). Not consumed by the loop.
+    pub fn with_config_store(mut self, c: Arc<dyn agent_core::ConfigStore>) -> Self {
+        self.config_store = Some(c);
+        self
+    }
+
     /// Attach the situational system-fragment resolver (docs/design/prompts/). The
     /// loop consumes this: it selects the fragments matching the current mode and
     /// injects them as a system message. A no-op resolver (the default) changes
@@ -776,6 +788,12 @@ impl Agent {
 
     pub fn prompt_store(&self) -> Option<Arc<dyn agent_core::PromptStore>> {
         self.prompt_store.clone()
+    }
+
+    /// The config-management store, if the `config` seam is wired
+    /// (`--serve-config`). Portal settings write-back target.
+    pub fn config_store(&self) -> Option<Arc<dyn agent_core::ConfigStore>> {
+        self.config_store.clone()
     }
 
     /// The provider-registry store, if `[registry] store` is configured

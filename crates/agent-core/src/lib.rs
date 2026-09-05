@@ -2259,6 +2259,132 @@ pub trait PromptStore: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// Seam: Config (portal settings) — see + edit the agent config file
+// ---------------------------------------------------------------------------
+
+/// Most edits accepted in one `validate`/`put` call. A form saves one section;
+/// this caps a hostile client that floods the call. See [`ConfigStore`].
+pub const MAX_CONFIG_EDITS: usize = 512;
+/// Longest dotted key-path on a [`ConfigEdit`] (e.g. `mcp.servers[0].command`).
+pub const MAX_CONFIG_PATH_LEN: usize = 256;
+/// Largest serialized value (bytes) a single [`ConfigEdit`] may carry.
+pub const MAX_CONFIG_VALUE_BYTES: usize = 64 * 1024;
+/// Largest array length a single edit may set (hostile fan-out guard).
+pub const MAX_CONFIG_ARRAY_LEN: usize = 1024;
+/// Largest config file (bytes) accepted for read or produced by a write.
+pub const MAX_CONFIG_DOC_BYTES: usize = 1024 * 1024;
+/// Deepest nesting a dotted path may address (depth-bomb guard).
+pub const MAX_CONFIG_DEPTH: usize = 16;
+
+/// Typed config-validation failure classes — a **closed** set (each is a wire
+/// discriminator and a metric label; the portal keys remediation off it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigIssueCode {
+    /// The path does not resolve to a known config field.
+    UnknownPath,
+    /// The value's JSON type does not match the field's schema type.
+    BadType,
+    /// The value is not one of the field's allowed choices.
+    BadEnum,
+    /// A required field would be left unset by the edit.
+    MissingRequired,
+    /// A cap was exceeded (value bytes, array length, doc bytes, depth).
+    TooLarge,
+    /// More than [`MAX_CONFIG_EDITS`] edits in one call.
+    TooMany,
+    /// The resulting document does not parse as valid config.
+    Parse,
+    /// A semantic fail-closed check failed (unknown impl name, bad backend).
+    BuildCheck,
+}
+
+impl ConfigIssueCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::UnknownPath => "unknown_path",
+            Self::BadType => "bad_type",
+            Self::BadEnum => "bad_enum",
+            Self::MissingRequired => "missing_required",
+            Self::TooLarge => "too_large",
+            Self::TooMany => "too_many",
+            Self::Parse => "parse",
+            Self::BuildCheck => "build_check",
+        }
+    }
+    /// Parse a wire discriminator; unknown ⇒ `None` (fail closed).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "unknown_path" => Some(Self::UnknownPath),
+            "bad_type" => Some(Self::BadType),
+            "bad_enum" => Some(Self::BadEnum),
+            "missing_required" => Some(Self::MissingRequired),
+            "too_large" => Some(Self::TooLarge),
+            "too_many" => Some(Self::TooMany),
+            "parse" => Some(Self::Parse),
+            "build_check" => Some(Self::BuildCheck),
+            _ => None,
+        }
+    }
+}
+
+/// One config edit: a dotted key-path and its new JSON value. `value == None`
+/// (a null/absent wire value) means **delete the key** — revert it to the
+/// compiled default. Paths address nested tables (`grpc.config.listen`),
+/// arrays-of-tables (`mcp.servers[0].command`), and maps
+/// (`tokenizer.hf.models.gpt2`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConfigEdit {
+    pub path: String,
+    pub value: Option<serde_json::Value>,
+}
+
+/// One config-validation finding: the offending path (`""` for a whole-document
+/// finding), the typed class, and a human detail line.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConfigIssue {
+    pub path: String,
+    pub code: ConfigIssueCode,
+    pub detail: String,
+}
+
+/// Drift between the on-disk config file and the running agent's loaded
+/// snapshot: `pending` is the set of leaf paths that differ, and
+/// `restart_required` is `!pending.is_empty()` (the running `Config` is
+/// immutable, so a saved edit only takes effect on the next start).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConfigStatus {
+    pub restart_required: bool,
+    pub pending: Vec<ConfigEdit>,
+    pub loaded_hash: String,
+    pub ondisk_hash: String,
+}
+
+/// The config seam: expose the agent's config file as a JSON-Schema + effective
+/// values, validate candidate edits, and persist them by writing the config
+/// file in place (comments preserved). Edits take effect on the **next agent
+/// start** — the running `Config` is read once and immutable — so [`Self::status`]
+/// surfaces the "restart required" drift. `put` MUST validate before writing (a
+/// rejected edit set leaves the file untouched).
+#[async_trait]
+pub trait ConfigStore: Send + Sync {
+    /// JSON-Schema describing every config field, with enum choices,
+    /// descriptions (from doc-comments), defaults, and `x-secret` flags.
+    async fn schema(&self) -> Result<serde_json::Value>;
+    /// The effective config as JSON (defaults filled), secrets **masked**.
+    async fn values(&self) -> Result<serde_json::Value>;
+    /// Typed findings for a candidate edit set; empty = valid. Never errors on
+    /// *content* (a broken edit is a `Vec` of issues, not an `Err`).
+    async fn validate(&self, edits: &[ConfigEdit]) -> Result<Vec<ConfigIssue>>;
+    /// Validate-then-write the edits to the config file, preserving comments and
+    /// layout. Returns the issues found; a non-empty result means **nothing was
+    /// written** (whole-patch atomic).
+    async fn put(&self, edits: Vec<ConfigEdit>) -> Result<Vec<ConfigIssue>>;
+    /// Drift between the on-disk file and the running snapshot.
+    async fn status(&self) -> Result<ConfigStatus>;
+}
+
+// ---------------------------------------------------------------------------
 // Seam: ProviderRegistry (model-router 03) — the fleet + routing policy
 // ---------------------------------------------------------------------------
 

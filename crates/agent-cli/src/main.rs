@@ -38,6 +38,9 @@ async fn main() -> Result<()> {
     // tracing is up, further down.
     let (mut config, unknown_config_keys) =
         agent_runtime::parse_config_reporting_unknown(&toml_str).context("parsing config")?;
+    // Record where the config came from so the `ConfigStore` seam (portal
+    // settings) can write edits back to the same file.
+    config.source_path = Some(config_path.clone());
     // `--cognition-graph FILE` = `[graph] store = "file", file = FILE` — the
     // scenario-file form (config/cognition/*.textproto).
     if let Some(file) = cognition_graph {
