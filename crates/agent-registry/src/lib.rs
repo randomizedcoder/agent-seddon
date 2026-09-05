@@ -61,6 +61,9 @@ pub fn decide(cfg: &ModelRouterConfig, hint: &RouteHint) -> RouteDecision {
             // numbers in the registry-backed path, model-router 04).
             in_flight: 0,
             latency_ewma_ms: 0,
+            // Carried so this preview matches the live router's capacity-normalised
+            // ordering; inert here (in_flight 0 ⇒ ratio 0 for all).
+            max_concurrency: u.max_concurrency,
         })
         .collect();
     let engine_hint = route::Hint {

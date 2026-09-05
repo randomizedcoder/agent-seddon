@@ -40,6 +40,9 @@ fn fleet(n: usize) -> Vec<UpstreamMeta<'static>> {
             supports_tools: true,
             in_flight: 0,
             latency_ewma_ms: 0,
+            // Varied capacity (incl. 0 = unknown) so the bench exercises both
+            // the capacity-normalised and the pass-through least-loaded paths.
+            max_concurrency: (i as u32 % 4) * 8,
         })
         .collect()
 }

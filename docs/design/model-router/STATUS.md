@@ -14,6 +14,7 @@ leak) and must pass `nix develop -c nix flake check`.
 | 02b | [`RouteHint` threading](02b-hint-threading.md) (hint on the request · task-mode axis · per-call roles · decision metrics) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ **merged** (PR #236) |
 | 03 | [Config + registry control plane](03-registry-proto.md) (textproto bootstrap + `ProviderRegistryService`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ **merged** (PR #237) |
 | 04 | [Registry-backed routing](04-registry-backed.md) (consume + seed + live-signal ordering + per-upstream metrics) | ✅ | — | ✅ | ✅ | ✅ | ✅ **merged** (PR #238, promoted to main via #239) |
+| 05 | [Capacity-aware routing](05-capacity-aware.md) (multi-GPU gateway: `least-loaded` normalised by `max_concurrency`) | ✅ | — | — | ✅ | — | 🚧 in progress |
 
 ## Build order = dependency order
 
@@ -249,6 +250,10 @@ no secret committed — the concrete request that motivated the track. See
 
 ## Deferred (whole-design)
 
+- **Adaptive effective-capacity (05 → 06)** — 05 makes `least-loaded` capacity-aware from a *static*
+  `max_concurrency`; the adaptive follow-up shrinks *effective* capacity when a gateway `429`s /
+  slows and recovers as it heals (a B300 dropping out of the gateway). Designed in
+  [05](05-capacity-aware.md#deferred--06-adaptive-effective-capacity); not built.
 - **LLM meta-router** — a cheap model picks among rule-eligible candidates. Decision engine stays
   declarative + live-signals.
 - **Learned / outcome-based weights** — tune per-upstream preference from measured latency/cost/

@@ -38,6 +38,10 @@ pub struct RouterUpstream {
     pub tier: PoolTier,
     /// Per-Mtok input cost (a routing hint; clamped non-negative on build).
     pub input_cost: f32,
+    /// Aggregate concurrency this upstream can absorb (≈ GPUs × per-GPU slots for
+    /// a multi-GPU gateway); `0` = unknown/unbounded. Feeds the capacity-normalised
+    /// `least-loaded` ordering — see [`crate::route::UpstreamMeta::max_concurrency`].
+    pub max_concurrency: u32,
     pub provider: Arc<dyn LlmProvider>,
 }
 
@@ -230,6 +234,7 @@ impl TaskRouter {
             supports_tools: caps.supports_tools,
             in_flight,
             latency_ewma_ms,
+            max_concurrency: u.max_concurrency,
         }
     }
 
@@ -472,6 +477,7 @@ mod tests {
             tags: vec![],
             tier: PoolTier::Heavy,
             input_cost: 0.0,
+            max_concurrency: 0,
             provider,
         }
     }
@@ -959,6 +965,7 @@ mod tests {
             tags: vec![],
             tier: PoolTier::Medium,
             input_cost: 0.0,
+            max_concurrency: 0,
             provider: Arc::new(TimedProvider {
                 id,
                 cost_ms,
@@ -997,6 +1004,7 @@ mod tests {
             tags: vec![],
             tier: PoolTier::Medium,
             input_cost: 0.0,
+            max_concurrency: 0,
             provider: Arc::new(OkProvider {
                 answer: "fine".into(),
                 caps: caps(true, false, 1000),
@@ -1008,6 +1016,7 @@ mod tests {
             tags: vec![],
             tier: PoolTier::Medium,
             input_cost: 0.0,
+            max_concurrency: 0,
             provider: Arc::new(fail),
         };
         let policy = Policy {
@@ -1049,6 +1058,7 @@ mod tests {
             tags: vec![],
             tier: PoolTier::Medium,
             input_cost: 0.0,
+            max_concurrency: 0,
             provider: Arc::new(fail),
         };
         let ok = RouterUpstream {
@@ -1056,6 +1066,7 @@ mod tests {
             tags: vec![],
             tier: PoolTier::Medium,
             input_cost: 0.0,
+            max_concurrency: 0,
             provider: Arc::new(OkProvider {
                 answer: "fine".into(),
                 caps: caps(true, false, 1000),

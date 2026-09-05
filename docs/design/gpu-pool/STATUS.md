@@ -107,5 +107,10 @@ tracing/tests/bench/leak) and must pass `nix develop -c nix flake check`.
 
 - Real GPU-utilization probing (ollama `/api/ps`, nvidia/DCGM) — the hook is designed
   in [03](03-gpu-health.md), not built.
+- **Multi-GPU gateway capacity** — one endpoint fronting N cards. The pool already
+  handles it via a bigger `max_concurrency` (02); the **task-router** gained the same
+  capacity-normalised `least-loaded` in
+  [model-router 05](../model-router/05-capacity-aware.md). The *adaptive* version
+  (effective capacity shrinks on 429/slowdown) is the deferred 06 there.
 - Aggregate autoscaling / cloud spillover when the whole pool is saturated.
 - Learned per-target weights from `agent_pool_*` outcomes.
