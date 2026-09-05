@@ -200,12 +200,20 @@ async fn positive_cursor_reads_are_repeatable_and_resume() {
     let client = GrpcPty::connect(&dial).unwrap();
 
     let id = client.open(&PtySpec::default()).await.expect("open");
-    client.write(&id, b"echo first\n").await.unwrap();
+    // The PTY line-discipline echoes the typed command back, and the command
+    // *then* emits its output — so a literal marker (e.g. `echo first`) lands in
+    // the stream twice: once in the echoed input, once in the output. Under load
+    // the two reads below can straddle that gap, letting the second occurrence
+    // surface in the resumed read and falsely trip the "must not repeat" assert.
+    // Use a marker present ONLY in the output: bash echoes `echo mark$((6 * 7))`,
+    // but the token `mark42` exists solely in what the command prints.
+    const MARK: &str = "mark42";
+    client.write(&id, b"echo mark$((6 * 7))\n").await.unwrap();
     until("first output", || async {
         client
             .read(&id, None)
             .await
-            .map(|o| String::from_utf8_lossy(&o.data).contains("first"))
+            .map(|o| String::from_utf8_lossy(&o.data).contains(MARK))
             .unwrap_or(false)
     })
     .await;
@@ -226,7 +234,7 @@ async fn positive_cursor_reads_are_repeatable_and_resume() {
     // Resuming from the returned cursor yields only what is new.
     let c = client.read(&id, Some(a.next_cursor)).await.unwrap();
     assert!(
-        !String::from_utf8_lossy(&c.data).contains("first"),
+        !String::from_utf8_lossy(&c.data).contains(MARK),
         "a resumed read must not repeat already-consumed output"
     );
     client.close(&id).await.unwrap();
