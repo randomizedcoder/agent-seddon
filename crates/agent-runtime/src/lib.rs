@@ -7,6 +7,10 @@ mod builder;
 #[cfg(feature = "graph")]
 mod cognition;
 mod config;
+#[cfg(feature = "config-schema")]
+mod config_schema;
+#[cfg(feature = "config")]
+mod config_store;
 mod context_files;
 mod distiller;
 #[cfg(feature = "git")]
@@ -33,6 +37,10 @@ pub use builder::{build_agent, build_agent_with};
 pub use config::Config;
 #[cfg(feature = "recall")]
 pub use config::RecallCfg;
+#[cfg(feature = "config-schema")]
+pub use config_schema::{build_schema, validate_config};
+#[cfg(feature = "config")]
+pub use config_store::FileConfigStore;
 pub use registry::{register_builtins, Registry};
 pub use session_events::{SessionEvents, SessionEventsRegistry};
 

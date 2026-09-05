@@ -3,8 +3,11 @@ import 'package:flutter/material.dart';
 import 'src/clients.dart';
 import 'src/config.dart';
 import 'src/pages/agent_view_page.dart';
+import 'src/pages/graph_page.dart';
 import 'src/pages/launcher_page.dart';
 import 'src/pages/prompts_page.dart';
+import 'src/pages/router_page.dart';
+import 'src/pages/settings_page.dart';
 
 void main() {
   runApp(const AgentPortalApp());
@@ -36,7 +39,10 @@ class _AgentPortalAppState extends State<AgentPortalApp> {
     final pages = [
       const LauncherPage(config: _config),
       PromptsPage(clients: _clients),
+      GraphPage(clients: _clients),
       AgentViewPage(clients: _clients),
+      RouterPage(clients: _clients),
+      SettingsPage(clients: _clients),
     ];
     return MaterialApp(
       title: 'Agent Portal',
@@ -69,9 +75,24 @@ class _AgentPortalAppState extends State<AgentPortalApp> {
                   label: Text('Prompts'),
                 ),
                 NavigationRailDestination(
+                  icon: Icon(Icons.account_tree_outlined),
+                  selectedIcon: Icon(Icons.account_tree),
+                  label: Text('Graph'),
+                ),
+                NavigationRailDestination(
                   icon: Icon(Icons.terminal_outlined),
                   selectedIcon: Icon(Icons.terminal),
                   label: Text('Agent'),
+                ),
+                NavigationRailDestination(
+                  icon: Icon(Icons.alt_route_outlined),
+                  selectedIcon: Icon(Icons.alt_route),
+                  label: Text('Router'),
+                ),
+                NavigationRailDestination(
+                  icon: Icon(Icons.settings_outlined),
+                  selectedIcon: Icon(Icons.settings),
+                  label: Text('Settings'),
                 ),
               ],
             ),

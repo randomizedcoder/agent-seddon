@@ -1616,3 +1616,227 @@ async fn adversarial_registry_hostile_input_rejected_over_wire() {
     // The fleet is intact after all the rejected attempts.
     assert_eq!(client.list().await.expect("list").len(), 2);
 }
+
+// ---------------------------------------------------------------------------
+// Config (docs/design/portal) — the `ConfigStore` seam over the wire.
+//
+// These assert WIRE FIDELITY (the ConfigEdit / ConfigIssue / ConfigStatus
+// conversions + both transports) against a mock store. The real
+// `FileConfigStore` — schema generation, comment-preserving write-back, secret
+// masking, drift — is covered by agent-runtime's own tests (BE-1).
+// ---------------------------------------------------------------------------
+
+struct MockConfigStore;
+
+#[async_trait]
+impl agent_core::ConfigStore for MockConfigStore {
+    async fn schema(&self) -> agent_core::Result<serde_json::Value> {
+        Ok(serde_json::json!({
+            "type": "object",
+            "properties": { "agent": { "type": "object" } }
+        }))
+    }
+    async fn values(&self) -> agent_core::Result<serde_json::Value> {
+        // A secret field the store has already masked to empty.
+        Ok(serde_json::json!({
+            "agent": { "provider": "openai-compat" },
+            "provider": { "api_key": "" }
+        }))
+    }
+    async fn validate(
+        &self,
+        edits: &[agent_core::ConfigEdit],
+    ) -> agent_core::Result<Vec<agent_core::ConfigIssue>> {
+        Ok(edits
+            .iter()
+            .filter(|e| e.path == "agent.context")
+            .map(|e| agent_core::ConfigIssue {
+                path: e.path.clone(),
+                code: agent_core::ConfigIssueCode::BadEnum,
+                detail: "not a known context strategy".into(),
+            })
+            .collect())
+    }
+    async fn put(
+        &self,
+        edits: Vec<agent_core::ConfigEdit>,
+    ) -> agent_core::Result<Vec<agent_core::ConfigIssue>> {
+        // Anything outside `agent.*` is an unknown path (rejected, nothing written).
+        Ok(edits
+            .iter()
+            .filter(|e| !e.path.starts_with("agent."))
+            .map(|e| agent_core::ConfigIssue {
+                path: e.path.clone(),
+                code: agent_core::ConfigIssueCode::UnknownPath,
+                detail: "no such field".into(),
+            })
+            .collect())
+    }
+    async fn status(&self) -> agent_core::Result<agent_core::ConfigStatus> {
+        Ok(agent_core::ConfigStatus {
+            restart_required: true,
+            pending: vec![agent_core::ConfigEdit {
+                path: "agent.max_iterations".into(),
+                value: Some(serde_json::json!(30)),
+            }],
+            loaded_hash: "aaaa".into(),
+            ondisk_hash: "bbbb".into(),
+        })
+    }
+}
+
+fn config_edit(path: &str, value: Option<serde_json::Value>) -> pb::ConfigEdit {
+    pb::ConfigEdit::from(agent_core::ConfigEdit {
+        path: path.to_string(),
+        value,
+    })
+}
+
+#[rstest]
+#[case::tcp(Transport::Tcp)]
+#[case::uds(Transport::Uds)]
+#[tokio::test]
+async fn config_get_schema_and_values_roundtrip(#[case] transport: Transport) {
+    let (dial, _srv) = spawn(
+        transport,
+        agent_grpc::server::config_router(Arc::new(MockConfigStore)),
+    )
+    .await;
+    let mut client =
+        pb::config_service_client::ConfigServiceClient::new(dial.connect_lazy().unwrap());
+
+    let schema: serde_json::Value = client
+        .get_schema(pb::GetSchemaRequest {})
+        .await
+        .unwrap()
+        .into_inner()
+        .schema
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert!(schema.get("properties").is_some(), "schema is an object");
+
+    let values: serde_json::Value = client
+        .get_values(pb::GetValuesRequest {})
+        .await
+        .unwrap()
+        .into_inner()
+        .values
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert_eq!(values["agent"]["provider"], "openai-compat");
+    // The secret is present but masked (never echoed with a value).
+    assert_eq!(values["provider"]["api_key"], "");
+}
+
+#[rstest]
+#[case::tcp(Transport::Tcp)]
+#[case::uds(Transport::Uds)]
+#[tokio::test]
+async fn config_validate_flags_bad_enum(#[case] transport: Transport) {
+    let (dial, _srv) = spawn(
+        transport,
+        agent_grpc::server::config_router(Arc::new(MockConfigStore)),
+    )
+    .await;
+    let mut client =
+        pb::config_service_client::ConfigServiceClient::new(dial.connect_lazy().unwrap());
+
+    let resp = client
+        .validate(pb::ValidateConfigRequest {
+            edits: vec![config_edit(
+                "agent.context",
+                Some(serde_json::json!("bogus")),
+            )],
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(resp.issues.len(), 1);
+    assert_eq!(resp.issues[0].path, "agent.context");
+    assert_eq!(resp.issues[0].code, "bad_enum");
+}
+
+#[rstest]
+#[case::tcp(Transport::Tcp)]
+#[case::uds(Transport::Uds)]
+#[tokio::test]
+async fn config_put_good_edit_requires_restart(#[case] transport: Transport) {
+    let (dial, _srv) = spawn(
+        transport,
+        agent_grpc::server::config_router(Arc::new(MockConfigStore)),
+    )
+    .await;
+    let mut client =
+        pb::config_service_client::ConfigServiceClient::new(dial.connect_lazy().unwrap());
+
+    let resp = client
+        .put(pb::PutConfigRequest {
+            edits: vec![config_edit(
+                "agent.max_iterations",
+                Some(serde_json::json!(30)),
+            )],
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(resp.issues.is_empty(), "a good edit has no issues");
+    assert!(
+        resp.restart_required,
+        "a written edit needs a restart to apply"
+    );
+}
+
+#[rstest]
+#[case::tcp(Transport::Tcp)]
+#[case::uds(Transport::Uds)]
+#[tokio::test]
+async fn adversarial_config_put_unknown_path_rejected(#[case] transport: Transport) {
+    let (dial, _srv) = spawn(
+        transport,
+        agent_grpc::server::config_router(Arc::new(MockConfigStore)),
+    )
+    .await;
+    let mut client =
+        pb::config_service_client::ConfigServiceClient::new(dial.connect_lazy().unwrap());
+
+    let resp = client
+        .put(pb::PutConfigRequest {
+            edits: vec![config_edit(
+                "../../etc/passwd",
+                Some(serde_json::json!("x")),
+            )],
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    // A hostile path comes back as a typed issue, not an RPC error or a panic —
+    // and nothing is applied, so no restart is required.
+    assert_eq!(resp.issues.len(), 1);
+    assert_eq!(resp.issues[0].code, "unknown_path");
+    assert!(!resp.restart_required);
+}
+
+#[tokio::test]
+async fn config_status_roundtrips_pending_edit() {
+    let (dial, _srv) = spawn(
+        Transport::Tcp,
+        agent_grpc::server::config_router(Arc::new(MockConfigStore)),
+    )
+    .await;
+    let mut client =
+        pb::config_service_client::ConfigServiceClient::new(dial.connect_lazy().unwrap());
+
+    let status = client
+        .status(pb::ConfigStatusRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(status.restart_required);
+    assert_eq!(status.pending.len(), 1);
+    assert_eq!(status.pending[0].path, "agent.max_iterations");
+    // The pending edit's JSON value survives the core→pb ConfigEdit conversion.
+    let v: serde_json::Value = status.pending[0].value.clone().unwrap().try_into().unwrap();
+    assert_eq!(v, serde_json::json!(30));
+}

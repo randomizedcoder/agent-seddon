@@ -57,6 +57,7 @@ pub enum Seam {
     Digest,
     Graph,
     ProviderRegistry,
+    Config,
     SessionStream,
 }
 
@@ -94,6 +95,7 @@ const ALL_SEAMS: &[Seam] = &[
     Seam::Digest,
     Seam::Graph,
     Seam::ProviderRegistry,
+    Seam::Config,
     Seam::SessionStream,
 ];
 
@@ -337,6 +339,13 @@ const SEAMS: &[SeamInfo] = &[
         endpoint: constants::PROVIDER_REGISTRY,
     },
     SeamInfo {
+        seam: Seam::Config,
+        flag: "--serve-config",
+        name: "config",
+        service: "agent.v1.ConfigService",
+        endpoint: constants::CONFIG,
+    },
+    SeamInfo {
         seam: Seam::SessionStream,
         flag: "--serve-session-stream",
         name: "session-stream",
@@ -418,6 +427,7 @@ impl Seam {
             Seam::Digest => &cfg.grpc.digest.listen,
             Seam::Graph => &cfg.grpc.graph.listen,
             Seam::ProviderRegistry => &cfg.grpc.provider_registry.listen,
+            Seam::Config => &cfg.grpc.config.listen,
             Seam::SessionStream => &cfg.grpc.session_stream.listen,
         }
     }
@@ -663,6 +673,13 @@ fn add_seam_service(
         Seam::ProviderRegistry => match agent.provider_registry() {
             Some(r) => (
                 router.add_service(srv::ProviderRegistrySvc::new(r).into_server()),
+                true,
+            ),
+            None => (router, false),
+        },
+        Seam::Config => match agent.config_store() {
+            Some(c) => (
+                router.add_service(srv::ConfigSvc::new(c).into_server()),
                 true,
             ),
             None => (router, false),

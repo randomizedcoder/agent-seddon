@@ -191,6 +191,14 @@ durable record.
 
 Full three-signal overview: [`docs/observability.md`](docs/observability.md).
 
+**Portal.** A small Flutter, gRPC-only app pulls this legibility into one place: it
+launches the observability UIs, sees and edits every prompt per mode, shows a live
+agent view (loop narration + a mode/context/pool/latency status bar), edits the
+model-router fleet **live**, and edits the whole `config/agent.toml` through a
+schema-driven **Settings** form (a `ConfigService` seam writes the file — comments
+preserved — to apply on the next restart). It is itself just another gRPC client of
+the `--serve-all` gateway. Design: [`docs/design/portal/`](docs/design/portal/README.md).
+
 ## Running seams as services
 
 26 seams have a gRPC service. Selecting one is a config change, not a code change —
