@@ -70,6 +70,10 @@ in
   # RESOURCE_EXHAUSTED under overload, and the ramp path runs (no perf assertions).
   loadtest-smoke = craneCheck ./loadtest-smoke.nix { inherit cargoArtifacts; };
   nix-fmt = import ./nix-fmt.nix { inherit pkgs versions; };
+  # `flutter analyze` over the portal (portal/) — the Dart static-analysis
+  # counterpart to clippy. Hermetic: buildFlutterApplication vendors pub deps
+  # offline from portal/pubspec.lock, then we run `flutter analyze --no-pub`.
+  dart-analyze = import ./dart-analyze.nix { inherit pkgs lib versions; };
   # `buf lint` + `buf breaking` over the .proto contracts (see buf.yaml). Breaking
   # is gated against the committed image; regenerate it with `nix run .#buf-image`.
   buf = import ./buf.nix { inherit pkgs versions; };
