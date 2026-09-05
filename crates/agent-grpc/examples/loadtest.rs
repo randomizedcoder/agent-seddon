@@ -305,6 +305,7 @@ async fn ramp(seam: &str, transport: &'static str, conc: usize, requests: usize)
                     tags: vec![],
                     tier: agent_core::PoolTier::Medium,
                     input_cost: 1.0,
+                    max_concurrency: 0,
                     provider: scripted(),
                 })
                 .collect();

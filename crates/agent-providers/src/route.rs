@@ -68,6 +68,13 @@ pub struct UpstreamMeta<'a> {
     /// untrusted). `0` = unknown, which is also the neutral ordering value.
     pub in_flight: u32,
     pub latency_ewma_ms: u32,
+    /// Configured aggregate concurrency this upstream can absorb — for a
+    /// multi-GPU gateway (one endpoint that internally load-balances N cards),
+    /// ≈ GPUs × per-GPU slots. Used to normalise the `least-loaded` key so a
+    /// higher-capacity endpoint draws proportionally more traffic. `0` =
+    /// unknown/unbounded, treated as capacity `1` (the neutral value that keeps
+    /// the raw-`in_flight` ordering — see [`Prefer::rank`]).
+    pub max_concurrency: u32,
 }
 
 /// A cheap context floor for a request that carries no `min_context`: total text
@@ -133,6 +140,12 @@ impl OrderPolicy {
     }
 }
 
+/// Fixed-point scale for the capacity-normalised `least-loaded` key: it turns
+/// the load *ratio* `in_flight / capacity` into an ordinal integer without a
+/// float sort key. Overflow-safe — `in_flight ≤ u32::MAX` and the multiply is in
+/// `i64`, so the worst case (`u32::MAX × SCALE`) stays well under `i64::MAX`.
+const LEAST_LOADED_SCALE: i64 = 1_000_000;
+
 /// The `prefer` half — how to ORDER the survivors once a rule matches.
 #[derive(Debug, Clone, Default)]
 pub struct Prefer {
@@ -169,7 +182,17 @@ impl Prefer {
             // float keys (the cost was clamped finite + non-negative on build).
             Some(OrderPolicy::Cost) => (f64::from(u.input_cost) * 1_000.0) as i64,
             Some(OrderPolicy::Latency) => i64::from(u.latency_ewma_ms),
-            Some(OrderPolicy::LeastLoaded) => i64::from(u.in_flight),
+            // Capacity-normalised load: order by the *ratio* in_flight/capacity,
+            // not raw in-flight, so a higher-capacity endpoint (e.g. a gateway
+            // fronting 3 GPUs, `max_concurrency = 3×`) looks 1/3 as loaded at the
+            // same in-flight and draws ~3× the traffic until the ratios equalise.
+            // Capacity `0` (unknown) ⇒ 1, so a fleet that sets no capacity keys
+            // on `in_flight × SCALE` — monotonic in in-flight, i.e. byte-identical
+            // ordering to the pre-capacity behaviour.
+            Some(OrderPolicy::LeastLoaded) => {
+                let cap = i64::from(u.max_concurrency).max(1);
+                i64::from(u.in_flight) * LEAST_LOADED_SCALE / cap
+            }
             None => 0,
         };
         (pos, -tag_overlap, -tier_bonus, live)
@@ -323,6 +346,7 @@ mod tests {
             supports_tools: true,
             in_flight: 0,
             latency_ewma_ms: 0,
+            max_concurrency: 0,
         }
     }
 
@@ -876,6 +900,65 @@ mod tests {
             let got = policy_only(Some(pol)).resolve(&Hint::default(), &fleet);
             assert_eq!(got[0], "ok", "{pol:?}");
         }
+    }
+
+    // --- capacity-normalised least-loaded (multi-GPU gateway) ---------------
+
+    /// Equal tags/tier/cost so ONLY the capacity-normalised load separates —
+    /// the case for a gateway that fronts several GPUs behind one endpoint.
+    fn loaded(id: &'static str, in_flight: u32, capacity: u32) -> UpstreamMeta<'static> {
+        UpstreamMeta {
+            max_concurrency: capacity,
+            ..live(id, 0.0, in_flight, 0)
+        }
+    }
+
+    #[test]
+    fn positive_capacity_normalises_least_loaded_toward_the_bigger_endpoint() {
+        // Equal in-flight, unequal capacity: the 3×-capacity gateway looks 1/3 as
+        // loaded (3/24 vs 3/8) and is preferred — the whole point of the feature.
+        let fleet = vec![loaded("small", 3, 8), loaded("big", 3, 24)];
+        let got = policy_only(Some(OrderPolicy::LeastLoaded)).resolve(&Hint::default(), &fleet);
+        assert_eq!(got, vec!["big".to_string(), "small".to_string()]);
+    }
+
+    #[test]
+    fn positive_bigger_endpoint_stays_preferred_while_carrying_proportionally_more() {
+        // "big" (cap 24) keeps winning while it carries ~3× "small"'s (cap 8)
+        // load: 8/24 = 0.33 < 3/8 = 0.375, so big is still first at 8-vs-3 in
+        // flight — traffic tracks the ~3:1 the capacities imply.
+        let fleet = vec![loaded("small", 3, 8), loaded("big", 8, 24)];
+        let got = policy_only(Some(OrderPolicy::LeastLoaded)).resolve(&Hint::default(), &fleet);
+        assert_eq!(got[0], "big");
+    }
+
+    #[test]
+    fn boundary_zero_capacity_orders_exactly_like_raw_in_flight() {
+        // Unknown capacity (0) ⇒ cap 1 ⇒ key is in_flight×SCALE: the pre-capacity
+        // behaviour (fewest in-flight first), so an un-annotated fleet is unchanged.
+        let fleet = vec![loaded("busy", 9, 0), loaded("idle", 1, 0)];
+        let got = policy_only(Some(OrderPolicy::LeastLoaded)).resolve(&Hint::default(), &fleet);
+        assert_eq!(got, vec!["idle".to_string(), "busy".to_string()]);
+    }
+
+    #[test]
+    fn corner_idle_endpoints_tie_on_id_regardless_of_capacity() {
+        // Capacity only matters under load: two idle endpoints (0 in flight) both
+        // rank at ratio 0 and fall back to the stable id order — a 3× box gets no
+        // head-start while idle.
+        let fleet = vec![loaded("b", 0, 24), loaded("a", 0, 8)];
+        let got = policy_only(Some(OrderPolicy::LeastLoaded)).resolve(&Hint::default(), &fleet);
+        assert_eq!(got, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn adversarial_hostile_capacity_never_overflows_or_panics() {
+        // u32::MAX capacity AND in-flight: the i64 multiply (in_flight × SCALE)
+        // stays < i64::MAX and the divide is well-defined; a sane low-ratio "ok"
+        // still wins (evil ≈ 1e6, ok = 10_000).
+        let fleet = vec![loaded("evil", u32::MAX, u32::MAX), loaded("ok", 1, 100)];
+        let got = policy_only(Some(OrderPolicy::LeastLoaded)).resolve(&Hint::default(), &fleet);
+        assert_eq!(got[0], "ok");
     }
 
     #[rstest::rstest]

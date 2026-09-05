@@ -65,6 +65,7 @@ fn up(id: &str, provider: Arc<dyn LlmProvider>) -> RouterUpstream {
         tags: vec!["reasoning".into()],
         tier: PoolTier::Heavy,
         input_cost: 1.0,
+        max_concurrency: 0,
         provider,
     }
 }

@@ -220,6 +220,9 @@ impl RegistryRouter {
                 tags: card.tags.clone(),
                 tier: card.tier.unwrap_or(agent_core::PoolTier::Medium),
                 input_cost: card.input_cost,
+                // Aggregate concurrency (multi-GPU gateway) — already clamped by
+                // `card.sanitize()` above; feeds capacity-normalised routing.
+                max_concurrency: card.max_concurrency,
                 provider,
             });
         }

@@ -497,6 +497,11 @@ cooldown_secs       = 30          # how long a breaker stays open before re-prob
 # tags = ["reasoning", "long-context"]
 # tier = "heavy"
 # input_cost = 3.0                    # per-Mtok hint for cost-aware ordering
+# max_concurrency = 24                # aggregate slots behind this endpoint: if the
+#                                     # URL is a GATEWAY load-balancing 3× B300s,
+#                                     # set ~3× a single card's slots so the
+#                                     # "least-loaded" policy sends it ~3× the traffic
+#                                     # (0/unset ⇒ ordered on raw in-flight, as before).
 #
 # [[route.upstreams]]
 # name = "glm"
@@ -523,6 +528,8 @@ cooldown_secs       = 30          # how long a breaker stays open before re-prob
 # # Applied when no rule matches — here: prefer kimi, fall back to glm.
 # # `policy` (model-router 04) breaks ties among equally-preferred survivors by a
 # # LIVE signal: "cost" | "latency" | "least-loaded" (a tie-break, never an override).
+# # "least-loaded" orders by in-flight NORMALISED by `max_concurrency`, so a
+# # higher-capacity endpoint (a multi-GPU gateway) draws proportionally more.
 # [route.default_prefer]
 # upstreams = ["kimi", "glm"]
 # # policy = "latency"

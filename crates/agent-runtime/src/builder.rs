@@ -2189,6 +2189,7 @@ fn route_cfg_from(
             tags: u.tags.clone(),
             tier: u.tier.map(|t| t.as_str().to_string()).unwrap_or_default(),
             input_cost: (u.input_cost != 0.0).then_some(u.input_cost),
+            max_concurrency: (u.max_concurrency != 0).then_some(u.max_concurrency),
         });
     }
     let prefer = |p: &agent_core::RoutePreferSpec| RoutePreferCfg {
@@ -2454,6 +2455,8 @@ fn route_upstream_card(
         tags: u.tags.clone(),
         input_cost: u.input_cost.unwrap_or(0.0),
         tier: agent_core::PoolTier::parse(&u.tier),
+        // Aggregate concurrency (multi-GPU gateway); `card.sanitize()` clamps it.
+        max_concurrency: u.max_concurrency.unwrap_or(0),
         ..Default::default()
     };
     card.sanitize();
@@ -3820,6 +3823,7 @@ mod registry_seed_tests {
             tags: vec!["reasoning".into()],
             tier: "heavy".into(),
             input_cost: Some(1.5),
+            max_concurrency: Some(24),
             ..Default::default()
         }
     }
@@ -3833,6 +3837,8 @@ mod registry_seed_tests {
         assert_eq!(card.context_window, 64_000);
         assert_eq!(card.tier, Some(agent_core::PoolTier::Heavy));
         assert_eq!(card.input_cost, 1.5);
+        // Multi-GPU-gateway capacity flows onto the card (model-router 05).
+        assert_eq!(card.max_concurrency, 24);
         assert!(card.enabled);
         // file-key form maps to the file: scheme.
         let mut u = ucfg("glm");

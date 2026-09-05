@@ -91,6 +91,7 @@ fn up(id: String, provider: Arc<dyn LlmProvider>, tags: &[&str], tier: PoolTier)
         tags: tags.iter().map(|s| (*s).to_string()).collect(),
         tier,
         input_cost: 1.0,
+        max_concurrency: 0,
         provider,
     }
 }

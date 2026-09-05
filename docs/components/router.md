@@ -229,7 +229,13 @@ fleet config); garbled or oversized env values fail closed.
 using the router's own dispatch accounting (an RAII in-flight counter + an
 α=0.3 latency EWMA per upstream) — a *tie-break*, never an override: an
 explicitly preferred upstream still wins regardless of its live numbers, and
-unknown (`0`) values are neutral. Per-upstream dispatch is metered:
+unknown (`0`) values are neutral. **`least-loaded` orders by in-flight
+*normalised* by `max_concurrency`** (the upstream's aggregate slot count), not
+raw in-flight — so a multi-GPU **gateway** (one endpoint fronting N cards,
+`max_concurrency ≈ N × per-GPU slots`) looks proportionally less loaded and
+draws ~N× the traffic before it reaches parity. `max_concurrency = 0` (unset)
+⇒ capacity 1, i.e. the raw-in-flight ordering, unchanged. See
+[model-router 05](../design/model-router/05-capacity-aware.md). Per-upstream dispatch is metered:
 `agent_router_dispatch_total{role,upstream,outcome}`,
 `agent_router_failover_total{from,to,reason}`, and the
 `agent_router_upstream_inflight{upstream}` gauge (fed from both edges of the

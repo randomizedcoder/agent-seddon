@@ -870,6 +870,13 @@ pub struct RouteUpstreamCfg {
     /// Per-Mtok input cost hint (clamped non-negative on build).
     #[serde(default)]
     pub input_cost: Option<f32>,
+    /// Aggregate concurrency this endpoint can absorb. For a multi-GPU gateway —
+    /// one OpenAI-compatible endpoint that internally load-balances several cards
+    /// — set this to ≈ GPUs × per-GPU slots so capacity-normalised `least-loaded`
+    /// routing sends it proportionally more traffic. Unset/`0` = unknown (treated
+    /// as neutral: ordered on raw in-flight, as before). Clamped on build.
+    #[serde(default)]
+    pub max_concurrency: Option<u32>,
 }
 
 /// The `match` half of a `[[route.rules]]` — present conditions must all hold.
