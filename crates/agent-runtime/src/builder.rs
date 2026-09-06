@@ -350,7 +350,12 @@ pub async fn build_agent_with(
     // the handle drives the optional background mirror-fetch below.
     #[cfg(feature = "git")]
     let repo_backend = {
-        let backend = crate::git::build_repo(registry, &cfg, &session_id, &metrics)
+        // The git funnel runs through the config-selected sandbox (C24); fall back
+        // to `LocalSandbox` when no backend was wired (tool-core off).
+        let git_sandbox = shared_sandbox
+            .clone()
+            .unwrap_or_else(|| Arc::new(agent_sandbox::LocalSandbox));
+        let backend = crate::git::build_repo(registry, &cfg, &session_id, &metrics, git_sandbox)
             .context("building git backend")?;
         let backend = crate::metered::repo(backend, metrics.clone(), cfg.git.backend_name());
         for tool in agent_tools::git_tools(backend.clone()) {
@@ -2027,6 +2032,14 @@ pub(crate) fn gate_evidence(
 /// repo / no commits / nothing changed.
 #[cfg(feature = "provider-consensus")]
 fn git_diff_evidence(dir: &str) -> Option<String> {
+    // NOT routed through the `Sandbox` seam (C24): this is a **synchronous**
+    // `EvidenceSource` closure (see `gate_evidence`) that the consensus gate calls,
+    // and it reads the **agent's own working tree** (`dir` from config, not model
+    // input) with fixed literal args. The chokepoint's wins — no-shell for
+    // untrusted args, future isolation-backend enforcement — don't apply, and
+    // routing would force the whole `EvidenceSource` type async through the
+    // provider gate. Left as a raw spawn deliberately; not covered by the
+    // `no_raw_spawn` guard (which scans the tool/git/search crates, not runtime).
     let git = |args: &[&str]| -> Option<String> {
         let out = std::process::Command::new("git")
             .arg("-C")

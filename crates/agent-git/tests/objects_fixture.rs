@@ -105,6 +105,37 @@ async fn list_tree_sees_added_file_only_on_feature() {
     assert!(feat.contains(&PathBuf::from("b.txt")));
 }
 
+/// A binary blob (non-UTF8 bytes, incl. NUL) read through the seam is byte-exact.
+/// This is the property the git funnel needs from `stdout_bytes` (R3a): routing a
+/// `cat-file blob` through `Sandbox::exec` must not go via the lossy `stdout`
+/// string, which would change the length and corrupt the content. `read_file`
+/// flags it binary and reports the exact byte length — both computed from the raw
+/// bytes `git_bytes` returned.
+#[tokio::test]
+async fn positive_binary_blob_read_is_byte_exact() {
+    let dir = fixture();
+    // 0x00 forces the binary classifier; 0xFF/0xFE are invalid UTF-8 (a lossy
+    // decode would replace them, changing the length).
+    let payload: Vec<u8> = vec![0x00, 0xFF, 0xFE, 0x01, 0x80, 0x00, 0x42];
+    std::fs::write(dir.join("bin.dat"), &payload).unwrap();
+    git(&dir, &["add", "-A"]);
+    git(&dir, &["commit", "-q", "-m", "add binary"]);
+
+    let blob = backend(&dir)
+        .read_file(&Revision::from("main"), Path::new("bin.dat"))
+        .await
+        .unwrap();
+    assert!(
+        blob.is_binary,
+        "a NUL-containing blob must be flagged binary"
+    );
+    assert_eq!(
+        blob.bytes_len,
+        payload.len() as u64,
+        "byte length must survive the seam exactly (proves stdout_bytes, not lossy stdout)"
+    );
+}
+
 #[tokio::test]
 async fn diff_main_to_feature_reports_add_and_modify() {
     let dir = fixture();

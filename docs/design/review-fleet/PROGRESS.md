@@ -12,11 +12,11 @@ Three PRs, each based off `main`, never stacked, each gated by `nix flake check`
 
 ## Now
 
-- **Current PR:** PR5 — **R3b** route rg + no-raw-Command guard + Tier-0 deny_tools policy + pty env-scrub
-- **Branch:** `feat/exec-chokepoint-r3b-route-rg` (off main; R3a #273 merged as b8e9411)
-- **Current step:** R3b · code + tests complete; **`nix flake check` GREEN**; committing + pushing + opening PR5
-- **Last action:** fixed missed exec_roundtrip PtyOpenRequest `env` field; gate re-ran clean (all 30 checks)
-- **Next action:** open PR5, await merge; then R3c (git funnel), R4 (org tier).
+- **Current PR:** PR6 — **R3c** route the `git` funnel through the Sandbox seam
+- **Branch:** `feat/exec-chokepoint-r3c-git-funnel` (off main; R3b #274 merged as bb4e511)
+- **Current step:** R3c · code + tests complete; **`nix flake check` GREEN**; committing + pushing + opening PR6
+- **Last action:** `git_bytes`→`Sandbox::exec` (argv/stdout_bytes/600s cap); `CliBackend::with_sandbox`; build_repo threads shared_sandbox; guard extended to agent-git+agent-search (manifest allowlisted); docs
+- **Next action:** open PR6, await merge; then R4 (org tier).
 
 Phase 1 (Foundation) COMPLETE — R2 #270 → R1a #271 → R1b #272 all merged (main 9e8af41).
 Phase 2 = R3 (exec chokepoint, C24) + R4 (org tier, C25); plan file
@@ -109,7 +109,29 @@ routes yet); R3c isolates the widest blast radius (git); R4 is light + independe
 Deferred to C23 (documented): full PTY-under-a-real-sandbox backend (streaming exec variant);
 manifest/consensus git routing → R3c.
 
-## PR6 — R3c: route the `git` funnel through the seam (binary fidelity + capped timeout)  ⬜
+## PR6 — R3c: route the `git` funnel through the seam (binary fidelity + capped timeout)  🟢 (gate green; ready to push)
+
+- [x] `CliBackend` gains `sandbox: Arc<dyn Sandbox>` (default `LocalSandbox`) + `with_sandbox`
+  builder; `git_bytes` now builds `ExecSpec::argv(["git","-C",cwd,...args], cwd).timeout(600)` and
+  calls `self.sandbox.exec`, reading `stdout_bytes`. Non-zero exit / `timed_out` → `Err` (preserves
+  today's semantics incl. `grep`'s swallowed exit-1). argv mode = untrusted ref/path never shelled
+  (`agent-git/src/cli.rs`; `agent-git` gains `agent-sandbox` dep, features `sandbox-local`)
+- [x] `crate::git::build_repo` gains a `sandbox` param; `builder.rs` threads `shared_sandbox` (falls
+  back to `LocalSandbox` when tool-core off) into the `cli`/`hybrid` construction (`git.rs`, `builder.rs`)
+- [x] **No-raw-`Command` guard extended**: `SCANNED` += `agent-git/src` (fully routed, zero allowlist)
+  + `agent-search/src`; `ALLOWED` += `agent-search/src/manifest.rs` (documented: sync, fixed-arg,
+  read-only index probe — no model input, no async seam) (`agent-tools/tests/no_raw_spawn.rs`)
+- [x] Consensus `git_diff_evidence` (`builder.rs`) left a raw spawn **by decision** (sync
+  `EvidenceSource` closure over the agent's OWN working tree, fixed args) — documented in-code; not
+  in guard scope (guard scans tool/git/search, not runtime)
+- [x] Docs: `agent-git/src/cli.rs` module header + `docs/components/sandbox.md` (chokepoint wiring
+  now names rg + git; futures list updated)
+- [x] Tests: real-repo binary blob byte-exact via `stdout_bytes` (objects_fixture, 14); recording-
+  sandbox unit tests — argv-mode/no-shell + 600s cap, timeout→Err, nonzero→Err (cli.rs, 31 lib);
+  guard passes (agent-git routed, manifest allowlisted); all existing objects_fixture now run through
+  `LocalSandbox` (free regression)
+- [x] `nix flake check` — **GREEN** (exit 0, "all checks passed!", all 30 checks incl. git-heavy
+  review/e2e suites, leak/bench/buf-additive)
 
 ## PR7 — R4: org tier convention + session-id encoding + semantics docs  ⬜
 

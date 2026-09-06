@@ -28,6 +28,15 @@ re-derive.
 - **Wiring:** `bash` (`agent-tools`) holds an `Arc<dyn Sandbox>`; the builder picks
   the backend from `[sandbox] backend` (default `local`), meters it, and passes it
   to `BashTool::new`. `LocalSandbox` is `bash`'s `Default` so nothing else changes.
+- **The execution chokepoint (C24):** every child process funnels through this seam,
+  not a raw `Command`. Beyond `bash`, the builder wires the same backend into the
+  `rg` grep fast-path (`GrepTool`, R3b) and the whole `git` funnel (`CliBackend::
+  with_sandbox`, R3c — argv mode so an untrusted ref/path is never shell-interpreted,
+  `stdout_bytes` for byte-exact object reads, a 600 s hang-guard). The
+  `agent-tools`/`agent-git` production source is spawn-free by test
+  (`agent-tools/tests/no_raw_spawn.rs`); the documented exceptions are the
+  `agent-sandbox` impls themselves, the `agent-pty` streaming spawn (env-scrubbed +
+  Policy-gated), and `agent-search`'s sync fixed-arg index probe.
 - **Config:** `[sandbox] backend = "local" | "nix"`.
 - **Capability probe + graceful degrade:** a backend whose binary is absent (no
   `nix` on `PATH`) reports `available = false`; the `nix` backend errors cleanly
@@ -105,5 +114,7 @@ back so the model can read them.
   picks the global default today.
 - **The `SandboxService` gRPC service** (`agent --serve-sandbox`) so a heavy
   backend runs out of process.
-- **Routing the write tools** (`write_file`/`edit`/`patch`) through the sandbox;
-  `bash` — the highest-risk surface — routes through it now.
+- **Routing the write tools** (`write_file`/`edit`/`patch`) through the sandbox.
+  `bash`, the `rg` grep fast-path, and the `git` funnel route through it now; the
+  write tools and the `agent-pty` streaming spawn (a real pty under a sandbox needs
+  a streaming exec variant) are the remaining spawners.

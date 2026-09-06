@@ -1,23 +1,24 @@
 //! `git-cli` — a [`RepoBackend`] implemented entirely by shelling out to the
 //! user's `git`.
 //!
-//! Zero new dependencies (only `tokio::process`), and every operation runs
-//! through the same `git` the user runs, so config, hooks and credentials match
-//! exactly. It is both the default backend and the robustness fallback the
-//! `git-hybrid` backend reuses for its worktree/ref writes. Object reads run
-//! against the working checkout's object DB; worktree/mirror ops prefer the
-//! shared mirror when one exists. See `docs/components/git.md`.
+//! Every operation runs through the same `git` the user runs, so config, hooks
+//! and credentials match exactly — but the spawn itself funnels through the
+//! [`Sandbox`] seam (the execution chokepoint, C24), not a raw `Command`, so a
+//! future isolation backend confines git too. It is both the default backend and
+//! the robustness fallback the `git-hybrid` backend reuses for its worktree/ref
+//! writes. Object reads run against the working checkout's object DB; worktree/
+//! mirror ops prefer the shared mirror when one exists. See `docs/components/git.md`.
 
 use crate::cache::OidCache;
 use agent_core::{
     BlobContent, ChangeKind, Checkpoint, CommitInfo, CommitTouch, DiffResult, EntryKind, Error,
-    FileDiff, FileTouch, GrepHit, Oid, RepoBackend, RepoStatus, Result, Revision, TreeEntry,
-    WorktreeHandle, WorktreeSpec,
+    ExecSpec, FileDiff, FileTouch, GrepHit, Oid, RepoBackend, RepoStatus, Result, Revision,
+    Sandbox, TreeEntry, WorktreeHandle, WorktreeSpec,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use tokio::process::Command;
+use std::sync::Arc;
 
 /// Cap on how many changed files get a per-file patch fetched in one `diff`
 /// (the tool layer truncates the aggregate anyway).
@@ -26,6 +27,11 @@ const MAX_PATCH_FILES: usize = 300;
 /// touches thousands of files shouldn't balloon the history feed (or pollute
 /// co-change with spurious pairings).
 const MAX_TOUCHED_FILES: usize = 500;
+/// Hang-guard timeout for a single `git` invocation. `git` has no built-in
+/// deadline, so a wedged transport (a stalled `fetch`, a credential prompt on a
+/// review of an untrusted repo) would block forever. Generous enough for a large
+/// `clone --mirror`/`fetch`, tight enough to kill a genuine hang.
+const GIT_TIMEOUT_SECS: u64 = 600;
 
 /// A [`RepoBackend`] over the `git` CLI.
 pub struct CliBackend {
@@ -40,6 +46,11 @@ pub struct CliBackend {
     /// OID-keyed result cache (memoizes `diff` by its immutable endpoint oids).
     /// Repo-scoped (not per-session), since immutable-oid keys are shareable.
     cache: OidCache,
+    /// The execution chokepoint: every `git` spawn runs through this seam rather
+    /// than a raw `Command`. Defaults to `LocalSandbox` (behaviour-identical to the
+    /// old direct spawn); the runtime injects the config-selected backend via
+    /// [`CliBackend::with_sandbox`].
+    sandbox: Arc<dyn Sandbox>,
 }
 
 impl CliBackend {
@@ -57,7 +68,17 @@ impl CliBackend {
             worktrees: worktrees.into(),
             remote: remote.into(),
             cache,
+            sandbox: Arc::new(agent_sandbox::LocalSandbox),
         }
+    }
+
+    /// Route every `git` spawn through `sandbox` instead of the default
+    /// `LocalSandbox`. The runtime wires the config-selected backend here so a
+    /// future isolation backend (bwrap/oci, C23) confines git too.
+    #[must_use]
+    pub fn with_sandbox(mut self, sandbox: Arc<dyn Sandbox>) -> Self {
+        self.sandbox = sandbox;
+        self
     }
 
     /// `(hits, misses)` of the OID cache (for metrics/tests).
@@ -147,24 +168,41 @@ impl CliBackend {
             .unwrap_or(0)
     }
 
-    /// Run `git -C <cwd> <args...>`, returning stdout bytes on success.
+    /// Run `git -C <cwd> <args...>` **through the [`Sandbox`] seam**, returning
+    /// stdout bytes on success.
+    ///
+    /// argv mode (no shell) is deliberate: a caller-supplied ref/path/pattern in
+    /// `args` (ultimately model-controlled, so untrusted under prompt injection) is
+    /// passed as a literal argument and can never be shell-interpreted. Binary
+    /// object reads (`cat-file blob`) stay byte-exact via `stdout_bytes`. A
+    /// non-zero exit or a hang maps to `Err`, so callers see today's behaviour
+    /// (e.g. `grep`'s exit-1 "no matches" is still an `Err` it swallows).
     async fn git_bytes(&self, cwd: &Path, args: &[&str]) -> Result<Vec<u8>> {
-        let out = Command::new("git")
-            .arg("-C")
-            .arg(cwd)
-            .args(args)
-            .output()
+        let mut argv: Vec<String> = Vec::with_capacity(args.len() + 3);
+        argv.push("git".into());
+        argv.push("-C".into());
+        argv.push(cwd.to_string_lossy().into_owned());
+        argv.extend(args.iter().map(|a| (*a).to_string()));
+        let spec = ExecSpec::argv(argv, cwd).timeout(GIT_TIMEOUT_SECS);
+        let out = self
+            .sandbox
+            .exec(&spec)
             .await
             .map_err(|e| Error::Repo(format!("spawning git failed: {e}")))?;
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr);
+        if out.timed_out {
+            return Err(Error::Repo(format!(
+                "git {} timed out after {GIT_TIMEOUT_SECS}s and was killed",
+                args.join(" ")
+            )));
+        }
+        if out.exit_code != 0 {
             return Err(Error::Repo(format!(
                 "git {} failed: {}",
                 args.join(" "),
-                stderr.trim()
+                out.stderr.trim()
             )));
         }
-        Ok(out.stdout)
+        Ok(out.stdout_bytes)
     }
 
     /// Run `git`, returning trimmed stdout as a UTF-8 string.
@@ -891,5 +929,105 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("invalid worktree id"), "{err}");
+    }
+
+    // --- R3c: the git funnel routes through the Sandbox seam ----------------
+    // A recording double captures the `ExecSpec` git_bytes builds and returns a
+    // canned result, so we can assert *how* the funnel calls the seam (argv mode,
+    // no shell, timeout cap) and that a hang / non-zero exit map to `Err` — all
+    // without a real repo. (Real-repo end-to-end coverage lives in
+    // `tests/objects_fixture.rs`, whose `backend()` now runs through `LocalSandbox`.)
+    use agent_core::{ExecOutput, SandboxCapabilities};
+    use std::sync::Mutex;
+
+    struct RecordingSandbox {
+        last: Mutex<Option<ExecSpec>>,
+        out: ExecOutput,
+    }
+
+    impl RecordingSandbox {
+        fn new(out: ExecOutput) -> Arc<Self> {
+            Arc::new(Self {
+                last: Mutex::new(None),
+                out,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Sandbox for RecordingSandbox {
+        async fn exec(&self, spec: &ExecSpec) -> Result<ExecOutput> {
+            *self.last.lock().unwrap() = Some(spec.clone());
+            Ok(self.out.clone())
+        }
+        fn capabilities(&self) -> SandboxCapabilities {
+            SandboxCapabilities {
+                backend: "recording".into(),
+                available: true,
+                ..Default::default()
+            }
+        }
+    }
+
+    fn ok_out(stdout: &[u8]) -> ExecOutput {
+        ExecOutput {
+            stdout_bytes: stdout.to_vec(),
+            ..Default::default()
+        }
+    }
+
+    /// The funnel runs `git` in **argv mode** (no shell) with the hang-guard
+    /// timeout, and an untrusted-looking ref is a single literal arg — never a
+    /// shell fragment.
+    #[tokio::test]
+    async fn positive_git_spawn_goes_through_sandbox_in_argv_mode() {
+        let rec = RecordingSandbox::new(ok_out(b"deadbeef\n"));
+        let b = backend().with_sandbox(rec.clone());
+        // A ref carrying shell metacharacters: in argv mode it stays one literal.
+        let oid = b.resolve(&Revision("HEAD; rm -rf /".into())).await.unwrap();
+        assert_eq!(oid.as_str(), "deadbeef", "stdout_bytes drives the result");
+
+        let spec = rec.last.lock().unwrap().clone().expect("exec was called");
+        assert!(spec.command.is_empty(), "argv mode, not `bash -c`");
+        assert_eq!(spec.argv.first().map(String::as_str), Some("git"));
+        assert_eq!(spec.timeout_secs, GIT_TIMEOUT_SECS, "hang-guard applied");
+        assert!(
+            spec.argv.iter().any(|a| a == "HEAD; rm -rf /"),
+            "the untrusted ref is one literal argv element, not shell-split: {:?}",
+            spec.argv
+        );
+    }
+
+    /// A hung git (the seam reports `timed_out`) maps to an `Err` that names the
+    /// timeout — the funnel never returns a partial/empty success.
+    #[tokio::test]
+    async fn boundary_git_timeout_caps_a_hang() {
+        let out = ExecOutput {
+            timed_out: true,
+            exit_code: -1,
+            ..Default::default()
+        };
+        let b = backend().with_sandbox(RecordingSandbox::new(out));
+        let err = b.resolve(&Revision("HEAD".into())).await.unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err}");
+    }
+
+    /// A non-zero git exit maps to an `Err` carrying stderr (today's behaviour,
+    /// preserved now that the seam returns `Ok(exit_code != 0)` rather than erroring).
+    #[tokio::test]
+    async fn negative_git_nonzero_exit_is_error() {
+        let out = ExecOutput {
+            exit_code: 128,
+            stderr: "fatal: bad revision".into(),
+            ..Default::default()
+        };
+        let b = backend().with_sandbox(RecordingSandbox::new(out));
+        let err = b.resolve(&Revision("nope".into())).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("failed"), "{msg}");
+        assert!(
+            msg.contains("fatal: bad revision"),
+            "stderr surfaced: {msg}"
+        );
     }
 }
