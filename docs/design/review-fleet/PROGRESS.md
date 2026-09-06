@@ -14,9 +14,9 @@ Three PRs, each based off `main`, never stacked, each gated by `nix flake check`
 
 - **Current PR:** PR2 — R1a per-session working directory
 - **Branch:** `feat/review-fleet-r1a-cwd` (off main; #270/R2 merged as 4be29aa)
-- **Current step:** PR2 · gate GREEN ("all checks passed!", exit 0); committing + opening PR
-- **Last action:** `nix flake check` passed (exec/pty/loop regression green — fleet_root=None unchanged)
-- **Next action:** commit + push + open PR2; on merge, start PR3 (R1b creds) on a fresh branch off main
+- **Current step:** PR2 · OPEN as **#271** (commit 5a4a697), gate green, awaiting review/merge
+- **Last action:** pushed `feat/review-fleet-r1a-cwd`, opened PR #271
+- **Next action:** on merge of #271, start PR3 (R1b creds) on a fresh branch off main
 
 ---
 
@@ -35,7 +35,7 @@ Three PRs, each based off `main`, never stacked, each gated by `nix flake check`
 - [x] Tests: stamp (scope/no-scope), all-7-rows-carry-user, sqlite scoped-read isolation + unscoped, sanitize_query hostile uid — ALL PASS
 - [x] `nix flake check` — GREEN ("all checks passed!"); buf additive (no baseline bump); digest_query bench Ir held
 
-## PR2 — R1a: per-session working directory  🟡 (code+tests done; gate running)
+## PR2 — R1a: per-session working directory  ✅ (PR #271, gate green)
 
 - [x] `resolve_cwd(key, fleet_root, fallback, opts)` — 3 branches; `CwdOpts.inherited_workspace` reserved for inc 8; returns `Result` (fail-closed) — `agent.rs`
 - [x] Rewired `session_with` cwd source; `fleet_root=None` ⇒ `settings.cwd` (zero change when unset); infallible constructor keeps its logged fail-safe fallback (keys are pre-validated)
