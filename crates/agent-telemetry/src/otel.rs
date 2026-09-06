@@ -95,6 +95,14 @@ where
     if let Some(id) = &cfg.instance_id {
         attrs.push(KeyValue::new("service.instance.id", id.clone()));
     }
+    // TENANCY (review-fleet R2): the ClickHouse-native sink (rows + logs) now carries
+    // the verified per-turn `user` — that is the queryable per-tenant telemetry the
+    // multi-tenancy track's RLS builds on. A per-SPAN `user`/`session` attribute here
+    // is deferred: it needs an OTEL SpanProcessor setting attributes on span start,
+    // but the batch exporter runs on its own task where the `current_identity()`
+    // task-local is absent, so it must be threaded via the OTEL Context rather than
+    // read ambiently. Spans still carry the run's session as a process-level resource
+    // attribute above. Tracked as a fast-follow (see PROGRESS.md).
 
     let provider = TracerProvider::builder()
         .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)

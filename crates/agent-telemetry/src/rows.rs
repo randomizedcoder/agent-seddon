@@ -22,6 +22,9 @@ fn dt64_from_ms(ms: u64) -> DateTime64<3> {
 #[derive(Debug, Clone, Row)]
 pub struct EventRow {
     pub session_id: String,
+    /// The verified owning identity (`SessionKey.user`; tenant == user at this
+    /// tier), stamped at the emit funnel. Empty for events emitted outside a scope.
+    pub user: String,
     pub ts: DateTime64<3>,
     pub seq: u32,
     pub kind: String,
@@ -41,6 +44,7 @@ impl EventRow {
         };
         Self {
             session_id: event.session_id.clone(),
+            user: event.user.clone(),
             ts: dt64_from_ms(event.ts_ms),
             seq,
             kind: event.kind.clone(),
@@ -58,6 +62,9 @@ impl EventRow {
 #[derive(Debug, Clone, Row)]
 pub struct LogRow {
     pub session_id: String,
+    /// The verified owning identity (`SessionKey.user`; tenant == user at this
+    /// tier), stamped at the emit funnel. Empty for events emitted outside a scope.
+    pub user: String,
     pub ts: DateTime64<3>,
     pub level: String,
     pub target: String,
@@ -66,8 +73,10 @@ pub struct LogRow {
 }
 
 impl LogRow {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         session_id: String,
+        user: String,
         level: String,
         target: String,
         message: String,
@@ -75,6 +84,7 @@ impl LogRow {
     ) -> Self {
         Self {
             session_id,
+            user,
             ts: dt64_from_ms(now_ms()),
             level,
             target,
@@ -88,6 +98,9 @@ impl LogRow {
 #[derive(Debug, Clone, Row)]
 pub struct UsageRow {
     pub session_id: String,
+    /// The verified owning identity (`SessionKey.user`; tenant == user at this
+    /// tier), stamped at the emit funnel. Empty for events emitted outside a scope.
+    pub user: String,
     pub ts: DateTime64<3>,
     pub iter: u32,
     pub prompt_tokens: u32,
@@ -101,6 +114,7 @@ impl UsageRow {
         let usage = event.usage.as_ref()?;
         Some(Self {
             session_id: event.session_id.clone(),
+            user: event.user.clone(),
             ts: dt64_from_ms(event.ts_ms),
             iter: event.iter.unwrap_or(0),
             prompt_tokens: usage.prompt_tokens,
@@ -115,6 +129,9 @@ impl UsageRow {
 #[derive(Debug, Clone, Row)]
 pub struct VerificationRow {
     pub session_id: String,
+    /// The verified owning identity (`SessionKey.user`; tenant == user at this
+    /// tier), stamped at the emit funnel. Empty for events emitted outside a scope.
+    pub user: String,
     pub ts: DateTime64<3>,
     pub iter: u32,
     pub tool_name: String,
@@ -138,6 +155,7 @@ impl VerificationRow {
         let v = event.verification.as_ref()?;
         Some(Self {
             session_id: event.session_id.clone(),
+            user: event.user.clone(),
             ts: dt64_from_ms(event.ts_ms),
             iter: event.iter.unwrap_or(0),
             tool_name: v.tool_name.clone(),
@@ -161,6 +179,9 @@ impl VerificationRow {
 #[derive(Debug, Clone, Row)]
 pub struct ReviewRow {
     pub session_id: String,
+    /// The verified owning identity (`SessionKey.user`; tenant == user at this
+    /// tier), stamped at the emit funnel. Empty for events emitted outside a scope.
+    pub user: String,
     pub ts: DateTime64<3>,
     pub repo_hash: String,
     pub base_rev: String,
@@ -183,6 +204,7 @@ impl ReviewRow {
         let r = event.review.as_ref()?;
         Some(Self {
             session_id: event.session_id.clone(),
+            user: event.user.clone(),
             ts: dt64_from_ms(event.ts_ms),
             repo_hash: r.repo_hash.clone(),
             base_rev: r.base_rev.clone(),
@@ -205,6 +227,9 @@ impl ReviewRow {
 #[derive(Debug, Clone, Row)]
 pub struct ReviewCollectorRow {
     pub session_id: String,
+    /// The verified owning identity (`SessionKey.user`; tenant == user at this
+    /// tier), stamped at the emit funnel. Empty for events emitted outside a scope.
+    pub user: String,
     pub ts: DateTime64<3>,
     pub collector: String,
     pub status: String,
@@ -232,6 +257,7 @@ impl ReviewCollectorRow {
                 };
                 ReviewCollectorRow {
                     session_id: event.session_id.clone(),
+                    user: event.user.clone(),
                     ts,
                     collector: c.collector.clone(),
                     status: c.status.as_str().to_string(),
@@ -248,6 +274,9 @@ impl ReviewCollectorRow {
 #[derive(Debug, Clone, Row)]
 pub struct DimensionRow {
     pub session_id: String,
+    /// The verified owning identity (`SessionKey.user`; tenant == user at this
+    /// tier), stamped at the emit funnel. Empty for events emitted outside a scope.
+    pub user: String,
     pub ts: DateTime64<3>,
     pub dimension: String,
     pub is_new: u8,
@@ -265,6 +294,7 @@ impl DimensionRow {
             .iter()
             .map(|s| DimensionRow {
                 session_id: event.session_id.clone(),
+                user: event.user.clone(),
                 ts,
                 dimension: s.dimension.clone(),
                 is_new: s.is_new as u8,
@@ -287,6 +317,7 @@ mod tests {
             message,
             ts_ms: 1,
             session_id: "s".into(),
+            user: "u".into(),
             usage,
             iter: Some(2),
             verification: None,
@@ -301,6 +332,7 @@ mod tests {
             message: Message::assistant(""),
             ts_ms: 1,
             session_id: "s".into(),
+            user: "u".into(),
             usage: None,
             iter: Some(7),
             verification: Some(rec),
@@ -420,6 +452,7 @@ mod tests {
             message: Message::assistant(""),
             ts_ms: 5,
             session_id: "s".into(),
+            user: "u".into(),
             usage: None,
             iter: None,
             verification: None,
@@ -488,5 +521,65 @@ mod tests {
         let e = ev("tool", Message::assistant(""), None);
         assert!(ReviewRow::from_event(&e).is_none());
         assert!(ReviewCollectorRow::rows_from_event(&e).is_empty());
+    }
+
+    // --- R2: every row carries the verified `user` from the source event -------
+    #[test]
+    fn positive_all_rows_carry_user_from_event() {
+        // The `ev` / `verification` / `review_event` helpers all seed `user = "u"`.
+        let usage = Some(Usage {
+            prompt_tokens: 1,
+            completion_tokens: 1,
+            total_tokens: 2,
+            ..Default::default()
+        });
+        assert_eq!(
+            EventRow::from_event(&ev("goal", Message::user("h"), None), 0).user,
+            "u"
+        );
+        assert_eq!(
+            UsageRow::from_event(&ev("usage", Message::assistant(""), usage))
+                .unwrap()
+                .user,
+            "u"
+        );
+        assert_eq!(
+            VerificationRow::from_event(&verification(sample_record()))
+                .unwrap()
+                .user,
+            "u"
+        );
+        assert_eq!(
+            ReviewRow::from_event(&review_event(sample_review()))
+                .unwrap()
+                .user,
+            "u"
+        );
+        for r in ReviewCollectorRow::rows_from_event(&review_event(sample_review())) {
+            assert_eq!(r.user, "u");
+        }
+
+        // DimensionRow comes from a `kind = "dimension"` event; build one inline.
+        let dim_event = MemoryEvent {
+            kind: "dimension".into(),
+            message: Message::assistant(""),
+            ts_ms: 1,
+            session_id: "s".into(),
+            user: "u".into(),
+            usage: None,
+            iter: None,
+            verification: None,
+            review: None,
+            dimensional: Some(agent_core::DimensionalRecord {
+                summaries: vec![agent_core::DimensionSummary {
+                    dimension: "arch".into(),
+                    summary: "s".into(),
+                    is_new: false,
+                }],
+            }),
+        };
+        let dim_rows = DimensionRow::rows_from_event(&dim_event);
+        assert_eq!(dim_rows.len(), 1);
+        assert_eq!(dim_rows[0].user, "u");
     }
 }

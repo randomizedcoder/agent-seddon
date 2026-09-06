@@ -41,8 +41,16 @@ impl<S: Subscriber> Layer<S> for ClickHouseLayer {
             serde_json::to_string(&Value::Object(visitor.fields)).unwrap_or_default()
         };
 
+        // Prefer the ambient per-turn identity (this layer fires synchronously on
+        // the scoped loop task); fall back to the process-global handle session for
+        // events emitted outside any scope (e.g. startup), where `user` is unknown.
+        let (session_id, user) = match agent_core::current_identity() {
+            Some(k) => (k.session.as_str().to_string(), k.user.as_str().to_string()),
+            None => (self.telemetry.session_id().to_string(), String::new()),
+        };
         self.telemetry.record_log(LogRow::new(
-            self.telemetry.session_id().to_string(),
+            session_id,
+            user,
             meta.level().to_string(),
             target.to_string(),
             visitor.message.unwrap_or_default(),

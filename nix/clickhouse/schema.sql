@@ -7,7 +7,17 @@
 --
 -- Populated by the Rust integration (Phase 2): a composite MemoryStore writes
 -- agent_events, a tracing layer streams agent_logs, and per-turn token counts
--- land in agent_usage. Rows are keyed by a per-run `session_id`.
+-- land in agent_usage. Rows are keyed by a per-run `session_id` and carry the
+-- verified owning identity in `user` (tenant == user at this tier), stamped at the
+-- emit funnel from ambient identity — never a model-supplied value.
+--
+-- NOTE (review-fleet Phase 1 / R2): the `user` column is additive. Because every
+-- statement here is IF NOT EXISTS, re-running does NOT alter an existing table — an
+-- already-populated volume needs the column added manually, once, per table:
+--   ALTER TABLE agent.<table> ADD COLUMN IF NOT EXISTS user String AFTER session_id;
+-- (applies to the 7 telemetry tables below; old rows default to ''). Making `user`
+-- a leading ORDER BY key for locality/RLS is deliberately deferred to the
+-- multi-tenancy track (MT-02), since that is a table rebuild, not an additive edit.
 
 CREATE DATABASE IF NOT EXISTS agent;
 
@@ -16,6 +26,7 @@ CREATE DATABASE IF NOT EXISTS agent;
 CREATE TABLE IF NOT EXISTS agent.agent_events
 (
     session_id   String,
+    user         String,                   -- verified SessionKey.user (tenant); '' outside a scope
     ts           DateTime64(3, 'UTC'),
     seq          UInt32,
     kind         String,                   -- goal | assistant | tool | usage
@@ -31,6 +42,7 @@ ORDER BY (session_id, ts, seq);
 CREATE TABLE IF NOT EXISTS agent.agent_logs
 (
     session_id String,
+    user       String,                     -- verified SessionKey.user (tenant); '' outside a scope
     ts         DateTime64(3, 'UTC'),
     level      String,                     -- ERROR | WARN | INFO | DEBUG | TRACE
     target     String,
@@ -44,6 +56,7 @@ ORDER BY (session_id, ts);
 CREATE TABLE IF NOT EXISTS agent.agent_usage
 (
     session_id        String,
+    user              String,                  -- verified SessionKey.user (tenant); '' outside a scope
     ts                DateTime64(3, 'UTC'),
     iter              UInt32,
     prompt_tokens     UInt32,
@@ -63,6 +76,7 @@ ORDER BY (session_id, ts);
 CREATE TABLE IF NOT EXISTS agent.agent_verifications
 (
     session_id     String,
+    user           String,                     -- verified SessionKey.user (tenant); '' outside a scope
     ts             DateTime64(3, 'UTC'),
     iter           UInt32,
     tool_name      String,
@@ -90,6 +104,7 @@ ORDER BY (session_id, ts, iter);
 CREATE TABLE IF NOT EXISTS agent.agent_reviews
 (
     session_id       String,
+    user             String,                    -- verified SessionKey.user (tenant); '' outside a scope
     ts               DateTime64(3, 'UTC'),
     repo_hash        String,                    -- fnv1a of the remote URL, not the URL
     base_rev         String,
@@ -112,6 +127,7 @@ ORDER BY (session_id, ts);
 CREATE TABLE IF NOT EXISTS agent.agent_review_collectors
 (
     session_id  String,
+    user        String,                         -- verified SessionKey.user (tenant); '' outside a scope
     ts          DateTime64(3, 'UTC'),
     collector   String,
     status      String,                         -- ok | partial | skipped | failed
@@ -127,6 +143,7 @@ ORDER BY (session_id, ts, collector);
 CREATE TABLE IF NOT EXISTS agent.agent_dimension_summaries
 (
     session_id  String,
+    user        String,                         -- verified SessionKey.user (tenant); '' outside a scope
     ts          DateTime64(3, 'UTC'),
     dimension   String,                         -- safe_segment'd slug (seed or admitted emergent)
     is_new      UInt8,                          -- proposed as a new dimension

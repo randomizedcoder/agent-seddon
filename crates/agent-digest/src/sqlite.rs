@@ -105,11 +105,15 @@ impl DigestStore for SqliteDigests {
         // compaction) skip re-parsing it — measured ~2% Ir on the bench corpus.
         let mut stmt = conn
             .prepare_cached(
+                // `?5 = '' OR user_id = ?5` scopes the read to the owning tenant so
+                // a shared/colliding session_id cannot cross-read another user's
+                // ledger; empty `user_id` means an unscoped/single-tenant read.
                 "SELECT session_id, user_id, seq, kind, text, keywords, mode, model,
                         ts_ms, duration_ms, tokens
                    FROM digests
                   WHERE session_id = ?1
                     AND (?2 = '' OR kind = ?2)
+                    AND (?5 = '' OR user_id = ?5)
                     AND seq >= ?3
                   ORDER BY seq ASC
                   LIMIT ?4",
@@ -119,7 +123,13 @@ impl DigestStore for SqliteDigests {
         let since = i64::try_from(q.since_seq.unwrap_or(0)).unwrap_or(i64::MAX);
         let rows = stmt
             .query_map(
-                params![q.session_id, kind, since, crate::MAX_QUERY_LIMIT as i64],
+                params![
+                    q.session_id,
+                    kind,
+                    since,
+                    crate::MAX_QUERY_LIMIT as i64,
+                    q.user_id
+                ],
                 row_to_digest,
             )
             .map_err(sql_err)?;
@@ -222,6 +232,51 @@ mod tests {
             session_id: session.into(),
             ..DigestQuery::default()
         }
+    }
+
+    /// A digest owned by a specific tenant (`user_id`).
+    fn du(session: &str, user: &str, seq: u64, text: &str) -> Digest {
+        Digest {
+            user_id: user.into(),
+            ..d(session, seq, DigestKind::Summary, text, &[])
+        }
+    }
+
+    // R2: two tenants sharing a `session_id` must never cross-read each other's
+    // ledger — the read is scoped to `user_id`.
+    #[tokio::test]
+    async fn adversarial_read_scoped_by_user_id_isolates_tenants() {
+        let s = SqliteDigests::in_memory().unwrap();
+        s.put(du("shared", "alice", 1, "alice-secret"))
+            .await
+            .unwrap();
+        s.put(du("shared", "bob", 2, "bob-secret")).await.unwrap();
+
+        let alice = s
+            .query(&DigestQuery {
+                session_id: "shared".into(),
+                user_id: "alice".into(),
+                ..DigestQuery::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(alice.len(), 1, "alice sees only her own row");
+        assert_eq!(alice[0].text, "alice-secret");
+        assert!(
+            alice.iter().all(|d| d.user_id == "alice"),
+            "no bob rows leaked into alice's scoped read"
+        );
+    }
+
+    // Backward-compat: an empty `user_id` is an unscoped read (single-tenant),
+    // returning every user's rows for the session.
+    #[tokio::test]
+    async fn corner_empty_user_id_reads_all_users() {
+        let s = SqliteDigests::in_memory().unwrap();
+        s.put(du("shared", "alice", 1, "a")).await.unwrap();
+        s.put(du("shared", "bob", 2, "b")).await.unwrap();
+        let all = s.query(&q("shared")).await.unwrap();
+        assert_eq!(all.len(), 2, "unscoped read returns both tenants' rows");
     }
 
     #[tokio::test]

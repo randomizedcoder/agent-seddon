@@ -492,6 +492,7 @@ impl Session {
                 message: marker,
                 ts_ms: now_ms(),
                 session_id: self.agent.settings.session_id.clone(),
+                user: String::new(),
                 usage: None,
                 iter: None,
                 verification: None,

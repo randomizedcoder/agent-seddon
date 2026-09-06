@@ -74,6 +74,15 @@ pub fn sanitize_query(q: &DigestQuery) -> Result<(DigestQuery, usize)> {
             q.session_id.escape_debug()
         )));
     }
+    // `user_id` scopes the read to one tenant. Empty is allowed (unscoped /
+    // single-tenant reads); any non-empty value reaches SQL, so it must pass
+    // `safe_segment` (traversal/injection rejected) — fail closed.
+    if !q.user_id.is_empty() && !safe_segment(&q.user_id) {
+        return Err(Error::Memory(format!(
+            "digest query: invalid user_id `{}`",
+            q.user_id.escape_debug()
+        )));
+    }
     let limit = match q.limit {
         0 => MAX_QUERY_LIMIT,
         n => n.min(MAX_QUERY_LIMIT),
@@ -164,6 +173,32 @@ mod tests {
             ..DigestQuery::default()
         };
         assert_eq!(sanitize_query(&q).unwrap().1, MAX_QUERY_LIMIT);
+    }
+
+    // R2: `user_id` scopes the read and reaches SQL, so a hostile value must be
+    // rejected before it can (traversal/injection); empty is the allowed unscoped case.
+    #[rstest::rstest]
+    #[case::adversarial_traversal("../../etc/passwd")]
+    #[case::adversarial_separator("a/b")]
+    #[case::adversarial_leading_dash("-rf")]
+    #[case::adversarial_injection("x' OR '1'='1")]
+    fn adversarial_hostile_user_id_rejected(#[case] uid: &str) {
+        let q = DigestQuery {
+            session_id: "s1".into(),
+            user_id: uid.into(),
+            ..DigestQuery::default()
+        };
+        assert!(sanitize_query(&q).is_err());
+    }
+
+    #[test]
+    fn corner_empty_user_id_is_allowed_unscoped() {
+        let q = DigestQuery {
+            session_id: "s1".into(),
+            user_id: String::new(),
+            ..DigestQuery::default()
+        };
+        assert!(sanitize_query(&q).is_ok());
     }
 
     #[test]
