@@ -46,6 +46,13 @@ The `Sandbox` seam (`agent-core/src/lib.rs:1277`) is already shaped for real iso
   another org's session.
 - **Note.** Applies from the fleet's inc 1 in the simple mapping (workspaces already key on the
   session's org via review-fleet C4); the *hard* partition (DB/netns) is this track.
+- **Landed (R4, foundation).** The `user = <org>` convention is documented on `SessionKey`; a
+  `repo@pr` → `safe_segment`-valid session-id encoder (`encode_review_session_id`) exists (the raw
+  `repo@pr` form is *rejected* — no charset widening); and the two re-meanings are recorded at
+  their sites — the per-user session cap becomes **per-org** (`SessionManager`), the metrics
+  `user` label reads as **org** (`agent-metrics`). Deferred: the org *value* injection at the
+  fleet mint-site (fleet core, inc 3); the hard DB/netns partition (planes 02/03); and a third
+  `org→team→user` tier.
 
 ## Plane 02 — data scoping & RLS (see [`02-data-scoping-and-rls.md`](02-data-scoping-and-rls.md))
 

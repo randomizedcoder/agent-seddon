@@ -12,11 +12,11 @@ Three PRs, each based off `main`, never stacked, each gated by `nix flake check`
 
 ## Now
 
-- **Current PR:** PR6 — **R3c** route the `git` funnel through the Sandbox seam
-- **Branch:** `feat/exec-chokepoint-r3c-git-funnel` (off main; R3b #274 merged as bb4e511)
-- **Current step:** R3c · code + tests complete; **`nix flake check` GREEN**; committing + pushing + opening PR6
-- **Last action:** `git_bytes`→`Sandbox::exec` (argv/stdout_bytes/600s cap); `CliBackend::with_sandbox`; build_repo threads shared_sandbox; guard extended to agent-git+agent-search (manifest allowlisted); docs
-- **Next action:** open PR6, await merge; then R4 (org tier).
+- **Current PR:** PR7 — **R4** org tenancy tier (C25): convention + encoding + semantics docs
+- **Branch:** `feat/org-tenancy-tier-r4` (off main; R3c #275 merged as 9628ffc)
+- **Current step:** R4 · code + tests complete; **`nix flake check` GREEN**; committing + pushing + opening PR7
+- **Last action:** gate green on retry (1st run hit the known pty `positive_cursor_resumes_without_replaying` flake under coverage — 3/3 pass in isolation, R4 touches no PTY code)
+- **Next action:** open PR7, await merge. R3+R4 = Phase 2 complete.
 
 Phase 1 (Foundation) COMPLETE — R2 #270 → R1a #271 → R1b #272 all merged (main 9e8af41).
 Phase 2 = R3 (exec chokepoint, C24) + R4 (org tier, C25); plan file
@@ -133,7 +133,27 @@ manifest/consensus git routing → R3c.
 - [x] `nix flake check` — **GREEN** (exit 0, "all checks passed!", all 30 checks incl. git-heavy
   review/e2e suites, leak/bench/buf-additive)
 
-## PR7 — R4: org tier convention + session-id encoding + semantics docs  ⬜
+## PR7 — R4: org tier convention + session-id encoding + semantics docs  🟢 (gate green; ready to push)
+
+- [x] `SessionKey` doc: org-tier convention (`user=<org>`, `session=<repo>+<pr>`; hierarchy
+  `host ⊃ org ⊃ repo+pr ⊃ child`; single-level, `org→team→user` a non-goal) — `agent-core/src/identity.rs`
+- [x] `encode_review_session_id(repo, pr) -> SessionId` — sanitize repo to charset + `-pr<n>`;
+  valid-by-construction (non-empty, no leading `-`/`.`, ≤MAX_SEGMENT_LEN). NO `safe_segment` widening
+  (raw `repo@pr` stays rejected). Auto-exported via `pub use identity::*`
+- [x] Semantics re-meanings documented at their sites (no behaviour change): per-user session cap →
+  **per-org** (`session_manager.rs` per_user filter comment); metrics `user` label → **org**, still
+  session-coarse so cardinality budget holds (`agent-metrics/src/lib.rs`)
+- [x] Design: multi-tenancy `STATUS.md` (plane 01 → 🟡: C24 ✅, C25 foundation 🟡, C23 ⬜) +
+  `00-components.md` C25 "Landed (R4)" note (deferred: org-value mint-site inc 3, hard DB/netns, 3rd tier)
+- [x] Tests (identity.rs mod, file end): user-as-org disjoint `path_under`; encoder → safe + parse-safe
+  + carries `-pr<n>`; raw `repo@pr` rejected; pathological repo names (all-sep fallback, over-long cap) — 4 pass
+- [x] `nix flake check` — **GREEN** (exit 0, "all checks passed!"). 1st run hit the known flaky pty
+  `positive_cursor_resumes_without_replaying` (coverage check, `agent-pty` — untouched by R4; 3/3 in
+  isolation); clean on retry
+
+R4 is deliberately **light** (convention + encoding + semantics). The org *value* injection at the
+fleet mint-site is deferred to fleet core inc 3; row/digest flow under `user=org` is mechanically
+identical to R2's tested user-scoping (org is just the user value).
 
 ---
 
