@@ -8,21 +8,34 @@
 //! chokepointed crates and fails if it finds a `process::Command`. Test code and
 //! the documented exceptions below are exempt.
 //!
-//! Scope grows with the chokepoint: R3b covers `agent-tools` (the `rg` fast path
-//! now routes through the seam). R3c adds `agent-git` + `agent-search` when the
-//! `git` funnel routes; the `agent-sandbox` seam impls and the `agent-pty`
-//! streaming spawn (env-scrubbed + Policy-gated) are the standing exceptions.
+//! Scope grows with the chokepoint: R3b covered `agent-tools` (the `rg` fast path
+//! routes through the seam). R3c adds `agent-git` (the whole `git` funnel now
+//! routes through `Sandbox::exec`) and `agent-search` (watched; `manifest.rs` is a
+//! documented exception below). The `agent-sandbox` seam impls and the
+//! `agent-pty` streaming spawn (env-scrubbed + Policy-gated) are standing
+//! exceptions not scanned here.
 
 use std::path::{Path, PathBuf};
 
 /// Crate `src` dirs whose production code must be spawn-free, relative to the
-/// workspace root. Extend this in R3c (add `agent-git`, `agent-search`).
-const SCANNED: &[&str] = &["crates/agent-tools/src"];
+/// workspace root.
+const SCANNED: &[&str] = &[
+    "crates/agent-tools/src",
+    "crates/agent-git/src",
+    "crates/agent-search/src",
+];
 
 /// Files allowed to contain a raw `Command` (documented exceptions), by
-/// workspace-relative path. Empty for R3b — `agent-tools` has no legitimate
-/// direct spawn once `grep` routes through the seam.
-const ALLOWED: &[&str] = &[];
+/// workspace-relative path.
+///
+/// - `agent-search/src/manifest.rs` — two **synchronous, fixed-argument,
+///   read-only** git probes (`rev-parse HEAD`, `status --porcelain`) that back the
+///   index's clean-checkout fast path. They run in a blocking context and take no
+///   model-supplied argument, so the chokepoint's two wins (no-shell for untrusted
+///   args; future isolation-backend enforcement) don't apply; routing them would
+///   force `Manifest::build`/`compare` and their callers async for no security
+///   gain. Kept as a raw spawn, explicitly and narrowly.
+const ALLOWED: &[&str] = &["crates/agent-search/src/manifest.rs"];
 
 fn workspace_root() -> PathBuf {
     // this crate is crates/agent-tools; the workspace root is two up.

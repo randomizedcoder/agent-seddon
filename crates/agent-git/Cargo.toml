@@ -20,6 +20,11 @@ git-hybrid = ["git-cli"]
 
 [dependencies]
 agent-core.workspace = true
+# The execution chokepoint (C24): every git spawn funnels through the `Sandbox`
+# seam rather than a raw `Command`, so a future isolation backend catches it. The
+# default is `LocalSandbox` (behaviour-identical to the old direct spawn); the
+# runtime injects the config-selected backend via `CliBackend::with_sandbox`.
+agent-sandbox = { workspace = true, features = ["sandbox-local"] }
 async-trait.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true

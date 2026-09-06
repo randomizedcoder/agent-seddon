@@ -41,6 +41,7 @@ pub fn build_repo(
     cfg: &Config,
     session_id: &str,
     metrics: &Metrics,
+    sandbox: Arc<dyn agent_core::Sandbox>,
 ) -> anyhow::Result<Arc<dyn RepoBackend>> {
     match cfg.git.backend_name() {
         "cli" | "hybrid" => {
@@ -50,12 +51,12 @@ pub fn build_repo(
             } else {
                 base_worktrees.join(session_id)
             };
-            Ok(Arc::new(agent_git::CliBackend::new(
-                root,
-                mirror,
-                run_dir,
-                cfg.git.remote.clone(),
-            )))
+            // Route every git spawn through the config-selected sandbox (the
+            // execution chokepoint, C24) rather than a raw `Command`.
+            Ok(Arc::new(
+                agent_git::CliBackend::new(root, mirror, run_dir, cfg.git.remote.clone())
+                    .with_sandbox(sandbox),
+            ))
         }
         name => registry
             .build_repo(name, &crate::registry::FactoryCtx::new(cfg, metrics))
