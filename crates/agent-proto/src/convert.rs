@@ -2130,6 +2130,7 @@ impl From<agent_core::PtySpec> for pb::PtyOpenRequest {
             cols: s.cols as u32,
             rows: s.rows as u32,
             cwd: s.cwd,
+            env: pb::ExecEnvPolicy::from(s.env) as i32,
         }
     }
 }
@@ -2142,6 +2143,7 @@ impl From<pb::PtyOpenRequest> for agent_core::PtySpec {
             cols: pty_dim(s.cols),
             rows: pty_dim(s.rows),
             cwd: s.cwd,
+            env: exec_env_from_i32(s.env),
         }
     }
 }

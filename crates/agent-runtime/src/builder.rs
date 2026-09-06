@@ -262,6 +262,19 @@ pub async fn build_agent_with(
         tools.register(crate::metered::tool(tool, metrics.clone()));
     }
 
+    // `grep`'s `rg` fast path spawns a process, so it routes through the same
+    // config-selected Sandbox backend as `bash` (the execution chokepoint).
+    // Falls back to `LocalSandbox` when no backend was wired (tool-core off).
+    // `find`/`ls` stay registry factories — they spawn nothing.
+    #[cfg(feature = "tool-search")]
+    {
+        let sandbox = shared_sandbox
+            .clone()
+            .unwrap_or_else(|| Arc::new(agent_sandbox::LocalSandbox));
+        let tool = Arc::new(agent_tools::GrepTool::new(sandbox));
+        tools.register(crate::metered::tool(tool, metrics.clone()));
+    }
+
     // The `metrics` tool reads the shared registry, so the agent can inspect its
     // own performance (see docs/observability.md). Registered before the subagent
     // set is captured so child agents inherit it.
@@ -665,6 +678,17 @@ pub async fn build_agent_with(
     let base_policy = registry
         .build_policy(&cfg.agent.policy, &full_ctx)
         .context("building policy")?;
+    // `[policy] deny_tools` overlay (fail-closed): refuse the named tools before
+    // the base policy sees them — the Tier-0 exec-isolation lever (e.g. a fleet
+    // session denies `bash`/`pty`). Empty ⇒ unchanged.
+    let base_policy: Arc<dyn agent_core::Policy> = if cfg.policy.deny_tools.is_empty() {
+        base_policy
+    } else {
+        Arc::new(crate::policy::DenyTools::new(
+            cfg.policy.deny_tools.clone(),
+            base_policy,
+        ))
+    };
     // Tool-call verifier (the `verifier` seam): built here while `full_ctx` (which
     // borrows `cfg`) is still valid; attached to the agent further down. Empty
     // `[verifier] backend` ⇒ off. `mode` captured now, before `cfg` is consumed.
@@ -1354,6 +1378,7 @@ fn ast_tools(backend: Arc<dyn agent_core::AstBackend>) -> Vec<Arc<dyn agent_core
 
 fn is_builder_registered_tool(name: &str) -> bool {
     (cfg!(feature = "tool-core") && name == "bash")
+        || (cfg!(feature = "tool-search") && name == "grep")
         || (cfg!(feature = "tool-metrics") && name == "metrics")
         || (cfg!(feature = "search") && (name == "search" || name == "index_ls"))
         || (cfg!(feature = "ast") && name.starts_with("find_"))

@@ -1679,6 +1679,12 @@ pub struct PolicyCfg {
     /// Path globs to exempt from the sensitive-path guard (escape hatch).
     #[serde(default)]
     pub allow_paths: Vec<String>,
+    /// Tool-name globs to deny outright, whatever the base policy says (e.g.
+    /// `["bash", "pty"]`). Applied before the base policy — a matching call is
+    /// refused, never approved. The Tier-0 exec-isolation lever a fleet session
+    /// uses to run reviewed code without the shell/terminal escape hatches.
+    #[serde(default)]
+    pub deny_tools: Vec<String>,
 }
 
 impl Default for PolicyCfg {
@@ -1688,6 +1694,7 @@ impl Default for PolicyCfg {
             guard: default_guard(),
             deny_paths: Vec::new(),
             allow_paths: Vec::new(),
+            deny_tools: Vec::new(),
         }
     }
 }

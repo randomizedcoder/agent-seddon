@@ -12,11 +12,11 @@ Three PRs, each based off `main`, never stacked, each gated by `nix flake check`
 
 ## Now
 
-- **Current PR:** PR4 — **R3a** Sandbox seam: argv exec + bytes output + env-scrub (Phase 2 foundation)
-- **Branch:** `feat/exec-chokepoint-r3a-seam` (off main; Phase 1 R1/R1b/R2 all merged)
-- **Current step:** R3a · gate GREEN; committing + opening PR4
-- **Last action:** `nix flake check` GREEN ("all checks passed!", exit 0)
-- **Next action:** open PR4 (R3a). Then R3b (route rg + guard + policy + pty-scrub), R3c (git funnel), R4 (org tier).
+- **Current PR:** PR5 — **R3b** route rg + no-raw-Command guard + Tier-0 deny_tools policy + pty env-scrub
+- **Branch:** `feat/exec-chokepoint-r3b-route-rg` (off main; R3a #273 merged as b8e9411)
+- **Current step:** R3b · code + tests complete; **`nix flake check` GREEN**; committing + pushing + opening PR5
+- **Last action:** fixed missed exec_roundtrip PtyOpenRequest `env` field; gate re-ran clean (all 30 checks)
+- **Next action:** open PR5, await merge; then R3c (git funnel), R4 (org tier).
 
 Phase 1 (Foundation) COMPLETE — R2 #270 → R1a #271 → R1b #272 all merged (main 9e8af41).
 Phase 2 = R3 (exec chokepoint, C24) + R4 (org tier, C25); plan file
@@ -84,7 +84,30 @@ routes yet); R3c isolates the widest blast radius (git); R4 is light + independe
   stdout_bytes-binary-exact, timeout; gRPC argv+bytes roundtrip (tcp+uds) — all pass
 - [x] `nix flake check` — GREEN ("all checks passed!", exit 0); clippy -D warnings clean, fmt, buf additive (no baseline bump), bench + leak held
 
-## PR5 — R3b: route `rg` + no-raw-`Command` guard + Tier-0 policy + pty env-scrub  ⬜
+## PR5 — R3b: route `rg` + no-raw-`Command` guard + Tier-0 policy + pty env-scrub  🟢 (gate green; ready to push)
+
+- [x] `GrepTool` holds `Arc<dyn Sandbox>`; `rg` fast path builds `ExecSpec::argv([...])` (no shell)
+  + reads `stdout_bytes`; Err ⇒ fall back to in-process walk (unchanged). Moved from a registry
+  factory to builder-wiring from `shared_sandbox` (like `bash`); added to `is_builder_registered_tool`
+  + allowlist; `find`/`ls` stay factories (no spawn) (`search.rs`, `registry.rs`, `builder.rs`)
+- [x] **Tier-0 `DenyTools` policy** (fail-closed overlay: deny globs → base) + `[policy] deny_tools`
+  config + builder wraps base_policy when non-empty; documented in `config/agent.toml`. A fleet session
+  sets `deny_tools = ["bash","pty"]` (`policy.rs`, `config.rs`, `builder.rs`)
+- [x] **PTY env-scrub**: `PtySpec.env: EnvPolicy` (default Inherit) + `PtyOpenRequest.env=6` proto
+  (additive) + convert; LocalPty spawn `env_clear` + minimal PATH + TERM on Scrub (`agent-core`,
+  `exec.proto`, `convert.rs`, `agent-pty/src/lib.rs`). PtySpec literals use `..Default::default()`
+- [x] **No-raw-`Command` guard** — `agent-tools/tests/no_raw_spawn.rs`: scans production src (pre
+  `#[cfg(test)]`) of chokepointed crates for `Command::new`; R3b scope = agent-tools (grows to
+  agent-git/agent-search in R3c); agent-sandbox seam + agent-pty streaming spawn = standing exceptions
+- [x] Tests: grep suite (72) green through LocalSandbox; DenyTools (deny/cannot-widen/star); pty
+  scrub-hides-HOME; guard passes — all green
+- [x] `nix flake check` — **GREEN** (exit 0, "all checks passed!", all 30 checks incl. leak/bench/buf).
+  First run surfaced a missed `pb::PtyOpenRequest` literal in `agent-grpc/tests/exec_roundtrip.rs`
+  (adversarial_absurd_dimensions_are_clamped) — needed the new `env` field; fixed
+  (`env: ExecEnvPolicy::Inherit as i32`), exec_roundtrip 25/25 green; re-run clean
+
+Deferred to C23 (documented): full PTY-under-a-real-sandbox backend (streaming exec variant);
+manifest/consensus git routing → R3c.
 
 ## PR6 — R3c: route the `git` funnel through the seam (binary fidelity + capped timeout)  ⬜
 

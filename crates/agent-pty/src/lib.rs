@@ -230,10 +230,19 @@ impl Pty for LocalPty {
         cmd.args(&spec.args)
             .stdin(std::process::Stdio::from(slave_in))
             .stdout(std::process::Stdio::from(slave_out))
-            .stderr(std::process::Stdio::from(slave_err))
-            // A terminal-aware child expects these; without TERM many programs
-            // refuse to run interactively at all.
-            .env("TERM", "xterm-256color");
+            .stderr(std::process::Stdio::from(slave_err));
+        // `EnvPolicy::Scrub` drops the ambient env (no host secrets reach an
+        // interactive child) — mirroring the `Sandbox` seam — restoring only a
+        // minimal PATH so the command still resolves. `TERM` is set either way:
+        // a terminal-aware child expects it, and without it many programs refuse
+        // to run interactively at all.
+        if spec.env == agent_core::EnvPolicy::Scrub {
+            cmd.env_clear();
+            if let Some(path) = std::env::var_os("PATH") {
+                cmd.env("PATH", path);
+            }
+        }
+        cmd.env("TERM", "xterm-256color");
         if !spec.cwd.is_empty() {
             cmd.current_dir(&spec.cwd);
         }

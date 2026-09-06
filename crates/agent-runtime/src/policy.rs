@@ -94,6 +94,37 @@ impl Policy for AllowList {
     }
 }
 
+/// Deny any tool whose name matches one of `denied` (minimal `*` globs);
+/// delegate every other call to `base`. A **fail-closed overlay**: it can only
+/// turn an allow into a deny, never the reverse, so wrapping any base policy with
+/// it strictly narrows what runs. The Tier-0 execution-isolation lever — a fleet
+/// session sets `deny_tools = ["bash", "pty"]` so reviewed code can't reach the
+/// shell / terminal escape hatches, whatever the base policy would have allowed.
+pub struct DenyTools {
+    denied: Vec<String>,
+    base: Arc<dyn Policy>,
+}
+
+impl DenyTools {
+    pub fn new(denied: Vec<String>, base: Arc<dyn Policy>) -> Self {
+        Self { denied, base }
+    }
+}
+
+/// The reason a `DenyTools` overlay refuses a call — deliberately generic (no
+/// echo of which glob matched).
+const DENY_TOOLS_REASON: &str = "tool disabled by policy";
+
+#[async_trait]
+impl Policy for DenyTools {
+    async fn authorize(&self, call: &ToolCall) -> Decision {
+        if self.denied.iter().any(|g| glob_match(g, &call.name)) {
+            return Decision::Deny(DENY_TOOLS_REASON.into());
+        }
+        self.base.authorize(call).await
+    }
+}
+
 /// Minimal glob match: `*` matches any (possibly empty) run of characters;
 /// every other byte is literal. Enough for `read_file`, `git_*`, `*` families.
 fn glob_match(pattern: &str, text: &str) -> bool {
@@ -1118,6 +1149,56 @@ mod tests {
     #[case::mid_star_no_match("a*z", "abc", false)]
     fn glob_match_cases(#[case] pattern: &str, #[case] text: &str, #[case] expected: bool) {
         assert_eq!(glob_match(pattern, text), expected);
+    }
+
+    // --- DenyTools overlay (Tier-0 exec isolation) -------------------------
+
+    /// A denied tool (by name or glob) is refused even over an allow-all base;
+    /// an undenied tool passes through to the base decision.
+    #[rstest]
+    #[case::positive_bash_denied("bash", true)]
+    #[case::positive_pty_denied("pty", true)]
+    #[case::negative_read_file_allowed("read_file", false)]
+    #[case::negative_grep_allowed("grep", false)]
+    #[tokio::test]
+    async fn deny_tools_refuses_named_tools_over_allow_all(
+        #[case] tool: &str,
+        #[case] denied: bool,
+    ) {
+        let p = DenyTools::new(
+            vec!["bash".into(), "pty".into()],
+            Arc::new(AutoApprove), // base would allow everything
+        );
+        let dec = p.authorize(&call(tool, json!({}))).await;
+        match (denied, dec) {
+            (true, Decision::Deny(r)) => assert_eq!(r, DENY_TOOLS_REASON),
+            (false, Decision::Allow) => {}
+            (d, other) => panic!("denied={d} but got {other:?}"),
+        }
+    }
+
+    /// The overlay only narrows: a call the base *denies* stays denied even when
+    /// it isn't in the deny list (base is consulted, not bypassed).
+    #[tokio::test]
+    async fn deny_tools_cannot_widen_the_base() {
+        let p = DenyTools::new(
+            vec!["bash".into()],
+            Arc::new(AllowList::new(vec![])), // base denies everything
+        );
+        assert!(matches!(
+            p.authorize(&call("read_file", json!({}))).await,
+            Decision::Deny(_)
+        ));
+    }
+
+    /// A `*` glob denies every tool (a fully locked-down session).
+    #[tokio::test]
+    async fn deny_tools_star_denies_all() {
+        let p = DenyTools::new(vec!["*".into()], Arc::new(AutoApprove));
+        assert!(matches!(
+            p.authorize(&call("anything", json!({}))).await,
+            Decision::Deny(_)
+        ));
     }
 
     // --- spec 18: scanner findings -> Decision -----------------------------
