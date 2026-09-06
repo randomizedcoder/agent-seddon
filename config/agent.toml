@@ -160,6 +160,15 @@ sessions_dir = ""            # empty ⇒ <working_dir>/.agent/sessions (the REPL
 index_dir    = ""            # empty ⇒ <sessions_dir>/.recall/index
 auto_index   = true
 
+# Unattended code-review fleet (docs/design/review-fleet/). Phase 1 wires only the
+# per-session workspace root: with `root` set, each session's cwd becomes its own
+# confined `root/<user>/<session>` (mode 0700) instead of the shared
+# `agent.working_dir` — the foundation for hosting many repos in one process. Empty
+# ⇒ unset ⇒ today's shared-cwd behavior (a no-op until you opt in). Roster,
+# triggers, and control plane arrive in later increments.
+[review_fleet]
+root = ""                    # empty ⇒ unset (shared agent.working_dir); tilde-expanded
+
 # Tokenizer (the Tokenizer seam): accurate per-model token counts that drive
 # compaction budgeting + USD/cache cost accounting, replacing the ~chars/4
 # heuristic. Backends (config-selected like every seam):

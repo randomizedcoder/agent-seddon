@@ -99,12 +99,33 @@ pub struct Config {
     pub pty: PtyCfg,
     #[serde(default)]
     pub recall: RecallCfg,
+    #[serde(default)]
+    pub review_fleet: ReviewFleetCfg,
     /// Path the config was read from, set by the CLI after parse (never a TOML
     /// key — `serde(skip)`). Held so the `ConfigStore` seam (portal settings) can
     /// write edits back to the same file. `None` for embedded/test callers that
     /// build a `Config` in memory.
     #[serde(skip)]
     pub source_path: Option<std::path::PathBuf>,
+}
+
+/// Unattended code-review fleet (docs/design/review-fleet/). Phase 1 wires only the
+/// **workspace root**: when `root` is non-empty, each session's cwd becomes its own
+/// confined `root/<user>/<session>` (review-fleet R1a / C4) instead of the single
+/// shared `agent.working_dir`. Empty ⇒ unset ⇒ today's shared-cwd behavior, so this
+/// is a no-op until an operator opts in. The roster, triggers, and control plane
+/// arrive in later increments.
+#[derive(Debug, Default, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
+pub struct ReviewFleetCfg {
+    /// Root directory under which per-session workspaces are created
+    /// (`root/<user>/<session>`, mode `0700`). Tilde-expanded. Empty ⇒ unset (the
+    /// shared `agent.working_dir` is used, unchanged).
+    #[serde(default)]
+    pub root: String,
 }
 
 /// Cross-session recall (parity spec 20): a full-text index over *past* saved
@@ -2597,6 +2618,7 @@ impl Config {
             scheduler: SchedulerCfg::default(),
             pty: PtyCfg::default(),
             recall: RecallCfg::default(),
+            review_fleet: ReviewFleetCfg::default(),
             source_path: None,
         }
     }

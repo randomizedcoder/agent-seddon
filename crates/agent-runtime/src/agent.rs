@@ -13,7 +13,7 @@ use agent_core::{
 use agent_metrics::{Metrics, SessionMetrics};
 use futures_util::StreamExt;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tracing::Instrument;
@@ -36,6 +36,11 @@ pub struct Settings {
     pub tool_timeout_secs: u64,
     pub recall_limit: usize,
     pub cwd: PathBuf,
+    /// Review-fleet workspace root (`[review_fleet] root`). When `Some`, a session's
+    /// cwd is its own confined `root/<user>/<session>` (per-session isolation, C4);
+    /// when `None`, every session shares [`cwd`](Self::cwd) as before. See
+    /// [`resolve_cwd`].
+    pub fleet_root: Option<PathBuf>,
     /// Model name, used as a metrics label.
     pub model: String,
     /// Per-run id, stamped on every recorded event (empty when telemetry is off).
@@ -891,6 +896,25 @@ impl Agent {
         let session_metrics = self
             .metrics
             .for_session(id.session.as_str(), id.user.as_str());
+        // Per-session workspace (review-fleet C4): with `fleet_root` set, this is the
+        // session's own confined `root/<user>/<session>`; unset ⇒ the shared cwd,
+        // unchanged. Keys reaching here are already `safe_segment`-validated at the
+        // identity boundary, so an error is a defense-in-depth surprise — log and fall
+        // back to the shared cwd rather than fail an infallible constructor.
+        let cwd = resolve_cwd(
+            &id,
+            self.settings.fleet_root.as_deref(),
+            &self.settings.cwd,
+            &CwdOpts::default(),
+        )
+        .unwrap_or_else(|e| {
+            tracing::error!(
+                user = %id.user.as_str(),
+                session = %id.session.as_str(),
+                "resolve_cwd failed ({e}); falling back to shared cwd"
+            );
+            self.settings.cwd.clone()
+        });
         Session {
             agent: self.clone(),
             id,
@@ -901,9 +925,7 @@ impl Agent {
                 max_context_tokens: self.settings.context_window,
                 reserve_output: self.settings.reserve_output,
             },
-            tool_ctx: ToolContext {
-                cwd: self.settings.cwd.clone(),
-            },
+            tool_ctx: ToolContext { cwd },
             tool_schemas: self.tools.describe_all(),
             started: false,
             pending_context: Vec::new(),
@@ -1692,6 +1714,75 @@ fn stamp_identity(event: &mut MemoryEvent) {
     }
 }
 
+/// Options for [`resolve_cwd`]. Reserves the child-session inheritance seam
+/// (`inherited_workspace`, always `None` until increment 8) so the signature is
+/// stable across that later build (docs/design/review-fleet/08-child-sessions.md).
+#[derive(Debug, Default, Clone)]
+pub(crate) struct CwdOpts {
+    /// An explicit working directory pinned **within** the session root (the
+    /// deferred `OpenRequest.working_dir`, multi-session 05b); `confine`d, so an
+    /// escape is rejected. `None` ⇒ the session root itself.
+    pub working_dir: Option<String>,
+    /// A workspace inherited from a parent session (child sessions, increment 8).
+    /// Always `None` today — the reserved seam.
+    pub inherited_workspace: Option<PathBuf>,
+}
+
+/// Resolve a session's working directory (review-fleet C4 — the foundation for
+/// "N repos in one process"). One resolver so the child-inheritance branch plugs in
+/// later without reopening this seam:
+///
+/// - `fleet_root` unset ⇒ the shared `fallback` (today's `settings.cwd`); **no
+///   behavior change** for non-fleet callers.
+/// - `opts.inherited_workspace` ⇒ used as-is (child sessions; inc 8, always `None`).
+/// - otherwise the session root is `key.path_under(root)` = `root/<user>/<session>`,
+///   both segments `safe_segment`-guarded so the join cannot escape `root`; the dir
+///   is created `0700` if absent. An explicit `opts.working_dir` is then pinned
+///   within that root via [`confine`](agent_core::confine).
+///
+/// **Fail-closed:** a hostile key (rejected by `safe_segment`) or a `working_dir`
+/// that escapes the root returns `Err` — never a silent shared or escaped path.
+fn resolve_cwd(
+    key: &agent_core::SessionKey,
+    fleet_root: Option<&Path>,
+    fallback: &Path,
+    opts: &CwdOpts,
+) -> std::result::Result<PathBuf, String> {
+    let Some(root) = fleet_root else {
+        return Ok(fallback.to_path_buf());
+    };
+    // Child sessions inherit the parent's workspace, not one derived from their own
+    // key (inc 8 fills this; the invariant is child ⊆ parent ⊆ fleet_root).
+    if let Some(inherited) = &opts.inherited_workspace {
+        return Ok(inherited.clone());
+    }
+    let base = key.path_under(root).map_err(|e| e.to_string())?;
+    ensure_dir_0700(&base)?;
+    match opts.working_dir.as_deref().filter(|s| !s.is_empty()) {
+        // `confine` canonicalizes and rejects an escape (incl. via a planted
+        // symlink) — never a lexical join alone.
+        Some(wd) => agent_core::confine(&base, wd),
+        None => Ok(base),
+    }
+}
+
+/// Create `dir` (and parents) if absent, `0700` on unix so a session's workspace is
+/// not group/other-readable. Idempotent — an existing dir is left as-is.
+fn ensure_dir_0700(dir: &Path) -> std::result::Result<(), String> {
+    if dir.is_dir() {
+        return Ok(());
+    }
+    let mut b = std::fs::DirBuilder::new();
+    b.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        b.mode(0o700);
+    }
+    b.create(dir)
+        .map_err(|e| format!("creating session workspace {}: {e}", dir.display()))
+}
+
 /// Wrap the recent working-set tail as synthetic `MemoryEvent`s for the per-step
 /// dimension pass (adaptive-cognition 03) — "what just happened" this turn.
 fn recent_events(messages: &[Message], n: usize) -> Vec<MemoryEvent> {
@@ -1888,6 +1979,132 @@ mod tests {
         stamp_identity(&mut e);
         assert_eq!(e.user, "");
         assert_eq!(e.session_id, "");
+    }
+
+    // ---- R1a: per-session working directory (resolve_cwd) ---------------
+
+    fn skey(user: &str, session: &str) -> agent_core::SessionKey {
+        agent_core::SessionKey::parse(user, session).unwrap()
+    }
+
+    /// A key with UNVALIDATED (hostile) segments — `new` trusts, unlike `parse` —
+    /// so `resolve_cwd`'s own `safe_segment` gate is what must reject it.
+    fn hostile_key(user: &str, session: &str) -> agent_core::SessionKey {
+        agent_core::SessionKey {
+            user: agent_core::UserId::new(user),
+            session: agent_core::SessionId::new(session),
+        }
+    }
+
+    #[test]
+    fn positive_cwd_derives_from_session_key() {
+        let root = agent_testkit::tempdir();
+        let fallback = agent_testkit::tempdir();
+        let cwd = resolve_cwd(
+            &skey("alice", "sess1"),
+            Some(&root),
+            &fallback,
+            &CwdOpts::default(),
+        )
+        .unwrap();
+        assert_eq!(cwd, root.join("alice").join("sess1"));
+        assert!(cwd.is_dir(), "session workspace created");
+    }
+
+    #[test]
+    fn positive_two_sessions_get_disjoint_cwds() {
+        let root = agent_testkit::tempdir();
+        let fb = agent_testkit::tempdir();
+        let a = resolve_cwd(&skey("u", "a"), Some(&root), &fb, &CwdOpts::default()).unwrap();
+        let b = resolve_cwd(&skey("u", "b"), Some(&root), &fb, &CwdOpts::default()).unwrap();
+        assert_ne!(a, b, "distinct sessions ⇒ distinct workspaces");
+    }
+
+    #[test]
+    fn negative_missing_fleet_root_falls_back_to_settings_cwd() {
+        let fb = agent_testkit::tempdir();
+        let cwd = resolve_cwd(&skey("u", "s"), None, &fb, &CwdOpts::default()).unwrap();
+        assert_eq!(cwd, fb, "unset fleet_root ⇒ shared cwd, unchanged");
+    }
+
+    #[test]
+    fn corner_repeated_open_same_key_reuses_dir() {
+        let root = agent_testkit::tempdir();
+        let fb = agent_testkit::tempdir();
+        let k = skey("u", "s");
+        let a = resolve_cwd(&k, Some(&root), &fb, &CwdOpts::default()).unwrap();
+        let b = resolve_cwd(&k, Some(&root), &fb, &CwdOpts::default()).unwrap();
+        assert_eq!(a, b);
+        assert!(a.is_dir());
+    }
+
+    #[test]
+    fn boundary_working_dir_within_root_is_accepted() {
+        let root = agent_testkit::tempdir();
+        let fb = agent_testkit::tempdir();
+        let base = root.join("u").join("s");
+        std::fs::create_dir_all(base.join("sub")).unwrap();
+        let opts = CwdOpts {
+            working_dir: Some("sub".into()),
+            ..Default::default()
+        };
+        let cwd = resolve_cwd(&skey("u", "s"), Some(&root), &fb, &opts).unwrap();
+        assert_eq!(
+            cwd.canonicalize().unwrap(),
+            base.join("sub").canonicalize().unwrap()
+        );
+    }
+
+    #[rstest]
+    #[case::traversal_user("..", "s")]
+    #[case::traversal_session("u", "..")]
+    #[case::separator("u", "a/b")]
+    #[case::leading_dash("-rf", "s")]
+    fn adversarial_traversal_session_id_rejected(#[case] user: &str, #[case] session: &str) {
+        let root = agent_testkit::tempdir();
+        let fb = agent_testkit::tempdir();
+        assert!(
+            resolve_cwd(
+                &hostile_key(user, session),
+                Some(&root),
+                &fb,
+                &CwdOpts::default()
+            )
+            .is_err(),
+            "hostile key {user}/{session} must be rejected, not silently mapped"
+        );
+    }
+
+    #[test]
+    fn adversarial_working_dir_escaping_root_rejected() {
+        let root = agent_testkit::tempdir();
+        let fb = agent_testkit::tempdir();
+        let opts = CwdOpts {
+            working_dir: Some("../../etc".into()),
+            ..Default::default()
+        };
+        assert!(resolve_cwd(&skey("u", "s"), Some(&root), &fb, &opts).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn adversarial_symlink_escape_blocked() {
+        let root = agent_testkit::tempdir();
+        let outside = agent_testkit::tempdir();
+        let fb = agent_testkit::tempdir();
+        let base = root.join("u").join("s");
+        std::fs::create_dir_all(&base).unwrap();
+        // Attacker code plants a symlink inside the session root pointing outside it;
+        // confine canonicalizes and rejects a write that would escape through it.
+        std::os::unix::fs::symlink(&outside, base.join("escape")).unwrap();
+        let opts = CwdOpts {
+            working_dir: Some("escape".into()),
+            ..Default::default()
+        };
+        assert!(
+            resolve_cwd(&skey("u", "s"), Some(&root), &fb, &opts).is_err(),
+            "symlink escape must be blocked by confine"
+        );
     }
 
     // ---- mode switch decision (hysteresis) ------------------------------
@@ -2707,6 +2924,7 @@ mod tests {
             tool_timeout_secs: 30,
             recall_limit: 0,
             cwd: std::env::temp_dir(),
+            fleet_root: None,
             model: "m".into(),
             session_id: String::new(),
             context_prepend: vec![],
