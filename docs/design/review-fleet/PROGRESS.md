@@ -14,9 +14,9 @@ Three PRs, each based off `main`, never stacked, each gated by `nix flake check`
 
 - **Current PR:** PR1 — R2 identity at the source
 - **Branch:** `feat/review-fleet-r2-identity`
-- **Current step:** PR1 · gate GREEN ("all checks passed!", exit 0); committing + opening PR
-- **Last action:** `nix flake check` passed (digest_query bench Ir held, no ceiling bump)
-- **Next action:** commit + push + open PR1; on merge, start PR2 (R1a per-session cwd) on a fresh branch off main
+- **Current step:** PR1 · OPEN as **#270** (commit 0b82cdd), gate green, awaiting review/merge
+- **Last action:** pushed `feat/review-fleet-r2-identity`, opened PR #270
+- **Next action:** on merge of #270, start PR2 (R1a per-session cwd) on a fresh branch off main (never stacked)
 
 ---
 
