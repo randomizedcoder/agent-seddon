@@ -218,6 +218,7 @@ mod tests {
     fn capture(exit: i32, stdout: &str, stderr: &str, timed_out: bool) -> ExecOutput {
         ExecOutput {
             stdout: stdout.into(),
+            stdout_bytes: stdout.as_bytes().to_vec(),
             stderr: stderr.into(),
             exit_code: exit,
             timed_out,

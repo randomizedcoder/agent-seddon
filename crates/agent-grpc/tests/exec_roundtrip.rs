@@ -27,6 +27,7 @@ fn sandbox() -> Arc<dyn Sandbox> {
 fn spec(cmd: &str) -> ExecSpec {
     ExecSpec {
         command: cmd.into(),
+        argv: Vec::new(),
         cwd: std::env::temp_dir(),
         network: NetworkPolicy::On,
         env: EnvPolicy::Inherit,
@@ -63,6 +64,39 @@ async fn positive_failing_command_reports_its_status_not_an_error() {
         .expect("a failing command is a successful RPC");
     assert_eq!(out.exit_code, 3);
     assert!(out.stderr.contains("to-stderr"));
+}
+
+/// R3a: the argv path and the exact `stdout_bytes` capture survive the wire —
+/// argv is not shell-interpreted, and a non-UTF8 payload comes back byte-exact
+/// (the property the git funnel relies on over `--serve-sandbox`).
+#[rstest]
+#[case::tcp(Transport::Tcp)]
+#[case::uds(Transport::Uds)]
+#[tokio::test(flavor = "multi_thread")]
+async fn positive_argv_and_stdout_bytes_round_trip(#[case] transport: Transport) {
+    let (dial, _srv) = spawn(transport, sandbox_router(sandbox())).await;
+    let client = GrpcSandbox::connect(&dial).unwrap();
+
+    // argv mode: the `;` is a literal arg, not a shell separator.
+    let out = client
+        .exec(&ExecSpec::argv(
+            ["printf", "%s", "a;b"],
+            std::env::temp_dir(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(out.stdout, "a;b", "argv args stay literal across the wire");
+
+    // binary capture: exact bytes, not the lossy view.
+    let bin = client
+        .exec(&ExecSpec::sh(r"printf '\377\376'", std::env::temp_dir()))
+        .await
+        .unwrap();
+    assert_eq!(
+        bin.stdout_bytes,
+        vec![0xFF, 0xFE],
+        "exact bytes over the wire"
+    );
 }
 
 /// `probe()` replaces the placeholder capabilities with the remote's real ones,

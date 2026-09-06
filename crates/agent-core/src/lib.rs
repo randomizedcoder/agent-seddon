@@ -1211,11 +1211,18 @@ pub enum EnvPolicy {
     Scrub,
 }
 
-/// One command to run inside a [`Sandbox`]. Mirrors `bash -c <command>` so the
-/// `local` backend is behaviour-identical to today's `BashTool`.
+/// One command to run inside a [`Sandbox`]. Two modes:
+/// - **shell** (`argv` empty): mirrors `bash -c <command>`, so the `local`
+///   backend is behaviour-identical to today's `BashTool`.
+/// - **argv** (`argv` non-empty): runs the program + args **directly, with no
+///   shell** — so an untrusted arg (a model-supplied regex, path, or git ref)
+///   is passed literally and can never be shell-interpreted. This is the mode
+///   the chokepoint (`rg`, `git`) uses. `command` is ignored when `argv` is set.
 #[derive(Debug, Clone)]
 pub struct ExecSpec {
     pub command: String,
+    /// When non-empty, run this argv directly (no shell); `command` is ignored.
+    pub argv: Vec<String>,
     pub cwd: std::path::PathBuf,
     pub network: NetworkPolicy,
     pub env: EnvPolicy,
@@ -1223,10 +1230,29 @@ pub struct ExecSpec {
 }
 
 impl ExecSpec {
-    /// A command with default policies (network on, env inherit).
+    /// A shell command (`bash -c <command>`) with default policies (network on,
+    /// env inherit).
     pub fn sh(command: impl Into<String>, cwd: impl Into<std::path::PathBuf>) -> Self {
         Self {
             command: command.into(),
+            argv: Vec::new(),
+            cwd: cwd.into(),
+            network: NetworkPolicy::On,
+            env: EnvPolicy::Inherit,
+            timeout_secs: 120,
+        }
+    }
+    /// An argv command run **directly, without a shell** — untrusted args are
+    /// never re-interpreted. Default policies (network on, env inherit); dial
+    /// with `.env()`/`.network()`/`.timeout()`.
+    pub fn argv<I, S>(argv: I, cwd: impl Into<std::path::PathBuf>) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            command: String::new(),
+            argv: argv.into_iter().map(Into::into).collect(),
             cwd: cwd.into(),
             network: NetworkPolicy::On,
             env: EnvPolicy::Inherit,
@@ -1248,9 +1274,15 @@ impl ExecSpec {
 }
 
 /// The result of a sandboxed exec (mirrors `BashTool`'s capture).
-#[derive(Debug, Clone)]
+///
+/// `stdout` is a lossy-UTF8 view for display and text consumers; `stdout_bytes`
+/// is the exact capture, so a binary reader (e.g. the `git` funnel reading a
+/// blob object) routes through the seam without corruption. Backends fill both.
+#[derive(Debug, Clone, Default)]
 pub struct ExecOutput {
     pub stdout: String,
+    /// Exact stdout bytes (`stdout` is `from_utf8_lossy` of this).
+    pub stdout_bytes: Vec<u8>,
     pub stderr: String,
     pub exit_code: i32,
     pub timed_out: bool,

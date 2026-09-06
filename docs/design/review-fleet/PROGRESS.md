@@ -12,11 +12,15 @@ Three PRs, each based off `main`, never stacked, each gated by `nix flake check`
 
 ## Now
 
-- **Current PR:** PR3 — R1b per-session credentials mechanism
-- **Branch:** `feat/review-fleet-r1b-creds` (off main; #271/R1a merged as b3e915f)
-- **Current step:** PR3 · code + tests complete; `nix flake check` GREEN; committing + opening PR3
-- **Last action:** gate green ("all checks passed!", exit 0)
-- **Next action:** none — Phase 1 (R2 + R1a + R1b) complete once PR3 merges. Git-env injection deferred to inc 3 (see decision).
+- **Current PR:** PR4 — **R3a** Sandbox seam: argv exec + bytes output + env-scrub (Phase 2 foundation)
+- **Branch:** `feat/exec-chokepoint-r3a-seam` (off main; Phase 1 R1/R1b/R2 all merged)
+- **Current step:** R3a · gate GREEN; committing + opening PR4
+- **Last action:** `nix flake check` GREEN ("all checks passed!", exit 0)
+- **Next action:** open PR4 (R3a). Then R3b (route rg + guard + policy + pty-scrub), R3c (git funnel), R4 (org tier).
+
+Phase 1 (Foundation) COMPLETE — R2 #270 → R1a #271 → R1b #272 all merged (main 9e8af41).
+Phase 2 = R3 (exec chokepoint, C24) + R4 (org tier, C25); plan file
+`~/.claude/.../plans/ok-we-have-more-immutable-cookie.md`.
 
 ---
 
@@ -55,6 +59,36 @@ Three PRs, each based off `main`, never stacked, each gated by `nix flake check`
 - [~] Git token injection at the `git_bytes` funnel — DEFERRED to inc 3 (see decision below): safe injection is host-scoped, and the host+token are exactly the roster's per-repo fields.
 - [x] Tests: Secret (redaction/expose/deserialize/empty), resolve_token (inline/file/file-miss/absent/no-leak) — all pass; http_e2e still green
 - [x] `nix flake check` — GREEN ("all checks passed!", exit 0); clippy -D warnings clean, fmt, buf additive, bench + leak held
+
+---
+
+# Phase 2 — R3 (exec chokepoint, C24) + R4 (org tier, C25)
+
+Four PRs, each off `main`, gated: **R3a** seam foundation → **R3b** route rg + guard + Tier-0
+policy + pty-scrub → **R3c** git funnel → **R4** org-tier convention. R3a is additive (nothing
+routes yet); R3c isolates the widest blast radius (git); R4 is light + independent.
+
+## PR4 — R3a: Sandbox argv exec + bytes output + env-scrub  🟡 (code+tests done; gate running)
+
+- [x] `ExecSpec.argv: Vec<String>` + `ExecSpec::argv(...)` ctor — argv mode runs the program
+  directly (no shell); empty ⇒ existing `bash -c` shell mode (`agent-core/src/lib.rs`)
+- [x] `ExecOutput.stdout_bytes: Vec<u8>` (+ `Default` derive); `stdout` stays the lossy view — so
+  the git funnel can read binary objects through the seam (`agent-core/src/lib.rs`)
+- [x] `run_argv` honors `EnvPolicy::Scrub` (`env_clear` + minimal `PATH`) + captures exact bytes;
+  `NetworkPolicy` still unenforced (documented — arrives with C23 backends) (`agent-sandbox/src/lib.rs`)
+- [x] `LocalSandbox`/`NixSandbox` dispatch argv-vs-shell (`local.rs`, `nix.rs`)
+- [x] Proto additive: `ExecRequest.argv=6`, `ExecResult.stdout_bytes=5`; both convert dirs
+  (older-server fallback = derive bytes from string) — buf additive, no baseline bump
+- [x] Updated all `ExecOutput`/`ExecSpec` literals (go.rs, structural_search, metered, exec_roundtrip)
+- [x] Tests: argv-no-shell, shell-unchanged, env-scrub-removes-HOME, scrub-keeps-PATH,
+  stdout_bytes-binary-exact, timeout; gRPC argv+bytes roundtrip (tcp+uds) — all pass
+- [x] `nix flake check` — GREEN ("all checks passed!", exit 0); clippy -D warnings clean, fmt, buf additive (no baseline bump), bench + leak held
+
+## PR5 — R3b: route `rg` + no-raw-`Command` guard + Tier-0 policy + pty env-scrub  ⬜
+
+## PR6 — R3c: route the `git` funnel through the seam (binary fidelity + capped timeout)  ⬜
+
+## PR7 — R4: org tier convention + session-id encoding + semantics docs  ⬜
 
 ---
 
