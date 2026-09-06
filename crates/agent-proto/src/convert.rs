@@ -168,6 +168,14 @@ pub fn status_from_error(e: &agent_core::Error) -> tonic::Status {
             tonic::Status::not_found(format!("registry: {m}"))
         }
         Error::Registry(m) => tonic::Status::invalid_argument(format!("registry: {m}")),
+        // The review-fleet roster seam mirrors Registry's contract: a rejected
+        // session row/id is a bad request; an unknown id (`not found` prefix) is
+        // NotFound. (The `ReviewFleetService` wiring lands in review-fleet inc 3b;
+        // the mapping lives here now so the shared error bridge stays exhaustive.)
+        Error::Fleet(m) if m.starts_with("not found") => {
+            tonic::Status::not_found(format!("fleet: {m}"))
+        }
+        Error::Fleet(m) => tonic::Status::invalid_argument(format!("fleet: {m}")),
         // Overload is a "slow down", not a fault: RESOURCE_EXHAUSTED is in the
         // client's retryable set, so it backs off + retries rather than failing.
         Error::Overloaded(m) => tonic::Status::resource_exhausted(format!("overloaded: {m}")),

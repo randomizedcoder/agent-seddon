@@ -70,6 +70,12 @@ pub enum Error {
     /// gRPC `RESOURCE_EXHAUSTED`, which the client retries with backoff (not a fault).
     #[error("overloaded: {0}")]
     Overloaded(String),
+    /// Review-fleet roster seam (review-fleet C2): a rejected session row / id or a
+    /// store failure. Like [`Error::Registry`], a message starting with `not found`
+    /// maps to gRPC `NotFound`; the rest to `InvalidArgument` (a bad request, not a
+    /// fault).
+    #[error("fleet error: {0}")]
+    Fleet(String),
 }
 
 // The shared message vocabulary — see message.rs (re-exported below).
@@ -2805,6 +2811,141 @@ pub trait ProviderRegistry: Send + Sync {
     /// reports every enabled card `Healthy` with zero counters — the live
     /// numbers arrive when the router itself feeds the registry (increment 04).
     async fn health(&self) -> Result<Vec<UpstreamHealth>>;
+}
+
+// ---------------------------------------------------------------------------
+// Seam: FleetRegistry (review-fleet C2) — the durable roster of "who reviews what"
+// ---------------------------------------------------------------------------
+
+/// Most rows one fleet roster holds (the design target is a fleet of a handful to
+/// a few dozen sessions; 512 is generous headroom, not an invitation — the same
+/// ceiling as [`MAX_REGISTRY_UPSTREAMS`]).
+pub const MAX_FLEET_ROWS: usize = 512;
+/// Poll-interval clamp for a roster row (`poll_secs`): a hostile/fat-fingered value
+/// must not turn into a busy-loop or an effectively-disabled session. Below the
+/// floor is clamped up, above the ceiling clamped down; unset (`0`) becomes the
+/// default.
+pub const MIN_FLEET_POLL_SECS: u64 = 30;
+pub const MAX_FLEET_POLL_SECS: u64 = 86_400;
+pub const DEFAULT_FLEET_POLL_SECS: u64 = 300;
+/// Longest free-text field (skill name, Slack channel) accepted on a roster row.
+pub const MAX_FLEET_NAME_LEN: usize = 256;
+
+/// One durable roster row: a review session's identity, the repo it watches, how it
+/// reaches its forge, and its triggers (review-fleet C2). This is the full C2 row —
+/// later increments only *read* the trigger/skill fields, so the shape never churns.
+///
+/// **Untrusted, fail-closed.** `id`/`user`/`repo` may become storage-path segments or
+/// metric labels, so they pass [`safe_segment`]; `token_ref` is a kind-prefixed
+/// *reference* (`env:NAME` / `file:/path`), **never** the secret value (the forge token
+/// resolves on the host that builds the concrete `Forge`, review-fleet C5) — a raw token
+/// here is the "secret in the config" mistake [`ApiKeyRef`] exists to reject, so it fails
+/// closed and the error never echoes the value.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetSession {
+    /// Path-safe roster id (it may become a storage path segment / metric label).
+    pub id: String,
+    /// Owning user/org (path-safe; the workspace root is `root/<user>/<session>`).
+    pub user: String,
+    /// Repository slug this session reviews (path-safe, e.g. `owner__repo`).
+    pub repo: String,
+    /// Forge kind: `"github"` | `"gitlab"` | `""` (resolve as a registered forge).
+    pub backend: String,
+    /// Forge API base URL (empty ⇒ the forge's public default).
+    pub base_url: String,
+    /// `env:NAME` or `file:/path` — never a raw token. Empty = unauthenticated.
+    pub token_ref: String,
+    /// Review skill/prompt selector (empty ⇒ the default review skill).
+    pub skill: String,
+    /// Slack channel watched for review triggers (empty ⇒ no Slack trigger).
+    pub slack_trigger_channel: String,
+    /// Slack channel where progress is posted (empty ⇒ no progress surfacing).
+    pub slack_progress_channel: String,
+    /// Forge poll interval in seconds (clamped into
+    /// `[MIN_FLEET_POLL_SECS, MAX_FLEET_POLL_SECS]`; `0` ⇒ [`DEFAULT_FLEET_POLL_SECS`]).
+    pub poll_secs: u64,
+    /// Whether the fleet server admits/drives this session.
+    pub enabled: bool,
+    /// Unix seconds the row was first created (`0` = unset; clamped non-negative).
+    pub created_at: i64,
+    /// Unix seconds the row was last updated (`0` = unset; clamped non-negative).
+    pub updated_at: i64,
+}
+
+impl FleetSession {
+    /// Clamp hostile/unset *numbers* in place, fail-soft (mirrors
+    /// [`Upstream::sanitize`]): `poll_secs` into its bounds (unset ⇒ default), negative
+    /// timestamps ⇒ `0`. Structural problems (a bad id, an over-long field, a raw token)
+    /// are [`Self::validate`]'s job and fail closed instead.
+    pub fn sanitize(&mut self) {
+        self.poll_secs = if self.poll_secs == 0 {
+            DEFAULT_FLEET_POLL_SECS
+        } else {
+            self.poll_secs
+                .clamp(MIN_FLEET_POLL_SECS, MAX_FLEET_POLL_SECS)
+        };
+        self.created_at = self.created_at.max(0);
+        self.updated_at = self.updated_at.max(0);
+    }
+
+    /// Fail-closed structural validation: `id`/`user`/`repo` must be path-safe segments,
+    /// the `backend` one of the known set, every free-text field within its cap, and
+    /// `token_ref` a well-formed reference (never a raw secret). Every field is untrusted
+    /// (a gRPC peer or a hand-edited file wrote it).
+    pub fn validate(&self) -> Result<()> {
+        let err = |m: String| Err(Error::Fleet(m));
+        for (field, value) in [("id", &self.id), ("user", &self.user), ("repo", &self.repo)] {
+            if !safe_segment(value) {
+                return err(format!(
+                    "fleet session {field} {:?} is not a path-safe segment",
+                    truncate_for_log(value)
+                ));
+            }
+        }
+        if !matches!(self.backend.as_str(), "" | "github" | "gitlab") {
+            return err(format!(
+                "fleet session `{}`: unknown backend {:?}",
+                self.id,
+                truncate_for_log(&self.backend)
+            ));
+        }
+        if self.base_url.len() > MAX_UPSTREAM_URL_LEN {
+            return err(format!("fleet session `{}`: base_url too long", self.id));
+        }
+        for (field, value) in [
+            ("skill", &self.skill),
+            ("slack_trigger_channel", &self.slack_trigger_channel),
+            ("slack_progress_channel", &self.slack_progress_channel),
+        ] {
+            if value.len() > MAX_FLEET_NAME_LEN {
+                return err(format!("fleet session `{}`: {field} too long", self.id));
+            }
+        }
+        // A forge token is a secret; reuse the audited key-ref parser (`env:`/`file:`/
+        // none, never a raw value, never echoed).
+        ApiKeyRef::parse(&self.token_ref)
+            .map_err(|e| Error::Fleet(format!("fleet session `{}`: {e}", self.id)))?;
+        Ok(())
+    }
+}
+
+/// The review-fleet roster seam (review-fleet C2): the durable list of review sessions
+/// the fleet server admits and drives, mirroring [`ProviderRegistry`]'s CRUD discipline.
+/// Every argument is untrusted (an `id` may become a storage path): stores validate
+/// fail-closed and clamp numbers on ingest, and never persist or return a resolved
+/// token. `get`/`set_enabled` of an unknown id is an `Err` whose message starts with
+/// `not found` (the wire layer maps it to `NotFound`); `delete` of an unknown id is
+/// `Ok(false)`, not an error.
+#[async_trait]
+pub trait FleetRegistry: Send + Sync {
+    /// Every row, enabled or not (the roster view).
+    async fn list(&self) -> Result<Vec<FleetSession>>;
+    async fn get(&self, id: &str) -> Result<FleetSession>;
+    /// Upsert; returns the stored (sanitized) row.
+    async fn put(&self, session: FleetSession) -> Result<FleetSession>;
+    async fn delete(&self, id: &str) -> Result<bool>;
+    /// Toggle without a full `put`; returns the updated row.
+    async fn set_enabled(&self, id: &str, enabled: bool) -> Result<FleetSession>;
 }
 
 // ---------------------------------------------------------------------------
