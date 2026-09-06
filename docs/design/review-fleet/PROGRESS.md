@@ -21,8 +21,8 @@ Three PRs, each based off `main`, never stacked, each gated by `nix flake check`
   `resolve_fleet_registry` factory + builder wiring + runtime `fleet`/`fleet-sqlite` features;
   table-driven tests: convert round-trip (agent-proto) + real-wire CRUD/token-never-returned/
   traversal-rejected roundtrip (agent-grpc, TCP+UDS); docs control-plane section
-- **Next action:** confirm gate GREEN, then commit (awaiting go-ahead); then 3c (server + FSM) off
-  updated main.
+- **Next action:** PR **#279** open (commit `a62ab76`, gate green). After merge, 3c (server + FSM,
+  C1 + C8) off updated main.
 
 Inc **3a (C2) DONE + MERGED (#278, main 91c40ab).**
 
