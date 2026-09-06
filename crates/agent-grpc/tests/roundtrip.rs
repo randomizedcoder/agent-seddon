@@ -568,6 +568,7 @@ async fn memory_append_and_recall(#[case] transport: Transport) {
         message: Message::assistant("remembered over the wire"),
         ts_ms: 42,
         session_id: "s1".into(),
+        user: String::new(),
         usage: None,
         iter: None,
         verification: None,

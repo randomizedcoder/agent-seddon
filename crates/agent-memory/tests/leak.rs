@@ -45,6 +45,7 @@ fn evt(text: &str) -> MemoryEvent {
         message: Message::user(text),
         ts_ms: 0,
         session_id: String::new(),
+        user: String::new(),
         usage: None,
         iter: None,
         verification: None,

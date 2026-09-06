@@ -59,6 +59,14 @@ impl Tool for MetricsTool {
         let filter = args.get("filter").and_then(Value::as_str);
         let raw = args.get("raw").and_then(Value::as_bool).unwrap_or(false);
 
+        // TENANCY (review-fleet R2 / foundation-now, enforcement-later): this dumps
+        // the whole process registry, so under a multi-tenant deployment it would
+        // expose other tenants' `(session,user)`-labelled series to the caller. That
+        // is acceptable at Tier 0 (single operator/trust domain). Per-tenant
+        // filtering of the exposition output belongs with the multi-tenancy track's
+        // data-scoping enforcement (MT-02), alongside the ClickHouse ROW POLICY —
+        // it is not attempted here (label-less seam-health families make naive line
+        // filtering lossy). See docs/design/multi-tenancy/02-data-scoping-and-rls.md.
         let text = self.metrics.encode_text();
         let mut out = String::new();
         for line in text.lines() {

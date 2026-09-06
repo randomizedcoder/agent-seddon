@@ -235,11 +235,16 @@ impl InstantWindow {
         head: usize,
         cut: usize,
     ) -> Option<Vec<Message>> {
-        let session_id = current_identity()?.session.as_str().to_string();
+        let key = current_identity()?;
+        let session_id = key.session.as_str().to_string();
+        // Scope every ledger read to the owning tenant (tenant == user) so a
+        // shared/colliding session_id can't surface another user's digests.
+        let user_id = key.user.as_str().to_string();
         let summaries = self
             .digests
             .query(&DigestQuery {
                 session_id: session_id.clone(),
+                user_id: user_id.clone(),
                 kind: Some(DigestKind::Summary),
                 ..DigestQuery::default()
             })
@@ -268,7 +273,7 @@ impl InstantWindow {
             .digests
             .put(Digest {
                 session_id: session_id.clone(),
-                user_id: current_identity()?.user.as_str().to_string(),
+                user_id: user_id.clone(),
                 seq: last_seq,
                 kind: DigestKind::Objective,
                 text: objective.clone(),
@@ -286,6 +291,7 @@ impl InstantWindow {
             .digests
             .query(&DigestQuery {
                 session_id: session_id.clone(),
+                user_id: user_id.clone(),
                 kind: Some(DigestKind::Facts),
                 ..DigestQuery::default()
             })
@@ -295,6 +301,7 @@ impl InstantWindow {
             .digests
             .query(&DigestQuery {
                 session_id,
+                user_id,
                 kind: Some(DigestKind::Alternatives),
                 ..DigestQuery::default()
             })

@@ -1576,8 +1576,8 @@ pub struct RecallQuery {
 /// An append-only episodic event. `kind` distinguishes e.g. "goal",
 /// "assistant", "tool", "usage".
 ///
-/// `session_id`, `usage`, and `iter` are additive (serde-defaulted) so the JSONL
-/// episodic log stays backward-compatible; they carry the extra context the
+/// `session_id`, `user`, `usage`, and `iter` are additive (serde-defaulted) so the
+/// JSONL episodic log stays backward-compatible; they carry the extra context the
 /// telemetry sink needs to route rows into ClickHouse.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryEvent {
@@ -1586,6 +1586,17 @@ pub struct MemoryEvent {
     pub ts_ms: u64,
     #[serde(default)]
     pub session_id: String,
+    /// The **verified** owning identity (`SessionKey.user`), stamped from ambient
+    /// `current_identity()` at the emit funnel (`Agent::append_event`) — never a
+    /// model-supplied value. Empty when emitted outside an identity scope. The
+    /// telemetry sink writes it into every row's `user` column so ClickHouse rows,
+    /// spans, and logs are attributable per tenant (tenant == user at this tier).
+    /// Telemetry-local like [`verification`](Self::verification): the sink runs
+    /// in-process before the memory composite, so this is not carried on the gRPC
+    /// memory wire (it defaults to empty across that boundary, where the far side
+    /// re-derives it from its own caller scope).
+    #[serde(default)]
+    pub user: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1816,6 +1827,12 @@ pub struct Digest {
 #[derive(Debug, Clone, Default)]
 pub struct DigestQuery {
     pub session_id: String,
+    /// The verified owning identity (`SessionKey.user`). The read is scoped to
+    /// this user so two tenants that share (or collide on) a `session_id` never
+    /// cross-read each other's ledger. Empty means "unscoped" (single-tenant /
+    /// local reads); backends must `safe_segment`-validate it before it reaches
+    /// SQL. Set from ambient identity at the call site, never from a model value.
+    pub user_id: String,
     /// Restrict to one kind; `None` = all kinds.
     pub kind: Option<DigestKind>,
     /// Only rows with `seq >= since_seq`.

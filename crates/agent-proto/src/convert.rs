@@ -664,6 +664,10 @@ impl TryFrom<pb::MemoryEvent> for agent_core::MemoryEvent {
                 .try_into()?,
             ts_ms: e.ts_ms,
             session_id: e.session_id,
+            // Telemetry-local (stamped at the emit funnel before the memory
+            // composite, not carried on the wire); the far side re-derives it from
+            // its own caller scope, so it defaults to empty across this boundary.
+            user: String::new(),
             usage: e.usage.map(Into::into),
             iter: e.iter,
             // Telemetry-local (recorded via the `CompositeMemory` mirror, not the
@@ -4575,6 +4579,7 @@ mod tests {
             message: msg_with_calls(),
             ts_ms: 1_700_000_000_000,
             session_id: "sess".into(),
+            user: String::new(),
             usage,
             iter,
             verification: None,

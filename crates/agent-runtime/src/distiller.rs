@@ -150,7 +150,7 @@ async fn run(
     let mut seeded = false;
     while let Some(job) = rx.recv().await {
         if !seeded {
-            prev_summary = latest_summary(&*ctx.store, &ctx.session_id).await;
+            prev_summary = latest_summary(&*ctx.store, &ctx.session_id, &ctx.user_id).await;
             seeded = true;
         }
         let span = tracing::info_span!(
@@ -172,10 +172,18 @@ async fn run(
 }
 
 /// The newest stored summary, for seeding the anchored chain after a restart.
-async fn latest_summary(store: &dyn DigestStore, session_id: &str) -> Option<String> {
+/// Scoped to `(session_id, user_id)` so a shared/colliding session never seeds
+/// from another tenant's ledger — the distiller runs on a spawned task where the
+/// identity task-local is absent, so `user_id` comes from the carried `ctx`.
+async fn latest_summary(
+    store: &dyn DigestStore,
+    session_id: &str,
+    user_id: &str,
+) -> Option<String> {
     let rows = store
         .query(&DigestQuery {
             session_id: session_id.to_string(),
+            user_id: user_id.to_string(),
             kind: Some(DigestKind::Summary),
             ..DigestQuery::default()
         })

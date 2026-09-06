@@ -27,6 +27,7 @@ fn event(kind: &str, text: &str) -> MemoryEvent {
         message: Message::assistant(text),
         ts_ms: 1_700_000_000_000,
         session_id: "s1".into(),
+        user: String::new(),
         usage: None,
         iter: None,
         verification: None,

@@ -177,11 +177,19 @@ impl DigestStore for ClickHouseDigests {
             .map(|k| format!("AND kind = '{}'", k.as_str()))
             .unwrap_or_default();
         let since = q.since_seq.unwrap_or(0);
+        // Scope to the owning tenant so a shared/colliding session_id cannot
+        // cross-read another user's ledger. `user_id` is `safe_segment`-validated
+        // (sanitize_query); empty means an unscoped/single-tenant read.
+        let user_clause = if q.user_id.is_empty() {
+            String::new()
+        } else {
+            format!("AND user_id = '{}'", q.user_id)
+        };
         let sql = format!(
             "SELECT session_id, user_id, seq, kind, text, keywords, mode, model, \
                     ts, duration_ms, tokens \
                FROM {TABLE} \
-              WHERE session_id = '{sid}' AND seq >= {since} {kind_clause} \
+              WHERE session_id = '{sid}' {user_clause} AND seq >= {since} {kind_clause} \
               ORDER BY seq ASC, kind ASC, ts DESC \
               LIMIT {fetch}",
             sid = q.session_id,

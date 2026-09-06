@@ -1001,6 +1001,7 @@ mod tests {
                 message: Message::tool(id, "ok"),
                 ts_ms: 0,
                 session_id: String::new(),
+                user: String::new(),
                 usage: None,
                 iter: None,
                 verification: None,

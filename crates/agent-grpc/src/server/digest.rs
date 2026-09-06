@@ -65,6 +65,13 @@ impl pb::digest_service_server::DigestService for DigestSvc {
         request: Request<pb::QueryDigestsRequest>,
     ) -> Result<Response<pb::QueryDigestsResponse>, Status> {
         let key = super::identity_key(request.metadata());
+        // Scope the read to the caller's verified identity (tenant == user), so a
+        // request can never read another tenant's ledger via a shared session_id.
+        // No caller identity ⇒ empty (unscoped), matching the store's contract.
+        let user_id = key
+            .as_ref()
+            .map(|k| k.user.as_str().to_string())
+            .unwrap_or_default();
         let sp = span("digest.query", request.metadata());
         let inner = self.inner.clone();
         let work = async move {
@@ -79,6 +86,7 @@ impl pb::digest_service_server::DigestService for DigestSvc {
             };
             let q = DigestQuery {
                 session_id: req.session_id,
+                user_id,
                 kind,
                 since_seq: (req.since_seq > 0).then_some(req.since_seq),
                 keywords_any: req.keywords_any,

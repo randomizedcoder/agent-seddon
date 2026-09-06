@@ -1527,6 +1527,7 @@ impl Agent {
             message,
             ts_ms: now_ms(),
             session_id: self.settings.session_id.clone(),
+            user: String::new(),
             usage: None,
             iter: None,
             verification: None,
@@ -1543,6 +1544,7 @@ impl Agent {
             message: Message::assistant(String::new()),
             ts_ms: now_ms(),
             session_id: self.settings.session_id.clone(),
+            user: String::new(),
             usage: Some(usage.clone()),
             iter: Some(iter),
             verification: None,
@@ -1561,6 +1563,7 @@ impl Agent {
             message: Message::assistant(String::new()),
             ts_ms: now_ms(),
             session_id: self.settings.session_id.clone(),
+            user: String::new(),
             usage: None,
             iter: Some(iter),
             verification: Some(rec),
@@ -1606,6 +1609,7 @@ impl Agent {
             message: Message::assistant(String::new()),
             ts_ms: now_ms(),
             session_id: self.settings.session_id.clone(),
+            user: String::new(),
             usage: None,
             iter: None,
             verification: None,
@@ -1615,7 +1619,8 @@ impl Agent {
         .await;
     }
 
-    async fn append_event(&self, event: MemoryEvent) {
+    async fn append_event(&self, mut event: MemoryEvent) {
+        stamp_identity(&mut event);
         if let Err(e) = self.memory.append(event).await {
             tracing::warn!("episodic append failed: {e}");
         }
@@ -1673,6 +1678,20 @@ const DIMENSION_WINDOW: usize = 16;
 /// How many bullets a per-dimension recall pulls in on a switch.
 const DIMENSION_RECALL_LIMIT: usize = 5;
 
+/// Stamp the **verified** owning identity onto an event at the single emit funnel,
+/// sourced from ambient `current_identity()` — never a model-supplied value. Runs on
+/// the identity-scoped loop task (the `record*` callers are on the turn loop), so the
+/// scope is live; outside a scope the fields keep their defaults. In the CLI the
+/// scoped `session` equals `settings.session_id`, so this is a no-op there; in the
+/// multi-session server it corrects the otherwise process-global `session_id` and
+/// supplies the per-tenant `user`. Extracted so the funnel is unit-testable.
+fn stamp_identity(event: &mut MemoryEvent) {
+    if let Some(key) = agent_core::current_identity() {
+        event.user = key.user.as_str().to_string();
+        event.session_id = key.session.as_str().to_string();
+    }
+}
+
 /// Wrap the recent working-set tail as synthetic `MemoryEvent`s for the per-step
 /// dimension pass (adaptive-cognition 03) — "what just happened" this turn.
 fn recent_events(messages: &[Message], n: usize) -> Vec<MemoryEvent> {
@@ -1684,6 +1703,7 @@ fn recent_events(messages: &[Message], n: usize) -> Vec<MemoryEvent> {
             message: m.clone(),
             ts_ms: 0,
             session_id: String::new(),
+            user: String::new(),
             usage: None,
             iter: None,
             verification: None,
@@ -1825,6 +1845,50 @@ mod tests {
     use rstest::rstest;
     use serde_json::json;
     use std::collections::VecDeque;
+
+    // ---- R2: identity stamping at the emit funnel -----------------------
+
+    fn bare_event() -> MemoryEvent {
+        MemoryEvent {
+            kind: "goal".into(),
+            message: agent_core::Message::user("hi"),
+            ts_ms: 0,
+            session_id: String::new(),
+            user: String::new(),
+            usage: None,
+            iter: None,
+            verification: None,
+            review: None,
+            dimensional: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn positive_stamp_identity_sets_user_and_session_from_scope() {
+        let key = agent_core::SessionKey::parse("alice", "sess-7").unwrap();
+        agent_core::scope(key, async {
+            let mut e = bare_event();
+            stamp_identity(&mut e);
+            assert_eq!(
+                e.user, "alice",
+                "verified user stamped from ambient identity"
+            );
+            assert_eq!(
+                e.session_id, "sess-7",
+                "per-turn session stamped, not process-global"
+            );
+        })
+        .await;
+    }
+
+    #[test]
+    fn corner_stamp_identity_no_scope_leaves_defaults() {
+        // Emitted outside any identity scope (e.g. startup) ⇒ empty, not a panic.
+        let mut e = bare_event();
+        stamp_identity(&mut e);
+        assert_eq!(e.user, "");
+        assert_eq!(e.session_id, "");
+    }
 
     // ---- mode switch decision (hysteresis) ------------------------------
 
