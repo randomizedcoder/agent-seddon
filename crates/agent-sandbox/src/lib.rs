@@ -10,36 +10,51 @@
 //! the `bwrap`/`nsjail`/`docker` backends are follow-ups. See
 //! `docs/components/sandbox.md`.
 
-use agent_core::{Error, ExecOutput, ExecSpec, Result};
+use agent_core::{EnvPolicy, Error, ExecOutput, ExecSpec, Result};
 use std::time::Duration;
 
-/// Run an argv command under the spec's cwd + timeout, capturing output. Shared
-/// by the backends (each just builds a different argv wrapping `bash -c`).
+/// Run an argv command under the spec's cwd + timeout + env policy, capturing
+/// output. Shared by the backends (each builds a different argv — `bash -c` for
+/// the shell path, the program directly for the argv path).
+///
+/// Enforced here at Tier 0: **cwd**, **timeout**, and **`EnvPolicy::Scrub`**
+/// (`env_clear` + a minimal `PATH`, no host secrets reach the child).
+/// `NetworkPolicy` is **not** enforced — a plain `Command` has no way to; that
+/// arrives with the namespace/bwrap backends (C23). The caller sets the intent
+/// regardless, so upgrading the backend enforces it with no caller change.
 async fn run_argv(argv: &[String], spec: &ExecSpec) -> Result<ExecOutput> {
     let (prog, args) = argv
         .split_first()
         .ok_or_else(|| Error::Sandbox("empty command".into()))?;
-    let run = tokio::process::Command::new(prog)
-        .args(args)
-        .current_dir(&spec.cwd)
-        .kill_on_drop(true)
-        .output();
+    let mut cmd = tokio::process::Command::new(prog);
+    cmd.args(args).current_dir(&spec.cwd).kill_on_drop(true);
+    if spec.env == EnvPolicy::Scrub {
+        // Drop the whole ambient env, then restore only a minimal PATH so the
+        // program (and, in shell mode, `bash`) still resolves. Nothing else —
+        // no host secrets, no tokens.
+        cmd.env_clear();
+        if let Some(path) = std::env::var_os("PATH") {
+            cmd.env("PATH", path);
+        }
+    }
+    let run = cmd.output();
     match tokio::time::timeout(Duration::from_secs(spec.timeout_secs.max(1)), run).await {
         Ok(Ok(o)) => Ok(ExecOutput {
             stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
+            stdout_bytes: o.stdout,
             stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
             exit_code: o.status.code().unwrap_or(-1),
             timed_out: false,
         }),
         Ok(Err(e)) => Err(Error::Sandbox(format!("spawning `{prog}`: {e}"))),
         Err(_) => Ok(ExecOutput {
-            stdout: String::new(),
             stderr: format!(
                 "command timed out after {}s and was killed",
                 spec.timeout_secs
             ),
             exit_code: -1,
             timed_out: true,
+            ..Default::default()
         }),
     }
 }
@@ -131,6 +146,99 @@ mod tests {
     // The flake root (this crate is crates/agent-sandbox; the flake is two up).
     fn workspace_root() -> String {
         format!("{}/../..", env!("CARGO_MANIFEST_DIR"))
+    }
+
+    // --- R3a: argv mode, env scrub, binary capture, timeout ---------------
+    use agent_core::{EnvPolicy, ExecSpec};
+
+    /// argv mode runs the program directly — a shell metachar in an arg is a
+    /// literal argument, never re-interpreted (the security point of the mode).
+    #[tokio::test]
+    async fn positive_argv_mode_runs_without_shell() {
+        let dir = tempdir();
+        let out = LocalSandbox
+            .exec(&ExecSpec::argv(["printf", "%s", "a;b|c>d"], dir))
+            .await
+            .unwrap();
+        assert_eq!(out.stdout, "a;b|c>d", "metachars stay literal in argv mode");
+        assert_eq!(out.exit_code, 0);
+    }
+
+    /// Shell mode still interprets the command (unchanged from pre-R3a).
+    #[tokio::test]
+    async fn positive_shell_mode_unchanged() {
+        let dir = tempdir();
+        let out = LocalSandbox
+            .exec(&ExecSpec::sh("printf 'x'; printf 'y'", dir))
+            .await
+            .unwrap();
+        assert_eq!(out.stdout, "xy", "the shell runs both statements");
+    }
+
+    /// `EnvPolicy::Scrub` clears the ambient env: a host var present under
+    /// Inherit is gone under Scrub. Read-only (no `set_var`) → race-free.
+    #[tokio::test]
+    async fn adversarial_env_scrub_removes_host_secret() {
+        let dir = tempdir();
+        // Under Scrub, HOME (a stand-in for any host secret) must be absent.
+        let scrubbed = LocalSandbox
+            .exec(
+                &ExecSpec::sh(r#"printf '%s' "${HOME:-__EMPTY__}""#, dir.clone())
+                    .env(EnvPolicy::Scrub),
+            )
+            .await
+            .unwrap();
+        assert_eq!(scrubbed.stdout, "__EMPTY__", "scrub must drop HOME");
+        // Under Inherit the same var is preserved (only assert when the parent
+        // actually has it, so the test is robust in a bare environment).
+        if let Ok(home) = std::env::var("HOME") {
+            if !home.is_empty() {
+                let inherited = LocalSandbox
+                    .exec(&ExecSpec::sh(r#"printf '%s' "$HOME""#, dir).env(EnvPolicy::Inherit))
+                    .await
+                    .unwrap();
+                assert_eq!(inherited.stdout, home, "inherit must keep HOME");
+            }
+        }
+    }
+
+    /// Scrub restores a minimal PATH so argv[0] (and `bash` in shell mode) still
+    /// resolves — otherwise every scrubbed command would fail to spawn.
+    #[tokio::test]
+    async fn boundary_scrub_keeps_minimal_path() {
+        let dir = tempdir();
+        let out = LocalSandbox
+            .exec(&ExecSpec::sh(r#"printf '%s' "$PATH""#, dir).env(EnvPolicy::Scrub))
+            .await
+            .unwrap();
+        assert!(!out.stdout.is_empty(), "scrub must keep PATH: got empty");
+    }
+
+    /// `stdout_bytes` is the exact capture; `stdout` is a lossy view. A non-UTF8
+    /// payload round-trips byte-exact (the property the git funnel needs).
+    #[tokio::test]
+    async fn positive_stdout_bytes_preserves_binary() {
+        let dir = tempdir();
+        let out = LocalSandbox
+            .exec(&ExecSpec::sh(r"printf '\377\376'", dir))
+            .await
+            .unwrap();
+        assert_eq!(out.stdout_bytes, vec![0xFF, 0xFE], "exact bytes");
+        assert!(
+            out.stdout.contains('\u{FFFD}'),
+            "lossy string has the replacement char"
+        );
+    }
+
+    /// The timeout still fires and reports `timed_out` (unchanged by R3a).
+    #[tokio::test]
+    async fn positive_timeout_still_honored() {
+        let dir = tempdir();
+        let out = LocalSandbox
+            .exec(&ExecSpec::sh("sleep 5", dir).timeout(1))
+            .await
+            .unwrap();
+        assert!(out.timed_out, "a 5s sleep under a 1s cap must time out");
     }
 
     // --- capability probes -------------------------------------------------

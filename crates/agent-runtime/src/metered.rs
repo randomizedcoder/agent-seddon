@@ -2455,9 +2455,8 @@ mod sandbox_tests {
         async fn exec(&self, _spec: &ExecSpec) -> Result<ExecOutput> {
             Ok(ExecOutput {
                 stdout: "ok".into(),
-                stderr: String::new(),
-                exit_code: 0,
-                timed_out: false,
+                stdout_bytes: b"ok".to_vec(),
+                ..Default::default()
             })
         }
         fn capabilities(&self) -> SandboxCapabilities {

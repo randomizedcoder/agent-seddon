@@ -35,21 +35,22 @@ impl Sandbox for NixSandbox {
                 "backend `nix` unavailable (no `nix` on PATH)".into(),
             ));
         }
-        // `nix develop <flake> -c bash -c <command>`: the toolchain/$PATH is the
-        // pinned closure; the command runs in `spec.cwd` (set by `run_argv`).
-        run_argv(
-            &[
-                "nix".into(),
-                "develop".into(),
-                self.flake.clone(),
-                "-c".into(),
-                "bash".into(),
-                "-c".into(),
-                spec.command.clone(),
-            ],
-            spec,
-        )
-        .await
+        // The toolchain/$PATH is the pinned closure; the command runs in
+        // `spec.cwd` (set by `run_argv`). Shell mode wraps `bash -c <command>`;
+        // argv mode runs the program directly under the closure (no shell, so an
+        // untrusted arg stays literal).
+        let mut argv = vec![
+            "nix".into(),
+            "develop".into(),
+            self.flake.clone(),
+            "-c".into(),
+        ];
+        if spec.argv.is_empty() {
+            argv.extend(["bash".into(), "-c".into(), spec.command.clone()]);
+        } else {
+            argv.extend(spec.argv.iter().cloned());
+        }
+        run_argv(&argv, spec).await
     }
 
     fn capabilities(&self) -> SandboxCapabilities {

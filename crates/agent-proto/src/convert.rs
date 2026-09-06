@@ -2001,6 +2001,7 @@ impl From<agent_core::ExecSpec> for pb::ExecRequest {
             network: pb::ExecNetworkPolicy::from(s.network) as i32,
             env: pb::ExecEnvPolicy::from(s.env) as i32,
             timeout_secs: s.timeout_secs,
+            argv: s.argv,
         }
     }
 }
@@ -2009,6 +2010,7 @@ impl From<pb::ExecRequest> for agent_core::ExecSpec {
     fn from(s: pb::ExecRequest) -> Self {
         agent_core::ExecSpec {
             command: s.command,
+            argv: s.argv,
             cwd: std::path::PathBuf::from(s.cwd),
             network: exec_network_from_i32(s.network),
             env: exec_env_from_i32(s.env),
@@ -2024,14 +2026,23 @@ impl From<agent_core::ExecOutput> for pb::ExecResult {
             stderr: o.stderr,
             exit_code: o.exit_code,
             timed_out: o.timed_out,
+            stdout_bytes: o.stdout_bytes,
         }
     }
 }
 
 impl From<pb::ExecResult> for agent_core::ExecOutput {
     fn from(o: pb::ExecResult) -> Self {
+        // Prefer the exact bytes; keep the sender's lossy string as-is (older
+        // servers send no bytes → derive the view from the string).
+        let stdout_bytes = if o.stdout_bytes.is_empty() && !o.stdout.is_empty() {
+            o.stdout.clone().into_bytes()
+        } else {
+            o.stdout_bytes
+        };
         agent_core::ExecOutput {
             stdout: o.stdout,
+            stdout_bytes,
             stderr: o.stderr,
             exit_code: o.exit_code,
             timed_out: o.timed_out,

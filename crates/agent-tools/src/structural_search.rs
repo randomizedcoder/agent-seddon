@@ -235,6 +235,7 @@ mod tests {
     fn ok_out(stdout: &str) -> ExecOutput {
         ExecOutput {
             stdout: stdout.into(),
+            stdout_bytes: stdout.as_bytes().to_vec(),
             stderr: String::new(),
             exit_code: 0,
             timed_out: false,
@@ -299,10 +300,8 @@ mod tests {
     #[tokio::test]
     async fn negative_missing_binary_is_clean_error() {
         let (tool, _) = tool_with(ExecOutput {
-            stdout: String::new(),
-            stderr: String::new(),
             exit_code: 127,
-            timed_out: false,
+            ..Default::default()
         });
         let obs = run(&tool, json!({"pattern": "x", "lang": "go"})).await;
         assert!(obs.content.contains("not found"));

@@ -51,6 +51,8 @@ message ExecRequest {
   ExecNetworkPolicy network = 3;
   ExecEnvPolicy env = 4;
   uint64 timeout_secs = 5;
+  // When non-empty, run this argv directly (no shell); `command` is ignored.
+  repeated string argv = 6;
 }
 
 message ExecResult {
@@ -58,6 +60,9 @@ message ExecResult {
   string stderr = 2;
   int32 exit_code = 3;
   bool timed_out = 4;
+  // Exact stdout bytes (`stdout` is a lossy-UTF8 view of this) — preserves a
+  // binary capture (e.g. a git blob object read through the seam).
+  bytes stdout_bytes = 5;
 }
 
 message ExecCapabilitiesRequest {}
