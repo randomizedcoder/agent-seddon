@@ -12,16 +12,62 @@ Three PRs, each based off `main`, never stacked, each gated by `nix flake check`
 
 ## Now
 
-- **Current PR:** inc 2 — **C9** PR fetch + checkout (`fetch_pr` + `--review <PR#>` fetch-if-missing)
-- **Branch:** `feat/review-fleet-inc2-pr-checkout` (off main; Phase 2 R4 #276 merged)
-- **Current step:** code + tests complete; running `nix flake check`, then commit + push + open PR
-- **Last action:** all touched-crate tests green (agent-git unit + objects_fixture integ, agent-review orchestrator); clippy -D warnings clean on the 4 crates
-- **Next action:** `nix flake check`, open the PR, flip C9 → 🟡 in STATUS.md.
+- **Current PR:** inc **3a** — **C2** persisted roster (`FleetRegistry` seam + `agent-review-fleet` crate)
+- **Branch:** `feat/review-fleet-inc3a-roster` (off main ea52e2c; inc 2 C9 #277 merged)
+- **Current step:** code + tests complete (40/40 green incl. sqlite feature); **`nix flake check` GREEN**
+- **Last action:** `FleetSession`/`FleetRegistry` in agent-core; new crate with memory/file/sqlite
+  backends over one shared `ops` path; table-driven tests (desc+expect, four classes + adversarial);
+  `nix/checks/fleet-sqlite.nix` gate; `docs/components/review-fleet.md`. Gate surfaced + fixed:
+  new-file git-track, unused `serde` (machete), stale Cargo.lock, `Error::Fleet` non-exhaustive match
+  in `convert.rs` (mapped like Registry), missing `default_fleet_{file,path}` fns + explicit `Default`
+- **Next action:** commit (awaiting go-ahead); then 3b (control plane) off updated main.
 
-Foundation COMPLETE: Phase 1 (R2 #270 → R1a #271 → R1b #272, main 9e8af41) + Phase 2
-(R3 exec-chokepoint #273/#274/#275 + R4 org-tier #276). Now the **fleet build proper**;
-inc 2 (C9) is its first prerequisite. Plan file
+Inc 2 (C9) DONE + MERGED (#277, main ea52e2c). Now the **fleet build proper**, sliced into
+**three gated PRs** off main (never stacked): **3a roster (C2)** → **3b control plane (C3)** →
+**3c server + FSM skeleton (C1 + C8)**. Plan file
 `~/.claude/.../plans/ok-we-have-more-immutable-cookie.md`.
+
+---
+
+## Increment 3a (C2) — persisted roster  🟢 (gate green; ready to commit)
+
+First of the three fleet-core PRs. The durable list of "who reviews what" + its validation core —
+no wire, no server (those are 3b/3c). Additive: a new crate + a new seam; nothing existing changes
+shape.
+
+- [x] `agent_core::FleetSession` — the full C2 row (id/user/repo/backend/base_url/token_ref/skill/
+  slack trigger+progress channels/poll_secs/enabled/created_at/updated_at) so later increments only
+  *read* the extra fields; `derive(Serialize, Deserialize, PartialEq, Eq)`; `sanitize()` (poll clamp
+  to `[MIN,MAX]`, `0⇒DEFAULT`, timestamps floored ≥0) + `validate()` (fail-closed) — `agent-core/src/lib.rs`
+- [x] `agent_core::FleetRegistry` trait (list/get/put/delete/set_enabled) — seam contract mirrors
+  `ProviderRegistry`: unknown `get`/`set_enabled` → `Err` starting `not found`; `delete` unknown ⇒
+  `Ok(false)`. New `Error::Fleet(String)` variant (`not found` → NotFound, rest → InvalidArgument)
+- [x] Decision: `token_ref` **reuses the audited `ApiKeyRef::parse`** (`env:`/`file:`/none, never a
+  raw token, never echoes the value) — a forge token is a secret; no near-duplicate parser
+- [x] Fleet caps in agent-core: `MAX_FLEET_ROWS=512`, poll bounds (`MIN=30`/`MAX=86400`/`DEFAULT=300`),
+  `MAX_FLEET_NAME_LEN=256`; id/user/repo via existing `safe_segment` (MAX_SEGMENT_LEN=128)
+- [x] New crate `crates/agent-review-fleet` (workspace member + `[workspace.dependencies]` entry):
+  private `mod ops` (the single sanitize→validate→cap path all backends funnel through, + `revalidate`
+  for out-of-band-edit defense) + `MemoryFleet` / `FileFleet` (atomic JSON bundle, temp+rename) /
+  `SqliteFleet` (feature `fleet-sqlite`, row-as-JSON in a BLOB, bound-param ids)
+- [x] `ReviewFleetCfg` gains roster-store fields (`store`/`file`/`path`/`max_total`/`max_per_user`;
+  explicit `Default` matching the serde defaults) — kept but **unconsumed in 3a**; the
+  `resolve_fleet_registry` factory + runtime `fleet` features land in **3c** with `serve_fleet`
+  (adding them now would be dead code under `-D warnings`)
+- [x] Tests (table-driven, `desc`+`expect` per row, `#[cfg(test)] mod` at file end): unified
+  `crud_contract` table (all op classes, positive/negative/boundary/corner + adversarial-traversal),
+  poll-clamp boundary table, raw-token-not-echoed, over-cap, per-backend equivalence (memory=file=
+  sqlite), file absent/oversized/out-of-band-tamper, sqlite reopen/tamper/bound-params — 40/40 green
+- [x] `nix/checks/fleet-sqlite.nix` (feature-scoped, mirrors `prompt-sqlite.nix`) registered in
+  `nix/checks/default.nix`; default-feature tests run via `test.nix` automatically
+- [x] `docs/components/review-fleet.md` — the FleetRegistry seam doc (trait, row, token-ref rule,
+  backends, testing)
+- [x] `nix flake check` — **GREEN** ("all checks passed!", exit 0): clippy -D warnings, tests, buf
+  additive (no baseline bump — no proto change), bench + leak, fmt, constants-sync, coverage all clean.
+  Gate surfaced + fixed: new files git-tracked (flake requirement), unused `serde` dep (cargo-machete),
+  stale Cargo.lock (`--locked`), the new `Error::Fleet` non-exhaustive in `convert.rs::status_from_error`
+  (mapped like `Registry`: `not found`→NotFound else InvalidArgument — no proto/wire change), missing
+  `default_fleet_{file,path}` fns + explicit `impl Default for ReviewFleetCfg`
 
 ---
 

@@ -44,6 +44,11 @@ in
   # default so the main `test` check never builds the DB dep). The dedicated,
   # feature-scoped check that runs them in the gate. docs/design/prompts/05-storage.md.
   prompt-sqlite = craneCheck ./prompt-sqlite.nix { inherit cargoArtifacts; };
+  # Executes the sqlite FleetRegistry roster backend's tests (feature `fleet-sqlite`,
+  # off by default so the main `test` check never builds the DB dep). The dedicated,
+  # feature-scoped check that runs them in the gate — the review-fleet C2 twin of
+  # prompt-sqlite. docs/design/review-fleet/03-fleet-core.md.
+  fleet-sqlite = craneCheck ./fleet-sqlite.nix { inherit cargoArtifacts; };
   # Executes the real `tiktoken` BPE tokenizer backend's tests (feature
   # `tokenizer-tiktoken`, off by default so the standard build ships no vocab). The
   # feature-scoped check that runs them in the gate. Parity spec 23; offline

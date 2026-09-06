@@ -115,7 +115,7 @@ pub struct Config {
 /// shared `agent.working_dir`. Empty ⇒ unset ⇒ today's shared-cwd behavior, so this
 /// is a no-op until an operator opts in. The roster, triggers, and control plane
 /// arrive in later increments.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[cfg_attr(
     feature = "config-schema",
     derive(serde::Serialize, schemars::JsonSchema)
@@ -126,6 +126,45 @@ pub struct ReviewFleetCfg {
     /// shared `agent.working_dir` is used, unchanged).
     #[serde(default)]
     pub root: String,
+    /// Roster backend (review-fleet C2): `"file"` | `"sqlite"` (feature
+    /// `fleet-sqlite`) | `""` (off, the default). Empty ⇒ no durable roster is
+    /// opened; the fleet control plane / server (later increments) is inert.
+    #[serde(default)]
+    pub store: String,
+    /// JSON roster bundle path (`file` backend only). Tilde-expanded.
+    #[serde(default = "default_fleet_file")]
+    pub file: String,
+    /// SQLite roster path (`sqlite` backend only). Tilde-expanded.
+    #[serde(default = "default_fleet_path")]
+    pub path: String,
+    /// Cap on total admitted sessions across the whole fleet (`0` = unbounded).
+    /// Consumed by the fleet server's `SessionManager` (review-fleet C1, inc 3c).
+    #[serde(default)]
+    pub max_total: usize,
+    /// Cap on admitted sessions per owning user/org (`0` = unbounded).
+    #[serde(default)]
+    pub max_per_user: usize,
+}
+
+impl Default for ReviewFleetCfg {
+    fn default() -> Self {
+        Self {
+            root: String::new(),
+            store: String::new(),
+            file: default_fleet_file(),
+            path: default_fleet_path(),
+            max_total: 0,
+            max_per_user: 0,
+        }
+    }
+}
+
+fn default_fleet_file() -> String {
+    ".agent/review-fleet.json".to_string()
+}
+
+fn default_fleet_path() -> String {
+    ".agent/review-fleet.sqlite3".to_string()
 }
 
 /// Cross-session recall (parity spec 20): a full-text index over *past* saved
