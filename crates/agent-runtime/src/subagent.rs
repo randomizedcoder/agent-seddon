@@ -175,6 +175,7 @@ mod tests {
             tool_timeout_secs: 30,
             recall_limit: 0,
             cwd: std::env::temp_dir(),
+            fleet_root: None,
             model: "m".into(),
             session_id: String::new(),
             context_prepend: vec![],

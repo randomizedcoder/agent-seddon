@@ -1025,6 +1025,11 @@ pub async fn build_agent_with(
         } else {
             std::path::PathBuf::from(expand_tilde(&cfg.agent.working_dir))
         },
+        // Per-session workspace root (review-fleet C4). Empty ⇒ None ⇒ every session
+        // shares `cwd`, unchanged; non-empty ⇒ each session gets a confined
+        // `root/<user>/<session>` (tilde-expanded).
+        fleet_root: (!cfg.review_fleet.root.is_empty())
+            .then(|| std::path::PathBuf::from(expand_tilde(&cfg.review_fleet.root))),
         model: cfg.provider.model.clone(),
         session_id,
         context_prepend,
