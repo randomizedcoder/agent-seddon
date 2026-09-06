@@ -271,6 +271,12 @@ pub struct ForgeCfg {
     pub token: String,
     #[serde(default)]
     pub token_env: String,
+    /// Read the token from a file (e.g. a mounted secret). Resolution precedence is
+    /// inline `token` > `token_env` > `token_file`; a set-but-unreadable `token_file`
+    /// is a hard error (fail closed), while an unset env var is simply absent.
+    /// Tilde-expanded.
+    #[serde(default)]
+    pub token_file: String,
     /// Preview writes instead of sending them. **Defaults true.**
     #[serde(default = "default_true")]
     pub dry_run: bool,
@@ -290,6 +296,7 @@ impl Default for ForgeCfg {
             base_url: String::new(),
             token: String::new(),
             token_env: String::new(),
+            token_file: String::new(),
             dry_run: true,
             timeout_secs: default_forge_timeout(),
             max_retries: default_forge_retries(),

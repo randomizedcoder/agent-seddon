@@ -420,7 +420,12 @@ backend   = ""              # "" | "github" | "gitlab"
 # repo    = "agent-seddon"
 # gitlab:
 # project = "group/project"   # or a numeric project id
-# token_env = "GITHUB_TOKEN"  # or GITLAB_TOKEN
+# Credential (never committed). Precedence: inline `token` > `token_env` >
+# `token_file`. An unset env var is simply absent (the forge runs without auth and
+# fails distinctly if a call needs it); a set-but-unreadable `token_file` is a hard
+# error (fail closed). The resolved token is a redacting Secret — never logged.
+# token_env  = "GITHUB_TOKEN"  # or GITLAB_TOKEN
+# token_file = "~/.config/agent/forge-token"   # e.g. a mounted secret
 dry_run   = true
 
 [router]

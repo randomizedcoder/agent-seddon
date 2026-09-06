@@ -17,7 +17,7 @@ impl GitHubForge {
         base: String,
         owner: String,
         repo: String,
-        token: String,
+        token: agent_core::Secret,
         timeout_secs: u64,
         max_retries: u32,
     ) -> Result<Self> {
@@ -272,7 +272,7 @@ mod tests {
             "https://unused.test".into(),
             "o".into(),
             "r".into(),
-            String::new(),
+            agent_core::Secret::default(),
             5,
             0,
         )
