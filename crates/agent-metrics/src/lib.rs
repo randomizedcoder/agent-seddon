@@ -267,7 +267,10 @@ impl Metrics {
         // (docs/design/multi-session/06-observability.md). Recorded only via
         // `SessionMetrics`; the seam-health families below stay label-less. `user` is
         // functionally dependent on `session`, so the pair ≈ session count, not a
-        // product — within the low-hundreds-sessions budget.
+        // product — within the low-hundreds-sessions budget. Under the org-tier
+        // convention (`user = <org>`, C25) the `user` label reads as **org**: still
+        // session-coarse (an org spans many sessions, never the reverse), so the
+        // cardinality budget is unchanged.
         let api_calls = IntCounterVec::new(
             Opts::new("agent_api_calls_total", "LLM completion calls"),
             &["model", "finish_reason", "session", "user"],

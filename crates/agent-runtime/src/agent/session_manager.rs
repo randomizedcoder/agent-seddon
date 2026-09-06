@@ -242,6 +242,10 @@ impl SessionManager {
             return Err(OpenError::TotalLimit(self.max_total));
         }
         if self.max_per_user > 0 {
+            // Counts by `key.user`. Under the org-tier convention (`user = <org>`,
+            // C25) this is a **per-org** session cap — a re-meaning of the same code,
+            // not a behaviour change. A per-real-user cap *within* an org needs the
+            // deferred third tenancy tier (see `SessionKey` docs).
             let per_user = map.keys().filter(|k| k.user == key.user).count();
             if per_user >= self.max_per_user {
                 return Err(OpenError::PerUserLimit(self.max_per_user));

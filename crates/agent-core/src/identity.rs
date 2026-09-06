@@ -126,10 +126,70 @@ impl std::fmt::Display for SessionId {
     }
 }
 
+/// Encode a `(repo, pr)` pair into a single [`safe_segment`]-valid [`SessionId`] for
+/// the review fleet's org-tier convention (`session = <repo>+<pr>`; see [`SessionKey`]).
+///
+/// The natural `repo@pr` form is **rejected** by [`safe_segment`] — `@` and `/` are
+/// out of the `[A-Za-z0-9._-]` charset — and widening the validator is a non-starter:
+/// it would ripple through every path component, metric label, and map key that trusts
+/// it. So encode instead: sanitize `repo` to the charset (out-of-charset chars,
+/// including `/` in `owner/name`, become `-`), then append `-pr<n>`. The result is
+/// well-formed by construction — non-empty, no leading `-`/`.`, capped at
+/// [`MAX_SEGMENT_LEN`] — so it always passes [`safe_segment`].
+pub fn encode_review_session_id(repo: &str, pr: u64) -> SessionId {
+    let suffix = format!("-pr{pr}");
+    // Sanitize to the safe_segment charset.
+    let sanitized: String = repo
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '_' | '.') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    // A leading `-`/`.` (or the whole thing being `.`/`..`) would fail safe_segment;
+    // trim leading separators and fall back to a stable tag if nothing survives.
+    let mut base = sanitized.trim_start_matches(['-', '.']).to_string();
+    if base.is_empty() {
+        base = "repo".to_string();
+    }
+    // Cap so `base + suffix` fits MAX_SEGMENT_LEN (suffix is always in-charset ASCII).
+    let max_base = MAX_SEGMENT_LEN.saturating_sub(suffix.len());
+    base.truncate(max_base);
+    // Truncation could re-expose a trailing `.` that makes `<base>.` odd but still
+    // valid; and an all-dot base was already handled. Re-trim trailing dots defensively.
+    let base = base.trim_end_matches('.');
+    let base = if base.is_empty() { "repo" } else { base };
+    SessionId::new(format!("{base}{suffix}"))
+}
+
 /// The `(user, session)` pair that keys per-tenant state and is the ambient identity
 /// carried across a gRPC hop. Used both as a `HashMap` key (the map's owner in the
 /// runtime) and as the request-scoped identity carrier; `SessionIdentity` is an alias
 /// for the same shape (docs/design/multi-session/01-identity.md).
+///
+/// # Org tenancy tier (C25 — docs/design/multi-tenancy/01-process-isolation.md)
+///
+/// Multi-org deployments (the review fleet) use `user` as the **organization**
+/// dimension by convention — **no struct change**: `user = <org>`, `session =
+/// <repo>+<pr>` (encode the latter with [`encode_review_session_id`], since the
+/// natural `repo@pr` form is rejected by [`safe_segment`]). The hierarchy is
+/// `host ⊃ org (user) ⊃ repo+pr (session) ⊃ child`, **single-level** — `org→team→user`
+/// is a noted non-goal, not this tier.
+///
+/// Everything the `(user, session)` primitive already namespaces then partitions by
+/// org for free: [`path_under`](SessionKey::path_under) gives `root/<org>/<session>`;
+/// telemetry rows + the digest scope carry the org in `user`; the metrics `(session,
+/// user)` label pair reads as `(session, org)`. Two consequences are **re-meanings,
+/// not behaviour changes**, and are documented at their sites: the per-user session
+/// cap (`SessionManager`) becomes a **per-org** cap, and the metrics `user` label
+/// means **org** (still session-coarse, so the cardinality budget holds). A genuine
+/// per-real-user cap *within* an org needs the deferred third tier.
+///
+/// The org *value* is injected where the fleet mints keys (fleet core, inc 3); this
+/// tier only fixes the convention, the encoding, and those semantics.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SessionKey {
     pub user: UserId,
@@ -203,4 +263,83 @@ where
     F: std::future::Future,
 {
     AGENT_IDENTITY.scope(identity, fut)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    // --- R4: org tenancy tier (C25) — `user = <org>` convention -------------
+
+    /// Under `user = <org>`, two orgs sharing a session id get disjoint per-tenant
+    /// trees `root/<org>/<session>` — the org partition the fleet relies on, for free
+    /// from the existing per-user path namespacing.
+    #[test]
+    fn positive_user_as_org_paths_namespace() {
+        let root = Path::new("/fleet");
+        let a = SessionKey {
+            user: UserId::new("org-acme"),
+            session: SessionId::new("repo-pr7"),
+        };
+        let b = SessionKey {
+            user: UserId::new("org-globex"),
+            session: SessionId::new("repo-pr7"),
+        };
+        let pa = a.path_under(root).unwrap();
+        let pb = b.path_under(root).unwrap();
+        assert_eq!(pa, Path::new("/fleet/org-acme/repo-pr7"));
+        assert_eq!(pb, Path::new("/fleet/org-globex/repo-pr7"));
+        assert_ne!(pa, pb, "different orgs must not share a tree");
+    }
+
+    /// The `repo@pr` session id encoder produces a `safe_segment`-valid id that also
+    /// survives the untrusted-wire parse path (so a fleet-minted id is wire-safe).
+    #[test]
+    fn positive_repo_pr_session_id_encodes_safe() {
+        let id = encode_review_session_id("owner/repo.name", 42);
+        assert!(safe_segment(id.as_str()), "encoded id must be valid: {id}");
+        assert!(
+            id.as_str().ends_with("-pr42"),
+            "carries the pr number: {id}"
+        );
+        assert!(!id.as_str().contains('/') && !id.as_str().contains('@'));
+        // The output is accepted by the same validator that guards untrusted input.
+        assert!(SessionId::parse(id.as_str()).is_ok());
+    }
+
+    /// The raw, *unencoded* `repo@pr` form is rejected by `safe_segment` — the reason
+    /// the encoder exists (and why the fix is an encoder, not a charset widening).
+    #[test]
+    fn adversarial_raw_at_session_id_rejected() {
+        assert!(
+            !safe_segment("owner/repo@42"),
+            "`/` and `@` are out of charset"
+        );
+        assert!(SessionId::parse("owner/repo@42").is_err());
+    }
+
+    /// Pathological repo names still encode to a well-formed id: an all-separator
+    /// name falls back to a stable tag; a very long name is capped at the segment
+    /// limit — both still `safe_segment`-valid.
+    #[test]
+    fn corner_encoder_handles_pathological_repo_names() {
+        let empty_ish = encode_review_session_id("///", 1);
+        assert!(safe_segment(empty_ish.as_str()), "{empty_ish}");
+        assert_eq!(empty_ish.as_str(), "repo-pr1");
+
+        let dotty = encode_review_session_id("..", 3);
+        assert!(safe_segment(dotty.as_str()), "{dotty}");
+
+        let long = encode_review_session_id(&"a".repeat(500), 9);
+        assert!(long.as_str().len() <= MAX_SEGMENT_LEN);
+        assert!(
+            safe_segment(long.as_str()),
+            "over-long repo must still encode safe"
+        );
+        assert!(
+            long.as_str().ends_with("-pr9"),
+            "pr suffix survives the cap: {long}"
+        );
+    }
 }
