@@ -2948,6 +2948,42 @@ pub trait FleetRegistry: Send + Sync {
     async fn set_enabled(&self, id: &str, enabled: bool) -> Result<FleetSession>;
 }
 
+/// A request to review one pull/merge request on one roster session — the unit the
+/// fleet orchestrator turns into a review (review-fleet C8). `session_id` names the
+/// **roster row** (a [`FleetSession::id`]); the PR-scoped `SessionKey` is minted from
+/// that row (`user = <org>`, `session = encode_review_session_id(repo, pr_number)`)
+/// inside the orchestrator. Real triggers (forge poll C6, Slack watch C7) arrive in
+/// increment 4; until then the `ReviewNow` control-plane RPC injects these manually.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FleetTrigger {
+    /// The roster row id this review belongs to (a `FleetSession::id`).
+    pub session_id: String,
+    /// The pull/merge-request number to review.
+    pub pr_number: u64,
+}
+
+/// Whether a [`FleetTrigger`] was queued or folded into one already pending.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriggerOutcome {
+    /// Queued for the orchestrator to drive.
+    Accepted,
+    /// A review for this `(session_id, pr_number)` was already pending or in flight,
+    /// so this trigger was folded into it (a no-op, not a second review). The bounded
+    /// queue also coalesces on overflow — never a silent drop.
+    Coalesced,
+}
+
+/// The intake the fleet server's orchestrator exposes so a trigger source can feed it
+/// (review-fleet C8). A served `ReviewFleetService` holds it as an
+/// `Option<Arc<dyn TriggerSink>>`, so the `ReviewNow` RPC is **opt-in** — `None` on the
+/// bare control-plane endpoint yields `UNIMPLEMENTED` (mirroring the driving
+/// `AgentSessionService`). `enqueue` is fire-and-forget into a **bounded** queue: it
+/// never blocks and never rejects — an over-capacity or duplicate trigger coalesces
+/// (and is logged), reported by the returned [`TriggerOutcome`].
+pub trait TriggerSink: Send + Sync {
+    fn enqueue(&self, trigger: FleetTrigger) -> TriggerOutcome;
+}
+
 // ---------------------------------------------------------------------------
 // Metrics proxy (docs/design/portal): generic PromQL over gRPC
 // ---------------------------------------------------------------------------
@@ -3201,6 +3237,31 @@ impl std::fmt::Display for DriverError {
 }
 
 impl std::error::Error for DriverError {}
+
+/// What the fleet server (review-fleet C1/C8) needs from the runtime's session
+/// manager: admit a **placeholder owner session** per enabled roster row (cap-checked),
+/// drop one when its row is disabled/removed, and admit-and-drive a **review session**
+/// for a PR. Implemented by the runtime's `SessionManager`; kept in `agent-core` so the
+/// fleet reconcile loop, the orchestrator, and their tests depend on the seam, not the
+/// concrete manager. All admits are capacity-checked and idempotent — re-admitting a
+/// live key is a no-op success, which is what makes reconcile a crash-safe
+/// rebuild-from-roster. (The observing side of driving a session is the separate
+/// [`SessionDriver`]/`AgentSessionService`; the fleet only needs to *start* a run.)
+pub trait FleetHost: Send + Sync {
+    /// Admit (or resolve) the owner session for `key`, enforcing capacity. `Err` only
+    /// when creating a *new* session would exceed a cap (→ `RESOURCE_EXHAUSTED`); an
+    /// already-live key succeeds (idempotent reconcile).
+    fn admit_owner(&self, key: SessionKey) -> std::result::Result<(), DriverError>;
+    /// Drop the session for `key` (a disabled or removed row). No-op if absent.
+    fn remove_session(&self, key: &SessionKey);
+    /// Admit (cap-checked) the review session for `key` and start `goal` on it,
+    /// returning the run's cancel-on-drop [`RunHandle`] — dropping it cancels the run.
+    fn start_review(
+        &self,
+        key: SessionKey,
+        goal: String,
+    ) -> std::result::Result<RunHandle, DriverError>;
+}
 
 // ---------------------------------------------------------------------------
 // Seam 4: Context assembly / compaction

@@ -1206,6 +1206,103 @@ fn resolve_token(inline: &str, env_var: &str, file: &str) -> anyhow::Result<agen
     Ok(agent_core::Secret::default())
 }
 
+/// Resolve a roster row's single-string `token_ref` (review-fleet C5) into a redacting
+/// [`Secret`]. The reference kind is the audited [`agent_core::ApiKeyRef`] grammar
+/// (`env:NAME` / `file:/path` / empty — never a raw token). Fail-closed policy matches
+/// the forge builder's: an **unset env var is absent** (the row simply has no
+/// credential), a **missing/unreadable `file:` is a hard error** (never silently fall
+/// back to no-auth on a misconfigured secret mount). The returned [`Secret`] never
+/// appears in `Debug`/logs.
+#[cfg(feature = "fleet")]
+pub fn resolve_token_ref(token_ref: &str) -> anyhow::Result<agent_core::Secret> {
+    use agent_core::ApiKeyRef;
+    use anyhow::Context;
+    match ApiKeyRef::parse(token_ref).map_err(|e| anyhow::anyhow!(e))? {
+        ApiKeyRef::None => Ok(agent_core::Secret::default()),
+        ApiKeyRef::Env(name) => match std::env::var(name) {
+            Ok(v) if !v.is_empty() => Ok(agent_core::Secret::new(v)),
+            // Unset / empty ⇒ absent (fail-soft): the row runs without a credential.
+            _ => Ok(agent_core::Secret::default()),
+        },
+        ApiKeyRef::File(path) => {
+            let expanded = crate::builder::expand_tilde(path);
+            let v = std::fs::read_to_string(&expanded)
+                // Never echo the path's *contents*; the path itself is operator config.
+                .with_context(|| format!("reading fleet token_ref file `{expanded}`"))?;
+            Ok(agent_core::Secret::new(v.trim()))
+        }
+    }
+}
+
+/// Build a **session-scoped** forge from a roster row (review-fleet C5). Resolves the
+/// row's `token_ref` (fail-closed — a bad `file:` ref is an `Err`, which keeps the
+/// session disabled in reconcile) and constructs the row's `backend` forge with its
+/// `base_url`. `""` backend ⇒ `Ok(None)` (a row with no forge — poll/post disabled).
+///
+/// The row's `repo` is a `safe_segment` (no `/`), so it encodes the forge-native path:
+/// GitHub `owner__name` (first `__` splits owner/name), GitLab the project path with
+/// `__` standing in for `/`. A backend the binary was not built with (feature off) is a
+/// fail-closed `Err`, not a silent no-forge.
+#[cfg(feature = "fleet")]
+pub fn build_session_forge(
+    row: &agent_core::FleetSession,
+) -> anyhow::Result<Option<Arc<dyn agent_core::Forge>>> {
+    // Resolve first: an unresolvable credential fails the whole build (fail closed).
+    let token = resolve_token_ref(&row.token_ref)?;
+    // Sane skeleton HTTP tuning; the row does not carry these (kept minimal in C2).
+    const TIMEOUT_SECS: u64 = 30;
+    const MAX_RETRIES: u32 = 3;
+    match row.backend.as_str() {
+        "" => Ok(None),
+        #[cfg(feature = "forge-github")]
+        "github" => {
+            let (owner, name) = row
+                .repo
+                .split_once("__")
+                .filter(|(o, n)| !o.is_empty() && !n.is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "fleet row `{}`: github repo must be `owner__name`, got `{}`",
+                        row.id,
+                        row.repo
+                    )
+                })?;
+            let base = if row.base_url.is_empty() {
+                "https://api.github.com".to_string()
+            } else {
+                row.base_url.clone()
+            };
+            Ok(Some(Arc::new(agent_forge::GitHubForge::new(
+                base,
+                owner.to_string(),
+                name.to_string(),
+                token,
+                TIMEOUT_SECS,
+                MAX_RETRIES,
+            )?) as Arc<dyn agent_core::Forge>))
+        }
+        #[cfg(feature = "forge-gitlab")]
+        "gitlab" => {
+            let base = if row.base_url.is_empty() {
+                "https://gitlab.com/api/v4".to_string()
+            } else {
+                row.base_url.clone()
+            };
+            Ok(Some(Arc::new(agent_forge::GitLabForge::new(
+                base,
+                row.repo.replace("__", "/"),
+                token,
+                TIMEOUT_SECS,
+                MAX_RETRIES,
+            )?) as Arc<dyn agent_core::Forge>))
+        }
+        other => anyhow::bail!(
+            "fleet row `{}`: forge backend `{other}` is not built into this binary",
+            row.id
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1331,6 +1428,110 @@ mod tests {
             assert!(
                 !format!("{s:?}").contains(TOKEN),
                 "resolved forge token must not leak via Debug"
+            );
+        }
+    }
+
+    // --- resolve_token_ref + build_session_forge (review-fleet C5) ----------
+    #[cfg(feature = "fleet")]
+    mod fleet_forge_tests {
+        use super::super::{build_session_forge, resolve_token_ref};
+        use agent_core::FleetSession;
+
+        const TOKEN: &str = "ghp_a_real_looking_secret";
+
+        fn row(backend: &str, repo: &str, token_ref: &str) -> FleetSession {
+            FleetSession {
+                id: "web".into(),
+                user: "acme".into(),
+                repo: repo.into(),
+                backend: backend.into(),
+                token_ref: token_ref.into(),
+                poll_secs: 300,
+                enabled: true,
+                ..Default::default()
+            }
+        }
+
+        #[test]
+        fn positive_env_ref_resolves() {
+            // A set env var resolves to its value. Use a process-unique name so the test
+            // is order-independent.
+            let var = "AGENT_FLEET_TOKREF_TEST";
+            std::env::set_var(var, TOKEN);
+            let s = resolve_token_ref(&format!("env:{var}")).unwrap();
+            assert_eq!(s.expose(), TOKEN);
+            std::env::remove_var(var);
+        }
+
+        #[test]
+        fn positive_file_ref_resolves_trimmed() {
+            let dir = agent_testkit::tempdir();
+            let path = dir.join("tok");
+            std::fs::write(&path, format!("  {TOKEN}\n")).unwrap();
+            let s = resolve_token_ref(&format!("file:{}", path.to_str().unwrap())).unwrap();
+            assert_eq!(s.expose(), TOKEN);
+        }
+
+        #[test]
+        fn corner_empty_ref_is_absent() {
+            let s = resolve_token_ref("").unwrap();
+            assert!(s.is_empty(), "empty token_ref ⇒ absent, not an error");
+        }
+
+        #[test]
+        fn corner_unset_env_is_absent_not_error() {
+            let s = resolve_token_ref("env:DEFINITELY_UNSET_FLEET_VAR_XYZ").unwrap();
+            assert!(s.is_empty(), "unset env ⇒ absent (fail-soft)");
+        }
+
+        #[test]
+        fn negative_missing_file_ref_is_hard_error() {
+            let dir = agent_testkit::tempdir();
+            let missing = dir.join("nope");
+            // Fail closed: a misconfigured secret mount must not degrade to no-auth.
+            assert!(resolve_token_ref(&format!("file:{}", missing.to_str().unwrap())).is_err());
+        }
+
+        #[test]
+        fn adversarial_raw_token_ref_refused_and_not_echoed() {
+            // A raw secret in token_ref is exactly what the reference grammar forbids.
+            let err = resolve_token_ref(TOKEN).unwrap_err();
+            assert!(
+                !format!("{err}").contains(TOKEN),
+                "the refusal must never echo the pasted secret"
+            );
+        }
+
+        #[test]
+        fn positive_empty_backend_builds_no_forge() {
+            let f = build_session_forge(&row("", "acme__web", "")).unwrap();
+            assert!(f.is_none(), "a row with no backend has no forge");
+        }
+
+        #[cfg(feature = "forge-github")]
+        #[test]
+        fn positive_github_row_builds_forge() {
+            let f = build_session_forge(&row("github", "acme__web", "env:UNSET_XYZ")).unwrap();
+            assert!(f.is_some(), "github row (owner__name) builds a forge");
+        }
+
+        #[cfg(feature = "forge-github")]
+        #[test]
+        fn adversarial_github_repo_without_owner_split_is_error() {
+            // `repo` must encode `owner__name`; a bare segment is a fail-closed error,
+            // never a forge pointed at a guessed owner.
+            assert!(build_session_forge(&row("github", "web", "")).is_err());
+        }
+
+        #[test]
+        fn adversarial_missing_file_token_fails_forge_build() {
+            // The credential is resolved *before* the forge is built, so an unresolvable
+            // `file:` ref fails the whole build (→ reconcile keeps the row disabled).
+            let f = build_session_forge(&row("github", "acme__web", "file:/no/such/secret"));
+            assert!(
+                f.is_err(),
+                "unresolvable credential fails the build (fail closed)"
             );
         }
     }

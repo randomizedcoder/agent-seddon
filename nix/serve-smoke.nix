@@ -70,6 +70,7 @@ pkgs.writeShellApplication {
       agent.v1.Semantic
       agent.v1.ModeService
       agent.v1.PromptService
+      agent.v1.ReviewFleetService
     "
 
     # A hermetic, model-free config: file/approx backends only, no metrics port (so
@@ -95,6 +96,13 @@ pkgs.writeShellApplication {
 
     [search]
     auto_index = false
+
+    # A file-backed review-fleet roster, so --serve-all advertises the Fleet control
+    # plane (review-fleet C3) and the CRUD + token-never-returned roundtrip below can
+    # exercise it over the wire. Absent file ⇒ empty roster (a Put populates it).
+    [review_fleet]
+    store = "file"
+    file  = "$work/.agent/review-fleet.json"
 
     [metrics]
     enabled = false
@@ -154,6 +162,27 @@ pkgs.writeShellApplication {
         echo "CONTRACT[$transport]: agent.v1.TokenizerService/Count round-trip failed" >&2
         cat "$work/count.$transport.err" >&2
         [ "$rc" -lt 2 ] && rc=2
+      fi
+
+      # ---- Review-fleet control plane: CRUD roundtrip + token-never-returned -----
+      # Put a row carrying a `token_ref` REFERENCE, then read it back via Get. The
+      # reply must echo the reference and NEVER a resolved secret (there is no secret
+      # to resolve — the whole point of the reference). Proves the C3 seam is truly on
+      # the wire and its no-token-leak contract holds end to end.
+      local put_json='{"id":"smoke","user":"acme","repo":"acme__web","backend":"github","token_ref":"env:SMOKE_GH_TOKEN","poll_secs":300,"enabled":true}'
+      if ! grpcurl -d "$put_json" "''${dial[@]}" \
+          agent.v1.ReviewFleetService.Put >/dev/null 2>"$work/fleet_put.$transport.err"; then
+        echo "CONTRACT[$transport]: ReviewFleetService/Put round-trip failed" >&2
+        cat "$work/fleet_put.$transport.err" >&2
+        [ "$rc" -lt 2 ] && rc=2
+      else
+        local got
+        got="$(grpcurl -d '{"id":"smoke"}' "''${dial[@]}" \
+          agent.v1.ReviewFleetService.Get 2>"$work/fleet_get.$transport.err" || true)"
+        if ! echo "$got" | grep -q 'env:SMOKE_GH_TOKEN'; then
+          echo "CONTRACT[$transport]: ReviewFleetService/Get did not return the token_ref reference" >&2
+          [ "$rc" -lt 2 ] && rc=2
+        fi
       fi
 
       [ "$rc" -eq 0 ] && echo "serve-smoke: [$transport] all seams describe; critical subset present; round-trips OK."

@@ -12,19 +12,20 @@ Three PRs, each based off `main`, never stacked, each gated by `nix flake check`
 
 ## Now
 
-- **Current PR:** inc **3b** — **C3** gRPC control plane (`ReviewFleetService`)
-- **Branch:** `feat/review-fleet-inc3b-control-plane` (off main 91c40ab; inc 3a C2 #278 merged)
-- **Current step:** code + tests complete; **`nix flake check` GREEN** ("all checks passed!")
-- **Last action:** `review_fleet.proto` + `ReviewFleetService` (server + `GrpcFleet` client) +
-  convert.rs core↔pb (token_ref verbatim, numbers clamped on decode) + FLEET constants
-  (50086/9636/fleet.sock) + `GrpcCfg.fleet` + `Seam::Fleet` wiring in grpc_server.rs +
-  `resolve_fleet_registry` factory + builder wiring + runtime `fleet`/`fleet-sqlite` features;
-  table-driven tests: convert round-trip (agent-proto) + real-wire CRUD/token-never-returned/
-  traversal-rejected roundtrip (agent-grpc, TCP+UDS); docs control-plane section
-- **Next action:** PR **#279** open (commit `a62ab76`, gate green). After merge, 3c (server + FSM,
-  C1 + C8) off updated main.
+- **Current PR:** inc **3c** — **C1** fleet server + **C8** orchestrator skeleton + **C5** scoped forge
+- **Branch:** `feat/review-fleet-inc3c-server-fsm` (off main 030a774; inc 3b C3 #279 merged)
+- **Current step:** code + tests complete; **`nix flake check` GREEN** (re-run after staging the new
+  `orchestrator.rs` — machete only sees git-tracked files, the 3a/3c lesson)
+- **Last action:** `agent --serve-fleet` full process (C1: reconcile + caps + reaper + driving
+  AgentSession) + orchestrator (C8: `FleetOrchestrator` FSM triggered→cloning→reviewing, bounded
+  coalescing `TriggerQueue`, `ReviewNow` RPC additive) + per-session forge (C5:
+  `build_session_forge`/`resolve_token_ref`, fail-closed); agent-core `FleetTrigger`/`TriggerSink`/
+  `FleetHost`; hermetic table-driven tests (reconcile/FSM/queue in agent-review-fleet, C5 in
+  agent-runtime, ReviewNow wire in agent-grpc) + serve-smoke fleet extension
+- **Next action:** commit (awaiting go-ahead), then push/PR. On merge, flip STATUS.md C1/C2/C3/C5/C8
+  + carried inc 1 & 2.
 
-Inc **3a (C2) DONE + MERGED (#278, main 91c40ab).**
+Inc **3b (C3) DONE + MERGED (#279, main 030a774).** Inc **3a (C2) DONE + MERGED (#278, main 91c40ab).**
 
 Inc 2 (C9) DONE + MERGED (#277, main ea52e2c). Now the **fleet build proper**, sliced into
 **three gated PRs** off main (never stacked): **3a roster (C2)** → **3b control plane (C3)** →
@@ -33,7 +34,53 @@ Inc 2 (C9) DONE + MERGED (#277, main ea52e2c). Now the **fleet build proper**, s
 
 ---
 
-## Increment 3b (C3) — gRPC control plane  🟢 (gate green; ready to commit)
+## Increment 3c (C1 + C8 + C5) — fleet server + orchestrator skeleton  🟢 (gate green; ready to commit)
+
+Third and last fleet-core PR. The **running process**: hosts the roster, admits capacity-capped
+sessions reconciled from it, and drives a manually-queued PR through `triggered → cloning →
+reviewing`. Additive: a new proto RPC (`ReviewNow`, buf additive), new agent-core seam types, a new
+CLI mode; nothing existing changes shape.
+
+- [x] **agent-core seam types:** `FleetTrigger {session_id, pr_number}` + `TriggerOutcome`
+  (Accepted/Coalesced) + `TriggerSink` (fire-and-forget bounded intake); `FleetHost`
+  (admit_owner/remove_session/start_review) — the fleet's view of the session manager, kept in core
+  so the orchestrator + reconcile + tests depend on the seam not the concrete `SessionManager`
+- [x] **C8 orchestrator** (`agent-review-fleet/src/orchestrator.rs`): `FleetOrchestrator::handle`
+  drives the FSM (dedup by `(session,pr)` → `roster.get` → `repo.fetch_pr` + read-only
+  `worktree_add` → mint PR key `encode_review_session_id(repo,pr)` → `host.start_review`, holding the
+  cancel-on-drop `RunHandle`); `reconcile` rebuilds owner sessions from the roster (idempotent,
+  fail-closed forge check, capacity-shed); bounded coalescing `TriggerQueue`/`TriggerReceiver`
+- [x] **C1 `serve_fleet`** (`agent-cli/src/grpc_server.rs`): `SessionManager::with_limits` (closes
+  the unbounded TODO) + idle reaper + reconcile + orchestrator drain loop + `ReviewFleetSvc`
+  (with the `ReviewNow` trigger sink) + driving `AgentSessionSvc` + reflection. `Mode::ServeFleet`
+  wired in main.rs (flag intercept so `--serve-fleet` = full process, not the bare seam; the seam
+  still serves inside `--serve-all`); metrics/listen via the Fleet seam endpoint
+- [x] **C5 per-session forge** (`agent-runtime/registry.rs`): `resolve_token_ref` (env:/file:,
+  env-miss absent, file-miss hard error → fail closed, never echoes a raw token) +
+  `build_session_forge` (github `owner__name` / gitlab `__`→`/`; `""`⇒no forge; unbuilt backend ⇒
+  fail-closed Err). Fleet caps threaded through `Settings` + `Agent::fleet_limits()`
+- [x] **`ReviewNow` RPC** (additive to `review_fleet.proto`): `ReviewNowRequest`/`ReviewNowReply`;
+  server opt-in (`with_triggers`, else `UNIMPLEMENTED`); `GrpcFleet::review_now` client helper
+- [x] Tests (table-driven, desc+expect, four classes + adversarial): reconcile (admit/skip-disabled/
+  capacity-shed/idempotent/fail-closed-credential), FSM (drives-once/duplicate-noop-no-refetch/
+  unknown-row-errs/runhandle-drop-cancels), queue (accept/coalesce-dup/coalesce-on-overflow/
+  requeue-after-pop) in agent-review-fleet; C5 env/file/missing/raw-refused in agent-runtime;
+  `ReviewNow` accepted/coalesced/unimplemented over TCP+UDS in agent-grpc `roundtrip.rs`. Added
+  `fetch_pr` recording to the shared `FixtureRepo` double
+- [x] `nix/serve-smoke.nix` extended: file-backed roster in the config so `--serve-all` advertises
+  `ReviewFleetService`; describe + a Put→Get CRUD round-trip asserting the token **reference** comes
+  back (never a resolved secret), on both transports (opt-in, not gated)
+- [~] **`nix/checks/fleet-core.nix` deliberately NOT added** — the plan's hermetic model-free
+  reconcile/FSM/queue coverage already runs in `nix/checks/test.nix` (default-feature crate tests),
+  so a separate example-based check would only re-run the same assertions. Documented here rather
+  than adding a redundant gate; the behaviors are gated.
+- [x] `nix flake check` — **GREEN**: buf additive (ReviewNow — no baseline bump), constants-sync,
+  clippy -D warnings, tests, fmt. Gotcha hit+fixed: new `orchestrator.rs` must be `git add`ed
+  (cargo-machete/flake see only git-tracked files → `tracing` looked unused without it)
+
+---
+
+## Increment 3b (C3) — gRPC control plane  ✅ (PR #279, main 030a774)
 
 Second of the three fleet-core PRs. Live CRUD over the 3a roster: `ReviewFleetService` +
 its client, so a roster is editable at runtime and one process can serve it. **Additive**

@@ -28,6 +28,20 @@ impl GrpcFleet {
             retry: grpc_retry_policy(),
         })
     }
+
+    /// Manually queue a review (review-fleet C8). Not part of the [`FleetRegistry`]
+    /// seam (roster CRUD) — it drives the orchestrator, served only by the full
+    /// `--serve-fleet` process. Returns whether the trigger queued (`true`) or coalesced
+    /// into a pending/in-flight one (`false`); a bare control-plane endpoint (no
+    /// orchestrator) answers `UNIMPLEMENTED`.
+    pub async fn review_now(&self, session_id: &str, pr_number: u64) -> Result<bool> {
+        let req = pb::ReviewNowRequest {
+            session_id: session_id.to_string(),
+            pr_number,
+        };
+        let resp = unary!(self, review_now, req).map_err(status_to_err)?;
+        Ok(resp.into_inner().accepted)
+    }
 }
 
 #[async_trait]

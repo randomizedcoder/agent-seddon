@@ -48,6 +48,17 @@ impl std::fmt::Display for OpenError {
 
 impl std::error::Error for OpenError {}
 
+/// The runtime cap error maps 1:1 to the seam-level [`agent_core::DriverError`]
+/// (→ `RESOURCE_EXHAUSTED`), so the `SessionDriver`/`FleetHost` impls share one mapping.
+impl From<OpenError> for agent_core::DriverError {
+    fn from(e: OpenError) -> Self {
+        match e {
+            OpenError::PerUserLimit(n) => agent_core::DriverError::PerUserLimit(n),
+            OpenError::TotalLimit(n) => agent_core::DriverError::TotalLimit(n),
+        }
+    }
+}
+
 /// A command to a session actor. `Run` is the only variant today; the enum leaves room
 /// for future `Compact`/`Load`/`Messages` queries without changing the actor shape.
 enum SessionCommand {
@@ -351,10 +362,9 @@ impl agent_core::SessionDriver for SessionManager {
         &self,
         key: agent_core::SessionKey,
     ) -> std::result::Result<agent_core::DriverSession, agent_core::DriverError> {
-        let handle = self.admit(key.clone()).map_err(|e| match e {
-            OpenError::PerUserLimit(n) => agent_core::DriverError::PerUserLimit(n),
-            OpenError::TotalLimit(n) => agent_core::DriverError::TotalLimit(n),
-        })?;
+        let handle = self
+            .admit(key.clone())
+            .map_err(agent_core::DriverError::from)?;
         // The session's actor built its sink via `session_with` → `events.get_or_create`,
         // so this resolves the *same* sink the loop publishes into (idempotent lookup).
         let source: Arc<dyn agent_core::SessionSource> =
@@ -363,6 +373,36 @@ impl agent_core::SessionDriver for SessionManager {
             source,
             runner: Arc::new(handle),
         })
+    }
+}
+
+/// The fleet server's view (review-fleet C1): admit a placeholder **owner** session per
+/// enabled roster row and drop one whose row is disabled/removed. `admit_owner` reuses
+/// the same capacity-checked, idempotent [`Self::admit`] the driving path uses, so
+/// reconcile is a crash-safe rebuild — re-admitting a live key is a no-op success.
+impl agent_core::FleetHost for SessionManager {
+    fn admit_owner(
+        &self,
+        key: agent_core::SessionKey,
+    ) -> std::result::Result<(), agent_core::DriverError> {
+        self.admit(key)
+            .map(|_| ())
+            .map_err(agent_core::DriverError::from)
+    }
+
+    fn remove_session(&self, key: &agent_core::SessionKey) {
+        self.remove(key);
+    }
+
+    fn start_review(
+        &self,
+        key: agent_core::SessionKey,
+        goal: String,
+    ) -> std::result::Result<agent_core::RunHandle, agent_core::DriverError> {
+        // Admit (cap-checked, idempotent) then start the goal; the handle's `RunStarter`
+        // impl returns a cancel-on-drop `RunHandle` (the orchestrator holds it).
+        let handle = self.admit(key).map_err(agent_core::DriverError::from)?;
+        Ok(agent_core::RunStarter::start(&handle, goal))
     }
 }
 

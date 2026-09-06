@@ -62,6 +62,11 @@ pub struct Settings {
     /// Overload admission cap for served gRPC seams (`[grpc] max_in_flight`): concurrent
     /// in-flight requests before shedding with `RESOURCE_EXHAUSTED`. `0` = unbounded.
     pub grpc_max_in_flight: usize,
+    /// Fleet global live-session cap (`[review_fleet] max_total`), applied by
+    /// `--serve-fleet`'s `SessionManager::with_limits`. `0` = unbounded.
+    pub fleet_max_total: usize,
+    /// Fleet per-org live-session cap (`[review_fleet] max_per_user`). `0` = unbounded.
+    pub fleet_max_per_user: usize,
 }
 
 pub struct Agent {
@@ -823,6 +828,15 @@ impl Agent {
     /// (`--serve-fleet`).
     pub fn fleet_registry(&self) -> Option<Arc<dyn agent_core::FleetRegistry>> {
         self.fleet_registry.clone()
+    }
+
+    /// Fleet capacity caps (`[review_fleet] max_total`, `max_per_user`) for
+    /// `--serve-fleet`'s `SessionManager::with_limits`. `0` = unbounded.
+    pub fn fleet_limits(&self) -> (usize, usize) {
+        (
+            self.settings.fleet_max_total,
+            self.settings.fleet_max_per_user,
+        )
     }
 
     pub fn metrics_proxy(&self) -> Option<Arc<dyn agent_core::MetricsProxy>> {
@@ -2952,6 +2966,8 @@ mod tests {
             mode_confidence_floor: 0.6,
             mode_hysteresis: 2,
             grpc_max_in_flight: 0,
+            fleet_max_total: 0,
+            fleet_max_per_user: 0,
         }
     }
 

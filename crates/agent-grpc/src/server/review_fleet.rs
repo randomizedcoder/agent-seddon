@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use agent_core::FleetRegistry;
+use agent_core::{FleetRegistry, FleetTrigger, TriggerOutcome, TriggerSink};
 use agent_proto::{pb, status_from_error};
 use tonic::transport::server::Router;
 use tonic::transport::Server;
@@ -23,11 +23,24 @@ use super::span;
 
 pub struct ReviewFleetSvc {
     inner: Arc<dyn FleetRegistry>,
+    /// The orchestrator's trigger intake (review-fleet C8). `None` on the bare
+    /// control-plane endpoint (roster CRUD only), so `ReviewNow` there is
+    /// `UNIMPLEMENTED`; the full `--serve-fleet` process wires it via
+    /// [`Self::with_triggers`]. Mirrors `AgentSessionSvc::with_driver`.
+    triggers: Option<Arc<dyn TriggerSink>>,
 }
 
 impl ReviewFleetSvc {
     pub fn new(inner: Arc<dyn FleetRegistry>) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            triggers: None,
+        }
+    }
+    /// Enable the `ReviewNow` RPC by attaching the orchestrator's trigger sink.
+    pub fn with_triggers(mut self, triggers: Arc<dyn TriggerSink>) -> Self {
+        self.triggers = Some(triggers);
+        self
     }
     pub fn into_server(self) -> pb::review_fleet_service_server::ReviewFleetServiceServer<Self> {
         pb::review_fleet_service_server::ReviewFleetServiceServer::new(self)
@@ -118,6 +131,33 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
                 .await
                 .map_err(|e| status_from_error(&e))?;
             Ok(Response::new(row.into()))
+        }
+        .instrument(sp)
+        .await
+    }
+
+    async fn review_now(
+        &self,
+        request: Request<pb::ReviewNowRequest>,
+    ) -> Result<Response<pb::ReviewNowReply>, Status> {
+        let sp = span("fleet.review_now", request.metadata());
+        // Opt-in: only the full fleet process (with an orchestrator) wires a sink.
+        let Some(triggers) = self.triggers.clone() else {
+            return Err(Status::unimplemented(
+                "ReviewNow requires the fleet orchestrator (run `agent --serve-fleet`)",
+            ));
+        };
+        async move {
+            let req = request.into_inner();
+            // `enqueue` is fire-and-forget into a bounded, coalescing queue — it never
+            // blocks or rejects; the outcome says whether it queued or coalesced.
+            let outcome = triggers.enqueue(FleetTrigger {
+                session_id: req.session_id,
+                pr_number: req.pr_number,
+            });
+            Ok(Response::new(pb::ReviewNowReply {
+                accepted: matches!(outcome, TriggerOutcome::Accepted),
+            }))
         }
         .instrument(sp)
         .await

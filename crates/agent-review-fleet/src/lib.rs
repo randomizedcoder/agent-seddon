@@ -23,6 +23,11 @@ use std::sync::Mutex;
 
 pub mod file;
 pub use file::FileFleet;
+pub mod orchestrator;
+pub use orchestrator::{
+    reconcile, FleetOrchestrator, ForgeCheck, Handled, ReconcileReport, TriggerQueue,
+    TriggerReceiver,
+};
 #[cfg(feature = "fleet-sqlite")]
 pub mod sqlite;
 #[cfg(feature = "fleet-sqlite")]

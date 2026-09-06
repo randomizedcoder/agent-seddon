@@ -16,6 +16,9 @@ fleet-sqlite = ["dep:rusqlite"]
 agent-core.workspace = true
 async-trait.workspace = true
 serde_json.workspace = true
+# The orchestrator's bounded trigger queue (mpsc) + coalesce/state logging.
+tokio = { workspace = true }
+tracing.workspace = true
 rusqlite = { workspace = true, optional = true }
 
 [dev-dependencies]
