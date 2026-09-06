@@ -9,6 +9,10 @@
 //!   - **Prompt-injection scan** — multi-word phrase detection shared by memory
 //!     persistence and `@`-reference fetch.
 //!   - **Path safety** — `confine`/`resolve_within` block traversal + symlink escape.
+//!   - **Secret** — a credential wrapper whose `Debug`/`Display` redact, so a token
+//!     can't leak into a log, span, error, or `Debug`-derived struct.
+
+use serde::{Deserialize, Serialize};
 
 // --- SSRF IP classification (single source of truth) -----------------------
 //
@@ -221,5 +225,123 @@ pub fn confine(
                 }
             }
         }
+    }
+}
+
+// --- Secret (credential wrapper) -------------------------------------------
+
+/// A credential value (an API token, password, or auth header) that **redacts in
+/// `Debug` and `Display`** so it cannot leak into a log line, a tracing span, an
+/// error message, or a `Debug`-derived struct. The plaintext is reached only via
+/// the explicit, grep-able [`expose`](Secret::expose) — so every read of the raw
+/// value is auditable.
+///
+/// `Deserialize`/`Serialize` are `transparent` (the wire form is the bare string):
+/// deserializing reads a token from config, and serializing **does** emit the
+/// plaintext — that is intentional, since config round-trip / write-back must
+/// preserve the value. Redaction is a `Debug`/`Display` property, never a
+/// serialization one (the same split the `secrecy` crate makes).
+#[derive(Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(transparent)]
+pub struct Secret(String);
+
+impl Secret {
+    /// Wrap a plaintext credential.
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
+    /// The plaintext. The one, grep-able way to read the raw value — keep the call
+    /// sites few and never hand the result to anything that logs or serializes it
+    /// (headers/child-env only).
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+
+    /// `true` when there is no credential (mirrors `String::is_empty`), so callers
+    /// can fail-closed on a missing token without exposing it.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl From<String> for Secret {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+/// The placeholder shown wherever a secret would otherwise be rendered.
+const REDACTED: &str = "<redacted>";
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Distinguish "no credential" from "a credential is present" without ever
+        // revealing the value — an empty token is a common, non-sensitive state.
+        if self.0.is_empty() {
+            f.write_str("Secret(empty)")
+        } else {
+            write!(f, "Secret({REDACTED})")
+        }
+    }
+}
+
+impl std::fmt::Display for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_empty() { "" } else { REDACTED })
+    }
+}
+
+#[cfg(test)]
+mod secret_tests {
+    use super::*;
+
+    const TOKEN: &str = "ghp_supersecrettokenvalue";
+
+    #[test]
+    fn positive_expose_returns_plaintext() {
+        assert_eq!(Secret::new(TOKEN).expose(), TOKEN);
+        assert_eq!(Secret::from(TOKEN.to_string()).expose(), TOKEN);
+    }
+
+    #[test]
+    fn adversarial_debug_and_display_redact_the_value() {
+        let s = Secret::new(TOKEN);
+        let dbg = format!("{s:?}");
+        let disp = format!("{s}");
+        assert!(!dbg.contains(TOKEN), "Debug leaked the token: {dbg}");
+        assert!(!disp.contains(TOKEN), "Display leaked the token: {disp}");
+        assert!(dbg.contains(REDACTED));
+        assert_eq!(disp, REDACTED);
+    }
+
+    #[test]
+    fn adversarial_debug_of_containing_struct_redacts() {
+        // A `Debug`-derived struct holding a `Secret` must not leak it — the whole
+        // point of the type over a bare `String`.
+        #[derive(Debug)]
+        struct Cfg {
+            token: Secret,
+        }
+        let c = Cfg {
+            token: Secret::new(TOKEN),
+        };
+        assert!(!format!("{c:?}").contains(TOKEN));
+        // …yet the value is still there, reachable only via the explicit `expose`.
+        assert_eq!(c.token.expose(), TOKEN);
+    }
+
+    #[test]
+    fn corner_empty_secret_is_distinguishable_and_safe() {
+        let s = Secret::default();
+        assert!(s.is_empty());
+        assert_eq!(format!("{s}"), "");
+        assert_eq!(format!("{s:?}"), "Secret(empty)");
+    }
+
+    #[test]
+    fn positive_deserialize_is_transparent_from_a_bare_string() {
+        let s: Secret = serde_json::from_str("\"tok\"").unwrap();
+        assert_eq!(s.expose(), "tok");
     }
 }

@@ -101,7 +101,7 @@ fn github(base: &str) -> GitHubForge {
         format!("{base}/gh"),
         "o".into(),
         "r".into(),
-        "gh-secret-token".into(),
+        agent_core::Secret::new("gh-secret-token"),
         5,
         0,
     )
@@ -112,7 +112,7 @@ fn gitlab(base: &str) -> GitLabForge {
     GitLabForge::new(
         format!("{base}/gl"),
         "g/p".into(),
-        "gl-secret-token".into(),
+        agent_core::Secret::new("gl-secret-token"),
         5,
         0,
     )

@@ -30,7 +30,7 @@ impl GitLabForge {
     pub fn new(
         base: String,
         project: String,
-        token: String,
+        token: agent_core::Secret,
         timeout_secs: u64,
         max_retries: u32,
     ) -> Result<Self> {
@@ -309,7 +309,7 @@ mod tests {
         let f = GitLabForge::new(
             "https://unused.test".into(),
             "g/p".into(),
-            String::new(),
+            agent_core::Secret::default(),
             5,
             0,
         )

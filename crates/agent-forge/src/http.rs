@@ -10,7 +10,7 @@
 //!   `Retry-After`), never hand-rolled.
 //! * **Bodies are bounded** — the payload is remote-controlled.
 
-use agent_core::{Error, Result};
+use agent_core::{Error, Result, Secret};
 use std::time::Duration;
 
 /// Cap on a response body we will parse.
@@ -20,7 +20,9 @@ pub struct ForgeHttp {
     client: reqwest::Client,
     /// API base, e.g. `https://api.github.com` or `https://gitlab.com/api/v4`.
     pub base: String,
-    token: String,
+    /// The API credential. A [`Secret`], so it can't leak via `Debug`; it is read
+    /// (via `expose`) at exactly one place — the auth header in [`Self::request`].
+    token: Secret,
     retry: agent_retry::RetryPolicy,
     /// Header the platform expects the token in.
     auth_header: &'static str,
@@ -32,7 +34,7 @@ pub struct ForgeHttp {
 impl ForgeHttp {
     pub fn new(
         base: String,
-        token: String,
+        token: Secret,
         timeout_secs: u64,
         max_retries: u32,
         auth_header: &'static str,
@@ -76,7 +78,7 @@ impl ForgeHttp {
         );
         let mut rb = self.client.request(method, url).header(
             self.auth_header,
-            format!("{}{}", self.auth_prefix, self.token),
+            format!("{}{}", self.auth_prefix, self.token.expose()),
         );
         for (k, v) in &self.extra {
             rb = rb.header(*k, v);

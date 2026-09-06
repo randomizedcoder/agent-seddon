@@ -12,11 +12,11 @@ Three PRs, each based off `main`, never stacked, each gated by `nix flake check`
 
 ## Now
 
-- **Current PR:** PR2 — R1a per-session working directory
-- **Branch:** `feat/review-fleet-r1a-cwd` (off main; #270/R2 merged as 4be29aa)
-- **Current step:** PR2 · OPEN as **#271** (commit 5a4a697), gate green, awaiting review/merge
-- **Last action:** pushed `feat/review-fleet-r1a-cwd`, opened PR #271
-- **Next action:** on merge of #271, start PR3 (R1b creds) on a fresh branch off main
+- **Current PR:** PR3 — R1b per-session credentials mechanism
+- **Branch:** `feat/review-fleet-r1b-creds` (off main; #271/R1a merged as b3e915f)
+- **Current step:** PR3 · code + tests complete; `nix flake check` GREEN; committing + opening PR3
+- **Last action:** gate green ("all checks passed!", exit 0)
+- **Next action:** none — Phase 1 (R2 + R1a + R1b) complete once PR3 merges. Git-env injection deferred to inc 3 (see decision).
 
 ---
 
@@ -46,14 +46,15 @@ Three PRs, each based off `main`, never stacked, each gated by `nix flake check`
 - [x] Regression: exec_roundtrip / pty_e2e / loop_e2e green (via `nix flake check`)
 - [x] `nix flake check` — GREEN ("all checks passed!"); clippy clean, fmt, constants-sync ok
 
-## PR3 — R1b: per-session credentials mechanism  ☐
+## PR3 — R1b: per-session credentials mechanism  🟡 (code+tests done; gate running)
 
-- [ ] `Secret(String)` newtype (redacting Debug/Display); adopt for forge token
-- [ ] `resolve_token(inline, env, file)` (resolve_key_opt semantics: file-miss errors)
-- [ ] Per-session `Forge` builder (vs global `shared_forge`)
-- [ ] Git token injection at the `git_bytes` funnel (`agent-git/src/cli.rs:152`)
-- [ ] Tests: positive/negative/corner + adversarial (no-leak, cross-session isolation)
-- [ ] `nix flake check` green
+- [x] `Secret(String)` newtype (redacting Debug/Display, transparent serde, `expose()`) — `agent-core/src/security.rs`
+- [x] Adopted `Secret` through the forge: `ForgeHttp.token`, `GitHubForge::new`/`GitLabForge::new` (all callers + http_e2e updated)
+- [x] `resolve_token(inline, env, file) -> Result<Secret>` (inline>env>file; env-miss absent; file-miss hard error) — `registry.rs`; `token_file` added to `ForgeCfg` + wired into both forge factories; documented in `config/agent.toml`
+- [~] Per-session `Forge` builder (vs global `shared_forge`) — DEFERRED to inc 3: the per-session token SOURCE is the roster; building a per-identity Forge now would be dead code. The resolution mechanism (`resolve_token`) it will call is in place.
+- [~] Git token injection at the `git_bytes` funnel — DEFERRED to inc 3 (see decision below): safe injection is host-scoped, and the host+token are exactly the roster's per-repo fields.
+- [x] Tests: Secret (redaction/expose/deserialize/empty), resolve_token (inline/file/file-miss/absent/no-leak) — all pass; http_e2e still green
+- [x] `nix flake check` — GREEN ("all checks passed!", exit 0); clippy -D warnings clean, fmt, buf additive, bench + leak held
 
 ---
 
@@ -75,6 +76,17 @@ Three PRs, each based off `main`, never stacked, each gated by `nix flake check`
   branch is built + tested (confine within root); the proto/`SessionRegistry::open` plumbing isn't needed
   for the fleet's primary mechanism (branch 3 = `fleet_root` + `path_under`). Follow-up if a caller needs
   to pin a subdir on open.
+- **2026-09-05 (PR3/R1b)** — Git-env token injection DEFERRED to inc 3 (roster). Rationale: safe git auth
+  is HOST-SCOPED (`http.<host>.extraHeader`), and the host+token are precisely the roster's per-repo
+  fields; injecting the global token into all git ops now would be fail-open (header sent to any remote)
+  or would require a separate `[git]` credential+host that duplicates what the roster carries. The single
+  injection point (`git_bytes`, `agent-git/src/cli.rs`) is identified; inc 3 wires it per-session via
+  `GIT_CONFIG_*` env (not argv → not ps-visible). R1b ships the credential-HANDLING core (Secret +
+  resolve_token + forge adoption), which is live and tested now.
+- **2026-09-05 (PR3/R1b)** — Config-struct `Debug` redaction (`ForgeCfg.token`) left as `String` to avoid
+  dragging `schemars`/`Serialize` for `Secret` across the crate boundary (config-schema feature). The
+  RESOLVED, in-memory token (the real leak surface — `ForgeHttp`, logs, spans) is a `Secret`; the inline
+  config token is usually empty (env/file preferred). Minor; revisit if config Debug is ever logged.
 
 ## Gate status
 
@@ -82,6 +94,9 @@ Three PRs, each based off `main`, never stacked, each gated by `nix flake check`
   warnings clean, fmt applied, buf additive, bench + leak passed (digest_query Ir held).
 - **2026-09-05** — PR2 (R1a): `nix flake check` GREEN ("all checks passed!", exit 0). clippy clean,
   fmt, constants-sync ok; exec/pty/loop regression green (fleet_root=None path unchanged).
+- **2026-09-05** — PR3 (R1b): `nix flake check` GREEN ("all checks passed!", exit 0). clippy -D
+  warnings clean, fmt applied, buf additive (no baseline bump), bench + leak held. Secret redaction +
+  resolve_token + forge adoption + http_e2e all green.
 
 ## l2 verification
 

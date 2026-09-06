@@ -2829,7 +2829,7 @@ fn compose_fork_provider(
     feature = "digest",
     feature = "graph"
 ))]
-fn expand_tilde(path: &str) -> String {
+pub(crate) fn expand_tilde(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/") {
         if let Ok(home) = std::env::var("HOME") {
             return format!("{home}/{rest}");

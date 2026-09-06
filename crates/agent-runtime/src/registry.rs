@@ -947,7 +947,7 @@ pub fn register_builtins(r: &mut Registry) {
             },
             cfg.owner.clone(),
             cfg.repo.clone(),
-            resolve_ws_key(&cfg.token, &cfg.token_env),
+            resolve_token(&cfg.token, &cfg.token_env, &cfg.token_file)?,
             cfg.timeout_secs,
             cfg.max_retries,
         )?) as Arc<dyn agent_core::Forge>)
@@ -965,7 +965,7 @@ pub fn register_builtins(r: &mut Registry) {
                 cfg.base_url.clone()
             },
             cfg.project.clone(),
-            resolve_ws_key(&cfg.token, &cfg.token_env),
+            resolve_token(&cfg.token, &cfg.token_env, &cfg.token_file)?,
             cfg.timeout_secs,
             cfg.max_retries,
         )?) as Arc<dyn agent_core::Forge>)
@@ -1177,6 +1177,35 @@ fn resolve_ws_key(inline: &str, env_var: &str) -> String {
     std::env::var(env_var).unwrap_or_default()
 }
 
+/// Resolve a forge credential into a redacting [`Secret`]: inline `token` >
+/// `token_env` > `token_file`. An **unset env var is absent** (the session simply
+/// runs without a credential, and `require_token` fails distinctly if one is
+/// needed); a **set-but-unreadable `token_file` is a hard error** (fail closed —
+/// don't silently fall back to no auth on a misconfigured secret mount). The
+/// returned [`Secret`] never appears in `Debug`/logs — this is the one boundary that
+/// reads the raw value from config.
+#[cfg(feature = "forge")]
+fn resolve_token(inline: &str, env_var: &str, file: &str) -> anyhow::Result<agent_core::Secret> {
+    use anyhow::Context;
+    if !inline.is_empty() {
+        return Ok(agent_core::Secret::new(inline));
+    }
+    if !env_var.is_empty() {
+        if let Ok(v) = std::env::var(env_var) {
+            if !v.is_empty() {
+                return Ok(agent_core::Secret::new(v));
+            }
+        }
+    }
+    if !file.is_empty() {
+        let expanded = crate::builder::expand_tilde(file);
+        let v = std::fs::read_to_string(&expanded)
+            .with_context(|| format!("reading forge token_file `{expanded}`"))?;
+        return Ok(agent_core::Secret::new(v.trim()));
+    }
+    Ok(agent_core::Secret::default())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1257,5 +1286,52 @@ mod tests {
             .to_string();
         assert!(err.contains("unknown policy `nope`"));
         assert!(err.contains("auto-approve"));
+    }
+
+    // --- resolve_token (forge credential resolution) -----------------------
+    #[cfg(feature = "forge")]
+    mod resolve_token_tests {
+        use super::super::resolve_token;
+
+        const TOKEN: &str = "ghp_a_real_looking_secret";
+
+        #[test]
+        fn positive_inline_is_preferred() {
+            let s = resolve_token(TOKEN, "UNSET_ENV_XYZ", "").unwrap();
+            assert_eq!(s.expose(), TOKEN);
+        }
+
+        #[test]
+        fn positive_file_ref_resolves_trimmed() {
+            let dir = agent_testkit::tempdir();
+            let path = dir.join("token");
+            std::fs::write(&path, format!("  {TOKEN}\n")).unwrap();
+            let s = resolve_token("", "", path.to_str().unwrap()).unwrap();
+            assert_eq!(s.expose(), TOKEN, "file token read and trimmed");
+        }
+
+        #[test]
+        fn negative_file_ref_missing_is_hard_error() {
+            let dir = agent_testkit::tempdir();
+            let missing = dir.join("nope");
+            // Fail closed: a set-but-unreadable secret mount must not degrade to
+            // "no auth" silently.
+            assert!(resolve_token("", "", missing.to_str().unwrap()).is_err());
+        }
+
+        #[test]
+        fn corner_all_unset_is_absent_not_error() {
+            let s = resolve_token("", "UNSET_ENV_XYZ", "").unwrap();
+            assert!(s.is_empty(), "no source configured ⇒ empty, not an error");
+        }
+
+        #[test]
+        fn adversarial_resolved_token_redacts_in_debug() {
+            let s = resolve_token(TOKEN, "", "").unwrap();
+            assert!(
+                !format!("{s:?}").contains(TOKEN),
+                "resolved forge token must not leak via Debug"
+            );
+        }
     }
 }
