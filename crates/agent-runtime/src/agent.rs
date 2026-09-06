@@ -113,6 +113,10 @@ pub struct Agent {
     /// `--serve-provider-registry`; the loop itself does not consume it until
     /// the registry-backed router (increment 04).
     provider_registry: Option<Arc<dyn agent_core::ProviderRegistry>>,
+    /// The review-fleet roster store, held for `--serve-fleet` (review-fleet C3);
+    /// the full fleet process that admits + drives sessions from it arrives in
+    /// review-fleet 3c.
+    fleet_registry: Option<Arc<dyn agent_core::FleetRegistry>>,
     /// Situational system-prompt fragments selected by the current mode
     /// (docs/design/prompts/). Unlike `prompt_store`, the loop **does** consume this:
     /// each turn it selects the fragments whose tags match the situation and injects
@@ -250,6 +254,7 @@ impl Agent {
             prompt_store: None,
             config_store: None,
             provider_registry: None,
+            fleet_registry: None,
             system_fragments: agent_context::system_fragments::SystemFragments::defaults(),
             metrics_proxy: None,
             review_collector: None,
@@ -542,6 +547,13 @@ impl Agent {
         self
     }
 
+    /// Attach the review-fleet roster store (review-fleet C3), so it can be hosted
+    /// over gRPC (`--serve-fleet`). Not consumed by the loop.
+    pub fn with_fleet_registry(mut self, r: Arc<dyn agent_core::FleetRegistry>) -> Self {
+        self.fleet_registry = Some(r);
+        self
+    }
+
     pub fn with_prompt_store(mut self, p: Arc<dyn agent_core::PromptStore>) -> Self {
         self.prompt_store = Some(p);
         self
@@ -805,6 +817,12 @@ impl Agent {
     /// (`--serve-provider-registry`).
     pub fn provider_registry(&self) -> Option<Arc<dyn agent_core::ProviderRegistry>> {
         self.provider_registry.clone()
+    }
+
+    /// The review-fleet roster store, if `[review_fleet] store` is configured
+    /// (`--serve-fleet`).
+    pub fn fleet_registry(&self) -> Option<Arc<dyn agent_core::FleetRegistry>> {
+        self.fleet_registry.clone()
     }
 
     pub fn metrics_proxy(&self) -> Option<Arc<dyn agent_core::MetricsProxy>> {

@@ -1841,3 +1841,132 @@ async fn config_status_roundtrips_pending_edit() {
     let v: serde_json::Value = status.pending[0].value.clone().unwrap().try_into().unwrap();
     assert_eq!(v, serde_json::json!(30));
 }
+
+// ---- review-fleet C3: ReviewFleetService over the wire (docs/design/review-fleet) ----
+
+/// A helper roster row carrying a `token_ref` **reference** (never a secret).
+fn fleet_row(id: &str, token_ref: &str, enabled: bool) -> agent_core::FleetSession {
+    agent_core::FleetSession {
+        id: id.into(),
+        user: "acme".into(),
+        repo: "acme__web".into(),
+        backend: "github".into(),
+        base_url: "https://api.github.com".into(),
+        token_ref: token_ref.into(),
+        skill: "code-review".into(),
+        poll_secs: 600,
+        enabled,
+        ..Default::default()
+    }
+}
+
+// A put→get→list→set_enabled→delete cycle survives the hop; an over-max
+// `poll_secs` is clamped on `put`, and a second delete is a benign `false`. The
+// same assertions run over TCP and UDS.
+#[rstest]
+#[case::tcp(Transport::Tcp)]
+#[case::uds(Transport::Uds)]
+#[tokio::test]
+async fn fleet_crud_roundtrips(#[case] transport: Transport) {
+    use agent_core::FleetRegistry;
+    let store = Arc::new(agent_review_fleet::MemoryFleet::new());
+    let (dial, _srv) = spawn(transport, agent_grpc::server::review_fleet_router(store)).await;
+    let client = agent_grpc::client::GrpcFleet::connect(&dial).unwrap();
+
+    // Put clamps an over-max poll interval; the returned row shows the clamp.
+    let mut row = fleet_row("web", "env:ACME_GH_TOKEN", true);
+    row.poll_secs = u64::MAX;
+    let stored = client.put(row).await.unwrap();
+    assert_eq!(stored.poll_secs, agent_core::MAX_FLEET_POLL_SECS);
+    assert_eq!(stored.id, "web");
+
+    // Get and List read the row back; the token_ref rides as the reference.
+    let got = client.get("web").await.unwrap();
+    assert_eq!(got.token_ref, "env:ACME_GH_TOKEN");
+    let list = client.list().await.unwrap();
+    assert_eq!(list.len(), 1);
+
+    // set_enabled toggles and returns the updated row.
+    let off = client.set_enabled("web", false).await.unwrap();
+    assert!(!off.enabled);
+
+    // Delete removes it; a second delete is a benign `false`, not an error.
+    assert!(client.delete("web").await.unwrap());
+    assert!(!client.delete("web").await.unwrap());
+}
+
+// The control plane never resolves a token: a row put with an `env:`/`file:`
+// reference reads back as the *reference*, and the reply bytes never contain the
+// secret the reference names. (There is no auth layer — the reference is all the
+// wire ever carries; docs/design/review-fleet + CLAUDE.md "the model is untrusted".)
+#[rstest]
+#[case::tcp(Transport::Tcp)]
+#[case::uds(Transport::Uds)]
+#[tokio::test]
+async fn adversarial_fleet_control_plane_never_returns_token(#[case] transport: Transport) {
+    use agent_core::FleetRegistry;
+    let store = Arc::new(agent_review_fleet::MemoryFleet::new());
+    let (dial, _srv) = spawn(transport, agent_grpc::server::review_fleet_router(store)).await;
+    let client = agent_grpc::client::GrpcFleet::connect(&dial).unwrap();
+
+    client
+        .put(fleet_row("web", "env:ACME_GH_TOKEN", true))
+        .await
+        .unwrap();
+
+    // Neither Get nor List ever echoes a resolved secret — only the reference.
+    let got = client.get("web").await.unwrap();
+    assert_eq!(got.token_ref, "env:ACME_GH_TOKEN");
+    let list = client.list().await.unwrap();
+    assert_eq!(list[0].token_ref, "env:ACME_GH_TOKEN");
+    // Belt-and-braces: nothing in the row looks like a resolved token value.
+    let blob = format!("{got:?}{:?}", list[0]);
+    assert!(
+        !blob.contains("ghp_") && !blob.contains("glpat-"),
+        "a resolved token must never cross the control plane: {blob}"
+    );
+}
+
+// A traversing / raw-secret row is rejected server-side and surfaces as an Err
+// across the wire — the untrusted-input guards survive the hop.
+#[rstest]
+#[case::traversal_id("../../etc", "env:TOK")]
+#[case::separator_id("a/b", "env:TOK")]
+#[case::raw_token("web", "ghp_deadbeefdeadbeefdeadbeef")]
+#[tokio::test]
+async fn adversarial_fleet_bad_row_rejected_over_wire(#[case] id: &str, #[case] token_ref: &str) {
+    use agent_core::FleetRegistry;
+    let store = Arc::new(agent_review_fleet::MemoryFleet::new());
+    let (dial, _srv) = spawn(
+        Transport::Tcp,
+        agent_grpc::server::review_fleet_router(store),
+    )
+    .await;
+    let client = agent_grpc::client::GrpcFleet::connect(&dial).unwrap();
+
+    let err = client.put(fleet_row(id, token_ref, true)).await;
+    assert!(
+        err.is_err(),
+        "a bad row (id={id:?}, token_ref={token_ref:?}) must be rejected across the wire"
+    );
+}
+
+// An unknown-id `get` maps to `NotFound` across the wire — the seam's `not found`
+// contract survives the hop (a chained grpc→grpc roster still sees NotFound).
+#[tokio::test]
+async fn negative_fleet_get_unknown_is_not_found_over_wire() {
+    use agent_core::FleetRegistry;
+    let store = Arc::new(agent_review_fleet::MemoryFleet::new());
+    let (dial, _srv) = spawn(
+        Transport::Tcp,
+        agent_grpc::server::review_fleet_router(store),
+    )
+    .await;
+    let client = agent_grpc::client::GrpcFleet::connect(&dial).unwrap();
+
+    let err = client.get("nope").await.unwrap_err();
+    assert!(
+        matches!(err, agent_core::Error::Fleet(m) if m.starts_with("not found")),
+        "unknown id must map back to a `not found` Fleet error"
+    );
+}

@@ -12,15 +12,19 @@ Three PRs, each based off `main`, never stacked, each gated by `nix flake check`
 
 ## Now
 
-- **Current PR:** inc **3a** — **C2** persisted roster (`FleetRegistry` seam + `agent-review-fleet` crate)
-- **Branch:** `feat/review-fleet-inc3a-roster` (off main ea52e2c; inc 2 C9 #277 merged)
-- **Current step:** code + tests complete (40/40 green incl. sqlite feature); **`nix flake check` GREEN**
-- **Last action:** `FleetSession`/`FleetRegistry` in agent-core; new crate with memory/file/sqlite
-  backends over one shared `ops` path; table-driven tests (desc+expect, four classes + adversarial);
-  `nix/checks/fleet-sqlite.nix` gate; `docs/components/review-fleet.md`. Gate surfaced + fixed:
-  new-file git-track, unused `serde` (machete), stale Cargo.lock, `Error::Fleet` non-exhaustive match
-  in `convert.rs` (mapped like Registry), missing `default_fleet_{file,path}` fns + explicit `Default`
-- **Next action:** commit (awaiting go-ahead); then 3b (control plane) off updated main.
+- **Current PR:** inc **3b** — **C3** gRPC control plane (`ReviewFleetService`)
+- **Branch:** `feat/review-fleet-inc3b-control-plane` (off main 91c40ab; inc 3a C2 #278 merged)
+- **Current step:** code + tests complete; **`nix flake check` GREEN** ("all checks passed!")
+- **Last action:** `review_fleet.proto` + `ReviewFleetService` (server + `GrpcFleet` client) +
+  convert.rs core↔pb (token_ref verbatim, numbers clamped on decode) + FLEET constants
+  (50086/9636/fleet.sock) + `GrpcCfg.fleet` + `Seam::Fleet` wiring in grpc_server.rs +
+  `resolve_fleet_registry` factory + builder wiring + runtime `fleet`/`fleet-sqlite` features;
+  table-driven tests: convert round-trip (agent-proto) + real-wire CRUD/token-never-returned/
+  traversal-rejected roundtrip (agent-grpc, TCP+UDS); docs control-plane section
+- **Next action:** PR **#279** open (commit `a62ab76`, gate green). After merge, 3c (server + FSM,
+  C1 + C8) off updated main.
+
+Inc **3a (C2) DONE + MERGED (#278, main 91c40ab).**
 
 Inc 2 (C9) DONE + MERGED (#277, main ea52e2c). Now the **fleet build proper**, sliced into
 **three gated PRs** off main (never stacked): **3a roster (C2)** → **3b control plane (C3)** →
@@ -29,7 +33,58 @@ Inc 2 (C9) DONE + MERGED (#277, main ea52e2c). Now the **fleet build proper**, s
 
 ---
 
-## Increment 3a (C2) — persisted roster  🟢 (gate green; ready to commit)
+## Increment 3b (C3) — gRPC control plane  🟢 (gate green; ready to commit)
+
+Second of the three fleet-core PRs. Live CRUD over the 3a roster: `ReviewFleetService` +
+its client, so a roster is editable at runtime and one process can serve it. **Additive**
+throughout (a new proto file/service, new endpoint, new default-empty config field) — buf stays
+additive (no `buf.image.binpb` bump); nothing existing changes shape.
+
+- [x] `review_fleet.proto` (`agent-proto`, package `agent.v1`): `FleetSession` (13 fields ==
+  the core row), `FleetListRequest`/`FleetSessionList`/`FleetSessionRef`/`FleetDeleteReply`/
+  `FleetSetEnabledRequest`; `service ReviewFleetService { List/Get/Put/Delete/SetEnabled }`;
+  security contract in the file header (`token_ref` reference-not-secret, untrusted ids). Added to
+  `build.rs`. Additive → `buf breaking` passes, **no baseline bump**
+- [x] `convert.rs` — `From<core::FleetSession> for pb::FleetSession` and back; `token_ref` copied
+  **verbatim** (never resolved); `pb→core` runs `sanitize()` (poll clamp, timestamps floored)
+- [x] Server `agent-grpc/src/server/review_fleet.rs` (`ReviewFleetSvc`, mirrors
+  `provider_registry.rs`): per-RPC `span` + trait call + `status_from_error` (`not found`→NotFound,
+  validation→InvalidArgument); `Put` decodes wire→core (clamps) then the store validates fail-closed;
+  `Get`/`List` return `token_ref` only. Registered in `server/mod.rs`
+- [x] Client `agent-grpc/src/client/review_fleet.rs` (`GrpcFleet`, `unary!` + retry): fails hard
+  (`Err`, no silent no-op); `status_to_err` preserves the `not found` contract across a chained
+  `grpc→grpc` hop. Registered in `client/mod.rs`
+- [x] Constants: `nix/constants.nix` `fleet` block (**50086/9636/fleet.sock** — next free after
+  `config`; NOT the design's 50081/9631 which belong to `digest`) + `gen-constants.nix` `seamConst`
+  render; `agent-grpc/src/constants.rs` regenerated (constants-sync enforces)
+- [x] `GrpcCfg.fleet: GrpcSeamCfg` (`#[serde(default)]`, endpoint/listen) — `config.rs`
+- [x] `grpc_server.rs`: `Seam::Fleet` variant + `ALL_SEAMS` entry + `SEAMS` row (`--serve-fleet`,
+  `agent.v1.ReviewFleetService`, `constants::FLEET`) + `configured_listen` arm + `build_router` arm
+  (served only when `agent.fleet_registry()` is `Some`)
+- [x] `resolve_fleet_registry(cfg)` factory (`builder.rs`, next to `resolve_provider_registry`):
+  string-match `store` (`""`→None / `file` / `sqlite` double-cfg-gated + `bail!` / `grpc` client /
+  `bail!` unknown) + builder wiring `with_fleet_registry`; Agent `fleet_registry` field + accessor
+  (added with the field so accessors are always present, only the builder wiring is feature-gated)
+- [x] Runtime `Cargo.toml`: `fleet = ["dep:agent-review-fleet"]` (added to default features — inert
+  when `store=""`), `fleet-sqlite = ["fleet", "agent-review-fleet/fleet-sqlite"]`; `agent-grpc`
+  dev-dep on `agent-review-fleet` for the wire test
+- [x] Tests (table-driven, desc+expect): convert round-trip identity + hostile-poll/timestamp clamp
+  (`agent-proto`); real-wire CRUD roundtrip (Put clamps poll → Get/List → SetEnabled → Delete +
+  benign second-delete), `adversarial_` token-never-returned + bad-row-rejected (traversal/separator/
+  raw-token) + unknown-id→NotFound, all over **TCP + UDS** (`agent-grpc/tests/roundtrip.rs`)
+- [x] `docs/components/review-fleet.md` — control-plane section (service, `--serve-fleet`,
+  `store="grpc"`, the two cross-wire invariants); note deferred to 3c: `metered::fleet_registry`
+  gauge, and the dedicated `Mode::ServeFleet` orchestrator process (distinct from the seam-harness
+  `--serve-fleet` that hosts only the roster CRUD)
+- [x] `nix flake check` — **GREEN** ("all checks passed!"): buf additive (no `buf.image.binpb`
+  bump — new file/service/RPCs only), constants-sync, clippy -D warnings, tests, fmt all clean.
+  Gate surfaced + fixed: new files git-tracked (flake requirement), rustfmt on the wire test,
+  `agent-review-fleet` dev-dep for the roundtrip; repo helper uses the `acme__web` safe-segment
+  convention (a `/` in a repo fails `safe_segment`, by design)
+
+---
+
+## Increment 3a (C2) — persisted roster  ✅ (PR #278, main 91c40ab)
 
 First of the three fleet-core PRs. The durable list of "who reviews what" + its validation core —
 no wire, no server (those are 3b/3c). Additive: a new crate + a new seam; nothing existing changes
@@ -52,8 +107,8 @@ shape.
   `SqliteFleet` (feature `fleet-sqlite`, row-as-JSON in a BLOB, bound-param ids)
 - [x] `ReviewFleetCfg` gains roster-store fields (`store`/`file`/`path`/`max_total`/`max_per_user`;
   explicit `Default` matching the serde defaults) — kept but **unconsumed in 3a**; the
-  `resolve_fleet_registry` factory + runtime `fleet` features land in **3c** with `serve_fleet`
-  (adding them now would be dead code under `-D warnings`)
+  `resolve_fleet_registry` factory + runtime `fleet` features land in **3b** (consumed by
+  `build_router` — adding them in 3a would be dead code under `-D warnings`)
 - [x] Tests (table-driven, `desc`+`expect` per row, `#[cfg(test)] mod` at file end): unified
   `crud_contract` table (all op classes, positive/negative/boundary/corner + adversarial-traversal),
   poll-clamp boundary table, raw-token-not-echoed, over-cap, per-backend equivalence (memory=file=

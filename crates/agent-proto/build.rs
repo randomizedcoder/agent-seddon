@@ -35,6 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "proto/agent/v1/session_registry.proto",
         "proto/agent/v1/upstream.proto",
         "proto/agent/v1/config.proto",
+        "proto/agent/v1/review_fleet.proto",
     ];
     // Re-run only when a proto changes.
     for p in &protos {

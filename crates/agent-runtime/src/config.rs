@@ -2101,6 +2101,9 @@ pub struct GrpcCfg {
     pub provider_registry: GrpcSeamCfg,
     #[serde(default)]
     pub config: GrpcSeamCfg,
+    /// The review-fleet roster seam (`--serve-fleet`, review-fleet C3).
+    #[serde(default)]
+    pub fleet: GrpcSeamCfg,
     #[serde(default)]
     pub review: GrpcSeamCfg,
     /// Not a seam: the opt-in `agent --serve-sessions` gateway (docs/design/portal),

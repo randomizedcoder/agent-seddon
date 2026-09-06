@@ -2804,6 +2804,51 @@ impl From<pb::Upstream> for agent_core::Upstream {
     }
 }
 
+impl From<agent_core::FleetSession> for pb::FleetSession {
+    fn from(s: agent_core::FleetSession) -> Self {
+        pb::FleetSession {
+            id: s.id,
+            user: s.user,
+            repo: s.repo,
+            backend: s.backend,
+            base_url: s.base_url,
+            // A reference (`env:`/`file:`), never a resolved token — copied verbatim.
+            token_ref: s.token_ref,
+            skill: s.skill,
+            slack_trigger_channel: s.slack_trigger_channel,
+            slack_progress_channel: s.slack_progress_channel,
+            poll_secs: s.poll_secs,
+            enabled: s.enabled,
+            created_at: s.created_at,
+            updated_at: s.updated_at,
+        }
+    }
+}
+
+impl From<pb::FleetSession> for agent_core::FleetSession {
+    fn from(s: pb::FleetSession) -> Self {
+        let mut out = agent_core::FleetSession {
+            id: s.id,
+            user: s.user,
+            repo: s.repo,
+            backend: s.backend,
+            base_url: s.base_url,
+            token_ref: s.token_ref,
+            skill: s.skill,
+            slack_trigger_channel: s.slack_trigger_channel,
+            slack_progress_channel: s.slack_progress_channel,
+            poll_secs: s.poll_secs,
+            enabled: s.enabled,
+            created_at: s.created_at,
+            updated_at: s.updated_at,
+        };
+        // Wire → core clamps hostile numbers (poll bounds, timestamps); the store
+        // validates fail-closed on put.
+        out.sanitize();
+        out
+    }
+}
+
 impl From<agent_core::UpstreamHealth> for pb::UpstreamHealth {
     fn from(h: agent_core::UpstreamHealth) -> Self {
         pb::UpstreamHealth {
@@ -5118,6 +5163,87 @@ mod tests {
         assert_eq!(card.max_retries, agent_core::MAX_UPSTREAM_RETRIES);
         assert_eq!(card.max_concurrency, agent_core::MAX_UPSTREAM_CONCURRENCY);
         assert_eq!(card.tier, None);
+    }
+
+    // ---- review-fleet C3: FleetSession wire ↔ core (docs/design/review-fleet) ----
+
+    /// A fully-populated, already-sanitized roster row. `token_ref` is a
+    /// **reference** (`env:`) — never a resolved secret.
+    fn full_fleet_row() -> agent_core::FleetSession {
+        agent_core::FleetSession {
+            id: "web".into(),
+            user: "acme".into(),
+            repo: "acme/web".into(),
+            backend: "github".into(),
+            base_url: "https://api.github.com".into(),
+            token_ref: "env:ACME_GH_TOKEN".into(),
+            skill: "code-review".into(),
+            slack_trigger_channel: "C123".into(),
+            slack_progress_channel: "C456".into(),
+            poll_secs: 600,
+            enabled: true,
+            created_at: 1_700_000_000,
+            updated_at: 1_700_000_042,
+        }
+    }
+
+    /// A sanitized row survives core → pb → core unchanged, and the `token_ref`
+    /// reference rides verbatim (the wire never carries a resolved token).
+    #[rstest::rstest]
+    #[case::positive_full_row(full_fleet_row())]
+    #[case::corner_minimal_disabled(agent_core::FleetSession {
+        id: "r".into(),
+        user: "u".into(),
+        repo: "u/r".into(),
+        poll_secs: agent_core::DEFAULT_FLEET_POLL_SECS,
+        ..Default::default()
+    })]
+    #[case::corner_empty_optionals(agent_core::FleetSession {
+        id: "r".into(),
+        user: "u".into(),
+        repo: "u/r".into(),
+        token_ref: "file:/run/secrets/tok".into(),
+        poll_secs: agent_core::MIN_FLEET_POLL_SECS,
+        ..Default::default()
+    })]
+    fn positive_fleet_core_to_pb_to_core_is_identity(#[case] row: agent_core::FleetSession) {
+        // Precondition: the row is already sanitized, so the decode's `sanitize()`
+        // is a no-op and the round trip is a true identity.
+        let mut expected = row.clone();
+        expected.sanitize();
+        assert_eq!(expected, row, "test row must be pre-sanitized");
+
+        let back = agent_core::FleetSession::from(pb::FleetSession::from(row.clone()));
+        assert_eq!(back, row);
+        // The reference survived intact — nothing resolved or stripped it.
+        assert_eq!(back.token_ref, row.token_ref);
+    }
+
+    /// `boundary_`/`adversarial_`: a hostile peer's numbers are clamped on decode
+    /// (the wire is untrusted) — poll bounds and negative timestamps.
+    #[rstest::rstest]
+    #[case::boundary_poll_zero_becomes_default(0, agent_core::DEFAULT_FLEET_POLL_SECS)]
+    #[case::boundary_poll_under_min_clamped(1, agent_core::MIN_FLEET_POLL_SECS)]
+    #[case::boundary_poll_over_max_clamped(u64::MAX, agent_core::MAX_FLEET_POLL_SECS)]
+    #[case::positive_poll_in_range_kept(600, 600)]
+    fn boundary_fleet_hostile_pb_poll_clamped_on_decode(
+        #[case] wire_poll: u64,
+        #[case] expect_poll: u64,
+    ) {
+        let wire = pb::FleetSession {
+            id: "r".into(),
+            user: "u".into(),
+            repo: "u/r".into(),
+            poll_secs: wire_poll,
+            created_at: -5,
+            updated_at: -1,
+            ..Default::default()
+        };
+        let row = agent_core::FleetSession::from(wire);
+        assert_eq!(row.poll_secs, expect_poll, "poll_secs clamp");
+        // Negative timestamps are floored to 0, never left negative.
+        assert_eq!(row.created_at, 0);
+        assert_eq!(row.updated_at, 0);
     }
 
     /// `adversarial_`: out-of-range enums in a policy decode to `None` (match
