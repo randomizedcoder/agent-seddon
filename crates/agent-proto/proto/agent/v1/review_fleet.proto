@@ -1,0 +1,75 @@
+// The `FleetRegistry` seam over gRPC (review-fleet C3, increment 3b): the
+// durable roster of "who reviews what" as a CRUD control plane, so review
+// sessions are added/updated/enabled at runtime and one roster can serve the
+// fleet server. Mirrors `ProviderRegistryService` (one process holds the roster
+// while any number of clients drive it).
+//
+// Security contract:
+//   - `FleetSession.token_ref` is a kind-prefixed REFERENCE (`env:NAME` or
+//     `file:/path`) — NEVER the secret. The forge token resolves on the host
+//     that builds the concrete `Forge` (review-fleet C5); the roster stores and
+//     serves only the reference, so a compromised control plane has no token to
+//     exfiltrate. `Get`/`List` return the reference, never a resolved value.
+//   - Every `id`/`user`/`repo` is untrusted (each may become a storage-path
+//     segment): the server validates it (`safe_segment`) and rejects with
+//     `InvalidArgument`.
+//   - Every number is clamped on ingest (a peer is untrusted).
+syntax = "proto3";
+
+package agent.v1;
+
+// One durable roster row — a review session's identity, the repo it watches, how
+// it reaches its forge, and its triggers. Mirrors `agent_core::FleetSession`.
+message FleetSession {
+  // Identity — path-safe segments (server-validated). The workspace is
+  // `root/<user>/<id>`.
+  string id = 1;
+  string user = 2;
+  string repo = 3;
+  // Forge: "github" | "gitlab" | "" (resolve as a registered forge).
+  string backend = 4;
+  string base_url = 5;
+  // Kind-prefixed token reference: `env:NAME` or `file:/path` — NEVER the secret.
+  string token_ref = 6;
+  // Review skill/prompt selector ("" ⇒ the default review skill).
+  string skill = 7;
+  // Slack triggers ("" ⇒ no Slack trigger / no progress surfacing).
+  string slack_trigger_channel = 8;
+  string slack_progress_channel = 9;
+  // Forge poll interval in seconds (clamped to [MIN, MAX] on ingest; 0 ⇒ default).
+  uint64 poll_secs = 10;
+  bool enabled = 11;
+  // Unix-seconds metadata (clamped non-negative on ingest).
+  int64 created_at = 12;
+  int64 updated_at = 13;
+}
+
+message FleetListRequest {}
+
+message FleetSessionList {
+  repeated FleetSession sessions = 1;
+}
+
+message FleetSessionRef {
+  string id = 1;
+}
+
+message FleetDeleteReply {
+  bool deleted = 1; // false when the id was absent (not an error)
+}
+
+message FleetSetEnabledRequest {
+  string id = 1;
+  bool enabled = 2;
+}
+
+// The roster control plane (mirrors ProviderRegistryService: one process holds
+// the roster while any number of clients drive it). `token_ref` rides as a
+// reference; the server never resolves it.
+service ReviewFleetService {
+  rpc List(FleetListRequest) returns (FleetSessionList);
+  rpc Get(FleetSessionRef) returns (FleetSession);
+  rpc Put(FleetSession) returns (FleetSession); // upsert = create + update
+  rpc Delete(FleetSessionRef) returns (FleetDeleteReply);
+  rpc SetEnabled(FleetSetEnabledRequest) returns (FleetSession); // toggle without a full Put
+}

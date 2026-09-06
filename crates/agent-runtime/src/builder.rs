@@ -1189,6 +1189,13 @@ pub async fn build_agent_with(
         Some(r) => agent.with_provider_registry(r),
         None => agent,
     };
+    // The review-fleet roster (review-fleet C2/C3), held for `--serve-fleet`; the
+    // fleet orchestrator consumes it in increment 3c.
+    #[cfg(feature = "fleet")]
+    let agent = match resolve_fleet_registry(&cfg)? {
+        Some(r) => agent.with_fleet_registry(r),
+        None => agent,
+    };
     // Situational system-prompt fragments (docs/design/prompts/): the loop selects
     // and injects the fragments matching the current mode. Rooted at the `prompts`
     // dir — a missing dir ⇒ a no-op resolver ⇒ byte-identical behaviour.
@@ -2633,6 +2640,43 @@ pub(crate) fn resolve_provider_registry(
         other => anyhow::bail!("unknown [registry] store `{other}`"),
     };
     Ok(store.map(|s| crate::metered::registry(s, metrics.clone())))
+}
+
+/// Build the `[review_fleet] store` backend — the durable review-fleet roster
+/// (review-fleet C2/C3), held for `--serve-fleet` and consumed by the fleet
+/// orchestrator (increment 3c). Mirrors [`resolve_provider_registry`]: a
+/// string-match over `store` with the sqlite arm double-cfg-gated (`bail!` when
+/// the feature is off) and a `bail!` on an unknown value. `""` ⇒ no roster (the
+/// seam stays absent). The metered decorator + gauge land in 3c; 3a/3b keep the
+/// resolver minimal.
+#[cfg(feature = "fleet")]
+pub(crate) fn resolve_fleet_registry(
+    cfg: &Config,
+) -> anyhow::Result<Option<Arc<dyn agent_core::FleetRegistry>>> {
+    let store: Option<Arc<dyn agent_core::FleetRegistry>> = match cfg.review_fleet.store.as_str() {
+        "" => None,
+        "file" => Some(Arc::new(agent_review_fleet::FileFleet::new(expand_tilde(
+            &cfg.review_fleet.file,
+        )))),
+        #[cfg(feature = "fleet-sqlite")]
+        "sqlite" => Some(Arc::new(agent_review_fleet::SqliteFleet::open(
+            expand_tilde(&cfg.review_fleet.path),
+        )?)),
+        #[cfg(not(feature = "fleet-sqlite"))]
+        "sqlite" => anyhow::bail!(
+            "[review_fleet] store = \"sqlite\" requires building with the `fleet-sqlite` feature"
+        ),
+        #[cfg(feature = "grpc")]
+        "grpc" => {
+            let ep = crate::registry::grpc_client_endpoint(
+                &cfg.grpc.fleet.endpoint,
+                agent_grpc::constants::FLEET,
+            );
+            Some(Arc::new(agent_grpc::client::GrpcFleet::connect(&ep)?))
+        }
+        other => anyhow::bail!("unknown [review_fleet] store `{other}`"),
+    };
+    Ok(store)
 }
 
 /// Build the `[graph] store` backend and, for a non-empty document, compile it

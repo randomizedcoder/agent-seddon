@@ -258,6 +258,19 @@
       metrics_port = 9635;
     };
 
+    # Review-fleet roster (review-fleet C3): the `FleetRegistry` seam — the
+    # durable roster of "who reviews what" as a CRUD control plane
+    # (FleetSession rows: Put/Delete/SetEnabled/List/Get), so review sessions are
+    # added/updated/enabled at runtime and one roster can serve the fleet server
+    # (`agent --serve-fleet`, review-fleet C1). Rows carry `token_ref`
+    # references, never secrets. (The full fleet process — the orchestrator that
+    # admits + drives sessions from this roster — arrives in review-fleet 3c.)
+    fleet = {
+      port = 50086;
+      socket = "/tmp/agent-seddon/fleet.sock";
+      metrics_port = 9636;
+    };
+
     # NOT a seam: the opt-in `agent --serve-sessions` gateway (docs/design/portal),
     # which hosts the `SessionRegistryService` (open/close/heartbeat) plus a
     # *driving* `AgentSessionService` (the `Send` RPC — submit a goal, stream the

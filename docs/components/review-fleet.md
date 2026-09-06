@@ -13,10 +13,14 @@ server reconciles its live sessions from (review-fleet C2,
   `SqliteFleet` (feature `fleet-sqlite`)
 - **Config:** `[review_fleet] store`, `file`, `path`, `root`, `max_total`,
   `max_per_user`
+- **Control plane (inc 3b):** `ReviewFleetService` — the seam over gRPC
+  (`agent --serve-fleet`, client `= "grpc"`)
 
-> This is the roster only (increment 3a). The gRPC control plane
-> (`ReviewFleetService`) and the `agent --serve-fleet` process that admits + drives
-> sessions from the roster arrive in increments 3b and 3c.
+> Increments 3a (roster) + 3b (gRPC control plane) are shipped. The
+> `agent --serve-fleet` **fleet process** that reconciles + drives live sessions from
+> the roster (C1 + C8) arrives in increment 3c. Note the distinction: today
+> `--serve-fleet` hosts the roster CRUD service over the generic seam harness; 3c's
+> dedicated fleet mode adds the orchestrator on top.
 
 ## The trait
 
@@ -97,6 +101,29 @@ can never drift between them:
 - **`SqliteFleet`** (feature `fleet-sqlite`, off by default) — each row as its JSON form
   in an embedded-SQLite BLOB (the same at-rest shape as the file backend). Ids reach SQL
   only as bound parameters; reads re-decode + re-validate, failing closed on tampering.
+
+## Control plane (`ReviewFleetService`, inc 3b)
+
+The roster is editable at runtime over gRPC. `ReviewFleetService`
+([`review_fleet.proto`](../../crates/agent-proto/proto/agent/v1/review_fleet.proto))
+mirrors `ProviderRegistryService`: one process holds the roster while any number of
+clients drive it (`List`/`Get`/`Put`/`Delete`/`SetEnabled`). It wires in like every
+other seam — host it with `agent --serve-fleet` (endpoint `constants::FLEET`,
+`50086`/`fleet.sock`, metrics `9636`) and dial it from another process by setting
+`[review_fleet] store = "grpc"`, which resolves the `GrpcFleet` client.
+
+Two invariants hold *across the wire*, each with an `adversarial_` round-trip test in
+[`roundtrip.rs`](../../crates/agent-grpc/tests/roundtrip.rs):
+
+- **No token ever crosses the control plane.** The single `convert.rs` path copies
+  `token_ref` verbatim (a reference, never resolved); `Get`/`List` return only the
+  reference. There is nothing to resolve server-side, so a compromised control plane has
+  no secret to exfiltrate.
+- **Untrusted input fails closed at the seam.** A traversing/separator id, an unknown
+  backend, an over-cap field, or a raw-secret `token_ref` is rejected in the store and
+  surfaces as `InvalidArgument`; an unknown-id `Get`/`SetEnabled` maps to `NotFound`
+  (the `not found` contract survives a chained `grpc → grpc` hop). Hostile numbers are
+  clamped on decode before a row is ever used.
 
 ## Testing
 

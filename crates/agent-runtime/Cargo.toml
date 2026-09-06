@@ -50,6 +50,7 @@ default = [
     "review",
     "prompt",
     "registry",
+    "fleet",
     "metrics-proxy",
     "session-export",
     "skill-write",
@@ -217,6 +218,11 @@ prompt-sqlite = ["prompt", "agent-prompt/prompt-sqlite"]
 registry = ["dep:agent-registry"]
 # The `sqlite` registry backend, off by default (mirrors `prompt-sqlite`).
 registry-sqlite = ["registry", "agent-registry/registry-sqlite"]
+# Review-fleet roster seam (review-fleet C2/C3): the FleetRegistry stores + the
+# `resolve_fleet_registry` factory (`[review_fleet] store`, `--serve-fleet`).
+fleet = ["dep:agent-review-fleet"]
+# The `sqlite` fleet backend, off by default (mirrors `registry-sqlite`).
+fleet-sqlite = ["fleet", "agent-review-fleet/fleet-sqlite"]
 # Metrics proxy seam (docs/design/portal): generic PromQL-over-gRPC to Prometheus.
 metrics-proxy = ["dep:agent-metrics-proxy", "agent-metrics-proxy/http"]
 # Connect to external MCP servers and register their tools.
@@ -262,6 +268,7 @@ agent-memory.workspace = true
 agent-context.workspace = true
 agent-prompt = { workspace = true, optional = true }
 agent-registry = { workspace = true, optional = true }
+agent-review-fleet = { workspace = true, optional = true }
 agent-digest = { workspace = true, optional = true }
 agent-graph = { workspace = true, optional = true }
 agent-metrics-proxy = { workspace = true, optional = true }
