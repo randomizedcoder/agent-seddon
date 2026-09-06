@@ -4462,6 +4462,16 @@ impl<S: Into<String>> From<S> for Revision {
     }
 }
 
+/// The namespaced local ref a fetched PR head lands on, e.g.
+/// `refs/fleet/pr/42`. Single source of truth shared by [`RepoBackend::fetch_pr`]
+/// (which writes it) and the review orchestrator's present-check (which reads it),
+/// so the two can't drift. The `refs/fleet/pr/` prefix is fixed and the tail is a
+/// `u64`, so the result is always a well-formed, injection-free ref.
+#[must_use]
+pub fn pr_local_ref(number: u64) -> String {
+    format!("refs/fleet/pr/{number}")
+}
+
 /// The kind of object a [`TreeEntry`] points at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -4713,6 +4723,18 @@ pub trait RepoBackend: Send + Sync {
     async fn status(&self) -> Result<RepoStatus>;
     /// Update the shared mirror from upstream. Long-running.
     async fn fetch(&self) -> Result<RepoStatus>;
+    /// Fetch a forge pull/merge-request head ref into a namespaced local ref and
+    /// return the resolved head oid (the C14/C15 dedup key). A `PullRequest`
+    /// carries only a branch name — never a head SHA — and the forge PR head ref
+    /// (`refs/pull/<N>/head`, `refs/merge-requests/<N>/head`, …) is not in a
+    /// default `git fetch`, so a fresh mirror cannot resolve a PR without this.
+    /// The remote ref is chosen by operator config (`[git] pr_ref_template`), not
+    /// inferred, and the local ref is [`pr_local_ref`] so writer (impl) and reader
+    /// (review orchestrator's present-check) can't drift. Default `Err` — a
+    /// backend (or a remote gRPC client) that cannot fetch says so, fail-soft.
+    async fn fetch_pr(&self, _number: u64) -> Result<Revision> {
+        Err(Error::Repo("fetch_pr unsupported by this backend".into()))
+    }
     /// Materialize a disposable worktree checked out at the spec's revision.
     async fn worktree_add(&self, spec: &WorktreeSpec) -> Result<WorktreeHandle>;
     /// List the live worktrees.

@@ -51,6 +51,11 @@ pub struct CliBackend {
     /// old direct spawn); the runtime injects the config-selected backend via
     /// [`CliBackend::with_sandbox`].
     sandbox: Arc<dyn Sandbox>,
+    /// Operator-configured remote-ref template for `fetch_pr` (`[git]
+    /// pr_ref_template`, e.g. `refs/pull/{n}/head`). `{n}` is substituted with the
+    /// PR number; empty ⇒ `fetch_pr` errs. Operator-owned and forge-agnostic, so
+    /// the forge kind is never inferred from the ref.
+    pr_ref_template: String,
 }
 
 impl CliBackend {
@@ -69,6 +74,7 @@ impl CliBackend {
             remote: remote.into(),
             cache,
             sandbox: Arc::new(agent_sandbox::LocalSandbox),
+            pr_ref_template: String::new(),
         }
     }
 
@@ -78,6 +84,15 @@ impl CliBackend {
     #[must_use]
     pub fn with_sandbox(mut self, sandbox: Arc<dyn Sandbox>) -> Self {
         self.sandbox = sandbox;
+        self
+    }
+
+    /// Set the `fetch_pr` remote-ref template (`[git] pr_ref_template`). The
+    /// operator owns it — `{n}` is the only interpolation and the PR number is a
+    /// `u64`, so there is no untrusted input in the resulting refspec.
+    #[must_use]
+    pub fn with_pr_ref_template(mut self, template: impl Into<String>) -> Self {
+        self.pr_ref_template = template.into();
         self
     }
 
@@ -720,6 +735,43 @@ impl RepoBackend for CliBackend {
         self.status().await
     }
 
+    async fn fetch_pr(&self, number: u64) -> Result<Revision> {
+        // The remote ref layout is operator-owned, never inferred from the forge:
+        // an unset template is a config error, not a guess.
+        if self.pr_ref_template.is_empty() {
+            return Err(Error::Config(
+                "fetch_pr needs [git] pr_ref_template (e.g. \"refs/pull/{n}/head\")".into(),
+            ));
+        }
+        // Bootstrap the mirror if needed (best-effort, like `fetch`): the fetch
+        // below still runs on the checkout when no remote is configured.
+        let _ = self.ensure_mirror().await;
+
+        // `{n}` is the only interpolation and `number` is a `u64`, so the remote
+        // ref is well-formed; the local ref comes from the shared `pr_local_ref`
+        // helper (fixed prefix + numeric tail). Screen the trailing segment via
+        // `safe_segment` anyway — defence-in-depth that blocks any future
+        // non-numeric caller and documents the invariant.
+        let remote_ref = self.pr_ref_template.replace("{n}", &number.to_string());
+        let local = agent_core::pr_local_ref(number);
+        let tail = local.rsplit('/').next().unwrap_or(&local);
+        safe_segment("pr ref segment", tail)?;
+
+        let base = self.base().to_path_buf();
+        let refspec = format!("{remote_ref}:{local}");
+        self.git_str(&base, &["fetch", self.remote_name(), &refspec])
+            .await?;
+
+        // Resolve the just-written local ref to the concrete head oid (the dedup
+        // key downstream increments build on). Read the *same* object DB the ref
+        // landed in — `base()`, the mirror when one exists — not `self.root`
+        // (which `resolve` uses and which a separate mirror wouldn't share).
+        let oid = self
+            .git_str(&base, &["rev-parse", "--verify", &local])
+            .await?;
+        Ok(Revision::from(oid))
+    }
+
     async fn worktree_add(&self, spec: &WorktreeSpec) -> Result<WorktreeHandle> {
         // A caller-supplied id must be a safe path segment; the auto-generated one
         // (below) is already `sanitize`d.
@@ -942,6 +994,7 @@ mod tests {
 
     struct RecordingSandbox {
         last: Mutex<Option<ExecSpec>>,
+        all: Mutex<Vec<ExecSpec>>,
         out: ExecOutput,
     }
 
@@ -949,8 +1002,20 @@ mod tests {
         fn new(out: ExecOutput) -> Arc<Self> {
             Arc::new(Self {
                 last: Mutex::new(None),
+                all: Mutex::new(Vec::new()),
                 out,
             })
+        }
+
+        /// The argv of every `git` call recorded, in order (an op like `fetch_pr`
+        /// funnels several: ensure_mirror, the fetch, the resolve).
+        fn all_argvs(&self) -> Vec<Vec<String>> {
+            self.all
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|s| s.argv.clone())
+                .collect()
         }
     }
 
@@ -958,6 +1023,7 @@ mod tests {
     impl Sandbox for RecordingSandbox {
         async fn exec(&self, spec: &ExecSpec) -> Result<ExecOutput> {
             *self.last.lock().unwrap() = Some(spec.clone());
+            self.all.lock().unwrap().push(spec.clone());
             Ok(self.out.clone())
         }
         fn capabilities(&self) -> SandboxCapabilities {
@@ -1029,5 +1095,122 @@ mod tests {
             msg.contains("fatal: bad revision"),
             "stderr surfaced: {msg}"
         );
+    }
+
+    // --- inc 2 (C9): fetch_pr builds the operator-configured refspec -----------
+    // A backend whose mirror is already present, so `ensure_mirror` short-circuits
+    // and `fetch_pr` funnels exactly the fetch + the rev-parse we assert on.
+    fn backend_ready_mirror() -> (CliBackend, PathBuf) {
+        let dir = agent_testkit::tempdir();
+        let mirror = dir.join("mirror");
+        std::fs::create_dir_all(&mirror).unwrap();
+        // A `HEAD` marker makes `mirror_ready()` true (skips the clone).
+        std::fs::write(mirror.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
+        let b = CliBackend::new(dir.join("root"), mirror.clone(), dir.join("wt"), "");
+        (b, mirror)
+    }
+
+    /// `{n}` is substituted into the operator template and the head lands on the
+    /// namespaced local ref — asserted on the exact argv the seam received.
+    #[tokio::test]
+    async fn positive_fetch_pr_builds_template_refspec() {
+        let rec = RecordingSandbox::new(ok_out(b"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n"));
+        let (b, mirror) = backend_ready_mirror();
+        let b = b
+            .with_sandbox(rec.clone())
+            .with_pr_ref_template("refs/pull/{n}/head");
+
+        let head = b.fetch_pr(42).await.unwrap();
+        assert_eq!(
+            head.as_str(),
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            "returns the resolved head oid"
+        );
+
+        let mirror_s = mirror.to_string_lossy().into_owned();
+        let argvs = rec.all_argvs();
+        assert!(
+            argvs.contains(&vec![
+                "git".into(),
+                "-C".into(),
+                mirror_s.clone(),
+                "fetch".into(),
+                "origin".into(),
+                "refs/pull/42/head:refs/fleet/pr/42".into(),
+            ]),
+            "template substituted + namespaced local ref, on the mirror: {argvs:?}"
+        );
+        assert!(
+            argvs.contains(&vec![
+                "git".into(),
+                "-C".into(),
+                mirror_s,
+                "rev-parse".into(),
+                "--verify".into(),
+                "refs/fleet/pr/42".into(),
+            ]),
+            "head resolved from the same object DB the ref landed in: {argvs:?}"
+        );
+    }
+
+    /// The template is the whole story — a GitLab layout is just a different string.
+    #[tokio::test]
+    async fn positive_fetch_pr_template_selects_gitlab_ref() {
+        let rec = RecordingSandbox::new(ok_out(b"cafebabecafebabecafebabecafebabecafebabe\n"));
+        let (b, mirror) = backend_ready_mirror();
+        let b = b
+            .with_sandbox(rec.clone())
+            .with_pr_ref_template("refs/merge-requests/{n}/head");
+
+        b.fetch_pr(7).await.unwrap();
+
+        let mirror_s = mirror.to_string_lossy().into_owned();
+        assert!(
+            rec.all_argvs().contains(&vec![
+                "git".into(),
+                "-C".into(),
+                mirror_s,
+                "fetch".into(),
+                "origin".into(),
+                "refs/merge-requests/7/head:refs/fleet/pr/7".into(),
+            ]),
+            "gitlab template drives the refspec"
+        );
+    }
+
+    /// No template ⇒ a clear config error, and **no** git spawn at all (fail
+    /// closed before touching the network).
+    #[tokio::test]
+    async fn negative_fetch_pr_empty_template_errors() {
+        let rec = RecordingSandbox::new(ok_out(b""));
+        let (b, _mirror) = backend_ready_mirror();
+        let b = b.with_sandbox(rec.clone()); // template left empty
+
+        let err = b.fetch_pr(1).await.unwrap_err();
+        assert!(
+            err.to_string().contains("pr_ref_template"),
+            "names the missing knob: {err}"
+        );
+        assert!(
+            rec.all_argvs().is_empty(),
+            "errs before any git spawn: {:?}",
+            rec.all_argvs()
+        );
+    }
+
+    /// The namespaced local ref is always a safe, non-escapable segment: the
+    /// `refs/fleet/pr/` prefix is fixed and the tail is a `u64`, so no PR number
+    /// (including the extremes) can inject a ref-hijack.
+    #[test]
+    fn adversarial_pr_ref_local_segment_is_safe() {
+        for n in [0u64, 1, 42, u64::MAX] {
+            let local = agent_core::pr_local_ref(n);
+            assert!(local.starts_with("refs/fleet/pr/"), "fixed prefix: {local}");
+            let tail = local.rsplit('/').next().unwrap();
+            assert!(
+                safe_segment("pr ref segment", tail).is_ok(),
+                "tail `{tail}` must pass safe_segment"
+            );
+        }
     }
 }

@@ -12,15 +12,48 @@ Three PRs, each based off `main`, never stacked, each gated by `nix flake check`
 
 ## Now
 
-- **Current PR:** PR7 — **R4** org tenancy tier (C25): convention + encoding + semantics docs
-- **Branch:** `feat/org-tenancy-tier-r4` (off main; R3c #275 merged as 9628ffc)
-- **Current step:** R4 · code + tests complete; **`nix flake check` GREEN**; committing + pushing + opening PR7
-- **Last action:** gate green on retry (1st run hit the known pty `positive_cursor_resumes_without_replaying` flake under coverage — 3/3 pass in isolation, R4 touches no PTY code)
-- **Next action:** open PR7, await merge. R3+R4 = Phase 2 complete.
+- **Current PR:** inc 2 — **C9** PR fetch + checkout (`fetch_pr` + `--review <PR#>` fetch-if-missing)
+- **Branch:** `feat/review-fleet-inc2-pr-checkout` (off main; Phase 2 R4 #276 merged)
+- **Current step:** code + tests complete; running `nix flake check`, then commit + push + open PR
+- **Last action:** all touched-crate tests green (agent-git unit + objects_fixture integ, agent-review orchestrator); clippy -D warnings clean on the 4 crates
+- **Next action:** `nix flake check`, open the PR, flip C9 → 🟡 in STATUS.md.
 
-Phase 1 (Foundation) COMPLETE — R2 #270 → R1a #271 → R1b #272 all merged (main 9e8af41).
-Phase 2 = R3 (exec chokepoint, C24) + R4 (org tier, C25); plan file
+Foundation COMPLETE: Phase 1 (R2 #270 → R1a #271 → R1b #272, main 9e8af41) + Phase 2
+(R3 exec-chokepoint #273/#274/#275 + R4 org-tier #276). Now the **fleet build proper**;
+inc 2 (C9) is its first prerequisite. Plan file
 `~/.claude/.../plans/ok-we-have-more-immutable-cookie.md`.
+
+---
+
+## Increment 2 (C9) — PR fetch + checkout  🟡 (code+tests done; gate running)
+
+The gap: the git seam could mirror + worktree an *already-resolvable* revision but could not
+fetch a **PR head ref** (`refs/pull/<N>/head` / `refs/merge-requests/<N>/head` — not in a default
+`git fetch`), and a `PullRequest` carries only a branch name, no head SHA. So `agent --review <PR#>`
+was **broken on a fresh clone** (`resolve` → branch names → `rev-parse --verify` fails, always for
+fork PRs). Additive, low-risk, single gated PR off `main`.
+
+- [x] `RepoBackend::fetch_pr(number) -> Revision` — **default body** (`Err`, matching the
+  optional-op idiom so gRPC/remote backends compile unchanged) — `agent-core/src/lib.rs`
+- [x] `pub fn pr_local_ref(number)` — single source of truth for the namespaced local ref
+  (`refs/fleet/pr/<n>`), shared by the impl (writes) + orchestrator present-check (reads) — `agent-core`
+- [x] `CliBackend::fetch_pr` + `with_pr_ref_template` builder + `pr_ref_template` field — empty
+  template ⇒ `Err(Config)`; `ensure_mirror`; `{n}`-substituted refspec via the R3c sandbox funnel;
+  head resolved from `base()` (the DB the ref lands in), not `self.root` — `agent-git/src/cli.rs`
+- [x] Decision: PR ref convention = **operator config** (`[git] pr_ref_template`), forge-agnostic —
+  keeps `RepoBackend`/`Forge` separated, covers self-hosted layouts
+- [x] `GitCfg.pr_ref_template` (`#[serde(default)]`) + `build_repo` wiring — `agent-runtime/{config,git}.rs`
+- [x] `MeteredRepo::fetch_pr` delegating override (a defaulted trait method the decorator MUST
+  forward or it silently shadows the real impl) — `agent-runtime/src/metered.rs`
+- [x] Orchestrator Pr arm: fetch-if-missing, head resolved **fork-correctly** via the namespaced PR
+  ref (never `source_branch`, which can collide with a local branch) — `agent-review/src/orchestrator.rs`
+- [x] `config/agent.toml` — `pr_ref_template = "refs/pull/{n}/head"` active + GitLab alt commented
+- [x] Tests: agent-git unit (recording-sandbox: refspec build, GitLab template, empty→err+no-spawn,
+  safe-segment) + real-repo integration (resolve head oid, worktree files, idempotent refetch,
+  unknown-PR soft error, `u64::MAX` boundary, advisory read-only) + agent-review orchestrator
+  (fetch-when-missing, skip-when-present) — ALL PASS
+- [x] `nix flake check` — **GREEN** ("all checks passed!", exit 0): clippy -D warnings, tests, buf
+  additive (no baseline bump), bench + leak, fmt, constants-sync, coverage all clean
 
 ---
 

@@ -732,6 +732,11 @@ backend       = "cli"
 mirror_dir    = ""           # empty ⇒ <repo>/.agent-seddon/mirror
 worktrees_dir = ""           # empty ⇒ <repo>/.agent-seddon/worktrees
 remote        = ""           # empty ⇒ infer from the checkout's origin
+# The remote ref `--review <PR#>` fetches per PR number (`{n}` ⇒ the number).
+# Operator-owned and forge-agnostic — the forge kind is never inferred from it.
+# Empty ⇒ PR review can't fetch a fresh PR head. GitHub default below; for GitLab
+# use "refs/merge-requests/{n}/head".
+pr_ref_template = "refs/pull/{n}/head"
 auto_fetch_secs = 0          # >0 ⇒ background-fetch the mirror if older than this
 max_worktrees = 8
 push_policy   = "never"      # never | checkpoint-only | explicit
