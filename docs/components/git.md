@@ -43,6 +43,7 @@ pub trait RepoBackend: Send + Sync {
     // mirror / worktree / ref lifecycle (side-effecting, session-scoped)
     async fn status(&self) -> Result<RepoStatus>;
     async fn fetch(&self) -> Result<RepoStatus>;
+    async fn fetch_pr(&self, number: u64) -> Result<Revision>; // default: Err (optional op)
     async fn worktree_add(&self, spec: &WorktreeSpec) -> Result<WorktreeHandle>;
     async fn worktree_list(&self) -> Result<Vec<WorktreeHandle>>;
     async fn worktree_remove(&self, id: &str) -> Result<()>;
@@ -100,10 +101,21 @@ backend       = "cli"        # cli (default) | hybrid (planned) | grpc (planned)
 mirror_dir    = ""           # empty ⇒ <repo>/.agent-seddon/mirror
 worktrees_dir = ""           # empty ⇒ <repo>/.agent-seddon/worktrees
 remote        = ""           # empty ⇒ infer from the checkout's origin
+pr_ref_template = "refs/pull/{n}/head"  # GitHub; GitLab: "refs/merge-requests/{n}/head"
 auto_fetch_secs = 0          # >0 ⇒ background-fetch the mirror if older than this
 max_worktrees = 8
 push_policy   = "never"      # never | checkpoint-only | explicit
 ```
+
+**PR fetch (`fetch_pr`).** A `PullRequest` carries only a branch name, never a
+head SHA, and a forge PR head ref (`refs/pull/<N>/head`, `refs/merge-requests/
+<N>/head`, …) is **not** in a default `git fetch` — so `agent --review <PR#>`
+cannot resolve a PR on a fresh mirror without an explicit fetch. `fetch_pr(number)`
+substitutes `{n}` in `pr_ref_template` (the operator-owned, forge-agnostic remote
+ref), fetches it into the namespaced local ref `refs/fleet/pr/<n>` (`pr_local_ref`),
+and returns the resolved head oid. The `--review <PR#>` path resolves that local
+ref first and fetches only when it is missing. An empty `pr_ref_template` makes
+`fetch_pr` a clear config error rather than a guess.
 
 The read tools work against the current checkout's object database out of the
 box — no mirror required. Setting `auto_fetch_secs > 0` opts into the shared

@@ -55,7 +55,8 @@ pub fn build_repo(
             // execution chokepoint, C24) rather than a raw `Command`.
             Ok(Arc::new(
                 agent_git::CliBackend::new(root, mirror, run_dir, cfg.git.remote.clone())
-                    .with_sandbox(sandbox),
+                    .with_sandbox(sandbox)
+                    .with_pr_ref_template(cfg.git.pr_ref_template.clone()),
             ))
         }
         name => registry

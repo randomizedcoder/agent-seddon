@@ -327,3 +327,130 @@ async fn worktree_add_list_remove_roundtrip() {
     b.worktree_remove("cmp").await.unwrap();
     assert!(!handle.path.exists(), "worktree dir removed");
 }
+
+// --- inc 2 (C9): fetch_pr against a real repo -------------------------------
+
+/// Capture `git -C dir <args>` stdout (trimmed), panicking on failure.
+fn git_out(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .expect("spawn git");
+    assert!(out.status.success(), "git {args:?} failed");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// The fixture repo with `refs/pull/1/head` pointing at the `feature` commit —
+/// standing in for a forge PR head ref, which is *not* reachable via a default
+/// `git fetch` (the exact gap `fetch_pr` closes). Returns (source, head oid).
+fn fixture_with_pr() -> (PathBuf, String) {
+    let source = fixture();
+    let head = git_out(&source, &["rev-parse", "feature"]);
+    git(&source, &["update-ref", "refs/pull/1/head", &head]);
+    (source, head)
+}
+
+/// A backend mirroring `source`, configured with the GitHub PR-ref template.
+fn pr_backend(source: &Path, work: &Path) -> CliBackend {
+    CliBackend::new(
+        source, // reads fall back to the checkout
+        work.join("mirror"),
+        work.join("wt"),
+        source.to_string_lossy().to_string(),
+    )
+    .with_pr_ref_template("refs/pull/{n}/head")
+}
+
+#[tokio::test]
+async fn positive_fetch_pr_resolves_head_oid() {
+    let (source, head) = fixture_with_pr();
+    let work = tempdir();
+    let b = pr_backend(&source, &work);
+
+    let got = b.fetch_pr(1).await.unwrap();
+    assert_eq!(got.as_str().len(), 40, "full sha-1: {}", got.as_str());
+    assert_eq!(got.as_str(), head, "fetched head == the PR head commit");
+}
+
+#[tokio::test]
+async fn positive_worktree_of_fetched_pr_has_expected_files() {
+    let (source, _head) = fixture_with_pr();
+    let work = tempdir();
+    let b = pr_backend(&source, &work);
+
+    let head = b.fetch_pr(1).await.unwrap();
+    let h = b
+        .worktree_add(&WorktreeSpec {
+            revision: head,
+            writable: false,
+            id: Some("pr-1".into()),
+        })
+        .await
+        .unwrap();
+    assert!(
+        h.path.join("b.txt").exists(),
+        "the PR head's files are checked out"
+    );
+    b.worktree_remove("pr-1").await.unwrap();
+}
+
+#[tokio::test]
+async fn corner_refetch_same_pr_is_idempotent() {
+    let (source, _head) = fixture_with_pr();
+    let work = tempdir();
+    let b = pr_backend(&source, &work);
+
+    let first = b.fetch_pr(1).await.unwrap();
+    let second = b.fetch_pr(1).await.unwrap();
+    assert_eq!(first, second, "refetching the same PR yields the same oid");
+}
+
+#[tokio::test]
+async fn negative_unknown_pr_number_is_soft_error() {
+    let (source, _head) = fixture_with_pr();
+    let work = tempdir();
+    let b = pr_backend(&source, &work);
+
+    let err = b.fetch_pr(999).await.unwrap_err();
+    assert!(!err.to_string().is_empty(), "a missing PR ref is an error");
+    // The mirror survives a failed fetch (no partial teardown).
+    assert!(
+        work.join("mirror").join("objects").exists(),
+        "mirror intact after a failed fetch"
+    );
+}
+
+#[tokio::test]
+async fn boundary_pr_number_max_u64() {
+    let (source, _head) = fixture_with_pr();
+    let work = tempdir();
+    let b = pr_backend(&source, &work);
+
+    // `u64::MAX` builds a well-formed refspec; it only errs because no such PR
+    // ref exists — never on a formatting/overflow panic.
+    let err = b.fetch_pr(u64::MAX).await.unwrap_err();
+    assert!(!err.to_string().is_empty(), "missing ref, not a panic");
+}
+
+#[tokio::test]
+async fn corner_worktree_of_fetched_pr_is_advisory_readonly() {
+    let (source, _head) = fixture_with_pr();
+    let work = tempdir();
+    let b = pr_backend(&source, &work);
+
+    let head = b.fetch_pr(1).await.unwrap();
+    let h = b
+        .worktree_add(&WorktreeSpec {
+            revision: head,
+            writable: false,
+            id: Some("pr-ro".into()),
+        })
+        .await
+        .unwrap();
+    // `writable:false` is an advisory handle flag in inc 2 — true FS read-only /
+    // no-exec enforcement is a C23 sandbox-backend concern, not asserted here.
+    assert!(!h.writable, "handle marked read-only (advisory)");
+    b.worktree_remove("pr-ro").await.unwrap();
+}

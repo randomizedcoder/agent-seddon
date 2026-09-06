@@ -240,7 +240,19 @@ impl ReviewOrchestrator {
                     Error::Config("no forge configured; cannot resolve a PR number".into())
                 })?;
                 let pr = forge.get_pr(*n).await?;
-                (pr.target_branch, pr.source_branch)
+                // A PullRequest carries only a branch name, never a head SHA, and
+                // the forge PR head ref (`refs/pull/<N>/head`, …) isn't in a
+                // default fetch — so on a fresh mirror `source_branch` never
+                // resolves (always, for fork PRs). Resolve the head fork-correctly
+                // via the namespaced PR ref (never `source_branch`, which can
+                // collide with an unrelated local branch), fetching it if the
+                // mirror doesn't already carry it.
+                let local = agent_core::pr_local_ref(*n);
+                let head = match self.repo.resolve(&Revision::from(local.clone())).await {
+                    Ok(oid) => oid.0,
+                    Err(_) => self.repo.fetch_pr(*n).await?.0,
+                };
+                (pr.target_branch, head)
             }
             ReviewTarget::Branch(b) => {
                 if !safe_segment(b) {
@@ -501,5 +513,220 @@ fn repo_hash(gs: &GitState, root: &Path) -> String {
         fnv1a_hex(root.to_string_lossy().as_bytes())
     } else {
         gs.remote_url_hash.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_core::{Oid, PullRequest};
+    use std::sync::Mutex;
+
+    /// A `RepoBackend` double for the PR-fetch path: the boring reads delegate to
+    /// `FixtureRepo`, but `resolve` of a `refs/fleet/pr/*` ref is toggleable (PR
+    /// already present vs. not) and `fetch_pr` records its calls and returns a
+    /// canned head oid — so we can assert exactly when the orchestrator fetches.
+    struct PrFakeRepo {
+        inner: agent_testkit::FixtureRepo,
+        /// Whether a `refs/fleet/pr/*` ref already resolves (PR head present).
+        pr_present: bool,
+        /// PR numbers passed to `fetch_pr`, in order.
+        fetched: Arc<Mutex<Vec<u64>>>,
+        /// The head oid `fetch_pr` (and a present `resolve`) yields.
+        head_oid: String,
+    }
+
+    impl PrFakeRepo {
+        fn new(pr_present: bool) -> Self {
+            Self {
+                inner: agent_testkit::FixtureRepo::new().with_branch("main", "0".repeat(40)),
+                pr_present,
+                fetched: Arc::new(Mutex::new(Vec::new())),
+                head_oid: "a".repeat(40),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl RepoBackend for PrFakeRepo {
+        async fn resolve(&self, rev: &Revision) -> Result<Oid> {
+            if rev.as_str().starts_with("refs/fleet/pr/") {
+                return if self.pr_present {
+                    Ok(Oid(self.head_oid.clone()))
+                } else {
+                    Err(Error::Repo("no such local PR ref (not fetched)".into()))
+                };
+            }
+            self.inner.resolve(rev).await
+        }
+        async fn fetch_pr(&self, number: u64) -> Result<Revision> {
+            self.fetched.lock().unwrap().push(number);
+            Ok(Revision::from(self.head_oid.clone()))
+        }
+        async fn read_file(&self, rev: &Revision, path: &Path) -> Result<agent_core::BlobContent> {
+            self.inner.read_file(rev, path).await
+        }
+        async fn list_tree(
+            &self,
+            rev: &Revision,
+            path: &Path,
+            recursive: bool,
+        ) -> Result<Vec<agent_core::TreeEntry>> {
+            self.inner.list_tree(rev, path, recursive).await
+        }
+        async fn diff(
+            &self,
+            base: &Revision,
+            target: &Revision,
+            globs: &[String],
+        ) -> Result<agent_core::DiffResult> {
+            self.inner.diff(base, target, globs).await
+        }
+        async fn grep(
+            &self,
+            rev: &Revision,
+            pattern: &str,
+            globs: &[String],
+            limit: usize,
+        ) -> Result<Vec<agent_core::GrepHit>> {
+            self.inner.grep(rev, pattern, globs, limit).await
+        }
+        async fn log(
+            &self,
+            rev: &Revision,
+            path: Option<&Path>,
+            limit: usize,
+        ) -> Result<Vec<agent_core::CommitInfo>> {
+            self.inner.log(rev, path, limit).await
+        }
+        async fn branches(&self) -> Result<Vec<(String, Oid)>> {
+            self.inner.branches().await
+        }
+        async fn status(&self) -> Result<agent_core::RepoStatus> {
+            self.inner.status().await
+        }
+        async fn fetch(&self) -> Result<agent_core::RepoStatus> {
+            self.inner.fetch().await
+        }
+        async fn worktree_add(
+            &self,
+            spec: &agent_core::WorktreeSpec,
+        ) -> Result<agent_core::WorktreeHandle> {
+            self.inner.worktree_add(spec).await
+        }
+        async fn worktree_list(&self) -> Result<Vec<agent_core::WorktreeHandle>> {
+            self.inner.worktree_list().await
+        }
+        async fn worktree_remove(&self, id: &str) -> Result<()> {
+            self.inner.worktree_remove(id).await
+        }
+        async fn checkpoint(
+            &self,
+            worktree_id: &str,
+            name: &str,
+        ) -> Result<agent_core::Checkpoint> {
+            self.inner.checkpoint(worktree_id, name).await
+        }
+        async fn push(&self, checkpoint: &agent_core::Checkpoint, remote_ref: &str) -> Result<()> {
+            self.inner.push(checkpoint, remote_ref).await
+        }
+    }
+
+    /// A `Forge` double returning one canned PR (`main` ← `feature`). Only
+    /// `get_pr` is exercised; the rest are never called on the resolve path.
+    struct FakeForge {
+        pr: PullRequest,
+    }
+
+    #[async_trait]
+    impl Forge for FakeForge {
+        fn name(&self) -> &str {
+            "github"
+        }
+        async fn get_pr(&self, _number: u64) -> Result<PullRequest> {
+            Ok(self.pr.clone())
+        }
+        async fn list_prs(&self, _page: u32) -> Result<agent_core::Page<PullRequest>> {
+            unimplemented!("not on the resolve path")
+        }
+        async fn list_issues(&self, _page: u32) -> Result<agent_core::Page<agent_core::Issue>> {
+            unimplemented!("not on the resolve path")
+        }
+        async fn import_issue(&self, _number: u64) -> Result<agent_core::Issue> {
+            unimplemented!("not on the resolve path")
+        }
+        async fn create_pr(&self, _req: &agent_core::CreatePrRequest) -> Result<PullRequest> {
+            unimplemented!("not on the resolve path")
+        }
+        async fn comment(&self, _number: u64, _body: &str) -> Result<agent_core::Comment> {
+            unimplemented!("not on the resolve path")
+        }
+        async fn review_pr(
+            &self,
+            _number: u64,
+            _verdict: agent_core::ReviewVerdict,
+            _body: &str,
+        ) -> Result<agent_core::Comment> {
+            unimplemented!("not on the resolve path")
+        }
+    }
+
+    fn canned_pr() -> PullRequest {
+        PullRequest {
+            number: 7,
+            title: "t".into(),
+            body: "b".into(),
+            state: "open".into(),
+            author: "a".into(),
+            url: "u".into(),
+            source_branch: "feature".into(),
+            target_branch: "main".into(),
+            draft: false,
+        }
+    }
+
+    fn orchestrator(repo: Arc<dyn RepoBackend>) -> ReviewOrchestrator {
+        ReviewOrchestrator::new(
+            "/fixture",
+            repo,
+            None,
+            Some(Arc::new(FakeForge { pr: canned_pr() })),
+        )
+    }
+
+    /// On a fresh mirror the PR head ref is absent, so the orchestrator fetches it
+    /// once and reviews the resolved oid — not the (unfetched) source branch.
+    #[tokio::test]
+    async fn positive_review_pr_fetches_when_head_missing() {
+        let repo = Arc::new(PrFakeRepo::new(false));
+        let fetched = repo.fetched.clone();
+        let head_oid = repo.head_oid.clone();
+        let r = orchestrator(repo)
+            .resolve(&ReviewTarget::Pr(7))
+            .await
+            .unwrap();
+
+        assert_eq!(&*fetched.lock().unwrap(), &[7], "fetched the PR head once");
+        assert_eq!(r.head.as_str(), head_oid, "head is the resolved PR oid");
+        assert_eq!(r.base.as_str(), "main", "base is the PR target branch");
+    }
+
+    /// When the PR head ref already resolves (previously fetched), no fetch runs —
+    /// the present-check short-circuits.
+    #[tokio::test]
+    async fn corner_review_pr_skips_fetch_when_present() {
+        let repo = Arc::new(PrFakeRepo::new(true));
+        let fetched = repo.fetched.clone();
+        let head_oid = repo.head_oid.clone();
+        let r = orchestrator(repo)
+            .resolve(&ReviewTarget::Pr(7))
+            .await
+            .unwrap();
+
+        assert!(
+            fetched.lock().unwrap().is_empty(),
+            "no fetch when the PR head is already present"
+        );
+        assert_eq!(r.head.as_str(), head_oid, "head from the present local ref");
     }
 }

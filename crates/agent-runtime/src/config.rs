@@ -1739,6 +1739,12 @@ pub struct GitCfg {
     /// Upstream remote URL for the mirror. Empty ⇒ infer from the checkout's origin.
     #[serde(default)]
     pub remote: String,
+    /// Remote-ref template `fetch_pr` fetches per PR number, e.g.
+    /// `refs/pull/{n}/head` (GitHub) or `refs/merge-requests/{n}/head` (GitLab).
+    /// `{n}` is replaced by the PR number. Operator-owned and forge-agnostic (the
+    /// forge kind is never inferred from it). Empty ⇒ `fetch_pr` errs.
+    #[serde(default)]
+    pub pr_ref_template: String,
     /// On start, fetch the mirror in the background if it is older than this many
     /// seconds. `0` ⇒ never auto-fetch.
     #[serde(default)]
@@ -1758,6 +1764,7 @@ impl Default for GitCfg {
             mirror_dir: String::new(),
             worktrees_dir: String::new(),
             remote: String::new(),
+            pr_ref_template: String::new(),
             auto_fetch_secs: 0,
             max_worktrees: default_max_worktrees(),
             push_policy: default_push_policy(),
