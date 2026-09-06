@@ -100,6 +100,7 @@ impl Tool for PtyTool {
                     cols: dim(&args, "cols", 120),
                     rows: dim(&args, "rows", 40),
                     cwd: ctx.cwd.display().to_string(),
+                    ..Default::default()
                 };
                 match self.backend.open(&spec).await {
                     Ok(id) => Ok(Observation::ok(format!(

@@ -202,6 +202,7 @@ async fn positive_interactive_session_round_trips(#[case] transport: Transport) 
             cols: 80,
             rows: 24,
             cwd: String::new(),
+            ..Default::default()
         })
         .await
         .expect("open");
@@ -288,6 +289,7 @@ async fn positive_exited_child_reports_its_code() {
             cols: 80,
             rows: 24,
             cwd: String::new(),
+            ..Default::default()
         })
         .await
         .expect("open");
@@ -323,6 +325,7 @@ async fn adversarial_absurd_dimensions_are_clamped(#[case] cols: u32, #[case] ro
         cols,
         rows,
         cwd: String::new(),
+        env: agent_proto::pb::ExecEnvPolicy::Inherit as i32,
     }
     .into();
     assert!(

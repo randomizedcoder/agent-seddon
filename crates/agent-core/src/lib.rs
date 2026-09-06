@@ -3159,6 +3159,10 @@ pub struct PtySpec {
     pub rows: u16,
     /// Working directory; empty ⇒ the agent's.
     pub cwd: String,
+    /// Environment policy for the pty child. `Scrub` drops the ambient env (no
+    /// host secrets) keeping only a minimal `PATH` + `TERM` — mirroring the
+    /// `Sandbox` seam's `EnvPolicy`. Default `Inherit` (unchanged behaviour).
+    pub env: EnvPolicy,
 }
 
 impl Default for PtySpec {
@@ -3171,6 +3175,7 @@ impl Default for PtySpec {
             cols: 120,
             rows: 40,
             cwd: String::new(),
+            env: EnvPolicy::Inherit,
         }
     }
 }

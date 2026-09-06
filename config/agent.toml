@@ -930,6 +930,12 @@ job         = "agent-seddon"
 #                        JSON-RPC channel and can't take a prompt).
 # `deny_paths` adds sensitive-path globs; `allow_paths` exempts paths from the guard.
 #
+# `deny_tools` refuses the named tools (a `*` glob per entry) BEFORE the base
+# policy sees them — a fail-closed overlay that can only remove tools, never add
+# them. It is the Tier-0 execution-isolation lever: a session running untrusted
+# code (e.g. a review-fleet session over a PR) sets `deny_tools = ["bash", "pty"]`
+# so the shell / terminal escape hatches are gone, whatever `[agent] policy` says.
+#
 # `allow` is only used when [agent] policy = "allow-list": allow a tool whose name
 # matches `tool` (a `*` glob) and, if `arg` is set, whose arguments contain that
 # substring. Everything else is denied. Empty ⇒ deny all.
@@ -937,6 +943,7 @@ job         = "agent-seddon"
 # guard      = "prompt"                 # "prompt" | "deny" | "off"
 # deny_paths = ["deploy/*.key", "*.pem"]
 # allow_paths = [".env.example"]
+# deny_tools = ["bash", "pty"]          # fail-closed: remove these tools entirely
 # allow = [
 #   { tool = "read_file" },
 #   { tool = "grep" },

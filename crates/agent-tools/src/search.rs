@@ -10,12 +10,13 @@
 //! produce the same `path:line:text` output, so behaviour is identical either way.
 
 use crate::{arg_bool, arg_str, arg_str_opt, resolve_within, truncate};
-use agent_core::{Error, Observation, Result, Tool, ToolContext, ToolSchema};
+use agent_core::{Error, ExecSpec, Observation, Result, Sandbox, Tool, ToolContext, ToolSchema};
 use async_trait::async_trait;
 use ignore::WalkBuilder;
 use regex::RegexBuilder;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Stop after this many matches/entries to bound output.
 const MAX_HITS: usize = 300;
@@ -32,7 +33,26 @@ fn rel(path: &Path, cwd: &Path) -> String {
 
 // --- grep -----------------------------------------------------------------
 
-pub struct GrepTool;
+/// The `rg` fast path spawns a process, so it goes through the [`Sandbox`] seam
+/// (the single execution chokepoint) — the runtime picks the backend from
+/// `[sandbox] backend`, same as `bash`. The in-process `ignore`-crate fallback
+/// spawns nothing and is unaffected.
+pub struct GrepTool {
+    sandbox: Arc<dyn Sandbox>,
+}
+
+impl GrepTool {
+    pub fn new(sandbox: Arc<dyn Sandbox>) -> Self {
+        Self { sandbox }
+    }
+}
+
+impl Default for GrepTool {
+    /// The unconfined `local` backend — today's behaviour.
+    fn default() -> Self {
+        Self::new(Arc::new(agent_sandbox::LocalSandbox))
+    }
+}
 
 #[async_trait]
 impl Tool for GrepTool {
@@ -72,9 +92,10 @@ impl Tool for GrepTool {
             Err(e) => return Ok(Observation::error(format!("invalid regex: {e}"))),
         };
         let cwd = ctx.cwd.clone();
-        // Fast path: the `rg` binary. `None` means it could not run (not on PATH,
-        // or a hard error) — fall back to the equivalent in-process walk.
-        if let Some(out) = ripgrep(&pattern, ci, &root, &cwd).await {
+        // Fast path: the `rg` binary, through the Sandbox seam. `None` means it
+        // could not run (not on PATH, or a hard error) — fall back to the
+        // equivalent in-process walk.
+        if let Some(out) = self.ripgrep(&pattern, ci, &root, &cwd).await {
             return Ok(Observation::ok(truncate(out)));
         }
         let out = tokio::task::spawn_blocking(move || grep_walk(&root, &cwd, &re))
@@ -92,24 +113,33 @@ impl Tool for GrepTool {
 /// Output is normalised to match the fallback exactly: paths relative to `cwd`
 /// (`rg` is handed the absolute root and prints absolute paths, which we strip),
 /// capped at `MAX_HITS` with the same truncation marker.
-async fn ripgrep(pattern: &str, ci: bool, root: &Path, cwd: &Path) -> Option<String> {
-    let mut cmd = tokio::process::Command::new("rg");
-    cmd.arg("--no-heading") // `path:line:text` per match, not grouped-by-file
-        .arg("--line-number")
-        .arg("--color=never")
-        .arg("--no-messages"); // swallow "binary file" / permission notes
-    if ci {
-        cmd.arg("--ignore-case");
-    }
-    // `-e <pattern>` keeps a flag-like pattern (e.g. `--pre=/x`) a literal regex;
-    // the absolute `root` positional cannot be mistaken for a flag.
-    cmd.arg("-e").arg(pattern).arg(root).current_dir(cwd);
+impl GrepTool {
+    async fn ripgrep(&self, pattern: &str, ci: bool, root: &Path, cwd: &Path) -> Option<String> {
+        let mut argv = vec![
+            "rg".to_string(),
+            "--no-heading".into(), // `path:line:text` per match, not grouped-by-file
+            "--line-number".into(),
+            "--color=never".into(),
+            "--no-messages".into(), // swallow "binary file" / permission notes
+        ];
+        if ci {
+            argv.push("--ignore-case".into());
+        }
+        // `-e <pattern>` keeps a flag-like pattern (e.g. `--pre=/x`) a literal regex;
+        // the absolute `root` positional cannot be mistaken for a flag. argv mode
+        // (no shell) means the untrusted pattern is never re-interpreted.
+        argv.push("-e".into());
+        argv.push(pattern.to_string());
+        argv.push(root.display().to_string());
 
-    let output = cmd.output().await.ok()?; // spawn failure (no `rg`) → fall back
-    match output.status.code() {
-        Some(0) => Some(format_rg(&output.stdout, cwd)), // matches
-        Some(1) => Some("(no matches)".into()),          // ran cleanly, found nothing
-        _ => None, // exit 2 (bad usage / internal error) → fall back to the walk
+        // Err (e.g. `rg` not on PATH, or a transport failure to a remote backend)
+        // → fall back to the in-process walk, exactly as before.
+        let out = self.sandbox.exec(&ExecSpec::argv(argv, cwd)).await.ok()?;
+        match out.exit_code {
+            0 => Some(format_rg(&out.stdout_bytes, cwd)), // matches
+            1 => Some("(no matches)".into()),             // ran cleanly, found nothing
+            _ => None, // exit 2 (bad usage / internal error) or a timeout → fall back
+        }
     }
 }
 
@@ -404,7 +434,7 @@ mod tests {
         args.as_object_mut()
             .unwrap()
             .extend(extra.as_object().unwrap().clone());
-        let obs = GrepTool.execute(args, &ctx(&dir)).await.unwrap();
+        let obs = GrepTool::default().execute(args, &ctx(&dir)).await.unwrap();
         match expected {
             Ok(needles) => {
                 assert!(!obs.is_error, "unexpected error: {}", obs.content);
@@ -547,7 +577,7 @@ mod tests {
         args.as_object_mut()
             .unwrap()
             .extend(extra.as_object().unwrap().clone());
-        let obs = GrepTool.execute(args, &ctx(&dir)).await.unwrap();
+        let obs = GrepTool::default().execute(args, &ctx(&dir)).await.unwrap();
         assert_contains(&obs, &present, &absent);
     }
 
@@ -556,7 +586,7 @@ mod tests {
     async fn grep_truncates_at_max_hits() {
         let dir = tempdir();
         std::fs::write(dir.join("big.txt"), "match\n".repeat(MAX_HITS + 50)).unwrap();
-        let obs = GrepTool
+        let obs = GrepTool::default()
             .execute(json!({"pattern": "match"}), &ctx(&dir))
             .await
             .unwrap();

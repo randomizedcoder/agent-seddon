@@ -125,7 +125,7 @@ async fn tools_do_not_leak() {
     {
         std::fs::write(ctx.cwd.join("s.txt"), "needle here\nother line\n").unwrap();
         assert_no_leak(400, || async {
-            let obs = agent_tools::GrepTool
+            let obs = agent_tools::GrepTool::default()
                 .execute(serde_json::json!({ "pattern": "needle" }), &ctx)
                 .await
                 .unwrap();

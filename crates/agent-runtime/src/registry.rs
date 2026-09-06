@@ -715,9 +715,9 @@ pub fn register_builtins(r: &mut Registry) {
     });
     #[cfg(feature = "tool-search")]
     {
-        r.tool("grep", |_ctx| {
-            Ok(Arc::new(agent_tools::GrepTool) as Arc<dyn Tool>)
-        });
+        // `grep` is wired by the builder (its `rg` fast path spawns through the
+        // config-selected Sandbox backend), not a plain registry factory — like
+        // `bash`. `find`/`ls` are in-process walks (no spawn) and stay factories.
         r.tool("find", |_ctx| {
             Ok(Arc::new(agent_tools::FindTool) as Arc<dyn Tool>)
         });

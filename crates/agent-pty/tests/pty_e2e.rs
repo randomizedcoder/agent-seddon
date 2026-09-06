@@ -19,6 +19,39 @@ fn spec(cmd: &str, args: &[&str]) -> PtySpec {
     }
 }
 
+/// `EnvPolicy::Scrub`: a pty child must not see host env (no secrets). Read-only
+/// (`HOME` as a stand-in) → race-free. Runs `sh -c` so the shell reads the var.
+#[tokio::test]
+async fn adversarial_scrub_hides_host_env_from_pty_child() {
+    let mut s = spec(
+        "sh",
+        &["-c", r#"printf '%s' "${HOME:-__EMPTY__}"; sleep 0.1"#],
+    );
+    s.env = agent_core::EnvPolicy::Scrub;
+    let pty = LocalPty::new();
+    let id = pty.open(&s).await.expect("open");
+
+    let mut text = String::new();
+    wait_for(
+        || {
+            let out = futures_lite::future::block_on(pty.read(&id, None)).expect("read");
+            text.push_str(&String::from_utf8_lossy(&out.data));
+            text.contains("__EMPTY__")
+        },
+        "scrubbed HOME",
+    )
+    .await;
+    assert!(
+        text.contains("__EMPTY__"),
+        "scrub must drop HOME; got: {text:?}"
+    );
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            assert!(!text.contains(&home), "the real HOME leaked: {text:?}");
+        }
+    }
+}
+
 /// Poll until `f` holds or the deadline passes. A pty is inherently
 /// asynchronous — the child writes when it feels like it — so tests wait for a
 /// condition rather than sleeping a fixed amount and hoping.

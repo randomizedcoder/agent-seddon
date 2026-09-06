@@ -86,6 +86,9 @@ message PtyOpenRequest {
   uint32 rows = 4;
   // Empty ⇒ the server's working directory.
   string cwd = 5;
+  // Environment policy for the child (`Scrub` drops host secrets, keeping a
+  // minimal PATH + TERM). Reuses the exec seam's enum.
+  ExecEnvPolicy env = 6;
 }
 
 message PtyWriteRequest {
