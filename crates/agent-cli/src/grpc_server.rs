@@ -931,6 +931,16 @@ pub async fn serve_fleet(agent: Arc<Agent>, listen: Endpoint) -> anyhow::Result<
             )
             .await;
 
+            // C7 Slack watch (inc 4b): one Socket-Mode connection fanned out from each
+            // enabled row's `slack_trigger_channel`, emitting onto the same queue. Started
+            // only when an app-level token is configured.
+            spawn_slack_watch(
+                agent.clone(),
+                roster.clone(),
+                queue.clone() as Arc<dyn agent_core::TriggerSink>,
+            )
+            .await;
+
             Some(queue as Arc<dyn agent_core::TriggerSink>)
         }
         None => {
@@ -1059,6 +1069,74 @@ async fn spawn_forge_poll(
                 .await;
         }
     });
+}
+
+/// Start the C7 Slack-watch trigger source (inc 4b): resolve the app-level token
+/// (`[review_fleet.slack] app_token_ref`, C5 — empty/unresolved ⇒ no watch), build a
+/// `SlackWatch` fan-out from the roster's enabled rows (each row's `slack_trigger_channel` →
+/// its session + expected repo), then run one Socket-Mode connection, reconnecting with
+/// `agent-retry` backoff whenever Slack drops it. Emits onto the same `sink` the
+/// orchestrator drains, so a Slack-posted link and a polled PR are indistinguishable
+/// downstream. Started only when at least one row has a trigger channel.
+async fn spawn_slack_watch(
+    agent: Arc<Agent>,
+    roster: Arc<dyn agent_core::FleetRegistry>,
+    sink: Arc<dyn agent_core::TriggerSink>,
+) {
+    let token_ref = agent.fleet_slack_app_token_ref().trim().to_string();
+    if token_ref.is_empty() {
+        tracing::debug!("fleet: no [review_fleet.slack] app_token_ref; Slack watch disabled");
+        return;
+    }
+    let app_token = match agent_runtime::resolve_token_ref(&token_ref) {
+        Ok(secret) if !secret.expose().is_empty() => secret,
+        Ok(_) => {
+            tracing::warn!("fleet: slack app_token_ref resolved to nothing; Slack watch disabled");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "fleet: slack app_token_ref did not resolve; Slack watch disabled");
+            return;
+        }
+    };
+
+    // Fan-out from each enabled row's trigger channel to its session + expected repo.
+    let mut watch = agent_slack::SlackWatch::new();
+    let mut subs = 0usize;
+    match roster.list().await {
+        Ok(rows) => {
+            for row in rows
+                .iter()
+                .filter(|r| r.enabled && !r.slack_trigger_channel.trim().is_empty())
+            {
+                match agent_slack::ExpectRepo::new(&row.backend, &row.base_url, &row.repo) {
+                    Some(expect) => {
+                        watch.subscribe(&row.slack_trigger_channel, &row.id, expect);
+                        subs += 1;
+                    }
+                    None => tracing::warn!(
+                        session = %row.id,
+                        "fleet: slack watch skipped a row with an unrecognized backend/base_url"
+                    ),
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "fleet: roster list failed; Slack watch disabled");
+            return;
+        }
+    }
+    if subs == 0 {
+        tracing::info!("fleet: no rows with a slack_trigger_channel; Slack watch idle");
+        return;
+    }
+    tracing::info!(subscriptions = subs, "fleet: slack watch starting");
+
+    // Reconnecting Socket-Mode driver (connect+backoff+drain, in agent-slack via
+    // agent-retry). Move the resolved token in so the task is `'static`.
+    let watch = Arc::new(watch);
+    let token = app_token.expose().to_string();
+    tokio::spawn(agent_slack::serve_socket_mode(token, watch, sink));
 }
 
 /// Resolve the `--serve-sessions` endpoint: `--listen` override, else

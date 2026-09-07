@@ -17,7 +17,7 @@ Legend: ⬜ not started · 🟡 in progress · ✅ merged.
 | 1 | Per-session workspace + creds isolation | C4, C5 | ✅ | #270, #271, #272, #280 |
 | 2 | PR fetch + checkout op | C9 | ✅ | #277 |
 | 3 | Fleet core + persisted registry | C1, C2, C3, C8(skel) | ✅ | #278, #279, #280 |
-| 4 | Triggers (forge poll + Slack watch) | C6, C7 | 🟡 4a (C6) ✅ #281; 4b-core (C7) in review; 4b-transport next | #281 |
+| 4 | Triggers (forge poll + Slack watch) | C6, C7 | ✅ | #281, #282, +transport |
 | 5 | Review skill + collectors | C10, C11, C12 | ⬜ | — |
 | 6 | Draft / persist / approve / post | C8, C13, C14, C15, C16, C17 | ⬜ | — |
 | 7 | Observability + Slack progress | C18, C19 | ⬜ | — |
@@ -65,9 +65,12 @@ exec collectors, tenant-tagged review tables) so that track's enforcement is dro
   `parse_pr_link` (host/path via `url::Url`; Slack text is data-not-instructions; lookalike hosts
   rejected structurally) + `SlackWatch` channel→session fan-out + a `SlackTransport` seam with a
   fake, **no network dependency, fully hermetic**. A polled PR and a Slack link produce the
-  identical `FleetTrigger`. **4b-transport (next):** the real `tokio-tungstenite` Socket-Mode
-  adapter + `[review_fleet.slack]` token_ref resolution + `serve_fleet` wiring. Increment 4 flips
-  ✅ when the transport lands.
+  identical `FleetTrigger`. **4b-core merged #282.** **4b-transport:** the real
+  `tokio-tungstenite` (rustls) Socket-Mode adapter (`parse_envelope` pure + hermetic;
+  `SlackSocketMode` WebSocket; `serve_socket_mode` reconnect via `agent-retry`) +
+  `[review_fleet.slack]` app-token resolution (C5) + `serve_fleet` wiring; one new dep
+  (`tokio-tungstenite`, rustls only) and one documented `deny.toml` skip (`webpki-roots`, a
+  non-dedupable 0.26-vs-1.0 split with reqwest). **Increment 4 (both triggers) ✅.**
 
 > Note on the exec-chokepoint / org-tier reworks (R3 #273/#274/#275, R4 #276): these are
 > foundation for the [multi-tenancy track](../multi-tenancy/) (components C24/C25), tracked

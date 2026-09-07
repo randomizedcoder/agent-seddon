@@ -49,6 +49,11 @@ skip = [
   "thiserror",
   "thiserror-impl",
   "tower",
+  # tokio-tungstenite 0.27 (agent-slack Socket-Mode, review-fleet C7) still pins
+  # webpki-roots 0.26 for its rustls roots, while reqwest 0.12 is on 1.0 — two
+  # independent deps requiring different majors, not dedupable. Drop when tungstenite
+  # upgrades to webpki-roots 1.0.
+  "webpki-roots",
   "windows-sys",
 ]
 # Deny wildcard (`= "*"`) version requirements — an unpinned registry dep is the

@@ -144,6 +144,10 @@ pub struct ReviewFleetCfg {
     /// Cap on admitted sessions per owning user/org (`0` = unbounded).
     #[serde(default)]
     pub max_per_user: usize,
+    /// Slack Socket-Mode credentials for the trigger watch (review-fleet C7). Empty ⇒
+    /// no Slack watch is started (the forge poll still runs).
+    #[serde(default)]
+    pub slack: FleetSlackCfg,
 }
 
 impl Default for ReviewFleetCfg {
@@ -155,8 +159,27 @@ impl Default for ReviewFleetCfg {
             path: default_fleet_path(),
             max_total: 0,
             max_per_user: 0,
+            slack: FleetSlackCfg::default(),
         }
     }
+}
+
+/// Slack Socket-Mode credentials for the fleet's trigger watch (review-fleet C7). Both are
+/// C5-style **references** (`env:NAME` / `file:/path`) — never a raw token, resolved only
+/// on the fleet host. The **app-level** token opens the one Socket-Mode connection
+/// (inbound PR-link triggers, inc 4b); the **bot** token posts progress (C18, inc 7).
+#[derive(Debug, Default, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
+pub struct FleetSlackCfg {
+    /// App-level token reference (`xapp-…`), for `apps.connections.open` + the WebSocket.
+    #[serde(default)]
+    pub app_token_ref: String,
+    /// Bot token reference (`xoxb-…`), for outbound `chat.postMessage` (inc 7).
+    #[serde(default)]
+    pub bot_token_ref: String,
 }
 
 fn default_fleet_file() -> String {

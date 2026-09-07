@@ -67,6 +67,10 @@ pub struct Settings {
     pub fleet_max_total: usize,
     /// Fleet per-org live-session cap (`[review_fleet] max_per_user`). `0` = unbounded.
     pub fleet_max_per_user: usize,
+    /// Slack app-level token **reference** (`[review_fleet.slack] app_token_ref`) for the
+    /// Socket-Mode trigger watch (review-fleet C7). Empty ⇒ no Slack watch. Resolved to a
+    /// secret only on the fleet host (never stored raw).
+    pub fleet_slack_app_token_ref: String,
 }
 
 pub struct Agent {
@@ -837,6 +841,12 @@ impl Agent {
             self.settings.fleet_max_total,
             self.settings.fleet_max_per_user,
         )
+    }
+
+    /// The Slack app-level token **reference** (`[review_fleet.slack] app_token_ref`) for
+    /// `--serve-fleet`'s trigger watch (review-fleet C7). Empty ⇒ no Slack watch.
+    pub fn fleet_slack_app_token_ref(&self) -> &str {
+        &self.settings.fleet_slack_app_token_ref
     }
 
     pub fn metrics_proxy(&self) -> Option<Arc<dyn agent_core::MetricsProxy>> {
@@ -2968,6 +2978,7 @@ mod tests {
             grpc_max_in_flight: 0,
             fleet_max_total: 0,
             fleet_max_per_user: 0,
+            fleet_slack_app_token_ref: String::new(),
         }
     }
 
