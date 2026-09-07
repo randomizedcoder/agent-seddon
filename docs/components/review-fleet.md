@@ -171,6 +171,19 @@ inc 6, C14). The `ReviewNow` RPC injects a trigger manually (for testing, or a p
 button); it is **opt-in** (only the `--serve-fleet` process wires the orchestrator's
 sink — the bare seam answers `UNIMPLEMENTED`).
 
+**Review engine (C10, inc 5c)** grounds the `reviewing` step. When a review engine is wired
+(`[review] backend`), `serve_fleet` attaches it to the orchestrator as a
+[`ReviewGrounder`](../../crates/agent-core/src/lib.rs) — a small `agent-core` seam
+(`async fn ground(target) -> Result<String>`) so the fleet crate depends on the seam, not the
+engine (`agent-review`); the impl (`EngineGrounder`, `agent-runtime`) runs the engine's
+`ReviewCollector` and renders its `ReviewFacts` with the same budget the in-loop review uses.
+On each trigger the FSM runs the engine on `ReviewTarget::Pr(pr)` and folds the rendered brief
+into the review goal, so the session reviews the *real* diff + mechanized findings (C12) rather
+than fetching them itself. The brief is **evidence to assess, not instructions** (it carries
+untrusted diff content). Grounding is **fail-soft**: an engine error (e.g. no forge to resolve
+the PR number) falls back to the bare instruction so a review still runs; dedup and unknown-row
+checks run *before* the engine so a duplicate/unknown never wastes a run.
+
 **Forge poll (C6, inc 4a)** is the first *real* trigger source. `serve_fleet` registers one
 `every {poll_secs}` job per enabled, forge-capable roster row on `agent-scheduler` (whose
 **overlap guard** means a poll that runs long never stacks a second copy) and fires due jobs

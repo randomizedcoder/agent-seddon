@@ -5684,6 +5684,23 @@ pub trait ReviewCollector: Send + Sync {
     async fn collect(&self, target: &ReviewTarget) -> Result<ReviewFacts>;
 }
 
+/// Runs the deterministic review engine for a [`ReviewTarget`] and renders its
+/// grounded facts into a **review brief** (markdown) — the input the fleet feeds a
+/// review session's first turn so the model reviews the *real* change, not a bare
+/// instruction (review-fleet C10).
+///
+/// It is a thin seam over a [`ReviewCollector`] plus the renderer, kept in
+/// `agent-core` so the fleet orchestrator can depend on the *seam* rather than the
+/// concrete engine (`agent-review`) — mirroring how the reconcile path injects its
+/// forge check as a closure. The impl lives in `agent-runtime` (which already owns
+/// both the engine and the renderer). Callers use it **fail-soft**: an `Err` lets the
+/// orchestrator fall back to an ungrounded goal so a review still runs.
+#[async_trait]
+pub trait ReviewGrounder: Send + Sync {
+    /// Run the engine on `target` and return a rendered brief for the review session.
+    async fn ground(&self, target: ReviewTarget) -> Result<String>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
