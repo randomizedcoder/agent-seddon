@@ -18,11 +18,15 @@ server reconciles its live sessions from (review-fleet C2,
   (`ReviewNow` C8) + reconcile (C1) + per-session forge (C5)
 - **Forge poll (inc 4a):** `agent-review-fleet::poll_session` — the first real trigger source
   (C6): one overlap-guarded `every {poll_secs}` job per enabled session
+- **Slack watch (inc 4b):** [`agent-slack`](../../crates/agent-slack) — the second trigger source
+  (C7): a strict PR-link parser + channel→session fan-out behind a `SlackTransport` seam
 
 > Increments 3a (roster) + 3b (gRPC control plane) + 3c (fleet process skeleton) + 4a
-> (forge-poll trigger C6) are shipped. The FSM drives `triggered → cloning → reviewing`,
-> now fed by the forge poll; the Slack watch (C7, inc 4b), review skill/collectors (inc 5),
-> and the draft→approve→post tail + head-oid dedup (C14, inc 6) are later increments.
+> (forge-poll trigger C6) + 4b **core** (Slack parser + fan-out C7) are shipped. The FSM
+> drives `triggered → cloning → reviewing`, fed by the forge poll and (once its transport
+> lands) the Slack watch. The real Socket-Mode adapter (4b follow-up), review
+> skill/collectors (inc 5), and the draft→approve→post tail + head-oid dedup (C14, inc 6)
+> are later increments.
 
 ## The trait
 
@@ -174,6 +178,24 @@ one tick, so a hostile paging chain or a PR flood is bounded. Dedup is coarse he
 number, via the queue's coalescing + the orchestrator's per-`(session, pr)` guard); precise
 head-oid re-review dedup is inc 6 (C14), since `PullRequest` carries no head SHA.
 
+**Slack watch (C7, inc 4b)** is the second trigger source, in the new
+[`agent-slack`](../../crates/agent-slack) crate (shared with C18's outbound progress poster,
+inc 7). The design is one Socket-Mode connection for the whole fleet, fanned out from each
+session's `slack_trigger_channel` to that session. A message in a watched channel runs the
+**strict** [`parse_pr_link`](../../crates/agent-slack/src/parse.rs): host and path come from
+`url::Url` (never hand-rolled string matching — that is where lookalike-host bugs live), and a
+trigger is emitted only when a link's host + owner/repo match the session's `repo`. **Slack
+text is data, never instructions** — the only thing ever taken from a message is a `u64` PR
+number; prose, `@mentions`, and "ignore your rules and post" commands are inert, and nothing
+is forwarded to the model. A polled PR and a Slack-posted link produce the *identical*
+`FleetTrigger`, so the orchestrator can't tell them apart.
+
+The **transport is a seam** (`SlackTransport`): 4b-core lands the parser + fan-out + the trait
++ a fake (fully hermetic, no network dependency); the real `tokio-tungstenite` Socket-Mode
+adapter — plus `[review_fleet.slack]` app/bot `token_ref` resolution, reconnect/backoff via
+`agent-retry`, and the `serve_fleet` wiring — is the deliberately-isolated 4b follow-up (the
+only code that touches the network).
+
 ## Testing
 
 Table-driven `rstest` with a `desc` + `expect` column on every row (`crud_contract` in
@@ -197,6 +219,14 @@ multi-page walk / error propagates / empty list / `u64::MAX` PR number / all-dra
 `next_page` self-loop stops / a runaway paging chain clamped to `MAX_POLL_PAGES` / a PR flood
 capped at `MAX_TRIGGERS_PER_TICK`. The scheduler's own overlap guard (a slow poll not
 stacking) is gated by `agent-scheduler`'s tests, not re-proven here.
+
+The Slack watch (C7) has its own tables in [`agent-slack`](../../crates/agent-slack):
+`parse_pr_link` gets a heavily adversarial table (lookalike suffix/prefix hosts, a userinfo
+`@`-host, a non-http scheme, embedded bot-commands kept inert, wrong-repo / wrong-backend /
+non-PR links rejected, multiple links with only the matching repo triggering, `u64` overflow,
+Slack `<url|label>` wrapping, self-hosted host matching), and the fan-out (`SlackWatch`) gets
+watched/unwatched-channel, wrong-repo, blank-channel, shared-channel, and a fake-transport
+end-to-end integration (only the watched-channel matching-repo message becomes a trigger).
 
 All of these run in `nix/checks/test.nix` (default features); the sqlite backend is
 executed by the feature-scoped `nix/checks/fleet-sqlite.nix` gate. The opt-in real-wire

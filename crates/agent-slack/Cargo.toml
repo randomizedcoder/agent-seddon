@@ -1,0 +1,25 @@
+[package]
+name = "agent-slack"
+version.workspace = true
+publish.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# FleetTrigger + TriggerSink (the orchestrator's intake) that the watch emits onto.
+agent-core.workspace = true
+# Structural URL parsing (host/path) for the strict PR-link parser — never hand-rolled
+# string ops, which is where lookalike-host bugs live. Already in-tree via reqwest.
+url.workspace = true
+# Locating URL candidates in untrusted free-form Slack text.
+regex.workspace = true
+# The async SlackTransport seam (the real Socket-Mode adapter lands in the 4b follow-up).
+async-trait.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
+tokio = { workspace = true }
+
+[lints]
+workspace = true
