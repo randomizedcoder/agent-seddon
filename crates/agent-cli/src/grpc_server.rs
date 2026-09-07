@@ -910,11 +910,18 @@ pub async fn serve_fleet(agent: Arc<Agent>, listen: Endpoint) -> anyhow::Result<
         Some(repo) => {
             let (queue, mut rx) =
                 agent_review_fleet::TriggerQueue::channel(FLEET_TRIGGER_QUEUE_CAP);
-            let orch = Arc::new(agent_review_fleet::FleetOrchestrator::new(
+            // C10: attach the review engine when one is wired, so the FSM grounds each
+            // review session in real facts (diff + mechanized checks). Absent ⇒ the
+            // orchestrator drives an ungrounded review (still runs).
+            let mut orch = agent_review_fleet::FleetOrchestrator::new(
                 roster.clone(),
                 repo,
                 mgr.clone() as Arc<dyn agent_core::FleetHost>,
-            ));
+            );
+            if let Some(grounder) = agent.review_grounder() {
+                orch = orch.with_grounder(grounder);
+            }
+            let orch = Arc::new(orch);
             tokio::spawn(async move {
                 while let Some(trigger) = rx.recv().await {
                     if let Err(e) = orch.handle(trigger).await {

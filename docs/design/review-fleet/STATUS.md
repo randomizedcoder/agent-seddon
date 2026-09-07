@@ -18,7 +18,7 @@ Legend: ⬜ not started · 🟡 in progress · ✅ merged.
 | 2 | PR fetch + checkout op | C9 | ✅ | #277 |
 | 3 | Fleet core + persisted registry | C1, C2, C3, C8(skel) | ✅ | #278, #279, #280 |
 | 4 | Triggers (forge poll + Slack watch) | C6, C7 | ✅ | #281, #282, +transport |
-| 5 | Review skill + collectors | C10, C11, C12 | ⬜ | — |
+| 5 | Review skill + collectors | C10, C11, C12 | ✅ | #284, #285, #286 |
 | 6 | Draft / persist / approve / post | C8, C13, C14, C15, C16, C17 | ⬜ | — |
 | 7 | Observability + Slack progress | C18, C19 | ⬜ | — |
 | 8 | Child sessions + workspace inheritance | C20, C21, C22 | ⬜ designed, build deferred | — |
@@ -71,6 +71,15 @@ exec collectors, tenant-tagged review tables) so that track's enforcement is dro
   `[review_fleet.slack]` app-token resolution (C5) + `serve_fleet` wiring; one new dep
   (`tokio-tungstenite`, rustls only) and one documented `deny.toml` skip (`webpki-roots`, a
   non-dedupable 0.26-vs-1.0 split with reqwest). **Increment 4 (both triggers) ✅.**
+- **2026-09-07** — **Increment 5 (review skill + collectors) ✅** — three gated PRs off main,
+  never stacked: **5a** collectors (C12: shellcheck no-ignores / go `-race`+bench / nearby-similar,
+  each an `AnalysisReport` slot in `ReviewFacts`, additive proto 13–15, all off by default, **#284**);
+  **5b** review skill (C11: `prompts/modes/review/0001..0006` `mode:review` fragments + `code-review`
+  SKILL.md + the roster-`skill`→`prompt_context` bridge via `seed_review`, **#285**); **5c** engine
+  invocation (C10: `agent_core::ReviewGrounder` seam + `EngineGrounder` impl in `agent-runtime` +
+  `FleetOrchestrator::with_grounder` running the engine on `ReviewTarget::Pr(n)` and folding the
+  rendered brief — framed as evidence, not instructions — into the review goal, fail-soft to a bare
+  instruction; wired in `serve_fleet`, **#286**).
 
 > Note on the exec-chokepoint / org-tier reworks (R3 #273/#274/#275, R4 #276): these are
 > foundation for the [multi-tenancy track](../multi-tenancy/) (components C24/C25), tracked

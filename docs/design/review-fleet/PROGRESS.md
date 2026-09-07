@@ -12,7 +12,34 @@ Three PRs, each based off `main`, never stacked, each gated by `nix flake check`
 
 ## Now
 
-- **INCREMENT 5b (C11 review skill) — code + tests complete; gate pending.** Encodes the user's
+- **INCREMENT 5c (C10 engine invocation) — code + tests complete; gate pending.** Wires the fleet
+  FSM to the deterministic review engine so a review session reviews the *real* change, not a bare
+  instruction:
+  - **Seam** — new `agent_core::ReviewGrounder` trait (`async fn ground(target) -> Result<String>`):
+    run the review engine on a target and render its `ReviewFacts` into a brief. Kept in `agent-core`
+    so the fleet orchestrator depends on the *seam*, not the concrete engine (`agent-review`) —
+    exactly how reconcile injects its forge check. Impl lives in `agent-runtime`.
+  - **Impl** — `EngineGrounder` (`agent-runtime/src/agent.rs`, `#[cfg(feature = "review")]`): a thin
+    wrapper over the wired `ReviewCollector` + `agent_review::render_facts_with` (same renderer +
+    `review_context_budget` the in-loop review uses). `Agent::review_grounder()` returns `Some` when a
+    review collector is configured, `None` otherwise (a no-review build drives ungrounded reviews).
+  - **FSM** — `FleetOrchestrator` gains an optional `grounder` (`with_grounder` builder). In `handle`,
+    after `cloning` (fetch PR + read-only worktree), it runs the engine on `ReviewTarget::Pr(pr)` and
+    folds the rendered brief into the review goal via `grounded_goal` (the brief is framed as
+    **evidence to assess, not instructions** — untrusted diff content). **Fail-soft**: an engine error
+    (e.g. no forge to resolve the PR number) falls back to the bare instruction so a review still
+    runs. Dedup and unknown-row checks run *before* the engine, so a duplicate/unknown never wastes an
+    engine run.
+  - **Wiring** — `serve_fleet` (`agent-cli/grpc_server.rs`) attaches `agent.review_grounder()` to the
+    orchestrator when present.
+  - Tests (agent-review-fleet, run in `test.nix`): grounded-goal-drives-session (brief reaches the
+    goal, framed as evidence), grounder-error-falls-back-to-plain-goal (fail-soft), duplicate-does-
+    not-reground, unknown-row-never-reaches-engine. No new nix check (default-feature crate tests).
+- **Next: inc 6** (draft render C13 + `agent_review_drafts`/`agent_review_feedback` tables C14/C15 +
+  cross-round tracker C16 + approval C17 — the draft → approve → post tail; `ReviewRecord::from_facts`
+  is the C14 flattening).
+
+- **INCREMENT 5b (C11 review skill) MERGED — PR #285 (main `7c1ec2e`).** Encodes the user's
   review checklist as the review session's behavior and bridges the roster `skill` field to prompt
   selection:
   - **Fragments** — `prompts/modes/review/0001..0006_*.md` (grounding / objective+tone / idioms+DRY

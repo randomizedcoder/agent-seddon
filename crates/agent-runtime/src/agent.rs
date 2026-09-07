@@ -233,6 +233,29 @@ pub struct Agent {
     graph: Option<Arc<dyn agent_core::GraphStore>>,
 }
 
+/// The concrete [`agent_core::ReviewGrounder`] (review-fleet C10): runs the wired review
+/// engine on a target and renders its facts into a brief for a fleet review session's
+/// first turn. A thin wrapper over the [`agent_core::ReviewCollector`] plus the renderer,
+/// so the fleet orchestrator depends only on the `agent-core` seam — not on this crate or
+/// `agent-review`. Compiled only with the `review` feature (the renderer lives there).
+#[cfg(feature = "review")]
+struct EngineGrounder {
+    engine: Arc<dyn agent_core::ReviewCollector>,
+    /// The byte budget handed to the fact renderer (same knob the in-loop review uses).
+    budget: usize,
+}
+
+#[cfg(feature = "review")]
+#[async_trait::async_trait]
+impl agent_core::ReviewGrounder for EngineGrounder {
+    async fn ground(&self, target: agent_core::ReviewTarget) -> agent_core::Result<String> {
+        // Collect is fail-soft (only an unresolvable target is a hard error); the caller
+        // (the orchestrator) is fail-soft on top, falling back to an ungrounded goal.
+        let facts = self.engine.collect(&target).await?;
+        Ok(agent_review::render_facts_with(&facts, self.budget))
+    }
+}
+
 impl Agent {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -869,6 +892,26 @@ impl Agent {
 
     pub fn review_collector(&self) -> Option<Arc<dyn agent_core::ReviewCollector>> {
         self.review_collector.clone()
+    }
+
+    /// The review engine exposed as a [`ReviewGrounder`] for the fleet FSM (review-fleet
+    /// C10): `Some` when a review collector is wired (the `review` feature + a configured
+    /// `[review] backend`), else `None` — the fleet orchestrator then drives an
+    /// ungrounded review rather than none at all.
+    #[cfg(feature = "review")]
+    pub fn review_grounder(&self) -> Option<Arc<dyn agent_core::ReviewGrounder>> {
+        let engine = self.review_collector.clone()?;
+        Some(Arc::new(EngineGrounder {
+            engine,
+            budget: self.settings.review_context_budget,
+        }))
+    }
+
+    /// Without the `review` feature the engine (and its renderer) is not compiled in, so
+    /// there is nothing to ground with — the fleet drives ungrounded reviews.
+    #[cfg(not(feature = "review"))]
+    pub fn review_grounder(&self) -> Option<Arc<dyn agent_core::ReviewGrounder>> {
+        None
     }
 
     /// Collect grounded review facts for the working tree and return them rendered
