@@ -6,7 +6,10 @@ use crate::callgraph::CallGraphCollector;
 use crate::churn::ChurnCollector;
 use crate::cochange::CoChangeCollector;
 use crate::collector::{CollectCtx, CollectorOutput, FactCollector, FactFragment};
+use crate::gochecks::GoChecksCollector;
+use crate::nearby::NearbyCollector;
 use crate::repo_facts::RepoChangeCollector;
+use crate::shellcheck::ShellcheckCollector;
 use crate::signatures::SignatureCollector;
 use crate::style::StyleCollector;
 use crate::summaries::SummaryCollector;
@@ -221,9 +224,62 @@ impl ReviewOrchestrator {
         self
     }
 
+    /// Enable the shellcheck collector (review-fleet C12, `[review] shellcheck = true`).
+    /// Runs `shellcheck` on the diff's shell scripts via the sandbox (fail-soft without
+    /// one), enforcing the **no-ignores** rule.
+    pub fn with_shellcheck(mut self, sandbox: Option<Arc<dyn Sandbox>>, timeout_secs: u64) -> Self {
+        if self.sandbox.is_none() {
+            self.sandbox = sandbox;
+        }
+        self.collectors.push(Box::new(ShellcheckCollector {
+            timeout_secs: timeout_secs.max(1),
+        }));
+        self
+    }
+
+    /// Enable the go-race-bench collector (review-fleet C12, `[review] go_checks = true`).
+    /// Runs `go test -race` (data races) + `go test -bench` (perf) under the sandbox with
+    /// the network off (fail-soft without a sandbox / Go toolchain / tests).
+    pub fn with_go_checks(mut self, sandbox: Option<Arc<dyn Sandbox>>, timeout_secs: u64) -> Self {
+        if self.sandbox.is_none() {
+            self.sandbox = sandbox;
+        }
+        self.collectors.push(Box::new(GoChecksCollector {
+            timeout_secs: timeout_secs.max(1),
+        }));
+        self
+    }
+
+    /// Enable the nearby-similar collector (review-fleet C12, `[review] nearby = true`).
+    /// Read-only: uses the injected `SearchBackend` to find existing code resembling the
+    /// change (fail-soft without a search backend).
+    pub fn with_nearby(mut self) -> Self {
+        self.collectors.push(Box::new(NearbyCollector));
+        self
+    }
+
     fn emit(&self, ev: ReviewEvent) {
         if let Some(o) = &self.observer {
             o(ev);
+        }
+    }
+
+    /// Emit one `ReviewEvent::Findings` per `(tool, severity, in_change)` bucket of an
+    /// `AnalysisReport` — shared by the analyzer and the C12 findings-shaped collectors.
+    fn emit_findings(&self, report: &agent_core::AnalysisReport) {
+        let mut buckets: BTreeMap<(String, String, bool), u32> = BTreeMap::new();
+        for f in &report.findings {
+            *buckets
+                .entry((f.tool.clone(), f.severity.clone(), f.in_change))
+                .or_insert(0) += 1;
+        }
+        for ((tool, severity, in_change), count) in buckets {
+            self.emit(ReviewEvent::Findings {
+                tool,
+                severity,
+                in_change,
+                count,
+            });
         }
     }
 
@@ -418,6 +474,21 @@ impl ReviewCollector for ReviewOrchestrator {
                             as u32,
                     });
                     facts.churn = report;
+                }
+                // review-fleet C12 collectors: each an AnalysisReport into its own slot.
+                // Findings events are emitted uniformly so the metrics see them like the
+                // analyzer's.
+                Some(FactFragment::Shellcheck { report }) => {
+                    self.emit_findings(&report);
+                    facts.shellcheck = report;
+                }
+                Some(FactFragment::GoChecks { report }) => {
+                    self.emit_findings(&report);
+                    facts.go_checks = report;
+                }
+                Some(FactFragment::Nearby { report }) => {
+                    self.emit_findings(&report);
+                    facts.nearby = report;
                 }
                 None => {}
             }

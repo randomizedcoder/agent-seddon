@@ -3810,6 +3810,9 @@ impl From<agent_core::ReviewFacts> for pb::ReviewFacts {
             churn: Some(f.churn.into()),
             salience: Some(f.salience.into()),
             risk: Some(f.risk.into()),
+            shellcheck: Some(f.shellcheck.into()),
+            go_checks: Some(f.go_checks.into()),
+            nearby: Some(f.nearby.into()),
         }
     }
 }
@@ -3828,6 +3831,9 @@ impl From<pb::ReviewFacts> for agent_core::ReviewFacts {
             churn: f.churn.map(Into::into).unwrap_or_default(),
             salience: f.salience.map(Into::into).unwrap_or_default(),
             risk: f.risk.map(Into::into).unwrap_or_default(),
+            shellcheck: f.shellcheck.map(Into::into).unwrap_or_default(),
+            go_checks: f.go_checks.map(Into::into).unwrap_or_default(),
+            nearby: f.nearby.map(Into::into).unwrap_or_default(),
         }
     }
 }

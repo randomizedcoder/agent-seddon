@@ -97,6 +97,21 @@ in
   # assert `agent --review` surfaces the finding. Offline (no module download), so
   # it runs in the hermetic sandbox. clippy is covered live (dev shell + eval).
   review-analyze = agentCheck ./review-analyze.nix { inherit versions; };
+  # Shellcheck coverage (review-fleet C12): a change adding a shell script with an
+  # unquoted variable (SC2086) + an inline disable directive; assert the
+  # `Shell scripts (shellcheck):` section surfaces the finding and flags the
+  # directive under the no-ignores rule. `shellcheck` on PATH; offline/hermetic.
+  review-shellcheck = agentCheck ./review-shellcheck.nix { };
+  # Go race+bench coverage (review-fleet C12): a stdlib-only Go module with a
+  # benchmark + a data-race test; assert `go test -race`/`-bench` run under the
+  # sandbox (network off) and the `Go race & benchmarks:` section shows the bench
+  # result. `go`/`gcc` on PATH; offline/hermetic (bench asserted, race best-effort).
+  review-go-race-bench = agentCheck ./review-go-race-bench.nix { inherit versions; };
+  # Nearby-similar wiring coverage (review-fleet C12): a change introducing a new
+  # declaration; assert the read-only collector runs and folds a
+  # `Nearby similar code:` section into the context. The correlation logic is
+  # covered deterministically by the fake-backend unit tests. Offline/hermetic.
+  review-nearby = agentCheck ./review-nearby.nix { };
   # Signature-diff coverage: reconstruct a two-commit history where a Go function's
   # signature changes + a new function appears, assert the `API signature changes`
   # section renders. Pure in-process (regex over blobs) — no toolchain, offline.

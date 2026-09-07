@@ -12,10 +12,13 @@ mod callgraph;
 mod churn;
 mod cochange;
 mod collector;
+mod gochecks;
+mod nearby;
 mod orchestrator;
 mod repo_facts;
 mod risk;
 mod salience;
+mod shellcheck;
 mod signatures;
 mod style;
 mod summaries;
@@ -134,6 +137,13 @@ pub fn render_facts_with(facts: &ReviewFacts, budget_bytes: usize) -> String {
     // Static-analysis findings — higher-signal than raw hunks, so rendered *before*
     // the diffs. Per-tool run summary, then findings with changed-file hits first.
     render_analysis(&mut out, &facts.analysis);
+
+    // review-fleet C12 collectors — each an AnalysisReport under its own heading, so a
+    // reviewer sees shell lints / go race+bench / nearby-similar as distinct sections
+    // (nothing is emitted when the collector is disabled — its `runs` are empty).
+    render_analysis_labeled(&mut out, "Shell scripts (shellcheck)", &facts.shellcheck);
+    render_analysis_labeled(&mut out, "Go race & benchmarks", &facts.go_checks);
+    render_analysis_labeled(&mut out, "Nearby similar code", &facts.nearby);
 
     // House-style fingerprint — so the review respects the repo's conventions.
     render_style(&mut out, &facts.style);
@@ -490,10 +500,17 @@ const MAX_RENDERED_FINDINGS: usize = 80;
 /// findings (changed-file hits first, capped). Nothing is emitted if the analyzer
 /// never ran (`analyze = false` ⇒ empty report).
 fn render_analysis(out: &mut String, report: &agent_core::AnalysisReport) {
+    render_analysis_labeled(out, "Analysis (static)", report);
+}
+
+/// Render an [`AnalysisReport`] under `label` — the shared skeleton for the static
+/// analyzer and the review-fleet C12 collectors (shellcheck / go race+bench /
+/// nearby). Emits nothing when the collector never ran (empty `runs`).
+fn render_analysis_labeled(out: &mut String, label: &str, report: &agent_core::AnalysisReport) {
     if report.runs.is_empty() {
-        return; // analyzer disabled or not wired — say nothing rather than "0"
+        return; // collector disabled or not wired — say nothing rather than "0"
     }
-    out.push_str("\nAnalysis (static):\n");
+    out.push_str(&format!("\n{label}:\n"));
     for r in &report.runs {
         let reason = if r.reason.is_empty() {
             String::new()

@@ -265,6 +265,27 @@ impl ReviewCollector for FakeReview {
                     total_churn: 340,
                 }],
             },
+            shellcheck: agent_core::AnalysisReport {
+                language: "shell".into(),
+                runs: vec![agent_core::AnalyzerRun {
+                    tool: "shellcheck".into(),
+                    status: "ok".into(),
+                    reason: String::new(),
+                    duration_ms: 3,
+                    finding_count: 1,
+                }],
+                findings: vec![agent_core::AnalysisFinding {
+                    tool: "shellcheck".into(),
+                    rule: "SC2086".into(),
+                    severity: "warning".into(),
+                    file: "deploy.sh".into(),
+                    line: 3,
+                    message: "Double quote to prevent word splitting.".into(),
+                    in_change: true,
+                }],
+            },
+            go_checks: agent_core::AnalysisReport::default(),
+            nearby: agent_core::AnalysisReport::default(),
             salience: agent_core::SalienceReport {
                 files: vec![agent_core::FileSalience {
                     file: "main.go".into(),
@@ -354,6 +375,14 @@ async fn review_collect_roundtrips(#[case] transport: Transport) {
     assert_eq!(facts.analysis.findings.len(), 1);
     assert_eq!(facts.analysis.findings[0].rule, "errcheck");
     assert!(facts.analysis.findings[0].in_change);
+
+    // review-fleet C12 collectors survive the wire round-trip (proto fields 13-15).
+    assert_eq!(facts.shellcheck.language, "shell");
+    assert_eq!(facts.shellcheck.findings.len(), 1);
+    assert_eq!(facts.shellcheck.findings[0].rule, "SC2086");
+    assert!(facts.shellcheck.findings[0].in_change);
+    assert!(facts.go_checks.runs.is_empty());
+    assert!(facts.nearby.runs.is_empty());
     // Signature-diff report survives the wire round-trip.
     assert_eq!(facts.signatures.changes.len(), 1);
     assert_eq!(facts.signatures.changes[0].kind, "modified");

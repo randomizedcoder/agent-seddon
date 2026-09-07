@@ -5556,6 +5556,18 @@ pub struct ReviewFacts {
     /// Static-analysis findings (increment 5). Empty when analysis is off/skipped.
     #[serde(default)]
     pub analysis: AnalysisReport,
+    /// Shellcheck findings on the diff's shell scripts (review-fleet C12). One finding
+    /// per warning, **no ignores**; `language == "shell"`. Empty when off/no shell changed.
+    #[serde(default)]
+    pub shellcheck: AnalysisReport,
+    /// Go `test -race` data races + `test -bench` results (review-fleet C12). Findings
+    /// carry the race/bench line; `language == "go"`. Empty when off/no Go toolchain/tests.
+    #[serde(default)]
+    pub go_checks: AnalysisReport,
+    /// Nearby-similar hits: existing code resembling the change, for the DRY / "apply
+    /// nearby too?" checklist (review-fleet C12). Empty when off/no search/no siblings.
+    #[serde(default)]
+    pub nearby: AnalysisReport,
     /// Changed function signatures (increment 6). Empty when off/no source changed.
     #[serde(default)]
     pub signatures: SignatureReport,

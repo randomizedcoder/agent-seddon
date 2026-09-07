@@ -55,6 +55,17 @@ pub(crate) enum FactFragment {
     Churn {
         report: ChurnReport,
     },
+    // review-fleet C12 collectors — all shaped as `AnalysisReport` (findings with
+    // file/line/severity/message), each into its own `ReviewFacts` slot.
+    Shellcheck {
+        report: AnalysisReport,
+    },
+    GoChecks {
+        report: AnalysisReport,
+    },
+    Nearby {
+        report: AnalysisReport,
+    },
 }
 
 /// A collector's self-describing result (status + fragment). `duration_ms` is

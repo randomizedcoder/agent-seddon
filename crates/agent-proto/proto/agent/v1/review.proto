@@ -306,4 +306,8 @@ message ReviewFacts {
   ReviewChurnReport churn = 10;
   ReviewSalienceReport salience = 11;
   ReviewRiskReport risk = 12;
+  // review-fleet C12 collectors — all shaped as ReviewAnalysisReport.
+  ReviewAnalysisReport shellcheck = 13;
+  ReviewAnalysisReport go_checks = 14;
+  ReviewAnalysisReport nearby = 15;
 }
