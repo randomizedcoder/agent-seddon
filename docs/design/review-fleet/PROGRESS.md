@@ -12,7 +12,28 @@ Three PRs, each based off `main`, never stacked, each gated by `nix flake check`
 
 ## Now
 
-- **INCREMENT 4 (both triggers) COMPLETE** on this PR's merge. 4a forge poll (C6) #281, 4b-core
+- **INCREMENT 5a (C12 collectors) — code + tests complete; gate pending.** Three new
+  `FactCollector`s join the review fan-out, each an `AnalysisReport` in its own `ReviewFacts`
+  slot (proto fields 13–15, additive → no buf baseline bump) rendered under its own heading:
+  - **shellcheck** (`shellcheck.rs`) — `shellcheck --format=json1` on the diff's shell scripts
+    via the Sandbox; **no-ignores** rule flags an inline `# shellcheck disable=…`/`source=…`
+    directive as its own finding; static, fail-soft.
+  - **go-race-bench** (`gochecks.rs`) — `go test -race` (data-race findings) + `go test -bench`
+    (ns/op) on the changed packages; **executes reviewed code** ⇒ runs under the Sandbox with
+    `NetworkPolicy::Off` + the per-collector timeout; exit 127 / no go.mod / no Go changes =
+    soft skip.
+  - **nearby-similar** (`nearby.rs`) — read-only: extracts declarations introduced by the diff
+    (shape-checked, length-capped literal terms), queries the injected `SearchBackend`, reports
+    out-of-change hits (in-change filtered, paths `confine()`d); soft-skips with no backend.
+  - Config toggles (`[review] shellcheck/go_checks/go_checks_timeout_secs/nearby`, all **off by
+    default** — the two code-executing/serverside ones are opt-in) + builder wiring; three
+    hermetic gate checks (`nix/checks/review-{shellcheck,go-race-bench,nearby}.nix` via
+    `mk-review-check`) registered in `checks/default.nix`; correlation logic covered by
+    fake-backend unit tests (`FixtureRepo`/`FixtureSearch`).
+- **Next: inc 5b** (C11 skill — `code-review` SKILL.md + roster `skill`→PromptContext bridge),
+  then **5c** (C10 engine invocation — fleet FSM runs the review engine on `ReviewTarget::Pr`).
+
+- **INCREMENT 4 (both triggers) COMPLETE** on 4b-transport merge. 4a forge poll (C6) #281, 4b-core
   Slack parser/fan-out (C7) #282, and **4b-transport (this PR)** = the real Socket-Mode adapter.
 - **INC 4b-transport — code + tests complete; gate pending.** `agent-slack` gains
   `socket_mode.rs`: `parse_envelope` (pure, hermetic — acks every envelope_id; only plain user

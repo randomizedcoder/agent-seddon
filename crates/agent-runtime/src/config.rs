@@ -1190,6 +1190,26 @@ pub struct ReviewCfg {
     /// gate verdict but still scores). Default `0.7`.
     #[serde(default = "default_gate_threshold")]
     pub gate_threshold: f64,
+    /// Run the shellcheck collector (lints changed shell scripts, enforcing the
+    /// no-ignores rule). **Off by default** — opt-in (review-fleet C12); runs the
+    /// external `shellcheck` under the sandbox, fail-soft + timeout-bounded (reuses
+    /// `analyze_timeout_secs`).
+    #[serde(default)]
+    pub shellcheck: bool,
+    /// Run the go-race-bench collector (`go test -race` + `go test -bench` on the
+    /// changed packages). **Off by default** — opt-in (review-fleet C12); it
+    /// **executes the reviewed code** under the sandbox with the network off,
+    /// fail-soft + timeout-bounded.
+    #[serde(default)]
+    pub go_checks: bool,
+    /// Timeout for each go-checks run (seconds). Race + bench are slow; default 300.
+    #[serde(default = "default_go_checks_timeout")]
+    pub go_checks_timeout_secs: u64,
+    /// Run the nearby-similar collector (correlates new declarations against the
+    /// search index). **Off by default** — opt-in (review-fleet C12); read-only,
+    /// fail-soft when no search backend is configured.
+    #[serde(default)]
+    pub nearby: bool,
 }
 
 impl Default for ReviewCfg {
@@ -1213,8 +1233,16 @@ impl Default for ReviewCfg {
             churn: true,
             churn_window: default_churn_window(),
             gate_threshold: default_gate_threshold(),
+            shellcheck: false,
+            go_checks: false,
+            go_checks_timeout_secs: default_go_checks_timeout(),
+            nearby: false,
         }
     }
+}
+
+fn default_go_checks_timeout() -> u64 {
+    300
 }
 
 fn default_classifier() -> String {

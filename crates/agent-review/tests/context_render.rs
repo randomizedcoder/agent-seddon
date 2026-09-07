@@ -50,6 +50,9 @@ fn facts(files: Vec<ChangedFile>, commits: Vec<ReviewCommit>) -> ReviewFacts {
         summaries: Default::default(),
         cochange: Default::default(),
         churn: Default::default(),
+        shellcheck: Default::default(),
+        go_checks: Default::default(),
+        nearby: Default::default(),
         salience: Default::default(),
         risk: Default::default(),
     }

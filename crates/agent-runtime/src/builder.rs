@@ -1010,6 +1010,21 @@ pub async fn build_agent_with(
                 if cfg.review.churn {
                     orch = orch.with_churn(cfg.review.churn_window);
                 }
+                // review-fleet C12 collectors — opt-in (off by default).
+                // Shellcheck: lints changed shell scripts under the sandbox.
+                if cfg.review.shellcheck {
+                    orch = orch
+                        .with_shellcheck(shared_sandbox.clone(), cfg.review.analyze_timeout_secs);
+                }
+                // Go race+bench: executes the reviewed code under the sandbox (network off).
+                if cfg.review.go_checks {
+                    orch = orch
+                        .with_go_checks(shared_sandbox.clone(), cfg.review.go_checks_timeout_secs);
+                }
+                // Nearby-similar: read-only correlation over the search index.
+                if cfg.review.nearby {
+                    orch = orch.with_nearby();
+                }
                 // Risk synthesis threshold (post-fan-out; always computed).
                 orch = orch.with_gate_threshold(cfg.review.gate_threshold);
                 Some(Arc::new(orch) as Arc<dyn agent_core::ReviewCollector>)
