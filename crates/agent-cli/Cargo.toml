@@ -17,6 +17,8 @@ agent-review.workspace = true
 agent-grpc.workspace = true
 # The review-fleet roster + orchestrator (C1/C8), for `agent --serve-fleet`.
 agent-review-fleet.workspace = true
+# Overlap-guarded `every {poll_secs}` jobs behind the forge-poll trigger (C6, inc 4a).
+agent-scheduler.workspace = true
 agent-telemetry.workspace = true
 tokio.workspace = true
 anyhow.workspace = true

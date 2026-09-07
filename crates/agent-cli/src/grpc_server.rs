@@ -834,6 +834,11 @@ pub async fn serve_sessions(agent: Arc<Agent>, listen: Endpoint) -> anyhow::Resu
 /// `ReviewNow` burst never silently loses a review.
 const FLEET_TRIGGER_QUEUE_CAP: usize = 256;
 
+/// How often the fleet fires due forge-poll jobs (C6, inc 4a). Each session polls on
+/// its own `every {poll_secs}` cadence (min [`agent_core::MIN_FLEET_POLL_SECS`] = 30s);
+/// this is the driver granularity, matched to that floor so the finest cadence is honored.
+const FLEET_POLL_TICK_SECS: u64 = 30;
+
 /// Host the full **review fleet** (`agent --serve-fleet`, review-fleet C1 + C8):
 ///
 /// 1. a capacity-capped [`SessionManager`] (`[review_fleet] max_*`) + the idle reaper;
@@ -841,7 +846,9 @@ const FLEET_TRIGGER_QUEUE_CAP: usize = 256;
 ///    into admitted owner sessions — a crash-safe rebuild from the source of truth,
 ///    with each row's forge credential fail-closed-checked (C5);
 /// 3. the orchestrator (C8) behind a bounded, coalescing trigger queue, drained by a
-///    background loop that drives each PR `triggered → cloning → reviewing`;
+///    background loop that drives each PR `triggered → cloning → reviewing`, and the
+///    **forge-poll** trigger (C6): one overlap-guarded `every {poll_secs}` job per
+///    enabled session emitting a trigger for every open non-draft PR;
 /// 4. the `ReviewFleetService` control plane (roster CRUD **+** the `ReviewNow`
 ///    trigger intake) and a driving `AgentSessionService` (so review sessions are
 ///    observable), with reflection.
@@ -915,6 +922,15 @@ pub async fn serve_fleet(agent: Arc<Agent>, listen: Endpoint) -> anyhow::Result<
                     }
                 }
             });
+
+            // C6 forge poll (inc 4a): one overlap-guarded `every {poll_secs}` job per
+            // enabled session emits triggers onto the same queue the orchestrator drains.
+            spawn_forge_poll(
+                roster.clone(),
+                queue.clone() as Arc<dyn agent_core::TriggerSink>,
+            )
+            .await;
+
             Some(queue as Arc<dyn agent_core::TriggerSink>)
         }
         None => {
@@ -957,6 +973,92 @@ pub async fn serve_fleet(agent: Arc<Agent>, listen: Endpoint) -> anyhow::Result<
     };
     bound.serve(router, shutdown).await?;
     Ok(())
+}
+
+/// Register + drive the C6 forge-poll jobs (inc 4a): one overlap-guarded
+/// `every {poll_secs}` job per enabled, forge-capable roster row, fired on a fixed
+/// [`FLEET_POLL_TICK_SECS`] tick through `agent-scheduler` (whose overlap guard means a
+/// slow poll never stacks a second copy). Each fire builds the row's session-scoped forge
+/// (C5) and emits a trigger for every open non-draft PR onto `sink`
+/// ([`agent_review_fleet::poll_session`], which bounds pages + triggers against a hostile
+/// forge response).
+///
+/// Jobs are registered from the roster snapshot at boot — matching the one-shot reconcile
+/// this process already does; a roster edit is picked up on the next restart (live re-sync
+/// of both reconcile and the poll jobs is a shared follow-up). The ticker is spawned only
+/// when at least one job registers, so an all-disabled roster stays quiet.
+async fn spawn_forge_poll(
+    roster: Arc<dyn agent_core::FleetRegistry>,
+    sink: Arc<dyn agent_core::TriggerSink>,
+) {
+    use agent_core::Scheduler;
+
+    let scheduler = Arc::new(agent_scheduler::LocalScheduler::new());
+    match roster.list().await {
+        Ok(rows) => {
+            let mut n = 0usize;
+            for row in rows.iter().filter(|r| r.enabled && !r.backend.is_empty()) {
+                let spec = format!("every {}s", row.poll_secs);
+                match scheduler.schedule(&spec, &row.id).await {
+                    Ok(_) => n += 1,
+                    Err(e) => tracing::warn!(
+                        session = %row.id, spec = %spec, error = %e,
+                        "fleet: could not register forge-poll job"
+                    ),
+                }
+            }
+            tracing::info!(jobs = n, "fleet: forge-poll jobs registered");
+            if n == 0 {
+                return; // nothing to poll — don't spawn an idle ticker
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "fleet: roster list failed; no forge-poll jobs");
+            return;
+        }
+    }
+
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(FLEET_POLL_TICK_SECS));
+        loop {
+            tick.tick().await;
+            let roster = roster.clone();
+            let sink = sink.clone();
+            scheduler
+                .tick_with(move |session_id| {
+                    let roster = roster.clone();
+                    let sink = sink.clone();
+                    async move {
+                        let row = roster
+                            .get(&session_id)
+                            .await
+                            .map_err(|e| agent_core::Error::Scheduler(e.to_string()))?;
+                        match agent_runtime::build_session_forge(&row)
+                            .map_err(|e| agent_core::Error::Scheduler(e.to_string()))?
+                        {
+                            Some(forge) => {
+                                let report = agent_review_fleet::poll_session(
+                                    forge.as_ref(),
+                                    &session_id,
+                                    sink.as_ref(),
+                                    agent_review_fleet::MAX_TRIGGERS_PER_TICK,
+                                )
+                                .await?;
+                                Ok(format!(
+                                    "polled {}: {} emitted / {} scanned{}",
+                                    session_id,
+                                    report.emitted,
+                                    report.scanned,
+                                    if report.capped { " (capped)" } else { "" }
+                                ))
+                            }
+                            None => Ok(format!("polled {session_id}: no forge configured")),
+                        }
+                    }
+                })
+                .await;
+        }
+    });
 }
 
 /// Resolve the `--serve-sessions` endpoint: `--listen` override, else

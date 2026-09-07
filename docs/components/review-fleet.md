@@ -16,11 +16,13 @@ server reconciles its live sessions from (review-fleet C2,
 - **Control plane (inc 3b):** `ReviewFleetService` — the seam over gRPC (client `= "grpc"`)
 - **Fleet process (inc 3c):** `agent --serve-fleet` — roster control plane + orchestrator
   (`ReviewNow` C8) + reconcile (C1) + per-session forge (C5)
+- **Forge poll (inc 4a):** `agent-review-fleet::poll_session` — the first real trigger source
+  (C6): one overlap-guarded `every {poll_secs}` job per enabled session
 
-> Increments 3a (roster) + 3b (gRPC control plane) + 3c (fleet process **skeleton**) are
-> shipped. The FSM drives `triggered → cloning → reviewing`; the real triggers (forge
-> poll C6 / Slack watch C7, inc 4), review skill/collectors (inc 5), and the
-> draft→approve→post tail + head-oid dedup (C14, inc 6) are later increments.
+> Increments 3a (roster) + 3b (gRPC control plane) + 3c (fleet process skeleton) + 4a
+> (forge-poll trigger C6) are shipped. The FSM drives `triggered → cloning → reviewing`,
+> now fed by the forge poll; the Slack watch (C7, inc 4b), review skill/collectors (inc 5),
+> and the draft→approve→post tail + head-oid dedup (C14, inc 6) are later increments.
 
 ## The trait
 
@@ -155,9 +157,22 @@ encode_review_session_id(repo, pr)`), and start a review run on it (holding the
 cancel-on-drop `RunHandle`). A bounded, **coalescing** `TriggerQueue` feeds it — a
 duplicate or over-capacity trigger folds into the pending one and is logged, never
 silently dropped — and one review runs per `(session, pr)` (head-oid–aware re-review is
-inc 6, C14). Until the real triggers land (inc 4), the `ReviewNow` RPC injects triggers
-manually; it is **opt-in** (only the `--serve-fleet` process wires the orchestrator's
+inc 6, C14). The `ReviewNow` RPC injects a trigger manually (for testing, or a portal
+button); it is **opt-in** (only the `--serve-fleet` process wires the orchestrator's
 sink — the bare seam answers `UNIMPLEMENTED`).
+
+**Forge poll (C6, inc 4a)** is the first *real* trigger source. `serve_fleet` registers one
+`every {poll_secs}` job per enabled, forge-capable roster row on `agent-scheduler` (whose
+**overlap guard** means a poll that runs long never stacks a second copy) and fires due jobs
+on a fixed 30s driver tick. Each fire builds the row's session-scoped forge (C5) and calls
+[`poll_session`](../../crates/agent-review-fleet/src/poll.rs), which lists open PRs, filters
+out drafts, and emits a `FleetTrigger` for each onto the same queue the orchestrator drains —
+so a polled PR is indistinguishable downstream from a `ReviewNow` (or, next, a Slack link).
+The **forge response is untrusted**: `next_page` is followed only when it strictly advances
+and never past `MAX_POLL_PAGES` (10), and at most `MAX_TRIGGERS_PER_TICK` (64) triggers leave
+one tick, so a hostile paging chain or a PR flood is bounded. Dedup is coarse here (by PR
+number, via the queue's coalescing + the orchestrator's per-`(session, pr)` guard); precise
+head-oid re-review dedup is inc 6 (C14), since `PullRequest` carries no head SHA.
 
 ## Testing
 
@@ -175,7 +190,13 @@ queue** (accept / coalesce-duplicate / coalesce-on-overflow / requeue-after-pop)
 forge builder + `resolve_token_ref` have their own env/file/missing/raw-refused table in
 `agent-runtime`; the wire surface (CRUD, token-never-returned, `ReviewNow`
 accepted/coalesced/unimplemented) round-trips over TCP + UDS in
-[`roundtrip.rs`](../../crates/agent-grpc/tests/roundtrip.rs).
+[`roundtrip.rs`](../../crates/agent-grpc/tests/roundtrip.rs). The forge poll (C6) has its own
+table over a scripted-page forge double + a recording sink in
+[`poll.rs`](../../crates/agent-review-fleet/src/poll.rs): non-draft emits / draft filtered /
+multi-page walk / error propagates / empty list / `u64::MAX` PR number / all-draft / a
+`next_page` self-loop stops / a runaway paging chain clamped to `MAX_POLL_PAGES` / a PR flood
+capped at `MAX_TRIGGERS_PER_TICK`. The scheduler's own overlap guard (a slow poll not
+stacking) is gated by `agent-scheduler`'s tests, not re-proven here.
 
 All of these run in `nix/checks/test.nix` (default features); the sqlite backend is
 executed by the feature-scoped `nix/checks/fleet-sqlite.nix` gate. The opt-in real-wire

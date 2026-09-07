@@ -54,6 +54,7 @@ dependencies = [
  "agent-review",
  "agent-review-fleet",
  "agent-runtime",
+ "agent-scheduler",
  "agent-telemetry",
  "anyhow",
  "async-trait",

@@ -12,20 +12,21 @@ Three PRs, each based off `main`, never stacked, each gated by `nix flake check`
 
 ## Now
 
-- **Current PR:** inc **3c** — **C1** fleet server + **C8** orchestrator skeleton + **C5** scoped forge
-- **Branch:** `feat/review-fleet-inc3c-server-fsm` (off main 030a774; inc 3b C3 #279 merged)
-- **Current step:** code + tests complete; **`nix flake check` GREEN** (re-run after staging the new
-  `orchestrator.rs` — machete only sees git-tracked files, the 3a/3c lesson)
-- **Last action:** `agent --serve-fleet` full process (C1: reconcile + caps + reaper + driving
-  AgentSession) + orchestrator (C8: `FleetOrchestrator` FSM triggered→cloning→reviewing, bounded
-  coalescing `TriggerQueue`, `ReviewNow` RPC additive) + per-session forge (C5:
-  `build_session_forge`/`resolve_token_ref`, fail-closed); agent-core `FleetTrigger`/`TriggerSink`/
-  `FleetHost`; hermetic table-driven tests (reconcile/FSM/queue in agent-review-fleet, C5 in
-  agent-runtime, ReviewNow wire in agent-grpc) + serve-smoke fleet extension
-- **Next action:** commit (awaiting go-ahead), then push/PR. On merge, flip STATUS.md C1/C2/C3/C5/C8
-  + carried inc 1 & 2.
+- **INCREMENT 4 sliced into two gated PRs** off main (never stacked, like 3a/3b/3c): **4a forge
+  poll (C6)** — self-contained, no new crate/deps → **4b Slack watch (C7)** — the new
+  `agent-slack` crate + a Socket-Mode WebSocket dep. Both emit the identical `FleetTrigger` onto
+  the orchestrator queue; everything downstream is trigger-source-agnostic.
+- **INC 4a (forge poll C6) — code + tests complete; gate pending.** `poll_session`
+  (`agent-review-fleet/src/poll.rs`) lists open PRs, filters drafts, emits one trigger per
+  candidate onto the queue, bounding pages (`MAX_POLL_PAGES`) + triggers (`MAX_TRIGGERS_PER_TICK`)
+  against a hostile forge response. `serve_fleet` registers one overlap-guarded `every {poll_secs}`
+  job per enabled row on `agent-scheduler` and drives them on a 30s tick, building each row's forge
+  (C5) per fire. 10-case table (four classes + adversarial) in `poll.rs`; overlap guard reused from
+  `agent-scheduler`. This PR also folds in the deferred **inc-3 STATUS flip** (0/1/2/3 → ✅), since
+  main didn't carry it yet.
+- **Next after 4a:** 4b Slack watch (C7) off updated main.
 
-Inc **3b (C3) DONE + MERGED (#279, main 030a774).** Inc **3a (C2) DONE + MERGED (#278, main 91c40ab).**
+Inc **3c (C1+C8+C5) DONE + MERGED (#280, main `ae42f7d`).** Inc **3b (C3) DONE + MERGED (#279, main 030a774).** Inc **3a (C2) DONE + MERGED (#278, main 91c40ab).**
 
 Inc 2 (C9) DONE + MERGED (#277, main ea52e2c). Now the **fleet build proper**, sliced into
 **three gated PRs** off main (never stacked): **3a roster (C2)** → **3b control plane (C3)** →
@@ -34,7 +35,7 @@ Inc 2 (C9) DONE + MERGED (#277, main ea52e2c). Now the **fleet build proper**, s
 
 ---
 
-## Increment 3c (C1 + C8 + C5) — fleet server + orchestrator skeleton  🟢 (gate green; ready to commit)
+## Increment 3c (C1 + C8 + C5) — fleet server + orchestrator skeleton  ✅ MERGED (#280, main `ae42f7d`)
 
 Third and last fleet-core PR. The **running process**: hosts the roster, admits capacity-capped
 sessions reconciled from it, and drives a manually-queued PR through `triggered → cloning →
