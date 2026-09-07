@@ -185,6 +185,8 @@ mod tests {
             mode_confidence_floor: 0.6,
             mode_hysteresis: 2,
             grpc_max_in_flight: 0,
+            fleet_max_total: 0,
+            fleet_max_per_user: 0,
         }
     }
 

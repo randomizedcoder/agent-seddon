@@ -13,14 +13,14 @@ server reconciles its live sessions from (review-fleet C2,
   `SqliteFleet` (feature `fleet-sqlite`)
 - **Config:** `[review_fleet] store`, `file`, `path`, `root`, `max_total`,
   `max_per_user`
-- **Control plane (inc 3b):** `ReviewFleetService` — the seam over gRPC
-  (`agent --serve-fleet`, client `= "grpc"`)
+- **Control plane (inc 3b):** `ReviewFleetService` — the seam over gRPC (client `= "grpc"`)
+- **Fleet process (inc 3c):** `agent --serve-fleet` — roster control plane + orchestrator
+  (`ReviewNow` C8) + reconcile (C1) + per-session forge (C5)
 
-> Increments 3a (roster) + 3b (gRPC control plane) are shipped. The
-> `agent --serve-fleet` **fleet process** that reconciles + drives live sessions from
-> the roster (C1 + C8) arrives in increment 3c. Note the distinction: today
-> `--serve-fleet` hosts the roster CRUD service over the generic seam harness; 3c's
-> dedicated fleet mode adds the orchestrator on top.
+> Increments 3a (roster) + 3b (gRPC control plane) + 3c (fleet process **skeleton**) are
+> shipped. The FSM drives `triggered → cloning → reviewing`; the real triggers (forge
+> poll C6 / Slack watch C7, inc 4), review skill/collectors (inc 5), and the
+> draft→approve→post tail + head-oid dedup (C14, inc 6) are later increments.
 
 ## The trait
 
@@ -107,10 +107,12 @@ can never drift between them:
 The roster is editable at runtime over gRPC. `ReviewFleetService`
 ([`review_fleet.proto`](../../crates/agent-proto/proto/agent/v1/review_fleet.proto))
 mirrors `ProviderRegistryService`: one process holds the roster while any number of
-clients drive it (`List`/`Get`/`Put`/`Delete`/`SetEnabled`). It wires in like every
-other seam — host it with `agent --serve-fleet` (endpoint `constants::FLEET`,
-`50086`/`fleet.sock`, metrics `9636`) and dial it from another process by setting
-`[review_fleet] store = "grpc"`, which resolves the `GrpcFleet` client.
+clients drive it (`List`/`Get`/`Put`/`Delete`/`SetEnabled`, plus the orchestrator-only
+`ReviewNow` — see below). It wires in like every other seam on endpoint `constants::FLEET`
+(`50086`/`fleet.sock`, metrics `9636`): it is served inside `agent --serve-all` (when a
+`[review_fleet] store` is configured) and by the full `agent --serve-fleet` process, and
+dialed from another process by setting `[review_fleet] store = "grpc"` (the `GrpcFleet`
+client).
 
 Two invariants hold *across the wire*, each with an `adversarial_` round-trip test in
 [`roundtrip.rs`](../../crates/agent-grpc/tests/roundtrip.rs):
@@ -125,6 +127,38 @@ Two invariants hold *across the wire*, each with an `adversarial_` round-trip te
   (the `not found` contract survives a chained `grpc → grpc` hop). Hostile numbers are
   clamped on decode before a row is ever used.
 
+## Fleet process (`agent --serve-fleet`, inc 3c — skeleton)
+
+`agent --serve-fleet` runs the full fleet: the roster control plane **plus** the
+orchestrator ([`orchestrator.rs`](../../crates/agent-review-fleet/src/orchestrator.rs)).
+(The bare Fleet *seam* served inside `--serve-all` is roster CRUD only; `--serve-fleet`
+adds reconcile + the `ReviewNow` intake on top.)
+
+**Reconcile (C1)** rebuilds the live session set from the roster — the source of truth —
+so boot, re-run, and reacting to a control-plane edit all converge to the same set (a
+crash-safe rebuild). For each **enabled** row it fail-closed-checks the row's forge
+credential (C5) and then admits a capacity-capped (`[review_fleet] max_total`/
+`max_per_user` → `SessionManager::with_limits`) placeholder **owner** session; a broken
+credential, a bad id, or a full cap **skips** the row (logged), never admits a broken or
+over-cap session.
+
+**Per-session forge (C5)** — `build_session_forge` resolves the row's `token_ref` (the
+same `env:`/`file:` grammar, fail-closed: a missing `file:` is a hard error) and builds
+the row's `backend` forge. The `repo` safe-segment encodes the forge path — GitHub
+`owner__name`, GitLab the project with `__` for `/`. A token is resolved only here, on
+the fleet host — never at rest, never over the control plane.
+
+**Orchestrator (C8)** turns a [`FleetTrigger`] `{session_id, pr_number}` into a review via
+the state machine `triggered → cloning → reviewing`: fetch the PR head (C9), materialize a
+read-only worktree, mint the PR-scoped `SessionKey` (`user = <org>`, `session =
+encode_review_session_id(repo, pr)`), and start a review run on it (holding the
+cancel-on-drop `RunHandle`). A bounded, **coalescing** `TriggerQueue` feeds it — a
+duplicate or over-capacity trigger folds into the pending one and is logged, never
+silently dropped — and one review runs per `(session, pr)` (head-oid–aware re-review is
+inc 6, C14). Until the real triggers land (inc 4), the `ReviewNow` RPC injects triggers
+manually; it is **opt-in** (only the `--serve-fleet` process wires the orchestrator's
+sink — the bare seam answers `UNIMPLEMENTED`).
+
 ## Testing
 
 Table-driven `rstest` with a `desc` + `expect` column on every row (`crud_contract` in
@@ -132,8 +166,22 @@ Table-driven `rstest` with a `desc` + `expect` column on every row (`crud_contra
 (`positive_`/`negative_`/`boundary_`/`corner_`) plus mandatory `adversarial_` cases
 (traversal ids, raw-token refusal with no echo, the rows cap, out-of-band tampering).
 A per-backend equivalence test asserts the memory/file/sqlite backends agree. The
-default-feature tests run in `nix/checks/test.nix`; the sqlite backend is executed by
-the feature-scoped `nix/checks/fleet-sqlite.nix` gate (the review-fleet twin of
-`prompt-sqlite`).
+orchestrator ([`orchestrator.rs`](../../crates/agent-review-fleet/src/orchestrator.rs))
+adds hermetic, model-free tables over doubles: **reconcile** (admits enabled / skips
+disabled / sheds over-capacity / idempotent re-run / fail-closed on an unresolvable
+credential), the **FSM** (drives cloning→reviewing once, a duplicate is a no-op that does
+not re-fetch, an unknown row errors, and dropping the run cancels it), and the **bounded
+queue** (accept / coalesce-duplicate / coalesce-on-overflow / requeue-after-pop). The C5
+forge builder + `resolve_token_ref` have their own env/file/missing/raw-refused table in
+`agent-runtime`; the wire surface (CRUD, token-never-returned, `ReviewNow`
+accepted/coalesced/unimplemented) round-trips over TCP + UDS in
+[`roundtrip.rs`](../../crates/agent-grpc/tests/roundtrip.rs).
+
+All of these run in `nix/checks/test.nix` (default features); the sqlite backend is
+executed by the feature-scoped `nix/checks/fleet-sqlite.nix` gate. The opt-in real-wire
+`nix run .#serve-smoke` additionally proves `ReviewFleetService` is registered on the live
+binary (describe over reflection + a CRUD round-trip asserting the token reference — never
+a resolved secret — comes back).
 
 [`ApiKeyRef::parse`]: ../../crates/agent-core/src/lib.rs
+[`FleetTrigger`]: ../../crates/agent-core/src/lib.rs

@@ -123,6 +123,9 @@ async fn main() -> Result<()> {
             Mode::ServeSessions(_) => {
                 format!("127.0.0.1:{}", agent_grpc::constants::SESSIONS.metrics_port)
             }
+            Mode::ServeFleet(_) => {
+                format!("127.0.0.1:{}", agent_grpc::constants::FLEET.metrics_port)
+            }
             _ => config.metrics.listen.clone(),
         };
         metrics_server::serve(metrics.clone(), &listen);
@@ -151,6 +154,16 @@ async fn main() -> Result<()> {
     };
     let serve_sessions_listen: Option<agent_grpc::Endpoint> = match &mode {
         Mode::ServeSessions(listen) => Some(grpc_server::resolve_sessions_listen(
+            &config,
+            listen.as_deref(),
+        )),
+        _ => None,
+    };
+    // The full fleet process binds the Fleet seam's endpoint (`[grpc.fleet] listen`,
+    // else the generated FLEET port) — the same endpoint the bare seam uses.
+    let serve_fleet_listen: Option<agent_grpc::Endpoint> = match &mode {
+        Mode::ServeFleet(listen) => Some(grpc_server::resolve_listen(
+            grpc_server::Seam::Fleet,
             &config,
             listen.as_deref(),
         )),
@@ -360,6 +373,12 @@ async fn main() -> Result<()> {
                     .await
                     .map(|()| None)
             }
+            Mode::ServeFleet(..) => {
+                let listen = serve_fleet_listen.expect("fleet target resolved above");
+                grpc_server::serve_fleet(agent.clone(), listen)
+                    .await
+                    .map(|()| None)
+            }
             // Handled before the run: the build above validated the config and we
             // already returned.
             Mode::CheckConfig => unreachable!("--check-config returns before the run"),
@@ -490,6 +509,12 @@ enum Mode {
     /// `SessionRegistryService` + a *driving* `AgentSessionService` (the `Send` RPC)
     /// + the idle-GC reaper. `--serve-mcp`-class; loopback/UDS-gated (docs/design/portal).
     ServeSessions(Option<String>),
+    /// Host the full **review fleet** (`--serve-fleet`, review-fleet C1): the roster
+    /// control plane (`ReviewFleetService` incl. `ReviewNow`) + the orchestrator that
+    /// reconciles enabled rows into capped sessions and drives queued PRs, plus the
+    /// driving `AgentSessionService` + reaper. Distinct from the bare Fleet *seam*
+    /// (roster CRUD only) served inside `--serve-all`.
+    ServeFleet(Option<String>),
     /// Drive the scheduler: tick on an interval, firing due jobs (parity spec 28).
     Scheduler,
     /// Collect grounded review facts for a target and print them
@@ -567,6 +592,7 @@ fn parse_args() -> Result<Args> {
     let mut serve_grpc: Option<grpc_server::Seam> = None;
     let mut serve_grpc_all = false;
     let mut serve_sessions = false;
+    let mut serve_fleet = false;
     let mut listen: Option<String> = None;
     let mut review_target: Option<String> = None;
     let mut review_gate = false;
@@ -594,6 +620,11 @@ fn parse_args() -> Result<Args> {
             "--serve-mcp" => serve_mcp = true,
             "--serve-all" => serve_grpc_all = true,
             "--serve-sessions" => serve_sessions = true,
+            // Intercept `--serve-fleet` here so it means the **full fleet process**
+            // (orchestrator + reconcile), not the bare roster-CRUD seam the generic
+            // `Seam::from_flag` arm below would select. The Fleet seam still serves
+            // inside `--serve-all` (docs/design/review-fleet/03-fleet-core.md).
+            "--serve-fleet" => serve_fleet = true,
             "--review" => {
                 review_target = Some(
                     args.next()
@@ -641,6 +672,7 @@ fn parse_args() -> Result<Args> {
                      --serve-<seam>      host one seam over gRPC; <seam> = {seams}\n  \
                      --serve-all         host every enabled seam over gRPC from one process\n  \
                      --serve-sessions    host the sessions gateway (SessionRegistry + driving AgentSession + reaper)\n  \
+                     --serve-fleet       host the review fleet (roster control plane + orchestrator + reconcile)\n  \
                      --listen ADDR       override the gRPC listen address (host:port or unix:/path)\n  \
                      --cognition-graph F run with cognition-graph document F (see config/cognition/)\n  \
                      --model-router-config F  load the task-router fleet+policy from textproto F (see config/model-router/)",
@@ -661,6 +693,8 @@ fn parse_args() -> Result<Args> {
         Mode::ServeGrpcAll(listen)
     } else if serve_sessions {
         Mode::ServeSessions(listen)
+    } else if serve_fleet {
+        Mode::ServeFleet(listen)
     } else if let Some(seam) = serve_grpc {
         Mode::ServeGrpc(seam, listen)
     } else if serve_mcp {

@@ -63,6 +63,21 @@ message FleetSetEnabledRequest {
   bool enabled = 2;
 }
 
+// Manually queue a review for one roster session's PR (review-fleet C8). Until the
+// real triggers land (forge poll C6 / Slack watch C7, increment 4), this is how a
+// review is kicked off. `session_id` names the roster row; `pr_number` the PR to
+// review.
+message ReviewNowRequest {
+  string session_id = 1;
+  uint64 pr_number = 2;
+}
+
+// Whether the trigger was queued or folded into one already pending/in-flight (the
+// bounded queue coalesces duplicates and on overflow — never a silent drop).
+message ReviewNowReply {
+  bool accepted = 1; // false ⇒ coalesced into an existing pending/in-flight review
+}
+
 // The roster control plane (mirrors ProviderRegistryService: one process holds
 // the roster while any number of clients drive it). `token_ref` rides as a
 // reference; the server never resolves it.
@@ -72,4 +87,8 @@ service ReviewFleetService {
   rpc Put(FleetSession) returns (FleetSession); // upsert = create + update
   rpc Delete(FleetSessionRef) returns (FleetDeleteReply);
   rpc SetEnabled(FleetSetEnabledRequest) returns (FleetSession); // toggle without a full Put
+  // Manually queue a review (C8). Opt-in: served only by the full `--serve-fleet`
+  // process (which has an orchestrator); the bare control-plane endpoint returns
+  // UNIMPLEMENTED.
+  rpc ReviewNow(ReviewNowRequest) returns (ReviewNowReply);
 }

@@ -501,6 +501,10 @@ pub struct FixtureRepo {
     blobs: std::collections::HashMap<String, String>,
     diff: Vec<FileDiff>,
     worktrees: Arc<Mutex<Vec<WorktreeHandle>>>,
+    /// Every PR number passed to [`RepoBackend::fetch_pr`], in order — so a test can
+    /// assert a review fetched once (and a duplicate trigger did **not** re-fetch).
+    /// Clones share the log (like `worktrees`).
+    fetch_pr_calls: Arc<Mutex<Vec<u64>>>,
 }
 
 impl FixtureRepo {
@@ -527,6 +531,10 @@ impl FixtureRepo {
     pub fn with_diff(mut self, files: Vec<FileDiff>) -> Self {
         self.diff = files;
         self
+    }
+    /// The PR numbers passed to [`RepoBackend::fetch_pr`] so far, in call order.
+    pub fn fetch_pr_calls(&self) -> Vec<u64> {
+        self.fetch_pr_calls.lock().unwrap().clone()
     }
     /// A deterministic 40-hex oid from a seed (no randomness).
     pub fn fake_oid(seed: &str) -> Oid {
@@ -607,6 +615,11 @@ impl RepoBackend for FixtureRepo {
     }
     async fn fetch(&self) -> Result<RepoStatus> {
         self.status().await
+    }
+    async fn fetch_pr(&self, number: u64) -> Result<Revision> {
+        self.fetch_pr_calls.lock().unwrap().push(number);
+        // The namespaced local ref the real backends resolve the head into.
+        Ok(Revision::from(agent_core::pr_local_ref(number)))
     }
     async fn worktree_add(&self, spec: &WorktreeSpec) -> Result<WorktreeHandle> {
         let id = spec

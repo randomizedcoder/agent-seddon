@@ -829,6 +829,136 @@ pub async fn serve_sessions(agent: Arc<Agent>, listen: Endpoint) -> anyhow::Resu
     Ok(())
 }
 
+/// Bounded backlog of pending review triggers (review-fleet C8). Over-capacity
+/// enqueues coalesce (fold into the pending one and log) rather than drop — a manual
+/// `ReviewNow` burst never silently loses a review.
+const FLEET_TRIGGER_QUEUE_CAP: usize = 256;
+
+/// Host the full **review fleet** (`agent --serve-fleet`, review-fleet C1 + C8):
+///
+/// 1. a capacity-capped [`SessionManager`] (`[review_fleet] max_*`) + the idle reaper;
+/// 2. the roster (`[review_fleet] store`, else an empty in-memory one) **reconciled**
+///    into admitted owner sessions — a crash-safe rebuild from the source of truth,
+///    with each row's forge credential fail-closed-checked (C5);
+/// 3. the orchestrator (C8) behind a bounded, coalescing trigger queue, drained by a
+///    background loop that drives each PR `triggered → cloning → reviewing`;
+/// 4. the `ReviewFleetService` control plane (roster CRUD **+** the `ReviewNow`
+///    trigger intake) and a driving `AgentSessionService` (so review sessions are
+///    observable), with reflection.
+///
+/// Like `--serve-sessions` this runs arbitrary review goals, so it is its own endpoint,
+/// never part of `--serve-all`; loopback/UDS + socket permissions are the access control
+/// (docs/design/multi-session/07-security.md).
+pub async fn serve_fleet(agent: Arc<Agent>, listen: Endpoint) -> anyhow::Result<()> {
+    use agent_grpc::server as srv;
+
+    let (max_total, max_per_user) = agent.fleet_limits();
+    let mgr = Arc::new(SessionManager::new(agent.clone()).with_limits(max_total, max_per_user));
+
+    // The roster: the configured store if any, else an empty in-memory one so the
+    // control plane still serves (a `Put` — or a hand-written store — populates it).
+    let roster: Arc<dyn agent_core::FleetRegistry> = agent
+        .fleet_registry()
+        .unwrap_or_else(|| Arc::new(agent_review_fleet::MemoryFleet::new()));
+
+    // Idle reaper — the resource guarantee (a crashed trigger source never cleans up).
+    {
+        let mgr = mgr.clone();
+        tokio::spawn(async move {
+            const IDLE_AFTER: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                let n = mgr.reap_idle(IDLE_AFTER);
+                if n > 0 {
+                    tracing::info!(reaped = n, "reaped idle fleet sessions");
+                }
+            }
+        });
+    }
+
+    // C5 fail-closed forge check: reconcile keeps a row disabled when its `token_ref`
+    // can't resolve or its backend forge can't be built.
+    let forge_check = |row: &agent_core::FleetSession| {
+        agent_runtime::build_session_forge(row)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    };
+    let report = agent_review_fleet::reconcile(
+        roster.as_ref(),
+        mgr.as_ref() as &dyn agent_core::FleetHost,
+        &forge_check,
+    )
+    .await;
+    tracing::info!(
+        admitted = report.admitted.len(),
+        skipped = report.skipped.len(),
+        "fleet reconciled from roster"
+    );
+
+    // Orchestrator + bounded trigger queue. The queue's sink drives `ReviewNow`; a
+    // background loop drains it through the FSM. Wired only when a repo backend exists
+    // (the FSM's `cloning` needs one); otherwise `ReviewNow` stays `UNIMPLEMENTED`.
+    let triggers: Option<Arc<dyn agent_core::TriggerSink>> = match agent.repo() {
+        Some(repo) => {
+            let (queue, mut rx) =
+                agent_review_fleet::TriggerQueue::channel(FLEET_TRIGGER_QUEUE_CAP);
+            let orch = Arc::new(agent_review_fleet::FleetOrchestrator::new(
+                roster.clone(),
+                repo,
+                mgr.clone() as Arc<dyn agent_core::FleetHost>,
+            ));
+            tokio::spawn(async move {
+                while let Some(trigger) = rx.recv().await {
+                    if let Err(e) = orch.handle(trigger).await {
+                        tracing::warn!(error = %e, "fleet: review trigger failed");
+                    }
+                }
+            });
+            Some(queue as Arc<dyn agent_core::TriggerSink>)
+        }
+        None => {
+            tracing::warn!(
+                "fleet: no repo backend ([git] unset); ReviewNow is UNIMPLEMENTED until one is configured"
+            );
+            None
+        }
+    };
+
+    let (router, health) = agent_grpc::server::base_router_with_observer(
+        agent.grpc_max_in_flight(),
+        Some(shed_observer(&agent)),
+    )
+    .await;
+    let mut fleet_svc = srv::ReviewFleetSvc::new(roster.clone());
+    if let Some(triggers) = triggers {
+        fleet_svc = fleet_svc.with_triggers(triggers);
+    }
+    let router = router.add_service(fleet_svc.into_server());
+    health.set_serving(Seam::Fleet.service_name()).await;
+    // A driving AgentSessionService, so a client can observe/drive the review sessions
+    // the orchestrator admits (same as the sessions gateway).
+    let router = router.add_service(
+        srv::AgentSessionSvc::new(agent.session_source_registry())
+            .with_driver(mgr.clone() as Arc<dyn agent_core::SessionDriver>)
+            .into_server(),
+    );
+    health.set_serving(Seam::SessionStream.service_name()).await;
+
+    let router = agent_grpc::server::with_reflection(router).map_err(anyhow::Error::msg)?;
+    let bound = listen.bind().await?;
+    tracing::info!(
+        endpoint = ?bound.dial_endpoint()?,
+        "review fleet ready (roster control plane + orchestrator + driving AgentSession + reaper)"
+    );
+    let shutdown = async {
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::info!("shutting down review fleet");
+    };
+    bound.serve(router, shutdown).await?;
+    Ok(())
+}
+
 /// Resolve the `--serve-sessions` endpoint: `--listen` override, else
 /// `[grpc.sessions] listen`, else a loopback default on the generated port.
 pub fn resolve_sessions_listen(cfg: &Config, override_addr: Option<&str>) -> Endpoint {

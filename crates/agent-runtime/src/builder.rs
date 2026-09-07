@@ -1069,6 +1069,10 @@ pub async fn build_agent_with(
         mode_hysteresis: cfg.mode.hysteresis,
         // Absent ⇒ a protective default cap; `Some(0)` ⇒ explicit opt-out (unbounded).
         grpc_max_in_flight: cfg.grpc.max_in_flight.unwrap_or(DEFAULT_GRPC_MAX_IN_FLIGHT),
+        // Fleet capacity guards (`[review_fleet] max_*`), consumed by `--serve-fleet`'s
+        // `SessionManager::with_limits`. `0` = unbounded (today's behaviour).
+        fleet_max_total: cfg.review_fleet.max_total,
+        fleet_max_per_user: cfg.review_fleet.max_per_user,
     };
 
     // Subagents: register a `delegate` tool whose children reuse the worker tool

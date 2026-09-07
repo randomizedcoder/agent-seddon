@@ -1970,3 +1970,84 @@ async fn negative_fleet_get_unknown_is_not_found_over_wire() {
         "unknown id must map back to a `not found` Fleet error"
     );
 }
+
+// A recording trigger sink (the orchestrator's role, for the wire test): records every
+// enqueued trigger and returns a preset outcome, so a test can prove `ReviewNow` reaches
+// the sink across the hop and reports accepted/coalesced faithfully.
+struct RecordingSink {
+    outcome: agent_core::TriggerOutcome,
+    seen: std::sync::Mutex<Vec<agent_core::FleetTrigger>>,
+}
+impl agent_core::TriggerSink for RecordingSink {
+    fn enqueue(&self, trigger: agent_core::FleetTrigger) -> agent_core::TriggerOutcome {
+        self.seen.lock().unwrap().push(trigger);
+        self.outcome
+    }
+}
+
+// ReviewNow reaches the orchestrator's sink over the wire and reports its outcome; the
+// (session_id, pr_number) survive the hop. Runs over TCP and UDS.
+#[rstest]
+#[case::tcp(Transport::Tcp)]
+#[case::uds(Transport::Uds)]
+#[tokio::test]
+async fn fleet_review_now_reaches_the_sink(#[case] transport: Transport) {
+    let store = Arc::new(agent_review_fleet::MemoryFleet::new());
+    let sink = Arc::new(RecordingSink {
+        outcome: agent_core::TriggerOutcome::Accepted,
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+    let router = tonic::transport::Server::builder().add_service(
+        agent_grpc::server::ReviewFleetSvc::new(store)
+            .with_triggers(sink.clone() as Arc<dyn agent_core::TriggerSink>)
+            .into_server(),
+    );
+    let (dial, _srv) = spawn(transport, router).await;
+    let client = agent_grpc::client::GrpcFleet::connect(&dial).unwrap();
+
+    assert!(client.review_now("web", 42).await.unwrap(), "accepted");
+    let seen = sink.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].session_id, "web");
+    assert_eq!(seen[0].pr_number, 42);
+}
+
+// A coalesced trigger reports `accepted = false` (folded into a pending/in-flight one) —
+// not an error, so a caller can distinguish "queued" from "already pending".
+#[tokio::test]
+async fn fleet_review_now_reports_coalesced() {
+    let store = Arc::new(agent_review_fleet::MemoryFleet::new());
+    let sink = Arc::new(RecordingSink {
+        outcome: agent_core::TriggerOutcome::Coalesced,
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+    let router = tonic::transport::Server::builder().add_service(
+        agent_grpc::server::ReviewFleetSvc::new(store)
+            .with_triggers(sink as Arc<dyn agent_core::TriggerSink>)
+            .into_server(),
+    );
+    let (dial, _srv) = spawn(Transport::Tcp, router).await;
+    let client = agent_grpc::client::GrpcFleet::connect(&dial).unwrap();
+    assert!(
+        !client.review_now("web", 1).await.unwrap(),
+        "coalesced ⇒ accepted:false, not an error"
+    );
+}
+
+// The bare control-plane endpoint has no orchestrator, so ReviewNow is UNIMPLEMENTED —
+// roster CRUD stays available; only the trigger intake is opt-in.
+#[tokio::test]
+async fn fleet_review_now_unimplemented_without_orchestrator() {
+    let store = Arc::new(agent_review_fleet::MemoryFleet::new());
+    let (dial, _srv) = spawn(
+        Transport::Tcp,
+        agent_grpc::server::review_fleet_router(store),
+    )
+    .await;
+    let client = agent_grpc::client::GrpcFleet::connect(&dial).unwrap();
+    let err = client.review_now("web", 1).await;
+    assert!(
+        err.is_err(),
+        "ReviewNow without a wired orchestrator must fail (UNIMPLEMENTED)"
+    );
+}
