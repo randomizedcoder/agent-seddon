@@ -12,22 +12,19 @@ Three PRs, each based off `main`, never stacked, each gated by `nix flake check`
 
 ## Now
 
-- **INC 4a (forge poll C6) DONE + MERGED (#281, main `bb88a0e`)** — carried the inc-3 STATUS flip.
-- **INCREMENT 4b (Slack watch C7) split again into core + transport** (the new-dependency risk
-  isolated per user choice): **4b-core** = the new `agent-slack` crate — strict `parse_pr_link` +
-  channel→session fan-out + `SlackTransport` seam + fake, **NO new dependency, fully hermetic** →
-  **4b-transport (follow-up)** = the real `tokio-tungstenite` Socket-Mode adapter + token_ref
-  resolution + `serve_fleet` wiring (the only code that touches the network).
-- **INC 4b-core — code + tests complete; gate pending.** `crates/agent-slack`:
-  `parse_pr_link(text, expect)` extracts a PR/MR number only for a link whose host+owner/repo match
-  the session's repo — host/path via `url::Url` (never hand-rolled → lookalike hosts rejected
-  structurally), `regex` to find URL candidates in free text; Slack text is **data not
-  instructions**. `SlackWatch` fans one Socket-Mode connection out from each row's
-  `slack_trigger_channel` to its session; a polled PR and a Slack link produce the *identical*
-  `FleetTrigger`. Transport is a seam (`SlackTransport`) so the gate uses a fake. 33 tests (parser
-  adversarial table + fan-out + fake-transport e2e). No `serve_fleet`/config change (deferred to
-  4b-transport, so nothing is dead).
-- **Next after 4b-core:** 4b-transport (real WebSocket adapter) off updated main.
+- **INCREMENT 4 (both triggers) COMPLETE** on this PR's merge. 4a forge poll (C6) #281, 4b-core
+  Slack parser/fan-out (C7) #282, and **4b-transport (this PR)** = the real Socket-Mode adapter.
+- **INC 4b-transport — code + tests complete; gate pending.** `agent-slack` gains
+  `socket_mode.rs`: `parse_envelope` (pure, hermetic — acks every envelope_id; only plain user
+  `message` events trigger, `bot_id`/`subtype` acked-but-inert so the fleet never reacts to itself)
+  + `SlackSocketMode` (real WebSocket: `apps.connections.open` → wss → read/ack, tokio-tungstenite
+  rustls) + `serve_socket_mode` (reconnect loop, backoff via `agent-retry`). Config
+  `[review_fleet.slack] app_token_ref/bot_token_ref` (C5 refs); `serve_fleet::spawn_slack_watch`
+  resolves the app token, builds `SlackWatch` from the roster's `slack_trigger_channel`s, and spawns
+  the driver. Dependency: only `tokio-tungstenite` 0.24 (rustls, no native-tls) enters the tree;
+  its transitive `webpki-roots 0.26` (vs reqwest's 1.0 — not dedupable) is the one new
+  `deny.toml` skip, documented.
+- **Next: inc 5** (review skill + collectors C10/C11/C12) off updated main.
 
 Inc **3c (C1+C8+C5) DONE + MERGED (#280, main `ae42f7d`).** Inc **3b (C3) DONE + MERGED (#279, main 030a774).** Inc **3a (C2) DONE + MERGED (#278, main 91c40ab).**
 

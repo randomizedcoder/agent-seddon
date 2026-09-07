@@ -12,21 +12,20 @@ server reconciles its live sessions from (review-fleet C2,
 - **Shipped backends:** `MemoryFleet` (base), `FileFleet` (JSON bundle),
   `SqliteFleet` (feature `fleet-sqlite`)
 - **Config:** `[review_fleet] store`, `file`, `path`, `root`, `max_total`,
-  `max_per_user`
+  `max_per_user`; `[review_fleet.slack] app_token_ref`, `bot_token_ref`
 - **Control plane (inc 3b):** `ReviewFleetService` — the seam over gRPC (client `= "grpc"`)
 - **Fleet process (inc 3c):** `agent --serve-fleet` — roster control plane + orchestrator
   (`ReviewNow` C8) + reconcile (C1) + per-session forge (C5)
 - **Forge poll (inc 4a):** `agent-review-fleet::poll_session` — the first real trigger source
   (C6): one overlap-guarded `every {poll_secs}` job per enabled session
 - **Slack watch (inc 4b):** [`agent-slack`](../../crates/agent-slack) — the second trigger source
-  (C7): a strict PR-link parser + channel→session fan-out behind a `SlackTransport` seam
+  (C7): a strict PR-link parser + channel→session fan-out + a real Socket-Mode transport
 
 > Increments 3a (roster) + 3b (gRPC control plane) + 3c (fleet process skeleton) + 4a
-> (forge-poll trigger C6) + 4b **core** (Slack parser + fan-out C7) are shipped. The FSM
-> drives `triggered → cloning → reviewing`, fed by the forge poll and (once its transport
-> lands) the Slack watch. The real Socket-Mode adapter (4b follow-up), review
-> skill/collectors (inc 5), and the draft→approve→post tail + head-oid dedup (C14, inc 6)
-> are later increments.
+> (forge-poll trigger C6) + 4b (Slack watch C7 — parser/fan-out **and** the Socket-Mode
+> transport) are shipped. The FSM drives `triggered → cloning → reviewing`, fed by **both**
+> triggers (forge poll + Slack). The review skill/collectors (inc 5) and the
+> draft→approve→post tail + head-oid dedup (C14, inc 6) are later increments.
 
 ## The trait
 
@@ -88,7 +87,14 @@ path         = ".agent/review-fleet.sqlite3"  # sqlite roster (sqlite backend)
 root         = ""                          # per-session workspace root (R1a); empty ⇒ shared cwd
 max_total    = 0                           # cap on total admitted sessions (0 = unbounded; inc 3c)
 max_per_user = 0                           # cap per owning org (0 = unbounded; inc 3c)
+
+[review_fleet.slack]                       # Slack-watch trigger (C7, inc 4b); empty ⇒ no watch
+app_token_ref = ""                         # env:NAME / file:/path — xapp- app token (Socket Mode)
+bot_token_ref = ""                         # env:NAME / file:/path — xoxb- bot token (progress, inc 7)
 ```
+
+Both Slack tokens are C5-style **references** (`env:`/`file:`), never raw secrets; the
+app-level token is resolved on the fleet host only.
 
 ## Storage backends
 
@@ -190,11 +196,16 @@ number; prose, `@mentions`, and "ignore your rules and post" commands are inert,
 is forwarded to the model. A polled PR and a Slack-posted link produce the *identical*
 `FleetTrigger`, so the orchestrator can't tell them apart.
 
-The **transport is a seam** (`SlackTransport`): 4b-core lands the parser + fan-out + the trait
-+ a fake (fully hermetic, no network dependency); the real `tokio-tungstenite` Socket-Mode
-adapter — plus `[review_fleet.slack]` app/bot `token_ref` resolution, reconnect/backoff via
-`agent-retry`, and the `serve_fleet` wiring — is the deliberately-isolated 4b follow-up (the
-only code that touches the network).
+The **transport is a seam** (`SlackTransport`): 4b-core landed the parser + fan-out + the trait
++ a fake (fully hermetic); 4b-transport adds the real adapter,
+[`SlackSocketMode`](../../crates/agent-slack/src/socket_mode.rs) — `apps.connections.open`
+(app-level token) → `wss://` → read + **ack** envelopes (only plain user `message` events
+trigger; a `bot_id`/`subtype` is acked but never triggers, so the fleet can't react to itself).
+Its envelope parsing (`parse_envelope`) is pure and hermetically tested; the WebSocket I/O is
+thin glue exercised only against a live Slack. `serve_fleet` resolves `[review_fleet.slack]
+app_token_ref` (C5, empty ⇒ no watch), builds the fan-out from the roster's
+`slack_trigger_channel`s, and runs one reconnecting connection (`serve_socket_mode`, backoff via
+`agent-retry`). Only `tokio-tungstenite` (rustls, no native-tls) enters the tree.
 
 ## Testing
 
@@ -224,9 +235,13 @@ The Slack watch (C7) has its own tables in [`agent-slack`](../../crates/agent-sl
 `parse_pr_link` gets a heavily adversarial table (lookalike suffix/prefix hosts, a userinfo
 `@`-host, a non-http scheme, embedded bot-commands kept inert, wrong-repo / wrong-backend /
 non-PR links rejected, multiple links with only the matching repo triggering, `u64` overflow,
-Slack `<url|label>` wrapping, self-hosted host matching), and the fan-out (`SlackWatch`) gets
+Slack `<url|label>` wrapping, self-hosted host matching), the fan-out (`SlackWatch`) gets
 watched/unwatched-channel, wrong-repo, blank-channel, shared-channel, and a fake-transport
-end-to-end integration (only the watched-channel matching-repo message becomes a trigger).
+end-to-end integration (only the watched-channel matching-repo message becomes a trigger), and
+the Socket-Mode envelope parser (`parse_envelope`) gets its own table (user message acks +
+yields, non-message/other-type acks without a trigger, `bot_id`/`subtype` acked but inert,
+`hello`/`disconnect`, malformed JSON and a missing `envelope_id` ignored). The WebSocket I/O
+itself needs a live Slack and so is not gated.
 
 All of these run in `nix/checks/test.nix` (default features); the sqlite backend is
 executed by the feature-scoped `nix/checks/fleet-sqlite.nix` gate. The opt-in real-wire

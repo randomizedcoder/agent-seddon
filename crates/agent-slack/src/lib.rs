@@ -10,15 +10,18 @@
 //! from a message is a PR number behind a link whose host + owner/repo match the session's
 //! repo. Wrong-repo links, non-PR chatter, and embedded commands are inert.
 //!
-//! **What is deliberately deferred to the 4b follow-up:** the real `tokio-tungstenite`
-//! Socket-Mode adapter behind [`SlackTransport`], its `[review_fleet.slack]` app/bot
-//! `token_ref` resolution (C5-style), reconnect/backoff via `agent-retry`, and the
-//! `serve_fleet` wiring that drives it. That adapter is the *only* thing that touches the
-//! network; the fan-out + parser here are transport-agnostic and fully hermetic, driven in
-//! tests by a fake transport.
+//! The real Socket-Mode adapter behind [`SlackTransport`] is [`SlackSocketMode`]
+//! ([`socket_mode`]) — the only code here that touches the network. Its envelope parsing is
+//! pure and hermetically tested; the fan-out + parser remain transport-agnostic (the gate
+//! drives them with a fake). Token resolution (`[review_fleet.slack] app_token_ref`, C5) and
+//! reconnect/backoff (`agent-retry`) live in the `serve_fleet` wiring that owns the loop.
 
 pub mod parse;
 pub use parse::{extract_pr_links, parse_pr_link, ExpectRepo, LinkKind, PrLink};
+pub mod socket_mode;
+pub use socket_mode::{
+    open_connection, parse_envelope, serve_socket_mode, EnvelopeAction, SlackSocketMode,
+};
 
 use std::collections::HashMap;
 use std::sync::Arc;

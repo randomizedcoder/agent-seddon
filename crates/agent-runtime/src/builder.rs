@@ -1073,6 +1073,7 @@ pub async fn build_agent_with(
         // `SessionManager::with_limits`. `0` = unbounded (today's behaviour).
         fleet_max_total: cfg.review_fleet.max_total,
         fleet_max_per_user: cfg.review_fleet.max_per_user,
+        fleet_slack_app_token_ref: cfg.review_fleet.slack.app_token_ref.clone(),
     };
 
     // Subagents: register a `delegate` tool whose children reuse the worker tool

@@ -19,6 +19,8 @@ agent-grpc.workspace = true
 agent-review-fleet.workspace = true
 # Overlap-guarded `every {poll_secs}` jobs behind the forge-poll trigger (C6, inc 4a).
 agent-scheduler.workspace = true
+# The Slack-watch trigger source (C7): PR-link parser, fan-out, Socket-Mode transport.
+agent-slack.workspace = true
 agent-telemetry.workspace = true
 tokio.workspace = true
 anyhow.workspace = true

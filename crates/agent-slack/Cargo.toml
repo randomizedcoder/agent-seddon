@@ -13,9 +13,24 @@ agent-core.workspace = true
 url.workspace = true
 # Locating URL candidates in untrusted free-form Slack text.
 regex.workspace = true
-# The async SlackTransport seam (the real Socket-Mode adapter lands in the 4b follow-up).
+# The async SlackTransport seam + the real Socket-Mode adapter.
 async-trait.workspace = true
 tracing.workspace = true
+# Socket-Mode transport (inc 4b-transport): the outbound WebSocket. rustls only (no
+# native-tls / openssl), matching the workspace TLS backend; `connect` pulls the client.
+tokio-tungstenite = { version = "0.24", default-features = false, features = [
+  "connect",
+  "rustls-tls-webpki-roots",
+] }
+# apps.connections.open (exchange the app token for a wss URL) + envelope JSON parsing.
+reqwest.workspace = true
+serde_json.workspace = true
+# Stream/Sink combinators for the WebSocket (read frames, send acks).
+futures-util.workspace = true
+# Runtime types for the connection.
+tokio = { workspace = true }
+# Reconnect/backoff — one retry library, never hand-rolled.
+agent-retry.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true
