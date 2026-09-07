@@ -3256,10 +3256,16 @@ pub trait FleetHost: Send + Sync {
     fn remove_session(&self, key: &SessionKey);
     /// Admit (cap-checked) the review session for `key` and start `goal` on it,
     /// returning the run's cancel-on-drop [`RunHandle`] — dropping it cancels the run.
+    ///
+    /// `skill` is the roster row's review skill (already validated; `None`/empty ⇒ the
+    /// default). The host seeds the new session so it runs in review mode with a
+    /// `skill:<name>` prompt tag — the review checklist fragments are then selected
+    /// deterministically (review-fleet C11), not left to per-turn mode classification.
     fn start_review(
         &self,
         key: SessionKey,
         goal: String,
+        skill: Option<String>,
     ) -> std::result::Result<RunHandle, DriverError>;
 }
 

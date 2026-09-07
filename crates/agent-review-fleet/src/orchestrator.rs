@@ -309,7 +309,11 @@ impl FleetOrchestrator {
         };
         let run = self
             .host
-            .start_review(key.clone(), Self::review_goal(&row, pr))
+            .start_review(
+                key.clone(),
+                Self::review_goal(&row, pr),
+                Some(row.skill.clone()),
+            )
             .map_err(|e| agent_core::Error::Fleet(format!("admit review session: {e}")))?;
         // Keep the run alive (drop = cancel) and mark it in flight.
         self.in_flight
@@ -345,7 +349,7 @@ mod tests {
     struct HostState {
         admitted: Vec<SessionKey>,
         removed: Vec<SessionKey>,
-        reviews: Vec<(SessionKey, String)>,
+        reviews: Vec<(SessionKey, String, Option<String>)>,
         /// One cancel flag per started review (index-aligned with `reviews`).
         cancels: Vec<Arc<AtomicBool>>,
     }
@@ -386,7 +390,12 @@ mod tests {
             s.removed.push(key.clone());
             s.admitted.retain(|k| k != key);
         }
-        fn start_review(&self, key: SessionKey, goal: String) -> Result<RunHandle, DriverError> {
+        fn start_review(
+            &self,
+            key: SessionKey,
+            goal: String,
+            skill: Option<String>,
+        ) -> Result<RunHandle, DriverError> {
             let mut s = self.state.lock().unwrap();
             if self.max_total > 0
                 && !s.admitted.contains(&key)
@@ -395,7 +404,7 @@ mod tests {
                 return Err(DriverError::TotalLimit(self.max_total));
             }
             let flag = Arc::new(AtomicBool::new(false));
-            s.reviews.push((key.clone(), goal));
+            s.reviews.push((key.clone(), goal, skill));
             s.cancels.push(flag.clone());
             if !s.admitted.contains(&key) {
                 s.admitted.push(key);
@@ -514,7 +523,9 @@ mod tests {
         // desc: a trigger for a known row + PR. expect: FSM reaches Reviewing, the PR
         // head is fetched once, a worktree is added, and the review runs on the
         // PR-scoped key (user = org, session = encode_review_session_id(repo, pr)).
-        let roster = seeded(&[row("web", true)]).await;
+        let mut r = row("web", true);
+        r.skill = "code-review".into();
+        let roster = seeded(&[r]).await;
         let repo = Arc::new(agent_testkit::FixtureRepo::new());
         let host = Arc::new(FakeHost::new(0));
         let o = orch(roster, repo.clone(), host.clone());
@@ -535,13 +546,20 @@ mod tests {
 
         let s = host.state.lock().unwrap();
         assert_eq!(s.reviews.len(), 1, "one review started");
-        let (key, goal) = &s.reviews[0];
+        let (key, goal, skill) = &s.reviews[0];
         assert_eq!(key.user.as_str(), "acme");
         assert_eq!(
             key.session.as_str(),
             encode_review_session_id("acme__web", 42).as_str()
         );
         assert!(goal.contains("#42"), "goal names the PR: {goal}");
+        // The roster row's skill is threaded to the host (C11) so the review session
+        // is seeded with its checklist; `row("web", …)` carries the default skill.
+        assert_eq!(
+            skill.as_deref(),
+            Some("code-review"),
+            "the review skill reaches the host"
+        );
     }
 
     #[tokio::test]

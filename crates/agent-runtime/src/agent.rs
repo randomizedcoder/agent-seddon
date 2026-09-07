@@ -972,6 +972,7 @@ impl Agent {
             started: false,
             pending_context: Vec::new(),
             current_mode: agent_core::TaskMode::default(),
+            skill: None,
             switch_history: std::collections::VecDeque::new(),
             pending_switch: None,
             situational_present: false,
@@ -2276,6 +2277,64 @@ mod tests {
             )
             .with_task_classifier(Arc::new(FixedClassifier(mode, confidence))),
         )
+    }
+
+    // ---- review-fleet C11: seed_review + prompt_context skill tag ----------
+
+    fn plain_agent() -> Arc<Agent> {
+        Arc::new(Agent::new(
+            Arc::new(FnProvider::new(|_req: &CompletionRequest| final_turn("ok"))),
+            ToolRegistry::new(),
+            Arc::new(RecordingMemory::new()),
+            Arc::new(StaticContext),
+            Arc::new(crate::policy::AutoApprove),
+            Metrics::new(),
+            settings(false),
+        ))
+    }
+
+    // An ordinary session carries only its mode tag — no skill leaks in.
+    #[test]
+    fn negative_plain_session_has_no_skill_tag() {
+        let agent = plain_agent();
+        let session = agent.session();
+        let ctx = session.prompt_context();
+        assert!(ctx.contains("mode:other"), "default mode tag present");
+        assert!(
+            !ctx.tags().any(|t| t.starts_with("skill:")),
+            "an unseeded session must not carry a skill tag"
+        );
+    }
+
+    // A seeded review session runs in review mode and carries its skill tag, so the
+    // review checklist fragments select deterministically (review-fleet C11).
+    #[test]
+    fn positive_seed_review_sets_mode_and_skill_tag() {
+        let agent = plain_agent();
+        let mut session = agent.session();
+        session.seed_review(Some("code-review".into()));
+        let ctx = session.prompt_context();
+        assert!(ctx.contains("mode:review"), "seeded into review mode");
+        assert!(ctx.contains("skill:code-review"), "skill tag emitted");
+    }
+
+    // A blank/whitespace roster skill falls back to the code-review default (the
+    // C11 `corner_unknown_skill_falls_back_to_code_review` case).
+    #[test]
+    fn corner_blank_skill_falls_back_to_code_review() {
+        let agent = plain_agent();
+        for blank in ["", "   ", "\t"] {
+            let mut session = agent.session();
+            session.seed_review(Some(blank.into()));
+            assert!(
+                session.prompt_context().contains("skill:code-review"),
+                "blank skill {blank:?} falls back to code-review"
+            );
+        }
+        // `None` (no skill field at all) also defaults.
+        let mut session = agent.session();
+        session.seed_review(None);
+        assert!(session.prompt_context().contains("skill:code-review"));
     }
 
     // A decisive verdict switches the session mode and records the switch.
