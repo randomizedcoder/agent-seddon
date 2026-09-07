@@ -28,6 +28,8 @@ pub use orchestrator::{
     reconcile, FleetOrchestrator, ForgeCheck, Handled, ReconcileReport, TriggerQueue,
     TriggerReceiver,
 };
+pub mod poll;
+pub use poll::{poll_session, PollReport, MAX_POLL_PAGES, MAX_TRIGGERS_PER_TICK};
 #[cfg(feature = "fleet-sqlite")]
 pub mod sqlite;
 #[cfg(feature = "fleet-sqlite")]

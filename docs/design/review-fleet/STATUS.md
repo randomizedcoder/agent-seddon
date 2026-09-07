@@ -17,7 +17,7 @@ Legend: ⬜ not started · 🟡 in progress · ✅ merged.
 | 1 | Per-session workspace + creds isolation | C4, C5 | ✅ | #270, #271, #272, #280 |
 | 2 | PR fetch + checkout op | C9 | ✅ | #277 |
 | 3 | Fleet core + persisted registry | C1, C2, C3, C8(skel) | ✅ | #278, #279, #280 |
-| 4 | Triggers (forge poll + Slack watch) | C6, C7 | ⬜ | — |
+| 4 | Triggers (forge poll + Slack watch) | C6, C7 | 🟡 4a (C6) in review; 4b (C7) next | — |
 | 5 | Review skill + collectors | C10, C11, C12 | ⬜ | — |
 | 6 | Draft / persist / approve / post | C8, C13, C14, C15, C16, C17 | ⬜ | — |
 | 7 | Observability + Slack progress | C18, C19 | ⬜ | — |
@@ -53,6 +53,13 @@ exec collectors, tenant-tagged review tables) so that track's enforcement is dro
   with `SessionManager::with_limits` + reconcile, C8 `FleetOrchestrator` FSM
   `triggered → cloning → reviewing` + coalescing `TriggerQueue` + additive `ReviewNow` RPC, C5
   `resolve_token_ref` + `build_session_forge`, **#280**).
+
+- **2026-09-06** — **Increment 4a (forge poll, C6) — in review.** `agent-review-fleet::poll_session`
+  lists open PRs, filters drafts, and emits one `FleetTrigger` per candidate onto the orchestrator
+  queue, bounding pages (`MAX_POLL_PAGES`) + triggers (`MAX_TRIGGERS_PER_TICK`) against a hostile
+  forge response. `serve_fleet` registers one overlap-guarded `every {poll_secs}` `agent-scheduler`
+  job per enabled row, driven on a 30s tick, building each row's forge (C5) per fire. Slack watch
+  (C7) is the sibling PR 4b. Increment flips ✅ when both land.
 
 > Note on the exec-chokepoint / org-tier reworks (R3 #273/#274/#275, R4 #276): these are
 > foundation for the [multi-tenancy track](../multi-tenancy/) (components C24/C25), tracked
