@@ -112,6 +112,12 @@ in
   # `Nearby similar code:` section into the context. The correlation logic is
   # covered deterministically by the fake-backend unit tests. Offline/hermetic.
   review-nearby = agentCheck ./review-nearby.nix { };
+  # Shipped review-skill content (review-fleet C11): the `prompts/modes/review/`
+  # checklist fragments + `skills/code-review/SKILL.md`. Markdown lives outside the
+  # crane source filter, so this references the files by nix path and asserts the
+  # checklist content is present + ordered. Selection mechanism is unit-tested in
+  # agent-context; the roster→session skill bridge in agent-runtime.
+  review-skill-content = agentCheck ./review-skill-content.nix { };
   # Signature-diff coverage: reconstruct a two-commit history where a Go function's
   # signature changes + a new function appears, assert the `API signature changes`
   # section renders. Pure in-process (regex over blobs) — no toolchain, offline.

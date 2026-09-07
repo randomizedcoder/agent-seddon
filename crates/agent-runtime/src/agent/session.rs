@@ -54,6 +54,10 @@ pub struct Session {
     /// Updated per turn by the classifier + hysteresis; drives the review hand-off
     /// today, and mode-aware compaction / dimensional memory later.
     pub(super) current_mode: agent_core::TaskMode,
+    /// The review skill this session was seeded with (review-fleet C11), if any. A
+    /// fleet review session is seeded with its roster row's skill so `prompt_context`
+    /// emits a `skill:<name>` tag; `None` for an ordinary session.
+    pub(super) skill: Option<String>,
     /// Recent per-turn mode proposals (bounded), for the switch hysteresis.
     pub(super) switch_history: std::collections::VecDeque<agent_core::TaskMode>,
     /// A task-mode switch armed this turn, consumed by the next `compact` as a
@@ -197,10 +201,27 @@ impl Session {
             .await;
     }
 
-    /// The current situation as a tag set (docs/design/prompts/04-selection.md). Only
-    /// the mode is a live signal today; later increments add more tags here.
-    fn prompt_context(&self) -> agent_core::PromptContext {
-        agent_core::PromptContext::new().with_tag(format!("mode:{}", self.current_mode.as_str()))
+    /// The current situation as a tag set (docs/design/prompts/04-selection.md). The
+    /// mode is the live per-turn signal; a fleet review session also carries its
+    /// seeded `skill:<name>` (review-fleet C11). Later increments add more tags here.
+    pub(super) fn prompt_context(&self) -> agent_core::PromptContext {
+        let mut ctx = agent_core::PromptContext::new()
+            .with_tag(format!("mode:{}", self.current_mode.as_str()));
+        if let Some(skill) = &self.skill {
+            ctx = ctx.with_tag(format!("skill:{skill}"));
+        }
+        ctx
+    }
+
+    /// Seed this session as a fleet review (review-fleet C11): run in review mode from
+    /// the first turn (deterministic — the fleet knows it is reviewing, so the
+    /// checklist fragments load without waiting on the mode classifier) and carry a
+    /// `skill:<name>` prompt tag. `skill` is the roster row's value, already validated;
+    /// blank ⇒ the `code-review` default.
+    pub(super) fn seed_review(&mut self, skill: Option<String>) {
+        self.current_mode = agent_core::TaskMode::Review;
+        let name = skill.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        self.skill = Some(name.unwrap_or("code-review").to_string());
     }
 
     /// Re-select the situational system-fragment message for the current context and

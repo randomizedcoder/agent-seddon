@@ -12,7 +12,35 @@ Three PRs, each based off `main`, never stacked, each gated by `nix flake check`
 
 ## Now
 
-- **INCREMENT 5a (C12 collectors) — code + tests complete; gate pending.** Three new
+- **INCREMENT 5b (C11 review skill) — code + tests complete; gate pending.** Encodes the user's
+  review checklist as the review session's behavior and bridges the roster `skill` field to prompt
+  selection:
+  - **Fragments** — `prompts/modes/review/0001..0006_*.md` (grounding / objective+tone / idioms+DRY
+    / tests+security / mechanized-checks / output-order), tag `mode:review`. Selected by the existing
+    loop resolver (`SystemFragments`, `mode:` dir tag). The mechanizable items point at the C12
+    collector facts rather than re-deriving them; tone / OS-silence / start-positive are prompt-level.
+  - **Skill** — `skills/code-review/SKILL.md` (frontmatter name/description + the full checklist),
+    discoverable via the existing `skills::discover`/`find` mechanism (REPL `/skill:code-review`) and
+    nameable by the roster `skill` field.
+  - **Bridge** — the fleet review session is now seeded deterministically (it *knows* it is
+    reviewing; don't wait on the mode classifier): `FleetHost::start_review` gains a `skill` param
+    (agent-core); `SessionManager::admit_review`/`spawn_entry_seeded` create the session seeded via
+    `Session::seed_review(skill)` → `current_mode = Review` + stored skill; `Session::prompt_context`
+    now emits `skill:<name>` alongside `mode:<mode>` (the documented "later increments add tags here"
+    extension point). Blank/whitespace skill ⇒ `code-review` default (C11
+    `corner_unknown_skill_falls_back_to_code_review`). Orchestrator threads `row.skill` verbatim.
+  - Tests: session `prompt_context`/`seed_review` (mode+skill tag, no-leak on plain session, blank→
+    default); orchestrator asserts the roster skill reaches the host. GOTCHA: markdown under
+    `prompts/`+`skills/` is **outside the crane source filter** (`nix/default.nix` unions only
+    proto/textproto/deny.toml/tests-fixtures), so a cargo integration test cannot read the shipped
+    files (fails in the `coverage`/`test` sandboxes). Instead a `runCommand` gate
+    `nix/checks/review-skill-content.nix` references the files by nix path and asserts the checklist
+    content + NNNN_ ordering + `name: code-review` frontmatter; the fragment-selection mechanism is
+    already unit-tested in `agent-context` (`system_fragments`).
+- **Next: inc 5c** (C10 engine invocation — fleet FSM runs the review engine on `ReviewTarget::Pr(n)`
+  with the fleet collector set, then drives the `mode:review` session from the grounded `ReviewFacts`).
+
+- **INCREMENT 5a (C12 collectors) MERGED — PR #284 (main `979222c`).** Three new
   `FactCollector`s join the review fan-out, each an `AnalysisReport` in its own `ReviewFacts`
   slot (proto fields 13–15, additive → no buf baseline bump) rendered under its own heading:
   - **shellcheck** (`shellcheck.rs`) — `shellcheck --format=json1` on the diff's shell scripts
@@ -29,9 +57,10 @@ Three PRs, each based off `main`, never stacked, each gated by `nix flake check`
     default** — the two code-executing/serverside ones are opt-in) + builder wiring; three
     hermetic gate checks (`nix/checks/review-{shellcheck,go-race-bench,nearby}.nix` via
     `mk-review-check`) registered in `checks/default.nix`; correlation logic covered by
-    fake-backend unit tests (`FixtureRepo`/`FixtureSearch`).
-- **Next: inc 5b** (C11 skill — `code-review` SKILL.md + roster `skill`→PromptContext bridge),
-  then **5c** (C10 engine invocation — fleet FSM runs the review engine on `ReviewTarget::Pr`).
+    fake-backend unit tests (`FixtureRepo`/`FixtureSearch`). Security review flagged cmd-injection +
+    argv-smuggling in the two shell-invoking collectors (untrusted diff paths); fixed
+    (`sh_quote`/`is_safe_dir`/leading-`./` in go-checks, `--` terminator in shellcheck) + adversarial
+    tests, gate re-verified green.
 
 - **INCREMENT 4 (both triggers) COMPLETE** on 4b-transport merge. 4a forge poll (C6) #281, 4b-core
   Slack parser/fan-out (C7) #282, and **4b-transport (this PR)** = the real Socket-Mode adapter.

@@ -196,9 +196,23 @@ impl SessionManager {
     /// Spawn a session actor for `key` and build its `Entry` (map lock held by the
     /// caller; `session_with`/`spawn` are synchronous, never `.await`).
     fn spawn_entry(&self, key: agent_core::SessionKey) -> (Entry, SessionHandle) {
+        self.spawn_entry_seeded(key, None)
+    }
+
+    /// Like [`Self::spawn_entry`], but when `review_skill` is `Some` the new session is
+    /// seeded as a fleet review (review mode + `skill:<name>` tag) before its actor
+    /// starts (review-fleet C11). `None` ⇒ an ordinary session, unchanged.
+    fn spawn_entry_seeded(
+        &self,
+        key: agent_core::SessionKey,
+        review_skill: Option<Option<String>>,
+    ) -> (Entry, SessionHandle) {
         let (tx, rx) = mpsc::channel(32);
         let shared = Arc::new(SessionShared::default());
-        let session = self.backend.session_with(key.clone());
+        let mut session = self.backend.session_with(key.clone());
+        if let Some(skill) = review_skill {
+            session.seed_review(skill);
+        }
         let task = tokio::spawn(run_actor(session, rx, shared.clone()));
         let entry = Entry {
             tx: tx.clone(),
@@ -240,6 +254,31 @@ impl SessionManager {
     /// throttled — only a hostile *new*-id spray is (docs/design/multi-session/05).
     #[allow(clippy::result_large_err)]
     pub fn admit(&self, key: agent_core::SessionKey) -> Result<SessionHandle, OpenError> {
+        self.admit_seeded(key, None)
+    }
+
+    /// Capacity-checked admission of a fleet **review** session (review-fleet C11):
+    /// like [`Self::admit`], but a newly-created session is seeded with review mode +
+    /// the roster row's `skill` (`None`/blank ⇒ the `code-review` default) so the
+    /// review checklist fragments load from the first turn. An already-live key is
+    /// returned untouched (its seed was set at creation), matching `admit`'s idempotency.
+    #[allow(clippy::result_large_err)]
+    pub fn admit_review(
+        &self,
+        key: agent_core::SessionKey,
+        skill: Option<String>,
+    ) -> Result<SessionHandle, OpenError> {
+        self.admit_seeded(key, Some(skill))
+    }
+
+    /// Shared admission core. `review_skill == Some(_)` seeds a new session as a review
+    /// (see [`Self::admit_review`]); `None` is an ordinary session (see [`Self::admit`]).
+    #[allow(clippy::result_large_err)]
+    fn admit_seeded(
+        &self,
+        key: agent_core::SessionKey,
+        review_skill: Option<Option<String>>,
+    ) -> Result<SessionHandle, OpenError> {
         let mut map = self.sessions.lock().expect("session map poisoned");
         if let Some(entry) = map.get_mut(&key) {
             entry.last_used = std::time::Instant::now();
@@ -262,7 +301,7 @@ impl SessionManager {
                 return Err(OpenError::PerUserLimit(self.max_per_user));
             }
         }
-        let (entry, handle) = self.spawn_entry(key.clone());
+        let (entry, handle) = self.spawn_entry_seeded(key.clone(), review_skill);
         map.insert(key, entry);
         Ok(handle)
     }
@@ -398,10 +437,14 @@ impl agent_core::FleetHost for SessionManager {
         &self,
         key: agent_core::SessionKey,
         goal: String,
+        skill: Option<String>,
     ) -> std::result::Result<agent_core::RunHandle, agent_core::DriverError> {
-        // Admit (cap-checked, idempotent) then start the goal; the handle's `RunStarter`
-        // impl returns a cancel-on-drop `RunHandle` (the orchestrator holds it).
-        let handle = self.admit(key).map_err(agent_core::DriverError::from)?;
+        // Admit (cap-checked, idempotent) seeding the review skill/mode, then start the
+        // goal; the handle's `RunStarter` impl returns a cancel-on-drop `RunHandle`
+        // (the orchestrator holds it).
+        let handle = self
+            .admit_review(key, skill)
+            .map_err(agent_core::DriverError::from)?;
         Ok(agent_core::RunStarter::start(&handle, goal))
     }
 }
