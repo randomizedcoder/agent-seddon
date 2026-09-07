@@ -12,19 +12,22 @@ Three PRs, each based off `main`, never stacked, each gated by `nix flake check`
 
 ## Now
 
-- **INCREMENT 4 sliced into two gated PRs** off main (never stacked, like 3a/3b/3c): **4a forge
-  poll (C6)** — self-contained, no new crate/deps → **4b Slack watch (C7)** — the new
-  `agent-slack` crate + a Socket-Mode WebSocket dep. Both emit the identical `FleetTrigger` onto
-  the orchestrator queue; everything downstream is trigger-source-agnostic.
-- **INC 4a (forge poll C6) — code + tests complete; gate pending.** `poll_session`
-  (`agent-review-fleet/src/poll.rs`) lists open PRs, filters drafts, emits one trigger per
-  candidate onto the queue, bounding pages (`MAX_POLL_PAGES`) + triggers (`MAX_TRIGGERS_PER_TICK`)
-  against a hostile forge response. `serve_fleet` registers one overlap-guarded `every {poll_secs}`
-  job per enabled row on `agent-scheduler` and drives them on a 30s tick, building each row's forge
-  (C5) per fire. 10-case table (four classes + adversarial) in `poll.rs`; overlap guard reused from
-  `agent-scheduler`. This PR also folds in the deferred **inc-3 STATUS flip** (0/1/2/3 → ✅), since
-  main didn't carry it yet.
-- **Next after 4a:** 4b Slack watch (C7) off updated main.
+- **INC 4a (forge poll C6) DONE + MERGED (#281, main `bb88a0e`)** — carried the inc-3 STATUS flip.
+- **INCREMENT 4b (Slack watch C7) split again into core + transport** (the new-dependency risk
+  isolated per user choice): **4b-core** = the new `agent-slack` crate — strict `parse_pr_link` +
+  channel→session fan-out + `SlackTransport` seam + fake, **NO new dependency, fully hermetic** →
+  **4b-transport (follow-up)** = the real `tokio-tungstenite` Socket-Mode adapter + token_ref
+  resolution + `serve_fleet` wiring (the only code that touches the network).
+- **INC 4b-core — code + tests complete; gate pending.** `crates/agent-slack`:
+  `parse_pr_link(text, expect)` extracts a PR/MR number only for a link whose host+owner/repo match
+  the session's repo — host/path via `url::Url` (never hand-rolled → lookalike hosts rejected
+  structurally), `regex` to find URL candidates in free text; Slack text is **data not
+  instructions**. `SlackWatch` fans one Socket-Mode connection out from each row's
+  `slack_trigger_channel` to its session; a polled PR and a Slack link produce the *identical*
+  `FleetTrigger`. Transport is a seam (`SlackTransport`) so the gate uses a fake. 33 tests (parser
+  adversarial table + fan-out + fake-transport e2e). No `serve_fleet`/config change (deferred to
+  4b-transport, so nothing is dead).
+- **Next after 4b-core:** 4b-transport (real WebSocket adapter) off updated main.
 
 Inc **3c (C1+C8+C5) DONE + MERGED (#280, main `ae42f7d`).** Inc **3b (C3) DONE + MERGED (#279, main 030a774).** Inc **3a (C2) DONE + MERGED (#278, main 91c40ab).**
 
