@@ -90,8 +90,11 @@ fi
 echo "fleet-e2e: generator $GEN_MODEL at $GEN_BASE_URL"
 
 # --- roster: one row per (repo, pr), owner = $FLEET_USER, token_ref = env:GITHUB_TOKEN ---
-IFS=',' read -r -a REPOS <<< "${AGENT_FLEET_E2E_REPOS:-randomizedcoder__rtl-fun,randomizedcoder__uds-rdma-proxy}"
-IFS=',' read -r -a PRS   <<< "${AGENT_FLEET_E2E_PRS:-75,97}"
+# Defaults review two external repos AND agent-seddon itself (drinking our own champagne —
+# the fleet reviews this very repo's own PR). refs/pull/<n>/head persists after a PR merges,
+# so a merged self-PR default stays valid; override with AGENT_FLEET_E2E_REPOS/_PRS.
+IFS=',' read -r -a REPOS <<< "${AGENT_FLEET_E2E_REPOS:-randomizedcoder__rtl-fun,randomizedcoder__uds-rdma-proxy,randomizedcoder__agent-seddon}"
+IFS=',' read -r -a PRS   <<< "${AGENT_FLEET_E2E_PRS:-75,97,290}"
 [ "${#REPOS[@]}" -eq "${#PRS[@]}" ] || { echo "FAIL(harness): AGENT_FLEET_E2E_REPOS and _PRS must have the same length" >&2; exit 1; }
 [ "${#REPOS[@]}" -ge 1 ] || { echo "FAIL(harness): need at least one repo/pr" >&2; exit 1; }
 
