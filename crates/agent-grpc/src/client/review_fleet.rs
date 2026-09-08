@@ -5,7 +5,7 @@
 //! clamps every number before a row is used. `token_ref` rides as a reference;
 //! nothing here resolves it.
 
-use agent_core::{Error, FleetRegistry, FleetSession, Result};
+use agent_core::{ApproveOutcome, Error, FleetRegistry, FleetSession, Result};
 use agent_proto::pb;
 use async_trait::async_trait;
 use tonic::transport::Channel;
@@ -41,6 +41,29 @@ impl GrpcFleet {
         };
         let resp = unary!(self, review_now, req).map_err(status_to_err)?;
         Ok(resp.into_inner().accepted)
+    }
+
+    /// Approve a persisted draft → post it to its forge (review-fleet C17). The human
+    /// approval gesture: the only path that posts. Idempotent — a second call on a posted
+    /// draft returns [`ApproveOutcome::AlreadyPosted`]. Served only by the full
+    /// `--serve-fleet` process with persisted history; a bare control plane (or one with no
+    /// history) answers `UNIMPLEMENTED`. The wire `status` string is mapped back to the
+    /// [`ApproveOutcome`]; an unrecognized status is a protocol fault (`Err`).
+    pub async fn approve(&self, review_id: &str) -> Result<ApproveOutcome> {
+        let req = pb::ApproveRequest {
+            review_id: review_id.to_string(),
+        };
+        let resp = unary!(self, approve, req)
+            .map_err(status_to_err)?
+            .into_inner();
+        match resp.status.as_str() {
+            "posted" => Ok(ApproveOutcome::Posted { url: resp.detail }),
+            "already_posted" => Ok(ApproveOutcome::AlreadyPosted),
+            "not_found" => Ok(ApproveOutcome::NotFound),
+            other => Err(Error::Fleet(format!(
+                "approve: unrecognized status {other:?} from server"
+            ))),
+        }
     }
 }
 

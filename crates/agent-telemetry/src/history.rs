@@ -195,6 +195,29 @@ impl FleetHistory for ClickHouseHistory {
             open_items,
         })
     }
+
+    async fn draft_by_id(&self, review_id: &str) -> Result<Option<ReviewDraftRecord>> {
+        // The latest draft-state row for this review_id (a supersede/post is appended as a
+        // new row, so newest by ts is the current state — its `status` is the idempotency
+        // key the approver reads). `review_id` is a server-minted Uuid but arrives as
+        // untrusted wire input; bind it as a query argument so it can't inject SQL.
+        let review_id = review_id.to_string();
+        Ok(self
+            .with_client(move |client| {
+                let q = QueryBuilder::new(
+                    "SELECT session_id, user, ts, review_id, repo, pr_number, head_sha, \
+                            risk_score, gate_failed, n_findings, files_changed, additions, \
+                            deletions, draft_path, status \
+                       FROM agent_review_drafts \
+                      WHERE review_id = $1 \
+                      ORDER BY ts DESC LIMIT 1",
+                )
+                .arg(review_id.clone());
+                async move { client.query_opt::<ReviewDraftRow>(q).await }
+            })
+            .await?
+            .map(record_from_row))
+    }
 }
 
 #[cfg(test)]

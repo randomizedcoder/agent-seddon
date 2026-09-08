@@ -12,7 +12,9 @@
 
 use std::sync::Arc;
 
-use agent_core::{FleetRegistry, FleetTrigger, TriggerOutcome, TriggerSink};
+use agent_core::{
+    ApproveOutcome, FleetApprover, FleetRegistry, FleetTrigger, TriggerOutcome, TriggerSink,
+};
 use agent_proto::{pb, status_from_error};
 use tonic::transport::server::Router;
 use tonic::transport::Server;
@@ -28,6 +30,11 @@ pub struct ReviewFleetSvc {
     /// `UNIMPLEMENTED`; the full `--serve-fleet` process wires it via
     /// [`Self::with_triggers`]. Mirrors `AgentSessionSvc::with_driver`.
     triggers: Option<Arc<dyn TriggerSink>>,
+    /// The approve→post tail (review-fleet C17). `None` unless the full `--serve-fleet`
+    /// process wires it (and only when persisted history exists to look a draft up), so
+    /// `Approve` on the bare control plane is `UNIMPLEMENTED`. Wired via
+    /// [`Self::with_approver`].
+    approver: Option<Arc<dyn FleetApprover>>,
 }
 
 impl ReviewFleetSvc {
@@ -35,11 +42,17 @@ impl ReviewFleetSvc {
         Self {
             inner,
             triggers: None,
+            approver: None,
         }
     }
     /// Enable the `ReviewNow` RPC by attaching the orchestrator's trigger sink.
     pub fn with_triggers(mut self, triggers: Arc<dyn TriggerSink>) -> Self {
         self.triggers = Some(triggers);
+        self
+    }
+    /// Enable the `Approve` RPC by attaching the approve→post tail (review-fleet C17).
+    pub fn with_approver(mut self, approver: Arc<dyn FleetApprover>) -> Self {
+        self.approver = Some(approver);
         self
     }
     pub fn into_server(self) -> pb::review_fleet_service_server::ReviewFleetServiceServer<Self> {
@@ -157,6 +170,40 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
             });
             Ok(Response::new(pb::ReviewNowReply {
                 accepted: matches!(outcome, TriggerOutcome::Accepted),
+            }))
+        }
+        .instrument(sp)
+        .await
+    }
+
+    async fn approve(
+        &self,
+        request: Request<pb::ApproveRequest>,
+    ) -> Result<Response<pb::ApproveReply>, Status> {
+        let sp = span("fleet.approve", request.metadata());
+        // Opt-in: only the full fleet process with persisted history wires an approver.
+        let Some(approver) = self.approver.clone() else {
+            return Err(Status::unimplemented(
+                "Approve requires the fleet orchestrator with persisted history \
+                 (run `agent --serve-fleet` with `[telemetry]` enabled)",
+            ));
+        };
+        async move {
+            let review_id = request.into_inner().review_id;
+            let outcome = approver
+                .approve(&review_id)
+                .await
+                .map_err(|e| status_from_error(&e))?;
+            // NotFound/AlreadyPosted are ordinary outcomes (a total reply), not transport
+            // errors — the caller reads `status`; only a genuine fault is an `Err` above.
+            let (status, detail) = match outcome {
+                ApproveOutcome::Posted { url } => ("posted", url),
+                ApproveOutcome::AlreadyPosted => ("already_posted", String::new()),
+                ApproveOutcome::NotFound => ("not_found", String::new()),
+            };
+            Ok(Response::new(pb::ApproveReply {
+                status: status.to_string(),
+                detail,
             }))
         }
         .instrument(sp)

@@ -986,6 +986,12 @@ pub async fn serve_fleet(agent: Arc<Agent>, listen: Endpoint) -> anyhow::Result<
     if let Some(triggers) = triggers {
         fleet_svc = fleet_svc.with_triggers(triggers);
     }
+    // C17 approve→post: enable `Approve` when the approve tail is wired (present only when
+    // persisted history exists — the approver looks a draft up there). Nothing posts without
+    // an explicit `Approve` call; the model's own in-loop forge stays read-only.
+    if let Some(approver) = agent.fleet_approver(roster.clone()) {
+        fleet_svc = fleet_svc.with_approver(approver);
+    }
     let router = router.add_service(fleet_svc.into_server());
     health.set_serving(Seam::Fleet.service_name()).await;
     // A driving AgentSessionService, so a client can observe/drive the review sessions

@@ -2096,3 +2096,150 @@ async fn fleet_review_now_unimplemented_without_orchestrator() {
         "ReviewNow without a wired orchestrator must fail (UNIMPLEMENTED)"
     );
 }
+
+// ---- C17 approve→post over the wire --------------------------------------
+//
+// A `FleetApprover` double: returns a preset outcome and records the review_ids it saw, so a
+// test can prove `Approve` reaches the approver across the hop and each `ApproveOutcome` maps
+// back to its wire status faithfully (and back to an `ApproveOutcome` on the client).
+struct RecordingApprover {
+    outcome: agent_core::ApproveOutcome,
+    seen: std::sync::Mutex<Vec<String>>,
+}
+#[async_trait]
+impl agent_core::FleetApprover for RecordingApprover {
+    async fn approve(&self, review_id: &str) -> agent_core::Result<agent_core::ApproveOutcome> {
+        self.seen.lock().unwrap().push(review_id.to_string());
+        Ok(self.outcome.clone())
+    }
+}
+
+// An approver that always faults, to prove a genuine failure crosses as a transport `Err`
+// (distinct from the `not_found`/`already_posted` total outcomes, which are ordinary replies).
+struct ErrApprover;
+#[async_trait]
+impl agent_core::FleetApprover for ErrApprover {
+    async fn approve(&self, _review_id: &str) -> agent_core::Result<agent_core::ApproveOutcome> {
+        Err(agent_core::Error::Fleet("post failed".into()))
+    }
+}
+
+fn approver_router(
+    outcome: agent_core::ApproveOutcome,
+) -> (Arc<RecordingApprover>, tonic::transport::server::Router) {
+    let store = Arc::new(agent_review_fleet::MemoryFleet::new());
+    let approver = Arc::new(RecordingApprover {
+        outcome,
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+    let router = tonic::transport::Server::builder().add_service(
+        agent_grpc::server::ReviewFleetSvc::new(store)
+            .with_approver(approver.clone() as Arc<dyn agent_core::FleetApprover>)
+            .into_server(),
+    );
+    (approver, router)
+}
+
+// Approve reaches the approver over the wire; a fresh post maps `Posted{url}` → wire
+// `status="posted"`/`detail=url` → back to `ApproveOutcome::Posted{url}`. The review_id
+// survives the hop. Runs over TCP and UDS (the serve-smoke Approve roundtrip).
+#[rstest]
+#[case::tcp(Transport::Tcp)]
+#[case::uds(Transport::Uds)]
+#[tokio::test]
+async fn positive_fleet_approve_posts_and_maps_status(#[case] transport: Transport) {
+    let url = "https://forge.example/pr/7#c1".to_string();
+    let (approver, router) =
+        approver_router(agent_core::ApproveOutcome::Posted { url: url.clone() });
+    let (dial, _srv) = spawn(transport, router).await;
+    let client = agent_grpc::client::GrpcFleet::connect(&dial).unwrap();
+
+    let outcome = client.approve("r-uuid-1").await.unwrap();
+    assert_eq!(
+        outcome,
+        agent_core::ApproveOutcome::Posted { url },
+        "Posted{{url}} round-trips through the wire status/detail"
+    );
+    assert_eq!(
+        *approver.seen.lock().unwrap(),
+        vec!["r-uuid-1".to_string()],
+        "the review_id reached the approver"
+    );
+}
+
+// Idempotency + not-found are TOTAL outcomes (ordinary replies, not transport errors): a
+// re-approve of a posted draft returns AlreadyPosted; an unknown id returns NotFound.
+#[rstest]
+#[case::already_posted(agent_core::ApproveOutcome::AlreadyPosted)]
+#[case::not_found(agent_core::ApproveOutcome::NotFound)]
+#[tokio::test]
+async fn positive_fleet_approve_total_outcomes_are_replies(
+    #[case] outcome: agent_core::ApproveOutcome,
+) {
+    let (_approver, router) = approver_router(outcome.clone());
+    let (dial, _srv) = spawn(Transport::Tcp, router).await;
+    let client = agent_grpc::client::GrpcFleet::connect(&dial).unwrap();
+    assert_eq!(
+        client.approve("r-x").await.unwrap(),
+        outcome,
+        "a total outcome crosses as a reply, not an Err"
+    );
+}
+
+// A genuine fault (forge post failed) crosses as a transport `Err`, so the operator sees the
+// failure instead of a silent no-op.
+#[tokio::test]
+async fn negative_fleet_approve_fault_maps_to_error() {
+    let store = Arc::new(agent_review_fleet::MemoryFleet::new());
+    let router = tonic::transport::Server::builder().add_service(
+        agent_grpc::server::ReviewFleetSvc::new(store)
+            .with_approver(Arc::new(ErrApprover) as Arc<dyn agent_core::FleetApprover>)
+            .into_server(),
+    );
+    let (dial, _srv) = spawn(Transport::Tcp, router).await;
+    let client = agent_grpc::client::GrpcFleet::connect(&dial).unwrap();
+    assert!(
+        client.approve("r-x").await.is_err(),
+        "an approver fault must surface as an Err"
+    );
+}
+
+// The bare control-plane endpoint has no approver wired, so Approve is UNIMPLEMENTED — the
+// control plane never posts; posting is opt-in to the full `--serve-fleet` process.
+#[tokio::test]
+async fn negative_fleet_approve_unimplemented_without_approver() {
+    let store = Arc::new(agent_review_fleet::MemoryFleet::new());
+    let (dial, _srv) = spawn(
+        Transport::Tcp,
+        agent_grpc::server::review_fleet_router(store),
+    )
+    .await;
+    let client = agent_grpc::client::GrpcFleet::connect(&dial).unwrap();
+    assert!(
+        client.approve("r-x").await.is_err(),
+        "Approve without a wired approver must fail (UNIMPLEMENTED)"
+    );
+}
+
+// `review_id` is an opaque lookup key, never a path: a hostile value crosses verbatim to the
+// approver (which looks it up as a bound query arg) — it is data, not a filesystem/SQL path.
+#[rstest]
+#[case::traversal("../../etc/passwd")]
+#[case::sql("r'; DROP TABLE agent_review_drafts;--")]
+#[tokio::test]
+async fn adversarial_fleet_approve_hostile_review_id_is_opaque_data(#[case] hostile: &str) {
+    let (approver, router) = approver_router(agent_core::ApproveOutcome::NotFound);
+    let (dial, _srv) = spawn(Transport::Tcp, router).await;
+    let client = agent_grpc::client::GrpcFleet::connect(&dial).unwrap();
+
+    assert_eq!(
+        client.approve(hostile).await.unwrap(),
+        agent_core::ApproveOutcome::NotFound,
+        "hostile id is looked up (and not found), never actioned as a path"
+    );
+    assert_eq!(
+        *approver.seen.lock().unwrap(),
+        vec![hostile.to_string()],
+        "the exact bytes reached the approver as opaque data"
+    );
+}
