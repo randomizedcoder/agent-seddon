@@ -187,6 +187,20 @@ let
       ;
   };
 
+  # `nix run .#fleet-e2e` — live review-fleet end-to-end: one `--serve-fleet` process
+  # reviews two REAL PRs (two different repos) and writes a redacted draft per PR,
+  # proving multi-repo grounding (#289) works against a real model + forge. Not a check
+  # (needs a model, a GITHUB_TOKEN, and a socket); auto-included in `.#integration`'s
+  # model tier when reachable. See nix/fleet-e2e.nix + test/fleet-e2e/run.sh.
+  fleet-e2e = import ./fleet-e2e.nix {
+    inherit
+      pkgs
+      lib
+      versions
+      agent
+      ;
+  };
+
   # `nix run .#graph-arena` — the cognition-graph A/B/n value sweep: one objective,
   # baseline + graph-document arms, per-requirement k/n + artifacts. Not a check
   # (needs the Kimi generator + GLM judge endpoints); its own test suite IS the
@@ -416,6 +430,7 @@ let
       e2e-live
       e2e-expect
       e2e-multi
+      fleet-e2e
       eval
       ;
     inherit (nixLib) harness;
@@ -485,6 +500,7 @@ in
         e2e-live
         e2e-expect
         e2e-multi
+        fleet-e2e
         graph-arena
         graph-arena-campaign
         review-eval
