@@ -25,8 +25,9 @@ server reconciles its live sessions from (review-fleet C2,
 > (forge-poll trigger C6) + 4b (Slack watch C7 — parser/fan-out **and** the Socket-Mode
 > transport) are shipped. The FSM drives `triggered → cloning → reviewing`, fed by **both**
 > triggers (forge poll + Slack). The review skill/collectors (inc 5), the draft +
-> `agent_review_drafts` (C13/C14, inc 6a), and the feedback + cross-round head-oid dedup
-> (C15/C16, inc 6b) are shipped; the approve → post tail (C17, inc 6c) is the last increment.
+> `agent_review_drafts` (C13/C14, inc 6a), the feedback + cross-round head-oid dedup
+> (C15/C16, inc 6b), and the approve → post tail (C17, inc 6c — the human approval gesture
+> that posts a persisted draft) are **all** shipped. The fleet track is complete.
 
 ## The trait
 
@@ -212,7 +213,8 @@ commit SHAs preserved; whole-document size-capped) under
 `status = drafted`. C14 is a `kind = "draft"` telemetry event routed to the new `agent_review_drafts`
 table — kept **separate** from the anonymized `agent_reviews`, and named by real `repo`/`pr_number`
 (fleet config), joining back on `head_sha == head_rev`. The task guard aborts on drop (drop = cancel);
-`review_id` is a server-minted `Uuid`. **Nothing posts** — the approve → post tail is inc 6c.
+`review_id` is a server-minted `Uuid`. **Nothing posts at `drafted`** — posting is the
+separate, human-gated approve step (C17, below).
 
 **Feedback + cross-round tracker (C15/C16, inc 6b)** persists per-item feedback and carries it across
 rounds. Each deterministic finding becomes an **open** `Feedback` whose `item_id` is a stable,
@@ -230,6 +232,25 @@ head arrives over a still-`drafted` prior round, that draft is marked `supersede
 round's still-open items flow into the draft so the renderer shows a grouped "prior feedback status"
 (Resolved on this head / Still open, redacted). Every history step is **fail-soft** (a read error ⇒
 review without dedup/carry, never a crash).
+
+**Approve → post (C17, inc 6c)** is the approve→post tail — the human approval gesture, and the
+**only** path that posts. The fleet stops at `drafted`; nothing reaches a PR until an operator calls
+[`ReviewFleetService.Approve(review_id)`](../../crates/agent-proto/proto/agent/v1/review_fleet.proto).
+The [`FleetApprover`](../../crates/agent-core/src/lib.rs) seam (concrete `EngineApprover` in
+`agent-runtime`) looks the persisted draft up by id
+([`FleetHistory::draft_by_id`](../../crates/agent-core/src/lib.rs), a bound query — resumable from
+C14, so the approving process need not be the one that drafted), and unless it is already `posted`,
+reads the rendered `.md`, builds the draft's repo's **operational** forge (`build_session_forge` —
+the model's own in-loop forge stays read-only/`dry_run`), posts the review as a **comment** (the fleet
+advises; a human decides approve/merge), and persists `status = posted`. That status is the
+**idempotency key**: a re-approve finds `posted` (newest-by-ts) and short-circuits to a no-op — a
+duplicate call never double-posts. `Approve` is **opt-in**: served only by the full `--serve-fleet`
+process **with `[telemetry]` enabled** (the approver needs the persisted history to look a draft up);
+the bare control plane, or a process without history, answers `UNIMPLEMENTED`. The RPC returns a total
+`status` — `posted` (with the comment URL in `detail`), `already_posted`, or `not_found` — as an
+ordinary reply; only a genuine fault (forge post failed, the draft's repo has no roster row, an
+unreadable `.md`) is a transport `Err`. `review_id` is untrusted wire input treated as an opaque
+lookup key, never a path.
 
 **Forge poll (C6, inc 4a)** is the first *real* trigger source. `serve_fleet` registers one
 `every {poll_secs}` job per enabled, forge-capable roster row on `agent-scheduler` (whose

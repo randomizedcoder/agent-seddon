@@ -78,6 +78,24 @@ message ReviewNowReply {
   bool accepted = 1; // false ⇒ coalesced into an existing pending/in-flight review
 }
 
+// Approve a persisted review draft and post it to its forge (review-fleet C17, the
+// approve→post tail). `review_id` names the draft row (server-minted Uuid, persisted at
+// `drafted`); the approval gesture is the ONLY thing that posts — nothing is posted
+// without an explicit Approve call. Idempotent: a draft already `posted` is a no-op.
+message ApproveRequest {
+  string review_id = 1;
+}
+
+// The outcome of an Approve. `status` is one of:
+//   "posted"         — the draft was posted this call (freshly).
+//   "already_posted" — idempotent no-op: the draft was already posted.
+//   "not_found"      — no persisted draft for this `review_id`.
+// `detail` carries the posted comment/review URL when `status = "posted"`, else "".
+message ApproveReply {
+  string status = 1;
+  string detail = 2;
+}
+
 // The roster control plane (mirrors ProviderRegistryService: one process holds
 // the roster while any number of clients drive it). `token_ref` rides as a
 // reference; the server never resolves it.
@@ -91,4 +109,10 @@ service ReviewFleetService {
   // process (which has an orchestrator); the bare control-plane endpoint returns
   // UNIMPLEMENTED.
   rpc ReviewNow(ReviewNowRequest) returns (ReviewNowReply);
+  // Approve a persisted draft → post it to its forge (C17). Opt-in: served only by the
+  // full `--serve-fleet` process with persisted history wired (the approver needs to
+  // look the draft up + build the row's forge); the bare control plane, or a process
+  // with no history, returns UNIMPLEMENTED. This is the human approval gesture — the
+  // ONLY path that posts; the model's own forge stays read-only (`dry_run`).
+  rpc Approve(ApproveRequest) returns (ApproveReply);
 }

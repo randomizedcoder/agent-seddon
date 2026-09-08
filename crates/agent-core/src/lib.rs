@@ -6049,6 +6049,46 @@ pub struct PriorReview {
 pub trait FleetHistory: Send + Sync {
     /// The prior state for `(repo, pr)`. `repo` is trusted roster config; `pr` a `u64`.
     async fn prior(&self, repo: &str, pr: u64) -> Result<PriorReview>;
+
+    /// The latest persisted draft record for `review_id` (review-fleet C17), so the
+    /// approve→post tail can rebuild a draft from what was durably persisted at
+    /// `drafted` (resumable from C14 — the process that approves need not be the one
+    /// that drafted). `review_id` is a server-minted Uuid; the impl binds it as a query
+    /// argument (no interpolation). Default `Ok(None)` so a bare/in-memory history
+    /// without a by-id index simply reports "no such draft" (Approve → `not_found`).
+    async fn draft_by_id(&self, _review_id: &str) -> Result<Option<ReviewDraftRecord>> {
+        Ok(None)
+    }
+}
+
+/// The outcome of an [`FleetApprover::approve`] (review-fleet C17). A total,
+/// non-transport result: `NotFound`/`AlreadyPosted` are ordinary outcomes (not errors),
+/// so the RPC stays a plain reply; a genuine fault (forge post failed, no roster row for
+/// the draft's repo, unreadable draft file) is an `Err` instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApproveOutcome {
+    /// The draft was posted this call. Carries the forge comment/review URL if one was
+    /// returned (may be empty for a forge that returns none).
+    Posted { url: String },
+    /// Idempotent no-op: the draft was already `posted` (the idempotency key).
+    AlreadyPosted,
+    /// No persisted draft for this `review_id`.
+    NotFound,
+}
+
+/// Approves a persisted review draft and posts it to its forge (review-fleet C17, the
+/// approve→post tail). The approval gesture is the **only** path that posts — nothing is
+/// posted without an explicit `approve` call, and the model's own in-loop forge stays
+/// read-only (`dry_run`); this operational forge is the one that writes. Idempotent on
+/// `review_id` via the persisted `status = "posted"`. A seam kept in `agent-core` so the
+/// service depends on the shape, not the concrete engine/forge/history in `agent-runtime`.
+#[async_trait]
+pub trait FleetApprover: Send + Sync {
+    /// Approve the draft named by `review_id`: look it up, and unless it is already
+    /// posted, post its rendered `.md` to the row's forge and persist `status = "posted"`.
+    /// `review_id` is untrusted wire input; the impl looks it up (bound query arg) rather
+    /// than turning it into a path.
+    async fn approve(&self, review_id: &str) -> Result<ApproveOutcome>;
 }
 
 #[cfg(test)]
@@ -6935,5 +6975,26 @@ mod tests {
             .collect();
         let out = reconcile_feedback(current, &[], "r1", "sha1");
         assert_eq!(out.len(), MAX_FEEDBACK_ITEMS, "capped");
+    }
+
+    // C17: a FleetHistory that implements only `prior` inherits the default `draft_by_id`,
+    // which reports "no such draft" — so Approve against a bare/in-memory history without a
+    // by-id index cleanly yields `not_found` rather than failing.
+    struct BareHistory;
+    #[async_trait]
+    impl FleetHistory for BareHistory {
+        async fn prior(&self, _repo: &str, _pr: u64) -> Result<PriorReview> {
+            Ok(PriorReview::default())
+        }
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn positive_default_draft_by_id_is_none() {
+        let got = BareHistory.draft_by_id("any-review-id").await.unwrap();
+        assert!(
+            got.is_none(),
+            "default draft_by_id reports no persisted draft"
+        );
     }
 }

@@ -376,6 +376,129 @@ impl agent_core::ReviewDrafter for EngineDrafter {
     }
 }
 
+/// The concrete [`agent_core::FleetApprover`] (review-fleet C17): the approve→post tail.
+/// On `approve`, it looks the persisted draft up by `review_id` (resumable from C14), and
+/// unless it is already posted, posts the rendered `.md` to the draft's repo's OPERATIONAL
+/// forge and persists `status = "posted"` — the idempotency key. Nothing posts without an
+/// explicit `approve`; the model's own in-loop forge stays read-only.
+#[cfg(feature = "review")]
+struct EngineApprover {
+    agent: Arc<Agent>,
+    /// The roster the control plane serves — used to resolve the draft's repo → its row →
+    /// its operational forge.
+    roster: Arc<dyn agent_core::FleetRegistry>,
+    /// Persisted history: the draft lookup by id + the durable `status` the idempotency
+    /// check reads.
+    history: Arc<dyn agent_core::FleetHistory>,
+}
+
+/// What an approve should do, decided purely from the looked-up draft + the current roster
+/// (review-fleet C17). Split out so the decision — not-found, the idempotent already-posted
+/// short-circuit, and repo→row resolution — is table-testable without a forge or a store.
+#[cfg(feature = "review")]
+#[derive(Debug)]
+enum ApprovePlan {
+    NotFound,
+    AlreadyPosted,
+    /// Boxed: the resolved draft + row dwarf the unit variants (clippy `large_enum_variant`).
+    Post(Box<PostPlan>),
+}
+
+/// The resolved inputs for a post: which draft to post, and the row whose forge posts it.
+#[cfg(feature = "review")]
+#[derive(Debug)]
+struct PostPlan {
+    record: agent_core::ReviewDraftRecord,
+    row: agent_core::FleetSession,
+}
+
+#[cfg(feature = "review")]
+fn plan_approve(
+    record: Option<agent_core::ReviewDraftRecord>,
+    rows: &[agent_core::FleetSession],
+) -> agent_core::Result<ApprovePlan> {
+    let Some(record) = record else {
+        return Ok(ApprovePlan::NotFound);
+    };
+    // Idempotency: a draft already posted is a no-op (newest-by-ts `status` is the key).
+    if record.status == agent_core::draft_status::POSTED {
+        return Ok(ApprovePlan::AlreadyPosted);
+    }
+    // Resolve the roster row whose repo this draft belongs to → its operational forge.
+    // Prefer an enabled row (the live reviewer) but accept any row for the repo; a draft
+    // whose repo has no row at all (deleted after drafting) is a misconfiguration we
+    // surface, not a silent skip. This is NOT prefixed `not found` — it maps to
+    // InvalidArgument (a bad/stale request), distinct from an absent draft.
+    let row = rows
+        .iter()
+        .find(|r| r.repo == record.repo && r.enabled)
+        .or_else(|| rows.iter().find(|r| r.repo == record.repo))
+        .cloned()
+        .ok_or_else(|| {
+            agent_core::Error::Fleet(format!(
+                "no roster row for the draft's repo {:?} (deleted after drafting?)",
+                record.repo
+            ))
+        })?;
+    Ok(ApprovePlan::Post(Box::new(PostPlan { record, row })))
+}
+
+#[cfg(feature = "review")]
+#[async_trait::async_trait]
+impl agent_core::FleetApprover for EngineApprover {
+    async fn approve(&self, review_id: &str) -> agent_core::Result<agent_core::ApproveOutcome> {
+        // Look the draft up by id (bound query arg — `review_id` is untrusted wire input,
+        // never a path) and read the current roster, then decide purely.
+        let record = self.history.draft_by_id(review_id).await?;
+        let rows = self.roster.list().await?;
+        let (record, row) = match plan_approve(record, &rows)? {
+            ApprovePlan::NotFound => return Ok(agent_core::ApproveOutcome::NotFound),
+            ApprovePlan::AlreadyPosted => return Ok(agent_core::ApproveOutcome::AlreadyPosted),
+            ApprovePlan::Post(plan) => (plan.record, plan.row),
+        };
+
+        // Build the row's OPERATIONAL forge (the one that writes — the model's in-loop forge
+        // stays read-only) and read the draft rendered + persisted at `drafted`. The body is
+        // already redacted (redaction happened at render time, C13); `draft_path` is a
+        // server-generated path under the confined session workspace.
+        let forge = crate::build_session_forge(&row)
+            .map_err(|e| {
+                agent_core::Error::Fleet(format!(
+                    "approve: cannot build forge for {:?}: {e}",
+                    row.repo
+                ))
+            })?
+            .ok_or_else(|| {
+                agent_core::Error::Fleet(format!(
+                    "approve: row for {:?} has no forge backend configured — nothing to post to",
+                    row.repo
+                ))
+            })?;
+        let body = tokio::fs::read_to_string(&record.draft_path)
+            .await
+            .map_err(|e| {
+                agent_core::Error::Fleet(format!(
+                    "approve: cannot read draft {:?}: {e}",
+                    record.draft_path
+                ))
+            })?;
+
+        // Post as a review COMMENT — the fleet advises; a human decides approve/merge.
+        let comment = forge
+            .review_pr(record.pr_number, agent_core::ReviewVerdict::Comment, &body)
+            .await?;
+
+        // Persist status=posted — the idempotency key. A re-approve then finds `posted`
+        // (newest-by-ts) and short-circuits to AlreadyPosted, so a duplicate call never
+        // double-posts.
+        let mut posted = record.clone();
+        posted.status = agent_core::draft_status::POSTED.to_string();
+        self.agent.record_draft(posted).await;
+
+        Ok(agent_core::ApproveOutcome::Posted { url: comment.url })
+    }
+}
+
 impl Agent {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -1090,6 +1213,34 @@ impl Agent {
     /// Without the `review` feature there is no renderer, so no draft is produced.
     #[cfg(not(feature = "review"))]
     pub fn review_drafter(self: &Arc<Self>) -> Option<Arc<dyn agent_core::ReviewDrafter>> {
+        None
+    }
+
+    /// The approve→post tail exposed as a [`FleetApprover`] for the fleet control plane
+    /// (review-fleet C17). `Some` only when persisted history is wired — the approver looks
+    /// the draft up by id there, so without a durable store there is nothing to approve and
+    /// Approve stays UNIMPLEMENTED. `roster` is the same roster the control plane serves,
+    /// used to resolve the draft's repo → its operational forge (the one that actually
+    /// posts; the model's own in-loop forge stays read-only).
+    #[cfg(feature = "review")]
+    pub fn fleet_approver(
+        self: &Arc<Self>,
+        roster: Arc<dyn agent_core::FleetRegistry>,
+    ) -> Option<Arc<dyn agent_core::FleetApprover>> {
+        let history = self.fleet_history()?;
+        Some(Arc::new(EngineApprover {
+            agent: self.clone(),
+            roster,
+            history,
+        }))
+    }
+
+    /// Without the `review` feature there is no draft to approve, so no approver.
+    #[cfg(not(feature = "review"))]
+    pub fn fleet_approver(
+        self: &Arc<Self>,
+        _roster: Arc<dyn agent_core::FleetRegistry>,
+    ) -> Option<Arc<dyn agent_core::FleetApprover>> {
         None
     }
 
@@ -4338,5 +4489,127 @@ mod tests {
             1,
             "a non-parallel-safe tool must serialize the whole turn"
         );
+    }
+
+    // ---- C17 approve→post: the pure `plan_approve` decision -------------
+    //
+    // The idempotent short-circuit, the not-found outcome, and repo→row resolution are the
+    // parts that must be right before anything posts; they are table-tested here without a
+    // forge or a store. The I/O tail (build forge, read `.md`, post, persist) is exercised
+    // by the served roundtrip (agent-grpc) and the live `fleet-e2e` harness.
+    #[cfg(feature = "review")]
+    mod approve_plan {
+        use super::*;
+        use agent_core::{draft_status, FleetSession, ReviewDraftRecord};
+
+        fn rec(status: &str, repo: &str) -> ReviewDraftRecord {
+            ReviewDraftRecord {
+                review_id: "r-uuid".into(),
+                repo: repo.into(),
+                pr_number: 7,
+                head_sha: "abc".into(),
+                risk_score: 1.0,
+                gate_failed: false,
+                n_findings: 0,
+                files_changed: 1,
+                additions: 2,
+                deletions: 3,
+                draft_path: "/w/reviews/pr-7-rr-uuid.md".into(),
+                status: status.into(),
+            }
+        }
+        fn row(id: &str, repo: &str, enabled: bool) -> FleetSession {
+            FleetSession {
+                id: id.into(),
+                user: "u".into(),
+                repo: repo.into(),
+                backend: "github".into(),
+                token_ref: "env:TOK".into(),
+                enabled,
+                ..Default::default()
+            }
+        }
+
+        /// desc: a drafted (not-yet-posted) draft whose repo has a roster row → Post.
+        /// expect: plans a post against that row (its forge is what actually posts).
+        #[rstest]
+        #[case::drafted(draft_status::DRAFTED)]
+        #[case::superseded(draft_status::SUPERSEDED)]
+        #[case::approved(draft_status::APPROVED)]
+        fn positive_unposted_with_matching_row_plans_post(#[case] status: &str) {
+            let rows = [row("web", "o__n", true)];
+            match plan_approve(Some(rec(status, "o__n")), &rows).unwrap() {
+                ApprovePlan::Post(plan) => {
+                    assert_eq!(plan.record.status, status, "carries the looked-up record");
+                    assert_eq!(plan.row.id, "web", "resolves the repo's row → its forge");
+                }
+                other => panic!("expected Post, got {other:?}"),
+            }
+        }
+
+        /// desc: no persisted draft for the id → NotFound (a total outcome, not an error).
+        /// expect: NotFound.
+        #[rstest]
+        fn negative_none_record_is_not_found() {
+            let rows = [row("web", "o__n", true)];
+            assert!(matches!(
+                plan_approve(None, &rows).unwrap(),
+                ApprovePlan::NotFound
+            ));
+        }
+
+        /// desc: an unposted draft whose repo has no roster row (deleted after drafting).
+        /// expect: Err — a stale/misconfigured request, surfaced not silently skipped.
+        #[rstest]
+        fn negative_no_row_for_repo_errors() {
+            let rows = [row("web", "other__repo", true)];
+            assert!(plan_approve(Some(rec(draft_status::DRAFTED, "o__n")), &rows).is_err());
+        }
+
+        /// desc: idempotency — a draft already `posted` short-circuits BEFORE row lookup, so
+        /// a re-approve never double-posts (and needs no live row).
+        /// expect: AlreadyPosted even with an empty roster.
+        #[rstest]
+        fn boundary_already_posted_short_circuits_without_row() {
+            let rows: [FleetSession; 0] = [];
+            assert!(matches!(
+                plan_approve(Some(rec(draft_status::POSTED, "o__n")), &rows).unwrap(),
+                ApprovePlan::AlreadyPosted
+            ));
+        }
+
+        /// desc: an enabled row is preferred over a disabled one for the same repo (the live
+        /// reviewer), but a disabled-only repo still resolves (fall back to any row).
+        /// expect: picks the enabled row when present; the disabled one otherwise.
+        #[rstest]
+        #[case::prefers_enabled(true, "live")]
+        #[case::falls_back_to_disabled(false, "paused")]
+        fn corner_row_selection_prefers_enabled(#[case] second_enabled: bool, #[case] want: &str) {
+            // Order: a disabled row first, then a (maybe-enabled) one — proving preference is
+            // by `enabled`, not by position.
+            let rows = [
+                row("paused", "o__n", false),
+                row("live", "o__n", second_enabled),
+            ];
+            match plan_approve(Some(rec(draft_status::DRAFTED, "o__n")), &rows).unwrap() {
+                ApprovePlan::Post(plan) => assert_eq!(plan.row.id, want),
+                other => panic!("expected Post, got {other:?}"),
+            }
+        }
+
+        /// desc: repo matching is EXACT — a hostile `repo` on the draft (traversal/separator)
+        /// cannot substring- or wildcard-match a legitimate row and borrow its forge.
+        /// expect: Err (no match), never a post against the wrong row.
+        #[rstest]
+        #[case::traversal("../../o__n")]
+        #[case::separator("o__n/extra")]
+        #[case::prefix("o__nEVIL")]
+        fn adversarial_hostile_repo_does_not_match_real_row(#[case] hostile: &str) {
+            let rows = [row("web", "o__n", true)];
+            assert!(
+                plan_approve(Some(rec(draft_status::DRAFTED, hostile)), &rows).is_err(),
+                "hostile repo {hostile:?} must not match the real row"
+            );
+        }
     }
 }
