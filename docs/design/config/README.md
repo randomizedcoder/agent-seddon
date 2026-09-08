@@ -116,5 +116,6 @@ auth end-to-end, per-tenant isolation, `= "grpc"` parity, wire-fault). Full matr
 
 [`00-components.md`](00-components.md) (the C32–C41 catalogue) → the primitive docs
 [`01`](01-config-card-pattern.md)–[`07`](07-storage-migration-and-existing.md) →
-[`08-testing-and-integration.md`](08-testing-and-integration.md) → [`STATUS.md`](STATUS.md) /
-[`IMPLEMENTATION.md`](IMPLEMENTATION.md).
+[`08-testing-and-integration.md`](08-testing-and-integration.md) →
+[`09-increments.md`](09-increments.md) (the phase-by-phase build sequence with per-phase DoD) →
+[`STATUS.md`](STATUS.md) / [`IMPLEMENTATION.md`](IMPLEMENTATION.md).
