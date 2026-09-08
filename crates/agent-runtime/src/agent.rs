@@ -126,6 +126,11 @@ pub struct Agent {
     /// the full fleet process that admits + drives sessions from it arrives in
     /// review-fleet 3c.
     fleet_registry: Option<Arc<dyn agent_core::FleetRegistry>>,
+    /// The fleet's persisted review-history reader (review-fleet C16), held for
+    /// `--serve-fleet`: the ClickHouse-backed [`agent_core::FleetHistory`] the orchestrator
+    /// consults for precise head-oid dedup + cross-round carry-forward. `None` ⇒ telemetry
+    /// off / no store, so the FSM reviews without dedup or carry (still runs).
+    fleet_history: Option<Arc<dyn agent_core::FleetHistory>>,
     /// Situational system-prompt fragments selected by the current mode
     /// (docs/design/prompts/). Unlike `prompt_store`, the loop **does** consume this:
     /// each turn it selects the fragments whose tags match the situation and injects
@@ -272,6 +277,32 @@ struct EngineDrafter {
     agent: Arc<Agent>,
 }
 
+/// Derive this round's **open** feedback items from the grounded facts (review-fleet C15):
+/// one item per deterministic finding across the analysis collectors. `category` names the
+/// producing collector so the cross-round item id is stable per (collector, file, rule,
+/// message). Deterministic and grounded in the diff — not the model narrative.
+#[cfg(feature = "review")]
+fn derive_feedback(
+    facts: &agent_core::ReviewFacts,
+    review_id: &str,
+    head_sha: &str,
+) -> Vec<agent_core::Feedback> {
+    let mut items = Vec::new();
+    for (category, report) in [
+        ("analyzer", &facts.analysis),
+        ("shellcheck", &facts.shellcheck),
+        ("go-checks", &facts.go_checks),
+        ("nearby", &facts.nearby),
+    ] {
+        for f in &report.findings {
+            items.push(agent_core::Feedback::from_finding(
+                review_id, head_sha, category, f,
+            ));
+        }
+    }
+    items
+}
+
 #[cfg(feature = "review")]
 #[async_trait::async_trait]
 impl agent_core::ReviewDrafter for EngineDrafter {
@@ -279,15 +310,42 @@ impl agent_core::ReviewDrafter for EngineDrafter {
         &self,
         req: agent_core::DraftRequest,
     ) -> agent_core::Result<agent_core::ReviewDraftRecord> {
+        let head_sha = req.facts.meta.head_rev.clone();
+        // C15/C16: derive this round's open items, then reconcile against the prior round's
+        // open items — a carried-over issue keeps its first_seen, a vanished one is marked
+        // addressed against the new head. Deterministic (grounded in the re-run engine).
+        let current = derive_feedback(&req.facts, &req.review_id, &head_sha);
+        let reconciled =
+            agent_core::reconcile_feedback(current, &req.prior, &req.review_id, &head_sha);
+        // The renderer's "prior feedback status" section shows only the cross-round items
+        // (carried-open + newly-addressed) — a brand-new open finding this round is a current
+        // finding, not prior feedback. A carried item's first_seen points at an earlier round.
+        let prior_status: Vec<agent_core::Feedback> = reconciled
+            .iter()
+            .filter(|f| f.first_seen_review != req.review_id)
+            .cloned()
+            .collect();
+
         // Render (redaction + size cap live in the renderer, C13) and write the `.md`
         // under `<workspace>/reviews/`. `review_id` is a server-minted Uuid and
         // `pr_number` a u64, so the file name is a safe segment; `workspace` is the
         // confined session root (C4).
-        let md = agent_review::render_draft(&req.facts, &req.narrative, &req.prior);
+        let md = agent_review::render_draft(&req.facts, &req.narrative, &prior_status);
         let dir = req.workspace.join("reviews");
         tokio::fs::create_dir_all(&dir).await?;
         let path = dir.join(format!("pr-{}-r{}.md", req.pr_number, req.review_id));
         tokio::fs::write(&path, md.as_bytes()).await?;
+
+        // Persist the reconciled feedback set (→ agent_review_feedback, C15) before the draft
+        // row, so a reader that sees the draft also sees its items.
+        self.agent
+            .record_feedback(agent_core::FeedbackRound {
+                review_id: req.review_id.clone(),
+                repo: req.repo.clone(),
+                pr_number: req.pr_number,
+                items: reconciled,
+            })
+            .await;
 
         let rec = agent_core::ReviewDraftRecord::from_facts(
             req.review_id,
@@ -301,6 +359,13 @@ impl agent_core::ReviewDrafter for EngineDrafter {
         // anonymized review row uses.
         self.agent.record_draft(rec.clone()).await;
         Ok(rec)
+    }
+
+    async fn supersede(&self, record: agent_core::ReviewDraftRecord) -> agent_core::Result<()> {
+        // A status-update row for the prior draft (review-fleet C16); the reader's newest-by-ts
+        // wins, so this marks the old round superseded without touching its `.md`.
+        self.agent.record_draft(record).await;
+        Ok(())
     }
 }
 
@@ -335,6 +400,7 @@ impl Agent {
             config_store: None,
             provider_registry: None,
             fleet_registry: None,
+            fleet_history: None,
             system_fragments: agent_context::system_fragments::SystemFragments::defaults(),
             metrics_proxy: None,
             review_collector: None,
@@ -632,6 +698,19 @@ impl Agent {
     pub fn with_fleet_registry(mut self, r: Arc<dyn agent_core::FleetRegistry>) -> Self {
         self.fleet_registry = Some(r);
         self
+    }
+
+    /// Attach the fleet's persisted review-history reader (review-fleet C16), consulted by
+    /// the fleet orchestrator for head-oid dedup + cross-round carry-forward.
+    pub fn with_fleet_history(mut self, h: Arc<dyn agent_core::FleetHistory>) -> Self {
+        self.fleet_history = Some(h);
+        self
+    }
+
+    /// The fleet's persisted review-history reader, if wired (review-fleet C16). Read by
+    /// `serve_fleet` to attach it to the orchestrator.
+    pub fn fleet_history(&self) -> Option<Arc<dyn agent_core::FleetHistory>> {
+        self.fleet_history.clone()
     }
 
     pub fn with_prompt_store(mut self, p: Arc<dyn agent_core::PromptStore>) -> Self {
@@ -1011,6 +1090,38 @@ impl Agent {
             review: None,
             dimensional: None,
             draft: Some(rec),
+            feedback: None,
+        })
+        .await;
+    }
+
+    /// Persist a round's reconciled review feedback (review-fleet C15/C16): route it through
+    /// the memory funnel as a `kind = "feedback"` event so the telemetry sink writes one
+    /// `agent_review_feedback` row per item. Empty rounds are skipped (nothing to write).
+    pub async fn record_feedback(&self, round: agent_core::FeedbackRound) {
+        if round.items.is_empty() {
+            return;
+        }
+        tracing::info!(
+            review_id = %round.review_id,
+            repo = %round.repo,
+            pr = round.pr_number,
+            items = round.items.len(),
+            "review feedback recorded"
+        );
+        self.append_event(MemoryEvent {
+            kind: "feedback".to_string(),
+            message: Message::assistant(String::new()),
+            ts_ms: now_ms(),
+            session_id: self.settings.session_id.clone(),
+            user: String::new(),
+            usage: None,
+            iter: None,
+            verification: None,
+            review: None,
+            dimensional: None,
+            draft: None,
+            feedback: Some(round),
         })
         .await;
     }
@@ -1743,6 +1854,7 @@ impl Agent {
             review: None,
             dimensional: None,
             draft: None,
+            feedback: None,
         })
         .await;
     }
@@ -1761,6 +1873,7 @@ impl Agent {
             review: None,
             dimensional: None,
             draft: None,
+            feedback: None,
         })
         .await;
     }
@@ -1781,6 +1894,7 @@ impl Agent {
             review: None,
             dimensional: None,
             draft: None,
+            feedback: None,
         })
         .await;
     }
@@ -1828,6 +1942,7 @@ impl Agent {
             review: Some(rec),
             dimensional: None,
             draft: None,
+            feedback: None,
         })
         .await;
     }
@@ -1992,6 +2107,7 @@ fn recent_events(messages: &[Message], n: usize) -> Vec<MemoryEvent> {
             review: None,
             dimensional: None,
             draft: None,
+            feedback: None,
         })
         .collect()
 }
@@ -2144,6 +2260,7 @@ mod tests {
             review: None,
             dimensional: None,
             draft: None,
+            feedback: None,
         }
     }
 

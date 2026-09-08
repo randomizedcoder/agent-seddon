@@ -257,6 +257,7 @@ mod tests {
                 review: None,
                 dimensional: None,
                 draft: None,
+                feedback: None,
             }
         }
 

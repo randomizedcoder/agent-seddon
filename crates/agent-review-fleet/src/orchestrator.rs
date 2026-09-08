@@ -14,10 +14,14 @@
 //!   **bounded** and **coalescing** (an over-capacity or duplicate trigger folds into
 //!   the pending one and is logged, never silently dropped).
 //!
-//! **What is deliberately *not* here yet** (later increments, per the plan): precise
-//! head-oid dedup + carry-forward of open feedback across rounds (C15/C16, inc 6b) and
-//! the approve → post tail (C17, inc 6c). Dedup here is by `(session_id, pr_number)`:
-//! one in-flight review per PR.
+//! **Cross-round tracking (C16, inc 6b)** is wired when a [`FleetHistory`] is attached: the
+//! FSM dedups precisely on the resolved head oid (a head already drafted ⇒ no-op), supersedes
+//! a stale prior draft when a new head arrives, and carries the prior round's open feedback
+//! into this one so the tracker can mark items addressed vs still-open. Without a history it
+//! falls back to the coarse in-flight `(session_id, pr_number)` guard (one review per PR).
+//!
+//! **What is deliberately *not* here yet** (per the plan): the approve → post tail (C17,
+//! inc 6c) — a completed review stops at `drafted` (`status = drafted`), awaiting a human.
 //!
 //! **Untrusted throughout.** Row fields come from a gRPC peer / hand-edited file, and a
 //! `pr_number` from a trigger source; ids are re-validated (`SessionKey::parse`) before
@@ -30,9 +34,9 @@ use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
 
 use agent_core::{
-    encode_review_session_id, DraftRequest, FleetHost, FleetRegistry, FleetSession, FleetTrigger,
-    RepoBackend, ReviewDrafter, ReviewGrounder, ReviewTarget, SessionKey, TriggerOutcome,
-    TriggerSink, UserId, WorktreeSpec,
+    draft_status, encode_review_session_id, DraftRequest, FleetHistory, FleetHost, FleetRegistry,
+    FleetSession, FleetTrigger, PriorReview, RepoBackend, ReviewDrafter, ReviewGrounder,
+    ReviewTarget, SessionKey, TriggerOutcome, TriggerSink, UserId, WorktreeSpec,
 };
 
 /// A forge-credential check for one row (C5): `Ok(())` when the row's `token_ref`
@@ -202,8 +206,14 @@ pub enum Handled {
     /// worktree materialized, and a review run started on `key`.
     Reviewing { key: SessionKey },
     /// A review for this `(session_id, pr_number)` was already in flight — a no-op
-    /// (no fetch, no new run). Head-oid–aware re-review is inc 6 (C14).
+    /// (no fetch, no new run). The coarse in-flight guard; the precise cross-round
+    /// dedup is [`Handled::UpToDate`].
     Duplicate,
+    /// The PR's current head oid was **already reviewed** in a prior round (review-fleet
+    /// C16): a persisted draft exists for this exact head, so the trigger is a no-op — no
+    /// re-fetch, no new run. Upgrades the coarse poll-time PR# guard from inc 4 to the
+    /// resolved head oid (C9).
+    UpToDate,
 }
 
 /// A spawned per-review task (review-fleet C8, inc 6a). Holding it keeps the review
@@ -261,6 +271,12 @@ pub struct FleetOrchestrator {
     /// `key.path_under(fleet_root)/reviews/`. `None` ⇒ the current directory (tests use a
     /// fake drafter that ignores the path).
     fleet_root: Option<PathBuf>,
+    /// The persisted review-history reader (C16). When present, [`Self::handle`] dedups
+    /// precisely on the resolved head oid (a head already drafted ⇒ [`Handled::UpToDate`]),
+    /// supersedes a stale prior draft when a new head arrives, and carries the prior round's
+    /// open feedback into this one. `None` ⇒ no cross-round tracking (the review still runs).
+    /// Used **fail-soft**: a read error falls back to "no prior".
+    history: Option<Arc<dyn FleetHistory>>,
     /// Live review tasks, keyed by `(session_id, pr_number)`; membership is the in-flight
     /// guard (one review per PR). Cleared by [`Self::cancel`]/[`Self::join`] or dropping
     /// the orchestrator; precise head-oid dedup + supersede across rounds is inc 6b (C16).
@@ -280,6 +296,7 @@ impl FleetOrchestrator {
             grounder: None,
             drafter: None,
             fleet_root: None,
+            history: None,
             in_flight: Mutex::new(HashMap::new()),
         }
     }
@@ -303,6 +320,14 @@ impl FleetOrchestrator {
     /// Set the fleet workspace root the draft `.md` is written under (C4).
     pub fn with_fleet_root(mut self, root: PathBuf) -> Self {
         self.fleet_root = Some(root);
+        self
+    }
+
+    /// Attach the persisted review-history reader (C16): with it, [`Self::handle`] dedups on
+    /// the resolved head oid, supersedes a stale prior draft, and carries open feedback into
+    /// the new round. Without one the FSM reviews every trigger fresh (no cross-round state).
+    pub fn with_history(mut self, history: Arc<dyn FleetHistory>) -> Self {
+        self.history = Some(history);
         self
     }
 
@@ -403,6 +428,28 @@ impl FleetOrchestrator {
         // triggered → cloning: fetch the PR head (C9) and materialize a read-only
         // worktree at it. Both are fail-hard — a review must run against the real head.
         let head = self.repo.fetch_pr(pr).await?;
+        let head_oid = head.0.clone();
+
+        // C16 cross-round: consult the persisted history before doing any expensive work.
+        // Fail-soft — a read error means "no prior", so a review still runs (just uncorrelated).
+        let prior: PriorReview = match &self.history {
+            Some(h) => h.prior(&row.repo, pr).await.unwrap_or_else(|e| {
+                tracing::warn!(session_id = %trigger.session_id, pr, error = %e,
+                    "fleet: history read failed; proceeding without cross-round state");
+                PriorReview::default()
+            }),
+            None => PriorReview::default(),
+        };
+        // Precise dedup: this exact head oid already has a (live, non-superseded) draft ⇒
+        // nothing to do. Upgrades the coarse poll-time PR# guard from inc 4 (C16).
+        if let Some(last) = &prior.last_draft {
+            if last.head_sha == head_oid && last.status != draft_status::SUPERSEDED {
+                tracing::debug!(session_id = %trigger.session_id, pr, head = %head_oid,
+                    "fleet: head already reviewed (up to date)");
+                return Ok(Handled::UpToDate);
+            }
+        }
+
         let _worktree = self
             .repo
             .worktree_add(&WorktreeSpec {
@@ -411,6 +458,20 @@ impl FleetOrchestrator {
                 id: Some(format!("pr-{pr}")),
             })
             .await?;
+
+        // A new head arrived while a prior round was still `drafted` (awaiting approval) ⇒
+        // mark that draft superseded (C16); its `.md` no longer reflects the code. Fail-soft,
+        // and only when a drafter is wired (no persistence otherwise).
+        if let (Some(drafter), Some(last)) = (&self.drafter, &prior.last_draft) {
+            if last.head_sha != head_oid && last.status == draft_status::DRAFTED {
+                let mut sup = last.clone();
+                sup.status = draft_status::SUPERSEDED.to_string();
+                if let Err(e) = drafter.supersede(sup).await {
+                    tracing::warn!(session_id = %trigger.session_id, pr, error = %e,
+                        "fleet: superseding prior draft failed (soft)");
+                }
+            }
+        }
 
         // cloning → reviewing: run the review engine (C10) on the PR to ground the
         // session, keeping the facts for the C13 draft. Grounding is **fail-soft**: if the
@@ -454,6 +515,9 @@ impl FleetOrchestrator {
         let repo = row.repo.clone();
         let key_run = key.clone();
         let sid = trigger.session_id.clone();
+        // Carry the prior round's still-open items into the draft so the tracker (C16) can
+        // reconcile them against this round's findings (addressed vs still-open).
+        let open_items = prior.open_items;
         let task = tokio::spawn(async move {
             let narrative = match host.run_review(key_run, goal, skill).await {
                 Ok(n) => n,
@@ -472,7 +536,7 @@ impl FleetOrchestrator {
                     facts,
                     narrative,
                     workspace,
-                    prior: Vec::new(),
+                    prior: open_items,
                 };
                 if let Err(e) = drafter.draft(req).await {
                     tracing::warn!(session_id = %sid, pr, error = %e,
@@ -650,23 +714,30 @@ mod tests {
     /// and can be made to fail to exercise the fail-soft draft path.
     struct FakeDrafter {
         drafted: Mutex<Vec<DraftRequest>>,
+        /// The prior records passed to `supersede` (review-fleet C16).
+        superseded: Mutex<Vec<agent_core::ReviewDraftRecord>>,
         fail: bool,
     }
     impl FakeDrafter {
         fn ok() -> Arc<Self> {
             Arc::new(Self {
                 drafted: Mutex::new(Vec::new()),
+                superseded: Mutex::new(Vec::new()),
                 fail: false,
             })
         }
         fn failing() -> Arc<Self> {
             Arc::new(Self {
                 drafted: Mutex::new(Vec::new()),
+                superseded: Mutex::new(Vec::new()),
                 fail: true,
             })
         }
         fn drafts(&self) -> Vec<DraftRequest> {
             self.drafted.lock().unwrap().clone()
+        }
+        fn supersedes(&self) -> Vec<agent_core::ReviewDraftRecord> {
+            self.superseded.lock().unwrap().clone()
         }
     }
     #[async_trait::async_trait]
@@ -688,6 +759,81 @@ mod tests {
                 return Err(agent_core::Error::Fleet("draft boom".into()));
             }
             Ok(rec)
+        }
+        async fn supersede(&self, record: agent_core::ReviewDraftRecord) -> agent_core::Result<()> {
+            self.superseded.lock().unwrap().push(record);
+            Ok(())
+        }
+    }
+
+    /// A [`FleetHistory`] double (C16): returns a canned [`PriorReview`], records the
+    /// `(repo, pr)` it was queried for, and can fail to exercise the fail-soft path.
+    struct FakeHistory {
+        prior: PriorReview,
+        calls: Mutex<Vec<(String, u64)>>,
+        fail: bool,
+    }
+    impl FakeHistory {
+        fn with_prior(prior: PriorReview) -> Arc<Self> {
+            Arc::new(Self {
+                prior,
+                calls: Mutex::new(Vec::new()),
+                fail: false,
+            })
+        }
+        fn failing() -> Arc<Self> {
+            Arc::new(Self {
+                prior: PriorReview::default(),
+                calls: Mutex::new(Vec::new()),
+                fail: true,
+            })
+        }
+        fn calls(&self) -> Vec<(String, u64)> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+    #[async_trait::async_trait]
+    impl FleetHistory for FakeHistory {
+        async fn prior(&self, repo: &str, pr: u64) -> agent_core::Result<PriorReview> {
+            self.calls.lock().unwrap().push((repo.to_string(), pr));
+            if self.fail {
+                return Err(agent_core::Error::Fleet("history boom".into()));
+            }
+            Ok(self.prior.clone())
+        }
+    }
+
+    /// A prior draft record for PR 42 in `acme__web` at `head_sha`/`status`.
+    fn draft_rec(head_sha: &str, status: &str) -> agent_core::ReviewDraftRecord {
+        agent_core::ReviewDraftRecord {
+            review_id: "r0".into(),
+            repo: "acme__web".into(),
+            pr_number: 42,
+            head_sha: head_sha.into(),
+            risk_score: 0.0,
+            gate_failed: false,
+            n_findings: 0,
+            files_changed: 0,
+            additions: 0,
+            deletions: 0,
+            draft_path: "/tmp/old.md".into(),
+            status: status.into(),
+        }
+    }
+
+    /// An open feedback item as it would be carried from a prior round.
+    fn open_fb(id: &str) -> agent_core::Feedback {
+        agent_core::Feedback {
+            item_id: id.into(),
+            category: "analyzer".into(),
+            severity: "warning".into(),
+            title: "t".into(),
+            body: "b".into(),
+            status: agent_core::feedback_status::OPEN.into(),
+            first_seen_review: "r0".into(),
+            first_seen_sha: "old".into(),
+            addressed_review: String::new(),
+            addressed_sha: String::new(),
         }
     }
 
@@ -1151,6 +1297,167 @@ mod tests {
             drafter.drafts().is_empty(),
             "no engine facts ⇒ no draft produced"
         );
+    }
+
+    // ---- C16 cross-round tracker ------------------------------------------
+
+    #[tokio::test]
+    async fn positive_same_head_is_noop_dedup() {
+        // desc: history already has a `drafted` record for this PR at the SAME head oid the
+        // fetch resolves. expect: Handled::UpToDate — no worktree, no engine, no review run.
+        let roster = seeded(&[row("web", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(0));
+        let grounder = FakeGrounder::ok("brief");
+        // FixtureRepo resolves PR 42's head to pr_local_ref(42).
+        let head = agent_core::pr_local_ref(42);
+        let history = FakeHistory::with_prior(PriorReview {
+            last_draft: Some(draft_rec(&head, "drafted")),
+            open_items: vec![],
+        });
+        let o = orch(roster, repo.clone(), host.clone())
+            .with_grounder(grounder.clone())
+            .with_history(history.clone());
+
+        let got = o
+            .handle(FleetTrigger {
+                session_id: "web".into(),
+                pr_number: 42,
+            })
+            .await
+            .expect("handle ok");
+        assert!(matches!(got, Handled::UpToDate), "same head ⇒ up to date");
+        assert_eq!(
+            history.calls(),
+            vec![("acme__web".into(), 42)],
+            "history queried"
+        );
+        assert!(grounder.calls().is_empty(), "engine never ran on a dedup");
+        assert_eq!(host.reviews_len(), 0, "no review started");
+    }
+
+    #[tokio::test]
+    async fn positive_new_head_supersedes_prior_draft() {
+        // desc: history has a `drafted` record at an OLD head; the fetch resolves a new head.
+        // expect: the prior draft is superseded (once, status=superseded) and a fresh review
+        // runs.
+        let roster = seeded(&[row("web", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(0));
+        let grounder = FakeGrounder::ok("brief");
+        let drafter = FakeDrafter::ok();
+        let history = FakeHistory::with_prior(PriorReview {
+            last_draft: Some(draft_rec("OLD_HEAD", "drafted")),
+            open_items: vec![],
+        });
+        let o = orch(roster, repo.clone(), host.clone())
+            .with_grounder(grounder)
+            .with_drafter(drafter.clone())
+            .with_history(history);
+
+        let got = o
+            .handle(FleetTrigger {
+                session_id: "web".into(),
+                pr_number: 42,
+            })
+            .await
+            .expect("handle ok");
+        assert!(matches!(got, Handled::Reviewing { .. }), "a new round runs");
+        let sup = drafter.supersedes();
+        assert_eq!(sup.len(), 1, "the stale draft was superseded once");
+        assert_eq!(sup[0].status, "superseded");
+        assert_eq!(sup[0].head_sha, "OLD_HEAD");
+        assert!(o.join("web", 42).await);
+        assert_eq!(host.reviews_len(), 1, "the fresh review ran");
+    }
+
+    #[tokio::test]
+    async fn positive_new_head_carries_open_items() {
+        // desc: a prior round left two open items; a new head arrives. expect: those open
+        // items are carried into the drafter's DraftRequest.prior for reconciliation.
+        let roster = seeded(&[row("web", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(0));
+        let grounder = FakeGrounder::ok("brief");
+        let drafter = FakeDrafter::ok();
+        let history = FakeHistory::with_prior(PriorReview {
+            last_draft: Some(draft_rec("OLD_HEAD", "posted")),
+            open_items: vec![open_fb("i1"), open_fb("i2")],
+        });
+        let o = orch(roster, repo.clone(), host.clone())
+            .with_grounder(grounder)
+            .with_drafter(drafter.clone())
+            .with_history(history);
+
+        o.handle(FleetTrigger {
+            session_id: "web".into(),
+            pr_number: 42,
+        })
+        .await
+        .expect("handle ok");
+        assert!(o.join("web", 42).await);
+        let drafts = drafter.drafts();
+        assert_eq!(drafts.len(), 1, "one draft");
+        let ids: Vec<&str> = drafts[0].prior.iter().map(|f| f.item_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["i1", "i2"],
+            "prior open items carried into the draft"
+        );
+        // A `posted` prior at a different head is not re-superseded.
+        assert!(
+            drafter.supersedes().is_empty(),
+            "posted prior not superseded"
+        );
+    }
+
+    #[tokio::test]
+    async fn corner_no_history_reviews_fresh() {
+        // desc: no history attached. expect: the FSM reviews every trigger (no dedup/carry),
+        // exactly the pre-6b behaviour.
+        let roster = seeded(&[row("web", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(0));
+        let grounder = FakeGrounder::ok("brief");
+        let o = orch(roster, repo, host.clone()).with_grounder(grounder);
+
+        let got = o
+            .handle(FleetTrigger {
+                session_id: "web".into(),
+                pr_number: 42,
+            })
+            .await
+            .expect("handle ok");
+        assert!(matches!(got, Handled::Reviewing { .. }));
+        assert!(o.join("web", 42).await);
+        assert_eq!(host.reviews_len(), 1, "review ran without history");
+    }
+
+    #[tokio::test]
+    async fn negative_history_error_is_soft() {
+        // desc: the history read fails. expect: fail-soft — the review still runs (no dedup,
+        // no carry), never an error out of handle.
+        let roster = seeded(&[row("web", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(0));
+        let grounder = FakeGrounder::ok("brief");
+        let o = orch(roster, repo, host.clone())
+            .with_grounder(grounder)
+            .with_history(FakeHistory::failing());
+
+        let got = o
+            .handle(FleetTrigger {
+                session_id: "web".into(),
+                pr_number: 42,
+            })
+            .await
+            .expect("handle ok despite history error");
+        assert!(
+            matches!(got, Handled::Reviewing { .. }),
+            "review still runs"
+        );
+        assert!(o.join("web", 42).await);
+        assert_eq!(host.reviews_len(), 1);
     }
 
     // ---- bounded, coalescing trigger queue --------------------------------

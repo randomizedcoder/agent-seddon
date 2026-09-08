@@ -12,8 +12,43 @@ Three PRs, each based off `main`, never stacked, each gated by `nix flake check`
 
 ## Now
 
-- **INCREMENT 6a (C13 draft renderer + C14 `agent_review_drafts` + completion-aware C8) — code +
-  tests complete; gate pending.** Turns a finished review into a persisted, redacted draft. The FSM
+- **INCREMENT 6b (C15 `agent_review_feedback` + C16 cross-round tracker) — code + tests complete;
+  gate pending.** Persists per-item review feedback and carries it across rounds, so a re-review dedups
+  precisely on the resolved head oid and verifies which prior items the new head fixed.
+  - **Feedback model (agent-core)** — `Feedback::from_finding` derives an **open** item per deterministic
+    finding; `feedback_item_id` is a stable, **line-independent** fnv1a over (category, file, rule,
+    message) so items match across rounds as lines shift. `reconcile_feedback(current, prior_open,
+    review_id, head)` is the pure tracker: an item in both rounds stays open (keeps `first_seen`); a
+    prior-open item gone this round is marked `addressed` (stamped with the resolving review/sha); a new
+    item is open. Caps: `MAX_FEEDBACK_TITLE/BODY/ITEMS`. New `FeedbackRound` side-channel on
+    `MemoryEvent`, `feedback_status` consts, `FleetHistory` seam (`prior(repo, pr) -> PriorReview {
+    last_draft, open_items }`), and `ReviewDrafter::supersede`.
+  - **C15 table (agent-telemetry)** — `ReviewFeedbackRow` + `rows_from_event` (Vec fan-out) +
+    `Msg::ReviewFeedback` + the writer flush pattern (all 5 sites; also backfilled the drafts row into
+    the post-loop final flush) + a `kind = "feedback"` dispatch branch; DDL `agent_review_feedback`
+    (`ORDER BY (repo, pr_number, item_id)`) in `schema.sql` (new table, no `ALTER`).
+  - **History reader (agent-telemetry)** — `ClickHouseHistory` impl of `FleetHistory` over C14/C15
+    (lazy-connect + reconnect-once, mirroring the digest store), parameterized reads (`$1/$2` — `repo`
+    trusted config, `pr` a `u64`), newest-per-item_id wins → currently-open carry set. Built in the
+    builder from `[telemetry]` params, wired into `serve_fleet` (`with_history`).
+  - **Drafter (agent-runtime)** — `EngineDrafter::draft` derives + reconciles feedback, persists it via
+    `Agent::record_feedback`, and renders only the **cross-round** items (carried-open + addressed) in
+    the "prior feedback status" section (grouped Resolved / Still-open, redacted). `supersede` records a
+    `status = superseded` row for the stale prior draft.
+  - **FSM (agent-review-fleet)** — `FleetOrchestrator` gains `history` (`with_history`). `handle` reads
+    `prior` after resolving the head oid: same head + live draft ⇒ `Handled::UpToDate` (precise dedup,
+    upgrading inc-4's coarse PR# guard); a new head over a still-`drafted` prior ⇒ supersede it; the
+    prior round's open items flow into `DraftRequest.prior`. All **fail-soft**.
+  - Tests (default-feature → `test.nix`): reconcile (stays-open / addressed-when-fixed / new-item /
+    mixed / **cap**), `from_finding` (open + stable id + line-independent + **hostile message capped**),
+    C15 row (fan-out / non-feedback→empty), reader row-map, renderer (grouped by status / **secret
+    redacted in prior**), FSM (**same-head dedup** / new-head-supersedes / carries-open-items /
+    no-history-reviews-fresh / **history-error-is-soft**).
+- **Next: inc 6c** (C17 `Approve` RPC + post tail — approval lifts `dry_run` per `review_id`, FSM posts
+  via `Forge`, `status = posted` idempotency key; serve-smoke `Approve` roundtrip).
+
+- **INCREMENT 6a (C13 draft renderer + C14 `agent_review_drafts` + completion-aware C8) — MERGED,
+  PR #287 (main `c8321c1`).** Turns a finished review into a persisted, redacted draft. The FSM
   becomes **completion-aware**: it now reaches `drafted`.
   - **Completion-aware FSM** — `FleetHost::start_review` (fire-and-forget) → `async fn run_review(key,
     goal, skill) -> Result<String>` (returns the model narrative). `FleetOrchestrator::handle` does the
@@ -33,16 +68,9 @@ Three PRs, each based off `main`, never stacked, each gated by `nix flake check`
     `<workspace>/reviews/pr-<N>-r<review_id>.md`, and records the row via `Agent::record_draft` (a
     `kind = "draft"` event). `Agent::review_drafter()` / `fleet_root()` accessors; `serve_fleet` wires
     the drafter + fleet root alongside the grounder.
-  - **C14 table (agent-telemetry)** — `ReviewDraftRow` + `from_event` + `Msg::ReviewDraft` + the 4-site
+  - **C14 table (agent-telemetry)** — `ReviewDraftRow` + `from_event` + `Msg::ReviewDraft` + the
     writer flush pattern + a `kind = "draft"` dispatch branch; DDL `agent_review_drafts`
     (`ORDER BY (repo, pr_number, head_sha)`) in `schema.sql` (new table, no `ALTER`).
-  - Tests (all default-feature → `test.nix`): renderer (ordered sections / steps / prior / **secret
-    redacted** / huge-body capped / SHA preserved); C14 row (`from_event` / non-draft→None / hostile
-    counts saturate); FSM (review-completes-then-drafts / draft-error-is-soft / no-drafter-no-draft /
-    no-facts-no-draft / cancel-aborts-before-draft, plus the carried 5c grounding cases). No new nix
-    check.
-- **Next: inc 6b** (C15 `agent_review_feedback` + C16 cross-round tracker: precise head-oid dedup +
-  supersede + carry open items across rounds), then **6c** (C17 `Approve` RPC + post tail).
 
 - **INCREMENT 5c (C10 engine invocation) MERGED — PR #286 (main `9a3b176`).** Wires the fleet
   FSM to the deterministic review engine so a review session reviews the *real* change, not a bare

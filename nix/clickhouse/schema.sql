@@ -163,6 +163,32 @@ CREATE TABLE IF NOT EXISTS agent.agent_review_drafts
 ENGINE = MergeTree
 ORDER BY (repo, pr_number, head_sha);
 
+-- One row per review-feedback item, carried across rounds (review-fleet C15/C16).
+-- review_id/repo/pr_number are the persisting round's context; the rest is the item's
+-- cross-round lifecycle. Joins to agent_review_drafts on (repo, pr_number). Model-/tool-
+-- authored title/body are size-capped at the source (never unbounded).
+CREATE TABLE IF NOT EXISTS agent.agent_review_feedback
+(
+    session_id        String,
+    user              String,                      -- verified SessionKey.user (tenant); '' outside a scope
+    ts                DateTime64(3, 'UTC'),
+    item_id           String,                      -- stable, line-independent identity (C16 dedup key)
+    review_id         String,                      -- the round that persisted this row
+    repo              String,                      -- roster repo key (owner__name), trusted config
+    pr_number         UInt64,
+    category          String,                      -- producing collector (analyzer | shellcheck | …)
+    severity          String,
+    title             String,
+    body              String,
+    status            String,                      -- open | addressed | wontfix
+    first_seen_review String,
+    first_seen_sha    String,
+    addressed_review  String,                      -- '' until addressed
+    addressed_sha     String                       -- '' until addressed
+)
+ENGINE = MergeTree
+ORDER BY (repo, pr_number, item_id);
+
 -- One row per accepted per-dimension summary (adaptive-cognition 03). Counts and
 -- lengths only — never the summary body — so the dimension distribution and
 -- emergent-slug churn can be analysed offline without storing model text.

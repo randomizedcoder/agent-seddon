@@ -24,8 +24,9 @@ server reconciles its live sessions from (review-fleet C2,
 > Increments 3a (roster) + 3b (gRPC control plane) + 3c (fleet process skeleton) + 4a
 > (forge-poll trigger C6) + 4b (Slack watch C7 — parser/fan-out **and** the Socket-Mode
 > transport) are shipped. The FSM drives `triggered → cloning → reviewing`, fed by **both**
-> triggers (forge poll + Slack). The review skill/collectors (inc 5) and the
-> draft→approve→post tail + head-oid dedup (C14, inc 6) are later increments.
+> triggers (forge poll + Slack). The review skill/collectors (inc 5), the draft +
+> `agent_review_drafts` (C13/C14, inc 6a), and the feedback + cross-round head-oid dedup
+> (C15/C16, inc 6b) are shipped; the approve → post tail (C17, inc 6c) is the last increment.
 
 ## The trait
 
@@ -196,6 +197,23 @@ table — kept **separate** from the anonymized `agent_reviews`, and named by re
 (fleet config), joining back on `head_sha == head_rev`. The task guard aborts on drop (drop = cancel);
 `review_id` is a server-minted `Uuid`. **Nothing posts** — the approve → post tail is inc 6c.
 
+**Feedback + cross-round tracker (C15/C16, inc 6b)** persists per-item feedback and carries it across
+rounds. Each deterministic finding becomes an **open** `Feedback` whose `item_id` is a stable,
+**line-independent** hash of (category, file, rule, message) — so the same issue matches across rounds
+even as the diff shifts lines. `reconcile_feedback` (a pure `agent-core` function) compares this round's
+items to the prior round's open set: an item in both stays open and keeps its `first_seen`; a prior-open
+item **gone** this round is marked `addressed` (the engine re-ran on the new head and the finding is
+gone — grounded in the diff, not the model's memory); a new item is open. The reconciled set is
+persisted as `kind = "feedback"` rows in the new `agent_review_feedback` table (one row per item,
+capped). Before drafting, the FSM reads
+[`FleetHistory::prior(repo, pr)`](../../crates/agent-core/src/lib.rs) (a ClickHouse-backed reader over
+C14/C15, `ClickHouseHistory`): if a **live draft already exists for the exact resolved head oid**, the
+trigger is a no-op (`Handled::UpToDate` — precise dedup, upgrading inc-4's coarse PR# guard); if a new
+head arrives over a still-`drafted` prior round, that draft is marked `superseded`; and the prior
+round's still-open items flow into the draft so the renderer shows a grouped "prior feedback status"
+(Resolved on this head / Still open, redacted). Every history step is **fail-soft** (a read error ⇒
+review without dedup/carry, never a crash).
+
 **Forge poll (C6, inc 4a)** is the first *real* trigger source. `serve_fleet` registers one
 `every {poll_secs}` job per enabled, forge-capable roster row on `agent-scheduler` (whose
 **overlap guard** means a poll that runs long never stacks a second copy) and fires due jobs
@@ -207,7 +225,8 @@ The **forge response is untrusted**: `next_page` is followed only when it strict
 and never past `MAX_POLL_PAGES` (10), and at most `MAX_TRIGGERS_PER_TICK` (64) triggers leave
 one tick, so a hostile paging chain or a PR flood is bounded. Dedup is coarse here (by PR
 number, via the queue's coalescing + the orchestrator's per-`(session, pr)` guard); precise
-head-oid re-review dedup is inc 6 (C14), since `PullRequest` carries no head SHA.
+head-oid re-review dedup lands in inc 6b (C16), resolving the head at fetch time rather than
+relying on `PullRequest` (which carries no head SHA).
 
 **Slack watch (C7, inc 4b)** is the second trigger source, in the new
 [`agent-slack`](../../crates/agent-slack) crate (shared with C18's outbound progress poster,

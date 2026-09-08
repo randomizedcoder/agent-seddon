@@ -34,6 +34,7 @@ fn event(kind: &str, text: &str) -> MemoryEvent {
         review: None,
         dimensional: None,
         draft: None,
+        feedback: None,
     }
 }
 

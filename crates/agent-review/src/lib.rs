@@ -107,18 +107,43 @@ pub fn render_draft(
         out.push('\n');
     }
 
-    // Prior feedback carried across rounds (inc 6b fills this; empty ⇒ omitted).
+    // Prior feedback carried across rounds (review-fleet C16; empty ⇒ omitted). Grouped so
+    // the approver sees at a glance what the new head resolved vs what still stands. The
+    // "addressed" verdict is grounded in the re-run engine (the finding is gone), not memory.
     if !prior.is_empty() {
+        use agent_core::feedback_status;
         out.push_str("## Prior feedback status\n\n");
-        for f in prior {
-            out.push_str(&format!(
-                "- [{}] {} — {}\n",
-                f.status,
-                redact(&f.title),
-                redact(&f.body),
-            ));
+        let addressed: Vec<_> = prior
+            .iter()
+            .filter(|f| f.status == feedback_status::ADDRESSED)
+            .collect();
+        let still_open: Vec<_> = prior
+            .iter()
+            .filter(|f| f.status == feedback_status::OPEN)
+            .collect();
+        if !addressed.is_empty() {
+            out.push_str("**Resolved on this head:**\n\n");
+            for f in &addressed {
+                out.push_str(&format!(
+                    "- ~~{}~~ (addressed in `{}`)\n",
+                    redact(&f.title),
+                    redact(&f.addressed_sha),
+                ));
+            }
+            out.push('\n');
         }
-        out.push('\n');
+        if !still_open.is_empty() {
+            out.push_str("**Still open (first seen in an earlier round):**\n\n");
+            for f in &still_open {
+                out.push_str(&format!(
+                    "- [{}] {} — {}\n",
+                    f.severity,
+                    redact(&f.title),
+                    redact(&f.body),
+                ));
+            }
+            out.push('\n');
+        }
     }
 
     // The grounded facts, for the approver's reference (already URL-free; redact for
@@ -770,25 +795,58 @@ mod draft_tests {
         );
     }
 
-    #[test]
-    fn positive_renders_prior_feedback_section() {
-        // desc: prior open items render a "prior feedback status" section (inc 6b hook).
-        // expect: the section + the item's title appear.
-        let prior = vec![Feedback {
-            item_id: "i1".into(),
+    fn fb(title: &str, body: &str, status: &str, addressed_sha: &str) -> Feedback {
+        Feedback {
+            item_id: format!("id-{title}"),
             category: "correctness".into(),
             severity: "must-fix".into(),
-            title: "unchecked unwrap".into(),
-            body: "line 12".into(),
-            status: "open".into(),
+            title: title.into(),
+            body: body.into(),
+            status: status.into(),
             first_seen_review: "r0".into(),
             first_seen_sha: "aaaa".into(),
-            addressed_review: String::new(),
-            addressed_sha: String::new(),
-        }];
+            addressed_review: if addressed_sha.is_empty() { "" } else { "r1" }.into(),
+            addressed_sha: addressed_sha.into(),
+        }
+    }
+
+    #[test]
+    fn positive_renders_prior_feedback_grouped_by_status() {
+        // desc: a reconciled prior set with one still-open and one addressed item. expect:
+        // the section groups "Resolved on this head" (with the resolving sha) and "Still open".
+        let prior = vec![
+            fb("unchecked unwrap", "line 12", "open", ""),
+            fb("missing error check", "was line 8", "addressed", "cccc"),
+        ];
         let md = render_draft(&facts(), "narrative", &prior);
         assert!(md.contains("## Prior feedback status"));
-        assert!(md.contains("unchecked unwrap"));
+        assert!(
+            md.contains("Resolved on this head"),
+            "addressed group: {md}"
+        );
+        assert!(
+            md.contains("missing error check") && md.contains("cccc"),
+            "resolving sha shown"
+        );
+        assert!(md.contains("Still open"), "open group present");
+        assert!(md.contains("unchecked unwrap"), "open item title shown");
+    }
+
+    #[test]
+    fn adversarial_secret_redacted_from_prior_feedback() {
+        // desc: a prior item whose body echoes a forge token (untrusted, model-derived).
+        // expect: the token never survives into the rendered prior-feedback section.
+        let prior = vec![fb(
+            "leak",
+            "token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 here",
+            "open",
+            "",
+        )];
+        let md = render_draft(&facts(), "narrative", &prior);
+        assert!(
+            !md.contains("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"),
+            "token in prior feedback must be redacted: {md}"
+        );
     }
 
     #[test]
