@@ -1,7 +1,9 @@
 # `nix run .#fleet-e2e` — live review-fleet end-to-end against REAL PRs.
 #
-# One `--serve-fleet` process hosts a two-row roster (two different GitHub repos),
-# is `ReviewNow`n for each, grounds each review against THAT row's own repo + forge
+# One `--serve-fleet` process hosts a multi-row roster (several different GitHub repos —
+# by default two external repos plus agent-seddon itself, so the fleet also reviews this
+# very repo's own PR), is `ReviewNow`n for each, grounds each review against THAT row's
+# own repo + forge
 # (multi-repo grounding, #289), and writes a redacted draft `.md` per PR. This is
 # the "does it actually work" proof the hermetic in-process tests can't give — it
 # needs a real model, a real GITHUB_TOKEN, and the network. Nothing is posted (the

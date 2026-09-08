@@ -105,11 +105,11 @@ pkgs.writeShellApplication {
         run_step "e2e-live — one-shot real model"    e2e-live
         run_step "e2e-expect — multi-turn REPL"      e2e-expect
         run_step "e2e-multi — concurrent + judge"    e2e-multi
-        # `fleet-e2e` (live review-fleet, two real PRs) additionally needs a GITHUB_TOKEN
+        # `fleet-e2e` (live review-fleet, real PRs) additionally needs a GITHUB_TOKEN
         # (forge get_pr is fail-closed). Include it only when one is present, else note the
         # skip (its own run would refuse hard).
         if [ -n "''${GITHUB_TOKEN:-}" ]; then
-          run_step "fleet-e2e — two real PRs, two drafts" fleet-e2e
+          run_step "fleet-e2e — real PRs, one draft each" fleet-e2e
         else
           echo ""
           echo "integration: SKIP fleet-e2e — no GITHUB_TOKEN (forge get_pr is fail-closed)."

@@ -314,8 +314,10 @@ a resolved secret — comes back).
 
 The hermetic tests above prove the machinery with doubles; the opt-in **`nix run .#fleet-e2e`**
 harness ([`nix/fleet-e2e.nix`](../../nix/fleet-e2e.nix) → [`test/fleet-e2e/run.sh`](../../test/fleet-e2e/run.sh))
-proves the whole thing against **real PRs**: one `--serve-fleet` process hosts a two-row roster
-(two different GitHub repos), is `ReviewNow`n over the wire for each, grounds each review against
+proves the whole thing against **real PRs**: one `--serve-fleet` process hosts a multi-row roster
+(several different GitHub repos — by default two external repos plus agent-seddon itself, so the
+fleet also reviews this very repo's own PR), is `ReviewNow`n over the wire for each, grounds each
+review against
 *that row's own* repo + forge (multi-repo grounding), and writes a redacted draft `.md` per PR. It
 is not a check (it needs a real model, a `GITHUB_TOKEN`, and the network); it refuses (never skips)
 when those are absent, and is auto-included in `nix run .#integration`'s model tier when both a

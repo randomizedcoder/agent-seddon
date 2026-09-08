@@ -2,8 +2,9 @@
 # Live review-fleet end-to-end (docs: nix run .#fleet-e2e).
 #
 # Proves the MULTI-REPO fleet actually works against REAL PRs: one `--serve-fleet`
-# process hosts a two-row roster (two different GitHub repos), is triggered with
-# `ReviewNow` for each, grounds each review against THAT row's own repo + forge
+# process hosts a multi-row roster (several different GitHub repos — by default two
+# external repos plus agent-seddon itself), is triggered with `ReviewNow` for each,
+# grounds each review against THAT row's own repo + forge
 # (review-fleet multi-repo grounding, #289), and writes a redacted draft `.md` per
 # PR. This is the "does it actually work" proof the hermetic in-process test
 # (crates/agent-review-fleet) cannot give — it needs a real model, a real forge
@@ -28,10 +29,12 @@
 #   AGENT_E2E_API_KEY | _API_KEY_FILE — generator key (inline or a file, e.g. the runpod kimi key).
 #   AGENT_E2E_INSECURE_TLS=1          — skip TLS verify for a self-signed generator (trusted nets only).
 #   AGENT_E2E_MAX_TOKENS/_CONTEXT_WINDOW — model budgets (reasoning models need more).
-#   AGENT_FLEET_E2E_REPOS             — comma list of owner__name slugs (default the two real repos).
-#   AGENT_FLEET_E2E_PRS               — comma list of PR numbers, 1:1 with REPOS (default 75,97).
+#   AGENT_FLEET_E2E_REPOS             — comma list of owner__name slugs (default: rtl-fun,
+#                                       uds-rdma-proxy, agent-seddon).
+#   AGENT_FLEET_E2E_PRS               — comma list of PR numbers, 1:1 with REPOS (default 75,97,290).
 #   AGENT_FLEET_E2E_USER              — roster owner/org (default randomizedcoder).
-#   AGENT_FLEET_E2E_TIMEOUT           — seconds to wait for each draft (default 600).
+#   AGENT_FLEET_E2E_MAX_ITERS         — per-review agent loop cap (default 40; large repos need more).
+#   AGENT_FLEET_E2E_TIMEOUT           — seconds to wait for each draft (default 900).
 #   AGENT_FLEET_E2E_PORT              — fleet gRPC TCP port (default 50186).
 #   AGENT_E2E_KEEP=1                  — keep the temp workspace for inspection.
 set -uo pipefail
