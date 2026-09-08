@@ -37,6 +37,25 @@ Two keystones with no dependency on each other, then the layers that need them:
 Each is a **gated PR off `main`, never stacked** (the established cadence); new card protos are additive
 (no `buf.image.binpb` bump).
 
+### Executable increments (phase-by-phase)
+
+The full build sequence — eleven gated PRs, each with scope, anchored key files, tests, and a definition
+of done — is [`09-increments.md`](09-increments.md). Summary (all ⬜):
+
+| Phase | Component | State | Depends on |
+|---|---|---|---|
+| A1 | `agent-config-store` crate: file+sqlite tiers + txn API | ⬜ | — |
+| A2 | Postgres tier + `[config_store]` bootstrap + opt-in DB harness | ⬜ | A1 |
+| A3 | Converge `agent-registry` (behavior-preserving) | ⬜ | A2 |
+| A3b | Converge `agent-review-fleet` | ⬜ | A2 |
+| A3c | Converge `agent-prompt` (outlier) | ⬜ | A2 |
+| B1 | `AuthInterceptor` tower layer + JWKS/JWT + `[auth]` | ⬜ | — |
+| C1 | C34 RBAC (roles/permissions as cards) | ⬜ | B1, A1 |
+| C2 | C35 per-tenant plane (+ C38 prompt) | ⬜ | B1, A3 |
+| D1 | C36 forge registry | ⬜ | A1 (+C2 per-tenant) |
+| D2 | C37 message-transport registry | ⬜ | A1 (+C2 per-tenant) |
+| E1 | C40 control-plane consolidation | ⬜ | B1, C1, C2 |
+
 ## Dependencies (cross-track)
 
 - **multi-tenancy C29–C31** — C35/C40 are the config-surface application of C30 (`PerTenant<Store>`) and
@@ -62,6 +81,19 @@ Each is a **gated PR off `main`, never stacked** (the established cadence); new 
 5. **Config storage = transactional SQL (OLTP), separate from telemetry.** file → sqlite → **postgres**
    behind one store trait; **ClickHouse never used for config**; atomic multi-card transactions required.
 6. **Topology = per-domain typed services over one shared SQL store** — no generic mega-service.
+
+**Refined at implementation-planning time (2026-09-08, grounded against the tree — see
+[`09-increments.md`](09-increments.md)):**
+
+7. **Two SQL code paths, one trait.** Today's SQLite is `rusqlite` (bundled); there is no `sqlx`. Keep
+   `rusqlite` for the `file`/`sqlite` tiers (untouched, still hermetic in-gate) and add `postgres` as a
+   new `sqlx` tier. This **supersedes decision #5's "sqlx one code path"** — it is behavior-preserving
+   and keeps the hermetic gate intact.
+8. **Postgres is opt-in, never in `nix flake check`.** A real DB server can't run in the check sandbox
+   (no docker/network), so the `postgres` tier is exercised only via `nix run .#integration` (mirroring
+   the ClickHouse harness); `file`+`sqlite` remain hermetic in-gate via bundled SQLite.
+9. **Auth is a tower `Layer`, not a tonic interceptor** — no interceptors exist today; C33 stacks a
+   second `Layer` beside `AdmissionLayer` and widens the `ServeRouter` alias.
 
 ## Non-goals
 
