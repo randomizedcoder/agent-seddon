@@ -223,6 +223,55 @@ impl ReviewRow {
     }
 }
 
+/// One fleet review draft (`agent_review_drafts`, review-fleet C14) — the operational
+/// record: per-PR draft state, the head-oid dedup key, summary stats, and the `.md` path.
+/// Named `repo`/`pr_number` (fleet config, not model-derived), unlike the anonymized
+/// [`ReviewRow`]; joins to `agent_reviews` on `head_sha == head_rev`. `gate_failed` is
+/// stored `UInt8`.
+#[derive(Debug, Clone, Row)]
+pub struct ReviewDraftRow {
+    pub session_id: String,
+    /// The verified owning identity (`SessionKey.user`; tenant == user at this tier).
+    pub user: String,
+    pub ts: DateTime64<3>,
+    pub review_id: String,
+    pub repo: String,
+    pub pr_number: u64,
+    pub head_sha: String,
+    pub risk_score: f64,
+    pub gate_failed: u8,
+    pub n_findings: u32,
+    pub files_changed: u32,
+    pub additions: u32,
+    pub deletions: u32,
+    pub draft_path: String,
+    pub status: String,
+}
+
+impl ReviewDraftRow {
+    /// Build the draft row from a `kind = "draft"` `MemoryEvent`.
+    pub fn from_event(event: &MemoryEvent) -> Option<Self> {
+        let d = event.draft.as_ref()?;
+        Some(Self {
+            session_id: event.session_id.clone(),
+            user: event.user.clone(),
+            ts: dt64_from_ms(event.ts_ms),
+            review_id: d.review_id.clone(),
+            repo: d.repo.clone(),
+            pr_number: d.pr_number,
+            head_sha: d.head_sha.clone(),
+            risk_score: d.risk_score,
+            gate_failed: d.gate_failed as u8,
+            n_findings: d.n_findings,
+            files_changed: d.files_changed,
+            additions: d.additions,
+            deletions: d.deletions,
+            draft_path: d.draft_path.clone(),
+            status: d.status.clone(),
+        })
+    }
+}
+
 /// One collector per review (`agent_review_collectors`) — the parallelism drill-down.
 #[derive(Debug, Clone, Row)]
 pub struct ReviewCollectorRow {
@@ -323,6 +372,7 @@ mod tests {
             verification: None,
             review: None,
             dimensional: None,
+            draft: None,
         }
     }
 
@@ -338,6 +388,7 @@ mod tests {
             verification: Some(rec),
             review: None,
             dimensional: None,
+            draft: None,
         }
     }
 
@@ -458,6 +509,7 @@ mod tests {
             verification: None,
             review: Some(rec),
             dimensional: None,
+            draft: None,
         }
     }
 
@@ -577,9 +629,89 @@ mod tests {
                     is_new: false,
                 }],
             }),
+            draft: None,
         };
         let dim_rows = DimensionRow::rows_from_event(&dim_event);
         assert_eq!(dim_rows.len(), 1);
         assert_eq!(dim_rows[0].user, "u");
+    }
+
+    // --- ReviewDraftRow (C14) --------------------------------------------
+    fn draft_event(rec: agent_core::ReviewDraftRecord) -> MemoryEvent {
+        MemoryEvent {
+            kind: "draft".into(),
+            message: Message::assistant(""),
+            ts_ms: 1,
+            session_id: "s".into(),
+            user: "u".into(),
+            usage: None,
+            iter: None,
+            verification: None,
+            review: None,
+            dimensional: None,
+            draft: Some(rec),
+        }
+    }
+
+    #[test]
+    fn positive_draft_row_from_event() {
+        // desc: a `kind = "draft"` event → one ReviewDraftRow with its columns mapped.
+        // expect: identity + fleet fields + gate_failed stored as UInt8.
+        let rec = agent_core::ReviewDraftRecord {
+            review_id: "rid".into(),
+            repo: "acme__web".into(),
+            pr_number: 42,
+            head_sha: "deadbeef".into(),
+            risk_score: 0.9,
+            gate_failed: true,
+            n_findings: 3,
+            files_changed: 2,
+            additions: 10,
+            deletions: 4,
+            draft_path: "/w/reviews/pr-42-rrid.md".into(),
+            status: "drafted".into(),
+        };
+        let row = ReviewDraftRow::from_event(&draft_event(rec)).expect("draft row");
+        assert_eq!(row.user, "u");
+        assert_eq!(row.review_id, "rid");
+        assert_eq!(row.repo, "acme__web");
+        assert_eq!(row.pr_number, 42);
+        assert_eq!(row.head_sha, "deadbeef");
+        assert_eq!(row.gate_failed, 1, "bool stored as UInt8");
+        assert_eq!(row.status, "drafted");
+    }
+
+    #[test]
+    fn negative_non_draft_event_yields_no_draft_row() {
+        // desc: an event of another kind has no `draft` side-channel. expect: None.
+        assert!(ReviewDraftRow::from_event(&ev("goal", Message::user("x"), None)).is_none());
+    }
+
+    #[test]
+    fn adversarial_hostile_counts_clamped_in_record() {
+        // desc: a fan-out reporting more files than u32 can't overflow the row. expect:
+        // ReviewDraftRecord::from_facts saturates additions/deletions at u32::MAX.
+        let mut f = agent_core::ReviewFacts::default();
+        for _ in 0..2 {
+            f.change.files.push(agent_core::ChangedFile {
+                path: "x".into(),
+                change: agent_core::ChangeKind::Modified,
+                additions: u32::MAX,
+                deletions: u32::MAX,
+                is_binary: false,
+                lang: "rust".into(),
+                patch: String::new(),
+            });
+        }
+        let rec = agent_core::ReviewDraftRecord::from_facts(
+            "rid",
+            "acme__web",
+            1,
+            &f,
+            "/p.md",
+            "drafted",
+        );
+        assert_eq!(rec.additions, u32::MAX, "additions saturate, never wrap");
+        assert_eq!(rec.deletions, u32::MAX, "deletions saturate, never wrap");
     }
 }

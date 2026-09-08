@@ -153,6 +153,9 @@ impl pb::agent_session_service_server::AgentSessionService for AgentSessionSvc {
             DriverError::PerUserLimit(_) | DriverError::TotalLimit(_) => {
                 Status::resource_exhausted(e.to_string())
             }
+            // `session_for` only rejects on capacity; a run-failure variant maps to
+            // internal for exhaustiveness.
+            DriverError::Backend(_) => Status::internal(e.to_string()),
         })?;
 
         // Subscribe *before* starting the run so the leading `RunStarted` is captured

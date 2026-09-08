@@ -19,6 +19,8 @@ serde_json.workspace = true
 # The orchestrator's bounded trigger queue (mpsc) + coalesce/state logging.
 tokio = { workspace = true }
 tracing.workspace = true
+# Server-minted review-round ids (C8/C14) — the same crate the session registry uses.
+uuid = { workspace = true }
 rusqlite = { workspace = true, optional = true }
 
 [dev-dependencies]

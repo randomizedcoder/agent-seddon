@@ -910,9 +910,11 @@ pub async fn serve_fleet(agent: Arc<Agent>, listen: Endpoint) -> anyhow::Result<
         Some(repo) => {
             let (queue, mut rx) =
                 agent_review_fleet::TriggerQueue::channel(FLEET_TRIGGER_QUEUE_CAP);
-            // C10: attach the review engine when one is wired, so the FSM grounds each
-            // review session in real facts (diff + mechanized checks). Absent ⇒ the
-            // orchestrator drives an ungrounded review (still runs).
+            // C10/C13/C14: attach the review engine + drafter when wired, so the FSM
+            // grounds each review in real facts (diff + mechanized checks) and, after the
+            // review completes, renders a redacted `.md` + persists an `agent_review_drafts`
+            // row under the session workspace. Absent ⇒ the orchestrator drives an
+            // ungrounded review with no draft (still runs).
             let mut orch = agent_review_fleet::FleetOrchestrator::new(
                 roster.clone(),
                 repo,
@@ -920,6 +922,12 @@ pub async fn serve_fleet(agent: Arc<Agent>, listen: Endpoint) -> anyhow::Result<
             );
             if let Some(grounder) = agent.review_grounder() {
                 orch = orch.with_grounder(grounder);
+            }
+            if let Some(drafter) = agent.review_drafter() {
+                orch = orch.with_drafter(drafter);
+            }
+            if let Some(root) = agent.fleet_root() {
+                orch = orch.with_fleet_root(root);
             }
             let orch = Arc::new(orch);
             tokio::spawn(async move {

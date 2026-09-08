@@ -1,5 +1,5 @@
-//! The fleet orchestrator (review-fleet C1/C8, increment 3c — **skeleton**): the two
-//! loops that turn a durable roster into running reviews.
+//! The fleet orchestrator (review-fleet C1/C8): the two loops that turn a durable
+//! roster into running reviews.
 //!
 //! - [`reconcile`] rebuilds the live session set from the roster (the source of
 //!   truth): for each **enabled** row it fail-closed-checks the row's forge
@@ -7,16 +7,17 @@
 //!   It is idempotent, so booting, re-running it, or reacting to a control-plane edit
 //!   all converge to the same set — the crash-safe rebuild the design calls for.
 //! - [`FleetOrchestrator`] drives one PR through the state machine
-//!   `triggered → cloning → reviewing`: fetch the PR head (C9), materialize a
-//!   read-only worktree, mint the PR-scoped `SessionKey`, and start a review run on it.
-//!   A [`TriggerQueue`] feeds it — **bounded** and **coalescing** (an over-capacity or
-//!   duplicate trigger folds into the pending one and is logged, never silently
-//!   dropped).
+//!   `triggered → cloning → reviewing → drafted`: fetch the PR head (C9), materialize a
+//!   read-only worktree, ground the review on the engine's facts (C10), then **spawn a
+//!   per-review task** (so the drain loop never blocks) that runs the review to
+//!   completion and renders + persists a draft (C13/C14). A [`TriggerQueue`] feeds it —
+//!   **bounded** and **coalescing** (an over-capacity or duplicate trigger folds into
+//!   the pending one and is logged, never silently dropped).
 //!
-//! **What is deliberately *not* here yet** (later increments, per the plan): the real
-//! triggers (forge poll C6 / Slack watch C7, inc 4), the review skill + collectors
-//! (inc 5), and the draft → approve → post tail + head-oid dedup (C14, inc 6). Dedup
-//! here is by `(session_id, pr_number)`: one in-flight review per PR.
+//! **What is deliberately *not* here yet** (later increments, per the plan): precise
+//! head-oid dedup + carry-forward of open feedback across rounds (C15/C16, inc 6b) and
+//! the approve → post tail (C17, inc 6c). Dedup here is by `(session_id, pr_number)`:
+//! one in-flight review per PR.
 //!
 //! **Untrusted throughout.** Row fields come from a gRPC peer / hand-edited file, and a
 //! `pr_number` from a trigger source; ids are re-validated (`SessionKey::parse`) before
@@ -26,10 +27,12 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
+use std::path::PathBuf;
+
 use agent_core::{
-    encode_review_session_id, FleetHost, FleetRegistry, FleetSession, FleetTrigger, RepoBackend,
-    ReviewGrounder, ReviewTarget, RunHandle, SessionKey, TriggerOutcome, TriggerSink, UserId,
-    WorktreeSpec,
+    encode_review_session_id, DraftRequest, FleetHost, FleetRegistry, FleetSession, FleetTrigger,
+    RepoBackend, ReviewDrafter, ReviewGrounder, ReviewTarget, SessionKey, TriggerOutcome,
+    TriggerSink, UserId, WorktreeSpec,
 };
 
 /// A forge-credential check for one row (C5): `Ok(())` when the row's `token_ref`
@@ -203,10 +206,42 @@ pub enum Handled {
     Duplicate,
 }
 
-/// Drives one PR through the review state machine and keeps its run alive. **Single
-/// consumer:** [`Self::handle`] is meant to be called serially by one drain loop (the
-/// bounded [`TriggerQueue`] serializes triggers), so its check-then-insert of the
-/// in-flight guard needs no cross-task locking beyond the guard itself.
+/// A spawned per-review task (review-fleet C8, inc 6a). Holding it keeps the review
+/// running and is the in-flight guard; **dropping it aborts the task** (drop = cancel),
+/// which drops the [`FleetHost::run_review`] future and so cancels the underlying turn —
+/// the cancel-on-drop semantics the old `RunHandle` gave, now at the task level.
+struct ReviewTask {
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl ReviewTask {
+    fn new(handle: tokio::task::JoinHandle<()>) -> Self {
+        Self {
+            handle: Some(handle),
+        }
+    }
+    /// Await the task to completion (finalize/test helper), consuming the guard so its
+    /// `Drop` does not abort a task that already finished.
+    async fn join(mut self) {
+        if let Some(h) = self.handle.take() {
+            let _ = h.await;
+        }
+    }
+}
+
+impl Drop for ReviewTask {
+    fn drop(&mut self) {
+        if let Some(h) = &self.handle {
+            h.abort();
+        }
+    }
+}
+
+/// Drives one PR through the review state machine `triggered → cloning → reviewing →
+/// drafted`. **Single consumer:** [`Self::handle`] is called serially by one drain loop
+/// (the bounded [`TriggerQueue`] serializes triggers) and is **non-blocking** — it does
+/// the synchronous prep, then spawns a per-review task that awaits the (possibly long)
+/// review run and renders+persists the draft, so the drain loop keeps moving.
 pub struct FleetOrchestrator {
     roster: Arc<dyn FleetRegistry>,
     repo: Arc<dyn RepoBackend>,
@@ -217,11 +252,19 @@ pub struct FleetOrchestrator {
     /// skeleton behaviour). Injected as a seam so this crate stays free of the concrete
     /// engine (`agent-review`) — the reconcile path injects its forge check the same way.
     grounder: Option<Arc<dyn ReviewGrounder>>,
-    /// Live review runs, keyed by `(session_id, pr_number)`. Holding the [`RunHandle`]
-    /// keeps the run from cancelling (drop = cancel); membership is the in-flight guard.
-    /// Completion-driven removal is inc 6 — until then a run is cleared only by
-    /// [`Self::cancel`] or dropping the orchestrator.
-    in_flight: Mutex<HashMap<(String, u64), RunHandle>>,
+    /// The draft renderer + persistence (C13/C14). When present *and* the engine produced
+    /// facts, the per-review task renders a redacted `.md` + persists an
+    /// `agent_review_drafts` row (`status = drafted`) after the review completes. `None`
+    /// (or no facts) ⇒ the review runs but no draft is produced (5c behaviour).
+    drafter: Option<Arc<dyn ReviewDrafter>>,
+    /// The fleet workspace root (C4/R1a). The draft `.md` is written under
+    /// `key.path_under(fleet_root)/reviews/`. `None` ⇒ the current directory (tests use a
+    /// fake drafter that ignores the path).
+    fleet_root: Option<PathBuf>,
+    /// Live review tasks, keyed by `(session_id, pr_number)`; membership is the in-flight
+    /// guard (one review per PR). Cleared by [`Self::cancel`]/[`Self::join`] or dropping
+    /// the orchestrator; precise head-oid dedup + supersede across rounds is inc 6b (C16).
+    in_flight: Mutex<HashMap<(String, u64), ReviewTask>>,
 }
 
 impl FleetOrchestrator {
@@ -235,6 +278,8 @@ impl FleetOrchestrator {
             repo,
             host,
             grounder: None,
+            drafter: None,
+            fleet_root: None,
             in_flight: Mutex::new(HashMap::new()),
         }
     }
@@ -244,6 +289,20 @@ impl FleetOrchestrator {
     /// FSM keeps its skeleton behaviour (a bare review instruction).
     pub fn with_grounder(mut self, grounder: Arc<dyn ReviewGrounder>) -> Self {
         self.grounder = Some(grounder);
+        self
+    }
+
+    /// Attach the draft renderer + persistence (C13/C14): with a drafter set (and the
+    /// engine producing facts), a completed review is rendered to a redacted `.md` and
+    /// recorded as an `agent_review_drafts` row.
+    pub fn with_drafter(mut self, drafter: Arc<dyn ReviewDrafter>) -> Self {
+        self.drafter = Some(drafter);
+        self
+    }
+
+    /// Set the fleet workspace root the draft `.md` is written under (C4).
+    pub fn with_fleet_root(mut self, root: PathBuf) -> Self {
+        self.fleet_root = Some(root);
         self
     }
 
@@ -286,8 +345,8 @@ impl FleetOrchestrator {
             .contains_key(&(session_id.to_string(), pr_number))
     }
 
-    /// Cancel and clear an in-flight review (dropping its [`RunHandle`] cancels the run).
-    /// Returns whether one was present.
+    /// Cancel and clear an in-flight review (dropping its [`ReviewTask`] aborts the task,
+    /// cancelling the run). Returns whether one was present.
     pub fn cancel(&self, session_id: &str, pr_number: u64) -> bool {
         self.in_flight
             .lock()
@@ -296,15 +355,36 @@ impl FleetOrchestrator {
             .is_some()
     }
 
-    /// Drive one trigger through `triggered → cloning → reviewing`.
+    /// Await the in-flight review task for `(session_id, pr_number)` to completion (its
+    /// run + draft), clearing the guard. Returns whether one was present. A finalize/test
+    /// helper — the drain loop never blocks on a review; it lets the task run detached.
+    pub async fn join(&self, session_id: &str, pr_number: u64) -> bool {
+        let task = self
+            .in_flight
+            .lock()
+            .expect("in_flight poisoned")
+            .remove(&(session_id.to_string(), pr_number));
+        match task {
+            Some(t) => {
+                t.join().await;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Drive one trigger through `triggered → cloning → reviewing → drafted`.
     ///
-    /// Fails closed with `Err` on an unknown row, a fetch/worktree failure, or a
-    /// capacity cap (the caller logs it). A duplicate `(session_id, pr_number)` returns
-    /// [`Handled::Duplicate`] without touching the forge or the session.
+    /// Synchronous prep (dedup, roster lookup, fetch + worktree, grounding) runs inline;
+    /// then a **per-review task** is spawned to await the review run and render+persist the
+    /// draft, so this returns [`Handled::Reviewing`] without blocking the drain loop. Fails
+    /// closed with `Err` on an unknown row or a fetch/worktree failure (the caller logs
+    /// it). A duplicate `(session_id, pr_number)` returns [`Handled::Duplicate`] without
+    /// touching the forge, the engine, or the session.
     pub async fn handle(&self, trigger: FleetTrigger) -> agent_core::Result<Handled> {
         let kt = (trigger.session_id.clone(), trigger.pr_number);
         // C14-lite dedup: one in-flight review per (session, PR). Checked up front so a
-        // duplicate never re-fetches.
+        // duplicate never re-fetches or re-grounds.
         if self
             .in_flight
             .lock()
@@ -333,34 +413,77 @@ impl FleetOrchestrator {
             .await?;
 
         // cloning → reviewing: run the review engine (C10) on the PR to ground the
-        // session, then mint the PR-scoped key (user = org, session =
-        // encode_review_session_id(repo, pr)) and start the run on it. Grounding is
-        // **fail-soft**: if the engine errors (e.g. no forge to resolve a PR number),
-        // fall back to the bare instruction so a review still runs.
-        let goal = match &self.grounder {
+        // session, keeping the facts for the C13 draft. Grounding is **fail-soft**: if the
+        // engine errors (e.g. no forge to resolve a PR number), fall back to the bare
+        // instruction so a review still runs (with no draft — nothing to render from).
+        let (goal, facts) = match &self.grounder {
             Some(grounder) => match grounder.ground(ReviewTarget::Pr(pr)).await {
-                Ok(brief) => Self::grounded_goal(&row, pr, &brief),
+                Ok(grounded) => (
+                    Self::grounded_goal(&row, pr, &grounded.brief),
+                    Some(grounded.facts),
+                ),
                 Err(e) => {
                     tracing::warn!(session_id = %trigger.session_id, pr, error = %e,
                         "fleet: review engine failed; driving an ungrounded review");
-                    Self::review_goal(&row, pr)
+                    (Self::review_goal(&row, pr), None)
                 }
             },
-            None => Self::review_goal(&row, pr),
+            None => (Self::review_goal(&row, pr), None),
         };
+
         let key = SessionKey {
             user: UserId::new(row.user.as_str()),
             session: encode_review_session_id(&row.repo, pr),
         };
-        let run = self
-            .host
-            .start_review(key.clone(), goal, Some(row.skill.clone()))
-            .map_err(|e| agent_core::Error::Fleet(format!("admit review session: {e}")))?;
-        // Keep the run alive (drop = cancel) and mark it in flight.
+        // A server-minted review-round id (unguessable), carried into the draft record so
+        // the approval path (inc 6c) can address exactly this round.
+        let review_id = uuid::Uuid::new_v4().to_string();
+        let workspace = self
+            .fleet_root
+            .as_ref()
+            .and_then(|r| key.path_under(r).ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+
+        // reviewing → drafted: spawn a task that awaits the run then drafts. Everything it
+        // needs is owned/Arc (nothing borrows `self`), so it outlives this call. NO await
+        // between spawn and insert, so the task (scheduled, not inline) cannot run — and
+        // so cannot be joined/cancelled — before the guard is in place.
+        let host = self.host.clone();
+        let drafter = self.drafter.clone();
+        let skill = Some(row.skill.clone());
+        let repo = row.repo.clone();
+        let key_run = key.clone();
+        let sid = trigger.session_id.clone();
+        let task = tokio::spawn(async move {
+            let narrative = match host.run_review(key_run, goal, skill).await {
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::warn!(session_id = %sid, pr, error = %e,
+                        "fleet: review run failed (no draft)");
+                    return;
+                }
+            };
+            // drafted: render + persist. Fail-soft — a draft error is logged, not fatal.
+            if let (Some(drafter), Some(facts)) = (drafter, facts) {
+                let req = DraftRequest {
+                    review_id,
+                    repo,
+                    pr_number: pr,
+                    facts,
+                    narrative,
+                    workspace,
+                    prior: Vec::new(),
+                };
+                if let Err(e) = drafter.draft(req).await {
+                    tracing::warn!(session_id = %sid, pr, error = %e,
+                        "fleet: draft render/persist failed (soft)");
+                }
+            }
+        });
         self.in_flight
             .lock()
             .expect("in_flight poisoned")
-            .insert(kt, run);
+            .insert(kt, ReviewTask::new(task));
         tracing::info!(session_id = %trigger.session_id, pr, session = %key.session.as_str(),
             "fleet: review started");
         Ok(Handled::Reviewing { key })
@@ -371,49 +494,55 @@ impl FleetOrchestrator {
 mod tests {
     use super::*;
     use crate::MemoryFleet;
-    use agent_core::DriverError;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use agent_core::{DriverError, GroundedReview, ReviewFacts};
     use std::sync::Arc;
+    use tokio::sync::Notify;
 
     // ---- doubles ----------------------------------------------------------
-
-    /// A `RunHandle` guard whose `Drop` records cancellation, so a test can assert that
-    /// dropping the orchestrator's handle actually cancels the run.
-    struct CancelFlag(Arc<AtomicBool>);
-    impl Drop for CancelFlag {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::SeqCst);
-        }
-    }
 
     #[derive(Default)]
     struct HostState {
         admitted: Vec<SessionKey>,
         removed: Vec<SessionKey>,
+        /// `(key, goal, skill)` per started review — recorded when `run_review` runs
+        /// (inside the orchestrator's spawned task, so a test `join`s before asserting).
         reviews: Vec<(SessionKey, String, Option<String>)>,
-        /// One cancel flag per started review (index-aligned with `reviews`).
-        cancels: Vec<Arc<AtomicBool>>,
     }
 
-    /// A [`FleetHost`] double with a configurable global cap. Admits are idempotent
-    /// (re-admitting a live key is a no-op success), matching the real manager, so
-    /// reconcile is idempotent. `start_review` hands back a cancel-on-drop handle whose
-    /// flag the test keeps a clone of.
+    /// A [`FleetHost`] double with a configurable global cap. Admits are idempotent, so
+    /// reconcile is idempotent. `run_review` records the call and returns a canned
+    /// narrative; with a `gate` set it instead **blocks** on the gate (never notified),
+    /// so the review stays in flight for the cancellation test.
     struct FakeHost {
         max_total: usize,
         state: Mutex<HostState>,
+        /// When `Some`, `run_review` awaits this (never fired) so the review is in flight.
+        gate: Option<Arc<Notify>>,
     }
     impl FakeHost {
         fn new(max_total: usize) -> Self {
             Self {
                 max_total,
                 state: Mutex::new(HostState::default()),
+                gate: None,
+            }
+        }
+        /// A host whose reviews block forever (in-flight), for the cancellation test.
+        fn gated() -> Self {
+            Self {
+                max_total: 0,
+                state: Mutex::new(HostState::default()),
+                gate: Some(Arc::new(Notify::new())),
             }
         }
         fn admitted(&self) -> Vec<SessionKey> {
             self.state.lock().unwrap().admitted.clone()
         }
+        fn reviews_len(&self) -> usize {
+            self.state.lock().unwrap().reviews.len()
+        }
     }
+    #[async_trait::async_trait]
     impl FleetHost for FakeHost {
         fn admit_owner(&self, key: SessionKey) -> Result<(), DriverError> {
             let mut s = self.state.lock().unwrap();
@@ -431,31 +560,38 @@ mod tests {
             s.removed.push(key.clone());
             s.admitted.retain(|k| k != key);
         }
-        fn start_review(
+        async fn run_review(
             &self,
             key: SessionKey,
             goal: String,
             skill: Option<String>,
-        ) -> Result<RunHandle, DriverError> {
-            let mut s = self.state.lock().unwrap();
-            if self.max_total > 0
-                && !s.admitted.contains(&key)
-                && s.admitted.len() >= self.max_total
+        ) -> Result<String, DriverError> {
             {
-                return Err(DriverError::TotalLimit(self.max_total));
+                let mut s = self.state.lock().unwrap();
+                if self.max_total > 0
+                    && !s.admitted.contains(&key)
+                    && s.admitted.len() >= self.max_total
+                {
+                    return Err(DriverError::TotalLimit(self.max_total));
+                }
+                s.reviews.push((key.clone(), goal, skill));
+                if !s.admitted.contains(&key) {
+                    s.admitted.push(key);
+                }
             }
-            let flag = Arc::new(AtomicBool::new(false));
-            s.reviews.push((key.clone(), goal, skill));
-            s.cancels.push(flag.clone());
-            if !s.admitted.contains(&key) {
-                s.admitted.push(key);
+            // A gated host stays in flight until aborted (the cancellation test relies on
+            // the review never reaching the draft step).
+            if let Some(gate) = &self.gate {
+                gate.notified().await;
             }
-            Ok(RunHandle::new(CancelFlag(flag)))
+            Ok("NARRATIVE".to_string())
         }
     }
 
     /// A [`ReviewGrounder`] double (C10): records the PR numbers it was asked to ground
-    /// and returns a fixed brief — or a fixed error, to exercise the fail-soft fallback.
+    /// and returns a fixed brief + facts — or a fixed error, to exercise the fail-soft
+    /// fallback. The facts carry a recognisable `head_rev` so a draft test can assert the
+    /// engine's facts flowed into the draft.
     struct FakeGrounder {
         brief: std::result::Result<String, String>,
         grounded: Mutex<Vec<u64>>,
@@ -477,14 +613,81 @@ mod tests {
         fn calls(&self) -> Vec<u64> {
             self.grounded.lock().unwrap().clone()
         }
+        /// Facts with a recognisable head oid + one changed file, so a draft test can
+        /// assert the engine's facts reached the drafter.
+        fn facts() -> ReviewFacts {
+            let mut f = ReviewFacts::default();
+            f.meta.head_rev = "deadbeef".into();
+            f.change.files.push(agent_core::ChangedFile {
+                path: "src/x.rs".into(),
+                change: agent_core::ChangeKind::Modified,
+                additions: 3,
+                deletions: 1,
+                is_binary: false,
+                lang: "rust".into(),
+                patch: String::new(),
+            });
+            f
+        }
     }
     #[async_trait::async_trait]
     impl ReviewGrounder for FakeGrounder {
-        async fn ground(&self, target: ReviewTarget) -> agent_core::Result<String> {
+        async fn ground(&self, target: ReviewTarget) -> agent_core::Result<GroundedReview> {
             if let ReviewTarget::Pr(n) = target {
                 self.grounded.lock().unwrap().push(n);
             }
-            self.brief.clone().map_err(agent_core::Error::Fleet)
+            match &self.brief {
+                Ok(b) => Ok(GroundedReview {
+                    brief: b.clone(),
+                    facts: Self::facts(),
+                }),
+                Err(e) => Err(agent_core::Error::Fleet(e.clone())),
+            }
+        }
+    }
+
+    /// A [`ReviewDrafter`] double (C13/C14): records every [`DraftRequest`] it receives,
+    /// and can be made to fail to exercise the fail-soft draft path.
+    struct FakeDrafter {
+        drafted: Mutex<Vec<DraftRequest>>,
+        fail: bool,
+    }
+    impl FakeDrafter {
+        fn ok() -> Arc<Self> {
+            Arc::new(Self {
+                drafted: Mutex::new(Vec::new()),
+                fail: false,
+            })
+        }
+        fn failing() -> Arc<Self> {
+            Arc::new(Self {
+                drafted: Mutex::new(Vec::new()),
+                fail: true,
+            })
+        }
+        fn drafts(&self) -> Vec<DraftRequest> {
+            self.drafted.lock().unwrap().clone()
+        }
+    }
+    #[async_trait::async_trait]
+    impl ReviewDrafter for FakeDrafter {
+        async fn draft(
+            &self,
+            req: DraftRequest,
+        ) -> agent_core::Result<agent_core::ReviewDraftRecord> {
+            let rec = agent_core::ReviewDraftRecord::from_facts(
+                req.review_id.clone(),
+                req.repo.clone(),
+                req.pr_number,
+                &req.facts,
+                "/tmp/draft.md",
+                agent_core::draft_status::DRAFTED,
+            );
+            self.drafted.lock().unwrap().push(req);
+            if self.fail {
+                return Err(agent_core::Error::Fleet("draft boom".into()));
+            }
+            Ok(rec)
         }
     }
 
@@ -618,6 +821,8 @@ mod tests {
             vec![42],
             "PR head fetched exactly once"
         );
+        // The review runs in a spawned task; await it so its `run_review` call is recorded.
+        assert!(o.join("web", 42).await, "the review task was in flight");
 
         let s = host.state.lock().unwrap();
         assert_eq!(s.reviews.len(), 1, "one review started");
@@ -659,7 +864,9 @@ mod tests {
             vec![7],
             "duplicate must not re-fetch"
         );
-        assert_eq!(host.state.lock().unwrap().reviews.len(), 1);
+        // Settle the one spawned review; exactly one run was started.
+        o.join("web", 7).await;
+        assert_eq!(host.reviews_len(), 1, "only one review ran");
     }
 
     #[tokio::test]
@@ -683,13 +890,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn corner_runhandle_drop_cancels_the_run() {
-        // desc: after a review starts, cancelling it drops the RunHandle. expect: the
-        // run's cancel flag fires (drop = cancel), and the guard is cleared.
+    async fn corner_cancel_aborts_in_flight_review_before_draft() {
+        // desc: a review whose run blocks (in flight); cancelling it aborts the task.
+        // expect: cancel clears the guard, and the review never reaches the draft step
+        // (drop = cancel) — so the drafter is never called.
         let roster = seeded(&[row("web", true)]).await;
         let repo = Arc::new(agent_testkit::FixtureRepo::new());
-        let host = Arc::new(FakeHost::new(0));
-        let o = orch(roster, repo, host.clone());
+        let host = Arc::new(FakeHost::gated());
+        let grounder = FakeGrounder::ok("brief");
+        let drafter = FakeDrafter::ok();
+        let o = orch(roster, repo, host)
+            .with_grounder(grounder)
+            .with_drafter(drafter.clone());
 
         o.handle(FleetTrigger {
             session_id: "web".into(),
@@ -697,19 +909,16 @@ mod tests {
         })
         .await
         .expect("handle ok");
-        let flag = host.state.lock().unwrap().cancels[0].clone();
-        assert!(
-            !flag.load(Ordering::SeqCst),
-            "not cancelled while in flight"
-        );
-        assert!(o.is_in_flight("web", 9));
+        assert!(o.is_in_flight("web", 9), "review is in flight");
 
-        assert!(o.cancel("web", 9), "cancel removes the in-flight run");
-        assert!(
-            flag.load(Ordering::SeqCst),
-            "dropping the handle cancels the run"
-        );
+        assert!(o.cancel("web", 9), "cancel removes the in-flight review");
         assert!(!o.is_in_flight("web", 9));
+        // The run was blocked and then aborted, so it never drafted (fail-closed: a
+        // cancelled review posts/persists nothing).
+        assert!(
+            drafter.drafts().is_empty(),
+            "a cancelled review produces no draft"
+        );
     }
 
     // ---- C10: review engine grounding -------------------------------------
@@ -738,6 +947,7 @@ mod tests {
             vec![42],
             "engine grounds the PR exactly once"
         );
+        o.join("web", 42).await;
 
         let s = host.state.lock().unwrap();
         let (_key, goal, _skill) = &s.reviews[0];
@@ -776,6 +986,7 @@ mod tests {
             "review still runs"
         );
         assert_eq!(grounder.calls(), vec![8], "the engine was attempted");
+        o.join("web", 8).await;
 
         let s = host.state.lock().unwrap();
         let (_key, goal, _skill) = &s.reviews[0];
@@ -830,6 +1041,115 @@ mod tests {
         assert!(
             grounder.calls().is_empty(),
             "unknown row fails closed before the engine runs"
+        );
+    }
+
+    // ---- C13/C14: draft render + persist ----------------------------------
+
+    #[tokio::test]
+    async fn positive_review_completes_then_drafts() {
+        // desc: engine + drafter attached. expect: after the review completes, the drafter
+        // is called once with the model's narrative and the engine's facts — the
+        // reviewing → drafted transition.
+        let roster = seeded(&[row("web", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(0));
+        let grounder = FakeGrounder::ok("brief");
+        let drafter = FakeDrafter::ok();
+        let o = orch(roster, repo, host)
+            .with_grounder(grounder)
+            .with_drafter(drafter.clone());
+
+        o.handle(FleetTrigger {
+            session_id: "web".into(),
+            pr_number: 42,
+        })
+        .await
+        .expect("handle ok");
+        assert!(o.join("web", 42).await, "the review task was in flight");
+
+        let drafts = drafter.drafts();
+        assert_eq!(drafts.len(), 1, "exactly one draft produced");
+        let req = &drafts[0];
+        assert_eq!(req.pr_number, 42);
+        assert_eq!(req.repo, "acme__web");
+        assert_eq!(
+            req.narrative, "NARRATIVE",
+            "the model narrative reaches the draft"
+        );
+        assert_eq!(
+            req.facts.meta.head_rev, "deadbeef",
+            "the engine's facts reach the draft"
+        );
+        assert!(!req.review_id.is_empty(), "a review id was minted");
+        assert!(req.prior.is_empty(), "no prior feedback in 6a");
+    }
+
+    #[tokio::test]
+    async fn negative_draft_error_is_soft() {
+        // desc: the drafter fails. expect: it is attempted once, the failure is swallowed
+        // (the task completes without panic) — a draft error never crashes the fleet.
+        let roster = seeded(&[row("web", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(0));
+        let grounder = FakeGrounder::ok("brief");
+        let drafter = FakeDrafter::failing();
+        let o = orch(roster, repo, host)
+            .with_grounder(grounder)
+            .with_drafter(drafter.clone());
+
+        o.handle(FleetTrigger {
+            session_id: "web".into(),
+            pr_number: 5,
+        })
+        .await
+        .expect("handle ok");
+        // Awaiting the task must not panic even though the drafter returned Err.
+        assert!(o.join("web", 5).await);
+        assert_eq!(drafter.drafts().len(), 1, "the draft was attempted once");
+    }
+
+    #[tokio::test]
+    async fn corner_no_drafter_no_draft_but_review_runs() {
+        // desc: engine attached, no drafter. expect: the review still runs to completion;
+        // no draft is produced (there is nothing to persist it with).
+        let roster = seeded(&[row("web", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(0));
+        let grounder = FakeGrounder::ok("brief");
+        let o = orch(roster, repo, host.clone()).with_grounder(grounder);
+
+        o.handle(FleetTrigger {
+            session_id: "web".into(),
+            pr_number: 6,
+        })
+        .await
+        .expect("handle ok");
+        assert!(o.join("web", 6).await);
+        assert_eq!(host.reviews_len(), 1, "the review still ran");
+    }
+
+    #[tokio::test]
+    async fn corner_no_grounder_no_facts_no_draft() {
+        // desc: a drafter but NO engine. expect: the review runs on the bare goal, but
+        // without facts there is nothing to draft — the drafter is never called.
+        let roster = seeded(&[row("web", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(0));
+        let drafter = FakeDrafter::ok();
+        let o = orch(roster, repo, host.clone()).with_drafter(drafter.clone());
+
+        o.handle(FleetTrigger {
+            session_id: "web".into(),
+            pr_number: 4,
+        })
+        .await
+        .expect("handle ok");
+        assert!(o.join("web", 4).await);
+        assert_eq!(host.reviews_len(), 1, "the bare review ran");
+        assert!(
+            drafter.drafts().is_empty(),
+            "no engine facts ⇒ no draft produced"
         );
     }
 
