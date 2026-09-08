@@ -1124,7 +1124,7 @@ impl DimensionsCfg {
 /// `ReviewCollector` (`""` off | `local` | `grpc`); `classifier` selects the
 /// `TaskClassifier` (`hybrid` | `""`). `in_loop` enables auto-detecting a review
 /// task mid-conversation and injecting grounded facts.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[cfg_attr(
     feature = "config-schema",
     derive(serde::Serialize, schemars::JsonSchema)

@@ -35,8 +35,8 @@ use std::path::PathBuf;
 
 use agent_core::{
     draft_status, encode_review_session_id, DraftRequest, FleetHistory, FleetHost, FleetRegistry,
-    FleetSession, FleetTrigger, PriorReview, RepoBackend, ReviewDrafter, ReviewGrounder,
-    ReviewTarget, SessionKey, TriggerOutcome, TriggerSink, UserId, WorktreeSpec,
+    FleetReviewFactory, FleetSession, FleetTrigger, PriorReview, RepoBackend, ReviewDrafter,
+    ReviewGrounder, ReviewTarget, SessionKey, TriggerOutcome, TriggerSink, UserId, WorktreeSpec,
 };
 
 /// A forge-credential check for one row (C5): `Ok(())` when the row's `token_ref`
@@ -277,6 +277,12 @@ pub struct FleetOrchestrator {
     /// open feedback into this one. `None` ⇒ no cross-round tracking (the review still runs).
     /// Used **fail-soft**: a read error falls back to "no prior".
     history: Option<Arc<dyn FleetHistory>>,
+    /// The per-row review-context factory (multi-repo grounding). When present,
+    /// [`Self::handle`] builds *that row's own* checkout + forge-bound engine and uses them
+    /// for `fetch_pr`/`worktree_add` and grounding — so one process reviews many repos.
+    /// `None` ⇒ today's single-repo behaviour (the process-global `repo`/`grounder`). Used
+    /// **fail-soft**: a build error falls back to the globals so a review still runs.
+    review_factory: Option<Arc<dyn FleetReviewFactory>>,
     /// Live review tasks, keyed by `(session_id, pr_number)`; membership is the in-flight
     /// guard (one review per PR). Cleared by [`Self::cancel`]/[`Self::join`] or dropping
     /// the orchestrator; precise head-oid dedup + supersede across rounds is inc 6b (C16).
@@ -297,6 +303,7 @@ impl FleetOrchestrator {
             drafter: None,
             fleet_root: None,
             history: None,
+            review_factory: None,
             in_flight: Mutex::new(HashMap::new()),
         }
     }
@@ -328,6 +335,15 @@ impl FleetOrchestrator {
     /// the new round. Without one the FSM reviews every trigger fresh (no cross-round state).
     pub fn with_history(mut self, history: Arc<dyn FleetHistory>) -> Self {
         self.history = Some(history);
+        self
+    }
+
+    /// Attach the per-row review-context factory (multi-repo grounding): with a factory set,
+    /// [`Self::handle`] reviews each roster row against **its own** checkout + forge instead
+    /// of the process-global `repo`/`grounder`, so one `--serve-fleet` process grounds
+    /// reviews for many repos. Fail-soft — a build error falls back to the globals.
+    pub fn with_review_factory(mut self, factory: Arc<dyn FleetReviewFactory>) -> Self {
+        self.review_factory = Some(factory);
         self
     }
 
@@ -425,9 +441,26 @@ impl FleetOrchestrator {
         let row = self.roster.get(&trigger.session_id).await?;
         let pr = trigger.pr_number;
 
+        // Resolve the per-row repo + grounder (multi-repo grounding). With a factory set,
+        // build *this row's* own checkout + forge-bound engine; on a build error fall back
+        // to the process-global `repo`/`grounder` (fail-soft — a review still runs,
+        // ungrounded, with no draft). Without a factory, use the globals (single-repo).
+        let (repo, grounder) = match &self.review_factory {
+            Some(factory) => match factory.build(&row).await {
+                Ok(ctx) => (ctx.repo, Some(ctx.grounder)),
+                Err(e) => {
+                    tracing::warn!(session_id = %trigger.session_id, pr, error = %e,
+                        "fleet: review factory failed; falling back to the global repo (ungrounded)");
+                    (self.repo.clone(), self.grounder.clone())
+                }
+            },
+            None => (self.repo.clone(), self.grounder.clone()),
+        };
+
         // triggered → cloning: fetch the PR head (C9) and materialize a read-only
         // worktree at it. Both are fail-hard — a review must run against the real head.
-        let head = self.repo.fetch_pr(pr).await?;
+        // (`repo` is the per-row factory repo when a factory is set, else the global.)
+        let head = repo.fetch_pr(pr).await?;
         let head_oid = head.0.clone();
 
         // C16 cross-round: consult the persisted history before doing any expensive work.
@@ -450,8 +483,7 @@ impl FleetOrchestrator {
             }
         }
 
-        let _worktree = self
-            .repo
+        let _worktree = repo
             .worktree_add(&WorktreeSpec {
                 revision: head,
                 writable: false,
@@ -477,7 +509,7 @@ impl FleetOrchestrator {
         // session, keeping the facts for the C13 draft. Grounding is **fail-soft**: if the
         // engine errors (e.g. no forge to resolve a PR number), fall back to the bare
         // instruction so a review still runs (with no draft — nothing to render from).
-        let (goal, facts) = match &self.grounder {
+        let (goal, facts) = match &grounder {
             Some(grounder) => match grounder.ground(ReviewTarget::Pr(pr)).await {
                 Ok(grounded) => (
                     Self::grounded_goal(&row, pr, &grounded.brief),
@@ -558,7 +590,7 @@ impl FleetOrchestrator {
 mod tests {
     use super::*;
     use crate::MemoryFleet;
-    use agent_core::{DriverError, GroundedReview, ReviewFacts};
+    use agent_core::{DriverError, FleetReviewCtx, GroundedReview, ReviewFacts};
     use std::sync::Arc;
     use tokio::sync::Notify;
 
@@ -1460,6 +1492,266 @@ mod tests {
         assert_eq!(host.reviews_len(), 1);
     }
 
+    // ---- multi-repo grounding (FleetReviewFactory) ------------------------
+
+    /// A [`FleetReviewFactory`] double: hands each row **its own** [`FixtureRepo`] +
+    /// [`FakeGrounder`] (so a test can assert the *right* repo/engine was used per row, with
+    /// no cross-repo bleed), caching the pair by `row.id` — a repeated build for the same row
+    /// reuses the same checkout + engine. Rows in `fail_ids` return `Err` (the fail-soft path).
+    /// A built per-row pair: the fixture repo handed out + its grounder.
+    type BuiltPair = (Arc<agent_testkit::FixtureRepo>, Arc<FakeGrounder>);
+
+    struct FakeReviewFactory {
+        built: Mutex<HashMap<String, BuiltPair>>,
+        fail_ids: Vec<String>,
+        build_calls: Mutex<HashMap<String, usize>>,
+    }
+    impl FakeReviewFactory {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                built: Mutex::new(HashMap::new()),
+                fail_ids: Vec::new(),
+                build_calls: Mutex::new(HashMap::new()),
+            })
+        }
+        fn failing_for(id: &str) -> Arc<Self> {
+            Arc::new(Self {
+                built: Mutex::new(HashMap::new()),
+                fail_ids: vec![id.to_string()],
+                build_calls: Mutex::new(HashMap::new()),
+            })
+        }
+        /// The per-row repo handed out for `id` (once built), for fetch assertions.
+        fn repo_for(&self, id: &str) -> Option<Arc<agent_testkit::FixtureRepo>> {
+            self.built.lock().unwrap().get(id).map(|(r, _)| r.clone())
+        }
+        /// The per-row grounder handed out for `id` (once built), for grounding assertions.
+        fn grounder_for(&self, id: &str) -> Option<Arc<FakeGrounder>> {
+            self.built.lock().unwrap().get(id).map(|(_, g)| g.clone())
+        }
+        fn build_count(&self, id: &str) -> usize {
+            self.build_calls
+                .lock()
+                .unwrap()
+                .get(id)
+                .copied()
+                .unwrap_or(0)
+        }
+    }
+    #[async_trait::async_trait]
+    impl FleetReviewFactory for FakeReviewFactory {
+        async fn build(&self, row: &FleetSession) -> agent_core::Result<FleetReviewCtx> {
+            *self
+                .build_calls
+                .lock()
+                .unwrap()
+                .entry(row.id.clone())
+                .or_default() += 1;
+            if self.fail_ids.contains(&row.id) {
+                return Err(agent_core::Error::Fleet("factory boom".into()));
+            }
+            let mut built = self.built.lock().unwrap();
+            let (repo, grounder) = built.entry(row.id.clone()).or_insert_with(|| {
+                (
+                    Arc::new(agent_testkit::FixtureRepo::new()),
+                    FakeGrounder::ok(&format!("brief for {}", row.repo)),
+                )
+            });
+            Ok(FleetReviewCtx {
+                repo: repo.clone() as Arc<dyn RepoBackend>,
+                grounder: grounder.clone() as Arc<dyn ReviewGrounder>,
+            })
+        }
+    }
+
+    /// A row with an explicit repo slug (the `row()` helper hard-codes `acme__web`).
+    fn row_repo(id: &str, repo: &str) -> FleetSession {
+        let mut r = row(id, true);
+        r.repo = repo.into();
+        r
+    }
+
+    #[tokio::test]
+    async fn positive_two_sessions_two_distinct_drafts() {
+        // desc: two roster rows for two different repos, each triggered. expect: each is
+        // reviewed against ITS OWN factory repo + engine (no cross-repo bleed) and drafts
+        // for the right repo/PR; the process-global repo is never touched.
+        let roster = seeded(&[row_repo("web", "acme__web"), row_repo("api", "acme__api")]).await;
+        let global = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(0));
+        let factory = FakeReviewFactory::new();
+        let drafter = FakeDrafter::ok();
+        let o = orch(roster, global.clone(), host)
+            .with_review_factory(factory.clone())
+            .with_drafter(drafter.clone());
+
+        o.handle(FleetTrigger {
+            session_id: "web".into(),
+            pr_number: 42,
+        })
+        .await
+        .expect("web handle ok");
+        o.handle(FleetTrigger {
+            session_id: "api".into(),
+            pr_number: 97,
+        })
+        .await
+        .expect("api handle ok");
+        assert!(o.join("web", 42).await);
+        assert!(o.join("api", 97).await);
+
+        // Each row fetched its OWN PR on its OWN factory repo — no bleed.
+        assert_eq!(factory.repo_for("web").unwrap().fetch_pr_calls(), vec![42]);
+        assert_eq!(factory.repo_for("api").unwrap().fetch_pr_calls(), vec![97]);
+        // The process-global repo was never used (the factory replaced it).
+        assert!(
+            global.fetch_pr_calls().is_empty(),
+            "factory repos are used, not the global repo"
+        );
+
+        // Two drafts, each for the right repo + PR.
+        let drafts = drafter.drafts();
+        assert_eq!(drafts.len(), 2, "one draft per session");
+        let web = drafts
+            .iter()
+            .find(|d| d.pr_number == 42)
+            .expect("web draft");
+        let api = drafts
+            .iter()
+            .find(|d| d.pr_number == 97)
+            .expect("api draft");
+        assert_eq!(web.repo, "acme__web");
+        assert_eq!(api.repo, "acme__api");
+    }
+
+    #[tokio::test]
+    async fn positive_factory_grounder_used_over_global() {
+        // desc: BOTH a global grounder and a factory are attached. expect: the factory's
+        // per-row grounder does the grounding; the global grounder is never called.
+        let roster = seeded(&[row_repo("web", "acme__web")]).await;
+        let global_repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(0));
+        let global_grounder = FakeGrounder::ok("GLOBAL");
+        let factory = FakeReviewFactory::new();
+        let o = orch(roster, global_repo, host)
+            .with_grounder(global_grounder.clone())
+            .with_review_factory(factory.clone());
+
+        o.handle(FleetTrigger {
+            session_id: "web".into(),
+            pr_number: 42,
+        })
+        .await
+        .expect("handle ok");
+        assert!(o.join("web", 42).await);
+
+        assert_eq!(
+            factory.grounder_for("web").unwrap().calls(),
+            vec![42],
+            "the factory's grounder grounded the PR"
+        );
+        assert!(
+            global_grounder.calls().is_empty(),
+            "the global grounder is bypassed when a factory is set"
+        );
+    }
+
+    #[tokio::test]
+    async fn negative_factory_error_is_soft_no_draft() {
+        // desc: the factory errors for the row, no global grounder. expect: fail-soft — the
+        // review still runs (on the global repo, ungrounded), no draft, no panic.
+        let roster = seeded(&[row_repo("web", "acme__web")]).await;
+        let global = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(0));
+        let factory = FakeReviewFactory::failing_for("web");
+        let drafter = FakeDrafter::ok();
+        let o = orch(roster, global.clone(), host.clone())
+            .with_review_factory(factory.clone())
+            .with_drafter(drafter.clone());
+
+        let got = o
+            .handle(FleetTrigger {
+                session_id: "web".into(),
+                pr_number: 42,
+            })
+            .await
+            .expect("handle is fail-soft, not an error");
+        assert!(matches!(got, Handled::Reviewing { .. }));
+        assert!(o.join("web", 42).await);
+
+        assert_eq!(factory.build_count("web"), 1, "the factory was tried once");
+        assert_eq!(
+            global.fetch_pr_calls(),
+            vec![42],
+            "fell back to the global repo for the fetch"
+        );
+        assert_eq!(host.reviews_len(), 1, "an (ungrounded) review still ran");
+        assert!(
+            drafter.drafts().is_empty(),
+            "no facts (ungrounded) ⇒ no draft"
+        );
+    }
+
+    #[tokio::test]
+    async fn boundary_same_row_different_prs_reuse_checkout() {
+        // desc: two different PRs on the same row. expect: the factory serves the SAME
+        // per-row checkout for both (reuse), which fetches both PRs — one clone, many PRs.
+        let roster = seeded(&[row_repo("web", "acme__web")]).await;
+        let global = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(0));
+        let factory = FakeReviewFactory::new();
+        let o = orch(roster, global, host).with_review_factory(factory.clone());
+
+        o.handle(FleetTrigger {
+            session_id: "web".into(),
+            pr_number: 1,
+        })
+        .await
+        .expect("pr1 ok");
+        assert!(o.join("web", 1).await);
+        o.handle(FleetTrigger {
+            session_id: "web".into(),
+            pr_number: 2,
+        })
+        .await
+        .expect("pr2 ok");
+        assert!(o.join("web", 2).await);
+
+        assert_eq!(factory.build_count("web"), 2, "one build per trigger");
+        assert_eq!(
+            factory.repo_for("web").unwrap().fetch_pr_calls(),
+            vec![1, 2],
+            "the same reused checkout fetched both PRs"
+        );
+    }
+
+    #[tokio::test]
+    async fn corner_no_factory_falls_back_to_global() {
+        // desc: NO factory — a global repo + global grounder + drafter. expect: today's
+        // single-repo behaviour — the global repo is fetched, the global grounder grounds,
+        // and a draft is produced.
+        let roster = seeded(&[row_repo("web", "acme__web")]).await;
+        let global = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(0));
+        let grounder = FakeGrounder::ok("brief");
+        let drafter = FakeDrafter::ok();
+        let o = orch(roster, global.clone(), host)
+            .with_grounder(grounder.clone())
+            .with_drafter(drafter.clone());
+
+        o.handle(FleetTrigger {
+            session_id: "web".into(),
+            pr_number: 42,
+        })
+        .await
+        .expect("handle ok");
+        assert!(o.join("web", 42).await);
+
+        assert_eq!(global.fetch_pr_calls(), vec![42], "global repo fetched");
+        assert_eq!(grounder.calls(), vec![42], "global grounder grounded");
+        assert_eq!(drafter.drafts().len(), 1, "a draft was produced");
+    }
+
     // ---- bounded, coalescing trigger queue --------------------------------
 
     #[tokio::test]
@@ -1526,5 +1818,78 @@ mod tests {
             "requeue after pop is a fresh accept"
         );
         assert_eq!(rx.recv().await, Some(t));
+    }
+
+    // ---- intake → drain → orchestrator → draft (the serve_fleet wiring) ----
+
+    #[tokio::test]
+    async fn positive_two_triggers_through_queue_produce_two_drafts() {
+        // desc: mirror `serve_fleet` — a bounded queue feeds a drain loop that calls
+        // `handle`, with a multi-repo factory + drafter wired. expect: two enqueued triggers
+        // for two different rows each drive their own review to a draft (the full intake →
+        // orchestrator → draft path, not `handle` called directly).
+        let roster = seeded(&[row_repo("web", "acme__web"), row_repo("api", "acme__api")]).await;
+        let global = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(0));
+        let factory = FakeReviewFactory::new();
+        let drafter = FakeDrafter::ok();
+        let o = Arc::new(
+            orch(roster, global, host)
+                .with_review_factory(factory.clone())
+                .with_drafter(drafter.clone()),
+        );
+
+        let (q, mut rx) = TriggerQueue::channel(8);
+        let drain = {
+            let o = o.clone();
+            tokio::spawn(async move {
+                while let Some(t) = rx.recv().await {
+                    let _ = o.handle(t).await;
+                }
+            })
+        };
+
+        // ReviewNow, twice, as the gRPC intake would enqueue them.
+        assert_eq!(
+            q.enqueue(FleetTrigger {
+                session_id: "web".into(),
+                pr_number: 42,
+            }),
+            TriggerOutcome::Accepted
+        );
+        assert_eq!(
+            q.enqueue(FleetTrigger {
+                session_id: "api".into(),
+                pr_number: 97,
+            }),
+            TriggerOutcome::Accepted
+        );
+
+        // Poll for both drafts (the reviews run in spawned tasks). Bounded so a wiring
+        // regression fails the test rather than hanging.
+        let mut ok = false;
+        for _ in 0..200 {
+            if drafter.drafts().len() == 2 {
+                ok = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(ok, "two triggers through the queue produced two drafts");
+
+        let drafts = drafter.drafts();
+        assert!(
+            drafts
+                .iter()
+                .any(|d| d.pr_number == 42 && d.repo == "acme__web"),
+            "web draft for its repo"
+        );
+        assert!(
+            drafts
+                .iter()
+                .any(|d| d.pr_number == 97 && d.repo == "acme__api"),
+            "api draft for its repo"
+        );
+        drain.abort();
     }
 }

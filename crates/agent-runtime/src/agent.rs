@@ -236,6 +236,13 @@ pub struct Agent {
     /// The cognition-graph document store (cognition-graph 04). `None` ⇒ the
     /// graph-less built-in behavior.
     graph: Option<Arc<dyn agent_core::GraphStore>>,
+    /// The per-row fleet review-context factory (review-fleet multi-repo grounding).
+    /// `Some` when the `review` feature is compiled in, a local review backend is wired,
+    /// and a fleet root is set — then `--serve-fleet` grounds each roster row against its
+    /// own repo + forge. `None` ⇒ the single-repo fleet behaviour (the process-global
+    /// grounder). Not feature-gated (the seam lives in `agent-core`); only ever populated
+    /// under `review`, exactly like `review_collector` gates `review_grounder`.
+    fleet_review_factory: Option<Arc<dyn agent_core::FleetReviewFactory>>,
 }
 
 /// The concrete [`agent_core::ReviewGrounder`] (review-fleet C10): runs the wired review
@@ -244,10 +251,10 @@ pub struct Agent {
 /// so the fleet orchestrator depends only on the `agent-core` seam — not on this crate or
 /// `agent-review`. Compiled only with the `review` feature (the renderer lives there).
 #[cfg(feature = "review")]
-struct EngineGrounder {
-    engine: Arc<dyn agent_core::ReviewCollector>,
+pub(crate) struct EngineGrounder {
+    pub(crate) engine: Arc<dyn agent_core::ReviewCollector>,
     /// The byte budget handed to the fact renderer (same knob the in-loop review uses).
-    budget: usize,
+    pub(crate) budget: usize,
 }
 
 #[cfg(feature = "review")]
@@ -436,6 +443,7 @@ impl Agent {
             distill_kinds: (true, true),
             distill_provider: None,
             graph: None,
+            fleet_review_factory: None,
         }
     }
 
@@ -455,6 +463,17 @@ impl Agent {
     /// Attach the cognition-graph document store (cognition-graph 04).
     pub fn with_graph(mut self, store: Arc<dyn agent_core::GraphStore>) -> Self {
         self.graph = Some(store);
+        self
+    }
+
+    /// Attach the per-row fleet review-context factory (review-fleet multi-repo grounding):
+    /// with one set, `--serve-fleet` grounds each roster row against its own repo + forge
+    /// (see [`Self::fleet_review_factory`]).
+    pub fn with_fleet_review_factory(
+        mut self,
+        factory: Arc<dyn agent_core::FleetReviewFactory>,
+    ) -> Self {
+        self.fleet_review_factory = Some(factory);
         self
     }
 
@@ -1046,6 +1065,14 @@ impl Agent {
     #[cfg(not(feature = "review"))]
     pub fn review_grounder(&self) -> Option<Arc<dyn agent_core::ReviewGrounder>> {
         None
+    }
+
+    /// The per-row review-context factory (review-fleet multi-repo grounding): `Some` when
+    /// the builder wired one (local review backend + fleet root), so `--serve-fleet` reviews
+    /// each roster row against **its own** repo + forge. `None` ⇒ the single-repo fallback
+    /// (the process-global [`Self::review_grounder`]).
+    pub fn fleet_review_factory(&self) -> Option<Arc<dyn agent_core::FleetReviewFactory>> {
+        self.fleet_review_factory.clone()
     }
 
     /// The review renderer + persistence exposed as a [`ReviewDrafter`] for the fleet FSM

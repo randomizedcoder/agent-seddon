@@ -5852,6 +5852,34 @@ pub trait ReviewDrafter: Send + Sync {
     }
 }
 
+/// The per-row review context the fleet needs to review **that roster row's own repo**
+/// (review-fleet multi-repo): a [`RepoBackend`] rooted at the row's checkout (for
+/// `fetch_pr`/`worktree_add`) and a [`ReviewGrounder`] whose engine is bound to the same
+/// repo **and the row's forge**. Both are `Arc`, so the factory can cache and hand back
+/// clones cheaply.
+#[derive(Clone)]
+pub struct FleetReviewCtx {
+    pub repo: Arc<dyn RepoBackend>,
+    pub grounder: Arc<dyn ReviewGrounder>,
+}
+
+/// Builds a per-row [`FleetReviewCtx`] so a single `--serve-fleet` process can ground
+/// reviews for **many** repos — each roster row reviewed against its own checkout + forge,
+/// not one process-global repo (review-fleet multi-repo grounding). A seam kept in
+/// `agent-core` so the fleet orchestrator depends on the *shape*, not the concrete git +
+/// review engine (which live in `agent-runtime`) — mirroring how the reconcile path injects
+/// its `ForgeCheck` closure and how [`ReviewGrounder`]/[`ReviewDrafter`] are wired. Used
+/// **fail-soft**: a build error lets the orchestrator fall back to an ungrounded review so a
+/// review still runs (with no draft).
+#[async_trait]
+pub trait FleetReviewFactory: Send + Sync {
+    /// Build (or return a cached) review context for `row`. Resolving/creating the row's
+    /// checkout under the fleet root and building its forge are the impl's job; `row` is a
+    /// validated roster entry (its `id`/`repo`/`user` are `safe_segment`-checked before they
+    /// become path segments).
+    async fn build(&self, row: &FleetSession) -> Result<FleetReviewCtx>;
+}
+
 /// One review feedback item carried across rounds (review-fleet C15/C16). Model-authored
 /// `title`/`body` are size-capped where the record is built. Fully populated in inc 6b;
 /// declared here so [`DraftRequest`]/[`ReviewDrafter`] have a stable shape from 6a.

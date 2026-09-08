@@ -35,6 +35,70 @@ pub async fn build_agent(
     build_agent_with(&registry, cfg, telemetry, session_id, metrics).await
 }
 
+/// Build a local review engine ([`agent_review::ReviewOrchestrator`]) rooted at `review_root`
+/// over `repo`/`search`/`forge`, applying the `[review]` collector toggles. Shared by the
+/// process-global wiring in [`build_agent_with`] and the per-row fleet review factory
+/// (review-fleet multi-repo grounding), so both assemble the **identical** collector set —
+/// only the repo/forge/root differ per roster row.
+#[cfg(feature = "review")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_review_orchestrator(
+    review_root: std::path::PathBuf,
+    repo: Arc<dyn agent_core::RepoBackend>,
+    search: Option<Arc<dyn agent_core::SearchBackend>>,
+    forge: Option<Arc<dyn agent_core::Forge>>,
+    sandbox: Option<Arc<dyn agent_core::Sandbox>>,
+    pool: Option<Arc<dyn agent_core::LlmPool>>,
+    review: &crate::config::ReviewCfg,
+    metrics: Metrics,
+) -> agent_review::ReviewOrchestrator {
+    let m = metrics;
+    let mut orch = agent_review::ReviewOrchestrator::new(review_root, repo, search, forge)
+        .with_observer(Arc::new(move |ev| {
+            crate::metered::record_review_event(&m, ev);
+        }))
+        .with_deadline(std::time::Duration::from_secs(review.deadline_secs));
+    // Static analysis (linters via the shared sandbox; fail-soft without one).
+    if review.analyze {
+        orch = orch.with_analyzer(sandbox.clone(), review.analyze_timeout_secs);
+    }
+    // Signature-diff — pure in-process.
+    if review.signatures {
+        orch = orch.with_signatures();
+    }
+    // Call graph (Go blast radius) via the pinned helper — fail-soft.
+    if review.callgraph {
+        orch = orch.with_callgraph(sandbox.clone(), review.callgraph_timeout_secs);
+    }
+    // Code-style fingerprint — pure in-process.
+    if review.style {
+        orch = orch.with_style(review.style_commit_sample);
+    }
+    // Cheap-LLM summaries over the pool — skips fail-soft without one.
+    if review.summaries {
+        orch = orch.with_summaries(pool.clone());
+    }
+    // Historical co-change / churn — pure git-history mining.
+    if review.cochange {
+        orch = orch.with_cochange(review.cochange_window);
+    }
+    if review.churn {
+        orch = orch.with_churn(review.churn_window);
+    }
+    // review-fleet C12 collectors — opt-in (off by default).
+    if review.shellcheck {
+        orch = orch.with_shellcheck(sandbox.clone(), review.analyze_timeout_secs);
+    }
+    if review.go_checks {
+        orch = orch.with_go_checks(sandbox.clone(), review.go_checks_timeout_secs);
+    }
+    if review.nearby {
+        orch = orch.with_nearby();
+    }
+    // Risk synthesis threshold (post-fan-out; always computed).
+    orch.with_gate_threshold(review.gate_threshold)
+}
+
 /// Build the agent from a caller-supplied [`Registry`]. Out-of-tree binaries use
 /// this to register their own provider/tool/memory/etc. factories (see
 /// `docs/extending.md`) before wiring the loop — no fork required.
@@ -964,69 +1028,19 @@ pub async fn build_agent_with(
                 let review_forge = shared_forge.clone();
                 #[cfg(not(feature = "forge"))]
                 let review_forge: Option<Arc<dyn agent_core::Forge>> = None;
-                let m = metrics.clone();
                 // Root the collector at the same repo the RepoBackend uses (the git
                 // root of the process cwd), so the file set and the diff agree.
                 let review_root = crate::git::git_paths(&cfg)?.0;
-                let mut orch = agent_review::ReviewOrchestrator::new(
+                let orch = build_review_orchestrator(
                     review_root,
                     repo_backend.clone(),
                     review_search,
                     review_forge,
-                )
-                .with_observer(Arc::new(move |ev| {
-                    crate::metered::record_review_event(&m, ev);
-                }))
-                .with_deadline(std::time::Duration::from_secs(cfg.review.deadline_secs));
-                // Static analysis runs by default; it shells out to the linters via
-                // the shared sandbox (fail-soft without one).
-                if cfg.review.analyze {
-                    orch =
-                        orch.with_analyzer(shared_sandbox.clone(), cfg.review.analyze_timeout_secs);
-                }
-                // Signature-diff (changed function signatures) runs by default —
-                // pure in-process, no external tool.
-                if cfg.review.signatures {
-                    orch = orch.with_signatures();
-                }
-                // Call graph (Go blast radius) via the pinned helper — fail-soft.
-                if cfg.review.callgraph {
-                    orch = orch
-                        .with_callgraph(shared_sandbox.clone(), cfg.review.callgraph_timeout_secs);
-                }
-                // Code-style fingerprint — pure in-process, no external tool.
-                if cfg.review.style {
-                    orch = orch.with_style(cfg.review.style_commit_sample);
-                }
-                // Cheap-LLM summaries over the pool — skips fail-soft without one.
-                if cfg.review.summaries {
-                    orch = orch.with_summaries(llm_pool_seam.clone());
-                }
-                // Historical co-change — pure git-history mining, no toolchain.
-                if cfg.review.cochange {
-                    orch = orch.with_cochange(cfg.review.cochange_window);
-                }
-                // Churn / ownership (bus factor + churn trend) — also git-history.
-                if cfg.review.churn {
-                    orch = orch.with_churn(cfg.review.churn_window);
-                }
-                // review-fleet C12 collectors — opt-in (off by default).
-                // Shellcheck: lints changed shell scripts under the sandbox.
-                if cfg.review.shellcheck {
-                    orch = orch
-                        .with_shellcheck(shared_sandbox.clone(), cfg.review.analyze_timeout_secs);
-                }
-                // Go race+bench: executes the reviewed code under the sandbox (network off).
-                if cfg.review.go_checks {
-                    orch = orch
-                        .with_go_checks(shared_sandbox.clone(), cfg.review.go_checks_timeout_secs);
-                }
-                // Nearby-similar: read-only correlation over the search index.
-                if cfg.review.nearby {
-                    orch = orch.with_nearby();
-                }
-                // Risk synthesis threshold (post-fan-out; always computed).
-                orch = orch.with_gate_threshold(cfg.review.gate_threshold);
+                    shared_sandbox.clone(),
+                    llm_pool_seam.clone(),
+                    &cfg.review,
+                    metrics.clone(),
+                );
                 Some(Arc::new(orch) as Arc<dyn agent_core::ReviewCollector>)
             }
             // A remote fact-collection host (CPU-heavy, worth distributing).
@@ -1043,6 +1057,39 @@ pub async fn build_agent_with(
         };
     #[cfg(not(feature = "review"))]
     let review_collector_seam: Option<Arc<dyn agent_core::ReviewCollector>> = None;
+
+    // Per-row fleet review factory (review-fleet multi-repo grounding): wired only when a
+    // **local** review engine is configured AND a `[review_fleet] root` is set, so a single
+    // `--serve-fleet` process grounds each roster row against its *own* repo + forge instead
+    // of the process-global one. Built here (before `cfg`/`llm_pool_seam` are consumed) and
+    // attached below; `None` ⇒ the single-repo fallback (the process-global grounder).
+    #[cfg(feature = "review")]
+    let fleet_review_factory_seam: Option<Arc<dyn agent_core::FleetReviewFactory>> = {
+        let fleet_root = (!cfg.review_fleet.root.is_empty())
+            .then(|| std::path::PathBuf::from(expand_tilde(&cfg.review_fleet.root)));
+        match (cfg.review.backend.as_str(), fleet_root) {
+            ("local", Some(root)) => {
+                #[cfg(feature = "search")]
+                let search = Some(search_dispatch.clone() as Arc<dyn agent_core::SearchBackend>);
+                #[cfg(not(feature = "search"))]
+                let search: Option<Arc<dyn agent_core::SearchBackend>> = None;
+                Some(Arc::new(crate::fleet_review::FleetReviewCtxFactory::new(
+                    root,
+                    cfg.review.clone(),
+                    cfg.git.pr_ref_template.clone(),
+                    shared_sandbox.clone(),
+                    llm_pool_seam.clone(),
+                    search,
+                    cfg.review.context_budget_bytes,
+                    metrics.clone(),
+                ))
+                    as Arc<dyn agent_core::FleetReviewFactory>)
+            }
+            _ => None,
+        }
+    };
+    #[cfg(not(feature = "review"))]
+    let fleet_review_factory_seam: Option<Arc<dyn agent_core::FleetReviewFactory>> = None;
 
     let settings = Settings {
         max_iterations: cfg.agent.max_iterations,
@@ -1243,6 +1290,10 @@ pub async fn build_agent_with(
     };
     let agent = match review_collector_seam {
         Some(r) => agent.with_review_collector(r),
+        None => agent,
+    };
+    let agent = match fleet_review_factory_seam {
+        Some(f) => agent.with_fleet_review_factory(f),
         None => agent,
     };
     // Hold the shared scanner so `agent --serve-scanner` can host it.

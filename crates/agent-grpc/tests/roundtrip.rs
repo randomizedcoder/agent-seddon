@@ -2036,6 +2036,49 @@ async fn fleet_review_now_reports_coalesced() {
     );
 }
 
+// Two rows for two repos, each `ReviewNow`n over the wire (review-fleet multi-repo): both
+// triggers reach the intake sink carrying their own (session_id, pr_number) — the served
+// control-plane path a two-repo fleet drives, upstream of the orchestrator's per-row grounding.
+#[rstest]
+#[case::tcp(Transport::Tcp)]
+#[case::uds(Transport::Uds)]
+#[tokio::test]
+async fn positive_two_rows_two_review_now_reach_sink(#[case] transport: Transport) {
+    use agent_core::FleetRegistry;
+    let store = Arc::new(agent_review_fleet::MemoryFleet::new());
+    let sink = Arc::new(RecordingSink {
+        outcome: agent_core::TriggerOutcome::Accepted,
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+    let router = tonic::transport::Server::builder().add_service(
+        agent_grpc::server::ReviewFleetSvc::new(store)
+            .with_triggers(sink.clone() as Arc<dyn agent_core::TriggerSink>)
+            .into_server(),
+    );
+    let (dial, _srv) = spawn(transport, router).await;
+    let client = agent_grpc::client::GrpcFleet::connect(&dial).unwrap();
+
+    // Two roster rows for two different repos, put over the wire.
+    let mut web = fleet_row("web", "env:ACME_GH_TOKEN", true);
+    web.repo = "acme__web".into();
+    let mut api = fleet_row("api", "env:ACME_GH_TOKEN", true);
+    api.repo = "acme__api".into();
+    client.put(web).await.unwrap();
+    client.put(api).await.unwrap();
+
+    // ReviewNow each; both are accepted and reach the sink with their own id + PR.
+    assert!(client.review_now("web", 42).await.unwrap(), "web accepted");
+    assert!(client.review_now("api", 97).await.unwrap(), "api accepted");
+    let seen = sink.seen.lock().unwrap();
+    assert_eq!(seen.len(), 2, "both triggers reached the intake");
+    assert!(seen
+        .iter()
+        .any(|t| t.session_id == "web" && t.pr_number == 42));
+    assert!(seen
+        .iter()
+        .any(|t| t.session_id == "api" && t.pr_number == 97));
+}
+
 // The bare control-plane endpoint has no orchestrator, so ReviewNow is UNIMPLEMENTED —
 // roster CRUD stays available; only the trigger intake is opt-in.
 #[tokio::test]
