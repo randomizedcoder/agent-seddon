@@ -4,7 +4,7 @@
 //! wired **once** from the process-global `[forge]` + a single `RepoBackend` rooted at the
 //! process cwd — so only the one repo `[git]`/`[forge]` pointed at could actually be reviewed.
 //! [`FleetReviewCtxFactory`] lifts that limit: given a roster row it resolves/creates *that
-//! row's own* checkout under the fleet root and builds a [`ReviewOrchestrator`] bound to that
+//! row's own* bare mirror under the fleet root and builds a [`ReviewOrchestrator`] bound to that
 //! repo **and the row's forge** (via the existing [`crate::registry::build_session_forge`]),
 //! wrapped as an [`agent_core::ReviewGrounder`]. The fleet orchestrator then fetches, worktrees,
 //! and grounds each PR against the correct repo.
@@ -116,9 +116,10 @@ fn pr_ref_template_for(
 
 /// Builds a per-row [`FleetReviewCtx`] so one fleet process grounds reviews for many repos.
 ///
-/// Each row gets an isolated checkout under `<fleet_root>/<user>/<id>/` (repo/mirror/worktrees),
-/// a [`agent_git::CliBackend`] rooted there (its remote = the row's clone URL, so the first
-/// `fetch_pr` bootstraps a bare mirror), the row's forge, and a [`ReviewOrchestrator`] with the
+/// Each row gets an isolated workspace under `<fleet_root>/<user>/<id>/` (a bare `mirror/`
+/// object store + `worktrees/`), a [`agent_git::CliBackend`] rooted at the mirror (its remote =
+/// the row's clone URL, so the first `fetch_pr` bootstraps the mirror), the row's forge, and a
+/// [`ReviewOrchestrator`] with the
 /// **same** `[review]` collector set as the in-loop path — only the repo/forge/root differ.
 /// Built contexts are cached by `row.id` so repeated triggers reuse the clone + engine.
 pub(crate) struct FleetReviewCtxFactory {
@@ -181,10 +182,15 @@ impl FleetReviewFactory for FleetReviewCtxFactory {
         let base = agent_core::SessionKey::parse(&row.user, &row.id)
             .and_then(|k| k.path_under(&self.fleet_root))
             .map_err(|e| Error::Config(format!("fleet row `{}`: {e}", row.id)))?;
-        let checkout = base.join("repo");
+        // The bare mirror is the whole object store — there is no working checkout, so
+        // it is BOTH the CliBackend `root` (where `resolve` runs `git rev-parse`) and the
+        // `mirror` (the shared object DB). The first `fetch_pr` bootstraps it via
+        // `git clone --mirror` from the row's clone URL; worktrees are checked out under
+        // `worktrees/`. Rooting at an empty `repo/` dir instead would make `resolve` (and
+        // thus `worktree_add`) fail with "not a git repository".
         let mirror = base.join("mirror");
         let worktrees = base.join("worktrees");
-        for dir in [&checkout, &mirror, &worktrees] {
+        for dir in [&mirror, &worktrees] {
             std::fs::create_dir_all(dir).map_err(|e| {
                 Error::Repo(format!(
                     "creating fleet workspace `{}` failed: {e}",
@@ -198,7 +204,7 @@ impl FleetReviewFactory for FleetReviewCtxFactory {
         let template = pr_ref_template_for(&row.backend, &self.pr_ref_override)
             .map_err(|e| Error::Config(format!("fleet row `{}`: {e}", row.id)))?;
 
-        let mut cli = agent_git::CliBackend::new(checkout.clone(), mirror, worktrees, url)
+        let mut cli = agent_git::CliBackend::new(mirror.clone(), mirror.clone(), worktrees, url)
             .with_pr_ref_template(template);
         if let Some(sandbox) = &self.sandbox {
             cli = cli.with_sandbox(sandbox.clone());
@@ -211,9 +217,10 @@ impl FleetReviewFactory for FleetReviewCtxFactory {
         })?;
 
         // The engine + grounder, bound to *this* repo + forge, with the same `[review]`
-        // collector set the in-loop review uses.
+        // collector set the in-loop review uses. `review_root` is the mirror (the repo
+        // root the fact renderer hashes/labels; the real objects live there).
         let orch = crate::builder::build_review_orchestrator(
-            checkout,
+            mirror,
             repo.clone(),
             self.search.clone(),
             forge,
@@ -416,15 +423,17 @@ mod tests {
             "",
         );
         let ctx = f.build(&r).await.expect("valid row builds");
-        // The confined checkout exists under <root>/<user>/<id>/repo (no escape).
-        let checkout = tmp
-            .as_path()
-            .join("randomizedcoder")
-            .join("rtl-fun")
-            .join("repo");
+        // The confined workspace (bare mirror + worktrees) exists under
+        // <root>/<user>/<id>/ (no escape). There is no working checkout — the mirror is
+        // the object store the first fetch bootstraps.
+        let base = tmp.as_path().join("randomizedcoder").join("rtl-fun");
         assert!(
-            checkout.is_dir(),
-            "checkout dir created under the fleet root"
+            base.join("mirror").is_dir(),
+            "mirror dir created under the fleet root"
+        );
+        assert!(
+            base.join("worktrees").is_dir(),
+            "worktrees dir created under the fleet root"
         );
         // Both seams are wired.
         let _ = ctx.repo;
@@ -481,12 +490,14 @@ mod tests {
             "distinct rows → distinct repos"
         );
         assert!(
-            tmp.as_path().join("randomizedcoder/rtl-fun/repo").is_dir()
+            tmp.as_path()
+                .join("randomizedcoder/rtl-fun/mirror")
+                .is_dir()
                 && tmp
                     .as_path()
-                    .join("randomizedcoder/uds-rdma-proxy/repo")
+                    .join("randomizedcoder/uds-rdma-proxy/mirror")
                     .is_dir(),
-            "each row has its own checkout dir"
+            "each row has its own workspace"
         );
     }
 

@@ -10,7 +10,8 @@
 # outcome via nix/lib/contract.sh — no harness logic is re-implemented here.
 #
 #   Model-free tier (always): loadtest, loadtest-loop, loadtest-wire, serve-smoke.
-#   Model tier (auto): e2e-live, e2e-expect, e2e-multi — run only when a model is
+#   Model tier (auto): e2e-live, e2e-expect, e2e-multi, and fleet-e2e (the last only
+#     when a GITHUB_TOKEN is also present) — run only when a model is
 #     configured AND reachable (AGENT_E2E_BASE_URL), else skipped with a notice, so
 #     the aggregate is runnable on a machine with no model.
 #
@@ -31,6 +32,7 @@
   e2e-live,
   e2e-expect,
   e2e-multi,
+  fleet-e2e,
   eval,
 }:
 pkgs.writeShellApplication {
@@ -45,6 +47,7 @@ pkgs.writeShellApplication {
     e2e-live
     e2e-expect
     e2e-multi
+    fleet-e2e
     eval
   ];
   text = ''
@@ -102,6 +105,15 @@ pkgs.writeShellApplication {
         run_step "e2e-live — one-shot real model"    e2e-live
         run_step "e2e-expect — multi-turn REPL"      e2e-expect
         run_step "e2e-multi — concurrent + judge"    e2e-multi
+        # `fleet-e2e` (live review-fleet, two real PRs) additionally needs a GITHUB_TOKEN
+        # (forge get_pr is fail-closed). Include it only when one is present, else note the
+        # skip (its own run would refuse hard).
+        if [ -n "''${GITHUB_TOKEN:-}" ]; then
+          run_step "fleet-e2e — two real PRs, two drafts" fleet-e2e
+        else
+          echo ""
+          echo "integration: SKIP fleet-e2e — no GITHUB_TOKEN (forge get_pr is fail-closed)."
+        fi
         # `eval` (promptfoo quality) additionally needs a judge key — include it only
         # when that is present, else note the skip (its own run would refuse hard).
         if [ -r "''${AGENT_E2E_JUDGE_API_KEY_FILE:-$HOME/Downloads/runpod/glm/glm-api-key}" ]; then

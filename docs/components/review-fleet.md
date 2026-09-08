@@ -310,5 +310,21 @@ executed by the feature-scoped `nix/checks/fleet-sqlite.nix` gate. The opt-in re
 binary (describe over reflection + a CRUD round-trip asserting the token reference — never
 a resolved secret — comes back).
 
+### Live end-to-end (`nix run .#fleet-e2e`)
+
+The hermetic tests above prove the machinery with doubles; the opt-in **`nix run .#fleet-e2e`**
+harness ([`nix/fleet-e2e.nix`](../../nix/fleet-e2e.nix) → [`test/fleet-e2e/run.sh`](../../test/fleet-e2e/run.sh))
+proves the whole thing against **real PRs**: one `--serve-fleet` process hosts a two-row roster
+(two different GitHub repos), is `ReviewNow`n over the wire for each, grounds each review against
+*that row's own* repo + forge (multi-repo grounding), and writes a redacted draft `.md` per PR. It
+is not a check (it needs a real model, a `GITHUB_TOKEN`, and the network); it refuses (never skips)
+when those are absent, and is auto-included in `nix run .#integration`'s model tier when both a
+model **and** a token are present. It follows the same `0` (all drafts valid) / `1` (harness) / `2`
+(model-quality) contract as `nix/e2e-live.nix`, asserts each draft is non-empty, well-formed
+(`# Review draft` / `## Review`), and **redacted** (the `GITHUB_TOKEN` never appears), and **posts
+nothing** — the fleet stops at `drafted`. The generator (Kimi) is env-driven
+(`AGENT_E2E_BASE_URL`/`_MODEL`/`_API_KEY[_FILE]`); routing a stronger verifier (GLM-5.2) into the
+Verify role is the documented next layer (see the script header).
+
 [`ApiKeyRef::parse`]: ../../crates/agent-core/src/lib.rs
 [`FleetTrigger`]: ../../crates/agent-core/src/lib.rs

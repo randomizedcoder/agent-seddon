@@ -148,7 +148,10 @@ Providers are OpenAI-compatible and Anthropic-native, both streaming, with model
 routing and failover, prompt-cache breakpoint placement, and token/cost accounting.
 Several local model targets (a heavy GLM, a medium MI50, a small card) can be grouped
 into a **health-checked, load-balanced pool** that routes around a target that is
-offline *or* busy and prefers a fast one over a slow one. Memory is a layered
+offline *or* busy and prefers a fast one over a slow one. The concrete dev/eval
+endpoints the harnesses dial (Kimi generator, GLM judge, MI50) — addresses, model
+names, and key handling — are written down in
+[`docs/llm-endpoints.md`](docs/llm-endpoints.md). Memory is a layered
 episodic log plus semantic recall. Multimodal content, lifecycle hooks, and a content
 scanner that feeds the `Policy` gate are all seams too.
 
