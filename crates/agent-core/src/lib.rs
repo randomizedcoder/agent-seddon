@@ -1662,6 +1662,12 @@ pub struct MemoryEvent {
     /// the others; dropped at the gRPC memory boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft: Option<ReviewDraftRecord>,
+    /// A fleet review-feedback set (routed to `agent_review_feedback` by the telemetry
+    /// sink; review-fleet C15) — one persisted row per item, carried across rounds by
+    /// the cross-round tracker (C16). Telemetry-local side-channel like the others;
+    /// dropped at the gRPC memory boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback: Option<FeedbackRound>,
 }
 
 /// The loop-facing memory facade. This is the whole store the agent loop talks
@@ -5835,6 +5841,15 @@ pub struct DraftRequest {
 pub trait ReviewDrafter: Send + Sync {
     /// Render + persist the draft for a completed review, returning its record.
     async fn draft(&self, req: DraftRequest) -> Result<ReviewDraftRecord>;
+
+    /// Mark a prior draft **superseded** (review-fleet C16): when a new head oid arrives
+    /// on a PR whose previous round was still `drafted` (awaiting approval), the old draft
+    /// no longer reflects the code. Persists `record` with `status = superseded` through
+    /// the same funnel as [`Self::draft`]. Called **fail-soft** — a supersede error is
+    /// logged, never fatal. Default no-op so an impl that doesn't persist can skip it.
+    async fn supersede(&self, _record: ReviewDraftRecord) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// One review feedback item carried across rounds (review-fleet C15/C16). Model-authored
@@ -5855,6 +5870,157 @@ pub struct Feedback {
     pub addressed_review: String,
     #[serde(default)]
     pub addressed_sha: String,
+}
+
+/// One round's reconciled feedback set plus the round context the `agent_review_feedback`
+/// rows need (review-fleet C15): the persisting `review_id` and the fleet's own `repo`/
+/// `pr_number` (trusted config). Telemetry-local side-channel on [`MemoryEvent`]; the
+/// per-item [`Feedback`] carries the cross-round lifecycle fields.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FeedbackRound {
+    pub review_id: String,
+    pub repo: String,
+    pub pr_number: u64,
+    pub items: Vec<Feedback>,
+}
+
+/// The feedback lifecycle statuses (review-fleet C15), stored as a string column.
+pub mod feedback_status {
+    pub const OPEN: &str = "open";
+    pub const ADDRESSED: &str = "addressed";
+    pub const WONTFIX: &str = "wontfix";
+}
+
+/// Max chars of a feedback item's `title` before truncation (review-fleet C15).
+pub const MAX_FEEDBACK_TITLE: usize = 200;
+/// Max chars of a feedback item's `body` before truncation.
+pub const MAX_FEEDBACK_BODY: usize = 4_000;
+/// Max feedback items persisted per review round — a drop-with-count cap so a hostile
+/// finding fan-out can't write an unbounded number of rows.
+pub const MAX_FEEDBACK_ITEMS: usize = 200;
+
+/// Truncate `s` to at most `max` chars on a char boundary (never splits a multibyte char).
+fn cap_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        s.chars().take(max).collect()
+    }
+}
+
+impl Feedback {
+    /// Build an **open** feedback item from a deterministic analysis finding (review-fleet
+    /// C15). `category` names the producing collector (`analyzer`/`shellcheck`/…). The
+    /// stable [`feedback_item_id`] is line-independent so the item matches across rounds
+    /// even as the diff shifts lines. Tool-authored `severity`/`title`/`body` (the tool is
+    /// downstream of the untrusted change) are truncated on a char boundary so a hostile
+    /// message can't blow a column.
+    pub fn from_finding(
+        review_id: &str,
+        head_sha: &str,
+        category: &str,
+        f: &AnalysisFinding,
+    ) -> Self {
+        Feedback {
+            item_id: feedback_item_id(category, &f.file, &f.rule, &f.message),
+            category: cap_chars(category, MAX_FEEDBACK_TITLE),
+            severity: cap_chars(&f.severity, 32),
+            title: cap_chars(&format!("{}: {}", f.rule, f.file), MAX_FEEDBACK_TITLE),
+            body: cap_chars(&f.message, MAX_FEEDBACK_BODY),
+            status: feedback_status::OPEN.to_string(),
+            first_seen_review: review_id.to_string(),
+            first_seen_sha: head_sha.to_string(),
+            addressed_review: String::new(),
+            addressed_sha: String::new(),
+        }
+    }
+}
+
+/// A stable, line-independent identity for a feedback item (review-fleet C16 dedup key):
+/// `fnv1a` over `category`, `file`, `rule`, and the finding `message` — everything **but**
+/// the line, so the same issue on the same file matches across rounds even when surrounding
+/// edits shift its line number. A code fix that removes the finding changes nothing here: the
+/// finding simply stops appearing, which is exactly how the tracker detects "addressed".
+pub fn feedback_item_id(category: &str, file: &str, rule: &str, message: &str) -> String {
+    let mut buf =
+        String::with_capacity(category.len() + file.len() + rule.len() + message.len() + 3);
+    buf.push_str(category);
+    buf.push('\0');
+    buf.push_str(file);
+    buf.push('\0');
+    buf.push_str(rule);
+    buf.push('\0');
+    buf.push_str(message);
+    fnv1a_hex(buf.as_bytes())
+}
+
+/// Reconcile this round's freshly-derived **open** items against the prior round's open items
+/// (review-fleet C16). Deterministic and grounded in the new diff — never the model's memory:
+///
+/// - An item present in **both** rounds stays `open`, keeping its earlier `first_seen_*`
+///   (carry-forward — it is the same long-lived issue).
+/// - A prior-open item **absent** this round is marked `addressed`, stamped with the resolving
+///   `review_id`/`head_sha` (the engine re-ran on the new head and the finding is gone).
+/// - A brand-new item (only this round) stays `open`, `first_seen` = this round.
+///
+/// Returns the full set to persist for this round (open carry-overs + new opens + newly
+/// addressed), capped at [`MAX_FEEDBACK_ITEMS`].
+pub fn reconcile_feedback(
+    current: Vec<Feedback>,
+    prior_open: &[Feedback],
+    review_id: &str,
+    head_sha: &str,
+) -> Vec<Feedback> {
+    use std::collections::{HashMap, HashSet};
+    let prior_by_id: HashMap<&str, &Feedback> =
+        prior_open.iter().map(|f| (f.item_id.as_str(), f)).collect();
+
+    let mut current_ids: HashSet<String> = HashSet::with_capacity(current.len());
+    let mut out: Vec<Feedback> = Vec::with_capacity(current.len() + prior_open.len());
+    // This round's items: an open carry-over keeps the earlier first_seen_*.
+    for mut item in current {
+        current_ids.insert(item.item_id.clone());
+        if let Some(prev) = prior_by_id.get(item.item_id.as_str()) {
+            item.first_seen_review.clone_from(&prev.first_seen_review);
+            item.first_seen_sha.clone_from(&prev.first_seen_sha);
+        }
+        out.push(item);
+    }
+    // Prior-open items that vanished this round → addressed.
+    for prev in prior_open {
+        if !current_ids.contains(prev.item_id.as_str()) {
+            let mut addressed = prev.clone();
+            addressed.status = feedback_status::ADDRESSED.to_string();
+            addressed.addressed_review = review_id.to_string();
+            addressed.addressed_sha = head_sha.to_string();
+            out.push(addressed);
+        }
+    }
+    out.truncate(MAX_FEEDBACK_ITEMS);
+    out
+}
+
+/// What the cross-round tracker (review-fleet C16) needs before drafting a round: the most
+/// recent draft for the PR (its `head_sha` is the precise dedup key; its `review_id`/`status`
+/// decide supersede) and the still-`open` feedback items to carry forward. Default = a PR
+/// never reviewed before (first round).
+#[derive(Debug, Clone, Default)]
+pub struct PriorReview {
+    /// The latest persisted draft record for this PR, if any.
+    pub last_draft: Option<ReviewDraftRecord>,
+    /// Feedback items still `open` from the last round, to carry into this one.
+    pub open_items: Vec<Feedback>,
+}
+
+/// Reads the fleet's own persisted review history (review-fleet C16) over the C14/C15 tables,
+/// so the FSM can dedup precisely on the resolved head oid and carry open feedback across
+/// rounds. A seam (kept in `agent-core`) so the orchestrator depends on the read *shape*, not
+/// the ClickHouse impl (`agent-telemetry`); tests use an in-memory fake. Used **fail-soft**: a
+/// read error falls back to "no prior" so a review still runs (it just can't dedup/carry).
+#[async_trait]
+pub trait FleetHistory: Send + Sync {
+    /// The prior state for `(repo, pr)`. `repo` is trusted roster config; `pr` a `u64`.
+    async fn prior(&self, repo: &str, pr: u64) -> Result<PriorReview>;
 }
 
 #[cfg(test)]
@@ -6558,5 +6724,188 @@ mod tests {
         };
         assert!(rules(MAX_ROUTE_RULES).validate().is_ok());
         assert!(rules(MAX_ROUTE_RULES + 1).validate().is_err());
+    }
+
+    // ---- review-fleet C15/C16: feedback derivation + cross-round reconcile -----------
+
+    fn finding(rule: &str, file: &str, message: &str) -> AnalysisFinding {
+        AnalysisFinding {
+            tool: "golangci-lint".into(),
+            rule: rule.into(),
+            severity: "warning".into(),
+            file: file.into(),
+            line: 10,
+            message: message.into(),
+            in_change: true,
+        }
+    }
+
+    /// An open item as it would arrive from a prior round's history read.
+    fn open_item(id_seed: (&str, &str, &str), first_review: &str, first_sha: &str) -> Feedback {
+        let (rule, file, msg) = id_seed;
+        Feedback {
+            item_id: feedback_item_id("analyzer", file, rule, msg),
+            category: "analyzer".into(),
+            severity: "warning".into(),
+            title: format!("{rule}: {file}"),
+            body: msg.into(),
+            status: feedback_status::OPEN.to_string(),
+            first_seen_review: first_review.into(),
+            first_seen_sha: first_sha.into(),
+            addressed_review: String::new(),
+            addressed_sha: String::new(),
+        }
+    }
+
+    #[test]
+    fn positive_from_finding_is_open_with_stable_id() {
+        // desc: build a feedback item from a finding. expect: status=open, first_seen stamped,
+        // id equals the standalone feedback_item_id over (category,file,rule,message).
+        let f = finding("errcheck", "main.go", "unchecked error");
+        let item = Feedback::from_finding("r1", "sha1", "analyzer", &f);
+        assert_eq!(
+            item.status,
+            feedback_status::OPEN,
+            "a fresh finding is open"
+        );
+        assert_eq!(item.first_seen_review, "r1");
+        assert_eq!(item.first_seen_sha, "sha1");
+        assert_eq!(
+            item.item_id,
+            feedback_item_id("analyzer", "main.go", "errcheck", "unchecked error"),
+            "id is the stable content hash"
+        );
+    }
+
+    #[rstest]
+    // desc / same_line? / expect_same_id
+    #[case::line_independent(false, true)]
+    fn positive_item_id_is_line_independent(#[case] _same_line: bool, #[case] expect_same: bool) {
+        // expect: the id ignores `line`, so a diff that shifts the line keeps the same id
+        // (the cross-round match survives surrounding edits).
+        let mut a = finding("errcheck", "main.go", "unchecked error");
+        a.line = 10;
+        let mut b = finding("errcheck", "main.go", "unchecked error");
+        b.line = 42;
+        let ida = Feedback::from_finding("r1", "s", "analyzer", &a).item_id;
+        let idb = Feedback::from_finding("r2", "s2", "analyzer", &b).item_id;
+        assert_eq!(ida == idb, expect_same, "line must not affect the id");
+    }
+
+    #[test]
+    fn adversarial_hostile_finding_message_is_capped() {
+        // desc: a hostile analyzer message far over the body cap. expect: title/body are
+        // truncated on a char boundary so a giant string can't blow a column.
+        let huge = "x".repeat(MAX_FEEDBACK_BODY * 3);
+        let f = finding("rule", "f.rs", &huge);
+        let item = Feedback::from_finding("r1", "s", "analyzer", &f);
+        assert!(
+            item.body.chars().count() <= MAX_FEEDBACK_BODY,
+            "body capped"
+        );
+        assert!(
+            item.title.chars().count() <= MAX_FEEDBACK_TITLE,
+            "title capped"
+        );
+    }
+
+    #[test]
+    fn positive_open_item_stays_open_when_not_fixed() {
+        // desc: the same finding recurs this round. expect: it stays open and KEEPS its
+        // earlier first_seen (carry-forward — one long-lived issue, not a new one).
+        let seed = ("errcheck", "main.go", "unchecked error");
+        let prior = vec![open_item(seed, "r0", "sha0")];
+        let current = vec![Feedback::from_finding(
+            "r1",
+            "sha1",
+            "analyzer",
+            &finding(seed.0, seed.1, seed.2),
+        )];
+        let out = reconcile_feedback(current, &prior, "r1", "sha1");
+        assert_eq!(out.len(), 1, "one item");
+        assert_eq!(out[0].status, feedback_status::OPEN, "still open");
+        assert_eq!(out[0].first_seen_review, "r0", "first_seen carried forward");
+        assert_eq!(out[0].first_seen_sha, "sha0");
+    }
+
+    #[test]
+    fn positive_open_item_marked_addressed_when_fixed() {
+        // desc: a prior-open finding is gone this round (the code was fixed). expect: it is
+        // marked addressed, stamped with the resolving review/sha; grounded in the new diff.
+        let seed = ("errcheck", "main.go", "unchecked error");
+        let prior = vec![open_item(seed, "r0", "sha0")];
+        let out = reconcile_feedback(Vec::new(), &prior, "r1", "sha1");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].status, feedback_status::ADDRESSED, "addressed");
+        assert_eq!(out[0].addressed_review, "r1");
+        assert_eq!(out[0].addressed_sha, "sha1");
+        assert_eq!(out[0].first_seen_review, "r0", "origin preserved");
+    }
+
+    #[test]
+    fn positive_new_item_is_open_first_seen_this_round() {
+        // desc: a finding with no prior match. expect: open, first_seen = this round.
+        let current = vec![Feedback::from_finding(
+            "r1",
+            "sha1",
+            "analyzer",
+            &finding("newrule", "a.go", "new issue"),
+        )];
+        let out = reconcile_feedback(current, &[], "r1", "sha1");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].status, feedback_status::OPEN);
+        assert_eq!(out[0].first_seen_review, "r1", "brand new this round");
+    }
+
+    #[test]
+    fn corner_mixed_carry_new_and_addressed() {
+        // desc: one carried-open, one newly-addressed, one brand-new. expect: all three,
+        // each with the right status/first_seen.
+        let carried = ("errcheck", "a.go", "unchecked");
+        let fixed = ("ineffassign", "b.go", "ineffective");
+        let prior = vec![
+            open_item(carried, "r0", "sha0"),
+            open_item(fixed, "r0", "sha0"),
+        ];
+        let current = vec![
+            Feedback::from_finding(
+                "r1",
+                "sha1",
+                "analyzer",
+                &finding(carried.0, carried.1, carried.2),
+            ),
+            Feedback::from_finding(
+                "r1",
+                "sha1",
+                "analyzer",
+                &finding("newone", "c.go", "brand new"),
+            ),
+        ];
+        let out = reconcile_feedback(current, &prior, "r1", "sha1");
+        assert_eq!(out.len(), 3, "carried + new + addressed");
+        let addressed: Vec<_> = out
+            .iter()
+            .filter(|f| f.status == feedback_status::ADDRESSED)
+            .collect();
+        assert_eq!(addressed.len(), 1, "exactly one addressed");
+        assert_eq!(addressed[0].title, format!("{}: {}", fixed.0, fixed.1));
+    }
+
+    #[test]
+    fn boundary_reconcile_caps_at_max_items() {
+        // desc: more items than the per-round cap. expect: the output is truncated to
+        // MAX_FEEDBACK_ITEMS (a hostile fan-out can't write unbounded rows).
+        let current: Vec<Feedback> = (0..(MAX_FEEDBACK_ITEMS + 50))
+            .map(|i| {
+                Feedback::from_finding(
+                    "r1",
+                    "sha1",
+                    "analyzer",
+                    &finding("rule", &format!("f{i}.go"), "msg"),
+                )
+            })
+            .collect();
+        let out = reconcile_feedback(current, &[], "r1", "sha1");
+        assert_eq!(out.len(), MAX_FEEDBACK_ITEMS, "capped");
     }
 }

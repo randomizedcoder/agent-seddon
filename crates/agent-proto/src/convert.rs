@@ -684,6 +684,7 @@ impl TryFrom<pb::MemoryEvent> for agent_core::MemoryEvent {
             review: None,
             dimensional: None,
             draft: None,
+            feedback: None,
         })
     }
 }
@@ -4659,6 +4660,7 @@ mod tests {
             review: None,
             dimensional: None,
             draft: None,
+            feedback: None,
         };
         let p1 = pb::MemoryEvent::from(core);
         let back = agent_core::MemoryEvent::try_from(p1.clone()).unwrap();

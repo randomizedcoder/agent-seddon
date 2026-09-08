@@ -11,6 +11,7 @@
 //! latency or outages never block or fail the agent — rows are simply dropped
 //! (with a one-time warning) while the JSONL episodic log keeps the full record.
 
+mod history;
 mod layer;
 mod memory;
 mod otel;
@@ -23,13 +24,14 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
+pub use history::ClickHouseHistory;
 pub use layer::ClickHouseLayer;
 pub use memory::CompositeMemory;
 pub use otel::{otlp_layer, OtelConfig, OtelGuard};
 
 use rows::{
-    DimensionRow, EventRow, ReviewCollectorRow, ReviewDraftRow, ReviewRow, UsageRow,
-    VerificationRow,
+    DimensionRow, EventRow, ReviewCollectorRow, ReviewDraftRow, ReviewFeedbackRow, ReviewRow,
+    UsageRow, VerificationRow,
 };
 use writer::{Msg, WriterConfig, TARGET};
 
@@ -107,6 +109,11 @@ impl TelemetryHandle {
             // The fleet's operational review-draft record (review-fleet C14).
             if let Some(row) = ReviewDraftRow::from_event(event) {
                 self.send(Msg::ReviewDraft(row));
+            }
+        } else if event.kind == "feedback" {
+            // One row per feedback item, carried across rounds (review-fleet C15/C16).
+            for row in ReviewFeedbackRow::rows_from_event(event) {
+                self.send(Msg::ReviewFeedback(row));
             }
         } else if event.kind == "dimension" {
             // One row per accepted per-dimension summary (adaptive-cognition 03).

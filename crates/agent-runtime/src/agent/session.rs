@@ -520,6 +520,7 @@ impl Session {
                 review: None,
                 dimensional: Some(agent_core::DimensionalRecord { summaries }),
                 draft: None,
+                feedback: None,
             })
             .await;
     }

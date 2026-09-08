@@ -929,6 +929,11 @@ pub async fn serve_fleet(agent: Arc<Agent>, listen: Endpoint) -> anyhow::Result<
             if let Some(root) = agent.fleet_root() {
                 orch = orch.with_fleet_root(root);
             }
+            // C16: attach the persisted review-history reader so the FSM dedups on the head
+            // oid + carries open feedback across rounds. Absent ⇒ every trigger reviews fresh.
+            if let Some(history) = agent.fleet_history() {
+                orch = orch.with_history(history);
+            }
             let orch = Arc::new(orch);
             tokio::spawn(async move {
                 while let Some(trigger) = rx.recv().await {

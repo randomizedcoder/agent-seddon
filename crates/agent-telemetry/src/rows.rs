@@ -272,6 +272,63 @@ impl ReviewDraftRow {
     }
 }
 
+/// One fleet review-feedback item (`agent_review_feedback`, review-fleet C15) — one row per
+/// item, carried across rounds by the cross-round tracker (C16). `review_id`/`repo`/
+/// `pr_number` are the persisting round's context; the rest is the item's lifecycle. Joins to
+/// [`ReviewDraftRow`] on `(repo, pr_number)`.
+#[derive(Debug, Clone, Row)]
+pub struct ReviewFeedbackRow {
+    pub session_id: String,
+    /// The verified owning identity (`SessionKey.user`; tenant == user at this tier).
+    pub user: String,
+    pub ts: DateTime64<3>,
+    pub item_id: String,
+    pub review_id: String,
+    pub repo: String,
+    pub pr_number: u64,
+    pub category: String,
+    pub severity: String,
+    pub title: String,
+    pub body: String,
+    pub status: String,
+    pub first_seen_review: String,
+    pub first_seen_sha: String,
+    pub addressed_review: String,
+    pub addressed_sha: String,
+}
+
+impl ReviewFeedbackRow {
+    /// One row per item in a `kind = "feedback"` `MemoryEvent`.
+    pub fn rows_from_event(event: &MemoryEvent) -> Vec<Self> {
+        let Some(round) = event.feedback.as_ref() else {
+            return Vec::new();
+        };
+        let ts = dt64_from_ms(event.ts_ms);
+        round
+            .items
+            .iter()
+            .map(|it| ReviewFeedbackRow {
+                session_id: event.session_id.clone(),
+                user: event.user.clone(),
+                ts,
+                item_id: it.item_id.clone(),
+                review_id: round.review_id.clone(),
+                repo: round.repo.clone(),
+                pr_number: round.pr_number,
+                category: it.category.clone(),
+                severity: it.severity.clone(),
+                title: it.title.clone(),
+                body: it.body.clone(),
+                status: it.status.clone(),
+                first_seen_review: it.first_seen_review.clone(),
+                first_seen_sha: it.first_seen_sha.clone(),
+                addressed_review: it.addressed_review.clone(),
+                addressed_sha: it.addressed_sha.clone(),
+            })
+            .collect()
+    }
+}
+
 /// One collector per review (`agent_review_collectors`) — the parallelism drill-down.
 #[derive(Debug, Clone, Row)]
 pub struct ReviewCollectorRow {
@@ -373,6 +430,7 @@ mod tests {
             review: None,
             dimensional: None,
             draft: None,
+            feedback: None,
         }
     }
 
@@ -389,6 +447,7 @@ mod tests {
             review: None,
             dimensional: None,
             draft: None,
+            feedback: None,
         }
     }
 
@@ -510,6 +569,7 @@ mod tests {
             review: Some(rec),
             dimensional: None,
             draft: None,
+            feedback: None,
         }
     }
 
@@ -630,6 +690,7 @@ mod tests {
                 }],
             }),
             draft: None,
+            feedback: None,
         };
         let dim_rows = DimensionRow::rows_from_event(&dim_event);
         assert_eq!(dim_rows.len(), 1);
@@ -650,6 +711,7 @@ mod tests {
             review: None,
             dimensional: None,
             draft: Some(rec),
+            feedback: None,
         }
     }
 
@@ -713,5 +775,69 @@ mod tests {
         );
         assert_eq!(rec.additions, u32::MAX, "additions saturate, never wrap");
         assert_eq!(rec.deletions, u32::MAX, "deletions saturate, never wrap");
+    }
+
+    // --- ReviewFeedbackRow (C15) -----------------------------------------
+    fn feedback_event(round: agent_core::FeedbackRound) -> MemoryEvent {
+        MemoryEvent {
+            kind: "feedback".into(),
+            message: Message::assistant(""),
+            ts_ms: 7,
+            session_id: "s".into(),
+            user: "u".into(),
+            usage: None,
+            iter: None,
+            verification: None,
+            review: None,
+            dimensional: None,
+            draft: None,
+            feedback: Some(round),
+        }
+    }
+
+    fn fb_item(item_id: &str, status: &str) -> agent_core::Feedback {
+        agent_core::Feedback {
+            item_id: item_id.into(),
+            category: "analyzer".into(),
+            severity: "warning".into(),
+            title: "errcheck: main.go".into(),
+            body: "unchecked error".into(),
+            status: status.into(),
+            first_seen_review: "r0".into(),
+            first_seen_sha: "sha0".into(),
+            addressed_review: String::new(),
+            addressed_sha: String::new(),
+        }
+    }
+
+    #[test]
+    fn positive_feedback_rows_one_per_item_carry_round_context() {
+        // desc: a `kind = "feedback"` round with two items → two rows, each carrying the
+        // round's review_id/repo/pr and the verified user. expect: 2 rows mapped 1:1.
+        let round = agent_core::FeedbackRound {
+            review_id: "r1".into(),
+            repo: "acme__web".into(),
+            pr_number: 42,
+            items: vec![fb_item("id-a", "open"), fb_item("id-b", "addressed")],
+        };
+        let rows = ReviewFeedbackRow::rows_from_event(&feedback_event(round));
+        assert_eq!(rows.len(), 2, "one row per item");
+        for r in &rows {
+            assert_eq!(r.user, "u", "verified user stamped");
+            assert_eq!(r.review_id, "r1");
+            assert_eq!(r.repo, "acme__web");
+            assert_eq!(r.pr_number, 42);
+        }
+        assert_eq!(rows[0].item_id, "id-a");
+        assert_eq!(rows[0].status, "open");
+        assert_eq!(rows[1].status, "addressed");
+    }
+
+    #[test]
+    fn negative_non_feedback_event_yields_no_rows() {
+        // desc: an event of another kind has no `feedback` side-channel. expect: empty.
+        assert!(
+            ReviewFeedbackRow::rows_from_event(&ev("goal", Message::user("x"), None)).is_empty()
+        );
     }
 }

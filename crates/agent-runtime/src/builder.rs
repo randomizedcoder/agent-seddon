@@ -1216,6 +1216,21 @@ pub async fn build_agent_with(
         Some(r) => agent.with_fleet_registry(r),
         None => agent,
     };
+    // The fleet's persisted review-history reader (review-fleet C16), over the same
+    // ClickHouse the telemetry writer feeds (C14/C15 tables). Only wired when telemetry is
+    // enabled — with no store there's nothing to read back, and the FSM reviews without
+    // dedup/carry (still runs). Held for `--serve-fleet`.
+    #[cfg(feature = "fleet")]
+    let agent = if cfg.telemetry.enabled {
+        agent.with_fleet_history(Arc::new(agent_telemetry::ClickHouseHistory::new(
+            cfg.telemetry.clickhouse_url.clone(),
+            cfg.telemetry.database.clone(),
+            cfg.telemetry.user.clone(),
+            cfg.telemetry.password.clone(),
+        )))
+    } else {
+        agent
+    };
     // Situational system-prompt fragments (docs/design/prompts/): the loop selects
     // and injects the fragments matching the current mode. Rooted at the `prompts`
     // dir — a missing dir ⇒ a no-op resolver ⇒ byte-identical behaviour.
