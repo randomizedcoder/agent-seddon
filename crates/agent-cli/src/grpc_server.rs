@@ -923,6 +923,12 @@ pub async fn serve_fleet(agent: Arc<Agent>, listen: Endpoint) -> anyhow::Result<
             if let Some(grounder) = agent.review_grounder() {
                 orch = orch.with_grounder(grounder);
             }
+            // Multi-repo grounding: when a per-row factory is wired, prefer it — each roster
+            // row is reviewed against *its own* repo + forge (the single grounder above stays
+            // as the fail-soft fallback). `None` ⇒ today's single-repo behaviour.
+            if let Some(factory) = agent.fleet_review_factory() {
+                orch = orch.with_review_factory(factory);
+            }
             if let Some(drafter) = agent.review_drafter() {
                 orch = orch.with_drafter(drafter);
             }

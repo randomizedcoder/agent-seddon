@@ -185,6 +185,23 @@ untrusted diff content). Grounding is **fail-soft**: an engine error (e.g. no fo
 the PR number) falls back to the bare instruction so a review still runs; dedup and unknown-row
 checks run *before* the engine so a duplicate/unknown never wastes a run.
 
+**Multi-repo grounding.** By default the grounder + `RepoBackend` are wired **once** from the
+process-global `[forge]`/`[git]`, so a single `--serve-fleet` process could only ground reviews for
+the one repo the process cwd pointed at — a roster could *hold* many rows but only one produced a
+grounded draft. The [`FleetReviewFactory`](../../crates/agent-core/src/lib.rs) seam lifts that limit:
+given a roster row it returns a `FleetReviewCtx { repo, grounder }` bound to **that row's own** repo +
+forge. The impl (`FleetReviewCtxFactory`, `agent-runtime`) resolves a confined per-row checkout under
+`<fleet_root>/<user>/<id>/` (`repo`/`mirror`/`worktrees`, `SessionKey::path_under` + `safe_segment`,
+fail-closed), derives the clone URL from `row.repo`/`backend`/`base_url`, builds a `CliBackend` (its
+remote = the clone URL, so the first `fetch_pr` bootstraps a bare mirror) with the per-backend PR-ref
+template (github `refs/pull/{n}/head`, gitlab `refs/merge-requests/{n}/head`; `[git] pr_ref_template`
+overrides), builds the row's forge via `build_session_forge`, and assembles a `ReviewOrchestrator`
+with the **same** `[review]` collector set as the in-loop path — only the repo/forge/root differ.
+Built contexts are cached by `row.id` (one clone + engine per row, reused across triggers). It is
+wired only when a **local** review engine is configured **and** `[review_fleet] root` is set;
+`serve_fleet` prefers it when present and keeps the single grounder as the fail-soft fallback (a
+factory build error falls back to the process-global repo + grounder — the review still runs).
+
 **Draft (C13/C14, inc 6a)** completes the `reviewing → drafted` step. The FSM is **completion-aware**:
 `handle` does the synchronous prep then spawns a per-review task (so the drain loop never blocks) that
 awaits [`FleetHost::run_review`](../../crates/agent-core/src/lib.rs) (the model's narrative) and, when a

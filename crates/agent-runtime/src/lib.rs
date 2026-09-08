@@ -13,6 +13,8 @@ mod config_schema;
 mod config_store;
 mod context_files;
 mod distiller;
+#[cfg(feature = "review")]
+mod fleet_review;
 #[cfg(feature = "git")]
 mod git;
 pub mod hooks;
