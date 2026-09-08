@@ -1656,6 +1656,12 @@ pub struct MemoryEvent {
     /// at the gRPC memory boundary (adaptive-cognition 03).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dimensional: Option<DimensionalRecord>,
+    /// A fleet review-draft record (routed to `agent_review_drafts` by the telemetry
+    /// sink; review-fleet C14). The fleet's *operational* record — kept separate from
+    /// the anonymized [`review`](Self::review) row. Telemetry-local side-channel like
+    /// the others; dropped at the gRPC memory boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft: Option<ReviewDraftRecord>,
 }
 
 /// The loop-facing memory facade. This is the whole store the agent loop talks
@@ -3219,12 +3225,15 @@ impl std::fmt::Debug for RunHandle {
 /// Why [`SessionDriver::session_for`] refused to admit a new session — a capacity cap
 /// (the amplification guard against a hostile client spraying goals). Mirrors the
 /// runtime's `OpenError`; the wire maps it to `RESOURCE_EXHAUSTED`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DriverError {
     /// The per-user live-session cap (the contained value) is full.
     PerUserLimit(usize),
     /// The global live-session cap (the contained value) is full.
     TotalLimit(usize),
+    /// The admitted run itself failed (a session/backend error, not a capacity cap).
+    /// Carried so the fleet orchestrator can log why a review didn't complete.
+    Backend(String),
 }
 
 impl std::fmt::Display for DriverError {
@@ -3232,6 +3241,7 @@ impl std::fmt::Display for DriverError {
         match self {
             DriverError::PerUserLimit(n) => write!(f, "per-user session limit reached ({n})"),
             DriverError::TotalLimit(n) => write!(f, "global session limit reached ({n})"),
+            DriverError::Backend(e) => write!(f, "review run failed: {e}"),
         }
     }
 }
@@ -3247,6 +3257,7 @@ impl std::error::Error for DriverError {}
 /// live key is a no-op success, which is what makes reconcile a crash-safe
 /// rebuild-from-roster. (The observing side of driving a session is the separate
 /// [`SessionDriver`]/`AgentSessionService`; the fleet only needs to *start* a run.)
+#[async_trait]
 pub trait FleetHost: Send + Sync {
     /// Admit (or resolve) the owner session for `key`, enforcing capacity. `Err` only
     /// when creating a *new* session would exceed a cap (→ `RESOURCE_EXHAUSTED`); an
@@ -3254,19 +3265,24 @@ pub trait FleetHost: Send + Sync {
     fn admit_owner(&self, key: SessionKey) -> std::result::Result<(), DriverError>;
     /// Drop the session for `key` (a disabled or removed row). No-op if absent.
     fn remove_session(&self, key: &SessionKey);
-    /// Admit (cap-checked) the review session for `key` and start `goal` on it,
-    /// returning the run's cancel-on-drop [`RunHandle`] — dropping it cancels the run.
+    /// Admit (cap-checked) the review session for `key`, run `goal` to completion, and
+    /// return the model's narrative (its review answer) — the input the C13 draft is
+    /// rendered from (review-fleet C10/C13).
+    ///
+    /// This **awaits** the run, so the fleet orchestrator calls it inside a spawned
+    /// per-review task (never on the drain loop) and cancels by aborting that task —
+    /// dropping this future drops the run's cancel channel, cancelling the turn.
     ///
     /// `skill` is the roster row's review skill (already validated; `None`/empty ⇒ the
     /// default). The host seeds the new session so it runs in review mode with a
     /// `skill:<name>` prompt tag — the review checklist fragments are then selected
     /// deterministically (review-fleet C11), not left to per-turn mode classification.
-    fn start_review(
+    async fn run_review(
         &self,
         key: SessionKey,
         goal: String,
         skill: Option<String>,
-    ) -> std::result::Result<RunHandle, DriverError>;
+    ) -> std::result::Result<String, DriverError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -5674,6 +5690,86 @@ impl ReviewRecord {
     }
 }
 
+/// The lifecycle status of a fleet review draft (review-fleet C14), stored as a string
+/// column in `agent_review_drafts`. A review is `drafted` when the `.md` + row are
+/// persisted, `superseded` when a newer head starts a fresh round (C16), `approved` the
+/// instant a human approves, and `posted` once the FSM has posted it (the idempotency
+/// key — a second post attempt for a `posted` review is a no-op).
+pub mod draft_status {
+    pub const DRAFTED: &str = "drafted";
+    pub const APPROVED: &str = "approved";
+    pub const POSTED: &str = "posted";
+    pub const SUPERSEDED: &str = "superseded";
+}
+
+/// The fleet's **operational** review record (review-fleet C14) — per-PR draft state,
+/// the head-oid dedup key, summary stats, and the path to the rendered `.md`. Kept
+/// deliberately **separate** from the anonymized [`ReviewRecord`] (`agent_reviews`,
+/// `repo_hash`, no PR#): this one names the real `repo`/`pr_number` because it is the
+/// fleet's own record (server config, not model-derived), and it joins back to
+/// `agent_reviews` on `head_sha == head_rev`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReviewDraftRecord {
+    /// The unique review-round id (server-minted `Uuid`).
+    pub review_id: String,
+    /// The roster repo key (`owner__name`), trusted server config.
+    pub repo: String,
+    pub pr_number: u64,
+    /// Resolved head oid from C9 — the dedup key across rounds (C16).
+    pub head_sha: String,
+    pub risk_score: f64,
+    pub gate_failed: bool,
+    pub n_findings: u32,
+    pub files_changed: u32,
+    pub additions: u32,
+    pub deletions: u32,
+    /// Path to the rendered C13 `.md` under the session workspace.
+    pub draft_path: String,
+    /// One of [`draft_status`].
+    pub status: String,
+}
+
+impl ReviewDraftRecord {
+    /// Build a draft record from the grounded [`ReviewFacts`] the review ran on. `repo`,
+    /// `pr_number`, `review_id`, `draft_path`, and `status` are the fleet's own
+    /// (trusted) values; the stats are folded from the facts (counts saturate at
+    /// `u32::MAX`, so a hostile fan-out can't overflow a column).
+    pub fn from_facts(
+        review_id: impl Into<String>,
+        repo: impl Into<String>,
+        pr_number: u64,
+        facts: &ReviewFacts,
+        draft_path: impl Into<String>,
+        status: impl Into<String>,
+    ) -> Self {
+        let files_changed = facts.change.files.len().min(u32::MAX as usize) as u32;
+        let additions = facts
+            .change
+            .files
+            .iter()
+            .fold(0u32, |acc, f| acc.saturating_add(f.additions));
+        let deletions = facts
+            .change
+            .files
+            .iter()
+            .fold(0u32, |acc, f| acc.saturating_add(f.deletions));
+        ReviewDraftRecord {
+            review_id: review_id.into(),
+            repo: repo.into(),
+            pr_number,
+            head_sha: facts.meta.head_rev.clone(),
+            risk_score: facts.risk.max_score,
+            gate_failed: facts.risk.gate_failed,
+            n_findings: facts.analysis.findings.len().min(u32::MAX as usize) as u32,
+            files_changed,
+            additions,
+            deletions,
+            draft_path: draft_path.into(),
+            status: status.into(),
+        }
+    }
+}
+
 /// Runs a fan-out of deterministic collectors into a grounded [`ReviewFacts`].
 #[async_trait]
 pub trait ReviewCollector: Send + Sync {
@@ -5697,8 +5793,68 @@ pub trait ReviewCollector: Send + Sync {
 /// orchestrator fall back to an ungrounded goal so a review still runs.
 #[async_trait]
 pub trait ReviewGrounder: Send + Sync {
-    /// Run the engine on `target` and return a rendered brief for the review session.
-    async fn ground(&self, target: ReviewTarget) -> Result<String>;
+    /// Run the engine on `target` and return the grounded review (the rendered brief for
+    /// the session's first turn **and** the facts it was rendered from — one engine run,
+    /// reused for both the goal and the C13 draft).
+    async fn ground(&self, target: ReviewTarget) -> Result<GroundedReview>;
+}
+
+/// The output of one review-engine run (review-fleet C10): the rendered `brief` handed to
+/// the review session, plus the `facts` it came from — kept so the FSM can also render the
+/// C13 draft from the same run rather than collecting twice.
+#[derive(Debug, Clone)]
+pub struct GroundedReview {
+    pub brief: String,
+    pub facts: ReviewFacts,
+}
+
+/// Everything the [`ReviewDrafter`] needs to render and persist a review draft
+/// (review-fleet C13/C14): the grounded `facts`, the model's `narrative` (the review
+/// session's answer), and the fleet identity of the review. `prior` is empty until C16
+/// (inc 6b) carries open feedback items across rounds.
+#[derive(Debug, Clone)]
+pub struct DraftRequest {
+    pub review_id: String,
+    pub repo: String,
+    pub pr_number: u64,
+    pub facts: ReviewFacts,
+    pub narrative: String,
+    /// The session workspace root (C4) the `.md` is written under.
+    pub workspace: std::path::PathBuf,
+    /// Prior-round open items to render a "prior feedback status" section (inc 6b).
+    pub prior: Vec<Feedback>,
+}
+
+/// Renders a finished review into a redacted `.md` and persists its
+/// [`ReviewDraftRecord`] (review-fleet C13/C14). A seam kept in `agent-core` so the fleet
+/// orchestrator depends on it rather than the concrete renderer (`agent-review`) — like
+/// [`ReviewGrounder`]. The impl (`agent-runtime`) writes the file under the session
+/// workspace and records the row through the memory-event funnel. Callers use it
+/// **fail-soft**: a draft error is logged and the review still completes.
+#[async_trait]
+pub trait ReviewDrafter: Send + Sync {
+    /// Render + persist the draft for a completed review, returning its record.
+    async fn draft(&self, req: DraftRequest) -> Result<ReviewDraftRecord>;
+}
+
+/// One review feedback item carried across rounds (review-fleet C15/C16). Model-authored
+/// `title`/`body` are size-capped where the record is built. Fully populated in inc 6b;
+/// declared here so [`DraftRequest`]/[`ReviewDrafter`] have a stable shape from 6a.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Feedback {
+    pub item_id: String,
+    pub category: String,
+    pub severity: String,
+    pub title: String,
+    pub body: String,
+    /// One of `open` | `addressed` | `wontfix`.
+    pub status: String,
+    pub first_seen_review: String,
+    pub first_seen_sha: String,
+    #[serde(default)]
+    pub addressed_review: String,
+    #[serde(default)]
+    pub addressed_sha: String,
 }
 
 #[cfg(test)]

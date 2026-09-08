@@ -248,11 +248,59 @@ struct EngineGrounder {
 #[cfg(feature = "review")]
 #[async_trait::async_trait]
 impl agent_core::ReviewGrounder for EngineGrounder {
-    async fn ground(&self, target: agent_core::ReviewTarget) -> agent_core::Result<String> {
+    async fn ground(
+        &self,
+        target: agent_core::ReviewTarget,
+    ) -> agent_core::Result<agent_core::GroundedReview> {
         // Collect is fail-soft (only an unresolvable target is a hard error); the caller
-        // (the orchestrator) is fail-soft on top, falling back to an ungrounded goal.
+        // (the orchestrator) is fail-soft on top, falling back to an ungrounded goal. The
+        // facts are returned alongside the brief so the FSM can render the C13 draft from
+        // this same run rather than collecting twice.
         let facts = self.engine.collect(&target).await?;
-        Ok(agent_review::render_facts_with(&facts, self.budget))
+        let brief = agent_review::render_facts_with(&facts, self.budget);
+        Ok(agent_core::GroundedReview { brief, facts })
+    }
+}
+
+/// The concrete [`agent_core::ReviewDrafter`] (review-fleet C13/C14): renders a finished
+/// review into a redacted `.md` under the session workspace and persists its
+/// [`agent_core::ReviewDraftRecord`] through the memory-event funnel (→ `agent_review_drafts`).
+/// A thin wrapper over `agent-review`'s renderer + the `Agent`'s event sink, so the fleet
+/// orchestrator depends only on the `agent-core` seam. Compiled only with `review`.
+#[cfg(feature = "review")]
+struct EngineDrafter {
+    agent: Arc<Agent>,
+}
+
+#[cfg(feature = "review")]
+#[async_trait::async_trait]
+impl agent_core::ReviewDrafter for EngineDrafter {
+    async fn draft(
+        &self,
+        req: agent_core::DraftRequest,
+    ) -> agent_core::Result<agent_core::ReviewDraftRecord> {
+        // Render (redaction + size cap live in the renderer, C13) and write the `.md`
+        // under `<workspace>/reviews/`. `review_id` is a server-minted Uuid and
+        // `pr_number` a u64, so the file name is a safe segment; `workspace` is the
+        // confined session root (C4).
+        let md = agent_review::render_draft(&req.facts, &req.narrative, &req.prior);
+        let dir = req.workspace.join("reviews");
+        tokio::fs::create_dir_all(&dir).await?;
+        let path = dir.join(format!("pr-{}-r{}.md", req.pr_number, req.review_id));
+        tokio::fs::write(&path, md.as_bytes()).await?;
+
+        let rec = agent_core::ReviewDraftRecord::from_facts(
+            req.review_id,
+            req.repo,
+            req.pr_number,
+            &req.facts,
+            path.to_string_lossy().into_owned(),
+            agent_core::draft_status::DRAFTED,
+        );
+        // Persist the operational row (→ agent_review_drafts) through the same funnel the
+        // anonymized review row uses.
+        self.agent.record_draft(rec.clone()).await;
+        Ok(rec)
     }
 }
 
@@ -894,6 +942,13 @@ impl Agent {
         self.review_collector.clone()
     }
 
+    /// The fleet workspace root (`[review_fleet] root`, C4/R1a), under which each review
+    /// session's confined cwd — and its draft `.md` — lives. `None` ⇒ unset (the shared
+    /// `settings.cwd` fallback). Read by `serve_fleet` to place C13 drafts.
+    pub fn fleet_root(&self) -> Option<std::path::PathBuf> {
+        self.settings.fleet_root.clone()
+    }
+
     /// The review engine exposed as a [`ReviewGrounder`] for the fleet FSM (review-fleet
     /// C10): `Some` when a review collector is wired (the `review` feature + a configured
     /// `[review] backend`), else `None` — the fleet orchestrator then drives an
@@ -912,6 +967,52 @@ impl Agent {
     #[cfg(not(feature = "review"))]
     pub fn review_grounder(&self) -> Option<Arc<dyn agent_core::ReviewGrounder>> {
         None
+    }
+
+    /// The review renderer + persistence exposed as a [`ReviewDrafter`] for the fleet FSM
+    /// (review-fleet C13/C14): `Some` when the `review` feature is compiled in (the
+    /// renderer lives there), else `None` — the fleet then runs a review without producing
+    /// a persisted draft. Takes `Arc<Self>` because the drafter records through the
+    /// `Agent`'s event sink.
+    #[cfg(feature = "review")]
+    pub fn review_drafter(self: &Arc<Self>) -> Option<Arc<dyn agent_core::ReviewDrafter>> {
+        Some(Arc::new(EngineDrafter {
+            agent: self.clone(),
+        }))
+    }
+
+    /// Without the `review` feature there is no renderer, so no draft is produced.
+    #[cfg(not(feature = "review"))]
+    pub fn review_drafter(self: &Arc<Self>) -> Option<Arc<dyn agent_core::ReviewDrafter>> {
+        None
+    }
+
+    /// Persist a fleet review-draft record (review-fleet C14): route it through the memory
+    /// funnel as a `kind = "draft"` event so the telemetry sink writes an
+    /// `agent_review_drafts` row. Mirrors [`Self::record_review`] but for the fleet's
+    /// operational (non-anonymized) record.
+    pub async fn record_draft(&self, rec: agent_core::ReviewDraftRecord) {
+        tracing::info!(
+            review_id = %rec.review_id,
+            repo = %rec.repo,
+            pr = rec.pr_number,
+            status = %rec.status,
+            "review draft recorded"
+        );
+        self.append_event(MemoryEvent {
+            kind: "draft".to_string(),
+            message: Message::assistant(String::new()),
+            ts_ms: now_ms(),
+            session_id: self.settings.session_id.clone(),
+            user: String::new(),
+            usage: None,
+            iter: None,
+            verification: None,
+            review: None,
+            dimensional: None,
+            draft: Some(rec),
+        })
+        .await;
     }
 
     /// Collect grounded review facts for the working tree and return them rendered
@@ -1641,6 +1742,7 @@ impl Agent {
             verification: None,
             review: None,
             dimensional: None,
+            draft: None,
         })
         .await;
     }
@@ -1658,6 +1760,7 @@ impl Agent {
             verification: None,
             review: None,
             dimensional: None,
+            draft: None,
         })
         .await;
     }
@@ -1677,6 +1780,7 @@ impl Agent {
             verification: Some(rec),
             review: None,
             dimensional: None,
+            draft: None,
         })
         .await;
     }
@@ -1723,6 +1827,7 @@ impl Agent {
             verification: None,
             review: Some(rec),
             dimensional: None,
+            draft: None,
         })
         .await;
     }
@@ -1886,6 +1991,7 @@ fn recent_events(messages: &[Message], n: usize) -> Vec<MemoryEvent> {
             verification: None,
             review: None,
             dimensional: None,
+            draft: None,
         })
         .collect()
 }
@@ -2037,6 +2143,7 @@ mod tests {
             verification: None,
             review: None,
             dimensional: None,
+            draft: None,
         }
     }
 

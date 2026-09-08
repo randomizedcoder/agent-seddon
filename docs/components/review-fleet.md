@@ -184,6 +184,18 @@ untrusted diff content). Grounding is **fail-soft**: an engine error (e.g. no fo
 the PR number) falls back to the bare instruction so a review still runs; dedup and unknown-row
 checks run *before* the engine so a duplicate/unknown never wastes a run.
 
+**Draft (C13/C14, inc 6a)** completes the `reviewing → drafted` step. The FSM is **completion-aware**:
+`handle` does the synchronous prep then spawns a per-review task (so the drain loop never blocks) that
+awaits [`FleetHost::run_review`](../../crates/agent-core/src/lib.rs) (the model's narrative) and, when a
+[`ReviewDrafter`](../../crates/agent-core/src/lib.rs) is attached, renders a **redacted** `.md`
+(`agent_review::render_draft` — forge/Slack tokens, `Bearer`/secret headers, and PEM blocks stripped;
+commit SHAs preserved; whole-document size-capped) under
+`<session workspace>/reviews/pr-<N>-r<review_id>.md` and persists an `agent_review_drafts` row at
+`status = drafted`. C14 is a `kind = "draft"` telemetry event routed to the new `agent_review_drafts`
+table — kept **separate** from the anonymized `agent_reviews`, and named by real `repo`/`pr_number`
+(fleet config), joining back on `head_sha == head_rev`. The task guard aborts on drop (drop = cancel);
+`review_id` is a server-minted `Uuid`. **Nothing posts** — the approve → post tail is inc 6c.
+
 **Forge poll (C6, inc 4a)** is the first *real* trigger source. `serve_fleet` registers one
 `every {poll_secs}` job per enabled, forge-capable roster row on `agent-scheduler` (whose
 **overlap guard** means a poll that runs long never stacks a second copy) and fires due jobs

@@ -12,7 +12,39 @@ Three PRs, each based off `main`, never stacked, each gated by `nix flake check`
 
 ## Now
 
-- **INCREMENT 5c (C10 engine invocation) — code + tests complete; gate pending.** Wires the fleet
+- **INCREMENT 6a (C13 draft renderer + C14 `agent_review_drafts` + completion-aware C8) — code +
+  tests complete; gate pending.** Turns a finished review into a persisted, redacted draft. The FSM
+  becomes **completion-aware**: it now reaches `drafted`.
+  - **Completion-aware FSM** — `FleetHost::start_review` (fire-and-forget) → `async fn run_review(key,
+    goal, skill) -> Result<String>` (returns the model narrative). `FleetOrchestrator::handle` does the
+    synchronous prep, then **spawns a per-review task** (held in `in_flight` as a `ReviewTask` guard
+    whose `Drop` aborts → cancel) that awaits `run_review` and then drafts — so the single drain loop
+    never blocks on a long review. `cancel`/`join` manage the task; `join` is the finalize/test await.
+  - **Seams (agent-core)** — `ReviewGrounder::ground` now returns `GroundedReview { brief, facts }` (one
+    engine run, reused for the goal *and* the draft). New `ReviewDrafter` seam (`async fn draft(req:
+    DraftRequest) -> Result<ReviewDraftRecord>`), `ReviewDraftRecord` (+`from_facts`, counts saturate),
+    `DraftRequest`, `Feedback` (shape declared for 6b), `draft_status` consts, and a `MemoryEvent.draft`
+    telemetry-local side-channel. `DriverError` gains `Backend(String)` for a run failure.
+  - **Renderer (agent-review)** — `render_draft(facts, narrative, prior) -> Markdown` (ordered header →
+    review → steps-taken → prior-feedback → grounded facts) with a **mandatory redaction pass**
+    (`redact`: forge/Slack tokens, `Bearer`/secret headers, PEM blocks — *not* commit SHAs) and a
+    whole-document size cap (`MAX_DRAFT_BYTES`).
+  - **Drafter impl (agent-runtime)** — `EngineDrafter` (`#[cfg(feature = "review")]`) renders, writes
+    `<workspace>/reviews/pr-<N>-r<review_id>.md`, and records the row via `Agent::record_draft` (a
+    `kind = "draft"` event). `Agent::review_drafter()` / `fleet_root()` accessors; `serve_fleet` wires
+    the drafter + fleet root alongside the grounder.
+  - **C14 table (agent-telemetry)** — `ReviewDraftRow` + `from_event` + `Msg::ReviewDraft` + the 4-site
+    writer flush pattern + a `kind = "draft"` dispatch branch; DDL `agent_review_drafts`
+    (`ORDER BY (repo, pr_number, head_sha)`) in `schema.sql` (new table, no `ALTER`).
+  - Tests (all default-feature → `test.nix`): renderer (ordered sections / steps / prior / **secret
+    redacted** / huge-body capped / SHA preserved); C14 row (`from_event` / non-draft→None / hostile
+    counts saturate); FSM (review-completes-then-drafts / draft-error-is-soft / no-drafter-no-draft /
+    no-facts-no-draft / cancel-aborts-before-draft, plus the carried 5c grounding cases). No new nix
+    check.
+- **Next: inc 6b** (C15 `agent_review_feedback` + C16 cross-round tracker: precise head-oid dedup +
+  supersede + carry open items across rounds), then **6c** (C17 `Approve` RPC + post tail).
+
+- **INCREMENT 5c (C10 engine invocation) MERGED — PR #286 (main `9a3b176`).** Wires the fleet
   FSM to the deterministic review engine so a review session reviews the *real* change, not a bare
   instruction:
   - **Seam** — new `agent_core::ReviewGrounder` trait (`async fn ground(target) -> Result<String>`):

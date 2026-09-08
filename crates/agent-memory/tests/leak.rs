@@ -51,6 +51,7 @@ fn evt(text: &str) -> MemoryEvent {
         verification: None,
         review: None,
         dimensional: None,
+        draft: None,
     }
 }
 

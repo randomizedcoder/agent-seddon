@@ -137,6 +137,32 @@ CREATE TABLE IF NOT EXISTS agent.agent_review_collectors
 ENGINE = MergeTree
 ORDER BY (session_id, ts, collector);
 
+-- The fleet's operational review-draft record (review-fleet C14). Unlike the
+-- anonymized agent_reviews, this names the real repo/pr_number (fleet config, not
+-- model-derived): it is the human-approval + dedup record. Joins back to
+-- agent_reviews on head_sha == head_rev. status ∈ drafted | approved | posted |
+-- superseded; the posted flip is the post idempotency key.
+CREATE TABLE IF NOT EXISTS agent.agent_review_drafts
+(
+    session_id    String,
+    user          String,                         -- verified SessionKey.user (tenant); '' outside a scope
+    ts            DateTime64(3, 'UTC'),
+    review_id     String,                          -- server-minted Uuid per review round
+    repo          String,                          -- roster repo key (owner__name), trusted config
+    pr_number     UInt64,
+    head_sha      String,                          -- resolved head oid (C9) — the cross-round dedup key
+    risk_score    Float64,
+    gate_failed   UInt8,
+    n_findings    UInt32,
+    files_changed UInt32,
+    additions     UInt32,
+    deletions     UInt32,
+    draft_path    String,                          -- path to the rendered C13 .md
+    status        String                           -- drafted | approved | posted | superseded
+)
+ENGINE = MergeTree
+ORDER BY (repo, pr_number, head_sha);
+
 -- One row per accepted per-dimension summary (adaptive-cognition 03). Counts and
 -- lengths only — never the summary body — so the dimension distribution and
 -- emergent-slug churn can be analysed offline without storing model text.

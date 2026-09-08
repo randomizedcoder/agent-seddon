@@ -43,6 +43,135 @@ pub fn render_facts(facts: &ReviewFacts) -> String {
     render_facts_with(facts, DEFAULT_CONTEXT_BUDGET)
 }
 
+/// The hard cap on a rendered draft `.md` (review-fleet C13). The narrative is
+/// model-authored and the facts are attacker-influenced diff content, so the whole
+/// document is clamped — a huge review degrades to a truncation notice, never floods
+/// the file or a Slack post.
+pub const MAX_DRAFT_BYTES: usize = 64_000;
+
+/// Render a finished review into the human-approvable draft `.md` (review-fleet C13):
+/// a header (repo/PR/head + risk gate), the model's `narrative` (the actual review,
+/// ordered by the skill: good → must-fix → minor), the deterministic "steps taken"
+/// (which collectors ran), a "prior feedback status" section from `prior` (empty until
+/// inc 6b), and the grounded facts appended for the approver's reference.
+///
+/// Two safety passes, both mandatory: every model/diff-derived surface goes through
+/// [`redact`] (a token or secret-shaped string never lands in the file), and the whole
+/// document is capped at [`MAX_DRAFT_BYTES`].
+pub fn render_draft(
+    facts: &ReviewFacts,
+    narrative: &str,
+    prior: &[agent_core::Feedback],
+) -> String {
+    let ch = &facts.change;
+    let mut out = String::new();
+
+    out.push_str(&format!(
+        "# Review draft — `{}`..`{}`\n\n",
+        ch.base_rev, ch.head_rev
+    ));
+    out.push_str(&format!(
+        "- Files changed: {}\n- Risk: {:.2} (gate {})\n- Findings: {}\n\n",
+        ch.files.len(),
+        facts.risk.max_score,
+        if facts.risk.gate_failed {
+            "FAILED"
+        } else {
+            "passed"
+        },
+        facts.analysis.findings.len(),
+    ));
+
+    // The model's review — the human-facing narrative, ordered by the skill (C11).
+    out.push_str("## Review\n\n");
+    out.push_str(redact(narrative).trim_end());
+    out.push_str("\n\n");
+
+    // Deterministic provenance: which collectors actually ran (and which were
+    // skipped/failed), so the reader knows what the review is grounded in.
+    if !facts.meta.collectors.is_empty() {
+        out.push_str("## Steps taken\n\n");
+        for c in &facts.meta.collectors {
+            out.push_str(&format!(
+                "- {} — {} ({} ms){}\n",
+                c.collector,
+                c.status.as_str(),
+                c.duration_ms,
+                if c.reason.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", redact(&c.reason))
+                },
+            ));
+        }
+        out.push('\n');
+    }
+
+    // Prior feedback carried across rounds (inc 6b fills this; empty ⇒ omitted).
+    if !prior.is_empty() {
+        out.push_str("## Prior feedback status\n\n");
+        for f in prior {
+            out.push_str(&format!(
+                "- [{}] {} — {}\n",
+                f.status,
+                redact(&f.title),
+                redact(&f.body),
+            ));
+        }
+        out.push('\n');
+    }
+
+    // The grounded facts, for the approver's reference (already URL-free; redact for
+    // belt-and-braces against a secret echoed into a diff hunk).
+    out.push_str("## Grounded facts\n\n");
+    out.push_str(&redact(&render_facts(facts)));
+
+    // Whole-document cap: truncate on a char boundary with an honest notice.
+    if out.len() > MAX_DRAFT_BYTES {
+        let mut cut = MAX_DRAFT_BYTES;
+        while cut > 0 && !out.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        out.truncate(cut);
+        out.push_str("\n\n_[draft truncated: over size cap]_\n");
+    }
+    out
+}
+
+/// Redact tokens and secret-shaped strings from a rendered surface (review-fleet C13
+/// security). Targets known forge/Slack token formats, `key: value` secret headers, and
+/// PEM private-key blocks — deliberately **not** long hex runs, so a legitimate commit
+/// SHA in a review survives. Matches are replaced with `[REDACTED]`.
+pub fn redact(s: &str) -> String {
+    use std::sync::LazyLock;
+    static PATTERNS: LazyLock<Vec<regex::Regex>> = LazyLock::new(|| {
+        [
+            // GitHub PATs / OAuth / app tokens (ghp_, gho_, ghu_, ghs_, ghr_) + fine-grained.
+            r"gh[pousr]_[A-Za-z0-9]{20,}",
+            r"github_pat_[A-Za-z0-9_]{20,}",
+            // GitLab personal/CI tokens.
+            r"glpat-[A-Za-z0-9_\-]{16,}",
+            // Slack bot/user/app/refresh tokens.
+            r"xox[baprs]-[A-Za-z0-9\-]{10,}",
+            // PEM private-key blocks (whole block).
+            r"(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+            // `Bearer <token>` (space-separated) — run first so the header rule below
+            // can't stop at the word "Bearer" and leave the secret exposed.
+            r"(?i)bearer\s+\S+",
+            // `authorization: <v>` / `token=<v>` / `api_key: <v>` / `password=<v>`.
+            r"(?i)(authorization|token|secret|api[_-]?key|password)\s*[:=]\s*\S+",
+        ]
+        .into_iter()
+        .map(|p| regex::Regex::new(p).expect("static redaction regex"))
+        .collect()
+    });
+    let mut out = s.to_string();
+    for re in PATTERNS.iter() {
+        out = re.replace_all(&out, "[REDACTED]").into_owned();
+    }
+    out
+}
+
 /// Render, capping total size at `budget_bytes` (`0` ⇒ unbounded). The repo line,
 /// the commits, and the changed-file list are always included; the **diff hunks**
 /// fill the remaining budget, and any that don't fit are omitted with an honest
@@ -571,5 +700,135 @@ impl ChangeLabel for agent_core::ChangeKind {
             Copied => "copied",
             TypeChange => "typechange",
         }
+    }
+}
+
+#[cfg(test)]
+mod draft_tests {
+    use super::*;
+    use agent_core::{
+        ChangeKind, ChangedFile, CollectStatus, CollectorStatus, Feedback, ReviewFacts,
+    };
+
+    /// Facts with two collectors (one ok, one skipped) and a small change, for the
+    /// draft renderer tests.
+    fn facts() -> ReviewFacts {
+        let mut f = ReviewFacts::default();
+        f.change.base_rev = "aaaa".into();
+        f.change.head_rev = "bbbb".into();
+        f.change.files.push(ChangedFile {
+            path: "src/x.rs".into(),
+            change: ChangeKind::Modified,
+            additions: 5,
+            deletions: 2,
+            is_binary: false,
+            lang: "rust".into(),
+            patch: String::new(),
+        });
+        f.risk.max_score = 0.9;
+        f.risk.gate_failed = true;
+        f.meta.collectors = vec![
+            CollectorStatus {
+                collector: "shellcheck".into(),
+                status: CollectStatus::Ok,
+                reason: String::new(),
+                duration_ms: 12,
+            },
+            CollectorStatus {
+                collector: "go-race".into(),
+                status: CollectStatus::Skipped,
+                reason: "no go.mod".into(),
+                duration_ms: 0,
+            },
+        ];
+        f
+    }
+
+    #[test]
+    fn positive_renders_ordered_sections() {
+        // desc: a draft has the review header, the model narrative, and the facts, in
+        // order. expect: all present with the narrative before the grounded facts.
+        let md = render_draft(&facts(), "Looks good overall. One must-fix in x.rs.", &[]);
+        assert!(md.starts_with("# Review draft"), "header first: {md:.40}");
+        let review_at = md.find("## Review").expect("review section");
+        let facts_at = md.find("## Grounded facts").expect("facts section");
+        assert!(review_at < facts_at, "narrative precedes grounded facts");
+        assert!(md.contains("One must-fix in x.rs."), "narrative rendered");
+        assert!(md.contains("gate FAILED"), "risk gate surfaced");
+    }
+
+    #[test]
+    fn positive_lists_steps_taken() {
+        // desc: the "steps taken" section lists which collectors ran. expect: both the
+        // ok and the skipped collector appear, the skipped one with its reason.
+        let md = render_draft(&facts(), "narrative", &[]);
+        assert!(md.contains("## Steps taken"));
+        assert!(md.contains("shellcheck — ok"));
+        assert!(
+            md.contains("go-race — skipped") && md.contains("no go.mod"),
+            "skipped collector + reason: {md}"
+        );
+    }
+
+    #[test]
+    fn positive_renders_prior_feedback_section() {
+        // desc: prior open items render a "prior feedback status" section (inc 6b hook).
+        // expect: the section + the item's title appear.
+        let prior = vec![Feedback {
+            item_id: "i1".into(),
+            category: "correctness".into(),
+            severity: "must-fix".into(),
+            title: "unchecked unwrap".into(),
+            body: "line 12".into(),
+            status: "open".into(),
+            first_seen_review: "r0".into(),
+            first_seen_sha: "aaaa".into(),
+            addressed_review: String::new(),
+            addressed_sha: String::new(),
+        }];
+        let md = render_draft(&facts(), "narrative", &prior);
+        assert!(md.contains("## Prior feedback status"));
+        assert!(md.contains("unchecked unwrap"));
+    }
+
+    #[test]
+    fn adversarial_secret_redacted_from_draft() {
+        // desc: a model narrative that echoes a forge token + a bearer header. expect:
+        // neither the token nor the header value survives into the rendered draft.
+        let narrative = "I found a token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 and \
+                         Authorization: Bearer sk-supersecretvalue in the diff.";
+        let md = render_draft(&facts(), narrative, &[]);
+        assert!(
+            !md.contains("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"),
+            "GitHub token must be redacted: {md}"
+        );
+        assert!(
+            !md.contains("sk-supersecretvalue"),
+            "bearer secret must be redacted: {md}"
+        );
+        assert!(md.contains("[REDACTED]"), "redaction marker present");
+    }
+
+    #[test]
+    fn boundary_huge_body_capped() {
+        // desc: an enormous narrative. expect: the whole document is clamped to the cap
+        // (+ a small truncation notice), never unbounded.
+        let narrative = "x".repeat(MAX_DRAFT_BYTES * 2);
+        let md = render_draft(&facts(), &narrative, &[]);
+        assert!(
+            md.len() <= MAX_DRAFT_BYTES + 64,
+            "capped near MAX_DRAFT_BYTES, got {}",
+            md.len()
+        );
+        assert!(md.contains("draft truncated"), "truncation is honest");
+    }
+
+    #[test]
+    fn corner_redact_keeps_commit_sha() {
+        // desc: a legitimate 40-hex commit SHA must NOT be redacted (only token-shaped
+        // strings are). expect: the SHA survives verbatim.
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let out = redact(&format!("reviewed at {sha}"));
+        assert!(out.contains(sha), "commit SHA preserved: {out}");
     }
 }

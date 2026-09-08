@@ -27,7 +27,10 @@ pub use layer::ClickHouseLayer;
 pub use memory::CompositeMemory;
 pub use otel::{otlp_layer, OtelConfig, OtelGuard};
 
-use rows::{DimensionRow, EventRow, ReviewCollectorRow, ReviewRow, UsageRow, VerificationRow};
+use rows::{
+    DimensionRow, EventRow, ReviewCollectorRow, ReviewDraftRow, ReviewRow, UsageRow,
+    VerificationRow,
+};
 use writer::{Msg, WriterConfig, TARGET};
 
 /// Bounded channel size. Overflow drops rows rather than blocking the loop.
@@ -99,6 +102,11 @@ impl TelemetryHandle {
             // One drill-down row per collector (the parallelism detail).
             for row in ReviewCollectorRow::rows_from_event(event) {
                 self.send(Msg::ReviewCollector(row));
+            }
+        } else if event.kind == "draft" {
+            // The fleet's operational review-draft record (review-fleet C14).
+            if let Some(row) = ReviewDraftRow::from_event(event) {
+                self.send(Msg::ReviewDraft(row));
             }
         } else if event.kind == "dimension" {
             // One row per accepted per-dimension summary (adaptive-cognition 03).

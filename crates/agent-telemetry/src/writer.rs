@@ -7,7 +7,8 @@
 //! best-effort; the JSONL episodic log remains the source of truth.
 
 use crate::rows::{
-    DimensionRow, EventRow, LogRow, ReviewCollectorRow, ReviewRow, UsageRow, VerificationRow,
+    DimensionRow, EventRow, LogRow, ReviewCollectorRow, ReviewDraftRow, ReviewRow, UsageRow,
+    VerificationRow,
 };
 use klickhouse::{Client, ClientOptions, Row};
 use std::time::Duration;
@@ -24,6 +25,7 @@ pub(crate) enum Msg {
     Verification(VerificationRow),
     Review(ReviewRow),
     ReviewCollector(ReviewCollectorRow),
+    ReviewDraft(ReviewDraftRow),
     Dimension(DimensionRow),
     /// Flush everything and stop; the ack fires once the final flush completes.
     /// Needed because the global tracing subscriber holds a `Sender` clone for
@@ -64,6 +66,7 @@ pub(crate) async fn run(mut rx: mpsc::Receiver<Msg>, cfg: WriterConfig) {
     let mut verifications: Vec<VerificationRow> = Vec::new();
     let mut reviews: Vec<ReviewRow> = Vec::new();
     let mut review_collectors: Vec<ReviewCollectorRow> = Vec::new();
+    let mut review_drafts: Vec<ReviewDraftRow> = Vec::new();
     let mut dimensions: Vec<DimensionRow> = Vec::new();
 
     let mut ticker = tokio::time::interval(cfg.flush_interval);
@@ -108,6 +111,12 @@ pub(crate) async fn run(mut rx: mpsc::Receiver<Msg>, cfg: WriterConfig) {
                         flush(&client, "agent_review_collectors", &mut review_collectors).await;
                     }
                 }
+                Some(Msg::ReviewDraft(r)) => {
+                    review_drafts.push(r);
+                    if review_drafts.len() >= cfg.batch_max_rows {
+                        flush(&client, "agent_review_drafts", &mut review_drafts).await;
+                    }
+                }
                 Some(Msg::Dimension(r)) => {
                     dimensions.push(r);
                     if dimensions.len() >= cfg.batch_max_rows {
@@ -121,6 +130,7 @@ pub(crate) async fn run(mut rx: mpsc::Receiver<Msg>, cfg: WriterConfig) {
                     flush(&client, "agent_verifications", &mut verifications).await;
                     flush(&client, "agent_reviews", &mut reviews).await;
                     flush(&client, "agent_review_collectors", &mut review_collectors).await;
+                    flush(&client, "agent_review_drafts", &mut review_drafts).await;
                     flush(&client, "agent_dimension_summaries", &mut dimensions).await;
                     let _ = ack.send(());
                     return;
@@ -135,6 +145,7 @@ pub(crate) async fn run(mut rx: mpsc::Receiver<Msg>, cfg: WriterConfig) {
                 flush(&client, "agent_verifications", &mut verifications).await;
                 flush(&client, "agent_reviews", &mut reviews).await;
                 flush(&client, "agent_review_collectors", &mut review_collectors).await;
+                flush(&client, "agent_review_drafts", &mut review_drafts).await;
                 flush(&client, "agent_dimension_summaries", &mut dimensions).await;
             }
         }

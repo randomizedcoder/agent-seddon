@@ -419,6 +419,7 @@ impl agent_core::SessionDriver for SessionManager {
 /// enabled roster row and drop one whose row is disabled/removed. `admit_owner` reuses
 /// the same capacity-checked, idempotent [`Self::admit`] the driving path uses, so
 /// reconcile is a crash-safe rebuild — re-admitting a live key is a no-op success.
+#[async_trait::async_trait]
 impl agent_core::FleetHost for SessionManager {
     fn admit_owner(
         &self,
@@ -433,19 +434,24 @@ impl agent_core::FleetHost for SessionManager {
         self.remove(key);
     }
 
-    fn start_review(
+    async fn run_review(
         &self,
         key: agent_core::SessionKey,
         goal: String,
         skill: Option<String>,
-    ) -> std::result::Result<agent_core::RunHandle, agent_core::DriverError> {
-        // Admit (cap-checked, idempotent) seeding the review skill/mode, then start the
-        // goal; the handle's `RunStarter` impl returns a cancel-on-drop `RunHandle`
-        // (the orchestrator holds it).
+    ) -> std::result::Result<String, agent_core::DriverError> {
+        // Admit (cap-checked, idempotent) seeding the review skill/mode, then run the
+        // goal to completion and hand back the narrative. `SessionHandle::run` holds the
+        // cancel channel for the whole run, so it never self-cancels; the fleet
+        // orchestrator cancels by aborting the task that awaits this future (dropping it
+        // drops the cancel sender → the actor cancels).
         let handle = self
             .admit_review(key, skill)
             .map_err(agent_core::DriverError::from)?;
-        Ok(agent_core::RunStarter::start(&handle, goal))
+        handle
+            .run(&goal)
+            .await
+            .map_err(|e| agent_core::DriverError::Backend(e.to_string()))
     }
 }
 
