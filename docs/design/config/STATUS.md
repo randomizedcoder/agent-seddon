@@ -1,0 +1,72 @@
+# Status — unified configuration architecture
+
+Legend: ⬜ designed, not built · 🟡 partially built · ✅ built + merged.
+
+**Track state: ⬜ design-of-record only.** This dir was written 2026-09-08; **no code is built.** The
+existing pieces it *builds on* (the model-router registry, `PerUserMemory`, the seam factory registry)
+are shipped, but every C32–C41 component below is design-only.
+
+## Components
+
+| C# | Component | State | Notes |
+|---|---|---|---|
+| C32 | Config-card pattern (meta) | ⬜ | Convention; formalizes the shipped `ProviderRegistryService` shape. |
+| C33 | Authentication interceptor (OIDC/JWT) | ⬜ | **Keystone.** Concretizes multi-session 07-security. No proto change. |
+| C34 | RBAC model | ⬜ | Roles/permissions as cards; gates control-plane RPCs (not the tool `Policy`). |
+| C35 | Per-tenant config plane | ⬜ | = multi-tenancy C30 applied to config stores. |
+| C36 | Forge registry | ⬜ | Forge cards; lifts hardcoded allow-list/base-url/repo-encoding. |
+| C37 | Message-transport registry | ⬜ | Bidirectional `MessageTransport`; Slack = one impl. |
+| C38 | Per-tenant prompt storage | ⬜ | `PerTenant` wrap of existing `PromptStore`; no trait change. |
+| C39 | LLM upstream/pool config | 🟡 | Reference impl **shipped** (model-router); only convergence onto C41/C35 pending. |
+| C40 | Control-plane consolidation | ⬜ | Composes C33/C34/C35 over all control services; = multi-tenancy C31. |
+| C41 | Transactional config data layer | ⬜ | **Keystone.** Postgres/sqlite/file behind one store; atomic multi-card txns. |
+
+## Proposed increment ordering
+
+Two keystones with no dependency on each other, then the layers that need them:
+
+1. **C41 — transactional store** (postgres tier + shared `agent-config-store` + migrations). Existing
+   single-tenant installs keep `file`/`sqlite`. Converge `agent-registry`/`agent-prompt`/
+   `agent-review-fleet` onto it (behavior-preserving).
+2. **C33 — auth interceptor** (OIDC/JWT; `mode=none` preserves today). Independent of C41.
+3. **C34 — RBAC** (needs C33's verified roles + the resource model).
+4. **C35 — per-tenant** (needs C33's verified tenant; wraps the C41 stores).
+5. **C36 / C37 / C38** — forge, transport, per-tenant prompt cards (need C41; per-tenant needs C35).
+6. **C40 — control-plane consolidation** (composes C33/C34/C35 over every service).
+
+Each is a **gated PR off `main`, never stacked** (the established cadence); new card protos are additive
+(no `buf.image.binpb` bump).
+
+## Dependencies (cross-track)
+
+- **multi-tenancy C29–C31** — C35/C40 are the config-surface application of C30 (`PerTenant<Store>`) and
+  C31 (tenant-scoped control plane), and adopt C29's operator-global-vs-tenant split. **One
+  implementation**; whichever track builds it first, the other references it. See
+  [`../multi-tenancy/`](../multi-tenancy/README.md).
+- **multi-session 07-security** — C33 **is** that follow-up (verified identity replacing the trusted
+  header). See [`../multi-session/07-security.md`](../multi-session/07-security.md).
+- **model-router** — C39/C32 reference its shipped registry as the exemplar. See
+  [`../model-router/`](../model-router/README.md).
+- **review-fleet** — C36/C37 generalize the forge + Slack config it uses; C37 is the seam its C18
+  progress feed posts through. See [`../review-fleet/`](../review-fleet/README.md).
+
+## Decisions of record (2026-09-08)
+
+1. **Two-tier model** — operator-global bootstrap stays TOML; domain + per-tenant config → protobuf
+   cards. No TOML rip-out.
+2. **Design docs only** this pass.
+3. **Fully specify now:** auth+RBAC, per-tenant config, multi-forge, generic messaging. (LLM/pool +
+   per-tenant prompt storage sketched lighter — they largely exist.)
+4. **Auth = OIDC/JWT bearer** — interceptor verifies the token, derives tenant+roles, ignores the client
+   header.
+5. **Config storage = transactional SQL (OLTP), separate from telemetry.** file → sqlite → **postgres**
+   behind one store trait; **ClickHouse never used for config**; atomic multi-card transactions required.
+6. **Topology = per-domain typed services over one shared SQL store** — no generic mega-service.
+
+## Non-goals
+
+- Removing TOML (bootstrap stays TOML).
+- A concrete IdP product choice (beyond "OIDC/JWT bearer").
+- A third identity tier (`org → team → user`) in v1 — noted extension only.
+- Using ClickHouse for config.
+- Re-specifying multi-tenancy C29–C31 (referenced, not duplicated).
