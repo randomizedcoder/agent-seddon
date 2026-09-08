@@ -227,6 +227,18 @@ while :; do
     if [ -n "$p" ] && [ -s "$p" ]; then FOUND[$i]="$p"; echo "fleet-e2e: draft for ${REPOS[$i]} #${PRS[$i]} → $p"; else all=0; fi
   done
   [ "$all" = 1 ] && break
+  # Fast-fail: a review that reaches max_iterations / errors is terminal (one-shot ReviewNow,
+  # no retry). Once every not-yet-drafted row has a failure logged, stop now instead of
+  # polling to the deadline — a review that FAILED is a MODEL-QUALITY (2) outcome.
+  fails="$(grep -c "review run failed (no draft)" "$srv_log" 2>/dev/null)"
+  found_n=0; for i in "${!REPOS[@]}"; do [ -n "${FOUND[$i]}" ] && found_n=$((found_n + 1)); done
+  if [ $((found_n + fails)) -ge "${#REPOS[@]}" ]; then
+    echo "FAIL: $fails review(s) produced no draft (the model did not conclude)" >&2
+    tail -n 30 "$srv_log" >&2
+    echo "  raise AGENT_FLEET_E2E_MAX_ITERS / _TIMEOUT, or use a stronger generator." >&2
+    if grep -q "review trigger failed" "$srv_log"; then rc=1; else rc=2; fi
+    break
+  fi
   if ! kill -0 "$srv_pid" 2>/dev/null; then echo "FAIL(harness): server died before all drafts landed" >&2; tail -n 40 "$srv_log" >&2; rc=1; break; fi
   if [ "$SECONDS" -ge "$deadline" ]; then
     echo "FAIL: timed out after ${DRAFT_TIMEOUT}s waiting for drafts" >&2
