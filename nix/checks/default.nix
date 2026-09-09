@@ -59,6 +59,11 @@ in
   # DB dep). The dedicated, feature-scoped check that runs them in the gate — the
   # config-architecture A1 twin of fleet-sqlite. docs/design/config/09-increments.md.
   config-store-sqlite = craneCheck ./config-store-sqlite.nix { inherit cargoArtifacts; };
+  # Executes the shared-store `ProviderRegistry` backend (`StoreRegistry`) matrix
+  # over the in-memory config store (feature `registry-store`, off by default so
+  # the main `test` check never builds the store dep). The config-architecture A3
+  # registry-convergence twin of config-store-sqlite. docs/design/config/09-increments.md.
+  registry-store = craneCheck ./registry-store.nix { inherit cargoArtifacts; };
   # Executes the real `tiktoken` BPE tokenizer backend's tests (feature
   # `tokenizer-tiktoken`, off by default so the standard build ships no vocab). The
   # feature-scoped check that runs them in the gate. Parity spec 23; offline

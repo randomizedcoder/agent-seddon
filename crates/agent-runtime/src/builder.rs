@@ -2733,6 +2733,19 @@ pub(crate) fn resolve_provider_registry(
             );
             Some(Arc::new(agent_grpc::client::GrpcRegistry::connect(&ep)?))
         }
+        // The shared-store arm (config C41 / A3): persist onto the `[config_store]`
+        // Postgres backend via `StoreRegistry`, reusing the same `ops`/`decide` as
+        // the file/sqlite tiers. The DSN comes from `[config_store] dsn_ref` (a
+        // reference, never inline); the schema is the shared config-store tables.
+        #[cfg(feature = "registry-postgres")]
+        "postgres" => {
+            let backend = crate::store_backend::pg_backend(&cfg.config_store)?;
+            Some(Arc::new(agent_registry::StoreRegistry::new(backend)))
+        }
+        #[cfg(not(feature = "registry-postgres"))]
+        "postgres" => anyhow::bail!(
+            "[registry] store = \"postgres\" requires building with the `registry-postgres` feature"
+        ),
         other => anyhow::bail!("unknown [registry] store `{other}`"),
     };
     Ok(store.map(|s| crate::metered::registry(s, metrics.clone())))

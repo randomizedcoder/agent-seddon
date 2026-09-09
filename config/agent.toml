@@ -575,10 +575,13 @@ cooldown_secs       = 30          # how long a breaker stays open before re-prob
 # why"), Health. Cards carry `api_key_ref` REFERENCES (env:NAME / file:/path),
 # never secrets — keys resolve on the host that builds the provider.
 # [registry]
-# store = "file"                      # "file" (default) | "sqlite" | "grpc" | "" (off)
+# store = "file"                      # "file" (default) | "sqlite" | "postgres" | "grpc" | "" (off)
 # file  = ".agent/model-router.textproto"  # file backend; model_router_config wins when set
 # path  = ".agent/model-router.sqlite3"    # sqlite backend (feature registry-sqlite)
 # refresh_secs = 5                    # registry-backed router snapshot interval (0 = every call)
+# store = "postgres" persists the registry onto the shared transactional config
+# store (config C41 / A3) — the [config_store] block below supplies the DSN and
+# pool. Needs the `registry-postgres` feature (a live Postgres server, opt-in).
 
 # The consensus gate (cognition-graph increment 01): every final answer is generated
 # by `generator` and challenged by `critic` (ideally a DIFFERENT model family) in a

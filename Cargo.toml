@@ -229,6 +229,7 @@ agent-prompt = { path = "crates/agent-prompt" }
 agent-digest = { path = "crates/agent-digest" }
 agent-graph = { path = "crates/agent-graph" }
 agent-registry = { path = "crates/agent-registry" }
+agent-config-store = { path = "crates/agent-config-store" }
 agent-metrics-proxy = { path = "crates/agent-metrics-proxy", default-features = false }
 agent-tokenizer = { path = "crates/agent-tokenizer", default-features = false }
 agent-web = { path = "crates/agent-web", default-features = false }

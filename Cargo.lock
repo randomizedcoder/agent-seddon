@@ -399,6 +399,7 @@ dependencies = [
 name = "agent-registry"
 version = "0.1.0"
 dependencies = [
+ "agent-config-store",
  "agent-core",
  "agent-proto",
  "agent-providers",
@@ -460,6 +461,7 @@ version = "0.1.0"
 dependencies = [
  "agent-ast",
  "agent-cache",
+ "agent-config-store",
  "agent-context",
  "agent-core",
  "agent-digest",

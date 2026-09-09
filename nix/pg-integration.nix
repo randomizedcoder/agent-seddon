@@ -59,7 +59,7 @@ pkgs.writeShellApplication {
     # which resets the tables and connects (see crates/agent-config-store/src/tests.rs).
     export AGENT_CONFIG_STORE_TEST_DSN="postgres://${versions.postgresUser}:${versions.postgresPassword}@127.0.0.1:${toString versions.postgresPort}/${versions.postgresDatabase}"
 
-    echo "==> pg-integration: running the ignored postgres suite"
+    echo "==> pg-integration: running the ignored config-store postgres suite"
     set +e
     # Single-threaded: the shared DB is reset per test, so tests must not race.
     nix develop --extra-experimental-features 'nix-command flakes' -c \
@@ -70,6 +70,18 @@ pkgs.writeShellApplication {
     # A failing test is the very thing this tier exists to catch → CONTRACT (2).
     if [ "$rc" -ne 0 ]; then note_fail 2; fi
 
-    contract_exit "PASS: pg-integration — postgres config-store suite green."
+    # The registry convergence (config C41 / A3): the same real server proves the
+    # `StoreRegistry` postgres arm (CRUD + routing agree with memory). A dedicated
+    # tenant keeps it isolated, so it may share the DB with the suite above.
+    echo "==> pg-integration: running the ignored registry postgres suite"
+    set +e
+    nix develop --extra-experimental-features 'nix-command flakes' -c \
+      cargo test -p agent-registry --features registry-store-postgres \
+      -- --ignored --test-threads=1
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then note_fail 2; fi
+
+    contract_exit "PASS: pg-integration — postgres config-store + registry suites green."
   '';
 }

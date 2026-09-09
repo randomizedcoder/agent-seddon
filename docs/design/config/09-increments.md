@@ -119,6 +119,16 @@ The two keystones (A, B) are **independent** and may land in either order or in 
   proof) + new shared-store rows; grpc parity unchanged.
 - **DoD.** Pre-existing registry tests green with **zero assertion changes**; postgres arm exercised via
   the PG harness; gate green; gated PR.
+- **Build note (A3 shipped).** Per grounded decision #2 (keep `rusqlite` for `file`/`sqlite`, add
+  `postgres` as the new tier), the legacy `Memory`/`File`/`Sqlite` registry backends are **untouched** —
+  so their tests pass unchanged *by construction*. The convergence lands as a new `StoreRegistry`
+  (`crates/agent-registry/src/store.rs`, feature `registry-store`) that implements `ProviderRegistry` over
+  any `agent_config_store::Backend` (memory/file/sqlite/**postgres**), reusing the shared `ops`/`decide` and
+  the same `pb::Upstream`/`pb::RoutePolicy` blobs as the SQLite tier (upstreams + one policy card;
+  single-tenant `local` until C2). `resolve_provider_registry` gains the `postgres` arm
+  (feature `registry-postgres`), building it over a lazily-connecting `PgBackend` from `[config_store]`.
+  In-gate tests run `StoreRegistry` over `MemoryBackend` (agreeing with `MemoryRegistry`); the postgres arm
+  runs `#[ignore]`-gated under `nix run .#integration`.
 
 ### Phase A3b — Converge `agent-review-fleet` (the clean twin)
 

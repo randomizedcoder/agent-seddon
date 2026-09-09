@@ -11,6 +11,15 @@ default = []
 # embedded SQLite, off by default so a normal build stays dependency-free
 # (mirrors agent-prompt's `prompt-sqlite`).
 registry-sqlite = ["dep:rusqlite", "dep:prost"]
+# The shared-store `ProviderRegistry` backend (config C41 / A3): reimplements the
+# registry over `agent-config-store::Backend` (cards as the same prost blobs the
+# sqlite tier uses), reusing the shared `ops`/`decide` so behaviour is identical.
+# Off by default — the legacy `Memory`/`File`/`Sqlite` backends are untouched.
+registry-store = ["dep:agent-config-store", "dep:prost"]
+# The Postgres arm of the shared-store backend: forwards to `agent-config-store`'s
+# own `config-store-postgres` (sqlx) tier. Off by default; NOT hermetic (needs a
+# live server), so its tests are `#[ignore]`-gated (run via `nix run .#integration`).
+registry-store-postgres = ["registry-store", "agent-config-store/config-store-postgres"]
 # dhat-instrumented leak/allocation tests (tests/leak.rs).
 dhat-heap = ["dep:dhat"]
 
@@ -24,6 +33,9 @@ agent-proto.workspace = true
 # exactly the ordering the TaskRouter would produce (the module is feature-free).
 agent-providers.workspace = true
 async-trait.workspace = true
+# The shared transactional store the `registry-store` backend persists onto
+# (config C41 / A3). Optional: a default build keeps the legacy backends only.
+agent-config-store = { workspace = true, optional = true }
 prost = { workspace = true, optional = true }
 prost-reflect.workspace = true
 rusqlite = { workspace = true, optional = true }

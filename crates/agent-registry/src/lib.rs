@@ -33,6 +33,10 @@ pub use file::FileRegistry;
 pub mod sqlite;
 #[cfg(feature = "registry-sqlite")]
 pub use sqlite::SqliteRegistry;
+#[cfg(feature = "registry-store")]
+pub mod store;
+#[cfg(feature = "registry-store")]
+pub use store::StoreRegistry;
 
 /// Answer the `Route` introspection question over a config snapshot: what would
 /// the `TaskRouter` pick for `hint`, and why. Pure and deterministic — it runs
