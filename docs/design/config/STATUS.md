@@ -50,7 +50,7 @@ of done — is [`09-increments.md`](09-increments.md). This table is the **live 
 | A3 | Converge `agent-registry` (behavior-preserving) | ⬜ | — | A2 |
 | A3b | Converge `agent-review-fleet` | ⬜ | — | A2 |
 | A3c | Converge `agent-prompt` (outlier) | ⬜ | — | A2 |
-| B1 | `AuthInterceptor` tower layer + JWKS/JWT + `[auth]` | 🟡 | (pending) | — |
+| B1 | `AuthInterceptor` tower layer + JWKS/JWT + `[auth]` | 🟡 | [#295](https://github.com/randomizedcoder/agent-seddon/pull/295) | — |
 | C1 | C34 RBAC (roles/permissions as cards) | ⬜ | — | B1, A1 |
 | C2 | C35 per-tenant plane (+ C38 prompt) | ⬜ | — | B1, A3 |
 | D1 | C36 forge registry | ⬜ | — | A1 (+C2 per-tenant) |
