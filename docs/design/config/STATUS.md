@@ -45,7 +45,7 @@ of done — is [`09-increments.md`](09-increments.md). This table is the **live 
 
 | Phase | Component | State | PR | Depends on |
 |---|---|---|---|---|
-| A1 | `agent-config-store` crate: file+sqlite tiers + txn API | 🟡 | (pending) | — |
+| A1 | `agent-config-store` crate: file+sqlite tiers + txn API | 🟡 | [#294](https://github.com/randomizedcoder/agent-seddon/pull/294) | — |
 | A2 | Postgres tier + `[config_store]` bootstrap + opt-in DB harness | ⬜ | — | A1 |
 | A3 | Converge `agent-registry` (behavior-preserving) | ⬜ | — | A2 |
 | A3b | Converge `agent-review-fleet` | ⬜ | — | A2 |
