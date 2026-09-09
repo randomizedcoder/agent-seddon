@@ -40,21 +40,22 @@ Each is a **gated PR off `main`, never stacked** (the established cadence); new 
 ### Executable increments (phase-by-phase)
 
 The full build sequence — eleven gated PRs, each with scope, anchored key files, tests, and a definition
-of done — is [`09-increments.md`](09-increments.md). Summary (all ⬜):
+of done — is [`09-increments.md`](09-increments.md). This table is the **live tracker**: **State** moves
+⬜ not started → 🟡 in review → ✅ merged, and **PR** carries the number as each phase opens.
 
-| Phase | Component | State | Depends on |
-|---|---|---|---|
-| A1 | `agent-config-store` crate: file+sqlite tiers + txn API | ⬜ | — |
-| A2 | Postgres tier + `[config_store]` bootstrap + opt-in DB harness | ⬜ | A1 |
-| A3 | Converge `agent-registry` (behavior-preserving) | ⬜ | A2 |
-| A3b | Converge `agent-review-fleet` | ⬜ | A2 |
-| A3c | Converge `agent-prompt` (outlier) | ⬜ | A2 |
-| B1 | `AuthInterceptor` tower layer + JWKS/JWT + `[auth]` | ⬜ | — |
-| C1 | C34 RBAC (roles/permissions as cards) | ⬜ | B1, A1 |
-| C2 | C35 per-tenant plane (+ C38 prompt) | ⬜ | B1, A3 |
-| D1 | C36 forge registry | ⬜ | A1 (+C2 per-tenant) |
-| D2 | C37 message-transport registry | ⬜ | A1 (+C2 per-tenant) |
-| E1 | C40 control-plane consolidation | ⬜ | B1, C1, C2 |
+| Phase | Component | State | PR | Depends on |
+|---|---|---|---|---|
+| A1 | `agent-config-store` crate: file+sqlite tiers + txn API | 🟡 | [#294](https://github.com/randomizedcoder/agent-seddon/pull/294) | — |
+| A2 | Postgres tier + `[config_store]` bootstrap + opt-in DB harness | ⬜ | — | A1 |
+| A3 | Converge `agent-registry` (behavior-preserving) | ⬜ | — | A2 |
+| A3b | Converge `agent-review-fleet` | ⬜ | — | A2 |
+| A3c | Converge `agent-prompt` (outlier) | ⬜ | — | A2 |
+| B1 | `AuthInterceptor` tower layer + JWKS/JWT + `[auth]` | ⬜ | — | — |
+| C1 | C34 RBAC (roles/permissions as cards) | ⬜ | — | B1, A1 |
+| C2 | C35 per-tenant plane (+ C38 prompt) | ⬜ | — | B1, A3 |
+| D1 | C36 forge registry | ⬜ | — | A1 (+C2 per-tenant) |
+| D2 | C37 message-transport registry | ⬜ | — | A1 (+C2 per-tenant) |
+| E1 | C40 control-plane consolidation | ⬜ | — | B1, C1, C2 |
 
 ## Dependencies (cross-track)
 

@@ -49,6 +49,11 @@ in
   # feature-scoped check that runs them in the gate — the review-fleet C2 twin of
   # prompt-sqlite. docs/design/review-fleet/03-fleet-core.md.
   fleet-sqlite = craneCheck ./fleet-sqlite.nix { inherit cargoArtifacts; };
+  # Executes the sqlite config-store backend's trait matrix (feature
+  # `config-store-sqlite`, off by default so the main `test` check never builds the
+  # DB dep). The dedicated, feature-scoped check that runs them in the gate — the
+  # config-architecture A1 twin of fleet-sqlite. docs/design/config/09-increments.md.
+  config-store-sqlite = craneCheck ./config-store-sqlite.nix { inherit cargoArtifacts; };
   # Executes the real `tiktoken` BPE tokenizer backend's tests (feature
   # `tokenizer-tiktoken`, off by default so the standard build ships no vocab). The
   # feature-scoped check that runs them in the gate. Parity spec 23; offline
