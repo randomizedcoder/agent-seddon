@@ -28,7 +28,7 @@ mod search;
 mod session_events;
 pub mod session_store;
 pub mod skills;
-#[cfg(feature = "registry-postgres")]
+#[cfg(any(feature = "registry-postgres", feature = "fleet-postgres"))]
 mod store_backend;
 #[cfg(feature = "structured")]
 pub mod structured;

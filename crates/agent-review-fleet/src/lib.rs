@@ -34,6 +34,10 @@ pub use poll::{poll_session, PollReport, MAX_POLL_PAGES, MAX_TRIGGERS_PER_TICK};
 pub mod sqlite;
 #[cfg(feature = "fleet-sqlite")]
 pub use sqlite::SqliteFleet;
+#[cfg(feature = "fleet-store")]
+pub mod store;
+#[cfg(feature = "fleet-store")]
+pub use store::StoreFleet;
 
 /// Shared fail-closed id gate for lookups: a hostile id is rejected before it is
 /// compared (and before it could reach a storage path in any backend).

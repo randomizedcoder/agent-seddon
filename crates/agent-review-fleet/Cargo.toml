@@ -11,11 +11,21 @@ default = []
 # SQLite BLOB, off by default so a normal build stays dependency-free (mirrors
 # agent-registry's `registry-sqlite`).
 fleet-sqlite = ["dep:rusqlite"]
+# The shared-store `FleetRegistry` backend (config C41 / A3b): the roster persists
+# onto `agent-config-store` (memory/file/sqlite), the same JSON rows. Off by default.
+fleet-store = ["dep:agent-config-store"]
+# The Postgres arm of the shared-store backend: forwards to `agent-config-store`'s
+# `config-store-postgres` (sqlx) tier. Off by default; NOT hermetic (needs a live
+# server), so its tests are `#[ignore]`-gated (run via `nix run .#integration`).
+fleet-store-postgres = ["fleet-store", "agent-config-store/config-store-postgres"]
 
 [dependencies]
 agent-core.workspace = true
 async-trait.workspace = true
 serde_json.workspace = true
+# The shared transactional config store the `fleet-store` backend persists onto
+# (config C41 / A3b). Optional: a default build keeps the legacy backends only.
+agent-config-store = { workspace = true, optional = true }
 # The orchestrator's bounded trigger queue (mpsc) + coalesce/state logging.
 tokio = { workspace = true }
 tracing.workspace = true
