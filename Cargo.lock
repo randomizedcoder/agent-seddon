@@ -460,6 +460,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-role"
+version = "0.1.0"
+dependencies = [
+ "agent-config-store",
+ "agent-core",
+ "agent-proto",
+ "async-trait",
+ "prost",
+ "rstest",
+ "tokio",
+]
+
+[[package]]
 name = "agent-runtime"
 version = "0.1.0"
 dependencies = [
@@ -488,6 +501,7 @@ dependencies = [
  "agent-registry",
  "agent-review",
  "agent-review-fleet",
+ "agent-role",
  "agent-sandbox",
  "agent-scanner",
  "agent-scheduler",

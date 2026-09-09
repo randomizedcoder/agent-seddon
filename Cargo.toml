@@ -15,6 +15,7 @@ members = [
     "crates/agent-digest",
     "crates/agent-graph",
     "crates/agent-registry",
+    "crates/agent-role",
     "crates/agent-config-store",
     "crates/agent-metrics-proxy",
     "crates/agent-tokenizer",
@@ -229,6 +230,7 @@ agent-prompt = { path = "crates/agent-prompt" }
 agent-digest = { path = "crates/agent-digest" }
 agent-graph = { path = "crates/agent-graph" }
 agent-registry = { path = "crates/agent-registry" }
+agent-role = { path = "crates/agent-role" }
 agent-config-store = { path = "crates/agent-config-store" }
 agent-metrics-proxy = { path = "crates/agent-metrics-proxy", default-features = false }
 agent-tokenizer = { path = "crates/agent-tokenizer", default-features = false }

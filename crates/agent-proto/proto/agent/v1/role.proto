@@ -1,0 +1,68 @@
+// The operator-defined-role control plane (config design C34, increment C1b): RBAC
+// role *cards* as a CRUD control plane, so an operator adds/edits/removes roles at
+// runtime and they take effect on the authorization gate — beyond the three
+// built-in roles (`operator`/`org_admin`/`reader`) the enforcement core (C1) ships.
+// Mirrors `ProviderRegistryService`/`ReviewFleetService` (one process holds the
+// role store while any number of clients drive it).
+//
+// Security contract:
+//   - `id` is untrusted (it may become a storage-path segment): the server
+//     validates it (`safe_segment`) and REJECTS a reserved built-in name — an
+//     operator card can never shadow `operator`/`org_admin`/`reader`.
+//   - Actions and resource-types ride as VALIDATED STRINGS (matching
+//     `agent_core::{Action,ResourceType}::parse`), not protobuf enums — this keeps
+//     the wire additive without an enum-prefix lint carve-out. An unknown action or
+//     resource string is rejected with `InvalidArgument` on ingest.
+//   - Roles are per-tenant CARDS on the shared config store; `roles` originate here
+//     only for a control-plane operator, never from a request's own claims.
+syntax = "proto3";
+
+package agent.v1;
+
+// One `(action, resource_type)` grant — both validated strings (e.g.
+// `("write", "registry")`, `("approve", "fleet")`).
+message RolePermission {
+  string action = 1;
+  string resource_type = 2;
+}
+
+// An operator-defined role card. Mirrors `agent_core::RoleCard`. The permission
+// shape is a flat, precedence-ordered trio (no oneof): `all` wins; else non-empty
+// `pairs`; else `actions_on_all` (possibly empty ⇒ grants nothing).
+message RoleCard {
+  // Path-safe role name (server-validated; may not reuse a built-in id).
+  string id = 1;
+  // Host-global role — may act in any tenant (like the built-in `operator`).
+  bool crosses_tenants = 2;
+  // Every action on every resource type (an admin role). Takes precedence.
+  bool all = 3;
+  // Actions granted on EVERY resource type (used when `all` is false and `pairs`
+  // is empty). An empty list here (with all=false, no pairs) grants nothing.
+  repeated string actions_on_all = 4;
+  // Explicit grants (used when `all` is false and this list is non-empty).
+  repeated RolePermission pairs = 5;
+}
+
+message RoleListRequest {}
+
+message RoleList {
+  repeated RoleCard roles = 1;
+}
+
+message RoleRef {
+  string id = 1;
+}
+
+message RoleDeleteReply {
+  bool deleted = 1; // false when the id was absent (not an error)
+}
+
+// The role control plane (mirrors ProviderRegistryService: one process holds the
+// role store while any number of clients drive it). Mutations are gated by the RBAC
+// enforcement core (C1) — a caller needs a role granting `(write|delete, role)`.
+service RoleService {
+  rpc List(RoleListRequest) returns (RoleList);
+  rpc Get(RoleRef) returns (RoleCard);
+  rpc Put(RoleCard) returns (RoleCard); // upsert = create + update
+  rpc Delete(RoleRef) returns (RoleDeleteReply);
+}

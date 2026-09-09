@@ -144,6 +144,11 @@ pub struct Agent {
     /// the full fleet process that admits + drives sessions from it arrives in
     /// review-fleet 3c.
     fleet_registry: Option<Arc<dyn agent_core::FleetRegistry>>,
+    /// The RBAC role-card store, held for `--serve-role` (config C1b): the
+    /// operator-defined role cards the control-plane gate authorizes against, atop
+    /// the three immutable built-ins. Present ⇒ the catalog snapshot was installed at
+    /// startup; `None` ⇒ the gate uses the built-ins alone (C1 behaviour).
+    role_registry: Option<Arc<dyn agent_core::RoleRegistry>>,
     /// The fleet's persisted review-history reader (review-fleet C16), held for
     /// `--serve-fleet`: the ClickHouse-backed [`agent_core::FleetHistory`] the orchestrator
     /// consults for precise head-oid dedup + cross-round carry-forward. `None` ⇒ telemetry
@@ -548,6 +553,7 @@ impl Agent {
             config_store: None,
             provider_registry: None,
             fleet_registry: None,
+            role_registry: None,
             fleet_history: None,
             system_fragments: agent_context::system_fragments::SystemFragments::defaults(),
             metrics_proxy: None,
@@ -860,6 +866,14 @@ impl Agent {
         self
     }
 
+    /// Attach the RBAC role-card store (config C1b), so it can be hosted over gRPC
+    /// (`--serve-role`). Not consumed by the loop; the control-plane gate reads the
+    /// ambient catalog snapshot the builder installs from this store at startup.
+    pub fn with_role_registry(mut self, r: Arc<dyn agent_core::RoleRegistry>) -> Self {
+        self.role_registry = Some(r);
+        self
+    }
+
     /// Attach the fleet's persisted review-history reader (review-fleet C16), consulted by
     /// the fleet orchestrator for head-oid dedup + cross-round carry-forward.
     pub fn with_fleet_history(mut self, h: Arc<dyn agent_core::FleetHistory>) -> Self {
@@ -1142,6 +1156,11 @@ impl Agent {
     /// (`--serve-fleet`).
     pub fn fleet_registry(&self) -> Option<Arc<dyn agent_core::FleetRegistry>> {
         self.fleet_registry.clone()
+    }
+
+    /// The RBAC role-card store, if `[role] store` is configured (`--serve-role`).
+    pub fn role_registry(&self) -> Option<Arc<dyn agent_core::RoleRegistry>> {
+        self.role_registry.clone()
     }
 
     /// Fleet capacity caps (`[review_fleet] max_total`, `max_per_user`) for

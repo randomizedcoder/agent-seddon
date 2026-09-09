@@ -271,6 +271,18 @@
       metrics_port = 9636;
     };
 
+    # RBAC role cards (config C1b): the `RoleService` seam — CRUD over the
+    # operator-defined role cards the control-plane gate authorizes against, atop
+    # the three immutable built-ins (operator/org_admin/reader). A successful
+    # Put/Delete rebuilds the ambient catalog snapshot in-process, so a role edit
+    # takes effect for the next request. Cards carry action/resource strings, never
+    # secrets. (`agent --serve-role`.)
+    role = {
+      port = 50087;
+      socket = "/tmp/agent-seddon/role.sock";
+      metrics_port = 9637;
+    };
+
     # NOT a seam: the opt-in `agent --serve-sessions` gateway (docs/design/portal),
     # which hosts the `SessionRegistryService` (open/close/heartbeat) plus a
     # *driving* `AgentSessionService` (the `Send` RPC — submit a goal, stream the

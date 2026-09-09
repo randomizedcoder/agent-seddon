@@ -211,6 +211,15 @@ The two keystones (A, B) are **independent** and may land in either order or in 
   serve-smoke (tcp+uds).
 - **DoD.** `authorize` gates all control-plane RPCs; decision table green in-gate; serve-smoke green; buf
   additive (no bump); gate green; gated PR.
+- **Split as built.** C1 shipped the **enforcement core only** (#297): `authorize` + a deny-by-default gate
+  on every mutating control-plane RPC, using the three built-in roles (`operator`/`org_admin`/`reader`) —
+  no persisted cards, no seam. **C1b** (this phase's fast-follow) adds the operator-defined **role cards**:
+  `role.proto` (additive; action/resource as validated **strings**, not enums, to sidestep buf
+  `ENUM_VALUE_PREFIX`), the `agent-role` crate (`StoreRoles` over the C41 shared store, `RoleRegistry`
+  seam + `RoleCard` core type), the `RoleService` seam (`--serve-role`, port 50087), and an **ambient
+  catalog snapshot** (`agent_core::current_catalog`/`install_catalog`) the gate reads — `builtin ∪ persisted
+  cards`, rebuilt at startup and after each `Put`/`Delete`. Uninstalled ⇒ the gate uses the built-ins alone,
+  exactly like C1 (so `mode=none` and every C1 test are unperturbed). Single-tenant `local` until C2.
 
 ### Phase C2 — C35 per-tenant plane (+ C38 prompt) (needs B1 + A3)
 

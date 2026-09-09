@@ -74,6 +74,7 @@ let
     ${seamConst "PROVIDER_REGISTRY" g.provider_registry}
     ${seamConst "CONFIG" g.config}
     ${seamConst "FLEET" g.fleet}
+    ${seamConst "ROLE" g.role}
 
     /// The opt-in `agent --serve-sessions` gateway (not a seam — it hosts the
     /// session registry + a driving `AgentSessionService`).

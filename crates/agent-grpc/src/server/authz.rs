@@ -23,7 +23,7 @@
 //! *model* may run; this decides what an authenticated *operator* may reconfigure.
 
 use agent_core::{
-    authorize, builtin_catalog, current_principal, AccessDecision, Action, Resource, ResourceType,
+    authorize, current_catalog, current_principal, AccessDecision, Action, Resource, ResourceType,
 };
 use tonic::Status;
 
@@ -38,7 +38,10 @@ pub(crate) fn require(action: Action, resource_type: ResourceType) -> Result<(),
     };
     // These RPCs act only on the caller's own tenant.
     let resource = Resource::new(resource_type, principal.tenant.clone());
-    match authorize(builtin_catalog(), &principal, action, &resource) {
+    // The ambient catalog snapshot: `builtin ∪ persisted role cards` when a role
+    // registry has been wired (C1b), else the built-ins alone — so an install that
+    // never persisted a role card gates exactly as C1 did.
+    match authorize(&current_catalog(), &principal, action, &resource) {
         AccessDecision::Allow => Ok(()),
         AccessDecision::Deny(_) => Err(Status::permission_denied("permission denied")),
     }
@@ -97,6 +100,27 @@ mod tests {
     async fn corner_no_roles_denied() {
         principal_scope(principal("acme", &[]), async {
             assert!(require(Action::Delete, ResourceType::Fleet).is_err());
+        })
+        .await;
+    }
+
+    // desc: the gate authorizes against the INSTALLED catalog snapshot, so a
+    // persisted (non-builtin) role grants exactly its permission. Installs a strict
+    // superset of the built-ins, so it cannot perturb the other (parallel) tests.
+    #[tokio::test]
+    async fn positive_gate_uses_installed_catalog() {
+        use agent_core::{install_catalog, Action, ResourceType, RoleCatalog, RoleDef};
+        let mut cat = RoleCatalog::builtin();
+        cat.insert(
+            "auditor",
+            RoleDef::pairs(false, vec![(Action::Approve, ResourceType::Config)]),
+        );
+        install_catalog(cat);
+        principal_scope(principal("acme", &["auditor"]), async {
+            // The granted pair passes the gate…
+            assert!(require(Action::Approve, ResourceType::Config).is_ok());
+            // …a different action for that role is still denied (deny-by-default).
+            assert!(require(Action::Delete, ResourceType::Config).is_err());
         })
         .await;
     }
