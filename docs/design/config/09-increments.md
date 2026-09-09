@@ -135,6 +135,14 @@ The two keystones (A, B) are **independent** and may land in either order or in 
 - **Scope.** Same shape as A3 for `trait FleetRegistry` (`crates/agent-core/src/lib.rs:2952`; note the
   `set_enabled` verb, JSON codec).
 - **DoD.** Existing fleet suite green **unchanged** + postgres arm via the PG harness; gate green; gated PR.
+- **Build note (A3b shipped).** Same shape as A3: the legacy `Memory`/`File`/`Sqlite` fleet backends are
+  **untouched**, and the convergence lands as a new `StoreFleet`
+  (`crates/agent-review-fleet/src/store.rs`, feature `fleet-store`) over any `agent_config_store::Backend`,
+  reusing the shared `ops` and the same **JSON** roster rows the file/sqlite tiers store (one collection,
+  `fleet_sessions`; single-tenant `local` until C2). `resolve_fleet_registry` gains the `postgres` arm
+  (feature `fleet-postgres`) over the shared `store_backend::pg_backend`. In-gate:
+  `nix/checks/fleet-store.nix` runs `StoreFleet` over `MemoryBackend` (agreeing with `MemoryFleet`); the
+  postgres arm runs `#[ignore]`-gated under `nix run .#integration`.
 
 ### Phase A3c — Converge `agent-prompt` (the outlier)
 

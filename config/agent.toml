@@ -168,6 +168,10 @@ auto_index   = true
 # triggers, and control plane arrive in later increments.
 [review_fleet]
 root = ""                    # empty ⇒ unset (shared agent.working_dir); tilde-expanded
+# store = "file"             # "" (off) | "file" | "sqlite" | "postgres" | "grpc"
+# store = "postgres" persists the roster onto the shared transactional config store
+# (config C41 / A3b) — the [config_store] block supplies the DSN and pool. Needs the
+# `fleet-postgres` feature (a live Postgres server, opt-in).
 
 # Tokenizer (the Tokenizer seam): accurate per-model token counts that drive
 # compaction budgeting + USD/cache cost accounting, replacing the ~chars/4

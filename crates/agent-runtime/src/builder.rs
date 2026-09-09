@@ -2783,6 +2783,18 @@ pub(crate) fn resolve_fleet_registry(
             );
             Some(Arc::new(agent_grpc::client::GrpcFleet::connect(&ep)?))
         }
+        // The shared-store arm (config C41 / A3b): persist the roster onto the
+        // `[config_store]` Postgres backend via `StoreFleet`, reusing the same
+        // `ops` as the file/sqlite tiers. DSN from `[config_store] dsn_ref`.
+        #[cfg(feature = "fleet-postgres")]
+        "postgres" => {
+            let backend = crate::store_backend::pg_backend(&cfg.config_store)?;
+            Some(Arc::new(agent_review_fleet::StoreFleet::new(backend)))
+        }
+        #[cfg(not(feature = "fleet-postgres"))]
+        "postgres" => anyhow::bail!(
+            "[review_fleet] store = \"postgres\" requires building with the `fleet-postgres` feature"
+        ),
         other => anyhow::bail!("unknown [review_fleet] store `{other}`"),
     };
     Ok(store)
