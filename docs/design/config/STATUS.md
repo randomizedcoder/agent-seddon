@@ -4,7 +4,8 @@ Legend: ⬜ designed, not built · 🟡 partially built · ✅ built + merged.
 
 **Track state: 🟡 building.** The design-of-record was written 2026-09-08; the phased build is now under
 way (see the live tracker below). Both keystones are merged — A1 `agent-config-store` (#294) and B1 the
-auth tower layer (#295); A2 (the Postgres tier, #296) and C1 (the RBAC enforcement core) are in review.
+auth tower layer (#295) — and A2 (the Postgres tier, #296). C1 (the RBAC enforcement core, #297) is in
+review.
 
 ## Components
 
@@ -46,7 +47,7 @@ of done — is [`09-increments.md`](09-increments.md). This table is the **live 
 | Phase | Component | State | PR | Depends on |
 |---|---|---|---|---|
 | A1 | `agent-config-store` crate: file+sqlite tiers + txn API | ✅ | [#294](https://github.com/randomizedcoder/agent-seddon/pull/294) | — |
-| A2 | Postgres tier + `[config_store]` bootstrap + opt-in DB harness | 🟡 | [#296](https://github.com/randomizedcoder/agent-seddon/pull/296) | A1 |
+| A2 | Postgres tier + `[config_store]` bootstrap + opt-in DB harness | ✅ | [#296](https://github.com/randomizedcoder/agent-seddon/pull/296) | A1 |
 | A3 | Converge `agent-registry` (behavior-preserving) | ⬜ | — | A2 |
 | A3b | Converge `agent-review-fleet` | ⬜ | — | A2 |
 | A3c | Converge `agent-prompt` (outlier) | ⬜ | — | A2 |

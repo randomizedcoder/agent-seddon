@@ -12,6 +12,12 @@ default = []
 # agent-registry's `registry-sqlite`). The DB is compiled in (`rusqlite`
 # `bundled`), so this tier is hermetic in `nix flake check`.
 config-store-sqlite = ["dep:rusqlite"]
+# The `postgres` config-store backend — the same opaque-blob cards over a real
+# Postgres server via `sqlx`, off by default so a normal build stays DB-free.
+# Unlike sqlite this tier is NOT hermetic (it needs a live server), so its tests
+# are `#[ignore]`-gated and run only under `nix run .#integration`; the crate
+# still compiles under this feature with no DB (runtime-checked queries).
+config-store-postgres = ["dep:sqlx"]
 
 [dependencies]
 # The shared error/result vocabulary + the audited `safe_segment` id gate. The
@@ -23,6 +29,7 @@ async-trait.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
 rusqlite = { workspace = true, optional = true }
+sqlx = { workspace = true, optional = true }
 
 [dev-dependencies]
 agent-testkit.workspace = true

@@ -131,6 +131,19 @@ dhat = "0.3"
 # in nix/versions.nix). See docs/design/prompts/05-storage.md.
 rusqlite = { version = "0.32", features = ["bundled"] }
 
+# The Postgres tier of `agent-config-store` (config C41 / A2), behind that crate's
+# non-default `config-store-postgres` feature so a default build / `nix build .#agent`
+# stays DB-free (the hermetic gate exercises only the bundled-SQLite tier). Pure Rust
+# with the existing rustls TLS stack (reqwest already pulls rustls), so no libpq /
+# pkg-config; crane vendors it from Cargo.lock. Runtime-checked queries only (no
+# compile-time `query!` macro), so the crate compiles with no DATABASE_URL. Postgres
+# itself is opt-in — exercised only via `nix run .#integration`, never in-gate. See
+# docs/design/config/09-increments.md (A2).
+sqlx = { version = "0.8", default-features = false, features = [
+  "postgres",
+  "runtime-tokio-rustls",
+] }
+
 # Real OpenAI-family BPE tokenizer, behind agent-tokenizer's non-default
 # `tokenizer-tiktoken` feature so the default build stays hermetic (approx backend
 # only). Pure Rust and OFFLINE — it embeds the `cl100k_base`/`o200k_base` merge

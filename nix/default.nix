@@ -43,6 +43,10 @@ let
         # integration fixtures — `agent-graph/tests/examples.rs` reads them — so the
         # hermetic test/package builds need them in the filtered source.
         || (lib.hasSuffix ".textproto" path)
+        # `agent-config-store`'s postgres tier embeds its schema DDL via
+        # `include_str!("../migrations/*.sql")` (config C41 / A2), so the SQL must
+        # survive the filter or the crate won't compile under `--all-features`.
+        || (lib.hasSuffix ".sql" path)
         # `deny.toml` (cargo-deny config) is not a cargo source file, so the default
         # filter would drop it — keep it for the `cargo-deny` check.
         || (lib.hasSuffix "/deny.toml" path)
@@ -376,6 +380,11 @@ let
   # ClickHouse container apps (up / down / client).
   clickhouse = import ./clickhouse { inherit pkgs lib versions; };
 
+  # Postgres container apps (up / down / client) — the opt-in transactional
+  # config store (agent-config-store postgres tier, config C41 / A2). Only used
+  # via `nix run .#integration` (pg-integration harness); never in-gate.
+  postgres = import ./postgres { inherit pkgs lib versions; };
+
   # ClickStack / HyperDX all-in-one apps (up / down / logs / client) — the OTLP
   # trace receiver + UI.
   clickstack = import ./clickstack { inherit pkgs lib versions; };
@@ -416,6 +425,19 @@ let
   # real endpoint (opt-in; writes response bodies only, never a secret).
   vcr-record = import ./vcr-record.nix { inherit pkgs; };
 
+  # `pg-integration` — the opt-in Postgres tier of agent-config-store (config C41
+  # / A2) against a real server: up → barrier → ignored cargo suite → down. Skips
+  # with a notice when docker is absent. Aggregated by `integration` below.
+  pg-integration = import ./pg-integration.nix {
+    inherit
+      pkgs
+      lib
+      versions
+      ;
+    inherit (postgres) postgres-up postgres-down;
+    inherit (nixLib) harness;
+  };
+
   # `nix run .#integration` — run the whole opt-in integration tier in one shot
   # (the model-free harnesses always, the model tier when AGENT_E2E_* is reachable),
   # orchestrating the apps below as black boxes on the shared 0/1/2 contract.
@@ -427,6 +449,7 @@ let
       loadtest-loop
       loadtest-wire
       serve-smoke
+      pg-integration
       e2e-live
       e2e-expect
       e2e-multi
@@ -514,6 +537,7 @@ in
         loadtest-loop
         loadtest-wire
         serve-smoke
+        pg-integration
         vcr-record
         integration
         soak
@@ -521,6 +545,7 @@ in
         ;
     }
     // mkApps { clickhouse-client = "clickhouse-client-wrapper"; } clickhouse
+    // mkApps { postgres-client = "postgres-client-wrapper"; } postgres
     // mkApps { clickstack-client = "clickstack-client-wrapper"; } clickstack
     // mkApps { } prometheus
     // mkApps { } grafana

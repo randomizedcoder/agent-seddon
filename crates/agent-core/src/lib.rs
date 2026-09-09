@@ -2631,6 +2631,55 @@ impl<'a> ApiKeyRef<'a> {
     }
 }
 
+/// Cap on a `dsn_ref` string (config C41 / A2). A reference, not the DSN, so it
+/// is short; the cap bounds a hostile config value.
+pub const MAX_DSN_REF_LEN: usize = 512;
+
+/// A parsed `[config_store] dsn_ref`: **where the Postgres DSN lives, never the
+/// DSN**. The `agent-config-store` `postgres` tier resolves this on the
+/// consuming host to a connection string that carries a password.
+///
+/// Unlike [`ApiKeyRef`] there is **no `None` variant** — a `postgres` backend
+/// cannot start without a DSN, so an empty or inline value is a hard error, not
+/// "unauthenticated". `env:`/`file:` only; a raw `postgres://user:pw@host/db`
+/// here is exactly the secret-in-config mistake this type prevents, so it fails
+/// closed and the error never echoes the value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DsnRef<'a> {
+    /// Resolve the DSN from this environment variable on the consuming host.
+    Env(&'a str),
+    /// Resolve the DSN from this file (tilde-expanded) on the consuming host.
+    File(&'a str),
+}
+
+impl<'a> DsnRef<'a> {
+    /// Parse the kind-prefixed form. Empty, inline, or any non-`env:`/`file:`
+    /// value is rejected (the error never echoes the value — it may be a DSN
+    /// with an embedded password).
+    pub fn parse(s: &'a str) -> std::result::Result<Self, String> {
+        if s.len() > MAX_DSN_REF_LEN {
+            return Err("dsn_ref too long".into());
+        }
+        if s.is_empty() {
+            return Err("dsn_ref is empty (need `env:NAME` or `file:/path`)".into());
+        }
+        if let Some(name) = s.strip_prefix("env:") {
+            if name.is_empty() {
+                return Err("dsn_ref `env:` names no variable".into());
+            }
+            return Ok(DsnRef::Env(name));
+        }
+        if let Some(path) = s.strip_prefix("file:") {
+            if path.is_empty() {
+                return Err("dsn_ref `file:` names no path".into());
+            }
+            return Ok(DsnRef::File(path));
+        }
+        // Never echo the value: it may BE a DSN with an embedded password.
+        Err("dsn_ref must be `env:NAME` or `file:/path` (never an inline DSN)".into())
+    }
+}
+
 /// Bound an untrusted string for an error message (never echo unbounded input).
 fn truncate_for_log(s: &str) -> String {
     const CAP: usize = 64;
@@ -6695,6 +6744,53 @@ mod tests {
         let err = ApiKeyRef::parse(&overlong).expect_err("over-length rejected");
         assert!(
             !err.contains("xxxx"),
+            "error must not echo the value: {err}"
+        );
+    }
+
+    #[rstest]
+    #[case::positive_env("env:AGENT_CONFIG_STORE_DSN", DsnRef::Env("AGENT_CONFIG_STORE_DSN"))]
+    #[case::positive_file("file:/run/secrets/pg_dsn", DsnRef::File("/run/secrets/pg_dsn"))]
+    #[case::positive_file_tilde("file:~/secrets/dsn", DsnRef::File("~/secrets/dsn"))]
+    fn dsn_ref_parses(#[case] s: &str, #[case] expect: DsnRef<'_>) {
+        assert_eq!(DsnRef::parse(s).expect("parses"), expect);
+    }
+
+    #[rstest]
+    #[case::negative_empty_names_nothing("")]
+    #[case::negative_bare_env_prefix("env:")]
+    #[case::negative_bare_file_prefix("file:")]
+    #[case::negative_wrong_scheme("vault:secret/pg")]
+    #[case::corner_env_lookalike_no_colon("envMY_DSN")]
+    fn dsn_ref_rejects_malformed(#[case] s: &str) {
+        assert!(DsnRef::parse(s).is_err(), "must reject `{s}`");
+    }
+
+    #[rstest]
+    #[case::boundary_at_cap("x".repeat(MAX_DSN_REF_LEN))]
+    #[case::boundary_over_cap("x".repeat(MAX_DSN_REF_LEN + 1))]
+    fn boundary_dsn_ref_length(#[case] body: String) {
+        // Length is checked first; an over-cap value is rejected regardless of
+        // scheme, an at-cap non-scheme value is rejected on scheme.
+        assert!(DsnRef::parse(&body).is_err(), "non-scheme value rejected");
+    }
+
+    /// `adversarial_`: an inline `postgres://user:PASSWORD@host/db` must be
+    /// rejected AND the password never echoed into the error (it would land in
+    /// logs). The value-in-config mistake `DsnRef` exists to prevent.
+    #[test]
+    fn adversarial_dsn_ref_rejects_inline_password() {
+        let dsn = "postgres://admin:s3cr3t-pw@db.internal:5432/config";
+        let err = DsnRef::parse(dsn).expect_err("inline DSN rejected");
+        assert!(
+            !err.contains("s3cr3t-pw"),
+            "error must not echo the password: {err}"
+        );
+        assert!(!err.contains(dsn), "error must not echo the DSN: {err}");
+        let overlong = format!("env:{}", "P".repeat(MAX_DSN_REF_LEN));
+        let err = DsnRef::parse(&overlong).expect_err("over-length rejected");
+        assert!(
+            !err.contains("PPPP"),
             "error must not echo the value: {err}"
         );
     }
