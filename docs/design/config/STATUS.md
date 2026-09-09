@@ -52,7 +52,7 @@ of done — is [`09-increments.md`](09-increments.md). This table is the **live 
 | A2 | Postgres tier + `[config_store]` bootstrap + opt-in DB harness | ✅ | [#296](https://github.com/randomizedcoder/agent-seddon/pull/296) | A1 |
 | A3 | Converge `agent-registry` (behavior-preserving) | ✅ | [#298](https://github.com/randomizedcoder/agent-seddon/pull/298) | A2 |
 | A3b | Converge `agent-review-fleet` | ✅ | [#299](https://github.com/randomizedcoder/agent-seddon/pull/299) | A2 |
-| A3c | Converge `agent-prompt` (outlier) | 🟡 | (this PR) | A2 |
+| A3c | Converge `agent-prompt` (outlier) | 🟡 | [#300](https://github.com/randomizedcoder/agent-seddon/pull/300) | A2 |
 | B1 | `AuthInterceptor` tower layer + JWKS/JWT + `[auth]` | ✅ | [#295](https://github.com/randomizedcoder/agent-seddon/pull/295) | — |
 | C1 | C34 RBAC enforcement core (`authorize` + gate all control-plane RPCs) | 🟡 | [#297](https://github.com/randomizedcoder/agent-seddon/pull/297) | B1, A1 |
 | C1b | RBAC role cards + `RoleService` seam (needs the shared store) | ⬜ | — | C1, A3 |
