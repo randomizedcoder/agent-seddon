@@ -15,6 +15,7 @@ members = [
     "crates/agent-digest",
     "crates/agent-graph",
     "crates/agent-registry",
+    "crates/agent-config-store",
     "crates/agent-metrics-proxy",
     "crates/agent-tokenizer",
     "crates/agent-web",
