@@ -49,6 +49,11 @@ in
   # feature-scoped check that runs them in the gate — the review-fleet C2 twin of
   # prompt-sqlite. docs/design/review-fleet/03-fleet-core.md.
   fleet-sqlite = craneCheck ./fleet-sqlite.nix { inherit cargoArtifacts; };
+  # Executes the OIDC/JWT auth layer's verifier + tower-layer matrix (feature `auth`,
+  # off by default so the main `test` check never builds `jsonwebtoken`/`reqwest`).
+  # Hermetic (embedded keypair + in-memory JWKS + injected clock). config C33 / B1,
+  # docs/design/config/09-increments.md.
+  auth = craneCheck ./auth.nix { inherit cargoArtifacts; };
   # Executes the sqlite config-store backend's trait matrix (feature
   # `config-store-sqlite`, off by default so the main `test` check never builds the
   # DB dep). The dedicated, feature-scoped check that runs them in the gate — the

@@ -748,10 +748,30 @@ fn shed_observer(agent: &Agent) -> agent_grpc::server::ShedObserver {
     std::sync::Arc::new(move || metrics.on_grpc_overload_shed())
 }
 
+/// The OIDC/JWT [`AuthLayer`] for served seams, built from `[auth]` (config C33/B1).
+/// `mode = "none"` (the default) yields a disabled pass-through — today's
+/// trusted-header behaviour; `mode = "oidc"` builds the JWKS/JWT verifier (which
+/// requires the `agent-grpc` `auth` feature, else this is a fail-closed startup
+/// error rather than a silent downgrade).
+fn auth_layer(agent: &Agent) -> anyhow::Result<agent_grpc::server::AuthLayer> {
+    let a = agent.grpc_auth();
+    agent_grpc::server::AuthLayer::from_params(agent_grpc::server::AuthParams {
+        mode: a.mode.clone(),
+        issuer: a.issuer.clone(),
+        audience: a.audience.clone(),
+        jwks_url: a.jwks_url.clone(),
+        tenant_claim: a.tenant_claim.clone(),
+        roles_claim: a.roles_claim.clone(),
+        leeway_secs: a.leeway_secs,
+    })
+    .map_err(anyhow::Error::msg)
+}
+
 pub async fn serve_session_observe(agent: &Agent, listen: Endpoint) -> anyhow::Result<()> {
-    let (router, health) = agent_grpc::server::base_router_with_observer(
+    let (router, health) = agent_grpc::server::base_router_with_auth(
         agent.grpc_max_in_flight(),
         Some(shed_observer(agent)),
+        auth_layer(agent)?,
     )
     .await;
     let (router, added) = add_seam_service(router, agent, Seam::SessionStream)?;
@@ -798,9 +818,10 @@ pub async fn serve_sessions(agent: Arc<Agent>, listen: Endpoint) -> anyhow::Resu
         });
     }
 
-    let (router, health) = agent_grpc::server::base_router_with_observer(
+    let (router, health) = agent_grpc::server::base_router_with_auth(
         agent.grpc_max_in_flight(),
         Some(shed_observer(&agent)),
+        auth_layer(&agent)?,
     )
     .await;
     let router = router.add_service(
@@ -977,9 +998,10 @@ pub async fn serve_fleet(agent: Arc<Agent>, listen: Endpoint) -> anyhow::Result<
         }
     };
 
-    let (router, health) = agent_grpc::server::base_router_with_observer(
+    let (router, health) = agent_grpc::server::base_router_with_auth(
         agent.grpc_max_in_flight(),
         Some(shed_observer(&agent)),
+        auth_layer(&agent)?,
     )
     .await;
     let mut fleet_svc = srv::ReviewFleetSvc::new(roster.clone());
@@ -1192,9 +1214,10 @@ async fn serve_seams(
 ) -> anyhow::Result<()> {
     // Health is the seed of the router, so hosting one seam and hosting all of
     // them are the same code path rather than two that can drift.
-    let (mut router, health) = agent_grpc::server::base_router_with_observer(
+    let (mut router, health) = agent_grpc::server::base_router_with_auth(
         agent.grpc_max_in_flight(),
         Some(shed_observer(agent)),
+        auth_layer(agent)?,
     )
     .await;
     let mut hosted: Vec<&str> = Vec::new();

@@ -20,16 +20,24 @@ use tonic::Status;
 pub use tonic::transport::server::Router;
 
 /// The router type produced by [`base_router`] and threaded through the serve path:
-/// a `Router` carrying the uniform [`AdmissionLayer`] (overload shedding). The
-/// standalone `*_router` helpers keep the bare `Router` (tests don't need
-/// admission); [`crate::transport::Endpoint::serve`] is generic so it accepts both.
-pub type ServeRouter =
-    Router<tower::layer::util::Stack<admission::AdmissionLayer, tower::layer::util::Identity>>;
+/// a `Router` carrying the uniform [`AdmissionLayer`] (overload shedding) wrapping
+/// the [`AuthLayer`] (OIDC/JWT). Admission is the OUTER layer so a request is shed
+/// under overload *before* any token crypto; auth is inner so it runs on every
+/// admitted request (a pass-through when `[auth] mode = "none"`). The standalone
+/// `*_router` helpers keep the bare `Router` (tests don't need either layer);
+/// [`crate::transport::Endpoint::serve`] is generic so it accepts both.
+pub type ServeRouter = Router<
+    tower::layer::util::Stack<
+        admission::AdmissionLayer,
+        tower::layer::util::Stack<auth::AuthLayer, tower::layer::util::Identity>,
+    >,
+>;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 mod admission;
 mod agent_session;
 mod ast;
+mod auth;
 mod config;
 mod context;
 mod digest;
@@ -64,6 +72,7 @@ mod web;
 pub use admission::*;
 pub use agent_session::*;
 pub use ast::*;
+pub use auth::*;
 pub use config::*;
 pub use context::*;
 pub use digest::*;

@@ -71,6 +71,24 @@ pub struct Settings {
     /// Socket-Mode trigger watch (review-fleet C7). Empty ⇒ no Slack watch. Resolved to a
     /// secret only on the fleet host (never stored raw).
     pub fleet_slack_app_token_ref: String,
+    /// OIDC/JWT authentication for served gRPC seams (`[auth]`, config C33/B1). Default
+    /// (`mode` empty) ⇒ disabled (today's trusted-header path). Read by the serve path
+    /// to build the `AuthLayer`.
+    pub grpc_auth: GrpcAuthSettings,
+}
+
+/// Runtime view of `[auth]` (config C33/B1), flattened from `AuthCfg`. Held codec-free
+/// in `agent-runtime` so it is always compiled; the serve path (agent-cli) maps it to
+/// `agent_grpc::server::AuthParams`. `mode` empty/`"none"` ⇒ authentication disabled.
+#[derive(Debug, Clone, Default)]
+pub struct GrpcAuthSettings {
+    pub mode: String,
+    pub issuer: String,
+    pub audience: String,
+    pub jwks_url: String,
+    pub tenant_claim: String,
+    pub roles_claim: String,
+    pub leeway_secs: u64,
 }
 
 pub struct Agent {
@@ -1149,6 +1167,13 @@ impl Agent {
     /// unbounded. Read by the serve path when building the router.
     pub fn grpc_max_in_flight(&self) -> usize {
         self.settings.grpc_max_in_flight
+    }
+
+    /// The OIDC/JWT authentication settings for served seams (`[auth]`, config
+    /// C33/B1). Read by the serve path to build the `AuthLayer`; `mode` empty ⇒
+    /// disabled (today's trusted-header path).
+    pub fn grpc_auth(&self) -> &GrpcAuthSettings {
+        &self.settings.grpc_auth
     }
 
     /// The registry a served `AgentSessionService` reads (docs/design/portal +
@@ -3483,6 +3508,7 @@ mod tests {
             fleet_max_total: 0,
             fleet_max_per_user: 0,
             fleet_slack_app_token_ref: String::new(),
+            grpc_auth: GrpcAuthSettings::default(),
         }
     }
 

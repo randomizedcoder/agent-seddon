@@ -156,6 +156,13 @@ uuid = { version = "1", features = ["v4"] }
 prometheus = { version = "0.13", default-features = false }
 tiny_http = "0.12"
 
+# OIDC/JWT bearer verification for the gRPC `AuthInterceptor` (config C33/B1), behind
+# agent-grpc's non-default `auth` feature so the default build stays token-free. Used
+# verify-only: JWK-set signature check + an asymmetric-only algorithm allow-list; the
+# fetched JWKS is cached via the workspace HTTP client (`reqwest`). No PEM/key
+# generation in a normal build. See docs/design/config/09-increments.md (B1).
+jsonwebtoken = "9"
+
 # Drives the CLI through a real pty in tests. Needed because the REPL's line
 # editor and the policy guard's operator prompt are both tty-only: the guard
 # hard-denies without reading a byte when stdin is not a terminal, so a pipe can
