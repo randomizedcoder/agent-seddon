@@ -995,10 +995,24 @@ pub async fn build_agent_with(
             #[cfg(feature = "prompt-postgres")]
             "postgres" => {
                 let backend = crate::store_backend::pg_backend(&cfg.config_store)?;
-                Arc::new(agent_prompt::StorePrompt::new(
-                    backend,
-                    cfg.agent.system_prompt.clone(),
-                )) as Arc<dyn agent_core::PromptStore>
+                // Per-tenant plane (config C38 / C2): route each call to the caller's
+                // verified-tenant prompt db when on; else one shared `local` view.
+                if cfg.tenancy.per_tenant {
+                    let b = backend.clone();
+                    let sys = cfg.agent.system_prompt.clone();
+                    Arc::new(crate::tenant::PerTenant::new(move |t| {
+                        agent_prompt::StorePrompt::with_tenant(b.clone(), sys.clone(), t)
+                            .map(|s| Arc::new(s) as Arc<dyn agent_core::PromptStore>)
+                            .unwrap_or_else(|_| {
+                                Arc::new(agent_prompt::StorePrompt::new(b.clone(), sys.clone()))
+                            })
+                    })) as Arc<dyn agent_core::PromptStore>
+                } else {
+                    Arc::new(agent_prompt::StorePrompt::new(
+                        backend,
+                        cfg.agent.system_prompt.clone(),
+                    )) as Arc<dyn agent_core::PromptStore>
+                }
             }
             #[cfg(not(feature = "prompt-postgres"))]
             "postgres" => anyhow::bail!(
@@ -2768,7 +2782,18 @@ pub(crate) fn resolve_provider_registry(
         #[cfg(feature = "registry-postgres")]
         "postgres" => {
             let backend = crate::store_backend::pg_backend(&cfg.config_store)?;
-            Some(Arc::new(agent_registry::StoreRegistry::new(backend)))
+            // Per-tenant plane (config C35 / C2): when enabled, route each call to the
+            // caller's verified-tenant view; else one shared `local` view (Tier-0).
+            if cfg.tenancy.per_tenant {
+                let b = backend.clone();
+                Some(Arc::new(crate::tenant::PerTenant::new(move |t| {
+                    agent_registry::StoreRegistry::with_tenant(b.clone(), t)
+                        .map(|s| Arc::new(s) as Arc<dyn agent_core::ProviderRegistry>)
+                        .unwrap_or_else(|_| Arc::new(agent_registry::StoreRegistry::new(b.clone())))
+                })) as Arc<dyn agent_core::ProviderRegistry>)
+            } else {
+                Some(Arc::new(agent_registry::StoreRegistry::new(backend)))
+            }
         }
         #[cfg(not(feature = "registry-postgres"))]
         "postgres" => anyhow::bail!(
@@ -2817,7 +2842,17 @@ pub(crate) fn resolve_fleet_registry(
         #[cfg(feature = "fleet-postgres")]
         "postgres" => {
             let backend = crate::store_backend::pg_backend(&cfg.config_store)?;
-            Some(Arc::new(agent_review_fleet::StoreFleet::new(backend)))
+            // Per-tenant plane (config C35 / C2): route per verified tenant when on.
+            if cfg.tenancy.per_tenant {
+                let b = backend.clone();
+                Some(Arc::new(crate::tenant::PerTenant::new(move |t| {
+                    agent_review_fleet::StoreFleet::with_tenant(b.clone(), t)
+                        .map(|s| Arc::new(s) as Arc<dyn agent_core::FleetRegistry>)
+                        .unwrap_or_else(|_| Arc::new(agent_review_fleet::StoreFleet::new(b.clone())))
+                })) as Arc<dyn agent_core::FleetRegistry>)
+            } else {
+                Some(Arc::new(agent_review_fleet::StoreFleet::new(backend)))
+            }
         }
         #[cfg(not(feature = "fleet-postgres"))]
         "postgres" => anyhow::bail!(

@@ -34,6 +34,8 @@ pub struct Config {
     #[serde(default)]
     pub auth: AuthCfg,
     #[serde(default)]
+    pub tenancy: TenancyCfg,
+    #[serde(default)]
     pub search: SearchCfg,
     #[serde(default)]
     pub ast: AstCfg,
@@ -2298,6 +2300,24 @@ pub struct AuthCfg {
     pub leeway_secs: u64,
 }
 
+/// The `[tenancy]` bootstrap block (config C35 / C2): whether the converged
+/// shared-store control-plane seams (provider-registry, review-fleet, prompt) are
+/// routed **per verified tenant**. `false` (the default) = Tier-0: one shared
+/// `local`-tenant view, byte-identical to today. `true` wraps each shared-store
+/// seam in `PerTenant`, so every call resolves the caller's verified tenant
+/// (`[auth] mode = "oidc"`; else `local`) and reads/writes that tenant's own view.
+/// Operator-global only (there is no per-tenant tenancy switch).
+#[derive(Debug, Default, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
+pub struct TenancyCfg {
+    /// Route the converged shared-store seams per verified tenant (default `false`).
+    #[serde(default)]
+    pub per_tenant: bool,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[cfg_attr(
     feature = "config-schema",
@@ -2864,6 +2884,7 @@ impl Config {
             review_fleet: ReviewFleetCfg::default(),
             role: RoleCfg::default(),
             auth: AuthCfg::default(),
+            tenancy: TenancyCfg::default(),
             source_path: None,
         }
     }

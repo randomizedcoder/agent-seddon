@@ -12,7 +12,7 @@ Legend: ⬜ not started · 🟡 in progress · ✅ merged.
 |---|---|---|---|---|
 | 01 | Process isolation & multi-org boundaries | C23, C24, C25 | 🟡 C24 ✅ + C25 foundation 🟡; C23 ⬜ | #273/#274/#275 (C24), #276 (C25) |
 | 02 | Data scoping & row-level security | C26, C27, C28 | ⬜ design; Tier-0 today | — |
-| 03 | Config & seam-state tenancy | C29, C30, C31 | ⬜ design; Tier-0 today | — |
+| 03 | Config & seam-state tenancy | C29, C30, C31 | 🟡 **C30 built** for the shared-store seams (config C2); C29/C31 ⬜ | #301→#302 (config C2) |
 
 **Plane 01 in progress** (via the review-fleet track): **C24 — execution chokepoint** is fully
 merged (every child process — `bash`, `rg`, the whole `git` funnel — funnels through the
@@ -21,8 +21,12 @@ tenancy tier** has its *foundation* now: the `user = <org>` convention, the `rep
 encoder, and the per-org cap / metric-label semantics (see `SessionKey` docs). Still deferred: the
 org *value* injection at the fleet mint-site (fleet core, inc 3), and **C23** strong-isolation
 backends (bwrap/oci — real FS/network/cgroup teeth), which C24's chokepoint unblocks. Planes 02/03
-remain **designed, build deferred**. Tier 0 (single operator, one config) is today's behavior and
-needs nothing.
+remain **designed, build deferred** — except **C30**, which the config track built as its C2
+increment: `PerTenant<S>` (`crates/agent-runtime/src/tenant.rs`) routes the converged shared-store
+control-plane seams (provider-registry, review-fleet, prompt) per verified tenant, gated by
+`[tenancy] per_tenant` (default off = Tier-0). This is the one implementation of C30 — the config
+track owns it; C29 (tenant-aware bootstrap) and C31 (control-plane operator-vs-tenant split, = config
+C40/E1) are still ⬜. Tier 0 (single operator, one config) is today's behavior and needs nothing.
 
 **Build order:** 01 (chokepoint C24 → backends C23) · 02 (identity-at-source C26 → RLS C27/C28)
 · 03 (`PerTenant<Store>` C30 → control-plane scoping C31). C26 is cheapest and unblocks 02 +

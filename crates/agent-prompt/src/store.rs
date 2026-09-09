@@ -28,8 +28,8 @@ use std::sync::Arc;
 use agent_config_store::{Backend, Write};
 use agent_context::lens::{builtin_instruction, ALL_MODES};
 use agent_core::{
-    Error, Message, PromptContext, PromptEntry, PromptKind, PromptRef, PromptStore, Result,
-    TaskMode,
+    safe_segment, Error, Message, PromptContext, PromptEntry, PromptKind, PromptRef, PromptStore,
+    Result, TaskMode,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -110,6 +110,25 @@ impl StorePrompt {
             tenant: DEFAULT_TENANT.to_string(),
             config_system_prompt: config_system_prompt.into(),
         }
+    }
+
+    /// A prompt store scoped to an explicit tenant (config C38 / C2 — the per-tenant
+    /// plane calls this per verified identity). The tenant is `safe_segment`-gated —
+    /// a hostile tenant is rejected at construction, never persisted or turned into a
+    /// storage key. `local` yields the same un-namespaced base as [`new`](Self::new).
+    pub fn with_tenant(
+        backend: Arc<dyn Backend>,
+        config_system_prompt: impl Into<String>,
+        tenant: &str,
+    ) -> Result<Self> {
+        if !safe_segment(tenant) {
+            return Err(Error::Prompt(format!("invalid tenant `{tenant}`")));
+        }
+        Ok(Self {
+            backend,
+            tenant: tenant.to_string(),
+            config_system_prompt: config_system_prompt.into(),
+        })
     }
 
     /// Fetch + decode one override card, or `None` if absent.

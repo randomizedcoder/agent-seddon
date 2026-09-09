@@ -6,8 +6,9 @@ Legend: ⬜ designed, not built · 🟡 partially built · ✅ built + merged.
 way (see the live tracker below). Both keystones are merged — A1 `agent-config-store` (#294) and B1 the
 auth tower layer (#295), A2 (the Postgres tier, #296), C1 (the RBAC enforcement core, #297), A3
 (`agent-registry` onto the shared store, #298), A3b (`agent-review-fleet`, #299), and A3c
-(`agent-prompt`, the outlier, #300) — **the whole store convergence is now merged**. C1b (RBAC role cards
-+ the `RoleService` seam) is in review; only C2 and tracks C/D/E remain.
+(`agent-prompt`, the outlier, #300) — **the whole store convergence is now merged**, and C1b (RBAC role
+cards + the `RoleService` seam, #301) with it. C2 (the per-tenant config plane) is in review; only tracks
+D/E and the C2b Graph/Scheduler tail remain.
 
 ## Components
 
@@ -55,8 +56,9 @@ of done — is [`09-increments.md`](09-increments.md). This table is the **live 
 | A3c | Converge `agent-prompt` (outlier) | ✅ | [#300](https://github.com/randomizedcoder/agent-seddon/pull/300) | A2 |
 | B1 | `AuthInterceptor` tower layer + JWKS/JWT + `[auth]` | ✅ | [#295](https://github.com/randomizedcoder/agent-seddon/pull/295) | — |
 | C1 | C34 RBAC enforcement core (`authorize` + gate all control-plane RPCs) | 🟡 | [#297](https://github.com/randomizedcoder/agent-seddon/pull/297) | B1, A1 |
-| C1b | RBAC role cards + `RoleService` seam (needs the shared store) | 🟡 | [#301](https://github.com/randomizedcoder/agent-seddon/pull/301) | C1, A3 |
-| C2 | C35 per-tenant plane (+ C38 prompt) | ⬜ | — | B1, A3 |
+| C1b | RBAC role cards + `RoleService` seam (needs the shared store) | ✅ | [#301](https://github.com/randomizedcoder/agent-seddon/pull/301) | C1, A3 |
+| C2 | C35 per-tenant plane (+ C38 prompt) | 🟡 | _in review_ | B1, A3 |
+| C2b | Per-tenant Graph + Scheduler (the non-shared-store seams) | ⬜ | — | C2 |
 | D1 | C36 forge registry | ⬜ | — | A1 (+C2 per-tenant) |
 | D2 | C37 message-transport registry | ⬜ | — | A1 (+C2 per-tenant) |
 | E1 | C40 control-plane consolidation | ⬜ | — | B1, C1, C2 |

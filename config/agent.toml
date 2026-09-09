@@ -976,6 +976,18 @@ job         = "agent-seddon"
 # roles_claim  = "roles"                                # claim → roles (default "roles")
 # leeway_secs  = 60                                     # accepted exp/nbf clock skew
 
+# [tenancy] — the per-tenant config plane (config C35 / C2). When `per_tenant =
+# true`, the converged shared-store control-plane seams (provider-registry, review-
+# fleet, prompt) are routed PER VERIFIED TENANT: each call resolves the caller's
+# verified tenant (from `[auth] mode = "oidc"`; `local` otherwise) and reads/writes
+# THAT tenant's own view of the store, so one deployment serves many orgs from one
+# backend with no cross-tenant bleed. `false` (the default) = one shared `local`
+# view, byte-identical to today. Operator-global only. Effective only for the
+# shared-store (`postgres`) arms of those seams; the file/sqlite dev tiers stay
+# single-tenant. (Graph + Scheduler per-tenant are a separate follow-up, C2b.)
+# [tenancy]
+# per_tenant = true
+
 # [config_store] — the shared transactional config data layer (config C41 / A2,
 # docs/design/config/09-increments.md). One store behind which every domain's
 # config *cards* will persist as the per-domain stores converge onto it (A3*).

@@ -76,6 +76,11 @@ in
   # in-memory config store (feature `role-store`, off by default). The config-
   # architecture C1b RBAC-role-card twin of registry-store. docs/design/config/09-increments.md.
   role-store = craneCheck ./role-store.nix { inherit cargoArtifacts; };
+  # Executes the per-tenant routing layer (`PerTenant<S>`) matrix + end-to-end
+  # isolation over the real converged stores (features registry-store/fleet-store/
+  # prompt-store, off by default). The config-architecture C2 per-tenant-plane check.
+  # docs/design/config/09-increments.md.
+  per-tenant = craneCheck ./per-tenant.nix { inherit cargoArtifacts; };
   # Executes the real `tiktoken` BPE tokenizer backend's tests (feature
   # `tokenizer-tiktoken`, off by default so the standard build ships no vocab). The
   # feature-scoped check that runs them in the gate. Parity spec 23; offline
