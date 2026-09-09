@@ -55,7 +55,7 @@ of done — is [`09-increments.md`](09-increments.md). This table is the **live 
 | A3c | Converge `agent-prompt` (outlier) | ✅ | [#300](https://github.com/randomizedcoder/agent-seddon/pull/300) | A2 |
 | B1 | `AuthInterceptor` tower layer + JWKS/JWT + `[auth]` | ✅ | [#295](https://github.com/randomizedcoder/agent-seddon/pull/295) | — |
 | C1 | C34 RBAC enforcement core (`authorize` + gate all control-plane RPCs) | 🟡 | [#297](https://github.com/randomizedcoder/agent-seddon/pull/297) | B1, A1 |
-| C1b | RBAC role cards + `RoleService` seam (needs the shared store) | 🟡 | _in review_ | C1, A3 |
+| C1b | RBAC role cards + `RoleService` seam (needs the shared store) | 🟡 | [#301](https://github.com/randomizedcoder/agent-seddon/pull/301) | C1, A3 |
 | C2 | C35 per-tenant plane (+ C38 prompt) | ⬜ | — | B1, A3 |
 | D1 | C36 forge registry | ⬜ | — | A1 (+C2 per-tenant) |
 | D2 | C37 message-transport registry | ⬜ | — | A1 (+C2 per-tenant) |
