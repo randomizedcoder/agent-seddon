@@ -803,6 +803,9 @@ pub use security::*;
 // Session / user identity — see identity.rs (re-exported below).
 mod identity;
 pub use identity::*;
+// Control-plane role-based access control — see rbac.rs (re-exported below).
+mod rbac;
+pub use rbac::*;
 // ---------------------------------------------------------------------------
 // Seam: TaskTracker (structured, inspectable agent plan)
 // ---------------------------------------------------------------------------

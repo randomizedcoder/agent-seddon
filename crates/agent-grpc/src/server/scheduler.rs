@@ -30,6 +30,10 @@ impl pb::scheduler_service_server::SchedulerService for SchedulerServiceSvc {
         &self,
         request: Request<pb::SchedScheduleRequest>,
     ) -> Result<Response<pb::SchedJobRef>, Status> {
+        super::authz::require(
+            agent_core::Action::Schedule,
+            agent_core::ResourceType::Scheduler,
+        )?;
         let sp = span("scheduler.schedule", request.metadata());
         let inner = self.inner.clone();
         async move {
@@ -64,6 +68,10 @@ impl pb::scheduler_service_server::SchedulerService for SchedulerServiceSvc {
         &self,
         request: Request<pb::SchedJobRef>,
     ) -> Result<Response<pb::SchedCancelResponse>, Status> {
+        super::authz::require(
+            agent_core::Action::Delete,
+            agent_core::ResourceType::Scheduler,
+        )?;
         let sp = span("scheduler.cancel", request.metadata());
         let inner = self.inner.clone();
         async move {

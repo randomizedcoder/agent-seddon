@@ -3,6 +3,15 @@
 The two genuinely-new primitives. Today there is **no authentication and no role-based authorization**;
 this doc specifies both, committing to **OIDC/JWT bearer** as the mechanism (decision #4).
 
+> **Build status.** C33 (auth) shipped as increment **B1** (#295): the `AuthLayer` tower layer in
+> `crates/agent-grpc/src/server/auth.rs`. The C34 RBAC **enforcement core** shipped as increment **C1**:
+> `crates/agent-core/src/rbac.rs` (`Action`/`ResourceType`/`AccessDecision`/`RoleCatalog`/`authorize`, the
+> `VerifiedPrincipal` task-local) + the `crates/agent-grpc/src/server/authz.rs` gate wrapping all 15
+> mutating control-plane handlers; the auth layer installs the token's verified roles into scope. **Roles
+> are the three built-ins** (`operator`/`org_admin`/`reader`); operator-defined **role cards** and a
+> `RoleService` seam (below) are a fast-follow (**C1b**) once the shared store (A3) can persist them. See
+> [`STATUS.md`](STATUS.md).
+
 ## Where we are today
 
 - Identity is a pair of **trusted metadata headers** — `x-agent-user-id`, `x-agent-session-id`

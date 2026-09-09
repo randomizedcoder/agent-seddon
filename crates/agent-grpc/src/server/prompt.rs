@@ -71,6 +71,7 @@ impl pb::prompt_service_server::PromptService for PromptSvc {
         &self,
         request: Request<pb::PromptEntry>,
     ) -> Result<Response<pb::PromptEntry>, Status> {
+        super::authz::require(agent_core::Action::Write, agent_core::ResourceType::Prompt)?;
         let sp = span("prompt.put", request.metadata());
         let inner = self.inner.clone();
         async move {
@@ -86,6 +87,7 @@ impl pb::prompt_service_server::PromptService for PromptSvc {
         &self,
         request: Request<pb::PromptRef>,
     ) -> Result<Response<pb::DeleteReply>, Status> {
+        super::authz::require(agent_core::Action::Delete, agent_core::ResourceType::Prompt)?;
         let sp = span("prompt.delete", request.metadata());
         let inner = self.inner.clone();
         async move {

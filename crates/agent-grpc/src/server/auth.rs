@@ -40,8 +40,10 @@ use tonic::codegen::http;
 use tower::{Layer, Service};
 
 /// The identity derived from a verified token. `tenant` becomes the request's
-/// `x-agent-user-id`; `subject`/`roles` are carried for a later increment (C34
-/// RBAC) and are not yet placed on the wire.
+/// `x-agent-user-id` (the ambient tenant scope); `subject`/`roles` are installed
+/// into the [`agent_core::AGENT_PRINCIPAL`] scope around the handler so the C34
+/// RBAC gate ([`agent_core::authorize`]) can consult them. Roles therefore reach
+/// a handler **only** through this verified path, never a client header.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedIdentity {
     pub tenant: String,
@@ -216,7 +218,16 @@ where
                     if let Ok(v) = http::HeaderValue::from_str(&id.tenant) {
                         req.headers_mut().insert(name, v);
                     }
-                    inner.call(req).await
+                    // Install the verified principal (tenant + subject + roles) into the
+                    // ambient scope for the whole handler, so the RBAC gate
+                    // (`server::authz::require`) can authorize without threading it
+                    // through every signature. Roles reach the handler ONLY here.
+                    let principal = agent_core::VerifiedPrincipal {
+                        tenant: id.tenant,
+                        subject: id.subject,
+                        roles: id.roles,
+                    };
+                    agent_core::principal_scope(principal, inner.call(req)).await
                 }
                 Err(()) => Ok(unauthenticated()),
             }

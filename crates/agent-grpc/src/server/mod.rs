@@ -38,6 +38,7 @@ mod admission;
 mod agent_session;
 mod ast;
 mod auth;
+mod authz;
 mod config;
 mod context;
 mod digest;

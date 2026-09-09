@@ -72,6 +72,10 @@ impl pb::provider_registry_service_server::ProviderRegistryService for ProviderR
     }
 
     async fn put(&self, request: Request<pb::Upstream>) -> Result<Response<pb::Upstream>, Status> {
+        super::authz::require(
+            agent_core::Action::Write,
+            agent_core::ResourceType::Registry,
+        )?;
         let sp = span("registry.put", request.metadata());
         let inner = self.inner.clone();
         async move {
@@ -88,6 +92,10 @@ impl pb::provider_registry_service_server::ProviderRegistryService for ProviderR
         &self,
         request: Request<pb::UpstreamRef>,
     ) -> Result<Response<pb::UpstreamDeleteReply>, Status> {
+        super::authz::require(
+            agent_core::Action::Delete,
+            agent_core::ResourceType::Registry,
+        )?;
         let sp = span("registry.delete", request.metadata());
         let inner = self.inner.clone();
         async move {
@@ -105,6 +113,10 @@ impl pb::provider_registry_service_server::ProviderRegistryService for ProviderR
         &self,
         request: Request<pb::UpstreamEnableRequest>,
     ) -> Result<Response<pb::Upstream>, Status> {
+        super::authz::require(
+            agent_core::Action::Write,
+            agent_core::ResourceType::Registry,
+        )?;
         let sp = span("registry.enable", request.metadata());
         let inner = self.inner.clone();
         async move {
@@ -140,6 +152,10 @@ impl pb::provider_registry_service_server::ProviderRegistryService for ProviderR
         &self,
         request: Request<pb::RoutePolicy>,
     ) -> Result<Response<pb::RoutePolicy>, Status> {
+        super::authz::require(
+            agent_core::Action::Write,
+            agent_core::ResourceType::Registry,
+        )?;
         let sp = span("registry.put_policy", request.metadata());
         let inner = self.inner.clone();
         async move {
