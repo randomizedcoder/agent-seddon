@@ -34,6 +34,11 @@ mod sqlite;
 #[cfg(feature = "config-store-sqlite")]
 pub use sqlite::SqliteBackend;
 
+#[cfg(feature = "config-store-postgres")]
+mod postgres;
+#[cfg(feature = "config-store-postgres")]
+pub use postgres::PgBackend;
+
 mod file;
 pub use file::FileBackend;
 

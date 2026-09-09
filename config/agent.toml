@@ -946,6 +946,26 @@ job         = "agent-seddon"
 # roles_claim  = "roles"                                # claim → roles (default "roles")
 # leeway_secs  = 60                                     # accepted exp/nbf clock skew
 
+# [config_store] — the shared transactional config data layer (config C41 / A2,
+# docs/design/config/09-increments.md). One store behind which every domain's
+# config *cards* will persist as the per-domain stores converge onto it (A3*).
+# Bootstrap-only today: it names the tier and where it lives; nothing is consumed
+# from it yet, so leaving `backend = ""` (the default when [config_store] is
+# absent) keeps today's per-domain stores unchanged.
+#
+# The DSN is a REFERENCE, never the DSN: `dsn_ref` is `env:NAME` or `file:/path`
+# (an inline `postgres://…` is rejected — it carries a password), resolved on the
+# host at connect time. The `postgres` tier needs the agent built with the
+# `config-store-postgres` feature and a real server; it is opt-in and never
+# exercised by `nix flake check` (only `nix run .#integration`). `file`/`sqlite`
+# stay hermetic.
+# [config_store]
+# backend          = "postgres"        # "" (off) | "file" | "sqlite" | "postgres" | "grpc"
+# dsn_ref          = "env:AGENT_CONFIG_STORE_DSN"   # env:NAME | file:/path (never inline)
+# path             = ".agent/config-store.sqlite3"  # file/sqlite tiers only
+# pool_max         = 8                 # postgres connection-pool ceiling
+# migrate_on_start = true              # apply the embedded schema on connect (postgres)
+
 # [policy] configures two independent things: the `allow-list` rules and the guard.
 #
 # `guard` wraps WHATEVER `[agent] policy` you selected and screens each call for
