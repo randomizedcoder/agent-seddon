@@ -72,6 +72,10 @@ in
   # in-memory config store (feature `prompt-store`, off by default). The config-
   # architecture A3c prompt-convergence (outlier) twin of registry-store. docs/design/config/09-increments.md.
   prompt-store = craneCheck ./prompt-store.nix { inherit cargoArtifacts; };
+  # Executes the shared-store `RoleRegistry` backend (`StoreRoles`) matrix over the
+  # in-memory config store (feature `role-store`, off by default). The config-
+  # architecture C1b RBAC-role-card twin of registry-store. docs/design/config/09-increments.md.
+  role-store = craneCheck ./role-store.nix { inherit cargoArtifacts; };
   # Executes the real `tiktoken` BPE tokenizer backend's tests (feature
   # `tokenizer-tiktoken`, off by default so the standard build ships no vocab). The
   # feature-scoped check that runs them in the gate. Parity spec 23; offline

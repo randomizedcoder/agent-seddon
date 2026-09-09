@@ -104,6 +104,13 @@ pkgs.writeShellApplication {
     store = "file"
     file  = "$work/.agent/review-fleet.json"
 
+    # A file-backed RBAC role-card store, so --serve-all advertises the RoleService
+    # control plane (config C1b) and the Put→Get roundtrip below can exercise it over
+    # the wire. Absent file ⇒ only the three built-in roles; a Put persists a card.
+    [role]
+    store = "file"
+    file  = "$work/.agent/roles.json"
+
     [metrics]
     enabled = false
     EOF
@@ -181,6 +188,27 @@ pkgs.writeShellApplication {
           agent.v1.ReviewFleetService.Get 2>"$work/fleet_get.$transport.err" || true)"
         if ! echo "$got" | grep -q 'env:SMOKE_GH_TOKEN'; then
           echo "CONTRACT[$transport]: ReviewFleetService/Get did not return the token_ref reference" >&2
+          [ "$rc" -lt 2 ] && rc=2
+        fi
+      fi
+
+      # ---- RBAC role control plane: Put→Get roundtrip (config C1b) --------------
+      # Put an operator-defined role card (validated action/resource STRINGS), then
+      # read it back via Get. Proves the RoleService seam is truly on the wire and the
+      # card round-trips through the shared store. The three built-in roles are never
+      # stored; a card may not reuse one of their ids (validated at the seam).
+      local role_json='{"id":"smoke_reviewer","actions_on_all":["read"],"pairs":[{"action":"approve","resource_type":"fleet"}]}'
+      if ! grpcurl -d "$role_json" "''${dial[@]}" \
+          agent.v1.RoleService.Put >/dev/null 2>"$work/role_put.$transport.err"; then
+        echo "CONTRACT[$transport]: RoleService/Put round-trip failed" >&2
+        cat "$work/role_put.$transport.err" >&2
+        [ "$rc" -lt 2 ] && rc=2
+      else
+        local role_got
+        role_got="$(grpcurl -d '{"id":"smoke_reviewer"}' "''${dial[@]}" \
+          agent.v1.RoleService.Get 2>"$work/role_get.$transport.err" || true)"
+        if ! echo "$role_got" | grep -q 'smoke_reviewer'; then
+          echo "CONTRACT[$transport]: RoleService/Get did not return the persisted card" >&2
           [ "$rc" -lt 2 ] && rc=2
         fi
       fi

@@ -104,6 +104,17 @@ pkgs.writeShellApplication {
     set -e
     if [ "$rc" -ne 0 ]; then note_fail 2; fi
 
-    contract_exit "PASS: pg-integration — postgres config-store + registry + fleet + prompt suites green."
+    # The RBAC role convergence (config C1b): the same real server proves the
+    # `StoreRoles` postgres arm. A dedicated tenant keeps it isolated.
+    echo "==> pg-integration: running the ignored role postgres suite"
+    set +e
+    nix develop --extra-experimental-features 'nix-command flakes' -c \
+      cargo test -p agent-role --features role-store-postgres \
+      -- --ignored --test-threads=1
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then note_fail 2; fi
+
+    contract_exit "PASS: pg-integration — postgres config-store + registry + fleet + prompt + role suites green."
   '';
 }

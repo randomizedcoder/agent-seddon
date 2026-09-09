@@ -37,7 +37,11 @@
 //! transparent here.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock, RwLock};
+
+use async_trait::async_trait;
+
+use crate::{safe_segment, Error, Result};
 
 /// A mutating action on a control-plane resource. Closed set (house style: an
 /// `as_str`/`parse` pair, `parse` fail-closed to `None` on an unknown name —
@@ -348,6 +352,133 @@ where
     AGENT_PRINCIPAL.scope(principal, fut)
 }
 
+// ---------------------------------------------------------------------------
+// Operator-defined role cards (config C34, increment C1b)
+// ---------------------------------------------------------------------------
+
+/// What an operator-defined role card grants — the persisted, wire-facing twin of
+/// the private [`PermissionSet`], holding parsed [`Action`]/[`ResourceType`] (so an
+/// unknown action string is rejected at the ingest boundary, never here).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RolePermissions {
+    /// Every action on every resource type (an admin role).
+    All,
+    /// A set of actions, each on **every** resource type.
+    ActionsOnAll(Vec<Action>),
+    /// Explicit `(action, resource_type)` grants.
+    Pairs(Vec<(Action, ResourceType)>),
+}
+
+impl Default for RolePermissions {
+    /// An empty grant (denies everything) — the fail-closed default.
+    fn default() -> Self {
+        RolePermissions::ActionsOnAll(Vec::new())
+    }
+}
+
+/// An operator-defined role, persisted as a card on the shared config store and
+/// served by the `RoleService` seam (increment C1b). It is the durable source of a
+/// [`RoleDef`]: [`RoleCard::to_def`] derives the runtime grant, and [`load_catalog`]
+/// folds a store's cards into a live [`RoleCatalog`] atop the built-ins.
+///
+/// **Untrusted, fail-closed.** `id` may become a storage-path segment, so it must
+/// pass [`safe_segment`]; and it **may not** reuse a reserved built-in name
+/// ([`RoleCatalog::is_builtin`]) — an operator card can never shadow
+/// `operator`/`org_admin`/`reader`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RoleCard {
+    pub id: String,
+    /// `true` for a host-global role (may act in any tenant). See [`RoleDef::crosses_tenants`].
+    pub crosses_tenants: bool,
+    pub permissions: RolePermissions,
+}
+
+impl RoleCard {
+    /// Fail-closed structural validation: a non-empty, path-safe id that is not a
+    /// reserved built-in name. (The permissions are already typed — an unknown
+    /// action/resource string was rejected when the card was parsed from the wire.)
+    pub fn validate(&self) -> Result<()> {
+        if self.id.is_empty() || !safe_segment(&self.id) {
+            return Err(Error::Config(format!(
+                "role card id `{}` is not a path-safe segment",
+                self.id
+            )));
+        }
+        if RoleCatalog::is_builtin(&self.id) {
+            return Err(Error::Config(format!(
+                "role card id `{}` reuses a reserved built-in role",
+                self.id
+            )));
+        }
+        Ok(())
+    }
+
+    /// The runtime [`RoleDef`] this card grants.
+    pub fn to_def(&self) -> RoleDef {
+        match &self.permissions {
+            RolePermissions::All => RoleDef::admin(self.crosses_tenants),
+            RolePermissions::ActionsOnAll(actions) => {
+                RoleDef::actions_on_all(self.crosses_tenants, actions.iter().copied())
+            }
+            RolePermissions::Pairs(pairs) => {
+                RoleDef::pairs(self.crosses_tenants, pairs.iter().copied())
+            }
+        }
+    }
+}
+
+/// The operator-defined-role control plane (config C34 / C1b): CRUD over
+/// [`RoleCard`]s, mirroring [`ProviderRegistry`](crate::ProviderRegistry)'s
+/// discipline. Every argument is untrusted (an `id` may become a storage key):
+/// stores validate fail-closed. `get` of an unknown id is an `Err` whose message
+/// starts with `not found` (the wire layer maps it to `NotFound`); `delete` of an
+/// unknown id is `Ok(false)`, not an error.
+#[async_trait]
+pub trait RoleRegistry: Send + Sync {
+    /// Every operator-defined role card (the built-ins are not stored).
+    async fn list(&self) -> Result<Vec<RoleCard>>;
+    async fn get(&self, id: &str) -> Result<RoleCard>;
+    /// Upsert; returns the stored (validated) card.
+    async fn put(&self, card: RoleCard) -> Result<RoleCard>;
+    async fn delete(&self, id: &str) -> Result<bool>;
+}
+
+/// Fold a role store's operator-defined cards onto the built-in catalog, producing
+/// the live [`RoleCatalog`] the gate authorizes against. Built-ins always win by
+/// construction (a card may not reuse a reserved id — [`RoleCard::validate`]).
+pub async fn load_catalog(reg: &dyn RoleRegistry) -> Result<RoleCatalog> {
+    let mut catalog = RoleCatalog::builtin();
+    for card in reg.list().await? {
+        catalog.insert(card.id.clone(), card.to_def());
+    }
+    Ok(catalog)
+}
+
+/// The live catalog cell: the built-in catalog until [`install_catalog`] swaps in a
+/// store-backed one (C1b). Reads clone the `Arc` (cheap); installs are rare
+/// (startup + after a `RoleService` write).
+fn catalog_cell() -> &'static RwLock<Arc<RoleCatalog>> {
+    static CELL: OnceLock<RwLock<Arc<RoleCatalog>>> = OnceLock::new();
+    CELL.get_or_init(|| RwLock::new(Arc::new(RoleCatalog::builtin())))
+}
+
+/// The catalog the gate authorizes against right now. Defaults to the built-ins,
+/// so an uninstalled catalog behaves exactly like the C1 enforcement core.
+pub fn current_catalog() -> Arc<RoleCatalog> {
+    catalog_cell()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+/// Install a new live catalog (built-ins ∪ persisted cards). Called at startup once
+/// a role store is present, and after every successful `RoleService` write.
+pub fn install_catalog(catalog: RoleCatalog) {
+    *catalog_cell()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(catalog);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -505,6 +636,84 @@ mod tests {
         assert!(RoleCatalog::is_builtin(ROLE_ORG_ADMIN));
         assert!(RoleCatalog::is_builtin(ROLE_READER));
         assert!(!RoleCatalog::is_builtin("fleet_approver"));
+    }
+
+    // --- operator-defined role cards (C1b) ---------------------------------
+
+    #[rstest]
+    // desc: a well-formed operator card validates.
+    #[case::positive_ok("reviewer", true)]
+    // desc: an empty id is rejected (fail-closed).
+    #[case::negative_empty_id("", false)]
+    // desc: a reserved built-in id may not be reused by an operator card.
+    #[case::adversarial_reserved_operator(ROLE_OPERATOR, false)]
+    #[case::adversarial_reserved_reader(ROLE_READER, false)]
+    // adversarial: a traversal / separator id is not a path-safe segment.
+    #[case::adversarial_traversal("../etc", false)]
+    #[case::adversarial_separator("a/b", false)]
+    // boundary: a single-char id is a valid segment.
+    #[case::boundary_single_char("r", true)]
+    fn role_card_validate(#[case] id: &str, #[case] ok: bool) {
+        let card = RoleCard {
+            id: id.to_string(),
+            crosses_tenants: false,
+            permissions: RolePermissions::All,
+        };
+        assert_eq!(
+            card.validate().is_ok(),
+            ok,
+            "id={id:?} => {:?}",
+            card.validate()
+        );
+    }
+
+    #[test]
+    fn corner_empty_permissions_denies_all() {
+        // A card with no permissions (the default) grants nothing.
+        let card = RoleCard {
+            id: "empty".to_string(),
+            crosses_tenants: false,
+            permissions: RolePermissions::default(),
+        };
+        let mut cat = RoleCatalog::builtin();
+        cat.insert(card.id.clone(), card.to_def());
+        let p = principal("acme", &["empty"]);
+        assert!(!authorize(
+            &cat,
+            &p,
+            Action::Read,
+            &Resource::new(ResourceType::Config, "acme")
+        )
+        .is_allowed());
+    }
+
+    #[test]
+    fn positive_role_card_to_def_grants_its_pairs() {
+        let card = RoleCard {
+            id: "approver".to_string(),
+            crosses_tenants: false,
+            permissions: RolePermissions::Pairs(vec![(Action::Approve, ResourceType::Fleet)]),
+        };
+        let def = card.to_def();
+        assert!(def.grants(Action::Approve, ResourceType::Fleet));
+        assert!(!def.grants(Action::Write, ResourceType::Fleet));
+    }
+
+    #[test]
+    fn positive_installed_catalog_wins_over_builtin() {
+        // The default snapshot is the built-ins (operator resolves).
+        let def = current_catalog();
+        assert!(def.get(ROLE_OPERATOR).is_some());
+        // A custom role is unknown until a catalog carrying it is installed.
+        let mut cat = RoleCatalog::builtin();
+        cat.insert(
+            "reviewer",
+            RoleDef::pairs(false, [(Action::Approve, ResourceType::Fleet)]),
+        );
+        install_catalog(cat);
+        let now = current_catalog();
+        assert!(now.get("reviewer").is_some(), "installed role is visible");
+        assert!(now.get(ROLE_OPERATOR).is_some(), "built-ins still present");
     }
 
     // --- the principal task-local ------------------------------------------

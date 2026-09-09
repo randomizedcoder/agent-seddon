@@ -195,6 +195,11 @@ pub const FLEET: SeamEndpoint = SeamEndpoint {
     uds_path: "/tmp/agent-seddon/fleet.sock",
     metrics_port: 9636,
 };
+pub const ROLE: SeamEndpoint = SeamEndpoint {
+    tcp_port: 50087,
+    uds_path: "/tmp/agent-seddon/role.sock",
+    metrics_port: 9637,
+};
 
 /// The opt-in `agent --serve-sessions` gateway (not a seam — it hosts the
 /// session registry + a driving `AgentSessionService`).

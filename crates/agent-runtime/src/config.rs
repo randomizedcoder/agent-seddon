@@ -105,6 +105,8 @@ pub struct Config {
     pub recall: RecallCfg,
     #[serde(default)]
     pub review_fleet: ReviewFleetCfg,
+    #[serde(default)]
+    pub role: RoleCfg,
     /// Path the config was read from, set by the CLI after parse (never a TOML
     /// key — `serde(skip)`). Held so the `ConfigStore` seam (portal settings) can
     /// write edits back to the same file. `None` for embedded/test callers that
@@ -192,6 +194,38 @@ fn default_fleet_file() -> String {
 
 fn default_fleet_path() -> String {
     ".agent/review-fleet.sqlite3".to_string()
+}
+
+/// The `[role]` block (config C1b): where the operator-defined RBAC **role cards**
+/// live. Empty `store` ⇒ the control-plane gate keeps only the three immutable
+/// built-in roles (`operator`/`org_admin`/`reader`) — exactly the C1 behaviour, so
+/// this is a no-op until an operator opts in.
+#[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
+pub struct RoleCfg {
+    /// Role-card backend: `"file"` | `"postgres"` (feature `role-postgres`) | `""`
+    /// (off, the default). Empty ⇒ no store is opened; the gate uses the built-ins.
+    #[serde(default)]
+    pub store: String,
+    /// JSON card-bundle path (`file` backend only). Tilde-expanded.
+    #[serde(default = "default_role_file")]
+    pub file: String,
+}
+
+impl Default for RoleCfg {
+    fn default() -> Self {
+        Self {
+            store: String::new(),
+            file: default_role_file(),
+        }
+    }
+}
+
+fn default_role_file() -> String {
+    ".agent/roles.json".to_string()
 }
 
 /// Cross-session recall (parity spec 20): a full-text index over *past* saved
@@ -2212,6 +2246,9 @@ pub struct GrpcCfg {
     /// The review-fleet roster seam (`--serve-fleet`, review-fleet C3).
     #[serde(default)]
     pub fleet: GrpcSeamCfg,
+    /// The RBAC role-card seam (`--serve-role`, config C1b).
+    #[serde(default)]
+    pub role: GrpcSeamCfg,
     #[serde(default)]
     pub review: GrpcSeamCfg,
     /// Not a seam: the opt-in `agent --serve-sessions` gateway (docs/design/portal),
@@ -2825,6 +2862,7 @@ impl Config {
             pty: PtyCfg::default(),
             recall: RecallCfg::default(),
             review_fleet: ReviewFleetCfg::default(),
+            role: RoleCfg::default(),
             auth: AuthCfg::default(),
             source_path: None,
         }

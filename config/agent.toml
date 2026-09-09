@@ -173,6 +173,20 @@ root = ""                    # empty ⇒ unset (shared agent.working_dir); tilde
 # (config C41 / A3b) — the [config_store] block supplies the DSN and pool. Needs the
 # `fleet-postgres` feature (a live Postgres server, opt-in).
 
+# [role] — operator-defined RBAC role cards (config C34 / C1b). The control-plane
+# gate (config C1) authorizes against the three immutable built-in roles
+# (`operator` host-global, `org_admin` per-tenant admin, `reader`) PLUS any cards
+# stored here. A card carries an id (may NOT reuse a built-in id) and its
+# permissions as validated action/resource STRINGS. Empty `store` (the default) ⇒
+# the gate uses only the built-ins — exactly the C1 behaviour. Edit a card via the
+# RoleService seam (`agent --serve-role`); a Put/Delete rebuilds the in-process
+# catalog so it takes effect on the next request.
+# [role]
+# store = "file"             # "" (off) | "file" | "postgres"
+# file  = ".agent/roles.json"  # `file` backend only; tilde-expanded
+# store = "postgres" persists cards onto the shared config store (the [config_store]
+# block supplies the DSN + pool); needs the `role-postgres` feature (opt-in).
+
 # Tokenizer (the Tokenizer seam): accurate per-model token counts that drive
 # compaction budgeting + USD/cache cost accounting, replacing the ~chars/4
 # heuristic. Backends (config-selected like every seam):
@@ -918,6 +932,13 @@ job         = "agent-seddon"
 # port 50085. Operator/portal facing — keep it loopback / a unix socket.
 # [grpc.config]
 # listen = "127.0.0.1:50085"                          # --serve-config binds this
+#
+# The RBAC role-card seam (config C1b): CRUD over operator-defined role cards the
+# control-plane gate authorizes against. Hosted by `--serve-role` / `--serve-all`,
+# or by a running agent when `listen` is set. Default port 50087. Operator facing —
+# keep it loopback / a unix socket. Needs a [role] store to advertise anything.
+# [grpc.role]
+# listen = "127.0.0.1:50087"                          # --serve-role binds this
 #
 # `agent --serve-all` hosts every enabled seam in ONE process on ONE endpoint,
 # so a same-host deployment isn't one process per seam. Seams whose impl is

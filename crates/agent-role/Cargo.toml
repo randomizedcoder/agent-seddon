@@ -1,0 +1,36 @@
+[package]
+name = "agent-role"
+version.workspace = true
+publish.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# The shared-store `RoleRegistry` backend (config C34 / C1b): persists operator-
+# defined role cards onto any `agent-config-store::Backend` (memory/file/sqlite/
+# postgres) as prost blobs, reusing the same store spine the A3* convergences use.
+# Off by default so a normal build stays dependency-free.
+role-store = ["dep:agent-config-store", "dep:prost"]
+# The Postgres arm of the shared-store backend: forwards to `agent-config-store`'s
+# own `config-store-postgres` (sqlx) tier. Off by default; NOT hermetic (needs a
+# live server), so its tests are `#[ignore]`-gated (run via `nix run .#integration`).
+role-store-postgres = ["role-store", "agent-config-store/config-store-postgres"]
+
+[dependencies]
+agent-core.workspace = true
+# The wire twin (`pb::RoleCard`) + the core↔proto conversions; role cards persist
+# as the prost-encoded `pb::RoleCard` blob, exactly like the registry's upstream cards.
+agent-proto.workspace = true
+async-trait.workspace = true
+# The shared transactional store the `role-store` backend persists onto. Optional:
+# a default build carries only the trait/types.
+agent-config-store = { workspace = true, optional = true }
+prost = { workspace = true, optional = true }
+
+[dev-dependencies]
+rstest.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

@@ -28,6 +28,14 @@ pub enum ConvertError {
     /// A required singular message field was absent (proto3 makes them optional).
     #[error("missing required field `{0}`")]
     MissingField(&'static str),
+    /// A role card carried an action string outside the closed [`agent_core::Action`]
+    /// set (fail-closed — an unrecognized action can never be granted).
+    #[error("unknown action `{0}`")]
+    UnknownAction(String),
+    /// A role card carried a resource-type string outside the closed
+    /// [`agent_core::ResourceType`] set.
+    #[error("unknown resource type `{0}`")]
+    UnknownResourceType(String),
 }
 
 impl From<ConvertError> for tonic::Status {
@@ -140,6 +148,12 @@ pub fn status_from_error(e: &agent_core::Error) -> tonic::Status {
         Error::Provider(m) => tonic::Status::internal(format!("provider: {m}")),
         Error::Tool(m) => tonic::Status::internal(format!("tool: {m}")),
         Error::Memory(m) => tonic::Status::internal(format!("memory: {m}")),
+        // A store-backed lookup miss (the config-store `not found:` shape, e.g. an
+        // absent role card) is a NotFound on the wire, not a bad request; the rest of
+        // the config errors (validation, malformed input) stay InvalidArgument.
+        Error::Config(m) if m.starts_with("not found") => {
+            tonic::Status::not_found(format!("config: {m}"))
+        }
         Error::Config(m) => tonic::Status::invalid_argument(format!("config: {m}")),
         Error::Io(m) => tonic::Status::unavailable(format!("io: {m}")),
         Error::Json(m) => tonic::Status::invalid_argument(format!("json: {m}")),
@@ -2851,6 +2865,79 @@ impl From<pb::FleetSession> for agent_core::FleetSession {
     }
 }
 
+// --- RoleCard (config C34 / C1b) -------------------------------------------
+//
+// Outbound (core → wire) is infallible: typed actions/resource-types print via
+// `as_str`, and the flat trio is set from the permission variant. Inbound
+// (wire → core) is fallible: an action/resource string outside the closed set is
+// rejected (fail-closed), and the flat trio collapses back to the variant with the
+// same precedence the wire documents (`all` › non-empty `pairs` › `actions_on_all`).
+
+impl From<agent_core::RoleCard> for pb::RoleCard {
+    fn from(c: agent_core::RoleCard) -> Self {
+        use agent_core::RolePermissions;
+        let (all, actions_on_all, pairs) = match c.permissions {
+            RolePermissions::All => (true, Vec::new(), Vec::new()),
+            RolePermissions::ActionsOnAll(actions) => (
+                false,
+                actions.iter().map(|a| a.as_str().to_string()).collect(),
+                Vec::new(),
+            ),
+            RolePermissions::Pairs(ps) => (
+                false,
+                Vec::new(),
+                ps.iter()
+                    .map(|(a, r)| pb::RolePermission {
+                        action: a.as_str().to_string(),
+                        resource_type: r.as_str().to_string(),
+                    })
+                    .collect(),
+            ),
+        };
+        pb::RoleCard {
+            id: c.id,
+            crosses_tenants: c.crosses_tenants,
+            all,
+            actions_on_all,
+            pairs,
+        }
+    }
+}
+
+impl TryFrom<pb::RoleCard> for agent_core::RoleCard {
+    type Error = ConvertError;
+    fn try_from(c: pb::RoleCard) -> Result<Self, Self::Error> {
+        use agent_core::{Action, ResourceType, RolePermissions};
+        let parse_action =
+            |s: &str| Action::parse(s).ok_or_else(|| ConvertError::UnknownAction(s.to_string()));
+        let parse_resource = |s: &str| {
+            ResourceType::parse(s).ok_or_else(|| ConvertError::UnknownResourceType(s.to_string()))
+        };
+        // Precedence matches the wire contract: `all` › non-empty `pairs` ›
+        // `actions_on_all` (possibly empty ⇒ grants nothing).
+        let permissions = if c.all {
+            RolePermissions::All
+        } else if !c.pairs.is_empty() {
+            let mut pairs = Vec::with_capacity(c.pairs.len());
+            for p in &c.pairs {
+                pairs.push((parse_action(&p.action)?, parse_resource(&p.resource_type)?));
+            }
+            RolePermissions::Pairs(pairs)
+        } else {
+            let mut actions = Vec::with_capacity(c.actions_on_all.len());
+            for a in &c.actions_on_all {
+                actions.push(parse_action(a)?);
+            }
+            RolePermissions::ActionsOnAll(actions)
+        };
+        Ok(agent_core::RoleCard {
+            id: c.id,
+            crosses_tenants: c.crosses_tenants,
+            permissions,
+        })
+    }
+}
+
 impl From<agent_core::UpstreamHealth> for pb::UpstreamHealth {
     fn from(h: agent_core::UpstreamHealth) -> Self {
         pb::UpstreamHealth {
@@ -5005,6 +5092,21 @@ mod tests {
                 "wrong code for {err:?}"
             );
         }
+    }
+
+    // A `Config` error whose message carries the store-miss `not found:` prefix maps
+    // to NotFound (the role/store seam contract), while every other Config error stays
+    // a bad request. boundary: only the leading prefix flips the code.
+    #[rstest]
+    // desc: an absent role card (config-store `not found:` shape) → expect NotFound.
+    #[case::store_miss("not found: role card `ghost`", tonic::Code::NotFound)]
+    // desc: a validation failure is a bad request → expect InvalidArgument.
+    #[case::validation("invalid role id `../etc`", tonic::Code::InvalidArgument)]
+    // boundary: `not found` only mid-message does not flip the code → InvalidArgument.
+    #[case::prefix_only("id not found in card", tonic::Code::InvalidArgument)]
+    fn status_from_config_not_found(#[case] msg: &str, #[case] want: tonic::Code) {
+        let s = status_from_error(&agent_core::Error::Config(msg.to_string()));
+        assert_eq!(s.code(), want, "wrong code for {msg:?}");
     }
 
     // A `ConvertError` (a malformed inbound message) is a client bad request.

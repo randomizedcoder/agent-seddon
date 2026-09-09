@@ -1288,6 +1288,19 @@ pub async fn build_agent_with(
         Some(r) => agent.with_fleet_registry(r),
         None => agent,
     };
+    // The RBAC role-card store (config C1b), held for `--serve-role`. When present,
+    // fold the persisted cards atop the built-ins and install the ambient catalog
+    // snapshot the control-plane gate reads — so an operator's roles take effect
+    // process-wide from startup. With no store the gate keeps the built-ins (C1).
+    #[cfg(feature = "role-store")]
+    let agent = match resolve_role_registry(&cfg)? {
+        Some(r) => {
+            let catalog = agent_core::load_catalog(r.as_ref()).await?;
+            agent_core::install_catalog(catalog);
+            agent.with_role_registry(r)
+        }
+        None => agent,
+    };
     // The fleet's persisted review-history reader (review-fleet C16), over the same
     // ClickHouse the telemetry writer feeds (C14/C15 tables). Only wired when telemetry is
     // enabled — with no store there's nothing to read back, and the FSM reviews without
@@ -2811,6 +2824,43 @@ pub(crate) fn resolve_fleet_registry(
             "[review_fleet] store = \"postgres\" requires building with the `fleet-postgres` feature"
         ),
         other => anyhow::bail!("unknown [review_fleet] store `{other}`"),
+    };
+    Ok(store)
+}
+
+/// Build the `[role] store` backend — the operator-defined RBAC role cards (config
+/// C1b), held for `--serve-role` and folded into the control-plane gate's catalog
+/// snapshot at startup ([`build_agent`] calls [`agent_core::install_catalog`] once
+/// this resolves to `Some`). Mirrors [`resolve_fleet_registry`]: a string-match
+/// over `store` with the postgres arm double-cfg-gated. `""` ⇒ no store (the gate
+/// keeps the three built-ins alone, exactly like C1).
+#[cfg(feature = "role-store")]
+pub(crate) fn resolve_role_registry(
+    cfg: &Config,
+) -> anyhow::Result<Option<Arc<dyn agent_core::RoleRegistry>>> {
+    let store: Option<Arc<dyn agent_core::RoleRegistry>> = match cfg.role.store.as_str() {
+        "" => None,
+        // Cards as prost blobs under a JSON-per-card file tree (hermetic; the
+        // in-gate + serve-smoke path).
+        "file" => {
+            let backend = Arc::new(agent_config_store::FileBackend::new(expand_tilde(
+                &cfg.role.file,
+            )));
+            Some(Arc::new(agent_role::StoreRoles::new(backend)))
+        }
+        // The shared-store arm: persist role cards onto the `[config_store]` Postgres
+        // backend, reusing the same spine as the registry/fleet convergences. DSN
+        // from `[config_store] dsn_ref`.
+        #[cfg(feature = "role-postgres")]
+        "postgres" => {
+            let backend = crate::store_backend::pg_backend(&cfg.config_store)?;
+            Some(Arc::new(agent_role::StoreRoles::new(backend)))
+        }
+        #[cfg(not(feature = "role-postgres"))]
+        "postgres" => anyhow::bail!(
+            "[role] store = \"postgres\" requires building with the `role-postgres` feature"
+        ),
+        other => anyhow::bail!("unknown [role] store `{other}`"),
     };
     Ok(store)
 }
