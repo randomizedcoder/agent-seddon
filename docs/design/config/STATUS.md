@@ -48,7 +48,7 @@ of done — is [`09-increments.md`](09-increments.md). This table is the **live 
 |---|---|---|---|---|
 | A1 | `agent-config-store` crate: file+sqlite tiers + txn API | ✅ | [#294](https://github.com/randomizedcoder/agent-seddon/pull/294) | — |
 | A2 | Postgres tier + `[config_store]` bootstrap + opt-in DB harness | ✅ | [#296](https://github.com/randomizedcoder/agent-seddon/pull/296) | A1 |
-| A3 | Converge `agent-registry` (behavior-preserving) | 🟡 | (this PR) | A2 |
+| A3 | Converge `agent-registry` (behavior-preserving) | 🟡 | [#298](https://github.com/randomizedcoder/agent-seddon/pull/298) | A2 |
 | A3b | Converge `agent-review-fleet` | ⬜ | — | A2 |
 | A3c | Converge `agent-prompt` (outlier) | ⬜ | — | A2 |
 | B1 | `AuthInterceptor` tower layer + JWKS/JWT + `[auth]` | ✅ | [#295](https://github.com/randomizedcoder/agent-seddon/pull/295) | — |
