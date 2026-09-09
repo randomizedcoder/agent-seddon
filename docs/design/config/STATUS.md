@@ -51,7 +51,7 @@ of done — is [`09-increments.md`](09-increments.md). This table is the **live 
 | A3b | Converge `agent-review-fleet` | ⬜ | — | A2 |
 | A3c | Converge `agent-prompt` (outlier) | ⬜ | — | A2 |
 | B1 | `AuthInterceptor` tower layer + JWKS/JWT + `[auth]` | ✅ | [#295](https://github.com/randomizedcoder/agent-seddon/pull/295) | — |
-| C1 | C34 RBAC enforcement core (`authorize` + gate all control-plane RPCs) | 🟡 | (this PR) | B1, A1 |
+| C1 | C34 RBAC enforcement core (`authorize` + gate all control-plane RPCs) | 🟡 | [#297](https://github.com/randomizedcoder/agent-seddon/pull/297) | B1, A1 |
 | C1b | RBAC role cards + `RoleService` seam (needs the shared store) | ⬜ | — | C1, A3 |
 | C2 | C35 per-tenant plane (+ C38 prompt) | ⬜ | — | B1, A3 |
 | D1 | C36 forge registry | ⬜ | — | A1 (+C2 per-tenant) |
