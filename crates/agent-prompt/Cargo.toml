@@ -11,6 +11,14 @@ default = []
 # database dependency in the workspace, off by default so a normal build stays
 # dependency-free (mirrors agent-session's `session-file` two-tier feature).
 prompt-sqlite = ["dep:rusqlite"]
+# The shared-store `PromptStore` backend (config C41 / A3c): the storable tiers
+# (sqlite/postgres/grpc) persist onto `agent-config-store`. The `FilePromptStore`
+# directory tree stays as-is. Off by default.
+prompt-store = ["dep:agent-config-store", "dep:serde", "dep:serde_json"]
+# The Postgres arm of the shared-store backend: forwards to `agent-config-store`'s
+# `config-store-postgres` (sqlx) tier. Off by default; NOT hermetic (needs a live
+# server), so its tests are `#[ignore]`-gated (run via `nix run .#integration`).
+prompt-store-postgres = ["prompt-store", "agent-config-store/config-store-postgres"]
 
 [dependencies]
 agent-core.workspace = true
@@ -22,6 +30,12 @@ tracing.workspace = true
 # Embedded SQLite for the `sqlite` backend, behind `prompt-sqlite` (off by default).
 # `bundled` compiles vendored sqlite3.c — no system library. See the workspace dep.
 rusqlite = { workspace = true, optional = true }
+# The shared transactional config store the `prompt-store` backend persists onto,
+# plus the JSON codec for its override cards (config C41 / A3c). Optional: pulled in
+# only by `prompt-store`/`prompt-store-postgres`.
+agent-config-store = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio.workspace = true

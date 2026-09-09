@@ -41,6 +41,11 @@ use agent_core::{
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "prompt-store")]
+pub mod store;
+#[cfg(feature = "prompt-store")]
+pub use store::StorePrompt;
+
 #[cfg(feature = "prompt-sqlite")]
 mod sqlite;
 #[cfg(feature = "prompt-sqlite")]

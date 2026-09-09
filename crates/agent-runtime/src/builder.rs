@@ -989,6 +989,21 @@ pub async fn build_agent_with(
                 Arc::new(agent_grpc::client::GrpcPrompts::connect(&ep)?)
                     as Arc<dyn agent_core::PromptStore>
             }
+            // The shared-store arm (config C41 / A3c): the storable tiers persist onto
+            // the `[config_store]` Postgres backend via `StorePrompt`, so prompt cards
+            // can join a cross-card transaction. The FilePromptStore tree stays as-is.
+            #[cfg(feature = "prompt-postgres")]
+            "postgres" => {
+                let backend = crate::store_backend::pg_backend(&cfg.config_store)?;
+                Arc::new(agent_prompt::StorePrompt::new(
+                    backend,
+                    cfg.agent.system_prompt.clone(),
+                )) as Arc<dyn agent_core::PromptStore>
+            }
+            #[cfg(not(feature = "prompt-postgres"))]
+            "postgres" => anyhow::bail!(
+                "[prompts] backend = \"postgres\" requires building with the `prompt-postgres` feature"
+            ),
             other => {
                 anyhow::bail!(
                     "unknown [prompts] backend `{other}` (built in: `file`, `sqlite`, `grpc`)"
