@@ -6,11 +6,22 @@ edition.workspace = true
 license.workspace = true
 description = "gRPC transport for the agent-seddon seams: per-seam servers + clients over TCP or unix domain sockets"
 
+[features]
+default = []
+# OIDC/JWT bearer authentication interceptor (config C33/B1). Off by default so the
+# standard build ships no token verification and no HTTP-fetch dep; the `AuthLayer`
+# itself always compiles (a pass-through when disabled, i.e. `[auth] mode = "none"`),
+# only the JWKS/JWT verifier is gated. See docs/design/config/09-increments.md.
+auth = ["dep:jsonwebtoken", "dep:reqwest"]
+
 [dependencies]
 agent-core = { workspace = true }
 agent-proto = { workspace = true }
 # The one canonical retry/backoff library (gRPC overload-code classifier).
 agent-retry = { workspace = true }
+# JWT verify + JWKS fetch for the `auth` feature (see the feature comment above).
+jsonwebtoken = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
 tonic = { workspace = true }
 tonic-reflection = { workspace = true }
 tonic-health = { workspace = true }

@@ -923,6 +923,29 @@ job         = "agent-seddon"
 # agent-specific knowledge. SERVING means "up and this seam's adapter is wired",
 # NOT that the backing impl is healthy — see docs/grpc.md.
 
+# [auth] — OIDC/JWT bearer authentication for served gRPC seams (config C33 / B1,
+# docs/design/config/09-increments.md). It concretizes the multi-session security
+# follow-up: a VERIFIED identity replacing the trusted `x-agent-user-id` header.
+#
+# `mode = "none"` (the default when [auth] is absent) preserves today's behaviour —
+# the `x-agent-user-id` / `x-agent-session-id` metadata is trusted as sent. With
+# `mode = "oidc"`, every served seam (and `--serve-all`) requires a bearer JWT;
+# it is verified against the issuer's JWKS and, on success, its tenant claim
+# OVERWRITES `x-agent-user-id` (any client-supplied value is dropped), so the
+# per-tenant scoping downstream keys off a verified principal. Any failure is an
+# opaque UNAUTHENTICATED. The health + reflection services stay exempt (probes need
+# no token). Requires the agent built with the `auth` feature — otherwise
+# `mode = "oidc"` is a fail-closed startup error, never a silent downgrade.
+#
+# [auth]
+# mode         = "oidc"                                 # "none" (default) | "oidc"
+# issuer       = "https://issuer.example.com"           # expected `iss`
+# audience     = "agent"                                # expected `aud`
+# jwks_url     = "https://issuer.example.com/.well-known/jwks.json"  # public keys
+# tenant_claim = "org"                                  # claim → tenant (default "org")
+# roles_claim  = "roles"                                # claim → roles (default "roles")
+# leeway_secs  = 60                                     # accepted exp/nbf clock skew
+
 # [policy] configures two independent things: the `allow-list` rules and the guard.
 #
 # `guard` wraps WHATEVER `[agent] policy` you selected and screens each call for

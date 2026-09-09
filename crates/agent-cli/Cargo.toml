@@ -9,6 +9,13 @@ license.workspace = true
 name = "agent"
 path = "src/main.rs"
 
+[features]
+default = []
+# OIDC/JWT bearer authentication for served seams (config C33/B1); forwards to
+# agent-runtime/auth (→ agent-grpc/auth). Off by default — `[auth] mode = "oidc"`
+# needs the agent built with this feature, else it is a fail-closed startup error.
+auth = ["agent-runtime/auth"]
+
 [dependencies]
 agent-core.workspace = true
 agent-runtime.workspace = true

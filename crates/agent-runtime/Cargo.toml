@@ -229,6 +229,10 @@ metrics-proxy = ["dep:agent-metrics-proxy", "agent-metrics-proxy/http"]
 mcp = ["dep:agent-mcp"]
 # gRPC seam transports: `= "grpc"` client factories + remote tool workers.
 grpc = ["dep:agent-grpc"]
+# OIDC/JWT bearer authentication for served seams (config C33/B1). Off by default so
+# the standard binary ships no token verification; enabling it lets `[auth] mode =
+# "oidc"` build the JWKS/JWT verifier (else it is a fail-closed startup error).
+auth = ["grpc", "agent-grpc/auth"]
 # Expose a `delegate` tool that spawns child agents (isolated context).
 subagents = []
 # The `web_fetch` tool over the WebBackend seam: the local reqwest transport +

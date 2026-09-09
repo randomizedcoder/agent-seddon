@@ -32,6 +32,7 @@ use tonic::transport::Server;
 
 use super::{
     admission::{AdmissionLayer, ShedObserver},
+    auth::AuthLayer,
     ServeRouter,
 };
 
@@ -108,20 +109,35 @@ pub async fn base_router(max_in_flight: usize) -> (ServeRouter, HealthHandle) {
 
 /// Like [`base_router`], but attaches a shed observer to the admission layer so a
 /// caller can count sheds as a metric (the serve path bridges it to
-/// `agent_grpc_overload_shed_total`). Kept as a separate entry point so the many
-/// test/example callers of `base_router` need no change.
+/// `agent_grpc_overload_shed_total`). Authentication is **disabled** (pass-through),
+/// preserving today's behaviour — the many test/example callers need no change.
 pub async fn base_router_with_observer(
     max_in_flight: usize,
     on_shed: Option<ShedObserver>,
+) -> (ServeRouter, HealthHandle) {
+    base_router_with_auth(max_in_flight, on_shed, AuthLayer::disabled()).await
+}
+
+/// The full base router: overload admission (outer) wrapping the authentication
+/// layer (inner). The serve path passes an [`AuthLayer`] built from `[auth]`; a
+/// disabled layer is a pass-through, so `mode = "none"` reproduces
+/// [`base_router_with_observer`] exactly.
+pub async fn base_router_with_auth(
+    max_in_flight: usize,
+    on_shed: Option<ShedObserver>,
+    auth: AuthLayer,
 ) -> (ServeRouter, HealthHandle) {
     let (mut reporter, health_service) = tonic_health::server::health_reporter();
     reporter
         .set_service_status("", tonic_health::ServingStatus::Serving)
         .await;
     (
-        // The admission layer wraps the whole routed service, so every seam added
-        // onto this router (and `--serve-all`) sheds overload uniformly.
+        // Both layers wrap the whole routed service, so every seam added onto this
+        // router (and `--serve-all`) sheds overload and authenticates uniformly.
+        // `.layer(auth)` first then `.layer(admission)` makes admission the OUTER
+        // layer (shed before crypto); the type is `Stack<Admission, Stack<Auth, _>>`.
         Server::builder()
+            .layer(auth)
             .layer(AdmissionLayer::new(max_in_flight, SHED_PUSHBACK_MS).with_observer(on_shed))
             .add_service(health_service),
         HealthHandle {

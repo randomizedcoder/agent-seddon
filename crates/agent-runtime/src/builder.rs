@@ -1136,6 +1136,16 @@ pub async fn build_agent_with(
         fleet_max_total: cfg.review_fleet.max_total,
         fleet_max_per_user: cfg.review_fleet.max_per_user,
         fleet_slack_app_token_ref: cfg.review_fleet.slack.app_token_ref.clone(),
+        // OIDC/JWT auth for served seams (`[auth]`, C33/B1); `mode` empty ⇒ disabled.
+        grpc_auth: crate::agent::GrpcAuthSettings {
+            mode: cfg.auth.mode.clone(),
+            issuer: cfg.auth.issuer.clone(),
+            audience: cfg.auth.audience.clone(),
+            jwks_url: cfg.auth.jwks_url.clone(),
+            tenant_claim: cfg.auth.tenant_claim.clone(),
+            roles_claim: cfg.auth.roles_claim.clone(),
+            leeway_secs: cfg.auth.leeway_secs,
+        },
     };
 
     // Subagents: register a `delegate` tool whose children reuse the worker tool

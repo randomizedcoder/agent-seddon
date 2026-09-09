@@ -32,6 +32,8 @@ pub struct Config {
     #[serde(default)]
     pub grpc: GrpcCfg,
     #[serde(default)]
+    pub auth: AuthCfg,
+    #[serde(default)]
     pub search: SearchCfg,
     #[serde(default)]
     pub ast: AstCfg,
@@ -2170,6 +2172,40 @@ pub struct GrpcCfg {
     pub gateway: GrpcSeamCfg,
 }
 
+/// `[auth]` — OIDC/JWT bearer authentication for served gRPC seams (config C33 /
+/// increment B1). `mode = "none"` (the default) preserves today's trusted-header
+/// path; `mode = "oidc"` makes every served seam require and verify a bearer token
+/// (requires the `agent-grpc` `auth` feature at build time). All values are the
+/// standard OIDC discovery fields; no secret is stored (JWKS is a public URL).
+#[derive(Debug, Default, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
+pub struct AuthCfg {
+    /// `"none"` (default) ⇒ trusted headers as today; `"oidc"` ⇒ verify bearer JWTs.
+    #[serde(default)]
+    pub mode: String,
+    /// Expected `iss` claim (the IdP's issuer URL).
+    #[serde(default)]
+    pub issuer: String,
+    /// Expected `aud` claim (this deployment's audience/client id).
+    #[serde(default)]
+    pub audience: String,
+    /// The issuer's JWKS endpoint (public keys; fetched + cached, rotation honored).
+    #[serde(default)]
+    pub jwks_url: String,
+    /// Claim carrying the tenant id (default `"org"` when empty).
+    #[serde(default)]
+    pub tenant_claim: String,
+    /// Claim carrying the roles array (default `"roles"` when empty).
+    #[serde(default)]
+    pub roles_claim: String,
+    /// Accepted clock skew for `exp`/`nbf`, in seconds (default `0`).
+    #[serde(default)]
+    pub leeway_secs: u64,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[cfg_attr(
     feature = "config-schema",
@@ -2733,6 +2769,7 @@ impl Config {
             pty: PtyCfg::default(),
             recall: RecallCfg::default(),
             review_fleet: ReviewFleetCfg::default(),
+            auth: AuthCfg::default(),
             source_path: None,
         }
     }
