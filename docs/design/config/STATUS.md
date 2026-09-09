@@ -57,7 +57,7 @@ of done — is [`09-increments.md`](09-increments.md). This table is the **live 
 | B1 | `AuthInterceptor` tower layer + JWKS/JWT + `[auth]` | ✅ | [#295](https://github.com/randomizedcoder/agent-seddon/pull/295) | — |
 | C1 | C34 RBAC enforcement core (`authorize` + gate all control-plane RPCs) | 🟡 | [#297](https://github.com/randomizedcoder/agent-seddon/pull/297) | B1, A1 |
 | C1b | RBAC role cards + `RoleService` seam (needs the shared store) | ✅ | [#301](https://github.com/randomizedcoder/agent-seddon/pull/301) | C1, A3 |
-| C2 | C35 per-tenant plane (+ C38 prompt) | 🟡 | _in review_ | B1, A3 |
+| C2 | C35 per-tenant plane (+ C38 prompt) | 🟡 | [#302](https://github.com/randomizedcoder/agent-seddon/pull/302) | B1, A3 |
 | C2b | Per-tenant Graph + Scheduler (the non-shared-store seams) | ⬜ | — | C2 |
 | D1 | C36 forge registry | ⬜ | — | A1 (+C2 per-tenant) |
 | D2 | C37 message-transport registry | ⬜ | — | A1 (+C2 per-tenant) |
