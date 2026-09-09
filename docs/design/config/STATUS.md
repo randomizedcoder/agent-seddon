@@ -2,9 +2,9 @@
 
 Legend: ⬜ designed, not built · 🟡 partially built · ✅ built + merged.
 
-**Track state: ⬜ design-of-record only.** This dir was written 2026-09-08; **no code is built.** The
-existing pieces it *builds on* (the model-router registry, `PerUserMemory`, the seam factory registry)
-are shipped, but every C32–C41 component below is design-only.
+**Track state: 🟡 building.** The design-of-record was written 2026-09-08; the phased build is now under
+way (see the live tracker below). Both keystones are merged — A1 `agent-config-store` (#294) and B1 the
+auth tower layer (#295) — and A2 (the Postgres tier) is in review.
 
 ## Components
 
@@ -46,11 +46,11 @@ of done — is [`09-increments.md`](09-increments.md). This table is the **live 
 | Phase | Component | State | PR | Depends on |
 |---|---|---|---|---|
 | A1 | `agent-config-store` crate: file+sqlite tiers + txn API | ✅ | [#294](https://github.com/randomizedcoder/agent-seddon/pull/294) | — |
-| A2 | Postgres tier + `[config_store]` bootstrap + opt-in DB harness | ⬜ | — | A1 |
+| A2 | Postgres tier + `[config_store]` bootstrap + opt-in DB harness | 🟡 | [#296](https://github.com/randomizedcoder/agent-seddon/pull/296) | A1 |
 | A3 | Converge `agent-registry` (behavior-preserving) | ⬜ | — | A2 |
 | A3b | Converge `agent-review-fleet` | ⬜ | — | A2 |
 | A3c | Converge `agent-prompt` (outlier) | ⬜ | — | A2 |
-| B1 | `AuthInterceptor` tower layer + JWKS/JWT + `[auth]` | 🟡 | [#295](https://github.com/randomizedcoder/agent-seddon/pull/295) | — |
+| B1 | `AuthInterceptor` tower layer + JWKS/JWT + `[auth]` | ✅ | [#295](https://github.com/randomizedcoder/agent-seddon/pull/295) | — |
 | C1 | C34 RBAC (roles/permissions as cards) | ⬜ | — | B1, A1 |
 | C2 | C35 per-tenant plane (+ C38 prompt) | ⬜ | — | B1, A3 |
 | D1 | C36 forge registry | ⬜ | — | A1 (+C2 per-tenant) |

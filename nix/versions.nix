@@ -287,6 +287,18 @@ in
   clickhouseNativePort = 9000; # native TCP protocol
   clickhouseDatabase = "agent";
 
+  # ── Postgres container settings ────────────────────────────────────────────
+  # The transactional config-store (`agent-config-store` postgres tier, config
+  # C41 / A2). Opt-in only — exercised via `nix run .#integration`
+  # (`postgres-up` + the `pg-integration` harness), never inside `nix flake
+  # check`. Pin the server image so an upstream bump is an explicit change here.
+  postgresImage = "postgres:16";
+  postgresContainerName = "agent-seddon-postgres";
+  postgresPort = 5432;
+  postgresDatabase = "agent_config";
+  postgresUser = "agent";
+  postgresPassword = "agent"; # dev/CI only — the container is bound to 127.0.0.1.
+
   # ── ClickStack (HyperDX all-in-one) settings ──────────────────────────────
   # The OTLP receiver + ClickHouse + HyperDX UI the agent's OTLP tracing exports
   # to. Pin the image so an upstream bump is an explicit change here.

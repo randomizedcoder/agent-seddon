@@ -84,6 +84,8 @@ pub struct Config {
     #[serde(default)]
     pub registry: RegistryCfg,
     #[serde(default)]
+    pub config_store: ConfigStoreCfg,
+    #[serde(default)]
     pub mode: ModeCfg,
     #[serde(default)]
     pub dimensions: DimensionsCfg,
@@ -901,6 +903,59 @@ fn default_registry_file() -> String {
 }
 fn default_registry_path() -> String {
     ".agent/model-router.sqlite3".to_string()
+}
+
+/// `[config_store]` — the shared transactional config data layer (config C41 /
+/// A2), behind which every domain's config *cards* will persist as the per-domain
+/// stores converge onto it (A3*). Bootstrap-only: it names the backend tier and
+/// where it lives; nothing is *consumed* from it yet (convergence is A3*).
+///
+/// The DSN is a **reference, never the DSN**: `dsn_ref` is `env:NAME` or
+/// `file:/path` (a `postgres://…` inline value is rejected — see
+/// [`agent_core::DsnRef`]), resolved on the host at connect time.
+#[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
+pub struct ConfigStoreCfg {
+    /// "" (off, default — today's per-domain stores are unchanged) | "file" |
+    /// "sqlite" (feature `config-store-sqlite`) | "postgres" (feature
+    /// `config-store-postgres`, opt-in, never in `nix flake check`) | "grpc".
+    #[serde(default)]
+    pub backend: String,
+    /// Reference to the Postgres DSN (`postgres` backend only): `env:NAME` or
+    /// `file:/path` — never an inline DSN (it carries a password).
+    #[serde(default)]
+    pub dsn_ref: String,
+    /// On-disk path for the `file`/`sqlite` backends.
+    #[serde(default = "default_config_store_path")]
+    pub path: String,
+    /// Postgres connection-pool ceiling (`postgres` backend only).
+    #[serde(default = "default_config_store_pool_max")]
+    pub pool_max: u32,
+    /// Apply the embedded schema on connect (`postgres` backend only).
+    #[serde(default)]
+    pub migrate_on_start: bool,
+}
+
+impl Default for ConfigStoreCfg {
+    fn default() -> Self {
+        Self {
+            backend: String::new(),
+            dsn_ref: String::new(),
+            path: default_config_store_path(),
+            pool_max: default_config_store_pool_max(),
+            migrate_on_start: false,
+        }
+    }
+}
+
+fn default_config_store_path() -> String {
+    ".agent/config-store.sqlite3".to_string()
+}
+fn default_config_store_pool_max() -> u32 {
+    8
 }
 fn default_instant_min_coverage() -> f32 {
     0.6
@@ -2759,6 +2814,7 @@ impl Config {
             instant: InstantCfg::default(),
             graph: GraphCfg::default(),
             registry: RegistryCfg::default(),
+            config_store: ConfigStoreCfg::default(),
             mode: ModeCfg::default(),
             dimensions: DimensionsCfg::default(),
             review: ReviewCfg::default(),

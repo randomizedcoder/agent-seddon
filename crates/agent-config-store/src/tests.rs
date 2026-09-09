@@ -110,6 +110,33 @@ fn sqlite_backend() -> Arc<dyn Backend> {
     Arc::new(crate::SqliteBackend::open_in_memory().expect("open in-memory sqlite"))
 }
 
+/// A real-Postgres backend for the `#[ignore]`-gated suite (run only under the
+/// `pg-integration` harness, which sets the DSN and runs single-threaded). Each
+/// call ensures the schema and TRUNCATEs to a clean slate so every scenario —
+/// which asserts exact counts — starts empty, exactly like the fresh
+/// in-memory/tempdir tiers.
+#[cfg(feature = "config-store-postgres")]
+async fn pg_backend() -> Arc<dyn Backend> {
+    use sqlx::postgres::PgPoolOptions;
+    let dsn = std::env::var("AGENT_CONFIG_STORE_TEST_DSN")
+        .expect("AGENT_CONFIG_STORE_TEST_DSN must be set by the pg-integration harness");
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&dsn)
+        .await
+        .expect("connect postgres");
+    sqlx::raw_sql(include_str!("../migrations/0001_config_store.sql"))
+        .execute(&pool)
+        .await
+        .expect("ensure schema");
+    // FK: cards references tenants; truncating both in one statement satisfies it.
+    sqlx::query("TRUNCATE cards, tenants")
+        .execute(&pool)
+        .await
+        .expect("reset to clean slate");
+    Arc::new(crate::PgBackend::from_pool(pool))
+}
+
 // --- the scenarios, each generic over the backend tier -----------------------
 
 mod scen {
@@ -322,53 +349,73 @@ mod scen {
     }
 }
 
-/// Generate the full scenario matrix for one backend tier.
+/// Generate the full scenario matrix for one backend tier. The hermetic tiers
+/// use the two-arg form; the `postgres` tier uses the `ignore` form so the whole
+/// matrix is `#[ignore]`d (it needs a live server — run under the
+/// `pg-integration` harness), while still proving the trait behaves identically.
 macro_rules! suite {
     ($modname:ident, $make:expr) => {
+        suite!(@gen $modname, $make,);
+    };
+    (ignore $modname:ident, $make:expr, $reason:literal) => {
+        suite!(@gen $modname, $make, #[ignore = $reason]);
+    };
+    (@gen $modname:ident, $make:expr, $(#[$ig:meta])?) => {
         mod $modname {
             use super::*;
 
             #[tokio::test]
+            $(#[$ig])?
             async fn positive_put_get_roundtrip() {
                 scen::put_get_roundtrip($make).await;
             }
             #[tokio::test]
+            $(#[$ig])?
             async fn positive_multi_card_commit() {
                 scen::multi_card_commit($make).await;
             }
             #[tokio::test]
+            $(#[$ig])?
             async fn positive_list_scoped_to_tenant() {
                 scen::list_scoped_to_tenant($make).await;
             }
             #[tokio::test]
+            $(#[$ig])?
             async fn negative_missing_card() {
                 scen::missing_card($make).await;
             }
             #[tokio::test]
+            $(#[$ig])?
             async fn negative_partial_failure_rolls_back_all() {
                 scen::partial_failure_rolls_back_all($make).await;
             }
             #[tokio::test]
+            $(#[$ig])?
             async fn negative_fk_violation_rejected() {
                 scen::fk_violation_rejected($make).await;
             }
             #[tokio::test]
+            $(#[$ig])?
             async fn boundary_max_cards_per_tenant() {
                 scen::max_cards_per_tenant($make).await;
             }
             #[tokio::test]
+            $(#[$ig])?
             async fn boundary_number_clamped_on_ingest() {
                 scen::number_clamped_on_ingest($make).await;
             }
             #[tokio::test]
+            $(#[$ig])?
             async fn corner_empty_document() {
                 scen::empty_document($make).await;
             }
             #[tokio::test]
+            $(#[$ig])?
             async fn adversarial_hostile_tenant_id_confined() {
                 scen::hostile_tenant_id_confined($make).await;
             }
             #[tokio::test]
+            $(#[$ig])?
             async fn adversarial_sql_injection_via_card_field() {
                 scen::sql_injection_via_card_field($make).await;
             }
@@ -380,3 +427,61 @@ suite!(memory, mem_backend());
 suite!(file, file_backend());
 #[cfg(feature = "config-store-sqlite")]
 suite!(sqlite, sqlite_backend());
+#[cfg(feature = "config-store-postgres")]
+suite!(
+    ignore postgres,
+    pg_backend().await,
+    "needs a running postgres (nix run .#postgres-up) — run via `nix run .#integration`"
+);
+
+/// A second Postgres handle on the SAME database WITHOUT resetting — for the
+/// concurrent-writer test, which needs two independent pools racing one row.
+#[cfg(feature = "config-store-postgres")]
+async fn pg_backend_no_reset() -> Arc<dyn Backend> {
+    use sqlx::postgres::PgPoolOptions;
+    let dsn = std::env::var("AGENT_CONFIG_STORE_TEST_DSN")
+        .expect("AGENT_CONFIG_STORE_TEST_DSN must be set by the pg-integration harness");
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&dsn)
+        .await
+        .expect("connect postgres");
+    Arc::new(crate::PgBackend::from_pool(pool))
+}
+
+/// `corner` (postgres, live): two independent connections race a `put` of the
+/// same `(tenant, id)`. Under MVCC the second INSERT … ON CONFLICT blocks on the
+/// first's row lock, then takes the UPDATE branch — both commit (no lost update,
+/// no deadlock/panic), and the surviving blob is one of the two writers'. The
+/// barrier is `join!` (both futures in flight together), never a sleep.
+#[cfg(feature = "config-store-postgres")]
+#[tokio::test]
+#[ignore = "needs a running postgres (nix run .#postgres-up) — run via `nix run .#integration`"]
+async fn corner_concurrent_writers_last_write_conflicts() {
+    let a = pg_backend().await; // resets the DB to a clean slate
+    let b = pg_backend_no_reset().await; // second pool on the same DB
+                                         // Serialize the tenant's creation once so both racers hit an existing tenant.
+    Store::<TestCard>::new(a.clone())
+        .put("t", card("seed", 1))
+        .await
+        .expect("seed tenant");
+
+    let sa = Store::<TestCard>::new(a);
+    let sb = Store::<TestCard>::new(b);
+    let (ra, rb) = tokio::join!(sa.put("t", card("x", 1)), sb.put("t", card("x", 2)));
+    ra.expect("writer A commits");
+    rb.expect("writer B commits");
+
+    let got = sa.get("t", "x").await.expect("row present after the race");
+    assert!(
+        got.weight == 1 || got.weight == 2,
+        "last write wins with no lost update; weight = {}",
+        got.weight
+    );
+    // The seed and the raced id are the only two cards — no phantom duplicate.
+    assert_eq!(
+        sa.list("t").await.expect("list").len(),
+        2,
+        "no lost/duplicated rows"
+    );
+}
