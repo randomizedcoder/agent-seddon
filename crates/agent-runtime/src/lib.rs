@@ -28,6 +28,8 @@ mod search;
 mod session_events;
 pub mod session_store;
 pub mod skills;
+#[cfg(feature = "registry-postgres")]
+mod store_backend;
 #[cfg(feature = "structured")]
 pub mod structured;
 #[cfg(feature = "subagents")]

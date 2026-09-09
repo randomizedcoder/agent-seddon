@@ -63,6 +63,24 @@ impl PgBackend {
         Ok(Self { pool })
     }
 
+    /// Build a lazily-connecting pool to `dsn` (max `pool_max`, clamped to ≥1)
+    /// **synchronously**: the DSN is validated now, but connections open on first
+    /// use — mirroring the lazy-connect discipline the gRPC clients use, so a
+    /// sync config resolver (`resolve_provider_registry`) can construct the
+    /// backend without an async context. Schema is **not** applied here (there is
+    /// no connection yet); a lazy deployment assumes the schema is present (the
+    /// shared `cards`/`tenants` tables from the config-store migration), or is
+    /// migrated out of band. The DSN is never echoed on error (it carries a
+    /// password).
+    pub fn connect_lazy(dsn: &str, pool_max: u32) -> Result<Self> {
+        let pool = PgPoolOptions::new()
+            .max_connections(pool_max.max(1))
+            // Never echo `e`: a DSN parse error can contain the connection string.
+            .connect_lazy(dsn)
+            .map_err(|_| Error::Config("postgres: invalid DSN (could not parse)".into()))?;
+        Ok(Self { pool })
+    }
+
     /// Build a backend over an already-established pool (tests/embedding).
     pub fn from_pool(pool: PgPool) -> Self {
         Self { pool }
