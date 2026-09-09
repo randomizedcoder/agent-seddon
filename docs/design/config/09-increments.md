@@ -239,6 +239,21 @@ The two keystones (A, B) are **independent** and may land in either order or in 
   `integration.nix`.
 - **DoD.** Isolation structural + wire-proven; Tier-0 unchanged; cross-track note added to multi-tenancy
   STATUS; gate green; gated PR.
+- **Built as.** `PerTenant<S>` (`crates/agent-runtime/src/tenant.rs`) routes on the **verified
+  identity** (`current_identity().user`, which B1's auth layer overwrites with the verified tenant; `local`
+  fallback), lazily builds + caches a per-tenant view over a builder closure, and is `?Sized`-generic with
+  one thin trait impl per wrapped seam. `[tenancy] per_tenant` (default `false` = Tier-0, byte-identical)
+  gates the wrap in `builder.rs`, applied at each seam's **shared-store (`postgres`) arm** (the file/sqlite
+  dev tiers stay single-tenant); metering wraps the router (per-view metering is a noted refinement).
+  **C38** added `StorePrompt::with_tenant`. **Scope trimmed per the owner's call:** the three converged
+  shared-store seams only — **Graph + Scheduler per-tenant are deferred to C2b** (neither is on the shared
+  store: Graph is file/grpc, Scheduler an in-memory `LocalScheduler`, so their per-tenant builders need
+  path/instance namespacing, a separable lift). The operator-global-vs-tenant write split
+  (`negative_tenant_write_to_operator_key_denied`) is a **C40/E1** concern, noted not built here. In-gate
+  `nix/checks/per-tenant.nix` (routing matrix + real-store isolation over `MemoryBackend`); the postgres
+  isolation proof runs in the existing `nix/pg-integration.nix` (an `agent-runtime` arm, tenants
+  `c2_tenant_it_*`) rather than a separate `tenant-isolation.nix` — reuses the composed up→barrier→down
+  harness like the registry/fleet/prompt/role pg suites.
 
 ---
 

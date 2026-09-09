@@ -115,6 +115,17 @@ pkgs.writeShellApplication {
     set -e
     if [ "$rc" -ne 0 ]; then note_fail 2; fi
 
-    contract_exit "PASS: pg-integration — postgres config-store + registry + fleet + prompt + role suites green."
+    # The per-tenant plane (config C2): the same real server proves `PerTenant`
+    # isolates tenants over the postgres store, routed by verified identity.
+    echo "==> pg-integration: running the ignored per-tenant postgres suite"
+    set +e
+    nix develop --extra-experimental-features 'nix-command flakes' -c \
+      cargo test -p agent-runtime --features registry-postgres \
+      -- --ignored --test-threads=1 pg_tenant_tests
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then note_fail 2; fi
+
+    contract_exit "PASS: pg-integration — postgres config-store + registry + fleet + prompt + role + per-tenant suites green."
   '';
 }

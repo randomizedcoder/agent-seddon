@@ -38,6 +38,14 @@ mod store_backend;
 pub mod structured;
 #[cfg(feature = "subagents")]
 mod subagent;
+// Per-tenant routing over the converged shared-store seams (config C35 / C2).
+// Only meaningful — and only compiled — when a shared-store backend is built.
+#[cfg(any(
+    feature = "registry-store",
+    feature = "fleet-store",
+    feature = "prompt-store"
+))]
+mod tenant;
 
 pub use agent::{Agent, OpenError, Session, SessionManager, Settings};
 pub use agent_metrics::Metrics;
