@@ -112,6 +112,7 @@ impl pb::config_service_server::ConfigService for ConfigSvc {
         &self,
         request: Request<pb::PutConfigRequest>,
     ) -> Result<Response<pb::PutConfigResponse>, Status> {
+        super::authz::require(agent_core::Action::Write, agent_core::ResourceType::Config)?;
         let key = super::identity_key(request.metadata());
         let sp = span("config.put", request.metadata());
         let inner = self.inner.clone();

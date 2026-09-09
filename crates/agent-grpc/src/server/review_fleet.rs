@@ -99,6 +99,7 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
         &self,
         request: Request<pb::FleetSession>,
     ) -> Result<Response<pb::FleetSession>, Status> {
+        super::authz::require(agent_core::Action::Write, agent_core::ResourceType::Fleet)?;
         let sp = span("fleet.put", request.metadata());
         let inner = self.inner.clone();
         async move {
@@ -118,6 +119,7 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
         &self,
         request: Request<pb::FleetSessionRef>,
     ) -> Result<Response<pb::FleetDeleteReply>, Status> {
+        super::authz::require(agent_core::Action::Delete, agent_core::ResourceType::Fleet)?;
         let sp = span("fleet.delete", request.metadata());
         let inner = self.inner.clone();
         async move {
@@ -135,6 +137,7 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
         &self,
         request: Request<pb::FleetSetEnabledRequest>,
     ) -> Result<Response<pb::FleetSession>, Status> {
+        super::authz::require(agent_core::Action::Write, agent_core::ResourceType::Fleet)?;
         let sp = span("fleet.set_enabled", request.metadata());
         let inner = self.inner.clone();
         async move {
@@ -153,6 +156,7 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
         &self,
         request: Request<pb::ReviewNowRequest>,
     ) -> Result<Response<pb::ReviewNowReply>, Status> {
+        super::authz::require(agent_core::Action::Trigger, agent_core::ResourceType::Fleet)?;
         let sp = span("fleet.review_now", request.metadata());
         // Opt-in: only the full fleet process (with an orchestrator) wires a sink.
         let Some(triggers) = self.triggers.clone() else {
@@ -180,6 +184,7 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
         &self,
         request: Request<pb::ApproveRequest>,
     ) -> Result<Response<pb::ApproveReply>, Status> {
+        super::authz::require(agent_core::Action::Approve, agent_core::ResourceType::Fleet)?;
         let sp = span("fleet.approve", request.metadata());
         // Opt-in: only the full fleet process with persisted history wires an approver.
         let Some(approver) = self.approver.clone() else {

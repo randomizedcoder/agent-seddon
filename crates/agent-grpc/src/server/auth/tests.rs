@@ -402,6 +402,130 @@ async fn corner_health_path_exempt_without_token() {
     );
 }
 
+// ===================== end-to-end: layer → RBAC gate =====================
+//
+// These prove the C1 wiring the unit tests can't: the layer installs the token's
+// verified roles into the `AGENT_PRINCIPAL` scope, and a handler's
+// `authz::require` reads them — so an under-privileged token is denied *through
+// the served stack*, not just in a direct `authorize` call.
+
+/// `valid_claims` with the `roles` claim overridden.
+fn claims_with_roles(org: &str, roles: &[&str]) -> serde_json::Value {
+    let mut c = valid_claims(org, "u");
+    c["roles"] = serde_json::json!(roles);
+    c
+}
+
+/// Drive `req` through `layer` into an inner handler that gates a `Write` on
+/// `Config` via `authz::require`, returning that handler's HTTP response (a bare
+/// 200 on allow, a `PermissionDenied` Status on deny).
+async fn drive_gated(layer: &AuthLayer, req: http::Request<BoxBody>) -> http::Response<BoxBody> {
+    let mut svc = layer.layer(tower::service_fn(
+        |_req: http::Request<BoxBody>| async move {
+            let resp = match crate::server::authz::require(
+                agent_core::Action::Write,
+                agent_core::ResourceType::Config,
+            ) {
+                Ok(()) => http::Response::new(empty_body()),
+                Err(status) => status.into_http(),
+            };
+            Ok::<_, Infallible>(resp)
+        },
+    ));
+    svc.call(req).await.unwrap()
+}
+
+/// The `grpc-status` header, if present. PermissionDenied == 7.
+fn grpc_status(resp: &http::Response<BoxBody>) -> Option<String> {
+    resp.headers()
+        .get("grpc-status")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+}
+
+#[tokio::test]
+async fn positive_operator_token_passes_the_gate() {
+    let token = mint(KID, &claims_with_roles("acme", &["operator"]));
+    let resp = drive_gated(
+        &enabled_layer(),
+        request(
+            "/agent.v1.ConfigService/Put",
+            &[("authorization", &format!("Bearer {token}"))],
+        ),
+    )
+    .await;
+    // No PermissionDenied — the operator role granted the write.
+    assert_ne!(
+        grpc_status(&resp).as_deref(),
+        Some("7"),
+        "operator is allowed"
+    );
+}
+
+#[tokio::test]
+async fn adversarial_reader_token_denied_by_the_gate() {
+    // A perfectly VALID token (good signature, right aud/iss) whose only role is
+    // `reader` must still be denied a write — proving roles gate the RPC, and that
+    // they came from the verified token, not a client header.
+    let token = mint(KID, &claims_with_roles("acme", &["reader"]));
+    let resp = drive_gated(
+        &enabled_layer(),
+        request(
+            "/agent.v1.ConfigService/Put",
+            &[("authorization", &format!("Bearer {token}"))],
+        ),
+    )
+    .await;
+    assert_eq!(
+        grpc_status(&resp).as_deref(),
+        Some("7"),
+        "a reader token is PermissionDenied on a write"
+    );
+}
+
+#[tokio::test]
+async fn adversarial_forged_roles_header_cannot_grant() {
+    // The client presents a reader token AND a forged `x-agent-roles` header. The
+    // layer installs roles ONLY from the verified token, so the write is denied —
+    // there is no header path to inject a privileged role.
+    let token = mint(KID, &claims_with_roles("acme", &["reader"]));
+    let resp = drive_gated(
+        &enabled_layer(),
+        request(
+            "/agent.v1.ConfigService/Put",
+            &[
+                ("x-agent-roles", "operator"),
+                ("authorization", &format!("Bearer {token}")),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(
+        grpc_status(&resp).as_deref(),
+        Some("7"),
+        "a forged roles header cannot escalate a reader token"
+    );
+}
+
+#[tokio::test]
+async fn corner_mode_none_bypasses_the_gate() {
+    // Disabled layer (mode=none): no principal is installed, so the gate is a
+    // pass-through — today's trusted-transport behaviour, unaffected by C1.
+    let resp = drive_gated(
+        &AuthLayer::disabled(),
+        request(
+            "/agent.v1.ConfigService/Put",
+            &[("x-agent-user-id", "acme")],
+        ),
+    )
+    .await;
+    assert_ne!(
+        grpc_status(&resp).as_deref(),
+        Some("7"),
+        "mode=none is a pass-through — no RBAC enforcement without a verified principal"
+    );
+}
+
 #[tokio::test]
 async fn adversarial_client_header_ignored_when_token_present() {
     // A client forges x-agent-user-id=evil AND presents a valid token for `acme`;

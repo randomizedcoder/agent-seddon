@@ -58,6 +58,7 @@ impl pb::graph_service_server::GraphService for GraphSvc {
         &self,
         request: Request<pb::PutGraphRequest>,
     ) -> Result<Response<pb::PutGraphResponse>, Status> {
+        super::authz::require(agent_core::Action::Write, agent_core::ResourceType::Graph)?;
         let key = super::identity_key(request.metadata());
         let sp = span("graph.put", request.metadata());
         let inner = self.inner.clone();
