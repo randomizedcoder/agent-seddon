@@ -213,6 +213,17 @@ prompt = ["dep:agent-prompt"]
 # The `sqlite` PromptStore backend (docs/design/prompts/05-storage.md), off by
 # default. Forwards to agent-prompt's own feature (mirrors `session`→`session-file`).
 prompt-sqlite = ["prompt", "agent-prompt/prompt-sqlite"]
+# The shared-store prompt backend (config C41 / A3c): the storable tiers persist
+# onto `agent-config-store`; the FilePromptStore tree stays as-is. Off by default.
+prompt-store = ["prompt", "agent-prompt/prompt-store", "dep:agent-config-store"]
+# The Postgres arm of the shared-store prompt backend: adds the `postgres` arm to
+# the prompt resolver, building `StorePrompt` over a `PgBackend` from `[config_store]`.
+# Off by default; NOT hermetic (needs a live Postgres server).
+prompt-postgres = [
+  "prompt-store",
+  "agent-prompt/prompt-store-postgres",
+  "agent-config-store/config-store-postgres",
+]
 # Provider-registry seam (model-router 03): the ProviderRegistry stores + the
 # `--model-router-config` textproto startup loader.
 registry = ["dep:agent-registry"]

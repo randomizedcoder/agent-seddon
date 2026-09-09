@@ -802,7 +802,9 @@ dir = "context.d"
 # so this is purely opt-in. Serve the CRUD surface with `agent --serve-prompt`.
 [prompts]
 # backend: "file" (git-legible default) | "sqlite" (embedded DB, feature
-# `prompt-sqlite`) | "grpc" (a central catalog). See docs/design/prompts/05-storage.md.
+# `prompt-sqlite`) | "postgres" (shared config store, config C41 / A3c, feature
+# `prompt-postgres` — [config_store] supplies the DSN; the file tree stays as-is) |
+# "grpc" (a central catalog). See docs/design/prompts/05-storage.md.
 backend = "file"
 dir = "prompts"
 # sqlite backend only: empty ⇒ <working_dir>/.agent-seddon/prompts.db

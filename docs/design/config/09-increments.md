@@ -150,6 +150,17 @@ The two keystones (A, B) are **independent** and may land in either order or in 
   abstraction); route only `sqlite`/`postgres`/`grpc` through the shared store so prompt cards can join a
   cross-card transaction.
 - **DoD.** Existing prompt suite green **unchanged**; gate green; gated PR.
+- **Build note (A3c shipped).** The `FilePromptStore` directory tree **and** the legacy `SqlitePromptStore`
+  stay **untouched**; the convergence lands as a new `StorePrompt`
+  (`crates/agent-prompt/src/store.rs`, feature `prompt-store`) over any `agent_config_store::Backend`,
+  reusing the shared derivation/selection helpers (`fragment_tags`/`fragment_order`/`assemble_preview`/
+  `PromptContext::covers`) so defaults-vs-overrides, `select` (`tags ⊆ ctx`), and `preview` match the
+  file/sqlite backends. Since prompt ids can hold `/` (fragments) or be empty (System) — which
+  `safe_segment` rejects — each override card is keyed by the **hex of its id** in a per-kind collection,
+  with the real id + fields in a JSON blob. `resolve` gains the `postgres` arm (feature `prompt-postgres`)
+  over the shared `store_backend::pg_backend`. In-gate: `nix/checks/prompt-store.nix` runs `StorePrompt`
+  over `MemoryBackend` (agreeing with a migrated file backend); the postgres arm runs `#[ignore]`-gated
+  under `nix run .#integration`.
 
 ---
 

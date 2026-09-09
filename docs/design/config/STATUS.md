@@ -4,9 +4,10 @@ Legend: ⬜ designed, not built · 🟡 partially built · ✅ built + merged.
 
 **Track state: 🟡 building.** The design-of-record was written 2026-09-08; the phased build is now under
 way (see the live tracker below). Both keystones are merged — A1 `agent-config-store` (#294) and B1 the
-auth tower layer (#295), A2 (the Postgres tier, #296), C1 (the RBAC enforcement core, #297), and A3
-(`agent-registry` onto the shared store, #298). The store convergence continues — A3b
-(`agent-review-fleet`) is in review.
+auth tower layer (#295), A2 (the Postgres tier, #296), C1 (the RBAC enforcement core, #297), A3
+(`agent-registry` onto the shared store, #298), and A3b (`agent-review-fleet`, #299). The store
+convergence is nearly complete — A3c (`agent-prompt`, the outlier) is in review; only C2 and tracks C/D/E
+remain.
 
 ## Components
 
@@ -50,8 +51,8 @@ of done — is [`09-increments.md`](09-increments.md). This table is the **live 
 | A1 | `agent-config-store` crate: file+sqlite tiers + txn API | ✅ | [#294](https://github.com/randomizedcoder/agent-seddon/pull/294) | — |
 | A2 | Postgres tier + `[config_store]` bootstrap + opt-in DB harness | ✅ | [#296](https://github.com/randomizedcoder/agent-seddon/pull/296) | A1 |
 | A3 | Converge `agent-registry` (behavior-preserving) | ✅ | [#298](https://github.com/randomizedcoder/agent-seddon/pull/298) | A2 |
-| A3b | Converge `agent-review-fleet` | 🟡 | [#299](https://github.com/randomizedcoder/agent-seddon/pull/299) | A2 |
-| A3c | Converge `agent-prompt` (outlier) | ⬜ | — | A2 |
+| A3b | Converge `agent-review-fleet` | ✅ | [#299](https://github.com/randomizedcoder/agent-seddon/pull/299) | A2 |
+| A3c | Converge `agent-prompt` (outlier) | 🟡 | (this PR) | A2 |
 | B1 | `AuthInterceptor` tower layer + JWKS/JWT + `[auth]` | ✅ | [#295](https://github.com/randomizedcoder/agent-seddon/pull/295) | — |
 | C1 | C34 RBAC enforcement core (`authorize` + gate all control-plane RPCs) | 🟡 | [#297](https://github.com/randomizedcoder/agent-seddon/pull/297) | B1, A1 |
 | C1b | RBAC role cards + `RoleService` seam (needs the shared store) | ⬜ | — | C1, A3 |
