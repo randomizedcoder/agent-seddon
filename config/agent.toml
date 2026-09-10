@@ -187,6 +187,21 @@ root = ""                    # empty ⇒ unset (shared agent.working_dir); tilde
 # store = "postgres" persists cards onto the shared config store (the [config_store]
 # block supplies the DSN + pool); needs the `role-postgres` feature (opt-in).
 
+# [forge_registry] — git-host forge cards (config C36 / D1). Each card declares a
+# `kind` (github/gitlab today; gitea/bitbucket/… as future host impls), an optional
+# `base_url` (empty ⇒ the kind's registered default; an override is SSRF-screened), a
+# `token_ref` (`env:NAME` / `file:/path`, never a raw token), and a `repo_encoding`
+# (`owner_name` | `path`). The valid kinds are "whatever host impls are built into
+# the binary" — an unknown kind fails closed at build time, listing the known kinds,
+# so there is NO hardcoded backend allow-list in core. Empty `store` (the default) ⇒
+# no registry; the fleet + in-loop review paths still build forges from their inline
+# config. Edit cards via the ForgeRegistryService seam (`agent --serve-forge-registry`).
+# [forge_registry]
+# store = "file"               # "" (off) | "file" | "postgres"
+# file  = ".agent/forges.json"   # `file` backend only; tilde-expanded
+# store = "postgres" persists cards onto the shared config store (the [config_store]
+# block supplies the DSN + pool); needs the `forge-registry-postgres` feature (opt-in).
+
 # Tokenizer (the Tokenizer seam): accurate per-model token counts that drive
 # compaction budgeting + USD/cache cost accounting, replacing the ~chars/4
 # heuristic. Backends (config-selected like every seam):
@@ -951,6 +966,13 @@ job         = "agent-seddon"
 # keep it loopback / a unix socket. Needs a [role] store to advertise anything.
 # [grpc.role]
 # listen = "127.0.0.1:50087"                          # --serve-role binds this
+#
+# The forge-card seam (config C36 / D1): CRUD over git-host forge cards. Hosted by
+# `--serve-forge-registry` / `--serve-all`, or by a running agent when `listen` is
+# set. Default port 50088. Operator facing — keep it loopback / a unix socket. Needs
+# a [forge_registry] store to advertise anything.
+# [grpc.forge_registry]
+# listen = "127.0.0.1:50088"                          # --serve-forge-registry binds this
 #
 # `agent --serve-all` hosts every enabled seam in ONE process on ONE endpoint,
 # so a same-host deployment isn't one process per seam. Seams whose impl is

@@ -283,6 +283,20 @@
       metrics_port = 9637;
     };
 
+    # Forge registry (config C36 / D1): the `ForgeRegistryService` seam — CRUD over
+    # the git-host **cards** (github/gitlab today; gitea/bitbucket/… as future host
+    # impls) the fleet + in-loop review paths build their forge clients from, so a
+    # host is added/edited at runtime WITHOUT a hardcoded backend allow-list in core.
+    # Cards carry `token_ref` references, never secrets. Distinct from the `forge`
+    # seam above, which is the git-host *capability* (PRs/issues/comments), the way
+    # `provider_registry` (cards) relates to the `provider` seam. (`agent
+    # --serve-forge-registry`.)
+    forge_registry = {
+      port = 50088;
+      socket = "/tmp/agent-seddon/forge_registry.sock";
+      metrics_port = 9638;
+    };
+
     # NOT a seam: the opt-in `agent --serve-sessions` gateway (docs/design/portal),
     # which hosts the `SessionRegistryService` (open/close/heartbeat) plus a
     # *driving* `AgentSessionService` (the `Send` RPC — submit a goal, stream the

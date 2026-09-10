@@ -36,6 +36,11 @@ pub enum ConvertError {
     /// [`agent_core::ResourceType`] set.
     #[error("unknown resource type `{0}`")]
     UnknownResourceType(String),
+    /// A forge card carried a `repo_encoding` outside the closed
+    /// [`agent_core::RepoEncoding`] set (empty included — fail-closed, so an absent
+    /// encoding can never silently pick a default).
+    #[error("unknown repo_encoding `{0}` (want `owner_name` | `path`)")]
+    UnknownRepoEncoding(String),
 }
 
 impl From<ConvertError> for tonic::Status {
@@ -2934,6 +2939,44 @@ impl TryFrom<pb::RoleCard> for agent_core::RoleCard {
             id: c.id,
             crosses_tenants: c.crosses_tenants,
             permissions,
+        })
+    }
+}
+
+// --- Forge cards (config C36 / D1) -----------------------------------------
+// `repo_encoding` rides as a validated string (like a role's action/resource) so
+// the wire stays additive without an enum-prefix lint carve-out; `TryFrom` is the
+// fail-closed boundary that rejects an unknown/absent encoding.
+
+impl From<agent_core::ForgeCard> for pb::ForgeCard {
+    fn from(c: agent_core::ForgeCard) -> Self {
+        pb::ForgeCard {
+            id: c.id,
+            kind: c.kind,
+            enabled: c.enabled,
+            base_url: c.base_url,
+            token_ref: c.token_ref,
+            repo_encoding: c.repo_encoding.as_str().to_string(),
+            timeout_secs: c.timeout_secs,
+            max_retries: c.max_retries,
+        }
+    }
+}
+
+impl TryFrom<pb::ForgeCard> for agent_core::ForgeCard {
+    type Error = ConvertError;
+    fn try_from(c: pb::ForgeCard) -> Result<Self, Self::Error> {
+        let repo_encoding = agent_core::RepoEncoding::parse(&c.repo_encoding)
+            .ok_or_else(|| ConvertError::UnknownRepoEncoding(c.repo_encoding.clone()))?;
+        Ok(agent_core::ForgeCard {
+            id: c.id,
+            kind: c.kind,
+            enabled: c.enabled,
+            base_url: c.base_url,
+            token_ref: c.token_ref,
+            repo_encoding,
+            timeout_secs: c.timeout_secs,
+            max_retries: c.max_retries,
         })
     }
 }

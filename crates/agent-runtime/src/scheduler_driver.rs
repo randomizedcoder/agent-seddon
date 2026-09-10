@@ -151,7 +151,7 @@ impl StoreDriver {
             match n {
                 Ok(k) => fired += k,
                 Err(e) => {
-                    tracing::warn!(tenant = %tenant, error = %e, "scheduler: tenant tick failed")
+                    tracing::warn!(tenant = %tenant, error = %e, "scheduler: tenant tick failed");
                 }
             }
         }

@@ -17,7 +17,12 @@ plus `Backend::tenants` (the driver's tenant-discovery primitive) — as library
 selectable in config so nothing could silently no-op; **C2c-2 (this PR)** wires it up: the
 `[scheduler] store` config arm, `resolve_scheduler`, the tenant-fanning driver (`StoreDriver`), the
 per-tenant served registry (`impl Scheduler for PerTenant<dyn Scheduler>`), and identity-scoped firing so
-each tenant's jobs run as that tenant. Only tracks **D/E** remain.
+each tenant's jobs run as that tenant. **Track D is now under way: D1 (this PR)** lands C36 — a `ForgeCard`
++ the `ForgeRegistryService` seam + an in-crate store, dropping the hardcoded `""|github|gitlab` allow-list
+so the valid kinds are "whatever forge impls are built in" (an unknown kind now fails closed at build time,
+listing the known kinds), and lifting the per-kind default `base_url` and per-host `repo_encoding` onto the
+card. Both forge build paths (the in-loop `[forge]` factory and `build_session_forge`) now route through
+one card builder. Only **D2** (C37 transport registry) and **E1** (C40 control-plane consolidation) remain.
 
 ## Components
 
@@ -27,7 +32,7 @@ each tenant's jobs run as that tenant. Only tracks **D/E** remain.
 | C33 | Authentication interceptor (OIDC/JWT) | ⬜ | **Keystone.** Concretizes multi-session 07-security. No proto change. |
 | C34 | RBAC model | ⬜ | Roles/permissions as cards; gates control-plane RPCs (not the tool `Policy`). |
 | C35 | Per-tenant config plane | ⬜ | = multi-tenancy C30 applied to config stores. |
-| C36 | Forge registry | ⬜ | Forge cards; lifts hardcoded allow-list/base-url/repo-encoding. |
+| C36 | Forge registry | 🟡 | Forge cards + `ForgeRegistryService` seam (D1); allow-list dropped, kind/base-url/repo-encoding lifted into the card and resolved at build time. |
 | C37 | Message-transport registry | ⬜ | Bidirectional `MessageTransport`; Slack = one impl. |
 | C38 | Per-tenant prompt storage | ⬜ | `PerTenant` wrap of existing `PromptStore`; no trait change. |
 | C39 | LLM upstream/pool config | 🟡 | Reference impl **shipped** (model-router); only convergence onto C41/C35 pending. |
@@ -69,8 +74,8 @@ of done — is [`09-increments.md`](09-increments.md). This table is the **live 
 | C2 | C35 per-tenant plane (+ C38 prompt) | ✅ | [#302](https://github.com/randomizedcoder/agent-seddon/pull/302) | B1, A3 |
 | C2b | Per-tenant **Graph** (file path-namespaced) | ✅ | [#303](https://github.com/randomizedcoder/agent-seddon/pull/303) | C2 |
 | C2c-1 | Durable **Scheduler** foundation (`StoreScheduler` + `Backend::tenants`) | ✅ | [#304](https://github.com/randomizedcoder/agent-seddon/pull/304) | A3 |
-| C2c-2 | Per-tenant Scheduler **driver + serve** (tenant-fanning) | 🟡 | [#305](https://github.com/randomizedcoder/agent-seddon/pull/305) | C2c-1, plane-01 |
-| D1 | C36 forge registry | ⬜ | — | A1 (+C2 per-tenant) |
+| C2c-2 | Per-tenant Scheduler **driver + serve** (tenant-fanning) | ✅ | [#305](https://github.com/randomizedcoder/agent-seddon/pull/305) | C2c-1, plane-01 |
+| D1 | C36 forge registry | 🟡 | [#306](https://github.com/randomizedcoder/agent-seddon/pull/306) | A1 (+C2 per-tenant) |
 | D2 | C37 message-transport registry | ⬜ | — | A1 (+C2 per-tenant) |
 | E1 | C40 control-plane consolidation | ⬜ | — | B1, C1, C2 |
 

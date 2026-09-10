@@ -324,6 +324,22 @@ The two keystones (A, B) are **independent** and may land in either order or in 
   `adversarial_base_url_ssrf_screened`). ForgeRegistryService serve-smoke.
 - **DoD.** Allow-list no longer hardcoded; matrix + serve-smoke green; buf additive (no bump); gate green;
   gated PR.
+- **Built (D1, this PR).** `forge_registry.proto` (additive, no bump); `agent_core::{ForgeCard,
+  RepoEncoding, ForgeRegistry}` + `ResourceType::ForgeRegistry`; the `""|github|gitlab` allow-list dropped
+  from `FleetSession::validate` (only a length cap remains — an unknown kind now fails closed at **build
+  time**, not persist, listing the known kinds). `agent-forge` owns the host knowledge: `kind.rs`
+  (`known_kinds`/`default_base_url`/`expected_encoding`, the `owner__name`/path slug decoders, the
+  `base_url` SSRF screen, and `build_forge_from_card`) + an in-crate `StoreForges` (feature `forge-store`).
+  **Both** forge build paths — the in-loop `[forge]` factory (`registry.rs`) and `build_session_forge` —
+  route through `build_forge_from_card`, so base-url defaults + repo-encoding live in one place;
+  `build_session_forge` has a `#[cfg(not(feature = "forge"))]` fail-closed arm. `ForgeRegistrySvc` seam
+  (`--serve-forge-registry`, `agent.v1.ForgeRegistryService`, port 50088) with `Put`/`Delete` gated by the
+  C1 RBAC core on `(write|delete, forge_registry)`. **Naming:** the new CRUD-card registry is
+  `ForgeRegistry*` throughout, distinct from the pre-existing git-host *capability* seam `Forge`
+  (`--serve-forge`), the way `ProviderRegistry` (cards) coexists with the `LlmProvider` seam.
+  **Deferred to D1b:** fleet rows selecting a persisted card **by id** (threads the registry into the fleet
+  factory — today each build path synthesizes a card from the existing row/config fields); gitea/bitbucket
+  host impls behind features.
 
 ### Phase D2 — C37 message-transport registry
 

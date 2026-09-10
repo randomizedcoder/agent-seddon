@@ -3,6 +3,15 @@
 Make the git host pluggable via cards — github/gitlab today, gitea/bitbucket/sourceforge and others as
 future cards — without editing a hardcoded allow-list in core.
 
+> **Status: 🟡 built (D1).** All three pluggability blockers below are lifted: the allow-list is dropped
+> (an unknown kind fails closed at build time, listing the known kinds), and the default `base_url` +
+> `repo_encoding` are card-declared and resolved by `agent_forge::build_forge_from_card`, through which
+> **both** forge build paths now route. Shipped: `agent_core::{ForgeCard, RepoEncoding, ForgeRegistry}`,
+> `agent-forge` `kind.rs` + `StoreForges`, and the `ForgeRegistryService` seam (`--serve-forge-registry`,
+> port 50088), RBAC-gated on `(write|delete, forge_registry)`. **Deferred to D1b:** fleet rows selecting a
+> persisted card **by id** (each build path currently synthesizes a card from the existing row/config
+> fields), and gitea/bitbucket host impls. See [`09-increments.md`](09-increments.md) §D1.
+
 ## Where we are today
 
 The **seam is already generic**: `trait Forge` (`crates/agent-core/src/lib.rs:3680`) is host-agnostic

@@ -1,0 +1,77 @@
+// The forge-registry control plane (config design C36, increment D1): git-host
+// *cards* as a CRUD control plane, so an operator adds/edits/removes forges at
+// runtime (github/gitlab today; gitea/bitbucket/… as future host impls) WITHOUT
+// editing a hardcoded backend allow-list in core. Mirrors
+// `ProviderRegistryService`/`RoleService` (one process holds the forge store while
+// any number of clients drive it).
+//
+// This is the *config-card registry* for forges — distinct from `agent.v1.Forge`,
+// which is the git-host *capability* seam (PRs/issues/comments). The relationship
+// mirrors `ProviderRegistryService` (cards) vs the `LlmProvider` seam (capability).
+//
+// Security contract:
+//   - `id` is untrusted (it may become a storage-path segment): the server
+//     validates it (`safe_segment`).
+//   - `kind` selects the `Forge` impl factory; the set of valid kinds is "whatever
+//     kinds are built into this binary" (a feature-gated factory list), NOT a
+//     hardcoded allow-list. An unknown `kind` is rejected at BUILD time with the
+//     known kinds listed, like every other seam's `unknown()` error.
+//   - `token_ref` is a REFERENCE (`env:NAME` / `file:/path`), never a raw token;
+//     a raw secret is rejected on ingest and never logged.
+//   - `base_url` is URL-validated and SSRF-screened (loopback/private hosts
+//     refused) when the operational forge is built.
+//   - `repo_encoding` declares how a flat `owner__name` slug maps to the host's API
+//     path; it rides as a VALIDATED STRING (matching `RepoEncoding::parse`), not a
+//     protobuf enum, to keep the wire additive without an enum-prefix lint carve-out.
+syntax = "proto3";
+
+package agent.v1;
+
+// A forge (git-host) card. Mirrors `agent_core::ForgeCard`. `kind` selects the impl
+// factory; `base_url` empty ⇒ the kind's registered default; `repo_encoding` is a
+// validated scheme string (`owner_name` | `path`).
+message ForgeCard {
+  // Path-safe forge id (server-validated).
+  string id = 1;
+  // Selects the Forge impl factory: github | gitlab | (gitea | bitbucket | …).
+  string kind = 2;
+  // Whether this forge is active (a disabled card is stored but not built).
+  bool enabled = 3;
+  // Empty ⇒ the kind's registered default (e.g. https://api.github.com); a non-empty
+  // value overrides it (self-hosted GitLab / GitHub Enterprise) and is SSRF-screened.
+  string base_url = 4;
+  // `env:NAME` | `file:/path` — NEVER a raw token.
+  string token_ref = 5;
+  // How a flat `owner__name` slug maps to the host API path: `owner_name` (GitHub:
+  // split `owner__name`) | `path` (GitLab: `__`→`/`, subgroups). Required.
+  string repo_encoding = 6;
+  // HTTP timeout, clamped on ingest.
+  uint32 timeout_secs = 7;
+  // HTTP retry budget, clamped on ingest.
+  uint32 max_retries = 8;
+}
+
+message ForgeListRequest {}
+
+message ForgeList {
+  repeated ForgeCard forges = 1;
+}
+
+message ForgeRef {
+  string id = 1;
+}
+
+message ForgeDeleteReply {
+  bool deleted = 1; // false when the id was absent (not an error)
+}
+
+// The forge control plane (mirrors ProviderRegistryService: one process holds the
+// forge store while any number of clients drive it). Mutations are gated by the RBAC
+// enforcement core (C1) — a caller needs a role granting `(write|delete,
+// forge_registry)`.
+service ForgeRegistryService {
+  rpc List(ForgeListRequest) returns (ForgeList);
+  rpc Get(ForgeRef) returns (ForgeCard);
+  rpc Put(ForgeCard) returns (ForgeCard); // upsert = create + update
+  rpc Delete(ForgeRef) returns (ForgeDeleteReply);
+}

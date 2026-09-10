@@ -933,24 +933,29 @@ pub fn register_builtins(r: &mut Registry) {
     });
 
     // --- forge backends (the Forge seam, parity spec 27) ---
+    // Both the in-loop `[forge]` factory and the fleet path (`build_session_forge`)
+    // build through `agent_forge::build_forge_from_card`, so the per-kind default
+    // `base_url` + repo-encoding live in ONE place (config C36 / D1) and an unknown
+    // kind fails closed there, listing the known kinds.
     #[cfg(feature = "forge-github")]
     r.forge("github", |ctx| {
         let cfg = &ctx.cfg.forge;
         if cfg.owner.is_empty() || cfg.repo.is_empty() {
             anyhow::bail!("[forge] owner and repo must be set for the github backend");
         }
-        Ok(Arc::new(agent_forge::GitHubForge::new(
-            if cfg.base_url.is_empty() {
-                "https://api.github.com".to_string()
-            } else {
-                cfg.base_url.clone()
-            },
-            cfg.owner.clone(),
-            cfg.repo.clone(),
-            resolve_token(&cfg.token, &cfg.token_env, &cfg.token_file)?,
-            cfg.timeout_secs,
-            cfg.max_retries,
-        )?) as Arc<dyn agent_core::Forge>)
+        let card = agent_core::ForgeCard {
+            id: "forge".to_string(),
+            kind: "github".to_string(),
+            enabled: true,
+            base_url: cfg.base_url.clone(),
+            token_ref: String::new(),
+            repo_encoding: agent_core::RepoEncoding::OwnerName,
+            timeout_secs: cfg.timeout_secs as u32,
+            max_retries: cfg.max_retries,
+        };
+        let repo = format!("{}__{}", cfg.owner, cfg.repo);
+        let token = resolve_token(&cfg.token, &cfg.token_env, &cfg.token_file)?;
+        Ok(agent_forge::build_forge_from_card(&card, &repo, token)?)
     });
     #[cfg(feature = "forge-gitlab")]
     r.forge("gitlab", |ctx| {
@@ -958,17 +963,22 @@ pub fn register_builtins(r: &mut Registry) {
         if cfg.project.is_empty() {
             anyhow::bail!("[forge] project must be set for the gitlab backend");
         }
-        Ok(Arc::new(agent_forge::GitLabForge::new(
-            if cfg.base_url.is_empty() {
-                "https://gitlab.com/api/v4".to_string()
-            } else {
-                cfg.base_url.clone()
-            },
-            cfg.project.clone(),
-            resolve_token(&cfg.token, &cfg.token_env, &cfg.token_file)?,
-            cfg.timeout_secs,
-            cfg.max_retries,
-        )?) as Arc<dyn agent_core::Forge>)
+        let card = agent_core::ForgeCard {
+            id: "forge".to_string(),
+            kind: "gitlab".to_string(),
+            enabled: true,
+            base_url: cfg.base_url.clone(),
+            token_ref: String::new(),
+            repo_encoding: agent_core::RepoEncoding::Path,
+            timeout_secs: cfg.timeout_secs as u32,
+            max_retries: cfg.max_retries,
+        };
+        let token = resolve_token(&cfg.token, &cfg.token_env, &cfg.token_file)?;
+        Ok(agent_forge::build_forge_from_card(
+            &card,
+            &cfg.project,
+            token,
+        )?)
     });
 
     // --- web-search backends (the WebSearch seam, parity spec 12) ---
@@ -1247,59 +1257,45 @@ pub fn resolve_token_ref(token_ref: &str) -> anyhow::Result<agent_core::Secret> 
 pub fn build_session_forge(
     row: &agent_core::FleetSession,
 ) -> anyhow::Result<Option<Arc<dyn agent_core::Forge>>> {
-    // Resolve first: an unresolvable credential fails the whole build (fail closed).
-    let token = resolve_token_ref(&row.token_ref)?;
-    // Sane skeleton HTTP tuning; the row does not carry these (kept minimal in C2).
-    const TIMEOUT_SECS: u64 = 30;
-    const MAX_RETRIES: u32 = 3;
-    match row.backend.as_str() {
-        "" => Ok(None),
-        #[cfg(feature = "forge-github")]
-        "github" => {
-            let (owner, name) = row
-                .repo
-                .split_once("__")
-                .filter(|(o, n)| !o.is_empty() && !n.is_empty())
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "fleet row `{}`: github repo must be `owner__name`, got `{}`",
-                        row.id,
-                        row.repo
-                    )
-                })?;
-            let base = if row.base_url.is_empty() {
-                "https://api.github.com".to_string()
-            } else {
-                row.base_url.clone()
-            };
-            Ok(Some(Arc::new(agent_forge::GitHubForge::new(
-                base,
-                owner.to_string(),
-                name.to_string(),
-                token,
-                TIMEOUT_SECS,
-                MAX_RETRIES,
-            )?) as Arc<dyn agent_core::Forge>))
-        }
-        #[cfg(feature = "forge-gitlab")]
-        "gitlab" => {
-            let base = if row.base_url.is_empty() {
-                "https://gitlab.com/api/v4".to_string()
-            } else {
-                row.base_url.clone()
-            };
-            Ok(Some(Arc::new(agent_forge::GitLabForge::new(
-                base,
-                row.repo.replace("__", "/"),
-                token,
-                TIMEOUT_SECS,
-                MAX_RETRIES,
-            )?) as Arc<dyn agent_core::Forge>))
-        }
-        other => anyhow::bail!(
-            "fleet row `{}`: forge backend `{other}` is not built into this binary",
-            row.id
-        ),
+    // `""` backend ⇒ a row with no forge (poll/post disabled).
+    if row.backend.is_empty() {
+        return Ok(None);
+    }
+    // The forge is built through the ONE kind builder (config C36 / D1): the per-kind
+    // default base_url + repo-encoding + SSRF screen live there, and an unknown kind
+    // fails closed listing the known kinds — no hardcoded per-backend match here.
+    #[cfg(feature = "forge")]
+    {
+        use anyhow::Context;
+        // Resolve first: an unresolvable credential fails the whole build (fail closed).
+        let token = resolve_token_ref(&row.token_ref)?;
+        let card = agent_core::ForgeCard {
+            id: row.id.clone(),
+            kind: row.backend.clone(),
+            enabled: row.enabled,
+            base_url: row.base_url.clone(),
+            // The token is resolved above and passed directly; the card's own ref is
+            // unused in the build path.
+            token_ref: String::new(),
+            // A fleet row carries no explicit encoding: use the kind's default (a
+            // placeholder for an unknown kind, which fails at the kind check anyway).
+            repo_encoding: agent_forge::expected_encoding(&row.backend)
+                .unwrap_or(agent_core::RepoEncoding::OwnerName),
+            // Sane skeleton HTTP tuning; the row does not carry these (kept minimal).
+            timeout_secs: 30,
+            max_retries: 3,
+        };
+        let forge = agent_forge::build_forge_from_card(&card, &row.repo, token)
+            .with_context(|| format!("fleet row `{}`: building forge", row.id))?;
+        Ok(Some(forge))
+    }
+    #[cfg(not(feature = "forge"))]
+    {
+        anyhow::bail!(
+            "fleet row `{}`: forge backend `{}` is not built into this binary (enable the `forge` feature)",
+            row.id,
+            row.backend
+        )
     }
 }
 

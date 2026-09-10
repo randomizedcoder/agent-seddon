@@ -134,6 +134,39 @@ malformed message must not be able to approve a pull request.
 **Failure semantic: hard.** Telling the model its pull request was opened when it
 was not is the worst outcome this seam has.
 
+## The forge card registry (config C36 / D1)
+
+The section above is the git-host **capability** seam — one live client that talks
+to a platform. Which host that client *is* used to be settled by three hardcoded
+facts: a `"" | "github" | "gitlab"` allow-list in `FleetSession::validate`, the
+per-kind default `base_url`, and the per-host repo-slug encoding. C36 lifts all
+three onto a **`ForgeCard`** (`agent_core::ForgeCard`: `id`, `kind`, `enabled`,
+`base_url`, `token_ref`, `repo_encoding`, `timeout_secs`, `max_retries`):
+
+- The allow-list is **gone**. The valid kinds are "whatever `Forge` impls are built
+  into the binary" (`agent_forge::known_kinds`); an unknown kind fails **closed at
+  build time** (`build_forge_from_card`), listing the known kinds — like every other
+  seam's `unknown()` error — instead of at persist time.
+- `base_url` empty ⇒ the kind's registered default; else an override that is
+  **SSRF-screened** (`screen_base_url`: no loopback/private/link-local host or IP)
+  when the operational client is built.
+- `repo_encoding` (`owner_name` | `path`) travels **on the card** rather than baked
+  per-backend. Both forge build paths — the in-loop `[forge]` factory and the fleet's
+  `build_session_forge` — now route through `build_forge_from_card`, so these
+  defaults live in exactly one place.
+
+The cards are CRUD'd over a **distinct control-plane seam**,
+`agent.v1.ForgeRegistryService` (`--serve-forge-registry`, port 50088), whose `Put`
+and `Delete` are gated by the RBAC core on `(write|delete, forge_registry)`. This is
+the *config-card registry* for forges; the `Forge` seam above is the *capability* —
+the same relationship `ProviderRegistryService` (cards) has with the `LlmProvider`
+seam. `token_ref` is an `env:`/`file:` reference, never a raw secret, and never
+echoed on rejection.
+
+**Deferred to D1b:** a fleet/loop row selecting a persisted card **by id** (each
+build path currently synthesizes a card from the existing row/config fields), and
+gitea/bitbucket host impls behind features.
+
 ## Deferred
 
 - **Line comments on reviews.** The most platform-divergent surface: GitHub
