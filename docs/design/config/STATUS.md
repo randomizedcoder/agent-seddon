@@ -75,7 +75,7 @@ of done — is [`09-increments.md`](09-increments.md). This table is the **live 
 | C2b | Per-tenant **Graph** (file path-namespaced) | ✅ | [#303](https://github.com/randomizedcoder/agent-seddon/pull/303) | C2 |
 | C2c-1 | Durable **Scheduler** foundation (`StoreScheduler` + `Backend::tenants`) | ✅ | [#304](https://github.com/randomizedcoder/agent-seddon/pull/304) | A3 |
 | C2c-2 | Per-tenant Scheduler **driver + serve** (tenant-fanning) | ✅ | [#305](https://github.com/randomizedcoder/agent-seddon/pull/305) | C2c-1, plane-01 |
-| D1 | C36 forge registry | 🟡 | _this PR_ | A1 (+C2 per-tenant) |
+| D1 | C36 forge registry | 🟡 | [#306](https://github.com/randomizedcoder/agent-seddon/pull/306) | A1 (+C2 per-tenant) |
 | D2 | C37 message-transport registry | ⬜ | — | A1 (+C2 per-tenant) |
 | E1 | C40 control-plane consolidation | ⬜ | — | B1, C1, C2 |
 
