@@ -147,7 +147,15 @@ Legend for "New-or-reuse": 🆕 new · ♻️ reuse/extend an existing seam · �
 - **Security.** Already conformant (`api_key_ref`, ingest clamps, health split).
 - **Tests.** Existing model-router tests stand; add the shared-store + per-tenant rows when it converges.
 
-## C40 — Config control-plane consolidation 🔗
+## C40 — Config control-plane consolidation 🔗  ✅ built (E1)
+
+> **Status: ✅ built (E1).** The operator-global vs tenant write split rides in `agent_core::authorize`
+> (`ResourceType::is_operator_global` → a mutating write to `Config` needs a host-global role; a tenant
+> role is denied even in-tenant), and forge (D1) + transport (D2) joined the `PerTenant` routing the
+> other CRUD registries already use, so `Get/List/Put/Delete` scope to the caller's verified tenant on
+> every service. Proven in the hermetic gate (`authorize` decision table, `authz::require`,
+> `tenant::real_forge`/`real_transport`) + the auth-e2e / tenant-isolation integration suite. The portal
+> admin surface remains future.
 
 - **Purpose.** Put every control-plane service under one auth (C33) + RBAC (C34) gate, tenant-scoped
   (C35), and describe the portal admin surface. Coordinates multi-tenancy C31.

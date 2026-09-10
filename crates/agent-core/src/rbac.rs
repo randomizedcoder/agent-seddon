@@ -21,6 +21,13 @@
 //!    the resource must be in the principal's own tenant. Any denial is an
 //!    **opaque** reason string; the wire layer maps it to `PermissionDenied`
 //!    without leaking which check failed.
+//! 4. The **operator-global vs tenant split** (config C29/C40): a resource whose
+//!    type is [`ResourceType::is_operator_global`] (the bootstrap `Config` surface)
+//!    may be mutated **only by a host-global role** — a tenant-scoped role (e.g.
+//!    `org_admin`) is denied even in its own tenant, because operator-global keys
+//!    (ports/wiring, store DSN, auth issuer, telemetry) are host-owned, not
+//!    tenant-editable. Tenant-owned card surfaces (registry/fleet/prompt/graph/
+//!    scheduler/role/forge/transport) carry no such restriction.
 //!
 //! When no principal is in scope (`[auth] mode = "none"`, the default), the gate
 //! is a pass-through — today's trusted-transport behaviour is preserved exactly,
@@ -125,6 +132,28 @@ impl ResourceType {
             "transport_registry" => ResourceType::TransportRegistry,
             _ => return None,
         })
+    }
+
+    /// Whether this resource is **operator-global** (host-owned bootstrap config)
+    /// rather than tenant-owned. The operator/tenant split (config C29/C40): an
+    /// operator-global key may be mutated only by a host-global role
+    /// ([`RoleDef::crosses_tenants`]); a tenant-scoped role is denied even in its
+    /// own tenant. Only [`ResourceType::Config`] (the bootstrap TOML surface —
+    /// ports/wiring, store DSN, auth issuer, telemetry) is operator-global today;
+    /// every card registry is tenant-owned. Kept as an explicit `match` (no
+    /// wildcard) so a newly added resource type must consciously choose its side.
+    pub fn is_operator_global(&self) -> bool {
+        match self {
+            ResourceType::Config => true,
+            ResourceType::Registry
+            | ResourceType::Fleet
+            | ResourceType::Prompt
+            | ResourceType::Graph
+            | ResourceType::Scheduler
+            | ResourceType::Role
+            | ResourceType::ForgeRegistry
+            | ResourceType::TransportRegistry => false,
+        }
     }
 }
 
@@ -310,6 +339,13 @@ pub fn authorize(
             continue;
         };
         if !def.grants(action, resource.resource_type) {
+            continue;
+        }
+        // Operator-global split (C29/C40): a host-owned bootstrap key
+        // (`is_operator_global`) is mutable only by a host-global role — a
+        // tenant-scoped role is denied even in its own tenant. Keep scanning: a
+        // later role in the set may be host-global.
+        if resource.resource_type.is_operator_global() && !def.crosses_tenants {
             continue;
         }
         // Tenant firewall: a non-host-global role may only act in its own tenant.
@@ -529,6 +565,22 @@ mod tests {
     #[case::adversarial_operator_is_the_only_crosser(&[ROLE_OPERATOR], "attacker", Action::Write, ResourceType::Fleet, "victim", true)]
     // adversarial: a stale/unknown role plus reader still cannot write.
     #[case::adversarial_unknown_plus_reader_no_write(&["ghost", ROLE_READER], "acme", Action::Write, ResourceType::Role, "acme", false)]
+    // --- operator-global vs tenant split (C29/C40) ------------------------------
+    // desc: operator (host-global) may edit the operator-global Config surface.
+    #[case::positive_operator_edits_operator_global(&[ROLE_OPERATOR], "acme", Action::Write, ResourceType::Config, "acme", true)]
+    // negative: org_admin (tenant-scoped) is denied a write to the operator-global
+    // Config key EVEN IN ITS OWN TENANT — the C40 operator/tenant write split.
+    #[case::negative_tenant_write_to_operator_key_denied(&[ROLE_ORG_ADMIN], "acme", Action::Write, ResourceType::Config, "acme", false)]
+    // boundary: the SAME org_admin write lands fine on a tenant-owned card surface —
+    // the split restricts only operator-global keys, not the card registries.
+    #[case::boundary_org_admin_writes_tenant_card(&[ROLE_ORG_ADMIN], "acme", Action::Write, ResourceType::ForgeRegistry, "acme", true)]
+    // corner: a role set of [reader, org_admin] still cannot touch Config — neither
+    // is host-global, so the operator-global guard denies both before the firewall.
+    #[case::corner_tenant_roles_cannot_edit_operator_global(&[ROLE_READER, ROLE_ORG_ADMIN], "acme", Action::Delete, ResourceType::Config, "acme", false)]
+    // adversarial: an operator + org_admin set is ALLOWED on Config — the host-global
+    // operator grants it (a later host-global role in the set wins over an earlier
+    // tenant one, proving the guard keeps scanning rather than short-circuiting).
+    #[case::adversarial_operator_in_set_grants_operator_global(&[ROLE_ORG_ADMIN, ROLE_OPERATOR], "acme", Action::Write, ResourceType::Config, "acme", true)]
     fn authorize_decision(
         #[case] roles: &[&str],
         #[case] principal_tenant: &str,
@@ -545,6 +597,25 @@ mod tests {
             expect_allow,
             "roles={roles:?} {action:?} {resource_type:?} p_tenant={principal_tenant} r_tenant={resource_tenant} => {decision:?}"
         );
+    }
+
+    #[rstest]
+    // desc: the bootstrap Config surface is the one operator-global resource.
+    #[case::positive_config_is_operator_global(ResourceType::Config, true)]
+    // negative: every card registry is tenant-owned, not operator-global.
+    #[case::negative_registry_is_tenant_owned(ResourceType::Registry, false)]
+    #[case::negative_fleet_is_tenant_owned(ResourceType::Fleet, false)]
+    #[case::negative_prompt_is_tenant_owned(ResourceType::Prompt, false)]
+    #[case::negative_graph_is_tenant_owned(ResourceType::Graph, false)]
+    #[case::negative_scheduler_is_tenant_owned(ResourceType::Scheduler, false)]
+    #[case::negative_role_is_tenant_owned(ResourceType::Role, false)]
+    #[case::negative_forge_is_tenant_owned(ResourceType::ForgeRegistry, false)]
+    #[case::negative_transport_is_tenant_owned(ResourceType::TransportRegistry, false)]
+    fn operator_global_classification(
+        #[case] resource_type: ResourceType,
+        #[case] expect_operator_global: bool,
+    ) {
+        assert_eq!(resource_type.is_operator_global(), expect_operator_global);
     }
 
     #[test]

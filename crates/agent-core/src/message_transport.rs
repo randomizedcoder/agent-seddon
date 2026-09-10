@@ -362,7 +362,7 @@ mod tests {
         }];
         assert!(c.validate().is_err(), "empty channel rejected");
         let mut c2 = card("slk", "slack", "", "env:X", "env:Y");
-        c2.channels = (0..MAX_CHANNELS + 1)
+        c2.channels = (0..=MAX_CHANNELS)
             .map(|i| ChannelBinding {
                 channel: format!("C{i}"),
                 purpose: ChannelPurpose::Trigger,

@@ -67,6 +67,14 @@ Not everything is tenant-editable. Following multi-tenancy C29:
 The control plane (C40) enforces the split: `ConfigService` refuses tenant edits to operator keys;
 the card services scope `Get/List/Put/Delete` to the caller's tenant.
 
+> **Status: ✅ built (E1).** The split lives in `agent_core::authorize`: `ResourceType::is_operator_global()`
+> is `true` only for the bootstrap `Config` surface, and a mutating write to an operator-global key is
+> granted **only to a host-global role** (`RoleDef::crosses_tenants`) — so a tenant `org_admin` is denied
+> `ConfigService::put` even in its own tenant (`negative_tenant_write_to_operator_key_denied`), while every
+> tenant-owned card registry (registry/fleet/prompt/graph/scheduler/role/**forge**/**transport**) is
+> unaffected and scoped to the caller's verified tenant via `PerTenant`. E1 brought the last two
+> single-tenant registries — forge (D1) and transport (D2) — onto that routing.
+
 ## Isolation guarantees + threat model
 
 - **Structural, not advisory.** A per-tenant store view is rooted/scoped by the verified tenant; a

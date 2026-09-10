@@ -91,6 +91,17 @@ patch is untrusted, so the store **fails closed** (caps are `MAX_CONFIG_*` in
   stored secret.
 - **The file always parses** — validate-then-write + atomic rename mean a rejected or
   crashed write never leaves a truncated `agent.toml`.
+- **Operator-global write gate (config C29/C40)** — `agent.toml` is **host-owned
+  bootstrap config**, so `ConfigService::put` is gated as an *operator-global*
+  resource ([`ResourceType::is_operator_global`](../../crates/agent-core/src/rbac.rs)):
+  under `[auth] mode = "oidc"` a mutating write is granted **only to a host-global
+  role** (`RoleDef::crosses_tenants`, e.g. the built-in `operator`) — a tenant-scoped
+  role (`org_admin`) is denied *even in its own tenant*, because there is no
+  per-tenant TOML. Under `mode = "none"` (the default, trusted transport) the gate is
+  a pass-through, so the single-tenant CLI is unaffected. The tenant-owned card
+  registries (registry/fleet/prompt/graph/scheduler/role/forge/transport) carry no
+  such restriction and are per-tenant scoped instead (see
+  [per-tenant config](../design/config/03-per-tenant-config.md)).
 
 Adversarial cases (unknown/path-like key with nothing written, oversized value, huge
 array, secret-exfil via `GetValues`, empty-secret leaves the secret intact, a patch

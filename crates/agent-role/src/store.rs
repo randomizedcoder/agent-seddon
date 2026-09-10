@@ -219,7 +219,10 @@ mod tests {
         assert!(!s.delete("temp").await.expect("delete again"));
     }
 
-    // boundary: an admin (All) card grants every action on every resource.
+    // boundary: an admin (All) card grants every action on every tenant-owned
+    // resource. It does NOT reach the operator-global `Config` surface, though —
+    // a non-host-global `All` card is still denied there by the C29/C40 split
+    // (`is_operator_global` needs `crosses_tenants`); asserted separately below.
     #[tokio::test]
     async fn boundary_all_grants_every_action() {
         let s = store();
@@ -233,11 +236,47 @@ mod tests {
             roles: vec!["super".into()],
         };
         for (a, r) in [
-            (Action::Write, ResourceType::Config),
+            (Action::Write, ResourceType::Registry),
             (Action::Delete, ResourceType::Scheduler),
+            (Action::Approve, ResourceType::Fleet),
         ] {
             assert!(authorize(&cat, &p, a, &Resource::new(r, "local")).is_allowed());
         }
+        // Operator-global split: the tenant-scoped `All` card cannot edit `Config`…
+        assert!(!authorize(
+            &cat,
+            &p,
+            Action::Write,
+            &Resource::new(ResourceType::Config, "local")
+        )
+        .is_allowed());
+    }
+
+    // boundary: a host-global `All` card (crosses_tenants) DOES reach the
+    // operator-global `Config` surface — the other side of the C29/C40 split.
+    #[tokio::test]
+    async fn boundary_host_global_all_grants_operator_global_config() {
+        let s = store();
+        s.put(RoleCard {
+            id: "host_super".into(),
+            crosses_tenants: true,
+            permissions: RolePermissions::All,
+        })
+        .await
+        .expect("put");
+        let cat = load_catalog(&s).await.expect("catalog");
+        let p = VerifiedPrincipal {
+            tenant: "host".into(),
+            subject: "op".into(),
+            roles: vec!["host_super".into()],
+        };
+        assert!(authorize(
+            &cat,
+            &p,
+            Action::Write,
+            &Resource::new(ResourceType::Config, "acme")
+        )
+        .is_allowed());
     }
 
     // corner: an empty-permissions card grants nothing.

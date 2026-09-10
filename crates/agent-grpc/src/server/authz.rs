@@ -19,6 +19,14 @@
 //! scopes every write by it), so a cross-tenant write is unreachable through the
 //! gate — the cross-tenant firewall in `authorize` is defence-in-depth.
 //!
+//! The **operator-global vs tenant split** (config C29/C40) rides entirely inside
+//! [`agent_core::authorize`]: a write to an operator-global resource
+//! ([`ResourceType::is_operator_global`] — the bootstrap `Config` surface behind
+//! `ConfigService`) is granted only to a host-global role, so a tenant `org_admin`
+//! is denied even in its own tenant. Every gated card service names a tenant-owned
+//! resource type, so the split is transparent at these call sites — `require` needs
+//! no per-resource special-casing.
+//!
 //! This is distinct from the per-`ToolCall` `Policy` seam: that decides what the
 //! *model* may run; this decides what an authenticated *operator* may reconfigure.
 
@@ -111,16 +119,41 @@ mod tests {
     async fn positive_gate_uses_installed_catalog() {
         use agent_core::{install_catalog, Action, ResourceType, RoleCatalog, RoleDef};
         let mut cat = RoleCatalog::builtin();
+        // A tenant-scoped (not host-global) custom role on a tenant-owned resource,
+        // so the operator-global split does not confound the installed-catalog test.
         cat.insert(
             "auditor",
-            RoleDef::pairs(false, vec![(Action::Approve, ResourceType::Config)]),
+            RoleDef::pairs(false, vec![(Action::Approve, ResourceType::Registry)]),
         );
         install_catalog(cat);
         principal_scope(principal("acme", &["auditor"]), async {
             // The granted pair passes the gate…
-            assert!(require(Action::Approve, ResourceType::Config).is_ok());
+            assert!(require(Action::Approve, ResourceType::Registry).is_ok());
             // …a different action for that role is still denied (deny-by-default).
-            assert!(require(Action::Delete, ResourceType::Config).is_err());
+            assert!(require(Action::Delete, ResourceType::Registry).is_err());
+        })
+        .await;
+    }
+
+    // desc: the operator/tenant write split (C40) at the gate — an operator (host-
+    // global) may write the operator-global Config surface behind `ConfigService`.
+    #[tokio::test]
+    async fn positive_operator_writes_operator_global_config() {
+        principal_scope(principal("host", &[ROLE_OPERATOR]), async {
+            assert!(require(Action::Write, ResourceType::Config).is_ok());
+        })
+        .await;
+    }
+
+    // negative: the C40 keystone — a tenant `org_admin` is denied a write to the
+    // operator-global Config key EVEN IN ITS OWN TENANT (opaque PermissionDenied).
+    #[tokio::test]
+    async fn negative_tenant_write_to_operator_key_denied() {
+        principal_scope(principal("acme", &[ROLE_ORG_ADMIN]), async {
+            let err = require(Action::Write, ResourceType::Config).expect_err("must deny");
+            assert_eq!(err.code(), tonic::Code::PermissionDenied);
+            // …yet the same org_admin may write a tenant-owned card surface.
+            assert!(require(Action::Write, ResourceType::Fleet).is_ok());
         })
         .await;
     }
