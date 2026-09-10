@@ -111,6 +111,15 @@ pkgs.writeShellApplication {
     store = "file"
     file  = "$work/.agent/roles.json"
 
+    # A file-backed durable scheduler (config C2c), so --serve-all advertises the
+    # Scheduler control plane over the persistent `StoreScheduler` and the
+    # Schedule→List roundtrip below can exercise it over the wire. `enabled` wires the
+    # seam; jobs only FIRE under `agent --scheduler`, so serving alone starts nothing.
+    [scheduler]
+    enabled = true
+    store   = "file"
+    path    = "$work/.agent/scheduler.json"
+
     [metrics]
     enabled = false
     EOF
@@ -209,6 +218,27 @@ pkgs.writeShellApplication {
           agent.v1.RoleService.Get 2>"$work/role_get.$transport.err" || true)"
         if ! echo "$role_got" | grep -q 'smoke_reviewer'; then
           echo "CONTRACT[$transport]: RoleService/Get did not return the persisted card" >&2
+          [ "$rc" -lt 2 ] && rc=2
+        fi
+      fi
+
+      # ---- Durable scheduler control plane: Schedule→List roundtrip (config C2c) --
+      # Schedule a recurring job, then List it back. Proves the SchedulerService seam
+      # is truly on the wire over the durable `StoreScheduler` and the job persists
+      # through the shared store. A far-future interval keeps it from ever firing
+      # during the smoke (there is no `--scheduler` driver here anyway).
+      local sched_json='{"spec":"every 3600s","goal":"smoke recurring goal"}'
+      if ! grpcurl -d "$sched_json" "''${dial[@]}" \
+          agent.v1.SchedulerService.Schedule >/dev/null 2>"$work/sched_put.$transport.err"; then
+        echo "CONTRACT[$transport]: SchedulerService/Schedule round-trip failed" >&2
+        cat "$work/sched_put.$transport.err" >&2
+        [ "$rc" -lt 2 ] && rc=2
+      else
+        local sched_got
+        sched_got="$(grpcurl -d '{}' "''${dial[@]}" \
+          agent.v1.SchedulerService.List 2>"$work/sched_list.$transport.err" || true)"
+        if ! echo "$sched_got" | grep -q 'smoke recurring goal'; then
+          echo "CONTRACT[$transport]: SchedulerService/List did not return the persisted job" >&2
           [ "$rc" -lt 2 ] && rc=2
         fi
       fi

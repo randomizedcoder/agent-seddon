@@ -52,6 +52,7 @@ default = [
     "registry",
     "fleet",
     "role-store",
+    "scheduler-store",
     "metrics-proxy",
     "session-export",
     "skill-write",
@@ -154,6 +155,24 @@ skill-write = ["agent-tools/tool-skill-write"]
 # Forge: GitHub/GitLab PRs, issues, reviews. See parity spec 27.
 # Scheduler: recurring unattended runs. See parity spec 28.
 scheduler = ["dep:agent-scheduler", "agent-tools/tool-schedule"]
+# The shared-store scheduler backend (config C41 / C2c): jobs persist onto
+# `agent-config-store` as `(collection = "scheduler", tenant, id)` cards, so a
+# `[scheduler] store` other than "" selects the durable `StoreScheduler` (the
+# durable twin of `LocalScheduler`) and — with `[tenancy] per_tenant` — a
+# tenant-fanning driver. On by default (like registry/fleet/role) so the file tier
+# is available without a rebuild; the sqlite/postgres tiers stay opt-in below.
+scheduler-store = ["scheduler", "agent-scheduler/scheduler-store", "dep:agent-config-store"]
+# The `sqlite` arm of the shared-store scheduler (`[scheduler] store = "sqlite"`):
+# adds the config-store SQLite backend. Hermetic (bundled SQLite), off by default.
+scheduler-sqlite = ["scheduler-store", "agent-config-store/config-store-sqlite"]
+# The `postgres` arm of the shared-store scheduler (`[scheduler] store =
+# "postgres"`): builds `StoreScheduler` over a `PgBackend` from `[config_store]`.
+# Off by default; NOT hermetic (needs a live Postgres server).
+scheduler-postgres = [
+  "scheduler-store",
+  "agent-scheduler/scheduler-store-postgres",
+  "agent-config-store/config-store-postgres",
+]
 # PTY: interactive terminal sessions. See parity spec 29.
 pty = ["dep:agent-pty", "agent-tools/tool-pty"]
 forge = ["dep:agent-forge", "agent-tools/tool-forge", "forge-github", "forge-gitlab"]

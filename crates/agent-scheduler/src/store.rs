@@ -40,8 +40,11 @@ use crate::{
     DEFAULT_CLAIM_TTL_MS, MAX_DETAIL_CHARS,
 };
 
-/// The collection every scheduler job card lives in.
-const COLLECTION: &str = "scheduler";
+/// The collection every scheduler job card lives in. `pub` so a tenant-fanning
+/// driver (config C2c-2) can enumerate the tenants with jobs via
+/// [`Backend::tenants`](agent_config_store::Backend::tenants) without duplicating
+/// the literal.
+pub const COLLECTION: &str = "scheduler";
 
 /// The single-tenant default, matching the other converged store seams: a
 /// `StoreScheduler::new` (no verified identity) reads and writes `local`.
@@ -380,3 +383,55 @@ impl Scheduler for StoreScheduler {
 // clippy `items_after_test_module`.
 #[cfg(test)]
 mod tests;
+
+// Tenant isolation over a REAL Postgres server — the durable twin of the registry's
+// `pg_tenant_tests` (config C2c-2). A job scheduled under one verified tenant is
+// invisible to another over the shared store's `(collection, tenant, id)` keying,
+// proven end to end over the tier `nix flake check` cannot host. `#[ignore]`-gated
+// and run single-threaded by the `pg-integration` harness (which sets
+// `AGENT_CONFIG_STORE_TEST_DSN`); dedicated tenants keep the run isolated.
+#[cfg(all(test, feature = "scheduler-store-postgres"))]
+mod pg_tests {
+    use super::StoreScheduler;
+    use agent_config_store::PgBackend;
+    use agent_core::Scheduler;
+    use std::sync::Arc;
+
+    // desc (postgres, live): a job scheduled under tenant A is invisible to tenant
+    // B's `list`, keyed entirely by tenant through the shared postgres store — the
+    // durable multi-tenant isolation proof the tenant-fanning driver relies on.
+    #[tokio::test]
+    #[ignore = "needs a running postgres (nix run .#postgres-up) — run via `nix run .#integration`"]
+    async fn positive_pg_two_tenants_isolated() {
+        let dsn = std::env::var("AGENT_CONFIG_STORE_TEST_DSN")
+            .expect("AGENT_CONFIG_STORE_TEST_DSN must be set by the pg-integration harness");
+        let backend: Arc<dyn agent_config_store::Backend> = Arc::new(
+            PgBackend::connect(&dsn, 4, true)
+                .await
+                .expect("connect postgres + ensure schema"),
+        );
+        // Dedicated tenants for this run; clean slate (idempotent across re-runs).
+        const A: &str = "sched_tenant_it_a";
+        const B: &str = "sched_tenant_it_b";
+        for t in [A, B] {
+            let s = StoreScheduler::with_tenant(backend.clone(), t).expect("tenant");
+            for j in s.list().await.expect("list") {
+                s.cancel(&j.id).await.expect("cleanup");
+            }
+        }
+        let a = StoreScheduler::with_tenant(backend.clone(), A).expect("tenant a");
+        let b = StoreScheduler::with_tenant(backend.clone(), B).expect("tenant b");
+        a.schedule("every 3600s", "tenant-a recurring goal")
+            .await
+            .expect("schedule under A");
+        let seen_a = a.list().await.expect("list A");
+        let seen_b = b.list().await.expect("list B");
+        assert_eq!(seen_a.len(), 1, "tenant A sees its own job");
+        assert_eq!(seen_a[0].goal, "tenant-a recurring goal");
+        assert!(seen_b.is_empty(), "tenant B must not see tenant A's job");
+        // Cleanup.
+        for j in a.list().await.expect("list A") {
+            a.cancel(&j.id).await.expect("cleanup A");
+        }
+    }
+}

@@ -282,6 +282,26 @@ The two keystones (A, B) are **independent** and may land in either order or in 
   `builder.rs`/config/driver — nothing selects it yet, so no tenant's jobs can be accepted-then-never-fired;
   the fanning driver + `[scheduler] store` arm + per-tenant serve seam are **C2c-2**. As-built claim
   concurrency (atomic batch, not CAS) and its bounded follow-up are documented in design §D1.
+- **C2c-2 (built).** Wires the foundation into the agent, from
+  [`10-per-tenant-scheduler.md`](10-per-tenant-scheduler.md) §D2/§D3. Five pieces: (a) `[scheduler] store`
+  + `path` config (`""`=in-memory `LocalScheduler` Tier-0, unchanged; `file`/`sqlite`/`postgres`=durable),
+  with `scheduler-store`/`scheduler-sqlite`/`scheduler-postgres` cargo features mirroring the registry
+  pattern (`scheduler-store` on by default, so the file tier needs no rebuild). (b) `resolve_scheduler`
+  (`builder.rs`) — replaces the inline `LocalScheduler` construction; a non-empty `store` without its
+  feature is a **hard startup error**, never a silent downgrade. (c) The tenant-fanning **driver**
+  (`scheduler_driver::StoreDriver`): enumerates tenants via `Backend::tenants("scheduler")` (only under
+  `[tenancy] per_tenant`; else just `local`), builds a per-tenant `StoreScheduler`, and ticks each — the
+  fanning/claim logic split into `tick_with_exec` so it is tested without a whole `Agent`. (d) The
+  per-tenant served **registry**, `impl Scheduler for PerTenant<dyn Scheduler>` (`tenant.rs`), so
+  `--serve-scheduler` and the `schedule` tool isolate `schedule`/`list`/`cancel`/`history` per verified
+  tenant. (e) **Identity-scoped firing**: each due job runs under `SessionKey::parse(tenant, "scheduler")`
+  so its turn reads that tenant's registries/prompts/memory/graph. `Agent` now holds a `SchedulerHandle`
+  (Local | Store) so `tick_scheduler` drives the right half; `scheduler_seam()` serves the per-tenant
+  registry either way. Covered in-gate by `nix/checks/per-tenant.nix` (routing + driver over the in-memory
+  backend) and `nix/serve-smoke.nix` (a file-backed Schedule→List roundtrip); the postgres
+  tenant-isolation arm is `scheduler-store-postgres` in `nix/pg-integration.nix`. Fired jobs run
+  in-process scoped to their tenant (not sandboxed) — strong per-tenant process isolation is the plane-01
+  dependency, called out not implied.
 
 ---
 

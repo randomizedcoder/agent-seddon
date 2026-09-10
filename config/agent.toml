@@ -427,7 +427,19 @@ max_sessions = 8
 
 [scheduler]
 enabled        = false
+# Where jobs live. "" (default) is the in-memory LocalScheduler — jobs are lost on
+# restart. "file"/"sqlite"/"postgres" select the durable StoreScheduler over the
+# shared config-store (config C2c), so jobs survive a restart; with [tenancy]
+# per_tenant = true the driver fans out and fires each tenant's jobs under its own
+# identity. Non-empty tiers need the matching cargo feature (scheduler-store for
+# file, scheduler-sqlite, scheduler-postgres); postgres reuses [config_store] for
+# its DSN.
+store          = ""
+# On-disk path for the "file"/"sqlite" stores (ignored for "" and "postgres").
+path           = ".agent/scheduler.json"
 tick_secs      = 30
+# Cap on registered jobs (the model can create them). With the durable store this
+# cap is per tenant.
 max_jobs       = 64
 claim_ttl_secs = 900
 

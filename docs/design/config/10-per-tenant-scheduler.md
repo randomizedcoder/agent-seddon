@@ -1,16 +1,23 @@
 # 10 — Per-tenant scheduling (design of record)
 
-**Status: 🟡 foundation built (C2c-1), driver designed (C2c-2).** The durable,
-tenant-keyed backend of §D1 below — `StoreScheduler` (`agent-scheduler`, feature
-`scheduler-store`) plus the `Backend::tenants` discovery primitive
-(`agent-config-store`) — is **built and gated** (`nix/checks/scheduler-store.nix`),
-as library + tests only: it is deliberately **not yet selectable in config**, so a
-non-`local` tenant's jobs cannot be accepted-then-never-fired. The tenant-fanning
-driver (§D2), the `[scheduler] store` config arm, and the per-tenant served seam
-(§D3) are the remaining **C2c-2** increment. One implementation choice differs from
-the sketch below, noted inline: claims ride on the store's atomic batch (not a
-compare-and-set), so they give single-driver overlap-prevention + crash recovery,
-not cross-driver mutual exclusion — see §D1.
+**Status: ✅ built (C2c-1 + C2c-2).** The durable, tenant-keyed backend of §D1 —
+`StoreScheduler` (`agent-scheduler`, feature `scheduler-store`) plus the
+`Backend::tenants` discovery primitive (`agent-config-store`) — landed in **C2c-1**
+(gated by `nix/checks/scheduler-store.nix`). **C2c-2** wired it into the agent: the
+`[scheduler] store` config arm (`""`=in-memory `LocalScheduler`; `file`/`sqlite`/
+`postgres`=durable), `resolve_scheduler` (`agent-runtime/src/builder.rs`), the
+tenant-fanning driver §D2 (`agent-runtime/src/scheduler_driver.rs`, `StoreDriver`),
+the per-tenant served registry §D3 (`impl Scheduler for PerTenant<dyn Scheduler>`,
+`agent-runtime/src/tenant.rs`), and identity-scoped firing (each tenant's job runs
+under `SessionKey::parse(tenant, …)` so it reads that tenant's seams). Covered by
+`nix/checks/per-tenant.nix` (routing + driver over the in-memory backend),
+`nix/serve-smoke.nix` (a `[scheduler] store="file"` Schedule→List roundtrip), and a
+`scheduler-store-postgres` tenant-isolation arm in `nix/pg-integration.nix`. Two
+implementation choices differ from the sketch below, noted inline: (1) claims ride
+on the store's atomic batch (not a compare-and-set) — single-driver
+overlap-prevention + crash recovery, not cross-driver mutual exclusion (§D1); and
+(2) a fired job runs in-process scoped to its tenant, not sandboxed — strong process
+isolation is the plane-01 dependency (§D2).
 
 This is the design of record for making the
 `Scheduler` seam multi-tenant. It was split out of the per-tenant plane increment

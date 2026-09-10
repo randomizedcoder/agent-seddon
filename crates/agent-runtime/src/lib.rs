@@ -31,7 +31,8 @@ pub mod skills;
 #[cfg(any(
     feature = "registry-postgres",
     feature = "fleet-postgres",
-    feature = "prompt-postgres"
+    feature = "prompt-postgres",
+    feature = "scheduler-postgres"
 ))]
 mod store_backend;
 #[cfg(feature = "structured")]
@@ -46,9 +47,14 @@ mod subagent;
     feature = "registry-store",
     feature = "fleet-store",
     feature = "prompt-store",
-    feature = "graph"
+    feature = "graph",
+    feature = "scheduler-store"
 ))]
 mod tenant;
+// The tenant-fanning scheduler driver (config C2c-2): the durable half of the
+// scheduler seam. Only compiled when the shared-store scheduler is built.
+#[cfg(feature = "scheduler-store")]
+mod scheduler_driver;
 
 pub use agent::{Agent, OpenError, Session, SessionManager, Settings};
 pub use agent_metrics::Metrics;
