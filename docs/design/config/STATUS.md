@@ -52,7 +52,7 @@ noted future. **With E1, the config-architecture build is complete** — only th
 | C37 | Message-transport registry | 🟡 | Bidirectional `MessageTransport` (recv + new outbound `post`) + `TransportRegistryService` seam (D2); Slack = one impl; `slack_*` lift into a card-by-id deferred to D2b. |
 | C38 | Per-tenant prompt storage | ✅ | `StorePrompt::with_tenant` + `PerTenant` wrap (C2 #302); no trait change. |
 | C39 | LLM upstream/pool config | 🟡 | Reference impl **shipped** (model-router); only convergence onto C41/C35 pending. |
-| C40 | Control-plane consolidation | 🟡 | Operator/tenant write split + per-tenant forge/transport (E1, this PR); composes C33/C34/C35 over all control services; = multi-tenancy C31. |
+| C40 | Control-plane consolidation | 🟡 | Operator/tenant write split + per-tenant forge/transport (E1, [#308](https://github.com/randomizedcoder/agent-seddon/pull/308)); composes C33/C34/C35 over all control services; = multi-tenancy C31. |
 | C41 | Transactional config data layer | ✅ | **Keystone.** `agent-config-store`: Postgres/sqlite/file behind one store (A1 #294, A2 #296, A3* #298–#300); atomic multi-card txns. |
 
 ## Proposed increment ordering
@@ -93,7 +93,7 @@ of done — is [`09-increments.md`](09-increments.md). This table is the **live 
 | C2c-2 | Per-tenant Scheduler **driver + serve** (tenant-fanning) | ✅ | [#305](https://github.com/randomizedcoder/agent-seddon/pull/305) | C2c-1, plane-01 |
 | D1 | C36 forge registry | ✅ | [#306](https://github.com/randomizedcoder/agent-seddon/pull/306) | A1 (+C2 per-tenant) |
 | D2 | C37 message-transport registry | ✅ | [#307](https://github.com/randomizedcoder/agent-seddon/pull/307) | A1 (+C2 per-tenant) |
-| E1 | C40 control-plane consolidation | 🟡 | — | B1, C1, C2 |
+| E1 | C40 control-plane consolidation | 🟡 | [#308](https://github.com/randomizedcoder/agent-seddon/pull/308) | B1, C1, C2 |
 
 ## Dependencies (cross-track)
 
