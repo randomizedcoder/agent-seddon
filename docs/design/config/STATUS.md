@@ -41,7 +41,8 @@ noted future. **With E1, the config-architecture build is complete** — only th
 remain. **D1b is now complete** across three PRs: the **gitea**
 ([#309](https://github.com/randomizedcoder/agent-seddon/pull/309)) and **bitbucket**
 ([#310](https://github.com/randomizedcoder/agent-seddon/pull/310)) host impls (proving the C36 "add a host =
-a new impl + a factory line" recipe, `04-forge-registry.md`), and **card-by-id** (this PR — an additive
+a new impl + a factory line" recipe, `04-forge-registry.md`), and **card-by-id**
+([#311](https://github.com/randomizedcoder/agent-seddon/pull/311) — an additive
 `FleetSession.forge_id` referencing a persisted `ForgeCard`, with the `ForgeRegistry` threaded into all
 three fleet build paths). The only remaining deferred tail is **D2b** (transport `slack_*` lift +
 matrix/teams + C18 live announce).
@@ -54,7 +55,7 @@ matrix/teams + C18 live announce).
 | C33 | Authentication interceptor (OIDC/JWT) | ✅ | Auth tower layer (B1 #295). Concretizes multi-session 07-security. No proto change. |
 | C34 | RBAC model | ✅ | `authorize` + role cards (C1 #297, C1b #301); gates control-plane RPCs (not the tool `Policy`). E1 adds the operator/tenant write split. |
 | C35 | Per-tenant config plane | ✅ | `PerTenant<Store>` (C2 #302); = multi-tenancy C30 applied to config stores. E1 extends it to forge/transport. |
-| C36 | Forge registry | 🟡 | Forge cards + `ForgeRegistryService` seam (D1); allow-list dropped, kind/base-url/repo-encoding lifted into the card and resolved at build time. |
+| C36 | Forge registry | 🟡 | Forge cards + `ForgeRegistryService` seam (D1); allow-list dropped, kind/base-url/repo-encoding lifted into the card and resolved at build time. D1b complete: gitea #309, bitbucket #310, card-by-id (`FleetSession.forge_id`) #311. |
 | C37 | Message-transport registry | 🟡 | Bidirectional `MessageTransport` (recv + new outbound `post`) + `TransportRegistryService` seam (D2); Slack = one impl; `slack_*` lift into a card-by-id deferred to D2b. |
 | C38 | Per-tenant prompt storage | ✅ | `StorePrompt::with_tenant` + `PerTenant` wrap (C2 #302); no trait change. |
 | C39 | LLM upstream/pool config | 🟡 | Reference impl **shipped** (model-router); only convergence onto C41/C35 pending. |
