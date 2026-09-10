@@ -10,11 +10,13 @@
 //! from a message is a PR number behind a link whose host + owner/repo match the session's
 //! repo. Wrong-repo links, non-PR chatter, and embedded commands are inert.
 //!
-//! The real Socket-Mode adapter behind [`SlackTransport`] is [`SlackSocketMode`]
-//! ([`socket_mode`]) — the only code here that touches the network. Its envelope parsing is
-//! pure and hermetically tested; the fan-out + parser remain transport-agnostic (the gate
-//! drives them with a fake). Token resolution (`[review_fleet.slack] app_token_ref`, C5) and
-//! reconnect/backoff (`agent-retry`) live in the `serve_fleet` wiring that owns the loop.
+//! The real Socket-Mode adapter behind the [`MessageTransport`] seam (config C37 / D2) is
+//! [`SlackSocketMode`] ([`socket_mode`]) — the only code here that touches the network. Its
+//! envelope parsing is pure and hermetically tested; the fan-out + parser remain
+//! transport-agnostic (the gate drives them with a fake). Outbound posting is
+//! [`SlackMessageTransport`] (`chat.postMessage`). Token resolution (`[review_fleet.slack]
+//! app_token_ref`, C5) and reconnect/backoff (`agent-retry`) live in the `serve_fleet` wiring
+//! that owns the loop.
 
 pub mod parse;
 pub use parse::{extract_pr_links, parse_pr_link, ExpectRepo, LinkKind, PrLink};
@@ -23,26 +25,28 @@ pub use socket_mode::{
     open_connection, parse_envelope, serve_socket_mode, EnvelopeAction, SlackSocketMode,
 };
 
+/// Per-kind transport construction + the outbound Slack poster (config C37 / D2).
+mod kind;
+pub use kind::{build_transport_from_card, known_kinds, screen_endpoint, SlackMessageTransport};
+
+/// The persisted transport-card registry (config C37 / D2). Behind `transport-store`
+/// so the default build stays free of the config-store dependency.
+#[cfg(feature = "transport-store")]
+mod store;
+#[cfg(feature = "transport-store")]
+pub use store::{StoreTransports, DEFAULT_TENANT};
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
+// The message-transport seam + neutral message types now live in `agent-core` (config
+// C37 / D2): re-exported here so existing `agent_slack::InboundMessage` callers and the
+// Socket-Mode adapter keep working, and the watch drains any `MessageTransport`.
+pub use agent_core::{
+    Channel, ChannelBinding, ChannelPurpose, InboundMessage, MessageTransport, OutboundMessage,
+    TransportCard, TransportRegistry,
+};
 use agent_core::{FleetTrigger, TriggerSink};
-use async_trait::async_trait;
-
-/// One inbound Slack message the watch inspects.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InboundMessage {
-    pub channel: String,
-    pub text: String,
-}
-
-/// The Socket-Mode connection, behind a seam so the gate drives it with a fake and the real
-/// `tokio-tungstenite` adapter (the 4b follow-up) is the only code that touches the network.
-/// `recv` yields the next inbound message, or `None` when the connection is closed for good.
-#[async_trait]
-pub trait SlackTransport: Send {
-    async fn recv(&mut self) -> Option<InboundMessage>;
-}
 
 /// One channel subscription: which session a matching link triggers, and the repo it must
 /// point at.
@@ -111,11 +115,11 @@ impl SlackWatch {
     }
 
     /// Drain `transport` until it closes, dispatching every message through
-    /// [`on_message`](Self::on_message). The real Socket-Mode adapter (4b follow-up) is one
-    /// such transport; the tests use a fake.
+    /// [`on_message`](Self::on_message). The real Socket-Mode adapter is one such
+    /// [`MessageTransport`] (config C37 / D2); the tests use a fake.
     pub async fn run(
         self: Arc<Self>,
-        mut transport: impl SlackTransport,
+        mut transport: impl MessageTransport,
         sink: Arc<dyn TriggerSink>,
     ) {
         while let Some(msg) = transport.recv().await {
@@ -128,6 +132,7 @@ impl SlackWatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use std::sync::Mutex;
 
     fn gh(repo_key: &str) -> ExpectRepo {
@@ -161,9 +166,16 @@ mod tests {
         }
     }
     #[async_trait]
-    impl SlackTransport for FakeTransport {
+    impl MessageTransport for FakeTransport {
+        fn kind(&self) -> &str {
+            "fake"
+        }
         async fn recv(&mut self) -> Option<InboundMessage> {
             self.msgs.next()
+        }
+        async fn post(&self, _to: &Channel, _msg: &OutboundMessage) -> agent_core::Result<()> {
+            // This fake drives the inbound watch only; it never posts.
+            Ok(())
         }
     }
 

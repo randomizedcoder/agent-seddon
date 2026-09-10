@@ -23,7 +23,9 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
-use crate::{InboundMessage, SlackTransport};
+use agent_core::{Channel, MessageTransport, OutboundMessage};
+
+use crate::InboundMessage;
 
 /// What one Socket-Mode envelope means to the watch.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,7 +151,11 @@ impl SlackSocketMode {
 }
 
 #[async_trait]
-impl SlackTransport for SlackSocketMode {
+impl MessageTransport for SlackSocketMode {
+    fn kind(&self) -> &str {
+        "slack"
+    }
+
     async fn recv(&mut self) -> Option<InboundMessage> {
         while let Some(frame) = self.ws.next().await {
             let msg = match frame {
@@ -180,6 +186,15 @@ impl SlackTransport for SlackSocketMode {
             }
         }
         None
+    }
+
+    /// Inbound-only handle: a live Socket-Mode connection carries events, it does not
+    /// post. Outbound goes through [`crate::SlackMessageTransport`] (config C37 / D2).
+    async fn post(&self, _to: &Channel, _msg: &OutboundMessage) -> agent_core::Result<()> {
+        Err(agent_core::Error::Web(
+            "slack socket-mode connection is inbound-only; use SlackMessageTransport to post"
+                .into(),
+        ))
     }
 }
 

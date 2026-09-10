@@ -809,6 +809,9 @@ pub use rbac::*;
 
 mod forge_card;
 pub use forge_card::*;
+
+mod message_transport;
+pub use message_transport::*;
 // ---------------------------------------------------------------------------
 // Seam: TaskTracker (structured, inspectable agent plan)
 // ---------------------------------------------------------------------------

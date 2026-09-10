@@ -4,6 +4,19 @@ Generalize messaging beyond Slack: a bidirectional `MessageTransport` seam with 
 matrix/teams/IRC/signal as future cards. Channel/token config lifts out of `FleetSession` into a
 transport card.
 
+> **Status: 🟡 built (D2).** The seam is generalized and the card registry shipped: `agent_core`
+> now owns the bidirectional `MessageTransport` seam (`recv` + the **new outbound `post`**) with
+> neutral `InboundMessage`/`OutboundMessage`/`Channel`, plus `TransportCard`/`ChannelBinding`/
+> `ChannelPurpose`/`TransportRegistry` and the pure `RateLimiter` + soft-fail `announce` primitives.
+> `agent-slack` became an impl (`SlackMessageTransport` posts via `chat.postMessage`, rate-limited +
+> bot-token-gated; `SlackSocketMode` still carries inbound) behind `agent_slack::build_transport_from_card`
+> (unknown kind fails closed at build time; endpoint SSRF-screened), with an in-crate `StoreTransports`
+> and the `TransportRegistryService` seam (`--serve-transport-registry`, port 50089), RBAC-gated on
+> `(write|delete, transport_registry)`. **Deferred to D2b:** lifting the `slack_*`/`FleetSlackCfg` fields
+> **out** of `FleetSession` into a card referenced by id + purpose (today the fleet still carries them,
+> and a build path synthesizes a card — the twin of D1b); matrix/teams/irc/signal host impls; unifying
+> the live Socket-Mode inbound loop onto a persisted card. See [`09-increments.md`](09-increments.md) §D2.
+
 ## Where we are today
 
 Messaging is **inbound-only and Slack-named** (`crates/agent-slack/src/lib.rs`):

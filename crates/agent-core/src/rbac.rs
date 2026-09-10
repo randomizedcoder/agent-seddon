@@ -95,6 +95,7 @@ pub enum ResourceType {
     Scheduler,
     Role,
     ForgeRegistry,
+    TransportRegistry,
 }
 
 impl ResourceType {
@@ -108,6 +109,7 @@ impl ResourceType {
             ResourceType::Scheduler => "scheduler",
             ResourceType::Role => "role",
             ResourceType::ForgeRegistry => "forge_registry",
+            ResourceType::TransportRegistry => "transport_registry",
         }
     }
     pub fn parse(s: &str) -> Option<Self> {
@@ -120,6 +122,7 @@ impl ResourceType {
             "scheduler" => ResourceType::Scheduler,
             "role" => ResourceType::Role,
             "forge_registry" => ResourceType::ForgeRegistry,
+            "transport_registry" => ResourceType::TransportRegistry,
             _ => return None,
         })
     }
@@ -623,6 +626,7 @@ mod tests {
     #[case::positive_config(ResourceType::Config)]
     #[case::positive_role(ResourceType::Role)]
     #[case::positive_forge_registry(ResourceType::ForgeRegistry)]
+    #[case::positive_transport_registry(ResourceType::TransportRegistry)]
     fn resource_type_round_trips(#[case] r: ResourceType) {
         assert_eq!(ResourceType::parse(r.as_str()), Some(r));
     }

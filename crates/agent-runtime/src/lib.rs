@@ -33,7 +33,8 @@ pub mod skills;
     feature = "fleet-postgres",
     feature = "prompt-postgres",
     feature = "scheduler-postgres",
-    feature = "forge-registry-postgres"
+    feature = "forge-registry-postgres",
+    feature = "transport-registry-postgres"
 ))]
 mod store_backend;
 #[cfg(feature = "structured")]

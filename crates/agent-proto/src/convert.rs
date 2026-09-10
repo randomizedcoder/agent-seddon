@@ -41,6 +41,11 @@ pub enum ConvertError {
     /// encoding can never silently pick a default).
     #[error("unknown repo_encoding `{0}` (want `owner_name` | `path`)")]
     UnknownRepoEncoding(String),
+    /// A transport card carried a channel `purpose` outside the closed
+    /// [`agent_core::ChannelPurpose`] set (empty included — fail-closed, so an absent
+    /// purpose can never silently pick a default).
+    #[error("unknown channel purpose `{0}` (want `trigger` | `progress`)")]
+    UnknownChannelPurpose(String),
 }
 
 impl From<ConvertError> for tonic::Status {
@@ -2977,6 +2982,68 @@ impl TryFrom<pb::ForgeCard> for agent_core::ForgeCard {
             repo_encoding,
             timeout_secs: c.timeout_secs,
             max_retries: c.max_retries,
+        })
+    }
+}
+
+// --- Transport cards (config C37 / D2) -------------------------------------
+// `purpose` rides as a validated string (like a forge card's `repo_encoding`) so the
+// wire stays additive without an enum-prefix lint carve-out; `TryFrom` is the
+// fail-closed boundary that rejects an unknown/absent purpose.
+
+impl From<agent_core::ChannelBinding> for pb::ChannelBinding {
+    fn from(b: agent_core::ChannelBinding) -> Self {
+        pb::ChannelBinding {
+            channel: b.channel,
+            purpose: b.purpose.as_str().to_string(),
+        }
+    }
+}
+
+impl TryFrom<pb::ChannelBinding> for agent_core::ChannelBinding {
+    type Error = ConvertError;
+    fn try_from(b: pb::ChannelBinding) -> Result<Self, Self::Error> {
+        let purpose = agent_core::ChannelPurpose::parse(&b.purpose)
+            .ok_or_else(|| ConvertError::UnknownChannelPurpose(b.purpose.clone()))?;
+        Ok(agent_core::ChannelBinding {
+            channel: b.channel,
+            purpose,
+        })
+    }
+}
+
+impl From<agent_core::TransportCard> for pb::TransportCard {
+    fn from(c: agent_core::TransportCard) -> Self {
+        pb::TransportCard {
+            id: c.id,
+            kind: c.kind,
+            enabled: c.enabled,
+            endpoint: c.endpoint,
+            app_token_ref: c.app_token_ref,
+            bot_token_ref: c.bot_token_ref,
+            channels: c.channels.into_iter().map(Into::into).collect(),
+            rate_limit_per_min: c.rate_limit_per_min,
+        }
+    }
+}
+
+impl TryFrom<pb::TransportCard> for agent_core::TransportCard {
+    type Error = ConvertError;
+    fn try_from(c: pb::TransportCard) -> Result<Self, Self::Error> {
+        let channels = c
+            .channels
+            .into_iter()
+            .map(agent_core::ChannelBinding::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(agent_core::TransportCard {
+            id: c.id,
+            kind: c.kind,
+            enabled: c.enabled,
+            endpoint: c.endpoint,
+            app_token_ref: c.app_token_ref,
+            bot_token_ref: c.bot_token_ref,
+            channels,
+            rate_limit_per_min: c.rate_limit_per_min,
         })
     }
 }

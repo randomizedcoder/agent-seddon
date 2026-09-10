@@ -297,6 +297,20 @@
       metrics_port = 9638;
     };
 
+    # Message-transport registry (config C37 / D2): the `TransportRegistryService`
+    # seam — CRUD over the messaging **cards** (slack today; matrix/teams/irc/signal
+    # as future impls) the fleet's trigger watch + progress feed build their clients
+    # from, so a transport is added/edited at runtime WITHOUT a hardcoded, Slack-
+    # specific config shape. Cards carry `*_token_ref` references, never secrets.
+    # Distinct from the messaging *capability* (`MessageTransport`: recv/post), the
+    # way `forge_registry` (cards) relates to the `forge` seam. (`agent
+    # --serve-transport-registry`.)
+    transport_registry = {
+      port = 50089;
+      socket = "/tmp/agent-seddon/transport_registry.sock";
+      metrics_port = 9639;
+    };
+
     # NOT a seam: the opt-in `agent --serve-sessions` gateway (docs/design/portal),
     # which hosts the `SessionRegistryService` (open/close/heartbeat) plus a
     # *driving* `AgentSessionService` (the `Send` RPC — submit a goal, stream the

@@ -202,6 +202,22 @@ root = ""                    # empty ⇒ unset (shared agent.working_dir); tilde
 # store = "postgres" persists cards onto the shared config store (the [config_store]
 # block supplies the DSN + pool); needs the `forge-registry-postgres` feature (opt-in).
 
+# [transport_registry] — message-transport cards (config C37 / D2). Each card declares
+# a `kind` (slack today; matrix/teams/irc/signal as future impls), an optional
+# `endpoint` (empty ⇒ the kind default; an override is an SSRF-screened http(s) URL),
+# `app_token_ref` + `bot_token_ref` (`env:NAME` / `file:/path`, never a raw token), a
+# list of channel `channels` (each `{channel, purpose}` with purpose `trigger` |
+# `progress`), and a `rate_limit_per_min` for outbound posts. The valid kinds are
+# "whatever transport impls are built into the binary" — an unknown kind fails closed
+# at build time, listing the known kinds. Empty `store` (the default) ⇒ no registry;
+# the fleet's Slack watch still builds from its inline [review_fleet.slack] config.
+# Edit cards via the TransportRegistryService seam (`agent --serve-transport-registry`).
+# [transport_registry]
+# store = "file"                    # "" (off) | "file" | "postgres"
+# file  = ".agent/transports.json"    # `file` backend only; tilde-expanded
+# store = "postgres" persists cards onto the shared config store (the [config_store]
+# block supplies the DSN + pool); needs the `transport-registry-postgres` feature (opt-in).
+
 # Tokenizer (the Tokenizer seam): accurate per-model token counts that drive
 # compaction budgeting + USD/cache cost accounting, replacing the ~chars/4
 # heuristic. Backends (config-selected like every seam):
@@ -973,6 +989,13 @@ job         = "agent-seddon"
 # a [forge_registry] store to advertise anything.
 # [grpc.forge_registry]
 # listen = "127.0.0.1:50088"                          # --serve-forge-registry binds this
+#
+# The transport-card seam (config C37 / D2): CRUD over message-transport cards. Hosted
+# by `--serve-transport-registry` / `--serve-all`, or by a running agent when `listen`
+# is set. Default port 50089. Operator facing — keep it loopback / a unix socket.
+# Needs a [transport_registry] store to advertise anything.
+# [grpc.transport_registry]
+# listen = "127.0.0.1:50089"                          # --serve-transport-registry binds this
 #
 # `agent --serve-all` hosts every enabled seam in ONE process on ONE endpoint,
 # so a same-host deployment isn't one process per seam. Seams whose impl is

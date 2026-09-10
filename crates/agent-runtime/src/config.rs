@@ -111,6 +111,8 @@ pub struct Config {
     pub role: RoleCfg,
     #[serde(default)]
     pub forge_registry: ForgeRegistryCfg,
+    #[serde(default)]
+    pub transport_registry: TransportRegistryCfg,
     /// Path the config was read from, set by the CLI after parse (never a TOML
     /// key — `serde(skip)`). Held so the `ConfigStore` seam (portal settings) can
     /// write edits back to the same file. `None` for embedded/test callers that
@@ -262,6 +264,39 @@ impl Default for ForgeRegistryCfg {
 
 fn default_forge_registry_file() -> String {
     ".agent/forges.json".to_string()
+}
+
+/// The `[transport_registry]` block (config C37 / D2): where the message-transport
+/// **cards** live. Empty `store` ⇒ no transport registry is opened (the fleet's Slack
+/// watch still builds from its inline `[review_fleet.slack]` config), so this is a
+/// no-op until an operator opts in.
+#[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
+pub struct TransportRegistryCfg {
+    /// Transport-card backend: `"file"` | `"postgres"` (feature
+    /// `transport-registry-postgres`) | `""` (off, the default). Empty ⇒ no store is
+    /// opened.
+    #[serde(default)]
+    pub store: String,
+    /// JSON card-bundle path (`file` backend only). Tilde-expanded.
+    #[serde(default = "default_transport_registry_file")]
+    pub file: String,
+}
+
+impl Default for TransportRegistryCfg {
+    fn default() -> Self {
+        Self {
+            store: String::new(),
+            file: default_transport_registry_file(),
+        }
+    }
+}
+
+fn default_transport_registry_file() -> String {
+    ".agent/transports.json".to_string()
 }
 
 /// Cross-session recall (parity spec 20): a full-text index over *past* saved
@@ -2309,6 +2344,9 @@ pub struct GrpcCfg {
     /// The forge-card seam (`--serve-forge-registry`, config C36 / D1).
     #[serde(default)]
     pub forge_registry: GrpcSeamCfg,
+    /// The transport-card seam (`--serve-transport-registry`, config C37 / D2).
+    #[serde(default)]
+    pub transport_registry: GrpcSeamCfg,
     #[serde(default)]
     pub review: GrpcSeamCfg,
     /// Not a seam: the opt-in `agent --serve-sessions` gateway (docs/design/portal),
@@ -2942,6 +2980,7 @@ impl Config {
             review_fleet: ReviewFleetCfg::default(),
             role: RoleCfg::default(),
             forge_registry: ForgeRegistryCfg::default(),
+            transport_registry: TransportRegistryCfg::default(),
             auth: AuthCfg::default(),
             tenancy: TenancyCfg::default(),
             source_path: None,

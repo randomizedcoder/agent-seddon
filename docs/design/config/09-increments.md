@@ -359,6 +359,26 @@ The two keystones (A, B) are **independent** and may land in either order or in 
   `MessageTransport` in `agent-testkit`; TransportRegistryService serve-smoke.
 - **DoD.** Slack recv+post roundtrip green; config lifted out of `FleetSession`; matrix + serve-smoke
   green; buf additive; gate green; gated PR.
+- **Built (D2, this PR).** `transport_registry.proto` (additive, no bump); `agent_core` gained the
+  **bidirectional** `MessageTransport` seam (`kind` + `recv` + the **new outbound `post`**) with neutral
+  `InboundMessage`/`OutboundMessage`/`Channel`, plus `TransportCard`/`ChannelBinding`/`ChannelPurpose`/
+  `trait TransportRegistry` + `ResourceType::TransportRegistry`, and two pure primitives every transport
+  reuses — a deterministic `RateLimiter` (per-minute, clock injected) and the soft-fail `announce`
+  helper. `agent-slack` became an impl: `kind.rs` owns the host knowledge (`known_kinds`,
+  `screen_endpoint` SSRF screen, `build_transport_from_card`) and `SlackMessageTransport` posts via
+  `chat.postMessage` (rate-limited + bot-token-gated; a missing token is a distinct early error); the
+  live `SlackSocketMode` now implements the same seam (inbound `recv` real, `post` refused as
+  inbound-only), and `SlackWatch::run` drains any `MessageTransport`. In-crate `StoreTransports` behind
+  feature `transport-store` (+ `transport-store-postgres`). `TransportRegistrySvc` seam
+  (`--serve-transport-registry`, `agent.v1.TransportRegistryService`, port 50089) with `Put`/`Delete`
+  gated by the C1 RBAC core on `(write|delete, transport_registry)`. **Naming:** the CRUD-card registry
+  is `TransportRegistry*` throughout, distinct from the `MessageTransport` *capability* seam, the way
+  `ForgeRegistry` (cards) coexists with `Forge`. Gate: new `transport-registry-store` check; serve-smoke
+  Put→Get roundtrip; pg-integration postgres arm. **Deferred to D2b** (the twin of D1b): lifting the
+  `slack_*`/`FleetSlackCfg` fields **out** of `FleetSession` into a card referenced by id + purpose
+  (today the fleet still carries them; a build path can synthesize a card); matrix/teams/irc/signal host
+  impls behind features; unifying the live Socket-Mode inbound loop onto a persisted card + the C18
+  progress feed as a live `announce` caller.
 
 ---
 

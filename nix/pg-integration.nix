@@ -149,6 +149,17 @@ pkgs.writeShellApplication {
     set -e
     if [ "$rc" -ne 0 ]; then note_fail 2; fi
 
-    contract_exit "PASS: pg-integration — postgres config-store + registry + fleet + prompt + role + per-tenant + scheduler + forge suites green."
+    # The transport registry (config C37 / D2): the same real server proves the
+    # `StoreTransports` postgres arm. A dedicated tenant keeps it isolated.
+    echo "==> pg-integration: running the ignored transport-registry postgres suite"
+    set +e
+    nix develop --extra-experimental-features 'nix-command flakes' -c \
+      cargo test -p agent-slack --features transport-store-postgres \
+      -- --ignored --test-threads=1 pg_tests
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then note_fail 2; fi
+
+    contract_exit "PASS: pg-integration — postgres config-store + registry + fleet + prompt + role + per-tenant + scheduler + forge + transport suites green."
   '';
 }

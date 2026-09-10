@@ -85,6 +85,12 @@ in
   # in-memory config store (feature `forge-store`, off by default). The config-
   # architecture C36 forge-card twin of registry-store. docs/design/config/09-increments.md.
   forge-registry-store = craneCheck ./forge-registry-store.nix { inherit cargoArtifacts; };
+  # Executes the shared-store `TransportRegistry` backend (`StoreTransports`) matrix +
+  # the transport-kind builder (card validation / channel purpose / endpoint SSRF
+  # screen) + the rate-limit / soft-fail primitives, over the in-memory config store
+  # (feature `transport-store`, off by default). The config-architecture C37
+  # message-transport twin of forge-registry-store. docs/design/config/09-increments.md.
+  transport-registry-store = craneCheck ./transport-registry-store.nix { inherit cargoArtifacts; };
   # Executes the per-tenant routing layer (`PerTenant<S>`) matrix + end-to-end
   # isolation over the real converged stores (features registry-store/fleet-store/
   # prompt-store, off by default). The config-architecture C2 per-tenant-plane check.

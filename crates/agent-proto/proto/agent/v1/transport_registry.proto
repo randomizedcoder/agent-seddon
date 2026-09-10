@@ -1,0 +1,85 @@
+// The message-transport control plane (config design C37, increment D2): messaging
+// *cards* as a CRUD control plane, so an operator adds/edits/removes transports at
+// runtime (slack today; matrix/teams/irc/signal as future impls) WITHOUT editing a
+// hardcoded, Slack-specific config shape. Mirrors `ForgeRegistryService`/
+// `ProviderRegistryService` (one process holds the transport store while any number
+// of clients drive it).
+//
+// This is the *config-card registry* for message transports — distinct from the
+// `MessageTransport` *capability* seam (recv/post), the way `ForgeRegistryService`
+// (cards) relates to the `Forge` seam (capability).
+//
+// Security contract:
+//   - `id` is untrusted (it may become a storage-path segment): the server validates
+//     it (`safe_segment`).
+//   - `kind` selects the `MessageTransport` impl factory; the set of valid kinds is
+//     "whatever kinds are built into this binary" (a feature-gated factory list), NOT
+//     a hardcoded allow-list. An unknown `kind` is rejected at BUILD time with the
+//     known kinds listed, like every other seam's `unknown()` error.
+//   - `app_token_ref` / `bot_token_ref` are REFERENCES (`env:NAME` / `file:/path`),
+//     never raw tokens; a raw secret is rejected on ingest and never logged.
+//   - `endpoint` is URL-validated and SSRF-screened (loopback/private hosts refused)
+//     when the operational transport is built.
+//   - `purpose` (trigger|progress) rides as a VALIDATED STRING (matching
+//     `ChannelPurpose::parse`), not a protobuf enum, to keep the wire additive
+//     without an enum-prefix lint carve-out.
+syntax = "proto3";
+
+package agent.v1;
+
+// One channel binding: which channel, for which purpose.
+message ChannelBinding {
+  // The channel/room/thread id (server-validated: non-empty, bounded).
+  string channel = 1;
+  // What the binding is for: `trigger` (inbound: a PR link there starts a review) |
+  // `progress` (outbound: the C18 announce feed posts lifecycle events there).
+  // A validated string; an absent/unknown value is rejected fail-closed.
+  string purpose = 2;
+}
+
+// A message-transport card. Mirrors `agent_core::TransportCard`. `kind` selects the
+// impl factory; `endpoint` empty ⇒ the kind's registered default.
+message TransportCard {
+  // Path-safe transport id (server-validated).
+  string id = 1;
+  // Selects the MessageTransport impl factory: slack | (matrix | teams | irc | …).
+  string kind = 2;
+  // Whether this transport is active (a disabled card is stored but not built).
+  bool enabled = 3;
+  // Workspace / homeserver / host. Empty ⇒ the kind's registered default; a non-empty
+  // value is an http(s) URL (self-hosted homeserver) and is SSRF-screened.
+  string endpoint = 4;
+  // Inbound (Socket-Mode) token: `env:NAME` | `file:/path` — NEVER a raw token.
+  string app_token_ref = 5;
+  // Outbound (post) token: `env:NAME` | `file:/path` — NEVER a raw token.
+  string bot_token_ref = 6;
+  // Which channels this transport watches (trigger) / posts to (progress).
+  repeated ChannelBinding channels = 7;
+  // Outbound posts per minute, clamped on ingest (`0` ⇒ no limit).
+  uint32 rate_limit_per_min = 8;
+}
+
+message TransportListRequest {}
+
+message TransportList {
+  repeated TransportCard transports = 1;
+}
+
+message TransportRef {
+  string id = 1;
+}
+
+message TransportDeleteReply {
+  bool deleted = 1; // false when the id was absent (not an error)
+}
+
+// The transport control plane (mirrors ForgeRegistryService: one process holds the
+// transport store while any number of clients drive it). Mutations are gated by the
+// RBAC enforcement core (C1) — a caller needs a role granting `(write|delete,
+// transport_registry)`.
+service TransportRegistryService {
+  rpc List(TransportListRequest) returns (TransportList);
+  rpc Get(TransportRef) returns (TransportCard);
+  rpc Put(TransportCard) returns (TransportCard); // upsert = create + update
+  rpc Delete(TransportRef) returns (TransportDeleteReply);
+}

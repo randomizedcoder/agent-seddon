@@ -289,6 +289,33 @@ app_token_ref` (C5, empty ⇒ no watch), builds the fan-out from the roster's
 `slack_trigger_channel`s, and runs one reconnecting connection (`serve_socket_mode`, backoff via
 `agent-retry`). Only `tokio-tungstenite` (rustls, no native-tls) enters the tree.
 
+### The transport is now bidirectional + card-configured (config C37 / D2)
+
+The inbound seam above generalized to a **bidirectional** [`MessageTransport`]
+(`agent_core`): `recv` (as today) **plus a new outbound `post`**, over neutral
+`InboundMessage`/`OutboundMessage`/`Channel`. `agent-slack` is one impl — the live
+[`SlackSocketMode`] carries inbound (its `post` is refused as inbound-only), while
+[`SlackMessageTransport`] posts via `chat.postMessage` (bot-token-gated — a missing token is a
+distinct early error — and rate-limited by a pure per-minute `RateLimiter`); a failed post is
+**soft** (`agent_core::announce` → `SoftFailed`, never blocking a review). This is the seam the
+still-unbuilt C18 progress feed will post through.
+
+Which transport a fleet uses is now a **`TransportCard`** (`kind`, `endpoint` empty ⇒ the kind
+default else an SSRF-screened override, `app_token_ref`/`bot_token_ref` references, channel
+bindings with a `trigger`/`progress` `purpose`, `rate_limit_per_min`). The valid kinds are
+"whatever transport impls are built in" (`agent_slack::known_kinds`); an unknown kind fails
+**closed at build time** (`build_transport_from_card`), listing the known kinds. Cards are CRUD'd
+over the **`agent.v1.TransportRegistryService`** control plane (`--serve-transport-registry`,
+port 50089), whose `Put`/`Delete` are RBAC-gated on `(write|delete, transport_registry)` — the
+*config-card registry* for transports, distinct from the `MessageTransport` *capability*, the way
+`ForgeRegistryService` relates to `Forge`. **Deferred to D2b:** the fleet still carries its
+`slack_*`/`FleetSlackCfg` fields inline — lifting them out into a card referenced by id + purpose
+(and matrix/teams/irc/signal host impls) is the twin of D1b.
+
+[`MessageTransport`]: ../../crates/agent-core/src/message_transport.rs
+[`SlackSocketMode`]: ../../crates/agent-slack/src/socket_mode.rs
+[`SlackMessageTransport`]: ../../crates/agent-slack/src/kind.rs
+
 ## Testing
 
 Table-driven `rstest` with a `desc` + `expect` column on every row (`crud_contract` in

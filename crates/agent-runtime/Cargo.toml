@@ -54,6 +54,7 @@ default = [
     "role-store",
     "scheduler-store",
     "forge-registry-store",
+    "transport-registry-store",
     "metrics-proxy",
     "session-export",
     "skill-write",
@@ -306,6 +307,22 @@ forge-registry-postgres = [
   "agent-forge/forge-store-postgres",
   "agent-config-store/config-store-postgres",
 ]
+# Transport-card registry (config C37 / D2): persist messaging cards onto
+# `agent-config-store` (file/postgres) via `StoreTransports` in `agent-slack`, held
+# for `--serve-transport-registry`. On by default. Independent of any live watch — it
+# needs only the transport store.
+transport-registry-store = [
+  "dep:agent-slack",
+  "agent-slack/transport-store",
+  "dep:agent-config-store",
+]
+# The Postgres arm of the transport registry. Off by default; NOT hermetic (needs a
+# live Postgres server).
+transport-registry-postgres = [
+  "transport-registry-store",
+  "agent-slack/transport-store-postgres",
+  "agent-config-store/config-store-postgres",
+]
 # Metrics proxy seam (docs/design/portal): generic PromQL-over-gRPC to Prometheus.
 metrics-proxy = ["dep:agent-metrics-proxy", "agent-metrics-proxy/http"]
 # Connect to external MCP servers and register their tools.
@@ -374,6 +391,7 @@ agent-verifier = { workspace = true, optional = true }
 agent-cache = { workspace = true, optional = true }
 agent-web-search = { workspace = true, optional = true }
 agent-forge = { workspace = true, optional = true }
+agent-slack = { workspace = true, optional = true }
 agent-mode = { workspace = true, optional = true }
 agent-review = { workspace = true, optional = true }
 agent-scheduler = { workspace = true, optional = true }

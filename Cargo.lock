@@ -510,6 +510,7 @@ dependencies = [
  "agent-scheduler",
  "agent-search",
  "agent-session",
+ "agent-slack",
  "agent-tasks",
  "agent-telemetry",
  "agent-testkit",
@@ -617,10 +618,13 @@ dependencies = [
 name = "agent-slack"
 version = "0.1.0"
 dependencies = [
+ "agent-config-store",
  "agent-core",
+ "agent-proto",
  "agent-retry",
  "async-trait",
  "futures-util",
+ "prost",
  "regex",
  "reqwest",
  "rstest",
