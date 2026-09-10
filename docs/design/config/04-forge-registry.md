@@ -8,9 +8,12 @@ future cards — without editing a hardcoded allow-list in core.
 > `repo_encoding` are card-declared and resolved by `agent_forge::build_forge_from_card`, through which
 > **both** forge build paths now route. Shipped: `agent_core::{ForgeCard, RepoEncoding, ForgeRegistry}`,
 > `agent-forge` `kind.rs` + `StoreForges`, and the `ForgeRegistryService` seam (`--serve-forge-registry`,
-> port 50088), RBAC-gated on `(write|delete, forge_registry)`. **Deferred to D1b:** fleet rows selecting a
-> persisted card **by id** (each build path currently synthesizes a card from the existing row/config
-> fields), and gitea/bitbucket host impls. See [`09-increments.md`](09-increments.md) §D1.
+> port 50088), RBAC-gated on `(write|delete, forge_registry)`. **D1b (in progress):** the **gitea** host
+> impl has landed — a third `Forge` behind an opt-in `forge-gitea` feature (`agent-forge/src/gitea.rs`),
+> registered in `kind.rs` (`gitea` → `OwnerName`, default `https://gitea.com/api/v1`) with clone-URL +
+> PR-ref arms in the fleet path, exercising the recipe below end to end. Still open in D1b: the
+> **bitbucket** host impl, and fleet rows selecting a persisted card **by id** (each build path currently
+> synthesizes a card from the existing row/config fields). See [`09-increments.md`](09-increments.md) §D1.
 
 ## Where we are today
 

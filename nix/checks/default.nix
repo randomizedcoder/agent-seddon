@@ -85,6 +85,10 @@ in
   # in-memory config store (feature `forge-store`, off by default). The config-
   # architecture C36 forge-card twin of registry-store. docs/design/config/09-increments.md.
   forge-registry-store = craneCheck ./forge-registry-store.nix { inherit cargoArtifacts; };
+  # Executes the Gitea `Forge` backend + the gitea arm of the forge-kind builder
+  # (feature `forge-gitea`, off by default so the standard github+gitlab build is
+  # unchanged). The config-architecture D1b new-host check. docs/design/config/04-forge-registry.md.
+  forge-gitea = craneCheck ./forge-gitea.nix { inherit cargoArtifacts; };
   # Executes the shared-store `TransportRegistry` backend (`StoreTransports`) matrix +
   # the transport-kind builder (card validation / channel purpose / endpoint SSRF
   # screen) + the rate-limit / soft-fail primitives, over the in-memory config store

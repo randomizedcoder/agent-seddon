@@ -64,8 +64,21 @@ fn clone_url(repo: &str, backend: &str, base_url: &str) -> std::result::Result<S
             let host = host_root(base_url, "https://gitlab.com", false)?;
             Ok(format!("{host}/{path}.git"))
         }
+        "gitea" => {
+            // Gitea repos are `owner/name`, like GitHub; its API host is also its
+            // clone host (no `api.` → bare-host remap), so `map_github_api` is false.
+            let (owner, name) = repo
+                .split_once("__")
+                .filter(|(o, n)| !o.is_empty() && !n.is_empty())
+                .ok_or_else(|| format!("gitea repo must be `owner__name`, got `{repo}`"))?;
+            if !safe_segment(owner) || !safe_segment(name) {
+                return Err(format!("unsafe repo slug segment in `{repo}`"));
+            }
+            let host = host_root(base_url, "https://gitea.com", false)?;
+            Ok(format!("{host}/{owner}/{name}.git"))
+        }
         other => Err(format!(
-            "no clone-URL rule for forge backend `{other}` (expected github | gitlab)"
+            "no clone-URL rule for forge backend `{other}` (expected github | gitlab | gitea)"
         )),
     }
 }
@@ -108,6 +121,8 @@ fn pr_ref_template_for(
     match backend {
         "github" => Ok("refs/pull/{n}/head".to_string()),
         "gitlab" => Ok("refs/merge-requests/{n}/head".to_string()),
+        // Gitea mirrors GitHub's PR-ref layout.
+        "gitea" => Ok("refs/pull/{n}/head".to_string()),
         other => Err(format!(
             "no default PR-ref template for forge backend `{other}` (set [git] pr_ref_template)"
         )),
@@ -299,6 +314,27 @@ mod tests {
         "",
         Ok("https://gitlab.com/group/sub/proj.git")
     )]
+    // positive: gitea resolves owner__name against the public instance by default.
+    #[case::positive_gitea_public(
+        "gitea clone url from owner__name",
+        "acme__web",
+        "gitea",
+        "",
+        Ok("https://gitea.com/acme/web.git")
+    )]
+    // positive: a self-hosted gitea api base drives the clone host (path dropped,
+    // and the api host is NOT remapped — gitea serves clones from the same host).
+    #[case::positive_gitea_self_hosted(
+        "self-hosted gitea api base_url drives the clone host",
+        "org__repo",
+        "gitea",
+        "https://gitea.example.com/api/v1",
+        Ok("https://gitea.example.com/org/repo.git")
+    )]
+    // adversarial: a traversal owner in a gitea slug is rejected too.
+    #[case::adversarial_gitea_traversal(
+        "gitea `..` owner segment rejected",
+        "..__repo", "gitea", "", Err(()))]
     // boundary: public api.github.com base maps back to the github.com clone host.
     #[case::boundary_github_api_host_mapped(
         "explicit public api host maps to clone host",
@@ -366,6 +402,12 @@ mod tests {
         "gitlab",
         "",
         Ok("refs/merge-requests/{n}/head")
+    )]
+    #[case::positive_gitea_default(
+        "gitea mirrors github's PR-ref template",
+        "gitea",
+        "",
+        Ok("refs/pull/{n}/head")
     )]
     #[case::boundary_override_wins_over_default(
         "an explicit [git] override wins for a known backend",

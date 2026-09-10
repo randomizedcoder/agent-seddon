@@ -26,6 +26,8 @@ pub fn known_kinds() -> Vec<&'static str> {
         "github",
         #[cfg(feature = "forge-gitlab")]
         "gitlab",
+        #[cfg(feature = "forge-gitea")]
+        "gitea",
     ]
     .to_vec()
 }
@@ -38,6 +40,10 @@ pub fn default_base_url(kind: &str) -> Option<&'static str> {
         "github" => Some("https://api.github.com"),
         #[cfg(feature = "forge-gitlab")]
         "gitlab" => Some("https://gitlab.com/api/v4"),
+        // Gitea is self-hosted; the public instance is the registered default so an
+        // empty base_url still resolves (a card usually overrides it).
+        #[cfg(feature = "forge-gitea")]
+        "gitea" => Some("https://gitea.com/api/v1"),
         _ => None,
     }
 }
@@ -50,6 +56,9 @@ pub fn expected_encoding(kind: &str) -> Option<RepoEncoding> {
         "github" => Some(RepoEncoding::OwnerName),
         #[cfg(feature = "forge-gitlab")]
         "gitlab" => Some(RepoEncoding::Path),
+        // Gitea repos are `owner/name`, like GitHub.
+        #[cfg(feature = "forge-gitea")]
+        "gitea" => Some(RepoEncoding::OwnerName),
         _ => None,
     }
 }
@@ -182,6 +191,13 @@ pub fn build_forge_from_card(
                 base, project, token, timeout, retries,
             )?))
         }
+        #[cfg(feature = "forge-gitea")]
+        "gitea" => {
+            let (owner, name) = decode_owner_name(repo)?;
+            Ok(Arc::new(crate::GiteaForge::new(
+                base, owner, name, token, timeout, retries,
+            )?))
+        }
         other => Err(unknown_kind(other)),
     }
 }
@@ -228,6 +244,43 @@ mod tests {
             Secret::from("t".to_string()),
         ));
         assert_eq!(f.name(), "github");
+    }
+
+    // desc (positive): a gitea card (owner__name encoding) builds a gitea forge
+    // against a self-hosted base_url → expect Ok and name == "gitea".
+    #[cfg(feature = "forge-gitea")]
+    #[test]
+    fn positive_gitea_card_builds_forge() {
+        let f = built(build_forge_from_card(
+            &card(
+                "gitea",
+                "https://gitea.example.com/api/v1",
+                RepoEncoding::OwnerName,
+            ),
+            "octocat__hello",
+            Secret::from("t".to_string()),
+        ));
+        assert_eq!(f.name(), "gitea");
+    }
+
+    // desc (boundary): gitea leaves base_url empty ⇒ the public-instance default.
+    #[cfg(feature = "forge-gitea")]
+    #[test]
+    fn boundary_gitea_empty_base_url_uses_public_default() {
+        assert_eq!(default_base_url("gitea"), Some("https://gitea.com/api/v1"));
+        assert!(build_forge_from_card(
+            &card("gitea", "", RepoEncoding::OwnerName),
+            "o__n",
+            Secret::from("t".to_string())
+        )
+        .is_ok());
+    }
+
+    // desc (positive): gitea is a known kind once its feature is built in.
+    #[cfg(feature = "forge-gitea")]
+    #[test]
+    fn positive_gitea_is_a_known_kind() {
+        assert!(known_kinds().contains(&"gitea"));
     }
 
     // desc (positive): a self-hosted gitlab base_url overrides the kind default and

@@ -38,7 +38,11 @@ tenant-owned card surface is unaffected; and the two Track-D card registries (**
 `Get/List/Put/Delete` scope to the caller's verified tenant on every CRUD service (proven in the hermetic
 gate over the file/memory tier). The portal admin surface (tenants/roles/forges/transports) remains a
 noted future. **With E1, the config-architecture build is complete** — only the explicitly-deferred tails
-(D1b gitea/bitbucket + card-by-id, D2b transport lift + matrix/teams + C18 live announce) remain.
+remain, and D1b is now being picked up incrementally: the **gitea host impl** (this PR) is the first
+slice — a third `Forge` behind an opt-in `forge-gitea` feature, proving the C36 "add a host = a new impl +
+a factory line" recipe (`04-forge-registry.md`). Still open after it: D1b **bitbucket** + **card-by-id**
+(fleet/loop rows selecting a persisted forge card by id), then D2b (transport lift + matrix/teams + C18
+live announce).
 
 ## Components
 

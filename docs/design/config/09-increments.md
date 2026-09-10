@@ -340,6 +340,13 @@ The two keystones (A, B) are **independent** and may land in either order or in 
   **Deferred to D1b:** fleet rows selecting a persisted card **by id** (threads the registry into the fleet
   factory — today each build path synthesizes a card from the existing row/config fields); gitea/bitbucket
   host impls behind features.
+- **D1b in progress (host impls, incremental).** The **gitea** host impl landed first: `GiteaForge`
+  (`agent-forge/src/gitea.rs`) behind an opt-in `forge-gitea` feature (NOT in the default `forge` set, so
+  the standard github+gitlab build is byte-unchanged), registered in `kind.rs` (`known_kinds`/
+  `default_base_url` = `https://gitea.com/api/v1`/`expected_encoding` = `OwnerName`/build dispatch) with a
+  `[forge] backend = "gitea"` factory line and the gitea clone-URL + PR-ref arms in `fleet_review.rs`.
+  Gate: a dedicated `forge-gitea` check runs the mapper matrix + card-build + the loopback e2e (token-auth
+  + `merged` bool). Still open in D1b: the **bitbucket** host impl, then **card-by-id**.
 
 ### Phase D2 — C37 message-transport registry
 

@@ -163,9 +163,13 @@ the same relationship `ProviderRegistryService` (cards) has with the `LlmProvide
 seam. `token_ref` is an `env:`/`file:` reference, never a raw secret, and never
 echoed on rejection.
 
-**Deferred to D1b:** a fleet/loop row selecting a persisted card **by id** (each
-build path currently synthesizes a card from the existing row/config fields), and
-gitea/bitbucket host impls behind features.
+**D1b (in progress):** the **gitea** host impl has landed — a third `Forge`
+(`agent-forge/src/gitea.rs`) behind an opt-in `forge-gitea` cargo feature (not in
+the default build), registered via the C36 recipe below: a GitHub-shaped `/api/v1`
+with its own `Authorization: token` scheme, `merged`-bool state, `page`/`limit`
+paging, and `APPROVED` review event. Still open in D1b: the **bitbucket** host impl,
+and a fleet/loop row selecting a persisted card **by id** (each build path currently
+synthesizes a card from the existing row/config fields).
 
 ## Deferred
 
