@@ -10,6 +10,8 @@
 mod http;
 mod kind;
 
+#[cfg(feature = "forge-bitbucket")]
+mod bitbucket;
 #[cfg(feature = "forge-gitea")]
 mod gitea;
 #[cfg(feature = "forge-github")]
@@ -22,6 +24,8 @@ mod gitlab;
 #[cfg(feature = "forge-store")]
 mod store;
 
+#[cfg(feature = "forge-bitbucket")]
+pub use bitbucket::BitbucketForge;
 #[cfg(feature = "forge-gitea")]
 pub use gitea::GiteaForge;
 #[cfg(feature = "forge-github")]

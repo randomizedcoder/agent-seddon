@@ -183,6 +183,9 @@ forge-gitlab = ["agent-forge/forge-gitlab"]
 # Gitea host (config C36 / D1b): opt-in — NOT folded into `forge`, so the default
 # build stays github+gitlab. Enable it (plus `forge`) to build gitea cards/rows.
 forge-gitea = ["agent-forge/forge-gitea"]
+# Bitbucket Cloud host (config C36 / D1b): opt-in — NOT folded into `forge`. Enable
+# it (plus `forge`) to build bitbucket cards/rows.
+forge-bitbucket = ["agent-forge/forge-bitbucket"]
 web-search = [
     "dep:agent-web-search",
     "agent-tools/tool-web-search",

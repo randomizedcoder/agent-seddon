@@ -77,8 +77,26 @@ fn clone_url(repo: &str, backend: &str, base_url: &str) -> std::result::Result<S
             let host = host_root(base_url, "https://gitea.com", false)?;
             Ok(format!("{host}/{owner}/{name}.git"))
         }
+        "bitbucket" => {
+            // Bitbucket Cloud clones `workspace/repo` from bitbucket.org; the API
+            // host (api.bitbucket.org) maps back to the web/clone host.
+            let (workspace, name) = repo
+                .split_once("__")
+                .filter(|(o, n)| !o.is_empty() && !n.is_empty())
+                .ok_or_else(|| format!("bitbucket repo must be `workspace__slug`, got `{repo}`"))?;
+            if !safe_segment(workspace) || !safe_segment(name) {
+                return Err(format!("unsafe repo slug segment in `{repo}`"));
+            }
+            let host = if base_url.is_empty() {
+                "https://bitbucket.org".to_string()
+            } else {
+                host_root(base_url, "https://bitbucket.org", false)?
+                    .replace("api.bitbucket.org", "bitbucket.org")
+            };
+            Ok(format!("{host}/{workspace}/{name}.git"))
+        }
         other => Err(format!(
-            "no clone-URL rule for forge backend `{other}` (expected github | gitlab | gitea)"
+            "no clone-URL rule for forge backend `{other}` (expected github | gitlab | gitea | bitbucket)"
         )),
     }
 }
@@ -123,6 +141,9 @@ fn pr_ref_template_for(
         "gitlab" => Ok("refs/merge-requests/{n}/head".to_string()),
         // Gitea mirrors GitHub's PR-ref layout.
         "gitea" => Ok("refs/pull/{n}/head".to_string()),
+        // Bitbucket's own PR-ref dialect (Server/DC layout; a Cloud repo without a
+        // stable PR ref can override via [git] pr_ref_template).
+        "bitbucket" => Ok("refs/pull-requests/{n}/from".to_string()),
         other => Err(format!(
             "no default PR-ref template for forge backend `{other}` (set [git] pr_ref_template)"
         )),
@@ -335,6 +356,26 @@ mod tests {
     #[case::adversarial_gitea_traversal(
         "gitea `..` owner segment rejected",
         "..__repo", "gitea", "", Err(()))]
+    // positive: bitbucket clones workspace/repo from bitbucket.org by default.
+    #[case::positive_bitbucket_public(
+        "bitbucket clone url from workspace__slug",
+        "acme__web",
+        "bitbucket",
+        "",
+        Ok("https://bitbucket.org/acme/web.git")
+    )]
+    // boundary: the api.bitbucket.org base host maps back to the bitbucket.org clone host.
+    #[case::boundary_bitbucket_api_host_mapped(
+        "bitbucket api base_url maps to the clone host",
+        "acme__web",
+        "bitbucket",
+        "https://api.bitbucket.org/2.0",
+        Ok("https://bitbucket.org/acme/web.git")
+    )]
+    // adversarial: a separator in a bitbucket slug is rejected.
+    #[case::adversarial_bitbucket_slash(
+        "bitbucket embedded `/` splits into an unsafe segment",
+        "ws__r/../x", "bitbucket", "", Err(()))]
     // boundary: public api.github.com base maps back to the github.com clone host.
     #[case::boundary_github_api_host_mapped(
         "explicit public api host maps to clone host",
@@ -408,6 +449,12 @@ mod tests {
         "gitea",
         "",
         Ok("refs/pull/{n}/head")
+    )]
+    #[case::positive_bitbucket_default(
+        "bitbucket has its own PR-ref dialect",
+        "bitbucket",
+        "",
+        Ok("refs/pull-requests/{n}/from")
     )]
     #[case::boundary_override_wins_over_default(
         "an explicit [git] override wins for a known backend",

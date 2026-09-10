@@ -340,13 +340,19 @@ The two keystones (A, B) are **independent** and may land in either order or in 
   **Deferred to D1b:** fleet rows selecting a persisted card **by id** (threads the registry into the fleet
   factory — today each build path synthesizes a card from the existing row/config fields); gitea/bitbucket
   host impls behind features.
-- **D1b in progress (host impls, incremental).** The **gitea** host impl landed first: `GiteaForge`
-  (`agent-forge/src/gitea.rs`) behind an opt-in `forge-gitea` feature (NOT in the default `forge` set, so
-  the standard github+gitlab build is byte-unchanged), registered in `kind.rs` (`known_kinds`/
-  `default_base_url` = `https://gitea.com/api/v1`/`expected_encoding` = `OwnerName`/build dispatch) with a
-  `[forge] backend = "gitea"` factory line and the gitea clone-URL + PR-ref arms in `fleet_review.rs`.
-  Gate: a dedicated `forge-gitea` check runs the mapper matrix + card-build + the loopback e2e (token-auth
-  + `merged` bool). Still open in D1b: the **bitbucket** host impl, then **card-by-id**.
+- **D1b in progress (host impls, incremental).** Two host impls have landed, each behind an opt-in feature
+  (NOT in the default `forge` set, so the standard github+gitlab build is byte-unchanged), registered in
+  `kind.rs` (`known_kinds`/`default_base_url`/`expected_encoding`/build dispatch) with a `[forge] backend`
+  factory line and clone-URL + PR-ref arms in `fleet_review.rs`, each with a dedicated `forge-<kind>` gate
+  check (mapper matrix + card-build + loopback e2e):
+  - **gitea** (`GiteaForge`, `forge-gitea`) — a GitHub-shaped `/api/v1` (auth `token`, `merged` bool,
+    `page`/`limit` paging, `APPROVED` review event, `WIP:` draft; default `https://gitea.com/api/v1`).
+  - **bitbucket** (`BitbucketForge`, `forge-bitbucket`) — the *divergent* Cloud API that re-proves the seam:
+    a `{values,next}` body-envelope pagination (no `Link`/`X-Next-Page`), no review object (approve /
+    request-changes endpoints + a PR comment, like GitLab), deeply-nested `links.html.href` /
+    `source.branch.name` / `content.raw`, upper-case state vocabulary, Bearer access token; default
+    `https://api.bitbucket.org/2.0`, clone host mapped back to `bitbucket.org`.
+  Still open in D1b: **card-by-id** (fleet/loop rows selecting a persisted forge card by id).
 
 ### Phase D2 — C37 message-transport registry
 

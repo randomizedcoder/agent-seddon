@@ -89,6 +89,10 @@ in
   # (feature `forge-gitea`, off by default so the standard github+gitlab build is
   # unchanged). The config-architecture D1b new-host check. docs/design/config/04-forge-registry.md.
   forge-gitea = craneCheck ./forge-gitea.nix { inherit cargoArtifacts; };
+  # Executes the Bitbucket Cloud `Forge` backend + the bitbucket arm of the forge-kind
+  # builder (feature `forge-bitbucket`, off by default). The D1b divergent-API host
+  # check — body-envelope paging, no review object, nested fields, upper-case state.
+  forge-bitbucket = craneCheck ./forge-bitbucket.nix { inherit cargoArtifacts; };
   # Executes the shared-store `TransportRegistry` backend (`StoreTransports`) matrix +
   # the transport-kind builder (card validation / channel purpose / endpoint SSRF
   # screen) + the rate-limit / soft-fail primitives, over the in-memory config store
