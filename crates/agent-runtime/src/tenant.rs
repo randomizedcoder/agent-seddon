@@ -228,6 +228,42 @@ impl agent_core::GraphStore for PerTenant<dyn agent_core::GraphStore> {
     }
 }
 
+/// The scheduler seam's **registry** half, routed per tenant (config C2c-2). This
+/// isolates `schedule`/`list`/`cancel`/`history` per verified tenant over the
+/// durable [`StoreScheduler`](agent_scheduler::StoreScheduler) — so a tenant's
+/// `--serve-scheduler` calls, and the model's `schedule` tool, read and write only
+/// that tenant's jobs.
+///
+/// The **driver** half (firing due jobs) is *not* here: `tick_with` is inherent on
+/// the concrete scheduler, not on this trait, because a job's executor is the owning
+/// process. The tenant-fanning driver ([`StoreDriver`](crate::scheduler_driver))
+/// fires each tenant's jobs; this wrap only routes the registry, exactly as the
+/// design doc requires (a `PerTenant` wrap of the registry alone would accept jobs
+/// the local-only driver never fires — the footgun the driver exists to avoid).
+///
+/// `name()` cannot delegate through `route()` (it returns a borrow that would
+/// outlive the routed `Arc`), so it returns a static label like the `GrpcScheduler`
+/// client does.
+#[cfg(feature = "scheduler-store")]
+#[async_trait::async_trait]
+impl agent_core::Scheduler for PerTenant<dyn agent_core::Scheduler> {
+    fn name(&self) -> &str {
+        "per-tenant"
+    }
+    async fn schedule(&self, spec: &str, goal: &str) -> agent_core::Result<agent_core::JobId> {
+        self.route().schedule(spec, goal).await
+    }
+    async fn list(&self) -> agent_core::Result<Vec<agent_core::Job>> {
+        self.route().list().await
+    }
+    async fn cancel(&self, id: &str) -> agent_core::Result<bool> {
+        self.route().cancel(id).await
+    }
+    async fn history(&self, id: &str) -> agent_core::Result<Vec<agent_core::Run>> {
+        self.route().history(id).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -627,6 +663,76 @@ mod tests {
                 "globex sees the default, not acme's override"
             );
             assert!(globex_sys.builtin, "globex's system is still the default");
+        }
+    }
+
+    // The scheduler's registry half, routed per tenant over the REAL durable
+    // `StoreScheduler` on one shared in-memory backend (config C2c-2). Proves a job
+    // scheduled under one verified tenant is invisible to another — the served
+    // `--serve-scheduler` isolation. The *driver* half is tested in
+    // `crate::scheduler_driver`. Feature-gated (the store dep is off in a minimal
+    // build); run by `nix/checks/per-tenant.nix`.
+    #[cfg(feature = "scheduler-store")]
+    mod real_scheduler {
+        use crate::tenant::PerTenant;
+        use agent_config_store::{Backend, MemoryBackend};
+        use agent_core::{scope, Scheduler, SessionKey};
+        use std::sync::Arc;
+
+        fn per_tenant_scheduler(backend: Arc<dyn Backend>) -> PerTenant<dyn Scheduler> {
+            PerTenant::new(move |t| {
+                agent_scheduler::StoreScheduler::with_tenant(backend.clone(), t)
+                    .map(|s| Arc::new(s) as Arc<dyn Scheduler>)
+                    .unwrap_or_else(|_| {
+                        Arc::new(agent_scheduler::StoreScheduler::new(backend.clone()))
+                    })
+            })
+        }
+
+        // desc: a job scheduled under tenant `acme` is invisible to `globex` →
+        // expect acme lists exactly its job, globex lists none.
+        #[tokio::test]
+        async fn positive_two_tenants_isolated_jobs() {
+            let backend: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
+            let sched = per_tenant_scheduler(backend);
+            scope(SessionKey::parse("acme", "s1").unwrap(), async {
+                sched.schedule("every 3600s", "acme goal").await.unwrap();
+            })
+            .await;
+            let globex = scope(SessionKey::parse("globex", "s1").unwrap(), async {
+                sched.list().await.unwrap()
+            })
+            .await;
+            let acme = scope(SessionKey::parse("acme", "s1").unwrap(), async {
+                sched.list().await.unwrap()
+            })
+            .await;
+            assert!(globex.is_empty(), "globex must not see acme's job");
+            assert_eq!(acme.len(), 1);
+            assert_eq!(acme[0].goal, "acme goal");
+        }
+
+        // desc: `name()` is a static label (it cannot borrow through the routed Arc)
+        // → expect "per-tenant".
+        #[tokio::test]
+        async fn corner_name_is_static_label() {
+            let backend: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
+            assert_eq!(per_tenant_scheduler(backend).name(), "per-tenant");
+        }
+
+        // desc (adversarial): with no ambient identity the wrap routes to `local`
+        // (fail closed, never an escape) → a job scheduled unscoped is the `local`
+        // tenant's, visible when re-reading unscoped.
+        #[tokio::test]
+        async fn adversarial_no_identity_defaults_local() {
+            let backend: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
+            let sched = per_tenant_scheduler(backend);
+            sched
+                .schedule("every 3600s", "unscoped goal")
+                .await
+                .unwrap();
+            let jobs = sched.list().await.unwrap();
+            assert_eq!(jobs.len(), 1, "the unscoped job is the local tenant's");
         }
     }
 }

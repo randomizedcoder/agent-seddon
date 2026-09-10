@@ -11,12 +11,13 @@ cards + the `RoleService` seam, #301), C2 (the per-tenant config plane, #302), a
 routing for the file-backed cognition graph, #303) with it. The scheduler half of C2b turned out
 **not** to be a `PerTenant` wrap (it is process-bound — a job's executor is the owning process), so it
 was split into its own design-of-record, [`10-per-tenant-scheduler.md`](10-per-tenant-scheduler.md)
-(durable tenant-keyed backend + tenant-fanning driver). **C2c is now building in two PRs:** C2c-1 (this
-PR) lands the durable **foundation** — a `StoreScheduler` over the shared store (the durable twin of
-`LocalScheduler`) plus `Backend::tenants` (the driver's tenant-discovery primitive) — as library +
-tests, deliberately **not yet selectable in config** so nothing can silently no-op; C2c-2 will wire the
-tenant-fanning driver, the `[scheduler] store` arm, and the per-tenant `--serve-scheduler` seam. Only
-tracks D/E and the C2c driver remain.
+(durable tenant-keyed backend + tenant-fanning driver). **C2c shipped in two PRs:** C2c-1 landed the
+durable **foundation** — a `StoreScheduler` over the shared store (the durable twin of `LocalScheduler`)
+plus `Backend::tenants` (the driver's tenant-discovery primitive) — as library + tests, deliberately not
+selectable in config so nothing could silently no-op; **C2c-2 (this PR)** wires it up: the
+`[scheduler] store` config arm, `resolve_scheduler`, the tenant-fanning driver (`StoreDriver`), the
+per-tenant served registry (`impl Scheduler for PerTenant<dyn Scheduler>`), and identity-scoped firing so
+each tenant's jobs run as that tenant. Only tracks **D/E** remain.
 
 ## Components
 
@@ -67,8 +68,8 @@ of done — is [`09-increments.md`](09-increments.md). This table is the **live 
 | C1b | RBAC role cards + `RoleService` seam (needs the shared store) | ✅ | [#301](https://github.com/randomizedcoder/agent-seddon/pull/301) | C1, A3 |
 | C2 | C35 per-tenant plane (+ C38 prompt) | ✅ | [#302](https://github.com/randomizedcoder/agent-seddon/pull/302) | B1, A3 |
 | C2b | Per-tenant **Graph** (file path-namespaced) | ✅ | [#303](https://github.com/randomizedcoder/agent-seddon/pull/303) | C2 |
-| C2c-1 | Durable **Scheduler** foundation (`StoreScheduler` + `Backend::tenants`) | 🟡 | [#304](https://github.com/randomizedcoder/agent-seddon/pull/304) | A3 |
-| C2c-2 | Per-tenant Scheduler **driver + serve** (tenant-fanning) | ⬜ | — (design [10](10-per-tenant-scheduler.md)) | C2c-1, plane-01 |
+| C2c-1 | Durable **Scheduler** foundation (`StoreScheduler` + `Backend::tenants`) | ✅ | [#304](https://github.com/randomizedcoder/agent-seddon/pull/304) | A3 |
+| C2c-2 | Per-tenant Scheduler **driver + serve** (tenant-fanning) | 🟡 | — (design [10](10-per-tenant-scheduler.md)) | C2c-1, plane-01 |
 | D1 | C36 forge registry | ⬜ | — | A1 (+C2 per-tenant) |
 | D2 | C37 message-transport registry | ⬜ | — | A1 (+C2 per-tenant) |
 | E1 | C40 control-plane consolidation | ⬜ | — | B1, C1, C2 |

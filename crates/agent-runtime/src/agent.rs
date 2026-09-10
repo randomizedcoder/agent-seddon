@@ -91,6 +91,23 @@ pub struct GrpcAuthSettings {
     pub leeway_secs: u64,
 }
 
+/// How the scheduler is wired (config C2c-2). The registry half is served either
+/// way; the two variants differ in how due jobs are *driven*.
+#[cfg(feature = "scheduler")]
+enum SchedulerHandle {
+    /// Tier-0: the in-memory `LocalScheduler`, served and ticked directly. Jobs are
+    /// lost on restart; there is no tenant fanning.
+    Local(Arc<agent_scheduler::LocalScheduler>),
+    /// The durable, store-backed scheduler (`[scheduler] store` set): `seam` is the
+    /// per-tenant-aware registry served over `--serve-scheduler` and behind the
+    /// `schedule` tool; `driver` fans the tick over tenants (config C2c-2).
+    #[cfg(feature = "scheduler-store")]
+    Store {
+        seam: Arc<dyn agent_core::Scheduler>,
+        driver: Arc<crate::scheduler_driver::StoreDriver>,
+    },
+}
+
 pub struct Agent {
     provider: Arc<dyn LlmProvider>,
     tools: ToolRegistry,
@@ -240,9 +257,9 @@ pub struct Agent {
     #[cfg(feature = "session")]
     auto_checkpoint: bool,
     /// The scheduler, if wired — held so the `--scheduler` driver can tick it
-    /// (parity spec 28).
+    /// (parity spec 28; durable/tenant-fanning variant is config C2c-2).
     #[cfg(feature = "scheduler")]
-    scheduler: Option<Arc<agent_scheduler::LocalScheduler>>,
+    scheduler: Option<SchedulerHandle>,
     /// The digest ledger the per-session background distiller writes and instant
     /// compaction reads (cognition-graph 02). `None` ⇒ distillation is off.
     digests: Option<Arc<dyn agent_core::DigestStore>>,
@@ -638,53 +655,82 @@ impl Agent {
         self
     }
 
-    /// Attach the scheduler (parity spec 28).
+    /// Attach the in-memory scheduler (Tier-0, parity spec 28).
     #[cfg(feature = "scheduler")]
     pub fn with_scheduler(mut self, s: Arc<agent_scheduler::LocalScheduler>) -> Self {
-        self.scheduler = Some(s);
+        self.scheduler = Some(SchedulerHandle::Local(s));
         self
     }
 
-    /// The scheduler, if wired.
-    #[cfg(feature = "scheduler")]
-    pub fn scheduler(&self) -> Option<Arc<agent_scheduler::LocalScheduler>> {
-        self.scheduler.clone()
+    /// Attach the durable, store-backed scheduler (config C2c-2): `seam` is the
+    /// per-tenant-aware registry served over gRPC and behind the `schedule` tool;
+    /// `driver` fans the tick over tenants. `pub(crate)` because only the builder
+    /// wires it (and `StoreDriver` is a crate-internal type).
+    #[cfg(feature = "scheduler-store")]
+    pub(crate) fn with_scheduler_store(
+        mut self,
+        seam: Arc<dyn agent_core::Scheduler>,
+        driver: Arc<crate::scheduler_driver::StoreDriver>,
+    ) -> Self {
+        self.scheduler = Some(SchedulerHandle::Store { seam, driver });
+        self
     }
 
-    /// The scheduler as the bare seam, for `agent --serve-scheduler`.
+    /// The in-memory scheduler, if wired as Tier-0. Returns `None` for the durable
+    /// store-backed variant (whose seam is a trait object — use
+    /// [`Agent::scheduler_seam`]).
+    #[cfg(feature = "scheduler")]
+    pub fn scheduler(&self) -> Option<Arc<agent_scheduler::LocalScheduler>> {
+        match &self.scheduler {
+            Some(SchedulerHandle::Local(s)) => Some(s.clone()),
+            _ => None,
+        }
+    }
+
+    /// The scheduler's **registry** seam, for `agent --serve-scheduler`.
     ///
-    /// Separate from [`Agent::scheduler`] because driving jobs needs the
-    /// concrete type: `tick_with` takes the executor closure and is deliberately
-    /// NOT on the `Scheduler` trait, since a job's executor is this agent. So a
-    /// remote client can manage the registry (schedule/list/cancel/history) but
-    /// only the process that owns the scheduler can fire its jobs.
+    /// Separate from driving jobs: `tick_with` takes the executor closure and is
+    /// deliberately NOT on the `Scheduler` trait, since a job's executor is this
+    /// process. So a remote client can manage the registry (schedule/list/cancel/
+    /// history) but only the process that owns the scheduler can fire its jobs. For
+    /// the durable variant this seam is per-tenant-aware (config C2c-2).
     #[cfg(feature = "scheduler")]
     pub fn scheduler_seam(&self) -> Option<Arc<dyn agent_core::Scheduler>> {
-        self.scheduler
-            .clone()
-            .map(|s| s as Arc<dyn agent_core::Scheduler>)
+        match &self.scheduler {
+            None => None,
+            Some(SchedulerHandle::Local(s)) => Some(s.clone() as Arc<dyn agent_core::Scheduler>),
+            #[cfg(feature = "scheduler-store")]
+            Some(SchedulerHandle::Store { seam, .. }) => Some(seam.clone()),
+        }
     }
 
     /// Fire every due job once, running each as a fresh headless turn.
     ///
-    /// Returns how many ran. The executor is supplied here rather than stored by
-    /// the scheduler, which is what keeps agent and scheduler from owning each
-    /// other.
+    /// Returns how many ran. For the durable variant this fans over tenants and
+    /// fires each tenant's jobs under its own identity (config C2c-2). The executor
+    /// is supplied here rather than stored by the scheduler, which is what keeps
+    /// agent and scheduler from owning each other.
     #[cfg(feature = "scheduler")]
     pub async fn tick_scheduler(self: &Arc<Self>) -> usize {
-        let Some(s) = &self.scheduler else { return 0 };
-        // Each due job runs as a fresh headless session; clone the `Arc` backend into
-        // the executor so the returned future owns it (no borrow of `self`).
-        let this = Arc::clone(self);
-        s.tick_with(move |goal| {
-            let this = Arc::clone(&this);
-            async move {
-                this.run(&goal)
-                    .await
-                    .map_err(|e| agent_core::Error::Scheduler(e.to_string()))
+        match &self.scheduler {
+            None => 0,
+            Some(SchedulerHandle::Local(s)) => {
+                // Each due job runs as a fresh headless session; clone the `Arc` into
+                // the executor so the returned future owns it (no borrow of `self`).
+                let this = Arc::clone(self);
+                s.tick_with(move |goal| {
+                    let this = Arc::clone(&this);
+                    async move {
+                        this.run(&goal)
+                            .await
+                            .map_err(|e| agent_core::Error::Scheduler(e.to_string()))
+                    }
+                })
+                .await
             }
-        })
-        .await
+            #[cfg(feature = "scheduler-store")]
+            Some(SchedulerHandle::Store { driver, .. }) => driver.tick(self).await,
+        }
     }
 
     /// Checkpoint automatically after each completed turn (parity spec 19).

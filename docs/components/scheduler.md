@@ -82,10 +82,42 @@ work as a side effect.
 ```toml
 [scheduler]
 enabled        = false   # registers the `schedule` tool
+store          = ""      # ""=in-memory; "file"/"sqlite"/"postgres"=durable (see below)
+path           = ".agent/scheduler.json"  # for the file/sqlite tiers
 tick_secs      = 30      # how often the driver checks
-max_jobs       = 64      # the model can create jobs, so bound them
+max_jobs       = 64      # the model can create jobs, so bound them (per tenant when durable)
 claim_ttl_secs = 900     # before a crashed run's job is reclaimable
 ```
+
+## Durable & per-tenant jobs (config C2c)
+
+`store = ""` keeps the in-memory `LocalScheduler` (Tier-0, jobs lost on restart).
+Setting `store` to `"file"`, `"sqlite"`, or `"postgres"` selects `StoreScheduler` —
+the durable twin — which persists each job as a `(collection = "scheduler", tenant,
+id)` card on the shared `agent-config-store`, so jobs survive a restart with the
+same overlap-guard / claim / one-shot / bounded-history semantics. The non-empty
+tiers need the matching cargo feature (`scheduler-store` for file — on by default,
+`scheduler-sqlite`, `scheduler-postgres`); a `store` set without its feature is a
+hard startup error, never a silent downgrade. `postgres` reuses `[config_store]` for
+its DSN.
+
+With `[tenancy] per_tenant = true` the durable scheduler becomes multi-tenant:
+
+- The **registry** half (`schedule`/`list`/`cancel`/`history`, over
+  `--serve-scheduler` and the `schedule` tool) is wrapped in `PerTenant<dyn
+  Scheduler>`, so each caller reads and writes only its verified tenant's jobs.
+- The **driver** half fans out: it enumerates the tenants that own jobs
+  (`Backend::tenants`), and fires each tenant's due jobs **under that tenant's
+  identity** (`SessionKey::parse(tenant, …)`), so a fired turn reads that tenant's
+  registries, prompts, memory, and graph.
+
+A `PerTenant` wrap of the registry *alone* would accept a non-`local` tenant's jobs
+and then never fire them (the local-only driver would tick only `local`) — the
+"oversold isolation" footgun. That is exactly why the driver, not a routing
+decorator, does the fanning. A fired job runs **in-process** scoped to its tenant,
+not sandboxed; strong per-tenant *process* isolation is the plane-01 dependency
+(multi-tenancy C23/C24). See
+[`docs/design/config/10-per-tenant-scheduler.md`](../design/config/10-per-tenant-scheduler.md).
 
 ## A note on the cycle
 
@@ -115,8 +147,15 @@ wiring line.
 
 ## Deferred
 
-- **Durable jobs.** The registry is in-memory, so jobs do not survive a restart.
-  Persisting them belongs with `SessionStore`'s content-addressed storage.
+- **Cross-driver mutual exclusion.** The durable claim rides on the store's atomic
+  batch, not a compare-and-set, so it gives single-driver overlap-prevention + crash
+  recovery (the TTL reclaims a dead run's claim) — but two drivers ticking one
+  backend in the same instant could both claim a job. True multi-driver exclusion
+  needs a CAS primitive the `Backend` does not yet expose (a conditional `apply`);
+  it is a bounded follow-up.
+- **Strong per-tenant process isolation of fired jobs** — a fired job currently runs
+  in the driver process, scoped to its tenant but not sandboxed. Composes with
+  plane-01 (multi-tenancy C23/C24) when that lands.
 - **A concurrency ceiling across jobs.** Each job is individually guarded against
   overlap, but N distinct due jobs run sequentially within a tick rather than
   under a bounded pool.

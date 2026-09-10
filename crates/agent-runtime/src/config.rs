@@ -313,10 +313,25 @@ fn default_max_pty_sessions() -> usize {
 pub struct SchedulerCfg {
     #[serde(default)]
     pub enabled: bool,
+    /// Where jobs live: `""` (default) is the in-memory `LocalScheduler` (Tier-0,
+    /// jobs are lost on restart); `"file"` / `"sqlite"` / `"postgres"` select the
+    /// durable `StoreScheduler` over the shared `agent-config-store` (config C2c),
+    /// so jobs survive a restart and — with `[tenancy] per_tenant` — a
+    /// tenant-fanning driver fires each tenant's jobs under its own identity. The
+    /// non-empty tiers need the matching cargo feature (`scheduler-store` for file,
+    /// `scheduler-sqlite`, `scheduler-postgres`); `postgres` reuses `[config_store]`
+    /// for its DSN.
+    #[serde(default)]
+    pub store: String,
+    /// On-disk path for the `file`/`sqlite` scheduler stores (ignored for `""` and
+    /// `postgres`).
+    #[serde(default = "default_scheduler_path")]
+    pub path: String,
     /// How often the driver checks for due jobs.
     #[serde(default = "default_tick_secs")]
     pub tick_secs: u64,
-    /// Cap on registered jobs (the model can create them).
+    /// Cap on registered jobs (the model can create them). With the durable store
+    /// this cap is **per tenant**.
     #[serde(default = "default_max_jobs")]
     pub max_jobs: usize,
     /// How long an in-flight claim is honoured before a crashed run's job is
@@ -329,11 +344,17 @@ impl Default for SchedulerCfg {
     fn default() -> Self {
         Self {
             enabled: false,
+            store: String::new(),
+            path: default_scheduler_path(),
             tick_secs: default_tick_secs(),
             max_jobs: default_max_jobs(),
             claim_ttl_secs: default_claim_ttl_secs(),
         }
     }
+}
+
+fn default_scheduler_path() -> String {
+    ".agent/scheduler.json".to_string()
 }
 
 fn default_tick_secs() -> u64 {

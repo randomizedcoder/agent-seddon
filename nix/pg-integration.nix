@@ -126,6 +126,18 @@ pkgs.writeShellApplication {
     set -e
     if [ "$rc" -ne 0 ]; then note_fail 2; fi
 
-    contract_exit "PASS: pg-integration — postgres config-store + registry + fleet + prompt + role + per-tenant suites green."
+    # The durable scheduler (config C2c): a job scheduled under one verified tenant
+    # is invisible to another over the postgres store — the tenant-keying the
+    # tenant-fanning driver relies on, proven over a real server.
+    echo "==> pg-integration: running the ignored scheduler postgres suite"
+    set +e
+    nix develop --extra-experimental-features 'nix-command flakes' -c \
+      cargo test -p agent-scheduler --features scheduler-store-postgres \
+      -- --ignored --test-threads=1 pg_tests
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then note_fail 2; fi
+
+    contract_exit "PASS: pg-integration — postgres config-store + registry + fleet + prompt + role + per-tenant + scheduler suites green."
   '';
 }

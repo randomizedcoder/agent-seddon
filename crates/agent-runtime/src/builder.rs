@@ -478,30 +478,30 @@ pub async fn build_agent_with(
     // Scheduler (parity spec 28): recurring unattended runs. The `schedule` tool
     // registers/inspects jobs; they only FIRE while a driver ticks
     // (`agent --scheduler`), so enabling this alone cannot start work silently.
+    // `[scheduler] store` selects the tier: "" is the in-memory `LocalScheduler`
+    // (Tier-0); "file"/"sqlite"/"postgres" is the durable `StoreScheduler`, which
+    // — with `[tenancy] per_tenant` — makes the registry per-tenant and the driver
+    // tenant-fanning (config C2c-2).
     #[cfg(feature = "scheduler")]
-    let scheduler = if cfg.scheduler.enabled {
+    let scheduler_wiring = if cfg.scheduler.enabled {
         let m = metrics.clone();
-        let s = Arc::new(
-            agent_scheduler::LocalScheduler::new()
-                .with_max_jobs(cfg.scheduler.max_jobs)
-                .with_claim_ttl_ms(cfg.scheduler.claim_ttl_secs.saturating_mul(1_000))
-                .with_observer(Arc::new(move |run: &agent_core::Run| {
-                    m.on_scheduled_run(
-                        run.outcome.as_str(),
-                        run.finished_ms.saturating_sub(run.started_ms) as f64 / 1000.0,
-                    );
-                    tracing::info!(
-                        job = %run.job_id,
-                        outcome = run.outcome.as_str(),
-                        "scheduled run finished"
-                    );
-                })),
-        );
-        let tool = Arc::new(agent_tools::ScheduleTool::new(
-            s.clone() as Arc<dyn agent_core::Scheduler>
-        ));
+        let observer: agent_scheduler::RunObserver = Arc::new(move |run: &agent_core::Run| {
+            m.on_scheduled_run(
+                run.outcome.as_str(),
+                run.finished_ms.saturating_sub(run.started_ms) as f64 / 1000.0,
+            );
+            tracing::info!(
+                job = %run.job_id,
+                outcome = run.outcome.as_str(),
+                "scheduled run finished"
+            );
+        });
+        let wiring = resolve_scheduler(&cfg, observer)?;
+        // The `schedule` tool writes into the same registry the seam serves, so under
+        // the per-tenant durable store the model schedules into its own tenant.
+        let tool = Arc::new(agent_tools::ScheduleTool::new(wiring.seam()));
         tools.register(crate::metered::tool(tool, metrics.clone()));
-        Some(s)
+        Some(wiring)
     } else {
         None
     };
@@ -1416,9 +1416,11 @@ pub async fn build_agent_with(
     // Lifecycle hooks (parity spec 22): config-selected, dispatched in the order
     // listed. Empty by default, and every dispatch short-circuits when empty.
     #[cfg(feature = "scheduler")]
-    let agent = match scheduler {
-        Some(s) => agent.with_scheduler(s),
+    let agent = match scheduler_wiring {
         None => agent,
+        Some(SchedulerWiring::Local(s)) => agent.with_scheduler(s),
+        #[cfg(feature = "scheduler-store")]
+        Some(SchedulerWiring::Store { seam, driver }) => agent.with_scheduler_store(seam, driver),
     };
     let agent = {
         let hooks = crate::hooks::build(&cfg.hooks.enabled, &metrics)?;
@@ -2736,6 +2738,150 @@ pub(crate) async fn seed_registry_from_toml(
         "seeded the provider registry from [route] TOML"
     );
     Ok(())
+}
+
+/// How the scheduler was resolved from `[scheduler] store` — carried from the
+/// builder body to the agent-wiring step (config C2c-2). The registry `seam` is
+/// served either way; the variants differ in how the driver ticks.
+#[cfg(feature = "scheduler")]
+enum SchedulerWiring {
+    Local(Arc<agent_scheduler::LocalScheduler>),
+    #[cfg(feature = "scheduler-store")]
+    Store {
+        seam: Arc<dyn agent_core::Scheduler>,
+        driver: Arc<crate::scheduler_driver::StoreDriver>,
+    },
+}
+
+#[cfg(feature = "scheduler")]
+impl SchedulerWiring {
+    /// The registry seam to serve and to back the `schedule` tool.
+    fn seam(&self) -> Arc<dyn agent_core::Scheduler> {
+        match self {
+            Self::Local(s) => s.clone() as Arc<dyn agent_core::Scheduler>,
+            #[cfg(feature = "scheduler-store")]
+            Self::Store { seam, .. } => seam.clone(),
+        }
+    }
+}
+
+/// Resolve `[scheduler] store` into the seam + driver (config C2c-2). `""` is the
+/// in-memory `LocalScheduler` (Tier-0, unchanged); a durable tier builds a
+/// `StoreScheduler` over the shared config-store, per-tenant-aware when
+/// `[tenancy] per_tenant` is set. A durable tier without the matching cargo
+/// feature is a hard startup error — never a silent downgrade to in-memory.
+#[cfg(feature = "scheduler")]
+fn resolve_scheduler(
+    cfg: &Config,
+    observer: agent_scheduler::RunObserver,
+) -> anyhow::Result<SchedulerWiring> {
+    let claim_ttl_ms = cfg.scheduler.claim_ttl_secs.saturating_mul(1_000);
+    let max_jobs = cfg.scheduler.max_jobs;
+    match cfg.scheduler.store.as_str() {
+        "" => Ok(SchedulerWiring::Local(Arc::new(
+            agent_scheduler::LocalScheduler::new()
+                .with_max_jobs(max_jobs)
+                .with_claim_ttl_ms(claim_ttl_ms)
+                .with_observer(observer),
+        ))),
+        #[cfg(feature = "scheduler-store")]
+        kind @ ("file" | "sqlite" | "postgres") => {
+            let backend = scheduler_backend(kind, cfg)?;
+            let seam = scheduler_seam(
+                &backend,
+                cfg.tenancy.per_tenant,
+                claim_ttl_ms,
+                max_jobs,
+                observer.clone(),
+            );
+            let driver = Arc::new(crate::scheduler_driver::StoreDriver::new(
+                backend,
+                cfg.tenancy.per_tenant,
+                claim_ttl_ms,
+                max_jobs,
+                observer,
+            ));
+            Ok(SchedulerWiring::Store { seam, driver })
+        }
+        #[cfg(not(feature = "scheduler-store"))]
+        other @ ("file" | "sqlite" | "postgres") => anyhow::bail!(
+            "[scheduler] store = `{other}` needs the `scheduler-store` feature (rebuild with it enabled)"
+        ),
+        other => anyhow::bail!(
+            "unknown [scheduler] store `{other}` (expected \"\", \"file\", \"sqlite\", or \"postgres\")"
+        ),
+    }
+}
+
+/// Build the shared `agent-config-store` backend for the durable scheduler from
+/// `[scheduler] store` + `[scheduler] path` (postgres reuses `[config_store]`).
+#[cfg(feature = "scheduler-store")]
+fn scheduler_backend(
+    kind: &str,
+    cfg: &Config,
+) -> anyhow::Result<Arc<dyn agent_config_store::Backend>> {
+    let b: Arc<dyn agent_config_store::Backend> = match kind {
+        "file" => Arc::new(agent_config_store::FileBackend::new(expand_tilde(
+            &cfg.scheduler.path,
+        ))),
+        #[cfg(feature = "scheduler-sqlite")]
+        "sqlite" => Arc::new(agent_config_store::SqliteBackend::open(expand_tilde(
+            &cfg.scheduler.path,
+        ))?),
+        #[cfg(not(feature = "scheduler-sqlite"))]
+        "sqlite" => anyhow::bail!(
+            "[scheduler] store = `sqlite` needs the `scheduler-sqlite` feature (rebuild with it enabled)"
+        ),
+        #[cfg(feature = "scheduler-postgres")]
+        "postgres" => crate::store_backend::pg_backend(&cfg.config_store)?,
+        #[cfg(not(feature = "scheduler-postgres"))]
+        "postgres" => anyhow::bail!(
+            "[scheduler] store = `postgres` needs the `scheduler-postgres` feature (rebuild with it enabled)"
+        ),
+        other => anyhow::bail!("unknown [scheduler] store `{other}`"),
+    };
+    Ok(b)
+}
+
+/// The durable scheduler's **registry** seam: a per-tenant `PerTenant` wrap when
+/// `per_tenant` is set (each caller routes to its verified tenant's jobs), else a
+/// single `local`-tenant `StoreScheduler` (single-tenant durable install). Mirrors
+/// `resolve_provider_registry`'s postgres arm; a hostile tenant segment in the
+/// closure falls back to the base view (never an escape) exactly as that arm does.
+#[cfg(feature = "scheduler-store")]
+fn scheduler_seam(
+    backend: &Arc<dyn agent_config_store::Backend>,
+    per_tenant: bool,
+    claim_ttl_ms: u64,
+    max_jobs: usize,
+    observer: agent_scheduler::RunObserver,
+) -> Arc<dyn agent_core::Scheduler> {
+    if per_tenant {
+        let b = backend.clone();
+        Arc::new(crate::tenant::PerTenant::new(move |t| {
+            let obs = observer.clone();
+            let s = agent_scheduler::StoreScheduler::with_tenant(b.clone(), t)
+                .map(|s| {
+                    s.with_claim_ttl_ms(claim_ttl_ms)
+                        .with_max_jobs(max_jobs)
+                        .with_observer(obs.clone())
+                })
+                .unwrap_or_else(|_| {
+                    agent_scheduler::StoreScheduler::new(b.clone())
+                        .with_claim_ttl_ms(claim_ttl_ms)
+                        .with_max_jobs(max_jobs)
+                        .with_observer(obs)
+                });
+            Arc::new(s) as Arc<dyn agent_core::Scheduler>
+        })) as Arc<dyn agent_core::Scheduler>
+    } else {
+        Arc::new(
+            agent_scheduler::StoreScheduler::new(backend.clone())
+                .with_claim_ttl_ms(claim_ttl_ms)
+                .with_max_jobs(max_jobs)
+                .with_observer(observer),
+        )
+    }
 }
 
 /// Build the `[registry] store` backend (model-router 03) — the provider
