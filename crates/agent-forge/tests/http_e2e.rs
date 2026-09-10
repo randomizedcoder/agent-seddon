@@ -60,6 +60,16 @@ fn spawn_server() -> (String, Seen) {
                             .unwrap(),
                     ),
                 )
+            } else if url.starts_with("/gitea/repos/o/r/pulls/7") {
+                // Gitea marks a merged PR with a `merged: true` boolean (not
+                // merged_at like GitHub), and speaks its own `/api/v1`.
+                (
+                    r#"{"number":7,"title":"Fix","body":"b","state":"closed",
+                        "merged":true,"user":{"login":"alice"},
+                        "html_url":"https://gitea/7","head":{"ref":"feat"},
+                        "base":{"ref":"main"}}"#,
+                    None,
+                )
             } else if url.starts_with("/gl/projects/g%2Fp/merge_requests/9") {
                 (
                     r#"{"id":99999,"iid":9,"title":"MR","description":"d","state":"opened",
@@ -117,6 +127,42 @@ fn gitlab(base: &str) -> GitLabForge {
         0,
     )
     .unwrap()
+}
+
+#[cfg(feature = "forge-gitea")]
+fn gitea(base: &str) -> agent_forge::GiteaForge {
+    agent_forge::GiteaForge::new(
+        format!("{base}/gitea"),
+        "o".into(),
+        "r".into(),
+        agent_core::Secret::new("gitea-secret-token"),
+        5,
+        0,
+    )
+    .unwrap()
+}
+
+/// Gitea proves the seam a third time: the token rides as `token <t>` (not Bearer,
+/// not PRIVATE-TOKEN) and a merged PR is a `merged: true` boolean.
+#[cfg(feature = "forge-gitea")]
+#[tokio::test]
+async fn positive_gitea_get_pr_uses_token_auth_and_merged_bool() {
+    let (base, seen) = spawn_server();
+    let pr = gitea(&base).get_pr(7).await.expect("get_pr");
+
+    assert_eq!(pr.number, 7);
+    assert_eq!(
+        pr.state, "merged",
+        "the `merged` bool must normalize the state"
+    );
+    assert_eq!(pr.source_branch, "feat");
+
+    let (_m, _u, auth) = seen.recv().unwrap();
+    assert_eq!(
+        auth, "token gitea-secret-token",
+        "gitea `token` auth scheme"
+    );
+    assert!(!format!("{pr:?}").contains("gitea-secret-token"));
 }
 
 #[tokio::test]
@@ -208,7 +254,11 @@ async fn corner_gitlab_approve_hits_approve_then_notes() {
 #[tokio::test]
 async fn positive_both_backends_satisfy_the_same_trait() {
     let (base, _s) = spawn_server();
-    let backends: Vec<Box<dyn Forge>> = vec![Box::new(github(&base)), Box::new(gitlab(&base))];
+    // `mut` is only exercised when the opt-in gitea backend is built in.
+    #[cfg_attr(not(feature = "forge-gitea"), allow(unused_mut))]
+    let mut backends: Vec<Box<dyn Forge>> = vec![Box::new(github(&base)), Box::new(gitlab(&base))];
+    #[cfg(feature = "forge-gitea")]
+    backends.push(Box::new(gitea(&base)));
     for b in backends {
         // Each answers the same call, whatever it does underneath.
         assert!(!b.name().is_empty());

@@ -9,6 +9,9 @@ license.workspace = true
 default = ["forge-github", "forge-gitlab"]
 forge-github = []
 forge-gitlab = []
+# Gitea host (config C36 / D1b): opt-in — NOT in `default`, so the standard build
+# is unchanged. A GitHub-shaped `/api/v1` with its own auth/merge/paging dialect.
+forge-gitea = []
 # The persisted forge-card registry (config C36 / D1): the `ForgeRegistry` store
 # over the shared `agent-config-store`.
 forge-store = ["dep:agent-config-store", "dep:agent-proto", "dep:prost"]

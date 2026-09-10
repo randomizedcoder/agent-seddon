@@ -180,6 +180,9 @@ pty = ["dep:agent-pty", "agent-tools/tool-pty"]
 forge = ["dep:agent-forge", "agent-tools/tool-forge", "forge-github", "forge-gitlab"]
 forge-github = ["agent-forge/forge-github"]
 forge-gitlab = ["agent-forge/forge-gitlab"]
+# Gitea host (config C36 / D1b): opt-in — NOT folded into `forge`, so the default
+# build stays github+gitlab. Enable it (plus `forge`) to build gitea cards/rows.
+forge-gitea = ["agent-forge/forge-gitea"]
 web-search = [
     "dep:agent-web-search",
     "agent-tools/tool-web-search",
