@@ -69,7 +69,9 @@ pub use config_schema::{build_schema, validate_config};
 #[cfg(feature = "config")]
 pub use config_store::FileConfigStore;
 #[cfg(feature = "fleet")]
-pub use registry::{build_session_forge, resolve_token_ref};
+pub use registry::{
+    build_session_forge, build_session_forge_from_card, resolve_session_forge, resolve_token_ref,
+};
 pub use registry::{register_builtins, Registry};
 pub use session_events::{SessionEvents, SessionEventsRegistry};
 

@@ -352,7 +352,15 @@ The two keystones (A, B) are **independent** and may land in either order or in 
     request-changes endpoints + a PR comment, like GitLab), deeply-nested `links.html.href` /
     `source.branch.name` / `content.raw`, upper-case state vocabulary, Bearer access token; default
     `https://api.bitbucket.org/2.0`, clone host mapped back to `bitbucket.org`.
-  Still open in D1b: **card-by-id** (fleet/loop rows selecting a persisted forge card by id).
+- **D1b card-by-id (built, completes D1b).** `FleetSession` gained an additive `forge_id` field (proto
+  field 14, no buf bump) — when set, the row's forge is built from the persisted `ForgeCard` of that id
+  (its `kind`/`base_url`/`token_ref`/`repo_encoding`), and the inline `backend`/`base_url`/`token_ref` are
+  ignored. Two sync helpers (`build_session_forge` inline, `build_session_forge_from_card` persisted) plus
+  the async `resolve_session_forge` dispatcher thread the `ForgeRegistry` into all three fleet build paths:
+  the reconcile `forge_check` (sync — resolved against a registry snapshot taken before reconcile), the
+  forge-poll ticker, and the per-row `FleetReviewCtxFactory` (which also uses the card's `kind` for the
+  clone URL + PR-ref). Fail-closed: a `forge_id` with no registry configured, or an id absent from the
+  registry, is an error (never a silent no-forge). **This completes D1b.**
 
 ### Phase D2 — C37 message-transport registry
 

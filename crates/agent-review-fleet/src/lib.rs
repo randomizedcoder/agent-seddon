@@ -170,6 +170,7 @@ pub(crate) mod testdata {
             enabled: true,
             created_at: 1,
             updated_at: 1,
+            forge_id: String::new(),
         }
     }
 }
@@ -232,6 +233,12 @@ mod tests {
         Op::Put(Box::new(r))
     }
 
+    fn put_with_forge_id(forge_id: String) -> Op {
+        let mut r = row("x");
+        r.forge_id = forge_id;
+        Op::Put(Box::new(r))
+    }
+
     // --- CRUD contract: one table over every op class, `desc` + `expect` per row ---
 
     #[rstest]
@@ -270,6 +277,8 @@ mod tests {
     #[case::boundary_id_at_max("id exactly at MAX_SEGMENT_LEN is accepted", put_with_id("a".repeat(MAX_SEGMENT_LEN)), Expect::Ok)]
     #[case::boundary_id_over_max("id one past MAX_SEGMENT_LEN is rejected", put_with_id("a".repeat(MAX_SEGMENT_LEN + 1)), Expect::Err)]
     #[case::adversarial_traversal_id("a traversal id is rejected", put_with_id("../escape".into()), Expect::Err)]
+    #[case::positive_forge_id_card_ref("a path-safe forge_id (card ref, config D1b) is accepted", put_with_forge_id("gh-cloud".into()), Expect::Ok)]
+    #[case::adversarial_traversal_forge_id("a traversal forge_id is rejected", put_with_forge_id("../../etc".into()), Expect::Err)]
     #[tokio::test]
     async fn crud_contract(#[case] desc: &str, #[case] op: Op, #[case] expect: Expect) {
         let store = MemoryFleet::new();

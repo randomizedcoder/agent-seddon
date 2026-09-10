@@ -2940,6 +2940,12 @@ pub struct FleetSession {
     pub created_at: i64,
     /// Unix seconds the row was last updated (`0` = unset; clamped non-negative).
     pub updated_at: i64,
+    /// Persisted forge-card id (config C36 / D1b). When non-empty, the row's forge is
+    /// built from the [`ForgeCard`] of this id in the `ForgeRegistry` — its
+    /// `kind`/`base_url`/`token_ref`/`repo_encoding` supersede the inline `backend`/
+    /// `base_url`/`token_ref` above. Empty ⇒ the inline fields are used (unchanged).
+    /// Path-safe (it is a registry key).
+    pub forge_id: String,
 }
 
 impl FleetSession {
@@ -2997,6 +3003,15 @@ impl FleetSession {
         // none, never a raw value, never echoed).
         ApiKeyRef::parse(&self.token_ref)
             .map_err(|e| Error::Fleet(format!("fleet session `{}`: {e}", self.id)))?;
+        // The forge-card reference (config C36 / D1b): a registry key when set, so it
+        // must be a path-safe segment (defense-in-depth — the registry validates too).
+        if !self.forge_id.is_empty() && !safe_segment(&self.forge_id) {
+            return err(format!(
+                "fleet session `{}`: forge_id {:?} is not a path-safe segment",
+                self.id,
+                truncate_for_log(&self.forge_id)
+            ));
+        }
         Ok(())
     }
 }

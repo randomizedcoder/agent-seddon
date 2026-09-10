@@ -954,11 +954,35 @@ pub async fn serve_fleet(agent: Arc<Agent>, listen: Endpoint) -> anyhow::Result<
     }
 
     // C5 fail-closed forge check: reconcile keeps a row disabled when its `token_ref`
-    // can't resolve or its backend forge can't be built.
-    let forge_check = |row: &agent_core::FleetSession| {
-        agent_runtime::build_session_forge(row)
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+    // can't resolve or its backend forge can't be built. A row that references a
+    // persisted forge card by id (config C36 / D1b) is checked against a SNAPSHOT of
+    // the registry taken here — the `forge_check` closure is sync and cannot await a
+    // per-row registry fetch. A `forge_id` absent from the snapshot fails closed.
+    let forge_cards: std::collections::HashMap<String, agent_core::ForgeCard> =
+        match agent.forge_registry() {
+            Some(reg) => reg
+                .list()
+                .await
+                .map(|cards| cards.into_iter().map(|c| (c.id.clone(), c)).collect())
+                .unwrap_or_default(),
+            None => std::collections::HashMap::new(),
+        };
+    let forge_check = move |row: &agent_core::FleetSession| {
+        if row.forge_id.is_empty() {
+            agent_runtime::build_session_forge(row)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        } else {
+            match forge_cards.get(&row.forge_id) {
+                Some(card) => agent_runtime::build_session_forge_from_card(row, card)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string()),
+                None => Err(format!(
+                    "forge_id `{}` not found in the forge registry",
+                    row.forge_id
+                )),
+            }
+        }
     };
     let report = agent_review_fleet::reconcile(
         roster.as_ref(),
@@ -1023,6 +1047,7 @@ pub async fn serve_fleet(agent: Arc<Agent>, listen: Endpoint) -> anyhow::Result<
             spawn_forge_poll(
                 roster.clone(),
                 queue.clone() as Arc<dyn agent_core::TriggerSink>,
+                agent.forge_registry(),
             )
             .await;
 
@@ -1102,6 +1127,7 @@ pub async fn serve_fleet(agent: Arc<Agent>, listen: Endpoint) -> anyhow::Result<
 async fn spawn_forge_poll(
     roster: Arc<dyn agent_core::FleetRegistry>,
     sink: Arc<dyn agent_core::TriggerSink>,
+    forge_registry: Option<Arc<dyn agent_core::ForgeRegistry>>,
 ) {
     use agent_core::Scheduler;
 
@@ -1109,7 +1135,12 @@ async fn spawn_forge_poll(
     match roster.list().await {
         Ok(rows) => {
             let mut n = 0usize;
-            for row in rows.iter().filter(|r| r.enabled && !r.backend.is_empty()) {
+            // A row has a forge either inline (`backend`) or by persisted card
+            // (`forge_id`, config C36 / D1b); poll whichever it uses.
+            for row in rows
+                .iter()
+                .filter(|r| r.enabled && (!r.backend.is_empty() || !r.forge_id.is_empty()))
+            {
                 let spec = format!("every {}s", row.poll_secs);
                 match scheduler.schedule(&spec, &row.id).await {
                     Ok(_) => n += 1,
@@ -1136,16 +1167,21 @@ async fn spawn_forge_poll(
             tick.tick().await;
             let roster = roster.clone();
             let sink = sink.clone();
+            let forge_registry = forge_registry.clone();
             scheduler
                 .tick_with(move |session_id| {
                     let roster = roster.clone();
                     let sink = sink.clone();
+                    let forge_registry = forge_registry.clone();
                     async move {
                         let row = roster
                             .get(&session_id)
                             .await
                             .map_err(|e| agent_core::Error::Scheduler(e.to_string()))?;
-                        match agent_runtime::build_session_forge(&row)
+                        // Inline (`backend`) or persisted-card (`forge_id`) forge —
+                        // `resolve_session_forge` dispatches (config C36 / D1b).
+                        match agent_runtime::resolve_session_forge(&row, forge_registry.as_ref())
+                            .await
                             .map_err(|e| agent_core::Error::Scheduler(e.to_string()))?
                         {
                             Some(forge) => {

@@ -1289,10 +1289,16 @@ pub fn resolve_token_ref(token_ref: &str) -> anyhow::Result<agent_core::Secret> 
     }
 }
 
-/// Build a **session-scoped** forge from a roster row (review-fleet C5). Resolves the
-/// row's `token_ref` (fail-closed — a bad `file:` ref is an `Err`, which keeps the
-/// session disabled in reconcile) and constructs the row's `backend` forge with its
-/// `base_url`. `""` backend ⇒ `Ok(None)` (a row with no forge — poll/post disabled).
+/// Build a **session-scoped** forge from a roster row's **inline** fields
+/// (review-fleet C5). Resolves the row's `token_ref` (fail-closed — a bad `file:` ref
+/// is an `Err`, which keeps the session disabled in reconcile) and constructs the row's
+/// `backend` forge with its `base_url`. `""` backend ⇒ `Ok(None)` (a row with no forge —
+/// poll/post disabled).
+///
+/// This is the path for a row that carries its forge **inline** (`forge_id` empty). A
+/// row that references a persisted [`agent_core::ForgeCard`] by id uses
+/// [`build_session_forge_from_card`] (the card is fetched from the `ForgeRegistry`
+/// first); [`resolve_session_forge`] dispatches between the two.
 ///
 /// The row's `repo` is a `safe_segment` (no `/`), so it encodes the forge-native path:
 /// GitHub `owner__name` (first `__` splits owner/name), GitLab the project path with
@@ -1342,6 +1348,83 @@ pub fn build_session_forge(
             row.backend
         )
     }
+}
+
+/// Build a **session-scoped** forge from a roster row that references a **persisted**
+/// [`agent_core::ForgeCard`] by id (config C36 / D1b). The card supplies the
+/// `kind`/`base_url`/`repo_encoding` and the `token_ref` (resolved here, fail-closed);
+/// the row supplies only the `repo` slug. A disabled card ⇒ `Ok(None)` (the row has no
+/// live forge — poll/post disabled), mirroring an empty inline `backend`.
+///
+/// The caller fetches the card from the `ForgeRegistry` (an async read) and passes it
+/// in, so this stays sync — usable from the sync reconcile `forge_check` closure as
+/// well as the async paths (via [`resolve_session_forge`]).
+#[cfg(feature = "fleet")]
+pub fn build_session_forge_from_card(
+    row: &agent_core::FleetSession,
+    card: &agent_core::ForgeCard,
+) -> anyhow::Result<Option<Arc<dyn agent_core::Forge>>> {
+    // A disabled card means the row is configured but its forge is turned off.
+    if !card.enabled {
+        return Ok(None);
+    }
+    #[cfg(feature = "forge")]
+    {
+        use anyhow::Context;
+        // The credential comes from the CARD's own ref (not the row's inline
+        // token_ref); resolve first so an unresolvable credential fails the whole
+        // build (fail closed).
+        let token = resolve_token_ref(&card.token_ref)?;
+        let forge =
+            agent_forge::build_forge_from_card(card, &row.repo, token).with_context(|| {
+                format!(
+                    "fleet row `{}`: building forge from card `{}`",
+                    row.id, card.id
+                )
+            })?;
+        Ok(Some(forge))
+    }
+    #[cfg(not(feature = "forge"))]
+    {
+        anyhow::bail!(
+            "fleet row `{}`: forge card `{}` (kind `{}`) needs the `forge` feature",
+            row.id,
+            card.id,
+            card.kind
+        )
+    }
+}
+
+/// Resolve a roster row's forge, dispatching on whether it references a persisted card.
+///
+/// - `forge_id` empty ⇒ the **inline** path ([`build_session_forge`]).
+/// - `forge_id` set ⇒ fetch that [`agent_core::ForgeCard`] from `registry` (an async
+///   read) and build from it ([`build_session_forge_from_card`]). A set `forge_id` with
+///   **no** registry configured, or an id absent from the registry, is a fail-closed
+///   `Err` (never a silent no-forge).
+#[cfg(feature = "fleet")]
+pub async fn resolve_session_forge(
+    row: &agent_core::FleetSession,
+    registry: Option<&Arc<dyn agent_core::ForgeRegistry>>,
+) -> anyhow::Result<Option<Arc<dyn agent_core::Forge>>> {
+    use anyhow::Context;
+    if row.forge_id.is_empty() {
+        return build_session_forge(row);
+    }
+    let reg = registry.ok_or_else(|| {
+        anyhow::anyhow!(
+            "fleet row `{}` references forge_id `{}` but no forge registry is configured",
+            row.id,
+            row.forge_id
+        )
+    })?;
+    let card = reg.get(&row.forge_id).await.with_context(|| {
+        format!(
+            "fleet row `{}`: resolving forge card `{}`",
+            row.id, row.forge_id
+        )
+    })?;
+    build_session_forge_from_card(row, &card)
 }
 
 #[cfg(test)]
@@ -1574,6 +1657,130 @@ mod tests {
                 f.is_err(),
                 "unresolvable credential fails the build (fail closed)"
             );
+        }
+
+        // --- card-by-id (config C36 / D1b) ---------------------------------
+        #[cfg(feature = "forge")]
+        mod card_by_id {
+            use super::super::super::{build_session_forge_from_card, resolve_session_forge};
+            use agent_core::{ForgeCard, ForgeRegistry, RepoEncoding};
+            use std::collections::HashMap;
+            use std::sync::Arc;
+
+            fn gh_card(id: &str) -> ForgeCard {
+                ForgeCard {
+                    id: id.into(),
+                    kind: "github".into(),
+                    enabled: true,
+                    base_url: String::new(),
+                    token_ref: String::new(),
+                    repo_encoding: RepoEncoding::OwnerName,
+                    timeout_secs: 30,
+                    max_retries: 3,
+                }
+            }
+
+            fn forge_id_row(forge_id: &str, repo: &str) -> agent_core::FleetSession {
+                agent_core::FleetSession {
+                    id: "web".into(),
+                    user: "acme".into(),
+                    repo: repo.into(),
+                    // Inline backend deliberately EMPTY — a card-by-id row carries no
+                    // inline forge, so this proves the card supplies the kind.
+                    forge_id: forge_id.into(),
+                    enabled: true,
+                    ..Default::default()
+                }
+            }
+
+            // A minimal in-memory registry double.
+            struct FakeForgeReg(HashMap<String, ForgeCard>);
+            #[async_trait::async_trait]
+            impl ForgeRegistry for FakeForgeReg {
+                async fn list(&self) -> agent_core::Result<Vec<ForgeCard>> {
+                    Ok(self.0.values().cloned().collect())
+                }
+                async fn get(&self, id: &str) -> agent_core::Result<ForgeCard> {
+                    self.0
+                        .get(id)
+                        .cloned()
+                        .ok_or_else(|| agent_core::Error::Config(format!("not found: {id}")))
+                }
+                async fn put(&self, c: ForgeCard) -> agent_core::Result<ForgeCard> {
+                    Ok(c)
+                }
+                async fn delete(&self, _id: &str) -> agent_core::Result<bool> {
+                    Ok(false)
+                }
+            }
+
+            fn reg_with(cards: &[ForgeCard]) -> Arc<dyn ForgeRegistry> {
+                Arc::new(FakeForgeReg(
+                    cards.iter().map(|c| (c.id.clone(), c.clone())).collect(),
+                ))
+            }
+
+            // desc (positive): a persisted card + the row's repo slug builds a forge.
+            #[cfg(feature = "forge-github")]
+            #[test]
+            fn positive_build_from_card() {
+                let f =
+                    build_session_forge_from_card(&forge_id_row("gh", "acme__web"), &gh_card("gh"))
+                        .expect("build from card");
+                assert!(f.is_some(), "an enabled card builds a forge");
+                assert_eq!(f.unwrap().name(), "github");
+            }
+
+            // desc (boundary): a disabled card is a stored-but-off forge ⇒ Ok(None).
+            #[test]
+            fn boundary_disabled_card_is_none() {
+                let mut card = gh_card("gh");
+                card.enabled = false;
+                let f = build_session_forge_from_card(&forge_id_row("gh", "acme__web"), &card)
+                    .expect("disabled card is not an error");
+                assert!(f.is_none(), "a disabled card yields no live forge");
+            }
+
+            // desc (positive): forge_id empty ⇒ the inline path, no registry needed.
+            #[cfg(feature = "forge-github")]
+            #[tokio::test]
+            async fn positive_resolve_inline_when_no_forge_id() {
+                let mut row = forge_id_row("", "acme__web");
+                row.backend = "github".into();
+                let f = resolve_session_forge(&row, None)
+                    .await
+                    .expect("inline resolve");
+                assert!(f.is_some(), "inline github row resolves without a registry");
+            }
+
+            // desc (positive): forge_id set + the card present ⇒ built from the card.
+            #[cfg(feature = "forge-github")]
+            #[tokio::test]
+            async fn positive_resolve_from_registry() {
+                let reg = reg_with(&[gh_card("gh")]);
+                let f = resolve_session_forge(&forge_id_row("gh", "acme__web"), Some(&reg))
+                    .await
+                    .expect("resolve from registry");
+                assert_eq!(f.expect("some").name(), "github");
+            }
+
+            // adversarial: a forge_id with NO registry configured fails closed.
+            #[tokio::test]
+            async fn adversarial_forge_id_without_registry_errs() {
+                let r = resolve_session_forge(&forge_id_row("gh", "acme__web"), None).await;
+                assert!(
+                    r.is_err(),
+                    "a card reference needs a registry (fail closed)"
+                );
+            }
+
+            // adversarial: a forge_id absent from the registry fails closed.
+            #[tokio::test]
+            async fn adversarial_forge_id_missing_card_errs() {
+                let reg = reg_with(&[]);
+                let r = resolve_session_forge(&forge_id_row("gh", "acme__web"), Some(&reg)).await;
+                assert!(r.is_err(), "an unknown card id fails closed");
+            }
         }
     }
 }

@@ -8,14 +8,15 @@ future cards — without editing a hardcoded allow-list in core.
 > `repo_encoding` are card-declared and resolved by `agent_forge::build_forge_from_card`, through which
 > **both** forge build paths now route. Shipped: `agent_core::{ForgeCard, RepoEncoding, ForgeRegistry}`,
 > `agent-forge` `kind.rs` + `StoreForges`, and the `ForgeRegistryService` seam (`--serve-forge-registry`,
-> port 50088), RBAC-gated on `(write|delete, forge_registry)`. **D1b (in progress):** two host impls have
-> landed behind opt-in features — **gitea** (`agent-forge/src/gitea.rs`, `forge-gitea`, a GitHub-shaped
-> `/api/v1`) and **bitbucket** (`agent-forge/src/bitbucket.rs`, `forge-bitbucket`, the *divergent* Cloud
-> API: body-envelope paging, no review object, deeply-nested fields, upper-case state) — each registered in
-> `kind.rs` (`OwnerName` encoding) with clone-URL + PR-ref arms in the fleet path, exercising the recipe
-> below end to end. Still open in D1b: fleet rows selecting a persisted card **by id** (each build path
-> currently synthesizes a card from the existing row/config fields). See
-> [`09-increments.md`](09-increments.md) §D1.
+> port 50088), RBAC-gated on `(write|delete, forge_registry)`. **D1b (complete):** two host impls landed
+> behind opt-in features — **gitea** (`agent-forge/src/gitea.rs`, `forge-gitea`, a GitHub-shaped `/api/v1`)
+> and **bitbucket** (`agent-forge/src/bitbucket.rs`, `forge-bitbucket`, the *divergent* Cloud API:
+> body-envelope paging, no review object, deeply-nested fields, upper-case state) — each registered in
+> `kind.rs` (`OwnerName` encoding) with clone-URL + PR-ref arms in the fleet path. **Card-by-id** also
+> landed: a `FleetSession` may set `forge_id` (additive proto field) to reference a persisted card instead
+> of carrying `backend`/`base_url`/`token_ref` inline; the `ForgeRegistry` is threaded into all three fleet
+> build paths (reconcile check, poll ticker, per-row review factory), fail-closed on a missing registry or
+> unknown id. See [`09-increments.md`](09-increments.md) §D1.
 
 ## Where we are today
 

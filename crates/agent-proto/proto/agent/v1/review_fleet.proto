@@ -42,6 +42,11 @@ message FleetSession {
   // Unix-seconds metadata (clamped non-negative on ingest).
   int64 created_at = 12;
   int64 updated_at = 13;
+  // Persisted forge card id (config C36 / D1b). When set, the row's forge is built
+  // from the `ForgeCard` of this id in the `ForgeRegistry` (its kind/base_url/
+  // token_ref/repo_encoding), and the inline `backend`/`base_url`/`token_ref` above
+  // are ignored. Empty ⇒ the inline fields are used (unchanged behavior). Path-safe.
+  string forge_id = 14;
 }
 
 message FleetListRequest {}
