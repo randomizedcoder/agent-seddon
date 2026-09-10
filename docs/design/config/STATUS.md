@@ -40,10 +40,10 @@ gate over the file/memory tier). The portal admin surface (tenants/roles/forges/
 noted future. **With E1, the config-architecture build is complete** — only the explicitly-deferred tails
 remain, and D1b is being picked up incrementally. Two host impls have landed behind opt-in features,
 proving the C36 "add a host = a new impl + a factory line" recipe (`04-forge-registry.md`): **gitea**
-([#309](https://github.com/randomizedcoder/agent-seddon/pull/309)) and **bitbucket** (this PR — the
-divergent Cloud API: body-envelope paging, no review object, nested fields, upper-case state). Still open
-in D1b: **card-by-id** (fleet/loop rows selecting a persisted forge card by id), then D2b (transport lift +
-matrix/teams + C18 live announce).
+([#309](https://github.com/randomizedcoder/agent-seddon/pull/309)) and **bitbucket**
+([#310](https://github.com/randomizedcoder/agent-seddon/pull/310) — the divergent Cloud API: body-envelope
+paging, no review object, nested fields, upper-case state). Still open in D1b: **card-by-id** (fleet/loop
+rows selecting a persisted forge card by id), then D2b (transport lift + matrix/teams + C18 live announce).
 
 ## Components
 
