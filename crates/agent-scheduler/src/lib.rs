@@ -16,6 +16,10 @@
 //! internally can only be tested by sleeping, which is slow and flaky.
 
 pub mod schedule;
+#[cfg(feature = "scheduler-store")]
+pub mod store;
+#[cfg(feature = "scheduler-store")]
+pub use store::StoreScheduler;
 
 use agent_core::{Error, Job, JobId, Result, Run, RunOutcome, Scheduler};
 use async_trait::async_trait;
@@ -30,11 +34,21 @@ pub use schedule::{next_fire, parse};
 pub type RunObserver = Arc<dyn Fn(&Run) + Send + Sync>;
 
 /// How long a claim stays valid before a crashed run's claim is reclaimable.
-const DEFAULT_CLAIM_TTL_MS: u64 = 15 * 60 * 1_000;
+pub(crate) const DEFAULT_CLAIM_TTL_MS: u64 = 15 * 60 * 1_000;
 /// Cap on retained history per job — an unbounded ledger is a slow leak.
-const MAX_HISTORY: usize = 100;
+pub(crate) const MAX_HISTORY: usize = 100;
 /// Cap on a stored detail string.
-const MAX_DETAIL_CHARS: usize = 2_000;
+pub(crate) const MAX_DETAIL_CHARS: usize = 2_000;
+
+/// Is a claim still live? A claim in the FUTURE is treated as stale: clock skew
+/// (or a restored backup) must not make a job permanently un-runnable. Shared by
+/// the in-memory and durable schedulers so the overlap guard is one definition.
+pub(crate) fn claim_is_live(claimed_at_ms: u64, now: u64, claim_ttl_ms: u64) -> bool {
+    if claimed_at_ms > now {
+        return false;
+    }
+    now.saturating_sub(claimed_at_ms) < claim_ttl_ms
+}
 
 struct JobState {
     job: Job,
@@ -53,7 +67,7 @@ pub struct LocalScheduler {
     max_jobs: usize,
 }
 
-fn wall_clock_ms() -> u64 {
+pub(crate) fn wall_clock_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -100,14 +114,10 @@ impl LocalScheduler {
         (self.now_ms)()
     }
 
-    /// Is this claim still live? A claim in the FUTURE is treated as stale:
-    /// clock skew (or a restored backup) must not make a job permanently
-    /// un-runnable.
+    /// Is this claim still live? Delegates to the shared [`claim_is_live`] so the
+    /// in-memory and durable tiers share one overlap-guard definition.
     fn claim_is_live(&self, claimed_at_ms: u64, now: u64) -> bool {
-        if claimed_at_ms > now {
-            return false;
-        }
-        now.saturating_sub(claimed_at_ms) < self.claim_ttl_ms
+        claim_is_live(claimed_at_ms, now, self.claim_ttl_ms)
     }
 
     /// Jobs whose next fire has arrived, claimed for execution.
@@ -218,7 +228,7 @@ impl LocalScheduler {
     }
 }
 
-fn push_history(history: &mut Vec<Run>, r: Run) {
+pub(crate) fn push_history(history: &mut Vec<Run>, r: Run) {
     history.push(r);
     if history.len() > MAX_HISTORY {
         let excess = history.len() - MAX_HISTORY;

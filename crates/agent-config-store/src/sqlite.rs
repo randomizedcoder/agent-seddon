@@ -121,6 +121,22 @@ impl Backend for SqliteBackend {
         Ok(n.max(0) as usize)
     }
 
+    async fn tenants(&self, collection: &str) -> Result<Vec<String>> {
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT tenant FROM cards WHERE collection = ?1 ORDER BY tenant")
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map(params![collection], |row| row.get::<_, String>(0))
+            .map_err(sql_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sql_err)?;
+        Ok(rows)
+    }
+
     async fn apply(&self, writes: &[Write]) -> Result<()> {
         let mut guard = self
             .conn

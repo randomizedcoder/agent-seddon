@@ -8,10 +8,20 @@ license.workspace = true
 [features]
 default = ["scheduler-local"]
 scheduler-local = []
+# Durable, tenant-keyed scheduler over the shared `agent-config-store` (config
+# design C41 / C2c). Off by default: the in-memory `LocalScheduler` is Tier-0.
+scheduler-store = ["dep:agent-config-store", "dep:serde", "dep:serde_json", "dep:uuid"]
+# The postgres tier of the durable scheduler (needs a live server; exercised via
+# `nix run .#integration`, never inside `nix flake check`).
+scheduler-store-postgres = ["scheduler-store", "agent-config-store/config-store-postgres"]
 
 [dependencies]
 agent-core.workspace = true
 async-trait.workspace = true
+agent-config-store = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio.workspace = true

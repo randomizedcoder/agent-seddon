@@ -127,6 +127,17 @@ impl Backend for PgBackend {
         Ok(n.max(0) as usize)
     }
 
+    async fn tenants(&self, collection: &str) -> Result<Vec<String>> {
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT tenant FROM cards WHERE collection = $1 ORDER BY tenant",
+        )
+        .bind(collection)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(pg_err)?;
+        Ok(rows)
+    }
+
     async fn apply(&self, writes: &[Write]) -> Result<()> {
         let mut tx = self.pool.begin().await.map_err(pg_err)?;
 

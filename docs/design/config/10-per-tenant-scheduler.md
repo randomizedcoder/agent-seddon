@@ -1,6 +1,18 @@
 # 10 — Per-tenant scheduling (design of record)
 
-**Status: ⬜ designed, not built.** This is the design of record for making the
+**Status: 🟡 foundation built (C2c-1), driver designed (C2c-2).** The durable,
+tenant-keyed backend of §D1 below — `StoreScheduler` (`agent-scheduler`, feature
+`scheduler-store`) plus the `Backend::tenants` discovery primitive
+(`agent-config-store`) — is **built and gated** (`nix/checks/scheduler-store.nix`),
+as library + tests only: it is deliberately **not yet selectable in config**, so a
+non-`local` tenant's jobs cannot be accepted-then-never-fired. The tenant-fanning
+driver (§D2), the `[scheduler] store` config arm, and the per-tenant served seam
+(§D3) are the remaining **C2c-2** increment. One implementation choice differs from
+the sketch below, noted inline: claims ride on the store's atomic batch (not a
+compare-and-set), so they give single-driver overlap-prevention + crash recovery,
+not cross-driver mutual exclusion — see §D1.
+
+This is the design of record for making the
 `Scheduler` seam multi-tenant. It was split out of the per-tenant plane increment
 **C2b**, which shipped per-tenant routing for the *file-backed cognition graph* but
 **deliberately left the scheduler alone**, because — unlike every other seam the
@@ -56,10 +68,17 @@ onto), keyed `(collection = "scheduler", tenant, job_id)`, mirroring `StoreRegis
   bounded tail; full history to a sibling collection).
 - `with_tenant(backend, tenant)` and `new(backend)` constructors, exactly like the
   other store seams, so `PerTenant` can wrap the **registry** half for free.
-- Claims are a compare-and-set on `next_fire_ms`/`claim` inside one store
-  transaction (`agent-config-store` already exposes atomic multi-card txns, config
-  decision #5) — this is what lets more than one driver run without double-firing,
-  and replaces `LocalScheduler`'s in-memory `claim_ttl_ms` bookkeeping.
+- Claims ride on the store's atomic **batch** (`agent-config-store` exposes
+  all-or-nothing multi-card txns, config decision #5), replacing `LocalScheduler`'s
+  in-memory `claim_ttl_ms` bookkeeping with a persisted `claimed_at_ms` on the job
+  card. **As built (C2c-1), this is not a compare-and-set:** `Backend::apply` is an
+  atomic batch, not a conditional write, so a claim gives single-driver
+  overlap-prevention and crash recovery (the TTL reclaims a dead run's claim) —
+  exactly `LocalScheduler`'s guarantee — but **not** cross-driver mutual exclusion:
+  two drivers ticking one backend in the same instant could both claim a job. True
+  multi-driver exclusion needs a CAS primitive the `Backend` does not expose
+  (a conditional `apply`, or a `compare_and_put`); adding it is a bounded
+  follow-up, called out here rather than implied by "transaction".
 
 `LocalScheduler` stays as the default single-tenant, in-memory tier (Tier-0
 unchanged); `StoreScheduler` is opt-in behind a `[scheduler] store = "postgres"`

@@ -563,11 +563,15 @@ dependencies = [
 name = "agent-scheduler"
 version = "0.1.0"
 dependencies = [
+ "agent-config-store",
  "agent-core",
  "async-trait",
  "iai-callgrind",
  "rstest",
+ "serde",
+ "serde_json",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

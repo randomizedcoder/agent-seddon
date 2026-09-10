@@ -111,6 +111,15 @@ pub trait Backend: Send + Sync {
     async fn list(&self, collection: &str, tenant: &str) -> Result<Vec<Vec<u8>>>;
     /// Number of cards in `(collection, tenant)`.
     async fn count(&self, collection: &str, tenant: &str) -> Result<usize>;
+    /// The distinct tenants that own at least one card in `collection`, sorted.
+    ///
+    /// The per-tenant plane's **driver-side** discovery primitive. A
+    /// request-driven seam is built per verified tenant and never needs this,
+    /// but a *driver* with no ambient identity — the multi-tenant scheduler
+    /// (config C2c) is the first — must enumerate which tenants have work.
+    /// Derived from the cards, not the `tenants` rows, so an ensured-but-empty
+    /// tenant does not appear (a tenant with no jobs has nothing to tick).
+    async fn tenants(&self, collection: &str) -> Result<Vec<String>>;
     /// Apply a batch atomically (all-or-nothing). Rejects any hostile segment
     /// and any `Put` to a tenant that neither exists nor is ensured in-batch.
     async fn apply(&self, writes: &[Write]) -> Result<()>;
@@ -417,6 +426,21 @@ impl Backend for MemoryBackend {
             .keys()
             .filter(|(c, t, _)| c == collection && t == tenant)
             .count())
+    }
+
+    async fn tenants(&self, collection: &str) -> Result<Vec<String>> {
+        let m = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // A `BTreeSet` gives distinct + sorted in one pass.
+        let set: std::collections::BTreeSet<&String> = m
+            .cards
+            .keys()
+            .filter(|(c, _, _)| c == collection)
+            .map(|(_, t, _)| t)
+            .collect();
+        Ok(set.into_iter().cloned().collect())
     }
 
     async fn apply(&self, writes: &[Write]) -> Result<()> {
