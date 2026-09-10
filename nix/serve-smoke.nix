@@ -118,6 +118,13 @@ pkgs.writeShellApplication {
     store = "file"
     file  = "$work/.agent/forges.json"
 
+    # A file-backed transport-card store, so --serve-all advertises the
+    # TransportRegistry control plane (config C37 / D2) and the Put→Get roundtrip
+    # below can exercise it over the wire.
+    [transport_registry]
+    store = "file"
+    file  = "$work/.agent/transports.json"
+
     # A file-backed durable scheduler (config C2c), so --serve-all advertises the
     # Scheduler control plane over the persistent `StoreScheduler` and the
     # Schedule→List roundtrip below can exercise it over the wire. `enabled` wires the
@@ -246,6 +253,28 @@ pkgs.writeShellApplication {
           agent.v1.ForgeRegistryService.Get 2>"$work/forge_get.$transport.err" || true)"
         if ! echo "$forge_got" | grep -q 'smoke_gh'; then
           echo "CONTRACT[$transport]: ForgeRegistryService/Get did not return the persisted card" >&2
+          [ "$rc" -lt 2 ] && rc=2
+        fi
+      fi
+
+      # ---- Transport registry control plane: Put→Get roundtrip (config C37 / D2) ---
+      # Put a slack transport card (kind/endpoint/token refs/channel bindings), then
+      # read it back via Get. Proves the TransportRegistryService seam is truly on the
+      # wire and the card round-trips through the shared store. The `*_token_ref`s are
+      # references (env:), never raw tokens; the channel `purpose` is a validated
+      # string (trigger|progress).
+      local transport_json='{"id":"smoke_slk","kind":"slack","enabled":true,"app_token_ref":"env:SLACK_APP","bot_token_ref":"env:SLACK_BOT","channels":[{"channel":"C_TRIGGER","purpose":"trigger"}]}'
+      if ! grpcurl -d "$transport_json" "''${dial[@]}" \
+          agent.v1.TransportRegistryService.Put >/dev/null 2>"$work/transport_put.$transport.err"; then
+        echo "CONTRACT[$transport]: TransportRegistryService/Put round-trip failed" >&2
+        cat "$work/transport_put.$transport.err" >&2
+        [ "$rc" -lt 2 ] && rc=2
+      else
+        local transport_got
+        transport_got="$(grpcurl -d '{"id":"smoke_slk"}' "''${dial[@]}" \
+          agent.v1.TransportRegistryService.Get 2>"$work/transport_get.$transport.err" || true)"
+        if ! echo "$transport_got" | grep -q 'smoke_slk'; then
+          echo "CONTRACT[$transport]: TransportRegistryService/Get did not return the persisted card" >&2
           [ "$rc" -lt 2 ] && rc=2
         fi
       fi

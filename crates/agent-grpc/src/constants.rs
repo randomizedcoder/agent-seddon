@@ -205,6 +205,11 @@ pub const FORGE_REGISTRY: SeamEndpoint = SeamEndpoint {
     uds_path: "/tmp/agent-seddon/forge_registry.sock",
     metrics_port: 9638,
 };
+pub const TRANSPORT_REGISTRY: SeamEndpoint = SeamEndpoint {
+    tcp_port: 50089,
+    uds_path: "/tmp/agent-seddon/transport_registry.sock",
+    metrics_port: 9639,
+};
 
 /// The opt-in `agent --serve-sessions` gateway (not a seam — it hosts the
 /// session registry + a driving `AgentSessionService`).

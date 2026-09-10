@@ -1322,6 +1322,14 @@ pub async fn build_agent_with(
         Some(r) => agent.with_forge_registry(r),
         None => agent,
     };
+    // The transport-card store (config C37 / D2), held for
+    // `--serve-transport-registry`. Not consumed by the loop; hosted for runtime CRUD
+    // over the messaging cards.
+    #[cfg(feature = "transport-registry-store")]
+    let agent = match resolve_transport_registry(&cfg)? {
+        Some(r) => agent.with_transport_registry(r),
+        None => agent,
+    };
     // The fleet's persisted review-history reader (review-fleet C16), over the same
     // ClickHouse the telemetry writer feeds (C14/C15 tables). Only wired when telemetry is
     // enabled — with no store there's nothing to read back, and the FSM reviews without
@@ -3080,6 +3088,36 @@ pub(crate) fn resolve_forge_registry(
         ),
         other => anyhow::bail!("unknown [forge_registry] store `{other}`"),
     };
+    Ok(store)
+}
+
+/// Resolve the `[transport_registry] store` (config C37 / D2): a `StoreTransports`
+/// over the selected backend, held for `--serve-transport-registry`. `""` ⇒ no store
+/// (the fleet's Slack watch still builds from its inline config, unchanged).
+#[cfg(feature = "transport-registry-store")]
+pub(crate) fn resolve_transport_registry(
+    cfg: &Config,
+) -> anyhow::Result<Option<Arc<dyn agent_core::TransportRegistry>>> {
+    let store: Option<Arc<dyn agent_core::TransportRegistry>> =
+        match cfg.transport_registry.store.as_str() {
+            "" => None,
+            "file" => {
+                let backend = Arc::new(agent_config_store::FileBackend::new(expand_tilde(
+                    &cfg.transport_registry.file,
+                )));
+                Some(Arc::new(agent_slack::StoreTransports::new(backend)))
+            }
+            #[cfg(feature = "transport-registry-postgres")]
+            "postgres" => {
+                let backend = crate::store_backend::pg_backend(&cfg.config_store)?;
+                Some(Arc::new(agent_slack::StoreTransports::new(backend)))
+            }
+            #[cfg(not(feature = "transport-registry-postgres"))]
+            "postgres" => anyhow::bail!(
+                "[transport_registry] store = \"postgres\" requires building with the `transport-registry-postgres` feature"
+            ),
+            other => anyhow::bail!("unknown [transport_registry] store `{other}`"),
+        };
     Ok(store)
 }
 

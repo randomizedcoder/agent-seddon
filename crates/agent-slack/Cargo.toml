@@ -5,6 +5,17 @@ publish.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# The persisted transport-card registry (config C37 / D2): the `TransportRegistry`
+# store over the shared `agent-config-store`.
+transport-store = ["dep:agent-config-store", "dep:agent-proto", "dep:prost"]
+# The postgres tier for the transport store (opt-in; exercised by `nix run .#integration`).
+transport-store-postgres = [
+  "transport-store",
+  "agent-config-store/config-store-postgres",
+]
+
 [dependencies]
 # FleetTrigger + TriggerSink (the orchestrator's intake) that the watch emits onto.
 agent-core.workspace = true
@@ -31,6 +42,10 @@ futures-util.workspace = true
 tokio = { workspace = true }
 # Reconnect/backoff — one retry library, never hand-rolled.
 agent-retry.workspace = true
+# The persisted transport-card registry (config C37 / D2), behind `transport-store`.
+agent-config-store = { workspace = true, optional = true }
+agent-proto = { workspace = true, optional = true }
+prost = { workspace = true, optional = true }
 
 [dev-dependencies]
 rstest.workspace = true

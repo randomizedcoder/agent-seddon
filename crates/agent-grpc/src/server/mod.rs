@@ -70,6 +70,7 @@ mod session;
 mod session_registry;
 mod tokenizer;
 mod tools;
+mod transport_registry;
 mod web;
 
 pub use admission::*;
@@ -107,6 +108,7 @@ pub use session::*;
 pub use session_registry::*;
 pub use tokenizer::*;
 pub use tools::*;
+pub use transport_registry::*;
 pub use web::*;
 
 /// Build a per-call span parented on the caller's extracted trace context, and

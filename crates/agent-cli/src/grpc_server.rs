@@ -60,6 +60,7 @@ pub enum Seam {
     Fleet,
     Role,
     ForgeRegistry,
+    TransportRegistry,
     Config,
     SessionStream,
 }
@@ -101,6 +102,7 @@ const ALL_SEAMS: &[Seam] = &[
     Seam::Fleet,
     Seam::Role,
     Seam::ForgeRegistry,
+    Seam::TransportRegistry,
     Seam::Config,
     Seam::SessionStream,
 ];
@@ -366,6 +368,13 @@ const SEAMS: &[SeamInfo] = &[
         endpoint: constants::FORGE_REGISTRY,
     },
     SeamInfo {
+        seam: Seam::TransportRegistry,
+        flag: "--serve-transport-registry",
+        name: "transport-registry",
+        service: "agent.v1.TransportRegistryService",
+        endpoint: constants::TRANSPORT_REGISTRY,
+    },
+    SeamInfo {
         seam: Seam::Config,
         flag: "--serve-config",
         name: "config",
@@ -457,6 +466,7 @@ impl Seam {
             Seam::Fleet => &cfg.grpc.fleet.listen,
             Seam::Role => &cfg.grpc.role.listen,
             Seam::ForgeRegistry => &cfg.grpc.forge_registry.listen,
+            Seam::TransportRegistry => &cfg.grpc.transport_registry.listen,
             Seam::Config => &cfg.grpc.config.listen,
             Seam::SessionStream => &cfg.grpc.session_stream.listen,
         }
@@ -721,6 +731,13 @@ fn add_seam_service(
         Seam::ForgeRegistry => match agent.forge_registry() {
             Some(r) => (
                 router.add_service(srv::ForgeRegistrySvc::new(r).into_server()),
+                true,
+            ),
+            None => (router, false),
+        },
+        Seam::TransportRegistry => match agent.transport_registry() {
+            Some(r) => (
+                router.add_service(srv::TransportRegistrySvc::new(r).into_server()),
                 true,
             ),
             None => (router, false),

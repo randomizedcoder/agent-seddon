@@ -170,6 +170,10 @@ pub struct Agent {
     /// the git-host cards the fleet + in-loop review paths build their forge clients
     /// from. Not consumed by the loop; hosted over gRPC for runtime CRUD.
     forge_registry: Option<Arc<dyn agent_core::ForgeRegistry>>,
+    /// The transport-card store, held for `--serve-transport-registry` (config C37 /
+    /// D2): the messaging cards the fleet's trigger watch + progress feed build their
+    /// clients from. Not consumed by the loop; hosted over gRPC for runtime CRUD.
+    transport_registry: Option<Arc<dyn agent_core::TransportRegistry>>,
     /// The fleet's persisted review-history reader (review-fleet C16), held for
     /// `--serve-fleet`: the ClickHouse-backed [`agent_core::FleetHistory`] the orchestrator
     /// consults for precise head-oid dedup + cross-round carry-forward. `None` ⇒ telemetry
@@ -576,6 +580,7 @@ impl Agent {
             fleet_registry: None,
             role_registry: None,
             forge_registry: None,
+            transport_registry: None,
             fleet_history: None,
             system_fragments: agent_context::system_fragments::SystemFragments::defaults(),
             metrics_proxy: None,
@@ -933,6 +938,15 @@ impl Agent {
         self
     }
 
+    /// Attach the transport-card store (config C37 / D2), so it can be hosted over
+    /// gRPC (`--serve-transport-registry`). Not consumed by the loop; the fleet's
+    /// trigger watch + progress feed build messaging clients through the kind builder,
+    /// seeded by these cards.
+    pub fn with_transport_registry(mut self, r: Arc<dyn agent_core::TransportRegistry>) -> Self {
+        self.transport_registry = Some(r);
+        self
+    }
+
     /// Attach the fleet's persisted review-history reader (review-fleet C16), consulted by
     /// the fleet orchestrator for head-oid dedup + cross-round carry-forward.
     pub fn with_fleet_history(mut self, h: Arc<dyn agent_core::FleetHistory>) -> Self {
@@ -1226,6 +1240,12 @@ impl Agent {
     /// (`--serve-forge-registry`).
     pub fn forge_registry(&self) -> Option<Arc<dyn agent_core::ForgeRegistry>> {
         self.forge_registry.clone()
+    }
+
+    /// The transport-card store, if `[transport_registry] store` is configured
+    /// (`--serve-transport-registry`).
+    pub fn transport_registry(&self) -> Option<Arc<dyn agent_core::TransportRegistry>> {
+        self.transport_registry.clone()
     }
 
     /// Fleet capacity caps (`[review_fleet] max_total`, `max_per_user`) for
