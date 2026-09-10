@@ -132,6 +132,17 @@ impl Backend for FileBackend {
             .count())
     }
 
+    async fn tenants(&self, collection: &str) -> Result<Vec<String>> {
+        let set: std::collections::BTreeSet<String> = self
+            .load()?
+            .cards
+            .into_iter()
+            .filter(|r| r.collection == collection)
+            .map(|r| r.tenant)
+            .collect();
+        Ok(set.into_iter().collect())
+    }
+
     async fn apply(&self, writes: &[Write]) -> Result<()> {
         let _guard = self
             .write

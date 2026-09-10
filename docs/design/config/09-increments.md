@@ -267,6 +267,21 @@ The two keystones (A, B) are **independent** and may land in either order or in 
   `LocalScheduler`), so a thin registry wrap would accept per-tenant jobs the single driver never fires.
   It became its own design of record, [`10-per-tenant-scheduler.md`](10-per-tenant-scheduler.md) (durable
   tenant-keyed backend + tenant-fanning driver), tracked as **C2c** and built later.
+- **C2c-1 (built).** The durable **foundation** for the per-tenant scheduler, from
+  [`10-per-tenant-scheduler.md`](10-per-tenant-scheduler.md) §D1. Two pieces: (a) `Backend::tenants(collection)`
+  on `agent-config-store` — the distinct tenants owning a card in a collection, sorted (derived from the
+  cards, not the tenant rows, so an empty tenant does not appear); the **driver-side discovery primitive**
+  a request-driven seam never needs but a driver with no ambient identity must have, implemented across all
+  four backends (Memory/File/SQLite/Postgres) and exercised in the config-store matrix. (b) `StoreScheduler`
+  (`agent-scheduler`, feature `scheduler-store`) — the durable twin of `LocalScheduler`: one job card per
+  `(collection="scheduler", tenant, job_id)`, serde-JSON blob (no new proto — `Job`/`Run` already derive
+  `Serialize`), uuid job ids (no in-memory counter to lose on restart), `new`/`with_tenant` mirroring
+  `StoreRegistry`, and a faithful port of the overlap guard / stale-and-future-claim reclaim / one-shot
+  spent-disable / bounded history / hostile-input clamps (the shared `claim_is_live`/`push_history` so the
+  tiers cannot drift). Gated by `nix/checks/scheduler-store.nix`. Deliberately **not** wired into
+  `builder.rs`/config/driver — nothing selects it yet, so no tenant's jobs can be accepted-then-never-fired;
+  the fanning driver + `[scheduler] store` arm + per-tenant serve seam are **C2c-2**. As-built claim
+  concurrency (atomic batch, not CAS) and its bounded follow-up are documented in design §D1.
 
 ---
 

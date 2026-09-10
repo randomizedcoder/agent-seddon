@@ -76,6 +76,10 @@ in
   # in-memory config store (feature `role-store`, off by default). The config-
   # architecture C1b RBAC-role-card twin of registry-store. docs/design/config/09-increments.md.
   role-store = craneCheck ./role-store.nix { inherit cargoArtifacts; };
+  # Executes the durable, tenant-keyed `Scheduler` backend (`StoreScheduler`) matrix
+  # over the in-memory config store (feature `scheduler-store`, off by default). The
+  # config-architecture C2c durable-scheduler twin of registry-store. docs/design/config/10-per-tenant-scheduler.md.
+  scheduler-store = craneCheck ./scheduler-store.nix { inherit cargoArtifacts; };
   # Executes the per-tenant routing layer (`PerTenant<S>`) matrix + end-to-end
   # isolation over the real converged stores (features registry-store/fleet-store/
   # prompt-store, off by default). The config-architecture C2 per-tenant-plane check.

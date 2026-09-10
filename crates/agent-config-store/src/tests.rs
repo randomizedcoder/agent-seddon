@@ -188,6 +188,48 @@ mod scen {
         );
     }
 
+    /// positive: `tenants` enumerates exactly the distinct tenants owning a card
+    /// in the collection — sorted, deduplicated, and blind to other collections.
+    pub async fn tenants_enumerated(backend: Arc<dyn Backend>) {
+        let s = Store::<TestCard>::new(backend.clone());
+        s.put("orgb", card("b1", 1)).await.expect("put orgb");
+        s.put("orga", card("a1", 1)).await.expect("put orga");
+        s.put("orga", card("a2", 1)).await.expect("put orga 2"); // same tenant twice
+                                                                 // A card in a *different* collection under a third tenant must not appear.
+        let other = Store::<TestCardB>::new(backend.clone());
+        other
+            .put(
+                "orgc",
+                TestCardB {
+                    id: "c".into(),
+                    label: "L".into(),
+                },
+            )
+            .await
+            .expect("put other collection");
+        let ts = backend
+            .tenants(TestCard::COLLECTION)
+            .await
+            .expect("tenants");
+        assert_eq!(
+            ts,
+            vec!["orga".to_string(), "orgb".to_string()],
+            "distinct + sorted, this collection only (orgc lives elsewhere)"
+        );
+    }
+
+    /// corner: an empty collection has no tenants — an empty list, not an error.
+    pub async fn tenants_empty(backend: Arc<dyn Backend>) {
+        assert!(
+            backend
+                .tenants(TestCard::COLLECTION)
+                .await
+                .expect("tenants")
+                .is_empty(),
+            "no cards ⇒ no tenants"
+        );
+    }
+
     /// negative: getting an absent card is a `not found` error, not a panic.
     pub async fn missing_card(backend: Arc<dyn Backend>) {
         let s = Store::<TestCard>::new(backend);
@@ -378,6 +420,16 @@ macro_rules! suite {
             $(#[$ig])?
             async fn positive_list_scoped_to_tenant() {
                 scen::list_scoped_to_tenant($make).await;
+            }
+            #[tokio::test]
+            $(#[$ig])?
+            async fn positive_tenants_enumerated() {
+                scen::tenants_enumerated($make).await;
+            }
+            #[tokio::test]
+            $(#[$ig])?
+            async fn corner_tenants_empty() {
+                scen::tenants_empty($make).await;
             }
             #[tokio::test]
             $(#[$ig])?
