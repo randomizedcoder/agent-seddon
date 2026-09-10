@@ -67,7 +67,7 @@ of done — is [`09-increments.md`](09-increments.md). This table is the **live 
 | C1b | RBAC role cards + `RoleService` seam (needs the shared store) | ✅ | [#301](https://github.com/randomizedcoder/agent-seddon/pull/301) | C1, A3 |
 | C2 | C35 per-tenant plane (+ C38 prompt) | ✅ | [#302](https://github.com/randomizedcoder/agent-seddon/pull/302) | B1, A3 |
 | C2b | Per-tenant **Graph** (file path-namespaced) | ✅ | [#303](https://github.com/randomizedcoder/agent-seddon/pull/303) | C2 |
-| C2c-1 | Durable **Scheduler** foundation (`StoreScheduler` + `Backend::tenants`) | 🟡 | _this PR_ | A3 |
+| C2c-1 | Durable **Scheduler** foundation (`StoreScheduler` + `Backend::tenants`) | 🟡 | [#304](https://github.com/randomizedcoder/agent-seddon/pull/304) | A3 |
 | C2c-2 | Per-tenant Scheduler **driver + serve** (tenant-fanning) | ⬜ | — (design [10](10-per-tenant-scheduler.md)) | C2c-1, plane-01 |
 | D1 | C36 forge registry | ⬜ | — | A1 (+C2 per-tenant) |
 | D2 | C37 message-transport registry | ⬜ | — | A1 (+C2 per-tenant) |
