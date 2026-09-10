@@ -12,6 +12,9 @@ forge-gitlab = []
 # Gitea host (config C36 / D1b): opt-in — NOT in `default`, so the standard build
 # is unchanged. A GitHub-shaped `/api/v1` with its own auth/merge/paging dialect.
 forge-gitea = []
+# Bitbucket Cloud host (config C36 / D1b): opt-in — the divergent API (body-envelope
+# paging, no review object, deeply-nested fields, upper-case state vocabulary).
+forge-bitbucket = []
 # The persisted forge-card registry (config C36 / D1): the `ForgeRegistry` store
 # over the shared `agent-config-store`.
 forge-store = ["dep:agent-config-store", "dep:agent-proto", "dep:prost"]

@@ -28,6 +28,8 @@ pub fn known_kinds() -> Vec<&'static str> {
         "gitlab",
         #[cfg(feature = "forge-gitea")]
         "gitea",
+        #[cfg(feature = "forge-bitbucket")]
+        "bitbucket",
     ]
     .to_vec()
 }
@@ -44,6 +46,9 @@ pub fn default_base_url(kind: &str) -> Option<&'static str> {
         // empty base_url still resolves (a card usually overrides it).
         #[cfg(feature = "forge-gitea")]
         "gitea" => Some("https://gitea.com/api/v1"),
+        // Bitbucket Cloud's API root (self-hosted Server/DC is out of scope).
+        #[cfg(feature = "forge-bitbucket")]
+        "bitbucket" => Some("https://api.bitbucket.org/2.0"),
         _ => None,
     }
 }
@@ -59,6 +64,9 @@ pub fn expected_encoding(kind: &str) -> Option<RepoEncoding> {
         // Gitea repos are `owner/name`, like GitHub.
         #[cfg(feature = "forge-gitea")]
         "gitea" => Some(RepoEncoding::OwnerName),
+        // Bitbucket repos are `workspace/repo_slug`, encoded like `owner__name`.
+        #[cfg(feature = "forge-bitbucket")]
+        "bitbucket" => Some(RepoEncoding::OwnerName),
         _ => None,
     }
 }
@@ -198,6 +206,13 @@ pub fn build_forge_from_card(
                 base, owner, name, token, timeout, retries,
             )?))
         }
+        #[cfg(feature = "forge-bitbucket")]
+        "bitbucket" => {
+            let (workspace, name) = decode_owner_name(repo)?;
+            Ok(Arc::new(crate::BitbucketForge::new(
+                base, workspace, name, token, timeout, retries,
+            )?))
+        }
         other => Err(unknown_kind(other)),
     }
 }
@@ -283,6 +298,24 @@ mod tests {
         assert!(known_kinds().contains(&"gitea"));
     }
 
+    // desc (positive): a bitbucket card (workspace__slug) builds against the Cloud
+    // default → expect Ok and name == "bitbucket".
+    #[cfg(feature = "forge-bitbucket")]
+    #[test]
+    fn positive_bitbucket_card_builds_forge() {
+        let f = built(build_forge_from_card(
+            &card("bitbucket", "", RepoEncoding::OwnerName),
+            "acme__web",
+            Secret::from("t".to_string()),
+        ));
+        assert_eq!(f.name(), "bitbucket");
+        assert_eq!(
+            default_base_url("bitbucket"),
+            Some("https://api.bitbucket.org/2.0")
+        );
+        assert!(known_kinds().contains(&"bitbucket"));
+    }
+
     // desc (positive): a self-hosted gitlab base_url overrides the kind default and
     // still builds → expect Ok and name == "gitlab".
     #[test]
@@ -317,8 +350,10 @@ mod tests {
     // kinds (fail-closed, not a silent no-op).
     #[test]
     fn negative_unknown_backend_rejected() {
+        // `sourceforge` is not a built-in kind under any feature set, so this stays
+        // a genuine unknown even when the opt-in gitea/bitbucket features are on.
         let err = build_err(build_forge_from_card(
-            &card("bitbucket", "", RepoEncoding::OwnerName),
+            &card("sourceforge", "", RepoEncoding::OwnerName),
             "o__n",
             Secret::from("t".to_string()),
         ));

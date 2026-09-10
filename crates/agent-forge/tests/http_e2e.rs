@@ -70,6 +70,16 @@ fn spawn_server() -> (String, Seen) {
                         "base":{"ref":"main"}}"#,
                     None,
                 )
+            } else if url.starts_with("/bb/repositories/ws/r/pullrequests/12") {
+                // Bitbucket Cloud: upper-case state, deeply-nested fields.
+                (
+                    r#"{"id":12,"title":"Fix","summary":{"raw":"b"},"state":"OPEN",
+                        "author":{"nickname":"alice"},
+                        "links":{"html":{"href":"https://bitbucket.org/ws/r/pull-requests/12"}},
+                        "source":{"branch":{"name":"feat"}},
+                        "destination":{"branch":{"name":"main"}}}"#,
+                    None,
+                )
             } else if url.starts_with("/gl/projects/g%2Fp/merge_requests/9") {
                 (
                     r#"{"id":99999,"iid":9,"title":"MR","description":"d","state":"opened",
@@ -165,6 +175,37 @@ async fn positive_gitea_get_pr_uses_token_auth_and_merged_bool() {
     assert!(!format!("{pr:?}").contains("gitea-secret-token"));
 }
 
+#[cfg(feature = "forge-bitbucket")]
+fn bitbucket(base: &str) -> agent_forge::BitbucketForge {
+    agent_forge::BitbucketForge::new(
+        format!("{base}/bb"),
+        "ws".into(),
+        "r".into(),
+        agent_core::Secret::new("bb-secret-token"),
+        5,
+        0,
+    )
+    .unwrap()
+}
+
+/// Bitbucket proves the seam a fourth time: a Bearer access token, an upper-case
+/// state vocabulary, and deeply-nested `links.html.href` / `source.branch.name`.
+#[cfg(feature = "forge-bitbucket")]
+#[tokio::test]
+async fn positive_bitbucket_get_pr_maps_nested_fields_and_authenticates() {
+    let (base, seen) = spawn_server();
+    let pr = bitbucket(&base).get_pr(12).await.expect("get_pr");
+
+    assert_eq!(pr.number, 12);
+    assert_eq!(pr.state, "open", "OPEN normalizes to open");
+    assert_eq!(pr.source_branch, "feat");
+    assert_eq!(pr.url, "https://bitbucket.org/ws/r/pull-requests/12");
+
+    let (_m, _u, auth) = seen.recv().unwrap();
+    assert_eq!(auth, "Bearer bb-secret-token", "bitbucket access token");
+    assert!(!format!("{pr:?}").contains("bb-secret-token"));
+}
+
 #[tokio::test]
 async fn positive_github_get_pr_maps_and_authenticates() {
     let (base, seen) = spawn_server();
@@ -254,11 +295,16 @@ async fn corner_gitlab_approve_hits_approve_then_notes() {
 #[tokio::test]
 async fn positive_both_backends_satisfy_the_same_trait() {
     let (base, _s) = spawn_server();
-    // `mut` is only exercised when the opt-in gitea backend is built in.
-    #[cfg_attr(not(feature = "forge-gitea"), allow(unused_mut))]
+    // `mut` is only exercised when an opt-in backend (gitea/bitbucket) is built in.
+    #[cfg_attr(
+        not(any(feature = "forge-gitea", feature = "forge-bitbucket")),
+        allow(unused_mut)
+    )]
     let mut backends: Vec<Box<dyn Forge>> = vec![Box::new(github(&base)), Box::new(gitlab(&base))];
     #[cfg(feature = "forge-gitea")]
     backends.push(Box::new(gitea(&base)));
+    #[cfg(feature = "forge-bitbucket")]
+    backends.push(Box::new(bitbucket(&base)));
     for b in backends {
         // Each answers the same call, whatever it does underneath.
         assert!(!b.name().is_empty());

@@ -1002,6 +1002,29 @@ pub fn register_builtins(r: &mut Registry) {
         let token = resolve_token(&cfg.token, &cfg.token_env, &cfg.token_file)?;
         Ok(agent_forge::build_forge_from_card(&card, &repo, token)?)
     });
+    // Bitbucket Cloud (config C36 / D1b): opt-in, `workspace__slug` via owner/repo.
+    #[cfg(feature = "forge-bitbucket")]
+    r.forge("bitbucket", |ctx| {
+        let cfg = &ctx.cfg.forge;
+        if cfg.owner.is_empty() || cfg.repo.is_empty() {
+            anyhow::bail!(
+                "[forge] owner (workspace) and repo must be set for the bitbucket backend"
+            );
+        }
+        let card = agent_core::ForgeCard {
+            id: "forge".to_string(),
+            kind: "bitbucket".to_string(),
+            enabled: true,
+            base_url: cfg.base_url.clone(),
+            token_ref: String::new(),
+            repo_encoding: agent_core::RepoEncoding::OwnerName,
+            timeout_secs: cfg.timeout_secs as u32,
+            max_retries: cfg.max_retries,
+        };
+        let repo = format!("{}__{}", cfg.owner, cfg.repo);
+        let token = resolve_token(&cfg.token, &cfg.token_env, &cfg.token_file)?;
+        Ok(agent_forge::build_forge_from_card(&card, &repo, token)?)
+    });
 
     // --- web-search backends (the WebSearch seam, parity spec 12) ---
     //
