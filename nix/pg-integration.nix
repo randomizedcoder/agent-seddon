@@ -138,6 +138,17 @@ pkgs.writeShellApplication {
     set -e
     if [ "$rc" -ne 0 ]; then note_fail 2; fi
 
-    contract_exit "PASS: pg-integration — postgres config-store + registry + fleet + prompt + role + per-tenant + scheduler suites green."
+    # The forge registry (config C36 / D1): the same real server proves the
+    # `StoreForges` postgres arm. A dedicated tenant keeps it isolated.
+    echo "==> pg-integration: running the ignored forge-registry postgres suite"
+    set +e
+    nix develop --extra-experimental-features 'nix-command flakes' -c \
+      cargo test -p agent-forge --features forge-store-postgres \
+      -- --ignored --test-threads=1 pg_tests
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then note_fail 2; fi
+
+    contract_exit "PASS: pg-integration — postgres config-store + registry + fleet + prompt + role + per-tenant + scheduler + forge suites green."
   '';
 }

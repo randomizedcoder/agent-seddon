@@ -1315,6 +1315,13 @@ pub async fn build_agent_with(
         }
         None => agent,
     };
+    // The forge-card store (config C36 / D1), held for `--serve-forge-registry`.
+    // Not consumed by the loop; hosted for runtime CRUD over the git-host cards.
+    #[cfg(feature = "forge-registry-store")]
+    let agent = match resolve_forge_registry(&cfg)? {
+        Some(r) => agent.with_forge_registry(r),
+        None => agent,
+    };
     // The fleet's persisted review-history reader (review-fleet C16), over the same
     // ClickHouse the telemetry writer feeds (C14/C15 tables). Only wired when telemetry is
     // enabled — with no store there's nothing to read back, and the FSM reviews without
@@ -3042,6 +3049,36 @@ pub(crate) fn resolve_role_registry(
             "[role] store = \"postgres\" requires building with the `role-postgres` feature"
         ),
         other => anyhow::bail!("unknown [role] store `{other}`"),
+    };
+    Ok(store)
+}
+
+/// Resolve the `[forge_registry] store` (config C36 / D1): a `StoreForges` over the
+/// selected backend, held for `--serve-forge-registry`. `""` ⇒ no store (the fleet +
+/// in-loop review paths still build forges from their inline config, unchanged).
+#[cfg(feature = "forge-registry-store")]
+pub(crate) fn resolve_forge_registry(
+    cfg: &Config,
+) -> anyhow::Result<Option<Arc<dyn agent_core::ForgeRegistry>>> {
+    let store: Option<Arc<dyn agent_core::ForgeRegistry>> = match cfg.forge_registry.store.as_str()
+    {
+        "" => None,
+        "file" => {
+            let backend = Arc::new(agent_config_store::FileBackend::new(expand_tilde(
+                &cfg.forge_registry.file,
+            )));
+            Some(Arc::new(agent_forge::StoreForges::new(backend)))
+        }
+        #[cfg(feature = "forge-registry-postgres")]
+        "postgres" => {
+            let backend = crate::store_backend::pg_backend(&cfg.config_store)?;
+            Some(Arc::new(agent_forge::StoreForges::new(backend)))
+        }
+        #[cfg(not(feature = "forge-registry-postgres"))]
+        "postgres" => anyhow::bail!(
+            "[forge_registry] store = \"postgres\" requires building with the `forge-registry-postgres` feature"
+        ),
+        other => anyhow::bail!("unknown [forge_registry] store `{other}`"),
     };
     Ok(store)
 }

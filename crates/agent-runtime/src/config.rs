@@ -109,6 +109,8 @@ pub struct Config {
     pub review_fleet: ReviewFleetCfg,
     #[serde(default)]
     pub role: RoleCfg,
+    #[serde(default)]
+    pub forge_registry: ForgeRegistryCfg,
     /// Path the config was read from, set by the CLI after parse (never a TOML
     /// key — `serde(skip)`). Held so the `ConfigStore` seam (portal settings) can
     /// write edits back to the same file. `None` for embedded/test callers that
@@ -228,6 +230,38 @@ impl Default for RoleCfg {
 
 fn default_role_file() -> String {
     ".agent/roles.json".to_string()
+}
+
+/// The `[forge_registry]` block (config C36 / D1): where the git-host **forge
+/// cards** live. Empty `store` ⇒ no forge registry is opened (the fleet + in-loop
+/// review paths still build forges from their inline config), so this is a no-op
+/// until an operator opts in.
+#[derive(Debug, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
+pub struct ForgeRegistryCfg {
+    /// Forge-card backend: `"file"` | `"postgres"` (feature `forge-registry-postgres`)
+    /// | `""` (off, the default). Empty ⇒ no store is opened.
+    #[serde(default)]
+    pub store: String,
+    /// JSON card-bundle path (`file` backend only). Tilde-expanded.
+    #[serde(default = "default_forge_registry_file")]
+    pub file: String,
+}
+
+impl Default for ForgeRegistryCfg {
+    fn default() -> Self {
+        Self {
+            store: String::new(),
+            file: default_forge_registry_file(),
+        }
+    }
+}
+
+fn default_forge_registry_file() -> String {
+    ".agent/forges.json".to_string()
 }
 
 /// Cross-session recall (parity spec 20): a full-text index over *past* saved
@@ -2272,6 +2306,9 @@ pub struct GrpcCfg {
     /// The RBAC role-card seam (`--serve-role`, config C1b).
     #[serde(default)]
     pub role: GrpcSeamCfg,
+    /// The forge-card seam (`--serve-forge-registry`, config C36 / D1).
+    #[serde(default)]
+    pub forge_registry: GrpcSeamCfg,
     #[serde(default)]
     pub review: GrpcSeamCfg,
     /// Not a seam: the opt-in `agent --serve-sessions` gateway (docs/design/portal),
@@ -2904,6 +2941,7 @@ impl Config {
             recall: RecallCfg::default(),
             review_fleet: ReviewFleetCfg::default(),
             role: RoleCfg::default(),
+            forge_registry: ForgeRegistryCfg::default(),
             auth: AuthCfg::default(),
             tenancy: TenancyCfg::default(),
             source_path: None,

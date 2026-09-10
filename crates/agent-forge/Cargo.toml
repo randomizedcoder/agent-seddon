@@ -9,6 +9,11 @@ license.workspace = true
 default = ["forge-github", "forge-gitlab"]
 forge-github = []
 forge-gitlab = []
+# The persisted forge-card registry (config C36 / D1): the `ForgeRegistry` store
+# over the shared `agent-config-store`.
+forge-store = ["dep:agent-config-store", "dep:agent-proto", "dep:prost"]
+# The postgres tier for the forge store (opt-in; exercised by `nix run .#integration`).
+forge-store-postgres = ["forge-store", "agent-config-store/config-store-postgres"]
 
 [dependencies]
 agent-core.workspace = true
@@ -16,6 +21,9 @@ agent-retry.workspace = true
 async-trait.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
+agent-config-store = { workspace = true, optional = true }
+agent-proto = { workspace = true, optional = true }
+prost = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio.workspace = true

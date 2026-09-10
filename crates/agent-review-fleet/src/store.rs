@@ -327,15 +327,32 @@ mod tests {
         assert!(reg.list().await.is_err(), "tampered row must fail closed");
     }
 
-    // adversarial: an unknown forge backend is refused.
+    // adversarial: a hostile-length forge backend is refused (the length cap is the
+    // remaining fail-closed check at this layer). Unknown *kind* rejection moved to
+    // build time (config C36 / D1): the valid kinds are the built-in impls, so an
+    // unknown-but-short backend now persists and fails closed when the forge is built
+    // (`build_session_forge` → `build_forge_from_card`), tested in `agent-forge`.
     #[tokio::test]
-    async fn adversarial_unknown_backend_rejected() {
+    async fn adversarial_oversized_backend_rejected() {
         let reg = store();
         let mut bad = row("r1");
-        bad.backend = "evil-forge".into();
+        bad.backend = "x".repeat(agent_core::MAX_FLEET_NAME_LEN + 1);
         assert!(
             reg.put(bad).await.is_err(),
-            "only github/gitlab/'' accepted"
+            "an over-long backend is rejected"
+        );
+    }
+
+    // corner: an unknown-but-short backend now persists (rejection is deferred to
+    // build time per config C36 / D1), where the known kinds are the built-in impls.
+    #[tokio::test]
+    async fn corner_unknown_short_backend_persists_rejection_deferred_to_build() {
+        let reg = store();
+        let mut r = row("r1");
+        r.backend = "evil-forge".into();
+        assert!(
+            reg.put(r).await.is_ok(),
+            "unknown kind is stored; it fails closed when the forge is built"
         );
     }
 }

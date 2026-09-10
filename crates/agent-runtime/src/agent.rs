@@ -166,6 +166,10 @@ pub struct Agent {
     /// the three immutable built-ins. Present ⇒ the catalog snapshot was installed at
     /// startup; `None` ⇒ the gate uses the built-ins alone (C1 behaviour).
     role_registry: Option<Arc<dyn agent_core::RoleRegistry>>,
+    /// The forge-card store, held for `--serve-forge-registry` (config C36 / D1):
+    /// the git-host cards the fleet + in-loop review paths build their forge clients
+    /// from. Not consumed by the loop; hosted over gRPC for runtime CRUD.
+    forge_registry: Option<Arc<dyn agent_core::ForgeRegistry>>,
     /// The fleet's persisted review-history reader (review-fleet C16), held for
     /// `--serve-fleet`: the ClickHouse-backed [`agent_core::FleetHistory`] the orchestrator
     /// consults for precise head-oid dedup + cross-round carry-forward. `None` ⇒ telemetry
@@ -571,6 +575,7 @@ impl Agent {
             provider_registry: None,
             fleet_registry: None,
             role_registry: None,
+            forge_registry: None,
             fleet_history: None,
             system_fragments: agent_context::system_fragments::SystemFragments::defaults(),
             metrics_proxy: None,
@@ -920,6 +925,14 @@ impl Agent {
         self
     }
 
+    /// Attach the forge-card store (config C36 / D1), so it can be hosted over gRPC
+    /// (`--serve-forge-registry`). Not consumed by the loop; the fleet + in-loop
+    /// review paths build forge clients through the kind builder, seeded by these cards.
+    pub fn with_forge_registry(mut self, r: Arc<dyn agent_core::ForgeRegistry>) -> Self {
+        self.forge_registry = Some(r);
+        self
+    }
+
     /// Attach the fleet's persisted review-history reader (review-fleet C16), consulted by
     /// the fleet orchestrator for head-oid dedup + cross-round carry-forward.
     pub fn with_fleet_history(mut self, h: Arc<dyn agent_core::FleetHistory>) -> Self {
@@ -1207,6 +1220,12 @@ impl Agent {
     /// The RBAC role-card store, if `[role] store` is configured (`--serve-role`).
     pub fn role_registry(&self) -> Option<Arc<dyn agent_core::RoleRegistry>> {
         self.role_registry.clone()
+    }
+
+    /// The forge-card store, if `[forge_registry] store` is configured
+    /// (`--serve-forge-registry`).
+    pub fn forge_registry(&self) -> Option<Arc<dyn agent_core::ForgeRegistry>> {
+        self.forge_registry.clone()
     }
 
     /// Fleet capacity caps (`[review_fleet] max_total`, `max_per_user`) for

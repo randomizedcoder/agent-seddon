@@ -53,6 +53,7 @@ default = [
     "fleet",
     "role-store",
     "scheduler-store",
+    "forge-registry-store",
     "metrics-proxy",
     "session-export",
     "skill-write",
@@ -287,6 +288,22 @@ role-store = ["dep:agent-role", "agent-role/role-store", "dep:agent-config-store
 role-postgres = [
   "role-store",
   "agent-role/role-store-postgres",
+  "agent-config-store/config-store-postgres",
+]
+# Forge-card registry (config C36 / D1): persist git-host cards onto
+# `agent-config-store` (file/postgres) via `StoreForges` in `agent-forge`, held for
+# `--serve-forge-registry`. On by default. Independent of the `forge` *seam* — it
+# needs only the forge store, not a built-in host impl.
+forge-registry-store = [
+  "dep:agent-forge",
+  "agent-forge/forge-store",
+  "dep:agent-config-store",
+]
+# The Postgres arm of the forge registry. Off by default; NOT hermetic (needs a
+# live Postgres server).
+forge-registry-postgres = [
+  "forge-registry-store",
+  "agent-forge/forge-store-postgres",
   "agent-config-store/config-store-postgres",
 ]
 # Metrics proxy seam (docs/design/portal): generic PromQL-over-gRPC to Prometheus.

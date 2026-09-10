@@ -806,6 +806,9 @@ pub use identity::*;
 // Control-plane role-based access control — see rbac.rs (re-exported below).
 mod rbac;
 pub use rbac::*;
+
+mod forge_card;
+pub use forge_card::*;
 // ---------------------------------------------------------------------------
 // Seam: TaskTracker (structured, inspectable agent plan)
 // ---------------------------------------------------------------------------
@@ -2966,12 +2969,14 @@ impl FleetSession {
                 ));
             }
         }
-        if !matches!(self.backend.as_str(), "" | "github" | "gitlab") {
-            return err(format!(
-                "fleet session `{}`: unknown backend {:?}",
-                self.id,
-                truncate_for_log(&self.backend)
-            ));
+        // The forge `backend` is NO LONGER validated against a hardcoded allow-list
+        // here (config C36 / D1): the valid kinds are "whatever forge impls are built
+        // into the binary", known only to the registry, so an unknown kind fails
+        // closed at build time (`build_session_forge`) with the known kinds listed —
+        // like every other seam's `unknown()` error. We keep only a length cap to
+        // bound a hostile value (it may become a factory-map key).
+        if self.backend.len() > MAX_FLEET_NAME_LEN {
+            return err(format!("fleet session `{}`: backend too long", self.id));
         }
         if self.base_url.len() > MAX_UPSTREAM_URL_LEN {
             return err(format!("fleet session `{}`: base_url too long", self.id));

@@ -160,9 +160,12 @@ dependencies = [
 name = "agent-forge"
 version = "0.1.0"
 dependencies = [
+ "agent-config-store",
  "agent-core",
+ "agent-proto",
  "agent-retry",
  "async-trait",
+ "prost",
  "reqwest",
  "rstest",
  "serde_json",

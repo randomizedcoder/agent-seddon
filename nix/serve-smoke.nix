@@ -111,6 +111,13 @@ pkgs.writeShellApplication {
     store = "file"
     file  = "$work/.agent/roles.json"
 
+    # A file-backed forge-card store, so --serve-all advertises the ForgeRegistry
+    # control plane (config C36 / D1) and the Put→Get roundtrip below can exercise it
+    # over the wire.
+    [forge_registry]
+    store = "file"
+    file  = "$work/.agent/forges.json"
+
     # A file-backed durable scheduler (config C2c), so --serve-all advertises the
     # Scheduler control plane over the persistent `StoreScheduler` and the
     # Schedule→List roundtrip below can exercise it over the wire. `enabled` wires the
@@ -218,6 +225,27 @@ pkgs.writeShellApplication {
           agent.v1.RoleService.Get 2>"$work/role_get.$transport.err" || true)"
         if ! echo "$role_got" | grep -q 'smoke_reviewer'; then
           echo "CONTRACT[$transport]: RoleService/Get did not return the persisted card" >&2
+          [ "$rc" -lt 2 ] && rc=2
+        fi
+      fi
+
+      # ---- Forge registry control plane: Put→Get roundtrip (config C36 / D1) -----
+      # Put a github forge card (kind/base_url/token_ref/repo_encoding), then read it
+      # back via Get. Proves the ForgeRegistryService seam is truly on the wire and
+      # the card round-trips through the shared store. `token_ref` is a reference
+      # (env:), never a raw token; an empty base_url ⇒ the kind's registered default.
+      local forge_json='{"id":"smoke_gh","kind":"github","enabled":true,"token_ref":"env:GH_TOKEN","repo_encoding":"owner_name"}'
+      if ! grpcurl -d "$forge_json" "''${dial[@]}" \
+          agent.v1.ForgeRegistryService.Put >/dev/null 2>"$work/forge_put.$transport.err"; then
+        echo "CONTRACT[$transport]: ForgeRegistryService/Put round-trip failed" >&2
+        cat "$work/forge_put.$transport.err" >&2
+        [ "$rc" -lt 2 ] && rc=2
+      else
+        local forge_got
+        forge_got="$(grpcurl -d '{"id":"smoke_gh"}' "''${dial[@]}" \
+          agent.v1.ForgeRegistryService.Get 2>"$work/forge_get.$transport.err" || true)"
+        if ! echo "$forge_got" | grep -q 'smoke_gh'; then
+          echo "CONTRACT[$transport]: ForgeRegistryService/Get did not return the persisted card" >&2
           [ "$rc" -lt 2 ] && rc=2
         fi
       fi
