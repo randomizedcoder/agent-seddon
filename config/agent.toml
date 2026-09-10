@@ -982,9 +982,13 @@ job         = "agent-seddon"
 # verified tenant (from `[auth] mode = "oidc"`; `local` otherwise) and reads/writes
 # THAT tenant's own view of the store, so one deployment serves many orgs from one
 # backend with no cross-tenant bleed. `false` (the default) = one shared `local`
-# view, byte-identical to today. Operator-global only. Effective only for the
-# shared-store (`postgres`) arms of those seams; the file/sqlite dev tiers stay
-# single-tenant. (Graph + Scheduler per-tenant are a separate follow-up, C2b.)
+# view, byte-identical to today. Operator-global only. Effective for the shared-
+# store (`postgres`) arms of those seams; the file/sqlite dev tiers stay single-
+# tenant. It ALSO routes the file-backed cognition graph (C2b): each tenant's
+# `--serve-graph` document is isolated under `tenants/<tenant>/` beside the base
+# `[graph] file` (`local` uses the base path unchanged). The Scheduler is NOT
+# per-tenant — it is process-bound (a job's executor is the owning process); true
+# per-tenant scheduling is a separate track (docs/design/config/10-per-tenant-scheduler.md).
 # [tenancy]
 # per_tenant = true
 

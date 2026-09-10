@@ -38,12 +38,15 @@ mod store_backend;
 pub mod structured;
 #[cfg(feature = "subagents")]
 mod subagent;
-// Per-tenant routing over the converged shared-store seams (config C35 / C2).
-// Only meaningful — and only compiled — when a shared-store backend is built.
+// Per-tenant routing over the multi-tenant seams: the converged shared-store
+// control-plane seams (config C35 / C2 — provider-registry, review-fleet, prompt)
+// and the file-backed cognition graph (config C2b, path-namespaced per tenant).
+// Only meaningful — and only compiled — when one of those seams is built.
 #[cfg(any(
     feature = "registry-store",
     feature = "fleet-store",
-    feature = "prompt-store"
+    feature = "prompt-store",
+    feature = "graph"
 ))]
 mod tenant;
 

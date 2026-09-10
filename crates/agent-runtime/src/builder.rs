@@ -2927,7 +2927,20 @@ async fn resolve_cognition_graph(
             let path = expand_tilde(&cfg.graph.file);
             absent_default = !std::path::Path::new(&path).exists()
                 && cfg.graph.file == crate::config::default_graph_file();
-            Some(Arc::new(agent_graph::FileGraphs::new(path)))
+            // Per-tenant plane (config C2b): the graph has no shared store to key by
+            // tenant, so each tenant gets its own path (`tenants/<t>/…`) beside the
+            // base. `local` (and the startup plan-compile, which has no ambient
+            // identity) resolve to the base path unchanged ⇒ Tier-0 byte-identical.
+            if cfg.tenancy.per_tenant {
+                let base = std::path::PathBuf::from(&path);
+                Some(Arc::new(crate::tenant::PerTenant::new(move |t| {
+                    Arc::new(agent_graph::FileGraphs::new(crate::tenant::tenant_path(
+                        &base, t,
+                    ))) as Arc<dyn agent_core::GraphStore>
+                })) as Arc<dyn agent_core::GraphStore>)
+            } else {
+                Some(Arc::new(agent_graph::FileGraphs::new(path)))
+            }
         }
         #[cfg(feature = "grpc")]
         "grpc" => {

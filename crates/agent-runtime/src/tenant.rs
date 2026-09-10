@@ -23,6 +23,7 @@
 //! `per_tenant = false` and the single-tenant CLI stay byte-identical.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use agent_core::{current_identity, safe_segment, UserId};
@@ -34,6 +35,30 @@ fn current_tenant() -> String {
     match current_identity() {
         Some(k) if safe_segment(k.user.as_str()) => k.user.as_str().to_string(),
         _ => UserId::LOCAL.to_string(),
+    }
+}
+
+/// Derive a tenant's own on-disk path from a base path, for the **file-backed**
+/// seam that has no shared store to key by tenant: the cognition graph (config C2b,
+/// `docs/design/config/03-per-tenant-config.md`). The shared-store seams key
+/// `(collection, tenant, id)` inside one backend; the graph lives in a file, so
+/// per-tenant isolation is a per-tenant *path* instead.
+///
+/// The default `local` tenant — and any non-[`safe_segment`] value that would ever
+/// slip through — maps to the base path **unchanged**, so `per_tenant = false` and
+/// the single-tenant CLI stay byte-identical and no hostile segment can escape the
+/// base directory. Every other (validated) tenant gets a `tenants/<tenant>/` segment
+/// inserted just before the file name, isolating its document beside the base.
+pub(crate) fn tenant_path(base: &Path, tenant: &str) -> PathBuf {
+    if tenant == UserId::LOCAL || !safe_segment(tenant) {
+        return base.to_path_buf();
+    }
+    let file = base.file_name().unwrap_or_default();
+    match base.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => {
+            parent.join("tenants").join(tenant).join(file)
+        }
+        _ => Path::new("tenants").join(tenant).join(file),
     }
 }
 
@@ -174,6 +199,32 @@ impl agent_core::PromptStore for PerTenant<dyn agent_core::PromptStore> {
         goal: &str,
     ) -> agent_core::Result<Vec<agent_core::Message>> {
         self.route().preview_assembled(ctx, goal).await
+    }
+}
+
+/// The cognition-graph seam, routed per tenant (config C2b). Unlike the three
+/// shared-store seams above, the file backend has no `(collection, tenant, id)`
+/// keying — the builder closure gives each tenant its own [`tenant_path`], so a
+/// tenant's `--serve-graph` `Put`/`Get` reads and writes only that tenant's
+/// document. The startup plan-compile runs with no ambient identity ⇒ `local` (the
+/// operator's own graph), which is the intended process-global cognition config.
+#[cfg(feature = "graph")]
+#[async_trait::async_trait]
+impl agent_core::GraphStore for PerTenant<dyn agent_core::GraphStore> {
+    async fn get(&self) -> agent_core::Result<agent_core::GraphDoc> {
+        self.route().get().await
+    }
+    async fn put(&self, doc: agent_core::GraphDoc) -> agent_core::Result<()> {
+        self.route().put(doc).await
+    }
+    async fn validate(
+        &self,
+        doc: &agent_core::GraphDoc,
+    ) -> agent_core::Result<Vec<agent_core::GraphIssue>> {
+        self.route().validate(doc).await
+    }
+    async fn node_types(&self) -> agent_core::Result<Vec<agent_core::NodeTypeSchema>> {
+        self.route().node_types().await
     }
 }
 
@@ -321,6 +372,155 @@ mod tests {
                 "hostile id {bad:?} must route to local, got {t}"
             );
             assert!(!t.contains(bad));
+        }
+    }
+
+    // ---- tenant_path derivation (config C2b: file-backed graph namespacing) ----
+
+    // positive: a validated tenant gets a `tenants/<t>/` segment before the file
+    // name → expect its document isolated beside the base.
+    #[test]
+    fn positive_tenant_path_isolates_by_segment() {
+        assert_eq!(
+            tenant_path(Path::new(".agent/graph.textproto"), "acme"),
+            PathBuf::from(".agent/tenants/acme/graph.textproto"),
+        );
+    }
+
+    // boundary: the default `local` tenant maps to the base path unchanged → expect
+    // byte-identical Tier-0 behavior (per_tenant = false / single-tenant CLI).
+    #[test]
+    fn boundary_tenant_path_local_uses_base() {
+        assert_eq!(
+            tenant_path(Path::new(".agent/graph.textproto"), UserId::LOCAL),
+            PathBuf::from(".agent/graph.textproto"),
+        );
+    }
+
+    // corner: a base that is a bare file name (no parent dir) still isolates under
+    // `tenants/<t>/` for a real tenant, and stays bare for `local`.
+    #[test]
+    fn corner_tenant_path_bare_filename() {
+        assert_eq!(
+            tenant_path(Path::new("graph.textproto"), "acme"),
+            PathBuf::from("tenants/acme/graph.textproto"),
+        );
+        assert_eq!(
+            tenant_path(Path::new("graph.textproto"), UserId::LOCAL),
+            PathBuf::from("graph.textproto"),
+        );
+    }
+
+    // adversarial: a hostile segment (traversal / separator / dotdot) never becomes
+    // a path component — it fails closed to the base path, never escaping the base
+    // directory (defense in depth; `route` already coerces these to `local`).
+    #[rstest::rstest]
+    #[case::traversal("../../etc")]
+    #[case::separator("a/b")]
+    #[case::dotdot("..")]
+    fn adversarial_tenant_path_hostile_segment_falls_back(#[case] bad: &str) {
+        let base = Path::new(".agent/graph.textproto");
+        let got = tenant_path(base, bad);
+        assert_eq!(got, base.to_path_buf(), "hostile {bad:?} must not escape");
+        assert!(!got.to_string_lossy().contains(bad));
+    }
+
+    // ---- PerTenant<dyn GraphStore> routing (config C2b) ----
+
+    #[cfg(feature = "graph")]
+    mod graph {
+        use crate::tenant::{tenant_path, PerTenant};
+        use agent_core::{
+            scope, GraphDoc, GraphIssue, GraphStore, NodeTypeSchema, Result, SessionKey,
+        };
+        use std::sync::{Arc, Mutex};
+
+        /// A `GraphStore` that records, on each `get`, the tenant it was built for.
+        struct FakeGraph {
+            tenant: String,
+            calls: Arc<Mutex<Vec<String>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl GraphStore for FakeGraph {
+            async fn get(&self) -> Result<GraphDoc> {
+                self.calls.lock().unwrap().push(self.tenant.clone());
+                Ok(GraphDoc::default())
+            }
+            async fn put(&self, _doc: GraphDoc) -> Result<()> {
+                Ok(())
+            }
+            async fn validate(&self, _doc: &GraphDoc) -> Result<Vec<GraphIssue>> {
+                Ok(vec![])
+            }
+            async fn node_types(&self) -> Result<Vec<NodeTypeSchema>> {
+                Ok(vec![])
+            }
+        }
+
+        // positive: two verified tenants route to distinct graph documents → expect
+        // each `get` recorded under its own tenant, no bleed.
+        #[tokio::test]
+        async fn positive_two_tenants_route_to_distinct_graphs() {
+            let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+            let c = calls.clone();
+            let pt = PerTenant::new(move |t: &str| {
+                Arc::new(FakeGraph {
+                    tenant: t.to_string(),
+                    calls: c.clone(),
+                }) as Arc<dyn GraphStore>
+            });
+            scope(SessionKey::parse("acme", "s1").unwrap(), async {
+                pt.get().await.unwrap()
+            })
+            .await;
+            scope(SessionKey::parse("globex", "s1").unwrap(), async {
+                pt.get().await.unwrap()
+            })
+            .await;
+            assert_eq!(
+                *calls.lock().unwrap(),
+                vec!["acme".to_string(), "globex".to_string()]
+            );
+        }
+
+        // desc: over the REAL `FileGraphs`, a `Put` under `acme` writes acme's own
+        // namespaced file and is invisible to `globex` (whose `Get` errors on the
+        // missing file) → expect on-disk per-tenant isolation, end to end.
+        #[tokio::test]
+        async fn positive_file_graphs_isolated_per_tenant() {
+            let dir = agent_testkit::tempdir();
+            let base = dir.join("graph.textproto");
+            let b = base.clone();
+            let graphs = PerTenant::new(move |t: &str| {
+                Arc::new(agent_graph::FileGraphs::new(tenant_path(&b, t))) as Arc<dyn GraphStore>
+            });
+            let doc = GraphDoc {
+                version: 1,
+                ..Default::default()
+            };
+            scope(SessionKey::parse("acme", "s1").unwrap(), async {
+                graphs.put(doc.clone()).await.unwrap();
+            })
+            .await;
+            assert!(
+                dir.join("tenants/acme/graph.textproto").exists(),
+                "acme's document written to its namespaced path"
+            );
+            assert!(
+                !dir.join("tenants/globex/graph.textproto").exists(),
+                "globex has no document"
+            );
+            let globex = scope(SessionKey::parse("globex", "s1").unwrap(), async {
+                graphs.get().await
+            })
+            .await;
+            assert!(globex.is_err(), "globex must not see acme's graph");
+            let acme = scope(SessionKey::parse("acme", "s1").unwrap(), async {
+                graphs.get().await.unwrap()
+            })
+            .await;
+            assert_eq!(acme.version, 1);
         }
     }
 

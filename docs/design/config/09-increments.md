@@ -254,6 +254,19 @@ The two keystones (A, B) are **independent** and may land in either order or in 
   isolation proof runs in the existing `nix/pg-integration.nix` (an `agent-runtime` arm, tenants
   `c2_tenant_it_*`) rather than a separate `tenant-isolation.nix` — reuses the composed up→barrier→down
   harness like the registry/fleet/prompt/role pg suites.
+- **C2b (built).** Per-tenant **Graph**: the file backend has no shared store to key by tenant, so
+  `PerTenant<dyn GraphStore>` routes each tenant to its own document via `tenant::tenant_path` — a
+  `tenants/<tenant>/` segment inserted before the base `[graph] file` name (`local` = base path unchanged
+  ⇒ Tier-0 byte-identical). Wired at the graph resolver's `file` arm behind `[tenancy] per_tenant`; the
+  `grpc` arm defers tenancy to the central service (identity is forwarded on the wire). The startup
+  plan-compile runs with no ambient identity ⇒ `local` (the operator's own graph), which is the intended
+  process-global cognition config. `mod tenant`'s gate widened to include `feature = "graph"`;
+  `nix/checks/per-tenant.nix` gains the `graph` feature (path-derivation table + `FileGraphs` tempdir
+  isolation). **Scheduler was NOT built as a `PerTenant` wrap** — it is process-bound (a job's executor is
+  the owning process; `tick_with` is deliberately off-trait and `Agent` holds the concrete
+  `LocalScheduler`), so a thin registry wrap would accept per-tenant jobs the single driver never fires.
+  It became its own design of record, [`10-per-tenant-scheduler.md`](10-per-tenant-scheduler.md) (durable
+  tenant-keyed backend + tenant-fanning driver), tracked as **C2c** and built later.
 
 ---
 
