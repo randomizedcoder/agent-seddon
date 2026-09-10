@@ -395,6 +395,22 @@ The two keystones (A, B) are **independent** and may land in either order or in 
   integration suite (serve-smoke / auth-e2e / tenant-isolation / pg-integration / grpc-parity / wire-fault).
 - **DoD.** One gate uniformly applied, verified no-bypass; full integration suite green (or
   skip-with-notice on a bare machine); gate green; gated PR.
+- **Built (E1, this PR).** The operator-global vs tenant **write split** (C29/C40) lives inside
+  `agent_core::authorize`: a new `ResourceType::is_operator_global()` (true only for the bootstrap
+  `Config` surface) makes a mutating write to an operator-global key grantable **only to a host-global
+  role** — a tenant `org_admin` is denied even in its own tenant (`negative_tenant_write_to_operator_key_denied`,
+  proven at both the `authorize` decision table and the `authz::require` gate), while every tenant-owned
+  card surface is unaffected. The gate needed no per-call change: the split rides in `authorize`, so the
+  ~20 existing `require(..)` call sites are already correct. The two Track-D card registries — **forge**
+  (C36/D1) and **transport** (C37/D2), the only CRUD registries still wired single-tenant `local` — are
+  brought onto the same `PerTenant` routing the A3*/C2b seams use (`impl ForgeRegistry`/`impl
+  TransportRegistry for PerTenant<…>` + a `forge_store_for`/`transport_store_for` builder wired into both
+  the `file` and `postgres` resolver arms), so `Get/List/Put/Delete` scope to the caller's verified tenant
+  on every CRUD service. Because the config-store backend keys `(collection, tenant, id)` on the
+  file/memory tier too, per-tenant forge/transport isolation is proven **in the hermetic gate**
+  (`nix/checks/per-tenant.nix`, `tenant::real_forge`/`real_transport`), not only over live Postgres.
+  **Deferred:** the portal admin surface; a generic reflective no-bypass assertion (coverage is the
+  per-service gates + the `authorize`-level split + the auth-e2e / tenant-isolation integration suite).
 
 ---
 

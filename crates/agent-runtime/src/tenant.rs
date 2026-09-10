@@ -264,6 +264,51 @@ impl agent_core::Scheduler for PerTenant<dyn agent_core::Scheduler> {
     }
 }
 
+/// The multi-forge card registry, routed per tenant (config C36 / D1, consolidated
+/// per-tenant in E1/C40). Each tenant's forge cards live under its own
+/// `(collection, tenant, id)` rows in the shared config store, so a tenant's
+/// `--serve-forge-registry` `Get/List/Put/Delete` addresses only its own forges.
+#[cfg(feature = "forge-registry-store")]
+#[async_trait::async_trait]
+impl agent_core::ForgeRegistry for PerTenant<dyn agent_core::ForgeRegistry> {
+    async fn list(&self) -> agent_core::Result<Vec<agent_core::ForgeCard>> {
+        self.route().list().await
+    }
+    async fn get(&self, id: &str) -> agent_core::Result<agent_core::ForgeCard> {
+        self.route().get(id).await
+    }
+    async fn put(&self, card: agent_core::ForgeCard) -> agent_core::Result<agent_core::ForgeCard> {
+        self.route().put(card).await
+    }
+    async fn delete(&self, id: &str) -> agent_core::Result<bool> {
+        self.route().delete(id).await
+    }
+}
+
+/// The message-transport card registry, routed per tenant (config C37 / D2,
+/// consolidated per-tenant in E1/C40). A tenant's transport cards (Slack/…) are
+/// keyed by its verified tenant in the shared config store, so a tenant's
+/// `--serve-transport-registry` calls read and write only its own transports.
+#[cfg(feature = "transport-registry-store")]
+#[async_trait::async_trait]
+impl agent_core::TransportRegistry for PerTenant<dyn agent_core::TransportRegistry> {
+    async fn list(&self) -> agent_core::Result<Vec<agent_core::TransportCard>> {
+        self.route().list().await
+    }
+    async fn get(&self, id: &str) -> agent_core::Result<agent_core::TransportCard> {
+        self.route().get(id).await
+    }
+    async fn put(
+        &self,
+        card: agent_core::TransportCard,
+    ) -> agent_core::Result<agent_core::TransportCard> {
+        self.route().put(card).await
+    }
+    async fn delete(&self, id: &str) -> agent_core::Result<bool> {
+        self.route().delete(id).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -733,6 +778,141 @@ mod tests {
                 .unwrap();
             let jobs = sched.list().await.unwrap();
             assert_eq!(jobs.len(), 1, "the unscoped job is the local tenant's");
+        }
+    }
+
+    // The forge card registry, routed per tenant over the REAL `StoreForges` on one
+    // shared in-memory backend (config C40/E1). Proves a forge card `Put` under one
+    // verified tenant is invisible to another — the `--serve-forge-registry`
+    // isolation, provable in the hermetic gate (the config-store backend keys by
+    // tenant on the file/memory tier, not only postgres). Feature-gated.
+    #[cfg(feature = "forge-registry-store")]
+    mod real_forge {
+        use crate::tenant::PerTenant;
+        use agent_config_store::{Backend, MemoryBackend};
+        use agent_core::{scope, ForgeCard, ForgeRegistry, RepoEncoding, SessionKey};
+        use std::sync::Arc;
+
+        fn card(id: &str) -> ForgeCard {
+            ForgeCard {
+                id: id.into(),
+                kind: "github".into(),
+                enabled: true,
+                base_url: String::new(),
+                token_ref: "env:TOK".into(),
+                repo_encoding: RepoEncoding::OwnerName,
+                timeout_secs: 30,
+                max_retries: 3,
+            }
+        }
+
+        fn per_tenant_forge(backend: Arc<dyn Backend>) -> PerTenant<dyn ForgeRegistry> {
+            PerTenant::new(move |t| {
+                agent_forge::StoreForges::with_tenant(backend.clone(), t)
+                    .map(|s| Arc::new(s) as Arc<dyn ForgeRegistry>)
+                    .unwrap_or_else(|_| Arc::new(agent_forge::StoreForges::new(backend.clone())))
+            })
+        }
+
+        // desc: a forge card written under tenant `acme` is invisible to `globex` →
+        // expect acme sees exactly its card, globex sees none.
+        #[tokio::test]
+        async fn positive_two_tenants_isolated_forges() {
+            let backend: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
+            let reg = per_tenant_forge(backend);
+            scope(SessionKey::parse("acme", "s1").unwrap(), async {
+                reg.put(card("gh")).await.unwrap();
+            })
+            .await;
+            let globex = scope(SessionKey::parse("globex", "s1").unwrap(), async {
+                reg.list().await.unwrap()
+            })
+            .await;
+            let acme = scope(SessionKey::parse("acme", "s1").unwrap(), async {
+                reg.list().await.unwrap()
+            })
+            .await;
+            assert!(globex.is_empty(), "globex must not see acme's forge card");
+            assert_eq!(acme.len(), 1);
+            assert_eq!(acme[0].id, "gh");
+        }
+
+        // adversarial: with no ambient identity the wrap routes to `local` (fail
+        // closed, never an escape) → an unscoped `Put` is the `local` tenant's.
+        #[tokio::test]
+        async fn adversarial_no_identity_defaults_local() {
+            let backend: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
+            let reg = per_tenant_forge(backend);
+            reg.put(card("gh")).await.unwrap();
+            assert_eq!(reg.list().await.unwrap().len(), 1);
+        }
+    }
+
+    // The message-transport card registry, routed per tenant over the REAL
+    // `StoreTransports` on one shared in-memory backend (config C40/E1). Proves a
+    // transport card `Put` under one verified tenant is invisible to another — the
+    // `--serve-transport-registry` isolation, provable in the hermetic gate.
+    #[cfg(feature = "transport-registry-store")]
+    mod real_transport {
+        use crate::tenant::PerTenant;
+        use agent_config_store::{Backend, MemoryBackend};
+        use agent_core::{scope, SessionKey, TransportCard, TransportRegistry};
+        use std::sync::Arc;
+
+        fn card(id: &str) -> TransportCard {
+            TransportCard {
+                id: id.into(),
+                kind: "slack".into(),
+                enabled: true,
+                endpoint: String::new(),
+                app_token_ref: "env:APP".into(),
+                bot_token_ref: "env:BOT".into(),
+                channels: vec![],
+                rate_limit_per_min: 60,
+            }
+        }
+
+        fn per_tenant_transport(backend: Arc<dyn Backend>) -> PerTenant<dyn TransportRegistry> {
+            PerTenant::new(move |t| {
+                agent_slack::StoreTransports::with_tenant(backend.clone(), t)
+                    .map(|s| Arc::new(s) as Arc<dyn TransportRegistry>)
+                    .unwrap_or_else(|_| {
+                        Arc::new(agent_slack::StoreTransports::new(backend.clone()))
+                    })
+            })
+        }
+
+        // desc: a transport card written under tenant `acme` is invisible to
+        // `globex` → expect acme sees exactly its card, globex sees none.
+        #[tokio::test]
+        async fn positive_two_tenants_isolated_transports() {
+            let backend: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
+            let reg = per_tenant_transport(backend);
+            scope(SessionKey::parse("acme", "s1").unwrap(), async {
+                reg.put(card("slk")).await.unwrap();
+            })
+            .await;
+            let globex = scope(SessionKey::parse("globex", "s1").unwrap(), async {
+                reg.list().await.unwrap()
+            })
+            .await;
+            let acme = scope(SessionKey::parse("acme", "s1").unwrap(), async {
+                reg.list().await.unwrap()
+            })
+            .await;
+            assert!(globex.is_empty(), "globex must not see acme's transport");
+            assert_eq!(acme.len(), 1);
+            assert_eq!(acme[0].id, "slk");
+        }
+
+        // adversarial: with no ambient identity the wrap routes to `local` (fail
+        // closed, never an escape) → an unscoped `Put` is the `local` tenant's.
+        #[tokio::test]
+        async fn adversarial_no_identity_defaults_local() {
+            let backend: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
+            let reg = per_tenant_transport(backend);
+            reg.put(card("slk")).await.unwrap();
+            assert_eq!(reg.list().await.unwrap().len(), 1);
         }
     }
 }

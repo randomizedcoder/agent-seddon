@@ -3061,9 +3061,34 @@ pub(crate) fn resolve_role_registry(
     Ok(store)
 }
 
+/// Build the `ForgeRegistry` view over a shared-store `backend`: a per-tenant
+/// [`PerTenant`] wrap when `per_tenant` is set (each caller routes to its verified
+/// tenant's forge cards, config C40/E1), else one shared `local` view (Tier-0).
+/// Both the `file` and `postgres` arms feed this (the config-store backend keys
+/// `(collection, tenant, id)` on either tier), so per-tenant forge isolation is
+/// provable in the hermetic gate — unlike the postgres-only per-tenant of the A3*
+/// converged seams.
+#[cfg(feature = "forge-registry-store")]
+fn forge_store_for(
+    backend: Arc<dyn agent_config_store::Backend>,
+    per_tenant: bool,
+) -> Arc<dyn agent_core::ForgeRegistry> {
+    if per_tenant {
+        let b = backend.clone();
+        Arc::new(crate::tenant::PerTenant::new(move |t| {
+            agent_forge::StoreForges::with_tenant(b.clone(), t)
+                .map(|s| Arc::new(s) as Arc<dyn agent_core::ForgeRegistry>)
+                .unwrap_or_else(|_| Arc::new(agent_forge::StoreForges::new(b.clone())))
+        })) as Arc<dyn agent_core::ForgeRegistry>
+    } else {
+        Arc::new(agent_forge::StoreForges::new(backend))
+    }
+}
+
 /// Resolve the `[forge_registry] store` (config C36 / D1): a `StoreForges` over the
 /// selected backend, held for `--serve-forge-registry`. `""` ⇒ no store (the fleet +
 /// in-loop review paths still build forges from their inline config, unchanged).
+/// Tenant-scoped per verified identity when `[tenancy] per_tenant` (config C40/E1).
 #[cfg(feature = "forge-registry-store")]
 pub(crate) fn resolve_forge_registry(
     cfg: &Config,
@@ -3072,15 +3097,15 @@ pub(crate) fn resolve_forge_registry(
     {
         "" => None,
         "file" => {
-            let backend = Arc::new(agent_config_store::FileBackend::new(expand_tilde(
-                &cfg.forge_registry.file,
-            )));
-            Some(Arc::new(agent_forge::StoreForges::new(backend)))
+            let backend: Arc<dyn agent_config_store::Backend> = Arc::new(
+                agent_config_store::FileBackend::new(expand_tilde(&cfg.forge_registry.file)),
+            );
+            Some(forge_store_for(backend, cfg.tenancy.per_tenant))
         }
         #[cfg(feature = "forge-registry-postgres")]
         "postgres" => {
             let backend = crate::store_backend::pg_backend(&cfg.config_store)?;
-            Some(Arc::new(agent_forge::StoreForges::new(backend)))
+            Some(forge_store_for(backend, cfg.tenancy.per_tenant))
         }
         #[cfg(not(feature = "forge-registry-postgres"))]
         "postgres" => anyhow::bail!(
@@ -3091,9 +3116,31 @@ pub(crate) fn resolve_forge_registry(
     Ok(store)
 }
 
+/// Build the `TransportRegistry` view over a shared-store `backend`: a per-tenant
+/// [`PerTenant`] wrap when `per_tenant` is set (config C40/E1), else one shared
+/// `local` view. Mirrors [`forge_store_for`]; both store arms feed it, so per-tenant
+/// transport isolation is provable in the hermetic gate.
+#[cfg(feature = "transport-registry-store")]
+fn transport_store_for(
+    backend: Arc<dyn agent_config_store::Backend>,
+    per_tenant: bool,
+) -> Arc<dyn agent_core::TransportRegistry> {
+    if per_tenant {
+        let b = backend.clone();
+        Arc::new(crate::tenant::PerTenant::new(move |t| {
+            agent_slack::StoreTransports::with_tenant(b.clone(), t)
+                .map(|s| Arc::new(s) as Arc<dyn agent_core::TransportRegistry>)
+                .unwrap_or_else(|_| Arc::new(agent_slack::StoreTransports::new(b.clone())))
+        })) as Arc<dyn agent_core::TransportRegistry>
+    } else {
+        Arc::new(agent_slack::StoreTransports::new(backend))
+    }
+}
+
 /// Resolve the `[transport_registry] store` (config C37 / D2): a `StoreTransports`
 /// over the selected backend, held for `--serve-transport-registry`. `""` ⇒ no store
 /// (the fleet's Slack watch still builds from its inline config, unchanged).
+/// Tenant-scoped per verified identity when `[tenancy] per_tenant` (config C40/E1).
 #[cfg(feature = "transport-registry-store")]
 pub(crate) fn resolve_transport_registry(
     cfg: &Config,
@@ -3102,15 +3149,17 @@ pub(crate) fn resolve_transport_registry(
         match cfg.transport_registry.store.as_str() {
             "" => None,
             "file" => {
-                let backend = Arc::new(agent_config_store::FileBackend::new(expand_tilde(
-                    &cfg.transport_registry.file,
-                )));
-                Some(Arc::new(agent_slack::StoreTransports::new(backend)))
+                let backend: Arc<dyn agent_config_store::Backend> = Arc::new(
+                    agent_config_store::FileBackend::new(expand_tilde(
+                        &cfg.transport_registry.file,
+                    )),
+                );
+                Some(transport_store_for(backend, cfg.tenancy.per_tenant))
             }
             #[cfg(feature = "transport-registry-postgres")]
             "postgres" => {
                 let backend = crate::store_backend::pg_backend(&cfg.config_store)?;
-                Some(Arc::new(agent_slack::StoreTransports::new(backend)))
+                Some(transport_store_for(backend, cfg.tenancy.per_tenant))
             }
             #[cfg(not(feature = "transport-registry-postgres"))]
             "postgres" => anyhow::bail!(

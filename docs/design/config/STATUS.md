@@ -22,29 +22,38 @@ each tenant's jobs run as that tenant. **Track D is now under way: D1 (this PR)*
 so the valid kinds are "whatever forge impls are built in" (an unknown kind now fails closed at build time,
 listing the known kinds), and lifting the per-kind default `base_url` and per-host `repo_encoding` onto the
 card. Both forge build paths (the in-loop `[forge]` factory and `build_session_forge`) now route through
-one card builder. **Track D is now complete: D2 (this PR)** lands C37 — the messaging twin of D1: a
+one card builder. **Track D is complete: D2 (#307)** landed C37 — the messaging twin of D1: a
 **bidirectional** `MessageTransport` seam (adding an outbound `post` half) with neutral message types, a
 `TransportCard` + `TransportRegistryService` seam + in-crate `StoreTransports`, and `agent-slack` recast
 as one impl (`SlackMessageTransport` posts via `chat.postMessage`; the live Socket-Mode adapter carries
 inbound) selected by `kind` at build time (unknown kind fails closed, endpoint SSRF-screened), plus the
 pure `RateLimiter` + soft-fail `announce` primitives. As in D1, lifting the `slack_*`/`FleetSlackCfg`
-fields **out** of `FleetSession` into a card-by-id is deferred (D2b). Only **E1** (C40 control-plane
-consolidation) now remains.
+fields **out** of `FleetSession` into a card-by-id is deferred (D2b). **Track E — the last phase — is now
+under way: E1 (this PR)** lands C40, the control-plane consolidation: the **operator-global vs tenant
+write split** (C29) rides inside `authorize` — a mutating write to an operator-global resource
+(`ResourceType::is_operator_global`, the bootstrap `Config` surface behind `ConfigService`) is granted
+**only to a host-global role**, so a tenant `org_admin` is denied even in its own tenant, while every
+tenant-owned card surface is unaffected; and the two Track-D card registries (**forge** C36/D1 +
+**transport** C37/D2) are brought onto the same `PerTenant` routing the A3*/C2b seams already use, so
+`Get/List/Put/Delete` scope to the caller's verified tenant on every CRUD service (proven in the hermetic
+gate over the file/memory tier). The portal admin surface (tenants/roles/forges/transports) remains a
+noted future. **With E1, the config-architecture build is complete** — only the explicitly-deferred tails
+(D1b gitea/bitbucket + card-by-id, D2b transport lift + matrix/teams + C18 live announce) remain.
 
 ## Components
 
 | C# | Component | State | Notes |
 |---|---|---|---|
 | C32 | Config-card pattern (meta) | ⬜ | Convention; formalizes the shipped `ProviderRegistryService` shape. |
-| C33 | Authentication interceptor (OIDC/JWT) | ⬜ | **Keystone.** Concretizes multi-session 07-security. No proto change. |
-| C34 | RBAC model | ⬜ | Roles/permissions as cards; gates control-plane RPCs (not the tool `Policy`). |
-| C35 | Per-tenant config plane | ⬜ | = multi-tenancy C30 applied to config stores. |
+| C33 | Authentication interceptor (OIDC/JWT) | ✅ | Auth tower layer (B1 #295). Concretizes multi-session 07-security. No proto change. |
+| C34 | RBAC model | ✅ | `authorize` + role cards (C1 #297, C1b #301); gates control-plane RPCs (not the tool `Policy`). E1 adds the operator/tenant write split. |
+| C35 | Per-tenant config plane | ✅ | `PerTenant<Store>` (C2 #302); = multi-tenancy C30 applied to config stores. E1 extends it to forge/transport. |
 | C36 | Forge registry | 🟡 | Forge cards + `ForgeRegistryService` seam (D1); allow-list dropped, kind/base-url/repo-encoding lifted into the card and resolved at build time. |
 | C37 | Message-transport registry | 🟡 | Bidirectional `MessageTransport` (recv + new outbound `post`) + `TransportRegistryService` seam (D2); Slack = one impl; `slack_*` lift into a card-by-id deferred to D2b. |
-| C38 | Per-tenant prompt storage | ⬜ | `PerTenant` wrap of existing `PromptStore`; no trait change. |
+| C38 | Per-tenant prompt storage | ✅ | `StorePrompt::with_tenant` + `PerTenant` wrap (C2 #302); no trait change. |
 | C39 | LLM upstream/pool config | 🟡 | Reference impl **shipped** (model-router); only convergence onto C41/C35 pending. |
-| C40 | Control-plane consolidation | ⬜ | Composes C33/C34/C35 over all control services; = multi-tenancy C31. |
-| C41 | Transactional config data layer | ⬜ | **Keystone.** Postgres/sqlite/file behind one store; atomic multi-card txns. |
+| C40 | Control-plane consolidation | 🟡 | Operator/tenant write split + per-tenant forge/transport (E1, this PR); composes C33/C34/C35 over all control services; = multi-tenancy C31. |
+| C41 | Transactional config data layer | ✅ | **Keystone.** `agent-config-store`: Postgres/sqlite/file behind one store (A1 #294, A2 #296, A3* #298–#300); atomic multi-card txns. |
 
 ## Proposed increment ordering
 
@@ -76,15 +85,15 @@ of done — is [`09-increments.md`](09-increments.md). This table is the **live 
 | A3b | Converge `agent-review-fleet` | ✅ | [#299](https://github.com/randomizedcoder/agent-seddon/pull/299) | A2 |
 | A3c | Converge `agent-prompt` (outlier) | ✅ | [#300](https://github.com/randomizedcoder/agent-seddon/pull/300) | A2 |
 | B1 | `AuthInterceptor` tower layer + JWKS/JWT + `[auth]` | ✅ | [#295](https://github.com/randomizedcoder/agent-seddon/pull/295) | — |
-| C1 | C34 RBAC enforcement core (`authorize` + gate all control-plane RPCs) | 🟡 | [#297](https://github.com/randomizedcoder/agent-seddon/pull/297) | B1, A1 |
+| C1 | C34 RBAC enforcement core (`authorize` + gate all control-plane RPCs) | ✅ | [#297](https://github.com/randomizedcoder/agent-seddon/pull/297) | B1, A1 |
 | C1b | RBAC role cards + `RoleService` seam (needs the shared store) | ✅ | [#301](https://github.com/randomizedcoder/agent-seddon/pull/301) | C1, A3 |
 | C2 | C35 per-tenant plane (+ C38 prompt) | ✅ | [#302](https://github.com/randomizedcoder/agent-seddon/pull/302) | B1, A3 |
 | C2b | Per-tenant **Graph** (file path-namespaced) | ✅ | [#303](https://github.com/randomizedcoder/agent-seddon/pull/303) | C2 |
 | C2c-1 | Durable **Scheduler** foundation (`StoreScheduler` + `Backend::tenants`) | ✅ | [#304](https://github.com/randomizedcoder/agent-seddon/pull/304) | A3 |
 | C2c-2 | Per-tenant Scheduler **driver + serve** (tenant-fanning) | ✅ | [#305](https://github.com/randomizedcoder/agent-seddon/pull/305) | C2c-1, plane-01 |
 | D1 | C36 forge registry | ✅ | [#306](https://github.com/randomizedcoder/agent-seddon/pull/306) | A1 (+C2 per-tenant) |
-| D2 | C37 message-transport registry | 🟡 | [#307](https://github.com/randomizedcoder/agent-seddon/pull/307) | A1 (+C2 per-tenant) |
-| E1 | C40 control-plane consolidation | ⬜ | — | B1, C1, C2 |
+| D2 | C37 message-transport registry | ✅ | [#307](https://github.com/randomizedcoder/agent-seddon/pull/307) | A1 (+C2 per-tenant) |
+| E1 | C40 control-plane consolidation | 🟡 | — | B1, C1, C2 |
 
 ## Dependencies (cross-track)
 
