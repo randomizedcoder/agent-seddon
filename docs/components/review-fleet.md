@@ -57,8 +57,9 @@ extra fields:
 | Field | Meaning |
 |---|---|
 | `id`, `user`, `repo` | Path-safe segments (`safe_segment`); the workspace is `root/<user>/<id>` |
-| `backend`, `base_url` | Forge kind (`github`/`gitlab`/`""`) + API base URL |
+| `backend`, `base_url` | Inline forge kind (`github`/`gitlab`/`gitea`/`bitbucket`/`""`) + API base URL |
 | `token_ref` | `env:NAME` / `file:/path` — **never** a raw token (see below) |
+| `forge_id` | Persisted `ForgeCard` id (config C36 / D1b). When set, the forge is built from that card and `backend`/`base_url`/`token_ref` are ignored; empty ⇒ the inline fields are used. Path-safe. |
 | `skill` | Review skill/prompt selector |
 | `slack_trigger_channel`, `slack_progress_channel` | Slack triggers / progress (inc 4/7) |
 | `poll_secs` | Forge poll interval, clamped to `[MIN_FLEET_POLL_SECS, MAX_FLEET_POLL_SECS]` |

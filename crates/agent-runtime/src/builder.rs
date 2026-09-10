@@ -1087,6 +1087,22 @@ pub async fn build_agent_with(
     #[cfg(not(feature = "review"))]
     let review_collector_seam: Option<Arc<dyn agent_core::ReviewCollector>> = None;
 
+    // The forge-card registry (config C36 / D1): resolved once here so both the fleet
+    // review factory (below, for `forge_id` rows) and the agent's `forge_registry()`
+    // accessor (attached later) share one instance. Only built when a consumer exists
+    // (the review factory or the `forge-registry-store` accessor path).
+    #[cfg(any(feature = "review", feature = "forge-registry-store"))]
+    let forge_registry_seam = {
+        #[cfg(feature = "forge-registry-store")]
+        {
+            resolve_forge_registry(&cfg)?
+        }
+        #[cfg(not(feature = "forge-registry-store"))]
+        {
+            Option::<Arc<dyn agent_core::ForgeRegistry>>::None
+        }
+    };
+
     // Per-row fleet review factory (review-fleet multi-repo grounding): wired only when a
     // **local** review engine is configured AND a `[review_fleet] root` is set, so a single
     // `--serve-fleet` process grounds each roster row against its *own* repo + forge instead
@@ -1110,6 +1126,7 @@ pub async fn build_agent_with(
                     llm_pool_seam.clone(),
                     search,
                     cfg.review.context_budget_bytes,
+                    forge_registry_seam.clone(),
                     metrics.clone(),
                 ))
                     as Arc<dyn agent_core::FleetReviewFactory>)
@@ -1318,7 +1335,7 @@ pub async fn build_agent_with(
     // The forge-card store (config C36 / D1), held for `--serve-forge-registry`.
     // Not consumed by the loop; hosted for runtime CRUD over the git-host cards.
     #[cfg(feature = "forge-registry-store")]
-    let agent = match resolve_forge_registry(&cfg)? {
+    let agent = match forge_registry_seam {
         Some(r) => agent.with_forge_registry(r),
         None => agent,
     };

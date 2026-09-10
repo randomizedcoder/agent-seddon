@@ -1858,6 +1858,8 @@ fn fleet_row(id: &str, token_ref: &str, enabled: bool) -> agent_core::FleetSessi
         skill: "code-review".into(),
         poll_secs: 600,
         enabled,
+        // A persisted forge-card reference (config C36 / D1b) rides the wire verbatim.
+        forge_id: "gh-cloud".into(),
         ..Default::default()
     }
 }

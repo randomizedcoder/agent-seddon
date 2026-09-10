@@ -5,9 +5,10 @@
 //! process cwd — so only the one repo `[git]`/`[forge]` pointed at could actually be reviewed.
 //! [`FleetReviewCtxFactory`] lifts that limit: given a roster row it resolves/creates *that
 //! row's own* bare mirror under the fleet root and builds a [`ReviewOrchestrator`] bound to that
-//! repo **and the row's forge** (via the existing [`crate::registry::build_session_forge`]),
-//! wrapped as an [`agent_core::ReviewGrounder`]. The fleet orchestrator then fetches, worktrees,
-//! and grounds each PR against the correct repo.
+//! repo **and the row's forge** — inline (via [`crate::registry::build_session_forge`]) or, when
+//! the row sets `forge_id`, resolved from a persisted [`agent_core::ForgeCard`] in the
+//! `ForgeRegistry` (config C36 / D1b) — wrapped as an [`agent_core::ReviewGrounder`]. The fleet
+//! orchestrator then fetches, worktrees, and grounds each PR against the correct repo.
 //!
 //! **Untrusted rows.** `row.user`/`row.id` become path segments and are re-validated through
 //! [`SessionKey::parse`] + [`SessionKey::path_under`] (`safe_segment`, fail-closed) before any
@@ -27,7 +28,7 @@ use async_trait::async_trait;
 
 use crate::agent::EngineGrounder;
 use crate::config::ReviewCfg;
-use crate::registry::build_session_forge;
+use crate::registry::{build_session_forge, build_session_forge_from_card};
 
 /// Derive the `git clone` URL for a roster row from its `repo` slug (`owner__name`, or
 /// gitlab subgroups `group__sub__name`), `backend`, and optional API `base_url`.
@@ -168,6 +169,9 @@ pub(crate) struct FleetReviewCtxFactory {
     search: Option<Arc<dyn agent_core::SearchBackend>>,
     /// Byte budget for the rendered grounded brief (same knob as the in-loop review).
     budget: usize,
+    /// The forge-card registry (config C36 / D1b), so a row that references a forge by
+    /// `forge_id` builds from the persisted card. `None` ⇒ only inline-forge rows work.
+    forge_registry: Option<Arc<dyn agent_core::ForgeRegistry>>,
     metrics: Metrics,
     /// Built `(repo, grounder)` by `row.id`. A repeated trigger reuses the checkout + engine.
     cache: Mutex<HashMap<String, FleetReviewCtx>>,
@@ -183,6 +187,7 @@ impl FleetReviewCtxFactory {
         pool: Option<Arc<dyn agent_core::LlmPool>>,
         search: Option<Arc<dyn agent_core::SearchBackend>>,
         budget: usize,
+        forge_registry: Option<Arc<dyn agent_core::ForgeRegistry>>,
         metrics: Metrics,
     ) -> Self {
         Self {
@@ -193,6 +198,7 @@ impl FleetReviewCtxFactory {
             pool,
             search,
             budget,
+            forge_registry,
             metrics,
             cache: Mutex::new(HashMap::new()),
         }
@@ -235,9 +241,38 @@ impl FleetReviewFactory for FleetReviewCtxFactory {
             })?;
         }
 
-        let url = clone_url(&row.repo, &row.backend, &row.base_url)
+        // Resolve the row's forge (fail-closed on an unresolvable/malformed credential)
+        // and the effective backend kind + base_url that drive the clone URL and PR-ref
+        // layout. A row references its forge either INLINE (`backend`/`base_url`) or by a
+        // persisted card id (`forge_id`, config C36 / D1b); the card then supplies the
+        // kind/base_url/credential (its `repo` slug still comes from the row).
+        let (backend, base_url, forge) = if row.forge_id.is_empty() {
+            let forge = build_session_forge(row).map_err(|e| {
+                Error::Fleet(format!("fleet row `{}`: forge build failed: {e}", row.id))
+            })?;
+            (row.backend.clone(), row.base_url.clone(), forge)
+        } else {
+            let reg = self.forge_registry.as_ref().ok_or_else(|| {
+                Error::Fleet(format!(
+                    "fleet row `{}` references forge_id `{}` but no forge registry is configured",
+                    row.id, row.forge_id
+                ))
+            })?;
+            let card = reg.get(&row.forge_id).await.map_err(|e| {
+                Error::Fleet(format!(
+                    "fleet row `{}`: resolving forge card `{}`: {e}",
+                    row.id, row.forge_id
+                ))
+            })?;
+            let forge = build_session_forge_from_card(row, &card).map_err(|e| {
+                Error::Fleet(format!("fleet row `{}`: forge build failed: {e}", row.id))
+            })?;
+            (card.kind.clone(), card.base_url.clone(), forge)
+        };
+
+        let url = clone_url(&row.repo, &backend, &base_url)
             .map_err(|e| Error::Config(format!("fleet row `{}`: {e}", row.id)))?;
-        let template = pr_ref_template_for(&row.backend, &self.pr_ref_override)
+        let template = pr_ref_template_for(&backend, &self.pr_ref_override)
             .map_err(|e| Error::Config(format!("fleet row `{}`: {e}", row.id)))?;
 
         let mut cli = agent_git::CliBackend::new(mirror.clone(), mirror.clone(), worktrees, url)
@@ -246,11 +281,6 @@ impl FleetReviewFactory for FleetReviewCtxFactory {
             cli = cli.with_sandbox(sandbox.clone());
         }
         let repo: Arc<dyn agent_core::RepoBackend> = Arc::new(cli);
-
-        // The row's own forge (fail-closed on an unresolvable/malformed credential).
-        let forge = build_session_forge(row).map_err(|e| {
-            Error::Fleet(format!("fleet row `{}`: forge build failed: {e}", row.id))
-        })?;
 
         // The engine + grounder, bound to *this* repo + forge, with the same `[review]`
         // collector set the in-loop review uses. `review_root` is the mirror (the repo
@@ -299,6 +329,7 @@ mod tests {
             enabled: true,
             created_at: 0,
             updated_at: 0,
+            forge_id: String::new(),
         }
     }
 
@@ -487,6 +518,13 @@ mod tests {
     // ---- FleetReviewCtxFactory::build ----------------------------------------
 
     fn factory(root: PathBuf) -> FleetReviewCtxFactory {
+        factory_with_forge(root, None)
+    }
+
+    fn factory_with_forge(
+        root: PathBuf,
+        forge_registry: Option<Arc<dyn agent_core::ForgeRegistry>>,
+    ) -> FleetReviewCtxFactory {
         FleetReviewCtxFactory::new(
             root,
             ReviewCfg::default(),
@@ -495,6 +533,7 @@ mod tests {
             None,
             None,
             4096,
+            forge_registry,
             Metrics::new(),
         )
     }
@@ -527,6 +566,81 @@ mod tests {
         // Both seams are wired.
         let _ = ctx.repo;
         let _ = ctx.grounder;
+    }
+
+    // A minimal in-memory forge-card registry double for the card-by-id path.
+    struct FakeForgeReg(std::collections::HashMap<String, agent_core::ForgeCard>);
+    #[async_trait]
+    impl agent_core::ForgeRegistry for FakeForgeReg {
+        async fn list(&self) -> Result<Vec<agent_core::ForgeCard>> {
+            Ok(self.0.values().cloned().collect())
+        }
+        async fn get(&self, id: &str) -> Result<agent_core::ForgeCard> {
+            self.0
+                .get(id)
+                .cloned()
+                .ok_or_else(|| Error::Config(format!("not found: {id}")))
+        }
+        async fn put(&self, c: agent_core::ForgeCard) -> Result<agent_core::ForgeCard> {
+            Ok(c)
+        }
+        async fn delete(&self, _id: &str) -> Result<bool> {
+            Ok(false)
+        }
+    }
+
+    fn gh_card(id: &str) -> agent_core::ForgeCard {
+        agent_core::ForgeCard {
+            id: id.into(),
+            kind: "github".into(),
+            enabled: true,
+            base_url: String::new(),
+            token_ref: String::new(),
+            repo_encoding: agent_core::RepoEncoding::OwnerName,
+            timeout_secs: 30,
+            max_retries: 3,
+        }
+    }
+
+    // positive (config C36 / D1b): a row with NO inline backend but a `forge_id`
+    // resolves the persisted card, so the clone URL + PR-ref use the CARD's kind —
+    // the inline path would fail on the empty backend. Proves the registry is threaded.
+    #[cfg(feature = "forge-github")]
+    #[tokio::test]
+    async fn positive_forge_id_row_builds_via_card() {
+        let tmp = agent_testkit::tempdir();
+        let reg: Arc<dyn agent_core::ForgeRegistry> = Arc::new(FakeForgeReg(
+            [("gh".to_string(), gh_card("gh"))].into_iter().collect(),
+        ));
+        let f = factory_with_forge(tmp.as_path().to_path_buf(), Some(reg));
+        let mut r = row(
+            "rtl-fun",
+            "randomizedcoder",
+            "randomizedcoder__rtl-fun",
+            "", // no inline backend — the card supplies the kind
+            "",
+        );
+        r.forge_id = "gh".into();
+        let ctx = f.build(&r).await.expect("forge_id row builds via the card");
+        let base = tmp.as_path().join("randomizedcoder").join("rtl-fun");
+        assert!(
+            base.join("mirror").is_dir(),
+            "workspace created for a card row"
+        );
+        let _ = ctx.repo;
+    }
+
+    // adversarial: a `forge_id` row with NO registry configured fails closed.
+    #[tokio::test]
+    async fn adversarial_forge_id_row_without_registry_errs() {
+        let tmp = agent_testkit::tempdir();
+        let f = factory(tmp.as_path().to_path_buf()); // None registry
+        let mut r = row("x", "u", "u__r", "", "");
+        r.forge_id = "gh".into();
+        assert!(
+            f.build(&r).await.is_err(),
+            "a card reference needs a registry (fail closed)"
+        );
     }
 
     // positive: a second build for the same row.id reuses the cached context.
