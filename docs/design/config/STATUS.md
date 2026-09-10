@@ -62,7 +62,7 @@ of done — is [`09-increments.md`](09-increments.md). This table is the **live 
 | C1 | C34 RBAC enforcement core (`authorize` + gate all control-plane RPCs) | 🟡 | [#297](https://github.com/randomizedcoder/agent-seddon/pull/297) | B1, A1 |
 | C1b | RBAC role cards + `RoleService` seam (needs the shared store) | ✅ | [#301](https://github.com/randomizedcoder/agent-seddon/pull/301) | C1, A3 |
 | C2 | C35 per-tenant plane (+ C38 prompt) | ✅ | [#302](https://github.com/randomizedcoder/agent-seddon/pull/302) | B1, A3 |
-| C2b | Per-tenant **Graph** (file path-namespaced) | 🟡 | _this PR_ | C2 |
+| C2b | Per-tenant **Graph** (file path-namespaced) | 🟡 | [#303](https://github.com/randomizedcoder/agent-seddon/pull/303) | C2 |
 | C2c | Per-tenant **Scheduler** (durable backend + fanning driver) | ⬜ | — (design [10](10-per-tenant-scheduler.md)) | C2, plane-01 |
 | D1 | C36 forge registry | ⬜ | — | A1 (+C2 per-tenant) |
 | D2 | C37 message-transport registry | ⬜ | — | A1 (+C2 per-tenant) |
