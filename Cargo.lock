@@ -294,6 +294,7 @@ dependencies = [
  "dhat",
  "iai-callgrind",
  "prometheus",
+ "rstest",
 ]
 
 [[package]]

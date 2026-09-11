@@ -138,6 +138,20 @@ pub struct Metrics {
     review_runs: IntCounterVec,
     review_total_duration: HistogramVec,
     review_parallelism: Histogram,
+    // Review-fleet lifecycle families — bounded `(user, repo)` tenancy, recorded via
+    // [`FleetMetrics`] (`for_fleet`). `repo` is the operator-roster `FleetSession.repo`
+    // (`O(sessions)`, `safe_segment`-valid); PR is a span attribute, never a label.
+    // Distinct repos are backstopped by the `fleet_repos` LRU (docs/design/observability).
+    fleet_triggers: IntCounterVec,
+    fleet_reviews: IntCounterVec,
+    fleet_progress: IntCounterVec,
+    fleet_approvals: IntCounterVec,
+    fleet_approval_latency: HistogramVec,
+    fleet_post_failures: IntCounterVec,
+    /// LRU cap on distinct fleet `(user, repo)` label pairs — the lifecycle backstop
+    /// for the `repo` dimension. Shared across `Metrics` clones (Arc), so an eviction
+    /// removes that pair's series from the one registry.
+    fleet_repos: Arc<std::sync::Mutex<FleetRepoLru>>,
     web_searches: IntCounterVec,
     web_search_seconds: HistogramVec,
     web_search_results: IntCounterVec,
@@ -799,6 +813,55 @@ impl Metrics {
             "Review parallelism payoff (sum of collector work ÷ total wall-clock)",
         ))
         .unwrap();
+        let fleet_triggers = IntCounterVec::new(
+            Opts::new(
+                "agent_fleet_triggers_total",
+                "Review-fleet triggers, by source (poll|slack), tenant and repo",
+            ),
+            &["source", "user", "repo"],
+        )
+        .unwrap();
+        let fleet_reviews = IntCounterVec::new(
+            Opts::new(
+                "agent_fleet_reviews_total",
+                "Review-fleet review lifecycle transitions, by status, tenant and repo",
+            ),
+            &["status", "user", "repo"],
+        )
+        .unwrap();
+        let fleet_progress = IntCounterVec::new(
+            Opts::new(
+                "agent_fleet_progress_total",
+                "Review-fleet progress-feed beats, by beat, outcome, tenant and repo",
+            ),
+            &["beat", "outcome", "user", "repo"],
+        )
+        .unwrap();
+        let fleet_approvals = IntCounterVec::new(
+            Opts::new(
+                "agent_fleet_approvals_total",
+                "Review-fleet approval outcomes, by outcome, tenant and repo",
+            ),
+            &["outcome", "user", "repo"],
+        )
+        .unwrap();
+        let fleet_approval_latency = HistogramVec::new(
+            HistogramOpts::new(
+                "agent_fleet_approval_latency_seconds",
+                "Review-fleet drafted→posted approval latency, by tenant and repo",
+            ),
+            &["user", "repo"],
+        )
+        .unwrap();
+        let fleet_post_failures = IntCounterVec::new(
+            Opts::new(
+                "agent_fleet_post_failures_total",
+                "Review-fleet progress/approval post failures, by transport, tenant and repo",
+            ),
+            &["transport", "user", "repo"],
+        )
+        .unwrap();
+        let fleet_repos = Arc::new(std::sync::Mutex::new(FleetRepoLru::new(MAX_FLEET_REPOS)));
         let web_searches = IntCounterVec::new(
             Opts::new(
                 "agent_web_searches_total",
@@ -1306,6 +1369,12 @@ impl Metrics {
             Box::new(review_runs.clone()),
             Box::new(review_total_duration.clone()),
             Box::new(review_parallelism.clone()),
+            Box::new(fleet_triggers.clone()),
+            Box::new(fleet_reviews.clone()),
+            Box::new(fleet_progress.clone()),
+            Box::new(fleet_approvals.clone()),
+            Box::new(fleet_approval_latency.clone()),
+            Box::new(fleet_post_failures.clone()),
             Box::new(web_searches.clone()),
             Box::new(web_search_seconds.clone()),
             Box::new(web_search_results.clone()),
@@ -1450,6 +1519,13 @@ impl Metrics {
             review_runs,
             review_total_duration,
             review_parallelism,
+            fleet_triggers,
+            fleet_reviews,
+            fleet_progress,
+            fleet_approvals,
+            fleet_approval_latency,
+            fleet_post_failures,
+            fleet_repos,
             web_searches,
             web_search_seconds,
             web_search_results,
@@ -1534,6 +1610,73 @@ impl Metrics {
             inner: self.clone(),
             session: session.to_string(),
             user: user.to_string(),
+        }
+    }
+
+    /// A per-`(tenant, repo)` recorder over the review-fleet families. `user` is the
+    /// verified org (C25); `repo` is the operator-roster `FleetSession.repo` (`owner__name`),
+    /// both `safe_segment`-valid upstream. The pair is admitted into the LRU backstop on
+    /// construction, so the number of distinct labelled repos stays bounded — the
+    /// least-recently-used pair's fleet series are removed on overflow. Recorded from the
+    /// fleet orchestrator/approver/progress-feed in Phase 2 (docs/design/observability).
+    pub fn for_fleet(&self, user: &str, repo: &str) -> FleetMetrics {
+        if let Ok(mut lru) = self.fleet_repos.lock() {
+            if let Some((evicted_user, evicted_repo)) = lru.admit(user, repo) {
+                self.remove_fleet_series(&evicted_user, &evicted_repo);
+            }
+        }
+        FleetMetrics {
+            inner: self.clone(),
+            user: user.to_string(),
+            repo: repo.to_string(),
+        }
+    }
+
+    /// Shrink the fleet-repo LRU cap and clear it — test-only, so the LRU-eviction
+    /// backstop can be exercised without inserting `MAX_FLEET_REPOS` distinct repos.
+    #[cfg(test)]
+    fn set_fleet_repo_cap(&self, cap: usize) {
+        if let Ok(mut lru) = self.fleet_repos.lock() {
+            *lru = FleetRepoLru::new(cap);
+        }
+    }
+
+    /// Remove every fleet-family series for one `(user, repo)` pair — used by the LRU
+    /// backstop on eviction and by [`FleetMetrics::retire`]. Iterates the *enumerable*
+    /// discriminator label values (the fleet families' `source`/`status`/`beat`/`outcome`/
+    /// `transport` sets are all small constants); a series that never existed is a silent
+    /// no-op. A transport kind not listed here (a deferred teams/irc/signal impl) would
+    /// leave a frozen series — acceptable for a lifecycle backstop, and documented.
+    fn remove_fleet_series(&self, user: &str, repo: &str) {
+        for source in ["poll", "slack"] {
+            let _ = self
+                .fleet_triggers
+                .remove_label_values(&[source, user, repo]);
+        }
+        for status in ["reviewing", "drafted", "superseded", "uptodate"] {
+            let _ = self
+                .fleet_reviews
+                .remove_label_values(&[status, user, repo]);
+        }
+        for beat in ["found", "drafted", "posted"] {
+            for outcome in ["posted", "softfailed", "skipped"] {
+                let _ = self
+                    .fleet_progress
+                    .remove_label_values(&[beat, outcome, user, repo]);
+            }
+        }
+        for outcome in ["posted", "already", "notfound"] {
+            let _ = self
+                .fleet_approvals
+                .remove_label_values(&[outcome, user, repo]);
+        }
+        let _ = self
+            .fleet_approval_latency
+            .remove_label_values(&[user, repo]);
+        for transport in ["slack", "matrix"] {
+            let _ = self
+                .fleet_post_failures
+                .remove_label_values(&[transport, user, repo]);
         }
     }
 
@@ -2271,6 +2414,52 @@ impl Metrics {
     }
 }
 
+/// The LRU cap on distinct fleet `(user, repo)` label pairs. Fleet repos come from the
+/// operator `FleetSession` roster (`O(sessions)` — locked at low hundreds), so this is a
+/// backstop that normal operation never reaches; it bounds the `repo` dimension under
+/// misconfig/churn, the same lifecycle mitigation the session map applies to `(session, user)`.
+const MAX_FLEET_REPOS: usize = 1024;
+
+/// Bounded LRU over distinct fleet `(user, repo)` pairs — the lifecycle backstop for the
+/// `repo` metric dimension (docs/design/observability/01-metric-census.md). Insertion order
+/// is least-recently-used first; re-admitting a live pair moves it to the back. When a new
+/// pair would exceed `cap`, the least-recently-used pair is evicted and its fleet series
+/// removed by [`Metrics::remove_fleet_series`].
+struct FleetRepoLru {
+    cap: usize,
+    /// `(user, repo)` pairs, least-recently-used at the front.
+    seen: std::collections::VecDeque<(String, String)>,
+}
+
+impl FleetRepoLru {
+    fn new(cap: usize) -> Self {
+        Self {
+            // A zero cap would make every admit evict itself; clamp to at least one so a
+            // hostile/degenerate config can't wedge the recorder.
+            cap: cap.max(1),
+            seen: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// Admit `(user, repo)`, returning the evicted pair when admission overflowed `cap`.
+    /// A pair already live is moved to the back (most-recently-used) with no eviction.
+    fn admit(&mut self, user: &str, repo: &str) -> Option<(String, String)> {
+        if let Some(pos) = self.seen.iter().position(|(u, r)| u == user && r == repo) {
+            if let Some(pair) = self.seen.remove(pos) {
+                self.seen.push_back(pair);
+            }
+            return None;
+        }
+        let evicted = if self.seen.len() >= self.cap {
+            self.seen.pop_front()
+        } else {
+            None
+        };
+        self.seen.push_back((user.to_string(), repo.to_string()));
+        evicted
+    }
+}
+
 /// A per-tenant recorder over the curated loop-level families, binding `(session,
 /// user)` once (built via [`Metrics::for_session`]). The agent loop holds one per
 /// session and records spend/activity through it, so a run is attributable per tenant
@@ -2417,6 +2606,88 @@ impl SessionMetrics {
     }
 }
 
+/// A per-`(tenant, repo)` recorder over the review-fleet families, binding `(user, repo)`
+/// once (built via [`Metrics::for_fleet`]). The fleet orchestrator/approver/progress-feed
+/// hold one per session and record lifecycle events through it, so the fleet is
+/// attributable per tenant and per repo (docs/design/observability/01-metric-census.md).
+/// PR is deliberately **not** a field here — it rides the `fleet.*` OTEL span as an
+/// attribute, never a Prometheus label. Discriminator values are recorded verbatim; the
+/// caller passes bounded constants (`source`/`status`/`beat`/`outcome`/`transport`).
+#[derive(Clone)]
+pub struct FleetMetrics {
+    inner: Metrics,
+    user: String,
+    repo: String,
+}
+
+impl FleetMetrics {
+    /// This recorder's `(user, repo)` label pair, for the families labelled by exactly it.
+    fn pair(&self) -> [&str; 2] {
+        [self.user.as_str(), self.repo.as_str()]
+    }
+
+    /// A trigger fired for this repo (`source` = `poll` | `slack`).
+    pub fn on_trigger(&self, source: &str) {
+        self.inner
+            .fleet_triggers
+            .with_label_values(&[source, self.user.as_str(), self.repo.as_str()])
+            .inc();
+    }
+
+    /// A review lifecycle transition (`status` = `reviewing` | `drafted` | `superseded` |
+    /// `uptodate`).
+    pub fn on_review(&self, status: &str) {
+        self.inner
+            .fleet_reviews
+            .with_label_values(&[status, self.user.as_str(), self.repo.as_str()])
+            .inc();
+    }
+
+    /// A progress-feed beat (`beat` = `found` | `drafted` | `posted`; `outcome` =
+    /// `posted` | `softfailed` | `skipped`).
+    pub fn on_progress(&self, beat: &str, outcome: &str) {
+        self.inner
+            .fleet_progress
+            .with_label_values(&[beat, outcome, self.user.as_str(), self.repo.as_str()])
+            .inc();
+    }
+
+    /// An approval outcome (`outcome` = `posted` | `already` | `notfound`).
+    pub fn on_approval(&self, outcome: &str) {
+        self.inner
+            .fleet_approvals
+            .with_label_values(&[outcome, self.user.as_str(), self.repo.as_str()])
+            .inc();
+    }
+
+    /// The drafted→posted approval latency. A non-finite or negative value (a hostile or
+    /// clock-skewed span pair would produce one) is dropped, mirroring the cost/token
+    /// clamp on [`SessionMetrics`], so it can never poison the histogram.
+    pub fn observe_approval_latency(&self, seconds: f64) {
+        if seconds.is_finite() && seconds >= 0.0 {
+            self.inner
+                .fleet_approval_latency
+                .with_label_values(&self.pair())
+                .observe(seconds);
+        }
+    }
+
+    /// A failed progress/approval post, by `transport` kind (the transport's `kind()`).
+    pub fn on_post_failure(&self, transport: &str) {
+        self.inner
+            .fleet_post_failures
+            .with_label_values(&[transport, self.user.as_str(), self.repo.as_str()])
+            .inc();
+    }
+
+    /// Retire this `(user, repo)` pair's fleet series on session end — the fleet analogue
+    /// of [`SessionMetrics::retire`], so a torn-down session's counters don't linger.
+    /// Idempotent: a missing series is a no-op.
+    pub fn retire(&self) {
+        self.inner.remove_fleet_series(&self.user, &self.repo);
+    }
+}
+
 fn bool_label(b: bool) -> &'static str {
     if b {
         "true"
@@ -2434,6 +2705,7 @@ impl Default for Metrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     #[test]
     fn encodes_incremented_metrics() {
@@ -2749,5 +3021,180 @@ mod tests {
                 "a health metric leaked a tenant label: {line}"
             );
         }
+    }
+
+    // --- Phase 1: review-fleet families (tenant + bounded repo) --------------
+    //
+    // The recorder itself is validation-agnostic (it records the segments verbatim,
+    // exactly as `SessionMetrics` does); `safe_segment` validation of a hostile
+    // `user`/`repo` is the caller's job at the fleet call sites and the gRPC span helper
+    // (agent-grpc), so the adversarial *rejection* rows live there. Here the adversarial
+    // coverage is the hostile-number clamp on the latency histogram and the LRU cardinality
+    // backstop under repo churn.
+
+    #[derive(Clone, Copy, Debug)]
+    enum Ev {
+        Trigger,
+        Review,
+        Progress,
+        Approval,
+        Latency,
+        PostFailure,
+    }
+
+    fn fire(fm: &FleetMetrics, ev: Ev) {
+        match ev {
+            Ev::Trigger => fm.on_trigger("poll"),
+            Ev::Review => fm.on_review("drafted"),
+            Ev::Progress => fm.on_progress("posted", "posted"),
+            Ev::Approval => fm.on_approval("posted"),
+            Ev::Latency => fm.observe_approval_latency(2.0),
+            Ev::PostFailure => fm.on_post_failure("slack"),
+        }
+    }
+
+    /// Distinct `repo="…"` label values present for `family` in the exposition.
+    fn repos_for(text: &str, family: &str) -> std::collections::BTreeSet<String> {
+        text.lines()
+            .filter(|l| l.starts_with(family))
+            .filter_map(|l| {
+                let rest = &l[l.find("repo=\"")? + 6..];
+                Some(rest[..rest.find('"')?].to_string())
+            })
+            .collect()
+    }
+
+    #[rstest]
+    // desc: a trigger ticks agent_fleet_triggers_total → expect the family present, labelled (user,repo).
+    #[case::positive_trigger(Ev::Trigger, "agent_fleet_triggers_total")]
+    // desc: a review transition ticks agent_fleet_reviews_total → expect (user,repo) labels.
+    #[case::positive_review(Ev::Review, "agent_fleet_reviews_total")]
+    // desc: a progress beat ticks agent_fleet_progress_total → expect (user,repo) labels.
+    #[case::positive_progress(Ev::Progress, "agent_fleet_progress_total")]
+    // desc: an approval ticks agent_fleet_approvals_total → expect (user,repo) labels.
+    #[case::positive_approval(Ev::Approval, "agent_fleet_approvals_total")]
+    // desc: a latency sample ticks the histogram _count series → expect (user,repo) labels.
+    #[case::positive_latency(Ev::Latency, "agent_fleet_approval_latency_seconds_count")]
+    // desc: a failed post ticks agent_fleet_post_failures_total → expect (user,repo) labels.
+    #[case::positive_post_failure(Ev::PostFailure, "agent_fleet_post_failures_total")]
+    fn positive_fleet_event_records_with_tenant_and_repo(#[case] ev: Ev, #[case] family: &str) {
+        let m = Metrics::new();
+        let fm = m.for_fleet("acme", "acme__web");
+        fire(&fm, ev);
+        let text = m.encode_text();
+        let line = text
+            .lines()
+            .find(|l| l.starts_with(family))
+            .unwrap_or_else(|| panic!("missing `{family}` in:\n{text}"));
+        assert!(
+            line.contains("user=\"acme\""),
+            "no tenant label on {family}: {line}"
+        );
+        assert!(
+            line.contains("repo=\"acme__web\""),
+            "no repo label on {family}: {line}"
+        );
+    }
+
+    #[test]
+    // desc (corner_labels_have_no_pr): PR is never a metric label — no agent_fleet_* line carries `pr=`.
+    fn corner_labels_have_no_pr() {
+        let m = Metrics::new();
+        let fm = m.for_fleet("acme", "acme__web");
+        for ev in [
+            Ev::Trigger,
+            Ev::Review,
+            Ev::Progress,
+            Ev::Approval,
+            Ev::Latency,
+            Ev::PostFailure,
+        ] {
+            fire(&fm, ev);
+        }
+        let text = m.encode_text();
+        for line in text.lines().filter(|l| l.starts_with("agent_fleet_")) {
+            assert!(
+                !line.contains("pr=\""),
+                "PR leaked into a fleet metric label: {line}"
+            );
+        }
+    }
+
+    #[rstest]
+    // desc: under the cap every distinct repo keeps its series → expect all present.
+    #[case::positive_under_cap(3, &["r1", "r2", "r3"], &["r1", "r2", "r3"])]
+    // desc (boundary_repo_label_lru_capped): a repo past the cap evicts the least-recently-used → oldest gone.
+    #[case::boundary_cap_evicts_oldest(2, &["r1", "r2", "r3"], &["r2", "r3"])]
+    // desc (corner): re-touching a live repo refreshes it, so a different repo is evicted instead.
+    #[case::corner_readmit_keeps_recent(2, &["r1", "r2", "r1", "r3"], &["r1", "r3"])]
+    fn boundary_repo_label_lru_capped(
+        #[case] cap: usize,
+        #[case] seq: &[&str],
+        #[case] expected: &[&str],
+    ) {
+        let m = Metrics::new();
+        m.set_fleet_repo_cap(cap);
+        for r in seq {
+            m.for_fleet("acme", r).on_trigger("poll");
+        }
+        let got = repos_for(&m.encode_text(), "agent_fleet_triggers_total");
+        let want: std::collections::BTreeSet<String> =
+            expected.iter().map(|s| s.to_string()).collect();
+        assert_eq!(got, want, "LRU repo set mismatch");
+    }
+
+    #[rstest]
+    // desc: a finite positive latency is recorded → expect one sample in _count.
+    #[case::positive_finite(1.5, 1)]
+    // desc (boundary): zero is a valid non-negative latency → recorded.
+    #[case::boundary_zero(0.0, 1)]
+    // desc (adversarial): NaN is dropped before observe → no sample, no poisoned series.
+    #[case::adversarial_nan(f64::NAN, 0)]
+    // desc (adversarial): a negative latency (clock skew / hostile span pair) is dropped.
+    #[case::adversarial_negative(-1.0, 0)]
+    // desc (adversarial): +inf is dropped.
+    #[case::adversarial_inf(f64::INFINITY, 0)]
+    fn adversarial_hostile_latency_clamped_before_observe(
+        #[case] seconds: f64,
+        #[case] expect_count: u64,
+    ) {
+        let m = Metrics::new();
+        m.for_fleet("acme", "acme__web")
+            .observe_approval_latency(seconds);
+        let count = m
+            .encode_text()
+            .lines()
+            .find(|l| l.starts_with("agent_fleet_approval_latency_seconds_count"))
+            .and_then(|l| l.rsplit(' ').next())
+            .and_then(|v| v.parse::<f64>().ok())
+            .map(|f| f as u64)
+            .unwrap_or(0);
+        assert_eq!(
+            count, expect_count,
+            "latency sample count mismatch for {seconds}"
+        );
+    }
+
+    #[test]
+    // desc (boundary_retire_removes_fleet_series): retire() clears the pair's fleet series so a
+    // torn-down session's repo dimension is reclaimed (fleet analogue of the gauge retire).
+    fn boundary_retire_removes_fleet_series() {
+        let m = Metrics::new();
+        let fm = m.for_fleet("acme", "acme__web");
+        fm.on_trigger("poll");
+        fm.on_review("drafted");
+        fm.observe_approval_latency(1.0);
+        assert!(
+            m.encode_text().contains("repo=\"acme__web\""),
+            "fleet series should exist before retire"
+        );
+        fm.retire();
+        let after = m.encode_text();
+        assert!(
+            !after
+                .lines()
+                .any(|l| l.starts_with("agent_fleet_") && l.contains("repo=\"acme__web\"")),
+            "fleet series not retired:\n{after}"
+        );
     }
 }
