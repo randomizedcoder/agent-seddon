@@ -309,13 +309,18 @@ bindings with a `trigger`/`progress` `purpose`, `rate_limit_per_min`). The valid
 over the **`agent.v1.TransportRegistryService`** control plane (`--serve-transport-registry`,
 port 50089), whose `Put`/`Delete` are RBAC-gated on `(write|delete, transport_registry)` — the
 *config-card registry* for transports, distinct from the `MessageTransport` *capability*, the way
-`ForgeRegistryService` relates to `Forge`. **Deferred to D2b:** the fleet still carries its
-`slack_*`/`FleetSlackCfg` fields inline — lifting them out into a card referenced by id + purpose
-(and matrix/teams/irc/signal host impls) is the twin of D1b.
+`ForgeRegistryService` relates to `Forge`. **D2b (under way, the twin of D1b):** a second host impl,
+[`MatrixMessageTransport`] (opt-in `transport-matrix` feature, a `PUT`+transaction-id client-server
+API with the room id percent-encoded into the URL path and a single access token), landed first,
+proving the "add a host = a new impl + a factory line" recipe. The fleet still carries its
+`slack_*`/`FleetSlackCfg` fields inline — lifting them out into a card referenced by id + purpose,
+with the C18 progress feed wired as a live `announce()` caller, are the remaining D2b PRs;
+teams/irc/signal host impls stay further-deferred.
 
 [`MessageTransport`]: ../../crates/agent-core/src/message_transport.rs
 [`SlackSocketMode`]: ../../crates/agent-slack/src/socket_mode.rs
 [`SlackMessageTransport`]: ../../crates/agent-slack/src/kind.rs
+[`MatrixMessageTransport`]: ../../crates/agent-slack/src/matrix.rs
 
 ## Testing
 

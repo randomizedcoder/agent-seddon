@@ -7,6 +7,10 @@ license.workspace = true
 
 [features]
 default = []
+# The Matrix outbound transport (config C37 / D2b): a second `MessageTransport` impl
+# behind an opt-in feature (off in the default build, which stays Slack-only). Needs
+# no extra deps — reqwest/url/serde_json/async-trait are already present.
+transport-matrix = []
 # The persisted transport-card registry (config C37 / D2): the `TransportRegistry`
 # store over the shared `agent-config-store`.
 transport-store = ["dep:agent-config-store", "dep:agent-proto", "dep:prost"]

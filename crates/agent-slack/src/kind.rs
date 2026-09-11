@@ -30,9 +30,15 @@ const SLACK_API_BASE: &str = "https://slack.com/api";
 
 /// The transport kinds built into this binary. The card's `kind` is validated
 /// against this at build time — "known kinds = registered kinds", not a core
-/// allow-list. (matrix/teams/irc/signal join here as future feature-gated impls.)
+/// allow-list. `matrix` joins behind the opt-in `transport-matrix` feature (config
+/// C37 / D2b); teams/irc/signal are further-deferred future feature-gated impls.
 pub fn known_kinds() -> Vec<&'static str> {
-    ["slack"].to_vec()
+    [
+        "slack",
+        #[cfg(feature = "transport-matrix")]
+        "matrix",
+    ]
+    .to_vec()
 }
 
 fn unknown_kind(kind: &str) -> Error {
@@ -191,6 +197,12 @@ pub fn build_transport_from_card(
 ) -> Result<Arc<dyn MessageTransport>> {
     match card.kind.as_str() {
         "slack" => Ok(Arc::new(SlackMessageTransport::new(card, bot_token)?)),
+        // Matrix uses a single access token (no app/bot split): the card's
+        // `bot_token_ref` holds it, resolved to `bot_token` here (config C37 / D2b).
+        #[cfg(feature = "transport-matrix")]
+        "matrix" => Ok(Arc::new(crate::matrix::MatrixMessageTransport::new(
+            card, bot_token,
+        )?)),
         other => Err(unknown_kind(other)),
     }
 }
@@ -306,5 +318,24 @@ mod tests {
             Secret::from("t".to_string())
         )
         .is_err());
+    }
+
+    // positive: with `transport-matrix` on, a matrix card builds a matrix transport
+    // through the ONE factory — the D2b "add a host = a factory line" recipe.
+    #[cfg(feature = "transport-matrix")]
+    #[test]
+    fn positive_matrix_card_builds_via_factory() {
+        let t = built(build_transport_from_card(
+            &card("matrix", ""),
+            Secret::from("syt-token".to_string()),
+        ));
+        assert_eq!(t.kind(), "matrix");
+    }
+
+    // positive: `matrix` is a known kind exactly when its feature is enabled.
+    #[cfg(feature = "transport-matrix")]
+    #[test]
+    fn positive_matrix_is_a_known_kind() {
+        assert!(known_kinds().contains(&"matrix"), "matrix must be known");
     }
 }

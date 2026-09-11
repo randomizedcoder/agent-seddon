@@ -395,11 +395,13 @@ The two keystones (A, B) are **independent** and may land in either order or in 
   gated by the C1 RBAC core on `(write|delete, transport_registry)`. **Naming:** the CRUD-card registry
   is `TransportRegistry*` throughout, distinct from the `MessageTransport` *capability* seam, the way
   `ForgeRegistry` (cards) coexists with `Forge`. Gate: new `transport-registry-store` check; serve-smoke
-  Put→Get roundtrip; pg-integration postgres arm. **Deferred to D2b** (the twin of D1b): lifting the
-  `slack_*`/`FleetSlackCfg` fields **out** of `FleetSession` into a card referenced by id + purpose
-  (today the fleet still carries them; a build path can synthesize a card); matrix/teams/irc/signal host
-  impls behind features; unifying the live Socket-Mode inbound loop onto a persisted card + the C18
-  progress feed as a live `announce` caller.
+  Put→Get roundtrip; pg-integration postgres arm. **D2b** (the twin of D1b, a 3-PR split) lifts the rest:
+  the **matrix** host impl (opt-in `transport-matrix` feature — `agent-slack/src/matrix.rs`, a `PUT`+txn-id
+  client-server API, room id in the URL path, single access token, `errcode` errors — proving the recipe
+  like gitea did) landed **first (built, D2b PR1)**; then lifting the `slack_*`/`FleetSlackCfg` fields
+  **out** of `FleetSession` into a card referenced by id + purpose (a build path synthesizes a card today)
+  with the live Socket-Mode inbound loop unified onto it, and the C18 progress feed wired as a live
+  `announce` caller. teams/irc/signal host impls stay further-deferred.
 
 ---
 

@@ -29,6 +29,14 @@ pub use socket_mode::{
 mod kind;
 pub use kind::{build_transport_from_card, known_kinds, screen_endpoint, SlackMessageTransport};
 
+/// The Matrix outbound transport (config C37 / D2b), behind the opt-in
+/// `transport-matrix` feature so the default build stays Slack-only — the D2b twin
+/// of the D1b gitea/bitbucket forge host impls.
+#[cfg(feature = "transport-matrix")]
+mod matrix;
+#[cfg(feature = "transport-matrix")]
+pub use matrix::MatrixMessageTransport;
+
 /// The persisted transport-card registry (config C37 / D2). Behind `transport-store`
 /// so the default build stays free of the config-store dependency.
 #[cfg(feature = "transport-store")]
