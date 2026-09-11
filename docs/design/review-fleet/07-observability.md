@@ -21,10 +21,20 @@ existing metrics/OTEL/ClickHouse stack rather than adding a new one.
 - New fleet families: `fleet_triggers_total{source}` (poll|slack), `fleet_reviews_total{status}`
   (drafted|posted|superseded), `fleet_feedback{state}` (open|addressed), `fleet_approval_latency`,
   `fleet_slack_post_failures_total`.
-- Labels bounded: `(session, user)` only (already `safe_segment`). **No repo/PR in labels**
-  (unbounded cardinality) — those dimensions live in ClickHouse (C14/C15), joined for
-  analysis. OTEL spans wrap trigger → checkout → review → draft → post, carrying repo/PR as
-  span attributes (not metric labels).
+- Labels bounded: `(user, repo)` (both already `safe_segment`). **`repo` is now a permitted label**
+  (revised — see below); **PR is still forbidden** as a label (span attribute only).
+
+> **Revised (2026-09-10, observability track — see
+> [`../observability/README.md`](../observability/README.md)).** The original rule here was
+> `(session, user)` only with **no repo/PR in labels**. That is relaxed for **repo**: fleet repos come
+> from the operator-configured `FleetSession` roster, so a `repo` label's cardinality is
+> `O(configured sessions)` — bounded and `safe_segment`-capped — **not** the `O(repos × PRs)` this doc
+> originally feared (that fear is really about *PR*-level, model-adjacent cardinality). So the
+> `agent_fleet_*` families carry a bounded **`repo`** label, backstopped by an **LRU cap** on distinct
+> repo values (the same lifecycle mitigation as the session map). **PR stays out of labels entirely** —
+> it rides the `fleet.*` OTEL span as an attribute. Repo/PR also still land in ClickHouse (C14/C15) for
+> deep joins; OTEL spans wrap trigger → checkout → review → draft → post, carrying repo/PR as span
+> attributes.
 
 ## Scale to ~100 (the observability budget)
 
@@ -43,7 +53,8 @@ existing metrics/OTEL/ClickHouse stack rather than adding a new one.
   `negative_post_failure_is_soft_and_counted`, `adversarial_secret_redacted_from_progress_post`.
 - C19: `positive_families_increment_on_events`, `boundary_retire_removes_session_series`
   (reuse the existing `boundary_retire_removes_the_gauge_series` shape),
-  `corner_labels_have_no_repo_or_pr`, `positive_span_carries_repo_pr_attributes`.
+  `corner_labels_have_no_pr` (repo is now permitted; **PR** must never appear),
+  `boundary_repo_label_lru_capped`, `positive_span_carries_repo_pr_attributes`.
 
 ## Live smoke (l2)
 

@@ -41,6 +41,18 @@ the `reason` (so a guard block is an audit trail in the trace, not just a counte
 `agent_testkit::observe::captured_span_fields` (fields set at creation *and* via
 `Span::record`).
 
+**Tenant + repo attributes.** The root of every trace carries the caller's `tenant`
+(the verified org / `user`) so a whole distributed trace is filterable by tenant in
+HyperDX — stamped on `agent.turn` in the loop and on the shared `grpc.server` span for
+served seams (`crates/agent-grpc/src/server/mod.rs`, validated with `safe_segment`).
+Fleet traces additionally carry `repo` and `pr` on the `fleet.*` spans (trigger →
+review → draft → post), so a specific PR's whole lifecycle is one query —
+`SELECT ... FROM otel_traces WHERE SpanAttributes['pr'] = '42'`. These are **span
+attributes, not metric labels**: `pr` in particular is deliberately never a Prometheus
+label (unbounded), and lives only here and in ClickHouse. Because tenant/repo sit on
+the root span, the whole nested seam sub-tree inherits the filter with no per-child
+edit. Design of record: [`design/observability/`](design/observability/README.md).
+
 With `provider = "grpc"`, the `provider.*` calls cross a process boundary and the
 gateway's `grpc.server` span is a **child** of the loop's `provider.stream` span —
 one trace, two services (`agent-loop`, `agent-provider-gateway`).
