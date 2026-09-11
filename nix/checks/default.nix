@@ -99,6 +99,11 @@ in
   # (feature `transport-store`, off by default). The config-architecture C37
   # message-transport twin of forge-registry-store. docs/design/config/09-increments.md.
   transport-registry-store = craneCheck ./transport-registry-store.nix { inherit cargoArtifacts; };
+  # Executes the Matrix `MessageTransport` impl (room-id path encoding / response
+  # classify / no-token error) + the matrix arm of the transport-kind factory
+  # (feature `transport-matrix`, off by default so the default build stays Slack-only).
+  # The D2b message-transport twin of forge-gitea. docs/design/config/05-message-transport.md.
+  transport-matrix = craneCheck ./transport-matrix.nix { inherit cargoArtifacts; };
   # Executes the per-tenant routing layer (`PerTenant<S>`) matrix + end-to-end
   # isolation over the real converged stores (features registry-store/fleet-store/
   # prompt-store, off by default). The config-architecture C2 per-tenant-plane check.

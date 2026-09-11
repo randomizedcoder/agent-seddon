@@ -12,10 +12,18 @@ transport card.
 > bot-token-gated; `SlackSocketMode` still carries inbound) behind `agent_slack::build_transport_from_card`
 > (unknown kind fails closed at build time; endpoint SSRF-screened), with an in-crate `StoreTransports`
 > and the `TransportRegistryService` seam (`--serve-transport-registry`, port 50089), RBAC-gated on
-> `(write|delete, transport_registry)`. **Deferred to D2b:** lifting the `slack_*`/`FleetSlackCfg` fields
-> **out** of `FleetSession` into a card referenced by id + purpose (today the fleet still carries them,
-> and a build path synthesizes a card — the twin of D1b); matrix/teams/irc/signal host impls; unifying
-> the live Socket-Mode inbound loop onto a persisted card. See [`09-increments.md`](09-increments.md) §D2.
+> `(write|delete, transport_registry)`.
+>
+> **D2b (under way — the transport twin of D1b, a 3-PR split).** PR1 landed the **matrix** host impl
+> (`agent-slack/src/matrix.rs`, opt-in `transport-matrix` feature, off in the default build): a second
+> `MessageTransport` proving the C37 recipe — *add a host = a new impl + a `kind.rs` factory line, no core
+> allow-list edit* — against a genuinely divergent protocol (`PUT` with a client transaction id, the room
+> id percent-encoded into the URL **path**, a single access token in `bot_token_ref`, `errcode` errors).
+> **Still to come in D2b:** lifting the `slack_*`/`FleetSlackCfg` fields **out** of `FleetSession` into a
+> card referenced by id + purpose (today the fleet still carries them, and a build path synthesizes a card
+> — the twin of D1b card-by-id) with the live Socket-Mode inbound loop unified onto that card; and the
+> review-fleet C18 progress feed wired as a live `announce()` caller. teams/irc/signal host impls are
+> further-deferred. See [`09-increments.md`](09-increments.md) §D2.
 
 ## Where we are today
 

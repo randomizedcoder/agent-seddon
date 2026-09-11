@@ -186,6 +186,10 @@ forge-gitea = ["agent-forge/forge-gitea"]
 # Bitbucket Cloud host (config C36 / D1b): opt-in — NOT folded into `forge`. Enable
 # it (plus `forge`) to build bitbucket cards/rows.
 forge-bitbucket = ["agent-forge/forge-bitbucket"]
+# Matrix transport host (config C37 / D2b): opt-in — NOT folded into any default set,
+# so the default build stays Slack-only. Pulls `agent-slack` and turns on its matrix
+# impl, so a card with `kind = "matrix"` builds an outbound transport.
+transport-matrix = ["dep:agent-slack", "agent-slack/transport-matrix"]
 web-search = [
     "dep:agent-web-search",
     "agent-tools/tool-web-search",
