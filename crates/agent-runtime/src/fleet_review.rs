@@ -330,6 +330,7 @@ mod tests {
             created_at: 0,
             updated_at: 0,
             forge_id: String::new(),
+            transport_id: String::new(),
         }
     }
 

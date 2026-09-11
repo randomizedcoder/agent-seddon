@@ -2946,6 +2946,13 @@ pub struct FleetSession {
     /// `base_url`/`token_ref` above. Empty ⇒ the inline fields are used (unchanged).
     /// Path-safe (it is a registry key).
     pub forge_id: String,
+    /// Persisted transport-card id (config C37 / D2b). When non-empty, the row's Slack
+    /// watch is driven by the [`TransportCard`] of this id in the `TransportRegistry` —
+    /// its `app_token_ref` supplies the Socket-Mode token and its `trigger`-purpose
+    /// channel bindings supersede the inline [`Self::slack_trigger_channel`]. Empty ⇒ the
+    /// inline `slack_*` fields + the `[review_fleet.slack]` default token are used
+    /// (unchanged). Path-safe (it is a registry key).
+    pub transport_id: String,
 }
 
 impl FleetSession {
@@ -3010,6 +3017,15 @@ impl FleetSession {
                 "fleet session `{}`: forge_id {:?} is not a path-safe segment",
                 self.id,
                 truncate_for_log(&self.forge_id)
+            ));
+        }
+        // The transport-card reference (config C37 / D2b): a registry key when set, so
+        // it must be a path-safe segment (defense-in-depth — the registry validates too).
+        if !self.transport_id.is_empty() && !safe_segment(&self.transport_id) {
+            return err(format!(
+                "fleet session `{}`: transport_id {:?} is not a path-safe segment",
+                self.id,
+                truncate_for_log(&self.transport_id)
             ));
         }
         Ok(())

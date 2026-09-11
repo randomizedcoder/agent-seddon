@@ -54,7 +54,7 @@ pub use agent_core::{
     Channel, ChannelBinding, ChannelPurpose, InboundMessage, MessageTransport, OutboundMessage,
     TransportCard, TransportRegistry,
 };
-use agent_core::{FleetTrigger, TriggerSink};
+use agent_core::{FleetSession, FleetTrigger, TriggerSink};
 
 /// One channel subscription: which session a matching link triggers, and the repo it must
 /// point at.
@@ -137,10 +137,48 @@ impl SlackWatch {
     }
 }
 
+/// Resolve a roster row's **Slack trigger source** — the `(app_token_ref, channels)`
+/// pair the fleet's Socket-Mode watch subscribes for that row (config C37 / D2b).
+/// Pure: it returns the token *reference*, not a resolved secret, so it is exercised
+/// hermetically; the caller resolves + groups by token.
+///
+/// - **`transport_id` empty** ⇒ the legacy path, unchanged: the `[review_fleet.slack]`
+///   default token (`legacy_app_token_ref`) + the row's inline `slack_trigger_channel`.
+/// - **`transport_id` set + a live Slack card** ⇒ the card's `app_token_ref` +
+///   its `trigger`-purpose channel bindings (superseding `slack_trigger_channel`).
+/// - **`transport_id` set + a non-Slack / disabled card** ⇒ `None`: that transport has
+///   no live Socket-Mode inbound, so the row contributes no trigger subscription (a
+///   Matrix card is progress-only until its own inbound lands). A missing card (the id
+///   is absent from the registry) is the caller's `None` too — fail-closed, no trigger.
+pub fn slack_trigger_binding(
+    row: &FleetSession,
+    card: Option<&TransportCard>,
+    legacy_app_token_ref: &str,
+) -> Option<(String, Vec<String>)> {
+    if row.transport_id.is_empty() {
+        return Some((
+            legacy_app_token_ref.to_string(),
+            vec![row.slack_trigger_channel.clone()],
+        ));
+    }
+    let card = card?;
+    if !card.enabled || card.kind != "slack" {
+        return None;
+    }
+    let channels = card
+        .channels
+        .iter()
+        .filter(|b| b.purpose == ChannelPurpose::Trigger)
+        .map(|b| b.channel.clone())
+        .collect();
+    Some((card.app_token_ref.clone(), channels))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use rstest::rstest;
     use std::sync::Mutex;
 
     fn gh(repo_key: &str) -> ExpectRepo {
@@ -309,5 +347,91 @@ mod tests {
             }],
             "exactly the one watched-channel, matching-repo link triggered a review"
         );
+    }
+
+    // --- slack_trigger_binding (config C37 / D2b) --------------------------------
+
+    fn fleet_row(transport_id: &str, inline_channel: &str) -> FleetSession {
+        FleetSession {
+            id: "acme:web".into(),
+            transport_id: transport_id.into(),
+            slack_trigger_channel: inline_channel.into(),
+            ..Default::default()
+        }
+    }
+
+    fn slack_card(enabled: bool, triggers: &[&str], progress: &[&str]) -> TransportCard {
+        let mut channels: Vec<ChannelBinding> = triggers
+            .iter()
+            .map(|c| ChannelBinding {
+                channel: (*c).into(),
+                purpose: ChannelPurpose::Trigger,
+            })
+            .collect();
+        channels.extend(progress.iter().map(|c| ChannelBinding {
+            channel: (*c).into(),
+            purpose: ChannelPurpose::Progress,
+        }));
+        TransportCard {
+            id: "slack-primary".into(),
+            kind: "slack".into(),
+            enabled,
+            endpoint: String::new(),
+            app_token_ref: "env:CARD_APP".into(),
+            bot_token_ref: "env:CARD_BOT".into(),
+            channels,
+            rate_limit_per_min: 30,
+        }
+    }
+
+    #[test]
+    // desc (positive): no transport_id ⇒ the legacy default token + the inline channel.
+    fn positive_empty_transport_id_uses_legacy() {
+        let got = slack_trigger_binding(&fleet_row("", "C_INLINE"), None, "env:LEGACY");
+        assert_eq!(got, Some(("env:LEGACY".into(), vec!["C_INLINE".into()])));
+    }
+
+    #[test]
+    // desc (positive): a live slack card supplies its app token + only its Trigger channels.
+    fn positive_card_supplies_token_and_trigger_channels() {
+        let card = slack_card(true, &["C_TRIG_A", "C_TRIG_B"], &["C_PROG"]);
+        let got = slack_trigger_binding(
+            &fleet_row("slack-primary", "C_INLINE"),
+            Some(&card),
+            "env:LEGACY",
+        );
+        assert_eq!(
+            got,
+            Some((
+                "env:CARD_APP".into(),
+                vec!["C_TRIG_A".into(), "C_TRIG_B".into()]
+            )),
+            "the card's token + Trigger channels win; Progress + the inline channel are ignored"
+        );
+    }
+
+    #[test]
+    // desc (corner): a slack card with no Trigger bindings ⇒ its token, but zero channels
+    // (the caller subscribes nothing — a progress-only card contributes no trigger).
+    fn corner_card_without_trigger_bindings_has_no_channels() {
+        let card = slack_card(true, &[], &["C_PROG"]);
+        let got = slack_trigger_binding(&fleet_row("slack-primary", ""), Some(&card), "env:LEGACY");
+        assert_eq!(got, Some(("env:CARD_APP".into(), vec![])));
+    }
+
+    #[rstest]
+    // desc (negative): transport_id set but the card is absent from the registry ⇒ None.
+    #[case::missing(None)]
+    // desc (negative): a disabled card ⇒ None (no live inbound).
+    #[case::disabled(Some(slack_card(false, &["C"], &[])))]
+    // desc (negative): a non-slack (matrix) card ⇒ None — no live Socket-Mode inbound.
+    #[case::non_slack(Some(TransportCard { kind: "matrix".into(), ..slack_card(true, &["C"], &[]) }))]
+    fn negative_no_live_slack_inbound(#[case] card: Option<TransportCard>) {
+        let got = slack_trigger_binding(
+            &fleet_row("slack-primary", "C_INLINE"),
+            card.as_ref(),
+            "env:LEGACY",
+        );
+        assert_eq!(got, None, "no live slack inbound ⇒ no trigger subscription");
     }
 }

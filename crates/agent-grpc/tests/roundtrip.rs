@@ -1860,6 +1860,7 @@ fn fleet_row(id: &str, token_ref: &str, enabled: bool) -> agent_core::FleetSessi
         enabled,
         // A persisted forge-card reference (config C36 / D1b) rides the wire verbatim.
         forge_id: "gh-cloud".into(),
+        transport_id: "slack-primary".into(),
         ..Default::default()
     }
 }

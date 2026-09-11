@@ -1688,6 +1688,7 @@ mod tests {
                     // Inline backend deliberately EMPTY — a card-by-id row carries no
                     // inline forge, so this proves the card supplies the kind.
                     forge_id: forge_id.into(),
+                    transport_id: String::new(),
                     enabled: true,
                     ..Default::default()
                 }
