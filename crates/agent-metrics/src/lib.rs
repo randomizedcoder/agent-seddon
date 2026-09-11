@@ -3139,7 +3139,7 @@ mod tests {
         }
         let got = repos_for(&m.encode_text(), "agent_fleet_triggers_total");
         let want: std::collections::BTreeSet<String> =
-            expected.iter().map(|s| s.to_string()).collect();
+            expected.iter().map(|&s| s.to_string()).collect();
         assert_eq!(got, want, "LRU repo set mismatch");
     }
 

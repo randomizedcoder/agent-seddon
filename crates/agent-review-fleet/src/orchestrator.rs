@@ -34,11 +34,13 @@ use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
 
 use agent_core::{
-    draft_status, encode_review_session_id, DraftRequest, FleetHistory, FleetHost, FleetProgress,
-    FleetProgressEvent, FleetRegistry, FleetReviewFactory, FleetSession, FleetTrigger, PriorReview,
-    RepoBackend, ReviewDrafter, ReviewGrounder, ReviewTarget, SessionKey, TriggerOutcome,
-    TriggerSink, UserId, WorktreeSpec,
+    draft_status, encode_review_session_id, safe_segment, DraftRequest, FleetHistory, FleetHost,
+    FleetProgress, FleetProgressEvent, FleetRegistry, FleetReviewFactory, FleetSession,
+    FleetTrigger, PriorReview, RepoBackend, ReviewDrafter, ReviewGrounder, ReviewTarget,
+    SessionKey, TriggerOutcome, TriggerSink, UserId, WorktreeSpec,
 };
+use agent_metrics::Metrics;
+use tracing::Instrument;
 
 /// A forge-credential check for one row (C5): `Ok(())` when the row's `token_ref`
 /// resolves to a usable secret and its backend forge can be built; `Err(reason)` when
@@ -291,6 +293,11 @@ pub struct FleetOrchestrator {
     /// (the review still runs). The `posted` beat is announced by the approver (the post
     /// path holds `Arc<Agent>`; the FSM here does not).
     progress: Option<Arc<dyn FleetProgress>>,
+    /// Per-tenant + per-repo fleet metrics (C19). When present, [`Self::handle`] records
+    /// the review lifecycle (`agent_fleet_reviews_total{status,user,repo}`) through a
+    /// [`agent_metrics::FleetMetrics`] bound to the row's `(user, repo)`; `None` ⇒ no
+    /// recording (the review runs unchanged, so existing wiring/tests need no metrics).
+    metrics: Option<Metrics>,
     /// Live review tasks, keyed by `(session_id, pr_number)`; membership is the in-flight
     /// guard (one review per PR). Cleared by [`Self::cancel`]/[`Self::join`] or dropping
     /// the orchestrator; precise head-oid dedup + supersede across rounds is inc 6b (C16).
@@ -313,6 +320,7 @@ impl FleetOrchestrator {
             history: None,
             review_factory: None,
             progress: None,
+            metrics: None,
             in_flight: Mutex::new(HashMap::new()),
         }
     }
@@ -363,6 +371,27 @@ impl FleetOrchestrator {
     pub fn with_progress(mut self, progress: Arc<dyn FleetProgress>) -> Self {
         self.progress = Some(progress);
         self
+    }
+
+    /// Attach the metrics registry (C19): with it, [`Self::handle`] records the review
+    /// lifecycle per `(user, repo)` on `agent_fleet_reviews_total`. Without it the FSM is
+    /// unchanged — recording is best-effort observability, never on the review's path.
+    pub fn with_metrics(mut self, metrics: Metrics) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    /// A `(user, repo)`-bound fleet recorder for a row, when metrics are attached. Both
+    /// segments come from the validated roster row, but are re-checked with `safe_segment`
+    /// (defense in depth) before becoming a label — a malformed value records nothing
+    /// rather than a poisoned series.
+    fn fleet_metrics(&self, row: &FleetSession) -> Option<agent_metrics::FleetMetrics> {
+        let m = self.metrics.as_ref()?;
+        if safe_segment(&row.user) && safe_segment(&row.repo) {
+            Some(m.for_fleet(&row.user, &row.repo))
+        } else {
+            None
+        }
     }
 
     /// The bare review instruction for a PR — the fallback when no engine is attached
@@ -459,6 +488,25 @@ impl FleetOrchestrator {
         let row = self.roster.get(&trigger.session_id).await?;
         let pr = trigger.pr_number;
 
+        // C19 observability. A `(user, repo)`-bound recorder for the review lifecycle
+        // families, and a per-review span carrying tenant/repo/pr as **attributes** (pr is
+        // never a metric label). The values are threaded explicitly — the FSM drains in a
+        // background task with no ambient identity — and re-validated before they are
+        // stamped (`safe_segment`), so a malformed row attributes nothing.
+        let fm = self.fleet_metrics(&row);
+        let review_span = tracing::info_span!(
+            "fleet.review",
+            tenant = tracing::field::Empty,
+            repo = tracing::field::Empty,
+            pr,
+        );
+        if safe_segment(&row.user) {
+            review_span.record("tenant", row.user.as_str());
+        }
+        if safe_segment(&row.repo) {
+            review_span.record("repo", row.repo.as_str());
+        }
+
         // Resolve the per-row repo + grounder (multi-repo grounding). With a factory set,
         // build *this row's* own checkout + forge-bound engine; on a build error fall back
         // to the process-global `repo`/`grounder` (fail-soft — a review still runs,
@@ -497,6 +545,9 @@ impl FleetOrchestrator {
             if last.head_sha == head_oid && last.status != draft_status::SUPERSEDED {
                 tracing::debug!(session_id = %trigger.session_id, pr, head = %head_oid,
                     "fleet: head already reviewed (up to date)");
+                if let Some(fm) = &fm {
+                    fm.on_review("uptodate");
+                }
                 return Ok(Handled::UpToDate);
             }
         }
@@ -519,6 +570,8 @@ impl FleetOrchestrator {
                 if let Err(e) = drafter.supersede(sup).await {
                     tracing::warn!(session_id = %trigger.session_id, pr, error = %e,
                         "fleet: superseding prior draft failed (soft)");
+                } else if let Some(fm) = &fm {
+                    fm.on_review("superseded");
                 }
             }
         }
@@ -570,58 +623,76 @@ impl FleetOrchestrator {
         let progress = self.progress.clone();
         let transport_id = row.transport_id.clone();
         let repo_evt = row.repo.clone();
+        // C19: the owning org, captured for the event's tenant field + the review-lifecycle
+        // metrics recorded from the (async) task, and the `(user, repo)` recorder itself.
+        let user_evt = row.user.clone();
+        let fm_task = fm.clone();
         // Carry the prior round's still-open items into the draft so the tracker (C16) can
         // reconcile them against this round's findings (addressed vs still-open).
         let open_items = prior.open_items;
-        let task = tokio::spawn(async move {
-            // reviewing: a PR was accepted and the review is starting (soft-fail).
-            if let Some(progress) = &progress {
-                progress
-                    .announce(
-                        &transport_id,
-                        FleetProgressEvent::Found {
-                            repo: repo_evt.clone(),
-                            pr,
-                        },
-                    )
-                    .await;
-            }
-            let narrative = match host.run_review(key_run, goal, skill).await {
-                Ok(n) => n,
-                Err(e) => {
-                    tracing::warn!(session_id = %sid, pr, error = %e,
-                        "fleet: review run failed (no draft)");
-                    return;
+        let task = tokio::spawn(
+            async move {
+                // reviewing: a PR was accepted and the review is starting (soft-fail).
+                if let Some(fm) = &fm_task {
+                    fm.on_review("reviewing");
                 }
-            };
-            // drafted: render + persist. Fail-soft — a draft error is logged, not fatal.
-            if let (Some(drafter), Some(facts)) = (drafter, facts) {
-                let req = DraftRequest {
-                    review_id,
-                    repo,
-                    pr_number: pr,
-                    facts,
-                    narrative,
-                    workspace,
-                    prior: open_items,
-                };
-                match drafter.draft(req).await {
-                    Ok(_) => {
-                        // drafted → awaiting approval: announce the draft is ready.
-                        if let Some(progress) = &progress {
-                            progress
-                                .announce(
-                                    &transport_id,
-                                    FleetProgressEvent::Drafted { repo: repo_evt, pr },
-                                )
-                                .await;
-                        }
+                if let Some(progress) = &progress {
+                    progress
+                        .announce(
+                            &transport_id,
+                            FleetProgressEvent::Found {
+                                user: user_evt.clone(),
+                                repo: repo_evt.clone(),
+                                pr,
+                            },
+                        )
+                        .await;
+                }
+                let narrative = match host.run_review(key_run, goal, skill).await {
+                    Ok(n) => n,
+                    Err(e) => {
+                        tracing::warn!(session_id = %sid, pr, error = %e,
+                            "fleet: review run failed (no draft)");
+                        return;
                     }
-                    Err(e) => tracing::warn!(session_id = %sid, pr, error = %e,
-                        "fleet: draft render/persist failed (soft)"),
+                };
+                // drafted: render + persist. Fail-soft — a draft error is logged, not fatal.
+                if let (Some(drafter), Some(facts)) = (drafter, facts) {
+                    let req = DraftRequest {
+                        review_id,
+                        repo,
+                        pr_number: pr,
+                        facts,
+                        narrative,
+                        workspace,
+                        prior: open_items,
+                    };
+                    match drafter.draft(req).await {
+                        Ok(_) => {
+                            if let Some(fm) = &fm_task {
+                                fm.on_review("drafted");
+                            }
+                            // drafted → awaiting approval: announce the draft is ready.
+                            if let Some(progress) = &progress {
+                                progress
+                                    .announce(
+                                        &transport_id,
+                                        FleetProgressEvent::Drafted {
+                                            user: user_evt,
+                                            repo: repo_evt,
+                                            pr,
+                                        },
+                                    )
+                                    .await;
+                            }
+                        }
+                        Err(e) => tracing::warn!(session_id = %sid, pr, error = %e,
+                            "fleet: draft render/persist failed (soft)"),
+                    }
                 }
             }
-        });
+            .instrument(review_span),
+        );
         self.in_flight
             .lock()
             .expect("in_flight poisoned")
@@ -637,6 +708,7 @@ mod tests {
     use super::*;
     use crate::MemoryFleet;
     use agent_core::{DriverError, FleetReviewCtx, GroundedReview, ReviewFacts};
+    use rstest::rstest;
     use std::sync::Arc;
     use tokio::sync::Notify;
 
@@ -1368,6 +1440,7 @@ mod tests {
         assert_eq!(
             beats[0].1,
             FleetProgressEvent::Found {
+                user: "acme".into(),
                 repo: "acme__web".into(),
                 pr: 42
             },
@@ -1376,6 +1449,7 @@ mod tests {
         assert_eq!(
             beats[1].1,
             FleetProgressEvent::Drafted {
+                user: "acme".into(),
                 repo: "acme__web".into(),
                 pr: 42
             },
@@ -2045,5 +2119,84 @@ mod tests {
             "api draft for its repo"
         );
         drain.abort();
+    }
+
+    // ---- C19 observability: fleet metrics + spans -------------------------
+    //
+    // The `fleet.review` span carries tenant/repo/pr via the same `info_span!` +
+    // `safe_segment`-guarded `record` idiom asserted directly (and reliably) for the twin
+    // `fleet.progress` span in `progress.rs`
+    // (`positive_span_carries_tenant_and_repo_attributes`). A capture test *here* is
+    // omitted on purpose: this module's ~40 `#[tokio::test]`s drive `handle` (creating the
+    // `fleet.review` callsite) under a no-op subscriber concurrently, which races the global
+    // callsite-interest cache and makes a span capture flaky. The metric test below drives
+    // the same `handle` path.
+
+    #[tokio::test]
+    async fn positive_review_lifecycle_records_fleet_metrics() {
+        // desc: a grounder + drafter + metrics attached, a trigger drives the review.
+        // expect: agent_fleet_reviews_total ticks status=reviewing then status=drafted,
+        // both labelled (user=acme, repo=acme__web); PR never appears as a label.
+        let roster = seeded(&[row("web", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(0));
+        let metrics = Metrics::new();
+        let o = orch(roster, repo, host)
+            .with_grounder(FakeGrounder::ok("brief"))
+            .with_drafter(FakeDrafter::ok())
+            .with_metrics(metrics.clone());
+        o.handle(FleetTrigger {
+            session_id: "web".into(),
+            pr_number: 42,
+        })
+        .await
+        .expect("handle ok");
+        assert!(o.join("web", 42).await, "review task ran");
+
+        let text = metrics.encode_text();
+        for status in ["reviewing", "drafted"] {
+            let needle = format!("status=\"{status}\"");
+            assert!(
+                text.lines()
+                    .any(|l| l.starts_with("agent_fleet_reviews_total")
+                        && l.contains(&needle)
+                        && l.contains("user=\"acme\"")
+                        && l.contains("repo=\"acme__web\"")),
+                "no reviews_total {status} (user,repo) line:\n{text}"
+            );
+        }
+        assert!(
+            !text
+                .lines()
+                .any(|l| l.starts_with("agent_fleet_") && l.contains("pr=\"")),
+            "PR must never be a fleet metric label:\n{text}"
+        );
+    }
+
+    #[rstest]
+    // desc: a well-formed row yields a (user,repo) recorder → Some.
+    #[case::positive_roster_row("acme", "acme__web", true)]
+    // desc (adversarial): a traversal repo fails safe_segment → no recorder, no series.
+    #[case::adversarial_repo_traversal("acme", "../../etc", false)]
+    // desc (adversarial): a separator in user fails safe_segment → no recorder.
+    #[case::adversarial_user_separator("a/b", "acme__web", false)]
+    fn adversarial_hostile_repo_or_tenant_rejected(
+        #[case] user: &str,
+        #[case] repo: &str,
+        #[case] admits: bool,
+    ) {
+        // The recorder re-validates the (validated) row's segments before they become a
+        // label (defense in depth) — a malformed value records nothing rather than a
+        // poisoned series.
+        let o = FleetOrchestrator::new(
+            Arc::new(MemoryFleet::new()),
+            Arc::new(agent_testkit::FixtureRepo::new()),
+            Arc::new(FakeHost::new(0)),
+        )
+        .with_metrics(Metrics::new());
+        let mut r = row("web", true);
+        r.user = user.into();
+        r.repo = repo.into();
+        assert_eq!(o.fleet_metrics(&r).is_some(), admits);
     }
 }
