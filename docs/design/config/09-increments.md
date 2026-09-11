@@ -398,10 +398,13 @@ The two keystones (A, B) are **independent** and may land in either order or in 
   Put→Get roundtrip; pg-integration postgres arm. **D2b** (the twin of D1b, a 3-PR split) lifts the rest:
   the **matrix** host impl (opt-in `transport-matrix` feature — `agent-slack/src/matrix.rs`, a `PUT`+txn-id
   client-server API, room id in the URL path, single access token, `errcode` errors — proving the recipe
-  like gitea did) landed **first (built, D2b PR1)**; then lifting the `slack_*`/`FleetSlackCfg` fields
-  **out** of `FleetSession` into a card referenced by id + purpose (a build path synthesizes a card today)
-  with the live Socket-Mode inbound loop unified onto it, and the C18 progress feed wired as a live
-  `announce` caller. teams/irc/signal host impls stay further-deferred.
+  like gitea did) landed **first (built, D2b PR1)**; then **card-by-id + Socket-Mode inbound unification**
+  (built, D2b PR2): an additive `FleetSession.transport_id` (proto field 15) references a persisted
+  `TransportCard`, and `spawn_slack_watch` resolves each row via `agent_slack::slack_trigger_binding`,
+  running one Socket-Mode connection **per resolved app token** (a card row takes its token +
+  `trigger`-purpose channels; a legacy row keeps the inline `slack_*` + the `[review_fleet.slack]` default).
+  The **last D2b PR** wires the C18 progress feed as a live `announce` caller (the `progress`-purpose
+  channels). teams/irc/signal host impls stay further-deferred.
 
 ---
 

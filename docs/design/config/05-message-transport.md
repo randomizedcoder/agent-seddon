@@ -19,11 +19,14 @@ transport card.
 > `MessageTransport` proving the C37 recipe — *add a host = a new impl + a `kind.rs` factory line, no core
 > allow-list edit* — against a genuinely divergent protocol (`PUT` with a client transaction id, the room
 > id percent-encoded into the URL **path**, a single access token in `bot_token_ref`, `errcode` errors).
-> **Still to come in D2b:** lifting the `slack_*`/`FleetSlackCfg` fields **out** of `FleetSession` into a
-> card referenced by id + purpose (today the fleet still carries them, and a build path synthesizes a card
-> — the twin of D1b card-by-id) with the live Socket-Mode inbound loop unified onto that card; and the
-> review-fleet C18 progress feed wired as a live `announce()` caller. teams/irc/signal host impls are
-> further-deferred. See [`09-increments.md`](09-increments.md) §D2.
+> PR2 then landed **card-by-id + Socket-Mode inbound unification**: a `FleetSession` may set an additive
+> `transport_id` (proto field 15) referencing a persisted `TransportCard`; the fleet's Slack watch now
+> resolves each row through `agent_slack::slack_trigger_binding` and runs **one Socket-Mode connection per
+> resolved app token** — a card row takes its `app_token_ref` + `trigger`-purpose channels from the card,
+> a legacy row (empty `transport_id`) keeps the inline `slack_*` + the `[review_fleet.slack]` default token
+> (unchanged). A missing/disabled/non-Slack card contributes no trigger (fail-closed). **Still to come in
+> D2b:** the review-fleet C18 progress feed wired as a live `announce()` caller (the `progress`-purpose
+> channels). teams/irc/signal host impls are further-deferred. See [`09-increments.md`](09-increments.md) §D2.
 
 ## Where we are today
 

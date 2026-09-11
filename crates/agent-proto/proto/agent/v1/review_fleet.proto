@@ -47,6 +47,13 @@ message FleetSession {
   // token_ref/repo_encoding), and the inline `backend`/`base_url`/`token_ref` above
   // are ignored. Empty ⇒ the inline fields are used (unchanged behavior). Path-safe.
   string forge_id = 14;
+  // Persisted transport card id (config C37 / D2b). When set, the row's Slack watch
+  // (and, later, its progress feed) is driven by the `TransportCard` of this id in the
+  // `TransportRegistry`: its `app_token_ref` supplies the Socket-Mode token and its
+  // `trigger`-purpose channel bindings supersede `slack_trigger_channel` above. Empty ⇒
+  // the inline `slack_*` fields + the `[review_fleet.slack]` default token are used
+  // (unchanged behavior). Path-safe.
+  string transport_id = 15;
 }
 
 message FleetListRequest {}

@@ -1209,72 +1209,123 @@ async fn spawn_forge_poll(
     });
 }
 
-/// Start the C7 Slack-watch trigger source (inc 4b): resolve the app-level token
-/// (`[review_fleet.slack] app_token_ref`, C5 — empty/unresolved ⇒ no watch), build a
-/// `SlackWatch` fan-out from the roster's enabled rows (each row's `slack_trigger_channel` →
-/// its session + expected repo), then run one Socket-Mode connection, reconnecting with
-/// `agent-retry` backoff whenever Slack drops it. Emits onto the same `sink` the
-/// orchestrator drains, so a Slack-posted link and a polled PR are indistinguishable
-/// downstream. Started only when at least one row has a trigger channel.
+/// Start the C7 Slack-watch trigger source (inc 4b; config C37 / D2b card-by-id):
+/// build the fan-out from the roster's **enabled** rows, then run one reconnecting
+/// Socket-Mode connection **per distinct app token**. Each row's trigger source is
+/// [`agent_slack::slack_trigger_binding`]: a row with a `transport_id` uses that
+/// persisted Slack [`TransportCard`]'s `app_token_ref` + `trigger`-purpose channels;
+/// a row without one uses the legacy `[review_fleet.slack] app_token_ref` default +
+/// its inline `slack_trigger_channel` (unchanged). Rows are grouped by resolved token
+/// (`env:`/`file:` *reference*) so multiple cards each get their own connection.
+/// Emits onto the same `sink` the orchestrator drains, so a Slack-posted link and a
+/// polled PR are indistinguishable downstream. A row whose card is missing, disabled,
+/// or non-Slack contributes no trigger (fail-closed; a Matrix card is progress-only).
 async fn spawn_slack_watch(
     agent: Arc<Agent>,
     roster: Arc<dyn agent_core::FleetRegistry>,
     sink: Arc<dyn agent_core::TriggerSink>,
 ) {
-    let token_ref = agent.fleet_slack_app_token_ref().trim().to_string();
-    if token_ref.is_empty() {
-        tracing::debug!("fleet: no [review_fleet.slack] app_token_ref; Slack watch disabled");
-        return;
-    }
-    let app_token = match agent_runtime::resolve_token_ref(&token_ref) {
-        Ok(secret) if !secret.expose().is_empty() => secret,
-        Ok(_) => {
-            tracing::warn!("fleet: slack app_token_ref resolved to nothing; Slack watch disabled");
-            return;
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "fleet: slack app_token_ref did not resolve; Slack watch disabled");
-            return;
-        }
-    };
+    let legacy_ref = agent.fleet_slack_app_token_ref().trim().to_string();
+    let registry = agent.transport_registry();
 
-    // Fan-out from each enabled row's trigger channel to its session + expected repo.
-    let mut watch = agent_slack::SlackWatch::new();
-    let mut subs = 0usize;
-    match roster.list().await {
-        Ok(rows) => {
-            for row in rows
-                .iter()
-                .filter(|r| r.enabled && !r.slack_trigger_channel.trim().is_empty())
-            {
-                match agent_slack::ExpectRepo::new(&row.backend, &row.base_url, &row.repo) {
-                    Some(expect) => {
-                        watch.subscribe(&row.slack_trigger_channel, &row.id, expect);
-                        subs += 1;
-                    }
-                    None => tracing::warn!(
-                        session = %row.id,
-                        "fleet: slack watch skipped a row with an unrecognized backend/base_url"
-                    ),
-                }
-            }
-        }
+    let rows = match roster.list().await {
+        Ok(rows) => rows,
         Err(e) => {
             tracing::warn!(error = %e, "fleet: roster list failed; Slack watch disabled");
             return;
         }
-    }
-    if subs == 0 {
-        tracing::info!("fleet: no rows with a slack_trigger_channel; Slack watch idle");
-        return;
-    }
-    tracing::info!(subscriptions = subs, "fleet: slack watch starting");
+    };
 
-    // Reconnecting Socket-Mode driver (connect+backoff+drain, in agent-slack via
-    // agent-retry). Move the resolved token in so the task is `'static`.
-    let watch = Arc::new(watch);
-    let token = app_token.expose().to_string();
-    tokio::spawn(agent_slack::serve_socket_mode(token, watch, sink));
+    // token_ref -> the watch fanning out every row that resolves to that token. A card
+    // is fetched at most once per id (a dangling/errored id ⇒ no trigger, warned once).
+    let mut groups: std::collections::HashMap<String, agent_slack::SlackWatch> =
+        std::collections::HashMap::new();
+    let mut card_cache: std::collections::HashMap<String, Option<agent_core::TransportCard>> =
+        std::collections::HashMap::new();
+
+    for row in rows.iter().filter(|r| r.enabled) {
+        let card = if row.transport_id.is_empty() {
+            None
+        } else {
+            // Resolve (cached). `None` (absent id or a get error) ⇒ the binding returns
+            // None below and the row is skipped — a bad transport_id never triggers.
+            if !card_cache.contains_key(&row.transport_id) {
+                let resolved = match &registry {
+                    Some(reg) => match reg.get(&row.transport_id).await {
+                        Ok(c) => Some(c),
+                        Err(e) => {
+                            tracing::warn!(session = %row.id, transport_id = %row.transport_id, error = %e,
+                                "fleet: transport card did not resolve; row gets no Slack trigger");
+                            None
+                        }
+                    },
+                    None => {
+                        tracing::warn!(session = %row.id, transport_id = %row.transport_id,
+                            "fleet: a row set transport_id but no TransportRegistry is configured; no Slack trigger");
+                        None
+                    }
+                };
+                card_cache.insert(row.transport_id.clone(), resolved);
+            }
+            card_cache.get(&row.transport_id).and_then(Clone::clone)
+        };
+
+        let Some((token_ref, channels)) =
+            agent_slack::slack_trigger_binding(row, card.as_ref(), &legacy_ref)
+        else {
+            continue; // no live Slack inbound for this row (non-slack/disabled/missing card).
+        };
+        if token_ref.trim().is_empty() {
+            continue; // no token configured for this row's transport.
+        }
+        let expect = match agent_slack::ExpectRepo::new(&row.backend, &row.base_url, &row.repo) {
+            Some(e) => e,
+            None => {
+                tracing::warn!(session = %row.id,
+                    "fleet: slack watch skipped a row with an unrecognized backend/base_url");
+                continue;
+            }
+        };
+        let watch = groups.entry(token_ref).or_default();
+        for channel in channels {
+            // `subscribe` ignores blank channels, so an empty inline channel is a no-op.
+            watch.subscribe(&channel, &row.id, expect.clone());
+        }
+    }
+
+    // Spawn one reconnecting Socket-Mode driver per token that resolves to a live
+    // connection AND has at least one subscribed channel.
+    let mut connections = 0usize;
+    for (token_ref, watch) in groups {
+        if watch.subscribed_channels().next().is_none() {
+            continue; // token with no channels — nothing to watch.
+        }
+        let app_token = match agent_runtime::resolve_token_ref(&token_ref) {
+            Ok(secret) if !secret.expose().is_empty() => secret,
+            Ok(_) => {
+                tracing::warn!(
+                    "fleet: a slack app token resolved to nothing; that connection is disabled"
+                );
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "fleet: a slack app token did not resolve; that connection is disabled");
+                continue;
+            }
+        };
+        let token = app_token.expose().to_string();
+        tokio::spawn(agent_slack::serve_socket_mode(
+            token,
+            Arc::new(watch),
+            sink.clone(),
+        ));
+        connections += 1;
+    }
+    if connections == 0 {
+        tracing::info!("fleet: no Slack trigger channels configured; Slack watch idle");
+    } else {
+        tracing::info!(connections, "fleet: slack watch starting");
+    }
 }
 
 /// Resolve the `--serve-sessions` endpoint: `--listen` override, else

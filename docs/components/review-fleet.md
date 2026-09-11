@@ -312,15 +312,20 @@ port 50089), whose `Put`/`Delete` are RBAC-gated on `(write|delete, transport_re
 `ForgeRegistryService` relates to `Forge`. **D2b (under way, the twin of D1b):** a second host impl,
 [`MatrixMessageTransport`] (opt-in `transport-matrix` feature, a `PUT`+transaction-id client-server
 API with the room id percent-encoded into the URL path and a single access token), landed first,
-proving the "add a host = a new impl + a factory line" recipe. The fleet still carries its
-`slack_*`/`FleetSlackCfg` fields inline — lifting them out into a card referenced by id + purpose,
-with the C18 progress feed wired as a live `announce()` caller, are the remaining D2b PRs;
-teams/irc/signal host impls stay further-deferred.
+proving the "add a host = a new impl + a factory line" recipe. Then **card-by-id**: a `FleetSession`
+may set an additive `transport_id` referencing a persisted `TransportCard`, and the Slack watch now
+resolves each enabled row through [`agent_slack::slack_trigger_binding`] — running **one Socket-Mode
+connection per resolved app token** (a card row takes its `app_token_ref` + `trigger`-purpose channels;
+a row with no `transport_id` keeps the inline `slack_trigger_channel` + the `[review_fleet.slack]`
+default token, unchanged). A missing/disabled/non-Slack card contributes no trigger, fail-closed. The
+remaining D2b PR wires the C18 progress feed as a live `announce()` caller; teams/irc/signal host
+impls stay further-deferred.
 
 [`MessageTransport`]: ../../crates/agent-core/src/message_transport.rs
 [`SlackSocketMode`]: ../../crates/agent-slack/src/socket_mode.rs
 [`SlackMessageTransport`]: ../../crates/agent-slack/src/kind.rs
 [`MatrixMessageTransport`]: ../../crates/agent-slack/src/matrix.rs
+[`agent_slack::slack_trigger_binding`]: ../../crates/agent-slack/src/lib.rs
 
 ## Testing
 

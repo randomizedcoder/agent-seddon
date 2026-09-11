@@ -2848,6 +2848,7 @@ impl From<agent_core::FleetSession> for pb::FleetSession {
             created_at: s.created_at,
             updated_at: s.updated_at,
             forge_id: s.forge_id,
+            transport_id: s.transport_id,
         }
     }
 }
@@ -2869,6 +2870,7 @@ impl From<pb::FleetSession> for agent_core::FleetSession {
             created_at: s.created_at,
             updated_at: s.updated_at,
             forge_id: s.forge_id,
+            transport_id: s.transport_id,
         };
         // Wire → core clamps hostile numbers (poll bounds, timestamps); the store
         // validates fail-closed on put.
@@ -5410,6 +5412,7 @@ mod tests {
             updated_at: 1_700_000_042,
             // A card reference rides the wire verbatim (config C36 / D1b).
             forge_id: "acme-github".into(),
+            transport_id: "slack-primary".into(),
         }
     }
 

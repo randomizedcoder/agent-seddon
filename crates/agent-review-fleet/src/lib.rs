@@ -171,6 +171,7 @@ pub(crate) mod testdata {
             created_at: 1,
             updated_at: 1,
             forge_id: String::new(),
+            transport_id: String::new(),
         }
     }
 }
@@ -239,6 +240,12 @@ mod tests {
         Op::Put(Box::new(r))
     }
 
+    fn put_with_transport_id(transport_id: String) -> Op {
+        let mut r = row("x");
+        r.transport_id = transport_id;
+        Op::Put(Box::new(r))
+    }
+
     // --- CRUD contract: one table over every op class, `desc` + `expect` per row ---
 
     #[rstest]
@@ -279,6 +286,8 @@ mod tests {
     #[case::adversarial_traversal_id("a traversal id is rejected", put_with_id("../escape".into()), Expect::Err)]
     #[case::positive_forge_id_card_ref("a path-safe forge_id (card ref, config D1b) is accepted", put_with_forge_id("gh-cloud".into()), Expect::Ok)]
     #[case::adversarial_traversal_forge_id("a traversal forge_id is rejected", put_with_forge_id("../../etc".into()), Expect::Err)]
+    #[case::positive_transport_id_card_ref("a path-safe transport_id (card ref, config D2b) is accepted", put_with_transport_id("slack-primary".into()), Expect::Ok)]
+    #[case::adversarial_traversal_transport_id("a traversal transport_id is rejected", put_with_transport_id("../../etc".into()), Expect::Err)]
     #[tokio::test]
     async fn crud_contract(#[case] desc: &str, #[case] op: Op, #[case] expect: Expect) {
         let store = MemoryFleet::new();
