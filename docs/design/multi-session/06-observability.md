@@ -80,6 +80,17 @@ Mitigation is **mandatory**:
   invoked from `SessionManager::remove` ([`02-runtime-split.md`](02-runtime-split.md)).
 - An **LRU cap** on the live-session map as a backstop.
 
+> **Extended (2026-09-10, observability track — see
+> [`../observability/README.md`](../observability/README.md)).** The curated attributable subset above is
+> the loop-level one. It is now **expanded** to the newly tenant-aware services: the fleet lifecycle
+> families (`agent_fleet_*`), config-plane CRUD (registries, config-store), auth allow/deny
+> (`agent_authz_decisions_total`), and per-tenant scheduled runs. The **"do not label all ~130 families"**
+> rule is unchanged — seam-health families stay label-less (regression-guarded); only the "who did work"
+> subset grows. The fleet families additionally carry a bounded **`repo`** label (operator roster;
+> `O(sessions)`, not `O(repos × PRs)`), backstopped by its **own LRU cap** on distinct repo values — the
+> same lifecycle mitigation applied to a second dimension. **PR is never a label** (span attribute only).
+> The [metric census](../observability/01-metric-census.md) is the family-by-family authority.
+
 ## MetricsProxy — no change
 
 [`MetricsProxyService`](../../components/metrics-proxy.md) proxies PromQL →
