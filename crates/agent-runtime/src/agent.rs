@@ -460,6 +460,29 @@ struct PostPlan {
     row: agent_core::FleetSession,
 }
 
+/// Record the tenant + repo on a `fleet.*` span, each only when it passes `safe_segment`
+/// (defense in depth — the row is validated config, but a label/attribute value is never
+/// stamped unchecked). PR is recorded by the caller (a `u64`, always valid).
+#[cfg(feature = "review")]
+fn record_fleet_span(span: &tracing::Span, user: &str, repo: &str) {
+    if agent_core::safe_segment(user) {
+        span.record("tenant", user);
+    }
+    if agent_core::safe_segment(repo) {
+        span.record("repo", repo);
+    }
+}
+
+/// Tick `agent_fleet_approvals_total{outcome,user,repo}` for one approval, when both
+/// segments are `safe_segment`-valid (a malformed value records nothing, never a poisoned
+/// series). Best-effort observability — never on the approval's path.
+#[cfg(feature = "review")]
+fn record_fleet_approval(metrics: &Metrics, user: &str, repo: &str, outcome: &str) {
+    if agent_core::safe_segment(user) && agent_core::safe_segment(repo) {
+        metrics.for_fleet(user, repo).on_approval(outcome);
+    }
+}
+
 #[cfg(feature = "review")]
 fn plan_approve(
     record: Option<agent_core::ReviewDraftRecord>,
@@ -495,73 +518,110 @@ fn plan_approve(
 #[async_trait::async_trait]
 impl agent_core::FleetApprover for EngineApprover {
     async fn approve(&self, review_id: &str) -> agent_core::Result<agent_core::ApproveOutcome> {
-        // Look the draft up by id (bound query arg — `review_id` is untrusted wire input,
-        // never a path) and read the current roster, then decide purely.
-        let record = self.history.draft_by_id(review_id).await?;
-        let rows = self.roster.list().await?;
-        let (record, row) = match plan_approve(record, &rows)? {
-            ApprovePlan::NotFound => return Ok(agent_core::ApproveOutcome::NotFound),
-            ApprovePlan::AlreadyPosted => return Ok(agent_core::ApproveOutcome::AlreadyPosted),
-            ApprovePlan::Post(plan) => (plan.record, plan.row),
-        };
+        // C19 observability: a `fleet.approve` span carrying tenant/repo/pr/outcome as
+        // attributes (pr is never a metric label), and the per-`(user,repo)` approval
+        // counter. Values are threaded explicitly from the resolved row (no ambient
+        // identity on this path) and re-validated before they are stamped.
+        let span = tracing::info_span!(
+            "fleet.approve",
+            tenant = tracing::field::Empty,
+            repo = tracing::field::Empty,
+            pr = tracing::field::Empty,
+            outcome = tracing::field::Empty,
+        );
+        let sp = span.clone();
+        async move {
+            // Look the draft up by id (bound query arg — `review_id` is untrusted wire input,
+            // never a path) and read the current roster, then decide purely.
+            let record = self.history.draft_by_id(review_id).await?;
+            let rows = self.roster.list().await?;
+            // The draft's repo (when a draft resolved), so an already-posted/absent outcome
+            // can still attribute to the owning row where one exists.
+            let draft_repo = record.as_ref().map(|r| r.repo.clone());
+            let (record, row) = match plan_approve(record, &rows)? {
+                ApprovePlan::NotFound => {
+                    // No draft resolved ⇒ no `(user, repo)` tenant to attribute; the outcome
+                    // rides the span only (per-trace, no metric series).
+                    sp.record("outcome", "notfound");
+                    return Ok(agent_core::ApproveOutcome::NotFound);
+                }
+                ApprovePlan::AlreadyPosted => {
+                    sp.record("outcome", "already");
+                    if let Some(r) = draft_repo.and_then(|rp| rows.iter().find(|r| r.repo == rp)) {
+                        record_fleet_span(&sp, &r.user, &r.repo);
+                        record_fleet_approval(&self.agent.metrics(), &r.user, &r.repo, "already");
+                    }
+                    return Ok(agent_core::ApproveOutcome::AlreadyPosted);
+                }
+                ApprovePlan::Post(plan) => (plan.record, plan.row),
+            };
+            record_fleet_span(&sp, &row.user, &row.repo);
+            sp.record("pr", record.pr_number);
 
-        // Build the row's OPERATIONAL forge (the one that writes — the model's in-loop forge
-        // stays read-only) and read the draft rendered + persisted at `drafted`. The body is
-        // already redacted (redaction happened at render time, C13); `draft_path` is a
-        // server-generated path under the confined session workspace.
-        let forge = crate::build_session_forge(&row)
-            .map_err(|e| {
-                agent_core::Error::Fleet(format!(
-                    "approve: cannot build forge for {:?}: {e}",
-                    row.repo
-                ))
-            })?
-            .ok_or_else(|| {
-                agent_core::Error::Fleet(format!(
+            // Build the row's OPERATIONAL forge (the one that writes — the model's in-loop forge
+            // stays read-only) and read the draft rendered + persisted at `drafted`. The body is
+            // already redacted (redaction happened at render time, C13); `draft_path` is a
+            // server-generated path under the confined session workspace.
+            let forge = crate::build_session_forge(&row)
+                .map_err(|e| {
+                    agent_core::Error::Fleet(format!(
+                        "approve: cannot build forge for {:?}: {e}",
+                        row.repo
+                    ))
+                })?
+                .ok_or_else(|| {
+                    agent_core::Error::Fleet(format!(
                     "approve: row for {:?} has no forge backend configured — nothing to post to",
                     row.repo
                 ))
-            })?;
-        let body = tokio::fs::read_to_string(&record.draft_path)
-            .await
-            .map_err(|e| {
-                agent_core::Error::Fleet(format!(
-                    "approve: cannot read draft {:?}: {e}",
-                    record.draft_path
-                ))
-            })?;
+                })?;
+            let body = tokio::fs::read_to_string(&record.draft_path)
+                .await
+                .map_err(|e| {
+                    agent_core::Error::Fleet(format!(
+                        "approve: cannot read draft {:?}: {e}",
+                        record.draft_path
+                    ))
+                })?;
 
-        // Post as a review COMMENT — the fleet advises; a human decides approve/merge.
-        let comment = forge
-            .review_pr(record.pr_number, agent_core::ReviewVerdict::Comment, &body)
-            .await?;
+            // Post as a review COMMENT — the fleet advises; a human decides approve/merge.
+            let comment = forge
+                .review_pr(record.pr_number, agent_core::ReviewVerdict::Comment, &body)
+                .await?;
 
-        // Persist status=posted — the idempotency key. A re-approve then finds `posted`
-        // (newest-by-ts) and short-circuits to AlreadyPosted, so a duplicate call never
-        // double-posts.
-        let mut posted = record.clone();
-        posted.status = agent_core::draft_status::POSTED.to_string();
-        self.agent.record_draft(posted).await;
+            // Persist status=posted — the idempotency key. A re-approve then finds `posted`
+            // (newest-by-ts) and short-circuits to AlreadyPosted, so a duplicate call never
+            // double-posts.
+            let mut posted = record.clone();
+            posted.status = agent_core::draft_status::POSTED.to_string();
+            self.agent.record_draft(posted).await;
 
-        // C18 progress feed (config C37): announce the posted review to the row's progress
-        // channels. Announce-only + soft-fail — a post failure never affects the approve
-        // outcome. A legacy row (empty `transport_id`) or no transport registry posts
-        // nowhere.
-        let url = comment.url;
-        if let Some(progress) = self.agent.fleet_progress() {
-            progress
-                .announce(
-                    &row.transport_id,
-                    agent_core::FleetProgressEvent::Posted {
-                        repo: row.repo.clone(),
-                        pr: record.pr_number,
-                        url: url.clone(),
-                    },
-                )
-                .await;
+            // C18 progress feed (config C37): announce the posted review to the row's progress
+            // channels. Announce-only + soft-fail — a post failure never affects the approve
+            // outcome. A legacy row (empty `transport_id`) or no transport registry posts
+            // nowhere.
+            let url = comment.url;
+            // The successful approval: one per `(user, repo)`, and the span's terminal outcome.
+            record_fleet_approval(&self.agent.metrics(), &row.user, &row.repo, "posted");
+            sp.record("outcome", "posted");
+            if let Some(progress) = self.agent.fleet_progress() {
+                progress
+                    .announce(
+                        &row.transport_id,
+                        agent_core::FleetProgressEvent::Posted {
+                            user: row.user.clone(),
+                            repo: row.repo.clone(),
+                            pr: record.pr_number,
+                            url: url.clone(),
+                        },
+                    )
+                    .await;
+            }
+
+            Ok(agent_core::ApproveOutcome::Posted { url })
         }
-
-        Ok(agent_core::ApproveOutcome::Posted { url })
+        .instrument(span)
+        .await
     }
 }
 
@@ -1274,8 +1334,10 @@ impl Agent {
         #[cfg(all(feature = "fleet", feature = "transport-registry-store"))]
         {
             self.transport_registry().map(|reg| {
-                Arc::new(crate::progress::TransportProgressFeed::new(reg))
-                    as Arc<dyn agent_core::FleetProgress>
+                Arc::new(crate::progress::TransportProgressFeed::new(
+                    reg,
+                    self.metrics(),
+                )) as Arc<dyn agent_core::FleetProgress>
             })
         }
         #[cfg(not(all(feature = "fleet", feature = "transport-registry-store")))]

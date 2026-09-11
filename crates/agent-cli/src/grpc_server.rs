@@ -1039,6 +1039,9 @@ pub async fn serve_fleet(agent: Arc<Agent>, listen: Endpoint) -> anyhow::Result<
             if let Some(progress) = agent.fleet_progress() {
                 orch = orch.with_progress(progress);
             }
+            // C19 observability: record the review lifecycle per `(user, repo)` on the
+            // `agent_fleet_*` families + emit the `fleet.review` spans.
+            orch = orch.with_metrics(agent.metrics());
             let orch = Arc::new(orch);
             tokio::spawn(async move {
                 while let Some(trigger) = rx.recv().await {

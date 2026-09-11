@@ -296,28 +296,70 @@ pub async fn announce(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FleetProgressEvent {
     /// A PR was accepted and a review has started.
-    Found { repo: String, pr: u64 },
+    Found { user: String, repo: String, pr: u64 },
     /// A review draft was rendered + persisted, awaiting a human `Approve`.
-    Drafted { repo: String, pr: u64 },
+    Drafted { user: String, repo: String, pr: u64 },
     /// An approved review was posted to the forge (with the comment URL).
-    Posted { repo: String, pr: u64, url: String },
+    Posted {
+        user: String,
+        repo: String,
+        pr: u64,
+        url: String,
+    },
 }
 
 impl FleetProgressEvent {
     /// Render the one-line announce message. Plain lifecycle metadata — safe to post
     /// verbatim (the values are a validated repo, a `u64` PR number, and a forge-
-    /// returned URL; never a token or review text).
+    /// returned URL; never a token or review text). `user` (the owning org) is carried
+    /// for per-tenant observability, not shown in the human-facing post.
     pub fn render(&self) -> String {
         match self {
-            FleetProgressEvent::Found { repo, pr } => {
+            FleetProgressEvent::Found { repo, pr, .. } => {
                 format!("🔎 Fleet: reviewing PR #{pr} in `{repo}`")
             }
-            FleetProgressEvent::Drafted { repo, pr } => {
+            FleetProgressEvent::Drafted { repo, pr, .. } => {
                 format!("📝 Fleet: review drafted for PR #{pr} in `{repo}` — awaiting approval")
             }
-            FleetProgressEvent::Posted { repo, pr, url } => {
+            FleetProgressEvent::Posted { repo, pr, url, .. } => {
                 format!("✅ Fleet: review posted for PR #{pr} in `{repo}`: {url}")
             }
+        }
+    }
+
+    /// The owning user/org (the tenant), for per-tenant progress metrics + span attrs.
+    pub fn user(&self) -> &str {
+        match self {
+            FleetProgressEvent::Found { user, .. }
+            | FleetProgressEvent::Drafted { user, .. }
+            | FleetProgressEvent::Posted { user, .. } => user,
+        }
+    }
+
+    /// The repo slug (`owner__name`), for per-repo progress metrics + span attrs.
+    pub fn repo(&self) -> &str {
+        match self {
+            FleetProgressEvent::Found { repo, .. }
+            | FleetProgressEvent::Drafted { repo, .. }
+            | FleetProgressEvent::Posted { repo, .. } => repo,
+        }
+    }
+
+    /// The PR number — a span attribute only, never a metric label.
+    pub fn pr(&self) -> u64 {
+        match self {
+            FleetProgressEvent::Found { pr, .. }
+            | FleetProgressEvent::Drafted { pr, .. }
+            | FleetProgressEvent::Posted { pr, .. } => *pr,
+        }
+    }
+
+    /// The lifecycle beat name — the bounded `beat` label on `agent_fleet_progress_total`.
+    pub fn beat(&self) -> &'static str {
+        match self {
+            FleetProgressEvent::Found { .. } => "found",
+            FleetProgressEvent::Drafted { .. } => "drafted",
+            FleetProgressEvent::Posted { .. } => "posted",
         }
     }
 }
@@ -526,17 +568,17 @@ mod tests {
     #[rstest]
     // positive: the "found" beat names the PR and repo.
     #[case::found(
-        FleetProgressEvent::Found { repo: "o/r".into(), pr: 7 },
+        FleetProgressEvent::Found { user: "acme".into(), repo: "o/r".into(), pr: 7 },
         &["7", "o/r", "reviewing"]
     )]
     // positive: the "drafted" beat marks it awaiting approval.
     #[case::drafted(
-        FleetProgressEvent::Drafted { repo: "o/r".into(), pr: 7 },
+        FleetProgressEvent::Drafted { user: "acme".into(), repo: "o/r".into(), pr: 7 },
         &["7", "o/r", "drafted", "approval"]
     )]
     // positive: the "posted" beat carries the forge comment URL.
     #[case::posted(
-        FleetProgressEvent::Posted { repo: "o/r".into(), pr: 7, url: "https://f/c/1".into() },
+        FleetProgressEvent::Posted { user: "acme".into(), repo: "o/r".into(), pr: 7, url: "https://f/c/1".into() },
         &["7", "o/r", "posted", "https://f/c/1"]
     )]
     fn progress_event_render(#[case] ev: FleetProgressEvent, #[case] needles: &[&str]) {
@@ -552,6 +594,7 @@ mod tests {
     #[test]
     fn adversarial_render_has_no_token_fields() {
         let s = FleetProgressEvent::Posted {
+            user: "acme".into(),
             repo: "o/r".into(),
             pr: 1,
             url: "https://f/c/1".into(),

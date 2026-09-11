@@ -25,14 +25,23 @@ retire/LRU guards.
 
 The C19 families. Repo is the operator-roster `FleetSession.repo` (bounded, LRU-capped). PR → span only.
 
-| Family | Labels |
-|---|---|
-| `agent_fleet_triggers_total` | `source` (poll\|slack), `user`, `repo` |
-| `agent_fleet_reviews_total` | `status` (reviewing\|drafted\|superseded\|uptodate), `user`, `repo` |
-| `agent_fleet_progress_total` | `beat` (found\|drafted\|posted), `outcome` (posted\|softfailed\|skipped), `user`, `repo` |
-| `agent_fleet_approvals_total` | `outcome` (posted\|already\|notfound), `user`, `repo` |
-| `agent_fleet_approval_latency_seconds` | `user`, `repo` (drafted→posted; clamp) |
-| `agent_fleet_post_failures_total` | `transport` (kind), `user`, `repo` |
+| Family | Labels | Phase 2 |
+|---|---|---|
+| `agent_fleet_triggers_total` | `source` (poll\|slack), `user`, `repo` | **deferred** — see note |
+| `agent_fleet_reviews_total` | `status` (reviewing\|drafted\|superseded\|uptodate), `user`, `repo` | ✅ recorded (orchestrator) |
+| `agent_fleet_progress_total` | `beat` (found\|drafted\|posted), `outcome` (posted\|softfailed\|skipped), `user`, `repo` | ✅ recorded (progress feed) |
+| `agent_fleet_approvals_total` | `outcome` (posted\|already\|notfound), `user`, `repo` | ✅ recorded (approver) |
+| `agent_fleet_approval_latency_seconds` | `user`, `repo` (drafted→posted; clamp) | **deferred** — see note |
+| `agent_fleet_post_failures_total` | `transport` (kind), `user`, `repo` | ✅ recorded (progress feed) |
+
+> **Two deferred within the track** (registered + unit-tested in Phase 1; wiring needs a
+> prerequisite): **`agent_fleet_triggers_total{source}`** needs a `source` on
+> `agent_core::FleetTrigger` — `poll_session`/the drain loop see only `session_id` (no `(user,
+> repo)`), and adding the field ripples to the core type + 3 enqueue sites + tests; the
+> per-`(user,repo)` "a review started" signal is already covered by
+> `agent_fleet_reviews_total{status="reviewing"}`. **`agent_fleet_approval_latency_seconds`**
+> needs a persisted *drafted* timestamp — `ReviewDraftRecord` carries none, so drafted→posted
+> latency isn't computable in `approve` yet. Both are follow-ups (sweep or a dedicated PR).
 
 ## C. Message-transport families — **new, health + bounded** (Phase 3)
 
