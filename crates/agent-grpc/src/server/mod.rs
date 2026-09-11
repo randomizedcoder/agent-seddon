@@ -126,11 +126,16 @@ pub(crate) fn span(rpc: &'static str, meta: &tonic::metadata::MetadataMap) -> tr
         rpc,
         session_id = tracing::field::Empty,
         user_id = tracing::field::Empty,
+        tenant = tracing::field::Empty,
     );
     s.set_parent(agent_proto::trace::extract_context(meta));
     let (user, session) = agent_proto::identity::extract_identity(meta);
     if let Some(u) = user.as_deref().filter(|u| agent_core::safe_segment(u)) {
         s.record("user_id", u);
+        // `tenant` is the canonical, cross-track attribute the observability queries
+        // filter on (docs/design/observability/); under the C25 convention the verified
+        // org *is* the `user`, so it carries the same validated value on every span.
+        s.record("tenant", u);
     }
     if let Some(sess) = session.as_deref().filter(|s| agent_core::safe_segment(s)) {
         s.record("session_id", sess);
@@ -199,14 +204,64 @@ pub fn with_reflection(
 
 #[cfg(test)]
 mod tests {
-    use super::identity_key;
+    use super::{identity_key, span};
     use agent_proto::identity::{inject_identity, SESSION_ID_KEY, USER_ID_KEY};
+    use agent_testkit::observe::{captured_span_fields, SpanField};
     use tonic::metadata::{MetadataMap, MetadataValue};
 
     fn meta_with(user: &str, session: &str) -> MetadataMap {
         let mut m = MetadataMap::new();
         inject_identity(user, session, &mut m);
         m
+    }
+
+    // Serialize the span-capturing tests: a non-recording test can cache the
+    // `grpc.server` callsite interest as disabled, so a capturing test must rebuild
+    // it without a concurrent test swapping the subscriber (mirrors metered.rs).
+    static CALLSITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The fields recorded on the `grpc.server` span for a given `(user, session)`.
+    fn span_fields(user: &str, session: &str) -> Vec<SpanField> {
+        let _g = CALLSITE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        captured_span_fields(|| {
+            tracing::callsite::rebuild_interest_cache();
+            let _s = span("/pkg.Svc/M", &meta_with(user, session));
+        })
+    }
+
+    #[test]
+    fn positive_span_carries_tenant() {
+        // The shared helper records a validated `tenant` (== the verified org / `user`
+        // under C25) alongside the existing `user_id`/`session_id`, so every one of the
+        // 40+ served RPCs is tenant-filterable in HyperDX (docs/design/observability).
+        let f = span_fields("acme", "sess-1");
+        let has = |field: &str, v: &str| {
+            f.iter()
+                .any(|(s, fld, val)| s == "grpc.server" && fld == field && val == v)
+        };
+        assert!(has("tenant", "acme"), "tenant not stamped: {f:?}");
+        assert!(has("user_id", "acme"), "user_id not stamped: {f:?}");
+        assert!(has("session_id", "sess-1"), "session_id not stamped: {f:?}");
+    }
+
+    // A hostile `user` is attacker-controlled and fails `safe_segment`; it must NOT be
+    // stamped as `tenant` (fail closed to the default tenant), never sanitized.
+    #[rstest::rstest]
+    // desc: path traversal in user → tenant field absent.
+    #[case::user_traversal("../../etc", "sess-1")]
+    // desc: separator in user → tenant field absent.
+    #[case::user_separator("a/b", "sess-1")]
+    // desc: leading-dash (ref-injection shape) in user → tenant field absent.
+    #[case::user_leading_dash("-rf", "sess-1")]
+    fn adversarial_hostile_tenant_not_recorded(#[case] user: &str, #[case] session: &str) {
+        let f = span_fields(user, session);
+        assert!(
+            !f.iter()
+                .any(|(s, fld, _)| s == "grpc.server" && fld == "tenant"),
+            "hostile tenant {user:?} was recorded: {f:?}"
+        );
     }
 
     #[test]

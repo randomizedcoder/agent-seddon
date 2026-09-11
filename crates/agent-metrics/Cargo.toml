@@ -23,6 +23,8 @@ dhat-heap = ["dep:dhat"]
 [dev-dependencies]
 # Deterministic instruction-count benchmark harness (see benches/metrics.rs).
 iai-callgrind.workspace = true
+# Table-driven unit tests (four case classes + adversarial), per CLAUDE.md.
+rstest.workspace = true
 
 # The exemplar bench + leak test establish the pattern every feature PR follows.
 [[bench]]
