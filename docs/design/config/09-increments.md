@@ -403,8 +403,13 @@ The two keystones (A, B) are **independent** and may land in either order or in 
   `TransportCard`, and `spawn_slack_watch` resolves each row via `agent_slack::slack_trigger_binding`,
   running one Socket-Mode connection **per resolved app token** (a card row takes its token +
   `trigger`-purpose channels; a legacy row keeps the inline `slack_*` + the `[review_fleet.slack]` default).
-  The **last D2b PR** wires the C18 progress feed as a live `announce` caller (the `progress`-purpose
-  channels). teams/irc/signal host impls stay further-deferred.
+  The **last D2b PR** (built, D2b PR3) wires the C18 progress feed as a live `announce` caller: a thin
+  `agent_core::FleetProgress` seam (`announce(transport_id, FleetProgressEvent)`) whose
+  `agent_runtime::TransportProgressFeed` resolves the card, builds its outbound transport
+  (`build_transport_from_card`), and posts each beat to the card's `progress`-purpose channels via the
+  soft-fail `announce` helper — the orchestrator's per-review task fires `reviewing`/`drafted`, the approve
+  path fires `posted`. That completes D2b (and Track D). teams/irc/signal host impls + a live Matrix
+  `/sync` inbound stay further-deferred.
 
 ---
 

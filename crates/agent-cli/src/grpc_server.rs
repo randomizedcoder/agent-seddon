@@ -1033,6 +1033,12 @@ pub async fn serve_fleet(agent: Arc<Agent>, listen: Endpoint) -> anyhow::Result<
             if let Some(history) = agent.fleet_history() {
                 orch = orch.with_history(history);
             }
+            // C18 progress feed (config C37): announce lifecycle beats (reviewing, drafted)
+            // to each row's `progress` channels via the transport seam. Absent (no
+            // transport registry) ⇒ no progress posting; the review still runs.
+            if let Some(progress) = agent.fleet_progress() {
+                orch = orch.with_progress(progress);
+            }
             let orch = Arc::new(orch);
             tokio::spawn(async move {
                 while let Some(trigger) = rx.recv().await {

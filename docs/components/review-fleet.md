@@ -299,7 +299,7 @@ The inbound seam above generalized to a **bidirectional** [`MessageTransport`]
 [`SlackMessageTransport`] posts via `chat.postMessage` (bot-token-gated — a missing token is a
 distinct early error — and rate-limited by a pure per-minute `RateLimiter`); a failed post is
 **soft** (`agent_core::announce` → `SoftFailed`, never blocking a review). This is the seam the
-still-unbuilt C18 progress feed will post through.
+C18 progress feed posts through (now built — see below).
 
 Which transport a fleet uses is now a **`TransportCard`** (`kind`, `endpoint` empty ⇒ the kind
 default else an SSRF-screened override, `app_token_ref`/`bot_token_ref` references, channel
@@ -317,15 +317,24 @@ may set an additive `transport_id` referencing a persisted `TransportCard`, and 
 resolves each enabled row through [`agent_slack::slack_trigger_binding`] — running **one Socket-Mode
 connection per resolved app token** (a card row takes its `app_token_ref` + `trigger`-purpose channels;
 a row with no `transport_id` keeps the inline `slack_trigger_channel` + the `[review_fleet.slack]`
-default token, unchanged). A missing/disabled/non-Slack card contributes no trigger, fail-closed. The
-remaining D2b PR wires the C18 progress feed as a live `announce()` caller; teams/irc/signal host
-impls stay further-deferred.
+default token, unchanged). A missing/disabled/non-Slack card contributes no trigger, fail-closed.
+Finally, the **C18 progress feed** landed as a live `announce()` caller: a thin
+[`agent_core::FleetProgress`] seam whose [`agent_runtime::TransportProgressFeed`] resolves the row's card,
+builds its **outbound** transport (`build_transport_from_card` on the `bot_token_ref`), and posts each
+lifecycle beat to the card's `progress`-purpose channels via the soft-fail `announce` helper. The FSM's
+per-review task fires `reviewing` (a PR was accepted) + `drafted` (a draft is ready); the approve path
+fires `posted` (with the forge comment URL). A row with no `transport_id`, no `progress` binding, or a
+disabled/unbuildable card posts nowhere, and every post is soft-fail — the feed can never block or fail a
+review. That completes D2b; teams/irc/signal host impls + a live Matrix `/sync` inbound stay
+further-deferred.
 
 [`MessageTransport`]: ../../crates/agent-core/src/message_transport.rs
 [`SlackSocketMode`]: ../../crates/agent-slack/src/socket_mode.rs
 [`SlackMessageTransport`]: ../../crates/agent-slack/src/kind.rs
 [`MatrixMessageTransport`]: ../../crates/agent-slack/src/matrix.rs
 [`agent_slack::slack_trigger_binding`]: ../../crates/agent-slack/src/lib.rs
+[`agent_core::FleetProgress`]: ../../crates/agent-core/src/message_transport.rs
+[`agent_runtime::TransportProgressFeed`]: ../../crates/agent-runtime/src/progress.rs
 
 ## Testing
 

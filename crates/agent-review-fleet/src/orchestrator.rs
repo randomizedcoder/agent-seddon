@@ -34,9 +34,10 @@ use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
 
 use agent_core::{
-    draft_status, encode_review_session_id, DraftRequest, FleetHistory, FleetHost, FleetRegistry,
-    FleetReviewFactory, FleetSession, FleetTrigger, PriorReview, RepoBackend, ReviewDrafter,
-    ReviewGrounder, ReviewTarget, SessionKey, TriggerOutcome, TriggerSink, UserId, WorktreeSpec,
+    draft_status, encode_review_session_id, DraftRequest, FleetHistory, FleetHost, FleetProgress,
+    FleetProgressEvent, FleetRegistry, FleetReviewFactory, FleetSession, FleetTrigger, PriorReview,
+    RepoBackend, ReviewDrafter, ReviewGrounder, ReviewTarget, SessionKey, TriggerOutcome,
+    TriggerSink, UserId, WorktreeSpec,
 };
 
 /// A forge-credential check for one row (C5): `Ok(())` when the row's `token_ref`
@@ -283,6 +284,13 @@ pub struct FleetOrchestrator {
     /// `None` ⇒ today's single-repo behaviour (the process-global `repo`/`grounder`). Used
     /// **fail-soft**: a build error falls back to the globals so a review still runs.
     review_factory: Option<Arc<dyn FleetReviewFactory>>,
+    /// The C18 progress feed (config C37). When present, the per-review task announces
+    /// the `reviewing` beat (a PR was accepted) and the `drafted` beat (a draft is ready)
+    /// to the row's `progress`-purpose channels via the transport seam. It is
+    /// announce-only and soft-fail: a post never blocks or fails a review. `None` ⇒ no progress posting
+    /// (the review still runs). The `posted` beat is announced by the approver (the post
+    /// path holds `Arc<Agent>`; the FSM here does not).
+    progress: Option<Arc<dyn FleetProgress>>,
     /// Live review tasks, keyed by `(session_id, pr_number)`; membership is the in-flight
     /// guard (one review per PR). Cleared by [`Self::cancel`]/[`Self::join`] or dropping
     /// the orchestrator; precise head-oid dedup + supersede across rounds is inc 6b (C16).
@@ -304,6 +312,7 @@ impl FleetOrchestrator {
             fleet_root: None,
             history: None,
             review_factory: None,
+            progress: None,
             in_flight: Mutex::new(HashMap::new()),
         }
     }
@@ -344,6 +353,15 @@ impl FleetOrchestrator {
     /// reviews for many repos. Fail-soft — a build error falls back to the globals.
     pub fn with_review_factory(mut self, factory: Arc<dyn FleetReviewFactory>) -> Self {
         self.review_factory = Some(factory);
+        self
+    }
+
+    /// Attach the C18 progress feed (config C37): with it set, the per-review task
+    /// announces `reviewing`/`drafted` lifecycle beats to the row's `progress` channels
+    /// (and the approver announces `posted`). Announce-only + soft-fail — without it, or
+    /// on a post error, the review runs exactly as before.
+    pub fn with_progress(mut self, progress: Arc<dyn FleetProgress>) -> Self {
+        self.progress = Some(progress);
         self
     }
 
@@ -547,10 +565,27 @@ impl FleetOrchestrator {
         let repo = row.repo.clone();
         let key_run = key.clone();
         let sid = trigger.session_id.clone();
+        // C18 progress feed (config C37): announce lifecycle beats to the row's progress
+        // channels. `transport_id` selects the card; empty ⇒ the feed posts nowhere.
+        let progress = self.progress.clone();
+        let transport_id = row.transport_id.clone();
+        let repo_evt = row.repo.clone();
         // Carry the prior round's still-open items into the draft so the tracker (C16) can
         // reconcile them against this round's findings (addressed vs still-open).
         let open_items = prior.open_items;
         let task = tokio::spawn(async move {
+            // reviewing: a PR was accepted and the review is starting (soft-fail).
+            if let Some(progress) = &progress {
+                progress
+                    .announce(
+                        &transport_id,
+                        FleetProgressEvent::Found {
+                            repo: repo_evt.clone(),
+                            pr,
+                        },
+                    )
+                    .await;
+            }
             let narrative = match host.run_review(key_run, goal, skill).await {
                 Ok(n) => n,
                 Err(e) => {
@@ -570,9 +605,20 @@ impl FleetOrchestrator {
                     workspace,
                     prior: open_items,
                 };
-                if let Err(e) = drafter.draft(req).await {
-                    tracing::warn!(session_id = %sid, pr, error = %e,
-                        "fleet: draft render/persist failed (soft)");
+                match drafter.draft(req).await {
+                    Ok(_) => {
+                        // drafted → awaiting approval: announce the draft is ready.
+                        if let Some(progress) = &progress {
+                            progress
+                                .announce(
+                                    &transport_id,
+                                    FleetProgressEvent::Drafted { repo: repo_evt, pr },
+                                )
+                                .await;
+                        }
+                    }
+                    Err(e) => tracing::warn!(session_id = %sid, pr, error = %e,
+                        "fleet: draft render/persist failed (soft)"),
                 }
             }
         });
@@ -832,6 +878,30 @@ mod tests {
                 return Err(agent_core::Error::Fleet("history boom".into()));
             }
             Ok(self.prior.clone())
+        }
+    }
+
+    /// A [`FleetProgress`] double (C18): records every `(transport_id, event)` it is
+    /// announced, so a test can assert which lifecycle beats fired and on which card.
+    #[derive(Default)]
+    struct FakeProgress {
+        announced: Mutex<Vec<(String, FleetProgressEvent)>>,
+    }
+    impl FakeProgress {
+        fn new() -> Arc<Self> {
+            Arc::new(Self::default())
+        }
+        fn announced(&self) -> Vec<(String, FleetProgressEvent)> {
+            self.announced.lock().unwrap().clone()
+        }
+    }
+    #[async_trait::async_trait]
+    impl FleetProgress for FakeProgress {
+        async fn announce(&self, transport_id: &str, event: FleetProgressEvent) {
+            self.announced
+                .lock()
+                .unwrap()
+                .push((transport_id.to_string(), event));
         }
     }
 
@@ -1261,6 +1331,90 @@ mod tests {
         );
         assert!(!req.review_id.is_empty(), "a review id was minted");
         assert!(req.prior.is_empty(), "no prior feedback in 6a");
+    }
+
+    #[tokio::test]
+    async fn positive_progress_feed_announces_reviewing_then_drafted() {
+        // desc: a progress feed + drafter attached, on a row bound to transport `slk`.
+        // expect: the per-review task announces Found (reviewing) then Drafted, both on
+        // the row's transport_id — the C18 lifecycle beats.
+        let mut r = row("web", true);
+        r.transport_id = "slk".into();
+        let roster = seeded(&[r]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(0));
+        let grounder = FakeGrounder::ok("brief");
+        let drafter = FakeDrafter::ok();
+        let progress = FakeProgress::new();
+        let o = orch(roster, repo, host)
+            .with_grounder(grounder)
+            .with_drafter(drafter)
+            .with_progress(progress.clone());
+
+        o.handle(FleetTrigger {
+            session_id: "web".into(),
+            pr_number: 42,
+        })
+        .await
+        .expect("handle ok");
+        assert!(o.join("web", 42).await, "the review task was in flight");
+
+        let beats = progress.announced();
+        assert_eq!(beats.len(), 2, "reviewing + drafted announced");
+        assert!(
+            beats.iter().all(|(tid, _)| tid == "slk"),
+            "every beat targets the row's transport card"
+        );
+        assert_eq!(
+            beats[0].1,
+            FleetProgressEvent::Found {
+                repo: "acme__web".into(),
+                pr: 42
+            },
+            "first beat is 'reviewing' (found)"
+        );
+        assert_eq!(
+            beats[1].1,
+            FleetProgressEvent::Drafted {
+                repo: "acme__web".into(),
+                pr: 42
+            },
+            "second beat is 'drafted'"
+        );
+    }
+
+    #[tokio::test]
+    async fn corner_progress_drafted_not_announced_when_draft_fails() {
+        // desc: the drafter fails, with a progress feed attached. expect: 'reviewing' is
+        // still announced (the review started), but NO 'drafted' beat (nothing was
+        // drafted) — the feed reflects the real lifecycle, not an optimistic one.
+        let mut r = row("web", true);
+        r.transport_id = "slk".into();
+        let roster = seeded(&[r]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(0));
+        let grounder = FakeGrounder::ok("brief");
+        let drafter = FakeDrafter::failing();
+        let progress = FakeProgress::new();
+        let o = orch(roster, repo, host)
+            .with_grounder(grounder)
+            .with_drafter(drafter)
+            .with_progress(progress.clone());
+
+        o.handle(FleetTrigger {
+            session_id: "web".into(),
+            pr_number: 9,
+        })
+        .await
+        .expect("handle ok");
+        assert!(o.join("web", 9).await);
+
+        let beats = progress.announced();
+        assert_eq!(beats.len(), 1, "only the 'reviewing' beat fired");
+        assert!(
+            matches!(beats[0].1, FleetProgressEvent::Found { .. }),
+            "the single beat is 'reviewing'"
+        );
     }
 
     #[tokio::test]

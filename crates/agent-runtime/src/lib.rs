@@ -20,6 +20,8 @@ mod git;
 pub mod hooks;
 mod metered;
 mod policy;
+#[cfg(all(feature = "fleet", feature = "transport-registry-store"))]
+mod progress;
 #[cfg(feature = "recall")]
 pub mod recall;
 mod registry;
@@ -68,6 +70,8 @@ pub use config::RecallCfg;
 pub use config_schema::{build_schema, validate_config};
 #[cfg(feature = "config")]
 pub use config_store::FileConfigStore;
+#[cfg(all(feature = "fleet", feature = "transport-registry-store"))]
+pub use progress::{progress_channels, TransportProgressFeed};
 #[cfg(feature = "fleet")]
 pub use registry::{
     build_session_forge, build_session_forge_from_card, resolve_session_forge, resolve_token_ref,

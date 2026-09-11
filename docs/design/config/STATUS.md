@@ -52,8 +52,13 @@ second `MessageTransport` proving the C37 "add a host = a new impl + a factory l
 `FleetSession.transport_id` referencing a persisted `TransportCard`; the fleet's Slack watch now runs one
 Socket-Mode connection **per resolved app token**, a card row taking its token + `trigger`-purpose
 channels from the card, a legacy row keeping the inline `slack_*` + `[review_fleet.slack]` default). The
-**C18 progress feed** as a live `announce()` caller is the last remaining D2b PR. teams/irc/signal host
-impls are noted further-deferred.
+last D2b PR, the **C18 progress feed** as a live `announce()` caller
+([#314](https://github.com/randomizedcoder/agent-seddon/pull/314) — a `FleetProgress` seam the orchestrator
+and the approver post lifecycle beats through: `reviewing` + `drafted` from the FSM's per-review task,
+`posted` from the approve path, each rendered to the card's `progress`-purpose channels via
+`build_transport_from_card` + `announce`; announce-only and soft-fail, so a broken channel never blocks a
+review), **completes Track D**. teams/irc/signal host impls and a live Matrix `/sync` inbound are noted
+further-deferred.
 
 ## Components
 
@@ -64,7 +69,7 @@ impls are noted further-deferred.
 | C34 | RBAC model | ✅ | `authorize` + role cards (C1 #297, C1b #301); gates control-plane RPCs (not the tool `Policy`). E1 adds the operator/tenant write split. |
 | C35 | Per-tenant config plane | ✅ | `PerTenant<Store>` (C2 #302); = multi-tenancy C30 applied to config stores. E1 extends it to forge/transport. |
 | C36 | Forge registry | 🟡 | Forge cards + `ForgeRegistryService` seam (D1); allow-list dropped, kind/base-url/repo-encoding lifted into the card and resolved at build time. D1b complete: gitea #309, bitbucket #310, card-by-id (`FleetSession.forge_id`) #311. |
-| C37 | Message-transport registry | 🟡 | Bidirectional `MessageTransport` (recv + new outbound `post`) + `TransportRegistryService` seam (D2); Slack = one impl. D2b under way: matrix host impl #312; `FleetSession.transport_id` card-by-id + Socket-Mode inbound unification #313; C18 announce feed follows. |
+| C37 | Message-transport registry | 🟡 | Bidirectional `MessageTransport` (recv + new outbound `post`) + `TransportRegistryService` seam (D2); Slack = one impl. D2b complete: matrix host impl #312; `FleetSession.transport_id` card-by-id + Socket-Mode inbound unification #313; C18 progress feed (`FleetProgress` announce caller) #314. |
 | C38 | Per-tenant prompt storage | ✅ | `StorePrompt::with_tenant` + `PerTenant` wrap (C2 #302); no trait change. |
 | C39 | LLM upstream/pool config | 🟡 | Reference impl **shipped** (model-router); only convergence onto C41/C35 pending. |
 | C40 | Control-plane consolidation | 🟡 | Operator/tenant write split + per-tenant forge/transport (E1, [#308](https://github.com/randomizedcoder/agent-seddon/pull/308)); composes C33/C34/C35 over all control services; = multi-tenancy C31. |
