@@ -24,9 +24,12 @@ transport card.
 > resolves each row through `agent_slack::slack_trigger_binding` and runs **one Socket-Mode connection per
 > resolved app token** — a card row takes its `app_token_ref` + `trigger`-purpose channels from the card,
 > a legacy row (empty `transport_id`) keeps the inline `slack_*` + the `[review_fleet.slack]` default token
-> (unchanged). A missing/disabled/non-Slack card contributes no trigger (fail-closed). **Still to come in
-> D2b:** the review-fleet C18 progress feed wired as a live `announce()` caller (the `progress`-purpose
-> channels). teams/irc/signal host impls are further-deferred. See [`09-increments.md`](09-increments.md) §D2.
+> (unchanged). A missing/disabled/non-Slack card contributes no trigger (fail-closed). PR3 then landed the
+> **C18 progress feed** as a live `announce()` caller (below): a `FleetProgress` seam the orchestrator and
+> the approver post lifecycle beats through (`reviewing`/`drafted`/`posted`), rendered to the card's
+> `progress`-purpose channels — announce-only + soft-fail, so a broken channel never blocks a review. That
+> **completes D2b** (and Track D). teams/irc/signal host impls and a live Matrix `/sync` inbound are
+> further-deferred. See [`09-increments.md`](09-increments.md) §D2.
 
 ## Where we are today
 
@@ -92,10 +95,17 @@ message ChannelBinding { string channel = 1; string purpose = 2; }  // purpose: 
 
 ## Announce-only, and the review-fleet C18 relationship
 
-The review-fleet progress feed (C18, still unbuilt) is **announce-only** — it posts lifecycle events
-(found PR → reviewing → draft ready → approved → posted) via `MessageTransport::post`; approval itself
-stays the `Approve` RPC. C37 is the seam C18 posts through. (If C18 lands before C37 it does so directly
-against Slack; C37 then generalizes it — the seam is designed so C18 is a thin caller either way.)
+The review-fleet progress feed (C18) is **announce-only** — it posts lifecycle beats
+(reviewing → drafted → posted) via `MessageTransport::post`; approval itself stays the `Approve` RPC. C37
+is the seam C18 posts through, and it is now built (D2b PR3): a thin `agent_core::FleetProgress` seam
+(`announce(transport_id, FleetProgressEvent)`), whose concrete `agent_runtime::TransportProgressFeed`
+resolves the session's card, builds its outbound transport (`build_transport_from_card` on the
+`bot_token_ref`), and posts each beat to the card's `progress`-purpose channels through the soft-fail
+`announce` helper. The caller is deliberately thin and split across the two places that reach the
+lifecycle: the orchestrator's per-review task fires `reviewing` (a PR was accepted) + `drafted` (a draft is
+ready), and the approve path fires `posted` (with the forge comment URL). A session with no `transport_id`,
+no `progress` binding, or a disabled/unbuildable card posts nowhere, and every post is soft-fail, so the
+feed can never block or fail a review.
 
 ## Security
 

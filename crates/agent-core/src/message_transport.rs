@@ -288,6 +288,55 @@ pub async fn announce(
     }
 }
 
+/// One review-fleet lifecycle beat, posted to a session's `progress`-purpose channels
+/// (config C18). These are **metadata** — a PR number, a repo, a status, a comment
+/// URL — never review content, so there is no redaction concern (the review body's
+/// redaction happened at draft-render time, C13). The seam renders the beat to text;
+/// the concrete feed resolves the session's card and posts through [`announce`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FleetProgressEvent {
+    /// A PR was accepted and a review has started.
+    Found { repo: String, pr: u64 },
+    /// A review draft was rendered + persisted, awaiting a human `Approve`.
+    Drafted { repo: String, pr: u64 },
+    /// An approved review was posted to the forge (with the comment URL).
+    Posted { repo: String, pr: u64, url: String },
+}
+
+impl FleetProgressEvent {
+    /// Render the one-line announce message. Plain lifecycle metadata — safe to post
+    /// verbatim (the values are a validated repo, a `u64` PR number, and a forge-
+    /// returned URL; never a token or review text).
+    pub fn render(&self) -> String {
+        match self {
+            FleetProgressEvent::Found { repo, pr } => {
+                format!("🔎 Fleet: reviewing PR #{pr} in `{repo}`")
+            }
+            FleetProgressEvent::Drafted { repo, pr } => {
+                format!("📝 Fleet: review drafted for PR #{pr} in `{repo}` — awaiting approval")
+            }
+            FleetProgressEvent::Posted { repo, pr, url } => {
+                format!("✅ Fleet: review posted for PR #{pr} in `{repo}`: {url}")
+            }
+        }
+    }
+}
+
+/// The review-fleet progress feed (config C18): announces lifecycle beats to a fleet
+/// session's `progress`-purpose channels, through the [`MessageTransport`] seam.
+/// **Announce-only and soft-fail** — a session with no transport, no progress binding,
+/// or a disabled/unbuildable card posts nowhere, and a post failure never propagates,
+/// so the feed can never block or fail a review. Injected into the orchestrator + the
+/// approver as a seam, so those crates stay free of the concrete transport wiring
+/// (token resolution + `build_transport_from_card`).
+#[async_trait]
+pub trait FleetProgress: Send + Sync {
+    /// Announce `event` to the progress channels bound to the transport named by
+    /// `transport_id`. An empty `transport_id` (a legacy inline row) posts nowhere.
+    /// Never errors.
+    async fn announce(&self, transport_id: &str, event: FleetProgressEvent);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -472,5 +521,45 @@ mod tests {
         )
         .await;
         assert_eq!(out, AnnounceOutcome::SoftFailed);
+    }
+
+    #[rstest]
+    // positive: the "found" beat names the PR and repo.
+    #[case::found(
+        FleetProgressEvent::Found { repo: "o/r".into(), pr: 7 },
+        &["7", "o/r", "reviewing"]
+    )]
+    // positive: the "drafted" beat marks it awaiting approval.
+    #[case::drafted(
+        FleetProgressEvent::Drafted { repo: "o/r".into(), pr: 7 },
+        &["7", "o/r", "drafted", "approval"]
+    )]
+    // positive: the "posted" beat carries the forge comment URL.
+    #[case::posted(
+        FleetProgressEvent::Posted { repo: "o/r".into(), pr: 7, url: "https://f/c/1".into() },
+        &["7", "o/r", "posted", "https://f/c/1"]
+    )]
+    fn progress_event_render(#[case] ev: FleetProgressEvent, #[case] needles: &[&str]) {
+        let s = ev.render();
+        for n in needles {
+            assert!(s.contains(n), "render {s:?} missing {n:?}");
+        }
+    }
+
+    // adversarial: the render is plain metadata — no token/secret shape can reach it
+    // (the enum only carries a repo, a u64, and a forge URL), so a rendered beat never
+    // leaks a credential even if upstream data were hostile.
+    #[test]
+    fn adversarial_render_has_no_token_fields() {
+        let s = FleetProgressEvent::Posted {
+            repo: "o/r".into(),
+            pr: 1,
+            url: "https://f/c/1".into(),
+        }
+        .render();
+        assert!(
+            !s.contains("xoxb-") && !s.contains("xapp-"),
+            "no token in {s:?}"
+        );
     }
 }

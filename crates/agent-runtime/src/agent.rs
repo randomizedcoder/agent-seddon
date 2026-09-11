@@ -543,7 +543,25 @@ impl agent_core::FleetApprover for EngineApprover {
         posted.status = agent_core::draft_status::POSTED.to_string();
         self.agent.record_draft(posted).await;
 
-        Ok(agent_core::ApproveOutcome::Posted { url: comment.url })
+        // C18 progress feed (config C37): announce the posted review to the row's progress
+        // channels. Announce-only + soft-fail — a post failure never affects the approve
+        // outcome. A legacy row (empty `transport_id`) or no transport registry posts
+        // nowhere.
+        let url = comment.url;
+        if let Some(progress) = self.agent.fleet_progress() {
+            progress
+                .announce(
+                    &row.transport_id,
+                    agent_core::FleetProgressEvent::Posted {
+                        repo: row.repo.clone(),
+                        pr: record.pr_number,
+                        url: url.clone(),
+                    },
+                )
+                .await;
+        }
+
+        Ok(agent_core::ApproveOutcome::Posted { url })
     }
 }
 
@@ -1246,6 +1264,24 @@ impl Agent {
     /// (`--serve-transport-registry`).
     pub fn transport_registry(&self) -> Option<Arc<dyn agent_core::TransportRegistry>> {
         self.transport_registry.clone()
+    }
+
+    /// The review-fleet C18 progress feed (config C37): a [`agent_core::FleetProgress`]
+    /// over the configured transport registry, or `None` when no transport registry is
+    /// wired (or the build lacks the fleet/transport features). Announce-only + soft-fail
+    /// — the orchestrator + the approver post lifecycle beats through it.
+    pub fn fleet_progress(&self) -> Option<Arc<dyn agent_core::FleetProgress>> {
+        #[cfg(all(feature = "fleet", feature = "transport-registry-store"))]
+        {
+            self.transport_registry().map(|reg| {
+                Arc::new(crate::progress::TransportProgressFeed::new(reg))
+                    as Arc<dyn agent_core::FleetProgress>
+            })
+        }
+        #[cfg(not(all(feature = "fleet", feature = "transport-registry-store")))]
+        {
+            None
+        }
     }
 
     /// Fleet capacity caps (`[review_fleet] max_total`, `max_per_user`) for
