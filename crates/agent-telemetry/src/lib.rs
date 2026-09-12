@@ -85,6 +85,23 @@ impl TelemetryHandle {
         &self.session_id
     }
 
+    /// A handle whose writer is **not** spawned: rows land in the returned receiver
+    /// instead of ClickHouse, so a test can drive the layer/recorders and assert the
+    /// exact `Msg`/`LogRow` produced without a live database.
+    #[cfg(test)]
+    pub(crate) fn for_test(session_id: impl Into<String>) -> (Self, mpsc::Receiver<Msg>) {
+        let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
+        (
+            Self {
+                tx,
+                session_id: Arc::from(session_id.into()),
+                seq: Arc::new(AtomicU32::new(0)),
+                warned: Arc::new(AtomicBool::new(false)),
+            },
+            rx,
+        )
+    }
+
     /// Mirror a recorded event into ClickHouse. `kind = "usage"` rows route to
     /// `agent_usage`, `kind = "verification"` to `agent_verifications`; everything
     /// else becomes an `agent_events` row.

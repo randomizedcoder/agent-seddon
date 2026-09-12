@@ -8,11 +8,12 @@ would conflict if branched together). Pause for merge between phases.
 
 | Phase | Scope | State | PR |
 |---|---|---|---|
-| **0** | audit + census + doctrine reconciliation (docs-only): this dir + revisions to review-fleet 07, multi-session 06, `docs/tracing.md`, `docs/observability.md` | 🟡 | #315 |
-| **1** | shared plumbing: `tenant` on the `grpc.server` span; new `agent_fleet_*` families registered; repo-label LRU cap helper; bench ceilings bumped | 🟡 | #316 |
-| **2** | review-fleet + C18 progress + approver — the C19 build (per-tenant + per-repo metrics; `fleet.*` spans with tenant/repo/pr) | 🟡 | #317 |
-| **3** | message transport (slack/matrix) — post/recv/ratelimit/soft-fail metrics + `transport.*` spans | 🟡 | #318 |
+| **0** | audit + census + doctrine reconciliation (docs-only): this dir + revisions to review-fleet 07, multi-session 06, `docs/tracing.md`, `docs/observability.md` | ✅ | #315 |
+| **1** | shared plumbing: `tenant` on the `grpc.server` span; new `agent_fleet_*` families registered; repo-label LRU cap helper; bench ceilings bumped | ✅ | #316 |
+| **2** | review-fleet + C18 progress + approver — the C19 build (per-tenant + per-repo metrics; `fleet.*` spans with tenant/repo/pr) | ✅ | #317 |
+| **3** | message transport (slack/matrix) — post/recv/ratelimit/soft-fail metrics + `transport.*` spans | ✅ | #318 |
 | **4** | config-plane: transport/forge registries, config-store backends, auth verify + authz allow/deny (per-tenant) | ⬜ | — |
+| **5.5** | ClickHouse sinks — `agent_logs` inherits tenant/repo/pr from the span scope (+`repo`/`pr` columns); OTLP `EnrichSpanProcessor` stamps tenant/session on every scoped span; `tenant` on the `agent.turn` root | 🟡 | #319 |
 | **5** | sweep the pre-existing ~137 families + existing spans per the census (promote the E candidates; confirm health families stay label-less) | ⬜ | — |
 
 ## Cross-references updated by Phase 0

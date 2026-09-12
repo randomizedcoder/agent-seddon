@@ -94,6 +94,13 @@ impl Session {
             goal = %goal,
             session_id = %self.id.session,
             user_id = %self.id.user,
+            // `tenant` is the canonical cross-track attribute the observability queries
+            // filter on (matching `grpc.server`); under C25 the verified org *is* the
+            // `user`. This root span is created *before* `agent_core::scope` is entered,
+            // so `EnrichSpanProcessor` (which reads the ambient identity) does not see it
+            // — hence the explicit field here. For a fleet review, `repo`/`pr` ride the
+            // enclosing `fleet.review` span that this turn runs under.
+            tenant = %self.id.user,
         );
         // Scope the turn's ambient identity so any `= "grpc"` seam call the loop makes
         // carries this session's `(user, session)` in its metadata. In-process seams

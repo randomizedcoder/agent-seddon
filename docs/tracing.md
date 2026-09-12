@@ -49,9 +49,15 @@ Fleet traces additionally carry `repo` and `pr` on the `fleet.*` spans (trigger 
 review → draft → post), so a specific PR's whole lifecycle is one query —
 `SELECT ... FROM otel_traces WHERE SpanAttributes['pr'] = '42'`. These are **span
 attributes, not metric labels**: `pr` in particular is deliberately never a Prometheus
-label (unbounded), and lives only here and in ClickHouse. Because tenant/repo sit on
-the root span, the whole nested seam sub-tree inherits the filter with no per-child
-edit. Design of record: [`design/observability/`](design/observability/README.md).
+label (unbounded), and lives only here and in ClickHouse. OTEL does **not** copy a
+parent's attributes onto its children, so per-child filtering is made to work by
+`EnrichSpanProcessor` (`crates/agent-telemetry/src/otel.rs`): its `on_start` runs
+*inline on the span-creating task* and stamps `tenant`/`session` from the ambient
+identity onto **every span opened under a scope** (all the metered seam + loop
+sub-spans) — so each child is independently filterable, not just the root. The
+ClickHouse-native `agent_logs` sink inherits the same dimensions a different way — the
+layer walks the enclosing span scope — so logs carry `repo`/`pr` columns too. Design of
+record: [`design/observability/`](design/observability/README.md).
 
 With `provider = "grpc"`, the `provider.*` calls cross a process boundary and the
 gateway's `grpc.server` span is a **child** of the loop's `provider.stream` span —

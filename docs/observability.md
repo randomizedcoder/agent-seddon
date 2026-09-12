@@ -79,15 +79,20 @@ See [tracing.md](tracing.md) for setup (ingestion key, gotchas) and more queries
 
 ## Per-tenant & per-repo dimensionality
 
-Both signals can be sliced by **tenant** (the verified org / `user`) and, in the review fleet, by
+All three signals can be sliced by **tenant** (the verified org / `user`) and, in the review fleet, by
 **repo** — without a cardinality blow-up, because each dimension goes where it is cheap:
 
 - **Metrics** carry `(session, user)` on the curated "who did work" families and a bounded `repo` on the
   fleet families (`agent_fleet_*`); e.g. `sum by (user) (agent_cost_usd_total)` or
   `sum by (repo) (rate(agent_fleet_reviews_total[1h]))`. Seam-*health* families stay label-less on
   purpose, and **PR is never a metric label**. Series lifecycle is bounded by `retire()` + LRU caps.
-- **Traces** carry `tenant`/`repo`/`pr` as **span attributes** on the trace root and the `fleet.*`
-  spans, so a whole distributed trace — or one PR's entire lifecycle — is one HyperDX filter.
+- **Traces** carry `tenant`/`repo`/`pr` as **span attributes**. `EnrichSpanProcessor` stamps
+  `tenant`/`session` on *every* span created under a scope (OTEL doesn't inherit parent attributes), and
+  the `fleet.*` spans add `repo`/`pr`, so a whole distributed trace — or one PR's entire lifecycle — is one
+  HyperDX filter.
+- **Logs** (`agent_logs`) carry `user`/`repo`/`pr` columns — the `ClickHouseLayer` walks the enclosing
+  span scope, so a fleet-drain log gets its owning tenant/repo/pr from the `fleet.*` span even with no
+  ambient identity; `SELECT ... FROM agent_logs WHERE repo = 'acme__web'`.
 
 The full rules (which family gets which label and why) are the design of record in
 [`design/observability/`](design/observability/README.md); the family-by-family decisions are in its

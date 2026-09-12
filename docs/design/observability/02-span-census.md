@@ -15,12 +15,25 @@ thread the values explicitly at the call site (the exporter runs on its own task
 | Site | File | Add |
 |---|---|---|
 | **`grpc.server`** (shared helper — covers all 40+ RPCs at once) | `crates/agent-grpc/src/server/mod.rs:123` | `tenant` field (validated; `identity_key(meta)` already in scope). *The single highest-leverage edit.* |
-| **`agent.turn`** (root loop span) | `crates/agent-runtime/src/agent.rs` | already has `session_id`/`user_id` per multi-session 06; add `tenant` alias + `repo`/`pr` for fleet runs (the encoded review session id carries them) |
-| **metered seam ops** (`provider.*`, `tool.execute`, `search.query`, `repo.op`, `memory.*`, `ast.*`, `web.fetch`, …) | `crates/agent-runtime/src/metered.rs` | inherit `tenant`/`repo` from the parent `agent.turn`/`grpc.server` span (no per-decorator edit needed — spans nest); add explicitly only where a decorator opens a root span |
-| loop sub-spans (`provider.stream/complete`, `tool.execute`, `context.compact`) | `crates/agent-runtime/src/agent.rs:1683/1688/1992/2106` | inherited from `agent.turn` |
+| **`agent.turn`** (root loop span) | `crates/agent-runtime/src/agent/session.rs:93` | has `session_id`/`user_id` per multi-session 06; **Phase 5.5** added `tenant` (= `user_id`, C25). It is created *before* `agent_core::scope` is entered, so `EnrichSpanProcessor` can't stamp it — hence the explicit field. `repo`/`pr` for a fleet run ride the enclosing `fleet.review` span this turn runs under. |
+| **metered seam ops** (`provider.*`, `tool.execute`, `search.query`, `repo.op`, `memory.*`, `ast.*`, `web.fetch`, …) | `crates/agent-runtime/src/metered.rs` | **Phase 5.5:** `tenant`/`session` are stamped as OTEL attributes by `EnrichSpanProcessor::on_start` (`agent-telemetry/src/otel.rs`) on **every** span created under a scope — no per-decorator edit. (OTEL doesn't copy parent attrs to children, so this ambient on-start stamp — not field inheritance — is what makes each child span independently filterable.) |
+| loop sub-spans (`provider.stream/complete`, `tool.execute`, `context.compact`) | `crates/agent-runtime/src/agent.rs:1683/1688/1992/2106` | same — `EnrichSpanProcessor` stamps `tenant`/`session` at start (all created under the turn's scope) |
 
-Because `tenant`/`repo` sit on the **root** span (`grpc.server` or `agent.turn`), the whole nested
-seam sub-tree is filterable by tenant/repo in HyperDX without touching each child span.
+Every span **created under a scope** carries `tenant`/`session` as OTEL attributes via
+`EnrichSpanProcessor` (Phase 5.5); the root spans (`grpc.server`, `agent.turn`) carry `tenant` as an
+explicit field for the pre-scope case. So the whole trace tree is filterable by tenant in HyperDX.
+
+## The two ClickHouse sinks carry the dimensions (Phase 5.5)
+
+Both telemetry streams that land in ClickHouse now carry tenant/repo/pr, matching the metrics side:
+
+- **Logs (`agent_logs`, native `ClickHouseLayer`)** — `on_event` walks `ctx.event_scope()` and pulls
+  `tenant`/`repo`/`pr` off the enclosing span extensions (captured in `on_new_span`/`on_record`), then
+  overlays the ambient `current_identity()` (authoritative for session/user on the loop path). `LogRow`
+  gained `repo`/`pr` columns. This closes the fleet-drain `user=""` gap (the `fleet.*` span supplies it)
+  and adds repo/pr everywhere — **no call-site edits**. Every scope value is re-validated with
+  `safe_segment` at the funnel.
+- **Traces (OTLP → ClickStack)** — `EnrichSpanProcessor` as above.
 
 ## Spans that DO NOT EXIST — create from scratch (Phase 2–4)
 
