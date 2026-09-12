@@ -33,6 +33,7 @@ use tonic::transport::Server;
 use super::{
     admission::{AdmissionLayer, ShedObserver},
     auth::AuthLayer,
+    metrics_layer::{MetricsLayer, RpcObserver},
     ServeRouter,
 };
 
@@ -115,28 +116,33 @@ pub async fn base_router_with_observer(
     max_in_flight: usize,
     on_shed: Option<ShedObserver>,
 ) -> (ServeRouter, HealthHandle) {
-    base_router_with_auth(max_in_flight, on_shed, AuthLayer::disabled()).await
+    base_router_with_auth(max_in_flight, on_shed, AuthLayer::disabled(), None).await
 }
 
 /// The full base router: overload admission (outer) wrapping the authentication
-/// layer (inner). The serve path passes an [`AuthLayer`] built from `[auth]`; a
-/// disabled layer is a pass-through, so `mode = "none"` reproduces
-/// [`base_router_with_observer`] exactly.
+/// layer wrapping the per-RPC metrics layer (inner). The serve path passes an
+/// [`AuthLayer`] built from `[auth]` and an [`RpcObserver`] bridging to the RPC metric;
+/// a disabled auth layer + absent observer is a pass-through, so `mode = "none"` with no
+/// observer reproduces [`base_router_with_observer`] exactly.
 pub async fn base_router_with_auth(
     max_in_flight: usize,
     on_shed: Option<ShedObserver>,
     auth: AuthLayer,
+    on_rpc: Option<RpcObserver>,
 ) -> (ServeRouter, HealthHandle) {
     let (mut reporter, health_service) = tonic_health::server::health_reporter();
     reporter
         .set_service_status("", tonic_health::ServingStatus::Serving)
         .await;
     (
-        // Both layers wrap the whole routed service, so every seam added onto this
-        // router (and `--serve-all`) sheds overload and authenticates uniformly.
-        // `.layer(auth)` first then `.layer(admission)` makes admission the OUTER
-        // layer (shed before crypto); the type is `Stack<Admission, Stack<Auth, _>>`.
+        // All three layers wrap the whole routed service, so every seam added onto this
+        // router (and `--serve-all`) sheds overload, authenticates, and is metered
+        // uniformly. Layers apply innermost-first: `.layer(metrics)` then `.layer(auth)`
+        // then `.layer(admission)` yields execution order admission → auth → metrics →
+        // handler (shed before crypto; meter the verified identity + real handler work).
+        // The type is `Stack<Admission, Stack<Auth, Stack<Metrics, _>>>`.
         Server::builder()
+            .layer(MetricsLayer::disabled().with_observer(on_rpc))
             .layer(auth)
             .layer(AdmissionLayer::new(max_in_flight, SHED_PUSHBACK_MS).with_observer(on_shed))
             .add_service(health_service),

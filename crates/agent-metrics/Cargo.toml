@@ -11,6 +11,11 @@ license.workspace = true
 
 [dependencies]
 prometheus.workspace = true
+# For `safe_segment` — the config-plane recorders re-validate their attacker-influenced
+# `tenant`/`collection` labels at the funnel (defense in depth), so a hostile segment
+# never reaches a Prometheus label. `agent-core` is the foundational crate every other
+# crate already builds, so this adds no new crate to the graph.
+agent-core = { workspace = true }
 # Optional heap profiler — pulled in only by the `dhat-heap` feature for the leak
 # test (tests/leak.rs). Absent from every normal build.
 dhat = { workspace = true, optional = true }

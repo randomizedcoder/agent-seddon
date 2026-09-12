@@ -496,7 +496,7 @@ pub async fn build_agent_with(
                 "scheduled run finished"
             );
         });
-        let wiring = resolve_scheduler(&cfg, observer)?;
+        let wiring = resolve_scheduler(&cfg, observer, &metrics)?;
         // The `schedule` tool writes into the same registry the seam serves, so under
         // the per-tenant durable store the model schedules into its own tenant.
         let tool = Arc::new(agent_tools::ScheduleTool::new(wiring.seam()));
@@ -994,7 +994,7 @@ pub async fn build_agent_with(
             // can join a cross-card transaction. The FilePromptStore tree stays as-is.
             #[cfg(feature = "prompt-postgres")]
             "postgres" => {
-                let backend = crate::store_backend::pg_backend(&cfg.config_store)?;
+                let backend = crate::store_backend::pg_backend(&cfg.config_store, &metrics)?;
                 // Per-tenant plane (config C38 / C2): route each call to the caller's
                 // verified-tenant prompt db when on; else one shared `local` view.
                 if cfg.tenancy.per_tenant {
@@ -1095,7 +1095,7 @@ pub async fn build_agent_with(
     let forge_registry_seam = {
         #[cfg(feature = "forge-registry-store")]
         {
-            resolve_forge_registry(&cfg)?
+            resolve_forge_registry(&cfg, &metrics)?
         }
         #[cfg(not(feature = "forge-registry-store"))]
         {
@@ -1315,7 +1315,7 @@ pub async fn build_agent_with(
     // The review-fleet roster (review-fleet C2/C3), held for `--serve-fleet`; the
     // fleet orchestrator consumes it in increment 3c.
     #[cfg(feature = "fleet")]
-    let agent = match resolve_fleet_registry(&cfg)? {
+    let agent = match resolve_fleet_registry(&cfg, &metrics)? {
         Some(r) => agent.with_fleet_registry(r),
         None => agent,
     };
@@ -1324,7 +1324,7 @@ pub async fn build_agent_with(
     // snapshot the control-plane gate reads — so an operator's roles take effect
     // process-wide from startup. With no store the gate keeps the built-ins (C1).
     #[cfg(feature = "role-store")]
-    let agent = match resolve_role_registry(&cfg)? {
+    let agent = match resolve_role_registry(&cfg, &metrics)? {
         Some(r) => {
             let catalog = agent_core::load_catalog(r.as_ref()).await?;
             agent_core::install_catalog(catalog);
@@ -1343,7 +1343,7 @@ pub async fn build_agent_with(
     // `--serve-transport-registry`. Not consumed by the loop; hosted for runtime CRUD
     // over the messaging cards.
     #[cfg(feature = "transport-registry-store")]
-    let agent = match resolve_transport_registry(&cfg)? {
+    let agent = match resolve_transport_registry(&cfg, &metrics)? {
         Some(r) => agent.with_transport_registry(r),
         None => agent,
     };
@@ -2806,7 +2806,11 @@ impl SchedulerWiring {
 fn resolve_scheduler(
     cfg: &Config,
     observer: agent_scheduler::RunObserver,
+    metrics: &Metrics,
 ) -> anyhow::Result<SchedulerWiring> {
+    // Only the durable (`scheduler-store`) arm builds a config-store backend to meter.
+    #[cfg(not(feature = "scheduler-store"))]
+    let _ = metrics;
     let claim_ttl_ms = cfg.scheduler.claim_ttl_secs.saturating_mul(1_000);
     let max_jobs = cfg.scheduler.max_jobs;
     match cfg.scheduler.store.as_str() {
@@ -2818,7 +2822,7 @@ fn resolve_scheduler(
         ))),
         #[cfg(feature = "scheduler-store")]
         kind @ ("file" | "sqlite" | "postgres") => {
-            let backend = scheduler_backend(kind, cfg)?;
+            let backend = scheduler_backend(kind, cfg, metrics)?;
             let seam = scheduler_seam(
                 &backend,
                 cfg.tenancy.per_tenant,
@@ -2851,21 +2855,33 @@ fn resolve_scheduler(
 fn scheduler_backend(
     kind: &str,
     cfg: &Config,
+    metrics: &Metrics,
 ) -> anyhow::Result<Arc<dyn agent_config_store::Backend>> {
+    // File/sqlite are wrapped in the config-plane metering decorator here; the postgres
+    // arm is already wrapped inside `pg_backend` (`backend = postgres`), so it is not
+    // double-wrapped.
     let b: Arc<dyn agent_config_store::Backend> = match kind {
-        "file" => Arc::new(agent_config_store::FileBackend::new(expand_tilde(
-            &cfg.scheduler.path,
-        ))),
+        "file" => crate::metered::config_store(
+            Arc::new(agent_config_store::FileBackend::new(expand_tilde(
+                &cfg.scheduler.path,
+            ))),
+            metrics.clone(),
+            "file",
+        ),
         #[cfg(feature = "scheduler-sqlite")]
-        "sqlite" => Arc::new(agent_config_store::SqliteBackend::open(expand_tilde(
-            &cfg.scheduler.path,
-        ))?),
+        "sqlite" => crate::metered::config_store(
+            Arc::new(agent_config_store::SqliteBackend::open(expand_tilde(
+                &cfg.scheduler.path,
+            ))?),
+            metrics.clone(),
+            "sqlite",
+        ),
         #[cfg(not(feature = "scheduler-sqlite"))]
         "sqlite" => anyhow::bail!(
             "[scheduler] store = `sqlite` needs the `scheduler-sqlite` feature (rebuild with it enabled)"
         ),
         #[cfg(feature = "scheduler-postgres")]
-        "postgres" => crate::store_backend::pg_backend(&cfg.config_store)?,
+        "postgres" => crate::store_backend::pg_backend(&cfg.config_store, metrics)?,
         #[cfg(not(feature = "scheduler-postgres"))]
         "postgres" => anyhow::bail!(
             "[scheduler] store = `postgres` needs the `scheduler-postgres` feature (rebuild with it enabled)"
@@ -2959,7 +2975,7 @@ pub(crate) fn resolve_provider_registry(
         // reference, never inline); the schema is the shared config-store tables.
         #[cfg(feature = "registry-postgres")]
         "postgres" => {
-            let backend = crate::store_backend::pg_backend(&cfg.config_store)?;
+            let backend = crate::store_backend::pg_backend(&cfg.config_store, metrics)?;
             // Per-tenant plane (config C35 / C2): when enabled, route each call to the
             // caller's verified-tenant view; else one shared `local` view (Tier-0).
             if cfg.tenancy.per_tenant {
@@ -2992,7 +3008,11 @@ pub(crate) fn resolve_provider_registry(
 #[cfg(feature = "fleet")]
 pub(crate) fn resolve_fleet_registry(
     cfg: &Config,
+    metrics: &Metrics,
 ) -> anyhow::Result<Option<Arc<dyn agent_core::FleetRegistry>>> {
+    // Only the (off-by-default) postgres arm builds a config-store backend to meter.
+    #[cfg(not(feature = "fleet-postgres"))]
+    let _ = metrics;
     let store: Option<Arc<dyn agent_core::FleetRegistry>> = match cfg.review_fleet.store.as_str() {
         "" => None,
         "file" => Some(Arc::new(agent_review_fleet::FileFleet::new(expand_tilde(
@@ -3019,7 +3039,7 @@ pub(crate) fn resolve_fleet_registry(
         // `ops` as the file/sqlite tiers. DSN from `[config_store] dsn_ref`.
         #[cfg(feature = "fleet-postgres")]
         "postgres" => {
-            let backend = crate::store_backend::pg_backend(&cfg.config_store)?;
+            let backend = crate::store_backend::pg_backend(&cfg.config_store, metrics)?;
             // Per-tenant plane (config C35 / C2): route per verified tenant when on.
             if cfg.tenancy.per_tenant {
                 let b = backend.clone();
@@ -3050,15 +3070,20 @@ pub(crate) fn resolve_fleet_registry(
 #[cfg(feature = "role-store")]
 pub(crate) fn resolve_role_registry(
     cfg: &Config,
+    metrics: &Metrics,
 ) -> anyhow::Result<Option<Arc<dyn agent_core::RoleRegistry>>> {
     let store: Option<Arc<dyn agent_core::RoleRegistry>> = match cfg.role.store.as_str() {
         "" => None,
         // Cards as prost blobs under a JSON-per-card file tree (hermetic; the
         // in-gate + serve-smoke path).
         "file" => {
-            let backend = Arc::new(agent_config_store::FileBackend::new(expand_tilde(
-                &cfg.role.file,
-            )));
+            let backend = crate::metered::config_store(
+                Arc::new(agent_config_store::FileBackend::new(expand_tilde(
+                    &cfg.role.file,
+                ))),
+                metrics.clone(),
+                "file",
+            );
             Some(Arc::new(agent_role::StoreRoles::new(backend)))
         }
         // The shared-store arm: persist role cards onto the `[config_store]` Postgres
@@ -3066,7 +3091,7 @@ pub(crate) fn resolve_role_registry(
         // from `[config_store] dsn_ref`.
         #[cfg(feature = "role-postgres")]
         "postgres" => {
-            let backend = crate::store_backend::pg_backend(&cfg.config_store)?;
+            let backend = crate::store_backend::pg_backend(&cfg.config_store, metrics)?;
             Some(Arc::new(agent_role::StoreRoles::new(backend)))
         }
         #[cfg(not(feature = "role-postgres"))]
@@ -3109,19 +3134,24 @@ fn forge_store_for(
 #[cfg(feature = "forge-registry-store")]
 pub(crate) fn resolve_forge_registry(
     cfg: &Config,
+    metrics: &Metrics,
 ) -> anyhow::Result<Option<Arc<dyn agent_core::ForgeRegistry>>> {
     let store: Option<Arc<dyn agent_core::ForgeRegistry>> = match cfg.forge_registry.store.as_str()
     {
         "" => None,
         "file" => {
-            let backend: Arc<dyn agent_config_store::Backend> = Arc::new(
-                agent_config_store::FileBackend::new(expand_tilde(&cfg.forge_registry.file)),
+            let backend: Arc<dyn agent_config_store::Backend> = crate::metered::config_store(
+                Arc::new(agent_config_store::FileBackend::new(expand_tilde(
+                    &cfg.forge_registry.file,
+                ))),
+                metrics.clone(),
+                "file",
             );
             Some(forge_store_for(backend, cfg.tenancy.per_tenant))
         }
         #[cfg(feature = "forge-registry-postgres")]
         "postgres" => {
-            let backend = crate::store_backend::pg_backend(&cfg.config_store)?;
+            let backend = crate::store_backend::pg_backend(&cfg.config_store, metrics)?;
             Some(forge_store_for(backend, cfg.tenancy.per_tenant))
         }
         #[cfg(not(feature = "forge-registry-postgres"))]
@@ -3161,21 +3191,24 @@ fn transport_store_for(
 #[cfg(feature = "transport-registry-store")]
 pub(crate) fn resolve_transport_registry(
     cfg: &Config,
+    metrics: &Metrics,
 ) -> anyhow::Result<Option<Arc<dyn agent_core::TransportRegistry>>> {
     let store: Option<Arc<dyn agent_core::TransportRegistry>> =
         match cfg.transport_registry.store.as_str() {
             "" => None,
             "file" => {
-                let backend: Arc<dyn agent_config_store::Backend> = Arc::new(
-                    agent_config_store::FileBackend::new(expand_tilde(
+                let backend: Arc<dyn agent_config_store::Backend> = crate::metered::config_store(
+                    Arc::new(agent_config_store::FileBackend::new(expand_tilde(
                         &cfg.transport_registry.file,
-                    )),
+                    ))),
+                    metrics.clone(),
+                    "file",
                 );
                 Some(transport_store_for(backend, cfg.tenancy.per_tenant))
             }
             #[cfg(feature = "transport-registry-postgres")]
             "postgres" => {
-                let backend = crate::store_backend::pg_backend(&cfg.config_store)?;
+                let backend = crate::store_backend::pg_backend(&cfg.config_store, metrics)?;
                 Some(transport_store_for(backend, cfg.tenancy.per_tenant))
             }
             #[cfg(not(feature = "transport-registry-postgres"))]

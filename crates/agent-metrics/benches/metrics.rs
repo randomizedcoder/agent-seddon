@@ -29,9 +29,10 @@ use iai_callgrind::{
 // ~1.364M after the observability track's six `agent_fleet_*` families
 // (triggers/reviews/progress/approvals/approval_latency/post_failures); ~1.42M after
 // Phase 3's three `agent_transport_*` health families (posts/post_seconds/ratelimit);
-// ~1.13x headroom.
+// ~1.451M after Phase 4's six config-plane families (config_store_ops/op_seconds,
+// auth_verify, authz_decisions, grpc_server_rpc/rpc_seconds); ~1.14x headroom.
 #[library_benchmark(config = LibraryBenchmarkConfig::default()
-    .tool(Callgrind::default().hard_limits([(EventKind::Ir, 1_620_000u64)])))]
+    .tool(Callgrind::default().hard_limits([(EventKind::Ir, 1_650_000u64)])))]
 fn new_registry() -> Metrics {
     black_box(Metrics::new())
 }
@@ -47,9 +48,10 @@ fn new_registry() -> Metrics {
 // after the gpu-pool families; ~2.11M after the model-router 03 registry
 // control-plane families; ~2.24M after the observability track's six
 // `agent_fleet_*` families; ~2.34M after Phase 3's three `agent_transport_*`
-// health families (the histogram's bucket series add encode cost); ~1.12x headroom.
+// health families (the histogram's bucket series add encode cost); ~2.35M after
+// Phase 4's six config-plane families; ~1.13x headroom.
 #[library_benchmark(config = LibraryBenchmarkConfig::default()
-    .tool(Callgrind::default().hard_limits([(EventKind::Ir, 2_620_000u64)])))]
+    .tool(Callgrind::default().hard_limits([(EventKind::Ir, 2_660_000u64)])))]
 fn record_and_encode() -> String {
     let m = Metrics::new();
     for _ in 0..100 {

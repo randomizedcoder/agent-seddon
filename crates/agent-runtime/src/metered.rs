@@ -2116,6 +2116,195 @@ impl agent_core::Pty for MeteredPty {
     }
 }
 
+/// Wrap the shared [`agent_config_store::Backend`] so every persistence op (behind
+/// **every** card registry + the durable scheduler + the prompt store) emits a
+/// `configstore.<op>` span and counts under `agent_config_store_ops_total{collection,
+/// op, outcome, tenant}` + times `agent_config_store_op_seconds{op}` (config-plane
+/// observability, docs/design/observability Phase 4). Wrapping at the *data-owner*
+/// backend — the single choke point beneath all domains — makes the persistence layer
+/// independently tenant-filterable without a decorator per registry, and keeps
+/// `agent-config-store` itself metrics-free. `backend_kind` is the config-selected
+/// storage impl (`file`|`postgres`|…), carried on the span for triage.
+///
+/// The `tenant`/`collection` on the metric are `safe_segment`-validated **at the
+/// recorder funnel** (`Metrics::record_config_store_op`), so a hostile segment never
+/// becomes a label; the span records them verbatim (per-trace attributes, not an
+/// accumulating series). This is gated on the union of features that pull in
+/// `agent-config-store` — the same set that makes any backend construction reachable.
+#[cfg(any(
+    feature = "scheduler-store",
+    feature = "prompt-store",
+    feature = "registry-store",
+    feature = "fleet-store",
+    feature = "role-store",
+    feature = "forge-registry-store",
+    feature = "transport-registry-store"
+))]
+pub(crate) fn config_store(
+    inner: Arc<dyn agent_config_store::Backend>,
+    m: Metrics,
+    backend_kind: &'static str,
+) -> Arc<dyn agent_config_store::Backend> {
+    Arc::new(MeteredBackend {
+        inner,
+        metrics: m,
+        backend_kind,
+    })
+}
+
+#[cfg(any(
+    feature = "scheduler-store",
+    feature = "prompt-store",
+    feature = "registry-store",
+    feature = "fleet-store",
+    feature = "role-store",
+    feature = "forge-registry-store",
+    feature = "transport-registry-store"
+))]
+struct MeteredBackend {
+    inner: Arc<dyn agent_config_store::Backend>,
+    metrics: Metrics,
+    backend_kind: &'static str,
+}
+
+#[cfg(any(
+    feature = "scheduler-store",
+    feature = "prompt-store",
+    feature = "registry-store",
+    feature = "fleet-store",
+    feature = "role-store",
+    feature = "forge-registry-store",
+    feature = "transport-registry-store"
+))]
+impl MeteredBackend {
+    /// `ok` on success, `error` on failure — the bounded `outcome` label.
+    fn outcome<T>(res: &Result<T>) -> &'static str {
+        if res.is_ok() {
+            "ok"
+        } else {
+            "error"
+        }
+    }
+
+    /// The pseudo-collection recorded for an `EnsureTenant` write, which targets the
+    /// shared `tenants` table rather than a card collection. Bounded and distinct from
+    /// every real card collection.
+    const ENSURE_TENANT_COLLECTION: &'static str = "tenants";
+}
+
+#[cfg(any(
+    feature = "scheduler-store",
+    feature = "prompt-store",
+    feature = "registry-store",
+    feature = "fleet-store",
+    feature = "role-store",
+    feature = "forge-registry-store",
+    feature = "transport-registry-store"
+))]
+#[async_trait]
+impl agent_config_store::Backend for MeteredBackend {
+    async fn get(&self, collection: &str, tenant: &str, id: &str) -> Result<Option<Vec<u8>>> {
+        let span = tracing::info_span!(
+            "configstore.get",
+            collection = %collection,
+            tenant = %tenant,
+            backend = self.backend_kind,
+        );
+        let start = Instant::now();
+        let out = self
+            .inner
+            .get(collection, tenant, id)
+            .instrument(span)
+            .await;
+        self.metrics
+            .record_config_store_latency("get", start.elapsed().as_secs_f64());
+        self.metrics
+            .record_config_store_op(collection, "get", Self::outcome(&out), tenant);
+        out
+    }
+
+    async fn list(&self, collection: &str, tenant: &str) -> Result<Vec<Vec<u8>>> {
+        let span = tracing::info_span!(
+            "configstore.list",
+            collection = %collection,
+            tenant = %tenant,
+            backend = self.backend_kind,
+        );
+        let start = Instant::now();
+        let out = self.inner.list(collection, tenant).instrument(span).await;
+        self.metrics
+            .record_config_store_latency("list", start.elapsed().as_secs_f64());
+        self.metrics
+            .record_config_store_op(collection, "list", Self::outcome(&out), tenant);
+        out
+    }
+
+    async fn count(&self, collection: &str, tenant: &str) -> Result<usize> {
+        let span = tracing::info_span!(
+            "configstore.count",
+            collection = %collection,
+            tenant = %tenant,
+            backend = self.backend_kind,
+        );
+        let start = Instant::now();
+        let out = self.inner.count(collection, tenant).instrument(span).await;
+        self.metrics
+            .record_config_store_latency("count", start.elapsed().as_secs_f64());
+        self.metrics
+            .record_config_store_op(collection, "count", Self::outcome(&out), tenant);
+        out
+    }
+
+    async fn tenants(&self, collection: &str) -> Result<Vec<String>> {
+        // A driver-side read with no single tenant, so it records latency (op=tenants)
+        // but not the per-tenant ops counter (there is no tenant to attribute).
+        let span = tracing::info_span!(
+            "configstore.tenants",
+            collection = %collection,
+            backend = self.backend_kind,
+        );
+        let start = Instant::now();
+        let out = self.inner.tenants(collection).instrument(span).await;
+        self.metrics
+            .record_config_store_latency("tenants", start.elapsed().as_secs_f64());
+        out
+    }
+
+    async fn apply(&self, writes: &[agent_config_store::Write]) -> Result<()> {
+        let span = tracing::info_span!(
+            "configstore.apply",
+            writes = writes.len(),
+            backend = self.backend_kind,
+        );
+        let start = Instant::now();
+        let out = self.inner.apply(writes).instrument(span).await;
+        self.metrics
+            .record_config_store_latency("apply", start.elapsed().as_secs_f64());
+        // A batch is atomic: on error every write failed, on success every write landed —
+        // so each write's counter carries the batch outcome, one line per (collection,
+        // op, tenant). `collection`/`tenant` are re-validated at the recorder funnel.
+        let outcome = Self::outcome(&out);
+        for w in writes {
+            let (collection, op, tenant) = match w {
+                agent_config_store::Write::Put {
+                    collection, tenant, ..
+                } => (*collection, "put", tenant.as_str()),
+                agent_config_store::Write::Delete {
+                    collection, tenant, ..
+                } => (*collection, "delete", tenant.as_str()),
+                agent_config_store::Write::EnsureTenant { tenant } => (
+                    Self::ENSURE_TENANT_COLLECTION,
+                    "ensure_tenant",
+                    tenant.as_str(),
+                ),
+            };
+            self.metrics
+                .record_config_store_op(collection, op, outcome, tenant);
+        }
+        out
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests for the decorators above. Kept together at the end of the file so the
 // production decorators read as one contiguous block, not split by a wall of
@@ -3033,5 +3222,218 @@ mod transport_tests {
             metered.recv().await.is_none(),
             "outbound decorator recv must be a no-op None"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Part A tests: the config-store metering decorator. Gated on the same feature
+// union as the decorator itself (role-store is default-on, so these run in the
+// gate). A fake `Backend` with an Ok/Err switch is driven through the decorator;
+// each row carries a `// desc:` and its expected outcome.
+// ---------------------------------------------------------------------------
+#[cfg(all(
+    test,
+    any(
+        feature = "scheduler-store",
+        feature = "prompt-store",
+        feature = "registry-store",
+        feature = "fleet-store",
+        feature = "role-store",
+        feature = "forge-registry-store",
+        feature = "transport-registry-store"
+    )
+))]
+mod config_store_tests {
+    use super::*;
+    use agent_config_store::{Backend, Write};
+    use agent_testkit::observe::{captured_span_fields, MetricsProbe};
+
+    /// A `Backend` double whose every op returns `Ok` or a `Config` error, so the
+    /// decorator's outcome mapping and per-write counting can be driven without a
+    /// real store.
+    struct FakeBackend {
+        fail: bool,
+    }
+
+    impl FakeBackend {
+        fn result<T>(&self, ok: T) -> Result<T> {
+            if self.fail {
+                Err(agent_core::Error::Config("boom".into()))
+            } else {
+                Ok(ok)
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Backend for FakeBackend {
+        async fn get(&self, _c: &str, _t: &str, _id: &str) -> Result<Option<Vec<u8>>> {
+            self.result(Some(vec![1]))
+        }
+        async fn list(&self, _c: &str, _t: &str) -> Result<Vec<Vec<u8>>> {
+            self.result(vec![vec![1]])
+        }
+        async fn count(&self, _c: &str, _t: &str) -> Result<usize> {
+            self.result(1)
+        }
+        async fn tenants(&self, _c: &str) -> Result<Vec<String>> {
+            self.result(vec!["acme".to_string()])
+        }
+        async fn apply(&self, _w: &[Write]) -> Result<()> {
+            self.result(())
+        }
+    }
+
+    fn metered(fail: bool, m: Metrics) -> Arc<dyn Backend> {
+        config_store(Arc::new(FakeBackend { fail }), m, "file")
+    }
+
+    // desc: a successful get records ops_total{collection,op=get,outcome=ok,tenant} → ticks once.
+    #[tokio::test]
+    async fn positive_get_records_collection_op_tenant() {
+        let m = Metrics::new();
+        let p = MetricsProbe::new(&m);
+        let _ = metered(false, m.clone())
+            .get("transport", "acme", "id")
+            .await;
+        assert_eq!(
+            p.delta(
+                &m,
+                "agent_config_store_ops_total",
+                Some("op=\"get\",outcome=\"ok\",tenant=\"acme\"")
+            ),
+            1.0,
+            "get did not record an ok series"
+        );
+    }
+
+    // desc: a backend error is recorded as outcome=error (never dropped) → the error series ticks.
+    #[tokio::test]
+    async fn negative_backend_err_records_error_outcome() {
+        let m = Metrics::new();
+        let p = MetricsProbe::new(&m);
+        let _ = metered(true, m.clone())
+            .get("transport", "acme", "id")
+            .await;
+        assert_eq!(
+            p.delta(
+                &m,
+                "agent_config_store_ops_total",
+                Some("outcome=\"error\"")
+            ),
+            1.0,
+            "an errored get must record outcome=error"
+        );
+    }
+
+    // desc (boundary): an apply batch records exactly one ops counter per Write (put/delete/ensure).
+    #[tokio::test]
+    async fn boundary_apply_batch_records_one_counter_per_write() {
+        let m = Metrics::new();
+        let p = MetricsProbe::new(&m);
+        let writes = vec![
+            Write::EnsureTenant {
+                tenant: "acme".into(),
+            },
+            Write::Put {
+                collection: "transport",
+                tenant: "acme".into(),
+                id: "a".into(),
+                blob: vec![1],
+            },
+            Write::Delete {
+                collection: "transport",
+                tenant: "acme".into(),
+                id: "b".into(),
+            },
+        ];
+        let _ = metered(false, m.clone()).apply(&writes).await;
+        assert_eq!(
+            p.delta(&m, "agent_config_store_ops_total", None),
+            3.0,
+            "apply must record one counter per write"
+        );
+    }
+
+    // desc (corner): a batch spanning two tenants attributes each write to its own tenant label.
+    #[tokio::test]
+    async fn corner_apply_batch_spanning_two_tenants_attributes_each() {
+        let m = Metrics::new();
+        let p = MetricsProbe::new(&m);
+        let writes = vec![
+            Write::Put {
+                collection: "transport",
+                tenant: "acme".into(),
+                id: "a".into(),
+                blob: vec![1],
+            },
+            Write::Put {
+                collection: "transport",
+                tenant: "globex".into(),
+                id: "b".into(),
+                blob: vec![1],
+            },
+        ];
+        let _ = metered(false, m.clone()).apply(&writes).await;
+        for tenant in ["acme", "globex"] {
+            assert_eq!(
+                p.delta(
+                    &m,
+                    "agent_config_store_ops_total",
+                    Some(&format!("tenant=\"{tenant}\""))
+                ),
+                1.0,
+                "no series attributed to {tenant}"
+            );
+        }
+    }
+
+    // desc (adversarial): a hostile collection segment (separator) is dropped at the recorder
+    // funnel — no config-store series is created for it.
+    #[tokio::test]
+    async fn adversarial_hostile_collection_not_recorded() {
+        let m = Metrics::new();
+        let p = MetricsProbe::new(&m);
+        let writes = vec![Write::Put {
+            collection: "a/b",
+            tenant: "acme".into(),
+            id: "a".into(),
+            blob: vec![1],
+        }];
+        let _ = metered(false, m.clone()).apply(&writes).await;
+        assert_eq!(
+            p.delta(&m, "agent_config_store_ops_total", None),
+            0.0,
+            "a hostile collection reached a metric label"
+        );
+    }
+
+    // desc: the decorator opens a `configstore.get` span carrying collection/tenant/backend
+    // (what makes the persistence layer independently tenant-filterable). Driven on a fresh
+    // current-thread runtime inside the sync span-capture closure.
+    #[test]
+    fn positive_span_carries_collection_tenant_backend() {
+        let m = Metrics::new();
+        let fields = captured_span_fields(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("runtime");
+            rt.block_on(async {
+                let _ = metered(false, m.clone())
+                    .get("transport", "acme", "id")
+                    .await;
+            });
+        });
+        let has = |field: &str, val: &str| {
+            fields
+                .iter()
+                .any(|(s, f, v)| s == "configstore.get" && f == field && v == val)
+        };
+        assert!(
+            has("collection", "transport"),
+            "no collection on span: {fields:?}"
+        );
+        assert!(has("tenant", "acme"), "no tenant on span: {fields:?}");
+        assert!(has("backend", "file"), "no backend on span: {fields:?}");
     }
 }

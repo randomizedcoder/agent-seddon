@@ -47,9 +47,10 @@ Use the `web.fetch` pattern in `metered.rs` as the template.
 | `TransportProgressFeed::announce` (5 soft-fail branches) | `crates/agent-runtime/src/progress.rs:51` | 2 | `fleet.progress`, `beat`/`outcome`/`tenant`/`repo` |
 | message-transport post (all kinds) | `crates/agent-runtime/src/metered.rs` (`MeteredTransport` decorator, **built**) | 3 | `transport.post`, `kind`/`outcome`; `tenant`/`repo` **inherited** from the parent `fleet.progress` span (the decorator is the cleaner home than per-impl `kind.rs`/`matrix.rs` — those stay span-free) |
 | message-transport recv (inbound dispatch) | `crates/agent-slack/src/lib.rs` (`SlackWatch::run`, **built**) | 3 | `transport.recv`, `kind`/`triggers`; inbound is pre-identity (no tenant/repo, no metric family) |
-| registry service handlers | `crates/agent-grpc/src/server/{transport_registry,forge_registry}.rs` | 4 | already inside `grpc.server` (inherit `tenant`); add `op`/`card_id` fields |
-| config-store backends | `crates/agent-config-store/src/{postgres,sqlite,file}.rs` (0 spans) | 4 | `configstore.apply`/`get`/`list`, `backend`/`op`/`tenant` (explicit arg) |
-| auth layer / authz gate | `crates/agent-grpc/src/server/{auth,authz}.rs` (0 span fields) | 4 | inside `grpc.server`; record `authz.decision`/`action`/`resource` + auth `verify.outcome` |
+| every gRPC RPC (RPC-level view) | `crates/agent-grpc/src/server/metrics_layer.rs` (`MetricsLayer` tower service, **built**) | 4 | no new span — one metric per RPC (`agent_grpc_server_rpc_*`), timed inside `AuthLayer` so it sees the verified `tenant`; the `grpc.server` span already covers the trace side |
+| config-store backends | `crates/agent-runtime/src/metered.rs` (`MeteredBackend` decorator, **built**) | 4 | `configstore.get`/`.list`/`.count`/`.apply`, `collection`/`tenant` (explicit arg)/`backend`; the `agent-config-store` crate stays **span-free + metrics-free** (the decorator is the single data-owner home, covering all registry/scheduler/prompt persistence) |
+| authz gate | `crates/agent-grpc/src/server/authz.rs` (`require`, **built**) | 4 | inside `grpc.server`; records `authz.decision`/`authz.action`/`authz.resource` onto the ambient span (declared `Empty` in the `span()` helper) |
+| auth verify | `crates/agent-grpc/src/server/auth.rs` | 4 | verify runs **before** the `grpc.server` span exists → metric only (`agent_auth_verify_total`), no span field |
 
 ## PR is a span attribute, never a metric label
 

@@ -160,6 +160,32 @@ pub struct Metrics {
     transport_posts: IntCounterVec,
     transport_post_seconds: HistogramVec,
     transport_ratelimit: IntCounterVec,
+    // Config-plane observability families (docs/design/observability, Phase 4). The
+    // config-store CRUD counter and the gRPC-server RPC counter carry a bounded,
+    // LRU-capped `tenant` label (the verified org, C25); their companion latency
+    // histograms stay label-less-of-tenant (op/rpc only) — seam-health, not
+    // attribution. The auth/authz counters carry only bounded enums (outcome /
+    // action×resource_type×decision), never tenant (it rides the `grpc.server` span).
+    config_store_ops: IntCounterVec,
+    config_store_op_seconds: HistogramVec,
+    auth_verify: IntCounterVec,
+    authz_decisions: IntCounterVec,
+    grpc_server_rpc: IntCounterVec,
+    grpc_server_rpc_seconds: HistogramVec,
+    /// LRU cap on distinct config-plane `tenant` label values — the lifecycle backstop
+    /// shared by `config_store_ops` and `grpc_server_rpc` (the two tenant-labelled
+    /// config-plane families). Shared across `Metrics` clones (Arc); an eviction removes
+    /// exactly the evicted tenant's recorded series from the one registry.
+    config_plane_tenants: Arc<std::sync::Mutex<TenantLru>>,
+    /// High-water bound on distinct `grpc_server_rpc` `rpc` label values. The RPC path
+    /// is `req.uri().path()` — attacker-controllable (a client can spray junk paths that
+    /// still reach the tower layer before tonic routes them to `Unimplemented`), so left
+    /// unbounded it is a cardinality DoS. The real method set is fixed and small (~50),
+    /// so the first `MAX_RPCS` distinct paths register as themselves and any later
+    /// *unknown* path collapses to the `"other"` sentinel — a high-water threshold, not
+    /// an LRU (a real method must never be evicted, or its series would strand and its
+    /// hits misroute). Shared across `Metrics` clones (Arc).
+    rpc_labels: Arc<std::sync::Mutex<RpcBound>>,
     web_searches: IntCounterVec,
     web_search_seconds: HistogramVec,
     web_search_results: IntCounterVec,
@@ -894,6 +920,56 @@ impl Metrics {
             &["kind", "decision"],
         )
         .unwrap();
+        let config_store_ops = IntCounterVec::new(
+            Opts::new(
+                "agent_config_store_ops_total",
+                "Config-store operations, by collection, op (get|list|count|tenants|put|delete|ensure_tenant), outcome (ok|error) and tenant",
+            ),
+            &["collection", "op", "outcome", "tenant"],
+        )
+        .unwrap();
+        let config_store_op_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "agent_config_store_op_seconds",
+                "Config-store call latency in seconds, by op (get|list|count|tenants|apply) — seam-health, un-tenanted",
+            ),
+            &["op"],
+        )
+        .unwrap();
+        let auth_verify = IntCounterVec::new(
+            Opts::new(
+                "agent_auth_verify_total",
+                "Bearer-token verification attempts at the auth layer, by outcome (ok|error)",
+            ),
+            &["outcome"],
+        )
+        .unwrap();
+        let authz_decisions = IntCounterVec::new(
+            Opts::new(
+                "agent_authz_decisions_total",
+                "RBAC authorization decisions, by action, resource_type and decision (allow|deny)",
+            ),
+            &["action", "resource_type", "decision"],
+        )
+        .unwrap();
+        let grpc_server_rpc = IntCounterVec::new(
+            Opts::new(
+                "agent_grpc_server_rpc_total",
+                "gRPC server requests, by rpc path, outcome (ok|the grpc code name) and tenant",
+            ),
+            &["rpc", "outcome", "tenant"],
+        )
+        .unwrap();
+        let grpc_server_rpc_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "agent_grpc_server_rpc_seconds",
+                "gRPC server request latency in seconds, by rpc path — seam-health, un-tenanted",
+            ),
+            &["rpc"],
+        )
+        .unwrap();
+        let config_plane_tenants = Arc::new(std::sync::Mutex::new(TenantLru::new(MAX_TENANTS)));
+        let rpc_labels = Arc::new(std::sync::Mutex::new(RpcBound::new(MAX_RPCS)));
         let web_searches = IntCounterVec::new(
             Opts::new(
                 "agent_web_searches_total",
@@ -1410,6 +1486,12 @@ impl Metrics {
             Box::new(transport_posts.clone()),
             Box::new(transport_post_seconds.clone()),
             Box::new(transport_ratelimit.clone()),
+            Box::new(config_store_ops.clone()),
+            Box::new(config_store_op_seconds.clone()),
+            Box::new(auth_verify.clone()),
+            Box::new(authz_decisions.clone()),
+            Box::new(grpc_server_rpc.clone()),
+            Box::new(grpc_server_rpc_seconds.clone()),
             Box::new(web_searches.clone()),
             Box::new(web_search_seconds.clone()),
             Box::new(web_search_results.clone()),
@@ -1564,6 +1646,14 @@ impl Metrics {
             transport_posts,
             transport_post_seconds,
             transport_ratelimit,
+            config_store_ops,
+            config_store_op_seconds,
+            auth_verify,
+            authz_decisions,
+            grpc_server_rpc,
+            grpc_server_rpc_seconds,
+            config_plane_tenants,
+            rpc_labels,
             web_searches,
             web_search_seconds,
             web_search_results,
@@ -1676,6 +1766,25 @@ impl Metrics {
     fn set_fleet_repo_cap(&self, cap: usize) {
         if let Ok(mut lru) = self.fleet_repos.lock() {
             *lru = FleetRepoLru::new(cap);
+        }
+    }
+
+    /// Shrink the config-plane tenant LRU cap and clear it — test-only, so the
+    /// tenant-eviction backstop can be exercised without inserting `MAX_TENANTS`
+    /// distinct tenants.
+    #[cfg(test)]
+    fn set_config_plane_tenant_cap(&self, cap: usize) {
+        if let Ok(mut lru) = self.config_plane_tenants.lock() {
+            *lru = TenantLru::new(cap);
+        }
+    }
+
+    /// Shrink the `grpc_server_rpc` `rpc` high-water cap and clear it — test-only, so the
+    /// `"other"` overflow collapse can be exercised without spraying `MAX_RPCS` paths.
+    #[cfg(test)]
+    fn set_rpc_label_cap(&self, cap: usize) {
+        if let Ok(mut b) = self.rpc_labels.lock() {
+            *b = RpcBound::new(cap);
         }
     }
 
@@ -2395,6 +2504,160 @@ impl Metrics {
             .inc();
     }
 
+    // --- config-plane observability (docs/design/observability, Phase 4) --
+
+    /// Count one config-store operation `{collection, op, outcome, tenant}` (the
+    /// `MeteredBackend` decorator, `agent-runtime`). `collection` is bounded (one per
+    /// card kind); `op` ∈ get|list|count|tenants|put|delete|ensure_tenant; `outcome`
+    /// ∈ ok|error — all caller-supplied bounded constants. `tenant` is the verified
+    /// org (C25) and **attacker-influenced**, so it is `safe_segment`-validated here
+    /// (the recorder is a funnel — a malformed value is dropped, not sanitized) and
+    /// admitted into the shared [`TenantLru`] backstop so the tenant dimension stays
+    /// bounded; an eviction removes the evicted tenant's config-plane series.
+    /// `collection` is likewise re-validated (defense in depth).
+    pub fn record_config_store_op(&self, collection: &str, op: &str, outcome: &str, tenant: &str) {
+        if !agent_core::safe_segment(collection) || !agent_core::safe_segment(tenant) {
+            return;
+        }
+        self.admit_config_plane_tenant(
+            tenant,
+            TenantSeries::ConfigStore {
+                collection: collection.to_string(),
+                op: op.to_string(),
+                outcome: outcome.to_string(),
+            },
+        );
+        self.config_store_ops
+            .with_label_values(&[collection, op, outcome, tenant])
+            .inc();
+    }
+
+    /// Observe one config-store *call* latency `{op}` (get|list|count|tenants|apply) —
+    /// seam-health, un-tenanted. A hostile/NaN/negative `seconds` is clamped to `0.0`
+    /// before `observe` (the local clamp idiom).
+    pub fn record_config_store_latency(&self, op: &str, seconds: f64) {
+        let secs = if seconds.is_finite() && seconds >= 0.0 {
+            seconds
+        } else {
+            0.0
+        };
+        self.config_store_op_seconds
+            .with_label_values(&[op])
+            .observe(secs);
+    }
+
+    /// Count one bearer-token verification `{outcome}` at the auth layer (`ok`|`error`),
+    /// bridged via the `AuthObserver` callback so `agent-grpc` keeps no `agent-metrics`
+    /// dependency. No tenant here — a failed verify has no trustworthy tenant, and a
+    /// successful one is attributed on the `grpc.server` span.
+    pub fn record_auth_verify(&self, outcome: &str) {
+        self.auth_verify.with_label_values(&[outcome]).inc();
+    }
+
+    /// Count one RBAC authorization decision `{action, resource_type, decision}` — all
+    /// bounded enums from `agent-core` (`Action`/`ResourceType` `as_str`; decision ∈
+    /// allow|deny). No tenant label: the decision rides the `grpc.server` span (which
+    /// already carries the validated tenant), keeping this a low-cardinality security
+    /// counter.
+    pub fn record_authz_decision(&self, action: &str, resource_type: &str, decision: &str) {
+        self.authz_decisions
+            .with_label_values(&[action, resource_type, decision])
+            .inc();
+    }
+
+    /// Count one gRPC server request `{rpc, outcome, tenant}` and observe its latency
+    /// `{rpc}` (the `MetricsLayer` tower service, bridged via the `RpcObserver`
+    /// callback). `rpc` is the bounded request path (`/pkg.Service/Method`); `outcome`
+    /// is `ok` or the grpc code name. `tenant` is the **verified** org from the
+    /// post-auth identity header — attacker-influenced upstream, so `safe_segment`-
+    /// validated here and admitted into the shared [`TenantLru`] backstop; an unset or
+    /// malformed tenant is recorded as the empty label (still bounded). Hostile/NaN/
+    /// negative `seconds` is clamped to `0.0` before `observe`.
+    pub fn record_grpc_rpc(&self, rpc: &str, outcome: &str, tenant: &str, seconds: f64) {
+        // The RPC path is attacker-controllable, so it is bounded by a high-water guard:
+        // a known/admissible path records as itself; once the cap is reached an unknown
+        // path collapses to the `"other"` sentinel (no unbounded `rpc` dimension). The
+        // *effective* label is what flows into both the counter and the tenant LRU below,
+        // so eviction removes exactly the series that were recorded.
+        let admitted = match self.rpc_labels.lock() {
+            Ok(mut b) => b.admit(rpc),
+            // A poisoned lock must not drop the sample; fold to the sentinel (fail-safe,
+            // bounded) rather than record the raw path.
+            Err(_) => false,
+        };
+        let rpc = if admitted { rpc } else { RPC_OTHER };
+        // The empty tenant (unauthenticated / no identity header) is a valid, bounded
+        // label value; a *non-empty* value must be a safe segment or it is dropped to
+        // empty rather than recorded verbatim.
+        let tenant = if tenant.is_empty() || agent_core::safe_segment(tenant) {
+            tenant
+        } else {
+            ""
+        };
+        if !tenant.is_empty() {
+            self.admit_config_plane_tenant(
+                tenant,
+                TenantSeries::GrpcRpc {
+                    rpc: rpc.to_string(),
+                    outcome: outcome.to_string(),
+                },
+            );
+        }
+        self.grpc_server_rpc
+            .with_label_values(&[rpc, outcome, tenant])
+            .inc();
+        let secs = if seconds.is_finite() && seconds >= 0.0 {
+            seconds
+        } else {
+            0.0
+        };
+        self.grpc_server_rpc_seconds
+            .with_label_values(&[rpc])
+            .observe(secs);
+    }
+
+    /// Record `series` under `tenant` in the shared config-plane tenant LRU, moving
+    /// `tenant` to most-recently-used. When admitting a *new* tenant overflows the cap,
+    /// the least-recently-used tenant is evicted and each of its recorded series removed
+    /// from the registry — so the `tenant` dimension stays bounded under churn/misconfig
+    /// (the config-plane analogue of the fleet `repo` LRU). Unlike the fleet families
+    /// (small enumerable discriminators), these carry open-ended discriminators (any
+    /// card `collection`, any RPC path), so the LRU remembers the exact tuples it
+    /// admitted and replays them here for precise removal.
+    fn admit_config_plane_tenant(&self, tenant: &str, series: TenantSeries) {
+        let evicted = match self.config_plane_tenants.lock() {
+            Ok(mut lru) => lru.admit(tenant, series),
+            Err(_) => return,
+        };
+        // Removal touches only the Prometheus vecs, not the LRU — the lock is already
+        // released, so eviction can never deadlock against a concurrent recorder.
+        if let Some((evicted_tenant, recorded)) = evicted {
+            for s in recorded {
+                match s {
+                    TenantSeries::ConfigStore {
+                        collection,
+                        op,
+                        outcome,
+                    } => {
+                        let _ = self.config_store_ops.remove_label_values(&[
+                            &collection,
+                            &op,
+                            &outcome,
+                            &evicted_tenant,
+                        ]);
+                    }
+                    TenantSeries::GrpcRpc { rpc, outcome } => {
+                        let _ = self.grpc_server_rpc.remove_label_values(&[
+                            &rpc,
+                            &outcome,
+                            &evicted_tenant,
+                        ]);
+                    }
+                }
+            }
+        }
+    }
+
     // --- tasks (TaskTracker seam) instrumentation -------------------------
 
     /// Set the plan-progress gauges to the current open / closed todo counts.
@@ -2527,6 +2790,120 @@ impl FleetRepoLru {
             None
         };
         self.seen.push_back((user.to_string(), repo.to_string()));
+        evicted
+    }
+}
+
+/// The LRU cap on distinct config-plane `tenant` label values, shared by the two
+/// tenant-labelled config-plane families (`config_store_ops` + `grpc_server_rpc`).
+/// Tenants are verified orgs (C25), locked at low hundreds like sessions, so this is a
+/// backstop normal operation never reaches; it bounds the `tenant` dimension under
+/// misconfig/churn — the config-plane analogue of [`MAX_FLEET_REPOS`].
+const MAX_TENANTS: usize = 1024;
+
+/// High-water cap on distinct `grpc_server_rpc` `rpc` label values (see the `rpc_labels`
+/// field). The real gRPC method set is fixed and well under this; the headroom absorbs
+/// legitimate growth while still collapsing a junk-path flood to `"other"`.
+const MAX_RPCS: usize = 256;
+
+/// The sentinel `rpc` label a path collapses to once [`RpcBound`] is full — so an
+/// unbounded flood of unknown paths cannot grow the `rpc` dimension without limit.
+const RPC_OTHER: &str = "other";
+
+/// High-water bound over distinct `rpc` label values. Unlike [`TenantLru`] this never
+/// evicts: a real method path, once admitted, must stay its own label (evicting it would
+/// strand its series and misroute later hits to `"other"`). Once `cap` distinct paths are
+/// known, any *new* path is refused (→ the caller records it as [`RPC_OTHER`]).
+struct RpcBound {
+    cap: usize,
+    seen: std::collections::HashSet<String>,
+}
+
+impl RpcBound {
+    fn new(cap: usize) -> Self {
+        Self {
+            cap: cap.max(1),
+            seen: std::collections::HashSet::new(),
+        }
+    }
+
+    /// `true` ⇒ `rpc` may be its own label (already known, or there was room to admit it);
+    /// `false` ⇒ the cap is full and `rpc` is new, so the caller must fold it into
+    /// [`RPC_OTHER`].
+    fn admit(&mut self, rpc: &str) -> bool {
+        if self.seen.contains(rpc) {
+            return true;
+        }
+        if self.seen.len() >= self.cap {
+            return false;
+        }
+        self.seen.insert(rpc.to_string());
+        true
+    }
+}
+
+/// One config-plane counter series recorded under a tenant, remembered so the tenant
+/// LRU can remove exactly the series it admitted on eviction. The config-plane
+/// discriminators are open-ended (any card `collection`, any RPC path), so — unlike the
+/// fleet families' small enumerable sets — precise eviction requires replaying the
+/// recorded tuples rather than enumerating constants.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum TenantSeries {
+    ConfigStore {
+        collection: String,
+        op: String,
+        outcome: String,
+    },
+    GrpcRpc {
+        rpc: String,
+        outcome: String,
+    },
+}
+
+/// Bounded LRU over distinct config-plane `tenant` label values — the lifecycle
+/// backstop for the config-plane `tenant` metric dimension
+/// (docs/design/observability/01-metric-census.md). Least-recently-used tenant first;
+/// recording under a live tenant moves it to the back. Each tenant remembers the exact
+/// [`TenantSeries`] recorded under it, so on eviction [`Metrics`] can remove precisely
+/// those series from the registry.
+struct TenantLru {
+    cap: usize,
+    /// Tenants in LRU order (least-recently-used at the front), each with the set of
+    /// series recorded under it.
+    seen: std::collections::VecDeque<(String, std::collections::HashSet<TenantSeries>)>,
+}
+
+impl TenantLru {
+    fn new(cap: usize) -> Self {
+        Self {
+            // A zero cap would make every admit evict itself; clamp to at least one so a
+            // hostile/degenerate config can't wedge the recorder.
+            cap: cap.max(1),
+            seen: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// Record `series` under `tenant`, returning the evicted `(tenant, its series)` when
+    /// admitting a **new** tenant overflowed `cap`. A tenant already live is moved to the
+    /// back (most-recently-used) and `series` added to its set — no eviction.
+    fn admit(&mut self, tenant: &str, series: TenantSeries) -> Option<(String, Vec<TenantSeries>)> {
+        if let Some(pos) = self.seen.iter().position(|(t, _)| t == tenant) {
+            if let Some(mut entry) = self.seen.remove(pos) {
+                entry.1.insert(series);
+                self.seen.push_back(entry);
+            }
+            return None;
+        }
+        let evicted = if self.seen.len() >= self.cap {
+            self.seen
+                .pop_front()
+                .map(|(t, set)| (t, set.into_iter().collect()))
+        } else {
+            None
+        };
+        let mut set = std::collections::HashSet::new();
+        set.insert(series);
+        self.seen.push_back((tenant.to_string(), set));
         evicted
     }
 }
@@ -3380,6 +3757,333 @@ mod tests {
             assert!(
                 !line.contains("user=") && !line.contains("repo=") && !line.contains("session="),
                 "a transport health metric leaked a tenant/repo label: {line}"
+            );
+        }
+    }
+
+    // --- Phase 4: config-plane observability (config-store + auth/authz + rpc) ------
+    //
+    // Unlike the fleet recorders (validation-agnostic), the config-plane recorders are a
+    // funnel: they re-validate the attacker-influenced `tenant`/`collection` labels with
+    // `safe_segment` (defense in depth), so the adversarial *rejection* rows live here.
+
+    /// The one exposition line for `family` whose labels all match `wants` (`(k, v)`
+    /// pairs), or `None` if absent.
+    fn line_with<'a>(text: &'a str, family: &str, wants: &[(&str, &str)]) -> Option<&'a str> {
+        text.lines().filter(|l| l.starts_with(family)).find(|l| {
+            wants
+                .iter()
+                .all(|(k, v)| l.contains(&format!("{k}=\"{v}\"")))
+        })
+    }
+
+    /// Distinct `tenant="…"` label values present for `family` in the exposition.
+    fn tenants_for(text: &str, family: &str) -> std::collections::BTreeSet<String> {
+        text.lines()
+            .filter(|l| l.starts_with(family))
+            .filter_map(|l| {
+                let rest = &l[l.find("tenant=\"")? + 8..];
+                Some(rest[..rest.find('"')?].to_string())
+            })
+            .collect()
+    }
+
+    /// Outcome a `record_config_store_op` call is expected to produce.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum CfgExpect {
+        /// The `(collection,op,outcome,tenant)` series is present.
+        Ticks,
+        /// Nothing is recorded (a hostile label was dropped at the funnel).
+        Rejected,
+    }
+
+    #[rstest]
+    // desc: a well-formed put records the (collection,op,outcome,tenant) series → expect it ticks.
+    #[case::positive_put_ticks("transport", "put", "ok", "acme", CfgExpect::Ticks)]
+    // desc: a backend error is recorded as outcome=error → expect the error series ticks.
+    #[case::negative_error_outcome("fleet", "get", "error", "acme", CfgExpect::Ticks)]
+    // desc (corner): the count op records its op label distinctly → expect op="count" series ticks.
+    #[case::corner_count_op("role", "count", "ok", "acme", CfgExpect::Ticks)]
+    // desc (boundary): an empty tenant is NOT a safe segment → the whole op is dropped.
+    #[case::boundary_empty_tenant("transport", "put", "ok", "", CfgExpect::Rejected)]
+    // desc (adversarial): a hostile tenant segment (traversal) reaches the funnel → dropped, no series.
+    #[case::adversarial_hostile_tenant("transport", "put", "ok", "../../etc", CfgExpect::Rejected)]
+    // desc (adversarial): a hostile collection segment (separator) is dropped at the funnel.
+    #[case::adversarial_hostile_collection("a/b", "put", "ok", "acme", CfgExpect::Rejected)]
+    fn config_store_recorder(
+        #[case] collection: &str,
+        #[case] op: &str,
+        #[case] outcome: &str,
+        #[case] tenant: &str,
+        #[case] expect: CfgExpect,
+    ) {
+        let m = Metrics::new();
+        m.record_config_store_op(collection, op, outcome, tenant);
+        let text = m.encode_text();
+        let found = line_with(
+            &text,
+            "agent_config_store_ops_total",
+            &[
+                ("collection", collection),
+                ("op", op),
+                ("outcome", outcome),
+                ("tenant", tenant),
+            ],
+        )
+        .is_some();
+        match expect {
+            CfgExpect::Ticks => assert!(found, "expected a series for {collection}/{op}:\n{text}"),
+            CfgExpect::Rejected => {
+                assert!(
+                    !text.contains("agent_config_store_ops_total{"),
+                    "hostile label was recorded:\n{text}"
+                );
+            }
+        }
+    }
+
+    #[rstest]
+    // desc: a finite positive latency is recorded on the un-tenanted op histogram → one sample.
+    #[case::positive_finite("get", 0.5, 1)]
+    // desc (boundary): zero is a valid non-negative latency → recorded.
+    #[case::boundary_zero("list", 0.0, 1)]
+    // desc (adversarial): NaN is clamped to 0.0 before observe → one sample, finite sum.
+    #[case::adversarial_nan("get", f64::NAN, 1)]
+    // desc (adversarial): a negative latency is clamped to 0.0 → recorded, sum stays finite.
+    #[case::adversarial_negative("apply", -3.0, 1)]
+    // desc (adversarial): +inf is clamped to 0.0 → recorded, sum stays finite.
+    #[case::adversarial_inf("count", f64::INFINITY, 1)]
+    fn config_store_latency_clamped(
+        #[case] op: &str,
+        #[case] seconds: f64,
+        #[case] expect_count: u64,
+    ) {
+        let m = Metrics::new();
+        m.record_config_store_latency(op, seconds);
+        let text = m.encode_text();
+        let count = text
+            .lines()
+            .find(|l| l.starts_with("agent_config_store_op_seconds_count"))
+            .and_then(|l| l.rsplit(' ').next())
+            .and_then(|v| v.parse::<f64>().ok())
+            .map(|f| f as u64)
+            .unwrap_or(0);
+        assert_eq!(count, expect_count, "sample count mismatch for {seconds}");
+        let sum = text
+            .lines()
+            .find(|l| l.starts_with("agent_config_store_op_seconds_sum"))
+            .and_then(|l| l.rsplit(' ').next())
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(f64::NAN);
+        assert!(sum.is_finite(), "op-latency sum was poisoned: {sum}");
+    }
+
+    #[rstest]
+    // desc: under the cap every distinct tenant keeps its config-plane series → all present.
+    #[case::positive_under_cap(3, &["t1", "t2", "t3"], &["t1", "t2", "t3"])]
+    // desc (boundary_tenant_lru_capped): a tenant past the cap evicts the least-recently-used.
+    #[case::boundary_cap_evicts_oldest(2, &["t1", "t2", "t3"], &["t2", "t3"])]
+    // desc (corner): re-touching a live tenant refreshes it, so a different one is evicted.
+    #[case::corner_readmit_keeps_recent(2, &["t1", "t2", "t1", "t3"], &["t1", "t3"])]
+    fn boundary_tenant_lru_capped(
+        #[case] cap: usize,
+        #[case] seq: &[&str],
+        #[case] expected: &[&str],
+    ) {
+        let m = Metrics::new();
+        m.set_config_plane_tenant_cap(cap);
+        for t in seq {
+            m.record_config_store_op("transport", "put", "ok", t);
+        }
+        let got = tenants_for(&m.encode_text(), "agent_config_store_ops_total");
+        let want: std::collections::BTreeSet<String> =
+            expected.iter().map(|&s| s.to_string()).collect();
+        assert_eq!(got, want, "LRU tenant set mismatch");
+    }
+
+    #[test]
+    // desc: an evicted tenant loses series across BOTH tenant-labelled families (open-ended
+    // discriminators are removed precisely from the remembered tuples, not enumerated).
+    fn boundary_tenant_eviction_clears_both_families() {
+        let m = Metrics::new();
+        m.set_config_plane_tenant_cap(1);
+        // t1 records into both config-store and rpc families…
+        m.record_config_store_op("transport", "put", "ok", "t1");
+        m.record_grpc_rpc("/pkg.Svc/M", "ok", "t1", 0.01);
+        assert_eq!(
+            tenants_for(&m.encode_text(), "agent_config_store_ops_total"),
+            ["t1".to_string()].into()
+        );
+        // …then t2 overflows the cap and evicts t1 from both.
+        m.record_config_store_op("transport", "put", "ok", "t2");
+        let text = m.encode_text();
+        assert!(
+            !text.contains("tenant=\"t1\""),
+            "evicted tenant t1 left a stale series:\n{text}"
+        );
+    }
+
+    #[rstest]
+    // desc: an OK request records {rpc,outcome=ok,tenant} and its latency → both tick.
+    #[case::positive_ok("/pkg.Svc/M", "ok", "acme", true)]
+    // desc (negative): a non-ok grpc status maps to the outcome label → series present.
+    #[case::negative_non_ok("/pkg.Svc/M", "permission_denied", "acme", true)]
+    // desc (corner): an unauthenticated request has an empty tenant — still a valid bounded label.
+    #[case::corner_empty_tenant("/pkg.Svc/M", "ok", "", true)]
+    // desc (adversarial): a hostile (spoofed) tenant segment is dropped to empty, never recorded verbatim.
+    #[case::adversarial_hostile_tenant("/pkg.Svc/M", "ok", "../../etc", false)]
+    fn grpc_rpc_recorder(
+        #[case] rpc: &str,
+        #[case] outcome: &str,
+        #[case] tenant: &str,
+        #[case] tenant_kept: bool,
+    ) {
+        let m = Metrics::new();
+        m.record_grpc_rpc(rpc, outcome, tenant, 0.02);
+        let text = m.encode_text();
+        // The counter always ticks (rpc+outcome are trusted); only the tenant label differs.
+        assert!(
+            line_with(
+                &text,
+                "agent_grpc_server_rpc_total",
+                &[("rpc", rpc), ("outcome", outcome)]
+            )
+            .is_some(),
+            "no rpc series:\n{text}"
+        );
+        let recorded_tenant = if tenant_kept { tenant } else { "" };
+        assert!(
+            line_with(
+                &text,
+                "agent_grpc_server_rpc_total",
+                &[("tenant", recorded_tenant)]
+            )
+            .is_some(),
+            "expected tenant={recorded_tenant:?}:\n{text}"
+        );
+        // The latency histogram is rpc-only (un-tenanted seam health).
+        for line in text
+            .lines()
+            .filter(|l| l.starts_with("agent_grpc_server_rpc_seconds"))
+        {
+            assert!(
+                !line.contains("tenant="),
+                "rpc latency leaked a tenant label: {line}"
+            );
+        }
+    }
+
+    #[test]
+    // adversarial: the `rpc` label is attacker-controllable — a client can spray junk
+    // paths that still reach the tower layer before tonic routes them to Unimplemented —
+    // so it is bounded by a high-water cap: once full, an unknown path collapses to the
+    // `other` sentinel instead of growing the dimension without limit. A known path keeps
+    // recording as itself.
+    fn adversarial_rpc_label_bounded_to_other() {
+        let m = Metrics::new();
+        m.set_rpc_label_cap(2);
+        m.record_grpc_rpc("/pkg.Svc/A", "ok", "acme", 0.01);
+        m.record_grpc_rpc("/pkg.Svc/B", "ok", "acme", 0.01);
+        // A known path re-records as itself (no new label consumed).
+        m.record_grpc_rpc("/pkg.Svc/A", "ok", "acme", 0.01);
+        // Distinct paths past the cap overflow → fold to `other`, both counter + latency.
+        m.record_grpc_rpc("/pkg.Svc/C", "ok", "acme", 0.01);
+        m.record_grpc_rpc("/pkg.Svc/D", "ok", "acme", 0.01);
+        let text = m.encode_text();
+        for kept in ["/pkg.Svc/A", "/pkg.Svc/B"] {
+            assert!(
+                line_with(&text, "agent_grpc_server_rpc_total", &[("rpc", kept)]).is_some(),
+                "known path {kept} kept:\n{text}"
+            );
+        }
+        assert!(
+            line_with(&text, "agent_grpc_server_rpc_total", &[("rpc", "other")]).is_some(),
+            "overflow folded to `other`:\n{text}"
+        );
+        for overflow in ["/pkg.Svc/C", "/pkg.Svc/D"] {
+            assert!(
+                !text.contains(&format!("rpc=\"{overflow}\"")),
+                "overflow path {overflow} must not become its own label (counter or latency):\n{text}"
+            );
+        }
+    }
+
+    #[rstest]
+    // desc: an allow decision ticks {action,resource_type,decision=allow}.
+    #[case::positive_allow("write", "registry", "allow")]
+    // desc (negative): a deny decision ticks decision=deny.
+    #[case::negative_deny("delete", "config", "deny")]
+    // desc (corner): the approve action maps to its own bounded label.
+    #[case::corner_approve("approve", "fleet", "allow")]
+    fn authz_and_verify_recorders(
+        #[case] action: &str,
+        #[case] resource_type: &str,
+        #[case] decision: &str,
+    ) {
+        let m = Metrics::new();
+        m.record_authz_decision(action, resource_type, decision);
+        m.record_auth_verify(if decision == "allow" { "ok" } else { "error" });
+        let text = m.encode_text();
+        assert!(
+            line_with(
+                &text,
+                "agent_authz_decisions_total",
+                &[
+                    ("action", action),
+                    ("resource_type", resource_type),
+                    ("decision", decision)
+                ]
+            )
+            .is_some(),
+            "no authz series:\n{text}"
+        );
+        // Neither security counter carries a tenant label (it rides the grpc.server span).
+        for fam in ["agent_authz_decisions_total", "agent_auth_verify_total"] {
+            for line in text.lines().filter(|l| l.starts_with(fam)) {
+                assert!(
+                    !line.contains("tenant="),
+                    "{fam} leaked a tenant label: {line}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    // desc (negative_seam_health_families_stay_label_less): the config-plane latency histograms
+    // are op/rpc-only — no tenant/collection label ever appears on them.
+    fn negative_config_plane_latency_stays_tenant_less() {
+        let m = Metrics::new();
+        m.record_config_store_latency("get", 0.01);
+        m.record_grpc_rpc("/pkg.Svc/M", "ok", "acme", 0.01);
+        let text = m.encode_text();
+        for fam in [
+            "agent_config_store_op_seconds",
+            "agent_grpc_server_rpc_seconds",
+        ] {
+            for line in text.lines().filter(|l| l.starts_with(fam)) {
+                assert!(
+                    !line.contains("tenant=") && !line.contains("collection="),
+                    "{fam} leaked a high-cardinality label: {line}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    // desc (corner_labels_have_no_pr): PR is never a config-plane metric label.
+    fn corner_config_plane_labels_have_no_pr() {
+        let m = Metrics::new();
+        m.record_config_store_op("transport", "put", "ok", "acme");
+        m.record_grpc_rpc("/pkg.Svc/M", "ok", "acme", 0.01);
+        m.record_authz_decision("write", "registry", "allow");
+        for line in m.encode_text().lines().filter(|l| {
+            l.starts_with("agent_config_store_")
+                || l.starts_with("agent_grpc_server_")
+                || l.starts_with("agent_authz_")
+        }) {
+            assert!(
+                !line.contains("pr=\""),
+                "PR leaked into a config-plane label: {line}"
             );
         }
     }
