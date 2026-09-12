@@ -65,6 +65,14 @@ pub struct LogRow {
     /// The verified owning identity (`SessionKey.user`; tenant == user at this
     /// tier), stamped at the emit funnel. Empty for events emitted outside a scope.
     pub user: String,
+    /// The fleet repo (`owner__name`) the event belongs to, inherited from the
+    /// enclosing `fleet.*` span; empty outside a fleet review. Validated
+    /// (`safe_segment`) at the funnel — never a model-supplied value.
+    pub repo: String,
+    /// The fleet PR number the event belongs to, inherited from the enclosing
+    /// `fleet.*` span; empty outside a fleet review. `String` (not numeric) so
+    /// "unknown" is the empty string, consistent with `user`/`repo`.
+    pub pr: String,
     pub ts: DateTime64<3>,
     pub level: String,
     pub target: String,
@@ -77,6 +85,8 @@ impl LogRow {
     pub(crate) fn new(
         session_id: String,
         user: String,
+        repo: String,
+        pr: String,
         level: String,
         target: String,
         message: String,
@@ -85,6 +95,8 @@ impl LogRow {
         Self {
             session_id,
             user,
+            repo,
+            pr,
             ts: dt64_from_ms(now_ms()),
             level,
             target,

@@ -39,10 +39,17 @@ ENGINE = MergeTree
 ORDER BY (session_id, ts, seq);
 
 -- Streamed tracing/log events (from the tracing-subscriber ClickHouse layer).
+-- `repo`/`pr` (observability track, Phase 5.5) are inherited from the enclosing
+-- `fleet.*` span scope so a log is filterable per repo/PR; both are '' outside a
+-- fleet review. Like `user`, they are additive — an existing volume needs, once:
+--   ALTER TABLE agent.agent_logs ADD COLUMN IF NOT EXISTS repo String AFTER user;
+--   ALTER TABLE agent.agent_logs ADD COLUMN IF NOT EXISTS pr   String AFTER repo;
 CREATE TABLE IF NOT EXISTS agent.agent_logs
 (
     session_id String,
     user       String,                     -- verified SessionKey.user (tenant); '' outside a scope
+    repo       String,                     -- fleet repo (owner__name) from the span scope; '' otherwise
+    pr         String,                     -- fleet PR number from the span scope; '' otherwise
     ts         DateTime64(3, 'UTC'),
     level      String,                     -- ERROR | WARN | INFO | DEBUG | TRACE
     target     String,
