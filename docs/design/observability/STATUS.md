@@ -2,9 +2,11 @@
 
 Legend: ⬜ designed, not built · 🟡 in progress / open PR · ✅ built + merged.
 
-**Track state: 🟡 building.** Design-of-record written 2026-09-10. Each phase is a gated PR off `main`,
-never stacked (all phases touch `agent-metrics/src/lib.rs` and/or the shared gRPC span helper, so they
-would conflict if branched together). Pause for merge between phases.
+**Track state: ✅ complete.** Design-of-record written 2026-09-10; all phases merged by 2026-09-12. Each
+phase was a gated PR off `main`, never stacked (all phases touch `agent-metrics/src/lib.rs` and/or the
+shared gRPC span helper, so they would conflict if branched together), with a merge pause between phases.
+Every metric family now matches its census decision, both ClickHouse sinks (`agent_logs` + OTLP traces)
+carry tenant/repo/pr, and every span created under a scope is tenant-filterable.
 
 | Phase | Scope | State | PR |
 |---|---|---|---|
@@ -14,7 +16,7 @@ would conflict if branched together). Pause for merge between phases.
 | **3** | message transport (slack/matrix) — post/recv/ratelimit/soft-fail metrics + `transport.*` spans | ✅ | #318 |
 | **4** | config-plane: config-store backends (all registry/scheduler/prompt persistence), auth verify + authz allow/deny, one generic per-RPC server metric (per-tenant) | ✅ | #320 |
 | **5.5** | ClickHouse sinks — `agent_logs` inherits tenant/repo/pr from the span scope (+`repo`/`pr` columns); OTLP `EnrichSpanProcessor` stamps tenant/session on every scoped span; `tenant` on the `agent.turn` root | ✅ | #319 |
-| **5** | sweep the pre-existing families + existing spans per the census (§E resolved: policy_authorize/policy_guard/hook_dispatches/session_ops → +tenant; scheduled/session_gc/registry kept health with rationale; span side already covered by 5.5's processor) | 🟡 | #321 |
+| **5** | sweep the pre-existing families + existing spans per the census (§E resolved: policy_authorize/policy_guard/hook_dispatches/session_ops → +tenant; scheduled/session_gc/registry kept health with rationale; span side already covered by 5.5's processor) | ✅ | #321 |
 
 ## Cross-references updated by Phase 0
 
