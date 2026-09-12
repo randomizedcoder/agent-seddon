@@ -58,7 +58,13 @@ let
     + seamJob "lsp" g.lsp.metrics_port
     + seamJob "episodic" g.episodic.metrics_port
     + seamJob "semantic" g.semantic.metrics_port
-    + seamJob "gateway" g.gateway.metrics_port;
+    + seamJob "gateway" g.gateway.metrics_port
+    # The two non-seam gateways: `--serve-sessions` (portal driver) and the full
+    # `--serve-fleet` process. The fleet process is where the review-fleet
+    # (`agent_fleet_*`) and message-transport (`agent_transport_*`) families are
+    # recorded, so without this job the dev stack cannot see a running fleet.
+    + seamJob "sessions" g.sessions.metrics_port
+    + seamJob "fleet" g.fleet.metrics_port;
 
   configYml = pkgs.writeText "prometheus.yml" (
     ''
