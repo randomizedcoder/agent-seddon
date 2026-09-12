@@ -12,9 +12,9 @@ would conflict if branched together). Pause for merge between phases.
 | **1** | shared plumbing: `tenant` on the `grpc.server` span; new `agent_fleet_*` families registered; repo-label LRU cap helper; bench ceilings bumped | ✅ | #316 |
 | **2** | review-fleet + C18 progress + approver — the C19 build (per-tenant + per-repo metrics; `fleet.*` spans with tenant/repo/pr) | ✅ | #317 |
 | **3** | message transport (slack/matrix) — post/recv/ratelimit/soft-fail metrics + `transport.*` spans | ✅ | #318 |
-| **4** | config-plane: config-store backends (all registry/scheduler/prompt persistence), auth verify + authz allow/deny, one generic per-RPC server metric (per-tenant) | 🟡 | #320 |
+| **4** | config-plane: config-store backends (all registry/scheduler/prompt persistence), auth verify + authz allow/deny, one generic per-RPC server metric (per-tenant) | ✅ | #320 |
 | **5.5** | ClickHouse sinks — `agent_logs` inherits tenant/repo/pr from the span scope (+`repo`/`pr` columns); OTLP `EnrichSpanProcessor` stamps tenant/session on every scoped span; `tenant` on the `agent.turn` root | ✅ | #319 |
-| **5** | sweep the pre-existing ~137 families + existing spans per the census (promote the E candidates; confirm health families stay label-less) | ⬜ | — |
+| **5** | sweep the pre-existing families + existing spans per the census (§E resolved: policy_authorize/policy_guard/hook_dispatches/session_ops → +tenant; scheduled/session_gc/registry kept health with rationale; span side already covered by 5.5's processor) | 🟡 | #321 |
 
 ## Cross-references updated by Phase 0
 

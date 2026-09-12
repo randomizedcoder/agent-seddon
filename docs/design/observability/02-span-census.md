@@ -23,6 +23,12 @@ Every span **created under a scope** carries `tenant`/`session` as OTEL attribut
 `EnrichSpanProcessor` (Phase 5.5); the root spans (`grpc.server`, `agent.turn`) carry `tenant` as an
 explicit field for the pre-scope case. So the whole trace tree is filterable by tenant in HyperDX.
 
+> **Phase 5 (sweep) — span side is already complete.** The processor (5.5) covers every metered/loop
+> span, and `repo`/`pr` are only meaningful on the fleet path (done in Phase 2). There is no in-scope
+> `repo` on the loop/config-plane spans to add, so the Phase 5 sweep adds **no new span fields** — it is
+> the metrics half only (the §E families in `01-metric-census.md`). This entry records that the audit
+> confirmed nothing further to instrument, not that it was skipped.
+
 ## The two ClickHouse sinks carry the dimensions (Phase 5.5)
 
 Both telemetry streams that land in ClickHouse now carry tenant/repo/pr, matching the metrics side:

@@ -429,7 +429,7 @@ impl Metrics {
                 "agent_hook_dispatches_total",
                 "Lifecycle hook dispatches, by hook and attachment point",
             ),
-            &["hook", "point"],
+            &["hook", "point", "tenant"],
         )
         .unwrap();
         let route_decisions = IntCounterVec::new(
@@ -1160,7 +1160,7 @@ impl Metrics {
         // --- policy -----------------------------------------------------------
         let policy_authorize = IntCounterVec::new(
             Opts::new("agent_policy_authorize_total", "Policy authorize decisions"),
-            &["policy", "decision"],
+            &["policy", "decision", "tenant"],
         )
         .unwrap();
         let policy_authorize_seconds = Histogram::with_opts(HistogramOpts::new(
@@ -1175,7 +1175,7 @@ impl Metrics {
                 "agent_policy_guard_total",
                 "Policy guard matches (dangerous command / sensitive path)",
             ),
-            &["category", "action"],
+            &["category", "action", "tenant"],
         )
         .unwrap();
 
@@ -1373,7 +1373,7 @@ impl Metrics {
         // --- session (recorded by the session metrics wrapper) ----------------
         let session_ops = IntCounterVec::new(
             Opts::new("agent_session_ops_total", "Session-history mutations by op"),
-            &["op"],
+            &["op", "tenant"],
         )
         .unwrap();
         let session_gc_reclaimed = IntCounter::new(
@@ -1878,9 +1878,12 @@ impl Metrics {
             .with_label_values(&[backend, op])
             .observe(seconds);
     }
-    /// One lifecycle hook dispatch (parity spec 22).
+    /// One lifecycle hook dispatch (parity spec 22). Per-tenant via the ambient
+    /// identity — hooks fire inside the scoped turn (Phase 5).
     pub fn on_hook(&self, hook: &str, point: &str) {
-        self.hook_dispatches.with_label_values(&[hook, point]).inc();
+        self.hook_dispatches
+            .with_label_values(&[hook, point, &ambient_tenant()])
+            .inc();
     }
     /// One router decision: `routed` / `fellover` / `skipped_unhealthy` /
     /// `exhausted`, by target (parity spec 25).
@@ -2360,18 +2363,22 @@ impl Metrics {
     // --- policy instrumentation -------------------------------------------
 
     pub fn on_authorize(&self, policy: &str, decision: &str, seconds: f64) {
+        // Per-tenant: which tenant's model is hitting authorize decisions (config-plane
+        // observability Phase 5). Read from the ambient identity (the loop scopes every
+        // turn), `""` when unscoped. The latency sibling stays un-tenanted seam health.
         self.policy_authorize
-            .with_label_values(&[policy, decision])
+            .with_label_values(&[policy, decision, &ambient_tenant()])
             .inc();
         self.policy_authorize_seconds.observe(seconds);
     }
 
     /// A guard rule matched a call: `category` is the rule family
     /// (`dangerous_command` / `sensitive_path`), `action` is what happened
-    /// (`deny` / `prompt_denied` / `prompt_allowed`).
+    /// (`deny` / `prompt_denied` / `prompt_allowed`). Per-tenant via the ambient
+    /// identity — guard denials are a per-tenant security signal (Phase 5).
     pub fn on_policy_guard(&self, category: &str, action: &str) {
         self.policy_guard
-            .with_label_values(&[category, action])
+            .with_label_values(&[category, action, &ambient_tenant()])
             .inc();
     }
 
@@ -2721,11 +2728,17 @@ impl Metrics {
 
     // --- session (SessionStore seam) instrumentation ----------------------
 
-    /// Count a session-history mutation, labelled by op.
+    /// Count a session-history mutation, labelled by op. Per-tenant via the ambient
+    /// identity — session lifecycle is per-user (Phase 5).
     pub fn on_session_op(&self, op: &str) {
-        self.session_ops.with_label_values(&[op]).inc();
+        self.session_ops
+            .with_label_values(&[op, &ambient_tenant()])
+            .inc();
     }
-    /// Count checkpoint objects reclaimed by a prune.
+    /// Count checkpoint objects reclaimed by a prune. **Un-tenanted seam health**: a
+    /// prune is a bulk reaper sweeping idle sessions across *many* tenants in one call,
+    /// so the batch count cannot be attributed to a single tenant (the reaper is not a
+    /// tenant). Per-tenant session activity rides `agent_session_ops_total` instead.
     pub fn on_session_gc(&self, reclaimed: usize) {
         self.session_gc_reclaimed.inc_by(reclaimed as u64);
     }
@@ -2792,6 +2805,22 @@ impl FleetRepoLru {
         self.seen.push_back((user.to_string(), repo.to_string()));
         evicted
     }
+}
+
+/// The ambient tenant (verified `user`, the C25 canonical dimension) for a seam-decorator
+/// family recorded outside [`SessionMetrics`] — the policy/guard/hook/session-op families
+/// swept in Phase 5. Read from the task-local identity **at record time**, which is sound
+/// because it runs inline on the recording task (not the batch trace exporter — unlike the
+/// deferred ambient-span hazard). `""` when no identity is scoped (single-tenant / local
+/// path); a non-`safe_segment` value fails closed to `""`, so a hostile segment never
+/// becomes a label. Loop-*spend* families instead bind `(session, user)` explicitly via
+/// [`SessionMetrics`]; these decorator families have no such handle, so the ambient read
+/// is the natural, DRY fit.
+fn ambient_tenant() -> String {
+    agent_core::current_identity()
+        .map(|k| k.user.as_str().to_string())
+        .filter(|u| agent_core::safe_segment(u))
+        .unwrap_or_default()
 }
 
 /// The LRU cap on distinct config-plane `tenant` label values, shared by the two
@@ -3468,6 +3497,134 @@ mod tests {
                 !line.contains("session=") && !line.contains("user="),
                 "a health metric leaked a tenant label: {line}"
             );
+        }
+    }
+
+    // --- Phase 5: seam-decorator families swept to +tenant --------------------
+    //
+    // policy_authorize / policy_guard / hook_dispatches / session_ops gain a `tenant`
+    // label read from the ambient identity at record time (`ambient_tenant`). These
+    // recorders run inside the scoped turn, so a well-formed identity is present; the
+    // recorder's own `safe_segment` funnel drops a hostile segment to `""`.
+
+    /// Build a `(user, session)` key field-wise (bypassing `parse`'s fail-closed
+    /// validation) so an adversarial `user` can be forced into the ambient scope to
+    /// exercise the recorder's own `safe_segment` funnel.
+    fn key_with_user(user: &str) -> agent_core::SessionKey {
+        agent_core::SessionKey {
+            user: agent_core::UserId::new(user),
+            session: agent_core::SessionId::new("s"),
+        }
+    }
+
+    #[rstest]
+    // desc: recorded inside a well-formed scope → the ambient user becomes the tenant label.
+    #[case::positive_scoped_user(Some("acme"), "acme")]
+    // desc: recorded outside any scope (single-tenant/local path) → tenant is the empty label.
+    #[case::corner_unscoped_empty(None, "")]
+    // desc (adversarial): a hostile user segment (traversal) reaches the recorder funnel → dropped to "".
+    #[case::adversarial_hostile_user_dropped(Some("../../etc"), "")]
+    #[tokio::test]
+    async fn swept_family_carries_ambient_tenant(
+        #[case] scope_user: Option<&str>,
+        #[case] want_tenant: &str,
+    ) {
+        let m = Metrics::new();
+        let record = || m.on_session_op("checkpoint");
+        match scope_user {
+            Some(u) => agent_core::scope(key_with_user(u), async { record() }).await,
+            None => record(),
+        }
+        let text = m.encode_text();
+        assert!(
+            line_with(
+                &text,
+                "agent_session_ops_total",
+                &[("op", "checkpoint"), ("tenant", want_tenant)]
+            )
+            .is_some(),
+            "expected session_ops tenant={want_tenant:?}:\n{text}"
+        );
+    }
+
+    // desc: every swept family gains the tenant label under a scope — one representative
+    // record per family, all attributed to the ambient tenant.
+    #[tokio::test]
+    async fn all_swept_families_carry_tenant_under_scope() {
+        let m = Metrics::new();
+        agent_core::scope(key_with_user("acme"), async {
+            m.on_authorize("bash", "allow", 0.001);
+            m.on_policy_guard("dangerous_command", "deny");
+            m.on_hook("audit", "pre_tool");
+            m.on_session_op("fork");
+        })
+        .await;
+        let text = m.encode_text();
+        for (family, wants) in [
+            (
+                "agent_policy_authorize_total",
+                vec![("decision", "allow"), ("tenant", "acme")],
+            ),
+            (
+                "agent_policy_guard_total",
+                vec![("action", "deny"), ("tenant", "acme")],
+            ),
+            (
+                "agent_hook_dispatches_total",
+                vec![("point", "pre_tool"), ("tenant", "acme")],
+            ),
+            (
+                "agent_session_ops_total",
+                vec![("op", "fork"), ("tenant", "acme")],
+            ),
+        ] {
+            assert!(
+                line_with(&text, family, &wants).is_some(),
+                "{family} missing tenant=acme:\n{text}"
+            );
+        }
+        // The policy latency sibling stays un-tenanted seam health.
+        for line in text
+            .lines()
+            .filter(|l| l.starts_with("agent_policy_authorize_seconds"))
+        {
+            assert!(
+                !line.contains("tenant="),
+                "policy latency leaked a tenant label: {line}"
+            );
+        }
+    }
+
+    // desc (negative regression): the families the Phase-5 sweep deliberately kept
+    // label-less stay so EVEN under a scoped identity — a prune reaper spans tenants, the
+    // provider registry is shared (per-tenant CRUD rides the RPC-layer metric), the
+    // scheduler counter is driver-health. None may gain a tenant/session/user label.
+    #[tokio::test]
+    async fn negative_swept_health_families_stay_tenant_less() {
+        let m = Metrics::new();
+        agent_core::scope(key_with_user("acme"), async {
+            m.on_scheduled_run("ok", 0.5);
+            m.on_session_gc(3);
+            m.on_registry_mutation("put");
+            m.set_registry_upstreams(2, 1);
+        })
+        .await;
+        let text = m.encode_text();
+        for family in [
+            "agent_scheduled_runs_total",
+            "agent_scheduled_run_duration_seconds",
+            "agent_session_gc_reclaimed_total",
+            "agent_registry_mutations_total",
+            "agent_registry_upstreams",
+        ] {
+            for line in text.lines().filter(|l| l.starts_with(family)) {
+                assert!(
+                    !line.contains("tenant=")
+                        && !line.contains("session=")
+                        && !line.contains("user="),
+                    "kept-health family {family} leaked a tenant label: {line}"
+                );
+            }
         }
     }
 
