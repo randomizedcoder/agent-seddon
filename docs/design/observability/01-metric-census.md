@@ -43,16 +43,30 @@ The C19 families. Repo is the operator-roster `FleetSession.repo` (bounded, LRU-
 > needs a persisted *drafted* timestamp — `ReviewDraftRecord` carries none, so drafted→posted
 > latency isn't computable in `approve` yet. Both are follow-ups (sweep or a dedicated PR).
 
-## C. Message-transport families — **new, health + bounded** (Phase 3)
+## C. Message-transport families — **new, health + bounded** (Phase 3 ✅ built)
 
-Transport is per-channel/card, not per-repo; the `repo` here is the fleet beat's repo **only when a beat
-supplies it** (progress posts), else absent. Labels bounded by `kind` + outcome.
+Transport is per-channel/card, not per-repo, and a shared channel is not per-tenant attributable, so these
+families carry **no tenant/repo label** — the fleet beat's repo/tenant ride the parent `fleet.progress`
+**span** (progress posts), never a label. Labels are bounded by `kind` (the transport impl's own
+`&'static str`, `slack`\|`matrix`) + a bounded `outcome`/`decision`.
 
-| Family | Labels |
-|---|---|
-| `agent_transport_posts_total` | `kind`, `outcome` (ok\|ratelimited\|no_token\|http_err\|decode_err\|api_err) |
-| `agent_transport_post_seconds` | `kind` (health latency) |
-| `agent_transport_ratelimit_total` | `kind`, `decision` (admit\|refuse) |
+| Family | Labels | Phase 3 |
+|---|---|---|
+| `agent_transport_posts_total` | `kind`, `outcome` (ok\|ratelimited\|error) | ✅ recorded (`MeteredTransport`) |
+| `agent_transport_post_seconds` | `kind` (health latency; hostile secs clamped) | ✅ recorded (`MeteredTransport`) |
+| `agent_transport_ratelimit_total` | `kind`, `decision` (admit\|refuse) | ✅ recorded (`MeteredTransport`) |
+
+> **Outcome is coarse by design (a finer split is deferred).** The transport impls collapse every post
+> failure cause — no bot token, HTTP error, JSON decode error, Slack `ok:false` api error — into a single
+> `Error::Web`, and the rate-limiter refusal into `Error::Overloaded`. The `MeteredTransport` decorator
+> (`agent-runtime/src/metered.rs`) therefore classifies from the `Result` alone: `Ok → ok/admit`,
+> `Overloaded → ratelimited/refuse`, any other `Err → error/admit`. The finer
+> `no_token`\|`http_err`\|`decode_err`\|`api_err` split would need an error-variant enrichment on
+> `agent_core::Error` (or a typed transport error) and is a follow-up. **Spans:** the decorator opens a
+> `transport.post` span (bounded `kind` + `outcome`; tenant/repo inherited from the parent
+> `fleet.progress` span), and the inbound driver `agent_slack::SlackWatch::run` opens a `transport.recv`
+> span per message (bounded `kind` + trigger count) — inbound is pre-identity and has no metric family
+> (this group is post-only).
 
 ## D. Config-plane families — **new, +tenant** (Phase 4)
 

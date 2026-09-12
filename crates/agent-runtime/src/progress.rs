@@ -129,7 +129,10 @@ impl FleetProgress for TransportProgressFeed {
                 }
             };
             let transport = match agent_slack::build_transport_from_card(&card, bot_token) {
-                Ok(t) => t,
+                // Meter the outbound handle (Phase 3): each post records the
+                // `agent_transport_*` health families + a `transport.post` span. The span
+                // is a child of this `fleet.progress` span, so it inherits tenant/repo.
+                Ok(t) => crate::metered::transport(t, self.metrics.clone()),
                 Err(e) => {
                     tracing::warn!(transport_id, kind = %card.kind, error = %e,
                     "fleet progress: transport build failed (soft)");

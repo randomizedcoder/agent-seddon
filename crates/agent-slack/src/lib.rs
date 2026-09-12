@@ -131,7 +131,19 @@ impl SlackWatch {
         sink: Arc<dyn TriggerSink>,
     ) {
         while let Some(msg) = transport.recv().await {
-            self.on_message(&msg, sink.as_ref());
+            // Phase 3 (observability): one `transport.recv` span per inbound message,
+            // carrying the bounded transport `kind` + the trigger count it produced.
+            // The inbound half is pre-identity (a channel message, not a tenant call),
+            // so there is no tenant/repo to stamp and no metric family (census C is
+            // post-only) — the span alone gives the dispatch its trace presence.
+            let span = tracing::info_span!(
+                "transport.recv",
+                kind = transport.kind(),
+                triggers = tracing::field::Empty,
+            );
+            let _enter = span.enter();
+            let n = self.on_message(&msg, sink.as_ref());
+            span.record("triggers", n as u64);
         }
         tracing::info!("slack: transport closed; watch loop ended");
     }

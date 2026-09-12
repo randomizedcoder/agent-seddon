@@ -152,6 +152,14 @@ pub struct Metrics {
     /// for the `repo` dimension. Shared across `Metrics` clones (Arc), so an eviction
     /// removes that pair's series from the one registry.
     fleet_repos: Arc<std::sync::Mutex<FleetRepoLru>>,
+    // Message-transport health families (config C37 / D2, Phase 3). These are
+    // seam-health + bounded: labelled only by `kind` (the transport impl's own
+    // `&'static str`, e.g. slack|matrix) plus a bounded `outcome`/`decision`. NO
+    // tenant/repo label — per-repo attribution is meaningless for a shared channel;
+    // the fleet beat's repo rides the parent `fleet.progress` **span**, never a label.
+    transport_posts: IntCounterVec,
+    transport_post_seconds: HistogramVec,
+    transport_ratelimit: IntCounterVec,
     web_searches: IntCounterVec,
     web_search_seconds: HistogramVec,
     web_search_results: IntCounterVec,
@@ -862,6 +870,30 @@ impl Metrics {
         )
         .unwrap();
         let fleet_repos = Arc::new(std::sync::Mutex::new(FleetRepoLru::new(MAX_FLEET_REPOS)));
+        let transport_posts = IntCounterVec::new(
+            Opts::new(
+                "agent_transport_posts_total",
+                "Message-transport post attempts, by kind and outcome (ok|ratelimited|error)",
+            ),
+            &["kind", "outcome"],
+        )
+        .unwrap();
+        let transport_post_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "agent_transport_post_seconds",
+                "Message-transport post latency in seconds, by kind (health)",
+            ),
+            &["kind"],
+        )
+        .unwrap();
+        let transport_ratelimit = IntCounterVec::new(
+            Opts::new(
+                "agent_transport_ratelimit_total",
+                "Message-transport rate-limit decisions, by kind and decision (admit|refuse)",
+            ),
+            &["kind", "decision"],
+        )
+        .unwrap();
         let web_searches = IntCounterVec::new(
             Opts::new(
                 "agent_web_searches_total",
@@ -1375,6 +1407,9 @@ impl Metrics {
             Box::new(fleet_approvals.clone()),
             Box::new(fleet_approval_latency.clone()),
             Box::new(fleet_post_failures.clone()),
+            Box::new(transport_posts.clone()),
+            Box::new(transport_post_seconds.clone()),
+            Box::new(transport_ratelimit.clone()),
             Box::new(web_searches.clone()),
             Box::new(web_search_seconds.clone()),
             Box::new(web_search_results.clone()),
@@ -1526,6 +1561,9 @@ impl Metrics {
             fleet_approval_latency,
             fleet_post_failures,
             fleet_repos,
+            transport_posts,
+            transport_post_seconds,
+            transport_ratelimit,
             web_searches,
             web_search_seconds,
             web_search_results,
@@ -2322,6 +2360,39 @@ impl Metrics {
         self.web_fetch_total.with_label_values(&[outcome]).inc();
         self.web_fetch_seconds.observe(seconds);
         self.web_fetch_bytes.observe(bytes as f64);
+    }
+
+    // --- message transport (MessageTransport seam) instrumentation --------
+
+    /// Count one message-transport post attempt and record its latency (config
+    /// C37 / D2, Phase 3). `kind` is the transport impl's own `&'static str`
+    /// (`slack`|`matrix`), inherently bounded — not model input, so no
+    /// `safe_segment` gate is needed; `outcome` is one of the bounded
+    /// `ok`|`ratelimited`|`error`. `seconds` is a wall-clock latency the caller
+    /// measured; a hostile/NaN/negative value is clamped to `0.0` before
+    /// `observe` (defense in depth, following the local clamp idiom).
+    pub fn record_transport_post(&self, kind: &str, outcome: &str, seconds: f64) {
+        self.transport_posts
+            .with_label_values(&[kind, outcome])
+            .inc();
+        let secs = if seconds.is_finite() && seconds >= 0.0 {
+            seconds
+        } else {
+            0.0
+        };
+        self.transport_post_seconds
+            .with_label_values(&[kind])
+            .observe(secs);
+    }
+
+    /// Count one message-transport rate-limit decision (config C37 / D2, Phase
+    /// 3): `decision` is `admit` (the post reached the network) or `refuse` (the
+    /// per-transport [`RateLimiter`](agent_core::RateLimiter) rejected it before
+    /// the network). `kind` is the bounded transport-impl string.
+    pub fn record_transport_ratelimit(&self, kind: &str, decision: &str) {
+        self.transport_ratelimit
+            .with_label_values(&[kind, decision])
+            .inc();
     }
 
     // --- tasks (TaskTracker seam) instrumentation -------------------------
@@ -3196,5 +3267,120 @@ mod tests {
                 .any(|l| l.starts_with("agent_fleet_") && l.contains("repo=\"acme__web\"")),
             "fleet series not retired:\n{after}"
         );
+    }
+
+    // --- Phase 3: message-transport health families (kind + bounded outcome) -
+    //
+    // These are seam-health: labelled only by `kind` + a bounded `outcome`/`decision`,
+    // never a tenant/repo (the fleet beat's repo rides the `fleet.progress` span). `kind`
+    // is the impl's own `&'static str`, so there is no hostile-string label to reject; the
+    // adversarial coverage here is the hostile-number clamp on the post-latency histogram.
+
+    #[rstest]
+    // desc: a successful post ticks agent_transport_posts_total{kind,outcome=ok} → expect the ok series.
+    #[case::positive_ok("slack", "ok", "agent_transport_posts_total", "outcome=\"ok\"")]
+    // desc: a rate-limited post is counted with outcome=ratelimited → expect the ratelimited series.
+    #[case::corner_ratelimited(
+        "slack",
+        "ratelimited",
+        "agent_transport_posts_total",
+        "outcome=\"ratelimited\""
+    )]
+    // desc: a failed post (no token / http / decode / api) collapses to outcome=error → expect the error series.
+    #[case::negative_error("matrix", "error", "agent_transport_posts_total", "outcome=\"error\"")]
+    fn positive_transport_post_records_kind_and_outcome(
+        #[case] kind: &str,
+        #[case] outcome: &str,
+        #[case] family: &str,
+        #[case] label: &str,
+    ) {
+        let m = Metrics::new();
+        m.record_transport_post(kind, outcome, 0.01);
+        let text = m.encode_text();
+        let line = text
+            .lines()
+            .find(|l| l.starts_with(family) && l.contains(label))
+            .unwrap_or_else(|| panic!("missing `{family}` `{label}` in:\n{text}"));
+        assert!(
+            line.contains(&format!("kind=\"{kind}\"")),
+            "no kind label on {family}: {line}"
+        );
+    }
+
+    #[rstest]
+    // desc: a post that reached the network is an admit decision → expect the admit series.
+    #[case::positive_admit("slack", "admit")]
+    // desc: a rate-limiter refusal is a refuse decision → expect the refuse series.
+    #[case::corner_refuse("slack", "refuse")]
+    fn positive_transport_ratelimit_records_decision(#[case] kind: &str, #[case] decision: &str) {
+        let m = Metrics::new();
+        m.record_transport_ratelimit(kind, decision);
+        let text = m.encode_text();
+        assert!(
+            text.lines()
+                .any(|l| l.starts_with("agent_transport_ratelimit_total")
+                    && l.contains(&format!("kind=\"{kind}\""))
+                    && l.contains(&format!("decision=\"{decision}\""))),
+            "no ratelimit {decision} series:\n{text}"
+        );
+    }
+
+    #[rstest]
+    // desc: a finite positive latency is recorded → expect one sample in _count.
+    #[case::positive_finite(0.25, 1)]
+    // desc (boundary): zero is a valid non-negative latency → recorded.
+    #[case::boundary_zero(0.0, 1)]
+    // desc (adversarial): NaN is dropped before observe → no sample, no poisoned series.
+    #[case::adversarial_nan(f64::NAN, 1)]
+    // desc (adversarial): a negative latency (clock skew) is clamped to 0.0 → still one sample.
+    #[case::adversarial_negative(-1.0, 1)]
+    // desc (adversarial): +inf is clamped to 0.0 → one non-poisoning sample.
+    #[case::adversarial_inf(f64::INFINITY, 1)]
+    fn adversarial_transport_post_latency_clamped_before_observe(
+        #[case] seconds: f64,
+        #[case] expect_count: u64,
+    ) {
+        // The post counter always ticks; the histogram sample count reflects the clamp
+        // (a hostile value is replaced by 0.0, still a valid sample — never NaN/inf into
+        // the bucket sums, which would poison the series).
+        let m = Metrics::new();
+        m.record_transport_post("slack", "ok", seconds);
+        let text = m.encode_text();
+        let count = text
+            .lines()
+            .find(|l| l.starts_with("agent_transport_post_seconds_count"))
+            .and_then(|l| l.rsplit(' ').next())
+            .and_then(|v| v.parse::<f64>().ok())
+            .map(|f| f as u64)
+            .unwrap_or(0);
+        assert_eq!(count, expect_count, "sample count mismatch for {seconds}");
+        // A poisoned sum shows as NaN/inf in the exposition; assert the sum stayed finite.
+        let sum = text
+            .lines()
+            .find(|l| l.starts_with("agent_transport_post_seconds_sum"))
+            .and_then(|l| l.rsplit(' ').next())
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(f64::NAN);
+        assert!(sum.is_finite(), "post-latency sum was poisoned: {sum}");
+    }
+
+    #[test]
+    // desc (negative_seam_health_families_stay_label_less): the transport families carry NO
+    // tenant/repo label — a shared channel is not per-tenant attributable; per-repo triage
+    // rides the span. Only `kind` + bounded `outcome`/`decision` are labels.
+    fn negative_transport_families_stay_tenant_repo_less() {
+        let m = Metrics::new();
+        m.record_transport_post("slack", "ok", 0.01);
+        m.record_transport_ratelimit("slack", "admit");
+        for line in m
+            .encode_text()
+            .lines()
+            .filter(|l| l.starts_with("agent_transport_"))
+        {
+            assert!(
+                !line.contains("user=") && !line.contains("repo=") && !line.contains("session="),
+                "a transport health metric leaked a tenant/repo label: {line}"
+            );
+        }
     }
 }
