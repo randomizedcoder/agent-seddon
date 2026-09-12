@@ -30,6 +30,9 @@ dhat-heap = ["dep:dhat"]
 iai-callgrind.workspace = true
 # Table-driven unit tests (four case classes + adversarial), per CLAUDE.md.
 rstest.workspace = true
+# Drives `agent_core::scope(...)` in the Phase-5 tests, so the ambient-tenant
+# recorders can be exercised under a scoped identity (current-thread runtime only).
+tokio = { workspace = true }
 
 # The exemplar bench + leak test establish the pattern every feature PR follows.
 [[bench]]

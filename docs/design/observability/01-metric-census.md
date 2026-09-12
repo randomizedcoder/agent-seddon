@@ -99,18 +99,25 @@ path is high-water-capped (`MAX_RPCS`, overflow → `other`) since a client can 
 > existing `MeteredRegistry` (`agent_registry_mutations_total` / `agent_registry_upstreams`) — it is **not**
 > config-store-backed; the sweep (§E) may add `tenant` to that provider family.
 
-## E. Candidate +tenant on existing families (Phase 5, judgement)
+## E. Candidate +tenant on existing families — **resolved by the Phase 5 sweep** ✅
 
-Now that the owning service is per-tenant, these become meaningfully attributable. Each is decided in the
-sweep and guarded by the label-less regression test if it stays health.
+The Phase 0 candidates below were each decided in the sweep against one test: **is a meaningful tenant
+genuinely in scope at the record site, and is per-tenant attribution correct?** Four families gained a
+`tenant` label (read from the ambient identity at record time via `ambient_tenant()` — sound because it
+runs inline on the recording task; `""` when unscoped, `safe_segment`-funnelled); five were kept
+label-less with the rationale below and are guarded by `negative_swept_health_families_stay_tenant_less`.
+This is the sweep exercising the mandate the Phase 0 census set ("candidates… decided in the sweep"), not
+a reversal of a commitment.
 
-| Family | Decision | Rationale |
+| Family | Decision | Rationale (sweep finding) |
 |---|---|---|
-| `agent_scheduled_runs_total`, `agent_scheduled_run_duration_seconds` | **+tenant** | per-tenant scheduler (C2c) fires jobs as a tenant |
-| `agent_session_ops_total`, `agent_session_gc_reclaimed_total` | **+tenant** | session lifecycle is per-user |
-| `agent_registry_mutations_total`, `agent_registry_upstreams` | **+tenant** | provider registry CRUD is per-tenant config plane |
-| `agent_policy_authorize_total`, `agent_policy_guard_total` | **consider** | per-call tool Policy (distinct from RBAC); tenant-attributable but high call volume — decide in sweep |
-| `agent_hook_dispatches_total` | **consider** | fleet hooks are per-session |
+| `agent_policy_authorize_total` | **+tenant** ✅ | tool authorize runs inside the scoped turn → identity in scope; per-tenant authorize/deny is a security signal. Latency sibling `agent_policy_authorize_seconds` stays health. |
+| `agent_policy_guard_total` | **+tenant** ✅ | guard (dangerous-command / sensitive-path) runs in-turn; per-tenant guard denials are security-relevant. |
+| `agent_hook_dispatches_total` | **+tenant** ✅ | lifecycle hooks fire in-turn → identity in scope; low volume, per-tenant is meaningful. |
+| `agent_session_ops_total` | **+tenant** ✅ | session-history mutations run in-turn (per-user lifecycle). |
+| `agent_session_gc_reclaimed_total` | **stays health** | a prune is a **bulk reaper** sweeping idle sessions across *many* tenants in one call; the batch count cannot be attributed to a single tenant (the reaper is not a tenant). Per-tenant session activity rides `agent_session_ops_total`. |
+| `agent_registry_mutations_total`, `agent_registry_upstreams` | **stays health** | the provider `ProviderRegistry` is a **shared, non-per-tenant** registry (PerTenant is future multi-tenancy work); per-tenant provider-registry CRUD is already visible at the **RPC layer** via Phase 4 `agent_grpc_server_rpc_total{rpc,tenant}` on `ProviderRegistryService`. Adding tenant here would double-count and record `tenant=""` on the local/admin path; `registry_upstreams` is a fleet-wide gauge (per-tenant is semantically wrong). |
+| `agent_scheduled_runs_total`, `agent_scheduled_run_duration_seconds` | **stays health** | the completion observer (`builder.rs`) fires **outside** the per-run `agent_core::scope` and receives only `&Run` (no identity), so no tenant is in scope; the scheduled turn itself runs *under* `scope(tenant)` so its per-tenant spend/outcome is already captured by the loop families (`agent_runs_total{…,user}` etc.). The scheduler's own completion counter is driver-health; threading a tenant onto core `Run` for one counter isn't worth the ripple. |
 
 ## F. Seam-health — **stay label-less** (regression-guarded)
 

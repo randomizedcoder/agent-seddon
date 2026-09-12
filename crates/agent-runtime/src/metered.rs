@@ -3413,8 +3413,13 @@ mod config_store_tests {
     // current-thread runtime inside the sync span-capture closure.
     #[test]
     fn positive_span_carries_collection_tenant_backend() {
+        // Serialize against the other span/metric tests: a non-recording test can cache
+        // the `configstore.get` callsite's interest as disabled, so re-evaluate it under
+        // the recording subscriber (mirrors `metered_web_emits_span_with_attributes`).
+        let _lock = super::callsite_guard();
         let m = Metrics::new();
         let fields = captured_span_fields(|| {
+            tracing::callsite::rebuild_interest_cache();
             let rt = tokio::runtime::Builder::new_current_thread()
                 .build()
                 .expect("runtime");
