@@ -16,7 +16,9 @@
 
 let
   name = versions.grafanaContainerName;
-  image = versions.grafanaImage;
+  # Fully-qualified so podman (whose short-name resolution is disabled on the
+  # headless l2 box) resolves it; docker treats the docker.io/ prefix as a no-op.
+  image = "docker.io/${versions.grafanaImage}";
   port = toString versions.grafanaPort;
 
   provisioning = ./provisioning;
@@ -28,26 +30,24 @@ in
 {
   grafana-up = pkgs.writeShellApplication {
     name = "grafana-up";
-    runtimeInputs = [
-      versions.docker
-      versions.curl
-    ];
+    runtimeInputs = c.runtimes ++ [ versions.curl ];
     text = ''
         set -euo pipefail
+        ${c.pickRuntime}
 
-        if ! docker info >/dev/null 2>&1; then
-          echo "grafana-up: docker daemon not reachable — is it running?" >&2
+        if ! "$runtime" info >/dev/null 2>&1; then
+          echo "grafana-up: '$runtime' not reachable — is it installed/running?" >&2
           exit 1
         fi
 
-        if docker ps -a --format '{{.Names}}' | grep -qx "${name}"; then
+        if "$runtime" ps -a --format '{{.Names}}' | grep -qx "${name}"; then
           echo "==> container '${name}' already exists; (re)starting it"
-          docker start "${name}" >/dev/null
+          "$runtime" start "${name}" >/dev/null
         else
           echo "==> starting Grafana (${image})"
           # `--network host` (Linux): Grafana serves on host :${port} and reaches
           # Prometheus at 127.0.0.1:9090 (the provisioned datasource).
-          docker run -d \
+          "$runtime" run -d \
             --name "${name}" \
             --network host \
             -e GF_SERVER_HTTP_PORT="${port}" \

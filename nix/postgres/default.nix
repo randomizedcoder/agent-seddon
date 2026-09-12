@@ -14,7 +14,9 @@
 }:
 let
   name = versions.postgresContainerName;
-  image = versions.postgresImage;
+  # Fully-qualified so podman (whose short-name resolution is disabled on the
+  # headless l2 box) resolves it; docker treats the docker.io/ prefix as a no-op.
+  image = "docker.io/${versions.postgresImage}";
   port = toString versions.postgresPort;
   db = versions.postgresDatabase;
   user = versions.postgresUser;
@@ -25,22 +27,23 @@ let
 
   postgres-up = pkgs.writeShellApplication {
     name = "postgres-up";
-    runtimeInputs = [ versions.docker ];
+    runtimeInputs = c.runtimes;
     text = ''
         set -euo pipefail
+        ${c.pickRuntime}
 
-        if ! docker info >/dev/null 2>&1; then
-          echo "postgres-up: docker daemon not reachable — is it running?" >&2
+        if ! "$runtime" info >/dev/null 2>&1; then
+          echo "postgres-up: '$runtime' not reachable — is it installed/running?" >&2
           exit 1
         fi
 
-        if docker ps -a --format '{{.Names}}' | grep -qx "${name}"; then
+        if "$runtime" ps -a --format '{{.Names}}' | grep -qx "${name}"; then
           echo "==> container '${name}' already exists; (re)starting it"
-          docker start "${name}" >/dev/null
+          "$runtime" start "${name}" >/dev/null
         else
           echo "==> starting Postgres (${image})"
           # Published on 127.0.0.1 only (host-local); dev/CI credentials.
-          docker run -d \
+          "$runtime" run -d \
             --name "${name}" \
             -e POSTGRES_USER="${user}" \
             -e POSTGRES_PASSWORD="${password}" \
@@ -54,7 +57,7 @@ let
         # sleeping only BETWEEN probes — the health probe is the barrier.
         ready=0
         for _ in $(seq 1 60); do
-          if docker exec "${name}" pg_isready -U "${user}" -d "${db}" >/dev/null 2>&1; then
+          if "$runtime" exec "${name}" pg_isready -U "${user}" -d "${db}" >/dev/null 2>&1; then
             echo " ready"
             ready=1
             break
