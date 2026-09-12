@@ -769,6 +769,81 @@ impl agent_core::WebBackend for MeteredWeb {
     }
 }
 
+// --- message transport (MessageTransport seam) -----------------------------
+
+/// A metering decorator over the **outbound** message-transport seam (config C37 /
+/// D2, Phase 3). It wraps the outbound (post) handle the review-fleet C18 progress
+/// feed builds from a transport card and records, per post:
+/// `agent_transport_posts_total{kind,outcome}` (ok|ratelimited|error),
+/// `agent_transport_post_seconds{kind}`, and `agent_transport_ratelimit_total{kind,
+/// decision}` (refuse iff the per-transport rate limiter rejected the post, else
+/// admit). A `transport.post` span carries the bounded `kind`; **tenant/repo are
+/// inherited from the parent `fleet.progress` span** (the feed instruments those),
+/// never a metric label here — a shared channel is not per-tenant attributable.
+///
+/// This only ever wraps outbound handles (what `build_transport_from_card` returns,
+/// whose own `recv` is a no-op `None`), so [`recv`](agent_core::MessageTransport::recv)
+/// here returns `None` too: an `Arc<dyn>` inner cannot be driven `&mut`, and there is
+/// nothing to drive. The inbound Socket-Mode path is a separate driver
+/// (`agent_slack::SlackWatch::run`) and is span-instrumented there, not through this
+/// decorator (there is no inbound metric family — census group C is post-only).
+#[cfg(all(feature = "fleet", feature = "transport-registry-store"))]
+pub(crate) struct MeteredTransport {
+    inner: Arc<dyn agent_core::MessageTransport>,
+    metrics: Metrics,
+}
+
+/// Wrap an outbound transport handle so its posts are metered (config C37 / D2,
+/// Phase 3). Returns the seam type so the C18 feed can `announce` through it
+/// transparently. Mirrors the module's other `Metered*` constructors (`web`, `tool`).
+#[cfg(all(feature = "fleet", feature = "transport-registry-store"))]
+pub(crate) fn transport(
+    inner: Arc<dyn agent_core::MessageTransport>,
+    metrics: Metrics,
+) -> Arc<dyn agent_core::MessageTransport> {
+    Arc::new(MeteredTransport { inner, metrics })
+}
+
+#[cfg(all(feature = "fleet", feature = "transport-registry-store"))]
+#[async_trait]
+impl agent_core::MessageTransport for MeteredTransport {
+    fn kind(&self) -> &str {
+        self.inner.kind()
+    }
+
+    async fn recv(&mut self) -> Option<agent_core::InboundMessage> {
+        // Outbound (post) decorator only — see the type doc. The wrapped handle's own
+        // `recv` is `None`; there is nothing to meter or delegate to on the inbound half.
+        None
+    }
+
+    async fn post(
+        &self,
+        to: &agent_core::Channel,
+        msg: &agent_core::OutboundMessage,
+    ) -> Result<()> {
+        // `kind` is the impl's own `&'static str` (slack|matrix) — bounded, not model
+        // input, so it needs no `safe_segment` gate before becoming a label/attribute.
+        let kind = self.inner.kind();
+        let span = tracing::info_span!("transport.post", kind, outcome = tracing::field::Empty);
+        let start = Instant::now();
+        let out = self.inner.post(to, msg).instrument(span.clone()).await;
+        let secs = start.elapsed().as_secs_f64();
+        // Collapse the post result into the bounded census-C outcome/decision. The finer
+        // no_token/http/decode/api causes all surface as `Error::Web` inside the impl and
+        // would need an error-variant enrichment to separate — deferred (census C note).
+        let (outcome, decision) = match &out {
+            Ok(()) => ("ok", "admit"),
+            Err(agent_core::Error::Overloaded(_)) => ("ratelimited", "refuse"),
+            Err(_) => ("error", "admit"),
+        };
+        span.record("outcome", outcome);
+        self.metrics.record_transport_post(kind, outcome, secs);
+        self.metrics.record_transport_ratelimit(kind, decision);
+        out
+    }
+}
+
 #[cfg(feature = "tokenizer")]
 struct MeteredTokenizer {
     inner: Arc<dyn agent_core::Tokenizer>,
@@ -2812,6 +2887,151 @@ mod router_inflight_tests {
             ),
             0.0,
             "the gauge drains to zero"
+        );
+    }
+}
+
+// message transport: the metered outbound handle records the `agent_transport_*`
+// health families (posts/post_seconds/ratelimit) and emits a `transport.post` span
+// carrying the bounded `kind` + outcome. Tenant/repo are never labels here — they
+// ride the parent `fleet.progress` span (proven in `agent-runtime::progress`).
+#[cfg(all(test, feature = "fleet", feature = "transport-registry-store"))]
+mod transport_tests {
+    use super::*;
+    use agent_core::{Channel, InboundMessage, MessageTransport, OutboundMessage};
+    use agent_testkit::observe::{captured_span_fields, MetricsProbe};
+    use rstest::rstest;
+
+    /// A scripted post outcome, one per decorator classification branch.
+    #[derive(Clone, Copy)]
+    enum PostResult {
+        Ok,
+        RateLimited,
+        Error,
+    }
+
+    /// A fake outbound transport whose `post` returns the scripted result verbatim,
+    /// so the decorator's Ok / `Overloaded` / other-`Error` mapping is exercised.
+    struct FakeTransport {
+        kind: &'static str,
+        result: PostResult,
+    }
+
+    #[async_trait]
+    impl MessageTransport for FakeTransport {
+        fn kind(&self) -> &str {
+            self.kind
+        }
+        async fn recv(&mut self) -> Option<InboundMessage> {
+            None
+        }
+        async fn post(&self, _to: &Channel, _msg: &OutboundMessage) -> Result<()> {
+            match self.result {
+                PostResult::Ok => Ok(()),
+                // The per-transport RateLimiter refuses over-budget posts with this.
+                PostResult::RateLimited => Err(agent_core::Error::Overloaded("rate limit".into())),
+                // no_token / http / decode / api all surface as `Error::Web` in the impl.
+                PostResult::Error => Err(agent_core::Error::Web("post failed".into())),
+            }
+        }
+    }
+
+    async fn post_once(kind: &'static str, result: PostResult, m: &Metrics) -> Result<()> {
+        let inner: Arc<dyn MessageTransport> = Arc::new(FakeTransport { kind, result });
+        let metered = super::transport(inner, m.clone());
+        metered
+            .post(&Channel::new("C0"), &OutboundMessage { text: "hi".into() })
+            .await
+    }
+
+    #[rstest]
+    // desc: an Ok post → posts_total{outcome=ok} + ratelimit_total{decision=admit} tick.
+    #[case::positive_ok(PostResult::Ok, "ok", "admit")]
+    // desc: an Overloaded post (rate-limiter refused) → outcome=ratelimited, decision=refuse.
+    #[case::corner_ratelimited(PostResult::RateLimited, "ratelimited", "refuse")]
+    // desc: any other Error collapses to outcome=error; it still reached the limiter → admit.
+    #[case::negative_error(PostResult::Error, "error", "admit")]
+    #[tokio::test]
+    async fn metered_transport_post_records_outcome_and_decision(
+        #[case] result: PostResult,
+        #[case] outcome: &str,
+        #[case] decision: &str,
+    ) {
+        let m = Metrics::new();
+        let probe = MetricsProbe::new(&m);
+        let _ = post_once("slack", result, &m).await;
+        assert!(
+            probe.delta(
+                &m,
+                "agent_transport_posts_total",
+                Some(&format!("outcome=\"{outcome}\""))
+            ) >= 1.0,
+            "posts_total not recorded for outcome={outcome}"
+        );
+        assert!(
+            probe.delta(
+                &m,
+                "agent_transport_ratelimit_total",
+                Some(&format!("decision=\"{decision}\""))
+            ) >= 1.0,
+            "ratelimit_total not recorded for decision={decision}"
+        );
+        assert!(
+            probe.delta(
+                &m,
+                "agent_transport_post_seconds_count",
+                Some("kind=\"slack\"")
+            ) >= 1.0,
+            "post latency sample not recorded"
+        );
+    }
+
+    #[test]
+    // desc (positive_span_carries...): the metered post opens a `transport.post` span
+    // carrying the bounded kind + the recorded outcome.
+    fn positive_transport_post_span_carries_kind_and_outcome() {
+        let _lock = super::callsite_guard();
+        let fields = captured_span_fields(|| {
+            tracing::callsite::rebuild_interest_cache();
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let m = Metrics::new();
+                let _ = post_once("slack", PostResult::Ok, &m).await;
+            });
+        });
+        let has = |f: &str, v: &str| {
+            fields
+                .iter()
+                .any(|(s, fld, val)| s == "transport.post" && fld == f && val == v)
+        };
+        assert!(
+            has("kind", "slack"),
+            "no kind on transport.post: {fields:?}"
+        );
+        assert!(
+            has("outcome", "ok"),
+            "no outcome on transport.post: {fields:?}"
+        );
+    }
+
+    #[tokio::test]
+    // desc (negative): the outbound decorator's recv is a no-op None (it only wraps
+    // outbound handles; the inbound Socket-Mode path is instrumented separately). Built
+    // as the concrete struct (same-crate) so its own `recv` is driven, not the inner's.
+    async fn negative_recv_is_none() {
+        let inner: Arc<dyn MessageTransport> = Arc::new(FakeTransport {
+            kind: "slack",
+            result: PostResult::Ok,
+        });
+        let mut metered = MeteredTransport {
+            inner,
+            metrics: Metrics::new(),
+        };
+        assert!(
+            metered.recv().await.is_none(),
+            "outbound decorator recv must be a no-op None"
         );
     }
 }

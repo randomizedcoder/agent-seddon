@@ -32,7 +32,8 @@ Use the `web.fetch` pattern in `metered.rs` as the template.
 | `TriggerQueue::enqueue` / poll pipeline | `crates/agent-review-fleet/src/{orchestrator,poll}.rs` | 2 | `fleet.trigger`, `source`/`tenant`/`repo` |
 | `EngineApprover::approve` (uninstrumented) | `crates/agent-runtime/src/agent.rs:497` | 2 | `fleet.approve`, `tenant`/`repo`/`pr`/`outcome` |
 | `TransportProgressFeed::announce` (5 soft-fail branches) | `crates/agent-runtime/src/progress.rs:51` | 2 | `fleet.progress`, `beat`/`outcome`/`tenant`/`repo` |
-| `SlackMessageTransport::post` / `recv` / matrix | `crates/agent-slack/src/{kind,matrix}.rs` (0 spans) | 3 | `transport.post`, `kind`/`outcome`/`tenant`/(`repo` when a fleet beat) |
+| message-transport post (all kinds) | `crates/agent-runtime/src/metered.rs` (`MeteredTransport` decorator, **built**) | 3 | `transport.post`, `kind`/`outcome`; `tenant`/`repo` **inherited** from the parent `fleet.progress` span (the decorator is the cleaner home than per-impl `kind.rs`/`matrix.rs` — those stay span-free) |
+| message-transport recv (inbound dispatch) | `crates/agent-slack/src/lib.rs` (`SlackWatch::run`, **built**) | 3 | `transport.recv`, `kind`/`triggers`; inbound is pre-identity (no tenant/repo, no metric family) |
 | registry service handlers | `crates/agent-grpc/src/server/{transport_registry,forge_registry}.rs` | 4 | already inside `grpc.server` (inherit `tenant`); add `op`/`card_id` fields |
 | config-store backends | `crates/agent-config-store/src/{postgres,sqlite,file}.rs` (0 spans) | 4 | `configstore.apply`/`get`/`list`, `backend`/`op`/`tenant` (explicit arg) |
 | auth layer / authz gate | `crates/agent-grpc/src/server/{auth,authz}.rs` (0 span fields) | 4 | inside `grpc.server`; record `authz.decision`/`action`/`resource` + auth `verify.outcome` |
