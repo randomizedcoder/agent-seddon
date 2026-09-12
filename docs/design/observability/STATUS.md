@@ -14,7 +14,7 @@ would conflict if branched together). Pause for merge between phases.
 | **3** | message transport (slack/matrix) — post/recv/ratelimit/soft-fail metrics + `transport.*` spans | ✅ | #318 |
 | **4** | config-plane: config-store backends (all registry/scheduler/prompt persistence), auth verify + authz allow/deny, one generic per-RPC server metric (per-tenant) | ✅ | #320 |
 | **5.5** | ClickHouse sinks — `agent_logs` inherits tenant/repo/pr from the span scope (+`repo`/`pr` columns); OTLP `EnrichSpanProcessor` stamps tenant/session on every scoped span; `tenant` on the `agent.turn` root | ✅ | #319 |
-| **5** | sweep the pre-existing families + existing spans per the census (§E resolved: policy_authorize/policy_guard/hook_dispatches/session_ops → +tenant; scheduled/session_gc/registry kept health with rationale; span side already covered by 5.5's processor) | 🟡 | _pending_ |
+| **5** | sweep the pre-existing families + existing spans per the census (§E resolved: policy_authorize/policy_guard/hook_dispatches/session_ops → +tenant; scheduled/session_gc/registry kept health with rationale; span side already covered by 5.5's processor) | 🟡 | #321 |
 
 ## Cross-references updated by Phase 0
 
