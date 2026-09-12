@@ -796,11 +796,50 @@ fn shed_observer(agent: &Agent) -> agent_grpc::server::ShedObserver {
     std::sync::Arc::new(move || metrics.on_grpc_overload_shed())
 }
 
+/// Per-RPC observer bridging the [`MetricsLayer`] (config-plane observability, Phase 4)
+/// into `agent_grpc_server_rpc_total{rpc,outcome,tenant}` + `_rpc_seconds{rpc}` on this
+/// process's `/metrics`. The layer sits inside `AuthLayer`, so `tenant` is the verified
+/// identity; the recorder re-validates it (and bounds the `rpc` label).
+///
+/// [`MetricsLayer`]: agent_grpc::server::MetricsLayer
+fn rpc_observer(agent: &Agent) -> agent_grpc::server::RpcObserver {
+    let metrics = agent.metrics();
+    std::sync::Arc::new(move |rpc: &str, outcome: &str, tenant: &str, secs: f64| {
+        metrics.record_grpc_rpc(rpc, outcome, tenant, secs);
+    })
+}
+
+/// Observer bridging every token-verification attempt into `agent_auth_verify_total`
+/// (`ok`/`error`). A disabled (`mode = "none"`) auth layer never verifies, so this is
+/// simply never called there.
+fn auth_verify_observer(agent: &Agent) -> agent_grpc::server::AuthObserver {
+    let metrics = agent.metrics();
+    std::sync::Arc::new(move |outcome: &str| metrics.record_auth_verify(outcome))
+}
+
+/// Register the process-global authz observer once, bridging each RBAC decision into
+/// `agent_authz_decisions_total{action,resource_type,decision}`. Idempotent (an
+/// `OnceLock` behind `set_authz_observer`), so calling it from every serve entry point
+/// is safe — the first registration wins.
+fn install_authz_observer(agent: &Agent) {
+    let metrics = agent.metrics();
+    agent_grpc::server::set_authz_observer(std::sync::Arc::new(
+        move |action: agent_core::Action, resource: agent_core::ResourceType, allow: bool| {
+            metrics.record_authz_decision(
+                action.as_str(),
+                resource.as_str(),
+                if allow { "allow" } else { "deny" },
+            );
+        },
+    ));
+}
+
 /// The OIDC/JWT [`AuthLayer`] for served seams, built from `[auth]` (config C33/B1).
 /// `mode = "none"` (the default) yields a disabled pass-through — today's
 /// trusted-header behaviour; `mode = "oidc"` builds the JWKS/JWT verifier (which
 /// requires the `agent-grpc` `auth` feature, else this is a fail-closed startup
-/// error rather than a silent downgrade).
+/// error rather than a silent downgrade). Carries the auth-verify observer so a served
+/// seam counts verifications on `/metrics`.
 fn auth_layer(agent: &Agent) -> anyhow::Result<agent_grpc::server::AuthLayer> {
     let a = agent.grpc_auth();
     agent_grpc::server::AuthLayer::from_params(agent_grpc::server::AuthParams {
@@ -812,14 +851,17 @@ fn auth_layer(agent: &Agent) -> anyhow::Result<agent_grpc::server::AuthLayer> {
         roles_claim: a.roles_claim.clone(),
         leeway_secs: a.leeway_secs,
     })
+    .map(|layer| layer.with_observer(Some(auth_verify_observer(agent))))
     .map_err(anyhow::Error::msg)
 }
 
 pub async fn serve_session_observe(agent: &Agent, listen: Endpoint) -> anyhow::Result<()> {
+    install_authz_observer(agent);
     let (router, health) = agent_grpc::server::base_router_with_auth(
         agent.grpc_max_in_flight(),
         Some(shed_observer(agent)),
         auth_layer(agent)?,
+        Some(rpc_observer(agent)),
     )
     .await;
     let (router, added) = add_seam_service(router, agent, Seam::SessionStream)?;
@@ -866,10 +908,12 @@ pub async fn serve_sessions(agent: Arc<Agent>, listen: Endpoint) -> anyhow::Resu
         });
     }
 
+    install_authz_observer(&agent);
     let (router, health) = agent_grpc::server::base_router_with_auth(
         agent.grpc_max_in_flight(),
         Some(shed_observer(&agent)),
         auth_layer(&agent)?,
+        Some(rpc_observer(&agent)),
     )
     .await;
     let router = router.add_service(
@@ -1080,10 +1124,12 @@ pub async fn serve_fleet(agent: Arc<Agent>, listen: Endpoint) -> anyhow::Result<
         }
     };
 
+    install_authz_observer(&agent);
     let (router, health) = agent_grpc::server::base_router_with_auth(
         agent.grpc_max_in_flight(),
         Some(shed_observer(&agent)),
         auth_layer(&agent)?,
+        Some(rpc_observer(&agent)),
     )
     .await;
     let mut fleet_svc = srv::ReviewFleetSvc::new(roster.clone());
@@ -1358,10 +1404,12 @@ async fn serve_seams(
 ) -> anyhow::Result<()> {
     // Health is the seed of the router, so hosting one seam and hosting all of
     // them are the same code path rather than two that can drift.
+    install_authz_observer(agent);
     let (mut router, health) = agent_grpc::server::base_router_with_auth(
         agent.grpc_max_in_flight(),
         Some(shed_observer(agent)),
         auth_layer(agent)?,
+        Some(rpc_observer(agent)),
     )
     .await;
     let mut hosted: Vec<&str> = Vec::new();

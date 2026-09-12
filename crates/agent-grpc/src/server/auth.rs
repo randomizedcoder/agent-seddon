@@ -77,11 +77,18 @@ pub struct AuthParams {
     pub leeway_secs: u64,
 }
 
+/// Called once per token-verification attempt with the bounded outcome (`ok`|`error`),
+/// so the serve path can bridge it to `agent_auth_verify_total` without this crate
+/// depending on `agent-metrics` — the auth twin of [`super::admission::ShedObserver`].
+pub type AuthObserver = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// Applies [`Auth`] to a service. Cheap to clone (an `Option<Arc<…>>`).
 #[derive(Clone)]
 pub struct AuthLayer {
     /// `None` ⇒ disabled (pass-through, `mode = "none"`).
     verifier: Option<Arc<dyn TokenVerifier>>,
+    /// Invoked on every verify with `ok`/`error` (serve path bridges to the metric).
+    on_verify: Option<AuthObserver>,
 }
 
 impl AuthLayer {
@@ -89,14 +96,26 @@ impl AuthLayer {
     /// trusted-header path). This is what `mode = "none"` and every non-serve/test
     /// caller of the base router get.
     pub fn disabled() -> Self {
-        Self { verifier: None }
+        Self {
+            verifier: None,
+            on_verify: None,
+        }
     }
 
     /// An enabled layer wrapping a concrete [`TokenVerifier`].
     pub fn enabled(verifier: Arc<dyn TokenVerifier>) -> Self {
         Self {
             verifier: Some(verifier),
+            on_verify: None,
         }
+    }
+
+    /// Attach an observer invoked on every token-verification attempt (`ok`/`error`).
+    /// The serve path uses it to increment `agent_auth_verify_total`; a disabled
+    /// (pass-through) layer never verifies, so the observer is simply never called.
+    pub fn with_observer(mut self, on_verify: Option<AuthObserver>) -> Self {
+        self.on_verify = on_verify;
+        self
     }
 
     /// Whether this layer enforces authentication (`false` ⇒ pass-through).
@@ -142,6 +161,7 @@ impl<S> Layer<S> for AuthLayer {
         Auth {
             inner,
             verifier: self.verifier.clone(),
+            on_verify: self.on_verify.clone(),
         }
     }
 }
@@ -153,6 +173,7 @@ impl<S> Layer<S> for AuthLayer {
 pub struct Auth<S> {
     inner: S,
     verifier: Option<Arc<dyn TokenVerifier>>,
+    on_verify: Option<AuthObserver>,
 }
 
 /// Paths served without authentication: standard health + reflection, so an
@@ -197,6 +218,7 @@ where
             None => return Box::pin(async move { inner.call(req).await }), // disabled
             Some(v) => v.clone(),
         };
+        let on_verify = self.on_verify.clone();
 
         // Health/reflection probes never carry a token.
         if is_exempt(req.uri().path()) {
@@ -209,6 +231,9 @@ where
             };
             match verifier.verify(&token).await {
                 Ok(id) => {
+                    if let Some(obs) = &on_verify {
+                        obs("ok");
+                    }
                     // Overwrite the identity header with the VERIFIED tenant, dropping
                     // any client-supplied value, so identity_key/run_scoped downstream
                     // consume a verified principal. `tenant` passed `safe_segment`, so
@@ -229,7 +254,12 @@ where
                     };
                     agent_core::principal_scope(principal, inner.call(req)).await
                 }
-                Err(()) => Ok(unauthenticated()),
+                Err(()) => {
+                    if let Some(obs) = &on_verify {
+                        obs("error");
+                    }
+                    Ok(unauthenticated())
+                }
             }
         })
     }

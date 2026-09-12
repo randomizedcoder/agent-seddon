@@ -54,11 +54,23 @@ fn resolve_dsn_ref(dsn_ref: &str) -> anyhow::Result<String> {
 /// synchronous config resolvers; the schema is assumed present (the shared
 /// `cards`/`tenants` tables from the config-store migration), applied out of band
 /// or by an eager bootstrap.
-pub(crate) fn pg_backend(cfg: &ConfigStoreCfg) -> anyhow::Result<Arc<dyn Backend>> {
+///
+/// The returned backend is wrapped in the [`crate::metered::config_store`] decorator
+/// (config-plane observability, Phase 4), so every op onto this shared Postgres backend
+/// — behind any registry/scheduler/prompt domain — counts and spans as `backend =
+/// postgres` at the single data-owner choke point.
+pub(crate) fn pg_backend(
+    cfg: &ConfigStoreCfg,
+    metrics: &agent_metrics::Metrics,
+) -> anyhow::Result<Arc<dyn Backend>> {
     let dsn = resolve_dsn_ref(&cfg.dsn_ref)?;
     let backend = PgBackend::connect_lazy(&dsn, cfg.pool_max)
         .map_err(|e| anyhow::anyhow!("[config_store] postgres backend: {e}"))?;
-    Ok(Arc::new(backend))
+    Ok(crate::metered::config_store(
+        Arc::new(backend),
+        metrics.clone(),
+        "postgres",
+    ))
 }
 
 #[cfg(test)]
@@ -119,7 +131,10 @@ mod tests {
         let name = "AGENT_A3_TEST_DSN_LAZY";
         std::env::set_var(name, "postgres://u:p@127.0.0.1:5432/db");
         let cfg = cfg_with(&format!("env:{name}"));
-        assert!(pg_backend(&cfg).is_ok(), "lazy pool must construct");
+        assert!(
+            pg_backend(&cfg, &agent_metrics::Metrics::new()).is_ok(),
+            "lazy pool must construct"
+        );
         std::env::remove_var(name);
     }
 }

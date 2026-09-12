@@ -68,22 +68,36 @@ families carry **no tenant/repo label** — the fleet beat's repo/tenant ride th
 > span per message (bounded `kind` + trigger count) — inbound is pre-identity and has no metric family
 > (this group is post-only).
 
-## D. Config-plane families — **new, +tenant** (Phase 4)
+## D. Config-plane families — **new, +tenant** (Phase 4 ✅ built)
 
-Tenant is the explicit method arg / verified principal, **not** the task-local.
+Tenant is the explicit method arg (config store) / verified principal (RPC layer), **not** the task-local.
+Six families across three instrumentation layers — the data-owner `Backend`, the auth/authz gate, and one
+generic per-RPC tower layer — chosen so `agent-grpc` stays free of any `agent-metrics` dependency (the
+`ShedObserver` callback pattern) and `agent-config-store` stays metrics-free. The six are recorded via
+`record_config_store_op`, `record_config_store_latency`, `record_auth_verify`, `record_authz_decision`,
+`record_grpc_rpc`.
 
-| Family | Labels |
-|---|---|
-| `agent_config_store_ops_total` | `backend` (memory\|file\|sqlite\|pg), `op` (get\|list\|apply\|delete), `outcome`, `tenant` |
-| `agent_config_store_op_seconds` | `backend`, `op` (health latency, un-tenanted) |
-| `agent_registry_ops_total` | `registry` (transport\|forge), `op`, `outcome`, `tenant` |
-| `agent_auth_verify_total` | `outcome` (ok\|reject) — **no tenant** (pre-identity; a rejected token has no verified tenant) |
-| `agent_authz_decisions_total` | `action`, `resource_type`, `decision` (allow\|deny), `tenant` — the security-relevant one |
+| Family | Labels | Layer |
+|---|---|---|
+| `agent_config_store_ops_total` | `collection` (one per card kind), `op` (get\|list\|count\|put\|delete\|ensure_tenant), `outcome` (ok\|error), `tenant` | `MeteredBackend` decorator over `agent_config_store::Backend` |
+| `agent_config_store_op_seconds` | `op` (get\|list\|count\|apply) — call-level health latency, **un-tenanted** (hostile secs clamped) | `MeteredBackend` |
+| `agent_auth_verify_total` | `outcome` (ok\|error) — **no tenant** (pre-identity; a rejected token has no verified tenant) | `AuthObserver` on `AuthLayer` |
+| `agent_authz_decisions_total` | `action`, `resource_type`, `decision` (allow\|deny) — **no tenant** (rides the `grpc.server` span, which carries it) | `OnceLock<AuthzObserver>` in `authz::require` |
+| `agent_grpc_server_rpc_total` | `rpc` (path; high-water bounded → `other`), `outcome` (canonical gRPC code name), `tenant` | `MetricsLayer` tower service (inside `AuthLayer`) |
+| `agent_grpc_server_rpc_seconds` | `rpc` (health latency, **un-tenanted**; hostile secs clamped) | `MetricsLayer` |
 
-> Note: `agent_registry_mutations_total` / `agent_registry_upstreams` already exist for the **provider**
-> registry (model-router). Phase 4 adds the transport/forge registries under `agent_registry_ops_total`
-> rather than overloading the provider family; the sweep may add `tenant` to the provider family too
-> (config-plane CRUD is now per-tenant).
+The `backend` (memory\|file\|sqlite\|postgres) is a **span field** on `configstore.*`, not a metric label —
+the per-backend split is a per-trace triage concern, and keeping it off the metric holds the label budget.
+`collection` is the metric's bounded discriminator; `tenant` is LRU-capped (`MAX_TENANTS`), and the `rpc`
+path is high-water-capped (`MAX_RPCS`, overflow → `other`) since a client can spray junk paths.
+
+> Design note: config-store metering sits at the **single data-owner `Backend` choke point** beneath every
+> domain (all registry + scheduler + prompt persistence), rather than per-registry decorators (tenant-blind
+> — the registry trait methods take id/card only) or `Metrics` injected into the `Svc` structs (breaks
+> layering). So the transport/forge/role registries, the scheduler store, and the prompt store are all
+> counted through `agent_config_store_ops_total` with no per-registry family. `ProviderRegistry` keeps its
+> existing `MeteredRegistry` (`agent_registry_mutations_total` / `agent_registry_upstreams`) — it is **not**
+> config-store-backed; the sweep (§E) may add `tenant` to that provider family.
 
 ## E. Candidate +tenant on existing families (Phase 5, judgement)
 

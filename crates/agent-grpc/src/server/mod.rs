@@ -21,15 +21,20 @@ pub use tonic::transport::server::Router;
 
 /// The router type produced by [`base_router`] and threaded through the serve path:
 /// a `Router` carrying the uniform [`AdmissionLayer`] (overload shedding) wrapping
-/// the [`AuthLayer`] (OIDC/JWT). Admission is the OUTER layer so a request is shed
-/// under overload *before* any token crypto; auth is inner so it runs on every
-/// admitted request (a pass-through when `[auth] mode = "none"`). The standalone
-/// `*_router` helpers keep the bare `Router` (tests don't need either layer);
-/// [`crate::transport::Endpoint::serve`] is generic so it accepts both.
+/// the [`AuthLayer`] (OIDC/JWT) wrapping the [`MetricsLayer`] (per-RPC metric).
+/// Admission is the OUTER layer so a request is shed under overload *before* any token
+/// crypto; auth is next so it runs on every admitted request (a pass-through when
+/// `[auth] mode = "none"`); metrics is INNERMOST so it observes the *verified* identity
+/// and times only real handler work. Execution order is admission → auth → metrics →
+/// handler. The standalone `*_router` helpers keep the bare `Router` (tests don't need
+/// any layer); [`crate::transport::Endpoint::serve`] is generic so it accepts both.
 pub type ServeRouter = Router<
     tower::layer::util::Stack<
         admission::AdmissionLayer,
-        tower::layer::util::Stack<auth::AuthLayer, tower::layer::util::Identity>,
+        tower::layer::util::Stack<
+            auth::AuthLayer,
+            tower::layer::util::Stack<metrics_layer::MetricsLayer, tower::layer::util::Identity>,
+        >,
     >,
 >;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -52,6 +57,7 @@ mod health;
 mod llm_pool;
 mod lsp;
 mod memory;
+mod metrics_layer;
 mod metrics_proxy;
 mod mode;
 mod policy;
@@ -77,6 +83,7 @@ pub use admission::*;
 pub use agent_session::*;
 pub use ast::*;
 pub use auth::*;
+pub use authz::{set_authz_observer, AuthzObserver};
 pub use config::*;
 pub use context::*;
 pub use digest::*;
@@ -90,6 +97,7 @@ pub use health::*;
 pub use llm_pool::*;
 pub use lsp::*;
 pub use memory::*;
+pub use metrics_layer::*;
 pub use metrics_proxy::*;
 pub use mode::*;
 pub use policy::*;
@@ -127,6 +135,12 @@ pub(crate) fn span(rpc: &'static str, meta: &tonic::metadata::MetadataMap) -> tr
         session_id = tracing::field::Empty,
         user_id = tracing::field::Empty,
         tenant = tracing::field::Empty,
+        // Filled by `authz::require` on a gated (mutating) control-plane RPC, so the
+        // trace shows the RBAC decision alongside the tenant (config-plane
+        // observability, Phase 4). Empty on ungated RPCs.
+        authz.decision = tracing::field::Empty,
+        authz.action = tracing::field::Empty,
+        authz.resource = tracing::field::Empty,
     );
     s.set_parent(agent_proto::trace::extract_context(meta));
     let (user, session) = agent_proto::identity::extract_identity(meta);

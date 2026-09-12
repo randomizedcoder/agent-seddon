@@ -30,10 +30,34 @@
 //! This is distinct from the per-`ToolCall` `Policy` seam: that decides what the
 //! *model* may run; this decides what an authenticated *operator* may reconfigure.
 
+use std::sync::{Arc, OnceLock};
+
 use agent_core::{
     authorize, current_catalog, current_principal, AccessDecision, Action, Resource, ResourceType,
 };
 use tonic::Status;
+
+/// A process-global sink for authz decisions (config-plane observability, Phase 4).
+///
+/// [`require`] is a free fn reading task-locals, so — unlike the auth tower layer,
+/// which carries its observer as a field — the authz counter is reported through a
+/// process-global callback registered once at serve init. The callback keeps
+/// `agent-grpc` free of any `agent-metrics` dependency (the [`ShedObserver`] /
+/// [`AuthObserver`] pattern): the wiring in `agent-cli` closes over the `Metrics`
+/// handle and forwards `(action, resource_type, allow)`.
+///
+/// [`ShedObserver`]: super::admission
+/// [`AuthObserver`]: super::auth::AuthObserver
+pub type AuthzObserver = Arc<dyn Fn(Action, ResourceType, bool) + Send + Sync>;
+
+static AUTHZ_OBSERVER: OnceLock<AuthzObserver> = OnceLock::new();
+
+/// Register the process-global authz observer. Called **once** at serve init;
+/// idempotent-by-first-write (a second call is ignored, matching `OnceLock`), so a
+/// stray re-init cannot swap the sink out from under in-flight requests.
+pub fn set_authz_observer(observer: AuthzObserver) {
+    let _ = AUTHZ_OBSERVER.set(observer);
+}
 
 /// Authorize the current request to perform `action` on `resource_type`, or
 /// return an opaque `PermissionDenied`. A pass-through when no verified principal
@@ -49,14 +73,38 @@ pub(crate) fn require(action: Action, resource_type: ResourceType) -> Result<(),
     // The ambient catalog snapshot: `builtin ∪ persisted role cards` when a role
     // registry has been wired (C1b), else the built-ins alone — so an install that
     // never persisted a role card gates exactly as C1 did.
-    match authorize(&current_catalog(), &principal, action, &resource) {
-        AccessDecision::Allow => Ok(()),
-        AccessDecision::Deny(_) => Err(Status::permission_denied("permission denied")),
+    let allow = matches!(
+        authorize(&current_catalog(), &principal, action, &resource),
+        AccessDecision::Allow
+    );
+
+    // Observability (Phase 4): count the decision and record it on the ambient
+    // `grpc.server` span (which already carries `tenant`), so authz is filterable
+    // both as a metric (bounded enums, no tenant label) and per-trace. The action
+    // and resource names are bounded enum `as_str()`s — safe as labels/attributes
+    // without `safe_segment` re-validation.
+    if let Some(observer) = AUTHZ_OBSERVER.get() {
+        observer(action, resource_type, allow);
+    }
+    let span = tracing::Span::current();
+    span.record("authz.decision", if allow { "allow" } else { "deny" });
+    span.record("authz.action", action.as_str());
+    span.record("authz.resource", resource_type.as_str());
+
+    if allow {
+        Ok(())
+    } else {
+        Err(Status::permission_denied("permission denied"))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::sync::Arc;
+
+    use rstest::rstest;
+
     use super::*;
     use agent_core::{
         principal_scope, VerifiedPrincipal, ROLE_OPERATOR, ROLE_ORG_ADMIN, ROLE_READER,
@@ -68,6 +116,127 @@ mod tests {
             subject: "op".to_string(),
             roles: roles.iter().copied().map(String::from).collect(),
         }
+    }
+
+    // --- observer + span instrumentation (config-plane observability, Phase 4) ------
+    //
+    // `set_authz_observer` installs a *process-global* (`OnceLock`) sink, and `require`
+    // is called by many tests in parallel, so the assertion cannot key on a per-test
+    // observer. Instead the globally-registered observer forwards into a **thread-local**
+    // sink: each test enables its own sink (on its own test thread; `#[tokio::test]`
+    // defaults to a current-thread runtime that polls `require` inline on that thread), so
+    // decisions from a *different* test's thread never leak in.
+
+    thread_local! {
+        static SINK: RefCell<Option<Vec<(Action, ResourceType, bool)>>> = const { RefCell::new(None) };
+    }
+
+    /// Register the forwarding observer once (idempotent — `OnceLock`). It records only
+    /// while the calling thread has enabled its sink, so it is inert for every other test.
+    fn install_forwarding_observer() {
+        set_authz_observer(Arc::new(|action, resource, allow| {
+            SINK.with(|s| {
+                if let Some(v) = s.borrow_mut().as_mut() {
+                    v.push((action, resource, allow));
+                }
+            });
+        }));
+    }
+
+    /// Enable this thread's sink, run each `(action, resource)` through `require` under
+    /// `principal`, and return the decisions the observer captured.
+    async fn observed(
+        principal: VerifiedPrincipal,
+        calls: &[(Action, ResourceType)],
+    ) -> Vec<(Action, ResourceType, bool)> {
+        install_forwarding_observer();
+        SINK.with(|s| *s.borrow_mut() = Some(Vec::new()));
+        principal_scope(principal, async {
+            for &(action, resource) in calls {
+                let _ = require(action, resource);
+            }
+        })
+        .await;
+        SINK.with(|s| s.borrow_mut().take().unwrap_or_default())
+    }
+
+    #[rstest]
+    // desc: an allowed decision fires the observer with allow=true (org_admin writing a tenant card).
+    #[case::positive_allow_ticks_allow(&[ROLE_ORG_ADMIN], Action::Write, ResourceType::Registry, true)]
+    // desc: a denied decision fires the observer with allow=false (reader may not write).
+    #[case::negative_deny_ticks_deny(&[ROLE_READER], Action::Write, ResourceType::Config, false)]
+    // desc: the operator/tenant split still fires as a decision — a tenant admin denied the operator-global key.
+    #[case::corner_operator_global_denied_still_ticks(&[ROLE_ORG_ADMIN], Action::Write, ResourceType::Config, false)]
+    // desc: an operator IS allowed the operator-global key — allow decision recorded.
+    #[case::boundary_operator_global_allowed(&[ROLE_OPERATOR], Action::Write, ResourceType::Config, true)]
+    #[tokio::test]
+    async fn authz_observer_records_decision(
+        #[case] roles: &[&str],
+        #[case] action: Action,
+        #[case] resource: ResourceType,
+        #[case] want_allow: bool,
+    ) {
+        let got = observed(principal("acme", roles), &[(action, resource)]).await;
+        assert_eq!(
+            got,
+            vec![(action, resource, want_allow)],
+            "the observer records exactly the decision `require` reached"
+        );
+    }
+
+    // corner: no principal in scope (auth disabled) ⇒ `require` short-circuits before the
+    // observer, so nothing is recorded.
+    #[tokio::test]
+    async fn corner_no_principal_records_nothing() {
+        install_forwarding_observer();
+        SINK.with(|s| *s.borrow_mut() = Some(Vec::new()));
+        // No `principal_scope`, so `current_principal()` is None.
+        let _ = require(Action::Write, ResourceType::Config);
+        let got = SINK.with(|s| s.borrow_mut().take().unwrap_or_default());
+        assert!(
+            got.is_empty(),
+            "a pass-through (no principal) records no authz decision"
+        );
+    }
+
+    // desc: `require` records `authz.decision`/`action`/`resource` onto the ambient
+    // `grpc.server` span, so a denied control-plane RPC is filterable per-trace alongside
+    // its tenant. Uses a current-thread runtime inside the (sync) field-capture closure.
+    #[test]
+    fn require_records_decision_on_current_span() {
+        let fields = agent_testkit::observe::captured_span_fields(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("current-thread runtime");
+            rt.block_on(async {
+                let span = tracing::info_span!(
+                    "grpc.server",
+                    authz.decision = tracing::field::Empty,
+                    authz.action = tracing::field::Empty,
+                    authz.resource = tracing::field::Empty,
+                );
+                let _e = span.enter();
+                principal_scope(principal("acme", &[ROLE_READER]), async {
+                    // A reader writing Config is denied — the span must show it.
+                    let _ = require(Action::Write, ResourceType::Config);
+                })
+                .await;
+            });
+        });
+        let has = |field: &str, value: &str| {
+            fields
+                .iter()
+                .any(|(span, f, v)| span == "grpc.server" && f == field && v == value)
+        };
+        assert!(
+            has("authz.decision", "deny"),
+            "decision recorded: {fields:?}"
+        );
+        assert!(has("authz.action", "write"), "action recorded: {fields:?}");
+        assert!(
+            has("authz.resource", "config"),
+            "resource recorded: {fields:?}"
+        );
     }
 
     // desc: auth disabled (no principal in scope) ⇒ the gate is a pass-through.
