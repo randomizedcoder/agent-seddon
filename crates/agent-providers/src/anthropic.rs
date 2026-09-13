@@ -341,7 +341,11 @@ impl LlmProvider for AnthropicProvider {
                 usage: Some(Usage {
                     prompt_tokens: input_tokens,
                     completion_tokens: output_tokens,
-                    total_tokens: input_tokens + output_tokens,
+                    // Server-supplied counts are untrusted: sum saturating so a
+                    // hostile/buggy endpoint can't panic (debug) or wrap (release)
+                    // the total — the CLAUDE.md "clamp hostile numbers before a
+                    // total" rule the OpenAI path already honours.
+                    total_tokens: input_tokens.saturating_add(output_tokens),
                     cache_read_tokens,
                     cache_write_tokens,
                     cost: None,
@@ -663,7 +667,9 @@ impl WireResp {
             usage: self.usage.map(|u| Usage {
                 prompt_tokens: u.input_tokens,
                 completion_tokens: u.output_tokens,
-                total_tokens: u.input_tokens + u.output_tokens,
+                // Untrusted counts: saturate the sum (see the streaming path) so a
+                // hostile endpoint can't overflow the total.
+                total_tokens: u.input_tokens.saturating_add(u.output_tokens),
                 cache_read_tokens: u.cache_read_input_tokens,
                 cache_write_tokens: u.cache_creation_input_tokens,
                 cost: None,
@@ -751,6 +757,23 @@ mod tests {
             .unwrap()
             .into_response();
         assert_eq!(resp.usage.unwrap().total_tokens, 15);
+    }
+
+    // A hostile/buggy endpoint reports huge counts whose sum overflows u32. The
+    // total must saturate — never panic (debug overflow-check) or wrap (release) —
+    // per the CLAUDE.md "clamp hostile numbers before a total" rule.
+    #[test]
+    fn adversarial_into_response_usage_sum_saturates() {
+        let body = json!({
+            "content": [{"type":"text","text":"correct answer"}],
+            "usage": {"input_tokens": u32::MAX, "output_tokens": 1000}
+        });
+        let resp = serde_json::from_value::<WireResp>(body)
+            .unwrap()
+            .into_response();
+        // The good answer survives and the total is clamped, not wrapped.
+        assert_eq!(resp.message.content_text(), "correct answer");
+        assert_eq!(resp.usage.unwrap().total_tokens, u32::MAX);
     }
 
     /// The 67-byte minimal 1x1 PNG (deterministic fixture, no assets).
