@@ -552,6 +552,13 @@ impl FleetOrchestrator {
             }
         }
 
+        // Idempotent add: a prior round for this PR (a crash, a poller re-fire, or a
+        // new head) can leave a `pr-{pr}` worktree registered; the id is head-oid-
+        // independent, so re-adding collides (`fatal: '…/worktrees/pr-N' already
+        // exists`). Remove any stale one first — best-effort: a not-found remove is
+        // expected and ignored, and this also makes the re-checkout land at the new
+        // head rather than reusing a stale tree.
+        let _ = repo.worktree_remove(&format!("pr-{pr}")).await;
         let _worktree = repo
             .worktree_add(&WorktreeSpec {
                 revision: head,
@@ -615,6 +622,11 @@ impl FleetOrchestrator {
         let host = self.host.clone();
         let drafter = self.drafter.clone();
         let skill = Some(row.skill.clone());
+        // The per-row repo backend, moved into the task so it can reap this PR's
+        // read-only worktree once the review finishes (the handle has no `Drop`, and
+        // nothing else reaps the per-row factory repo). Captured before `repo` is
+        // shadowed below by the repo *name* string used in the draft record.
+        let review_repo = repo.clone();
         let repo = row.repo.clone();
         let key_run = key.clone();
         let sid = trigger.session_id.clone();
@@ -648,47 +660,53 @@ impl FleetOrchestrator {
                         )
                         .await;
                 }
-                let narrative = match host.run_review(key_run, goal, skill).await {
-                    Ok(n) => n,
-                    Err(e) => {
-                        tracing::warn!(session_id = %sid, pr, error = %e,
-                            "fleet: review run failed (no draft)");
-                        return;
-                    }
-                };
-                // drafted: render + persist. Fail-soft — a draft error is logged, not fatal.
-                if let (Some(drafter), Some(facts)) = (drafter, facts) {
-                    let req = DraftRequest {
-                        review_id,
-                        repo,
-                        pr_number: pr,
-                        facts,
-                        narrative,
-                        workspace,
-                        prior: open_items,
-                    };
-                    match drafter.draft(req).await {
-                        Ok(_) => {
-                            if let Some(fm) = &fm_task {
-                                fm.on_review("drafted");
-                            }
-                            // drafted → awaiting approval: announce the draft is ready.
-                            if let Some(progress) = &progress {
-                                progress
-                                    .announce(
-                                        &transport_id,
-                                        FleetProgressEvent::Drafted {
-                                            user: user_evt,
-                                            repo: repo_evt,
-                                            pr,
-                                        },
-                                    )
-                                    .await;
+                // Run the review, then draft on success. NOT an early return on error:
+                // the worktree cleanup below must run on both paths (there is no `Drop`).
+                match host.run_review(key_run, goal, skill).await {
+                    Ok(narrative) => {
+                        // drafted: render + persist. Fail-soft — a draft error is logged.
+                        if let (Some(drafter), Some(facts)) = (drafter, facts) {
+                            let req = DraftRequest {
+                                review_id,
+                                repo,
+                                pr_number: pr,
+                                facts,
+                                narrative,
+                                workspace,
+                                prior: open_items,
+                            };
+                            match drafter.draft(req).await {
+                                Ok(_) => {
+                                    if let Some(fm) = &fm_task {
+                                        fm.on_review("drafted");
+                                    }
+                                    // drafted → awaiting approval: announce readiness.
+                                    if let Some(progress) = &progress {
+                                        progress
+                                            .announce(
+                                                &transport_id,
+                                                FleetProgressEvent::Drafted {
+                                                    user: user_evt,
+                                                    repo: repo_evt,
+                                                    pr,
+                                                },
+                                            )
+                                            .await;
+                                    }
+                                }
+                                Err(e) => tracing::warn!(session_id = %sid, pr, error = %e,
+                                    "fleet: draft render/persist failed (soft)"),
                             }
                         }
-                        Err(e) => tracing::warn!(session_id = %sid, pr, error = %e,
-                            "fleet: draft render/persist failed (soft)"),
                     }
+                    Err(e) => tracing::warn!(session_id = %sid, pr, error = %e,
+                        "fleet: review run failed (no draft)"),
+                }
+                // Reap this PR's read-only worktree so disk doesn't grow one checkout
+                // per reviewed PR. Best-effort — never fail a review on cleanup.
+                if let Err(e) = review_repo.worktree_remove(&format!("pr-{pr}")).await {
+                    tracing::debug!(session_id = %sid, pr, error = %e,
+                        "fleet: worktree cleanup failed (soft)");
                 }
             }
             .instrument(review_span),
@@ -732,6 +750,9 @@ mod tests {
         state: Mutex<HostState>,
         /// When `Some`, `run_review` awaits this (never fired) so the review is in flight.
         gate: Option<Arc<Notify>>,
+        /// When set, `run_review` records the attempt then returns `Backend` error —
+        /// to exercise the fleet's failure path (cleanup still runs; no draft).
+        fail_review: bool,
     }
     impl FakeHost {
         fn new(max_total: usize) -> Self {
@@ -739,6 +760,7 @@ mod tests {
                 max_total,
                 state: Mutex::new(HostState::default()),
                 gate: None,
+                fail_review: false,
             }
         }
         /// A host whose reviews block forever (in-flight), for the cancellation test.
@@ -747,6 +769,16 @@ mod tests {
                 max_total: 0,
                 state: Mutex::new(HostState::default()),
                 gate: Some(Arc::new(Notify::new())),
+                fail_review: false,
+            }
+        }
+        /// A host whose `run_review` fails (a backend error), for the failure-path tests.
+        fn failing() -> Self {
+            Self {
+                max_total: 0,
+                state: Mutex::new(HostState::default()),
+                gate: None,
+                fail_review: true,
             }
         }
         fn admitted(&self) -> Vec<SessionKey> {
@@ -792,6 +824,9 @@ mod tests {
                 if !s.admitted.contains(&key) {
                     s.admitted.push(key);
                 }
+            }
+            if self.fail_review {
+                return Err(DriverError::Backend("review boom".into()));
             }
             // A gated host stays in flight until aborted (the cancellation test relies on
             // the review never reaching the draft step).
@@ -1187,6 +1222,152 @@ mod tests {
         // Settle the one spawned review; exactly one run was started.
         o.join("web", 7).await;
         assert_eq!(host.reviews_len(), 1, "only one review ran");
+    }
+
+    // ---- worktree idempotency + cleanup (Bug 1) --------------------------
+
+    #[tokio::test]
+    async fn positive_worktree_reaped_after_successful_run() {
+        // desc: a review runs to completion. expect: the PR's read-only worktree is
+        // removed afterwards (the handle has no `Drop`) so disk does not grow one
+        // checkout per reviewed PR.
+        let roster = seeded(&[row("web", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(0));
+        let o = orch(roster, repo.clone(), host.clone());
+
+        o.handle(FleetTrigger {
+            session_id: "web".into(),
+            pr_number: 42,
+        })
+        .await
+        .expect("handle ok");
+        assert!(o.join("web", 42).await, "review task was in flight");
+        assert!(
+            repo.worktree_list().await.unwrap().is_empty(),
+            "the pr-42 worktree is reaped after the run"
+        );
+    }
+
+    #[tokio::test]
+    async fn positive_worktree_reaped_after_failed_run() {
+        // desc: the review run errors (a backend failure). expect: the worktree is STILL
+        // reaped — cleanup runs on the error path too, not only on success.
+        let roster = seeded(&[row("web", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::failing());
+        let o = orch(roster, repo.clone(), host.clone());
+
+        o.handle(FleetTrigger {
+            session_id: "web".into(),
+            pr_number: 42,
+        })
+        .await
+        .expect("handle ok");
+        assert!(o.join("web", 42).await);
+        assert_eq!(host.reviews_len(), 1, "the review was attempted");
+        assert!(
+            repo.worktree_list().await.unwrap().is_empty(),
+            "worktree reaped even though the review failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn positive_stale_worktree_removed_before_add() {
+        // desc: a prior round left a `pr-42` worktree registered (a crash, or a re-fire
+        // on a new head). expect: the run removes it before re-adding, so the add can't
+        // collide and the re-review succeeds — the exact failure the l2 demo hit
+        // (`fatal: '…/worktrees/pr-42' already exists`).
+        let roster = seeded(&[row("web", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        // Seed the collision the real git backend raises on a second add of a live id.
+        repo.worktree_add(&WorktreeSpec {
+            revision: agent_core::Revision("stale".into()),
+            writable: false,
+            id: Some("pr-42".into()),
+        })
+        .await
+        .expect("seed stale worktree");
+        let host = Arc::new(FakeHost::new(0));
+        let o = orch(roster, repo.clone(), host.clone());
+
+        let got = o
+            .handle(FleetTrigger {
+                session_id: "web".into(),
+                pr_number: 42,
+            })
+            .await
+            .expect("handle ok despite a stale worktree");
+        assert!(matches!(got, Handled::Reviewing { .. }));
+        assert!(o.join("web", 42).await);
+        assert!(
+            repo.worktree_list().await.unwrap().is_empty(),
+            "no duplicate pr-42 accumulates; the run reaps its worktree"
+        );
+    }
+
+    #[tokio::test]
+    async fn boundary_reremove_when_absent_is_noop() {
+        // desc: no prior worktree exists (the common first-review case). expect: the
+        // best-effort remove-before-add is a harmless no-op and the review still runs.
+        let roster = seeded(&[row("web", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(0));
+        let o = orch(roster, repo.clone(), host.clone());
+
+        let got = o
+            .handle(FleetTrigger {
+                session_id: "web".into(),
+                pr_number: 7,
+            })
+            .await
+            .expect("handle ok");
+        assert!(matches!(got, Handled::Reviewing { .. }));
+        assert!(o.join("web", 7).await);
+        assert!(repo.worktree_list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn negative_cleanup_failure_does_not_break_the_task() {
+        // desc: worktree cleanup itself fails. expect: it is swallowed (best-effort) —
+        // the review still ran and the task completes cleanly, never surfacing the reap
+        // error (the leftover worktree proves the failing path was taken).
+        let roster = seeded(&[row("web", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new().with_failing_worktree_remove());
+        let host = Arc::new(FakeHost::new(0));
+        let o = orch(roster, repo.clone(), host.clone());
+
+        o.handle(FleetTrigger {
+            session_id: "web".into(),
+            pr_number: 42,
+        })
+        .await
+        .expect("handle ok");
+        assert!(
+            o.join("web", 42).await,
+            "task completes despite a reap error"
+        );
+        assert_eq!(host.reviews_len(), 1, "the review still ran");
+        assert_eq!(
+            repo.worktree_list().await.unwrap().len(),
+            1,
+            "the failing remove left the worktree, but the task did not panic or hang"
+        );
+    }
+
+    #[tokio::test]
+    async fn adversarial_worktree_id_from_pr_is_always_safe() {
+        // desc: the worktree id is `pr-{pr}` built from a u64 — the attacker-controlled
+        // PR number can never become a path-traversal segment. expect: every boundary
+        // PR value yields a safe_segment-valid id (traversal is structurally impossible
+        // here; the backend also rejects hostile ids — see agent-git
+        // cli::worktree_add_rejects_traversal_id / worktree_remove_rejects_traversal).
+        for pr in [0u64, 1, 42, u64::MAX] {
+            assert!(
+                safe_segment(&format!("pr-{pr}")),
+                "pr-{pr} must be a safe path segment"
+            );
+        }
     }
 
     #[tokio::test]
