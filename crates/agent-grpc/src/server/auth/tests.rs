@@ -216,6 +216,33 @@ async fn negative_wrong_audience_rejected() {
     );
 }
 
+// A token with NO `aud` claim must be rejected, not accepted vacuously — else a
+// token minted for a different resource server (whose JWKS also signs for us)
+// would authenticate here. Fail-closed on absence, not just on mismatch.
+#[tokio::test]
+async fn adversarial_missing_audience_rejected() {
+    let (v, _) = verifier_with(60, NOW);
+    let mut claims = valid_claims("acme", "u");
+    claims.as_object_mut().unwrap().remove("aud");
+    assert!(
+        v.verify(&mint(KID, &claims)).await.is_err(),
+        "a token lacking `aud` must be rejected (fail-closed)"
+    );
+}
+
+// Likewise a token with NO `iss` claim must be rejected rather than passing the
+// issuer check vacuously.
+#[tokio::test]
+async fn adversarial_missing_issuer_rejected() {
+    let (v, _) = verifier_with(60, NOW);
+    let mut claims = valid_claims("acme", "u");
+    claims.as_object_mut().unwrap().remove("iss");
+    assert!(
+        v.verify(&mint(KID, &claims)).await.is_err(),
+        "a token lacking `iss` must be rejected (fail-closed)"
+    );
+}
+
 #[tokio::test]
 async fn boundary_clock_skew_within_leeway() {
     // exp is 30s in the past, but leeway is 60s → still accepted.
