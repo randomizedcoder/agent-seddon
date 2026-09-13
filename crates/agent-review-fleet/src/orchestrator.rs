@@ -699,8 +699,19 @@ impl FleetOrchestrator {
                             }
                         }
                     }
-                    Err(e) => tracing::warn!(session_id = %sid, pr, error = %e,
-                        "fleet: review run failed (no draft)"),
+                    // The review run failed even after the core loop's forced finalize
+                    // turn (a truncation cap or a provider fault). Don't fail silently:
+                    // record a distinct `failed` metric so the miss is observable. No
+                    // draft is persisted, so the head-oid dedup won't trip and the next
+                    // trigger (poll or ReviewNow) re-reviews cleanly — PR #327's
+                    // idempotent worktree makes that retry safe.
+                    Err(e) => {
+                        if let Some(fm) = &fm_task {
+                            fm.on_review("failed");
+                        }
+                        tracing::warn!(session_id = %sid, pr, error = %e,
+                            "fleet: review run failed (no draft) — recorded status=failed, will retry on next trigger");
+                    }
                 }
                 // Reap this PR's read-only worktree so disk doesn't grow one checkout
                 // per reviewed PR. Best-effort — never fail a review on cleanup.
@@ -2351,6 +2362,44 @@ mod tests {
                 .lines()
                 .any(|l| l.starts_with("agent_fleet_") && l.contains("pr=\"")),
             "PR must never be a fleet metric label:\n{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn negative_run_review_err_records_failed_not_silent() {
+        // desc: the review run errors (even the core loop's forced finalize could not
+        // salvage it). expect: it is NOT a silent no-op — agent_fleet_reviews_total ticks
+        // status=failed (user,repo), and no draft is persisted (so the next trigger
+        // re-reviews cleanly).
+        let roster = seeded(&[row("web", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::failing());
+        let drafter = FakeDrafter::ok();
+        let metrics = Metrics::new();
+        let o = orch(roster, repo, host)
+            .with_grounder(FakeGrounder::ok("brief"))
+            .with_drafter(drafter.clone())
+            .with_metrics(metrics.clone());
+        o.handle(FleetTrigger {
+            session_id: "web".into(),
+            pr_number: 42,
+        })
+        .await
+        .expect("handle ok");
+        assert!(o.join("web", 42).await, "review task ran");
+
+        let text = metrics.encode_text();
+        assert!(
+            text.lines()
+                .any(|l| l.starts_with("agent_fleet_reviews_total")
+                    && l.contains("status=\"failed\"")
+                    && l.contains("user=\"acme\"")
+                    && l.contains("repo=\"acme__web\"")),
+            "a failed review records status=failed (user,repo):\n{text}"
+        );
+        assert!(
+            drafter.drafts().is_empty(),
+            "a failed run must not persist a draft"
         );
     }
 

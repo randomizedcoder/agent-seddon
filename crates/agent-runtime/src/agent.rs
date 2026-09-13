@@ -2179,7 +2179,62 @@ impl Agent {
             }
         }
 
+        // Step budget exhausted without the model volunteering a final answer.
+        // Rather than discard the whole run, make ONE forced finalize turn: ask
+        // for the best final answer now, with tools DISABLED so it cannot request
+        // another tool call and loop again. This is a single shot outside the loop
+        // (no recursion). An empty or failed finalize falls back to the DNF error
+        // below, so we never return a fake-empty success.
+        tracing::warn!(
+            max_iterations = self.settings.max_iterations,
+            "reached max_iterations without a final answer — forcing one finalize turn"
+        );
+        working
+            .messages
+            .push(Message::user(MAX_ITERATIONS_FINALIZE_NUDGE));
+        let finalize_req = CompletionRequest {
+            messages: working.messages.clone(),
+            // No tools: the model must answer in text, not start another action.
+            tools: Vec::new(),
+            max_tokens: self.settings.max_tokens,
+            temperature: self.settings.temperature,
+            response_format: None,
+            route: Some(agent_core::RouteHint {
+                task_mode: Some(mode),
+                role: Some(agent_core::RouteRole::Main),
+                ..Default::default()
+            }),
+        };
+        let finalize = if self.settings.stream {
+            self.complete_streaming(finalize_req, events)
+                .instrument(tracing::info_span!("provider.finalize", model))
+                .await
+        } else {
+            self.provider
+                .complete(finalize_req)
+                .instrument(tracing::info_span!("provider.finalize", model))
+                .await
+                .map_err(anyhow::Error::from)
+        };
         self.memory.distill().await.ok();
+        match finalize {
+            Ok(resp) => {
+                let assistant = resp.message.clone();
+                let text = assistant.content_text();
+                if !text.is_empty() {
+                    working.messages.push(assistant.clone());
+                    self.record("assistant", assistant).await;
+                    // Mirror the loop's buffered-path echo so a live subscriber
+                    // (the portal Agent view) still renders the forced answer.
+                    if !self.settings.stream && events.has_subscribers() {
+                        events.publish(agent_core::SessionEvent::TokenDelta { text: text.clone() });
+                    }
+                    return Ok(text);
+                }
+                tracing::warn!("finalize turn produced no text; recording a DNF");
+            }
+            Err(e) => tracing::warn!(error = %e, "finalize turn failed; recording a DNF"),
+        }
         anyhow::bail!(
             "reached max_iterations ({}) without a final answer",
             self.settings.max_iterations
@@ -2556,6 +2611,14 @@ fn now_ms() -> u64 {
 const TRUNCATION_NUDGE: &str = "Your previous message was cut off at the output-token \
 limit before it was complete. Continue exactly where you left off and finish it — if you \
 were emitting a tool call (for example writing a file), send the whole tool call this time.";
+
+/// Sent on the single forced finalize turn after the step budget is exhausted.
+/// Tools are disabled for that turn, so the model must produce its best final
+/// answer as text (a partial-but-real review beats discarding the whole run).
+const MAX_ITERATIONS_FINALIZE_NUDGE: &str = "You have reached your step budget and cannot \
+take any more actions or call any more tools. Using only what you have already gathered, \
+write your best and most complete final answer now. Do not ask to continue — this is your \
+last turn.";
 
 /// How many back-to-back truncated completions the loop will nudge through
 /// before giving up. A truncated response is never a final answer, so we let
@@ -4002,8 +4065,11 @@ mod tests {
 
     #[tokio::test]
     async fn loop_terminates_at_max_iterations() {
-        // ScriptedProvider repeats its last response, so the loop is only ever
-        // handed a tool request and never an empty-tool-calls (final) turn.
+        // ScriptedProvider repeats its last response, so the loop is only ever handed
+        // a tool request and never an empty-tool-calls (final) turn. On exhaustion the
+        // one forced finalize turn is attempted, but the scripted provider ignores the
+        // tools-disabled request and replies with the same tool call (no text), so the
+        // finalize yields nothing and the run falls back to the DNF error.
         let mut tools = ToolRegistry::new();
         tools.register(Arc::new(EchoTool));
         let provider = ScriptedProvider::new(vec![tool_turn(vec![tool_call("t0", "echo")])]);
@@ -4024,6 +4090,113 @@ mod tests {
             .expect_err("should hit the iteration bound")
             .to_string();
         assert!(err.contains("max_iterations"), "{err}");
+    }
+
+    // ---- max_iterations finalize turn (Bug 2a) -----------------------------
+
+    /// Build an agent with `EchoTool` registered (so loop turns carry a non-empty
+    /// tool schema — the finalize turn is the only request sent with NO tools).
+    fn finalize_agent<P: LlmProvider + 'static>(provider: P, max_iterations: usize) -> Arc<Agent> {
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(EchoTool));
+        let mut s = settings(false);
+        s.max_iterations = max_iterations;
+        Arc::new(Agent::new(
+            Arc::new(provider),
+            tools,
+            Arc::new(RecordingMemory::new()),
+            Arc::new(StaticContext),
+            Arc::new(crate::policy::AutoApprove),
+            Metrics::new(),
+            s,
+        ))
+    }
+
+    #[tokio::test]
+    async fn positive_exhaustion_returns_finalize_answer() {
+        // desc: the model keeps requesting tools until the step budget is exhausted;
+        // the forced finalize turn (sent with no tools) then answers in text. expect:
+        // the run returns that answer instead of discarding the whole run.
+        let provider = FnProvider::new(|req: &CompletionRequest| {
+            if req.tools.is_empty() {
+                final_turn("FINAL: my best partial answer")
+            } else {
+                tool_turn(vec![tool_call("t0", "echo")])
+            }
+        });
+        let out = finalize_agent(provider, 3)
+            .run("go")
+            .await
+            .expect("finalize answer returned");
+        assert_eq!(out, "FINAL: my best partial answer");
+    }
+
+    #[tokio::test]
+    async fn positive_finalize_turn_has_tools_disabled() {
+        // desc: the finalize turn must be sent with NO tools so the model cannot start
+        // another action. expect: every loop turn carries tools, the final (finalize)
+        // request carries none.
+        let seen: Arc<std::sync::Mutex<Vec<bool>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen2 = seen.clone();
+        let provider = FnProvider::new(move |req: &CompletionRequest| {
+            seen2.lock().unwrap().push(!req.tools.is_empty());
+            if req.tools.is_empty() {
+                final_turn("done")
+            } else {
+                tool_turn(vec![tool_call("t0", "echo")])
+            }
+        });
+        let out = finalize_agent(provider, 2).run("go").await.expect("answer");
+        assert_eq!(out, "done");
+        let calls = seen.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec![true, true, false],
+            "two loop turns carry tools, the finalize turn drops them: {calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn negative_finalize_empty_falls_back_to_error() {
+        // desc: the finalize turn produces no text (an empty answer). expect: the run
+        // does NOT return a fake-empty success — it falls back to the DNF error.
+        let provider = FnProvider::new(|req: &CompletionRequest| {
+            if req.tools.is_empty() {
+                final_turn("") // empty finalize
+            } else {
+                tool_turn(vec![tool_call("t0", "echo")])
+            }
+        });
+        let err = finalize_agent(provider, 2)
+            .run("go")
+            .await
+            .expect_err("empty finalize must not be a success")
+            .to_string();
+        assert!(err.contains("max_iterations"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn boundary_finalize_runs_exactly_once() {
+        // desc: the finalize turn is a single shot outside the loop, not another loop.
+        // expect: exactly `max_iterations` loop calls + one finalize call, no more.
+        let calls: Arc<std::sync::atomic::AtomicUsize> =
+            Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls2 = calls.clone();
+        let provider = FnProvider::new(move |req: &CompletionRequest| {
+            calls2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if req.tools.is_empty() {
+                final_turn("done")
+            } else {
+                tool_turn(vec![tool_call("t0", "echo")])
+            }
+        });
+        let out = finalize_agent(provider, 3).run("go").await.expect("answer");
+        assert_eq!(out, "done");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            4,
+            "3 loop turns + exactly 1 finalize turn"
+        );
     }
 
     // ---- worktree cleanup on exit ------------------------------------------
