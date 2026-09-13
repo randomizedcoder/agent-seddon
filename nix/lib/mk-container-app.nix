@@ -26,6 +26,14 @@ let
   pickRuntime = ''runtime="''${CONTAINER_RUNTIME:-docker}"'';
 in
 {
+  # Exposed so each per-service `*-up` app (which stays in its own module because
+  # the network mode / port maps / provisioning are bespoke) resolves the container
+  # runtime IDENTICALLY to the shared down/client/logs apps — `CONTAINER_RUNTIME`
+  # (default `docker`), so a podman-only host runs every app with
+  # `CONTAINER_RUNTIME=podman`. `runtimes` goes in the up-app's `runtimeInputs`;
+  # `pickRuntime` is the shell prelude that sets `$runtime`.
+  inherit runtimes pickRuntime;
+
   # `<name>-down` — remove the container (data discarded), idempotent.
   down =
     {

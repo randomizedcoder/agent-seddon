@@ -19,7 +19,9 @@
 
 let
   name = versions.prometheusContainerName;
-  image = versions.prometheusImage;
+  # Fully-qualified so podman (whose short-name resolution is disabled on the
+  # headless l2 box) resolves it; docker treats the docker.io/ prefix as a no-op.
+  image = "docker.io/${versions.prometheusImage}";
   port = toString versions.prometheusPort;
   g = versions.grpc;
 
@@ -83,26 +85,24 @@ in
 {
   prometheus-up = pkgs.writeShellApplication {
     name = "prometheus-up";
-    runtimeInputs = [
-      versions.docker
-      versions.curl
-    ];
+    runtimeInputs = c.runtimes ++ [ versions.curl ];
     text = ''
         set -euo pipefail
+        ${c.pickRuntime}
 
-        if ! docker info >/dev/null 2>&1; then
-          echo "prometheus-up: docker daemon not reachable — is it running?" >&2
+        if ! "$runtime" info >/dev/null 2>&1; then
+          echo "prometheus-up: '$runtime' not reachable — is it installed/running?" >&2
           exit 1
         fi
 
-        if docker ps -a --format '{{.Names}}' | grep -qx "${name}"; then
+        if "$runtime" ps -a --format '{{.Names}}' | grep -qx "${name}"; then
           echo "==> container '${name}' already exists; (re)starting it"
-          docker start "${name}" >/dev/null
+          "$runtime" start "${name}" >/dev/null
         else
           echo "==> starting Prometheus (${image})"
           # `--network host` (Linux): Prometheus listens on host :${port} and can
           # scrape the agent's 127.0.0.1 metrics ports directly.
-          docker run -d \
+          "$runtime" run -d \
             --name "${name}" \
             --network host \
             -v "${configYml}:/etc/prometheus/prometheus.yml:ro" \
