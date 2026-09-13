@@ -229,6 +229,16 @@ impl Session {
         self.current_mode = agent_core::TaskMode::Review;
         let name = skill.as_deref().map(str::trim).filter(|s| !s.is_empty());
         self.skill = Some(name.unwrap_or("code-review").to_string());
+        // Bake safe review defaults: a reviewer inspects a diff and cites file:line,
+        // it never mutates the tree. Restrict the advertised tools to the read-only
+        // subset (REVIEW_READONLY_TOOLS) so bash/edit/write/apply_patch and the heavy
+        // explorers are off — no hand-tuned [tools] needed, and run_loop's dispatch
+        // enforces the same list fail-closed. Fail closed: if the process registry
+        // offers none of these (a minimal build), the review runs with no tools,
+        // grounded on the diff already in context, rather than falling back to the
+        // full mutating set. An operator's max_tokens is floored in run_loop.
+        self.tool_schemas
+            .retain(|s| REVIEW_READONLY_TOOLS.contains(&s.name.as_str()));
     }
 
     /// Re-select the situational system-fragment message for the current context and

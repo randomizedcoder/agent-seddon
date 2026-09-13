@@ -1686,6 +1686,14 @@ impl Agent {
         metrics: &SessionMetrics,
     ) -> anyhow::Result<String> {
         let model = self.settings.model.as_str();
+        // A review turn's final answer needs room: 4096 truncated a real review to
+        // finish=length. In review mode raise the output cap to a floor so the
+        // drafted review isn't cut off; a higher explicit setting is preserved.
+        let effective_max_tokens = if mode == agent_core::TaskMode::Review {
+            self.settings.max_tokens.max(REVIEW_MAX_TOKENS_FLOOR)
+        } else {
+            self.settings.max_tokens
+        };
         // Back-to-back truncated completions (finish_reason = output-cap) seen so
         // far; any productive turn clears it. Bounds the continue-on-truncation
         // recovery so a perpetually-truncating model fails fast, not at the
@@ -1720,7 +1728,7 @@ impl Agent {
             let req = CompletionRequest {
                 messages,
                 tools: tool_schemas.to_vec(),
-                max_tokens: self.settings.max_tokens,
+                max_tokens: effective_max_tokens,
                 temperature: self.settings.temperature,
                 // The main loop uses free-text completions; structured output is a
                 // separate helper path (parity spec 16).
@@ -2047,6 +2055,12 @@ impl Agent {
                 .zip(&verifier_feedback)
                 .map(|((call, dec), vfb)| {
                     let tools = &self.tools;
+                    // Fail-closed allowlist: only a tool ADVERTISED to this session may
+                    // run. A review session advertises a read-only subset (see
+                    // seed_review), so an injected `bash`/`write_file` call from a
+                    // hostile diff is refused here even though the process registry
+                    // still holds those tools.
+                    let advertised = tool_schemas;
                     let cwd = tool_ctx.cwd.clone();
                     // A call the verifier blocked (enforce mode) does not run — its
                     // feedback message is produced in the result loop below.
@@ -2059,6 +2073,15 @@ impl Agent {
                         match dec {
                             Decision::Deny(_) => None,
                             Decision::Allow => Some(match tools.get(&call.name) {
+                                // Present in the registry but not advertised to this
+                                // session (e.g. a review session's read-only subset):
+                                // refuse it — fail closed, don't fall through to run it.
+                                Some(_) if !advertised.iter().any(|s| s.name == call.name) => {
+                                    Observation::error(format!(
+                                        "tool `{}` is not available in this session",
+                                        call.name
+                                    ))
+                                }
                                 // Guarded: a hung tool times out and a panicking tool
                                 // is isolated — either way an error observation, so
                                 // one bad tool never freezes or crashes the loop.
@@ -2196,7 +2219,7 @@ impl Agent {
             messages: working.messages.clone(),
             // No tools: the model must answer in text, not start another action.
             tools: Vec::new(),
-            max_tokens: self.settings.max_tokens,
+            max_tokens: effective_max_tokens,
             temperature: self.settings.temperature,
             response_format: None,
             route: Some(agent_core::RouteHint {
@@ -2619,6 +2642,32 @@ const MAX_ITERATIONS_FINALIZE_NUDGE: &str = "You have reached your step budget a
 take any more actions or call any more tools. Using only what you have already gathered, \
 write your best and most complete final answer now. Do not ask to continue — this is your \
 last turn.";
+
+/// Tools a review session may use: read-only inspection only. A reviewer reads a
+/// diff and cites `file:line` — it must never mutate the tree, and heavy explorers
+/// (bash, full-text `search`, AST indexing, `edit`/`write_file`/`apply_patch`) burn
+/// the step budget without concluding (learned running the fleet on l2). `seed_review`
+/// restricts the advertised schemas to this set; the loop's dispatch then refuses any
+/// tool not advertised, so an injected `bash`/`write_file` call from a hostile diff
+/// cannot run even though the process registry still contains those tools.
+const REVIEW_READONLY_TOOLS: &[&str] = &[
+    "read_file",
+    "grep",
+    "find",
+    "ls",
+    "git_diff",
+    "git_read",
+    "git_log",
+    "git_grep",
+    "git_status",
+    "git_tree",
+];
+
+/// Output-token floor for a review turn. A reasoning model's final review needs
+/// room — 4096 truncated a real l2 review to `finish=length`. In review mode
+/// `run_loop` raises `max_tokens` to this floor; an operator's explicit higher
+/// value is preserved (it is a floor, not an override).
+const REVIEW_MAX_TOKENS_FLOOR: u32 = 8192;
 
 /// How many back-to-back truncated completions the loop will nudge through
 /// before giving up. A truncated response is never a final answer, so we let
@@ -4196,6 +4245,210 @@ mod tests {
             calls.load(std::sync::atomic::Ordering::SeqCst),
             4,
             "3 loop turns + exactly 1 finalize turn"
+        );
+    }
+
+    // ---- baked review-session defaults (Bug 3) -----------------------------
+
+    /// A no-op tool with an arbitrary real name, so a test registry can hold both
+    /// the review read-only subset and mutating tools under their actual names.
+    struct NamedTool(&'static str);
+    #[async_trait::async_trait]
+    impl agent_core::Tool for NamedTool {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn schema(&self) -> agent_core::ToolSchema {
+            agent_core::ToolSchema {
+                name: self.0.into(),
+                description: "test tool".into(),
+                parameters: json!({"type": "object"}),
+            }
+        }
+        async fn execute(
+            &self,
+            _a: serde_json::Value,
+            _c: &agent_core::ToolContext,
+        ) -> agent_core::Result<Observation> {
+            Ok(Observation::ok(format!("{} ran", self.0)))
+        }
+    }
+
+    /// An agent whose registry holds a realistic mix: two read-only review tools
+    /// and two mutating tools a review session must never expose.
+    fn mixed_tools_agent() -> Arc<Agent> {
+        let mut tools = ToolRegistry::new();
+        for name in ["read_file", "grep", "bash", "write_file"] {
+            tools.register(Arc::new(NamedTool(name)));
+        }
+        Arc::new(Agent::new(
+            Arc::new(FnProvider::new(|_req: &CompletionRequest| final_turn("ok"))),
+            tools,
+            Arc::new(RecordingMemory::new()),
+            Arc::new(StaticContext),
+            Arc::new(crate::policy::AutoApprove),
+            Metrics::new(),
+            settings(false),
+        ))
+    }
+
+    #[test]
+    fn positive_review_session_gets_readonly_subset() {
+        // A seeded review session advertises only the read-only subset.
+        let agent = mixed_tools_agent();
+        let mut session = agent.session();
+        session.seed_review(Some("code-review".into()));
+        let names: Vec<&str> = session
+            .tool_schemas
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert!(
+            names.contains(&"read_file") && names.contains(&"grep"),
+            "read-only tools kept: {names:?}"
+        );
+        assert!(
+            names.iter().all(|n| REVIEW_READONLY_TOOLS.contains(n)),
+            "only read-only tools advertised: {names:?}"
+        );
+    }
+
+    #[test]
+    fn negative_mutating_tools_absent_in_review_mode() {
+        // bash/write_file must not survive into a review session's advertised set.
+        let agent = mixed_tools_agent();
+        let mut session = agent.session();
+        session.seed_review(None);
+        let names: Vec<&str> = session
+            .tool_schemas
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert!(!names.contains(&"bash"), "bash advertised: {names:?}");
+        assert!(
+            !names.contains(&"write_file"),
+            "write_file advertised: {names:?}"
+        );
+    }
+
+    #[test]
+    fn positive_non_review_session_unaffected() {
+        // An ordinary (unseeded) session keeps the full registry — no restriction.
+        let agent = mixed_tools_agent();
+        let session = agent.session();
+        let names: Vec<&str> = session
+            .tool_schemas
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert!(
+            names.contains(&"bash") && names.contains(&"write_file"),
+            "a non-review session keeps mutating tools: {names:?}"
+        );
+    }
+
+    /// Drive one review-seeded turn and return the `max_tokens` the provider saw.
+    /// No classifier is wired, so the seeded Review mode holds through `send`.
+    async fn review_turn_max_tokens(settings_max_tokens: u32) -> u32 {
+        let seen: Arc<std::sync::Mutex<Option<u32>>> = Arc::new(std::sync::Mutex::new(None));
+        let seen2 = seen.clone();
+        let provider = FnProvider::new(move |req: &CompletionRequest| {
+            *seen2.lock().unwrap() = Some(req.max_tokens);
+            final_turn("review done")
+        });
+        let mut s = settings(false);
+        s.max_tokens = settings_max_tokens;
+        let agent = Arc::new(Agent::new(
+            Arc::new(provider),
+            ToolRegistry::new(),
+            Arc::new(RecordingMemory::new()),
+            Arc::new(StaticContext),
+            Arc::new(crate::policy::AutoApprove),
+            Metrics::new(),
+            s,
+        ));
+        let mut session = agent.session();
+        session.seed_review(Some("code-review".into()));
+        assert_eq!(session.send("review this").await.unwrap(), "review done");
+        let saw = seen.lock().unwrap().expect("provider saw a request");
+        saw
+    }
+
+    #[tokio::test]
+    async fn boundary_max_tokens_raised_to_floor() {
+        // A review turn with a too-small configured max_tokens is floored.
+        assert_eq!(review_turn_max_tokens(2048).await, REVIEW_MAX_TOKENS_FLOOR);
+    }
+
+    #[tokio::test]
+    async fn corner_explicit_higher_max_tokens_preserved() {
+        // An explicit value above the floor is preserved (a floor, not an override).
+        assert_eq!(review_turn_max_tokens(16_384).await, 16_384);
+    }
+
+    #[tokio::test]
+    async fn negative_non_review_max_tokens_not_floored() {
+        // The floor is review-only: an ordinary turn keeps its configured value.
+        let seen: Arc<std::sync::Mutex<Option<u32>>> = Arc::new(std::sync::Mutex::new(None));
+        let seen2 = seen.clone();
+        let provider = FnProvider::new(move |req: &CompletionRequest| {
+            *seen2.lock().unwrap() = Some(req.max_tokens);
+            final_turn("done")
+        });
+        let mut s = settings(false);
+        s.max_tokens = 2048;
+        let agent = Arc::new(Agent::new(
+            Arc::new(provider),
+            ToolRegistry::new(),
+            Arc::new(RecordingMemory::new()),
+            Arc::new(StaticContext),
+            Arc::new(crate::policy::AutoApprove),
+            Metrics::new(),
+            s,
+        ));
+        assert_eq!(agent.run("hello").await.unwrap(), "done");
+        assert_eq!(seen.lock().unwrap().expect("saw a request"), 2048);
+    }
+
+    #[tokio::test]
+    async fn adversarial_injected_mutating_tool_refused_in_review() {
+        // A hostile diff makes the model emit a `bash` call. bash IS in the process
+        // registry, but a review session never advertised it — dispatch refuses it
+        // fail-closed (it never executes) and the loop records the refusal.
+        let memory = RecordingMemory::new();
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(NamedTool("read_file")));
+        tools.register(Arc::new(NamedTool("bash")));
+        let provider = ScriptedProvider::new(vec![
+            tool_turn(vec![tool_call("t0", "bash")]),
+            final_turn("done"),
+        ]);
+        let agent = Arc::new(Agent::new(
+            Arc::new(provider),
+            tools,
+            Arc::new(memory.clone()),
+            Arc::new(StaticContext),
+            Arc::new(crate::policy::AutoApprove),
+            Metrics::new(),
+            settings(false),
+        ));
+        let mut session = agent.session();
+        session.seed_review(None);
+        assert_eq!(session.send("review this").await.unwrap(), "done");
+        let tool_msgs: Vec<String> = memory
+            .events()
+            .into_iter()
+            .filter(|e| e.kind == "tool")
+            .map(|e| e.message.content_text())
+            .collect();
+        assert_eq!(tool_msgs.len(), 1, "{tool_msgs:?}");
+        assert!(
+            tool_msgs[0].contains("not available in this session"),
+            "injected bash must be refused fail-closed: {tool_msgs:?}"
+        );
+        assert!(
+            !tool_msgs[0].contains("bash ran"),
+            "bash must NOT execute: {tool_msgs:?}"
         );
     }
 
