@@ -428,8 +428,16 @@ mod jwt {
             // the leeway is deterministic and testable.
             validation.validate_exp = false;
             validation.validate_nbf = false;
-            validation.required_spec_claims =
-                ["exp", "sub"].iter().map(|s| (*s).to_string()).collect();
+            // `aud`/`iss` are enforced via set_audience/set_issuer, but jsonwebtoken
+            // only checks them when the claim is PRESENT — an absent `aud` (or `iss`)
+            // would otherwise pass vacuously, so a token minted for another resource
+            // server whose JWKS also signs for us would be accepted here. Require
+            // them so a missing claim is a MissingRequiredClaim rejection, making the
+            // "iss/aud match config, fail-closed" promise in the module doc true.
+            validation.required_spec_claims = ["exp", "sub", "aud", "iss"]
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect();
 
             let data = decode::<serde_json::Value>(token, &key, &validation).map_err(|_| ())?;
             let claims = data.claims;
