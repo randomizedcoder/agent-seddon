@@ -310,6 +310,42 @@ mod scen {
             .expect("update existing id stays under cap");
     }
 
+    /// corner: the per-tenant cap is a **soft** ceiling. `Store::put`'s pre-check is
+    /// not atomic with its count, so concurrent distinct-new-id writers (or a batch,
+    /// which does not cap) can push a tenant past it. The accepted contract: the cap
+    /// **re-converges** — once over, the next new-id `put` is still rejected, so growth
+    /// stops; updating an existing id is always allowed. A batch commit stands in for
+    /// the (inherently racy) concurrent overshoot so the test stays deterministic.
+    pub async fn cap_is_soft_and_reconverges(backend: Arc<dyn Backend>) {
+        let s = Store::<TestCard>::with_cap(backend, 2);
+        // Overshoot cap=2 atomically via the batch path (which does not enforce the
+        // cap) — a deterministic stand-in for W concurrent writers each observing
+        // count < cap before any commits.
+        let mut b = s.batch();
+        b.put("t", card("a", 1)).expect("stage a");
+        b.put("t", card("b", 1)).expect("stage b");
+        b.put("t", card("c", 1)).expect("stage c"); // 3 > cap of 2
+        b.commit().await.expect("batch commits past the soft cap");
+        assert_eq!(
+            s.list("t").await.expect("list").len(),
+            3,
+            "the soft cap was overshot"
+        );
+        // Re-converges: a further NEW id is rejected, so growth halts at the overshoot.
+        let err = s
+            .put("t", card("d", 1))
+            .await
+            .expect_err("a new id past the soft cap is rejected");
+        assert!(
+            format!("{err}").contains("full"),
+            "the cap is re-observed on the next put: {err}"
+        );
+        // Updating an EXISTING id is not a new id ⇒ always allowed, even over the cap.
+        s.put("t", card("a", 9))
+            .await
+            .expect("updating an existing id stays allowed over the soft cap");
+    }
+
     /// boundary: a hostile number is clamped on ingest, not stored raw.
     pub async fn number_clamped_on_ingest(backend: Arc<dyn Backend>) {
         let s = Store::<TestCard>::new(backend);
@@ -450,6 +486,11 @@ macro_rules! suite {
             $(#[$ig])?
             async fn boundary_max_cards_per_tenant() {
                 scen::max_cards_per_tenant($make).await;
+            }
+            #[tokio::test]
+            $(#[$ig])?
+            async fn corner_cap_is_soft_and_reconverges() {
+                scen::cap_is_soft_and_reconverges($make).await;
             }
             #[tokio::test]
             $(#[$ig])?
