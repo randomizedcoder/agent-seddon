@@ -1800,7 +1800,7 @@ impl Metrics {
                 .fleet_triggers
                 .remove_label_values(&[source, user, repo]);
         }
-        for status in ["reviewing", "drafted", "superseded", "uptodate"] {
+        for status in ["reviewing", "drafted", "superseded", "uptodate", "failed"] {
             let _ = self
                 .fleet_reviews
                 .remove_label_values(&[status, user, repo]);
@@ -3112,7 +3112,9 @@ impl FleetMetrics {
     }
 
     /// A review lifecycle transition (`status` = `reviewing` | `drafted` | `superseded` |
-    /// `uptodate`).
+    /// `uptodate` | `failed`). `failed` marks a review that ran but produced no draft
+    /// (the run errored — a truncation cap or provider fault — even after the core
+    /// loop's forced finalize turn), so the failure is observable rather than silent.
     pub fn on_review(&self, status: &str) {
         self.inner
             .fleet_reviews
