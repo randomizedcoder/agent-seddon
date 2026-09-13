@@ -494,6 +494,10 @@ impl SearchBackend for FixtureSearch {
 /// methods, and an in-memory worktree list that `worktree_add`/`worktree_remove`
 /// mutate. Enough to exercise the git seam (and, later, its gRPC transport)
 /// without a real repo. Cloneable: clones share the worktree list.
+///
+/// `worktree_add` is **faithful to git**: a second add with an id that is already
+/// live fails with `Error::Repo` (mirrors `fatal: '…' already exists`), so a
+/// caller's idempotency (remove-before-add) is exercisable.
 #[derive(Clone, Default)]
 pub struct FixtureRepo {
     branches: Vec<(String, Oid)>,
@@ -505,6 +509,9 @@ pub struct FixtureRepo {
     /// assert a review fetched once (and a duplicate trigger did **not** re-fetch).
     /// Clones share the log (like `worktrees`).
     fetch_pr_calls: Arc<Mutex<Vec<u64>>>,
+    /// When set, `worktree_remove` returns `Err` — to assert a caller treats
+    /// worktree cleanup as best-effort (a reap failure must not lose the work).
+    fail_remove: Arc<Mutex<bool>>,
 }
 
 impl FixtureRepo {
@@ -535,6 +542,12 @@ impl FixtureRepo {
     /// The PR numbers passed to [`RepoBackend::fetch_pr`] so far, in call order.
     pub fn fetch_pr_calls(&self) -> Vec<u64> {
         self.fetch_pr_calls.lock().unwrap().clone()
+    }
+    /// Make every `worktree_remove` fail — to test that a caller's cleanup is
+    /// best-effort (a reap failure must not fail the surrounding work).
+    pub fn with_failing_worktree_remove(self) -> Self {
+        *self.fail_remove.lock().unwrap() = true;
+        self
     }
     /// A deterministic 40-hex oid from a seed (no randomness).
     pub fn fake_oid(seed: &str) -> Oid {
@@ -622,10 +635,17 @@ impl RepoBackend for FixtureRepo {
         Ok(Revision::from(agent_core::pr_local_ref(number)))
     }
     async fn worktree_add(&self, spec: &WorktreeSpec) -> Result<WorktreeHandle> {
+        let mut live = self.worktrees.lock().unwrap();
         let id = spec
             .id
             .clone()
-            .unwrap_or_else(|| format!("wt{}", self.worktrees.lock().unwrap().len()));
+            .unwrap_or_else(|| format!("wt{}", live.len()));
+        // Faithful to git: adding an id that is already live collides.
+        if live.iter().any(|w| w.id == id) {
+            return Err(agent_core::Error::Repo(format!(
+                "worktree `{id}` already exists"
+            )));
+        }
         let handle = WorktreeHandle {
             id: id.clone(),
             path: std::path::PathBuf::from(format!("/fixture/worktrees/{id}")),
@@ -633,13 +653,18 @@ impl RepoBackend for FixtureRepo {
             revision: spec.revision.clone(),
             writable: spec.writable,
         };
-        self.worktrees.lock().unwrap().push(handle.clone());
+        live.push(handle.clone());
         Ok(handle)
     }
     async fn worktree_list(&self) -> Result<Vec<WorktreeHandle>> {
         Ok(self.worktrees.lock().unwrap().clone())
     }
     async fn worktree_remove(&self, id: &str) -> Result<()> {
+        if *self.fail_remove.lock().unwrap() {
+            return Err(agent_core::Error::Repo(format!(
+                "worktree remove `{id}` failed (fixture)"
+            )));
+        }
         self.worktrees.lock().unwrap().retain(|w| w.id != id);
         Ok(())
     }
