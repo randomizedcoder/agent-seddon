@@ -140,6 +140,24 @@ unpinned slot routing through the task-router is decided by the policy under the
 slot's role; a pin may itself name `"task-router"` (self-reference inside
 `[route] upstreams` stays rejected).
 
+### Preferred generator vs. judge
+
+The recommended dev split is **Kimi = the generator** (the more powerful model,
+so it drives the main loop and reviews) and **GLM = the judge** (consensus
+critic, fork judge, verifier). Express it in `[route]` (see the commented
+template in `config/agent.toml`): tag GLM `"judge"`, add a lowest-precedence
+`role = "judge"` rule that prefers the `"judge"` tag, and set
+`default_prefer.upstreams = ["kimi", "glm"]` so everything else prefers Kimi and
+falls back to GLM. Generation (role `main`/`review`) then lands on Kimi; judging
+lands on GLM.
+
+The committed **default provider stays local** (`provider = "openai-compat"` →
+Ollama) so a fresh checkout runs offline. The RunPod endpoints are **ephemeral
+pods** — the `base_url` changes when a pod restarts — so keep them in operator
+config (or `--dart-define`/env), never as a committed default, and re-check the
+URL with `curl <base>/v1/models` before assuming a pod is down. Keys are always
+referenced (`api_key_file` / `api_key_ref: "file:…"`), never inlined.
+
 Decisions are observable: `agent_router_decisions_total{role,task_mode,chosen,
 rule}` (`rule` = matched index or `default` — bounded, never config text),
 `agent_router_no_candidate_total{role}`, and a `route.select` debug event inside
