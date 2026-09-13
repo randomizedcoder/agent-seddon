@@ -101,11 +101,17 @@ impl Tool for ApplyPatchTool {
                         match apply_hunk(&mut file_lines, hunk) {
                             Ok(true) => changed_here = true,
                             Ok(false) => {}
-                            Err(()) => {
+                            Err(e) => {
+                                let why = match e {
+                                    HunkErr::NotFound => "context not found",
+                                    HunkErr::Ambiguous => {
+                                        "context is not unique — add surrounding context or an @@ hint"
+                                    }
+                                };
                                 return Ok(Observation::error(format!(
-                                    "validation failed: `{path}`: hunk {}: context not found",
+                                    "validation failed: `{path}`: hunk {}: {why}",
                                     n + 1
-                                )))
+                                )));
                             }
                         }
                     }
@@ -217,6 +223,14 @@ enum Op {
     Add { path: String, lines: Vec<String> },
     Update { path: String, hunks: Vec<Hunk> },
     Delete { path: String },
+}
+
+impl Op {
+    fn path(&self) -> &str {
+        match self {
+            Op::Add { path, .. } | Op::Update { path, .. } | Op::Delete { path } => path,
+        }
+    }
 }
 
 struct Hunk {
@@ -370,6 +384,22 @@ fn parse(patch: &str) -> std::result::Result<Vec<Op>, String> {
             return Err(format!("unexpected patch line: `{line}`"));
         }
     }
+    // Reject a patch that touches the same path in more than one operation. Each
+    // Op::Update re-reads the ORIGINAL file and nothing is written until the commit
+    // phase, so two Update blocks for one path both compute from the original and
+    // the commit's last write silently drops the earlier block's edits
+    // (last-write-wins). Add/Delete of a path also named elsewhere is equally
+    // ambiguous. Fail closed — the model must combine them into one block.
+    let mut seen = std::collections::HashSet::new();
+    for op in &ops {
+        if !seen.insert(op.path()) {
+            return Err(format!(
+                "`{}`: the same path appears in more than one file operation; \
+                 combine them into a single block",
+                op.path()
+            ));
+        }
+    }
     Ok(ops)
 }
 
@@ -377,10 +407,17 @@ fn parse(patch: &str) -> std::result::Result<Vec<Op>, String> {
 // Applier
 // ---------------------------------------------------------------------------
 
+/// Why a hunk could not be placed. Distinguished so the model gets an actionable
+/// message: `Ambiguous` means "add surrounding context", not "context not found".
+enum HunkErr {
+    NotFound,
+    Ambiguous,
+}
+
 /// Apply one hunk to `file_lines` in place. `Ok(true)` if it changed anything,
-/// `Ok(false)` for a context-only (no-op) hunk, `Err(())` if the context could
-/// not be located.
-fn apply_hunk(file_lines: &mut Vec<String>, hunk: &Hunk) -> std::result::Result<bool, ()> {
+/// `Ok(false)` for a context-only (no-op) hunk, `Err` if the context could not be
+/// uniquely located.
+fn apply_hunk(file_lines: &mut Vec<String>, hunk: &Hunk) -> std::result::Result<bool, HunkErr> {
     let has_edit = hunk.lines.iter().any(|(k, _)| *k == '-' || *k == '+');
     if !has_edit {
         return Ok(false);
@@ -403,7 +440,7 @@ fn apply_hunk(file_lines: &mut Vec<String>, hunk: &Hunk) -> std::result::Result<
         let pos = match &hunk.hint {
             Some(h) => match file_lines.iter().position(|l| l.contains(h.as_str())) {
                 Some(idx) => idx + 1,
-                None => return Err(()),
+                None => return Err(HunkErr::NotFound),
             },
             None => file_lines.len(),
         };
@@ -426,15 +463,15 @@ fn find_block(
     needle: &[String],
     eof: bool,
     hint: Option<&str>,
-) -> std::result::Result<usize, ()> {
+) -> std::result::Result<usize, HunkErr> {
     if needle.is_empty() || needle.len() > hay.len() {
-        return Err(());
+        return Err(HunkErr::NotFound);
     }
     let matches: Vec<usize> = (0..=hay.len() - needle.len())
         .filter(|&i| hay[i..i + needle.len()] == *needle)
         .collect();
     if matches.is_empty() {
-        return Err(());
+        return Err(HunkErr::NotFound);
     }
     if let Some(h) = hint {
         if let Some(anchor) = hay.iter().position(|l| l.contains(h)) {
@@ -444,7 +481,13 @@ fn find_block(
         }
     }
     if eof {
+        // `*** End of File` is an explicit "match from the end" disambiguator.
         Ok(*matches.last().unwrap())
+    } else if matches.len() > 1 {
+        // Ambiguous context with no hint/eof to disambiguate: refuse rather than
+        // silently editing the first occurrence (which may be the wrong one) —
+        // matching EditTool's uniqueness contract.
+        Err(HunkErr::Ambiguous)
     } else {
         Ok(matches[0])
     }
@@ -590,6 +633,21 @@ mod tests {
         &[("update.txt", "x\n")],
         envelope("*** Update File: update.txt"),
         Err("at least one @@ chunk"),
+    )]
+    // Two Update blocks for one path both compute from the ORIGINAL file, so the
+    // commit's last write would silently drop the first block's edits. Reject it
+    // (T3) — the model must combine the hunks into one block.
+    #[case::duplicate_update_path_rejected(
+        &[("a.py", "x = 1\ny = 2\n")],
+        envelope("*** Update File: a.py\n@@\n-x = 1\n+x = 11\n*** Update File: a.py\n@@\n-y = 2\n+y = 22"),
+        Err("more than one file operation"),
+    )]
+    // Ambiguous context (two identical blocks, no hint/eof) must be refused, not
+    // applied to the first occurrence (T4) — matching EditTool's uniqueness rule.
+    #[case::ambiguous_context_rejected(
+        &[("dup.py", "    return None\nmid\n    return None\n")],
+        envelope("*** Update File: dup.py\n@@\n-    return None\n+    return X"),
+        Err("not unique"),
     )]
     #[case::empty_patch(&[], json!({ "patch": "" }), Err("empty"))]
     #[case::path_escape_rejected(&[], envelope("*** Add File: ../secret\n+x"), Err("escape"))]
