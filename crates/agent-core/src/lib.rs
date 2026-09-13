@@ -3054,7 +3054,7 @@ pub trait FleetRegistry: Send + Sync {
 /// A request to review one pull/merge request on one roster session — the unit the
 /// fleet orchestrator turns into a review (review-fleet C8). `session_id` names the
 /// **roster row** (a [`FleetSession::id`]); the PR-scoped `SessionKey` is minted from
-/// that row (`user = <org>`, `session = encode_review_session_id(repo, pr_number)`)
+/// that row (`user = <org>`, `session = encode_review_session_id(id, repo, pr_number)`)
 /// inside the orchestrator. Real triggers (forge poll C6, Slack watch C7) arrive in
 /// increment 4; until then the `ReviewNow` control-plane RPC injects these manually.
 #[derive(Debug, Clone, PartialEq, Eq)]
