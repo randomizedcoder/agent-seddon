@@ -1850,6 +1850,13 @@ impl Agent {
                     working.messages.push(Message::user(TRUNCATION_NUDGE));
                     continue;
                 }
+                // A final-answer turn returns before the post-tool compaction that
+                // would consume an armed mode switch. Consume it here too: otherwise
+                // the switch survives into an unrelated later turn and fires a
+                // spurious, budget-ignoring switch-compaction (an extra LLM call +
+                // lossy reshape). The mode change itself is already reflected in the
+                // session's current_mode, so only the stale reshape signal is dropped.
+                let _ = pending_switch.take();
                 self.memory.distill().await.ok();
                 return Ok(assistant.content_text());
             }
@@ -3137,6 +3144,26 @@ mod tests {
         assert!(
             switches.iter().any(|c| c.contains("review")),
             "expected a recorded switch into review, got: {switches:?}"
+        );
+    }
+
+    // A decisive switch arms `pending_switch`; a direct (no-tool) answer must
+    // consume it, so it can't later fire a spurious budget-ignoring reshape. The
+    // mode change itself still holds (current_mode is Review).
+    #[tokio::test]
+    async fn positive_direct_answer_consumes_armed_switch() {
+        let memory = RecordingMemory::new();
+        let agent = agent_with_classifier(TaskMode::Review, 0.95, memory);
+        let mut session = agent.session();
+        assert_eq!(session.send("please review this").await.unwrap(), "ok");
+        assert!(
+            session.pending_switch.is_none(),
+            "a direct-answer turn must consume the armed switch, not leave it for a later turn"
+        );
+        assert_eq!(
+            session.current_mode,
+            TaskMode::Review,
+            "the mode change itself still holds"
         );
     }
 
