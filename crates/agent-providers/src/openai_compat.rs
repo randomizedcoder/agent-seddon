@@ -597,8 +597,12 @@ struct WireUsage {
     completion_tokens: u32,
     #[serde(default)]
     total_tokens: u32,
+    // `#[serde(default)]` covers an ABSENT field, but some gateways (e.g. sglang)
+    // send the field present-but-`null` — deserializing `null` into the struct then
+    // fails ("invalid type: null, expected struct PromptTokensDetails") and sinks
+    // the whole response. `Option` maps both absent and explicit-null to `None`.
     #[serde(default)]
-    prompt_tokens_details: PromptTokensDetails,
+    prompt_tokens_details: Option<PromptTokensDetails>,
 }
 
 /// The `usage.prompt_tokens_details` sub-object (OpenAI + compatible gateways);
@@ -621,7 +625,7 @@ fn to_core_usage(u: WireUsage) -> Usage {
         // OpenAI reports prompt-cache hits under `prompt_tokens_details.
         // cached_tokens`; there is no separate cache-write line (writes are billed
         // as normal input), so `cache_write_tokens` stays 0.
-        cache_read_tokens: u.prompt_tokens_details.cached_tokens,
+        cache_read_tokens: u.prompt_tokens_details.unwrap_or_default().cached_tokens,
         cache_write_tokens: 0,
         cost: None,
     }
@@ -745,9 +749,9 @@ mod tests {
             prompt_tokens: prompt,
             completion_tokens: completion,
             total_tokens: total,
-            prompt_tokens_details: PromptTokensDetails {
+            prompt_tokens_details: Some(PromptTokensDetails {
                 cached_tokens: cached,
-            },
+            }),
         }
     }
 
@@ -788,6 +792,12 @@ mod tests {
     #[case::corner_usage_defaults_missing_fields(
         r#"{"choices":[],"usage":{"prompt_tokens":5,"prompt_tokens_details":{"cached_tokens":3}}}"#,
         Some((5, 0, 0))
+    )]
+    // adversarial: some gateways (sglang) send prompt_tokens_details present-but-null;
+    // it must map to None/default, not sink the whole response.
+    #[case::adversarial_prompt_tokens_details_null(
+        r#"{"choices":[],"usage":{"prompt_tokens":8752,"total_tokens":8879,"completion_tokens":127,"prompt_tokens_details":null}}"#,
+        Some((8752, 127, 8879))
     )]
     #[case::boundary_max_u32(
         r#"{"choices":[],"usage":{"prompt_tokens":4294967295,"total_tokens":4294967295}}"#,
