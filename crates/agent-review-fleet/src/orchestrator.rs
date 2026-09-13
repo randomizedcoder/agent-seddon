@@ -240,6 +240,13 @@ impl ReviewTask {
             let _ = h.await;
         }
     }
+    /// Whether the spawned review has run to completion (draft persisted + worktree
+    /// reaped). A guard whose handle was already taken counts as finished.
+    fn is_finished(&self) -> bool {
+        self.handle
+            .as_ref()
+            .is_none_or(tokio::task::JoinHandle::is_finished)
+    }
 }
 
 impl Drop for ReviewTask {
@@ -433,6 +440,21 @@ impl FleetOrchestrator {
             .contains_key(&(session_id.to_string(), pr_number))
     }
 
+    /// Drop completed review tasks from the in-flight guard; returns how many were
+    /// reaped. In production the drain loop is fire-and-forget — it never calls
+    /// [`Self::cancel`]/[`Self::join`] — so without this a finished `(session, PR)`
+    /// would (a) block a re-trigger forever (the dedup check below sees a stale
+    /// entry, so a new commit is never re-reviewed and the whole C16 cross-round
+    /// path is dead) and (b) leak one completed `JoinHandle` per PR ever reviewed.
+    /// Called at the top of [`Self::handle`], so the guard holds only genuinely
+    /// running reviews.
+    fn reap_finished(&self) -> usize {
+        let mut g = self.in_flight.lock().expect("in_flight poisoned");
+        let before = g.len();
+        g.retain(|_, t| !t.is_finished());
+        before - g.len()
+    }
+
     /// Cancel and clear an in-flight review (dropping its [`ReviewTask`] aborts the task,
     /// cancelling the run). Returns whether one was present.
     pub fn cancel(&self, session_id: &str, pr_number: u64) -> bool {
@@ -471,8 +493,13 @@ impl FleetOrchestrator {
     /// touching the forge, the engine, or the session.
     pub async fn handle(&self, trigger: FleetTrigger) -> agent_core::Result<Handled> {
         let kt = (trigger.session_id.clone(), trigger.pr_number);
+        // Reap completed reviews first, so a finished (session, PR) neither blocks a
+        // re-trigger (a new commit → re-review) nor leaks its JoinHandle — the prod
+        // drain loop never cancels/joins, so this is the only reaper on that path.
+        self.reap_finished();
         // C14-lite dedup: one in-flight review per (session, PR). Checked up front so a
-        // duplicate never re-fetches or re-grounds.
+        // duplicate never re-fetches or re-grounds. After the reap above, a hit here
+        // means a review is genuinely still running.
         if self
             .in_flight
             .lock()
@@ -790,6 +817,14 @@ mod tests {
                 state: Mutex::new(HostState::default()),
                 gate: None,
                 fail_review: true,
+            }
+        }
+        /// Release a gated review so its task can run to completion (for the reap
+        /// tests). `notify_one` stores a permit, so it is race-free even if called
+        /// before the task reaches `.notified().await`.
+        fn release(&self) {
+            if let Some(g) = &self.gate {
+                g.notify_one();
             }
         }
         fn admitted(&self) -> Vec<SessionKey> {
@@ -1233,6 +1268,75 @@ mod tests {
         // Settle the one spawned review; exactly one run was started.
         o.join("web", 7).await;
         assert_eq!(host.reviews_len(), 1, "only one review ran");
+    }
+
+    // ---- in-flight guard reaping (Bug F1) --------------------------------
+
+    #[tokio::test]
+    async fn positive_reap_leaves_a_running_review_untouched() {
+        // A genuinely in-flight review must NOT be reaped, and still dedups.
+        let roster = seeded(&[row("web", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::gated());
+        let o = orch(roster, repo, host);
+        let t = || FleetTrigger {
+            session_id: "web".into(),
+            pr_number: 42,
+        };
+        assert!(matches!(
+            o.handle(t()).await.expect("first ok"),
+            Handled::Reviewing { .. }
+        ));
+        assert_eq!(o.reap_finished(), 0, "a running review is not reaped");
+        assert!(o.is_in_flight("web", 42), "still in flight");
+        assert!(
+            matches!(o.handle(t()).await.expect("second ok"), Handled::Duplicate),
+            "a running review still dedups a duplicate trigger"
+        );
+        o.cancel("web", 42); // abort the gated task
+    }
+
+    #[tokio::test]
+    async fn positive_finished_review_is_reaped_and_unblocks_retrigger() {
+        // The prod drain loop never cancels/joins, so a finished (session, PR) must be
+        // reaped here — else the map leaks a JoinHandle per PR and the stale entry
+        // turns a re-trigger (new commit) into a spurious Duplicate, killing re-review.
+        let roster = seeded(&[row("web", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::gated());
+        let o = orch(roster, repo, host.clone());
+        let t = || FleetTrigger {
+            session_id: "web".into(),
+            pr_number: 42,
+        };
+        assert!(matches!(
+            o.handle(t()).await.expect("first ok"),
+            Handled::Reviewing { .. }
+        ));
+
+        // Let the review complete, then confirm it is reaped WITHOUT a join/cancel
+        // (the prod path). Bounded yield loop → deterministic outcome, no real sleep.
+        host.release();
+        let mut reaped = 0;
+        for _ in 0..1000 {
+            tokio::task::yield_now().await;
+            reaped += o.reap_finished();
+            if reaped > 0 {
+                break;
+            }
+        }
+        assert_eq!(reaped, 1, "the finished review was reaped");
+        assert!(!o.is_in_flight("web", 42), "reaped entry is gone (no leak)");
+
+        // The same PR can now be re-reviewed — not blocked by the stale entry.
+        assert!(
+            !matches!(
+                o.handle(t()).await.expect("retrigger ok"),
+                Handled::Duplicate
+            ),
+            "a finished PR must be re-reviewable, not a spurious Duplicate"
+        );
+        o.cancel("web", 42); // settle the second (gated) review
     }
 
     // ---- worktree idempotency + cleanup (Bug 1) --------------------------
