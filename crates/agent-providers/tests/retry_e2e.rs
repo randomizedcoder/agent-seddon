@@ -45,6 +45,58 @@ async fn mock_server(responses: Vec<(u16, &'static str)>) -> (String, Arc<Atomic
     (format!("http://{addr}/v1"), count)
 }
 
+/// One scripted response: a full one, or a **truncated** one whose headers promise
+/// a body that is never fully sent before the socket closes — reproducing a mid-body
+/// connection drop ("connection closed before message completed").
+enum Scripted {
+    Full(u16, &'static str),
+    TruncatedBody,
+}
+
+/// Like [`mock_server`], but each entry may truncate its body to exercise the
+/// mid-body-drop retry path (which the buffered `complete` handles inside its retry
+/// boundary). Returns `(base_url, connection_count)`.
+async fn mock_server_scripted(script: Vec<Scripted>) -> (String, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let count = Arc::new(AtomicUsize::new(0));
+    let count_task = count.clone();
+
+    tokio::spawn(async move {
+        for item in script {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                break;
+            };
+            count_task.fetch_add(1, Ordering::SeqCst);
+            let mut buf = [0u8; 2048];
+            let _ = sock.read(&mut buf).await;
+
+            match item {
+                Scripted::Full(code, body) => {
+                    let reason = if code == 200 { "OK" } else { "ERR" };
+                    let resp = format!(
+                        "HTTP/1.1 {code} {reason}\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                }
+                Scripted::TruncatedBody => {
+                    // Headers (200 OK) promise 512 body bytes; send a handful, then
+                    // close early → the client's body read hits EOF mid-message.
+                    let head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                                Content-Length: 512\r\nConnection: close\r\n\r\n";
+                    let _ = sock.write_all(head.as_bytes()).await;
+                    let _ = sock.write_all(br#"{"choices""#).await;
+                }
+            }
+            let _ = sock.shutdown().await;
+        }
+    });
+
+    (format!("http://{addr}/v1"), count)
+}
+
 fn provider(base_url: String, max_retries: u32) -> OpenAiCompatProvider {
     OpenAiCompatProvider::new(OpenAiCompatConfig {
         base_url,
@@ -93,6 +145,49 @@ async fn client_error_is_not_retried() {
     let err = p.complete(req()).await.expect_err("400 must not succeed");
     assert!(err.to_string().contains("400"), "err: {err}");
     assert_eq!(conns.load(Ordering::SeqCst), 1, "no retry on a 4xx");
+}
+
+/// A connection dropped **mid-body** ("connection closed before message
+/// completed") is transient: the buffered `complete` reads the body inside the
+/// retry boundary, so it retries and the next full response succeeds. Before the
+/// fix the body read happened *after* `send` returned, so this hard-failed with no
+/// retry and no failover.
+#[tokio::test]
+async fn retries_mid_body_connection_drop_then_succeeds() {
+    let (base_url, conns) =
+        mock_server_scripted(vec![Scripted::TruncatedBody, Scripted::Full(200, OK_BODY)]).await;
+    let p = provider(base_url, 3);
+
+    let resp = p
+        .complete(req())
+        .await
+        .expect("mid-body drop should be retried, then the full response succeeds");
+    assert_eq!(resp.message.content_text(), "hello");
+    assert_eq!(conns.load(Ordering::SeqCst), 2, "one retry after the drop");
+}
+
+/// Adversarial: a server that drops mid-body on *every* attempt must not loop
+/// forever — the provider gives up after `max_retries` and surfaces a body error.
+#[tokio::test]
+async fn exhausts_retries_on_persistent_mid_body_drop() {
+    let (base_url, conns) = mock_server_scripted(vec![
+        Scripted::TruncatedBody,
+        Scripted::TruncatedBody,
+        Scripted::TruncatedBody,
+    ])
+    .await;
+    let p = provider(base_url, 2); // 1 initial + 2 retries = 3 attempts
+
+    let err = p
+        .complete(req())
+        .await
+        .expect_err("a persistent mid-body drop must fail, not hang");
+    assert!(err.to_string().contains("body"), "err: {err}");
+    assert_eq!(
+        conns.load(Ordering::SeqCst),
+        3,
+        "initial + 2 retries, then give up"
+    );
 }
 
 /// When every attempt fails, the provider gives up after `max_retries` and

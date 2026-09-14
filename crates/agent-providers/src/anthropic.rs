@@ -164,23 +164,11 @@ impl AnthropicProvider {
     /// caller can read its body for the message.
     async fn send(&self, body: &Value) -> Result<reqwest::Response> {
         agent_retry::run(&self.retry, || async {
-            match self
-                .client
-                .post(&self.endpoint)
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", &self.version)
-                .json(body)
-                .send()
-                .await
-            {
+            match self.post(body).send().await {
                 Ok(resp) => {
                     let code = resp.status().as_u16();
                     if agent_retry::http::retryable_status(code) {
-                        let after = resp
-                            .headers()
-                            .get(reqwest::header::RETRY_AFTER)
-                            .and_then(|v| v.to_str().ok())
-                            .and_then(agent_retry::http::parse_retry_after);
+                        let after = crate::retry_after(&resp);
                         let body = resp.text().await.unwrap_or_default();
                         agent_retry::Attempt::Retry {
                             err: Error::Provider(format!("http {code}: {body}")),
@@ -190,13 +178,68 @@ impl AnthropicProvider {
                         agent_retry::Attempt::Done(resp)
                     }
                 }
-                Err(e) if e.is_timeout() || e.is_connect() => agent_retry::Attempt::Retry {
+                Err(e) if crate::transient_transport(&e) => agent_retry::Attempt::Retry {
                     err: Error::Provider(format!("request failed: {e}")),
                     after: None,
                 },
                 Err(e) => {
                     agent_retry::Attempt::Fail(Error::Provider(format!("request failed: {e}")))
                 }
+            }
+        })
+        .await
+    }
+
+    /// The per-attempt request builder (fresh each retry — a `RequestBuilder` is
+    /// single-use). Shared by [`Self::send`] (streaming) and [`Self::send_buffered`].
+    fn post(&self, body: &Value) -> reqwest::RequestBuilder {
+        self.client
+            .post(&self.endpoint)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", &self.version)
+            .json(body)
+    }
+
+    /// Like [`Self::send`], but reads the **whole response body inside the retry
+    /// boundary** and returns `(status, body)`. A connection dropped mid-body
+    /// ("connection closed before message completed") is then retried like a timeout
+    /// instead of failing the call outright (which would also skip any failover) —
+    /// the fix for the buffered path, where the body read used to happen *after*
+    /// `send` returned. Used by the buffered [`complete`]; `stream` keeps [`Self::send`]
+    /// (a mid-stream drop can't be transparently replayed). A non-retryable error
+    /// status is returned as `Done` so the caller can surface its body.
+    async fn send_buffered(&self, body: &Value) -> Result<(reqwest::StatusCode, String)> {
+        agent_retry::run(&self.retry, || async {
+            let resp = match self.post(body).send().await {
+                Ok(resp) => resp,
+                Err(e) if crate::transient_transport(&e) => {
+                    return agent_retry::Attempt::Retry {
+                        err: Error::Provider(format!("request failed: {e}")),
+                        after: None,
+                    };
+                }
+                Err(e) => {
+                    return agent_retry::Attempt::Fail(Error::Provider(format!(
+                        "request failed: {e}"
+                    )));
+                }
+            };
+            let status = resp.status();
+            let retryable = agent_retry::http::retryable_status(status.as_u16());
+            // Capture the backoff hint before the body read consumes `resp`.
+            let after = retryable.then(|| crate::retry_after(&resp)).flatten();
+            match resp.text().await {
+                Ok(body) if retryable => agent_retry::Attempt::Retry {
+                    err: Error::Provider(format!("http {status}: {body}")),
+                    after,
+                },
+                Ok(body) => agent_retry::Attempt::Done((status, body)),
+                // The mid-body drop: transient, so retry it.
+                Err(e) if crate::transient_transport(&e) => agent_retry::Attempt::Retry {
+                    err: Error::Provider(format!("reading body: {e}")),
+                    after: None,
+                },
+                Err(e) => agent_retry::Attempt::Fail(Error::Provider(format!("reading body: {e}"))),
             }
         })
         .await
@@ -217,12 +260,9 @@ impl LlmProvider for AnthropicProvider {
 
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse> {
         let body = self.build_body(&req, false);
-        let resp = self.send(&body).await?;
-        let status = resp.status();
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| Error::Provider(format!("reading body: {e}")))?;
+        // Buffered path: the body is read inside the retry boundary, so a mid-body
+        // connection drop is retried rather than surfaced as a hard error.
+        let (status, text) = self.send_buffered(&body).await?;
         if !status.is_success() {
             return Err(Error::Provider(format!("http {status}: {text}")));
         }

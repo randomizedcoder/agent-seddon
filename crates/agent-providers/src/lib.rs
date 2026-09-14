@@ -74,3 +74,50 @@ pub use branching::{
     BranchCfg, BranchFate, BranchObserver, BranchReport, BranchSpec, BranchingProvider, JoinPolicy,
     MergeStrategy, OnTimeout,
 };
+
+/// Whether a reqwest transport error is transient and worth retrying: a timed-out
+/// or refused connection, a request/response **body** error, or a connection dropped
+/// **mid-body** — the "connection closed before message completed" case. reqwest
+/// reports that last one as a *decode* error (`is_decode()`, "error decoding response
+/// body"), which we must **not** retry blanketly — a genuinely malformed or
+/// invalid-UTF-8 body is the server's fault, not transient. So we match it precisely
+/// by walking the error's source chain for the connection-drop signature (hyper's
+/// "connection closed before message completed" / the io "unexpected end of file").
+///
+/// This is why the buffered `complete` path reads the response body *inside* the
+/// retry boundary (see each provider's `send_buffered`): a drop while reading the
+/// body is as transient as a timeout, and classifying it permanent would forfeit both
+/// the retry and any downstream failover. Status-code retryability (429/5xx) is
+/// separate — `agent_retry::http`.
+#[cfg(any(feature = "provider-openai-compat", feature = "provider-anthropic"))]
+pub(crate) fn transient_transport(e: &reqwest::Error) -> bool {
+    if e.is_timeout() || e.is_connect() || e.is_body() {
+        return true;
+    }
+    // A mid-body connection drop surfaces as a decode/body error whose *source* chain
+    // carries the real cause. Match that signature specifically — never every decode
+    // error — so a malformed body still fails fast.
+    let mut src = std::error::Error::source(e);
+    while let Some(s) = src {
+        let msg = s.to_string().to_ascii_lowercase();
+        if msg.contains("connection closed before message completed")
+            || msg.contains("unexpected end of file")
+            || msg.contains("end of file before message length reached")
+        {
+            return true;
+        }
+        src = s.source();
+    }
+    false
+}
+
+/// The server's `Retry-After` backoff hint, if present and in delta-seconds form
+/// (`agent_retry::http::parse_retry_after` handles the parse/clamp). Read from the
+/// response headers *before* the body is consumed.
+#[cfg(any(feature = "provider-openai-compat", feature = "provider-anthropic"))]
+pub(crate) fn retry_after(resp: &reqwest::Response) -> Option<std::time::Duration> {
+    resp.headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(agent_retry::http::parse_retry_after)
+}
