@@ -555,8 +555,26 @@ struct WireToolCallFn {
 #[derive(Deserialize)]
 struct WireResp {
     choices: Vec<WireChoice>,
-    #[serde(default)]
+    // Usage is telemetry: a present-but-malformed block (negative/float/wrong-type
+    // counts, or any hostile gateway value) must NOT sink an otherwise-valid answer.
+    // `#[serde(default)]` alone only rescues an ABSENT field; the lenient
+    // deserializer additionally maps a present-but-unparseable usage to `None`, so
+    // the completion survives and only the counts are dropped. (The streaming path
+    // keeps the strict `Option<WireUsage>` — a bad terminal usage chunk is skipped
+    // there, and the content has already streamed.)
+    #[serde(default, deserialize_with = "lenient_usage")]
     usage: Option<WireUsage>,
+}
+
+/// Deserialize `WireResp.usage` tolerantly: parse the value into a `serde_json::Value`
+/// first, then try `WireUsage`, mapping any failure (negative counts, floats, a string,
+/// a wrong shape) to `None` rather than failing the whole response decode.
+fn lenient_usage<'de, D>(de: D) -> std::result::Result<Option<WireUsage>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = Option::<Value>::deserialize(de)?;
+    Ok(v.and_then(|v| serde_json::from_value::<WireUsage>(v).ok()))
 }
 
 #[derive(Deserialize)]
@@ -635,7 +653,7 @@ fn to_core_usage(u: WireUsage) -> Usage {
 mod tests {
     use super::{
         parse_tool_args, to_core_usage, to_openai_content, OpenAiCompatConfig,
-        OpenAiCompatProvider, PromptTokensDetails, StreamEvent, WireContent, WireUsage,
+        OpenAiCompatProvider, PromptTokensDetails, StreamEvent, WireContent, WireResp, WireUsage,
     };
     use agent_core::{CompletionRequest, ContentBlock, Message};
     use rstest::rstest;
@@ -829,6 +847,39 @@ mod tests {
         assert!(
             serde_json::from_str::<StreamEvent>(data).is_err(),
             "hostile usage chunk must be rejected, not silently coerced: {data}"
+        );
+    }
+
+    // The BUFFERED path is different from streaming: the whole answer is in one
+    // WireResp, so a present-but-hostile usage block must NOT sink it — the answer
+    // survives and only the counts drop to None.
+    #[rstest]
+    #[case::negative(
+        r#"{"choices":[{"message":{"content":"the answer"}}],"usage":{"prompt_tokens":-1}}"#
+    )]
+    #[case::float(
+        r#"{"choices":[{"message":{"content":"the answer"}}],"usage":{"prompt_tokens":3.5}}"#
+    )]
+    #[case::wrong_type(r#"{"choices":[{"message":{"content":"the answer"}}],"usage":"garbage"}"#)]
+    #[case::overflow(r#"{"choices":[{"message":{"content":"the answer"}}],"usage":{"prompt_tokens":99999999999999}}"#)]
+    fn adversarial_buffered_hostile_usage_keeps_answer(#[case] body: &str) {
+        let parsed: WireResp = serde_json::from_str(body)
+            .expect("a hostile usage block must not fail the whole response decode");
+        assert!(parsed.usage.is_none(), "hostile usage dropped to None");
+        let choice = parsed.choices.into_iter().next().expect("choice present");
+        assert_eq!(choice.message.content.as_deref(), Some("the answer"));
+    }
+
+    // A well-formed usage still decodes into counts (no regression from the lenient
+    // path).
+    #[test]
+    fn positive_buffered_valid_usage_decodes() {
+        let body = r#"{"choices":[{"message":{"content":"hi"}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#;
+        let parsed: WireResp = serde_json::from_str(body).unwrap();
+        let u = parsed.usage.expect("usage present");
+        assert_eq!(
+            (u.prompt_tokens, u.completion_tokens, u.total_tokens),
+            (10, 5, 15)
         );
     }
 }
