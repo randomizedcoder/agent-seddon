@@ -1694,6 +1694,21 @@ impl Agent {
         } else {
             self.settings.max_tokens
         };
+        // Compaction trims the prompt to `max_context_tokens - reserve_output`, so
+        // the reserve must cover the output the request will actually claim; else
+        // `prompt + max_tokens` overflows the window (the provider truncates to
+        // finish=length or rejects the call). Enforce `reserve_output >=
+        // effective_max_tokens` — this closes the review-mode floor's overflow (the
+        // floor raised max_tokens above reserve_output; #330) and the same latent
+        // gap for any config with `max_tokens > reserve_output`. Clamped to the
+        // context window so the trim target never underflows.
+        let effective_budget = TokenBudget {
+            max_context_tokens: budget.max_context_tokens,
+            reserve_output: budget
+                .reserve_output
+                .max(effective_max_tokens)
+                .min(budget.max_context_tokens),
+        };
         // Back-to-back truncated completions (finish_reason = output-cap) seen so
         // far; any productive turn clears it. Bounds the continue-on-truncation
         // recovery so a perpetually-truncating model fails fast, not at the
@@ -2187,7 +2202,7 @@ impl Agent {
             // The armed switch (if any) is consumed on this first compact; later
             // iterations pass `None` (an ordinary budget compaction).
             self.context
-                .compact(working, budget, pending_switch.take())
+                .compact(working, &effective_budget, pending_switch.take())
                 .instrument(tracing::info_span!("context.compact", iter))
                 .await?;
             if !self.hooks.is_empty() && before != working.messages.len() {
@@ -4450,6 +4465,89 @@ mod tests {
             !tool_msgs[0].contains("bash ran"),
             "bash must NOT execute: {tool_msgs:?}"
         );
+    }
+
+    // ---- compaction reserve tracks the request's max_tokens (Bug L1) -------
+
+    /// A `ContextStrategy` that records the `reserve_output` of the budget handed to
+    /// `compact`, so a test can assert the loop reserves output room for the tokens
+    /// the request actually claims.
+    #[derive(Clone, Default)]
+    struct RecordingContext {
+        last_reserve: Arc<std::sync::Mutex<Option<u32>>>,
+    }
+    #[async_trait::async_trait]
+    impl agent_core::ContextStrategy for RecordingContext {
+        async fn assemble(
+            &self,
+            input: agent_core::ContextInput,
+        ) -> agent_core::Result<Vec<Message>> {
+            Ok(vec![
+                Message::system(input.system_prompt),
+                Message::user(input.goal),
+            ])
+        }
+        async fn compact(
+            &self,
+            _working: &mut agent_core::WorkingSet,
+            budget: &agent_core::TokenBudget,
+            _switch: Option<(agent_core::TaskMode, agent_core::TaskMode)>,
+        ) -> agent_core::Result<agent_core::CompactAction> {
+            *self.last_reserve.lock().unwrap() = Some(budget.reserve_output);
+            Ok(agent_core::CompactAction::Budget)
+        }
+    }
+
+    /// Drive one tool turn (so the loop reaches the post-tool compaction) then a
+    /// final answer, and return the `reserve_output` compaction was handed.
+    async fn recorded_compact_reserve(review: bool, max_tokens: u32, reserve_output: u32) -> u32 {
+        let ctx = RecordingContext::default();
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(EchoTool));
+        let provider = ScriptedProvider::new(vec![
+            tool_turn(vec![tool_call("t0", "echo")]),
+            final_turn("done"),
+        ]);
+        let mut s = settings(false);
+        s.max_tokens = max_tokens;
+        s.reserve_output = reserve_output;
+        let agent = Arc::new(Agent::new(
+            Arc::new(provider),
+            tools,
+            Arc::new(RecordingMemory::new()),
+            Arc::new(ctx.clone()),
+            Arc::new(crate::policy::AutoApprove),
+            Metrics::new(),
+            s,
+        ));
+        let mut session = agent.session();
+        if review {
+            session.seed_review(None);
+        }
+        session.send("go").await.unwrap();
+        let r = ctx.last_reserve.lock().unwrap().expect("compaction ran");
+        r
+    }
+
+    #[tokio::test]
+    async fn boundary_review_compaction_reserves_for_the_floored_output() {
+        // Review floors max_tokens to 8192; compaction must reserve at least that,
+        // even though the configured reserve_output (2048) is smaller — else the
+        // trimmed prompt + 8192 output overflows the window.
+        assert_eq!(recorded_compact_reserve(true, 2048, 2048).await, 8192);
+    }
+
+    #[tokio::test]
+    async fn corner_non_review_reserve_raised_to_match_max_tokens() {
+        // The invariant is general: a non-review config with max_tokens > reserve
+        // also gets the reserve raised to the request's output cap.
+        assert_eq!(recorded_compact_reserve(false, 4096, 1024).await, 4096);
+    }
+
+    #[tokio::test]
+    async fn negative_reserve_unchanged_when_already_large_enough() {
+        // reserve_output already >= max_tokens → left untouched (no lowering).
+        assert_eq!(recorded_compact_reserve(false, 1000, 8000).await, 8000);
     }
 
     // ---- worktree cleanup on exit ------------------------------------------
