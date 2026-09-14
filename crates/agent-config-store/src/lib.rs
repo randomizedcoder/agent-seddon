@@ -44,6 +44,8 @@ pub use file::FileBackend;
 
 /// Default per-tenant cap on cards in one collection. A control-plane surface,
 /// not the hot loop; the ceiling bounds the blast radius of a runaway writer.
+/// It is a **soft** ceiling — enforced best-effort per [`Store::put`], exact under
+/// sequential writes and subject to a small, bounded overshoot under concurrency.
 pub const DEFAULT_MAX_CARDS_PER_TENANT: usize = 512;
 
 /// A config card: one typed config document keyed by [`Card::id`] within its
@@ -250,6 +252,20 @@ impl<C: Card> Store<C> {
 
     /// Upsert a card (sanitize → validate → persist). Creates the tenant view on
     /// first write; rejects a *new* id once the per-tenant cap is reached.
+    ///
+    /// The cap is a **soft** ceiling, enforced best-effort. The newness read, the
+    /// count, and the write are three separate backend calls, not one transaction, so
+    /// `W` writers each adding a *distinct new* id concurrently can each observe
+    /// `count < cap` before any commits and transiently overshoot by up to `W - 1`
+    /// cards. This is deliberate: the cap is a resource guard against a runaway writer
+    /// on a low-traffic control plane (`DEFAULT_MAX_CARDS_PER_TENANT`), **not** a
+    /// security or correctness boundary — `tenant` is already validated and
+    /// authenticated upstream, and a handful of extra cards costs only a little memory,
+    /// which the next sequential `put` re-observes and rejects against. Making it hard
+    /// would mean threading a per-collection cap through the untyped, cross-collection
+    /// `Backend::apply` transaction on every backend — disproportionate for the
+    /// bounded, harmless overshoot it prevents. Sequential (single-writer) enforcement
+    /// is exact.
     pub async fn put(&self, tenant: &str, mut card: C) -> Result<C> {
         seg("tenant", tenant)?;
         card.sanitize();
@@ -261,6 +277,8 @@ impl<C: Card> Store<C> {
             .get(C::COLLECTION, tenant, &id)
             .await?
             .is_none();
+        // Soft cap (see the doc above): a best-effort pre-check, not atomic with the
+        // apply below. Concurrent distinct-new-id writers may transiently exceed it.
         if is_new && self.backend.count(C::COLLECTION, tenant).await? >= self.cap {
             return Err(Error::Config(format!(
                 "{} is full ({} cards for tenant `{tenant}`)",
