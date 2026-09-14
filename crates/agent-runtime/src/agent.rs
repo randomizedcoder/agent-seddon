@@ -161,6 +161,12 @@ pub struct Agent {
     /// the full fleet process that admits + drives sessions from it arrives in
     /// review-fleet 3c.
     fleet_registry: Option<Arc<dyn agent_core::FleetRegistry>>,
+    /// The approve→post idempotency lease (review-fleet C17), held for `--serve-fleet`.
+    /// A durable, read-your-writes, cross-process compare-and-set that guarantees a review
+    /// posts to its forge **at most once** across concurrent/repeated approves. `None` ⇒
+    /// the approver falls back to an in-process [`agent_review_fleet::MemoryPostLease`]
+    /// (closes same-process double-posts; not durable across restarts/processes).
+    fleet_post_lease: Option<Arc<dyn agent_core::FleetPostLease>>,
     /// The RBAC role-card store, held for `--serve-role` (config C1b): the
     /// operator-defined role cards the control-plane gate authorizes against, atop
     /// the three immutable built-ins. Present ⇒ the catalog snapshot was installed at
@@ -429,21 +435,25 @@ impl agent_core::ReviewDrafter for EngineDrafter {
 /// unless it is already posted, posts the rendered `.md` to the draft's repo's OPERATIONAL
 /// forge and persists `status = "posted"` — the idempotency key. Nothing posts without an
 /// explicit `approve`; the model's own in-loop forge stays read-only.
-#[cfg(feature = "review")]
+#[cfg(all(feature = "review", feature = "fleet"))]
 struct EngineApprover {
     agent: Arc<Agent>,
     /// The roster the control plane serves — used to resolve the draft's repo → its row →
     /// its operational forge.
     roster: Arc<dyn agent_core::FleetRegistry>,
-    /// Persisted history: the draft lookup by id + the durable `status` the idempotency
-    /// check reads.
+    /// Persisted history: the draft lookup by id + the (eventually-consistent) `status`
+    /// used only as a cheap early-out. The AUTHORITATIVE idempotency guard is `post_lease`.
     history: Arc<dyn agent_core::FleetHistory>,
+    /// The durable, read-your-writes, cross-process compare-and-set that makes the forge
+    /// post idempotent on `review_id` (review-fleet C17). Checked immediately before the
+    /// post: exactly one concurrent/repeated approve acquires the lease and posts.
+    post_lease: Arc<dyn agent_core::FleetPostLease>,
 }
 
 /// What an approve should do, decided purely from the looked-up draft + the current roster
 /// (review-fleet C17). Split out so the decision — not-found, the idempotent already-posted
 /// short-circuit, and repo→row resolution — is table-testable without a forge or a store.
-#[cfg(feature = "review")]
+#[cfg(all(feature = "review", feature = "fleet"))]
 #[derive(Debug)]
 enum ApprovePlan {
     NotFound,
@@ -453,7 +463,7 @@ enum ApprovePlan {
 }
 
 /// The resolved inputs for a post: which draft to post, and the row whose forge posts it.
-#[cfg(feature = "review")]
+#[cfg(all(feature = "review", feature = "fleet"))]
 #[derive(Debug)]
 struct PostPlan {
     record: agent_core::ReviewDraftRecord,
@@ -463,7 +473,7 @@ struct PostPlan {
 /// Record the tenant + repo on a `fleet.*` span, each only when it passes `safe_segment`
 /// (defense in depth — the row is validated config, but a label/attribute value is never
 /// stamped unchecked). PR is recorded by the caller (a `u64`, always valid).
-#[cfg(feature = "review")]
+#[cfg(all(feature = "review", feature = "fleet"))]
 fn record_fleet_span(span: &tracing::Span, user: &str, repo: &str) {
     if agent_core::safe_segment(user) {
         span.record("tenant", user);
@@ -476,14 +486,14 @@ fn record_fleet_span(span: &tracing::Span, user: &str, repo: &str) {
 /// Tick `agent_fleet_approvals_total{outcome,user,repo}` for one approval, when both
 /// segments are `safe_segment`-valid (a malformed value records nothing, never a poisoned
 /// series). Best-effort observability — never on the approval's path.
-#[cfg(feature = "review")]
+#[cfg(all(feature = "review", feature = "fleet"))]
 fn record_fleet_approval(metrics: &Metrics, user: &str, repo: &str, outcome: &str) {
     if agent_core::safe_segment(user) && agent_core::safe_segment(repo) {
         metrics.for_fleet(user, repo).on_approval(outcome);
     }
 }
 
-#[cfg(feature = "review")]
+#[cfg(all(feature = "review", feature = "fleet"))]
 fn plan_approve(
     record: Option<agent_core::ReviewDraftRecord>,
     rows: &[agent_core::FleetSession],
@@ -514,7 +524,7 @@ fn plan_approve(
     Ok(ApprovePlan::Post(Box::new(PostPlan { record, row })))
 }
 
-#[cfg(feature = "review")]
+#[cfg(all(feature = "review", feature = "fleet"))]
 #[async_trait::async_trait]
 impl agent_core::FleetApprover for EngineApprover {
     async fn approve(&self, review_id: &str) -> agent_core::Result<agent_core::ApproveOutcome> {
@@ -584,14 +594,51 @@ impl agent_core::FleetApprover for EngineApprover {
                     ))
                 })?;
 
-            // Post as a review COMMENT — the fleet advises; a human decides approve/merge.
-            let comment = forge
-                .review_pr(record.pr_number, agent_core::ReviewVerdict::Comment, &body)
-                .await?;
+            // The authoritative idempotency guard (review-fleet C17). The `plan_approve`
+            // short-circuit above reads `status` from the eventually-consistent telemetry
+            // funnel, so it CANNOT prevent a double post on its own: two concurrent approves,
+            // or a re-approve inside the flush window, both see `drafted`. The lease is a
+            // durable, read-your-writes, cross-process compare-and-set — exactly one caller
+            // acquires it and posts; the rest stand down. Acquired immediately BEFORE the
+            // (irreversible) forge post.
+            match self.post_lease.acquire(review_id).await? {
+                agent_core::PostLease::Acquired => {}
+                // Already posted, or another approve is mid-post — an idempotent no-op. Never
+                // post a second comment.
+                agent_core::PostLease::AlreadyPosted | agent_core::PostLease::Held => {
+                    sp.record("outcome", "already");
+                    record_fleet_approval(&self.agent.metrics(), &row.user, &row.repo, "already");
+                    return Ok(agent_core::ApproveOutcome::AlreadyPosted);
+                }
+            }
 
-            // Persist status=posted — the idempotency key. A re-approve then finds `posted`
-            // (newest-by-ts) and short-circuits to AlreadyPosted, so a duplicate call never
-            // double-posts.
+            // Post as a review COMMENT — the fleet advises; a human decides approve/merge.
+            // On failure, RELEASE the held lease so a later approve can retry the post.
+            let comment = match forge
+                .review_pr(record.pr_number, agent_core::ReviewVerdict::Comment, &body)
+                .await
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    if let Err(re) = self.post_lease.release(review_id).await {
+                        tracing::warn!(review_id, error = %re,
+                            "approve: releasing the post lease after a failed post failed (soft)");
+                    }
+                    return Err(e);
+                }
+            };
+
+            // Commit the lease (held → posted): the durable idempotency key. Best-effort —
+            // a post that succeeded but whose commit fails still dedups (a leftover `held`
+            // lease makes the next approve stand down as AlreadyPosted), so a commit failure
+            // is never LESS safe; it must not fail the (already-succeeded) approve.
+            if let Err(e) = self.post_lease.commit(review_id).await {
+                tracing::warn!(review_id, error = %e,
+                    "approve: committing the post lease failed after a successful post (soft)");
+            }
+
+            // Also persist status=posted through the history funnel — feeds the cheap
+            // `plan_approve` early-out, the C16 head-oid dedup, and the operator's history.
             let mut posted = record.clone();
             posted.status = agent_core::draft_status::POSTED.to_string();
             self.agent.record_draft(posted).await;
@@ -656,6 +703,7 @@ impl Agent {
             config_store: None,
             provider_registry: None,
             fleet_registry: None,
+            fleet_post_lease: None,
             role_registry: None,
             forge_registry: None,
             transport_registry: None,
@@ -1000,6 +1048,13 @@ impl Agent {
         self
     }
 
+    /// Attach the approve→post idempotency lease (review-fleet C17), used by the fleet
+    /// approver to post each review at most once. Not consumed by the loop.
+    pub fn with_fleet_post_lease(mut self, l: Arc<dyn agent_core::FleetPostLease>) -> Self {
+        self.fleet_post_lease = Some(l);
+        self
+    }
+
     /// Attach the RBAC role-card store (config C1b), so it can be hosted over gRPC
     /// (`--serve-role`). Not consumed by the loop; the control-plane gate reads the
     /// ambient catalog snapshot the builder installs from this store at startup.
@@ -1309,6 +1364,12 @@ impl Agent {
         self.fleet_registry.clone()
     }
 
+    /// The approve→post idempotency lease, if one was resolved from config
+    /// (`[review_fleet] store`); `None` ⇒ the approver uses an in-process fallback.
+    pub fn fleet_post_lease(&self) -> Option<Arc<dyn agent_core::FleetPostLease>> {
+        self.fleet_post_lease.clone()
+    }
+
     /// The RBAC role-card store, if `[role] store` is configured (`--serve-role`).
     pub fn role_registry(&self) -> Option<Arc<dyn agent_core::RoleRegistry>> {
         self.role_registry.clone()
@@ -1449,21 +1510,28 @@ impl Agent {
     /// Approve stays UNIMPLEMENTED. `roster` is the same roster the control plane serves,
     /// used to resolve the draft's repo → its operational forge (the one that actually
     /// posts; the model's own in-loop forge stays read-only).
-    #[cfg(feature = "review")]
+    #[cfg(all(feature = "review", feature = "fleet"))]
     pub fn fleet_approver(
         self: &Arc<Self>,
         roster: Arc<dyn agent_core::FleetRegistry>,
     ) -> Option<Arc<dyn agent_core::FleetApprover>> {
         let history = self.fleet_history()?;
+        // The idempotency lease: the durable one resolved from config when present, else an
+        // in-process fallback that still closes same-process double-posts.
+        let post_lease = self
+            .fleet_post_lease()
+            .unwrap_or_else(|| Arc::new(agent_review_fleet::MemoryPostLease::new()));
         Some(Arc::new(EngineApprover {
             agent: self.clone(),
             roster,
             history,
+            post_lease,
         }))
     }
 
-    /// Without the `review` feature there is no draft to approve, so no approver.
-    #[cfg(not(feature = "review"))]
+    /// Without the `review`+`fleet` features there is no fleet draft to approve (and no
+    /// lease backend), so no approver.
+    #[cfg(not(all(feature = "review", feature = "fleet")))]
     pub fn fleet_approver(
         self: &Arc<Self>,
         _roster: Arc<dyn agent_core::FleetRegistry>,
@@ -5276,7 +5344,7 @@ mod tests {
     // parts that must be right before anything posts; they are table-tested here without a
     // forge or a store. The I/O tail (build forge, read `.md`, post, persist) is exercised
     // by the served roundtrip (agent-grpc) and the live `fleet-e2e` harness.
-    #[cfg(feature = "review")]
+    #[cfg(all(feature = "review", feature = "fleet"))]
     mod approve_plan {
         use super::*;
         use agent_core::{draft_status, FleetSession, ReviewDraftRecord};
