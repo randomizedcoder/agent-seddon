@@ -1736,6 +1736,26 @@ impl Agent {
 
     /// The core iteration loop over an existing working set: model call → tool
     /// dispatch → record → compact, until the model stops asking for tools (or
+    /// Strip image/document blocks the configured model can't accept (parity spec 26): a
+    /// non-vision model errors the WHOLE request on a single unsupported block, so degrade
+    /// to an explicit note instead. Shared by every in-loop turn AND the forced
+    /// max-iterations finalize turn — otherwise the finalize salvage is defeated in exactly
+    /// the case it exists for (a non-vision run whose context carries a tool-returned image).
+    fn media_gated(&self, mut messages: Vec<Message>) -> Vec<Message> {
+        if !self.provider.capabilities().supports_vision {
+            let mut dropped = 0usize;
+            for m in &mut messages {
+                dropped +=
+                    m.strip_media("[media omitted: the selected model does not support images]");
+            }
+            if dropped > 0 {
+                self.metrics.on_content_blocks_dropped(dropped as u64);
+                tracing::debug!(dropped, "stripped media for a non-vision model");
+            }
+        }
+        messages
+    }
+
     /// `max_iterations`). Mutates `working` in place and returns the final answer.
     // A core private loop with several genuinely-distinct per-turn params (state,
     // budget, tool ctx, the armed switch, and the two per-session observation sinks
@@ -1791,18 +1811,7 @@ impl Agent {
             // Capability gate: a model without vision must never be sent an image
             // block — one unsupported block errors the entire request, losing the
             // turn. Degrade to an explicit note instead (parity spec 26).
-            let mut messages = working.messages.clone();
-            if !self.provider.capabilities().supports_vision {
-                let mut dropped = 0usize;
-                for m in &mut messages {
-                    dropped += m
-                        .strip_media("[media omitted: the selected model does not support images]");
-                }
-                if dropped > 0 {
-                    self.metrics.on_content_blocks_dropped(dropped as u64);
-                    tracing::debug!(dropped, "stripped media for a non-vision model");
-                }
-            }
+            let messages = self.media_gated(working.messages.clone());
             for m in &messages {
                 for b in &m.content {
                     self.metrics.on_content_block(b.modality());
@@ -1933,6 +1942,30 @@ impl Agent {
                     working.messages.push(Message::user(TRUNCATION_NUDGE));
                     continue;
                 }
+                // An empty completion (finish=stop, no content, no tool call) is a
+                // degraded-provider non-answer, not a final answer — returning it would
+                // score a fake-empty success (in the fleet, a "successful" *empty* review).
+                // Nudge and continue, bounded by the same no-answer cap as truncation so a
+                // persistently-empty model records a DNF rather than returning "".
+                let text = assistant.content_text();
+                if text.is_empty() {
+                    consecutive_truncations += 1;
+                    if consecutive_truncations > MAX_CONSECUTIVE_TRUNCATIONS {
+                        anyhow::bail!(
+                            "model returned {consecutive_truncations} empty or truncated responses \
+                             in a row without completing a tool call or a final answer"
+                        );
+                    }
+                    tracing::warn!(
+                        iter,
+                        consecutive_truncations,
+                        finish = %resp.finish_reason,
+                        "empty completion with no tool call — nudging to continue \
+                         (an empty response is not a final answer)"
+                    );
+                    working.messages.push(Message::user(EMPTY_ANSWER_NUDGE));
+                    continue;
+                }
                 // A final-answer turn returns before the post-tool compaction that
                 // would consume an armed mode switch. Consume it here too: otherwise
                 // the switch survives into an unrelated later turn and fires a
@@ -1941,7 +1974,7 @@ impl Agent {
                 // session's current_mode, so only the stale reshape signal is dropped.
                 let _ = pending_switch.take();
                 self.memory.distill().await.ok();
-                return Ok(assistant.content_text());
+                return Ok(text);
             }
             // A productive (tool-call) turn clears the truncation streak.
             consecutive_truncations = 0;
@@ -2306,7 +2339,10 @@ impl Agent {
             .messages
             .push(Message::user(MAX_ITERATIONS_FINALIZE_NUDGE));
         let finalize_req = CompletionRequest {
-            messages: working.messages.clone(),
+            // Same capability gate as every in-loop turn — a non-vision model would
+            // otherwise error the whole finalize on a lingering image block, turning the
+            // salvage into a DNF exactly when it should rescue the run.
+            messages: self.media_gated(working.messages.clone()),
             // No tools: the model must answer in text, not start another action.
             tools: Vec::new(),
             max_tokens: effective_max_tokens,
@@ -2724,6 +2760,13 @@ fn now_ms() -> u64 {
 const TRUNCATION_NUDGE: &str = "Your previous message was cut off at the output-token \
 limit before it was complete. Continue exactly where you left off and finish it — if you \
 were emitting a tool call (for example writing a file), send the whole tool call this time.";
+
+/// Sent when a turn produced an empty completion (no text, no tool call, and not a
+/// truncation). An empty stop is a degraded-provider non-answer, not a final answer, so
+/// the loop nudges rather than returning it as a fake-empty success.
+const EMPTY_ANSWER_NUDGE: &str = "Your previous message was empty. Either take the next \
+action by calling a tool, or, if you are done, write your complete final answer now — an \
+empty response is not an answer.";
 
 /// Sent on the single forced finalize turn after the step budget is exhausted.
 /// Tools are disabled for that turn, so the model must produce its best final
@@ -5140,6 +5183,110 @@ mod tests {
         ]));
         let out = agent_over(provider, 50).run("go").await.unwrap();
         assert_eq!(out, "done", "6 truncations but never 4 in a row → no bail");
+    }
+
+    // ---- empty-completion handling (G2: not a fake-empty success) -----------
+
+    /// A `stop` turn carrying no text and no tool call — a degraded-provider non-answer.
+    fn empty_turn() -> CompletionResponse {
+        CompletionResponse {
+            message: agent_core::Message::assistant(""),
+            finish_reason: "stop".into(),
+            usage: None,
+        }
+    }
+
+    /// An empty completion is nudged (not returned as `Ok("")`); the model's next, real
+    /// answer wins — the empty turns were continuations, not the answer.
+    #[tokio::test]
+    async fn boundary_empty_answer_then_real_answer_recovers() {
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            empty_turn(),
+            empty_turn(),
+            empty_turn(),
+            final_turn("done"),
+        ]));
+        let script = provider.clone();
+        let out = agent_over(provider, 10).run("go").await.unwrap();
+        assert_eq!(out, "done", "an empty turn is not the final answer");
+        assert_eq!(
+            script.calls(),
+            (MAX_CONSECUTIVE_TRUNCATIONS + 1) as usize,
+            "three nudged empties, then the real answer"
+        );
+    }
+
+    /// A model that returns empty forever fails fast (a DNF error) rather than returning a
+    /// fake-empty success or spinning to the iteration ceiling.
+    #[tokio::test]
+    async fn corner_persistent_empty_answer_fails_fast() {
+        let provider = Arc::new(ScriptedProvider::new(vec![empty_turn()]));
+        let script = provider.clone();
+        let err = agent_over(provider, 50).run("go").await.unwrap_err();
+        assert!(
+            err.to_string().contains("empty"),
+            "expected an empty/non-answer error, got: {err}"
+        );
+        assert_eq!(
+            script.calls(),
+            (MAX_CONSECUTIVE_TRUNCATIONS + 1) as usize,
+            "bails on the 4th empty, far below the 50-iteration ceiling"
+        );
+    }
+
+    // ---- media_gated: shared non-vision strip (G1: finalize uses it too) ----
+
+    fn img_msg() -> agent_core::Message {
+        agent_core::Message::with_blocks(
+            agent_core::Role::User,
+            vec![
+                agent_core::ContentBlock::text("look at this"),
+                agent_core::ContentBlock::image("image/png", vec![0u8, 1, 2, 3]),
+            ],
+        )
+    }
+
+    /// A non-vision model must never be sent an image block (it errors the whole request):
+    /// the shared gate — used by BOTH every in-loop turn and the forced finalize turn —
+    /// strips it and leaves an explicit note.
+    #[tokio::test]
+    async fn positive_media_gated_strips_image_for_non_vision() {
+        // ScriptedProvider defaults to supports_vision = false.
+        let agent = agent_over(Arc::new(ScriptedProvider::new(vec![final_turn("x")])), 1);
+        let out = agent.media_gated(vec![img_msg()]);
+        let has_image = out
+            .iter()
+            .flat_map(|m| &m.content)
+            .any(|b| matches!(b, agent_core::ContentBlock::Image { .. }));
+        assert!(
+            !has_image,
+            "the image block must be stripped for a non-vision model"
+        );
+        let has_note = out
+            .iter()
+            .flat_map(|m| &m.content)
+            .any(|b| matches!(b, agent_core::ContentBlock::Text { text } if text.contains("media omitted")));
+        assert!(has_note, "a note replaces the stripped media");
+    }
+
+    /// A vision-capable model keeps its image blocks unchanged.
+    #[tokio::test]
+    async fn positive_media_gated_keeps_image_for_vision() {
+        let vision = ScriptedProvider::new(vec![final_turn("x")]).with_capabilities(
+            agent_core::ModelCapabilities {
+                supports_tools: true,
+                context_window: 1000,
+                supports_response_format: false,
+                supports_vision: true,
+            },
+        );
+        let agent = agent_over(Arc::new(vision), 1);
+        let out = agent.media_gated(vec![img_msg()]);
+        let has_image = out
+            .iter()
+            .flat_map(|m| &m.content)
+            .any(|b| matches!(b, agent_core::ContentBlock::Image { .. }));
+        assert!(has_image, "a vision model keeps its image blocks");
     }
 
     // ---- tool timeout + panic isolation ------------------------------------
