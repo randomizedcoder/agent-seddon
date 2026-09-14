@@ -51,6 +51,29 @@ impl Tool for ApplyPatchTool {
             Err(e) => return Ok(Observation::error(e)),
         };
 
+        // ---- alias-safe dedup: reject the same file named by two ops ----------
+        // `parse` already rejects the *same string* twice, but two ops can name
+        // one file by different spellings (`a.py` vs `./a.py` vs `dir/../a.py`):
+        // distinct raw strings that `confine` resolves to the same path. Each
+        // Update re-reads the ORIGINAL file and nothing is written until commit,
+        // so both would compute from the original and the commit's last write
+        // silently drops the other's edits (last-write-wins). Dedup on the
+        // *resolved* path. (A confine error is surfaced with full context by the
+        // validation loop below, so skip it here.)
+        let mut seen_full = std::collections::HashSet::new();
+        for op in &ops {
+            if let Ok(full) = confine(&ctx.cwd, op.path()) {
+                if !seen_full.insert(full) {
+                    return Ok(Observation::error(format!(
+                        "`{}`: the same file appears in more than one file operation \
+                         (possibly under different path spellings); combine them into \
+                         a single block",
+                        op.path()
+                    )));
+                }
+            }
+        }
+
         // ---- validation phase: plan every write, touch nothing on disk --------
         let mut plans: Vec<Plan> = Vec::new();
         let mut changes = 0usize;
@@ -640,6 +663,14 @@ mod tests {
     #[case::duplicate_update_path_rejected(
         &[("a.py", "x = 1\ny = 2\n")],
         envelope("*** Update File: a.py\n@@\n-x = 1\n+x = 11\n*** Update File: a.py\n@@\n-y = 2\n+y = 22"),
+        Err("more than one file operation"),
+    )]
+    // Aliased spellings of ONE file (`a.py` vs `./a.py`) are distinct strings, so
+    // the parse-time dedup misses them, but both confine to `cwd/a.py`. Without
+    // the resolved-path dedup the second write silently drops the first's edit.
+    #[case::aliased_update_path_rejected(
+        &[("a.py", "x = 1\ny = 2\n")],
+        envelope("*** Update File: a.py\n@@\n-x = 1\n+x = 11\n*** Update File: ./a.py\n@@\n-y = 2\n+y = 22"),
         Err("more than one file operation"),
     )]
     // Ambiguous context (two identical blocks, no hint/eof) must be refused, not
