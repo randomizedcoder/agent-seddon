@@ -804,6 +804,10 @@ fn shed_observer(agent: &Agent) -> agent_grpc::server::ShedObserver {
 /// [`MetricsLayer`]: agent_grpc::server::MetricsLayer
 fn rpc_observer(agent: &Agent) -> agent_grpc::server::RpcObserver {
     let metrics = agent.metrics();
+    // Pre-seed the bounded `rpc` label set with the known method paths, so an auth-disabled
+    // flood of unknown request paths can't crowd real methods out to `"other"`. Idempotent,
+    // so it is safe to run from every serve entry point.
+    metrics.seed_rpc_labels(&agent_grpc::server::rpc_method_paths());
     std::sync::Arc::new(move |rpc: &str, outcome: &str, tenant: &str, secs: f64| {
         metrics.record_grpc_rpc(rpc, outcome, tenant, secs);
     })

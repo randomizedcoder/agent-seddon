@@ -2572,6 +2572,25 @@ impl Metrics {
             .inc();
     }
 
+    /// Pre-seed the bounded `rpc` label set with the server's **known** method paths
+    /// (`/pkg.Service/Method`, from [`agent_proto::method_paths`], passed in by the gRPC
+    /// wiring so this low-level crate keeps no proto dependency).
+    ///
+    /// Without seeding, the high-water [`RpcBound`] admits paths first-come: an
+    /// auth-disabled flood of *unknown* (junk) paths can fill all `MAX_RPCS` slots before a
+    /// real method is first hit, collapsing that real method to the `"other"` sentinel and
+    /// degrading observability. Seeding the real methods up front guarantees each one keeps
+    /// its own label regardless of junk-path order (junk still collapses to `"other"` once
+    /// the bound is full — the memory was always bounded; this protects the *real* labels).
+    /// Idempotent, and a no-op past the cap.
+    pub fn seed_rpc_labels<S: AsRef<str>>(&self, paths: &[S]) {
+        if let Ok(mut b) = self.rpc_labels.lock() {
+            for p in paths {
+                b.admit(p.as_ref());
+            }
+        }
+    }
+
     /// Count one gRPC server request `{rpc, outcome, tenant}` and observe its latency
     /// `{rpc}` (the `MetricsLayer` tower service, bridged via the `RpcObserver`
     /// callback). `rpc` is the bounded request path (`/pkg.Service/Method`); `outcome`
@@ -4165,6 +4184,37 @@ mod tests {
                 "overflow path {overflow} must not become its own label (counter or latency):\n{text}"
             );
         }
+    }
+
+    #[test]
+    // B2: a seeded real method must keep its own label even when an (auth-disabled) flood of
+    // junk paths arrives FIRST and fills the bound — the exact regression seeding prevents.
+    fn positive_seeded_rpc_method_survives_a_junk_flood() {
+        let m = Metrics::new();
+        m.set_rpc_label_cap(3);
+        // Pre-seed one real method (as the serve wiring does from the descriptor set).
+        m.seed_rpc_labels(&["/pkg.Svc/Real"]);
+        // A junk flood arrives before the real method is ever hit; it fills the remaining
+        // slots and then overflows to `other`.
+        for j in 0..10 {
+            m.record_grpc_rpc(&format!("/junk/{j}"), "ok", "", 0.01);
+        }
+        // The real method, hit only now, still records as ITSELF (it was seeded), not `other`.
+        m.record_grpc_rpc("/pkg.Svc/Real", "ok", "", 0.01);
+        let text = m.encode_text();
+        assert!(
+            line_with(
+                &text,
+                "agent_grpc_server_rpc_total",
+                &[("rpc", "/pkg.Svc/Real")]
+            )
+            .is_some(),
+            "a seeded real method must survive a junk flood:\n{text}"
+        );
+        assert!(
+            line_with(&text, "agent_grpc_server_rpc_total", &[("rpc", "other")]).is_some(),
+            "junk still bounded to `other`:\n{text}"
+        );
     }
 
     #[rstest]

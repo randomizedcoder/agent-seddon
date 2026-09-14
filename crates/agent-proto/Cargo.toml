@@ -10,6 +10,8 @@ description = "protobuf/gRPC wire contracts for the agent-seddon seams + core<->
 agent-core = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }
+# decode the emitted FileDescriptorSet (method_paths, + the reflection descriptor test)
+prost-types = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 # W3C trace-context inject/extract over tonic metadata (helpers in src/trace.rs).
@@ -22,8 +24,6 @@ tonic-build = { workspace = true }
 rstest = { workspace = true }
 # concrete propagator for the trace round-trip test
 opentelemetry_sdk = { workspace = true }
-# decode the emitted FileDescriptorSet in the reflection descriptor test
-prost-types = { workspace = true }
 
 [lints]
 workspace = true

@@ -216,9 +216,17 @@ pub fn with_reflection(
     Ok(router.add_service(v1).add_service(v1alpha))
 }
 
+/// Every known gRPC method path (`/pkg.Service/Method`) the server can receive, from the
+/// wire descriptor set. Handed to `Metrics::seed_rpc_labels` at serve startup so a flood of
+/// unknown request paths can't crowd real methods out of the bounded `rpc` metric label.
+/// A thin re-export so the `agent-cli` wiring needn't depend on `agent-proto` directly.
+pub fn rpc_method_paths() -> Vec<String> {
+    agent_proto::method_paths()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{identity_key, span};
+    use super::{identity_key, rpc_method_paths, span};
     use agent_proto::identity::{inject_identity, SESSION_ID_KEY, USER_ID_KEY};
     use agent_testkit::observe::{captured_span_fields, SpanField};
     use tonic::metadata::{MetadataMap, MetadataValue};
@@ -243,6 +251,32 @@ mod tests {
             tracing::callsite::rebuild_interest_cache();
             let _s = span("/pkg.Svc/M", &meta_with(user, session));
         })
+    }
+
+    #[test]
+    fn positive_rpc_method_paths_are_well_formed_and_nonempty() {
+        // The seed set the metrics layer pre-loads must decode to real, well-formed method
+        // paths (`/pkg.Service/Method`) — the same shape `record_grpc_rpc` receives — so
+        // seeding actually protects the real labels. An empty vec would mean the descriptor
+        // failed to decode (a silent regression that would re-open the junk-flood gap).
+        let paths = rpc_method_paths();
+        assert!(!paths.is_empty(), "descriptor yielded no method paths");
+        for p in &paths {
+            assert!(p.starts_with('/'), "path must start with '/': {p}");
+            let segs: Vec<&str> = p[1..].split('/').collect();
+            assert_eq!(segs.len(), 2, "path must be /Service/Method: {p}");
+            assert!(
+                !segs[0].is_empty() && !segs[1].is_empty(),
+                "no empty segment: {p}"
+            );
+        }
+        // The set is deduped-by-construction across files and comfortably within the metric
+        // label bound, so seeding can never itself exhaust the cap.
+        assert!(
+            paths.len() < 256,
+            "far more RPCs than expected: {}",
+            paths.len()
+        );
     }
 
     #[test]
