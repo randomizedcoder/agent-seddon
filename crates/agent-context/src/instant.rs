@@ -51,6 +51,11 @@ pub struct InstantCfg {
     pub min_coverage: f32,
     pub facts_max_chars: usize,
     pub alternatives_max_chars: usize,
+    /// Cap on the assembled "summary of earlier conversation" block. Bounds the
+    /// ledger-rebuild's dominant section so a large ledger can't build a pathological
+    /// system block (the token-budget re-check in `compact` is the hard backstop; this
+    /// keeps the common case within budget so the rebuild is actually accepted).
+    pub summaries_max_chars: usize,
 }
 
 impl Default for InstantCfg {
@@ -61,6 +66,7 @@ impl Default for InstantCfg {
             min_coverage: 0.6,
             facts_max_chars: 4_096,
             alternatives_max_chars: 2_048,
+            summaries_max_chars: 8_192,
         }
     }
 }
@@ -74,6 +80,7 @@ impl InstantCfg {
         self.objective_max_tokens = self.objective_max_tokens.clamp(32, 512);
         self.facts_max_chars = self.facts_max_chars.min(16 * 1024);
         self.alternatives_max_chars = self.alternatives_max_chars.min(8 * 1024);
+        self.summaries_max_chars = self.summaries_max_chars.min(32 * 1024);
         self
     }
 }
@@ -310,13 +317,25 @@ impl InstantWindow {
 
         let mut block = format!("## Current objective\n{objective}\n");
         block.push_str("\n## Summary of earlier conversation (from the session ledger)\n");
-        for d in &kept {
+        // Bound the dominant section: keep the most-recent summaries within the char
+        // budget (oldest dropped first) so a large ledger can't build a pathological
+        // block. `kept` is chronological; walk newest-first, then restore order.
+        let mut chosen: Vec<&str> = Vec::new();
+        let mut used = 0usize;
+        for d in kept.iter().rev() {
             // Screened at write AND at read (defense in depth).
             if scan_for_injection(&d.text).is_some() {
                 tracing::warn!(seq = d.seq, "instant compaction: flagged summary dropped");
                 continue;
             }
-            block.push_str(&d.text);
+            if used + d.text.len() + 1 > self.cfg.summaries_max_chars && !chosen.is_empty() {
+                break;
+            }
+            used += d.text.len() + 1;
+            chosen.push(&d.text);
+        }
+        for text in chosen.iter().rev() {
+            block.push_str(text);
             block.push('\n');
         }
         push_section(&mut block, "## Key facts", &facts, self.cfg.facts_max_chars);
@@ -364,9 +383,19 @@ impl ContextStrategy for InstantWindow {
                 .assemble_from_ledger(&working.messages, head, cut)
                 .await
             {
-                // Post-assembly invariant: actually smaller, or the ledger block
-                // defeated the point — fall back.
-                if rebuilt.len() < working.messages.len() {
+                // Post-assembly invariant: the rebuild must be both smaller AND fit
+                // the model's context window. Accepting on message count alone let an
+                // over-large ledger block (many/long summaries) return `Budget` while
+                // still larger than the whole window — the very next
+                // `provider.complete` would then reject the over-window context and
+                // fail the run. Re-check tokens against `max_context_tokens` (the hard
+                // ceiling; being over the softer `target` is fine — `reserve_output`
+                // absorbs it, as the count-based path always tolerated). A miss falls
+                // through to the classic summarizer, which collapses the span into one
+                // bounded summary.
+                if rebuilt.len() < working.messages.len()
+                    && self.inner.budget_tokens(&rebuilt).await <= budget.max_context_tokens
+                {
                     tracing::info!(
                         kept = rebuilt.len(),
                         "instant compaction assembled from the digest ledger"
@@ -454,6 +483,17 @@ mod tests {
         }
     }
 
+    /// A realistic window: large enough that a genuine ledger-assembled block fits
+    /// (so the ledger path is *accepted*, not rejected by the fit check), yet still
+    /// below a big working set so compaction triggers. Used by the assembly-content
+    /// tests, which need the rebuild to actually land in the working set.
+    fn roomy_budget() -> TokenBudget {
+        TokenBudget {
+            max_context_tokens: 8_000,
+            reserve_output: 100,
+        }
+    }
+
     fn ledger(exchanges: u64) -> Arc<SqliteDigests> {
         let store = SqliteDigests::in_memory().unwrap();
         for row in testdata::session_rows("s1", exchanges) {
@@ -485,11 +525,11 @@ mod tests {
         let provider = Arc::new(ScriptedProvider::new(vec![final_turn(
             "Implement the DigestStore seam and its sqlite backend.",
         )]));
-        let w = window(provider, ledger(8), Relevance::Keyword);
-        let mut ws = working(8);
+        let w = window(provider, ledger(120), Relevance::Keyword);
+        let mut ws = working(120);
         let before = ws.messages.len();
         agent_core::scope(key(), async {
-            w.compact(&mut ws, &budget(), None).await.unwrap();
+            w.compact(&mut ws, &roomy_budget(), None).await.unwrap();
         })
         .await;
         assert!(ws.messages.len() < before, "compacted");
@@ -511,10 +551,10 @@ mod tests {
         let provider = Arc::new(ScriptedProvider::new(vec![final_turn(
             "Implement the DigestStore seam and its sqlite backend now.",
         )]));
-        let w = window(provider, ledger(8), Relevance::Keyword);
-        let mut ws = working(8);
+        let w = window(provider, ledger(120), Relevance::Keyword);
+        let mut ws = working(120);
         agent_core::scope(key(), async {
-            w.compact(&mut ws, &budget(), None).await.unwrap();
+            w.compact(&mut ws, &roomy_budget(), None).await.unwrap();
         })
         .await;
         let block = ws.messages[1].content_text();
@@ -625,6 +665,93 @@ mod tests {
             objectives.iter().any(|d| d.text.contains("DigestStore")),
             "objective filed: {objectives:?}"
         );
+    }
+
+    /// A ledger of `n` oversized summary rows (each `text_len` bytes) — used to make
+    /// the assembled block exceed the token target / the summaries char cap.
+    fn big_summary_ledger(n: u64, text_len: usize) -> Arc<SqliteDigests> {
+        let store = SqliteDigests::in_memory().unwrap();
+        for seq in 1..=n {
+            store
+                .put_sync(Digest {
+                    session_id: "s1".into(),
+                    user_id: "local".into(),
+                    seq,
+                    kind: DigestKind::Summary,
+                    text: format!("summary {seq}: {}", "z".repeat(text_len)),
+                    keywords: vec!["summary".into()],
+                    mode: "implement".into(),
+                    model: "kimi".into(),
+                    ts_ms: 1_700_000_000_000 + seq * 90_000,
+                    duration_ms: 800,
+                    tokens: 200,
+                })
+                .unwrap();
+        }
+        Arc::new(store)
+    }
+
+    #[tokio::test]
+    async fn corner_over_budget_ledger_block_falls_back_not_falsely_accepted() {
+        // L3: the ledger assembles a block far larger than the token target. The old
+        // accept-on-message-count returned `Budget` while STILL over target — the very
+        // next `provider.complete` would then reject the over-window context and fail
+        // the run. Now the post-assembly token re-check rejects the oversized block and
+        // the classic summarizer runs instead (which fits).
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            final_turn("Objective: keep working on the ledger."), // the objective() call
+            final_turn("CLASSIC-SUMMARY of the whole span"),      // the fallback summarizer
+        ]));
+        let w = window(provider, big_summary_ledger(8, 400), Relevance::All);
+        let mut ws = working(8);
+        agent_core::scope(key(), async {
+            w.compact(&mut ws, &budget(), None).await.unwrap();
+        })
+        .await;
+        let joined: String = ws.messages.iter().map(Message::content_text).collect();
+        assert!(
+            joined.contains("CLASSIC-SUMMARY"),
+            "compaction fell back to the summarizer"
+        );
+        assert!(
+            !joined.contains("zzzz"),
+            "the oversized ledger block was rejected, not accepted over-budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn boundary_summaries_section_is_capped() {
+        // A huge ledger is bounded: even with many long summaries the assembled
+        // "summary of earlier conversation" section stays within `summaries_max_chars`
+        // (default 8192), and the rebuild is still accepted under a generous target.
+        let provider = Arc::new(ScriptedProvider::new(vec![final_turn(
+            "Objective: keep working on the ledger.",
+        )]));
+        let w = window(provider, big_summary_ledger(140, 400), Relevance::All);
+        let budget = TokenBudget {
+            max_context_tokens: 4_100,
+            reserve_output: 100,
+        };
+        let mut ws = working(60);
+        agent_core::scope(key(), async {
+            w.compact(&mut ws, &budget, None).await.unwrap();
+        })
+        .await;
+        let block = ws.messages[1].content_text();
+        assert!(
+            block.contains("## Current objective"),
+            "the ledger path was accepted (not a fallback)"
+        );
+        let start = block
+            .find("## Summary of earlier conversation")
+            .expect("summary header present");
+        // facts/alternatives sections are empty here, so summaries run to the end.
+        let section_len = block.len() - start;
+        assert!(
+            section_len <= 8192 + 1024,
+            "summary section capped to summaries_max_chars: {section_len} chars"
+        );
+        assert!(block.contains("zzzz"), "some summaries were kept");
     }
 
     #[tokio::test]

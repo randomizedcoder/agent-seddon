@@ -536,6 +536,7 @@ pub fn register_builtins(r: &mut Registry) {
                 min_coverage: cfg.min_coverage,
                 facts_max_chars: cfg.facts_max_chars,
                 alternatives_max_chars: cfg.alternatives_max_chars,
+                summaries_max_chars: cfg.summaries_max_chars,
             })
             .with_tokenizer(ctx.tokenizer().cloned(), ctx.cfg.provider.model.clone()),
         ) as Arc<dyn ContextStrategy>)
