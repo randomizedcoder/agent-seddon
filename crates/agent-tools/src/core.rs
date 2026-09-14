@@ -237,7 +237,10 @@ fn render_read(text: &str, offset: Option<u64>, limit: Option<u64>, line_numbers
         .unwrap_or(0)
         .min(total);
     let end = match limit {
-        Some(l) => (start + l as usize).min(total),
+        // `limit` is attacker-chosen: `start + huge` overflows (debug: panic;
+        // release: wraps below `start`, so `lines[start..end]` panics). Saturate so
+        // `end` stays in `[start, total]` and the slice is always valid.
+        Some(l) => start.saturating_add(l as usize).min(total),
         None => total,
     };
 
@@ -401,6 +404,23 @@ mod tests {
         assert!(!obs.is_error);
         assert!(obs.content.ends_with("[output truncated]"));
         assert!(obs.content.len() <= MAX_OUTPUT + "\n...[output truncated]".len());
+    }
+
+    // A hostile `limit` near u64::MAX must not overflow `start + limit`: `end`
+    // saturates within `[start, total]`, so the read returns the available lines
+    // rather than panicking (debug overflow-check) or slicing `lines[start..<start]`.
+    #[test]
+    fn adversarial_render_read_huge_limit_does_not_overflow() {
+        let out = render_read("l1\nl2\nl3", Some(1), Some(u64::MAX), false);
+        assert!(out.contains("l1") && out.contains("l3"), "{out}");
+    }
+
+    // Offset past EOF combined with a huge limit is also safe: an empty slice, no
+    // panic.
+    #[test]
+    fn boundary_render_read_offset_past_eof_huge_limit() {
+        let out = render_read("only", Some(1000), Some(u64::MAX), false);
+        assert!(!out.contains("only"), "{out}");
     }
 
     // A binary file (invalid UTF-8 / NUL bytes) is reported cleanly — a non-error
