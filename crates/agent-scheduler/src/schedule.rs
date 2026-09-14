@@ -168,10 +168,17 @@ impl Field {
             if lo > hi {
                 return Err(Error::Scheduler(format!("inverted cron range `{range}`")));
             }
+            // `step` is attacker/model-controlled (any `u32`, only 0 rejected above), so
+            // `v + step` can overflow — a debug panic that kills the scheduling task, a
+            // wrapping (wrong-but-bounded) set in release. Step with `checked_add` and
+            // stop at the ceiling; `hi <= max` bounds the field, so this terminates.
             let mut v = lo;
             while v <= hi {
                 out.push(v);
-                v += step;
+                match v.checked_add(step) {
+                    Some(next) => v = next,
+                    None => break,
+                }
             }
         }
         out.sort_unstable();
@@ -408,6 +415,19 @@ mod tests {
         // Feb 30 never exists.
         let s = parse("0 0 30 2 *", MON).unwrap();
         assert_eq!(next_fire(&s, MON), None, "must give up, not hang");
+    }
+
+    /// A hostile cron `step` must not overflow the field enumeration: `v += step`
+    /// used to panic in debug (killing the scheduling task) and wrap to a bogus set in
+    /// release. Parsing must succeed and yield exactly the one in-range value.
+    #[test]
+    fn adversarial_huge_cron_step_does_not_overflow() {
+        let spec = format!("59/{} * * * *", u32::MAX);
+        let s = parse(&spec, MON).expect("hostile step parses without panicking");
+        let got = next_fire(&s, MON).expect("schedule is usable, not empty");
+        // The only minute in the set is 59 — a release-mode wrap would have injected
+        // bogus minutes and fired at the wrong one.
+        assert_eq!(civil_from_epoch_ms(got).minute, 59, "only :59 matches");
     }
 
     /// A huge interval must not overflow into the past.
