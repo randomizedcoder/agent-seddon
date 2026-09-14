@@ -454,3 +454,48 @@ async fn corner_worktree_of_fetched_pr_is_advisory_readonly() {
     assert!(!h.writable, "handle marked read-only (advisory)");
     b.worktree_remove("pr-ro").await.unwrap();
 }
+
+/// Adversarial: a model-controlled revision like `--output=<file>` must never
+/// reach `git log`/`ls-tree` as an option — `git log --output=<file>` writes and
+/// truncates that file, an escape past path confinement. The backend resolves the
+/// revision to an oid first (`rev-parse --verify` rejects a leading-dash value),
+/// so every walk fails closed and the victim file is left untouched.
+#[tokio::test]
+async fn adversarial_revision_arg_injection_cannot_write_a_file() {
+    let dir = fixture();
+    let victim = dir.join("victim.txt");
+    std::fs::write(&victim, "ORIGINAL").unwrap();
+    let b = backend(&dir);
+
+    let hostile = format!("--output={}", victim.display());
+    let rev = Revision::from(hostile.as_str());
+
+    assert!(
+        b.log(&rev, None, 10).await.is_err(),
+        "log must reject a leading-dash revision"
+    );
+    assert!(
+        b.log_touched(&rev, 10).await.is_err(),
+        "log_touched must reject a leading-dash revision"
+    );
+    assert!(
+        b.list_tree(&rev, Path::new(""), false).await.is_err(),
+        "list_tree must reject a leading-dash revision"
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(&victim).unwrap(),
+        "ORIGINAL",
+        "the victim file must be untouched by any of the three walks"
+    );
+}
+
+/// A benign revision still resolves and walks correctly after the resolve-first
+/// change (no behavioural regression for real refs/oids).
+#[tokio::test]
+async fn positive_log_still_walks_a_real_branch() {
+    let dir = fixture();
+    let b = backend(&dir);
+    let commits = b.log(&Revision::from("main"), None, 10).await.unwrap();
+    assert!(!commits.is_empty(), "main has at least the init commit");
+}
