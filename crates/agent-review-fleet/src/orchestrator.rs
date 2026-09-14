@@ -552,18 +552,30 @@ impl FleetOrchestrator {
             }
         }
 
-        // Idempotent add: a prior round for this PR (a crash, a poller re-fire, or a
-        // new head) can leave a `pr-{pr}` worktree registered; the id is head-oid-
-        // independent, so re-adding collides (`fatal: '…/worktrees/pr-N' already
-        // exists`). Remove any stale one first — best-effort: a not-found remove is
-        // expected and ignored, and this also makes the re-checkout land at the new
-        // head rather than reusing a stale tree.
-        let _ = repo.worktree_remove(&format!("pr-{pr}")).await;
+        // The per-review worktree id. Keyed by **both** the PR and the review's
+        // `session_id` — the same `(session_id, pr)` pair that keys `in_flight` dedup —
+        // *not* `pr-{pr}` alone. In single-repo mode (no per-row factory: `review.backend`
+        // != "local" or the root unset — a real default) every row shares the one global
+        // repo, so two distinct rows watching the same PR# (e.g. a security row and a
+        // style row) would otherwise share the `pr-{pr}` worktree: row B's stale-remove
+        // and its post-run cleanup would delete the very tree row A's spawned task is
+        // still reviewing. Distinct sessions ⇒ distinct worktrees ⇒ no cross-delete;
+        // same (row, pr) re-fire ⇒ same id ⇒ the idempotent remove-before-add below still
+        // reaps its own stale tree. `session_id` is untrusted, so the id is sanitized and
+        // capped safe_segment-valid by construction (`review_worktree_id`).
+        let wt_id = review_worktree_id(pr, &trigger.session_id);
+        // Idempotent add: a prior round for this (session, PR) (a crash, a poller re-fire,
+        // or a new head) can leave the worktree registered; the id is head-oid-independent,
+        // so re-adding collides (`fatal: '…/worktrees/<id>' already exists`). Remove any
+        // stale one first — best-effort: a not-found remove is expected and ignored, and
+        // this also makes the re-checkout land at the new head rather than reusing a stale
+        // tree.
+        let _ = repo.worktree_remove(&wt_id).await;
         let _worktree = repo
             .worktree_add(&WorktreeSpec {
                 revision: head,
                 writable: false,
-                id: Some(format!("pr-{pr}")),
+                id: Some(wt_id.clone()),
             })
             .await?;
 
@@ -627,6 +639,9 @@ impl FleetOrchestrator {
         // nothing else reaps the per-row factory repo). Captured before `repo` is
         // shadowed below by the repo *name* string used in the draft record.
         let review_repo = repo.clone();
+        // The per-review worktree id, moved into the task so it reaps exactly this
+        // review's worktree (matching the `(session_id, pr)`-keyed add above).
+        let wt_id_task = wt_id;
         let repo = row.repo.clone();
         let key_run = key.clone();
         let sid = trigger.session_id.clone();
@@ -713,9 +728,9 @@ impl FleetOrchestrator {
                             "fleet: review run failed (no draft) — recorded status=failed, will retry on next trigger");
                     }
                 }
-                // Reap this PR's read-only worktree so disk doesn't grow one checkout
+                // Reap this review's read-only worktree so disk doesn't grow one checkout
                 // per reviewed PR. Best-effort — never fail a review on cleanup.
-                if let Err(e) = review_repo.worktree_remove(&format!("pr-{pr}")).await {
+                if let Err(e) = review_repo.worktree_remove(&wt_id_task).await {
                     tracing::debug!(session_id = %sid, pr, error = %e,
                         "fleet: worktree cleanup failed (soft)");
                 }
@@ -730,6 +745,38 @@ impl FleetOrchestrator {
             "fleet: review started");
         Ok(Handled::Reviewing { key })
     }
+}
+
+/// The git-worktree id for one review round, keyed by `(session_id, pr)` — the same pair
+/// that keys `in_flight` dedup — so two rows watching the same PR in single-repo mode get
+/// **distinct** worktrees and never cross-delete each other's checkout.
+///
+/// `session_id` is untrusted (a roster row id from a gRPC peer / hand-edited file), and the
+/// result becomes a path segment, so it is sanitized to the `safe_segment` charset and
+/// capped: `pr<pr>-<sanitized session>`, well-formed by construction (non-empty, no leading
+/// `-`/`.`, ≤ `MAX_SEGMENT_LEN`) — the same encode-don't-widen approach as
+/// [`encode_review_session_id`]. `pr` is a `u64` so the prefix is always in-charset and
+/// never leads with `-`.
+fn review_worktree_id(pr: u64, session_id: &str) -> String {
+    let prefix = format!("pr{pr}-");
+    let sanitized: String = session_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '_' | '.') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    // A leading `-`/`.` on the session part is harmless (the `pr<pr>-` prefix leads), but
+    // cap so `prefix + base` fits MAX_SEGMENT_LEN.
+    let max_base = agent_core::MAX_SEGMENT_LEN.saturating_sub(prefix.len());
+    let mut base = sanitized;
+    base.truncate(max_base);
+    // If the session part sanitized/truncated to nothing, `pr<pr>-` alone is still a valid
+    // segment; keep it rather than emitting a bare dangling id.
+    format!("{prefix}{base}")
 }
 
 #[cfg(test)]
@@ -1285,17 +1332,18 @@ mod tests {
 
     #[tokio::test]
     async fn positive_stale_worktree_removed_before_add() {
-        // desc: a prior round left a `pr-42` worktree registered (a crash, or a re-fire
-        // on a new head). expect: the run removes it before re-adding, so the add can't
-        // collide and the re-review succeeds — the exact failure the l2 demo hit
-        // (`fatal: '…/worktrees/pr-42' already exists`).
+        // desc: a prior round for this same (session, pr) left its worktree registered (a
+        // crash, or a re-fire on a new head). expect: the run removes it before re-adding,
+        // so the add can't collide and the re-review succeeds — the exact failure the l2
+        // demo hit (`fatal: '…/worktrees/…' already exists`).
         let roster = seeded(&[row("web", true)]).await;
         let repo = Arc::new(agent_testkit::FixtureRepo::new());
-        // Seed the collision the real git backend raises on a second add of a live id.
+        // Seed the collision the real git backend raises on a second add of a live id —
+        // under the review's own `(session, pr)`-keyed id (`review_worktree_id(42,"web")`).
         repo.worktree_add(&WorktreeSpec {
             revision: agent_core::Revision("stale".into()),
             writable: false,
-            id: Some("pr-42".into()),
+            id: Some(review_worktree_id(42, "web")),
         })
         .await
         .expect("seed stale worktree");
@@ -1313,7 +1361,7 @@ mod tests {
         assert!(o.join("web", 42).await);
         assert!(
             repo.worktree_list().await.unwrap().is_empty(),
-            "no duplicate pr-42 accumulates; the run reaps its worktree"
+            "no duplicate worktree accumulates; the run reaps its worktree"
         );
     }
 
@@ -2428,5 +2476,80 @@ mod tests {
         r.user = user.into();
         r.repo = repo.into();
         assert_eq!(o.fleet_metrics(&r).is_some(), admits);
+    }
+
+    // ---- review_worktree_id (R2: per-(session,pr) worktree, no cross-delete) ----------
+
+    #[rstest]
+    // Two distinct rows watching the same PR# must get DISTINCT worktree ids — the whole
+    // point: in single-repo mode a shared `pr-{pr}` id let row B delete row A's checkout.
+    fn positive_distinct_sessions_yield_distinct_worktree_ids() {
+        let a = review_worktree_id(7, "security-row");
+        let b = review_worktree_id(7, "style-row");
+        assert_ne!(a, b, "distinct sessions must not share a worktree id");
+        assert!(agent_core::safe_segment(&a) && agent_core::safe_segment(&b));
+    }
+
+    #[rstest]
+    // A re-fire of the SAME (session, pr) must be stable so the idempotent
+    // remove-before-add reaps its own stale tree.
+    fn positive_same_session_and_pr_is_stable() {
+        assert_eq!(
+            review_worktree_id(42, "row-abc"),
+            review_worktree_id(42, "row-abc")
+        );
+    }
+
+    #[rstest]
+    // The same row reviewing two different PRs concurrently must get distinct worktrees
+    // (matching the `(session_id, pr)` in_flight key).
+    fn positive_same_session_distinct_pr_differ() {
+        assert_ne!(
+            review_worktree_id(1, "row-abc"),
+            review_worktree_id(2, "row-abc")
+        );
+    }
+
+    #[rstest]
+    // A long session id is capped so `prefix + base` stays within MAX_SEGMENT_LEN and the
+    // id remains a valid single segment.
+    fn boundary_long_session_id_capped_and_valid() {
+        let id = review_worktree_id(9, &"x".repeat(300));
+        assert!(id.len() <= agent_core::MAX_SEGMENT_LEN);
+        assert!(
+            agent_core::safe_segment(&id),
+            "capped id must be valid: {id}"
+        );
+    }
+
+    #[rstest]
+    // An empty session part still yields a well-formed segment (`pr<n>-`), never a bare/
+    // dangling id.
+    fn corner_empty_session_id_still_valid() {
+        let id = review_worktree_id(5, "");
+        assert!(agent_core::safe_segment(&id), "id must be valid: {id}");
+    }
+
+    #[rstest]
+    // session_id is untrusted: traversal, path separators, and git-ref-special chars must
+    // be sanitized so the id can never escape the worktrees dir or inject a ref — the
+    // result is always a single safe_segment with no `/`, `..`, or leading `-`.
+    #[case::traversal("../../etc/passwd")]
+    #[case::separators("owner/name")]
+    #[case::ref_special("~^:?*[")]
+    #[case::leading_dash("-rf")]
+    #[case::dotdot("..")]
+    fn adversarial_hostile_session_id_sanitized(#[case] session: &str) {
+        let id = review_worktree_id(3, session);
+        // `safe_segment` is the real invariant git worktree relies on: it guarantees a
+        // single component (no `/`), not exactly `.`/`..`, no leading `-`, charset-bound —
+        // so the id can neither escape the worktrees dir nor inject a git ref. (An internal
+        // `.` substring is legitimately allowed, e.g. `repo.name`, and is harmless inside a
+        // single path component.)
+        assert!(
+            agent_core::safe_segment(&id),
+            "hostile session `{session}` must sanitize to a valid segment, got `{id}`"
+        );
+        assert!(!id.contains('/') && !id.starts_with('-') && id != "..");
     }
 }
