@@ -3267,6 +3267,32 @@ pub(crate) fn resolve_transport_registry(
     Ok(store)
 }
 
+/// Validate a loaded cognition-graph document, failing closed with a message that
+/// names the first few typed issues. Every store backend must clear this before
+/// the executor sees the document (the executor indexes `doc.nodes[&id]` and
+/// panics on a dangling edge). The file store validates in its own `load`, but
+/// the gRPC store only wire-decodes — so this is the uniform guard.
+#[cfg(feature = "graph")]
+fn validate_graph_doc(doc: &agent_core::GraphDoc) -> anyhow::Result<()> {
+    let issues = agent_graph::validate(doc, &agent_graph::NodeTypeRegistry::builtin());
+    if issues.is_empty() {
+        return Ok(());
+    }
+    let mut shown: Vec<String> = issues
+        .iter()
+        .take(3)
+        .map(|i| format!("[{}] {}: {}", i.code.as_str(), i.node, i.detail))
+        .collect();
+    if issues.len() > shown.len() {
+        shown.push(format!("… and {} more", issues.len() - shown.len()));
+    }
+    anyhow::bail!(
+        "invalid cognition-graph document ({} issue(s)): {}",
+        issues.len(),
+        shown.join("; ")
+    )
+}
+
 /// Build the `[graph] store` backend and, for a non-empty document, compile it
 /// and overlay the plan onto the config (cognition-graph 04's anchor-slot
 /// executor: the graph drives the same engines the TOML blocks drive). Returns
@@ -3331,8 +3357,6 @@ async fn resolve_cognition_graph(
         );
         return Ok((store, None, None));
     }
-    // The store re-validates on read, so an invalid document fails closed HERE
-    // — a startup error naming the typed issues — never at the executor.
     let doc = s
         .get()
         .await
@@ -3341,6 +3365,12 @@ async fn resolve_cognition_graph(
         // An empty document = the built-in, graph-less behavior.
         return Ok((store, None, None));
     }
+    // Fail closed on an invalid document HERE — a startup error naming the typed
+    // issues — never at the executor, which indexes `doc.nodes[&id]` and would
+    // *panic* on a dangling edge. Only the file store validates inside its own
+    // `load`; the gRPC store's `get` merely wire-decodes, so an untrusted graph
+    // server could hand us a document with a dangling edge or unknown node type.
+    validate_graph_doc(&doc)?;
     let plan = crate::cognition::compile(&doc);
     for w in &plan.warnings {
         tracing::warn!(target: "cognition", "graph compile: {w}");
@@ -4065,6 +4095,31 @@ mod seam_builder_tests {
             "gate-only doc: no distillation"
         );
         assert_eq!(cfg.agent.provider, "consensus", "gate overlay applied");
+    }
+
+    /// A valid document (the one the file store already accepts) clears the
+    /// uniform guard.
+    #[cfg(feature = "graph")]
+    #[test]
+    fn positive_valid_graph_doc_passes() {
+        assert!(validate_graph_doc(&agent_graph::testdata::simple()).is_ok());
+    }
+
+    /// A dangling `main` edge (target node doesn't exist) is rejected by the guard
+    /// rather than reaching the executor, which indexes `doc.nodes[&id]` and would
+    /// panic. This is exactly what the gRPC store's non-validating `get` let
+    /// through before the fix — the file store's own `load` would have caught it.
+    #[cfg(feature = "graph")]
+    #[test]
+    fn adversarial_dangling_edge_is_rejected_not_panicked() {
+        let mut doc = agent_graph::testdata::simple();
+        // simple()'s edges[1] is generate→gate (Main); point it at a ghost node.
+        doc.edges[1].to = "ghost".into();
+        let err = validate_graph_doc(&doc).unwrap_err().to_string();
+        assert!(
+            err.contains("invalid cognition-graph document"),
+            "expected a validation error, got: {err}"
+        );
     }
 }
 
