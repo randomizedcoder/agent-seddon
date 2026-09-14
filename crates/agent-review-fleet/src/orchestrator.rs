@@ -257,11 +257,40 @@ impl Drop for ReviewTask {
     }
 }
 
+/// Upper bound on any single **forge-touching** prep step in [`FleetOrchestrator::handle`]
+/// (`review_factory.build`, `fetch_pr`, grounding). The drain loop is serial (one trigger
+/// at a time — an intentional throttle), and while the multi-minute review *run* is spawned
+/// off it, this prep runs **inline**. A slow or hostile forge that never responds would
+/// otherwise stall the whole fleet's trigger processing indefinitely. The timeout converts
+/// an unbounded hang into a bounded, logged failure; the trigger simply re-fires and retries
+/// cleanly (the worktree add is idempotent). Generous, so a real clone/fetch of a large repo
+/// still completes well within it.
+const PREP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Bound one forge-touching prep future by `budget`, mapping an elapsed timeout to a fleet
+/// error that names the step (so the drain loop logs *what* hung). `budget` is a parameter
+/// (production passes [`PREP_TIMEOUT`]) so the timeout path is testable with real time.
+async fn with_prep_timeout<T>(
+    what: &str,
+    budget: std::time::Duration,
+    fut: impl std::future::Future<Output = agent_core::Result<T>>,
+) -> agent_core::Result<T> {
+    match tokio::time::timeout(budget, fut).await {
+        Ok(r) => r,
+        Err(_) => Err(agent_core::Error::Fleet(format!(
+            "{what} exceeded the {}s fleet prep timeout (slow/unresponsive forge)",
+            budget.as_secs()
+        ))),
+    }
+}
+
 /// Drives one PR through the review state machine `triggered → cloning → reviewing →
 /// drafted`. **Single consumer:** [`Self::handle`] is called serially by one drain loop
-/// (the bounded [`TriggerQueue`] serializes triggers) and is **non-blocking** — it does
-/// the synchronous prep, then spawns a per-review task that awaits the (possibly long)
-/// review run and renders+persists the draft, so the drain loop keeps moving.
+/// (the bounded [`TriggerQueue`] serializes triggers) and is **non-blocking** for the
+/// review run — it does the synchronous prep (each forge-touching step bounded by
+/// [`PREP_TIMEOUT`] so a hung forge can't stall the loop), then spawns a per-review task
+/// that awaits the (possibly long) review run and renders+persists the draft, so the drain
+/// loop keeps moving.
 pub struct FleetOrchestrator {
     roster: Arc<dyn FleetRegistry>,
     repo: Arc<dyn RepoBackend>,
@@ -539,21 +568,26 @@ impl FleetOrchestrator {
         // to the process-global `repo`/`grounder` (fail-soft — a review still runs,
         // ungrounded, with no draft). Without a factory, use the globals (single-repo).
         let (repo, grounder) = match &self.review_factory {
-            Some(factory) => match factory.build(&row).await {
-                Ok(ctx) => (ctx.repo, Some(ctx.grounder)),
-                Err(e) => {
-                    tracing::warn!(session_id = %trigger.session_id, pr, error = %e,
+            Some(factory) => {
+                match with_prep_timeout("review factory build", PREP_TIMEOUT, factory.build(&row))
+                    .await
+                {
+                    Ok(ctx) => (ctx.repo, Some(ctx.grounder)),
+                    Err(e) => {
+                        tracing::warn!(session_id = %trigger.session_id, pr, error = %e,
                         "fleet: review factory failed; falling back to the global repo (ungrounded)");
-                    (self.repo.clone(), self.grounder.clone())
+                        (self.repo.clone(), self.grounder.clone())
+                    }
                 }
-            },
+            }
             None => (self.repo.clone(), self.grounder.clone()),
         };
 
         // triggered → cloning: fetch the PR head (C9) and materialize a read-only
         // worktree at it. Both are fail-hard — a review must run against the real head.
         // (`repo` is the per-row factory repo when a factory is set, else the global.)
-        let head = repo.fetch_pr(pr).await?;
+        // The fetch touches the forge, so it is bounded by PREP_TIMEOUT.
+        let head = with_prep_timeout("fetch_pr", PREP_TIMEOUT, repo.fetch_pr(pr)).await?;
         let head_oid = head.0.clone();
 
         // C16 cross-round: consult the persisted history before doing any expensive work.
@@ -627,7 +661,13 @@ impl FleetOrchestrator {
         // engine errors (e.g. no forge to resolve a PR number), fall back to the bare
         // instruction so a review still runs (with no draft — nothing to render from).
         let (goal, facts) = match &grounder {
-            Some(grounder) => match grounder.ground(ReviewTarget::Pr(pr)).await {
+            Some(grounder) => match with_prep_timeout(
+                "review grounding",
+                PREP_TIMEOUT,
+                grounder.ground(ReviewTarget::Pr(pr)),
+            )
+            .await
+            {
                 Ok(grounded) => (
                     Self::grounded_goal(&row, pr, &grounded.brief),
                     Some(grounded.facts),
@@ -2629,6 +2669,67 @@ mod tests {
         r.user = user.into();
         r.repo = repo.into();
         assert_eq!(o.fleet_metrics(&r).is_some(), admits);
+    }
+
+    // ---- with_prep_timeout (R3: a hung forge can't stall the drain loop) --------------
+    //
+    // The budget is a parameter, so the timeout path is exercised with a tiny *real*
+    // duration (no virtual-clock feature needed); production passes PREP_TIMEOUT.
+
+    // A generous-enough budget that a ready/near-instant future never trips it.
+    const TEST_BUDGET: std::time::Duration = std::time::Duration::from_millis(200);
+
+    #[tokio::test]
+    async fn positive_ready_prep_returns_immediately() {
+        // A prep step that resolves well within the budget passes its value through.
+        let got =
+            with_prep_timeout("x", TEST_BUDGET, async { Ok::<_, agent_core::Error>(7) }).await;
+        assert_eq!(got.unwrap(), 7);
+    }
+
+    #[tokio::test]
+    async fn negative_prep_error_passes_through_not_swallowed() {
+        // A real error from the step is surfaced as-is (the timeout wrapper is not an error
+        // sink — only an *elapsed* future becomes the timeout error).
+        let got: agent_core::Result<()> = with_prep_timeout("x", TEST_BUDGET, async {
+            Err(agent_core::Error::Fleet("boom".into()))
+        })
+        .await;
+        assert!(matches!(got, Err(agent_core::Error::Fleet(m)) if m == "boom"));
+    }
+
+    #[tokio::test]
+    async fn boundary_prep_completing_under_budget_succeeds() {
+        // Completing under the budget is fine — the real bound (PREP_TIMEOUT) is generous.
+        let got = with_prep_timeout("x", TEST_BUDGET, async {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            Ok::<_, agent_core::Error>(())
+        })
+        .await;
+        assert!(
+            got.is_ok(),
+            "a step finishing under the budget must not time out"
+        );
+    }
+
+    #[tokio::test]
+    async fn adversarial_hung_forge_prep_times_out_and_names_the_step() {
+        // The DoS case: a forge that never responds. The wrapper must return a bounded Fleet
+        // error (so the drain loop logs it and moves on) rather than hang forever, and the
+        // message must name the step that hung.
+        let got: agent_core::Result<()> = with_prep_timeout(
+            "fetch_pr",
+            std::time::Duration::from_millis(20),
+            std::future::pending(),
+        )
+        .await;
+        match got {
+            Err(agent_core::Error::Fleet(m)) => {
+                assert!(m.contains("fetch_pr"), "names the hung step: {m}");
+                assert!(m.contains("timeout"), "identifies the cause: {m}");
+            }
+            other => panic!("a hung prep must time out to a Fleet error, got {other:?}"),
+        }
     }
 
     // ---- review_worktree_id (R2: per-(session,pr) worktree, no cross-delete) ----------
