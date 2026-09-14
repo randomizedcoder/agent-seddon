@@ -26,7 +26,12 @@ struct Fixture {
 }
 
 fn fixture() -> Fixture {
-    let store = Arc::new(testdata::populated_sqlite(1, 40));
+    // A realistic long session: compaction only helps (reduces tokens) when the
+    // working set genuinely dwarfs the assembled ledger block. A short (~40-exchange)
+    // corpus's block — objective + summaries + the facts/alternatives sections — is
+    // actually larger than the raw messages, so the token-budget accept check (rightly)
+    // rejects it. 120 exchanges is a session where assembly is the win it's meant to be.
+    let store = Arc::new(testdata::populated_sqlite(1, 120));
     let provider = Arc::new(ScriptedProvider::new(vec![final_turn(
         "Implement the DigestStore seam and its sqlite backend.",
     )]));
@@ -35,7 +40,7 @@ fn fixture() -> Fixture {
         ..InstantCfg::default()
     });
     let mut messages = vec![Message::system("you are an agent")];
-    for i in 1..=40u32 {
+    for i in 1..=120u32 {
         messages.push(Message::user(format!("exchange {i}: {}", "x".repeat(120))));
         messages.push(Message::assistant(format!("done {i}: {}", "y".repeat(120))));
     }
@@ -48,18 +53,22 @@ fn fixture() -> Fixture {
     }
 }
 
-// Observed 2,612,735 Ir (3 ledger queries + per-row injection re-screens +
-// section assembly over a 40-exchange corpus; optimization pass 2026-08-09
-// found no fruit worth taking — the cost profile matches the digest_query
-// bench and the path runs only at compaction). Ceiling ~2.5×. NOTE: the
+// Observed 5,802,735 Ir (3 ledger queries + per-row injection re-screens +
+// section assembly over a 120-exchange corpus — a session long enough that
+// assembly actually reduces tokens, so the budget-fit accept check keeps the
+// assembly path; the path runs only at compaction). Ceiling ~1.1×. NOTE: the
 // in-bench assert below is load-bearing — an early unguarded run silently
-// measured the drop-oldest fallback at 64k Ir.
+// measured the drop-oldest fallback at 64k Ir, and a too-small budget silently
+// measures the classic-summarizer fallback instead of assembly.
 #[library_benchmark(config = LibraryBenchmarkConfig::default()
     .tool(Callgrind::default().hard_limits([(EventKind::Ir, 6_500_000u64)])))]
 #[bench::assemble(setup = fixture)]
 fn instant_assemble(mut f: Fixture) -> usize {
+    // Window large enough that the assembled block fits (so the assembly path is
+    // accepted, not rejected by the fit check), yet well below the 120-exchange
+    // working set so compaction triggers.
     let budget = TokenBudget {
-        max_context_tokens: 300,
+        max_context_tokens: 6_000,
         reserve_output: 100,
     };
     let key = SessionKey {
