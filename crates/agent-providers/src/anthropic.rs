@@ -7,6 +7,7 @@
 //! same-role turns — e.g. several tool results after one assistant turn — into a
 //! single message) and parses the typed response back into a `CompletionResponse`.
 
+use crate::stream_caps::{MAX_STREAM_BUF_BYTES, MAX_STREAM_TOOL_ARG_BYTES, MAX_STREAM_TOOL_CALLS};
 use agent_core::{
     ChunkStream, CompletionChunk, CompletionRequest, CompletionResponse, ContentBlock, Error,
     LlmProvider, Message, ModelCapabilities, Result, Role, ToolCall, Usage,
@@ -325,6 +326,15 @@ impl LlmProvider for AnthropicProvider {
                         "content_block_start" => {
                             if let (Some(i), Some(cb)) = (ev.index, ev.content_block) {
                                 if cb.typ.as_deref() == Some("tool_use") {
+                                    // Cap the distinct tool-use blocks a hostile server can
+                                    // open (blocks are only removed on content_block_stop, so
+                                    // fresh indices with no stop would grow the map unbounded).
+                                    if !blocks.contains_key(&i) && blocks.len() >= MAX_STREAM_TOOL_CALLS {
+                                        yield Err(Error::Provider(format!(
+                                            "stream opened more than {MAX_STREAM_TOOL_CALLS} tool-use blocks"
+                                        )));
+                                        return;
+                                    }
                                     blocks.insert(
                                         i,
                                         ToolBlockAcc {
@@ -345,6 +355,14 @@ impl LlmProvider for AnthropicProvider {
                                 }
                                 if let (Some(i), Some(pj)) = (ev.index, delta.partial_json) {
                                     if let Some(acc) = blocks.get_mut(&i) {
+                                        // Cap accumulated tool-input JSON per block (this also
+                                        // bounds the `serde_json` parse in `into_tool_call`).
+                                        if acc.json.len().saturating_add(pj.len()) > MAX_STREAM_TOOL_ARG_BYTES {
+                                            yield Err(Error::Provider(format!(
+                                                "stream tool-use input exceeded {MAX_STREAM_TOOL_ARG_BYTES} bytes"
+                                            )));
+                                            return;
+                                        }
                                         acc.json.push_str(&pj);
                                     }
                                 }
@@ -373,6 +391,14 @@ impl LlmProvider for AnthropicProvider {
                         "message_stop" => break 'read,
                         _ => {}
                     }
+                }
+                // An incomplete frame (no newline yet) must not grow without bound — a
+                // hostile/broken server that never sends a delimiter would OOM us otherwise.
+                if buf.len() > MAX_STREAM_BUF_BYTES {
+                    yield Err(Error::Provider(format!(
+                        "stream frame exceeded {MAX_STREAM_BUF_BYTES} bytes without a delimiter"
+                    )));
+                    return;
                 }
             }
 

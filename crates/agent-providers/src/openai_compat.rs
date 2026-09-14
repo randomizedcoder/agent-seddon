@@ -5,6 +5,7 @@
 //! OpenAI convention) and only fills `content` once reasoning is done — so
 //! `max_tokens` needs real headroom.
 
+use crate::stream_caps::{MAX_STREAM_BUF_BYTES, MAX_STREAM_TOOL_ARG_BYTES, MAX_STREAM_TOOL_CALLS};
 use agent_core::{
     ChunkStream, CompletionChunk, CompletionRequest, CompletionResponse, ContentBlock, Error,
     LlmProvider, Message, ModelCapabilities, Result, Role, ToolCall, Usage,
@@ -328,6 +329,16 @@ impl LlmProvider for OpenAiCompatProvider {
                                 }
                             }
                             for tc in delta.tool_calls.unwrap_or_default() {
+                                // Cap the distinct tool-call slots a hostile server can open
+                                // (the index is server-supplied and keys the accumulator map).
+                                if !tools_acc.contains_key(&tc.index)
+                                    && tools_acc.len() >= MAX_STREAM_TOOL_CALLS
+                                {
+                                    yield Err(Error::Provider(format!(
+                                        "stream opened more than {MAX_STREAM_TOOL_CALLS} tool calls"
+                                    )));
+                                    return;
+                                }
                                 let acc = tools_acc.entry(tc.index).or_default();
                                 if let Some(id) = tc.id {
                                     if !id.is_empty() {
@@ -341,6 +352,16 @@ impl LlmProvider for OpenAiCompatProvider {
                                         }
                                     }
                                     if let Some(a) = f.arguments {
+                                        // Cap accumulated argument bytes per call (this also
+                                        // bounds the `serde_json::from_str` input downstream).
+                                        if acc.args.len().saturating_add(a.len())
+                                            > MAX_STREAM_TOOL_ARG_BYTES
+                                        {
+                                            yield Err(Error::Provider(format!(
+                                                "stream tool-call arguments exceeded {MAX_STREAM_TOOL_ARG_BYTES} bytes"
+                                            )));
+                                            return;
+                                        }
                                         acc.args.push_str(&a);
                                     }
                                 }
@@ -350,6 +371,15 @@ impl LlmProvider for OpenAiCompatProvider {
                             finish = Some(fr);
                         }
                     }
+                }
+                // Whatever remains in `buf` is an incomplete frame (no newline yet). A
+                // hostile/broken server that never sends a delimiter would grow it without
+                // bound — cap it and error out rather than OOM.
+                if buf.len() > MAX_STREAM_BUF_BYTES {
+                    yield Err(Error::Provider(format!(
+                        "stream frame exceeded {MAX_STREAM_BUF_BYTES} bytes without a delimiter"
+                    )));
+                    return;
                 }
             }
 
