@@ -172,6 +172,13 @@ fn format_rg(stdout: &[u8], cwd: &Path) -> String {
     }
 }
 
+/// Whether `path`'s on-disk size exceeds `max` — the guard that keeps the
+/// in-process walk from reading an oversized file into memory. A missing or
+/// unstattable file returns `false` (the subsequent read handles it).
+fn over_size_cap(path: &Path, max: u64) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| m.len() > max)
+}
+
 fn grep_walk(root: &Path, cwd: &Path, re: &regex::Regex) -> String {
     let mut out = String::new();
     let mut hits = 0usize;
@@ -184,6 +191,14 @@ fn grep_walk(root: &Path, cwd: &Path, re: &regex::Regex) -> String {
             Err(_) => continue,
         };
         if !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        // Skip a file over the read cap before pulling it into memory:
+        // `read_to_string` allocates the whole file up front (the `MAX_HITS` cap
+        // only bounds the *scan*, which runs after), so a single huge file (a
+        // model-created log via `bash`, a checked-in data blob) would OOM the
+        // walk. `read_file`/`edit`/`apply_patch` all cap the same way.
+        if over_size_cap(entry.path(), crate::MAX_FILE_BYTES) {
             continue;
         }
         let content = match std::fs::read_to_string(entry.path()) {
@@ -738,5 +753,44 @@ mod tests {
         let dir = fixture();
         let re = RegexBuilder::new("zzzznope").build().unwrap();
         assert_eq!(grep_walk(&dir, &dir, &re), "(no matches)");
+    }
+
+    // --- over_size_cap: the walk's per-file read guard ---------------------
+    // strictly-greater-than semantics; a missing path is never "over cap".
+    #[rstest]
+    #[case::under(3, 4, false)]
+    #[case::boundary_at(4, 4, false)]
+    #[case::over(5, 4, true)]
+    fn over_size_cap_cases(#[case] bytes: usize, #[case] max: u64, #[case] expected: bool) {
+        let dir = tempdir();
+        let p = dir.join("f");
+        std::fs::write(&p, vec![b'x'; bytes]).unwrap();
+        assert_eq!(over_size_cap(&p, max), expected);
+        assert!(!over_size_cap(&dir.join("nope"), max), "missing = not over");
+    }
+
+    // A file over MAX_FILE_BYTES is skipped (never read into memory), while a
+    // normal file's match is still returned — the OOM guard, and no regression.
+    #[test]
+    fn adversarial_grep_walk_skips_oversized_file() {
+        let dir = tempdir();
+        // Oversized file that *does* contain the pattern → must be skipped, so its
+        // match must not surface.
+        std::fs::write(
+            dir.join("huge.txt"),
+            format!("NEEDLE\n{}", "x".repeat(crate::MAX_FILE_BYTES as usize)),
+        )
+        .unwrap();
+        std::fs::write(dir.join("small.txt"), "NEEDLE here").unwrap();
+        let re = RegexBuilder::new("NEEDLE").build().unwrap();
+        let out = grep_walk(&dir, &dir, &re);
+        assert!(
+            out.contains("small.txt"),
+            "small-file match returned: {out}"
+        );
+        assert!(
+            !out.contains("huge.txt"),
+            "oversized file must be skipped, not read: {out}"
+        );
     }
 }
