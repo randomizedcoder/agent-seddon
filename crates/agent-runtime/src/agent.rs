@@ -161,6 +161,12 @@ pub struct Agent {
     /// the full fleet process that admits + drives sessions from it arrives in
     /// review-fleet 3c.
     fleet_registry: Option<Arc<dyn agent_core::FleetRegistry>>,
+    /// The approve→post idempotency lease (review-fleet C17), held for `--serve-fleet`.
+    /// A durable, read-your-writes, cross-process compare-and-set that guarantees a review
+    /// posts to its forge **at most once** across concurrent/repeated approves. `None` ⇒
+    /// the approver falls back to an in-process [`agent_review_fleet::MemoryPostLease`]
+    /// (closes same-process double-posts; not durable across restarts/processes).
+    fleet_post_lease: Option<Arc<dyn agent_core::FleetPostLease>>,
     /// The RBAC role-card store, held for `--serve-role` (config C1b): the
     /// operator-defined role cards the control-plane gate authorizes against, atop
     /// the three immutable built-ins. Present ⇒ the catalog snapshot was installed at
@@ -429,21 +435,25 @@ impl agent_core::ReviewDrafter for EngineDrafter {
 /// unless it is already posted, posts the rendered `.md` to the draft's repo's OPERATIONAL
 /// forge and persists `status = "posted"` — the idempotency key. Nothing posts without an
 /// explicit `approve`; the model's own in-loop forge stays read-only.
-#[cfg(feature = "review")]
+#[cfg(all(feature = "review", feature = "fleet"))]
 struct EngineApprover {
     agent: Arc<Agent>,
     /// The roster the control plane serves — used to resolve the draft's repo → its row →
     /// its operational forge.
     roster: Arc<dyn agent_core::FleetRegistry>,
-    /// Persisted history: the draft lookup by id + the durable `status` the idempotency
-    /// check reads.
+    /// Persisted history: the draft lookup by id + the (eventually-consistent) `status`
+    /// used only as a cheap early-out. The AUTHORITATIVE idempotency guard is `post_lease`.
     history: Arc<dyn agent_core::FleetHistory>,
+    /// The durable, read-your-writes, cross-process compare-and-set that makes the forge
+    /// post idempotent on `review_id` (review-fleet C17). Checked immediately before the
+    /// post: exactly one concurrent/repeated approve acquires the lease and posts.
+    post_lease: Arc<dyn agent_core::FleetPostLease>,
 }
 
 /// What an approve should do, decided purely from the looked-up draft + the current roster
 /// (review-fleet C17). Split out so the decision — not-found, the idempotent already-posted
 /// short-circuit, and repo→row resolution — is table-testable without a forge or a store.
-#[cfg(feature = "review")]
+#[cfg(all(feature = "review", feature = "fleet"))]
 #[derive(Debug)]
 enum ApprovePlan {
     NotFound,
@@ -453,7 +463,7 @@ enum ApprovePlan {
 }
 
 /// The resolved inputs for a post: which draft to post, and the row whose forge posts it.
-#[cfg(feature = "review")]
+#[cfg(all(feature = "review", feature = "fleet"))]
 #[derive(Debug)]
 struct PostPlan {
     record: agent_core::ReviewDraftRecord,
@@ -463,7 +473,7 @@ struct PostPlan {
 /// Record the tenant + repo on a `fleet.*` span, each only when it passes `safe_segment`
 /// (defense in depth — the row is validated config, but a label/attribute value is never
 /// stamped unchecked). PR is recorded by the caller (a `u64`, always valid).
-#[cfg(feature = "review")]
+#[cfg(all(feature = "review", feature = "fleet"))]
 fn record_fleet_span(span: &tracing::Span, user: &str, repo: &str) {
     if agent_core::safe_segment(user) {
         span.record("tenant", user);
@@ -476,14 +486,14 @@ fn record_fleet_span(span: &tracing::Span, user: &str, repo: &str) {
 /// Tick `agent_fleet_approvals_total{outcome,user,repo}` for one approval, when both
 /// segments are `safe_segment`-valid (a malformed value records nothing, never a poisoned
 /// series). Best-effort observability — never on the approval's path.
-#[cfg(feature = "review")]
+#[cfg(all(feature = "review", feature = "fleet"))]
 fn record_fleet_approval(metrics: &Metrics, user: &str, repo: &str, outcome: &str) {
     if agent_core::safe_segment(user) && agent_core::safe_segment(repo) {
         metrics.for_fleet(user, repo).on_approval(outcome);
     }
 }
 
-#[cfg(feature = "review")]
+#[cfg(all(feature = "review", feature = "fleet"))]
 fn plan_approve(
     record: Option<agent_core::ReviewDraftRecord>,
     rows: &[agent_core::FleetSession],
@@ -514,7 +524,7 @@ fn plan_approve(
     Ok(ApprovePlan::Post(Box::new(PostPlan { record, row })))
 }
 
-#[cfg(feature = "review")]
+#[cfg(all(feature = "review", feature = "fleet"))]
 #[async_trait::async_trait]
 impl agent_core::FleetApprover for EngineApprover {
     async fn approve(&self, review_id: &str) -> agent_core::Result<agent_core::ApproveOutcome> {
@@ -584,14 +594,51 @@ impl agent_core::FleetApprover for EngineApprover {
                     ))
                 })?;
 
-            // Post as a review COMMENT — the fleet advises; a human decides approve/merge.
-            let comment = forge
-                .review_pr(record.pr_number, agent_core::ReviewVerdict::Comment, &body)
-                .await?;
+            // The authoritative idempotency guard (review-fleet C17). The `plan_approve`
+            // short-circuit above reads `status` from the eventually-consistent telemetry
+            // funnel, so it CANNOT prevent a double post on its own: two concurrent approves,
+            // or a re-approve inside the flush window, both see `drafted`. The lease is a
+            // durable, read-your-writes, cross-process compare-and-set — exactly one caller
+            // acquires it and posts; the rest stand down. Acquired immediately BEFORE the
+            // (irreversible) forge post.
+            match self.post_lease.acquire(review_id).await? {
+                agent_core::PostLease::Acquired => {}
+                // Already posted, or another approve is mid-post — an idempotent no-op. Never
+                // post a second comment.
+                agent_core::PostLease::AlreadyPosted | agent_core::PostLease::Held => {
+                    sp.record("outcome", "already");
+                    record_fleet_approval(&self.agent.metrics(), &row.user, &row.repo, "already");
+                    return Ok(agent_core::ApproveOutcome::AlreadyPosted);
+                }
+            }
 
-            // Persist status=posted — the idempotency key. A re-approve then finds `posted`
-            // (newest-by-ts) and short-circuits to AlreadyPosted, so a duplicate call never
-            // double-posts.
+            // Post as a review COMMENT — the fleet advises; a human decides approve/merge.
+            // On failure, RELEASE the held lease so a later approve can retry the post.
+            let comment = match forge
+                .review_pr(record.pr_number, agent_core::ReviewVerdict::Comment, &body)
+                .await
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    if let Err(re) = self.post_lease.release(review_id).await {
+                        tracing::warn!(review_id, error = %re,
+                            "approve: releasing the post lease after a failed post failed (soft)");
+                    }
+                    return Err(e);
+                }
+            };
+
+            // Commit the lease (held → posted): the durable idempotency key. Best-effort —
+            // a post that succeeded but whose commit fails still dedups (a leftover `held`
+            // lease makes the next approve stand down as AlreadyPosted), so a commit failure
+            // is never LESS safe; it must not fail the (already-succeeded) approve.
+            if let Err(e) = self.post_lease.commit(review_id).await {
+                tracing::warn!(review_id, error = %e,
+                    "approve: committing the post lease failed after a successful post (soft)");
+            }
+
+            // Also persist status=posted through the history funnel — feeds the cheap
+            // `plan_approve` early-out, the C16 head-oid dedup, and the operator's history.
             let mut posted = record.clone();
             posted.status = agent_core::draft_status::POSTED.to_string();
             self.agent.record_draft(posted).await;
@@ -656,6 +703,7 @@ impl Agent {
             config_store: None,
             provider_registry: None,
             fleet_registry: None,
+            fleet_post_lease: None,
             role_registry: None,
             forge_registry: None,
             transport_registry: None,
@@ -1000,6 +1048,13 @@ impl Agent {
         self
     }
 
+    /// Attach the approve→post idempotency lease (review-fleet C17), used by the fleet
+    /// approver to post each review at most once. Not consumed by the loop.
+    pub fn with_fleet_post_lease(mut self, l: Arc<dyn agent_core::FleetPostLease>) -> Self {
+        self.fleet_post_lease = Some(l);
+        self
+    }
+
     /// Attach the RBAC role-card store (config C1b), so it can be hosted over gRPC
     /// (`--serve-role`). Not consumed by the loop; the control-plane gate reads the
     /// ambient catalog snapshot the builder installs from this store at startup.
@@ -1309,6 +1364,12 @@ impl Agent {
         self.fleet_registry.clone()
     }
 
+    /// The approve→post idempotency lease, if one was resolved from config
+    /// (`[review_fleet] store`); `None` ⇒ the approver uses an in-process fallback.
+    pub fn fleet_post_lease(&self) -> Option<Arc<dyn agent_core::FleetPostLease>> {
+        self.fleet_post_lease.clone()
+    }
+
     /// The RBAC role-card store, if `[role] store` is configured (`--serve-role`).
     pub fn role_registry(&self) -> Option<Arc<dyn agent_core::RoleRegistry>> {
         self.role_registry.clone()
@@ -1449,21 +1510,28 @@ impl Agent {
     /// Approve stays UNIMPLEMENTED. `roster` is the same roster the control plane serves,
     /// used to resolve the draft's repo → its operational forge (the one that actually
     /// posts; the model's own in-loop forge stays read-only).
-    #[cfg(feature = "review")]
+    #[cfg(all(feature = "review", feature = "fleet"))]
     pub fn fleet_approver(
         self: &Arc<Self>,
         roster: Arc<dyn agent_core::FleetRegistry>,
     ) -> Option<Arc<dyn agent_core::FleetApprover>> {
         let history = self.fleet_history()?;
+        // The idempotency lease: the durable one resolved from config when present, else an
+        // in-process fallback that still closes same-process double-posts.
+        let post_lease = self
+            .fleet_post_lease()
+            .unwrap_or_else(|| Arc::new(agent_review_fleet::MemoryPostLease::new()));
         Some(Arc::new(EngineApprover {
             agent: self.clone(),
             roster,
             history,
+            post_lease,
         }))
     }
 
-    /// Without the `review` feature there is no draft to approve, so no approver.
-    #[cfg(not(feature = "review"))]
+    /// Without the `review`+`fleet` features there is no fleet draft to approve (and no
+    /// lease backend), so no approver.
+    #[cfg(not(all(feature = "review", feature = "fleet")))]
     pub fn fleet_approver(
         self: &Arc<Self>,
         _roster: Arc<dyn agent_core::FleetRegistry>,
@@ -1668,6 +1736,26 @@ impl Agent {
 
     /// The core iteration loop over an existing working set: model call → tool
     /// dispatch → record → compact, until the model stops asking for tools (or
+    /// Strip image/document blocks the configured model can't accept (parity spec 26): a
+    /// non-vision model errors the WHOLE request on a single unsupported block, so degrade
+    /// to an explicit note instead. Shared by every in-loop turn AND the forced
+    /// max-iterations finalize turn — otherwise the finalize salvage is defeated in exactly
+    /// the case it exists for (a non-vision run whose context carries a tool-returned image).
+    fn media_gated(&self, mut messages: Vec<Message>) -> Vec<Message> {
+        if !self.provider.capabilities().supports_vision {
+            let mut dropped = 0usize;
+            for m in &mut messages {
+                dropped +=
+                    m.strip_media("[media omitted: the selected model does not support images]");
+            }
+            if dropped > 0 {
+                self.metrics.on_content_blocks_dropped(dropped as u64);
+                tracing::debug!(dropped, "stripped media for a non-vision model");
+            }
+        }
+        messages
+    }
+
     /// `max_iterations`). Mutates `working` in place and returns the final answer.
     // A core private loop with several genuinely-distinct per-turn params (state,
     // budget, tool ctx, the armed switch, and the two per-session observation sinks
@@ -1694,6 +1782,21 @@ impl Agent {
         } else {
             self.settings.max_tokens
         };
+        // Compaction trims the prompt to `max_context_tokens - reserve_output`, so
+        // the reserve must cover the output the request will actually claim; else
+        // `prompt + max_tokens` overflows the window (the provider truncates to
+        // finish=length or rejects the call). Enforce `reserve_output >=
+        // effective_max_tokens` — this closes the review-mode floor's overflow (the
+        // floor raised max_tokens above reserve_output; #330) and the same latent
+        // gap for any config with `max_tokens > reserve_output`. Clamped to the
+        // context window so the trim target never underflows.
+        let effective_budget = TokenBudget {
+            max_context_tokens: budget.max_context_tokens,
+            reserve_output: budget
+                .reserve_output
+                .max(effective_max_tokens)
+                .min(budget.max_context_tokens),
+        };
         // Back-to-back truncated completions (finish_reason = output-cap) seen so
         // far; any productive turn clears it. Bounds the continue-on-truncation
         // recovery so a perpetually-truncating model fails fast, not at the
@@ -1708,18 +1811,7 @@ impl Agent {
             // Capability gate: a model without vision must never be sent an image
             // block — one unsupported block errors the entire request, losing the
             // turn. Degrade to an explicit note instead (parity spec 26).
-            let mut messages = working.messages.clone();
-            if !self.provider.capabilities().supports_vision {
-                let mut dropped = 0usize;
-                for m in &mut messages {
-                    dropped += m
-                        .strip_media("[media omitted: the selected model does not support images]");
-                }
-                if dropped > 0 {
-                    self.metrics.on_content_blocks_dropped(dropped as u64);
-                    tracing::debug!(dropped, "stripped media for a non-vision model");
-                }
-            }
+            let messages = self.media_gated(working.messages.clone());
             for m in &messages {
                 for b in &m.content {
                     self.metrics.on_content_block(b.modality());
@@ -1850,8 +1942,39 @@ impl Agent {
                     working.messages.push(Message::user(TRUNCATION_NUDGE));
                     continue;
                 }
+                // An empty completion (finish=stop, no content, no tool call) is a
+                // degraded-provider non-answer, not a final answer — returning it would
+                // score a fake-empty success (in the fleet, a "successful" *empty* review).
+                // Nudge and continue, bounded by the same no-answer cap as truncation so a
+                // persistently-empty model records a DNF rather than returning "".
+                let text = assistant.content_text();
+                if text.is_empty() {
+                    consecutive_truncations += 1;
+                    if consecutive_truncations > MAX_CONSECUTIVE_TRUNCATIONS {
+                        anyhow::bail!(
+                            "model returned {consecutive_truncations} empty or truncated responses \
+                             in a row without completing a tool call or a final answer"
+                        );
+                    }
+                    tracing::warn!(
+                        iter,
+                        consecutive_truncations,
+                        finish = %resp.finish_reason,
+                        "empty completion with no tool call — nudging to continue \
+                         (an empty response is not a final answer)"
+                    );
+                    working.messages.push(Message::user(EMPTY_ANSWER_NUDGE));
+                    continue;
+                }
+                // A final-answer turn returns before the post-tool compaction that
+                // would consume an armed mode switch. Consume it here too: otherwise
+                // the switch survives into an unrelated later turn and fires a
+                // spurious, budget-ignoring switch-compaction (an extra LLM call +
+                // lossy reshape). The mode change itself is already reflected in the
+                // session's current_mode, so only the stale reshape signal is dropped.
+                let _ = pending_switch.take();
                 self.memory.distill().await.ok();
-                return Ok(assistant.content_text());
+                return Ok(text);
             }
             // A productive (tool-call) turn clears the truncation streak.
             consecutive_truncations = 0;
@@ -2187,7 +2310,7 @@ impl Agent {
             // The armed switch (if any) is consumed on this first compact; later
             // iterations pass `None` (an ordinary budget compaction).
             self.context
-                .compact(working, budget, pending_switch.take())
+                .compact(working, &effective_budget, pending_switch.take())
                 .instrument(tracing::info_span!("context.compact", iter))
                 .await?;
             if !self.hooks.is_empty() && before != working.messages.len() {
@@ -2216,7 +2339,10 @@ impl Agent {
             .messages
             .push(Message::user(MAX_ITERATIONS_FINALIZE_NUDGE));
         let finalize_req = CompletionRequest {
-            messages: working.messages.clone(),
+            // Same capability gate as every in-loop turn — a non-vision model would
+            // otherwise error the whole finalize on a lingering image block, turning the
+            // salvage into a DNF exactly when it should rescue the run.
+            messages: self.media_gated(working.messages.clone()),
             // No tools: the model must answer in text, not start another action.
             tools: Vec::new(),
             max_tokens: effective_max_tokens,
@@ -2634,6 +2760,13 @@ fn now_ms() -> u64 {
 const TRUNCATION_NUDGE: &str = "Your previous message was cut off at the output-token \
 limit before it was complete. Continue exactly where you left off and finish it — if you \
 were emitting a tool call (for example writing a file), send the whole tool call this time.";
+
+/// Sent when a turn produced an empty completion (no text, no tool call, and not a
+/// truncation). An empty stop is a degraded-provider non-answer, not a final answer, so
+/// the loop nudges rather than returning it as a fake-empty success.
+const EMPTY_ANSWER_NUDGE: &str = "Your previous message was empty. Either take the next \
+action by calling a tool, or, if you are done, write your complete final answer now — an \
+empty response is not an answer.";
 
 /// Sent on the single forced finalize turn after the step budget is exhausted.
 /// Tools are disabled for that turn, so the model must produce its best final
@@ -3137,6 +3270,26 @@ mod tests {
         assert!(
             switches.iter().any(|c| c.contains("review")),
             "expected a recorded switch into review, got: {switches:?}"
+        );
+    }
+
+    // A decisive switch arms `pending_switch`; a direct (no-tool) answer must
+    // consume it, so it can't later fire a spurious budget-ignoring reshape. The
+    // mode change itself still holds (current_mode is Review).
+    #[tokio::test]
+    async fn positive_direct_answer_consumes_armed_switch() {
+        let memory = RecordingMemory::new();
+        let agent = agent_with_classifier(TaskMode::Review, 0.95, memory);
+        let mut session = agent.session();
+        assert_eq!(session.send("please review this").await.unwrap(), "ok");
+        assert!(
+            session.pending_switch.is_none(),
+            "a direct-answer turn must consume the armed switch, not leave it for a later turn"
+        );
+        assert_eq!(
+            session.current_mode,
+            TaskMode::Review,
+            "the mode change itself still holds"
         );
     }
 
@@ -4452,6 +4605,89 @@ mod tests {
         );
     }
 
+    // ---- compaction reserve tracks the request's max_tokens (Bug L1) -------
+
+    /// A `ContextStrategy` that records the `reserve_output` of the budget handed to
+    /// `compact`, so a test can assert the loop reserves output room for the tokens
+    /// the request actually claims.
+    #[derive(Clone, Default)]
+    struct RecordingContext {
+        last_reserve: Arc<std::sync::Mutex<Option<u32>>>,
+    }
+    #[async_trait::async_trait]
+    impl agent_core::ContextStrategy for RecordingContext {
+        async fn assemble(
+            &self,
+            input: agent_core::ContextInput,
+        ) -> agent_core::Result<Vec<Message>> {
+            Ok(vec![
+                Message::system(input.system_prompt),
+                Message::user(input.goal),
+            ])
+        }
+        async fn compact(
+            &self,
+            _working: &mut agent_core::WorkingSet,
+            budget: &agent_core::TokenBudget,
+            _switch: Option<(agent_core::TaskMode, agent_core::TaskMode)>,
+        ) -> agent_core::Result<agent_core::CompactAction> {
+            *self.last_reserve.lock().unwrap() = Some(budget.reserve_output);
+            Ok(agent_core::CompactAction::Budget)
+        }
+    }
+
+    /// Drive one tool turn (so the loop reaches the post-tool compaction) then a
+    /// final answer, and return the `reserve_output` compaction was handed.
+    async fn recorded_compact_reserve(review: bool, max_tokens: u32, reserve_output: u32) -> u32 {
+        let ctx = RecordingContext::default();
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(EchoTool));
+        let provider = ScriptedProvider::new(vec![
+            tool_turn(vec![tool_call("t0", "echo")]),
+            final_turn("done"),
+        ]);
+        let mut s = settings(false);
+        s.max_tokens = max_tokens;
+        s.reserve_output = reserve_output;
+        let agent = Arc::new(Agent::new(
+            Arc::new(provider),
+            tools,
+            Arc::new(RecordingMemory::new()),
+            Arc::new(ctx.clone()),
+            Arc::new(crate::policy::AutoApprove),
+            Metrics::new(),
+            s,
+        ));
+        let mut session = agent.session();
+        if review {
+            session.seed_review(None);
+        }
+        session.send("go").await.unwrap();
+        let r = ctx.last_reserve.lock().unwrap().expect("compaction ran");
+        r
+    }
+
+    #[tokio::test]
+    async fn boundary_review_compaction_reserves_for_the_floored_output() {
+        // Review floors max_tokens to 8192; compaction must reserve at least that,
+        // even though the configured reserve_output (2048) is smaller — else the
+        // trimmed prompt + 8192 output overflows the window.
+        assert_eq!(recorded_compact_reserve(true, 2048, 2048).await, 8192);
+    }
+
+    #[tokio::test]
+    async fn corner_non_review_reserve_raised_to_match_max_tokens() {
+        // The invariant is general: a non-review config with max_tokens > reserve
+        // also gets the reserve raised to the request's output cap.
+        assert_eq!(recorded_compact_reserve(false, 4096, 1024).await, 4096);
+    }
+
+    #[tokio::test]
+    async fn negative_reserve_unchanged_when_already_large_enough() {
+        // reserve_output already >= max_tokens → left untouched (no lowering).
+        assert_eq!(recorded_compact_reserve(false, 1000, 8000).await, 8000);
+    }
+
     // ---- worktree cleanup on exit ------------------------------------------
 
     /// A scriptable `RepoBackend` for `Agent::cleanup`: `list` is what
@@ -4949,6 +5185,110 @@ mod tests {
         assert_eq!(out, "done", "6 truncations but never 4 in a row → no bail");
     }
 
+    // ---- empty-completion handling (G2: not a fake-empty success) -----------
+
+    /// A `stop` turn carrying no text and no tool call — a degraded-provider non-answer.
+    fn empty_turn() -> CompletionResponse {
+        CompletionResponse {
+            message: agent_core::Message::assistant(""),
+            finish_reason: "stop".into(),
+            usage: None,
+        }
+    }
+
+    /// An empty completion is nudged (not returned as `Ok("")`); the model's next, real
+    /// answer wins — the empty turns were continuations, not the answer.
+    #[tokio::test]
+    async fn boundary_empty_answer_then_real_answer_recovers() {
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            empty_turn(),
+            empty_turn(),
+            empty_turn(),
+            final_turn("done"),
+        ]));
+        let script = provider.clone();
+        let out = agent_over(provider, 10).run("go").await.unwrap();
+        assert_eq!(out, "done", "an empty turn is not the final answer");
+        assert_eq!(
+            script.calls(),
+            (MAX_CONSECUTIVE_TRUNCATIONS + 1) as usize,
+            "three nudged empties, then the real answer"
+        );
+    }
+
+    /// A model that returns empty forever fails fast (a DNF error) rather than returning a
+    /// fake-empty success or spinning to the iteration ceiling.
+    #[tokio::test]
+    async fn corner_persistent_empty_answer_fails_fast() {
+        let provider = Arc::new(ScriptedProvider::new(vec![empty_turn()]));
+        let script = provider.clone();
+        let err = agent_over(provider, 50).run("go").await.unwrap_err();
+        assert!(
+            err.to_string().contains("empty"),
+            "expected an empty/non-answer error, got: {err}"
+        );
+        assert_eq!(
+            script.calls(),
+            (MAX_CONSECUTIVE_TRUNCATIONS + 1) as usize,
+            "bails on the 4th empty, far below the 50-iteration ceiling"
+        );
+    }
+
+    // ---- media_gated: shared non-vision strip (G1: finalize uses it too) ----
+
+    fn img_msg() -> agent_core::Message {
+        agent_core::Message::with_blocks(
+            agent_core::Role::User,
+            vec![
+                agent_core::ContentBlock::text("look at this"),
+                agent_core::ContentBlock::image("image/png", vec![0u8, 1, 2, 3]),
+            ],
+        )
+    }
+
+    /// A non-vision model must never be sent an image block (it errors the whole request):
+    /// the shared gate — used by BOTH every in-loop turn and the forced finalize turn —
+    /// strips it and leaves an explicit note.
+    #[tokio::test]
+    async fn positive_media_gated_strips_image_for_non_vision() {
+        // ScriptedProvider defaults to supports_vision = false.
+        let agent = agent_over(Arc::new(ScriptedProvider::new(vec![final_turn("x")])), 1);
+        let out = agent.media_gated(vec![img_msg()]);
+        let has_image = out
+            .iter()
+            .flat_map(|m| &m.content)
+            .any(|b| matches!(b, agent_core::ContentBlock::Image { .. }));
+        assert!(
+            !has_image,
+            "the image block must be stripped for a non-vision model"
+        );
+        let has_note = out
+            .iter()
+            .flat_map(|m| &m.content)
+            .any(|b| matches!(b, agent_core::ContentBlock::Text { text } if text.contains("media omitted")));
+        assert!(has_note, "a note replaces the stripped media");
+    }
+
+    /// A vision-capable model keeps its image blocks unchanged.
+    #[tokio::test]
+    async fn positive_media_gated_keeps_image_for_vision() {
+        let vision = ScriptedProvider::new(vec![final_turn("x")]).with_capabilities(
+            agent_core::ModelCapabilities {
+                supports_tools: true,
+                context_window: 1000,
+                supports_response_format: false,
+                supports_vision: true,
+            },
+        );
+        let agent = agent_over(Arc::new(vision), 1);
+        let out = agent.media_gated(vec![img_msg()]);
+        let has_image = out
+            .iter()
+            .flat_map(|m| &m.content)
+            .any(|b| matches!(b, agent_core::ContentBlock::Image { .. }));
+        assert!(has_image, "a vision model keeps its image blocks");
+    }
+
     // ---- tool timeout + panic isolation ------------------------------------
 
     /// A tool that never returns — stands in for a hung build / deadlocked call.
@@ -5151,7 +5491,7 @@ mod tests {
     // parts that must be right before anything posts; they are table-tested here without a
     // forge or a store. The I/O tail (build forge, read `.md`, post, persist) is exercised
     // by the served roundtrip (agent-grpc) and the live `fleet-e2e` harness.
-    #[cfg(feature = "review")]
+    #[cfg(all(feature = "review", feature = "fleet"))]
     mod approve_plan {
         use super::*;
         use agent_core::{draft_status, FleetSession, ReviewDraftRecord};

@@ -7,6 +7,7 @@
 //! same-role turns — e.g. several tool results after one assistant turn — into a
 //! single message) and parses the typed response back into a `CompletionResponse`.
 
+use crate::stream_caps::{MAX_STREAM_BUF_BYTES, MAX_STREAM_TOOL_ARG_BYTES, MAX_STREAM_TOOL_CALLS};
 use agent_core::{
     ChunkStream, CompletionChunk, CompletionRequest, CompletionResponse, ContentBlock, Error,
     LlmProvider, Message, ModelCapabilities, Result, Role, ToolCall, Usage,
@@ -164,23 +165,11 @@ impl AnthropicProvider {
     /// caller can read its body for the message.
     async fn send(&self, body: &Value) -> Result<reqwest::Response> {
         agent_retry::run(&self.retry, || async {
-            match self
-                .client
-                .post(&self.endpoint)
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", &self.version)
-                .json(body)
-                .send()
-                .await
-            {
+            match self.post(body).send().await {
                 Ok(resp) => {
                     let code = resp.status().as_u16();
                     if agent_retry::http::retryable_status(code) {
-                        let after = resp
-                            .headers()
-                            .get(reqwest::header::RETRY_AFTER)
-                            .and_then(|v| v.to_str().ok())
-                            .and_then(agent_retry::http::parse_retry_after);
+                        let after = crate::retry_after(&resp);
                         let body = resp.text().await.unwrap_or_default();
                         agent_retry::Attempt::Retry {
                             err: Error::Provider(format!("http {code}: {body}")),
@@ -190,13 +179,68 @@ impl AnthropicProvider {
                         agent_retry::Attempt::Done(resp)
                     }
                 }
-                Err(e) if e.is_timeout() || e.is_connect() => agent_retry::Attempt::Retry {
+                Err(e) if crate::transient_transport(&e) => agent_retry::Attempt::Retry {
                     err: Error::Provider(format!("request failed: {e}")),
                     after: None,
                 },
                 Err(e) => {
                     agent_retry::Attempt::Fail(Error::Provider(format!("request failed: {e}")))
                 }
+            }
+        })
+        .await
+    }
+
+    /// The per-attempt request builder (fresh each retry — a `RequestBuilder` is
+    /// single-use). Shared by [`Self::send`] (streaming) and [`Self::send_buffered`].
+    fn post(&self, body: &Value) -> reqwest::RequestBuilder {
+        self.client
+            .post(&self.endpoint)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", &self.version)
+            .json(body)
+    }
+
+    /// Like [`Self::send`], but reads the **whole response body inside the retry
+    /// boundary** and returns `(status, body)`. A connection dropped mid-body
+    /// ("connection closed before message completed") is then retried like a timeout
+    /// instead of failing the call outright (which would also skip any failover) —
+    /// the fix for the buffered path, where the body read used to happen *after*
+    /// `send` returned. Used by the buffered [`complete`]; `stream` keeps [`Self::send`]
+    /// (a mid-stream drop can't be transparently replayed). A non-retryable error
+    /// status is returned as `Done` so the caller can surface its body.
+    async fn send_buffered(&self, body: &Value) -> Result<(reqwest::StatusCode, String)> {
+        agent_retry::run(&self.retry, || async {
+            let resp = match self.post(body).send().await {
+                Ok(resp) => resp,
+                Err(e) if crate::transient_transport(&e) => {
+                    return agent_retry::Attempt::Retry {
+                        err: Error::Provider(format!("request failed: {e}")),
+                        after: None,
+                    };
+                }
+                Err(e) => {
+                    return agent_retry::Attempt::Fail(Error::Provider(format!(
+                        "request failed: {e}"
+                    )));
+                }
+            };
+            let status = resp.status();
+            let retryable = agent_retry::http::retryable_status(status.as_u16());
+            // Capture the backoff hint before the body read consumes `resp`.
+            let after = retryable.then(|| crate::retry_after(&resp)).flatten();
+            match resp.text().await {
+                Ok(body) if retryable => agent_retry::Attempt::Retry {
+                    err: Error::Provider(format!("http {status}: {body}")),
+                    after,
+                },
+                Ok(body) => agent_retry::Attempt::Done((status, body)),
+                // The mid-body drop: transient, so retry it.
+                Err(e) if crate::transient_transport(&e) => agent_retry::Attempt::Retry {
+                    err: Error::Provider(format!("reading body: {e}")),
+                    after: None,
+                },
+                Err(e) => agent_retry::Attempt::Fail(Error::Provider(format!("reading body: {e}"))),
             }
         })
         .await
@@ -217,12 +261,9 @@ impl LlmProvider for AnthropicProvider {
 
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse> {
         let body = self.build_body(&req, false);
-        let resp = self.send(&body).await?;
-        let status = resp.status();
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| Error::Provider(format!("reading body: {e}")))?;
+        // Buffered path: the body is read inside the retry boundary, so a mid-body
+        // connection drop is retried rather than surfaced as a hard error.
+        let (status, text) = self.send_buffered(&body).await?;
         if !status.is_success() {
             return Err(Error::Provider(format!("http {status}: {text}")));
         }
@@ -285,6 +326,15 @@ impl LlmProvider for AnthropicProvider {
                         "content_block_start" => {
                             if let (Some(i), Some(cb)) = (ev.index, ev.content_block) {
                                 if cb.typ.as_deref() == Some("tool_use") {
+                                    // Cap the distinct tool-use blocks a hostile server can
+                                    // open (blocks are only removed on content_block_stop, so
+                                    // fresh indices with no stop would grow the map unbounded).
+                                    if !blocks.contains_key(&i) && blocks.len() >= MAX_STREAM_TOOL_CALLS {
+                                        yield Err(Error::Provider(format!(
+                                            "stream opened more than {MAX_STREAM_TOOL_CALLS} tool-use blocks"
+                                        )));
+                                        return;
+                                    }
                                     blocks.insert(
                                         i,
                                         ToolBlockAcc {
@@ -305,6 +355,14 @@ impl LlmProvider for AnthropicProvider {
                                 }
                                 if let (Some(i), Some(pj)) = (ev.index, delta.partial_json) {
                                     if let Some(acc) = blocks.get_mut(&i) {
+                                        // Cap accumulated tool-input JSON per block (this also
+                                        // bounds the `serde_json` parse in `into_tool_call`).
+                                        if acc.json.len().saturating_add(pj.len()) > MAX_STREAM_TOOL_ARG_BYTES {
+                                            yield Err(Error::Provider(format!(
+                                                "stream tool-use input exceeded {MAX_STREAM_TOOL_ARG_BYTES} bytes"
+                                            )));
+                                            return;
+                                        }
                                         acc.json.push_str(&pj);
                                     }
                                 }
@@ -334,6 +392,14 @@ impl LlmProvider for AnthropicProvider {
                         _ => {}
                     }
                 }
+                // An incomplete frame (no newline yet) must not grow without bound — a
+                // hostile/broken server that never sends a delimiter would OOM us otherwise.
+                if buf.len() > MAX_STREAM_BUF_BYTES {
+                    yield Err(Error::Provider(format!(
+                        "stream frame exceeded {MAX_STREAM_BUF_BYTES} bytes without a delimiter"
+                    )));
+                    return;
+                }
             }
 
             yield Ok(CompletionChunk {
@@ -341,7 +407,11 @@ impl LlmProvider for AnthropicProvider {
                 usage: Some(Usage {
                     prompt_tokens: input_tokens,
                     completion_tokens: output_tokens,
-                    total_tokens: input_tokens + output_tokens,
+                    // Server-supplied counts are untrusted: sum saturating so a
+                    // hostile/buggy endpoint can't panic (debug) or wrap (release)
+                    // the total — the CLAUDE.md "clamp hostile numbers before a
+                    // total" rule the OpenAI path already honours.
+                    total_tokens: input_tokens.saturating_add(output_tokens),
                     cache_read_tokens,
                     cache_write_tokens,
                     cost: None,
@@ -663,7 +733,9 @@ impl WireResp {
             usage: self.usage.map(|u| Usage {
                 prompt_tokens: u.input_tokens,
                 completion_tokens: u.output_tokens,
-                total_tokens: u.input_tokens + u.output_tokens,
+                // Untrusted counts: saturate the sum (see the streaming path) so a
+                // hostile endpoint can't overflow the total.
+                total_tokens: u.input_tokens.saturating_add(u.output_tokens),
                 cache_read_tokens: u.cache_read_input_tokens,
                 cache_write_tokens: u.cache_creation_input_tokens,
                 cost: None,
@@ -751,6 +823,23 @@ mod tests {
             .unwrap()
             .into_response();
         assert_eq!(resp.usage.unwrap().total_tokens, 15);
+    }
+
+    // A hostile/buggy endpoint reports huge counts whose sum overflows u32. The
+    // total must saturate — never panic (debug overflow-check) or wrap (release) —
+    // per the CLAUDE.md "clamp hostile numbers before a total" rule.
+    #[test]
+    fn adversarial_into_response_usage_sum_saturates() {
+        let body = json!({
+            "content": [{"type":"text","text":"correct answer"}],
+            "usage": {"input_tokens": u32::MAX, "output_tokens": 1000}
+        });
+        let resp = serde_json::from_value::<WireResp>(body)
+            .unwrap()
+            .into_response();
+        // The good answer survives and the total is clamped, not wrapped.
+        assert_eq!(resp.message.content_text(), "correct answer");
+        assert_eq!(resp.usage.unwrap().total_tokens, u32::MAX);
     }
 
     /// The 67-byte minimal 1x1 PNG (deterministic fixture, no assets).

@@ -9,7 +9,7 @@
 //! back to the `ignore`-crate walk when `rg` is absent or errors — the two paths
 //! produce the same `path:line:text` output, so behaviour is identical either way.
 
-use crate::{arg_bool, arg_str, arg_str_opt, resolve_within, truncate};
+use crate::{arg_bool, arg_str, arg_str_opt, confine, truncate};
 use agent_core::{Error, ExecSpec, Observation, Result, Sandbox, Tool, ToolContext, ToolSchema};
 use async_trait::async_trait;
 use ignore::WalkBuilder;
@@ -22,8 +22,15 @@ use std::sync::Arc;
 const MAX_HITS: usize = 300;
 
 /// Resolve the optional `path` argument (default ".") within the working dir.
+///
+/// Uses [`confine`] (not lexical `resolve_within`): the walk root is model-supplied,
+/// and `read_dir`/`WalkBuilder`/the `rg` positional all follow a symlinked root, so
+/// an in-repo symlink (`data -> /etc`) would otherwise let `grep`/`find`/`ls` read or
+/// list outside the tree. `confine` rejects a root that resolves outside `cwd` —
+/// matching the file tools, per the CLAUDE.md "every model path goes through confine"
+/// rule. A symlink pointing *inside* the tree is still allowed.
 fn resolve_root(cwd: &Path, args: &Value) -> std::result::Result<PathBuf, String> {
-    resolve_within(cwd, arg_str_opt(args, "path").unwrap_or("."))
+    confine(cwd, arg_str_opt(args, "path").unwrap_or("."))
 }
 
 /// Path relative to `cwd`, for stable, short output.
@@ -408,13 +415,46 @@ mod tests {
     }
 
     // --- resolve_root: default "." + escape rejection ----------------------
+    // `confine` canonicalizes `cwd`, so this uses a real temp dir (with a `src`
+    // subdir) rather than a fabricated path.
     #[rstest]
     #[case::positive_default(json!({}), true)]
     #[case::positive_subdir(json!({"path": "src"}), true)]
     #[case::negative_escape(json!({"path": "../.."}), false)]
     #[case::negative_absolute(json!({"path": "/etc"}), false)]
     fn resolve_root_cases(#[case] args: Value, #[case] ok: bool) {
-        assert_eq!(resolve_root(Path::new("/work/repo"), &args).is_ok(), ok);
+        let cwd = agent_testkit::tempdir();
+        std::fs::create_dir(cwd.join("src")).unwrap();
+        assert_eq!(resolve_root(&cwd, &args).is_ok(), ok);
+    }
+
+    // A symlink inside the tree pointing OUTSIDE it must be rejected as a walk
+    // root — otherwise grep/find/ls would list/read files outside cwd (secret
+    // disclosure). The confirmed escape vector the confine fix closes.
+    #[cfg(unix)]
+    #[test]
+    fn adversarial_symlinked_root_escaping_tree_is_rejected() {
+        use std::os::unix::fs::symlink;
+        let cwd = agent_testkit::tempdir();
+        let outside = agent_testkit::tempdir();
+        std::fs::write(outside.join("secret.txt"), "top secret").unwrap();
+        symlink(&*outside, cwd.join("data")).unwrap(); // data -> /outside
+
+        let err = resolve_root(&cwd, &json!({"path": "data"}))
+            .expect_err("a root symlinked outside the tree must be rejected");
+        assert!(err.contains("symlink") || err.contains("escapes"), "{err}");
+    }
+
+    // A symlink pointing back INSIDE the tree is still a valid root (confine
+    // allows internal symlinks) — the fix must not regress legitimate use.
+    #[cfg(unix)]
+    #[test]
+    fn positive_internal_symlinked_root_is_allowed() {
+        use std::os::unix::fs::symlink;
+        let cwd = agent_testkit::tempdir();
+        std::fs::create_dir(cwd.join("real")).unwrap();
+        symlink(cwd.join("real"), cwd.join("link")).unwrap(); // link -> ./real
+        assert!(resolve_root(&cwd, &json!({"path": "link"})).is_ok());
     }
 
     // --- grep --------------------------------------------------------------

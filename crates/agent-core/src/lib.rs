@@ -3054,7 +3054,7 @@ pub trait FleetRegistry: Send + Sync {
 /// A request to review one pull/merge request on one roster session — the unit the
 /// fleet orchestrator turns into a review (review-fleet C8). `session_id` names the
 /// **roster row** (a [`FleetSession::id`]); the PR-scoped `SessionKey` is minted from
-/// that row (`user = <org>`, `session = encode_review_session_id(repo, pr_number)`)
+/// that row (`user = <org>`, `session = encode_review_session_id(id, repo, pr_number)`)
 /// inside the orchestrator. Real triggers (forge poll C6, Slack watch C7) arrive in
 /// increment 4; until then the `ReviewNow` control-plane RPC injects these manually.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6180,6 +6180,53 @@ pub trait FleetApprover: Send + Sync {
     /// `review_id` is untrusted wire input; the impl looks it up (bound query arg) rather
     /// than turning it into a path.
     async fn approve(&self, review_id: &str) -> Result<ApproveOutcome>;
+}
+
+/// The outcome of a durable, atomic attempt to claim the exclusive right to POST a
+/// review (review-fleet C17, the approve→post idempotency point).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostLease {
+    /// This caller won the race and holds the exclusive right to post `review_id`. It
+    /// MUST then [`FleetPostLease::commit`] on a successful post or
+    /// [`FleetPostLease::release`] on a failed one.
+    Acquired,
+    /// A prior lease already committed — the review was posted. An idempotent no-op.
+    AlreadyPosted,
+    /// Another approve holds the lease right now (a concurrent post in flight, or a
+    /// crashed post whose hold has not been reclaimed). The caller must NOT post; the
+    /// approver treats it as an idempotent no-op (mapped to `AlreadyPosted` on the wire).
+    Held,
+}
+
+/// A durable, read-your-writes, cross-process compare-and-set that makes approve→post
+/// idempotent on `review_id` (review-fleet C17).
+///
+/// The forge post is the only *irreversible* side effect of an approve, and the fleet's
+/// draft `status` is persisted through an **async, eventually-consistent** telemetry
+/// funnel — so `status = "posted"` **cannot** be the idempotency key: two concurrent
+/// approves, or a sequential re-approve inside the flush window, both read `drafted` and
+/// both post (a double comment on the real forge). This seam is the authoritative guard,
+/// checked immediately before the post:
+///
+/// - [`acquire`](FleetPostLease::acquire) atomically transitions *none → held* and reports
+///   the prior state ([`PostLease`]). Exactly one concurrent/repeated caller gets
+///   `Acquired`; the rest get `Held`/`AlreadyPosted` and must not post.
+/// - [`commit`](FleetPostLease::commit) marks *held → posted* after a successful post
+///   (best-effort: a lease left `held` after a real post still dedups as a no-op, so it is
+///   never *less* safe to fail here).
+/// - [`release`](FleetPostLease::release) returns a `held` (un-posted) lease to *none* so a
+///   **failed** post can be retried by a later approve.
+///
+/// `review_id` is untrusted wire input — impls bind it as a query argument (no
+/// interpolation) and never turn it into a path.
+#[async_trait]
+pub trait FleetPostLease: Send + Sync {
+    /// Atomically claim the right to post `review_id`; see [`PostLease`].
+    async fn acquire(&self, review_id: &str) -> Result<PostLease>;
+    /// Mark a held lease posted (idempotency committed). Best-effort at the call site.
+    async fn commit(&self, review_id: &str) -> Result<()>;
+    /// Release a held, un-posted lease so a later approve can retry the post.
+    async fn release(&self, review_id: &str) -> Result<()>;
 }
 
 #[cfg(test)]

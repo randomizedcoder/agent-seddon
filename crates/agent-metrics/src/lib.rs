@@ -1881,8 +1881,22 @@ impl Metrics {
     /// One lifecycle hook dispatch (parity spec 22). Per-tenant via the ambient
     /// identity — hooks fire inside the scoped turn (Phase 5).
     pub fn on_hook(&self, hook: &str, point: &str) {
+        // `ambient_tenant()` is already `safe_segment`-filtered ("" otherwise). A
+        // non-empty value is attacker-influenced, so bound it through the shared
+        // config-plane tenant LRU (empty is a single bounded label) — else a flood of
+        // distinct ids grows this dimension without limit (B1).
+        let tenant = ambient_tenant();
+        if !tenant.is_empty() {
+            self.admit_config_plane_tenant(
+                &tenant,
+                TenantSeries::HookDispatch {
+                    hook: hook.to_string(),
+                    point: point.to_string(),
+                },
+            );
+        }
         self.hook_dispatches
-            .with_label_values(&[hook, point, &ambient_tenant()])
+            .with_label_values(&[hook, point, &tenant])
             .inc();
     }
     /// One router decision: `routed` / `fellover` / `skipped_unhealthy` /
@@ -2365,9 +2379,21 @@ impl Metrics {
     pub fn on_authorize(&self, policy: &str, decision: &str, seconds: f64) {
         // Per-tenant: which tenant's model is hitting authorize decisions (config-plane
         // observability Phase 5). Read from the ambient identity (the loop scopes every
-        // turn), `""` when unscoped. The latency sibling stays un-tenanted seam health.
+        // turn), `""` when unscoped. A non-empty value is attacker-influenced, so bound
+        // it through the shared tenant LRU (B1). The latency sibling stays un-tenanted
+        // seam health.
+        let tenant = ambient_tenant();
+        if !tenant.is_empty() {
+            self.admit_config_plane_tenant(
+                &tenant,
+                TenantSeries::PolicyAuthorize {
+                    policy: policy.to_string(),
+                    decision: decision.to_string(),
+                },
+            );
+        }
         self.policy_authorize
-            .with_label_values(&[policy, decision, &ambient_tenant()])
+            .with_label_values(&[policy, decision, &tenant])
             .inc();
         self.policy_authorize_seconds.observe(seconds);
     }
@@ -2377,8 +2403,19 @@ impl Metrics {
     /// (`deny` / `prompt_denied` / `prompt_allowed`). Per-tenant via the ambient
     /// identity — guard denials are a per-tenant security signal (Phase 5).
     pub fn on_policy_guard(&self, category: &str, action: &str) {
+        // Non-empty ambient tenant is attacker-influenced → bound via the shared LRU (B1).
+        let tenant = ambient_tenant();
+        if !tenant.is_empty() {
+            self.admit_config_plane_tenant(
+                &tenant,
+                TenantSeries::PolicyGuard {
+                    category: category.to_string(),
+                    action: action.to_string(),
+                },
+            );
+        }
         self.policy_guard
-            .with_label_values(&[category, action, &ambient_tenant()])
+            .with_label_values(&[category, action, &tenant])
             .inc();
     }
 
@@ -2572,6 +2609,25 @@ impl Metrics {
             .inc();
     }
 
+    /// Pre-seed the bounded `rpc` label set with the server's **known** method paths
+    /// (`/pkg.Service/Method`, from [`agent_proto::method_paths`], passed in by the gRPC
+    /// wiring so this low-level crate keeps no proto dependency).
+    ///
+    /// Without seeding, the high-water [`RpcBound`] admits paths first-come: an
+    /// auth-disabled flood of *unknown* (junk) paths can fill all `MAX_RPCS` slots before a
+    /// real method is first hit, collapsing that real method to the `"other"` sentinel and
+    /// degrading observability. Seeding the real methods up front guarantees each one keeps
+    /// its own label regardless of junk-path order (junk still collapses to `"other"` once
+    /// the bound is full — the memory was always bounded; this protects the *real* labels).
+    /// Idempotent, and a no-op past the cap.
+    pub fn seed_rpc_labels<S: AsRef<str>>(&self, paths: &[S]) {
+        if let Ok(mut b) = self.rpc_labels.lock() {
+            for p in paths {
+                b.admit(p.as_ref());
+            }
+        }
+    }
+
     /// Count one gRPC server request `{rpc, outcome, tenant}` and observe its latency
     /// `{rpc}` (the `MetricsLayer` tower service, bridged via the `RpcObserver`
     /// callback). `rpc` is the bounded request path (`/pkg.Service/Method`); `outcome`
@@ -2629,8 +2685,9 @@ impl Metrics {
     /// from the registry — so the `tenant` dimension stays bounded under churn/misconfig
     /// (the config-plane analogue of the fleet `repo` LRU). Unlike the fleet families
     /// (small enumerable discriminators), these carry open-ended discriminators (any
-    /// card `collection`, any RPC path), so the LRU remembers the exact tuples it
-    /// admitted and replays them here for precise removal.
+    /// card `collection`, any RPC path, any hook/op/policy tuple), so the LRU remembers
+    /// the exact tuples it admitted and replays them here for precise removal. Shared by
+    /// the config-plane pair and the Phase-5 ambient families (session/policy/guard/hook).
     fn admit_config_plane_tenant(&self, tenant: &str, series: TenantSeries) {
         let evicted = match self.config_plane_tenants.lock() {
             Ok(mut lru) => lru.admit(tenant, series),
@@ -2657,6 +2714,32 @@ impl Metrics {
                         let _ = self.grpc_server_rpc.remove_label_values(&[
                             &rpc,
                             &outcome,
+                            &evicted_tenant,
+                        ]);
+                    }
+                    TenantSeries::SessionOp { op } => {
+                        let _ = self
+                            .session_ops
+                            .remove_label_values(&[&op, &evicted_tenant]);
+                    }
+                    TenantSeries::PolicyAuthorize { policy, decision } => {
+                        let _ = self.policy_authorize.remove_label_values(&[
+                            &policy,
+                            &decision,
+                            &evicted_tenant,
+                        ]);
+                    }
+                    TenantSeries::PolicyGuard { category, action } => {
+                        let _ = self.policy_guard.remove_label_values(&[
+                            &category,
+                            &action,
+                            &evicted_tenant,
+                        ]);
+                    }
+                    TenantSeries::HookDispatch { hook, point } => {
+                        let _ = self.hook_dispatches.remove_label_values(&[
+                            &hook,
+                            &point,
                             &evicted_tenant,
                         ]);
                     }
@@ -2731,9 +2814,15 @@ impl Metrics {
     /// Count a session-history mutation, labelled by op. Per-tenant via the ambient
     /// identity — session lifecycle is per-user (Phase 5).
     pub fn on_session_op(&self, op: &str) {
-        self.session_ops
-            .with_label_values(&[op, &ambient_tenant()])
-            .inc();
+        // Non-empty ambient tenant is attacker-influenced (in auth-disabled mode a
+        // client controls the identity header, and `on_session_op` fires even on a
+        // failed op) → bound via the shared LRU so a flood of distinct ids can't grow
+        // the tenant dimension without limit (B1).
+        let tenant = ambient_tenant();
+        if !tenant.is_empty() {
+            self.admit_config_plane_tenant(&tenant, TenantSeries::SessionOp { op: op.to_string() });
+        }
+        self.session_ops.with_label_values(&[op, &tenant]).inc();
     }
     /// Count checkpoint objects reclaimed by a prune. **Un-tenanted seam health**: a
     /// prune is a bulk reaper sweeping idle sessions across *many* tenants in one call,
@@ -2823,11 +2912,14 @@ fn ambient_tenant() -> String {
         .unwrap_or_default()
 }
 
-/// The LRU cap on distinct config-plane `tenant` label values, shared by the two
-/// tenant-labelled config-plane families (`config_store_ops` + `grpc_server_rpc`).
-/// Tenants are verified orgs (C25), locked at low hundreds like sessions, so this is a
-/// backstop normal operation never reaches; it bounds the `tenant` dimension under
-/// misconfig/churn — the config-plane analogue of [`MAX_FLEET_REPOS`].
+/// The LRU cap on distinct `tenant` label values, shared by every tenant-labelled
+/// family recorded outside [`SessionMetrics`]: the config-plane pair
+/// (`config_store_ops` + `grpc_server_rpc`) and the Phase-5 ambient families
+/// (`session_ops` + `policy_authorize` + `policy_guard` + `hook_dispatches`). Tenants
+/// are verified orgs (C25), locked at low hundreds like sessions, so this is a backstop
+/// normal operation never reaches; it bounds the `tenant` dimension under
+/// misconfig/churn — and, for the ambient families, under an auth-disabled client that
+/// controls the identity header (B1). The config-plane analogue of [`MAX_FLEET_REPOS`].
 const MAX_TENANTS: usize = 1024;
 
 /// High-water cap on distinct `grpc_server_rpc` `rpc` label values (see the `rpc_labels`
@@ -2886,6 +2978,25 @@ enum TenantSeries {
     GrpcRpc {
         rpc: String,
         outcome: String,
+    },
+    /// `agent_session_ops_total{op, tenant}` (the SessionStore seam).
+    SessionOp {
+        op: String,
+    },
+    /// `agent_policy_authorize_total{policy, decision, tenant}`.
+    PolicyAuthorize {
+        policy: String,
+        decision: String,
+    },
+    /// `agent_policy_guard_total{category, action, tenant}`.
+    PolicyGuard {
+        category: String,
+        action: String,
+    },
+    /// `agent_hook_dispatches_total{hook, point, tenant}`.
+    HookDispatch {
+        hook: String,
+        point: String,
     },
 }
 
@@ -4082,6 +4193,49 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    // desc (adversarial, B1): a flood of distinct attacker-controlled ambient tenants on
+    // a Phase-5 family (session_ops — in auth-disabled mode the client controls the
+    // identity header, and on_session_op fires even on a failed op) is LRU-bounded, not
+    // unbounded. t1 is evicted once the cap is exceeded.
+    async fn adversarial_ambient_tenant_flood_is_bounded() {
+        let m = Metrics::new();
+        m.set_config_plane_tenant_cap(2);
+        for t in ["t1", "t2", "t3"] {
+            agent_core::scope(key_with_user(t), async {
+                m.on_session_op("restore");
+            })
+            .await;
+        }
+        let got = tenants_for(&m.encode_text(), "agent_session_ops_total");
+        let want: std::collections::BTreeSet<String> =
+            ["t2".to_string(), "t3".to_string()].into_iter().collect();
+        assert_eq!(
+            got, want,
+            "ambient tenant dimension must be LRU-bounded (t1 evicted)"
+        );
+    }
+
+    #[tokio::test]
+    // desc (B1): the tenant LRU is shared, so evicting a tenant removes its series across
+    // BOTH an ambient family (policy_guard) and a config-plane family recorded under it.
+    async fn boundary_eviction_clears_ambient_and_config_plane_together() {
+        let m = Metrics::new();
+        m.set_config_plane_tenant_cap(1);
+        agent_core::scope(key_with_user("t1"), async {
+            m.on_policy_guard("dangerous_command", "deny");
+        })
+        .await;
+        m.record_config_store_op("transport", "put", "ok", "t1");
+        // t2 overflows cap=1 → t1 evicted from both the guard and config-store families.
+        m.record_config_store_op("transport", "put", "ok", "t2");
+        let text = m.encode_text();
+        assert!(
+            !text.contains("tenant=\"t1\""),
+            "evicted t1 left a stale series in an ambient or config-plane family:\n{text}"
+        );
+    }
+
     #[rstest]
     // desc: an OK request records {rpc,outcome=ok,tenant} and its latency → both tick.
     #[case::positive_ok("/pkg.Svc/M", "ok", "acme", true)]
@@ -4165,6 +4319,37 @@ mod tests {
                 "overflow path {overflow} must not become its own label (counter or latency):\n{text}"
             );
         }
+    }
+
+    #[test]
+    // B2: a seeded real method must keep its own label even when an (auth-disabled) flood of
+    // junk paths arrives FIRST and fills the bound — the exact regression seeding prevents.
+    fn positive_seeded_rpc_method_survives_a_junk_flood() {
+        let m = Metrics::new();
+        m.set_rpc_label_cap(3);
+        // Pre-seed one real method (as the serve wiring does from the descriptor set).
+        m.seed_rpc_labels(&["/pkg.Svc/Real"]);
+        // A junk flood arrives before the real method is ever hit; it fills the remaining
+        // slots and then overflows to `other`.
+        for j in 0..10 {
+            m.record_grpc_rpc(&format!("/junk/{j}"), "ok", "", 0.01);
+        }
+        // The real method, hit only now, still records as ITSELF (it was seeded), not `other`.
+        m.record_grpc_rpc("/pkg.Svc/Real", "ok", "", 0.01);
+        let text = m.encode_text();
+        assert!(
+            line_with(
+                &text,
+                "agent_grpc_server_rpc_total",
+                &[("rpc", "/pkg.Svc/Real")]
+            )
+            .is_some(),
+            "a seeded real method must survive a junk flood:\n{text}"
+        );
+        assert!(
+            line_with(&text, "agent_grpc_server_rpc_total", &[("rpc", "other")]).is_some(),
+            "junk still bounded to `other`:\n{text}"
+        );
     }
 
     #[rstest]

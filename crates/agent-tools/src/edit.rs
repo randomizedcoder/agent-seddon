@@ -106,8 +106,13 @@ impl Tool for EditTool {
 
         // Preserve a leading BOM and the file's dominant line ending; match against
         // an `\n`-normalized copy so an LF `old_string` finds CRLF content.
+        // "Dominant" is by count: a file that is mostly LF with a single stray CRLF
+        // must stay LF — `body.contains("\r\n")` treated *any* CRLF as all-CRLF and
+        // rewrote every line ending, mutating untouched LF lines into CRLF.
         let (bom, body) = split_bom(&raw);
-        let crlf = body.contains("\r\n");
+        let crlf_count = body.matches("\r\n").count();
+        let lf_only_count = body.matches('\n').count() - crlf_count;
+        let crlf = crlf_count > lf_only_count;
         let normalized = body.replace("\r\n", "\n");
 
         let outcome = if multi {
@@ -467,6 +472,19 @@ mod tests {
         "first\nsecond\nthird\n",
         json!({"path": "f.txt", "old_string": "second", "new_string": "REPLACED"}),
         Ok("first\nREPLACED\nthird\n")
+    )]
+    // Mixed endings, LF-dominant: a single stray CRLF must NOT flip every line to
+    // CRLF (the `contains("\r\n")` bug). Untouched lines keep the dominant LF.
+    #[case::corner_mixed_lf_dominant_stays_lf(
+        "a\nb\r\nc\nd\n",
+        json!({"path": "f.txt", "old_string": "c", "new_string": "C"}),
+        Ok("a\nb\nC\nd\n")
+    )]
+    // Mixed endings, CRLF-dominant: reassemble as CRLF (the documented dominant rule).
+    #[case::corner_mixed_crlf_dominant_uses_crlf(
+        "a\r\nb\r\nc\nd\r\n",
+        json!({"path": "f.txt", "old_string": "c", "new_string": "C"}),
+        Ok("a\r\nb\r\nC\r\nd\r\n")
     )]
     // BOM preserved through the edit.
     #[case::boundary_bom_preserved(

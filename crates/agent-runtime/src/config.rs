@@ -920,6 +920,10 @@ pub struct InstantCfg {
     pub facts_max_chars: usize,
     #[serde(default = "default_instant_alternatives_chars")]
     pub alternatives_max_chars: usize,
+    /// Cap on the assembled "summary of earlier conversation" block; bounds the
+    /// ledger rebuild's dominant section (the token-budget re-check is the backstop).
+    #[serde(default = "default_instant_summaries_chars")]
+    pub summaries_max_chars: usize,
 }
 
 impl Default for InstantCfg {
@@ -931,6 +935,7 @@ impl Default for InstantCfg {
             min_coverage: default_instant_min_coverage(),
             facts_max_chars: default_instant_facts_chars(),
             alternatives_max_chars: default_instant_alternatives_chars(),
+            summaries_max_chars: default_instant_summaries_chars(),
         }
     }
 }
@@ -1091,6 +1096,9 @@ fn default_instant_facts_chars() -> usize {
 }
 fn default_instant_alternatives_chars() -> usize {
     2_048
+}
+fn default_instant_summaries_chars() -> usize {
+    8_192
 }
 
 fn default_digest_path() -> String {
