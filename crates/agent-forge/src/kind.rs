@@ -136,15 +136,21 @@ pub fn screen_base_url(url: &str) -> Result<()> {
         )));
     }
     if let Ok(ip) = h.parse::<IpAddr>() {
+        let is_v4_local = |v4: std::net::Ipv4Addr| {
+            v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
+        };
         let blocked = match ip {
-            IpAddr::V4(v4) => {
-                v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
-            }
-            IpAddr::V6(v6) => {
-                // loopback / unspecified / IPv4-mapped-private handled coarsely, plus
-                // ULA fc00::/7.
-                v6.is_loopback() || v6.is_unspecified() || (v6.segments()[0] & 0xfe00) == 0xfc00
-            }
+            IpAddr::V4(v4) => is_v4_local(v4),
+            // An IPv4-mapped address (e.g. `::ffff:169.254.169.254`, the cloud-metadata
+            // IP, or `::ffff:127.0.0.1`) carries a v4 host and must be screened by the v4
+            // rules — the bare v6 predicates below match none of them. Otherwise: v6
+            // loopback / unspecified / ULA (fc00::/7).
+            IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+                Some(v4) => is_v4_local(v4),
+                None => {
+                    v6.is_loopback() || v6.is_unspecified() || (v6.segments()[0] & 0xfe00) == 0xfc00
+                }
+            },
         };
         if blocked {
             return Err(Error::Config(format!(
@@ -417,6 +423,11 @@ mod tests {
     #[case::loopback_v6("http://[::1]/api")]
     #[case::dot_local("https://gitlab.local/api/v4")]
     #[case::bad_scheme("ftp://example.com/api")]
+    // IPv4-mapped IPv6 carries a v4 host past the bare v6 predicates — the classic
+    // cloud-metadata SSRF, and loopback/private in mapped form.
+    #[case::mapped_metadata("https://[::ffff:169.254.169.254]/latest/meta-data")]
+    #[case::mapped_loopback("http://[::ffff:127.0.0.1]/api")]
+    #[case::mapped_private("https://[::ffff:10.0.0.5]/api")]
     fn adversarial_base_url_ssrf_screened(#[case] url: &str) {
         assert!(screen_base_url(url).is_err(), "must screen {url}");
     }
@@ -426,6 +437,8 @@ mod tests {
     #[case::github("https://api.github.com")]
     #[case::self_hosted("https://gitlab.example.com/api/v4")]
     #[case::public_ip("https://8.8.8.8/api")]
+    // A mapped *public* v4 must still pass — the mapping handling must not over-block.
+    #[case::mapped_public("https://[::ffff:8.8.8.8]/api")]
     fn positive_public_base_url_passes_screen(#[case] url: &str) {
         assert!(screen_base_url(url).is_ok(), "should pass {url}");
     }
