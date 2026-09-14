@@ -42,6 +42,14 @@ const REINDEX_READ_BATCH: usize = 64;
 /// Below this many files in a batch, read sequentially — rayon's dispatch/join
 /// cost wouldn't be repaid. Counts/index contents are identical either way.
 const REINDEX_PAR_MIN: usize = 8;
+/// Hard ceiling on `SearchQuery.limit`. The model-facing tool path clamps to a
+/// small value before building the query, but the gRPC seam (untrusted wire) and
+/// any in-process caller do not — and tantivy's `TopNComputer` eagerly allocates
+/// `2 × limit` `ComparableDoc`s per segment, so an unclamped hostile `limit`
+/// (e.g. 500M) OOMs the process, and a near-`usize::MAX` value overflows
+/// `limit * 2` into a capacity-overflow panic. Clamp at the allocation site so
+/// every caller fails closed. Far above any realistic result set.
+const MAX_QUERY_LIMIT: usize = 10_000;
 
 /// The three indexed fields (all `Copy`).
 #[derive(Clone, Copy)]
@@ -170,7 +178,9 @@ impl SearchBackend for TantivyBackend {
         let globs = compile_globs(&q.path_globs)?;
         let searcher = self.reader.searcher();
         let fields = self.fields;
-        let limit = q.limit.max(1);
+        // Clamp: `.max(1)` guards the empty case; `MAX_QUERY_LIMIT` guards the
+        // hostile-huge case that would OOM/overflow tantivy's TopN allocation.
+        let limit = q.limit.clamp(1, MAX_QUERY_LIMIT);
         tokio::task::spawn_blocking(move || {
             run_search(searcher, query, limit, fields, matcher, globs)
         })
@@ -628,6 +638,28 @@ mod tests {
         let mut q = query("fox", SearchMode::Literal);
         q.limit = 1;
         assert!(backend.query(&q).await.unwrap().len() <= 1);
+    }
+
+    /// An untrusted `limit` reaches this backend unclamped over the gRPC seam and
+    /// from in-process callers (only the model-facing tool path clamps). tantivy's
+    /// `TopNComputer` eagerly allocates `2 × limit`, so a hostile-huge value OOMs
+    /// and a near-`usize::MAX` value overflows `limit * 2` into a capacity-overflow
+    /// panic. The clamp must keep the query bounded and successful.
+    #[rstest]
+    #[case::hostile_huge(500_000_000)]
+    #[case::overflow_usize_max(usize::MAX)]
+    #[tokio::test]
+    async fn adversarial_hostile_limit_is_clamped(#[case] limit: usize) {
+        let (_dir, backend) = indexed().await;
+        let mut q = query("fox", SearchMode::Literal);
+        q.limit = limit;
+        // Succeeds (no OOM/panic) and the result count is bounded by the clamp.
+        let hits = backend.query(&q).await.unwrap();
+        assert!(
+            hits.len() <= MAX_QUERY_LIMIT,
+            "results bounded by the clamp, got {}",
+            hits.len()
+        );
     }
 
     #[tokio::test]
