@@ -22,11 +22,19 @@
 //! another tenant's view. `local` maps to the store's own un-namespaced base, so
 //! `per_tenant = false` and the single-tenant CLI stay byte-identical.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use agent_core::{current_identity, safe_segment, UserId};
+
+/// Upper bound on distinct per-tenant views cached at once. The tenant string is
+/// attacker-influenced under `[auth] mode = "none"` (the client-set `x-agent-user-id` is
+/// trusted-as-sent), so an unbounded flood of distinct tenants would otherwise grow the
+/// cache — and its backing store views — without limit. Oldest-first eviction is safe: an
+/// evicted tenant simply rebuilds its (cheap `Arc`) view on next use. Matches the metrics
+/// tenant-label bound.
+const MAX_CACHED_TENANTS: usize = 1024;
 
 /// The current turn's verified tenant segment, or `local` when no identity is
 /// scoped or the scoped segment is not path-safe (fail-closed to the default
@@ -72,7 +80,24 @@ type TenantBuilder<S> = dyn Fn(&str) -> Arc<S> + Send + Sync;
 /// a tenant `String`) make the lazy cache nearly free.
 pub struct PerTenant<S: ?Sized> {
     build: Arc<TenantBuilder<S>>,
-    cache: Mutex<HashMap<String, Arc<S>>>,
+    cache: Mutex<TenantCache<S>>,
+    cap: usize,
+}
+
+/// The bounded per-tenant view cache: the views plus a FIFO of tenant keys for
+/// oldest-first eviction once [`MAX_CACHED_TENANTS`] is reached.
+struct TenantCache<S: ?Sized> {
+    views: HashMap<String, Arc<S>>,
+    order: VecDeque<String>,
+}
+
+impl<S: ?Sized> TenantCache<S> {
+    fn new() -> Self {
+        Self {
+            views: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
 }
 
 impl<S: ?Sized> PerTenant<S> {
@@ -85,22 +110,66 @@ impl<S: ?Sized> PerTenant<S> {
     pub fn new(build: impl Fn(&str) -> Arc<S> + Send + Sync + 'static) -> Self {
         Self {
             build: Arc::new(build),
-            cache: Mutex::new(HashMap::new()),
+            cache: Mutex::new(TenantCache::new()),
+            cap: MAX_CACHED_TENANTS,
+        }
+    }
+
+    /// Like [`new`](Self::new) but with an explicit cache cap (test-only, so the bound is
+    /// exercisable without minting `MAX_CACHED_TENANTS` tenants).
+    #[cfg(test)]
+    fn with_cap(cap: usize, build: impl Fn(&str) -> Arc<S> + Send + Sync + 'static) -> Self {
+        Self {
+            build: Arc::new(build),
+            cache: Mutex::new(TenantCache::new()),
+            cap: cap.max(1),
         }
     }
 
     /// The store view for the current turn's tenant. The cache lock is released
     /// before the returned `Arc` is used, so distinct tenants never contend on the
     /// seam call itself (only on the brief build/lookup).
+    ///
+    /// The builder runs **outside** the lock and a poisoned lock is **recovered** (the
+    /// crate convention), so one tenant's panicking first-build can neither stall nor
+    /// permanently wedge routing for every other tenant.
     pub fn route(&self) -> Arc<S> {
         let tenant = current_tenant();
-        let mut cache = self.cache.lock().expect("per-tenant cache poisoned");
-        if let Some(s) = cache.get(&tenant) {
-            return s.clone();
+        {
+            let cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(s) = cache.views.get(&tenant) {
+                return s.clone();
+            }
         }
+        // Build outside the lock: a slow or panicking builder must not block other
+        // tenants, nor poison the mutex.
         let s = (self.build)(&tenant);
-        cache.insert(tenant, s.clone());
+        let mut cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
+        // A concurrent call may have built + inserted this tenant first — share that one
+        // view so all callers converge (and drop our redundant build).
+        if let Some(existing) = cache.views.get(&tenant) {
+            return existing.clone();
+        }
+        // Bound the cache (attacker-influenced tenant string under mode=none): evict the
+        // oldest view before admitting a new one past the cap.
+        if cache.views.len() >= self.cap {
+            if let Some(old) = cache.order.pop_front() {
+                cache.views.remove(&old);
+            }
+        }
+        cache.views.insert(tenant.clone(), s.clone());
+        cache.order.push_back(tenant);
         s
+    }
+
+    /// Number of cached tenant views (test-only; asserts the bound holds).
+    #[cfg(test)]
+    fn cached_len(&self) -> usize {
+        self.cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .views
+            .len()
     }
 }
 
@@ -401,6 +470,60 @@ mod tests {
         list_as(&pt, "acme", "s2").await; // same tenant, different session
         assert_eq!(builds.load(Ordering::SeqCst), 1, "one build per tenant");
         assert_eq!(calls.lock().unwrap().len(), 2, "both calls routed");
+    }
+
+    // adversarial (A3): the tenant string is attacker-influenced under mode=none, so the
+    // view cache must be bounded — a flood of distinct tenants evicts oldest-first and
+    // never grows past the cap.
+    #[tokio::test]
+    async fn adversarial_tenant_cache_is_bounded() {
+        let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let c = calls.clone();
+        let pt = PerTenant::<dyn ProviderRegistry>::with_cap(3, move |tenant: &str| {
+            Arc::new(FakeReg {
+                tenant: tenant.to_string(),
+                calls: c.clone(),
+            }) as Arc<dyn ProviderRegistry>
+        });
+        for i in 0..50 {
+            list_as(&pt, &format!("tenant-{i}"), "s1").await;
+        }
+        assert!(
+            pt.cached_len() <= 3,
+            "cache must stay within the cap, got {}",
+            pt.cached_len()
+        );
+    }
+
+    // adversarial (A2): a builder that panics for one tenant must not poison the cache and
+    // wedge routing for every other tenant (the build runs outside the lock; a poisoned
+    // lock is recovered).
+    #[tokio::test]
+    async fn adversarial_panicking_builder_does_not_wedge_other_tenants() {
+        let pt = Arc::new(PerTenant::<dyn ProviderRegistry>::new(
+            move |tenant: &str| {
+                assert!(tenant != "boom", "builder panics for the hostile tenant");
+                Arc::new(FakeReg {
+                    tenant: tenant.to_string(),
+                    calls: Arc::new(Mutex::new(Vec::new())),
+                }) as Arc<dyn ProviderRegistry>
+            },
+        ));
+        // The panicking build for "boom" is caught; it must not poison the cache.
+        let pt2 = pt.clone();
+        let boom = tokio::spawn(async move {
+            let key = SessionKey::parse("boom", "s1").unwrap();
+            scope(key, async { pt2.list().await.ok() }).await
+        })
+        .await;
+        assert!(
+            boom.is_err(),
+            "the hostile tenant's build panicked (as set up)"
+        );
+        // A different tenant still routes fine — the lock was not wedged.
+        let key = SessionKey::parse("acme", "s1").unwrap();
+        let ok = scope(key, async { pt.list().await }).await;
+        assert!(ok.is_ok(), "a good tenant routes despite the prior panic");
     }
 
     // boundary: the default `local` tenant routes to the un-namespaced base view →
