@@ -713,6 +713,7 @@ cooldown_secs       = 30          # how long a breaker stays open before re-prob
 # min_coverage = 0.6                 # ledger coverage of the span; below → fallback
 # facts_max_chars = 4096
 # alternatives_max_chars = 2048
+# summaries_max_chars = 8192           # cap on the assembled summary block (bounds the rebuild)
 
 # The cognition-graph document (cognition-graph 04): the declarative node graph
 # re-expressing the gate/distiller/compaction wiring above, editable as data

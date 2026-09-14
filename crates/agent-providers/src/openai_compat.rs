@@ -5,6 +5,7 @@
 //! OpenAI convention) and only fills `content` once reasoning is done — so
 //! `max_tokens` needs real headroom.
 
+use crate::stream_caps::{MAX_STREAM_BUF_BYTES, MAX_STREAM_TOOL_ARG_BYTES, MAX_STREAM_TOOL_CALLS};
 use agent_core::{
     ChunkStream, CompletionChunk, CompletionRequest, CompletionResponse, ContentBlock, Error,
     LlmProvider, Message, ModelCapabilities, Result, Role, ToolCall, Usage,
@@ -78,22 +79,11 @@ impl OpenAiCompatProvider {
     /// the caller can read its body for the message).
     async fn send(&self, wire: &WireReq<'_>) -> Result<reqwest::Response> {
         agent_retry::run(&self.retry, || async {
-            match self
-                .client
-                .post(&self.endpoint)
-                .bearer_auth(&self.api_key)
-                .json(wire)
-                .send()
-                .await
-            {
+            match self.post(wire).send().await {
                 Ok(resp) => {
                     let code = resp.status().as_u16();
                     if agent_retry::http::retryable_status(code) {
-                        let after = resp
-                            .headers()
-                            .get(reqwest::header::RETRY_AFTER)
-                            .and_then(|v| v.to_str().ok())
-                            .and_then(agent_retry::http::parse_retry_after);
+                        let after = crate::retry_after(&resp);
                         let body = resp.text().await.unwrap_or_default();
                         agent_retry::Attempt::Retry {
                             err: Error::Provider(format!("http {code}: {body}")),
@@ -103,13 +93,67 @@ impl OpenAiCompatProvider {
                         agent_retry::Attempt::Done(resp)
                     }
                 }
-                Err(e) if e.is_timeout() || e.is_connect() => agent_retry::Attempt::Retry {
+                Err(e) if crate::transient_transport(&e) => agent_retry::Attempt::Retry {
                     err: Error::Provider(format!("request failed: {e}")),
                     after: None,
                 },
                 Err(e) => {
                     agent_retry::Attempt::Fail(Error::Provider(format!("request failed: {e}")))
                 }
+            }
+        })
+        .await
+    }
+
+    /// The per-attempt request builder (fresh each retry — a `RequestBuilder` is
+    /// single-use). Shared by [`Self::send`] (streaming) and [`Self::send_buffered`].
+    fn post(&self, wire: &WireReq<'_>) -> reqwest::RequestBuilder {
+        self.client
+            .post(&self.endpoint)
+            .bearer_auth(&self.api_key)
+            .json(wire)
+    }
+
+    /// Like [`Self::send`], but reads the **whole response body inside the retry
+    /// boundary** and returns `(status, body)`. A connection dropped mid-body
+    /// ("connection closed before message completed") is then retried like a timeout
+    /// instead of failing the call outright (which would also skip any failover) —
+    /// the fix for the buffered path, where the body read used to happen *after*
+    /// `send` returned. Used by the buffered [`complete`]; `stream` keeps [`Self::send`]
+    /// (a mid-stream drop can't be transparently replayed). A non-retryable error
+    /// status is returned as `Done` so the caller can surface its body.
+    async fn send_buffered(&self, wire: &WireReq<'_>) -> Result<(reqwest::StatusCode, String)> {
+        agent_retry::run(&self.retry, || async {
+            let resp = match self.post(wire).send().await {
+                Ok(resp) => resp,
+                Err(e) if crate::transient_transport(&e) => {
+                    return agent_retry::Attempt::Retry {
+                        err: Error::Provider(format!("request failed: {e}")),
+                        after: None,
+                    };
+                }
+                Err(e) => {
+                    return agent_retry::Attempt::Fail(Error::Provider(format!(
+                        "request failed: {e}"
+                    )));
+                }
+            };
+            let status = resp.status();
+            let retryable = agent_retry::http::retryable_status(status.as_u16());
+            // Capture the backoff hint before the body read consumes `resp`.
+            let after = retryable.then(|| crate::retry_after(&resp)).flatten();
+            match resp.text().await {
+                Ok(body) if retryable => agent_retry::Attempt::Retry {
+                    err: Error::Provider(format!("http {status}: {body}")),
+                    after,
+                },
+                Ok(body) => agent_retry::Attempt::Done((status, body)),
+                // The mid-body drop: transient, so retry it.
+                Err(e) if crate::transient_transport(&e) => agent_retry::Attempt::Retry {
+                    err: Error::Provider(format!("reading body: {e}")),
+                    after: None,
+                },
+                Err(e) => agent_retry::Attempt::Fail(Error::Provider(format!("reading body: {e}"))),
             }
         })
         .await
@@ -170,13 +214,9 @@ impl LlmProvider for OpenAiCompatProvider {
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse> {
         let wire = self.build_wire(&req, false);
 
-        let resp = self.send(&wire).await?;
-
-        let status = resp.status();
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| Error::Provider(format!("reading body: {e}")))?;
+        // Buffered path: the body is read inside the retry boundary, so a mid-body
+        // connection drop is retried rather than surfaced as a hard error.
+        let (status, body) = self.send_buffered(&wire).await?;
 
         if !status.is_success() {
             return Err(Error::Provider(format!("http {status}: {body}")));
@@ -289,6 +329,16 @@ impl LlmProvider for OpenAiCompatProvider {
                                 }
                             }
                             for tc in delta.tool_calls.unwrap_or_default() {
+                                // Cap the distinct tool-call slots a hostile server can open
+                                // (the index is server-supplied and keys the accumulator map).
+                                if !tools_acc.contains_key(&tc.index)
+                                    && tools_acc.len() >= MAX_STREAM_TOOL_CALLS
+                                {
+                                    yield Err(Error::Provider(format!(
+                                        "stream opened more than {MAX_STREAM_TOOL_CALLS} tool calls"
+                                    )));
+                                    return;
+                                }
                                 let acc = tools_acc.entry(tc.index).or_default();
                                 if let Some(id) = tc.id {
                                     if !id.is_empty() {
@@ -302,6 +352,16 @@ impl LlmProvider for OpenAiCompatProvider {
                                         }
                                     }
                                     if let Some(a) = f.arguments {
+                                        // Cap accumulated argument bytes per call (this also
+                                        // bounds the `serde_json::from_str` input downstream).
+                                        if acc.args.len().saturating_add(a.len())
+                                            > MAX_STREAM_TOOL_ARG_BYTES
+                                        {
+                                            yield Err(Error::Provider(format!(
+                                                "stream tool-call arguments exceeded {MAX_STREAM_TOOL_ARG_BYTES} bytes"
+                                            )));
+                                            return;
+                                        }
                                         acc.args.push_str(&a);
                                     }
                                 }
@@ -311,6 +371,15 @@ impl LlmProvider for OpenAiCompatProvider {
                             finish = Some(fr);
                         }
                     }
+                }
+                // Whatever remains in `buf` is an incomplete frame (no newline yet). A
+                // hostile/broken server that never sends a delimiter would grow it without
+                // bound — cap it and error out rather than OOM.
+                if buf.len() > MAX_STREAM_BUF_BYTES {
+                    yield Err(Error::Provider(format!(
+                        "stream frame exceeded {MAX_STREAM_BUF_BYTES} bytes without a delimiter"
+                    )));
+                    return;
                 }
             }
 
@@ -555,8 +624,26 @@ struct WireToolCallFn {
 #[derive(Deserialize)]
 struct WireResp {
     choices: Vec<WireChoice>,
-    #[serde(default)]
+    // Usage is telemetry: a present-but-malformed block (negative/float/wrong-type
+    // counts, or any hostile gateway value) must NOT sink an otherwise-valid answer.
+    // `#[serde(default)]` alone only rescues an ABSENT field; the lenient
+    // deserializer additionally maps a present-but-unparseable usage to `None`, so
+    // the completion survives and only the counts are dropped. (The streaming path
+    // keeps the strict `Option<WireUsage>` — a bad terminal usage chunk is skipped
+    // there, and the content has already streamed.)
+    #[serde(default, deserialize_with = "lenient_usage")]
     usage: Option<WireUsage>,
+}
+
+/// Deserialize `WireResp.usage` tolerantly: parse the value into a `serde_json::Value`
+/// first, then try `WireUsage`, mapping any failure (negative counts, floats, a string,
+/// a wrong shape) to `None` rather than failing the whole response decode.
+fn lenient_usage<'de, D>(de: D) -> std::result::Result<Option<WireUsage>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = Option::<Value>::deserialize(de)?;
+    Ok(v.and_then(|v| serde_json::from_value::<WireUsage>(v).ok()))
 }
 
 #[derive(Deserialize)]
@@ -635,7 +722,7 @@ fn to_core_usage(u: WireUsage) -> Usage {
 mod tests {
     use super::{
         parse_tool_args, to_core_usage, to_openai_content, OpenAiCompatConfig,
-        OpenAiCompatProvider, PromptTokensDetails, StreamEvent, WireContent, WireUsage,
+        OpenAiCompatProvider, PromptTokensDetails, StreamEvent, WireContent, WireResp, WireUsage,
     };
     use agent_core::{CompletionRequest, ContentBlock, Message};
     use rstest::rstest;
@@ -829,6 +916,39 @@ mod tests {
         assert!(
             serde_json::from_str::<StreamEvent>(data).is_err(),
             "hostile usage chunk must be rejected, not silently coerced: {data}"
+        );
+    }
+
+    // The BUFFERED path is different from streaming: the whole answer is in one
+    // WireResp, so a present-but-hostile usage block must NOT sink it — the answer
+    // survives and only the counts drop to None.
+    #[rstest]
+    #[case::negative(
+        r#"{"choices":[{"message":{"content":"the answer"}}],"usage":{"prompt_tokens":-1}}"#
+    )]
+    #[case::float(
+        r#"{"choices":[{"message":{"content":"the answer"}}],"usage":{"prompt_tokens":3.5}}"#
+    )]
+    #[case::wrong_type(r#"{"choices":[{"message":{"content":"the answer"}}],"usage":"garbage"}"#)]
+    #[case::overflow(r#"{"choices":[{"message":{"content":"the answer"}}],"usage":{"prompt_tokens":99999999999999}}"#)]
+    fn adversarial_buffered_hostile_usage_keeps_answer(#[case] body: &str) {
+        let parsed: WireResp = serde_json::from_str(body)
+            .expect("a hostile usage block must not fail the whole response decode");
+        assert!(parsed.usage.is_none(), "hostile usage dropped to None");
+        let choice = parsed.choices.into_iter().next().expect("choice present");
+        assert_eq!(choice.message.content.as_deref(), Some("the answer"));
+    }
+
+    // A well-formed usage still decodes into counts (no regression from the lenient
+    // path).
+    #[test]
+    fn positive_buffered_valid_usage_decodes() {
+        let body = r#"{"choices":[{"message":{"content":"hi"}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#;
+        let parsed: WireResp = serde_json::from_str(body).unwrap();
+        let u = parsed.usage.expect("usage present");
+        assert_eq!(
+            (u.prompt_tokens, u.completion_tokens, u.total_tokens),
+            (10, 5, 15)
         );
     }
 }

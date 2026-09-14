@@ -287,6 +287,15 @@ mod jwt {
     /// header — this is what defeats `alg:none` and HS/RS key-confusion.
     const ALLOWED_ALGS: [Algorithm; 2] = [Algorithm::RS256, Algorithm::ES256];
 
+    /// Minimum seconds between JWKS refetches. A cache miss (unknown `kid`) triggers at
+    /// most one outbound fetch per this window — so an attacker who sends tokens bearing a
+    /// fresh random `kid` each request (all of which pass the unsigned `decode_header` +
+    /// alg-allow-list checks *before* any signature is verified) cannot amplify each cheap
+    /// inbound request into an outbound JWKS GET+parse (a pre-auth DoS on both this process
+    /// and the IdP). Legitimate key rotation is still honoured within this window — IdPs
+    /// rotate with old/new key overlap, so a bounded pickup delay is safe.
+    pub(super) const MIN_JWKS_REFETCH_SECS: u64 = 60;
+
     /// A clock, injectable so `exp`/`nbf` leeway is testable without sleeping.
     pub trait Clock: Send + Sync {
         fn now_secs(&self) -> u64;
@@ -338,7 +347,16 @@ mod jwt {
         leeway_secs: u64,
         jwks: Arc<dyn JwksSource>,
         clock: Arc<dyn Clock>,
-        cache: Mutex<Option<JwkSet>>,
+        cache: Mutex<JwksCache>,
+    }
+
+    /// The cached JWK set plus the time of the last fetch *attempt* — the timestamp
+    /// rate-limits refetches (see [`MIN_JWKS_REFETCH_SECS`]). `last_fetch_secs == 0`
+    /// means "never fetched" (a cold cache always allows the first fetch).
+    #[derive(Default)]
+    struct JwksCache {
+        set: Option<JwkSet>,
+        last_fetch_secs: u64,
     }
 
     impl JwtVerifier {
@@ -380,25 +398,42 @@ mod jwt {
                 leeway_secs: params.leeway_secs,
                 jwks,
                 clock,
-                cache: Mutex::new(None),
+                cache: Mutex::new(JwksCache::default()),
             }
         }
 
-        /// Find the JWK for `kid`, refetching once on a miss so key rotation is
-        /// honoured. Returns `None` on any fetch failure or a persistent miss.
+        /// Find the JWK for `kid`. On a cache miss (cold cache or a rotated key) refetch
+        /// the JWK set — but **rate-limited**: at most one fetch per
+        /// [`MIN_JWKS_REFETCH_SECS`], so an unknown `kid` cannot force an outbound fetch on
+        /// every request (a pre-auth amplification DoS). Returns `None` on a fetch failure,
+        /// a persistent miss, or while inside the refetch cooldown after a recent attempt.
         async fn key_for(&self, kid: &str) -> Option<Jwk> {
             {
-                let cache = self.cache.lock().await;
-                if let Some(set) = cache.as_ref() {
+                let mut cache = self.cache.lock().await;
+                if let Some(set) = cache.set.as_ref() {
                     if let Some(k) = set.find(kid) {
                         return Some(k.clone());
                     }
                 }
+                // Miss. Refuse to refetch inside the cooldown so a flood of unknown `kid`s
+                // can't each force an outbound fetch. Stamp the attempt NOW, before
+                // releasing the lock, so concurrent misses coalesce onto this one fetch
+                // (they see the fresh timestamp and back off) — bounding fetches to one per
+                // window even under a concurrent burst.
+                let now = self.clock.now_secs();
+                if cache.last_fetch_secs != 0
+                    && now.saturating_sub(cache.last_fetch_secs) < MIN_JWKS_REFETCH_SECS
+                {
+                    return None;
+                }
+                cache.last_fetch_secs = now;
             }
-            // Miss (cold cache or rotated key) → refetch once.
+            // Miss past the cooldown (cold cache or a rotated key) → refetch once. The lock
+            // is released across the network fetch so a slow JWKS endpoint can't stall other
+            // verifications.
             let fresh = self.jwks.fetch().await.ok()?;
             let found = fresh.find(kid).cloned();
-            *self.cache.lock().await = Some(fresh);
+            self.cache.lock().await.set = Some(fresh);
             found
         }
     }
@@ -428,8 +463,16 @@ mod jwt {
             // the leeway is deterministic and testable.
             validation.validate_exp = false;
             validation.validate_nbf = false;
-            validation.required_spec_claims =
-                ["exp", "sub"].iter().map(|s| (*s).to_string()).collect();
+            // `aud`/`iss` are enforced via set_audience/set_issuer, but jsonwebtoken
+            // only checks them when the claim is PRESENT — an absent `aud` (or `iss`)
+            // would otherwise pass vacuously, so a token minted for another resource
+            // server whose JWKS also signs for us would be accepted here. Require
+            // them so a missing claim is a MissingRequiredClaim rejection, making the
+            // "iss/aud match config, fail-closed" promise in the module doc true.
+            validation.required_spec_claims = ["exp", "sub", "aud", "iss"]
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect();
 
             let data = decode::<serde_json::Value>(token, &key, &validation).map_err(|_| ())?;
             let claims = data.claims;

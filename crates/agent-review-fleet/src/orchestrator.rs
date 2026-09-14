@@ -240,6 +240,13 @@ impl ReviewTask {
             let _ = h.await;
         }
     }
+    /// Whether the spawned review has run to completion (draft persisted + worktree
+    /// reaped). A guard whose handle was already taken counts as finished.
+    fn is_finished(&self) -> bool {
+        self.handle
+            .as_ref()
+            .is_none_or(tokio::task::JoinHandle::is_finished)
+    }
 }
 
 impl Drop for ReviewTask {
@@ -433,6 +440,21 @@ impl FleetOrchestrator {
             .contains_key(&(session_id.to_string(), pr_number))
     }
 
+    /// Drop completed review tasks from the in-flight guard; returns how many were
+    /// reaped. In production the drain loop is fire-and-forget — it never calls
+    /// [`Self::cancel`]/[`Self::join`] — so without this a finished `(session, PR)`
+    /// would (a) block a re-trigger forever (the dedup check below sees a stale
+    /// entry, so a new commit is never re-reviewed and the whole C16 cross-round
+    /// path is dead) and (b) leak one completed `JoinHandle` per PR ever reviewed.
+    /// Called at the top of [`Self::handle`], so the guard holds only genuinely
+    /// running reviews.
+    fn reap_finished(&self) -> usize {
+        let mut g = self.in_flight.lock().expect("in_flight poisoned");
+        let before = g.len();
+        g.retain(|_, t| !t.is_finished());
+        before - g.len()
+    }
+
     /// Cancel and clear an in-flight review (dropping its [`ReviewTask`] aborts the task,
     /// cancelling the run). Returns whether one was present.
     pub fn cancel(&self, session_id: &str, pr_number: u64) -> bool {
@@ -471,8 +493,13 @@ impl FleetOrchestrator {
     /// touching the forge, the engine, or the session.
     pub async fn handle(&self, trigger: FleetTrigger) -> agent_core::Result<Handled> {
         let kt = (trigger.session_id.clone(), trigger.pr_number);
+        // Reap completed reviews first, so a finished (session, PR) neither blocks a
+        // re-trigger (a new commit → re-review) nor leaks its JoinHandle — the prod
+        // drain loop never cancels/joins, so this is the only reaper on that path.
+        self.reap_finished();
         // C14-lite dedup: one in-flight review per (session, PR). Checked up front so a
-        // duplicate never re-fetches or re-grounds.
+        // duplicate never re-fetches or re-grounds. After the reap above, a hit here
+        // means a review is genuinely still running.
         if self
             .in_flight
             .lock()
@@ -552,18 +579,30 @@ impl FleetOrchestrator {
             }
         }
 
-        // Idempotent add: a prior round for this PR (a crash, a poller re-fire, or a
-        // new head) can leave a `pr-{pr}` worktree registered; the id is head-oid-
-        // independent, so re-adding collides (`fatal: '…/worktrees/pr-N' already
-        // exists`). Remove any stale one first — best-effort: a not-found remove is
-        // expected and ignored, and this also makes the re-checkout land at the new
-        // head rather than reusing a stale tree.
-        let _ = repo.worktree_remove(&format!("pr-{pr}")).await;
+        // The per-review worktree id. Keyed by **both** the PR and the review's
+        // `session_id` — the same `(session_id, pr)` pair that keys `in_flight` dedup —
+        // *not* `pr-{pr}` alone. In single-repo mode (no per-row factory: `review.backend`
+        // != "local" or the root unset — a real default) every row shares the one global
+        // repo, so two distinct rows watching the same PR# (e.g. a security row and a
+        // style row) would otherwise share the `pr-{pr}` worktree: row B's stale-remove
+        // and its post-run cleanup would delete the very tree row A's spawned task is
+        // still reviewing. Distinct sessions ⇒ distinct worktrees ⇒ no cross-delete;
+        // same (row, pr) re-fire ⇒ same id ⇒ the idempotent remove-before-add below still
+        // reaps its own stale tree. `session_id` is untrusted, so the id is sanitized and
+        // capped safe_segment-valid by construction (`review_worktree_id`).
+        let wt_id = review_worktree_id(pr, &trigger.session_id);
+        // Idempotent add: a prior round for this (session, PR) (a crash, a poller re-fire,
+        // or a new head) can leave the worktree registered; the id is head-oid-independent,
+        // so re-adding collides (`fatal: '…/worktrees/<id>' already exists`). Remove any
+        // stale one first — best-effort: a not-found remove is expected and ignored, and
+        // this also makes the re-checkout land at the new head rather than reusing a stale
+        // tree.
+        let _ = repo.worktree_remove(&wt_id).await;
         let _worktree = repo
             .worktree_add(&WorktreeSpec {
                 revision: head,
                 writable: false,
-                id: Some(format!("pr-{pr}")),
+                id: Some(wt_id.clone()),
             })
             .await?;
 
@@ -604,7 +643,7 @@ impl FleetOrchestrator {
 
         let key = SessionKey {
             user: UserId::new(row.user.as_str()),
-            session: encode_review_session_id(&row.repo, pr),
+            session: encode_review_session_id(&row.id, &row.repo, pr),
         };
         // A server-minted review-round id (unguessable), carried into the draft record so
         // the approval path (inc 6c) can address exactly this round.
@@ -627,6 +666,9 @@ impl FleetOrchestrator {
         // nothing else reaps the per-row factory repo). Captured before `repo` is
         // shadowed below by the repo *name* string used in the draft record.
         let review_repo = repo.clone();
+        // The per-review worktree id, moved into the task so it reaps exactly this
+        // review's worktree (matching the `(session_id, pr)`-keyed add above).
+        let wt_id_task = wt_id;
         let repo = row.repo.clone();
         let key_run = key.clone();
         let sid = trigger.session_id.clone();
@@ -713,9 +755,9 @@ impl FleetOrchestrator {
                             "fleet: review run failed (no draft) — recorded status=failed, will retry on next trigger");
                     }
                 }
-                // Reap this PR's read-only worktree so disk doesn't grow one checkout
+                // Reap this review's read-only worktree so disk doesn't grow one checkout
                 // per reviewed PR. Best-effort — never fail a review on cleanup.
-                if let Err(e) = review_repo.worktree_remove(&format!("pr-{pr}")).await {
+                if let Err(e) = review_repo.worktree_remove(&wt_id_task).await {
                     tracing::debug!(session_id = %sid, pr, error = %e,
                         "fleet: worktree cleanup failed (soft)");
                 }
@@ -730,6 +772,38 @@ impl FleetOrchestrator {
             "fleet: review started");
         Ok(Handled::Reviewing { key })
     }
+}
+
+/// The git-worktree id for one review round, keyed by `(session_id, pr)` — the same pair
+/// that keys `in_flight` dedup — so two rows watching the same PR in single-repo mode get
+/// **distinct** worktrees and never cross-delete each other's checkout.
+///
+/// `session_id` is untrusted (a roster row id from a gRPC peer / hand-edited file), and the
+/// result becomes a path segment, so it is sanitized to the `safe_segment` charset and
+/// capped: `pr<pr>-<sanitized session>`, well-formed by construction (non-empty, no leading
+/// `-`/`.`, ≤ `MAX_SEGMENT_LEN`) — the same encode-don't-widen approach as
+/// [`encode_review_session_id`]. `pr` is a `u64` so the prefix is always in-charset and
+/// never leads with `-`.
+fn review_worktree_id(pr: u64, session_id: &str) -> String {
+    let prefix = format!("pr{pr}-");
+    let sanitized: String = session_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '_' | '.') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    // A leading `-`/`.` on the session part is harmless (the `pr<pr>-` prefix leads), but
+    // cap so `prefix + base` fits MAX_SEGMENT_LEN.
+    let max_base = agent_core::MAX_SEGMENT_LEN.saturating_sub(prefix.len());
+    let mut base = sanitized;
+    base.truncate(max_base);
+    // If the session part sanitized/truncated to nothing, `pr<pr>-` alone is still a valid
+    // segment; keep it rather than emitting a bare dangling id.
+    format!("{prefix}{base}")
 }
 
 #[cfg(test)]
@@ -790,6 +864,14 @@ mod tests {
                 state: Mutex::new(HostState::default()),
                 gate: None,
                 fail_review: true,
+            }
+        }
+        /// Release a gated review so its task can run to completion (for the reap
+        /// tests). `notify_one` stores a permit, so it is race-free even if called
+        /// before the task reaches `.notified().await`.
+        fn release(&self) {
+            if let Some(g) = &self.gate {
+                g.notify_one();
             }
         }
         fn admitted(&self) -> Vec<SessionKey> {
@@ -1166,7 +1248,7 @@ mod tests {
     async fn positive_trigger_drives_cloning_then_reviewing() {
         // desc: a trigger for a known row + PR. expect: FSM reaches Reviewing, the PR
         // head is fetched once, a worktree is added, and the review runs on the
-        // PR-scoped key (user = org, session = encode_review_session_id(repo, pr)).
+        // PR-scoped key (user = org, session = encode_review_session_id(row_id, repo, pr)).
         let mut r = row("web", true);
         r.skill = "code-review".into();
         let roster = seeded(&[r]).await;
@@ -1196,7 +1278,7 @@ mod tests {
         assert_eq!(key.user.as_str(), "acme");
         assert_eq!(
             key.session.as_str(),
-            encode_review_session_id("acme__web", 42).as_str()
+            encode_review_session_id("web", "acme__web", 42).as_str()
         );
         assert!(goal.contains("#42"), "goal names the PR: {goal}");
         // The roster row's skill is threaded to the host (C11) so the review session
@@ -1206,6 +1288,55 @@ mod tests {
             Some("code-review"),
             "the review skill reaches the host"
         );
+    }
+
+    #[tokio::test]
+    async fn positive_two_rows_same_repo_get_distinct_review_sessions() {
+        // desc (F2): two roster rows watch the SAME repo for the SAME PR (e.g. one runs
+        // a security checklist, one a style checklist — distinct row ids, distinct
+        // skills). expect: each review runs under its OWN SessionKey, so the second never
+        // reuses the first's seeded session (no wrong-skill / transcript bleed). Both
+        // rows share `repo = "acme__web"`; only the row id differs.
+        let mut sec = row("web-sec", true);
+        sec.skill = "security-review".into();
+        let mut sty = row("web-style", true);
+        sty.skill = "style-review".into();
+        let roster = seeded(&[sec, sty]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(0));
+        let o = orch(roster, repo.clone(), host.clone());
+
+        for id in ["web-sec", "web-style"] {
+            o.handle(FleetTrigger {
+                session_id: id.into(),
+                pr_number: 42,
+            })
+            .await
+            .expect("handle ok");
+            assert!(o.join(id, 42).await, "review task in flight");
+        }
+
+        let s = host.state.lock().unwrap();
+        assert_eq!(s.reviews.len(), 2, "both rows reviewed");
+        let sessions: Vec<&str> = s
+            .reviews
+            .iter()
+            .map(|(k, _, _)| k.session.as_str())
+            .collect();
+        assert_ne!(
+            sessions[0], sessions[1],
+            "distinct rows on one repo must not share a review session: {sessions:?}"
+        );
+        // Each session carries its own row id (the disambiguator) and the shared repo.
+        assert!(
+            sessions.iter().any(|s| s.contains("web-sec"))
+                && sessions.iter().any(|s| s.contains("web-style")),
+            "each review session names its row: {sessions:?}"
+        );
+        // And each row's own skill reached the host under its own key (no bleed).
+        let skills: Vec<Option<&str>> = s.reviews.iter().map(|(_, _, sk)| sk.as_deref()).collect();
+        assert!(skills.contains(&Some("security-review")));
+        assert!(skills.contains(&Some("style-review")));
     }
 
     #[tokio::test]
@@ -1233,6 +1364,75 @@ mod tests {
         // Settle the one spawned review; exactly one run was started.
         o.join("web", 7).await;
         assert_eq!(host.reviews_len(), 1, "only one review ran");
+    }
+
+    // ---- in-flight guard reaping (Bug F1) --------------------------------
+
+    #[tokio::test]
+    async fn positive_reap_leaves_a_running_review_untouched() {
+        // A genuinely in-flight review must NOT be reaped, and still dedups.
+        let roster = seeded(&[row("web", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::gated());
+        let o = orch(roster, repo, host);
+        let t = || FleetTrigger {
+            session_id: "web".into(),
+            pr_number: 42,
+        };
+        assert!(matches!(
+            o.handle(t()).await.expect("first ok"),
+            Handled::Reviewing { .. }
+        ));
+        assert_eq!(o.reap_finished(), 0, "a running review is not reaped");
+        assert!(o.is_in_flight("web", 42), "still in flight");
+        assert!(
+            matches!(o.handle(t()).await.expect("second ok"), Handled::Duplicate),
+            "a running review still dedups a duplicate trigger"
+        );
+        o.cancel("web", 42); // abort the gated task
+    }
+
+    #[tokio::test]
+    async fn positive_finished_review_is_reaped_and_unblocks_retrigger() {
+        // The prod drain loop never cancels/joins, so a finished (session, PR) must be
+        // reaped here — else the map leaks a JoinHandle per PR and the stale entry
+        // turns a re-trigger (new commit) into a spurious Duplicate, killing re-review.
+        let roster = seeded(&[row("web", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::gated());
+        let o = orch(roster, repo, host.clone());
+        let t = || FleetTrigger {
+            session_id: "web".into(),
+            pr_number: 42,
+        };
+        assert!(matches!(
+            o.handle(t()).await.expect("first ok"),
+            Handled::Reviewing { .. }
+        ));
+
+        // Let the review complete, then confirm it is reaped WITHOUT a join/cancel
+        // (the prod path). Bounded yield loop → deterministic outcome, no real sleep.
+        host.release();
+        let mut reaped = 0;
+        for _ in 0..1000 {
+            tokio::task::yield_now().await;
+            reaped += o.reap_finished();
+            if reaped > 0 {
+                break;
+            }
+        }
+        assert_eq!(reaped, 1, "the finished review was reaped");
+        assert!(!o.is_in_flight("web", 42), "reaped entry is gone (no leak)");
+
+        // The same PR can now be re-reviewed — not blocked by the stale entry.
+        assert!(
+            !matches!(
+                o.handle(t()).await.expect("retrigger ok"),
+                Handled::Duplicate
+            ),
+            "a finished PR must be re-reviewable, not a spurious Duplicate"
+        );
+        o.cancel("web", 42); // settle the second (gated) review
     }
 
     // ---- worktree idempotency + cleanup (Bug 1) --------------------------
@@ -1285,17 +1485,18 @@ mod tests {
 
     #[tokio::test]
     async fn positive_stale_worktree_removed_before_add() {
-        // desc: a prior round left a `pr-42` worktree registered (a crash, or a re-fire
-        // on a new head). expect: the run removes it before re-adding, so the add can't
-        // collide and the re-review succeeds — the exact failure the l2 demo hit
-        // (`fatal: '…/worktrees/pr-42' already exists`).
+        // desc: a prior round for this same (session, pr) left its worktree registered (a
+        // crash, or a re-fire on a new head). expect: the run removes it before re-adding,
+        // so the add can't collide and the re-review succeeds — the exact failure the l2
+        // demo hit (`fatal: '…/worktrees/…' already exists`).
         let roster = seeded(&[row("web", true)]).await;
         let repo = Arc::new(agent_testkit::FixtureRepo::new());
-        // Seed the collision the real git backend raises on a second add of a live id.
+        // Seed the collision the real git backend raises on a second add of a live id —
+        // under the review's own `(session, pr)`-keyed id (`review_worktree_id(42,"web")`).
         repo.worktree_add(&WorktreeSpec {
             revision: agent_core::Revision("stale".into()),
             writable: false,
-            id: Some("pr-42".into()),
+            id: Some(review_worktree_id(42, "web")),
         })
         .await
         .expect("seed stale worktree");
@@ -1313,7 +1514,7 @@ mod tests {
         assert!(o.join("web", 42).await);
         assert!(
             repo.worktree_list().await.unwrap().is_empty(),
-            "no duplicate pr-42 accumulates; the run reaps its worktree"
+            "no duplicate worktree accumulates; the run reaps its worktree"
         );
     }
 
@@ -2428,5 +2629,80 @@ mod tests {
         r.user = user.into();
         r.repo = repo.into();
         assert_eq!(o.fleet_metrics(&r).is_some(), admits);
+    }
+
+    // ---- review_worktree_id (R2: per-(session,pr) worktree, no cross-delete) ----------
+
+    #[rstest]
+    // Two distinct rows watching the same PR# must get DISTINCT worktree ids — the whole
+    // point: in single-repo mode a shared `pr-{pr}` id let row B delete row A's checkout.
+    fn positive_distinct_sessions_yield_distinct_worktree_ids() {
+        let a = review_worktree_id(7, "security-row");
+        let b = review_worktree_id(7, "style-row");
+        assert_ne!(a, b, "distinct sessions must not share a worktree id");
+        assert!(agent_core::safe_segment(&a) && agent_core::safe_segment(&b));
+    }
+
+    #[rstest]
+    // A re-fire of the SAME (session, pr) must be stable so the idempotent
+    // remove-before-add reaps its own stale tree.
+    fn positive_same_session_and_pr_is_stable() {
+        assert_eq!(
+            review_worktree_id(42, "row-abc"),
+            review_worktree_id(42, "row-abc")
+        );
+    }
+
+    #[rstest]
+    // The same row reviewing two different PRs concurrently must get distinct worktrees
+    // (matching the `(session_id, pr)` in_flight key).
+    fn positive_same_session_distinct_pr_differ() {
+        assert_ne!(
+            review_worktree_id(1, "row-abc"),
+            review_worktree_id(2, "row-abc")
+        );
+    }
+
+    #[rstest]
+    // A long session id is capped so `prefix + base` stays within MAX_SEGMENT_LEN and the
+    // id remains a valid single segment.
+    fn boundary_long_session_id_capped_and_valid() {
+        let id = review_worktree_id(9, &"x".repeat(300));
+        assert!(id.len() <= agent_core::MAX_SEGMENT_LEN);
+        assert!(
+            agent_core::safe_segment(&id),
+            "capped id must be valid: {id}"
+        );
+    }
+
+    #[rstest]
+    // An empty session part still yields a well-formed segment (`pr<n>-`), never a bare/
+    // dangling id.
+    fn corner_empty_session_id_still_valid() {
+        let id = review_worktree_id(5, "");
+        assert!(agent_core::safe_segment(&id), "id must be valid: {id}");
+    }
+
+    #[rstest]
+    // session_id is untrusted: traversal, path separators, and git-ref-special chars must
+    // be sanitized so the id can never escape the worktrees dir or inject a ref — the
+    // result is always a single safe_segment with no `/`, `..`, or leading `-`.
+    #[case::traversal("../../etc/passwd")]
+    #[case::separators("owner/name")]
+    #[case::ref_special("~^:?*[")]
+    #[case::leading_dash("-rf")]
+    #[case::dotdot("..")]
+    fn adversarial_hostile_session_id_sanitized(#[case] session: &str) {
+        let id = review_worktree_id(3, session);
+        // `safe_segment` is the real invariant git worktree relies on: it guarantees a
+        // single component (no `/`), not exactly `.`/`..`, no leading `-`, charset-bound —
+        // so the id can neither escape the worktrees dir nor inject a git ref. (An internal
+        // `.` substring is legitimately allowed, e.g. `repo.name`, and is harmless inside a
+        // single path component.)
+        assert!(
+            agent_core::safe_segment(&id),
+            "hostile session `{session}` must sanitize to a valid segment, got `{id}`"
+        );
+        assert!(!id.contains('/') && !id.starts_with('-') && id != "..");
     }
 }

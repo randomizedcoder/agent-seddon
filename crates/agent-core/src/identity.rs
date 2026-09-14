@@ -126,34 +126,47 @@ impl std::fmt::Display for SessionId {
     }
 }
 
-/// Encode a `(repo, pr)` pair into a single [`safe_segment`]-valid [`SessionId`] for
-/// the review fleet's org-tier convention (`session = <repo>+<pr>`; see [`SessionKey`]).
+/// Encode a `(row_id, repo, pr)` triple into a single [`safe_segment`]-valid
+/// [`SessionId`] for the review fleet's org-tier convention (`session =
+/// <row_id>+<repo>+<pr>`; see [`SessionKey`]).
+///
+/// The **row id leads** because it is the roster's primary key — unique per row and
+/// already `safe_segment`-valid — so two rows watching the *same* repo (e.g. one for a
+/// security checklist, one for a style checklist) mint **distinct** review sessions
+/// instead of colliding and reusing each other's seeded skill + transcript. Re-review
+/// of the *same* row+pr stays deterministic (the id is a pure function of the triple),
+/// which is what makes a retrigger idempotent.
 ///
 /// The natural `repo@pr` form is **rejected** by [`safe_segment`] — `@` and `/` are
 /// out of the `[A-Za-z0-9._-]` charset — and widening the validator is a non-starter:
 /// it would ripple through every path component, metric label, and map key that trusts
-/// it. So encode instead: sanitize `repo` to the charset (out-of-charset chars,
-/// including `/` in `owner/name`, become `-`), then append `-pr<n>`. The result is
-/// well-formed by construction — non-empty, no leading `-`/`.`, capped at
-/// [`MAX_SEGMENT_LEN`] — so it always passes [`safe_segment`].
-pub fn encode_review_session_id(repo: &str, pr: u64) -> SessionId {
+/// it. So encode instead: sanitize both components to the charset (out-of-charset
+/// chars, including `/` in `owner/name`, become `-`), join `<row_id>-<repo>`, then
+/// append `-pr<n>`. The result is well-formed by construction — non-empty, no leading
+/// `-`/`.`, capped at [`MAX_SEGMENT_LEN`] — so it always passes [`safe_segment`]. The
+/// cap truncates from the tail, so the leading row id (the disambiguator) is preserved
+/// preferentially over the trailing repo decoration.
+pub fn encode_review_session_id(row_id: &str, repo: &str, pr: u64) -> SessionId {
     let suffix = format!("-pr{pr}");
-    // Sanitize to the safe_segment charset.
-    let sanitized: String = repo
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '_' | '.') {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
+    // Sanitize each component to the safe_segment charset, then join with the row id
+    // first. The row id is the collision-breaking key; the repo is readable decoration.
+    let sanitize = |s: &str| -> String {
+        s.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '_' | '.') {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect()
+    };
+    let joined = format!("{}-{}", sanitize(row_id), sanitize(repo));
     // A leading `-`/`.` (or the whole thing being `.`/`..`) would fail safe_segment;
     // trim leading separators and fall back to a stable tag if nothing survives.
-    let mut base = sanitized.trim_start_matches(['-', '.']).to_string();
+    let mut base = joined.trim_start_matches(['-', '.']).to_string();
     if base.is_empty() {
-        base = "repo".to_string();
+        base = "review".to_string();
     }
     // Cap so `base + suffix` fits MAX_SEGMENT_LEN (suffix is always in-charset ASCII).
     let max_base = MAX_SEGMENT_LEN.saturating_sub(suffix.len());
@@ -161,7 +174,7 @@ pub fn encode_review_session_id(repo: &str, pr: u64) -> SessionId {
     // Truncation could re-expose a trailing `.` that makes `<base>.` odd but still
     // valid; and an all-dot base was already handled. Re-trim trailing dots defensively.
     let base = base.trim_end_matches('.');
-    let base = if base.is_empty() { "repo" } else { base };
+    let base = if base.is_empty() { "review" } else { base };
     SessionId::new(format!("{base}{suffix}"))
 }
 
@@ -174,9 +187,10 @@ pub fn encode_review_session_id(repo: &str, pr: u64) -> SessionId {
 ///
 /// Multi-org deployments (the review fleet) use `user` as the **organization**
 /// dimension by convention — **no struct change**: `user = <org>`, `session =
-/// <repo>+<pr>` (encode the latter with [`encode_review_session_id`], since the
-/// natural `repo@pr` form is rejected by [`safe_segment`]). The hierarchy is
-/// `host ⊃ org (user) ⊃ repo+pr (session) ⊃ child`, **single-level** — `org→team→user`
+/// <row_id>+<repo>+<pr>` (encode the latter with [`encode_review_session_id`], since the
+/// natural `repo@pr` form is rejected by [`safe_segment`], and the row id disambiguates
+/// two rows watching one repo). The hierarchy is
+/// `host ⊃ org (user) ⊃ row+repo+pr (session) ⊃ child`, **single-level** — `org→team→user`
 /// is a noted non-goal, not this tier.
 ///
 /// Everything the `(user, session)` primitive already namespaces then partitions by
@@ -293,12 +307,17 @@ mod tests {
         assert_ne!(pa, pb, "different orgs must not share a tree");
     }
 
-    /// The `repo@pr` session id encoder produces a `safe_segment`-valid id that also
-    /// survives the untrusted-wire parse path (so a fleet-minted id is wire-safe).
+    /// The `(row_id, repo, pr)` session id encoder produces a `safe_segment`-valid id
+    /// that also survives the untrusted-wire parse path (so a fleet-minted id is
+    /// wire-safe), and carries both the row id and the pr number.
     #[test]
     fn positive_repo_pr_session_id_encodes_safe() {
-        let id = encode_review_session_id("owner/repo.name", 42);
+        let id = encode_review_session_id("web-sec", "owner/repo.name", 42);
         assert!(safe_segment(id.as_str()), "encoded id must be valid: {id}");
+        assert!(
+            id.as_str().starts_with("web-sec-"),
+            "leads with the row id: {id}"
+        );
         assert!(
             id.as_str().ends_with("-pr42"),
             "carries the pr number: {id}"
@@ -306,6 +325,56 @@ mod tests {
         assert!(!id.as_str().contains('/') && !id.as_str().contains('@'));
         // The output is accepted by the same validator that guards untrusted input.
         assert!(SessionId::parse(id.as_str()).is_ok());
+    }
+
+    /// F2 regression: two roster rows watching the **same repo** for the **same PR**
+    /// (e.g. a security row and a style row) must mint **distinct** review sessions, so
+    /// the second review never reuses the first's seeded skill + transcript. The row id
+    /// is the disambiguator.
+    #[test]
+    fn positive_distinct_rows_same_repo_get_distinct_sessions() {
+        let sec = encode_review_session_id("web-sec", "acme/web", 7);
+        let sty = encode_review_session_id("web-style", "acme/web", 7);
+        assert_ne!(
+            sec.as_str(),
+            sty.as_str(),
+            "distinct rows for one repo must not collide"
+        );
+        // And each is still a stable function of its inputs (idempotent re-review).
+        assert_eq!(sec, encode_review_session_id("web-sec", "acme/web", 7));
+    }
+
+    /// Boundary: a very long row id is preserved over the trailing repo decoration when
+    /// the segment cap bites — the row id is the collision-breaking key, so truncating
+    /// from the tail keeps two long distinct row ids distinct.
+    #[test]
+    fn boundary_long_row_id_survives_cap_and_stays_distinct() {
+        let a = encode_review_session_id(&format!("{}a", "row".repeat(40)), "acme/web", 5);
+        let b = encode_review_session_id(&format!("{}b", "row".repeat(40)), "acme/web", 5);
+        assert!(a.as_str().len() <= MAX_SEGMENT_LEN);
+        assert!(b.as_str().len() <= MAX_SEGMENT_LEN);
+        assert!(safe_segment(a.as_str()) && safe_segment(b.as_str()));
+        assert!(a.as_str().ends_with("-pr5") && b.as_str().ends_with("-pr5"));
+    }
+
+    /// Adversarial: a hostile row id (traversal/separator/injection chars) is sanitized
+    /// to the charset like the repo is — the encoded id is always `safe_segment`-valid,
+    /// never escaping to a `..` or path-separator payload.
+    #[test]
+    fn adversarial_hostile_row_id_is_sanitized() {
+        for row in [
+            "../../etc",
+            "a/b\\c",
+            "..",
+            "-lead",
+            "id;rm -rf",
+            "\u{202e}rtl",
+        ] {
+            let id = encode_review_session_id(row, "acme/web", 1);
+            assert!(safe_segment(id.as_str()), "hostile row id `{row}` → {id}");
+            assert!(SessionId::parse(id.as_str()).is_ok());
+            assert!(!id.as_str().contains("..") && !id.as_str().contains('/'));
+        }
     }
 
     /// The raw, *unencoded* `repo@pr` form is rejected by `safe_segment` — the reason
@@ -324,14 +393,15 @@ mod tests {
     /// limit — both still `safe_segment`-valid.
     #[test]
     fn corner_encoder_handles_pathological_repo_names() {
-        let empty_ish = encode_review_session_id("///", 1);
+        // Both components all-separator ⇒ the stable fallback tag.
+        let empty_ish = encode_review_session_id("///", "///", 1);
         assert!(safe_segment(empty_ish.as_str()), "{empty_ish}");
-        assert_eq!(empty_ish.as_str(), "repo-pr1");
+        assert_eq!(empty_ish.as_str(), "review-pr1");
 
-        let dotty = encode_review_session_id("..", 3);
+        let dotty = encode_review_session_id("..", "..", 3);
         assert!(safe_segment(dotty.as_str()), "{dotty}");
 
-        let long = encode_review_session_id(&"a".repeat(500), 9);
+        let long = encode_review_session_id("row", &"a".repeat(500), 9);
         assert!(long.as_str().len() <= MAX_SEGMENT_LEN);
         assert!(
             safe_segment(long.as_str()),
