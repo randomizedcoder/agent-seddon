@@ -90,6 +90,50 @@ impl Clock for FixedClock {
     }
 }
 
+/// A clock the test can advance, for exercising the JWKS refetch cooldown.
+#[derive(Clone)]
+struct AdvanceableClock(Arc<std::sync::atomic::AtomicU64>);
+impl AdvanceableClock {
+    fn new(now: u64) -> Self {
+        Self(Arc::new(std::sync::atomic::AtomicU64::new(now)))
+    }
+    fn advance(&self, secs: u64) {
+        self.0.fetch_add(secs, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+impl Clock for AdvanceableClock {
+    fn now_secs(&self) -> u64 {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// A JWKS source that counts fetches and serves a swappable set — the seam for the
+/// rotation + refetch-rate-limit tests.
+#[derive(Clone)]
+struct CountingJwks {
+    set: Arc<Mutex<JwkSet>>,
+    fetches: Arc<std::sync::atomic::AtomicUsize>,
+}
+impl CountingJwks {
+    fn new(set: Arc<Mutex<JwkSet>>) -> Self {
+        Self {
+            set,
+            fetches: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+    fn count(&self) -> usize {
+        self.fetches.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+#[async_trait::async_trait]
+impl JwksSource for CountingJwks {
+    async fn fetch(&self) -> Result<JwkSet, ()> {
+        self.fetches
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(self.set.lock().unwrap().clone())
+    }
+}
+
 fn params(leeway_secs: u64) -> AuthParams {
     AuthParams {
         mode: "oidc".into(),
@@ -166,19 +210,64 @@ async fn positive_valid_jwt_derives_tenant() {
 
 #[tokio::test]
 async fn positive_jwks_rotation_reverifies() {
-    let (v, set) = verifier_with(60, NOW);
+    // Rotation is honoured, but refetches are rate-limited — so advance the clock past the
+    // cooldown before the rotated key arrives (an IdP rotates infrequently, with overlap).
+    let set = Arc::new(Mutex::new(jwks_with_kid(KID)));
+    let clock = AdvanceableClock::new(NOW);
+    let v = JwtVerifier::with_sources(
+        params(60),
+        Arc::new(CountingJwks::new(set.clone())),
+        Arc::new(clock.clone()),
+    );
     // First verify with the seeded key populates the cache.
     v.verify(&mint(KID, &valid_claims("acme", "u")))
         .await
         .expect("initial key verifies");
-    // Issuer rotates: same key material, NEW kid; a token with the new kid misses
-    // the cache and must force one refetch, then verify.
+    // Issuer rotates: same key material, NEW kid; a token with the new kid misses the
+    // cache and, once past the refetch cooldown, forces one refetch, then verifies.
     *set.lock().unwrap() = jwks_with_kid("rotated-key-2");
+    clock.advance(super::jwt::MIN_JWKS_REFETCH_SECS);
     let id = v
         .verify(&mint("rotated-key-2", &valid_claims("acme", "u")))
         .await
         .expect("rotated key re-verifies after refetch");
     assert_eq!(id.tenant, "acme");
+}
+
+#[tokio::test]
+async fn adversarial_unknown_kid_flood_is_rate_limited() {
+    // A pre-auth attacker sends tokens bearing a fresh random `kid` each request; every one
+    // misses the cache. Without a cooldown each miss would force an outbound JWKS fetch
+    // (amplification DoS). Assert the flood triggers AT MOST ONE fetch inside the window,
+    // and that a legitimate rotation still refetches once the cooldown elapses.
+    let set = Arc::new(Mutex::new(jwks_with_kid(KID)));
+    let jwks = CountingJwks::new(set.clone());
+    let clock = AdvanceableClock::new(NOW);
+    let v = JwtVerifier::with_sources(params(60), Arc::new(jwks.clone()), Arc::new(clock.clone()));
+    // A burst of distinct unknown kids, all within the same cooldown window.
+    for i in 0..50 {
+        let _ = v
+            .verify(&mint(
+                &format!("attacker-kid-{i}"),
+                &valid_claims("acme", "u"),
+            ))
+            .await;
+    }
+    assert_eq!(
+        jwks.count(),
+        1,
+        "50 unknown-kid misses in one window must trigger at most one JWKS fetch"
+    );
+    // Past the cooldown, a genuine miss is allowed to refetch again (rotation still works).
+    clock.advance(super::jwt::MIN_JWKS_REFETCH_SECS);
+    let _ = v
+        .verify(&mint("attacker-kid-later", &valid_claims("acme", "u")))
+        .await;
+    assert_eq!(
+        jwks.count(),
+        2,
+        "a miss after the cooldown elapses may refetch once more"
+    );
 }
 
 #[tokio::test]
