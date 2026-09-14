@@ -631,7 +631,7 @@ impl FleetOrchestrator {
 
         let key = SessionKey {
             user: UserId::new(row.user.as_str()),
-            session: encode_review_session_id(&row.repo, pr),
+            session: encode_review_session_id(&row.id, &row.repo, pr),
         };
         // A server-minted review-round id (unguessable), carried into the draft record so
         // the approval path (inc 6c) can address exactly this round.
@@ -1201,7 +1201,7 @@ mod tests {
     async fn positive_trigger_drives_cloning_then_reviewing() {
         // desc: a trigger for a known row + PR. expect: FSM reaches Reviewing, the PR
         // head is fetched once, a worktree is added, and the review runs on the
-        // PR-scoped key (user = org, session = encode_review_session_id(repo, pr)).
+        // PR-scoped key (user = org, session = encode_review_session_id(row_id, repo, pr)).
         let mut r = row("web", true);
         r.skill = "code-review".into();
         let roster = seeded(&[r]).await;
@@ -1231,7 +1231,7 @@ mod tests {
         assert_eq!(key.user.as_str(), "acme");
         assert_eq!(
             key.session.as_str(),
-            encode_review_session_id("acme__web", 42).as_str()
+            encode_review_session_id("web", "acme__web", 42).as_str()
         );
         assert!(goal.contains("#42"), "goal names the PR: {goal}");
         // The roster row's skill is threaded to the host (C11) so the review session
@@ -1241,6 +1241,55 @@ mod tests {
             Some("code-review"),
             "the review skill reaches the host"
         );
+    }
+
+    #[tokio::test]
+    async fn positive_two_rows_same_repo_get_distinct_review_sessions() {
+        // desc (F2): two roster rows watch the SAME repo for the SAME PR (e.g. one runs
+        // a security checklist, one a style checklist — distinct row ids, distinct
+        // skills). expect: each review runs under its OWN SessionKey, so the second never
+        // reuses the first's seeded session (no wrong-skill / transcript bleed). Both
+        // rows share `repo = "acme__web"`; only the row id differs.
+        let mut sec = row("web-sec", true);
+        sec.skill = "security-review".into();
+        let mut sty = row("web-style", true);
+        sty.skill = "style-review".into();
+        let roster = seeded(&[sec, sty]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(0));
+        let o = orch(roster, repo.clone(), host.clone());
+
+        for id in ["web-sec", "web-style"] {
+            o.handle(FleetTrigger {
+                session_id: id.into(),
+                pr_number: 42,
+            })
+            .await
+            .expect("handle ok");
+            assert!(o.join(id, 42).await, "review task in flight");
+        }
+
+        let s = host.state.lock().unwrap();
+        assert_eq!(s.reviews.len(), 2, "both rows reviewed");
+        let sessions: Vec<&str> = s
+            .reviews
+            .iter()
+            .map(|(k, _, _)| k.session.as_str())
+            .collect();
+        assert_ne!(
+            sessions[0], sessions[1],
+            "distinct rows on one repo must not share a review session: {sessions:?}"
+        );
+        // Each session carries its own row id (the disambiguator) and the shared repo.
+        assert!(
+            sessions.iter().any(|s| s.contains("web-sec"))
+                && sessions.iter().any(|s| s.contains("web-style")),
+            "each review session names its row: {sessions:?}"
+        );
+        // And each row's own skill reached the host under its own key (no bleed).
+        let skills: Vec<Option<&str>> = s.reviews.iter().map(|(_, _, sk)| sk.as_deref()).collect();
+        assert!(skills.contains(&Some("security-review")));
+        assert!(skills.contains(&Some("style-review")));
     }
 
     #[tokio::test]
