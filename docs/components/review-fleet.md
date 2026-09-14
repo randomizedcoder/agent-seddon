@@ -243,9 +243,28 @@ The [`FleetApprover`](../../crates/agent-core/src/lib.rs) seam (concrete `Engine
 C14, so the approving process need not be the one that drafted), and unless it is already `posted`,
 reads the rendered `.md`, builds the draft's repo's **operational** forge (`build_session_forge` —
 the model's own in-loop forge stays read-only/`dry_run`), posts the review as a **comment** (the fleet
-advises; a human decides approve/merge), and persists `status = posted`. That status is the
-**idempotency key**: a re-approve finds `posted` (newest-by-ts) and short-circuits to a no-op — a
-duplicate call never double-posts. `Approve` is **opt-in**: served only by the full `--serve-fleet`
+advises; a human decides approve/merge), and persists `status = posted`.
+
+The **authoritative idempotency guard** is the
+[`FleetPostLease`](../../crates/agent-core/src/lib.rs) seam — a durable, read-your-writes,
+cross-process **compare-and-set** acquired immediately before the (irreversible) forge post:
+exactly one concurrent/repeated approve of a `review_id` `acquire`s the lease and posts, and the rest
+observe `Held`/`AlreadyPosted` and stand down. This is deliberate: the persisted `status` is written
+through the **async, eventually-consistent telemetry funnel**, so it *cannot* be the idempotency key on
+its own — two concurrent approves, or a re-approve inside the flush window, would both read `drafted`
+and both post a duplicate comment. The persisted `status = posted` remains a **cheap early-out** (the
+`plan_approve` short-circuit for a far-apart re-approve) and feeds C16 head-oid dedup + operator
+history, but the lease is what makes the guarantee. The lease follows the roster store
+([`resolve_fleet_post_lease`](../../crates/agent-runtime/src/builder.rs)): a `sqlite` store gets the
+durable, cross-process [`SqlitePostLease`](../../crates/agent-review-fleet/src/lease.rs) (its own table
+in the roster DB); every other store falls back to the in-process
+[`MemoryPostLease`](../../crates/agent-review-fleet/src/lease.rs), which still closes the same-process
+double-post but is not durable across restarts/processes (a fleet needing that runs `sqlite`; durable
+`file`/`postgres` leases are a follow-up). On a **failed** post the lease is released so a later approve
+can retry; a post that succeeds but whose lease-commit fails still dedups (a leftover `held` lease makes
+the next approve stand down), so commit is best-effort.
+
+`Approve` is **opt-in**: served only by the full `--serve-fleet`
 process **with `[telemetry]` enabled** (the approver needs the persisted history to look a draft up);
 the bare control plane, or a process without history, answers `UNIMPLEMENTED`. The RPC returns a total
 `status` — `posted` (with the comment URL in `detail`), `already_posted`, or `not_found` — as an
