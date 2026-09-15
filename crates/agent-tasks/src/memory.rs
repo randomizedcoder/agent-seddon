@@ -58,9 +58,33 @@ impl TaskTracker for MemoryTaskTracker {
     }
 }
 
-/// The plan invariant: at most one todo may be `in_progress` (the agent works one
-/// step at a time). Neither peer enforces this — a genuine correctness improvement.
+/// Cap on the number of todos in a plan. A real plan is a handful of steps; this
+/// refuses a model-supplied array large enough to bloat memory (the plan is copied
+/// wholesale into the store). Generous — far above any legitimate plan.
+const MAX_TODOS: usize = 1000;
+/// Cap on a single todo's `content` length (bytes). Bounds the other axis the
+/// model controls, so a plan can't balloon via a few enormous strings.
+const MAX_TODO_CHARS: usize = 4096;
+
+/// The plan invariants, enforced at the seam so every caller (`write` and
+/// `update`) is covered:
+/// * at most one todo may be `in_progress` (the agent works one step at a time);
+/// * the plan is bounded in count and per-item content size — the array and its
+///   strings are model-controlled and copied wholesale into the store, so an
+///   unbounded plan is a memory-DoS vector (every sibling seam caps its inputs).
 fn validate_invariant(todos: &[Todo]) -> Result<()> {
+    if todos.len() > MAX_TODOS {
+        return Err(Error::Tasks(format!(
+            "too many todos ({}, limit {MAX_TODOS})",
+            todos.len()
+        )));
+    }
+    if let Some(t) = todos.iter().find(|t| t.content.len() > MAX_TODO_CHARS) {
+        return Err(Error::Tasks(format!(
+            "todo content too long ({} bytes, limit {MAX_TODO_CHARS})",
+            t.content.len()
+        )));
+    }
     let in_progress = todos
         .iter()
         .filter(|t| t.status == TodoStatus::InProgress)
@@ -236,5 +260,48 @@ mod tests {
             .unwrap();
         t.clear().await.unwrap();
         assert!(t.list().await.unwrap().is_empty());
+    }
+
+    // A plan with more than MAX_TODOS entries is rejected, and the store is left
+    // unchanged (the model controls this array; it must not bloat memory).
+    #[tokio::test]
+    async fn adversarial_oversized_plan_rejected() {
+        let t = MemoryTaskTracker::new();
+        let huge: Vec<Todo> = (0..=MAX_TODOS)
+            .map(|i| todo(&format!("t{i}"), TodoStatus::Pending, TodoPriority::Low))
+            .collect();
+        let err = t.write(huge).await.unwrap_err().to_string();
+        assert!(err.contains("too many todos"), "{err}");
+        assert!(t.list().await.unwrap().is_empty(), "store unchanged");
+    }
+
+    // A single over-long content string is rejected.
+    #[tokio::test]
+    async fn adversarial_oversized_content_rejected() {
+        let t = MemoryTaskTracker::new();
+        let big = "x".repeat(MAX_TODO_CHARS + 1);
+        let err = t
+            .write(vec![todo(&big, TodoStatus::Pending, TodoPriority::Low)])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("content too long"), "{err}");
+    }
+
+    // Exactly at both caps is still accepted (strict > semantics).
+    #[tokio::test]
+    async fn boundary_plan_at_caps_is_accepted() {
+        let t = MemoryTaskTracker::new();
+        let at_count: Vec<Todo> = (0..MAX_TODOS)
+            .map(|i| todo(&format!("t{i}"), TodoStatus::Pending, TodoPriority::Low))
+            .collect();
+        assert!(t.write(at_count).await.is_ok(), "exactly MAX_TODOS is ok");
+        let at_len = "y".repeat(MAX_TODO_CHARS);
+        assert!(
+            t.write(vec![todo(&at_len, TodoStatus::Pending, TodoPriority::Low)])
+                .await
+                .is_ok(),
+            "content exactly MAX_TODO_CHARS is ok"
+        );
     }
 }
