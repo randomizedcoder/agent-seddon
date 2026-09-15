@@ -11,7 +11,8 @@
 //!   result, error, span, or log; errors carry an HTTP status or a generic phrase;
 //! - the returned `input_tokens` is parsed as `u64` and **clamped** to `u32`, so a
 //!   hostile huge/negative number can't wrap or panic a downstream `inc_by`;
-//! - the response is size-capped (via `Content-Length`) and the client is
+//! - the response is size-capped by a streamed byte limit (independent of the
+//!   advertised `Content-Length`, which a chunked body omits) and the client is
 //!   timeout-bounded, so a slow or giant response can't wedge the compaction loop;
 //! - any failure returns `Err`, and the caller (compaction) falls back to its
 //!   heuristic — a count is never fabricated.
@@ -92,17 +93,7 @@ impl ProviderTokenizer {
                 "provider count_tokens: HTTP {status}"
             )));
         }
-        if resp
-            .content_length()
-            .is_some_and(|n| n > MAX_RESPONSE_BYTES)
-        {
-            return Err(Error::Tokenizer(
-                "provider count_tokens: response too large".into(),
-            ));
-        }
-        let text = resp.text().await.map_err(|_| {
-            Error::Tokenizer("provider count_tokens: reading response failed".into())
-        })?;
+        let text = read_capped(resp, MAX_RESPONSE_BYTES).await?;
         let v: Value = serde_json::from_str(&text)
             .map_err(|_| Error::Tokenizer("provider count_tokens: malformed response".into()))?;
         let n = v
@@ -112,6 +103,33 @@ impl ProviderTokenizer {
         // Clamp a hostile/huge value into range rather than wrap or panic.
         Ok(u32::try_from(n).unwrap_or(u32::MAX))
     }
+}
+
+/// Read a response body with a hard size cap that does *not* depend on the
+/// advertised `Content-Length`. The old check only fired when `content_length()`
+/// was `Some`, so a chunked response (no length header) reached `resp.text()`,
+/// which buffers without bound — a hostile/compromised provider endpoint could
+/// OOM us. Reject an over-cap length up front and cap the streamed body too.
+async fn read_capped(mut resp: reqwest::Response, max: u64) -> Result<String> {
+    if resp.content_length().is_some_and(|n| n > max) {
+        return Err(Error::Tokenizer(
+            "provider count_tokens: response too large".into(),
+        ));
+    }
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|_| Error::Tokenizer("provider count_tokens: reading response failed".into()))?
+    {
+        if buf.len() as u64 + chunk.len() as u64 > max {
+            return Err(Error::Tokenizer(
+                "provider count_tokens: response too large".into(),
+            ));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
 /// Flatten a message's countable text (text blocks + tool-call name/args) into one
@@ -232,5 +250,72 @@ mod tests {
         // No server: an empty text must short-circuit to 0, never touch the network.
         let t = ProviderTokenizer::new("http://127.0.0.1:1/v1", "k", "v", 1).unwrap();
         assert_eq!(t.count("", "m").await.unwrap(), 0);
+    }
+
+    // --- read_capped: size cap independent of Content-Length ----------------
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Serve one response once (raw head + body). `head` should NOT include the
+    /// final blank line (`\r\n\r\n` is appended). Returns the URL to GET.
+    async fn serve_once(head: String, body: Vec<u8>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut scratch = [0u8; 1024];
+                let _ = sock.read(&mut scratch).await;
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.write_all(b"\r\n\r\n").await;
+                let _ = sock.write_all(&body).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        format!("http://{addr}/")
+    }
+
+    async fn get(url: &str) -> reqwest::Response {
+        reqwest::Client::new().get(url).send().await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn positive_body_under_cap_is_returned() {
+        let url = serve_once(
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close".into(),
+            b"hi".to_vec(),
+        )
+        .await;
+        assert_eq!(read_capped(get(&url).await, 64).await.unwrap(), "hi");
+    }
+
+    #[tokio::test]
+    async fn adversarial_oversized_content_length_rejected() {
+        let url = serve_once(
+            "HTTP/1.1 200 OK\r\nContent-Length: 9999\r\nConnection: close".into(),
+            vec![b'x'; 16],
+        )
+        .await;
+        let err = read_capped(get(&url).await, 64)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("too large"), "{err}");
+    }
+
+    /// The regression this fix targets: NO Content-Length (chunked/close-delimited)
+    /// with a body over the cap. The old header-only check missed this and buffered
+    /// it all; the streamed cap now rejects it.
+    #[tokio::test]
+    async fn adversarial_unbounded_body_without_content_length_is_capped() {
+        let url = serve_once(
+            "HTTP/1.1 200 OK\r\nConnection: close".into(),
+            vec![b'x'; 4096],
+        )
+        .await;
+        let err = read_capped(get(&url).await, 64)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("too large"), "{err}");
     }
 }
