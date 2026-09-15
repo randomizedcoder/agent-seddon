@@ -1153,6 +1153,14 @@ pub async fn serve_fleet(
     // Operational self-diagnosis over gRPC (docs/design/doctor/): a portal or remote
     // operator can Preflight a running fleet without shelling in.
     fleet_svc = fleet_svc.with_preflight(preflight);
+    // C14 read surface (portal Fleet tab): `ListReviews`/`GetReview` when persisted history
+    // (and, for bodies, a fleet root) are wired. Read-only — no forge side effects.
+    if let Some(history) = agent.fleet_history() {
+        fleet_svc = fleet_svc.with_history(history);
+    }
+    if let Some(reader) = agent.fleet_draft_reader() {
+        fleet_svc = fleet_svc.with_reader(reader);
+    }
     let router = router.add_service(fleet_svc.into_server());
     health.set_serving(Seam::Fleet.service_name()).await;
     // A driving AgentSessionService, so a client can observe/drive the review sessions
