@@ -108,6 +108,28 @@ message ApproveReply {
   string detail = 2;
 }
 
+// Operational self-diagnosis of a running fleet process (docs/design/doctor/): run
+// the same probe set as `agent doctor` over gRPC, so a portal or a remote operator
+// can ask "are your dependencies healthy?" without shelling into the box. No input.
+message PreflightRequest {}
+
+// One probe's outcome. `status` is "ok" | "warn" | "fail" | "skipped". `detail` is a
+// status class or a trusted config value (an address/path) — NEVER a resolved secret
+// or a raw error body. `latency_ms` is the probe's wall-clock.
+message PreflightProbe {
+  string name = 1;
+  string status = 2;
+  string detail = 3;
+  uint32 latency_ms = 4;
+}
+
+// The aggregate report. `ok` is the gate: true iff no probe failed (warn/skipped do
+// not fail). `probes` preserves the probe order.
+message PreflightReply {
+  bool ok = 1;
+  repeated PreflightProbe probes = 2;
+}
+
 // The roster control plane (mirrors ProviderRegistryService: one process holds
 // the roster while any number of clients drive it). `token_ref` rides as a
 // reference; the server never resolves it.
@@ -127,4 +149,8 @@ service ReviewFleetService {
   // with no history, returns UNIMPLEMENTED. This is the human approval gesture — the
   // ONLY path that posts; the model's own forge stays read-only (`dry_run`).
   rpc Approve(ApproveRequest) returns (ApproveReply);
+  // Operational self-diagnosis (docs/design/doctor/). Opt-in: served only by the
+  // full `--serve-fleet` process (which has the config to build the probes); the
+  // bare control-plane endpoint returns UNIMPLEMENTED.
+  rpc Preflight(PreflightRequest) returns (PreflightReply);
 }

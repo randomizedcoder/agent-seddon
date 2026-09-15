@@ -65,6 +65,14 @@ async fn main() -> Result<()> {
     let digest_drain_timeout = config.digest.drain_timeout();
     // Captured before `config` moves into `build_agent` (see the metrics note below).
     let review_budget = config.review.context_budget_bytes;
+    // The fleet Preflight RPC's operational probe set (docs/design/doctor/), built
+    // from `config` before the builder consumes it. Only the full `--serve-fleet`
+    // process wires it; every other mode leaves it `None`.
+    let fleet_preflight: Option<std::sync::Arc<dyn agent_core::PreflightProvider>> =
+        matches!(mode, Mode::ServeFleet(_)).then(|| {
+            std::sync::Arc::new(agent_runtime::doctor::DoctorProbes::from_config(&config))
+                as std::sync::Arc<dyn agent_core::PreflightProvider>
+        });
 
     // Telemetry (opt-in). Build the writer before installing tracing so the
     // ClickHouse layer can stream logs from the very first event.
@@ -411,7 +419,8 @@ async fn main() -> Result<()> {
             }
             Mode::ServeFleet(..) => {
                 let listen = serve_fleet_listen.expect("fleet target resolved above");
-                grpc_server::serve_fleet(agent.clone(), listen)
+                let preflight = fleet_preflight.expect("preflight built for ServeFleet above");
+                grpc_server::serve_fleet(agent.clone(), listen, preflight)
                     .await
                     .map(|()| None)
             }

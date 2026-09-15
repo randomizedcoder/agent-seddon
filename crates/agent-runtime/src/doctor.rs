@@ -67,7 +67,10 @@ fn resolve_provider_key(cfg: &crate::config::ProviderCfg) -> String {
         }
     }
     if !cfg.api_key_file.is_empty() {
-        if let Ok(s) = std::fs::read_to_string(&cfg.api_key_file) {
+        // Expand `~` exactly like the provider builder (`resolve_key_opt`), else a
+        // very common `~/…` key path reads as missing and the probe falsely fails.
+        let path = crate::builder::expand_tilde(&cfg.api_key_file);
+        if let Ok(s) = std::fs::read_to_string(&path) {
             let trimmed = s.trim();
             if !trimmed.is_empty() {
                 return trimmed.to_string();
@@ -80,6 +83,30 @@ fn resolve_provider_key(cfg: &crate::config::ProviderCfg) -> String {
 /// Run the default probe set for `config`.
 pub async fn diagnose(config: &Config) -> DoctorReport {
     run(probes_for(config)).await
+}
+
+/// A prebuilt probe set that answers `preflight()` on demand — the
+/// [`PreflightProvider`](agent_core::PreflightProvider) the fleet server dials.
+/// Built once from `Config` at fleet startup; each call re-runs the probes (a fresh
+/// network view), so a dependency recovering between calls is reflected.
+pub struct DoctorProbes {
+    probes: Vec<Arc<dyn Probe>>,
+}
+
+impl DoctorProbes {
+    pub fn from_config(config: &Config) -> Self {
+        Self {
+            probes: probes_for(config),
+        }
+    }
+}
+
+#[async_trait]
+impl agent_core::PreflightProvider for DoctorProbes {
+    async fn preflight(&self) -> DoctorReport {
+        // Cheap Arc clones; probes hold their own params, so re-running is a fresh dial.
+        run(self.probes.clone()).await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -244,7 +271,10 @@ impl Probe for ProviderKeyProbe {
             };
         }
         if !self.api_key_file.is_empty() {
-            return match std::fs::read_to_string(&self.api_key_file) {
+            // Expand `~` like the provider builder so a `~/…` key path isn't a false
+            // failure; report the configured (untrusted-but-operator-owned) path.
+            let path = crate::builder::expand_tilde(&self.api_key_file);
+            return match std::fs::read_to_string(&path) {
                 Ok(s) if !s.trim().is_empty() => ProbeOutcome::new(
                     "provider-key",
                     ProbeStatus::Ok,
@@ -593,6 +623,21 @@ mod tests {
     fn negative_resolve_key_none_configured_is_empty() {
         let cfg = provider_cfg_stub();
         assert_eq!(resolve_provider_key(&cfg), "");
+    }
+
+    #[test]
+    fn positive_resolve_key_reads_and_trims_file() {
+        // The `~` expansion the file branch shares with the builder is covered by
+        // `builder::expand_tilde` tests; here we cover the read + trim on an absolute
+        // path (the branch that previously read the raw, unexpanded path).
+        let path = std::env::temp_dir().join(format!("doctor-key-{}.txt", std::process::id()));
+        std::fs::write(&path, "  filekey\n").unwrap();
+        let cfg = crate::config::ProviderCfg {
+            api_key_file: path.to_string_lossy().into_owned(),
+            ..provider_cfg_stub()
+        };
+        assert_eq!(resolve_provider_key(&cfg), "filekey");
+        let _ = std::fs::remove_file(&path);
     }
 
     /// A minimal `ProviderCfg` for the key-resolution tests (fields we don't touch
