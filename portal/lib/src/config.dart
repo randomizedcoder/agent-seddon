@@ -20,6 +20,18 @@ class PortalConfig {
   /// Native builds ignore this and dial `sessionsHost:sessionsPort` directly.
   final String sessionsGrpcWebUrl;
 
+  /// The full review-fleet process (`--serve-fleet`, `:50086`): the Fleet tab's
+  /// roster CRUD + `ReviewNow`/`Approve` + the review-draft read/edit RPCs
+  /// (`ListReviews`/`GetReview`/`UpdateReview`). A separate endpoint from
+  /// `--serve-all` because the writes need the orchestrator/approver/history that
+  /// only the full fleet process wires.
+  final String fleetHost;
+  final int fleetPort;
+
+  /// The grpc-web proxy for the fleet process (a third envoy → `:50086`). Native
+  /// builds ignore this and dial `fleetHost:fleetPort` directly.
+  final String fleetGrpcWebUrl;
+
   /// External observability UIs, opened in the system browser from the Launcher.
   final String grafanaUrl;
   final String hyperdxUrl;
@@ -54,6 +66,18 @@ class PortalConfig {
     this.sessionsGrpcWebUrl = const String.fromEnvironment(
       'PORTAL_SESSIONS_GRPC_WEB_URL',
       defaultValue: 'http://localhost:8091',
+    ),
+    this.fleetHost = const String.fromEnvironment(
+      'PORTAL_FLEET_HOST',
+      defaultValue: '127.0.0.1',
+    ),
+    this.fleetPort = const int.fromEnvironment(
+      'PORTAL_FLEET_PORT',
+      defaultValue: 50086,
+    ),
+    this.fleetGrpcWebUrl = const String.fromEnvironment(
+      'PORTAL_FLEET_GRPC_WEB_URL',
+      defaultValue: 'http://localhost:8093',
     ),
     this.grafanaUrl = const String.fromEnvironment(
       'PORTAL_GRAFANA_URL',

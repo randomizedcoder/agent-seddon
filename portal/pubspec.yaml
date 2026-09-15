@@ -16,6 +16,8 @@ dependencies:
   fixnum: ^1.1.0
   # Open Grafana / HyperDX / Prometheus in the system browser from the Launcher.
   url_launcher: ^6.3.0
+  # Render a review draft's markdown body in the Fleet tab (view + preview).
+  flutter_markdown: ^0.7.4
 
 dev_dependencies:
   flutter_lints: ^6.0.0

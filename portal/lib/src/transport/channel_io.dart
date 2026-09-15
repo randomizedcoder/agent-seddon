@@ -23,3 +23,13 @@ ClientChannel createSessionsChannel(PortalConfig cfg) => native.ClientChannel(
         credentials: native.ChannelCredentials.insecure(),
       ),
     );
+
+/// Native desktop: dial the `--serve-fleet` process directly (roster CRUD +
+/// `ReviewNow`/`Approve` + the review-draft read/edit RPCs).
+ClientChannel createFleetChannel(PortalConfig cfg) => native.ClientChannel(
+      cfg.fleetHost,
+      port: cfg.fleetPort,
+      options: const native.ChannelOptions(
+        credentials: native.ChannelCredentials.insecure(),
+      ),
+    );

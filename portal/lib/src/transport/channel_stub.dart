@@ -9,3 +9,6 @@ ClientChannel createGatewayChannel(PortalConfig cfg) =>
 
 ClientChannel createSessionsChannel(PortalConfig cfg) =>
     throw UnsupportedError('no gRPC transport available on this platform');
+
+ClientChannel createFleetChannel(PortalConfig cfg) =>
+    throw UnsupportedError('no gRPC transport available on this platform');
