@@ -53,6 +53,10 @@ pub use router::{Candidate, RouteEvent, RoutePolicy, Router};
 /// increment 02). Depends only on `agent_core::PoolTier`, so it is always compiled.
 pub mod route;
 
+/// Non-billing provider reachability (`GET {base_url}/models`) for `agent doctor` /
+/// the fleet Preflight probes. Family-agnostic raw HTTP, so it is always compiled.
+pub mod reach;
+
 /// `TaskRouter` — a provider that routes each request to a declaratively-preferred,
 /// capable upstream (via [`route::Policy`]) and fails over on a retryable error.
 /// Reuses the router's circuit breaker, so it is gated on `provider-router`.
