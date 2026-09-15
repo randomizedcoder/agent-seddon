@@ -156,6 +156,24 @@ message GetReviewReply {
   bool truncated = 3;
 }
 
+// Rewrite a draft's markdown body in place (review-fleet C14, the portal's GitHub-style edit).
+// `review_id` is untrusted wire input, looked up as a bound query arg; the new `body` is written
+// to the draft's own server-minted `draft_path` (confined under the fleet root, size-capped) —
+// never a wire-supplied path. Only an un-posted draft is editable: a draft whose status is
+// `posted` or `approved` is locked (an edit would diverge from what was posted).
+message UpdateReviewRequest {
+  string review_id = 1;
+  string body = 2;
+}
+
+// The outcome of an UpdateReview. `status` is one of:
+//   "updated"   — the body was rewritten.
+//   "not_found" — no persisted draft for this `review_id`.
+//   "locked"    — the draft is `posted`/`approved` and cannot be edited.
+message UpdateReviewReply {
+  string status = 1;
+}
+
 // Operational self-diagnosis of a running fleet process (docs/design/doctor/): run
 // the same probe set as `agent doctor` over gRPC, so a portal or a remote operator
 // can ask "are your dependencies healthy?" without shelling into the box. No input.
@@ -204,6 +222,11 @@ service ReviewFleetService {
   // Fetch one draft's metadata + rendered markdown body (C14). Opt-in: needs the
   // history reader (the `--serve-fleet` process); else UNIMPLEMENTED. Read-only.
   rpc GetReview(GetReviewRequest) returns (GetReviewReply);
+  // Rewrite a draft's markdown body (C14, the portal's edit). Opt-in: needs the draft
+  // editor (the `--serve-fleet` process); else UNIMPLEMENTED. A `posted`/`approved` draft
+  // is locked. This edits the local draft only — it never posts; posting stays the
+  // separate `Approve` gesture.
+  rpc UpdateReview(UpdateReviewRequest) returns (UpdateReviewReply);
   // Operational self-diagnosis (docs/design/doctor/). Opt-in: served only by the
   // full `--serve-fleet` process (which has the config to build the probes); the
   // bare control-plane endpoint returns UNIMPLEMENTED.

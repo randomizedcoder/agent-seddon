@@ -6313,6 +6313,34 @@ pub trait FleetDraftReader: Send + Sync {
     async fn read_body(&self, review_id: &str) -> Result<Option<DraftBody>>;
 }
 
+/// The outcome of a [`FleetDraftEditor::update_body`] (review-fleet C14). A total,
+/// non-transport result: `NotFound`/`Locked` are ordinary outcomes (not errors), so the RPC
+/// stays a plain reply; a genuine fault (unwritable file, path escaping the workspace, a body
+/// over the cap) is an `Err` instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateOutcome {
+    /// The body was rewritten in place.
+    Updated,
+    /// No persisted draft for this `review_id`.
+    NotFound,
+    /// The draft is `posted`/`approved` and cannot be edited — carries the current status.
+    Locked { status: String },
+}
+
+/// Rewrites a persisted draft's markdown body by id (review-fleet C14, the portal's edit). A
+/// seam kept in `agent-core` so the gRPC service depends on the write *shape*, not the concrete
+/// filesystem/history impl in `agent-runtime`. `review_id` is untrusted wire input: the impl
+/// looks it up (bound query arg) and writes the body to the draft's own server-minted
+/// `draft_path` — **never** a wire-supplied path — after rejecting an over-cap body and a
+/// `posted`/`approved` (locked) draft. Editing the local draft never posts; posting stays the
+/// separate [`FleetApprover`] gesture.
+#[async_trait]
+pub trait FleetDraftEditor: Send + Sync {
+    /// Rewrite the `.md` body of the draft `review_id` to `body`. Returns [`UpdateOutcome`];
+    /// fails only on a genuine fault (over-cap body, unwritable file, path escape).
+    async fn update_body(&self, review_id: &str, body: &str) -> Result<UpdateOutcome>;
+}
+
 /// The outcome of an [`FleetApprover::approve`] (review-fleet C17). A total,
 /// non-transport result: `NotFound`/`AlreadyPosted` are ordinary outcomes (not errors),
 /// so the RPC stays a plain reply; a genuine fault (forge post failed, no roster row for

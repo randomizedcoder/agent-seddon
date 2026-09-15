@@ -2575,3 +2575,179 @@ async fn negative_fleet_get_review_unimplemented_without_reader() {
         "got: {err}"
     );
 }
+
+// ---- C14 edit over the wire: UpdateReview -------------------------------
+//
+// An in-memory draft that is BOTH a reader and an editor over one shared body, so an
+// UpdateReview followed by a GetReview reflects the edit across the hop. A `posted`/`approved`
+// record is locked (an edit is refused, the body untouched).
+struct MemDraft {
+    record: agent_core::ReviewDraftRecord,
+    body: std::sync::Mutex<String>,
+}
+#[async_trait]
+impl agent_core::FleetDraftReader for MemDraft {
+    async fn read_body(
+        &self,
+        review_id: &str,
+    ) -> agent_core::Result<Option<agent_core::DraftBody>> {
+        if review_id != self.record.review_id {
+            return Ok(None);
+        }
+        Ok(Some(agent_core::DraftBody {
+            record: self.record.clone(),
+            body: self.body.lock().unwrap().clone(),
+            truncated: false,
+        }))
+    }
+}
+#[async_trait]
+impl agent_core::FleetDraftEditor for MemDraft {
+    async fn update_body(
+        &self,
+        review_id: &str,
+        body: &str,
+    ) -> agent_core::Result<agent_core::UpdateOutcome> {
+        if review_id != self.record.review_id {
+            return Ok(agent_core::UpdateOutcome::NotFound);
+        }
+        if self.record.status == agent_core::draft_status::POSTED
+            || self.record.status == agent_core::draft_status::APPROVED
+        {
+            return Ok(agent_core::UpdateOutcome::Locked {
+                status: self.record.status.clone(),
+            });
+        }
+        *self.body.lock().unwrap() = body.to_string();
+        Ok(agent_core::UpdateOutcome::Updated)
+    }
+}
+
+fn mem_draft(status: &str, body: &str) -> Arc<MemDraft> {
+    Arc::new(MemDraft {
+        record: c14_rec("rid", "runpod__host", 7, status),
+        body: std::sync::Mutex::new(body.to_string()),
+    })
+}
+
+// UpdateReview reaches the editor over the wire and the edit is durable: a following GetReview
+// returns the new body. `Updated` round-trips. Over TCP and UDS.
+#[rstest]
+#[case::tcp(Transport::Tcp)]
+#[case::uds(Transport::Uds)]
+#[tokio::test]
+async fn positive_fleet_update_then_get_reflects(#[case] transport: Transport) {
+    let draft = mem_draft(agent_core::draft_status::DRAFTED, "old body");
+    let store = Arc::new(agent_review_fleet::MemoryFleet::new());
+    let router = tonic::transport::Server::builder().add_service(
+        agent_grpc::server::ReviewFleetSvc::new(store)
+            .with_reader(draft.clone() as Arc<dyn agent_core::FleetDraftReader>)
+            .with_editor(draft.clone() as Arc<dyn agent_core::FleetDraftEditor>)
+            .into_server(),
+    );
+    let (dial, _srv) = spawn(transport, router).await;
+    let client = agent_grpc::client::GrpcFleet::connect(&dial).unwrap();
+
+    assert_eq!(
+        client
+            .update_review("rid", "# edited\n\nnew body")
+            .await
+            .unwrap(),
+        agent_core::UpdateOutcome::Updated,
+        "a drafted body is editable"
+    );
+    let got = client
+        .get_review("rid")
+        .await
+        .unwrap()
+        .expect("body present");
+    assert_eq!(
+        got.body, "# edited\n\nnew body",
+        "the edit is durable across the hop"
+    );
+}
+
+// A posted draft is locked: UpdateReview returns Locked (a total reply), the body untouched.
+#[tokio::test]
+async fn negative_fleet_update_posted_is_locked() {
+    let draft = mem_draft(agent_core::draft_status::POSTED, "posted body");
+    let store = Arc::new(agent_review_fleet::MemoryFleet::new());
+    let router = tonic::transport::Server::builder().add_service(
+        agent_grpc::server::ReviewFleetSvc::new(store)
+            .with_editor(draft.clone() as Arc<dyn agent_core::FleetDraftEditor>)
+            .into_server(),
+    );
+    let (dial, _srv) = spawn(Transport::Tcp, router).await;
+    let client = agent_grpc::client::GrpcFleet::connect(&dial).unwrap();
+    match client.update_review("rid", "sneaky edit").await.unwrap() {
+        agent_core::UpdateOutcome::Locked { .. } => {}
+        other => panic!("expected Locked, got {other:?}"),
+    }
+    assert_eq!(
+        *draft.body.lock().unwrap(),
+        "posted body",
+        "locked ⇒ body untouched"
+    );
+}
+
+// UpdateReview for an absent draft is a total outcome (NotFound), not a transport fault.
+#[tokio::test]
+async fn negative_fleet_update_unknown_is_not_found() {
+    let draft = mem_draft(agent_core::draft_status::DRAFTED, "x");
+    let store = Arc::new(agent_review_fleet::MemoryFleet::new());
+    let router = tonic::transport::Server::builder().add_service(
+        agent_grpc::server::ReviewFleetSvc::new(store)
+            .with_editor(draft as Arc<dyn agent_core::FleetDraftEditor>)
+            .into_server(),
+    );
+    let (dial, _srv) = spawn(Transport::Tcp, router).await;
+    let client = agent_grpc::client::GrpcFleet::connect(&dial).unwrap();
+    assert_eq!(
+        client.update_review("no-such-id", "x").await.unwrap(),
+        agent_core::UpdateOutcome::NotFound
+    );
+}
+
+// The bare control plane (no editor wired) answers UNIMPLEMENTED, like the other opt-ins.
+#[tokio::test]
+async fn negative_fleet_update_unimplemented_without_editor() {
+    let store = Arc::new(agent_review_fleet::MemoryFleet::new());
+    let (dial, _srv) = spawn(
+        Transport::Tcp,
+        agent_grpc::server::review_fleet_router(store),
+    )
+    .await;
+    let client = agent_grpc::client::GrpcFleet::connect(&dial).unwrap();
+    let err = client
+        .update_review("rid", "x")
+        .await
+        .expect_err("no editor ⇒ UNIMPLEMENTED");
+    assert!(
+        format!("{err}").contains("UpdateReview requires the fleet draft editor"),
+        "got: {err}"
+    );
+}
+
+// review_id is an opaque lookup key, never a path: a hostile value crosses verbatim and is
+// simply not found (the editor looks it up as data), never actioned as a filesystem/SQL path.
+#[rstest]
+#[case::traversal("../../etc/passwd")]
+#[case::sql("r'; DROP TABLE agent_review_drafts;--")]
+#[tokio::test]
+async fn adversarial_fleet_update_hostile_review_id_is_opaque_data(#[case] hostile: &str) {
+    let draft = mem_draft(agent_core::draft_status::DRAFTED, "safe");
+    let store = Arc::new(agent_review_fleet::MemoryFleet::new());
+    let router = tonic::transport::Server::builder().add_service(
+        agent_grpc::server::ReviewFleetSvc::new(store)
+            .with_editor(draft.clone() as Arc<dyn agent_core::FleetDraftEditor>)
+            .into_server(),
+    );
+    let (dial, _srv) = spawn(Transport::Tcp, router).await;
+    let client = agent_grpc::client::GrpcFleet::connect(&dial).unwrap();
+    assert_eq!(
+        client.update_review(hostile, "x").await.unwrap(),
+        agent_core::UpdateOutcome::NotFound,
+        "hostile id is looked up (not found), never actioned as a path"
+    );
+    assert_eq!(*draft.body.lock().unwrap(), "safe", "no write occurred");
+}

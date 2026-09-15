@@ -7,7 +7,7 @@
 
 use agent_core::{
     ApproveOutcome, DraftBody, Error, FleetRegistry, FleetSession, Result, ReviewDraftFilter,
-    ReviewDraftRecord,
+    ReviewDraftRecord, UpdateOutcome,
 };
 use agent_proto::pb;
 use async_trait::async_trait;
@@ -139,6 +139,32 @@ impl GrpcFleet {
             // An absent draft is a total outcome, not a transport fault.
             Err(s) if s.code() == tonic::Code::NotFound => Ok(None),
             Err(s) => Err(status_to_err(s)),
+        }
+    }
+
+    /// Rewrite a draft's markdown body (review-fleet C14, the portal's edit). Returns the
+    /// [`UpdateOutcome`]: `Updated`, `NotFound`, or `Locked` (a `posted`/`approved` draft). The
+    /// wire reply carries only the outcome word, so a `Locked` outcome's `status` is empty
+    /// client-side (the portal only needs "it's locked"). Served only by a process with the
+    /// editor wired; a process without it answers `UNIMPLEMENTED` (an `Err`). An over-cap body
+    /// or unwritable file is a genuine fault (`Err`). Editing never posts.
+    pub async fn update_review(&self, review_id: &str, body: &str) -> Result<UpdateOutcome> {
+        let req = pb::UpdateReviewRequest {
+            review_id: review_id.to_string(),
+            body: body.to_string(),
+        };
+        let resp = unary!(self, update_review, req)
+            .map_err(status_to_err)?
+            .into_inner();
+        match resp.status.as_str() {
+            "updated" => Ok(UpdateOutcome::Updated),
+            "not_found" => Ok(UpdateOutcome::NotFound),
+            "locked" => Ok(UpdateOutcome::Locked {
+                status: String::new(),
+            }),
+            other => Err(Error::Fleet(format!(
+                "update_review: unrecognized status {other:?} from server"
+            ))),
         }
     }
 }
