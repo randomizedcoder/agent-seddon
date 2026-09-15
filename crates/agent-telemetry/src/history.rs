@@ -67,6 +67,16 @@ impl ClickHouseHistory {
         Ok(client)
     }
 
+    /// Fail-closed liveness check for the shared ClickHouse: lazily connect (reusing
+    /// the cached client, reconnecting once if stale) and run a trivial `SELECT 1`
+    /// round-trip. `Ok(())` iff the server answered. This makes ClickHouse liveness
+    /// **the agent's own determination** — the doctor/preflight probes call it
+    /// instead of an operator shelling out to `clickhouse-client`.
+    pub async fn ping(&self) -> Result<()> {
+        self.with_client(|client| async move { client.execute("SELECT 1").await })
+            .await
+    }
+
     /// Run `op` on the cached client; on error, reconnect once and retry (a restarted
     /// ClickHouse heals on the next call). Mirrors the digest store's discipline.
     async fn with_client<T, F, Fut>(&self, op: F) -> Result<T>
