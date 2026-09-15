@@ -583,6 +583,18 @@ impl FleetOrchestrator {
             None => (self.repo.clone(), self.grounder.clone()),
         };
 
+        // Refresh the reused mirror's base refs first. The per-row mirror is long-lived
+        // and reused across reviews; `fetch_pr` below fetches only the PR *head* ref, so
+        // without this the diff **base** — the PR's target branch (e.g. `main`) — resolves
+        // to whatever the mirror last saw, inflating the review to every commit merged
+        // since (a single-file PR reads as the whole backlog). Fail-soft and
+        // PREP_TIMEOUT-bounded: a refresh hiccup must not kill the review — it only risks a
+        // slightly stale base — whereas the head fetch below stays fail-hard.
+        if let Err(e) = with_prep_timeout("mirror refresh", PREP_TIMEOUT, repo.fetch()).await {
+            tracing::warn!(session_id = %trigger.session_id, pr, error = %e,
+                "fleet: mirror base-ref refresh failed; reviewing against the last-known base");
+        }
+
         // triggered → cloning: fetch the PR head (C9) and materialize a read-only
         // worktree at it. Both are fail-hard — a review must run against the real head.
         // (`repo` is the per-row factory repo when a factory is set, else the global.)
@@ -1604,6 +1616,61 @@ mod tests {
             repo.worktree_list().await.unwrap().len(),
             1,
             "the failing remove left the worktree, but the task did not panic or hang"
+        );
+    }
+
+    #[tokio::test]
+    async fn positive_base_ref_refreshed_before_review() {
+        // desc: a normal review refreshes the reused mirror's base refs (RepoBackend::fetch)
+        // exactly once before it grounds/diffs. expect: fetch_calls == 1 — without this the
+        // diff base (the PR's target branch) resolves to the mirror's stale local ref and
+        // the review is inflated to every commit merged since the mirror was last fetched.
+        let roster = seeded(&[row("web", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(0));
+        let o = orch(roster, repo.clone(), host.clone());
+
+        o.handle(FleetTrigger {
+            session_id: "web".into(),
+            pr_number: 42,
+        })
+        .await
+        .expect("handle ok");
+        assert!(o.join("web", 42).await);
+        assert_eq!(host.reviews_len(), 1, "the review ran");
+        assert_eq!(
+            repo.fetch_calls(),
+            1,
+            "the mirror base refs were refreshed once before the review"
+        );
+    }
+
+    #[tokio::test]
+    async fn negative_base_refresh_failure_does_not_break_the_review() {
+        // desc: the base-ref refresh (fetch) itself fails. expect: it is swallowed
+        // (best-effort) — the review still runs to completion against the last-known base,
+        // and the fetch was attempted (fetch_calls == 1) rather than skipped. The head
+        // fetch stays fail-hard; only this base refresh is fail-soft.
+        let roster = seeded(&[row("web", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new().with_failing_fetch());
+        let host = Arc::new(FakeHost::new(0));
+        let o = orch(roster, repo.clone(), host.clone());
+
+        o.handle(FleetTrigger {
+            session_id: "web".into(),
+            pr_number: 42,
+        })
+        .await
+        .expect("handle ok despite a base-refresh failure");
+        assert!(
+            o.join("web", 42).await,
+            "task completes despite the fetch error"
+        );
+        assert_eq!(host.reviews_len(), 1, "the review still ran");
+        assert_eq!(
+            repo.fetch_calls(),
+            1,
+            "the refresh was attempted, not skipped"
         );
     }
 
