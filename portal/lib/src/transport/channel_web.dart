@@ -13,3 +13,8 @@ ClientChannel createGatewayChannel(PortalConfig cfg) =>
 /// gateway (a second envoy → `:50080`). See the portal README.
 ClientChannel createSessionsChannel(PortalConfig cfg) =>
     GrpcWebClientChannel.xhr(Uri.parse(cfg.sessionsGrpcWebUrl));
+
+/// Web build: dial a third grpc-web proxy in front of the `--serve-fleet`
+/// process (a third envoy → `:50086`). Start it with `nix run .#grpc-web-up`.
+ClientChannel createFleetChannel(PortalConfig cfg) =>
+    GrpcWebClientChannel.xhr(Uri.parse(cfg.fleetGrpcWebUrl));

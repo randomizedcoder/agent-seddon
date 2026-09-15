@@ -7,7 +7,8 @@
 #   nix run .#portal          native desktop app (raw gRPC to :50100)
 #   nix run .#portal-web      build the WEB bundle + serve it headless (no browser)
 #   nix run .#grpc-web-up     envoy grpc-web proxy for the WEB build
-#                             (:8090 -> gateway :50100, :8091 -> sessions :50080)
+#                             (:8090 -> gateway :50100, :8091 -> sessions :50080,
+#                              :8093 -> fleet :50086)
 #   nix run .#grpc-web-down   stop it
 #
 # The native desktop build dials the gateway (:50100) directly and needs no proxy;
@@ -31,9 +32,11 @@ let
   grpcWebPort = 8090; # browser -> gateway
   grpcWebSessionsPort = 8091; # browser -> sessions
   portalWebPort = 8092; # static server for the built web bundle
+  grpcWebFleetPort = 8093; # browser -> fleet (--serve-fleet)
   # The gateways the proxy forwards to (mirror nix/constants.nix gateway/sessions).
   gatewayPort = 50100;
   sessionsPort = 50080;
+  fleetPort = 50086; # the full review-fleet process (--serve-fleet)
   name = "agent-grpc-web";
   # Fully-qualified so podman (whose unqualified-search list can be empty, e.g. on the
   # headless l2 box) resolves it; docker treats the docker.io/ prefix as a no-op.
@@ -47,7 +50,8 @@ let
     for key in \
       PORTAL_GATEWAY_HOST PORTAL_GATEWAY_PORT \
       PORTAL_SESSIONS_HOST PORTAL_SESSIONS_PORT \
-      PORTAL_GRPC_WEB_URL PORTAL_SESSIONS_GRPC_WEB_URL \
+      PORTAL_FLEET_HOST PORTAL_FLEET_PORT \
+      PORTAL_GRPC_WEB_URL PORTAL_SESSIONS_GRPC_WEB_URL PORTAL_FLEET_GRPC_WEB_URL \
       PORTAL_GRAFANA_URL PORTAL_HYPERDX_URL PORTAL_PROMETHEUS_URL; do
       val="''${!key:-}"
       if [ -n "$val" ]; then defines+=("--dart-define=$key=$val"); fi
@@ -111,8 +115,9 @@ let
   };
 
   # Envoy grpc-web proxy: translates browser grpc-web to raw gRPC on the gateways.
-  # Two listeners in one config/container: gateway (:8090 -> :50100) and the opt-in
-  # sessions gateway (:8091 -> :50080). Web build only.
+  # Three listeners in one config/container: gateway (:8090 -> :50100), the opt-in
+  # sessions gateway (:8091 -> :50080), and the opt-in fleet process
+  # (:8093 -> :50086, the Fleet tab). Web build only.
   envoyConfig = pkgs.writeText "portal-envoy.yaml" ''
     static_resources:
       listeners:
@@ -190,6 +195,43 @@ let
                       - name: envoy.filters.http.router
                         typed_config:
                           "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+        - name: fleet_grpc_web
+          address:
+            socket_address: { address: 0.0.0.0, port_value: ${toString grpcWebFleetPort} }
+          filter_chains:
+            - filters:
+                - name: envoy.filters.network.http_connection_manager
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                    stat_prefix: fleet_grpc_web
+                    codec_type: AUTO
+                    route_config:
+                      name: fleet_route
+                      virtual_hosts:
+                        - name: agent_fleet
+                          domains: ["*"]
+                          typed_per_filter_config:
+                            envoy.filters.http.cors:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.cors.v3.CorsPolicy
+                              allow_origin_string_match:
+                                - prefix: "*"
+                              allow_methods: GET, PUT, DELETE, POST, OPTIONS
+                              allow_headers: keep-alive,user-agent,cache-control,content-type,content-transfer-encoding,x-grpc-web,x-user-agent,grpc-timeout,x-agent-user-id,x-agent-session-id
+                              max_age: "1728000"
+                              expose_headers: grpc-status,grpc-message
+                          routes:
+                            - match: { prefix: "/" }
+                              route: { cluster: agent_fleet, timeout: 0s }
+                    http_filters:
+                      - name: envoy.filters.http.grpc_web
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.grpc_web.v3.GrpcWeb
+                      - name: envoy.filters.http.cors
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.cors.v3.Cors
+                      - name: envoy.filters.http.router
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
       clusters:
         - name: agent_gateway
           connect_timeout: 0.25s
@@ -223,6 +265,22 @@ let
                   - endpoint:
                       address:
                         socket_address: { address: 127.0.0.1, port_value: ${toString sessionsPort} }
+        - name: agent_fleet
+          connect_timeout: 0.25s
+          type: LOGICAL_DNS
+          lb_policy: ROUND_ROBIN
+          typed_extension_protocol_options:
+            envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+              "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+              explicit_http_config:
+                http2_protocol_options: {}
+          load_assignment:
+            cluster_name: agent_fleet
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address: { address: 127.0.0.1, port_value: ${toString fleetPort} }
   '';
 
   # Both docker and podman on PATH; CONTAINER_RUNTIME (default docker) picks one.
@@ -246,6 +304,7 @@ let
       echo "==> starting grpc-web proxy ($runtime, ${image}):"
       echo "      :${toString grpcWebPort}  -> gateway  :${toString gatewayPort}"
       echo "      :${toString grpcWebSessionsPort}  -> sessions :${toString sessionsPort}"
+      echo "      :${toString grpcWebFleetPort}  -> fleet    :${toString fleetPort}"
       # `--network host` (Linux) so envoy reaches the gateways on host loopback and
       # the browser (or an SSH tunnel) reaches envoy on the host proxy ports.
       "$runtime" run -d \
@@ -257,6 +316,7 @@ let
       echo "grpc-web proxy up. Start the gateways with:"
       echo "  agent --serve-all       (:${toString gatewayPort})"
       echo "  agent --serve-sessions  (:${toString sessionsPort})"
+      echo "  agent --serve-fleet     (:${toString fleetPort})"
       echo "Stop with: nix run .#grpc-web-down"
     '';
   };

@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'src/clients.dart';
 import 'src/config.dart';
 import 'src/pages/agent_view_page.dart';
+import 'src/pages/fleet_page.dart';
 import 'src/pages/graph_page.dart';
 import 'src/pages/launcher_page.dart';
 import 'src/pages/prompts_page.dart';
@@ -42,6 +43,7 @@ class _AgentPortalAppState extends State<AgentPortalApp> {
       GraphPage(clients: _clients),
       AgentViewPage(clients: _clients),
       RouterPage(clients: _clients),
+      FleetPage(clients: _clients),
       SettingsPage(clients: _clients),
     ];
     return MaterialApp(
@@ -88,6 +90,11 @@ class _AgentPortalAppState extends State<AgentPortalApp> {
                   icon: Icon(Icons.alt_route_outlined),
                   selectedIcon: Icon(Icons.alt_route),
                   label: Text('Router'),
+                ),
+                NavigationRailDestination(
+                  icon: Icon(Icons.rate_review_outlined),
+                  selectedIcon: Icon(Icons.rate_review),
+                  label: Text('Fleet'),
                 ),
                 NavigationRailDestination(
                   icon: Icon(Icons.settings_outlined),
