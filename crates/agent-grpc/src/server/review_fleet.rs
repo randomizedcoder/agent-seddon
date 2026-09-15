@@ -13,7 +13,8 @@
 use std::sync::Arc;
 
 use agent_core::{
-    ApproveOutcome, FleetApprover, FleetRegistry, FleetTrigger, TriggerOutcome, TriggerSink,
+    ApproveOutcome, FleetApprover, FleetRegistry, FleetTrigger, PreflightProvider, TriggerOutcome,
+    TriggerSink,
 };
 use agent_proto::{pb, status_from_error};
 use tonic::transport::server::Router;
@@ -35,6 +36,11 @@ pub struct ReviewFleetSvc {
     /// `Approve` on the bare control plane is `UNIMPLEMENTED`. Wired via
     /// [`Self::with_approver`].
     approver: Option<Arc<dyn FleetApprover>>,
+    /// Operational self-diagnosis source (docs/design/doctor/). `None` on the bare
+    /// control plane (no config to build probes from), so `Preflight` there is
+    /// `UNIMPLEMENTED`; the full `--serve-fleet` process wires it via
+    /// [`Self::with_preflight`].
+    preflight: Option<Arc<dyn PreflightProvider>>,
 }
 
 impl ReviewFleetSvc {
@@ -43,6 +49,7 @@ impl ReviewFleetSvc {
             inner,
             triggers: None,
             approver: None,
+            preflight: None,
         }
     }
     /// Enable the `ReviewNow` RPC by attaching the orchestrator's trigger sink.
@@ -53,6 +60,12 @@ impl ReviewFleetSvc {
     /// Enable the `Approve` RPC by attaching the approve→post tail (review-fleet C17).
     pub fn with_approver(mut self, approver: Arc<dyn FleetApprover>) -> Self {
         self.approver = Some(approver);
+        self
+    }
+    /// Enable the `Preflight` RPC by attaching an operational self-diagnosis source
+    /// (docs/design/doctor/).
+    pub fn with_preflight(mut self, preflight: Arc<dyn PreflightProvider>) -> Self {
+        self.preflight = Some(preflight);
         self
     }
     pub fn into_server(self) -> pb::review_fleet_service_server::ReviewFleetServiceServer<Self> {
@@ -209,6 +222,39 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
             Ok(Response::new(pb::ApproveReply {
                 status: status.to_string(),
                 detail,
+            }))
+        }
+        .instrument(sp)
+        .await
+    }
+
+    async fn preflight(
+        &self,
+        request: Request<pb::PreflightRequest>,
+    ) -> Result<Response<pb::PreflightReply>, Status> {
+        // Read-only diagnostic (like list/get): no authz gate. The report carries only
+        // status classes and trusted config values — never a secret.
+        let sp = span("fleet.preflight", request.metadata());
+        // Opt-in: only the full fleet process has the config to build the probes.
+        let Some(preflight) = self.preflight.clone() else {
+            return Err(Status::unimplemented(
+                "Preflight requires the fleet process (run `agent --serve-fleet`)",
+            ));
+        };
+        async move {
+            let report = preflight.preflight().await;
+            Ok(Response::new(pb::PreflightReply {
+                ok: report.ok(),
+                probes: report
+                    .probes
+                    .into_iter()
+                    .map(|p| pb::PreflightProbe {
+                        name: p.name,
+                        status: p.status.as_str().to_string(),
+                        detail: p.detail,
+                        latency_ms: p.latency_ms,
+                    })
+                    .collect(),
             }))
         }
         .instrument(sp)

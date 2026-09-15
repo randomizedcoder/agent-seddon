@@ -973,7 +973,11 @@ const FLEET_POLL_TICK_SECS: u64 = 30;
 /// Like `--serve-sessions` this runs arbitrary review goals, so it is its own endpoint,
 /// never part of `--serve-all`; loopback/UDS + socket permissions are the access control
 /// (docs/design/multi-session/07-security.md).
-pub async fn serve_fleet(agent: Arc<Agent>, listen: Endpoint) -> anyhow::Result<()> {
+pub async fn serve_fleet(
+    agent: Arc<Agent>,
+    listen: Endpoint,
+    preflight: Arc<dyn agent_core::PreflightProvider>,
+) -> anyhow::Result<()> {
     use agent_grpc::server as srv;
 
     let (max_total, max_per_user) = agent.fleet_limits();
@@ -1146,6 +1150,9 @@ pub async fn serve_fleet(agent: Arc<Agent>, listen: Endpoint) -> anyhow::Result<
     if let Some(approver) = agent.fleet_approver(roster.clone()) {
         fleet_svc = fleet_svc.with_approver(approver);
     }
+    // Operational self-diagnosis over gRPC (docs/design/doctor/): a portal or remote
+    // operator can Preflight a running fleet without shelling in.
+    fleet_svc = fleet_svc.with_preflight(preflight);
     let router = router.add_service(fleet_svc.into_server());
     health.set_serving(Seam::Fleet.service_name()).await;
     // A driving AgentSessionService, so a client can observe/drive the review sessions

@@ -493,6 +493,17 @@ impl ProbeStatus {
             ProbeStatus::Skipped => "skipped",
         }
     }
+    /// Parse a wire status string back to a `ProbeStatus`. `None` for an unrecognized
+    /// value — the caller fails closed (an untrusted server can't smuggle a status).
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "ok" => ProbeStatus::Ok,
+            "warn" => ProbeStatus::Warn,
+            "fail" => ProbeStatus::Fail,
+            "skipped" => ProbeStatus::Skipped,
+            _ => return None,
+        })
+    }
 }
 
 /// One probe's settled outcome. `detail` is a short, operator-facing status string
@@ -552,6 +563,16 @@ impl DoctorReport {
 pub trait Probe: Send + Sync {
     fn name(&self) -> &str;
     async fn check(&self) -> ProbeOutcome;
+}
+
+/// Something that runs its operational probes on demand — the seam the fleet's
+/// `Preflight` RPC dials so a *running* process reports its own health without an
+/// operator shelling in. Implemented in `agent-runtime` over the doctor probe set
+/// and injected into the fleet server; the bare control plane leaves it unset (the
+/// RPC then returns UNIMPLEMENTED).
+#[async_trait]
+pub trait PreflightProvider: Send + Sync {
+    async fn preflight(&self) -> DoctorReport;
 }
 
 // ---------------------------------------------------------------------------

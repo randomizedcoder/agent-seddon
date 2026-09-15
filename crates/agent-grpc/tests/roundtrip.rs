@@ -2039,6 +2039,104 @@ async fn fleet_review_now_reports_coalesced() {
     );
 }
 
+// A fake PreflightProvider returning a fixed report, so the Preflight round trip is
+// exercised with no real probes or network.
+struct FakePreflight(agent_core::DoctorReport);
+#[async_trait::async_trait]
+impl agent_core::PreflightProvider for FakePreflight {
+    async fn preflight(&self) -> agent_core::DoctorReport {
+        self.0.clone()
+    }
+}
+
+// Preflight runs the process's probe set and the report survives the hop: the gate
+// (`ok`), the probe order, and each outcome's status/detail/latency round-trip. Over
+// TCP and UDS.
+#[rstest]
+#[case::tcp(Transport::Tcp)]
+#[case::uds(Transport::Uds)]
+#[tokio::test]
+async fn fleet_preflight_round_trips_the_report(#[case] transport: Transport) {
+    use agent_core::{ProbeOutcome, ProbeStatus};
+    let report = agent_core::DoctorReport {
+        probes: vec![
+            ProbeOutcome::new("config", ProbeStatus::Ok, "provider=openai-compat", 0),
+            ProbeOutcome::new("clickhouse", ProbeStatus::Skipped, "telemetry disabled", 0),
+            ProbeOutcome::new(
+                "provider-reach",
+                ProbeStatus::Warn,
+                "unexpected http 404",
+                7,
+            ),
+        ],
+    };
+    let store = Arc::new(agent_review_fleet::MemoryFleet::new());
+    let router = tonic::transport::Server::builder().add_service(
+        agent_grpc::server::ReviewFleetSvc::new(store)
+            .with_preflight(
+                Arc::new(FakePreflight(report)) as Arc<dyn agent_core::PreflightProvider>
+            )
+            .into_server(),
+    );
+    let (dial, _srv) = spawn(transport, router).await;
+    let client = agent_grpc::client::GrpcFleet::connect(&dial).unwrap();
+
+    let got = client.preflight().await.unwrap();
+    // Warn does not fail the gate.
+    assert!(got.ok(), "warn/skip do not fail the gate");
+    let names: Vec<&str> = got.probes.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, vec!["config", "clickhouse", "provider-reach"]);
+    assert_eq!(got.probes[1].status, ProbeStatus::Skipped);
+    assert_eq!(got.probes[2].status, ProbeStatus::Warn);
+    assert_eq!(got.probes[2].latency_ms, 7);
+    assert_eq!(got.probes[2].detail, "unexpected http 404");
+}
+
+// A failing probe crosses the wire as a failed gate (`ok == false`).
+#[tokio::test]
+async fn fleet_preflight_failed_probe_fails_the_gate() {
+    use agent_core::{ProbeOutcome, ProbeStatus};
+    let report = agent_core::DoctorReport {
+        probes: vec![ProbeOutcome::new(
+            "clickhouse",
+            ProbeStatus::Fail,
+            "connection refused",
+            3,
+        )],
+    };
+    let store = Arc::new(agent_review_fleet::MemoryFleet::new());
+    let router = tonic::transport::Server::builder().add_service(
+        agent_grpc::server::ReviewFleetSvc::new(store)
+            .with_preflight(
+                Arc::new(FakePreflight(report)) as Arc<dyn agent_core::PreflightProvider>
+            )
+            .into_server(),
+    );
+    let (dial, _srv) = spawn(Transport::Tcp, router).await;
+    let client = agent_grpc::client::GrpcFleet::connect(&dial).unwrap();
+    let got = client.preflight().await.unwrap();
+    assert!(!got.ok(), "a failed probe fails the gate over the wire");
+}
+
+// The bare control plane (no preflight source wired) answers UNIMPLEMENTED, mirroring
+// ReviewNow/Approve — not a silent empty report.
+#[tokio::test]
+async fn fleet_preflight_unimplemented_without_source() {
+    let store = Arc::new(agent_review_fleet::MemoryFleet::new());
+    let router = tonic::transport::Server::builder()
+        .add_service(agent_grpc::server::ReviewFleetSvc::new(store).into_server());
+    let (dial, _srv) = spawn(Transport::Tcp, router).await;
+    let client = agent_grpc::client::GrpcFleet::connect(&dial).unwrap();
+    let err = client
+        .preflight()
+        .await
+        .expect_err("bare control plane ⇒ UNIMPLEMENTED");
+    assert!(
+        format!("{err}").contains("Preflight requires the fleet process"),
+        "got: {err}"
+    );
+}
+
 // Two rows for two repos, each `ReviewNow`n over the wire (review-fleet multi-repo): both
 // triggers reach the intake sink carrying their own (session_id, pr_number) — the served
 // control-plane path a two-repo fleet drives, upstream of the orchestrator's per-row grounding.

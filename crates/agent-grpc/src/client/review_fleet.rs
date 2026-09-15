@@ -65,6 +65,34 @@ impl GrpcFleet {
             ))),
         }
     }
+
+    /// Operational self-diagnosis of a running fleet (docs/design/doctor/): run the
+    /// process's probe set and return the report. Served only by the full
+    /// `--serve-fleet` process; a bare control plane answers `UNIMPLEMENTED`. Each
+    /// wire status string maps back to a [`ProbeStatus`](agent_core::ProbeStatus);
+    /// an unrecognized one is a protocol fault (`Err`) — fail closed on an untrusted
+    /// server rather than silently dropping a probe.
+    pub async fn preflight(&self) -> Result<agent_core::DoctorReport> {
+        let resp = unary!(self, preflight, pb::PreflightRequest {})
+            .map_err(status_to_err)?
+            .into_inner();
+        let mut probes = Vec::with_capacity(resp.probes.len());
+        for p in resp.probes {
+            let status = agent_core::ProbeStatus::parse(&p.status).ok_or_else(|| {
+                Error::Fleet(format!(
+                    "preflight: unrecognized probe status {:?} from server",
+                    p.status
+                ))
+            })?;
+            probes.push(agent_core::ProbeOutcome {
+                name: p.name,
+                status,
+                detail: p.detail,
+                latency_ms: p.latency_ms,
+            });
+        }
+        Ok(agent_core::DoctorReport { probes })
+    }
 }
 
 #[async_trait]
