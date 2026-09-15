@@ -692,12 +692,15 @@ const MAX_REVIEW_BODY_BYTES: usize = 256 * 1024;
 /// `fleet_root` is `None` the caller has no confinement base (the single-repo approve path),
 /// so the path is read directly, unchanged from prior behavior. Pure over the real filesystem
 /// so the confine/cap logic is table-testable with a `tempdir`.
-async fn read_confined_body(
-    fleet_root: Option<&Path>,
-    draft_path: &str,
-    cap: usize,
-) -> agent_core::Result<(String, bool)> {
-    let safe: PathBuf = match fleet_root {
+/// Resolve a persisted (server-minted, but untrusted) `draft_path` to a real path safe to
+/// read/write. When `fleet_root` is `Some`, the path is reduced to one relative to the root and
+/// run through [`agent_core::confine`] (canonicalize + symlink-escape guard) — a path not under
+/// the root, or escaping it via a symlink, is refused. When `fleet_root` is `None` the caller
+/// has no confinement base (the single-repo approve path), so the path is used directly,
+/// unchanged from prior behavior. Shared by the reader, the editor, and the approver so all
+/// three confine identically.
+fn confine_draft_path(fleet_root: Option<&Path>, draft_path: &str) -> agent_core::Result<PathBuf> {
+    match fleet_root {
         Some(root) => {
             // `resolve_within`/`confine` reject absolute paths, so reduce the stored absolute
             // path to one relative to the root first; a path outside the root fails here.
@@ -706,10 +709,18 @@ async fn read_confined_body(
                     "draft path is not under the fleet root: {draft_path:?}"
                 ))
             })?;
-            agent_core::confine(root, &rel.to_string_lossy()).map_err(agent_core::Error::Fleet)?
+            agent_core::confine(root, &rel.to_string_lossy()).map_err(agent_core::Error::Fleet)
         }
-        None => PathBuf::from(draft_path),
-    };
+        None => Ok(PathBuf::from(draft_path)),
+    }
+}
+
+async fn read_confined_body(
+    fleet_root: Option<&Path>,
+    draft_path: &str,
+    cap: usize,
+) -> agent_core::Result<(String, bool)> {
+    let safe = confine_draft_path(fleet_root, draft_path)?;
     let bytes = tokio::fs::read(&safe)
         .await
         .map_err(|e| agent_core::Error::Fleet(format!("cannot read draft {draft_path:?}: {e}")))?;
@@ -750,6 +761,57 @@ impl agent_core::FleetDraftReader for EngineDraftReader {
             body,
             truncated,
         }))
+    }
+}
+
+/// Cap on the bytes an UpdateReview edit may write. Mirrors the renderer's `MAX_DRAFT_BYTES`
+/// (64_000, review-fleet C13): the draft the renderer produces is capped at this, and the
+/// edited body is what a later Approve posts, so an over-cap edit is rejected (fail closed —
+/// the `body` is untrusted wire input, and a huge write would diverge from what can be posted).
+const MAX_EDIT_BODY_BYTES: usize = 64_000;
+
+/// Rewrites a persisted draft's `.md` body by id for the portal's edit (review-fleet C14).
+/// Looks the record up in the persisted history (bound query arg — `review_id` is untrusted wire
+/// input, never a path), rejects a `posted`/`approved` draft (locked) and an over-cap body, then
+/// writes to the record's own `draft_path` confined under the fleet root. Editing never posts.
+struct EngineDraftEditor {
+    history: Arc<dyn agent_core::FleetHistory>,
+    /// The fleet workspace root every draft path must resolve under (`[review_fleet] root`).
+    fleet_root: PathBuf,
+}
+
+#[async_trait::async_trait]
+impl agent_core::FleetDraftEditor for EngineDraftEditor {
+    async fn update_body(
+        &self,
+        review_id: &str,
+        body: &str,
+    ) -> agent_core::Result<agent_core::UpdateOutcome> {
+        // Reject an over-cap body up front (untrusted wire input) before any lookup or write.
+        if body.len() > MAX_EDIT_BODY_BYTES {
+            return Err(agent_core::Error::Fleet(format!(
+                "edit body is {} bytes, over the {MAX_EDIT_BODY_BYTES}-byte cap",
+                body.len()
+            )));
+        }
+        let Some(record) = self.history.draft_by_id(review_id).await? else {
+            return Ok(agent_core::UpdateOutcome::NotFound);
+        };
+        // A posted/approved draft is locked — an edit would diverge from what was posted.
+        if record.status == agent_core::draft_status::POSTED
+            || record.status == agent_core::draft_status::APPROVED
+        {
+            return Ok(agent_core::UpdateOutcome::Locked {
+                status: record.status,
+            });
+        }
+        let safe = confine_draft_path(Some(&self.fleet_root), &record.draft_path)?;
+        tokio::fs::write(&safe, body.as_bytes())
+            .await
+            .map_err(|e| {
+                agent_core::Error::Fleet(format!("cannot write draft {:?}: {e}", record.draft_path))
+            })?;
+        Ok(agent_core::UpdateOutcome::Updated)
     }
 }
 
@@ -1629,6 +1691,19 @@ impl Agent {
         let history = self.fleet_history()?;
         let fleet_root = self.fleet_root()?;
         Some(Arc::new(EngineDraftReader {
+            history,
+            fleet_root,
+        }))
+    }
+
+    /// The persisted-draft body editor for the portal's edit (review-fleet C14, `UpdateReview`).
+    /// `Some` only when persisted history AND a fleet root are wired (the body lives as an `.md`
+    /// under that root, confined on every write); absent either, `UpdateReview` stays
+    /// UNIMPLEMENTED. Editing never posts — posting stays the `Approve` gesture.
+    pub fn fleet_draft_editor(self: &Arc<Self>) -> Option<Arc<dyn agent_core::FleetDraftEditor>> {
+        let history = self.fleet_history()?;
+        let fleet_root = self.fleet_root()?;
+        Some(Arc::new(EngineDraftEditor {
             history,
             fleet_root,
         }))
@@ -3260,6 +3335,231 @@ mod tests {
         assert!(
             got.is_err(),
             "a symlink escaping the fleet root must be refused by confine"
+        );
+    }
+
+    // ---- EngineDraftEditor: update_body (status gate + confine + cap) ----
+
+    /// A `FleetHistory` fake mapping review_id → a preset record, so the editor's lookup is
+    /// exercised without a store. `prior` is unused on this path.
+    struct MapHistory(std::collections::HashMap<String, agent_core::ReviewDraftRecord>);
+    #[async_trait::async_trait]
+    impl agent_core::FleetHistory for MapHistory {
+        async fn prior(
+            &self,
+            _repo: &str,
+            _pr: u64,
+        ) -> agent_core::Result<agent_core::PriorReview> {
+            Ok(agent_core::PriorReview {
+                last_draft: None,
+                open_items: Vec::new(),
+            })
+        }
+        async fn draft_by_id(
+            &self,
+            review_id: &str,
+        ) -> agent_core::Result<Option<agent_core::ReviewDraftRecord>> {
+            Ok(self.0.get(review_id).cloned())
+        }
+    }
+
+    /// A tempdir fleet root with a draft `.md` at `<root>/runpod/host/reviews/pr-7-rrid.md`
+    /// carrying `status`, plus the matching record. Returns `(root, editor)` ready to drive.
+    fn editor_setup(status: &str) -> (PathBuf, EngineDraftEditor) {
+        let root = agent_testkit::tempdir();
+        let dir = root.join("runpod").join("host").join("reviews");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pr-7-rrid.md");
+        std::fs::write(&path, "ORIGINAL").unwrap();
+        let rec = agent_core::ReviewDraftRecord {
+            review_id: "rid".into(),
+            repo: "runpod__host".into(),
+            pr_number: 7,
+            head_sha: "sha".into(),
+            risk_score: 1.0,
+            gate_failed: false,
+            n_findings: 0,
+            files_changed: 0,
+            additions: 0,
+            deletions: 0,
+            draft_path: path.to_string_lossy().into_owned(),
+            status: status.into(),
+        };
+        let mut map = std::collections::HashMap::new();
+        map.insert("rid".to_string(), rec);
+        let editor = EngineDraftEditor {
+            history: Arc::new(MapHistory(map)),
+            fleet_root: root.clone(),
+        };
+        (root, editor)
+    }
+
+    /// desc: the status gate decides Updated vs Locked; an editable draft's file is rewritten.
+    /// expect: the outcome tag, and whether the on-disk body changed.
+    #[rstest]
+    #[case::positive_drafted_is_updated(
+        "a `drafted` draft is editable → Updated, file rewritten",
+        "drafted",
+        "updated",
+        true
+    )]
+    #[case::negative_posted_is_locked(
+        "a `posted` draft is locked → Locked, file unchanged",
+        "posted",
+        "locked",
+        false
+    )]
+    #[case::negative_approved_is_locked(
+        "an `approved` draft is locked → Locked, file unchanged",
+        "approved",
+        "locked",
+        false
+    )]
+    #[case::corner_superseded_is_editable(
+        "a `superseded` draft is not posted/approved → editable",
+        "superseded",
+        "updated",
+        true
+    )]
+    #[tokio::test]
+    async fn update_body_status_gate(
+        #[case] desc: &str,
+        #[case] status: &str,
+        #[case] want_tag: &str,
+        #[case] want_rewritten: bool,
+    ) {
+        use agent_core::FleetDraftEditor;
+        let (root, editor) = editor_setup(status);
+        let outcome = editor.update_body("rid", "NEWBODY").await.unwrap();
+        let tag = match outcome {
+            agent_core::UpdateOutcome::Updated => "updated",
+            agent_core::UpdateOutcome::NotFound => "not_found",
+            agent_core::UpdateOutcome::Locked { .. } => "locked",
+        };
+        assert_eq!(tag, want_tag, "{desc}: outcome");
+        let on_disk = std::fs::read_to_string(
+            root.join("runpod")
+                .join("host")
+                .join("reviews")
+                .join("pr-7-rrid.md"),
+        )
+        .unwrap();
+        assert_eq!(
+            on_disk == "NEWBODY",
+            want_rewritten,
+            "{desc}: file rewritten?"
+        );
+        assert_eq!(
+            on_disk == "ORIGINAL",
+            !want_rewritten,
+            "{desc}: locked ⇒ original preserved"
+        );
+    }
+
+    #[tokio::test]
+    async fn negative_update_unknown_id_is_not_found() {
+        use agent_core::FleetDraftEditor;
+        // An empty history ⇒ no draft resolves ⇒ NotFound (not an error).
+        let root = agent_testkit::tempdir();
+        let editor = EngineDraftEditor {
+            history: Arc::new(MapHistory(std::collections::HashMap::new())),
+            fleet_root: root,
+        };
+        assert_eq!(
+            editor.update_body("nope", "x").await.unwrap(),
+            agent_core::UpdateOutcome::NotFound
+        );
+    }
+
+    #[tokio::test]
+    async fn corner_update_empty_body_replaces() {
+        use agent_core::FleetDraftEditor;
+        // An empty edit is a valid replace (clears the body), not a rejection.
+        let (root, editor) = editor_setup("drafted");
+        assert_eq!(
+            editor.update_body("rid", "").await.unwrap(),
+            agent_core::UpdateOutcome::Updated
+        );
+        let on_disk = std::fs::read_to_string(
+            root.join("runpod")
+                .join("host")
+                .join("reviews")
+                .join("pr-7-rrid.md"),
+        )
+        .unwrap();
+        assert_eq!(on_disk, "", "empty body replaces the file content");
+    }
+
+    /// desc: the body byte cap — exactly at the cap writes; one over is refused before any write.
+    /// expect: Updated at the cap; Err over it, with the original preserved.
+    #[rstest]
+    #[case::boundary_body_at_cap_ok(
+        "a body exactly at the cap is written",
+        MAX_EDIT_BODY_BYTES,
+        true
+    )]
+    #[case::adversarial_body_over_cap_rejected("a body one byte over the cap is refused (Err), file unchanged", MAX_EDIT_BODY_BYTES + 1, false)]
+    #[tokio::test]
+    async fn update_body_cap(#[case] desc: &str, #[case] len: usize, #[case] want_ok: bool) {
+        use agent_core::FleetDraftEditor;
+        let (root, editor) = editor_setup("drafted");
+        let body = "a".repeat(len);
+        let res = editor.update_body("rid", &body).await;
+        assert_eq!(res.is_ok(), want_ok, "{desc}: ok?");
+        let on_disk = std::fs::read_to_string(
+            root.join("runpod")
+                .join("host")
+                .join("reviews")
+                .join("pr-7-rrid.md"),
+        )
+        .unwrap();
+        if want_ok {
+            assert_eq!(on_disk.len(), len, "{desc}: written whole");
+        } else {
+            assert_eq!(
+                on_disk, "ORIGINAL",
+                "{desc}: over-cap write never touched the file"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn adversarial_update_draft_path_outside_root_refused() {
+        use agent_core::FleetDraftEditor;
+        // A tampered draft_path pointing OUTSIDE the fleet root is refused before any write —
+        // the persisted store is untrusted.
+        let root = agent_testkit::tempdir();
+        let outside = agent_testkit::tempdir();
+        let victim = outside.join("victim.md");
+        std::fs::write(&victim, "DO NOT TOUCH").unwrap();
+        let rec = agent_core::ReviewDraftRecord {
+            review_id: "rid".into(),
+            repo: "runpod__host".into(),
+            pr_number: 7,
+            head_sha: "sha".into(),
+            risk_score: 1.0,
+            gate_failed: false,
+            n_findings: 0,
+            files_changed: 0,
+            additions: 0,
+            deletions: 0,
+            draft_path: victim.to_string_lossy().into_owned(),
+            status: "drafted".into(),
+        };
+        let mut map = std::collections::HashMap::new();
+        map.insert("rid".to_string(), rec);
+        let editor = EngineDraftEditor {
+            history: Arc::new(MapHistory(map)),
+            fleet_root: root,
+        };
+        assert!(
+            editor.update_body("rid", "PWNED").await.is_err(),
+            "a draft_path outside the fleet root must be refused"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "DO NOT TOUCH",
+            "the out-of-root file was never written"
         );
     }
 

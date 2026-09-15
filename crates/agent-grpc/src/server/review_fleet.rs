@@ -13,8 +13,9 @@
 use std::sync::Arc;
 
 use agent_core::{
-    ApproveOutcome, FleetApprover, FleetDraftReader, FleetHistory, FleetRegistry, FleetTrigger,
-    PreflightProvider, ReviewDraftFilter, ReviewDraftRecord, TriggerOutcome, TriggerSink,
+    ApproveOutcome, FleetApprover, FleetDraftEditor, FleetDraftReader, FleetHistory, FleetRegistry,
+    FleetTrigger, PreflightProvider, ReviewDraftFilter, ReviewDraftRecord, TriggerOutcome,
+    TriggerSink, UpdateOutcome,
 };
 use agent_proto::{pb, status_from_error};
 use tonic::transport::server::Router;
@@ -49,6 +50,10 @@ pub struct ReviewFleetSvc {
     /// both history and a fleet root), so `GetReview` there is `UNIMPLEMENTED`; wired via
     /// [`Self::with_reader`]. Read-only.
     reader: Option<Arc<dyn FleetDraftReader>>,
+    /// Persisted draft-body editor (review-fleet C14). `None` unless a process wires it (needs
+    /// both history and a fleet root), so `UpdateReview` there is `UNIMPLEMENTED`; wired via
+    /// [`Self::with_editor`]. Edits the local draft only — it never posts.
+    editor: Option<Arc<dyn FleetDraftEditor>>,
 }
 
 /// A persisted draft record → its wire METADATA (`ReviewSummary`). The `.md` body and the
@@ -89,6 +94,7 @@ impl ReviewFleetSvc {
             preflight: None,
             history: None,
             reader: None,
+            editor: None,
         }
     }
     /// Enable the `ReviewNow` RPC by attaching the orchestrator's trigger sink.
@@ -117,6 +123,12 @@ impl ReviewFleetSvc {
     /// C14). Read-only.
     pub fn with_reader(mut self, reader: Arc<dyn FleetDraftReader>) -> Self {
         self.reader = Some(reader);
+        self
+    }
+    /// Enable the `UpdateReview` RPC by attaching the persisted draft-body editor (review-fleet
+    /// C14). Edits the local draft only — it never posts.
+    pub fn with_editor(mut self, editor: Arc<dyn FleetDraftEditor>) -> Self {
+        self.editor = Some(editor);
         self
     }
     pub fn into_server(self) -> pb::review_fleet_service_server::ReviewFleetServiceServer<Self> {
@@ -373,6 +385,42 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
                 body: body.body,
                 truncated: body.truncated,
             }))
+        }
+        .instrument(sp)
+        .await
+    }
+
+    async fn update_review(
+        &self,
+        request: Request<pb::UpdateReviewRequest>,
+    ) -> Result<Response<pb::UpdateReviewReply>, Status> {
+        // A write to a persisted draft: gated `Write` on the Fleet resource (like put/delete).
+        // `review_id` is untrusted — the editor looks it up as a bound query arg and writes the
+        // body to the draft's own `draft_path` (confined under the fleet root), never a
+        // wire-supplied path; an over-cap body is rejected, a posted/approved draft is locked.
+        super::authz::require(agent_core::Action::Write, agent_core::ResourceType::Fleet)?;
+        let sp = span("fleet.update_review", request.metadata());
+        // Opt-in: needs the draft-body editor (persisted history + a fleet root).
+        let Some(editor) = self.editor.clone() else {
+            return Err(Status::unimplemented(
+                "UpdateReview requires the fleet draft editor \
+                 (run `agent --serve-fleet` with `[telemetry]` enabled)",
+            ));
+        };
+        async move {
+            let req = request.into_inner();
+            let outcome = editor
+                .update_body(&req.review_id, &req.body)
+                .await
+                .map_err(|e| status_from_error(&e))?;
+            // NotFound/Locked are ordinary outcomes (a total reply), not transport errors — the
+            // caller reads `status`; only a genuine fault (over-cap, unwritable) is an `Err`.
+            let status = match outcome {
+                UpdateOutcome::Updated => "updated".to_string(),
+                UpdateOutcome::NotFound => "not_found".to_string(),
+                UpdateOutcome::Locked { .. } => "locked".to_string(),
+            };
+            Ok(Response::new(pb::UpdateReviewReply { status }))
         }
         .instrument(sp)
         .await

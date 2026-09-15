@@ -1161,6 +1161,11 @@ pub async fn serve_fleet(
     if let Some(reader) = agent.fleet_draft_reader() {
         fleet_svc = fleet_svc.with_reader(reader);
     }
+    // C14 edit (portal Fleet tab): `UpdateReview` when the draft editor is wired. Edits the
+    // local draft only — it never posts (posting stays the `Approve` gesture).
+    if let Some(editor) = agent.fleet_draft_editor() {
+        fleet_svc = fleet_svc.with_editor(editor);
+    }
     let router = router.add_service(fleet_svc.into_server());
     health.set_serving(Seam::Fleet.service_name()).await;
     // A driving AgentSessionService, so a client can observe/drive the review sessions
