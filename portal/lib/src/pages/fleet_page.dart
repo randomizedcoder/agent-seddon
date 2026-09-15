@@ -377,9 +377,15 @@ class _FleetPageState extends State<FleetPage> {
   }
 }
 
+/// The detail pane's mode: the rendered read view, a raw-markdown editor, or a
+/// live preview of the edit buffer (GitHub-style edit/preview).
+enum _DetailMode { view, edit, preview }
+
 /// The right detail pane: fetches the selected draft's body (GetReview) and
-/// renders it as markdown, with an Approve & post action. Keyed by review_id so
-/// selecting a different draft rebuilds it fresh.
+/// renders it as markdown, with an Edit/Preview toggle (Save → UpdateReview) and
+/// an Approve & post action. Keyed by review_id so selecting a different draft
+/// rebuilds it fresh. A `posted`/`approved` draft is locked — editing is
+/// disabled and the server would reject a write anyway (UpdateReview → locked).
 class _DraftDetail extends StatefulWidget {
   final PortalClients clients;
   final ReviewSummary summary;
@@ -396,15 +402,37 @@ class _DraftDetail extends StatefulWidget {
 }
 
 class _DraftDetailState extends State<_DraftDetail> {
+  final _edit = TextEditingController();
   String? _body;
   bool _truncated = false;
   bool _loading = true;
+  bool _saving = false;
   String? _error;
+  _DetailMode _mode = _DetailMode.view;
+
+  /// A `posted`/`approved` draft can't be edited (matches the server's write
+  /// gate — UpdateReview returns `locked`).
+  bool get _locked =>
+      widget.summary.status == 'posted' || widget.summary.status == 'approved';
+
+  /// The edit buffer differs from the persisted body.
+  bool get _dirty => _edit.text != (_body ?? '');
 
   @override
   void initState() {
     super.initState();
     _fetch();
+  }
+
+  @override
+  void dispose() {
+    _edit.dispose();
+    super.dispose();
+  }
+
+  void _snack(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
   Future<void> _fetch() async {
@@ -419,6 +447,7 @@ class _DraftDetailState extends State<_DraftDetail> {
       if (!mounted) return;
       setState(() {
         _body = reply.body;
+        _edit.text = reply.body; // keep the edit buffer in sync with disk
         _truncated = reply.truncated;
         _loading = false;
       });
@@ -431,10 +460,42 @@ class _DraftDetailState extends State<_DraftDetail> {
     }
   }
 
+  Future<void> _save() async {
+    setState(() => _saving = true);
+    try {
+      final reply = await widget.clients.fleet.updateReview(
+        UpdateReviewRequest()
+          ..reviewId = widget.summary.reviewId
+          ..body = _edit.text,
+      );
+      switch (reply.status) {
+        case 'updated':
+          _snack('Saved.');
+          if (!mounted) return;
+          setState(() => _mode = _DetailMode.view);
+          await _fetch();
+        case 'locked':
+          _snack('Locked — this draft is posted/approved and can\'t be edited.');
+          await _fetch();
+        case 'not_found':
+          _snack('Draft not found (superseded?).');
+        default:
+          _snack('Save: ${reply.status}');
+      }
+    } catch (e) {
+      _snack('Save failed: $e');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final r = widget.summary;
     final posted = r.status == 'posted';
+    // Approving posts the *persisted* body, so block it while there are unsaved
+    // edits — the operator should Save first (edit → save → approve).
+    final canApprove = !posted && !_dirty && !_saving;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -459,19 +520,76 @@ class _DraftDetailState extends State<_DraftDetail> {
               ),
               const SizedBox(width: 12),
               FilledButton.icon(
-                onPressed: posted ? null : widget.onApprove,
+                onPressed: canApprove ? widget.onApprove : null,
                 icon: const Icon(Icons.send, size: 18),
                 label: Text(posted ? 'Posted' : 'Approve & post'),
               ),
             ],
           ),
         ),
+        // Mode toggle + Save. A locked draft has no editor — view only.
+        if (!_loading && _error == null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Row(
+              children: [
+                SegmentedButton<_DetailMode>(
+                  segments: [
+                    const ButtonSegment(
+                      value: _DetailMode.view,
+                      icon: Icon(Icons.visibility_outlined, size: 18),
+                      label: Text('View'),
+                    ),
+                    ButtonSegment(
+                      value: _DetailMode.edit,
+                      icon: const Icon(Icons.edit_outlined, size: 18),
+                      label: const Text('Edit'),
+                      enabled: !_locked,
+                    ),
+                    ButtonSegment(
+                      value: _DetailMode.preview,
+                      icon: const Icon(Icons.article_outlined, size: 18),
+                      label: const Text('Preview'),
+                      enabled: !_locked,
+                    ),
+                  ],
+                  selected: {_mode},
+                  onSelectionChanged: (s) => setState(() => _mode = s.first),
+                ),
+                const Spacer(),
+                if (_locked)
+                  Text('read-only (${r.status})',
+                      style: Theme.of(context).textTheme.bodySmall),
+                if (!_locked && _mode != _DetailMode.view) ...[
+                  if (_dirty)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: Text('unsaved',
+                          style: TextStyle(
+                              color: Theme.of(context).colorScheme.error)),
+                    ),
+                  FilledButton.tonalIcon(
+                    onPressed: (_dirty && !_saving) ? _save : null,
+                    icon: _saving
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2))
+                        : const Icon(Icons.save, size: 18),
+                    label: const Text('Save'),
+                  ),
+                ],
+              ],
+            ),
+          ),
         if (_truncated)
           Container(
             width: double.infinity,
             color: Theme.of(context).colorScheme.errorContainer,
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-            child: Text('Body truncated at the server cap.',
+            child: Text(
+                'Body truncated at the server cap — saving would overwrite the '
+                'full draft with this shortened copy. Do not save.',
                 style: TextStyle(
                     color: Theme.of(context).colorScheme.onErrorContainer)),
           ),
@@ -486,7 +604,34 @@ class _DraftDetailState extends State<_DraftDetail> {
     if (_error != null) {
       return _OfflineRetry(message: _error!, onRetry: _fetch);
     }
-    final body = _body ?? '';
+    switch (_mode) {
+      case _DetailMode.edit:
+        return Padding(
+          padding: const EdgeInsets.all(16),
+          child: TextField(
+            controller: _edit,
+            maxLines: null,
+            expands: true,
+            textAlignVertical: TextAlignVertical.top,
+            keyboardType: TextInputType.multiline,
+            style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
+            decoration: const InputDecoration(
+              border: OutlineInputBorder(),
+              alignLabelWithHint: true,
+              hintText: 'Draft markdown…',
+            ),
+            // Refresh the dirty/Save state as the operator types.
+            onChanged: (_) => setState(() {}),
+          ),
+        );
+      case _DetailMode.preview:
+        return _markdown(_edit.text);
+      case _DetailMode.view:
+        return _markdown(_body ?? '');
+    }
+  }
+
+  Widget _markdown(String body) {
     if (body.isEmpty) {
       return const Center(child: Text('Empty draft body.'));
     }
