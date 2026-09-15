@@ -509,9 +509,16 @@ pub struct FixtureRepo {
     /// assert a review fetched once (and a duplicate trigger did **not** re-fetch).
     /// Clones share the log (like `worktrees`).
     fetch_pr_calls: Arc<Mutex<Vec<u64>>>,
+    /// Count of [`RepoBackend::fetch`] calls — so a test can assert the reused
+    /// mirror's base refs are refreshed before a review diffs against them.
+    /// Clones share the counter (like `worktrees`).
+    fetch_calls: Arc<Mutex<u32>>,
     /// When set, `worktree_remove` returns `Err` — to assert a caller treats
     /// worktree cleanup as best-effort (a reap failure must not lose the work).
     fail_remove: Arc<Mutex<bool>>,
+    /// When set, `fetch` returns `Err` — to assert a caller treats the base-ref
+    /// refresh as best-effort (a fetch hiccup must not fail the whole review).
+    fail_fetch: Arc<Mutex<bool>>,
 }
 
 impl FixtureRepo {
@@ -543,10 +550,20 @@ impl FixtureRepo {
     pub fn fetch_pr_calls(&self) -> Vec<u64> {
         self.fetch_pr_calls.lock().unwrap().clone()
     }
+    /// How many times [`RepoBackend::fetch`] was called (the mirror base refresh).
+    pub fn fetch_calls(&self) -> u32 {
+        *self.fetch_calls.lock().unwrap()
+    }
     /// Make every `worktree_remove` fail — to test that a caller's cleanup is
     /// best-effort (a reap failure must not fail the surrounding work).
     pub fn with_failing_worktree_remove(self) -> Self {
         *self.fail_remove.lock().unwrap() = true;
+        self
+    }
+    /// Make every `fetch` fail — to test that a caller's base-ref refresh is
+    /// best-effort (a fetch failure must not fail the surrounding review).
+    pub fn with_failing_fetch(self) -> Self {
+        *self.fail_fetch.lock().unwrap() = true;
         self
     }
     /// A deterministic 40-hex oid from a seed (no randomness).
@@ -627,6 +644,10 @@ impl RepoBackend for FixtureRepo {
         })
     }
     async fn fetch(&self) -> Result<RepoStatus> {
+        *self.fetch_calls.lock().unwrap() += 1;
+        if *self.fail_fetch.lock().unwrap() {
+            return Err(agent_core::Error::Repo("fetch failed (fixture)".into()));
+        }
         self.status().await
     }
     async fn fetch_pr(&self, number: u64) -> Result<Revision> {
