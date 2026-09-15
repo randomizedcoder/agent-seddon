@@ -6264,6 +6264,53 @@ pub trait FleetHistory: Send + Sync {
     async fn draft_by_id(&self, _review_id: &str) -> Result<Option<ReviewDraftRecord>> {
         Ok(None)
     }
+
+    /// List persisted draft records, newest state per `review_id` (review-fleet C14), for
+    /// the operator surfaces (portal Fleet tab / `GetReview`). Every [`ReviewDraftFilter`]
+    /// field is optional (AND-ed, empty ⇒ unconstrained) and bound as a query argument (no
+    /// interpolation); the impl applies a hard row cap. Default `Ok(vec![])` so a bare/
+    /// in-memory history without a list index simply reports "no drafts".
+    async fn list_drafts(&self, _filter: &ReviewDraftFilter) -> Result<Vec<ReviewDraftRecord>> {
+        Ok(Vec::new())
+    }
+}
+
+/// Filter for [`FleetHistory::list_drafts`]. Each `Some` field constrains the query
+/// (AND-ed); `None` is unconstrained. All values are bound as query arguments — never
+/// interpolated (they are untrusted wire input on the portal path). `limit` is clamped to
+/// the store's row cap (0 ⇒ the cap).
+#[derive(Debug, Clone, Default)]
+pub struct ReviewDraftFilter {
+    /// Roster repo key `owner__name`.
+    pub repo: Option<String>,
+    /// Roster row id (the `session_id` column).
+    pub session_id: Option<String>,
+    /// One of [`draft_status`].
+    pub status: Option<String>,
+    /// Requested max rows (0 ⇒ the store cap); the impl clamps to its cap.
+    pub limit: usize,
+}
+
+/// A persisted draft's metadata plus its rendered markdown BODY, read by id
+/// (review-fleet C14). `truncated` is set when the on-disk `.md` exceeded the reader's
+/// byte cap (the returned `body` is then the capped prefix).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DraftBody {
+    pub record: ReviewDraftRecord,
+    pub body: String,
+    pub truncated: bool,
+}
+
+/// Reads a persisted draft's rendered markdown body by id (review-fleet C14). A seam kept
+/// in `agent-core` so the gRPC service depends on the read *shape*, not the concrete
+/// filesystem/history impl in `agent-runtime`. `review_id` is untrusted wire input: the
+/// impl looks it up (bound query arg) and reads the body from the draft's own
+/// server-minted `draft_path` — **never** a wire-supplied path — capping the bytes.
+#[async_trait]
+pub trait FleetDraftReader: Send + Sync {
+    /// The draft record + its `.md` body for `review_id`, or `None` if there is no such
+    /// draft. Fails only on a genuine fault (unreadable file, path escaping the workspace).
+    async fn read_body(&self, review_id: &str) -> Result<Option<DraftBody>>;
 }
 
 /// The outcome of an [`FleetApprover::approve`] (review-fleet C17). A total,

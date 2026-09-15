@@ -108,6 +108,54 @@ message ApproveReply {
   string detail = 2;
 }
 
+// One persisted review draft's METADATA (review-fleet C14). Mirrors the non-body
+// fields of `agent_core::ReviewDraftRecord` — the `.md` body is fetched separately
+// via `GetReview` (it is large + LLM-authored, so it is never bundled into a list).
+// `repo` is the roster repo key (`owner__name`); `status` is one of drafted |
+// approved | posted | superseded.
+message ReviewSummary {
+  string review_id = 1;
+  string repo = 2;
+  uint64 pr_number = 3;
+  string head_sha = 4;
+  double risk_score = 5;
+  bool gate_failed = 6;
+  uint32 n_findings = 7;
+  uint32 files_changed = 8;
+  uint32 additions = 9;
+  uint32 deletions = 10;
+  string status = 11;
+}
+
+// List persisted review drafts (review-fleet C14). All filters are optional AND-ed
+// (empty ⇒ no constraint); every filter value is bound as a query argument, never
+// interpolated. `limit` is clamped to a server cap (0 ⇒ the cap). Read-only.
+message ListReviewsRequest {
+  string repo = 1;       // roster repo key `owner__name`; "" ⇒ any
+  string session_id = 2; // roster row id; "" ⇒ any
+  string status = 3;     // drafted|approved|posted|superseded; "" ⇒ any
+  uint32 limit = 4;      // 0 ⇒ server cap; clamped to the cap
+}
+
+message ListReviewsReply {
+  repeated ReviewSummary reviews = 1;
+}
+
+// Fetch one draft's metadata + rendered markdown BODY (review-fleet C14). `review_id`
+// is untrusted wire input, looked up as a bound query arg; the server reads the body
+// from the draft's own server-minted `draft_path` (never a wire-supplied path). The
+// body is size-capped in the reply (`truncated` set when the on-disk `.md` exceeded
+// the cap).
+message GetReviewRequest {
+  string review_id = 1;
+}
+
+message GetReviewReply {
+  ReviewSummary meta = 1;
+  string body = 2;
+  bool truncated = 3;
+}
+
 // Operational self-diagnosis of a running fleet process (docs/design/doctor/): run
 // the same probe set as `agent doctor` over gRPC, so a portal or a remote operator
 // can ask "are your dependencies healthy?" without shelling into the box. No input.
@@ -149,6 +197,13 @@ service ReviewFleetService {
   // with no history, returns UNIMPLEMENTED. This is the human approval gesture — the
   // ONLY path that posts; the model's own forge stays read-only (`dry_run`).
   rpc Approve(ApproveRequest) returns (ApproveReply);
+  // List persisted review drafts (C14), newest state per review. Opt-in: served only
+  // by a process with persisted fleet history wired (the `--serve-fleet` process); a
+  // process with no history returns UNIMPLEMENTED. Read-only.
+  rpc ListReviews(ListReviewsRequest) returns (ListReviewsReply);
+  // Fetch one draft's metadata + rendered markdown body (C14). Opt-in: needs the
+  // history reader (the `--serve-fleet` process); else UNIMPLEMENTED. Read-only.
+  rpc GetReview(GetReviewRequest) returns (GetReviewReply);
   // Operational self-diagnosis (docs/design/doctor/). Opt-in: served only by the
   // full `--serve-fleet` process (which has the config to build the probes); the
   // bare control-plane endpoint returns UNIMPLEMENTED.

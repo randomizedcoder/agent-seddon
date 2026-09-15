@@ -5,7 +5,10 @@
 //! clamps every number before a row is used. `token_ref` rides as a reference;
 //! nothing here resolves it.
 
-use agent_core::{ApproveOutcome, Error, FleetRegistry, FleetSession, Result};
+use agent_core::{
+    ApproveOutcome, DraftBody, Error, FleetRegistry, FleetSession, Result, ReviewDraftFilter,
+    ReviewDraftRecord,
+};
 use agent_proto::pb;
 use async_trait::async_trait;
 use tonic::transport::Channel;
@@ -92,6 +95,72 @@ impl GrpcFleet {
             });
         }
         Ok(agent_core::DoctorReport { probes })
+    }
+
+    /// List persisted review drafts (review-fleet C14), newest state per review. Read-only.
+    /// Served only by a process with persisted fleet history; a process without it answers
+    /// `UNIMPLEMENTED`. Every filter value rides as a bound query arg server-side; the server
+    /// caps the row count. The returned records carry an EMPTY `draft_path` — the wire summary
+    /// never exposes the server-minted path; fetch a body via [`Self::get_review`].
+    pub async fn list_reviews(&self, filter: &ReviewDraftFilter) -> Result<Vec<ReviewDraftRecord>> {
+        let req = pb::ListReviewsRequest {
+            repo: filter.repo.clone().unwrap_or_default(),
+            session_id: filter.session_id.clone().unwrap_or_default(),
+            status: filter.status.clone().unwrap_or_default(),
+            limit: filter.limit.min(u32::MAX as usize) as u32,
+        };
+        let resp = unary!(self, list_reviews, req)
+            .map_err(status_to_err)?
+            .into_inner();
+        Ok(resp.reviews.into_iter().map(record_from_summary).collect())
+    }
+
+    /// Fetch one draft's metadata + rendered markdown body (review-fleet C14). Read-only.
+    /// Returns `None` when there is no persisted draft for `review_id` (the server's
+    /// `NotFound`), `Err` on a genuine fault, and `UNIMPLEMENTED` maps to `Err`. Served only by
+    /// a process with the draft reader wired. The returned record's `draft_path` is empty (see
+    /// [`Self::list_reviews`]).
+    pub async fn get_review(&self, review_id: &str) -> Result<Option<DraftBody>> {
+        let req = pb::GetReviewRequest {
+            review_id: review_id.to_string(),
+        };
+        match unary!(self, get_review, req) {
+            Ok(resp) => {
+                let resp = resp.into_inner();
+                let record = resp.meta.map(record_from_summary).ok_or_else(|| {
+                    Error::Fleet("get_review: reply missing draft metadata".into())
+                })?;
+                Ok(Some(DraftBody {
+                    record,
+                    body: resp.body,
+                    truncated: resp.truncated,
+                }))
+            }
+            // An absent draft is a total outcome, not a transport fault.
+            Err(s) if s.code() == tonic::Code::NotFound => Ok(None),
+            Err(s) => Err(status_to_err(s)),
+        }
+    }
+}
+
+/// A wire `ReviewSummary` → a domain [`ReviewDraftRecord`]. The summary omits the server-minted
+/// `draft_path` (never exposed on the wire), so the record carries an empty path — the body is
+/// fetched via `GetReview`, not by re-reading this path client-side. Numbers arrive typed
+/// (proto scalars), so there is nothing further to clamp.
+fn record_from_summary(s: pb::ReviewSummary) -> ReviewDraftRecord {
+    ReviewDraftRecord {
+        review_id: s.review_id,
+        repo: s.repo,
+        pr_number: s.pr_number,
+        head_sha: s.head_sha,
+        risk_score: s.risk_score,
+        gate_failed: s.gate_failed,
+        n_findings: s.n_findings,
+        files_changed: s.files_changed,
+        additions: s.additions,
+        deletions: s.deletions,
+        draft_path: String::new(),
+        status: s.status,
     }
 }
 

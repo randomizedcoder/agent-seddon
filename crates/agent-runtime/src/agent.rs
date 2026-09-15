@@ -585,14 +585,17 @@ impl agent_core::FleetApprover for EngineApprover {
                     row.repo
                 ))
                 })?;
-            let body = tokio::fs::read_to_string(&record.draft_path)
-                .await
-                .map_err(|e| {
-                    agent_core::Error::Fleet(format!(
-                        "approve: cannot read draft {:?}: {e}",
-                        record.draft_path
-                    ))
-                })?;
+            // Defense-in-depth (CLAUDE.md — the persisted `draft_path` is untrusted): confine
+            // it under the fleet root before reading, and cap the bytes. The renderer already
+            // caps the body at `MAX_DRAFT_BYTES` (64_000) ≪ the read cap, so a legitimate draft
+            // is read whole; a tampered/oversized file is bounded rather than posted in full.
+            let (body, _truncated) = read_confined_body(
+                self.agent.fleet_root().as_deref(),
+                &record.draft_path,
+                MAX_REVIEW_BODY_BYTES,
+            )
+            .await
+            .map_err(|e| agent_core::Error::Fleet(format!("approve: {e}")))?;
 
             // The authoritative idempotency guard (review-fleet C17). The `plan_approve`
             // short-circuit above reads `status` from the eventually-consistent telemetry
@@ -669,6 +672,84 @@ impl agent_core::FleetApprover for EngineApprover {
         }
         .instrument(span)
         .await
+    }
+}
+
+/// Cap on the bytes a draft-body read returns. Well above the renderer's `MAX_DRAFT_BYTES`
+/// (64_000, review-fleet C13) so a legitimate draft is never truncated, while a tampered or
+/// oversized `.md` on disk stays bounded — the model AND the persisted store are untrusted, so
+/// a hostile `draft_path`/file size must not let a read allocate without bound.
+const MAX_REVIEW_BODY_BYTES: usize = 256 * 1024;
+
+/// Read a persisted draft's `.md` body from its (server-minted, but untrusted) `draft_path`,
+/// confined under the fleet root and byte-capped. Returns `(body, truncated)` — `truncated` is
+/// set when the on-disk file exceeded `cap` (the returned body is then the capped prefix).
+///
+/// `draft_path` is treated as untrusted (a compromised store could return anything, CLAUDE.md
+/// "every provider/server value"): when `fleet_root` is `Some`, the path is reduced to one
+/// relative to the root and run through [`agent_core::confine`] (canonicalize + symlink-escape
+/// guard) — a path that is not under the root, or escapes it via a symlink, is refused. When
+/// `fleet_root` is `None` the caller has no confinement base (the single-repo approve path),
+/// so the path is read directly, unchanged from prior behavior. Pure over the real filesystem
+/// so the confine/cap logic is table-testable with a `tempdir`.
+async fn read_confined_body(
+    fleet_root: Option<&Path>,
+    draft_path: &str,
+    cap: usize,
+) -> agent_core::Result<(String, bool)> {
+    let safe: PathBuf = match fleet_root {
+        Some(root) => {
+            // `resolve_within`/`confine` reject absolute paths, so reduce the stored absolute
+            // path to one relative to the root first; a path outside the root fails here.
+            let rel = Path::new(draft_path).strip_prefix(root).map_err(|_| {
+                agent_core::Error::Fleet(format!(
+                    "draft path is not under the fleet root: {draft_path:?}"
+                ))
+            })?;
+            agent_core::confine(root, &rel.to_string_lossy()).map_err(agent_core::Error::Fleet)?
+        }
+        None => PathBuf::from(draft_path),
+    };
+    let bytes = tokio::fs::read(&safe)
+        .await
+        .map_err(|e| agent_core::Error::Fleet(format!("cannot read draft {draft_path:?}: {e}")))?;
+    let truncated = bytes.len() > cap;
+    let end = bytes.len().min(cap);
+    // Cut at the cap; `from_utf8_lossy` tolerates a multibyte codepoint split at the boundary.
+    let body = String::from_utf8_lossy(&bytes[..end]).into_owned();
+    Ok((body, truncated))
+}
+
+/// Reads a persisted draft's rendered markdown body by id for the operator surfaces
+/// (review-fleet C14, `GetReview`). Looks the record up in the persisted history (bound query
+/// arg — `review_id` is untrusted wire input, never a path), then reads the body from the
+/// record's own `draft_path` via [`read_confined_body`] (confined under the fleet root, capped).
+struct EngineDraftReader {
+    history: Arc<dyn agent_core::FleetHistory>,
+    /// The fleet workspace root every draft path must resolve under (`[review_fleet] root`).
+    fleet_root: PathBuf,
+}
+
+#[async_trait::async_trait]
+impl agent_core::FleetDraftReader for EngineDraftReader {
+    async fn read_body(
+        &self,
+        review_id: &str,
+    ) -> agent_core::Result<Option<agent_core::DraftBody>> {
+        let Some(record) = self.history.draft_by_id(review_id).await? else {
+            return Ok(None);
+        };
+        let (body, truncated) = read_confined_body(
+            Some(&self.fleet_root),
+            &record.draft_path,
+            MAX_REVIEW_BODY_BYTES,
+        )
+        .await?;
+        Ok(Some(agent_core::DraftBody {
+            record,
+            body,
+            truncated,
+        }))
     }
 }
 
@@ -1537,6 +1618,20 @@ impl Agent {
         _roster: Arc<dyn agent_core::FleetRegistry>,
     ) -> Option<Arc<dyn agent_core::FleetApprover>> {
         None
+    }
+
+    /// The persisted-draft body reader for the operator surfaces (review-fleet C14,
+    /// `GetReview`). `Some` only when persisted history AND a fleet root are wired — a draft
+    /// body lives as an `.md` under that root, and the reader confines every read to it; absent
+    /// either, `GetReview` stays UNIMPLEMENTED. Read-only (no feature gate: it needs only the
+    /// history seam + the filesystem).
+    pub fn fleet_draft_reader(self: &Arc<Self>) -> Option<Arc<dyn agent_core::FleetDraftReader>> {
+        let history = self.fleet_history()?;
+        let fleet_root = self.fleet_root()?;
+        Some(Arc::new(EngineDraftReader {
+            history,
+            fleet_root,
+        }))
     }
 
     /// Persist a fleet review-draft record (review-fleet C14): route it through the memory
@@ -3064,6 +3159,107 @@ mod tests {
         assert!(
             resolve_cwd(&skey("u", "s"), Some(&root), &fb, &opts).is_err(),
             "symlink escape must be blocked by confine"
+        );
+    }
+
+    // ---- read_confined_body: draft-body read (confine + cap) ------------
+
+    /// desc: a body under the root reads back whole with `truncated` reflecting the cap.
+    /// The `expected` columns are the returned body and the truncated flag.
+    #[rstest]
+    #[case::positive_returns_body(
+        "an ASCII body under the root reads back verbatim, untruncated",
+        "hello review",
+        1024,
+        "hello review",
+        false
+    )]
+    #[case::corner_crlf_and_unicode_body(
+        "CRLF + multibyte content is preserved when it fits the cap",
+        "line1\r\nüni—çødé ✅\r\n",
+        1024,
+        "line1\r\nüni—çødé ✅\r\n",
+        false
+    )]
+    #[case::boundary_body_exactly_at_cap(
+        "a body exactly at the cap is whole and NOT truncated (len == cap)",
+        "0123456789",
+        10,
+        "0123456789",
+        false
+    )]
+    #[case::adversarial_body_over_cap_sets_truncated(
+        "a body one byte over the cap yields the capped prefix and truncated=true",
+        "0123456789X",
+        10,
+        "0123456789",
+        true
+    )]
+    #[tokio::test]
+    async fn read_confined_body_table(
+        #[case] desc: &str,
+        #[case] contents: &str,
+        #[case] cap: usize,
+        #[case] want_body: &str,
+        #[case] want_truncated: bool,
+    ) {
+        let root = agent_testkit::tempdir();
+        let dir = root.join("runpod").join("host").join("reviews");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pr-1-rabc.md");
+        std::fs::write(&path, contents).unwrap();
+        let (body, truncated) = read_confined_body(Some(&root), &path.to_string_lossy(), cap)
+            .await
+            .expect("read confined body");
+        assert_eq!(body, want_body, "{desc}: body");
+        assert_eq!(truncated, want_truncated, "{desc}: truncated");
+    }
+
+    #[tokio::test]
+    async fn negative_read_confined_body_missing_file_errors() {
+        // A record that points at a non-existent (but in-root) file surfaces an error, not a
+        // panic or a silent empty body.
+        let root = agent_testkit::tempdir();
+        let path = root
+            .join("runpod")
+            .join("host")
+            .join("reviews")
+            .join("gone.md");
+        let got = read_confined_body(Some(&root), &path.to_string_lossy(), 1024).await;
+        assert!(got.is_err(), "a missing draft file is a surfaced error");
+    }
+
+    #[tokio::test]
+    async fn adversarial_read_confined_body_path_outside_root_refused() {
+        // A tampered `draft_path` pointing OUTSIDE the fleet root is refused before any read —
+        // the store is untrusted, so a path that is not under the root cannot be read.
+        let root = agent_testkit::tempdir();
+        let outside = agent_testkit::tempdir();
+        let secret = outside.join("secret.md");
+        std::fs::write(&secret, "TOP SECRET").unwrap();
+        let got = read_confined_body(Some(&root), &secret.to_string_lossy(), 1024).await;
+        assert!(
+            got.is_err(),
+            "a draft_path outside the fleet root must be refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn adversarial_read_confined_body_symlink_escape_refused() {
+        // A symlink INSIDE the root pointing outside it is caught by `confine`'s canonicalize
+        // (a compromised store could plant the path; the file itself could be a planted link).
+        let root = agent_testkit::tempdir();
+        let outside = agent_testkit::tempdir();
+        let secret = outside.join("secret.md");
+        std::fs::write(&secret, "TOP SECRET").unwrap();
+        let dir = root.join("runpod").join("host").join("reviews");
+        std::fs::create_dir_all(&dir).unwrap();
+        let link = dir.join("escape.md");
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+        let got = read_confined_body(Some(&root), &link.to_string_lossy(), 1024).await;
+        assert!(
+            got.is_err(),
+            "a symlink escaping the fleet root must be refused by confine"
         );
     }
 

@@ -2344,3 +2344,234 @@ async fn adversarial_fleet_approve_hostile_review_id_is_opaque_data(#[case] host
         "the exact bytes reached the approver as opaque data"
     );
 }
+
+// ---- C14 read surface over the wire: ListReviews + GetReview -------------
+//
+// A `FleetHistory` double for ListReviews: returns a preset record set and records the filter
+// it saw (so a test proves the wire→core filter mapping). `prior` is unused on this path.
+struct RecordingHistory {
+    drafts: Vec<agent_core::ReviewDraftRecord>,
+    seen: std::sync::Mutex<Vec<agent_core::ReviewDraftFilter>>,
+}
+#[async_trait]
+impl agent_core::FleetHistory for RecordingHistory {
+    async fn prior(&self, _repo: &str, _pr: u64) -> agent_core::Result<agent_core::PriorReview> {
+        Ok(agent_core::PriorReview {
+            last_draft: None,
+            open_items: Vec::new(),
+        })
+    }
+    async fn list_drafts(
+        &self,
+        filter: &agent_core::ReviewDraftFilter,
+    ) -> agent_core::Result<Vec<agent_core::ReviewDraftRecord>> {
+        self.seen.lock().unwrap().push(filter.clone());
+        Ok(self.drafts.clone())
+    }
+}
+
+// A `FleetDraftReader` double for GetReview: returns a preset body (or `None` for "no such
+// draft"), so the read round trip is exercised with no filesystem or store.
+struct FakeReader(Option<agent_core::DraftBody>);
+#[async_trait]
+impl agent_core::FleetDraftReader for FakeReader {
+    async fn read_body(
+        &self,
+        _review_id: &str,
+    ) -> agent_core::Result<Option<agent_core::DraftBody>> {
+        Ok(self.0.clone())
+    }
+}
+
+fn c14_rec(review_id: &str, repo: &str, pr: u64, status: &str) -> agent_core::ReviewDraftRecord {
+    agent_core::ReviewDraftRecord {
+        review_id: review_id.into(),
+        repo: repo.into(),
+        pr_number: pr,
+        head_sha: "sha".into(),
+        risk_score: 1.5,
+        gate_failed: false,
+        n_findings: 1,
+        files_changed: 2,
+        additions: 3,
+        deletions: 4,
+        // A server-side path that must NEVER cross the wire (the summary omits it).
+        draft_path: "/w/runpod/host/reviews/pr-7.md".into(),
+        status: status.into(),
+    }
+}
+
+// ListReviews reaches the history over the wire; each record maps to a wire `ReviewSummary`
+// (metadata only — the server-minted `draft_path` never crosses) and back. The filter the
+// client built reaches the history verbatim. Over TCP and UDS.
+#[rstest]
+#[case::tcp(Transport::Tcp)]
+#[case::uds(Transport::Uds)]
+#[tokio::test]
+async fn positive_fleet_list_reviews_round_trip(#[case] transport: Transport) {
+    let history = Arc::new(RecordingHistory {
+        drafts: vec![
+            c14_rec("r1", "runpod__host", 7, "drafted"),
+            c14_rec("r2", "runpod__host", 8, "posted"),
+        ],
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+    let store = Arc::new(agent_review_fleet::MemoryFleet::new());
+    let router = tonic::transport::Server::builder().add_service(
+        agent_grpc::server::ReviewFleetSvc::new(store)
+            .with_history(history.clone() as Arc<dyn agent_core::FleetHistory>)
+            .into_server(),
+    );
+    let (dial, _srv) = spawn(transport, router).await;
+    let client = agent_grpc::client::GrpcFleet::connect(&dial).unwrap();
+
+    let filter = agent_core::ReviewDraftFilter {
+        repo: Some("runpod__host".into()),
+        session_id: None,
+        status: None,
+        limit: 0,
+    };
+    let got = client.list_reviews(&filter).await.unwrap();
+    assert_eq!(got.len(), 2, "both drafts crossed the wire");
+    assert_eq!(got[0].review_id, "r1");
+    assert_eq!(got[0].repo, "runpod__host");
+    assert_eq!(got[0].pr_number, 7);
+    assert_eq!(got[1].status, "posted");
+    assert!(
+        got.iter().all(|r| r.draft_path.is_empty()),
+        "the server-minted draft_path is never exposed on the wire"
+    );
+    // The filter the client sent reached the history unchanged (repo bound, others None).
+    let seen = history.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].repo.as_deref(), Some("runpod__host"));
+    assert_eq!(seen[0].session_id, None);
+    assert_eq!(seen[0].status, None);
+}
+
+// The client's `limit` is carried to the history as the requested cap (the impl clamps it; the
+// double just records what it received). An explicit non-zero limit crosses as that value.
+#[rstest]
+#[case::boundary_explicit_limit(5usize, 5usize)]
+#[case::boundary_zero_means_cap(0usize, 0usize)]
+#[tokio::test]
+async fn boundary_fleet_list_limit_passed_through(#[case] sent: usize, #[case] expect: usize) {
+    let history = Arc::new(RecordingHistory {
+        drafts: Vec::new(),
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+    let store = Arc::new(agent_review_fleet::MemoryFleet::new());
+    let router = tonic::transport::Server::builder().add_service(
+        agent_grpc::server::ReviewFleetSvc::new(store)
+            .with_history(history.clone() as Arc<dyn agent_core::FleetHistory>)
+            .into_server(),
+    );
+    let (dial, _srv) = spawn(Transport::Tcp, router).await;
+    let client = agent_grpc::client::GrpcFleet::connect(&dial).unwrap();
+
+    let filter = agent_core::ReviewDraftFilter {
+        limit: sent,
+        ..Default::default()
+    };
+    client.list_reviews(&filter).await.unwrap();
+    assert_eq!(history.seen.lock().unwrap()[0].limit, expect);
+}
+
+// The bare control plane (no history wired) answers UNIMPLEMENTED, like ReviewNow/Approve.
+#[tokio::test]
+async fn negative_fleet_list_reviews_unimplemented_without_history() {
+    let store = Arc::new(agent_review_fleet::MemoryFleet::new());
+    let (dial, _srv) = spawn(
+        Transport::Tcp,
+        agent_grpc::server::review_fleet_router(store),
+    )
+    .await;
+    let client = agent_grpc::client::GrpcFleet::connect(&dial).unwrap();
+    let err = client
+        .list_reviews(&agent_core::ReviewDraftFilter::default())
+        .await
+        .expect_err("no history ⇒ UNIMPLEMENTED");
+    assert!(
+        format!("{err}").contains("ListReviews requires persisted fleet history"),
+        "got: {err}"
+    );
+}
+
+// GetReview reaches the reader over the wire; the body + metadata survive the hop, and the
+// record's `draft_path` is empty client-side (never exposed). Over TCP and UDS.
+#[rstest]
+#[case::tcp(Transport::Tcp)]
+#[case::uds(Transport::Uds)]
+#[tokio::test]
+async fn positive_fleet_get_review_round_trip(#[case] transport: Transport) {
+    let body = agent_core::DraftBody {
+        record: c14_rec("r1", "runpod__host", 7, "drafted"),
+        body: "# Review\n\nLooks good, one nit at foo.rs:12.".into(),
+        truncated: false,
+    };
+    let reader = Arc::new(FakeReader(Some(body.clone())));
+    let store = Arc::new(agent_review_fleet::MemoryFleet::new());
+    let router = tonic::transport::Server::builder().add_service(
+        agent_grpc::server::ReviewFleetSvc::new(store)
+            .with_reader(reader as Arc<dyn agent_core::FleetDraftReader>)
+            .into_server(),
+    );
+    let (dial, _srv) = spawn(transport, router).await;
+    let client = agent_grpc::client::GrpcFleet::connect(&dial).unwrap();
+
+    let got = client
+        .get_review("r1")
+        .await
+        .unwrap()
+        .expect("a body is present");
+    assert_eq!(got.body, body.body, "the markdown body survives the hop");
+    assert_eq!(got.record.review_id, "r1");
+    assert_eq!(got.record.pr_number, 7);
+    assert!(!got.truncated);
+    assert!(
+        got.record.draft_path.is_empty(),
+        "draft_path is never exposed on the wire"
+    );
+}
+
+// GetReview for an absent draft is a total outcome (`None`), not a transport fault: the
+// server's NotFound maps back to `Ok(None)` at the client.
+#[rstest]
+#[case::tcp(Transport::Tcp)]
+#[case::uds(Transport::Uds)]
+#[tokio::test]
+async fn negative_fleet_get_review_unknown_is_none(#[case] transport: Transport) {
+    let reader = Arc::new(FakeReader(None));
+    let store = Arc::new(agent_review_fleet::MemoryFleet::new());
+    let router = tonic::transport::Server::builder().add_service(
+        agent_grpc::server::ReviewFleetSvc::new(store)
+            .with_reader(reader as Arc<dyn agent_core::FleetDraftReader>)
+            .into_server(),
+    );
+    let (dial, _srv) = spawn(transport, router).await;
+    let client = agent_grpc::client::GrpcFleet::connect(&dial).unwrap();
+    assert!(
+        client.get_review("nope").await.unwrap().is_none(),
+        "an absent draft is Ok(None), not an Err"
+    );
+}
+
+// The bare control plane (no reader wired) answers UNIMPLEMENTED.
+#[tokio::test]
+async fn negative_fleet_get_review_unimplemented_without_reader() {
+    let store = Arc::new(agent_review_fleet::MemoryFleet::new());
+    let (dial, _srv) = spawn(
+        Transport::Tcp,
+        agent_grpc::server::review_fleet_router(store),
+    )
+    .await;
+    let client = agent_grpc::client::GrpcFleet::connect(&dial).unwrap();
+    let err = client
+        .get_review("r1")
+        .await
+        .expect_err("no reader ⇒ UNIMPLEMENTED");
+    assert!(
+        format!("{err}").contains("GetReview requires the fleet draft reader"),
+        "got: {err}"
+    );
+}

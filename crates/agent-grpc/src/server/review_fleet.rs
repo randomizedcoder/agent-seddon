@@ -13,8 +13,8 @@
 use std::sync::Arc;
 
 use agent_core::{
-    ApproveOutcome, FleetApprover, FleetRegistry, FleetTrigger, PreflightProvider, TriggerOutcome,
-    TriggerSink,
+    ApproveOutcome, FleetApprover, FleetDraftReader, FleetHistory, FleetRegistry, FleetTrigger,
+    PreflightProvider, ReviewDraftFilter, ReviewDraftRecord, TriggerOutcome, TriggerSink,
 };
 use agent_proto::{pb, status_from_error};
 use tonic::transport::server::Router;
@@ -41,6 +41,43 @@ pub struct ReviewFleetSvc {
     /// `UNIMPLEMENTED`; the full `--serve-fleet` process wires it via
     /// [`Self::with_preflight`].
     preflight: Option<Arc<dyn PreflightProvider>>,
+    /// Persisted review-draft history (review-fleet C14). `None` unless a process wires
+    /// persisted history, so `ListReviews` there is `UNIMPLEMENTED`; the `--serve-fleet`
+    /// process wires it via [`Self::with_history`]. Read-only.
+    history: Option<Arc<dyn FleetHistory>>,
+    /// Persisted draft-body reader (review-fleet C14). `None` unless a process wires it (needs
+    /// both history and a fleet root), so `GetReview` there is `UNIMPLEMENTED`; wired via
+    /// [`Self::with_reader`]. Read-only.
+    reader: Option<Arc<dyn FleetDraftReader>>,
+}
+
+/// A persisted draft record → its wire METADATA (`ReviewSummary`). The `.md` body and the
+/// server-minted `draft_path` are deliberately NOT projected here — the body rides only in
+/// `GetReview`, and the path is never exposed on the wire.
+fn summary_from_record(r: ReviewDraftRecord) -> pb::ReviewSummary {
+    pb::ReviewSummary {
+        review_id: r.review_id,
+        repo: r.repo,
+        pr_number: r.pr_number,
+        head_sha: r.head_sha,
+        risk_score: r.risk_score,
+        gate_failed: r.gate_failed,
+        n_findings: r.n_findings,
+        files_changed: r.files_changed,
+        additions: r.additions,
+        deletions: r.deletions,
+        status: r.status,
+    }
+}
+
+/// An empty wire string means "no constraint" (the proto default); a non-empty one is a bound
+/// filter value. Keeps the `""` ⇒ `None` mapping in one place.
+fn filter_opt(s: String) -> Option<String> {
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 impl ReviewFleetSvc {
@@ -50,6 +87,8 @@ impl ReviewFleetSvc {
             triggers: None,
             approver: None,
             preflight: None,
+            history: None,
+            reader: None,
         }
     }
     /// Enable the `ReviewNow` RPC by attaching the orchestrator's trigger sink.
@@ -66,6 +105,18 @@ impl ReviewFleetSvc {
     /// (docs/design/doctor/).
     pub fn with_preflight(mut self, preflight: Arc<dyn PreflightProvider>) -> Self {
         self.preflight = Some(preflight);
+        self
+    }
+    /// Enable the `ListReviews` RPC by attaching the persisted review-draft history
+    /// (review-fleet C14). Read-only.
+    pub fn with_history(mut self, history: Arc<dyn FleetHistory>) -> Self {
+        self.history = Some(history);
+        self
+    }
+    /// Enable the `GetReview` RPC by attaching the persisted draft-body reader (review-fleet
+    /// C14). Read-only.
+    pub fn with_reader(mut self, reader: Arc<dyn FleetDraftReader>) -> Self {
+        self.reader = Some(reader);
         self
     }
     pub fn into_server(self) -> pb::review_fleet_service_server::ReviewFleetServiceServer<Self> {
@@ -255,6 +306,72 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
                         latency_ms: p.latency_ms,
                     })
                     .collect(),
+            }))
+        }
+        .instrument(sp)
+        .await
+    }
+
+    async fn list_reviews(
+        &self,
+        request: Request<pb::ListReviewsRequest>,
+    ) -> Result<Response<pb::ListReviewsReply>, Status> {
+        // Read-only (like list/get/preflight): no authz gate. Every filter value is bound as a
+        // query argument in the impl (never interpolated), and the impl caps the row count.
+        let sp = span("fleet.list_reviews", request.metadata());
+        // Opt-in: only a process with persisted history can list drafts.
+        let Some(history) = self.history.clone() else {
+            return Err(Status::unimplemented(
+                "ListReviews requires persisted fleet history \
+                 (run `agent --serve-fleet` with `[telemetry]` enabled)",
+            ));
+        };
+        async move {
+            let req = request.into_inner();
+            let filter = ReviewDraftFilter {
+                repo: filter_opt(req.repo),
+                session_id: filter_opt(req.session_id),
+                status: filter_opt(req.status),
+                limit: req.limit as usize, // 0 ⇒ the impl's row cap; over-cap is clamped there
+            };
+            let rows = history
+                .list_drafts(&filter)
+                .await
+                .map_err(|e| status_from_error(&e))?;
+            Ok(Response::new(pb::ListReviewsReply {
+                reviews: rows.into_iter().map(summary_from_record).collect(),
+            }))
+        }
+        .instrument(sp)
+        .await
+    }
+
+    async fn get_review(
+        &self,
+        request: Request<pb::GetReviewRequest>,
+    ) -> Result<Response<pb::GetReviewReply>, Status> {
+        // Read-only: no authz gate. `review_id` is untrusted wire input — the reader looks it
+        // up as a bound query arg and reads the body from the draft's own `draft_path`
+        // (confined under the fleet root), never a wire-supplied path; the body is byte-capped.
+        let sp = span("fleet.get_review", request.metadata());
+        // Opt-in: needs the draft-body reader (persisted history + a fleet root).
+        let Some(reader) = self.reader.clone() else {
+            return Err(Status::unimplemented(
+                "GetReview requires the fleet draft reader \
+                 (run `agent --serve-fleet` with `[telemetry]` enabled)",
+            ));
+        };
+        async move {
+            let review_id = request.into_inner().review_id;
+            let body = reader
+                .read_body(&review_id)
+                .await
+                .map_err(|e| status_from_error(&e))?
+                .ok_or_else(|| Status::not_found("no persisted draft for this review_id"))?;
+            Ok(Response::new(pb::GetReviewReply {
+                meta: Some(summary_from_record(body.record)),
+                body: body.body,
+                truncated: body.truncated,
             }))
         }
         .instrument(sp)
