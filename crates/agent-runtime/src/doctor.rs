@@ -41,13 +41,40 @@ pub async fn run(probes: Vec<Arc<dyn Probe>>) -> DoctorReport {
 }
 
 /// The default probe set for a process-level `agent doctor`: config selections,
-/// ClickHouse liveness (if telemetry is on), and provider API-key resolvability.
+/// ClickHouse liveness (if telemetry is on), provider API-key resolvability, and a
+/// non-billing provider reachability ping.
 pub fn probes_for(config: &Config) -> Vec<Arc<dyn Probe>> {
     vec![
         Arc::new(ConfigProbe::new(config)),
         Arc::new(ClickHouseProbe::new(config)),
         Arc::new(ProviderKeyProbe::new(config)),
+        Arc::new(ProviderReachProbe::new(config)),
     ]
+}
+
+/// Resolve the provider's API key to its value (inline > env > file), or empty if
+/// none is configured. **Never logged or placed in a report** — only used to send
+/// the reachability request. Mirrors the provider builder's precedence.
+fn resolve_provider_key(cfg: &crate::config::ProviderCfg) -> String {
+    if !cfg.api_key.is_empty() {
+        return cfg.api_key.clone();
+    }
+    if !cfg.api_key_env.is_empty() {
+        if let Ok(v) = std::env::var(&cfg.api_key_env) {
+            if !v.is_empty() {
+                return v;
+            }
+        }
+    }
+    if !cfg.api_key_file.is_empty() {
+        if let Ok(s) = std::fs::read_to_string(&cfg.api_key_file) {
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
+    String::new()
 }
 
 /// Run the default probe set for `config`.
@@ -247,6 +274,100 @@ impl Probe for ProviderKeyProbe {
     }
 }
 
+// ---------------------------------------------------------------------------
+// ProviderReachProbe — non-billing reachability ping of the model endpoint.
+// ---------------------------------------------------------------------------
+
+/// Whether the configured LLM endpoint is reachable and its credential is accepted,
+/// via a **non-billing** `GET {base_url}/models` (Increment 2). A provider kind with
+/// no models endpoint (a `grpc` client, a pool/router wrapper) is `Skipped`. This
+/// dials the network; the key is used to authenticate but never appears in the
+/// report. Grades: reachable+accepted ⇒ Ok; reached-but-odd-status ⇒ Warn; auth
+/// rejected or unreachable ⇒ Fail.
+pub struct ProviderReachProbe {
+    kind: String,
+    base_url: String,
+    api_key: String,
+    version: String,
+    insecure_tls: bool,
+}
+
+impl ProviderReachProbe {
+    pub fn new(config: &Config) -> Self {
+        Self {
+            kind: config.agent.provider.clone(),
+            base_url: config.provider.base_url.clone(),
+            api_key: resolve_provider_key(&config.provider),
+            version: config.provider.version.clone(),
+            insecure_tls: config.provider.insecure_tls,
+        }
+    }
+
+    /// A trusted (config-derived) endpoint label for the report — never the key.
+    fn endpoint_label(&self) -> String {
+        if self.base_url.is_empty() {
+            format!("{} default endpoint", self.kind)
+        } else {
+            self.base_url.clone()
+        }
+    }
+}
+
+/// Map a [`Reach`](agent_providers::reach::Reach) grade to a probe status + detail.
+/// Pure, so the grading policy is testable without a network dial: reachable+
+/// accepted ⇒ Ok; reachable-but-odd-status ⇒ Warn; auth rejected or unreachable ⇒
+/// Fail; a kind with no models endpoint ⇒ Skipped. `label` and `kind` are trusted
+/// config values; the error text is truncated before display.
+fn grade_reach(
+    reach: agent_providers::reach::Reach,
+    label: &str,
+    kind: &str,
+) -> (ProbeStatus, String) {
+    use agent_providers::reach::Reach;
+    match reach {
+        Reach::Ok => (ProbeStatus::Ok, format!("{label} reachable")),
+        Reach::AuthRejected(code) => (
+            ProbeStatus::Fail,
+            format!("{label} rejected the credential (http {code})"),
+        ),
+        Reach::BadStatus(code) => (
+            ProbeStatus::Warn,
+            format!("{label} reachable, unexpected http {code}"),
+        ),
+        Reach::Unreachable(e) => (
+            ProbeStatus::Fail,
+            format!("{label} unreachable: {}", short_detail(&e)),
+        ),
+        Reach::Unsupported => (
+            ProbeStatus::Skipped,
+            format!("no non-billing reachability endpoint for provider `{kind}`"),
+        ),
+    }
+}
+
+#[async_trait]
+impl Probe for ProviderReachProbe {
+    fn name(&self) -> &str {
+        "provider-reach"
+    }
+    async fn check(&self) -> ProbeOutcome {
+        use agent_providers::reach::{probe, ReachParams};
+        let start = Instant::now();
+        let reach = probe(ReachParams {
+            kind: &self.kind,
+            base_url: &self.base_url,
+            api_key: &self.api_key,
+            version: &self.version,
+            insecure_tls: self.insecure_tls,
+            timeout: PROBE_TIMEOUT,
+        })
+        .await;
+        let ms = start.elapsed().as_millis();
+        let (status, detail) = grade_reach(reach, &self.endpoint_label(), &self.kind);
+        ProbeOutcome::new("provider-reach", status, detail, ms)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,6 +512,103 @@ mod tests {
             api_key_file: "/nonexistent/definitely/not/here.key".into(),
         };
         assert_eq!(p.check().await.status, ProbeStatus::Fail);
+    }
+
+    // --- ProviderReachProbe: grading policy (pure, no network) ---
+
+    #[rstest::rstest]
+    // description, reach grade, expected status
+    #[case::positive_ok("2xx ⇒ Ok", agent_providers::reach::Reach::Ok, ProbeStatus::Ok)]
+    #[case::negative_auth(
+        "auth rejected ⇒ Fail",
+        agent_providers::reach::Reach::AuthRejected(401),
+        ProbeStatus::Fail
+    )]
+    #[case::corner_bad_status(
+        "odd status ⇒ Warn",
+        agent_providers::reach::Reach::BadStatus(404),
+        ProbeStatus::Warn
+    )]
+    #[case::negative_unreachable("unreachable ⇒ Fail", agent_providers::reach::Reach::Unreachable("connection refused".into()), ProbeStatus::Fail)]
+    #[case::boundary_unsupported(
+        "unsupported kind ⇒ Skipped",
+        agent_providers::reach::Reach::Unsupported,
+        ProbeStatus::Skipped
+    )]
+    fn grade_reach_cases(
+        #[case] description: &str,
+        #[case] reach: agent_providers::reach::Reach,
+        #[case] expected: ProbeStatus,
+    ) {
+        let (status, _detail) = grade_reach(reach, "http://h/v1", "openai-compat");
+        assert_eq!(status, expected, "{description}");
+    }
+
+    #[test]
+    fn adversarial_grade_reach_truncates_unreachable_body() {
+        let huge = "x".repeat(10_000);
+        let (status, detail) = grade_reach(
+            agent_providers::reach::Reach::Unreachable(huge),
+            "http://h/v1",
+            "openai-compat",
+        );
+        assert_eq!(status, ProbeStatus::Fail);
+        // Prefix + truncated body + ellipsis — bounded, not the whole 10k.
+        assert!(
+            detail.chars().count() < 300,
+            "detail must be bounded: {}",
+            detail.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn boundary_provider_reach_unsupported_kind_is_skipped_no_network() {
+        // A `grpc` provider has no models endpoint — Skipped without any dial.
+        let p = ProviderReachProbe {
+            kind: "grpc".into(),
+            base_url: "http://127.0.0.1:1/v1".into(),
+            api_key: "sk-secret".into(),
+            version: String::new(),
+            insecure_tls: false,
+        };
+        let o = p.check().await;
+        assert_eq!(o.status, ProbeStatus::Skipped);
+        assert!(!o.detail.contains("sk-secret"), "must not leak the key");
+    }
+
+    // --- resolve_provider_key: precedence + never-empty-on-present ---
+
+    #[test]
+    fn positive_resolve_key_prefers_inline() {
+        let cfg = crate::config::ProviderCfg {
+            api_key: "inline".into(),
+            api_key_env: "SHOULD_NOT_READ".into(),
+            api_key_file: "/nope".into(),
+            ..provider_cfg_stub()
+        };
+        assert_eq!(resolve_provider_key(&cfg), "inline");
+    }
+
+    #[test]
+    fn negative_resolve_key_none_configured_is_empty() {
+        let cfg = provider_cfg_stub();
+        assert_eq!(resolve_provider_key(&cfg), "");
+    }
+
+    /// A minimal `ProviderCfg` for the key-resolution tests (fields we don't touch
+    /// get any valid default).
+    fn provider_cfg_stub() -> crate::config::ProviderCfg {
+        crate::config::ProviderCfg {
+            base_url: String::new(),
+            model: "m".into(),
+            version: "2023-06-01".into(),
+            api_key: String::new(),
+            api_key_env: String::new(),
+            api_key_file: String::new(),
+            insecure_tls: false,
+            max_retries: 0,
+            supports_vision: false,
+        }
     }
 
     // --- ClickHouseProbe: disabled telemetry is Skipped, never a failure ---
