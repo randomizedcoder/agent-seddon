@@ -13,6 +13,7 @@ mod config_schema;
 mod config_store;
 mod context_files;
 mod distiller;
+pub mod doctor;
 #[cfg(feature = "review")]
 mod fleet_review;
 #[cfg(feature = "git")]

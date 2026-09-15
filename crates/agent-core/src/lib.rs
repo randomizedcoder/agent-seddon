@@ -462,6 +462,99 @@ pub trait LlmPool: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// Seam: operational self-diagnosis (doctor / preflight)
+// ---------------------------------------------------------------------------
+//
+// The agent — not an operator with `curl`/`pgrep`/`clickhouse-client` — determines
+// its own operational state. A `Probe` is one dependency check; the aggregator runs
+// a set of them concurrently into a `DoctorReport`, surfaced by `agent doctor` and
+// the fleet `Preflight` RPC. See `docs/design/doctor/`.
+
+/// Grade of a single operational probe. `Skipped` is **not** a failure — it means
+/// the checked subsystem is not applicable to this config (e.g. telemetry is off),
+/// so it never trips the gate. `Warn` is reachable-but-caveated (a token present but
+/// unverified, degraded latency).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ProbeStatus {
+    #[default]
+    Ok,
+    Warn,
+    Fail,
+    Skipped,
+}
+
+impl ProbeStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ProbeStatus::Ok => "ok",
+            ProbeStatus::Warn => "warn",
+            ProbeStatus::Fail => "fail",
+            ProbeStatus::Skipped => "skipped",
+        }
+    }
+}
+
+/// One probe's settled outcome. `detail` is a short, operator-facing status string
+/// — a class or a reachable endpoint address, **never a resolved secret or a raw
+/// error body** (the servers a probe dials are untrusted, same as everywhere else).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProbeOutcome {
+    pub name: String,
+    pub status: ProbeStatus,
+    pub detail: String,
+    /// Probe wall-clock, milliseconds.
+    #[serde(default)]
+    pub latency_ms: u32,
+}
+
+impl ProbeOutcome {
+    /// Construct an outcome, clamping any hostile/absurd latency to a `u32` so the
+    /// value is always safe to serialize and to feed a metric.
+    pub fn new(
+        name: impl Into<String>,
+        status: ProbeStatus,
+        detail: impl Into<String>,
+        latency_ms: u128,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            status,
+            detail: detail.into(),
+            latency_ms: latency_ms.min(u32::MAX as u128) as u32,
+        }
+    }
+}
+
+/// The aggregate of every probe run — the agent's own view of its operational
+/// state. `ok()` is the gate used by `agent doctor`'s exit code: true iff **no**
+/// probe failed (warnings and skips do not fail the gate).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DoctorReport {
+    pub probes: Vec<ProbeOutcome>,
+}
+
+impl DoctorReport {
+    pub fn ok(&self) -> bool {
+        self.probes.iter().all(|p| p.status != ProbeStatus::Fail)
+    }
+
+    /// Count of probes at a given status — for a one-line summary.
+    pub fn count(&self, status: ProbeStatus) -> usize {
+        self.probes.iter().filter(|p| p.status == status).count()
+    }
+}
+
+/// A single operational health check. **Fail-soft:** `check` reports its outcome —
+/// including a failure, as `ProbeStatus::Fail` — rather than returning an error, so
+/// one dead dependency never aborts the whole report.
+#[async_trait]
+pub trait Probe: Send + Sync {
+    fn name(&self) -> &str;
+    async fn check(&self) -> ProbeOutcome;
+}
+
+// ---------------------------------------------------------------------------
 // Seam: Tokenizer + cost model
 // ---------------------------------------------------------------------------
 //

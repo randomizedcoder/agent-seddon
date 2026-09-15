@@ -109,6 +109,42 @@ async fn main() -> Result<()> {
         );
     }
 
+    // `agent doctor`: the agent determines its own operational state and prints a
+    // report, then exits — before any server/metrics machinery starts. Unlike
+    // `--check-config` this dials the network (ClickHouse liveness). Exit is
+    // non-zero iff a required probe failed (warnings/skips do not fail the gate).
+    // Placed here so it borrows `config` before the builder consumes it, and never
+    // starts a metrics or seam server. See docs/design/doctor/.
+    if matches!(mode, Mode::Doctor) {
+        let report = agent_runtime::doctor::diagnose(&config).await;
+        for p in &report.probes {
+            let latency = if p.latency_ms > 0 {
+                format!(" ({}ms)", p.latency_ms)
+            } else {
+                String::new()
+            };
+            println!(
+                "  [{:>7}] {:<13} {}{}",
+                p.status.as_str(),
+                p.name,
+                p.detail,
+                latency
+            );
+        }
+        println!(
+            "doctor: {} ({} ok, {} warn, {} fail, {} skipped)",
+            if report.ok() { "OK" } else { "FAIL" },
+            report.count(agent_core::ProbeStatus::Ok),
+            report.count(agent_core::ProbeStatus::Warn),
+            report.count(agent_core::ProbeStatus::Fail),
+            report.count(agent_core::ProbeStatus::Skipped),
+        );
+        if !report.ok() {
+            anyhow::bail!("doctor: one or more probes failed");
+        }
+        return Ok(());
+    }
+
     // Metrics (opt-in). Instrumentation always runs into this registry; serving
     // the /metrics endpoint and pushing are gated by config.
     let metrics = Metrics::new();
@@ -382,6 +418,7 @@ async fn main() -> Result<()> {
             // Handled before the run: the build above validated the config and we
             // already returned.
             Mode::CheckConfig => unreachable!("--check-config returns before the run"),
+            Mode::Doctor => unreachable!("doctor returns before the run"),
         }
     })
     .await;
@@ -530,6 +567,11 @@ enum Mode {
     /// must resolve, print the chosen impls, and exit 0. A dry run for CI /
     /// operators — no model, no network. Backs the `config-roundtrip` check.
     CheckConfig,
+    /// Run operational health probes and print a report (`agent doctor`): the agent
+    /// determines its own state — config selections, ClickHouse liveness, provider-key
+    /// resolvability — and exits non-zero iff a required probe failed. On-demand,
+    /// unlike `--check-config` it *does* dial the network. See docs/design/doctor/.
+    Doctor,
 }
 
 /// The seam impls a config selects — captured before `Config` is consumed by the
@@ -598,6 +640,7 @@ fn parse_args() -> Result<Args> {
     let mut review_gate = false;
     let mut detect_mode_prompt: Option<String> = None;
     let mut check_config = false;
+    let mut doctor = false;
     let mut cognition_graph: Option<String> = None;
     let mut model_router_config: Option<String> = None;
     let mut goal_parts: Vec<String> = Vec::new();
@@ -617,6 +660,9 @@ fn parse_args() -> Result<Args> {
             }
             "--scheduler" => scheduler_mode = true,
             "--check-config" => check_config = true,
+            // Bare `doctor` subcommand (or `--doctor`); the bare word must be an
+            // explicit arm so the `_` catch-all below doesn't swallow it as a goal.
+            "doctor" | "--doctor" => doctor = true,
             "--serve-mcp" => serve_mcp = true,
             "--serve-all" => serve_grpc_all = true,
             "--serve-sessions" => serve_sessions = true,
@@ -668,6 +714,7 @@ fn parse_args() -> Result<Args> {
                      --gate              with --review: exit non-zero if risk ≥ the configured threshold\n  \
                      --detect-mode P     classify prompt P's task mode and print the verdict\n  \
                      --check-config      load + validate the config, print the selected impls, and exit\n  \
+                     doctor              run operational health probes (config, ClickHouse, provider key) and exit non-zero on failure\n  \
                      --serve-mcp         run as an MCP server over stdio (exposes a `run` tool)\n  \
                      --serve-<seam>      host one seam over gRPC; <seam> = {seams}\n  \
                      --serve-all         host every enabled seam over gRPC from one process\n  \
@@ -687,6 +734,8 @@ fn parse_args() -> Result<Args> {
     let goal = goal_parts.join(" ");
     let mode = if check_config {
         Mode::CheckConfig
+    } else if doctor {
+        Mode::Doctor
     } else if scheduler_mode {
         Mode::Scheduler
     } else if serve_grpc_all {
