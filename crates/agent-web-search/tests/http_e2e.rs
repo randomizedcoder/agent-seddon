@@ -40,6 +40,13 @@ fn spawn_server() -> (String, mpsc::Receiver<String>) {
             } else if url.starts_with("/ratelimited") {
                 let _ = request.respond(Response::empty(429));
                 continue;
+            } else if url.starts_with("/toobig") {
+                // A body far larger than the parse cap (Content-Length set by
+                // tiny_http). A real search JSON is tiny; this stands in for a
+                // hostile/broken provider streaming an unbounded body.
+                let huge = "x".repeat(5 * 1024 * 1024);
+                let _ = request.respond(Response::from_string(huge));
+                continue;
             } else {
                 "{}"
             };
@@ -109,6 +116,20 @@ async fn negative_rate_limit_error_does_not_leak_the_key() {
     assert!(
         !err.contains("secret-key-value"),
         "API key leaked into the error: {err}"
+    );
+}
+
+/// A provider returning an over-cap body must be rejected (not buffered whole),
+/// with an error that names the size problem — an OOM guard, since the payload is
+/// provider-controlled.
+#[tokio::test]
+async fn adversarial_oversized_body_is_rejected_not_buffered() {
+    let (base, _h) = spawn_server();
+    let b = BraveSearch::new(cfg(format!("{base}/toobig"), "k")).unwrap();
+    let err = b.search(&q("rust")).await.unwrap_err().to_string();
+    assert!(
+        err.contains("too large"),
+        "expected a size error, got: {err}"
     );
 }
 

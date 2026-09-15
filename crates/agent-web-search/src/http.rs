@@ -37,14 +37,34 @@ fn client(timeout_secs: u64) -> Result<reqwest::Client> {
         .map_err(|e| Error::Web(format!("building http client: {e}")))
 }
 
-/// Read a bounded body. A provider that streams forever must not hang the turn.
-async fn bounded_text(resp: reqwest::Response) -> Result<String> {
-    let bytes = resp
-        .bytes()
+/// Read a genuinely size-bounded body. The payload is provider-controlled and
+/// `reqwest::Response::bytes` buffers the *whole* body before any truncation, so
+/// a provider returning a multi-GB response (or one with a false/absent
+/// `Content-Length`) would OOM the process before the cap ever applied. Reject an
+/// over-cap `Content-Length` up front and cap a chunked body as it streams,
+/// never trusting the advertised length — the same discipline `agent-web` uses.
+async fn bounded_text(mut resp: reqwest::Response) -> Result<String> {
+    if let Some(len) = resp.content_length() {
+        if len > MAX_BODY_BYTES as u64 {
+            return Err(Error::Web(format!(
+                "search response too large ({len} bytes)"
+            )));
+        }
+    }
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
         .await
-        .map_err(|e| Error::Web(format!("reading search response: {e}")))?;
-    let cut = bytes.len().min(MAX_BODY_BYTES);
-    Ok(String::from_utf8_lossy(&bytes[..cut]).into_owned())
+        .map_err(|e| Error::Web(format!("reading search response: {e}")))?
+    {
+        if buf.len() + chunk.len() > MAX_BODY_BYTES {
+            return Err(Error::Web(format!(
+                "search response too large (> {MAX_BODY_BYTES} bytes)"
+            )));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
 /// Send with the canonical retry driver: retry 429/5xx (honouring `Retry-After`)
