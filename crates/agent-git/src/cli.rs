@@ -334,11 +334,14 @@ impl RepoBackend for CliBackend {
         recursive: bool,
     ) -> Result<Vec<TreeEntry>> {
         let path_str = path.to_string_lossy();
+        // Resolve the model-controlled revision to an oid first so a leading-dash
+        // value can't be parsed as a `git ls-tree` option (see `log`).
+        let oid = self.resolve(rev).await?;
         let mut args = vec!["ls-tree", "-l", "-z"];
         if recursive {
             args.push("-r");
         }
-        args.push(rev.as_str());
+        args.push(oid.as_str());
         if !path_str.is_empty() {
             args.push(&path_str);
         }
@@ -525,7 +528,13 @@ impl RepoBackend for CliBackend {
         let n = format!("-{cap}");
         // \x1f between fields, \x1e terminates each commit record.
         let fmt = "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%ct%x1f%s%x1f%b%x1e";
-        let mut args = vec!["log", "--no-color", n.as_str(), fmt, rev.as_str()];
+        // Resolve the model-controlled revision to an oid FIRST (as diff/grep/
+        // log_range do): `rev-parse --verify` rejects a leading-dash value, so a
+        // hostile `rev` like `--output=<file>` can never reach `git log` as an
+        // option (that one writes/truncates an arbitrary file — an escape past
+        // path confinement). Never pass a raw revision positionally to git.
+        let oid = self.resolve(rev).await?;
+        let mut args = vec!["log", "--no-color", n.as_str(), fmt, oid.as_str()];
         let path_str = path.map(|p| p.to_string_lossy().into_owned());
         if let Some(ref p) = path_str {
             args.push("--");
@@ -643,6 +652,9 @@ impl RepoBackend for CliBackend {
         let cap = if limit == 0 { 2000 } else { limit };
         let fmt = "--format=%x1e%H%x1f%an%x1f%ae%x1f%ct";
         let n = format!("-{cap}");
+        // Resolve the revision to an oid first so a leading-dash value can't be
+        // parsed as a `git log` option (see `log`).
+        let oid = self.resolve(rev).await?;
         let out = self
             .git_str(
                 &self.root,
@@ -656,7 +668,7 @@ impl RepoBackend for CliBackend {
                     "--numstat",
                     n.as_str(),
                     fmt,
-                    rev.as_str(),
+                    oid.as_str(),
                 ],
             )
             .await?;
@@ -1061,6 +1073,79 @@ mod tests {
             spec.argv.iter().any(|a| a == "HEAD; rm -rf /"),
             "the untrusted ref is one literal argv element, not shell-split: {:?}",
             spec.argv
+        );
+    }
+
+    /// A model-controlled revision must be resolved to an oid *before* it is
+    /// passed positionally to `git log`/`ls-tree`: a value like `--output=<file>`
+    /// would otherwise be parsed as a git option that writes/truncates that file
+    /// (an escape past path confinement). Assert the resolve happens first and the
+    /// raw hostile revision never reaches the walk argv — the resolved oid does.
+    #[rstest]
+    #[case::log_walk("log")]
+    #[case::log_touched_walk("--numstat")]
+    #[case::list_tree_walk("ls-tree")]
+    #[tokio::test]
+    async fn adversarial_revision_resolved_before_walk(#[case] walk_marker: &str) {
+        const HOSTILE: &str = "--output=/home/victim/.bashrc";
+        let rec = RecordingSandbox::new(ok_out(b"deadbeef\n"));
+        let b = backend().with_sandbox(rec.clone());
+        let rev = Revision(HOSTILE.into());
+        // Drive whichever walk this case covers; the result is irrelevant (the
+        // canned oid parses to junk) — we assert on the argv the funnel built.
+        match walk_marker {
+            "log" => {
+                let _ = b.log(&rev, None, 10).await;
+            }
+            "--numstat" => {
+                let _ = b.log_touched(&rev, 10).await;
+            }
+            "ls-tree" => {
+                let _ = b.list_tree(&rev, Path::new(""), false).await;
+            }
+            _ => unreachable!(),
+        }
+
+        let argvs = rec.all_argvs();
+        assert!(
+            argvs
+                .iter()
+                .any(|a| a.iter().any(|x| x == "rev-parse") && a.iter().any(|x| x == "--verify")),
+            "resolve-first: a `rev-parse --verify` must precede the walk: {argvs:?}"
+        );
+        let walk = argvs
+            .iter()
+            .find(|a| a.iter().any(|x| x == walk_marker))
+            .unwrap_or_else(|| panic!("the `{walk_marker}` walk ran: {argvs:?}"));
+        assert!(
+            walk.iter().any(|x| x == "deadbeef"),
+            "the walk uses the resolved oid, not the raw revision: {walk:?}"
+        );
+        assert!(
+            !walk.iter().any(|x| x == HOSTILE),
+            "the raw hostile revision must never reach the git walk: {walk:?}"
+        );
+    }
+
+    /// When the revision can't be resolved (git errors), the walk fails closed and
+    /// no `git log`/`ls-tree` runs with the unresolved value.
+    #[tokio::test]
+    async fn negative_walk_fails_closed_when_rev_unresolvable() {
+        let out = ExecOutput {
+            exit_code: 128,
+            stderr: "fatal: bad revision '--output=/x'".into(),
+            ..Default::default()
+        };
+        let rec = RecordingSandbox::new(out);
+        let b = backend().with_sandbox(rec.clone());
+        let err = b
+            .log(&Revision("--output=/x".into()), None, 10)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("failed"), "{err}");
+        assert!(
+            !rec.all_argvs().iter().any(|a| a.iter().any(|x| x == "log")),
+            "no `git log` walk after a failed resolve"
         );
     }
 
