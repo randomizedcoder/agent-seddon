@@ -1800,7 +1800,14 @@ impl Metrics {
                 .fleet_triggers
                 .remove_label_values(&[source, user, repo]);
         }
-        for status in ["reviewing", "drafted", "superseded", "uptodate", "failed"] {
+        for status in [
+            "reviewing",
+            "drafted",
+            "superseded",
+            "uptodate",
+            "failed",
+            "at_capacity",
+        ] {
             let _ = self
                 .fleet_reviews
                 .remove_label_values(&[status, user, repo]);
