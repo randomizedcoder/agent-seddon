@@ -59,13 +59,12 @@ impl FactCollector for RepoChangeCollector {
 /// Repo file set — the search index when present (fresh, fast), else an
 /// index-free gitignore-aware walk (`Manifest::scan`, off the async path).
 async fn file_paths(ctx: &CollectCtx) -> Vec<PathBuf> {
-    if let Some(search) = &ctx.search {
-        if let Ok(files) = search.list_files(&[]).await {
-            if !files.is_empty() {
-                return files;
-            }
-        }
-    }
+    // Scan the reviewed checkout (`ctx.repo_root`), NOT `ctx.search`: in the fleet the
+    // search backend is the process-global index over the agent's own working directory
+    // — a different repo than the one under review — so it would report that repo's file
+    // set (its `repo_file_count`, and a wrong-language fallback in `detect_language`).
+    // `ctx.repo_root` is the correct tree in both cases (working checkout in-loop; the
+    // per-review worktree in the fleet). Mirrors `style::file_paths`.
     let root = ctx.repo_root.clone();
     tokio::task::spawn_blocking(move || {
         agent_search::Manifest::scan(&root)
@@ -216,4 +215,111 @@ fn detect_language(root: &Path, files: &[PathBuf]) -> RepoLanguage {
 
 fn short(s: &str) -> String {
     s.chars().take(120).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_core::{RepoBackend, RepoLanguage, Revision, SearchBackend};
+    use agent_testkit::{FixtureRepo, FixtureSearch};
+    use std::sync::Arc;
+
+    fn ctx(
+        root: PathBuf,
+        repo: Arc<dyn RepoBackend>,
+        search: Option<Arc<dyn SearchBackend>>,
+    ) -> CollectCtx {
+        CollectCtx {
+            repo_root: root,
+            base: Revision::from("base".to_string()),
+            head: Revision::from("head".to_string()),
+            base_label: "base".into(),
+            head_label: "head".into(),
+            default_branch: "main".into(),
+            repo,
+            search,
+            branch_names: vec![],
+            sandbox: None,
+        }
+    }
+
+    fn repo_change(out: &CollectorOutput) -> (&ChangeSet, &GitState) {
+        match &out.fragment {
+            Some(FactFragment::RepoChange { change, git_state }) => (change, git_state),
+            _ => panic!("expected a RepoChange fragment"),
+        }
+    }
+
+    // positive: the repo file set (count + language fallback) comes from the checkout
+    // FS when there is no index.
+    #[tokio::test]
+    async fn positive_repo_file_count_from_worktree() {
+        let root = agent_testkit::tempdir();
+        std::fs::write(root.join("a.go"), "package p\n").unwrap();
+        std::fs::write(root.join("b.go"), "package p\n").unwrap();
+        let repo: Arc<dyn RepoBackend> = Arc::new(FixtureRepo::new());
+        let out = RepoChangeCollector.collect(&ctx(root, repo, None)).await;
+        let (change, git_state) = repo_change(&out);
+        assert_eq!(change.repo_file_count, 2, "counted the worktree's files");
+        assert_eq!(
+            git_state.project,
+            RepoLanguage::Go,
+            "language fallback tallied the worktree's .go files"
+        );
+    }
+
+    // corner (the fleet regression): a cross-repo index reporting a DIFFERENT file set
+    // must not drive repo_file_count or the language fallback.
+    #[tokio::test]
+    async fn corner_ignores_cross_repo_index() {
+        let root = agent_testkit::tempdir();
+        std::fs::write(root.join("a.go"), "package p\n").unwrap();
+        let repo: Arc<dyn RepoBackend> = Arc::new(FixtureRepo::new());
+        // A wrong-repo index: five Rust paths that don't exist in this checkout.
+        let search: Arc<dyn SearchBackend> = Arc::new(FixtureSearch::new().with_files(vec![
+            PathBuf::from("crates/agent-core/src/lib.rs"),
+            PathBuf::from("crates/agent-cli/src/main.rs"),
+            PathBuf::from("crates/agent-review/src/lib.rs"),
+            PathBuf::from("crates/agent-git/src/cli.rs"),
+            PathBuf::from("crates/agent-runtime/src/agent.rs"),
+        ]));
+        let out = RepoChangeCollector
+            .collect(&ctx(root, repo, Some(search)))
+            .await;
+        let (change, git_state) = repo_change(&out);
+        assert_eq!(
+            change.repo_file_count, 1,
+            "count reflects the reviewed checkout (1), not the index (5)"
+        );
+        assert_eq!(
+            git_state.project,
+            RepoLanguage::Go,
+            "language reflects the checkout's .go, not the index's .rs"
+        );
+    }
+
+    // detect_language unit coverage (there was none): a manifest wins; the extension
+    // tally is only a tiebreak; no signal ⇒ Unknown.
+    #[test]
+    fn positive_manifest_file_wins_over_extensions() {
+        let root = agent_testkit::tempdir();
+        std::fs::write(root.join("go.mod"), "module x\n").unwrap();
+        // Extensions say rust, but the go.mod manifest is authoritative.
+        let files = vec![PathBuf::from("x.rs"), PathBuf::from("y.rs")];
+        assert_eq!(detect_language(&root, &files), RepoLanguage::Go);
+    }
+
+    #[test]
+    fn corner_both_manifests_is_mixed() {
+        let root = agent_testkit::tempdir();
+        std::fs::write(root.join("go.mod"), "module x\n").unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[package]\n").unwrap();
+        assert_eq!(detect_language(&root, &[]), RepoLanguage::Mixed);
+    }
+
+    #[test]
+    fn boundary_no_manifest_no_source_is_unknown() {
+        let root = agent_testkit::tempdir();
+        assert_eq!(detect_language(&root, &[]), RepoLanguage::Unknown);
+    }
 }
