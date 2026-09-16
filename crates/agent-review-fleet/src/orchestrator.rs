@@ -723,6 +723,9 @@ impl FleetOrchestrator {
         let wt_id_task = wt_id;
         let repo = row.repo.clone();
         let key_run = key.clone();
+        // CH7: a second clone so the task can free the session once the run is done
+        // (`key_run` is moved into `run_review`; `key` is returned in `Reviewing`).
+        let key_free = key.clone();
         let sid = trigger.session_id.clone();
         // C18 progress feed (config C37): announce lifecycle beats to the row's progress
         // channels. `transport_id` selects the card; empty ⇒ the feed posts nowhere.
@@ -813,6 +816,17 @@ impl FleetOrchestrator {
                     tracing::debug!(session_id = %sid, pr, error = %e,
                         "fleet: worktree cleanup failed (soft)");
                 }
+                // CH7: free the review session now the run is complete, so its capacity
+                // slot is reclaimed *immediately* rather than lingering until the 30-min
+                // idle reaper. Without this, `max_total` is a session-*lifetime* cap, not a
+                // concurrency one: a bulk sweep reviews ~max_total PRs, fills every slot
+                // with finished-but-unreaped sessions, then sheds every later trigger
+                // (Handled::AtCapacity, CH1) for half an hour until the batch ages out — so
+                // a 40-PR sweep crawls. Freeing here makes `max_total` true concurrency; a
+                // later re-trigger (a new head) simply re-admits (cheap; the idempotent
+                // worktree from PR #327 makes that retry safe). Runs on BOTH the Ok and Err
+                // paths (this is after the match), and removal is idempotent.
+                host.remove_session(&key_free);
             }
             .instrument(review_span),
         );
@@ -931,6 +945,9 @@ mod tests {
         }
         fn reviews_len(&self) -> usize {
             self.state.lock().unwrap().reviews.len()
+        }
+        fn removed(&self) -> Vec<SessionKey> {
+            self.state.lock().unwrap().removed.clone()
         }
     }
     #[async_trait::async_trait]
@@ -1339,6 +1356,56 @@ mod tests {
             skill.as_deref(),
             Some("code-review"),
             "the review skill reaches the host"
+        );
+    }
+
+    #[rstest]
+    // desc, whether the host's run_review fails: in both cases the completed review's
+    // session MUST be freed (removed from the host) so its capacity slot is reclaimed
+    // immediately (CH7) rather than lingering until the 30-min idle reaper.
+    #[case::positive_success_frees_session(
+        "a review that drafts successfully frees its session on completion",
+        false
+    )]
+    #[case::corner_failed_review_still_frees_session(
+        "a review whose run fails (no draft) still frees its session — cleanup runs on both paths",
+        true
+    )]
+    #[tokio::test]
+    async fn completed_review_frees_its_session(#[case] description: &str, #[case] fail: bool) {
+        let roster = seeded(&[row("web", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(if fail {
+            FakeHost::failing()
+        } else {
+            FakeHost::new(0)
+        });
+        let o = orch(roster, repo.clone(), host.clone());
+
+        o.handle(FleetTrigger {
+            session_id: "web".into(),
+            pr_number: 42,
+        })
+        .await
+        .expect("handle ok");
+        // Await the spawned run+draft+cleanup+free before asserting.
+        assert!(
+            o.join("web", 42).await,
+            "{description}: the review task ran"
+        );
+
+        // The key `handle()` mints for this row/repo/PR (row("web", …) → user "acme").
+        let key = SessionKey {
+            user: UserId::new("acme"),
+            session: encode_review_session_id("web", "acme__web", 42),
+        };
+        assert!(
+            host.removed().contains(&key),
+            "{description}: the session was freed (remove_session called)"
+        );
+        assert!(
+            !host.admitted().contains(&key),
+            "{description}: the freed session no longer occupies a capacity slot"
         );
     }
 
