@@ -751,6 +751,13 @@ impl FleetOrchestrator {
         // CH7: a second clone so the task can free the session once the run is done
         // (`key_run` is moved into `run_review`; `key` is returned in `Reviewing`).
         let key_free = key.clone();
+        // CH6b: a third clone so the drafter's telemetry (review headline, per-collector,
+        // draft, feedback rows) is recorded UNDER THIS REVIEW'S identity. The drafter runs
+        // after `run_review`'s identity scope has exited, so without this its
+        // `stamp_identity` falls back to the long-lived fleet-process session — stamping
+        // every review's rows with one uuid and defeating per-repo/per-PR scoping (and
+        // correlation with the `agent_usage` rows, which already carry this session).
+        let key_draft = key.clone();
         let sid = trigger.session_id.clone();
         // C18 progress feed (config C37): announce lifecycle beats to the row's progress
         // channels. `transport_id` selects the card; empty ⇒ the feed posts nowhere.
@@ -797,7 +804,9 @@ impl FleetOrchestrator {
                                 workspace,
                                 prior: open_items,
                             };
-                            match drafter.draft(req).await {
+                            // CH6b: record the draft (and its review/collector/feedback
+                            // rows) under this review's identity, not the fleet process's.
+                            match agent_core::scope(key_draft, drafter.draft(req)).await {
                                 Ok(_) => {
                                     if let Some(fm) = &fm_task {
                                         fm.on_review("drafted");
@@ -1108,6 +1117,10 @@ mod tests {
         drafted: Mutex<Vec<DraftRequest>>,
         /// The prior records passed to `supersede` (review-fleet C16).
         superseded: Mutex<Vec<agent_core::ReviewDraftRecord>>,
+        /// CH6b: the ambient identity observed while `draft` ran — the drafter's rows
+        /// (review/collector/draft/feedback) are stamped from this, so it must be the
+        /// per-review session, not the fleet process's.
+        seen_identity: Mutex<Option<agent_core::SessionKey>>,
         fail: bool,
     }
     impl FakeDrafter {
@@ -1115,6 +1128,7 @@ mod tests {
             Arc::new(Self {
                 drafted: Mutex::new(Vec::new()),
                 superseded: Mutex::new(Vec::new()),
+                seen_identity: Mutex::new(None),
                 fail: false,
             })
         }
@@ -1122,6 +1136,7 @@ mod tests {
             Arc::new(Self {
                 drafted: Mutex::new(Vec::new()),
                 superseded: Mutex::new(Vec::new()),
+                seen_identity: Mutex::new(None),
                 fail: true,
             })
         }
@@ -1130,6 +1145,10 @@ mod tests {
         }
         fn supersedes(&self) -> Vec<agent_core::ReviewDraftRecord> {
             self.superseded.lock().unwrap().clone()
+        }
+        /// The ambient identity the drafter ran under (CH6b).
+        fn seen_identity(&self) -> Option<agent_core::SessionKey> {
+            self.seen_identity.lock().unwrap().clone()
         }
     }
     #[async_trait::async_trait]
@@ -1146,6 +1165,7 @@ mod tests {
                 "/tmp/draft.md",
                 agent_core::draft_status::DRAFTED,
             );
+            *self.seen_identity.lock().unwrap() = agent_core::current_identity();
             self.drafted.lock().unwrap().push(req);
             if self.fail {
                 return Err(agent_core::Error::Fleet("draft boom".into()));
@@ -2231,6 +2251,73 @@ mod tests {
         assert!(
             grounder.roots().is_empty(),
             "no grounding, so no worktree path is ever derived from a hostile session"
+        );
+    }
+
+    // ---- CH6b: the drafter records under the per-review identity -------------
+    //
+    // The drafter's telemetry (review headline, per-collector, draft, feedback rows)
+    // is stamped from the ambient identity. It runs after `run_review`'s scope exits,
+    // so without an explicit scope it falls back to the fleet-process session, giving
+    // every review's rows one uuid (breaking per-repo/PR scoping and correlation with
+    // the `agent_usage` rows). These assert the drafter runs under THIS review's key.
+
+    #[tokio::test]
+    async fn positive_drafter_runs_under_review_identity() {
+        let roster = seeded(&[row("web", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(0));
+        let drafter = FakeDrafter::ok();
+        let o = orch(roster, repo, host)
+            .with_grounder(FakeGrounder::ok("brief"))
+            .with_drafter(drafter.clone());
+
+        o.handle(FleetTrigger {
+            session_id: "web".into(),
+            pr_number: 42,
+        })
+        .await
+        .expect("handle ok");
+        assert!(o.join("web", 42).await, "the review task ran");
+
+        let id = drafter
+            .seen_identity()
+            .expect("the drafter ran under an ambient identity, not None");
+        assert_eq!(id.user.as_str(), "acme", "identity user = the owning org");
+        assert_eq!(
+            id.session.as_str(),
+            encode_review_session_id("web", "acme__web", 42).as_str(),
+            "identity session = this review's session, not the fleet process uuid"
+        );
+    }
+
+    #[tokio::test]
+    async fn corner_failing_draft_still_under_review_identity() {
+        // The scope must wrap the draft on the error path too — a failing draft still
+        // records (feedback/attempt) under the review identity, never the process's.
+        let roster = seeded(&[row("web", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(0));
+        let drafter = FakeDrafter::failing();
+        let o = orch(roster, repo, host)
+            .with_grounder(FakeGrounder::ok("brief"))
+            .with_drafter(drafter.clone());
+
+        o.handle(FleetTrigger {
+            session_id: "web".into(),
+            pr_number: 9,
+        })
+        .await
+        .expect("handle ok");
+        assert!(o.join("web", 9).await, "the review task ran");
+
+        let id = drafter
+            .seen_identity()
+            .expect("the failing drafter still ran under an identity");
+        assert_eq!(
+            id.session.as_str(),
+            encode_review_session_id("web", "acme__web", 9).as_str(),
+            "the scope wraps the draft on the error path too"
         );
     }
 
