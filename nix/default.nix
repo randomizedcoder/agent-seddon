@@ -83,7 +83,7 @@ let
   # agent-git's fixture repos and `rg` for the `grep` tool's fast path. Without
   # them `nix build .#agent` and `nix run .#agent` fail on a clean tree even
   # though `nix flake check` passes, because only the check supplied them.
-  agent = craneLib.buildPackage (
+  agent-unwrapped = craneLib.buildPackage (
     commonArgs
     // {
       inherit cargoArtifacts;
@@ -93,6 +93,42 @@ let
       ];
     }
   );
+
+  # The runtime tools the agent shells out to via the `Sandbox`. The review flow's
+  # call-graph collector runs `agent-go-ast`, the `AstBackend` `go`/`scip` engines
+  # run `agent-go-graph`/`scip-go`/`ast-grep`, and the `git`/`grep` tools run
+  # `git`/`rg` — all with `EnvPolicy::Inherit`, so the child inherits the agent
+  # process's `PATH`. This mirrors the dev shell's tool set exactly.
+  agentRuntimePath = [
+    go-ast
+    go-graph
+    versions.scip-go
+    versions.ast-grep
+    pkgs.git
+    pkgs.ripgrep
+  ];
+
+  # The `agent` binary, wrapped so the flake supplies every runtime tool on `PATH`.
+  #
+  # `buildPackage` put `git`/`rg` only on the *build* `PATH` (its test check phase
+  # shells out to them); nothing put the review/AST helpers on the *runtime* `PATH`.
+  # So a packaged agent (`nix run .#agent`, a `--serve-fleet` service, a container)
+  # silently degraded — e.g. the call-graph collector exited 127 and reported
+  # `agent-go-ast not found on PATH`, skipping the whole component. Wrapping fixes
+  # that without relying on the ambient environment (the dev shell / a NixOS host).
+  agent =
+    pkgs.runCommand "agent"
+      {
+        nativeBuildInputs = [ pkgs.makeWrapper ];
+        meta = agent-unwrapped.meta or { };
+      }
+      ''
+        mkdir -p "$out/bin"
+        for bin in "${agent-unwrapped}"/bin/*; do
+          makeWrapper "$bin" "$out/bin/$(basename "$bin")" \
+            --prefix PATH : ${lib.makeBinPath agentRuntimePath}
+        done
+      '';
 
   # The stdlib-only Go call-graph helper (crates/../helpers/go-ast), invoked by the
   # review flow's call-graph collector via the Sandbox. No external Go deps, so
