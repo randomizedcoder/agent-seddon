@@ -316,13 +316,73 @@ pub(crate) struct EngineGrounder {
 impl agent_core::ReviewGrounder for EngineGrounder {
     async fn ground(
         &self,
+        _root: &std::path::Path,
         target: agent_core::ReviewTarget,
     ) -> agent_core::Result<agent_core::GroundedReview> {
+        // `root` is advisory for this impl and intentionally ignored: it wraps an
+        // already-rooted `ReviewCollector` (the process's own working checkout, or a
+        // remote gRPC collector with its own disk), fixed at build time — it cannot be
+        // re-rooted per call. This impl backs only the single-repo fallback; the fleet's
+        // multi-repo path uses `WorktreeGrounder`, which honours `root`.
+        //
         // Collect is fail-soft (only an unresolvable target is a hard error); the caller
         // (the orchestrator) is fail-soft on top, falling back to an ungrounded goal. The
         // facts are returned alongside the brief so the FSM can render the C13 draft from
         // this same run rather than collecting twice.
         let facts = self.engine.collect(&target).await?;
+        let brief = agent_review::render_facts_with(&facts, self.budget);
+        Ok(agent_core::GroundedReview { brief, facts })
+    }
+}
+
+/// The multi-repo [`agent_core::ReviewGrounder`] for the fleet (fleet-grounding track):
+/// unlike [`EngineGrounder`], it does **not** hold a pre-built engine rooted at a fixed
+/// path. It captures everything [`crate::builder::build_review_orchestrator`] needs
+/// *except* the root, and on each `ground` builds a fresh orchestrator rooted at the
+/// per-review **checked-out worktree** the fleet passes in — so the file-reading
+/// collectors (call graph, nearby, signatures, language detection) read real files
+/// instead of the bare mirror (which has no working tree). Rebuilding per trigger is
+/// cheap: the orchestrator only pushes zero-sized collector structs into a `Vec`; the
+/// expensive state — the mirror clone + `OidCache` on `repo`, and the `forge` — is
+/// `Arc`-captured here and reused across triggers. Compiled only with `review`.
+#[cfg(feature = "review")]
+pub(crate) struct WorktreeGrounder {
+    pub(crate) repo: Arc<dyn agent_core::RepoBackend>,
+    pub(crate) search: Option<Arc<dyn agent_core::SearchBackend>>,
+    pub(crate) forge: Option<Arc<dyn agent_core::Forge>>,
+    pub(crate) sandbox: Option<Arc<dyn agent_core::Sandbox>>,
+    pub(crate) pool: Option<Arc<dyn agent_core::LlmPool>>,
+    pub(crate) review: crate::config::ReviewCfg,
+    pub(crate) metrics: Metrics,
+    /// The byte budget handed to the fact renderer (same knob the in-loop review uses).
+    pub(crate) budget: usize,
+}
+
+#[cfg(feature = "review")]
+#[async_trait::async_trait]
+impl agent_core::ReviewGrounder for WorktreeGrounder {
+    async fn ground(
+        &self,
+        root: &std::path::Path,
+        target: agent_core::ReviewTarget,
+    ) -> agent_core::Result<agent_core::GroundedReview> {
+        // Root the collectors at the per-review checked-out worktree, not the bare mirror.
+        // Object reads (diff/log/blobs) still go through `self.repo` (the mirror + its
+        // OidCache), which the worktree's `.git` resolves against — so the git-object
+        // collectors are unaffected; only the filesystem-reading collectors change from
+        // empty to populated.
+        let engine: Arc<dyn agent_core::ReviewCollector> =
+            Arc::new(crate::builder::build_review_orchestrator(
+                root.to_path_buf(),
+                self.repo.clone(),
+                self.search.clone(),
+                self.forge.clone(),
+                self.sandbox.clone(),
+                self.pool.clone(),
+                &self.review,
+                self.metrics.clone(),
+            ));
+        let facts = engine.collect(&target).await?;
         let brief = agent_review::render_facts_with(&facts, self.budget);
         Ok(agent_core::GroundedReview { brief, facts })
     }

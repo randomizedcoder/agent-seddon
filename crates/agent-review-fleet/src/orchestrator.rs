@@ -671,7 +671,7 @@ impl FleetOrchestrator {
         // this also makes the re-checkout land at the new head rather than reusing a stale
         // tree.
         let _ = repo.worktree_remove(&wt_id).await;
-        let _worktree = repo
+        let worktree = repo
             .worktree_add(&WorktreeSpec {
                 revision: head,
                 writable: false,
@@ -703,7 +703,9 @@ impl FleetOrchestrator {
             Some(grounder) => match with_prep_timeout(
                 "review grounding",
                 PREP_TIMEOUT,
-                grounder.ground(ReviewTarget::Pr(pr)),
+                // Ground against the checked-out worktree, not the bare mirror, so the
+                // file-reading collectors see real files (fleet-grounding track).
+                grounder.ground(&worktree.path, ReviewTarget::Pr(pr)),
             )
             .await
             {
@@ -1035,23 +1037,32 @@ mod tests {
     struct FakeGrounder {
         brief: std::result::Result<String, String>,
         grounded: Mutex<Vec<u64>>,
+        /// The checkout roots the engine was actually rooted at (fleet-grounding track):
+        /// the fleet must ground against the per-review worktree, not the bare mirror.
+        roots: Mutex<Vec<std::path::PathBuf>>,
     }
     impl FakeGrounder {
         fn ok(brief: &str) -> Arc<Self> {
             Arc::new(Self {
                 brief: Ok(brief.into()),
                 grounded: Mutex::new(Vec::new()),
+                roots: Mutex::new(Vec::new()),
             })
         }
         fn broken() -> Arc<Self> {
             Arc::new(Self {
                 brief: Err("engine boom".into()),
                 grounded: Mutex::new(Vec::new()),
+                roots: Mutex::new(Vec::new()),
             })
         }
         /// The PR numbers the engine was actually asked to ground (order preserved).
         fn calls(&self) -> Vec<u64> {
             self.grounded.lock().unwrap().clone()
+        }
+        /// The checkout roots the engine was rooted at (order preserved).
+        fn roots(&self) -> Vec<std::path::PathBuf> {
+            self.roots.lock().unwrap().clone()
         }
         /// Facts with a recognisable head oid + one changed file, so a draft test can
         /// assert the engine's facts reached the drafter.
@@ -1072,7 +1083,12 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl ReviewGrounder for FakeGrounder {
-        async fn ground(&self, target: ReviewTarget) -> agent_core::Result<GroundedReview> {
+        async fn ground(
+            &self,
+            root: &std::path::Path,
+            target: ReviewTarget,
+        ) -> agent_core::Result<GroundedReview> {
+            self.roots.lock().unwrap().push(root.to_path_buf());
             if let ReviewTarget::Pr(n) = target {
                 self.grounded.lock().unwrap().push(n);
             }
@@ -2082,6 +2098,139 @@ mod tests {
         assert!(
             grounder.calls().is_empty(),
             "unknown row fails closed before the engine runs"
+        );
+    }
+
+    // ---- fleet-grounding: ground against the worktree, not the bare mirror ---
+    //
+    // The deterministic collectors read files off the checkout, so the fleet must
+    // root grounding at the per-review worktree. These assert the path the engine is
+    // handed is exactly the checkout `worktree_add` returned
+    // (`/fixture/worktrees/<review_worktree_id>`), never the bare mirror
+    // (`/fixture`). Confinement of that id against a hostile `session_id` (traversal,
+    // over-length, empty) is covered by the `review_worktree_id` adversarial tests
+    // further below.
+
+    fn expected_worktree(pr: u64, session: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(format!(
+            "/fixture/worktrees/{}",
+            review_worktree_id(pr, session)
+        ))
+    }
+
+    #[tokio::test]
+    async fn positive_grounds_against_worktree_not_mirror() {
+        // desc: a trigger grounds the PR against the checked-out worktree.
+        // expect: the engine is rooted at the worktree path, never the bare mirror.
+        let roster = seeded(&[row("web", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(0));
+        let grounder = FakeGrounder::ok("brief");
+        let o = orch(roster, repo, host).with_grounder(grounder.clone());
+
+        o.handle(FleetTrigger {
+            session_id: "web".into(),
+            pr_number: 42,
+        })
+        .await
+        .expect("handle ok");
+
+        assert_eq!(
+            grounder.roots(),
+            vec![expected_worktree(42, "web")],
+            "grounded at the worktree checkout, not the mirror"
+        );
+        assert!(
+            grounder
+                .roots()
+                .iter()
+                .all(|r| r != std::path::Path::new("/fixture")),
+            "never grounded at the bare mirror (which has no working tree)"
+        );
+    }
+
+    #[tokio::test]
+    async fn boundary_duplicate_trigger_grounds_worktree_once() {
+        // desc: the same (session, PR) fired twice.
+        // expect: grounded exactly once, at the worktree — the duplicate is
+        // short-circuited before it can re-ground.
+        let roster = seeded(&[row("web", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(0));
+        let grounder = FakeGrounder::ok("brief");
+        let o = orch(roster, repo, host).with_grounder(grounder.clone());
+
+        let t = || FleetTrigger {
+            session_id: "web".into(),
+            pr_number: 7,
+        };
+        o.handle(t()).await.expect("first ok");
+        o.handle(t()).await.expect("second ok");
+
+        assert_eq!(
+            grounder.roots(),
+            vec![expected_worktree(7, "web")],
+            "grounded exactly once, at the worktree"
+        );
+    }
+
+    #[tokio::test]
+    async fn corner_two_rows_same_pr_ground_distinct_worktrees() {
+        // desc: two roster rows watching the same PR number.
+        // expect: each grounds at its own session-scoped worktree — distinct
+        // checkouts, so neither row's cleanup can delete the other's tree.
+        let roster = seeded(&[row("web", true), row("api", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(0));
+        let grounder = FakeGrounder::ok("brief");
+        let o = orch(roster, repo, host).with_grounder(grounder.clone());
+
+        o.handle(FleetTrigger {
+            session_id: "web".into(),
+            pr_number: 5,
+        })
+        .await
+        .expect("web ok");
+        o.handle(FleetTrigger {
+            session_id: "api".into(),
+            pr_number: 5,
+        })
+        .await
+        .expect("api ok");
+
+        let roots = grounder.roots();
+        assert_eq!(
+            roots,
+            vec![expected_worktree(5, "web"), expected_worktree(5, "api")],
+            "each row grounds at its own worktree"
+        );
+        assert_ne!(
+            roots[0], roots[1],
+            "distinct sessions ⇒ distinct worktrees for the same PR"
+        );
+    }
+
+    #[tokio::test]
+    async fn adversarial_hostile_session_never_grounds() {
+        // desc: a trigger whose `session_id` is unknown / carries traversal.
+        // expect: fail closed *before* grounding — no worktree is rooted for an
+        // unmatched session, so a hostile session_id can never steer the checkout path.
+        let roster = seeded(&[row("web", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(0));
+        let grounder = FakeGrounder::ok("brief");
+        let o = orch(roster, repo, host).with_grounder(grounder.clone());
+
+        let got = o
+            .handle(FleetTrigger {
+                session_id: "../../etc/web".into(),
+                pr_number: 1,
+            })
+            .await;
+        assert!(got.is_err(), "an unmatched/hostile session is an error");
+        assert!(
+            grounder.roots().is_empty(),
+            "no grounding, so no worktree path is ever derived from a hostile session"
         );
     }
 

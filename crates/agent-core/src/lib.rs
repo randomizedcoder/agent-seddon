@@ -6017,7 +6017,13 @@ pub trait ReviewGrounder: Send + Sync {
     /// Run the engine on `target` and return the grounded review (the rendered brief for
     /// the session's first turn **and** the facts it was rendered from — one engine run,
     /// reused for both the goal and the C13 draft).
-    async fn ground(&self, target: ReviewTarget) -> Result<GroundedReview>;
+    ///
+    /// `root` is the checked-out tree the collectors should read (the fleet's per-review
+    /// worktree): file-reading collectors — call graph, nearby, signatures, language
+    /// detection — need real files on disk, so a bare mirror grounds thinly. A grounder
+    /// whose engine is already rooted (the single-repo / remote case) may treat `root`
+    /// as advisory; the fleet's multi-repo grounder honours it.
+    async fn ground(&self, root: &std::path::Path, target: ReviewTarget) -> Result<GroundedReview>;
 }
 
 /// The output of one review-engine run (review-fleet C10): the rendered `brief` handed to
