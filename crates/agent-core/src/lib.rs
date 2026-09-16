@@ -3476,6 +3476,16 @@ pub trait FleetHost: Send + Sync {
     fn admit_owner(&self, key: SessionKey) -> std::result::Result<(), DriverError>;
     /// Drop the session for `key` (a disabled or removed row). No-op if absent.
     fn remove_session(&self, key: &SessionKey);
+    /// Whether admitting a review session for `key` would succeed **right now** under the
+    /// capacity caps — a read-only dry run of [`Self::run_review`]'s admission gate. An
+    /// already-live key always fits (idempotent re-admit). The fleet orchestrator calls
+    /// this *before* the expensive per-PR prep (fetch head, materialize worktree, ground)
+    /// so an over-capacity trigger is shed cheaply and retried on the next poll, rather
+    /// than doing all that work only to fail inside `run_review`. Default `true`
+    /// (unbounded) — only a capped host overrides it.
+    fn has_capacity(&self, _key: &SessionKey) -> bool {
+        true
+    }
     /// Admit (cap-checked) the review session for `key`, run `goal` to completion, and
     /// return the model's narrative (its review answer) — the input the C13 draft is
     /// rendered from (review-fleet C10/C13).

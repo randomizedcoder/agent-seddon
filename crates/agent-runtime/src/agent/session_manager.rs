@@ -306,6 +306,28 @@ impl SessionManager {
         Ok(handle)
     }
 
+    /// Would a fresh admission of `key` succeed under the current caps? A read-only dry
+    /// run of [`Self::admit_seeded`]'s capacity gate (same total + per-user checks), so it
+    /// can drift only if that gate changes — keep the two in step. An already-live key
+    /// always fits (idempotent re-admit). Used by the fleet orchestrator to shed an
+    /// over-capacity review trigger *before* the expensive fetch/worktree/ground prep.
+    pub fn has_capacity_for(&self, key: &agent_core::SessionKey) -> bool {
+        let map = self.sessions.lock().expect("session map poisoned");
+        if map.contains_key(key) {
+            return true;
+        }
+        if self.max_total > 0 && map.len() >= self.max_total {
+            return false;
+        }
+        if self.max_per_user > 0 {
+            let per_user = map.keys().filter(|k| k.user == key.user).count();
+            if per_user >= self.max_per_user {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Reset a session's idle timer (the wire `Heartbeat`), keeping a long-lived but
     /// quiet session warm. Returns whether the session was live.
     pub fn touch(&self, key: &agent_core::SessionKey) -> bool {
@@ -432,6 +454,10 @@ impl agent_core::FleetHost for SessionManager {
 
     fn remove_session(&self, key: &agent_core::SessionKey) {
         self.remove(key);
+    }
+
+    fn has_capacity(&self, key: &agent_core::SessionKey) -> bool {
+        self.has_capacity_for(key)
     }
 
     async fn run_review(

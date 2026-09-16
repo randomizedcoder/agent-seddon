@@ -4124,6 +4124,67 @@ mod tests {
         assert!(mgr.admit(key("bob", "s1")).is_ok());
     }
 
+    #[rstest]
+    // desc, max_total, max_per_user, pre-admitted (user,sess) sessions, the probe key
+    // (user,sess), expected: has_capacity_for(probe) == ?
+    #[case::positive_empty_has_room(
+        "unbounded, empty: any key fits",
+        0, 0, &[], ("alice", "s1"), true
+    )]
+    #[case::positive_below_total_cap(
+        "cap 3, one live: a new key still fits below the total cap",
+        3, 0, &[("alice", "s1")], ("bob", "s2"), true
+    )]
+    #[case::negative_at_total_cap_new_key(
+        "cap 1, one live: a new key does NOT fit (would be shed before prep)",
+        1, 0, &[("alice", "s1")], ("bob", "s2"), false
+    )]
+    #[case::corner_at_total_cap_existing_key_fits(
+        "cap 1, one live: the SAME key still fits (idempotent re-admit is never throttled)",
+        1, 0, &[("alice", "s1")], ("alice", "s1"), true
+    )]
+    #[case::negative_at_per_user_cap(
+        "per-user cap 1, alice already has one: another alice key does not fit",
+        0, 1, &[("alice", "s1")], ("alice", "s2"), false
+    )]
+    #[case::corner_per_user_cap_other_user_fits(
+        "per-user cap 1, alice at her cap: a different user still fits (isolated budgets)",
+        0, 1, &[("alice", "s1")], ("bob", "s1"), true
+    )]
+    #[case::boundary_total_cap_exactly_one_free(
+        "cap 2, one live: exactly one slot free, a new key fits",
+        2, 0, &[("alice", "s1")], ("bob", "s2"), true
+    )]
+    #[tokio::test]
+    async fn session_manager_has_capacity_for_mirrors_admit_gate(
+        #[case] description: &str,
+        #[case] max_total: usize,
+        #[case] max_per_user: usize,
+        #[case] live: &[(&str, &str)],
+        #[case] probe: (&str, &str),
+        #[case] expected: bool,
+    ) {
+        // A read-only dry run of the admission gate: it must agree with `admit`'s own
+        // total/per-user checks so the fleet's pre-prep capacity shed (CH1) never disagrees
+        // with what `run_review` would then do.
+        let mgr = SessionManager::new(base_agent()).with_limits(max_total, max_per_user);
+        for (u, s) in live {
+            mgr.admit(key(u, s)).expect("seed live session");
+        }
+        let probe_key = key(probe.0, probe.1);
+        assert_eq!(mgr.has_capacity_for(&probe_key), expected, "{description}");
+        // Cross-check against the real gate: if we predict capacity, a fresh admit of a
+        // NEW key must succeed; if we predict none, it must be rejected — the two agree.
+        if !live.iter().any(|(u, s)| *u == probe.0 && *s == probe.1) {
+            let admit = mgr.admit(probe_key);
+            assert_eq!(
+                admit.is_ok(),
+                expected,
+                "{description}: has_capacity_for disagrees with admit"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn session_manager_touch_and_remove() {
         let mgr = SessionManager::new(base_agent());
