@@ -419,6 +419,18 @@ impl agent_core::ReviewDrafter for EngineDrafter {
         // Persist the operational row (→ agent_review_drafts) through the same funnel the
         // anonymized review row uses.
         self.agent.record_draft(rec.clone()).await;
+        // Also record the anonymized review-run headline (→ agent_reviews +
+        // agent_review_collectors, component 09). The fleet grounds via
+        // `ReviewGrounder::ground`, which — unlike the in-loop `auto` path
+        // (agent.rs `review_collect`) and the CLI `explicit` path (agent-cli) —
+        // never calls `record_review`. Without this the fleet emits drafts/feedback
+        // but no per-collector timing telemetry, so `fleet-measure`'s GROUNDING /
+        // END-TO-END sections stay empty (CH6). The drafter is the natural home: it
+        // already holds the run's `ReviewFacts` and the `Agent` event sink, and runs
+        // once per review. `mode_via = "fleet"` labels the trigger.
+        self.agent
+            .record_review(agent_core::ReviewRecord::from_facts(&req.facts, "fleet"))
+            .await;
         Ok(rec)
     }
 
@@ -6143,6 +6155,146 @@ mod tests {
             peak_concurrency(false).await,
             1,
             "a non-parallel-safe tool must serialize the whole turn"
+        );
+    }
+
+    // ---- CH6: the fleet grounding path records the review-run headline ------
+    //
+    // The fleet drafts through `EngineDrafter::draft`. Before the CH6 fix it wrote
+    // the operational draft/feedback rows but never the anonymized `agent_reviews`
+    // + `agent_review_collectors` headline (`record_review`), so `fleet-measure`'s
+    // GROUNDING / END-TO-END sections stayed empty. These assert the drafter now
+    // emits exactly one `kind="review"` event, faithful to the facts, tagged
+    // `mode_via="fleet"` (never `auto`/`explicit`), without dropping the draft row.
+    #[cfg(all(feature = "review", feature = "fleet"))]
+    fn ch6_collector(
+        name: &str,
+        status: agent_core::CollectStatus,
+        ms: u32,
+    ) -> agent_core::CollectorStatus {
+        agent_core::CollectorStatus {
+            collector: name.into(),
+            status,
+            reason: String::new(),
+            duration_ms: ms,
+        }
+    }
+
+    #[cfg(all(feature = "review", feature = "fleet"))]
+    fn ch6_facts(
+        total_ms: u32,
+        collectors: Vec<agent_core::CollectorStatus>,
+    ) -> agent_core::ReviewFacts {
+        let mut f = agent_core::ReviewFacts::default();
+        f.meta.head_rev = "cafef00d".into();
+        f.meta.total_ms = total_ms;
+        f.meta.collectors = collectors;
+        f
+    }
+
+    #[cfg(all(feature = "review", feature = "fleet"))]
+    async fn ch6_draft_events(facts: agent_core::ReviewFacts) -> Vec<MemoryEvent> {
+        let memory = RecordingMemory::new();
+        let agent = Arc::new(Agent::new(
+            Arc::new(FnProvider::new(|_req: &CompletionRequest| final_turn("ok"))),
+            ToolRegistry::new(),
+            Arc::new(memory.clone()),
+            Arc::new(StaticContext),
+            Arc::new(crate::policy::AutoApprove),
+            Metrics::new(),
+            settings(false),
+        ));
+        let drafter = EngineDrafter { agent };
+        let req = agent_core::DraftRequest {
+            review_id: "rid-1".into(),
+            repo: "owner__repo".into(),
+            pr_number: 7,
+            facts,
+            narrative: "looks fine".into(),
+            workspace: agent_testkit::tempdir(),
+            prior: Vec::new(),
+        };
+        agent_core::ReviewDrafter::draft(&drafter, req)
+            .await
+            .expect("draft writes the .md and records rows");
+        memory.events()
+    }
+
+    /// desc: the fleet draft path records one `agent_reviews` headline whose collector
+    /// set and `total_ms` mirror the grounded facts, tagged `mode_via="fleet"` (not the
+    /// in-loop `auto` / CLI `explicit` labels), while still emitting the draft row.
+    /// expect: exactly one `kind="review"` event carrying the row's fields + a draft row.
+    #[cfg(all(feature = "review", feature = "fleet"))]
+    #[rstest]
+    #[case::positive_records_fleet_headline(
+        50,
+        vec![
+            ch6_collector("repo-change", agent_core::CollectStatus::Ok, 20),
+            ch6_collector("analyzer", agent_core::CollectStatus::Ok, 30),
+        ],
+        2,
+        false
+    )]
+    #[case::negative_mode_via_is_fleet_not_auto_or_explicit(
+        10,
+        vec![ch6_collector("repo-change", agent_core::CollectStatus::Ok, 10)],
+        1,
+        false
+    )]
+    #[case::boundary_empty_collectors_zero_total_still_records(0, vec![], 0, false)]
+    #[case::corner_failed_collector_carried_faithfully(
+        40,
+        vec![
+            ch6_collector("analyzer", agent_core::CollectStatus::Ok, 10),
+            ch6_collector("callgraph", agent_core::CollectStatus::Failed, 30),
+        ],
+        2,
+        true
+    )]
+    #[tokio::test]
+    async fn fleet_draft_records_review_headline(
+        #[case] total_ms: u32,
+        #[case] collectors: Vec<agent_core::CollectorStatus>,
+        #[case] expect_collectors: usize,
+        #[case] expect_has_failed: bool,
+    ) {
+        let events = ch6_draft_events(ch6_facts(total_ms, collectors)).await;
+
+        let reviews: Vec<&agent_core::ReviewRecord> = events
+            .iter()
+            .filter(|e| e.kind == "review")
+            .filter_map(|e| e.review.as_ref())
+            .collect();
+        assert_eq!(
+            reviews.len(),
+            1,
+            "the fleet draft path records exactly one review headline"
+        );
+        let rec = reviews[0];
+        assert_eq!(
+            rec.mode_via, "fleet",
+            "the fleet trigger is labelled `fleet`"
+        );
+        assert_ne!(rec.mode_via, "auto", "must not borrow the in-loop label");
+        assert_ne!(rec.mode_via, "explicit", "must not borrow the CLI label");
+        assert_eq!(
+            rec.collectors.len(),
+            expect_collectors,
+            "collector set mirrors the grounded facts"
+        );
+        assert_eq!(rec.total_ms, total_ms, "wall-clock carried from facts.meta");
+        assert_eq!(
+            rec.collectors
+                .iter()
+                .any(|c| c.status == agent_core::CollectStatus::Failed),
+            expect_has_failed,
+            "a failed collector is carried into the record, not dropped"
+        );
+
+        // Regression: adding record_review must not drop the operational draft row.
+        assert!(
+            events.iter().any(|e| e.kind == "draft"),
+            "the draft row is still recorded alongside the review headline"
         );
     }
 
