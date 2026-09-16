@@ -241,6 +241,12 @@ let
       ;
   };
 
+  # `nix run .#fleet-measure` — deterministic review-fleet performance report over
+  # the ClickHouse telemetry (model loop / grounding collectors / end-to-end /
+  # draft outcomes). Read-only, no model; needs a reachable ClickHouse. See
+  # nix/fleet-measure.nix + test/fleet-measure/report.py.
+  fleet-measure = import ./fleet-measure.nix { inherit pkgs; };
+
   # `nix run .#graph-arena` — the cognition-graph A/B/n value sweep: one objective,
   # baseline + graph-document arms, per-requirement k/n + artifacts. Not a check
   # (needs the Kimi generator + GLM judge endpoints); its own test suite IS the
@@ -560,6 +566,7 @@ in
         e2e-expect
         e2e-multi
         fleet-e2e
+        fleet-measure
         graph-arena
         graph-arena-campaign
         review-eval

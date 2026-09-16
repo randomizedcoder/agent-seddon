@@ -217,6 +217,12 @@ pub enum Handled {
     /// re-fetch, no new run. Upgrades the coarse poll-time PR# guard from inc 4 to the
     /// resolved head oid (C9).
     UpToDate,
+    /// The host is at its session-capacity cap (`[review_fleet] max_total`/`max_per_user`),
+    /// so this trigger is **shed before any prep** — no forge fetch, no worktree, no
+    /// grounding, and (crucially) no `status=failed` draft record. The poller re-emits it
+    /// on the next tick; it starts once a slot frees. Backpressure, not a terminal failure
+    /// (review-fleet CH1).
+    AtCapacity,
 }
 
 /// A spawned per-review task (review-fleet C8, inc 6a). Holding it keeps the review
@@ -563,6 +569,27 @@ impl FleetOrchestrator {
             review_span.record("repo", row.repo.as_str());
         }
 
+        // The review session key — built up front so we can shed an over-capacity trigger
+        // *before* any prep. Keyed by the row's org + repo + PR (same triple `run_review`
+        // admits under).
+        let key = SessionKey {
+            user: UserId::new(row.user.as_str()),
+            session: encode_review_session_id(&row.id, &row.repo, pr),
+        };
+        // CH1 backpressure: if the host has no free session slot right now, shed the trigger
+        // *before* the expensive fetch/worktree/ground prep — no forge round-trip, no
+        // worktree, and (crucially) no `status=failed` draft. The poller re-emits it next
+        // tick and it starts once a slot frees. Without this the whole prep ran only to fail
+        // inside `run_review` at the cap. An already-live key still fits (idempotent).
+        if !self.host.has_capacity(&key) {
+            tracing::debug!(session_id = %trigger.session_id, pr,
+                "fleet: host at capacity; shedding trigger before prep (retried next poll)");
+            if let Some(fm) = &fm {
+                fm.on_review("at_capacity");
+            }
+            return Ok(Handled::AtCapacity);
+        }
+
         // Resolve the per-row repo + grounder (multi-repo grounding). With a factory set,
         // build *this row's* own checkout + forge-bound engine; on a build error fall back
         // to the process-global `repo`/`grounder` (fail-soft — a review still runs,
@@ -693,10 +720,6 @@ impl FleetOrchestrator {
             None => (Self::review_goal(&row, pr), None),
         };
 
-        let key = SessionKey {
-            user: UserId::new(row.user.as_str()),
-            session: encode_review_session_id(&row.id, &row.repo, pr),
-        };
         // A server-minted review-round id (unguessable), carried into the draft record so
         // the approval path (inc 6c) can address exactly this round.
         let review_id = uuid::Uuid::new_v4().to_string();
@@ -876,7 +899,7 @@ fn review_worktree_id(pr: u64, session_id: &str) -> String {
 mod tests {
     use super::*;
     use crate::MemoryFleet;
-    use agent_core::{DriverError, FleetReviewCtx, GroundedReview, ReviewFacts};
+    use agent_core::{DriverError, FleetReviewCtx, GroundedReview, ReviewFacts, SessionId};
     use rstest::rstest;
     use std::sync::Arc;
     use tokio::sync::Notify;
@@ -967,6 +990,12 @@ mod tests {
             let mut s = self.state.lock().unwrap();
             s.removed.push(key.clone());
             s.admitted.retain(|k| k != key);
+        }
+        fn has_capacity(&self, key: &SessionKey) -> bool {
+            // Read-only mirror of `run_review`'s admission gate: an already-live key fits,
+            // else a free slot must exist under the cap (`max_total == 0` ⇒ unbounded).
+            let s = self.state.lock().unwrap();
+            s.admitted.contains(key) || self.max_total == 0 || s.admitted.len() < self.max_total
         }
         async fn run_review(
             &self,
@@ -1223,6 +1252,24 @@ mod tests {
         }
     }
 
+    /// The `SessionKey` `handle()` mints for a review of `row_id`/`repo`/`pr` — the same
+    /// triple the host admits under. Lets a capacity test pre-admit the review's own key.
+    fn review_key(row_id: &str, repo: &str, pr: u64) -> SessionKey {
+        SessionKey {
+            user: UserId::new("acme"),
+            session: encode_review_session_id(row_id, repo, pr),
+        }
+    }
+
+    /// An unrelated session key that occupies a host slot (a different org each `n`), used
+    /// to fill the host to capacity without colliding with any review key.
+    fn filler_key(n: usize) -> SessionKey {
+        SessionKey {
+            user: UserId::new(format!("filler-org-{n}")),
+            session: SessionId::new(format!("filler-{n}")),
+        }
+    }
+
     async fn seeded(rows: &[FleetSession]) -> Arc<MemoryFleet> {
         let roster = Arc::new(MemoryFleet::new());
         for r in rows {
@@ -1407,6 +1454,113 @@ mod tests {
             !host.admitted().contains(&key),
             "{description}: the freed session no longer occupies a capacity slot"
         );
+    }
+
+    #[rstest]
+    // desc, host cap (max_total; 0 = unbounded), unrelated sessions to pre-admit, whether to
+    // pre-admit the review's OWN key, expected: sheds the trigger before prep?
+    #[case::positive_free_slot_runs(
+        "cap 1, host empty: a free slot admits the review, so it runs and fetches the PR head",
+        1,
+        0,
+        false,
+        false
+    )]
+    #[case::negative_at_capacity_shed_before_prep(
+        "cap 1, one unrelated session live: no free slot, so the trigger is shed with AtCapacity \
+         before any forge fetch or worktree — backpressure, retried next poll",
+        1,
+        1,
+        false,
+        true
+    )]
+    #[case::boundary_exactly_at_cap_shed(
+        "cap 2, exactly two unrelated sessions live: at the cap boundary there is no slot, shed",
+        2,
+        2,
+        false,
+        true
+    )]
+    #[case::boundary_unbounded_never_sheds(
+        "cap 0 (unbounded) with sessions already live: capacity is never exhausted, so it runs",
+        0,
+        3,
+        false,
+        false
+    )]
+    #[case::corner_already_live_review_key_still_fits(
+        "the review's OWN key is already admitted (idempotent re-admit, e.g. a re-trigger at a \
+         new head) at an otherwise-full host: it fits (no new slot needed), so it runs",
+        1,
+        0,
+        true,
+        false
+    )]
+    #[tokio::test]
+    async fn at_capacity_sheds_trigger_before_prep(
+        #[case] description: &str,
+        #[case] max_total: usize,
+        #[case] fillers: usize,
+        #[case] prefill_review_key: bool,
+        #[case] expected_shed: bool,
+    ) {
+        // CH1: an over-capacity trigger must be shed *before* the expensive fetch/worktree/
+        // ground prep (no forge round-trip, no `status=failed` draft), and re-emitted next
+        // poll — not run all the way to a failure inside the host's admission gate.
+        let roster = seeded(&[row("web", true)]).await;
+        let repo = Arc::new(agent_testkit::FixtureRepo::new());
+        let host = Arc::new(FakeHost::new(max_total));
+        for n in 0..fillers {
+            host.admit_owner(filler_key(n)).expect("filler admit");
+        }
+        if prefill_review_key {
+            host.admit_owner(review_key("web", "acme__web", 42))
+                .expect("review-key admit");
+        }
+        let o = orch(roster, repo.clone(), host.clone());
+
+        let got = o
+            .handle(FleetTrigger {
+                session_id: "web".into(),
+                pr_number: 42,
+            })
+            .await
+            .expect("handle ok");
+
+        if expected_shed {
+            assert!(
+                matches!(got, Handled::AtCapacity),
+                "{description}: expected AtCapacity, got {got:?}"
+            );
+            assert!(
+                repo.fetch_pr_calls().is_empty(),
+                "{description}: shed before prep, so the PR head is never fetched"
+            );
+            assert_eq!(
+                host.reviews_len(),
+                0,
+                "{description}: no review is started at capacity"
+            );
+        } else {
+            assert!(
+                matches!(got, Handled::Reviewing { .. }),
+                "{description}: expected Reviewing, got {got:?}"
+            );
+            assert_eq!(
+                repo.fetch_pr_calls(),
+                vec![42],
+                "{description}: a free slot fetches the PR head exactly once"
+            );
+            assert!(
+                o.join("web", 42).await,
+                "{description}: the review task ran"
+            );
+            assert_eq!(
+                host.reviews_len(),
+                1,
+                "{description}: exactly one review started"
+            );
+        }
     }
 
     #[tokio::test]
