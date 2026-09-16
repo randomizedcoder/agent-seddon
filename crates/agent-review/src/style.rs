@@ -85,16 +85,18 @@ impl FactCollector for StyleCollector {
     }
 }
 
-/// The repo's file set: the search index when present (fast), else an index-free
-/// `Manifest::scan` off the async path. Mirrors `repo_facts::file_paths`.
+/// The repo's file set for the style baseline: an index-free `Manifest::scan` of the
+/// **reviewed checkout** (`ctx.repo_root`).
+///
+/// We deliberately do NOT use `ctx.search` here. In the fleet that backend is the
+/// process-global index, built over the agent's own working directory — a *different*
+/// repo than the one under review — so its paths don't exist in `ctx.repo`, every
+/// `read_file` misses, and `scanned` stays 0, skipping the collector on 100% of fleet
+/// reviews. `ctx.repo_root` is the correct tree in both cases: the working checkout
+/// in-loop, and the per-review worktree in the fleet (fleet-grounding worktree-rooting).
+/// The scan is bounded downstream by `MAX_FILES`, so dropping the index is cheap. A
+/// per-review index scoped to this checkout is a separate, deferred optimization.
 async fn file_paths(ctx: &CollectCtx) -> Vec<PathBuf> {
-    if let Some(search) = &ctx.search {
-        if let Ok(files) = search.list_files(&[]).await {
-            if !files.is_empty() {
-                return files;
-            }
-        }
-    }
     let root = ctx.repo_root.clone();
     tokio::task::spawn_blocking(move || {
         agent_search::Manifest::scan(&root)
@@ -644,5 +646,140 @@ mod tests {
         assert_eq!(f.naming.functions, "unknown");
         assert_eq!(f.line_len_p95, 0);
         assert!(a.finish_if_seen().is_none(), "never scanned ⇒ None");
+    }
+
+    // ---- collect(): the baseline is scanned from the reviewed checkout ----------
+    //
+    // Regression for the fleet-grounding bug: `file_paths` used to prefer
+    // `ctx.search`, which in the fleet is the process-global index over a DIFFERENT
+    // repo. Its paths don't exist in `ctx.repo`, so every blob read missed, `scanned`
+    // stayed 0, and the collector skipped 100% of fleet reviews. The baseline must
+    // come from `ctx.repo_root` (the worktree), regardless of any cross-repo index.
+
+    use crate::collector::FactCollector;
+    use agent_core::{CollectStatus, RepoBackend, SearchBackend};
+    use agent_testkit::{FixtureRepo, FixtureSearch};
+    use std::sync::Arc;
+
+    const GO_SRC: &str = "package p\n\n// Doc for Foo.\nfunc Foo() int {\n\treturn 1\n}\n";
+
+    fn style_ctx(
+        root: PathBuf,
+        repo: Arc<dyn RepoBackend>,
+        search: Option<Arc<dyn SearchBackend>>,
+    ) -> CollectCtx {
+        CollectCtx {
+            repo_root: root,
+            base: Revision::from("base".to_string()),
+            head: Revision::from("head".to_string()),
+            base_label: "base".into(),
+            head_label: "head".into(),
+            default_branch: "main".into(),
+            repo,
+            search,
+            branch_names: vec![],
+            sandbox: None,
+        }
+    }
+
+    fn files_scanned(out: &CollectorOutput) -> Option<u32> {
+        match &out.fragment {
+            Some(FactFragment::Style { facts }) => Some(facts.files_scanned),
+            _ => None,
+        }
+    }
+
+    // positive: no index at all → scan the worktree FS, read its source, produce facts.
+    #[tokio::test]
+    async fn positive_scans_worktree_source_without_index() {
+        let root = agent_testkit::tempdir();
+        std::fs::write(root.join("widget.go"), GO_SRC).unwrap();
+        let repo: Arc<dyn RepoBackend> =
+            Arc::new(FixtureRepo::new().with_blob("head", "widget.go", GO_SRC));
+        let out = StyleCollector { commit_sample: 10 }
+            .collect(&style_ctx(root, repo, None))
+            .await;
+        assert_eq!(out.status, CollectStatus::Ok, "scanned the worktree source");
+        assert_eq!(
+            files_scanned(&out),
+            Some(1),
+            "one source file fingerprinted"
+        );
+    }
+
+    // corner (the fleet regression): a cross-repo index lists paths absent from the
+    // reviewed repo; the collector must ignore it and scan the worktree instead.
+    #[tokio::test]
+    async fn corner_ignores_cross_repo_index() {
+        let root = agent_testkit::tempdir();
+        std::fs::write(root.join("widget.go"), GO_SRC).unwrap();
+        let repo: Arc<dyn RepoBackend> =
+            Arc::new(FixtureRepo::new().with_blob("head", "widget.go", GO_SRC));
+        // The wrong-repo index (agent-seddon paths) — not present in `repo`.
+        let search: Arc<dyn SearchBackend> = Arc::new(
+            FixtureSearch::new().with_files(vec![PathBuf::from("crates/agent-core/src/lib.rs")]),
+        );
+        let out = StyleCollector { commit_sample: 10 }
+            .collect(&style_ctx(root, repo, Some(search)))
+            .await;
+        assert_eq!(
+            out.status,
+            CollectStatus::Ok,
+            "a cross-repo index must not make the collector skip"
+        );
+        assert_eq!(
+            files_scanned(&out),
+            Some(1),
+            "scanned the worktree, not the index"
+        );
+    }
+
+    // boundary: a checkout with no source files → a legitimate skip is preserved.
+    #[tokio::test]
+    async fn boundary_no_source_files_skips() {
+        let root = agent_testkit::tempdir();
+        std::fs::write(root.join("README.md"), "# docs\n").unwrap();
+        let repo: Arc<dyn RepoBackend> = Arc::new(FixtureRepo::new());
+        let out = StyleCollector { commit_sample: 10 }
+            .collect(&style_ctx(root, repo, None))
+            .await;
+        assert_eq!(out.status, CollectStatus::Skipped, "no source ⇒ skipped");
+    }
+
+    // negative: source files are listed but unreadable from the repo (no blob) →
+    // scanned stays 0 and the collector skips rather than fabricating facts.
+    #[tokio::test]
+    async fn negative_listed_but_unreadable_skips() {
+        let root = agent_testkit::tempdir();
+        std::fs::write(root.join("widget.go"), GO_SRC).unwrap();
+        // FixtureRepo with no blob for widget.go ⇒ read_file errors.
+        let repo: Arc<dyn RepoBackend> = Arc::new(FixtureRepo::new());
+        let out = StyleCollector { commit_sample: 10 }
+            .collect(&style_ctx(root, repo, None))
+            .await;
+        assert_eq!(out.status, CollectStatus::Skipped, "unreadable ⇒ skipped");
+    }
+
+    // adversarial: a hostile index lists traversal/absolute paths; because the index
+    // is never consulted, those paths can never steer a read outside the checkout.
+    #[tokio::test]
+    async fn adversarial_hostile_index_paths_not_consulted() {
+        let root = agent_testkit::tempdir();
+        std::fs::write(root.join("widget.go"), GO_SRC).unwrap();
+        let repo: Arc<dyn RepoBackend> =
+            Arc::new(FixtureRepo::new().with_blob("head", "widget.go", GO_SRC));
+        let search: Arc<dyn SearchBackend> = Arc::new(FixtureSearch::new().with_files(vec![
+            PathBuf::from("../../etc/passwd"),
+            PathBuf::from("/etc/shadow"),
+        ]));
+        let out = StyleCollector { commit_sample: 10 }
+            .collect(&style_ctx(root, repo, Some(search)))
+            .await;
+        assert_eq!(out.status, CollectStatus::Ok);
+        assert_eq!(
+            files_scanned(&out),
+            Some(1),
+            "only the worktree's own source was read; hostile index paths ignored"
+        );
     }
 }
