@@ -408,6 +408,10 @@ class _DraftDetailState extends State<_DraftDetail> {
   bool _loading = true;
   bool _saving = false;
   String? _error;
+  // The draft is listed but has no readable body on this fleet instance — the
+  // server answered NotFound (e.g. it belongs to a different fleet root). A clean
+  // empty state, not a connectivity error.
+  bool _unavailable = false;
   _DetailMode _mode = _DetailMode.view;
 
   /// A `posted`/`approved` draft can't be edited (matches the server's write
@@ -439,6 +443,7 @@ class _DraftDetailState extends State<_DraftDetail> {
     setState(() {
       _loading = true;
       _error = null;
+      _unavailable = false;
     });
     try {
       final reply = await widget.clients.fleet.getReview(
@@ -453,6 +458,16 @@ class _DraftDetailState extends State<_DraftDetail> {
       });
     } catch (e) {
       if (!mounted) return;
+      // A draft with no readable body here (e.g. one minted under a different
+      // fleet root, still listed by ListReviews) comes back as gRPC NotFound —
+      // show the empty state, not the offline/retry panel.
+      if (_grpcCode(e) == _grpcNotFound) {
+        setState(() {
+          _unavailable = true;
+          _loading = false;
+        });
+        return;
+      }
       setState(() {
         _error = '$e';
         _loading = false;
@@ -494,8 +509,9 @@ class _DraftDetailState extends State<_DraftDetail> {
     final r = widget.summary;
     final posted = r.status == 'posted';
     // Approving posts the *persisted* body, so block it while there are unsaved
-    // edits — the operator should Save first (edit → save → approve).
-    final canApprove = !posted && !_dirty && !_saving;
+    // edits — the operator should Save first (edit → save → approve). Also block
+    // when there's no readable body here (an unavailable/cross-root draft).
+    final canApprove = !posted && !_dirty && !_saving && !_unavailable;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -527,8 +543,9 @@ class _DraftDetailState extends State<_DraftDetail> {
             ],
           ),
         ),
-        // Mode toggle + Save. A locked draft has no editor — view only.
-        if (!_loading && _error == null)
+        // Mode toggle + Save. A locked draft has no editor — view only. Hidden
+        // when there's no readable body here (an unavailable/cross-root draft).
+        if (!_loading && _error == null && !_unavailable)
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
             child: Row(
@@ -604,6 +621,18 @@ class _DraftDetailState extends State<_DraftDetail> {
     if (_error != null) {
       return _OfflineRetry(message: _error!, onRetry: _fetch);
     }
+    if (_unavailable) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Text(
+            'No stored body for this draft on this fleet instance.\n'
+            'It may belong to a different fleet root (an earlier run).',
+            textAlign: TextAlign.center,
+          ),
+        ),
+      );
+    }
     switch (_mode) {
       case _DetailMode.edit:
         return Padding(
@@ -669,6 +698,22 @@ class _DraftDetailState extends State<_DraftDetail> {
         ],
       ),
     );
+  }
+}
+
+/// gRPC `NotFound` status code. `package:grpc/service_api.dart` (all the portal
+/// imports) doesn't export `StatusCode`, so we compare the numeric code.
+const int _grpcNotFound = 5;
+
+/// The gRPC status code carried by an error, or null if it isn't a `GrpcError`.
+/// `GrpcError` isn't exported by `service_api.dart` either, so read `.code`
+/// dynamically rather than catching the type.
+int? _grpcCode(Object e) {
+  try {
+    final code = (e as dynamic).code;
+    return code is int ? code : null;
+  } catch (_) {
+    return null;
   }
 }
 

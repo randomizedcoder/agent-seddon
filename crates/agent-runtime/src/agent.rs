@@ -750,6 +750,17 @@ impl agent_core::FleetDraftReader for EngineDraftReader {
         let Some(record) = self.history.draft_by_id(review_id).await? else {
             return Ok(None);
         };
+        // A draft minted under a *different* fleet root (e.g. an earlier run with a different
+        // `[review_fleet] root`) is still listed by `ListReviews` — which returns every persisted
+        // row regardless of root — but its `.md` body lives outside this instance's workspace and
+        // is not readable here. Treat that as "no draft for this instance" (→ `NotFound`) rather
+        // than surfacing the confine mismatch as a hard `INVALID_ARGUMENT`, so the operator sees a
+        // clean empty state instead of an error. `starts_with` is a path-component (not string)
+        // prefix check; `read_confined_body`'s `confine` below still fails closed on a symlink
+        // escape from *within* the root.
+        if !Path::new(&record.draft_path).starts_with(&self.fleet_root) {
+            return Ok(None);
+        }
         let (body, truncated) = read_confined_body(
             Some(&self.fleet_root),
             &record.draft_path,
@@ -3335,6 +3346,99 @@ mod tests {
         assert!(
             got.is_err(),
             "a symlink escaping the fleet root must be refused by confine"
+        );
+    }
+
+    // ---- EngineDraftReader: read_body (cross-root → None, review-fleet C14 / CH5) --------
+
+    /// A reader rooted at `root`, backed by a history mapping `"rid"` → a `drafted` record with
+    /// the given `draft_path`. (Reuses [`MapHistory`], defined below in the same module.)
+    fn reader_with(root: &Path, draft_path: &str) -> EngineDraftReader {
+        let rec = agent_core::ReviewDraftRecord {
+            review_id: "rid".into(),
+            repo: "runpod__host".into(),
+            pr_number: 7,
+            head_sha: "sha".into(),
+            risk_score: 1.0,
+            gate_failed: false,
+            n_findings: 0,
+            files_changed: 0,
+            additions: 0,
+            deletions: 0,
+            draft_path: draft_path.to_string(),
+            status: "drafted".into(),
+        };
+        let mut map = std::collections::HashMap::new();
+        map.insert("rid".to_string(), rec);
+        EngineDraftReader {
+            history: Arc::new(MapHistory(map)),
+            fleet_root: root.to_path_buf(),
+        }
+    }
+
+    /// desc: read_body serves an in-root draft, returns None for an unknown id, and — the CH5 fix
+    /// — returns None (a clean `NotFound`, not a hard confine error) for a draft whose path lives
+    /// under a *different* fleet root (still listed by `ListReviews`, unreadable here).
+    /// expect: whether `Some(body)` comes back.
+    #[rstest]
+    #[case::positive_in_root_returns_body("an in-root draft → Some(body)", "in_root", true)]
+    #[case::negative_unknown_id_is_none("an unknown review_id → None", "unknown", false)]
+    #[case::corner_cross_root_is_none(
+        "a draft under a different fleet root → None (CH5), not an error",
+        "cross_root",
+        false
+    )]
+    #[tokio::test]
+    async fn read_body_cross_root_and_unknown(
+        #[case] desc: &str,
+        #[case] scenario: &str,
+        #[case] want_some: bool,
+    ) {
+        use agent_core::FleetDraftReader;
+        let root = agent_testkit::tempdir();
+        let in_dir = root.join("runpod").join("host").join("reviews");
+        std::fs::create_dir_all(&in_dir).unwrap();
+        let in_path = in_dir.join("pr-7-rrid.md");
+        std::fs::write(&in_path, "BODY").unwrap();
+        // A draft file that lives under a *separate* root.
+        let other_root = agent_testkit::tempdir();
+        let other_path = other_root.join("pr-9.md");
+        std::fs::write(&other_path, "OTHER").unwrap();
+
+        let reader = match scenario {
+            "cross_root" => reader_with(&root, &other_path.to_string_lossy()),
+            // "in_root" and "unknown" both point at the in-root draft; "unknown" queries a
+            // different id so the history lookup misses.
+            _ => reader_with(&root, &in_path.to_string_lossy()),
+        };
+        let id = if scenario == "unknown" { "nope" } else { "rid" };
+        let got = reader.read_body(id).await.expect(desc);
+        assert_eq!(got.is_some(), want_some, "{desc}");
+        if want_some {
+            assert_eq!(got.unwrap().body, "BODY", "{desc}");
+        }
+    }
+
+    /// desc (adversarial): a `draft_path` lexically under the root but symlinking *outside* it must
+    /// still fail closed (`Err`), not read the escape target — the cross-root shortcut above only
+    /// skips paths that aren't under the root at all; `confine` guards escapes from within it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn adversarial_read_body_symlink_escape_within_root_refused() {
+        use agent_core::FleetDraftReader;
+        let root = agent_testkit::tempdir();
+        let secret_dir = agent_testkit::tempdir();
+        let secret = secret_dir.join("secret.md");
+        std::fs::write(&secret, "SECRET").unwrap();
+        let link_dir = root.join("reviews");
+        std::fs::create_dir_all(&link_dir).unwrap();
+        let link = link_dir.join("pr-7.md"); // under the root lexically…
+        std::os::unix::fs::symlink(&secret, &link).unwrap(); // …but resolves outside it.
+        let reader = reader_with(&root, &link.to_string_lossy());
+        let got = reader.read_body("rid").await;
+        assert!(
+            got.is_err(),
+            "a symlink escaping the fleet root must fail closed, not read the target"
         );
     }
 
