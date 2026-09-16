@@ -26,7 +26,7 @@ use agent_core::{safe_segment, Error, FleetReviewCtx, FleetReviewFactory, FleetS
 use agent_metrics::Metrics;
 use async_trait::async_trait;
 
-use crate::agent::EngineGrounder;
+use crate::agent::WorktreeGrounder;
 use crate::config::ReviewCfg;
 use crate::registry::{build_session_forge, build_session_forge_from_card};
 
@@ -282,21 +282,20 @@ impl FleetReviewFactory for FleetReviewCtxFactory {
         }
         let repo: Arc<dyn agent_core::RepoBackend> = Arc::new(cli);
 
-        // The engine + grounder, bound to *this* repo + forge, with the same `[review]`
-        // collector set the in-loop review uses. `review_root` is the mirror (the repo
-        // root the fact renderer hashes/labels; the real objects live there).
-        let orch = crate::builder::build_review_orchestrator(
-            mirror,
-            repo.clone(),
-            self.search.clone(),
+        // The grounder, bound to *this* repo + forge, with the same `[review]` collector
+        // set the in-loop review uses. It does NOT bake in a root: `WorktreeGrounder`
+        // rebuilds the engine per trigger rooted at the checked-out worktree the fleet
+        // passes to `ground`, so the file-reading collectors see real files (the bare
+        // `mirror` has no working tree). The expensive mirror clone (`repo`, with its
+        // OidCache) and the forge are captured and reused across triggers.
+        let grounder: Arc<dyn agent_core::ReviewGrounder> = Arc::new(WorktreeGrounder {
+            repo: repo.clone(),
+            search: self.search.clone(),
             forge,
-            self.sandbox.clone(),
-            self.pool.clone(),
-            &self.review,
-            self.metrics.clone(),
-        );
-        let grounder: Arc<dyn agent_core::ReviewGrounder> = Arc::new(EngineGrounder {
-            engine: Arc::new(orch),
+            sandbox: self.sandbox.clone(),
+            pool: self.pool.clone(),
+            review: self.review.clone(),
+            metrics: self.metrics.clone(),
             budget: self.budget,
         });
 
