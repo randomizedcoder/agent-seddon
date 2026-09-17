@@ -31,7 +31,7 @@ pub use otel::{otlp_layer, OtelConfig, OtelGuard};
 
 use rows::{
     DimensionRow, EventRow, ReviewCollectorRow, ReviewDraftRow, ReviewFeedbackRow, ReviewRow,
-    UsageRow, VerificationRow,
+    ReviewToolRow, UsageRow, VerificationRow,
 };
 use writer::{Msg, WriterConfig, TARGET};
 
@@ -121,6 +121,10 @@ impl TelemetryHandle {
             // One drill-down row per collector (the parallelism detail).
             for row in ReviewCollectorRow::rows_from_event(event) {
                 self.send(Msg::ReviewCollector(row));
+            }
+            // One drill-down row per analyzer tool (review-analysis-depth Inc 2-tel).
+            for row in ReviewToolRow::rows_from_event(event) {
+                self.send(Msg::ReviewTool(row));
             }
         } else if event.kind == "draft" {
             // The fleet's operational review-draft record (review-fleet C14).

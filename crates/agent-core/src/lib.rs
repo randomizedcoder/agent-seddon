@@ -5896,6 +5896,12 @@ pub struct ReviewRecord {
     /// Name of the slowest collector — what to optimize next.
     pub critical_path: String,
     pub collectors: Vec<CollectorStatus>,
+    /// Per-tool static-analysis outcomes (review-analysis-depth Inc 2-tel) — the
+    /// drill-down under the `analyzer` collector (golangci-lint / gosec / go vet /
+    /// gofmt / clippy), routed to `agent_review_tools`. `#[serde(default)]` so an
+    /// older record without it still deserializes. Empty when analysis is off/skipped.
+    #[serde(default)]
+    pub runs: Vec<AnalyzerRun>,
 }
 
 impl ReviewRecord {
@@ -5936,6 +5942,7 @@ impl ReviewRecord {
             sum_work_ms,
             critical_path,
             collectors: f.meta.collectors.clone(),
+            runs: f.analysis.runs.clone(),
         }
     }
 }

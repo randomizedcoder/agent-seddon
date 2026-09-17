@@ -397,6 +397,47 @@ impl ReviewCollectorRow {
     }
 }
 
+/// One static-analysis tool per review (`agent_review_tools`) — the per-tool
+/// drill-down under the `analyzer` collector (review-analysis-depth Inc 2-tel).
+#[derive(Debug, Clone, Row)]
+pub struct ReviewToolRow {
+    pub session_id: String,
+    /// The verified owning identity (`SessionKey.user`; tenant == user at this
+    /// tier), stamped at the emit funnel. Empty for events emitted outside a scope.
+    pub user: String,
+    pub ts: DateTime64<3>,
+    pub tool: String,
+    pub status: String,
+    /// Why a tool was `skipped`/`failed`/`timeout` (bounded, no raw content); empty
+    /// for `ok`. Tool error text is untrusted — capped here (reuses [`MAX_REASON`]).
+    pub reason: String,
+    pub duration_ms: u32,
+    pub finding_count: u32,
+}
+
+impl ReviewToolRow {
+    /// One row per analyzer tool run in a `kind = "review"` `MemoryEvent`.
+    pub fn rows_from_event(event: &MemoryEvent) -> Vec<Self> {
+        let Some(r) = event.review.as_ref() else {
+            return Vec::new();
+        };
+        let ts = dt64_from_ms(event.ts_ms);
+        r.runs
+            .iter()
+            .map(|run| ReviewToolRow {
+                session_id: event.session_id.clone(),
+                user: event.user.clone(),
+                ts,
+                tool: run.tool.clone(),
+                status: run.status.clone(),
+                reason: run.reason.chars().take(MAX_REASON).collect(),
+                duration_ms: run.duration_ms,
+                finding_count: run.finding_count,
+            })
+            .collect()
+    }
+}
+
 /// One per-dimension summary (`agent_dimension_summaries`) — adaptive-cognition 03.
 /// `summary_len` (not the body) is stored: counts/lengths only, never the text.
 #[derive(Debug, Clone, Row)]
@@ -624,6 +665,22 @@ mod tests {
                     duration_ms: 1,
                 },
             ],
+            runs: vec![
+                agent_core::AnalyzerRun {
+                    tool: "golangci-lint".into(),
+                    status: "ok".into(),
+                    reason: String::new(),
+                    duration_ms: 70,
+                    finding_count: 3,
+                },
+                agent_core::AnalyzerRun {
+                    tool: "gosec".into(),
+                    status: "skipped".into(),
+                    reason: "tool not found on PATH".into(),
+                    duration_ms: 0,
+                    finding_count: 0,
+                },
+            ],
         }
     }
 
@@ -652,6 +709,46 @@ mod tests {
         assert_eq!(
             summaries.reason, "no pool",
             "the skip cause is persisted (F3)"
+        );
+    }
+
+    #[test]
+    fn positive_review_tool_rows_one_per_analyzer_run() {
+        let rows = ReviewToolRow::rows_from_event(&review_event(sample_review()));
+        assert_eq!(rows.len(), 2, "one row per analyzer tool run");
+        let golangci = rows.iter().find(|r| r.tool == "golangci-lint").unwrap();
+        assert_eq!(golangci.status, "ok");
+        assert_eq!(golangci.finding_count, 3);
+        assert_eq!(golangci.duration_ms, 70);
+        assert_eq!(golangci.reason, "", "an ok tool carries no reason");
+        let gosec = rows.iter().find(|r| r.tool == "gosec").unwrap();
+        assert_eq!(gosec.status, "skipped");
+        assert_eq!(gosec.reason, "tool not found on PATH");
+        assert_eq!(gosec.session_id, "s");
+    }
+
+    #[test]
+    fn corner_review_tool_rows_empty_without_runs() {
+        let mut rec = sample_review();
+        rec.runs.clear();
+        assert!(ReviewToolRow::rows_from_event(&review_event(rec)).is_empty());
+    }
+
+    #[test]
+    fn adversarial_review_tool_reason_capped() {
+        let mut rec = sample_review();
+        rec.runs = vec![agent_core::AnalyzerRun {
+            tool: "gosec".into(),
+            status: "failed".into(),
+            reason: "X".repeat(5_000), // untrusted tool error text
+            duration_ms: 3,
+            finding_count: 0,
+        }];
+        let rows = ReviewToolRow::rows_from_event(&review_event(rec));
+        assert_eq!(rows.len(), 1);
+        assert!(
+            rows[0].reason.chars().count() <= MAX_REASON,
+            "tool reason must be capped at the persistence boundary"
         );
     }
 

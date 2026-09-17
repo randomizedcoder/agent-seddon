@@ -7,6 +7,7 @@ prints a per-phase timing picture for the reviews the fleet has produced —
 
   * model loop        (agent_usage)            — the dominant, sequential cost
   * grounding phase   (agent_review_collectors) — the parallel fan-out
+  * analyzer suite    (agent_review_tools)      — per-tool timing + findings
   * end-to-end        (agent_reviews)          — total vs summed-work + critical path
   * draft outcomes    (agent_review_drafts)     — drafted / posted / superseded
 
@@ -130,6 +131,21 @@ def sections(f: Filters) -> list[tuple[str, str]]:
             "SELECT collector, status, reason, count() AS n "
             f"FROM agent_review_collectors{reason_where} "
             "GROUP BY collector, status, reason ORDER BY n DESC LIMIT 20",
+        ),
+        (
+            "ANALYZER — per-tool timing + findings (agent_review_tools; the suite fan-out)",
+            "SELECT tool, count() AS n, "
+            "countIf(status = 'ok') AS ok, countIf(status != 'ok') AS not_ok, "
+            "round(avg(duration_ms)) AS avg_ms, round(quantile(0.95)(duration_ms)) AS p95_ms, "
+            "max(duration_ms) AS max_ms, sum(finding_count) AS findings "
+            f"FROM agent_review_tools{f.usage_where()} "
+            "GROUP BY tool ORDER BY avg_ms DESC",
+        ),
+        (
+            "ANALYZER — tool skip/fail reasons (why a tool produced no findings)",
+            "SELECT tool, status, reason, count() AS n "
+            f"FROM agent_review_tools{reason_where} "
+            "GROUP BY tool, status, reason ORDER BY n DESC LIMIT 20",
         ),
         (
             "END-TO-END — per review (agent_reviews; total vs summed work + critical path)",
