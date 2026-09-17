@@ -17,6 +17,7 @@
   agent,
   go-ast,
   go-graph,
+  review-toolbox,
   reviewGoCorpus,
 }:
 
@@ -186,6 +187,14 @@ in
   # and the callee changes; assert the `Call graph` blast-radius section shows the
   # caller. Uses the flake-built `agent-go-ast` helper on PATH; offline.
   review-callgraph = agentCheck ./review-callgraph.nix { inherit go-ast; };
+  # Reproducibility contract (review-analysis-depth Inc 1): the nix-provisioned
+  # static-analysis toolbox (golangci-lint/gosec/go/gofmt) is bundled and on the
+  # packaged agent's runtime PATH, so the fleet finds the linters with no ambient
+  # env and one nixpkgs bump floats them all.
+  review-toolbox = import ./review-toolbox.nix {
+    inherit pkgs agent;
+    toolbox = review-toolbox;
+  };
 
   # AstBackend Go engine: the type-aware `agent-go-graph` helper resolves the
   # implicit interface-satisfaction relation + precise call edges over a fixture Go
