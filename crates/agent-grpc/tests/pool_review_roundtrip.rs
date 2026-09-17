@@ -310,6 +310,25 @@ impl ReviewCollector for FakeReview {
                 gate_threshold: 0.7,
                 gate_failed: true,
             },
+            digest: agent_core::AnalysisDigest {
+                findings: vec![agent_core::AnalysisFinding {
+                    tool: "golangci-lint".into(),
+                    rule: "errcheck".into(),
+                    severity: "warning".into(),
+                    file: "main.go".into(),
+                    line: 1,
+                    message: "Error return value is not checked".into(),
+                    in_change: true,
+                }],
+                total: 1,
+                in_change: 1,
+                rule_counts: vec![agent_core::RuleCount {
+                    tool: "golangci-lint".into(),
+                    rule: "errcheck".into(),
+                    count: 1,
+                    in_change: 1,
+                }],
+            },
         })
     }
 }
@@ -426,6 +445,13 @@ async fn review_collect_roundtrips(#[case] transport: Transport) {
     assert_eq!(facts.risk.files[0].level, "high");
     assert_eq!(facts.risk.files[0].reasons[0].kind, "load_bearing");
     assert!(facts.risk.gate_failed);
+    // Analysis digest (findings + counts + rule tally) survives the round-trip.
+    assert_eq!(facts.digest.total, 1);
+    assert_eq!(facts.digest.in_change, 1);
+    assert_eq!(facts.digest.findings.len(), 1);
+    assert_eq!(facts.digest.findings[0].rule, "errcheck");
+    assert_eq!(facts.digest.rule_counts.len(), 1);
+    assert_eq!(facts.digest.rule_counts[0].count, 1);
 }
 
 /// A PR target survives the encode/decode round-trip through the wire string.

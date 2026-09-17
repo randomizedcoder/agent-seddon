@@ -12,6 +12,7 @@ mod callgraph;
 mod churn;
 mod cochange;
 mod collector;
+mod digest;
 mod gochecks;
 mod nearby;
 mod orchestrator;
@@ -298,6 +299,11 @@ pub fn render_facts_with(facts: &ReviewFacts, budget_bytes: usize) -> String {
     render_analysis_labeled(&mut out, "Shell scripts (shellcheck)", &facts.shellcheck);
     render_analysis_labeled(&mut out, "Go race & benchmarks", &facts.go_checks);
     render_analysis_labeled(&mut out, "Nearby similar code", &facts.nearby);
+
+    // Unified analysis digest (Stage 2) — every tool's findings deduped, risk-ranked,
+    // and bucketed by rule into ONE section. Renders after the per-tool run summaries
+    // above, which now carry only status/timing (the digest owns the findings).
+    render_digest(&mut out, &facts.digest);
 
     // House-style fingerprint — so the review respects the repo's conventions.
     render_style(&mut out, &facts.style);
@@ -649,6 +655,9 @@ fn render_callgraph(out: &mut String, g: &agent_core::CallGraph) {
 
 /// The most findings rendered verbatim; the rest are summarized as a count.
 const MAX_RENDERED_FINDINGS: usize = 80;
+/// How many `(tool, rule)` buckets the digest's by-rule tally lists before folding
+/// the rest into a "+N more rule(s)" count.
+const MAX_DIGEST_RULES: usize = 12;
 
 /// Render the static-analysis section: a one-line-per-tool run summary, then the
 /// findings (changed-file hits first, capped). Nothing is emitted if the analyzer
@@ -657,9 +666,15 @@ fn render_analysis(out: &mut String, report: &agent_core::AnalysisReport) {
     render_analysis_labeled(out, "Analysis (static)", report);
 }
 
-/// Render an [`AnalysisReport`] under `label` — the shared skeleton for the static
-/// analyzer and the review-fleet C12 collectors (shellcheck / go race+bench /
-/// nearby). Emits nothing when the collector never ran (empty `runs`).
+/// Render an [`AnalysisReport`]'s **per-tool run summary** under `label` — the shared
+/// skeleton for the static analyzer and the review-fleet C12 collectors (shellcheck /
+/// go race+bench / nearby). Emits nothing when the collector never ran (empty `runs`).
+///
+/// The findings themselves are **not** rendered here — every report's findings are
+/// unified, deduped, risk-ranked, and rule-bucketed once by [`render_digest`] (Stage
+/// 2), so a reviewer sees one ranked section instead of four independently-capped
+/// lists. This function keeps only the run diagnostics (status / timing / count),
+/// which are per-collector and belong beside their collector's heading.
 fn render_analysis_labeled(out: &mut String, label: &str, report: &agent_core::AnalysisReport) {
     if report.runs.is_empty() {
         return; // collector disabled or not wired — say nothing rather than "0"
@@ -676,25 +691,52 @@ fn render_analysis_labeled(out: &mut String, label: &str, report: &agent_core::A
             r.tool, r.status, r.finding_count, r.duration_ms, reason,
         ));
     }
+}
 
-    if report.findings.is_empty() {
+/// Render the unified analysis digest (Stage 2): every analysis report's findings
+/// deduped across tools, ranked (changed-file + high-risk-file first), and bucketed
+/// by `(tool, rule)` into one section — purely tool-derived. The by-rule tally keeps
+/// a high-volume lint visible even when its individual lines fall past the cap, so
+/// the tail is summarized rather than silently dropped.
+fn render_digest(out: &mut String, d: &agent_core::AnalysisDigest) {
+    if d.total == 0 {
         return;
     }
-    // Changed-file findings first (higher signal), stable within each group.
-    let mut ordered: Vec<&agent_core::AnalysisFinding> = report.findings.iter().collect();
-    ordered.sort_by_key(|f| !f.in_change);
-    out.push_str("Findings:\n");
-    for f in ordered.iter().take(MAX_RENDERED_FINDINGS) {
+    out.push_str(&format!(
+        "\nAnalysis digest — {} finding(s) ({} on changed files), deduped across tools, risk-ranked:\n",
+        d.total, d.in_change,
+    ));
+    // The bucketed rule tally, most-frequent first, before the verbatim list.
+    if !d.rule_counts.is_empty() {
+        let tally: Vec<String> = d
+            .rule_counts
+            .iter()
+            .take(MAX_DIGEST_RULES)
+            .map(|c| format!("{}/{} ×{}", c.tool, c.rule, c.count))
+            .collect();
+        out.push_str(&format!("  By rule: {}", tally.join(", ")));
+        if d.rule_counts.len() > MAX_DIGEST_RULES {
+            out.push_str(&format!(
+                ", +{} more rule(s)",
+                d.rule_counts.len() - MAX_DIGEST_RULES
+            ));
+        }
+        out.push('\n');
+    }
+    for f in d.findings.iter().take(MAX_RENDERED_FINDINGS) {
         let scope = if f.in_change { "" } else { " [pre-existing]" };
         out.push_str(&format!(
             "  {} {}/{} {}:{} — {}{}\n",
             f.severity, f.tool, f.rule, f.file, f.line, f.message, scope,
         ));
     }
-    if ordered.len() > MAX_RENDERED_FINDINGS {
+    // The list is capped twice (compute's cap, then the render cap); either way the
+    // by-rule tally above accounts for every finding, so nothing is invisible.
+    let rendered = d.findings.len().min(MAX_RENDERED_FINDINGS) as u32;
+    if d.total > rendered {
         out.push_str(&format!(
-            "  … and {} more finding(s) (omitted from the listing)\n",
-            ordered.len() - MAX_RENDERED_FINDINGS
+            "  … and {} more finding(s) (counted in the by-rule tally above)\n",
+            d.total - rendered
         ));
     }
 }
@@ -888,5 +930,53 @@ mod draft_tests {
         let sha = "0123456789abcdef0123456789abcdef01234567";
         let out = redact(&format!("reviewed at {sha}"));
         assert!(out.contains(sha), "commit SHA preserved: {out}");
+    }
+
+    #[test]
+    fn positive_renders_digest_section_and_rule_tally() {
+        // desc: a populated digest renders one unified section with the header, the
+        // by-rule tally, and the ranked findings. expect: all three present.
+        let mut f = facts();
+        f.digest = agent_core::AnalysisDigest {
+            findings: vec![agent_core::AnalysisFinding {
+                tool: "golangci-lint".into(),
+                rule: "errcheck".into(),
+                severity: "warning".into(),
+                file: "src/x.rs".into(),
+                line: 3,
+                message: "unchecked error".into(),
+                in_change: true,
+            }],
+            total: 5,
+            in_change: 4,
+            rule_counts: vec![agent_core::RuleCount {
+                tool: "golangci-lint".into(),
+                rule: "errcheck".into(),
+                count: 5,
+                in_change: 4,
+            }],
+        };
+        let md = render_facts(&f);
+        assert!(md.contains("Analysis digest"), "digest header present");
+        assert!(
+            md.contains("By rule: golangci-lint/errcheck ×5"),
+            "rule tally rendered: {md}"
+        );
+        assert!(md.contains("unchecked error"), "finding rendered");
+        assert!(
+            md.contains("and 4 more finding(s)"),
+            "capped tail counted (total 5 − 1 rendered): {md}"
+        );
+    }
+
+    #[test]
+    fn corner_empty_digest_renders_no_section() {
+        // desc: a default (empty) digest emits nothing — absence is not "0 findings".
+        let f = facts();
+        let md = render_facts(&f);
+        assert!(
+            !md.contains("Analysis digest"),
+            "no digest section when empty"
+        );
     }
 }

@@ -55,6 +55,7 @@ fn facts(files: Vec<ChangedFile>, commits: Vec<ReviewCommit>) -> ReviewFacts {
         nearby: Default::default(),
         salience: Default::default(),
         risk: Default::default(),
+        digest: Default::default(),
     }
 }
 

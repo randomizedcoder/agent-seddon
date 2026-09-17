@@ -5816,6 +5816,40 @@ pub struct RiskReport {
     pub gate_failed: bool,
 }
 
+/// One `(tool, rule)` tally in the [`AnalysisDigest`] — how many deduped findings a
+/// rule produced, and how many of them land on a changed file. The bucketed summary
+/// so a high-volume rule stays visible even when its individual findings fall past
+/// the digest's verbatim cap.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RuleCount {
+    pub tool: String,
+    pub rule: String,
+    pub count: u32,
+    /// How many of `count` are on files the change touched.
+    pub in_change: u32,
+}
+
+/// The deterministic analysis digest (review-analysis-depth Stage 2): a post-fan-out
+/// reduce over **every** [`AnalysisReport`] in the facts (the static analyzer + the
+/// C12 collectors) into ONE deduped, risk-ranked, rule-bucketed section. Purely
+/// tool-derived — no model. Empty when no analysis produced a finding.
+///
+/// Dedup is by `(tool, rule, file, line)` across reports; the ranking foregrounds
+/// findings on changed and high-risk files; `rule_counts` summarizes the whole set
+/// so the tail past the render cap is never silently invisible.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AnalysisDigest {
+    /// Deduped findings, ranked (changed-file + high-risk-file first). Bounded — the
+    /// list is capped at render time; `total` is the true count.
+    pub findings: Vec<AnalysisFinding>,
+    /// Total deduped findings (may exceed `findings.len()` after the cap).
+    pub total: u32,
+    /// How many of `total` are on files the change touched.
+    pub in_change: u32,
+    /// Per-`(tool, rule)` counts across all deduped findings, most-frequent first.
+    pub rule_counts: Vec<RuleCount>,
+}
+
 /// The grounded fact bundle a reviewer reasons over. Everything here is a hard
 /// fact from a tool — except `summaries`, the one soft (model-generated) field,
 /// which is clearly labelled and never overwrites a fact. Later increments add
@@ -5868,6 +5902,10 @@ pub struct ReviewFacts {
     /// of every other signal. Empty when nothing scored risk.
     #[serde(default)]
     pub risk: RiskReport,
+    /// Unified analysis digest (Stage 2) — every AnalysisReport's findings deduped,
+    /// risk-ranked, and rule-bucketed into one section. Empty when no finding exists.
+    #[serde(default)]
+    pub digest: AnalysisDigest,
 }
 
 /// A flattened, analytics-shaped record of one review run — the telemetry-local

@@ -293,6 +293,25 @@ message ReviewRiskReport {
   bool gate_failed = 4;
 }
 
+// One (tool, rule) tally in the analysis digest — the bucketed summary so a
+// high-volume rule stays visible past the verbatim finding cap.
+message ReviewRuleCount {
+  string tool = 1;
+  string rule = 2;
+  uint32 count = 3;
+  uint32 in_change = 4;
+}
+
+// The unified analysis digest (review-analysis-depth Stage 2): every
+// ReviewAnalysisReport's findings deduped, risk-ranked, and rule-bucketed into
+// one section. Tool-derived — no model.
+message ReviewAnalysisDigest {
+  repeated ReviewAnalysisFinding findings = 1;
+  uint32 total = 2;
+  uint32 in_change = 3;
+  repeated ReviewRuleCount rule_counts = 4;
+}
+
 message ReviewFacts {
   ReviewMeta meta = 1;
   ReviewChangeSet change = 2;
@@ -310,4 +329,6 @@ message ReviewFacts {
   ReviewAnalysisReport shellcheck = 13;
   ReviewAnalysisReport go_checks = 14;
   ReviewAnalysisReport nearby = 15;
+  // Unified analysis digest (Stage 2) — deduped/risk-ranked/bucketed findings.
+  ReviewAnalysisDigest digest = 16;
 }
