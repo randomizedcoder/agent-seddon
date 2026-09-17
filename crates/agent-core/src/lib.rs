@@ -1442,6 +1442,35 @@ pub trait Sandbox: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// Seam: ToolProvider (resolve an analysis-tool name → an invocable command)
+// ---------------------------------------------------------------------------
+//
+// The review analyzer shells out to external linters (golangci-lint, gosec, …).
+// This seam makes *how those tools are provisioned* swappable: `PathToolProvider`
+// trusts the process `PATH` (the nix-wrapped agent carries the review toolbox —
+// see nix/review-tools.nix), while a `nix run`-backed provider can supply any
+// nixpkgs tool on demand. The analyzer resolves each tool through this before
+// shelling out via the [`Sandbox`]. Tool *names* are fixed in-code (the model /
+// PR content never chooses one); a provider returns `None` when it cannot supply a
+// name, and the caller then skips that tool fail-soft.
+
+/// An invocable command resolved by a [`ToolProvider`]: the program to run plus any
+/// fixed leading args (e.g. `nix run nixpkgs#<tool> --`). Empty `prefix_args` ⇒ run
+/// `program` directly.
+#[derive(Debug, Clone)]
+pub struct ToolCommand {
+    pub program: String,
+    pub prefix_args: Vec<String>,
+}
+
+/// Resolves a logical analysis-tool name (`"golangci-lint"`, `"gosec"`, …) to an
+/// invocable [`ToolCommand`], or `None` when this provider cannot supply it.
+#[async_trait]
+pub trait ToolProvider: Send + Sync {
+    async fn resolve(&self, tool: &str) -> Option<ToolCommand>;
+}
+
+// ---------------------------------------------------------------------------
 // Seam: Embedder (text → vector, for semantic search + recall, parity spec 15)
 // ---------------------------------------------------------------------------
 //

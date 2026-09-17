@@ -352,6 +352,9 @@ pub(crate) struct WorktreeGrounder {
     pub(crate) forge: Option<Arc<dyn agent_core::Forge>>,
     pub(crate) sandbox: Option<Arc<dyn agent_core::Sandbox>>,
     pub(crate) pool: Option<Arc<dyn agent_core::LlmPool>>,
+    /// Static-analysis tool resolver (review-analysis-depth Inc 1), shared with the
+    /// process-global review path so the fleet analyzer resolves tools identically.
+    pub(crate) tool_provider: Option<Arc<dyn agent_core::ToolProvider>>,
     pub(crate) review: crate::config::ReviewCfg,
     pub(crate) metrics: Metrics,
     /// The byte budget handed to the fact renderer (same knob the in-loop review uses).
@@ -379,6 +382,7 @@ impl agent_core::ReviewGrounder for WorktreeGrounder {
                 self.forge.clone(),
                 self.sandbox.clone(),
                 self.pool.clone(),
+                self.tool_provider.clone(),
                 &self.review,
                 self.metrics.clone(),
             ));

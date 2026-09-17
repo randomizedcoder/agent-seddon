@@ -2,7 +2,9 @@
 
 Legend: ⬜ designed, not built · 🟡 partially built · ✅ built + merged.
 
-**Track state: ⬜ designed.** The design-of-record ([README.md](README.md)) was written 2026-09-17,
+**Track state: 🟡 building.** Inc 0 (design + this tracker, #387) and Inc 1a (nix `review-toolbox`
+provisioning, #388) are merged; Inc 1b (the `ToolProvider` seam) is in flight. The design-of-record
+([README.md](README.md)) was written 2026-09-17,
 building on the completed [fleet-grounding](../fleet-grounding/README.md) track (worktree-rooting #382,
 grounding telemetry #381, collector skip/fail `reason` #386). The goal: run a **consistent,
 comprehensive** static-analysis suite on every PR regardless of the target repo, **provision every
@@ -15,8 +17,9 @@ optional MI50 summary) into a compact, high-signal brief that reaches Kimi befor
 
 | Inc | What | PR | State |
 |----:|------|----|-------|
-| 0 | Design-of-record + this STATUS tracker | — | 🟡 in this PR |
-| 1 | nix provisioning (`nix/review-tools.nix` → `review-toolbox` wired into `agentRuntimePath`, `devShells.review`, `packages.review-toolbox`) + the `ToolProvider` seam (`PathToolProvider`, registered) + `[review] tool_provider`; analyzer resolves its two current tools through it (no behaviour change); `nix/checks/review-toolbox.nix` | — | ⬜ |
+| 0 | Design-of-record + this STATUS tracker | #387 | ✅ |
+| 1a | nix provisioning: `nix/review-tools.nix` → `review-toolbox` (`symlinkJoin` of go/golangci-lint/gosec from `versions.nix`) wired into `agentRuntimePath` + `packages.review-toolbox`; `nix/checks/review-toolbox.nix` asserts the suite is on the wrapped agent's PATH | #388 | ✅ |
+| 1b | The `ToolProvider` seam: `agent_core::{ToolProvider, ToolCommand}` trait + `PathToolProvider` (validates a plain tool name → bare-name command) registered as `"path"`; `[review] tool_provider` config (default `"path"`); analyzer resolves its two current tools through it (no behaviour change) | — | 🟡 in this PR |
 | 2 | The Go suite (comprehensive golangci config + `gosec` + `go vet` + `gofmt`) under a concurrency-budgeted `buffer_unordered` fan-out; `analyzer_config` override; **per-tool telemetry** — `ReviewRecord.runs` wire change + `agent_review_tools` table + `fleet-measure` ANALYZER section. Measure first. | — | ⬜ |
 | 3 | Deterministic Rust digest (Stage 2) — post-fan-out dedupe/rank-by-salience/bucket into a compact verbatim brief section | — | ⬜ |
 | 4 | MI50 local summary (Stage 3) — overflow-gated `LlmPool` summary, additive + bounded + fail-soft; lands only if net-positive | — | ⬜ |
@@ -31,5 +34,11 @@ parallel speedup, brief size, Kimi iters/at-cap) — the running proof the track
   config) + clippy only, serial; on runpod/host (no `.golangci.yml`) that means golangci's bare
   default linters — no `gosec`/`gocritic`/`revive`. Model loop avg 7.6 iters, 0 at-cap. `summaries`
   shows `skipped "no pool configured"` (no `[pool]` in the fleet toml — see Inc 4).
-- _Inc 1 … (to be recorded)_
+- **Inc 1a (#388):** `nix build .#agent` produces a wrapped binary whose PATH carries the
+  `review-toolbox` (go/gofmt/golangci-lint/gosec); `nix/checks/review-toolbox.nix` asserts it. One
+  `nix flake update nixpkgs` now floats every tool version reproducibly. No runtime behaviour change.
+- **Inc 1b (this PR):** `ToolProvider` seam threaded through the analyzer and both review paths
+  (process-global + per-row fleet factory). `PathToolProvider` (default `"path"`) resolves a validated
+  plain tool name to a bare-name command — identical to the prior behaviour, so no measurable change;
+  it is the plumbing Inc 2's suite runs on.
 - _Inc 2 … (to be recorded)_

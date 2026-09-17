@@ -1325,6 +1325,11 @@ pub struct ReviewCfg {
     pub backend: String,
     #[serde(default = "default_classifier")]
     pub classifier: String,
+    /// How the analyzer resolves its linters (review-analysis-depth). `"path"`
+    /// (default) trusts the process `PATH` — the nix-wrapped agent carries the review
+    /// toolbox (nix/review-tools.nix). A `nix run`-backed provider is a later increment.
+    #[serde(default = "default_tool_provider")]
+    pub tool_provider: String,
     #[serde(default = "default_review_deadline")]
     pub deadline_secs: u64,
     #[serde(default)]
@@ -1408,6 +1413,7 @@ impl Default for ReviewCfg {
         Self {
             backend: String::new(),
             classifier: default_classifier(),
+            tool_provider: default_tool_provider(),
             deadline_secs: default_review_deadline(),
             in_loop: false,
             context_budget_bytes: default_review_budget(),
@@ -1438,6 +1444,9 @@ fn default_go_checks_timeout() -> u64 {
 
 fn default_classifier() -> String {
     "hybrid".to_string()
+}
+fn default_tool_provider() -> String {
+    "path".to_string()
 }
 fn default_review_deadline() -> u64 {
     60
