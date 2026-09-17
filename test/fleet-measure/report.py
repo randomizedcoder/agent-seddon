@@ -96,6 +96,10 @@ def sections(f: Filters) -> list[tuple[str, str]]:
         "sum(prompt_tokens) AS in_tok, sum(completion_tokens) AS out_tok "
         f"FROM agent_usage{uw} GROUP BY session_id"
     )
+    # The non-ok reasons share the collector filters but add their own predicates, so
+    # fold them into the (possibly empty) usage WHERE instead of appending a 2nd WHERE.
+    not_ok = "status != 'ok' AND reason != ''"
+    reason_where = f"{uw} AND {not_ok}" if uw else f" WHERE {not_ok}"
     return [
         (
             "MODEL LOOP — aggregate (agent_usage; the dominant, sequential cost)",
@@ -120,6 +124,12 @@ def sections(f: Filters) -> list[tuple[str, str]]:
             "max(duration_ms) AS max_ms, sum(items) AS items "
             f"FROM agent_review_collectors{f.usage_where()} "
             "GROUP BY collector ORDER BY avg_ms DESC",
+        ),
+        (
+            "GROUNDING — skip/fail reasons (why a collector produced no fact)",
+            "SELECT collector, status, reason, count() AS n "
+            f"FROM agent_review_collectors{reason_where} "
+            "GROUP BY collector, status, reason ORDER BY n DESC LIMIT 20",
         ),
         (
             "END-TO-END — per review (agent_reviews; total vs summed work + critical path)",

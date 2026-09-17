@@ -351,14 +351,23 @@ pub struct ReviewCollectorRow {
     pub ts: DateTime64<3>,
     pub collector: String,
     pub status: String,
+    /// Why a collector was `skipped`/`failed`/`partial` (bounded, no raw content);
+    /// empty for `ok`. Model/git-derived error text is untrusted — capped here.
+    pub reason: String,
     pub duration_ms: u32,
     pub items: u32,
 }
 
+/// Persisted-reason cap. The collector `reason` is mostly a short static string, but
+/// a `partial`/`failed` reason can splice in git/model error text — untrusted, so we
+/// fail closed with a hard char cap at the persistence boundary regardless of upstream.
+const MAX_REASON: usize = 256;
+
 impl ReviewCollectorRow {
     /// One row per collector in a `kind = "review"` `MemoryEvent`. `items` reflects
     /// the well-known collectors' aggregate counts (0 otherwise — a per-collector
-    /// count isn't carried on `CollectorStatus`).
+    /// count isn't carried on `CollectorStatus`). `reason` carries the skip/fail
+    /// cause (bounded), empty when the collector is `ok`.
     pub fn rows_from_event(event: &MemoryEvent) -> Vec<Self> {
         let Some(r) = event.review.as_ref() else {
             return Vec::new();
@@ -379,6 +388,7 @@ impl ReviewCollectorRow {
                     ts,
                     collector: c.collector.clone(),
                     status: c.status.as_str().to_string(),
+                    reason: c.reason.chars().take(MAX_REASON).collect(),
                     duration_ms: c.duration_ms,
                     items,
                 }
@@ -635,9 +645,79 @@ mod tests {
         let analyzer = rows.iter().find(|r| r.collector == "analyzer").unwrap();
         assert_eq!(analyzer.status, "ok");
         assert_eq!(analyzer.items, 3); // well-known collector ⇒ its aggregate count
+        assert_eq!(analyzer.reason, "", "an ok collector carries no reason");
         let summaries = rows.iter().find(|r| r.collector == "summaries").unwrap();
         assert_eq!(summaries.status, "skipped");
         assert_eq!(summaries.items, 1);
+        assert_eq!(
+            summaries.reason, "no pool",
+            "the skip cause is persisted (F3)"
+        );
+    }
+
+    // --- F3: the per-collector skip/fail `reason` is persisted (bounded) ----------
+    /// A review whose sole collector carries `(status, reason)`.
+    fn review_one_collector(status: agent_core::CollectStatus, reason: &str) -> MemoryEvent {
+        let mut rec = sample_review();
+        rec.collectors = vec![agent_core::CollectorStatus {
+            collector: "style".into(),
+            status,
+            reason: reason.into(),
+            duration_ms: 5,
+        }];
+        review_event(rec)
+    }
+
+    #[rstest]
+    // positive: an ok collector persists an empty reason.
+    #[case::positive_ok_empty(agent_core::CollectStatus::Ok, String::new(), String::new())]
+    // negative: a skip persists its cause verbatim (short, static string).
+    #[case::negative_skip_reason(
+        agent_core::CollectStatus::Skipped,
+        "no readable source files".to_string(),
+        "no readable source files".to_string()
+    )]
+    // corner: a partial carries a spliced error tail (already short) through unchanged.
+    #[case::corner_partial_reason(
+        agent_core::CollectStatus::Partial,
+        "diff failed: fatal: bad object".to_string(),
+        "diff failed: fatal: bad object".to_string()
+    )]
+    // boundary: a failed reason exactly at the cap is kept whole (no truncation).
+    #[case::boundary_failed_at_cap(
+        agent_core::CollectStatus::Failed,
+        "a".repeat(MAX_REASON),
+        "a".repeat(MAX_REASON)
+    )]
+    fn review_collector_reason_persisted_by_status(
+        #[case] status: agent_core::CollectStatus,
+        #[case] reason: String,
+        #[case] expected: String,
+    ) {
+        let rows = ReviewCollectorRow::rows_from_event(&review_one_collector(status, &reason));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].reason, expected);
+    }
+
+    // adversarial: a hostile over-long reason (git/model error text is attacker-
+    // influenced) is hard-capped at MAX_REASON chars at the persistence boundary,
+    // and a multi-byte tail is truncated on a char boundary (no panic, no split byte).
+    #[rstest]
+    #[case::huge_ascii("a".repeat(1000))]
+    #[case::multibyte("é".repeat(1000))]
+    fn adversarial_review_collector_reason_capped(#[case] reason: String) {
+        let rows = ReviewCollectorRow::rows_from_event(&review_one_collector(
+            agent_core::CollectStatus::Failed,
+            &reason,
+        ));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].reason.chars().count(),
+            MAX_REASON,
+            "reason capped to MAX_REASON chars"
+        );
+        // The stored prefix is a faithful, boundary-safe prefix of the input.
+        assert!(reason.starts_with(&rows[0].reason));
     }
 
     #[test]
