@@ -16,12 +16,27 @@
 //! tally so a high-volume lint stays visible even when its individual lines fall past
 //! the render cap — the tail is summarized, never silently dropped.
 
-use agent_core::{AnalysisDigest, AnalysisFinding, ReviewFacts, RuleCount};
+use agent_core::{
+    AnalysisDigest, AnalysisFinding, CompletionRequest, LlmPool, Message, ReviewFacts, RouteHint,
+    RouteRole, RuleCount,
+};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
 
 /// The verbatim finding cap the digest keeps; the rest survive as `rule_counts`.
 pub(crate) const DIGEST_MAX_FINDINGS: usize = 80;
+
+/// Stage 3 (Inc 4) overflow gate: only findings-heavy PRs earn a cheap-LLM prose
+/// summary. Calibrated from the live sweep — a 55-finding PR overflowed the brief
+/// budget while a 29-finding one did not squeeze diffs, so ~40 is the knee.
+pub(crate) const DIGEST_SUMMARY_MIN_FINDINGS: u32 = 40;
+/// How many `(tool, rule)` buckets and ranked findings feed the summary prompt —
+/// bounded so a hostile finding flood can't blow the local model's context.
+const SUMMARY_PROMPT_RULES: usize = 20;
+const SUMMARY_PROMPT_FINDINGS: usize = 40;
+/// Cap on the model's prose (untrusted output), like `summaries`' `MAX_SUMMARY`.
+const MAX_DIGEST_SUMMARY: usize = 600;
 
 /// Rank of a severity for ordering — `error` before `warning` before anything else.
 /// Untrusted linter text, so an unknown severity sorts last rather than panicking.
@@ -123,6 +138,80 @@ pub(crate) fn compute(facts: &ReviewFacts) -> AnalysisDigest {
         in_change,
         rule_counts,
     }
+}
+
+/// The Stage 3 overflow gate: is this digest big enough to earn a cheap-LLM prose
+/// summary? Small digests render fine verbatim; only findings-heavy PRs (which the
+/// live sweep showed overflow the brief budget) benefit from a themed synthesis.
+pub(crate) fn should_summarize(d: &AnalysisDigest) -> bool {
+    d.total >= DIGEST_SUMMARY_MIN_FINDINGS
+}
+
+/// Stage 3: a cheap **local**-LLM prose synthesis of the digest — the one soft
+/// analysis field. Fail-soft in every arm: no healthy member, a dead job, or an
+/// empty reply yields `""` (the verbatim digest still stands), never a blocked
+/// review. The prompt is the *already-compact* digest (rule tally + top ranked
+/// findings, both bounded) — never raw diffs — so it is cheap and can't be flooded.
+/// Output is bounded like any untrusted model text.
+pub(crate) async fn summarize(pool: Arc<dyn LlmPool>, d: &AnalysisDigest) -> String {
+    // Don't spend a request on a dead pool.
+    if !pool.health().await.members.iter().any(|m| m.alive) {
+        return String::new();
+    }
+    let prompt = summary_prompt(d);
+    let req = CompletionRequest {
+        messages: vec![
+            Message::system(
+                "You summarize static-analysis findings for a code reviewer. Given a deduped, \
+                 risk-ranked list of linter findings (already grouped by rule), reply with 2-4 \
+                 short factual sentences: the dominant themes, where they cluster, and how many \
+                 land on the changed files vs are pre-existing. No preamble, no markdown, no \
+                 advice on how to fix, no code.",
+            ),
+            Message::user(prompt),
+        ],
+        max_tokens: 400,
+        temperature: 0.0,
+        // Route to a Review-fit member (the local MI50); a plain member ignores it.
+        route: Some(RouteHint {
+            role: Some(RouteRole::Review),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let Ok(resp) = pool.complete(req).await else {
+        return String::new();
+    };
+    crate::util::bound(resp.message.content_text().trim(), MAX_DIGEST_SUMMARY)
+}
+
+/// Build the bounded summary prompt from the digest: the `(tool, rule)` tally plus
+/// the top ranked findings (both truncated), so the local model sees the shape of
+/// the whole set without the raw diff.
+fn summary_prompt(d: &AnalysisDigest) -> String {
+    let mut p = format!(
+        "{} static-analysis finding(s), {} on changed files.\n\nBy rule (most frequent first):\n",
+        d.total, d.in_change
+    );
+    for c in d.rule_counts.iter().take(SUMMARY_PROMPT_RULES) {
+        p.push_str(&format!(
+            "  {}/{}: {} ({} on changed files)\n",
+            c.tool, c.rule, c.count, c.in_change
+        ));
+    }
+    p.push_str("\nTop findings (changed-file / high-risk first):\n");
+    for f in d.findings.iter().take(SUMMARY_PROMPT_FINDINGS) {
+        let scope = if f.in_change {
+            "changed"
+        } else {
+            "pre-existing"
+        };
+        p.push_str(&format!(
+            "  [{}] {}/{} {}:{} ({})\n",
+            f.severity, f.tool, f.rule, f.file, f.line, scope
+        ));
+    }
+    p
 }
 
 #[cfg(test)]
@@ -373,5 +462,131 @@ mod tests {
             "known high-risk file ranks first"
         );
         assert_eq!(d.total, 2);
+    }
+
+    // --- Stage 3 (Inc 4): the overflow gate + the cheap-LLM summary --------------
+
+    /// A pool double: `alive` toggles health; `reply` is the canned completion text.
+    struct FakePool {
+        alive: bool,
+        reply: String,
+    }
+
+    #[async_trait::async_trait]
+    impl agent_core::LlmPool for FakePool {
+        fn name(&self) -> &str {
+            "fake"
+        }
+        async fn health(&self) -> agent_core::HealthReport {
+            agent_core::HealthReport {
+                members: vec![agent_core::PoolMemberHealth {
+                    name: "m".into(),
+                    tier: agent_core::PoolTier::Medium,
+                    alive: self.alive,
+                    consecutive_failures: 0,
+                    last_probe_ms: 1,
+                    in_flight: 0,
+                    weight: 1.0,
+                    max_concurrency: 0,
+                    saturated: false,
+                    state: agent_core::PoolMemberState::Healthy,
+                    latency_ms_ewma: 0,
+                }],
+            }
+        }
+        async fn complete_all(
+            &self,
+            _req: CompletionRequest,
+            _tier: agent_core::PoolTier,
+            _fanout: usize,
+        ) -> Vec<agent_core::PoolMemberResult> {
+            vec![]
+        }
+        async fn complete(
+            &self,
+            _req: CompletionRequest,
+        ) -> agent_core::Result<agent_core::CompletionResponse> {
+            Ok(agent_core::CompletionResponse {
+                message: Message::assistant(&self.reply),
+                finish_reason: "stop".into(),
+                usage: None,
+            })
+        }
+    }
+
+    fn digest_of(total: u32) -> AnalysisDigest {
+        AnalysisDigest {
+            findings: (0..total.min(3))
+                .map(|i| finding("gosec", "G204", "medium", "a.go", i, true))
+                .collect(),
+            total,
+            in_change: total,
+            rule_counts: vec![RuleCount {
+                tool: "gosec".into(),
+                rule: "G204".into(),
+                count: total,
+                in_change: total,
+            }],
+        }
+    }
+
+    #[rstest]
+    // desc: below the threshold → no summary earned. expect: false.
+    #[case::below(DIGEST_SUMMARY_MIN_FINDINGS - 1, false)]
+    // desc: exactly the threshold → earned. expect: true.
+    #[case::at(DIGEST_SUMMARY_MIN_FINDINGS, true)]
+    // desc: above the threshold → earned. expect: true.
+    #[case::above(DIGEST_SUMMARY_MIN_FINDINGS + 20, true)]
+    fn boundary_should_summarize_gate(#[case] total: u32, #[case] expected: bool) {
+        assert_eq!(should_summarize(&digest_of(total)), expected);
+    }
+
+    #[tokio::test]
+    async fn positive_summarize_returns_prose_from_a_healthy_pool() {
+        // desc: a healthy pool's reply becomes the (trimmed) summary. expect: prose.
+        let pool = Arc::new(FakePool {
+            alive: true,
+            reply: "  Findings cluster on subprocess exec.  ".into(),
+        });
+        let s = summarize(pool, &digest_of(50)).await;
+        assert_eq!(s, "Findings cluster on subprocess exec.", "trimmed prose");
+    }
+
+    #[tokio::test]
+    async fn corner_summarize_dead_pool_is_empty() {
+        // desc: no healthy member → fail-soft to "" (the verbatim digest still stands).
+        let pool = Arc::new(FakePool {
+            alive: false,
+            reply: "should never be used".into(),
+        });
+        assert!(summarize(pool, &digest_of(50)).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn corner_summarize_empty_reply_is_empty() {
+        // desc: a healthy pool that returns nothing → "" (no phantom summary line).
+        let pool = Arc::new(FakePool {
+            alive: true,
+            reply: "   ".into(),
+        });
+        assert!(summarize(pool, &digest_of(50)).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn adversarial_summarize_caps_a_huge_reply() {
+        // desc: a hostile/runaway model reply must be bounded like any untrusted text.
+        let pool = Arc::new(FakePool {
+            alive: true,
+            reply: "x".repeat(MAX_DIGEST_SUMMARY * 4),
+        });
+        let s = summarize(pool, &digest_of(50)).await;
+        // `bound` caps at MAX_DIGEST_SUMMARY chars + a short truncation marker — the
+        // point is it's bounded near the cap, not the 4×-cap hostile input.
+        assert!(
+            s.chars().count() <= MAX_DIGEST_SUMMARY + 16,
+            "bounded near the cap, got {}",
+            s.chars().count()
+        );
+        assert!(s.contains("[truncated]"), "truncation is honest");
     }
 }

@@ -4059,6 +4059,7 @@ impl From<agent_core::ReviewFacts> for pb::ReviewFacts {
             go_checks: Some(f.go_checks.into()),
             nearby: Some(f.nearby.into()),
             digest: Some(f.digest.into()),
+            digest_summary: f.digest_summary,
         }
     }
 }
@@ -4081,6 +4082,7 @@ impl From<pb::ReviewFacts> for agent_core::ReviewFacts {
             go_checks: f.go_checks.map(Into::into).unwrap_or_default(),
             nearby: f.nearby.map(Into::into).unwrap_or_default(),
             digest: f.digest.map(Into::into).unwrap_or_default(),
+            digest_summary: f.digest_summary,
         }
     }
 }

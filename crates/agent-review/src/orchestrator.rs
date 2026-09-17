@@ -114,6 +114,9 @@ pub struct ReviewOrchestrator {
     analyze_timeout_secs: u64,
     /// Risk level a `--gate` run fails at (`0` disables the gate verdict).
     gate_threshold: f64,
+    /// Cheap local pool for the Stage 3 digest summary (Inc 4). `None` ⇒ the digest
+    /// renders verbatim only (no soft prose). Fail-soft when the pool is unhealthy.
+    digest_pool: Option<Arc<dyn LlmPool>>,
 }
 
 struct Resolved {
@@ -143,7 +146,18 @@ impl ReviewOrchestrator {
             sandbox: None,
             analyze_timeout_secs: 45,
             gate_threshold: 0.7,
+            digest_pool: None,
         }
+    }
+
+    /// Enable the Stage 3 digest summary (Inc 4): a cheap local-LLM prose synthesis
+    /// of the analysis digest, generated only when the overflow gate fires (a
+    /// findings-heavy PR). Fail-soft — no pool / no healthy member ⇒ no summary, the
+    /// verbatim digest still stands. Reuse the same pool as the summaries collector.
+    #[must_use]
+    pub fn with_digest_summary(mut self, pool: Option<Arc<dyn LlmPool>>) -> Self {
+        self.digest_pool = pool;
+        self
     }
 
     /// Set the risk level a `--gate` run fails at (default `0.7`; `0` disables it).
@@ -539,6 +553,14 @@ impl ReviewCollector for ReviewOrchestrator {
         // risk-ranked, rule-bucketed section. Runs last — it reads the assembled
         // findings AND the risk scores computed just above. Purely tool-derived.
         facts.digest = crate::digest::compute(&facts);
+
+        // Stage 3 (Inc 4): on a findings-heavy PR, add a cheap local-LLM prose
+        // summary of the digest — the one soft analysis field, gated + fail-soft.
+        if let Some(pool) = &self.digest_pool {
+            if crate::digest::should_summarize(&facts.digest) {
+                facts.digest_summary = crate::digest::summarize(pool.clone(), &facts.digest).await;
+            }
+        }
 
         let total_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
         facts.meta.total_ms = total_ms;

@@ -85,6 +85,9 @@ pub(crate) fn build_review_orchestrator(
     if review.summaries {
         orch = orch.with_summaries(pool.clone());
     }
+    // Stage 3 digest summary (Inc 4) — cheap local prose over the analysis digest,
+    // gated to findings-heavy PRs; fail-soft without a pool. Reuses the same pool.
+    orch = orch.with_digest_summary(pool.clone());
     // Historical co-change / churn — pure git-history mining.
     if review.cochange {
         orch = orch.with_cochange(review.cochange_window);

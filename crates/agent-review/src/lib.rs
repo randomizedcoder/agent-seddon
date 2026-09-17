@@ -305,6 +305,19 @@ pub fn render_facts_with(facts: &ReviewFacts, budget_bytes: usize) -> String {
     // above, which now carry only status/timing (the digest owns the findings).
     render_digest(&mut out, &facts.digest);
 
+    // Stage 3 (Inc 4) — the cheap local-LLM prose summary of the digest, SOFT and
+    // clearly labelled, only present on findings-heavy PRs where the gate fired.
+    if !facts.digest_summary.is_empty() {
+        out.push_str(
+            "\nAnalysis summary (cheap-LLM, SOFT — over the tool findings, not the code):\n",
+        );
+        for line in facts.digest_summary.lines() {
+            out.push_str("  ");
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+
     // House-style fingerprint — so the review respects the repo's conventions.
     render_style(&mut out, &facts.style);
 
@@ -977,6 +990,32 @@ mod draft_tests {
         assert!(
             !md.contains("Analysis digest"),
             "no digest section when empty"
+        );
+    }
+
+    #[test]
+    fn positive_renders_soft_digest_summary_labeled() {
+        // desc: a non-empty digest_summary renders as a clearly-labelled SOFT section.
+        let mut f = facts();
+        f.digest_summary = "Findings cluster on subprocess exec in pkg/docker.".into();
+        let md = render_facts(&f);
+        assert!(
+            md.contains("Analysis summary (cheap-LLM, SOFT"),
+            "soft label present: {md}"
+        );
+        assert!(
+            md.contains("cluster on subprocess exec"),
+            "summary rendered"
+        );
+    }
+
+    #[test]
+    fn corner_empty_digest_summary_renders_no_section() {
+        // desc: the default empty summary emits nothing (no phantom SOFT header).
+        let md = render_facts(&facts());
+        assert!(
+            !md.contains("Analysis summary (cheap-LLM"),
+            "no soft summary section when empty"
         );
     }
 }

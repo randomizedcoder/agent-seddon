@@ -329,6 +329,7 @@ impl ReviewCollector for FakeReview {
                     in_change: 1,
                 }],
             },
+            digest_summary: "Mostly unchecked errors in the changed file.".into(),
         })
     }
 }
@@ -452,6 +453,10 @@ async fn review_collect_roundtrips(#[case] transport: Transport) {
     assert_eq!(facts.digest.findings[0].rule, "errcheck");
     assert_eq!(facts.digest.rule_counts.len(), 1);
     assert_eq!(facts.digest.rule_counts[0].count, 1);
+    assert_eq!(
+        facts.digest_summary,
+        "Mostly unchecked errors in the changed file."
+    );
 }
 
 /// A PR target survives the encode/decode round-trip through the wire string.

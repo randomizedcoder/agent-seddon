@@ -499,6 +499,11 @@ cooldown_secs     = 30
 # active liveness probe + circuit breaker route around a target that is offline; the
 # selection policy routes around one that is busy. Empty ⇒ no pool.
 [pool]
+# The pool also powers the review's cheap-LLM work: the per-function `summaries`
+# collector and — on findings-heavy PRs — the Stage 3 **analysis-digest summary**
+# (review-analysis-depth Inc 4). Both route with `RouteRole::Review`, so a local
+# `mi50` member (see the blocks below) absorbs that load off the remote review model;
+# with no pool, both degrade fail-soft (skipped / no summary), never blocking a review.
 # `policy` orders the healthy, capable members before dispatch:
 #   cost (default, cheapest-first) | least-loaded (fewest in-flight — best for a
 #   heterogeneous GPU pool) | round-robin | weighted (by per-member `weight`).

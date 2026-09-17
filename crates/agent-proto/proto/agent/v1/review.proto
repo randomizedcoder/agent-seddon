@@ -331,4 +331,6 @@ message ReviewFacts {
   ReviewAnalysisReport nearby = 15;
   // Unified analysis digest (Stage 2) — deduped/risk-ranked/bucketed findings.
   ReviewAnalysisDigest digest = 16;
+  // Cheap local-LLM prose summary of the digest (Stage 3) — SOFT, may be empty.
+  string digest_summary = 17;
 }
