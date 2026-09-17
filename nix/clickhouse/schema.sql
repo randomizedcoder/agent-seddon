@@ -138,6 +138,7 @@ CREATE TABLE IF NOT EXISTS agent.agent_review_collectors
     ts          DateTime64(3, 'UTC'),
     collector   String,
     status      String,                         -- ok | partial | skipped | failed
+    reason      String,                         -- bounded skip/fail cause (no raw content); '' when ok
     duration_ms UInt32,
     items       UInt32                          -- findings / nodes / summaries (well-known collectors)
 )
