@@ -22,7 +22,7 @@ optional MI50 summary) into a compact, high-signal brief that reaches Kimi befor
 | 1a | nix provisioning: `nix/review-tools.nix` → `review-toolbox` (`symlinkJoin` of go/golangci-lint/gosec from `versions.nix`) wired into `agentRuntimePath` + `packages.review-toolbox`; `nix/checks/review-toolbox.nix` asserts the suite is on the wrapped agent's PATH | #388 | ✅ |
 | 1b | The `ToolProvider` seam: `agent_core::{ToolProvider, ToolCommand}` trait + `PathToolProvider` (validates a plain tool name → bare-name command) registered as `"path"`; `[review] tool_provider` config (default `"path"`); analyzer resolves its two current tools through it (no behaviour change) | #389 | ✅ |
 | 2 | The Go suite — add `gosec` + `go vet` + `gofmt` alongside `golangci-lint`; **parallel fan-out** via `buffer_unordered(analyze_parallelism)` with per-tool `GOMAXPROCS = cpus/parallelism`; union-dedupe findings; `run_tool` returns `(run, findings)`; new JSON/text parsers each with adversarial path-escape tests | — | 🟡 in this PR |
-| 2-tel | **per-tool telemetry** (split from Inc 2): `ReviewRecord.runs` serde side-channel + `agent_review_tools` CH table (5-spot pipeline) + `fleet-measure` ANALYZER section, so the live sweep is measurable | — | ⬜ |
+| 2-tel | **per-tool telemetry** (split from Inc 2): `ReviewRecord.runs` serde side-channel (populated from `analysis.runs`) + `agent_review_tools` CH table (schema + `ReviewToolRow` + writer `Msg`/buffer/4-flush + telemetry dispatch) + `fleet-measure` ANALYZER section, so the live sweep is measurable | — | 🟡 in this PR |
 | 2-golangci | comprehensive golangci config (`--config` a pinned curated set) + `[review] analyzer_config` repo override — deferred from Inc 2 (golangci v2 config schema is version-fragile; author + test against the pinned version) | — | ⬜ |
 | 3 | Deterministic Rust digest (Stage 2) — post-fan-out dedupe/rank-by-salience/bucket into a compact verbatim brief section | — | ⬜ |
 | 4 | MI50 local summary (Stage 3) — overflow-gated `LlmPool` summary, additive + bounded + fail-soft; lands only if net-positive | — | ⬜ |
@@ -51,4 +51,8 @@ parallel speedup, brief size, Kimi iters/at-cap) — the running proof the track
   `GOMAXPROCS` capped to `cpus / parallelism`, so the collector's wall-clock is the slowest single
   tool, not the serial sum. Findings are union-deduped by `(file, line, rule)`. **Live sweep numbers
   pending** the per-tool telemetry (Inc 2-tel) + a runpod/host run on l2.
-- _Inc 2-tel … (to be recorded)_
+- **Inc 2-tel (this PR):** per-tool outcomes now persist to `agent_review_tools` (tool, status,
+  bounded reason, duration_ms, finding_count) via `ReviewRecord.runs`, and `fleet-measure` gained an
+  ANALYZER section (per-tool timing + findings, and tool skip/fail reasons). This makes the Inc 2
+  suite measurable — **live runpod/host sweep numbers pending** a run on l2 (needs the fleet + creds).
+- _Inc 3 … (to be recorded)_

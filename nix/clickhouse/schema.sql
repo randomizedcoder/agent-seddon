@@ -145,6 +145,24 @@ CREATE TABLE IF NOT EXISTS agent.agent_review_collectors
 ENGINE = MergeTree
 ORDER BY (session_id, ts, collector);
 
+-- One row per static-analysis tool per review (review-analysis-depth Inc 2-tel):
+-- the drill-down UNDER the `analyzer` collector — golangci-lint / gosec / go vet /
+-- gofmt / clippy — so a sweep shows each tool's cost, outcome, and finding count
+-- (and, with agent_review_collectors.duration_ms, the fan-out's parallel speedup).
+CREATE TABLE IF NOT EXISTS agent.agent_review_tools
+(
+    session_id    String,
+    user          String,                         -- verified SessionKey.user (tenant); '' outside a scope
+    ts            DateTime64(3, 'UTC'),
+    tool          String,                         -- golangci-lint | gosec | govet | gofmt | clippy
+    status        String,                         -- ok | skipped | failed | timeout
+    reason        String,                         -- bounded skip/fail cause (no raw content); '' when ok
+    duration_ms   UInt32,
+    finding_count UInt32
+)
+ENGINE = MergeTree
+ORDER BY (session_id, ts, tool);
+
 -- The fleet's operational review-draft record (review-fleet C14). Unlike the
 -- anonymized agent_reviews, this names the real repo/pr_number (fleet config, not
 -- model-derived): it is the human-approval + dedup record. Joins back to
