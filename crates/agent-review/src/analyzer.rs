@@ -2,9 +2,11 @@
 //! changed packages and folds **findings** into `ReviewFacts`. Deterministic
 //! correctness/security signal a reviewer would otherwise run by hand.
 //!
-//! The Go suite (review-analysis-depth Inc 2) runs `golangci-lint` (aggregate),
-//! `gosec` (security — not in golangci's default set), `go vet` (toolchain checks),
-//! and `gofmt` (formatting drift on the changed files); Rust runs `cargo clippy`.
+//! The Go suite (review-analysis-depth Inc 2) runs `golangci-lint` (aggregate, with
+//! a baked-in comprehensive config so every repo gets the same curated linters —
+//! Inc 2-golangci), `gosec` (security — not in golangci's default set), `go vet`
+//! (toolchain checks), and `gofmt` (formatting drift on the changed files); Rust
+//! runs `cargo clippy`.
 //! The tools **fan out concurrently** under a parallelism budget (each Go tool's
 //! `GOMAXPROCS` capped to `cpus / parallelism`), and their findings are union-deduped.
 //!
@@ -25,10 +27,53 @@ use std::time::Instant;
 const MAX_FINDINGS: usize = 200;
 const MAX_MSG: usize = 400;
 
+/// The comprehensive golangci-lint config, baked into the binary so every reviewed
+/// Go repo gets the same curated suite regardless of what it ships (Inc 2-golangci).
+const GOLANGCI_COMPREHENSIVE: &str = include_str!("golangci-comprehensive.yml");
+
+/// Materialize [`GOLANGCI_COMPREHENSIVE`] to a stable temp file (once per process)
+/// and return its path, so it can be passed to `golangci-lint --config`. The name is
+/// content-addressed (a config edit lands in a fresh file) and the write is atomic
+/// (temp + rename). Returns `None` if the temp file can't be written — the caller
+/// then omits `--config`, so a filesystem hiccup degrades to golangci's own defaults
+/// rather than failing the run.
+fn embedded_golangci_config() -> Option<PathBuf> {
+    use std::hash::{Hash, Hasher};
+    use std::sync::OnceLock;
+    static PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+    PATH.get_or_init(|| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        GOLANGCI_COMPREHENSIVE.hash(&mut h);
+        let tag = h.finish();
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("agent-seddon-golangci-{tag:016x}.yml"));
+        if path.exists() {
+            return Some(path);
+        }
+        let tmp = dir.join(format!(
+            "agent-seddon-golangci-{tag:016x}.{}.tmp",
+            std::process::id()
+        ));
+        if std::fs::write(&tmp, GOLANGCI_COMPREHENSIVE).is_err() {
+            return None;
+        }
+        // Atomic publish; if another process won the race, use the existing file.
+        if std::fs::rename(&tmp, &path).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            return path.exists().then_some(path);
+        }
+        Some(path)
+    })
+    .clone()
+}
+
 pub(crate) struct AnalyzerCollector {
     pub timeout_secs: u64,
     /// How many tools run concurrently (review-analysis-depth Inc 2). Clamped ≥ 1.
     pub parallelism: usize,
+    /// golangci-lint config path (review-analysis-depth Inc 2-golangci). Empty ⇒ the
+    /// embedded comprehensive config baked into the binary; a path ⇒ that config.
+    pub golangci_config: String,
     /// Resolves each linter's program (review-analysis-depth Inc 1). `None` ⇒ the bare
     /// tool name on `PATH` (the prior behaviour). A provider that cannot supply a tool
     /// (returns `None`) makes that linter a fail-soft `skipped` run.
@@ -99,7 +144,10 @@ impl FactCollector for AnalyzerCollector {
                 .map(|p| shell_quote(&p.to_string_lossy()))
                 .collect();
 
-            // golangci-lint — the aggregate Go linter (JSON on stdout).
+            // golangci-lint — the aggregate Go linter (JSON on stdout). `--config`
+            // pins the same comprehensive suite on every repo (Inc 2-golangci); an
+            // empty/unavailable config falls back to golangci's own resolution.
+            let config_arg = self.golangci_config_arg();
             self.plan_go_tool(
                 &mut runs,
                 &mut tasks,
@@ -107,7 +155,7 @@ impl FactCollector for AnalyzerCollector {
                 "golangci-lint",
                 &go_env,
                 &format!(
-                    "run --output.json.path stdout --timeout {}s {dir_args}",
+                    "run {config_arg}--output.json.path stdout --timeout {}s {dir_args}",
                     self.timeout_secs
                 ),
                 parse_golangci,
@@ -242,6 +290,21 @@ impl FactCollector for AnalyzerCollector {
 }
 
 impl AnalyzerCollector {
+    /// The `--config <path> ` fragment (trailing space) for golangci-lint, or `""`.
+    /// A configured path wins; otherwise the embedded comprehensive config is
+    /// materialized to a temp file. If neither is available, returns `""` so
+    /// golangci falls back to its own config resolution (never a hard failure).
+    fn golangci_config_arg(&self) -> String {
+        let path = match self.golangci_config.trim() {
+            "" => embedded_golangci_config(),
+            custom => Some(PathBuf::from(custom)),
+        };
+        match path {
+            Some(p) => format!("--config {} ", shell_quote(&p.to_string_lossy())),
+            None => String::new(),
+        }
+    }
+
     /// Resolve a Go tool's program and, if available, push a ready `ToolTask`; if the
     /// provider cannot supply it, record a fail-soft `skipped` run instead. `env` is a
     /// ready-to-splice prefix (e.g. `"GOMAXPROCS=6 "`); `args` follows the program.
@@ -793,6 +856,48 @@ mod tests {
     fn corner_garbage_json_yields_no_findings() {
         assert!(parse_golangci("not json", &root(), &changed()).is_empty());
         assert!(parse_clippy("not\njson\n", &root(), &changed()).is_empty());
+    }
+
+    // --- golangci config selection (Inc 2-golangci) ---------------------------
+
+    fn collector(golangci_config: &str) -> AnalyzerCollector {
+        AnalyzerCollector {
+            timeout_secs: 30,
+            parallelism: 4,
+            golangci_config: golangci_config.to_string(),
+            tool_provider: None,
+        }
+    }
+
+    #[test]
+    fn positive_golangci_config_arg_uses_embedded_when_unset() {
+        let arg = collector("").golangci_config_arg();
+        assert!(
+            arg.starts_with("--config ") && arg.ends_with(".yml' "),
+            "empty config ⇒ embedded temp file: {arg:?}"
+        );
+        // The embedded config materialized to a real, readable file.
+        let path = arg
+            .trim_start_matches("--config ")
+            .trim()
+            .trim_matches('\'');
+        let body = std::fs::read_to_string(path).expect("embedded config readable");
+        assert!(body.contains("version: \"2\""), "materialized v2 config");
+    }
+
+    #[test]
+    fn positive_golangci_config_arg_honours_custom_path() {
+        let arg = collector("/etc/my.golangci.yml").golangci_config_arg();
+        assert_eq!(arg, "--config '/etc/my.golangci.yml' ");
+    }
+
+    #[test]
+    fn adversarial_golangci_config_path_is_shell_quoted() {
+        let arg = collector("$(rm -rf /).yml").golangci_config_arg();
+        assert_eq!(
+            arg, "--config '$(rm -rf /).yml' ",
+            "a hostile config path is neutralized by quoting"
+        );
     }
 
     // --- gosec (Inc 2) --------------------------------------------------------

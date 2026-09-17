@@ -167,11 +167,13 @@ impl ReviewOrchestrator {
     /// [`Sandbox`] to shell out to the linters; without one it is a no-op. The
     /// `tool_provider` resolves each linter's program (review-analysis-depth Inc 1);
     /// `None` ⇒ resolve to the bare name on `PATH` (the prior behaviour).
+    #[allow(clippy::too_many_arguments)]
     pub fn with_analyzer(
         mut self,
         sandbox: Option<Arc<dyn Sandbox>>,
         timeout_secs: u64,
         parallelism: usize,
+        golangci_config: String,
         tool_provider: Option<Arc<dyn agent_core::ToolProvider>>,
     ) -> Self {
         self.sandbox = sandbox;
@@ -179,6 +181,7 @@ impl ReviewOrchestrator {
         self.collectors.push(Box::new(AnalyzerCollector {
             timeout_secs: self.analyze_timeout_secs,
             parallelism: parallelism.max(1),
+            golangci_config,
             tool_provider,
         }));
         self

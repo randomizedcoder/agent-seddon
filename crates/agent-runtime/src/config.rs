@@ -1351,6 +1351,13 @@ pub struct ReviewCfg {
     /// oversubscribe the box. Clamped ≥ 1.
     #[serde(default = "default_analyze_parallelism")]
     pub analyze_parallelism: usize,
+    /// Path to a golangci-lint config to pass via `--config` (review-analysis-depth
+    /// Inc 2-golangci). **Empty (the default) uses the embedded comprehensive config**
+    /// baked into the binary, so every reviewed Go repo gets the same curated suite
+    /// regardless of whether it ships its own `.golangci.yml`. Set it to a path to
+    /// override with a repo/operator config instead.
+    #[serde(default)]
+    pub analyzer_config: String,
     /// Run the signature-diff collector (changed function signatures). On by default
     /// — pure in-process (blob reads + a regex scan), deadline-bounded.
     #[serde(default = "default_true")]
@@ -1426,6 +1433,7 @@ impl Default for ReviewCfg {
             analyze: true,
             analyze_timeout_secs: default_analyze_timeout(),
             analyze_parallelism: default_analyze_parallelism(),
+            analyzer_config: String::new(),
             signatures: true,
             callgraph: true,
             callgraph_timeout_secs: default_callgraph_timeout(),
