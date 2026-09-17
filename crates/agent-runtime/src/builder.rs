@@ -65,6 +65,7 @@ pub(crate) fn build_review_orchestrator(
             sandbox.clone(),
             review.analyze_timeout_secs,
             review.analyze_parallelism,
+            review.analyzer_config.clone(),
             tool_provider.clone(),
         );
     }

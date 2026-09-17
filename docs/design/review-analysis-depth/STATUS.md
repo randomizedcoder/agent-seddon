@@ -23,7 +23,7 @@ optional MI50 summary) into a compact, high-signal brief that reaches Kimi befor
 | 1b | The `ToolProvider` seam: `agent_core::{ToolProvider, ToolCommand}` trait + `PathToolProvider` (validates a plain tool name → bare-name command) registered as `"path"`; `[review] tool_provider` config (default `"path"`); analyzer resolves its two current tools through it (no behaviour change) | #389 | ✅ |
 | 2 | The Go suite — add `gosec` + `go vet` + `gofmt` alongside `golangci-lint`; **parallel fan-out** via `buffer_unordered(analyze_parallelism)` with per-tool `GOMAXPROCS = cpus/parallelism`; union-dedupe findings; `run_tool` returns `(run, findings)`; new JSON/text parsers each with adversarial path-escape tests | — | 🟡 in this PR |
 | 2-tel | **per-tool telemetry** (split from Inc 2): `ReviewRecord.runs` serde side-channel (populated from `analysis.runs`) + `agent_review_tools` CH table (schema + `ReviewToolRow` + writer `Msg`/buffer/4-flush + telemetry dispatch) + `fleet-measure` ANALYZER section, so the live sweep is measurable | — | 🟡 in this PR |
-| 2-golangci | comprehensive golangci config (`--config` a pinned curated set) + `[review] analyzer_config` repo override — deferred from Inc 2 (golangci v2 config schema is version-fragile; author + test against the pinned version) | — | ⬜ |
+| 2-golangci | comprehensive golangci config baked into the binary (`include_str!` → `--config`), so every reviewed Go repo gets the same curated linter set; `[review] analyzer_config` path override; config `govet`/`gosec`-free (run standalone); verified vs golangci-lint 2.12.2 | — | 🟡 in this PR |
 | 3 | Deterministic Rust digest (Stage 2) — post-fan-out dedupe/rank-by-salience/bucket into a compact verbatim brief section | — | ⬜ |
 | 4 | MI50 local summary (Stage 3) — overflow-gated `LlmPool` summary, additive + bounded + fail-soft; lands only if net-positive | — | ⬜ |
 | 5 | `NixRunToolProvider` (allowlisted `nix run` escape hatch) + Rust/coverage parity (cargo-audit/cargo-deny, go coverage) | — | ⬜ |
@@ -55,4 +55,10 @@ parallel speedup, brief size, Kimi iters/at-cap) — the running proof the track
   bounded reason, duration_ms, finding_count) via `ReviewRecord.runs`, and `fleet-measure` gained an
   ANALYZER section (per-tool timing + findings, and tool skip/fail reasons). This makes the Inc 2
   suite measurable — **live runpod/host sweep numbers pending** a run on l2 (needs the fleet + creds).
+- **Inc 2-golangci (this PR):** golangci-lint now runs a **comprehensive curated config** baked into
+  the binary (staticcheck-all, gocritic, revive, misspell, unconvert, noctx, bodyclose, errorlint,
+  nilerr, durationcheck, makezero, asasalint on top of the standard set), passed via `--config` so a
+  repo with no `.golangci.yml` gets the full suite instead of bare defaults. `govet`/`gosec` are
+  deliberately excluded (run as standalone tools with precise attribution). `[review] analyzer_config`
+  overrides with a path. Config verified + smoke-run against the pinned golangci-lint 2.12.2.
 - _Inc 3 … (to be recorded)_

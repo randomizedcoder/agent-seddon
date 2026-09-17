@@ -47,6 +47,10 @@ let
         # `include_str!("../migrations/*.sql")` (config C41 / A2), so the SQL must
         # survive the filter or the crate won't compile under `--all-features`.
         || (lib.hasSuffix ".sql" path)
+        # `agent-review` bakes its comprehensive golangci config into the binary via
+        # `include_str!("golangci-comprehensive.yml")`, so the YAML must survive the
+        # filter or the crate won't compile (review-analysis-depth Inc 2-golangci).
+        || (lib.hasSuffix "/golangci-comprehensive.yml" path)
         # `deny.toml` (cargo-deny config) is not a cargo source file, so the default
         # filter would drop it — keep it for the `cargo-deny` check.
         || (lib.hasSuffix "/deny.toml" path)

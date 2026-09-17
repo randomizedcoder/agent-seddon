@@ -1,0 +1,78 @@
+# Comprehensive golangci-lint config for the review fleet (review-analysis-depth
+# Inc 2). Embedded in the `agent` binary (include_str!) and passed via
+# `--config` so EVERY reviewed Go repo gets the same curated suite regardless of
+# whether it ships its own `.golangci.yml` — which most PRs under review do not,
+# so they would otherwise get only golangci's bare default linters.
+#
+# Deliberately generic (no repo-specific paths/exclusions) and tuned for
+# low-false-positive, high-signal review feedback on UNFAMILIAR code:
+#   * `govet` and `gosec` are intentionally NOT enabled here — the analyzer runs
+#     them as standalone tools (`go vet`, `gosec`) with precise per-rule
+#     attribution, and re-enabling them here would double-report.
+#   * formatting (`gofmt`) is likewise a standalone tool, so no formatters here.
+#
+# Schema is golangci-lint v2 (`version: "2"`); keep it valid against the version
+# pinned in nix/versions.nix — a schema-invalid config makes golangci fail
+# outright, losing even the default-linter baseline.
+version: "2"
+
+linters:
+  # `standard` = errcheck, govet, ineffassign, staticcheck, unused.
+  default: standard
+  disable:
+    # Run standalone (`go vet`) for precise attribution; see header.
+    - govet
+  enable:
+    - gocritic
+    - revive
+    - misspell
+    - unconvert
+    - noctx
+    - bodyclose
+    - errorlint
+    - nilerr
+    - durationcheck
+    - makezero
+    - asasalint
+
+  settings:
+    staticcheck:
+      checks:
+        - all
+        # Deprecation warnings are usually pre-existing, not introduced by the PR.
+        - -SA1019
+    revive:
+      rules:
+        - name: context-as-argument
+        - name: error-return
+        - name: error-strings
+        - name: errorf
+    misspell:
+      locale: US
+    gocritic:
+      disabled-checks:
+        # Performance heuristics that are noisy on unfamiliar code.
+        - hugeParam
+        - rangeValCopy
+
+  exclusions:
+    # Don't warn when an exclusion rule matched nothing (repos vary).
+    warn-unused: false
+    presets:
+      - common-false-positives
+      - std-error-handling
+    paths:
+      - ".*\\.pb\\.go$"
+      - ".*\\.pb\\.gw\\.go$"
+    rules:
+      # Test files legitimately swallow errors / omit contexts.
+      - path: "_test\\.go"
+        linters:
+          - errcheck
+          - noctx
+          - bodyclose
+
+issues:
+  # We cap findings ourselves (changed-file-first), so let golangci report all.
+  max-issues-per-linter: 0
+  max-same-issues: 0
