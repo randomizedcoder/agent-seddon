@@ -5942,8 +5942,9 @@ pub struct ReviewRecord {
     pub collectors: Vec<CollectorStatus>,
     /// Per-tool static-analysis outcomes (review-analysis-depth Inc 2-tel) — the
     /// drill-down under the `analyzer` collector (golangci-lint / gosec / go vet /
-    /// gofmt / clippy), routed to `agent_review_tools`. `#[serde(default)]` so an
-    /// older record without it still deserializes. Empty when analysis is off/skipped.
+    /// gofmt / clippy / cargo-audit / cargo-deny), routed to `agent_review_tools`.
+    /// `#[serde(default)]` so an older record without it still deserializes. Empty
+    /// when analysis is off/skipped.
     #[serde(default)]
     pub runs: Vec<AnalyzerRun>,
 }

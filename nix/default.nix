@@ -111,8 +111,10 @@ let
     pkgs.git
     pkgs.ripgrep
     # The static-analysis suite the review analyzer shells out to (golangci-lint /
-    # gosec / go / gofmt), bundled + version-pinned in nix/review-tools.nix. golangci
-    # itself needs a Go toolchain on PATH, which this now guarantees for the fleet.
+    # gosec / go / gofmt for Go; cargo-audit / cargo-deny for Rust supply-chain —
+    # Inc 5a), bundled + version-pinned in nix/review-tools.nix. golangci itself needs
+    # a Go toolchain on PATH, which this now guarantees for the fleet. cargo-audit runs
+    # offline against the pinned advisory-db via AGENT_ADVISORY_DB (set on the wrapper).
     review-toolbox
   ];
 
@@ -134,7 +136,8 @@ let
         mkdir -p "$out/bin"
         for bin in "${agent-unwrapped}"/bin/*; do
           makeWrapper "$bin" "$out/bin/$(basename "$bin")" \
-            --prefix PATH : ${lib.makeBinPath agentRuntimePath}
+            --prefix PATH : ${lib.makeBinPath agentRuntimePath} \
+            --set-default AGENT_ADVISORY_DB ${advisory-db}
         done
       '';
 
