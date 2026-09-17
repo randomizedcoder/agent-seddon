@@ -1414,6 +1414,17 @@ pub struct ReviewCfg {
     /// Timeout for each go-checks run (seconds). Race + bench are slow; default 300.
     #[serde(default = "default_go_checks_timeout")]
     pub go_checks_timeout_secs: u64,
+    /// Run `go test -cover` on the changed packages (review-analysis-depth Inc 5b).
+    /// **Off by default** — like `go_checks` it **executes the reviewed code**; opt-in.
+    /// Flags changed packages whose statement coverage is below `go_coverage_min` (and
+    /// changed packages with no test files). Shares the go-checks collector + its
+    /// `go_checks_timeout_secs`; independent of `go_checks` (either can run alone).
+    #[serde(default)]
+    pub go_coverage: bool,
+    /// Statement-coverage percent below which a changed package is flagged (Inc 5b).
+    /// Clamped to `0..=100`. Default 50.
+    #[serde(default = "default_go_coverage_min")]
+    pub go_coverage_min: u8,
     /// Run the nearby-similar collector (correlates new declarations against the
     /// search index). **Off by default** — opt-in (review-fleet C12); read-only,
     /// fail-soft when no search backend is configured.
@@ -1448,6 +1459,8 @@ impl Default for ReviewCfg {
             shellcheck: false,
             go_checks: false,
             go_checks_timeout_secs: default_go_checks_timeout(),
+            go_coverage: false,
+            go_coverage_min: default_go_coverage_min(),
             nearby: false,
         }
     }
@@ -1455,6 +1468,10 @@ impl Default for ReviewCfg {
 
 fn default_go_checks_timeout() -> u64 {
     300
+}
+
+fn default_go_coverage_min() -> u8 {
+    50
 }
 
 fn default_classifier() -> String {

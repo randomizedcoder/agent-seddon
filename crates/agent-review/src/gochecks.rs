@@ -1,7 +1,11 @@
 //! `GoChecksCollector` — where a Go module + tests exist, runs `go test -race` (data-race
-//! findings) and `go test -bench` (surfacing low-hanging perf) on the changed packages and
-//! folds the results into `ReviewFacts` (review-fleet C12). Lands the code-review track's
-//! deferred "test-execution results".
+//! findings), `go test -bench` (surfacing low-hanging perf), and — review-analysis-depth
+//! Inc 5b — `go test -cover` (flagging changed packages below a coverage threshold) on the
+//! changed packages, folding the results into `ReviewFacts` (review-fleet C12). Lands the
+//! code-review track's deferred "test-execution results".
+//!
+//! Each sub-run is independently gated (`race_bench` / `coverage`); the caller adds the
+//! collector only when at least one is on.
 //!
 //! **This executes the reviewed code**, so it runs under the `Sandbox` seam with the
 //! **network off** and the fan-out's per-collector timeout + output caps. Fail-soft: no
@@ -20,6 +24,13 @@ const MAX_MSG: usize = 400;
 
 pub(crate) struct GoChecksCollector {
     pub timeout_secs: u64,
+    /// Run `go test -race` + `go test -bench` (`[review] go_checks`).
+    pub race_bench: bool,
+    /// Run `go test -cover` and flag low-coverage changed packages (Inc 5b,
+    /// `[review] go_coverage`).
+    pub coverage: bool,
+    /// Coverage percent below which a changed package is flagged (clamped ≤ 100).
+    pub coverage_min: u8,
 }
 
 #[async_trait::async_trait]
@@ -66,38 +77,68 @@ impl FactCollector for GoChecksCollector {
         let mut runs = Vec::new();
         let mut findings = Vec::new();
 
-        // `go test -race`: data races. `-count=1` disables the test cache so it actually runs.
-        let race_cmd = format!("go test -race -count=1 -run . -vet=off {scope}");
-        match run_go(&sandbox, &ctx.repo_root, &race_cmd, self.timeout_secs).await {
-            GoRun::Output { stdout, stderr } => {
-                let combined = format!("{stdout}\n{stderr}");
-                let mut races = parse_races(&combined, &ctx.repo_root);
-                let n = races.len();
-                findings.append(&mut races);
-                let mut r = run("go test -race", "ok", "", Instant::now());
-                r.finding_count = n.min(u32::MAX as usize) as u32;
-                runs.push(r);
+        if self.race_bench {
+            // `go test -race`: data races. `-count=1` disables the test cache so it runs.
+            let race_cmd = format!("go test -race -count=1 -run . -vet=off {scope}");
+            match run_go(&sandbox, &ctx.repo_root, &race_cmd, self.timeout_secs).await {
+                GoRun::Output { stdout, stderr } => {
+                    let combined = format!("{stdout}\n{stderr}");
+                    let mut races = parse_races(&combined, &ctx.repo_root);
+                    let n = races.len();
+                    findings.append(&mut races);
+                    let mut r = run("go test -race", "ok", "", Instant::now());
+                    r.finding_count = n.min(u32::MAX as usize) as u32;
+                    runs.push(r);
+                }
+                GoRun::Skipped(reason) => {
+                    runs.push(run("go test -race", "skipped", &reason, now()));
+                }
+                GoRun::Timeout => runs.push(run("go test -race", "timeout", "", now())),
+                GoRun::Failed(reason) => runs.push(run("go test -race", "failed", &reason, now())),
             }
-            GoRun::Skipped(reason) => runs.push(run("go test -race", "skipped", &reason, now())),
-            GoRun::Timeout => runs.push(run("go test -race", "timeout", "", now())),
-            GoRun::Failed(reason) => runs.push(run("go test -race", "failed", &reason, now())),
+
+            // `go test -bench`: run benchmarks (no unit tests: `-run=^$`), surface ns/op.
+            let bench_cmd = format!("go test -bench=. -benchmem -run=^$ -count=1 -vet=off {scope}");
+            match run_go(&sandbox, &ctx.repo_root, &bench_cmd, self.timeout_secs).await {
+                GoRun::Output { stdout, stderr } => {
+                    let combined = format!("{stdout}\n{stderr}");
+                    let mut benches = parse_benches(&combined);
+                    let n = benches.len();
+                    findings.append(&mut benches);
+                    let mut r = run("go test -bench", "ok", "", now());
+                    r.finding_count = n.min(u32::MAX as usize) as u32;
+                    runs.push(r);
+                }
+                GoRun::Skipped(reason) => {
+                    runs.push(run("go test -bench", "skipped", &reason, now()));
+                }
+                GoRun::Timeout => runs.push(run("go test -bench", "timeout", "", now())),
+                GoRun::Failed(reason) => runs.push(run("go test -bench", "failed", &reason, now())),
+            }
         }
 
-        // `go test -bench`: run benchmarks (no unit tests: `-run=^$`), surface ns/op.
-        let bench_cmd = format!("go test -bench=. -benchmem -run=^$ -count=1 -vet=off {scope}");
-        match run_go(&sandbox, &ctx.repo_root, &bench_cmd, self.timeout_secs).await {
-            GoRun::Output { stdout, stderr } => {
-                let combined = format!("{stdout}\n{stderr}");
-                let mut benches = parse_benches(&combined);
-                let n = benches.len();
-                findings.append(&mut benches);
-                let mut r = run("go test -bench", "ok", "", now());
-                r.finding_count = n.min(u32::MAX as usize) as u32;
-                runs.push(r);
+        if self.coverage {
+            // `go test -cover`: statement coverage per package. Flag changed packages
+            // below the threshold (and changed packages with no test files). `-run .`
+            // runs the tests; `-vet=off` keeps it to coverage, not vet diagnostics.
+            let module = module_path(&ctx.repo_root);
+            let cover_cmd = format!("go test -cover -run . -count=1 -vet=off {scope}");
+            match run_go(&sandbox, &ctx.repo_root, &cover_cmd, self.timeout_secs).await {
+                GoRun::Output { stdout, stderr } => {
+                    let combined = format!("{stdout}\n{stderr}");
+                    let mut cov = parse_coverage(&combined, &module, &changed, self.coverage_min);
+                    let n = cov.len();
+                    findings.append(&mut cov);
+                    let mut r = run("go test -cover", "ok", "", now());
+                    r.finding_count = n.min(u32::MAX as usize) as u32;
+                    runs.push(r);
+                }
+                GoRun::Skipped(reason) => {
+                    runs.push(run("go test -cover", "skipped", &reason, now()));
+                }
+                GoRun::Timeout => runs.push(run("go test -cover", "timeout", "", now())),
+                GoRun::Failed(reason) => runs.push(run("go test -cover", "failed", &reason, now())),
             }
-            GoRun::Skipped(reason) => runs.push(run("go test -bench", "skipped", &reason, now())),
-            GoRun::Timeout => runs.push(run("go test -bench", "timeout", "", now())),
-            GoRun::Failed(reason) => runs.push(run("go test -bench", "failed", &reason, now())),
         }
 
         if findings.len() > MAX_FINDINGS {
@@ -221,6 +262,109 @@ fn parse_benches(out: &str) -> Vec<AnalysisFinding> {
         });
     }
     findings
+}
+
+/// Parse `go test -cover` output (Inc 5b): per-package result lines
+/// `ok  <import/path>  0.2s  coverage: NN.N% of statements` and no-test lines
+/// `?  <import/path>  [no test files]`. Emits a `warning` finding for each package
+/// strictly below `min` percent, and for each changed package with no test files. The
+/// import path is mapped back to a repo-relative dir via the go.mod `module` prefix so a
+/// finding can anchor on a real changed `.go` file (and set `in_change`). Defensive — a
+/// line that does not match the shape is skipped.
+fn parse_coverage(out: &str, module: &str, changed: &[PathBuf], min: u8) -> Vec<AnalysisFinding> {
+    let mut findings = Vec::new();
+    for line in out.lines() {
+        let toks: Vec<&str> = line.split_whitespace().collect();
+        if toks.len() < 2 {
+            continue;
+        }
+        // Package result lines begin with `ok` (tested) or `?` (no tests).
+        let status = toks[0];
+        if status != "ok" && status != "?" {
+            continue;
+        }
+        let import = toks[1];
+        let (file, in_change) = pkg_file(changed, &rel_dir(import, module));
+        if line.contains("[no test files]") {
+            findings.push(cov_finding(
+                "no-tests",
+                file,
+                in_change,
+                format!("{import}: no test files (changed package is untested)"),
+            ));
+            continue;
+        }
+        // `coverage: NN.N% of statements` — the percent is the token ending in `%`.
+        let pct = toks
+            .iter()
+            .find_map(|t| t.strip_suffix('%').and_then(|n| n.parse::<f64>().ok()));
+        let Some(pct) = pct else {
+            continue;
+        };
+        if pct >= f64::from(min) {
+            continue; // at or above the threshold — not a finding
+        }
+        findings.push(cov_finding(
+            "coverage",
+            file,
+            in_change,
+            format!("{import}: {pct:.1}% statement coverage (< {min}%)"),
+        ));
+    }
+    findings
+}
+
+/// Strip the go.mod module prefix from a package import path → repo-relative dir
+/// (the import path itself when it does not start with the module).
+fn rel_dir(import: &str, module: &str) -> String {
+    if !module.is_empty() {
+        if let Some(rest) = import.strip_prefix(module) {
+            return rest.trim_start_matches('/').to_string();
+        }
+    }
+    import.to_string()
+}
+
+/// A changed `.go` file that lives directly in `dir` (so a coverage finding can anchor on
+/// a real changed file + count as `in_change`); `("", false)` when the package holds none.
+fn pkg_file(changed: &[PathBuf], dir: &str) -> (String, bool) {
+    for p in changed.iter().filter(|p| ext(p) == "go") {
+        let pdir = p
+            .parent()
+            .map(|d| d.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if pdir == dir {
+            return (p.to_string_lossy().into_owned(), true);
+        }
+    }
+    (String::new(), false)
+}
+
+/// Build a coverage finding with the message bounded.
+fn cov_finding(rule: &str, file: String, in_change: bool, message: String) -> AnalysisFinding {
+    AnalysisFinding {
+        tool: "go test -cover".into(),
+        rule: rule.into(),
+        severity: "warning".into(),
+        file,
+        line: 0,
+        message: bound(&message, MAX_MSG),
+        in_change,
+    }
+}
+
+/// Read the `module <path>` line from `go.mod` (empty when absent/unreadable).
+fn module_path(root: &Path) -> String {
+    std::fs::read_to_string(root.join("go.mod"))
+        .ok()
+        .and_then(|txt| {
+            txt.lines().find_map(|l| {
+                l.trim()
+                    .strip_prefix("module ")
+                    .map(|m| m.trim().to_string())
+            })
+        })
+        .unwrap_or_default()
 }
 
 /// Extract an in-repo `path/to/file.go:line` reference from a race-report line.
@@ -416,5 +560,103 @@ PASS";
         assert_eq!(sh_quote("$(x)"), "'$(x)'");
         // An embedded single quote is closed, escaped, and reopened.
         assert_eq!(sh_quote("a'b"), r"'a'\''b'");
+    }
+
+    // --- coverage (Inc 5b) ----------------------------------------------------
+
+    fn changed_go() -> Vec<PathBuf> {
+        vec![
+            PathBuf::from("pkg/foo/foo.go"),
+            PathBuf::from("pkg/bar/bar.go"),
+        ]
+    }
+
+    #[test]
+    fn positive_coverage_flags_below_threshold_on_changed_file() {
+        let out = "ok  \texample.com/m/pkg/foo\t0.2s\tcoverage: 12.3% of statements\n";
+        let f = parse_coverage(out, "example.com/m", &changed_go(), 50);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].tool, "go test -cover");
+        assert_eq!(f[0].rule, "coverage");
+        assert_eq!(f[0].severity, "warning");
+        assert_eq!(f[0].file, "pkg/foo/foo.go", "anchored on the changed file");
+        assert!(f[0].in_change);
+        assert!(f[0].message.contains("12.3%"));
+        assert!(f[0].message.contains("< 50%"));
+    }
+
+    #[test]
+    fn boundary_coverage_at_threshold_not_flagged() {
+        let out = "ok  example.com/m/pkg/foo  0.2s  coverage: 50.0% of statements\n";
+        assert!(parse_coverage(out, "example.com/m", &changed_go(), 50).is_empty());
+    }
+
+    #[test]
+    fn negative_high_coverage_not_flagged() {
+        let out = "ok  example.com/m/pkg/foo  0.2s  coverage: 100.0% of statements\n";
+        assert!(parse_coverage(out, "example.com/m", &changed_go(), 50).is_empty());
+    }
+
+    #[test]
+    fn corner_no_test_files_flagged() {
+        let out = "?   example.com/m/pkg/bar   [no test files]\n";
+        let f = parse_coverage(out, "example.com/m", &changed_go(), 50);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].rule, "no-tests");
+        assert_eq!(f[0].file, "pkg/bar/bar.go");
+        assert!(f[0].in_change);
+        assert!(f[0].message.contains("no test files"));
+    }
+
+    #[test]
+    fn corner_coverage_line_without_module_prefix_has_no_file() {
+        // An import path outside the module prefix ⇒ no changed file matched (file empty,
+        // not in_change), but the low-coverage finding is still surfaced.
+        let out = "ok  other.com/x  0.1s  coverage: 3.0% of statements\n";
+        let f = parse_coverage(out, "example.com/m", &changed_go(), 50);
+        assert_eq!(f.len(), 1);
+        assert!(f[0].file.is_empty());
+        assert!(!f[0].in_change);
+    }
+
+    #[test]
+    fn negative_coverage_non_result_lines_skipped() {
+        let out = "=== RUN TestFoo\nPASS\nsome noise\n--- FAIL: x\n";
+        assert!(parse_coverage(out, "example.com/m", &changed_go(), 50).is_empty());
+    }
+
+    #[test]
+    fn adversarial_coverage_hostile_import_is_bounded() {
+        let big = "a/".repeat(100_000);
+        let out = format!("ok  example.com/m/{big}pkg  0.1s  coverage: 1.0% of statements\n");
+        let f = parse_coverage(&out, "example.com/m", &changed_go(), 50);
+        assert_eq!(f.len(), 1);
+        assert!(
+            f[0].message.chars().count() <= MAX_MSG + 20,
+            "message not bounded"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::strips_prefix("example.com/m/pkg/foo", "example.com/m", "pkg/foo")]
+    #[case::root_pkg("example.com/m", "example.com/m", "")]
+    #[case::outside_module("other.com/x", "example.com/m", "other.com/x")]
+    #[case::empty_module("example.com/m/pkg", "", "example.com/m/pkg")]
+    fn rel_dir_maps_import_to_repo_dir(
+        #[case] import: &str,
+        #[case] module: &str,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(rel_dir(import, module), expected);
+    }
+
+    #[test]
+    fn pkg_file_matches_directly_and_misses_otherwise() {
+        let changed = changed_go();
+        assert_eq!(
+            pkg_file(&changed, "pkg/foo"),
+            ("pkg/foo/foo.go".to_string(), true)
+        );
+        assert_eq!(pkg_file(&changed, "pkg/none"), (String::new(), false));
     }
 }

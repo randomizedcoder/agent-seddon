@@ -264,15 +264,28 @@ impl ReviewOrchestrator {
         self
     }
 
-    /// Enable the go-race-bench collector (review-fleet C12, `[review] go_checks = true`).
-    /// Runs `go test -race` (data races) + `go test -bench` (perf) under the sandbox with
-    /// the network off (fail-soft without a sandbox / Go toolchain / tests).
-    pub fn with_go_checks(mut self, sandbox: Option<Arc<dyn Sandbox>>, timeout_secs: u64) -> Self {
+    /// Enable the go-checks collector (review-fleet C12 + review-analysis-depth Inc 5b).
+    /// `race_bench` runs `go test -race` (data races) + `go test -bench` (perf);
+    /// `coverage` runs `go test -cover` and flags changed packages below `coverage_min`
+    /// percent. Both **execute the reviewed code** under the sandbox with the network off
+    /// (fail-soft without a sandbox / Go toolchain / tests). The caller adds the collector
+    /// only when at least one sub-run is enabled.
+    pub fn with_go_checks(
+        mut self,
+        sandbox: Option<Arc<dyn Sandbox>>,
+        timeout_secs: u64,
+        race_bench: bool,
+        coverage: bool,
+        coverage_min: u8,
+    ) -> Self {
         if self.sandbox.is_none() {
             self.sandbox = sandbox;
         }
         self.collectors.push(Box::new(GoChecksCollector {
             timeout_secs: timeout_secs.max(1),
+            race_bench,
+            coverage,
+            coverage_min: coverage_min.min(100),
         }));
         self
     }
