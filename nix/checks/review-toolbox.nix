@@ -18,7 +18,7 @@ pkgs.runCommand "review-toolbox-check" { } ''
 
   # 1. The toolbox bundles the expected analysis binaries (the symlinks resolve to
   #    executables) — so a single nixpkgs bump floats a real, runnable suite.
-  for t in golangci-lint gosec go gofmt; do
+  for t in golangci-lint gosec go gofmt cargo-audit cargo-deny; do
     if [ ! -x "${toolbox}/bin/$t" ]; then
       echo "FAIL: review toolbox is missing an executable '$t'" >&2
       exit 1

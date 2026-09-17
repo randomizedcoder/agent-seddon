@@ -11,7 +11,10 @@
 # Versions come from nix/versions.nix (the SSOT) — never `pkgs.<tool>` directly —
 # so there is exactly one place a version is chosen. `go` provides `go`, `gofmt`,
 # and `go vet`; `golangci-lint` needs a Go toolchain on PATH to run, which this
-# bundle now guarantees for the fleet (previously only ambient).
+# bundle now guarantees for the fleet (previously only ambient). `cargo-audit`
+# (RustSec advisories) and `cargo-deny` (banned/duplicate deps + sources) are the
+# Rust supply-chain half of the analyzer's suite (review-analysis-depth Inc 5a),
+# run offline against the pinned advisory-db (see nix/default.nix, AGENT_ADVISORY_DB).
 {
   pkgs,
   versions,
@@ -22,5 +25,7 @@ pkgs.symlinkJoin {
     versions.go # `go` + `gofmt` + `go vet`
     versions.golangci-lint
     versions.gosec
+    versions.cargo-audit
+    versions.cargo-deny
   ];
 }

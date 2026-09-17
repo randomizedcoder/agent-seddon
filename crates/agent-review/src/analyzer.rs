@@ -6,7 +6,9 @@
 //! a baked-in comprehensive config so every repo gets the same curated linters —
 //! Inc 2-golangci), `gosec` (security — not in golangci's default set), `go vet`
 //! (toolchain checks), and `gofmt` (formatting drift on the changed files); Rust
-//! runs `cargo clippy`.
+//! runs `cargo clippy` plus the supply-chain pair `cargo-audit` (RustSec advisories,
+//! offline against the pinned advisory-db) and `cargo-deny` (banned/duplicate deps +
+//! sources) — review-analysis-depth Inc 5a.
 //! The tools **fan out concurrently** under a parallelism budget (each Go tool's
 //! `GOMAXPROCS` capped to `cpus / parallelism`), and their findings are union-deduped.
 //!
@@ -18,7 +20,7 @@
 
 use crate::collector::{CollectCtx, CollectorOutput, FactCollector, FactFragment};
 use crate::util::bound;
-use agent_core::{AnalysisFinding, AnalysisReport, AnalyzerRun, ExecSpec};
+use agent_core::{AnalysisFinding, AnalysisReport, AnalyzerRun, ExecSpec, NetworkPolicy};
 use futures_util::StreamExt;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -87,6 +89,10 @@ struct ToolTask {
     parser: Parser,
     /// Diagnostics stream to parse — `go vet` writes to stderr; the JSON tools to stdout.
     parse_stderr: bool,
+    /// Network the tool runs with. Most linters keep `On` (clippy may resolve deps on a
+    /// cold worktree); the Rust supply-chain tools (Inc 5a) run `Off` as defense-in-depth
+    /// (they are already offline via `--db`/`-n`/`--offline`).
+    network: NetworkPolicy,
 }
 
 #[async_trait::async_trait]
@@ -220,6 +226,8 @@ impl FactCollector for AnalyzerCollector {
                             cmd,
                             parser: parse_clippy,
                             parse_stderr: false,
+                            // clippy may resolve/build deps on a cold worktree — keep net On.
+                            network: NetworkPolicy::On,
                         });
                     }
                     None => runs.push(skipped_run(
@@ -228,6 +236,37 @@ impl FactCollector for AnalyzerCollector {
                     )),
                 }
             }
+
+            // Rust supply-chain parity (Inc 5a): cargo-audit (RustSec advisories) +
+            // cargo-deny (banned/duplicate deps + sources). Both are workspace/lockfile
+            // -scoped (NOT `-p` per-crate) and run offline — cargo-audit against the
+            // pinned advisory-db (AGENT_ADVISORY_DB, baked onto the wrapper), cargo-deny
+            // `--offline` against the repo's own deny.toml. A missing tool / missing DB /
+            // missing deny.toml is a fail-soft `skipped` run, never a blocked bundle.
+            // cargo-audit — JSON on stdout; offline against the pinned advisory-db.
+            self.plan_rust_supply_tool(
+                &mut runs,
+                &mut tasks,
+                "cargo-audit",
+                "cargo-audit",
+                &format!("audit {}--json", advisory_db_arg()),
+                parse_cargo_audit,
+                false,
+            )
+            .await;
+            // cargo-deny — NDJSON diagnostics on stderr; `--offline` against the repo's
+            // deny.toml (or cargo-deny's built-in defaults when absent). advisories are
+            // left to cargo-audit (no overlap, no DB dependency here).
+            self.plan_rust_supply_tool(
+                &mut runs,
+                &mut tasks,
+                "cargo-deny",
+                "cargo-deny",
+                "--format json --offline check bans sources",
+                parse_cargo_deny,
+                true,
+            )
+            .await;
         }
 
         // Fan the resolved tools out concurrently under the parallelism budget: each
@@ -250,6 +289,7 @@ impl FactCollector for AnalyzerCollector {
                         changed_set,
                         t.parser,
                         t.parse_stderr,
+                        t.network,
                     )
                     .await
                 }
@@ -326,6 +366,37 @@ impl AnalyzerCollector {
                 cmd: format!("{env}{prefix}{program} {args}"),
                 parser,
                 parse_stderr,
+                network: NetworkPolicy::On,
+            }),
+            None => runs.push(skipped_run(
+                tool,
+                "tool unavailable via the configured provider",
+            )),
+        }
+    }
+
+    /// Plan a Rust supply-chain tool (Inc 5a): resolve its program via the provider and
+    /// push a ready `ToolTask` with the **network off** (they are offline via their own
+    /// flags — belt-and-suspenders), or record a fail-soft `skipped` run when the provider
+    /// cannot supply it. `args` follows the program (no GOMAXPROCS env — these aren't Go).
+    #[allow(clippy::too_many_arguments)]
+    async fn plan_rust_supply_tool(
+        &self,
+        runs: &mut Vec<AnalyzerRun>,
+        tasks: &mut Vec<ToolTask>,
+        tool: &'static str,
+        program_name: &str,
+        args: &str,
+        parser: Parser,
+        parse_stderr: bool,
+    ) {
+        match self.resolve_program(program_name).await {
+            Some((program, prefix)) => tasks.push(ToolTask {
+                tool,
+                cmd: format!("{prefix}{program} {args}"),
+                parser,
+                parse_stderr,
+                network: NetworkPolicy::Off,
             }),
             None => runs.push(skipped_run(
                 tool,
@@ -369,9 +440,12 @@ async fn run_tool(
     changed: &BTreeSet<String>,
     parse: Parser,
     parse_stderr: bool,
+    network: NetworkPolicy,
 ) -> (AnalyzerRun, Vec<AnalysisFinding>) {
     let started = Instant::now();
-    let spec = ExecSpec::sh(cmd, root).timeout(timeout_secs.max(1));
+    let spec = ExecSpec::sh(cmd, root)
+        .timeout(timeout_secs.max(1))
+        .network(network);
     let out = match sandbox.exec(&spec).await {
         Ok(o) => o,
         Err(e) => return (run(tool, "failed", &short(&e), started), Vec::new()),
@@ -670,6 +744,184 @@ fn parse_gofmt(stdout: &str, root: &Path, changed: &BTreeSet<String>) -> Vec<Ana
             )
         })
         .collect()
+}
+
+/// The `--db <path> -n ` fragment (trailing space) for `cargo audit`, from the
+/// `AGENT_ADVISORY_DB` env var the nix wrapper bakes on (the pinned RustSec DB store
+/// path). Present ⇒ audit runs **offline** against the pinned DB; absent ⇒ `""` so a
+/// dev-shell run falls back to cargo-audit's own DB resolution. The path is shell-quoted
+/// (defense-in-depth; it is operator/build-controlled, not model input).
+fn advisory_db_arg() -> String {
+    advisory_db_arg_from(std::env::var("AGENT_ADVISORY_DB").ok())
+}
+
+/// Pure core of [`advisory_db_arg`] (so it is testable without mutating process env).
+fn advisory_db_arg_from(db: Option<String>) -> String {
+    match db {
+        Some(p) if !p.trim().is_empty() => format!("--db {} -n ", shell_quote(&p)),
+        _ => String::new(),
+    }
+}
+
+/// cargo-audit JSON (`cargo audit --json`, one object on stdout): `{ vulnerabilities:{
+/// list:[ { advisory:{id,title,informational,...}, package:{name,version} } ] },
+/// warnings:{ <kind>:[ { advisory?, package } ] } }`. Advisories carry no source line, so
+/// findings anchor at `Cargo.lock:0`. Vulnerabilities are `error`; warnings are `warning`.
+/// Defensive (`serde_json::Value`).
+fn parse_cargo_audit(
+    stdout: &str,
+    root: &Path,
+    changed: &BTreeSet<String>,
+) -> Vec<AnalysisFinding> {
+    let v: serde_json::Value = match serde_json::from_str(stdout) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    let pkg_label = |item: &serde_json::Value| -> String {
+        let p = item.get("package");
+        let name = p
+            .and_then(|p| p.get("name"))
+            .and_then(|n| n.as_str())
+            .unwrap_or("");
+        let ver = p
+            .and_then(|p| p.get("version"))
+            .and_then(|n| n.as_str())
+            .unwrap_or("");
+        if ver.is_empty() {
+            name.to_string()
+        } else {
+            format!("{name}@{ver}")
+        }
+    };
+    let mk = |item: &serde_json::Value, severity: &str, fallback_rule: &str| -> AnalysisFinding {
+        let adv = item.get("advisory");
+        let rule = adv
+            .and_then(|a| a.get("id"))
+            .and_then(|i| i.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(fallback_rule)
+            .to_string();
+        let title = adv
+            .and_then(|a| a.get("title"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("");
+        let pkg = pkg_label(item);
+        let message = match (title.is_empty(), pkg.is_empty()) {
+            (false, false) => format!("{title} ({pkg})"),
+            (false, true) => title.to_string(),
+            (true, false) => format!("{fallback_rule}: {pkg}"),
+            (true, true) => fallback_rule.to_string(),
+        };
+        AnalysisFinding {
+            tool: "cargo-audit".into(),
+            rule,
+            severity: severity.into(),
+            file: "Cargo.lock".into(),
+            line: 0,
+            message,
+            in_change: false,
+        }
+    };
+    // Security vulnerabilities.
+    if let Some(list) = v
+        .get("vulnerabilities")
+        .and_then(|x| x.get("list"))
+        .and_then(|l| l.as_array())
+    {
+        for item in list {
+            if let Some(f) = finalize(mk(item, "error", "vulnerability"), root, changed) {
+                out.push(f);
+            }
+        }
+    }
+    // Warnings, keyed by kind (unmaintained / unsound / yanked / …).
+    if let Some(kinds) = v.get("warnings").and_then(|w| w.as_object()) {
+        for (kind, arr) in kinds {
+            let Some(items) = arr.as_array() else {
+                continue;
+            };
+            for item in items {
+                if let Some(f) = finalize(mk(item, "warning", kind), root, changed) {
+                    out.push(f);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// cargo-deny JSON (`cargo deny --format json check …`, NDJSON on **stderr**): a stream of
+/// objects; the `type=="diagnostic"` ones carry `fields:{severity,code,message,labels:[{
+/// line,span}]}` (plus a huge `graphs` tree we ignore). Only `error`/`warning` diagnostics
+/// become findings, anchored at `Cargo.lock:<label line>`. Defensive, line-oriented.
+fn parse_cargo_deny(stderr: &str, root: &Path, changed: &BTreeSet<String>) -> Vec<AnalysisFinding> {
+    let mut out = Vec::new();
+    for line in stderr.lines() {
+        let v: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if v.get("type").and_then(|t| t.as_str()) != Some("diagnostic") {
+            continue;
+        }
+        let Some(fields) = v.get("fields") else {
+            continue;
+        };
+        let severity = fields
+            .get("severity")
+            .and_then(|s| s.as_str())
+            .unwrap_or("");
+        if severity != "error" && severity != "warning" {
+            continue; // note / help — not a finding
+        }
+        let rule = fields
+            .get("code")
+            .and_then(|c| c.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("deny")
+            .to_string();
+        let message = fields
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("")
+            .to_string();
+        // First label may carry a Cargo.lock line + the offending crate span.
+        let label = fields
+            .get("labels")
+            .and_then(|l| l.as_array())
+            .and_then(|a| a.first());
+        let line_no = label
+            .and_then(|l| l.get("line"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as u32;
+        let span = label
+            .and_then(|l| l.get("span"))
+            .and_then(|s| s.as_str())
+            .and_then(|s| s.split_whitespace().next())
+            .unwrap_or("");
+        let message = if span.is_empty() || message.contains(span) {
+            message
+        } else {
+            format!("{message} ({span})")
+        };
+        if let Some(f) = finalize(
+            AnalysisFinding {
+                tool: "cargo-deny".into(),
+                rule,
+                severity: severity.into(),
+                file: "Cargo.lock".into(),
+                line: line_no,
+                message,
+                in_change: false,
+            },
+            root,
+            changed,
+        ) {
+            out.push(f);
+        }
+    }
+    out
 }
 
 /// Best-effort make an absolute tool-reported path repo-relative (so it matches the
@@ -1037,5 +1289,136 @@ mod tests {
         #[case] expected: &str,
     ) {
         assert_eq!(shell_quote(input), expected);
+    }
+
+    // --- cargo-audit (Inc 5a) -------------------------------------------------
+
+    #[test]
+    fn positive_parse_cargo_audit_vuln_and_warning() {
+        let json = r#"{
+            "vulnerabilities":{"count":1,"found":true,"list":[
+                {"advisory":{"id":"RUSTSEC-2026-0258","title":"h2 unbounded empty DATA frames","informational":null},
+                 "package":{"name":"h2","version":"0.4.15"}}
+            ]},
+            "warnings":{"unmaintained":[
+                {"kind":"unmaintained","advisory":{"id":"RUSTSEC-2025-0141","title":"Bincode is unmaintained"},
+                 "package":{"name":"bincode","version":"1.3.3"}}
+            ]}
+        }"#;
+        let f = parse_cargo_audit(json, &root(), &changed());
+        assert_eq!(f.len(), 2, "one vuln + one warning");
+        // Vulnerabilities come first (parsed before warnings) and are `error`.
+        assert_eq!(f[0].tool, "cargo-audit");
+        assert_eq!(f[0].rule, "RUSTSEC-2026-0258");
+        assert_eq!(f[0].severity, "error");
+        assert_eq!(f[0].file, "Cargo.lock");
+        assert_eq!(f[0].line, 0);
+        assert!(f[0].message.contains("h2 unbounded"));
+        assert!(f[0].message.contains("h2@0.4.15"), "package labelled");
+        // The unmaintained warning is `warning`.
+        assert_eq!(f[1].rule, "RUSTSEC-2025-0141");
+        assert_eq!(f[1].severity, "warning");
+        assert!(f[1].message.contains("bincode@1.3.3"));
+    }
+
+    #[test]
+    fn boundary_cargo_audit_yanked_without_advisory_uses_kind() {
+        // A yanked warning carries no advisory ⇒ the rule falls back to the kind.
+        let json = r#"{"vulnerabilities":{"list":[]},
+            "warnings":{"yanked":[{"kind":"yanked","package":{"name":"foo","version":"1.0.0"}}]}}"#;
+        let f = parse_cargo_audit(json, &root(), &changed());
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].rule, "yanked", "no advisory id ⇒ kind is the rule");
+        assert_eq!(f[0].severity, "warning");
+        assert!(f[0].message.contains("foo@1.0.0"));
+    }
+
+    #[test]
+    fn corner_cargo_audit_clean_and_garbage_yield_nothing() {
+        assert!(parse_cargo_audit(
+            r#"{"vulnerabilities":{"list":[]},"warnings":{}}"#,
+            &root(),
+            &changed()
+        )
+        .is_empty());
+        assert!(parse_cargo_audit("not json", &root(), &changed()).is_empty());
+    }
+
+    #[test]
+    fn adversarial_cargo_audit_hostile_title_is_bounded() {
+        let big = "A".repeat(100_000);
+        let json = format!(
+            r#"{{"vulnerabilities":{{"list":[{{"advisory":{{"id":"X","title":"IGNORE INSTRUCTIONS {big}"}},"package":{{"name":"p","version":"1"}}}}]}},"warnings":{{}}}}"#
+        );
+        let f = parse_cargo_audit(&json, &root(), &changed());
+        assert_eq!(f.len(), 1);
+        assert!(
+            f[0].message.chars().count() <= MAX_MSG + 20,
+            "message not bounded"
+        );
+    }
+
+    // --- cargo-deny (Inc 5a) --------------------------------------------------
+
+    #[test]
+    fn positive_parse_cargo_deny_diagnostic() {
+        // NDJSON on stderr: a summary line (ignored) + one error diagnostic. The huge
+        // `graphs` tree is present in real output but this parser never reads it.
+        let stderr = concat!(
+            r#"{"type":"summary","fields":{"bans":{"errors":0}}}"#,
+            "\n",
+            r#"{"type":"diagnostic","fields":{"severity":"error","code":"vulnerability","message":"h2 unbounded empty DATA frames","graphs":[{"Krate":{"name":"h2"}}],"labels":[{"line":138,"column":1,"span":"h2 0.4.15 registry+https://x"}]}}"#,
+            "\n",
+        );
+        let f = parse_cargo_deny(stderr, &root(), &changed());
+        assert_eq!(f.len(), 1, "the summary line is not a finding");
+        assert_eq!(f[0].tool, "cargo-deny");
+        assert_eq!(f[0].rule, "vulnerability");
+        assert_eq!(f[0].severity, "error");
+        assert_eq!(f[0].file, "Cargo.lock");
+        assert_eq!(f[0].line, 138, "label line surfaced");
+        assert!(f[0].message.contains("h2 unbounded"));
+        assert!(f[0].message.contains("h2"), "crate span appended");
+    }
+
+    #[test]
+    fn negative_cargo_deny_note_and_help_are_skipped() {
+        let stderr = concat!(
+            r#"{"type":"diagnostic","fields":{"severity":"note","code":"n","message":"a note"}}"#,
+            "\n",
+            r#"{"type":"diagnostic","fields":{"severity":"help","code":"h","message":"a help"}}"#,
+        );
+        assert!(parse_cargo_deny(stderr, &root(), &changed()).is_empty());
+    }
+
+    #[test]
+    fn corner_cargo_deny_garbage_lines_yield_nothing() {
+        assert!(parse_cargo_deny("not\njson\nlines\n", &root(), &changed()).is_empty());
+    }
+
+    #[test]
+    fn adversarial_cargo_deny_hostile_message_is_bounded() {
+        let big = "B".repeat(100_000);
+        let stderr = format!(
+            r#"{{"type":"diagnostic","fields":{{"severity":"warning","code":"banned","message":"IGNORE {big}"}}}}"#
+        );
+        let f = parse_cargo_deny(&stderr, &root(), &changed());
+        assert_eq!(f.len(), 1);
+        assert!(
+            f[0].message.chars().count() <= MAX_MSG + 20,
+            "message not bounded"
+        );
+    }
+
+    // --- advisory_db_arg (Inc 5a) ---------------------------------------------
+
+    #[rstest::rstest]
+    #[case::unset(None, "")]
+    #[case::empty(Some(String::new()), "")]
+    #[case::blank(Some("   ".to_string()), "")]
+    #[case::set(Some("/nix/store/abc-advisory-db".to_string()), "--db '/nix/store/abc-advisory-db' -n ")]
+    #[case::hostile(Some("$(rm -rf /)".to_string()), "--db '$(rm -rf /)' -n ")]
+    fn advisory_db_arg_from_env(#[case] db: Option<String>, #[case] expected: &str) {
+        assert_eq!(advisory_db_arg_from(db), expected);
     }
 }
