@@ -10,10 +10,20 @@
   advisory-db,
   # Pinned Go review-eval corpus: { <label> = { base; head; }; } store paths.
   reviewGoCorpus,
+  # Locked nixpkgs revision (from flake.lock), baked onto the wrapped agent for the
+  # `nix-run` tool provider (review-analysis-depth Inc 5c). "" ⇒ no flake ref ⇒ the
+  # provider resolves nothing (fail-closed).
+  nixpkgsRev ? "",
 }:
 
 let
   versions = import ./versions.nix { inherit pkgs; };
+
+  # The locked flake ref the `nix-run` tool provider runs tools against — the agent's
+  # OWN pinned nixpkgs, so `nix run <ref>#<tool>` is reproducible. Empty when the rev is
+  # unknown (a dirty/pathless input) ⇒ the provider treats it as "resolve nothing".
+  nixpkgsFlakeRef =
+    if nixpkgsRev == "" then "" else "github:NixOS/nixpkgs/${nixpkgsRev}";
 
   # Shared flake helpers (mkApp/mkApps + harness snippets + mk*Check factories).
   nixLib = import ./lib { inherit pkgs lib versions; };
@@ -116,6 +126,9 @@ let
     # a Go toolchain on PATH, which this now guarantees for the fleet. cargo-audit runs
     # offline against the pinned advisory-db via AGENT_ADVISORY_DB (set on the wrapper).
     review-toolbox
+    # `nix` itself, so the opt-in `nix-run` tool provider (Inc 5c) can shell out to
+    # `nix run <locked-ref>#<tool>` for allowlisted nixpkgs tools on demand.
+    pkgs.nix
   ];
 
   # The `agent` binary, wrapped so the flake supplies every runtime tool on `PATH`.
@@ -137,7 +150,8 @@ let
         for bin in "${agent-unwrapped}"/bin/*; do
           makeWrapper "$bin" "$out/bin/$(basename "$bin")" \
             --prefix PATH : ${lib.makeBinPath agentRuntimePath} \
-            --set-default AGENT_ADVISORY_DB ${advisory-db}
+            --set-default AGENT_ADVISORY_DB ${advisory-db} \
+            --set-default AGENT_NIXPKGS_FLAKEREF "${nixpkgsFlakeRef}"
         done
       '';
 

@@ -648,6 +648,17 @@ pub fn register_builtins(r: &mut Registry) {
         Ok(Arc::new(crate::tool_provider::PathToolProvider::new())
             as Arc<dyn agent_core::ToolProvider>)
     });
+    // "nix-run" (Inc 5c) resolves each allowlisted tool to `nix run <locked-ref>#<tool> --`.
+    // The ref is the agent's own locked nixpkgs, baked onto the wrapper as
+    // AGENT_NIXPKGS_FLAKEREF (empty on an un-wrapped binary ⇒ resolves nothing); the
+    // allowlist is `[review] nix_run_allowlist` (empty ⇒ fail-closed, resolves nothing).
+    r.tool_provider("nix-run", |ctx| {
+        let flake_ref = std::env::var("AGENT_NIXPKGS_FLAKEREF").unwrap_or_default();
+        let allow = ctx.cfg.review.nix_run_allowlist.iter().cloned();
+        Ok(Arc::new(crate::tool_provider::NixRunToolProvider::new(
+            flake_ref, allow,
+        )) as Arc<dyn agent_core::ToolProvider>)
+    });
 
     // --- verifiers (the tool-call correctness gate; off unless selected) ---
     #[cfg(feature = "verifier")]

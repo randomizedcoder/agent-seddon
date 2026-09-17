@@ -14,8 +14,11 @@ and **Inc 4 (the overflow-gated MI50 digest summary, #396) is now merged**. **In
 supply-chain parity — cargo-audit + cargo-deny, #398) is now merged and live-verified on l2**
 (4 offline advisory findings folded into the digest — see the evidence log). **Inc 5b (Go test
 coverage, #400 + parser fix) is now merged and live-verified on l2** (a no-test package flagged at
-0.0% + a partial package at 50.0%, folded into the digest). **Next: Inc 5c** (`NixRunToolProvider`);
-a live MI50 net-positive check for Inc 4 remains open. The design-of-record
+0.0% + a partial package at 50.0%, folded into the digest). **Inc 5c (`NixRunToolProvider`, #402) is
+now merged and live-verified on l2** (`tool_provider="nix-run"` resolved golangci-lint/gosec/go to
+`nix run <locked-ref>#<tool> --`; gosec's G404 surfaced through the digest). **★ The whole
+review-analysis-depth track (Inc 0–5) is now COMPLETE.** Open follow-ups only: a live MI50
+net-positive check for Inc 4, and the deferred redeploy parts (2) `.#fleet-redeploy` + (4) writer WARN. The design-of-record
 ([README.md](README.md)) was written 2026-09-17,
 building on the completed [fleet-grounding](../fleet-grounding/README.md) track (worktree-rooting #382,
 grounding telemetry #381, collector skip/fail `reason` #386). The goal: run a **consistent,
@@ -39,7 +42,7 @@ optional MI50 summary) into a compact, high-signal brief that reaches Kimi befor
 | 4 | MI50 local summary (Stage 3) — `ReviewFacts.digest_summary` (soft) via `digest::summarize` over the `LlmPool` with `RouteRole::Review`; **overflow-gated** (`should_summarize` = digest total ≥ 40 findings, calibrated from the sweep), prompt = the compact digest (rule tally + top findings, bounded — never raw diffs), output bounded + fail-soft (no pool / dead member / empty reply ⇒ `""`); `with_digest_summary` on the orchestrator, wired in the builder; proto field 17 on `ReviewFacts` | #396 | ✅ |
 | 5a | Rust supply-chain parity — `cargo-audit` (RustSec advisories, **offline** against the pinned `advisory-db` via `AGENT_ADVISORY_DB` on the wrapper) + `cargo-deny` (`--offline check bans sources`) alongside clippy; both provisioned in `review-toolbox`; per-`ToolTask` network-off; 2 defensive parsers → `Cargo.lock` findings; no wire change | #398 | ✅ |
 | 5b | Go test coverage — `go test -cover` on changed packages in the `go-checks` collector, opt-in (`go_coverage`+`go_coverage_min`), flags changed packages below the threshold (and no-test packages); each go-checks sub-run self-gated; `parse_coverage` maps the import path → changed file via the go.mod module | #400 (+fix) | ✅ |
-| 5c | `NixRunToolProvider` (allowlisted `nix run` escape hatch, locked to `flake.lock`'s nixpkgs via `AGENT_NIXPKGS_FLAKEREF` on the wrapper) | — | ⬜ |
+| 5c | `NixRunToolProvider` — resolves an allowlisted tool to `nix run <locked-nixpkgs>#<tool> --` (reaching any nixpkgs pkg on demand), fail-closed on name/allowlist/ref; locked to `flake.lock`'s nixpkgs via `AGENT_NIXPKGS_FLAKEREF` baked on the wrapper; `[review] nix_run_allowlist`; `pkgs.nix` on the runtime PATH. Also fixes a latent `resolve_head` ordering bug (program before prefix_args) | #402 | ✅ |
 
 ## Evidence log
 
@@ -144,4 +147,17 @@ parallel speedup, brief size, Kimi iters/at-cap) — the running proof the track
   no-test package as a **statusless** `\t<pkg>\t\tcoverage: 0.0%` line (no `ok`/`?` token), which
   the first cut skipped — `parse_coverage` now derives the import path with or without a leading
   status token (guarded to a real package path).
-- _Inc 5c … (to be recorded)_
+- **Inc 5c (#402):** `NixRunToolProvider` resolves an allowlisted tool to
+  `nix run <locked-nixpkgs>#<tool> --`, reaching any nixpkgs package on demand — fail-closed on the
+  plain-name check, the `[review] nix_run_allowlist`, AND a present locked ref. The ref is the
+  agent's OWN `flake.lock` nixpkgs, baked onto the wrapper as `AGENT_NIXPKGS_FLAKEREF` (unset ⇒
+  resolve nothing), so it stays reproducible and never uses the user's registry; `pkgs.nix` is on the
+  wrapped runtime PATH. **Live on l2** (`tool_provider="nix-run"`, `nix_run_allowlist=["golangci-lint",
+  "gosec","go"]`, `--review .` on a tiny Go module): `golangci-lint: ok (1145 ms)`, `gosec: ok (181
+  ms)`, `govet: ok` — all resolved through `nix run <ref>#… --` (verified the wrapper bakes
+  `github:NixOS/nixpkgs/753cc8a…`) — and gosec's **G404** surfaced in the digest exactly as under the
+  `path` provider; `gofmt` correctly `skipped` (not allowlisted). Per-invocation eval cost is small
+  (the locked rev is cache-resident): gosec 181 ms vs ~134 ms on `path`. _Also fixes a latent
+  `resolve_head` ordering bug the live check caught — the command head is now `program prefix_args…`
+  (`nix run <ref>#tool --`), not `prefix_args… program`; `PathToolProvider` (empty prefix) was
+  unaffected, which is why it stayed hidden until nix-run._
