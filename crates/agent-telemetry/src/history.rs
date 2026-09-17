@@ -22,6 +22,12 @@ fn ch_err(e: klickhouse::KlickhouseError) -> Error {
     Error::Memory(format!("fleet history clickhouse: {e}"))
 }
 
+/// One row of `SELECT name FROM system.tables` — the doctor schema-drift check.
+#[derive(Debug, Clone, klickhouse::Row)]
+struct TableNameRow {
+    name: String,
+}
+
 /// Hard cap on the number of draft records [`ClickHouseHistory::list_drafts`] returns — the
 /// operator/portal surface is bounded even if a `limit` of 0 (⇒ the cap) or an over-large
 /// `limit` arrives on the wire (untrusted). Newest-first, so the cap keeps the most recent.
@@ -149,6 +155,23 @@ impl ClickHouseHistory {
     pub async fn ping(&self) -> Result<()> {
         self.with_client(|client| async move { client.execute("SELECT 1").await })
             .await
+    }
+
+    /// The set of table names in the configured database (from `system.tables`). The
+    /// doctor's schema-drift check compares this against the tables the running binary
+    /// expects (parsed from the baked-in `schema.sql`), so a long-lived container that
+    /// predates a schema addition — where the telemetry writer would *silently drop*
+    /// those rows — is surfaced rather than lost. Cheap: one bound query.
+    pub async fn tables(&self) -> Result<Vec<String>> {
+        let db = self.database.clone();
+        let rows: Vec<TableNameRow> = self
+            .with_client(move |client| {
+                let q = QueryBuilder::new("SELECT name FROM system.tables WHERE database = $1")
+                    .arg(db.clone());
+                async move { client.query_collect::<TableNameRow>(q).await }
+            })
+            .await?;
+        Ok(rows.into_iter().map(|r| r.name).collect())
     }
 
     /// Run `op` on the cached client; on error, reconnect once and retry (a restarted

@@ -80,8 +80,34 @@ in
         Database: ${db}   Tables: agent_events, agent_logs, agent_usage
 
         Query:   nix run .#clickhouse-client -- -q 'SHOW TABLES FROM ${db}'
+        Migrate: nix run .#clickhouse-migrate   (re-apply schema after a binary update)
         Stop:    nix run .#clickhouse-down
       EOF
+    '';
+  };
+
+  # Re-apply the schema to an ALREADY-RUNNING container without the up-flow's
+  # create/wait — the redeploy verb for "the binary gained a table, migrate the DB".
+  # schema.sql is all `CREATE TABLE IF NOT EXISTS`, so this is idempotent and safe to
+  # run any time; it closes the gap where a long-lived container predates a schema
+  # addition and the telemetry writer silently drops those rows (the doctor's
+  # `clickhouse` probe now flags that drift; this fixes it).
+  clickhouse-migrate = pkgs.writeShellApplication {
+    name = "clickhouse-migrate";
+    runtimeInputs = c.runtimes;
+    text = ''
+      set -euo pipefail
+      ${c.pickRuntime}
+
+      if ! "$runtime" ps --format '{{.Names}}' | grep -qx "${name}"; then
+        echo "clickhouse-migrate: container '${name}' is not running — start it with" >&2
+        echo "  nix run .#clickhouse-up" >&2
+        exit 1
+      fi
+
+      echo "==> applying schema to '${name}' (database '${db}')"
+      "$runtime" exec -i "${name}" clickhouse-client --multiquery < "${schema}"
+      echo "==> schema applied (idempotent)"
     '';
   };
 
