@@ -64,6 +64,7 @@ pub(crate) fn build_review_orchestrator(
         orch = orch.with_analyzer(
             sandbox.clone(),
             review.analyze_timeout_secs,
+            review.analyze_parallelism,
             tool_provider.clone(),
         );
     }
