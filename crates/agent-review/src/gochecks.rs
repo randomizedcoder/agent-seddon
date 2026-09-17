@@ -264,28 +264,42 @@ fn parse_benches(out: &str) -> Vec<AnalysisFinding> {
     findings
 }
 
-/// Parse `go test -cover` output (Inc 5b): per-package result lines
-/// `ok  <import/path>  0.2s  coverage: NN.N% of statements` and no-test lines
-/// `?  <import/path>  [no test files]`. Emits a `warning` finding for each package
-/// strictly below `min` percent, and for each changed package with no test files. The
-/// import path is mapped back to a repo-relative dir via the go.mod `module` prefix so a
-/// finding can anchor on a real changed `.go` file (and set `in_change`). Defensive — a
-/// line that does not match the shape is skipped.
+/// Parse `go test -cover` output (Inc 5b). `go test` prints one line per package, and the
+/// shape varies by whether the package has tests and the Go version:
+/// - tested: `ok  \t<import/path>\t0.2s\tcoverage: NN.N% of statements`
+/// - **no tests, under `-cover`**: `\t<import/path>\t\tcoverage: 0.0% of statements`
+///   (leading whitespace, **no `ok`/`?` status token** — the case that matters most)
+/// - no tests, some versions: `?  \t<import/path>\t[no test files]`
+///
+/// Emits a `warning` finding for each package strictly below `min` percent, and for each
+/// package reported with no test files. The import path is mapped back to a repo-relative
+/// dir via the go.mod `module` prefix so a finding can anchor on a real changed `.go` file
+/// (and set `in_change`). Defensive: only lines that actually carry `coverage:` / `[no test
+/// files]` and a plausible package path are considered.
 fn parse_coverage(out: &str, module: &str, changed: &[PathBuf], min: u8) -> Vec<AnalysisFinding> {
     let mut findings = Vec::new();
     for line in out.lines() {
+        let no_tests = line.contains("[no test files]");
+        if !line.contains("coverage:") && !no_tests {
+            continue; // not a package result line
+        }
         let toks: Vec<&str> = line.split_whitespace().collect();
-        if toks.len() < 2 {
+        // The import path is the token after a leading `ok`/`?`/`FAIL` status, or the
+        // first token when the line has none (the no-test-under-`-cover` shape).
+        let import = match toks.first() {
+            Some(&("ok" | "?" | "FAIL")) => toks.get(1).copied(),
+            other => other.copied(),
+        };
+        let Some(import) = import else {
+            continue;
+        };
+        // Guard against a stray "coverage:" line that is not a package result: a real
+        // import path contains `/` (or is the module root itself).
+        if !import.contains('/') && import != module {
             continue;
         }
-        // Package result lines begin with `ok` (tested) or `?` (no tests).
-        let status = toks[0];
-        if status != "ok" && status != "?" {
-            continue;
-        }
-        let import = toks[1];
         let (file, in_change) = pkg_file(changed, &rel_dir(import, module));
-        if line.contains("[no test files]") {
+        if no_tests {
             findings.push(cov_finding(
                 "no-tests",
                 file,
@@ -606,6 +620,37 @@ PASS";
         assert_eq!(f[0].file, "pkg/bar/bar.go");
         assert!(f[0].in_change);
         assert!(f[0].message.contains("no test files"));
+    }
+
+    #[test]
+    fn corner_no_test_package_under_cover_is_flagged_as_zero() {
+        // The real `go test -cover` shape for a no-test package: a leading-whitespace line
+        // with NO `ok`/`?` status token and `coverage: 0.0%` (verified live against the
+        // pinned Go toolchain). Must still be flagged (0.0% < min), not skipped.
+        let out = "\texample.com/m/pkg/bar\t\tcoverage: 0.0% of statements\n";
+        let f = parse_coverage(out, "example.com/m", &changed_go(), 50);
+        assert_eq!(f.len(), 1, "the statusless 0% line must be parsed");
+        assert_eq!(f[0].rule, "coverage");
+        assert_eq!(f[0].file, "pkg/bar/bar.go", "import mapped to changed file");
+        assert!(f[0].in_change);
+        assert!(f[0].message.contains("0.0%"));
+    }
+
+    #[test]
+    fn corner_cached_coverage_line_parsed() {
+        // A cached result: `ok  <pkg>  (cached)  coverage: 12.3% of statements`.
+        let out = "ok  \texample.com/m/pkg/foo\t(cached)\tcoverage: 12.3% of statements\n";
+        let f = parse_coverage(out, "example.com/m", &changed_go(), 50);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].rule, "coverage");
+        assert!(f[0].message.contains("12.3%"));
+    }
+
+    #[test]
+    fn negative_stray_coverage_word_without_package_skipped() {
+        // A log line mentioning "coverage:" but with no package path is not a finding.
+        let out = "    some log: coverage: nonsense here\n";
+        assert!(parse_coverage(out, "example.com/m", &changed_go(), 50).is_empty());
     }
 
     #[test]
