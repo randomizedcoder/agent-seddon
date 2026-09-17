@@ -215,12 +215,10 @@ impl FactCollector for AnalyzerCollector {
                     "no owning crate for the changed files",
                 ));
             } else {
-                match self.resolve_program("cargo").await {
-                    Some((program, prefix)) => {
+                match self.resolve_head("cargo").await {
+                    Some(head) => {
                         let pkgs: String = crates.iter().map(|c| format!("-p {c} ")).collect();
-                        let cmd = format!(
-                            "{prefix}{program} clippy --message-format=json --quiet {pkgs}"
-                        );
+                        let cmd = format!("{head} clippy --message-format=json --quiet {pkgs}");
                         tasks.push(ToolTask {
                             tool: "clippy",
                             cmd,
@@ -360,10 +358,10 @@ impl AnalyzerCollector {
         parser: Parser,
         parse_stderr: bool,
     ) {
-        match self.resolve_program(program_name).await {
-            Some((program, prefix)) => tasks.push(ToolTask {
+        match self.resolve_head(program_name).await {
+            Some(head) => tasks.push(ToolTask {
                 tool,
-                cmd: format!("{env}{prefix}{program} {args}"),
+                cmd: format!("{env}{head} {args}"),
                 parser,
                 parse_stderr,
                 network: NetworkPolicy::On,
@@ -390,10 +388,10 @@ impl AnalyzerCollector {
         parser: Parser,
         parse_stderr: bool,
     ) {
-        match self.resolve_program(program_name).await {
-            Some((program, prefix)) => tasks.push(ToolTask {
+        match self.resolve_head(program_name).await {
+            Some(head) => tasks.push(ToolTask {
                 tool,
-                cmd: format!("{prefix}{program} {args}"),
+                cmd: format!("{head} {args}"),
                 parser,
                 parse_stderr,
                 network: NetworkPolicy::Off,
@@ -405,20 +403,21 @@ impl AnalyzerCollector {
         }
     }
 
-    /// Resolve a linter's program (+ any prefix args) via the configured provider.
-    /// `None` provider ⇒ the bare name on `PATH` (the prior behaviour). `Some(_)` +
-    /// unresolved ⇒ `None`, so the caller records a fail-soft `skipped` run. The prefix
-    /// is a ready-to-splice string ("" or "`<args> `") for the shell command.
-    async fn resolve_program(&self, name: &str) -> Option<(String, String)> {
+    /// Resolve a linter to its **command head** via the configured provider: the program
+    /// followed by any fixed leading args, in invocation order (e.g. `golangci-lint`, or
+    /// `nix run <ref>#golangci-lint --`). The caller appends the tool's own args after it.
+    /// `None` provider ⇒ the bare name on `PATH` (the prior behaviour); `Some(_)` +
+    /// unresolved ⇒ `None`, so the caller records a fail-soft `skipped` run.
+    async fn resolve_head(&self, name: &str) -> Option<String> {
         match &self.tool_provider {
-            None => Some((name.to_string(), String::new())),
+            None => Some(name.to_string()),
             Some(p) => p.resolve(name).await.map(|c| {
-                let prefix = if c.prefix_args.is_empty() {
-                    String::new()
+                if c.prefix_args.is_empty() {
+                    c.program
                 } else {
-                    format!("{} ", c.prefix_args.join(" "))
-                };
-                (c.program, prefix)
+                    // program THEN its fixed leading args (e.g. `nix run <ref>#tool --`).
+                    format!("{} {}", c.program, c.prefix_args.join(" "))
+                }
             }),
         }
     }
@@ -1420,5 +1419,47 @@ mod tests {
     #[case::hostile(Some("$(rm -rf /)".to_string()), "--db '$(rm -rf /)' -n ")]
     fn advisory_db_arg_from_env(#[case] db: Option<String>, #[case] expected: &str) {
         assert_eq!(advisory_db_arg_from(db), expected);
+    }
+
+    // --- resolve_head ordering (Inc 5c) ---------------------------------------
+
+    #[tokio::test]
+    async fn resolve_head_orders_program_before_prefix_args() {
+        use agent_core::{ToolCommand, ToolProvider};
+        // A provider with prefix_args (the nix-run shape): the head must be
+        // `program prefix_args…`, NOT `prefix_args… program` — the ordering bug the
+        // Inc 5c live check caught (which produced `run <ref>#tool -- nix …`).
+        struct Fake;
+        #[async_trait::async_trait]
+        impl ToolProvider for Fake {
+            async fn resolve(&self, tool: &str) -> Option<ToolCommand> {
+                (tool == "gosec").then(|| ToolCommand {
+                    program: "nix".into(),
+                    prefix_args: vec!["run".into(), "ref#gosec".into(), "--".into()],
+                })
+            }
+        }
+        let with_prefix = AnalyzerCollector {
+            timeout_secs: 1,
+            parallelism: 1,
+            golangci_config: String::new(),
+            tool_provider: Some(std::sync::Arc::new(Fake)),
+        };
+        assert_eq!(
+            with_prefix.resolve_head("gosec").await.as_deref(),
+            Some("nix run ref#gosec --"),
+            "program precedes its fixed leading args"
+        );
+        assert_eq!(
+            with_prefix.resolve_head("other").await,
+            None,
+            "unresolved ⇒ None (fail-soft skip)"
+        );
+        // No provider ⇒ the bare name (empty prefix_args), unchanged behaviour.
+        let bare = collector("");
+        assert_eq!(
+            bare.resolve_head("golangci-lint").await.as_deref(),
+            Some("golangci-lint")
+        );
     }
 }

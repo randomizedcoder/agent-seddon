@@ -102,6 +102,10 @@
             reviewGoCorpus
             ;
           src = ./.;
+          # The locked nixpkgs revision, baked onto the wrapped agent so the
+          # `nix-run` tool provider (review-analysis-depth Inc 5c) resolves tools
+          # against the agent's OWN pinned nixpkgs, not the user's registry.
+          nixpkgsRev = nixpkgs.rev or "";
         };
       in
       {

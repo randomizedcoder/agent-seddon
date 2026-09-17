@@ -1327,9 +1327,17 @@ pub struct ReviewCfg {
     pub classifier: String,
     /// How the analyzer resolves its linters (review-analysis-depth). `"path"`
     /// (default) trusts the process `PATH` — the nix-wrapped agent carries the review
-    /// toolbox (nix/review-tools.nix). A `nix run`-backed provider is a later increment.
+    /// toolbox (nix/review-tools.nix). `"nix-run"` (Inc 5c) resolves each tool to
+    /// `nix run <locked-nixpkgs>#<tool> --` for any allowlisted nixpkgs package.
     #[serde(default = "default_tool_provider")]
     pub tool_provider: String,
+    /// Package names the `"nix-run"` tool provider may resolve (review-analysis-depth
+    /// Inc 5c). **Empty = resolve nothing** (fail-closed): the escape hatch only reaches
+    /// tools an operator has explicitly allowlisted here; the flake ref is the agent's
+    /// own locked nixpkgs (baked on the wrapper), so it stays reproducible. Ignored when
+    /// `tool_provider != "nix-run"`.
+    #[serde(default)]
+    pub nix_run_allowlist: Vec<String>,
     #[serde(default = "default_review_deadline")]
     pub deadline_secs: u64,
     #[serde(default)]
@@ -1438,6 +1446,7 @@ impl Default for ReviewCfg {
             backend: String::new(),
             classifier: default_classifier(),
             tool_provider: default_tool_provider(),
+            nix_run_allowlist: Vec::new(),
             deadline_secs: default_review_deadline(),
             in_loop: false,
             context_budget_bytes: default_review_budget(),
