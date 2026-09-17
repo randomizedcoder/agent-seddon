@@ -171,12 +171,14 @@ impl ReviewOrchestrator {
         mut self,
         sandbox: Option<Arc<dyn Sandbox>>,
         timeout_secs: u64,
+        parallelism: usize,
         tool_provider: Option<Arc<dyn agent_core::ToolProvider>>,
     ) -> Self {
         self.sandbox = sandbox;
         self.analyze_timeout_secs = timeout_secs.max(1);
         self.collectors.push(Box::new(AnalyzerCollector {
             timeout_secs: self.analyze_timeout_secs,
+            parallelism: parallelism.max(1),
             tool_provider,
         }));
         self

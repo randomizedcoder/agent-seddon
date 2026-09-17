@@ -1345,6 +1345,12 @@ pub struct ReviewCfg {
     /// Per-tool timeout for the analyzer (seconds). Bounds a cold/slow linter run.
     #[serde(default = "default_analyze_timeout")]
     pub analyze_timeout_secs: u64,
+    /// How many analyzer tools run concurrently (review-analysis-depth Inc 2). The
+    /// Go suite (golangci-lint + gosec + go vet + gofmt) fans out under this budget;
+    /// each Go tool's `GOMAXPROCS` is capped to `cpus / parallelism` so N tools don't
+    /// oversubscribe the box. Clamped ≥ 1.
+    #[serde(default = "default_analyze_parallelism")]
+    pub analyze_parallelism: usize,
     /// Run the signature-diff collector (changed function signatures). On by default
     /// — pure in-process (blob reads + a regex scan), deadline-bounded.
     #[serde(default = "default_true")]
@@ -1419,6 +1425,7 @@ impl Default for ReviewCfg {
             context_budget_bytes: default_review_budget(),
             analyze: true,
             analyze_timeout_secs: default_analyze_timeout(),
+            analyze_parallelism: default_analyze_parallelism(),
             signatures: true,
             callgraph: true,
             callgraph_timeout_secs: default_callgraph_timeout(),
@@ -1456,6 +1463,9 @@ fn default_review_budget() -> usize {
 }
 fn default_analyze_timeout() -> u64 {
     45
+}
+fn default_analyze_parallelism() -> usize {
+    4
 }
 fn default_callgraph_timeout() -> u64 {
     30

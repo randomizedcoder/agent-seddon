@@ -2,8 +2,9 @@
 
 Legend: ⬜ designed, not built · 🟡 partially built · ✅ built + merged.
 
-**Track state: 🟡 building.** Inc 0 (design + this tracker, #387) and Inc 1a (nix `review-toolbox`
-provisioning, #388) are merged; Inc 1b (the `ToolProvider` seam) is in flight. The design-of-record
+**Track state: 🟡 building.** Inc 0 (design + this tracker, #387), Inc 1a (nix `review-toolbox`
+provisioning, #388) and Inc 1b (the `ToolProvider` seam, #389) are merged; Inc 2 (the Go tool suite +
+parallel fan-out) is in flight. The design-of-record
 ([README.md](README.md)) was written 2026-09-17,
 building on the completed [fleet-grounding](../fleet-grounding/README.md) track (worktree-rooting #382,
 grounding telemetry #381, collector skip/fail `reason` #386). The goal: run a **consistent,
@@ -19,8 +20,10 @@ optional MI50 summary) into a compact, high-signal brief that reaches Kimi befor
 |----:|------|----|-------|
 | 0 | Design-of-record + this STATUS tracker | #387 | ✅ |
 | 1a | nix provisioning: `nix/review-tools.nix` → `review-toolbox` (`symlinkJoin` of go/golangci-lint/gosec from `versions.nix`) wired into `agentRuntimePath` + `packages.review-toolbox`; `nix/checks/review-toolbox.nix` asserts the suite is on the wrapped agent's PATH | #388 | ✅ |
-| 1b | The `ToolProvider` seam: `agent_core::{ToolProvider, ToolCommand}` trait + `PathToolProvider` (validates a plain tool name → bare-name command) registered as `"path"`; `[review] tool_provider` config (default `"path"`); analyzer resolves its two current tools through it (no behaviour change) | — | 🟡 in this PR |
-| 2 | The Go suite (comprehensive golangci config + `gosec` + `go vet` + `gofmt`) under a concurrency-budgeted `buffer_unordered` fan-out; `analyzer_config` override; **per-tool telemetry** — `ReviewRecord.runs` wire change + `agent_review_tools` table + `fleet-measure` ANALYZER section. Measure first. | — | ⬜ |
+| 1b | The `ToolProvider` seam: `agent_core::{ToolProvider, ToolCommand}` trait + `PathToolProvider` (validates a plain tool name → bare-name command) registered as `"path"`; `[review] tool_provider` config (default `"path"`); analyzer resolves its two current tools through it (no behaviour change) | #389 | ✅ |
+| 2 | The Go suite — add `gosec` + `go vet` + `gofmt` alongside `golangci-lint`; **parallel fan-out** via `buffer_unordered(analyze_parallelism)` with per-tool `GOMAXPROCS = cpus/parallelism`; union-dedupe findings; `run_tool` returns `(run, findings)`; new JSON/text parsers each with adversarial path-escape tests | — | 🟡 in this PR |
+| 2-tel | **per-tool telemetry** (split from Inc 2): `ReviewRecord.runs` serde side-channel + `agent_review_tools` CH table (5-spot pipeline) + `fleet-measure` ANALYZER section, so the live sweep is measurable | — | ⬜ |
+| 2-golangci | comprehensive golangci config (`--config` a pinned curated set) + `[review] analyzer_config` repo override — deferred from Inc 2 (golangci v2 config schema is version-fragile; author + test against the pinned version) | — | ⬜ |
 | 3 | Deterministic Rust digest (Stage 2) — post-fan-out dedupe/rank-by-salience/bucket into a compact verbatim brief section | — | ⬜ |
 | 4 | MI50 local summary (Stage 3) — overflow-gated `LlmPool` summary, additive + bounded + fail-soft; lands only if net-positive | — | ⬜ |
 | 5 | `NixRunToolProvider` (allowlisted `nix run` escape hatch) + Rust/coverage parity (cargo-audit/cargo-deny, go coverage) | — | ⬜ |
@@ -37,8 +40,15 @@ parallel speedup, brief size, Kimi iters/at-cap) — the running proof the track
 - **Inc 1a (#388):** `nix build .#agent` produces a wrapped binary whose PATH carries the
   `review-toolbox` (go/gofmt/golangci-lint/gosec); `nix/checks/review-toolbox.nix` asserts it. One
   `nix flake update nixpkgs` now floats every tool version reproducibly. No runtime behaviour change.
-- **Inc 1b (this PR):** `ToolProvider` seam threaded through the analyzer and both review paths
+- **Inc 1b (#389):** `ToolProvider` seam threaded through the analyzer and both review paths
   (process-global + per-row fleet factory). `PathToolProvider` (default `"path"`) resolves a validated
   plain tool name to a bare-name command — identical to the prior behaviour, so no measurable change;
   it is the plumbing Inc 2's suite runs on.
-- _Inc 2 … (to be recorded)_
+- **Inc 2 (this PR):** the analyzer now runs the full Go suite — `golangci-lint` + `gosec` +
+  `go vet` + `gofmt` — instead of only `golangci-lint`, so a repo with no `.golangci.yml` gains
+  security (`gosec`) and formatting (`gofmt`) coverage that golangci's bare defaults miss. Tools **fan
+  out concurrently** (`buffer_unordered(analyze_parallelism)`, default 4) with each Go tool's
+  `GOMAXPROCS` capped to `cpus / parallelism`, so the collector's wall-clock is the slowest single
+  tool, not the serial sum. Findings are union-deduped by `(file, line, rule)`. **Live sweep numbers
+  pending** the per-tool telemetry (Inc 2-tel) + a runpod/host run on l2.
+- _Inc 2-tel … (to be recorded)_
