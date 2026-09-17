@@ -5,9 +5,12 @@ Legend: ⬜ designed, not built · 🟡 partially built · ✅ built + merged.
 **Track state: 🟡 building.** Inc 0 (design + this tracker, #387), Inc 1a (nix `review-toolbox`
 provisioning, #388), Inc 1b (the `ToolProvider` seam, #389), Inc 2 (the Go tool suite + parallel
 fan-out, #390), Inc 2-tel (per-tool telemetry, #391) and Inc 2-golangci (comprehensive golangci
-config, #392) and Inc 3 (the deterministic analysis digest, #394) are all merged. **Next: the live
-runpod/host sweep on l2** to measure the suite + digest brief-size delta (gates Inc 4). The
-design-of-record
+config, #392) and Inc 3 (the deterministic analysis digest, #394) are all merged, and a **live
+runpod/host sweep on l2 (2026-09-17) validated the whole suite + digest end-to-end** — the full Go
+suite runs in parallel (gosec surfaced 55/29 findings a bare-default golangci missed), the digest
+renders deduped/risk-ranked/bucketed, and the model loop stayed at 0/at-cap (see the evidence log). The
+sweep also confirmed **Inc 4 is justified** — big findings-heavy PRs still overflow the brief budget.
+**Next: Inc 4 (MI50 local summary).** The design-of-record
 ([README.md](README.md)) was written 2026-09-17,
 building on the completed [fleet-grounding](../fleet-grounding/README.md) track (worktree-rooting #382,
 grounding telemetry #381, collector skip/fail `reason` #386). The goal: run a **consistent,
@@ -72,6 +75,32 @@ parallel speedup, brief size, Kimi iters/at-cap) — the running proof the track
   high-volume lint stays visible even when its lines fall past the render cap. `render_digest` replaces
   the per-report findings lists; each report keeps only its run summary (status/timing). The digest is a
   first-class fact — `agent_core::{AnalysisDigest, RuleCount}`, proto field 16, wire-roundtrip tested —
-  so a remote `ReviewService` returns it too. Purely tool-derived. **Live brief-size / Kimi iter delta
-  vs Inc 2 pending** the runpod/host sweep.
+  so a remote `ReviewService` returns it too. Purely tool-derived.
+- **★ LIVE SWEEP (2026-09-17, l2 — validates Inc 2 + Inc 3 end-to-end):** ran the **nix-wrapped** agent
+  (main `2f0dbed`, so the `review-toolbox` — go/golangci-lint/gosec/gofmt — is on PATH) as
+  `--serve-fleet` against the real private Go repo **runpod/host**, generator RunPod **Kimi K3**,
+  DRAFT-ONLY, over PRs **#2745 / #2820 / #2825**. Results:
+  - **The full Go suite runs live, all `ok`:** `golangci-lint` + `gosec` + `go vet` + `gofmt` (per the
+    draft `.md` run summaries + `agent_review_tools`). **`gosec` is the value-add the bare-default
+    baseline missed** — #2745 → **55 findings**, #2820 → **29** (the pre-track baseline was
+    `findings=0`); #2825 → 0 (its 10 changed files were clean/excluded — all four tools still ran `ok`).
+  - **Parallel fan-out proven:** on #2745 the analyzer's serial work ≈ 20.4 s (golangci 11901 ms +
+    gosec 3977 + govet 4522 + gofmt 11) completed in ≈ 11.9 s wall (critical path = the slowest tool,
+    golangci-lint) — the fleet.review span logged `critical=analyzer`; on #2820, 1746 ms serial →
+    ≈ 886 ms wall (~2×).
+  - **The digest renders live** (from the #2745 draft): `Analysis digest — 55 finding(s) (11 on changed
+    files), deduped across tools, risk-ranked`, with the by-rule tally `gosec/G204 ×17, gosec/G104 ×13,
+    gosec/G304 ×6, … +1 more rule(s)` and the **changed-file findings ranked ahead of the
+    `[pre-existing]` ones** — one unified section in place of the old four separate capped lists.
+  - **Model loop healthy:** 3 reviews, avg **8** iters, max 10, **0 at iter-cap** — the digest did not
+    inflate iterations. `summaries skipped "no pool configured"` (no `[pool]` in the fleet toml → the
+    Inc 4 hook).
+  - **Inc 4 gate signal:** on the 55-finding #2745 the grounded-facts brief still overflows the draft's
+    24 KB facts budget (9 file diffs omitted) — but the **digest renders in full before the diffs**, so
+    the compressed 55-finding ranked list + tally survives while only raw diffs get squeezed. Big
+    findings-heavy PRs still overflow → **Inc 4 (MI50 local summary) is justified**.
+  - _Gotcha:_ the l2 standalone ClickHouse container predated the Inc 2-tel schema (#391), so
+    `agent_review_tools` was absent and the first three reviews' per-tool rows were dropped; created the
+    table from `schema.sql` and re-ran #2820 to populate it + validate the `fleet-measure` ANALYZER
+    section (a fresh `nix run .#clickhouse-up` would carry the table).
 - _Inc 4 … (to be recorded)_
