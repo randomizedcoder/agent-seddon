@@ -5906,6 +5906,12 @@ pub struct ReviewFacts {
     /// risk-ranked, and rule-bucketed into one section. Empty when no finding exists.
     #[serde(default)]
     pub digest: AnalysisDigest,
+    /// A cheap local-LLM prose summary of the [`digest`](Self::digest) (Stage 3) —
+    /// the one **soft** (model-generated) analysis field, clearly labelled. Empty
+    /// unless the overflow gate fired (a findings-heavy PR) AND a healthy pool
+    /// produced it; fail-soft, bounded, never overwrites a hard fact.
+    #[serde(default)]
+    pub digest_summary: String,
 }
 
 /// A flattened, analytics-shaped record of one review run — the telemetry-local

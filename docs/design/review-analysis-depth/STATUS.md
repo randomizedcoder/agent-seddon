@@ -9,8 +9,10 @@ config, #392) and Inc 3 (the deterministic analysis digest, #394) are all merged
 runpod/host sweep on l2 (2026-09-17) validated the whole suite + digest end-to-end** — the full Go
 suite runs in parallel (gosec surfaced 55/29 findings a bare-default golangci missed), the digest
 renders deduped/risk-ranked/bucketed, and the model loop stayed at 0/at-cap (see the evidence log). The
-sweep also confirmed **Inc 4 is justified** — big findings-heavy PRs still overflow the brief budget.
-**Next: Inc 4 (MI50 local summary).** The design-of-record
+sweep also confirmed **Inc 4 is justified** — big findings-heavy PRs still overflow the brief budget —
+and **Inc 4 (the overflow-gated MI50 digest summary, #396) is now merged**. **Next: a live net-positive
+check** (add an `mi50` `[[pool.members]]` to the fleet toml and re-sweep a big PR) then **Inc 5**
+(`NixRunToolProvider` + Rust/coverage parity). The design-of-record
 ([README.md](README.md)) was written 2026-09-17,
 building on the completed [fleet-grounding](../fleet-grounding/README.md) track (worktree-rooting #382,
 grounding telemetry #381, collector skip/fail `reason` #386). The goal: run a **consistent,
@@ -31,7 +33,7 @@ optional MI50 summary) into a compact, high-signal brief that reaches Kimi befor
 | 2-tel | **per-tool telemetry** (split from Inc 2): `ReviewRecord.runs` serde side-channel (populated from `analysis.runs`) + `agent_review_tools` CH table (schema + `ReviewToolRow` + writer `Msg`/buffer/4-flush + telemetry dispatch) + `fleet-measure` ANALYZER section, so the live sweep is measurable | #391 | ✅ |
 | 2-golangci | comprehensive golangci config baked into the binary (`include_str!` → `--config`), so every reviewed Go repo gets the same curated linter set; `[review] analyzer_config` path override; config `govet`/`gosec`-free (run standalone); verified vs golangci-lint 2.12.2 | #392 | ✅ |
 | 3 | Deterministic Rust digest (Stage 2) — `agent_core::{AnalysisDigest, RuleCount}` + `digest::compute` folds every AnalysisReport (analyzer + shellcheck + go_checks + nearby) into ONE section: dedupe by `(tool,rule,file,line)`, rank by changed-file + per-file risk score + severity, bucket a `(tool,rule)` tally so the capped tail stays visible; runs post-fan-out after risk; `render_digest` replaces the four per-report findings lists (run summaries stay); proto field 16 + roundtrip | #394 | ✅ |
-| 4 | MI50 local summary (Stage 3) — overflow-gated `LlmPool` summary, additive + bounded + fail-soft; lands only if net-positive | — | ⬜ |
+| 4 | MI50 local summary (Stage 3) — `ReviewFacts.digest_summary` (soft) via `digest::summarize` over the `LlmPool` with `RouteRole::Review`; **overflow-gated** (`should_summarize` = digest total ≥ 40 findings, calibrated from the sweep), prompt = the compact digest (rule tally + top findings, bounded — never raw diffs), output bounded + fail-soft (no pool / dead member / empty reply ⇒ `""`); `with_digest_summary` on the orchestrator, wired in the builder; proto field 17 on `ReviewFacts` | #396 | ✅ |
 | 5 | `NixRunToolProvider` (allowlisted `nix run` escape hatch) + Rust/coverage parity (cargo-audit/cargo-deny, go coverage) | — | ⬜ |
 
 ## Evidence log
@@ -103,4 +105,15 @@ parallel speedup, brief size, Kimi iters/at-cap) — the running proof the track
     `agent_review_tools` was absent and the first three reviews' per-tool rows were dropped; created the
     table from `schema.sql` and re-ran #2820 to populate it + validate the `fleet-measure` ANALYZER
     section (a fresh `nix run .#clickhouse-up` would carry the table).
-- _Inc 4 … (to be recorded)_
+- **Inc 4 (#396):** Stage 3 adds `ReviewFacts.digest_summary` — a cheap **local**-LLM prose synthesis
+  of the analysis digest (the one soft analysis field), generated post-fan-out via `digest::summarize`
+  over the `LlmPool` with `RouteRole::Review` so a local `mi50` member absorbs it off the remote review
+  model. It is **overflow-gated** (`should_summarize`: digest total ≥ 40 findings — the knee the live
+  sweep found, where #2745's 55 findings overflowed the brief but #2820's 29 did not), and **fail-soft
+  in every arm** (no pool / no healthy member / empty reply ⇒ `""`, the verbatim digest still stands).
+  The prompt is the *already-compact* digest (rule tally + top ranked findings, both bounded) — never
+  raw diffs — so it is cheap and cannot be flooded; the output is bounded like any untrusted model text.
+  Rendered as a clearly-labelled SOFT section under the digest. **Live net-positive check pending** a
+  sweep with an `mi50` `[[pool.members]]` in the fleet toml (the sweep confirmed the gate condition
+  fires on big PRs and `summaries skipped "no pool configured"` — adding the member enables both).
+- _Inc 5 … (to be recorded)_
