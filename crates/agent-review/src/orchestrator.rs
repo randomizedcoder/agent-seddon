@@ -535,6 +535,11 @@ impl ReviewCollector for ReviewOrchestrator {
             });
         }
 
+        // Analysis digest: fold every analysis report's findings into one deduped,
+        // risk-ranked, rule-bucketed section. Runs last — it reads the assembled
+        // findings AND the risk scores computed just above. Purely tool-derived.
+        facts.digest = crate::digest::compute(&facts);
+
         let total_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
         facts.meta.total_ms = total_ms;
         facts.meta.repo_hash = repo_hash(&facts.git_state, &self.repo_root);

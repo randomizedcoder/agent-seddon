@@ -3547,6 +3547,48 @@ impl From<pb::ReviewAnalysisReport> for agent_core::AnalysisReport {
     }
 }
 
+impl From<agent_core::RuleCount> for pb::ReviewRuleCount {
+    fn from(c: agent_core::RuleCount) -> Self {
+        pb::ReviewRuleCount {
+            tool: c.tool,
+            rule: c.rule,
+            count: c.count,
+            in_change: c.in_change,
+        }
+    }
+}
+impl From<pb::ReviewRuleCount> for agent_core::RuleCount {
+    fn from(c: pb::ReviewRuleCount) -> Self {
+        agent_core::RuleCount {
+            tool: c.tool,
+            rule: c.rule,
+            count: c.count,
+            in_change: c.in_change,
+        }
+    }
+}
+
+impl From<agent_core::AnalysisDigest> for pb::ReviewAnalysisDigest {
+    fn from(d: agent_core::AnalysisDigest) -> Self {
+        pb::ReviewAnalysisDigest {
+            findings: d.findings.into_iter().map(Into::into).collect(),
+            total: d.total,
+            in_change: d.in_change,
+            rule_counts: d.rule_counts.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+impl From<pb::ReviewAnalysisDigest> for agent_core::AnalysisDigest {
+    fn from(d: pb::ReviewAnalysisDigest) -> Self {
+        agent_core::AnalysisDigest {
+            findings: d.findings.into_iter().map(Into::into).collect(),
+            total: d.total,
+            in_change: d.in_change,
+            rule_counts: d.rule_counts.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
 impl From<agent_core::SignatureChange> for pb::ReviewSignatureChange {
     fn from(c: agent_core::SignatureChange) -> Self {
         pb::ReviewSignatureChange {
@@ -4016,6 +4058,7 @@ impl From<agent_core::ReviewFacts> for pb::ReviewFacts {
             shellcheck: Some(f.shellcheck.into()),
             go_checks: Some(f.go_checks.into()),
             nearby: Some(f.nearby.into()),
+            digest: Some(f.digest.into()),
         }
     }
 }
@@ -4037,6 +4080,7 @@ impl From<pb::ReviewFacts> for agent_core::ReviewFacts {
             shellcheck: f.shellcheck.map(Into::into).unwrap_or_default(),
             go_checks: f.go_checks.map(Into::into).unwrap_or_default(),
             nearby: f.nearby.map(Into::into).unwrap_or_default(),
+            digest: f.digest.map(Into::into).unwrap_or_default(),
         }
     }
 }

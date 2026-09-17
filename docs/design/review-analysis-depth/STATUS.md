@@ -5,8 +5,9 @@ Legend: ⬜ designed, not built · 🟡 partially built · ✅ built + merged.
 **Track state: 🟡 building.** Inc 0 (design + this tracker, #387), Inc 1a (nix `review-toolbox`
 provisioning, #388), Inc 1b (the `ToolProvider` seam, #389), Inc 2 (the Go tool suite + parallel
 fan-out, #390), Inc 2-tel (per-tool telemetry, #391) and Inc 2-golangci (comprehensive golangci
-config, #392) are all merged. **Next: the live runpod/host sweep on l2** to measure the suite (gates
-Inc 3/4). The design-of-record
+config, #392) and Inc 3 (the deterministic analysis digest, #394) are all merged. **Next: the live
+runpod/host sweep on l2** to measure the suite + digest brief-size delta (gates Inc 4). The
+design-of-record
 ([README.md](README.md)) was written 2026-09-17,
 building on the completed [fleet-grounding](../fleet-grounding/README.md) track (worktree-rooting #382,
 grounding telemetry #381, collector skip/fail `reason` #386). The goal: run a **consistent,
@@ -26,7 +27,7 @@ optional MI50 summary) into a compact, high-signal brief that reaches Kimi befor
 | 2 | The Go suite — add `gosec` + `go vet` + `gofmt` alongside `golangci-lint`; **parallel fan-out** via `buffer_unordered(analyze_parallelism)` with per-tool `GOMAXPROCS = cpus/parallelism`; union-dedupe findings; `run_tool` returns `(run, findings)`; new JSON/text parsers each with adversarial path-escape tests | #390 | ✅ |
 | 2-tel | **per-tool telemetry** (split from Inc 2): `ReviewRecord.runs` serde side-channel (populated from `analysis.runs`) + `agent_review_tools` CH table (schema + `ReviewToolRow` + writer `Msg`/buffer/4-flush + telemetry dispatch) + `fleet-measure` ANALYZER section, so the live sweep is measurable | #391 | ✅ |
 | 2-golangci | comprehensive golangci config baked into the binary (`include_str!` → `--config`), so every reviewed Go repo gets the same curated linter set; `[review] analyzer_config` path override; config `govet`/`gosec`-free (run standalone); verified vs golangci-lint 2.12.2 | #392 | ✅ |
-| 3 | Deterministic Rust digest (Stage 2) — post-fan-out dedupe/rank-by-salience/bucket into a compact verbatim brief section | — | ⬜ |
+| 3 | Deterministic Rust digest (Stage 2) — `agent_core::{AnalysisDigest, RuleCount}` + `digest::compute` folds every AnalysisReport (analyzer + shellcheck + go_checks + nearby) into ONE section: dedupe by `(tool,rule,file,line)`, rank by changed-file + per-file risk score + severity, bucket a `(tool,rule)` tally so the capped tail stays visible; runs post-fan-out after risk; `render_digest` replaces the four per-report findings lists (run summaries stay); proto field 16 + roundtrip | #394 | ✅ |
 | 4 | MI50 local summary (Stage 3) — overflow-gated `LlmPool` summary, additive + bounded + fail-soft; lands only if net-positive | — | ⬜ |
 | 5 | `NixRunToolProvider` (allowlisted `nix run` escape hatch) + Rust/coverage parity (cargo-audit/cargo-deny, go coverage) | — | ⬜ |
 
@@ -63,4 +64,14 @@ parallel speedup, brief size, Kimi iters/at-cap) — the running proof the track
   repo with no `.golangci.yml` gets the full suite instead of bare defaults. `govet`/`gosec` are
   deliberately excluded (run as standalone tools with precise attribution). `[review] analyzer_config`
   overrides with a path. Config verified + smoke-run against the pinned golangci-lint 2.12.2.
-- _Inc 3 … (to be recorded)_
+- **Inc 3 (#394):** the analyzer's four separate findings lists (analyzer + shellcheck + go race/bench
+  + nearby, each independently capped, none risk-ranked) are now folded into ONE **analysis digest** —
+  a post-fan-out reduce (`digest::compute`, alongside salience/risk) that dedupes by
+  `(tool, rule, file, line)`, ranks findings by *changed-file → per-file risk score → severity → stable
+  tiebreak* (so a finding on a load-bearing/high-risk file leads), and emits a `(tool, rule)` tally so a
+  high-volume lint stays visible even when its lines fall past the render cap. `render_digest` replaces
+  the per-report findings lists; each report keeps only its run summary (status/timing). The digest is a
+  first-class fact — `agent_core::{AnalysisDigest, RuleCount}`, proto field 16, wire-roundtrip tested —
+  so a remote `ReviewService` returns it too. Purely tool-derived. **Live brief-size / Kimi iter delta
+  vs Inc 2 pending** the runpod/host sweep.
+- _Inc 4 … (to be recorded)_
