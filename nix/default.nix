@@ -106,6 +106,10 @@ let
     versions.ast-grep
     pkgs.git
     pkgs.ripgrep
+    # The static-analysis suite the review analyzer shells out to (golangci-lint /
+    # gosec / go / gofmt), bundled + version-pinned in nix/review-tools.nix. golangci
+    # itself needs a Go toolchain on PATH, which this now guarantees for the fleet.
+    review-toolbox
   ];
 
   # The `agent` binary, wrapped so the flake supplies every runtime tool on `PATH`.
@@ -152,6 +156,12 @@ let
     src = ../helpers/go-graph;
     vendorHash = "sha256-XZRy+J+JY9zELD9kydqOz+YdNSLyiVN+uxlvqD5yfkE=";
   };
+
+  # The review static-analysis tool suite (golangci-lint / gosec / go / gofmt) as one
+  # version-pinned bundle — see nix/review-tools.nix. Wired onto `agentRuntimePath`
+  # above (so the fleet reviewer finds the linters with no ambient env) and exposed
+  # as `packages.review-toolbox`. One nixpkgs bump floats every tool together.
+  review-toolbox = import ./review-tools.nix { inherit pkgs versions; };
 
   # The generated `crates/agent-grpc/src/constants.rs` (from nix/constants.nix).
   # One derivation, shared by the `gen-constants` app and the `constants-sync`
@@ -402,6 +412,7 @@ let
       agent
       go-ast
       go-graph
+      review-toolbox
       reviewGoCorpus
       ;
   };
@@ -532,7 +543,12 @@ let
 in
 {
   packages = {
-    inherit agent go-ast go-graph;
+    inherit
+      agent
+      go-ast
+      go-graph
+      review-toolbox
+      ;
     inherit (versions)
       promptfoo
       swebench
