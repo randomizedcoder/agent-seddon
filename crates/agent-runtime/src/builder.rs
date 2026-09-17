@@ -99,8 +99,16 @@ pub(crate) fn build_review_orchestrator(
     if review.shellcheck {
         orch = orch.with_shellcheck(sandbox.clone(), review.analyze_timeout_secs);
     }
-    if review.go_checks {
-        orch = orch.with_go_checks(sandbox.clone(), review.go_checks_timeout_secs);
+    // The go-checks collector hosts both race/bench (`go_checks`) and coverage
+    // (`go_coverage`, Inc 5b) — add it when either is on, each sub-run self-gated.
+    if review.go_checks || review.go_coverage {
+        orch = orch.with_go_checks(
+            sandbox.clone(),
+            review.go_checks_timeout_secs,
+            review.go_checks,
+            review.go_coverage,
+            review.go_coverage_min,
+        );
     }
     if review.nearby {
         orch = orch.with_nearby();
