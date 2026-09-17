@@ -12,9 +12,10 @@ renders deduped/risk-ranked/bucketed, and the model loop stayed at 0/at-cap (see
 sweep also confirmed **Inc 4 is justified** — big findings-heavy PRs still overflow the brief budget —
 and **Inc 4 (the overflow-gated MI50 digest summary, #396) is now merged**. **Inc 5a (Rust
 supply-chain parity — cargo-audit + cargo-deny, #398) is now merged and live-verified on l2**
-(4 offline advisory findings folded into the digest — see the evidence log). **Next: Inc 5b**
-(Go test coverage) and **Inc 5c** (`NixRunToolProvider`); a live MI50 net-positive check for Inc 4
-remains open. The design-of-record
+(4 offline advisory findings folded into the digest — see the evidence log). **Inc 5b (Go test
+coverage, #400 + parser fix) is now merged and live-verified on l2** (a no-test package flagged at
+0.0% + a partial package at 50.0%, folded into the digest). **Next: Inc 5c** (`NixRunToolProvider`);
+a live MI50 net-positive check for Inc 4 remains open. The design-of-record
 ([README.md](README.md)) was written 2026-09-17,
 building on the completed [fleet-grounding](../fleet-grounding/README.md) track (worktree-rooting #382,
 grounding telemetry #381, collector skip/fail `reason` #386). The goal: run a **consistent,
@@ -37,7 +38,7 @@ optional MI50 summary) into a compact, high-signal brief that reaches Kimi befor
 | 3 | Deterministic Rust digest (Stage 2) — `agent_core::{AnalysisDigest, RuleCount}` + `digest::compute` folds every AnalysisReport (analyzer + shellcheck + go_checks + nearby) into ONE section: dedupe by `(tool,rule,file,line)`, rank by changed-file + per-file risk score + severity, bucket a `(tool,rule)` tally so the capped tail stays visible; runs post-fan-out after risk; `render_digest` replaces the four per-report findings lists (run summaries stay); proto field 16 + roundtrip | #394 | ✅ |
 | 4 | MI50 local summary (Stage 3) — `ReviewFacts.digest_summary` (soft) via `digest::summarize` over the `LlmPool` with `RouteRole::Review`; **overflow-gated** (`should_summarize` = digest total ≥ 40 findings, calibrated from the sweep), prompt = the compact digest (rule tally + top findings, bounded — never raw diffs), output bounded + fail-soft (no pool / dead member / empty reply ⇒ `""`); `with_digest_summary` on the orchestrator, wired in the builder; proto field 17 on `ReviewFacts` | #396 | ✅ |
 | 5a | Rust supply-chain parity — `cargo-audit` (RustSec advisories, **offline** against the pinned `advisory-db` via `AGENT_ADVISORY_DB` on the wrapper) + `cargo-deny` (`--offline check bans sources`) alongside clippy; both provisioned in `review-toolbox`; per-`ToolTask` network-off; 2 defensive parsers → `Cargo.lock` findings; no wire change | #398 | ✅ |
-| 5b | Go test coverage — `go test -cover` on changed packages in the `go-checks` collector, opt-in (`go_coverage`), flags changed packages below a threshold | — | ⬜ |
+| 5b | Go test coverage — `go test -cover` on changed packages in the `go-checks` collector, opt-in (`go_coverage`+`go_coverage_min`), flags changed packages below the threshold (and no-test packages); each go-checks sub-run self-gated; `parse_coverage` maps the import path → changed file via the go.mod module | #400 (+fix) | ✅ |
 | 5c | `NixRunToolProvider` (allowlisted `nix run` escape hatch, locked to `flake.lock`'s nixpkgs via `AGENT_NIXPKGS_FLAKEREF` on the wrapper) | — | ⬜ |
 
 ## Evidence log
@@ -133,4 +134,14 @@ parallel speedup, brief size, Kimi iters/at-cap) — the running proof the track
     wire change — per-tool telemetry + `fleet-measure` pick the new tools up for free.
   - _Reproducibility win:_ the pinned DB is older than a live fetch (0 CVEs vs the live 2), so
     results don't drift with upstream — one `nix flake update` floats the DB with the toolset.
-- _Inc 5b / 5c … (to be recorded)_
+- **Inc 5b (#400 + parser fix):** the `go-checks` collector gained `go test -cover` (opt-in
+  `go_coverage`, threshold `go_coverage_min` default 50), reusing the same network-off sandbox run
+  + digest/telemetry plumbing as race/bench. **Live end-to-end on l2** (nix-wrapped `.#agent`,
+  `--review .` on a tiny Go module, `go_coverage_min=60`): `go test -cover: ok (2 findings)` →
+  `pkg/bar: 0.0% statement coverage (< 60%)` (a **no-test** package) + `pkg/foo: 50.0% (< 60%)`
+  (partial), both anchored on the changed `.go` file and folded into the digest (`go test
+  -cover/coverage ×2`). _Parser fix:_ the live run caught that real `go test -cover` prints a
+  no-test package as a **statusless** `\t<pkg>\t\tcoverage: 0.0%` line (no `ok`/`?` token), which
+  the first cut skipped — `parse_coverage` now derives the import path with or without a leading
+  status token (guarded to a real package path).
+- _Inc 5c … (to be recorded)_
