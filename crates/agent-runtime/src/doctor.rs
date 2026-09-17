@@ -34,6 +34,45 @@ fn short_detail(s: &str) -> String {
     out
 }
 
+/// The ClickHouse schema the running binary writes to, baked in so the doctor checks
+/// the live DB against exactly what THIS build expects (the `include_str!` of a
+/// cross-dir `.sql` mirrors `agent-config-store`'s embedded DDL). One source of truth
+/// — adding a table to `schema.sql` automatically extends the drift check.
+const SCHEMA_SQL: &str = include_str!("../../../nix/clickhouse/schema.sql");
+
+/// Parse the `agent.<name>` tables the schema declares (each
+/// `CREATE TABLE IF NOT EXISTS agent.<name>`), so the drift check tracks the schema
+/// with no hand-maintained list. Deduped + sorted for a stable report.
+fn schema_tables() -> Vec<&'static str> {
+    const MARKER: &str = "CREATE TABLE IF NOT EXISTS agent.";
+    let mut out: Vec<&'static str> = SCHEMA_SQL
+        .lines()
+        .filter_map(|line| line.trim_start().strip_prefix(MARKER))
+        .filter_map(|rest| {
+            rest.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .next()
+                .filter(|n| !n.is_empty())
+        })
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// The `expected` tables absent from `present` — the schema drift the probe reports.
+/// A missing table means the container predates a schema addition and the telemetry
+/// writer is *silently dropping* those rows (the exact gap a stale container hits).
+fn missing_tables<'a>(
+    expected: &[&'a str],
+    present: &std::collections::HashSet<String>,
+) -> Vec<&'a str> {
+    expected
+        .iter()
+        .copied()
+        .filter(|t| !present.contains(*t))
+        .collect()
+}
+
 /// Run every probe concurrently and collect the outcomes, preserving input order.
 pub async fn run(probes: Vec<Arc<dyn Probe>>) -> DoctorReport {
     let outcomes = futures_util::future::join_all(probes.iter().map(|p| p.check())).await;
@@ -190,19 +229,57 @@ impl Probe for ClickHouseProbe {
         );
         let start = Instant::now();
         let result = tokio::time::timeout(PROBE_TIMEOUT, history.ping()).await;
-        let ms = start.elapsed().as_millis();
         match result {
-            Ok(Ok(())) => ProbeOutcome::new(
-                "clickhouse",
-                ProbeStatus::Ok,
-                format!("{} reachable", self.addr),
-                ms,
-            ),
+            // Reachable — now check for schema drift (a table the binary writes to but
+            // that the (possibly long-lived) container lacks ⇒ silently dropped rows).
+            Ok(Ok(())) => {
+                let expected = schema_tables();
+                match tokio::time::timeout(PROBE_TIMEOUT, history.tables()).await {
+                    Ok(Ok(present)) => {
+                        let set: std::collections::HashSet<String> = present.into_iter().collect();
+                        let missing = missing_tables(&expected, &set);
+                        let ms = start.elapsed().as_millis();
+                        if missing.is_empty() {
+                            ProbeOutcome::new(
+                                "clickhouse",
+                                ProbeStatus::Ok,
+                                format!(
+                                    "{} reachable, all {} schema table(s) present",
+                                    self.addr,
+                                    expected.len()
+                                ),
+                                ms,
+                            )
+                        } else {
+                            ProbeOutcome::new(
+                                "clickhouse",
+                                ProbeStatus::Warn,
+                                format!(
+                                    "{} reachable but MISSING {} schema table(s): {} — re-run \
+                                     `nix run .#clickhouse-up` (drift; those telemetry rows are dropped)",
+                                    self.addr,
+                                    missing.len(),
+                                    missing.join(", ")
+                                ),
+                                ms,
+                            )
+                        }
+                    }
+                    // The table listing failed/timed out — don't downgrade a healthy
+                    // ping over a secondary query; report reachable with a caveat.
+                    _ => ProbeOutcome::new(
+                        "clickhouse",
+                        ProbeStatus::Ok,
+                        format!("{} reachable (schema check unavailable)", self.addr),
+                        start.elapsed().as_millis(),
+                    ),
+                }
+            }
             Ok(Err(e)) => ProbeOutcome::new(
                 "clickhouse",
                 ProbeStatus::Fail,
                 short_detail(&e.to_string()),
-                ms,
+                start.elapsed().as_millis(),
             ),
             Err(_) => ProbeOutcome::new(
                 "clickhouse",
@@ -212,7 +289,7 @@ impl Probe for ClickHouseProbe {
                     PROBE_TIMEOUT.as_secs(),
                     self.addr
                 ),
-                ms,
+                start.elapsed().as_millis(),
             ),
         }
     }
@@ -669,5 +746,68 @@ mod tests {
         };
         let o = p.check().await;
         assert_eq!(o.status, ProbeStatus::Skipped);
+    }
+
+    // --- schema-drift check: the tables come from the baked-in schema.sql ---
+
+    #[test]
+    fn positive_schema_tables_parsed_from_baked_schema() {
+        // desc: the drift check derives its expected set from the embedded schema.sql,
+        // so a schema addition is covered automatically. expect: the telemetry/review
+        // tables (incl. the one a stale container missed live) are all present, sorted.
+        let t = schema_tables();
+        for want in [
+            "agent_events",
+            "agent_usage",
+            "agent_reviews",
+            "agent_review_collectors",
+            "agent_review_tools", // the table the 4-day-old l2 container lacked
+            "agent_review_drafts",
+        ] {
+            assert!(t.contains(&want), "schema declares {want}: {t:?}");
+        }
+        let mut sorted = t.clone();
+        sorted.sort_unstable();
+        assert_eq!(t, sorted, "sorted");
+        let mut deduped = t.clone();
+        deduped.dedup();
+        assert_eq!(t.len(), deduped.len(), "deduped");
+    }
+
+    fn present(names: &[&str]) -> std::collections::HashSet<String> {
+        names.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn positive_missing_tables_none_when_all_present() {
+        // desc: every expected table is in the DB. expect: no drift.
+        let expected = ["a", "b", "c"];
+        assert!(missing_tables(&expected, &present(&["a", "b", "c"])).is_empty());
+    }
+
+    #[test]
+    fn negative_missing_tables_reports_the_absent_one() {
+        // desc: one expected table is absent. expect: exactly that one is reported.
+        let expected = ["a", "b", "c"];
+        assert_eq!(
+            missing_tables(&expected, &present(&["a", "c"])),
+            vec!["b"],
+            "the absent table is named"
+        );
+    }
+
+    #[test]
+    fn boundary_missing_tables_empty_db_reports_all() {
+        // desc: a fresh/empty DB. expect: every expected table is reported missing.
+        let expected = ["a", "b"];
+        assert_eq!(missing_tables(&expected, &present(&[])), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn corner_missing_tables_superset_present_is_clean() {
+        // desc: the DB has MORE tables than expected (a newer schema, or unrelated
+        // tables). expect: no drift — extras never count as missing.
+        let expected = ["a", "b"];
+        assert!(missing_tables(&expected, &present(&["a", "b", "x", "y"])).is_empty());
     }
 }

@@ -54,7 +54,15 @@ wiring crate that already owns `Config` and depends on `agent-telemetry`,
   - **ConfigProbe** — the config parsed into the typed schema; reports the selected
     seam impls (provider/context/policy/memory/tokenizer). Ok.
   - **ClickHouseProbe** — if `[telemetry] enabled`, dial + `ping()`; Ok/Fail. Off ⇒
-    Skipped.
+    Skipped. It also runs a **schema-drift check**: after a live ping it lists the
+    DB's tables (`ClickHouseHistory::tables()`) and compares them to the tables the
+    running binary expects — derived from the baked-in `nix/clickhouse/schema.sql`
+    (`include_str!`), so it tracks the schema with no hand-maintained list. A table
+    the binary writes to but the (possibly long-lived) container lacks is a **`Warn`**
+    naming the missing tables and pointing at `nix run .#clickhouse-up` /
+    `.#clickhouse-migrate` — because that drift means the telemetry writer is
+    *silently dropping* those rows (the exact gap a stale container hit during the
+    review-analysis-depth live sweep).
   - **ProviderKeyProbe** — the provider is selected and its API key is resolvable
     (inline / env / file). Present ⇒ Ok; absent ⇒ Warn (a local Ollama needs none)
     — no network.
