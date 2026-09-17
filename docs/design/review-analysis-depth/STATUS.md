@@ -10,9 +10,11 @@ runpod/host sweep on l2 (2026-09-17) validated the whole suite + digest end-to-e
 suite runs in parallel (gosec surfaced 55/29 findings a bare-default golangci missed), the digest
 renders deduped/risk-ranked/bucketed, and the model loop stayed at 0/at-cap (see the evidence log). The
 sweep also confirmed **Inc 4 is justified** — big findings-heavy PRs still overflow the brief budget —
-and **Inc 4 (the overflow-gated MI50 digest summary, #396) is now merged**. **Next: a live net-positive
-check** (add an `mi50` `[[pool.members]]` to the fleet toml and re-sweep a big PR) then **Inc 5**
-(`NixRunToolProvider` + Rust/coverage parity). The design-of-record
+and **Inc 4 (the overflow-gated MI50 digest summary, #396) is now merged**. **Inc 5a (Rust
+supply-chain parity — cargo-audit + cargo-deny, #398) is now merged and live-verified on l2**
+(4 offline advisory findings folded into the digest — see the evidence log). **Next: Inc 5b**
+(Go test coverage) and **Inc 5c** (`NixRunToolProvider`); a live MI50 net-positive check for Inc 4
+remains open. The design-of-record
 ([README.md](README.md)) was written 2026-09-17,
 building on the completed [fleet-grounding](../fleet-grounding/README.md) track (worktree-rooting #382,
 grounding telemetry #381, collector skip/fail `reason` #386). The goal: run a **consistent,
@@ -34,7 +36,9 @@ optional MI50 summary) into a compact, high-signal brief that reaches Kimi befor
 | 2-golangci | comprehensive golangci config baked into the binary (`include_str!` → `--config`), so every reviewed Go repo gets the same curated linter set; `[review] analyzer_config` path override; config `govet`/`gosec`-free (run standalone); verified vs golangci-lint 2.12.2 | #392 | ✅ |
 | 3 | Deterministic Rust digest (Stage 2) — `agent_core::{AnalysisDigest, RuleCount}` + `digest::compute` folds every AnalysisReport (analyzer + shellcheck + go_checks + nearby) into ONE section: dedupe by `(tool,rule,file,line)`, rank by changed-file + per-file risk score + severity, bucket a `(tool,rule)` tally so the capped tail stays visible; runs post-fan-out after risk; `render_digest` replaces the four per-report findings lists (run summaries stay); proto field 16 + roundtrip | #394 | ✅ |
 | 4 | MI50 local summary (Stage 3) — `ReviewFacts.digest_summary` (soft) via `digest::summarize` over the `LlmPool` with `RouteRole::Review`; **overflow-gated** (`should_summarize` = digest total ≥ 40 findings, calibrated from the sweep), prompt = the compact digest (rule tally + top findings, bounded — never raw diffs), output bounded + fail-soft (no pool / dead member / empty reply ⇒ `""`); `with_digest_summary` on the orchestrator, wired in the builder; proto field 17 on `ReviewFacts` | #396 | ✅ |
-| 5 | `NixRunToolProvider` (allowlisted `nix run` escape hatch) + Rust/coverage parity (cargo-audit/cargo-deny, go coverage) | — | ⬜ |
+| 5a | Rust supply-chain parity — `cargo-audit` (RustSec advisories, **offline** against the pinned `advisory-db` via `AGENT_ADVISORY_DB` on the wrapper) + `cargo-deny` (`--offline check bans sources`) alongside clippy; both provisioned in `review-toolbox`; per-`ToolTask` network-off; 2 defensive parsers → `Cargo.lock` findings; no wire change | #398 | ✅ |
+| 5b | Go test coverage — `go test -cover` on changed packages in the `go-checks` collector, opt-in (`go_coverage`), flags changed packages below a threshold | — | ⬜ |
+| 5c | `NixRunToolProvider` (allowlisted `nix run` escape hatch, locked to `flake.lock`'s nixpkgs via `AGENT_NIXPKGS_FLAKEREF` on the wrapper) | — | ⬜ |
 
 ## Evidence log
 
@@ -116,4 +120,17 @@ parallel speedup, brief size, Kimi iters/at-cap) — the running proof the track
   Rendered as a clearly-labelled SOFT section under the digest. **Live net-positive check pending** a
   sweep with an `mi50` `[[pool.members]]` in the fleet toml (the sweep confirmed the gate condition
   fires on big PRs and `summaries skipped "no pool configured"` — adding the member enables both).
-- _Inc 5 … (to be recorded)_
+- **Inc 5a (#398):** the analyzer's Rust path gained the supply-chain pair alongside clippy.
+  **Live end-to-end on l2** (nix-wrapped `.#agent`, `--review .` on a committed Rust change):
+  - `cargo-audit: ok (4 findings, 355 ms)` — run **offline** against the pinned `advisory-db`
+    store path (`AGENT_ADVISORY_DB`, `--db <db> -n --json`, no network): 3 unmaintained
+    (`paste`/`bincode`/`proc-macro-error2`) + 1 yanked (`chacha20@0.10.1`).
+  - `cargo-deny: ok (0 findings, 672 ms)` — `--offline check bans sources` (advisories left to
+    cargo-audit); `clippy: ok` still runs.
+  - **The digest folds them:** `Analysis digest — 4 finding(s) … deduped across tools,
+    risk-ranked`, by-rule tally `cargo-audit/RUSTSEC-2024-0436 ×1, …`, each at `Cargo.lock:0`
+    with the package label (`paste@1.0.15`), marked `[pre-existing]`. Purely tool-derived, no
+    wire change — per-tool telemetry + `fleet-measure` pick the new tools up for free.
+  - _Reproducibility win:_ the pinned DB is older than a live fetch (0 CVEs vs the live 2), so
+    results don't drift with upstream — one `nix flake update` floats the DB with the toolset.
+- _Inc 5b / 5c … (to be recorded)_
