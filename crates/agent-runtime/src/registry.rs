@@ -135,6 +135,7 @@ pub struct Registry {
     episodics: BTreeMap<&'static str, Factory<dyn EpisodicStore>>,
     semantics: BTreeMap<&'static str, Factory<dyn SemanticStore>>,
     tools: BTreeMap<&'static str, Factory<dyn Tool>>,
+    tool_providers: BTreeMap<&'static str, Factory<dyn agent_core::ToolProvider>>,
     #[cfg(feature = "search")]
     searches: BTreeMap<&'static str, Factory<dyn agent_core::SearchBackend>>,
     #[cfg(feature = "verifier")]
@@ -226,6 +227,18 @@ impl Registry {
         f: impl Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn Tool>> + Send + Sync + 'static,
     ) {
         self.tools.insert(name, Box::new(f));
+    }
+    /// Register a tool provider (review-analysis-depth Inc 1): resolves an analysis-tool
+    /// name to an invocable command. Selected by `[review] tool_provider`.
+    pub fn tool_provider(
+        &mut self,
+        name: &'static str,
+        f: impl Fn(&FactoryCtx<'_>) -> anyhow::Result<Arc<dyn agent_core::ToolProvider>>
+            + Send
+            + Sync
+            + 'static,
+    ) {
+        self.tool_providers.insert(name, Box::new(f));
     }
     #[cfg(feature = "search")]
     pub fn search(
@@ -350,6 +363,14 @@ impl Registry {
     }
     pub fn build_tool(&self, name: &str, ctx: &FactoryCtx<'_>) -> anyhow::Result<Arc<dyn Tool>> {
         build_from(&self.tools, "tool", name, ctx)
+    }
+    /// Resolve the configured `[review] tool_provider` string to its impl.
+    pub fn build_tool_provider(
+        &self,
+        name: &str,
+        ctx: &FactoryCtx<'_>,
+    ) -> anyhow::Result<Arc<dyn agent_core::ToolProvider>> {
+        build_from(&self.tool_providers, "tool provider", name, ctx)
     }
 
     /// All registered tool names (used when `[tools] enabled` is empty ⇒ all).
@@ -619,6 +640,13 @@ pub fn register_builtins(r: &mut Registry) {
             .map(|r| (r.tool.clone(), r.arg.clone()))
             .collect();
         Ok(Arc::new(crate::policy::AllowList::new(rules)) as Arc<dyn Policy>)
+    });
+
+    // --- tool providers (review analyzer tool resolution, review-analysis-depth) ---
+    // "path" trusts the process PATH (the nix-wrapped agent carries the review toolbox).
+    r.tool_provider("path", |_ctx| {
+        Ok(Arc::new(crate::tool_provider::PathToolProvider::new())
+            as Arc<dyn agent_core::ToolProvider>)
     });
 
     // --- verifiers (the tool-call correctness gate; off unless selected) ---

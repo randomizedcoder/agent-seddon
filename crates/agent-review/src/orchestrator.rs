@@ -164,12 +164,20 @@ impl ReviewOrchestrator {
     }
 
     /// Enable the static-analysis collector (`[review] analyze = true`). It needs a
-    /// [`Sandbox`] to shell out to the linters; without one it is a no-op.
-    pub fn with_analyzer(mut self, sandbox: Option<Arc<dyn Sandbox>>, timeout_secs: u64) -> Self {
+    /// [`Sandbox`] to shell out to the linters; without one it is a no-op. The
+    /// `tool_provider` resolves each linter's program (review-analysis-depth Inc 1);
+    /// `None` ⇒ resolve to the bare name on `PATH` (the prior behaviour).
+    pub fn with_analyzer(
+        mut self,
+        sandbox: Option<Arc<dyn Sandbox>>,
+        timeout_secs: u64,
+        tool_provider: Option<Arc<dyn agent_core::ToolProvider>>,
+    ) -> Self {
         self.sandbox = sandbox;
         self.analyze_timeout_secs = timeout_secs.max(1);
         self.collectors.push(Box::new(AnalyzerCollector {
             timeout_secs: self.analyze_timeout_secs,
+            tool_provider,
         }));
         self
     }

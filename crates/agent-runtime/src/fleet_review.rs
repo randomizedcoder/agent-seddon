@@ -166,6 +166,9 @@ pub(crate) struct FleetReviewCtxFactory {
     pr_ref_override: String,
     sandbox: Option<Arc<dyn agent_core::Sandbox>>,
     pool: Option<Arc<dyn agent_core::LlmPool>>,
+    /// Static-analysis tool resolver (review-analysis-depth Inc 1), shared with the
+    /// process-global path so every row's analyzer resolves tools identically.
+    tool_provider: Option<Arc<dyn agent_core::ToolProvider>>,
     search: Option<Arc<dyn agent_core::SearchBackend>>,
     /// Byte budget for the rendered grounded brief (same knob as the in-loop review).
     budget: usize,
@@ -185,6 +188,7 @@ impl FleetReviewCtxFactory {
         pr_ref_override: String,
         sandbox: Option<Arc<dyn agent_core::Sandbox>>,
         pool: Option<Arc<dyn agent_core::LlmPool>>,
+        tool_provider: Option<Arc<dyn agent_core::ToolProvider>>,
         search: Option<Arc<dyn agent_core::SearchBackend>>,
         budget: usize,
         forge_registry: Option<Arc<dyn agent_core::ForgeRegistry>>,
@@ -196,6 +200,7 @@ impl FleetReviewCtxFactory {
             pr_ref_override,
             sandbox,
             pool,
+            tool_provider,
             search,
             budget,
             forge_registry,
@@ -294,6 +299,7 @@ impl FleetReviewFactory for FleetReviewCtxFactory {
             forge,
             sandbox: self.sandbox.clone(),
             pool: self.pool.clone(),
+            tool_provider: self.tool_provider.clone(),
             review: self.review.clone(),
             metrics: self.metrics.clone(),
             budget: self.budget,
@@ -529,6 +535,7 @@ mod tests {
             root,
             ReviewCfg::default(),
             String::new(),
+            None,
             None,
             None,
             None,

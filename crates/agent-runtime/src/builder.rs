@@ -49,6 +49,7 @@ pub(crate) fn build_review_orchestrator(
     forge: Option<Arc<dyn agent_core::Forge>>,
     sandbox: Option<Arc<dyn agent_core::Sandbox>>,
     pool: Option<Arc<dyn agent_core::LlmPool>>,
+    tool_provider: Option<Arc<dyn agent_core::ToolProvider>>,
     review: &crate::config::ReviewCfg,
     metrics: Metrics,
 ) -> agent_review::ReviewOrchestrator {
@@ -60,7 +61,11 @@ pub(crate) fn build_review_orchestrator(
         .with_deadline(std::time::Duration::from_secs(review.deadline_secs));
     // Static analysis (linters via the shared sandbox; fail-soft without one).
     if review.analyze {
-        orch = orch.with_analyzer(sandbox.clone(), review.analyze_timeout_secs);
+        orch = orch.with_analyzer(
+            sandbox.clone(),
+            review.analyze_timeout_secs,
+            tool_provider.clone(),
+        );
     }
     // Signature-diff — pure in-process.
     if review.signatures {
@@ -1044,6 +1049,17 @@ pub async fn build_agent_with(
     #[cfg(not(feature = "metrics-proxy"))]
     let metrics_proxy_seam: Option<Arc<dyn agent_core::MetricsProxy>> = None;
 
+    // Static-analysis tool provider (review-analysis-depth Inc 1): resolves a
+    // logical tool name → the runnable command. `"path"` (default) execs bare
+    // names off the wrapped runtime PATH (nix-provisioned toolbox). Built once
+    // here so both the process-global orchestrator and the per-row fleet factory
+    // share the identical resolver.
+    #[cfg(feature = "review")]
+    let review_tool_provider: Option<Arc<dyn agent_core::ToolProvider>> = {
+        let tp_ctx = crate::registry::FactoryCtx::new(&cfg, &metrics);
+        Some(registry.build_tool_provider(&cfg.review.tool_provider, &tp_ctx)?)
+    };
+
     #[cfg(feature = "review")]
     let review_collector_seam: Option<Arc<dyn agent_core::ReviewCollector>> =
         match cfg.review.backend.as_str() {
@@ -1067,6 +1083,7 @@ pub async fn build_agent_with(
                     review_forge,
                     shared_sandbox.clone(),
                     llm_pool_seam.clone(),
+                    review_tool_provider.clone(),
                     &cfg.review,
                     metrics.clone(),
                 );
@@ -1124,6 +1141,7 @@ pub async fn build_agent_with(
                     cfg.git.pr_ref_template.clone(),
                     shared_sandbox.clone(),
                     llm_pool_seam.clone(),
+                    review_tool_provider.clone(),
                     search,
                     cfg.review.context_budget_bytes,
                     forge_registry_seam.clone(),

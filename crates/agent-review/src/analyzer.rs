@@ -19,6 +19,10 @@ const MAX_MSG: usize = 400;
 
 pub(crate) struct AnalyzerCollector {
     pub timeout_secs: u64,
+    /// Resolves each linter's program (review-analysis-depth Inc 1). `None` ⇒ the bare
+    /// tool name on `PATH` (the prior behaviour). A provider that cannot supply a tool
+    /// (returns `None`) makes that linter a fail-soft `skipped` run.
+    pub tool_provider: Option<std::sync::Arc<dyn agent_core::ToolProvider>>,
 }
 
 #[async_trait::async_trait]
@@ -57,24 +61,32 @@ impl FactCollector for AnalyzerCollector {
         let mut findings = Vec::new();
 
         if has_go {
-            let dirs = go_scope(&changed);
-            let cmd = format!(
-                "golangci-lint run --output.json.path stdout --timeout {}s {}",
-                self.timeout_secs,
-                dirs.join(" ")
-            );
-            run_tool(
-                &sandbox,
-                &ctx.repo_root,
-                "golangci-lint",
-                &cmd,
-                self.timeout_secs,
-                &changed_set,
-                parse_golangci,
-                &mut runs,
-                &mut findings,
-            )
-            .await;
+            match self.resolve_program("golangci-lint").await {
+                Some((program, prefix)) => {
+                    let dirs = go_scope(&changed);
+                    let cmd = format!(
+                        "{prefix}{program} run --output.json.path stdout --timeout {}s {}",
+                        self.timeout_secs,
+                        dirs.join(" ")
+                    );
+                    run_tool(
+                        &sandbox,
+                        &ctx.repo_root,
+                        "golangci-lint",
+                        &cmd,
+                        self.timeout_secs,
+                        &changed_set,
+                        parse_golangci,
+                        &mut runs,
+                        &mut findings,
+                    )
+                    .await;
+                }
+                None => runs.push(skipped_run(
+                    "golangci-lint",
+                    "tool unavailable via the configured provider",
+                )),
+            }
         }
         if has_rust {
             let crates = rust_scope(&ctx.repo_root, &changed);
@@ -84,20 +96,30 @@ impl FactCollector for AnalyzerCollector {
                     "no owning crate for the changed files",
                 ));
             } else {
-                let pkgs: String = crates.iter().map(|c| format!("-p {c} ")).collect();
-                let cmd = format!("cargo clippy --message-format=json --quiet {pkgs}");
-                run_tool(
-                    &sandbox,
-                    &ctx.repo_root,
-                    "clippy",
-                    &cmd,
-                    self.timeout_secs,
-                    &changed_set,
-                    parse_clippy,
-                    &mut runs,
-                    &mut findings,
-                )
-                .await;
+                match self.resolve_program("cargo").await {
+                    Some((program, prefix)) => {
+                        let pkgs: String = crates.iter().map(|c| format!("-p {c} ")).collect();
+                        let cmd = format!(
+                            "{prefix}{program} clippy --message-format=json --quiet {pkgs}"
+                        );
+                        run_tool(
+                            &sandbox,
+                            &ctx.repo_root,
+                            "clippy",
+                            &cmd,
+                            self.timeout_secs,
+                            &changed_set,
+                            parse_clippy,
+                            &mut runs,
+                            &mut findings,
+                        )
+                        .await;
+                    }
+                    None => runs.push(skipped_run(
+                        "clippy",
+                        "cargo unavailable via the configured provider",
+                    )),
+                }
             }
         }
 
@@ -119,6 +141,26 @@ impl FactCollector for AnalyzerCollector {
                 findings,
             },
         })
+    }
+}
+
+impl AnalyzerCollector {
+    /// Resolve a linter's program (+ any prefix args) via the configured provider.
+    /// `None` provider ⇒ the bare name on `PATH` (the prior behaviour). `Some(_)` +
+    /// unresolved ⇒ `None`, so the caller records a fail-soft `skipped` run. The prefix
+    /// is a ready-to-splice string ("" or "`<args> `") for the shell command.
+    async fn resolve_program(&self, name: &str) -> Option<(String, String)> {
+        match &self.tool_provider {
+            None => Some((name.to_string(), String::new())),
+            Some(p) => p.resolve(name).await.map(|c| {
+                let prefix = if c.prefix_args.is_empty() {
+                    String::new()
+                } else {
+                    format!("{} ", c.prefix_args.join(" "))
+                };
+                (c.program, prefix)
+            }),
+        }
     }
 }
 
