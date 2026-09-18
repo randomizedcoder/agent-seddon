@@ -1,9 +1,11 @@
 # Prompt Library — implementation status
 
-The living tracker for the [Prompt Library](README.md) design. **Increments 01
-(`647add8`), 03 (PR #145), 02 (PR #146), 04 (PR #147) and 05 (`48b0cc4`, PR #148) are
-merged**; **increment 06 (example content) is coded and in review** — the final
-increment, so the track is feature-complete once it lands. Where the shipped code
+The living tracker for the [Prompt Library](README.md) design. **Rounds 1–2 (increments
+01–06) are complete**: 01 (`647add8`), 03 (PR #145), 02 (PR #146), 04 (PR #147) and 05
+(`48b0cc4`, PR #148) are merged; increment 06 (example content) is coded and in review —
+the final Round-1/2 increment. **[Round 3](#round-3--personalities-versioning--upstream-sourced-prompts)
+(personalities, versioning, upstream-sourced prompts; docs 06–11) is designed** — see the
+Round-3 table below. Where the shipped code
 refines a design detail, this file becomes authoritative (the same convention as
 [`../portal/STATUS.md`](../portal/STATUS.md) and
 [`../adaptive-cognition/STATUS.md`](../adaptive-cognition/STATUS.md)).
@@ -36,6 +38,33 @@ the byte-identical default. 04 completes the wire so a remote/portal client sees
 selection. 05 adds the database backend **as its own PR** so the first workspace DB
 dependency lands reviewable in isolation. 06 is inert content that turns the capability
 on for whoever opts in.
+
+## Round 3 — personalities, versioning & upstream-sourced prompts
+
+**Design of record: [`README.md` (Round 3)](README.md) + docs 06–11.** Round 3 lets a
+user run agent-seddon *as* a peer harness (pi/hermes/opencode/codex) or the native
+best-of-breed blend, by selecting a **named base** ([`07`](07-personalities.md)); peer
+prompts are sourced from nixpkgs `.src` ([`09`](09-nixpkgs-sourcing.md)), versioned with
+provenance ([`08`](08-versioning-and-provenance.md)), switchable from the portal
+([`10`](10-portal-selector.md)), and refreshed by an MI50 job ([`11`](11-refresh-job.md)).
+It **extends** Rounds 1–2 and amends two deferrals (see below). **All phases ⬜ designed**
+(this pass is docs-only); each has its own status doc with a table-driven test spec.
+
+Legend: ✅ merged · 🔶 in review · ⬜ designed/not-started.
+
+| Phase | Increment | Wire | Design | Status doc | Status |
+|---|---|:--:|:--:|---|:--:|
+| — | **Docs** — reference doc + Round-3 design docs 06–11 + status docs (this pass) | — | 06–11 | this file | done-on-merge |
+| 1 | **Personalities dimension + seed set** — `[agent] personality`, closed set, personality-aware `resolve_system_prompt`, inert seed incl. the authored blend | — | [`07`](07-personalities.md) | [`status/round3-01-personalities.md`](status/round3-01-personalities.md) | ⬜ designed |
+| 2 | **Versioning + provenance** — `version`/`source_ref` on `PromptEntry` + sqlite history + additive proto fields | ✅ additive | [`08`](08-versioning-and-provenance.md) | [`status/round3-02-versioning.md`](status/round3-02-versioning.md) | ⬜ designed |
+| 3 | **Portal selector + set-active** — discover from store; live `SetActivePersonality` RPC + Flutter selector | ✅ additive | [`10`](10-portal-selector.md) | [`status/round3-03-portal-selector.md`](status/round3-03-portal-selector.md) | ⬜ designed |
+| 4 | **nixpkgs source wiring** — flake inputs (opencode/codex/pi `.src` + hermes locked) + prompt-sources derivation | — | [`09`](09-nixpkgs-sourcing.md) | [`status/round3-04-nixpkgs-sourcing.md`](status/round3-04-nixpkgs-sourcing.md) | ⬜ designed |
+| 5 | **MI50 auto-refresh job (LAST)** — detect lock change → re-extract → upsert new version; extractor fuzzing | — | [`11`](11-refresh-job.md) | [`status/round3-05-refresh-job.md`](status/round3-05-refresh-job.md) | ⬜ designed |
+
+**Amended Round-1/2 deferrals** (see the [Deferred](#deferred-documented-not-scoped-here)
+section): "Prompt versioning / history" and "Live re-resolution of the base mid-session"
+are both delivered by Round 3 (phases 2 and 3 respectively). "No new mode taxonomy" is
+**intact** — personality is an orthogonal *named-base* axis, not a `TaskMode`.
 
 ## Dependencies
 
@@ -209,6 +238,11 @@ independent increment:
   the agent keeps no SQL client; the service owns the database.
 - **Per-mode *tool* gating** (opencode's `plan` denies edits) — a `Policy`-seam concern.
 - **Live re-resolution of the base `system/`** mid-session. Base is resolved at startup
-  (next run); only the situational fragments + lens are live. Unmotivated to change.
+  (next run); only the situational fragments + lens are live. *(Delivered in Round 3
+  phase 3 — the portal's `SetActivePersonality` re-resolves the head base live via the
+  personality-aware `resolve_system_prompt`; [`10-portal-selector.md`](10-portal-selector.md).)*
 - **Prompt versioning / history.** None in the shipped `PromptStore`; git (file) or the
-  DB's tooling is the history.
+  DB's tooling is the history. *(Amended in Round 3 phase 2 — `version` + `source_ref`
+  are added **for imported personalities**, which git-of-our-repo can't track; operator
+  file-backend prompts keep git as their history.
+  [`08-versioning-and-provenance.md`](08-versioning-and-provenance.md).)*

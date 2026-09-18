@@ -67,6 +67,10 @@ batteries-included), and [opencode](https://github.com/anomalyco/opencode)
 > are active projects and will have moved on. Every cell traces to a source path
 > in [`docs/features-comparison.md`](docs/features-comparison.md).
 
+For an orientation map of the local peer clones — what each is, where its prompts
+live, and how to reach the same source reproducibly through nixpkgs — see
+[`docs/reference/peer-harnesses.md`](docs/reference/peer-harnesses.md).
+
 **Fundamentals — all four have these.** The last column is the interesting one.
 
 | Capability | pi | hermes | opencode | What agent-seddon does with it |

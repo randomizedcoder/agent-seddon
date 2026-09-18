@@ -12,12 +12,22 @@ It is a draft to refine; where the shipped code later refines a detail,
 [`../adaptive-cognition/`](../adaptive-cognition/README.md) and
 [`../code-review/`](../code-review/README.md).
 
-> **Design in two rounds.** Round 1 (docs 01–03) gave the prompts a home and a
+> **Design in three rounds.** Round 1 (docs 01–03) gave the prompts a home and a
 > base + per-mode-fragment layout. Round 2 (docs 04–05) generalises the per-mode
 > *key* into a freeform **tag** so prompts are chosen by *any* aspect of the
 > situation, and makes **storage a backend seam** so the same catalog can live in
 > files or a database. Round 2 **subsumes** Round 1: `mode` becomes one tag among
 > many, and `prompts/modes/<mode>/` becomes sugar for "tag these `mode:<mode>`."
+>
+> **Round 3 (docs 06–11)** adds **personalities** — running agent-seddon *as* one of
+> the peer harnesses (pi/hermes/opencode/codex) by adopting its system-prompt text,
+> plus a native **agent-seddon best-of-breed** blend. A personality is a **named
+> base** selected from a closed set (the axis above the additive tag fragments); peer
+> prompts are **sourced from nixpkgs `.src`** (hermes via a locked input) and kept
+> fresh by an **MI50 refresh job**, with **versioning + provenance** added to the
+> store so imported prompts are traceable. Round 3 **extends** Rounds 1–2 and amends
+> two of their non-goals (versioning; live base re-resolution) — see the amended
+> [Non-goals](#non-goals) and [`STATUS.md`](STATUS.md).
 
 ## The idea
 
@@ -122,9 +132,23 @@ Everything above the goal is a legibility win the portal can render verbatim via
 | 03 | [`03-content.md`](03-content.md) | The **drafted prompt text** — the base fragments and per-mode (tagged) fragments, grounded in the repo's real conventions. |
 | 04 | [`04-selection.md`](04-selection.md) | **Situational selection**: the tag model, `PromptContext`, the subset-match rule, which axes are free vs deferred, legibility, and tag security. |
 | 05 | [`05-storage.md`](05-storage.md) | **Storage backends**: `[prompts] backend = file \| sqlite \| grpc`, the SQLite schema + dependency honesty, and the file↔db legibility bridge. |
-| — | [`STATUS.md`](STATUS.md) | The implementation tracker and increment order. |
+| 06 | [`06-personality-comparison.md`](06-personality-comparison.md) | **Round 3.** The four peers' *system-prompt text* compared (adds codex), each one's strengths/weaknesses, and the synthesis → the agent-seddon best-of-breed base. |
+| 07 | [`07-personalities.md`](07-personalities.md) | **Round 3.** The **personality** axis: named bases from a closed set; personality-aware base-resolution ladder; the additive-vs-base-selection reconciliation; security. |
+| 08 | [`08-versioning-and-provenance.md`](08-versioning-and-provenance.md) | **Round 3.** `version` + `source_ref` on the store (amends the "no versioning" non-goal); sqlite history table; additive proto fields; grpc, no direct-SQL dep. |
+| 09 | [`09-nixpkgs-sourcing.md`](09-nixpkgs-sourcing.md) | **Round 3.** Sourcing peer prompts from nixpkgs `<pkg>.src` (+ hermes locked input); the `.src`-not-`$out` rule; the prompt-sources derivation; licensing. |
+| 10 | [`10-portal-selector.md`](10-portal-selector.md) | **Round 3.** The Flutter personality selector — discover from the store, live set-active RPC (vs restart-banner); delivers live base re-resolution. |
+| 11 | [`11-refresh-job.md`](11-refresh-job.md) | **Round 3 (last phase).** The MI50 detect-change → re-extract → upsert-new-version job; the extractor as the untrusted parser + first real fuzz harness. |
+| — | [`../../reference/peer-harnesses.md`](../../reference/peer-harnesses.md) | Orientation map of the peer clones + nixpkgs (where each prompt lives, how to source it reproducibly). |
+| — | [`STATUS.md`](STATUS.md) | The implementation tracker and increment order (Rounds 1–2 shipped; Round 3 designed). |
 
 ## Compare and contrast: how three peer agents organise prompts
+
+> **Round 3 extends this.** The table below compares how *three* peers **organise**
+> prompts (files vs constants vs literals) — the Round-1/2 lens. Round 3's
+> [`06-personality-comparison.md`](06-personality-comparison.md) adds **codex** as a
+> fourth peer and compares the actual prompt **text** (identity, tool-use, safety,
+> planning, persistence), concluding in the agent-seddon best-of-breed base. Read this
+> for structure; read 06 for the text and the synthesis.
 
 The three peer codebases in the parity set each solve "base prompt + situational
 variation" differently. The comparison sharpens our choices; the last column is
@@ -208,10 +232,24 @@ SQLite `bound-parameters` note in [`05-storage.md`](05-storage.md#sqlite--first-
   `tier`/`effort`/`language`/`task` are expressible as tags today but inert until
   their signal source lands — each its own increment ([`STATUS.md`](STATUS.md)); the
   `tier` case additionally needs the loop to decide the tier *before* assembly.
-- **No prompt versioning / history.** The shipped `PromptStore` has none; this design
-  does not add it. Git (file backend) or the DB's own tooling is the history.
+- **No prompt versioning / history.** *(Amended in Round 3 —
+  [`08-versioning-and-provenance.md`](08-versioning-and-provenance.md).)* This held
+  while prompts were operator-authored here — git is their history. Round 3 imports
+  **external upstream prompts** (peer personalities) machine-written into SQL, for which
+  git-of-our-repo records no provenance; so `version` + `source_ref` are added **for
+  imported personalities**. Operator-authored file-backend prompts are unchanged — git
+  stays their history.
 - **No new mode taxonomy.** The six `TaskMode`s are fixed by
   [`adaptive-cognition/01-mode.md`](../adaptive-cognition/01-mode.md); this design
-  makes `mode` a tag, it does not add or rename modes.
+  makes `mode` a tag, it does not add or rename modes. *(Round 3's **personality** is a
+  distinct, orthogonal axis — a **named base**, not a `TaskMode` — so this non-goal is
+  intact: personalities do not touch the mode taxonomy.
+  [`07-personalities.md`](07-personalities.md).)*
+- **Personality is base-*selection*, not fragment-*replacement*.** *(Round 3 clarifies
+  the "additive, not replace" principle above.)* The additive rule governs the
+  situational tier (mode/`language:`… fragments always append). A **personality** picks
+  *which base* fills the stable tier — a level above the fragments, which still append
+  to whatever base is active. The only cost is a one-time cache-prefix re-warm on a
+  (rare, explicit) switch. [`07-personalities.md`](07-personalities.md).
 - **No per-mode *tool* gating.** opencode's modes also restrict tools (e.g. `plan`
   denies edits); that is a `Policy`-seam concern, explicitly out of scope here.
