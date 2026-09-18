@@ -33,6 +33,14 @@ calls (parallel-safe ones concurrently, results kept in call order) → append
 episodic events → compact if over budget → repeat until done/`max_iterations`. At
 session end it calls `distill`. `Session` keeps the working set across REPL turns.
 
+A **non-convergence guard** (`[agent] max_unproductive_iters`, default 3; `0`
+disables) caps a stalled loop: each turn's tool calls are signature-hashed
+(name+args), and after that many *consecutive* turns that introduce no new call —
+the model re-issuing calls it already made — the loop force-finalizes early (the
+same tools-disabled finalize turn used at `max_iterations`) instead of spinning to
+the ceiling. Distinct exploration always introduces a novel signature, so a
+progressing run is never cut. Early stops are counted by `agent_loop_early_stops_total`.
+
 ## Config ([`config.rs`](../../crates/agent-runtime/src/config.rs))
 
 The TOML schema (`Config` + per-section structs). Every field is
