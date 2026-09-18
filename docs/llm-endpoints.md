@@ -23,8 +23,8 @@ Served via a LiteLLM proxy in front of a RunPod pod. **Valid TLS** (no
 
 | | |
 |---|---|
-| **OpenAI-compat base** | `https://175ppwu9phh1r6-4000.proxy.runpod.net/v1` |
-| **LiteLLM admin UI** | `https://175ppwu9phh1r6-4000.proxy.runpod.net/ui` |
+| **OpenAI-compat base** | `https://talsatati0ku25-4000.proxy.runpod.net/v1` |
+| **LiteLLM admin UI** | `https://talsatati0ku25-4000.proxy.runpod.net/ui` |
 | **Model name** | `moonshotai/Kimi-K3` |
 | **API key** | `./kimi-api-key` (git-ignored, local only) |
 | **TLS** | valid — do **not** set `insecure_tls` / `AGENT_E2E_INSECURE_TLS` |
@@ -32,7 +32,7 @@ Served via a LiteLLM proxy in front of a RunPod pod. **Valid TLS** (no
 ```sh
 # reachability + model list
 curl -s -H "Authorization: Bearer $(cat kimi-api-key)" \
-  https://175ppwu9phh1r6-4000.proxy.runpod.net/v1/models | jq -r '.data[].id'
+  https://talsatati0ku25-4000.proxy.runpod.net/v1/models | jq -r '.data[].id'
 ```
 
 ## GLM-5.2 — the judge / verifier (grades or verifies the generator)
@@ -68,7 +68,7 @@ The eval/e2e harnesses read the **generator** from `AGENT_E2E_BASE_URL` / `_MODE
 
 ```sh
 GITHUB_TOKEN="$(gh auth token)" \
-AGENT_E2E_BASE_URL="https://175ppwu9phh1r6-4000.proxy.runpod.net/v1" \
+AGENT_E2E_BASE_URL="https://talsatati0ku25-4000.proxy.runpod.net/v1" \
 AGENT_E2E_MODEL="moonshotai/Kimi-K3" \
 AGENT_E2E_API_KEY_FILE="./kimi-api-key" \
 nix run .#fleet-e2e
