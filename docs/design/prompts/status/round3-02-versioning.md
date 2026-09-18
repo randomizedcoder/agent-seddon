@@ -1,6 +1,20 @@
 # Round 3 · Phase 2 — Versioning & provenance
 
-**Status: ⬜ designed.** Design: [`../08-versioning-and-provenance.md`](../08-versioning-and-provenance.md).
+**Status: ✅ built.** Design: [`../08-versioning-and-provenance.md`](../08-versioning-and-provenance.md).
+
+**As-built deltas from the design:**
+- **Companion tables, not `ALTER TABLE`.** The sqlite tier has no migration framework, so
+  `version`/`source_ref` live in two `CREATE TABLE IF NOT EXISTS` sidecars — `prompt_meta`
+  (live version + provenance pointer) and the append-only `prompt_history` — rather than new
+  columns on `prompts` (the `prompt_tags` extension idiom; an existing catalog upgrades with
+  no `ALTER`). Same external semantics.
+- **`history()` / `rollback()` are inherent `SqlitePromptStore` methods** (not trait methods,
+  no new RPC — consistent with "no new `PromptService` RPCs in Phase 2"). `version` +
+  `source_ref` ride the existing `PromptEntry`, so `get`/`list`/`put` + the wire carry them.
+- **No new gate check file:** the versioning suite runs under the existing
+  `nix/checks/prompt-sqlite.nix` (same `--features prompt-sqlite`), whose comment now notes it.
+- **Clock seam:** `SqlitePromptStore::with_clock(Arc<dyn Fn() -> u64>)` (default wall-clock ms)
+  stamps `prompt_history.updated_ms`; tests inject a fixed clock.
 
 ## Goal
 
@@ -13,11 +27,11 @@ SQL client** added to the agent.
 | File | Change |
 |---|---|
 | `crates/agent-core/src/lib.rs` | `PromptEntry.version: u32` + `source_ref: String` |
-| `crates/agent-prompt/src/sqlite.rs` | `version`/`source_ref` columns + `prompt_history` table + versioned `put` / no-op / rollback |
-| `crates/agent-prompt/src/{store.rs,lib.rs}` | carry fields; `migrate` preserves them; file backend derives (git = history) |
-| `crates/agent-proto/proto/agent/v1/prompt.proto` | `version = 8`, `source_ref = 9` (**additive**) |
-| `crates/agent-grpc/src/{server,client}/prompt.rs` | thread the fields (TCP+UDS roundtrip) |
-| `nix/checks/prompt-versioning.nix` (new) | feature-scoped execution check (the `prompt-sqlite.nix` pattern) |
+| `crates/agent-prompt/src/sqlite.rs` | `prompt_meta` + `prompt_history` companion tables (as-built, not columns) + versioned `put` / no-op / `history` / `rollback` + `with_clock` |
+| `crates/agent-prompt/src/{store.rs,lib.rs}` | carry fields; `migrate` preserves them; file backend derives (git = history); `validate_imported_source_ref` + `MAX_SOURCE_REF_LEN` |
+| `crates/agent-proto/proto/agent/v1/prompt.proto` | `version = 8`, `source_ref = 9` (**additive**; baseline `buf.image.binpb` bumped) |
+| `crates/agent-proto/src/convert.rs` + `crates/agent-grpc` (wire) | thread the fields (TCP+UDS roundtrip) |
+| `nix/checks/prompt-sqlite.nix` (reused) | the versioning suite runs under the existing feature-scoped check (no new file) |
 
 **Wire:** additive only — `buf breaking` green, no `buf.image.binpb` bump.
 

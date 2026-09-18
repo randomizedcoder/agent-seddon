@@ -38,6 +38,9 @@ message PromptEntry {
   bool read_only = 5;
   uint32 order = 6;
   repeated string tags = 7; // selection tags (SystemFragment only): mode:<m>, language:<l>, …
+  // Round-3 versioning/provenance (docs/design/prompts/08-versioning-and-provenance.md):
+  uint32 version = 8;     // monotonic revision per (kind,id); 0 = un-versioned (file backend)
+  string source_ref = 9; // opaque, bounded provenance; empty = operator-authored
 }
 
 message PromptListRequest {

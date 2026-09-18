@@ -1076,6 +1076,7 @@ async fn prompt_crud_roundtrips(#[case] transport: Transport) {
             read_only: false,
             order: 0,
             tags: Vec::new(),
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -1133,6 +1134,7 @@ async fn adversarial_prompt_traversal_rejected_over_wire() {
             read_only: false,
             order: 0,
             tags: Vec::new(),
+            ..Default::default()
         })
         .await;
     assert!(err.is_err(), "traversal must be rejected across the wire");
@@ -1166,6 +1168,7 @@ async fn system_fragment_tags_roundtrip(#[case] transport: Transport) {
             read_only: false,
             order: 0,
             tags: Vec::new(),
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -1187,6 +1190,92 @@ async fn system_fragment_tags_roundtrip(#[case] transport: Transport) {
     assert_eq!(frags.len(), 1);
     assert_eq!(frags[0].id, "review/0001_focus.md");
     assert!(frags[0].tags.contains(&"language:rust".to_string()));
+}
+
+// An in-test PromptStore that echoes a single entry verbatim — including the Round-3
+// `version` / `source_ref` — so the wire test can prove those additive `PromptEntry`
+// fields survive the hop. The file backend always reports 0/"" and cannot exercise them.
+struct EchoStore(agent_core::PromptEntry);
+
+#[async_trait::async_trait]
+impl agent_core::PromptStore for EchoStore {
+    async fn list(
+        &self,
+        _kind: Option<agent_core::PromptKind>,
+    ) -> agent_core::Result<Vec<agent_core::PromptEntry>> {
+        Ok(vec![self.0.clone()])
+    }
+    async fn get(&self, _r: &agent_core::PromptRef) -> agent_core::Result<agent_core::PromptEntry> {
+        Ok(self.0.clone())
+    }
+    async fn put(
+        &self,
+        entry: agent_core::PromptEntry,
+    ) -> agent_core::Result<agent_core::PromptEntry> {
+        Ok(entry)
+    }
+    async fn delete(&self, _r: &agent_core::PromptRef) -> agent_core::Result<bool> {
+        Ok(false)
+    }
+    async fn select(
+        &self,
+        _ctx: &agent_core::PromptContext,
+    ) -> agent_core::Result<Vec<agent_core::PromptEntry>> {
+        Ok(Vec::new())
+    }
+    async fn preview_assembled(
+        &self,
+        _ctx: &agent_core::PromptContext,
+        _goal: &str,
+    ) -> agent_core::Result<Vec<agent_core::Message>> {
+        Ok(Vec::new())
+    }
+}
+
+// The Round-3 additive fields (`PromptEntry.version` = 8, `source_ref` = 9) are faithful
+// on the wire in both directions and on both transports.
+#[rstest]
+#[case::tcp(Transport::Tcp)]
+#[case::uds(Transport::Uds)]
+#[tokio::test]
+async fn prompt_version_and_source_ref_roundtrip(#[case] transport: Transport) {
+    use agent_core::{PromptEntry, PromptKind, PromptRef, PromptStore};
+    let store = Arc::new(EchoStore(PromptEntry {
+        kind: PromptKind::System,
+        content: "VERSIONED".into(),
+        version: 7,
+        source_ref: "nixpkgs:opencode@abc123:anthropic.txt".into(),
+        ..Default::default()
+    }));
+    let (dial, _srv) = spawn(transport, agent_grpc::server::prompt_router(store)).await;
+    let client = agent_grpc::client::GrpcPrompts::connect(&dial).unwrap();
+
+    // server → client: get returns the stored version + provenance.
+    let got = client
+        .get(&PromptRef {
+            kind: PromptKind::System,
+            id: String::new(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(got.version, 7, "version survives server→client");
+    assert_eq!(
+        got.source_ref, "nixpkgs:opencode@abc123:anthropic.txt",
+        "provenance survives server→client"
+    );
+
+    // client → server → client: the fields the client sends reach the server and back.
+    let put = client
+        .put(PromptEntry {
+            kind: PromptKind::System,
+            content: "X".into(),
+            version: 3,
+            source_ref: "wire:prov".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!((put.version, put.source_ref.as_str()), (3, "wire:prov"));
 }
 
 // The `Select(PromptContext)` RPC and preview-by-context survive the hop: a Review
@@ -1216,6 +1305,7 @@ async fn prompt_select_and_preview_by_context_roundtrip(#[case] transport: Trans
             read_only: false,
             order: 0,
             tags: Vec::new(),
+            ..Default::default()
         })
         .await
         .unwrap();

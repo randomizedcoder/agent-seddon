@@ -76,6 +76,32 @@ const MAX_CONTENT_BYTES: usize = 64 * 1024;
 /// Longest accepted `context.d` filename (`id`), in bytes.
 const MAX_ID_LEN: usize = 128;
 
+/// Longest accepted [`agent_core::PromptEntry::source_ref`], in bytes. A provenance
+/// string is a bounded upstream reference (`nixpkgs:<pkg>@<narHash>:<path>` etc.), not
+/// free content — this caps a hostile value before it reaches a bound SQL parameter.
+pub const MAX_SOURCE_REF_LEN: usize = 1024;
+
+/// Validate the provenance of an **imported** prompt (the Round-3 refresh/import path,
+/// `docs/design/prompts/08-versioning-and-provenance.md`): an imported entry MUST carry a
+/// non-empty, bounded `source_ref`, so a machine-written personality always records where
+/// it came from. Operator-authored `put`s are exempt (they may leave `source_ref` empty),
+/// so this is a helper the import path calls — not a blanket store invariant. Every value
+/// is untrusted, so it fails closed (empty ⇒ reject; over-cap ⇒ reject).
+pub fn validate_imported_source_ref(source_ref: &str) -> Result<()> {
+    if source_ref.is_empty() {
+        return Err(Error::Prompt(
+            "imported prompt is missing its source_ref (provenance is required)".into(),
+        ));
+    }
+    if source_ref.len() > MAX_SOURCE_REF_LEN {
+        return Err(Error::Prompt(format!(
+            "source_ref too long ({} > {MAX_SOURCE_REF_LEN} bytes)",
+            source_ref.len()
+        )));
+    }
+    Ok(())
+}
+
 /// A filesystem-backed [`PromptStore`] over a `context.d` dir and a `prompts` dir.
 pub struct FilePromptStore {
     /// The `context.d` root (holds `prepend/` and `append/`).
@@ -133,6 +159,8 @@ impl FilePromptStore {
             read_only: false,
             order: 0,
             tags: Vec::new(),
+            version: 0,
+            source_ref: String::new(),
         }
     }
 
@@ -149,6 +177,8 @@ impl FilePromptStore {
             read_only: false,
             order: 0,
             tags: Vec::new(),
+            version: 0,
+            source_ref: String::new(),
         }
     }
 
@@ -187,6 +217,8 @@ impl FilePromptStore {
                 read_only: false,
                 order: order.min(u32::MAX as u64) as u32,
                 tags: Vec::new(),
+                version: 0,
+                source_ref: String::new(),
             })
             .collect()
     }
@@ -275,6 +307,8 @@ impl FilePromptStore {
                 builtin: false,
                 read_only: false,
                 order,
+                version: 0,
+                source_ref: String::new(),
             })
             .collect()
     }
@@ -323,6 +357,8 @@ impl PromptStore for FilePromptStore {
                     read_only: false,
                     order: numeric_prefix(&r.id).min(u32::MAX as u64) as u32,
                     tags: Vec::new(),
+                    version: 0,
+                    source_ref: String::new(),
                 })
             }
             PromptKind::SystemFragment => {
@@ -339,6 +375,8 @@ impl PromptStore for FilePromptStore {
                     content: content.trim_end().to_string(),
                     builtin: false,
                     read_only: false,
+                    version: 0,
+                    source_ref: String::new(),
                 })
             }
         }
@@ -766,6 +804,7 @@ mod tests {
             read_only: false,
             order: 0,
             tags: Vec::new(),
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -824,6 +863,7 @@ mod tests {
             read_only: false,
             order: 0,
             tags: Vec::new(),
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -872,6 +912,7 @@ mod tests {
             read_only: false,
             order: 0,
             tags: Vec::new(),
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -883,6 +924,7 @@ mod tests {
             read_only: false,
             order: 0,
             tags: Vec::new(),
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -894,6 +936,7 @@ mod tests {
             read_only: false,
             order: 0,
             tags: Vec::new(),
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -962,6 +1005,7 @@ mod tests {
                 read_only: false,
                 order: 0,
                 tags: Vec::new(),
+                ..Default::default()
             })
             .await
             .unwrap_err();
@@ -984,6 +1028,7 @@ mod tests {
                 read_only: false,
                 order: 0,
                 tags: Vec::new(),
+                ..Default::default()
             })
             .await
             .unwrap_err();
@@ -1108,6 +1153,7 @@ mod tests {
             read_only: false,
             order: 0,
             tags: Vec::new(),
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -1120,6 +1166,7 @@ mod tests {
             read_only: false,
             order: 0,
             tags: Vec::new(),
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -1196,6 +1243,7 @@ mod tests {
             read_only: false,
             order: 0,
             tags: Vec::new(),
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -1237,6 +1285,7 @@ mod tests {
                 read_only: false,
                 order: 0,
                 tags: Vec::new(),
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -1292,6 +1341,7 @@ mod tests {
                     read_only: false,
                     order: 0,
                     tags: Vec::new(),
+                    ..Default::default()
                 })
                 .await
                 .unwrap_err();
@@ -1323,6 +1373,7 @@ mod tests {
             read_only: false,
             order: 0,
             tags: Vec::new(),
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -1377,6 +1428,34 @@ mod tests {
             fragment_order(front, "notes.md"),
             u32::MAX,
             "unprefixed sorts last"
+        );
+    }
+
+    // --- Round-3 import provenance guard (docs/design/prompts/08-…md) --------
+    #[rstest]
+    // description                                    source_ref                              expect Ok
+    #[case::positive_with_provenance("nixpkgs:opencode@abc123:packages/…/anthropic.txt", true)]
+    #[case::positive_hermes_input_rev("hermes@deadbeef:agent/prompt_builder.py#IDENTITY", true)]
+    #[case::negative_missing_source_ref_on_imported("", false)]
+    #[case::adversarial_sql_metachar_within_cap("'; DROP TABLE prompts; --", true)]
+    fn validate_imported_source_ref_cases(#[case] source_ref: &str, #[case] ok: bool) {
+        // The guard is provenance-presence + length only; metacharacters are inert
+        // (the value only ever reaches SQL as a bound parameter), so a short hostile
+        // string validates fine — it is the store's `put` that binds it safely.
+        assert_eq!(validate_imported_source_ref(source_ref).is_ok(), ok);
+    }
+
+    #[test]
+    fn boundary_source_ref_length_cap() {
+        let at_cap = "a".repeat(MAX_SOURCE_REF_LEN);
+        assert!(
+            validate_imported_source_ref(&at_cap).is_ok(),
+            "exactly at the cap is allowed"
+        );
+        let over = "a".repeat(MAX_SOURCE_REF_LEN + 1);
+        assert!(
+            validate_imported_source_ref(&over).is_err(),
+            "over the cap is rejected (fail closed)"
         );
     }
 }

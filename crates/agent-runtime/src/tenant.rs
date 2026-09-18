@@ -808,6 +808,7 @@ mod tests {
                         read_only: false,
                         order: 0,
                         tags: vec![],
+                        ..Default::default()
                     })
                     .await
                     .unwrap();

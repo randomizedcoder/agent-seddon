@@ -65,6 +65,11 @@ struct Stored {
     read_only: bool,
     #[serde(default)]
     tags: Vec<String>,
+    // Provenance travels with the card blob so `migrate` round-trips it through this
+    // backend too. Phase 2 does not implement version *bumping* here (postgres is
+    // un-versioned — its own tooling is the history), so a read reports `version = 0`.
+    #[serde(default)]
+    source_ref: String,
 }
 
 /// The collection a `kind`'s override cards live in.
@@ -163,6 +168,8 @@ impl StorePrompt {
                         read_only: s.read_only,
                         order: s.order,
                         tags: s.tags,
+                        version: 0,
+                        source_ref: s.source_ref,
                     })
                     .map_err(|e| Error::Prompt(format!("stored prompt decode: {e}")))
             })
@@ -172,9 +179,9 @@ impl StorePrompt {
     }
 
     async fn system_entry(&self) -> Result<PromptEntry> {
-        let (content, builtin) = match self.card(PromptKind::System, "").await? {
-            Some(s) => (s.content, false),
-            None => (self.config_system_prompt.clone(), true),
+        let (content, source_ref, builtin) = match self.card(PromptKind::System, "").await? {
+            Some(s) => (s.content, s.source_ref, false),
+            None => (self.config_system_prompt.clone(), String::new(), true),
         };
         Ok(PromptEntry {
             kind: PromptKind::System,
@@ -184,14 +191,17 @@ impl StorePrompt {
             read_only: false,
             order: 0,
             tags: Vec::new(),
+            version: 0,
+            source_ref,
         })
     }
 
     async fn lens_entry(&self, mode: TaskMode) -> Result<PromptEntry> {
-        let (content, builtin) = match self.card(PromptKind::ModeLens, mode.as_str()).await? {
-            Some(s) => (s.content, false),
-            None => (builtin_instruction(mode).to_string(), true),
-        };
+        let (content, source_ref, builtin) =
+            match self.card(PromptKind::ModeLens, mode.as_str()).await? {
+                Some(s) => (s.content, s.source_ref, false),
+                None => (builtin_instruction(mode).to_string(), String::new(), true),
+            };
         Ok(PromptEntry {
             kind: PromptKind::ModeLens,
             id: mode.as_str().to_string(),
@@ -200,6 +210,8 @@ impl StorePrompt {
             read_only: false,
             order: 0,
             tags: Vec::new(),
+            version: 0,
+            source_ref,
         })
     }
 
@@ -289,6 +301,8 @@ impl PromptStore for StorePrompt {
                     read_only: s.read_only,
                     order: s.order,
                     tags: s.tags,
+                    version: 0,
+                    source_ref: s.source_ref,
                 })
             }
         }
@@ -309,6 +323,7 @@ impl PromptStore for StorePrompt {
             order,
             read_only: entry.read_only,
             tags,
+            source_ref: entry.source_ref,
         })
         .map_err(|e| Error::Prompt(format!("serialize prompt: {e}")))?;
         self.backend
@@ -407,6 +422,7 @@ mod tests {
             read_only: false,
             order: 0,
             tags: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -443,6 +459,7 @@ mod tests {
             read_only: false,
             order: 0,
             tags: Vec::new(),
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -560,6 +577,7 @@ mod tests {
             read_only: false,
             order: 0,
             tags: Vec::new(),
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -691,6 +709,7 @@ mod pg_tests {
             read_only: false,
             order: 0,
             tags: Vec::new(),
+            ..Default::default()
         }
     }
 
