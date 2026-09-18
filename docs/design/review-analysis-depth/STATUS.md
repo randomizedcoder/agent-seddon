@@ -17,8 +17,9 @@ coverage, #400 + parser fix) is now merged and live-verified on l2** (a no-test 
 0.0% + a partial package at 50.0%, folded into the digest). **Inc 5c (`NixRunToolProvider`, #402) is
 now merged and live-verified on l2** (`tool_provider="nix-run"` resolved golangci-lint/gosec/go to
 `nix run <locked-ref>#<tool> --`; gosec's G404 surfaced through the digest). **★ The whole
-review-analysis-depth track (Inc 0–5) is now COMPLETE.** Open follow-ups only: a live MI50
-net-positive check for Inc 4, and the deferred redeploy parts (2) `.#fleet-redeploy` + (4) writer WARN. The design-of-record
+review-analysis-depth track (Inc 0–5) is now COMPLETE.** All follow-ups closed: the **Inc 4 live MI50
+net-positive check is done** (2026-09-18 — net-positive; see the evidence log), redeploy part (2)
+`.#fleet-redeploy` shipped (#403), and part (4) writer WARN is already present. The design-of-record
 ([README.md](README.md)) was written 2026-09-17,
 building on the completed [fleet-grounding](../fleet-grounding/README.md) track (worktree-rooting #382,
 grounding telemetry #381, collector skip/fail `reason` #386). The goal: run a **consistent,
@@ -121,9 +122,25 @@ parallel speedup, brief size, Kimi iters/at-cap) — the running proof the track
   in every arm** (no pool / no healthy member / empty reply ⇒ `""`, the verbatim digest still stands).
   The prompt is the *already-compact* digest (rule tally + top ranked findings, both bounded) — never
   raw diffs — so it is cheap and cannot be flooded; the output is bounded like any untrusted model text.
-  Rendered as a clearly-labelled SOFT section under the digest. **Live net-positive check pending** a
-  sweep with an `mi50` `[[pool.members]]` in the fleet toml (the sweep confirmed the gate condition
-  fires on big PRs and `summaries skipped "no pool configured"` — adding the member enables both).
+  Rendered as a clearly-labelled SOFT section under the digest. **Live net-positive check ✅ done
+  (2026-09-18, l2)** — the fleet was redeployed via `.#fleet-redeploy` with an `mi50`
+  `[[pool.members]]` (`http://localhost:8095/v1`, `context_window=32768`) added under a `cost` `[pool]`,
+  then a controlled sweep triggered three **previously-unreviewed** runpod/host PRs (#2763/#2562/#2797
+  — fresh ids so the head-oid cross-round dedup doesn't short-circuit them). Result, clearly
+  net-positive:
+  - **`summaries` collector flipped `skipped` → `ok`** (3/3, avg ~17.5 s, on the local MI50) — the
+    baseline sweep showed `skipped "no pool configured"`.
+  - **`digest_summary` fired** on all three (133 / 200 / 44 findings, all ≥ 40) with real triage value,
+    e.g. #2763: *"dominant themes are improper error handling (G104) and command injection (G204)… 149
+    pre-existing, only 51 on changed files → limited new risk."*
+  - **The remote Kimi loop was not degraded** — `avg_iters` 7 (baseline 8), `max` 8, **`at_iter_cap`
+    0** (baseline 0). The local work is **parallel-absorbed** inside the grounding fan-out (critical
+    path = `summaries` on 2/3, `analyzer` on 1/3; ~22 s summaries ≈ ~23 s analyzer, run concurrently),
+    so it adds reviewer value without serial latency or pushing reviews toward the cap.
+  - Full Go suite intact across the sweep (`gosec` 576, `govet` 0, `golangci-lint` 0, `gofmt` 2 — all
+    `ok`; `fleet-measure`'s ANALYZER table renders only the two slowest, the CH `agent_review_tools`
+    rows confirm all four). _Op note:_ forcing a fresh review by `DELETE`-ing the baseline draft rows is
+    blocked by the destructive-op classifier — pick unreviewed PRs instead.
 - **Inc 5a (#398):** the analyzer's Rust path gained the supply-chain pair alongside clippy.
   **Live end-to-end on l2** (nix-wrapped `.#agent`, `--review .` on a committed Rust change):
   - `cargo-audit: ok (4 findings, 355 ms)` — run **offline** against the pinned `advisory-db`
