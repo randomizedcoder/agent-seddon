@@ -733,7 +733,13 @@ impl LlmPool for PoolProvider {
                 } => return Ok(r),
                 PoolMemberResult { error, .. } => {
                     let msg = error.unwrap_or_default();
-                    if agent_retry::classify(&msg) == agent_retry::Class::Terminal {
+                    // A terminal error aborts the chain — it fails identically on every
+                    // member — EXCEPT an auth-terminal (401/403), which is member-specific
+                    // (a rotated key / forbidden endpoint on this member says nothing about
+                    // the next), so we fail over to the next member instead.
+                    if agent_retry::classify(&msg) == agent_retry::Class::Terminal
+                        && !agent_retry::is_auth_terminal(&msg)
+                    {
                         return Err(Error::Provider(msg));
                     }
                     let _ = attempt;
@@ -899,6 +905,56 @@ mod tests {
         ]);
         let r = p.complete(req()).await.expect("falls over");
         assert_eq!(r.message.content_text(), "good");
+    }
+
+    /// An auth-terminal (403) is member-specific — a rotated key / forbidden endpoint
+    /// on one member says nothing about the next — so the pool falls over to it.
+    #[tokio::test]
+    async fn positive_auth_terminal_falls_over() {
+        let p = pool(vec![
+            PoolSpec {
+                candidate: Candidate {
+                    name: "bad".into(),
+                    provider: Arc::new(FailProvider {
+                        msg: "http 403: forbidden".into(),
+                        calls: Arc::new(AtomicUsize::new(0)),
+                    }),
+                },
+                tier: PoolTier::Light,
+                cost: 0.0,
+                weight: 1.0,
+                max_concurrency: 0,
+            },
+            ok_member("good", PoolTier::Light),
+        ]);
+        let r = p.complete(req()).await.expect("auth-terminal falls over");
+        assert_eq!(r.message.content_text(), "good");
+    }
+
+    /// A request-level terminal (400) fails identically everywhere → abort, no failover.
+    #[tokio::test]
+    async fn negative_request_terminal_does_not_fall_over() {
+        let good = ok_member("good", PoolTier::Light);
+        let p = pool(vec![
+            PoolSpec {
+                candidate: Candidate {
+                    name: "bad".into(),
+                    provider: Arc::new(FailProvider {
+                        msg: "http 400: unsupported parameter".into(),
+                        calls: Arc::new(AtomicUsize::new(0)),
+                    }),
+                },
+                tier: PoolTier::Light,
+                cost: 0.0,
+                weight: 1.0,
+                max_concurrency: 0,
+            },
+            good,
+        ]);
+        assert!(
+            p.complete(req()).await.is_err(),
+            "request-terminal must abort, not fall over"
+        );
     }
 
     /// health() reports every member.

@@ -465,6 +465,32 @@ pub fn classify(message: &str) -> Class {
     Class::Terminal
 }
 
+/// Whether a **terminal** failure is *member-specific* (authentication /
+/// authorization) rather than *request-specific*.
+///
+/// `classify` correctly marks a 401/403 as [`Class::Terminal`] — retrying the **same**
+/// upstream is futile. But a bad/rotated key or a forbidden (e.g. rotated) endpoint on
+/// one upstream says nothing about another, so a router should still **fail over** to
+/// the next candidate on these — unlike a 400/402/content-policy terminal, which fails
+/// identically everywhere and must abort the chain. Failover loops therefore abort only
+/// on `classify == Terminal && !is_auth_terminal(msg)`.
+///
+/// Recognizes the `"http {code}:"` form (401/403) and the bare auth phrases some
+/// providers emit without a status code.
+pub fn is_auth_terminal(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    if let Some(code) = extract_http_status(&lower) {
+        return code == 401 || code == 403;
+    }
+    const AUTH: [&str; 4] = [
+        "unauthorized",
+        "forbidden",
+        "invalid api key",
+        "permission denied",
+    ];
+    AUTH.iter().any(|p| lower.contains(p))
+}
+
 /// Pull the status out of a `"http {code}"` prefix, if present.
 fn extract_http_status(lower: &str) -> Option<u16> {
     let idx = lower.find("http ")?;
@@ -519,5 +545,28 @@ mod classify_tests {
     #[case::adversarial_very_long("http 500: x")]
     fn adversarial_messages_are_safe(#[case] msg: &str) {
         let _ = classify(msg); // must not panic
+    }
+
+    #[rstest]
+    // Auth-terminal (member-specific): a router should fall over to the next candidate.
+    #[case::positive_unauthorized_status("http 401: invalid api key", true)]
+    #[case::positive_forbidden_status("http 403: forbidden", true)]
+    #[case::positive_bare_unauthorized("Unauthorized", true)]
+    #[case::positive_bare_forbidden("Forbidden", true)]
+    #[case::positive_bare_invalid_key("Invalid API key", true)]
+    // Request-terminal / retryable / unknown: NOT auth-specific → abort (or retry) as before.
+    #[case::negative_bad_request("http 400: unsupported parameter", false)]
+    #[case::negative_billing("http 402: payment required", false)]
+    #[case::negative_not_found("http 404: model_not_found", false)]
+    #[case::negative_rate_limit("http 429: slow down", false)]
+    #[case::negative_server_error("http 500: internal", false)]
+    #[case::negative_content_policy("blocked by content policy", false)]
+    #[case::boundary_unknown("something inexplicable", false)]
+    #[case::boundary_empty("", false)]
+    // Provider-supplied text must not panic or be fooled.
+    #[case::adversarial_huge_number("http 99999999999999999999: overflow", false)]
+    #[case::adversarial_multibyte("http 403: 你好 🎉", true)]
+    fn is_auth_terminal_cases(#[case] msg: &str, #[case] want: bool) {
+        assert_eq!(is_auth_terminal(msg), want, "message: {msg:?}");
     }
 }
