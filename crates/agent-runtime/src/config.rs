@@ -2671,6 +2671,13 @@ pub struct AgentCfg {
     pub keep_recent_tokens: u32,
     #[serde(default = "default_system_prompt")]
     pub system_prompt: String,
+    /// Which **personality** (named base system prompt) to run as — one of the closed
+    /// [`agent_core::ALL_PERSONALITIES`] (`agent-seddon | pi | hermes | opencode |
+    /// codex`). Selects the base via `<prompts>/personalities/<p>/…`; empty/unknown ⇒
+    /// today's base (`system.md`/`system_prompt`), byte-identical. Round 3,
+    /// `docs/design/prompts/07-personalities.md`.
+    #[serde(default = "default_personality")]
+    pub personality: String,
     /// Consume completions as a stream and echo assistant text live to stderr.
     /// (The loop always uses the provider's `stream`; this toggles the echo.)
     #[serde(default = "default_true")]
@@ -2899,6 +2906,11 @@ fn default_system_prompt() -> String {
      do not call any more tools."
         .into()
 }
+fn default_personality() -> String {
+    // Empty ⇒ the default base (today's `system.md`/`system_prompt`), byte-identical.
+    // A non-empty value selects a named base from `agent_core::ALL_PERSONALITIES`.
+    String::new()
+}
 pub(crate) fn default_anthropic_version() -> String {
     "2023-06-01".into()
 }
@@ -2983,6 +2995,7 @@ impl Config {
                 reserve_output: default_reserve_output(),
                 keep_recent_tokens: default_keep_recent(),
                 system_prompt: default_system_prompt(),
+                personality: default_personality(),
                 stream: true,
                 parallel_tools: true,
                 tool_timeout_secs: default_tool_timeout(),

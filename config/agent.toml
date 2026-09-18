@@ -68,6 +68,14 @@ observe the result, then decide the next step. When the task is complete, reply
 with a short plain-text summary and do not call any more tools.
 """
 
+# Personality: which named base system prompt to run as. One of the closed set
+# agent-seddon | pi | hermes | opencode | codex (docs/design/prompts/07-personalities.md).
+# It selects the base via <prompts>/personalities/<p>/*.md (copy one in from
+# prompts/personalities.example/<p>/ to activate). Empty ⇒ the default base
+# (system.md / system_prompt above) — byte-identical to leaving this unset. An
+# unknown value falls back to the default; the name is never used as a raw path.
+personality = ""
+
 # --- provider examples ----------------------------------------------------
 # openai-compat (shown): Ollama / vLLM / OpenAI / any OpenAI-compatible endpoint.
 #

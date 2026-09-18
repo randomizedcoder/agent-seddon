@@ -119,6 +119,22 @@ same `[prompts] dir`.
   [`prompts/README.md`](../../prompts/README.md) for the layout, the resolution
   ladder, and authoring guidance.
 
+## Personalities (the base, selected by name)
+
+`[agent] personality` runs agent-seddon *as* a **named base** — one of the closed set
+[`agent_core::ALL_PERSONALITIES`](../../crates/agent-core/src/lib.rs) (`agent-seddon |
+pi | hermes | opencode | codex`). It selects *which* base the loop uses; the situational
+fragments above still layer on top (the two axes are orthogonal). `resolve_system_prompt`
+walks a **named-base ladder**: `<prompts>/personalities/<p>/*.md` (numeric-ordered
+concat) → `<prompts>/personalities/<p>.md` → `<prompts>/system.md` → `[agent]
+system_prompt`. An **empty or unknown** personality skips the personality rungs entirely
+→ today's base, **byte-identical**; the name is validated against the closed set
+(`agent_core::valid_personality`) so it is never used as a raw path segment. Resolved at
+startup (next-run), like the rest of the base. Seed prompts for all five ship inert under
+[`prompts/personalities.example/`](../../prompts/personalities.example/README.md) (copy
+one into `prompts/personalities/<p>/` to activate). Design:
+[`docs/design/prompts/07-personalities.md`](../design/prompts/07-personalities.md).
+
 ## Storage backends
 
 The medium a prompt lives in is a **backend choice behind the seam** — every consumer

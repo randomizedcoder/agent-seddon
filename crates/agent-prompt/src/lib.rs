@@ -411,8 +411,11 @@ impl PromptStore for FilePromptStore {
     }
 
     async fn preview_assembled(&self, ctx: &PromptContext, goal: &str) -> Result<Vec<Message>> {
+        // The store preview uses the default (unset personality) base; personality
+        // selection is a runtime/portal concern (Round-3 phases 2–3), not the store's.
         let system = resolve_system_prompt(
             self.prompts_dir.to_str().unwrap_or_default(),
+            "",
             &self.config_system_prompt,
         );
         let prepend: Vec<ContextBlock> = self
@@ -452,16 +455,77 @@ impl PromptStore for FilePromptStore {
     }
 }
 
-/// The runtime's startup hook: the effective system prompt is the `<prompts>/system.md`
-/// override if present + non-empty, else the config default. Called once by the
-/// builder (`Settings.system_prompt`), so a `Put(System)` takes effect next run.
-pub fn resolve_system_prompt(prompts_dir: &str, config_default: &str) -> String {
+/// The runtime's startup hook: the effective **base** system prompt. Called once by
+/// the builder (`Settings.system_prompt`), so an edit takes effect next run.
+///
+/// Round 3 adds a **named-base ladder** for personalities
+/// (`docs/design/prompts/07-personalities.md`): when `personality` names one of the
+/// closed [`agent_core::ALL_PERSONALITIES`], its base wins; otherwise the shared base
+/// (today's behaviour) is used. The ladder, in order:
+///
+/// 1. `<dir>/personalities/<p>/*.md` (numeric-ordered concat) — a multi-fragment named base
+/// 2. `<dir>/personalities/<p>.md` — a single-file named base
+/// 3. `<dir>/system.md` — the shared base (unchanged Round-1/2 rung)
+/// 4. `config_default` — the compiled/config default
+///
+/// An empty or unknown `personality` fails [`agent_core::valid_personality`], so **no
+/// path is built from it** and resolution falls straight through to rungs 3–4 —
+/// byte-identical to pre-Round-3 behaviour. (The store-entry rung for the sqlite/grpc
+/// backends lands with Round-3 phases 2–3.)
+pub fn resolve_system_prompt(prompts_dir: &str, personality: &str, config_default: &str) -> String {
     if prompts_dir.is_empty() {
         return config_default.to_string();
     }
-    match read_nonempty(&Path::new(prompts_dir).join("system.md")) {
+    let base = Path::new(prompts_dir);
+    // Personality rungs: closed-set validated, so `p` is always a known-safe segment
+    // (a hostile/unknown name yields `None` and we build no path from it).
+    if let Some(p) = agent_core::valid_personality(personality) {
+        let dir = base.join("personalities").join(p);
+        if let Some(s) = read_dir_concat(&dir) {
+            return s;
+        }
+        if let Some(s) = read_nonempty(&base.join("personalities").join(format!("{p}.md"))) {
+            return s.trim_end().to_string();
+        }
+    }
+    match read_nonempty(&base.join("system.md")) {
         Some(s) => s.trim_end().to_string(),
         None => config_default.to_string(),
+    }
+}
+
+/// Read every `*.md` in `dir`, ordered by numeric prefix then name, and concatenate
+/// the non-blank trimmed bodies with a blank line between (the same order/shape as
+/// `context_entries`). `None` if the directory is missing or holds no non-empty
+/// fragment (so the caller falls through to the next ladder rung).
+fn read_dir_concat(dir: &Path) -> Option<String> {
+    let mut files: Vec<(u64, String, String)> = Vec::new();
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        files.push((numeric_prefix(&name), name, content));
+    }
+    files.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    let joined = files
+        .into_iter()
+        .map(|(_, _, c)| c.trim().to_string())
+        .filter(|c| !c.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if joined.is_empty() {
+        None
+    } else {
+        Some(joined)
     }
 }
 
@@ -716,7 +780,7 @@ mod tests {
         assert!(!e.builtin);
         // resolve_system_prompt (the runtime hook) sees the override too.
         assert_eq!(
-            resolve_system_prompt(root.join("prompts").to_str().unwrap(), "CONFIG SYS"),
+            resolve_system_prompt(root.join("prompts").to_str().unwrap(), "", "CONFIG SYS"),
             "OVERRIDE SYS"
         );
 
@@ -944,7 +1008,91 @@ mod tests {
     // --- corner_: resolve_system_prompt with empty dir → config default ----
     #[test]
     fn corner_resolve_system_prompt_empty_dir() {
-        assert_eq!(resolve_system_prompt("", "CFG"), "CFG");
+        assert_eq!(resolve_system_prompt("", "", "CFG"), "CFG");
+    }
+
+    // --- Round 3: the personality named-base ladder (resolve_system_prompt) ---
+
+    /// Write `content` to `<prompts>/<rel>`, creating parent dirs.
+    fn write_prompt(prompts: &Path, rel: &str, content: &str) {
+        let path = prompts.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+
+    #[rstest]
+    // positive: an active personality's dir base wins over the shared base.
+    #[case::positive_active_personality_selects_its_base(
+        "codex",
+        &[("personalities/codex/0001_base.md", "CODEX BASE"), ("system.md", "SHARED")],
+        "CODEX BASE"
+    )]
+    // positive: multiple fragments concatenate in numeric-prefix order.
+    #[case::positive_multi_fragment_concat_in_order(
+        "pi",
+        &[("personalities/pi/0002_b.md", "B"), ("personalities/pi/0001_a.md", "A")],
+        "A\n\nB"
+    )]
+    // positive: the single-file named-base form.
+    #[case::positive_single_file_form(
+        "pi",
+        &[("personalities/pi.md", "PI ONE"), ("system.md", "SHARED")],
+        "PI ONE"
+    )]
+    // positive/default: unset personality → the shared system.md rung (byte-identical).
+    #[case::positive_default_unset_uses_shared_base("", &[("system.md", "SHARED")], "SHARED")]
+    // negative: an unknown personality never builds a path → shared base.
+    #[case::negative_unknown_personality_falls_back("nope", &[("system.md", "SHARED")], "SHARED")]
+    // boundary: empty personality string → default ladder even if a peer dir exists.
+    #[case::boundary_empty_personality_string(
+        "",
+        &[("personalities/codex/0001.md", "CODEX"), ("system.md", "SHARED")],
+        "SHARED"
+    )]
+    // boundary: personality dir present but holds no non-empty .md → fall through.
+    #[case::boundary_personality_dir_empty(
+        "codex",
+        &[("personalities/codex/README.txt", "x"), ("system.md", "SHARED")],
+        "SHARED"
+    )]
+    // adversarial: a hostile personality name never validates → no path, shared base.
+    #[case::adversarial_hostile_personality_id("../../etc", &[("system.md", "SHARED")], "SHARED")]
+    fn resolve_personality_ladder(
+        #[case] personality: &str,
+        #[case] files: &[(&str, &str)],
+        #[case] expect: &str,
+    ) {
+        let root = tempdir();
+        let prompts = root.join("prompts");
+        std::fs::create_dir_all(&prompts).unwrap();
+        for (rel, content) in files {
+            write_prompt(&prompts, rel, content);
+        }
+        assert_eq!(
+            resolve_system_prompt(prompts.to_str().unwrap(), personality, "CFG DEFAULT"),
+            expect
+        );
+    }
+
+    // corner: personality set but NO prompts dir → config default, feature inert.
+    #[test]
+    fn corner_personality_set_no_prompts_dir() {
+        assert_eq!(
+            resolve_system_prompt("", "codex", "CFG DEFAULT"),
+            "CFG DEFAULT"
+        );
+    }
+
+    // positive: default-unset with no files at all → config default (byte-identical).
+    #[test]
+    fn positive_default_unset_no_files_is_config_default() {
+        let root = tempdir();
+        let prompts = root.join("prompts");
+        std::fs::create_dir_all(&prompts).unwrap();
+        assert_eq!(
+            resolve_system_prompt(prompts.to_str().unwrap(), "", "CFG DEFAULT"),
+            "CFG DEFAULT"
+        );
     }
 
     // --- SystemFragment: put → get/list with derived tags + order, then delete -
