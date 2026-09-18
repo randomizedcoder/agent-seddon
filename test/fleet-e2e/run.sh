@@ -55,7 +55,7 @@ FLEET_USER="${AGENT_FLEET_E2E_USER:-randomizedcoder}"
 # --- generator (Kimi): the model the review sessions use to WRITE the narrative ---
 # Defaults to the Kimi K3 dev endpoint (docs/llm-endpoints.md); RunPod proxy URLs are
 # ephemeral, so override with AGENT_E2E_BASE_URL/_MODEL when the pod rotates.
-GEN_BASE_URL="${AGENT_E2E_BASE_URL:-https://175ppwu9phh1r6-4000.proxy.runpod.net/v1}"
+GEN_BASE_URL="${AGENT_E2E_BASE_URL:-https://talsatati0ku25-4000.proxy.runpod.net/v1}"
 GEN_MODEL="${AGENT_E2E_MODEL:-moonshotai/Kimi-K3}"
 # Key: an explicit file wins, then an inline key, then the repo-local `./kimi-api-key`
 # (git-ignored) the dev setup keeps alongside the checkout.
