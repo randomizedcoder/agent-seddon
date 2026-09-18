@@ -2647,7 +2647,7 @@ impl Agent {
         if nonconvergence_stop {
             tracing::warn!(
                 max_iterations = self.settings.max_iterations,
-                "non-convergence guard tripped — forcing one finalize turn"
+                "non-convergence guard stopped the loop — forcing one finalize turn"
             );
         } else {
             tracing::warn!(
@@ -2703,6 +2703,13 @@ impl Agent {
                 tracing::warn!("finalize turn produced no text; recording a DNF");
             }
             Err(e) => tracing::warn!(error = %e, "finalize turn failed; recording a DNF"),
+        }
+        if nonconvergence_stop {
+            anyhow::bail!(
+                "non-convergence guard stopped the loop after {} unproductive iterations \
+                 (only already-seen tool calls), and the forced finalize turn produced no answer",
+                self.settings.max_unproductive_iters
+            )
         }
         anyhow::bail!(
             "reached max_iterations ({}) without a final answer",
@@ -5187,7 +5194,17 @@ mod tests {
         };
         let (res, calls) =
             run_scripted_guard(vec![tool_turn(vec![echo_call("t0", args)])], 20, threshold).await;
-        assert!(res.is_err(), "expected an early-finalize DNF, got {res:?}");
+        // The DNF names the guard as the cause — NOT max_iterations, which the loop
+        // never reached (the scripted repeat also yields no text on the finalize).
+        let err = res.expect_err("expected an early-finalize DNF").to_string();
+        assert!(
+            err.contains("non-convergence guard"),
+            "DNF should name the guard cause, got: {err}"
+        );
+        assert!(
+            err.contains(&format!("{threshold} unproductive")),
+            "DNF should render the unproductive-iteration threshold, got: {err}"
+        );
         assert_eq!(
             calls,
             threshold + 2,
