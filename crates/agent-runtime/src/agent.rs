@@ -2647,7 +2647,7 @@ impl Agent {
         if nonconvergence_stop {
             tracing::warn!(
                 max_iterations = self.settings.max_iterations,
-                "non-convergence guard tripped — forcing one finalize turn"
+                "non-convergence guard stopped the loop — forcing one finalize turn"
             );
         } else {
             tracing::warn!(
@@ -5200,6 +5200,10 @@ mod tests {
         assert!(
             err.contains("non-convergence guard"),
             "DNF should name the guard cause, got: {err}"
+        );
+        assert!(
+            err.contains(&format!("{threshold} unproductive")),
+            "DNF should render the unproductive-iteration threshold, got: {err}"
         );
         assert_eq!(
             calls,
