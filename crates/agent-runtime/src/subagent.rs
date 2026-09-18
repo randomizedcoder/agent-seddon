@@ -171,6 +171,7 @@ mod tests {
             context_window: 100_000,
             reserve_output: 1000,
             system_prompt: "sys".into(),
+            active_personality: None,
             stream: false,
             parallel_tools: true,
             tool_timeout_secs: 30,

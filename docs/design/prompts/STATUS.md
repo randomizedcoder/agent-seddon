@@ -57,7 +57,7 @@ Legend: ✅ merged · 🔶 in review · ⬜ designed/not-started.
 | — | **Docs** — reference doc + Round-3 design docs 06–11 + status docs (this pass) | — | 06–11 | this file | done-on-merge |
 | 1 | **Personalities dimension + seed set** — `[agent] personality`, closed set, personality-aware `resolve_system_prompt` (file ladder), inert seed of all five incl. the MI50-drafted blend | — | [`07`](07-personalities.md) | [`status/round3-01-personalities.md`](status/round3-01-personalities.md) | ✅ built |
 | 2 | **Versioning + provenance** — `version`/`source_ref` on `PromptEntry` + sqlite history + additive proto fields | ✅ additive | [`08`](08-versioning-and-provenance.md) | [`status/round3-02-versioning.md`](status/round3-02-versioning.md) | ✅ built |
-| 3 | **Portal selector + set-active** — discover from store; live `SetActivePersonality` RPC + Flutter selector | ✅ additive | [`10`](10-portal-selector.md) | [`status/round3-03-portal-selector.md`](status/round3-03-portal-selector.md) | ⬜ designed |
+| 3 | **Portal selector + set-active** — discover from store; live `SetActivePersonality` RPC + Flutter selector | ✅ additive | [`10`](10-portal-selector.md) | [`status/round3-03-portal-selector.md`](status/round3-03-portal-selector.md) | ✅ built |
 | 4 | **nixpkgs source wiring** — flake inputs (opencode/codex/pi `.src` + hermes locked) + prompt-sources derivation | — | [`09`](09-nixpkgs-sourcing.md) | [`status/round3-04-nixpkgs-sourcing.md`](status/round3-04-nixpkgs-sourcing.md) | ⬜ designed |
 | 5 | **MI50 auto-refresh job (LAST)** — detect lock change → re-extract → upsert new version; extractor fuzzing | — | [`11`](11-refresh-job.md) | [`status/round3-05-refresh-job.md`](status/round3-05-refresh-job.md) | ⬜ designed |
 
@@ -78,6 +78,19 @@ are both delivered by Round 3 (phases 2 and 3 respectively). "No new mode taxono
   no new RPC — `SetActivePersonality` stays Phase 3). The file backend reports `version 0` /
   empty `source_ref` (git is its history); the versioning tests ride the existing
   `prompt-sqlite` gate check.
+- **As-built (round3-03, portal selector + live set-active):** the head base is now a
+  **live, swappable cell** — `agent_core::ActivePersonalityCell` (seam trait), implemented by
+  `agent_prompt::ActivePersonality` (a `RwLock` re-resolving `resolve_system_prompt` on `set`).
+  One `Arc` is shared between the runtime's `Settings.active_personality` and the served
+  `PromptSvc`, so `PromptService.{Get,Set}ActivePersonality` (additive RPCs +
+  `ActivePersonality` message) switch which personality the loop runs *as* with **no restart**.
+  The base is read at **session assembly** (a switch applies to the next assembled session, not
+  a continuation-turn — preserving the stable-head/compaction contract); the situational
+  `messages[1]` fragment machinery is untouched. `Set { persist }` also writes `[agent]
+  personality` through the in-process `ConfigStore` (best-effort). The Flutter selector lives at
+  the top of the Prompts tab (closed-set dropdown + version/provenance subtitle + persist
+  toggle); Dart widget tests are deferred (the `dart-analyze` gate is analyze-only and
+  `PortalClients` has no injection seam) — the RPCs are covered by the Rust wire test.
 
 ## Dependencies
 

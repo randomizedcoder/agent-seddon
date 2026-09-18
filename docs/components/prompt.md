@@ -72,6 +72,14 @@ initial assembly is mode-independent — the lens applies only at switch-compact
 - **System / prepend / append — next run.** These are read into an immutable
   `Settings` at startup (`resolve_system_prompt`, `context_files::load`), so an edit
   applies to the next run / session.
+- **Active personality (the head base) — live, next session.** When a `PromptService`
+  is co-located with a running agent (`--serve-prompt` / `--serve-sessions`),
+  `SetActivePersonality` swaps which named base the loop runs *as* through a shared
+  [`ActivePersonalityCell`](#personalities-the-base-selected-by-name) — **no restart**.
+  The base is read where the stable head is assembled, so a switch takes effect on the
+  **next assembled session** (a continuation turn keeps its head; the stable-head /
+  compaction contract is preserved). `Set { persist }` also writes `[agent] personality`
+  via `ConfigService` as the new-run default (docs/design/prompts/10-portal-selector.md).
 
 ## Security
 
@@ -130,10 +138,16 @@ concat) → `<prompts>/personalities/<p>.md` → `<prompts>/system.md` → `[age
 system_prompt`. An **empty or unknown** personality skips the personality rungs entirely
 → today's base, **byte-identical**; the name is validated against the closed set
 (`agent_core::valid_personality`) so it is never used as a raw path segment. Resolved at
-startup (next-run), like the rest of the base. Seed prompts for all five ship inert under
+startup, and — since Round 3 phase 3 — **swappable live** through a shared
+`agent_core::ActivePersonalityCell` (implemented by `agent_prompt::ActivePersonality`,
+which re-runs `resolve_system_prompt` on `set`): a portal `SetActivePersonality` switches
+the base for the next assembled session with no restart, optionally persisting `[agent]
+personality` as the new default (see *When an edit takes effect* above). Seed prompts for
+all five ship inert under
 [`prompts/personalities.example/`](../../prompts/personalities.example/README.md) (copy
 one into `prompts/personalities/<p>/` to activate). Design:
-[`docs/design/prompts/07-personalities.md`](../design/prompts/07-personalities.md).
+[`docs/design/prompts/07-personalities.md`](../design/prompts/07-personalities.md),
+[`10-portal-selector.md`](../design/prompts/10-portal-selector.md).
 
 ## Storage backends
 

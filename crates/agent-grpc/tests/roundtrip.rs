@@ -1278,6 +1278,114 @@ async fn prompt_version_and_source_ref_roundtrip(#[case] transport: Transport) {
     assert_eq!((put.version, put.source_ref.as_str()), (3, "wire:prov"));
 }
 
+// A `ConfigStore` that records the edits it is asked to write, so a persisting
+// `SetActivePersonality` can be asserted end-to-end.
+#[derive(Clone, Default)]
+struct RecordingConfig {
+    edits: Arc<std::sync::Mutex<Vec<agent_core::ConfigEdit>>>,
+}
+
+#[async_trait::async_trait]
+impl agent_core::ConfigStore for RecordingConfig {
+    async fn schema(&self) -> agent_core::Result<serde_json::Value> {
+        Ok(serde_json::json!({}))
+    }
+    async fn values(&self) -> agent_core::Result<serde_json::Value> {
+        Ok(serde_json::json!({}))
+    }
+    async fn validate(
+        &self,
+        _edits: &[agent_core::ConfigEdit],
+    ) -> agent_core::Result<Vec<agent_core::ConfigIssue>> {
+        Ok(Vec::new())
+    }
+    async fn put(
+        &self,
+        edits: Vec<agent_core::ConfigEdit>,
+    ) -> agent_core::Result<Vec<agent_core::ConfigIssue>> {
+        self.edits.lock().unwrap().extend(edits);
+        Ok(Vec::new())
+    }
+    async fn status(&self) -> agent_core::Result<agent_core::ConfigStatus> {
+        Ok(agent_core::ConfigStatus {
+            restart_required: false,
+            pending: Vec::new(),
+            loaded_hash: String::new(),
+            ondisk_hash: String::new(),
+        })
+    }
+}
+
+// The active-personality control roundtrips (docs/design/prompts/10-portal-selector.md):
+// get/set the live head base over the wire, closed-set validation surfaces as an Err,
+// empty selects the default, and a persisting set writes `[agent] personality` through
+// the config store. Runs on TCP and UDS.
+#[rstest]
+#[case::tcp(Transport::Tcp)]
+#[case::uds(Transport::Uds)]
+#[tokio::test]
+async fn active_personality_roundtrips(#[case] transport: Transport) {
+    let root = tempdir();
+    let store = Arc::new(agent_prompt::FilePromptStore::new(
+        root.join("context.d"),
+        root.join("prompts"),
+        "CONFIG SYS",
+    ));
+    let cell = Arc::new(agent_prompt::ActivePersonality::new(
+        root.join("prompts").to_str().unwrap(),
+        "",
+        "CONFIG SYS",
+    ));
+    let cfg = RecordingConfig::default();
+    let recorded = cfg.edits.clone();
+    let router = tonic::transport::Server::builder().add_service(
+        agent_grpc::server::PromptSvc::new(store)
+            .with_active(Some(cell))
+            .with_config(Some(Arc::new(cfg)))
+            .into_server(),
+    );
+    let (dial, _srv) = spawn(transport, router).await;
+    let client = agent_grpc::client::GrpcPrompts::connect(&dial).unwrap();
+
+    // Seeded empty ⇒ default.
+    assert_eq!(client.get_active_personality().await.unwrap(), "");
+
+    // positive_set_then_get_active: a live switch (no persist) roundtrips the id.
+    assert_eq!(
+        client.set_active_personality("codex", false).await.unwrap(),
+        "codex"
+    );
+    assert_eq!(client.get_active_personality().await.unwrap(), "codex");
+    assert!(
+        recorded.lock().unwrap().is_empty(),
+        "no persist ⇒ no config write"
+    );
+
+    // negative_unknown_id_rejected: rejected across the wire; active unchanged.
+    assert!(client.set_active_personality("nope", false).await.is_err());
+    assert_eq!(client.get_active_personality().await.unwrap(), "codex");
+
+    // adversarial_hostile_active_id: a traversal id is rejected, not used as a path.
+    assert!(client
+        .set_active_personality("../../etc", false)
+        .await
+        .is_err());
+    assert_eq!(client.get_active_personality().await.unwrap(), "codex");
+
+    // boundary_empty_id_selects_default.
+    assert_eq!(client.set_active_personality("", false).await.unwrap(), "");
+
+    // persist=true writes [agent] personality through the config store.
+    assert_eq!(
+        client.set_active_personality("pi", true).await.unwrap(),
+        "pi"
+    );
+    let edits = recorded.lock().unwrap();
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].path, "agent.personality");
+    assert_eq!(edits[0].value, Some(serde_json::json!("pi")));
+}
+
 // The `Select(PromptContext)` RPC and preview-by-context survive the hop: a Review
 // context selects the review fragment and folds it into the previewed system message,
 // while an unrelated context selects nothing. Runs on TCP and UDS.

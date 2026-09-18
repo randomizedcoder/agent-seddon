@@ -1,6 +1,32 @@
 # Round 3 · Phase 3 — Portal selector + set-active
 
-**Status: ⬜ designed.** Design: [`../10-portal-selector.md`](../10-portal-selector.md).
+**Status: ✅ built.** Design: [`../10-portal-selector.md`](../10-portal-selector.md).
+
+**As-built deltas from the design:**
+- **Live cell is a seam trait.** `agent-grpc` depends on `agent-core` + `agent-prompt`
+  (not `agent-runtime`), so the swappable head base is `agent_core::ActivePersonalityCell`
+  (a trait), implemented by `agent_prompt::ActivePersonality` (a `std::sync::RwLock` over
+  `{id, base}`, re-resolving via `resolve_system_prompt` on `set`). One `Arc` is shared
+  between the runtime's `Settings.active_personality` and `PromptSvc` — no new crate dep,
+  no `arc_swap`.
+- **Read at session assembly, not per continuation-turn.** The base is read where the
+  stable head is built (`session.rs` assemble); a switch therefore applies to the **next
+  assembled session** — no restart. Re-resolving the head mid-conversation is deliberately
+  avoided so the stable-head / compaction / prompt-cache-prefix contract holds. The
+  situational `messages[1]` fragment machinery is untouched (orthogonal).
+- **`persist` chosen (user).** `SetActivePersonalityRequest { id, persist }`; `persist`
+  writes `[agent] personality` through the in-process `ConfigStore` (best-effort — a failed
+  persist never fails the live switch). Reuses the trait directly, no wire round-trip.
+- **Co-location via the serve path.** `grpc_server.rs` wires the running `Arc<Agent>`'s
+  cell + config into `PromptSvc` (`with_active`/`with_config`), so `--serve-prompt` /
+  `--serve-sessions` switch a live loop. The bare `prompt_router` (tests/loadtest) has no
+  cell ⇒ `Set` is `FAILED_PRECONDITION`, `Get` reports the default.
+- **Client helpers.** `GrpcPrompts::{get,set}_active_personality` are inherent methods (not
+  `PromptStore`), mirroring the sqlite `history`/`rollback` idiom.
+- **Dart widget tests deferred.** The `dart-analyze` gate analyzes `portal/lib` only
+  (`portal/test/` is an excluded stale scaffold), and the concrete `PortalClients` has no
+  injection seam, so runnable widget tests would need a client-abstraction refactor. The
+  selector is analyze-gated; the RPCs are covered end-to-end by the Rust wire test.
 
 ## Goal
 

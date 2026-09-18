@@ -77,6 +77,23 @@ class PromptServiceClient extends $grpc.Client {
     return $createUnaryCall(_$previewAssembled, request, options: options);
   }
 
+  /// Read / switch the active personality (the head base) live — no restart
+  /// (docs/design/prompts/10-portal-selector.md). `Set` re-resolves the base for the
+  /// next turn; with `persist` it also writes the new default through ConfigService.
+  $grpc.ResponseFuture<$0.ActivePersonality> getActivePersonality(
+    $0.GetActivePersonalityRequest request, {
+    $grpc.CallOptions? options,
+  }) {
+    return $createUnaryCall(_$getActivePersonality, request, options: options);
+  }
+
+  $grpc.ResponseFuture<$0.ActivePersonality> setActivePersonality(
+    $0.SetActivePersonalityRequest request, {
+    $grpc.CallOptions? options,
+  }) {
+    return $createUnaryCall(_$setActivePersonality, request, options: options);
+  }
+
   // method descriptors
 
   static final _$list = $grpc.ClientMethod<$0.PromptListRequest, $0.PromptList>(
@@ -104,6 +121,16 @@ class PromptServiceClient extends $grpc.Client {
           '/agent.v1.PromptService/PreviewAssembled',
           ($0.PreviewRequest value) => value.writeToBuffer(),
           $0.AssembledContext.fromBuffer);
+  static final _$getActivePersonality =
+      $grpc.ClientMethod<$0.GetActivePersonalityRequest, $0.ActivePersonality>(
+          '/agent.v1.PromptService/GetActivePersonality',
+          ($0.GetActivePersonalityRequest value) => value.writeToBuffer(),
+          $0.ActivePersonality.fromBuffer);
+  static final _$setActivePersonality =
+      $grpc.ClientMethod<$0.SetActivePersonalityRequest, $0.ActivePersonality>(
+          '/agent.v1.PromptService/SetActivePersonality',
+          ($0.SetActivePersonalityRequest value) => value.writeToBuffer(),
+          $0.ActivePersonality.fromBuffer);
 }
 
 @$pb.GrpcServiceName('agent.v1.PromptService')
@@ -153,6 +180,24 @@ abstract class PromptServiceBase extends $grpc.Service {
         false,
         ($core.List<$core.int> value) => $0.PreviewRequest.fromBuffer(value),
         ($0.AssembledContext value) => value.writeToBuffer()));
+    $addMethod($grpc.ServiceMethod<$0.GetActivePersonalityRequest,
+            $0.ActivePersonality>(
+        'GetActivePersonality',
+        getActivePersonality_Pre,
+        false,
+        false,
+        ($core.List<$core.int> value) =>
+            $0.GetActivePersonalityRequest.fromBuffer(value),
+        ($0.ActivePersonality value) => value.writeToBuffer()));
+    $addMethod($grpc.ServiceMethod<$0.SetActivePersonalityRequest,
+            $0.ActivePersonality>(
+        'SetActivePersonality',
+        setActivePersonality_Pre,
+        false,
+        false,
+        ($core.List<$core.int> value) =>
+            $0.SetActivePersonalityRequest.fromBuffer(value),
+        ($0.ActivePersonality value) => value.writeToBuffer()));
   }
 
   $async.Future<$0.PromptList> list_Pre($grpc.ServiceCall $call,
@@ -203,4 +248,22 @@ abstract class PromptServiceBase extends $grpc.Service {
 
   $async.Future<$0.AssembledContext> previewAssembled(
       $grpc.ServiceCall call, $0.PreviewRequest request);
+
+  $async.Future<$0.ActivePersonality> getActivePersonality_Pre(
+      $grpc.ServiceCall $call,
+      $async.Future<$0.GetActivePersonalityRequest> $request) async {
+    return getActivePersonality($call, await $request);
+  }
+
+  $async.Future<$0.ActivePersonality> getActivePersonality(
+      $grpc.ServiceCall call, $0.GetActivePersonalityRequest request);
+
+  $async.Future<$0.ActivePersonality> setActivePersonality_Pre(
+      $grpc.ServiceCall $call,
+      $async.Future<$0.SetActivePersonalityRequest> $request) async {
+    return setActivePersonality($call, await $request);
+  }
+
+  $async.Future<$0.ActivePersonality> setActivePersonality(
+      $grpc.ServiceCall call, $0.SetActivePersonalityRequest request);
 }
