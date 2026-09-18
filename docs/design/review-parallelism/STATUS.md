@@ -58,7 +58,7 @@ needs iter N-1's tool result), so one PR uses ~1 cluster slot regardless of clus
 | 1 | `stream=true` in the fleet toml — attack the 157s non-streamed tail | ~free (config) | low | ✅ **confirmed win** (see 2026-09-18 log) |
 | 2 | Keep the poller queue full + start reviews **together** → chase a clean 3× cross-review | ~free | low | 🟡 **capped by review-length variance** (see log) |
 | 3 | **Chunked map-reduce review**: MI50 split diff → K≈3 parallel Kimi chunk-reviews → MI50/1×Kimi merge; gated on file-count, K=min(cluster_width, files/group) | new track (multi-PR) | **high** (recall/context-loss; per-chunk ingest tax; the "too-small" sweet-spot) | ⬜ **designed** — see [README.md](README.md) |
-| 4 | **Non-convergence guard**: `[agent] max_unproductive_iters` — force-finalize after N consecutive turns that re-issue only already-seen tool calls; `agent_loop_early_stops_total` metric | gated PR (agent-loop) | low (fires only on genuine repetition; distinct exploration untouched) | 🟡 **built** — live-verify pending (see log) |
+| 4 | **Non-convergence guard**: `[agent] max_unproductive_iters` — force-finalize after N consecutive turns that re-issue only already-seen tool calls; `agent_loop_early_stops_total` metric | gated PR (agent-loop) | low (fires only on genuine repetition; distinct exploration untouched) | ✅ **built + merged (#405)** — a safety net; no false-fires live (see log) |
 
 **Sweet-spot reasoning (why chunking may NOT pay off):** each chunk re-pays the fixed context-ingest
 cost (the 65s "iter-1 full-context" call), so K chunks cost `K×ingest + reasoning`, not `1/K`. Too
@@ -109,7 +109,16 @@ marked ❌ here.
   distinct-exploration on a big PR is chunking's job, not the guard's). Ships with a new
   `agent_loop_early_stops_total` metric so a live sweep can measure how often it fires (the go/no-go
   signal). Gate green; table-driven tests cover positive/negative/boundary/corner + adversarial
-  (hostile/huge args hashed without panic). **Live-verify on l2 pending** — re-sweep a #2828-class
-  40-file PR with `max_unproductive_iters=3` and record whether the guard fires and whether the runaway
-  tail shrinks; honest outcome either way (if it rarely fires, #2828 was distinct exploration → a
-  chunking problem, and the metric proves it).
+  (hostile/huge args hashed without panic). **Merged as #405** (main 2e7d411).
+
+- **2026-09-18 — lever 4 LIVE-VERIFIED on l2 (guard binary, `max_unproductive_iters=3`).** Redeployed
+  the fleet with the merged guard and swept 3 fresh PRs, two of them **446-file / ~43k-churn monsters**
+  (#2699, #2733) plus #2783 (25 files). **The guard did NOT fire** — `agent_loop_early_stops_total`
+  stayed **0** — and all three converged normally: **11 / 10 / 6 iterations**, well under
+  `max_iterations=40`. **Honest outcome:** the guard is a **safety net with zero false-positives** —
+  it correctly left healthy reviews untouched even at 446 files. It does **not** deliver a common-case
+  latency win: #2828's 40-iter runaway was a *specific pathology* (looping near-identical greps), not a
+  general big-PR property (446-file PRs converge in ~10 iters). It remains valuable as the fail-safe
+  for that pathology (proven to fire in the unit tests). #2828 itself is C16-locked (already drafted
+  pre-guard), so an on-demand live *firing* wasn't reproducible without a fresh pathological PR. **The
+  real single-PR latency lever remains chunking (lever 3, [README.md](README.md)).**
