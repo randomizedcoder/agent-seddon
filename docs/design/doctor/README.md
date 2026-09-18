@@ -62,7 +62,12 @@ wiring crate that already owns `Config` and depends on `agent-telemetry`,
     naming the missing tables and pointing at `nix run .#clickhouse-up` /
     `.#clickhouse-migrate` — because that drift means the telemetry writer is
     *silently dropping* those rows (the exact gap a stale container hit during the
-    review-analysis-depth live sweep).
+    review-analysis-depth live sweep). The redeploy verb that makes this drift
+    impossible-to-forget is **`nix run .#fleet-redeploy`** (`nix/fleet-redeploy.nix`):
+    it runs the whole sequence in order — `clickhouse-migrate` → stop the old fleet →
+    start the freshly-built `--serve-fleet` → poll `agent doctor` until healthy —
+    parameterised by env (`FLEET_CONFIG`, `FLEET_GIT_CREDENTIALS`, …), never hardcoding
+    operator paths.
   - **ProviderKeyProbe** — the provider is selected and its API key is resolvable
     (inline / env / file). Present ⇒ Ok; absent ⇒ Warn (a local Ollama needs none)
     — no network.

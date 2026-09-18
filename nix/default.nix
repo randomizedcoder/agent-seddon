@@ -22,8 +22,7 @@ let
   # The locked flake ref the `nix-run` tool provider runs tools against — the agent's
   # OWN pinned nixpkgs, so `nix run <ref>#<tool>` is reproducible. Empty when the rev is
   # unknown (a dirty/pathless input) ⇒ the provider treats it as "resolve nothing".
-  nixpkgsFlakeRef =
-    if nixpkgsRev == "" then "" else "github:NixOS/nixpkgs/${nixpkgsRev}";
+  nixpkgsFlakeRef = if nixpkgsRev == "" then "" else "github:NixOS/nixpkgs/${nixpkgsRev}";
 
   # Shared flake helpers (mkApp/mkApps + harness snippets + mk*Check factories).
   nixLib = import ./lib { inherit pkgs lib versions; };
@@ -561,6 +560,14 @@ let
       ;
     inherit (nixLib) harness;
   };
+
+  # Complete, in-order review-fleet redeploy (migrate → stop → serve → doctor) so no step
+  # is forgotten — see nix/fleet-redeploy.nix. Takes the freshly-built agent + the
+  # clickhouse-migrate verb as derivations (hermetic; the "build" is realizing `${agent}`).
+  fleet-redeploy = import ./fleet-redeploy.nix {
+    inherit pkgs agent;
+    inherit (clickhouse) clickhouse-migrate;
+  };
 in
 {
   packages = {
@@ -604,6 +611,7 @@ in
         e2e-multi
         fleet-e2e
         fleet-measure
+        fleet-redeploy
         graph-arena
         graph-arena-campaign
         review-eval
