@@ -690,8 +690,16 @@ fn add_seam_service(
             None => (router, false),
         },
         Seam::Prompt => match agent.prompt_store() {
+            // Share the running agent's live personality cell + config store, so a
+            // `SetActivePersonality` switches the head base for the next turn (and can
+            // persist the new default) — docs/design/prompts/10-portal-selector.md.
             Some(p) => (
-                router.add_service(srv::PromptSvc::new(p).into_server()),
+                router.add_service(
+                    srv::PromptSvc::new(p)
+                        .with_active(agent.active_personality())
+                        .with_config(agent.config_store())
+                        .into_server(),
+                ),
                 true,
             ),
             None => (router, false),

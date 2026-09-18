@@ -16,11 +16,28 @@ class PromptsPage extends StatefulWidget {
 }
 
 class _PromptsPageState extends State<PromptsPage> {
+  /// The closed set of personalities agent-seddon can run *as*, mirroring
+  /// `agent_core::ALL_PERSONALITIES` (docs/design/prompts/07-personalities.md).
+  /// `''` (the default base) is prepended as the first option in the selector.
+  static const _personalities = [
+    'agent-seddon',
+    'pi',
+    'hermes',
+    'opencode',
+    'codex',
+  ];
+
   List<PromptEntry> _entries = [];
   PromptEntry? _selected;
   final _editor = TextEditingController();
   String? _error;
   bool _loading = true;
+
+  /// The active personality (`''` ⇒ default base), and whether a live switch also
+  /// persists it as the new-run default (docs/design/prompts/10-portal-selector.md).
+  String _activePersonality = '';
+  bool _persistPersonality = false;
+  bool _switching = false;
 
   @override
   void initState() {
@@ -41,8 +58,11 @@ class _PromptsPageState extends State<PromptsPage> {
     });
     try {
       final list = await widget.clients.prompts.list(PromptListRequest());
+      final active = await widget.clients.prompts
+          .getActivePersonality(GetActivePersonalityRequest());
       setState(() {
         _entries = list.entries;
+        _activePersonality = active.id;
         _loading = false;
         // Keep the selection if it still exists, else clear.
         _selected = _entries.firstWhere(
@@ -58,6 +78,37 @@ class _PromptsPageState extends State<PromptsPage> {
         _loading = false;
         _error = '$e';
       });
+    }
+  }
+
+  /// The store `System` entry for a personality id, if one has been imported —
+  /// its version/provenance decorates the option. `null` for the default and for
+  /// personalities resolved purely from files (no store row yet).
+  PromptEntry? _personalityEntry(String id) {
+    if (id.isEmpty) return null;
+    for (final e in _entries) {
+      if (e.kind == PromptKind.PROMPT_KIND_SYSTEM && e.id == id) return e;
+    }
+    return null;
+  }
+
+  Future<void> _setActivePersonality(String id) async {
+    if (id == _activePersonality) return;
+    setState(() => _switching = true);
+    try {
+      final res = await widget.clients.prompts.setActivePersonality(
+          SetActivePersonalityRequest(id: id, persist: _persistPersonality));
+      setState(() {
+        _activePersonality = res.id;
+        _switching = false;
+      });
+      final label = res.id.isEmpty ? 'default base' : res.id;
+      _snack(_persistPersonality
+          ? 'Personality "$label" applied live and saved as default.'
+          : 'Personality "$label" applied live.');
+    } catch (e) {
+      setState(() => _switching = false);
+      _snack('Switch failed: $e');
     }
   }
 
@@ -151,12 +202,92 @@ class _PromptsPageState extends State<PromptsPage> {
     if (_error != null) {
       return _ErrorRetry(message: _error!, onRetry: _reload);
     }
-    return Row(
+    return Column(
       children: [
-        SizedBox(width: 280, child: _list()),
-        const VerticalDivider(width: 1),
-        Expanded(child: _editorPane()),
+        _selectorBar(),
+        const Divider(height: 1),
+        Expanded(
+          child: Row(
+            children: [
+              SizedBox(width: 280, child: _list()),
+              const VerticalDivider(width: 1),
+              Expanded(child: _editorPane()),
+            ],
+          ),
+        ),
       ],
+    );
+  }
+
+  /// The personality selector — pick which named base the loop runs *as*, applied
+  /// live (docs/design/prompts/10-portal-selector.md). Discovered from the closed
+  /// set; a store-imported personality shows its version/provenance.
+  Widget _selectorBar() {
+    final theme = Theme.of(context);
+    final active = _personalityEntry(_activePersonality);
+    final subtitle = active != null
+        ? 'v${active.version}${active.sourceRef.isEmpty ? "" : " · ${active.sourceRef}"}'
+        : (_activePersonality.isEmpty
+            ? 'the default base (from files/config)'
+            : 'resolved from files');
+    return Material(
+      color: theme.colorScheme.tertiaryContainer,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        child: Row(
+          children: [
+            Icon(Icons.badge_outlined,
+                size: 18, color: theme.colorScheme.onTertiaryContainer),
+            const SizedBox(width: 8),
+            Text('Personality',
+                style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    color: theme.colorScheme.onTertiaryContainer)),
+            const SizedBox(width: 12),
+            DropdownButton<String>(
+              value: _activePersonality,
+              onChanged: _switching
+                  ? null
+                  : (v) {
+                      if (v != null) _setActivePersonality(v);
+                    },
+              items: [
+                const DropdownMenuItem(value: '', child: Text('default base')),
+                for (final p in _personalities)
+                  DropdownMenuItem(value: p, child: Text(p)),
+              ],
+            ),
+            const SizedBox(width: 12),
+            if (_switching)
+              const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2))
+            else
+              Expanded(
+                child: Text(subtitle,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                        color: theme.colorScheme.onTertiaryContainer
+                            .withValues(alpha: 0.8))),
+              ),
+            const SizedBox(width: 8),
+            Tooltip(
+              message: 'Also write [agent] personality as the new-run default',
+              child: Row(children: [
+                Checkbox(
+                  value: _persistPersonality,
+                  onChanged: (v) =>
+                      setState(() => _persistPersonality = v ?? false),
+                ),
+                Text('persist',
+                    style:
+                        TextStyle(color: theme.colorScheme.onTertiaryContainer)),
+              ]),
+            ),
+          ],
+        ),
+      ),
     );
   }
 

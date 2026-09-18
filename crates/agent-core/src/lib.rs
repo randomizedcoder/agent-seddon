@@ -186,6 +186,29 @@ pub fn valid_personality(s: &str) -> Option<&'static str> {
         .find(|p| p.eq_ignore_ascii_case(s))
 }
 
+/// A live handle to the agent's **active personality** — the swappable head base
+/// (`docs/design/prompts/10-portal-selector.md`). It is the seam that lets an
+/// operator switch which personality the loop runs *as* mid-session, with no
+/// restart: the running session reads [`base`](Self::base) each turn, and the
+/// `PromptService` handler drives [`set`](Self::set).
+///
+/// The concrete cell lives in `agent-prompt` (it owns `resolve_system_prompt`); the
+/// trait lives here so the runtime and the gRPC layer share **one** `Arc` without
+/// either depending on the other. When no cell is wired (feature off, or a seam
+/// served without a running loop) the runtime falls back to the immutable
+/// `Settings.system_prompt` and the service reports the switch unavailable.
+pub trait ActivePersonalityCell: Send + Sync {
+    /// The current personality id (`""` ⇒ the default base).
+    fn id(&self) -> String;
+    /// The live resolved head base for the next turn.
+    fn base(&self) -> String;
+    /// Validate `id` against [`ALL_PERSONALITIES`] (`""` selects the default),
+    /// re-resolve the base, and swap it in for subsequent turns. An unknown
+    /// non-empty id is [`Error::Prompt`] (⇒ `InvalidArgument` on the wire) and the
+    /// active personality is left unchanged — fail closed.
+    fn set(&self, id: &str) -> Result<()>;
+}
+
 /// Per-request routing signals carried on a [`CompletionRequest`] (model-router
 /// increment 02b). Every field is a *filter or preference* over the
 /// already-configured fleet — a hostile hint (the model is untrusted, and so is

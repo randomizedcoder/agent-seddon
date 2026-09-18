@@ -1168,6 +1168,20 @@ pub async fn build_agent_with(
     #[cfg(not(feature = "review"))]
     let fleet_review_factory_seam: Option<Arc<dyn agent_core::FleetReviewFactory>> = None;
 
+    // The live active-personality cell shares the head base with the served
+    // `PromptService` (docs/design/prompts/10-portal-selector.md). Seeded from the
+    // same `(prompts.dir, agent.personality, agent.system_prompt)` as `system_prompt`
+    // below, so an unswitched cell is byte-identical to today's immutable base.
+    #[cfg(feature = "prompt")]
+    let active_personality: Option<Arc<dyn agent_core::ActivePersonalityCell>> =
+        Some(Arc::new(agent_prompt::ActivePersonality::new(
+            &cfg.prompts.dir,
+            &cfg.agent.personality,
+            &cfg.agent.system_prompt,
+        )));
+    #[cfg(not(feature = "prompt"))]
+    let active_personality: Option<Arc<dyn agent_core::ActivePersonalityCell>> = None;
+
     let settings = Settings {
         max_iterations: cfg.agent.max_iterations,
         max_unproductive_iters: cfg.agent.max_unproductive_iters,
@@ -1186,6 +1200,7 @@ pub async fn build_agent_with(
         ),
         #[cfg(not(feature = "prompt"))]
         system_prompt: cfg.agent.system_prompt.clone(),
+        active_personality,
         stream: cfg.agent.stream,
         parallel_tools: cfg.agent.parallel_tools,
         tool_timeout_secs: cfg.agent.tool_timeout_secs,

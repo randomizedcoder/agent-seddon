@@ -83,6 +83,21 @@ message AssembledContext {
   repeated PreviewMessage messages = 1; // [system, user, (system-append)]
 }
 
+// The active **personality** — which named base the loop currently runs *as*
+// (docs/design/prompts/10-portal-selector.md). `id` is one of
+// `agent_core::ALL_PERSONALITIES` (agent-seddon|pi|hermes|opencode|codex), or `""`
+// for the default base. The closed set means a hostile id simply fails validation.
+message ActivePersonality {
+  string id = 1;
+}
+
+message GetActivePersonalityRequest {}
+
+message SetActivePersonalityRequest {
+  string id = 1;      // "" ⇒ default base; unknown non-empty ⇒ INVALID_ARGUMENT
+  bool persist = 2;   // also write [agent] personality via ConfigService (new run default)
+}
+
 service PromptService {
   rpc List(PromptListRequest) returns (PromptList);
   rpc Get(PromptRef) returns (PromptEntry);
@@ -93,4 +108,9 @@ service PromptService {
   // operator sees exactly the set that composes and why.
   rpc Select(PromptContext) returns (PromptList);
   rpc PreviewAssembled(PreviewRequest) returns (AssembledContext);
+  // Read / switch the active personality (the head base) live — no restart
+  // (docs/design/prompts/10-portal-selector.md). `Set` re-resolves the base for the
+  // next turn; with `persist` it also writes the new default through ConfigService.
+  rpc GetActivePersonality(GetActivePersonalityRequest) returns (ActivePersonality);
+  rpc SetActivePersonality(SetActivePersonalityRequest) returns (ActivePersonality);
 }

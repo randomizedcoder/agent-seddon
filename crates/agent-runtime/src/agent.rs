@@ -30,7 +30,16 @@ pub struct Settings {
     pub temperature: f32,
     pub context_window: u32,
     pub reserve_output: u32,
+    /// The head base resolved at startup (`resolve_system_prompt`). Also the
+    /// **fallback** when no live [`active_personality`](Self::active_personality) cell
+    /// is wired (feature off / a seam served without a running loop).
     pub system_prompt: String,
+    /// The live, swappable head base (docs/design/prompts/10-portal-selector.md). When
+    /// `Some`, the loop reads `base()` each turn instead of [`system_prompt`](Self::system_prompt),
+    /// so a `PromptService.SetActivePersonality` takes effect on the next turn with no
+    /// restart. Seeded byte-identically to `system_prompt`, so an unswitched cell is a
+    /// no-op. `None` ⇒ today's immutable-base behaviour.
+    pub active_personality: Option<Arc<dyn agent_core::ActivePersonalityCell>>,
     /// Echo streamed assistant text live to stderr.
     pub stream: bool,
     /// Run a turn's parallel-safe tool calls concurrently.
@@ -1579,6 +1588,14 @@ impl Agent {
 
     pub fn prompt_store(&self) -> Option<Arc<dyn agent_core::PromptStore>> {
         self.prompt_store.clone()
+    }
+
+    /// The live active-personality cell, if the `prompt` seam is wired
+    /// (docs/design/prompts/10-portal-selector.md). Shared with the running loop's
+    /// `Settings`, so `--serve-prompt` / `--serve-sessions` can switch the head base
+    /// live: a `PromptService.SetActivePersonality` re-resolves it for the next turn.
+    pub fn active_personality(&self) -> Option<Arc<dyn agent_core::ActivePersonalityCell>> {
+        self.settings.active_personality.clone()
     }
 
     /// The config-management store, if the `config` seam is wired
@@ -4767,6 +4784,7 @@ mod tests {
             context_window: 100_000,
             reserve_output: 1000,
             system_prompt: "sys".into(),
+            active_personality: None,
             stream: false,
             parallel_tools: parallel,
             tool_timeout_secs: 30,
@@ -5703,6 +5721,112 @@ mod tests {
     async fn negative_reserve_unchanged_when_already_large_enough() {
         // reserve_output already >= max_tokens → left untouched (no lowering).
         assert_eq!(recorded_compact_reserve(false, 1000, 8000).await, 8000);
+    }
+
+    // ---- live active-personality head base (Round 3 phase 3) ----------------
+
+    use agent_core::ActivePersonalityCell as _;
+
+    /// A `ContextStrategy` that records the `system_prompt` (head base) each assembly
+    /// receives — so a test can prove which base a session ran on.
+    #[derive(Clone, Default)]
+    struct CapturingHead {
+        heads: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+    #[async_trait::async_trait]
+    impl agent_core::ContextStrategy for CapturingHead {
+        async fn assemble(
+            &self,
+            input: agent_core::ContextInput,
+        ) -> agent_core::Result<Vec<Message>> {
+            self.heads.lock().unwrap().push(input.system_prompt.clone());
+            Ok(vec![
+                Message::system(input.system_prompt),
+                Message::user(input.goal),
+            ])
+        }
+        async fn compact(
+            &self,
+            _working: &mut agent_core::WorkingSet,
+            _budget: &agent_core::TokenBudget,
+            _switch: Option<(agent_core::TaskMode, agent_core::TaskMode)>,
+        ) -> agent_core::Result<agent_core::CompactAction> {
+            Ok(agent_core::CompactAction::Budget)
+        }
+    }
+
+    /// A minimal live [`agent_core::ActivePersonalityCell`] whose base a test can swap.
+    #[derive(Default)]
+    struct SwitchableCell {
+        cur: std::sync::Mutex<String>,
+    }
+    impl agent_core::ActivePersonalityCell for SwitchableCell {
+        fn id(&self) -> String {
+            self.cur.lock().unwrap().clone()
+        }
+        fn base(&self) -> String {
+            self.cur.lock().unwrap().clone()
+        }
+        fn set(&self, id: &str) -> agent_core::Result<()> {
+            *self.cur.lock().unwrap() = id.to_string();
+            Ok(())
+        }
+    }
+
+    fn head_capturing_agent(ctx: CapturingHead, s: Settings) -> Arc<Agent> {
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(EchoTool));
+        Arc::new(Agent::new(
+            Arc::new(ScriptedProvider::new(vec![final_turn("done")])),
+            tools,
+            Arc::new(RecordingMemory::new()),
+            Arc::new(ctx),
+            Arc::new(crate::policy::AutoApprove),
+            Metrics::new(),
+            s,
+        ))
+    }
+
+    // positive: switching the live cell changes the head base the NEXT assembled
+    // session runs on — no restart. (The base is read at session assembly, the
+    // stable-head point; the situational messages[1] machinery is untouched.)
+    #[tokio::test]
+    async fn positive_live_switch_changes_head_base() {
+        let cell = Arc::new(SwitchableCell::default());
+        cell.set("BASE-A").unwrap();
+        let ctx = CapturingHead::default();
+        let mut s = settings(false);
+        s.system_prompt = "STATIC-FALLBACK".into();
+        s.active_personality = Some(cell.clone());
+        let agent = head_capturing_agent(ctx.clone(), s);
+
+        agent.session().send("go").await.unwrap();
+        // Switch live, then a fresh session picks up the new base with no restart.
+        cell.set("BASE-B").unwrap();
+        agent.session().send("go").await.unwrap();
+
+        let heads = ctx.heads.lock().unwrap();
+        assert_eq!(
+            heads.as_slice(),
+            &["BASE-A".to_string(), "BASE-B".to_string()]
+        );
+    }
+
+    // negative/default: with no cell wired the loop reads the immutable
+    // Settings.system_prompt — byte-identical to pre-Round-3 behaviour.
+    #[tokio::test]
+    async fn negative_no_cell_uses_static_system_prompt() {
+        let ctx = CapturingHead::default();
+        let mut s = settings(false);
+        s.system_prompt = "STATIC-BASE".into();
+        s.active_personality = None;
+        let agent = head_capturing_agent(ctx.clone(), s);
+
+        agent.session().send("go").await.unwrap();
+        assert_eq!(
+            ctx.heads.lock().unwrap().as_slice(),
+            &["STATIC-BASE".to_string()]
+        );
     }
 
     // ---- worktree cleanup on exit ------------------------------------------

@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use agent_core::{PromptContext, PromptStore, TaskMode};
+use agent_core::{ActivePersonalityCell, ConfigStore, PromptContext, PromptStore, TaskMode};
 use agent_proto::{pb, status_from_error};
 use tonic::transport::server::Router;
 use tonic::transport::Server;
@@ -18,11 +18,34 @@ use super::span;
 
 pub struct PromptSvc {
     inner: Arc<dyn PromptStore>,
+    /// The live head-base cell shared with the running loop's `Settings`, when this
+    /// service is co-located with an agent (`--serve-prompt` / `--serve-sessions`).
+    /// `None` ⇒ the bare `prompt_router` (tests/loadtest): `SetActivePersonality` is
+    /// `FAILED_PRECONDITION` (docs/design/prompts/10-portal-selector.md).
+    active: Option<Arc<dyn ActivePersonalityCell>>,
+    /// The config store, for the optional `persist` write-back of `[agent] personality`
+    /// as the new-run default. `None` ⇒ persist is a logged no-op; the live switch still
+    /// applies.
+    config: Option<Arc<dyn ConfigStore>>,
 }
 
 impl PromptSvc {
     pub fn new(inner: Arc<dyn PromptStore>) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            active: None,
+            config: None,
+        }
+    }
+    /// Wire the live active-personality cell (mirrors `AgentSessionSvc::with_driver`).
+    pub fn with_active(mut self, active: Option<Arc<dyn ActivePersonalityCell>>) -> Self {
+        self.active = active;
+        self
+    }
+    /// Wire the config store used by `SetActivePersonality { persist }`.
+    pub fn with_config(mut self, config: Option<Arc<dyn ConfigStore>>) -> Self {
+        self.config = config;
+        self
     }
     pub fn into_server(self) -> pb::prompt_service_server::PromptServiceServer<Self> {
         pb::prompt_service_server::PromptServiceServer::new(self)
@@ -143,6 +166,67 @@ impl pb::prompt_service_server::PromptService for PromptSvc {
             Ok(Response::new(pb::AssembledContext {
                 messages: messages.into_iter().map(Into::into).collect(),
             }))
+        }
+        .instrument(sp)
+        .await
+    }
+
+    async fn get_active_personality(
+        &self,
+        request: Request<pb::GetActivePersonalityRequest>,
+    ) -> Result<Response<pb::ActivePersonality>, Status> {
+        let sp = span("prompt.get_active_personality", request.metadata());
+        // No cell wired (the bare router) ⇒ report the default; a read is always safe.
+        let id = self.active.as_ref().map(|c| c.id()).unwrap_or_default();
+        async move { Ok(Response::new(pb::ActivePersonality { id })) }
+            .instrument(sp)
+            .await
+    }
+
+    async fn set_active_personality(
+        &self,
+        request: Request<pb::SetActivePersonalityRequest>,
+    ) -> Result<Response<pb::ActivePersonality>, Status> {
+        super::authz::require(agent_core::Action::Write, agent_core::ResourceType::Prompt)?;
+        let sp = span("prompt.set_active_personality", request.metadata());
+        let active = self.active.clone();
+        let config = self.config.clone();
+        async move {
+            let req = request.into_inner();
+            // Only meaningful with a running loop to re-resolve against; the bare
+            // router (no cell) reports the switch unavailable rather than silently
+            // succeeding with no effect.
+            let cell = active.ok_or_else(|| {
+                Status::failed_precondition(
+                    "active personality unavailable: no running agent bound to this service",
+                )
+            })?;
+            // Closed-set validation lives in the cell; a bad id ⇒ InvalidArgument.
+            cell.set(&req.id).map_err(|e| status_from_error(&e))?;
+            let id = cell.id();
+            // Best-effort persist of the new default; never fails the live switch.
+            if req.persist {
+                match &config {
+                    Some(store) => {
+                        let edit = agent_core::ConfigEdit {
+                            path: "agent.personality".to_string(),
+                            value: Some(serde_json::Value::String(id.clone())),
+                        };
+                        match store.put(vec![edit]).await {
+                            Ok(issues) if !issues.is_empty() => tracing::warn!(
+                                count = issues.len(),
+                                "persist of active personality rejected by config store"
+                            ),
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::warn!(error = %e, "persist of active personality failed");
+                            }
+                        }
+                    }
+                    None => tracing::warn!("persist requested but no config store wired"),
+                }
+            }
+            Ok(Response::new(pb::ActivePersonality { id }))
         }
         .instrument(sp)
         .await

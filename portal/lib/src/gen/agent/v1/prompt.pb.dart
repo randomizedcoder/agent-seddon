@@ -100,6 +100,8 @@ class PromptEntry extends $pb.GeneratedMessage {
     $core.bool? readOnly,
     $core.int? order,
     $core.Iterable<$core.String>? tags,
+    $core.int? version,
+    $core.String? sourceRef,
   }) {
     final result = create();
     if (kind != null) result.kind = kind;
@@ -109,6 +111,8 @@ class PromptEntry extends $pb.GeneratedMessage {
     if (readOnly != null) result.readOnly = readOnly;
     if (order != null) result.order = order;
     if (tags != null) result.tags.addAll(tags);
+    if (version != null) result.version = version;
+    if (sourceRef != null) result.sourceRef = sourceRef;
     return result;
   }
 
@@ -133,6 +137,8 @@ class PromptEntry extends $pb.GeneratedMessage {
     ..aOB(5, _omitFieldNames ? '' : 'readOnly')
     ..aI(6, _omitFieldNames ? '' : 'order', fieldType: $pb.PbFieldType.OU3)
     ..pPS(7, _omitFieldNames ? '' : 'tags')
+    ..aI(8, _omitFieldNames ? '' : 'version', fieldType: $pb.PbFieldType.OU3)
+    ..aOS(9, _omitFieldNames ? '' : 'sourceRef')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -210,6 +216,25 @@ class PromptEntry extends $pb.GeneratedMessage {
 
   @$pb.TagNumber(7)
   $pb.PbList<$core.String> get tags => $_getList(6);
+
+  /// Round-3 versioning/provenance (docs/design/prompts/08-versioning-and-provenance.md):
+  @$pb.TagNumber(8)
+  $core.int get version => $_getIZ(7);
+  @$pb.TagNumber(8)
+  set version($core.int value) => $_setUnsignedInt32(7, value);
+  @$pb.TagNumber(8)
+  $core.bool hasVersion() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearVersion() => $_clearField(8);
+
+  @$pb.TagNumber(9)
+  $core.String get sourceRef => $_getSZ(8);
+  @$pb.TagNumber(9)
+  set sourceRef($core.String value) => $_setString(8, value);
+  @$pb.TagNumber(9)
+  $core.bool hasSourceRef() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearSourceRef() => $_clearField(9);
 }
 
 class PromptListRequest extends $pb.GeneratedMessage {
@@ -620,6 +645,174 @@ class AssembledContext extends $pb.GeneratedMessage {
 
   @$pb.TagNumber(1)
   $pb.PbList<PreviewMessage> get messages => $_getList(0);
+}
+
+/// The active **personality** — which named base the loop currently runs *as*
+/// (docs/design/prompts/10-portal-selector.md). `id` is one of
+/// `agent_core::ALL_PERSONALITIES` (agent-seddon|pi|hermes|opencode|codex), or `""`
+/// for the default base. The closed set means a hostile id simply fails validation.
+class ActivePersonality extends $pb.GeneratedMessage {
+  factory ActivePersonality({
+    $core.String? id,
+  }) {
+    final result = create();
+    if (id != null) result.id = id;
+    return result;
+  }
+
+  ActivePersonality._();
+
+  factory ActivePersonality.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory ActivePersonality.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ActivePersonality',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'id')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ActivePersonality clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ActivePersonality copyWith(void Function(ActivePersonality) updates) =>
+      super.copyWith((message) => updates(message as ActivePersonality))
+          as ActivePersonality;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ActivePersonality create() => ActivePersonality._();
+  @$core.override
+  ActivePersonality createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static ActivePersonality getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ActivePersonality>(create);
+  static ActivePersonality? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get id => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set id($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearId() => $_clearField(1);
+}
+
+class GetActivePersonalityRequest extends $pb.GeneratedMessage {
+  factory GetActivePersonalityRequest() => create();
+
+  GetActivePersonalityRequest._();
+
+  factory GetActivePersonalityRequest.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory GetActivePersonalityRequest.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'GetActivePersonalityRequest',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
+      createEmptyInstance: create)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  GetActivePersonalityRequest clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  GetActivePersonalityRequest copyWith(
+          void Function(GetActivePersonalityRequest) updates) =>
+      super.copyWith(
+              (message) => updates(message as GetActivePersonalityRequest))
+          as GetActivePersonalityRequest;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static GetActivePersonalityRequest create() =>
+      GetActivePersonalityRequest._();
+  @$core.override
+  GetActivePersonalityRequest createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static GetActivePersonalityRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<GetActivePersonalityRequest>(create);
+  static GetActivePersonalityRequest? _defaultInstance;
+}
+
+class SetActivePersonalityRequest extends $pb.GeneratedMessage {
+  factory SetActivePersonalityRequest({
+    $core.String? id,
+    $core.bool? persist,
+  }) {
+    final result = create();
+    if (id != null) result.id = id;
+    if (persist != null) result.persist = persist;
+    return result;
+  }
+
+  SetActivePersonalityRequest._();
+
+  factory SetActivePersonalityRequest.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory SetActivePersonalityRequest.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'SetActivePersonalityRequest',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'agent.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'id')
+    ..aOB(2, _omitFieldNames ? '' : 'persist')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SetActivePersonalityRequest clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SetActivePersonalityRequest copyWith(
+          void Function(SetActivePersonalityRequest) updates) =>
+      super.copyWith(
+              (message) => updates(message as SetActivePersonalityRequest))
+          as SetActivePersonalityRequest;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static SetActivePersonalityRequest create() =>
+      SetActivePersonalityRequest._();
+  @$core.override
+  SetActivePersonalityRequest createEmptyInstance() => create();
+  @$core.pragma('dart2js:noInline')
+  static SetActivePersonalityRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<SetActivePersonalityRequest>(create);
+  static SetActivePersonalityRequest? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get id => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set id($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.bool get persist => $_getBF(1);
+  @$pb.TagNumber(2)
+  set persist($core.bool value) => $_setBool(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasPersist() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearPersist() => $_clearField(2);
 }
 
 const $core.bool _omitFieldNames =

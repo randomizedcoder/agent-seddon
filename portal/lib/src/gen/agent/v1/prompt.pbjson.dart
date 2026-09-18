@@ -74,6 +74,8 @@ const PromptEntry$json = {
     {'1': 'read_only', '3': 5, '4': 1, '5': 8, '10': 'readOnly'},
     {'1': 'order', '3': 6, '4': 1, '5': 13, '10': 'order'},
     {'1': 'tags', '3': 7, '4': 3, '5': 9, '10': 'tags'},
+    {'1': 'version', '3': 8, '4': 1, '5': 13, '10': 'version'},
+    {'1': 'source_ref', '3': 9, '4': 1, '5': 9, '10': 'sourceRef'},
   ],
 };
 
@@ -82,7 +84,8 @@ final $typed_data.Uint8List promptEntryDescriptor = $convert.base64Decode(
     'CgtQcm9tcHRFbnRyeRIoCgRraW5kGAEgASgOMhQuYWdlbnQudjEuUHJvbXB0S2luZFIEa2luZB'
     'IOCgJpZBgCIAEoCVICaWQSGAoHY29udGVudBgDIAEoCVIHY29udGVudBIYCgdidWlsdGluGAQg'
     'ASgIUgdidWlsdGluEhsKCXJlYWRfb25seRgFIAEoCFIIcmVhZE9ubHkSFAoFb3JkZXIYBiABKA'
-    '1SBW9yZGVyEhIKBHRhZ3MYByADKAlSBHRhZ3M=');
+    '1SBW9yZGVyEhIKBHRhZ3MYByADKAlSBHRhZ3MSGAoHdmVyc2lvbhgIIAEoDVIHdmVyc2lvbhId'
+    'Cgpzb3VyY2VfcmVmGAkgASgJUglzb3VyY2VSZWY=');
 
 @$core.Deprecated('Use promptListRequestDescriptor instead')
 const PromptListRequest$json = {
@@ -203,3 +206,39 @@ const AssembledContext$json = {
 final $typed_data.Uint8List assembledContextDescriptor = $convert.base64Decode(
     'ChBBc3NlbWJsZWRDb250ZXh0EjQKCG1lc3NhZ2VzGAEgAygLMhguYWdlbnQudjEuUHJldmlld0'
     '1lc3NhZ2VSCG1lc3NhZ2Vz');
+
+@$core.Deprecated('Use activePersonalityDescriptor instead')
+const ActivePersonality$json = {
+  '1': 'ActivePersonality',
+  '2': [
+    {'1': 'id', '3': 1, '4': 1, '5': 9, '10': 'id'},
+  ],
+};
+
+/// Descriptor for `ActivePersonality`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List activePersonalityDescriptor =
+    $convert.base64Decode('ChFBY3RpdmVQZXJzb25hbGl0eRIOCgJpZBgBIAEoCVICaWQ=');
+
+@$core.Deprecated('Use getActivePersonalityRequestDescriptor instead')
+const GetActivePersonalityRequest$json = {
+  '1': 'GetActivePersonalityRequest',
+};
+
+/// Descriptor for `GetActivePersonalityRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List getActivePersonalityRequestDescriptor =
+    $convert.base64Decode('ChtHZXRBY3RpdmVQZXJzb25hbGl0eVJlcXVlc3Q=');
+
+@$core.Deprecated('Use setActivePersonalityRequestDescriptor instead')
+const SetActivePersonalityRequest$json = {
+  '1': 'SetActivePersonalityRequest',
+  '2': [
+    {'1': 'id', '3': 1, '4': 1, '5': 9, '10': 'id'},
+    {'1': 'persist', '3': 2, '4': 1, '5': 8, '10': 'persist'},
+  ],
+};
+
+/// Descriptor for `SetActivePersonalityRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List setActivePersonalityRequestDescriptor =
+    $convert.base64Decode(
+        'ChtTZXRBY3RpdmVQZXJzb25hbGl0eVJlcXVlc3QSDgoCaWQYASABKAlSAmlkEhgKB3BlcnNpc3'
+        'QYAiABKAhSB3BlcnNpc3Q=');

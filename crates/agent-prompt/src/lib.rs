@@ -532,6 +532,88 @@ pub fn resolve_system_prompt(prompts_dir: &str, personality: &str, config_defaul
     }
 }
 
+/// A live, swappable [`agent_core::ActivePersonalityCell`] over the head base
+/// (`docs/design/prompts/10-portal-selector.md`). Seeded at startup from the same
+/// `(prompts_dir, personality, config_default)` the runtime resolves today, it lets the
+/// portal switch the active personality mid-session: [`set`](Self::set) re-runs
+/// [`resolve_system_prompt`] and swaps the cached base under a lock, so the **next** turn
+/// assembles the new base (the situational `messages[1]` fragment machinery is untouched;
+/// the two axes are orthogonal). A `std::sync::RwLock` (not a channel) because the read is
+/// per-turn and synchronous — lock → clone → drop, no `await` held — and writes are rare.
+///
+/// Unwired (feature off / a seam served without a running loop) the runtime never
+/// constructs this and reads its immutable `Settings.system_prompt` instead, so behaviour
+/// is byte-identical to today.
+pub struct ActivePersonality {
+    prompts_dir: String,
+    config_default: String,
+    state: std::sync::RwLock<PersonalityState>,
+}
+
+struct PersonalityState {
+    /// Canonical personality id (`""` ⇒ the default base).
+    id: String,
+    /// The resolved head base for the next turn.
+    base: String,
+}
+
+impl ActivePersonality {
+    /// Seed the cell by resolving `personality` now — byte-identical to the runtime's
+    /// startup resolution. An empty/unknown `personality` seeds the default base and an
+    /// empty canonical id (fail closed: a hostile name never becomes state).
+    pub fn new(prompts_dir: &str, personality: &str, config_default: &str) -> Self {
+        let base = resolve_system_prompt(prompts_dir, personality, config_default);
+        let id = agent_core::valid_personality(personality)
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        Self {
+            prompts_dir: prompts_dir.to_string(),
+            config_default: config_default.to_string(),
+            state: std::sync::RwLock::new(PersonalityState { id, base }),
+        }
+    }
+}
+
+impl agent_core::ActivePersonalityCell for ActivePersonality {
+    fn id(&self) -> String {
+        self.state.read().map(|s| s.id.clone()).unwrap_or_default()
+    }
+
+    fn base(&self) -> String {
+        // A poisoned lock must not kill the loop: fall back to a fresh default resolve.
+        match self.state.read() {
+            Ok(s) => s.base.clone(),
+            Err(_) => resolve_system_prompt(&self.prompts_dir, "", &self.config_default),
+        }
+    }
+
+    fn set(&self, id: &str) -> Result<()> {
+        // Closed-set validation: `""` ⇒ default; unknown non-empty ⇒ reject (fail closed).
+        // The rejection names the static allowed set only — never the untrusted input.
+        let canonical = if id.trim().is_empty() {
+            String::new()
+        } else {
+            match agent_core::valid_personality(id) {
+                Some(p) => p.to_string(),
+                None => {
+                    return Err(Error::Prompt(format!(
+                        "unknown personality (expected one of {:?})",
+                        agent_core::ALL_PERSONALITIES
+                    )))
+                }
+            }
+        };
+        let base = resolve_system_prompt(&self.prompts_dir, &canonical, &self.config_default);
+        let mut st = self
+            .state
+            .write()
+            .map_err(|_| Error::Prompt("active personality lock poisoned".into()))?;
+        st.id = canonical;
+        st.base = base;
+        Ok(())
+    }
+}
+
 /// Read every `*.md` in `dir`, ordered by numeric prefix then name, and concatenate
 /// the non-blank trimmed bodies with a blank line between (the same order/shape as
 /// `context_entries`). `None` if the directory is missing or holds no non-empty
@@ -1138,6 +1220,85 @@ mod tests {
             resolve_system_prompt(prompts.to_str().unwrap(), "", "CFG DEFAULT"),
             "CFG DEFAULT"
         );
+    }
+
+    // --- Round 3 phase 3: the live ActivePersonality cell -------------------
+
+    use agent_core::ActivePersonalityCell as _;
+
+    /// A prompts dir seeded with a codex + pi named base and a shared fallback.
+    fn cell_dir() -> String {
+        let root = tempdir();
+        let prompts = root.join("prompts");
+        std::fs::create_dir_all(&prompts).unwrap();
+        write_prompt(&prompts, "personalities/codex/0001_base.md", "CODEX BASE");
+        write_prompt(&prompts, "personalities/pi/0001_base.md", "PI BASE");
+        write_prompt(&prompts, "system.md", "SHARED");
+        prompts.to_str().unwrap().to_string()
+    }
+
+    // positive: seeding from a personality resolves that base + canonical id.
+    #[test]
+    fn positive_cell_seeds_from_personality() {
+        let cell = ActivePersonality::new(&cell_dir(), "codex", "CFG");
+        assert_eq!(cell.id(), "codex");
+        assert_eq!(cell.base(), "CODEX BASE");
+    }
+
+    // positive: a live switch re-resolves the base for the next read.
+    #[test]
+    fn positive_cell_live_switch_reresolves_base() {
+        let cell = ActivePersonality::new(&cell_dir(), "", "CFG");
+        assert_eq!(cell.id(), "");
+        assert_eq!(cell.base(), "SHARED"); // default rung
+        cell.set("pi").unwrap();
+        assert_eq!(cell.id(), "pi");
+        assert_eq!(cell.base(), "PI BASE");
+        cell.set("codex").unwrap();
+        assert_eq!(cell.base(), "CODEX BASE");
+    }
+
+    // boundary: empty id selects the default base (today's behaviour).
+    #[test]
+    fn boundary_cell_empty_id_selects_default() {
+        let cell = ActivePersonality::new(&cell_dir(), "codex", "CFG");
+        cell.set("").unwrap();
+        assert_eq!(cell.id(), "");
+        assert_eq!(cell.base(), "SHARED");
+    }
+
+    // negative/adversarial: an unknown or hostile id is rejected and leaves the
+    // active personality unchanged (fail closed — no path built from raw input).
+    #[rstest]
+    #[case::negative_unknown("nope")]
+    #[case::adversarial_traversal("../../etc")]
+    #[case::adversarial_ref_special("codex\nHEAD")]
+    fn negative_cell_rejects_bad_id_unchanged(#[case] bad: &str) {
+        let cell = ActivePersonality::new(&cell_dir(), "codex", "CFG");
+        let err = cell.set(bad).unwrap_err();
+        assert!(matches!(err, Error::Prompt(_)));
+        // Unchanged: still codex.
+        assert_eq!(cell.id(), "codex");
+        assert_eq!(cell.base(), "CODEX BASE");
+    }
+
+    // adversarial: a huge id is rejected cheaply (closed-set compare) — no panic/DoS,
+    // active personality unchanged.
+    #[test]
+    fn adversarial_cell_huge_id_rejected() {
+        let cell = ActivePersonality::new(&cell_dir(), "codex", "CFG");
+        let huge = "x".repeat(100_000);
+        assert!(matches!(cell.set(&huge), Err(Error::Prompt(_))));
+        assert_eq!(cell.id(), "codex");
+    }
+
+    // corner: set the already-active id → still succeeds, base unchanged.
+    #[test]
+    fn corner_cell_set_same_as_current() {
+        let cell = ActivePersonality::new(&cell_dir(), "codex", "CFG");
+        cell.set("codex").unwrap();
+        assert_eq!(cell.id(), "codex");
+        assert_eq!(cell.base(), "CODEX BASE");
     }
 
     // --- SystemFragment: put → get/list with derived tags + order, then delete -

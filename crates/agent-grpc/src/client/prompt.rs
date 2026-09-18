@@ -27,6 +27,26 @@ impl GrpcPrompts {
             retry: grpc_retry_policy(),
         })
     }
+
+    /// The active personality id (`""` ⇒ default). Not a `PromptStore` method — the
+    /// active-personality control is inherent to the service
+    /// (docs/design/prompts/10-portal-selector.md).
+    pub async fn get_active_personality(&self) -> Result<String> {
+        let req = pb::GetActivePersonalityRequest {};
+        let resp = unary!(self, get_active_personality, req).map_err(status_to_err)?;
+        Ok(resp.into_inner().id)
+    }
+
+    /// Switch the active personality live (`persist` also writes the new-run default).
+    /// Returns the canonical active id after the switch.
+    pub async fn set_active_personality(&self, id: &str, persist: bool) -> Result<String> {
+        let req = pb::SetActivePersonalityRequest {
+            id: id.to_string(),
+            persist,
+        };
+        let resp = unary!(self, set_active_personality, req).map_err(status_to_err)?;
+        Ok(resp.into_inner().id)
+    }
 }
 
 #[async_trait]

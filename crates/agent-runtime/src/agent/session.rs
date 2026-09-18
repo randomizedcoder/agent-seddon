@@ -381,7 +381,13 @@ impl Session {
                 .agent
                 .context
                 .assemble(ContextInput {
-                    system_prompt: self.agent.settings.system_prompt.clone(),
+                    // The live active-personality cell (if wired) is the head base, so a
+                    // no-restart personality switch takes effect on this turn; else the
+                    // immutable startup base (docs/design/prompts/10-portal-selector.md).
+                    system_prompt: match &self.agent.settings.active_personality {
+                        Some(cell) => cell.base(),
+                        None => self.agent.settings.system_prompt.clone(),
+                    },
                     prepend: {
                         let mut p = self.agent.settings.context_prepend.clone();
                         p.extend(expanded.iter().cloned());
