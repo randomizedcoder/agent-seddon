@@ -1170,6 +1170,7 @@ pub async fn build_agent_with(
 
     let settings = Settings {
         max_iterations: cfg.agent.max_iterations,
+        max_unproductive_iters: cfg.agent.max_unproductive_iters,
         max_tokens: cfg.agent.max_tokens,
         temperature: cfg.agent.temperature,
         context_window: cfg.agent.context_window,

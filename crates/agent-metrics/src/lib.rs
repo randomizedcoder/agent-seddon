@@ -194,6 +194,7 @@ pub struct Metrics {
     scan_seconds: Histogram,
     content_blocks_dropped: IntCounter,
     iterations: IntCounterVec,
+    loop_early_stops: IntCounterVec,
     runs: IntCounterVec,
     run_seconds: HistogramVec,
     active: IntGaugeVec,
@@ -1030,6 +1031,14 @@ impl Metrics {
             &["session", "user"],
         )
         .unwrap();
+        let loop_early_stops = IntCounterVec::new(
+            Opts::new(
+                "agent_loop_early_stops_total",
+                "Agent loops force-finalized early by the non-convergence guard",
+            ),
+            &["session", "user"],
+        )
+        .unwrap();
         let runs = IntCounterVec::new(
             Opts::new("agent_runs_total", "Completed agent runs"),
             &["outcome", "session", "user"],
@@ -1501,6 +1510,7 @@ impl Metrics {
             Box::new(content_blocks.clone()),
             Box::new(content_blocks_dropped.clone()),
             Box::new(iterations.clone()),
+            Box::new(loop_early_stops.clone()),
             Box::new(runs.clone()),
             Box::new(run_seconds.clone()),
             Box::new(active.clone()),
@@ -1663,6 +1673,7 @@ impl Metrics {
             content_blocks,
             content_blocks_dropped,
             iterations,
+            loop_early_stops,
             runs,
             run_seconds,
             active,
@@ -3091,6 +3102,15 @@ impl SessionMetrics {
             .with_label_values(&self.tenant())
             .inc();
     }
+    /// The non-convergence guard force-finalized the loop early (the model was
+    /// re-issuing already-seen tool calls). Lets a live sweep measure how often the
+    /// guard fires — the go/no-go signal for the lever.
+    pub fn on_nonconvergence_stop(&self) {
+        self.inner
+            .loop_early_stops
+            .with_label_values(&self.tenant())
+            .inc();
+    }
     pub fn on_api_call(&self, model: &str, finish_reason: &str, seconds: f64) {
         let (s, u) = (self.session.as_str(), self.user.as_str());
         self.inner
@@ -3309,6 +3329,7 @@ mod tests {
         let m = Metrics::new();
         let sm = m.for_session("sess-1", "alice");
         sm.on_iteration();
+        sm.on_nonconvergence_stop();
         sm.on_api_call("test-model", "stop", 0.5);
         sm.add_tokens("test-model", 100, 20);
         sm.add_cost("test-model", 0.003, 0.015, 0.0003, 0.0);
@@ -3322,6 +3343,7 @@ mod tests {
         let text = m.encode_text();
         for name in [
             "agent_iterations_total",
+            "agent_loop_early_stops_total",
             "agent_api_calls_total",
             "agent_tokens_total",
             "agent_cost_usd_total",

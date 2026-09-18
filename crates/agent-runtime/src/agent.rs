@@ -21,6 +21,11 @@ use tracing::Instrument;
 #[derive(Clone)]
 pub struct Settings {
     pub max_iterations: usize,
+    /// Non-convergence guard threshold (`[agent] max_unproductive_iters`): after
+    /// this many consecutive iterations that introduce no new tool call, the loop
+    /// force-finalizes early rather than spinning to [`max_iterations`](Self::max_iterations).
+    /// `0` disables it. See the guard in `run_loop`.
+    pub max_unproductive_iters: usize,
     pub max_tokens: u32,
     pub temperature: f32,
     pub context_window: u32,
@@ -2059,6 +2064,18 @@ impl Agent {
         // recovery so a perpetually-truncating model fails fast, not at the
         // max_iterations ceiling.
         let mut consecutive_truncations = 0u32;
+        // Non-convergence guard: a model can spin re-issuing tool calls it has
+        // already made — a 40-file PR once looped `git_grep` to the max_iterations
+        // ceiling (~360s of wasted remote calls). Track each call's (name + args)
+        // signature; an iteration whose calls are ALL already seen is
+        // "unproductive". After `max_unproductive_iters` consecutive unproductive
+        // turns, break early into the forced-finalize path below rather than
+        // burning the whole budget. Distinct exploration always introduces a novel
+        // signature, so a genuinely-progressing run never trips it. `0` disables.
+        let mut seen_tool_sigs: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let mut unproductive_iters = 0usize;
+        let mut nonconvergence_stop = false;
         for iter in 1..=self.settings.max_iterations {
             metrics.on_iteration();
             events.publish(agent_core::SessionEvent::IterationStart { iter: iter as u32 });
@@ -2580,6 +2597,45 @@ impl Agent {
                     })
                     .await;
             }
+
+            // Non-convergence guard (see the counters declared above the loop).
+            // This turn made tool calls (the no-tool-call branch returned or
+            // continued earlier), and its results are now on the wire, so history
+            // is well-formed for the finalize turn. If every call's signature was
+            // already seen, the turn added no new action.
+            if self.settings.max_unproductive_iters > 0 {
+                let mut novel = false;
+                for call in &assistant.tool_calls {
+                    let sig = agent_core::fnv1a_hex(
+                        format!(
+                            "{}\u{0}{}",
+                            call.name,
+                            serde_json::to_string(&call.arguments).unwrap_or_default()
+                        )
+                        .as_bytes(),
+                    );
+                    // `insert` returns true when the signature is new to this run.
+                    novel |= seen_tool_sigs.insert(sig);
+                }
+                if novel {
+                    unproductive_iters = 0;
+                } else {
+                    unproductive_iters += 1;
+                    if unproductive_iters >= self.settings.max_unproductive_iters {
+                        tracing::warn!(
+                            iter,
+                            unproductive_iters,
+                            max_unproductive_iters = self.settings.max_unproductive_iters,
+                            "model re-issued only already-seen tool calls for \
+                             {unproductive_iters} consecutive turns — forcing a finalize \
+                             turn instead of spinning to max_iterations"
+                        );
+                        metrics.on_nonconvergence_stop();
+                        nonconvergence_stop = true;
+                        break;
+                    }
+                }
+            }
         }
 
         // Step budget exhausted without the model volunteering a final answer.
@@ -2588,10 +2644,17 @@ impl Agent {
         // another tool call and loop again. This is a single shot outside the loop
         // (no recursion). An empty or failed finalize falls back to the DNF error
         // below, so we never return a fake-empty success.
-        tracing::warn!(
-            max_iterations = self.settings.max_iterations,
-            "reached max_iterations without a final answer — forcing one finalize turn"
-        );
+        if nonconvergence_stop {
+            tracing::warn!(
+                max_iterations = self.settings.max_iterations,
+                "non-convergence guard tripped — forcing one finalize turn"
+            );
+        } else {
+            tracing::warn!(
+                max_iterations = self.settings.max_iterations,
+                "reached max_iterations without a final answer — forcing one finalize turn"
+            );
+        }
         working
             .messages
             .push(Message::user(MAX_ITERATIONS_FINALIZE_NUDGE));
@@ -4689,6 +4752,9 @@ mod tests {
     fn settings(parallel: bool) -> Settings {
         Settings {
             max_iterations: 5,
+            // Guard off by default so existing loop tests are unaffected; the
+            // non-convergence tests set it explicitly.
+            max_unproductive_iters: 0,
             max_tokens: 100,
             temperature: 0.0,
             context_window: 100_000,
@@ -5029,6 +5095,203 @@ mod tests {
             .expect_err("should hit the iteration bound")
             .to_string();
         assert!(err.contains("max_iterations"), "{err}");
+    }
+
+    // ---- non-convergence guard (fix/agent-nonconvergence-guard) -------------
+    // A model can spin re-issuing tool calls it has already made (a 40-file PR
+    // once looped `git_grep` to the max_iterations ceiling). The guard counts
+    // iterations whose tool calls are ALL already-seen and force-finalizes after
+    // `max_unproductive_iters` consecutive such turns. Distinct exploration always
+    // introduces a novel signature, so a progressing run is never cut.
+
+    /// Model capabilities that advertise tool support (so the loop sends the tool
+    /// schema on normal turns; the finalize turn is the only tools-empty request).
+    fn tool_caps() -> agent_core::ModelCapabilities {
+        agent_core::ModelCapabilities {
+            supports_tools: true,
+            context_window: 100_000,
+            supports_response_format: false,
+            supports_vision: false,
+        }
+    }
+
+    /// An agent with `EchoTool` registered and the guard configured.
+    fn guard_agent(
+        provider: Arc<dyn LlmProvider>,
+        max_iterations: usize,
+        max_unproductive: usize,
+    ) -> Arc<Agent> {
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(EchoTool));
+        let mut s = settings(false);
+        s.max_iterations = max_iterations;
+        s.max_unproductive_iters = max_unproductive;
+        Arc::new(Agent::new(
+            provider,
+            tools,
+            Arc::new(RecordingMemory::new()),
+            Arc::new(StaticContext),
+            Arc::new(crate::policy::AutoApprove),
+            Metrics::new(),
+            s,
+        ))
+    }
+
+    /// Run a scripted provider through the guarded loop; return the result and the
+    /// number of provider round-trips (so a test can prove an early stop).
+    async fn run_scripted_guard(
+        responses: Vec<CompletionResponse>,
+        max_iterations: usize,
+        max_unproductive: usize,
+    ) -> (anyhow::Result<String>, usize) {
+        let provider = Arc::new(ScriptedProvider::new(responses));
+        let agent = guard_agent(provider.clone(), max_iterations, max_unproductive);
+        let res = agent.run("go").await;
+        (res, provider.calls())
+    }
+
+    fn echo_call(id: &str, args: serde_json::Value) -> ToolCall {
+        ToolCall {
+            id: id.into(),
+            name: "echo".into(),
+            arguments: args,
+        }
+    }
+
+    /// `positive_`/`adversarial_`/`boundary_`: a provider that repeats ONE tool
+    /// call every turn (same signature) trips the guard, which force-finalizes
+    /// exactly `threshold`+2 round-trips in (turn 1 is first-seen/novel, then
+    /// `threshold` unproductive turns, then one finalize) — far below
+    /// max_iterations=20. The scripted provider also repeats on the tools-disabled
+    /// finalize, so it yields no text and the run DNFs — but it stopped EARLY.
+    #[rstest]
+    #[case::positive_repeated_tool_call(3, false)]
+    #[case::boundary_fires_exactly_at_threshold_two(2, false)]
+    #[case::adversarial_hostile_args_hashed_safely(3, true)]
+    #[tokio::test]
+    async fn nonconvergence_guard_fires_and_stops_early(
+        #[case] threshold: usize,
+        #[case] hostile: bool,
+    ) {
+        // The adversarial case feeds traversal + shell-injection + a 50 KB blob as
+        // the (model-controlled) tool args; the guard only *hashes* them, so this
+        // must not panic and must still fire.
+        let args = if hostile {
+            json!({
+                "path": "../../../../etc/passwd",
+                "inj": "$(rm -rf /)",
+                "blob": "x".repeat(50_000),
+            })
+        } else {
+            json!({})
+        };
+        let (res, calls) =
+            run_scripted_guard(vec![tool_turn(vec![echo_call("t0", args)])], 20, threshold).await;
+        assert!(res.is_err(), "expected an early-finalize DNF, got {res:?}");
+        assert_eq!(
+            calls,
+            threshold + 2,
+            "guard should force-finalize exactly at the threshold, well below max_iterations"
+        );
+    }
+
+    /// `positive_`: the same stall, but the finalize turn (tools disabled) DOES
+    /// answer — the run returns that answer rather than DNF-ing.
+    #[tokio::test]
+    async fn positive_guard_returns_finalize_answer() {
+        let provider = Arc::new(
+            FnProvider::new(|req: &CompletionRequest| {
+                if req.tools.is_empty() {
+                    final_turn("guard-finalized")
+                } else {
+                    tool_turn(vec![echo_call("t0", json!({}))])
+                }
+            })
+            .with_capabilities(tool_caps()),
+        );
+        assert_eq!(
+            guard_agent(provider, 20, 3).run("go").await.unwrap(),
+            "guard-finalized"
+        );
+    }
+
+    /// `negative_`: every turn issues a DISTINCT tool call (novel signature) → the
+    /// guard never fires; the model reaches its own final answer uncut.
+    #[tokio::test]
+    async fn negative_distinct_exploration_not_cut() {
+        let n = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = Arc::new(
+            FnProvider::new(move |req: &CompletionRequest| {
+                if req.tools.is_empty() {
+                    return final_turn("unexpected-finalize");
+                }
+                let i = n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if i < 6 {
+                    tool_turn(vec![echo_call(&format!("t{i}"), json!({ "q": i }))])
+                } else {
+                    final_turn("explored-done")
+                }
+            })
+            .with_capabilities(tool_caps()),
+        );
+        assert_eq!(
+            guard_agent(provider, 20, 3).run("go").await.unwrap(),
+            "explored-done"
+        );
+    }
+
+    /// `negative_`: a first-turn final answer (no tool calls) — the guard is inert.
+    #[tokio::test]
+    async fn negative_final_answer_first_turn_guard_inert() {
+        let provider = Arc::new(
+            FnProvider::new(|_r: &CompletionRequest| final_turn("immediate"))
+                .with_capabilities(tool_caps()),
+        );
+        assert_eq!(
+            guard_agent(provider, 20, 3).run("go").await.unwrap(),
+            "immediate"
+        );
+    }
+
+    /// `boundary_`: A,A,A then a novel B RESETS the streak, then A,A reaches the
+    /// final answer. With threshold 3 the run completes (never 3 consecutive
+    /// unproductive turns), proving a novel call clears the counter.
+    #[tokio::test]
+    async fn boundary_novel_call_resets_counter() {
+        let script = vec![
+            tool_turn(vec![echo_call("a", json!({}))]),
+            tool_turn(vec![echo_call("a", json!({}))]),
+            tool_turn(vec![echo_call("a", json!({}))]),
+            tool_turn(vec![echo_call("b", json!({ "x": 1 }))]), // novel → reset
+            tool_turn(vec![echo_call("a", json!({}))]),
+            tool_turn(vec![echo_call("a", json!({}))]),
+            final_turn("resolved"),
+        ];
+        let (res, calls) = run_scripted_guard(script, 20, 3).await;
+        assert_eq!(res.unwrap(), "resolved");
+        assert_eq!(calls, 7, "no early stop — the novel B reset the streak");
+    }
+
+    /// `corner_`: `max_unproductive_iters = 0` disables the guard → a repeated call
+    /// spins to the max_iterations ceiling (existing exhaustion path, unchanged).
+    #[tokio::test]
+    async fn corner_guard_disabled_when_zero() {
+        let (res, calls) =
+            run_scripted_guard(vec![tool_turn(vec![echo_call("t0", json!({}))])], 4, 0).await;
+        assert!(res.unwrap_err().to_string().contains("max_iterations"));
+        assert_eq!(calls, 5, "4 loop iters + 1 finalize — no early stop");
+    }
+
+    /// `corner_`: one tool call then a final answer — never a repeat, guard inert.
+    #[tokio::test]
+    async fn corner_single_tool_call_completes_normally() {
+        let script = vec![
+            tool_turn(vec![echo_call("t0", json!({}))]),
+            final_turn("done-after-one-tool"),
+        ];
+        let (res, calls) = run_scripted_guard(script, 20, 3).await;
+        assert_eq!(res.unwrap(), "done-after-one-tool");
+        assert_eq!(calls, 2);
     }
 
     // ---- max_iterations finalize turn (Bug 2a) -----------------------------

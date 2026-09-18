@@ -2650,6 +2650,13 @@ pub struct AgentCfg {
     pub policy: String,
     #[serde(default = "default_max_iters")]
     pub max_iterations: usize,
+    /// Non-convergence guard: after this many *consecutive* loop iterations that
+    /// introduce no new tool call (the model re-issuing calls it has already made —
+    /// a stall), the loop is force-finalized early instead of spinning to
+    /// `max_iterations`. Distinct exploration always introduces novel calls, so a
+    /// genuinely-progressing run is untouched. `0` disables the guard.
+    #[serde(default = "default_max_unproductive")]
+    pub max_unproductive_iters: usize,
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
     #[serde(default = "default_temperature")]
@@ -2858,6 +2865,12 @@ fn default_policy() -> String {
 fn default_max_iters() -> usize {
     12
 }
+fn default_max_unproductive() -> usize {
+    // Mirror MAX_CONSECUTIVE_TRUNCATIONS (3): tolerate a couple of repeated turns
+    // (a brief re-check is legitimate) but cut a genuine stall well below the
+    // iteration ceiling. `0` disables the guard.
+    3
+}
 fn default_tool_timeout() -> u64 {
     // 10 minutes: a backstop for a truly hung tool, well above a normal
     // build/test invoked via `bash` (which has its own shorter timeout).
@@ -2963,6 +2976,7 @@ impl Config {
                 context: default_context(),
                 policy: default_policy(),
                 max_iterations: default_max_iters(),
+                max_unproductive_iters: default_max_unproductive(),
                 max_tokens: default_max_tokens(),
                 temperature: default_temperature(),
                 context_window: default_context_window(),

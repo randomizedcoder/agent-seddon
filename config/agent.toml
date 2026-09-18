@@ -20,6 +20,11 @@ context  = "sliding-window"  # SlidingWindow | summarizing-window | mode-aware-w
 policy   = "auto-approve"    # -> AutoApprove ("interactive" | "allow-list")
 
 max_iterations = 12
+# Non-convergence guard: after this many CONSECUTIVE iterations that introduce no
+# new tool call (the model re-issuing calls it already made — a stall), the loop is
+# force-finalized early instead of spinning to max_iterations. Distinct exploration
+# always introduces novel calls, so a progressing run is untouched. 0 disables.
+max_unproductive_iters = 3
 max_tokens     = 2048        # per-response output cap; reasoning models need more
 temperature    = 0.7
 # The budget compaction works against, so it must not exceed what the server will

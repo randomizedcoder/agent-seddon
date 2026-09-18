@@ -165,6 +165,7 @@ mod tests {
     fn settings() -> Settings {
         Settings {
             max_iterations: 5,
+            max_unproductive_iters: 0,
             max_tokens: 100,
             temperature: 0.0,
             context_window: 100_000,
