@@ -47,8 +47,8 @@ best-of-breed blend, by selecting a **named base** ([`07`](07-personalities.md))
 prompts are sourced from nixpkgs `.src` ([`09`](09-nixpkgs-sourcing.md)), versioned with
 provenance ([`08`](08-versioning-and-provenance.md)), switchable from the portal
 ([`10`](10-portal-selector.md)), and refreshed by an MI50 job ([`11`](11-refresh-job.md)).
-It **extends** Rounds 1–2 and amends two deferrals (see below). **All phases ⬜ designed**
-(this pass is docs-only); each has its own status doc with a table-driven test spec.
+It **extends** Rounds 1–2 and amends two deferrals (see below). **Phases 1–2 built;
+phases 3–5 ⬜ designed.** Each phase has its own status doc with a table-driven test spec.
 
 Legend: ✅ merged · 🔶 in review · ⬜ designed/not-started.
 
@@ -56,7 +56,7 @@ Legend: ✅ merged · 🔶 in review · ⬜ designed/not-started.
 |---|---|:--:|:--:|---|:--:|
 | — | **Docs** — reference doc + Round-3 design docs 06–11 + status docs (this pass) | — | 06–11 | this file | done-on-merge |
 | 1 | **Personalities dimension + seed set** — `[agent] personality`, closed set, personality-aware `resolve_system_prompt` (file ladder), inert seed of all five incl. the MI50-drafted blend | — | [`07`](07-personalities.md) | [`status/round3-01-personalities.md`](status/round3-01-personalities.md) | ✅ built |
-| 2 | **Versioning + provenance** — `version`/`source_ref` on `PromptEntry` + sqlite history + additive proto fields | ✅ additive | [`08`](08-versioning-and-provenance.md) | [`status/round3-02-versioning.md`](status/round3-02-versioning.md) | ⬜ designed |
+| 2 | **Versioning + provenance** — `version`/`source_ref` on `PromptEntry` + sqlite history + additive proto fields | ✅ additive | [`08`](08-versioning-and-provenance.md) | [`status/round3-02-versioning.md`](status/round3-02-versioning.md) | ✅ built |
 | 3 | **Portal selector + set-active** — discover from store; live `SetActivePersonality` RPC + Flutter selector | ✅ additive | [`10`](10-portal-selector.md) | [`status/round3-03-portal-selector.md`](status/round3-03-portal-selector.md) | ⬜ designed |
 | 4 | **nixpkgs source wiring** — flake inputs (opencode/codex/pi `.src` + hermes locked) + prompt-sources derivation | — | [`09`](09-nixpkgs-sourcing.md) | [`status/round3-04-nixpkgs-sourcing.md`](status/round3-04-nixpkgs-sourcing.md) | ⬜ designed |
 | 5 | **MI50 auto-refresh job (LAST)** — detect lock change → re-extract → upsert new version; extractor fuzzing | — | [`11`](11-refresh-job.md) | [`status/round3-05-refresh-job.md`](status/round3-05-refresh-job.md) | ⬜ designed |
@@ -65,6 +65,19 @@ Legend: ✅ merged · 🔶 in review · ⬜ designed/not-started.
 section): "Prompt versioning / history" and "Live re-resolution of the base mid-session"
 are both delivered by Round 3 (phases 2 and 3 respectively). "No new mode taxonomy" is
 **intact** — personality is an orthogonal *named-base* axis, not a `TaskMode`.
+
+- **As-built (round3-02, versioning & provenance):** `PromptEntry` gained `version: u32`
+  + `source_ref: String`; the additive proto fields landed at `PromptEntry.version = 8` /
+  `source_ref = 9` (baseline image bumped). The sqlite backend stores version/provenance in
+  **two companion tables** (`prompt_meta` live pointer + append-only `prompt_history`) rather
+  than doc 08's literal `ALTER TABLE prompts ADD COLUMN` — the sqlite tier has **no migration
+  framework**, and a companion table is the house idiom (`prompt_tags`), so an existing catalog
+  gains versioning with no `ALTER`. A content-or-provenance change bumps `version` and appends a
+  history row; an identical re-import is a no-op (keeps the Phase-5 refresh idempotent).
+  `history()`/`rollback()` are **inherent `SqlitePromptStore` methods** (no new trait method,
+  no new RPC — `SetActivePersonality` stays Phase 3). The file backend reports `version 0` /
+  empty `source_ref` (git is its history); the versioning tests ride the existing
+  `prompt-sqlite` gate check.
 
 ## Dependencies
 

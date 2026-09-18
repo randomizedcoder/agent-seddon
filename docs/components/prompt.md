@@ -157,6 +157,27 @@ derived from its content the same way — so the two are interchangeable. Move a
 between them with `agent_prompt::migrate(&from, &to)` (skips builtins; works in either
 direction).
 
+## Versioning & provenance
+
+Every `PromptEntry` carries two extra fields (Round 3,
+[`docs/design/prompts/08-versioning-and-provenance.md`](../design/prompts/08-versioning-and-provenance.md)):
+
+- **`version: u32`** — a monotonically increasing revision per `(kind, id)`. The **file**
+  backend leaves it `0` (git is its history); a **sqlite** entry starts at `1` and bumps on
+  each content-or-provenance change.
+- **`source_ref: String`** — opaque, bounded (`MAX_SOURCE_REF_LEN`) provenance, e.g.
+  `nixpkgs:opencode@<narHash>:…/anthropic.txt`. Empty for operator-authored entries;
+  `agent_prompt::validate_imported_source_ref` requires it on the *import* path (so a
+  machine-written personality always records where it came from), while ordinary `put`s stay
+  permissive.
+
+In the sqlite backend a `put` is **idempotent**: an identical `(content, source_ref)` is a
+no-op (no bump, no history row), while a change appends to an append-only history. That
+history is queryable (`SqlitePromptStore::history`) and a prior revision can be restored as a
+new forward revision (`SqlitePromptStore::rollback`). Both `version` and `source_ref` travel
+over the grpc wire and through `migrate`, so provenance is preserved when a catalog moves
+between backends.
+
 ## Config
 
 ```toml

@@ -2455,6 +2455,14 @@ pub struct PromptRef {
 /// only for [`PromptKind::SystemFragment`]; in the file backend it is a read
 /// projection of the directory tag (`mode:<mode>`) unioned with any frontmatter
 /// `tags:`, so a `put` persists tags via the fragment's content, not this field.
+///
+/// `version` and `source_ref` back the Round-3 versioning/provenance layer
+/// (`docs/design/prompts/08-versioning-and-provenance.md`): `version` is a
+/// monotonically increasing revision per `(kind, id)` in a versioning backend
+/// (sqlite/grpc), and `0` means un-versioned — the file backend leaves it `0`
+/// because git is its history. `source_ref` is an opaque, bounded provenance
+/// string (e.g. `"nixpkgs:opencode@<narHash>:…/anthropic.txt"`), empty for
+/// operator-authored entries and required only on the import path.
 #[derive(Debug, Clone)]
 pub struct PromptEntry {
     pub kind: PromptKind,
@@ -2464,6 +2472,27 @@ pub struct PromptEntry {
     pub read_only: bool,
     pub order: u32,
     pub tags: Vec<String>,
+    /// Monotonic revision per `(kind, id)` in a versioning backend; `0` = un-versioned
+    /// (file backend — git is the history).
+    pub version: u32,
+    /// Opaque, bounded provenance of the content; empty = operator-authored.
+    pub source_ref: String,
+}
+
+impl Default for PromptEntry {
+    fn default() -> Self {
+        Self {
+            kind: PromptKind::System,
+            id: String::new(),
+            content: String::new(),
+            builtin: false,
+            read_only: false,
+            order: 0,
+            tags: Vec::new(),
+            version: 0,
+            source_ref: String::new(),
+        }
+    }
 }
 
 /// A management surface over the agent's prompts. Every argument is untrusted (an

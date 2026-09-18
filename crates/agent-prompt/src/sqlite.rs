@@ -19,7 +19,8 @@
 //! tag like `'; DROP TABLE prompts; --` is inert text that matches nothing.
 
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_context::lens::{builtin_instruction, ALL_MODES};
 use agent_core::{
@@ -31,8 +32,18 @@ use rusqlite::{params, params_from_iter, Connection};
 
 use crate::{
     assemble_preview, fragment_order, fragment_tags, numeric_prefix, safe_prompt_file,
-    split_fragment_id, split_frontmatter, ContextBlock, MAX_CONTENT_BYTES,
+    split_fragment_id, split_frontmatter, ContextBlock, MAX_CONTENT_BYTES, MAX_SOURCE_REF_LEN,
 };
+
+/// Wall-clock milliseconds since the Unix epoch — the default versioning clock. A
+/// pre-1970 clock (or overflow) is clamped to `0`, so the value is always monotone
+/// non-negative and never panics.
+fn wall_clock_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis().min(u64::MAX as u128) as u64)
+        .unwrap_or(0)
+}
 
 /// A SQLite-backed [`PromptStore`]. The connection is wrapped in a `Mutex` (rusqlite's
 /// `Connection` is `Send` but `!Sync`); every method locks it for a short, synchronous
@@ -43,6 +54,9 @@ pub struct SqlitePromptStore {
     /// Served as the `System` default when no override row exists (mirrors the file
     /// backend's config-system-prompt fallback).
     config_system_prompt: String,
+    /// The versioning clock (`prompt_history.updated_ms`). Defaults to [`wall_clock_ms`];
+    /// tests inject a deterministic source via [`SqlitePromptStore::with_clock`].
+    now_ms: Arc<dyn Fn() -> u64 + Send + Sync>,
 }
 
 impl SqlitePromptStore {
@@ -55,8 +69,20 @@ impl SqlitePromptStore {
         Self::from_conn(conn, config_system_prompt)
     }
 
+    /// Override the versioning clock (used by tests for a deterministic `updated_ms`).
+    #[must_use]
+    pub fn with_clock(mut self, now_ms: Arc<dyn Fn() -> u64 + Send + Sync>) -> Self {
+        self.now_ms = now_ms;
+        self
+    }
+
     fn from_conn(conn: Connection, config_system_prompt: impl Into<String>) -> Result<Self> {
         conn.execute_batch(
+            // `prompts`/`prompt_tags` are unchanged; `prompt_meta` and `prompt_history` are
+            // companion tables (the `prompt_tags` extension idiom — the sqlite tier has no
+            // migration framework), so an existing catalog gains versioning without an
+            // `ALTER TABLE`. `prompt_meta` holds the live version + provenance pointer;
+            // `prompt_history` is the append-only log (docs/design/prompts/08-…md).
             "CREATE TABLE IF NOT EXISTS prompts (
                  kind      TEXT NOT NULL,
                  id        TEXT NOT NULL,
@@ -71,13 +97,47 @@ impl SqlitePromptStore {
                  tag  TEXT NOT NULL,
                  PRIMARY KEY (kind, id, tag)
              );
-             CREATE INDEX IF NOT EXISTS idx_prompt_tags_tag ON prompt_tags(tag);",
+             CREATE INDEX IF NOT EXISTS idx_prompt_tags_tag ON prompt_tags(tag);
+             CREATE TABLE IF NOT EXISTS prompt_meta (
+                 kind       TEXT NOT NULL,
+                 id         TEXT NOT NULL,
+                 version    INTEGER NOT NULL DEFAULT 0,
+                 source_ref TEXT NOT NULL DEFAULT '',
+                 PRIMARY KEY (kind, id)
+             );
+             CREATE TABLE IF NOT EXISTS prompt_history (
+                 kind       TEXT NOT NULL,
+                 id         TEXT NOT NULL,
+                 version    INTEGER NOT NULL,
+                 content    TEXT NOT NULL,
+                 source_ref TEXT NOT NULL DEFAULT '',
+                 updated_ms INTEGER NOT NULL,
+                 PRIMARY KEY (kind, id, version)
+             );",
         )
         .map_err(sql_err)?;
         Ok(Self {
             conn: Mutex::new(conn),
             config_system_prompt: config_system_prompt.into(),
+            now_ms: Arc::new(wall_clock_ms),
         })
+    }
+
+    /// The live `(version, source_ref)` for a `(kind, id)`, or `(0, "")` when the row
+    /// carries no `prompt_meta` (un-versioned — e.g. seeded before this backend, or the
+    /// compiled/config default).
+    fn meta_for(&self, conn: &Connection, kind: PromptKind, id: &str) -> Result<(u32, String)> {
+        conn.query_row(
+            "SELECT version, source_ref FROM prompt_meta WHERE kind = ?1 AND id = ?2",
+            params![kind.as_str(), id],
+            |r| Ok((r.get::<_, i64>(0)? as u32, r.get::<_, String>(1)?)),
+        )
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(sql_err(other)),
+        })
+        .map(|o| o.unwrap_or((0, String::new())))
     }
 
     /// The raw `(content, ord, read_only)` override row for a `(kind, id)`, or `None`.
@@ -122,6 +182,12 @@ impl SqlitePromptStore {
             Some((c, _, _)) => (c, false),
             None => (self.config_system_prompt.clone(), true),
         };
+        // A compiled/config default is un-versioned (0/""); only an override row carries meta.
+        let (version, source_ref) = if builtin {
+            (0, String::new())
+        } else {
+            self.meta_for(conn, PromptKind::System, "")?
+        };
         Ok(PromptEntry {
             kind: PromptKind::System,
             id: String::new(),
@@ -130,6 +196,8 @@ impl SqlitePromptStore {
             read_only: false,
             order: 0,
             tags: Vec::new(),
+            version,
+            source_ref,
         })
     }
 
@@ -137,6 +205,11 @@ impl SqlitePromptStore {
         let (content, builtin) = match self.row(conn, PromptKind::ModeLens, mode.as_str())? {
             Some((c, _, _)) => (c, false),
             None => (builtin_instruction(mode).to_string(), true),
+        };
+        let (version, source_ref) = if builtin {
+            (0, String::new())
+        } else {
+            self.meta_for(conn, PromptKind::ModeLens, mode.as_str())?
         };
         Ok(PromptEntry {
             kind: PromptKind::ModeLens,
@@ -146,6 +219,8 @@ impl SqlitePromptStore {
             read_only: false,
             order: 0,
             tags: Vec::new(),
+            version,
+            source_ref,
         })
     }
 
@@ -176,6 +251,7 @@ impl SqlitePromptStore {
             } else {
                 Vec::new()
             };
+            let (version, source_ref) = self.meta_for(conn, kind, &id)?;
             out.push(PromptEntry {
                 kind,
                 id,
@@ -184,6 +260,8 @@ impl SqlitePromptStore {
                 read_only,
                 order,
                 tags,
+                version,
+                source_ref,
             });
         }
         Ok(out)
@@ -219,6 +297,66 @@ impl SqlitePromptStore {
                 ))
             }
         }
+    }
+
+    /// The append-only version history for a `(kind, id)`, oldest → newest. Each entry's
+    /// `content`/`source_ref`/`version` are the values stored at that revision (`builtin`
+    /// is always false — a history row is a real stored revision). Empty when the prompt
+    /// has no versioned history (un-versioned or never written through this backend).
+    pub fn history(&self, r: &PromptRef) -> Result<Vec<PromptEntry>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT version, content, source_ref FROM prompt_history \
+                 WHERE kind = ?1 AND id = ?2 ORDER BY version",
+            )
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map(params![r.kind.as_str(), r.id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)? as u32,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(sql_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sql_err)?;
+        Ok(rows
+            .into_iter()
+            .map(|(version, content, source_ref)| PromptEntry {
+                kind: r.kind,
+                id: r.id.clone(),
+                content,
+                builtin: false,
+                read_only: false,
+                order: 0,
+                tags: Vec::new(),
+                version,
+                source_ref,
+            })
+            .collect())
+    }
+
+    /// Restore the content+provenance of an earlier `to_version` as a **new** revision
+    /// (the version counter only moves forward — a rollback is itself recorded). Errors if
+    /// that version is not in the history. Returns the newly-written live entry.
+    pub async fn rollback(&self, r: &PromptRef, to_version: u32) -> Result<PromptEntry> {
+        let target = self
+            .history(r)?
+            .into_iter()
+            .find(|e| e.version == to_version)
+            .ok_or_else(|| {
+                Error::Prompt(format!("no version {to_version} for prompt `{}`", r.id))
+            })?;
+        self.put(PromptEntry {
+            kind: r.kind,
+            id: r.id.clone(),
+            content: target.content,
+            source_ref: target.source_ref,
+            ..PromptEntry::default()
+        })
+        .await
     }
 }
 
@@ -272,6 +410,7 @@ impl PromptStore for SqlitePromptStore {
                 } else {
                     Vec::new()
                 };
+                let (version, source_ref) = self.meta_for(&conn, r.kind, &r.id)?;
                 Ok(PromptEntry {
                     kind: r.kind,
                     id: r.id.clone(),
@@ -280,6 +419,8 @@ impl PromptStore for SqlitePromptStore {
                     read_only,
                     order,
                     tags,
+                    version,
+                    source_ref,
                 })
             }
         }
@@ -292,40 +433,87 @@ impl PromptStore for SqlitePromptStore {
                 entry.content.len()
             )));
         }
+        if entry.source_ref.len() > MAX_SOURCE_REF_LEN {
+            return Err(Error::Prompt(format!(
+                "source_ref too long ({} > {MAX_SOURCE_REF_LEN} bytes)",
+                entry.source_ref.len()
+            )));
+        }
         let (id, order, tags) = self.normalize(&entry)?;
         let kind = entry.kind;
         {
-            let conn = self.conn.lock().unwrap();
-            conn.execute(
+            // One transaction: the no-op check, the version bump, the live-row upsert, the
+            // history append, and the tag rewrite must all agree or none apply. The lock is
+            // dropped at the end of this block, *before* the trailing `get` re-locks it.
+            let mut conn = self.conn.lock().unwrap();
+            let tx = conn.transaction().map_err(sql_err)?;
+
+            // No-op: identical content *and* provenance ⇒ no bump, no history row (keeps
+            // the Phase-5 refresh idempotent). `source_ref` is meaningful only where the
+            // caller supplies it; the file→sqlite `migrate` leaves it empty and so still
+            // no-ops on a re-copy of unchanged content.
+            let current = self.row(&tx, kind, &id)?;
+            let (prev_version, prev_source) = self.meta_for(&tx, kind, &id)?;
+            let is_noop = matches!(&current, Some((c, _, _)) if *c == entry.content)
+                && prev_source == entry.source_ref;
+            if is_noop {
+                // tx drops (rolls back — nothing was written); fall through to `get`.
+                drop(tx);
+            } else {
+                let new_version = prev_version.saturating_add(1);
+                tx.execute(
                 "INSERT INTO prompts (kind, id, content, ord, read_only) VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT(kind, id) DO UPDATE SET content = excluded.content, ord = excluded.ord",
                 params![kind.as_str(), id, entry.content, order as i64, entry.read_only],
             )
             .map_err(sql_err)?;
-            conn.execute(
-                "DELETE FROM prompt_tags WHERE kind = ?1 AND id = ?2",
-                params![kind.as_str(), id],
+                tx.execute(
+                "INSERT INTO prompt_meta (kind, id, version, source_ref) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(kind, id) DO UPDATE SET version = excluded.version, source_ref = excluded.source_ref",
+                params![kind.as_str(), id, new_version as i64, entry.source_ref],
             )
             .map_err(sql_err)?;
-            for tag in &tags {
-                conn.execute(
-                    "INSERT OR IGNORE INTO prompt_tags (kind, id, tag) VALUES (?1, ?2, ?3)",
-                    params![kind.as_str(), id, tag],
+                tx.execute(
+                "INSERT INTO prompt_history (kind, id, version, content, source_ref, updated_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    kind.as_str(),
+                    id,
+                    new_version as i64,
+                    entry.content,
+                    entry.source_ref,
+                    (self.now_ms)() as i64
+                ],
+            )
+            .map_err(sql_err)?;
+                tx.execute(
+                    "DELETE FROM prompt_tags WHERE kind = ?1 AND id = ?2",
+                    params![kind.as_str(), id],
                 )
                 .map_err(sql_err)?;
+                for tag in &tags {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO prompt_tags (kind, id, tag) VALUES (?1, ?2, ?3)",
+                        params![kind.as_str(), id, tag],
+                    )
+                    .map_err(sql_err)?;
+                }
+                tx.commit().map_err(sql_err)?;
+                tracing::info!(kind = kind.as_str(), id = %id, version = new_version, "prompt written (sqlite)");
             }
         }
-        tracing::info!(kind = kind.as_str(), id = %id, "prompt written (sqlite)");
         self.get(&PromptRef { kind, id }).await
     }
 
     async fn delete(&self, r: &PromptRef) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "DELETE FROM prompt_tags WHERE kind = ?1 AND id = ?2",
-            params![r.kind.as_str(), r.id],
-        )
-        .map_err(sql_err)?;
+        for tbl in ["prompt_tags", "prompt_meta", "prompt_history"] {
+            conn.execute(
+                &format!("DELETE FROM {tbl} WHERE kind = ?1 AND id = ?2"),
+                params![r.kind.as_str(), r.id],
+            )
+            .map_err(sql_err)?;
+        }
         let n = conn
             .execute(
                 "DELETE FROM prompts WHERE kind = ?1 AND id = ?2",
@@ -369,6 +557,7 @@ impl PromptStore for SqlitePromptStore {
         let mut out = Vec::with_capacity(rows.len());
         for (id, content, order, read_only) in rows {
             let tags = self.tags_for(&conn, PromptKind::SystemFragment, &id)?;
+            let (version, source_ref) = self.meta_for(&conn, PromptKind::SystemFragment, &id)?;
             out.push(PromptEntry {
                 kind: PromptKind::SystemFragment,
                 id,
@@ -377,6 +566,8 @@ impl PromptStore for SqlitePromptStore {
                 read_only,
                 order,
                 tags,
+                version,
+                source_ref,
             });
         }
         Ok(out)
@@ -439,6 +630,7 @@ mod tests {
             read_only: false,
             order: 0,
             tags: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -475,6 +667,7 @@ mod tests {
             read_only: false,
             order: 0,
             tags: Vec::new(),
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -643,6 +836,7 @@ mod tests {
             read_only: false,
             order: 0,
             tags: Vec::new(),
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -696,5 +890,183 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    // ==================================================================
+    // Round-3 versioning & provenance (docs/design/prompts/08-…md).
+    // ==================================================================
+
+    /// A `System` override entry with the given content + provenance.
+    fn ver_sys(content: &str, source_ref: &str) -> PromptEntry {
+        PromptEntry {
+            kind: PromptKind::System,
+            id: String::new(),
+            content: content.into(),
+            source_ref: source_ref.into(),
+            ..Default::default()
+        }
+    }
+
+    fn ver_ref() -> PromptRef {
+        PromptRef {
+            kind: PromptKind::System,
+            id: String::new(),
+        }
+    }
+
+    // positive_: a content change bumps the version and logs the prior revision.
+    #[tokio::test]
+    async fn positive_reimport_new_content_bumps_version() {
+        let s = store();
+        let v1 = s.put(ver_sys("ONE", "src:a")).await.unwrap();
+        assert_eq!(v1.version, 1, "first stored revision is version 1");
+        let v2 = s.put(ver_sys("TWO", "src:b")).await.unwrap();
+        assert_eq!(v2.version, 2, "a content change increments the version");
+        let hist = s.history(&ver_ref()).unwrap();
+        assert_eq!(hist.len(), 2, "both revisions are in the history");
+        assert_eq!((hist[0].version, hist[0].content.as_str()), (1, "ONE"));
+        assert_eq!((hist[1].version, hist[1].content.as_str()), (2, "TWO"));
+    }
+
+    // positive_: get returns the latest; history is the full ordered log.
+    #[tokio::test]
+    async fn positive_get_returns_latest_version() {
+        let s = store();
+        for c in ["ONE", "TWO", "THREE"] {
+            s.put(ver_sys(c, "src:a")).await.unwrap();
+        }
+        let got = s.get(&ver_ref()).await.unwrap();
+        assert_eq!((got.content.as_str(), got.version), ("THREE", 3));
+        assert_eq!(got.source_ref, "src:a");
+        let versions: Vec<u32> = s
+            .history(&ver_ref())
+            .unwrap()
+            .iter()
+            .map(|e| e.version)
+            .collect();
+        assert_eq!(versions, vec![1, 2, 3]);
+    }
+
+    // positive_: rollback restores an earlier revision as a NEW forward version.
+    #[tokio::test]
+    async fn positive_rollback_to_prior_version() {
+        let s = store();
+        s.put(ver_sys("ONE", "src:a")).await.unwrap();
+        s.put(ver_sys("TWO", "src:b")).await.unwrap();
+        let restored = s.rollback(&ver_ref(), 1).await.unwrap();
+        assert_eq!(restored.content, "ONE", "live content reverts to v1");
+        assert_eq!(
+            restored.version, 3,
+            "the rollback is itself a new forward revision"
+        );
+        assert_eq!(
+            restored.source_ref, "src:a",
+            "the restored revision's provenance returns"
+        );
+        assert_eq!(s.get(&ver_ref()).await.unwrap().content, "ONE");
+        // Rolling back to a version that never existed fails closed.
+        assert!(s.rollback(&ver_ref(), 99).await.is_err());
+    }
+
+    // boundary_: an identical re-import is a no-op — no bump, no history row.
+    #[tokio::test]
+    async fn boundary_reimport_identical_content() {
+        let s = store();
+        s.put(ver_sys("ONE", "src:a")).await.unwrap();
+        let again = s.put(ver_sys("ONE", "src:a")).await.unwrap();
+        assert_eq!(
+            again.version, 1,
+            "identical content+source_ref does not bump"
+        );
+        assert_eq!(
+            s.history(&ver_ref()).unwrap().len(),
+            1,
+            "no extra history row"
+        );
+        // Same content but changed provenance IS a new revision.
+        let bumped = s.put(ver_sys("ONE", "src:b")).await.unwrap();
+        assert_eq!(bumped.version, 2, "changed provenance is a new revision");
+    }
+
+    // boundary_: the first insert of a (kind,id) is version 1 with provenance recorded.
+    #[tokio::test]
+    async fn boundary_version_zero_seed() {
+        let s = store();
+        let v = s
+            .put(ver_sys("SEED", "nixpkgs:opencode@abc:prompt.txt"))
+            .await
+            .unwrap();
+        assert_eq!(v.version, 1);
+        assert_eq!(v.source_ref, "nixpkgs:opencode@abc:prompt.txt");
+    }
+
+    // corner_: the file backend is un-versioned — version 0, empty source_ref.
+    #[tokio::test]
+    async fn corner_file_backend_no_version() {
+        use agent_testkit::tempdir;
+        let root = tempdir();
+        let file =
+            crate::FilePromptStore::new(root.join("context.d"), root.join("prompts"), "CONFIG SYS");
+        let e = file.get(&ver_ref()).await.unwrap();
+        assert_eq!(
+            e.version, 0,
+            "file backend leaves version 0 (git is the history)"
+        );
+        assert!(e.source_ref.is_empty());
+    }
+
+    // adversarial_: a hostile source_ref is capped + bound — no injection, no panic.
+    #[tokio::test]
+    async fn adversarial_hostile_source_ref() {
+        let s = store();
+        // Over-cap ⇒ rejected (fail closed), no panic.
+        let huge = "x".repeat(MAX_SOURCE_REF_LEN + 1);
+        assert!(s.put(ver_sys("BODY", &huge)).await.is_err());
+        // A SQL-metacharacter source_ref within cap is stored inert (bound param).
+        let evil = "'; DROP TABLE prompts; --";
+        let stored = s.put(ver_sys("BODY", evil)).await.unwrap();
+        assert_eq!(
+            stored.source_ref, evil,
+            "stored verbatim as data, not executed"
+        );
+        assert_eq!(
+            s.get(&ver_ref()).await.unwrap().content,
+            "BODY",
+            "the catalog survived — the string never became SQL"
+        );
+    }
+
+    // boundary_: the injected clock stamps history.updated_ms deterministically.
+    #[tokio::test]
+    async fn boundary_injected_clock_stamps_updated_ms() {
+        let s = store().with_clock(Arc::new(|| 4242));
+        s.put(ver_sys("ONE", "src:a")).await.unwrap();
+        let conn = s.conn.lock().unwrap();
+        let ms: i64 = conn
+            .query_row(
+                "SELECT updated_ms FROM prompt_history WHERE kind='system' AND id='' AND version=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(ms, 4242, "the injected clock supplies updated_ms");
+    }
+
+    // boundary_: migrate carries provenance across backends (version is target-assigned).
+    #[tokio::test]
+    async fn boundary_migrate_carries_source_ref() {
+        let src = store();
+        src.put(ver_sys("HELLO", "nixpkgs:pi@deadbeef:system-prompt.ts"))
+            .await
+            .unwrap();
+        let dst = store();
+        crate::migrate(&src, &dst).await.unwrap();
+        let got = dst.get(&ver_ref()).await.unwrap();
+        assert_eq!(got.content, "HELLO");
+        assert_eq!(
+            got.source_ref, "nixpkgs:pi@deadbeef:system-prompt.ts",
+            "provenance round-trips through migrate"
+        );
+        assert_eq!(got.version, 1, "the destination assigns its own version");
     }
 }

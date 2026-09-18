@@ -4496,6 +4496,8 @@ impl From<agent_core::PromptEntry> for pb::PromptEntry {
             read_only: e.read_only,
             order: e.order,
             tags: e.tags,
+            version: e.version,
+            source_ref: e.source_ref,
         }
     }
 }
@@ -4512,6 +4514,8 @@ impl TryFrom<pb::PromptEntry> for agent_core::PromptEntry {
             read_only: e.read_only,
             order: e.order,
             tags: e.tags,
+            version: e.version,
+            source_ref: e.source_ref,
         })
     }
 }
@@ -5566,5 +5570,40 @@ mod tests {
     #[case::bad_card(agent_core::Error::Registry("upstream id `..` is not a path-safe segment".into()), tonic::Code::InvalidArgument)]
     fn registry_error_status_mapping(#[case] err: agent_core::Error, #[case] code: tonic::Code) {
         assert_eq!(status_from_error(&err).code(), code);
+    }
+
+    // The Round-3 additive `PromptEntry` fields survive core→proto→core (positive), and a
+    // proto with the fields defaulted (an old peer / un-versioned row) decodes to 0/""
+    // (boundary) rather than erroring.
+    #[test]
+    fn positive_prompt_entry_version_and_source_ref_roundtrip() {
+        let core = agent_core::PromptEntry {
+            kind: agent_core::PromptKind::System,
+            id: String::new(),
+            content: "BODY".into(),
+            builtin: false,
+            read_only: false,
+            order: 0,
+            tags: vec![],
+            version: 5,
+            source_ref: "nixpkgs:codex@abc:prompt.md".into(),
+        };
+        let back = agent_core::PromptEntry::try_from(pb::PromptEntry::from(core.clone())).unwrap();
+        assert_eq!(back.version, 5);
+        assert_eq!(back.source_ref, "nixpkgs:codex@abc:prompt.md");
+    }
+
+    #[test]
+    fn boundary_prompt_entry_defaults_when_fields_absent() {
+        // A proto value with version/source_ref left at their defaults (proto3 zero
+        // values) — as an old client would send — decodes cleanly to 0 / "".
+        let p = pb::PromptEntry {
+            kind: pb::PromptKind::System as i32,
+            content: "BODY".into(),
+            ..Default::default()
+        };
+        let core = agent_core::PromptEntry::try_from(p).unwrap();
+        assert_eq!(core.version, 0);
+        assert!(core.source_ref.is_empty());
     }
 }
