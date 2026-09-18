@@ -3,6 +3,8 @@
 Legend: 🔬 exploring · ⬜ designed, not built · 🟡 partially built · ✅ built + merged ·
 ❌ **tried, did not pay off — abandoned** (kept as a negative result).
 
+Design-of-record for the chunked map-reduce lever (lever 3): [README.md](README.md).
+
 **Track state: 🔬 EXPLORATION — outcome uncertain, may be marked ❌.** This is a measurement-first
 investigation into review latency, opened after OTLP tracing was enabled on the l2 review-fleet
 (2026-09-18). The dominant cost is remote-Kimi inference wait; the open question is whether we can cut
@@ -55,7 +57,7 @@ needs iter N-1's tool result), so one PR uses ~1 cluster slot regardless of clus
 |--:|-------|------|------|-------|
 | 1 | `stream=true` in the fleet toml — attack the 157s non-streamed tail | ~free (config) | low | ✅ **confirmed win** (see 2026-09-18 log) |
 | 2 | Keep the poller queue full + start reviews **together** → chase a clean 3× cross-review | ~free | low | 🟡 **capped by review-length variance** (see log) |
-| 3 | **Chunked map-reduce review**: MI50 split diff → K≈3 parallel Kimi chunk-reviews → MI50/1×Kimi merge; gated on file-count, K=min(cluster_width, files/group) | new track (multi-PR) | **high** (recall/context-loss; per-chunk ingest tax; the "too-small" sweet-spot) | ⬜ **now better justified** (see log) |
+| 3 | **Chunked map-reduce review**: MI50 split diff → K≈3 parallel Kimi chunk-reviews → MI50/1×Kimi merge; gated on file-count, K=min(cluster_width, files/group) | new track (multi-PR) | **high** (recall/context-loss; per-chunk ingest tax; the "too-small" sweet-spot) | ⬜ **designed** — see [README.md](README.md) |
 | 4 | **Non-convergence guard**: `[agent] max_unproductive_iters` — force-finalize after N consecutive turns that re-issue only already-seen tool calls; `agent_loop_early_stops_total` metric | gated PR (agent-loop) | low (fires only on genuine repetition; distinct exploration untouched) | 🟡 **built** — live-verify pending (see log) |
 
 **Sweet-spot reasoning (why chunking may NOT pay off):** each chunk re-pays the fixed context-ingest
