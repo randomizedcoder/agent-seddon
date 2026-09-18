@@ -571,7 +571,11 @@ cooldown_secs       = 30          # how long a breaker stays open before re-prob
 
 # Task-aware routing (the TaskRouter — model-router increments 02 + 02b). Selected with
 # `[agent] provider = "task-router"`. Routes each request to a declaratively-preferred,
-# CAPABLE upstream and fails over on a retryable error — a fleet as one provider.
+# CAPABLE upstream and fails over — a fleet as one provider. Failover triggers on a
+# retryable error (429/5xx/timeout) AND on an AUTH error (401/403), which is
+# upstream-specific (a rotated key / dead pod on one endpoint says nothing about the
+# next) — but NOT on a request-level terminal (400/402/content-policy), which would fail
+# identically everywhere. So a rotated Kimi pod (403) transparently falls over to GLM.
 # RECOMMENDED SPLIT: **Kimi = the preferred GENERATOR** (the more powerful model, so it
 # drives the main loop / reviews) and **GLM = the JUDGE** (consensus critic, fork judge,
 # verifier). `default_prefer` sends everything to kimi-then-glm; the `role = "judge"`
@@ -609,6 +613,12 @@ cooldown_secs       = 30          # how long a breaker stays open before re-prob
 # tier = "heavy"
 # input_cost = 1.0
 #
+# [[route.upstreams]]
+# name = "mi50"                        # local floor: a last-resort fallback that is
+# endpoint = "http://localhost:8095/v1"  # always up (no remote pod to rotate). Weaker,
+# model = "unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF"  # but keeps the loop alive if BOTH
+# tier = "light"                      # remote endpoints are down/forbidden.
+#
 # # Ordered rules — the first whose `match` holds sets the ordering preference.
 # # A typo'd role/task_mode is a CONFIG ERROR at startup (never silently match-any).
 # #
@@ -633,7 +643,7 @@ cooldown_secs       = 30          # how long a breaker stays open before re-prob
 # # "least-loaded" orders by in-flight NORMALISED by `max_concurrency`, so a
 # # higher-capacity endpoint (a multi-GPU gateway) draws proportionally more.
 # [route.default_prefer]
-# upstreams = ["kimi", "glm"]
+# upstreams = ["kimi", "glm", "mi50"]  # failover order: Kimi → GLM → local MI50 floor
 # # policy = "latency"
 # # failure_threshold = 3 / cooldown_secs = 30  (breaker, same as [router]/[pool])
 #

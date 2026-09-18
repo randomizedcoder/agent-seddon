@@ -30,17 +30,24 @@ registered.
 
 ## Three rules that make failover safe
 
-### 1. Only retryable failures fail over
+### 1. Retryable and *auth-terminal* failures fail over; request-terminals abort
 
-A terminal failure — auth, billing, bad request, content policy, unknown model —
-fails the same way on every candidate. Trying them all burns the chain, and real
-money, to arrive at the identical answer. Classification lives in `agent-retry`
-(`classify`) and is shared rather than re-implemented:
+A *request-level* terminal failure — billing, bad request, content policy, unknown
+model — fails the same way on every candidate. Trying them all burns the chain, and
+real money, to arrive at the identical answer. But an **auth-terminal (401/403) is
+member-specific** — a rotated key or a dead/forbidden endpoint on one upstream says
+nothing about the next — so those **do** fail over. Classification lives in
+`agent-retry` and is shared rather than re-implemented (`classify` +
+`is_auth_terminal`):
 
-| Class | Examples |
-|---|---|
-| `Retryable` | 429, 5xx, 529 overloaded, timeout, connection refused/reset |
-| `Terminal` | 401/403 auth, 402 billing, 400 bad request, 404 model, content policy |
+| Class | Fails over? | Examples |
+|---|---|---|
+| `Retryable` | yes | 429, 5xx, 529 overloaded, timeout, connection refused/reset |
+| `Terminal` + auth (`is_auth_terminal`) | **yes** (member-specific) | 401/403, bare "unauthorized"/"forbidden"/"invalid api key" |
+| `Terminal`, request-level | no (aborts) | 402 billing, 400 bad request, 404 model, content policy |
+
+So a failover loop aborts only on `classify == Terminal && !is_auth_terminal(msg)`.
+This is what lets a rotated Kimi pod (403) transparently fall over to GLM.
 
 **Unknown failures classify as `Terminal`.** That is the conservative choice: an
 unrecognised error is more likely a deterministic bug (a malformed request, an

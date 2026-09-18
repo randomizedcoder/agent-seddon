@@ -2,8 +2,9 @@
 //! increment 02).
 //!
 //! Like [`crate::router::Router`] it **is-a** `LlmProvider` composing others with the
-//! same failover safety — only a retryable failure advances to the next upstream, a
-//! terminal one (auth/billing/bad-request) stops, and an open circuit breaker is
+//! same failover safety — a retryable failure (or a member-specific *auth* failure,
+//! 401/403) advances to the next upstream, a request-level terminal (billing/bad-request)
+//! stops, and an open circuit breaker is
 //! skipped-then-tried-last so a total outage still attempts *something*. What it adds
 //! is the *decision*: it runs a declarative [`route::Policy`] over each upstream's
 //! **live** capabilities (context window, tools, vision — read from the provider) plus
@@ -323,7 +324,13 @@ impl TaskRouter {
                 Err(e) => {
                     let msg = e.to_string();
                     self.health[i].record_failure((self.now_ms)(), self.failure_threshold);
-                    if agent_retry::classify(&msg) == agent_retry::Class::Terminal {
+                    // Terminal errors fail identically on every upstream — stop. EXCEPT an
+                    // auth-terminal (401/403), which is upstream-specific (a rotated key /
+                    // forbidden endpoint on this upstream says nothing about the next), so
+                    // fall over instead of aborting the whole chain.
+                    let auth_terminal = agent_retry::is_auth_terminal(&msg);
+                    if agent_retry::classify(&msg) == agent_retry::Class::Terminal && !auth_terminal
+                    {
                         self.emit(RouteEvent::Dispatched {
                             role: hint.role.as_str(),
                             upstream: &u.id,
@@ -334,13 +341,13 @@ impl TaskRouter {
                     self.emit(RouteEvent::Dispatched {
                         role: hint.role.as_str(),
                         upstream: &u.id,
-                        outcome: "retryable",
+                        outcome: if auth_terminal { "auth" } else { "retryable" },
                     });
                     if attempt + 1 < order.len() {
                         self.emit(RouteEvent::FellOver {
                             from: &u.id,
                             to: &self.upstreams[order[attempt + 1]].id,
-                            reason: "retryable",
+                            reason: if auth_terminal { "auth" } else { "retryable" },
                         });
                     }
                     last = Some(e);
@@ -567,8 +574,9 @@ mod tests {
 
     // --- negative -----------------------------------------------------------
     #[tokio::test]
-    async fn negative_terminal_failure_does_not_fall_over() {
-        let primary = Arc::new(FailProvider::new("http 401: unauthorized"));
+    async fn negative_request_terminal_does_not_fall_over() {
+        // A request-level terminal (400) fails identically everywhere → abort.
+        let primary = Arc::new(FailProvider::new("http 400: unsupported parameter"));
         let secondary = Arc::new(FailProvider::new("should-not-be-reached"));
         let r = router(
             vec![up("kimi", primary.clone()), up("glm", secondary.clone())],
@@ -578,8 +586,28 @@ mod tests {
         assert_eq!(
             secondary.calls.load(Ordering::SeqCst),
             0,
-            "a terminal failure must not burn the fallback"
+            "a request-terminal failure must not burn the fallback"
         );
+    }
+
+    // --- positive: auth-terminal is upstream-specific → falls over -----------
+    #[tokio::test]
+    async fn positive_auth_terminal_falls_over_to_next() {
+        // A 403 (rotated key / forbidden endpoint) on kimi says nothing about glm.
+        let primary = Arc::new(FailProvider::new("http 403: forbidden"));
+        let r = router(
+            vec![
+                up("kimi", primary.clone()),
+                up("glm", ok("from-glm", true, false)),
+            ],
+            prefer(&["kimi", "glm"]),
+        );
+        let resp = r
+            .complete(req())
+            .await
+            .expect("auth-terminal must fall over");
+        assert_eq!(resp.message.content_text(), "from-glm");
+        assert_eq!(primary.calls.load(Ordering::SeqCst), 1, "primary was tried");
     }
 
     // --- corner -------------------------------------------------------------

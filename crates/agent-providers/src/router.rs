@@ -2,17 +2,19 @@
 //!
 //! It **is-a** `LlmProvider`, so nothing downstream knows it exists: the loop,
 //! the context strategy, and the metered decorators all see one provider. What
-//! it adds is resilience — a classified *transient* failure on the primary
-//! transparently continues on the next candidate, so the turn completes instead
-//! of surfacing an error.
+//! it adds is resilience — a classified *transient* failure (or a member-specific
+//! *auth* failure) on the primary transparently continues on the next candidate, so
+//! the turn completes instead of surfacing an error.
 //!
 //! Three rules make that safe rather than merely hopeful:
 //!
-//! 1. **Only retryable failures fail over.** A terminal failure (auth, billing,
-//!    bad request, content policy) fails the same way on every candidate, so
-//!    trying them all burns the chain — and real money — to reach the same
-//!    answer. Classification lives in `agent-retry` and is shared, not
-//!    re-implemented here.
+//! 1. **Retryable and auth-terminal failures fail over; request-terminals abort.** A
+//!    *request-level* terminal (billing, bad request, content policy) fails the same
+//!    way on every candidate, so trying them all burns the chain — and real money — to
+//!    reach the same answer. An *auth-terminal* (401/403) is member-specific, though —
+//!    a rotated key / forbidden endpoint on one candidate says nothing about the next —
+//!    so it DOES fall over. Classification lives in `agent-retry` (`classify` +
+//!    `is_auth_terminal`) and is shared, not re-implemented here.
 //! 2. **An unhealthy candidate is skipped.** Repeated failures open a circuit
 //!    breaker that closes again after a cooldown, so a dead provider stops
 //!    costing a timeout on every single turn.
@@ -293,15 +295,20 @@ impl Router {
                 Err(e) => {
                     let msg = e.to_string();
                     self.health[i].record_failure((self.now_ms)(), self.failure_threshold);
-                    if agent_retry::classify(&msg) == agent_retry::Class::Terminal {
-                        // The same call fails identically everywhere — stop.
+                    // A terminal error fails identically everywhere — stop. EXCEPT an
+                    // auth-terminal (401/403), which is member-specific (a rotated key /
+                    // forbidden endpoint on this candidate says nothing about the next),
+                    // so fall over to the next candidate instead of burning the chain.
+                    let auth_terminal = agent_retry::is_auth_terminal(&msg);
+                    if agent_retry::classify(&msg) == agent_retry::Class::Terminal && !auth_terminal
+                    {
                         return Err(e);
                     }
                     if attempt + 1 < order.len() {
                         self.emit(RouteEvent::FellOver {
                             to: "",
                             from: &c.name,
-                            reason: "retryable",
+                            reason: if auth_terminal { "auth" } else { "retryable" },
                         });
                     }
                     last = Some(e);
@@ -441,19 +448,42 @@ mod tests {
         assert_eq!(bad.calls.load(Ordering::SeqCst), 1, "primary was tried");
     }
 
-    /// A terminal failure must NOT be retried elsewhere: it fails the same way
-    /// on every candidate, so trying them all burns the chain for nothing.
+    /// A *request-level* terminal failure must NOT be retried elsewhere: it fails
+    /// the same way on every candidate, so trying them all burns the chain for
+    /// nothing. (Auth-terminals are the exception — see the next test.)
     #[rstest]
-    #[case::negative_auth("http 401: invalid api key")]
     #[case::negative_billing("http 402: payment required")]
     #[case::negative_bad_request("http 400: unsupported parameter")]
+    #[case::negative_content_policy("http 400: content policy violation")]
     #[tokio::test]
-    async fn negative_terminal_failure_does_not_fall_over(#[case] msg: &str) {
+    async fn negative_request_terminal_does_not_fall_over(#[case] msg: &str) {
         let bad = Arc::new(FailProvider::new(msg));
         let good = Arc::new(ScriptedProvider::new(vec![final_turn("answer")]));
         let r = router(vec![("primary", bad.clone()), ("secondary", good.clone())]);
         assert!(r.complete(req()).await.is_err(), "must not fall over");
         assert_eq!(bad.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(good.calls(), 0, "secondary not reached");
+    }
+
+    /// An *auth*-terminal (401/403) IS member-specific — a rotated key / forbidden
+    /// endpoint on the primary says nothing about the secondary — so the router must
+    /// fall over to the next candidate rather than abort the chain.
+    #[rstest]
+    #[case::forbidden("http 403: forbidden")]
+    #[case::unauthorized("http 401: invalid api key")]
+    #[case::bare_forbidden("Forbidden")]
+    #[tokio::test]
+    async fn positive_auth_terminal_falls_over(#[case] msg: &str) {
+        let bad = Arc::new(FailProvider::new(msg));
+        let good = Arc::new(ScriptedProvider::new(vec![final_turn("answer")]));
+        let r = router(vec![("primary", bad.clone()), ("secondary", good.clone())]);
+        let resp = r
+            .complete(req())
+            .await
+            .expect("auth-terminal must fall over");
+        assert_eq!(resp.message.content_text(), "answer");
+        assert_eq!(bad.calls.load(Ordering::SeqCst), 1, "primary was tried");
+        assert_eq!(good.calls(), 1, "secondary answered");
     }
 
     /// Exhausting the chain surfaces the last error rather than hanging.
