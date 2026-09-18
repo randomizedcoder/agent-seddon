@@ -1181,6 +1181,7 @@ pub async fn build_agent_with(
         #[cfg(feature = "prompt")]
         system_prompt: agent_prompt::resolve_system_prompt(
             &cfg.prompts.dir,
+            &cfg.agent.personality,
             &cfg.agent.system_prompt,
         ),
         #[cfg(not(feature = "prompt"))]

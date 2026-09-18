@@ -1,8 +1,19 @@
 # Round 3 · Phase 1 — Personalities dimension + seed set
 
-**Status: ⬜ designed** (docs-only pass; code is a later gated PR).
+**Status: ✅ built** (`feat/prompts-personalities`).
 Design: [`../07-personalities.md`](../07-personalities.md) · analysis:
 [`../06-personality-comparison.md`](../06-personality-comparison.md).
+
+**As-built:** `resolve_system_prompt(prompts_dir, personality, config_default)` is a **sync
+file-based named-base ladder** (`personalities/<p>/*.md` → `personalities/<p>.md` → `system.md` →
+config); the closed set is `agent_core::ALL_PERSONALITIES` + `agent_core::valid_personality` (a hostile
+name never builds a path). The **store-entry rung** (a `System` entry `id=<p>` from sqlite/grpc) is
+deferred to phases 2–3 (versioning/portal), where the store is in play — mirroring how as-built 01
+narrowed the base to a file read. Seed shipped as all five verbatim under
+`prompts/personalities.example/` (opencode/pi/hermes MIT, codex Apache-2.0, each with `ATTRIBUTION.md`
++ aggregate `LICENSES.md`); the `agent-seddon` blend was drafted by the **local MI50** (Qwen3-30B — the
+remote Kimi pod was 403/rotated) and curated. Default (unset personality, no live `personalities/` dir)
+stays byte-identical.
 
 ## Goal
 
