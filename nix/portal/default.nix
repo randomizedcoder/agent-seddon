@@ -31,6 +31,8 @@
   lib,
   versions,
   agent,
+  harness,
+  portal-test-report,
 }:
 let
   # grpc-web proxy ports. UI plumbing, not seams, so they live here rather than in
@@ -43,6 +45,9 @@ let
   gatewayPort = 50100;
   sessionsPort = 50080;
   fleetPort = 50086; # the full review-fleet process (--serve-fleet)
+  # Prometheus metrics of the --serve-all gateway (mirrors nix/constants.nix
+  # GATEWAY.metrics_port). The Layer-B e2e reads per-RPC deltas from here.
+  metricsPort = 9700;
   # OTLP/gRPC collector (ClickStack), reached on host loopback since envoy runs
   # --network host. Access logs + tracer spans from the bridge ship here so the
   # browser -> envoy -> gateway -> seam hop is one trace. Single source of truth.
@@ -703,6 +708,349 @@ let
       exit 1
     '';
   };
+
+  # `nix run .#portal-e2e` — the opt-in **Layer B** live end-to-end
+  # (docs/design/portal-gui-testing/04). It brings up the real server tier + the
+  # Envoy grpc-web bridge, drives the real Flutter *web* app headlessly through
+  # the bridge (`browser -> envoy -> gateway -> seam`), and proves each curated
+  # *mutating* action from the **observability system**: the `:${toString metricsPort}`
+  # metrics delta (correct RPC fired + `ok`), the read RPC on `:${toString gatewayPort}`
+  # (state changed), and a curated OTLP `grpc.server` span in ClickHouse (the
+  # tracing pipe). It emits a rich per-case JSONL report and renders it.
+  #
+  # NOT a check: it spawns servers + a browser + dials sockets, which agent-seddon
+  # keeps out of the hermetic `nix flake check` sandbox (like `serve-smoke` /
+  # `e2e-live`). Exit codes are the shared 0/1/2 contract (0 ok, 1 harness, 2
+  # contract).
+  #
+  # Browser: `flutter drive` launches the web build in headless chromium via
+  # chromedriver. The nixpkgs `chromium` the flake input carries has no cached
+  # binary (it would source-build), so — like `portal-web`/`grpc-web-up`, which
+  # already fetch the Flutter web SDK / the envoy image at runtime — the browser +
+  # matched driver are resolved at run time from the ambient `nixpkgs` registry
+  # (fully binary-cached) and can be overridden with `PORTAL_E2E_CHROMIUM` /
+  # `PORTAL_E2E_CHROMEDRIVER`.
+  #
+  # Fleet safety: a `--serve-fleet` (or any seam) ALREADY running counts as *up* —
+  # this app uses it and never restarts or kills it. It tracks only the seams IT
+  # starts (pidfiles under its own workdir) and tears down only those.
+  portal-e2e = pkgs.writeShellApplication {
+    name = "portal-e2e";
+    runtimeInputs = [
+      agent
+      versions.flutter
+      versions.grpcurl
+      versions.jq
+      versions.docker
+      versions.podman
+      pkgs.nix # resolve the cached chromium + chromedriver at runtime
+      pkgs.curl
+      pkgs.coreutils
+      pkgs.gnugrep
+      pkgs.gawk
+      grpc-web-up
+    ];
+    text = ''
+      set -uo pipefail
+    ''
+    + harness.contract
+    + ''
+
+      agent_bin="${agent}/bin/agent"
+      runtime="''${CONTAINER_RUNTIME:-docker}"
+      export CONTAINER_RUNTIME="$runtime"
+      run_id="''${PORTAL_E2E_RUN_ID:-$$}"
+
+      config="''${PORTAL_CONFIG:-config/agent.toml}"
+      if [ ! -f "$config" ]; then
+        echo "portal-e2e: gateway config not found: $config (run from the repo root, or set PORTAL_CONFIG)" >&2
+        exit 1
+      fi
+      if ! "$runtime" info >/dev/null 2>&1; then
+        echo "portal-e2e: container runtime '$runtime' not reachable — is it running?" >&2
+        echo "  (on a podman-only host: CONTAINER_RUNTIME=podman nix run .#portal-e2e)" >&2
+        exit 1
+      fi
+
+      workdir="$(mktemp -d)"
+      cd_pid=""
+      # Teardown: kill ONLY the seams we started (a pidfile each in $workdir) plus
+      # our chromedriver. A seam we found already running has no pidfile here, so
+      # it is never signalled (the operator's --serve-fleet is safe).
+      # shellcheck disable=SC2329  # invoked indirectly via the EXIT trap
+      teardown() {
+        [ -n "$cd_pid" ] && kill "$cd_pid" 2>/dev/null || true
+        for pf in "$workdir"/*.pid; do
+          [ -f "$pf" ] || continue
+          p="$(cat "$pf" 2>/dev/null || true)"
+          [ -n "$p" ] && kill "$p" 2>/dev/null || true
+        done
+        rm -rf "$workdir"
+      }
+      trap teardown EXIT
+
+      # --- helpers ---------------------------------------------------------------
+      # A gRPC health probe. `agent`'s seams answer grpc.health.v1 when served.
+      health() { grpcurl -plaintext "$1" grpc.health.v1.Health/Check >/dev/null 2>&1; }
+
+      wait_health() {
+        local addr="$1" n="''${2:-40}"
+        for _ in $(seq 1 "$n"); do health "$addr" && return 0; sleep 1; done
+        return 1
+      }
+
+      # ensure_seam REQUIRED LABEL FLAG ADDR — if ADDR is already healthy, use it
+      # (never restart). Otherwise start `agent FLAG` tracked by our own pidfile.
+      # REQUIRED=1 seams that fail are a harness error; REQUIRED=0 (optional) seams
+      # that fail just leave their page to preflight as skipped (a WARN, not a fail).
+      ensure_seam() {
+        local required="$1" label="$2" flag="$3" addr="$4"
+        if health "$addr"; then
+          echo "portal-e2e: $label already up ($addr) — using it, not restarting"
+          return 0
+        fi
+        echo "portal-e2e: starting agent $flag ($addr)"
+        nohup "$agent_bin" "$flag" --config "$config" >"$workdir/$label.log" 2>&1 &
+        echo "$!" >"$workdir/$label.pid"
+        if ! wait_health "$addr"; then
+          if [ "$required" -eq 1 ]; then
+            echo "FAIL(harness): required seam $label ($flag) never became healthy" >&2
+          else
+            echo "portal-e2e: [warn] optional seam $label ($flag) not available — its page will preflight as skipped"
+          fi
+          tail -n 5 "$workdir/$label.log" >&2 || true
+          return 1
+        fi
+      }
+
+      # metric_val FILE RPC — the ok-outcome counter for
+      # agent_grpc_server_rpc_total{outcome="ok",rpc="RPC",...}. The scrape is
+      # SERVER-produced and thus untrusted (CLAUDE.md): match the exact family +
+      # labels, take the trailing field, and accept ONLY a run of digits — an
+      # empty/negative/non-numeric/NaN value collapses to 0 (fail closed), so a
+      # hostile value can never make a delta look positive.
+      metric_val() {
+        local f="$1" rpc="$2" v
+        v="$(grep -F 'agent_grpc_server_rpc_total{' "$f" 2>/dev/null \
+              | grep -F 'outcome="ok"' \
+              | grep -F "rpc=\"$rpc\"" \
+              | awk '{print $NF}' | tail -n1)"
+        case "$v" in
+          "" | *[!0-9]* ) echo 0 ;;
+          * ) echo "$v" ;;
+        esac
+      }
+
+      # append_record — one rich per-case JSONL row for the inc-08 renderer
+      # (page -> element -> case). outcome is pass|fail|skip.
+      append_record() {
+        # page element rpc outcome ms detail
+        jq -cn --arg page "$1" --arg el "$2" --arg rpc "$3" --arg oc "$4" \
+              --argjson ms "$5" --arg detail "$6" \
+          '{page:$page, case:("e2e_"+($rpc|split("/")|last)), layer:"e2e",
+            element_id:$el, outcome:$oc, duration_ms:$ms, backend:"up",
+            rpc_fired:[$rpc], description:$detail}' >>"$workdir/report.jsonl"
+      }
+
+      # --- 1. resolve the headless browser + driver -----------------------------
+      chromium_bin="''${PORTAL_E2E_CHROMIUM:-}"
+      chromedriver_bin="''${PORTAL_E2E_CHROMEDRIVER:-}"
+      if [ -z "$chromium_bin" ]; then
+        echo "portal-e2e: resolving chromium from the nixpkgs registry (cached)…"
+        chromium_bin="$(nix build --no-link --print-out-paths nixpkgs#chromium)/bin/chromium"
+      fi
+      if [ -z "$chromedriver_bin" ]; then
+        echo "portal-e2e: resolving chromedriver from the nixpkgs registry (cached)…"
+        chromedriver_bin="$(nix build --no-link --print-out-paths nixpkgs#chromedriver)/bin/chromedriver"
+      fi
+      if [ ! -x "$chromium_bin" ] || [ ! -x "$chromedriver_bin" ]; then
+        echo "FAIL(harness): could not resolve chromium/chromedriver binaries" >&2
+        exit 1
+      fi
+      # chromedriver auto-detects the browser by finding `chromium` on PATH; also
+      # export CHROME_EXECUTABLE for flutter's own probing.
+      chromium_dir="$(dirname "$chromium_bin")"
+      chromedriver_dir="$(dirname "$chromedriver_bin")"
+      export PATH="$chromium_dir:$chromedriver_dir:$PATH"
+      export CHROME_EXECUTABLE="$chromium_bin"
+
+      # --- 2. bring up the server tier + bridge ---------------------------------
+      # --serve-all carries the gateway (:${toString gatewayPort}) + metrics
+      # (:${toString metricsPort}); --serve-sessions + --serve-fleet light up the
+      # Agent + Fleet tabs (else those pages preflight as skipped).
+      ensure_seam 1 serve-all --serve-all "127.0.0.1:${toString gatewayPort}" || { note_fail 1; contract_exit ""; }
+      ensure_seam 0 serve-sessions --serve-sessions "127.0.0.1:${toString sessionsPort}" || true
+      ensure_seam 0 serve-fleet --serve-fleet "127.0.0.1:${toString fleetPort}" || true
+
+      echo "portal-e2e: (re)creating the grpc-web bridge"
+      grpc-web-up || { echo "FAIL(harness): grpc-web bridge did not come up" >&2; note_fail 1; contract_exit ""; }
+
+      # Wait for the metrics endpoint (the harness reads deltas from it).
+      metrics_url="http://127.0.0.1:${toString metricsPort}/metrics"
+      for _ in $(seq 1 30); do
+        if curl -sf -o /dev/null "$metrics_url"; then break; fi
+        sleep 1
+      done
+      if ! curl -sf -o "$workdir/metrics.before" "$metrics_url"; then
+        echo "FAIL(harness): metrics endpoint $metrics_url unreachable" >&2
+        note_fail 1; contract_exit ""
+      fi
+
+      # --- 3. drive the web app through the bridge -------------------------------
+      # `flutter drive -d web-server` serves + drives its OWN instance of the app;
+      # what matters is the app's grpc-web calls go to the Envoy bridge (via the
+      # --dart-define endpoints), so the path is the browser's own.
+      ( cd portal && flutter create --platforms=web --project-name agent_portal . >/dev/null 2>&1 || true )
+      # The suite hands its per-action records back through `reportData`, which the
+      # driver writes here; drop a prior run's file so we never read stale actions.
+      resp="portal/build/integration_response_data.json"
+      rm -f "$resp"
+
+      "$chromedriver_bin" --port=4444 >"$workdir/chromedriver.log" 2>&1 &
+      cd_pid=$!
+      sleep 2
+
+      echo "portal-e2e: driving the web app (headless chromium) through :${toString grpcWebPort}"
+      drive_rc=0
+      ( cd portal && flutter drive \
+          --driver=test_driver/integration_test.dart \
+          --target=integration_test/portal_e2e_test.dart \
+          -d web-server --browser-name=chrome \
+          --web-browser-flag=--headless=new \
+          --web-browser-flag=--no-sandbox \
+          --web-browser-flag=--disable-gpu \
+          --web-browser-flag=--disable-dev-shm-usage \
+          --web-browser-flag=--window-size=1600,1200 \
+          --dart-define=PORTAL_GRPC_WEB_URL=http://127.0.0.1:${toString grpcWebPort} \
+          --dart-define=PORTAL_SESSIONS_GRPC_WEB_URL=http://127.0.0.1:${toString grpcWebSessionsPort} \
+          --dart-define=PORTAL_FLEET_GRPC_WEB_URL=http://127.0.0.1:${toString grpcWebFleetPort} \
+          --dart-define=E2E_RUN_ID="$run_id" ) >"$workdir/drive.log" 2>&1 || drive_rc=$?
+      if [ "$drive_rc" -ne 0 ]; then
+        echo "FAIL(harness): flutter drive exited $drive_rc — last log lines:" >&2
+        tail -n 25 "$workdir/drive.log" >&2 || true
+        note_fail 1; contract_exit ""
+      fi
+
+      # Prefer the driver's `reportData` file (a browser `print` does not surface on
+      # `flutter drive` stdout for the web device); fall back to the marker line.
+      if [ -f "$resp" ] && jq -e . "$resp" >/dev/null 2>&1; then
+        actions="$(cat "$resp")"
+      else
+        actions="$(grep -F 'PORTAL_E2E_ACTIONS ' "$workdir/drive.log" | tail -n1 | sed 's/^.*PORTAL_E2E_ACTIONS //')"
+      fi
+      if [ -z "$actions" ] || ! echo "$actions" | jq -e '.actions' >/dev/null 2>&1; then
+        echo "FAIL(harness): no parseable action records from the drive (reportData missing)" >&2
+        note_fail 1; contract_exit ""
+      fi
+
+      # --- 4. observability assertions per curated action -----------------------
+      curl -sf -o "$workdir/metrics.after" "$metrics_url" || cp "$workdir/metrics.before" "$workdir/metrics.after"
+
+      n="$(echo "$actions" | jq '.actions | length')"
+      echo "portal-e2e: verifying $n driven action(s) from observability"
+      for i in $(seq 0 $((n - 1))); do
+        page="$(echo "$actions" | jq -r ".actions[$i].page")"
+        el="$(echo "$actions" | jq -r ".actions[$i].element")"
+        rpc="$(echo "$actions" | jq -r ".actions[$i].rpc")"
+        value="$(echo "$actions" | jq -r ".actions[$i].value")"
+        drove="$(echo "$actions" | jq -r ".actions[$i].outcome")"
+        ms="$(echo "$actions" | jq -r ".actions[$i].ms")"
+
+        if [ "$drove" = "skipped" ]; then
+          echo "  [skip] $page/$el ($rpc) — $(echo "$actions" | jq -r ".actions[$i].detail")"
+          append_record "$page" "$el" "$rpc" "skip" 0 "driver skipped: $(echo "$actions" | jq -r ".actions[$i].detail")"
+          continue
+        fi
+        if [ "$drove" != "ok" ]; then
+          echo "CONTRACT: $page/$el ($rpc) — driver reported '$drove': $(echo "$actions" | jq -r ".actions[$i].detail")" >&2
+          append_record "$page" "$el" "$rpc" "fail" "$ms" "driver: $drove"
+          note_fail 2; continue
+        fi
+
+        # (a) correct RPC fired + ok — a positive metrics delta.
+        before="$(metric_val "$workdir/metrics.before" "$rpc")"
+        after="$(metric_val "$workdir/metrics.after" "$rpc")"
+        delta=$((after - before))
+        if [ "$delta" -ge 1 ]; then
+          echo "  [ok]   metrics: $rpc delta=$delta (outcome=ok)"
+        else
+          echo "CONTRACT: $page/$el — no ok-metrics delta for $rpc (before=$before after=$after)" >&2
+          append_record "$page" "$el" "$rpc" "fail" "$ms" "no metrics delta"
+          note_fail 2; continue
+        fi
+
+        # (b) intended state changed — the matching read RPC on the gateway. The
+        # service name is dot-separated (agent.v1.<Service>), so match on the
+        # service+method suffix (no leading slash).
+        state_ok=1
+        mapped=1
+        case "$rpc" in
+          *ProviderRegistryService/Put)
+            got="$(grpcurl -d "{\"id\":\"$value\"}" -plaintext 127.0.0.1:${toString gatewayPort} \
+                    agent.v1.ProviderRegistryService/Get 2>/dev/null || true)"
+            echo "$got" | jq -e --arg id "$value" '.id == $id' >/dev/null 2>&1 || state_ok=0 ;;
+          *ProviderRegistryService/Enable)
+            got="$(grpcurl -d "{\"id\":\"$value\"}" -plaintext 127.0.0.1:${toString gatewayPort} \
+                    agent.v1.ProviderRegistryService/Get 2>/dev/null || true)"
+            echo "$got" | jq -e '.enabled == true' >/dev/null 2>&1 || state_ok=0 ;;
+          *PromptService/SetActivePersonality)
+            got="$(grpcurl -d '{}' -plaintext 127.0.0.1:${toString gatewayPort} \
+                    agent.v1.PromptService/GetActivePersonality 2>/dev/null || true)"
+            echo "$got" | jq -e --arg id "$value" '(.id // .name // "") == $id' >/dev/null 2>&1 || state_ok=0 ;;
+          *) mapped=0; echo "  [warn] no read-RPC mapping for $rpc — proven by metrics delta only" ;;
+        esac
+        if [ "$mapped" -eq 1 ] && [ "$state_ok" -eq 0 ]; then
+          echo "CONTRACT: $page/$el — read-RPC did not reflect the change for $rpc (value=$value)" >&2
+          append_record "$page" "$el" "$rpc" "fail" "$ms" "state unchanged"
+          note_fail 2; continue
+        fi
+        [ "$mapped" -eq 1 ] && echo "  [ok]   state: read-RPC reflects '$value'"
+
+        append_record "$page" "$el" "$rpc" "pass" "$ms" "metrics delta + read-RPC verified"
+      done
+
+      # --- 5. curated OTLP span (the tracing pipe; best-effort) ------------------
+      # inc 10 is the authoritative cross-hop trace proof; here we confirm the
+      # gateway exported a recent grpc.server span into ClickHouse. Best-effort:
+      # a ClickHouse that is down/unreachable is a WARN, not a contract failure.
+      span_n=0
+      if "$runtime" ps --format '{{.Names}}' 2>/dev/null | grep -qx clickstack; then
+        for _ in $(seq 1 15); do
+          span_n="$("$runtime" exec clickstack clickhouse-client -q \
+            "SELECT count() FROM default.otel_traces WHERE ServiceName='agent-gateway' AND SpanName='grpc.server' AND Timestamp > now() - INTERVAL 3 MINUTE" 2>/dev/null || echo 0)"
+          case "$span_n" in "" | *[!0-9]* ) span_n=0 ;; esac
+          if [ "$span_n" -ge 1 ]; then break; fi
+          sleep 2
+        done
+      fi
+      if [ "$span_n" -ge 1 ]; then
+        echo "portal-e2e: curated span check — $span_n recent agent-gateway grpc.server span(s) in ClickHouse"
+      else
+        echo "portal-e2e: [warn] no recent gateway span found in ClickHouse (obs down, or telemetry disabled) — see inc 10 for the authoritative trace proof"
+      fi
+
+      # --- 5b. tidy up the rows this run created --------------------------------
+      # The Router upstreams carry a unique per-run id; remove them so repeated
+      # runs don't accumulate registry entries. Best-effort (an active-personality
+      # change has no prior value to restore, so it is left as set).
+      for uid in $(echo "$actions" | jq -r '.actions[] | select(.rpc|endswith("/Put")) | .value' | sort -u); do
+        [ -n "$uid" ] || continue
+        grpcurl -d "{\"id\":\"$uid\"}" -plaintext 127.0.0.1:${toString gatewayPort} \
+          agent.v1.ProviderRegistryService/Delete >/dev/null 2>&1 || true
+      done
+
+      # --- 6. report ------------------------------------------------------------
+      report="''${PORTAL_E2E_REPORT:-$workdir/report.jsonl}"
+      [ "$report" != "$workdir/report.jsonl" ] && cp "$workdir/report.jsonl" "$report" 2>/dev/null || true
+      echo ""
+      echo "== portal-e2e report (page -> element -> case) =="
+      ${portal-test-report}/bin/portal-test-report "$workdir/report.jsonl" || true
+      echo ""
+      echo "report JSONL: $report"
+
+      contract_exit "PASS: portal-e2e drove the curated mutating subset over the real wire; every non-skipped action proven by metrics delta + read-RPC."
+    '';
+  };
 in
 {
   inherit
@@ -712,5 +1060,6 @@ in
     grpc-web-up
     grpc-web-down
     portal-redeploy
+    portal-e2e
     ;
 }

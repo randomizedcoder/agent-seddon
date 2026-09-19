@@ -78,9 +78,42 @@ stream into `portal_gui_perf` — see [`06-performance.md`](06-performance.md).
 ## The `portal-e2e` app
 
 A `pkgs.writeShellApplication` folded into `apps` via `mkApps`
-(`nix/default.nix:614-654`), honoring `CONTAINER_RUNTIME` (podman on l2). It brings up
+(`nix/default.nix`), honoring `CONTAINER_RUNTIME` (podman on l2). It brings up
 the stack, runs the `integration_test` suite over the mutating subset, performs the
 metrics + read-RPC (+ curated span) assertions, emits the [report](05-report.md) +
 [perf rows](06-performance.md), and tears down what it started (never the operator's
 own `--serve-fleet` — track a pidfile like `portal-redeploy` does). Opt-in; not on
 `nix flake check`.
+
+### As built (inc 07)
+
+- **Curated mutating subset shipped:** Router **Put** + **Enable**
+  (`ProviderRegistryService`, fully self-contained — a unique per-run upstream id,
+  cleaned up afterwards) and Prompts **SetActivePersonality**. Each action whose
+  page/backend/preconditions are absent is recorded `skip`, never `fail` (the
+  backend-preflight philosophy). More mutating actions (Graph `Put`, Settings
+  `Put`, Fleet `UpdateReview`/`Approve`) slot into the same table.
+- **The Dart suite is the driver only; the shell owns the assertions.** The Layer-A
+  robots are coupled to the in-process fake gateway (its recording log), so Layer B
+  reuses the **widget keys** (not the robots): it navigates by nav-rail label text,
+  drives the keyed controls with deterministic values, and hands each action's
+  record back through `IntegrationTestWidgetsFlutterBinding.reportData`. The shell
+  reads that (the driver writes `portal/build/integration_response_data.json`; a
+  browser `print` does **not** surface on `flutter drive` web stdout) and does every
+  observability assertion — metrics delta, read-RPC, span — with `grpcurl`/`curl`,
+  exactly as `serve-smoke` does.
+- **Driver:** `flutter drive -d web-server --browser-name=chrome` serves and drives
+  its **own** instance of the web build; what matters is the app's grpc-web calls go
+  to the Envoy bridge (via the `--dart-define` endpoints), so the path is the
+  browser's own. Headless chromium + a version-matched chromedriver are resolved at
+  run time from the ambient `nixpkgs` registry (the flake-pinned `chromium` has no
+  cached binary and would source-build; `portal-web`/`grpc-web-up` already fetch the
+  web SDK / envoy image at runtime), overridable via `PORTAL_E2E_CHROMIUM` /
+  `PORTAL_E2E_CHROMEDRIVER`.
+- **Curated span check is best-effort:** it confirms a recent `agent-gateway`
+  `grpc.server` span reached ClickHouse (via `clickhouse-client` in the ClickStack
+  container), but a down/telemetry-disabled obs stack is a WARN, not a contract
+  failure — [inc 10](07-envoy-otel.md) is the authoritative cross-hop trace proof.
+- **Exit-code contract** is the shared `nix/lib/contract.sh` 0/1/2 (0 ok, 1 harness,
+  2 contract). Untrusted `/metrics` text is parsed fail-closed (only a run of digits
+  counts; anything else → 0, so a hostile counter can never fake a positive delta).

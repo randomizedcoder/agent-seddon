@@ -490,7 +490,9 @@ let
       lib
       versions
       agent
+      portal-test-report
       ;
+    inherit (nixLib) harness;
   };
 
   # Seam load / overload-conformance harness (docs/design/loadtest), opt-in.
