@@ -29,6 +29,55 @@ class _AgentPortalAppState extends State<AgentPortalApp> {
   final _clients = PortalClients(_config);
   int _index = 0;
 
+  /// Nav-rail items in display order (index-aligned with [_pages]). Each carries
+  /// a muted, dull-primary tint so the rail reads at a glance — following
+  /// conventions users know (Settings = grey), never bright/saturated.
+  static const _navItems =
+      <({String label, IconData icon, IconData selected, Color color})>[
+    (
+      label: 'Launch',
+      icon: Icons.dashboard_outlined,
+      selected: Icons.dashboard,
+      color: Color(0xFF5B7BA6), // slate blue
+    ),
+    (
+      label: 'Prompts',
+      icon: Icons.edit_note_outlined,
+      selected: Icons.edit_note,
+      color: Color(0xFFBF9B4F), // muted amber
+    ),
+    (
+      label: 'Graph',
+      icon: Icons.account_tree_outlined,
+      selected: Icons.account_tree,
+      color: Color(0xFF8A72B5), // muted violet
+    ),
+    (
+      label: 'Agent',
+      icon: Icons.terminal_outlined,
+      selected: Icons.terminal,
+      color: Color(0xFF5E9C6B), // muted green
+    ),
+    (
+      label: 'Router',
+      icon: Icons.alt_route_outlined,
+      selected: Icons.alt_route,
+      color: Color(0xFF4E9AA0), // muted teal
+    ),
+    (
+      label: 'Fleet',
+      icon: Icons.rate_review_outlined,
+      selected: Icons.rate_review,
+      color: Color(0xFFC07A85), // muted rose
+    ),
+    (
+      label: 'Settings',
+      icon: Icons.settings_outlined,
+      selected: Icons.settings,
+      color: Color(0xFF8A9199), // neutral grey (the familiar Settings cue)
+    ),
+  ];
+
   @override
   void dispose() {
     _clients.shutdown();
@@ -47,12 +96,19 @@ class _AgentPortalAppState extends State<AgentPortalApp> {
       SettingsPage(clients: _clients),
     ];
     return MaterialApp(
-      title: 'Agent Portal',
-      theme: ThemeData(colorSchemeSeed: Colors.indigo, useMaterial3: true),
+      // Also the browser-tab title once Flutter boots (it overwrites index.html's
+      // <title>), so keep it in sync with the tab branding.
+      title: 'Agent Seddon',
+      theme: ThemeData(
+        colorSchemeSeed: Colors.indigo,
+        useMaterial3: true,
+        fontFamily: 'SourceSerif4',
+      ),
       darkTheme: ThemeData(
         colorSchemeSeed: Colors.indigo,
         brightness: Brightness.dark,
         useMaterial3: true,
+        fontFamily: 'SourceSerif4',
       ),
       home: Scaffold(
         body: Row(
@@ -63,44 +119,15 @@ class _AgentPortalAppState extends State<AgentPortalApp> {
               labelType: NavigationRailLabelType.all,
               leading: const Padding(
                 padding: EdgeInsets.symmetric(vertical: 12),
-                child: Icon(Icons.hub),
+                child: Icon(Icons.hub, color: Color(0xFF8A9199)),
               ),
-              destinations: const [
-                NavigationRailDestination(
-                  icon: Icon(Icons.dashboard_outlined),
-                  selectedIcon: Icon(Icons.dashboard),
-                  label: Text('Launch'),
-                ),
-                NavigationRailDestination(
-                  icon: Icon(Icons.edit_note_outlined),
-                  selectedIcon: Icon(Icons.edit_note),
-                  label: Text('Prompts'),
-                ),
-                NavigationRailDestination(
-                  icon: Icon(Icons.account_tree_outlined),
-                  selectedIcon: Icon(Icons.account_tree),
-                  label: Text('Graph'),
-                ),
-                NavigationRailDestination(
-                  icon: Icon(Icons.terminal_outlined),
-                  selectedIcon: Icon(Icons.terminal),
-                  label: Text('Agent'),
-                ),
-                NavigationRailDestination(
-                  icon: Icon(Icons.alt_route_outlined),
-                  selectedIcon: Icon(Icons.alt_route),
-                  label: Text('Router'),
-                ),
-                NavigationRailDestination(
-                  icon: Icon(Icons.rate_review_outlined),
-                  selectedIcon: Icon(Icons.rate_review),
-                  label: Text('Fleet'),
-                ),
-                NavigationRailDestination(
-                  icon: Icon(Icons.settings_outlined),
-                  selectedIcon: Icon(Icons.settings),
-                  label: Text('Settings'),
-                ),
+              destinations: [
+                for (final it in _navItems)
+                  NavigationRailDestination(
+                    icon: Icon(it.icon, color: it.color.withValues(alpha: 0.85)),
+                    selectedIcon: Icon(it.selected, color: it.color),
+                    label: Text(it.label),
+                  ),
               ],
             ),
             const VerticalDivider(width: 1),
