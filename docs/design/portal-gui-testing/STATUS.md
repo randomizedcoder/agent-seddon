@@ -18,7 +18,7 @@ stack (a lesson carried from the portal + code-review tracks).
 | 07 | Layer B `portal-e2e` app (metrics-delta + read-RPC + curated span, trace linking) | ✅ | ✅ | ✅ | — | ⬜ |
 | 08 | Report renderer + aggregation (+ failure artifacts) — `nix run .#portal-test-report` (hermetic slice) | — | — | ✅ | — | ✅ 640892b |
 | 09 | Performance tracking — `portal_gui_perf` table + JSONEachRow emitter + SQL + Grafana | — | ✅ | ✅ | ✅ | ⬜ |
-| 10 | Envoy full instrumentation — OTLP access logs + tracing + CORS trace-context + `envoy_access_latency` | — | — | ✅ | ✅ | ⬜ |
+| 10 | Envoy full instrumentation — OTLP access logs + tracing + CORS trace-context + `envoy_access_latency` | — | — | ✅ | ✅ | **this PR** |
 
 ## Dependency order
 
@@ -45,7 +45,14 @@ stack (a lesson carried from the portal + code-review tracks).
 - **10 (Envoy)** wires the unified `trace_id`; **07** (curated span assertion, trace
   links) and **09** (proxy-vs-backend latency split) lean on it, so 10 can land
   alongside/just before 07/09. Envoy instrumentation is also standalone-valuable
-  (production bridge observability), so it may ship early.
+  (production bridge observability), so it may ship early. **Shipped first in the
+  live-l2 wave** — config-only, gate stays green; the `envoyproxy/envoy:v1.31` image
+  accepts the OTLP access-logger + tracer + collector cluster (`envoy --mode validate`
+  → `configuration OK`). One design-listed access-log field, `%UPSTREAM_HANDSHAKE_DURATION%`
+  (07 §1), is **not a supported command operator in v1.31** (`Not supported field in
+  StreamInfo`) and was dropped; the proxy-vs-backend split still holds on
+  `%DURATION% − %RESPONSE_DURATION%` + the upstream duration. `envoy_access_latency`
+  materialized view deferred to inc 09 (where the ClickHouse schema work lands).
 
 ## Notes / decisions of record
 

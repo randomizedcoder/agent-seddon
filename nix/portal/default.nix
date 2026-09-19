@@ -43,6 +43,10 @@ let
   gatewayPort = 50100;
   sessionsPort = 50080;
   fleetPort = 50086; # the full review-fleet process (--serve-fleet)
+  # OTLP/gRPC collector (ClickStack), reached on host loopback since envoy runs
+  # --network host. Access logs + tracer spans from the bridge ship here so the
+  # browser -> envoy -> gateway -> seam hop is one trace. Single source of truth.
+  otelCollectorPort = versions.clickstackOtlpGrpcPort;
   name = "agent-grpc-web";
   # Fully-qualified so podman (whose unqualified-search list can be empty, e.g. on the
   # headless l2 box) resolves it; docker treats the docker.io/ prefix as a no-op.
@@ -159,6 +163,15 @@ let
   # Three listeners in one config/container: gateway (:8090 -> :50100), the opt-in
   # sessions gateway (:8091 -> :50080), and the opt-in fleet process
   # (:8093 -> :50086, the Fleet tab). Web build only.
+  #
+  # Each listener ships OTLP access logs + tracer spans to the ClickStack collector
+  # (otel_collector cluster -> 127.0.0.1:${toString otelCollectorPort}) so the
+  # browser -> envoy -> gateway -> seam hop is one trace (docs/design/portal-gui-testing/
+  # 07-envoy-otel.md). ClickStack's all-in-one-auth image requires an ingestion key on
+  # OTLP, so the `''${OTLP_AUTHORIZATION}` sentinel below is substituted at bring-up by
+  # grpc-web-up from $PORTAL_OTLP_AUTHORIZATION|$CLICKSTACK_INGESTION_API_KEY — the secret
+  # is NEVER baked into the nix store (mirrors the agent's [telemetry] otlp_headers). Unset
+  # ⇒ empty header ⇒ the collector drops the bridge's telemetry (best-effort, non-fatal).
   envoyConfig = pkgs.writeText "portal-envoy.yaml" ''
     static_resources:
       listeners:
@@ -172,6 +185,56 @@ let
                     "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
                     stat_prefix: gateway_grpc_web
                     codec_type: AUTO
+                    access_log:
+                      - name: envoy.access_loggers.open_telemetry
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.access_loggers.open_telemetry.v3.OpenTelemetryAccessLogConfig
+                          common_config:
+                            log_name: envoy-portal-bridge
+                            transport_api_version: V3
+                            grpc_service:
+                              envoy_grpc:
+                                cluster_name: otel_collector
+                              initial_metadata:
+                                - key: authorization
+                                  value: "''${OTLP_AUTHORIZATION}"
+                          resource_attributes:
+                            values:
+                              - key: service.name
+                                value: { string_value: envoy-portal-bridge }
+                          body: { string_value: "%REQ(:PATH)%" }
+                          attributes:
+                            values:
+                              - key: duration_ms
+                                value: { string_value: "%DURATION%" }
+                              - key: response_duration_ms
+                                value: { string_value: "%RESPONSE_DURATION%" }
+                              - key: request_duration_ms
+                                value: { string_value: "%REQUEST_DURATION%" }
+                              - key: grpc_status
+                                value: { string_value: "%GRPC_STATUS%" }
+                              - key: response_code
+                                value: { string_value: "%RESPONSE_CODE%" }
+                              - key: response_flags
+                                value: { string_value: "%RESPONSE_FLAGS%" }
+                              - key: upstream_host
+                                value: { string_value: "%UPSTREAM_HOST%" }
+                              - key: request_id
+                                value: { string_value: "%REQ(X-REQUEST-ID)%" }
+                    tracing:
+                      random_sampling: { value: 100 }
+                      provider:
+                        name: envoy.tracers.opentelemetry
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.config.trace.v3.OpenTelemetryConfig
+                          service_name: envoy-portal-bridge
+                          grpc_service:
+                            envoy_grpc:
+                              cluster_name: otel_collector
+                            initial_metadata:
+                              - key: authorization
+                                value: "''${OTLP_AUTHORIZATION}"
+                            timeout: 0.250s
                     route_config:
                       name: gateway_route
                       virtual_hosts:
@@ -183,9 +246,9 @@ let
                               allow_origin_string_match:
                                 - prefix: "*"
                               allow_methods: GET, PUT, DELETE, POST, OPTIONS
-                              allow_headers: keep-alive,user-agent,cache-control,content-type,content-transfer-encoding,x-grpc-web,x-user-agent,grpc-timeout,x-agent-user-id,x-agent-session-id
+                              allow_headers: keep-alive,user-agent,cache-control,content-type,content-transfer-encoding,x-grpc-web,x-user-agent,grpc-timeout,x-agent-user-id,x-agent-session-id,traceparent,tracestate,x-request-id
                               max_age: "1728000"
-                              expose_headers: grpc-status,grpc-message
+                              expose_headers: grpc-status,grpc-message,x-envoy-upstream-service-time,traceparent,tracestate
                           routes:
                             - match: { prefix: "/" }
                               route: { cluster: agent_gateway, timeout: 0s }
@@ -209,6 +272,56 @@ let
                     "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
                     stat_prefix: sessions_grpc_web
                     codec_type: AUTO
+                    access_log:
+                      - name: envoy.access_loggers.open_telemetry
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.access_loggers.open_telemetry.v3.OpenTelemetryAccessLogConfig
+                          common_config:
+                            log_name: envoy-portal-bridge
+                            transport_api_version: V3
+                            grpc_service:
+                              envoy_grpc:
+                                cluster_name: otel_collector
+                              initial_metadata:
+                                - key: authorization
+                                  value: "''${OTLP_AUTHORIZATION}"
+                          resource_attributes:
+                            values:
+                              - key: service.name
+                                value: { string_value: envoy-portal-bridge }
+                          body: { string_value: "%REQ(:PATH)%" }
+                          attributes:
+                            values:
+                              - key: duration_ms
+                                value: { string_value: "%DURATION%" }
+                              - key: response_duration_ms
+                                value: { string_value: "%RESPONSE_DURATION%" }
+                              - key: request_duration_ms
+                                value: { string_value: "%REQUEST_DURATION%" }
+                              - key: grpc_status
+                                value: { string_value: "%GRPC_STATUS%" }
+                              - key: response_code
+                                value: { string_value: "%RESPONSE_CODE%" }
+                              - key: response_flags
+                                value: { string_value: "%RESPONSE_FLAGS%" }
+                              - key: upstream_host
+                                value: { string_value: "%UPSTREAM_HOST%" }
+                              - key: request_id
+                                value: { string_value: "%REQ(X-REQUEST-ID)%" }
+                    tracing:
+                      random_sampling: { value: 100 }
+                      provider:
+                        name: envoy.tracers.opentelemetry
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.config.trace.v3.OpenTelemetryConfig
+                          service_name: envoy-portal-bridge
+                          grpc_service:
+                            envoy_grpc:
+                              cluster_name: otel_collector
+                            initial_metadata:
+                              - key: authorization
+                                value: "''${OTLP_AUTHORIZATION}"
+                            timeout: 0.250s
                     route_config:
                       name: sessions_route
                       virtual_hosts:
@@ -220,9 +333,9 @@ let
                               allow_origin_string_match:
                                 - prefix: "*"
                               allow_methods: GET, PUT, DELETE, POST, OPTIONS
-                              allow_headers: keep-alive,user-agent,cache-control,content-type,content-transfer-encoding,x-grpc-web,x-user-agent,grpc-timeout,x-agent-user-id,x-agent-session-id
+                              allow_headers: keep-alive,user-agent,cache-control,content-type,content-transfer-encoding,x-grpc-web,x-user-agent,grpc-timeout,x-agent-user-id,x-agent-session-id,traceparent,tracestate,x-request-id
                               max_age: "1728000"
-                              expose_headers: grpc-status,grpc-message
+                              expose_headers: grpc-status,grpc-message,x-envoy-upstream-service-time,traceparent,tracestate
                           routes:
                             - match: { prefix: "/" }
                               route: { cluster: agent_sessions, timeout: 0s }
@@ -246,6 +359,56 @@ let
                     "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
                     stat_prefix: fleet_grpc_web
                     codec_type: AUTO
+                    access_log:
+                      - name: envoy.access_loggers.open_telemetry
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.access_loggers.open_telemetry.v3.OpenTelemetryAccessLogConfig
+                          common_config:
+                            log_name: envoy-portal-bridge
+                            transport_api_version: V3
+                            grpc_service:
+                              envoy_grpc:
+                                cluster_name: otel_collector
+                              initial_metadata:
+                                - key: authorization
+                                  value: "''${OTLP_AUTHORIZATION}"
+                          resource_attributes:
+                            values:
+                              - key: service.name
+                                value: { string_value: envoy-portal-bridge }
+                          body: { string_value: "%REQ(:PATH)%" }
+                          attributes:
+                            values:
+                              - key: duration_ms
+                                value: { string_value: "%DURATION%" }
+                              - key: response_duration_ms
+                                value: { string_value: "%RESPONSE_DURATION%" }
+                              - key: request_duration_ms
+                                value: { string_value: "%REQUEST_DURATION%" }
+                              - key: grpc_status
+                                value: { string_value: "%GRPC_STATUS%" }
+                              - key: response_code
+                                value: { string_value: "%RESPONSE_CODE%" }
+                              - key: response_flags
+                                value: { string_value: "%RESPONSE_FLAGS%" }
+                              - key: upstream_host
+                                value: { string_value: "%UPSTREAM_HOST%" }
+                              - key: request_id
+                                value: { string_value: "%REQ(X-REQUEST-ID)%" }
+                    tracing:
+                      random_sampling: { value: 100 }
+                      provider:
+                        name: envoy.tracers.opentelemetry
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.config.trace.v3.OpenTelemetryConfig
+                          service_name: envoy-portal-bridge
+                          grpc_service:
+                            envoy_grpc:
+                              cluster_name: otel_collector
+                            initial_metadata:
+                              - key: authorization
+                                value: "''${OTLP_AUTHORIZATION}"
+                            timeout: 0.250s
                     route_config:
                       name: fleet_route
                       virtual_hosts:
@@ -257,9 +420,9 @@ let
                               allow_origin_string_match:
                                 - prefix: "*"
                               allow_methods: GET, PUT, DELETE, POST, OPTIONS
-                              allow_headers: keep-alive,user-agent,cache-control,content-type,content-transfer-encoding,x-grpc-web,x-user-agent,grpc-timeout,x-agent-user-id,x-agent-session-id
+                              allow_headers: keep-alive,user-agent,cache-control,content-type,content-transfer-encoding,x-grpc-web,x-user-agent,grpc-timeout,x-agent-user-id,x-agent-session-id,traceparent,tracestate,x-request-id
                               max_age: "1728000"
-                              expose_headers: grpc-status,grpc-message
+                              expose_headers: grpc-status,grpc-message,x-envoy-upstream-service-time,traceparent,tracestate
                           routes:
                             - match: { prefix: "/" }
                               route: { cluster: agent_fleet, timeout: 0s }
@@ -322,6 +485,22 @@ let
                   - endpoint:
                       address:
                         socket_address: { address: 127.0.0.1, port_value: ${toString fleetPort} }
+        - name: otel_collector
+          connect_timeout: 0.25s
+          type: LOGICAL_DNS
+          lb_policy: ROUND_ROBIN
+          typed_extension_protocol_options:
+            envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+              "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+              explicit_http_config:
+                http2_protocol_options: {}
+          load_assignment:
+            cluster_name: otel_collector
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address: { address: 127.0.0.1, port_value: ${toString otelCollectorPort} }
   '';
 
   # Both docker and podman on PATH; CONTAINER_RUNTIME (default docker) picks one.
@@ -330,35 +509,52 @@ let
     runtimeInputs = [
       versions.docker
       versions.podman
+      pkgs.gettext # envsubst — inject the OTLP auth token into the config at bring-up
+      pkgs.coreutils
     ];
     text = ''
-      runtime="''${CONTAINER_RUNTIME:-docker}"
-      if ! "$runtime" info >/dev/null 2>&1; then
-        echo "grpc-web-up: '$runtime' not reachable — is it installed/running?" >&2
-        echo "  (on a podman-only host: CONTAINER_RUNTIME=podman nix run .#grpc-web-up)" >&2
-        exit 1
-      fi
-      if "$runtime" ps -a --format '{{.Names}}' | grep -qx "${name}"; then
-        echo "==> restarting ${name}"
-        "$runtime" rm -f "${name}" >/dev/null
-      fi
-      echo "==> starting grpc-web proxy ($runtime, ${image}):"
-      echo "      :${toString grpcWebPort}  -> gateway  :${toString gatewayPort}"
-      echo "      :${toString grpcWebSessionsPort}  -> sessions :${toString sessionsPort}"
-      echo "      :${toString grpcWebFleetPort}  -> fleet    :${toString fleetPort}"
-      # `--network host` (Linux) so envoy reaches the gateways on host loopback and
-      # the browser (or an SSH tunnel) reaches envoy on the host proxy ports.
-      "$runtime" run -d \
-        --name "${name}" \
-        --network host \
-        -v "${envoyConfig}:/etc/envoy/envoy.yaml:ro" \
-        "${image}" \
-        -c /etc/envoy/envoy.yaml >/dev/null
-      echo "grpc-web proxy up. Start the gateways with:"
-      echo "  agent --serve-all       (:${toString gatewayPort})"
-      echo "  agent --serve-sessions  (:${toString sessionsPort})"
-      echo "  agent --serve-fleet     (:${toString fleetPort})"
-      echo "Stop with: nix run .#grpc-web-down"
+            runtime="''${CONTAINER_RUNTIME:-docker}"
+            if ! "$runtime" info >/dev/null 2>&1; then
+              echo "grpc-web-up: '$runtime' not reachable — is it installed/running?" >&2
+              echo "  (on a podman-only host: CONTAINER_RUNTIME=podman nix run .#grpc-web-up)" >&2
+              exit 1
+            fi
+            if "$runtime" ps -a --format '{{.Names}}' | grep -qx "${name}"; then
+              echo "==> restarting ${name}"
+              "$runtime" rm -f "${name}" >/dev/null
+            fi
+            # Render the effective config: substitute ONLY $OTLP_AUTHORIZATION (the ClickStack
+            # ingestion key) into the committed template, so the secret never lands in the nix
+            # store. Written to a stable per-user path (not a mktemp we'd trap-clean) so it
+            # outlives this script for the detached container's lifetime. Empty ⇒ empty header.
+            OTLP_AUTHORIZATION="''${PORTAL_OTLP_AUTHORIZATION:-''${CLICKSTACK_INGESTION_API_KEY:-}}"
+            export OTLP_AUTHORIZATION
+            render_dir="''${XDG_RUNTIME_DIR:-/tmp}"
+            effective_config="$render_dir/${name}-envoy.yaml"
+      # shellcheck disable=SC2016 # envsubst takes the literal var NAME (not its value) to scope substitution
+            envsubst '$OTLP_AUTHORIZATION' <"${envoyConfig}" >"$effective_config"
+            if [ -z "$OTLP_AUTHORIZATION" ]; then
+              echo "grpc-web-up: note — no OTLP ingestion key set (PORTAL_OTLP_AUTHORIZATION /" >&2
+              echo "  CLICKSTACK_INGESTION_API_KEY); the bridge's OTLP telemetry will be dropped" >&2
+              echo "  by an auth'd collector. Set it to trace browser -> envoy -> gateway." >&2
+            fi
+            echo "==> starting grpc-web proxy ($runtime, ${image}):"
+            echo "      :${toString grpcWebPort}  -> gateway  :${toString gatewayPort}"
+            echo "      :${toString grpcWebSessionsPort}  -> sessions :${toString sessionsPort}"
+            echo "      :${toString grpcWebFleetPort}  -> fleet    :${toString fleetPort}"
+            # `--network host` (Linux) so envoy reaches the gateways on host loopback and
+            # the browser (or an SSH tunnel) reaches envoy on the host proxy ports.
+            "$runtime" run -d \
+              --name "${name}" \
+              --network host \
+              -v "$effective_config:/etc/envoy/envoy.yaml:ro" \
+              "${image}" \
+              -c /etc/envoy/envoy.yaml >/dev/null
+            echo "grpc-web proxy up. Start the gateways with:"
+            echo "  agent --serve-all       (:${toString gatewayPort})"
+            echo "  agent --serve-sessions  (:${toString sessionsPort})"
+            echo "  agent --serve-fleet     (:${toString fleetPort})"
+            echo "Stop with: nix run .#grpc-web-down"
     '';
   };
 
