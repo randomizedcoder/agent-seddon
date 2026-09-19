@@ -9,9 +9,9 @@ stack (a lesson carried from the portal + code-review tracks).
 | # | Increment | Portal code | testkit | Nix check/app | ClickHouse | Status |
 |---|---|:--:|:--:|:--:|:--:|:--:|
 | 00 | Design docs (`docs/design/portal-gui-testing/`) | — | — | — | — | ✅ #421 |
-| 01 | Widget-key scheme (inline `Key('<page>.<element>')` across all pages) | ✅ | — | — | — | **this PR** |
-| 02 | `portal-testkit` fakes + per-page robots + completeness critic + `flutter_test`/`integration_test` deps + regen `pubspec.lock` + L0 unit tests | — | ✅ | — | — | ⬜ |
-| 03 | Layer A `portal-widget` check + first 1–2 pages tabled (template) | ✅ | ✅ | ✅ | — | ⬜ |
+| 01 | Widget-key scheme (inline `Key('<page>.<element>')` across all pages) | ✅ | — | — | — | ✅ #423 |
+| 02 | `portal-testkit` fakes (in-proc fake gRPC + recording) + `flutter_test`/`integration_test` deps + regen `pubspec.lock` + config-diff extraction + L0 unit tests | ✅ | ✅ | — | — | **this PR** |
+| 03 | Layer A `portal-widget` check + per-page robots + completeness critic + first 1–2 pages tabled (template) | ✅ | ✅ | ✅ | — | ⬜ |
 | 04 | Remaining pages tabled in Layer A | ✅ | ✅ | — | — | ⬜ |
 | 05 | Golden + a11y `portal-visual` check | ✅ | ✅ | ✅ | — | ⬜ |
 | 06 | Contract drift guard (RPC set + rendered enums vs descriptor set) | — | ✅ | ✅ | — | ⬜ |
@@ -25,15 +25,22 @@ stack (a lesson carried from the portal + code-review tracks).
 - **01** is the prerequisite for everything (the widget keys). It ships **keys only** —
   inline `Key('<page>.<element>')` literals (the design's "source scan" registry option),
   so every page could be keyed in parallel with zero shared-file contention, and the
-  change is fully verifiable by the existing `dart-analyze` gate. The **per-page robots +
-  the completeness critic moved into 02**, because both import `package:flutter_test` and
-  are only analyzable/runnable once 02 adds that SDK dep — keeping them out of 01 avoids
-  landing un-analyzed Dart on `main`.
-- **02** adds the test deps + fakes + robots + critic; regenerating the tracked `portal/pubspec.lock` is
-  required for the hermetic `buildFlutterApplication` vendoring (the tracked
-  `portal/pubspec.lock` feeds it, as [`dart-analyze`](../../../nix/checks/dart-analyze.nix)
-  already relies on).
-- **03** stands up the gated breadth layer with a template page; **04** fans out.
+  change is fully verifiable by the existing `dart-analyze` gate.
+- **02** adds the `flutter_test`/`integration_test` SDK deps, regenerates the tracked
+  `portal/pubspec.lock` (needed for the hermetic `buildFlutterApplication` vendoring, as
+  [`dart-analyze`](../../../nix/checks/dart-analyze.nix) already relies on), and lands the
+  `portal-testkit` fakes — an **in-process fake gRPC gateway** on an ephemeral loopback
+  port that records every call + scripts responses, dialed through a real `PortalClients`
+  (the key-feasibility claim, proven by `test/testkit/fake_gateway_test.dart`). It also
+  extracts the Settings config-diff into a pure `lib/src/config_diff.dart` so it is
+  L0-testable, and ships the L0 unit suite (`graph_json`, `graph_library`, `config_diff`).
+  **The per-page robots + completeness critic move to 03**, where the `portal-widget` nix
+  check first runs `test/` in the gate and the template pages give the robots a consumer —
+  writing them earlier would land test-only Dart with nothing exercising it.
+  (`portal/.gitignore` narrowed from `/test/` to just the `flutter create`
+  `test/widget_test.dart` scaffold so the real suite is tracked.)
+- **03** stands up the gated breadth layer (`portal-widget`), adds the robots + completeness
+  critic, and tables a template page; **04** fans out.
 - **05, 06** are independent hermetic checks and can land in any order after 03.
 - **10 (Envoy)** wires the unified `trace_id`; **07** (curated span assertion, trace
   links) and **09** (proxy-vs-backend latency split) lean on it, so 10 can land
@@ -42,9 +49,10 @@ stack (a lesson carried from the portal + code-review tracks).
 
 ## Notes / decisions of record
 
-- **Delete the dead scaffold** `portal/test/widget_test.dart` in increment 02 and
-  include `portal/test/` in the new checks' source filesets (today `dart-analyze`
-  excludes it).
+- **Dead scaffold removed** (inc 02): `portal/test/widget_test.dart` deleted and
+  `portal/.gitignore` narrowed from `/test/` to just that scaffold file, so the real
+  suite is tracked. Including `portal/test/` in a check's source fileset happens in
+  inc 03 (the `portal-widget` check); `dart-analyze` still excludes it.
 - **Perf is trend-tracking, not a hard gate** — wall-clock GUI latency is noisy;
   regressions surface via SQL/Grafana, not a red build. iai-callgrind Ir ceilings stay
   the deterministic micro-perf gate.
