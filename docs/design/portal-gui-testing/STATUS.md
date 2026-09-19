@@ -8,9 +8,9 @@ stack (a lesson carried from the portal + code-review tracks).
 
 | # | Increment | Portal code | testkit | Nix check/app | ClickHouse | Status |
 |---|---|:--:|:--:|:--:|:--:|:--:|
-| 00 | Design docs (`docs/design/portal-gui-testing/`) | — | — | — | — | **this PR** |
-| 01 | Widget-key scheme + per-page robots + completeness critic | ✅ | ✅ | — | — | ⬜ |
-| 02 | `portal-testkit` fakes + `flutter_test`/`integration_test` deps + regen `pubspec.lock` + L0 unit tests | — | ✅ | — | — | ⬜ |
+| 00 | Design docs (`docs/design/portal-gui-testing/`) | — | — | — | — | ✅ #421 |
+| 01 | Widget-key scheme (inline `Key('<page>.<element>')` across all pages) | ✅ | — | — | — | **this PR** |
+| 02 | `portal-testkit` fakes + per-page robots + completeness critic + `flutter_test`/`integration_test` deps + regen `pubspec.lock` + L0 unit tests | — | ✅ | — | — | ⬜ |
 | 03 | Layer A `portal-widget` check + first 1–2 pages tabled (template) | ✅ | ✅ | ✅ | — | ⬜ |
 | 04 | Remaining pages tabled in Layer A | ✅ | ✅ | — | — | ⬜ |
 | 05 | Golden + a11y `portal-visual` check | ✅ | ✅ | ✅ | — | ⬜ |
@@ -22,8 +22,14 @@ stack (a lesson carried from the portal + code-review tracks).
 
 ## Dependency order
 
-- **01** is the prerequisite for everything (keys + robots).
-- **02** adds the test deps + fakes; regenerating the tracked `portal/pubspec.lock` is
+- **01** is the prerequisite for everything (the widget keys). It ships **keys only** —
+  inline `Key('<page>.<element>')` literals (the design's "source scan" registry option),
+  so every page could be keyed in parallel with zero shared-file contention, and the
+  change is fully verifiable by the existing `dart-analyze` gate. The **per-page robots +
+  the completeness critic moved into 02**, because both import `package:flutter_test` and
+  are only analyzable/runnable once 02 adds that SDK dep — keeping them out of 01 avoids
+  landing un-analyzed Dart on `main`.
+- **02** adds the test deps + fakes + robots + critic; regenerating the tracked `portal/pubspec.lock` is
   required for the hermetic `buildFlutterApplication` vendoring (the tracked
   `portal/pubspec.lock` feeds it, as [`dart-analyze`](../../../nix/checks/dart-analyze.nix)
   already relies on).

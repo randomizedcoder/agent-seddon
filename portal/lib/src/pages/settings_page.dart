@@ -222,6 +222,7 @@ class _SettingsPageState extends State<SettingsPage> {
                   children: [
                     for (final s in sections)
                       ListTile(
+                        key: Key('settings.section.item.$s'),
                         dense: true,
                         selected: _selected == s,
                         title: Text(s),
@@ -304,18 +305,21 @@ class _SettingsPageState extends State<SettingsPage> {
                   style: Theme.of(context).textTheme.titleLarge),
               const Spacer(),
               TextButton.icon(
+                key: const Key('settings.revert'),
                 onPressed: dirty ? () => _revert(section) : null,
                 icon: const Icon(Icons.undo, size: 18),
                 label: const Text('Revert'),
               ),
               const SizedBox(width: 8),
               OutlinedButton.icon(
+                key: const Key('settings.validate'),
                 onPressed: dirty ? () => _validate(section) : null,
                 icon: const Icon(Icons.rule, size: 18),
                 label: const Text('Validate'),
               ),
               const SizedBox(width: 8),
               FilledButton.icon(
+                key: const Key('settings.save'),
                 onPressed: dirty ? () => _save(section) : null,
                 icon: const Icon(Icons.save, size: 18),
                 label: const Text('Save'),
@@ -361,7 +365,10 @@ class _OfflineRetry extends StatelessWidget {
                 textAlign: TextAlign.center),
           ),
           const SizedBox(height: 12),
-          FilledButton(onPressed: onRetry, child: const Text('Retry')),
+          FilledButton(
+              key: const Key('settings.retry'),
+              onPressed: onRetry,
+              child: const Text('Retry')),
         ],
       ),
     );

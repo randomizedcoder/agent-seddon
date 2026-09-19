@@ -252,6 +252,7 @@ class _AgentViewPageState extends State<AgentViewPage> {
         children: [
           Expanded(
             child: TextField(
+              key: const Key('agent.goal'),
               controller: _goalInput,
               decoration: const InputDecoration(
                 hintText: 'Send a goal to the agent…',
@@ -263,6 +264,7 @@ class _AgentViewPageState extends State<AgentViewPage> {
           ),
           const SizedBox(width: 8),
           FilledButton.icon(
+            key: const Key('agent.send'),
             onPressed: _sending ? null : () => _send(_goalInput.text),
             icon: const Icon(Icons.send, size: 18),
             label: const Text('Send'),
@@ -284,7 +286,10 @@ class _AgentViewPageState extends State<AgentViewPage> {
                 'Start the sessions gateway: `agent --serve-sessions`,\n'
                 'then send a goal below or Reconnect to observe.'),
             const SizedBox(height: 8),
-            FilledButton(onPressed: _subscribe, child: const Text('Reconnect')),
+            FilledButton(
+                key: const Key('agent.reconnect'),
+                onPressed: _subscribe,
+                child: const Text('Reconnect')),
           ],
         ),
       );
@@ -296,6 +301,7 @@ class _AgentViewPageState extends State<AgentViewPage> {
         controller: _scroll,
         itemCount: _log.length,
         itemBuilder: (_, i) => Text(
+          key: Key('agent.transcript.$i'),
           _log[i],
           style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
         ),
@@ -319,6 +325,7 @@ class _AgentViewPageState extends State<AgentViewPage> {
             Icons.memory,
             'GPU pool',
             _pool.isEmpty ? 'n/a' : '$alive/${_pool.length} alive',
+            key: const Key('agent.status.pool'),
             detail: _pool
                 .map((m) => '${m.name}${m.saturated ? "!" : ""}(${m.inFlight})')
                 .join(' '),
@@ -329,14 +336,17 @@ class _AgentViewPageState extends State<AgentViewPage> {
             _p50 == null && _p99 == null
                 ? 'n/a'
                 : 'p50 ${_ms(_p50)} · p99 ${_ms(_p99)}',
+            key: const Key('agent.status.grpc'),
           ),
         ],
       ),
     );
   }
 
-  Widget _cell(IconData icon, String label, String value, {String? detail}) {
+  Widget _cell(IconData icon, String label, String value,
+      {String? detail, Key? key}) {
     return Tooltip(
+      key: key,
       message: detail ?? label,
       child: Chip(
         avatar: Icon(icon, size: 16),

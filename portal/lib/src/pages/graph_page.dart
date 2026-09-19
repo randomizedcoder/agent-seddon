@@ -239,6 +239,7 @@ class _GraphPageState extends State<GraphPage> {
               ),
         actions: [
           TextButton(
+              key: const Key('graph.validate.issues.close'),
               onPressed: () => Navigator.pop(context),
               child: const Text('Close')),
         ],
@@ -328,11 +329,13 @@ class _GraphPageState extends State<GraphPage> {
               Text('Library', style: Theme.of(context).textTheme.titleMedium),
               const Spacer(),
               IconButton(
+                key: const Key('graph.new'),
                 tooltip: 'New graph',
                 icon: const Icon(Icons.add),
                 onPressed: _newGraph,
               ),
               IconButton(
+                key: const Key('graph.import'),
                 tooltip: 'Import JSON',
                 icon: const Icon(Icons.upload_file),
                 onPressed: _import,
@@ -369,6 +372,7 @@ class _GraphPageState extends State<GraphPage> {
                   children: [
                     for (final e in _library.entries)
                       ListTile(
+                        key: Key('graph.library.item.${e.name}'),
                         dense: true,
                         selected: identical(e, _selected),
                         title: Text(e.name),
@@ -417,18 +421,22 @@ class _GraphPageState extends State<GraphPage> {
                 ),
               const Spacer(),
               IconButton(
+                  key: const Key('graph.rename'),
                   tooltip: 'Rename',
                   icon: const Icon(Icons.drive_file_rename_outline),
                   onPressed: () => _rename(e)),
               IconButton(
+                  key: const Key('graph.duplicate'),
                   tooltip: 'Duplicate',
                   icon: const Icon(Icons.copy_all_outlined),
                   onPressed: () => _duplicate(e)),
               IconButton(
+                  key: const Key('graph.export'),
                   tooltip: 'Export JSON',
                   icon: const Icon(Icons.download),
                   onPressed: () => _export(e)),
               IconButton(
+                  key: const Key('graph.delete'),
                   tooltip: 'Delete from library',
                   icon: const Icon(Icons.delete_outline),
                   onPressed: () => _delete(e)),
@@ -438,11 +446,13 @@ class _GraphPageState extends State<GraphPage> {
           Row(
             children: [
               OutlinedButton.icon(
+                  key: const Key('graph.validate'),
                   onPressed: () => _validate(e),
                   icon: const Icon(Icons.fact_check_outlined),
                   label: const Text('Validate')),
               const SizedBox(width: 8),
               FilledButton.icon(
+                  key: const Key('graph.setActive'),
                   onPressed: () => _setActive(e),
                   icon: const Icon(Icons.play_circle_outline),
                   label: const Text('Set active')),
@@ -454,7 +464,8 @@ class _GraphPageState extends State<GraphPage> {
               children: [
                 _PreviewCard(graph: e.graph),
                 const SizedBox(height: 16),
-                _sectionHeader('Nodes', onAdd: () => _addNode(e)),
+                _sectionHeader('Nodes',
+                    onAdd: () => _addNode(e), addKey: const Key('graph.node.add')),
                 if (e.graph.nodes.isEmpty)
                   const Padding(
                     padding: EdgeInsets.all(8),
@@ -462,6 +473,7 @@ class _GraphPageState extends State<GraphPage> {
                   ),
                 for (final id in (e.graph.nodes.keys.toList()..sort()))
                   _NodeTile(
+                    key: Key('graph.node.$id'),
                     id: id,
                     node: e.graph.nodes[id]!,
                     schema: _nodeTypes[e.graph.nodes[id]!.type],
@@ -469,7 +481,8 @@ class _GraphPageState extends State<GraphPage> {
                     onParamsChanged: (p) => _onParamsChanged(e, id, p),
                   ),
                 const SizedBox(height: 16),
-                _sectionHeader('Edges', onAdd: () => _addEdge(e)),
+                _sectionHeader('Edges',
+                    onAdd: () => _addEdge(e), addKey: const Key('graph.edge.add')),
                 if (e.graph.edges.isEmpty)
                   const Padding(
                     padding: EdgeInsets.all(8),
@@ -484,12 +497,14 @@ class _GraphPageState extends State<GraphPage> {
     );
   }
 
-  Widget _sectionHeader(String title, {required VoidCallback onAdd}) {
+  Widget _sectionHeader(String title,
+      {required VoidCallback onAdd, Key? addKey}) {
     return Row(
       children: [
         Text(title, style: Theme.of(context).textTheme.titleMedium),
         const SizedBox(width: 8),
         IconButton(
+          key: addKey,
           icon: const Icon(Icons.add_circle_outline, size: 20),
           onPressed: onAdd,
           tooltip: 'Add $title',
@@ -501,10 +516,12 @@ class _GraphPageState extends State<GraphPage> {
   Widget _edgeTile(GraphLibraryEntry e, int i) {
     final edge = e.graph.edges[i];
     return ListTile(
+      key: Key('graph.edge.$i'),
       dense: true,
       leading: _EdgeKindChip(kind: edge.kind),
       title: Text('${edge.from}  →  ${edge.to}'),
       trailing: IconButton(
+        key: Key('graph.edge.remove.$i'),
         icon: const Icon(Icons.remove_circle_outline, size: 20),
         onPressed: () => _removeEdge(e, i),
       ),
@@ -518,6 +535,7 @@ class _GraphPageState extends State<GraphPage> {
       builder: (_) => AlertDialog(
         title: Text(title),
         content: TextField(
+          key: const Key('graph.name.field'),
           controller: controller,
           autofocus: true,
           decoration: const InputDecoration(labelText: 'Name'),
@@ -525,9 +543,11 @@ class _GraphPageState extends State<GraphPage> {
         ),
         actions: [
           TextButton(
+              key: const Key('graph.name.cancel'),
               onPressed: () => Navigator.pop(context),
               child: const Text('Cancel')),
           FilledButton(
+              key: const Key('graph.name.ok'),
               onPressed: () => Navigator.pop(context, controller.text.trim()),
               child: const Text('OK')),
         ],
@@ -556,7 +576,10 @@ class _ServerBanner extends StatelessWidget {
             const Expanded(
                 child:
                     Text('Gateway offline — validate / set-active disabled')),
-            TextButton(onPressed: onRetry, child: const Text('Retry')),
+            TextButton(
+                key: const Key('graph.retry'),
+                onPressed: onRetry,
+                child: const Text('Retry')),
           ],
         ),
       ),
@@ -590,6 +613,7 @@ class _EdgeKindChip extends StatelessWidget {
 /// One node row: type/version header, remove, and a schema-guided param editor.
 class _NodeTile extends StatelessWidget {
   const _NodeTile({
+    super.key,
     required this.id,
     required this.node,
     required this.schema,
@@ -610,6 +634,7 @@ class _NodeTile extends StatelessWidget {
         title: Text(id, style: const TextStyle(fontWeight: FontWeight.bold)),
         subtitle: Text('${node.type} · v${node.typeVersion}'),
         trailing: IconButton(
+          key: Key('graph.node.remove.$id'),
           icon: const Icon(Icons.remove_circle_outline, size: 20),
           tooltip: 'Remove node',
           onPressed: onRemove,
@@ -720,6 +745,7 @@ class _ParamsEditorState extends State<_ParamsEditor> {
               const Text('params'),
               const Spacer(),
               TextButton.icon(
+                key: const Key('graph.node.params.toggle'),
                 icon: Icon(_useRaw ? Icons.list_alt : Icons.data_object,
                     size: 16),
                 label: Text(_useRaw ? 'Form' : 'Raw JSON'),
@@ -755,6 +781,7 @@ class _ParamsEditorState extends State<_ParamsEditor> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         TextField(
+          key: const Key('graph.node.params.raw'),
           controller: _raw,
           maxLines: null,
           minLines: 3,
@@ -786,6 +813,7 @@ class _ParamsEditorState extends State<_ParamsEditor> {
               labelText: name, helperText: desc is String ? desc : null),
           child: DropdownButtonHideUnderline(
             child: DropdownButton<String>(
+              key: Key('graph.node.params.field.$name'),
               isExpanded: true,
               value: options.contains(current) ? current : null,
               items: [
@@ -805,6 +833,7 @@ class _ParamsEditorState extends State<_ParamsEditor> {
     if (type == 'boolean') {
       final v = _values[name] == true;
       return SwitchListTile(
+        key: Key('graph.node.params.field.$name'),
         contentPadding: EdgeInsets.zero,
         title: Text(name),
         subtitle: desc is String ? Text(desc) : null,
@@ -820,6 +849,7 @@ class _ParamsEditorState extends State<_ParamsEditor> {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: TextFormField(
+        key: Key('graph.node.params.field.$name'),
         initialValue: _values[name]?.toString() ?? '',
         keyboardType: numeric
             ? const TextInputType.numberWithOptions(decimal: true)
@@ -888,6 +918,7 @@ class _AddNodeDialogState extends State<_AddNodeDialog> {
         mainAxisSize: MainAxisSize.min,
         children: [
           TextField(
+            key: const Key('graph.node.add.id'),
             controller: _id,
             autofocus: true,
             decoration: InputDecoration(
@@ -898,6 +929,7 @@ class _AddNodeDialogState extends State<_AddNodeDialog> {
           ),
           const SizedBox(height: 12),
           DropdownButtonFormField<String>(
+            key: const Key('graph.node.add.type'),
             initialValue: _type,
             decoration: const InputDecoration(labelText: 'Type'),
             items: [
@@ -914,9 +946,11 @@ class _AddNodeDialogState extends State<_AddNodeDialog> {
       ),
       actions: [
         TextButton(
+            key: const Key('graph.node.add.cancel'),
             onPressed: () => Navigator.pop(context),
             child: const Text('Cancel')),
         FilledButton(
+          key: const Key('graph.node.add.confirm'),
           onPressed: () {
             final id = _id.text.trim();
             if (id.isEmpty) {
@@ -966,6 +1000,7 @@ class _AddEdgeDialogState extends State<_AddEdgeDialog> {
         mainAxisSize: MainAxisSize.min,
         children: [
           TextField(
+            key: const Key('graph.edge.add.from'),
             controller: _from,
             autofocus: true,
             decoration: const InputDecoration(
@@ -976,6 +1011,7 @@ class _AddEdgeDialogState extends State<_AddEdgeDialog> {
           ),
           const SizedBox(height: 8),
           TextField(
+            key: const Key('graph.edge.add.to'),
             controller: _to,
             decoration: const InputDecoration(labelText: 'to'),
           ),
@@ -987,6 +1023,7 @@ class _AddEdgeDialogState extends State<_AddEdgeDialog> {
           ),
           const SizedBox(height: 12),
           DropdownButtonFormField<GraphEdge_Kind>(
+            key: const Key('graph.edge.add.kind'),
             initialValue: _kind,
             decoration: const InputDecoration(labelText: 'kind'),
             items: [
@@ -999,9 +1036,11 @@ class _AddEdgeDialogState extends State<_AddEdgeDialog> {
       ),
       actions: [
         TextButton(
+            key: const Key('graph.edge.add.cancel'),
             onPressed: () => Navigator.pop(context),
             child: const Text('Cancel')),
         FilledButton(
+          key: const Key('graph.edge.add.confirm'),
           onPressed: () {
             final from = _from.text.trim();
             final to = _to.text.trim();
