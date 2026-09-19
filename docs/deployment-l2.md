@@ -21,7 +21,7 @@ see [`docs/llm-endpoints.md`](llm-endpoints.md) for the upstream LLM endpoints a
  ┌──────────────┐            ┌────────────────┐          ┌──────────────┐  ┌──────────┐
  │ Portal (web) │            │  Grafana :3000 │          │ Prometheus   │  │ HyperDX  │
  │  :8092       │            │  (native NixOS)│◀────────▶│  :9090       │  │ :8080    │
- │ Flutter /    │            │  admin:admin   │  datasrc │ (native)     │  │(ClickStk │
+ │ Flutter /    │            │  admin:admin   │  datasrc │ (native)     │  │(decomp.  │
  │ static-web   │            │ agent-overview │          │              │  │ podman)  │
  └──────┬───────┘            └────────────────┘          └──────┬───────┘  └────┬─────┘
         │ grpc-web (browsers can't speak raw gRPC)               │ scrape        ▲ OTLP
@@ -74,7 +74,9 @@ see [`docs/llm-endpoints.md`](llm-endpoints.md) for the upstream LLM endpoints a
   (`:4317` gRPC / `:4318` HTTP → UI `:8080`); Grafana (native) reads Prometheus
   and provisions the `agent-seddon-overview` dashboard.
 - **Native vs podman.** Prometheus and Grafana are native NixOS services; the
-  Envoy grpc-web bridge and HyperDX/ClickStack run under rootless podman.
+  Envoy grpc-web bridge, the single ClickHouse, and the decomposed HyperDX (Mongo +
+  OTel collector + app) run under rootless podman. HyperDX's collector writes the OTLP
+  `otel_*` tables into that one ClickHouse, so traces JOIN the `agent.*` history.
 
 ## Port reference
 
@@ -90,8 +92,9 @@ see [`docs/llm-endpoints.md`](llm-endpoints.md) for the upstream LLM endpoints a
 | 8095 | llama.cpp (Qwen3-30B-A3B) | service | Vulkan on MI50; `n_ctx = 32768` |
 | 9090 | Prometheus | native | scrapes `:9700` / `:9630` |
 | 3000 | Grafana | native | `admin:admin`; `agent-seddon-overview` |
-| 8080 | HyperDX / ClickStack UI | podman | LAN login needs `CLICKSTACK_FRONTEND_URL` |
-| 4317 / 4318 | OTLP gRPC / HTTP | podman (ClickStack) | agent `[telemetry] otlp_endpoint` |
+| 8080 | HyperDX UI (app) | podman | decomposed trio; LAN login needs `HYPERDX_FRONTEND_URL` |
+| 4317 / 4318 | OTLP gRPC / HTTP | podman (HyperDX collector) | agent `[telemetry] otlp_endpoint`; needs the ingestion key in `otlp_headers` |
+| 8123 / 9000 | ClickHouse HTTP / native | podman | the single CH — `agent.*` + OTLP `default.otel_*` |
 
 The LAN firewall (`~/nixos/desktop/l2/lan-access.nix`) opens
 `8090/8091/8092/8095/3000/9090/8080`. **Security:** `8090/8091` expose the

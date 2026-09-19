@@ -55,7 +55,7 @@ nix run .#portal          # build + launch the Flutter app — increment 06
 
 Browsers can't speak raw gRPC (HTTP/2 trailers), so the **web** build needs a
 grpc-web ↔ gRPC translator in front of the gateway. `grpc-web-up` runs **envoy as a
-docker container** (the same docker-app pattern as `prometheus-up`/`clickstack-up`,
+docker container** (the same docker-app pattern as `prometheus-up`/`hyperdx-up`,
 so the gate never source-builds envoy) that:
 
 - listens on `:8090` (HTTP/1.1 + grpc-web) with a CORS policy for browser preflight,
@@ -81,7 +81,7 @@ nix run .#portal             # (web target) served at a localhost URL
 # observability stack the Launcher links to (unchanged):
 nix run .#prometheus-up      # :9090  (MetricsProxyService's upstream)
 nix run .#grafana-up         # :3000
-nix run .#clickstack-up      # :8080
+nix run .#hyperdx-up        # :8080 (decomposed; +clickhouse-up)
 ```
 
 `MetricsProxyService` reads Prometheus at `:9090`, so `prometheus-up` is its upstream

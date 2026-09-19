@@ -29,12 +29,12 @@ LAN. Nothing needs a browser on l2 — the portal is *served* headless.
 | Agent sessions | loopback `:50080` (metrics `:9630`) | `agent --serve-sessions` | drives runs from the portal; **needs its own `[search] index_dir`** (§3) |
 | Prometheus | `:9090` | native NixOS service (`l2/prometheus.nix`) | scrapes `127.0.0.1:9700` + `:9630` |
 | Grafana | `:3000` | native NixOS service (`l2/grafana.nix`) | `admin:admin`; dashboards provisioned from `l2/grafana-dashboards/` |
-| HyperDX (ClickStack) | `0.0.0.0:8080`, OTLP `127.0.0.1:4317/4318` | `CONTAINER_RUNTIME=podman CLICKSTACK_UI_HOST=0.0.0.0 nix run .#clickstack-up` | all-in-one; OTLP needs an ingestion key (§6) |
+| HyperDX (decomposed) | `0.0.0.0:8080`, OTLP `127.0.0.1:4317/4318` | `CONTAINER_RUNTIME=podman nix run .#clickhouse-up && CONTAINER_RUNTIME=podman HYPERDX_FRONTEND_URL=http://172.16.50.46:8080 nix run .#hyperdx-up` | Mongo + collector + app writing the single ClickHouse; OTLP needs the ingestion key (§6) |
 | llama.cpp | `0.0.0.0:8095` | l2 nixos `llama-cpp-mi50.service` | `unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF` |
 
 **Reachability** requires three layers to line up: (1) the NixOS firewall
 (`l2/lan-access.nix` opens 8090/8091/8092/8095/3000/9090/8080), (2) each service's
-bind address (loopback vs `0.0.0.0`; the grpc-web/clickstack containers publish on
+bind address (loopback vs `0.0.0.0`; the grpc-web/hyperdx containers publish on
 `0.0.0.0`, the gateways stay loopback *behind* Envoy), and (3) the URLs baked into
 the portal bundle (§2).
 
@@ -93,13 +93,14 @@ CONTAINER_RUNTIME=podman nix run .#grpc-web-up
 # portal web (see §2 for the LAN dart-defines)
 … nix run .#portal-web
 
-# HyperDX (podman). For LAN login + durable OTLP, set the frontend URL and pin the
-# ingestion key (see §6/§7). The key lives in ~/.ssh/hyperdx-credentials.
-source ~/.ssh/hyperdx-credentials
-CONTAINER_RUNTIME=podman CLICKSTACK_UI_HOST=0.0.0.0 \
-  CLICKSTACK_FRONTEND_URL=http://172.16.50.46:8080 \
-  CLICKSTACK_INGESTION_API_KEY="$HYPERDX_INGESTION_KEY" \
-  nix run .#clickstack-up
+# The single ClickHouse first (holds agent.* AND the OTLP default.otel_*), then the
+# decomposed HyperDX (Mongo + collector + app). HYPERDX_FRONTEND_URL makes LAN login
+# work (cookie binds to it). Unlike the old all-in-one, the ingestion key is NOT
+# pinnable via env — the app mints it on first-team creation; read it from the UI
+# (Team Settings) and put it in the agent's otlp_headers (§6/§7).
+CONTAINER_RUNTIME=podman nix run .#clickhouse-up
+CONTAINER_RUNTIME=podman HYPERDX_FRONTEND_URL=http://172.16.50.46:8080 \
+  nix run .#hyperdx-up
 ```
 
 Grafana + Prometheus are **native NixOS services** — enabled in
@@ -247,24 +248,27 @@ down — ignore).
 ### HyperDX (the fiddly one)
 
 HyperDX needs a **first-run account** and an **ingestion API key**; unauthenticated
-OTLP is rejected (connection reset). The clean setup uses two container env vars
-(both supported by `clickstack-up`, see §3):
+OTLP is rejected `UNAUTHENTICATED` and spans are silently dropped. Setup on the
+decomposed stack (see §3):
 
-- **`CLICKSTACK_FRONTEND_URL=http://<lan-ip>:8080`** → HyperDX's own app/redirect
-  URL. This is what makes **LAN login work**: HyperDX binds its session cookie to
-  this host, so with it set to the LAN IP you can log in from another box directly
-  (no tunnel). Without it (default `localhost`), login via the LAN IP *appears* to
-  succeed (`303`) then bounces to `/login` because the cookie doesn't apply.
-- **`CLICKSTACK_INGESTION_API_KEY=<uuid>`** → pins the OTLP ingestion key so it's
-  known up front and **survives container recreation**. Set the agent's
-  `otlp_headers` to the same value (§7). Without it, HyperDX mints a random key you
-  must scrape from the UI, and it changes every time the container is recreated.
+- **`HYPERDX_FRONTEND_URL=http://<lan-ip>:8080`** (the one env `hyperdx-up` reads) →
+  HyperDX's own app/redirect URL. This is what makes **LAN login work**: HyperDX binds
+  its session cookie to this host, so with it set to the LAN IP you can log in from
+  another box directly (no tunnel). Without it (default `localhost`), login via the LAN
+  IP *appears* to succeed (`303`) then bounces to `/login` because the cookie doesn't
+  apply. (The app binds `0.0.0.0` on its own under `--network host`, so there's no
+  separate `UI_HOST` knob any more.)
+- **Ingestion key — NOT pinnable.** The all-in-one accepted `CLICKSTACK_INGESTION_API_KEY`;
+  the decomposed app instead **mints** the key as the team's `apiKey` on first-team
+  creation. Read it from the UI (**Team Settings → API Keys**) — or, headless, from
+  Mongo (`db.teams.findOne().apiKey`) — and set the agent's `otlp_headers` to it (§7).
+  It persists across `hyperdx-down`/`up` because it lives in Mongo's named volume.
 
-1. **Register** at `http://<lan-ip>:8080/register` (once per fresh container — the
-   account lives in the container's writable layer, so `clickstack-down` wipes it).
-   **Password policy:** 12–72 chars, with upper, lower, a digit, and a special char
-   (`!@#$%^&*(),.?":{}|<>;-+=`). Account: `admin@hyperdx.local` / password in
-   `~/.ssh/hyperdx-credentials`.
+1. **Register** at `http://<lan-ip>:8080` (once per fresh Mongo volume — the account
+   lives in Mongo, so a plain `hyperdx-down` KEEPS it; only `hyperdx-down -- --volumes`
+   wipes it). Headless: `POST :8000/register/password`
+   `{"email","password","confirmPassword","name"}`. **Password policy:** 12–72 chars,
+   with upper, lower, a digit, and a special char (`!@#$%^&*(),.?":{}|<>;-+=`).
 2. **Login from `l`:** open the LAN IP (`http://172.16.50.46:8080`) — the portal's
    "Open HyperDX" link already uses the IP, matching `CLICKSTACK_FRONTEND_URL`.
    (If you browse by hostname `l2:8080` instead, the cookie won't match — use the IP,
@@ -311,23 +315,25 @@ otel_service_name = "agent-sessions"
 otlp_headers      = "authorization=<HYPERDX_INGESTION_KEY>"
 ```
 
-Restart the gateway. Verify (no auth → `ExportError: ConnectionReset`; with the key,
-rows land):
+Restart the gateway. Verify (no/wrong key → `ExportError: … Unauthenticated: provided
+authorization does not match expected scheme or token`; with the key, rows land). The
+spans are in the **agent** ClickHouse now, so query with `clickhouse-client`:
 
 ```sh
 # export errors?
-grep -iE 'ExportError|ConnectionReset|BrokenPipe' sessions.log
+grep -iE 'ExportError|Unauthenticated|ConnectionReset|BrokenPipe' sessions.log
 # rows arriving?
-CONTAINER_RUNTIME=podman nix run .#clickstack-client -- \
+CONTAINER_RUNTIME=podman nix run .#clickhouse-client -- \
   -q "SELECT ServiceName, count() FROM default.otel_traces GROUP BY ServiceName"
 ```
 
-The `<HYPERDX_INGESTION_KEY>` must equal the key HyperDX uses. The robust way is to
-**pin it**: launch `clickstack-up` with `CLICKSTACK_INGESTION_API_KEY=$HYPERDX_INGESTION_KEY`
-(§3) so both sides read the same value from `~/.ssh/hyperdx-credentials` and it
-survives container recreation. To keep the key out of the repo, have the launch
-wiring substitute it into the generated config at start (the config field is inline
-`otlp_headers`, with no `_file` variant like the LLM `api_key_file`).
+The `<HYPERDX_INGESTION_KEY>` must equal the team's `apiKey`. On the decomposed stack
+it's minted by the app (§6), so read it from **Team Settings → API Keys** (or Mongo
+`db.teams.findOne().apiKey`) and set it in `otlp_headers`. The collector's bearer-token
+receiver accepts the raw key or `Bearer <key>`. It persists across container recreation
+via Mongo's volume. To keep the key out of the repo, have the launch wiring substitute
+it into the generated config at start (the config field is inline `otlp_headers`, with
+no `_file` variant like the LLM `api_key_file`).
 
 > `otlp_endpoint` uses `127.0.0.1:4317` (loopback) because the gateways run on the
 > host and ClickStack publishes OTLP only on loopback — that's independent of the

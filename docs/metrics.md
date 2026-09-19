@@ -4,7 +4,7 @@ Per-component Prometheus metrics for a running agent, scraped by Prometheus and
 visualised in a provisioned Grafana dashboard. This is the **metrics** leg of
 observability; it complements the OTLP **tracing** ([docs/tracing.md](tracing.md))
 and the native ClickHouse transaction sink. Everything ships behind the same Nix
-docker-app pattern as ClickHouse/ClickStack.
+docker-app pattern as ClickHouse/HyperDX.
 
 > See **[observability.md](observability.md)** for the map that ties metrics,
 > traces, and logs together — and how the agent inspects its own performance via

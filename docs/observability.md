@@ -8,8 +8,8 @@ with one `nix run` command:
 | Signal | What it answers | Emitted by | Stack | UI |
 |--------|-----------------|------------|-------|----|
 | **Metrics** | rates, counts, latencies (p50/p95), gauges | `agent-metrics` registry + `metered.rs` decorators | Prometheus → Grafana | Grafana :3000 |
-| **Traces** | the causal span tree of one run, across process hops | `agent-telemetry` OTLP export | ClickStack (HyperDX) | HyperDX :8080 |
-| **Logs / history** | structured turn history, usage, tool events | `agent-telemetry` ClickHouse sink | ClickHouse | `clickhouse-client` |
+| **Traces** | the causal span tree of one run, across process hops | `agent-telemetry` OTLP export | HyperDX collector → the agent ClickHouse (`default.otel_*`) | HyperDX :8080 |
+| **Logs / history** | structured turn history, usage, tool events | `agent-telemetry` ClickHouse sink | the agent ClickHouse (`agent.*`) | `clickhouse-client` |
 
 Full runbooks: **[metrics.md](metrics.md)** (Prometheus + Grafana) and
 **[tracing.md](tracing.md)** (OTLP + HyperDX). This page is the map that ties them
@@ -23,14 +23,15 @@ nix run .#prometheus-up      # Prometheus  UI :9090, scrapes :9600 + per-seam :9
 nix run .#grafana-up         # Grafana     UI :3000, provisioned "agent-seddon" dashboard
 
 # Traces (opt-in — set [telemetry] otlp_endpoint = "http://127.0.0.1:4317"):
-nix run .#clickstack-up      # HyperDX UI :8080, OTLP :4317 (traces) + bundled ClickHouse
+nix run .#clickhouse-up      # the single ClickHouse (agent.* + otel_*)
+nix run .#hyperdx-up         # decomposed HyperDX (Mongo + collector + app); UI :8080, OTLP :4317
 
 # Run the agent so signals flow:
 nix run .#agent -- --config config/agent.toml
 ```
 
 Tear down with the matching `*-down` apps (`prometheus-down`, `grafana-down`,
-`clickstack-down`).
+`hyperdx-down`, `clickhouse-down`).
 
 ## Metrics → Grafana dashboard
 
@@ -55,7 +56,7 @@ and any `agent --serve-<seam>` process, which each expose their own `/metrics`
 ## Traces → HyperDX
 
 With `[telemetry] otlp_endpoint` set, each run is a span tree exported over
-OTLP/gRPC to ClickStack:
+OTLP/gRPC to the HyperDX collector, which writes them into the agent ClickHouse:
 
 ```
 agent.turn
@@ -71,7 +72,7 @@ W3C trace context rides in gRPC metadata, so a request that crosses into a
 at <http://localhost:8080>, or query the spans directly:
 
 ```sh
-nix run .#clickstack-client -- -q "SELECT ServiceName, SpanName, count() n \
+nix run .#clickhouse-client -- -q "SELECT ServiceName, SpanName, count() n \
   FROM default.otel_traces GROUP BY ServiceName, SpanName ORDER BY 1,2 FORMAT PrettyCompact"
 ```
 
@@ -122,8 +123,8 @@ curl -s 127.0.0.1:9600/metrics | grep '^agent_search_'
 curl -s 'http://127.0.0.1:9090/api/v1/query' \
   --data-urlencode 'query=histogram_quantile(0.95, sum(rate(agent_search_query_seconds_bucket[5m])) by (le,backend,mode))'
 
-# recent traces (span durations) from ClickStack:
-nix run .#clickstack-client -- -q "SELECT SpanName, count() n, round(avg(Duration)/1e6,1) avg_ms \
+# recent traces (span durations) from the agent ClickHouse:
+nix run .#clickhouse-client -- -q "SELECT SpanName, count() n, round(avg(Duration)/1e6,1) avg_ms \
   FROM default.otel_traces WHERE SpanName LIKE 'search.%' GROUP BY SpanName FORMAT PrettyCompact"
 ```
 
@@ -138,4 +139,4 @@ bundles these into a runbook you can load into a session on demand.
 - OTLP tracing + ClickHouse sink: [`agent-telemetry`](../crates/agent-telemetry).
 - Ports (single source of truth): [`nix/constants.nix`](../nix/constants.nix).
 - Monitoring stack apps: [`nix/prometheus`](../nix/prometheus), [`nix/grafana`](../nix/grafana),
-  [`nix/clickstack`](../nix/clickstack), [`nix/clickhouse`](../nix/clickhouse).
+  [`nix/hyperdx`](../nix/hyperdx), [`nix/clickhouse`](../nix/clickhouse).
