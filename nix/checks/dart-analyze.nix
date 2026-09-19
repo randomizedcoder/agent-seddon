@@ -32,6 +32,9 @@ let
       (portalRoot + "/pubspec.yaml")
       (portalRoot + "/pubspec.lock")
       (portalRoot + "/analysis_options.yaml")
+      # Declared in pubspec `assets:`; the analyzer warns if the directory is
+      # absent, so it must be in the analyze source (the bundled example graphs).
+      (portalRoot + "/assets")
     ];
   };
 in

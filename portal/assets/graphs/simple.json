@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "nodes": {
+    "gate": {
+      "type": "critic_gate",
+      "typeVersion": 1,
+      "params": {
+        "critic": "glm",
+        "max_rounds": 2
+      }
+    },
+    "generate": {
+      "type": "generate",
+      "typeVersion": 1
+    }
+  },
+  "edges": [
+    {"from": "anchor.response", "to": "generate", "kind": "main"},
+    {"from": "generate", "to": "gate", "kind": "main"},
+    {"from": "glm", "to": "gate", "kind": "capability"}
+  ]
+}

@@ -33,3 +33,8 @@ flutter:
           weight: 400
         - asset: fonts/SourceSerif4-Semibold.ttf
           weight: 600
+  # The shipped cognition graphs (config/cognition/*.textproto), converted to the
+  # portal's clean JSON shape and bundled so the Graph tab can seed its library on
+  # first load. Kept in sync with the textproto by a parity test in agent-graph.
+  assets:
+    - assets/graphs/

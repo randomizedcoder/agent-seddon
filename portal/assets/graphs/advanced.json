@@ -1,0 +1,93 @@
+{
+  "version": 1,
+  "nodes": {
+    "compact": {
+      "type": "compact_assemble",
+      "typeVersion": 1,
+      "params": {
+        "relevance": "keyword",
+        "min_coverage": 0.6
+      }
+    },
+    "facts": {
+      "type": "distill_facts",
+      "typeVersion": 1,
+      "params": {
+        "max_tokens": 256
+      }
+    },
+    "gate": {
+      "type": "critic_gate",
+      "typeVersion": 1,
+      "params": {
+        "critic": "glm",
+        "max_rounds": 2
+      }
+    },
+    "gate_safe": {
+      "type": "critic_gate",
+      "typeVersion": 1,
+      "params": {
+        "critic": "glm",
+        "max_rounds": 2
+      }
+    },
+    "gen_perf": {
+      "type": "generate",
+      "typeVersion": 1,
+      "params": {
+        "lens": "performance optimization"
+      }
+    },
+    "gen_safe": {
+      "type": "generate",
+      "typeVersion": 1,
+      "params": {
+        "lens": "correctness and strict safety"
+      }
+    },
+    "join_impl": {
+      "type": "join",
+      "typeVersion": 1,
+      "params": {
+        "policy": "all",
+        "timeout_ms": 120000,
+        "on_timeout": "partial"
+      }
+    },
+    "merge_impl": {
+      "type": "merge",
+      "typeVersion": 1,
+      "params": {
+        "strategy": "synthesize",
+        "judge": "glm",
+        "record_losers": true
+      }
+    },
+    "split_impl": {
+      "type": "split",
+      "typeVersion": 1
+    },
+    "summarize": {
+      "type": "distill_summary",
+      "typeVersion": 1,
+      "params": {
+        "max_tokens": 512
+      }
+    }
+  },
+  "edges": [
+    {"from": "anchor.response", "to": "split_impl", "kind": "main"},
+    {"from": "split_impl", "to": "gen_safe", "kind": "main"},
+    {"from": "gen_safe", "to": "gate_safe", "kind": "main"},
+    {"from": "gate_safe", "to": "join_impl", "kind": "main"},
+    {"from": "split_impl", "to": "gen_perf", "kind": "main"},
+    {"from": "gen_perf", "to": "join_impl", "kind": "main"},
+    {"from": "join_impl", "to": "merge_impl", "kind": "main"},
+    {"from": "merge_impl", "to": "gate", "kind": "main"},
+    {"from": "glm", "to": "gate", "kind": "capability"},
+    {"from": "anchor.delivery", "to": "summarize", "kind": "background"},
+    {"from": "anchor.delivery", "to": "facts", "kind": "background"},
+    {"from": "anchor.compaction", "to": "compact", "kind": "main"}
+  ]
+}
