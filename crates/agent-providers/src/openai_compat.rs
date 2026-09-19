@@ -5,7 +5,9 @@
 //! OpenAI convention) and only fills `content` once reasoning is done — so
 //! `max_tokens` needs real headroom.
 
-use crate::stream_caps::{MAX_STREAM_BUF_BYTES, MAX_STREAM_TOOL_ARG_BYTES, MAX_STREAM_TOOL_CALLS};
+use crate::stream_caps::{
+    MAX_STREAM_BUF_BYTES, MAX_STREAM_TEXT_BYTES, MAX_STREAM_TOOL_ARG_BYTES, MAX_STREAM_TOOL_CALLS,
+};
 use agent_core::{
     ChunkStream, CompletionChunk, CompletionRequest, CompletionResponse, ContentBlock, Error,
     LlmProvider, Message, ModelCapabilities, Result, Role, ToolCall, Usage,
@@ -292,6 +294,9 @@ impl LlmProvider for OpenAiCompatProvider {
             let mut tools_acc: BTreeMap<u32, ToolAcc> = BTreeMap::new();
             let mut finish: Option<String> = None;
             let mut usage: Option<Usage> = None;
+            // Total assistant text seen so far — bound it so a server slow-dripping small
+            // text deltas forever can't grow the consumer's buffer without limit (OOM).
+            let mut text_total: usize = 0;
 
             'read: while let Some(next) = bytes.next().await {
                 let b = match next {
@@ -325,6 +330,13 @@ impl LlmProvider for OpenAiCompatProvider {
                         if let Some(delta) = choice.delta {
                             if let Some(text) = delta.content {
                                 if !text.is_empty() {
+                                    text_total = text_total.saturating_add(text.len());
+                                    if text_total > MAX_STREAM_TEXT_BYTES {
+                                        yield Err(Error::Provider(format!(
+                                            "stream text exceeded {MAX_STREAM_TEXT_BYTES} bytes"
+                                        )));
+                                        return;
+                                    }
                                     yield Ok(CompletionChunk { delta_text: text, ..Default::default() });
                                 }
                             }

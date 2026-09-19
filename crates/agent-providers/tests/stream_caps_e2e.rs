@@ -7,8 +7,8 @@
 
 use agent_core::{CompletionRequest, LlmProvider};
 use agent_providers::{
-    OpenAiCompatConfig, OpenAiCompatProvider, MAX_STREAM_BUF_BYTES, MAX_STREAM_TOOL_ARG_BYTES,
-    MAX_STREAM_TOOL_CALLS,
+    OpenAiCompatConfig, OpenAiCompatProvider, MAX_STREAM_BUF_BYTES, MAX_STREAM_TEXT_BYTES,
+    MAX_STREAM_TOOL_ARG_BYTES, MAX_STREAM_TOOL_CALLS,
 };
 use futures_util::StreamExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -107,6 +107,28 @@ async fn adversarial_oversized_tool_args_is_cut_off() {
     assert!(
         stream_errs(&p).await,
         "tool-call arguments past the cap must error, not accumulate unbounded"
+    );
+}
+
+#[tokio::test]
+async fn adversarial_slow_drip_text_is_cut_off() {
+    // Many well-formed, newline-delimited text frames — each small enough to never trip the
+    // per-frame buffer cap — whose *cumulative* content exceeds MAX_STREAM_TEXT_BYTES. This is
+    // the slow-drip OOM vector: the buffer cap can't see it, so the cumulative text cap must.
+    let per_frame = 1024 * 1024; // 1 MiB of text per frame (< the 8 MiB frame cap)
+    let frames = MAX_STREAM_TEXT_BYTES / per_frame + 2; // push just past the total cap
+    let chunk = "x".repeat(per_frame);
+    let mut body = String::new();
+    for _ in 0..frames {
+        body.push_str(&format!(
+            "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{chunk}\"}}}}]}}\n\n"
+        ));
+    }
+    let url = stream_server(body.into_bytes()).await;
+    let p = provider(url);
+    assert!(
+        stream_errs(&p).await,
+        "cumulative text past the cap must error, not accumulate unbounded"
     );
 }
 

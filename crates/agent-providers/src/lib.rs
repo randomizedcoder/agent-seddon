@@ -38,9 +38,17 @@ pub(crate) mod stream_caps {
     pub const MAX_STREAM_TOOL_ARG_BYTES: usize = 4 * 1024 * 1024;
     /// Max distinct tool-call slots one stream may open (server-supplied index / block id).
     pub const MAX_STREAM_TOOL_CALLS: usize = 512;
+    /// Max total assistant text a single stream may accumulate. The per-frame
+    /// [`MAX_STREAM_BUF_BYTES`] cap only bounds one un-delimited frame; a hostile/compromised
+    /// server can instead slow-drip unbounded small newline-delimited text deltas, growing the
+    /// consumer's buffer without limit → OOM. 32 MiB is far above any legitimate completion, so
+    /// exceeding it is a hostile stream → error out.
+    pub const MAX_STREAM_TEXT_BYTES: usize = 32 * 1024 * 1024;
 }
 #[cfg(any(feature = "provider-openai-compat", feature = "provider-anthropic"))]
-pub use stream_caps::{MAX_STREAM_BUF_BYTES, MAX_STREAM_TOOL_ARG_BYTES, MAX_STREAM_TOOL_CALLS};
+pub use stream_caps::{
+    MAX_STREAM_BUF_BYTES, MAX_STREAM_TEXT_BYTES, MAX_STREAM_TOOL_ARG_BYTES, MAX_STREAM_TOOL_CALLS,
+};
 
 /// Provider routing + failover (parity spec 25). A `Router` IS-A `LlmProvider`,
 /// so nothing downstream knows it composes others.

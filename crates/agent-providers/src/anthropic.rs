@@ -7,7 +7,9 @@
 //! same-role turns — e.g. several tool results after one assistant turn — into a
 //! single message) and parses the typed response back into a `CompletionResponse`.
 
-use crate::stream_caps::{MAX_STREAM_BUF_BYTES, MAX_STREAM_TOOL_ARG_BYTES, MAX_STREAM_TOOL_CALLS};
+use crate::stream_caps::{
+    MAX_STREAM_BUF_BYTES, MAX_STREAM_TEXT_BYTES, MAX_STREAM_TOOL_ARG_BYTES, MAX_STREAM_TOOL_CALLS,
+};
 use agent_core::{
     ChunkStream, CompletionChunk, CompletionRequest, CompletionResponse, ContentBlock, Error,
     LlmProvider, Message, ModelCapabilities, Result, Role, ToolCall, Usage,
@@ -293,6 +295,9 @@ impl LlmProvider for AnthropicProvider {
             let mut cache_read_tokens = 0u32;
             let mut cache_write_tokens = 0u32;
             let mut stop_reason: Option<String> = None;
+            // Total assistant text seen so far — bound it so a server slow-dripping small
+            // text deltas forever can't grow the consumer's buffer without limit (OOM).
+            let mut text_total: usize = 0;
 
             'read: while let Some(next) = bytes.next().await {
                 let b = match next {
@@ -350,6 +355,13 @@ impl LlmProvider for AnthropicProvider {
                             if let Some(delta) = ev.delta {
                                 if let Some(text) = delta.text {
                                     if !text.is_empty() {
+                                        text_total = text_total.saturating_add(text.len());
+                                        if text_total > MAX_STREAM_TEXT_BYTES {
+                                            yield Err(Error::Provider(format!(
+                                                "stream text exceeded {MAX_STREAM_TEXT_BYTES} bytes"
+                                            )));
+                                            return;
+                                        }
                                         yield Ok(CompletionChunk { delta_text: text, ..Default::default() });
                                     }
                                 }
