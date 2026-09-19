@@ -13,10 +13,10 @@ stack (a lesson carried from the portal + code-review tracks).
 | 02 | `portal-testkit` fakes (in-proc fake gRPC + recording) + `flutter_test`/`integration_test` deps + regen `pubspec.lock` + config-diff extraction + L0 unit tests | ✅ | ✅ | — | — | ✅ #424 |
 | 03 | Layer A `portal-widget` check + robots + completeness critic + Launch & Prompts tabled (template) | ✅ | ✅ | ✅ | — | **this PR** |
 | 04 | Remaining pages tabled in Layer A (Graph, Agent, Router, Fleet, Settings) | ✅ | ✅ | — | — | **this PR** |
-| 05 | Golden + a11y `portal-visual` check | ✅ | ✅ | ✅ | — | ⬜ |
+| 05 | Golden + a11y `portal-visual` check (Launch & Prompts slice; matrix extends) | ✅ | ✅ | ✅ | — | **this PR** |
 | 06 | Contract drift guard (RPC set + rendered enums vs descriptor set) | — | ✅ | ✅ | — | ⬜ |
 | 07 | Layer B `portal-e2e` app (metrics-delta + read-RPC + curated span, trace linking) | ✅ | ✅ | ✅ | — | ⬜ |
-| 08 | Report renderer + aggregation (+ failure artifacts) — `nix run .#portal-test-report` (hermetic slice) | — | — | ✅ | — | **this PR** |
+| 08 | Report renderer + aggregation (+ failure artifacts) — `nix run .#portal-test-report` (hermetic slice) | — | — | ✅ | — | ✅ 640892b |
 | 09 | Performance tracking — `portal_gui_perf` table + JSONEachRow emitter + SQL + Grafana | — | ✅ | ✅ | ✅ | ⬜ |
 | 10 | Envoy full instrumentation — OTLP access logs + tracing + CORS trace-context + `envoy_access_latency` | — | — | ✅ | ✅ | ⬜ |
 
@@ -60,6 +60,12 @@ stack (a lesson carried from the portal + code-review tracks).
   backend, rpc_fired, trace_id, artifacts) — Layer B's `portal-e2e` will append those (inc 07), at
   which point the backend-down legend and per-element rows populate. Renderer stays green (it is a
   report, not a gate) unless `--fail-on-fail`.
+- **Visual/a11y (inc 05)** is `portal-visual` — `matchesGoldenFile` + `meetsGuideline` over
+  `test/visual/`. Goldens are generated and checked on the **same pinned `versions.flutter`**, so
+  the nix sandbox reproduces them byte-for-byte (verified: a corrupted golden fails the check).
+  Landed as a **representative slice** (Launch + Prompts, light) — the template; extending to the
+  other five pages and the {dark}×{narrow,wide}×{large-text} matrix is mechanical follow-on
+  (regenerate with `flutter test --update-goldens test/visual`).
 - **Perf is trend-tracking, not a hard gate** — wall-clock GUI latency is noisy;
   regressions surface via SQL/Grafana, not a red build. iai-callgrind Ir ceilings stay
   the deterministic micro-perf gate.
