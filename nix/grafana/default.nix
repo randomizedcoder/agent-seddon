@@ -3,7 +3,7 @@
 # Grafana container lifecycle as Nix apps (docker) — dashboards over the Prometheus
 # datasource, plus a ClickHouse datasource (grafana-clickhouse-datasource, installed
 # via GF_INSTALL_PLUGINS) for the portal GUI perf dashboard (portal-gui-testing inc
-# 09). Mirrors the clickhouse/clickstack/prometheus modules.
+# 09). Mirrors the clickhouse/hyperdx/prometheus modules.
 #
 # Networking (Linux): runs with `--network host` so Grafana serves on host :3000
 # and reaches Prometheus at 127.0.0.1:9090. Provisioning (the datasource + the

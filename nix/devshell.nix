@@ -4,7 +4,7 @@
 #
 # Goals:
 #   - Pinned Rust toolchain + every contributor tool already on PATH.
-#   - Helper functions (fmt, lint, test, audit, ch-up/ch-down/ch-client,
+#   - Helper functions (fmt, lint, test, audit, ch-up/ch-down/ch-client, hdx-up/down,
 #     run-agent) discoverable via `agent-help` in the shell.
 #   - No magic env vars — keep the shell predictable.
 #
@@ -90,11 +90,11 @@ pkgs.mkShell {
       ch-client -q 'SHOW TABLES FROM agent'   Run a query against it
       ch-down                                 Stop + remove the container
 
-    ClickStack / HyperDX (docker) — OTLP trace receiver + UI:
-      cs-up                                   Start HyperDX all-in-one (UI :8080, OTLP :4317)
-      cs-client -q 'SHOW TABLES FROM default' Query the bundled ClickHouse (traces)
-      cs-logs                                 Follow container logs
-      cs-down                                 Stop + remove the container
+    HyperDX (docker) — OTLP trace receiver + UI (decomposed; writes the agent ClickHouse):
+      hdx-up                                  Start Mongo + OTel collector + app (UI :8080, OTLP :4317)
+      ch-client -q 'SHOW TABLES FROM default' Query the traces (otel_* live in the agent ClickHouse now)
+      hdx-logs        (-- otel | mongo)       Follow the app (or collector/mongo) logs
+      hdx-down        (-- --volumes)          Stop + remove the containers (+ Mongo data)
 
     Prometheus + Grafana (docker) — metrics scraper + dashboards:
       prom-up                                 Start Prometheus (UI :9090, scrapes :9600-9622, :9700)
@@ -141,10 +141,9 @@ pkgs.mkShell {
         ch-down()   { nix run .#clickhouse-down -- "$@"; }
         ch-client() { nix run .#clickhouse-client -- "$@"; }
 
-        cs-up()     { nix run .#clickstack-up -- "$@"; }
-        cs-down()   { nix run .#clickstack-down -- "$@"; }
-        cs-logs()   { nix run .#clickstack-logs -- "$@"; }
-        cs-client() { nix run .#clickstack-client -- "$@"; }
+        hdx-up()    { nix run .#hyperdx-up -- "$@"; }
+        hdx-down()  { nix run .#hyperdx-down -- "$@"; }
+        hdx-logs()  { nix run .#hyperdx-logs -- "$@"; }
 
         prom-up()   { nix run .#prometheus-up -- "$@"; }
         prom-down() { nix run .#prometheus-down -- "$@"; }

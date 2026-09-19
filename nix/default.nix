@@ -474,9 +474,9 @@ let
   # via `nix run .#integration` (pg-integration harness); never in-gate.
   postgres = import ./postgres { inherit pkgs lib versions; };
 
-  # ClickStack / HyperDX all-in-one apps (up / down / logs / client) — the OTLP
-  # trace receiver + UI.
-  clickstack = import ./clickstack { inherit pkgs lib versions; };
+  # HyperDX (decomposed) apps (up / down / logs) — Mongo + OTel collector + app,
+  # all writing/reading the SINGLE agent ClickHouse (no bundled ClickHouse).
+  hyperdx = import ./hyperdx { inherit pkgs lib versions; };
 
   # Prometheus scraper + Grafana dashboards for the agent's metrics.
   prometheus = import ./prometheus { inherit pkgs lib versions; };
@@ -661,7 +661,7 @@ in
     }
     // mkApps { clickhouse-client = "clickhouse-client-wrapper"; } clickhouse
     // mkApps { postgres-client = "postgres-client-wrapper"; } postgres
-    // mkApps { clickstack-client = "clickstack-client-wrapper"; } clickstack
+    // mkApps { } hyperdx
     // mkApps { } prometheus
     // mkApps { } grafana
     // mkApps { } portal;

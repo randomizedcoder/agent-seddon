@@ -1,7 +1,7 @@
 # nix/prometheus/default.nix
 #
 # Prometheus container lifecycle as Nix apps (docker) — the scraper that pulls the
-# agent's `/metrics` and feeds Grafana. Mirrors the clickhouse/clickstack modules.
+# agent's `/metrics` and feeds Grafana. Mirrors the clickhouse/hyperdx modules.
 #
 # Networking (Linux): the container runs with `--network host` so it can scrape
 # the agent's loopback endpoints (`127.0.0.1:9600` + the per-seam `--serve-<seam>`
