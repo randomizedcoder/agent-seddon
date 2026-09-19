@@ -15,11 +15,14 @@
 //! Runs by default but is **fail-soft**: a missing tool, a timeout, or a parse
 //! failure becomes a recorded `skipped`/`timeout`/`failed` run, never a blocked
 //! bundle. Scoped to the changed packages/crates to keep it fast. Linter output is
-//! untrusted — finding paths are `confine`d, messages bounded, the count capped, and
-//! changed-file paths are single-quoted before they reach the shell.
+//! untrusted — finding paths are `confine`d, messages bounded, the count capped. The
+//! **scope args** are diff-derived (attacker-controlled), so every value spliced into a
+//! `bash -c` command is fail-closed AND single-quoted: Go package dirs with an unsafe
+//! component are dropped (`is_safe_dir`), a clippy crate name that isn't a safe segment is
+//! dropped (`safe_segment`), and changed `.go` file paths + all survivors are `shell_quote`d.
 
 use crate::collector::{CollectCtx, CollectorOutput, FactCollector, FactFragment};
-use crate::util::bound;
+use crate::util::{bound, safe_segment};
 use agent_core::{AnalysisFinding, AnalysisReport, AnalyzerRun, ExecSpec, NetworkPolicy};
 use futures_util::StreamExt;
 use std::collections::BTreeSet;
@@ -142,8 +145,15 @@ impl FactCollector for AnalyzerCollector {
         let go_env = format!("GOMAXPROCS={gomaxprocs} ");
 
         if has_go {
+            // Scope dirs derive from attacker-controlled diff paths: `go_scope` drops any
+            // with an unsafe component, and each survivor is single-quoted before it reaches
+            // `bash -c` (defense in depth) — a dir can never break out into shell interpretation.
             let dirs = go_scope(&changed);
-            let dir_args = dirs.join(" ");
+            let dir_args = dirs
+                .iter()
+                .map(|d| shell_quote(d))
+                .collect::<Vec<_>>()
+                .join(" ");
             let go_files: Vec<String> = changed
                 .iter()
                 .filter(|p| ext(p) == "go")
@@ -217,7 +227,12 @@ impl FactCollector for AnalyzerCollector {
             } else {
                 match self.resolve_head("cargo").await {
                     Some(head) => {
-                        let pkgs: String = crates.iter().map(|c| format!("-p {c} ")).collect();
+                        // Names already pass `safe_segment` in `rust_scope`; single-quote
+                        // each anyway (defense in depth) before it reaches `bash -c`.
+                        let pkgs: String = crates
+                            .iter()
+                            .map(|c| format!("-p {} ", shell_quote(c)))
+                            .collect();
                         let cmd = format!("{head} clippy --message-format=json --quiet {pkgs}");
                         tasks.push(ToolTask {
                             tool: "clippy",
@@ -954,7 +969,11 @@ fn finalize(
     Some(f)
 }
 
-/// Distinct package dirs of the changed `.go` files, as `./dir/...` scope args.
+/// Distinct package dirs of the changed `.go` files, as `./dir/...` scope args. Paths
+/// come from an untrusted diff, so a dir with an unsafe component (a shell/glob
+/// metacharacter, whitespace, `..`, or a leading `-` on any segment) is **dropped** — the
+/// package just isn't scoped (fail-closed), rather than reaching the shell. Safe entries
+/// are still single-quoted at the call site (defense in depth). Mirrors `gochecks::go_scope`.
 fn go_scope(changed: &[PathBuf]) -> Vec<String> {
     let mut dirs: BTreeSet<String> = BTreeSet::new();
     for p in changed.iter().filter(|p| ext(p) == "go") {
@@ -964,11 +983,27 @@ fn go_scope(changed: &[PathBuf]) -> Vec<String> {
             .unwrap_or_default();
         if dir.is_empty() {
             dirs.insert("./...".into());
-        } else {
+        } else if is_safe_dir(&dir) {
             dirs.insert(format!("./{dir}/..."));
         }
+        // else: unsafe path component ⇒ drop this package from the scope.
     }
     dirs.into_iter().collect()
+}
+
+/// A relative dir safe to interpolate into a Go package pattern: only `[A-Za-z0-9._-]`
+/// per `/`-separated segment, no empty/`.`/`..`/leading-`-` segment. Blocks command
+/// injection (`d/$(cmd)`) and argv-smuggling (a leading `-` read as a flag) via a diff path.
+fn is_safe_dir(dir: &str) -> bool {
+    dir.split('/').all(|seg| {
+        !seg.is_empty()
+            && seg != "."
+            && seg != ".."
+            && !seg.starts_with('-')
+            && seg
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    })
 }
 
 /// Distinct crate names owning the changed `.rs` files (nearest `[package]`
@@ -980,7 +1015,13 @@ fn rust_scope(root: &Path, changed: &[PathBuf]) -> Vec<String> {
         while let Some(d) = dir {
             let manifest = root.join(d).join("Cargo.toml");
             if let Some(name) = package_name(&manifest) {
-                names.insert(name);
+                // The name is read verbatim from an attacker-controlled `Cargo.toml`, then
+                // spliced into `cargo clippy -p <name>` under `bash -c`. Fail closed: drop a
+                // name that isn't a single safe segment (blocks `x$(cmd)` command injection
+                // and a leading-`-` flag smuggle) rather than letting it reach the shell.
+                if safe_segment(&name) {
+                    names.insert(name);
+                }
                 break;
             }
             dir = d.parent();
@@ -1288,6 +1329,101 @@ mod tests {
         #[case] expected: &str,
     ) {
         assert_eq!(shell_quote(input), expected);
+    }
+
+    // --- go_scope / is_safe_dir: shell-injection fail-closed (Round 5 A1) -----
+
+    #[test]
+    fn positive_go_scope_nested_and_root_dirs() {
+        let changed = vec![
+            PathBuf::from("cmd/x/x.go"),
+            PathBuf::from("cmd/x/y.go"), // same dir ⇒ deduped
+            PathBuf::from("main.go"),    // repo root ⇒ ./...
+            PathBuf::from("README.md"),  // non-go ⇒ ignored
+        ];
+        assert_eq!(go_scope(&changed), vec!["./...", "./cmd/x/..."]);
+    }
+
+    #[test]
+    fn corner_go_scope_non_go_files_yield_empty_scope() {
+        let changed = vec![PathBuf::from("a.rs"), PathBuf::from("b.txt")];
+        assert!(go_scope(&changed).is_empty());
+    }
+
+    #[rstest::rstest]
+    // A hostile diff path whose *directory* carries a shell metacharacter must be
+    // DROPPED, never quoted-and-run — command substitution, `..`, whitespace, a
+    // leading-`-` flag smuggle, and glob/redirect chars all fail `is_safe_dir`.
+    #[case::command_subst("$(touch pwned)/a.go")]
+    #[case::backtick("`id`/a.go")]
+    #[case::semicolon("a;rm -rf ~/a.go")]
+    #[case::pipe("a|nc/a.go")]
+    #[case::traversal("../../etc/a.go")]
+    #[case::whitespace("a b/a.go")]
+    #[case::leading_dash("-oh/a.go")]
+    #[case::glob("a*/a.go")]
+    #[case::redirect("a>b/a.go")]
+    fn adversarial_go_scope_drops_unsafe_dirs(#[case] path: &str) {
+        let changed = vec![PathBuf::from(path)];
+        assert!(
+            go_scope(&changed).is_empty(),
+            "unsafe dir {path:?} must be dropped, not scoped"
+        );
+    }
+
+    #[test]
+    fn boundary_go_scope_mixes_safe_and_unsafe() {
+        // The one safe package is scoped; the injecting one is silently dropped.
+        let changed = vec![PathBuf::from("pkg/ok/a.go"), PathBuf::from("$(evil)/b.go")];
+        assert_eq!(go_scope(&changed), vec!["./pkg/ok/..."]);
+    }
+
+    // --- rust_scope: clippy `-p` crate name fail-closed (Round 5 A2) ----------
+
+    fn write_manifest(dir: &Path, name: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn positive_rust_scope_reads_owning_crate_name() {
+        let root = root();
+        write_manifest(&root.join("crates/mycrate"), "mycrate");
+        let changed = vec![PathBuf::from("crates/mycrate/src/lib.rs")];
+        assert_eq!(rust_scope(&root, &changed), vec!["mycrate".to_string()]);
+    }
+
+    #[test]
+    fn adversarial_rust_scope_drops_shell_injecting_crate_name() {
+        // A hostile PR's `Cargo.toml` names the crate `x$(touch pwned)`; the name would
+        // otherwise splice into `cargo clippy -p <name>` under `bash -c`. `safe_segment`
+        // must drop it so nothing is scoped (fail-closed), not run it.
+        let root = root();
+        write_manifest(&root.join("evil"), "x$(touch pwned)");
+        let changed = vec![PathBuf::from("evil/src/lib.rs")];
+        assert!(
+            rust_scope(&root, &changed).is_empty(),
+            "crate name with shell metacharacters must be dropped"
+        );
+    }
+
+    #[test]
+    fn boundary_rust_scope_keeps_safe_drops_unsafe() {
+        let root = root();
+        write_manifest(&root.join("good"), "good-crate_1.0");
+        write_manifest(&root.join("bad"), "b;rm -rf");
+        let changed = vec![
+            PathBuf::from("good/src/a.rs"),
+            PathBuf::from("bad/src/b.rs"),
+        ];
+        assert_eq!(
+            rust_scope(&root, &changed),
+            vec!["good-crate_1.0".to_string()]
+        );
     }
 
     // --- cargo-audit (Inc 5a) -------------------------------------------------
