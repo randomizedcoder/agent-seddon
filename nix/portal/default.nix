@@ -52,6 +52,12 @@ let
   # --network host. Access logs + tracer spans from the bridge ship here so the
   # browser -> envoy -> gateway -> seam hop is one trace. Single source of truth.
   otelCollectorPort = versions.clickstackOtlpGrpcPort;
+  # The agent's own telemetry ClickHouse (HTTP :8123, database `agent`) — where the
+  # Layer-B perf rows land (inc 09). Distinct from the ClickStack container's bundled
+  # ClickHouse (holds `default.otel_traces`, not host-published); the two are linked by
+  # the `trace_id` column, not a cross-server JOIN (rootless podman isolates them).
+  chHttpPort = versions.clickhouseHttpPort;
+  clickstackContainer = versions.clickstackContainerName;
   name = "agent-grpc-web";
   # Fully-qualified so podman (whose unqualified-search list can be empty, e.g. on the
   # headless l2 box) resolves it; docker treats the docker.io/ prefix as a no-op.
@@ -748,6 +754,7 @@ let
       pkgs.coreutils
       pkgs.gnugrep
       pkgs.gawk
+      pkgs.git # perf rows (inc 09) stamp commit_sha / branch / git_dirty
       grpc-web-up
     ];
     text = ''
@@ -1014,9 +1021,9 @@ let
       # gateway exported a recent grpc.server span into ClickHouse. Best-effort:
       # a ClickHouse that is down/unreachable is a WARN, not a contract failure.
       span_n=0
-      if "$runtime" ps --format '{{.Names}}' 2>/dev/null | grep -qx clickstack; then
+      if "$runtime" ps --format '{{.Names}}' 2>/dev/null | grep -qx "${clickstackContainer}"; then
         for _ in $(seq 1 15); do
-          span_n="$("$runtime" exec clickstack clickhouse-client -q \
+          span_n="$("$runtime" exec "${clickstackContainer}" clickhouse-client -q \
             "SELECT count() FROM default.otel_traces WHERE ServiceName='agent-gateway' AND SpanName='grpc.server' AND Timestamp > now() - INTERVAL 3 MINUTE" 2>/dev/null || echo 0)"
           case "$span_n" in "" | *[!0-9]* ) span_n=0 ;; esac
           if [ "$span_n" -ge 1 ]; then break; fi
@@ -1038,6 +1045,121 @@ let
         grpcurl -d "{\"id\":\"$uid\"}" -plaintext 127.0.0.1:${toString gatewayPort} \
           agent.v1.ProviderRegistryService/Delete >/dev/null 2>&1 || true
       done
+
+      # --- 5c. perf rows -> agent.portal_gui_perf (inc 09; best-effort trend record) ---
+      # Every driven action doubles as a timing sample. We record the client-perceived
+      # interaction latency (from the driver) and the SERVER-side truth (the :${toString metricsPort}
+      # histogram delta for the RPC), tag each RPC sample with the gateway span's
+      # trace_id (looked up in ClickStack's otel_traces by the short span name), and
+      # stream the batch to the agent ClickHouse over HTTP JSONEachRow. This is
+      # observability, NOT a gate: any failure here is a warning, never a contract fail.
+      : >"$workdir/perf.jsonl"
+
+      # git / host provenance (best-effort; a detached or dirty tree still records).
+      commit_sha="$(git rev-parse HEAD 2>/dev/null || echo "")"
+      branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+      git_dirty=0
+      if [ -n "$(git status --porcelain 2>/dev/null)" ]; then git_dirty=1; fi
+      host="$(uname -n 2>/dev/null || echo "")"
+      pr_number="''${PORTAL_PR_NUMBER:-0}"
+      case "$pr_number" in "" | *[!0-9]* ) pr_number=0 ;; esac
+
+      # Full gRPC path -> the SERVER span's short op name (an info_span "grpc.server"
+      # carrying the short name in SpanAttributes['rpc'], crates/agent-grpc/src/server/*).
+      # "" for an RPC we do not map -> no trace lookup for it.
+      short_rpc() {
+        case "$1" in
+          *ProviderRegistryService/Put) echo registry.put ;;
+          *ProviderRegistryService/Enable) echo registry.enable ;;
+          *ProviderRegistryService/Get) echo registry.get ;;
+          *PromptService/SetActivePersonality) echo prompt.set_active_personality ;;
+          *) echo "" ;;
+        esac
+      }
+
+      # Newest gateway trace_id for a short RPC name within the run window. The value is
+      # SERVER-supplied (untrusted): accept ONLY hex, else "" — so a hostile trace id
+      # can never reach the row (and JSONEachRow carries it as data, never SQL).
+      # Best-effort: no ClickStack, export lag, or tracing off -> "".
+      trace_for() {
+        local sr="$1" tid=""
+        [ -n "$sr" ] || { echo ""; return; }
+        "$runtime" ps --format '{{.Names}}' 2>/dev/null | grep -qx "${clickstackContainer}" || { echo ""; return; }
+        for _ in $(seq 1 6); do
+          tid="$("$runtime" exec "${clickstackContainer}" clickhouse-client -q \
+            "SELECT TraceId FROM default.otel_traces WHERE ServiceName='agent-gateway' AND SpanAttributes['rpc']='$sr' AND Timestamp > now() - INTERVAL 5 MINUTE ORDER BY Timestamp DESC LIMIT 1" 2>/dev/null || echo "")"
+          if [ -n "$tid" ]; then break; fi
+          sleep 1
+        done
+        case "$tid" in
+          "" | *[!0-9a-fA-F]* ) echo "" ;;
+          * ) echo "$tid" ;;
+        esac
+      }
+
+      # Sum a histogram field (sum|count) for a full-path RPC. Server-produced, so
+      # accept ONLY a clean non-negative decimal per line (a hostile value -> 0).
+      hist_field() {
+        grep -F "agent_grpc_server_rpc_seconds_$2{" "$1" 2>/dev/null \
+          | grep -F "rpc=\"$3\"" \
+          | awk '{ v=$NF; if (v ~ /^[0-9]+(\.[0-9]+)?$/) s+=v } END { printf "%.9f", s+0 }'
+      }
+
+      # emit one validated perf row: page element rpc metric phase value_ms outcome trace_id
+      emit_perf_row() {
+        awk -v x="$6" 'BEGIN{ exit !(x ~ /^[0-9]+(\.[0-9]+)?$/) }' || return 0
+        jq -cn \
+          --arg run_id "$run_id" --argjson pr_number "$pr_number" \
+          --arg commit_sha "$commit_sha" --arg branch "$branch" \
+          --argjson git_dirty "$git_dirty" --arg host "$host" --arg layer "e2e" \
+          --arg page "$1" --arg element_id "$2" --arg test_name "portal-e2e" \
+          --arg phase "$5" --arg step "" --arg rpc_method "$3" \
+          --arg metric "$4" --argjson value_ms "$6" --argjson iteration 1 \
+          --arg outcome "$7" --arg trace_id "$8" \
+          '{run_id:$run_id, pr_number:$pr_number, commit_sha:$commit_sha, branch:$branch,
+            git_dirty:$git_dirty, host:$host, layer:$layer, page:$page,
+            element_id:$element_id, test_name:$test_name, phase:$phase, step:$step,
+            rpc_method:$rpc_method, metric:$metric, value_ms:$value_ms,
+            iteration:$iteration, outcome:$outcome, trace_id:$trace_id}' \
+          >>"$workdir/perf.jsonl"
+      }
+
+      # Build rows from the report the assertion loop already wrote (its outcome is the
+      # verified pass|fail|skip). One interaction_ms row per action; one grpc_server_ms
+      # row per non-skipped mapped RPC (server truth), both tagged with the trace_id.
+      while IFS= read -r rec; do
+        [ -n "$rec" ] || continue
+        p_page="$(echo "$rec" | jq -r '.page')"
+        p_el="$(echo "$rec" | jq -r '.element_id')"
+        p_rpc="$(echo "$rec" | jq -r '.rpc_fired[0] // ""')"
+        p_oc="$(echo "$rec" | jq -r '.outcome')"
+        p_ms="$(echo "$rec" | jq -r '.duration_ms')"
+        p_tid=""
+        if [ "$p_oc" != "skip" ]; then p_tid="$(trace_for "$(short_rpc "$p_rpc")")"; fi
+        emit_perf_row "$p_page" "$p_el" "$p_rpc" "interaction_ms" "action" "$p_ms" "$p_oc" "$p_tid"
+        if [ "$p_oc" != "skip" ] && [ -n "$p_rpc" ]; then
+          sb="$(hist_field "$workdir/metrics.before" sum "$p_rpc")"
+          sa="$(hist_field "$workdir/metrics.after" sum "$p_rpc")"
+          cb="$(hist_field "$workdir/metrics.before" count "$p_rpc")"
+          ca="$(hist_field "$workdir/metrics.after" count "$p_rpc")"
+          server_ms="$(awk -v sb="$sb" -v sa="$sa" -v cb="$cb" -v ca="$ca" \
+            'BEGIN{ dc=ca-cb; ds=sa-sb; if (dc>0 && ds>=0) printf "%.3f", (ds/dc)*1000 }')"
+          if [ -n "$server_ms" ]; then emit_perf_row "$p_page" "$p_el" "$p_rpc" "grpc_server_ms" "rpc" "$server_ms" "$p_oc" "$p_tid"; fi
+        fi
+      done <"$workdir/report.jsonl"
+
+      if [ -s "$workdir/perf.jsonl" ]; then
+        perf_rows="$(wc -l <"$workdir/perf.jsonl" | tr -d ' ')"
+        {
+          printf 'INSERT INTO agent.portal_gui_perf FORMAT JSONEachRow\n'
+          cat "$workdir/perf.jsonl"
+        } >"$workdir/perf.post"
+        if curl -sf --data-binary @"$workdir/perf.post" "http://127.0.0.1:${toString chHttpPort}/" >/dev/null 2>&1; then
+          echo "portal-e2e: inserted $perf_rows perf row(s) into agent.portal_gui_perf (run_id=$run_id)"
+        else
+          echo "portal-e2e: [warn] perf insert skipped — agent ClickHouse :${toString chHttpPort} down, or table missing (run 'nix run .#clickhouse-migrate')"
+        fi
+      fi
 
       # --- 6. report ------------------------------------------------------------
       report="''${PORTAL_E2E_REPORT:-$workdir/report.jsonl}"

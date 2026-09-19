@@ -1,0 +1,76 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 0,
+  "schemaVersion": 39,
+  "tags": ["agent-seddon", "portal", "perf"],
+  "time": { "from": "now-7d", "to": "now" },
+  "refresh": "",
+  "title": "portal-gui-perf",
+  "uid": "portal-gui-perf",
+  "templating": {
+    "list": [
+      {
+        "name": "page",
+        "type": "custom",
+        "query": "*",
+        "current": { "text": "*", "value": "*" },
+        "options": [{ "text": "*", "value": "*", "selected": true }]
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Latest run — p95 per (page, metric)",
+      "type": "table",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+          "queryType": "sql",
+          "editorType": "sql",
+          "rawSql": "SELECT page, metric, count() AS samples, round(quantile(0.50)(value_ms),2) AS p50_ms, round(quantile(0.95)(value_ms),2) AS p95_ms FROM agent.portal_gui_perf WHERE run_id = (SELECT run_id FROM agent.portal_gui_perf ORDER BY ts DESC LIMIT 1) AND outcome = 'pass' GROUP BY page, metric ORDER BY page, metric",
+          "format": 1
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Slowest gRPC (server-side) this run — with trace_id",
+      "type": "table",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+          "queryType": "sql",
+          "editorType": "sql",
+          "rawSql": "SELECT rpc_method, round(max(value_ms),2) AS worst_ms, argMax(trace_id, value_ms) AS trace FROM agent.portal_gui_perf WHERE run_id = (SELECT run_id FROM agent.portal_gui_perf ORDER BY ts DESC LIMIT 1) AND metric = 'grpc_server_ms' AND rpc_method != '' GROUP BY rpc_method ORDER BY worst_ms DESC LIMIT 20",
+          "format": 1
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "main branch — grpc_server_ms p95 trend by rpc_method",
+      "type": "timeseries",
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 9 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+          "queryType": "sql",
+          "editorType": "sql",
+          "rawSql": "SELECT toStartOfHour(ts) AS time, rpc_method, round(quantile(0.95)(value_ms),2) AS p95_ms FROM agent.portal_gui_perf WHERE branch = 'main' AND metric = 'grpc_server_ms' AND rpc_method != '' AND $__timeFilter(ts) GROUP BY time, rpc_method ORDER BY time",
+          "format": 0
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
+    }
+  ]
+}

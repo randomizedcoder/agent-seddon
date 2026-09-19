@@ -1,0 +1,25 @@
+# @generated config — provisions the ClickHouse datasource for the portal GUI perf
+# dashboard (portal-gui-testing 06 / inc 09). Grafana runs `--network host`, so the
+# AGENT ClickHouse (the one holding `agent.portal_gui_perf`) is at 127.0.0.1:9000
+# (native protocol; published host-local by `nix run .#clickhouse-up`).
+#
+# NEEDS the `grafana-clickhouse-datasource` plugin, installed by `grafana-up` via
+# GF_INSTALL_PLUGINS. A grafana container created BEFORE that env was added lacks the
+# plugin and will log a provisioning error for this datasource (harmless — the
+# Prometheus datasource + dashboard keep working); recreate it to pick up the plugin:
+#   nix run .#grafana-down && nix run .#grafana-up
+apiVersion: 1
+
+datasources:
+  - name: ClickHouse
+    uid: clickhouse
+    type: grafana-clickhouse-datasource
+    access: proxy
+    editable: true
+    jsonData:
+      host: 127.0.0.1
+      port: 9000
+      protocol: native
+      secure: false
+      username: default
+      defaultDatabase: agent

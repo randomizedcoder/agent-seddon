@@ -1,7 +1,9 @@
 # nix/grafana/default.nix
 #
 # Grafana container lifecycle as Nix apps (docker) — dashboards over the Prometheus
-# datasource. Mirrors the clickhouse/clickstack/prometheus modules.
+# datasource, plus a ClickHouse datasource (grafana-clickhouse-datasource, installed
+# via GF_INSTALL_PLUGINS) for the portal GUI perf dashboard (portal-gui-testing inc
+# 09). Mirrors the clickhouse/clickstack/prometheus modules.
 #
 # Networking (Linux): runs with `--network host` so Grafana serves on host :3000
 # and reaches Prometheus at 127.0.0.1:9090. Provisioning (the datasource + the
@@ -51,6 +53,7 @@ in
             --name "${name}" \
             --network host \
             -e GF_SERVER_HTTP_PORT="${port}" \
+            -e GF_INSTALL_PLUGINS=grafana-clickhouse-datasource \
             -e GF_AUTH_ANONYMOUS_ENABLED=true \
             -e GF_AUTH_ANONYMOUS_ORG_ROLE=Admin \
             -e GF_AUTH_DISABLE_LOGIN_FORM=true \

@@ -98,3 +98,47 @@ complementary, cross-PR *trend* record for the GUI path.
 The proxy-vs-backend split (`grpc_client_ms` / `grpc_upstream_ms` / `grpc_server_ms`)
 plus the Envoy access-log latencies ([`07`](07-envoy-otel.md)) let a SQL query localize
 any slowdown to the UI, the proxy hop, or the backend.
+
+## As built (inc 09)
+
+Folded into the opt-in `nix run .#portal-e2e` app (inc 07), not on the gate.
+
+- **Table.** `agent.portal_gui_perf` (the design DDL, prefixed `agent.` to match every
+  other table) added to [`nix/clickhouse/schema.sql`](../../../nix/clickhouse/schema.sql).
+  The `agent doctor` ClickHouse drift check parses `schema.sql`, so it **auto-extends** —
+  an un-migrated volume reports the table missing until `nix run .#clickhouse-migrate`.
+- **Two ClickHouse servers, one key.** The perf rows land in the **agent** ClickHouse
+  (host `:8123`, database `agent`); the gateway/Envoy **spans** live in ClickStack's
+  **separate** bundled ClickHouse (`default.otel_traces`), whose native port is not
+  host-published. Under rootless podman the two have no shared network, so `trace_id` is
+  a **portable key link, not a cross-server JOIN** — the "trace of the slowest" query
+  (Q3 in [`portal_gui_perf.sql`](../../../nix/clickhouse/portal_gui_perf.sql)) is a
+  two-step lookup: get the `trace_id` from the agent CH, resolve it in ClickStack's CH.
+- **What's measured, live.** Per driven action: `interaction_ms` (client-perceived, from
+  the driver's own timing) and `grpc_server_ms` (**server truth** from the `:9700`
+  `agent_grpc_server_rpc_seconds` histogram delta — note its `rpc` label is the **full**
+  method path with **no** `outcome` label, unlike the `_total` counter the assertions
+  use). `grpc_client_ms` / `grpc_upstream_ms` (the `x-envoy-upstream-service-time` header)
+  are not captured from the headless browser and are left for a later pass.
+- **trace_id capture.** Looked up in `otel_traces` by the gateway span's **short** op
+  name (`SpanAttributes['rpc']`, e.g. `registry.put` / `registry.enable` /
+  `prompt.set_active_personality` — the `info_span!("grpc.server", rpc, …)` in
+  `crates/agent-grpc/src/server/*`), newest within the run window, so a captured id is
+  guaranteed to resolve in `otel_traces`. Best-effort: no ClickStack / export lag /
+  tracing-off yields `''` (like inc 07's span check).
+- **Ingestion & safety.** One `INSERT … FORMAT JSONEachRow` POST to `:8123`, built with
+  `jq` (data, never SQL). Untrusted inputs are fail-closed: histogram fields accept only a
+  clean non-negative decimal, `value_ms` is regex-validated before the row is emitted, a
+  server-supplied `trace_id` is accepted only if hex, and `pr_number` collapses to `0`
+  unless all-digits. The insert is **best-effort** — a down CH or missing table is a warn,
+  never a contract failure. `iteration=1` for the single live drive (N-iteration warm-up
+  is future work; the p50/p95 SQL is ready for when it lands).
+- **Grafana.** A `grafana-clickhouse-datasource` datasource
+  ([`clickhouse.yml`](../../../nix/grafana/provisioning/datasources/clickhouse.yml)) +
+  a `portal-gui-perf` dashboard
+  ([`portal-gui-perf.json`](../../../nix/grafana/dashboards/portal-gui-perf.json));
+  `grafana-up` installs the plugin via `GF_INSTALL_PLUGINS`, so a pre-existing grafana
+  container must be recreated (`grafana-down && grafana-up`) to pick it up.
+- **Deferred:** the `envoy_access_latency` materialized view (07) — the Envoy access-log
+  latency columns are already flat in `otel_logs`, so it is a convenience view, not a
+  blocker; left for a focused follow-up.
