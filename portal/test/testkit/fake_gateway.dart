@@ -4,40 +4,38 @@ import 'package:agent_portal/src/clients.dart';
 import 'package:agent_portal/src/config.dart';
 import 'package:grpc/grpc.dart';
 
-import 'fakes/prompt_service.dart';
 import 'recording.dart';
 
 /// An in-process fake of the agent gRPC gateway for hermetic Layer-A tests.
 ///
-/// It starts a **real** gRPC [Server] on an ephemeral loopback port hosting fake
-/// service impls, then hands back a [PortalClients] whose three channels all dial
-/// it. Because the Dart VM transport is the same `channel_io` loopback the native
-/// app uses, a test drives a page against this fake over the true wire — proving
-/// the real RPC fired with the real encoded arguments, not a mocked method call.
+/// It starts a **real** gRPC [Server] on an ephemeral loopback port hosting the
+/// caller's fake service impls, then hands back a [PortalClients] whose three
+/// channels all dial it. Because the Dart VM transport is the same `channel_io`
+/// loopback the native app uses, a test drives a page against this fake over the
+/// true wire — proving the real RPC fired with the real encoded arguments.
 ///
-/// The fakes record every call into [log] and return scripted responses (set
-/// them on the per-service handles, e.g. [prompts]). Pass [extra] services to
-/// register additional seams as later pages are tabled (inc 3+).
+/// Each page's robot builds the seam fakes it needs (bound to the shared [log])
+/// and passes them to [start]; the fakes record every call into [log] and return
+/// scripted responses. This keeps FakeGateway seam-agnostic, so a new page adds
+/// its own fake without touching this file.
 class FakeGateway {
-  FakeGateway._(this._server, this.log, this.prompts, this.port);
+  FakeGateway._(this._server, this.log, this.port);
 
   final Server _server;
 
   /// The ordered record of every RPC served — assert against this.
   final RecordingLog log;
 
-  /// The `PromptService` fake (scriptable responses + fault injection).
-  final FakePromptService prompts;
-
   /// The ephemeral loopback port the fake is listening on.
   final int port;
 
-  static Future<FakeGateway> start({List<Service> extra = const []}) async {
+  /// Start the fake serving [build]'s services (bound to a fresh shared log).
+  static Future<FakeGateway> start(
+      List<Service> Function(RecordingLog log) build) async {
     final log = RecordingLog();
-    final prompts = FakePromptService(log);
-    final server = Server.create(services: [prompts, ...extra]);
+    final server = Server.create(services: build(log));
     await server.serve(address: InternetAddress.loopbackIPv4, port: 0);
-    return FakeGateway._(server, log, prompts, server.port!);
+    return FakeGateway._(server, log, server.port!);
   }
 
   /// A [PortalConfig] whose gateway/sessions/fleet endpoints all point at this
@@ -51,8 +49,7 @@ class FakeGateway {
         fleetPort: port,
       );
 
-  /// A fresh [PortalClients] dialing this fake. The caller owns it and must
-  /// `shutdown()` it (or let [shutdown] tear the server down at test end).
+  /// A fresh [PortalClients] dialing this fake.
   PortalClients clients() => PortalClients(config);
 
   Future<void> shutdown() async => _server.shutdown();

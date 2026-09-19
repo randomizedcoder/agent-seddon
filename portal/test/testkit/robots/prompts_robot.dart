@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../fake_gateway.dart';
+import '../fakes/prompt_service.dart';
 import 'robot.dart';
 
 /// Robot for the Prompts page. Owns a [FakeGateway] (started on an ephemeral
@@ -10,17 +11,24 @@ import 'robot.dart';
 /// in `runAsync`, since socket close needs the real event loop — automatically.
 /// Script responses via `gw.prompts` before calling [load].
 class PromptsRobot extends Robot {
-  PromptsRobot._(super.tester, this.gw);
+  PromptsRobot._(super.tester, this.gw, this.prompts);
 
   final FakeGateway gw;
+
+  /// The `PromptService` fake (scriptable responses + fault/slow injection).
+  final FakePromptService prompts;
   late final clients = gw.clients();
 
   static Future<PromptsRobot> create(WidgetTester tester) async {
     late FakeGateway gw;
+    late FakePromptService prompts;
     await tester.runAsync(() async {
-      gw = await FakeGateway.start();
+      gw = await FakeGateway.start((log) {
+        prompts = FakePromptService(log);
+        return [prompts];
+      });
     });
-    final robot = PromptsRobot._(tester, gw);
+    final robot = PromptsRobot._(tester, gw, prompts);
     addTearDown(() => tester.runAsync(() async {
           await robot.clients.shutdown();
           await gw.shutdown();

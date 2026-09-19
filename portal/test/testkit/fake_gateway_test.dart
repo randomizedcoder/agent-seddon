@@ -4,6 +4,7 @@ import 'package:grpc/grpc.dart';
 
 import 'builders.dart';
 import 'fake_gateway.dart';
+import 'fakes/prompt_service.dart';
 
 /// Self-test of the testkit's key feasibility claim: a page's `PortalClients`,
 /// pointed at the in-process [FakeGateway], drives real RPCs over the loopback
@@ -12,9 +13,13 @@ import 'fake_gateway.dart';
 /// inc 3+ rest on solid ground.
 void main() {
   late FakeGateway gw;
+  late FakePromptService prompts;
 
   setUp(() async {
-    gw = await FakeGateway.start();
+    gw = await FakeGateway.start((log) {
+      prompts = FakePromptService(log);
+      return [prompts];
+    });
   });
   tearDown(() async {
     await gw.shutdown();
@@ -22,7 +27,7 @@ void main() {
 
   test('positive_list_fires_correct_rpc_and_returns_scripted_response',
       () async {
-    gw.prompts.listResponse =
+    prompts.listResponse =
         promptList([promptEntry(id: 'a'), promptEntry(id: 'b')]);
 
     final clients = gw.clients();
@@ -48,7 +53,7 @@ void main() {
   });
 
   test('adversarial_injected_transport_fault_surfaces_as_grpc_error', () async {
-    gw.prompts.error = const GrpcError.unavailable('backend down');
+    prompts.error = const GrpcError.unavailable('backend down');
     final clients = gw.clients();
 
     await expectLater(
