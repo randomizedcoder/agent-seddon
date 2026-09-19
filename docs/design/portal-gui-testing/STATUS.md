@@ -12,7 +12,7 @@ stack (a lesson carried from the portal + code-review tracks).
 | 01 | Widget-key scheme (inline `Key('<page>.<element>')` across all pages) | ✅ | — | — | — | ✅ #423 |
 | 02 | `portal-testkit` fakes (in-proc fake gRPC + recording) + `flutter_test`/`integration_test` deps + regen `pubspec.lock` + config-diff extraction + L0 unit tests | ✅ | ✅ | — | — | ✅ #424 |
 | 03 | Layer A `portal-widget` check + robots + completeness critic + Launch & Prompts tabled (template) | ✅ | ✅ | ✅ | — | **this PR** |
-| 04 | Remaining pages tabled in Layer A | ✅ | ✅ | — | — | ⬜ |
+| 04 | Remaining pages tabled in Layer A (Graph, Agent, Router, Fleet, Settings) | ✅ | ✅ | — | — | **this PR** |
 | 05 | Golden + a11y `portal-visual` check | ✅ | ✅ | ✅ | — | ⬜ |
 | 06 | Contract drift guard (RPC set + rendered enums vs descriptor set) | — | ✅ | ✅ | — | ⬜ |
 | 07 | Layer B `portal-e2e` app (metrics-delta + read-RPC + curated span, trace linking) | ✅ | ✅ | ✅ | — | ⬜ |
@@ -68,6 +68,17 @@ stack (a lesson carried from the portal + code-review tracks).
   offstage IndexedStack twin). Drain trailing timers before test end — the SnackBar auto-dismiss
   and grpc-dart's HTTP/2 **connection idle timeout** (5 min) both leak as `!timersPending`
   otherwise. All centralised in `test/testkit/robots/robot.dart`.
+- **Two more real-loopback gotchas (inc 04, every page robot must handle):**
+  1. **grpc-dart's `channel.shutdown()` wedges indefinitely on an in-flight RPC.** A page that
+     issues an RPC whose response is still arriving at teardown (e.g. Settings' trailing
+     `Status`, a `Validate`/`Put` reply) hangs the test. Fix: a `quiesce()` that advances a few
+     **real-time** windows (`runAsync` + `pump`) so every fired call's response lands and the
+     channel is idle before shutdown — end RPC-firing tests with it.
+  2. **initState `Timer.periodic` pollers are REAL timers** (initState runs inside `runAsync`),
+     so `tester.pump(Duration)` does NOT fire them — advance with real `Future.delayed`. And the
+     teardown must **unmount the page** (`pumpWidget(SizedBox())`) so `dispose` cancels the
+     pollers + stream subscription before shutting the wire down, or a leaked real timer races
+     finalization (the Agent page).
 - **Completeness critic** source-scans `portal/lib` for `Key('…')` stems and fails a tabled page
   that has a stem without a `positive_` row; not-yet-tabled pages are logged as *pending*
   (inc 04 burns the pending count to 0), never silently skipped.

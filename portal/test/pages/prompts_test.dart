@@ -19,7 +19,7 @@ void main() {
   for (final row in promptsSpec.rows) {
     testWidgets('prompts ${row.label} — ${row.description}', (tester) async {
       final robot = await PromptsRobot.create(tester);
-      final fake = robot.gw.prompts;
+      final fake = robot.prompts;
 
       switch (row.label) {
         case 'positive_loaded_lists_grouped':
