@@ -12,6 +12,43 @@
 
 use agent_core::{EnvPolicy, Error, ExecOutput, ExecSpec, Result};
 use std::time::Duration;
+use tokio::io::AsyncReadExt;
+
+/// Hard ceiling on captured output **per stream** (stdout, stderr). The sandbox runs
+/// attacker-influenced programs (linters over an untrusted repo, the model's `bash`) whose
+/// output volume is not something we control, so the capture is bounded here at the point it
+/// is buffered — before it can OOM the process. A stream that hits the cap is truncated and
+/// tagged; the child is then killed so it can't block writing to a full pipe.
+const MAX_CAPTURE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Read from `r` into a `Vec`, buffering at most `cap` bytes. Returns the bytes and whether
+/// the source had **more** than `cap` (⇒ truncated). Reads in bounded chunks so a hostile
+/// program can't force a single huge allocation, and never buffers more than `cap`. Exactly
+/// `cap` bytes with nothing after is *not* flagged truncated.
+async fn read_capped<R: tokio::io::AsyncRead + Unpin>(mut r: R, cap: usize) -> (Vec<u8>, bool) {
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        match r.read(&mut chunk).await {
+            Ok(0) => return (buf, false),
+            Ok(n) => {
+                // Already at the cap and yet more data arrived ⇒ truncated.
+                if buf.len() >= cap {
+                    return (buf, true);
+                }
+                let take = n.min(cap - buf.len());
+                buf.extend_from_slice(&chunk[..take]);
+                // Couldn't take the whole read ⇒ the rest is dropped ⇒ truncated.
+                if take < n {
+                    return (buf, true);
+                }
+            }
+            // A read error mid-capture (e.g. the child was killed) ends the stream; keep
+            // what we have rather than discarding a partial-but-useful capture.
+            Err(_) => return (buf, false),
+        }
+    }
+}
 
 /// Run an argv command under the spec's cwd + timeout + env policy, capturing
 /// output. Shared by the backends (each builds a different argv — `bash -c` for
@@ -37,16 +74,63 @@ async fn run_argv(argv: &[String], spec: &ExecSpec) -> Result<ExecOutput> {
             cmd.env("PATH", path);
         }
     }
-    let run = cmd.output();
+    // Capture stdout+stderr with a per-stream byte cap. `cmd.output()` would buffer the
+    // child's entire output unbounded — an OOM vector when the program is attacker-influenced
+    // (a linter over a hostile repo, the model's `bash`). We pipe both streams and read them
+    // concurrently (draining both avoids a full-pipe deadlock), stopping at `MAX_CAPTURE_BYTES`.
+    // `cmd.output()` defaulted stdin to null; `spawn()` would inherit the parent's, so a
+    // program that reads stdin could hang or steal the agent's input. Keep it null.
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    let run = async {
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| Error::Sandbox(format!("spawning `{prog}`: {e}")))?;
+        // `piped()` guarantees these are `Some`.
+        let out = child
+            .stdout
+            .take()
+            .ok_or_else(|| Error::Sandbox("no stdout pipe".into()))?;
+        let err = child
+            .stderr
+            .take()
+            .ok_or_else(|| Error::Sandbox("no stderr pipe".into()))?;
+        let ((so, so_trunc), (se, se_trunc)) = tokio::join!(
+            read_capped(out, MAX_CAPTURE_BYTES),
+            read_capped(err, MAX_CAPTURE_BYTES),
+        );
+        // If either stream hit the cap the child may be blocked writing to a now-unread pipe;
+        // kill it so `wait()` returns instead of hanging until the timeout.
+        if so_trunc || se_trunc {
+            let _ = child.start_kill();
+        }
+        let status = child
+            .wait()
+            .await
+            .map_err(|e| Error::Sandbox(format!("waiting on `{prog}`: {e}")))?;
+        Ok::<_, Error>((so, so_trunc, se, se_trunc, status))
+    };
     match tokio::time::timeout(Duration::from_secs(spec.timeout_secs.max(1)), run).await {
-        Ok(Ok(o)) => Ok(ExecOutput {
-            stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
-            stdout_bytes: o.stdout,
-            stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
-            exit_code: o.status.code().unwrap_or(-1),
-            timed_out: false,
-        }),
-        Ok(Err(e)) => Err(Error::Sandbox(format!("spawning `{prog}`: {e}"))),
+        Ok(Ok((stdout_bytes, so_trunc, mut err_bytes, se_trunc, status))) => {
+            if se_trunc {
+                err_bytes.extend_from_slice(TRUNCATION_MARKER);
+            }
+            let mut stderr = String::from_utf8_lossy(&err_bytes).into_owned();
+            if so_trunc {
+                // stdout is often parsed as-is (JSON linter output), so leave its bytes intact
+                // and surface the truncation on stderr where it won't corrupt a parse.
+                stderr.push_str(STDOUT_TRUNCATED_NOTE);
+            }
+            Ok(ExecOutput {
+                stdout: String::from_utf8_lossy(&stdout_bytes).into_owned(),
+                stdout_bytes,
+                stderr,
+                exit_code: status.code().unwrap_or(-1),
+                timed_out: false,
+            })
+        }
+        Ok(Err(e)) => Err(e),
         Err(_) => Ok(ExecOutput {
             stderr: format!(
                 "command timed out after {}s and was killed",
@@ -58,6 +142,9 @@ async fn run_argv(argv: &[String], spec: &ExecSpec) -> Result<ExecOutput> {
         }),
     }
 }
+
+const TRUNCATION_MARKER: &[u8] = b"\n[stderr truncated: exceeded 8 MiB capture cap]\n";
+const STDOUT_TRUNCATED_NOTE: &str = "\n[stdout truncated: exceeded 8 MiB capture cap]\n";
 
 /// Cheap probe: is `bin` a file on `$PATH`? (No exec-bit check — enough to pick or
 /// degrade, mirroring the `rg`-fast-path availability guard in search.)
@@ -239,6 +326,56 @@ mod tests {
             .await
             .unwrap();
         assert!(out.timed_out, "a 5s sleep under a 1s cap must time out");
+    }
+
+    // --- Round 5 A3: capture is byte-capped (OOM guard) --------------------
+
+    /// `read_capped` returns the whole source and `false` when it fits, whether the
+    /// input is under the cap or exactly the cap (no false-positive truncation).
+    #[rstest]
+    #[case::positive_under_cap(50, 100)]
+    #[case::boundary_exactly_cap(100, 100)]
+    #[tokio::test]
+    async fn read_capped_keeps_all_when_it_fits(#[case] len: usize, #[case] cap: usize) {
+        let src = vec![b'x'; len];
+        let (buf, truncated) = read_capped(&src[..], cap).await;
+        assert_eq!(buf.len(), len, "kept every byte");
+        assert!(!truncated, "not flagged truncated when it fits");
+    }
+
+    /// A source larger than the cap is truncated to exactly `cap` and flagged. This is
+    /// the OOM guard: a hostile linter/`bash` output cannot grow the buffer past `cap`.
+    #[rstest]
+    #[case::corner_one_over(101, 100)]
+    #[case::adversarial_far_over(10_000, 100)]
+    #[tokio::test]
+    async fn read_capped_truncates_oversized_source(#[case] len: usize, #[case] cap: usize) {
+        let src = vec![b'x'; len];
+        let (buf, truncated) = read_capped(&src[..], cap).await;
+        assert_eq!(buf.len(), cap, "buffer never exceeds the cap");
+        assert!(truncated, "oversized source is flagged truncated");
+    }
+
+    /// End-to-end: a command whose stdout exceeds `MAX_CAPTURE_BYTES` is captured up to the
+    /// cap and the truncation is surfaced on stderr — the process does not buffer it all.
+    #[tokio::test]
+    async fn adversarial_oversized_stdout_is_capped_end_to_end() {
+        let dir = tempdir();
+        // Emit ~12 MiB of zeros (> the 8 MiB cap) as fast as possible.
+        let out = LocalSandbox
+            .exec(&ExecSpec::sh("head -c 12582912 /dev/zero", dir).timeout(60))
+            .await
+            .unwrap();
+        assert_eq!(
+            out.stdout_bytes.len(),
+            MAX_CAPTURE_BYTES,
+            "stdout captured only up to the cap"
+        );
+        assert!(
+            out.stderr.contains("stdout truncated"),
+            "truncation surfaced on stderr: {}",
+            out.stderr
+        );
     }
 
     // --- capability probes -------------------------------------------------
