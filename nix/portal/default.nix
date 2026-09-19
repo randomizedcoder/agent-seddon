@@ -140,7 +140,18 @@ let
       port="''${PORTAL_WEB_PORT:-${toString portalWebPort}}"
       echo "==> serving portal/build/web at http://$host:$port  (Ctrl-C to stop)"
       echo "    front the gRPC calls with: nix run .#grpc-web-up"
-      exec static-web-server --root build/web --host "$host" --port "$port"
+      # --cache-control-headers=false: static-web-server defaults to stamping
+      # `cache-control: max-age=31536000` (one year) on EVERY file. Flutter's
+      # `--pwa-strategy=none` output is served under fixed, un-hashed names
+      # (`index.html`, `flutter_bootstrap.js`, `main.dart.js`), so that default made a
+      # returning browser hold the previous bundle for a year — a `portal-redeploy` was
+      # invisible until a manual hard-reload. That is the same staleness the disabled
+      # service worker caused (see the --pwa-strategy note above), reintroduced through
+      # the HTTP cache. Disabling the header leaves `last-modified` in place, so the
+      # browser revalidates (If-Modified-Since → 304 or fresh bytes) and always picks up
+      # a redeploy. The revalidation cost is negligible for a loopback/LAN internal tool.
+      exec static-web-server --root build/web --host "$host" --port "$port" \
+        --cache-control-headers=false
     '';
   };
 
