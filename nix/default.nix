@@ -467,7 +467,15 @@ let
   grafana = import ./grafana { inherit pkgs lib versions; };
 
   # Agent Portal (docs/design/portal): Dart codegen + Flutter run + grpc-web proxy.
-  portal = import ./portal { inherit pkgs lib versions; };
+  # `agent` is passed so `portal-redeploy` can bake the freshly-built binary.
+  portal = import ./portal {
+    inherit
+      pkgs
+      lib
+      versions
+      agent
+      ;
+  };
 
   # Seam load / overload-conformance harness (docs/design/loadtest), opt-in.
   loadtest = import ./loadtest.nix { inherit pkgs versions; };

@@ -10,6 +10,11 @@
 #                             (:8090 -> gateway :50100, :8091 -> sessions :50080,
 #                              :8093 -> fleet :50086)
 #   nix run .#grpc-web-down   stop it
+#   nix run .#portal-redeploy one-verb server-tier bring-up: (re)start the --serve-all
+#                             gateway (:50100), tear down ANY stale bridge squatting
+#                             :8090, recreate the canonical grpc-web bridge, then
+#                             health-check the FULL browser path (grpc-web round-trip
+#                             through the bridge). Never touches a separate --serve-fleet.
 #
 # The native desktop build dials the gateway (:50100) directly and needs no proxy;
 # `grpc-web-up` exists only because browsers cannot speak raw gRPC (HTTP/2 trailers).
@@ -25,6 +30,7 @@
   pkgs,
   lib,
   versions,
+  agent,
 }:
 let
   # grpc-web proxy ports. UI plumbing, not seams, so they live here rather than in
@@ -105,7 +111,16 @@ let
       flutter create --platforms=web --project-name agent_portal . >/dev/null
       ${dartDefines}
       echo "==> building Flutter web bundle (first run downloads the web SDK)…"
-      flutter build web "''${defines[@]}" "$@"
+      # --pwa-strategy=none: do NOT generate/register a service worker. This portal
+      # is an internal tool that gets rewired constantly (endpoints, gateway); a
+      # cached SW served a stale pre-`personality-selector` bundle for days and
+      # surfaced as a bogus "Not connected to the gateway" 404 — pure client cache,
+      # not a server fault. The SW buys nothing here and costs exactly that. A caller
+      # can still override by re-passing --pwa-strategy after "$@".
+      flutter build web --pwa-strategy=none "''${defines[@]}" "$@"
+      # Belt-and-suspenders: drop any service-worker file a previous strategy left in
+      # the output tree so the static server never hands a client a registerable SW.
+      rm -f build/web/flutter_service_worker.js
       host="''${PORTAL_WEB_HOST:-127.0.0.1}"
       port="''${PORTAL_WEB_PORT:-${toString portalWebPort}}"
       echo "==> serving portal/build/web at http://$host:$port  (Ctrl-C to stop)"
@@ -337,6 +352,135 @@ let
       fi
     '';
   };
+
+  # `nix run .#portal-redeploy` — the server tier of the portal in one verb, mirroring
+  # `fleet-redeploy` (build → stop → serve → health-check). It exists because a manual
+  # bring-up once left a *differently-named* grpc-web bridge squatting :8090 while
+  # pointed at the wrong backend, so every main-tab RPC 404'd against the browser: the
+  # symptom looked like a portal bug but was pure wiring. This app makes that
+  # unreproducible — it sweeps ANY `agent-grpc-web*` container before recreating the
+  # canonical one, and its health-check is the *actual browser path* (a grpc-web
+  # round-trip through the bridge), not just "is the gateway up".
+  #
+  # It manages ONLY the --serve-all gateway (tracked via its own pidfile); a separately
+  # run --serve-fleet / --serve-sessions is never touched. The browser tier is the
+  # long-running `portal-web` (printed as the next step), kept separate so a redeploy
+  # stays fast and never source-builds the Flutter web SDK on the gate path.
+  #
+  #   $1 | $PORTAL_CONFIG       gateway agent TOML (default config/agent.toml; run from repo root)
+  #   $CONTAINER_RUNTIME        docker|podman (default docker; l2 is podman-only)
+  #   $PORTAL_GATEWAY_PIDFILE   pid we track   (default $XDG_RUNTIME_DIR|/tmp / agent-serve-all.pid)
+  #   $PORTAL_GATEWAY_LOG       serve log path (default $XDG_RUNTIME_DIR|/tmp / agent-serve-all.log)
+  #   $PORTAL_HEALTH_RETRIES    probe attempts, 2s apart (default 30 ⇒ up to 60s)
+  portal-redeploy = pkgs.writeShellApplication {
+    name = "portal-redeploy";
+    runtimeInputs = [
+      pkgs.coreutils
+      pkgs.curl
+      versions.docker
+      versions.podman
+      grpc-web-up
+    ];
+    text = ''
+      # writeShellApplication already sets `set -euo pipefail`.
+      agent_bin="${agent}/bin/agent"
+      runtime="''${CONTAINER_RUNTIME:-docker}"
+      export CONTAINER_RUNTIME="$runtime"
+
+      config="''${1:-''${PORTAL_CONFIG:-config/agent.toml}}"
+      if [ ! -f "$config" ]; then
+        echo "portal-redeploy: gateway config not found: $config" >&2
+        echo "  pass the agent TOML as \$1 or set PORTAL_CONFIG, and run from the repo root." >&2
+        exit 2
+      fi
+
+      if ! "$runtime" info >/dev/null 2>&1; then
+        echo "portal-redeploy: container runtime '$runtime' not reachable — is it running?" >&2
+        echo "  (on a podman-only host: CONTAINER_RUNTIME=podman nix run .#portal-redeploy)" >&2
+        exit 1
+      fi
+
+      runtime_dir="''${XDG_RUNTIME_DIR:-/tmp}"
+      pidfile="''${PORTAL_GATEWAY_PIDFILE:-$runtime_dir/agent-serve-all.pid}"
+      log="''${PORTAL_GATEWAY_LOG:-$runtime_dir/agent-serve-all.log}"
+      retries="''${PORTAL_HEALTH_RETRIES:-30}"
+
+      echo "==> portal-redeploy: agent=$agent_bin config=$config runtime=$runtime"
+
+      # 1. Stop the previous gateway if we are tracking a live one. This is scoped to the
+      #    --serve-all gateway via our own pidfile and never signals a --serve-fleet.
+      if [ -f "$pidfile" ] && oldpid="$(cat "$pidfile" 2>/dev/null)" && [ -n "$oldpid" ] \
+        && kill -0 "$oldpid" 2>/dev/null; then
+        echo "==> [1/4] stopping previous gateway (pid $oldpid)"
+        kill "$oldpid" 2>/dev/null || true
+        for _ in $(seq 1 10); do
+          kill -0 "$oldpid" 2>/dev/null || break
+          sleep 1
+        done
+        kill -9 "$oldpid" 2>/dev/null || true
+      else
+        echo "==> [1/4] no live previous gateway to stop"
+      fi
+
+      # 2. Start the freshly-built gateway (--serve-all, :${toString gatewayPort}).
+      echo "==> [2/4] starting gateway (--serve-all), log $log"
+      nohup "$agent_bin" --serve-all --config "$config" > "$log" 2>&1 &
+      newpid=$!
+      echo "$newpid" > "$pidfile"
+      echo "    pid $newpid"
+
+      # 3. Sweep ANY stale bridge (a differently-named proxy on :${toString grpcWebPort}
+      #    pointed at the wrong backend is the exact failure this app prevents), then let
+      #    the idempotent grpc-web-up recreate the canonical bridge.
+      echo "==> [3/4] (re)creating grpc-web bridge (sweeping any stale agent-grpc-web* first)"
+      names="$("$runtime" ps -a --format '{{.Names}}' | grep -E '^agent-grpc-web' || true)"
+      if [ -n "$names" ]; then
+        while IFS= read -r c; do
+          if [ "$c" != "${name}" ]; then
+            echo "    removing stale bridge container: $c"
+            "$runtime" rm -f "$c" >/dev/null 2>&1 || true
+          fi
+        done <<< "$names"
+      fi
+      grpc-web-up
+
+      # 4. Health-check the FULL browser path: a grpc-web round-trip THROUGH the bridge
+      #    (verifies bridge routing + CORS, not merely that the gateway is up). The empty
+      #    frame 'AAAAAAA=' is a zero-length request message; a healthy path returns
+      #    HTTP 200 with a grpc-status:0 trailer.
+      echo "==> [4/4] waiting for the gateway to answer through the bridge :${toString grpcWebPort}"
+      probe_url="http://127.0.0.1:${toString grpcWebPort}/agent.v1.PromptService/GetActivePersonality"
+      for _ in $(seq 1 "$retries"); do
+        if ! kill -0 "$newpid" 2>/dev/null; then
+          echo "portal-redeploy: gateway exited early — last log lines:" >&2
+          tail -n 20 "$log" >&2 || true
+          exit 1
+        fi
+        code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+          -H 'Content-Type: application/grpc-web-text' \
+          -H 'Accept: application/grpc-web-text' \
+          -H 'x-grpc-web: 1' \
+          --data 'AAAAAAA=' "$probe_url" 2>/dev/null || true)"
+        if [ "$code" = "200" ]; then
+          echo "==> portal-redeploy OK — gateway :${toString gatewayPort} live and reachable"
+          echo "    through the bridge :${toString grpcWebPort} (pid $newpid)"
+          echo "    serve the browser tier with:"
+          echo "      PORTAL_WEB_HOST=0.0.0.0 \\"
+          echo "      PORTAL_GRPC_WEB_URL=http://<l2-ip>:${toString grpcWebPort} nix run .#portal-web"
+          echo "    NOTE: a browser that already loaded the portal caches it via a service"
+          echo "          worker — hard-reload (Cmd/Ctrl+Shift+R) or unregister the SW to"
+          echo "          pick up a re-wired bridge."
+          exit 0
+        fi
+        sleep 2
+      done
+
+      echo "portal-redeploy: bridge did not return 200 for the grpc-web probe after $((retries * 2))s" >&2
+      echo "  last gateway log lines:" >&2
+      tail -n 20 "$log" >&2 || true
+      exit 1
+    '';
+  };
 in
 {
   inherit
@@ -345,5 +489,6 @@ in
     portal-web
     grpc-web-up
     grpc-web-down
+    portal-redeploy
     ;
 }
