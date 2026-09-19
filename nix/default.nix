@@ -52,6 +52,12 @@ let
         # integration fixtures — `agent-graph/tests/examples.rs` reads them — so the
         # hermetic test/package builds need them in the filtered source.
         || (lib.hasSuffix ".textproto" path)
+        # The portal bundles those same graphs as JSON assets
+        # (`portal/assets/graphs/*.json`); `agent-graph/tests/portal_examples_parity.rs`
+        # reads them at runtime to guard drift against the source-of-truth textprotos,
+        # so the hermetic test/package builds need them in the filtered source too.
+        # (Scoped to that dir so unrelated portal JSON can't sweep in and rebuild deps.)
+        || (lib.hasInfix "/portal/assets/graphs/" path)
         # `agent-config-store`'s postgres tier embeds its schema DDL via
         # `include_str!("../migrations/*.sql")` (config C41 / A2), so the SQL must
         # survive the filter or the crate won't compile under `--all-features`.
