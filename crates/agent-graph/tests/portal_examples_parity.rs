@@ -34,8 +34,8 @@ fn asset(name: &str) -> PathBuf {
 
 fn load_asset(name: &str) -> Value {
     let path = asset(name);
-    let text = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     serde_json::from_str(&text)
         .unwrap_or_else(|e| panic!("{}: not valid JSON: {e}", path.display()))
 }

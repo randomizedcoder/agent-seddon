@@ -27,25 +27,35 @@ pkgs.runCommand "agent-review-skill-content"
     fail() { echo "FAIL: $1" >&2; exit 1; }
 
     frag=${fragments}
-    # Exactly the six ordered checklist fragments, NNNN_-prefixed for deterministic order.
-    for n in 0001_grounding 0002_objective_and_tone 0003_idioms_and_dry \
-             0004_tests_and_security 0005_mechanized_checks 0006_output_order; do
+    # Exactly the eight ordered checklist fragments, NNNN_-prefixed for deterministic
+    # order. The set was restructured by the PR-draft-for-approval rewrite (#415):
+    # tone split from objective/alternatives, tests/race/bench split from
+    # static-analysis/shell, and security given its own fragment.
+    for n in 0001_purpose_and_checkout 0002_objective_and_alternatives \
+             0003_tone_and_good 0004_idioms_and_dry 0005_tests_race_bench \
+             0006_static_analysis_and_shell 0007_security 0008_output_order; do
       test -f "$frag/$n.md" || fail "missing fragment $n.md"
     done
 
-    # Each fragment carries its behaviour-bearing content (the user's checklist).
-    grep -qi "reviewing a change" "$frag/0001_grounding.md"        || fail "grounding lost"
-    grep -qi "friendly"           "$frag/0002_objective_and_tone.md" || fail "tone lost"
-    grep -qi "DRY"                "$frag/0003_idioms_and_dry.md"    || fail "DRY lost"
-    grep -qi "table-driven"       "$frag/0004_tests_and_security.md" || fail "tests-are-table-driven lost"
-    grep -qi "untrusted"          "$frag/0004_tests_and_security.md" || fail "security bar lost"
-    grep -qi "shellcheck"         "$frag/0005_mechanized_checks.md" || fail "shellcheck item lost"
-    grep -qi "race"               "$frag/0005_mechanized_checks.md" || fail "go race/bench item lost"
+    # Each fragment carries its behaviour-bearing content (the user's checklist). The
+    # substrings below track where each load-bearing rule now lives after #415.
+    grep -qi "draft a PR response" "$frag/0001_purpose_and_checkout.md" \
+      || fail "purpose (draft-for-approval) lost"
+    grep -qi "ground"             "$frag/0001_purpose_and_checkout.md" \
+      || fail "grounding rule lost"
+    grep -qi "alternative"        "$frag/0002_objective_and_alternatives.md" \
+      || fail "objective/alternatives lost"
+    grep -qi "friendly"           "$frag/0003_tone_and_good.md"     || fail "tone lost"
+    grep -qi "DRY"                "$frag/0004_idioms_and_dry.md"    || fail "DRY lost"
+    grep -qi "table-driven"       "$frag/0005_tests_race_bench.md"  || fail "tests-are-table-driven lost"
+    grep -qi "race"               "$frag/0005_tests_race_bench.md"  || fail "go race/bench item lost"
+    grep -qi "shellcheck"         "$frag/0006_static_analysis_and_shell.md" || fail "shellcheck item lost"
     # The OS-silence rule is load-bearing (reviews must not name the OS/toolchain).
     # (grep a single-line substring: the full sentence wraps across a line break.)
-    grep -qi "operating system" "$frag/0005_mechanized_checks.md" \
+    grep -qi "operating system" "$frag/0006_static_analysis_and_shell.md" \
       || fail "OS-silence rule lost"
-    grep -qi "Order the review"   "$frag/0006_output_order.md"      || fail "output-order lost"
+    grep -qi "untrusted"          "$frag/0007_security.md"          || fail "security bar lost"
+    grep -qi "order the written review" "$frag/0008_output_order.md" || fail "output-order lost"
 
     # The code-review SKILL.md: discoverable frontmatter + the mechanizable checklist.
     sk=${skill}
