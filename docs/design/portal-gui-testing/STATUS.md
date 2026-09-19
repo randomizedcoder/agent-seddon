@@ -14,7 +14,7 @@ stack (a lesson carried from the portal + code-review tracks).
 | 03 | Layer A `portal-widget` check + robots + completeness critic + Launch & Prompts tabled (template) | ✅ | ✅ | ✅ | — | **this PR** |
 | 04 | Remaining pages tabled in Layer A (Graph, Agent, Router, Fleet, Settings) | ✅ | ✅ | — | — | **this PR** |
 | 05 | Golden + a11y `portal-visual` check (Launch & Prompts slice; matrix extends) | ✅ | ✅ | ✅ | — | **this PR** |
-| 06 | Contract drift guard (RPC set + rendered enums vs descriptor set) | — | ✅ | ✅ | — | ⬜ |
+| 06 | Contract drift guard (RPC set + rendered enums vs descriptor set) — `test/meta/contract_test.dart`, runs in `portal-widget` | — | ✅ | ✅ | — | **this PR** |
 | 07 | Layer B `portal-e2e` app (metrics-delta + read-RPC + curated span, trace linking) | ✅ | ✅ | ✅ | — | ⬜ |
 | 08 | Report renderer + aggregation (+ failure artifacts) — `nix run .#portal-test-report` (hermetic slice) | — | — | ✅ | — | ✅ 640892b |
 | 09 | Performance tracking — `portal_gui_perf` table + JSONEachRow emitter + SQL + Grafana | — | ✅ | ✅ | ✅ | ⬜ |
@@ -69,6 +69,12 @@ stack (a lesson carried from the portal + code-review tracks).
 - **Perf is trend-tracking, not a hard gate** — wall-clock GUI latency is noisy;
   regressions surface via SQL/Grafana, not a red build. iai-callgrind Ir ceilings stay
   the deterministic micro-perf gate.
+- **Contract drift guard (inc 06)** is `test/meta/contract_test.dart` (runs inside `portal-widget`,
+  no new check): every spec `expectedRpc` must resolve to a real method on its generated
+  `*ServiceBase` (`$lookupMethod`), and the **hardcoded** `graphEdgeKinds` list must cover
+  `GraphEdge_Kind` (minus unspecified). Enums the UI renders straight from `Enum.values`
+  (TaskMode/RouteRole/PoolTier) can't drift, so they need no guard. It also records the invoked
+  RPC set per service (the "unwired stubs" reference).
 - **Backend preflight tags "down" vs "broken"** so an unrun seam reads as *skipped*, not
   a failure — the fix for the "lots of pages don't work" report is first to *tell* which
   is which.
