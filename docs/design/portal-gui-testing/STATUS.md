@@ -17,7 +17,7 @@ stack (a lesson carried from the portal + code-review tracks).
 | 06 | Contract drift guard (RPC set + rendered enums vs descriptor set) — `test/meta/contract_test.dart`, runs in `portal-widget` | — | ✅ | ✅ | — | **this PR** |
 | 07 | Layer B `portal-e2e` app (metrics-delta + read-RPC + curated span, trace linking) | ✅ | ✅ | ✅ | — | **this PR** |
 | 08 | Report renderer + aggregation (+ failure artifacts) — `nix run .#portal-test-report` (hermetic slice) | — | — | ✅ | — | ✅ 640892b |
-| 09 | Performance tracking — `portal_gui_perf` table + JSONEachRow emitter + SQL + Grafana | — | ✅ | ✅ | ✅ | ⬜ |
+| 09 | Performance tracking — `portal_gui_perf` table + JSONEachRow emitter + SQL + Grafana | — | ✅ | ✅ | ✅ | **this PR** |
 | 10 | Envoy full instrumentation — OTLP access logs + tracing + CORS trace-context + `envoy_access_latency` | — | — | ✅ | ✅ | **this PR** |
 
 ## Dependency order
@@ -67,6 +67,28 @@ stack (a lesson carried from the portal + code-review tracks).
   and the curated OTLP span check is best-effort (inc 10 is authoritative). The
   personality select must target a personality **other than** the active one (the page
   no-ops an unchanged selection, firing no RPC).
+- **09 (perf → `portal_gui_perf`)** shipped third (last) in the live-l2 wave — folded
+  into the same opt-in `nix run .#portal-e2e`, NOT on the gate. See [`06`](06-performance.md)
+  "As built". Notes of record: the table lives in the **agent** ClickHouse
+  (`agent.portal_gui_perf`, added to `nix/clickhouse/schema.sql` — the doctor drift check
+  auto-extends), inserted via HTTP `JSONEachRow` to `:8123`; **rootless podman isolates**
+  the two ClickHouse servers (the agent's, and ClickStack's bundled one holding
+  `default.otel_traces`, whose native port is not host-published), so `trace_id` is the
+  portable **key link**, not a single-server JOIN — Q3 of the canned SQL is a two-step
+  lookup. Per action we record `interaction_ms` (client, from the driver) and
+  `grpc_server_ms` (server truth from the `:9700` histogram delta — its `rpc` label is the
+  **full** path with **no** `outcome` label, unlike the `_total` counter); `trace_id` is
+  looked up in `otel_traces` by the gateway span's **short** op name
+  (`SpanAttributes['rpc']`, e.g. `registry.put`), so a captured id is guaranteed to
+  resolve there. All parsed values are fail-closed: histogram fields accept only a clean
+  non-negative decimal, `value_ms` is validated before the row, and a server-supplied
+  `trace_id` is accepted only if hex (else `''`). The insert is **best-effort** (a down CH
+  or un-migrated table is a warn, never a contract fail). Grafana ships a
+  `grafana-clickhouse-datasource` datasource + `portal-gui-perf` dashboard (plugin
+  installed via `GF_INSTALL_PLUGINS`; a pre-existing grafana container must be recreated).
+  `iteration=1` for the single live drive (N-iteration warm-up is future work). Also fixed
+  an inc-07 carryover: the curated span check grepped for a container named `clickstack`
+  but it is `agent-seddon-clickstack` (`versions.clickstackContainerName`).
 
 ## Notes / decisions of record
 

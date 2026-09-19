@@ -253,3 +253,38 @@ CREATE TABLE IF NOT EXISTS agent.agent_turn_digests
 ENGINE = MergeTree
 PARTITION BY toDate(ts)
 ORDER BY (session_id, seq, kind);
+
+-- Portal GUI test timings (portal-gui-testing 06 / inc 09). One row per
+-- (sample, metric) so a PR's GUI performance is comparable to main and to prior
+-- PRs with plain SQL, and any slow sample links to its full trace. Written by the
+-- Layer-B `nix run .#portal-e2e` app via HTTP JSONEachRow — NOT the Rust telemetry
+-- writer — so it needs no `rows.rs` type. `trace_id` is the portable key to the
+-- gateway span in ClickStack's separate `default.otel_traces` (rootless podman
+-- isolates the two ClickHouse servers, so this is a key link, not a cross-server
+-- JOIN). Trend-tracking, NEVER a gate — deterministic micro-perf stays the
+-- iai-callgrind Ir ceilings. `host` is advisory: never compare value_ms across hosts.
+CREATE TABLE IF NOT EXISTS agent.portal_gui_perf
+(
+    ts         DateTime64(3, 'UTC') DEFAULT now64(3, 'UTC'),
+    run_id     String,                        -- one suite invocation (shared with the report)
+    pr_number  UInt32,                        -- 0 off a branch / locally
+    commit_sha String,
+    branch     String,
+    git_dirty  UInt8,
+    host       LowCardinality(String),        -- never compare value_ms across hosts
+    layer      LowCardinality(String),        -- 'unit' | 'widget' | 'golden' | 'e2e'
+    page       LowCardinality(String),
+    element_id LowCardinality(String),
+    test_name  String,
+    phase      LowCardinality(String),        -- 'load' | 'action' | 'settle' | 'rpc' | 'teardown'
+    step       String,                        -- free-form sub-step label
+    rpc_method LowCardinality(String),        -- '' for pure-UI samples
+    metric     LowCardinality(String),        -- page_load_ms | interaction_ms | grpc_client_ms | grpc_upstream_ms | grpc_server_ms
+    value_ms   Float64,
+    iteration  UInt16,
+    outcome    LowCardinality(String),        -- 'pass' | 'fail' | 'skip'
+    trace_id   String                         -- Layer B: key into default.otel_traces (ClickStack)
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(ts)
+ORDER BY (page, test_name, metric, ts);
