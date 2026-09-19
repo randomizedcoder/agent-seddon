@@ -202,6 +202,10 @@ MCP; on branch `feat/portal-config-settings` (not yet merged).
 
 ## Deferred (documented, not scoped here)
 
+- **Automated GUI test coverage** for the portal — every page/element exercised,
+  table-driven, with observability-backed "correct RPC fired + state changed" and per-PR
+  latency tracking. Designed as its own track:
+  [`../portal-gui-testing/`](../portal-gui-testing/README.md).
 - A `constants-sync`-style **drift check for the committed Dart stubs**.
 - **mTLS / cross-host** transport for the portal (tracks the existing gRPC follow-up
   in [`grpc.md`](../../grpc.md#possible-follow-ups); the portal inherits whatever the
