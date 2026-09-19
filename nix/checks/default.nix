@@ -144,6 +144,9 @@ in
   # breadth + L0 units + completeness critic) over portal/test/, vendored offline
   # from portal/pubspec.lock exactly like dart-analyze.
   portal-widget = import ./portal-widget.nix { inherit pkgs lib versions; };
+  # The portal GUI-test report renderer's own suite (docs/design/
+  # portal-gui-testing/05-report.md): render.py four-class tables + check-the-checks.
+  portal-report-tests = import ./portal-report-tests.nix { inherit pkgs; };
   # `buf lint` + `buf breaking` over the .proto contracts (see buf.yaml). Breaking
   # is gated against the committed image; regenerate it with `nix run .#buf-image`.
   buf = import ./buf.nix { inherit pkgs versions; };

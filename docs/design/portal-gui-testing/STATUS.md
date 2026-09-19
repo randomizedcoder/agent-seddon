@@ -16,7 +16,7 @@ stack (a lesson carried from the portal + code-review tracks).
 | 05 | Golden + a11y `portal-visual` check | ✅ | ✅ | ✅ | — | ⬜ |
 | 06 | Contract drift guard (RPC set + rendered enums vs descriptor set) | — | ✅ | ✅ | — | ⬜ |
 | 07 | Layer B `portal-e2e` app (metrics-delta + read-RPC + curated span, trace linking) | ✅ | ✅ | ✅ | — | ⬜ |
-| 08 | Report renderer + aggregation (+ failure artifacts) | — | — | ✅ | — | ⬜ |
+| 08 | Report renderer + aggregation (+ failure artifacts) — `nix run .#portal-test-report` (hermetic slice) | — | — | ✅ | — | **this PR** |
 | 09 | Performance tracking — `portal_gui_perf` table + JSONEachRow emitter + SQL + Grafana | — | ✅ | ✅ | ✅ | ⬜ |
 | 10 | Envoy full instrumentation — OTLP access logs + tracing + CORS trace-context + `envoy_access_latency` | — | — | ✅ | ✅ | ⬜ |
 
@@ -53,6 +53,13 @@ stack (a lesson carried from the portal + code-review tracks).
   `portal/.gitignore` narrowed from `/test/` to just that scaffold file, so the real
   suite is tracked. Including `portal/test/` in a check's source fileset happens in
   inc 03 (the `portal-widget` check); `dart-analyze` still excludes it.
+- **Report renderer (inc 08)** is `nix run .#portal-test-report -- <jsonl>...` (Python behind a
+  shell shim, `test/portal-report/render.py`, gated by `portal-report-tests`). The **hermetic
+  slice** consumes the checks' `flutter test --machine` streams (page/case/outcome/duration keyed
+  by test name) and is forward-compatible with the design's richer per-case records (element_id,
+  backend, rpc_fired, trace_id, artifacts) — Layer B's `portal-e2e` will append those (inc 07), at
+  which point the backend-down legend and per-element rows populate. Renderer stays green (it is a
+  report, not a gate) unless `--fail-on-fail`.
 - **Perf is trend-tracking, not a hard gate** — wall-clock GUI latency is noisy;
   regressions surface via SQL/Grafana, not a red build. iai-callgrind Ir ceilings stay
   the deterministic micro-perf gate.

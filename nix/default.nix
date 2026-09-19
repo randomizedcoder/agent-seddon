@@ -46,6 +46,10 @@ let
       # The Rust build needs nothing from the arena; its files reach the
       # `graph-arena` app and `graph-arena-tests` check by direct path reference.
       !(lib.hasInfix "/test/graph-arena/" path)
+      # The portal report renderer (test/portal-report/*.py) reaches its app +
+      # `portal-report-tests` check by direct path reference; the Rust build needs
+      # nothing from it, so keep it out of the cargo source (same as graph-arena).
+      && !(lib.hasInfix "/test/portal-report/" path)
       && (
         (lib.hasSuffix ".proto" path)
         # The shipped example cognition graphs (`config/cognition/*.textproto`) are
@@ -282,6 +286,12 @@ let
   # draft outcomes). Read-only, no model; needs a reachable ClickHouse. See
   # nix/fleet-measure.nix + test/fleet-measure/report.py.
   fleet-measure = import ./fleet-measure.nix { inherit pkgs; };
+
+  # `nix run .#portal-test-report -- <jsonl>...` — render the portal GUI test
+  # report (page → element → case) from the hermetic checks' `flutter test
+  # --machine` streams + the Layer-B rich records. See nix/portal-test-report.nix
+  # + test/portal-report/render.py (tested by the `portal-report-tests` check).
+  portal-test-report = import ./portal-test-report.nix { inherit pkgs; };
 
   # `nix run .#graph-arena` — the cognition-graph A/B/n value sweep: one objective,
   # baseline + graph-document arms, per-requirement k/n + artifacts. Not a check
@@ -626,6 +636,7 @@ in
         fleet-e2e
         fleet-measure
         fleet-redeploy
+        portal-test-report
         graph-arena
         graph-arena-campaign
         review-eval
