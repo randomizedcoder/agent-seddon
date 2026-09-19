@@ -1,7 +1,9 @@
 # @generated config — provisions the ClickHouse datasource for the portal GUI perf
 # dashboard (portal-gui-testing 06 / inc 09). Grafana runs `--network host`, so the
-# AGENT ClickHouse (the one holding `agent.portal_gui_perf`) is at 127.0.0.1:9000
-# (native protocol; published host-local by `nix run .#clickhouse-up`).
+# AGENT ClickHouse is at 127.0.0.1:9000 (native protocol; published host-local by
+# `nix run .#clickhouse-up`). Since obs-single-ch-01 this ONE server holds both
+# `agent.portal_gui_perf` AND the OTLP `default.otel_traces`, so a single datasource
+# can JOIN perf rows to their trace spans (default DB is `agent`; qualify `default.` for otel_*).
 #
 # NEEDS the `grafana-clickhouse-datasource` plugin, installed by `grafana-up` via
 # GF_INSTALL_PLUGINS. A grafana container created BEFORE that env was added lacks the

@@ -111,9 +111,10 @@ own `--serve-fleet` — track a pidfile like `portal-redeploy` does). Opt-in; no
   web SDK / envoy image at runtime), overridable via `PORTAL_E2E_CHROMIUM` /
   `PORTAL_E2E_CHROMEDRIVER`.
 - **Curated span check is best-effort:** it confirms a recent `agent-gateway`
-  `grpc.server` span reached ClickHouse (via `clickhouse-client` in the ClickStack
-  container), but a down/telemetry-disabled obs stack is a WARN, not a contract
-  failure — [inc 10](07-envoy-otel.md) is the authoritative cross-hop trace proof.
+  `grpc.server` span reached ClickHouse (via `clickhouse-client` in the agent CH
+  container — `default.otel_traces` lives there since obs-single-ch-01), but a
+  down/telemetry-disabled obs stack is a WARN, not a contract failure —
+  [inc 10](07-envoy-otel.md) is the authoritative cross-hop trace proof.
 - **Exit-code contract** is the shared `nix/lib/contract.sh` 0/1/2 (0 ok, 1 harness,
   2 contract). Untrusted `/metrics` text is parsed fail-closed (only a run of digits
   counts; anything else → 0, so a hostile counter can never fake a positive delta).
