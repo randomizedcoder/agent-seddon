@@ -107,13 +107,15 @@ Folded into the opt-in `nix run .#portal-e2e` app (inc 07), not on the gate.
   other table) added to [`nix/clickhouse/schema.sql`](../../../nix/clickhouse/schema.sql).
   The `agent doctor` ClickHouse drift check parses `schema.sql`, so it **auto-extends** —
   an un-migrated volume reports the table missing until `nix run .#clickhouse-migrate`.
-- **Two ClickHouse servers, one key.** The perf rows land in the **agent** ClickHouse
-  (host `:8123`, database `agent`); the gateway/Envoy **spans** live in ClickStack's
-  **separate** bundled ClickHouse (`default.otel_traces`), whose native port is not
-  host-published. Under rootless podman the two have no shared network, so `trace_id` is
-  a **portable key link, not a cross-server JOIN** — the "trace of the slowest" query
-  (Q3 in [`portal_gui_perf.sql`](../../../nix/clickhouse/portal_gui_perf.sql)) is a
-  two-step lookup: get the `trace_id` from the agent CH, resolve it in ClickStack's CH.
+- **One ClickHouse, one JOIN** *(updated by obs-single-ch-01)*. The perf rows land in the
+  **agent** ClickHouse (host `:8123`, database `agent`), and — since the obs stack was
+  decomposed off the all-in-one — the gateway/Envoy **spans** now land in
+  `default.otel_traces` on that **same** server (the HyperDX collector writes otel_* into
+  the agent CH). So `trace_id` is a real **cross-DB JOIN**, and the "trace of the slowest"
+  query (Q3 in [`portal_gui_perf.sql`](../../../nix/clickhouse/portal_gui_perf.sql)) is a
+  single `INNER JOIN agent.portal_gui_perf … default.otel_traces ON trace_id = TraceId`.
+  *(Originally two servers: ClickStack's bundled ClickHouse held the spans, isolated by
+  rootless podman, making Q3 a two-step key-link lookup — see obs-single-ch-01.)*
 - **What's measured, live.** Per driven action: `interaction_ms` (client-perceived, from
   the driver's own timing) and `grpc_server_ms` (**server truth** from the `:9700`
   `agent_grpc_server_rpc_seconds` histogram delta — note its `rpc` label is the **full**

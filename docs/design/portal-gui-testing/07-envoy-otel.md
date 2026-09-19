@@ -82,7 +82,8 @@ A `portal-gui-test` tracer wraps each test/step in a span that is the **parent**
 Envoy → gateway → seam spans, and stores the `trace_id` in the `portal_gui_perf` row and
 the [report](05-report.md) record. Result: **any slow sample is one SQL join from its
 full cross-hop trace** — `SELECT … WHERE duration_ms > N` on the traces table, or join
-`portal_gui_perf.trace_id` → the ClickStack traces table:
+`portal_gui_perf.trace_id` → `default.otel_traces`. Since obs-single-ch-01 the spans live
+in the SAME agent ClickHouse as the perf rows, so this is a real cross-DB JOIN:
 
 ```sql
 -- every span of the slowest interaction this run, in order

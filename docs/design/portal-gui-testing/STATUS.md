@@ -71,11 +71,12 @@ stack (a lesson carried from the portal + code-review tracks).
   into the same opt-in `nix run .#portal-e2e`, NOT on the gate. See [`06`](06-performance.md)
   "As built". Notes of record: the table lives in the **agent** ClickHouse
   (`agent.portal_gui_perf`, added to `nix/clickhouse/schema.sql` — the doctor drift check
-  auto-extends), inserted via HTTP `JSONEachRow` to `:8123`; **rootless podman isolates**
-  the two ClickHouse servers (the agent's, and ClickStack's bundled one holding
-  `default.otel_traces`, whose native port is not host-published), so `trace_id` is the
-  portable **key link**, not a single-server JOIN — Q3 of the canned SQL is a two-step
-  lookup. Per action we record `interaction_ms` (client, from the driver) and
+  auto-extends), inserted via HTTP `JSONEachRow` to `:8123`. **Since obs-single-ch-01
+  decomposed the obs stack, there is ONE ClickHouse:** `default.otel_traces` now lives on
+  the same server as `agent.portal_gui_perf`, so `trace_id` is a real cross-DB **JOIN** —
+  Q3 of the canned SQL is a single `INNER JOIN`. *(Originally two servers — the agent's and
+  ClickStack's bundled one, isolated by rootless podman — making trace_id a two-step key
+  link.)* Per action we record `interaction_ms` (client, from the driver) and
   `grpc_server_ms` (server truth from the `:9700` histogram delta — its `rpc` label is the
   **full** path with **no** `outcome` label, unlike the `_total` counter); `trace_id` is
   looked up in `otel_traces` by the gateway span's **short** op name

@@ -258,10 +258,11 @@ ORDER BY (session_id, seq, kind);
 -- (sample, metric) so a PR's GUI performance is comparable to main and to prior
 -- PRs with plain SQL, and any slow sample links to its full trace. Written by the
 -- Layer-B `nix run .#portal-e2e` app via HTTP JSONEachRow — NOT the Rust telemetry
--- writer — so it needs no `rows.rs` type. `trace_id` is the portable key to the
--- gateway span in ClickStack's separate `default.otel_traces` (rootless podman
--- isolates the two ClickHouse servers, so this is a key link, not a cross-server
--- JOIN). Trend-tracking, NEVER a gate — deterministic micro-perf stays the
+-- writer — so it needs no `rows.rs` type. `trace_id` JOINs to the gateway span in
+-- `default.otel_traces` on THIS SAME server: the obs stack was decomposed
+-- (obs-single-ch-01) so the HyperDX collector writes otel_* into the agent ClickHouse,
+-- making the perf-row → trace link a real cross-DB JOIN. Trend-tracking, NEVER a gate
+-- — deterministic micro-perf stays the
 -- iai-callgrind Ir ceilings. `host` is advisory: never compare value_ms across hosts.
 CREATE TABLE IF NOT EXISTS agent.portal_gui_perf
 (
@@ -283,7 +284,7 @@ CREATE TABLE IF NOT EXISTS agent.portal_gui_perf
     value_ms   Float64,
     iteration  UInt16,
     outcome    LowCardinality(String),        -- 'pass' | 'fail' | 'skip'
-    trace_id   String                         -- Layer B: key into default.otel_traces (ClickStack)
+    trace_id   String                         -- Layer B: JOIN key into default.otel_traces (same server)
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(ts)
