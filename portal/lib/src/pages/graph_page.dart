@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../clients.dart';
 import '../gen/agent/v1/graph.pb.dart';
+import '../graph_examples.dart';
 import '../graph_json.dart';
 import '../graph_library.dart';
 import '../io/graph_platform.dart' as platform;
@@ -45,7 +46,17 @@ class _GraphPageState extends State<GraphPage> {
 
   Future<void> _init() async {
     _library = GraphLibrary.load();
-    await _refreshServer(seedIfEmpty: true);
+    if (_library.entries.isEmpty) {
+      // First visit (or storage cleared): seed the repo's shipped example graphs
+      // so the page demonstrates the feature instead of showing an empty library.
+      // They are ordinary, editable entries from then on (persisted to storage).
+      final examples = await loadExampleGraphs();
+      if (examples.isNotEmpty) {
+        _library.entries.addAll(examples);
+        _library.save();
+      }
+    }
+    await _refreshServer(seedActive: true);
     setState(() {
       _selected = _library.entries.isNotEmpty ? _library.entries.first : null;
       _loading = false;
@@ -55,7 +66,7 @@ class _GraphPageState extends State<GraphPage> {
   /// Fetch node-type schemas (the reachability probe) and, best-effort, the
   /// active graph. A gateway that is down leaves the local library fully
   /// editable, just without live validate / set-active until Retry.
-  Future<void> _refreshServer({bool seedIfEmpty = false}) async {
+  Future<void> _refreshServer({bool seedActive = false}) async {
     // Node types are the "is the gateway reachable" probe — the palette + param
     // forms need them regardless of whether any graph is active yet.
     try {
@@ -75,7 +86,12 @@ class _GraphPageState extends State<GraphPage> {
     try {
       final active = await widget.clients.graph.get(GetGraphRequest());
       _activeJson = jsonEncode(graphToJson(active.graph));
-      if (seedIfEmpty && _library.entries.isEmpty) {
+      // Surface the server's active document as a library entry, but only if no
+      // entry (e.g. a seeded example) already has that exact content — otherwise
+      // it just duplicates one of the examples the user is already looking at.
+      if (seedActive &&
+          !_library.entries
+              .any((e) => jsonEncode(graphToJson(e.graph)) == _activeJson)) {
         _library.entries
             .add(GraphLibraryEntry('active (server)', active.graph));
         _library.save();
@@ -338,8 +354,17 @@ class _GraphPageState extends State<GraphPage> {
         Expanded(
           child: _library.entries.isEmpty
               ? const Center(
-                  child: Text('No graphs yet.\nNew or Import.',
-                      textAlign: TextAlign.center))
+                  child: Padding(
+                    padding: EdgeInsets.all(24),
+                    child: Text(
+                      'No graphs in this browser yet.\n\n'
+                      'The shipped example graphs seed automatically on first '
+                      'load. If storage is blocked, use New or Import above — or '
+                      'run a session so the server has an active graph to show.',
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                )
               : ListView(
                   children: [
                     for (final e in _library.entries)

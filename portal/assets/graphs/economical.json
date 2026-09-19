@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "nodes": {
+    "compact": {
+      "type": "compact_assemble",
+      "typeVersion": 1,
+      "params": {
+        "relevance": "keyword",
+        "min_coverage": 0.6
+      }
+    },
+    "facts": {
+      "type": "distill_facts",
+      "typeVersion": 1,
+      "params": {
+        "max_tokens": 256,
+        "provider": "local"
+      }
+    },
+    "gate": {
+      "type": "critic_gate",
+      "typeVersion": 1,
+      "params": {
+        "critic": "local",
+        "max_rounds": 2
+      }
+    },
+    "generate": {
+      "type": "generate",
+      "typeVersion": 1
+    },
+    "objective": {
+      "type": "objective",
+      "typeVersion": 1,
+      "params": {
+        "max_tokens": 128
+      }
+    },
+    "summarize": {
+      "type": "distill_summary",
+      "typeVersion": 1,
+      "params": {
+        "max_tokens": 512,
+        "provider": "local"
+      }
+    }
+  },
+  "edges": [
+    {"from": "anchor.response", "to": "generate", "kind": "main"},
+    {"from": "generate", "to": "gate", "kind": "main"},
+    {"from": "local", "to": "gate", "kind": "capability"},
+    {"from": "anchor.delivery", "to": "summarize", "kind": "background"},
+    {"from": "anchor.delivery", "to": "facts", "kind": "background"},
+    {"from": "anchor.compaction", "to": "objective", "kind": "main"},
+    {"from": "objective", "to": "compact", "kind": "main"},
+    {"from": "local", "to": "objective", "kind": "capability"}
+  ]
+}
