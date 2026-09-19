@@ -1,8 +1,7 @@
-import 'dart:convert';
-
 import 'package:flutter/material.dart';
 
 import '../clients.dart';
+import '../config_diff.dart';
 import '../gen/agent/v1/config.pb.dart';
 import '../graph_json.dart';
 import '../widgets/schema_form.dart';
@@ -96,34 +95,14 @@ class _SettingsPageState extends State<SettingsPage> {
     final staged = _staged[section];
     if (staged == null) return false;
     final orig = (_values[section] as Map?)?.cast<String, dynamic>() ?? {};
-    return _edits(orig, staged, '$section.').isNotEmpty;
-  }
-
-  /// Diff original vs staged into dotted-path edits. Recurses into objects;
-  /// arrays and scalars are atomic leaves (whole-array replacement — matches the
-  /// backend, which rejects indexed array paths).
-  List<ConfigEdit> _edits(
-      Map<String, dynamic> orig, Map<String, dynamic> staged, String prefix) {
-    final out = <ConfigEdit>[];
-    for (final key in staged.keys) {
-      final o = orig[key];
-      final e = staged[key];
-      if (o is Map<String, dynamic> && e is Map<String, dynamic>) {
-        out.addAll(_edits(o, e, '$prefix$key.'));
-      } else if (jsonEncode(o) != jsonEncode(e)) {
-        out.add(ConfigEdit()
-          ..path = '$prefix$key'
-          ..value = dartToJsonValue(e));
-      }
-    }
-    return out;
+    return configEdits(orig, staged, '$section.').isNotEmpty;
   }
 
   List<ConfigEdit> _sectionEdits(String section) {
     final staged = _staged[section];
     if (staged == null) return [];
     final orig = (_values[section] as Map?)?.cast<String, dynamic>() ?? {};
-    return _edits(orig, staged, '$section.');
+    return configEdits(orig, staged, '$section.');
   }
 
   Future<void> _save(String section) async {
