@@ -1,7 +1,7 @@
 # nix/lib/mk-container-app.nix
 #
 # The container-lifecycle apps that are byte-identical across the container modules
-# (clickhouse / clickstack / prometheus / grafana): the `*-down` remover, the
+# (clickhouse / prometheus / grafana): the `*-down` remover, the
 # `*-client` exec wrapper, and the `*-logs` follower. Only the `*-up` app is
 # genuinely per-service (network mode, port maps, schema/dashboard provisioning),
 # so it stays in each module.

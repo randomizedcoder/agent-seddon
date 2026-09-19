@@ -145,7 +145,7 @@ in
   protoc-gen-dart = pkgs.protoc-gen-dart;
   flutter = pkgs.flutter;
   dart = pkgs.dart;
-  # The grpc-web proxy runs as a container (like prometheus/clickstack), so the gate
+  # The grpc-web proxy runs as a container (like prometheus/hyperdx), so the gate
   # never source-builds envoy. Web build only. Referenced fully-qualified
   # (`docker.io/...`) in nix/portal so podman — whose unqualified-search list can be
   # empty (e.g. the headless l2 box) — resolves it too.
@@ -299,14 +299,27 @@ in
   postgresUser = "agent";
   postgresPassword = "agent"; # dev/CI only — the container is bound to 127.0.0.1.
 
-  # ── ClickStack (HyperDX all-in-one) settings ──────────────────────────────
-  # The OTLP receiver + ClickHouse + HyperDX UI the agent's OTLP tracing exports
-  # to. Pin the image so an upstream bump is an explicit change here.
-  clickstackImage = "docker.hyperdx.io/hyperdx/hyperdx-all-in-one:2";
-  clickstackContainerName = "agent-seddon-clickstack";
-  clickstackUiPort = 8080; # HyperDX web UI
-  clickstackOtlpGrpcPort = 4317; # OTLP/gRPC receiver (the endpoint the agent uses)
-  clickstackOtlpHttpPort = 4318; # OTLP/HTTP receiver
+  # ── HyperDX (ClickStack) — decomposed, bring-your-own-ClickHouse ───────────
+  # We DELIBERATELY do not use the `hyperdx-all-in-one` image: it bundles its own
+  # ClickHouse that cannot be disabled, which forced a SECOND clickhouse server
+  # (otel_* lived there, `agent.*` in ours) and made trace_id a cross-store key
+  # link instead of a JOIN. Instead we run the official self-hosted trio — Mongo
+  # (app state) + the OTel collector (OTLP → ClickHouse, auto-creates otel_*) +
+  # the HyperDX app (UI/API/OpAMP) — all pointed at the SINGLE agent ClickHouse
+  # (`clickhouseContainerName`, DB `default` for otel_*). See nix/hyperdx.
+  # Pin images so an upstream bump is an explicit change here.
+  hyperdxAppImage = "docker.hyperdx.io/hyperdx/hyperdx:2"; # UI + API + OpAMP (already registry-qualified)
+  hyperdxCollectorImage = "docker.clickhouse.com/clickhouse/clickstack-otel-collector:2"; # OTLP → ClickHouse (already qualified)
+  mongoImage = "mongo:5.0.32-focal"; # HyperDX metadata (users/teams/dashboards + CH connection defs)
+  hyperdxAppContainerName = "agent-seddon-hyperdx-app";
+  hyperdxOtelContainerName = "agent-seddon-hyperdx-otel";
+  mongoContainerName = "agent-seddon-mongo";
+  hyperdxUiPort = 8080; # HyperDX web UI (app)
+  hyperdxApiPort = 8000; # HyperDX API (app)
+  hyperdxOpampPort = 4320; # OpAMP config server the collector pulls its pipeline from (app)
+  mongoPort = 27017; # MongoDB (app state)
+  otlpGrpcPort = 4317; # OTLP/gRPC receiver on the collector (the endpoint the agent exports to)
+  otlpHttpPort = 4318; # OTLP/HTTP receiver on the collector
 
   # ── Prometheus + Grafana settings ─────────────────────────────────────────
   # The metrics scraper + dashboards for a running agent (complementary to the

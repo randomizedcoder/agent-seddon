@@ -18,7 +18,7 @@
 #
 # The native desktop build dials the gateway (:50100) directly and needs no proxy;
 # `grpc-web-up` exists only because browsers cannot speak raw gRPC (HTTP/2 trailers).
-# The proxy runs as a container (like prometheus/clickstack) so the gate never
+# The proxy runs as a container (like prometheus/hyperdx) so the gate never
 # source-builds envoy; it honours `CONTAINER_RUNTIME=podman` for docker-less hosts.
 #
 # Every endpoint the app dials is overridable via `--dart-define` (see the
@@ -48,16 +48,16 @@ let
   # Prometheus metrics of the --serve-all gateway (mirrors nix/constants.nix
   # GATEWAY.metrics_port). The Layer-B e2e reads per-RPC deltas from here.
   metricsPort = 9700;
-  # OTLP/gRPC collector (ClickStack), reached on host loopback since envoy runs
-  # --network host. Access logs + tracer spans from the bridge ship here so the
-  # browser -> envoy -> gateway -> seam hop is one trace. Single source of truth.
-  otelCollectorPort = versions.clickstackOtlpGrpcPort;
-  # The agent's own telemetry ClickHouse (HTTP :8123, database `agent`) — where the
-  # Layer-B perf rows land (inc 09). Distinct from the ClickStack container's bundled
-  # ClickHouse (holds `default.otel_traces`, not host-published); the two are linked by
-  # the `trace_id` column, not a cross-server JOIN (rootless podman isolates them).
+  # OTLP/gRPC collector (the decomposed HyperDX otel-collector), reached on host
+  # loopback since envoy runs --network host. Access logs + tracer spans from the
+  # bridge ship here so the browser -> envoy -> gateway -> seam hop is one trace.
+  otelCollectorPort = versions.otlpGrpcPort;
+  # The SINGLE agent ClickHouse (HTTP :8123). It now holds BOTH the Layer-B perf rows
+  # (`agent.portal_gui_perf`, inc 09) AND the OTLP spans (`default.otel_traces`, written
+  # by the HyperDX collector) — the obs stack was decomposed off the all-in-one so there
+  # is one ClickHouse, and `trace_id` is a same-server (cross-DB) JOIN, not a key link.
   chHttpPort = versions.clickhouseHttpPort;
-  clickstackContainer = versions.clickstackContainerName;
+  chContainer = versions.clickhouseContainerName;
   name = "agent-grpc-web";
   # Fully-qualified so podman (whose unqualified-search list can be empty, e.g. on the
   # headless l2 box) resolves it; docker treats the docker.io/ prefix as a no-op.
@@ -1021,9 +1021,9 @@ let
       # gateway exported a recent grpc.server span into ClickHouse. Best-effort:
       # a ClickHouse that is down/unreachable is a WARN, not a contract failure.
       span_n=0
-      if "$runtime" ps --format '{{.Names}}' 2>/dev/null | grep -qx "${clickstackContainer}"; then
+      if "$runtime" ps --format '{{.Names}}' 2>/dev/null | grep -qx "${chContainer}"; then
         for _ in $(seq 1 15); do
-          span_n="$("$runtime" exec "${clickstackContainer}" clickhouse-client -q \
+          span_n="$("$runtime" exec "${chContainer}" clickhouse-client -q \
             "SELECT count() FROM default.otel_traces WHERE ServiceName='agent-gateway' AND SpanName='grpc.server' AND Timestamp > now() - INTERVAL 3 MINUTE" 2>/dev/null || echo 0)"
           case "$span_n" in "" | *[!0-9]* ) span_n=0 ;; esac
           if [ "$span_n" -ge 1 ]; then break; fi
@@ -1050,8 +1050,8 @@ let
       # Every driven action doubles as a timing sample. We record the client-perceived
       # interaction latency (from the driver) and the SERVER-side truth (the :${toString metricsPort}
       # histogram delta for the RPC), tag each RPC sample with the gateway span's
-      # trace_id (looked up in ClickStack's otel_traces by the short span name), and
-      # stream the batch to the agent ClickHouse over HTTP JSONEachRow. This is
+      # trace_id (looked up in the agent CH's default.otel_traces by the short span name), and
+      # stream the batch to the same agent ClickHouse over HTTP JSONEachRow. This is
       # observability, NOT a gate: any failure here is a warning, never a contract fail.
       : >"$workdir/perf.jsonl"
 
@@ -1080,13 +1080,13 @@ let
       # Newest gateway trace_id for a short RPC name within the run window. The value is
       # SERVER-supplied (untrusted): accept ONLY hex, else "" — so a hostile trace id
       # can never reach the row (and JSONEachRow carries it as data, never SQL).
-      # Best-effort: no ClickStack, export lag, or tracing off -> "".
+      # Best-effort: no ClickHouse, export lag, or tracing off -> "".
       trace_for() {
         local sr="$1" tid=""
         [ -n "$sr" ] || { echo ""; return; }
-        "$runtime" ps --format '{{.Names}}' 2>/dev/null | grep -qx "${clickstackContainer}" || { echo ""; return; }
+        "$runtime" ps --format '{{.Names}}' 2>/dev/null | grep -qx "${chContainer}" || { echo ""; return; }
         for _ in $(seq 1 6); do
-          tid="$("$runtime" exec "${clickstackContainer}" clickhouse-client -q \
+          tid="$("$runtime" exec "${chContainer}" clickhouse-client -q \
             "SELECT TraceId FROM default.otel_traces WHERE ServiceName='agent-gateway' AND SpanAttributes['rpc']='$sr' AND Timestamp > now() - INTERVAL 5 MINUTE ORDER BY Timestamp DESC LIMIT 1" 2>/dev/null || echo "")"
           if [ -n "$tid" ]; then break; fi
           sleep 1

@@ -104,8 +104,10 @@ matching check passes — the diff is the reviewable "accept this change" step)
 - `vcr-record` — refresh the provider cassettes the hermetic `vcr_matrix` test replays
 
 **Observability & datastore containers** (need docker)
-- `clickhouse-{up,down,client}`, `clickstack-{up,down,logs,client}` — the OTLP
-  trace store + UI
+- `clickhouse-{up,down,client}` — the single ClickHouse (holds `agent.*` AND, since the
+  obs stack was decomposed, the OTLP `default.otel_*` tables)
+- `hyperdx-{up,down,logs}` — the decomposed HyperDX (Mongo + OTel collector + app), the
+  OTLP trace receiver + UI, all pointed at that one ClickHouse
 - `prometheus-{up,down}`, `grafana-{up,down}` — metrics scraping + dashboards
 - `grpc-web-{up,down}` — the grpc-web proxy for the portal
 - `portal` — the Flutter agent portal
@@ -121,7 +123,7 @@ nix/
   packages.nix         package-set helpers
   lib/                 shared flake helpers — the DRY core (see below)
   checks/              one file per `nix flake check` target
-  clickhouse/ clickstack/ prometheus/ grafana/ portal/   container/app modules
+  clickhouse/ hyperdx/ prometheus/ grafana/ portal/   container/app modules
   *.nix                one file per app (integration.nix, soak.nix, loadtest*.nix, …)
 ```
 
