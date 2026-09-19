@@ -305,8 +305,36 @@ Experimental, single-author, no CI. Known gaps, stated plainly:
 per-component docs, the operating guides, and the 30 parity specs.
 [**`DESIGN.md`**](DESIGN.md) is the architecture reference (the loop, the seams, the
 gRPC layer); the [**`docs/design/`**](docs/design/) directories hold the per-track
-design docs and their status trackers (adaptive cognition, the GPU/LLM pool, the
-code-review flow, tool-call verification).
+design docs and their status trackers.
+
+### Design tracks
+
+Each track's directory holds its design of record plus a `STATUS.md` tracking what's
+built vs. designed. (Two deferred idea-notes are single files rather than directories.)
+
+| Track | What it designs |
+|---|---|
+| [adaptive-cognition](docs/design/adaptive-cognition/README.md) | Local-LLM meta-cognition: runtime mode detection, mode-aware compaction, and dimensional per-file memory. |
+| [code-graph](docs/design/code-graph/README.md) | Type-aware, whole-repo structural code intelligence exposed as an `AstBackend` seam. |
+| [code-review](docs/design/code-review/README.md) | The end-to-end code-review flow — signals, synthesis, and a reason-tagged risk gate. |
+| [cognition-graph](docs/design/cognition-graph/README.md) | Cross-checked responses, as-you-go distillation, and instant compaction via a graph-structured document. |
+| [config](docs/design/config/README.md) | Unified two-tier (TOML + protobuf) configuration with auth, RBAC, and per-tenant multi-forge stores. |
+| [doctor](docs/design/doctor/README.md) | Operational self-diagnosis: an `agent doctor` CLI and fleet `Preflight` RPC over a reusable `Probe` seam. |
+| [fleet-grounding](docs/design/fleet-grounding/README.md) | Fast, well-grounded PR reviews via repo indexing and worktree-rooted grounding. |
+| [gpu-pool](docs/design/gpu-pool/README.md) | Health-checked, capacity-aware load balancing across many GPU/LLM targets. |
+| [loadtest](docs/design/loadtest/README.md) | Overload/backpressure conformance (`RESOURCE_EXHAUSTED` + pushback) and a seam load/stress harness. |
+| [model-router](docs/design/model-router/README.md) | Task-aware routing and an upstream registry over a fleet of 10–50 LLM upstreams. |
+| [multi-session](docs/design/multi-session/README.md) | Multi-session / multi-user isolation across every seam (identity, tenancy, lifecycle). |
+| [multi-tenancy](docs/design/multi-tenancy/README.md) | Making the whole agent multi-org across process-isolation, data-scoping, and config/state planes. |
+| [observability](docs/design/observability/README.md) | A repo-wide OTEL audit adding tenant + repo dimensions across every metric family and span. |
+| [portal](docs/design/portal/README.md) | A Flutter/gRPC-only portal: prompt CRUD, live agent view, config/router admin, and an obs launcher. |
+| [portal-gui-testing](docs/design/portal-gui-testing/README.md) | A portal GUI test-automation framework: hermetic widget tests plus live Layer-B e2e proven via observability. |
+| [prompts](docs/design/prompts/README.md) | Situational, tag-based prompt selection with swappable storage and named personalities. |
+| [review-analysis-depth](docs/design/review-analysis-depth/README.md) | Deeper review static analysis: nix-provisioned tool suites, run in parallel and condensed before the LLM. |
+| [review-fleet](docs/design/review-fleet/README.md) | A long-running server hosting N unattended review sessions (watch → checkout → review → approve → post). |
+| [review-parallelism](docs/design/review-parallelism/README.md) | Chunked map-reduce review to cut single-PR review latency (lever 3). |
+| [tokenization-cache](docs/design/tokenization-cache.md) | Idea-note (deferred): memoize token *counts* via a `Tokenizer`-seam decorator. |
+| [tool-call-verification](docs/design/tool-call-verification.md) | A measured, multi-model gate that verifies tool-call correctness before execution. |
 
 ## License
 
