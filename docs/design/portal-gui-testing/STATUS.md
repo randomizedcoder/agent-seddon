@@ -10,8 +10,8 @@ stack (a lesson carried from the portal + code-review tracks).
 |---|---|:--:|:--:|:--:|:--:|:--:|
 | 00 | Design docs (`docs/design/portal-gui-testing/`) | — | — | — | — | ✅ #421 |
 | 01 | Widget-key scheme (inline `Key('<page>.<element>')` across all pages) | ✅ | — | — | — | ✅ #423 |
-| 02 | `portal-testkit` fakes (in-proc fake gRPC + recording) + `flutter_test`/`integration_test` deps + regen `pubspec.lock` + config-diff extraction + L0 unit tests | ✅ | ✅ | — | — | **this PR** |
-| 03 | Layer A `portal-widget` check + per-page robots + completeness critic + first 1–2 pages tabled (template) | ✅ | ✅ | ✅ | — | ⬜ |
+| 02 | `portal-testkit` fakes (in-proc fake gRPC + recording) + `flutter_test`/`integration_test` deps + regen `pubspec.lock` + config-diff extraction + L0 unit tests | ✅ | ✅ | — | — | ✅ #424 |
+| 03 | Layer A `portal-widget` check + robots + completeness critic + Launch & Prompts tabled (template) | ✅ | ✅ | ✅ | — | **this PR** |
 | 04 | Remaining pages tabled in Layer A | ✅ | ✅ | — | — | ⬜ |
 | 05 | Golden + a11y `portal-visual` check | ✅ | ✅ | ✅ | — | ⬜ |
 | 06 | Contract drift guard (RPC set + rendered enums vs descriptor set) | — | ✅ | ✅ | — | ⬜ |
@@ -59,6 +59,18 @@ stack (a lesson carried from the portal + code-review tracks).
 - **Backend preflight tags "down" vs "broken"** so an unrun seam reads as *skipped*, not
   a failure — the fix for the "lots of pages don't work" report is first to *tell* which
   is which.
+- **Real-loopback pump recipe (inc 03, load-bearing for every page test)**: pages dial the
+  fake gRPC over a real ephemeral loopback socket, but `flutter_test`'s fake clock does not
+  advance real socket I/O — so `pumpWidget` and teardown must run inside `tester.runAsync`,
+  and `Robot.pumpUntil` alternates a real-async step with a `pump()` to settle deterministically
+  (no fixed sleeps). Pump on a desktop-sized surface (the default 800×600 overflows). Select a
+  `DropdownButton` item by its **text** with `.hitTestable()` (the keyed `DropdownMenuItem` has an
+  offstage IndexedStack twin). Drain trailing timers before test end — the SnackBar auto-dismiss
+  and grpc-dart's HTTP/2 **connection idle timeout** (5 min) both leak as `!timersPending`
+  otherwise. All centralised in `test/testkit/robots/robot.dart`.
+- **Completeness critic** source-scans `portal/lib` for `Key('…')` stems and fails a tabled page
+  that has a stem without a `positive_` row; not-yet-tabled pages are logged as *pending*
+  (inc 04 burns the pending count to 0), never silently skipped.
 - **Reuse existing infra**: hermetic Flutter (`buildFlutterApplication`), the gRPC
   metrics/spans the harness already emits, ClickStack/ClickHouse + Grafana on l2, and
   the `portal-redeploy` full-stack bring-up.

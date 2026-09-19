@@ -22,13 +22,29 @@ class FakePromptService extends PromptServiceBase {
   DeleteReply deleteResponse = DeleteReply();
   PromptList selectResponse = PromptList();
   AssembledContext previewResponse = AssembledContext();
+
+  /// The active personality `GetActivePersonality` reports (the initial state);
+  /// defaults to the empty id (the "default base").
   ActivePersonality activePersonality = ActivePersonality();
+
+  /// `SetActivePersonality`'s reply. When null (default) the fake echoes the
+  /// request id — the realistic server behaviour (it applies and returns the new
+  /// active) — so a test need only script the *initial* [activePersonality].
+  ActivePersonality? setActivePersonalityResponse;
 
   /// When set, the next served RPC throws this instead of returning — cleared
   /// after it fires, so one injected fault affects exactly one call.
   GrpcError? error;
 
-  void _guard() {
+  /// When > zero, every served RPC waits this long before responding — the
+  /// `slow(delay)` script for the "slow / hung" resilience row (assert the
+  /// loading state + the in-flight guard disables the button, no double-submit).
+  Duration responseDelay = Duration.zero;
+
+  Future<void> _guard() async {
+    if (responseDelay > Duration.zero) {
+      await Future<void>.delayed(responseDelay);
+    }
     final e = error;
     if (e != null) {
       error = null;
@@ -39,35 +55,35 @@ class FakePromptService extends PromptServiceBase {
   @override
   Future<PromptList> list(ServiceCall call, PromptListRequest request) async {
     _log.record('agent.v1.PromptService/List', request);
-    _guard();
+    await _guard();
     return listResponse;
   }
 
   @override
   Future<PromptEntry> get(ServiceCall call, PromptRef request) async {
     _log.record('agent.v1.PromptService/Get', request);
-    _guard();
+    await _guard();
     return getResponse;
   }
 
   @override
   Future<PromptEntry> put(ServiceCall call, PromptEntry request) async {
     _log.record('agent.v1.PromptService/Put', request);
-    _guard();
+    await _guard();
     return putResponse;
   }
 
   @override
   Future<DeleteReply> delete(ServiceCall call, PromptRef request) async {
     _log.record('agent.v1.PromptService/Delete', request);
-    _guard();
+    await _guard();
     return deleteResponse;
   }
 
   @override
   Future<PromptList> select(ServiceCall call, PromptContext request) async {
     _log.record('agent.v1.PromptService/Select', request);
-    _guard();
+    await _guard();
     return selectResponse;
   }
 
@@ -75,7 +91,7 @@ class FakePromptService extends PromptServiceBase {
   Future<AssembledContext> previewAssembled(
       ServiceCall call, PreviewRequest request) async {
     _log.record('agent.v1.PromptService/PreviewAssembled', request);
-    _guard();
+    await _guard();
     return previewResponse;
   }
 
@@ -83,7 +99,7 @@ class FakePromptService extends PromptServiceBase {
   Future<ActivePersonality> getActivePersonality(
       ServiceCall call, GetActivePersonalityRequest request) async {
     _log.record('agent.v1.PromptService/GetActivePersonality', request);
-    _guard();
+    await _guard();
     return activePersonality;
   }
 
@@ -91,7 +107,7 @@ class FakePromptService extends PromptServiceBase {
   Future<ActivePersonality> setActivePersonality(
       ServiceCall call, SetActivePersonalityRequest request) async {
     _log.record('agent.v1.PromptService/SetActivePersonality', request);
-    _guard();
-    return activePersonality;
+    await _guard();
+    return setActivePersonalityResponse ?? (ActivePersonality()..id = request.id);
   }
 }
