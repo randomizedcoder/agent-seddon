@@ -1,7 +1,7 @@
 # 07 — Fully instrument the Envoy bridge (OTLP → ClickHouse)
 
 The grpc-web **Envoy bridge is the one hop with zero telemetry today** — its config has
-no `access_log` and no `tracing` (`nix/portal/default.nix:151-325`). So when a browser
+no `access_log` and no `tracing` (`nix/portal/default.nix`, the `envoyConfig` heredoc). So when a browser
 call is slow we cannot tell whether the time is in the proxy/HTTP layer or the backend.
 This increment instruments Envoy fully, streaming to the **existing ClickStack OTEL
 collector** (OTLP `:4317`, already wired — `crates/agent-telemetry/src/otel.rs:20-33`,
@@ -20,12 +20,15 @@ collector with the fields that separate proxy time from upstream time:
 | total | `%DURATION%` | request start → last response byte |
 | response | `%RESPONSE_DURATION%` | first upstream byte time |
 | request rx | `%REQUEST_DURATION%` | request body received |
-| upstream handshake | `%UPSTREAM_HANDSHAKE_DURATION%` | connect/TLS to backend |
 | method | `%REQ(:PATH)%` | the gRPC method |
 | status | `%GRPC_STATUS%` / `%RESPONSE_CODE%` | outcome |
 | flags | `%RESPONSE_FLAGS%` | e.g. `UF`/`UT` upstream failure/timeout |
 | upstream | `%UPSTREAM_HOST%` | which backend |
 | ids | `%REQ(X-REQUEST-ID)%`, trace id | correlation |
+
+(`%UPSTREAM_HANDSHAKE_DURATION%` was in the original list but is **not a supported
+command operator in `envoy:v1.31`** — `envoy --mode validate` rejects it with "Not
+supported field in StreamInfo" — so it is omitted.)
 
 `DURATION − RESPONSE_DURATION` (and the upstream duration) localizes a slowdown to the
 proxy vs the backend. These land in ClickStack's OTLP **logs** table with
@@ -65,9 +68,9 @@ authoritative breakdown.
 The three CORS policies in the envoy config must be widened or the browser can't
 propagate/read trace context:
 
-- **`allow_headers`** (`nix/portal/default.nix:175,212,249`) — add
+- **`allow_headers`** (all three CORS policies in the `envoyConfig` heredoc) — add
   `traceparent,tracestate,x-request-id` so the browser/harness can send trace context.
-- **`expose_headers`** (`nix/portal/default.nix:177,214,251`) — add
+- **`expose_headers`** (same three policies) — add
   `x-envoy-upstream-service-time` (and the trace headers) so the client can read them.
 
 Optionally instrument the Dart grpc-web client to inject `traceparent` so the **browser
@@ -94,9 +97,11 @@ ORDER BY start_time;
 ## Scope / verification
 
 The change is confined to the envoy config generated in
-[`nix/portal/default.nix`](../../../nix/portal/default.nix) (access_log + tracing stanzas
-+ the CORS header additions), plus the optional Dart-client `traceparent` injection and
-the `envoy_access_latency` materialized view. The collector runs on host loopback and
+[`nix/portal/default.nix`](../../../nix/portal/default.nix) (a new `otel_collector`
+h2 cluster to `127.0.0.1:4317`, the `access_log` + `tracing` stanzas on each of the
+three HCM listeners, and the CORS header additions), plus the optional Dart-client
+`traceparent` injection and the `envoy_access_latency` materialized view (deferred to
+inc 09 with the ClickHouse schema work). The collector runs on host loopback and
 envoy runs `--network host`, so `localhost:4317` is reachable. Verify by driving one
 call through the bridge and confirming (a) an `envoy-portal-bridge` access-log row and
 (b) an Envoy span sharing the gateway span's `trace_id` both land in ClickHouse.
