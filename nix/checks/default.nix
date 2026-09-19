@@ -140,6 +140,10 @@ in
   # counterpart to clippy. Hermetic: buildFlutterApplication vendors pub deps
   # offline from portal/pubspec.lock, then we run `flutter analyze --no-pub`.
   dart-analyze = import ./dart-analyze.nix { inherit pkgs lib versions; };
+  # Layer A of the portal GUI test framework: hermetic `flutter test` (widget
+  # breadth + L0 units + completeness critic) over portal/test/, vendored offline
+  # from portal/pubspec.lock exactly like dart-analyze.
+  portal-widget = import ./portal-widget.nix { inherit pkgs lib versions; };
   # `buf lint` + `buf breaking` over the .proto contracts (see buf.yaml). Breaking
   # is gated against the committed image; regenerate it with `nix run .#buf-image`.
   buf = import ./buf.nix { inherit pkgs versions; };
