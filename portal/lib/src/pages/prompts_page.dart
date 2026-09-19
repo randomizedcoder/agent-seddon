@@ -180,6 +180,7 @@ class _PromptsPageState extends State<PromptsPage> {
           ),
           actions: [
             TextButton(
+                key: const Key('prompts.preview.close'),
                 onPressed: () => Navigator.pop(context),
                 child: const Text('Close')),
           ],
@@ -245,6 +246,7 @@ class _PromptsPageState extends State<PromptsPage> {
                     color: theme.colorScheme.onTertiaryContainer)),
             const SizedBox(width: 12),
             DropdownButton<String>(
+              key: const Key('prompts.personality.dropdown'),
               value: _activePersonality,
               onChanged: _switching
                   ? null
@@ -252,9 +254,15 @@ class _PromptsPageState extends State<PromptsPage> {
                       if (v != null) _setActivePersonality(v);
                     },
               items: [
-                const DropdownMenuItem(value: '', child: Text('default base')),
+                const DropdownMenuItem(
+                    key: Key('prompts.personality.item.default'),
+                    value: '',
+                    child: Text('default base')),
                 for (final p in _personalities)
-                  DropdownMenuItem(value: p, child: Text(p)),
+                  DropdownMenuItem(
+                      key: Key('prompts.personality.item.$p'),
+                      value: p,
+                      child: Text(p)),
               ],
             ),
             const SizedBox(width: 12),
@@ -276,6 +284,7 @@ class _PromptsPageState extends State<PromptsPage> {
               message: 'Also write [agent] personality as the new-run default',
               child: Row(children: [
                 Checkbox(
+                  key: const Key('prompts.personality.persist'),
                   value: _persistPersonality,
                   onChanged: (v) =>
                       setState(() => _persistPersonality = v ?? false),
@@ -312,6 +321,7 @@ class _PromptsPageState extends State<PromptsPage> {
         final selected = identical(e, _selected) ||
             (_selected != null && e.kind == _selected!.kind && e.id == _selected!.id);
         items.add(ListTile(
+          key: Key('prompts.list.item.${e.kind.name}.${e.id}'),
           dense: true,
           selected: selected,
           title: Text(e.id.isEmpty ? '(system prompt)' : e.id),
@@ -349,6 +359,7 @@ class _PromptsPageState extends State<PromptsPage> {
           const SizedBox(height: 8),
           Expanded(
             child: TextField(
+              key: const Key('prompts.editor'),
               controller: _editor,
               maxLines: null,
               expands: true,
@@ -362,16 +373,19 @@ class _PromptsPageState extends State<PromptsPage> {
           const SizedBox(height: 8),
           Row(children: [
             FilledButton.icon(
+                key: const Key('prompts.save'),
                 onPressed: _save,
                 icon: const Icon(Icons.save),
                 label: const Text('Save')),
             const SizedBox(width: 8),
             OutlinedButton.icon(
+                key: const Key('prompts.delete'),
                 onPressed: _delete,
                 icon: const Icon(Icons.delete_outline),
                 label: const Text('Reset / delete')),
             const Spacer(),
             TextButton.icon(
+                key: const Key('prompts.preview'),
                 onPressed: _preview,
                 icon: const Icon(Icons.visibility),
                 label: const Text('Preview assembled')),
@@ -413,7 +427,10 @@ class _ErrorRetry extends StatelessWidget {
           Text('Not connected to the gateway.\n$message',
               textAlign: TextAlign.center),
           const SizedBox(height: 8),
-          FilledButton(onPressed: onRetry, child: const Text('Retry')),
+          FilledButton(
+              key: const Key('prompts.error.retry'),
+              onPressed: onRetry,
+              child: const Text('Retry')),
         ],
       ),
     );

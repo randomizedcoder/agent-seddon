@@ -91,10 +91,12 @@ class _RouterPageState extends State<RouterPage> {
         content: const Text('Removes the upstream from the live registry.'),
         actions: [
           TextButton(
+            key: const Key('router.upstream.delete.cancel'),
             onPressed: () => Navigator.pop(ctx, false),
             child: const Text('Cancel'),
           ),
           FilledButton(
+            key: const Key('router.upstream.delete.confirm'),
             onPressed: () => Navigator.pop(ctx, true),
             child: const Text('Delete'),
           ),
@@ -151,15 +153,18 @@ class _RouterPageState extends State<RouterPage> {
                     ButtonSegment(
                         value: _View.upstreams,
                         icon: Icon(Icons.dns_outlined),
-                        label: Text('Upstreams')),
+                        label: Text('Upstreams',
+                            key: Key('router.view.upstreams'))),
                     ButtonSegment(
                         value: _View.health,
                         icon: Icon(Icons.favorite_outline),
-                        label: Text('Health')),
+                        label:
+                            Text('Health', key: Key('router.view.health'))),
                     ButtonSegment(
                         value: _View.route,
                         icon: Icon(Icons.alt_route),
-                        label: Text('Route tester')),
+                        label: Text('Route tester',
+                            key: Key('router.view.route'))),
                   ],
                   selected: {_view},
                   onSelectionChanged: (s) => setState(() => _view = s.first),
@@ -207,6 +212,7 @@ class _RouterPageState extends State<RouterPage> {
                         style: TextStyle(fontWeight: FontWeight.bold)),
                     const Spacer(),
                     FilledButton.tonalIcon(
+                      key: const Key('router.upstream.add'),
                       onPressed: () => setState(() => _selected = Upstream()),
                       icon: const Icon(Icons.add, size: 18),
                       label: const Text('Add'),
@@ -229,6 +235,7 @@ class _RouterPageState extends State<RouterPage> {
                         itemBuilder: (ctx, i) {
                           final u = _upstreams[i];
                           return ListTile(
+                            key: Key('router.upstream.item.${u.id}'),
                             selected: _selected?.id == u.id,
                             title: Text(u.id,
                                 maxLines: 1,
@@ -243,10 +250,12 @@ class _RouterPageState extends State<RouterPage> {
                               mainAxisSize: MainAxisSize.min,
                               children: [
                                 Switch(
+                                  key: Key('router.upstream.enable.${u.id}'),
                                   value: u.enabled,
                                   onChanged: (v) => _toggleEnable(u, v),
                                 ),
                                 IconButton(
+                                  key: Key('router.upstream.delete.${u.id}'),
                                   icon: const Icon(Icons.delete_outline),
                                   tooltip: 'Delete',
                                   onPressed: () => _delete(u),
@@ -393,6 +402,7 @@ class _UpstreamEditorState extends State<_UpstreamEditor> {
             ),
             const Spacer(),
             FilledButton.icon(
+              key: const Key('router.upstream.save'),
               onPressed: () => widget.onSave(_build()),
               icon: const Icon(Icons.save, size: 18),
               label: const Text('Save'),
@@ -412,6 +422,7 @@ class _UpstreamEditorState extends State<_UpstreamEditor> {
         _field('tags', 'tags', helper: 'Comma-separated capability tags'),
         const SizedBox(height: 8),
         DropdownButtonFormField<PoolTier>(
+          key: const Key('router.upstream.field.tier'),
           initialValue: _tier,
           decoration: const InputDecoration(
               labelText: 'tier', border: OutlineInputBorder()),
@@ -431,26 +442,31 @@ class _UpstreamEditorState extends State<_UpstreamEditor> {
         _numField('outputCost', 'output_cost'),
         const SizedBox(height: 8),
         SwitchListTile(
+          key: const Key('router.upstream.field.enabled'),
           title: const Text('enabled'),
           value: _enabled,
           onChanged: (v) => setState(() => _enabled = v),
         ),
         SwitchListTile(
+          key: const Key('router.upstream.field.insecureTls'),
           title: const Text('insecure_tls'),
           value: _insecureTls,
           onChanged: (v) => setState(() => _insecureTls = v),
         ),
         SwitchListTile(
+          key: const Key('router.upstream.field.supportsTools'),
           title: const Text('supports_tools'),
           value: _supportsTools,
           onChanged: (v) => setState(() => _supportsTools = v),
         ),
         SwitchListTile(
+          key: const Key('router.upstream.field.supportsVision'),
           title: const Text('supports_vision'),
           value: _supportsVision,
           onChanged: (v) => setState(() => _supportsVision = v),
         ),
         SwitchListTile(
+          key: const Key('router.upstream.field.supportsResponseFormat'),
           title: const Text('supports_response_format'),
           value: _supportsResponseFormat,
           onChanged: (v) => setState(() => _supportsResponseFormat = v),
@@ -462,6 +478,7 @@ class _UpstreamEditorState extends State<_UpstreamEditor> {
   Widget _field(String key, String label, {String? helper}) => Padding(
         padding: const EdgeInsets.only(bottom: 12),
         child: TextField(
+          key: Key('router.upstream.field.$key'),
           controller: _text[key],
           decoration: InputDecoration(
             labelText: label,
@@ -475,6 +492,7 @@ class _UpstreamEditorState extends State<_UpstreamEditor> {
   Widget _numField(String key, String label) => Padding(
         padding: const EdgeInsets.only(bottom: 12),
         child: TextField(
+          key: Key('router.upstream.field.$key'),
           controller: _text[key],
           keyboardType: const TextInputType.numberWithOptions(decimal: true),
           decoration: InputDecoration(
@@ -542,6 +560,7 @@ class _HealthViewState extends State<_HealthView> {
                   style: TextStyle(fontWeight: FontWeight.bold)),
               const Spacer(),
               OutlinedButton.icon(
+                key: const Key('router.health.refresh'),
                 onPressed: _refresh,
                 icon: const Icon(Icons.refresh, size: 18),
                 label: const Text('Refresh'),
@@ -646,6 +665,7 @@ class _RouteTesterState extends State<_RouteTester> {
         const Text('Introspects the router — no request is dispatched.'),
         const SizedBox(height: 16),
         DropdownButtonFormField<TaskMode>(
+          key: const Key('router.route.task_mode'),
           initialValue: _taskMode,
           decoration: const InputDecoration(
               labelText: 'task_mode', border: OutlineInputBorder()),
@@ -657,6 +677,7 @@ class _RouteTesterState extends State<_RouteTester> {
         ),
         const SizedBox(height: 12),
         DropdownButtonFormField<RouteRole>(
+          key: const Key('router.route.role'),
           initialValue: _role,
           decoration: const InputDecoration(
               labelText: 'role', border: OutlineInputBorder()),
@@ -668,6 +689,7 @@ class _RouteTesterState extends State<_RouteTester> {
         ),
         const SizedBox(height: 12),
         DropdownButtonFormField<PoolTier>(
+          key: const Key('router.route.tier'),
           initialValue: _tier,
           decoration: const InputDecoration(
               labelText: 'tier', border: OutlineInputBorder()),
@@ -679,6 +701,7 @@ class _RouteTesterState extends State<_RouteTester> {
         ),
         const SizedBox(height: 12),
         TextField(
+          key: const Key('router.route.min_context'),
           controller: _minContext,
           keyboardType: TextInputType.number,
           decoration: const InputDecoration(
@@ -686,6 +709,7 @@ class _RouteTesterState extends State<_RouteTester> {
         ),
         const SizedBox(height: 12),
         TextField(
+          key: const Key('router.route.max_cost'),
           controller: _maxCost,
           keyboardType: const TextInputType.numberWithOptions(decimal: true),
           decoration: const InputDecoration(
@@ -693,6 +717,7 @@ class _RouteTesterState extends State<_RouteTester> {
         ),
         const SizedBox(height: 12),
         TextField(
+          key: const Key('router.route.hint'),
           controller: _override,
           decoration: const InputDecoration(
               labelText: 'override_upstream',
@@ -701,6 +726,7 @@ class _RouteTesterState extends State<_RouteTester> {
         ),
         const SizedBox(height: 16),
         FilledButton.icon(
+          key: const Key('router.route.run'),
           onPressed: _run,
           icon: const Icon(Icons.play_arrow),
           label: const Text('Route'),
@@ -766,7 +792,10 @@ class _OfflineRetry extends StatelessWidget {
                 textAlign: TextAlign.center),
           ),
           const SizedBox(height: 12),
-          FilledButton(onPressed: onRetry, child: const Text('Retry')),
+          FilledButton(
+              key: const Key('router.error.retry'),
+              onPressed: onRetry,
+              child: const Text('Retry')),
         ],
       ),
     );

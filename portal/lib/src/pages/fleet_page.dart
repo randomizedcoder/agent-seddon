@@ -115,6 +115,7 @@ class _FleetPageState extends State<FleetPage> {
       builder: (ctx) => AlertDialog(
         title: Text('Review now — ${s.id}'),
         content: TextField(
+          key: const Key('fleet.reviewNow.prNumber'),
           controller: controller,
           autofocus: true,
           keyboardType: TextInputType.number,
@@ -127,10 +128,12 @@ class _FleetPageState extends State<FleetPage> {
         ),
         actions: [
           TextButton(
+            key: const Key('fleet.reviewNow.cancel'),
             onPressed: () => Navigator.pop(ctx),
             child: const Text('Cancel'),
           ),
           FilledButton(
+            key: const Key('fleet.reviewNow.queue'),
             onPressed: () => Navigator.pop(ctx, controller.text),
             child: const Text('Queue'),
           ),
@@ -166,10 +169,12 @@ class _FleetPageState extends State<FleetPage> {
         ),
         actions: [
           TextButton(
+            key: const Key('fleet.approve.cancel'),
             onPressed: () => Navigator.pop(ctx, false),
             child: const Text('Cancel'),
           ),
           FilledButton(
+            key: const Key('fleet.approve.confirm'),
             onPressed: () => Navigator.pop(ctx, true),
             child: const Text('Approve & post'),
           ),
@@ -218,6 +223,7 @@ class _FleetPageState extends State<FleetPage> {
                 SizedBox(
                   width: 220,
                   child: TextField(
+                    key: const Key('fleet.filter.repo'),
                     controller: _repo,
                     decoration: const InputDecoration(
                       isDense: true,
@@ -229,6 +235,7 @@ class _FleetPageState extends State<FleetPage> {
                 ),
                 const SizedBox(width: 12),
                 DropdownButton<_StatusFilter>(
+                  key: const Key('fleet.filter.status'),
                   value: _status,
                   items: _StatusFilter.values
                       .map((s) => DropdownMenuItem(
@@ -244,6 +251,7 @@ class _FleetPageState extends State<FleetPage> {
                 ),
                 const Spacer(),
                 OutlinedButton.icon(
+                  key: const Key('fleet.filter.refresh'),
                   onPressed: _reload,
                   icon: const Icon(Icons.refresh, size: 18),
                   label: const Text('Refresh'),
@@ -261,7 +269,10 @@ class _FleetPageState extends State<FleetPage> {
   Widget _body() {
     if (_loading) return const Center(child: CircularProgressIndicator());
     if (_error != null) {
-      return _OfflineRetry(message: _error!, onRetry: _reload);
+      return _OfflineRetry(
+          key: const Key('fleet.error.retry'),
+          message: _error!,
+          onRetry: _reload);
     }
     return Row(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -301,6 +312,7 @@ class _FleetPageState extends State<FleetPage> {
                   itemBuilder: (ctx, i) {
                     final r = _reviews[i];
                     return ListTile(
+                      key: Key('fleet.review.item.${r.reviewId}'),
                       selected: _selected?.reviewId == r.reviewId,
                       dense: true,
                       title: Text('PR #${r.prNumber} · ${r.repo}',
@@ -348,11 +360,13 @@ class _FleetPageState extends State<FleetPage> {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         IconButton(
+                          key: Key('fleet.session.reviewNow.${s.id}'),
                           icon: const Icon(Icons.play_circle_outline),
                           tooltip: 'Review now',
                           onPressed: () => _reviewNow(s),
                         ),
                         Switch(
+                          key: Key('fleet.session.enable.${s.id}'),
                           value: s.enabled,
                           onChanged: (v) => _toggleEnable(s, v),
                         ),
@@ -536,6 +550,7 @@ class _DraftDetailState extends State<_DraftDetail> {
               ),
               const SizedBox(width: 12),
               FilledButton.icon(
+                key: const Key('fleet.detail.approve'),
                 onPressed: canApprove ? widget.onApprove : null,
                 icon: const Icon(Icons.send, size: 18),
                 label: Text(posted ? 'Posted' : 'Approve & post'),
@@ -551,6 +566,7 @@ class _DraftDetailState extends State<_DraftDetail> {
             child: Row(
               children: [
                 SegmentedButton<_DetailMode>(
+                  key: const Key('fleet.detail.mode'),
                   segments: [
                     const ButtonSegment(
                       value: _DetailMode.view,
@@ -586,6 +602,7 @@ class _DraftDetailState extends State<_DraftDetail> {
                               color: Theme.of(context).colorScheme.error)),
                     ),
                   FilledButton.tonalIcon(
+                    key: const Key('fleet.detail.save'),
                     onPressed: (_dirty && !_saving) ? _save : null,
                     icon: _saving
                         ? const SizedBox(
@@ -619,7 +636,10 @@ class _DraftDetailState extends State<_DraftDetail> {
   Widget _content() {
     if (_loading) return const Center(child: CircularProgressIndicator());
     if (_error != null) {
-      return _OfflineRetry(message: _error!, onRetry: _fetch);
+      return _OfflineRetry(
+          key: const Key('fleet.detail.retry'),
+          message: _error!,
+          onRetry: _fetch);
     }
     if (_unavailable) {
       return const Center(
@@ -638,6 +658,7 @@ class _DraftDetailState extends State<_DraftDetail> {
         return Padding(
           padding: const EdgeInsets.all(16),
           child: TextField(
+            key: const Key('fleet.detail.editor'),
             controller: _edit,
             maxLines: null,
             expands: true,
@@ -721,7 +742,8 @@ int? _grpcCode(Object e) {
 class _OfflineRetry extends StatelessWidget {
   final String message;
   final VoidCallback onRetry;
-  const _OfflineRetry({required this.message, required this.onRetry});
+  const _OfflineRetry(
+      {super.key, required this.message, required this.onRetry});
 
   @override
   Widget build(BuildContext context) {

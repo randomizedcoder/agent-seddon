@@ -36,6 +36,8 @@ class LauncherPage extends StatelessWidget {
               subtitle: Text('${l.subtitle}\n${l.url}'),
               isThreeLine: true,
               trailing: FilledButton.tonalIcon(
+                // Test key: `launch.card.<service>` (grafana|hyperdx|prometheus).
+                key: Key('launch.card.${l.title.toLowerCase()}'),
                 onPressed: () => _open(context, l.url),
                 icon: const Icon(Icons.open_in_new),
                 label: const Text('Open'),

@@ -146,6 +146,7 @@ class _SchemaFormState extends State<SchemaForm> {
       if (cur != null && !items.contains(cur)) items.insert(0, cur);
       return _wrap(
         DropdownButtonFormField<String>(
+          key: Key('settings.form.field.$key'),
           initialValue: items.contains(cur) ? cur : null,
           isExpanded: true,
           decoration: _dec(key, desc, def),
@@ -162,6 +163,7 @@ class _SchemaFormState extends State<SchemaForm> {
 
     if (type == 'boolean') {
       return SwitchListTile(
+        key: Key('settings.form.field.$key'),
         title: Text(key),
         subtitle: desc == null ? null : Text(desc),
         value: current == true,
@@ -172,6 +174,7 @@ class _SchemaFormState extends State<SchemaForm> {
     if (type == 'string') {
       return _wrap(
         TextFormField(
+          key: Key('settings.form.field.$key'),
           initialValue: isSecret ? '' : (current?.toString() ?? ''),
           obscureText: isSecret,
           decoration: _dec(
@@ -195,6 +198,7 @@ class _SchemaFormState extends State<SchemaForm> {
       final isInt = type == 'integer';
       return _wrap(
         TextFormField(
+          key: Key('settings.form.field.$key'),
           initialValue: current?.toString() ?? '',
           keyboardType: TextInputType.numberWithOptions(decimal: !isInt),
           decoration: _dec(key, desc, def),
@@ -219,6 +223,7 @@ class _SchemaFormState extends State<SchemaForm> {
       final childValues =
           (current is Map<String, dynamic>) ? current : <String, dynamic>{};
       return ExpansionTile(
+        key: Key('settings.form.field.$key'),
         title: Text(key),
         subtitle: desc == null ? null : Text(desc, maxLines: 2, overflow: TextOverflow.ellipsis),
         childrenPadding: const EdgeInsets.only(left: 12, bottom: 8),
@@ -236,6 +241,7 @@ class _SchemaFormState extends State<SchemaForm> {
     // Arrays, maps (object + additionalProperties), unions, unknowns → raw JSON.
     return _wrap(
       _RawJsonField(
+        key: Key('settings.form.field.$key'),
         label: key,
         help: desc,
         value: current,
@@ -274,6 +280,7 @@ class _RawJsonField extends StatefulWidget {
   final dynamic value;
   final ValueChanged<dynamic> onChanged;
   const _RawJsonField({
+    super.key,
     required this.label,
     this.help,
     required this.value,
