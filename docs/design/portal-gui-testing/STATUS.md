@@ -15,7 +15,7 @@ stack (a lesson carried from the portal + code-review tracks).
 | 04 | Remaining pages tabled in Layer A (Graph, Agent, Router, Fleet, Settings) | ✅ | ✅ | — | — | **this PR** |
 | 05 | Golden + a11y `portal-visual` check (Launch & Prompts slice; matrix extends) | ✅ | ✅ | ✅ | — | **this PR** |
 | 06 | Contract drift guard (RPC set + rendered enums vs descriptor set) — `test/meta/contract_test.dart`, runs in `portal-widget` | — | ✅ | ✅ | — | **this PR** |
-| 07 | Layer B `portal-e2e` app (metrics-delta + read-RPC + curated span, trace linking) | ✅ | ✅ | ✅ | — | ⬜ |
+| 07 | Layer B `portal-e2e` app (metrics-delta + read-RPC + curated span, trace linking) | ✅ | ✅ | ✅ | — | **this PR** |
 | 08 | Report renderer + aggregation (+ failure artifacts) — `nix run .#portal-test-report` (hermetic slice) | — | — | ✅ | — | ✅ 640892b |
 | 09 | Performance tracking — `portal_gui_perf` table + JSONEachRow emitter + SQL + Grafana | — | ✅ | ✅ | ✅ | ⬜ |
 | 10 | Envoy full instrumentation — OTLP access logs + tracing + CORS trace-context + `envoy_access_latency` | — | — | ✅ | ✅ | **this PR** |
@@ -53,6 +53,20 @@ stack (a lesson carried from the portal + code-review tracks).
   StreamInfo`) and was dropped; the proxy-vs-backend split still holds on
   `%DURATION% − %RESPONSE_DURATION%` + the upstream duration. `envoy_access_latency`
   materialized view deferred to inc 09 (where the ClickHouse schema work lands).
+- **07 (`portal-e2e`)** shipped second in the live-l2 wave — opt-in
+  `nix run .#portal-e2e`, NOT on the gate. Live-verified on l2: the curated mutating
+  subset (Router `Put`+`Enable`, Prompts `SetActivePersonality`) drove headless
+  chromium through the Envoy bridge and each action passed **metrics delta + read-RPC**
+  (`3 passed · 0 failed`). See [`04`](04-layer-b-e2e.md) "As built". Notes of record:
+  the Dart suite is the driver only (the shell owns assertions via `grpcurl`/`curl`,
+  the `serve-smoke` pattern); Layer-A robots are fake-gateway-coupled so Layer B reuses
+  the **keys**, not the robots; `flutter drive`'s web `print` does not surface, so the
+  suite hands records back via `reportData` → `build/integration_response_data.json`;
+  the browser + matched chromedriver are resolved at runtime from the `nixpkgs`
+  registry (the flake-pinned `chromium` has no cached binary → would source-build);
+  and the curated OTLP span check is best-effort (inc 10 is authoritative). The
+  personality select must target a personality **other than** the active one (the page
+  no-ops an unchanged selection, firing no RPC).
 
 ## Notes / decisions of record
 
