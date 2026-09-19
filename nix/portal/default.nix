@@ -105,6 +105,8 @@ let
     runtimeInputs = [
       versions.flutter
       versions.static-web-server
+      pkgs.coreutils
+      pkgs.gnused
     ];
     text = ''
       cd portal
@@ -121,6 +123,19 @@ let
       # Belt-and-suspenders: drop any service-worker file a previous strategy left in
       # the output tree so the static server never hands a client a registerable SW.
       rm -f build/web/flutter_service_worker.js
+      # Brand the browser tab: `flutter create` regenerates web/ with the stock Flutter
+      # favicon/PWA icons + a placeholder <title>, so we overwrite them in the built
+      # output tree (post-build) with the agent-seddon mark. Source assets are tracked
+      # under portal/branding/ (generated from agent-seddon.png; see that dir).
+      if [ -d branding ]; then
+        install -m0644 branding/favicon.png build/web/favicon.png
+        mkdir -p build/web/icons
+        install -m0644 branding/Icon-192.png          build/web/icons/Icon-192.png
+        install -m0644 branding/Icon-512.png          build/web/icons/Icon-512.png
+        install -m0644 branding/Icon-maskable-192.png build/web/icons/Icon-maskable-192.png
+        install -m0644 branding/Icon-maskable-512.png build/web/icons/Icon-maskable-512.png
+        sed -i 's#<title>agent_portal</title>#<title>Agent Seddon</title>#' build/web/index.html
+      fi
       host="''${PORTAL_WEB_HOST:-127.0.0.1}"
       port="''${PORTAL_WEB_PORT:-${toString portalWebPort}}"
       echo "==> serving portal/build/web at http://$host:$port  (Ctrl-C to stop)"

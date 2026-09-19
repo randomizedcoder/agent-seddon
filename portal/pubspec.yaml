@@ -24,3 +24,12 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  # Source Serif 4 (SIL OFL 1.1) bundled as a tracked asset — the hermetic build
+  # cannot fetch fonts at runtime, so we do not use google_fonts. See fonts/README.md.
+  fonts:
+    - family: SourceSerif4
+      fonts:
+        - asset: fonts/SourceSerif4-Regular.ttf
+          weight: 400
+        - asset: fonts/SourceSerif4-Semibold.ttf
+          weight: 600
