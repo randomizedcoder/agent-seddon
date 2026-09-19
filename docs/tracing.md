@@ -5,6 +5,11 @@ HyperDX** collector and seeing the agent interacting with its components — inc
 a **distributed trace that spans two processes** (the loop + a `--serve-provider`
 model gateway).
 
+> HyperDX runs **decomposed** (Mongo + OTel collector + app) rather than the
+> all-in-one image, so its collector writes the OTLP `otel_*` tables into the **single
+> agent ClickHouse** — `otel_*` in DB `default`, `agent.*` in DB `agent`, one server.
+> See [`nix/hyperdx`](../nix/hyperdx) and the obs-single-ch track.
+
 > See **[observability.md](observability.md)** for how tracing fits alongside
 > metrics + logs, and how the agent inspects its own performance.
 
@@ -69,10 +74,11 @@ Prereqs: Docker running; a working provider (the example inherits the endpoint f
 `config/agent.toml` — a local Ollama by default, see
 [`operating.md`](operating.md#running)).
 
-**1. Start ClickStack** (HyperDX all-in-one: OTLP collector + ClickHouse + UI):
+**1. Start the ClickHouse, then HyperDX** (the decomposed trio writes into that one CH):
 
 ```sh
-nix run .#clickstack-up          # UI :8080, OTLP gRPC :4317, OTLP HTTP :4318
+nix run .#clickhouse-up          # the single ClickHouse (agent.* + otel_*)
+nix run .#hyperdx-up             # Mongo + OTel collector + app; UI :8080, OTLP gRPC :4317, HTTP :4318
 ```
 
 **2. Onboard + get the ingestion key.** Open <http://localhost:8080>, create a
@@ -105,13 +111,16 @@ spans nested under `provider.stream`).
 
 ## Verify from ClickHouse (no UI)
 
+The spans now live in the **agent** ClickHouse (DB `default`), so query them with the
+regular `clickhouse-client` — the same server that holds `agent.*`:
+
 ```sh
 # spans by service + name
-nix run .#clickstack-client -- -q "SELECT ServiceName, SpanName, count() n \
+nix run .#clickhouse-client -- -q "SELECT ServiceName, SpanName, count() n \
   FROM default.otel_traces GROUP BY ServiceName, SpanName ORDER BY 1,2 FORMAT PrettyCompact"
 
 # one trace spanning BOTH processes (the distributed proof)
-nix run .#clickstack-client -- -q "SELECT TraceId, groupUniqArray(ServiceName) services, count() spans \
+nix run .#clickhouse-client -- -q "SELECT TraceId, groupUniqArray(ServiceName) services, count() spans \
   FROM default.otel_traces GROUP BY TraceId HAVING length(services) > 1 \
   ORDER BY max(Timestamp) DESC LIMIT 1 FORMAT PrettyCompact"
 ```
@@ -123,16 +132,23 @@ TraceId                            services                                   sp
 039c65a4da7ca72d822c63367f4c05b9   ['agent-loop','agent-provider-gateway']    12
 ```
 
-`nix run .#clickstack-down` tears it down (data discarded).
+`nix run .#hyperdx-down` tears down the three HyperDX containers (`-- --volumes` also
+drops Mongo's app state); the traces persist in the agent ClickHouse until
+`nix run .#clickhouse-down`.
 
 ## Gotchas (learned the hard way)
 
 - **Use `127.0.0.1`, not `localhost`, in `otlp_endpoint`.** The container maps
   `4317` on IPv4 only; `localhost` may resolve to IPv6 `::1` and fail to connect.
 - **The collector needs onboarding.** Before you create a HyperDX account, the
-  bundled collector runs a `nop` OTLP pipeline and doesn't bind `:4317`. Creating an
-  account activates it.
-- **OTLP requires the ingestion key** (`authorization` header) once onboarded.
+  collector runs a `nop` OTLP pipeline (fed from the app's OpAMP) and doesn't bind
+  `:4317`. Creating an account (with a **password** — an invited user doesn't count)
+  activates it; so `hyperdx-up`'s `:4317` wait is best-effort on first boot.
+- **OTLP requires the ingestion key** (`authorization` header) once onboarded — the
+  collector's receiver enforces it as a bearer token, so exports without the team's
+  ingestion key are rejected `UNAUTHENTICATED` and spans are silently dropped.
+- **One ClickHouse.** Since the obs stack was decomposed, there is no bundled ClickHouse
+  — `otel_*` and `agent.*` share the single agent CH, so `trace_id` JOINs across them.
 - **Traces are independent of `RUST_LOG`.** The OTLP layer has its own `INFO` filter
   (`agent-cli/src/main.rs`), so `RUST_LOG=warn` quiets the console without silently
   disabling tracing — the spans are `info_span!` and would otherwise be filtered out

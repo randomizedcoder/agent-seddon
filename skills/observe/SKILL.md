@@ -31,10 +31,13 @@ Or open the Grafana dashboard (`nix run .#grafana-up`, UI :3000 → **agent-sedd
 the **Search** row shows index freshness/files, reindex duration+rate, and query
 latency/rate/hits by backend+mode.
 
-## 3. Traces / span durations (needs ClickStack up: `nix run .#clickstack-up`)
+## 3. Traces / span durations (needs HyperDX up: `nix run .#clickhouse-up && nix run .#hyperdx-up`)
+
+The decomposed HyperDX collector writes `otel_*` into the agent ClickHouse, so query
+spans with the regular `clickhouse-client`:
 
 ```sh
-nix run .#clickstack-client -- -q "SELECT SpanName, count() n, round(avg(Duration)/1e6,1) avg_ms \
+nix run .#clickhouse-client -- -q "SELECT SpanName, count() n, round(avg(Duration)/1e6,1) avg_ms \
   FROM default.otel_traces GROUP BY SpanName ORDER BY n DESC FORMAT PrettyCompact"
 ```
 

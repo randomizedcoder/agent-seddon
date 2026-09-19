@@ -314,12 +314,13 @@ nix run .#clickhouse-client -- -q \
   "SELECT kind, role, substring(content,1,60) FROM agent.agent_events ORDER BY ts, seq FORMAT PrettyCompact"
 ```
 
-### Prometheus, Grafana and ClickStack
+### Prometheus, Grafana and HyperDX
 
 ```sh
 nix run .#prometheus-up          # scraper, UI :9090 — scrape targets generated from nix/constants.nix
 nix run .#grafana-up             # dashboards, UI :3000 (Dashboards → agent-seddon)
-nix run .#clickstack-up          # OTLP receiver + trace UI :8080, OTLP :4317
+nix run .#clickhouse-up          # the single ClickHouse (agent.* + OTLP default.otel_*)
+nix run .#hyperdx-up             # decomposed HyperDX (Mongo + collector + app): OTLP :4317, trace UI :8080
 ```
 
 The main agent serves `/metrics` on `127.0.0.1:9600`; each `--serve-<seam>` process
