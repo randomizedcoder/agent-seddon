@@ -33,11 +33,29 @@ struct TableNameRow {
 /// `limit` arrives on the wire (untrusted). Newest-first, so the cap keeps the most recent.
 const MAX_DRAFT_ROWS: usize = 500;
 
-/// The `list_drafts` SELECT with a fixed `WHERE`/`ORDER` around a compile-time literal `$where`.
-/// Every variant is a string LITERAL (never a runtime `format!` of a filter value), so the
-/// filter values can only ride as bound `$N` args — an untrusted `repo`/`session_id` cannot
+/// Hard cap on the number of *raw* rows [`ClickHouseHistory::list_drafts`] fetches before the
+/// in-memory dedup/cap in [`finalize_drafts`]. `agent_review_drafts` is append-only (a
+/// supersede/post is a new row), so without a `LIMIT` the read would pull the whole table into
+/// memory on every portal/operator list — growing unboundedly with history. The fetch is ordered
+/// `ts DESC` so the cap keeps the NEWEST rows: a review whose current-state (max-`ts`) row is
+/// inside the window is fully captured (its rows are monotone in `ts`), and only reviews older
+/// than the window are dropped — acceptable for a newest-first, [`MAX_DRAFT_ROWS`]-capped list.
+/// 20× the output cap leaves generous headroom for supersede history before anything is dropped.
+const DRAFT_FETCH_CAP: usize = MAX_DRAFT_ROWS * 20;
+
+/// `concat!` needs a string literal, so the `drafts_query!` `LIMIT` is the literal `10000`; pin
+/// it to `DRAFT_FETCH_CAP` at compile time so changing `MAX_DRAFT_ROWS` can't silently desync the
+/// two (this fails the build, forcing the SQL literal to be updated in lock-step).
+const _: () = assert!(DRAFT_FETCH_CAP == 10_000);
+
+/// The `list_drafts` SELECT with a fixed `WHERE`/`ORDER`/`LIMIT` around a compile-time literal
+/// `$where`. Every variant is a string LITERAL (never a runtime `format!` of a filter value), so
+/// the filter values can only ride as bound `$N` args — an untrusted `repo`/`session_id` cannot
 /// inject SQL. (A literal is also required: `QueryBuilder<'a>` borrows the query `&str`, so it
-/// must be `&'static`, not a local `String` that would escape the retry closure.)
+/// must be `&'static`, not a local `String` that would escape the retry closure.) `ORDER BY ts
+/// DESC LIMIT` bounds the fetch to [`DRAFT_FETCH_CAP`] newest rows; [`finalize_drafts`] then
+/// dedups newest-per-`review_id` (order-independently) and applies the output cap. The `10000`
+/// literal is `DRAFT_FETCH_CAP` — kept in sync by `positive_list_drafts_sql_bounds_the_fetch`.
 macro_rules! drafts_query {
     ($where:literal) => {
         concat!(
@@ -46,7 +64,7 @@ macro_rules! drafts_query {
              deletions, draft_path, status \
              FROM agent_review_drafts",
             $where,
-            " ORDER BY review_id ASC, ts ASC"
+            " ORDER BY ts DESC LIMIT 10000"
         )
     };
 }
@@ -64,20 +82,32 @@ fn drafts_sql(has_repo: bool, has_session: bool) -> &'static str {
     }
 }
 
-/// Reduce the raw draft rows (all matching `repo`/`session_id`, ordered `review_id ASC, ts ASC`)
-/// to the operator view: newest state per `review_id`, filtered on that current `status`, ordered
-/// newest-first, and capped. Pure so the dedup/filter/cap logic is table-testable without a live
-/// ClickHouse. `limit == 0` ⇒ the cap; any larger `limit` is clamped to it.
+/// Reduce the raw draft rows (all matching `repo`/`session_id`) to the operator view: newest
+/// state per `review_id`, filtered on that current `status`, ordered newest-first, and capped.
+/// Pure so the dedup/filter/cap logic is table-testable without a live ClickHouse. `limit == 0`
+/// ⇒ the cap; any larger `limit` is clamped to it.
 fn finalize_drafts(
     rows: Vec<ReviewDraftRow>,
     status: Option<&str>,
     limit: usize,
 ) -> Vec<ReviewDraftRecord> {
-    // Newest-wins per review_id (rows arrive ts-ascending, so a later row overwrites) — a
-    // supersede/post is a fresh row, so this yields each draft's *current* state.
+    // Newest-wins per review_id — a supersede/post is a fresh row, so the max-`ts` row is each
+    // draft's *current* state. Compare `ts` explicitly (not insertion order) so the reducer is
+    // correct regardless of how the SELECT ordered its rows: the fetch orders `ts DESC` for the
+    // LIMIT, so relying on insertion order here would silently pick a stale state.
+    use std::collections::hash_map::Entry;
     let mut latest: HashMap<String, ReviewDraftRow> = HashMap::new();
     for r in rows {
-        latest.insert(r.review_id.clone(), r);
+        match latest.entry(r.review_id.clone()) {
+            Entry::Occupied(mut e) => {
+                if r.ts.1 > e.get().ts.1 {
+                    e.insert(r);
+                }
+            }
+            Entry::Vacant(e) => {
+                e.insert(r);
+            }
+        }
     }
     // Filter on the current status, then order newest-first (a HashMap iterates arbitrarily →
     // deterministic sort for stable renders/tests). `ts` is `DateTime64::<3>(Tz, millis)`;
@@ -464,6 +494,20 @@ mod tests {
         0,
         Vec::<&str>::new()
     )]
+    #[case::corner_newest_per_id_wins_reversed_input(
+        "newest-per-id holds when the newest row arrives FIRST (the ts-desc fetch order)",
+        vec![("a", "posted", 5), ("a", "drafted", 1)],
+        Some("posted"),
+        0,
+        vec!["a"]
+    )]
+    #[case::corner_stale_hidden_reversed_input(
+        "...and the superseded state stays hidden no matter the input order",
+        vec![("a", "posted", 5), ("a", "drafted", 1)],
+        Some("drafted"),
+        0,
+        Vec::<&str>::new()
+    )]
     fn finalize_drafts_table(
         #[case] desc: &str,
         #[case] rows: Vec<(&str, &str, u64)>,
@@ -567,6 +611,29 @@ mod tests {
         assert!(
             sql.contains("$1") && sql.contains("$2"),
             "{desc}: filter values bind as placeholders"
+        );
+    }
+
+    /// desc: the fetch is bounded (newest-first) so an ever-growing append-only table is never
+    /// pulled wholesale into memory before `finalize_drafts`' in-memory cap.
+    /// expect: every variant orders `ts DESC` and carries the `DRAFT_FETCH_CAP` LIMIT — this also
+    /// pins the SQL literal to the const so the two can't silently drift.
+    #[rstest]
+    #[case::positive_no_filters(false, false)]
+    #[case::positive_repo_only(true, false)]
+    #[case::corner_both_filters(true, true)]
+    fn positive_list_drafts_sql_bounds_the_fetch(
+        #[case] has_repo: bool,
+        #[case] has_session: bool,
+    ) {
+        let sql = drafts_sql(has_repo, has_session);
+        assert!(
+            sql.contains("ORDER BY ts DESC"),
+            "newest-first fetch: {sql}"
+        );
+        assert!(
+            sql.contains(&format!("LIMIT {DRAFT_FETCH_CAP}")),
+            "fetch bounded to DRAFT_FETCH_CAP ({DRAFT_FETCH_CAP}): {sql}"
         );
     }
 }
