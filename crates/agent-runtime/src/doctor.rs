@@ -124,18 +124,44 @@ pub async fn diagnose(config: &Config) -> DoctorReport {
     run(probes_for(config)).await
 }
 
+/// Minimum spacing between fresh probe fan-outs behind `preflight()`. The fleet
+/// `Preflight` RPC is a read-only diagnostic reachable by an unauthenticated caller
+/// (fleet auth is off by default), and each fresh run fans out *real outbound dials*
+/// (ClickHouse `SELECT 1` + table listing, a `GET /models` to the provider). Without
+/// a floor, a flood of `Preflight` calls amplifies one-for-one into dials against
+/// those dependencies (an attacker turning the agent into a small dial amplifier).
+/// A short TTL collapses a burst to a single dial-set while still reflecting a
+/// dependency that recovers seconds later.
+const MIN_PREFLIGHT_INTERVAL: Duration = Duration::from_secs(5);
+
 /// A prebuilt probe set that answers `preflight()` on demand — the
 /// [`PreflightProvider`](agent_core::PreflightProvider) the fleet server dials.
-/// Built once from `Config` at fleet startup; each call re-runs the probes (a fresh
-/// network view), so a dependency recovering between calls is reflected.
+/// Built once from `Config` at fleet startup. Calls are throttled to one fresh probe
+/// fan-out per [`MIN_PREFLIGHT_INTERVAL`] (see [`DoctorProbes::preflight`]); within
+/// that window callers share the memoized report, so a burst can't amplify into a
+/// burst of outbound dials. A dependency that recovers after the interval is still
+/// reflected on the next call.
 pub struct DoctorProbes {
     probes: Vec<Arc<dyn Probe>>,
+    /// Last `(completed_at, report)`. A call within `min_interval` of `completed_at`
+    /// returns the memoized report instead of re-dialing. `tokio::sync::Mutex` so it
+    /// can be held across the `run().await` for single-flight coalescing.
+    cache: tokio::sync::Mutex<Option<(Instant, DoctorReport)>>,
+    min_interval: Duration,
 }
 
 impl DoctorProbes {
     pub fn from_config(config: &Config) -> Self {
+        Self::with_interval(probes_for(config), MIN_PREFLIGHT_INTERVAL)
+    }
+
+    /// Build from an explicit probe set + throttle interval — the test seam that lets
+    /// the memoize/refresh behaviour be exercised without waiting real wall-clock.
+    fn with_interval(probes: Vec<Arc<dyn Probe>>, min_interval: Duration) -> Self {
         Self {
-            probes: probes_for(config),
+            probes,
+            cache: tokio::sync::Mutex::new(None),
+            min_interval,
         }
     }
 }
@@ -143,8 +169,20 @@ impl DoctorProbes {
 #[async_trait]
 impl agent_core::PreflightProvider for DoctorProbes {
     async fn preflight(&self) -> DoctorReport {
-        // Cheap Arc clones; probes hold their own params, so re-running is a fresh dial.
-        run(self.probes.clone()).await
+        // Single-flight throttle: hold the lock across the fan-out so a burst of
+        // callers within `min_interval` collapses to ONE probe run (a fresh dial-set)
+        // and the rest read the memoized report. Bounds Preflight-RPC amplification
+        // into outbound dials against the probed dependencies (fail-closed on load).
+        let mut cache = self.cache.lock().await;
+        if let Some((at, report)) = cache.as_ref() {
+            if at.elapsed() < self.min_interval {
+                return report.clone();
+            }
+        }
+        // Cheap Arc clones; probes hold their own params, so a run is a fresh dial.
+        let report = run(self.probes.clone()).await;
+        *cache = Some((Instant::now(), report.clone()));
+        report
     }
 }
 
@@ -497,6 +535,90 @@ mod tests {
 
     fn fake(name: &'static str, status: ProbeStatus) -> Arc<dyn Probe> {
         Arc::new(FakeProbe { name, status })
+    }
+
+    /// A probe that counts how many times it was actually `check()`ed — so a test can
+    /// prove the `preflight()` throttle coalesces bursts into a single fan-out.
+    struct CountingProbe {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Probe for CountingProbe {
+        fn name(&self) -> &str {
+            "counting"
+        }
+        async fn check(&self) -> ProbeOutcome {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            ProbeOutcome::new("counting", ProbeStatus::Ok, "counted", 0)
+        }
+    }
+
+    fn counting() -> (Arc<dyn Probe>, Arc<std::sync::atomic::AtomicUsize>) {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        (
+            Arc::new(CountingProbe {
+                calls: calls.clone(),
+            }),
+            calls,
+        )
+    }
+
+    // --- DoctorProbes::preflight throttle: memoize within the interval, refresh after,
+    //     and collapse a concurrent burst to a single fan-out (amplification guard) ---
+
+    #[tokio::test]
+    async fn positive_preflight_memoizes_within_interval() {
+        use agent_core::PreflightProvider;
+        // Two calls inside a wide window ⇒ the probes are dialed exactly once and the
+        // second call returns the memoized report (identical shape).
+        let (probe, calls) = counting();
+        let dp = DoctorProbes::with_interval(vec![probe], Duration::from_secs(3600));
+        let a = dp.preflight().await;
+        let b = dp.preflight().await;
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a second call within the interval must not re-dial"
+        );
+        assert_eq!(a.probes.len(), 1);
+        assert_eq!(b.probes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn boundary_preflight_reruns_when_interval_is_zero() {
+        use agent_core::PreflightProvider;
+        // A zero interval means every call is stale ⇒ each re-dials (the un-throttled
+        // limit; proves the memoize is gated on the interval, not unconditional).
+        let (probe, calls) = counting();
+        let dp = DoctorProbes::with_interval(vec![probe], Duration::ZERO);
+        dp.preflight().await;
+        dp.preflight().await;
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "with a zero interval every call re-runs the probes"
+        );
+    }
+
+    #[tokio::test]
+    async fn adversarial_preflight_burst_collapses_to_single_fanout() {
+        use agent_core::PreflightProvider;
+        // A flood of concurrent Preflight calls (the amplification vector: one RPC →
+        // one outbound dial-set) must fan out to the dependencies only ONCE within the
+        // interval — the single-flight lock coalesces the burst.
+        let (probe, calls) = counting();
+        let dp = DoctorProbes::with_interval(vec![probe], Duration::from_secs(3600));
+        let reports = futures_util::future::join_all((0..32).map(|_| dp.preflight())).await;
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a 32-call burst must dial the probes once, not 32 times"
+        );
+        assert!(
+            reports.iter().all(|r| r.probes.len() == 1),
+            "every caller still gets a full report"
+        );
     }
 
     // --- aggregator: gate + ordering + counts ---
