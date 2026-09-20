@@ -898,6 +898,17 @@ impl agent_core::FleetDraftEditor for EngineDraftEditor {
         let Some(record) = self.history.draft_by_id(review_id).await? else {
             return Ok(agent_core::UpdateOutcome::NotFound);
         };
+        // A draft minted under a *different* fleet root is still listed by `ListReviews` (which
+        // returns every persisted row regardless of root) but its `.md` lives outside this
+        // instance's workspace. Mirror `EngineDraftReader::read_body` (CH5): return `NotFound`
+        // (a clean empty state) rather than the hard confine error `confine_draft_path` would
+        // raise below — so the write path is consistent with the read path. Takes precedence over
+        // the status gate: a cross-root draft isn't ours to lock or edit. `starts_with` is a
+        // path-component prefix check; `confine_draft_path` below still fails closed on a symlink
+        // escape from *within* the root.
+        if !Path::new(&record.draft_path).starts_with(&self.fleet_root) {
+            return Ok(agent_core::UpdateOutcome::NotFound);
+        }
         // A posted/approved draft is locked — an edit would diverge from what was posted.
         if record.status == agent_core::draft_status::POSTED
             || record.status == agent_core::draft_status::APPROVED
@@ -3757,6 +3768,99 @@ mod tests {
         assert_eq!(on_disk, "", "empty body replaces the file content");
     }
 
+    /// desc (CH5 parity, Round 5 F2): a draft whose path lives under a *different* fleet root is
+    /// still listed by `ListReviews` but isn't editable here — `update_body` returns a clean
+    /// `NotFound` (like `read_body`), not the hard confine error. This precedes the status gate,
+    /// so even a cross-root `posted` draft reads as `NotFound`, and the foreign file is untouched.
+    #[rstest]
+    #[case::corner_cross_root_drafted_is_not_found("drafted")]
+    #[case::corner_cross_root_posted_is_not_found("posted")]
+    #[tokio::test]
+    async fn update_body_cross_root_is_not_found(#[case] status: &str) {
+        use agent_core::FleetDraftEditor;
+        let root = agent_testkit::tempdir();
+        // The draft file lives under a *separate* root.
+        let other_root = agent_testkit::tempdir();
+        let other_path = other_root.join("pr-9.md");
+        std::fs::write(&other_path, "OTHER").unwrap();
+        let rec = agent_core::ReviewDraftRecord {
+            review_id: "rid".into(),
+            repo: "runpod__host".into(),
+            pr_number: 9,
+            head_sha: "sha".into(),
+            risk_score: 1.0,
+            gate_failed: false,
+            n_findings: 0,
+            files_changed: 0,
+            additions: 0,
+            deletions: 0,
+            draft_path: other_path.to_string_lossy().into_owned(),
+            status: status.into(),
+        };
+        let mut map = std::collections::HashMap::new();
+        map.insert("rid".to_string(), rec);
+        let editor = EngineDraftEditor {
+            history: Arc::new(MapHistory(map)),
+            fleet_root: root,
+        };
+        assert_eq!(
+            editor.update_body("rid", "NEWBODY").await.unwrap(),
+            agent_core::UpdateOutcome::NotFound,
+            "a cross-root draft is NotFound, not a hard error or a write"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&other_path).unwrap(),
+            "OTHER",
+            "the foreign draft file must be untouched"
+        );
+    }
+
+    /// desc (adversarial): a `draft_path` lexically under the root but symlinking *outside* it must
+    /// still fail closed (`Err`) on write — the cross-root shortcut only skips paths not under the
+    /// root at all; `confine_draft_path` guards escapes from within it, so the target is not written.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn adversarial_update_symlink_escape_within_root_refused() {
+        use agent_core::FleetDraftEditor;
+        let root = agent_testkit::tempdir();
+        let secret_dir = agent_testkit::tempdir();
+        let secret = secret_dir.join("secret.md");
+        std::fs::write(&secret, "SECRET").unwrap();
+        let link_dir = root.join("reviews");
+        std::fs::create_dir_all(&link_dir).unwrap();
+        let link = link_dir.join("pr-7.md"); // under the root lexically…
+        std::os::unix::fs::symlink(&secret, &link).unwrap(); // …but resolves outside it.
+        let rec = agent_core::ReviewDraftRecord {
+            review_id: "rid".into(),
+            repo: "runpod__host".into(),
+            pr_number: 7,
+            head_sha: "sha".into(),
+            risk_score: 1.0,
+            gate_failed: false,
+            n_findings: 0,
+            files_changed: 0,
+            additions: 0,
+            deletions: 0,
+            draft_path: link.to_string_lossy().into_owned(),
+            status: "drafted".into(),
+        };
+        let mut map = std::collections::HashMap::new();
+        map.insert("rid".to_string(), rec);
+        let editor = EngineDraftEditor {
+            history: Arc::new(MapHistory(map)),
+            fleet_root: root,
+        };
+        assert!(
+            editor.update_body("rid", "PWNED").await.is_err(),
+            "a symlink escaping the fleet root must fail closed, not write the target"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&secret).unwrap(),
+            "SECRET",
+            "the escape target must be untouched"
+        );
+    }
+
     /// desc: the body byte cap — exactly at the cap writes; one over is refused before any write.
     /// expect: Updated at the cap; Err over it, with the original preserved.
     #[rstest]
@@ -3794,7 +3898,11 @@ mod tests {
     async fn adversarial_update_draft_path_outside_root_refused() {
         use agent_core::FleetDraftEditor;
         // A tampered draft_path pointing OUTSIDE the fleet root is refused before any write —
-        // the persisted store is untrusted.
+        // the persisted store is untrusted. The lexically-outside case resolves to a soft
+        // `NotFound` (matching `EngineDraftReader::read_body`'s cross-root behaviour, CH5), not a
+        // hard error; the security invariant that matters is that the out-of-root file is *never
+        // written*. A within-root path that escapes via a symlink still fails closed with an
+        // `Err` from `confine` — see `adversarial_update_symlink_escape_within_root_refused`.
         let root = agent_testkit::tempdir();
         let outside = agent_testkit::tempdir();
         let victim = outside.join("victim.md");
@@ -3820,8 +3928,11 @@ mod tests {
             fleet_root: root,
         };
         assert!(
-            editor.update_body("rid", "PWNED").await.is_err(),
-            "a draft_path outside the fleet root must be refused"
+            matches!(
+                editor.update_body("rid", "PWNED").await,
+                Ok(agent_core::UpdateOutcome::NotFound)
+            ),
+            "a draft_path outside the fleet root must resolve to NotFound (no write), matching the reader"
         );
         assert_eq!(
             std::fs::read_to_string(&victim).unwrap(),
