@@ -205,6 +205,13 @@ pub async fn build_agent_with(
     let base_ctx = crate::registry::FactoryCtx::new(&cfg, &metrics)
         .with_registry(registry)
         .with_digests(digest_store.as_ref());
+    // Fail early, with a graph-aware message, if the cognition graph references a
+    // provider the current config doesn't define — before the cryptic late
+    // "unknown provider" this would otherwise raise deep in a factory.
+    #[cfg(feature = "graph")]
+    if let Some(plan) = graph_plan.as_ref() {
+        preflight_graph_providers(plan, &base_ctx, &cfg.graph.file)?;
+    }
     // Role routing (`[digest] provider`): the distiller's summary/facts calls
     // go to a dedicated (typically cheap/local) provider instead of the main
     // generator. Resolved like any provider reference; attached further down.
@@ -3451,6 +3458,33 @@ async fn resolve_cognition_graph(
     Ok((store, Some(kinds), Some(plan)))
 }
 
+/// Preflight the provider names a cognition-graph plan references, failing with a
+/// graph-aware error before the cryptic late "unknown provider" from deep in a
+/// factory. A stale or foreign `.agent/graph.textproto` (the graph is default-on
+/// and the schema-default critic is `glm`) can name a provider the current config
+/// doesn't define; without this the run dies at the registry with no hint the
+/// document is the cause. Each referenced name is resolved exactly as it would be
+/// at build (route upstreams + registry) and discarded — construction is cheap
+/// (no network), so the only cost is building the graph's few providers twice.
+#[cfg(feature = "graph")]
+fn preflight_graph_providers(
+    plan: &crate::cognition::GraphPlan,
+    ctx: &crate::registry::FactoryCtx<'_>,
+    graph_file: &str,
+) -> anyhow::Result<()> {
+    for (whence, name) in plan.referenced_providers() {
+        crate::registry::resolve_provider_ref(&name, ctx).map_err(|e| {
+            anyhow::anyhow!(
+                "cognition-graph document `{graph_file}` references provider `{name}` \
+                 ({whence}) that the current config does not define: {e}. Define it \
+                 (e.g. a matching [[providers]] entry or a [route] upstream), or disable \
+                 the graph with `[graph] store = \"\"` (or remove the document)."
+            )
+        })?;
+    }
+    Ok(())
+}
+
 /// Compose the fork's provider chain from a compiled [`ForkPlan`]: per-branch
 /// generators (name-resolved or the base) each optionally wrapped in a
 /// branch-local consensus gate, the `BranchingProvider` with its join/merge
@@ -4151,6 +4185,56 @@ mod seam_builder_tests {
             Err(e) => e.to_string(),
         };
         assert!(err.contains("no API key"), "got: {err}");
+    }
+
+    // --- graph provider preflight (round6-A1) ------------------------------
+
+    /// A cognition graph naming a provider the config doesn't define (the classic
+    /// case: a stale document whose schema-default critic is `glm`) fails preflight
+    /// with a graph-aware error — the document, the provider, and the remedy — not
+    /// the cryptic late "unknown provider" from deep in a factory.
+    #[cfg(feature = "graph")]
+    #[test]
+    fn adversarial_graph_preflight_rejects_unknown_provider() {
+        let cfg = Config::minimal_for_test();
+        let metrics = Metrics::new();
+        let registry = crate::registry::Registry::with_builtins();
+        let ctx = crate::registry::FactoryCtx::new(&cfg, &metrics).with_registry(&registry);
+        let plan = crate::cognition::GraphPlan {
+            gate: Some(crate::cognition::GatePlan {
+                critic: "no-such-provider-xyz".into(),
+                max_rounds: None,
+                scope: None,
+                on_exhaustion: None,
+            }),
+            ..Default::default()
+        };
+        let err = match preflight_graph_providers(&plan, &ctx, ".agent/graph.textproto") {
+            Ok(()) => panic!("an unknown graph provider must fail preflight"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("no-such-provider-xyz"),
+            "names the provider: {err}"
+        );
+        assert!(
+            err.contains(".agent/graph.textproto"),
+            "names the document: {err}"
+        );
+        assert!(err.contains("[graph] store"), "suggests the remedy: {err}");
+    }
+
+    /// An empty plan references no providers, so preflight is a no-op success (the
+    /// out-of-the-box, graph-less path never regresses).
+    #[cfg(feature = "graph")]
+    #[test]
+    fn positive_graph_preflight_passes_with_no_references() {
+        let cfg = Config::minimal_for_test();
+        let metrics = Metrics::new();
+        let registry = crate::registry::Registry::with_builtins();
+        let ctx = crate::registry::FactoryCtx::new(&cfg, &metrics).with_registry(&registry);
+        let plan = crate::cognition::GraphPlan::default();
+        assert!(preflight_graph_providers(&plan, &ctx, ".agent/graph.textproto").is_ok());
     }
 
     // --- the default-on graph store (cognition follow-up) -------------------
