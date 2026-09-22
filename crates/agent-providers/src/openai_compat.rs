@@ -1,9 +1,12 @@
 //! An OpenAI-compatible `/chat/completions` provider.
 //!
 //! Tested against a GLM-5.2 server. GLM is a reasoning model: it emits a
-//! `reasoning_content` field (which we log for debugging but do NOT resend, per
-//! OpenAI convention) and only fills `content` once reasoning is done — so
-//! `max_tokens` needs real headroom.
+//! `reasoning_content` field (which we log for debugging but normally do NOT
+//! resend, per OpenAI convention) and only fills `content` once reasoning is done
+//! — so `max_tokens` needs real headroom. The one exception: when a completion
+//! ends with EMPTY `content` and no tool call, the reasoning is the only output,
+//! so we fall back to it rather than surface an empty turn that stalls the loop
+//! (both the non-streaming and streaming paths do this).
 
 use crate::stream_caps::{
     MAX_STREAM_BUF_BYTES, MAX_STREAM_TEXT_BYTES, MAX_STREAM_TOOL_ARG_BYTES, MAX_STREAM_TOOL_CALLS,
@@ -233,40 +236,9 @@ impl LlmProvider for OpenAiCompatProvider {
             .next()
             .ok_or_else(|| Error::Provider("no choices in response".into()))?;
 
-        if let Some(reasoning) = &choice.message.reasoning_content {
-            if !reasoning.is_empty() {
-                tracing::debug!(
-                    chars = reasoning.len(),
-                    "model reasoning_content (not resent)"
-                );
-            }
-        }
-
-        let tool_calls = choice
-            .message
-            .tool_calls
-            .unwrap_or_default()
-            .into_iter()
-            .map(|tc| ToolCall {
-                id: tc.id,
-                name: tc.function.name,
-                arguments: parse_tool_args(&tc.function.arguments),
-            })
-            .collect();
-
-        let text = choice.message.content.unwrap_or_default();
-        let message = Message {
-            role: Role::Assistant,
-            // This API returns assistant text only (images come back via separate
-            // modalities), so a single text block is the faithful decode.
-            content: if text.is_empty() {
-                Vec::new()
-            } else {
-                vec![ContentBlock::text(text)]
-            },
-            tool_calls,
-            tool_call_id: None,
-        };
+        // Assemble the assistant message, salvaging a reasoning-only completion
+        // (empty `content`, no tool call) — see `message_from_choice`.
+        let message = message_from_choice(choice.message);
 
         Ok(CompletionResponse {
             message,
@@ -297,6 +269,10 @@ impl LlmProvider for OpenAiCompatProvider {
             // Total assistant text seen so far — bound it so a server slow-dripping small
             // text deltas forever can't grow the consumer's buffer without limit (OOM).
             let mut text_total: usize = 0;
+            // Accumulated `reasoning_content`, salvaged as the reply only if the stream
+            // ends with no content and no tool call. Capped at the same ceiling as text
+            // so a reasoning-only stream can't grow it without bound (OOM).
+            let mut reasoning_acc = String::new();
 
             'read: while let Some(next) = bytes.next().await {
                 let b = match next {
@@ -338,6 +314,18 @@ impl LlmProvider for OpenAiCompatProvider {
                                         return;
                                     }
                                     yield Ok(CompletionChunk { delta_text: text, ..Default::default() });
+                                }
+                            }
+                            // Buffer reasoning for the salvage-if-empty case below. Best-effort
+                            // and bounded: append a delta only while it still fits under the text
+                            // ceiling; drop the tail once full (don't error, and never slice mid
+                            // UTF-8 — a reasoning-only reply is a fallback, not the primary output).
+                            if let Some(rc) = delta.reasoning_content {
+                                if !rc.is_empty()
+                                    && reasoning_acc.len().saturating_add(rc.len())
+                                        <= MAX_STREAM_TEXT_BYTES
+                                {
+                                    reasoning_acc.push_str(&rc);
                                 }
                             }
                             for tc in delta.tool_calls.unwrap_or_default() {
@@ -395,6 +383,12 @@ impl LlmProvider for OpenAiCompatProvider {
                 }
             }
 
+            // Salvage a reasoning-only stream: if no assistant text streamed and no tool
+            // call was opened, but the model emitted reasoning, surface the reasoning as
+            // the reply (same rule as the non-streaming path — see `use_reasoning_as_reply`).
+            if use_reasoning_as_reply(text_total > 0, !tools_acc.is_empty(), !reasoning_acc.is_empty()) {
+                yield Ok(CompletionChunk { delta_text: reasoning_acc, ..Default::default() });
+            }
             for (_i, acc) in tools_acc {
                 yield Ok(CompletionChunk { tool_call: Some(acc.into_tool_call()), ..Default::default() });
             }
@@ -462,6 +456,11 @@ struct StreamChoice {
 struct StreamDelta {
     #[serde(default)]
     content: Option<String>,
+    /// Reasoning-model chain-of-thought, streamed separately from `content`. Salvaged
+    /// as the reply only when a stream ends with no content and no tool call (mirrors
+    /// the non-streaming path in `complete`).
+    #[serde(default)]
+    reasoning_content: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<StreamToolCall>>,
 }
@@ -730,11 +729,63 @@ fn to_core_usage(u: WireUsage) -> Usage {
     }
 }
 
+/// The reasoning-only salvage rule, shared by the buffered and streaming decoders:
+/// `reasoning_content` becomes the reply ONLY when there is no assistant text AND
+/// no tool call (see module docs). A normal text or tool-call turn never resends
+/// reasoning; a genuinely empty turn (no reasoning either) stays empty so the
+/// non-convergence guard can still act.
+fn use_reasoning_as_reply(has_text: bool, has_tool_call: bool, has_reasoning: bool) -> bool {
+    !has_text && !has_tool_call && has_reasoning
+}
+
+/// Build the assistant [`Message`] from a decoded buffered choice, applying the
+/// reasoning-only salvage ([`use_reasoning_as_reply`]).
+fn message_from_choice(msg: WireRespMsg) -> Message {
+    let reasoning = msg.reasoning_content.unwrap_or_default();
+    if !reasoning.is_empty() {
+        tracing::debug!(chars = reasoning.len(), "model reasoning_content");
+    }
+    let tool_calls: Vec<ToolCall> = msg
+        .tool_calls
+        .unwrap_or_default()
+        .into_iter()
+        .map(|tc| ToolCall {
+            id: tc.id,
+            name: tc.function.name,
+            arguments: parse_tool_args(&tc.function.arguments),
+        })
+        .collect();
+    let content = msg.content.unwrap_or_default();
+    let text = if use_reasoning_as_reply(
+        !content.is_empty(),
+        !tool_calls.is_empty(),
+        !reasoning.is_empty(),
+    ) {
+        tracing::debug!("empty content with reasoning_content only; using reasoning as the reply");
+        reasoning
+    } else {
+        content
+    };
+    Message {
+        role: Role::Assistant,
+        // This API returns assistant text only (images come back via separate
+        // modalities), so a single text block is the faithful decode.
+        content: if text.is_empty() {
+            Vec::new()
+        } else {
+            vec![ContentBlock::text(text)]
+        },
+        tool_calls,
+        tool_call_id: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_tool_args, to_core_usage, to_openai_content, OpenAiCompatConfig,
-        OpenAiCompatProvider, PromptTokensDetails, StreamEvent, WireContent, WireResp, WireUsage,
+        message_from_choice, parse_tool_args, to_core_usage, to_openai_content,
+        use_reasoning_as_reply, OpenAiCompatConfig, OpenAiCompatProvider, PromptTokensDetails,
+        StreamEvent, WireContent, WireResp, WireUsage,
     };
     use agent_core::{CompletionRequest, ContentBlock, Message};
     use rstest::rstest;
@@ -962,5 +1013,84 @@ mod tests {
             (u.prompt_tokens, u.completion_tokens, u.total_tokens),
             (10, 5, 15)
         );
+    }
+
+    // --- reasoning-only salvage: the shared rule --------------------------------
+
+    // `reasoning_content` becomes the reply ONLY when there is no assistant text AND
+    // no tool call. Every combination of the three inputs is pinned so the guard
+    // can't silently widen (e.g. leaking reasoning alongside real content or a tool
+    // call) or narrow (dropping a reasoning-only reply, the CH-B bug).
+    #[rstest]
+    #[case::positive_reasoning_only(false, false, true, true)]
+    #[case::negative_has_text(true, false, true, false)]
+    #[case::corner_has_tool_call(false, true, true, false)]
+    #[case::boundary_no_reasoning(false, false, false, false)]
+    #[case::negative_text_and_tool(true, true, true, false)]
+    #[case::corner_text_no_reasoning(true, false, false, false)]
+    #[case::boundary_all_true(true, true, true, false)]
+    #[case::boundary_all_false(false, false, false, false)]
+    fn use_reasoning_as_reply_cases(
+        #[case] has_text: bool,
+        #[case] has_tool_call: bool,
+        #[case] has_reasoning: bool,
+        #[case] expect: bool,
+    ) {
+        assert_eq!(
+            use_reasoning_as_reply(has_text, has_tool_call, has_reasoning),
+            expect
+        );
+    }
+
+    // --- reasoning-only salvage: the buffered decoder ---------------------------
+
+    fn choice_msg(body: &str) -> super::WireRespMsg {
+        let parsed: WireResp = serde_json::from_str(body).expect("well-formed body parses");
+        parsed
+            .choices
+            .into_iter()
+            .next()
+            .expect("a choice is present")
+            .message
+    }
+
+    /// `message_from_choice` prefers real `content`, salvages a reasoning-only turn,
+    /// keeps a tool-call turn's text empty (never leaking reasoning), and leaves a
+    /// genuinely empty turn empty.
+    #[rstest]
+    // content present -> used verbatim; reasoning ignored even if present
+    #[case::positive_content_used(
+        r#"{"choices":[{"message":{"content":"hi","reasoning_content":"ignored"}}]}"#,
+        "hi",
+        0
+    )]
+    // the CH-B case: empty content, no tool call, reasoning present -> salvaged
+    #[case::positive_reasoning_salvaged(
+        r#"{"choices":[{"message":{"content":"","reasoning_content":"the answer"}}]}"#,
+        "the answer",
+        0
+    )]
+    // both fields absent (null) -> empty turn
+    #[case::corner_absent_fields(r#"{"choices":[{"message":{}}]}"#, "", 0)]
+    // both present-but-empty -> empty turn
+    #[case::boundary_empty_strings(
+        r#"{"choices":[{"message":{"content":"","reasoning_content":""}}]}"#,
+        "",
+        0
+    )]
+    // empty content + reasoning + a tool call -> tool call kept, reasoning NOT leaked
+    #[case::corner_tool_call_suppresses_salvage(
+        r#"{"choices":[{"message":{"content":"","reasoning_content":"do not leak","tool_calls":[{"id":"c1","function":{"name":"ls","arguments":"{}"}}]}}]}"#,
+        "",
+        1
+    )]
+    fn message_from_choice_cases(
+        #[case] body: &str,
+        #[case] expect_text: &str,
+        #[case] expect_tool_calls: usize,
+    ) {
+        let msg = message_from_choice(choice_msg(body));
+        assert_eq!(msg.content_text(), expect_text, "reply text");
+        assert_eq!(msg.tool_calls.len(), expect_tool_calls, "tool-call count");
     }
 }
