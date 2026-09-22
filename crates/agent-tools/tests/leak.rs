@@ -6,6 +6,17 @@
 //! times and asserts **live blocks stay flat** across iterations (a real leak grows
 //! linearly) plus a per-iteration allocation budget. Compiled only with
 //! `--features dhat-heap`; `nix/checks/leak.nix` runs it (with the tool features on).
+//!
+//! The flatness check is done over **two consecutive windows**, not a single absolute
+//! delta from a one-shot warm-up. One-time lazy initialization (tokio spinning up a
+//! blocking-pool thread on demand, `tracing` callsite interning, a regex/`ignore`
+//! global cache) allocates permanent blocks the *first* time a code path fires; under
+//! the sequential gate leak derivation that first fire can land inside the measured
+//! window and read as a leak (this caused a recurring `+8` flake). By definition a
+//! real leak grows *every* window, while one-time init only shows up in the first —
+//! so we absorb window 1 (base→mid may grow) and assert the **second** window
+//! (mid→after) is flat. That is the semantically correct leak test and is immune to
+//! where one-time init happens to land.
 #![cfg(feature = "dhat-heap")]
 
 #[global_allocator]
@@ -14,27 +25,47 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 use agent_core::{Tool, ToolContext};
 use agent_testkit::tempdir;
 
-/// Run `body` 50× after a warm-up and assert live blocks stay flat (no leak) and
-/// allocations per run stay under `max_blocks_per_run`.
+/// Run `body` over two consecutive windows of `ITERS` runs each (after a warm-up) and
+/// assert the **second** window's live blocks stay flat (a real leak grows every
+/// window; one-time lazy init only shows up in the first) and allocations per run stay
+/// under `max_blocks_per_run`.
 async fn assert_no_leak<F, Fut>(max_blocks_per_run: u64, mut body: F)
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
-    body().await; // warm up tokio's blocking-pool buffers to steady state
-    let base = dhat::HeapStats::get();
+    // Small absolute slack for the flat *second* window. It is not a per-iteration
+    // budget (that's `max_blocks_per_run` below) — it only absorbs a stray one-time
+    // allocation that happens to fire in window 2 rather than window 1.
+    const WINDOW_SLACK: usize = 8;
     const ITERS: u64 = 50;
+
+    body().await; // warm up tokio's blocking-pool buffers toward steady state
+    let base = dhat::HeapStats::get();
+    for _ in 0..ITERS {
+        body().await;
+    }
+    // Window 1 (base -> mid) absorbs one-time lazy init (pool threads, tracing
+    // callsites, regex/ignore caches); we deliberately do NOT assert on its growth.
+    let mid = dhat::HeapStats::get();
     for _ in 0..ITERS {
         body().await;
     }
     let after = dhat::HeapStats::get();
+
+    // Window 2 (mid -> after): with all one-time init behind us, live blocks must be
+    // flat. A genuine per-iteration leak keeps growing here and still fails.
+    let window2_growth = after.curr_blocks.saturating_sub(mid.curr_blocks);
     dhat::assert!(
-        after.curr_blocks <= base.curr_blocks + 8,
-        "live blocks grew across runs (leak?): {} -> {}",
+        window2_growth <= WINDOW_SLACK,
+        "live blocks still growing in the second window (leak?): base {} -> mid {} -> after {}",
         base.curr_blocks,
+        mid.curr_blocks,
         after.curr_blocks
     );
-    let per_iter = (after.total_blocks - base.total_blocks) / ITERS;
+
+    // Per-run allocation budget over both windows (cumulative allocations, not live).
+    let per_iter = (after.total_blocks - base.total_blocks) / (2 * ITERS);
     dhat::assert!(
         per_iter < max_blocks_per_run,
         "allocated {per_iter} blocks/run (> {max_blocks_per_run})"

@@ -97,9 +97,14 @@ async fn fork_cancel_cycle_does_not_leak() {
     // The CONTRACT is eventually-freed — an aborted task's teardown runs at
     // the scheduler's leisure, so a single yield can sample mid-release under
     // load (live-observed flake: 10.7k -> 19.4k that a re-run freed). Poll for
-    // the settle; a REAL strand never converges and still fails.
+    // the settle; a REAL strand never converges and still fails. The budget is
+    // generous (~5s) because under the sequential gate leak derivation every leak
+    // test runs back-to-back under load, and 1s occasionally sampled before the
+    // aborted laggard's teardown completed (round7-2: same recurring gate flake).
+    // A real strand won't free in 5s any more than in 50s, so this doesn't weaken
+    // the assertion — it only stops sampling mid-release.
     let mut end = dhat::HeapStats::get();
-    for _ in 0..100 {
+    for _ in 0..500 {
         if end.curr_bytes <= base.curr_bytes + 4 * 1024 {
             break;
         }
