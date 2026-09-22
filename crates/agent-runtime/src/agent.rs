@@ -538,6 +538,11 @@ struct EngineApprover {
     /// post idempotent on `review_id` (review-fleet C17). Checked immediately before the
     /// post: exactly one concurrent/repeated approve acquires the lease and posts.
     post_lease: Arc<dyn agent_core::FleetPostLease>,
+    /// The fleet workspace root every draft path must resolve under (`[review_fleet] root`).
+    /// Mandatory — approve reads the persisted (untrusted) `draft_path` under it via
+    /// [`read_confined_body`], so like the reader/editor the approver is only wired when a root
+    /// is configured (round8-2; previously it read the path unconfined when the root was unset).
+    fleet_root: PathBuf,
 }
 
 /// What an approve should do, decided purely from the looked-up draft + the current roster
@@ -679,13 +684,11 @@ impl agent_core::FleetApprover for EngineApprover {
             // it under the fleet root before reading, and cap the bytes. The renderer already
             // caps the body at `MAX_DRAFT_BYTES` (64_000) ≪ the read cap, so a legitimate draft
             // is read whole; a tampered/oversized file is bounded rather than posted in full.
-            let (body, _truncated) = read_confined_body(
-                self.agent.fleet_root().as_deref(),
-                &record.draft_path,
-                MAX_REVIEW_BODY_BYTES,
-            )
-            .await
-            .map_err(|e| agent_core::Error::Fleet(format!("approve: {e}")))?;
+            // The root is mandatory (round8-2) — the read is always confined.
+            let (body, _truncated) =
+                read_confined_body(&self.fleet_root, &record.draft_path, MAX_REVIEW_BODY_BYTES)
+                    .await
+                    .map_err(|e| agent_core::Error::Fleet(format!("approve: {e}")))?;
 
             // The authoritative idempotency guard (review-fleet C17). The `plan_approve`
             // short-circuit above reads `status` from the eventually-consistent telemetry
@@ -771,42 +774,33 @@ impl agent_core::FleetApprover for EngineApprover {
 /// a hostile `draft_path`/file size must not let a read allocate without bound.
 const MAX_REVIEW_BODY_BYTES: usize = 256 * 1024;
 
-/// Read a persisted draft's `.md` body from its (server-minted, but untrusted) `draft_path`,
-/// confined under the fleet root and byte-capped. Returns `(body, truncated)` — `truncated` is
-/// set when the on-disk file exceeded `cap` (the returned body is then the capped prefix).
-///
-/// `draft_path` is treated as untrusted (a compromised store could return anything, CLAUDE.md
-/// "every provider/server value"): when `fleet_root` is `Some`, the path is reduced to one
-/// relative to the root and run through [`agent_core::confine`] (canonicalize + symlink-escape
-/// guard) — a path that is not under the root, or escapes it via a symlink, is refused. When
-/// `fleet_root` is `None` the caller has no confinement base (the single-repo approve path),
-/// so the path is read directly, unchanged from prior behavior. Pure over the real filesystem
-/// so the confine/cap logic is table-testable with a `tempdir`.
-/// Resolve a persisted (server-minted, but untrusted) `draft_path` to a real path safe to
-/// read/write. When `fleet_root` is `Some`, the path is reduced to one relative to the root and
-/// run through [`agent_core::confine`] (canonicalize + symlink-escape guard) — a path not under
-/// the root, or escaping it via a symlink, is refused. When `fleet_root` is `None` the caller
-/// has no confinement base (the single-repo approve path), so the path is used directly,
-/// unchanged from prior behavior. Shared by the reader, the editor, and the approver so all
-/// three confine identically.
-fn confine_draft_path(fleet_root: Option<&Path>, draft_path: &str) -> agent_core::Result<PathBuf> {
-    match fleet_root {
-        Some(root) => {
-            // `resolve_within`/`confine` reject absolute paths, so reduce the stored absolute
-            // path to one relative to the root first; a path outside the root fails here.
-            let rel = Path::new(draft_path).strip_prefix(root).map_err(|_| {
-                agent_core::Error::Fleet(format!(
-                    "draft path is not under the fleet root: {draft_path:?}"
-                ))
-            })?;
-            agent_core::confine(root, &rel.to_string_lossy()).map_err(agent_core::Error::Fleet)
-        }
-        None => Ok(PathBuf::from(draft_path)),
-    }
+/// Resolve a persisted (server-minted, but untrusted — CLAUDE.md "every provider/server
+/// value") `draft_path` to a real path safe to read/write: reduce it to a path relative to the
+/// fleet root, then run it through [`agent_core::confine`] (canonicalize + symlink-escape guard)
+/// — a path not under the root, or escaping it via a symlink, is refused. The root is
+/// **mandatory** (`&Path`, never optional): the reader, the editor, AND the approver all confine
+/// identically, so no draft read/write is ever performed unconfined (the approver used to skip
+/// confinement when no root was configured — round8-2). Pure over the real filesystem so the
+/// confine logic is table-testable with a `tempdir`.
+fn confine_draft_path(fleet_root: &Path, draft_path: &str) -> agent_core::Result<PathBuf> {
+    // `resolve_within`/`confine` reject absolute paths, so reduce the stored absolute path to one
+    // relative to the root first; a path outside the root fails here.
+    let rel = Path::new(draft_path)
+        .strip_prefix(fleet_root)
+        .map_err(|_| {
+            agent_core::Error::Fleet(format!(
+                "draft path is not under the fleet root: {draft_path:?}"
+            ))
+        })?;
+    agent_core::confine(fleet_root, &rel.to_string_lossy()).map_err(agent_core::Error::Fleet)
 }
 
+/// Read a persisted draft's `.md` body from its (server-minted, but untrusted) `draft_path`,
+/// confined under the fleet root via [`confine_draft_path`] and byte-capped. Returns
+/// `(body, truncated)` — `truncated` is set when the on-disk file exceeded `cap` (the returned
+/// body is then the capped prefix).
 async fn read_confined_body(
-    fleet_root: Option<&Path>,
+    fleet_root: &Path,
     draft_path: &str,
     cap: usize,
 ) -> agent_core::Result<(String, bool)> {
@@ -851,12 +845,8 @@ impl agent_core::FleetDraftReader for EngineDraftReader {
         if !Path::new(&record.draft_path).starts_with(&self.fleet_root) {
             return Ok(None);
         }
-        let (body, truncated) = read_confined_body(
-            Some(&self.fleet_root),
-            &record.draft_path,
-            MAX_REVIEW_BODY_BYTES,
-        )
-        .await?;
+        let (body, truncated) =
+            read_confined_body(&self.fleet_root, &record.draft_path, MAX_REVIEW_BODY_BYTES).await?;
         Ok(Some(agent_core::DraftBody {
             record,
             body,
@@ -917,7 +907,7 @@ impl agent_core::FleetDraftEditor for EngineDraftEditor {
                 status: record.status,
             });
         }
-        let safe = confine_draft_path(Some(&self.fleet_root), &record.draft_path)?;
+        let safe = confine_draft_path(&self.fleet_root, &record.draft_path)?;
         tokio::fs::write(&safe, body.as_bytes())
             .await
             .map_err(|e| {
@@ -1779,6 +1769,11 @@ impl Agent {
         roster: Arc<dyn agent_core::FleetRegistry>,
     ) -> Option<Arc<dyn agent_core::FleetApprover>> {
         let history = self.fleet_history()?;
+        // Approve reads the persisted (untrusted) draft body under the fleet root and confines
+        // it there, so — like the reader/editor — require a configured root; without one the
+        // approver is absent (Approve → UNIMPLEMENTED) rather than reading a draft_path
+        // unconfined (round8-2).
+        let fleet_root = self.fleet_root()?;
         // The idempotency lease: the durable one resolved from config when present, else an
         // in-process fallback that still closes same-process double-posts.
         let post_lease = self
@@ -1789,6 +1784,7 @@ impl Agent {
             roster,
             history,
             post_lease,
+            fleet_root,
         }))
     }
 
@@ -3468,7 +3464,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("pr-1-rabc.md");
         std::fs::write(&path, contents).unwrap();
-        let (body, truncated) = read_confined_body(Some(&root), &path.to_string_lossy(), cap)
+        let (body, truncated) = read_confined_body(&root, &path.to_string_lossy(), cap)
             .await
             .expect("read confined body");
         assert_eq!(body, want_body, "{desc}: body");
@@ -3485,7 +3481,7 @@ mod tests {
             .join("host")
             .join("reviews")
             .join("gone.md");
-        let got = read_confined_body(Some(&root), &path.to_string_lossy(), 1024).await;
+        let got = read_confined_body(&root, &path.to_string_lossy(), 1024).await;
         assert!(got.is_err(), "a missing draft file is a surfaced error");
     }
 
@@ -3497,7 +3493,7 @@ mod tests {
         let outside = agent_testkit::tempdir();
         let secret = outside.join("secret.md");
         std::fs::write(&secret, "TOP SECRET").unwrap();
-        let got = read_confined_body(Some(&root), &secret.to_string_lossy(), 1024).await;
+        let got = read_confined_body(&root, &secret.to_string_lossy(), 1024).await;
         assert!(
             got.is_err(),
             "a draft_path outside the fleet root must be refused"
@@ -3516,7 +3512,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let link = dir.join("escape.md");
         std::os::unix::fs::symlink(&secret, &link).unwrap();
-        let got = read_confined_body(Some(&root), &link.to_string_lossy(), 1024).await;
+        let got = read_confined_body(&root, &link.to_string_lossy(), 1024).await;
         assert!(
             got.is_err(),
             "a symlink escaping the fleet root must be refused by confine"
