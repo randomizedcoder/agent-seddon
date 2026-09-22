@@ -28,6 +28,15 @@ extension points intact:
   cached) + `analyze_timeout_secs` (default 45) + skip-if-tool-missing (exit 127).
   A cold/slow/missing/erroring linter → a recorded `skipped`/`timeout`/`failed`
   `AnalyzerRun`, never a blocked bundle.
+- **Tool provisioning (operational):** with the default `[review] tool_provider =
+  "path"` the linters (golangci-lint, gosec, cargo-audit, cargo-deny, …) must be on
+  the process `PATH`. They are only via the `nix develop` shell or the **nix-wrapped**
+  `agent` (its `makeWrapper` prefixes the review-toolbox onto `PATH`) — the sanctioned
+  deploy (`nix/fleet-redeploy.nix`) uses the wrapped binary. A `--serve-fleet` started
+  from a plain `cargo build` binary has neither, so those tools exit 127 and are
+  `skipped` with a reason naming the remedy. To make them resolve independent of
+  `PATH`, set `[review] tool_provider = "nix-run"` with the tool names in
+  `nix_run_allowlist` (each resolves to `nix run <locked-ref>#<tool> --`).
 - **Untrusted output contained** exactly as the Security section requires: paths
   `confine`d (escapers dropped), messages `bound`ed, finding count capped
   (`MAX_FINDINGS`, drop-with-count).
