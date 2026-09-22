@@ -88,6 +88,21 @@ impl FileBackend {
     /// derived from ours, not attacker-influenced).
     fn persist(&self, bundle: &Bundle) -> Result<()> {
         let text = serde_json::to_string_pretty(bundle)?;
+        // Symmetric with load()'s cap: a write must never grow the bundle past what
+        // a read accepts. Otherwise the next load() — which EVERY op runs, get/list/
+        // count/tenants and apply() itself (including a Delete meant to prune) —
+        // fails on size, wedging the ENTIRE shared store unrecoverably (a plain
+        // `cargo build --serve-*` fleet reaches this simply by the scheduler
+        // retaining MAX_HISTORY×MAX_DETAIL per job across normal ticks). Reject the
+        // over-cap write instead: it fails here BEFORE the temp/rename, so the
+        // on-disk bundle stays at its last-good state and fully usable.
+        if text.len() > MAX_BUNDLE_BYTES {
+            return Err(Error::Config(format!(
+                "config store `{}`: write rejected — bundle would be {} bytes (cap {MAX_BUNDLE_BYTES})",
+                self.path.display(),
+                text.len()
+            )));
+        }
         if let Some(parent) = self.path.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent)?;
         }
@@ -199,5 +214,61 @@ impl Backend for FileBackend {
             }
         }
         self.persist(&bundle)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn backend() -> FileBackend {
+        FileBackend::new(agent_testkit::tempdir().join("store.json"))
+    }
+
+    fn ensure(tenant: &str) -> Write {
+        Write::EnsureTenant {
+            tenant: tenant.into(),
+        }
+    }
+    fn put(id: &str, blob: Vec<u8>) -> Write {
+        Write::Put {
+            collection: "c",
+            tenant: "t".into(),
+            id: id.into(),
+            blob,
+        }
+    }
+
+    /// A normal under-cap write round-trips through the on-disk bundle.
+    #[tokio::test]
+    async fn positive_under_cap_write_round_trips() {
+        let be = backend();
+        be.apply(&[ensure("t"), put("a", b"hi".to_vec())])
+            .await
+            .unwrap();
+        assert_eq!(be.get("c", "t", "a").await.unwrap(), Some(b"hi".to_vec()));
+    }
+
+    /// The R8-4 fix: a write that would push the serialized bundle past the cap is
+    /// REJECTED at persist time — and, critically, the store is NOT wedged. The
+    /// prior value still reads and a further small write still applies (before the
+    /// fix, the oversize bundle landed on disk and every later load() failed).
+    #[tokio::test]
+    async fn adversarial_oversize_write_is_rejected_and_store_stays_usable() {
+        let be = backend();
+        be.apply(&[ensure("t"), put("a", b"hi".to_vec())])
+            .await
+            .unwrap();
+
+        // A single blob at the byte cap serializes (as a JSON number array) to far
+        // more than MAX_BUNDLE_BYTES, so persist() must reject the write.
+        let huge = vec![0u8; MAX_BUNDLE_BYTES];
+        let err = be.apply(&[put("big", huge)]).await;
+        assert!(err.is_err(), "over-cap write is rejected");
+
+        // Store still usable: the earlier card reads, and a new small write applies.
+        assert_eq!(be.get("c", "t", "a").await.unwrap(), Some(b"hi".to_vec()));
+        be.apply(&[put("b", b"ok".to_vec())]).await.unwrap();
+        assert_eq!(be.get("c", "t", "b").await.unwrap(), Some(b"ok".to_vec()));
     }
 }
