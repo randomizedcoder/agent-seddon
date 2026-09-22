@@ -48,6 +48,18 @@ const DRAFT_FETCH_CAP: usize = MAX_DRAFT_ROWS * 20;
 /// two (this fails the build, forcing the SQL literal to be updated in lock-step).
 const _: () = assert!(DRAFT_FETCH_CAP == 10_000);
 
+/// Hard cap on the number of *raw* feedback rows [`ClickHouseHistory::prior`] fetches before the
+/// in-memory newest-per-`item_id` dedup in [`finalize_feedback`]. `agent_review_feedback` is
+/// append-only (each review round appends up to [`agent_core::MAX_FEEDBACK_ITEMS`] rows) with no
+/// TTL, so without a `LIMIT` `prior()` — called once per review round on the hot fleet path —
+/// would pull the PR's ever-growing feedback history into memory every round. Ordered `ts DESC`
+/// so the cap keeps the NEWEST rows: an item whose current-state (max-`ts`) row is inside the
+/// window is captured (carry-forward is correct), and only items untouched for ~50 rounds (all
+/// their rows older than the window) drop — acceptable for carry-forward. Mirrors
+/// [`DRAFT_FETCH_CAP`]; the `10000` SQL literal is pinned to it below.
+const FEEDBACK_FETCH_CAP: usize = agent_core::MAX_FEEDBACK_ITEMS * 50;
+const _: () = assert!(FEEDBACK_FETCH_CAP == 10_000);
+
 /// The `list_drafts` SELECT with a fixed `WHERE`/`ORDER`/`LIMIT` around a compile-time literal
 /// `$where`. Every variant is a string LITERAL (never a runtime `format!` of a filter value), so
 /// the filter values can only ride as bound `$N` args — an untrusted `repo`/`session_id` cannot
@@ -80,6 +92,21 @@ fn drafts_sql(has_repo: bool, has_session: bool) -> &'static str {
         (false, true) => drafts_query!(" WHERE session_id = $1"),
         (true, true) => drafts_query!(" WHERE repo = $1 AND session_id = $2"),
     }
+}
+
+/// The `prior()` feedback SELECT. A `&'static` literal so the filter values ride only as bound
+/// `$1`/`$2` args (an untrusted `repo` cannot inject SQL — and `QueryBuilder<'a>` borrows the
+/// query `&str`, so it must be `&'static`, not a local `String`). `ORDER BY ts DESC LIMIT` bounds
+/// the fetch to [`FEEDBACK_FETCH_CAP`] newest rows; [`finalize_feedback`] then dedups
+/// newest-per-`item_id` (order-independently) in memory. The `10000` literal is
+/// `FEEDBACK_FETCH_CAP` — kept in sync by `positive_prior_feedback_sql_bounds_the_fetch`.
+fn feedback_sql() -> &'static str {
+    "SELECT session_id, user, ts, item_id, review_id, repo, pr_number, \
+            category, severity, title, body, status, first_seen_review, \
+            first_seen_sha, addressed_review, addressed_sha \
+       FROM agent_review_feedback \
+      WHERE repo = $1 AND pr_number = $2 \
+      ORDER BY ts DESC LIMIT 10000"
 }
 
 /// Reduce the raw draft rows (all matching `repo`/`session_id`) to the operator view: newest
@@ -128,6 +155,37 @@ fn finalize_drafts(
         limit.min(MAX_DRAFT_ROWS)
     };
     kept.into_iter().take(limit).map(record_from_row).collect()
+}
+
+/// Reduce the raw feedback rows (all matching `repo`/`pr`) to the carry-forward view: the newest
+/// state per `item_id`, keeping only those currently `open`, in deterministic `item_id` order.
+/// Pure so the dedup/filter logic is table-testable without a live ClickHouse. Newest-wins is by
+/// max-`ts` (NOT insertion order): the fetch orders `ts DESC` for the `LIMIT`, so relying on
+/// insertion order here would silently carry a stale (older) state forward.
+fn finalize_feedback(rows: Vec<ReviewFeedbackRow>) -> Vec<Feedback> {
+    use std::collections::hash_map::Entry;
+    let mut latest: HashMap<String, ReviewFeedbackRow> = HashMap::new();
+    for r in rows {
+        match latest.entry(r.item_id.clone()) {
+            Entry::Occupied(mut e) => {
+                if r.ts.1 > e.get().ts.1 {
+                    e.insert(r);
+                }
+            }
+            Entry::Vacant(e) => {
+                e.insert(r);
+            }
+        }
+    }
+    // Keep only currently-open items to carry forward; sort for a stable order (a HashMap
+    // iterates arbitrarily).
+    let mut open_items: Vec<Feedback> = latest
+        .into_values()
+        .filter(|r| r.status == agent_core::feedback_status::OPEN)
+        .map(feedback_from_row)
+        .collect();
+    open_items.sort_by(|a, b| a.item_id.cmp(&b.item_id));
+    open_items
 }
 
 /// A ClickHouse-backed [`FleetHistory`]. Shares the `[telemetry]` connection params with the
@@ -293,43 +351,21 @@ impl FleetHistory for ClickHouseHistory {
             .map(record_from_row)
         };
 
-        // All feedback rows for the PR; the newest row per item_id is its current state.
-        // Keep only those currently `open` to carry forward.
+        // The newest FEEDBACK_FETCH_CAP feedback rows for the PR (append-only, no TTL — the
+        // fetch MUST be bounded; see the const). The newest row per item_id is its current
+        // state; finalize_feedback dedups (max-ts, order-independent) and keeps the open ones.
         let rows: Vec<ReviewFeedbackRow> = {
             let repo = repo.clone();
             self.with_client(move |client| {
-                let q = QueryBuilder::new(
-                    "SELECT session_id, user, ts, item_id, review_id, repo, pr_number, \
-                            category, severity, title, body, status, first_seen_review, \
-                            first_seen_sha, addressed_review, addressed_sha \
-                       FROM agent_review_feedback \
-                      WHERE repo = $1 AND pr_number = $2 \
-                      ORDER BY item_id ASC, ts ASC",
-                )
-                .arg(repo.clone())
-                .arg(pr);
+                let q = QueryBuilder::new(feedback_sql()).arg(repo.clone()).arg(pr);
                 async move { client.query_collect::<ReviewFeedbackRow>(q).await }
             })
             .await?
         };
 
-        // Newest-wins per item_id (rows arrive ts-ascending, so a later row overwrites).
-        let mut latest: HashMap<String, ReviewFeedbackRow> = HashMap::new();
-        for r in rows {
-            latest.insert(r.item_id.clone(), r);
-        }
-        let mut open_items: Vec<Feedback> = latest
-            .into_values()
-            .filter(|r| r.status == agent_core::feedback_status::OPEN)
-            .map(feedback_from_row)
-            .collect();
-        // Deterministic order (a HashMap iterates arbitrarily) so downstream renders/tests
-        // are stable.
-        open_items.sort_by(|a, b| a.item_id.cmp(&b.item_id));
-
         Ok(PriorReview {
             last_draft,
-            open_items,
+            open_items: finalize_feedback(rows),
         })
     }
 
@@ -635,5 +671,108 @@ mod tests {
             sql.contains(&format!("LIMIT {DRAFT_FETCH_CAP}")),
             "fetch bounded to DRAFT_FETCH_CAP ({DRAFT_FETCH_CAP}): {sql}"
         );
+    }
+
+    // --- prior() feedback fetch (round8-3: bounded + order-independent dedup) --------------
+
+    /// A minimal feedback row for the `finalize_feedback` tables — only the fields the reducer
+    /// reads (item_id, status, ts) vary; the rest are fixed.
+    fn fb_row(item_id: &str, status: &str, ts_ms: u64) -> ReviewFeedbackRow {
+        ReviewFeedbackRow {
+            session_id: "s".into(),
+            user: "u".into(),
+            ts: klickhouse::DateTime64::<3>(klickhouse::Tz::UTC, ts_ms),
+            item_id: item_id.into(),
+            review_id: "r".into(),
+            repo: "o__n".into(),
+            pr_number: 1,
+            category: "c".into(),
+            severity: "low".into(),
+            title: "t".into(),
+            body: "b".into(),
+            status: status.into(),
+            first_seen_review: String::new(),
+            first_seen_sha: String::new(),
+            addressed_review: String::new(),
+            addressed_sha: String::new(),
+        }
+    }
+
+    /// desc: newest-per-item_id (by max ts) + keep only currently-`open`, in item_id order.
+    /// The `expected` column is the item_ids `finalize_feedback` must carry forward.
+    #[rstest]
+    #[case::positive_open_item_carried(
+        "an open item is carried forward",
+        vec![("a", "open", 1)],
+        vec!["a"]
+    )]
+    #[case::positive_addressed_item_dropped(
+        "an addressed item is not carried forward",
+        vec![("a", "addressed", 1)],
+        Vec::<&str>::new()
+    )]
+    #[case::corner_newest_state_open_kept(
+        "same item: newest ts is `open` → carried forward",
+        vec![("a", "addressed", 1), ("a", "open", 5)],
+        vec!["a"]
+    )]
+    #[case::corner_newest_state_addressed_dropped(
+        "same item: newest ts is `addressed` → dropped (stale `open` ignored)",
+        vec![("a", "open", 1), ("a", "addressed", 5)],
+        Vec::<&str>::new()
+    )]
+    #[case::corner_newest_wins_reversed_input(
+        "newest-wins holds when the newest row arrives FIRST (the ts-desc fetch order)",
+        vec![("a", "addressed", 5), ("a", "open", 1)],
+        Vec::<&str>::new()
+    )]
+    #[case::positive_multi_item_sorted(
+        "multiple open items come back in item_id order",
+        vec![("b", "open", 2), ("a", "open", 1)],
+        vec!["a", "b"]
+    )]
+    #[case::boundary_empty_input(
+        "no rows in → no items out",
+        Vec::<(&str, &str, u64)>::new(),
+        Vec::<&str>::new()
+    )]
+    fn finalize_feedback_table(
+        #[case] desc: &str,
+        #[case] rows: Vec<(&str, &str, u64)>,
+        #[case] expected: Vec<&str>,
+    ) {
+        let rows: Vec<ReviewFeedbackRow> = rows
+            .into_iter()
+            .map(|(id, st, ts)| fb_row(id, st, ts))
+            .collect();
+        let got: Vec<String> = finalize_feedback(rows)
+            .into_iter()
+            .map(|f| f.item_id)
+            .collect();
+        assert_eq!(got, expected, "{desc}");
+    }
+
+    /// desc: `prior()`'s feedback fetch is bounded (newest-first) so the append-only, TTL-less
+    /// `agent_review_feedback` table is never pulled wholesale into memory per review round.
+    /// expect: `ORDER BY ts DESC` + the `FEEDBACK_FETCH_CAP` LIMIT (pins the SQL literal to the
+    /// const), bound `$1`/`$2` args, and no interpolated value.
+    #[rstest]
+    #[case::adversarial_value_never_interpolated("a DROP TABLE payload never lands in the SQL")]
+    fn positive_prior_feedback_sql_bounds_the_fetch(#[case] desc: &str) {
+        let sql = feedback_sql();
+        assert!(
+            sql.contains("ORDER BY ts DESC"),
+            "{desc}: newest-first: {sql}"
+        );
+        assert!(
+            sql.contains(&format!("LIMIT {FEEDBACK_FETCH_CAP}")),
+            "{desc}: fetch bounded to FEEDBACK_FETCH_CAP ({FEEDBACK_FETCH_CAP}): {sql}"
+        );
+        assert!(
+            sql.contains("$1") && sql.contains("$2"),
+            "{desc}: repo/pr bind as placeholders"
+        );
+        let evil = "x'; DROP TABLE agent_review_feedback;--";
+        assert!(!sql.contains(evil), "{desc}: no interpolated value");
     }
 }
