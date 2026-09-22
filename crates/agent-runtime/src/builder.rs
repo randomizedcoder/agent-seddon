@@ -1737,7 +1737,17 @@ pub(crate) fn openai_compat_provider(
              and traffic to man-in-the-middle attacks — do not use over untrusted networks."
         );
     }
-    let api_key = resolve_api_key(&cfg.provider)?;
+    // Keyless is allowed here (unlike Anthropic): the OpenAI-compatible provider is
+    // the generic one, routinely pointed at a LOCAL server that ignores the key
+    // (e.g. a llama-cpp endpoint). Requiring a key forced a dummy placeholder for
+    // those; resolve without requiring one, matching pool/router members. A remote
+    // endpoint that does need a key still fails fast at the first 401 (and `doctor`
+    // / `provider reach` flags a missing key up front).
+    let api_key = resolve_key_opt(
+        &cfg.provider.api_key,
+        &cfg.provider.api_key_env,
+        &cfg.provider.api_key_file,
+    )?;
     let provider = OpenAiCompatProvider::new(OpenAiCompatConfig {
         base_url: cfg.provider.base_url.clone(),
         model: cfg.provider.model.clone(),
@@ -1885,9 +1895,11 @@ fn resolve_key_opt(inline: &str, env: &str, file: &str) -> anyhow::Result<String
 }
 
 /// Resolve the API key without ever storing it in the repo: inline > env > file.
-/// Shared by every provider factory that needs a key; unlike `resolve_key_opt` it
-/// **requires** one (the top-level `[provider]` can't be keyless).
-#[cfg(any(feature = "provider-openai-compat", feature = "provider-anthropic"))]
+/// Unlike `resolve_key_opt` it **requires** one, so it is used only by providers
+/// for which a key is always mandatory (Anthropic — `api.anthropic.com` never
+/// accepts a request without one). The generic OpenAI-compatible provider uses
+/// `resolve_key_opt` instead, since it is routinely a keyless local endpoint.
+#[cfg(feature = "provider-anthropic")]
 fn resolve_api_key(p: &ProviderCfg) -> anyhow::Result<String> {
     let key = resolve_key_opt(&p.api_key, &p.api_key_env, &p.api_key_file)?;
     if key.is_empty() {
@@ -3608,6 +3620,8 @@ mod tests {
     use crate::config::ProviderCfg;
     use rstest::rstest;
 
+    // Only the (anthropic-gated) resolve_api_key tests build a ProviderCfg this way.
+    #[cfg(feature = "provider-anthropic")]
     fn pcfg(api_key: &str, api_key_env: &str, api_key_file: &str) -> ProviderCfg {
         ProviderCfg {
             base_url: String::new(),
@@ -3639,7 +3653,10 @@ mod tests {
         }
     }
 
-    // --- resolve_api_key: precedence inline > env > file -------------------
+    // --- resolve_api_key: precedence inline > env > file (anthropic path) --------
+    // resolve_api_key is now used only by the Anthropic factory (the OpenAI-compatible
+    // factory allows keyless via resolve_key_opt), so these are gated to match.
+    #[cfg(feature = "provider-anthropic")]
     #[test]
     fn resolve_api_key_prefers_inline() {
         assert_eq!(
@@ -3648,6 +3665,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "provider-anthropic")]
     #[test]
     fn resolve_api_key_falls_back_to_env() {
         // A unique var name so parallel cases can't race on shared env state.
@@ -3658,6 +3676,7 @@ mod tests {
         assert_eq!(got, "FROMENV");
     }
 
+    #[cfg(feature = "provider-anthropic")]
     #[test]
     fn resolve_api_key_reads_file_trimmed() {
         let dir = agent_testkit::tempdir();
@@ -3669,6 +3688,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "provider-anthropic")]
     #[test]
     fn resolve_api_key_errors_when_none_configured() {
         assert!(resolve_api_key(&pcfg("", "", "")).is_err());
@@ -4090,6 +4110,47 @@ mod seam_builder_tests {
             Err(e) => e.to_string(),
         };
         assert!(err.contains("unknown [cache] strategy"), "got: {err}");
+    }
+
+    // --- top-level [provider] key requirement (round6-C1) ------------------
+
+    /// The OpenAI-compatible provider is routinely a keyless local endpoint, so the
+    /// factory must build with no key configured (regression: it used to require one,
+    /// forcing a dummy placeholder for a local llama-cpp server).
+    #[cfg(feature = "provider-openai-compat")]
+    #[test]
+    fn positive_openai_compat_builds_keyless() {
+        let mut cfg = Config::minimal_for_test();
+        cfg.provider.base_url = "http://localhost:8095/v1".into();
+        cfg.provider.model = "local-model".into();
+        cfg.provider.api_key = String::new();
+        cfg.provider.api_key_env = String::new();
+        cfg.provider.api_key_file = String::new();
+        let metrics = Metrics::new();
+        let ctx = crate::registry::FactoryCtx::new(&cfg, &metrics);
+        assert!(
+            openai_compat_provider(&ctx).is_ok(),
+            "a keyless openai-compat provider must build"
+        );
+    }
+
+    /// Anthropic never accepts a keyless request, so its factory must still fail
+    /// closed when no key is configured.
+    #[cfg(feature = "provider-anthropic")]
+    #[test]
+    fn negative_anthropic_requires_a_key() {
+        let mut cfg = Config::minimal_for_test();
+        cfg.provider.model = "claude-x".into();
+        cfg.provider.api_key = String::new();
+        cfg.provider.api_key_env = String::new();
+        cfg.provider.api_key_file = String::new();
+        let metrics = Metrics::new();
+        let ctx = crate::registry::FactoryCtx::new(&cfg, &metrics);
+        let err = match anthropic_provider(&ctx) {
+            Ok(_) => panic!("keyless anthropic must fail closed"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("no API key"), "got: {err}");
     }
 
     // --- the default-on graph store (cognition follow-up) -------------------
