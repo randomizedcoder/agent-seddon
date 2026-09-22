@@ -156,3 +156,20 @@ pub(crate) fn retry_after(resp: &reqwest::Response) -> Option<std::time::Duratio
         .and_then(|v| v.to_str().ok())
         .and_then(agent_retry::http::parse_retry_after)
 }
+
+/// The reasoning-only salvage rule, shared by the OpenAI-compatible and Anthropic
+/// decoders (buffered and streaming alike): a reasoning/thinking block becomes the
+/// reply ONLY when there is no assistant text AND no tool call. A normal text or
+/// tool-call turn never resends reasoning; a genuinely empty turn (no reasoning
+/// either) stays empty so the non-convergence guard can still act. Some reasoning
+/// endpoints spend the whole budget in `reasoning_content`/`thinking` and return a
+/// stop turn with empty `content` — surfacing that reasoning keeps the agent loop
+/// from stalling on an empty message (openai-compat #442; anthropic parallel).
+#[cfg(any(feature = "provider-openai-compat", feature = "provider-anthropic"))]
+pub(crate) fn use_reasoning_as_reply(
+    has_text: bool,
+    has_tool_call: bool,
+    has_reasoning: bool,
+) -> bool {
+    !has_text && !has_tool_call && has_reasoning
+}
