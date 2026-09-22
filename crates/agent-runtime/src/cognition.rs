@@ -47,6 +47,53 @@ pub(crate) struct GraphPlan {
     pub warnings: Vec<String>,
 }
 
+impl GraphPlan {
+    /// Every concrete provider NAME this plan references, each paired with a
+    /// human label of where it came from. A `None`/empty reference means "the
+    /// configured main provider" and is skipped (it is resolved and reported
+    /// elsewhere). Used to **preflight** the graph's providers at startup so a
+    /// stale/foreign document naming a provider the current config doesn't define
+    /// (e.g. the schema-default critic `glm`) fails with a graph-aware error,
+    /// instead of a cryptic late "unknown provider `glm`" from deep in a factory.
+    pub(crate) fn referenced_providers(&self) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = Vec::new();
+        let mut push = |whence: String, name: &str| {
+            if !name.is_empty() {
+                out.push((whence, name.to_string()));
+            }
+        };
+        if let Some(g) = &self.generator {
+            push("generate node `provider`".into(), g);
+        }
+        if let Some(gate) = &self.gate {
+            push("critic_gate `critic`".into(), &gate.critic);
+        }
+        if let Some(p) = self.summary.as_ref().and_then(|d| d.provider.as_deref()) {
+            push("distill_summary `provider`".into(), p);
+        }
+        if let Some(p) = self.facts.as_ref().and_then(|d| d.provider.as_deref()) {
+            push("distill_facts `provider`".into(), p);
+        }
+        if let Some(p) = &self.objective_provider {
+            push("objective `provider`".into(), p);
+        }
+        if let Some(fork) = &self.fork {
+            for b in &fork.branches {
+                if let Some(p) = &b.provider {
+                    push(format!("fork branch `{}` `provider`", b.label), p);
+                }
+                if let Some(bg) = &b.gate {
+                    push(format!("fork branch `{}` `critic`", b.label), &bg.critic);
+                }
+            }
+            if let Some(j) = &fork.judge {
+                push("fork merge `judge`".into(), j);
+            }
+        }
+        out
+    }
+}
+
 /// A `distill_summary`/`distill_facts` node's settings: token budget and the
 /// role provider its background calls use (param or capability edge).
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -764,5 +811,93 @@ mod tests {
         assert!(warnings.iter().any(|w| w.contains("double-gating")));
         // The operator's own [consensus] wiring is untouched.
         assert_eq!(cfg.consensus.critic, "operator-critic");
+    }
+
+    // --- referenced_providers: the preflight collector (round6-A1) -----------
+
+    /// An empty plan (the built-in, graph-less behavior) references nothing.
+    #[test]
+    fn boundary_referenced_providers_empty_plan_is_empty() {
+        assert!(GraphPlan::default().referenced_providers().is_empty());
+    }
+
+    /// A `None`/empty reference means the configured main provider and is skipped,
+    /// so the collector never emits a spurious empty name to preflight.
+    #[test]
+    fn negative_referenced_providers_skips_none_and_empty() {
+        let plan = GraphPlan {
+            generator: None,
+            objective_provider: Some(String::new()),
+            summary: Some(DistillNodePlan {
+                tokens: None,
+                provider: None,
+            }),
+            ..Default::default()
+        };
+        assert!(plan.referenced_providers().is_empty());
+    }
+
+    /// A `critic_gate` names its critic (the schema default is `glm`) — the exact
+    /// reference behind the cryptic-startup bug this preflight fixes.
+    #[test]
+    fn positive_referenced_providers_reports_gate_critic() {
+        let plan = GraphPlan {
+            gate: Some(GatePlan {
+                critic: "glm".into(),
+                max_rounds: None,
+                scope: None,
+                on_exhaustion: None,
+            }),
+            ..Default::default()
+        };
+        let refs = plan.referenced_providers();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].1, "glm");
+        assert!(refs[0].0.contains("critic"), "label: {}", refs[0].0);
+    }
+
+    /// A fork contributes every concrete branch provider, branch critic, and the
+    /// merge judge — but not a branch that inherits the base provider (`None`).
+    #[test]
+    fn corner_referenced_providers_collects_fork_names() {
+        let plan = GraphPlan {
+            generator: Some("gen-x".into()),
+            fork: Some(ForkPlan {
+                split: "s".into(),
+                branches: vec![
+                    BranchPlan {
+                        label: "b1".into(),
+                        lens: String::new(),
+                        provider: Some("kimi".into()),
+                        gate: None,
+                    },
+                    BranchPlan {
+                        label: "b2".into(),
+                        lens: String::new(),
+                        provider: None, // inherits the base provider — not collected
+                        gate: Some(GatePlan {
+                            critic: "b2-critic".into(),
+                            max_rounds: None,
+                            scope: None,
+                            on_exhaustion: None,
+                        }),
+                    },
+                ],
+                policy: String::new(),
+                quorum_k: None,
+                timeout_ms: None,
+                on_timeout: String::new(),
+                strategy: String::new(),
+                judge: Some("judge-y".into()),
+                record_losers: None,
+            }),
+            ..Default::default()
+        };
+        let names: Vec<String> = plan
+            .referenced_providers()
+            .into_iter()
+            .map(|(_, n)| n)
+            .collect();
+        assert_eq!(names, vec!["gen-x", "kimi", "b2-critic", "judge-y"]);
     }
 }
