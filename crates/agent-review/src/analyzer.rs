@@ -468,10 +468,21 @@ async fn run_tool(
         return (run(tool, "timeout", "", started), Vec::new());
     }
     if out.exit_code == 127 {
-        return (
-            run(tool, "skipped", "tool not found on PATH", started),
-            Vec::new(),
+        // Exit 127 = the tool binary isn't on the sandbox's PATH. The analysis tools
+        // are on PATH only via the `nix develop` shell or the nix-*wrapped* `agent`
+        // (its makeWrapper prefixes the review-toolbox); a plain `cargo build` binary
+        // serving `--serve-fleet` has neither. Fail soft (skip, never block the review)
+        // but say how to fix it — this reason flows to the digest/telemetry (bounded
+        // downstream), so an operator sees why supply-chain/lint findings are missing.
+        let reason = bound(
+            &format!(
+                "{tool} not found on PATH — run the wrapped `agent` (it carries the \
+                 review-toolbox) or set [review] tool_provider=\"nix-run\" with {tool} \
+                 in nix_run_allowlist"
+            ),
+            200,
         );
+        return (run(tool, "skipped", &reason, started), Vec::new());
     }
     let diag = if parse_stderr {
         &out.stderr
@@ -1596,6 +1607,99 @@ mod tests {
         assert_eq!(
             bare.resolve_head("golangci-lint").await.as_deref(),
             Some("golangci-lint")
+        );
+    }
+
+    // --- run_tool fail-soft: missing tool (exit 127) → actionable skip (round7-3) ------
+
+    /// A sandbox that returns one fixed exit code, so `run_tool`'s fail-soft arms can be
+    /// exercised without a real subprocess.
+    struct FixedExitSandbox(i32);
+    #[async_trait::async_trait]
+    impl agent_core::Sandbox for FixedExitSandbox {
+        async fn exec(&self, _spec: &ExecSpec) -> agent_core::Result<agent_core::ExecOutput> {
+            Ok(agent_core::ExecOutput {
+                stdout: String::new(),
+                stdout_bytes: Vec::new(),
+                stderr: String::new(),
+                exit_code: self.0,
+                timed_out: false,
+            })
+        }
+        fn capabilities(&self) -> agent_core::SandboxCapabilities {
+            agent_core::SandboxCapabilities {
+                backend: "fake".into(),
+                available: true,
+                ..Default::default()
+            }
+        }
+    }
+
+    /// A tool binary absent from the sandbox PATH (exit 127) is a fail-soft `skipped`
+    /// run — never a blocked review — whose reason names the tool AND the remedy
+    /// (wrapped binary / `tool_provider="nix-run"`), so an operator can see why
+    /// supply-chain/lint findings are missing.
+    #[tokio::test]
+    async fn positive_missing_tool_skips_with_actionable_reason() {
+        let sandbox: std::sync::Arc<dyn agent_core::Sandbox> =
+            std::sync::Arc::new(FixedExitSandbox(127));
+        let (r, findings) = run_tool(
+            &sandbox,
+            &root(),
+            "cargo-audit",
+            "cargo-audit audit --json",
+            5,
+            &changed(),
+            parse_cargo_audit,
+            false,
+            NetworkPolicy::Off,
+        )
+        .await;
+        assert_eq!(r.status, "skipped");
+        assert!(findings.is_empty());
+        assert!(
+            r.reason.contains("cargo-audit"),
+            "names the tool: {}",
+            r.reason
+        );
+        assert!(
+            r.reason.contains("tool_provider=\"nix-run\""),
+            "names the remedy: {}",
+            r.reason
+        );
+    }
+
+    /// The reason is built from the (attacker-influenceable in principle) tool name, so
+    /// it is bounded — a pathological name can't splice an unbounded reason downstream.
+    #[tokio::test]
+    async fn adversarial_missing_tool_reason_is_bounded() {
+        let sandbox: std::sync::Arc<dyn agent_core::Sandbox> =
+            std::sync::Arc::new(FixedExitSandbox(127));
+        let huge = "x".repeat(500);
+        let (r, _) = run_tool(
+            &sandbox,
+            &root(),
+            &huge,
+            "whatever",
+            5,
+            &changed(),
+            parse_cargo_audit,
+            false,
+            NetworkPolicy::Off,
+        )
+        .await;
+        assert_eq!(r.status, "skipped");
+        // `bound` caps at 200 chars + a short truncation marker — the 500-char tool
+        // name cannot splice an unbounded reason downstream.
+        assert!(
+            r.reason.contains("[truncated]"),
+            "reason truncated: {}",
+            r.reason
+        );
+        assert!(
+            r.reason.chars().count() <= 213,
+            "reason bounded: {} chars",
+            r.reason.chars().count()
         );
     }
 }
