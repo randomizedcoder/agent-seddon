@@ -2721,7 +2721,11 @@ pub struct ProviderCfg {
     /// `anthropic-version` header for the Anthropic provider.
     #[serde(default = "default_anthropic_version")]
     pub version: String,
-    /// Inline key (avoid committing). Takes precedence if non-empty.
+    /// Inline key (avoid committing). Takes precedence if non-empty. Resolution
+    /// order across all three fields is `api_key` > `api_key_env` > `api_key_file`.
+    /// For the OpenAI-compatible provider all three may be empty ⇒ keyless (fine
+    /// for a local server that ignores the key, e.g. llama-cpp); the Anthropic
+    /// provider still requires a key (`api.anthropic.com` never accepts none).
     #[serde(default)]
     pub api_key: String,
     /// Read the key from this env var if `api_key` is empty.
