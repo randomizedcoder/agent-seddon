@@ -386,7 +386,7 @@ impl LlmProvider for OpenAiCompatProvider {
             // Salvage a reasoning-only stream: if no assistant text streamed and no tool
             // call was opened, but the model emitted reasoning, surface the reasoning as
             // the reply (same rule as the non-streaming path — see `use_reasoning_as_reply`).
-            if use_reasoning_as_reply(text_total > 0, !tools_acc.is_empty(), !reasoning_acc.is_empty()) {
+            if crate::use_reasoning_as_reply(text_total > 0, !tools_acc.is_empty(), !reasoning_acc.is_empty()) {
                 yield Ok(CompletionChunk { delta_text: reasoning_acc, ..Default::default() });
             }
             for (_i, acc) in tools_acc {
@@ -729,17 +729,8 @@ fn to_core_usage(u: WireUsage) -> Usage {
     }
 }
 
-/// The reasoning-only salvage rule, shared by the buffered and streaming decoders:
-/// `reasoning_content` becomes the reply ONLY when there is no assistant text AND
-/// no tool call (see module docs). A normal text or tool-call turn never resends
-/// reasoning; a genuinely empty turn (no reasoning either) stays empty so the
-/// non-convergence guard can still act.
-fn use_reasoning_as_reply(has_text: bool, has_tool_call: bool, has_reasoning: bool) -> bool {
-    !has_text && !has_tool_call && has_reasoning
-}
-
 /// Build the assistant [`Message`] from a decoded buffered choice, applying the
-/// reasoning-only salvage ([`use_reasoning_as_reply`]).
+/// reasoning-only salvage ([`crate::use_reasoning_as_reply`]).
 fn message_from_choice(msg: WireRespMsg) -> Message {
     let reasoning = msg.reasoning_content.unwrap_or_default();
     if !reasoning.is_empty() {
@@ -756,7 +747,7 @@ fn message_from_choice(msg: WireRespMsg) -> Message {
         })
         .collect();
     let content = msg.content.unwrap_or_default();
-    let text = if use_reasoning_as_reply(
+    let text = if crate::use_reasoning_as_reply(
         !content.is_empty(),
         !tool_calls.is_empty(),
         !reasoning.is_empty(),
@@ -783,10 +774,10 @@ fn message_from_choice(msg: WireRespMsg) -> Message {
 #[cfg(test)]
 mod tests {
     use super::{
-        message_from_choice, parse_tool_args, to_core_usage, to_openai_content,
-        use_reasoning_as_reply, OpenAiCompatConfig, OpenAiCompatProvider, PromptTokensDetails,
-        StreamEvent, WireContent, WireResp, WireUsage,
+        message_from_choice, parse_tool_args, to_core_usage, to_openai_content, OpenAiCompatConfig,
+        OpenAiCompatProvider, PromptTokensDetails, StreamEvent, WireContent, WireResp, WireUsage,
     };
+    use crate::use_reasoning_as_reply;
     use agent_core::{CompletionRequest, ContentBlock, Message};
     use rstest::rstest;
     use serde_json::{json, Value};

@@ -6,6 +6,12 @@
 //! our normalized `Message` list into that shape (coalescing consecutive
 //! same-role turns — e.g. several tool results after one assistant turn — into a
 //! single message) and parses the typed response back into a `CompletionResponse`.
+//!
+//! Thinking blocks are normally not surfaced as the reply. The one exception: when a
+//! turn ends with no text and no `tool_use` but does carry a `thinking` block, the
+//! reasoning is the only output, so we fall back to it rather than surface an empty
+//! turn that stalls the loop (both the buffered and streaming paths do this — see
+//! [`crate::use_reasoning_as_reply`], the Anthropic parallel of the openai-compat fix).
 
 use crate::stream_caps::{
     MAX_STREAM_BUF_BYTES, MAX_STREAM_TEXT_BYTES, MAX_STREAM_TOOL_ARG_BYTES, MAX_STREAM_TOOL_CALLS,
@@ -298,6 +304,13 @@ impl LlmProvider for AnthropicProvider {
             // Total assistant text seen so far — bound it so a server slow-dripping small
             // text deltas forever can't grow the consumer's buffer without limit (OOM).
             let mut text_total: usize = 0;
+            // Accumulated `thinking` deltas, salvaged as the reply only if the stream ends
+            // with no text and no tool_use. Capped at the same ceiling as text so a
+            // thinking-only stream can't grow it without bound (OOM); the tail is dropped
+            // (not an error) because it is a fallback, not the primary output.
+            let mut thinking_acc = String::new();
+            // Whether any tool_use block was opened — a tool-call turn never salvages thinking.
+            let mut tool_use_seen = false;
 
             'read: while let Some(next) = bytes.next().await {
                 let b = match next {
@@ -340,6 +353,7 @@ impl LlmProvider for AnthropicProvider {
                                         )));
                                         return;
                                     }
+                                    tool_use_seen = true;
                                     blocks.insert(
                                         i,
                                         ToolBlockAcc {
@@ -363,6 +377,17 @@ impl LlmProvider for AnthropicProvider {
                                             return;
                                         }
                                         yield Ok(CompletionChunk { delta_text: text, ..Default::default() });
+                                    }
+                                }
+                                // Buffer thinking for the salvage-if-empty case at stream end.
+                                // Bounded: append only while it still fits under the text ceiling;
+                                // drop the tail once full (don't error, don't slice mid-UTF-8).
+                                if let Some(th) = delta.thinking {
+                                    if !th.is_empty()
+                                        && thinking_acc.len().saturating_add(th.len())
+                                            <= MAX_STREAM_TEXT_BYTES
+                                    {
+                                        thinking_acc.push_str(&th);
                                     }
                                 }
                                 if let (Some(i), Some(pj)) = (ev.index, delta.partial_json) {
@@ -412,6 +437,13 @@ impl LlmProvider for AnthropicProvider {
                     )));
                     return;
                 }
+            }
+
+            // Salvage a thinking-only stream: if no assistant text streamed and no tool_use
+            // block opened, but the model emitted thinking, surface the thinking as the reply
+            // (same rule as the buffered path — see `crate::use_reasoning_as_reply`).
+            if crate::use_reasoning_as_reply(text_total > 0, tool_use_seen, !thinking_acc.is_empty()) {
+                yield Ok(CompletionChunk { delta_text: thinking_acc, ..Default::default() });
             }
 
             yield Ok(CompletionChunk {
@@ -489,6 +521,10 @@ struct SseContentBlock {
 struct SseDelta {
     #[serde(default)]
     text: Option<String>,
+    /// `thinking_delta` events carry the reasoning here (not under `text`). Accumulated
+    /// and salvaged as the reply only for a thinking-only stream — see the stream loop.
+    #[serde(default)]
+    thinking: Option<String>,
     #[serde(default)]
     partial_json: Option<String>,
     #[serde(default)]
@@ -699,7 +735,20 @@ enum WireBlock {
         #[serde(default)]
         input: Value,
     },
-    /// Anything else (e.g. thinking blocks) is ignored.
+    /// Extended-thinking block: the model's reasoning, normally not surfaced as the
+    /// reply. Salvaged (see `into_response`) only when the turn has no text and no
+    /// tool_use, so a thinking-only stop turn doesn't decode to an empty message that
+    /// stalls the agent loop (the Anthropic parallel of the openai-compat #442 fix).
+    /// `signature` matters only when *resending* the block on a tool-continuation
+    /// turn, so ignoring it here does not weaken signature preservation.
+    Thinking {
+        #[serde(default)]
+        text: String,
+    },
+    /// Encrypted thinking: no plaintext to surface, so it is never salvaged (a
+    /// redacted-only turn stays empty and lets the non-convergence guard act).
+    RedactedThinking,
+    /// Anything else is ignored.
     #[serde(other)]
     Other,
 }
@@ -722,6 +771,7 @@ impl WireResp {
         // string — flattening here is lossy by construction.
         let mut content: Vec<ContentBlock> = Vec::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
+        let mut thinking = String::new();
         for block in self.content {
             match block {
                 WireBlock::Text { text } => content.push(ContentBlock::text(text)),
@@ -730,8 +780,23 @@ impl WireResp {
                     name,
                     arguments: input,
                 }),
-                WireBlock::Other => {}
+                WireBlock::Thinking { text } => thinking.push_str(&text),
+                WireBlock::RedactedThinking | WireBlock::Other => {}
             }
+        }
+        // Salvage a thinking-only turn: a reasoning model can spend the whole budget in
+        // a `thinking` block and stop with no text and no tool_use — surfacing the
+        // reasoning keeps the loop from stalling on an empty message (see
+        // `crate::use_reasoning_as_reply`, the Anthropic parallel of #442).
+        if crate::use_reasoning_as_reply(
+            !content.is_empty(),
+            !tool_calls.is_empty(),
+            !thinking.is_empty(),
+        ) {
+            tracing::debug!(
+                "empty content with a thinking block only; using thinking as the reply"
+            );
+            content.push(ContentBlock::text(thinking));
         }
         let message = Message {
             role: Role::Assistant,
@@ -814,7 +879,13 @@ mod tests {
     #[case::positive_tool_only(json!({"content":[{"type":"tool_use","id":"t","name":"ls","input":{}}],"stop_reason":"tool_use"}), "", 1, "tool_use")]
     #[case::positive_text_and_tool(json!({"content":[{"type":"text","text":"a"},{"type":"tool_use","id":"t","name":"b","input":{}}],"stop_reason":"tool_use"}), "a", 1, "tool_use")]
     #[case::boundary_empty_content(json!({}), "", 0, "end_turn")]
-    #[case::corner_ignores_unknown_block(json!({"content":[{"type":"thinking","text":"…"},{"type":"text","text":"x"}]}), "x", 0, "end_turn")]
+    #[case::corner_ignores_unknown_block(json!({"content":[{"type":"future_block","q":1},{"type":"text","text":"x"}]}), "x", 0, "end_turn")]
+    // thinking-only salvage (round7-1): a reasoning-only stop turn must not decode to an
+    // empty message. Text/tool-call turns still never surface thinking.
+    #[case::positive_thinking_only_salvaged(json!({"content":[{"type":"thinking","text":"the answer"}]}), "the answer", 0, "end_turn")]
+    #[case::corner_thinking_ignored_when_text(json!({"content":[{"type":"thinking","text":"scratch"},{"type":"text","text":"x"}]}), "x", 0, "end_turn")]
+    #[case::corner_thinking_and_tool_no_salvage(json!({"content":[{"type":"thinking","text":"do not leak"},{"type":"tool_use","id":"t","name":"ls","input":{}}],"stop_reason":"tool_use"}), "", 1, "tool_use")]
+    #[case::boundary_redacted_thinking_only_empty(json!({"content":[{"type":"redacted_thinking","data":"enc"}]}), "", 0, "end_turn")]
     fn into_response_cases(
         #[case] body: Value,
         #[case] text: &str,
