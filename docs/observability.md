@@ -99,6 +99,30 @@ The full rules (which family gets which label and why) are the design of record 
 [`design/observability/`](design/observability/README.md); the family-by-family decisions are in its
 [metric census](design/observability/01-metric-census.md).
 
+### Reading back is tenant-scoped too (row-level security, C27)
+
+Stamping the `user` (tenant) on every row is only half the boundary — a *shared* ClickHouse is a
+feature only if one tenant cannot read another's rows out of it. Multi-tenancy
+[C27](design/multi-tenancy/02-data-scoping-and-rls.md) makes that **structural, server-side**:
+
+- A least-privilege **`agent_reader`** credential (SELECT on `agent.*` only — never the co-located
+  HyperDX `default.otel_*`) is subject to a `tenant_iso_*` **`ROW POLICY`** on every tenant-bearing
+  table: `USING user = getSetting('SQL_tenant_id')` (the digest table keys on `user_id`). Defined
+  once in [`nix/clickhouse/schema.sql`](../nix/clickhouse/schema.sql) +
+  [`users.xml`](../nix/clickhouse/users.xml) — no DDL churn as orgs come and go.
+- The pure-read fleet-history seam (`ClickHouseHistory`) binds `SQL_tenant_id` from the **verified
+  ambient identity** (`current_identity()`) per connection — never a value the prompt-injectable
+  model can choose (there is no raw-SQL tool). So `SELECT * FROM agent_review_drafts` returns only the
+  caller-tenant's rows regardless of any `WHERE` the model adds; the credential + policy *is* the
+  boundary. A missing/hostile identity fails closed (the policy's `''` default matches no rows).
+- **Tier-0 is unchanged.** RLS engages only when an operator sets `[telemetry] reader_user`; empty
+  (the default) reuses the writer credential, which is outside every policy's `TO` list. The writer
+  sink keeps its own (INSERT-capable) credential.
+
+The `user`-leading sort-key rebuild that makes the RLS predicate prune other tenants at the index
+level (security = performance) is C27-2; scoping the model-reachable read tools (`metrics`,
+`session_recall`, `search`) is C28.
+
 ## The agent observing itself
 
 The agent can watch its own performance without any of the stack running — the

@@ -10,8 +10,8 @@ Legend: ⬜ not started · 🟡 in progress · ✅ merged.
 
 | # | Plane | Components | State | PR |
 |---|---|---|---|---|
-| 01 | Process isolation & multi-org boundaries | C23, C24, C25 | 🟡 C24 ✅ + C25 foundation 🟡; C23 ⬜ | #273/#274/#275 (C24), #276 (C25) |
-| 02 | Data scoping & row-level security | C26, C27, C28 | ⬜ design; Tier-0 today | — |
+| 01 | Process isolation & multi-org boundaries | C23, C24, C25 | ✅ C23 (bwrap, 5 pillars) + C24; 🟡 C25 foundation | #454/#455 (C23), #273/#274/#275 (C24), #276 (C25) |
+| 02 | Data scoping & row-level security | C26, C27, C28 | ✅ C26 (identity at source); 🟡 C27 (RLS mechanism); C28 ⬜ | #315–#322 (C26), C27-1 (RLS) |
 | 03 | Config & seam-state tenancy | C29, C30, C31 | 🟡 **C30 built** for the shared-store seams (config C2) + the file-backed graph (config C2b); C29/C31 ⬜, scheduler designed | #302 (config C2), C2b (graph) |
 
 **Plane 01 in progress** (via the review-fleet track): **C24 — execution chokepoint** is fully
@@ -19,9 +19,20 @@ merged (every child process — `bash`, `rg`, the whole `git` funnel — funnels
 `Sandbox` seam, with argv-mode/no-shell + env-scrub + a no-raw-`Command` guard). **C25 — org
 tenancy tier** has its *foundation* now: the `user = <org>` convention, the `repo@pr` session-id
 encoder, and the per-org cap / metric-label semantics (see `SessionKey` docs). Still deferred: the
-org *value* injection at the fleet mint-site (fleet core, inc 3), and **C23** strong-isolation
-backends (bwrap/oci — real FS/network/cgroup teeth), which C24's chokepoint unblocks. Planes 02/03
-remain **designed, build deferred** — except **C30**, which the config track built across two
+org *value* injection at the fleet mint-site (fleet core, inc 3). **C23** strong-isolation is now
+**built**: the `bwrap` backend enforces all five pillars (FS/process/network/credential via rootless
+namespaces, C23-1 #454; resource via cgroup limits, C23-2 #455), fail-closed, live-verified.
+
+**Plane 02 building.** **C26 — identity at source** is done: a verified `user` (tenant == user at
+this tier) rides every telemetry row/span/log, stamped from `current_identity()` at the emit funnel
+(never a model payload). **C27 — ClickHouse RLS** now has its mechanism: a least-privilege
+`agent_reader` credential + a `tenant_iso_*` `ROW POLICY` per tenant-bearing table
+(`USING user = getSetting('SQL_tenant_id')`, nix/clickhouse/{schema.sql,users.xml}), and the
+pure-read fleet-history seam binds `SQL_tenant_id` from the verified identity per connection
+(`[telemetry] reader_user`; empty ⇒ Tier-0 writer credential, RLS off). Enforcement is live-verified
+(the hermetic gate has no ClickHouse); the `user`-leading sort-key rebuild is C27-2, shared-store /
+read-tool scoping is C28. Planes 02/03 otherwise remain **designed, build deferred** — except **C30**,
+which the config track built across two
 increments: `PerTenant<S>` (`crates/agent-runtime/src/tenant.rs`) routes the converged shared-store
 control-plane seams (provider-registry, review-fleet, prompt) per verified tenant (config C2), and — in
 config C2b — the file-backed cognition graph, isolated per tenant by path (`tenants/<t>/…`). Both are

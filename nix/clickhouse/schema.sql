@@ -289,3 +289,45 @@ CREATE TABLE IF NOT EXISTS agent.portal_gui_perf
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(ts)
 ORDER BY (page, test_name, metric, ts);
+
+-- ── Multi-tenancy C27: ClickHouse row-level security ────────────────────────
+-- docs/design/multi-tenancy/02-data-scoping-and-rls.md. The verified `user` column
+-- (tenant == user at this tier; stamped from ambient identity at the emit funnel, never a
+-- model payload) already rides every row. This makes tenant scoping a STRUCTURAL,
+-- server-side property of reads: a session connected as the least-privilege `agent_reader`
+-- can only ever SELECT its own tenant's rows — regardless of any WHERE the (prompt-
+-- injectable) model adds — because the boundary is the credential + ROW POLICY, not a filter.
+--
+-- Tier-0 (single operator) is UNCHANGED: the writer/default credential is not in any
+-- policy's TO list, and `users_without_row_policies_can_read_rows` (users.xml) keeps
+-- uncovered users seeing all rows. RLS engages only when an operator points the reader at
+-- `agent_reader` via `[telemetry] reader_user`. See nix/clickhouse/users.xml for the
+-- `SQL_` custom-settings prefix + the uncovered-user default.
+--
+-- The reader is a SELECT-only (`readonly = 2`, so it may SET its own scope but not write or
+-- relax readonly) user whose per-connection `SQL_tenant_id` the trusted Rust reader sets
+-- from the verified identity. Its default is '' so an unset connection sees only unowned
+-- rows (fail closed). GRANT is `agent.*` only — never `default.*`, so the reader cannot read
+-- the co-located HyperDX `default.otel_*` traces/logs either.
+CREATE USER IF NOT EXISTS agent_reader
+    IDENTIFIED WITH no_password
+    HOST ANY
+    SETTINGS readonly = 2, SQL_tenant_id = '';
+GRANT SELECT ON agent.* TO agent_reader;
+
+-- One permissive policy per tenant-bearing table, all keyed on the verified `user` column
+-- (the digest table's tenant column is `user_id`). `getSetting('SQL_tenant_id')` is the
+-- per-connection tenant the reader binds; the single-quoted value can never inject because
+-- the setter (`set_tenant_stmt`) screens it with `safe_segment` first. portal_gui_perf has
+-- no tenant column (host-level perf trend data, not tenant-owned) so it carries no policy.
+CREATE ROW POLICY IF NOT EXISTS tenant_iso_events        ON agent.agent_events              USING user = getSetting('SQL_tenant_id')     TO agent_reader;
+CREATE ROW POLICY IF NOT EXISTS tenant_iso_logs          ON agent.agent_logs                USING user = getSetting('SQL_tenant_id')     TO agent_reader;
+CREATE ROW POLICY IF NOT EXISTS tenant_iso_usage         ON agent.agent_usage               USING user = getSetting('SQL_tenant_id')     TO agent_reader;
+CREATE ROW POLICY IF NOT EXISTS tenant_iso_verifications ON agent.agent_verifications       USING user = getSetting('SQL_tenant_id')     TO agent_reader;
+CREATE ROW POLICY IF NOT EXISTS tenant_iso_reviews       ON agent.agent_reviews             USING user = getSetting('SQL_tenant_id')     TO agent_reader;
+CREATE ROW POLICY IF NOT EXISTS tenant_iso_collectors    ON agent.agent_review_collectors   USING user = getSetting('SQL_tenant_id')     TO agent_reader;
+CREATE ROW POLICY IF NOT EXISTS tenant_iso_tools         ON agent.agent_review_tools        USING user = getSetting('SQL_tenant_id')     TO agent_reader;
+CREATE ROW POLICY IF NOT EXISTS tenant_iso_drafts        ON agent.agent_review_drafts       USING user = getSetting('SQL_tenant_id')     TO agent_reader;
+CREATE ROW POLICY IF NOT EXISTS tenant_iso_feedback      ON agent.agent_review_feedback     USING user = getSetting('SQL_tenant_id')     TO agent_reader;
+CREATE ROW POLICY IF NOT EXISTS tenant_iso_dimensions    ON agent.agent_dimension_summaries USING user = getSetting('SQL_tenant_id')     TO agent_reader;
+CREATE ROW POLICY IF NOT EXISTS tenant_iso_digests       ON agent.agent_turn_digests        USING user_id = getSetting('SQL_tenant_id')  TO agent_reader;
