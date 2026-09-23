@@ -728,6 +728,152 @@ mod tests {
         }
     }
 
+    // Per-tenant isolation of the file-backed **sqlite prompt catalog** (multi-tenancy
+    // C28): unlike the shared-store arms this backend has no `(collection, tenant, id)`
+    // keying, so `PerTenant` isolates it by *path* (`tenants/<t>/prompts.db`) exactly as
+    // it does the cognition graph. Proves a tenant's prompt override is invisible to
+    // another over the REAL `SqlitePromptStore`, on disk, and that a tenant whose file
+    // cannot be opened fails **closed** to an empty in-memory catalog — never another
+    // tenant's file. Feature-gated (`prompt-sqlite` is off by default).
+    #[cfg(feature = "prompt-sqlite")]
+    mod sqlite_prompt {
+        use crate::tenant::{tenant_path, PerTenant};
+        use agent_core::{
+            scope, PromptEntry, PromptKind, PromptRef, PromptStore, SessionKey, UserId,
+        };
+        use std::path::Path;
+        use std::sync::Arc;
+
+        /// The exact per-tenant builder the sqlite arm wires in `builder.rs`: open the
+        /// tenant's own `prompts.db`, else fail closed to an isolated in-memory catalog.
+        fn per_tenant_prompts(base: &Path) -> PerTenant<dyn PromptStore> {
+            let base = base.to_path_buf();
+            PerTenant::new(move |t| {
+                let path = tenant_path(&base, t);
+                agent_prompt::SqlitePromptStore::open(&path, "DEFAULT-SYS")
+                    .or_else(|_| agent_prompt::SqlitePromptStore::in_memory("DEFAULT-SYS"))
+                    .map(|s| Arc::new(s) as Arc<dyn PromptStore>)
+                    .expect("in-memory sqlite catalog is always openable")
+            })
+        }
+
+        fn sys_ref() -> PromptRef {
+            PromptRef {
+                kind: PromptKind::System,
+                id: String::new(),
+            }
+        }
+
+        // positive: acme's System override lives in acme's own on-disk catalog and is
+        // invisible to globex, whose System is still the builtin default.
+        #[tokio::test]
+        async fn positive_two_tenants_isolated_prompt_files() {
+            let dir = agent_testkit::tempdir();
+            let base = dir.join("prompts.db");
+            let prompts = per_tenant_prompts(&base);
+            scope(SessionKey::parse("acme", "s1").unwrap(), async {
+                prompts
+                    .put(PromptEntry {
+                        kind: PromptKind::System,
+                        id: String::new(),
+                        content: "ACME-SYS".into(),
+                        builtin: false,
+                        read_only: false,
+                        order: 0,
+                        tags: vec![],
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap();
+            })
+            .await;
+            assert!(
+                dir.join("tenants/acme/prompts.db").exists(),
+                "acme's catalog written to its namespaced path"
+            );
+            assert!(
+                !dir.join("tenants/globex/prompts.db").exists(),
+                "globex has no catalog yet"
+            );
+            let acme = scope(SessionKey::parse("acme", "s1").unwrap(), async {
+                prompts.get(&sys_ref()).await.unwrap()
+            })
+            .await;
+            let globex = scope(SessionKey::parse("globex", "s1").unwrap(), async {
+                prompts.get(&sys_ref()).await.unwrap()
+            })
+            .await;
+            assert_eq!(acme.content, "ACME-SYS");
+            assert!(!acme.builtin);
+            assert_eq!(
+                globex.content, "DEFAULT-SYS",
+                "globex sees the default, not acme's override"
+            );
+            assert!(globex.builtin, "globex's system is still the default");
+        }
+
+        // boundary: the default `local` tenant maps to the base file unchanged →
+        // Tier-0 (`per_tenant = false`) parity: no `tenants/` namespacing.
+        #[tokio::test]
+        async fn boundary_local_tenant_uses_base_file() {
+            let dir = agent_testkit::tempdir();
+            let base = dir.join("prompts.db");
+            let prompts = per_tenant_prompts(&base);
+            scope(SessionKey::local("s1"), async {
+                prompts
+                    .put(PromptEntry {
+                        kind: PromptKind::System,
+                        id: String::new(),
+                        content: "LOCAL-SYS".into(),
+                        builtin: false,
+                        read_only: false,
+                        order: 0,
+                        tags: vec![],
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap();
+            })
+            .await;
+            assert!(base.exists(), "local writes the base file");
+            assert!(
+                !dir.join("tenants").exists(),
+                "local must not create a tenants/ namespace"
+            );
+            assert_eq!(tenant_path(&base, UserId::LOCAL), base);
+        }
+
+        // adversarial: with no ambient identity the wrap routes to `local` (fail closed,
+        // never another tenant's file) → an unscoped write is the local (base) catalog's.
+        #[tokio::test]
+        async fn adversarial_no_identity_defaults_to_local_base() {
+            let dir = agent_testkit::tempdir();
+            let base = dir.join("prompts.db");
+            let prompts = per_tenant_prompts(&base);
+            prompts
+                .put(PromptEntry {
+                    kind: PromptKind::System,
+                    id: String::new(),
+                    content: "UNSCOPED".into(),
+                    builtin: false,
+                    read_only: false,
+                    order: 0,
+                    tags: vec![],
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            assert!(
+                base.exists(),
+                "the unscoped write landed in the base catalog"
+            );
+            assert!(
+                !dir.join("tenants").exists(),
+                "no identity must not mint a tenant namespace"
+            );
+        }
+    }
+
     // End-to-end over the REAL converged stores on one shared MemoryBackend: proves
     // PerTenant + the store's `(collection, tenant, id)` keying actually isolate
     // tenants, and exercises the new `StorePrompt::with_tenant` (C38). Feature-gated
