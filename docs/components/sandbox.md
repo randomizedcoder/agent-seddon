@@ -33,8 +33,12 @@ re-derive.
     `--new-session`), filesystem (read-only system binds, a private `/tmp` tmpfs, the
     cwd bound read-write), network (`NetworkPolicy::Off`/`Loopback` → `--unshare-net`,
     a loopback-only netns), and credential (`EnvPolicy::Scrub` via the shared exec
-    path, propagated to the child). The **resource** pillar (cgroups: cpu/mem/pids) is
-    a separate mechanism and a follow-up (C23-2). `capabilities` reports
+    path, propagated to the child). The **resource** pillar (C23-2) is a separate
+    mechanism — cgroup-v2 caps (`MemoryMax`/`CPUQuota`/`TasksMax`) applied by wrapping
+    the exec in a rootless `systemd-run --user --scope`, configured via
+    `[sandbox.limits]`. It is **anti-DoS only, not a security boundary**, so a missing
+    `systemd-run` degrades with a warning (isolation unaffected) rather than failing
+    closed. `capabilities` reports
     `network_off`/`private_tmp` when the binary is present; if the host forbids
     unprivileged namespaces, `exec` **fails closed** (the child never runs unconfined)
     rather than degrading. Tier 1 = rootless, **shared kernel** — real process/fs/net
@@ -52,7 +56,9 @@ re-derive.
   `agent-sandbox` impls themselves, the `agent-pty` streaming spawn (env-scrubbed +
   Policy-gated), and `agent-search`'s sync fixed-arg index probe.
 - **Config:** `[sandbox] backend = "local" | "nix" | "bwrap" | "grpc"` (default
-  `local`). `bwrap` requires the `sandbox-bwrap` feature (opt-in, Linux-only).
+  `local`). `bwrap` requires the `sandbox-bwrap` feature (opt-in, Linux-only) and
+  takes optional cgroup caps under `[sandbox.limits]` (`memory_max = "512M"`,
+  `cpu_quota = "50%"`, `pids_max = 256` — all optional, anti-DoS only).
 - **Capability probe + graceful degrade:** a backend whose binary is absent (no
   `nix` on `PATH`) reports `available = false`; the `nix` backend errors cleanly
   (`backend \`nix\` unavailable`) instead of a raw spawn failure — the same
@@ -79,7 +85,9 @@ re-derive.
     the option list), plus the fail-closed setup-error classifier. The real-exec
     pillar tests (network-off blocks egress, scrub drops a host secret) **skip**
     unless the host permits unprivileged namespaces — the hermetic nix builder does
-    not, so `nix flake check` stays green while l2 exercises them live.
+    not, so `nix flake check` stays green while l2 exercises them live. C23-2 adds a
+    hermetic `systemd_scope_argv` table (one `-p Name=Value` per set limit, unset ones
+    omitted) + a live, skippable `TasksMax` fork-cap test (surplus forks hit EAGAIN).
 - **Bench:** none — the seam is process-spawn / I/O-bound with no deterministic CPU
   hot path (same rationale as `bash`); documented skip.
 - **Leak:** `tests/leak.rs` runs repeated local execs under dhat, asserting the
@@ -131,12 +139,11 @@ back so the model can read them.
   default. The dev-shell mode ships now (reproducible closure); the derivation mode
   (real network/mount teeth) is the follow-up. `NetworkPolicy`/`EnvPolicy` are
   carried on `ExecSpec` today but only enforced by backends that can.
-- **`bwrap` follow-ups (C23-2+):** the **resource** pillar (cgroups v2
-  cpu/mem/pids via `systemd-run --scope`, `[sandbox.limits]`), an egress allow-list
-  (`[sandbox.egress]`), a read-only checkout for reviewed code, and a tuned seccomp
-  profile. The `bwrap` backend itself (process/fs/network/credential pillars) ships
-  now. **`nsjail` / `docker` / `oci` / `microvm`** are further backends behind the
-  same seam (Tier 2+).
+- **`bwrap` follow-ups (C23-3+):** an egress allow-list (`[sandbox.egress]`), a
+  read-only checkout for reviewed code, and a tuned seccomp profile. The `bwrap`
+  backend (process/fs/network/credential pillars, C23-1) and the resource pillar
+  (cgroups via `[sandbox.limits]`, C23-2) ship now. **`nsjail` / `docker` / `oci` /
+  `microvm`** are further backends behind the same seam (Tier 2+).
 - **Per-call backend selection via `Policy`** (`Decision` naming a backend); config
   picks the global default today.
 - **The `SandboxService` gRPC service** (`agent --serve-sandbox`) so a heavy

@@ -169,7 +169,7 @@ pub use nix::NixSandbox;
 #[cfg(feature = "sandbox-bwrap")]
 mod bwrap;
 #[cfg(feature = "sandbox-bwrap")]
-pub use bwrap::BwrapSandbox;
+pub use bwrap::{BwrapSandbox, SandboxLimits};
 
 #[cfg(test)]
 mod tests {
@@ -415,8 +415,8 @@ mod tests {
     #[cfg(feature = "sandbox-bwrap")]
     mod bwrap_tests {
         use super::*;
-        use crate::bwrap::{bwrap_argv, is_bwrap_setup_error};
-        use crate::BwrapSandbox;
+        use crate::bwrap::{bwrap_argv, is_bwrap_setup_error, systemd_scope_argv};
+        use crate::{BwrapSandbox, SandboxLimits};
         use agent_core::NetworkPolicy;
 
         /// The index of the `--` terminator (the boundary between bwrap options and
@@ -559,7 +559,7 @@ mod tests {
         /// this backend enforces when it can run (fail-closed at exec, not here).
         #[test]
         fn bwrap_capabilities_probe() {
-            let caps = BwrapSandbox.capabilities();
+            let caps = BwrapSandbox::default().capabilities();
             assert_eq!(caps.backend, "bwrap");
             assert_eq!(caps.available, available("bwrap"));
             // When the binary is present the backend claims the pillars it enforces.
@@ -577,7 +577,7 @@ mod tests {
             }
             let dir = tempdir();
             // A setup failure returns `Err` (fail-closed); success means isolation worked.
-            BwrapSandbox
+            BwrapSandbox::default()
                 .exec(&ExecSpec::sh("true", dir).timeout(30))
                 .await
                 .is_ok()
@@ -590,7 +590,7 @@ mod tests {
                 return;
             }
             let dir = tempdir();
-            let out = BwrapSandbox
+            let out = BwrapSandbox::default()
                 .exec(&ExecSpec::sh("printf 'a\\nb'", dir).timeout(30))
                 .await
                 .unwrap();
@@ -608,7 +608,7 @@ mod tests {
                 return;
             }
             let dir = tempdir();
-            let out = BwrapSandbox
+            let out = BwrapSandbox::default()
                 .exec(
                     &ExecSpec::sh(
                         "exec 3<>/dev/tcp/1.1.1.1/53 && echo CONNECTED || echo BLOCKED",
@@ -636,7 +636,7 @@ mod tests {
                 return;
             }
             let dir = tempdir();
-            let out = BwrapSandbox
+            let out = BwrapSandbox::default()
                 .exec(
                     &ExecSpec::sh(r#"printf '%s' "${HOME:-__EMPTY__}""#, dir)
                         .env(EnvPolicy::Scrub)
@@ -647,6 +647,116 @@ mod tests {
             assert_eq!(
                 out.stdout, "__EMPTY__",
                 "scrub must drop HOME inside the sandbox"
+            );
+        }
+
+        // --- C23-2: the resource pillar (cgroups via systemd-run) --------------
+
+        /// desc: `systemd_scope_argv` emits one `-p Name=Value` per set limit and
+        /// nothing for the unset ones. Pure assembly — hermetic. (`scope_prefix`
+        /// skips this entirely when `is_empty()`, so this is only reached with ≥1 set.)
+        /// expect: the exact `-p` pairs present.
+        #[rstest]
+        #[case::positive_memory_only(
+            SandboxLimits { memory_max: Some("512M".into()), ..Default::default() },
+            vec!["MemoryMax=512M"]
+        )]
+        #[case::corner_pids_only(
+            SandboxLimits { pids_max: Some(256), ..Default::default() },
+            vec!["TasksMax=256"]
+        )]
+        #[case::boundary_all_three(
+            SandboxLimits {
+                memory_max: Some("1G".into()),
+                cpu_quota: Some("50%".into()),
+                pids_max: Some(64),
+            },
+            vec!["MemoryMax=1G", "CPUQuota=50%", "TasksMax=64"]
+        )]
+        fn systemd_scope_argv_emits_set_limits(
+            #[case] limits: SandboxLimits,
+            #[case] want_props: Vec<&str>,
+        ) {
+            let a = systemd_scope_argv(&limits);
+            // The invariant scope flags come first.
+            assert_eq!(a[0], "systemd-run");
+            for f in ["--user", "--scope", "--quiet", "--collect"] {
+                assert!(a.iter().any(|s| s == f), "missing {f} in {a:?}");
+            }
+            // Exactly the expected properties, each preceded by a `-p`.
+            let props: Vec<&String> = a
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i > 0 && a[i - 1] == "-p")
+                .map(|(_, s)| s)
+                .collect();
+            assert_eq!(
+                props, want_props,
+                "one -p per set limit, unset ones omitted"
+            );
+        }
+
+        /// desc: with no limits the backend adds NO systemd-run wrapper — the exec is
+        /// the namespace-only bwrap invocation (behaviour-identical to C23-1).
+        #[test]
+        fn negative_empty_limits_is_namespace_only() {
+            assert!(SandboxLimits::default().is_empty());
+            // A set limit flips it.
+            let l = SandboxLimits {
+                pids_max: Some(8),
+                ..Default::default()
+            };
+            assert!(!l.is_empty());
+        }
+
+        /// Is a rootless `systemd-run --user --scope` cgroup usable here? (The nix
+        /// builder has no systemd → these live tests skip there.)
+        async fn systemd_scope_usable() -> bool {
+            if !available("bwrap") || !available("systemd-run") {
+                return false;
+            }
+            // Probe the real path: run a trivial command under a scope with a tiny
+            // limit. If the user manager / dbus is absent, systemd-run fails → skip.
+            let dir = tempdir();
+            BwrapSandbox::new(SandboxLimits {
+                pids_max: Some(64),
+                ..Default::default()
+            })
+            .exec(&ExecSpec::sh("true", dir).timeout(30))
+            .await
+            .map(|o| !o.timed_out && o.exit_code == 0)
+            .unwrap_or(false)
+        }
+
+        /// desc (live, adversarial, skippable): `TasksMax` (pids cgroup) caps the
+        /// process count, so a fork burst inside the sandbox hits EAGAIN — the
+        /// anti-DoS / fork-bomb guard. Skips where a rootless cgroup scope isn't usable.
+        #[tokio::test]
+        async fn adversarial_bwrap_pids_max_caps_forks() {
+            if !systemd_scope_usable().await {
+                return;
+            }
+            let dir = tempdir();
+            let out = BwrapSandbox::new(SandboxLimits {
+                pids_max: Some(8),
+                ..Default::default()
+            })
+            .exec(
+                // Far more background forks than the cap ⇒ the surplus fork() calls
+                // fail with EAGAIN, which bash reports as "Resource temporarily
+                // unavailable". Short sleeps so `wait` returns quickly.
+                &ExecSpec::sh(
+                    "for i in $(seq 1 64); do sleep 2 & done; wait; echo END",
+                    dir,
+                )
+                .timeout(60),
+            )
+            .await
+            .unwrap();
+            assert!(
+                out.stderr.contains("Resource temporarily unavailable"),
+                "TasksMax must make surplus forks fail (EAGAIN); stderr={:?}",
+                out.stderr
             );
         }
     }

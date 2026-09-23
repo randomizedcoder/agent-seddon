@@ -1775,18 +1775,45 @@ fn default_embedder_dims() -> usize {
 pub struct SandboxCfg {
     #[serde(default = "default_sandbox_backend")]
     pub backend: String,
+    /// Resource caps for the `bwrap` backend (multi-tenancy C23-2, cgroups v2 via
+    /// `systemd-run`). Empty ⇒ no caps. Anti-DoS only — not a security boundary.
+    #[serde(default)]
+    pub limits: SandboxLimitsCfg,
 }
 
 impl Default for SandboxCfg {
     fn default() -> Self {
         Self {
             backend: default_sandbox_backend(),
+            limits: SandboxLimitsCfg::default(),
         }
     }
 }
 
 fn default_sandbox_backend() -> String {
     "local".to_string()
+}
+
+/// `[sandbox.limits]` — cgroup-v2 resource caps applied to the `bwrap` sandboxed
+/// subtree (C23-2), passed verbatim to `systemd-run -p`. Operator config, not
+/// model-supplied; all-unset ⇒ no `systemd-run` wrapper. **Anti-DoS only** — these
+/// bound resource exhaustion, they are not an isolation boundary (that is the bwrap
+/// namespaces). Ignored by the `local`/`nix`/`grpc` backends.
+#[derive(Debug, Default, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
+pub struct SandboxLimitsCfg {
+    /// `MemoryMax` — hard RSS ceiling (e.g. `"512M"`); the subtree is OOM-killed past it.
+    #[serde(default)]
+    pub memory_max: Option<String>,
+    /// `CPUQuota` — CPU bandwidth cap (e.g. `"50%"` = half a core).
+    #[serde(default)]
+    pub cpu_quota: Option<String>,
+    /// `TasksMax` — max processes/threads in the cgroup (fork-bomb guard).
+    #[serde(default)]
+    pub pids_max: Option<u32>,
 }
 
 /// Language servers (the `LspBackend` seam, parity spec 13). Empty ⇒ LSP is off

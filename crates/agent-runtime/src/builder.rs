@@ -330,9 +330,19 @@ pub async fn build_agent_with(
                 Arc::new(agent_sandbox::NixSandbox::new(flake))
             }
             // Tier-1 isolation: rootless namespaces (network-off, private /tmp,
-            // read-only system, env-scrub) for attacker-influenced exec (C23).
+            // read-only system, env-scrub) for attacker-influenced exec (C23-1),
+            // plus optional cgroup resource caps (`[sandbox.limits]`, C23-2).
             #[cfg(feature = "sandbox-bwrap")]
-            "bwrap" => Arc::new(agent_sandbox::BwrapSandbox),
+            "bwrap" => {
+                let l = &cfg.sandbox.limits;
+                Arc::new(agent_sandbox::BwrapSandbox::new(
+                    agent_sandbox::SandboxLimits {
+                        memory_max: l.memory_max.clone(),
+                        cpu_quota: l.cpu_quota.clone(),
+                        pids_max: l.pids_max,
+                    },
+                ))
+            }
             // A remote executor: run on a host built for it (the toolchain, or
             // deliberate isolation) while this process stays thin.
             #[cfg(feature = "grpc")]

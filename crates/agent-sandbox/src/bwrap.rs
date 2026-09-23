@@ -28,7 +28,67 @@ use async_trait::async_trait;
 /// (`nix/default.nix` `agentRuntimePath`, Linux-only) and in the dev shell.
 const BWRAP: &str = "bwrap";
 
-pub struct BwrapSandbox;
+/// `systemd-run`: wraps the exec in a transient cgroup-v2 scope to apply the
+/// resource pillar (C23-2). Also provisioned on the wrapped agent's PATH.
+const SYSTEMD_RUN: &str = "systemd-run";
+
+/// The **resource** pillar (C23-2): cgroup-v2 caps on the sandboxed subtree. These
+/// are operator config (`[sandbox.limits]`), not model-supplied, and are **anti-DoS
+/// only** — a memory/pid/cpu ceiling so attacker-influenced exec can't exhaust the
+/// host. They are NOT a security boundary (that is the namespace pillars in
+/// [`bwrap_argv`]). All-`None` ⇒ no scope wrapper at all (behaviour-identical to the
+/// no-limits backend). Values are passed verbatim to `systemd-run -p` as
+/// `MemoryMax`/`CPUQuota`/`TasksMax` (e.g. `"512M"`, `"50%"`, `256`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SandboxLimits {
+    /// `MemoryMax` — hard RSS ceiling; the subtree is OOM-killed past it (e.g. `"512M"`).
+    pub memory_max: Option<String>,
+    /// `CPUQuota` — CPU bandwidth cap (e.g. `"50%"` = half a core).
+    pub cpu_quota: Option<String>,
+    /// `TasksMax` — max processes/threads in the cgroup (fork-bomb guard).
+    pub pids_max: Option<u32>,
+}
+
+impl SandboxLimits {
+    /// No limit is set ⇒ the backend skips the `systemd-run` wrapper entirely.
+    pub fn is_empty(&self) -> bool {
+        self.memory_max.is_none() && self.cpu_quota.is_none() && self.pids_max.is_none()
+    }
+}
+
+/// A Tier-1 isolation backend. `limits` (default empty) adds the C23-2 resource
+/// pillar; with no limits it is exactly the namespace-only backend.
+#[derive(Debug, Clone, Default)]
+pub struct BwrapSandbox {
+    limits: SandboxLimits,
+}
+
+impl BwrapSandbox {
+    /// A backend with cgroup resource caps (C23-2). `SandboxLimits::default()`
+    /// (all `None`) yields the namespace-only backend — the same as `default()`.
+    pub fn new(limits: SandboxLimits) -> Self {
+        Self { limits }
+    }
+
+    /// The `systemd-run` scope prefix that applies [`SandboxLimits`], or an empty
+    /// prefix when there is nothing to cap OR `systemd-run` is unavailable. cgroups
+    /// are anti-DoS, not a security boundary, so a missing `systemd-run` **degrades
+    /// with a warning** (the command still runs under the bwrap namespace isolation)
+    /// rather than failing closed — unlike the security pillars.
+    fn scope_prefix(&self) -> Vec<String> {
+        if self.limits.is_empty() {
+            return Vec::new();
+        }
+        if !on_path(SYSTEMD_RUN) {
+            tracing::warn!(
+                "[sandbox] backend=bwrap has [sandbox.limits] set but `systemd-run` is not on \
+                 PATH; running WITHOUT cgroup resource caps (anti-DoS only, isolation unaffected)"
+            );
+            return Vec::new();
+        }
+        systemd_scope_argv(&self.limits)
+    }
+}
 
 /// Build the `bwrap` wrapper argv for `spec`. Pure — no env or filesystem reads —
 /// so the whole flag-assembly (the part that must be *correct*) is unit-testable
@@ -117,6 +177,34 @@ pub(crate) fn is_bwrap_setup_error(exit_code: i32, stderr: &str) -> bool {
     exit_code != 0 && stderr.contains("bwrap:")
 }
 
+/// Build the `systemd-run` transient-scope prefix that applies `limits` to the
+/// sandboxed subtree via cgroup v2 (C23-2). Pure — no env/fs reads — so the
+/// property assembly is unit-testable. `--user` (rootless, no root/polkit needed),
+/// `--scope` (run synchronously in a transient scope, stdio inherited so `run_argv`
+/// still captures), `--quiet` (no "Running as unit" chatter), `--collect` (GC the
+/// unit on exit). Each set limit becomes one `-p Name=Value` pair; values are
+/// separate argv elements (no shell) so an operator value can't inject. Callers
+/// only invoke this when at least one limit is set.
+pub(crate) fn systemd_scope_argv(limits: &SandboxLimits) -> Vec<String> {
+    let mut a: Vec<String> = ["systemd-run", "--user", "--scope", "--quiet", "--collect"]
+        .map(String::from)
+        .to_vec();
+    let mut prop = |name: &str, value: &str| {
+        a.push("-p".into());
+        a.push(format!("{name}={value}"));
+    };
+    if let Some(m) = &limits.memory_max {
+        prop("MemoryMax", m);
+    }
+    if let Some(c) = &limits.cpu_quota {
+        prop("CPUQuota", c);
+    }
+    if let Some(p) = &limits.pids_max {
+        prop("TasksMax", &p.to_string());
+    }
+    a
+}
+
 #[async_trait]
 impl Sandbox for BwrapSandbox {
     async fn exec(&self, spec: &ExecSpec) -> Result<ExecOutput> {
@@ -125,7 +213,12 @@ impl Sandbox for BwrapSandbox {
                 "backend `bwrap` unavailable (no `bwrap` on PATH)".into(),
             ));
         }
-        let out = run_argv(&bwrap_argv(spec), spec).await?;
+        // Optionally wrap in a `systemd-run` cgroup scope (C23-2 resource pillar),
+        // then the bwrap isolation, then the untrusted child. An empty prefix ⇒ the
+        // namespace-only backend.
+        let mut argv = self.scope_prefix();
+        argv.extend(bwrap_argv(spec));
+        let out = run_argv(&argv, spec).await?;
         // Fail closed: if bwrap couldn't establish isolation it exited before the
         // child ran. Surface that as a sandbox error, never as a command result —
         // a caller must not mistake "not isolated" for "the command failed".
