@@ -119,9 +119,11 @@ feature only if one tenant cannot read another's rows out of it. Multi-tenancy
   (the default) reuses the writer credential, which is outside every policy's `TO` list. The writer
   sink keeps its own (INSERT-capable) credential.
 
-The `user`-leading sort-key rebuild that makes the RLS predicate prune other tenants at the index
-level (security = performance) is C27-2; scoping the model-reachable read tools (`metrics`,
-`session_recall`, `search`) is C28.
+`user` is the **leading `ORDER BY` key** on the telemetry tables (C27-2), so the RLS predicate rides
+the primary index and *prunes other tenants' granules* — a scoped read touches fewer parts, making
+isolation and speed the same mechanism rather than a tax (at Tier 0 `user` is a single constant, so
+the prior locality is preserved). Scoping the model-reachable read tools (`metrics`, `session_recall`,
+`search`) is C28.
 
 ## The agent observing itself
 
