@@ -69,6 +69,17 @@ impl SqlitePromptStore {
         Self::from_conn(conn, config_system_prompt)
     }
 
+    /// An ephemeral, file-less catalog (SQLite `:memory:`). This is the **fail-closed
+    /// fallback** for per-tenant routing (multi-tenancy C28): when a tenant's own
+    /// on-disk catalog cannot be opened, the router hands back one of these — an
+    /// isolated, empty store that serves only the builtin/config defaults — rather
+    /// than ever falling back to another tenant's on-disk file. Nothing written to it
+    /// persists.
+    pub fn in_memory(config_system_prompt: impl Into<String>) -> Result<Self> {
+        let conn = Connection::open_in_memory().map_err(sql_err)?;
+        Self::from_conn(conn, config_system_prompt)
+    }
+
     /// Override the versioning clock (used by tests for a deterministic `updated_ms`).
     #[must_use]
     pub fn with_clock(mut self, now_ms: Arc<dyn Fn() -> u64 + Send + Sync>) -> Self {
@@ -632,6 +643,45 @@ mod tests {
             tags: Vec::new(),
             ..Default::default()
         }
+    }
+
+    // --- positive_: the fail-closed in-memory catalog serves defaults, isolated ---
+    #[tokio::test]
+    async fn positive_in_memory_serves_defaults_and_is_ephemeral() {
+        // The C28 fail-closed fallback: an isolated, empty catalog that still serves
+        // the builtin System default, and whose writes do not touch any file.
+        let s = SqlitePromptStore::in_memory("CONFIG SYS").unwrap();
+        let sys = s
+            .get(&PromptRef {
+                kind: PromptKind::System,
+                id: String::new(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(sys.content, "CONFIG SYS");
+        assert!(sys.builtin, "an empty in-memory catalog has no override");
+        // A write succeeds but is confined to this ephemeral connection.
+        s.put(PromptEntry {
+            kind: PromptKind::System,
+            id: String::new(),
+            content: "EPHEMERAL".into(),
+            builtin: false,
+            read_only: false,
+            order: 0,
+            tags: Vec::new(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let got = s
+            .get(&PromptRef {
+                kind: PromptKind::System,
+                id: String::new(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(got.content, "EPHEMERAL");
+        assert!(!got.builtin);
     }
 
     // --- positive_: System/ModeLens defaults, then override + revert ---------

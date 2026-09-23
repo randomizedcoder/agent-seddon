@@ -14,7 +14,10 @@
 # `scheduler_driver`) over a real `StoreScheduler`, AND the per-tenant forge +
 # transport card registries (config C40/E1) over real `StoreForges` /
 # `StoreTransports` on an in-memory backend (their file/memory tier keys by tenant,
-# so this isolation is hermetic — unlike the postgres-only A3* seams).
+# so this isolation is hermetic — unlike the postgres-only A3* seams), AND the
+# per-tenant sqlite prompt catalog (multi-tenancy C28), which — having no
+# `(collection, tenant, id)` keying — is isolated by *path* (`tenants/<t>/prompts.db`)
+# over a real `SqlitePromptStore` in a tempdir, the same hard boundary as the graph.
 #
 # Hermetic — the in-memory `agent-config-store` backend needs no DB. The postgres
 # tenant-isolation proof over a live server is `nix/tenant-isolation.nix` (and the
@@ -32,6 +35,6 @@ craneLib.cargoTest (
     inherit cargoArtifacts;
     # Two filter substrings (libtest ORs them) → they must follow `--`; `cargo test`
     # itself takes only one positional TESTNAME.
-    cargoTestExtraArgs = "-p agent-runtime --features registry-store,fleet-store,prompt-store,graph,scheduler-store,forge-registry-store,transport-registry-store -- tenant:: scheduler_driver::";
+    cargoTestExtraArgs = "-p agent-runtime --features registry-store,fleet-store,prompt-store,prompt-sqlite,graph,scheduler-store,forge-registry-store,transport-registry-store -- tenant:: scheduler_driver::";
   }
 )

@@ -1015,10 +1015,31 @@ pub async fn build_agent_with(
                 } else {
                     std::path::PathBuf::from(&cfg.prompts.db_path)
                 };
-                Arc::new(agent_prompt::SqlitePromptStore::open(
-                    &db,
-                    cfg.agent.system_prompt.clone(),
-                )?) as Arc<dyn agent_core::PromptStore>
+                // Per-tenant plane (multi-tenancy C28 / C2): unlike the shared-store
+                // arms, the sqlite catalog has no `(collection, tenant, id)` keying and
+                // the tier has no migration framework, so isolation is by **path** — one
+                // `tenants/<tenant>/prompts.db` per verified tenant (the same hard boundary
+                // the file-backed graph uses; `local` ⇒ the base file unchanged, so
+                // `per_tenant = false` stays byte-identical). Because `prompt.select` /
+                // `preview_assembled` are model-reachable and un-authz'd, a shared file
+                // would otherwise let a prompt-injectable session read another tenant's
+                // catalog. A tenant whose file cannot be opened fails **closed** to an
+                // isolated in-memory catalog (builtins only) — never another tenant's file.
+                if cfg.tenancy.per_tenant {
+                    let sys = cfg.agent.system_prompt.clone();
+                    Arc::new(crate::tenant::PerTenant::new(move |t| {
+                        let path = crate::tenant::tenant_path(&db, t);
+                        agent_prompt::SqlitePromptStore::open(&path, sys.clone())
+                            .or_else(|_| agent_prompt::SqlitePromptStore::in_memory(sys.clone()))
+                            .map(|s| Arc::new(s) as Arc<dyn agent_core::PromptStore>)
+                            .expect("in-memory sqlite catalog is always openable")
+                    })) as Arc<dyn agent_core::PromptStore>
+                } else {
+                    Arc::new(agent_prompt::SqlitePromptStore::open(
+                        &db,
+                        cfg.agent.system_prompt.clone(),
+                    )?) as Arc<dyn agent_core::PromptStore>
+                }
             }
             // A shared/central catalog dialed over gRPC (the already-shipped client).
             #[cfg(feature = "grpc")]

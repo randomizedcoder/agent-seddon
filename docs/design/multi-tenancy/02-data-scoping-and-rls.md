@@ -119,10 +119,20 @@ session_id, ts)`). Then:
   whole registry; or keep a per-tenant view of the registry.
 - **`session_recall` tool.** Query only the caller-tenant's corpus partition (falls out of the
   per-tenant index above).
-- **sqlite.** The provider registry is global server config (no tenant dimension — fine). The
-  fleet roster (C2) and any fleet review sqlite carry a `tenant` column and filter **in the
-  shared `ops` layer** (sqlite has no RLS), with a per-tenant DB file as the hard-boundary
-  option (path-namespaced like memory).
+- **sqlite.** The provider registry and fleet roster are global server/control-plane config (no
+  tenant dimension — fine). The one **model-reachable** sqlite gap is the **prompt catalog**
+  (`agent-prompt/sqlite.rs`): `prompt.select` / `preview_assembled` are served un-authz'd and feed
+  the model's system context, so a shared catalog would let a prompt-injectable session read
+  another tenant's prompts. **C28 (built):** when `[tenancy] per_tenant` is on, the sqlite prompt
+  arm is wrapped in `PerTenant<dyn PromptStore>` and isolated by **path** —
+  `tenants/<tenant>/prompts.db`, the same hard boundary as the file-backed graph (the sqlite tier
+  has no `(collection, tenant, id)` keying and no migration framework, so a per-tenant DB *file*
+  is the right hard boundary rather than an in-row filter + `ALTER TABLE`). A tenant whose file
+  cannot be opened fails **closed** to an isolated in-memory catalog (builtins only), never another
+  tenant's file; `local` maps to the base file unchanged, so Tier-0 stays byte-identical. The
+  shared-store prompt arm (postgres/`StorePrompt`) was already `PerTenant`-routed (config C2). The
+  postgres/converged fleet review tables carry a `tenant` column and filter in the shared `ops`
+  layer.
 
 ## Build (ordered)
 
