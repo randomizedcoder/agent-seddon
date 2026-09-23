@@ -1433,12 +1433,19 @@ pub async fn build_agent_with(
     // dedup/carry (still runs). Held for `--serve-fleet`.
     #[cfg(feature = "fleet")]
     let agent = if cfg.telemetry.enabled {
-        agent.with_fleet_history(Arc::new(agent_telemetry::ClickHouseHistory::new(
-            cfg.telemetry.clickhouse_url.clone(),
-            cfg.telemetry.database.clone(),
-            cfg.telemetry.user.clone(),
-            cfg.telemetry.password.clone(),
-        )))
+        // Pure-read seam ⇒ use the least-privilege reader credential (multi-tenancy C27),
+        // which falls back to the writer credential at Tier 0. `tenant_scoped` engages the
+        // per-tenant ROW POLICY only when a distinct reader was provisioned.
+        let reader = cfg.telemetry.reader_credentials();
+        agent.with_fleet_history(Arc::new(
+            agent_telemetry::ClickHouseHistory::new(
+                cfg.telemetry.clickhouse_url.clone(),
+                cfg.telemetry.database.clone(),
+                reader.user,
+                reader.password,
+            )
+            .tenant_scoped(reader.tenant_scoped),
+        ))
     } else {
         agent
     };

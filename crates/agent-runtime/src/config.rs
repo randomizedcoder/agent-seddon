@@ -2845,6 +2845,19 @@ pub struct TelemetryCfg {
     pub user: String,
     #[serde(default)]
     pub password: String,
+    /// Least-privilege **reader** credential for the pure-read fleet-history seam
+    /// (multi-tenancy C27). Empty (the default) ⇒ reuse `user`/`password` (Tier-0: one
+    /// credential, RLS off). When set to a distinct `agent_reader`-style user (SELECT on
+    /// `agent.*` only, subject to the `tenant_iso` ROW POLICY), the reader connection is
+    /// tenant-scoped server-side via a `SET SQL_tenant_id = <verified identity>` — so a
+    /// session can only read its own tenant's rows regardless of any `WHERE` the model adds.
+    /// See docs/design/multi-tenancy/02-data-scoping-and-rls.md + nix/clickhouse/users.xml.
+    #[serde(default)]
+    pub reader_user: String,
+    /// Password for `reader_user`. Only consulted when `reader_user` is set; may legitimately
+    /// be empty. Never falls back to the writer `password` (a distinct reader has its own).
+    #[serde(default)]
+    pub reader_password: String,
     /// Stream `tracing` log events into `agent_logs` (in addition to stdout).
     #[serde(default = "default_true")]
     pub stream_logs: bool,
@@ -2876,12 +2889,49 @@ impl Default for TelemetryCfg {
             database: default_database(),
             user: default_ch_user(),
             password: String::new(),
+            reader_user: String::new(),
+            reader_password: String::new(),
             stream_logs: default_true(),
             batch_max_rows: default_batch_rows(),
             flush_interval_ms: default_flush_ms(),
             otlp_endpoint: String::new(),
             otel_service_name: default_otel_service_name(),
             otlp_headers: String::new(),
+        }
+    }
+}
+
+/// The resolved ClickHouse **reader** credential for the fleet-history seam, with the
+/// Tier-0 fallback applied in one place (multi-tenancy C27). `tenant_scoped` records
+/// whether a distinct reader was provisioned: only then does the reader connection issue
+/// the `SET SQL_tenant_id` that engages the server-side ROW POLICY. At Tier 0 (no reader
+/// configured) the writer credential is reused and `tenant_scoped` is false — byte-for-byte
+/// today's behaviour.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReaderCredentials {
+    pub user: String,
+    pub password: String,
+    pub tenant_scoped: bool,
+}
+
+impl TelemetryCfg {
+    /// Resolve the reader credential: the explicit `reader_user`/`reader_password` when a
+    /// distinct reader is provisioned (RLS on), else the writer `user`/`password` (Tier 0,
+    /// RLS off). Keeping the fallback here means the builder wires one value and can't
+    /// diverge between the history seam and any future reader.
+    pub fn reader_credentials(&self) -> ReaderCredentials {
+        if self.reader_user.is_empty() {
+            ReaderCredentials {
+                user: self.user.clone(),
+                password: self.password.clone(),
+                tenant_scoped: false,
+            }
+        } else {
+            ReaderCredentials {
+                user: self.reader_user.clone(),
+                password: self.reader_password.clone(),
+                tenant_scoped: true,
+            }
         }
     }
 }
@@ -3126,6 +3176,58 @@ mod tests {
         assert_eq!(cfg.members[0].name(), "glm");
         assert!(matches!(cfg.members[1], PoolMemberEntry::Name(_)));
         assert_eq!(cfg.policy, "least-loaded");
+    }
+
+    /// desc: `TelemetryCfg::reader_credentials` (multi-tenancy C27) resolves the reader
+    /// credential with the Tier-0 fallback in one place. No `reader_user` ⇒ the writer
+    /// credential is reused and `tenant_scoped` is false (RLS off, today's behaviour); a
+    /// distinct `reader_user` ⇒ the reader credential is used and `tenant_scoped` is true.
+    #[rstest::rstest]
+    // negative: unset reader ⇒ fall back to the writer creds, RLS off.
+    #[case::negative_unset_falls_back_to_writer(r#"user = "w""#, "w", "", false)]
+    #[case::negative_unset_carries_writer_password(
+        r#"
+        user = "w"
+        password = "wp"
+        "#,
+        "w",
+        "wp",
+        false
+    )]
+    // positive: a distinct reader ⇒ use it, RLS on.
+    #[case::positive_reader_set_scopes(
+        r#"
+        user = "w"
+        password = "wp"
+        reader_user = "agent_reader"
+        reader_password = "rp"
+        "#,
+        "agent_reader",
+        "rp",
+        true
+    )]
+    // corner: a reader with a legitimately empty password never borrows the writer's.
+    #[case::corner_reader_empty_password(
+        r#"
+        user = "w"
+        password = "wp"
+        reader_user = "agent_reader"
+        "#,
+        "agent_reader",
+        "",
+        true
+    )]
+    fn reader_credentials_resolves_with_tier0_fallback(
+        #[case] toml_src: &str,
+        #[case] want_user: &str,
+        #[case] want_password: &str,
+        #[case] want_scoped: bool,
+    ) {
+        let cfg: TelemetryCfg = toml::from_str(toml_src).unwrap();
+        let got = cfg.reader_credentials();
+        assert_eq!(got.user, want_user, "reader user");
+        assert_eq!(got.password, want_password, "reader password");
+        assert_eq!(got.tenant_scoped, want_scoped, "tenant_scoped");
     }
 
     /// The detailed `[[members]]` form parses into `Detailed` entries with knobs.

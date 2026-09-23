@@ -11,11 +11,28 @@
   only (host-local). Do NOT use this container config on a shared/exposed host.
 -->
 <clickhouse>
+    <!-- Multi-tenancy C27 (docs/design/multi-tenancy/02-data-scoping-and-rls.md): the
+         `agent_reader` row-level-security reader (created in schema.sql) binds a per-
+         connection `SQL_tenant_id` custom setting that the `tenant_iso_*` ROW POLICYs read
+         via getSetting(). Custom settings must have a server-declared prefix. -->
+    <custom_settings_prefixes>SQL_</custom_settings_prefixes>
+
+    <access_control_improvements>
+        <!-- A table with ANY row policy: users NOT named in a policy's TO list (here the
+             `default`/writer credential) still see ALL rows. This is the recent-ClickHouse
+             default; pin it explicitly so a version flip can't silently hide the writer's
+             own rows and break Tier-0 (single-operator) reads/inserts. -->
+        <users_without_row_policies_can_read_rows>true</users_without_row_policies_can_read_rows>
+    </access_control_improvements>
+
     <users>
         <default>
             <networks replace="replace">
                 <ip>::/0</ip>
             </networks>
+            <!-- Let the schema migration (run as `default` by `clickhouse-migrate`) issue
+                 CREATE USER / CREATE ROW POLICY. Dev-only, like the widened networks above. -->
+            <access_management>1</access_management>
         </default>
     </users>
 </clickhouse>
