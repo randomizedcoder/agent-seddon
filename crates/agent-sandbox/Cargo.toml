@@ -23,6 +23,7 @@ dhat-heap = ["dep:dhat"]
 agent-core.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 dhat = { workspace = true, optional = true }
 
 [dev-dependencies]

@@ -552,6 +552,7 @@ dependencies = [
  "dhat",
  "rstest",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
