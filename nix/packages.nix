@@ -56,5 +56,8 @@
     versions.go
     versions.golangci-lint
     versions.gosec
-  ];
+  ]
+  # `bwrap` for the opt-in Tier-1 Sandbox backend (C23), so the dev shell can
+  # exercise `[sandbox] backend = "bwrap"`. Linux-only (Darwin has no bubblewrap).
+  ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ versions.bubblewrap ];
 }

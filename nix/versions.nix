@@ -209,6 +209,14 @@ in
   # and the hermetic test sandbox (which has no host PATH) exercise the `rg` path.
   ripgrep = pkgs.ripgrep;
 
+  # `bwrap` (bubblewrap): the Tier-1 isolation Sandbox backend (multi-tenancy C23,
+  # `[sandbox] backend = "bwrap"`). Linux-only; put on the wrapped agent's PATH +
+  # the dev shell so the opt-in backend can spawn attacker-influenced exec inside
+  # rootless namespaces. Real isolation still needs a host that permits
+  # unprivileged user namespaces (the hermetic nix builder does not — the live
+  # bwrap tests skip there).
+  bubblewrap = pkgs.bubblewrap;
+
   # `promptfoo`: the LLM eval + red-team harness that drives the real agent as an
   # `exec:` provider in `nix run .#eval` / `.#redteam` (docs/eval.md). Vendored +
   # pinned HERE (via nix/promptfoo.nix) so we track the latest release independently

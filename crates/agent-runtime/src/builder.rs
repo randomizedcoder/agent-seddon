@@ -329,6 +329,10 @@ pub async fn build_agent_with(
                 };
                 Arc::new(agent_sandbox::NixSandbox::new(flake))
             }
+            // Tier-1 isolation: rootless namespaces (network-off, private /tmp,
+            // read-only system, env-scrub) for attacker-influenced exec (C23).
+            #[cfg(feature = "sandbox-bwrap")]
+            "bwrap" => Arc::new(agent_sandbox::BwrapSandbox),
             // A remote executor: run on a host built for it (the toolchain, or
             // deliberate isolation) while this process stays thin.
             #[cfg(feature = "grpc")]
@@ -343,7 +347,9 @@ pub async fn build_agent_with(
                 c.probe().await?;
                 Arc::new(c)
             }
-            other => anyhow::bail!("unknown [sandbox] backend `{other}` (local|nix|grpc)"),
+            other => {
+                anyhow::bail!("unknown [sandbox] backend `{other}` (local|nix|bwrap|grpc)")
+            }
         };
         let backend = crate::metered::sandbox(backend, metrics.clone());
         shared_sandbox = Some(backend.clone());

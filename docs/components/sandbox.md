@@ -25,6 +25,20 @@ re-derive.
     it changes nothing.
   - **`nix`** (`sandbox-nix`, default) — the dev-shell mode above; `capabilities`
     reports `content_addressed = true`, `available = which(nix)`.
+  - **`bwrap`** (`sandbox-bwrap`, opt-in, Linux-only) — **Tier-1 isolation**
+    (multi-tenancy [C23](../design/multi-tenancy/01-process-isolation.md)). Runs the
+    command inside rootless [bubblewrap](https://github.com/containers/bubblewrap)
+    namespaces, so the four pillars it covers are actually *enforced*: process
+    (user/pid/ipc/uts namespaces → no host capabilities, `--die-with-parent`,
+    `--new-session`), filesystem (read-only system binds, a private `/tmp` tmpfs, the
+    cwd bound read-write), network (`NetworkPolicy::Off`/`Loopback` → `--unshare-net`,
+    a loopback-only netns), and credential (`EnvPolicy::Scrub` via the shared exec
+    path, propagated to the child). The **resource** pillar (cgroups: cpu/mem/pids) is
+    a separate mechanism and a follow-up (C23-2). `capabilities` reports
+    `network_off`/`private_tmp` when the binary is present; if the host forbids
+    unprivileged namespaces, `exec` **fails closed** (the child never runs unconfined)
+    rather than degrading. Tier 1 = rootless, **shared kernel** — real process/fs/net
+    isolation, not a VM (the `oci`/`microvm` Tier-2+ backends are follow-ups).
 - **Wiring:** `bash` (`agent-tools`) holds an `Arc<dyn Sandbox>`; the builder picks
   the backend from `[sandbox] backend` (default `local`), meters it, and passes it
   to `BashTool::new`. `LocalSandbox` is `bash`'s `Default` so nothing else changes.
@@ -37,7 +51,8 @@ re-derive.
   (`agent-tools/tests/no_raw_spawn.rs`); the documented exceptions are the
   `agent-sandbox` impls themselves, the `agent-pty` streaming spawn (env-scrubbed +
   Policy-gated), and `agent-search`'s sync fixed-arg index probe.
-- **Config:** `[sandbox] backend = "local" | "nix"`.
+- **Config:** `[sandbox] backend = "local" | "nix" | "bwrap" | "grpc"` (default
+  `local`). `bwrap` requires the `sandbox-bwrap` feature (opt-in, Linux-only).
 - **Capability probe + graceful degrade:** a backend whose binary is absent (no
   `nix` on `PATH`) reports `available = false`; the `nix` backend errors cleanly
   (`backend \`nix\` unavailable`) instead of a raw spawn failure — the same
@@ -57,6 +72,14 @@ re-derive.
   short-circuit so the suite is green without nix installed. Capability-probe
   assertions (`local` always available + no network-off; `nix` matches binary
   presence + content-addressed).
+  - **`bwrap`** (`sandbox-bwrap`): the pure `bwrap_argv` flag-assembly is
+    table-driven and hermetic — network-flag by `NetworkPolicy`, cwd bound rw after
+    the tmpfs, the child payload isolated after the `--` terminator (with adversarial
+    cases: a leading-dash / metachar / bwrap-flag-lookalike command never leaks into
+    the option list), plus the fail-closed setup-error classifier. The real-exec
+    pillar tests (network-off blocks egress, scrub drops a host secret) **skip**
+    unless the host permits unprivileged namespaces — the hermetic nix builder does
+    not, so `nix flake check` stays green while l2 exercises them live.
 - **Bench:** none — the seam is process-spawn / I/O-bound with no deterministic CPU
   hot path (same rationale as `bash`); documented skip.
 - **Leak:** `tests/leak.rs` runs repeated local execs under dhat, asserting the
@@ -108,8 +131,12 @@ back so the model can read them.
   default. The dev-shell mode ships now (reproducible closure); the derivation mode
   (real network/mount teeth) is the follow-up. `NetworkPolicy`/`EnvPolicy` are
   carried on `ExecSpec` today but only enforced by backends that can.
-- **`bubblewrap` / `nsjail` / `docker`** backends (network-off + mount confinement
-  without nix).
+- **`bwrap` follow-ups (C23-2+):** the **resource** pillar (cgroups v2
+  cpu/mem/pids via `systemd-run --scope`, `[sandbox.limits]`), an egress allow-list
+  (`[sandbox.egress]`), a read-only checkout for reviewed code, and a tuned seccomp
+  profile. The `bwrap` backend itself (process/fs/network/credential pillars) ships
+  now. **`nsjail` / `docker` / `oci` / `microvm`** are further backends behind the
+  same seam (Tier 2+).
 - **Per-call backend selection via `Policy`** (`Decision` naming a backend); config
   picks the global default today.
 - **The `SandboxService` gRPC service** (`agent --serve-sandbox`) so a heavy
