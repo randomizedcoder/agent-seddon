@@ -109,6 +109,44 @@ fn feedback_sql() -> &'static str {
       ORDER BY ts DESC LIMIT 10000"
 }
 
+/// Reduce `rows` to the newest row per key: the max by `ts` millis, breaking an exact-
+/// millisecond tie deterministically on `tiebreak` so the result is **independent of the input
+/// row order** — the fetch orders `ts DESC` for the `LIMIT`, and without an explicit tie-break a
+/// same-millisecond supersede (plausible under retries at `DateTime64<3>` precision) would let
+/// that SELECT ordering leak into which row wins. The tie-break is for *determinism*, not
+/// semantic "newer" (equal `ts` is genuinely ambiguous); a stable field keeps renders/tests
+/// reproducible. Pure so both fleet reducers share exactly one copy of the newest-wins loop.
+fn newest_by_key<R, T: Ord>(
+    rows: Vec<R>,
+    key: impl Fn(&R) -> &str,
+    ts: impl Fn(&R) -> T,
+    tiebreak: impl Fn(&R) -> &str,
+) -> Vec<R> {
+    use std::collections::hash_map::Entry;
+    let mut latest: HashMap<String, R> = HashMap::new();
+    for r in rows {
+        match latest.entry(key(&r).to_string()) {
+            Entry::Occupied(mut e) => {
+                let replace = {
+                    let cur = e.get();
+                    match ts(&r).cmp(&ts(cur)) {
+                        std::cmp::Ordering::Greater => true,
+                        std::cmp::Ordering::Equal => tiebreak(&r) > tiebreak(cur),
+                        std::cmp::Ordering::Less => false,
+                    }
+                };
+                if replace {
+                    e.insert(r);
+                }
+            }
+            Entry::Vacant(e) => {
+                e.insert(r);
+            }
+        }
+    }
+    latest.into_values().collect()
+}
+
 /// Reduce the raw draft rows (all matching `repo`/`session_id`) to the operator view: newest
 /// state per `review_id`, filtered on that current `status`, ordered newest-first, and capped.
 /// Pure so the dedup/filter/cap logic is table-testable without a live ClickHouse. `limit == 0`
@@ -118,31 +156,16 @@ fn finalize_drafts(
     status: Option<&str>,
     limit: usize,
 ) -> Vec<ReviewDraftRecord> {
-    // Newest-wins per review_id — a supersede/post is a fresh row, so the max-`ts` row is each
-    // draft's *current* state. Compare `ts` explicitly (not insertion order) so the reducer is
-    // correct regardless of how the SELECT ordered its rows: the fetch orders `ts DESC` for the
-    // LIMIT, so relying on insertion order here would silently pick a stale state.
-    use std::collections::hash_map::Entry;
-    let mut latest: HashMap<String, ReviewDraftRow> = HashMap::new();
-    for r in rows {
-        match latest.entry(r.review_id.clone()) {
-            Entry::Occupied(mut e) => {
-                if r.ts.1 > e.get().ts.1 {
-                    e.insert(r);
-                }
-            }
-            Entry::Vacant(e) => {
-                e.insert(r);
-            }
-        }
-    }
-    // Filter on the current status, then order newest-first (a HashMap iterates arbitrarily →
-    // deterministic sort for stable renders/tests). `ts` is `DateTime64::<3>(Tz, millis)`;
-    // compare the millis (`.1`), tie-breaking on review_id for total order.
-    let mut kept: Vec<ReviewDraftRow> = latest
-        .into_values()
-        .filter(|r| status.is_none_or(|s| r.status == s))
-        .collect();
+    // Newest-wins per review_id (a supersede/post is a fresh row, so the max-`ts` row is each
+    // draft's *current* state), via the shared order-independent reducer. Filter on the current
+    // status, then order newest-first (a HashMap iterates arbitrarily → deterministic sort for
+    // stable renders/tests). `ts` is `DateTime64::<3>(Tz, millis)`; compare the millis (`.1`),
+    // tie-breaking on review_id for total order.
+    let mut kept: Vec<ReviewDraftRow> =
+        newest_by_key(rows, |r| &r.review_id, |r| r.ts.1, |r| &r.status)
+            .into_iter()
+            .filter(|r| status.is_none_or(|s| r.status == s))
+            .collect();
     kept.sort_by(|a, b| {
         b.ts.1
             .cmp(&a.ts.1)
@@ -163,27 +186,14 @@ fn finalize_drafts(
 /// max-`ts` (NOT insertion order): the fetch orders `ts DESC` for the `LIMIT`, so relying on
 /// insertion order here would silently carry a stale (older) state forward.
 fn finalize_feedback(rows: Vec<ReviewFeedbackRow>) -> Vec<Feedback> {
-    use std::collections::hash_map::Entry;
-    let mut latest: HashMap<String, ReviewFeedbackRow> = HashMap::new();
-    for r in rows {
-        match latest.entry(r.item_id.clone()) {
-            Entry::Occupied(mut e) => {
-                if r.ts.1 > e.get().ts.1 {
-                    e.insert(r);
-                }
-            }
-            Entry::Vacant(e) => {
-                e.insert(r);
-            }
-        }
-    }
-    // Keep only currently-open items to carry forward; sort for a stable order (a HashMap
-    // iterates arbitrarily).
-    let mut open_items: Vec<Feedback> = latest
-        .into_values()
-        .filter(|r| r.status == agent_core::feedback_status::OPEN)
-        .map(feedback_from_row)
-        .collect();
+    // Newest-wins per item_id via the shared order-independent reducer, then keep only currently-
+    // open items to carry forward; sort for a stable order (a HashMap iterates arbitrarily).
+    let mut open_items: Vec<Feedback> =
+        newest_by_key(rows, |r| &r.item_id, |r| r.ts.1, |r| &r.status)
+            .into_iter()
+            .filter(|r| r.status == agent_core::feedback_status::OPEN)
+            .map(feedback_from_row)
+            .collect();
     open_items.sort_by(|a, b| a.item_id.cmp(&b.item_id));
     open_items
 }
@@ -750,6 +760,49 @@ mod tests {
             .map(|f| f.item_id)
             .collect();
         assert_eq!(got, expected, "{desc}");
+    }
+
+    /// desc (round9-2): on an EXACT-millisecond tie for the same key, the reducer's result must
+    /// not depend on input row order — before the shared `newest_by_key` tie-break, `>` kept the
+    /// first-seen row, so which same-ms state survived leaked from the SELECT's ordering. Feed the
+    /// two tied rows in BOTH orders; the carried-forward state must be identical (the deterministic
+    /// status tie-break, `open` > `addressed` lexically, wins regardless of order).
+    #[rstest]
+    #[case::forward(vec![("a", "addressed", 5), ("a", "open", 5)])]
+    #[case::reversed(vec![("a", "open", 5), ("a", "addressed", 5)])]
+    fn corner_equal_ts_tie_break_is_order_independent(#[case] rows: Vec<(&str, &str, u64)>) {
+        let rows: Vec<ReviewFeedbackRow> = rows
+            .into_iter()
+            .map(|(id, st, ts)| fb_row(id, st, ts))
+            .collect();
+        let got: Vec<String> = finalize_feedback(rows)
+            .into_iter()
+            .map(|f| f.item_id)
+            .collect();
+        // `open` deterministically wins the equal-ms tie in either input order, so the item is
+        // carried forward both times — the outcome no longer depends on fetch order.
+        assert_eq!(
+            got,
+            vec!["a"],
+            "equal-ts tie-break must be order-independent"
+        );
+    }
+
+    /// desc (round9-2): the shared `newest_by_key` reducer is order-independent for the strict
+    /// (non-tied) case too — the max-`ts` row wins whether it arrives first or last.
+    #[rstest]
+    #[case::newest_last(vec![("a", "addressed", 1), ("a", "open", 9)])]
+    #[case::newest_first(vec![("a", "open", 9), ("a", "addressed", 1)])]
+    fn positive_newest_by_key_picks_max_ts_regardless_of_order(
+        #[case] rows: Vec<(&str, &str, u64)>,
+    ) {
+        let rows: Vec<ReviewFeedbackRow> = rows
+            .into_iter()
+            .map(|(id, st, ts)| fb_row(id, st, ts))
+            .collect();
+        let got = newest_by_key(rows, |r| &r.item_id, |r| r.ts.1, |r| &r.status);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].status, "open", "the ts=9 row wins in either order");
     }
 
     /// desc: `prior()`'s feedback fetch is bounded (newest-first) so the append-only, TTL-less
