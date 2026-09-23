@@ -122,8 +122,12 @@ feature only if one tenant cannot read another's rows out of it. Multi-tenancy
 `user` is the **leading `ORDER BY` key** on the telemetry tables (C27-2), so the RLS predicate rides
 the primary index and *prunes other tenants' granules* — a scoped read touches fewer parts, making
 isolation and speed the same mechanism rather than a tax (at Tier 0 `user` is a single constant, so
-the prior locality is preserved). Scoping the model-reachable read tools (`metrics`, `session_recall`,
-`search`) is C28.
+the prior locality is preserved). Scoping the model-reachable read tools is C28: the **`metrics`
+tool** is now tenant-scoped (C28-1) — under `[tenancy] per_tenant` it returns only the caller's own
+`(session, user)` series (from the verified `current_identity()`, never a tool arg) plus the shared
+label-less seam-health families, failing closed to those health families when no identity is scoped;
+Tier-0 (`per_tenant` off) is unchanged. `session_recall` / `search` corpus partitioning is the
+remaining C28 work.
 
 ## The agent observing itself
 
