@@ -138,7 +138,10 @@ let
     # `nix` itself, so the opt-in `nix-run` tool provider (Inc 5c) can shell out to
     # `nix run <locked-ref>#<tool>` for allowlisted nixpkgs tools on demand.
     pkgs.nix
-  ];
+  ]
+  # `bwrap` for the opt-in Tier-1 Sandbox backend (C23). Linux-only, so it stays
+  # off the closure on Darwin (where `pkgs.bubblewrap` doesn't build).
+  ++ lib.optionals pkgs.stdenv.isLinux [ versions.bubblewrap ];
 
   # The `agent` binary, wrapped so the flake supplies every runtime tool on `PATH`.
   #

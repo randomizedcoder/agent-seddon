@@ -5,9 +5,11 @@
 //! `BashTool`). [`NixSandbox`] is the headline: it runs each command inside the
 //! repo's pinned, hermetic flake closure (`nix develop <flake> -c …`), so the
 //! tool environment is reproducible + content-addressed + re-derivable from
-//! `nix/versions.nix` — where the peers use mutable images. The stronger nix
-//! sandboxed-derivation mode (network-off, private-tmp, mount confinement) and
-//! the `bwrap`/`nsjail`/`docker` backends are follow-ups. See
+//! `nix/versions.nix` — where the peers use mutable images. [`BwrapSandbox`]
+//! (feature `sandbox-bwrap`, C23) adds real Tier-1 isolation: rootless namespaces
+//! that enforce network-off, a private `/tmp`, read-only system, and env-scrub for
+//! attacker-influenced code. The stronger nix sandboxed-derivation mode and the
+//! `oci`/`microvm` (Tier 2+) backends are follow-ups. See
 //! `docs/components/sandbox.md`.
 
 use agent_core::{EnvPolicy, Error, ExecOutput, ExecSpec, Result};
@@ -163,6 +165,11 @@ pub use local::LocalSandbox;
 mod nix;
 #[cfg(feature = "sandbox-nix")]
 pub use nix::NixSandbox;
+
+#[cfg(feature = "sandbox-bwrap")]
+mod bwrap;
+#[cfg(feature = "sandbox-bwrap")]
+pub use bwrap::BwrapSandbox;
 
 #[cfg(test)]
 mod tests {
@@ -396,5 +403,251 @@ mod tests {
         // The dev-shell closure is content-addressed even though this mode can't
         // enforce network-off (that's the sandboxed-derivation follow-up).
         assert!(caps.content_addressed);
+    }
+
+    // --- C23: bwrap (Tier-1 isolation) backend ----------------------------
+    //
+    // Real bwrap exec needs a host that permits unprivileged namespaces — which the
+    // hermetic `nix flake check` builder does NOT (and bwrap isn't on its PATH). So
+    // the bulk of the coverage is on the PURE flag-assembly (`bwrap_argv`) + the
+    // setup-error classifier, which are hermetic; the real-exec pillar tests skip
+    // unless the host is actually capable (mirroring the `nix` skip guard).
+    #[cfg(feature = "sandbox-bwrap")]
+    mod bwrap_tests {
+        use super::*;
+        use crate::bwrap::{bwrap_argv, is_bwrap_setup_error};
+        use crate::BwrapSandbox;
+        use agent_core::NetworkPolicy;
+
+        /// The index of the `--` terminator (the boundary between bwrap options and
+        /// the untrusted child command). Panics if absent — every assembly must emit it.
+        fn sep(a: &[String]) -> usize {
+            a.iter()
+                .position(|s| s == "--")
+                .expect("argv must terminate options with `--`")
+        }
+
+        /// desc: isolation flags derive from `spec.network`. The process/user/pid
+        /// namespaces are always present; `--unshare-net` appears iff egress is denied.
+        /// expect: whether the argv contains `--unshare-net`.
+        #[rstest]
+        #[case::positive_network_on_stays_shared(NetworkPolicy::On, false)]
+        #[case::negative_network_off_gets_netns(NetworkPolicy::Off, true)]
+        #[case::corner_loopback_also_gets_netns(NetworkPolicy::Loopback, true)]
+        fn bwrap_argv_network_flag(#[case] net: NetworkPolicy, #[case] want_netns: bool) {
+            let spec = ExecSpec::sh("echo hi", "/work").network(net);
+            let a = bwrap_argv(&spec);
+            assert_eq!(a[0], "bwrap");
+            // The always-on process/fs pillars.
+            for f in [
+                "--unshare-user",
+                "--unshare-pid",
+                "--die-with-parent",
+                "--tmpfs",
+            ] {
+                assert!(a.iter().any(|s| s == f), "missing {f} in {a:?}");
+            }
+            assert_eq!(
+                a.iter().any(|s| s == "--unshare-net"),
+                want_netns,
+                "netns presence for {net:?}"
+            );
+        }
+
+        /// desc: the cwd is bound read-write and made the child's directory, so tools
+        /// can write build/scratch output; and the bind lands AFTER `--tmpfs /tmp`.
+        /// expect: `--bind <cwd> <cwd>` + `--chdir <cwd>` present, ordered after the tmpfs.
+        #[test]
+        fn positive_bwrap_argv_binds_cwd_rw_after_tmpfs() {
+            let a = bwrap_argv(&ExecSpec::sh("true", "/work/repo"));
+            let bind = a.iter().position(|s| s == "--bind").expect("cwd bound");
+            assert_eq!(a[bind + 1], "/work/repo");
+            assert_eq!(a[bind + 2], "/work/repo");
+            let tmp = a.iter().position(|s| s == "--tmpfs").unwrap();
+            assert!(
+                tmp < bind,
+                "cwd bind must follow the /tmp tmpfs so it isn't shadowed"
+            );
+            let chdir = a.iter().position(|s| s == "--chdir").expect("chdir set");
+            assert_eq!(a[chdir + 1], "/work/repo");
+        }
+
+        /// desc: shell mode wraps `bash -c <command>`; argv mode runs the program
+        /// directly (no shell). Either way the payload sits AFTER the `--` terminator.
+        /// expect: the child argv exactly, positioned after `--`.
+        #[test]
+        fn positive_bwrap_argv_shell_and_argv_payload() {
+            let sh = bwrap_argv(&ExecSpec::sh("echo hi", "/w"));
+            let s = sep(&sh);
+            assert_eq!(
+                &sh[s + 1..],
+                &["bash".to_string(), "-c".into(), "echo hi".into()]
+            );
+
+            let av = bwrap_argv(&ExecSpec::argv(["rg", "pat", "."], "/w"));
+            let s2 = sep(&av);
+            assert_eq!(&av[s2 + 1..], &["rg".to_string(), "pat".into(), ".".into()]);
+        }
+
+        /// desc (boundary): an empty command still assembles a valid `bash -c ""`.
+        #[test]
+        fn boundary_bwrap_argv_empty_command() {
+            let a = bwrap_argv(&ExecSpec::sh("", "/w"));
+            let s = sep(&a);
+            assert_eq!(
+                &a[s + 1..],
+                &["bash".to_string(), "-c".into(), String::new()]
+            );
+        }
+
+        /// desc (adversarial): the child string is attacker-controlled. A leading `-`
+        /// or shell metachars must never be parsed as a bwrap option nor split a bind
+        /// path — everything untrusted appears ONLY after the `--` terminator, and no
+        /// bwrap flag before it carries the payload.
+        #[rstest]
+        #[case::adversarial_leading_dash_argv(vec!["--unshare-all", "; rm -rf /"])]
+        #[case::adversarial_shell_metachars(vec!["$(touch pwned)", "`id`", "a|b>c"])]
+        #[case::adversarial_bwrap_flag_lookalike(vec!["--bind", "/etc", "/etc"])]
+        fn adversarial_bwrap_argv_payload_is_isolated_after_separator(#[case] argv: Vec<&str>) {
+            let a = bwrap_argv(&ExecSpec::argv(argv.clone(), "/w"));
+            let s = sep(&a);
+            // The payload is exactly the untrusted argv, and it is entirely after `--`.
+            let payload: Vec<String> = argv.iter().map(ToString::to_string).collect();
+            assert_eq!(
+                &a[s + 1..],
+                payload.as_slice(),
+                "untrusted argv passed verbatim after `--`"
+            );
+            // The option list BEFORE `--` is derived ONLY from network + cwd, never from
+            // the untrusted command — so it is byte-identical to the prefix for a benign
+            // command with the same (network, cwd). This is the real property: hostile
+            // content can't influence a single isolation flag (a token-membership check
+            // would false-positive when the payload happens to equal a legit flag/path,
+            // e.g. `--bind` / `/etc`).
+            let benign = bwrap_argv(&ExecSpec::argv(["BENIGN"], "/w"));
+            let bs = sep(&benign);
+            assert_eq!(
+                &a[..s],
+                &benign[..bs],
+                "the isolation flags must not depend on the untrusted payload"
+            );
+        }
+
+        /// desc: the fail-closed classifier — bwrap's own setup failure (couldn't make
+        /// the namespaces) is distinguished from the child's exit, so a caller never
+        /// mistakes "not isolated" for "command failed" (the untrusted child never ran).
+        /// expect: whether it's classified as a bwrap setup error.
+        #[rstest]
+        #[case::positive_child_success(0, "", false)]
+        #[case::negative_child_nonzero_is_not_setup_error(3, "boom: build failed", false)]
+        #[case::corner_setup_error_userns(1, "bwrap: Creating new namespace failed: EPERM", true)]
+        #[case::corner_setup_error_generic(
+            1,
+            "bwrap: No permissions to create new namespace",
+            true
+        )]
+        #[case::boundary_bwrap_prefix_but_exit_zero(0, "bwrap: warning", false)]
+        fn is_bwrap_setup_error_classifies(
+            #[case] code: i32,
+            #[case] stderr: &str,
+            #[case] want: bool,
+        ) {
+            assert_eq!(is_bwrap_setup_error(code, stderr), want);
+        }
+
+        /// desc: the capability probe reflects binary presence and reports the pillars
+        /// this backend enforces when it can run (fail-closed at exec, not here).
+        #[test]
+        fn bwrap_capabilities_probe() {
+            let caps = BwrapSandbox.capabilities();
+            assert_eq!(caps.backend, "bwrap");
+            assert_eq!(caps.available, available("bwrap"));
+            // When the binary is present the backend claims the pillars it enforces.
+            assert_eq!(caps.network_off, caps.available);
+            assert_eq!(caps.private_tmp, caps.available);
+            assert!(!caps.content_addressed);
+        }
+
+        /// Is a real bwrap exec usable here? Requires the binary AND a host that
+        /// permits unprivileged namespaces (the nix builder does not) — so the live
+        /// pillar tests below skip cleanly where isolation can't be established.
+        async fn bwrap_usable() -> bool {
+            if !available("bwrap") {
+                return false;
+            }
+            let dir = tempdir();
+            // A setup failure returns `Err` (fail-closed); success means isolation worked.
+            BwrapSandbox
+                .exec(&ExecSpec::sh("true", dir).timeout(30))
+                .await
+                .is_ok()
+        }
+
+        /// desc (live, skippable): a basic command runs correctly inside the sandbox.
+        #[tokio::test]
+        async fn positive_bwrap_runs_basic_command() {
+            if !bwrap_usable().await {
+                return;
+            }
+            let dir = tempdir();
+            let out = BwrapSandbox
+                .exec(&ExecSpec::sh("printf 'a\\nb'", dir).timeout(30))
+                .await
+                .unwrap();
+            assert_eq!(out.stdout, "a\nb");
+            assert_eq!(out.exit_code, 0);
+        }
+
+        /// desc (live, adversarial, skippable): `NetworkPolicy::Off` puts the child in
+        /// a private netns with no route, so an outbound connect fails — no egress from
+        /// attacker-influenced code. A `network-unreachable` connect returns at once
+        /// (no hang), so no external timeout is needed.
+        #[tokio::test]
+        async fn adversarial_bwrap_network_off_blocks_egress() {
+            if !bwrap_usable().await {
+                return;
+            }
+            let dir = tempdir();
+            let out = BwrapSandbox
+                .exec(
+                    &ExecSpec::sh(
+                        "exec 3<>/dev/tcp/1.1.1.1/53 && echo CONNECTED || echo BLOCKED",
+                        dir,
+                    )
+                    .network(NetworkPolicy::Off)
+                    .timeout(30),
+                )
+                .await
+                .unwrap();
+            assert!(
+                out.stdout.contains("BLOCKED"),
+                "network-off must block egress, got stdout={:?} stderr={:?}",
+                out.stdout,
+                out.stderr
+            );
+        }
+
+        /// desc (live, adversarial, skippable): `EnvPolicy::Scrub` drops host secrets —
+        /// HOME (a stand-in) is absent in the child even though bwrap otherwise
+        /// propagates the (already-scrubbed) parent env.
+        #[tokio::test]
+        async fn adversarial_bwrap_scrub_drops_host_secret() {
+            if !bwrap_usable().await {
+                return;
+            }
+            let dir = tempdir();
+            let out = BwrapSandbox
+                .exec(
+                    &ExecSpec::sh(r#"printf '%s' "${HOME:-__EMPTY__}""#, dir)
+                        .env(EnvPolicy::Scrub)
+                        .timeout(30),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                out.stdout, "__EMPTY__",
+                "scrub must drop HOME inside the sandbox"
+            );
+        }
     }
 }
