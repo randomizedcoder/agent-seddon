@@ -15,9 +15,25 @@
 -- statement here is IF NOT EXISTS, re-running does NOT alter an existing table — an
 -- already-populated volume needs the column added manually, once, per table:
 --   ALTER TABLE agent.<table> ADD COLUMN IF NOT EXISTS user String AFTER session_id;
--- (applies to the 7 telemetry tables below; old rows default to ''). Making `user`
--- a leading ORDER BY key for locality/RLS is deliberately deferred to the
--- multi-tenancy track (MT-02), since that is a table rebuild, not an additive edit.
+-- (applies to the telemetry tables below; old rows default to '').
+--
+-- NOTE (multi-tenancy C27-2): `user` is now the LEADING ORDER BY key on the telemetry
+-- tables (`ORDER BY (user, …)`), so the C27 row-policy predicate
+-- (`user = getSetting('SQL_tenant_id')`, defined at the foot of this file) rides the
+-- primary index and PRUNES other tenants' granules — a scoped read touches fewer parts,
+-- so security == performance here rather than a tax. At Tier 0 `user` is a single
+-- constant ('' outside a scope), so a leading-constant key adds no cardinality and the
+-- prior locality is preserved. This is a table REBUILD, not additive: `IF NOT EXISTS`
+-- will NOT re-sort an existing table, so an already-populated volume must be rebuilt once
+-- per table, e.g.:
+--   RENAME TABLE agent.agent_events TO agent.agent_events__old;
+--   -- re-run this file to CREATE agent.agent_events with the new ORDER BY, then:
+--   INSERT INTO agent.agent_events SELECT * FROM agent.agent_events__old;
+--   DROP TABLE agent.agent_events__old;
+-- (or just DROP the table if its telemetry is disposable). Fresh installs pick up the new
+-- key automatically. The digest table keeps its `(session_id, seq, kind)` key: its reader
+-- is session-first and already filters `user_id` in-query, so re-sorting it would regress
+-- its own hot path for no RLS-pushdown win the in-query filter doesn't already give.
 
 CREATE DATABASE IF NOT EXISTS agent;
 
@@ -36,7 +52,7 @@ CREATE TABLE IF NOT EXISTS agent.agent_events
     tool_call_id String
 )
 ENGINE = MergeTree
-ORDER BY (session_id, ts, seq);
+ORDER BY (user, session_id, ts, seq);
 
 -- Streamed tracing/log events (from the tracing-subscriber ClickHouse layer).
 -- `repo`/`pr` (observability track, Phase 5.5) are inherited from the enclosing
@@ -57,7 +73,7 @@ CREATE TABLE IF NOT EXISTS agent.agent_logs
     fields     String                      -- JSON of structured fields
 )
 ENGINE = MergeTree
-ORDER BY (session_id, ts);
+ORDER BY (user, session_id, ts);
 
 -- Per-turn token usage reported by the provider.
 CREATE TABLE IF NOT EXISTS agent.agent_usage
@@ -71,7 +87,7 @@ CREATE TABLE IF NOT EXISTS agent.agent_usage
     total_tokens      UInt32
 )
 ENGINE = MergeTree
-ORDER BY (session_id, ts);
+ORDER BY (user, session_id, ts);
 
 -- Tool-call verifications: one row per verified call, for offline analysis of
 -- which verifier/model is worth trusting per task_type (the measurement platform
@@ -101,7 +117,7 @@ CREATE TABLE IF NOT EXISTS agent.agent_verifications
     task_succeeded Nullable(UInt8)            -- did the run reach a good final state?
 )
 ENGINE = MergeTree
-ORDER BY (session_id, ts, iter);
+ORDER BY (user, session_id, ts, iter);
 
 -- ── Code review (docs/design/code-review/, component 09) ────────────────────
 -- One row per review run: the headline (durations, sizes, mode, parallelism).
@@ -128,7 +144,7 @@ CREATE TABLE IF NOT EXISTS agent.agent_reviews
     critical_path    String                     -- slowest collector's name
 )
 ENGINE = MergeTree
-ORDER BY (session_id, ts);
+ORDER BY (user, session_id, ts);
 
 -- One row per collector per review: the parallelism / optimization drill-down.
 CREATE TABLE IF NOT EXISTS agent.agent_review_collectors
@@ -143,7 +159,7 @@ CREATE TABLE IF NOT EXISTS agent.agent_review_collectors
     items       UInt32                          -- findings / nodes / summaries (well-known collectors)
 )
 ENGINE = MergeTree
-ORDER BY (session_id, ts, collector);
+ORDER BY (user, session_id, ts, collector);
 
 -- One row per static-analysis tool per review (review-analysis-depth Inc 2-tel):
 -- the drill-down UNDER the `analyzer` collector — golangci-lint / gosec / go vet /
@@ -161,7 +177,7 @@ CREATE TABLE IF NOT EXISTS agent.agent_review_tools
     finding_count UInt32
 )
 ENGINE = MergeTree
-ORDER BY (session_id, ts, tool);
+ORDER BY (user, session_id, ts, tool);
 
 -- The fleet's operational review-draft record (review-fleet C14). Unlike the
 -- anonymized agent_reviews, this names the real repo/pr_number (fleet config, not
@@ -187,7 +203,7 @@ CREATE TABLE IF NOT EXISTS agent.agent_review_drafts
     status        String                           -- drafted | approved | posted | superseded
 )
 ENGINE = MergeTree
-ORDER BY (repo, pr_number, head_sha);
+ORDER BY (user, repo, pr_number, head_sha);
 
 -- One row per review-feedback item, carried across rounds (review-fleet C15/C16).
 -- review_id/repo/pr_number are the persisting round's context; the rest is the item's
@@ -213,7 +229,7 @@ CREATE TABLE IF NOT EXISTS agent.agent_review_feedback
     addressed_sha     String                       -- '' until addressed
 )
 ENGINE = MergeTree
-ORDER BY (repo, pr_number, item_id);
+ORDER BY (user, repo, pr_number, item_id);
 
 -- One row per accepted per-dimension summary (adaptive-cognition 03). Counts and
 -- lengths only — never the summary body — so the dimension distribution and
@@ -228,7 +244,7 @@ CREATE TABLE IF NOT EXISTS agent.agent_dimension_summaries
     summary_len UInt32                          -- length of the summary, not its text
 )
 ENGINE = MergeTree
-ORDER BY (session_id, ts, dimension);
+ORDER BY (user, session_id, ts, dimension);
 
 -- The per-session digest ledger (cognition-graph 02): one summary + one facts row
 -- per delivered response (+ gate alternatives / compaction objectives), written
