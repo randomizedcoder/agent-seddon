@@ -114,9 +114,14 @@ session_id, ts)`). Then:
   (per-session workspace) lands, the *code* index already sits under each session's confined
   root, so that leak closes for the fleet automatically — the **shared session-recall corpus**
   (`recall.rs:132`) is the one still needing explicit per-tenant partitioning.
-- **`metrics` tool.** Scope `encode_text()` (`metrics.rs:62`) to the caller's
-  `(session, user)` series (filter by `current_identity()` server-side) instead of dumping the
-  whole registry; or keep a per-tenant view of the registry.
+- **`metrics` tool (C28-1, built).** Under `[tenancy] per_tenant` the tool scopes its exposition to
+  the caller's own `(session, user)` series (from the **verified** `current_identity()`, never a tool
+  arg) plus the shared **label-less seam-health** families (provider / tool-exec / search latencies,
+  which carry no tenant label — kept deliberately, as they hold no per-tenant data). A missing
+  identity fails **closed** to the label-less families only; Tier-0 (`per_tenant` off) returns the
+  whole registry, byte-identical. Enabled via `MetricsTool::tenant_scoped(cfg.tenancy.per_tenant)`;
+  the filter keeps label-less series rather than dropping them (the "naive line filtering is lossy"
+  caveat), so seam-health self-inspection is preserved.
 - **`session_recall` tool.** Query only the caller-tenant's corpus partition (falls out of the
   per-tenant index above).
 - **sqlite.** The provider registry and fleet roster are global server/control-plane config (no

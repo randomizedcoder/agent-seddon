@@ -385,7 +385,14 @@ pub async fn build_agent_with(
     // set is captured so child agents inherit it.
     #[cfg(feature = "tool-metrics")]
     {
-        let tool = Arc::new(agent_tools::MetricsTool::new(metrics.clone()));
+        // Per-tenant scoping (multi-tenancy C28-1): when `[tenancy] per_tenant` is on,
+        // the tool returns only the caller's own `(session, user)` series (from the
+        // verified `current_identity()`) plus shared label-less seam-health families, so
+        // a prompt-injectable session can't read another tenant's counters. Off (Tier-0)
+        // is unchanged.
+        let tool = Arc::new(
+            agent_tools::MetricsTool::new(metrics.clone()).tenant_scoped(cfg.tenancy.per_tenant),
+        );
         tools.register(crate::metered::tool(tool, metrics.clone()));
     }
 
