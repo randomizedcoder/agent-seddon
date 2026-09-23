@@ -3937,6 +3937,71 @@ mod tests {
         );
     }
 
+    // ---- fleet_approver: the fail-closed presence gate (round8-2) -----------
+
+    /// Build an `Arc<Agent>` for the approver gate: optionally wire a persisted fleet
+    /// history and/or a fleet root. `fleet_approver` requires BOTH — it looks the draft
+    /// up in history and reads the untrusted draft body under the root, confining it there,
+    /// so absent either it must stay absent (Approve → UNIMPLEMENTED) rather than post from
+    /// an unconfined `draft_path` (round8-2).
+    #[cfg(all(feature = "review", feature = "fleet"))]
+    fn agent_for_approver(with_history: bool, root: Option<PathBuf>) -> Arc<Agent> {
+        let mut s = settings(false);
+        s.fleet_root = root;
+        let mut a = Agent::new(
+            Arc::new(FnProvider::new(|_req: &CompletionRequest| final_turn("ok"))),
+            ToolRegistry::new(),
+            Arc::new(RecordingMemory::new()),
+            Arc::new(StaticContext),
+            Arc::new(crate::policy::AutoApprove),
+            Metrics::new(),
+            s,
+        );
+        if with_history {
+            a = a.with_fleet_history(Arc::new(MapHistory(std::collections::HashMap::new())));
+        }
+        Arc::new(a)
+    }
+
+    /// desc: `fleet_approver` is present ONLY when a persisted history AND a fleet root are
+    /// BOTH wired — either one missing ⇒ `None` (Approve stays UNIMPLEMENTED), the
+    /// fail-closed property #449/round8-2 exists for. A roster is always supplied, so the
+    /// gate under test is the (history, root) pair, not the argument.
+    /// expect: whether `fleet_approver(roster)` is `Some`.
+    #[cfg(all(feature = "review", feature = "fleet"))]
+    #[rstest]
+    #[case::positive_history_and_root_present(
+        "history + fleet root → approver present",
+        true,
+        true,
+        true
+    )]
+    #[case::negative_no_root_no_approver(
+        "history but no fleet root → absent (round8-2: never read a draft unconfined)",
+        true,
+        false,
+        false
+    )]
+    #[case::negative_no_history_no_approver(
+        "fleet root but no history → absent (no store to look the draft up in)",
+        false,
+        true,
+        false
+    )]
+    #[case::corner_neither_no_approver("neither wired → absent", false, false, false)]
+    fn fleet_approver_presence_gate(
+        #[case] desc: &str,
+        #[case] with_history: bool,
+        #[case] with_root: bool,
+        #[case] want_some: bool,
+    ) {
+        let root = with_root.then(agent_testkit::tempdir);
+        let agent = agent_for_approver(with_history, root);
+        let roster: Arc<dyn agent_core::FleetRegistry> =
+            Arc::new(agent_review_fleet::MemoryFleet::new());
+        assert_eq!(agent.fleet_approver(roster).is_some(), want_some, "{desc}");
+    }
+
     // ---- mode switch decision (hysteresis) ------------------------------
 
     #[test]
