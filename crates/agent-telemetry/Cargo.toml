@@ -7,6 +7,11 @@ license.workspace = true
 
 [dependencies]
 agent-core.workspace = true
+# Redact secrets out of message content before it is stored in ClickHouse
+# (multi-tenancy C28-3): the recall path reads `agent_events.content`, so a leaked
+# credential must never land in the table in the first place (parity with the
+# tantivy recall corpus, which redacts before indexing).
+agent-export.workspace = true
 async-trait.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

@@ -107,6 +107,16 @@ session_id, ts)`). Then:
 
 ## The other shared stores
 
+- **Recall → ClickHouse (C28-3, chosen 2026-09-23).** Rather than partition a tantivy recall
+  index per tenant, recall reads session transcripts straight out of `agent_events` (row-per-message,
+  already tenant-columned) through the **C27 `agent_reader` + `tenant_iso_events` ROW POLICY** — so
+  tenant isolation is the RLS boundary we already built, not a filesystem partition. Foundation (C28-3a,
+  built): `content`/`tool_calls` are **redacted at the sink** (`EventRow::from_event`) so no raw secret
+  is ever stored (parity with the tantivy corpus, which redacted before indexing); a `tokenbf_v1`
+  data-skipping index on `content` accelerates `hasToken`/`multiSearchAny` recall queries. Session-level
+  targeting (title / repo / source / model) lands on a small `agent_sessions` dim table (C28-3b), written
+  from the distiller where that data exists. The file/tantivy recall stays as the Tier-0 / offline
+  fallback (config-selected `[recall] backend`).
 - **tantivy — the sharpest leak.** Partition indexes **per tenant** by path (mirroring
   memory's "the path is the boundary"): `…/index/<backend>/<tenant>/` and recall corpus
   `…/<tenant>/.recall/index`. A path-partitioned index is a hard boundary; a shared index with
