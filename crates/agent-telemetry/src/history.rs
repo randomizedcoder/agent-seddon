@@ -9,18 +9,14 @@
 //! means "no prior", so a review still runs). Every interpolated value is bound as a query
 //! argument (`$1`/`$2`), so `repo` (trusted roster config) and `pr` (`u64`) can't inject SQL.
 
+use crate::ch::ChReader;
 use crate::rows::{ReviewDraftRow, ReviewFeedbackRow};
 use agent_core::{
-    Error, Feedback, FleetHistory, PriorReview, Result, ReviewDraftFilter, ReviewDraftRecord,
+    Feedback, FleetHistory, PriorReview, Result, ReviewDraftFilter, ReviewDraftRecord,
 };
 use async_trait::async_trait;
-use klickhouse::{Client, ClientOptions, QueryBuilder};
+use klickhouse::QueryBuilder;
 use std::collections::HashMap;
-use tokio::sync::Mutex;
-
-fn ch_err(e: klickhouse::KlickhouseError) -> Error {
-    Error::Memory(format!("fleet history clickhouse: {e}"))
-}
 
 /// One row of `SELECT name FROM system.tables` — the doctor schema-drift check.
 #[derive(Debug, Clone, klickhouse::Row)]
@@ -198,42 +194,12 @@ fn finalize_feedback(rows: Vec<ReviewFeedbackRow>) -> Vec<Feedback> {
     open_items
 }
 
-/// The custom ClickHouse setting the `tenant_iso` ROW POLICY reads (`USING user =
-/// getSetting('SQL_tenant_id')`). The `SQL_` prefix is declared server-side via
-/// `<custom_settings_prefixes>` (nix/clickhouse/users.xml); the reader profile locks it
-/// read-only with a `''` default so an unset connection sees no tenant-owned rows.
-const TENANT_SETTING: &str = "SQL_tenant_id";
-
-/// The `SET SQL_tenant_id = '<tenant>'` statement that binds an `agent_reader` connection
-/// to one tenant's rows via the server-side ROW POLICY — or `None` when there is no safe
-/// tenant to set (empty, or `safe_segment`-rejected). **Fail closed:** with no valid
-/// setting the policy's `''` default matches only unowned rows, so a hostile or absent
-/// identity reads nothing rather than everything. `safe_segment`'s charset
-/// (`[A-Za-z0-9._-]`) contains no quote, `;`, or whitespace, so the single-quoted literal
-/// cannot be broken out of — the tenant value can never inject SQL. Pure so it is
-/// table-testable without a live ClickHouse (the enforcement itself is a live-only test).
-fn set_tenant_stmt(tenant: &str) -> Option<String> {
-    if !agent_core::safe_segment(tenant) {
-        return None;
-    }
-    Some(format!("SET {TENANT_SETTING} = '{tenant}'"))
-}
-
-/// A ClickHouse-backed [`FleetHistory`]. Shares the `[telemetry]` connection params with the
-/// writer (one server; the writer inserts, this reads back).
+/// A ClickHouse-backed [`FleetHistory`] (review-fleet C16). Embeds a shared
+/// [`ChReader`] for the lazy-connect / reconnect-once / C27 RLS tenant-scope plumbing;
+/// shares the `[telemetry]` connection params with the writer (one server; the writer
+/// inserts, this reads back).
 pub struct ClickHouseHistory {
-    /// `host:port` for the native protocol (e.g. `localhost:9000`).
-    addr: String,
-    database: String,
-    user: String,
-    password: String,
-    /// When true (a distinct `agent_reader` credential was provisioned, multi-tenancy C27),
-    /// each fresh connection issues `SET SQL_tenant_id = <verified identity>` so the
-    /// server-side ROW POLICY scopes every read to the caller's tenant. False at Tier 0
-    /// (writer credential reused, no policy) ⇒ byte-for-byte today's behaviour.
-    tenant_scoped: bool,
-    /// Lazily-connected, dropped on error so the next op reconnects.
-    client: Mutex<Option<Client>>,
+    inner: ChReader,
 }
 
 impl ClickHouseHistory {
@@ -244,64 +210,26 @@ impl ClickHouseHistory {
         password: impl Into<String>,
     ) -> Self {
         Self {
-            addr: addr.into(),
-            database: database.into(),
-            user: user.into(),
-            password: password.into(),
-            tenant_scoped: false,
-            client: Mutex::new(None),
+            inner: ChReader::new(addr, database, user, password),
         }
     }
 
     /// Engage per-tenant RLS scoping on this reader (multi-tenancy C27): each connection
     /// will `SET SQL_tenant_id` from the verified ambient identity. Chainable; the builder
     /// sets it from [`ReaderCredentials::tenant_scoped`](crate) — on only when a distinct
-    /// reader credential is configured.
+    /// reader credential is configured. See [`ChReader::tenant_scoped`].
     #[must_use]
     pub fn tenant_scoped(mut self, yes: bool) -> Self {
-        self.tenant_scoped = yes;
+        self.inner = self.inner.tenant_scoped(yes);
         self
     }
 
-    async fn connect(&self) -> Result<Client> {
-        let client = Client::connect(
-            self.addr.as_str(),
-            ClientOptions {
-                username: self.user.clone(),
-                password: self.password.clone(),
-                default_database: self.database.clone(),
-                tcp_nodelay: true,
-            },
-        )
-        .await
-        .map_err(ch_err)?;
-        client
-            .execute("SET log_queries = 0, log_query_threads = 0")
-            .await
-            .map_err(ch_err)?;
-        // Multi-tenancy C27: bind this connection to the caller's tenant so the server-side
-        // ROW POLICY prunes every other tenant's rows. Sourced from the *verified* ambient
-        // identity (never a model payload); `set_tenant_stmt` fails closed on an
-        // absent/hostile identity (no SET ⇒ the policy's `''` default ⇒ no tenant rows).
-        if self.tenant_scoped {
-            let tenant = agent_core::current_identity()
-                .map(|k| k.user.as_str().to_string())
-                .unwrap_or_default();
-            if let Some(stmt) = set_tenant_stmt(&tenant) {
-                client.execute(stmt.as_str()).await.map_err(ch_err)?;
-            }
-        }
-        Ok(client)
-    }
-
-    /// Fail-closed liveness check for the shared ClickHouse: lazily connect (reusing
-    /// the cached client, reconnecting once if stale) and run a trivial `SELECT 1`
-    /// round-trip. `Ok(())` iff the server answered. This makes ClickHouse liveness
-    /// **the agent's own determination** — the doctor/preflight probes call it
-    /// instead of an operator shelling out to `clickhouse-client`.
+    /// Fail-closed liveness check for the shared ClickHouse: lazily connect and run a
+    /// trivial `SELECT 1` round-trip. Makes ClickHouse liveness **the agent's own
+    /// determination** — the doctor/preflight probes call it instead of an operator
+    /// shelling out to `clickhouse-client`.
     pub async fn ping(&self) -> Result<()> {
-        self.with_client(|client| async move { client.execute("SELECT 1").await })
-            .await
+        self.inner.ping().await
     }
 
     /// The set of table names in the configured database (from `system.tables`). The
@@ -310,8 +238,9 @@ impl ClickHouseHistory {
     /// predates a schema addition — where the telemetry writer would *silently drop*
     /// those rows — is surfaced rather than lost. Cheap: one bound query.
     pub async fn tables(&self) -> Result<Vec<String>> {
-        let db = self.database.clone();
+        let db = self.inner.database().to_string();
         let rows: Vec<TableNameRow> = self
+            .inner
             .with_client(move |client| {
                 let q = QueryBuilder::new("SELECT name FROM system.tables WHERE database = $1")
                     .arg(db.clone());
@@ -319,34 +248,6 @@ impl ClickHouseHistory {
             })
             .await?;
         Ok(rows.into_iter().map(|r| r.name).collect())
-    }
-
-    /// Run `op` on the cached client; on error, reconnect once and retry (a restarted
-    /// ClickHouse heals on the next call). Mirrors the digest store's discipline.
-    async fn with_client<T, F, Fut>(&self, op: F) -> Result<T>
-    where
-        F: Fn(Client) -> Fut,
-        Fut: std::future::Future<Output = klickhouse::Result<T>>,
-    {
-        let mut guard = self.client.lock().await;
-        if guard.is_none() {
-            *guard = Some(self.connect().await?);
-        }
-        let client = guard.clone().expect("client just ensured");
-        match op(client).await {
-            Ok(v) => Ok(v),
-            Err(first) => {
-                *guard = None; // stale connection — rebuild and retry once
-                let fresh = self.connect().await.map_err(|e| {
-                    Error::Memory(format!(
-                        "fleet history clickhouse: {first}; reconnect failed: {e}"
-                    ))
-                })?;
-                let v = op(fresh.clone()).await.map_err(ch_err)?;
-                *guard = Some(fresh);
-                Ok(v)
-            }
-        }
     }
 }
 
@@ -393,21 +294,22 @@ impl FleetHistory for ClickHouseHistory {
         let repo = repo.to_string();
         let last_draft: Option<ReviewDraftRecord> = {
             let repo = repo.clone();
-            self.with_client(move |client| {
-                let q = QueryBuilder::new(
-                    "SELECT session_id, user, ts, review_id, repo, pr_number, head_sha, \
+            self.inner
+                .with_client(move |client| {
+                    let q = QueryBuilder::new(
+                        "SELECT session_id, user, ts, review_id, repo, pr_number, head_sha, \
                             risk_score, gate_failed, n_findings, files_changed, additions, \
                             deletions, draft_path, status \
                        FROM agent_review_drafts \
                       WHERE repo = $1 AND pr_number = $2 \
                       ORDER BY ts DESC LIMIT 1",
-                )
-                .arg(repo.clone())
-                .arg(pr);
-                async move { client.query_opt::<ReviewDraftRow>(q).await }
-            })
-            .await?
-            .map(record_from_row)
+                    )
+                    .arg(repo.clone())
+                    .arg(pr);
+                    async move { client.query_opt::<ReviewDraftRow>(q).await }
+                })
+                .await?
+                .map(record_from_row)
         };
 
         // The newest FEEDBACK_FETCH_CAP feedback rows for the PR (append-only, no TTL — the
@@ -415,11 +317,12 @@ impl FleetHistory for ClickHouseHistory {
         // state; finalize_feedback dedups (max-ts, order-independent) and keeps the open ones.
         let rows: Vec<ReviewFeedbackRow> = {
             let repo = repo.clone();
-            self.with_client(move |client| {
-                let q = QueryBuilder::new(feedback_sql()).arg(repo.clone()).arg(pr);
-                async move { client.query_collect::<ReviewFeedbackRow>(q).await }
-            })
-            .await?
+            self.inner
+                .with_client(move |client| {
+                    let q = QueryBuilder::new(feedback_sql()).arg(repo.clone()).arg(pr);
+                    async move { client.query_collect::<ReviewFeedbackRow>(q).await }
+                })
+                .await?
         };
 
         Ok(PriorReview {
@@ -435,6 +338,7 @@ impl FleetHistory for ClickHouseHistory {
         // untrusted wire input; bind it as a query argument so it can't inject SQL.
         let review_id = review_id.to_string();
         Ok(self
+            .inner
             .with_client(move |client| {
                 let q = QueryBuilder::new(
                     "SELECT session_id, user, ts, review_id, repo, pr_number, head_sha, \
@@ -461,6 +365,7 @@ impl FleetHistory for ClickHouseHistory {
         let sql = drafts_sql(repo.is_some(), session_id.is_some());
 
         let rows: Vec<ReviewDraftRow> = self
+            .inner
             .with_client(move |client| {
                 let mut q = QueryBuilder::new(sql);
                 if let Some(r) = repo.clone() {
@@ -485,49 +390,6 @@ impl FleetHistory for ClickHouseHistory {
 mod tests {
     use super::*;
     use rstest::rstest;
-
-    /// desc: `set_tenant_stmt` — the per-connection RLS scope statement (multi-tenancy C27).
-    /// A valid tenant yields `SET SQL_tenant_id = '<tenant>'`; an absent/hostile one yields
-    /// `None` (fail closed — the ROW POLICY's `''` default then matches no tenant-owned rows).
-    /// The value can never inject: `safe_segment`'s charset carries no quote/`;`/whitespace.
-    #[rstest]
-    // positive: an ordinary org/user identity is quoted verbatim.
-    #[case::positive_plain("acme", Some("SET SQL_tenant_id = 'acme'"))]
-    #[case::positive_org_review("agent-seddon", Some("SET SQL_tenant_id = 'agent-seddon'"))]
-    #[case::positive_dotted("org.team_1", Some("SET SQL_tenant_id = 'org.team_1'"))]
-    // negative: no identity ⇒ no statement (reader stays on the policy default).
-    #[case::negative_empty("", None)]
-    // adversarial: any SQL-breaking / traversal / injection payload is rejected outright,
-    // never escaped-and-emitted — the setter refuses rather than trusting quoting.
-    #[case::adversarial_single_quote("a' OR '1'='1", None)]
-    #[case::adversarial_statement_break("a'; DROP TABLE agent.agent_events; --", None)]
-    #[case::adversarial_newline("a\nb", None)]
-    #[case::adversarial_space("a b", None)]
-    #[case::adversarial_traversal("..", None)]
-    #[case::adversarial_leading_dash("-x", None)]
-    #[case::adversarial_backtick("a`b", None)]
-    fn set_tenant_stmt_scopes_or_fails_closed(#[case] tenant: &str, #[case] expect: Option<&str>) {
-        assert_eq!(set_tenant_stmt(tenant).as_deref(), expect);
-    }
-
-    /// desc: boundary on the identity length — exactly `MAX_SEGMENT_LEN` is accepted and
-    /// quoted verbatim; one char over is rejected (fail closed). Computed, not a literal, so
-    /// the case can't silently desync from the cap.
-    #[test]
-    fn boundary_set_tenant_stmt_at_and_over_max_len() {
-        let at = "a".repeat(agent_core::MAX_SEGMENT_LEN);
-        assert_eq!(
-            set_tenant_stmt(&at),
-            Some(format!("SET SQL_tenant_id = '{at}'")),
-            "exactly MAX_SEGMENT_LEN is a valid tenant"
-        );
-        let over = "a".repeat(agent_core::MAX_SEGMENT_LEN + 1);
-        assert_eq!(
-            set_tenant_stmt(&over),
-            None,
-            "one over the cap fails closed (no SET emitted)"
-        );
-    }
 
     /// desc: the pure row→domain mappings the reader relies on.
     /// expect: `gate_failed` UInt8 → bool; fields carried 1:1.

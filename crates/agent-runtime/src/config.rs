@@ -311,8 +311,15 @@ fn default_transport_registry_file() -> String {
 pub struct RecallCfg {
     #[serde(default)]
     pub enabled: bool,
+    /// Recall corpus backend (multi-tenancy C28-3): `"tantivy"` (default) indexes the
+    /// local `.agent/sessions` transcripts — the Tier-0/offline path; `"clickhouse"`
+    /// recalls from the `agent_events` telemetry table instead, inheriting per-tenant
+    /// isolation from the C27 ROW POLICY (needs `[telemetry].enabled` + a ClickHouse).
+    /// An unknown value is rejected at build time (fail closed, never silently tantivy).
+    #[serde(default = "default_recall_backend")]
+    pub backend: String,
     /// Sessions directory to index (empty ⇒ `<working_dir>/.agent/sessions`, the
-    /// same transcripts the REPL saves).
+    /// same transcripts the REPL saves). Only the `tantivy` backend reads this.
     #[serde(default)]
     pub sessions_dir: String,
     /// Override the recall index directory (empty ⇒ `<sessions_dir>/.recall/index`).
@@ -328,6 +335,7 @@ impl Default for RecallCfg {
     fn default() -> Self {
         Self {
             enabled: false,
+            backend: default_recall_backend(),
             sessions_dir: String::new(),
             index_dir: String::new(),
             auto_index: true,
@@ -3012,6 +3020,9 @@ fn default_semantic_dir() -> String {
 }
 fn default_recall_limit() -> usize {
     5
+}
+fn default_recall_backend() -> String {
+    "tantivy".into()
 }
 fn default_context_dir() -> String {
     "context.d".into()

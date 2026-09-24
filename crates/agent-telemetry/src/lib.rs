@@ -11,10 +11,12 @@
 //! latency or outages never block or fail the agent — rows are simply dropped
 //! (with a one-time warning) while the JSONL episodic log keeps the full record.
 
+mod ch;
 mod history;
 mod layer;
 mod memory;
 mod otel;
+mod recall;
 mod rows;
 mod writer;
 
@@ -28,6 +30,7 @@ pub use history::ClickHouseHistory;
 pub use layer::ClickHouseLayer;
 pub use memory::CompositeMemory;
 pub use otel::{otlp_layer, OtelConfig, OtelGuard};
+pub use recall::ClickHouseRecall;
 
 use rows::{
     DimensionRow, EventRow, ReviewCollectorRow, ReviewDraftRow, ReviewFeedbackRow, ReviewRow,

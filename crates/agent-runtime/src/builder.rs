@@ -446,7 +446,7 @@ pub async fn build_agent_with(
     // reindex is kicked off below. Registered before the subagent set is captured.
     #[cfg(feature = "recall")]
     if cfg.recall.enabled {
-        let backend = crate::recall::build_recall_backend(&cfg.recall, &cfg.agent.working_dir)
+        let backend = crate::recall::build_recall_backend(&cfg)
             .context("building cross-session recall backend")?;
         let backend = crate::metered::search(backend, metrics.clone(), "recall");
         let tool = Arc::new(agent_tools::SessionRecallTool::new(backend.clone()));
