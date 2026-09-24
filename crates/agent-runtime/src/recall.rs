@@ -11,8 +11,9 @@
 //! reuses the whole reindex/query/freshness/serve-stale machinery — no bespoke
 //! index. The `session_recall` tool that queries it lands in the next increment.
 
+use crate::config::Config;
 use crate::session_store;
-use agent_core::{IndexState, Message, Result, SearchBackend};
+use agent_core::{Error, IndexState, Message, Result, SearchBackend};
 use agent_search::manifest::FileStamp;
 use agent_search::{DocumentSource, Manifest, SourceDoc, TantivyBackend};
 use std::collections::BTreeMap;
@@ -116,10 +117,54 @@ fn searchable_text(messages: &[Message]) -> String {
     out
 }
 
-/// Build the recall backend: a tantivy index over the [`SessionCorpus`], resolved
-/// from config. Returns `None`-free — the caller wires it as a `session_recall`
-/// tool + background freshness (next increment).
-pub fn build_recall_backend(
+/// Build the configured recall backend (multi-tenancy C28-3). `[recall] backend`
+/// selects the corpus:
+/// - `"tantivy"` (default): a local index over the `.agent/sessions` transcripts — the
+///   Tier-0/offline path, unchanged behaviour.
+/// - `"clickhouse"`: recall from the `agent_events` telemetry table, tenant-scoped by
+///   the C27 ROW POLICY via the least-privilege reader credential. Needs
+///   `[telemetry].enabled`; a distinct `reader_user` engages per-tenant isolation.
+///
+/// An unknown backend value is rejected (fail closed — never silently the tantivy path).
+pub fn build_recall_backend(cfg: &Config) -> Result<Arc<dyn SearchBackend>> {
+    match cfg.recall.backend.as_str() {
+        "tantivy" => build_tantivy_recall(&cfg.recall, &cfg.agent.working_dir),
+        "clickhouse" => build_clickhouse_recall(cfg),
+        other => Err(Error::Config(format!(
+            "unknown [recall] backend {other:?} (expected \"tantivy\" or \"clickhouse\")"
+        ))),
+    }
+}
+
+/// The ClickHouse-backed recall corpus (multi-tenancy C28-3): read past sessions from
+/// `agent_events` through the least-privilege reader credential (C27), engaging the
+/// per-tenant ROW POLICY when a distinct `reader_user` is configured (Tier-0 falls back
+/// to the writer credential, `tenant_scoped = false`). Requires telemetry to be enabled —
+/// with no writer there is nothing to recall.
+fn build_clickhouse_recall(cfg: &Config) -> Result<Arc<dyn SearchBackend>> {
+    if !cfg.telemetry.enabled {
+        return Err(Error::Config(
+            "[recall] backend = \"clickhouse\" requires [telemetry].enabled (the writer \
+             populates agent_events)"
+                .into(),
+        ));
+    }
+    let reader = cfg.telemetry.reader_credentials();
+    let backend = agent_telemetry::ClickHouseRecall::new(
+        cfg.telemetry.clickhouse_url.clone(),
+        cfg.telemetry.database.clone(),
+        reader.user,
+        reader.password,
+    )
+    .tenant_scoped(reader.tenant_scoped);
+    Ok(Arc::new(backend))
+}
+
+/// Build the tantivy recall backend: an index over the [`SessionCorpus`], resolved from
+/// config. The Tier-0/offline path (no ClickHouse). Public so the integration test can
+/// drive the tantivy chain directly; production wiring goes through
+/// [`build_recall_backend`].
+pub fn build_tantivy_recall(
     cfg: &crate::config::RecallCfg,
     working_dir: &str,
 ) -> Result<Arc<dyn SearchBackend>> {
@@ -292,7 +337,7 @@ mod tests {
             sessions_dir: dir.to_string_lossy().into_owned(),
             ..Default::default()
         };
-        let backend = build_recall_backend(&cfg, "").unwrap();
+        let backend = build_tantivy_recall(&cfg, "").unwrap();
         backend.reindex(&|_p| {}).await.unwrap();
 
         let hits = backend
@@ -312,5 +357,64 @@ mod tests {
             hits.iter().map(|h| h.path.clone()).collect::<Vec<_>>()
         );
         assert!(!hits.iter().any(|h| h.path.to_string_lossy() == "s_other"));
+    }
+
+    // --- backend selection (C28-3) -----------------------------------------
+
+    /// `positive_`: the default (`tantivy`) selects the local corpus backend.
+    #[test]
+    fn positive_selector_defaults_to_tantivy() {
+        let mut cfg = crate::config::Config::minimal_for_test();
+        cfg.recall.sessions_dir = agent_testkit::tempdir().to_string_lossy().into_owned();
+        assert_eq!(cfg.recall.backend, "tantivy");
+        let backend = build_recall_backend(&cfg).expect("tantivy recall builds");
+        assert_eq!(backend.capabilities().backend, "tantivy");
+    }
+
+    /// `positive_`: `clickhouse` with telemetry enabled selects the ClickHouse recall
+    /// backend (construction is lazy — no connection until a query, so this needs no server).
+    #[test]
+    fn positive_selector_clickhouse_when_telemetry_enabled() {
+        let mut cfg = crate::config::Config::minimal_for_test();
+        cfg.recall.backend = "clickhouse".into();
+        cfg.telemetry.enabled = true;
+        let backend = build_recall_backend(&cfg).expect("clickhouse recall builds");
+        assert_eq!(backend.capabilities().backend, "clickhouse-recall");
+    }
+
+    /// `negative_`: `clickhouse` without telemetry has no writer to recall from — rejected,
+    /// never a silent fallback to the empty local corpus.
+    #[test]
+    fn negative_selector_clickhouse_needs_telemetry() {
+        let mut cfg = crate::config::Config::minimal_for_test();
+        cfg.recall.backend = "clickhouse".into();
+        cfg.telemetry.enabled = false;
+        let err = match build_recall_backend(&cfg) {
+            Ok(_) => panic!("clickhouse recall without telemetry must be rejected"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("telemetry"),
+            "error should name the missing telemetry, got: {err}"
+        );
+    }
+
+    /// `adversarial_`: an unknown / hostile backend string fails closed rather than
+    /// silently selecting a default — a misconfiguration can't quietly disable tenant scoping.
+    #[rstest::rstest]
+    #[case::unknown("sqlite")]
+    #[case::empty_ish("CLICKHOUSE")]
+    #[case::injection("tantivy; DROP TABLE")]
+    fn adversarial_selector_rejects_unknown_backend(#[case] backend: &str) {
+        let mut cfg = crate::config::Config::minimal_for_test();
+        cfg.recall.backend = backend.into();
+        let err = match build_recall_backend(&cfg) {
+            Ok(_) => panic!("unknown backend must be rejected"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("unknown [recall] backend"),
+            "got: {err}"
+        );
     }
 }

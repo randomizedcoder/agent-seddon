@@ -25,7 +25,12 @@ which owns the checkpoint/branch model these read from.
 > document keyed by its id; redaction reuses `agent-export`'s synchronous fallback
 > matcher. The `session_recall` tool (`{query, limit}` → ranked past sessions with
 > snippets) is opt-in via `[recall] enabled`, metered under the `recall` search
-> label, and kept out of the code-search dispatch. **Deferred within recall:**
+> label, and kept out of the code-search dispatch. **Backend is now selectable
+> (multi-tenancy C28-3c):** `[recall] backend = "tantivy"` (default, the local
+> corpus above) or `"clickhouse"` — the latter recalls from the `agent_events`
+> telemetry table via `agent_telemetry::ClickHouseRecall`, inheriting per-tenant
+> isolation from the C27 ROW POLICY instead of a filesystem partition (so the
+> "per-user scoping" deferral below is closed on that path). **Deferred within recall:**
 > automation-source demotion (no transcript marker yet), per-message
 > window/bookend anchors, semantic/hybrid recall over the corpus, the async
 > `Scanner` redaction path (needs an async `load`), per-user scoping (follows the

@@ -25,7 +25,7 @@ async fn recall_tool(dir: &std::path::Path) -> SessionRecallTool {
         sessions_dir: dir.to_string_lossy().into_owned(),
         ..Default::default()
     };
-    let backend = recall::build_recall_backend(&cfg, "").unwrap();
+    let backend = recall::build_tantivy_recall(&cfg, "").unwrap();
     backend.reindex(&|_p| {}).await.unwrap();
     SessionRecallTool::new(backend)
 }
@@ -109,7 +109,7 @@ async fn positive_incremental_reindex_picks_up_appended_turn() {
         sessions_dir: dir.to_string_lossy().into_owned(),
         ..Default::default()
     };
-    let backend = recall::build_recall_backend(&cfg, "").unwrap();
+    let backend = recall::build_tantivy_recall(&cfg, "").unwrap();
     backend.reindex(&|_p| {}).await.unwrap();
 
     // Append a distinctive turn to s1 and reindex.

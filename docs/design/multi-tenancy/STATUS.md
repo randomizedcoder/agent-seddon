@@ -11,7 +11,7 @@ Legend: ⬜ not started · 🟡 in progress · ✅ merged.
 | # | Plane | Components | State | PR |
 |---|---|---|---|---|
 | 01 | Process isolation & multi-org boundaries | C23, C24, C25 | ✅ C23 (bwrap, 5 pillars) + C24; 🟡 C25 foundation | #454/#455 (C23), #273/#274/#275 (C24), #276 (C25) |
-| 02 | Data scoping & row-level security | C26, C27, C28 | ✅ C26 (identity at source) + C27 (RLS + `user`-leading sort key); C28 ⬜ | #315–#322 (C26), #456 (C27-1), C27-2 (sort key) |
+| 02 | Data scoping & row-level security | C26, C27, C28 | ✅ C26 (identity at source) + C27 (RLS + `user`-leading sort key); 🟡 **C28 building** — metrics tool (C28-1) + sqlite prompt (C28-2) + recall schema/redaction (C28-3a) + ClickHouse recall backend (C28-3c) built; code-index partition (C28-3d) ⬜ | #315–#322 (C26), #456 (C27-1), C27-2 (sort key), #458 (C28-2), #459 (C28-1), #460 (C28-3a), C28-3c (recall backend) |
 | 03 | Config & seam-state tenancy | C29, C30, C31 | 🟡 **C30 built** for the shared-store seams (config C2) + the file-backed graph (config C2b); C29/C31 ⬜, scheduler designed | #302 (config C2), C2b (graph) |
 
 **Plane 01 in progress** (via the review-fleet track): **C24 — execution chokepoint** is fully
@@ -32,7 +32,15 @@ pure-read fleet-history seam binds `SQL_tenant_id` from the verified identity pe
 (`[telemetry] reader_user`; empty ⇒ Tier-0 writer credential, RLS off). C27-2 makes `user` the
 **leading `ORDER BY` key** on the telemetry tables so the policy predicate prunes other tenants at the
 primary index (security = performance; a table rebuild, guided in schema.sql). Enforcement is
-live-verified (the hermetic gate has no ClickHouse); shared-store / read-tool scoping is C28. Planes 02/03 otherwise remain **designed, build deferred** — except **C30**,
+live-verified (the hermetic gate has no ClickHouse). **C28 — shared-store / read-tool scoping** is
+building: the `metrics` tool scopes to the caller's `(session, user)` series + shared label-less
+seam-health families (C28-1); the sqlite prompt store partitions per tenant by path under
+`[tenancy] per_tenant` (C28-2); and cross-session **recall** moved from per-tenant tantivy to reading
+`agent_events` through the C27 RLS boundary — content redacted at the sink + a `tokenbf_v1` index
+(C28-3a), and a `ClickHouseRecall` `SearchBackend` selected by `[recall] backend` (C28-3c) that derives
+session titles in the query (the `agent_sessions` dim table is deferred). The non-fleet **code-index**
+per-tenant path partition (C28-3d) is the remaining C28 piece. Planes 02/03 otherwise remain
+**designed, build deferred** — except **C30**,
 which the config track built across two
 increments: `PerTenant<S>` (`crates/agent-runtime/src/tenant.rs`) routes the converged shared-store
 control-plane seams (provider-registry, review-fleet, prompt) per verified tenant (config C2), and — in

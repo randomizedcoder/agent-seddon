@@ -113,10 +113,18 @@ session_id, ts)`). Then:
   tenant isolation is the RLS boundary we already built, not a filesystem partition. Foundation (C28-3a,
   built): `content`/`tool_calls` are **redacted at the sink** (`EventRow::from_event`) so no raw secret
   is ever stored (parity with the tantivy corpus, which redacted before indexing); a `tokenbf_v1`
-  data-skipping index on `content` accelerates `hasToken`/`multiSearchAny` recall queries. Session-level
-  targeting (title / repo / source / model) lands on a small `agent_sessions` dim table (C28-3b), written
-  from the distiller where that data exists. The file/tantivy recall stays as the Tier-0 / offline
-  fallback (config-selected `[recall] backend`).
+  data-skipping index on `content` accelerates `hasToken` recall queries. **Backend (C28-3c, built):**
+  `agent_telemetry::ClickHouseRecall` is a `SearchBackend` that queries `agent_events` through the
+  shared, tenant-scoped `ChReader` (the C27 `agent_reader` + `SET SQL_tenant_id` from the **verified**
+  identity — the same reader the fleet history uses). A recall search AND-chains `hasToken(content, $i)`
+  over the query's `[A-Za-z0-9]+` tokens (each a bound `$N` arg — an untrusted term can never inject),
+  groups by `session_id`, orders by `max(ts)` desc, and derives each session's title from its first user
+  message (`argMinIf(content, seq, role='user')`) — so **session-level targeting is derived in the query**
+  and the `agent_sessions` dim table is **deferred** (decision, 2026-09-23). The file/tantivy recall
+  stays the Tier-0 / offline default; `[recall] backend = "tantivy" | "clickhouse"` selects (an unknown
+  value fails closed at build; `clickhouse` requires `[telemetry].enabled`). Token match is
+  case-sensitive (the `tokenbf_v1`/`hasToken` pairing) — a conscious trade of the tantivy tokenizer's
+  case-folding for server-side isolation + index-pruned scans on the opt-in tier.
 - **tantivy — the sharpest leak.** Partition indexes **per tenant** by path (mirroring
   memory's "the path is the boundary"): `…/index/<backend>/<tenant>/` and recall corpus
   `…/<tenant>/.recall/index`. A path-partitioned index is a hard boundary; a shared index with
@@ -132,8 +140,9 @@ session_id, ts)`). Then:
   whole registry, byte-identical. Enabled via `MetricsTool::tenant_scoped(cfg.tenancy.per_tenant)`;
   the filter keeps label-less series rather than dropping them (the "naive line filtering is lossy"
   caveat), so seam-health self-inspection is preserved.
-- **`session_recall` tool.** Query only the caller-tenant's corpus partition (falls out of the
-  per-tenant index above).
+- **`session_recall` tool.** With the ClickHouse backend, scoping is the C27 RLS boundary (the
+  reader's `SET SQL_tenant_id` prunes other tenants server-side); with the tantivy backend, the
+  caller-tenant's corpus partition (falls out of the per-tenant index above).
 - **sqlite.** The provider registry and fleet roster are global server/control-plane config (no
   tenant dimension — fine). The one **model-reachable** sqlite gap is the **prompt catalog**
   (`agent-prompt/sqlite.rs`): `prompt.select` / `preview_assembled` are served un-authz'd and feed

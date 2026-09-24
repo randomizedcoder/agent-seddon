@@ -126,8 +126,12 @@ the prior locality is preserved). Scoping the model-reachable read tools is C28:
 tool** is now tenant-scoped (C28-1) — under `[tenancy] per_tenant` it returns only the caller's own
 `(session, user)` series (from the verified `current_identity()`, never a tool arg) plus the shared
 label-less seam-health families, failing closed to those health families when no identity is scoped;
-Tier-0 (`per_tenant` off) is unchanged. `session_recall` / `search` corpus partitioning is the
-remaining C28 work.
+Tier-0 (`per_tenant` off) is unchanged. **`session_recall`** can now read from ClickHouse instead of
+a per-tenant tantivy corpus (C28-3c): `[recall] backend = "clickhouse"` selects `ClickHouseRecall`, a
+`SearchBackend` that queries `agent_events` through the same tenant-scoped reader — so recall inherits
+the C27 RLS boundary (the `SET SQL_tenant_id` prunes other tenants server-side), with content redacted
+at the sink (C28-3a) so no raw secret is ever stored. The `search` code-index per-tenant partition
+(C28-3d) is the remaining C28 work.
 
 ## The agent observing itself
 
