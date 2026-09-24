@@ -129,6 +129,73 @@ pub fn spawn_freshness(dispatch: Arc<DispatchSearch>, metrics: Metrics) {
     });
 }
 
+/// Kick off a one-shot background freshness check for a single freshly-built
+/// backend — the per-tenant code index (multi-tenancy C28-3d), which
+/// [`spawn_freshness`] cannot reach because it only warms the `local` view at
+/// startup (there is no ambient identity then). Reindex if the tenant's index is
+/// stale/missing so its first `search` serves real hits; queries serve the last
+/// committed snapshot meanwhile (serve-stale). Tracing only — the label-less
+/// search-health *gauges* are deliberately not touched here, so many tenants
+/// warming concurrently cannot make one gauge flap across tenants.
+pub(crate) fn spawn_reindex_if_stale(backend: Arc<dyn agent_core::SearchBackend>) {
+    tokio::spawn(async move {
+        match backend.status().await {
+            Ok(st) if st.state == IndexState::Fresh => {
+                tracing::debug!(files = st.indexed_files, "per-tenant code index fresh");
+            }
+            Ok(st) => {
+                tracing::info!(state = ?st.state, "per-tenant code index not fresh — reindexing");
+                if let Err(e) = backend.reindex(&|_p| {}).await {
+                    tracing::warn!(error = %e, "per-tenant code index reindex failed");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "per-tenant code index status check failed"),
+        }
+    });
+}
+
+/// A fail-closed, empty [`SearchBackend`]: it holds no documents and every query
+/// returns nothing. Used as the per-tenant fallback (multi-tenancy C28-3d) when a
+/// tenant's own on-disk index cannot be opened — so that tenant sees an **empty**
+/// index, never another tenant's, mirroring the sqlite prompt arm's isolated
+/// in-memory fallback. Never selected by config; purely a defensive fallback.
+pub(crate) struct EmptySearch;
+
+#[async_trait::async_trait]
+impl agent_core::SearchBackend for EmptySearch {
+    fn capabilities(&self) -> agent_core::SearchCapabilities {
+        agent_core::SearchCapabilities {
+            backend: "empty".into(),
+            modes: vec![],
+            content_search: false,
+            scored: false,
+            incremental: false,
+            max_concurrent_queries: 0,
+        }
+    }
+    async fn status(&self) -> agent_core::Result<agent_core::IndexStatus> {
+        Ok(agent_core::IndexStatus {
+            state: IndexState::Missing,
+            indexed_files: 0,
+            last_indexed_ms: 0,
+            manifest_digest: String::new(),
+        })
+    }
+    async fn reindex(
+        &self,
+        _progress: agent_core::ProgressFn<'_>,
+    ) -> agent_core::Result<agent_core::IndexStatus> {
+        // Nothing to index; report the same empty, missing status.
+        self.status().await
+    }
+    async fn query(
+        &self,
+        _q: &agent_core::SearchQuery,
+    ) -> agent_core::Result<Vec<agent_core::SearchHit>> {
+        Ok(vec![])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,5 +293,33 @@ mod tests {
             "a stale index must trigger a background reindex"
         );
         assert_eq!(fx.reindex_count(), 1);
+    }
+
+    // ---- EmptySearch: the fail-closed per-tenant fallback (C28-3d) ---------
+
+    // A tenant whose own index can't open must see NOTHING — never another tenant's
+    // rows. The empty backend reports a missing index and returns no hits.
+    #[tokio::test]
+    async fn empty_search_returns_no_hits_and_missing_status() {
+        use agent_core::{IndexState, SearchMode, SearchQuery};
+        let backend = EmptySearch;
+        let st = backend.status().await.unwrap();
+        assert_eq!(st.state, IndexState::Missing);
+        assert_eq!(st.indexed_files, 0);
+        let hits = backend
+            .query(&SearchQuery {
+                text: "anything".into(),
+                mode: SearchMode::Literal,
+                path_globs: vec![],
+                lang: None,
+                limit: 10,
+                fuzzy_distance: None,
+            })
+            .await
+            .unwrap();
+        assert!(hits.is_empty(), "the fail-closed fallback returns nothing");
+        // reindex is a no-op that stays empty (never rebuilds from a shared source).
+        let after = backend.reindex(&|_p| {}).await.unwrap();
+        assert_eq!(after.state, IndexState::Missing);
     }
 }

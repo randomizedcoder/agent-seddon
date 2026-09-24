@@ -130,8 +130,12 @@ Tier-0 (`per_tenant` off) is unchanged. **`session_recall`** can now read from C
 a per-tenant tantivy corpus (C28-3c): `[recall] backend = "clickhouse"` selects `ClickHouseRecall`, a
 `SearchBackend` that queries `agent_events` through the same tenant-scoped reader — so recall inherits
 the C27 RLS boundary (the `SET SQL_tenant_id` prunes other tenants server-side), with content redacted
-at the sink (C28-3a) so no raw secret is ever stored. The `search` code-index per-tenant partition
-(C28-3d) is the remaining C28 work.
+at the sink (C28-3a) so no raw secret is ever stored. Finally the `search`/`structural_search`
+**code index** is path-partitioned per tenant (C28-3d): under `[tenancy] per_tenant` the `tantivy`
+backend is wrapped in `PerTenant<dyn SearchBackend>` so each verified tenant reads and writes only its
+own on-disk index (`…/index/tenants/<tenant>/tantivy`; `local` keeps the base path, Tier-0
+byte-identical), warmed lazily in the background and failing closed to an empty index if a tenant's own
+index can't be opened. That completes C28.
 
 ## The agent observing itself
 

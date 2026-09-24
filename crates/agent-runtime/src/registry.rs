@@ -1122,13 +1122,7 @@ pub fn register_builtins(r: &mut Registry) {
     r.search("vector", crate::search::build_vector);
     #[cfg(feature = "search")]
     {
-        r.search("tantivy", |ctx| {
-            let (root, index_dir) = search_paths(ctx.cfg, "tantivy")?;
-            Ok(
-                Arc::new(agent_search::TantivyBackend::open(root, index_dir)?)
-                    as Arc<dyn agent_core::SearchBackend>,
-            )
-        });
+        r.search("tantivy", |ctx| build_tantivy_search(ctx.cfg));
         #[cfg(feature = "grpc")]
         r.search("grpc", |ctx| {
             let ep =
@@ -1207,6 +1201,54 @@ fn search_paths(
         std::path::PathBuf::from(&cfg.search.index_dir).join(backend)
     };
     Ok((root, index_dir))
+}
+
+/// Build the tantivy code-index backend, optionally partitioned per tenant
+/// (multi-tenancy C28-3d). Resolves the repo root + base index dir from config, then
+/// hands off to [`tantivy_search_from`].
+#[cfg(feature = "search")]
+fn build_tantivy_search(cfg: &Config) -> anyhow::Result<Arc<dyn agent_core::SearchBackend>> {
+    let (root, index_dir) = search_paths(cfg, "tantivy")?;
+    tantivy_search_from(root, index_dir, cfg.tenancy.per_tenant)
+}
+
+/// Compose the tantivy code index, path-partitioning it per verified tenant when
+/// `per_tenant` is on (multi-tenancy C28-3d). At Tier-0 (`per_tenant = false`) this
+/// is a single [`TantivyBackend`] over the base index dir — byte-identical to the
+/// pre-C28 wiring. With `per_tenant` on, each verified tenant gets its **own**
+/// on-disk index at [`tenant_path`](crate::tenant::tenant_path) (the `local` tenant
+/// keeps the base path unchanged), built lazily on first use and warmed in the
+/// background so a tenant's first `search` serves real hits. A tenant whose own
+/// index cannot be opened fails **closed** to an empty index
+/// ([`EmptySearch`](crate::search::EmptySearch)) — never another tenant's.
+#[cfg(feature = "search")]
+fn tantivy_search_from(
+    root: std::path::PathBuf,
+    index_dir: std::path::PathBuf,
+    per_tenant: bool,
+) -> anyhow::Result<Arc<dyn agent_core::SearchBackend>> {
+    if !per_tenant {
+        return Ok(
+            Arc::new(agent_search::TantivyBackend::open(root, index_dir)?)
+                as Arc<dyn agent_core::SearchBackend>,
+        );
+    }
+    Ok(Arc::new(crate::tenant::PerTenant::new(move |tenant: &str| {
+        let dir = crate::tenant::tenant_path(&index_dir, tenant);
+        let backend: Arc<dyn agent_core::SearchBackend> = match agent_search::TantivyBackend::open(
+            root.clone(),
+            dir,
+        ) {
+            Ok(b) => Arc::new(b),
+            Err(e) => {
+                // Fail closed: this tenant sees nothing, never another tenant's index.
+                tracing::warn!(error = %e, "per-tenant code index open failed — failing closed to empty");
+                Arc::new(crate::search::EmptySearch)
+            }
+        };
+        crate::search::spawn_reindex_if_stale(backend.clone());
+        backend
+    })) as Arc<dyn agent_core::SearchBackend>)
 }
 
 /// Resolve a `[grpc]` client endpoint: the configured string, or a loopback TCP
@@ -1504,6 +1546,72 @@ mod tests {
         assert!(
             r.searches.contains_key("vector"),
             "vector must be a plain registry factory"
+        );
+    }
+
+    // --- tantivy_search_from: per-tenant code-index partition (C28-3d) ------
+
+    #[cfg(feature = "search")]
+    fn probe_query() -> agent_core::SearchQuery {
+        agent_core::SearchQuery {
+            text: "x".into(),
+            mode: agent_core::SearchMode::Literal,
+            path_globs: vec![],
+            lang: None,
+            limit: 1,
+            fuzzy_distance: None,
+        }
+    }
+
+    // Tier-0 (per_tenant = false): a single index at the base path, no `tenants/`
+    // namespace — byte-identical to the pre-C28 wiring.
+    #[cfg(feature = "search")]
+    #[tokio::test]
+    async fn per_tenant_off_uses_single_base_index() {
+        let root = agent_testkit::tempdir();
+        let base = root.join("idx").join("tantivy");
+        let backend = tantivy_search_from(root.clone(), base.clone(), false).unwrap();
+        backend.query(&probe_query()).await.unwrap();
+        assert!(base.exists(), "the base index dir is created");
+        assert!(
+            !root.join("idx/tenants").exists(),
+            "Tier-0 must not create a tenants/ namespace"
+        );
+    }
+
+    // per_tenant = true: each verified tenant's query lands in its own on-disk index
+    // (`tenants/<t>/tantivy`), while the default `local` keeps the base path — the
+    // structural, path-based boundary.
+    #[cfg(feature = "search")]
+    #[tokio::test]
+    async fn per_tenant_on_partitions_index_by_tenant() {
+        use agent_core::{scope, SessionKey};
+        let root = agent_testkit::tempdir();
+        let base = root.join("idx").join("tantivy");
+        let backend = tantivy_search_from(root.clone(), base.clone(), true).unwrap();
+        scope(SessionKey::parse("acme", "s1").unwrap(), async {
+            backend.query(&probe_query()).await.unwrap();
+        })
+        .await;
+        scope(SessionKey::parse("globex", "s1").unwrap(), async {
+            backend.query(&probe_query()).await.unwrap();
+        })
+        .await;
+        scope(SessionKey::local("s1"), async {
+            backend.query(&probe_query()).await.unwrap();
+        })
+        .await;
+        assert!(
+            root.join("idx/tenants/acme/tantivy").exists(),
+            "acme's index is path-isolated"
+        );
+        assert!(
+            root.join("idx/tenants/globex/tantivy").exists(),
+            "globex's index is a distinct path"
+        );
+        assert!(
+            base.exists(),
+            "local keeps the base index path (Tier-0 parity)"
         );
     }
 
