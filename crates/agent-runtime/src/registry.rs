@@ -840,6 +840,10 @@ pub fn register_builtins(r: &mut Registry) {
             let obs = ctx.metrics.clone();
             let router = agent_providers::RegistryRouter::new(store, synth)
                 .with_refresh_ms(ctx.cfg.registry.refresh_secs.saturating_mul(1_000))
+                // Per-tenant fleet cells when `[tenancy] per_tenant` is on (C31-2):
+                // each verified tenant routes through its own snapshot built from its
+                // own cards/keys; off = one global fleet (Tier-0 byte-identical).
+                .with_per_tenant(ctx.cfg.tenancy.per_tenant)
                 .with_breaker(
                     cfg.failure_threshold,
                     cfg.cooldown_secs.saturating_mul(1_000),

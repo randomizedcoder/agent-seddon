@@ -116,11 +116,22 @@ one `Arc<dyn Trait>` per seam; only memory/dimensions are per-tenant (via `PerUs
 - **Security.** Routes by verified ambient identity; `safe_segment` partitions; per-tenant
   secret resolution; router snapshot/cache keyed by tenant.
 
-### C31 — tenant-scoped control plane
-- **Purpose.** The config gRPC services isolate by caller.
+### C31 — tenant-scoped control plane ✅
+- **Purpose.** The config gRPC services isolate by caller, and the registry-backed router serves
+  each tenant its own fleet built from its own cards/keys.
 - **Interface.** `ProviderRegistryService`/`GraphService`/`PromptService`/`ReviewFleetService`
-  scope `Put/Get/Delete/List` to the caller's partition (some already `run_scoped` but stores
-  ignore it); `ConfigService` operator-only for operator keys.
+  scope `Put/Get/Delete/List` to the caller's partition; `ConfigService` operator-only for
+  operator keys.
+- **Built.** *C31-1* (#464) wraps every RPC of the three still-unscoped services
+  (provider-registry, prompt, review-fleet) in `run_scoped(identity_key(...))`, mirroring the
+  already-scoped Graph/Config services, so a `PerTenant`-wrapped store (C30) routes to the caller's
+  verified tenant instead of collapsing to `local`. *C31-2* keys `RegistryRouter` by verified tenant:
+  `agent_core::current_tenant()` (the fail-closed tenant-resolution rule, promoted to `agent-core` as
+  the single source shared with `PerTenant`) selects a per-tenant `RouterCell` — its own snapshot,
+  provider/connection cache, and breaker state — from a bounded, oldest-first-evicting cache, gated by
+  `with_per_tenant([tenancy] per_tenant)`. Each cell is built from its tenant's own cards under its own
+  identity scope, so the synth only ever resolves that tenant's `api_key_ref` (secret isolation is
+  structural). Tier 0 (`per_tenant = false`) keeps exactly one `local` cell — byte-identical.
 
 ## Component → plane map
 

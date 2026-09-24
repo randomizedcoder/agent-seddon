@@ -28,16 +28,62 @@ use agent_core::{
 };
 use async_trait::async_trait;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::RwLock;
+
+/// Upper bound on distinct per-tenant router cells cached at once. The tenant string
+/// is attacker-influenced under `[auth] mode = "none"` (the client-set
+/// `x-agent-user-id` is trusted-as-sent), so an unbounded flood of distinct tenants
+/// would otherwise grow the cell cache — and its per-cell provider connections —
+/// without limit. Oldest-first eviction is safe: an evicted tenant simply rebuilds
+/// its snapshot on next use. Mirrors `agent_runtime::tenant::MAX_CACHED_TENANTS` (the
+/// same bound the `PerTenant<Store>` view cache uses).
+const MAX_CACHED_TENANTS: usize = 1024;
 
 /// Builds the concrete provider for one upstream card. Injected by the runtime
 /// (it owns key resolution, metering, and the provider constructors); returns
 /// `Err` for a card it cannot build — the router skips that card.
 pub type UpstreamSynth = Arc<dyn Fn(&Upstream) -> Result<Arc<dyn LlmProvider>> + Send + Sync>;
+
+/// The per-tenant mutable state of one fleet: the last good inner router plus the
+/// connection cache and refresh bookkeeping that build it. One cell per verified
+/// tenant (multi-tenancy C31-2) — so tenant A's snapshot, providers, and breaker
+/// state never mix with tenant B's, and A's `api_key_ref` is only ever resolved to
+/// build A's own providers. At Tier-0 (`per_tenant = false`) there is exactly one
+/// cell (`local`), byte-identical to the pre-C31-2 single global fleet.
+struct RouterCell {
+    /// The last good inner router; `None` until the first successful snapshot
+    /// with at least one buildable card.
+    current: RwLock<Option<Arc<TaskRouter>>>,
+    /// Provider instances keyed by the card's *connection identity*, reused
+    /// across rebuilds so an unchanged upstream keeps its client.
+    providers: Mutex<HashMap<u64, Arc<dyn LlmProvider>>>,
+    last_refresh_ms: AtomicU64,
+    fingerprint: AtomicU64,
+}
+
+impl RouterCell {
+    fn new() -> Self {
+        Self {
+            current: RwLock::new(None),
+            providers: Mutex::new(HashMap::new()),
+            last_refresh_ms: AtomicU64::new(0),
+            fingerprint: AtomicU64::new(0),
+        }
+    }
+}
+
+/// The bounded per-tenant cell cache: the cells plus a FIFO of tenant keys for
+/// oldest-first eviction once [`MAX_CACHED_TENANTS`] is reached (the tenant string
+/// is attacker-influenced under `mode = "none"`).
+#[derive(Default)]
+struct CellCache {
+    cells: HashMap<String, Arc<RouterCell>>,
+    order: VecDeque<String>,
+}
 
 pub struct RegistryRouter {
     registry: Arc<dyn ProviderRegistry>,
@@ -47,14 +93,13 @@ pub struct RegistryRouter {
     breaker_cooldown_ms: u64,
     observer: Option<RouteObserver>,
     now_ms: Arc<dyn Fn() -> u64 + Send + Sync>,
-    /// The last good inner router; `None` until the first successful snapshot
-    /// with at least one buildable card.
-    current: RwLock<Option<Arc<TaskRouter>>>,
-    /// Provider instances keyed by the card's *connection identity*, reused
-    /// across rebuilds so an unchanged upstream keeps its client.
-    providers: Mutex<HashMap<u64, Arc<dyn LlmProvider>>>,
-    last_refresh_ms: AtomicU64,
-    fingerprint: AtomicU64,
+    /// When set, each verified tenant gets its **own** fleet cell (snapshot +
+    /// provider cache), keyed by [`agent_core::current_tenant`]; when clear (Tier-0,
+    /// the default) every caller shares the single `local` cell.
+    per_tenant: bool,
+    /// The per-tenant fleet cells, built lazily and cached (bounded); one entry
+    /// (`local`) when `per_tenant` is off.
+    cells: Mutex<CellCache>,
 }
 
 impl RegistryRouter {
@@ -67,10 +112,8 @@ impl RegistryRouter {
             breaker_cooldown_ms: 30_000,
             observer: None,
             now_ms: Arc::new(crate::router::wall_clock_ms),
-            current: RwLock::new(None),
-            providers: Mutex::new(HashMap::new()),
-            last_refresh_ms: AtomicU64::new(0),
-            fingerprint: AtomicU64::new(0),
+            per_tenant: false,
+            cells: Mutex::new(CellCache::default()),
         }
     }
 
@@ -91,6 +134,58 @@ impl RegistryRouter {
     pub fn with_clock(mut self, now_ms: Arc<dyn Fn() -> u64 + Send + Sync>) -> Self {
         self.now_ms = now_ms;
         self
+    }
+
+    /// Route each caller to its **own** fleet cell keyed by verified tenant
+    /// (multi-tenancy C31-2). Off (the default) keeps a single global fleet — Tier-0
+    /// byte-identical. Threaded from `[tenancy] per_tenant`.
+    pub fn with_per_tenant(mut self, per_tenant: bool) -> Self {
+        self.per_tenant = per_tenant;
+        self
+    }
+
+    /// The fleet cell for the current turn's tenant, built lazily and cached. The
+    /// key is [`agent_core::current_tenant`] when `per_tenant` is on (fail-closed to
+    /// `local` for an absent/hostile identity — never another tenant's cell), else
+    /// the single `local` cell. The cache is bounded and evicts oldest-first, so a
+    /// flood of distinct (attacker-influenced) tenants cannot grow it without limit;
+    /// an evicted tenant simply rebuilds its snapshot on next use.
+    fn cell_for_current(&self) -> Arc<RouterCell> {
+        let key = if self.per_tenant {
+            agent_core::current_tenant()
+        } else {
+            agent_core::UserId::LOCAL.to_string()
+        };
+        {
+            let cache = self.cells.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(cell) = cache.cells.get(&key) {
+                return cell.clone();
+            }
+        }
+        // Build the empty cell outside the lookup lock, then insert-or-share under it.
+        let cell = Arc::new(RouterCell::new());
+        let mut cache = self.cells.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(existing) = cache.cells.get(&key) {
+            return existing.clone();
+        }
+        if cache.cells.len() >= MAX_CACHED_TENANTS {
+            if let Some(old) = cache.order.pop_front() {
+                cache.cells.remove(&old);
+            }
+        }
+        cache.cells.insert(key.clone(), cell.clone());
+        cache.order.push_back(key);
+        cell
+    }
+
+    /// Number of cached per-tenant cells (test-only; asserts the bound holds).
+    #[cfg(test)]
+    fn cells_len(&self) -> usize {
+        self.cells
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .cells
+            .len()
     }
 
     /// The connection identity of a card — the fields whose change requires a
@@ -122,22 +217,24 @@ impl RegistryRouter {
         h.finish().max(1)
     }
 
-    /// Refresh the snapshot if the interval has elapsed. Fail-soft: any
-    /// registry error keeps the last good router (and still advances the
-    /// refresh clock, so a dead registry is retried at the interval, not
-    /// hammered per call).
-    async fn maybe_refresh(&self) {
+    /// Refresh the given cell's snapshot if the interval has elapsed. Fail-soft:
+    /// any registry error keeps that cell's last good router (and still advances its
+    /// refresh clock, so a dead registry is retried at the interval, not hammered
+    /// per call). Called under the caller's `AGENT_IDENTITY` scope, so
+    /// `registry.list()` over a `PerTenant` store returns *this* tenant's cards into
+    /// *this* tenant's cell.
+    async fn maybe_refresh(&self, cell: &RouterCell) {
         let now = (self.now_ms)();
-        let last = self.last_refresh_ms.load(Ordering::Acquire);
+        let last = cell.last_refresh_ms.load(Ordering::Acquire);
         let due = last == 0 || now.saturating_sub(last) >= self.refresh_ms;
         if !due {
             return;
         }
-        // One refresher at a time; the losers just use the current snapshot.
-        let Ok(mut current) = self.current.try_write() else {
+        // One refresher at a time (per cell); the losers just use the current snapshot.
+        let Ok(mut current) = cell.current.try_write() else {
             return;
         };
-        self.last_refresh_ms.store(now.max(1), Ordering::Release);
+        cell.last_refresh_ms.store(now.max(1), Ordering::Release);
         let (cards, policy) = match (self.registry.list().await, self.registry.get_policy().await) {
             (Ok(c), Ok(p)) => (c, p),
             (Err(e), _) | (_, Err(e)) => {
@@ -149,13 +246,13 @@ impl RegistryRouter {
             }
         };
         let fp = Self::config_fingerprint(&cards, &policy);
-        if fp == self.fingerprint.load(Ordering::Acquire) {
+        if fp == cell.fingerprint.load(Ordering::Acquire) {
             return;
         }
-        match self.build_router(&cards, &policy, fp) {
+        match self.build_router(cell, &cards, &policy, fp) {
             Some(router) => {
                 *current = Some(Arc::new(router));
-                self.fingerprint.store(fp, Ordering::Release);
+                cell.fingerprint.store(fp, Ordering::Release);
                 tracing::info!(
                     snapshot_version = fp,
                     upstreams = cards.iter().filter(|c| c.enabled).count(),
@@ -168,7 +265,7 @@ impl RegistryRouter {
                 // registry means "route nothing" (fail closed per call);
                 // remember the fingerprint so we don't rebuild-log every tick.
                 *current = None;
-                self.fingerprint.store(fp, Ordering::Release);
+                cell.fingerprint.store(fp, Ordering::Release);
                 tracing::warn!("registry snapshot has no buildable enabled upstream");
             }
         }
@@ -179,15 +276,16 @@ impl RegistryRouter {
     /// attributable to this exact snapshot (the `route.select` trail).
     fn build_router(
         &self,
+        cell: &RouterCell,
         cards: &[Upstream],
         policy: &RoutePolicySpec,
         fingerprint: u64,
     ) -> Option<TaskRouter> {
         let mut upstreams = Vec::new();
-        let mut cache = self
+        let mut cache = cell
             .providers
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .unwrap_or_else(PoisonError::into_inner);
         for card in cards.iter().filter(|c| c.enabled) {
             // Defense in depth: the store validated on ingest, but a remote
             // registry is untrusted — re-validate before building anything.
@@ -249,8 +347,10 @@ impl RegistryRouter {
     }
 
     async fn snapshot(&self) -> Result<Arc<TaskRouter>> {
-        self.maybe_refresh().await;
-        self.current.read().await.clone().ok_or_else(|| {
+        let cell = self.cell_for_current();
+        self.maybe_refresh(&cell).await;
+        let snap = cell.current.read().await.clone();
+        snap.ok_or_else(|| {
             Error::Provider("registry-backed router has no routable upstream".into())
         })
     }
@@ -273,12 +373,14 @@ fn truncate(s: &str) -> String {
 impl LlmProvider for RegistryRouter {
     /// The current snapshot's union view; an empty registry advertises nothing.
     fn capabilities(&self) -> ModelCapabilities {
-        // Sync accessor over an async lock: try-read the live snapshot; a
-        // contended lock (mid-refresh) falls back to a conservative default.
-        match self.current.try_read() {
-            Ok(guard) => guard.as_ref().map(|r| r.capabilities()).unwrap_or_default(),
-            Err(_) => ModelCapabilities::default(),
-        }
+        // Sync accessor over an async lock: try-read the current tenant's live
+        // snapshot; a contended lock (mid-refresh) falls back to a conservative
+        // default.
+        let cell = self.cell_for_current();
+        let Ok(guard) = cell.current.try_read() else {
+            return ModelCapabilities::default();
+        };
+        guard.as_ref().map(|r| r.capabilities()).unwrap_or_default()
     }
 
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse> {
@@ -592,5 +694,318 @@ mod tests {
         assert_eq!(second.message.content_text(), "from-b");
         // Role hints keep working through the rebuilt inner router.
         let _ = RouteRole::Judge;
+    }
+
+    // ---- multi-tenancy C31-2: per-tenant fleet cells + secret isolation ------
+    //
+    // With `with_per_tenant(true)` each verified tenant routes through its OWN cell:
+    // its own snapshot built from its own cards, its own provider/connection cache,
+    // and therefore only ever its own `api_key_ref` resolved by the synth. Off (the
+    // default) collapses to one shared `local` cell — Tier-0 byte-identical.
+    mod per_tenant {
+        use super::*;
+        use agent_core::{scope, SessionId, SessionKey, UserId};
+
+        /// A `ProviderRegistry` whose `list()` returns a **per-tenant** card set,
+        /// keyed by the ambient `current_tenant()` — so a per-tenant router builds
+        /// each tenant its own fleet. Pair with [`recording_synth`] to observe which
+        /// cards (and key refs) each tenant's build resolved.
+        struct TenantReg {
+            by_tenant: HashMap<String, Vec<Upstream>>,
+            policy: Mutex<RoutePolicySpec>,
+            fail: std::sync::atomic::AtomicBool,
+        }
+        impl TenantReg {
+            fn new(by_tenant: HashMap<String, Vec<Upstream>>) -> Self {
+                Self {
+                    by_tenant,
+                    policy: Mutex::new(RoutePolicySpec::default()),
+                    fail: std::sync::atomic::AtomicBool::new(false),
+                }
+            }
+        }
+        #[async_trait]
+        impl ProviderRegistry for TenantReg {
+            async fn list(&self) -> Result<Vec<Upstream>> {
+                if self.fail.load(Ordering::SeqCst) {
+                    return Err(Error::Registry("registry down".into()));
+                }
+                let t = agent_core::current_tenant();
+                Ok(self.by_tenant.get(&t).cloned().unwrap_or_default())
+            }
+            async fn get(&self, _id: &str) -> Result<Upstream> {
+                unimplemented!("not used by the router")
+            }
+            async fn put(&self, card: Upstream) -> Result<Upstream> {
+                Ok(card)
+            }
+            async fn delete(&self, _id: &str) -> Result<bool> {
+                Ok(false)
+            }
+            async fn enable(&self, _id: &str, _enabled: bool) -> Result<Upstream> {
+                unimplemented!("not used by the router")
+            }
+            async fn get_policy(&self) -> Result<RoutePolicySpec> {
+                if self.fail.load(Ordering::SeqCst) {
+                    return Err(Error::Registry("registry down".into()));
+                }
+                Ok(self.policy.lock().unwrap().clone())
+            }
+            async fn put_policy(&self, p: RoutePolicySpec) -> Result<RoutePolicySpec> {
+                *self.policy.lock().unwrap() = p.clone();
+                Ok(p)
+            }
+            async fn route(&self, _h: &agent_core::RouteHint) -> Result<agent_core::RouteDecision> {
+                unimplemented!("not used by the router")
+            }
+            async fn health(&self) -> Result<Vec<agent_core::UpstreamHealth>> {
+                Ok(vec![])
+            }
+        }
+
+        /// A card carrying an explicit `api_key_ref`, so a test can assert which
+        /// secret reference the synth was (or was never) asked to resolve.
+        fn card_key(id: &str, api_key_ref: &str) -> Upstream {
+            Upstream {
+                api_key_ref: api_key_ref.into(),
+                ..card(id)
+            }
+        }
+
+        /// A synth that records every `(card.id, card.api_key_ref)` it is asked to
+        /// build and answers with `from-<id>`, so the winning upstream — and the set
+        /// of key refs ever resolved — is observable.
+        #[allow(clippy::type_complexity)]
+        fn recording_synth() -> (UpstreamSynth, Arc<Mutex<Vec<(String, String)>>>) {
+            let seen: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+            let s = seen.clone();
+            let synth: UpstreamSynth = Arc::new(move |card: &Upstream| {
+                s.lock()
+                    .unwrap()
+                    .push((card.id.clone(), card.api_key_ref.clone()));
+                let answer = format!("from-{}", card.id);
+                Ok(Arc::new(ScriptedProvider::new(vec![
+                    final_turn(&answer),
+                    final_turn(&answer),
+                    final_turn(&answer),
+                    final_turn(&answer),
+                ])) as Arc<dyn LlmProvider>)
+            });
+            (synth, seen)
+        }
+
+        fn tenants(pairs: Vec<(&str, Vec<Upstream>)>) -> Arc<TenantReg> {
+            Arc::new(TenantReg::new(
+                pairs.into_iter().map(|(t, c)| (t.to_string(), c)).collect(),
+            ))
+        }
+
+        async fn complete_as(router: &RegistryRouter, user: &str) -> String {
+            let key = SessionKey::parse(user, "s1").unwrap();
+            scope(key, async {
+                router
+                    .complete(CompletionRequest::default())
+                    .await
+                    .unwrap()
+                    .message
+                    .content_text()
+            })
+            .await
+        }
+
+        async fn snapshot_as(router: &RegistryRouter, user: &str) -> Arc<TaskRouter> {
+            let key = SessionKey::parse(user, "s1").unwrap();
+            scope(key, async { router.snapshot().await.unwrap() }).await
+        }
+
+        // positive: two verified tenants get DIFFERENT fleets built from their own
+        // cards — A routes to A's upstream, B to B's, and the two inner routers are
+        // distinct instances (no shared global fleet).
+        #[tokio::test]
+        async fn positive_snapshot_is_per_tenant() {
+            let reg = tenants(vec![
+                ("acme", vec![card("acme-up")]),
+                ("globex", vec![card("globex-up")]),
+            ]);
+            let (synth, _) = recording_synth();
+            let (_, now) = clock();
+            let router = RegistryRouter::new(reg, synth)
+                .with_refresh_ms(0)
+                .with_per_tenant(true)
+                .with_clock(now);
+            assert_eq!(complete_as(&router, "acme").await, "from-acme-up");
+            assert_eq!(complete_as(&router, "globex").await, "from-globex-up");
+            let a = snapshot_as(&router, "acme").await;
+            let b = snapshot_as(&router, "globex").await;
+            assert!(
+                !Arc::ptr_eq(&a, &b),
+                "each tenant must get its own inner router"
+            );
+            assert_eq!(router.cells_len(), 2, "one cell per tenant");
+        }
+
+        // positive: the provider/connection cache never crosses tenants — two tenants
+        // whose cards are BYTE-IDENTICAL (same connection identity) still each trigger
+        // their own synth build; a single global cache would have reused the first.
+        #[tokio::test]
+        async fn positive_provider_cache_isolated_per_tenant() {
+            let shared = card_key("shared", "env:KEY");
+            let reg = tenants(vec![
+                ("acme", vec![shared.clone()]),
+                ("globex", vec![shared]),
+            ]);
+            let (synth, seen) = recording_synth();
+            let (_, now) = clock();
+            let router = RegistryRouter::new(reg, synth)
+                .with_refresh_ms(0)
+                .with_per_tenant(true)
+                .with_clock(now);
+            complete_as(&router, "acme").await;
+            complete_as(&router, "globex").await;
+            let builds = seen.lock().unwrap().clone();
+            assert_eq!(
+                builds.len(),
+                2,
+                "identical cards must build once PER tenant cell, never share: {builds:?}"
+            );
+        }
+
+        // adversarial: tenant B's request never triggers resolution of tenant A's
+        // `api_key_ref`. Only B is ever scoped; the synth must only ever see B's key
+        // ref — A's secret reference is structurally unreachable from B's cell.
+        #[tokio::test]
+        async fn adversarial_tenant_a_api_key_never_resolved_for_b() {
+            let reg = tenants(vec![
+                ("acme", vec![card_key("acme-up", "env:ACME_SECRET")]),
+                ("globex", vec![card_key("globex-up", "env:GLOBEX_SECRET")]),
+            ]);
+            let (synth, seen) = recording_synth();
+            let (_, now) = clock();
+            let router = RegistryRouter::new(reg, synth)
+                .with_refresh_ms(0)
+                .with_per_tenant(true)
+                .with_clock(now);
+            // Only globex ever makes a request; acme is never scoped.
+            complete_as(&router, "globex").await;
+            let refs: Vec<String> = seen
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, k)| k.clone())
+                .collect();
+            assert!(
+                refs.iter().all(|k| k == "env:GLOBEX_SECRET"),
+                "only globex's key ref may be resolved, saw: {refs:?}"
+            );
+            assert!(
+                !refs.iter().any(|k| k == "env:ACME_SECRET"),
+                "acme's secret must never be resolved for globex"
+            );
+        }
+
+        // boundary: the per-tenant cell cache is bounded (flood safety) — minting more
+        // than the cap distinct (attacker-influenced) tenants evicts oldest-first and
+        // never grows past the cap; an evicted tenant simply rebuilds on next use.
+        #[tokio::test]
+        async fn boundary_cell_cache_evicts_oldest_past_cap() {
+            let reg = tenants(vec![]);
+            let (synth, _) = recording_synth();
+            let router = RegistryRouter::new(reg, synth)
+                .with_refresh_ms(0)
+                .with_per_tenant(true);
+            // Mint cap + 8 distinct tenants (capabilities() creates each tenant's cell).
+            for i in 0..(MAX_CACHED_TENANTS + 8) {
+                let key = SessionKey::parse(&format!("t{i}"), "s1").unwrap();
+                scope(key, async { router.capabilities() }).await;
+            }
+            assert!(
+                router.cells_len() <= MAX_CACHED_TENANTS,
+                "cell cache must stay within the cap, got {}",
+                router.cells_len()
+            );
+            // The oldest (t0) was evicted; re-using it rebuilds its cell without
+            // breaching the cap.
+            let key = SessionKey::parse("t0", "s1").unwrap();
+            scope(key, async { router.capabilities() }).await;
+            assert!(router.cells_len() <= MAX_CACHED_TENANTS);
+        }
+
+        // negative (Tier-0): with per_tenant OFF every caller shares the single global
+        // fleet regardless of scope — the two snapshots are the SAME instance,
+        // byte-identical to the pre-C31-2 behavior.
+        #[tokio::test]
+        async fn negative_per_tenant_off_is_single_global_view() {
+            // A realistic Tier-0 store is NOT `PerTenant`-wrapped: it returns the same
+            // global cards regardless of caller — so the one shared cell never rebuilds
+            // across callers.
+            let reg = registry_with(vec![card("only-up")]);
+            let (synth, _) = recording_synth();
+            let (_, now) = clock();
+            let router = RegistryRouter::new(reg, synth)
+                .with_refresh_ms(0)
+                .with_per_tenant(false)
+                .with_clock(now);
+            let a = snapshot_as(&router, "acme").await;
+            let b = snapshot_as(&router, "globex").await;
+            assert!(
+                Arc::ptr_eq(&a, &b),
+                "per_tenant off must serve one shared fleet to every caller"
+            );
+            assert_eq!(router.cells_len(), 1, "exactly one (local) cell when off");
+        }
+
+        // adversarial: a hostile scoped tenant segment (only a raw `mode=none` header
+        // could set it) collapses to the `local` cell — never a cell of its own, never
+        // another tenant's. Proven by pointer-identity with an explicit local scope.
+        #[tokio::test]
+        async fn adversarial_unsafe_tenant_scopes_to_local() {
+            let reg = tenants(vec![("local", vec![card("local-up")])]);
+            let (synth, _) = recording_synth();
+            let (_, now) = clock();
+            let router = RegistryRouter::new(reg, synth)
+                .with_refresh_ms(0)
+                .with_per_tenant(true)
+                .with_clock(now);
+            // A hostile user segment that bypasses `parse` (as a trusted-as-sent
+            // header would); `current_tenant()` must fail it closed to `local`.
+            let hostile = SessionKey {
+                user: UserId::new("../../heads/main"),
+                session: SessionId::new("s1"),
+            };
+            let via_hostile = scope(hostile, async { router.snapshot().await.unwrap() }).await;
+            let via_local = snapshot_as(&router, "local").await;
+            assert!(
+                Arc::ptr_eq(&via_hostile, &via_local),
+                "a hostile tenant must route through the local cell, not its own"
+            );
+            assert_eq!(
+                router.cells_len(),
+                1,
+                "no cell was minted for the hostile id"
+            );
+        }
+
+        // corner: fail-soft is PER cell — a mid-refresh registry error keeps that
+        // tenant's last-good fleet serving (degrade, don't stall), just like the
+        // single-fleet case but isolated to the tenant.
+        #[tokio::test]
+        async fn corner_registry_error_keeps_last_good_per_tenant() {
+            let reg = tenants(vec![("acme", vec![card("acme-up")])]);
+            let (synth, _) = recording_synth();
+            let (t, now) = clock();
+            let router = RegistryRouter::new(reg.clone(), synth)
+                .with_refresh_ms(0)
+                .with_per_tenant(true)
+                .with_clock(now);
+            assert_eq!(complete_as(&router, "acme").await, "from-acme-up");
+            // The registry goes down; acme's last good snapshot serves on.
+            reg.fail.store(true, Ordering::SeqCst);
+            t.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(
+                complete_as(&router, "acme").await,
+                "from-acme-up",
+                "acme keeps its last good fleet through a registry error"
+            );
+        }
     }
 }

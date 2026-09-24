@@ -134,8 +134,11 @@ data.
 - **C30 — `PerTenant<Store>` wrapper**: generalize `PerUserMemory`'s internal-routing pattern;
   apply to provider registry, graph, prompts (read-through defaults), scheduler; builder wraps
   when a per-tenant tier is on.
-- **C31 — tenant-scoped control plane**: services honor the caller identity end-to-end;
-  per-tenant router snapshot/cache; per-tenant secret resolution.
+- **C31 — tenant-scoped control plane** ✅: services honor the caller identity end-to-end
+  (C31-1 #464 — the three still-unscoped services wrap every RPC in `run_scoped(identity_key(...))`);
+  per-tenant router snapshot/cache and per-tenant secret resolution (C31-2 — `RegistryRouter` keyed by
+  `agent_core::current_tenant()` into bounded per-tenant `RouterCell`s, each built from its own cards so
+  the synth only resolves its own `api_key_ref`).
 
 ## Build (deferred; ordered)
 
@@ -153,13 +156,16 @@ resolution, reusing the doc-09 tier. Builder wraps seams in `PerTenant` only whe
 ### Test matrix (adversarial mandatory)
 - `positive_per_tenant_registry_isolates_upstreams` — tenant A's `list()` never shows B's.
 - `adversarial_tenant_cannot_put_into_another_tenants_registry/graph/prompts`.
-- `adversarial_tenant_a_api_key_never_resolved_for_tenant_b`.
-- `positive_router_snapshot_is_per_tenant` — A's routing can't select B's upstream.
+- `adversarial_tenant_a_api_key_never_resolved_for_tenant_b`. ✅ C31-2
+  (`registry_router::tests::per_tenant::adversarial_tenant_a_api_key_never_resolved_for_b`).
+- `positive_router_snapshot_is_per_tenant` — A's routing can't select B's upstream. ✅ C31-2
+  (`registry_router::tests::per_tenant::positive_snapshot_is_per_tenant` + `..._provider_cache_isolated_per_tenant`).
 - `positive_prompt_read_through_falls_back_to_operator_default`.
 - `positive_tenant_override_shadows_default_without_copying_the_rest`.
 - `adversarial_tenant_cannot_write_operator_config_key` (ConfigService).
 - `positive_scheduler_jobs_are_per_tenant_and_persist`.
-- `boundary_tier0_single_operator_behaves_exactly_as_today` (no wrap when off).
+- `boundary_tier0_single_operator_behaves_exactly_as_today` (no wrap when off). ✅ C31-2
+  (`registry_router::tests::per_tenant::negative_per_tenant_off_is_single_global_view`).
 - `adversarial_identity_from_transport_not_model` — a model-supplied tenant string can't
   redirect routing.
 

@@ -12,7 +12,7 @@ Legend: ⬜ not started · 🟡 in progress · ✅ merged.
 |---|---|---|---|---|
 | 01 | Process isolation & multi-org boundaries | C23, C24, C25 | ✅ C23 (bwrap, 5 pillars) + C24; 🟡 C25 foundation | #454/#455 (C23), #273/#274/#275 (C24), #276 (C25) |
 | 02 | Data scoping & row-level security | C26, C27, C28 | ✅ C26 (identity at source) + C27 (RLS + `user`-leading sort key); ✅ **C28 complete** — metrics tool (C28-1) + sqlite prompt (C28-2) + recall schema/redaction (C28-3a) + ClickHouse recall backend (C28-3c) + code-index per-tenant partition (C28-3d) | #315–#322 (C26), #456 (C27-1), C27-2 (sort key), #458 (C28-2), #459 (C28-1), #460 (C28-3a), #461 (C28-3c), C28-3d (code-index partition) |
-| 03 | Config & seam-state tenancy | C29, C30, C31 | ✅ **C29** (config ownership model + operator-config write guard) + **C30** (shared-store seams, config C2; file-backed graph, config C2b); 🟡 **C31-1** (control-plane scope-by-caller: provider-registry / prompt / review-fleet services); C31-2 router keying ⬜, scheduler designed | #297/#308 (C29 enforcement, via config C40), C29 (mode=none guard + ownership annotation), #302 (config C2), C2b (graph), C31-1 (service scoping) |
+| 03 | Config & seam-state tenancy | C29, C30, C31 | ✅ **plane complete** — **C29** (config ownership model + operator-config write guard) + **C30** (shared-store seams, config C2; file-backed graph, config C2b) + **C31** (C31-1 control-plane scope-by-caller: provider-registry / prompt / review-fleet services; C31-2 tenant-keyed `RegistryRouter` fleet cells + secret isolation); scheduler is the one designed-not-built seam | #297/#308 (C29 enforcement, via config C40), C29 (mode=none guard + ownership annotation), #302 (config C2), C2b (graph), #464 (C31-1 service scoping), C31-2 (router keying) |
 
 **Plane 01 in progress** (via the review-fleet track): **C24 — execution chokepoint** is fully
 merged (every child process — `bash`, `rg`, the whole `git` funnel — funnels through the
@@ -63,12 +63,18 @@ and `ConfigService` **rejects tenant writes**. The RBAC role gate already enforc
 under `[tenancy] per_tenant`, a caller presenting a non-`local` tenant `x-agent-user-id` is denied the
 operator-config write even with auth off (the RBAC gate is a pass-through there), while the bare operator
 CLI (no identity / `local`) and every `per_tenant = false` install stay byte-identical. **C31**
-(control-plane operator-vs-tenant split, = config C40/E1 follow-ups) is **in progress**: **C31-1**
-makes the three still-unscoped control-plane services — provider-registry, prompt, review-fleet — wrap
-every RPC in `run_scoped(identity_key(...))` (mirroring the already-scoped Graph/Config services), so a
-`PerTenant`-wrapped store (C30) routes each op to the caller's verified tenant instead of collapsing to
-`local`; a partial/hostile identity fails closed to the default tenant. **C31-2** (tenant-keyed
-`RegistryRouter` snapshot/provider cache + secret isolation) is still ⬜.
+(control-plane operator-vs-tenant split, = config C40/E1 follow-ups) is now **complete**: **C31-1**
+(#464) makes the three still-unscoped control-plane services — provider-registry, prompt, review-fleet —
+wrap every RPC in `run_scoped(identity_key(...))` (mirroring the already-scoped Graph/Config services), so
+a `PerTenant`-wrapped store (C30) routes each op to the caller's verified tenant instead of collapsing to
+`local`; a partial/hostile identity fails closed to the default tenant. **C31-2** keys the registry-backed
+router by verified tenant: `current_tenant()` (the one fail-closed tenant-resolution rule, promoted to
+`agent_core` so `PerTenant` and the router can't drift) selects a per-tenant `RouterCell` (its own
+snapshot + provider/connection cache + breaker state) from a bounded, oldest-first-evicting cache, gated
+by `RegistryRouter::with_per_tenant(cfg.tenancy.per_tenant)`. Each tenant's fleet is built from *its own*
+cards under *its own* `AGENT_IDENTITY` scope, so the synth only ever resolves that tenant's `api_key_ref`
+— secret isolation is structural, no synth change. At Tier 0 (`per_tenant = false`) there is exactly one
+`local` cell, byte-identical to the pre-C31-2 single global fleet.
 Tier 0 (single operator, one config) is today's behavior and needs nothing.
 
 **Build order:** 01 (chokepoint C24 → backends C23) · 02 (identity-at-source C26 → RLS C27/C28)
