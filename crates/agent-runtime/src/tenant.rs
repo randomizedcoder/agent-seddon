@@ -378,6 +378,48 @@ impl agent_core::TransportRegistry for PerTenant<dyn agent_core::TransportRegist
     }
 }
 
+/// The code-search seam, routed per tenant (multi-tenancy C28-3d). Unlike the
+/// shared-store seams, the tantivy code index is a file-backed corpus with no
+/// `(collection, tenant, id)` keying — the builder closure gives each tenant its
+/// own on-disk index directory ([`tenant_path`]), so a tenant's `search` /
+/// `structural_search` reads and writes only its own index. Isolating by *path* is
+/// the hard boundary (a shared index with a tenant *filter* field is bug-prone and
+/// rejected for a security boundary — principle 5 in the design doc).
+///
+/// The default `local` tenant maps to the base index path unchanged, so
+/// `[tenancy] per_tenant = false` (the wrap is not even applied there) and the
+/// single-tenant CLI stay byte-identical. A hostile identity fails closed to
+/// `local` in [`route`](Self::route) — never another tenant's index.
+///
+/// `capabilities()` is synchronous and cannot borrow through the routed `Arc`; it
+/// reports the current turn's tenant view (`local` when unscoped), which is the
+/// same backend kind for every tenant.
+#[cfg(feature = "search")]
+#[async_trait::async_trait]
+impl agent_core::SearchBackend for PerTenant<dyn agent_core::SearchBackend> {
+    fn capabilities(&self) -> agent_core::SearchCapabilities {
+        self.route().capabilities()
+    }
+    async fn status(&self) -> agent_core::Result<agent_core::IndexStatus> {
+        self.route().status().await
+    }
+    async fn reindex(
+        &self,
+        progress: agent_core::ProgressFn<'_>,
+    ) -> agent_core::Result<agent_core::IndexStatus> {
+        self.route().reindex(progress).await
+    }
+    async fn query(
+        &self,
+        q: &agent_core::SearchQuery,
+    ) -> agent_core::Result<Vec<agent_core::SearchHit>> {
+        self.route().query(q).await
+    }
+    async fn list_files(&self, globs: &[String]) -> agent_core::Result<Vec<std::path::PathBuf>> {
+        self.route().list_files(globs).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -725,6 +767,174 @@ mod tests {
             })
             .await;
             assert_eq!(acme.version, 1);
+        }
+    }
+
+    // ---- PerTenant<dyn SearchBackend> routing (multi-tenancy C28-3d) ----
+    //
+    // The tantivy code index is path-partitioned per tenant exactly like the graph and
+    // sqlite prompt arms: the builder derives each tenant's own index dir via
+    // `tenant_path`, so `search` reads/writes only that tenant's index. Proven both
+    // with a recording fake (which dir each call routed to) and over the REAL
+    // `TantivyBackend` on disk (acme's indexed content invisible to globex).
+    #[cfg(feature = "search")]
+    mod search_index {
+        use crate::tenant::{tenant_path, PerTenant};
+        use agent_core::{scope, SearchBackend, SearchMode, SearchQuery, SessionKey};
+        use std::path::PathBuf;
+        use std::sync::{Arc, Mutex};
+
+        /// A `SearchBackend` that records, on each `query`, the index dir it was built
+        /// for — so a test can see which per-tenant path a call was routed to.
+        struct FakeSearch {
+            dir: PathBuf,
+            calls: Arc<Mutex<Vec<PathBuf>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl SearchBackend for FakeSearch {
+            fn capabilities(&self) -> agent_core::SearchCapabilities {
+                agent_core::SearchCapabilities {
+                    backend: "fake".into(),
+                    modes: vec![SearchMode::Literal],
+                    content_search: true,
+                    scored: false,
+                    incremental: false,
+                    max_concurrent_queries: 0,
+                }
+            }
+            async fn status(&self) -> agent_core::Result<agent_core::IndexStatus> {
+                Ok(agent_core::IndexStatus {
+                    state: agent_core::IndexState::Fresh,
+                    indexed_files: 0,
+                    last_indexed_ms: 0,
+                    manifest_digest: String::new(),
+                })
+            }
+            async fn reindex(
+                &self,
+                _p: agent_core::ProgressFn<'_>,
+            ) -> agent_core::Result<agent_core::IndexStatus> {
+                self.status().await
+            }
+            async fn query(
+                &self,
+                _q: &SearchQuery,
+            ) -> agent_core::Result<Vec<agent_core::SearchHit>> {
+                self.calls.lock().unwrap().push(self.dir.clone());
+                Ok(vec![])
+            }
+        }
+
+        fn per_tenant_search(
+            base: PathBuf,
+        ) -> (PerTenant<dyn SearchBackend>, Arc<Mutex<Vec<PathBuf>>>) {
+            let calls: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
+            let c = calls.clone();
+            let pt = PerTenant::new(move |t: &str| {
+                Arc::new(FakeSearch {
+                    dir: tenant_path(&base, t),
+                    calls: c.clone(),
+                }) as Arc<dyn SearchBackend>
+            });
+            (pt, calls)
+        }
+
+        fn q(text: &str) -> SearchQuery {
+            SearchQuery {
+                text: text.into(),
+                mode: SearchMode::Literal,
+                path_globs: vec![],
+                lang: None,
+                limit: 5,
+                fuzzy_distance: None,
+            }
+        }
+
+        // positive: two verified tenants route to distinct, path-isolated index dirs
+        // (`tenants/<t>/tantivy`) → expect each `query` recorded under its own dir.
+        #[tokio::test]
+        async fn positive_two_tenants_isolated_index_dirs() {
+            let base = PathBuf::from(".agent-seddon/index/tantivy");
+            let (pt, calls) = per_tenant_search(base);
+            scope(SessionKey::parse("acme", "s1").unwrap(), async {
+                pt.query(&q("x")).await.unwrap()
+            })
+            .await;
+            scope(SessionKey::parse("globex", "s1").unwrap(), async {
+                pt.query(&q("x")).await.unwrap()
+            })
+            .await;
+            assert_eq!(
+                calls.lock().unwrap().clone(),
+                vec![
+                    PathBuf::from(".agent-seddon/index/tenants/acme/tantivy"),
+                    PathBuf::from(".agent-seddon/index/tenants/globex/tantivy"),
+                ]
+            );
+        }
+
+        // boundary: the default `local` tenant maps to the base index dir unchanged →
+        // Tier-0 (`per_tenant = false`) parity, no `tenants/` namespacing.
+        #[tokio::test]
+        async fn boundary_local_uses_base_index_dir() {
+            let base = PathBuf::from(".agent-seddon/index/tantivy");
+            let (pt, calls) = per_tenant_search(base.clone());
+            scope(SessionKey::local("s1"), async {
+                pt.query(&q("x")).await.unwrap()
+            })
+            .await;
+            assert_eq!(calls.lock().unwrap().clone(), vec![base]);
+        }
+
+        // adversarial: with no ambient identity the wrap routes to `local` (fail closed,
+        // never another tenant's index) → an unscoped query hits the base index dir.
+        #[tokio::test]
+        async fn adversarial_no_identity_uses_base_index_dir() {
+            let base = PathBuf::from(".agent-seddon/index/tantivy");
+            let (pt, calls) = per_tenant_search(base.clone());
+            pt.query(&q("x")).await.unwrap();
+            assert_eq!(calls.lock().unwrap().clone(), vec![base]);
+        }
+
+        // positive (real tantivy, on disk): acme reindexes its own path-isolated index;
+        // acme's indexed content is a hit for acme and INVISIBLE to globex, whose index
+        // is a separate (un-reindexed) directory — the end-to-end isolation proof.
+        #[tokio::test]
+        async fn positive_real_tantivy_isolated_per_tenant() {
+            let root = agent_testkit::tempdir();
+            std::fs::write(root.join("alpha.txt"), "gamma breakthrough insight").unwrap();
+            let base_index = root.join(".idx").join("tantivy");
+            let r = root.clone();
+            let b = base_index.clone();
+            let search = PerTenant::new(move |t: &str| {
+                Arc::new(
+                    agent_search::TantivyBackend::open(r.clone(), tenant_path(&b, t))
+                        .expect("open per-tenant index"),
+                ) as Arc<dyn SearchBackend>
+            });
+            // acme reindexes; globex never does.
+            scope(SessionKey::parse("acme", "s1").unwrap(), async {
+                search.reindex(&|_p| {}).await.unwrap();
+            })
+            .await;
+            let acme_hits = scope(SessionKey::parse("acme", "s1").unwrap(), async {
+                search.query(&q("gamma")).await.unwrap()
+            })
+            .await;
+            let globex_hits = scope(SessionKey::parse("globex", "s1").unwrap(), async {
+                search.query(&q("gamma")).await.unwrap()
+            })
+            .await;
+            assert!(!acme_hits.is_empty(), "acme sees its own indexed content");
+            assert!(
+                globex_hits.is_empty(),
+                "globex's separate index was never reindexed — no cross-tenant hit"
+            );
+            assert!(
+                root.join(".idx/tenants/acme/tantivy").exists(),
+                "acme's index lives at its own namespaced path"
+            );
         }
     }
 

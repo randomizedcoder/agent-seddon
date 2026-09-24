@@ -125,13 +125,28 @@ session_id, ts)`). Then:
   value fails closed at build; `clickhouse` requires `[telemetry].enabled`). Token match is
   case-sensitive (the `tokenbf_v1`/`hasToken` pairing) — a conscious trade of the tantivy tokenizer's
   case-folding for server-side isolation + index-pruned scans on the opt-in tier.
-- **tantivy — the sharpest leak.** Partition indexes **per tenant** by path (mirroring
-  memory's "the path is the boundary"): `…/index/<backend>/<tenant>/` and recall corpus
-  `…/<tenant>/.recall/index`. A path-partitioned index is a hard boundary; a shared index with
-  a filter field is bug-prone and rejected for the security boundary. **Note:** once C4
-  (per-session workspace) lands, the *code* index already sits under each session's confined
-  root, so that leak closes for the fleet automatically — the **shared session-recall corpus**
-  (`recall.rs:132`) is the one still needing explicit per-tenant partitioning.
+- **tantivy code index (C28-3d, built).** The `search` / `structural_search` code index is
+  partitioned **per tenant by path** (mirroring memory's "the path is the boundary"): under
+  `[tenancy] per_tenant` the `tantivy` backend is wrapped in `PerTenant<dyn SearchBackend>`
+  (`tenant.rs`), and each verified tenant gets its own on-disk index at `tenant_path(base) =
+  …/index/tenants/<tenant>/tantivy` (the same `tenants/<t>/` convention the file-backed graph
+  and sqlite prompt arms use). A path-partitioned index is a hard boundary; a shared index with
+  a tenant *filter* field is bug-prone and rejected for a security boundary. The `local` tenant
+  maps to the base path unchanged, so Tier-0 (`per_tenant` off — the wrap is not even applied)
+  stays byte-identical. Each tenant's index is built lazily on first use and **warmed in the
+  background** (`search::spawn_reindex_if_stale`) so its first `search` serves real hits
+  (serve-stale meanwhile); a tenant whose own index cannot be opened fails **closed** to an
+  empty index (`search::EmptySearch`) — never another tenant's. Routing is by the **verified**
+  ambient identity (no tenant argument on the seam), and a hostile identity coerces to `local`.
+  **Note:** once C4 (per-session workspace) lands, the *code* index also sits under each
+  session's confined root, so the content itself diverges per tenant and the path partition then
+  isolates real per-tenant corpora (not just N copies of one shared repo).
+- **tantivy session-recall corpus.** The tenant-scoped recall path is the ClickHouse backend
+  (C28-3c: `[recall] backend = "clickhouse"`, isolated by the C27 RLS boundary); the tantivy
+  recall corpus (`recall.rs`) stays the **Tier-0 / offline fallback**. Under `per_tenant` an
+  operator should select the ClickHouse recall backend for tenant isolation — partitioning the
+  shared `.agent/sessions` transcripts dir per tenant (the tantivy fallback's remaining gap) is
+  superseded by that RLS path and left as a documented follow-up.
 - **`metrics` tool (C28-1, built).** Under `[tenancy] per_tenant` the tool scopes its exposition to
   the caller's own `(session, user)` series (from the **verified** `current_identity()`, never a tool
   arg) plus the shared **label-less seam-health** families (provider / tool-exec / search latencies,
