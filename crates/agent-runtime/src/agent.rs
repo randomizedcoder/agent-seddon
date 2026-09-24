@@ -89,6 +89,10 @@ pub struct Settings {
     /// (`mode` empty) ⇒ disabled (today's trusted-header path). Read by the serve path
     /// to build the `AuthLayer`.
     pub grpc_auth: GrpcAuthSettings,
+    /// Multi-tenant deployment (`[tenancy] per_tenant`, default `false`). Gates the
+    /// per-tenant store routing (builder) and the C29 operator-config write guard on the
+    /// served `ConfigService`. Tier-0 (`false`) is byte-identical single-operator behaviour.
+    pub per_tenant: bool,
 }
 
 /// Runtime view of `[auth]` (config C33/B1), flattened from `AuthCfg`. Held codec-free
@@ -1690,6 +1694,13 @@ impl Agent {
     /// disabled (today's trusted-header path).
     pub fn grpc_auth(&self) -> &GrpcAuthSettings {
         &self.settings.grpc_auth
+    }
+
+    /// Whether this is a multi-tenant deployment (`[tenancy] per_tenant`, config C29).
+    /// Read by the serve path to arm the `ConfigService` operator-config write guard;
+    /// `false` (default) is byte-identical single-operator behaviour.
+    pub fn per_tenant(&self) -> bool {
+        self.settings.per_tenant
     }
 
     /// The registry a served `AgentSessionService` reads (docs/design/portal +
@@ -4976,6 +4987,7 @@ mod tests {
             fleet_max_per_user: 0,
             fleet_slack_app_token_ref: String::new(),
             grpc_auth: GrpcAuthSettings::default(),
+            per_tenant: false,
         }
     }
 

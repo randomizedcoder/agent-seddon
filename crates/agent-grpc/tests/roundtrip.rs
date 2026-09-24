@@ -2042,6 +2042,114 @@ async fn config_status_roundtrips_pending_edit() {
     assert_eq!(v, serde_json::json!(30));
 }
 
+// ---------------------------------------------------------------------------
+// C29 (multi-tenancy): the ConfigService operator-config write guard closes the
+// `[auth] mode = "none"` gap over the wire. With `tenant_scoped(true)` and no auth
+// layer in front (so no verified principal — the default single-tenant transport),
+// a `Put` carrying a non-operator tenant identity is denied AND nothing is written;
+// the operator (no identity / `local`) still writes. `record_put` proves the store
+// was reached only when allowed.
+// ---------------------------------------------------------------------------
+
+/// A `ConfigStore` double that records whether `put` was invoked — so a barred
+/// write can be proven to touch nothing.
+struct RecordingConfigStore {
+    put_called: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait]
+impl agent_core::ConfigStore for RecordingConfigStore {
+    async fn schema(&self) -> agent_core::Result<serde_json::Value> {
+        Ok(serde_json::json!({ "type": "object" }))
+    }
+    async fn values(&self) -> agent_core::Result<serde_json::Value> {
+        Ok(serde_json::json!({}))
+    }
+    async fn validate(
+        &self,
+        _edits: &[agent_core::ConfigEdit],
+    ) -> agent_core::Result<Vec<agent_core::ConfigIssue>> {
+        Ok(vec![])
+    }
+    async fn put(
+        &self,
+        _edits: Vec<agent_core::ConfigEdit>,
+    ) -> agent_core::Result<Vec<agent_core::ConfigIssue>> {
+        self.put_called
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(vec![]) // a clean write
+    }
+    async fn status(&self) -> agent_core::Result<agent_core::ConfigStatus> {
+        Ok(agent_core::ConfigStatus {
+            restart_required: false,
+            pending: vec![],
+            loaded_hash: String::new(),
+            ondisk_hash: String::new(),
+        })
+    }
+}
+
+#[rstest]
+// adversarial: a tenant caller's Put is refused AND nothing is written.
+#[case::adversarial_mode_none_tenant_put_denied_writes_nothing(Some("acme"), true)]
+// positive: the operator CLI (no identity) still writes.
+#[case::positive_operator_no_identity_put_succeeds(None, false)]
+// negative: the explicit `local` operator still writes.
+#[case::negative_local_identity_put_succeeds(Some("local"), false)]
+#[tokio::test]
+async fn c29_config_put_operator_guard(#[case] user: Option<&str>, #[case] expect_denied: bool) {
+    let put_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let store = Arc::new(RecordingConfigStore {
+        put_called: put_called.clone(),
+    });
+    // `tenant_scoped(true)` + a bare server (no auth layer ⇒ no verified principal).
+    let router = tonic::transport::Server::builder().add_service(
+        agent_grpc::server::ConfigSvc::new(store)
+            .tenant_scoped(true)
+            .into_server(),
+    );
+    let (dial, _srv) = spawn(Transport::Tcp, router).await;
+    let mut client =
+        pb::config_service_client::ConfigServiceClient::new(dial.connect_lazy().unwrap());
+
+    let mut req = tonic::Request::new(pb::PutConfigRequest {
+        edits: vec![config_edit(
+            "agent.max_iterations",
+            Some(serde_json::json!(30)),
+        )],
+    });
+    if let Some(u) = user {
+        req.metadata_mut()
+            .insert("x-agent-user-id", u.parse().expect("ascii metadata"));
+    }
+    let result = client.put(req).await;
+
+    if expect_denied {
+        let err = result.expect_err("a tenant caller must be denied the operator-config write");
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        // Opaque: the denial names neither the tenant, action, nor resource.
+        for leaked in ["acme", "write", "config", "tenant"] {
+            assert!(
+                !err.message().contains(leaked),
+                "leaked `{leaked}`: {}",
+                err.message()
+            );
+        }
+        assert!(
+            !put_called.load(std::sync::atomic::Ordering::SeqCst),
+            "a barred Put must write nothing"
+        );
+    } else {
+        result
+            .expect("the operator write must succeed")
+            .into_inner();
+        assert!(
+            put_called.load(std::sync::atomic::Ordering::SeqCst),
+            "an allowed Put must reach the store"
+        );
+    }
+}
+
 // ---- review-fleet C3: ReviewFleetService over the wire (docs/design/review-fleet) ----
 
 /// A helper roster row carrying a `token_ref` **reference** (never a secret).

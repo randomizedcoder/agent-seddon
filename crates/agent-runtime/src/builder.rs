@@ -1291,6 +1291,9 @@ pub async fn build_agent_with(
             roles_claim: cfg.auth.roles_claim.clone(),
             leeway_secs: cfg.auth.leeway_secs,
         },
+        // Multi-tenant deployment (`[tenancy] per_tenant`); arms the C29 ConfigService
+        // operator-config write guard on the serve path. `false` = Tier-0 (unchanged).
+        per_tenant: cfg.tenancy.per_tenant,
     };
 
     // Subagents: register a `delegate` tool whose children reuse the worker tool
