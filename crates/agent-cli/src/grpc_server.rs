@@ -751,8 +751,15 @@ fn add_seam_service(
             None => (router, false),
         },
         Seam::Config => match agent.config_store() {
+            // C29: under a multi-tenant deployment, arm the operator-config write guard
+            // so a non-operator tenant caller cannot mutate `agent.toml` even with auth
+            // off. `per_tenant` off (default) = today's single-operator behaviour.
             Some(c) => (
-                router.add_service(srv::ConfigSvc::new(c).into_server()),
+                router.add_service(
+                    srv::ConfigSvc::new(c)
+                        .tenant_scoped(agent.per_tenant())
+                        .into_server(),
+                ),
                 true,
             ),
             None => (router, false),

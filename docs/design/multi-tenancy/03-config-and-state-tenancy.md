@@ -125,8 +125,12 @@ data.
 
 ## Components (see also [`00-components.md`](00-components.md) plane 03)
 
-- **C29 — config ownership model**: the operator-global vs per-tenant split; mark each config
-  section's ownership; `ConfigService` rejects tenant writes to operator keys.
+- **C29 — config ownership model** ✅ **built**: the operator-global vs per-tenant split; every
+  `agent.toml` section is operator-global (Principle 1), codified by `tenant_writable_config_sections()`
+  (an empty set, reconciled against the generated schema). `ConfigService` rejects tenant writes to
+  operator keys — the RBAC role gate under `oidc` (config C40/E1, `ResourceType::Config` operator-global)
+  plus a `mode = "none"` pre-gate that bars a non-`local` tenant `x-agent-user-id` when
+  `[tenancy] per_tenant` is on. Tier-0 unchanged.
 - **C30 — `PerTenant<Store>` wrapper**: generalize `PerUserMemory`'s internal-routing pattern;
   apply to provider registry, graph, prompts (read-through defaults), scheduler; builder wraps
   when a per-tenant tier is on.

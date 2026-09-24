@@ -12,7 +12,7 @@ Legend: ⬜ not started · 🟡 in progress · ✅ merged.
 |---|---|---|---|---|
 | 01 | Process isolation & multi-org boundaries | C23, C24, C25 | ✅ C23 (bwrap, 5 pillars) + C24; 🟡 C25 foundation | #454/#455 (C23), #273/#274/#275 (C24), #276 (C25) |
 | 02 | Data scoping & row-level security | C26, C27, C28 | ✅ C26 (identity at source) + C27 (RLS + `user`-leading sort key); ✅ **C28 complete** — metrics tool (C28-1) + sqlite prompt (C28-2) + recall schema/redaction (C28-3a) + ClickHouse recall backend (C28-3c) + code-index per-tenant partition (C28-3d) | #315–#322 (C26), #456 (C27-1), C27-2 (sort key), #458 (C28-2), #459 (C28-1), #460 (C28-3a), #461 (C28-3c), C28-3d (code-index partition) |
-| 03 | Config & seam-state tenancy | C29, C30, C31 | 🟡 **C30 built** for the shared-store seams (config C2) + the file-backed graph (config C2b); C29/C31 ⬜, scheduler designed | #302 (config C2), C2b (graph) |
+| 03 | Config & seam-state tenancy | C29, C30, C31 | ✅ **C29** (config ownership model + operator-config write guard) + **C30** (shared-store seams, config C2; file-backed graph, config C2b); C31 ⬜, scheduler designed | #297/#308 (C29 enforcement, via config C40), C29 (mode=none guard + ownership annotation), #302 (config C2), C2b (graph) |
 
 **Plane 01 in progress** (via the review-fleet track): **C24 — execution chokepoint** is fully
 merged (every child process — `bash`, `rg`, the whole `git` funnel — funnels through the
@@ -53,8 +53,17 @@ config C2b — the file-backed cognition graph, isolated per tenant by path (`te
 gated by `[tenancy] per_tenant` (default off = Tier-0). The **scheduler** is the one seam C30 does *not*
 cover: it is process-bound (a job's executor is the owning process), so per-tenant scheduling is a
 backend+driver change, designed in `docs/design/config/10-per-tenant-scheduler.md` and blocked in part on
-plane-01 (per-tenant executor). This is the one implementation of C30 — the config track owns it; C29
-(tenant-aware bootstrap) and C31 (control-plane operator-vs-tenant split, = config C40/E1) are still ⬜.
+plane-01 (per-tenant executor). This is the one implementation of C30 — the config track owns it.
+**C29 — config ownership model** is now **complete**: `agent.toml` is operator-global in full
+(Principle 1 — the tenant-facing config surface is the per-tenant *stores*, never a per-tenant TOML;
+codified by `tenant_writable_config_sections()`, an empty set reconciled against the generated schema),
+and `ConfigService` **rejects tenant writes**. The RBAC role gate already enforced that under `oidc`
+(config C40/E1, #297/#308: `ResourceType::Config` is the sole operator-global resource, so a tenant
+`org_admin` is denied even in its own tenant); C29 additionally closes the `[auth] mode = "none"` gap —
+under `[tenancy] per_tenant`, a caller presenting a non-`local` tenant `x-agent-user-id` is denied the
+operator-config write even with auth off (the RBAC gate is a pass-through there), while the bare operator
+CLI (no identity / `local`) and every `per_tenant = false` install stay byte-identical. **C31**
+(control-plane operator-vs-tenant split, = config C40/E1 follow-ups) is still ⬜.
 Tier 0 (single operator, one config) is today's behavior and needs nothing.
 
 **Build order:** 01 (chokepoint C24 → backends C23) · 02 (identity-at-source C26 → RLS C27/C28)

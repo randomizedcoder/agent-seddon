@@ -121,6 +121,28 @@ pub struct Config {
     pub source_path: Option<std::path::PathBuf>,
 }
 
+/// C29 config-ownership model — see
+/// `docs/design/multi-tenancy/03-config-and-state-tenancy.md`, Principle 1.
+///
+/// Every section of `agent.toml` is **operator-global**: the operator owns all
+/// bootstrap/wiring config (listen ports, store DSNs, `[auth]`, `[telemetry]`,
+/// `[sandbox]` tier, feature enablement, the fleet roster, …), and the tenant-facing
+/// configuration surface is the per-tenant **stores** (provider registry, prompts,
+/// graph, scheduler) reached through the control-plane services — *never* a per-tenant
+/// TOML. So the set of tenant-writable `agent.toml` sections is deliberately **empty**,
+/// which maps directly onto RBAC's single operator-global resource
+/// (`ResourceType::Config`, `is_operator_global() == true`) that `ConfigService` gates:
+/// a tenant caller is denied any config write, under OIDC (the role gate) and — with
+/// `[tenancy] per_tenant` — under `mode = "none"` too (the `ConfigService` pre-gate).
+///
+/// Declared explicitly (not inferred) so the ownership decision stays a conscious one:
+/// were a future section ever intended to be tenant-writable, it would be named here,
+/// and the `config-schema` reconciliation test proves each declared name is a real
+/// config section (no drift).
+pub fn tenant_writable_config_sections() -> &'static [&'static str] {
+    &[]
+}
+
 /// Unattended code-review fleet (docs/design/review-fleet/). Phase 1 wires only the
 /// **workspace root**: when `root` is non-empty, each session's cwd becomes its own
 /// confined `root/<user>/<session>` (review-fleet R1a / C4) instead of the single
@@ -3558,5 +3580,66 @@ mod tests {
         assert_eq!(cfg.critic_max_tokens, 4096);
         assert_eq!(cfg.max_alternatives, 3);
         assert!(cfg.scope.is_empty() && cfg.on_exhaustion.is_empty());
+    }
+
+    // --- C29 config-ownership annotation (docs/design/multi-tenancy/03) --------------
+    //
+    // Principle 1: every `agent.toml` section is operator-global; the tenant-facing
+    // config surface is the stores, not TOML — so `tenant_writable_config_sections()`
+    // is empty. These tests reconcile that declaration against the generated schema so
+    // it cannot silently drift.
+
+    /// Top-level `agent.toml` section names from the generated JSON schema (`#[serde(skip)]`
+    /// fields like `source_path` are already excluded by schemars).
+    #[cfg(feature = "config-schema")]
+    fn schema_sections() -> Vec<String> {
+        crate::config_schema::build_schema()
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .map(|o| o.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    // positive: the schema exposes the full config surface (guards the enumeration
+    // itself) and includes the well-known operator sections.
+    #[cfg(feature = "config-schema")]
+    #[test]
+    fn positive_schema_exposes_operator_sections() {
+        let sections = schema_sections();
+        assert!(
+            sections.len() > 20,
+            "expected the full config surface, got {}: {sections:?}",
+            sections.len()
+        );
+        for name in ["agent", "provider", "telemetry", "auth", "tenancy", "grpc"] {
+            assert!(
+                sections.iter().any(|s| s == name),
+                "operator section `{name}` missing from schema: {sections:?}"
+            );
+        }
+    }
+
+    // positive: Principle 1 — no `agent.toml` section is tenant-writable; all are
+    // operator-owned (tenant config lives in the per-tenant stores).
+    #[test]
+    fn positive_no_config_section_is_tenant_writable() {
+        assert!(
+            tenant_writable_config_sections().is_empty(),
+            "C29: agent.toml is operator-global; tenant config lives in stores, not TOML"
+        );
+    }
+
+    // negative: any declared tenant-writable section (none today) must be a REAL schema
+    // section — a stale/typo'd entry fails the build, so the annotation cannot drift.
+    #[cfg(feature = "config-schema")]
+    #[test]
+    fn negative_declared_tenant_sections_are_real() {
+        let sections = schema_sections();
+        for s in tenant_writable_config_sections() {
+            assert!(
+                sections.iter().any(|x| x == s),
+                "declared tenant-writable section `{s}` is not a real config section: {sections:?}"
+            );
+        }
     }
 }

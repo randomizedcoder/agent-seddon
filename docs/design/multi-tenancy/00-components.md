@@ -93,11 +93,19 @@ Multi-org isolation must hold for **every feature**, not just review data: LLM u
 routing/LB policy, cognition graphs, prompts/skills, scheduler jobs. Audit: single-global-config,
 one `Arc<dyn Trait>` per seam; only memory/dimensions are per-tenant (via `PerUserMemory`).
 
-### C29 — config ownership model
+### C29 — config ownership model ✅ built
 - **Purpose.** Split config into operator-global (`agent.toml`) vs per-tenant (data in
   registries/stores) — no per-tenant TOML.
 - **Interface.** Annotate each config section's ownership; `ConfigService` (50085) rejects
   tenant writes to operator-scoped keys.
+- **Landed.** All of `agent.toml` is operator-global (Principle 1), codified by
+  `tenant_writable_config_sections()` — an empty set reconciled against the generated schema
+  (`agent-runtime/src/config.rs`). Enforcement: `ResourceType::Config` is the sole operator-global
+  RBAC resource, so the role gate denies a tenant `org_admin` a Config write even in its own tenant
+  (config C40/E1, #297/#308); C29 also closes the `[auth] mode = "none"` gap — under
+  `[tenancy] per_tenant`, `ConfigService::put` bars a caller presenting a non-`local` tenant
+  `x-agent-user-id` (a pre-gate before the RBAC pass-through). Tier-0 (`per_tenant = false`, or the
+  bare `local` operator) is byte-identical.
 
 ### C30 — `PerTenant<Store>` wrapper
 - **Purpose.** Make every store-backed seam per-tenant with the proven pattern.
