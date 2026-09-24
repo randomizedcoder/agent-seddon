@@ -58,9 +58,10 @@ impl pb::prompt_service_server::PromptService for PromptSvc {
         &self,
         request: Request<pb::PromptListRequest>,
     ) -> Result<Response<pb::PromptList>, Status> {
+        let key = super::identity_key(request.metadata());
         let sp = span("prompt.list", request.metadata());
         let inner = self.inner.clone();
-        async move {
+        let work = async move {
             let req = request.into_inner();
             // UNSPECIFIED / unknown tag ⇒ "every kind".
             let kind = pb::PromptKind::try_from(req.kind)
@@ -71,23 +72,24 @@ impl pb::prompt_service_server::PromptService for PromptSvc {
                 entries: entries.into_iter().map(Into::into).collect(),
             }))
         }
-        .instrument(sp)
-        .await
+        .instrument(sp);
+        super::run_scoped(key, work).await
     }
 
     async fn get(
         &self,
         request: Request<pb::PromptRef>,
     ) -> Result<Response<pb::PromptEntry>, Status> {
+        let key = super::identity_key(request.metadata());
         let sp = span("prompt.get", request.metadata());
         let inner = self.inner.clone();
-        async move {
+        let work = async move {
             let r = request.into_inner().try_into()?;
             let entry = inner.get(&r).await.map_err(|e| status_from_error(&e))?;
             Ok(Response::new(entry.into()))
         }
-        .instrument(sp)
-        .await
+        .instrument(sp);
+        super::run_scoped(key, work).await
     }
 
     async fn put(
@@ -95,15 +97,16 @@ impl pb::prompt_service_server::PromptService for PromptSvc {
         request: Request<pb::PromptEntry>,
     ) -> Result<Response<pb::PromptEntry>, Status> {
         super::authz::require(agent_core::Action::Write, agent_core::ResourceType::Prompt)?;
+        let key = super::identity_key(request.metadata());
         let sp = span("prompt.put", request.metadata());
         let inner = self.inner.clone();
-        async move {
+        let work = async move {
             let entry = request.into_inner().try_into()?;
             let stored = inner.put(entry).await.map_err(|e| status_from_error(&e))?;
             Ok(Response::new(stored.into()))
         }
-        .instrument(sp)
-        .await
+        .instrument(sp);
+        super::run_scoped(key, work).await
     }
 
     async fn delete(
@@ -111,24 +114,26 @@ impl pb::prompt_service_server::PromptService for PromptSvc {
         request: Request<pb::PromptRef>,
     ) -> Result<Response<pb::DeleteReply>, Status> {
         super::authz::require(agent_core::Action::Delete, agent_core::ResourceType::Prompt)?;
+        let key = super::identity_key(request.metadata());
         let sp = span("prompt.delete", request.metadata());
         let inner = self.inner.clone();
-        async move {
+        let work = async move {
             let r = request.into_inner().try_into()?;
             let deleted = inner.delete(&r).await.map_err(|e| status_from_error(&e))?;
             Ok(Response::new(pb::DeleteReply { deleted }))
         }
-        .instrument(sp)
-        .await
+        .instrument(sp);
+        super::run_scoped(key, work).await
     }
 
     async fn select(
         &self,
         request: Request<pb::PromptContext>,
     ) -> Result<Response<pb::PromptList>, Status> {
+        let key = super::identity_key(request.metadata());
         let sp = span("prompt.select", request.metadata());
         let inner = self.inner.clone();
-        async move {
+        let work = async move {
             let ctx = PromptContext::from(request.into_inner());
             let entries = inner
                 .select(&ctx)
@@ -138,17 +143,18 @@ impl pb::prompt_service_server::PromptService for PromptSvc {
                 entries: entries.into_iter().map(Into::into).collect(),
             }))
         }
-        .instrument(sp)
-        .await
+        .instrument(sp);
+        super::run_scoped(key, work).await
     }
 
     async fn preview_assembled(
         &self,
         request: Request<pb::PreviewRequest>,
     ) -> Result<Response<pb::AssembledContext>, Status> {
+        let key = super::identity_key(request.metadata());
         let sp = span("prompt.preview_assembled", request.metadata());
         let inner = self.inner.clone();
-        async move {
+        let work = async move {
             let req = request.into_inner();
             // Prefer the explicit tag set; fall back to a `mode:<mode>` tag from the
             // pre-04 scalar `mode` field (empty/unknown ⇒ Other) so old clients work.
@@ -167,20 +173,20 @@ impl pb::prompt_service_server::PromptService for PromptSvc {
                 messages: messages.into_iter().map(Into::into).collect(),
             }))
         }
-        .instrument(sp)
-        .await
+        .instrument(sp);
+        super::run_scoped(key, work).await
     }
 
     async fn get_active_personality(
         &self,
         request: Request<pb::GetActivePersonalityRequest>,
     ) -> Result<Response<pb::ActivePersonality>, Status> {
+        let key = super::identity_key(request.metadata());
         let sp = span("prompt.get_active_personality", request.metadata());
         // No cell wired (the bare router) ⇒ report the default; a read is always safe.
         let id = self.active.as_ref().map(|c| c.id()).unwrap_or_default();
-        async move { Ok(Response::new(pb::ActivePersonality { id })) }
-            .instrument(sp)
-            .await
+        let work = async move { Ok(Response::new(pb::ActivePersonality { id })) }.instrument(sp);
+        super::run_scoped(key, work).await
     }
 
     async fn set_active_personality(
@@ -188,10 +194,11 @@ impl pb::prompt_service_server::PromptService for PromptSvc {
         request: Request<pb::SetActivePersonalityRequest>,
     ) -> Result<Response<pb::ActivePersonality>, Status> {
         super::authz::require(agent_core::Action::Write, agent_core::ResourceType::Prompt)?;
+        let key = super::identity_key(request.metadata());
         let sp = span("prompt.set_active_personality", request.metadata());
         let active = self.active.clone();
         let config = self.config.clone();
-        async move {
+        let work = async move {
             let req = request.into_inner();
             // Only meaningful with a running loop to re-resolve against; the bare
             // router (no cell) reports the switch unavailable rather than silently
@@ -228,8 +235,8 @@ impl pb::prompt_service_server::PromptService for PromptSvc {
             }
             Ok(Response::new(pb::ActivePersonality { id }))
         }
-        .instrument(sp)
-        .await
+        .instrument(sp);
+        super::run_scoped(key, work).await
     }
 }
 
@@ -247,4 +254,107 @@ fn pb_kind_to_core(k: pb::PromptKind) -> Option<agent_core::PromptKind> {
 
 pub fn prompt_router(inner: Arc<dyn PromptStore>) -> Router {
     Server::builder().add_service(PromptSvc::new(inner).into_server())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_proto::identity::{SESSION_ID_KEY, USER_ID_KEY};
+    use pb::prompt_service_server::PromptService as _;
+    use rstest::rstest;
+    use std::sync::Mutex;
+    use tonic::metadata::MetadataValue;
+
+    // Records the ambient tenant (`current_identity().user`) at each store call — proves the
+    // served handler scopes the caller into a `PerTenant`-wrapped prompt store (C31 Principle 3).
+    #[derive(Default)]
+    struct TenantProbePrompt {
+        seen: Arc<Mutex<Vec<Option<String>>>>,
+    }
+    impl TenantProbePrompt {
+        fn record(&self) {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(agent_core::current_identity().map(|k| k.user.as_str().to_string()));
+        }
+    }
+    #[tonic::async_trait]
+    impl PromptStore for TenantProbePrompt {
+        async fn list(
+            &self,
+            _kind: Option<agent_core::PromptKind>,
+        ) -> agent_core::Result<Vec<agent_core::PromptEntry>> {
+            self.record();
+            Ok(vec![])
+        }
+        async fn get(
+            &self,
+            _r: &agent_core::PromptRef,
+        ) -> agent_core::Result<agent_core::PromptEntry> {
+            unimplemented!()
+        }
+        async fn put(
+            &self,
+            _entry: agent_core::PromptEntry,
+        ) -> agent_core::Result<agent_core::PromptEntry> {
+            unimplemented!()
+        }
+        async fn delete(&self, _r: &agent_core::PromptRef) -> agent_core::Result<bool> {
+            unimplemented!()
+        }
+        async fn select(
+            &self,
+            _ctx: &PromptContext,
+        ) -> agent_core::Result<Vec<agent_core::PromptEntry>> {
+            unimplemented!()
+        }
+        async fn preview_assembled(
+            &self,
+            _ctx: &PromptContext,
+            _goal: &str,
+        ) -> agent_core::Result<Vec<agent_core::Message>> {
+            unimplemented!()
+        }
+    }
+
+    fn req_with<T>(payload: T, user: Option<&str>, session: Option<&str>) -> Request<T> {
+        let mut req = Request::new(payload);
+        if let Some(u) = user {
+            req.metadata_mut()
+                .insert(USER_ID_KEY, MetadataValue::try_from(u).unwrap());
+        }
+        if let Some(s) = session {
+            req.metadata_mut()
+                .insert(SESSION_ID_KEY, MetadataValue::try_from(s).unwrap());
+        }
+        req
+    }
+
+    // Every caller-identity class → the tenant the store runs under. Present + path-safe
+    // scopes; partial/hostile fails closed to the default tenant (`None`).
+    #[rstest]
+    #[case::positive_tenant_header_scopes_to_tenant(Some("acme".into()), Some("s1".into()), Some("acme".into()))]
+    #[case::negative_no_identity_runs_as_local(None, None, None)]
+    #[case::negative_second_tenant_is_isolated(Some("globex".into()), Some("s1".into()), Some("globex".into()))]
+    #[case::boundary_max_len_tenant_segment(Some("a".repeat(128)), Some("s1".into()), Some("a".repeat(128)))]
+    #[case::corner_user_without_session_runs_as_local(Some("acme".into()), None, None)]
+    #[case::adversarial_traversal_header_fails_to_local(Some("../../heads/main".into()), Some("s1".into()), None)]
+    #[case::adversarial_empty_header_fails_to_local(Some(String::new()), Some("s1".into()), None)]
+    #[tokio::test]
+    async fn prompt_list_scopes_caller_tenant(
+        #[case] user: Option<String>,
+        #[case] session: Option<String>,
+        #[case] expected: Option<String>,
+    ) {
+        let store = Arc::new(TenantProbePrompt::default());
+        let svc = PromptSvc::new(store.clone());
+        let req = req_with(
+            pb::PromptListRequest::default(),
+            user.as_deref(),
+            session.as_deref(),
+        );
+        svc.list(req).await.unwrap();
+        assert_eq!(store.seen.lock().unwrap().as_slice(), &[expected]);
+    }
 }

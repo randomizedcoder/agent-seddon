@@ -142,33 +142,35 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
         &self,
         request: Request<pb::FleetListRequest>,
     ) -> Result<Response<pb::FleetSessionList>, Status> {
+        let key = super::identity_key(request.metadata());
         let sp = span("fleet.list", request.metadata());
         let inner = self.inner.clone();
-        async move {
+        let work = async move {
             let rows = inner.list().await.map_err(|e| status_from_error(&e))?;
             Ok(Response::new(pb::FleetSessionList {
                 sessions: rows.into_iter().map(Into::into).collect(),
             }))
         }
-        .instrument(sp)
-        .await
+        .instrument(sp);
+        super::run_scoped(key, work).await
     }
 
     async fn get(
         &self,
         request: Request<pb::FleetSessionRef>,
     ) -> Result<Response<pb::FleetSession>, Status> {
+        let key = super::identity_key(request.metadata());
         let sp = span("fleet.get", request.metadata());
         let inner = self.inner.clone();
-        async move {
+        let work = async move {
             let row = inner
                 .get(&request.into_inner().id)
                 .await
                 .map_err(|e| status_from_error(&e))?;
             Ok(Response::new(row.into()))
         }
-        .instrument(sp)
-        .await
+        .instrument(sp);
+        super::run_scoped(key, work).await
     }
 
     async fn put(
@@ -176,9 +178,10 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
         request: Request<pb::FleetSession>,
     ) -> Result<Response<pb::FleetSession>, Status> {
         super::authz::require(agent_core::Action::Write, agent_core::ResourceType::Fleet)?;
+        let key = super::identity_key(request.metadata());
         let sp = span("fleet.put", request.metadata());
         let inner = self.inner.clone();
-        async move {
+        let work = async move {
             // Wire → core clamps numbers; the store validates fail-closed.
             let session = agent_core::FleetSession::from(request.into_inner());
             let stored = inner
@@ -187,8 +190,8 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
                 .map_err(|e| status_from_error(&e))?;
             Ok(Response::new(stored.into()))
         }
-        .instrument(sp)
-        .await
+        .instrument(sp);
+        super::run_scoped(key, work).await
     }
 
     async fn delete(
@@ -196,17 +199,18 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
         request: Request<pb::FleetSessionRef>,
     ) -> Result<Response<pb::FleetDeleteReply>, Status> {
         super::authz::require(agent_core::Action::Delete, agent_core::ResourceType::Fleet)?;
+        let key = super::identity_key(request.metadata());
         let sp = span("fleet.delete", request.metadata());
         let inner = self.inner.clone();
-        async move {
+        let work = async move {
             let deleted = inner
                 .delete(&request.into_inner().id)
                 .await
                 .map_err(|e| status_from_error(&e))?;
             Ok(Response::new(pb::FleetDeleteReply { deleted }))
         }
-        .instrument(sp)
-        .await
+        .instrument(sp);
+        super::run_scoped(key, work).await
     }
 
     async fn set_enabled(
@@ -214,9 +218,10 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
         request: Request<pb::FleetSetEnabledRequest>,
     ) -> Result<Response<pb::FleetSession>, Status> {
         super::authz::require(agent_core::Action::Write, agent_core::ResourceType::Fleet)?;
+        let key = super::identity_key(request.metadata());
         let sp = span("fleet.set_enabled", request.metadata());
         let inner = self.inner.clone();
-        async move {
+        let work = async move {
             let req = request.into_inner();
             let row = inner
                 .set_enabled(&req.id, req.enabled)
@@ -224,8 +229,8 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
                 .map_err(|e| status_from_error(&e))?;
             Ok(Response::new(row.into()))
         }
-        .instrument(sp)
-        .await
+        .instrument(sp);
+        super::run_scoped(key, work).await
     }
 
     async fn review_now(
@@ -233,6 +238,7 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
         request: Request<pb::ReviewNowRequest>,
     ) -> Result<Response<pb::ReviewNowReply>, Status> {
         super::authz::require(agent_core::Action::Trigger, agent_core::ResourceType::Fleet)?;
+        let key = super::identity_key(request.metadata());
         let sp = span("fleet.review_now", request.metadata());
         // Opt-in: only the full fleet process (with an orchestrator) wires a sink.
         let Some(triggers) = self.triggers.clone() else {
@@ -240,7 +246,7 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
                 "ReviewNow requires the fleet orchestrator (run `agent --serve-fleet`)",
             ));
         };
-        async move {
+        let work = async move {
             let req = request.into_inner();
             // `enqueue` is fire-and-forget into a bounded, coalescing queue — it never
             // blocks or rejects; the outcome says whether it queued or coalesced.
@@ -252,8 +258,8 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
                 accepted: matches!(outcome, TriggerOutcome::Accepted),
             }))
         }
-        .instrument(sp)
-        .await
+        .instrument(sp);
+        super::run_scoped(key, work).await
     }
 
     async fn approve(
@@ -261,6 +267,7 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
         request: Request<pb::ApproveRequest>,
     ) -> Result<Response<pb::ApproveReply>, Status> {
         super::authz::require(agent_core::Action::Approve, agent_core::ResourceType::Fleet)?;
+        let key = super::identity_key(request.metadata());
         let sp = span("fleet.approve", request.metadata());
         // Opt-in: only the full fleet process with persisted history wires an approver.
         let Some(approver) = self.approver.clone() else {
@@ -269,7 +276,7 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
                  (run `agent --serve-fleet` with `[telemetry]` enabled)",
             ));
         };
-        async move {
+        let work = async move {
             let review_id = request.into_inner().review_id;
             let outcome = approver
                 .approve(&review_id)
@@ -287,8 +294,8 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
                 detail,
             }))
         }
-        .instrument(sp)
-        .await
+        .instrument(sp);
+        super::run_scoped(key, work).await
     }
 
     async fn preflight(
@@ -297,6 +304,7 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
     ) -> Result<Response<pb::PreflightReply>, Status> {
         // Read-only diagnostic (like list/get): no authz gate. The report carries only
         // status classes and trusted config values — never a secret.
+        let key = super::identity_key(request.metadata());
         let sp = span("fleet.preflight", request.metadata());
         // Opt-in: only the full fleet process has the config to build the probes.
         let Some(preflight) = self.preflight.clone() else {
@@ -304,7 +312,7 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
                 "Preflight requires the fleet process (run `agent --serve-fleet`)",
             ));
         };
-        async move {
+        let work = async move {
             let report = preflight.preflight().await;
             Ok(Response::new(pb::PreflightReply {
                 ok: report.ok(),
@@ -320,8 +328,8 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
                     .collect(),
             }))
         }
-        .instrument(sp)
-        .await
+        .instrument(sp);
+        super::run_scoped(key, work).await
     }
 
     async fn list_reviews(
@@ -330,6 +338,7 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
     ) -> Result<Response<pb::ListReviewsReply>, Status> {
         // Read-only (like list/get/preflight): no authz gate. Every filter value is bound as a
         // query argument in the impl (never interpolated), and the impl caps the row count.
+        let key = super::identity_key(request.metadata());
         let sp = span("fleet.list_reviews", request.metadata());
         // Opt-in: only a process with persisted history can list drafts.
         let Some(history) = self.history.clone() else {
@@ -338,7 +347,7 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
                  (run `agent --serve-fleet` with `[telemetry]` enabled)",
             ));
         };
-        async move {
+        let work = async move {
             let req = request.into_inner();
             let filter = ReviewDraftFilter {
                 repo: filter_opt(req.repo),
@@ -354,8 +363,8 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
                 reviews: rows.into_iter().map(summary_from_record).collect(),
             }))
         }
-        .instrument(sp)
-        .await
+        .instrument(sp);
+        super::run_scoped(key, work).await
     }
 
     async fn get_review(
@@ -365,6 +374,7 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
         // Read-only: no authz gate. `review_id` is untrusted wire input — the reader looks it
         // up as a bound query arg and reads the body from the draft's own `draft_path`
         // (confined under the fleet root), never a wire-supplied path; the body is byte-capped.
+        let key = super::identity_key(request.metadata());
         let sp = span("fleet.get_review", request.metadata());
         // Opt-in: needs the draft-body reader (persisted history + a fleet root).
         let Some(reader) = self.reader.clone() else {
@@ -373,7 +383,7 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
                  (run `agent --serve-fleet` with `[telemetry]` enabled)",
             ));
         };
-        async move {
+        let work = async move {
             let review_id = request.into_inner().review_id;
             let body = reader
                 .read_body(&review_id)
@@ -386,8 +396,8 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
                 truncated: body.truncated,
             }))
         }
-        .instrument(sp)
-        .await
+        .instrument(sp);
+        super::run_scoped(key, work).await
     }
 
     async fn update_review(
@@ -399,6 +409,7 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
         // body to the draft's own `draft_path` (confined under the fleet root), never a
         // wire-supplied path; an over-cap body is rejected, a posted/approved draft is locked.
         super::authz::require(agent_core::Action::Write, agent_core::ResourceType::Fleet)?;
+        let key = super::identity_key(request.metadata());
         let sp = span("fleet.update_review", request.metadata());
         // Opt-in: needs the draft-body editor (persisted history + a fleet root).
         let Some(editor) = self.editor.clone() else {
@@ -407,7 +418,7 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
                  (run `agent --serve-fleet` with `[telemetry]` enabled)",
             ));
         };
-        async move {
+        let work = async move {
             let req = request.into_inner();
             let outcome = editor
                 .update_body(&req.review_id, &req.body)
@@ -422,11 +433,117 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
             };
             Ok(Response::new(pb::UpdateReviewReply { status }))
         }
-        .instrument(sp)
-        .await
+        .instrument(sp);
+        super::run_scoped(key, work).await
     }
 }
 
 pub fn review_fleet_router(inner: Arc<dyn FleetRegistry>) -> Router {
     Server::builder().add_service(ReviewFleetSvc::new(inner).into_server())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_proto::identity::{SESSION_ID_KEY, USER_ID_KEY};
+    use pb::review_fleet_service_server::ReviewFleetService as _;
+    use rstest::rstest;
+    use std::sync::Mutex;
+    use tonic::metadata::MetadataValue;
+
+    // Records the ambient tenant (`current_identity().user`) at each store call — proves the
+    // served handler scopes the caller into a `PerTenant`-wrapped fleet roster (C31 Principle 3).
+    #[derive(Default)]
+    struct TenantProbeFleet {
+        seen: Arc<Mutex<Vec<Option<String>>>>,
+    }
+    impl TenantProbeFleet {
+        fn record(&self) {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(agent_core::current_identity().map(|k| k.user.as_str().to_string()));
+        }
+    }
+    #[tonic::async_trait]
+    impl FleetRegistry for TenantProbeFleet {
+        async fn list(&self) -> agent_core::Result<Vec<agent_core::FleetSession>> {
+            self.record();
+            Ok(vec![])
+        }
+        async fn put(
+            &self,
+            session: agent_core::FleetSession,
+        ) -> agent_core::Result<agent_core::FleetSession> {
+            self.record();
+            Ok(session)
+        }
+        async fn get(&self, _id: &str) -> agent_core::Result<agent_core::FleetSession> {
+            unimplemented!()
+        }
+        async fn delete(&self, _id: &str) -> agent_core::Result<bool> {
+            unimplemented!()
+        }
+        async fn set_enabled(
+            &self,
+            _id: &str,
+            _enabled: bool,
+        ) -> agent_core::Result<agent_core::FleetSession> {
+            unimplemented!()
+        }
+    }
+
+    fn req_with<T>(payload: T, user: Option<&str>, session: Option<&str>) -> Request<T> {
+        let mut req = Request::new(payload);
+        if let Some(u) = user {
+            req.metadata_mut()
+                .insert(USER_ID_KEY, MetadataValue::try_from(u).unwrap());
+        }
+        if let Some(s) = session {
+            req.metadata_mut()
+                .insert(SESSION_ID_KEY, MetadataValue::try_from(s).unwrap());
+        }
+        req
+    }
+
+    // Every caller-identity class → the tenant the store runs under. Present + path-safe
+    // scopes; partial/hostile fails closed to the default tenant (`None`).
+    #[rstest]
+    #[case::positive_tenant_header_scopes_to_tenant(Some("acme".into()), Some("s1".into()), Some("acme".into()))]
+    #[case::negative_no_identity_runs_as_local(None, None, None)]
+    #[case::negative_second_tenant_is_isolated(Some("globex".into()), Some("s1".into()), Some("globex".into()))]
+    #[case::boundary_max_len_tenant_segment(Some("a".repeat(128)), Some("s1".into()), Some("a".repeat(128)))]
+    #[case::corner_user_without_session_runs_as_local(Some("acme".into()), None, None)]
+    #[case::adversarial_traversal_header_fails_to_local(Some("../../heads/main".into()), Some("s1".into()), None)]
+    #[case::adversarial_empty_header_fails_to_local(Some(String::new()), Some("s1".into()), None)]
+    #[tokio::test]
+    async fn fleet_list_scopes_caller_tenant(
+        #[case] user: Option<String>,
+        #[case] session: Option<String>,
+        #[case] expected: Option<String>,
+    ) {
+        let store = Arc::new(TenantProbeFleet::default());
+        let svc = ReviewFleetSvc::new(store.clone());
+        let req = req_with(
+            pb::FleetListRequest::default(),
+            user.as_deref(),
+            session.as_deref(),
+        );
+        svc.list(req).await.unwrap();
+        assert_eq!(store.seen.lock().unwrap().as_slice(), &[expected]);
+    }
+
+    // The write path composes with the RBAC gate: with no verified principal `authz::require`
+    // is a pass-through, and the handler still scopes the caller into the store.
+    #[tokio::test]
+    async fn fleet_put_scopes_under_authz_passthrough() {
+        let store = Arc::new(TenantProbeFleet::default());
+        let svc = ReviewFleetSvc::new(store.clone());
+        let req = req_with(pb::FleetSession::default(), Some("acme"), Some("s1"));
+        svc.put(req).await.unwrap();
+        assert_eq!(
+            store.seen.lock().unwrap().as_slice(),
+            &[Some("acme".to_string())]
+        );
+    }
 }
