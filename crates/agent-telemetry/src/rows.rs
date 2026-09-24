@@ -40,7 +40,10 @@ impl EventRow {
         let tool_calls = if event.message.tool_calls.is_empty() {
             String::new()
         } else {
-            serde_json::to_string(&event.message.tool_calls).unwrap_or_default()
+            // Tool-call arguments (edit bodies, bash commands) can carry secrets too,
+            // so redact the serialized blob before storing — same posture as `content`.
+            let raw = serde_json::to_string(&event.message.tool_calls).unwrap_or_default();
+            agent_export::apply_redactions(&raw, agent_export::fallback_findings(&raw))
         };
         Self {
             session_id: event.session_id.clone(),
@@ -51,7 +54,16 @@ impl EventRow {
             role: event.message.role.as_str().to_string(),
             // The telemetry row is a flat text column; media blocks are
             // summarized by `content_text` rather than base64'd into ClickHouse.
-            content: event.message.content_text(),
+            // Redact secrets BEFORE storing (multi-tenancy C28-3): the recall path
+            // reads this column, so a credential that scrolled through a transcript
+            // must never be stored — parity with the tantivy recall corpus, which
+            // redacts before indexing (recall.rs). Synchronous fallback matcher
+            // (AWS keys / private-key blocks); the full async `Scanner` seam is not
+            // reachable from this non-async funnel.
+            content: {
+                let raw = event.message.content_text();
+                agent_export::apply_redactions(&raw, agent_export::fallback_findings(&raw))
+            },
             tool_calls,
             tool_call_id: event.message.tool_call_id.clone().unwrap_or_default(),
         }
@@ -560,6 +572,63 @@ mod tests {
         assert_eq!(row.seq, 3);
         assert_eq!(row.session_id, "s");
         assert!(row.tool_calls.contains("bash"));
+    }
+
+    // --- C28-3: secrets are redacted BEFORE storage (parity with recall corpus) ---
+
+    // adversarial: a credential that scrolled through a message must never be stored
+    // in `agent_events.content` — the recall path reads this column.
+    #[test]
+    fn adversarial_content_secret_is_redacted_before_storage() {
+        let secret = "AKIAIOSFODNN7EXAMPLE"; // fallback-matched AWS access key id
+        let row = EventRow::from_event(
+            &ev(
+                "assistant",
+                Message::assistant(format!("export AWS_KEY={secret}")),
+                None,
+            ),
+            0,
+        );
+        assert!(
+            !row.content.contains(secret),
+            "raw secret must not be stored, got: {}",
+            row.content
+        );
+        assert!(row.content.contains("[redacted"), "a marker replaces it");
+    }
+
+    // adversarial: a secret hidden in tool-call arguments is redacted too.
+    #[test]
+    fn adversarial_tool_call_secret_is_redacted_before_storage() {
+        let secret = "AKIAIOSFODNN7EXAMPLE";
+        let mut msg = Message::assistant("");
+        msg.tool_calls = vec![ToolCall {
+            id: "call_1".into(),
+            name: "bash".into(),
+            arguments: json!({ "command": format!("aws configure set key {secret}") }),
+        }];
+        let row = EventRow::from_event(&ev("assistant", msg, None), 0);
+        assert!(
+            !row.tool_calls.contains(secret),
+            "raw secret must not be stored in tool_calls, got: {}",
+            row.tool_calls
+        );
+        assert!(row.tool_calls.contains("bash"), "the tool name survives");
+    }
+
+    // positive: ordinary content is stored verbatim (redaction is a no-op when there
+    // is nothing to redact).
+    #[test]
+    fn positive_ordinary_content_is_stored_verbatim() {
+        let row = EventRow::from_event(
+            &ev(
+                "goal",
+                Message::user("how did we fix the segment merge bug?"),
+                None,
+            ),
+            0,
+        );
+        assert_eq!(row.content, "how did we fix the segment merge bug?");
     }
 
     // --- UsageRow: present ⇒ Some(tokens); absent ⇒ None ------------------

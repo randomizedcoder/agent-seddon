@@ -47,9 +47,17 @@ CREATE TABLE IF NOT EXISTS agent.agent_events
     seq          UInt32,
     kind         String,                   -- goal | assistant | tool | usage
     role         String,                   -- system | user | assistant | tool
-    content      String,
-    tool_calls   String,                   -- JSON array (empty for non-assistant)
-    tool_call_id String
+    content      String,                   -- secret-redacted at the sink (C28-3); recall reads this
+    tool_calls   String,                   -- JSON array (empty for non-assistant); also redacted
+    tool_call_id String,
+    -- Full-text acceleration for ClickHouse-backed recall (multi-tenancy C28-3): a
+    -- token bloom-filter data-skipping index so `hasToken(content, 'segment')` /
+    -- `multiSearchAny(content, [...])` prune granules instead of scanning every row.
+    -- Tunable (bloom bytes, hash fns, seed); GRANULARITY is in index-granule blocks.
+    -- Existing volumes, once: `ALTER TABLE agent.agent_events ADD INDEX idx_events_content
+    -- content TYPE tokenbf_v1(16384, 3, 0) GRANULARITY 4; ALTER TABLE agent.agent_events
+    -- MATERIALIZE INDEX idx_events_content;`.
+    INDEX idx_events_content content TYPE tokenbf_v1(16384, 3, 0) GRANULARITY 4
 )
 ENGINE = MergeTree
 ORDER BY (user, session_id, ts, seq);
