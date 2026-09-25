@@ -272,4 +272,9 @@ in
   # (every objective requirement must accept its pass fixture AND reject its fail
   # fixture). Offline: go runs with GOPROXY=off on stdlib-only modules.
   graph-arena-tests = import ./graph-arena-tests.nix { inherit pkgs versions; };
+
+  # The multi-tenancy auditor's own test suite (four-class tables + check-the-checks +
+  # manifest self-consistency). Gates the auditor's correctness; the repo-wide
+  # `mt-audit --gate` gate lands once the gaps it reports are fixed. Pure stdlib Python.
+  mt-audit-tests = import ./mt-audit-tests.nix { inherit pkgs; };
 }

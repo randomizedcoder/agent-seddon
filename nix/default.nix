@@ -290,6 +290,11 @@ let
   # nix/fleet-measure.nix + test/fleet-measure/report.py.
   fleet-measure = import ./fleet-measure.nix { inherit pkgs; };
 
+  # `nix run .#mt-audit` — multi-tenancy coverage audit over the source tree, reconciled
+  # against test/mt-audit/manifest.toml. nix/mt-audit.nix + test/mt-audit/audit.py (tested
+  # by the `mt-audit-tests` check).
+  mt-audit = import ./mt-audit.nix { inherit pkgs; };
+
   # `nix run .#portal-test-report -- <jsonl>...` — render the portal GUI test
   # report (page → element → case) from the hermetic checks' `flutter test
   # --machine` streams + the Layer-B rich records. See nix/portal-test-report.nix
@@ -640,6 +645,7 @@ in
         e2e-multi
         fleet-e2e
         fleet-measure
+        mt-audit
         fleet-redeploy
         portal-test-report
         graph-arena
