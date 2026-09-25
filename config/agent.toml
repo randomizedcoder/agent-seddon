@@ -301,9 +301,21 @@ max_repairs = 1
 #             (`nix develop <flake> -c bash -c …`), so the toolchain/$PATH is
 #             exactly nix/versions.nix — reproducible + content-addressed, no
 #             ambient host toolchain. Requires `nix` on PATH.
+#   "bwrap" — Tier-1 rootless-namespace isolation (multi-tenancy C23; Linux only,
+#             requires the `sandbox-bwrap` build feature + `bwrap` on PATH).
 # See docs/components/sandbox.md.
 [sandbox]
 backend = "local"
+# Tier-1 read-only checkout (C23-3a, `bwrap` only). When true, UNTRUSTED exec
+# (network-off — the reviewed-code profile) runs on a read-only bind of the checkout
+# with a throwaway tmpfs overlay for its writes (discarded on exit), so reviewed code
+# cannot mutate the host tree; the agent's own (network-on) exec keeps the writable
+# bind. Default false = today's writable bind for every exec.
+# readonly_exec = false
+# [sandbox.limits] — cgroup-v2 anti-DoS caps for `bwrap` (C23-2, via systemd-run).
+# memory_max = "512M"   # MemoryMax; OOM-killed past it
+# cpu_quota  = "50%"    # CPUQuota; half a core
+# pids_max   = 256      # TasksMax; fork-bomb guard
 
 # Embedding model for semantic search (the Embedder seam). `backend` = "local"
 # (dependency-free feature-hashing embedder; no model/network). `dimensions` sizes

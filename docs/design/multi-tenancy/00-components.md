@@ -22,6 +22,13 @@ The `Sandbox` seam (`agent-core/src/lib.rs:1277`) is already shaped for real iso
   real `capabilities()`.
 - **Security.** cgroups v2 = resource pillar; namespaces+seccomp+netns = the rest; document
   residual risk per tier (don't oversell).
+- **Built.** *C23-1* (#454) — process/fs/network/credential pillars via rootless bwrap,
+  fail-closed. *C23-2* (#455) — resource pillar (cgroup-v2 caps via `systemd-run`,
+  `[sandbox.limits]`). *C23-3a* — FS pillar for reviewed code: `[sandbox] readonly_exec` makes
+  untrusted (network-off) exec run on a **read-only checkout + throwaway tmpfs overlay**
+  (`--overlay-src`/`--tmp-overlay`), writes discarded on exit; the agent's own (network-on) exec
+  keeps the writable bind; default off = byte-identical. **Remaining (deferred/optional):** *C23-3b*
+  seccomp profile + *C23-3c* egress allow-list (`[sandbox.egress]`).
 
 ### C24 — execution chokepoint
 - **Purpose.** Make `Sandbox` the *single* place every child process is spawned, so isolation

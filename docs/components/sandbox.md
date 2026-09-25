@@ -31,7 +31,9 @@ re-derive.
     namespaces, so the four pillars it covers are actually *enforced*: process
     (user/pid/ipc/uts namespaces → no host capabilities, `--die-with-parent`,
     `--new-session`), filesystem (read-only system binds, a private `/tmp` tmpfs, the
-    cwd bound read-write), network (`NetworkPolicy::Off`/`Loopback` → `--unshare-net`,
+    cwd bound read-write — or, under `[sandbox] readonly_exec` (C23-3a), a **read-only
+    checkout with a throwaway overlay** for untrusted exec, see below), network
+    (`NetworkPolicy::Off`/`Loopback` → `--unshare-net`,
     a loopback-only netns), and credential (`EnvPolicy::Scrub` via the shared exec
     path, propagated to the child). The **resource** pillar (C23-2) is a separate
     mechanism — cgroup-v2 caps (`MemoryMax`/`CPUQuota`/`TasksMax`) applied by wrapping
@@ -43,6 +45,18 @@ re-derive.
     unprivileged namespaces, `exec` **fails closed** (the child never runs unconfined)
     rather than degrading. Tier 1 = rootless, **shared kernel** — real process/fs/net
     isolation, not a VM (the `oci`/`microvm` Tier-2+ backends are follow-ups).
+- **Read-only checkout + throwaway overlay (`readonly_exec`, C23-3a; `bwrap` only).**
+  The same backend serves the agent's own tools *and* attacker-controlled reviewed
+  code, so a read-only checkout must be **per-call**, not global. The discriminator is
+  the intent already on `ExecSpec`: untrusted reviewed-code exec sets
+  `NetworkPolicy::Off` (the same signal that already drops the network), while the
+  agent's own `bash`/`git` run `NetworkPolicy::On`. With `[sandbox] readonly_exec =
+  true`, an `Off`/`Loopback` exec mounts the checkout as an **overlay** — a read-only
+  lower (the real cwd) plus an invisible tmpfs upper — so reviewed code can build/test
+  but its writes are **discarded** on exit and never reach the host tree; `On` exec
+  keeps the writable bind. Default `false` = today's writable bind for every exec
+  (Tier-0 byte-identical). An overlayfs setup failure is **fail-closed** like the rest
+  of the FS pillar (bwrap exits before the child).
 - **Wiring:** `bash` (`agent-tools`) holds an `Arc<dyn Sandbox>`; the builder picks
   the backend from `[sandbox] backend` (default `local`), meters it, and passes it
   to `BashTool::new`. `LocalSandbox` is `bash`'s `Default` so nothing else changes.
@@ -139,11 +153,12 @@ back so the model can read them.
   default. The dev-shell mode ships now (reproducible closure); the derivation mode
   (real network/mount teeth) is the follow-up. `NetworkPolicy`/`EnvPolicy` are
   carried on `ExecSpec` today but only enforced by backends that can.
-- **`bwrap` follow-ups (C23-3+):** an egress allow-list (`[sandbox.egress]`), a
-  read-only checkout for reviewed code, and a tuned seccomp profile. The `bwrap`
-  backend (process/fs/network/credential pillars, C23-1) and the resource pillar
-  (cgroups via `[sandbox.limits]`, C23-2) ship now. **`nsjail` / `docker` / `oci` /
-  `microvm`** are further backends behind the same seam (Tier 2+).
+- **`bwrap` follow-ups (C23-3b/c+):** an egress allow-list (`[sandbox.egress]`) and a
+  tuned seccomp profile. The `bwrap` backend (process/fs/network/credential pillars,
+  C23-1), the resource pillar (cgroups via `[sandbox.limits]`, C23-2), and the
+  read-only checkout + throwaway overlay for reviewed code (`[sandbox] readonly_exec`,
+  C23-3a) ship now. **`nsjail` / `docker` / `oci` / `microvm`** are further backends
+  behind the same seam (Tier 2+).
 - **Per-call backend selection via `Policy`** (`Decision` naming a backend); config
   picks the global default today.
 - **The `SandboxService` gRPC service** (`agent --serve-sandbox`) so a heavy

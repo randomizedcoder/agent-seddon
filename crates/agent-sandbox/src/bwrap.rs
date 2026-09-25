@@ -6,7 +6,11 @@
 //! - **process/syscall** — user/pid/ipc/uts namespaces (rootless ⇒ the child holds
 //!   no capabilities over host resources), `--die-with-parent`, `--new-session`.
 //! - **filesystem** — a fresh root with read-only binds of the system toolchain,
-//!   a private `/tmp` (tmpfs), and the working directory bound read-write.
+//!   a private `/tmp` (tmpfs), and the working directory bound read-write. Under the
+//!   opt-in `[sandbox] readonly_exec` (C23-3a), *untrusted* exec (network `Off`/
+//!   `Loopback` — the reviewed-code profile) instead runs on a **read-only** checkout
+//!   with a **throwaway** tmpfs overlay, so it can build/test but never mutates the
+//!   host tree; the agent's own (network `On`) exec keeps the writable bind.
 //! - **network** — `NetworkPolicy::Off`/`Loopback` → `--unshare-net` (a private,
 //!   loopback-only network namespace); `On` stays on the shared network.
 //! - **credential** — `EnvPolicy::Scrub` is enforced by the shared [`run_argv`]
@@ -57,17 +61,30 @@ impl SandboxLimits {
 }
 
 /// A Tier-1 isolation backend. `limits` (default empty) adds the C23-2 resource
-/// pillar; with no limits it is exactly the namespace-only backend.
+/// pillar; with no limits it is exactly the namespace-only backend. `readonly_exec`
+/// (default `false`, C23-3a) makes untrusted (network-off) exec run on a read-only
+/// checkout + throwaway overlay; `false` is byte-identical to the pre-C23-3a backend.
 #[derive(Debug, Clone, Default)]
 pub struct BwrapSandbox {
     limits: SandboxLimits,
+    readonly_exec: bool,
 }
 
 impl BwrapSandbox {
     /// A backend with cgroup resource caps (C23-2). `SandboxLimits::default()`
     /// (all `None`) yields the namespace-only backend — the same as `default()`.
     pub fn new(limits: SandboxLimits) -> Self {
-        Self { limits }
+        Self {
+            limits,
+            readonly_exec: false,
+        }
+    }
+
+    /// Enable the C23-3a read-only checkout + throwaway overlay for untrusted
+    /// (network `Off`/`Loopback`) exec. Off (the default) keeps the writable bind.
+    pub fn with_readonly_exec(mut self, on: bool) -> Self {
+        self.readonly_exec = on;
+        self
     }
 
     /// The `systemd-run` scope prefix that applies [`SandboxLimits`], or an empty
@@ -97,7 +114,13 @@ impl BwrapSandbox {
 /// never be parsed as a bwrap option. Isolation flags derive only from
 /// `spec.network`; `EnvPolicy::Scrub` is applied by the outer [`run_argv`] and
 /// propagated by bwrap (see the module docs), so it needs no flag here.
-pub(crate) fn bwrap_argv(spec: &ExecSpec) -> Vec<String> {
+///
+/// `readonly_exec` (C23-3a) controls the working-directory mount for *untrusted* exec
+/// (network `Off`/`Loopback`): when set, the checkout is bound read-only with a
+/// throwaway tmpfs overlay for the child's writes; when unset (default), the cwd is a
+/// writable bind exactly as before. Trusted (network `On`) exec is always a writable
+/// bind, so the agent's own tools are unaffected regardless of the flag.
+pub(crate) fn bwrap_argv(spec: &ExecSpec, readonly_exec: bool) -> Vec<String> {
     let cwd = spec.cwd.to_string_lossy().into_owned();
     let mut a: Vec<String> = vec![BWRAP.to_string()];
     // Process/syscall isolation: rootless namespaces (the child gets no host
@@ -150,12 +173,26 @@ pub(crate) fn bwrap_argv(spec: &ExecSpec) -> Vec<String> {
         ]
         .map(String::from),
     );
-    // The working directory is writable (tools write build/scratch output there),
-    // bound AFTER `--tmpfs /tmp` so a cwd under /tmp overlays onto the private
-    // tmpfs rather than being shadowed by it.
-    a.push("--bind".into());
-    a.push(cwd.clone());
-    a.push(cwd.clone());
+    // The working directory, bound AFTER `--tmpfs /tmp` so a cwd under /tmp overlays
+    // onto the private tmpfs rather than being shadowed by it. Untrusted reviewed-code
+    // exec (network Off/Loopback — the same predicate that dropped the network above)
+    // runs on a READ-ONLY checkout with a throwaway tmpfs overlay for its writes
+    // (discarded when the namespace exits), so it can build/test but can never mutate
+    // the host checkout. The agent's own exec (network On) keeps the writable bind.
+    // Gated by `readonly_exec` ([sandbox] readonly_exec); off ⇒ today's behaviour.
+    // An overlayfs setup failure is fail-closed like the rest of the FS pillar: bwrap
+    // prints a `bwrap:` diagnostic and exits before the child (see `is_bwrap_setup_error`).
+    let untrusted = matches!(spec.network, NetworkPolicy::Off | NetworkPolicy::Loopback);
+    if readonly_exec && untrusted {
+        a.push("--overlay-src".into()); // read-only lower = the real checkout
+        a.push(cwd.clone());
+        a.push("--tmp-overlay".into()); // upper+work = an invisible, throwaway tmpfs
+        a.push(cwd.clone());
+    } else {
+        a.push("--bind".into());
+        a.push(cwd.clone());
+        a.push(cwd.clone());
+    }
     a.push("--chdir".into());
     a.push(cwd);
     // End of bwrap options; everything after is the untrusted child command.
@@ -217,7 +254,7 @@ impl Sandbox for BwrapSandbox {
         // then the bwrap isolation, then the untrusted child. An empty prefix ⇒ the
         // namespace-only backend.
         let mut argv = self.scope_prefix();
-        argv.extend(bwrap_argv(spec));
+        argv.extend(bwrap_argv(spec, self.readonly_exec));
         let out = run_argv(&argv, spec).await?;
         // Fail closed: if bwrap couldn't establish isolation it exited before the
         // child ran. Surface that as a sandbox error, never as a command result —

@@ -79,7 +79,7 @@ stays simple and honest.
 
 | Pillar | Mechanism | Current state | Fleet target |
 |---|---|---|---|
-| **Filesystem** | mount namespace + ro bind / overlayfs; per-org root; `confine` backstop | `confine` only (logical) | ro-mount the checkout; overlay upper for writable children; per-org subtree |
+| **Filesystem** | mount namespace + ro bind / overlayfs; per-org root; `confine` backstop | ✅ (C23-1 + C23-3a) bwrap ro system binds + private /tmp; untrusted exec → ro checkout + throwaway overlay | ro-mount the checkout (✅ `readonly_exec`); overlay upper for writable children (✅); per-org subtree (C4) |
 | **Process / syscall** | pid+user namespaces, seccomp, drop caps, non-root uid | none | unprivileged uid per org; seccomp profile; no host pids visible |
 | **Resource (cgroups)** | cgroups v2 `cpu.max`, `memory.max`, `pids.max`, `io` | none (only wall-clock timeout) | per-session cgroup; anti-DoS / fork-bomb / noisy-neighbor |
 | **Network** | per-session netns + egress allow-list | none (`NetworkPolicy::Off` unenforced; only web_fetch SSRF screen) | reviewed-code exec = **no network**; agent process = egress to LLM+forge only |
@@ -152,6 +152,9 @@ Ordered so the prerequisite lands first:
 2. **Enforcing backends** behind `impl Sandbox` (no trait change):
    - `bwrap` (Tier 1): rootless mount+pid+user namespaces, ro binds, seccomp, `EnvPolicy::Scrub`
      + `NetworkPolicy::Off` honored; cgroup caps via a `systemd-run --user` scope.
+     **Built:** C23-1 (process/fs/network/credential) + C23-2 (cgroups) + **C23-3a** (read-only
+     checkout + throwaway overlay for untrusted exec, `[sandbox] readonly_exec`). Remaining
+     bwrap follow-ups: seccomp (C23-3b) + egress allow-list (C23-3c).
    - `oci` (Tier 2): podman/crun rootless — full namespaces + cgroups v2 + seccomp + ro rootfs
      + per-session netns/egress; the OCI spec expresses all five pillars in one place.
    - `microvm` (Tier 2+, optional): Firecracker/gVisor for a kernel boundary.
@@ -172,8 +175,11 @@ Config: `[sandbox] backend = "local|nix|grpc|bwrap|oci|microvm"` + `[sandbox.lim
   `adversarial_no_direct_spawn_bypasses_sandbox` (grep-guard/test that asserts no raw
   `Command::new` outside the seam in tool crates).
 - FS: `adversarial_reviewed_code_cannot_read_other_org_workspace`,
-  `adversarial_reviewed_code_cannot_write_readonly_checkout`,
-  `positive_writable_overlay_is_throwaway`.
+  `adversarial_reviewed_code_cannot_write_readonly_checkout` (✅ C23-3a,
+  `agent-sandbox` `adversarial_bwrap_readonly_cannot_write_checkout`),
+  `positive_writable_overlay_is_throwaway` (✅ C23-3a,
+  `positive_bwrap_writable_overlay_is_throwaway`; plus
+  `positive_bwrap_trusted_exec_still_writes_checkout` for the agent-own-exec side).
 - Credential/network: `adversarial_scrub_removes_host_secrets_from_exec_env`,
   `adversarial_reviewed_code_has_no_network` (attempt egress → fails),
   `positive_agent_process_reaches_llm_and_forge_only`.
