@@ -26,7 +26,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use agent_core::{current_identity, safe_segment, UserId};
+use agent_core::{current_tenant, safe_segment, UserId};
 
 /// Upper bound on distinct per-tenant views cached at once. The tenant string is
 /// attacker-influenced under `[auth] mode = "none"` (the client-set `x-agent-user-id` is
@@ -35,16 +35,6 @@ use agent_core::{current_identity, safe_segment, UserId};
 /// evicted tenant simply rebuilds its (cheap `Arc`) view on next use. Matches the metrics
 /// tenant-label bound.
 const MAX_CACHED_TENANTS: usize = 1024;
-
-/// The current turn's verified tenant segment, or `local` when no identity is
-/// scoped or the scoped segment is not path-safe (fail-closed to the default
-/// tenant — never another tenant's view, never an escape).
-fn current_tenant() -> String {
-    match current_identity() {
-        Some(k) if safe_segment(k.user.as_str()) => k.user.as_str().to_string(),
-        _ => UserId::LOCAL.to_string(),
-    }
-}
 
 /// Derive a tenant's own on-disk path from a base path, for the **file-backed**
 /// seam that has no shared store to key by tenant: the cognition graph (config C2b,

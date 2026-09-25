@@ -266,6 +266,23 @@ pub fn current_identity() -> Option<SessionKey> {
     AGENT_IDENTITY.try_with(std::clone::Clone::clone).ok()
 }
 
+/// The current turn's **verified tenant** segment, or [`UserId::LOCAL`] when no
+/// identity is scoped or the scoped `user` is not [`safe_segment`]-valid
+/// (fail-closed to the default tenant — never another tenant, never an escape).
+///
+/// This is the one security-critical tenant-resolution rule, shared by every
+/// per-tenant router and cache (the `PerTenant<Store>` wrap and the
+/// registry-backed router's per-tenant snapshot), so the boundary cannot drift
+/// between two hand-copied definitions. `local` maps to a store's own
+/// un-namespaced view, so `[tenancy] per_tenant = false` and the single-tenant
+/// CLI stay byte-identical.
+pub fn current_tenant() -> String {
+    match current_identity() {
+        Some(k) if safe_segment(k.user.as_str()) => k.user.as_str().to_string(),
+        _ => UserId::LOCAL.to_string(),
+    }
+}
+
 /// Run `fut` with `identity` as the ambient identity (see [`AGENT_IDENTITY`]). Nested
 /// scopes shadow; a spawned task does *not* inherit the scope (deliberate — a gRPC
 /// server handler task must use its *caller's* identity, not the server's).
@@ -386,6 +403,63 @@ mod tests {
             "`/` and `@` are out of charset"
         );
         assert!(SessionId::parse("owner/repo@42").is_err());
+    }
+
+    // --- multi-tenancy C31-2: current_tenant() fail-closed resolution ---------
+
+    /// A verified, path-safe `user` becomes the tenant verbatim.
+    #[tokio::test]
+    async fn positive_safe_user_is_tenant() {
+        let got = scope(SessionKey::parse("acme", "s1").unwrap(), async {
+            current_tenant()
+        })
+        .await;
+        assert_eq!(got, "acme");
+    }
+
+    /// No ambient identity ⇒ the default `local` tenant (the operator's own view).
+    #[test]
+    fn negative_no_identity_is_local() {
+        assert_eq!(current_tenant(), UserId::LOCAL);
+    }
+
+    /// The longest `safe_segment` user still maps to itself (no truncation at the
+    /// boundary — the whole segment is the tenant key).
+    #[tokio::test]
+    async fn boundary_max_len_user_is_tenant() {
+        let user = "a".repeat(MAX_SEGMENT_LEN);
+        let key = SessionKey {
+            user: UserId::new(user.clone()),
+            session: SessionId::new("s1"),
+        };
+        let got = scope(key, async { current_tenant() }).await;
+        assert_eq!(got, user);
+    }
+
+    /// Adversarial: a hostile `user` segment that only a raw `mode = "none"` header
+    /// could slip through (traversal/separator/leading-dash) fails **closed** to
+    /// `local` — never `..`, a separator, or another tenant's view. `UserId::new`
+    /// bypasses `parse`'s validation exactly as a trusted-as-sent header would, so
+    /// this drives the resolver's own last line of defense.
+    #[rstest::rstest]
+    #[case::traversal("../../heads/main")]
+    #[case::separator("a/b")]
+    #[case::dotdot("..")]
+    #[case::leading_dash("-x")]
+    #[case::empty("")]
+    #[tokio::test]
+    async fn adversarial_unsafe_user_is_local(#[case] bad: &str) {
+        let key = SessionKey {
+            user: UserId::new(bad),
+            session: SessionId::new("s1"),
+        };
+        let got = scope(key, async { current_tenant() }).await;
+        assert_eq!(
+            got,
+            UserId::LOCAL,
+            "hostile user {bad:?} must fail to local"
+        );
+        assert!(!got.contains(bad) || bad.is_empty());
     }
 
     /// Pathological repo names still encode to a well-formed id: an all-separator
