@@ -74,6 +74,32 @@ async fn main() -> Result<()> {
                 as std::sync::Arc<dyn agent_core::PreflightProvider>
         });
 
+    // C23-3c: agent-process egress allow-list. When enabled, start a loopback CONNECT
+    // filtering proxy and pin this process's `reqwest` egress to it via
+    // `HTTPS_PROXY`/`HTTP_PROXY`, so the agent reaches only allow-listed hosts (providers +
+    // forge + `[web]` + operator extras). Done HERE — before telemetry, `agent doctor`, and
+    // `build_agent` construct any `reqwest` client, so the env is in place when they read
+    // it. Fail-closed: a bind failure refuses to start the agent (it would otherwise run
+    // with egress unfiltered while the operator believes it is on). The confirmation is
+    // logged after `init_tracing` below (no subscriber exists yet here).
+    let egress_addr = if config.sandbox.egress.enabled {
+        let rules = agent_runtime::derive_egress_allowlist(&config);
+        let matcher = std::sync::Arc::new(agent_egress::HostMatcher::new(rules));
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .context("egress allow-list: binding the loopback proxy")?;
+        let addr = listener
+            .local_addr()
+            .context("egress allow-list: proxy local addr")?;
+        for (k, v) in agent_egress::proxy_env(addr) {
+            std::env::set_var(k, v);
+        }
+        tokio::spawn(agent_egress::serve(listener, matcher.clone()));
+        Some((addr, matcher.len()))
+    } else {
+        None
+    };
+
     // Telemetry (opt-in). Build the writer before installing tracing so the
     // ClickHouse layer can stream logs from the very first event.
     let (telemetry, session_id) = if config.telemetry.enabled {
@@ -103,6 +129,21 @@ async fn main() -> Result<()> {
         headers: config.telemetry.otlp_headers.clone(),
     });
     let otel_guard = init_tracing(&telemetry, config.telemetry.stream_logs, otel_cfg);
+
+    // Confirm the C23-3c egress allow-list now that a subscriber exists.
+    if let Some((addr, rules)) = egress_addr {
+        tracing::info!(
+            proxy = %addr,
+            allow_hosts = rules,
+            "C23-3c egress allow-list active — process egress restricted to allow-listed hosts"
+        );
+        if rules == 0 {
+            tracing::warn!(
+                "egress allow-list is enabled but empty — ALL process egress is blocked \
+                 (no provider/forge/web hosts derived; add hosts under [sandbox.egress])"
+            );
+        }
+    }
 
     // Now that there is a subscriber, report anything in the config that nothing
     // reads. Ignored keys are not fatal, but they must not be silent: this file

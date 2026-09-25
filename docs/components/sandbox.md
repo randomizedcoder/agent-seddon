@@ -153,12 +153,22 @@ back so the model can read them.
   default. The dev-shell mode ships now (reproducible closure); the derivation mode
   (real network/mount teeth) is the follow-up. `NetworkPolicy`/`EnvPolicy` are
   carried on `ExecSpec` today but only enforced by backends that can.
-- **`bwrap` follow-ups (C23-3b/c+):** an egress allow-list (`[sandbox.egress]`) and a
-  tuned seccomp profile. The `bwrap` backend (process/fs/network/credential pillars,
-  C23-1), the resource pillar (cgroups via `[sandbox.limits]`, C23-2), and the
-  read-only checkout + throwaway overlay for reviewed code (`[sandbox] readonly_exec`,
-  C23-3a) ship now. **`nsjail` / `docker` / `oci` / `microvm`** are further backends
-  behind the same seam (Tier 2+).
+- **`bwrap` backend — all pillars ship now:** process/fs/network/credential (C23-1),
+  resource (cgroups via `[sandbox.limits]`, C23-2), read-only checkout + throwaway overlay
+  for reviewed code (`[sandbox] readonly_exec`, C23-3a), and the tuned seccomp-BPF filter
+  (`[sandbox] seccomp`, C23-3b). **`nsjail` / `docker` / `oci` / `microvm`** are further
+  backends behind the same seam (Tier 2+).
+- **Agent-process egress allow-list (`[sandbox.egress]`, C23-3c — ships now, independent of
+  `backend`).** Reviewed code already gets zero egress via the bwrap netns; this restricts
+  the **agent's own** outbound HTTP. When `enabled`, the runtime starts a loopback CONNECT
+  filtering proxy and pins the process's `reqwest` egress to it (`HTTPS_PROXY`/`HTTP_PROXY`),
+  allowing only hosts **auto-derived** from config (provider `base_url`s, the forge host +
+  companions, `[web] allow_hosts`) plus `[sandbox.egress] allow_hosts`. Fail-closed
+  (non-listed/malformed → `403`; bind failure refuses to start; empty set blocks all egress);
+  a **policy boundary for the trusted process**, not a hard kernel boundary, covering `reqwest`
+  only (tonic/OTLP, ClickHouse-native, and the `git` subprocess reach operator backends and
+  are not proxied — a kernel-level all-egress netns is the later hardening). Default off =
+  byte-identical.
 - **Per-call backend selection via `Policy`** (`Decision` naming a backend); config
   picks the global default today.
 - **The `SandboxService` gRPC service** (`agent --serve-sandbox`) so a heavy

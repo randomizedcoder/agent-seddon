@@ -10,7 +10,7 @@ Legend: ⬜ not started · 🟡 in progress · ✅ merged.
 
 | # | Plane | Components | State | PR |
 |---|---|---|---|---|
-| 01 | Process isolation & multi-org boundaries | C23, C24, C25 | ✅ C23 (bwrap, 5 pillars + C23-3a ro-checkout/overlay + C23-3b seccomp) + C24; 🟡 C25 foundation; ⬜ C23-3c egress | #454/#455 (C23), C23-3a (ro-checkout), C23-3b (seccomp), #273/#274/#275 (C24), #276 (C25) |
+| 01 | Process isolation & multi-org boundaries | C23, C24, C25 | ✅ C23 (bwrap, 5 pillars + C23-3a ro-checkout/overlay + C23-3b seccomp + C23-3c egress allow-list) + C24; 🟡 C25 foundation | #454/#455 (C23), C23-3a (ro-checkout), C23-3b (seccomp), C23-3c (egress), #273/#274/#275 (C24), #276 (C25) |
 | 02 | Data scoping & row-level security | C26, C27, C28 | ✅ C26 (identity at source) + C27 (RLS + `user`-leading sort key); ✅ **C28 complete** — metrics tool (C28-1) + sqlite prompt (C28-2) + recall schema/redaction (C28-3a) + ClickHouse recall backend (C28-3c) + code-index per-tenant partition (C28-3d) | #315–#322 (C26), #456 (C27-1), C27-2 (sort key), #458 (C28-2), #459 (C28-1), #460 (C28-3a), #461 (C28-3c), C28-3d (code-index partition) |
 | 03 | Config & seam-state tenancy | C29, C30, C31 | ✅ **plane complete** — **C29** (config ownership model + operator-config write guard) + **C30** (shared-store seams, config C2; file-backed graph, config C2b) + **C31** (C31-1 control-plane scope-by-caller: provider-registry / prompt / review-fleet services; C31-2 tenant-keyed `RegistryRouter` fleet cells + secret isolation); scheduler is the one designed-not-built seam | #297/#308 (C29 enforcement, via config C40), C29 (mode=none guard + ownership annotation), #302 (config C2), C2b (graph), #464 (C31-1 service scoping), C31-2 (router keying) |
 
@@ -34,7 +34,20 @@ writable-but-throwaway, agent-own writes still land). **C23-3b** completes the s
 pure-Rust `seccompiler` and handed to bwrap over an inherited `memfd` (`--seccomp <fd>`); fail-closed
 (an unsupported arch / build error refuses to exec, never runs un-filtered) and default-off =
 byte-identical. Live-verified on l (`Seccomp: 2` filter mode active in the child; normal commands
-unaffected). Remaining bwrap follow-up: **C23-3c** egress allow-list (deferred/optional).
+unaffected). **C23-3c** completes the network pillar for the **agent process itself** with an
+opt-in **egress allow-list**: under `[sandbox.egress] enabled` (independent of the sandbox
+`backend`), a tiny pure-Rust loopback **CONNECT filtering proxy** is started at boot and the
+process's `reqwest` egress is pinned to it (`HTTPS_PROXY`/`HTTP_PROXY`, `NO_PROXY` for loopback),
+so the agent reaches only allow-listed hosts. The permitted set is **auto-derived** from config
+(LLM provider `base_url`s, the git-forge host + companions, `[web] allow_hosts`) **plus**
+`[sandbox.egress] allow_hosts`; fail-closed (a non-allow-listed / malformed target → `403`; a bind
+failure refuses to start; an empty derived set blocks all egress). It is a **policy boundary for
+the trusted agent process** and the model-driven `reqwest` paths — *not* a hard kernel boundary
+against a fully-compromised process, and it covers `reqwest` only (the tonic/OTLP, ClickHouse-native
+and `git`-subprocess paths talk to operator backends and are not proxied); a kernel-level all-egress
+netns is a possible later hardening. Default off = runtime byte-identical. **With C23-3c the C23
+bwrap pillar set (FS/process/network/credential/resource + ro-checkout + seccomp + egress) is
+complete.**
 
 **Plane 02 building.** **C26 — identity at source** is done: a verified `user` (tenant == user at
 this tier) rides every telemetry row/span/log, stamped from `current_identity()` at the emit funnel

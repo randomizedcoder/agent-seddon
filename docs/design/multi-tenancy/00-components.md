@@ -27,8 +27,13 @@ The `Sandbox` seam (`agent-core/src/lib.rs:1277`) is already shaped for real iso
   `[sandbox.limits]`). *C23-3a* — FS pillar for reviewed code: `[sandbox] readonly_exec` makes
   untrusted (network-off) exec run on a **read-only checkout + throwaway tmpfs overlay**
   (`--overlay-src`/`--tmp-overlay`), writes discarded on exit; the agent's own (network-on) exec
-  keeps the writable bind; default off = byte-identical. **Remaining (deferred/optional):** *C23-3b*
-  seccomp profile + *C23-3c* egress allow-list (`[sandbox.egress]`).
+  keeps the writable bind; default off = byte-identical. *C23-3b* — syscall pillar: `[sandbox]
+  seccomp` runs every sandboxed exec under a default-allow + curated deny-list seccomp-BPF filter
+  (`EPERM`, not kill). *C23-3c* — agent-process egress allow-list (`[sandbox.egress]`, independent of
+  `backend`): a loopback CONNECT filtering proxy pins the process's `reqwest` egress to hosts
+  auto-derived from config (provider/forge/`[web]`) plus operator extras; fail-closed; a policy
+  boundary for the trusted process (reqwest paths), not a hard kernel boundary. **With C23-3c the
+  bwrap pillar set is complete.**
 
 ### C24 — execution chokepoint
 - **Purpose.** Make `Sandbox` the *single* place every child process is spawned, so isolation

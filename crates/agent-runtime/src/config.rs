@@ -1825,6 +1825,10 @@ pub struct SandboxCfg {
     /// `false` ⇒ no filter (Tier-0 byte-identical). Ignored by non-`bwrap` backends.
     #[serde(default)]
     pub seccomp: bool,
+    /// Agent-process egress allow-list (multi-tenancy C23-3c). Governs the **agent's own**
+    /// outbound HTTP — **independent of `backend`** (works even with `backend = "local"`).
+    #[serde(default)]
+    pub egress: SandboxEgressCfg,
 }
 
 impl Default for SandboxCfg {
@@ -1834,12 +1838,40 @@ impl Default for SandboxCfg {
             limits: SandboxLimitsCfg::default(),
             readonly_exec: false,
             seccomp: false,
+            egress: SandboxEgressCfg::default(),
         }
     }
 }
 
 fn default_sandbox_backend() -> String {
     "local".to_string()
+}
+
+/// `[sandbox.egress]` — the agent-process egress allow-list (C23-3c,
+/// docs/design/multi-tenancy/01-process-isolation.md). When `enabled`, the runtime starts
+/// a loopback CONNECT filtering proxy and pins the process's `reqwest` egress to it, so the
+/// agent can reach only allow-listed hosts. The permitted set is **auto-derived** from
+/// config (LLM provider `base_url`s, the git-forge host + its companions, `[web]
+/// allow_hosts`) **plus** `allow_hosts` here. Fail-closed: anything not derived or listed
+/// is refused, and `enabled` with an empty derived set blocks *all* egress. Operator
+/// config, never model-supplied. Default `enabled = false` ⇒ runtime byte-identical (the
+/// proxy never starts, no env is set). This governs the agent process itself and is
+/// **independent of the sandbox `backend`**. It covers `reqwest` egress only — the tonic
+/// (OTLP / internal gRPC), ClickHouse-native, and `git`-subprocess paths (all operator
+/// backends) are not proxied.
+#[derive(Debug, Default, Deserialize)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
+pub struct SandboxEgressCfg {
+    /// Turn the egress allow-list on. Default `false`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Extra permitted hosts beyond the auto-derived set. Each is an exact host
+    /// (`api.example.com`) or a subdomain wildcard (`.example.com` / `*.example.com`).
+    #[serde(default)]
+    pub allow_hosts: Vec<String>,
 }
 
 /// `[sandbox.limits]` — cgroup-v2 resource caps applied to the `bwrap` sandboxed

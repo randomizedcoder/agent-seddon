@@ -49,6 +49,7 @@ name = "agent-cli"
 version = "0.1.0"
 dependencies = [
  "agent-core",
+ "agent-egress",
  "agent-grpc",
  "agent-mcp",
  "agent-review",
@@ -130,6 +131,15 @@ dependencies = [
  "rusqlite",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "agent-egress"
+version = "0.1.0"
+dependencies = [
+ "rstest",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -489,6 +499,7 @@ dependencies = [
  "agent-context",
  "agent-core",
  "agent-digest",
+ "agent-egress",
  "agent-embed",
  "agent-export",
  "agent-forge",

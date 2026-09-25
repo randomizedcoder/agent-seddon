@@ -39,6 +39,7 @@ members = [
     "crates/agent-forge",
     "crates/agent-scheduler",
     "crates/agent-pty",
+    "crates/agent-egress",
     "crates/agent-grpc",
     "crates/agent-mcp",
     "crates/agent-proto",
@@ -263,6 +264,7 @@ agent-review-fleet = { path = "crates/agent-review-fleet", default-features = fa
 agent-slack = { path = "crates/agent-slack", default-features = false }
 agent-scheduler = { path = "crates/agent-scheduler", default-features = false }
 agent-pty = { path = "crates/agent-pty", default-features = false }
+agent-egress = { path = "crates/agent-egress" }
 agent-grpc = { path = "crates/agent-grpc" }
 agent-mcp = { path = "crates/agent-mcp" }
 agent-proto = { path = "crates/agent-proto" }

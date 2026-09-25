@@ -19,6 +19,8 @@ auth = ["agent-runtime/auth"]
 [dependencies]
 agent-core.workspace = true
 agent-runtime.workspace = true
+# C23-3c agent-process egress allow-list — the loopback CONNECT filtering proxy.
+agent-egress.workspace = true
 # Grounded-fact rendering for `agent --review` (docs/design/code-review/).
 agent-review.workspace = true
 agent-grpc.workspace = true

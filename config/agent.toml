@@ -321,6 +321,16 @@ backend = "local"
 # memory_max = "512M"   # MemoryMax; OOM-killed past it
 # cpu_quota  = "50%"    # CPUQuota; half a core
 # pids_max   = 256      # TasksMax; fork-bomb guard
+# [sandbox.egress] — agent-process egress allow-list (C23-3c). Governs the AGENT'S OWN
+# outbound HTTP, INDEPENDENT of `backend` (works with backend = "local"). When enabled, a
+# loopback CONNECT proxy is started and this process's reqwest egress is pinned to it, so
+# the agent reaches only allow-listed hosts. The permitted set is auto-derived from config
+# (provider base_urls, the [forge] host + companions, [web] allow_hosts) PLUS `allow_hosts`
+# here. Fail-closed: anything not derived/listed is refused; enabled with an empty derived
+# set blocks ALL egress. Covers reqwest only (tonic/OTLP, ClickHouse-native, and the git
+# subprocess talk to operator backends and are not proxied). Default off = byte-identical.
+# enabled = false
+# allow_hosts = []   # extra hosts: "api.example.com", ".example.com" or "*.example.com"
 
 # Embedding model for semantic search (the Embedder seam). `backend` = "local"
 # (dependency-free feature-hashing embedder; no model/network). `dimensions` sizes
