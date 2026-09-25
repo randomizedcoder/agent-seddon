@@ -14,10 +14,14 @@ under `SessionKey::parse(tenant, …)` so it reads that tenant's seams). Covered
 `nix/serve-smoke.nix` (a `[scheduler] store="file"` Schedule→List roundtrip), and a
 `scheduler-store-postgres` tenant-isolation arm in `nix/pg-integration.nix`. One
 implementation choice differs from the sketch below, noted inline: a fired job runs
-in-process scoped to its tenant, not sandboxed — strong process isolation is the
-plane-01 dependency (§D2). **The cross-driver claim gap of §D1 is now closed
-(scheduler S1):** claims are written under a store `CompareAndSwap`, so two drivers
-ticking one backend can no longer both claim the same job.
+in-process scoped to its tenant by default. **The cross-driver claim gap of §D1 is now
+closed (scheduler S1):** claims are written under a store `CompareAndSwap`, so two
+drivers ticking one backend can no longer both claim the same job. **Both open §D2
+sub-questions are now built (scheduler S2):** S2a added fairness (a global concurrency
+ceiling + round-robin tick order + per-tenant in-flight cap), and S2b added optional
+per-tenant *process* isolation of fired jobs (`[scheduler] sandbox_dispatch` dispatches
+each job as a headless per-tenant `agent` subprocess under the `Sandbox` seam). The
+plane-01 dependency is satisfied — see §D2.
 
 This is the design of record for making the
 `Scheduler` seam multi-tenant. It was split out of the per-tenant plane increment
@@ -113,6 +117,15 @@ the design:
   (`docs/design/multi-tenancy/` C23/C24): the driver dispatches into a per-tenant
   sandbox instead of an in-process turn. That is the *right* long-term shape and is
   called out as a dependency, not duplicated here.
+  **Built (scheduler S2b).** With the C23 sandbox pillars all landed, `[scheduler]
+  sandbox_dispatch` makes the driver fire each job as a headless per-tenant `agent`
+  subprocess — `agent --run-scheduled-job --tenant <t> <goal>` via the `Sandbox` seam
+  (argv mode, so the goal is one un-shell-interpreted element) — instead of an
+  in-process turn. `EnvPolicy::Inherit` + network `On` (a scheduled turn must reach its
+  provider; credential isolation rests on per-tenant secret resolution, not env-scrub);
+  the child validates `--tenant` fail-closed (no `local` fallback). Real isolation with
+  `[sandbox] backend = "bwrap"`; default off = in-process. See
+  [`scheduler.md`](../../components/scheduler.md).
 - **Fairness / caps.** `[scheduler] max_jobs` becomes **per tenant**; add a global
   ceiling and a round-robin/priority tick order so one tenant's backlog cannot
   starve others. Hostile inputs (`spec`, `goal`, job counts) stay clamped exactly
@@ -138,9 +151,10 @@ label (`"per-tenant"`), as the `GrpcScheduler` client already does.
 
 - **In scope (this design):** durable tenant-keyed job store; transactional claims;
   a tenant-fanning driver; per-tenant caps; the per-tenant served seam.
-- **Out of scope / dependencies:** strong per-tenant *process* isolation of fired
-  jobs (plane-01, C23/C24) — the driver dispatches in-process until then; learned
-  scheduling; cross-process cron replacement.
+- **Built (scheduler S2b):** strong per-tenant *process* isolation of fired jobs
+  (plane-01, C23/C24 satisfied) — `[scheduler] sandbox_dispatch` runs each job as a
+  per-tenant subprocess under the `Sandbox` seam.
+- **Out of scope / dependencies:** learned scheduling; cross-process cron replacement.
 
 ## Relationship to the tracks
 
