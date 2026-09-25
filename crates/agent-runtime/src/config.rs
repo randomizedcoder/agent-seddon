@@ -450,6 +450,19 @@ pub struct SchedulerCfg {
     /// reclaimable.
     #[serde(default = "default_claim_ttl_secs")]
     pub claim_ttl_secs: u64,
+    /// Dispatch each fired job as a **headless per-tenant subprocess under the
+    /// `Sandbox` seam** instead of an in-process turn (scheduler S2b). Default
+    /// `false` = today's in-process `agent.run` (the S2a fairness caps still apply).
+    /// Real per-tenant isolation needs `[sandbox] backend = "bwrap"`; with `local`
+    /// it is a plain subprocess. Credential isolation rests on per-tenant secret
+    /// resolution (the child scopes to its tenant), not env-scrub, since the child
+    /// needs its environment to reach its provider.
+    #[serde(default)]
+    pub sandbox_dispatch: bool,
+    /// Timeout (seconds) for a sandbox-dispatched job subprocess. Ignored when
+    /// `sandbox_dispatch` is off.
+    #[serde(default = "default_job_timeout_secs")]
+    pub job_timeout_secs: u64,
 }
 
 impl Default for SchedulerCfg {
@@ -463,6 +476,8 @@ impl Default for SchedulerCfg {
             max_concurrent: default_max_concurrent(),
             max_inflight_per_tenant: default_max_inflight_per_tenant(),
             claim_ttl_secs: default_claim_ttl_secs(),
+            sandbox_dispatch: false,
+            job_timeout_secs: default_job_timeout_secs(),
         }
     }
 }
@@ -482,6 +497,9 @@ fn default_max_concurrent() -> usize {
 }
 fn default_max_inflight_per_tenant() -> usize {
     1
+}
+fn default_job_timeout_secs() -> u64 {
+    3_600
 }
 fn default_claim_ttl_secs() -> u64 {
     900

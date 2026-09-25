@@ -521,6 +521,16 @@ max_jobs       = 64
 # 0 = bounded only by max_concurrent.
 max_concurrent           = 1
 max_inflight_per_tenant  = 1
+# Sandbox dispatch (scheduler S2b). When true the driver fires each job as a headless
+# per-tenant `agent` subprocess (--run-scheduled-job --tenant) under the [sandbox]
+# backend instead of an in-process turn. Default false = today's in-process run (the
+# fairness caps above still apply). Real per-tenant isolation needs backend = "bwrap";
+# with "local" it is a plain subprocess. The child inherits the environment and keeps
+# network on (a scheduled turn must reach its provider); cross-tenant credential
+# isolation comes from per-tenant secret resolution (the child scopes to its tenant),
+# not env-scrub. job_timeout_secs bounds each child; ignored when sandbox_dispatch off.
+sandbox_dispatch = false
+job_timeout_secs = 3600
 claim_ttl_secs = 900
 
 [forge]

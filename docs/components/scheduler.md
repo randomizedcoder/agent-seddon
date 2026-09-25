@@ -88,6 +88,8 @@ tick_secs      = 30      # how often the driver checks
 max_jobs       = 64      # registration cap; the model can create jobs (per tenant when durable)
 max_concurrent          = 1  # global ceiling on jobs firing at once per tick (0 = unbounded)
 max_inflight_per_tenant = 1  # one tenant's share of that ceiling  (0 = only max_concurrent bounds)
+sandbox_dispatch        = false  # fire each job as a per-tenant subprocess under [sandbox] (S2b)
+job_timeout_secs        = 3600   # per-child timeout when sandbox_dispatch is on
 claim_ttl_secs = 900     # before a crashed run's job is reclaimable
 ```
 
@@ -155,9 +157,32 @@ wiring line.
   backend in the same instant could both claim a job. True multi-driver exclusion
   needs a CAS primitive the `Backend` does not yet expose (a conditional `apply`);
   it is a bounded follow-up.
-- **Strong per-tenant process isolation of fired jobs** — a fired job currently runs
-  in the driver process, scoped to its tenant but not sandboxed. Composes with
-  plane-01 (multi-tenancy C23/C24) when that lands (scheduler S2b).
+## Per-tenant process isolation of fired jobs (scheduler S2b)
+
+By default a fired job runs **in-process**, scoped to its tenant but not sandboxed —
+the correct Tier-1 shape. With `[scheduler] sandbox_dispatch = true` the driver
+instead dispatches each fired job as a **headless per-tenant `agent` subprocess**
+through the `Sandbox` seam: `agent --config … --run-scheduled-job --tenant <t>
+<goal>`. The child boots, scopes the whole turn to `<t>` (so it reads that tenant's
+per-tenant seams and resolves only that tenant's secrets), runs the goal via
+`agent.run`, and exits — its stdout is the answer, a non-zero exit or timeout is a
+`Failed` run. This slots into the S2a fan-out, so the fairness caps bound the
+subprocesses too.
+
+- **Isolation delivered** scales with `[sandbox] backend`: `bwrap` runs each job in
+  its own process / pid / ipc / uts + fs + resource (cgroup) namespaces; `local` /
+  `nix` give a plain subprocess (no namespace teeth). `sandbox_dispatch` is meaningful
+  only with `bwrap`.
+- **Trust posture (stated plainly).** The child runs `EnvPolicy::Inherit` with the
+  network **On** — a scheduled turn is the agent's own trusted work and must reach its
+  LLM provider. Cross-tenant **credential** isolation therefore rests on per-tenant
+  secret *resolution* (the child resolves only its `--tenant`'s `api_key_ref`, C30/C31),
+  **not** on env-scrub. A future S2c could add per-var env injection for scrub+inject.
+- **Fail-closed at the boundary that matters:** the child validates `--tenant` and
+  **refuses to run** on an invalid segment (no `local` fallback across the process
+  boundary). If the sandbox or binary path cannot be resolved, dispatch degrades to
+  the in-process turn with a warning (the trusted job still runs) rather than failing
+  the whole driver.
 
 ## Fairness — global ceiling + round-robin + per-tenant cap (scheduler S2a)
 

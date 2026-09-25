@@ -320,7 +320,14 @@ async fn main() -> Result<()> {
     } else {
         session_id.clone()
     };
-    let identity = agent_core::SessionKey::local(run_session);
+    // A scheduled-job child (scheduler S2b) scopes the whole run to its owning tenant
+    // — validated fail-closed, never falling back to `local`, since a wrong-tenant run
+    // would cross the isolation boundary. Every other mode is this (local) process.
+    let identity = match &mode {
+        Mode::RunScheduledJob { tenant, .. } => agent_core::SessionKey::parse(tenant, "scheduler")
+            .with_context(|| format!("--tenant `{tenant}` is not a valid tenant segment"))?,
+        _ => agent_core::SessionKey::local(run_session),
+    };
 
     // Run either one-shot or the REPL, capturing the answer (one-shot only).
     let outcome: Result<Option<String>> = agent_core::scope(identity, async {
@@ -388,6 +395,18 @@ async fn main() -> Result<()> {
                     }
                 }
                 Ok(None)
+            }
+            Mode::RunScheduledJob { goal, .. } => {
+                // One headless turn, scoped (above) to the owning tenant — the exact
+                // shape the in-process driver fires, now as a spawnable subprocess the
+                // sandboxed driver dispatches (scheduler S2b). The answer goes to
+                // stdout; a run error propagates so the process exits non-zero and the
+                // driver records the job Failed.
+                let answer = agent
+                    .run(&goal)
+                    .await
+                    .context("running the scheduled job")?;
+                Ok(Some(answer))
             }
             Mode::Review(target, gate) => match agent.review_collector() {
                 Some(collector) => {
@@ -604,6 +623,17 @@ enum Mode {
     ServeFleet(Option<String>),
     /// Drive the scheduler: tick on an interval, firing due jobs (parity spec 28).
     Scheduler,
+    /// Run **one** scheduled job as a headless per-tenant turn and exit (scheduler
+    /// S2b). This is the child the tenant-fanning driver spawns under the `Sandbox`
+    /// seam when `[scheduler] sandbox_dispatch` is on: it scopes the run to
+    /// `--tenant` (so it reads that tenant's per-tenant seams and resolves only that
+    /// tenant's secrets), runs the goal via `agent.run`, prints the answer, and exits
+    /// non-zero on failure. The tenant is validated fail-closed — an invalid segment
+    /// refuses to run, never falling back to `local`.
+    RunScheduledJob {
+        tenant: String,
+        goal: String,
+    },
     /// Collect grounded review facts for a target and print them
     /// (`agent --review <PR#|branch|.>`). The bool is `--gate`: exit non-zero if the
     /// synthesized risk crosses the configured threshold. See docs/design/code-review/.
@@ -677,9 +707,18 @@ struct Args {
 }
 
 fn parse_args() -> Result<Args> {
+    parse_args_from(std::env::args().skip(1))
+}
+
+/// The arg-parsing core, taking the args explicitly so it is unit-testable (the
+/// scheduler-S2b `--` end-of-options handling in particular). `parse_args` calls it
+/// with the real process args.
+fn parse_args_from(args: impl Iterator<Item = String>) -> Result<Args> {
     let mut config_path = PathBuf::from("config/agent.toml");
     let mut resume: Option<ResumeArg> = None;
     let mut scheduler_mode = false;
+    let mut run_scheduled_job = false;
+    let mut tenant: Option<String> = None;
     let mut serve_mcp = false;
     let mut serve_grpc: Option<grpc_server::Seam> = None;
     let mut serve_grpc_all = false;
@@ -694,10 +733,20 @@ fn parse_args() -> Result<Args> {
     let mut cognition_graph: Option<String> = None;
     let mut model_router_config: Option<String> = None;
     let mut goal_parts: Vec<String> = Vec::new();
+    // Once `--` is seen, every remaining token is a positional goal word, never a
+    // flag — so a model-authored (untrusted) scheduled-job goal that looks like a
+    // flag (`--serve-mcp`, `doctor`) can never hijack the child's mode (scheduler
+    // S2b passes the goal after `--`).
+    let mut end_of_opts = false;
 
-    let mut args = std::env::args().skip(1);
+    let mut args = args;
     while let Some(arg) = args.next() {
+        if end_of_opts {
+            goal_parts.push(arg);
+            continue;
+        }
         match arg.as_str() {
+            "--" => end_of_opts = true,
             "--config" | "-c" => {
                 config_path =
                     PathBuf::from(args.next().context("--config requires a path argument")?);
@@ -709,6 +758,10 @@ fn parse_args() -> Result<Args> {
                 ));
             }
             "--scheduler" => scheduler_mode = true,
+            "--run-scheduled-job" => run_scheduled_job = true,
+            "--tenant" => {
+                tenant = Some(args.next().context("--tenant requires a tenant segment")?);
+            }
             "--check-config" => check_config = true,
             // Bare `doctor` subcommand (or `--doctor`); the bare word must be an
             // explicit arm so the `_` catch-all below doesn't swallow it as a goal.
@@ -760,6 +813,8 @@ fn parse_args() -> Result<Args> {
                      --continue          resume the most recent saved session\n  \
                      --resume ID         resume a specific session\n  \
                      --scheduler         drive scheduled jobs (ticks until interrupted)\n  \
+                     --run-scheduled-job run one scheduled job as a headless turn scoped to --tenant, then exit\n  \
+                     --tenant SEG        with --run-scheduled-job: the owning tenant to scope the run to\n  \
                      --review TARGET     collect + print grounded review facts (TARGET = PR#, branch, or `.`)\n  \
                      --gate              with --review: exit non-zero if risk ≥ the configured threshold\n  \
                      --detect-mode P     classify prompt P's task mode and print the verdict\n  \
@@ -788,6 +843,12 @@ fn parse_args() -> Result<Args> {
         Mode::Doctor
     } else if scheduler_mode {
         Mode::Scheduler
+    } else if run_scheduled_job {
+        let tenant = tenant.context("--run-scheduled-job requires --tenant <segment>")?;
+        if goal.trim().is_empty() {
+            anyhow::bail!("--run-scheduled-job requires a goal");
+        }
+        Mode::RunScheduledJob { tenant, goal }
     } else if serve_grpc_all {
         Mode::ServeGrpcAll(listen)
     } else if serve_sessions {
@@ -814,4 +875,65 @@ fn parse_args() -> Result<Args> {
         cognition_graph,
         model_router_config,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(argv: &[&str]) -> Result<Args> {
+        parse_args_from(argv.iter().map(|s| (*s).to_string()))
+    }
+
+    // desc: a flag-like scheduled-job goal after `--` is captured as the goal, never
+    // interpreted as a flag — the argv-injection guard (scheduler S2b). Without this,
+    // a model-authored goal of `--serve-mcp` would hijack the child into a server.
+    #[test]
+    fn positive_double_dash_makes_flag_like_goal_positional() {
+        let args = parse(&[
+            "--run-scheduled-job",
+            "--tenant",
+            "acme",
+            "--",
+            "--serve-mcp",
+        ])
+        .unwrap();
+        match args.mode {
+            Mode::RunScheduledJob { tenant, goal } => {
+                assert_eq!(tenant, "acme");
+                assert_eq!(goal, "--serve-mcp");
+            }
+            _ => panic!("expected RunScheduledJob"),
+        }
+    }
+
+    // desc: every token after `--` joins the goal; flag-looking words among them are
+    // inert (the general one-shot path benefits too).
+    #[test]
+    fn positive_double_dash_collects_following_words_as_goal() {
+        let args = parse(&["--", "summarise", "--the", "logs"]).unwrap();
+        match args.mode {
+            Mode::OneShot(goal) => assert_eq!(goal, "summarise --the logs"),
+            _ => panic!("expected OneShot"),
+        }
+    }
+
+    // desc (negative): --run-scheduled-job without --tenant is refused (fail-closed —
+    // a job must never run un-scoped).
+    #[test]
+    fn negative_run_scheduled_job_requires_tenant() {
+        assert!(parse(&["--run-scheduled-job", "--", "some goal"]).is_err());
+    }
+
+    // desc (adversarial): a bare flag-like word (no `--`) is still NOT a scheduled job
+    // — only the explicit --run-scheduled-job flag selects that mode, so a goal alone
+    // can never reach the scheduled-job path.
+    #[test]
+    fn adversarial_flag_like_goal_without_run_flag_is_not_scheduled_job() {
+        let args = parse(&["--", "--run-scheduled-job"]).unwrap();
+        match args.mode {
+            Mode::OneShot(goal) => assert_eq!(goal, "--run-scheduled-job"),
+            _ => panic!("expected OneShot (the token is a goal, not a mode)"),
+        }
+    }
 }

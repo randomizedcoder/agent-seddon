@@ -12,7 +12,7 @@ Legend: ⬜ not started · 🟡 in progress · ✅ merged.
 |---|---|---|---|---|
 | 01 | Process isolation & multi-org boundaries | C23, C24, C25 | ✅ C23 (bwrap, 5 pillars + C23-3a ro-checkout/overlay + C23-3b seccomp + C23-3c egress allow-list) + C24; 🟡 C25 foundation | #454/#455 (C23), C23-3a (ro-checkout), C23-3b (seccomp), C23-3c (egress), #273/#274/#275 (C24), #276 (C25) |
 | 02 | Data scoping & row-level security | C26, C27, C28 | ✅ C26 (identity at source) + C27 (RLS + `user`-leading sort key); ✅ **C28 complete** — metrics tool (C28-1) + sqlite prompt (C28-2) + recall schema/redaction (C28-3a) + ClickHouse recall backend (C28-3c) + code-index per-tenant partition (C28-3d) | #315–#322 (C26), #456 (C27-1), C27-2 (sort key), #458 (C28-2), #459 (C28-1), #460 (C28-3a), #461 (C28-3c), C28-3d (code-index partition) |
-| 03 | Config & seam-state tenancy | C29, C30, C31 | ✅ **plane complete** — **C29** (config ownership model + operator-config write guard) + **C30** (shared-store seams, config C2; file-backed graph, config C2b) + **C31** (C31-1 control-plane scope-by-caller: provider-registry / prompt / review-fleet services; C31-2 tenant-keyed `RegistryRouter` fleet cells + secret isolation); scheduler is the one designed-not-built seam | #297/#308 (C29 enforcement, via config C40), C29 (mode=none guard + ownership annotation), #302 (config C2), C2b (graph), #464 (C31-1 service scoping), C31-2 (router keying) |
+| 03 | Config & seam-state tenancy | C29, C30, C31 | ✅ **plane complete** — **C29** (config ownership model + operator-config write guard) + **C30** (shared-store seams, config C2; file-backed graph, config C2b) + **C31** (C31-1 control-plane scope-by-caller: provider-registry / prompt / review-fleet services; C31-2 tenant-keyed `RegistryRouter` fleet cells + secret isolation); scheduler S2 built (S2a fairness + S2b sandboxed per-tenant dispatch) — every C30 seam done | #297/#308 (C29 enforcement, via config C40), C29 (mode=none guard + ownership annotation), #302 (config C2), C2b (graph), #464 (C31-1 service scoping), C31-2 (router keying), #470 (scheduler S2a) |
 
 **Plane 01 in progress** (via the review-fleet track): **C24 — execution chokepoint** is fully
 merged (every child process — `bash`, `rg`, the whole `git` funnel — funnels through the
@@ -82,9 +82,24 @@ scheduling is a backend+driver change, designed in `docs/design/config/10-per-te
 durable tenant-keyed backend + fanning driver shipped (config C2c-1/C2c-2), and **scheduler S1** then
 closed the design's one remaining claim gap: a store `Write::CompareAndSwap` (a conditional upsert, `SELECT
 … FOR UPDATE` on Postgres) + a per-driver `owner` token make claims **cross-driver mutually exclusive** —
-two drivers ticking one backend can no longer both fire a job. The remaining scheduler work is **S2**
-(dispatch a fired job into a per-tenant *sandbox* instead of the shared in-process turn + fairness caps),
-which depends on plane-01 process isolation. This is the one implementation of C30 — the config track owns it.
+two drivers ticking one backend can no longer both fire a job. **Scheduler S2 is now built** (the last of
+C30): **S2a** added fairness — a global concurrency ceiling + round-robin tick order + per-tenant in-flight
+cap (`[scheduler] max_concurrent` / `max_inflight_per_tenant`), so one tenant's backlog cannot starve
+others; **S2b** added per-tenant *process* isolation of fired jobs (`[scheduler] sandbox_dispatch` dispatches
+each job as a headless per-tenant `agent` subprocess under the `Sandbox` seam — the plane-01 dependency, now
+satisfied). This was the one designed-not-built seam of C30 — **the multi-tenancy track has no remaining
+items.**
+
+**Security note (S2b, resolved).** The scheduled-job *goal* is model-authored, i.e. untrusted (CLAUDE.md:
+"the model is untrusted"). The subprocess dispatch already passes the goal as a single argv element (no
+shell → no shell injection), but an automated security review flagged **argv flag-smuggling**: a goal that is
+itself a flag token (e.g. `--serve-mcp`, `doctor`) would be parsed by the *child's own* arg parser and hijack
+its mode. Fixed by emitting a `--` end-of-options separator immediately before the goal in `dispatch_subprocess`
+and teaching `agent`'s `parse_args` to honour `--` (every token after it is a positional goal word, never a
+flag). Guarded by tests at both levels — the driver asserts `--` precedes the goal in the argv, and
+`parse_args_from` confirms a flag-like goal after `--` is captured as the goal, not a mode. Combined with the
+existing fail-closed `--tenant` validation (an invalid segment refuses to run, no `local` fallback), the
+model can influence neither the child's mode nor its tenant.
 **C29 — config ownership model** is now **complete**: `agent.toml` is operator-global in full
 (Principle 1 — the tenant-facing config surface is the per-tenant *stores*, never a per-tenant TOML;
 codified by `tenant_writable_config_sections()`, an empty set reconciled against the generated schema),

@@ -548,7 +548,7 @@ pub async fn build_agent_with(
                 "scheduled run finished"
             );
         });
-        let wiring = resolve_scheduler(&cfg, observer, &metrics)?;
+        let wiring = resolve_scheduler(&cfg, observer, &metrics, shared_sandbox.clone())?;
         // The `schedule` tool writes into the same registry the seam serves, so under
         // the per-tenant durable store the model schedules into its own tenant.
         let tool = Arc::new(agent_tools::ScheduleTool::new(wiring.seam()));
@@ -2941,10 +2941,13 @@ fn resolve_scheduler(
     cfg: &Config,
     observer: agent_scheduler::RunObserver,
     metrics: &Metrics,
+    sandbox: Option<Arc<dyn agent_core::Sandbox>>,
 ) -> anyhow::Result<SchedulerWiring> {
     // Only the durable (`scheduler-store`) arm builds a config-store backend to meter.
     #[cfg(not(feature = "scheduler-store"))]
     let _ = metrics;
+    #[cfg(not(feature = "scheduler-store"))]
+    let _ = sandbox;
     let claim_ttl_ms = cfg.scheduler.claim_ttl_secs.saturating_mul(1_000);
     let max_jobs = cfg.scheduler.max_jobs;
     match cfg.scheduler.store.as_str() {
@@ -2964,6 +2967,26 @@ fn resolve_scheduler(
                 max_jobs,
                 observer.clone(),
             );
+            // Sandbox-dispatch (S2b): fire each job as a headless per-tenant subprocess
+            // of this binary, re-reading the same config so it resolves the same
+            // per-tenant seams/secrets. `current_exe` failure or a missing config path
+            // leaves it in-process (fail-soft to today's behaviour, logged).
+            let (agent_bin, config_path) = if cfg.scheduler.sandbox_dispatch {
+                let bin = std::env::current_exe()
+                    .inspect_err(|e| tracing::warn!(error = %e, "scheduler: current_exe unavailable; sandbox dispatch stays in-process"))
+                    .ok();
+                let path = cfg
+                    .source_path
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                if path.is_empty() {
+                    tracing::warn!("scheduler: no config source path; sandbox dispatch stays in-process");
+                }
+                (bin, path)
+            } else {
+                (None, String::new())
+            };
             let driver = Arc::new(
                 crate::scheduler_driver::StoreDriver::new(
                     backend,
@@ -2975,6 +2998,13 @@ fn resolve_scheduler(
                 .with_fairness(
                     cfg.scheduler.max_concurrent,
                     cfg.scheduler.max_inflight_per_tenant,
+                )
+                .with_sandbox_dispatch(
+                    cfg.scheduler.sandbox_dispatch && agent_bin.is_some() && !config_path.is_empty(),
+                    sandbox,
+                    agent_bin,
+                    config_path,
+                    cfg.scheduler.job_timeout_secs,
                 ),
             );
             Ok(SchedulerWiring::Store { seam, driver })
