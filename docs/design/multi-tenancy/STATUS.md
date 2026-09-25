@@ -138,8 +138,14 @@ six served handlers that were `PerTenant`-wrapped but never scoped the caller �
 - ✅ **SearchService** (mt-audit-03) — same fix; `reindex` re-scopes *inside* its detached
   `tokio::spawn` (a spawned task does not inherit the task-local `AGENT_IDENTITY`).
 - ✅ **ForgeRegistryService** (mt-audit-04) — same fix.
-- ⬜ TransportRegistryService — same fix.
-- ⬜ Episodic / Semantic — confirm the served store is per-user, then scope or reclassify.
+- ✅ **TransportRegistryService** (mt-audit-05) — same fix.
+- ⬜ Episodic / Semantic — investigation done: the served `--serve-episodic` /
+  `--serve-semantic` layers are built from `file_episodic` / `file_semantic`, which return
+  **raw `FileEpisodic` / `FileSemantic` at fixed paths** — *not* per-user, and there is no
+  `PerTenant<EpisodicStore/SemanticStore>` impl. Only the unlayered `MemoryStore` path is
+  per-tenant (via `PerUserMemory`, routing internally on `current_identity()`). So a
+  mechanical `run_scoped` wrap would be **cosmetic** (no isolation) — mt-audit-06 must either
+  reclassify them or make the served layers genuinely per-tenant.
 - Final: flip `mt-audit` to a hard `nix flake check` gate once the manifest is gap-free.
 
 ## Origin & decisions

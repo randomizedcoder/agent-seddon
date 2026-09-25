@@ -133,8 +133,7 @@ class = "stateless"
 
 [services.TransportRegistryService]
 class = "scoped"
-status = "gap"
-note = "PerTenant<TransportRegistry> wrap but handler span-only; fixed in PR2"
+note = "every RPC scopes via identity_key + run_scoped (mt-audit-05); PerTenant<TransportRegistry> routes the caller's tenant"
 
 [services.WebSearchService]
 class = "stateless"
