@@ -1809,6 +1809,15 @@ pub struct SandboxCfg {
     /// `systemd-run`). Empty ⇒ no caps. Anti-DoS only — not a security boundary.
     #[serde(default)]
     pub limits: SandboxLimitsCfg,
+    /// Tier-1 read-only checkout (multi-tenancy C23-3a, `bwrap` only). When `true`,
+    /// *untrusted* exec (network `Off`/`Loopback` — the reviewed-code profile) runs on
+    /// a read-only bind of the checkout with a throwaway tmpfs overlay for its writes
+    /// (discarded on exit), so reviewed code cannot mutate the host tree; the agent's
+    /// own (network `On`) exec keeps the writable bind. Default `false` ⇒ today's
+    /// writable bind for every exec (Tier-0 byte-identical). Ignored by non-`bwrap`
+    /// backends.
+    #[serde(default)]
+    pub readonly_exec: bool,
 }
 
 impl Default for SandboxCfg {
@@ -1816,6 +1825,7 @@ impl Default for SandboxCfg {
         Self {
             backend: default_sandbox_backend(),
             limits: SandboxLimitsCfg::default(),
+            readonly_exec: false,
         }
     }
 }

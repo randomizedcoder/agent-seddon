@@ -436,7 +436,7 @@ mod tests {
         #[case::corner_loopback_also_gets_netns(NetworkPolicy::Loopback, true)]
         fn bwrap_argv_network_flag(#[case] net: NetworkPolicy, #[case] want_netns: bool) {
             let spec = ExecSpec::sh("echo hi", "/work").network(net);
-            let a = bwrap_argv(&spec);
+            let a = bwrap_argv(&spec, false);
             assert_eq!(a[0], "bwrap");
             // The always-on process/fs pillars.
             for f in [
@@ -459,7 +459,7 @@ mod tests {
         /// expect: `--bind <cwd> <cwd>` + `--chdir <cwd>` present, ordered after the tmpfs.
         #[test]
         fn positive_bwrap_argv_binds_cwd_rw_after_tmpfs() {
-            let a = bwrap_argv(&ExecSpec::sh("true", "/work/repo"));
+            let a = bwrap_argv(&ExecSpec::sh("true", "/work/repo"), false);
             let bind = a.iter().position(|s| s == "--bind").expect("cwd bound");
             assert_eq!(a[bind + 1], "/work/repo");
             assert_eq!(a[bind + 2], "/work/repo");
@@ -472,19 +472,111 @@ mod tests {
             assert_eq!(a[chdir + 1], "/work/repo");
         }
 
+        // --- C23-3a: read-only checkout + throwaway overlay --------------------
+
+        /// desc: the working-directory mount is chosen by (`readonly_exec`, network).
+        /// Untrusted exec (network Off/Loopback) under `readonly_exec` runs on a
+        /// read-only checkout with a throwaway tmpfs overlay (`--overlay-src <cwd>` +
+        /// `--tmp-overlay <cwd>`, no `--bind`); every other combination keeps today's
+        /// writable `--bind <cwd> <cwd>`. `--chdir <cwd>` is always present, and the
+        /// mount always lands after `--tmpfs /tmp` (so a cwd under /tmp isn't shadowed).
+        /// expect: `want_overlay` — whether the overlay form is emitted.
+        #[rstest]
+        #[case::positive_readonly_off_binds_cwd_rw(false, NetworkPolicy::Off, false)]
+        #[case::positive_readonly_untrusted_uses_overlay(true, NetworkPolicy::Off, true)]
+        #[case::negative_readonly_trusted_stays_rw(true, NetworkPolicy::On, false)]
+        #[case::corner_readonly_loopback_uses_overlay(true, NetworkPolicy::Loopback, true)]
+        fn bwrap_argv_readonly_checkout(
+            #[case] readonly_exec: bool,
+            #[case] net: NetworkPolicy,
+            #[case] want_overlay: bool,
+        ) {
+            let cwd = "/work/repo";
+            let a = bwrap_argv(&ExecSpec::sh("true", cwd).network(net), readonly_exec);
+            let tmp = a.iter().position(|s| s == "--tmpfs").unwrap();
+            // The child is always chdir'd into the checkout.
+            let chdir = a.iter().position(|s| s == "--chdir").expect("chdir set");
+            assert_eq!(a[chdir + 1], cwd);
+            if want_overlay {
+                let src = a
+                    .iter()
+                    .position(|s| s == "--overlay-src")
+                    .expect("overlay lower bound");
+                let ov = a
+                    .iter()
+                    .position(|s| s == "--tmp-overlay")
+                    .expect("throwaway overlay mounted");
+                assert_eq!(a[src + 1], cwd, "overlay lower is the checkout");
+                assert_eq!(a[ov + 1], cwd, "overlay mounts at the checkout");
+                assert!(src < ov, "--overlay-src must precede its --tmp-overlay");
+                assert!(tmp < src, "the overlay must follow the /tmp tmpfs");
+                assert!(
+                    !a.iter().any(|s| s == "--bind"),
+                    "a read-only checkout must not writable-bind the cwd: {a:?}"
+                );
+            } else {
+                let bind = a.iter().position(|s| s == "--bind").expect("cwd bound rw");
+                assert_eq!(a[bind + 1], cwd);
+                assert_eq!(a[bind + 2], cwd);
+                assert!(tmp < bind, "the cwd bind must follow the /tmp tmpfs");
+                assert!(
+                    !a.iter().any(|s| s == "--tmp-overlay"),
+                    "writable exec must not use an overlay: {a:?}"
+                );
+            }
+        }
+
+        /// desc (boundary): a cwd containing a space stays a SINGLE argv element in the
+        /// overlay form — no word-splitting into `--overlay-src`/`--tmp-overlay` operands.
+        #[test]
+        fn boundary_readonly_cwd_with_spaces() {
+            let cwd = "/work/my repo";
+            let a = bwrap_argv(&ExecSpec::sh("true", cwd).network(NetworkPolicy::Off), true);
+            let src = a.iter().position(|s| s == "--overlay-src").unwrap();
+            let ov = a.iter().position(|s| s == "--tmp-overlay").unwrap();
+            assert_eq!(a[src + 1], cwd);
+            assert_eq!(a[ov + 1], cwd);
+        }
+
+        /// desc (adversarial): the cwd is confined, but even a cwd that looks like a
+        /// bwrap flag must be passed as the positional OPERAND of `--overlay-src` /
+        /// `--tmp-overlay` (never parsed as an option) and stay BEFORE `--`; the
+        /// untrusted child after `--` is unaffected by the mount choice.
+        #[test]
+        fn adversarial_readonly_cwd_flag_lookalike() {
+            let cwd = "--bind"; // a hostile-looking cwd string
+            let a = bwrap_argv(
+                &ExecSpec::argv(["prog"], cwd).network(NetworkPolicy::Off),
+                true,
+            );
+            let s = sep(&a);
+            let src = a.iter().position(|s| s == "--overlay-src").unwrap();
+            let ov = a.iter().position(|s| s == "--tmp-overlay").unwrap();
+            // The lookalike is the operand right after each flag, and both are options
+            // (before `--`), so bwrap consumes them as overlay paths, not as flags.
+            assert_eq!(a[src + 1], cwd);
+            assert_eq!(a[ov + 1], cwd);
+            assert!(
+                src < s && ov < s,
+                "overlay flags stay before the `--` terminator"
+            );
+            // The untrusted child is exactly `prog`, entirely after `--`.
+            assert_eq!(&a[s + 1..], &["prog".to_string()]);
+        }
+
         /// desc: shell mode wraps `bash -c <command>`; argv mode runs the program
         /// directly (no shell). Either way the payload sits AFTER the `--` terminator.
         /// expect: the child argv exactly, positioned after `--`.
         #[test]
         fn positive_bwrap_argv_shell_and_argv_payload() {
-            let sh = bwrap_argv(&ExecSpec::sh("echo hi", "/w"));
+            let sh = bwrap_argv(&ExecSpec::sh("echo hi", "/w"), false);
             let s = sep(&sh);
             assert_eq!(
                 &sh[s + 1..],
                 &["bash".to_string(), "-c".into(), "echo hi".into()]
             );
 
-            let av = bwrap_argv(&ExecSpec::argv(["rg", "pat", "."], "/w"));
+            let av = bwrap_argv(&ExecSpec::argv(["rg", "pat", "."], "/w"), false);
             let s2 = sep(&av);
             assert_eq!(&av[s2 + 1..], &["rg".to_string(), "pat".into(), ".".into()]);
         }
@@ -492,7 +584,7 @@ mod tests {
         /// desc (boundary): an empty command still assembles a valid `bash -c ""`.
         #[test]
         fn boundary_bwrap_argv_empty_command() {
-            let a = bwrap_argv(&ExecSpec::sh("", "/w"));
+            let a = bwrap_argv(&ExecSpec::sh("", "/w"), false);
             let s = sep(&a);
             assert_eq!(
                 &a[s + 1..],
@@ -509,7 +601,7 @@ mod tests {
         #[case::adversarial_shell_metachars(vec!["$(touch pwned)", "`id`", "a|b>c"])]
         #[case::adversarial_bwrap_flag_lookalike(vec!["--bind", "/etc", "/etc"])]
         fn adversarial_bwrap_argv_payload_is_isolated_after_separator(#[case] argv: Vec<&str>) {
-            let a = bwrap_argv(&ExecSpec::argv(argv.clone(), "/w"));
+            let a = bwrap_argv(&ExecSpec::argv(argv.clone(), "/w"), false);
             let s = sep(&a);
             // The payload is exactly the untrusted argv, and it is entirely after `--`.
             let payload: Vec<String> = argv.iter().map(ToString::to_string).collect();
@@ -524,7 +616,7 @@ mod tests {
             // content can't influence a single isolation flag (a token-membership check
             // would false-positive when the payload happens to equal a legit flag/path,
             // e.g. `--bind` / `/etc`).
-            let benign = bwrap_argv(&ExecSpec::argv(["BENIGN"], "/w"));
+            let benign = bwrap_argv(&ExecSpec::argv(["BENIGN"], "/w"), false);
             let bs = sep(&benign);
             assert_eq!(
                 &a[..s],
@@ -647,6 +739,100 @@ mod tests {
             assert_eq!(
                 out.stdout, "__EMPTY__",
                 "scrub must drop HOME inside the sandbox"
+            );
+        }
+
+        /// desc (live, positive, skippable, C23-3a): under `readonly_exec`, untrusted
+        /// (network-off) exec gets a WRITABLE throwaway overlay — the write succeeds and
+        /// is readable within the same exec — but the upper layer is an invisible tmpfs,
+        /// so nothing lands on the host checkout.
+        #[tokio::test]
+        async fn positive_bwrap_writable_overlay_is_throwaway() {
+            if !bwrap_usable().await {
+                return;
+            }
+            let dir = tempdir();
+            let out = BwrapSandbox::default()
+                .with_readonly_exec(true)
+                .exec(
+                    &ExecSpec::sh("echo overlay-ok > f && cat f", &dir)
+                        .network(NetworkPolicy::Off)
+                        .timeout(30),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                out.exit_code, 0,
+                "the overlay must be writable inside the sandbox; stderr={:?}",
+                out.stderr
+            );
+            assert!(
+                out.stdout.contains("overlay-ok"),
+                "the write is readable within the same exec: {:?}",
+                out.stdout
+            );
+            assert!(
+                !dir.join("f").exists(),
+                "the throwaway overlay upper must never reach the host checkout"
+            );
+        }
+
+        /// desc (live, adversarial, skippable, C23-3a): under `readonly_exec`, untrusted
+        /// (network-off) reviewed code cannot mutate the host checkout — an existing file
+        /// keeps its content and a newly-created file never appears on the host, even
+        /// though the commands "succeed" against the throwaway overlay.
+        #[tokio::test]
+        async fn adversarial_bwrap_readonly_cannot_write_checkout() {
+            if !bwrap_usable().await {
+                return;
+            }
+            let dir = tempdir();
+            std::fs::write(dir.join("orig.txt"), "original").unwrap();
+            let out = BwrapSandbox::default()
+                .with_readonly_exec(true)
+                .exec(
+                    &ExecSpec::sh("echo tampered > orig.txt; echo new > added.txt; true", &dir)
+                        .network(NetworkPolicy::Off)
+                        .timeout(30),
+                )
+                .await
+                .unwrap();
+            assert_eq!(out.exit_code, 0, "stderr={:?}", out.stderr);
+            assert_eq!(
+                std::fs::read_to_string(dir.join("orig.txt")).unwrap(),
+                "original",
+                "reviewed code must not mutate an existing checkout file"
+            );
+            assert!(
+                !dir.join("added.txt").exists(),
+                "reviewed code must not add files to the host checkout"
+            );
+        }
+
+        /// desc (live, positive, skippable, C23-3a): even with `readonly_exec` set, the
+        /// agent's OWN exec (network On — the reviewed-code discriminator is absent) keeps
+        /// the writable bind, so its writes DO land on the host checkout. This is the
+        /// property that lets `bash`/`git` keep working while reviewed code is locked down.
+        #[tokio::test]
+        async fn positive_bwrap_trusted_exec_still_writes_checkout() {
+            if !bwrap_usable().await {
+                return;
+            }
+            let dir = tempdir();
+            let out = BwrapSandbox::default()
+                .with_readonly_exec(true)
+                .exec(
+                    &ExecSpec::sh("echo agent-write > out.txt", &dir)
+                        .network(NetworkPolicy::On)
+                        .timeout(30),
+                )
+                .await
+                .unwrap();
+            assert_eq!(out.exit_code, 0, "stderr={:?}", out.stderr);
+            assert_eq!(
+                std::fs::read_to_string(dir.join("out.txt")).unwrap().trim(),
+                "agent-write",
+                "the agent's own (network-on) exec must still write the checkout"
             );
         }
 

@@ -335,13 +335,15 @@ pub async fn build_agent_with(
             #[cfg(feature = "sandbox-bwrap")]
             "bwrap" => {
                 let l = &cfg.sandbox.limits;
-                Arc::new(agent_sandbox::BwrapSandbox::new(
-                    agent_sandbox::SandboxLimits {
+                Arc::new(
+                    agent_sandbox::BwrapSandbox::new(agent_sandbox::SandboxLimits {
                         memory_max: l.memory_max.clone(),
                         cpu_quota: l.cpu_quota.clone(),
                         pids_max: l.pids_max,
-                    },
-                ))
+                    })
+                    // C23-3a: read-only checkout + throwaway overlay for untrusted exec.
+                    .with_readonly_exec(cfg.sandbox.readonly_exec),
+                )
             }
             // A remote executor: run on a host built for it (the toolchain, or
             // deliberate isolation) while this process stays thin.

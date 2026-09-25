@@ -10,7 +10,7 @@ Legend: ⬜ not started · 🟡 in progress · ✅ merged.
 
 | # | Plane | Components | State | PR |
 |---|---|---|---|---|
-| 01 | Process isolation & multi-org boundaries | C23, C24, C25 | ✅ C23 (bwrap, 5 pillars) + C24; 🟡 C25 foundation | #454/#455 (C23), #273/#274/#275 (C24), #276 (C25) |
+| 01 | Process isolation & multi-org boundaries | C23, C24, C25 | ✅ C23 (bwrap, 5 pillars + C23-3a ro-checkout/overlay) + C24; 🟡 C25 foundation; ⬜ C23-3b seccomp + C23-3c egress | #454/#455 (C23), C23-3a (ro-checkout), #273/#274/#275 (C24), #276 (C25) |
 | 02 | Data scoping & row-level security | C26, C27, C28 | ✅ C26 (identity at source) + C27 (RLS + `user`-leading sort key); ✅ **C28 complete** — metrics tool (C28-1) + sqlite prompt (C28-2) + recall schema/redaction (C28-3a) + ClickHouse recall backend (C28-3c) + code-index per-tenant partition (C28-3d) | #315–#322 (C26), #456 (C27-1), C27-2 (sort key), #458 (C28-2), #459 (C28-1), #460 (C28-3a), #461 (C28-3c), C28-3d (code-index partition) |
 | 03 | Config & seam-state tenancy | C29, C30, C31 | ✅ **plane complete** — **C29** (config ownership model + operator-config write guard) + **C30** (shared-store seams, config C2; file-backed graph, config C2b) + **C31** (C31-1 control-plane scope-by-caller: provider-registry / prompt / review-fleet services; C31-2 tenant-keyed `RegistryRouter` fleet cells + secret isolation); scheduler is the one designed-not-built seam | #297/#308 (C29 enforcement, via config C40), C29 (mode=none guard + ownership annotation), #302 (config C2), C2b (graph), #464 (C31-1 service scoping), C31-2 (router keying) |
 
@@ -22,6 +22,13 @@ encoder, and the per-org cap / metric-label semantics (see `SessionKey` docs). S
 org *value* injection at the fleet mint-site (fleet core, inc 3). **C23** strong-isolation is now
 **built**: the `bwrap` backend enforces all five pillars (FS/process/network/credential via rootless
 namespaces, C23-1 #454; resource via cgroup limits, C23-2 #455), fail-closed, live-verified.
+**C23-3a** completes the FS pillar for reviewed code: under the opt-in `[sandbox] readonly_exec`,
+untrusted (network-off) exec runs on a **read-only checkout with a throwaway tmpfs overlay**
+(`--overlay-src` + `--tmp-overlay`), so reviewed code can build/test but its writes are discarded
+and never mutate the host tree; the agent's own (network-on) exec keeps the writable bind, and the
+default (`false`) is byte-identical to before. Live-verified on l (checkout unmutated, overlay
+writable-but-throwaway, agent-own writes still land). Remaining bwrap follow-ups: **C23-3b** seccomp
+profile + **C23-3c** egress allow-list (both deferred/optional).
 
 **Plane 02 building.** **C26 — identity at source** is done: a verified `user` (tenant == user at
 this tier) rides every telemetry row/span/log, stamped from `current_identity()` at the emit funnel
