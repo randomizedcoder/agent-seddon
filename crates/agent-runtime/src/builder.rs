@@ -2964,13 +2964,19 @@ fn resolve_scheduler(
                 max_jobs,
                 observer.clone(),
             );
-            let driver = Arc::new(crate::scheduler_driver::StoreDriver::new(
-                backend,
-                cfg.tenancy.per_tenant,
-                claim_ttl_ms,
-                max_jobs,
-                observer,
-            ));
+            let driver = Arc::new(
+                crate::scheduler_driver::StoreDriver::new(
+                    backend,
+                    cfg.tenancy.per_tenant,
+                    claim_ttl_ms,
+                    max_jobs,
+                    observer,
+                )
+                .with_fairness(
+                    cfg.scheduler.max_concurrent,
+                    cfg.scheduler.max_inflight_per_tenant,
+                ),
+            );
             Ok(SchedulerWiring::Store { seam, driver })
         }
         #[cfg(not(feature = "scheduler-store"))]

@@ -85,7 +85,9 @@ enabled        = false   # registers the `schedule` tool
 store          = ""      # ""=in-memory; "file"/"sqlite"/"postgres"=durable (see below)
 path           = ".agent/scheduler.json"  # for the file/sqlite tiers
 tick_secs      = 30      # how often the driver checks
-max_jobs       = 64      # the model can create jobs, so bound them (per tenant when durable)
+max_jobs       = 64      # registration cap; the model can create jobs (per tenant when durable)
+max_concurrent          = 1  # global ceiling on jobs firing at once per tick (0 = unbounded)
+max_inflight_per_tenant = 1  # one tenant's share of that ceiling  (0 = only max_concurrent bounds)
 claim_ttl_secs = 900     # before a crashed run's job is reclaimable
 ```
 
@@ -155,7 +157,22 @@ wiring line.
   it is a bounded follow-up.
 - **Strong per-tenant process isolation of fired jobs** — a fired job currently runs
   in the driver process, scoped to its tenant but not sandboxed. Composes with
-  plane-01 (multi-tenancy C23/C24) when that lands.
-- **A concurrency ceiling across jobs.** Each job is individually guarded against
-  overlap, but N distinct due jobs run sequentially within a tick rather than
-  under a bounded pool.
+  plane-01 (multi-tenancy C23/C24) when that lands (scheduler S2b).
+
+## Fairness — global ceiling + round-robin + per-tenant cap (scheduler S2a)
+
+The tenant-fanning driver no longer drains tenants strictly serially. Each tick it
+**claims** every tenant's due jobs (still under S1's per-job CAS claim), then
+**dispatches** them round-robin-interleaved across tenants — one job per tenant per
+round — under two caps:
+
+- `max_concurrent` — a **global ceiling** on how many jobs fire at once across all
+  tenants (`1` = serial, the default; `0` = unbounded).
+- `max_inflight_per_tenant` — bounds any **one tenant's** share of that ceiling, so a
+  tenant with a long backlog can neither starve nor drown the others (`1` = default;
+  `0` = bounded only by `max_concurrent`).
+
+The starting tenant rotates each tick, so no tenant's lexicographic position keeps it
+perpetually first. With both caps at their `1` default a single-tenant install is
+byte-identical to before; a multi-tenant one gains a fair, interleaved order, and an
+operator opts into parallel firing by raising the caps.
