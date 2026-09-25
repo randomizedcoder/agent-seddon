@@ -1,0 +1,371 @@
+# mt-audit expectation manifest — the checked-in multi-tenancy coverage baseline.
+#
+# This is the source of truth `nix run .#mt-audit` reconciles the source against
+# (the constants-sync / buf-image governance shape). When you add a gRPC service or a
+# metric family, classify it HERE or the audit flags it as unclassified drift.
+#
+# service class: scoped | field-scoped | stateless | operator-global
+#   scoped        every RPC calls identity_key + run_scoped (ambient tenant routing)
+#   field-scoped  tenant derived from request fields / a direct capability key
+#   stateless     no per-tenant state (tenant irrelevant; span attribution only)
+#   operator-global  deliberately process-global (operator config, RBAC-gated)
+# status = "gap" marks a KNOWN coverage gap (reported, labeled) pending a fix.
+
+# --- gRPC services ---------------------------------------------------------------
+[services.AgentSessionService]
+class = "field-scoped"
+note = "identity_key addresses the live session directly"
+
+[services.AstService]
+class = "stateless"
+
+[services.ConfigService]
+class = "scoped"
+
+[services.ContextService]
+class = "stateless"
+
+[services.DigestService]
+class = "scoped"
+
+[services.DimensionService]
+class = "scoped"
+
+[services.EmbedService]
+class = "stateless"
+
+[services.Episodic]
+class = "scoped"
+status = "gap"
+note = "span-only while sibling MemoryService scopes; confirm intent in PR2"
+
+[services.FactCollectorService]
+class = "stateless"
+
+[services.ForgeRegistryService]
+class = "scoped"
+status = "gap"
+note = "PerTenant<ForgeRegistry> wrap but handler span-only; fixed in PR2"
+
+[services.ForgeService]
+class = "stateless"
+
+[services.GraphService]
+class = "scoped"
+
+[services.LlmPoolService]
+class = "stateless"
+
+[services.LspService]
+class = "stateless"
+
+[services.Memory]
+class = "scoped"
+
+[services.MetricsProxyService]
+class = "stateless"
+
+[services.ModeService]
+class = "stateless"
+
+[services.Policy]
+class = "stateless"
+
+[services.PromptService]
+class = "scoped"
+
+[services.Provider]
+class = "stateless"
+
+[services.ProviderRegistryService]
+class = "scoped"
+
+[services.PtyService]
+class = "stateless"
+
+[services.ReferenceService]
+class = "stateless"
+
+[services.RepoService]
+class = "stateless"
+
+[services.ReviewFleetService]
+class = "scoped"
+
+[services.RoleService]
+class = "operator-global"
+note = "role catalog is operator-global; RBAC-gated, not tenant-partitioned"
+
+[services.SandboxService]
+class = "stateless"
+
+[services.ScannerService]
+class = "stateless"
+
+[services.SchedulerService]
+class = "scoped"
+status = "gap"
+note = "PerTenant<Scheduler> wrap (builder.rs) but handler span-only; fixed in PR2"
+
+[services.SearchService]
+class = "scoped"
+status = "gap"
+note = "PerTenant<SearchBackend> wrap (registry.rs) but handler span-only; fixed in PR2"
+
+[services.Semantic]
+class = "scoped"
+status = "gap"
+note = "span-only while sibling MemoryService scopes; confirm intent in PR2"
+
+[services.SessionRegistryService]
+class = "field-scoped"
+note = "key_of(req.user, req.session_id) from request fields"
+
+[services.SessionService]
+class = "field-scoped"
+note = "session-id-addressed RPCs key by full id; bare-capability-id RPCs (restore/diff) scope to authorize"
+
+[services.TaskService]
+class = "stateless"
+
+[services.TokenizerService]
+class = "stateless"
+
+[services.ToolService]
+class = "stateless"
+
+[services.TransportRegistryService]
+class = "scoped"
+status = "gap"
+note = "PerTenant<TransportRegistry> wrap but handler span-only; fixed in PR2"
+
+[services.WebSearchService]
+class = "stateless"
+
+[services.WebService]
+class = "stateless"
+
+# --- metric families (census docs/design/observability/01-metric-census.md) -------
+# attributable = carries a tenant/repo dimension (via a recorder view); §A/B/D/E.
+# health       = label-less by design (seam-health); §C/E-kept/F. The Rust
+#   negative_*_stay_label_less guards remain the runtime proof (asserted below).
+[metrics]
+attributable = [
+  "agent_active",
+  "agent_api_calls_total",
+  "agent_cache_tokens_total",
+  "agent_config_store_ops_total",
+  "agent_context_messages",
+  "agent_context_tokens",
+  "agent_cost_usd_total",
+  "agent_fleet_approval_latency_seconds",
+  "agent_fleet_approvals_total",
+  "agent_fleet_post_failures_total",
+  "agent_fleet_progress_total",
+  "agent_fleet_reviews_total",
+  "agent_fleet_triggers_total",
+  "agent_grpc_server_rpc_total",
+  "agent_hook_dispatches_total",
+  "agent_iterations_total",
+  "agent_mode_switches_total",
+  "agent_policy_authorize_total",
+  "agent_policy_guard_total",
+  "agent_run_duration_seconds",
+  "agent_runs_total",
+  "agent_session_ops_total",
+  "agent_tokens_total",
+  "agent_tool_calls_total",
+]
+health = [
+  "agent_api_call_duration_seconds",
+  "agent_ast_errors_total",
+  "agent_ast_query_seconds",
+  "agent_ast_result_nodes",
+  "agent_auth_verify_total",
+  "agent_authz_decisions_total",
+  "agent_cache_breakpoints_total",
+  "agent_config_store_op_seconds",
+  "agent_content_blocks_dropped_total",
+  "agent_content_blocks_total",
+  "agent_context_compact_tokens",
+  "agent_context_compactions_total",
+  "agent_context_op_seconds",
+  "agent_context_summary_fallback_total",
+  "agent_context_switch_compactions_total",
+  "agent_context_tokens_shed",
+  "agent_dimension_recall_total",
+  "agent_dimension_summaries_total",
+  "agent_dimension_summarize_duration_seconds",
+  "agent_distill_jobs_total",
+  "agent_distill_lag_seconds",
+  "agent_embed_batch",
+  "agent_embed_seconds",
+  "agent_forge_calls_total",
+  "agent_forge_duration_seconds",
+  "agent_gate_alternatives_total",
+  "agent_gate_issues_total",
+  "agent_gate_phase_duration_seconds",
+  "agent_gate_rounds",
+  "agent_gate_verdicts_total",
+  "agent_graph_branches_total",
+  "agent_graph_join_wait_seconds",
+  "agent_graph_merge_total",
+  "agent_grpc_overload_shed_total",
+  "agent_grpc_server_rpc_seconds",
+  "agent_loop_early_stops_total",
+  "agent_lsp_diagnostics_total",
+  "agent_lsp_errors_total",
+  "agent_lsp_request_seconds",
+  "agent_memory_errors_total",
+  "agent_memory_op_seconds",
+  "agent_memory_recall_items",
+  "agent_mode_classifications_total",
+  "agent_mode_switch_confidence",
+  "agent_policy_authorize_seconds",
+  "agent_pool_dispatch_duration_seconds",
+  "agent_pool_member_calls_total",
+  "agent_pool_member_inflight",
+  "agent_pool_member_latency_ewma_ms",
+  "agent_pool_member_latency_seconds",
+  "agent_pool_member_saturated",
+  "agent_pool_member_state",
+  "agent_pool_members_alive",
+  "agent_pool_probe_duration_seconds",
+  "agent_pool_saturation_shed_total",
+  "agent_pool_select_total",
+  "agent_prompt_fragments_selected_total",
+  "agent_provider_errors_total",
+  "agent_provider_request_seconds",
+  "agent_provider_stream_chunks_total",
+  "agent_provider_ttft_seconds",
+  "agent_pty_active_sessions",
+  "agent_pty_bytes_total",
+  "agent_pty_sessions_total",
+  "agent_reference_blocked_total",
+  "agent_reference_refs_total",
+  "agent_reference_resolve_seconds",
+  "agent_registry_mutations_total",
+  "agent_registry_upstreams",
+  "agent_repo_errors_total",
+  "agent_repo_fetch_seconds",
+  "agent_repo_op_seconds",
+  "agent_repo_worktrees_live",
+  "agent_review_callgraph_edges",
+  "agent_review_callgraph_nodes",
+  "agent_review_change_files",
+  "agent_review_churn_total",
+  "agent_review_cochange_total",
+  "agent_review_collect_duration_seconds",
+  "agent_review_collector_duration_seconds",
+  "agent_review_collectors_total",
+  "agent_review_findings_total",
+  "agent_review_gitstate_total",
+  "agent_review_parallelism_ratio",
+  "agent_review_risk_max_score",
+  "agent_review_risk_total",
+  "agent_review_runs_total",
+  "agent_review_salience_total",
+  "agent_review_signature_changes_total",
+  "agent_review_style_diff_conformance_total",
+  "agent_review_summaries_total",
+  "agent_review_total_duration_seconds",
+  "agent_route_decisions_total",
+  "agent_router_decisions_total",
+  "agent_router_dispatch_total",
+  "agent_router_failover_total",
+  "agent_router_no_candidate_total",
+  "agent_router_upstream_inflight",
+  "agent_sandbox_exec_seconds",
+  "agent_sandbox_exec_total",
+  "agent_scan_duration_seconds",
+  "agent_scanner_findings_total",
+  "agent_scheduled_run_duration_seconds",
+  "agent_scheduled_runs_total",
+  "agent_search_errors_total",
+  "agent_search_hits",
+  "agent_search_index_files",
+  "agent_search_index_fresh",
+  "agent_search_index_seconds",
+  "agent_search_query_seconds",
+  "agent_search_reindex_total",
+  "agent_session_gc_reclaimed_total",
+  "agent_structured_total",
+  "agent_structured_validate_seconds",
+  "agent_tasks_closed",
+  "agent_tasks_open",
+  "agent_tool_errors_total",
+  "agent_tool_exec_seconds",
+  "agent_transport_post_seconds",
+  "agent_transport_posts_total",
+  "agent_transport_ratelimit_total",
+  "agent_upstream_tokens_total",
+  "agent_verifier_verdicts_total",
+  "agent_web_fetch_bytes",
+  "agent_web_fetch_seconds",
+  "agent_web_fetch_total",
+  "agent_web_search_duration_seconds",
+  "agent_web_search_results_total",
+  "agent_web_searches_total",
+]
+
+[[metrics.anchors]]
+file = "crates/agent-metrics/src/lib.rs"
+contains = "negative_seam_health_families_stay_label_less"
+why = "the runtime regression guard that health families never gain a tenant label"
+
+[[metrics.anchors]]
+file = "crates/agent-metrics/src/lib.rs"
+contains = "negative_swept_health_families_stay_tenant_less"
+why = "the Phase-5 sweep guard that kept-health families stay tenant-less"
+
+# --- spans / logs structural mechanisms ------------------------------------------
+[[spans-logs.anchors]]
+file = "crates/agent-telemetry/src/otel.rs"
+contains = "EnrichSpanProcessor"
+why = "the OTEL processor that stamps tenant/session onto every scoped span"
+
+[[spans-logs.anchors]]
+file = "crates/agent-telemetry/src/otel.rs"
+contains = "identity_attributes"
+why = "the pure helper the processor uses to derive span identity attributes"
+
+[[spans-logs.anchors]]
+file = "crates/agent-telemetry/src/layer.rs"
+contains = "event_scope"
+why = "the ClickHouse log layer walks the span scope to inherit tenant/repo/pr onto every log"
+
+[[spans-logs.anchors]]
+file = "crates/agent-telemetry/src/layer.rs"
+contains = "resolve_dims"
+why = "the pure precedence+validation funnel for log dimensions"
+
+[[spans-logs.anchors]]
+file = "crates/agent-telemetry/src/rows.rs"
+contains = "pub repo: String"
+why = "the agent_logs LogRow carries the repo column"
+
+[[spans-logs.anchors]]
+file = "crates/agent-telemetry/src/rows.rs"
+contains = "pub pr: String"
+why = "the agent_logs LogRow carries the pr column"
+
+[[spans-logs.anchors]]
+file = "crates/agent-grpc/src/server/mod.rs"
+contains = "s.record(\"tenant\", u)"
+why = "the shared grpc.server span stamps the validated tenant attribute"
+
+# --- config ownership (C29) ------------------------------------------------------
+[config]
+# agent.toml is operator-global in full: the tenant-writable set must stay EMPTY.
+tenant_writable_empty = true
+
+[[config.anchors]]
+file = "crates/agent-runtime/src/config.rs"
+contains = "tenant_writable_config_sections"
+why = "the C29 codification of operator-vs-tenant config ownership"
+
+[[config.anchors]]
+file = "crates/agent-grpc/src/server/config.rs"
+contains = "tenant_barred_from_operator_config"
+why = "ConfigService bars a non-operator tenant from operator-config writes (C29)"
+
