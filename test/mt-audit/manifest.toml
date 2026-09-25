@@ -44,8 +44,7 @@ class = "stateless"
 
 [services.ForgeRegistryService]
 class = "scoped"
-status = "gap"
-note = "PerTenant<ForgeRegistry> wrap but handler span-only; fixed in PR2"
+note = "every RPC scopes via identity_key + run_scoped (mt-audit-04); PerTenant<ForgeRegistry> routes the caller's tenant"
 
 [services.ForgeService]
 class = "stateless"
