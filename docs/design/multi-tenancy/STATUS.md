@@ -127,6 +127,18 @@ Tier 0 (single operator, one config) is today's behavior and needs nothing.
 · 03 (`PerTenant<Store>` C30 → control-plane scoping C31). C26 is cheapest and unblocks 02 +
 fleet observability — land it early (during the fleet's Phase 1).
 
+## Coverage audit (`mt-audit`)
+
+The reusable [`mt-audit`](../../components/mt-audit.md) tool parses the tree and reconciles the
+tenancy surface against `test/mt-audit/manifest.toml` (report-only; PR #472). Its first run found
+six served handlers that were `PerTenant`-wrapped but never scoped the caller — so a standalone
+`--serve-<seam>` call routed to the `local` tenant (cross-tenant). Closing them one PR each:
+
+- ✅ **SchedulerService** (mt-audit-02) — every RPC now `identity_key` + `run_scoped`.
+- ⬜ SearchService · ⬜ ForgeRegistryService · ⬜ TransportRegistryService — same fix.
+- ⬜ Episodic / Semantic — confirm the served store is per-user, then scope or reclassify.
+- Final: flip `mt-audit` to a hard `nix flake check` gate once the manifest is gap-free.
+
 ## Origin & decisions
 
 - **2026-09-05** — Graduated into its own track from the review-fleet design (was review-fleet
