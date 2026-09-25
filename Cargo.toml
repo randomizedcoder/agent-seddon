@@ -162,6 +162,15 @@ tokenizers = { version = "0.21", default-features = false, features = ["fancy-re
 # `tokenizers`; declared here so the `tokenizer-tiktoken` feature can use it directly.
 rayon = "1"
 
+# Tuned seccomp-BPF profile for the bwrap sandbox (C23-3b), behind agent-sandbox's
+# non-default `sandbox-bwrap` feature so a default build / `nix build .#agent` never
+# compiles it. Pure Rust (Firecracker's `rust-vmm` crate) — no system libseccomp /
+# pkg-config, matching the crate's hermetic convention; crane vendors it from
+# Cargo.lock. `libc` (below) supplies the arch-correct `SYS_*` numbers + the anonymous
+# `memfd` the compiled BPF is handed to bwrap over. See docs/design/multi-tenancy/.
+seccompiler = "0.5"
+libc = "0.2"
+
 # telemetry / ClickHouse (native protocol, port 9000)
 klickhouse = "0.13"
 uuid = { version = "1", features = ["v4"] }

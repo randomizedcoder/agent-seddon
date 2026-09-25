@@ -15,7 +15,11 @@ license.workspace = true
 default = ["sandbox-local", "sandbox-nix"]
 sandbox-local = []
 sandbox-nix = []
-sandbox-bwrap = []
+# The bwrap backend pulls the pure-Rust seccomp compiler + libc (arch-correct SYS_*
+# numbers + the anonymous memfd the BPF is passed to bwrap over) for the C23-3b tuned
+# syscall filter. Both compile ONLY under this opt-in feature — the default build /
+# `nix build .#agent` stays dependency-free.
+sandbox-bwrap = ["dep:seccompiler", "dep:libc"]
 # Injects a dhat global allocator for the allocation-budget leak test only.
 dhat-heap = ["dep:dhat"]
 
@@ -25,6 +29,9 @@ async-trait.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 dhat = { workspace = true, optional = true }
+# C23-3b seccomp filter — compiled only under `sandbox-bwrap` (see [features]).
+seccompiler = { workspace = true, optional = true }
+libc = { workspace = true, optional = true }
 
 [dev-dependencies]
 rstest.workspace = true

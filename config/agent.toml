@@ -312,6 +312,11 @@ backend = "local"
 # cannot mutate the host tree; the agent's own (network-on) exec keeps the writable
 # bind. Default false = today's writable bind for every exec.
 # readonly_exec = false
+# Tier-1 tuned seccomp-BPF syscall filter (C23-3b, `bwrap` only). When true, every
+# sandboxed exec runs under a default-allow filter that denies a curated set of
+# dangerous syscalls (keyring, ptrace, mount, module load, bpf, …) with EPERM — without
+# breaking build/test toolchains. Default false = no filter.
+# seccomp = false
 # [sandbox.limits] — cgroup-v2 anti-DoS caps for `bwrap` (C23-2, via systemd-run).
 # memory_max = "512M"   # MemoryMax; OOM-killed past it
 # cpu_quota  = "50%"    # CPUQuota; half a core

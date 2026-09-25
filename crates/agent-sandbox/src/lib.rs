@@ -169,6 +169,8 @@ pub use nix::NixSandbox;
 #[cfg(feature = "sandbox-bwrap")]
 mod bwrap;
 #[cfg(feature = "sandbox-bwrap")]
+mod seccomp;
+#[cfg(feature = "sandbox-bwrap")]
 pub use bwrap::{BwrapSandbox, SandboxLimits};
 
 #[cfg(test)]
@@ -436,7 +438,7 @@ mod tests {
         #[case::corner_loopback_also_gets_netns(NetworkPolicy::Loopback, true)]
         fn bwrap_argv_network_flag(#[case] net: NetworkPolicy, #[case] want_netns: bool) {
             let spec = ExecSpec::sh("echo hi", "/work").network(net);
-            let a = bwrap_argv(&spec, false);
+            let a = bwrap_argv(&spec, false, None);
             assert_eq!(a[0], "bwrap");
             // The always-on process/fs pillars.
             for f in [
@@ -459,7 +461,7 @@ mod tests {
         /// expect: `--bind <cwd> <cwd>` + `--chdir <cwd>` present, ordered after the tmpfs.
         #[test]
         fn positive_bwrap_argv_binds_cwd_rw_after_tmpfs() {
-            let a = bwrap_argv(&ExecSpec::sh("true", "/work/repo"), false);
+            let a = bwrap_argv(&ExecSpec::sh("true", "/work/repo"), false, None);
             let bind = a.iter().position(|s| s == "--bind").expect("cwd bound");
             assert_eq!(a[bind + 1], "/work/repo");
             assert_eq!(a[bind + 2], "/work/repo");
@@ -492,7 +494,7 @@ mod tests {
             #[case] want_overlay: bool,
         ) {
             let cwd = "/work/repo";
-            let a = bwrap_argv(&ExecSpec::sh("true", cwd).network(net), readonly_exec);
+            let a = bwrap_argv(&ExecSpec::sh("true", cwd).network(net), readonly_exec, None);
             let tmp = a.iter().position(|s| s == "--tmpfs").unwrap();
             // The child is always chdir'd into the checkout.
             let chdir = a.iter().position(|s| s == "--chdir").expect("chdir set");
@@ -531,7 +533,11 @@ mod tests {
         #[test]
         fn boundary_readonly_cwd_with_spaces() {
             let cwd = "/work/my repo";
-            let a = bwrap_argv(&ExecSpec::sh("true", cwd).network(NetworkPolicy::Off), true);
+            let a = bwrap_argv(
+                &ExecSpec::sh("true", cwd).network(NetworkPolicy::Off),
+                true,
+                None,
+            );
             let src = a.iter().position(|s| s == "--overlay-src").unwrap();
             let ov = a.iter().position(|s| s == "--tmp-overlay").unwrap();
             assert_eq!(a[src + 1], cwd);
@@ -548,6 +554,7 @@ mod tests {
             let a = bwrap_argv(
                 &ExecSpec::argv(["prog"], cwd).network(NetworkPolicy::Off),
                 true,
+                None,
             );
             let s = sep(&a);
             let src = a.iter().position(|s| s == "--overlay-src").unwrap();
@@ -564,19 +571,91 @@ mod tests {
             assert_eq!(&a[s + 1..], &["prog".to_string()]);
         }
 
+        // --- C23-3b: tuned seccomp-BPF filter ---------------------------------
+
+        /// desc: the `--seccomp <fd>` flag is emitted iff a profile fd is supplied, and
+        /// when present it is a bwrap OPTION (before `--`, among the namespace flags) with
+        /// the fd number as its own operand — never after the terminator.
+        /// expect: `want_flag` — whether `--seccomp` appears.
+        #[rstest]
+        #[case::positive_seccomp_off_emits_no_flag(None, false)]
+        #[case::positive_seccomp_on_emits_flag(Some(7), true)]
+        fn bwrap_argv_seccomp_flag(#[case] fd: Option<i32>, #[case] want_flag: bool) {
+            let a = bwrap_argv(&ExecSpec::sh("true", "/w"), false, fd);
+            let s = sep(&a);
+            let pos = a.iter().position(|x| x == "--seccomp");
+            assert_eq!(pos.is_some(), want_flag, "seccomp flag presence: {a:?}");
+            if let (Some(p), Some(fdn)) = (pos, fd) {
+                assert!(p < s, "--seccomp must be a bwrap option (before `--`)");
+                assert_eq!(a[p + 1], fdn.to_string(), "fd number is the flag's operand");
+                // The always-on process pillar still surrounds it.
+                assert!(a.iter().any(|x| x == "--unshare-user"));
+            }
+        }
+
+        /// desc (boundary): a large fd number renders as a plain decimal operand, no
+        /// panic/overflow, and stays a single argv element before `--`.
+        #[test]
+        fn boundary_seccomp_high_fd_number() {
+            let fd = 1_000_000;
+            let a = bwrap_argv(&ExecSpec::sh("true", "/w"), false, Some(fd));
+            let p = a
+                .iter()
+                .position(|x| x == "--seccomp")
+                .expect("flag present");
+            assert_eq!(a[p + 1], "1000000");
+            assert!(p < sep(&a));
+        }
+
+        /// desc (adversarial): the untrusted child cannot spoof or displace the enforced
+        /// `--seccomp` flag — even a child argv literally containing `--seccomp`/`--`
+        /// stays entirely after the real terminator, and the isolation prefix (which
+        /// carries the real flag) does not depend on the payload.
+        #[test]
+        fn adversarial_seccomp_flag_not_spoofable_by_child() {
+            let hostile = bwrap_argv(
+                &ExecSpec::argv(["--seccomp", "999", "--", "id"], "/w").network(NetworkPolicy::Off),
+                false,
+                Some(4),
+            );
+            let s = sep(&hostile);
+            // Exactly ONE real `--seccomp` option, before `--`, with our fd (4) — not 999.
+            let opt = hostile.iter().position(|x| x == "--seccomp").unwrap();
+            assert!(opt < s);
+            assert_eq!(hostile[opt + 1], "4");
+            // The hostile tokens are the untrusted payload, verbatim, entirely after `--`.
+            assert_eq!(
+                &hostile[s + 1..],
+                &[
+                    "--seccomp".to_string(),
+                    "999".into(),
+                    "--".into(),
+                    "id".into()
+                ]
+            );
+            // The prefix (with the real flag) is byte-identical to a benign child's.
+            let benign = bwrap_argv(
+                &ExecSpec::argv(["BENIGN"], "/w").network(NetworkPolicy::Off),
+                false,
+                Some(4),
+            );
+            let bs = sep(&benign);
+            assert_eq!(&hostile[..s], &benign[..bs]);
+        }
+
         /// desc: shell mode wraps `bash -c <command>`; argv mode runs the program
         /// directly (no shell). Either way the payload sits AFTER the `--` terminator.
         /// expect: the child argv exactly, positioned after `--`.
         #[test]
         fn positive_bwrap_argv_shell_and_argv_payload() {
-            let sh = bwrap_argv(&ExecSpec::sh("echo hi", "/w"), false);
+            let sh = bwrap_argv(&ExecSpec::sh("echo hi", "/w"), false, None);
             let s = sep(&sh);
             assert_eq!(
                 &sh[s + 1..],
                 &["bash".to_string(), "-c".into(), "echo hi".into()]
             );
 
-            let av = bwrap_argv(&ExecSpec::argv(["rg", "pat", "."], "/w"), false);
+            let av = bwrap_argv(&ExecSpec::argv(["rg", "pat", "."], "/w"), false, None);
             let s2 = sep(&av);
             assert_eq!(&av[s2 + 1..], &["rg".to_string(), "pat".into(), ".".into()]);
         }
@@ -584,7 +663,7 @@ mod tests {
         /// desc (boundary): an empty command still assembles a valid `bash -c ""`.
         #[test]
         fn boundary_bwrap_argv_empty_command() {
-            let a = bwrap_argv(&ExecSpec::sh("", "/w"), false);
+            let a = bwrap_argv(&ExecSpec::sh("", "/w"), false, None);
             let s = sep(&a);
             assert_eq!(
                 &a[s + 1..],
@@ -601,7 +680,7 @@ mod tests {
         #[case::adversarial_shell_metachars(vec!["$(touch pwned)", "`id`", "a|b>c"])]
         #[case::adversarial_bwrap_flag_lookalike(vec!["--bind", "/etc", "/etc"])]
         fn adversarial_bwrap_argv_payload_is_isolated_after_separator(#[case] argv: Vec<&str>) {
-            let a = bwrap_argv(&ExecSpec::argv(argv.clone(), "/w"), false);
+            let a = bwrap_argv(&ExecSpec::argv(argv.clone(), "/w"), false, None);
             let s = sep(&a);
             // The payload is exactly the untrusted argv, and it is entirely after `--`.
             let payload: Vec<String> = argv.iter().map(ToString::to_string).collect();
@@ -616,7 +695,7 @@ mod tests {
             // content can't influence a single isolation flag (a token-membership check
             // would false-positive when the payload happens to equal a legit flag/path,
             // e.g. `--bind` / `/etc`).
-            let benign = bwrap_argv(&ExecSpec::argv(["BENIGN"], "/w"), false);
+            let benign = bwrap_argv(&ExecSpec::argv(["BENIGN"], "/w"), false, None);
             let bs = sep(&benign);
             assert_eq!(
                 &a[..s],
@@ -834,6 +913,59 @@ mod tests {
                 "agent-write",
                 "the agent's own (network-on) exec must still write the checkout"
             );
+        }
+
+        /// desc (live, positive, skippable, C23-3b): with `seccomp` on, the child runs
+        /// under a real seccomp *filter* — `/proc/self/status` reports `Seccomp: 2`
+        /// (filter mode). This proves the tuned profile is actually installed, not merely
+        /// assembled. Skips where isolation can't be established (the nix builder).
+        #[tokio::test]
+        async fn positive_bwrap_seccomp_filter_is_installed() {
+            if !bwrap_usable().await {
+                return;
+            }
+            let dir = tempdir();
+            let out = BwrapSandbox::default()
+                .with_seccomp(true)
+                .exec(
+                    &ExecSpec::sh("grep -E '^Seccomp:' /proc/self/status", &dir)
+                        .network(NetworkPolicy::Off)
+                        .timeout(30),
+                )
+                .await
+                .unwrap();
+            assert_eq!(out.exit_code, 0, "stderr={:?}", out.stderr);
+            assert!(
+                out.stdout.contains('2'),
+                "seccomp filter mode must be active (Seccomp: 2), got {:?}",
+                out.stdout
+            );
+        }
+
+        /// desc (live, positive, skippable, C23-3b): the default-allow policy leaves
+        /// ordinary build/test syscalls untouched — a normal command still succeeds under
+        /// the filter, so reviewed-code toolchains aren't broken by the deny-list.
+        #[tokio::test]
+        async fn positive_bwrap_seccomp_allows_normal_commands() {
+            if !bwrap_usable().await {
+                return;
+            }
+            let dir = tempdir();
+            let out = BwrapSandbox::default()
+                .with_seccomp(true)
+                .exec(
+                    &ExecSpec::sh("echo ok && ls / >/dev/null && printf done", &dir)
+                        .network(NetworkPolicy::Off)
+                        .timeout(30),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                out.exit_code, 0,
+                "normal commands must still work under seccomp; stderr={:?}",
+                out.stderr
+            );
+            assert!(out.stdout.contains("done"), "stdout={:?}", out.stdout);
         }
 
         // --- C23-2: the resource pillar (cgroups via systemd-run) --------------

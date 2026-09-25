@@ -342,7 +342,9 @@ pub async fn build_agent_with(
                         pids_max: l.pids_max,
                     })
                     // C23-3a: read-only checkout + throwaway overlay for untrusted exec.
-                    .with_readonly_exec(cfg.sandbox.readonly_exec),
+                    .with_readonly_exec(cfg.sandbox.readonly_exec)
+                    // C23-3b: tuned seccomp-BPF syscall filter (default-allow + deny-list).
+                    .with_seccomp(cfg.sandbox.seccomp),
                 )
             }
             // A remote executor: run on a host built for it (the toolchain, or

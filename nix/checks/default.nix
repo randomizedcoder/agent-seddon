@@ -45,6 +45,12 @@ in
   # default so the main `test` check never builds the DB dep). The dedicated,
   # feature-scoped check that runs them in the gate. docs/design/prompts/05-storage.md.
   prompt-sqlite = craneCheck ./prompt-sqlite.nix { inherit cargoArtifacts; };
+  # Executes the bwrap Tier-1 isolation backend's tests (feature `sandbox-bwrap`, off by
+  # default so the main `test` check never builds the seccomp/libc deps). The dedicated,
+  # feature-scoped check that runs the pure argv/seccomp-BPF assembly in the gate; the
+  # live-exec pillar tests self-skip where unprivileged namespaces are unavailable.
+  # multi-tenancy C23 (docs/design/multi-tenancy/01-process-isolation.md).
+  sandbox-bwrap = craneCheck ./sandbox-bwrap.nix { inherit cargoArtifacts; };
   # Executes the sqlite FleetRegistry roster backend's tests (feature `fleet-sqlite`,
   # off by default so the main `test` check never builds the DB dep). The dedicated,
   # feature-scoped check that runs them in the gate — the review-fleet C2 twin of

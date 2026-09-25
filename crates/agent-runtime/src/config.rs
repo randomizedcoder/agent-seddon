@@ -1818,6 +1818,13 @@ pub struct SandboxCfg {
     /// backends.
     #[serde(default)]
     pub readonly_exec: bool,
+    /// Tier-1 tuned seccomp-BPF syscall filter (multi-tenancy C23-3b, `bwrap` only).
+    /// When `true`, every sandboxed exec runs under a default-allow filter that denies a
+    /// curated set of dangerous syscalls (keyring, ptrace, mount, module load, bpf, …)
+    /// with `EPERM` — blocking them without breaking build/test toolchains. Default
+    /// `false` ⇒ no filter (Tier-0 byte-identical). Ignored by non-`bwrap` backends.
+    #[serde(default)]
+    pub seccomp: bool,
 }
 
 impl Default for SandboxCfg {
@@ -1826,6 +1833,7 @@ impl Default for SandboxCfg {
             backend: default_sandbox_backend(),
             limits: SandboxLimitsCfg::default(),
             readonly_exec: false,
+            seccomp: false,
         }
     }
 }
