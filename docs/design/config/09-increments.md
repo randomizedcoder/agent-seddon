@@ -281,7 +281,9 @@ The two keystones (A, B) are **independent** and may land in either order or in 
   tiers cannot drift). Gated by `nix/checks/scheduler-store.nix`. Deliberately **not** wired into
   `builder.rs`/config/driver — nothing selects it yet, so no tenant's jobs can be accepted-then-never-fired;
   the fanning driver + `[scheduler] store` arm + per-tenant serve seam are **C2c-2**. As-built claim
-  concurrency (atomic batch, not CAS) and its bounded follow-up are documented in design §D1.
+  concurrency (atomic batch, not CAS) and its bounded follow-up were documented in design §D1; that
+  follow-up shipped as **scheduler S1** (a store `Write::CompareAndSwap` + per-driver `owner` token → true
+  cross-driver mutual exclusion, no double-fire).
 - **C2c-2 (built).** Wires the foundation into the agent, from
   [`10-per-tenant-scheduler.md`](10-per-tenant-scheduler.md) §D2/§D3. Five pieces: (a) `[scheduler] store`
   + `path` config (`""`=in-memory `LocalScheduler` Tier-0, unchanged; `file`/`sqlite`/`postgres`=durable),

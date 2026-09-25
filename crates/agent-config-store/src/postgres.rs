@@ -28,7 +28,7 @@ use async_trait::async_trait;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 
-use crate::{check_batch, Backend, Write};
+use crate::{check_batch, conflict, Backend, Write};
 
 /// A Postgres-backed config store (a connection pool + the shared schema).
 pub struct PgBackend {
@@ -196,6 +196,43 @@ impl Backend for PgBackend {
                     .bind(collection)
                     .bind(tenant)
                     .bind(id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(pg_err)?;
+                }
+                Write::CompareAndSwap {
+                    collection,
+                    tenant,
+                    id,
+                    expected,
+                    blob,
+                } => {
+                    // `SELECT … FOR UPDATE` takes a row lock, so a second connection
+                    // racing the same claim blocks until this txn commits/rolls back
+                    // and then sees the updated value — the row lock is what makes
+                    // this true cross-connection mutual exclusion. On mismatch the
+                    // `Err` drops `tx` before commit, rolling back the whole batch.
+                    let cur: Option<Vec<u8>> = sqlx::query_scalar(
+                        "SELECT blob FROM cards WHERE collection = $1 AND tenant = $2 AND id = $3 FOR UPDATE",
+                    )
+                    .bind(collection)
+                    .bind(tenant)
+                    .bind(id)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(pg_err)?;
+                    if cur.as_deref() != expected.as_deref() {
+                        return Err(conflict(collection, id));
+                    }
+                    sqlx::query(
+                        "INSERT INTO cards (collection, tenant, id, pos, blob)
+                         VALUES ($1, $2, $3, (SELECT COALESCE(MAX(pos), -1) + 1 FROM cards), $4)
+                         ON CONFLICT (collection, tenant, id) DO UPDATE SET blob = EXCLUDED.blob",
+                    )
+                    .bind(collection)
+                    .bind(tenant)
+                    .bind(id)
+                    .bind(blob.as_slice())
                     .execute(&mut *tx)
                     .await
                     .map_err(pg_err)?;

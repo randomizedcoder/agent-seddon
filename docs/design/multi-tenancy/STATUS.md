@@ -58,9 +58,14 @@ increments: `PerTenant<S>` (`crates/agent-runtime/src/tenant.rs`) routes the con
 control-plane seams (provider-registry, review-fleet, prompt) per verified tenant (config C2), and — in
 config C2b — the file-backed cognition graph, isolated per tenant by path (`tenants/<t>/…`). Both are
 gated by `[tenancy] per_tenant` (default off = Tier-0). The **scheduler** is the one seam C30 does *not*
-cover: it is process-bound (a job's executor is the owning process), so per-tenant scheduling is a
-backend+driver change, designed in `docs/design/config/10-per-tenant-scheduler.md` and blocked in part on
-plane-01 (per-tenant executor). This is the one implementation of C30 — the config track owns it.
+cover with a thin wrap: it is process-bound (a job's executor is the owning process), so per-tenant
+scheduling is a backend+driver change, designed in `docs/design/config/10-per-tenant-scheduler.md`. Its
+durable tenant-keyed backend + fanning driver shipped (config C2c-1/C2c-2), and **scheduler S1** then
+closed the design's one remaining claim gap: a store `Write::CompareAndSwap` (a conditional upsert, `SELECT
+… FOR UPDATE` on Postgres) + a per-driver `owner` token make claims **cross-driver mutually exclusive** —
+two drivers ticking one backend can no longer both fire a job. The remaining scheduler work is **S2**
+(dispatch a fired job into a per-tenant *sandbox* instead of the shared in-process turn + fairness caps),
+which depends on plane-01 process isolation. This is the one implementation of C30 — the config track owns it.
 **C29 — config ownership model** is now **complete**: `agent.toml` is operator-global in full
 (Principle 1 — the tenant-facing config surface is the per-tenant *stores*, never a per-tenant TOML;
 codified by `tenant_writable_config_sections()`, an empty set reconciled against the generated schema),

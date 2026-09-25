@@ -18,7 +18,7 @@ use agent_core::{Error, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::{check_batch, Backend, Write};
+use crate::{check_batch, conflict, Backend, Write};
 
 /// Size cap on the on-disk bundle, checked before parse (a hostile/oversized
 /// file must not be buffered unboundedly).
@@ -165,6 +165,28 @@ impl Backend for FileBackend {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut bundle = self.load()?;
         check_batch(writes, |t| bundle.tenants.iter().any(|x| x == t))?;
+        // CAS precondition pre-pass against the loaded bundle: reject the whole
+        // batch (nothing is persisted — the mutated `bundle` is dropped, the
+        // on-disk file untouched) if any `CompareAndSwap` no longer matches.
+        for w in writes {
+            if let Write::CompareAndSwap {
+                collection,
+                tenant,
+                id,
+                expected,
+                ..
+            } = w
+            {
+                let cur = bundle
+                    .cards
+                    .iter()
+                    .find(|r| r.collection == *collection && r.tenant == *tenant && r.id == *id)
+                    .map(|r| r.blob.as_slice());
+                if cur != expected.as_deref() {
+                    return Err(conflict(collection, id));
+                }
+            }
+        }
         let mut next_pos = bundle
             .cards
             .iter()
@@ -178,11 +200,19 @@ impl Backend for FileBackend {
                         bundle.tenants.push(tenant.clone());
                     }
                 }
+                // A CAS whose precondition held is an ordinary upsert from here on.
                 Write::Put {
                     collection,
                     tenant,
                     id,
                     blob,
+                }
+                | Write::CompareAndSwap {
+                    collection,
+                    tenant,
+                    id,
+                    blob,
+                    ..
                 } => {
                     match bundle
                         .cards

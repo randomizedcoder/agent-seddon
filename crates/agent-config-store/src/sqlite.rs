@@ -19,9 +19,9 @@ use std::sync::Mutex;
 
 use agent_core::{Error, Result};
 use async_trait::async_trait;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::{check_batch, Backend, Write};
+use crate::{check_batch, conflict, Backend, Write};
 
 /// A SQLite-backed config store.
 pub struct SqliteBackend {
@@ -191,6 +191,35 @@ impl Backend for SqliteBackend {
                     tx.execute(
                         "DELETE FROM cards WHERE collection = ?1 AND tenant = ?2 AND id = ?3",
                         params![collection, tenant, id],
+                    )
+                    .map_err(sql_err)?;
+                }
+                Write::CompareAndSwap {
+                    collection,
+                    tenant,
+                    id,
+                    expected,
+                    blob,
+                } => {
+                    // Read the current value inside the transaction, compare, and
+                    // reject on mismatch — returning `Err` drops `tx` before commit,
+                    // rolling back every write in this batch (all-or-nothing).
+                    let cur: Option<Vec<u8>> = tx
+                        .query_row(
+                            "SELECT blob FROM cards WHERE collection = ?1 AND tenant = ?2 AND id = ?3",
+                            params![collection, tenant, id],
+                            |row| row.get::<_, Vec<u8>>(0),
+                        )
+                        .optional()
+                        .map_err(sql_err)?;
+                    if cur.as_deref() != expected.as_deref() {
+                        return Err(conflict(collection, id));
+                    }
+                    tx.execute(
+                        "INSERT INTO cards (collection, tenant, id, pos, blob)
+                         VALUES (?1, ?2, ?3, (SELECT COALESCE(MAX(pos), -1) + 1 FROM cards), ?4)
+                         ON CONFLICT (collection, tenant, id) DO UPDATE SET blob = excluded.blob",
+                        params![collection, tenant, id, blob],
                     )
                     .map_err(sql_err)?;
                 }

@@ -22,6 +22,9 @@
 //!   persists none of the writes.
 //! - A `Put` for a **non-existent tenant** is rejected (a foreign-key
 //!   violation), unless the tenant is created earlier in the same batch.
+//! - A [`Write::CompareAndSwap`] is a **conditional** upsert: it lands only if the
+//!   stored value still equals what the writer read, else the batch is rejected
+//!   with an [`is_conflict`] error — the cross-driver mutual-exclusion primitive.
 
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -101,6 +104,20 @@ pub enum Write {
         tenant: String,
         id: String,
     },
+    /// Upsert `blob` at `(collection, tenant, id)` **only if** the current stored
+    /// value equals `expected` (`None` = the card must be absent). On mismatch the
+    /// whole batch is rejected with a [`is_conflict`]-recognizable error and **none**
+    /// of its writes land — the cross-driver mutual-exclusion primitive the
+    /// multi-tenant scheduler needs (config C2c / scheduler S1). Each backend
+    /// evaluates the precondition inside the same lock/transaction it already opens
+    /// for `apply`, so the compare-and-swap is atomic with the write.
+    CompareAndSwap {
+        collection: &'static str,
+        tenant: String,
+        id: String,
+        expected: Option<Vec<u8>>,
+        blob: Vec<u8>,
+    },
 }
 
 /// The storage backend: untyped, transactional, object-safe. Implementations are
@@ -142,6 +159,25 @@ fn not_found(collection: &str, id: &str) -> Error {
     Error::Config(format!("not found: {collection} card `{id}`"))
 }
 
+/// A failed [`Write::CompareAndSwap`] precondition: the stored value no longer
+/// matches what the writer read. Like [`not_found`], the `conflict:` prefix is the
+/// seam contract — a caller distinguishes it with [`is_conflict`] to retry or skip
+/// (the loser of a cross-driver claim race), rather than treat it as a hard error.
+/// (The wire layer could map it to gRPC `Aborted`/`FailedPrecondition`; the first
+/// consumer — the scheduler claim path — is in-process, so that is not wired here.)
+/// The segment is safe to echo — it passed [`seg`].
+fn conflict(collection: &str, id: &str) -> Error {
+    Error::Config(format!("conflict: {collection} card `{id}`"))
+}
+
+/// Whether `err` is a compare-and-swap precondition failure from [`Backend::apply`]
+/// — a [`Write::CompareAndSwap`] whose `expected` did not match the stored value.
+/// Lets a caller (the multi-driver scheduler) treat a lost claim as "someone else
+/// won it, skip" instead of an error, while still propagating real failures.
+pub fn is_conflict(err: &Error) -> bool {
+    matches!(err, Error::Config(m) if m.starts_with("conflict: "))
+}
+
 /// Fail-closed validation shared by every backend's `apply`: every segment is
 /// checked, and a `Put` must target an existing-or-ensured tenant.
 ///
@@ -158,7 +194,12 @@ fn check_batch(writes: &[Write], existing: impl Fn(&str) -> bool) -> Result<()> 
             }
             Write::Put {
                 tenant, id, blob, ..
+            }
+            | Write::CompareAndSwap {
+                tenant, id, blob, ..
             } => {
+                // A CAS validates its target exactly like a `Put` — the `expected`
+                // bytes are opaque and checked per-backend inside the transaction.
                 seg("tenant", tenant)?;
                 seg("id", id)?;
                 if blob.is_empty() {
@@ -467,18 +508,48 @@ impl Backend for MemoryBackend {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         check_batch(writes, |t| m.tenants.contains(t))?;
-        // Two-phase within the lock: the check above already proved the batch
+        // CAS precondition pre-pass (against the pre-batch state, under the lock):
+        // every `CompareAndSwap` must still match `expected` or the whole batch is
+        // rejected before any mutation — so the batch stays all-or-nothing even
+        // though the mutate loop below commits in place.
+        for w in writes {
+            if let Write::CompareAndSwap {
+                collection,
+                tenant,
+                id,
+                expected,
+                ..
+            } = w
+            {
+                let cur = m
+                    .cards
+                    .get(&(collection.to_string(), tenant.clone(), id.clone()))
+                    .map(|(_, blob)| blob.as_slice());
+                if cur != expected.as_deref() {
+                    return Err(conflict(collection, id));
+                }
+            }
+        }
+        // Two-phase within the lock: the checks above already proved the batch
         // valid, so applying it cannot fail — the map mutation is the commit.
         for w in writes {
             match w {
                 Write::EnsureTenant { tenant } => {
                     m.tenants.insert(tenant.clone());
                 }
+                // A CAS whose precondition held is an ordinary upsert from here on.
                 Write::Put {
                     collection,
                     tenant,
                     id,
                     blob,
+                }
+                | Write::CompareAndSwap {
+                    collection,
+                    tenant,
+                    id,
+                    blob,
+                    ..
                 } => {
                     let key = (collection.to_string(), tenant.clone(), id.clone());
                     let pos = match m.cards.get(&key) {

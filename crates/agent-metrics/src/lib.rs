@@ -924,7 +924,7 @@ impl Metrics {
         let config_store_ops = IntCounterVec::new(
             Opts::new(
                 "agent_config_store_ops_total",
-                "Config-store operations, by collection, op (get|list|count|tenants|put|delete|ensure_tenant), outcome (ok|error) and tenant",
+                "Config-store operations, by collection, op (get|list|count|tenants|put|delete|ensure_tenant|compare_and_swap), outcome (ok|error) and tenant",
             ),
             &["collection", "op", "outcome", "tenant"],
         )
@@ -2570,7 +2570,7 @@ impl Metrics {
 
     /// Count one config-store operation `{collection, op, outcome, tenant}` (the
     /// `MeteredBackend` decorator, `agent-runtime`). `collection` is bounded (one per
-    /// card kind); `op` ∈ get|list|count|tenants|put|delete|ensure_tenant; `outcome`
+    /// card kind); `op` ∈ get|list|count|tenants|put|delete|ensure_tenant|compare_and_swap; `outcome`
     /// ∈ ok|error — all caller-supplied bounded constants. `tenant` is the verified
     /// org (C25) and **attacker-influenced**, so it is `safe_segment`-validated here
     /// (the recorder is a funnel — a malformed value is dropped, not sanitized) and

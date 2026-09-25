@@ -19,18 +19,21 @@
 //! [`claim_is_live`](crate::claim_is_live)/[`push_history`](crate::push_history)
 //! definitions, so the two tiers cannot drift.
 //!
-//! Concurrency note (fail-closed, not oversold): `Backend::apply` is an
-//! atomic **batch**, not a compare-and-set. So a claim written here gives
-//! single-driver overlap-prevention and crash recovery (the TTL), exactly as
-//! `LocalScheduler` does — **not** cross-driver mutual exclusion. Two drivers
-//! ticking one backend could both claim the same job in the same instant. True
-//! multi-driver exclusion needs a CAS primitive the `Backend` does not expose;
-//! it is a bounded follow-up (config C2c-2), called out rather than implied.
+//! Concurrency note (fail-closed): claims are written under
+//! [`Write::CompareAndSwap`] (scheduler S1) — a claim lands only if the job card
+//! still holds the bytes this driver read, so exactly one of several drivers
+//! ticking the same backend wins a due job and the losers see an
+//! [`is_conflict`](agent_config_store::is_conflict) error and skip it (no
+//! double-fire). This is **cross-driver** mutual exclusion, above the
+//! single-driver overlap-prevention + TTL crash-recovery `LocalScheduler` gives.
+//! An `owner` token on each claim records which driver holds it (observability +
+//! a fail-closed release: a stale finisher whose claim was TTL-reclaimed by
+//! another driver hits a conflict and does not clobber the new claim).
 
 use std::future::Future;
 use std::sync::Arc;
 
-use agent_config_store::{Backend, Write};
+use agent_config_store::{is_conflict, Backend, Write};
 use agent_core::{safe_segment, Error, Job, JobId, Result, Run, RunOutcome, Scheduler};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -60,6 +63,10 @@ struct StoredJob {
     /// When the in-flight run claimed this job (epoch ms); `None` if idle.
     #[serde(default)]
     claimed_at_ms: Option<u64>,
+    /// Which driver holds the live claim (its `owner` token); `None` when idle.
+    /// `#[serde(default)]` so a card persisted before S1 still decodes.
+    #[serde(default)]
+    claimed_by: Option<String>,
     #[serde(default)]
     history: Vec<Run>,
 }
@@ -83,6 +90,17 @@ pub struct StoreScheduler {
     claim_ttl_ms: u64,
     /// Cap on jobs per tenant, since the model can create them.
     max_jobs: usize,
+    /// This driver's claim-owner token (S1). Stamped on a job when this instance
+    /// wins its CAS claim, so a claim is attributable and a stale finisher can be
+    /// told apart from the driver that reclaimed the job. A fresh per-instance id
+    /// (no new dep — `uuid` is already the job-id source) so two drivers over one
+    /// backend never share an owner.
+    owner: String,
+}
+
+/// A fresh, collision-free claim-owner token for one `StoreScheduler` instance.
+fn new_owner() -> String {
+    format!("drv-{}", uuid::Uuid::new_v4().simple())
 }
 
 impl StoreScheduler {
@@ -95,6 +113,7 @@ impl StoreScheduler {
             observer: None,
             claim_ttl_ms: DEFAULT_CLAIM_TTL_MS,
             max_jobs: 64,
+            owner: new_owner(),
         }
     }
 
@@ -112,7 +131,15 @@ impl StoreScheduler {
             observer: None,
             claim_ttl_ms: DEFAULT_CLAIM_TTL_MS,
             max_jobs: 64,
+            owner: new_owner(),
         })
+    }
+
+    /// Override this driver's claim-owner token (default: a fresh per-instance id).
+    /// Useful for a stable, human-readable owner or for deterministic tests.
+    pub fn with_owner(mut self, owner: impl Into<String>) -> Self {
+        self.owner = owner.into();
+        self
     }
 
     pub fn with_observer(mut self, o: RunObserver) -> Self {
@@ -157,26 +184,67 @@ impl StoreScheduler {
             .await
     }
 
-    /// Load every job card for this tenant (decoded, hostile blobs fail closed).
-    async fn load(&self) -> Result<Vec<StoredJob>> {
+    /// Load every job card for this tenant, each paired with its **raw blob**
+    /// (decoded, hostile blobs fail closed). The raw bytes are what a
+    /// [`Write::CompareAndSwap`] claim conditions on — the exact value this driver
+    /// read, so its claim lands only if no other driver has since rewritten the card.
+    async fn load_raw(&self) -> Result<Vec<(StoredJob, Vec<u8>)>> {
         self.backend
             .list(COLLECTION, &self.tenant)
             .await?
-            .iter()
-            .map(|b| decode_job(b))
+            .into_iter()
+            .map(|b| Ok((decode_job(&b)?, b)))
             .collect()
+    }
+
+    /// Load every job card for this tenant (decoded, hostile blobs fail closed).
+    async fn load(&self) -> Result<Vec<StoredJob>> {
+        Ok(self
+            .load_raw()
+            .await?
+            .into_iter()
+            .map(|(sj, _)| sj)
+            .collect())
+    }
+
+    /// Persist `sj` only if its card still holds `prior` (the bytes we read) — the
+    /// cross-driver claim/release primitive (S1). The idempotent `EnsureTenant`
+    /// keeps the store's foreign-key check satisfied; the `CompareAndSwap` is what
+    /// makes exactly one racing driver win. A conflict rolls back the whole batch.
+    async fn cas_apply(&self, sj: &StoredJob, prior: Vec<u8>) -> Result<()> {
+        let blob = encode_job(sj)?;
+        self.backend
+            .apply(&[
+                Write::EnsureTenant {
+                    tenant: self.tenant.clone(),
+                },
+                Write::CompareAndSwap {
+                    collection: COLLECTION,
+                    tenant: self.tenant.clone(),
+                    id: sj.job.id.clone(),
+                    expected: Some(prior),
+                    blob,
+                },
+            ])
+            .await
     }
 
     /// Jobs whose next fire has arrived, claimed for execution — the durable twin
     /// of `LocalScheduler::claim_due`. Returns `(id, goal)` for jobs that won a
     /// claim; records a visible `Skipped` run for each that lost to a live claim.
-    /// All the re-armed/claimed cards are persisted in one atomic batch.
+    ///
+    /// Each claim (and each re-arm of a still-live job) is persisted as its **own**
+    /// [`Write::CompareAndSwap`] conditioned on the exact bytes read, so when
+    /// several drivers tick one backend at once exactly one wins each due job — the
+    /// losers see an [`is_conflict`] error and skip it silently (no double-fire, no
+    /// hard error). One CAS-apply per due job (rather than one big batch) so a lost
+    /// race on one job never rolls back this driver's other valid claims; fine for a
+    /// control-plane tick, where the due set per tick is small.
     pub async fn claim_due(&self, now: u64) -> Result<Vec<(JobId, String)>> {
         let mut due = Vec::new();
         let mut skipped: Vec<Run> = Vec::new();
-        let mut writes: Vec<Write> = Vec::new();
 
-        for mut sj in self.load().await? {
+        for (mut sj, prior) in self.load_raw().await? {
             if !sj.job.enabled {
                 continue;
             }
@@ -199,25 +267,28 @@ impl StoreScheduler {
                     };
                     push_history(&mut sj.history, r.clone());
                     sj.job.next_fire_ms = next_fire(&sj.job.schedule, now);
-                    skipped.push(r);
-                    writes.push(self.put_write(&sj)?);
+                    // Re-arm under CAS; if another driver already re-armed or claimed
+                    // this job, its write is authoritative — skip silently.
+                    match self.cas_apply(&sj, prior).await {
+                        Ok(()) => skipped.push(r),
+                        Err(e) if is_conflict(&e) => {}
+                        Err(e) => return Err(e),
+                    }
                     continue;
                 }
             }
             sj.claimed_at_ms = Some(now);
+            sj.claimed_by = Some(self.owner.clone());
             sj.job.next_fire_ms = next_fire(&sj.job.schedule, now);
-            due.push((sj.job.id.clone(), sj.job.goal.clone()));
-            writes.push(self.put_write(&sj)?);
+            // Win the job only if our read is still current: exactly one driver's
+            // CAS succeeds; a loser sees a conflict and does not add it to `due`.
+            match self.cas_apply(&sj, prior).await {
+                Ok(()) => due.push((sj.job.id.clone(), sj.job.goal.clone())),
+                Err(e) if is_conflict(&e) => {}
+                Err(e) => return Err(e),
+            }
         }
 
-        if !writes.is_empty() {
-            let mut batch = Vec::with_capacity(writes.len() + 1);
-            batch.push(Write::EnsureTenant {
-                tenant: self.tenant.clone(),
-            });
-            batch.extend(writes);
-            self.backend.apply(&batch).await?;
-        }
         // Observe skips only after the state they describe is committed.
         if let Some(o) = &self.observer {
             for r in &skipped {
@@ -234,12 +305,25 @@ impl StoreScheduler {
         if safe_segment(id) {
             if let Some(blob) = self.backend.get(COLLECTION, &self.tenant, id).await? {
                 let mut sj = decode_job(&blob)?;
-                sj.claimed_at_ms = None;
-                push_history(&mut sj.history, run.clone());
-                if sj.job.next_fire_ms.is_none() {
-                    sj.job.enabled = false;
+                // Release only a claim this driver still owns. If the run's claim was
+                // TTL-reclaimed by another driver (which stamped its own owner), this
+                // finish is stale — record nothing and leave the new claim intact,
+                // rather than clobber the owner now re-running the job.
+                if sj.claimed_by.as_deref() == Some(self.owner.as_str()) {
+                    sj.claimed_at_ms = None;
+                    sj.claimed_by = None;
+                    push_history(&mut sj.history, run.clone());
+                    if sj.job.next_fire_ms.is_none() {
+                        sj.job.enabled = false;
+                    }
+                    // CAS guards the window between the read above and this write: if
+                    // another driver reclaims in that gap, the conflict is a no-op.
+                    match self.cas_apply(&sj, blob).await {
+                        Ok(()) => {}
+                        Err(e) if is_conflict(&e) => {}
+                        Err(e) => return Err(e),
+                    }
                 }
-                self.write_job(&sj).await?;
             }
         }
         if let Some(o) = &self.observer {
@@ -280,16 +364,6 @@ impl StoreScheduler {
             .await?;
         }
         Ok(count)
-    }
-
-    /// A `Put` for one job card (encoding fallible; a bad card fails the batch).
-    fn put_write(&self, sj: &StoredJob) -> Result<Write> {
-        Ok(Write::Put {
-            collection: COLLECTION,
-            tenant: self.tenant.clone(),
-            id: sj.job.id.clone(),
-            blob: encode_job(sj)?,
-        })
     }
 }
 
@@ -334,6 +408,7 @@ impl Scheduler for StoreScheduler {
                 enabled: true,
             },
             claimed_at_ms: None,
+            claimed_by: None,
             history: Vec::new(),
         };
         self.write_job(&sj).await?;
