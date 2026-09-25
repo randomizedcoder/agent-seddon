@@ -67,7 +67,10 @@ pub struct LocalScheduler {
     max_jobs: usize,
 }
 
-pub(crate) fn wall_clock_ms() -> u64 {
+/// Milliseconds since the Unix epoch — the schedulers' default wall clock, and
+/// the fallback clock the multi-tenant driver ([`crate::StoreScheduler`] driver,
+/// scheduler S2) stamps a tick with when no test clock is injected.
+pub fn wall_clock_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)

@@ -344,26 +344,45 @@ impl StoreScheduler {
         let due = self.claim_due(now).await?;
         let count = due.len();
         for (id, goal) in due {
-            let started = self.now();
-            let out = exec(goal).await;
-            let finished = self.now();
-            let (outcome, detail) = match out {
-                Ok(answer) => (RunOutcome::Completed, answer),
-                Err(e) => (RunOutcome::Failed, e.to_string()),
-            };
-            self.finish(
-                &id,
-                Run {
-                    job_id: id.clone(),
-                    started_ms: started,
-                    finished_ms: finished,
-                    outcome,
-                    detail: detail.chars().take(MAX_DETAIL_CHARS).collect(),
-                },
-            )
-            .await?;
+            self.run_claimed(&id, goal, &exec).await?;
         }
         Ok(count)
+    }
+
+    /// Run one **already-claimed** job through `exec` and record its outcome,
+    /// releasing the claim via [`finish`](Self::finish).
+    ///
+    /// Split out of [`tick_with`](Self::tick_with) so the multi-tenant driver
+    /// (config C2c-2, scheduler **S2**) can claim across tenants with
+    /// [`claim_due`](Self::claim_due) and then dispatch the claimed jobs with its
+    /// own fan-out / fairness (a global concurrency ceiling + round-robin), while
+    /// reusing the *identical* run-recording semantics (timing, outcome, the
+    /// `MAX_DETAIL_CHARS` detail cap, and the CAS-guarded claim release). A failed
+    /// `exec` is still recorded (as [`RunOutcome::Failed`]); the run is over either
+    /// way.
+    pub async fn run_claimed<F, Fut>(&self, id: &str, goal: String, exec: F) -> Result<()>
+    where
+        F: FnOnce(String) -> Fut,
+        Fut: Future<Output = Result<String>>,
+    {
+        let started = self.now();
+        let out = exec(goal).await;
+        let finished = self.now();
+        let (outcome, detail) = match out {
+            Ok(answer) => (RunOutcome::Completed, answer),
+            Err(e) => (RunOutcome::Failed, e.to_string()),
+        };
+        self.finish(
+            id,
+            Run {
+                job_id: id.to_string(),
+                started_ms: started,
+                finished_ms: finished,
+                outcome,
+                detail: detail.chars().take(MAX_DETAIL_CHARS).collect(),
+            },
+        )
+        .await
     }
 }
 

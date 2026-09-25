@@ -117,6 +117,14 @@ the design:
   ceiling and a round-robin/priority tick order so one tenant's backlog cannot
   starve others. Hostile inputs (`spec`, `goal`, job counts) stay clamped exactly
   as `LocalScheduler` clamps them today.
+  **Built (scheduler S2a).** The driver now *claims* every tenant's due jobs (S1's
+  per-job CAS claim) and *dispatches* them round-robin-interleaved across tenants
+  under a global concurrency ceiling (`[scheduler] max_concurrent`) and a per-tenant
+  in-flight cap (`[scheduler] max_inflight_per_tenant`); the start tenant rotates each
+  tick. `max_jobs` stays the per-tenant *registration* cap. Both caps default to `1`
+  (serial — single-tenant byte-identical); an operator raises them for parallel
+  firing. See [`scheduler.md`](../../components/scheduler.md). The **executor**
+  sub-question above (sandboxed subprocess dispatch) is scheduler **S2b**, still open.
 
 ### D3. The `--serve-scheduler` seam
 

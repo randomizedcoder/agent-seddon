@@ -510,8 +510,17 @@ store          = ""
 path           = ".agent/scheduler.json"
 tick_secs      = 30
 # Cap on registered jobs (the model can create them). With the durable store this
-# cap is per tenant.
+# cap is per tenant. This is a *registration* cap — distinct from the runtime
+# dispatch caps below.
 max_jobs       = 64
+# Fairness (scheduler S2). max_concurrent is the global ceiling on how many jobs the
+# tenant-fanning driver fires concurrently in one tick; 1 (default) keeps firing
+# serial (a single-tenant install is byte-identical, a multi-tenant one just gains a
+# fair, round-robin order), 0 = unbounded. max_inflight_per_tenant bounds any one
+# tenant's share of that ceiling so a busy tenant cannot starve others; 1 (default),
+# 0 = bounded only by max_concurrent.
+max_concurrent           = 1
+max_inflight_per_tenant  = 1
 claim_ttl_secs = 900
 
 [forge]

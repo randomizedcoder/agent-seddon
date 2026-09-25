@@ -430,9 +430,22 @@ pub struct SchedulerCfg {
     #[serde(default = "default_tick_secs")]
     pub tick_secs: u64,
     /// Cap on registered jobs (the model can create them). With the durable store
-    /// this cap is **per tenant**.
+    /// this cap is **per tenant**. This is a *registration* cap — distinct from the
+    /// runtime dispatch caps below.
     #[serde(default = "default_max_jobs")]
     pub max_jobs: usize,
+    /// Global ceiling on how many jobs the durable, tenant-fanning driver fires
+    /// **concurrently** across all tenants in one tick (scheduler S2 fairness).
+    /// `1` (default) keeps firing serial — a single-tenant install is
+    /// byte-identical; a multi-tenant one only gains a fair, round-robin order.
+    /// `0` = unbounded. Raise it to fire independent tenants' jobs in parallel.
+    #[serde(default = "default_max_concurrent")]
+    pub max_concurrent: usize,
+    /// Ceiling on how many of a **single tenant's** jobs fire concurrently, so one
+    /// tenant's backlog cannot consume the whole `max_concurrent` ceiling. `1`
+    /// (default); `0` = bounded only by `max_concurrent`.
+    #[serde(default = "default_max_inflight_per_tenant")]
+    pub max_inflight_per_tenant: usize,
     /// How long an in-flight claim is honoured before a crashed run's job is
     /// reclaimable.
     #[serde(default = "default_claim_ttl_secs")]
@@ -447,6 +460,8 @@ impl Default for SchedulerCfg {
             path: default_scheduler_path(),
             tick_secs: default_tick_secs(),
             max_jobs: default_max_jobs(),
+            max_concurrent: default_max_concurrent(),
+            max_inflight_per_tenant: default_max_inflight_per_tenant(),
             claim_ttl_secs: default_claim_ttl_secs(),
         }
     }
@@ -461,6 +476,12 @@ fn default_tick_secs() -> u64 {
 }
 fn default_max_jobs() -> usize {
     64
+}
+fn default_max_concurrent() -> usize {
+    1
+}
+fn default_max_inflight_per_tenant() -> usize {
+    1
 }
 fn default_claim_ttl_secs() -> u64 {
     900

@@ -31,13 +31,23 @@
 //! per-tenant sandbox instead of an in-process turn. Called out as a dependency,
 //! not implied here.
 
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use agent_config_store::Backend;
-use agent_scheduler::{RunObserver, StoreScheduler};
+use agent_scheduler::{wall_clock_ms, RunObserver, StoreScheduler};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::task::JoinSet;
 
 use crate::agent::Agent;
+
+/// A tenant's claimed-but-not-yet-dispatched jobs: the tenant, its per-tenant
+/// scheduler, and the queue of claimed `(job_id, goal)` pairs to fire.
+type ClaimBatch = (String, Arc<StoreScheduler>, VecDeque<(String, String)>);
+/// One claimed job ready to dispatch: `(tenant, its scheduler, job_id, goal)`.
+type ClaimedJob = (String, Arc<StoreScheduler>, String, String);
 
 /// Drives the durable, store-backed scheduler by fanning the tick over tenants.
 ///
@@ -55,8 +65,18 @@ pub(crate) struct StoreDriver {
     claim_ttl_ms: u64,
     max_jobs: usize,
     observer: RunObserver,
-    /// Injectable clock, so tests are deterministic; production uses the default
-    /// wall clock the built scheduler already carries.
+    /// Global ceiling on jobs firing concurrently across all tenants in one tick
+    /// (scheduler S2 fairness). `1` = serial (single-tenant byte-identical); `0` =
+    /// unbounded.
+    max_concurrent: usize,
+    /// Ceiling on one tenant's concurrently-firing jobs, so a single tenant's
+    /// backlog cannot consume the whole global ceiling. `0` = bounded only by
+    /// `max_concurrent`.
+    max_inflight_per_tenant: usize,
+    /// Rotates the (sorted) tenant tick order each tick, so no tenant's
+    /// lexicographic position starves it (scheduler S2 fairness).
+    rr_cursor: AtomicUsize,
+    /// Injectable clock, so tests are deterministic; production uses the wall clock.
     now_ms: Option<Arc<dyn Fn() -> u64 + Send + Sync>>,
 }
 
@@ -74,8 +94,31 @@ impl StoreDriver {
             claim_ttl_ms,
             max_jobs,
             observer,
+            // Serial by default → today's behaviour (single-tenant byte-identical);
+            // an operator raises these to fire independent tenants' jobs in parallel.
+            max_concurrent: 1,
+            max_inflight_per_tenant: 1,
+            rr_cursor: AtomicUsize::new(0),
             now_ms: None,
         }
+    }
+
+    /// Set the fairness caps (config C2c-2, scheduler S2). `max_concurrent` is the
+    /// global ceiling on concurrently-firing jobs; `max_inflight_per_tenant` bounds
+    /// any one tenant's share of it. A `0` cap means unbounded.
+    pub(crate) fn with_fairness(
+        mut self,
+        max_concurrent: usize,
+        max_inflight_per_tenant: usize,
+    ) -> Self {
+        self.max_concurrent = max_concurrent;
+        self.max_inflight_per_tenant = max_inflight_per_tenant;
+        self
+    }
+
+    /// The tick's `now`, from the injected clock (tests) or the wall clock.
+    fn now(&self) -> u64 {
+        self.now_ms.as_ref().map_or_else(wall_clock_ms, |f| f())
     }
 
     /// Override the clock (tests only).
@@ -122,39 +165,88 @@ impl StoreDriver {
         }
     }
 
+    /// The tenants to drive this tick, rotated round-robin so no tenant's
+    /// lexicographic position (the sorted order [`Backend::tenants`] returns)
+    /// starves it across ticks.
+    async fn rotated_tenants(&self) -> Vec<String> {
+        let mut tenants = self.tenants().await;
+        if tenants.len() > 1 {
+            let start = self.rr_cursor.fetch_add(1, Ordering::Relaxed) % tenants.len();
+            tenants.rotate_left(start);
+        }
+        tenants
+    }
+
     /// Tick every driven tenant once, running each due job's goal through `exec`
-    /// (given the owning tenant and the goal). Returns the total jobs fired.
+    /// (given the owning tenant and the goal). Returns the total jobs claimed and
+    /// dispatched this tick (a job whose `exec` fails is still counted — its run is
+    /// recorded `Failed`).
     ///
     /// Factored out of [`tick`](Self::tick) so the fanning + per-tenant claim logic
     /// is testable without a whole [`Agent`]: a test passes a fake `exec` that
     /// records `(tenant, goal)` pairs.
+    ///
+    /// **Fairness (scheduler S2).** Due jobs are first *claimed* per tenant (S1's
+    /// CAS claim, so overlap/cross-driver races stay excluded), then *dispatched*
+    /// round-robin-interleaved across tenants under a global concurrency ceiling
+    /// (`max_concurrent`) and a per-tenant in-flight cap (`max_inflight_per_tenant`)
+    /// — so a busy tenant's backlog can neither starve nor drown the others. With
+    /// both caps at their `1` default, dispatch is serial and interleaved (today's
+    /// behaviour for a single tenant, fair ordering for many).
     pub(crate) async fn tick_with_exec<F, Fut>(&self, exec: F) -> usize
     where
-        F: Fn(String, String) -> Fut + Clone,
-        Fut: Future<Output = agent_core::Result<String>>,
+        F: Fn(String, String) -> Fut + Clone + Send + 'static,
+        Fut: Future<Output = agent_core::Result<String>> + Send,
     {
-        let mut fired = 0usize;
-        for tenant in self.tenants().await {
+        let now = self.now();
+
+        // 1. Claim every tenant's due jobs, in rotated (round-robin) tenant order.
+        let mut batches: Vec<ClaimBatch> = Vec::new();
+        for tenant in self.rotated_tenants().await {
             let Some(sched) = self.scheduler_for(&tenant) else {
                 tracing::warn!(tenant = %tenant, "scheduler: skipping tenant (unsafe segment)");
                 continue;
             };
-            let exec = exec.clone();
-            let t = tenant.clone();
-            let n = sched
-                .tick_with(move |goal| {
-                    let exec = exec.clone();
-                    let t = t.clone();
-                    async move { exec(t, goal).await }
-                })
-                .await;
-            match n {
-                Ok(k) => fired += k,
+            let sched = Arc::new(sched);
+            match sched.claim_due(now).await {
+                Ok(due) if !due.is_empty() => batches.push((tenant, sched, due.into())),
+                Ok(_) => {}
                 Err(e) => {
-                    tracing::warn!(tenant = %tenant, error = %e, "scheduler: tenant tick failed");
+                    tracing::warn!(tenant = %tenant, error = %e, "scheduler: tenant claim failed");
                 }
             }
         }
+
+        // 2. Interleave the claims round-robin → a flat order that alternates tenants.
+        let jobs = interleave(batches);
+        let fired = jobs.len();
+        if fired == 0 {
+            return 0;
+        }
+
+        // 3. Dispatch under the global ceiling + per-tenant in-flight cap.
+        let global = make_semaphore(self.max_concurrent);
+        let mut per_tenant: HashMap<String, Arc<Semaphore>> = HashMap::new();
+        let mut set = JoinSet::new();
+        for (tenant, sched, id, goal) in jobs {
+            let gate = per_tenant
+                .entry(tenant.clone())
+                .or_insert_with(|| make_semaphore(self.max_inflight_per_tenant))
+                .clone();
+            let global = global.clone();
+            let exec = exec.clone();
+            set.spawn(async move {
+                // Per-tenant permit first, then the global one — a fixed acquire
+                // order across every task, so the two semaphores cannot deadlock.
+                let _tpermit = acquire(gate).await;
+                let _gpermit = acquire(global).await;
+                let t = tenant.clone();
+                if let Err(e) = sched.run_claimed(&id, goal, move |g| exec(t, g)).await {
+                    tracing::warn!(tenant = %tenant, job = %id, error = %e, "scheduler: run/finish failed");
+                }
+            });
+        }
+        while set.join_next().await.is_some() {}
         fired
     }
 
@@ -179,6 +271,42 @@ impl StoreDriver {
         })
         .await
     }
+}
+
+/// Flatten per-tenant claim batches into one dispatch order that **alternates
+/// tenants** — one job per tenant per round — so a tenant with a long backlog does
+/// not run all its jobs before any other tenant's first (scheduler S2 fairness).
+fn interleave(mut batches: Vec<ClaimBatch>) -> Vec<ClaimedJob> {
+    let mut out = Vec::new();
+    let mut progress = true;
+    while progress {
+        progress = false;
+        for (tenant, sched, queue) in &mut batches {
+            if let Some((id, goal)) = queue.pop_front() {
+                out.push((tenant.clone(), sched.clone(), id, goal));
+                progress = true;
+            }
+        }
+    }
+    out
+}
+
+/// A semaphore for a fairness cap; a `0` cap means **unbounded** (mirrors the gRPC
+/// admission-layer convention).
+fn make_semaphore(cap: usize) -> Arc<Semaphore> {
+    let permits = if cap == 0 {
+        Semaphore::MAX_PERMITS
+    } else {
+        cap
+    };
+    Arc::new(Semaphore::new(permits))
+}
+
+/// Acquire one owned permit; these semaphores are never closed, so this cannot fail.
+async fn acquire(sem: Arc<Semaphore>) -> OwnedSemaphorePermit {
+    sem.acquire_owned()
+        .await
+        .expect("scheduler fairness semaphore is never closed")
 }
 
 #[cfg(test)]
