@@ -4,7 +4,11 @@
 //! the four pillars bubblewrap covers are actually enforced:
 //!
 //! - **process/syscall** — user/pid/ipc/uts namespaces (rootless ⇒ the child holds
-//!   no capabilities over host resources), `--die-with-parent`, `--new-session`.
+//!   no capabilities over host resources), `--die-with-parent`, `--new-session`. Under
+//!   the opt-in `[sandbox] seccomp` (C23-3b) a **tuned seccomp-BPF filter** is also
+//!   installed (`--seccomp <fd>`): default-allow with a curated deny-list (keyring,
+//!   ptrace, mount, module load, bpf, …) returning `EPERM`, so dangerous syscalls are
+//!   blocked without breaking build/test toolchains. See [`crate::seccomp`].
 //! - **filesystem** — a fresh root with read-only binds of the system toolchain,
 //!   a private `/tmp` (tmpfs), and the working directory bound read-write. Under the
 //!   opt-in `[sandbox] readonly_exec` (C23-3a), *untrusted* exec (network `Off`/
@@ -27,6 +31,7 @@ use agent_core::{
     Error, ExecOutput, ExecSpec, NetworkPolicy, Result, Sandbox, SandboxCapabilities,
 };
 use async_trait::async_trait;
+use std::os::fd::{AsRawFd, RawFd};
 
 /// The bubblewrap binary. Provisioned on the wrapped agent's PATH via nix
 /// (`nix/default.nix` `agentRuntimePath`, Linux-only) and in the dev shell.
@@ -64,10 +69,13 @@ impl SandboxLimits {
 /// pillar; with no limits it is exactly the namespace-only backend. `readonly_exec`
 /// (default `false`, C23-3a) makes untrusted (network-off) exec run on a read-only
 /// checkout + throwaway overlay; `false` is byte-identical to the pre-C23-3a backend.
+/// `seccomp` (default `false`, C23-3b) installs the tuned syscall filter; `false` is
+/// byte-identical to the pre-C23-3b backend.
 #[derive(Debug, Clone, Default)]
 pub struct BwrapSandbox {
     limits: SandboxLimits,
     readonly_exec: bool,
+    seccomp: bool,
 }
 
 impl BwrapSandbox {
@@ -77,6 +85,7 @@ impl BwrapSandbox {
         Self {
             limits,
             readonly_exec: false,
+            seccomp: false,
         }
     }
 
@@ -84,6 +93,13 @@ impl BwrapSandbox {
     /// (network `Off`/`Loopback`) exec. Off (the default) keeps the writable bind.
     pub fn with_readonly_exec(mut self, on: bool) -> Self {
         self.readonly_exec = on;
+        self
+    }
+
+    /// Enable the C23-3b tuned seccomp-BPF filter (`--seccomp <fd>`, default-allow +
+    /// curated deny-list ⇒ `EPERM`). Off (the default) is byte-identical to before.
+    pub fn with_seccomp(mut self, on: bool) -> Self {
+        self.seccomp = on;
         self
     }
 
@@ -120,7 +136,16 @@ impl BwrapSandbox {
 /// throwaway tmpfs overlay for the child's writes; when unset (default), the cwd is a
 /// writable bind exactly as before. Trusted (network `On`) exec is always a writable
 /// bind, so the agent's own tools are unaffected regardless of the flag.
-pub(crate) fn bwrap_argv(spec: &ExecSpec, readonly_exec: bool) -> Vec<String> {
+///
+/// `seccomp_fd` (C23-3b) is the number of an inherited fd holding the compiled BPF
+/// filter; `Some(fd)` emits `--seccomp <fd>` among the isolation options (before `--`),
+/// `None` (default) emits nothing. The fd itself is produced and kept alive by the
+/// caller ([`BwrapSandbox::exec`]); this fn only places the flag, so it stays pure.
+pub(crate) fn bwrap_argv(
+    spec: &ExecSpec,
+    readonly_exec: bool,
+    seccomp_fd: Option<RawFd>,
+) -> Vec<String> {
     let cwd = spec.cwd.to_string_lossy().into_owned();
     let mut a: Vec<String> = vec![BWRAP.to_string()];
     // Process/syscall isolation: rootless namespaces (the child gets no host
@@ -136,6 +161,12 @@ pub(crate) fn bwrap_argv(spec: &ExecSpec, readonly_exec: bool) -> Vec<String> {
         ]
         .map(String::from),
     );
+    // Tuned syscall filter (C23-3b): bwrap reads the BPF program from this inherited fd
+    // and installs it on the child after its own setup. `None` ⇒ no filter (unchanged).
+    if let Some(fd) = seccomp_fd {
+        a.push("--seccomp".to_string());
+        a.push(fd.to_string());
+    }
     // Network: Off/Loopback get a private (loopback-only) netns → no egress; On
     // stays on the shared network (the agent's own LLM/forge calls need it).
     if matches!(spec.network, NetworkPolicy::Off | NetworkPolicy::Loopback) {
@@ -250,11 +281,25 @@ impl Sandbox for BwrapSandbox {
                 "backend `bwrap` unavailable (no `bwrap` on PATH)".into(),
             ));
         }
+        // Stage the seccomp profile FIRST (C23-3b). Building it can fail (unsupported
+        // arch, memfd error) — fail closed here, before spawning, so the untrusted child
+        // never runs un-filtered. The fd is kept in `_seccomp_fd` for the whole exec:
+        // created without close-on-exec, it is inherited by the spawned bwrap, which
+        // reads it at startup; dropped (closed) when this scope ends, after the child.
+        let _seccomp_fd = if self.seccomp {
+            Some(crate::seccomp::seccomp_memfd()?)
+        } else {
+            None
+        };
         // Optionally wrap in a `systemd-run` cgroup scope (C23-2 resource pillar),
         // then the bwrap isolation, then the untrusted child. An empty prefix ⇒ the
         // namespace-only backend.
         let mut argv = self.scope_prefix();
-        argv.extend(bwrap_argv(spec, self.readonly_exec));
+        argv.extend(bwrap_argv(
+            spec,
+            self.readonly_exec,
+            _seccomp_fd.as_ref().map(AsRawFd::as_raw_fd),
+        ));
         let out = run_argv(&argv, spec).await?;
         // Fail closed: if bwrap couldn't establish isolation it exited before the
         // child ran. Surface that as a sandbox error, never as a command result —

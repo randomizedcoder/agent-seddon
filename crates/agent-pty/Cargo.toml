@@ -12,7 +12,7 @@ pty-local = []
 [target.'cfg(unix)'.dependencies]
 # The only unsafe surface: openpty + setsid/TIOCSCTTY. Already in the tree
 # transitively, so this adds no new external crate.
-libc = "0.2"
+libc.workspace = true
 
 [dependencies]
 agent-core.workspace = true
