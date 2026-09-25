@@ -14,6 +14,7 @@ mod config_store;
 mod context_files;
 mod distiller;
 pub mod doctor;
+mod egress;
 #[cfg(feature = "review")]
 mod fleet_review;
 #[cfg(feature = "git")]
@@ -75,6 +76,7 @@ pub use config::RecallCfg;
 pub use config_schema::{build_schema, validate_config};
 #[cfg(feature = "config")]
 pub use config_store::FileConfigStore;
+pub use egress::derive_egress_allowlist;
 #[cfg(all(feature = "fleet", feature = "transport-registry-store"))]
 pub use progress::{progress_channels, TransportProgressFeed};
 #[cfg(feature = "fleet")]

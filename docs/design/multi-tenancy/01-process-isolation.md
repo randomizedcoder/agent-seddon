@@ -80,9 +80,9 @@ stays simple and honest.
 | Pillar | Mechanism | Current state | Fleet target |
 |---|---|---|---|
 | **Filesystem** | mount namespace + ro bind / overlayfs; per-org root; `confine` backstop | ✅ (C23-1 + C23-3a) bwrap ro system binds + private /tmp; untrusted exec → ro checkout + throwaway overlay | ro-mount the checkout (✅ `readonly_exec`); overlay upper for writable children (✅); per-org subtree (C4) |
-| **Process / syscall** | pid+user namespaces, seccomp, drop caps, non-root uid | none | unprivileged uid per org; seccomp profile; no host pids visible |
-| **Resource (cgroups)** | cgroups v2 `cpu.max`, `memory.max`, `pids.max`, `io` | none (only wall-clock timeout) | per-session cgroup; anti-DoS / fork-bomb / noisy-neighbor |
-| **Network** | per-session netns + egress allow-list | none (`NetworkPolicy::Off` unenforced; only web_fetch SSRF screen) | reviewed-code exec = **no network**; agent process = egress to LLM+forge only |
+| **Process / syscall** | pid+user namespaces, seccomp, drop caps, non-root uid | ✅ (C23-1 pid+user ns) + ✅ (C23-3b tuned seccomp-BPF, `[sandbox] seccomp`) | unprivileged uid per org; seccomp profile; no host pids visible |
+| **Resource (cgroups)** | cgroups v2 `cpu.max`, `memory.max`, `pids.max`, `io` | ✅ (C23-2) `[sandbox.limits]` via `systemd-run` (MemoryMax/CPUQuota/TasksMax) | per-session cgroup; anti-DoS / fork-bomb / noisy-neighbor |
+| **Network** | per-session netns + egress allow-list | ✅ reviewed-code exec = no network (C23-1 `--unshare-net`); ✅ agent-process egress allow-list (C23-3c `[sandbox.egress]`, reqwest paths) | reviewed-code exec = **no network**; agent process = egress to LLM+forge only |
 | **Credential** | per-org secrets, least privilege, never in the reviewed process's env | `EnvPolicy::Scrub` **unhonored** — bash inherits host secrets | Scrub enforced; token only in the agent process, never in exec'd PR code |
 
 **cgroups, precisely:** they are the *resource* pillar — they cap CPU/memory/PIDs/IO and stop
