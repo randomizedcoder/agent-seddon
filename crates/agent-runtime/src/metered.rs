@@ -2297,6 +2297,9 @@ impl agent_config_store::Backend for MeteredBackend {
                     "ensure_tenant",
                     tenant.as_str(),
                 ),
+                agent_config_store::Write::CompareAndSwap {
+                    collection, tenant, ..
+                } => (*collection, "compare_and_swap", tenant.as_str()),
             };
             self.metrics
                 .record_config_store_op(collection, op, outcome, tenant);

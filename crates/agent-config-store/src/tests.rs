@@ -425,6 +425,157 @@ mod scen {
             "both cards present"
         );
     }
+
+    // --- compare-and-swap: the scheduler S1 cross-driver exclusion primitive ---
+
+    /// A `CompareAndSwap` on `(TestCard::COLLECTION, "t", id)`.
+    fn cas(id: &str, expected: Option<Vec<u8>>, blob: Vec<u8>) -> Write {
+        Write::CompareAndSwap {
+            collection: TestCard::COLLECTION,
+            tenant: "t".into(),
+            id: id.into(),
+            expected,
+            blob,
+        }
+    }
+
+    /// positive: a CAS whose `expected` matches the stored value swaps it.
+    pub async fn cas_matching_expected_writes(backend: Arc<dyn Backend>) {
+        let s = Store::<TestCard>::new(backend.clone());
+        s.put("t", card("x", 1)).await.expect("seed");
+        let prior = backend
+            .get(TestCard::COLLECTION, "t", "x")
+            .await
+            .expect("get")
+            .expect("present");
+        backend
+            .apply(&[cas("x", Some(prior), card("x", 2).encode())])
+            .await
+            .expect("CAS on the current value swaps it");
+        assert_eq!(
+            s.get("t", "x").await.expect("get").weight,
+            2,
+            "the new value landed"
+        );
+    }
+
+    /// positive: a CAS with `expected = None` on an absent id creates it.
+    pub async fn cas_absent_expected_creates(backend: Arc<dyn Backend>) {
+        let s = Store::<TestCard>::new(backend.clone());
+        // Seed a sibling so tenant `t` exists (the CAS's FK check requires it).
+        s.put("t", card("seed", 1)).await.expect("seed tenant");
+        backend
+            .apply(&[cas("fresh", None, card("fresh", 1).encode())])
+            .await
+            .expect("CAS create on an absent id");
+        s.get("t", "fresh")
+            .await
+            .expect("the created card is present");
+    }
+
+    /// negative: a CAS whose `expected` does not match is a conflict, and the
+    /// stored value is left untouched (all-or-nothing).
+    pub async fn cas_mismatch_is_conflict(backend: Arc<dyn Backend>) {
+        let s = Store::<TestCard>::new(backend.clone());
+        s.put("t", card("x", 1)).await.expect("seed");
+        let err = backend
+            .apply(&[cas("x", Some(b"stale".to_vec()), card("x", 9).encode())])
+            .await
+            .expect_err("a stale `expected` must conflict");
+        assert!(
+            crate::is_conflict(&err),
+            "the error is a CAS conflict: {err}"
+        );
+        assert_eq!(
+            s.get("t", "x").await.expect("get").weight,
+            1,
+            "the value is unchanged after a conflict"
+        );
+    }
+
+    /// negative: a CAS with `expected = None` on an id that already exists is a
+    /// conflict — create-if-absent must not silently overwrite.
+    pub async fn cas_absent_expected_but_present(backend: Arc<dyn Backend>) {
+        let s = Store::<TestCard>::new(backend.clone());
+        s.put("t", card("x", 1)).await.expect("seed");
+        let err = backend
+            .apply(&[cas("x", None, card("x", 9).encode())])
+            .await
+            .expect_err("create-if-absent on an existing id conflicts");
+        assert!(crate::is_conflict(&err), "conflict: {err}");
+        assert_eq!(s.get("t", "x").await.expect("get").weight, 1, "unchanged");
+    }
+
+    /// corner: a batch mixing a valid Put with a conflicting CAS persists NONE of
+    /// it — the CAS conflict rolls the whole batch back.
+    pub async fn cas_batch_all_or_nothing(backend: Arc<dyn Backend>) {
+        let s = Store::<TestCard>::new(backend.clone());
+        s.put("t", card("x", 1)).await.expect("seed the CAS target");
+        let batch = vec![
+            Write::Put {
+                collection: TestCard::COLLECTION,
+                tenant: "t".into(),
+                id: "sibling".into(),
+                blob: card("sibling", 1).encode(),
+            },
+            cas("x", Some(b"stale".to_vec()), card("x", 9).encode()),
+        ];
+        backend
+            .apply(&batch)
+            .await
+            .expect_err("the conflicting CAS fails the whole batch");
+        assert!(
+            s.get("t", "sibling").await.is_err(),
+            "the sibling Put in the same batch did not land"
+        );
+        assert_eq!(
+            s.get("t", "x").await.expect("get").weight,
+            1,
+            "the CAS target is unchanged"
+        );
+    }
+
+    /// boundary: the compare is exact — an `expected` differing from the stored
+    /// value by a single trailing byte still conflicts.
+    pub async fn cas_off_by_one_expected_conflicts(backend: Arc<dyn Backend>) {
+        let s = Store::<TestCard>::new(backend.clone());
+        s.put("t", card("x", 1)).await.expect("seed");
+        let mut prior = backend
+            .get(TestCard::COLLECTION, "t", "x")
+            .await
+            .expect("get")
+            .expect("present");
+        prior.push(b' '); // one byte different from the stored value
+        let err = backend
+            .apply(&[cas("x", Some(prior), card("x", 9).encode())])
+            .await
+            .expect_err("a near-miss `expected` conflicts");
+        assert!(crate::is_conflict(&err), "conflict: {err}");
+    }
+
+    /// adversarial: a hostile tenant/id on a CAS is rejected by the segment gate
+    /// (a validation reject before any store access) — never a conflict or a write.
+    pub async fn cas_hostile_segment_rejected(backend: Arc<dyn Backend>) {
+        let bad = Write::CompareAndSwap {
+            collection: TestCard::COLLECTION,
+            tenant: "../etc".into(),
+            id: "x".into(),
+            expected: None,
+            blob: card("x", 1).encode(),
+        };
+        let err = backend
+            .apply(&[bad])
+            .await
+            .expect_err("hostile tenant rejected");
+        assert!(
+            !crate::is_conflict(&err),
+            "a hostile segment is a validation reject, not a CAS conflict: {err}"
+        );
+        assert!(
+            format!("{err}").contains("invalid"),
+            "segment reject: {err}"
+        );
+    }
 }
 
 /// Generate the full scenario matrix for one backend tier. The hermetic tiers
@@ -512,6 +663,41 @@ macro_rules! suite {
             async fn adversarial_sql_injection_via_card_field() {
                 scen::sql_injection_via_card_field($make).await;
             }
+            #[tokio::test]
+            $(#[$ig])?
+            async fn positive_cas_matching_expected_writes() {
+                scen::cas_matching_expected_writes($make).await;
+            }
+            #[tokio::test]
+            $(#[$ig])?
+            async fn positive_cas_absent_expected_creates() {
+                scen::cas_absent_expected_creates($make).await;
+            }
+            #[tokio::test]
+            $(#[$ig])?
+            async fn negative_cas_mismatch_is_conflict() {
+                scen::cas_mismatch_is_conflict($make).await;
+            }
+            #[tokio::test]
+            $(#[$ig])?
+            async fn negative_cas_absent_expected_but_present() {
+                scen::cas_absent_expected_but_present($make).await;
+            }
+            #[tokio::test]
+            $(#[$ig])?
+            async fn corner_cas_batch_all_or_nothing() {
+                scen::cas_batch_all_or_nothing($make).await;
+            }
+            #[tokio::test]
+            $(#[$ig])?
+            async fn boundary_cas_off_by_one_expected_conflicts() {
+                scen::cas_off_by_one_expected_conflicts($make).await;
+            }
+            #[tokio::test]
+            $(#[$ig])?
+            async fn adversarial_cas_hostile_segment_rejected() {
+                scen::cas_hostile_segment_rejected($make).await;
+            }
         }
     };
 }
@@ -576,5 +762,56 @@ async fn corner_concurrent_writers_last_write_conflicts() {
         sa.list("t").await.expect("list").len(),
         2,
         "no lost/duplicated rows"
+    );
+}
+
+/// `adversarial` (postgres, live, S1): two independent connections race a
+/// `CompareAndSwap` of the same row, both conditioned on the same prior value.
+/// `SELECT … FOR UPDATE` serializes them, so exactly one CAS commits and the
+/// other sees the now-changed value and returns a conflict — the true
+/// cross-driver mutual exclusion the atomic-batch claim could not give. The
+/// barrier is `join!` (both in flight together), never a sleep.
+#[cfg(feature = "config-store-postgres")]
+#[tokio::test]
+#[ignore = "needs a running postgres (nix run .#postgres-up) — run via `nix run .#integration`"]
+async fn adversarial_concurrent_cas_exactly_one_wins() {
+    let a = pg_backend().await; // resets the DB to a clean slate
+    let b = pg_backend_no_reset().await; // second pool on the same DB
+    let sa = Store::<TestCard>::new(a.clone());
+    sa.put("t", card("x", 1))
+        .await
+        .expect("seed the CAS target");
+    let prior = a
+        .get(TestCard::COLLECTION, "t", "x")
+        .await
+        .expect("get")
+        .expect("present");
+
+    let mk = |weight: u32| {
+        vec![Write::CompareAndSwap {
+            collection: TestCard::COLLECTION,
+            tenant: "t".into(),
+            id: "x".into(),
+            expected: Some(prior.clone()),
+            blob: card("x", weight).encode(),
+        }]
+    };
+    let (wa, wb) = (mk(2), mk(3));
+    let (ra, rb) = tokio::join!(a.apply(&wa), b.apply(&wb));
+
+    let results = [ra, rb];
+    let wins = results.iter().filter(|r| r.is_ok()).count();
+    let conflicts = results
+        .iter()
+        .filter(|r| matches!(r, Err(e) if crate::is_conflict(e)))
+        .count();
+    assert_eq!(wins, 1, "exactly one CAS wins: {results:?}");
+    assert_eq!(conflicts, 1, "the loser sees a conflict: {results:?}");
+    // The surviving value is the winner's, and it is the only card besides… none.
+    let got = sa.get("t", "x").await.expect("row present after the race");
+    assert!(
+        got.weight == 2 || got.weight == 3,
+        "the winner's value survived; weight = {}",
+        got.weight
     );
 }

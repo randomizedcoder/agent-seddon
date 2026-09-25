@@ -351,6 +351,7 @@ async fn adversarial_future_dated_claim_is_reclaimed() {
             enabled: true,
         },
         claimed_at_ms: Some(T0 + 999_999),
+        claimed_by: Some("drv-old".to_string()),
         history: Vec::new(),
     };
     b.apply(&[
@@ -386,5 +387,111 @@ async fn adversarial_job_count_is_bounded() {
     assert!(
         s.schedule("every 60s", "g").await.is_err(),
         "unbounded jobs"
+    );
+}
+
+/// A due job's raw card, decoded, straight from the backend (for asserting the
+/// persisted claim owner — `claimed_by` is crate-private state).
+async fn card(b: &Arc<dyn Backend>, id: &str) -> StoredJob {
+    decode_job(
+        &b.get(COLLECTION, DEFAULT_TENANT, id)
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+/// adversarial (S1): two drivers that both read a job as unclaimed then race to
+/// claim it — exactly one CAS wins, the loser sees a conflict (never a double
+/// fire), and the winner's owner is what persists. This is the cross-driver
+/// mutual exclusion the atomic-batch claim could not give.
+#[tokio::test]
+async fn adversarial_two_drivers_race_one_wins() {
+    let clock = Arc::new(AtomicU64::new(T0));
+    let b = backend();
+    let a = store_at(b.clone(), clock.clone()).with_owner("drv-a");
+    let z = store_at(b.clone(), clock.clone()).with_owner("drv-z");
+    let id = a.schedule("every 60s", "g").await.unwrap();
+
+    // Both drivers observe the same pre-claim card — the race window.
+    let prior = b
+        .get(COLLECTION, DEFAULT_TENANT, &id)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut claim_a = decode_job(&prior).unwrap();
+    claim_a.claimed_at_ms = Some(T0 + 60_000);
+    claim_a.claimed_by = Some("drv-a".into());
+    let mut claim_z = claim_a.clone();
+    claim_z.claimed_by = Some("drv-z".into());
+
+    // First CAS wins; the second, on the now-stale `prior`, conflicts.
+    a.cas_apply(&claim_a, prior.clone())
+        .await
+        .expect("first claim wins");
+    let err = z
+        .cas_apply(&claim_z, prior)
+        .await
+        .expect_err("second claim must lose");
+    assert!(is_conflict(&err), "the loser sees a conflict: {err}");
+    assert_eq!(
+        card(&b, &id).await.claimed_by.as_deref(),
+        Some("drv-a"),
+        "the winner's owner persisted"
+    );
+}
+
+/// corner (S1): a finisher whose claim was already TTL-reclaimed by another
+/// driver must NOT clobber the new owner's claim — its release is a silent no-op.
+#[tokio::test]
+async fn corner_finish_after_reclaim_is_noop() {
+    let clock = Arc::new(AtomicU64::new(T0));
+    let b = backend();
+    let a = store_at(b.clone(), clock.clone())
+        .with_claim_ttl_ms(10_000)
+        .with_owner("drv-a");
+    let z = store_at(b.clone(), clock.clone())
+        .with_claim_ttl_ms(10_000)
+        .with_owner("drv-z");
+    let id = a.schedule("every 60s", "g").await.unwrap();
+
+    // Driver A claims at T0+60s but (simulating a crash) never finishes.
+    clock.store(T0 + 60_000, Ordering::SeqCst);
+    assert_eq!(a.claim_due(T0 + 60_000).await.unwrap().len(), 1);
+    assert_eq!(card(&b, &id).await.claimed_by.as_deref(), Some("drv-a"));
+
+    // Long past the TTL, driver Z reclaims the dead run's claim.
+    let later = T0 + 60_000 + 999_000;
+    clock.store(later, Ordering::SeqCst);
+    assert_eq!(z.claim_due(later).await.unwrap().len(), 1, "TTL reclaim");
+    assert_eq!(
+        card(&b, &id).await.claimed_by.as_deref(),
+        Some("drv-z"),
+        "Z now owns the claim"
+    );
+
+    // A, unaware, finishes its stale run — a no-op: Z's live claim must survive.
+    a.finish(
+        &id,
+        Run {
+            job_id: id.clone(),
+            started_ms: T0 + 60_000,
+            finished_ms: later,
+            outcome: RunOutcome::Completed,
+            detail: "late".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let after = card(&b, &id).await;
+    assert_eq!(
+        after.claimed_by.as_deref(),
+        Some("drv-z"),
+        "a stale finisher must not clear the new owner's claim"
+    );
+    assert!(
+        after.claimed_at_ms.is_some(),
+        "Z's claim survives the stale finish"
     );
 }

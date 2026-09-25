@@ -12,12 +12,12 @@ the per-tenant served registry §D3 (`impl Scheduler for PerTenant<dyn Scheduler
 under `SessionKey::parse(tenant, …)` so it reads that tenant's seams). Covered by
 `nix/checks/per-tenant.nix` (routing + driver over the in-memory backend),
 `nix/serve-smoke.nix` (a `[scheduler] store="file"` Schedule→List roundtrip), and a
-`scheduler-store-postgres` tenant-isolation arm in `nix/pg-integration.nix`. Two
-implementation choices differ from the sketch below, noted inline: (1) claims ride
-on the store's atomic batch (not a compare-and-set) — single-driver
-overlap-prevention + crash recovery, not cross-driver mutual exclusion (§D1); and
-(2) a fired job runs in-process scoped to its tenant, not sandboxed — strong process
-isolation is the plane-01 dependency (§D2).
+`scheduler-store-postgres` tenant-isolation arm in `nix/pg-integration.nix`. One
+implementation choice differs from the sketch below, noted inline: a fired job runs
+in-process scoped to its tenant, not sandboxed — strong process isolation is the
+plane-01 dependency (§D2). **The cross-driver claim gap of §D1 is now closed
+(scheduler S1):** claims are written under a store `CompareAndSwap`, so two drivers
+ticking one backend can no longer both claim the same job.
 
 This is the design of record for making the
 `Scheduler` seam multi-tenant. It was split out of the per-tenant plane increment
@@ -78,14 +78,18 @@ onto), keyed `(collection = "scheduler", tenant, job_id)`, mirroring `StoreRegis
 - Claims ride on the store's atomic **batch** (`agent-config-store` exposes
   all-or-nothing multi-card txns, config decision #5), replacing `LocalScheduler`'s
   in-memory `claim_ttl_ms` bookkeeping with a persisted `claimed_at_ms` on the job
-  card. **As built (C2c-1), this is not a compare-and-set:** `Backend::apply` is an
-  atomic batch, not a conditional write, so a claim gives single-driver
-  overlap-prevention and crash recovery (the TTL reclaims a dead run's claim) —
-  exactly `LocalScheduler`'s guarantee — but **not** cross-driver mutual exclusion:
-  two drivers ticking one backend in the same instant could both claim a job. True
-  multi-driver exclusion needs a CAS primitive the `Backend` does not expose
-  (a conditional `apply`, or a `compare_and_put`); adding it is a bounded
-  follow-up, called out here rather than implied by "transaction".
+  card. C2c-1 shipped this as a plain batch, which gave single-driver
+  overlap-prevention + crash recovery (the TTL reclaims a dead run's claim) but
+  **not** cross-driver mutual exclusion. **Scheduler S1 closes that gap:** the
+  `Backend` now exposes a `Write::CompareAndSwap` (a conditional upsert enforced
+  inside each backend's existing transaction — `SELECT … FOR UPDATE` on Postgres),
+  and `StoreScheduler::claim_due` writes each claim conditioned on the exact bytes
+  it read. Exactly one of several racing drivers wins a due job; the losers see an
+  `is_conflict` error and skip it (no double-fire). A per-driver `owner` token on
+  the job card records who holds the claim, so a stale finisher whose claim was
+  TTL-reclaimed by another driver hits a conflict and does not clobber the new
+  claim. `Store::put`'s per-tenant cap stays a documented **soft** ceiling (a
+  count-then-write, not a CAS) — S1 scoped the claim race, not the cap.
 
 `LocalScheduler` stays as the default single-tenant, in-memory tier (Tier-0
 unchanged); `StoreScheduler` is opt-in behind a `[scheduler] store = "postgres"`
