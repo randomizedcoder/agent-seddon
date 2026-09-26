@@ -105,14 +105,11 @@ impl Tool for EditTool {
         };
 
         // Preserve a leading BOM and the file's dominant line ending; match against
-        // an `\n`-normalized copy so an LF `old_string` finds CRLF content.
-        // "Dominant" is by count: a file that is mostly LF with a single stray CRLF
-        // must stay LF — `body.contains("\r\n")` treated *any* CRLF as all-CRLF and
-        // rewrote every line ending, mutating untouched LF lines into CRLF.
+        // an `\n`-normalized copy so an LF `old_string` finds CRLF content. Dominance
+        // is by count (see `is_crlf_dominant`) so a lone stray CRLF can't flip an
+        // otherwise-LF file.
         let (bom, body) = split_bom(&raw);
-        let crlf_count = body.matches("\r\n").count();
-        let lf_only_count = body.matches('\n').count() - crlf_count;
-        let crlf = crlf_count > lf_only_count;
+        let crlf = is_crlf_dominant(body);
         let normalized = body.replace("\r\n", "\n");
 
         let outcome = if multi {
@@ -391,6 +388,19 @@ fn split_bom(s: &str) -> (bool, &str) {
     }
 }
 
+/// True when the body's dominant newline is CRLF; ties — and a body with no
+/// newlines — resolve to LF. Counting `\r\n` and subtracting from the total `\n`
+/// count is what lets a lone stray CRLF sit in an otherwise-LF file without
+/// flipping every line (the old `contains("\r\n")` bug rewrote them all). The
+/// subtraction can't underflow: every `\r\n` contains an `\n`, so the `\n` total
+/// is always ≥ `crlf_count`, and a lone `\r` (no following `\n`) counts as
+/// neither. The body is untrusted file content, so this must stay panic-free.
+fn is_crlf_dominant(body: &str) -> bool {
+    let crlf_count = body.matches("\r\n").count();
+    let lf_only_count = body.matches('\n').count() - crlf_count;
+    crlf_count > lf_only_count
+}
+
 /// Distinguish the common I/O failures so the model gets an actionable signal.
 fn io_err_msg(op: &str, path: &str, e: &std::io::Error) -> String {
     use std::io::ErrorKind;
@@ -664,5 +674,49 @@ mod tests {
     fn reindent_reanchors_to_file_indent() {
         let out = reindent("if x:\n    body\n", "        ");
         assert_eq!(out, vec!["        if x:", "            body", ""]);
+    }
+
+    // Isolated table for the dominant-line-ending decision. Each row carries a
+    // `description` of the case and the `expected` outcome (`true` = CRLF dominant,
+    // `false` = LF/tie/none). Ties and newline-free bodies resolve to LF; the
+    // adversarial rows pin that a lone `\r` (no `\n`) can't underflow the
+    // subtraction. This is the logic the `contains("\r\n")` regression got wrong.
+    #[rstest]
+    #[case::positive_all_crlf("every line ends CRLF → CRLF dominant", "a\r\nb\r\nc\r\n", true)]
+    #[case::positive_crlf_majority(
+        "CRLF majority with one stray LF stays CRLF",
+        "a\r\nb\r\nc\nd\r\n",
+        true
+    )]
+    #[case::negative_all_lf("every line ends LF → not CRLF dominant", "a\nb\nc\n", false)]
+    #[case::negative_lf_majority_stray_crlf(
+        "the regression: LF majority with a single stray CRLF stays LF",
+        "a\nb\r\nc\nd\n",
+        false
+    )]
+    #[case::boundary_exact_tie_resolves_to_lf(
+        "equal CRLF and LF-only counts → tie breaks to LF",
+        "a\r\nb\n",
+        false
+    )]
+    #[case::boundary_single_crlf("one CRLF versus zero LF-only → CRLF dominant", "a\r\nb", true)]
+    #[case::corner_empty("empty body has no newlines → LF", "", false)]
+    #[case::corner_no_newline("single line, no newline at all → LF", "no newline here", false)]
+    #[case::adversarial_lone_cr_no_lf(
+        "lone CR with no following LF counts as neither; must not underflow → LF",
+        "a\rb\rc",
+        false
+    )]
+    #[case::adversarial_only_lone_crs(
+        "a body of only bare CRs (no LF anywhere) → LF, no panic",
+        "\r\r\r\r",
+        false
+    )]
+    fn is_crlf_dominant_cases(
+        #[case] description: &str,
+        #[case] body: &str,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(is_crlf_dominant(body), expected, "{description}");
     }
 }
