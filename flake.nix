@@ -71,7 +71,12 @@
       xtcp2-52-base,
       xtcp2-52-head,
     }:
-    flake-utils.lib.eachSystem [ "x86_64-linux" ] (
+    # Per-system outputs (packages/checks/apps/devShells/formatter) merged with the
+    # SYSTEM-INDEPENDENT `nixosModules` output. The NixOS module must live OUTSIDE
+    # `eachSystem` — it is a module function evaluated by the consuming host's own
+    # `nixosSystem`, not a per-system attribute. The eval-only `nixos-agent-postgres-eval`
+    # check (under `checks.<system>`) keeps it honest in the gate.
+    (flake-utils.lib.eachSystem [ "x86_64-linux" ] (
       system:
       let
         pkgs = import nixpkgs {
@@ -117,5 +122,16 @@
           formatter
           ;
       }
-    );
+    ))
+    // {
+      # NixOS-native production deployment of the config-store postgres tier
+      # (PG-05). A consuming host repo (e.g. ~/nixos/desktop/l2) adds
+      # `agent-seddon.nixosModules.agent-postgres` to its `nixosSystem` modules and
+      # sets `services.agentPostgres.enable = true` + a `passwordFile`. See the
+      # module header (nix/nixos/agent-postgres.nix) for the import snippet.
+      nixosModules = {
+        agent-postgres = import ./nix/nixos/agent-postgres.nix;
+        default = import ./nix/nixos/agent-postgres.nix;
+      };
+    };
 }

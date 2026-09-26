@@ -273,6 +273,13 @@ in
   # fixture). Offline: go runs with GOPROXY=off on stdlib-only modules.
   graph-arena-tests = import ./graph-arena-tests.nix { inherit pkgs versions; };
 
+  # Eval-only gate for the NixOS-native config-store module (nixosModules.agent-postgres,
+  # PG-05): instantiate a throwaway NixOS config with the module enabled and assert it
+  # resolves to the intended `services.postgresql` wiring (DB + role ensured, loopback
+  # firewall closed, scram + tuning applied). Pure eval — no VM/KVM. The NixOS twin of
+  # config-roundtrip. docs/design/config/STATUS.md (PG-05).
+  nixos-agent-postgres-eval = import ./nixos-agent-postgres-eval.nix { inherit pkgs; };
+
   # The multi-tenancy auditor's own test suite (four-class tables + check-the-checks +
   # manifest self-consistency). Gates the auditor's CORRECTNESS. Pure stdlib Python.
   mt-audit-tests = import ./mt-audit-tests.nix { inherit pkgs; };
