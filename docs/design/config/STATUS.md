@@ -154,6 +154,30 @@ of done — is [`09-increments.md`](09-increments.md). This table is the **live 
 9. **Auth is a tower `Layer`, not a tonic interceptor** — no interceptors exist today; C33 stacks a
    second `Layer` beside `AdmissionLayer` and widens the `ServeRouter` alias.
 
+## Follow-on: Postgres as a first-class, production backend (PG-01 … PG-11)
+
+C41 shipped the Postgres *tier* (opt-in, dev-only nix module). A follow-on track hardens it into the
+first-class, production-default backend for scaled multi-tenant deployments: a versioned migration
+runner, a schema/index fix for the `pos` write-serialization bottleneck, a production config profile +
+first-class build features, a NixOS-native `services.postgresql` module exposed from the flake, and
+extended coverage (a Postgres digest ledger + a durable post-lease over the shared store's
+compare-and-swap, retiring the legacy `*-sqlite` impls). Eleven gated PRs off `main`.
+
+- **PG-01 (this increment) — versioned migration runner.** `agent-config-store`'s Postgres tier moves
+  from a single idempotent `raw_sql(0001)` applied on every connect to a small **versioned runner**
+  (`PgBackend::run_migrations`): the embedded `migrations/*.sql` set is applied exactly once, in order,
+  recorded in a `_schema_migrations` ledger — so a later non-idempotent `ALTER` is safe — with the whole
+  run serialized by a transaction-scoped advisory lock so concurrent starters can't race a step. The
+  SQLite tier stamps `PRAGMA user_version` (baseline 1) as its version anchor. Behavior-preserving;
+  existing deployed DBs re-record `0001` (inert `CREATE TABLE IF NOT EXISTS`) on first upgrade.
+  - **Security note (deviation from the plan's `sqlx::migrate!` choice):** `sqlx`'s `macros` feature —
+    which the `migrate!` macro needs — pulls in *every* driver crate (`sqlx-mysql`, `sqlx-sqlite`)
+    regardless of the one in use, and `sqlx-mysql` drags in `rsa`, which carries the unfixable
+    timing-sidechannel advisory **RUSTSEC-2023-0071** that `cargo audit` (a gate check) rejects. Rather
+    than depend on — and then have to suppress an advisory for — a MySQL driver we never speak, the
+    hand-rolled runner over the base `sqlx` API gives the same exactly-once/versioned guarantee while
+    keeping the dependency graph to the Postgres driver alone (no lockfile churn, `cargo audit` clean).
+
 ## Non-goals
 
 - Removing TOML (bootstrap stays TOML).

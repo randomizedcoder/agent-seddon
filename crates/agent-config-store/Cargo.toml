@@ -17,6 +17,13 @@ config-store-sqlite = ["dep:rusqlite"]
 # Unlike sqlite this tier is NOT hermetic (it needs a live server), so its tests
 # are `#[ignore]`-gated and run only under `nix run .#integration`; the crate
 # still compiles under this feature with no DB (runtime-checked queries).
+#
+# Deliberately NO `sqlx/migrate` or `sqlx/macros`: sqlx's `macros` feature pulls
+# in *every* driver crate (`sqlx-mysql`, `sqlx-sqlite`) regardless of the driver
+# we actually use, and `sqlx-mysql` drags in `rsa` — a crate with an unfixable
+# timing-sidechannel advisory (RUSTSEC-2023-0071) that `cargo audit` rejects. We
+# never speak MySQL, so we run our own tiny versioned migration runner over the
+# embedded `migrations/` set (see `postgres.rs`) instead of the `migrate!` macro.
 config-store-postgres = ["dep:sqlx"]
 
 [dependencies]
