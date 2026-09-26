@@ -104,8 +104,7 @@ class = "stateless"
 
 [services.SchedulerService]
 class = "scoped"
-status = "gap"
-note = "PerTenant<Scheduler> wrap (builder.rs) but handler span-only; fixed in PR2"
+note = "every RPC scopes via identity_key + run_scoped (mt-audit-02); PerTenant<Scheduler> routes the caller's tenant"
 
 [services.SearchService]
 class = "scoped"
