@@ -239,6 +239,23 @@ compare-and-swap, retiring the legacy `*-sqlite` impls). Eleven gated PRs off `m
   evaluation, no VM/KVM (a full `nixosTest` boot needs KVM the gate sandbox lacks — deferred). It is the
   NixOS twin of `config-roundtrip`.
 
+- **PG-06 — cross-backend parity harness + config-store test expansion.** The table-driven scenario
+  matrix in `agent-config-store/src/tests.rs` already runs every scenario **unchanged over
+  `MemoryBackend`, `FileBackend`, and `SqliteBackend`** (and, `#[ignore]`-gated, `PgBackend`) via the
+  `suite!` macro — so the `Backend` trait's behaviour is proven identical across tiers. This increment
+  closes the coverage gaps that make the upcoming legacy retirements (PG-10/PG-11) safe by adding four
+  new rows, each auto-running across all four tiers: `boundary_large_blob_roundtrips` (a 256 KiB opaque
+  blob round-trips byte-identical — sized under `FileBackend::MAX_BUNDLE_BYTES`, whose file-specific cap
+  stays tested in `file.rs`, so this asserts the *shared* no-truncation contract);
+  `boundary_empty_blob_rejected` (the shared `check_batch` empty-blob guard — an uncovered branch — fires
+  on every tier and is all-or-nothing); `corner_cross_collection_same_key_isolated` (the PK is
+  `(collection, tenant, id)`, so the same `(tenant, id)` in two collections are independent rows, and a
+  delete of one leaves the other); and `adversarial_hostile_collection_is_bound_not_pathed` (`collection`
+  — unlike `tenant`/`id` it is a compile-time `Card::COLLECTION` const, not `safe_segment`-gated — still
+  reaches SQL only as a bound parameter on the raw read seam: injection/traversal payloads match nothing,
+  never error, never perturb a real collection). Test-only, one crate; the parity invariant is now a
+  gate-enforced guard against sqlite/file/postgres silently diverging.
+
 ## Non-goals
 
 - Removing TOML (bootstrap stays TOML).
