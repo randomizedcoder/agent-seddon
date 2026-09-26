@@ -708,7 +708,7 @@ links its own sub-docs.
 
 ## 10. Prioritised closing list
 
-**P0 — security / tenancy correctness**
+**P0 — security / tenancy correctness** — implementation plan: [`design/security-hardening/`](../design/security-hardening/README.md)
 
 - Compile the `auth` feature into the default binary (`nix build .#agent`).
 - Derive the tenant from `VerifiedPrincipal`; remove the missing-session → `local` fallback.
