@@ -37,7 +37,24 @@ Three surfaces, all listed with `nix flake show`:
 | **`apps`** | On-demand tools + harnesses (`nix run .#…`) | see [Apps — the runnable targets](#apps--the-runnable-targets) |
 
 Plus `devShells.default` (the dev shell) and `formatter` (nixfmt, so `nix fmt`
-works).
+works), and — merged **outside** `eachSystem` — the system-independent
+`nixosModules` output (`agent-postgres`, also `default`): the NixOS-native
+production deployment of the config-store postgres tier. A consuming host flake
+imports it and enables the service:
+
+```nix
+# in the host's flake inputs
+inputs.agent-seddon.url = "github:randomizedcoder/agent-seddon";
+# in its nixosSystem `modules` list
+agent-seddon.nixosModules.agent-postgres
+{ services.agentPostgres = { enable = true; passwordFile = "/run/secrets/agent-pg-password"; }; }
+```
+
+It resolves to a tuned, persistent `services.postgresql` with the `agent_config`
+database + owning role ensured, SCRAM auth, and a loopback-only bind by default
+(open a LAN address + `trustedCidrs` only if the agent runs on another host). The
+module (`nix/nixos/agent-postgres.nix`) is kept honest in the gate by the
+eval-only `nixos-agent-postgres-eval` check (no VM/KVM).
 
 ### Checks — the gate
 
@@ -116,7 +133,8 @@ matching check passes — the diff is the reviewable "accept this change" step)
 - `postgres-{up,down,client,logs}` — the transactional config store (`agent-config-store`
   postgres tier; the `config/multi-tenant.toml` profile). Tuned, PERSISTENT data volume
   (`postgres-down` keeps it), password from `$AGENT_PG_PASSWORD` (dev default otherwise).
-  A local/CI spin; the production deployment is the NixOS-native service (PG-05)
+  A local/CI spin; the production deployment is the NixOS-native service
+  (`nixosModules.agent-postgres`, see below)
 - `hyperdx-{up,down,logs}` — the decomposed HyperDX (Mongo + OTel collector + app), the
   OTLP trace receiver + UI, all pointed at that one ClickHouse
 - `prometheus-{up,down}`, `grafana-{up,down}` — metrics scraping + dashboards

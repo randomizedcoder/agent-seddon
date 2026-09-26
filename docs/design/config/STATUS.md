@@ -220,6 +220,24 @@ compare-and-swap, retiring the legacy `*-sqlite` impls). Eleven gated PRs off `m
   the container on cleanup, so the persistent volume doesn't leak between runs. The container's role
   password is fixed at first volume init (standard postgres-image behaviour), documented alongside the
   volume knob.
+- **PG-05 — NixOS-native module exposed from the flake (D5).** The PRODUCTION deployment (the container
+  is the local/CI spin): `nix/nixos/agent-postgres.nix` defines `options.services.agentPostgres`
+  (enable / package `postgresql_16` / port / persistent `dataDir` / database / user / **`passwordFile`**
+  secret ref / `listenAddresses` / `trustedCidrs` / a `settings` tuning submodule mirroring the container
+  knobs) and wires `services.postgresql` — `ensureDatabases`/`ensureUsers` with DB ownership, a SCRAM
+  `pg_hba` (loopback always, plus a line per `trustedCidrs` entry), the role password RE-APPLIED from
+  `passwordFile` on every start via a `postStart` `ALTER ROLE … PASSWORD :'pw'` (psql's `:'var'` form
+  quotes+escapes it — a quote in the secret can't break or inject the statement), and the firewall port
+  opened ONLY when a non-loopback address is bound (loopback-only by default, D5). The module is a NEW
+  top-level `nixosModules.agent-postgres` (+ `default`) flake output, merged OUTSIDE `eachSystem` (it is
+  a host module, not a per-system attribute); the `eachSystem` merge is preserved so every existing
+  `checks.<system>` stays. A consuming host repo (e.g. `~/nixos/desktop/l2`, a separate repo) imports
+  `agent-seddon.nixosModules.agent-postgres` and sets `enable = true` + a `passwordFile` (agenix/sops).
+  Gated hermetically by the EVAL-ONLY check `nixos-agent-postgres-eval`: it instantiates a throwaway
+  `nixosSystem` with the module enabled and asserts the resolved `services.postgresql` config (enabled,
+  `agent_config` DB + `agent` role ensured, loopback firewall closed, SCRAM + tuning applied) — pure
+  evaluation, no VM/KVM (a full `nixosTest` boot needs KVM the gate sandbox lacks — deferred). It is the
+  NixOS twin of `config-roundtrip`.
 
 ## Non-goals
 
