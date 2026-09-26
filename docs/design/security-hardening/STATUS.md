@@ -7,7 +7,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 
 | # | Increment | Closes | State | PR |
 |---|---|---|---|---|
-| S1 | `auth` default feature, load-time validation, insecure-listen refusal | P0-1, P0-3 | 🟡 | — |
+| S1 | `auth` default feature, load-time validation, insecure-listen refusal | P0-1, P0-3 | ✅ | #487 |
 | S2 | Tenant from principal, identity policy, direct-reader conversion | P0-2, P0-3 | ⬜ | — |
 | S3 | Multi-issuer OIDC profiles + fake issuer | D2 | ⬜ | — |
 | S4 | tonic TLS, `[grpc.tls]`, `nix run .#pki-dev` | P0-5 | ⬜ | — |
@@ -35,7 +35,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
   step-ca PKI + agent-issued tokens ([02](02-token-service.md), [07](07-transport-tls-and-pki.md));
   a session store in Postgres and an auth-event stream into ClickHouse, both adopted
   ([02](02-token-service.md)). Nothing built yet.
-- **2026-09-26 — S1.** `auth` joins `agent-cli`'s default features, so the shipped binary can run
+- **2026-09-26 — S1 (#487).** `auth` joins `agent-cli`'s default features, so the shipped binary can run
   `[auth] mode = "oidc"`. `AuthCfg::validate` runs inside `parse_config`: unknown mode, missing
   `issuer`/`audience`/`jwks_url`, a `jwks_url` that is not https (plain http only to a numeric
   loopback IP; embedded credentials refused), `leeway_secs` > 300, and `oidc` in a build without
