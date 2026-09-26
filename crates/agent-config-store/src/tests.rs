@@ -665,6 +665,158 @@ mod scen {
             "segment reject: {err}"
         );
     }
+
+    // --- cross-tier coverage the parity harness locks (PG-06) -----------------
+
+    /// boundary: a large opaque blob round-trips byte-identical on every tier.
+    /// Sized well under `FileBackend`'s `MAX_BUNDLE_BYTES` cap (the file tier's
+    /// documented, file-specific resource guard, exercised in `file.rs`), so this
+    /// asserts the *shared* contract — no tier truncates or corrupts a big card.
+    pub async fn large_blob_roundtrips(backend: Arc<dyn Backend>) {
+        let s = Store::<TestCard>::new(backend);
+        // 256 KiB of a non-escaping byte, comfortably below the 8 MiB file cap.
+        let big = "x".repeat(256 * 1024);
+        let c = TestCard {
+            id: "big".into(),
+            note: big.clone(),
+            weight: 1,
+        };
+        s.put("t", c.clone()).await.expect("large card stored");
+        let got = s.get("t", "big").await.expect("large card read back");
+        assert_eq!(
+            got.note.len(),
+            big.len(),
+            "the large field is neither truncated nor padded"
+        );
+        assert_eq!(got, c, "the large card round-trips byte-identical");
+    }
+
+    /// boundary: an empty card blob is rejected by the shared `check_batch` guard
+    /// on every tier (the `Store` never emits one, but the raw `Backend::apply`
+    /// seam is untrusted), and the reject is all-or-nothing — a good sibling write
+    /// in the same batch does not land.
+    pub async fn empty_blob_rejected(backend: Arc<dyn Backend>) {
+        let writes = vec![
+            Write::EnsureTenant { tenant: "t".into() },
+            Write::Put {
+                collection: TestCard::COLLECTION,
+                tenant: "t".into(),
+                id: "good".into(),
+                blob: card("good", 1).encode(),
+            },
+            Write::Put {
+                collection: TestCard::COLLECTION,
+                tenant: "t".into(),
+                id: "empty".into(),
+                blob: Vec::new(),
+            },
+        ];
+        let err = backend
+            .apply(&writes)
+            .await
+            .expect_err("an empty blob is rejected");
+        assert!(
+            format!("{err}").contains("empty card blob"),
+            "the reject names the empty-blob contract: {err}"
+        );
+        assert_eq!(
+            backend
+                .count(TestCard::COLLECTION, "t")
+                .await
+                .expect("count"),
+            0,
+            "the good sibling write in the rejected batch did not land",
+        );
+    }
+
+    /// corner: the primary key is `(collection, tenant, id)` — the *same* `(tenant,
+    /// id)` in two different collections are independent rows on every tier, so a
+    /// get/delete of one never touches the other.
+    pub async fn cross_collection_same_key_isolated(backend: Arc<dyn Backend>) {
+        let sa = Store::<TestCard>::new(backend.clone());
+        let sb = Store::<TestCardB>::new(backend.clone());
+        sa.put("t", card("dup", 7)).await.expect("put in a");
+        sb.put(
+            "t",
+            TestCardB {
+                id: "dup".into(),
+                label: "L".into(),
+            },
+        )
+        .await
+        .expect("put same key in b");
+        // Both coexist.
+        assert_eq!(sa.get("t", "dup").await.expect("a present").weight, 7);
+        assert_eq!(sb.get("t", "dup").await.expect("b present").label, "L");
+        // Deleting from one collection leaves the other's same-keyed row intact.
+        assert!(sa.delete("t", "dup").await.expect("delete a"), "a existed");
+        assert!(
+            sa.get("t", "dup").await.is_err(),
+            "a's row is gone after its delete"
+        );
+        sb.get("t", "dup")
+            .await
+            .expect("b's same-keyed row is untouched by a's delete");
+    }
+
+    /// adversarial: `collection` (unlike `tenant`/`id`, it is not `safe_segment`-
+    /// gated — it is a compile-time `Card::COLLECTION` const) still reaches SQL only
+    /// as a **bound parameter** on the raw read seam. A hostile collection string
+    /// (injection / traversal payloads) matches nothing, never errors, and never
+    /// perturbs a real collection's rows — proving it is bound, not interpolated.
+    pub async fn hostile_collection_is_bound_not_pathed(backend: Arc<dyn Backend>) {
+        // Seed a real card so we can prove the legit collection is untouched.
+        Store::<TestCard>::new(backend.clone())
+            .put("t", card("a", 1))
+            .await
+            .expect("seed a real card");
+        for bad in [
+            "'; DROP TABLE cards;--",
+            "test_cards' OR '1'='1",
+            "../../etc/passwd",
+            "test_cards; DELETE FROM cards",
+            "",
+        ] {
+            assert_eq!(
+                backend
+                    .get(bad, "t", "a")
+                    .await
+                    .expect("get is a clean miss"),
+                None,
+                "hostile collection `{bad}` matches no row"
+            );
+            assert!(
+                backend
+                    .list(bad, "t")
+                    .await
+                    .expect("list is a clean empty")
+                    .is_empty(),
+                "hostile collection `{bad}` lists nothing"
+            );
+            assert_eq!(
+                backend.count(bad, "t").await.expect("count is a clean 0"),
+                0,
+                "hostile collection `{bad}` counts nothing"
+            );
+            assert!(
+                backend
+                    .tenants(bad)
+                    .await
+                    .expect("tenants is a clean empty")
+                    .is_empty(),
+                "hostile collection `{bad}` has no tenants"
+            );
+        }
+        // The real collection is intact and still writable after all the probes.
+        assert_eq!(
+            backend
+                .count(TestCard::COLLECTION, "t")
+                .await
+                .expect("count real"),
+            1,
+            "the legit collection is untouched by the hostile probes"
+        );
+    }
 }
 
 /// Generate the full scenario matrix for one backend tier. The hermetic tiers
@@ -806,6 +958,26 @@ macro_rules! suite {
             $(#[$ig])?
             async fn adversarial_cas_hostile_segment_rejected() {
                 scen::cas_hostile_segment_rejected($make).await;
+            }
+            #[tokio::test]
+            $(#[$ig])?
+            async fn boundary_large_blob_roundtrips() {
+                scen::large_blob_roundtrips($make).await;
+            }
+            #[tokio::test]
+            $(#[$ig])?
+            async fn boundary_empty_blob_rejected() {
+                scen::empty_blob_rejected($make).await;
+            }
+            #[tokio::test]
+            $(#[$ig])?
+            async fn corner_cross_collection_same_key_isolated() {
+                scen::cross_collection_same_key_isolated($make).await;
+            }
+            #[tokio::test]
+            $(#[$ig])?
+            async fn adversarial_hostile_collection_is_bound_not_pathed() {
+                scen::hostile_collection_is_bound_not_pathed($make).await;
             }
         }
     };
