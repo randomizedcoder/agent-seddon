@@ -125,8 +125,7 @@ async fn pg_backend() -> Arc<dyn Backend> {
         .connect(&dsn)
         .await
         .expect("connect postgres");
-    sqlx::raw_sql(include_str!("../migrations/0001_config_store.sql"))
-        .execute(&pool)
+    crate::PgBackend::run_migrations(&pool)
         .await
         .expect("ensure schema");
     // FK: cards references tenants; truncating both in one statement satisfies it.
@@ -726,6 +725,27 @@ async fn pg_backend_no_reset() -> Arc<dyn Backend> {
         .await
         .expect("connect postgres");
     Arc::new(crate::PgBackend::from_pool(pool))
+}
+
+/// `positive` (postgres, live): the migration runner is idempotent — connecting
+/// twice with `migrate_on_start` applies the versioned set once and then no-ops
+/// (the `_schema_migrations` ledger records what ran), so a restart never re-applies
+/// a step or errors. Proves the PG-01 runner is safe to leave on in production.
+#[cfg(feature = "config-store-postgres")]
+#[tokio::test]
+#[ignore = "needs a running postgres (nix run .#postgres-up) — run via `nix run .#integration`"]
+async fn positive_migrate_is_idempotent_on_reconnect() {
+    let dsn = std::env::var("AGENT_CONFIG_STORE_TEST_DSN")
+        .expect("AGENT_CONFIG_STORE_TEST_DSN must be set by the pg-integration harness");
+    // First connect applies (or, on an already-provisioned DB, records) the set.
+    crate::PgBackend::connect(&dsn, 4, true)
+        .await
+        .expect("first migrate succeeds");
+    // Second connect must see a fully-applied ledger and no-op — not error, not
+    // re-run the (potentially non-idempotent) steps.
+    crate::PgBackend::connect(&dsn, 4, true)
+        .await
+        .expect("second migrate is a no-op, not a re-apply or error");
 }
 
 /// `corner` (postgres, live): two independent connections race a `put` of the

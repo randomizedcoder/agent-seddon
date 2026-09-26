@@ -16,10 +16,16 @@
 //! fail-closed [`check_batch`] runs inside that transaction against a snapshot
 //! of `tenants`, so the tenant foreign-key check and the writes are atomic.
 //!
-//! The schema is a single idempotent DDL script (`migrations/`, embedded via
-//! `include_str!`) applied with the simple-query protocol when
-//! `migrate_on_start` is set — enough for one small control-plane table pair
-//! without pulling `sqlx`'s macro/migrate machinery into the build.
+//! Schema is applied by a small **versioned** runner ([`PgBackend::run_migrations`])
+//! over the embedded [`MIGRATIONS`] set (each `migrations/*.sql` pulled in with
+//! `include_str!`): each numbered step is applied **exactly once**, recorded in a
+//! `_schema_migrations` ledger, so a later non-idempotent step (an `ALTER`) is
+//! safe on restart. We deliberately do **not** use `sqlx::migrate!`: its `macros`
+//! feature pulls in every sqlx driver (`sqlx-mysql`, `sqlx-sqlite`) regardless of
+//! the one we use, and `sqlx-mysql` drags in `rsa` — a crate with an unfixable
+//! timing-sidechannel advisory (RUSTSEC-2023-0071) that `cargo audit` rejects. A
+//! hand-rolled runner over the base `sqlx` API keeps the build to the Postgres
+//! driver alone while giving the same exactly-once, versioned guarantee.
 
 use std::collections::HashSet;
 
@@ -29,6 +35,20 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 
 use crate::{check_batch, conflict, Backend, Write};
+
+/// The embedded migrations, in apply order: `(version, sql)`. A version is
+/// applied exactly once and recorded in the `_schema_migrations` ledger, so a
+/// non-idempotent step (a later `ALTER`) runs a single time even across restarts.
+/// Adding a migration = drop the next-numbered `.sql` in `migrations/` and append
+/// its `(n, include_str!(...))` here (the version is the source of truth, not the
+/// filename — no runtime path parsing).
+const MIGRATIONS: &[(i64, &str)] = &[(1, include_str!("../migrations/0001_config_store.sql"))];
+
+/// A fixed, arbitrary key for the transaction-scoped advisory lock that
+/// serializes concurrent starters through [`PgBackend::run_migrations`] (so two
+/// processes booting at once never race the same non-idempotent step). Any stable
+/// constant works; this one is `"agent-config-store"` folded into an `i64`.
+const MIGRATION_LOCK_KEY: i64 = 0x6167_636f_6e66_6773_u64 as i64;
 
 /// A Postgres-backed config store (a connection pool + the shared schema).
 pub struct PgBackend {
@@ -53,14 +73,63 @@ impl PgBackend {
             .await
             .map_err(|e| Error::Config(format!("postgres: connect failed: {e}")))?;
         if migrate_on_start {
-            // One idempotent DDL script via the simple-query protocol
-            // (multi-statement); `CREATE TABLE IF NOT EXISTS` makes re-runs safe.
-            sqlx::raw_sql(include_str!("../migrations/0001_config_store.sql"))
-                .execute(&pool)
-                .await
-                .map_err(|e| Error::Config(format!("postgres: migrate failed: {e}")))?;
+            Self::run_migrations(&pool).await?;
         }
         Ok(Self { pool })
+    }
+
+    /// Apply the embedded [`MIGRATIONS`] set exactly once, in order.
+    ///
+    /// The whole run is one transaction guarded by a transaction-scoped advisory
+    /// lock ([`MIGRATION_LOCK_KEY`]), so concurrent starters are serialized — the
+    /// second waits, then sees a fully-applied ledger and no-ops. DDL is
+    /// transactional in Postgres, so the `_schema_migrations` bookkeeping and each
+    /// step's DDL commit (or roll back) together: a crash mid-run never leaves a
+    /// half-applied, half-recorded step. On a DB carrying the pre-runner `0001`
+    /// schema but no ledger, the empty history re-runs `0001` (`CREATE TABLE IF
+    /// NOT EXISTS`, inert) and records it — so upgrading in place is safe.
+    pub(crate) async fn run_migrations(pool: &PgPool) -> Result<()> {
+        let mut tx = pool.begin().await.map_err(pg_err)?;
+        // Serialize concurrent starters; the lock releases on commit/rollback.
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(MIGRATION_LOCK_KEY)
+            .execute(&mut *tx)
+            .await
+            .map_err(pg_err)?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS _schema_migrations (
+                 version    BIGINT      NOT NULL PRIMARY KEY,
+                 applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+             )",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(pg_err)?;
+        let applied: HashSet<i64> =
+            sqlx::query_scalar::<_, i64>("SELECT version FROM _schema_migrations")
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(pg_err)?
+                .into_iter()
+                .collect();
+        for (version, sql) in MIGRATIONS {
+            if applied.contains(version) {
+                continue;
+            }
+            // `raw_sql` uses the simple-query protocol, so a script with several
+            // statements runs as one call — the migration body applies whole.
+            sqlx::raw_sql(sql)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| Error::Config(format!("postgres: migration {version} failed: {e}")))?;
+            sqlx::query("INSERT INTO _schema_migrations (version) VALUES ($1)")
+                .bind(version)
+                .execute(&mut *tx)
+                .await
+                .map_err(pg_err)?;
+        }
+        tx.commit().await.map_err(pg_err)?;
+        Ok(())
     }
 
     /// Build a lazily-connecting pool to `dsn` (max `pool_max`, clamped to ≥1)
