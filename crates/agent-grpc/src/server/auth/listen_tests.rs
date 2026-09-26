@@ -122,3 +122,79 @@ fn positive_none_builds_pass_through(#[case] mode: &str) {
     .expect("none builds");
     assert!(!layer.is_enabled());
 }
+
+// --- S2: `require_identity` on a layer with no verifier ------------------------
+
+/// Drive a disabled layer (`mode = "none"`) with `require_identity` set as given,
+/// returning the gRPC status the caller saw (`None` = the handler ran).
+async fn drive_without_verifier(
+    require_identity: bool,
+    path: &str,
+    headers: &[(&str, &str)],
+) -> Option<String> {
+    use tonic::body::BoxBody;
+    use tonic::codegen::http;
+    use tower::{Layer, Service};
+
+    let layer = AuthLayer::disabled().with_require_identity(require_identity);
+    let mut svc = layer.layer(tower::service_fn(|_req: http::Request<BoxBody>| async {
+        Ok::<_, std::convert::Infallible>(http::Response::new(tonic::body::empty_body()))
+    }));
+    let mut b = http::Request::builder().uri(path);
+    for (k, v) in headers {
+        b = b.header(*k, *v);
+    }
+    let resp = svc
+        .call(b.body(tonic::body::empty_body()).unwrap())
+        .await
+        .unwrap();
+    resp.headers()
+        .get("grpc-status")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+}
+
+const BOTH: &[(&str, &str)] = &[("x-agent-user-id", "acme"), ("x-agent-session-id", "s1")];
+const USER_ONLY: &[(&str, &str)] = &[("x-agent-user-id", "acme")];
+const NONE: &[(&str, &str)] = &[];
+
+#[rstest]
+#[case::positive_required_with_identity(true, "/agent.v1.Memory/Recall", BOTH, None)]
+#[case::positive_required_stateless_without_identity(
+    true,
+    "/agent.v1.EmbedService/Embed",
+    NONE,
+    None
+)]
+#[case::negative_required_scoped_without_session(
+    true,
+    "/agent.v1.Memory/Recall",
+    USER_ONLY,
+    Some("16")
+)]
+#[case::negative_required_scoped_without_identity(
+    true,
+    "/agent.v1.PromptService/List",
+    NONE,
+    Some("16")
+)]
+#[case::boundary_loopback_default_require_false(false, "/agent.v1.Memory/Recall", NONE, None)]
+#[case::corner_not_required_unknown_service_passes(false, "/agent.v1.Shadow/Dump", NONE, None)]
+#[case::corner_required_health_exempt(true, "/grpc.health.v1.Health/Check", NONE, None)]
+#[case::adversarial_required_unknown_service(true, "/agent.v1.Shadow/Dump", BOTH, Some("7"))]
+#[case::adversarial_required_traversal_session(
+    true,
+    "/agent.v1.Memory/Recall",
+    &[("x-agent-user-id", "acme"), ("x-agent-session-id", "..")],
+    Some("16")
+)]
+#[tokio::test]
+async fn require_identity_without_verifier_cases(
+    #[case] require_identity: bool,
+    #[case] path: &str,
+    #[case] headers: &[(&str, &str)],
+    #[case] want: Option<&str>,
+) {
+    let got = drive_without_verifier(require_identity, path, headers).await;
+    assert_eq!(got.as_deref(), want);
+}

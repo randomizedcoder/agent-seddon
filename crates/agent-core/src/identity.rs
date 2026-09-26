@@ -266,9 +266,28 @@ pub fn current_identity() -> Option<SessionKey> {
     AGENT_IDENTITY.try_with(std::clone::Clone::clone).ok()
 }
 
-/// The current turn's **verified tenant** segment, or [`UserId::LOCAL`] when no
-/// identity is scoped or the scoped `user` is not [`safe_segment`]-valid
-/// (fail-closed to the default tenant — never another tenant, never an escape).
+/// The tenant the current task runs for, or `None` when nothing names one.
+///
+/// A verified principal (installed by the auth layer from a bearer token) wins;
+/// the scoped identity's `user` segment is used only when there is no principal
+/// (security-hardening S2, docs/design/security-hardening/05-identity-and-tenancy.md).
+/// So a token-bearing call that sends no session header still runs as its token's
+/// tenant rather than falling back to `local`. A segment that is not
+/// [`safe_segment`]-valid names no tenant. Callers that must fail closed on "no
+/// tenant" (a ClickHouse row-policy binding, a metric label) use this; the
+/// per-tenant routers use [`current_tenant`].
+pub fn scoped_tenant() -> Option<String> {
+    if let Some(p) = crate::current_principal() {
+        return safe_segment(&p.tenant).then_some(p.tenant);
+    }
+    current_identity()
+        .map(|k| k.user.as_str().to_string())
+        .filter(|u| safe_segment(u))
+}
+
+/// The current turn's **verified tenant** segment, or [`UserId::LOCAL`] when
+/// [`scoped_tenant`] names none (fail-closed to the default tenant — never
+/// another tenant, never an escape).
 ///
 /// This is the one security-critical tenant-resolution rule, shared by every
 /// per-tenant router and cache (the `PerTenant<Store>` wrap and the
@@ -277,10 +296,7 @@ pub fn current_identity() -> Option<SessionKey> {
 /// un-namespaced view, so `[tenancy] per_tenant = false` and the single-tenant
 /// CLI stay byte-identical.
 pub fn current_tenant() -> String {
-    match current_identity() {
-        Some(k) if safe_segment(k.user.as_str()) => k.user.as_str().to_string(),
-        _ => UserId::LOCAL.to_string(),
-    }
+    scoped_tenant().unwrap_or_else(|| UserId::LOCAL.to_string())
 }
 
 /// Run `fut` with `identity` as the ambient identity (see [`AGENT_IDENTITY`]). Nested
@@ -485,5 +501,58 @@ mod tests {
             long.as_str().ends_with("-pr9"),
             "pr suffix survives the cap: {long}"
         );
+    }
+
+    // --- S2: tenant from the verified principal -------------------------------
+
+    fn principal(tenant: &str) -> crate::VerifiedPrincipal {
+        crate::VerifiedPrincipal {
+            tenant: tenant.to_string(),
+            subject: "alice".to_string(),
+            roles: Vec::new(),
+        }
+    }
+
+    /// `current_tenant` / `scoped_tenant` over every combination of a principal
+    /// and a scoped identity: the principal's tenant wins, a header user is used
+    /// only without one, and an unsafe segment names no tenant.
+    #[rstest::rstest]
+    #[case::positive_principal_without_identity(Some("acme"), None, Some("acme"))]
+    #[case::positive_identity_without_principal(None, Some("globex"), Some("globex"))]
+    #[case::negative_neither_is_local(None, None, None)]
+    #[case::corner_principal_matches_identity(Some("acme"), Some("acme"), Some("acme"))]
+    #[case::boundary_local_identity(None, Some("local"), Some("local"))]
+    #[case::adversarial_header_user_ignored_with_principal(
+        Some("acme"),
+        Some("globex"),
+        Some("acme")
+    )]
+    #[case::adversarial_unsafe_principal_tenant(Some("../etc"), Some("globex"), None)]
+    #[tokio::test]
+    async fn tenant_resolution_cases(
+        #[case] principal_tenant: Option<&str>,
+        #[case] identity_user: Option<&str>,
+        #[case] want: Option<&str>,
+    ) {
+        let check = || async {
+            assert_eq!(scoped_tenant().as_deref(), want);
+            assert_eq!(current_tenant(), want.unwrap_or(UserId::LOCAL));
+        };
+        let with_identity = || async {
+            match identity_user {
+                Some(u) => {
+                    let key = SessionKey {
+                        user: UserId::new(u),
+                        session: SessionId::new("s1"),
+                    };
+                    scope(key, check()).await;
+                }
+                None => check().await,
+            }
+        };
+        match principal_tenant {
+            Some(t) => crate::principal_scope(principal(t), with_identity()).await,
+            None => with_identity().await,
+        }
     }
 }

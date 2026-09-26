@@ -464,7 +464,7 @@ async fn positive_layer_rewrites_user_header_to_verified_tenant() {
     let resp = drive(
         &enabled_layer(),
         request(
-            "/pkg.Svc/M",
+            "/agent.v1.EmbedService/Embed",
             &[("authorization", &format!("Bearer {token}"))],
         ),
     )
@@ -478,7 +478,11 @@ async fn positive_layer_rewrites_user_header_to_verified_tenant() {
 
 #[tokio::test]
 async fn corner_no_token_is_unauthenticated() {
-    let resp = drive(&enabled_layer(), request("/pkg.Svc/M", &[])).await;
+    let resp = drive(
+        &enabled_layer(),
+        request("/agent.v1.EmbedService/Embed", &[]),
+    )
+    .await;
     assert!(
         is_unauthenticated(&resp),
         "a request with no bearer token is UNAUTHENTICATED"
@@ -494,7 +498,10 @@ async fn corner_mode_none_uses_header() {
     // Disabled layer = today's trusted-header path: the client value passes through.
     let resp = drive(
         &AuthLayer::disabled(),
-        request("/pkg.Svc/M", &[("x-agent-user-id", "client-said")]),
+        request(
+            "/agent.v1.EmbedService/Embed",
+            &[("x-agent-user-id", "client-said")],
+        ),
     )
     .await;
     assert_eq!(
@@ -566,7 +573,10 @@ async fn positive_operator_token_passes_the_gate() {
         &enabled_layer(),
         request(
             "/agent.v1.ConfigService/Put",
-            &[("authorization", &format!("Bearer {token}"))],
+            &[
+                ("x-agent-session-id", "s1"),
+                ("authorization", &format!("Bearer {token}")),
+            ],
         ),
     )
     .await;
@@ -588,7 +598,10 @@ async fn adversarial_reader_token_denied_by_the_gate() {
         &enabled_layer(),
         request(
             "/agent.v1.ConfigService/Put",
-            &[("authorization", &format!("Bearer {token}"))],
+            &[
+                ("x-agent-session-id", "s1"),
+                ("authorization", &format!("Bearer {token}")),
+            ],
         ),
     )
     .await;
@@ -610,6 +623,7 @@ async fn adversarial_forged_roles_header_cannot_grant() {
         request(
             "/agent.v1.ConfigService/Put",
             &[
+                ("x-agent-session-id", "s1"),
                 ("x-agent-roles", "operator"),
                 ("authorization", &format!("Bearer {token}")),
             ],
@@ -650,7 +664,7 @@ async fn adversarial_client_header_ignored_when_token_present() {
     let resp = drive(
         &enabled_layer(),
         request(
-            "/pkg.Svc/M",
+            "/agent.v1.EmbedService/Embed",
             &[
                 ("x-agent-user-id", "evil"),
                 ("authorization", &format!("Bearer {token}")),
@@ -662,5 +676,93 @@ async fn adversarial_client_header_ignored_when_token_present() {
         echoed(&resp).as_deref(),
         Some("acme"),
         "the client-supplied identity is overwritten by the verified tenant"
+    );
+}
+
+// --- S2: identity policy under a verified token -------------------------------
+
+#[tokio::test]
+async fn negative_token_without_session_on_scoped_is_unauthenticated() {
+    // A valid token but no session header on a tenant-keyed service: rejected
+    // rather than run unscoped as the bare tenant.
+    let token = mint(KID, &valid_claims("acme", "u"));
+    let resp = drive(
+        &enabled_layer(),
+        request(
+            "/agent.v1.Memory/Recall",
+            &[("authorization", &format!("Bearer {token}"))],
+        ),
+    )
+    .await;
+    assert!(is_unauthenticated(&resp), "scoped service needs a session");
+    assert_eq!(echoed(&resp), None, "the handler never ran");
+}
+
+#[tokio::test]
+async fn positive_token_with_session_reaches_scoped() {
+    let token = mint(KID, &valid_claims("acme", "u"));
+    let resp = drive(
+        &enabled_layer(),
+        request(
+            "/agent.v1.Memory/Recall",
+            &[
+                ("x-agent-session-id", "s1"),
+                ("authorization", &format!("Bearer {token}")),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(echoed(&resp).as_deref(), Some("acme"));
+}
+
+#[tokio::test]
+async fn corner_field_scoped_open_without_session_ok() {
+    // SessionRegistry.Open is how a client obtains a session: it must not need one.
+    let token = mint(KID, &valid_claims("acme", "u"));
+    let resp = drive(
+        &enabled_layer(),
+        request(
+            "/agent.v1.SessionRegistryService/Open",
+            &[("authorization", &format!("Bearer {token}"))],
+        ),
+    )
+    .await;
+    assert_eq!(echoed(&resp).as_deref(), Some("acme"));
+}
+
+#[tokio::test]
+async fn adversarial_unknown_service_rejected() {
+    // A path with no identity policy is refused even with a valid token and a
+    // full identity, so an unclassified service can never run.
+    let token = mint(KID, &valid_claims("acme", "u"));
+    let resp = drive(
+        &enabled_layer(),
+        request(
+            "/agent.v1.Shadow/Dump",
+            &[
+                ("x-agent-session-id", "s1"),
+                ("authorization", &format!("Bearer {token}")),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(
+        grpc_status(&resp).as_deref(),
+        Some("7"),
+        "PERMISSION_DENIED"
+    );
+    assert_eq!(echoed(&resp), None);
+}
+
+#[tokio::test]
+async fn corner_health_exempt_from_identity_policy() {
+    let resp = drive(
+        &enabled_layer(),
+        request("/grpc.health.v1.Health/Check", &[]),
+    )
+    .await;
+    assert!(
+        !is_unauthenticated(&resp),
+        "health needs no token or identity"
     );
 }

@@ -8,7 +8,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | # | Increment | Closes | State | PR |
 |---|---|---|---|---|
 | S1 | `auth` default feature, load-time validation, insecure-listen refusal | P0-1, P0-3 | ✅ | #487 |
-| S2 | Tenant from principal, identity policy, direct-reader conversion | P0-2, P0-3 | ⬜ | — |
+| S2 | Tenant from principal, identity policy, direct-reader conversion | P0-2, P0-3 | 🟡 | — |
 | S3 | Multi-issuer OIDC profiles + fake issuer | D2 | ⬜ | — |
 | S4 | tonic TLS, `[grpc.tls]`, `nix run .#pki-dev` | P0-5 | ⬜ | — |
 | S5 | Token service core (agent JWT, JWKS, `WhoAmI`) | D1, D10 | ⬜ | — |
@@ -49,3 +49,23 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
   (S2).
   Gate: `nix flake check` green (the `leak` fork/cancel and `coverage` pty-firehose timing
   flakes, both outside S1's code, passed on rerun).
+- **2026-09-26 — S2.** `agent_core::current_tenant()` now prefers the verified principal's tenant
+  (new `scoped_tenant()` is the `Option` form for callers that must fail closed), so a token with
+  no session header runs as its own tenant, never `local`. The direct readers now use it: memory
+  `PerUserMemory`, the ClickHouse reader's `SET SQL_tenant_id`, the metrics `ambient_tenant`
+  label, the digest `Query` filter (via `server::request_tenant`) and the distiller's alternatives
+  rows. The ConfigService tenant-write guard already defers to the principal and is unchanged.
+  New `crates/agent-grpc/src/server/identity_policy.rs`: `class_of` (closed match over all 39
+  services, the mt-audit classes), `service_of(path)`, and `admit`. The auth layer calls `admit`
+  after verifying a token, and without a verifier when `require_identity` is on: `scoped` and
+  `single-store` services without a valid session get `UNAUTHENTICATED("identity required")`, an
+  unclassified service gets `PERMISSION_DENIED`. `[auth] require_identity` (`Option<bool>`)
+  defaults per listener to on for routable addresses and off for loopback and unix sockets.
+  mt-audit sub-check 5 `identity-policy` parses `class_of` and fails on any difference from the
+  manifest; a Rust test asserts every service in `method_paths()` has a class. Not changed: the
+  auth layer still *rewrites* `x-agent-user-id` rather than ignoring it (equivalent, since the
+  verified tenant wins); the harness helpers (`dial_for` headers, ghz `-m`, fleet-e2e
+  `DIAL_FLAGS`, a Rust `scoped_request()`) are not needed while every harness listens on
+  loopback, so they move to S15, where the strict path first runs.
+  Gate: `nix flake check` green (the `leak` check's `tools_do_not_leak` window-2 timing flake,
+  outside S2's code, passed on rerun).

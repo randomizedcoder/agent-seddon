@@ -112,9 +112,7 @@ impl ChReader {
         // on an absent/hostile identity (no SET ⇒ the policy's `''` default ⇒ no
         // tenant rows).
         if self.tenant_scoped {
-            let tenant = agent_core::current_identity()
-                .map(|k| k.user.as_str().to_string())
-                .unwrap_or_default();
+            let tenant = agent_core::scoped_tenant().unwrap_or_default();
             if let Some(stmt) = set_tenant_stmt(&tenant) {
                 client.execute(stmt.as_str()).await.map_err(ch_err)?;
             }

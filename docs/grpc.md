@@ -306,15 +306,27 @@ metadata (not a `.proto` field, so it is additive and `buf breaking` never sees 
   `user_id`). A server-as-client (`--serve-all`) forwards the caller's identity via
   the same task-local.
 
-> **Trust boundary (important).** These values are **attacker-controllable** — there
-> is no authentication layer yet. They are trusted only as routing/namespacing
-> labels, and only as far as the transport (UDS file perms / loopback) already trusts
-> the peer. Isolation is enforced *structurally* (per-tenant paths guarded by
-> `safe_segment` + `confine`), so even a spoofed identity cannot escape the namespace
-> it names. `safe_segment` also **bounds each segment's length** (`MAX_SEGMENT_LEN`),
-> so an over-long id can't blow up a metric label or path. A real
-> `auth-token → user_id` interceptor is a **named follow-up** — see
-> [`docs/design/multi-session/07-security.md`](design/multi-session/07-security.md).
+> **Trust boundary (important).** Without `[auth] mode = "oidc"` these values are
+> **attacker-controllable**. They are trusted only as routing/namespacing labels, and
+> only as far as the transport (UDS file perms / loopback) already trusts the peer;
+> `mode = "none"` on a routable address refuses to start unless
+> `allow_insecure_listen = true`. Isolation is enforced *structurally* (per-tenant
+> paths guarded by `safe_segment` + `confine`), so even a spoofed identity cannot
+> escape the namespace it names. `safe_segment` also **bounds each segment's length**
+> (`MAX_SEGMENT_LEN`), so an over-long id can't blow up a metric label or path. Under
+> `mode = "oidc"` the auth layer overwrites `x-agent-user-id` with the token's verified
+> tenant, and `agent_core::current_tenant()` prefers that verified tenant everywhere.
+
+**Which calls must carry identity.** Each service has an identity class
+([`identity_policy.rs`](../crates/agent-grpc/src/server/identity_policy.rs), kept equal to
+the [mt-audit](components/mt-audit.md) manifest). While identity is enforced — always for a
+call with a verified token, and for token-less calls when `[auth] require_identity` is on
+(default: on for a routable listener, off for loopback and unix sockets) — a call to a
+`scoped` or `single-store` service without a valid `x-agent-session-id` (and, without a
+token, `x-agent-user-id`) gets `UNAUTHENTICATED("identity required")`, and a call to a
+service with no class gets `PERMISSION_DENIED`. `field-scoped` services
+(`SessionRegistryService.Open` is how a client gets a session), `stateless` and
+`operator-global` services proceed on the tenant alone. Health and reflection are exempt.
 
 ### Isolation is not containment: `bash` and the exec seams
 

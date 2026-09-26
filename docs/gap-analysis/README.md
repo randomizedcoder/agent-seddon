@@ -711,8 +711,8 @@ links its own sub-docs.
 **P0 — security / tenancy correctness** — implementation plan: [`design/security-hardening/`](../design/security-hardening/README.md)
 
 - ✅ Compile the `auth` feature into the default binary (`nix build .#agent`) — security-hardening S1.
-- Derive the tenant from `VerifiedPrincipal`; remove the missing-session → `local` fallback.
-- Reject absent identity on every stateful RPC.
+- ✅ Derive the tenant from `VerifiedPrincipal`; remove the missing-session → `local` fallback — security-hardening S2.
+- ✅ Reject absent identity on every stateful RPC — security-hardening S2 (always with a token and off-loopback; token-less loopback/unix-socket listeners opt in with `[auth] require_identity`).
 - Envoy: bind to loopback or the LAN address, add `authorization` to `allow_headers`, add `jwt_authn`.
 - TLS on TCP transports.
 - Give `agent_reader` a password and drop `users_without_row_policies_can_read_rows`.

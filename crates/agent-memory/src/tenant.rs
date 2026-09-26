@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use agent_core::{current_identity, safe_segment, LlmProvider, UserId};
+use agent_core::{safe_segment, LlmProvider, UserId};
 
 /// Root `base` under `user`: insert the user segment as the **parent of `base`'s
 /// final component**, giving the design's `<root>/<user>/<leaf>` layout
@@ -41,13 +41,12 @@ fn tenant_path(base: &Path, user: &str) -> PathBuf {
     }
 }
 
-/// The current turn's user segment, or `local` when no identity is scoped (the
-/// single-user CLI, or an unauthenticated served call — it lands in the default
-/// tenant, never another user's namespace).
+/// The current turn's tenant segment ([`agent_core::current_tenant`]): the verified
+/// principal's tenant, else the scoped identity's user, else `local` (the single-user
+/// CLI, or an unauthenticated served call — it lands in the default tenant, never
+/// another user's namespace).
 fn current_user() -> String {
-    current_identity()
-        .map(|k| k.user.as_str().to_string())
-        .unwrap_or_else(|| UserId::LOCAL.to_string())
+    agent_core::current_tenant()
 }
 
 /// A [`MemoryStore`](agent_core::MemoryStore) that routes each call to a per-user

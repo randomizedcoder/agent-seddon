@@ -16,8 +16,10 @@ from audit import (
     Service,
     check_anchors,
     check_config_ownership,
+    check_identity_policy,
     check_metrics,
     check_services,
+    parse_identity_classes,
     parse_metric_families,
     parse_pertenant_seams,
     parse_service_handlers,
@@ -363,6 +365,84 @@ class TestCheckConfigOwnership(unittest.TestCase):
     def boundary_missing_function_flagged(self):
         out = check_config_ownership("fn other() {}", {"config": {}})
         self.assertEqual([f.kind for f in out], ["config-mismatch"])
+
+
+# --------------------------------------------------------------------------------------
+# Sub-check 5: identity-policy (identity_policy.rs `class_of` == manifest classes)
+# --------------------------------------------------------------------------------------
+
+POLICY_RS = """
+pub fn class_of(service: &str) -> Option<IdentityClass> {
+    use IdentityClass::*;
+    Some(match service {
+        "Memory"
+        | "PromptService" => Scoped,
+        "SessionRegistryService" => FieldScoped,
+        "EmbedService" => Stateless,
+        "RoleService" => OperatorGlobal,
+        "Episodic" => SingleStore,
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    fn fixture() { let _ = class_of("Ghost"); match x { "Ghost" => Scoped, _ => {} } }
+}
+"""
+
+POLICY_MANIFEST = {
+    "services": {
+        "Memory": {"class": "scoped"},
+        "PromptService": {"class": "scoped"},
+        "SessionRegistryService": {"class": "field-scoped"},
+        "EmbedService": {"class": "stateless"},
+        "RoleService": {"class": "operator-global"},
+        "Episodic": {"class": "single-store"},
+    }
+}
+
+
+class TestIdentityPolicy(unittest.TestCase):
+    def positive_parse_multiline_arms(self):
+        got = parse_identity_classes(POLICY_RS)
+        self.assertEqual(got["Memory"], "scoped")
+        self.assertEqual(got["PromptService"], "scoped")
+        self.assertEqual(got["Episodic"], "single-store")
+        self.assertEqual(len(got), 6)
+
+    def positive_matching_manifest_clean(self):
+        self.assertEqual(check_identity_policy(parse_identity_classes(POLICY_RS), POLICY_MANIFEST), [])
+
+    def negative_manifest_service_missing_from_policy(self):
+        m = {"services": dict(POLICY_MANIFEST["services"], TaskService={"class": "stateless"})}
+        out = check_identity_policy(parse_identity_classes(POLICY_RS), m)
+        self.assertEqual([(f.kind, f.subject) for f in out], [("policy-missing", "TaskService")])
+
+    def negative_policy_service_missing_from_manifest(self):
+        m = {"services": {k: v for k, v in POLICY_MANIFEST["services"].items() if k != "RoleService"}}
+        out = check_identity_policy(parse_identity_classes(POLICY_RS), m)
+        self.assertEqual([(f.kind, f.subject) for f in out], [("unclassified", "RoleService")])
+
+    def adversarial_identity_policy_drift_fails_gate(self):
+        # Manifest says scoped, runtime says stateless: the server would let a
+        # session-less call through that the audit believes is rejected.
+        m = {"services": dict(POLICY_MANIFEST["services"], EmbedService={"class": "scoped"})}
+        out = check_identity_policy(parse_identity_classes(POLICY_RS), m)
+        self.assertEqual([(f.kind, f.subject) for f in out], [("policy-drift", "EmbedService")])
+
+    def boundary_missing_function_flagged(self):
+        out = check_identity_policy(parse_identity_classes("fn other() {}"), POLICY_MANIFEST)
+        self.assertEqual([f.kind for f in out], ["mechanism-missing"])
+
+    def corner_test_module_arms_ignored(self):
+        # The `"Ghost" => Scoped` arm lives in #[cfg(test)] and must not count.
+        self.assertNotIn("Ghost", parse_identity_classes(POLICY_RS))
+
+    def adversarial_unknown_variant_reported_not_dropped(self):
+        rs = POLICY_RS.replace('"RoleService" => OperatorGlobal', '"RoleService" => Superuser')
+        out = check_identity_policy(parse_identity_classes(rs), POLICY_MANIFEST)
+        self.assertEqual([(f.kind, f.subject) for f in out], [("policy-drift", "RoleService")])
 
 
 # --------------------------------------------------------------------------------------
