@@ -42,7 +42,13 @@ use crate::{check_batch, conflict, Backend, Write};
 /// Adding a migration = drop the next-numbered `.sql` in `migrations/` and append
 /// its `(n, include_str!(...))` here (the version is the source of truth, not the
 /// filename — no runtime path parsing).
-const MIGRATIONS: &[(i64, &str)] = &[(1, include_str!("../migrations/0001_config_store.sql"))];
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, include_str!("../migrations/0001_config_store.sql")),
+    (
+        2,
+        include_str!("../migrations/0002_cards_pos_identity_and_list_index.sql"),
+    ),
+];
 
 /// A fixed, arbitrary key for the transaction-scoped advisory lock that
 /// serializes concurrent starters through [`PgBackend::run_migrations`] (so two
@@ -238,12 +244,14 @@ impl Backend for PgBackend {
                     id,
                     blob,
                 } => {
-                    // New rows take the next global `pos` (insertion order,
-                    // visible within this txn); an existing row keeps its pos
-                    // and only swaps the blob.
+                    // New rows get the next `pos` from the identity sequence
+                    // (insertion order) — omitting the column lets the DEFAULT
+                    // fill it, so there is no `MAX(pos)` full-table aggregate on
+                    // the write path (PG-02). An existing row keeps its pos and
+                    // only swaps the blob.
                     sqlx::query(
-                        "INSERT INTO cards (collection, tenant, id, pos, blob)
-                         VALUES ($1, $2, $3, (SELECT COALESCE(MAX(pos), -1) + 1 FROM cards), $4)
+                        "INSERT INTO cards (collection, tenant, id, blob)
+                         VALUES ($1, $2, $3, $4)
                          ON CONFLICT (collection, tenant, id) DO UPDATE SET blob = EXCLUDED.blob",
                     )
                     .bind(collection)
@@ -293,9 +301,11 @@ impl Backend for PgBackend {
                     if cur.as_deref() != expected.as_deref() {
                         return Err(conflict(collection, id));
                     }
+                    // Identity `pos` on insert (see the `Put` arm); an update
+                    // keeps the row's existing pos.
                     sqlx::query(
-                        "INSERT INTO cards (collection, tenant, id, pos, blob)
-                         VALUES ($1, $2, $3, (SELECT COALESCE(MAX(pos), -1) + 1 FROM cards), $4)
+                        "INSERT INTO cards (collection, tenant, id, blob)
+                         VALUES ($1, $2, $3, $4)
                          ON CONFLICT (collection, tenant, id) DO UPDATE SET blob = EXCLUDED.blob",
                     )
                     .bind(collection)

@@ -61,11 +61,17 @@ impl SqliteBackend {
                  PRIMARY KEY (collection, tenant, id),
                  FOREIGN KEY (tenant) REFERENCES tenants(tenant)
              );
-             -- Schema-version anchor (the SQLite twin of Postgres' `_sqlx_migrations`
-             -- ledger): this baseline is version 1, so a later additive `ALTER` can be
+             -- The composite index backing `list ... ORDER BY pos, id` scoped to a
+             -- tenant (the SQLite mirror of Postgres' `cards_list_idx`, PG-02). Kept
+             -- in lockstep with the Postgres `0002` migration by the hermetic
+             -- schema-mirror test.
+             CREATE INDEX IF NOT EXISTS cards_list_idx ON cards (collection, tenant, pos);
+             -- Schema-version anchor (the SQLite twin of Postgres' `_schema_migrations`
+             -- ledger): this schema is version 2, so a later additive `ALTER` can be
              -- gated on `PRAGMA user_version` instead of blindly re-running. A DB
-             -- created before this anchor also reads 0 and is stamped to 1 here.
-             PRAGMA user_version = 1;",
+             -- created before this anchor reads 0/1 and is re-stamped here; the DDL
+             -- above is all `IF NOT EXISTS`, so re-stamping in place is inert.
+             PRAGMA user_version = 2;",
         )
         .map_err(sql_err)?;
         Ok(Self {
@@ -240,18 +246,19 @@ mod tests {
     use super::SqliteBackend;
     use rusqlite::Connection;
 
-    /// `positive`: opening a store stamps the schema-version anchor to the baseline
-    /// (1), so a later additive migration can gate on `PRAGMA user_version` instead
-    /// of blindly re-running. Read back on a second connection to the same file to
-    /// prove the stamp is persisted, not per-connection.
+    /// `positive`: opening a store stamps the schema-version anchor to the current
+    /// version (2 after PG-02 added `cards_list_idx`), so a later additive migration
+    /// can gate on `PRAGMA user_version` instead of blindly re-running. Read back on
+    /// a second connection to the same file to prove the stamp is persisted, not
+    /// per-connection.
     #[test]
-    fn positive_sqlite_user_version_is_1() {
+    fn positive_sqlite_user_version_is_2() {
         let path = agent_testkit::tempdir().join("user_version.sqlite3");
         SqliteBackend::open(&path).expect("open stamps the schema");
         let conn = Connection::open(&path).expect("reopen the same file");
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .expect("read user_version");
-        assert_eq!(v, 1, "baseline schema version is stamped on open");
+        assert_eq!(v, 2, "current schema version is stamped on open");
     }
 }
