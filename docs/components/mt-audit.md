@@ -22,7 +22,12 @@ Each sub-check maps to a plane of the [multi-tenancy design](../design/multi-ten
    - `field-scoped` — tenant comes from request fields or a direct capability key, not the
      ambient scope (e.g. `SessionRegistryService`, `SessionService`, `AgentSessionService`);
    - `stateless` — no per-tenant state (tenant irrelevant; span attribution only);
-   - `operator-global` — deliberately process-global (operator config, RBAC-gated).
+   - `operator-global` — deliberately process-global (operator config, RBAC-gated);
+   - `single-store` — stateful but a **single shared store, not tenant-partitioned** — a
+     *documented* non-isolation (e.g. the served `Episodic`/`Semantic` memory layers, hosted
+     from raw `FileEpisodic`/`FileSemantic` at fixed paths). Used only where a `run_scoped`
+     wrap would be cosmetic (the backend ignores `current_identity()`); a real per-tenant fix
+     is tracked separately rather than oversold. A class outside this closed set is flagged.
 
    A `scoped` service whose handler is span-only, a service present in source but absent from
    the manifest (unclassified drift), or a per-tenant-wrapped seam

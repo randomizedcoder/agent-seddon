@@ -4,11 +4,14 @@
 # (the constants-sync / buf-image governance shape). When you add a gRPC service or a
 # metric family, classify it HERE or the audit flags it as unclassified drift.
 #
-# service class: scoped | field-scoped | stateless | operator-global
+# service class: scoped | field-scoped | stateless | operator-global | single-store
 #   scoped        every RPC calls identity_key + run_scoped (ambient tenant routing)
 #   field-scoped  tenant derived from request fields / a direct capability key
 #   stateless     no per-tenant state (tenant irrelevant; span attribution only)
 #   operator-global  deliberately process-global (operator config, RBAC-gated)
+#   single-store  stateful but a single shared store, NOT tenant-partitioned — a DOCUMENTED
+#                 non-isolation (a real per-tenant fix is tracked separately). Used only
+#                 where a run_scoped wrap would be cosmetic (the backend ignores identity).
 # status = "gap" marks a KNOWN coverage gap (reported, labeled) pending a fix.
 
 # --- gRPC services ---------------------------------------------------------------
@@ -35,9 +38,8 @@ class = "scoped"
 class = "stateless"
 
 [services.Episodic]
-class = "scoped"
-status = "gap"
-note = "span-only while sibling MemoryService scopes; confirm intent in PR2"
+class = "single-store"
+note = "served --serve-episodic layer is raw FileEpisodic at a fixed path (builder.rs file_episodic), NOT PerTenant-wrapped and does not consult current_identity() — a run_scoped wrap would be cosmetic. Documented non-isolation (mt-audit-06); real per-tenant layer work tracked in multi-tenancy STATUS.md follow-up."
 
 [services.FactCollectorService]
 class = "stateless"
@@ -110,9 +112,8 @@ class = "scoped"
 note = "every RPC scopes via identity_key + run_scoped (mt-audit-03); reindex re-scopes inside its detached spawn; PerTenant<SearchBackend> routes the caller's tenant"
 
 [services.Semantic]
-class = "scoped"
-status = "gap"
-note = "span-only while sibling MemoryService scopes; confirm intent in PR2"
+class = "single-store"
+note = "served --serve-semantic layer is raw FileSemantic at a fixed dir (builder.rs file_semantic), NOT PerTenant-wrapped and does not consult current_identity() — a run_scoped wrap would be cosmetic. Documented non-isolation (mt-audit-06); real per-tenant layer work tracked in multi-tenancy STATUS.md follow-up."
 
 [services.SessionRegistryService]
 class = "field-scoped"

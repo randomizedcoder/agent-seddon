@@ -139,14 +139,30 @@ six served handlers that were `PerTenant`-wrapped but never scoped the caller �
   `tokio::spawn` (a spawned task does not inherit the task-local `AGENT_IDENTITY`).
 - ✅ **ForgeRegistryService** (mt-audit-04) — same fix.
 - ✅ **TransportRegistryService** (mt-audit-05) — same fix.
-- ⬜ Episodic / Semantic — investigation done: the served `--serve-episodic` /
-  `--serve-semantic` layers are built from `file_episodic` / `file_semantic`, which return
-  **raw `FileEpisodic` / `FileSemantic` at fixed paths** — *not* per-user, and there is no
-  `PerTenant<EpisodicStore/SemanticStore>` impl. Only the unlayered `MemoryStore` path is
-  per-tenant (via `PerUserMemory`, routing internally on `current_identity()`). So a
-  mechanical `run_scoped` wrap would be **cosmetic** (no isolation) — mt-audit-06 must either
-  reclassify them or make the served layers genuinely per-tenant.
-- Final: flip `mt-audit` to a hard `nix flake check` gate once the manifest is gap-free.
+- ✅ **Episodic / Semantic** (mt-audit-06) — **reclassified**, not wrapped. The served
+  `--serve-episodic` / `--serve-semantic` layers are built from `file_episodic` /
+  `file_semantic`, which return **raw `FileEpisodic` / `FileSemantic` at fixed paths** — *not*
+  per-user, with no `PerTenant<EpisodicStore/SemanticStore>` impl. Only the unlayered
+  `MemoryStore` path is per-tenant (via `PerUserMemory`). A mechanical `run_scoped` wrap would
+  be **cosmetic** (no isolation), so per CLAUDE.md "don't oversell guards" they are classified
+  `single-store` in the manifest (a new, audit-recognized class for a documented
+  non-partitioned served store) and the limitation is documented on the handlers. The audit is
+  now **clean**.
+- Final (mt-audit-07): flip `mt-audit` to a hard `nix flake check` gate now the manifest is
+  clean.
+
+### Follow-up — genuine per-tenant memory layers (deferred, tracked)
+
+The `single-store` classification records a **real limitation**, not a fix: under
+`[tenancy] per_tenant`, the standalone `--serve-episodic` / `--serve-semantic` seams — and the
+**layered** in-process memory path (`[memory] semantic` set), which composes raw
+`FileEpisodic` + `FileSemantic` into `LayeredMemory` **without** a `PerUserMemory` /
+`PerTenant` wrap — are **not tenant-isolated**. (The unlayered `MemoryStore` path is, via
+`PerUserMemory`.) A real fix = per-user layer factories (root at `<base>/<user>/…` like
+`PerUserMemory` already does for the whole store) + `PerTenant<dyn EpisodicStore>` /
+`PerTenant<dyn SemanticStore>` impls, then scope the handlers and reclassify to `scoped`. This
+is a memory-layering design change, deferred to its own increment — Tier-0 (`per_tenant = false`)
+is unaffected.
 
 ## Origin & decisions
 

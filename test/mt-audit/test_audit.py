@@ -279,6 +279,22 @@ class TestCheckServices(unittest.TestCase):
         out = check_services(svcs, {"Scheduler"}, m)
         self.assertTrue(any("per-tenant seam" in f.message for f in out))
 
+    def positive_single_store_span_only_is_clean(self):
+        # A single-store served layer (raw store, not PerTenant, ignores identity) is a
+        # documented non-isolation — span-only handlers must NOT be flagged for it.
+        svcs = [self._svc("Episodic", [Rpc("append", False, False), Rpc("recent", False, False)])]
+        m = {"services": {"Episodic": {"class": "single-store"}}}
+        self.assertEqual(check_services(svcs, set(), m), [])
+
+    def negative_unknown_class_is_flagged(self):
+        # A class outside the closed VALID_CLASSES set is a manifest typo — flagged, so the
+        # classification vocabulary can't drift silently (check-the-check for the hardening).
+        svcs = [self._svc("WidgetService", [Rpc("get", True, False)])]
+        m = {"services": {"WidgetService": {"class": "scopd"}}}  # typo
+        out = check_services(svcs, set(), m)
+        self.assertEqual([f.kind for f in out], ["unclassified"])
+        self.assertIn("not one of", out[0].message)
+
 
 # --------------------------------------------------------------------------------------
 # check_metrics — check-the-checks
@@ -368,7 +384,7 @@ class TestManifestSelfConsistent(unittest.TestCase):
         for name, spec in m["services"].items():
             self.assertIn(
                 spec["class"],
-                {"scoped", "field-scoped", "stateless", "operator-global"},
+                audit.VALID_CLASSES,
                 f"{name} has an unknown class",
             )
 

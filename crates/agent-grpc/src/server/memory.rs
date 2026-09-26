@@ -1,5 +1,16 @@
 //! The `MemoryStore` seam as a service, plus the `Episodic` and `Semantic`
 //! layer adapters that expose the same store at a finer grain.
+//!
+//! **Tenancy note.** `MemoryService` scopes every RPC (`identity_key` +
+//! `run_scoped`) because its `MemoryStore` is per-user (`PerUserMemory` routes on
+//! `current_identity()`). The `Episodic`/`Semantic` *served layers* deliberately do
+//! **not** scope: `--serve-episodic`/`--serve-semantic` host raw `FileEpisodic`/
+//! `FileSemantic` at fixed paths (builder `file_episodic`/`file_semantic`) — they
+//! are not `PerTenant`-wrapped and ignore `current_identity()`, so a `run_scoped`
+//! wrap would be cosmetic (no isolation). This is a **documented single-store
+//! limitation**, classified `single-store` in the mt-audit manifest; making the
+//! served layers genuinely per-tenant is a tracked follow-up
+//! (docs/design/multi-tenancy/STATUS.md).
 
 use std::sync::Arc;
 
