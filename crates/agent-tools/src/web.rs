@@ -77,26 +77,17 @@ impl Tool for WebFetchTool {
                 "refusing to fetch: URL must use http/https",
             ));
         }
-        let format = match args.get("format").and_then(Value::as_str) {
-            None | Some("markdown") => WebFormat::Markdown,
-            Some("text") => WebFormat::Text,
-            Some("html") => WebFormat::Html,
-            Some(other) => {
-                return Ok(Observation::error(format!(
-                    "unknown format `{other}` (use markdown|text|html)"
-                )))
-            }
+        let format = match parse_format(args.get("format").and_then(Value::as_str)) {
+            Ok(f) => f,
+            Err(e) => return Ok(Observation::error(e)),
         };
-        // Timeout: default, or a caller value clamped to the valid open interval.
-        let timeout_secs = match args.get("timeout").and_then(Value::as_u64) {
-            None => self.default_timeout_secs,
-            Some(t) if (1..=self.max_timeout_secs).contains(&t) => t,
-            Some(_) => {
-                return Ok(Observation::error(format!(
-                    "timeout must be between 1 and {}s",
-                    self.max_timeout_secs
-                )))
-            }
+        let timeout_secs = match parse_timeout(
+            args.get("timeout").and_then(Value::as_u64),
+            self.default_timeout_secs,
+            self.max_timeout_secs,
+        ) {
+            Ok(t) => t,
+            Err(e) => return Ok(Observation::error(e)),
         };
 
         let req = WebRequest {
@@ -123,6 +114,32 @@ impl Tool for WebFetchTool {
 
         let reduced = reduce(&resp.body, &resp.content_type, format);
         Ok(Observation::ok(truncate(reduced)))
+    }
+}
+
+/// Map the untrusted `format` argument to a [`WebFormat`], or a caller-facing
+/// error. Absent (or `"markdown"`) is the default; anything else is rejected *by
+/// name* — never coerced — and the match is exact/case-sensitive, so a hostile
+/// value can't sneak through by casing. The rejected value is echoed back so the
+/// model can correct itself; it is only ever formatted into a string, never run.
+fn parse_format(arg: Option<&str>) -> std::result::Result<WebFormat, String> {
+    match arg {
+        None | Some("markdown") => Ok(WebFormat::Markdown),
+        Some("text") => Ok(WebFormat::Text),
+        Some("html") => Ok(WebFormat::Html),
+        Some(other) => Err(format!("unknown format `{other}` (use markdown|text|html)")),
+    }
+}
+
+/// Resolve the untrusted `timeout` argument (seconds): absent → `default`; a value
+/// in the inclusive `1..=max` interval is taken as-is; anything else — `0`, or a
+/// value above `max` (a hostile huge `u64` included) — is rejected. Fails closed:
+/// the value is bounded here, before it can become a real socket timeout.
+fn parse_timeout(arg: Option<u64>, default: u64, max: u64) -> std::result::Result<u64, String> {
+    match arg {
+        None => Ok(default),
+        Some(t) if (1..=max).contains(&t) => Ok(t),
+        Some(_) => Err(format!("timeout must be between 1 and {max}s")),
     }
 }
 
@@ -566,6 +583,92 @@ mod tests {
     #[case::drops_script("<p>keep</p><script>drop()</script>", "keep")]
     fn html_to_markdown_cases(#[case] html: &str, #[case] expected: &str) {
         assert_eq!(html_to_markdown(html), expected);
+    }
+
+    // --- parse_format: untrusted `format` arg → WebFormat or a typed error --
+    // Each row carries a `description` and the `expected` outcome: `Ok(fmt)` = the
+    // accepted format; `Err(substr)` = the rejection message must contain `substr`.
+    #[rstest]
+    #[case::positive_markdown(
+        "explicit \"markdown\" is accepted",
+        Some("markdown"),
+        Ok(WebFormat::Markdown)
+    )]
+    #[case::positive_text("\"text\" is accepted", Some("text"), Ok(WebFormat::Text))]
+    #[case::positive_html("\"html\" is accepted", Some("html"), Ok(WebFormat::Html))]
+    #[case::corner_absent_defaults_markdown(
+        "an absent arg defaults to markdown",
+        None,
+        Ok(WebFormat::Markdown)
+    )]
+    #[case::negative_unknown_value(
+        "an unknown format name is rejected by name",
+        Some("pdf"),
+        Err("unknown format")
+    )]
+    #[case::boundary_empty_string(
+        "the empty string is not a known value → rejected",
+        Some(""),
+        Err("unknown format")
+    )]
+    #[case::adversarial_wrong_case(
+        "uppercase \"MARKDOWN\" is not coerced (exact, fail closed)",
+        Some("MARKDOWN"),
+        Err("unknown format")
+    )]
+    #[case::adversarial_hostile_value_echoed(
+        "a hostile value is echoed verbatim in the error, never run",
+        Some("../../etc"),
+        Err("../../etc")
+    )]
+    fn parse_format_cases(
+        #[case] description: &str,
+        #[case] arg: Option<&str>,
+        #[case] expected: std::result::Result<WebFormat, &str>,
+    ) {
+        match (parse_format(arg), expected) {
+            (Ok(got), Ok(want)) => assert_eq!(got, want, "{description}"),
+            (Err(msg), Err(substr)) => {
+                assert!(
+                    msg.contains(substr),
+                    "{description}: `{msg}` missing `{substr}`"
+                );
+            }
+            (got, want) => panic!("{description}: got {got:?}, want {want:?}"),
+        }
+    }
+
+    // --- parse_timeout: untrusted `timeout` arg, clamped-or-rejected --------
+    // Fixture: default=30, max=120. Each row carries a `description` and the
+    // `expected` outcome: `Ok(secs)` = accepted; `Err(substr)` = rejection message
+    // contains `substr`.
+    #[rstest]
+    #[case::corner_absent_uses_default("an absent arg falls back to the default", None, Ok(30))]
+    #[case::positive_in_range("a value inside 1..=max is taken as-is", Some(45), Ok(45))]
+    #[case::boundary_floor("exactly 1 (the interval floor) is accepted", Some(1), Ok(1))]
+    #[case::boundary_ceiling("exactly max (the interval ceiling) is accepted", Some(120), Ok(120))]
+    #[case::negative_zero("0 is below the floor → rejected", Some(0), Err("between 1 and 120"))]
+    #[case::negative_over_max("one past max → rejected", Some(121), Err("between 1 and 120"))]
+    #[case::adversarial_huge(
+        "a hostile huge u64 is rejected, never a socket timeout",
+        Some(u64::MAX),
+        Err("between 1 and 120")
+    )]
+    fn parse_timeout_cases(
+        #[case] description: &str,
+        #[case] arg: Option<u64>,
+        #[case] expected: std::result::Result<u64, &str>,
+    ) {
+        match (parse_timeout(arg, 30, 120), expected) {
+            (Ok(got), Ok(want)) => assert_eq!(got, want, "{description}"),
+            (Err(msg), Err(substr)) => {
+                assert!(
+                    msg.contains(substr),
+                    "{description}: `{msg}` missing `{substr}`"
+                );
+            }
+            (got, want) => panic!("{description}: got {got:?}, want {want:?}"),
+        }
     }
 
     // --- web_fetch tool over the OneShot double ----------------------------
