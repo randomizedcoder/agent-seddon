@@ -122,6 +122,10 @@ below is the service flag / `[grpc.<seam>]` block that hosts them.
 | Testing conventions | [`testing.md`](components/testing.md) |
 | Benchmarking and leak gate | [`benchmarking.md`](components/benchmarking.md) |
 
+## Gap analysis
+
+[`gap-analysis/`](gap-analysis/README.md) — designed-vs-implemented audit (2026-09-26): multi-tenancy defaults and scoping, product gaps, proto→REST/OpenAPI, test and integration gaps, LLM tool awareness, repo knowledge graph, LLM routing/scale-out, docs discoverability, and a prioritised closing list.
+
 ## Design notes
 
 Per-track design documents in [`design/`](design/) — the input to a feature's
