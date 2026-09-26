@@ -1106,9 +1106,18 @@ fn default_registry_path() -> String {
 }
 
 /// `[config_store]` — the shared transactional config data layer (config C41 /
-/// A2), behind which every domain's config *cards* will persist as the per-domain
-/// stores converge onto it (A3*). Bootstrap-only: it names the backend tier and
-/// where it lives; nothing is *consumed* from it yet (convergence is A3*).
+/// A2), behind which every domain's config *cards* persist now that the per-domain
+/// stores have converged onto it (A3*). It supplies the **DSN + pool** that each
+/// domain's `store = "postgres"` reuses (registry, review-fleet, prompts, roles,
+/// scheduler, forge/transport cards); the shipped `config/multi-tenant.toml` profile
+/// turns the whole surface on. The `backend` field itself is not separately
+/// dispatched — a domain opts in via its own `store`/`backend` selector — so its
+/// role is documentary (naming the deployment's tier) plus the DSN/pool it carries.
+///
+/// The compiled default stays `backend = ""` (decision D2): a minimal
+/// `[config_store]` (or none) leaves today's per-domain stores unchanged, so the
+/// zero-server quickstart never opens a DB. "First-class Postgres" is the shipped
+/// *profile*, not the compiled default.
 ///
 /// The DSN is a **reference, never the DSN**: `dsn_ref` is `env:NAME` or
 /// `file:/path` (a `postgres://…` inline value is rejected — see

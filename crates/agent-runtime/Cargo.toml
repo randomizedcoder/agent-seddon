@@ -338,6 +338,26 @@ transport-registry-postgres = [
   "agent-slack/transport-store-postgres",
   "agent-config-store/config-store-postgres",
 ]
+# The "first-class Postgres" umbrella (config C41 / PG-03): turns on the Postgres
+# arm of EVERY shared-store domain at once, so one build can run the whole OLTP
+# surface on a single Postgres via `config/multi-tenant.toml` (`[config_store]`
+# supplies the DSN + pool; each domain's `store = "postgres"` reuses it). NOT in
+# agent-runtime's own `default` — a library consumer of the runtime stays lean and
+# links no `sqlx` unless it opts in (cleaner semver) — but enabled in `agent-cli`'s
+# `default`, so the shipped `agent` binary is Postgres-capable out of the box. Each
+# arm still needs its domain feature (all in `default`) AND a live server at runtime;
+# `nix flake check` never dials one (every pg suite is `#[ignore]`-gated), so this is
+# gate-safe. The compiled `ConfigStoreCfg::default()` stays `""` (D2), so a build
+# with this feature that runs a `file`/`local-ollama.toml` config opens no DB.
+postgres = [
+  "scheduler-postgres",
+  "prompt-postgres",
+  "registry-postgres",
+  "fleet-postgres",
+  "role-postgres",
+  "forge-registry-postgres",
+  "transport-registry-postgres",
+]
 # Metrics proxy seam (docs/design/portal): generic PromQL-over-gRPC to Prometheus.
 metrics-proxy = ["dep:agent-metrics-proxy", "agent-metrics-proxy/http"]
 # Connect to external MCP servers and register their tools.

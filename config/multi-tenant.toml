@@ -1,0 +1,117 @@
+# Production profile: agent-seddon as a multi-org control plane on PostgreSQL.
+#
+# This is the "first-class Postgres" profile (config C41 / PG-03). Where
+# `config/local-ollama.toml` is the zero-server quickstart (a `file` store, no DB),
+# this profile runs the WHOLE OLTP control-plane surface — the provider registry,
+# review-fleet roster, prompts, RBAC roles, scheduler jobs, and forge/transport
+# cards — on ONE PostgreSQL, with per-tenant isolation, so a single deployment
+# serves many orgs from one backend.
+#
+# It needs an `agent` built with the `postgres` umbrella feature — which is on in
+# the shipped binary's `default` (agent-cli), so no rebuild is required — AND a
+# live PostgreSQL. Bring one up with the NixOS-native service (PG-05,
+# `services.agentPostgres.enable = true`) or, for a quick spin, the container
+# module (`nix run .#postgres-up`). `nix flake check` never dials it: every
+# Postgres suite is `#[ignore]`-gated, and this profile is exercised only by
+# `agent --check-config` (which builds every seam but opens no socket) and by the
+# opt-in `nix run .#integration` harness.
+#
+#     export AGENT_CONFIG_STORE_DSN='postgres://agent:...@127.0.0.1:5432/agent'
+#     export AGENT_PROVIDER_API_KEY='sk-...'
+#     agent --config config/multi-tenant.toml \
+#       "review the open PRs"
+#
+# SECRETS ARE REFERENCES, NEVER VALUES. The Postgres DSN (which carries a password)
+# is `dsn_ref = "env:NAME"` / `"file:/path"`; an inline `postgres://…` is rejected
+# at load. The provider key is `api_key_env` / `api_key_file`. Nothing in this file
+# is a credential, so it is safe to commit.
+
+[agent]
+provider = "openai-compat"
+context  = "mode-aware-window"
+# Unattended for ordinary work; the guard below still screens the dangerous calls.
+policy   = "auto-approve"
+
+max_iterations = 24
+max_tokens     = 4096
+temperature    = 0.7
+context_window = 131072
+reserve_output = 4096
+stream         = true
+parallel_tools = true
+
+[provider]
+base_url = "http://127.0.0.1:8095/v1"
+model    = "default"
+# The key is a REFERENCE: read from this env var on the host, never stored here.
+api_key_env = "AGENT_PROVIDER_API_KEY"
+
+# Screen dangerous shell commands and writes to sensitive paths. `prompt` hard-denies
+# when stdin is not a TTY, so unattended/served runs fail safe.
+[policy]
+guard = "prompt"
+
+# Memory stays file-backed (the recall/dimension seam is not part of the OLTP
+# control plane); point it at per-deployment paths as needed.
+[memory]
+backend       = "file"
+episodic_path = ".agent/episodic.jsonl"
+semantic_dir  = ".agent/memory"
+recall_limit  = 5
+
+[tools]
+enabled = ["bash", "read_file", "write_file", "edit", "grep", "find", "ls"]
+
+[search]
+auto_index = false
+
+[metrics]
+enabled = true
+listen  = "127.0.0.1:9600"
+
+# The per-tenant control plane (config C35 / C2): each request resolves the caller's
+# verified tenant (from `[auth] mode = "oidc"`; `local` otherwise) and reads/writes
+# only THAT tenant's view of the shared store, so many orgs share one backend with no
+# cross-tenant bleed. Effective for the `postgres` arms below.
+[tenancy]
+per_tenant = true
+
+# The shared transactional config store: ONE PostgreSQL behind which every domain's
+# cards persist. `[config_store]` supplies the DSN + pool; each domain's
+# `store = "postgres"` (or `backend` for prompts) reuses it.
+[config_store]
+backend          = "postgres"
+dsn_ref          = "env:AGENT_CONFIG_STORE_DSN"   # env:NAME | file:/path (never inline)
+pool_max         = 16
+migrate_on_start = true
+
+# Provider registry (model-router 03): upstream cards + routing policy on Postgres.
+[registry]
+store = "postgres"
+
+# Review-fleet roster (review-fleet C2/C3): the reviewer roster on Postgres.
+[review_fleet]
+root  = ""
+store = "postgres"
+
+# Prompts (config C41 / A3c): the prompt catalog on Postgres; the file tree is unused.
+[prompts]
+backend = "postgres"
+
+# RBAC role cards (config C34 / C1b): operator-defined roles on Postgres, atop the
+# three immutable built-ins.
+[role]
+store = "postgres"
+
+# Scheduler jobs (config C41 / C2c): durable recurring runs on Postgres.
+[scheduler]
+enabled = true
+store   = "postgres"
+
+# Forge-host cards (config C36 / D1): git-host registry on Postgres.
+[forge_registry]
+store = "postgres"
+
+# Message-transport cards (config C37 / D2): Slack/etc. registry on Postgres.
+[transport_registry]
+store = "postgres"

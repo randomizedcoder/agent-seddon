@@ -1134,17 +1134,25 @@ job         = "agent-seddon"
 # per_tenant = true
 
 # [config_store] — the shared transactional config data layer (config C41 / A2,
-# docs/design/config/09-increments.md). One store behind which every domain's
-# config *cards* will persist as the per-domain stores converge onto it (A3*).
-# Bootstrap-only today: it names the tier and where it lives; nothing is consumed
-# from it yet, so leaving `backend = ""` (the default when [config_store] is
-# absent) keeps today's per-domain stores unchanged.
+# docs/design/config/09-increments.md). One store that supplies the DSN + pool every
+# domain's `store = "postgres"` reuses now that the per-domain stores have converged
+# onto it (A3*: registry, review_fleet, prompts, role, scheduler, forge_registry,
+# transport_registry). The `backend` field itself is not separately dispatched (a
+# domain opts in via its own store/backend selector); leaving `backend = ""` (the
+# default when [config_store] is absent) keeps today's per-domain stores unchanged,
+# so the zero-server quickstart opens no DB.
+#
+# ── Running the whole OLTP surface on Postgres? See config/multi-tenant.toml, the
+#    shipped production profile: it sets `backend = "postgres"` here and
+#    `store = "postgres"` for every domain, with per-tenant isolation. The `agent`
+#    binary is Postgres-capable by default (the `postgres` umbrella feature), so no
+#    rebuild is needed — just a live server (PG-05 `services.agentPostgres.enable`
+#    or `nix run .#postgres-up`).
 #
 # The DSN is a REFERENCE, never the DSN: `dsn_ref` is `env:NAME` or `file:/path`
 # (an inline `postgres://…` is rejected — it carries a password), resolved on the
-# host at connect time. The `postgres` tier needs the agent built with the
-# `config-store-postgres` feature and a real server; it is opt-in and never
-# exercised by `nix flake check` (only `nix run .#integration`). `file`/`sqlite`
+# host at connect time. The `postgres` tier needs a real server; it is opt-in and
+# never exercised by `nix flake check` (only `nix run .#integration`). `file`/`sqlite`
 # stay hermetic.
 # [config_store]
 # backend          = "postgres"        # "" (off) | "file" | "sqlite" | "postgres" | "grpc"

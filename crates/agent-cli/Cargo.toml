@@ -10,7 +10,17 @@ name = "agent"
 path = "src/main.rs"
 
 [features]
-default = []
+# The shipped `agent` binary is Postgres-capable by default (config C41 / PG-03,
+# decision D1 Option B): `default` turns on the `postgres` umbrella so an operator
+# can run the whole OLTP surface on one Postgres via `config/multi-tenant.toml`
+# with no rebuild. The compiled config default stays `""` (D2), so the zero-server
+# quickstart (`config/local-ollama.toml`, a `file` store) opens no DB. Build with
+# `--no-default-features` (plus the features you want) for a lean, sqlx-free binary.
+default = ["postgres"]
+# The Postgres umbrella: forwards to agent-runtime's `postgres` feature (the seven
+# `*-postgres` shared-store arms). Kept as a named feature (not inlined into
+# `default`) so `--no-default-features --features postgres` is expressible.
+postgres = ["agent-runtime/postgres"]
 # OIDC/JWT bearer authentication for served seams (config C33/B1); forwards to
 # agent-runtime/auth (→ agent-grpc/auth). Off by default — `[auth] mode = "oidc"`
 # needs the agent built with this feature, else it is a fail-closed startup error.

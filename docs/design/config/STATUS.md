@@ -190,6 +190,24 @@ compare-and-swap, retiring the legacy `*-sqlite` impls). Eleven gated PRs off `m
   (insertion order, update keeps position, re-insert after delete gets a new slot, hostile fields don't
   perturb order) run across every backend tier.
 
+- **PG-03 — production profile + first-class default features (D1/D2).** The shipped `agent` binary is
+  Postgres-capable out of the box: `agent-runtime` gains a `postgres` umbrella feature (the seven
+  `*-postgres` shared-store arms), and `agent-cli`'s `default` turns it on (decision **D1 Option B** — the
+  binary is batteries-included while a library consumer of `agent-runtime` stays lean and links no `sqlx`
+  unless it opts in). The compiled `ConfigStoreCfg::default()` stays `""` (decision **D2**), so a minimal
+  or `file`-backed config still opens no DB — "first-class Postgres" is the shipped *profile*, not the
+  compiled default. New `config/multi-tenant.toml` runs the WHOLE OLTP control plane (provider registry,
+  review-fleet roster, prompts, RBAC roles, scheduler, forge/transport cards) on one Postgres with
+  per-tenant isolation; secrets stay references (`dsn_ref = "env:…"`, `api_key_env`). The
+  `config-roundtrip` gate check gains a Postgres-profile fixture that mirrors it and must resolve every
+  domain's `store = "postgres"` through the real factory chain (`pg_backend` connects lazily, so
+  `--check-config` stays hermetic — no server dialed), plus an adversarial twin proving an INLINE DSN in
+  the profile is rejected at build. `[role]` is omitted from the hermetic fixture because its RBAC catalog
+  loads eagerly (needs a live server); the full profile including role is validated by
+  `nix run .#integration`. Fail-closed-without-feature is a compile-time property (each resolver keeps its
+  `#[cfg(not(feature = "…-postgres"))] "postgres" => bail!` arm), reachable via a `--no-default-features`
+  build, outside the default-feature hermetic gate.
+
 ## Non-goals
 
 - Removing TOML (bootstrap stays TOML).
