@@ -425,6 +425,96 @@ mod scen {
         );
     }
 
+    // --- pos ordering: the `list` insertion-order contract (PG-02) ------------
+
+    /// positive: `list` returns cards in insertion order — the order the `pos`
+    /// column (identity on Postgres, `MAX(pos)+1` on the single-writer tiers)
+    /// assigns on first write.
+    pub async fn list_returns_insertion_order(backend: Arc<dyn Backend>) {
+        let s = Store::<TestCard>::new(backend);
+        for id in ["a", "b", "c"] {
+            s.put("t", card(id, 1)).await.expect("put in order");
+        }
+        let ids: Vec<String> = s
+            .list("t")
+            .await
+            .expect("list")
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(ids, ["a", "b", "c"], "list preserves insertion order");
+    }
+
+    /// boundary: updating an existing card swaps its blob but keeps its position —
+    /// an update must not shuffle the row to the end of the order.
+    pub async fn pos_monotonic_after_update(backend: Arc<dyn Backend>) {
+        let s = Store::<TestCard>::new(backend);
+        s.put("t", card("a", 1)).await.expect("put a");
+        s.put("t", card("b", 1)).await.expect("put b");
+        s.put("t", card("a", 9)).await.expect("update a in place");
+        let ids: Vec<String> = s
+            .list("t")
+            .await
+            .expect("list")
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(ids, ["a", "b"], "an update keeps the original position");
+    }
+
+    /// corner: deleting then re-inserting an id gives it a fresh (higher)
+    /// position — `pos` never reuses a freed slot, so the row moves to the end.
+    pub async fn reinsert_after_delete_gets_new_position(backend: Arc<dyn Backend>) {
+        let s = Store::<TestCard>::new(backend);
+        s.put("t", card("a", 1)).await.expect("put a");
+        s.put("t", card("b", 1)).await.expect("put b");
+        assert!(s.delete("t", "a").await.expect("delete a"), "a was present");
+        s.put("t", card("a", 1)).await.expect("re-put a");
+        let ids: Vec<String> = s
+            .list("t")
+            .await
+            .expect("list")
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(
+            ids,
+            ["b", "a"],
+            "a re-inserted id takes a new slot at the end"
+        );
+    }
+
+    /// adversarial: cards whose *fields* carry SQL metacharacters still list in
+    /// exact insertion order — proving the new insert (no user-influenced `pos`
+    /// expression) binds fields as opaque data and never lets a field perturb
+    /// order or the `pos` assignment.
+    pub async fn metachar_fields_preserve_order(backend: Arc<dyn Backend>) {
+        let s = Store::<TestCard>::new(backend);
+        let evil = [
+            "'; DROP TABLE cards;--",
+            ") ; SELECT setval('x', 999); --",
+            "pos=999, blob=x'00'",
+        ];
+        for (i, note) in evil.iter().enumerate() {
+            let c = TestCard {
+                id: format!("id{i}"),
+                note: (*note).to_string(),
+                weight: 1,
+            };
+            s.put("t", c).await.expect("hostile-field card stored");
+        }
+        let cards = s.list("t").await.expect("list");
+        let ids: Vec<String> = cards.iter().map(|c| c.id.clone()).collect();
+        assert_eq!(
+            ids,
+            ["id0", "id1", "id2"],
+            "order is insertion order regardless of field content"
+        );
+        for (c, note) in cards.iter().zip(evil.iter()) {
+            assert_eq!(&c.note, note, "hostile field round-trips verbatim");
+        }
+    }
+
     // --- compare-and-swap: the scheduler S1 cross-driver exclusion primitive ---
 
     /// A `CompareAndSwap` on `(TestCard::COLLECTION, "t", id)`.
@@ -664,6 +754,26 @@ macro_rules! suite {
             }
             #[tokio::test]
             $(#[$ig])?
+            async fn positive_list_returns_insertion_order() {
+                scen::list_returns_insertion_order($make).await;
+            }
+            #[tokio::test]
+            $(#[$ig])?
+            async fn boundary_pos_monotonic_after_update() {
+                scen::pos_monotonic_after_update($make).await;
+            }
+            #[tokio::test]
+            $(#[$ig])?
+            async fn corner_reinsert_after_delete_gets_new_position() {
+                scen::reinsert_after_delete_gets_new_position($make).await;
+            }
+            #[tokio::test]
+            $(#[$ig])?
+            async fn adversarial_metachar_fields_preserve_order() {
+                scen::metachar_fields_preserve_order($make).await;
+            }
+            #[tokio::test]
+            $(#[$ig])?
             async fn positive_cas_matching_expected_writes() {
                 scen::cas_matching_expected_writes($make).await;
             }
@@ -834,4 +944,66 @@ async fn adversarial_concurrent_cas_exactly_one_wins() {
         "the winner's value survived; weight = {}",
         got.weight
     );
+}
+
+/// `positive` (hermetic, D7 — no live server): the Postgres and SQLite tiers must
+/// not silently diverge on the `pos`/list schema. Assert the *live* SQLite schema
+/// carries the `cards_list_idx` index (`PRAGMA index_list`), and that the Postgres
+/// `0002` migration text creates the same-named index — so a change to one tier
+/// that forgets the other trips this test. This is the config-store analogue of
+/// the ClickHouse DDL-drift guard.
+#[cfg(feature = "config-store-sqlite")]
+#[tokio::test]
+async fn positive_schema_mirror_cards_list_idx() {
+    use rusqlite::Connection;
+    // Live SQLite: opening a store applies the DDL; read back its indexes.
+    let path = agent_testkit::tempdir().join("mirror.sqlite3");
+    crate::SqliteBackend::open(&path).expect("open sqlite store");
+    let conn = Connection::open(&path).expect("reopen the same file");
+    let mut stmt = conn
+        .prepare("PRAGMA index_list('cards')")
+        .expect("prepare index_list");
+    // `PRAGMA index_list` columns: (seq, name, unique, origin, partial); name = 1.
+    let names: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(1))
+        .expect("query index_list")
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .expect("collect index names");
+    assert!(
+        names.iter().any(|n| n == "cards_list_idx"),
+        "sqlite `cards` has the cards_list_idx index; got {names:?}"
+    );
+    // The Postgres 0002 migration creates the same-named index.
+    let pg_0002 = include_str!("../migrations/0002_cards_pos_identity_and_list_index.sql");
+    assert!(
+        pg_0002.contains("cards_list_idx"),
+        "the postgres 0002 migration must create cards_list_idx (schema mirror)"
+    );
+}
+
+/// `corner` (postgres, live): after the versioned runner applies `0002`, the
+/// `cards_list_idx` index actually exists in the catalog — proving the migration
+/// *ran*, not merely that its text mentions the index.
+#[cfg(feature = "config-store-postgres")]
+#[tokio::test]
+#[ignore = "needs a running postgres (nix run .#postgres-up) — run via `nix run .#integration`"]
+async fn corner_migrate_applies_cards_list_idx() {
+    use sqlx::postgres::PgPoolOptions;
+    let dsn = std::env::var("AGENT_CONFIG_STORE_TEST_DSN")
+        .expect("AGENT_CONFIG_STORE_TEST_DSN must be set by the pg-integration harness");
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&dsn)
+        .await
+        .expect("connect postgres");
+    crate::PgBackend::run_migrations(&pool)
+        .await
+        .expect("runner applies the versioned set");
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE tablename = 'cards' AND indexname = 'cards_list_idx')",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("query pg_indexes");
+    assert!(exists, "the 0002 migration created cards_list_idx");
 }
