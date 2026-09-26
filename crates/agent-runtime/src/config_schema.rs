@@ -89,6 +89,7 @@ pub const ENUM_CHOICES: &[(&str, &[&str])] = &[
     ),
     ("consensus.evidence", &["auto", "off"]),
     ("route.source", &["", "registry"]),
+    ("auth.mode", &["", "none", "oidc"]),
 ];
 
 /// Dotted paths (value-space) whose contents are an **inline secret** and must be

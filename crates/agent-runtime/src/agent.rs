@@ -107,6 +107,9 @@ pub struct GrpcAuthSettings {
     pub tenant_claim: String,
     pub roles_claim: String,
     pub leeway_secs: u64,
+    /// `[auth] allow_insecure_listen`: permit `mode = "none"` on a non-loopback
+    /// listener (warned on every start). Checked by the serve path's listen policy.
+    pub allow_insecure_listen: bool,
 }
 
 /// How the scheduler is wired (config C2c-2). The registry half is served either

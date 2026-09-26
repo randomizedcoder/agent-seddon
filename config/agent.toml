@@ -1105,8 +1105,15 @@ job         = "agent-seddon"
 # OVERWRITES `x-agent-user-id` (any client-supplied value is dropped), so the
 # per-tenant scoping downstream keys off a verified principal. Any failure is an
 # opaque UNAUTHENTICATED. The health + reflection services stay exempt (probes need
-# no token). Requires the agent built with the `auth` feature — otherwise
-# `mode = "oidc"` is a fail-closed startup error, never a silent downgrade.
+# no token). The `auth` feature is in the default build; a `--no-default-features`
+# build without it refuses `mode = "oidc"` when the config loads, never a silent
+# downgrade. `[auth]` is validated at load (known mode, oidc fields present,
+# `jwks_url` https or loopback http, `leeway_secs` <= 300).
+#
+# Serving with `mode = "none"` on a NON-loopback address (e.g. 0.0.0.0) is a
+# startup error: without auth any peer that can reach it can claim any tenant.
+# Loopback TCP and unix sockets are unaffected. `allow_insecure_listen = true`
+# accepts the risk and warns on every start.
 #
 # [auth]
 # mode         = "oidc"                                 # "none" (default) | "oidc"
@@ -1115,7 +1122,8 @@ job         = "agent-seddon"
 # jwks_url     = "https://issuer.example.com/.well-known/jwks.json"  # public keys
 # tenant_claim = "org"                                  # claim → tenant (default "org")
 # roles_claim  = "roles"                                # claim → roles (default "roles")
-# leeway_secs  = 60                                     # accepted exp/nbf clock skew
+# leeway_secs  = 60                                     # accepted exp/nbf clock skew (max 300)
+# allow_insecure_listen = false                         # permit mode="none" on 0.0.0.0 (warns)
 
 # [tenancy] — the per-tenant config plane (config C35 / C2). When `per_tenant =
 # true`, the converged shared-store control-plane seams (provider-registry, review-

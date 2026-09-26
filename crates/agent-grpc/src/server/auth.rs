@@ -16,7 +16,11 @@
 //!   trusted-header behaviour is preserved exactly (explicit, back-compatible).
 //! - `mode = "oidc"`: a bearer JWT is required and verified; any failure is an
 //!   **opaque** `UNAUTHENTICATED` (never leaking which check failed). Requires the
-//!   crate's non-default `auth` feature (the verifier + its deps).
+//!   crate's `auth` feature (the verifier + its deps), which the shipped `agent`
+//!   binary enables by default.
+//!
+//! [`listen_posture`] is the startup twin: `mode = "none"` is only allowed on a
+//! loopback or unix-socket listener unless `allow_insecure_listen` is set.
 //!
 //! ## What is verified (standard OIDC bearer), all fail-closed
 //! - Signature against the issuer's **JWKS** (fetched + cached; a `kid` miss forces
@@ -152,6 +156,49 @@ impl AuthLayer {
                 "unknown `[auth] mode` `{other}` (want `none` | `oidc`)"
             )),
         }
+    }
+}
+
+/// How a listener is protected, decided once at startup by [`listen_posture`]
+/// (security-hardening S1, docs/design/security-hardening/05-identity-and-tenancy.md).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListenPosture {
+    /// `mode = "oidc"`: every non-exempt call must carry a verified bearer.
+    Authenticated,
+    /// `mode = "none"` on loopback TCP or a unix socket: only local peers reach it.
+    LocalOnly,
+    /// `mode = "none"` on a routable address, explicitly accepted with
+    /// `allow_insecure_listen = true`. The caller warns on every start.
+    InsecureAllowed,
+}
+
+/// Decide whether a served listener may start under the configured `[auth] mode`.
+///
+/// Without authentication the identity headers are trusted as sent, so any peer
+/// that can reach the listener can assert any tenant. That is acceptable on a
+/// loopback address or a unix socket (the host is the trust boundary) and nowhere
+/// else: `mode = "none"` on a routable address is a **startup error** unless the
+/// operator sets `allow_insecure_listen = true`, which yields
+/// [`ListenPosture::InsecureAllowed`] for the caller to warn about. An unknown
+/// mode is rejected here too, so the check never passes on a typo.
+pub fn listen_posture(
+    mode: &str,
+    allow_insecure_listen: bool,
+    listen: &crate::transport::Endpoint,
+) -> Result<ListenPosture, String> {
+    match mode.trim() {
+        "oidc" => Ok(ListenPosture::Authenticated),
+        "" | "none" if listen.is_local() => Ok(ListenPosture::LocalOnly),
+        "" | "none" if allow_insecure_listen => Ok(ListenPosture::InsecureAllowed),
+        "" | "none" => Err(format!(
+            "refusing to serve on {listen:?} without authentication: with `[auth] mode = \"none\"` \
+             any peer that can reach a non-loopback address can claim any tenant. Set \
+             `[auth] mode = \"oidc\"`, listen on 127.0.0.1 or a unix socket, or set \
+             `[auth] allow_insecure_listen = true` to accept the risk"
+        )),
+        other => Err(format!(
+            "unknown `[auth] mode` `{other}` (want `none` | `oidc`)"
+        )),
     }
 }
 
@@ -529,3 +576,6 @@ pub use jwt::{Clock, JwksSource, JwtVerifier, SystemClock};
 
 #[cfg(all(test, feature = "auth"))]
 mod tests;
+
+#[cfg(test)]
+mod listen_tests;
