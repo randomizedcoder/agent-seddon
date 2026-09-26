@@ -274,7 +274,13 @@ in
   graph-arena-tests = import ./graph-arena-tests.nix { inherit pkgs versions; };
 
   # The multi-tenancy auditor's own test suite (four-class tables + check-the-checks +
-  # manifest self-consistency). Gates the auditor's correctness; the repo-wide
-  # `mt-audit --gate` gate lands once the gaps it reports are fixed. Pure stdlib Python.
+  # manifest self-consistency). Gates the auditor's CORRECTNESS. Pure stdlib Python.
   mt-audit-tests = import ./mt-audit-tests.nix { inherit pkgs; };
+  # The repo-wide multi-tenancy coverage gate: `mt-audit --gate` against the real
+  # source, failing on any unclassified/regressed tenancy surface. Shares the one
+  # audit.py entrypoint with `nix run .#mt-audit` (report), the constants-sync duality.
+  mt-audit = import ./mt-audit.nix {
+    inherit pkgs;
+    src = commonArgs.src;
+  };
 }

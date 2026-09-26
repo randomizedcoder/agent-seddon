@@ -72,7 +72,11 @@ idiom).
 
 ## Status
 
-Report-only today. The report surfaces the current known service gaps (the standalone
-`--serve-<seam>` handlers that are `PerTenant`-wrapped but never scope). Once those are
-fixed, a `mt-audit` `nix flake check` gate runs `mt-audit --gate` against the source, sharing
-this one entrypoint so report and gate can never disagree.
+**Gated.** The four served-registry gaps the first run found (Scheduler/Search/Forge/Transport
+— `PerTenant`-wrapped but never scoped) are fixed (mt-audit-02–05), and the Episodic/Semantic
+served layers are classified `single-store` (a documented non-isolation; mt-audit-06). The
+manifest is clean, so `nix flake check` now runs the **`mt-audit` gate**
+([`nix/checks/mt-audit.nix`](../../nix/checks/mt-audit.nix)) = `mt-audit --gate` against the
+source, failing on any regression. It shares this one `audit.py` entrypoint with
+`nix run .#mt-audit` (report), so report and gate can never disagree — the constants-sync /
+buf-breaking duality. (`mt-audit-tests` separately gates the auditor's own correctness.)

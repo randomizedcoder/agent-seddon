@@ -55,6 +55,13 @@ those live under `apps` instead.
 - **Wire contract** — `buf` (`buf lint` + `buf breaking` vs the committed
   `buf.image.binpb` baseline), `constants-sync` (generated `constants.rs` matches
   `constants.nix`)
+- **Multi-tenancy coverage** — `mt-audit` (`mt-audit --gate` reconciles the served
+  gRPC services + metric families against `test/mt-audit/manifest.toml`; fails on an
+  unclassified/regressed tenancy surface) and `mt-audit-tests` (the auditor's own
+  four-class + check-the-checks suite). **Manifest-update ritual:** when you add a
+  gRPC service or metric family, classify it in `test/mt-audit/manifest.toml` — the
+  same deliberate, reviewed baseline move as bumping `buf.image.binpb` or
+  regenerating `constants.rs`. See [`docs/components/mt-audit.md`](../docs/components/mt-audit.md).
 - **Performance / memory** — `bench` (iai-callgrind under valgrind, absolute Ir
   ceilings), `leak` (dhat allocation budgets). See
   [`docs/components/benchmarking.md`](../docs/components/benchmarking.md).
