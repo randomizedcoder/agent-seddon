@@ -15,9 +15,12 @@ Four sub-checks (each maps to one plane of the multi-tenancy design,
 1. **services** — every served gRPC handler in ``crates/agent-grpc/src/server/*.rs`` is
    classified in the manifest as ``scoped`` (must call ``identity_key`` + ``run_scoped``),
    ``stateless`` (no per-tenant state), ``field-scoped`` (tenant from request fields, not
-   the metadata header), or ``operator-global`` (deliberately process-global). A ``scoped``
+   the metadata header), ``operator-global`` (deliberately process-global), or
+   ``single-store`` (stateful but a single shared store, NOT tenant-partitioned — a
+   *documented* non-isolation, e.g. the served episodic/semantic memory layers). A ``scoped``
    service whose handler is span-only (never scopes) is a coverage gap; a service present in
-   source but absent from the manifest is unclassified drift. Cross-checked against the set
+   source but absent from the manifest — or carrying a class outside the closed set — is
+   flagged. Cross-checked against the set
    of seams that have a ``PerTenant<dyn …>`` impl (``crates/agent-runtime/src/tenant.rs``):
    a per-tenant-wrapped seam whose service is not ``scoped`` is a gap.
 2. **metrics** — every ``agent_*`` family defined in ``crates/agent-metrics/src/lib.rs`` is
@@ -217,6 +220,19 @@ SERVICE_TRAIT = {
     "ReviewFleetService": "FleetRegistry",
 }
 
+# The closed set of service classifications. A class outside this set is a manifest typo
+# (or an un-reviewed new class) — flagged, so the vocabulary can't drift silently.
+#   scoped           every RPC calls identity_key + run_scoped (ambient-tenant routing)
+#   field-scoped     tenant from request fields / a direct capability key, not the header
+#   stateless        no per-tenant state (tenant irrelevant; span attribution only)
+#   operator-global  deliberately process-global (operator config, RBAC-gated)
+#   single-store     stateful but a single shared store, NOT tenant-partitioned — a
+#                    DOCUMENTED non-isolation (e.g. the served episodic/semantic memory
+#                    layers, built from raw FileEpisodic/FileSemantic at fixed paths). A
+#                    real per-tenant fix is tracked separately; this class records the
+#                    limitation honestly rather than overselling a cosmetic run_scoped.
+VALID_CLASSES = {"scoped", "field-scoped", "stateless", "operator-global", "single-store"}
+
 
 def check_services(
     services: list[Service], pertenant_seams: set[str], manifest: dict
@@ -240,6 +256,17 @@ def check_services(
             continue
         klass = spec.get("class")
         known = spec.get("status") == "gap"
+        if klass not in VALID_CLASSES:
+            findings.append(
+                Finding(
+                    "services",
+                    "unclassified",
+                    s.svc,
+                    f"`{s.svc}` has class `{klass}` which is not one of {sorted(VALID_CLASSES)} "
+                    f"— fix the manifest classification",
+                )
+            )
+            continue
         if klass == "scoped" and not s.all_scoped:
             unscoped = [r.name for r in s.rpcs if not r.scoped]
             findings.append(
