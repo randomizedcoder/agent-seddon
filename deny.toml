@@ -55,6 +55,25 @@ skip = [
   # upgrades to webpki-roots 1.0.
   "webpki-roots",
   "windows-sys",
+  # `sqlx` (the config-store Postgres tier) is now in the shipped binary's DEFAULT
+  # dependency graph (config C41 / PG-03: `agent-cli` default enables the `postgres`
+  # umbrella), and cargo-deny examines the default-feature graph — so sqlx's
+  # transitive pins now surface as duplicate majors against the rest of the tree
+  # (its hashbrown pulls `foldhash`; it pins `hashlink` 0.10 and a `redox_syscall`
+  # major that differ from parking_lot's; and it pulls a `windows-sys`/`windows-targets`
+  # major split from the existing one). All are independent upstream pins, not
+  # dedupable here. Trim as sqlx and the rest of the tree converge.
+  "foldhash",
+  "hashlink",
+  "redox_syscall",
+  "windows-targets",
+  "windows_aarch64_gnullvm",
+  "windows_aarch64_msvc",
+  "windows_i686_gnu",
+  "windows_i686_msvc",
+  "windows_x86_64_gnu",
+  "windows_x86_64_gnullvm",
+  "windows_x86_64_msvc",
 ]
 # Deny wildcard (`= "*"`) version requirements — an unpinned registry dep is the
 # real risk. The workspace's own crates depend on each other by path with

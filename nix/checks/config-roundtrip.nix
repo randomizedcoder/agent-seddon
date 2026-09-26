@@ -238,5 +238,79 @@ pkgs.runCommand "agent-config-roundtrip"
     fi
     echo "--- mrc-bad (correctly rejected) ---"
 
+    # 10) The production Postgres profile (config C41 / PG-03): the shipped binary is
+    #     built with the `postgres` umbrella (agent-cli `default`), so a config that
+    #     selects `store = "postgres"` for every shared-store domain must resolve each
+    #     arm through the REAL factory chain — a missing feature or a bad selector
+    #     bails at build. `[config_store]` supplies the DSN; a dummy env ref is enough
+    #     because `pg_backend` connects lazily (`connect_lazy`) — the pool opens on
+    #     first use, which `--check-config` never triggers, so this stays hermetic (no
+    #     server dialed). This inline fixture MIRRORS `config/multi-tenant.toml`, which
+    #     is a deployment artifact outside the hermetic cargo source (crane's filter
+    #     keeps only cargo sources + the embedded fixtures, not `config/*.toml`), so
+    #     the shape is guarded here rather than by reading that file.
+    #
+    #     `[role]` is deliberately OMITTED: the RBAC catalog loads EAGERLY at build
+    #     (the control-plane gate needs it immediately), so `role.store = "postgres"`
+    #     forces a real connection and cannot be exercised without a server. The full
+    #     profile including role is validated end to end by `nix run .#integration`.
+    export AGENT_CONFIG_STORE_DSN='postgres://agent:unused@127.0.0.1:1/agent'
+    cat > "$HOME/multi-tenant.toml" <<TOML
+    [agent]
+    provider    = "openai-compat"
+    context     = "mode-aware-window"
+    policy      = "auto-approve"
+    working_dir = "$work"
+    [provider]
+    base_url = "http://127.0.0.1:1/v1"
+    model    = "m"
+    api_key  = "none"
+    [memory]
+    backend = "file"
+    [tools]
+    enabled = ["ls"]
+    [metrics]
+    enabled = false
+    [search]
+    auto_index = false
+    [git]
+    auto_fetch_secs = 0
+    [tenancy]
+    per_tenant = true
+    [config_store]
+    backend          = "postgres"
+    dsn_ref          = "env:AGENT_CONFIG_STORE_DSN"
+    pool_max         = 16
+    migrate_on_start = true
+    [registry]
+    store = "postgres"
+    [review_fleet]
+    root  = ""
+    store = "postgres"
+    [prompts]
+    backend = "postgres"
+    [scheduler]
+    enabled = true
+    store   = "postgres"
+    [forge_registry]
+    store = "postgres"
+    [transport_registry]
+    store = "postgres"
+    TOML
+    # A clean build with every domain on "postgres" IS the selection proof: each
+    # resolver has a `#[cfg(not(feature = "…-postgres"))] "postgres" => bail!` arm, so
+    # a feature-less binary or a typo'd selector would fail here, not fall back.
+    expect_ok multi-tenant "$HOME/multi-tenant.toml" \
+      "config: OK" \
+      "provider  = openai-compat"
+
+    # 11) Adversarial: an INLINE Postgres DSN in the profile (a password on disk) must
+    #     be rejected — `[config_store] dsn_ref` is a REFERENCE (`env:` / `file:`),
+    #     never the DSN. Fail closed at build, never silently accept the secret.
+    sed 's|dsn_ref          = "env:AGENT_CONFIG_STORE_DSN"|dsn_ref          = "postgres://agent:secret@127.0.0.1:5432/agent"|' \
+      "$HOME/multi-tenant.toml" > "$HOME/multi-tenant-inline-dsn.toml"
+    expect_fail multi-tenant-inline-dsn "$HOME/multi-tenant-inline-dsn.toml"
+    unset AGENT_CONFIG_STORE_DSN
+
     echo "OK: representative configs load, build, and select the right impls; broken ones fail closed" > "$out"
   ''
