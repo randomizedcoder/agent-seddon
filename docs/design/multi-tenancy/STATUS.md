@@ -137,7 +137,8 @@ six served handlers that were `PerTenant`-wrapped but never scoped the caller �
 - ✅ **SchedulerService** (mt-audit-02) — every RPC now `identity_key` + `run_scoped`.
 - ✅ **SearchService** (mt-audit-03) — same fix; `reindex` re-scopes *inside* its detached
   `tokio::spawn` (a spawned task does not inherit the task-local `AGENT_IDENTITY`).
-- ⬜ ForgeRegistryService · ⬜ TransportRegistryService — same fix.
+- ✅ **ForgeRegistryService** (mt-audit-04) — same fix.
+- ⬜ TransportRegistryService — same fix.
 - ⬜ Episodic / Semantic — confirm the served store is per-user, then scope or reclassify.
 - Final: flip `mt-audit` to a hard `nix flake check` gate once the manifest is gap-free.
 
