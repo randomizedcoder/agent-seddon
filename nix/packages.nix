@@ -40,6 +40,7 @@
 
     # Ops / ClickHouse.
     versions.clickhouse # clickhouse-client
+    versions.postgresql # host `psql` (config-store postgres tier; `pg-client` helper)
     versions.docker
     versions.jq
     versions.curl

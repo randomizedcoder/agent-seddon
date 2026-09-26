@@ -305,7 +305,29 @@ in
   postgresPort = 5432;
   postgresDatabase = "agent_config";
   postgresUser = "agent";
-  postgresPassword = "agent"; # dev/CI only — the container is bound to 127.0.0.1.
+  # Dev/CI DEFAULT only — the container is bound to 127.0.0.1. `postgres-up` reads
+  # $AGENT_PG_PASSWORD at run time and falls back to this, so a developer can set a
+  # real password without editing the flake (the NixOS module PG-05 takes a
+  # passwordFile). NB: the password is baked into the data volume on FIRST init —
+  # changing it later needs the volume removed (see postgresDataVolume).
+  postgresPassword = "agent";
+  # Host PostgreSQL client (`psql`) for the dev shell, pinned to the same major as
+  # the server image (postgres:16). The package also carries the server binaries,
+  # which the dev shell does not use — the container / NixOS module runs the server.
+  postgresql = pkgs.postgresql_16;
+  # Named data volume for the container, so `postgres-down` (which removes the
+  # container) no longer discards the database — persistence is the point of a
+  # production-shaped store. Remove the volume by hand (`<runtime> volume rm
+  # agent-seddon-pgdata`) to re-initialise from scratch (e.g. to change creds).
+  postgresDataVolume = "agent-seddon-pgdata";
+  # Server tuning, applied as `-c key=value` startup flags on the container.
+  # Conservative dev/CI defaults; the NixOS module (PG-05) exposes the same knobs
+  # for production sizing. Keep max_connections ≥ the agent's `[config_store]
+  # pool_max` across every process that dials this server.
+  postgresSharedBuffers = "256MB";
+  postgresMaxConnections = 100;
+  postgresWorkMem = "16MB";
+  postgresEffectiveCacheSize = "1GB";
 
   # ── HyperDX (ClickStack) — decomposed, bring-your-own-ClickHouse ───────────
   # We DELIBERATELY do not use the `hyperdx-all-in-one` image: it bundles its own
