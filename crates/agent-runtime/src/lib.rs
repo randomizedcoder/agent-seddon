@@ -118,5 +118,8 @@ pub fn parse_config_reporting_unknown(toml_str: &str) -> anyhow::Result<(Config,
     let de = toml::Deserializer::new(toml_str);
     let mut unknown = Vec::new();
     let cfg: Config = serde_ignored::deserialize(de, |path| unknown.push(path.to_string()))?;
+    // `[auth]` is checked here, at load, so every entry point (serve, one-shot,
+    // doctor) refuses a bad block up front (security-hardening S1).
+    cfg.auth.validate().map_err(anyhow::Error::msg)?;
     Ok((cfg, unknown))
 }

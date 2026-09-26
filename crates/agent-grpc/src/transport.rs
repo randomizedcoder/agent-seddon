@@ -43,6 +43,21 @@ impl Endpoint {
         }
     }
 
+    /// Whether only this host can reach the endpoint: a unix socket, or a TCP
+    /// listener on a numeric **loopback** IP (`127.0.0.0/8`, `::1`). Everything
+    /// else is treated as routable, fail-closed: `0.0.0.0` / `::` (all
+    /// interfaces), a LAN IP, a hostname (even `localhost`, whose resolution this
+    /// process does not control), and an IPv4-mapped `::ffff:127.0.0.1`. The
+    /// startup listen policy ([`crate::server::listen_posture`]) keys off this.
+    pub fn is_local(&self) -> bool {
+        match self {
+            Endpoint::Uds(_) => true,
+            Endpoint::Tcp(hostport) => hostport
+                .parse::<SocketAddr>()
+                .is_ok_and(|addr| addr.ip().is_loopback()),
+        }
+    }
+
     /// Build a **lazy** channel (connects on first request). TCP uses the standard
     /// connector; UDS uses a custom connector that dials the socket path.
     pub fn connect_lazy(&self) -> Result<Channel, tonic::transport::Error> {
@@ -214,5 +229,28 @@ mod tests {
     #[case::unix_triple("unix:///tmp/a.sock", Endpoint::Uds(PathBuf::from("/tmp/a.sock")))]
     fn parse_cases(#[case] input: &str, #[case] expected: Endpoint) {
         assert_eq!(Endpoint::parse(input), expected);
+    }
+
+    #[rstest]
+    #[case::positive_ipv4_loopback("127.0.0.1:50051", true)]
+    #[case::positive_ipv6_loopback("[::1]:50051", true)]
+    #[case::positive_uds("unix:/tmp/agent-seddon/a.sock", true)]
+    #[case::positive_http_scheme_loopback("http://127.0.0.1:50051", true)]
+    #[case::boundary_top_of_loopback_block("127.255.255.254:1", true)]
+    #[case::negative_all_interfaces_v4("0.0.0.0:50051", false)]
+    #[case::negative_all_interfaces_v6("[::]:50051", false)]
+    #[case::negative_lan_ip("172.16.50.46:50051", false)]
+    #[case::boundary_just_outside_loopback_block("128.0.0.1:50051", false)]
+    #[case::corner_localhost_hostname_is_not_trusted("localhost:50051", false)]
+    #[case::corner_no_port("127.0.0.1", false)]
+    #[case::adversarial_ipv4_mapped_loopback("[::ffff:127.0.0.1]:50051", false)]
+    #[case::adversarial_loopback_prefix_hostname("127.0.0.1.evil.example:50051", false)]
+    #[case::adversarial_empty("", false)]
+    fn is_local_cases(#[case] input: &str, #[case] expected: bool) {
+        assert_eq!(
+            Endpoint::parse(input).is_local(),
+            expected,
+            "`{input}` local={expected}"
+        );
     }
 }

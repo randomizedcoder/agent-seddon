@@ -859,8 +859,21 @@ fn install_authz_observer(agent: &Agent) {
 /// requires the `agent-grpc` `auth` feature, else this is a fail-closed startup
 /// error rather than a silent downgrade). Carries the auth-verify observer so a served
 /// seam counts verifications on `/metrics`.
-fn auth_layer(agent: &Agent) -> anyhow::Result<agent_grpc::server::AuthLayer> {
+///
+/// It first applies the startup listen policy for `listen` (security-hardening S1):
+/// `mode = "none"` on a non-loopback address refuses to start unless
+/// `[auth] allow_insecure_listen = true`, which warns instead.
+fn auth_layer(agent: &Agent, listen: &Endpoint) -> anyhow::Result<agent_grpc::server::AuthLayer> {
     let a = agent.grpc_auth();
+    let posture = agent_grpc::server::listen_posture(&a.mode, a.allow_insecure_listen, listen)
+        .map_err(anyhow::Error::msg)?;
+    if posture == agent_grpc::server::ListenPosture::InsecureAllowed {
+        tracing::warn!(
+            endpoint = ?listen,
+            "serving WITHOUT authentication on a non-loopback address \
+             (`[auth] allow_insecure_listen = true`): any peer that can reach it can claim any tenant"
+        );
+    }
     agent_grpc::server::AuthLayer::from_params(agent_grpc::server::AuthParams {
         mode: a.mode.clone(),
         issuer: a.issuer.clone(),
@@ -879,7 +892,7 @@ pub async fn serve_session_observe(agent: &Agent, listen: Endpoint) -> anyhow::R
     let (router, health) = agent_grpc::server::base_router_with_auth(
         agent.grpc_max_in_flight(),
         Some(shed_observer(agent)),
-        auth_layer(agent)?,
+        auth_layer(agent, &listen)?,
         Some(rpc_observer(agent)),
     )
     .await;
@@ -931,7 +944,7 @@ pub async fn serve_sessions(agent: Arc<Agent>, listen: Endpoint) -> anyhow::Resu
     let (router, health) = agent_grpc::server::base_router_with_auth(
         agent.grpc_max_in_flight(),
         Some(shed_observer(&agent)),
-        auth_layer(&agent)?,
+        auth_layer(&agent, &listen)?,
         Some(rpc_observer(&agent)),
     )
     .await;
@@ -1151,7 +1164,7 @@ pub async fn serve_fleet(
     let (router, health) = agent_grpc::server::base_router_with_auth(
         agent.grpc_max_in_flight(),
         Some(shed_observer(&agent)),
-        auth_layer(&agent)?,
+        auth_layer(&agent, &listen)?,
         Some(rpc_observer(&agent)),
     )
     .await;
@@ -1447,7 +1460,7 @@ async fn serve_seams(
     let (mut router, health) = agent_grpc::server::base_router_with_auth(
         agent.grpc_max_in_flight(),
         Some(shed_observer(agent)),
-        auth_layer(agent)?,
+        auth_layer(agent, &listen)?,
         Some(rpc_observer(agent)),
     )
     .await;

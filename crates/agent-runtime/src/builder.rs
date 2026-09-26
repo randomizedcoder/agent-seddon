@@ -1294,6 +1294,7 @@ pub async fn build_agent_with(
             tenant_claim: cfg.auth.tenant_claim.clone(),
             roles_claim: cfg.auth.roles_claim.clone(),
             leeway_secs: cfg.auth.leeway_secs,
+            allow_insecure_listen: cfg.auth.allow_insecure_listen,
         },
         // Multi-tenant deployment (`[tenancy] per_tenant`); arms the C29 ConfigService
         // operator-config write guard on the serve path. `false` = Tier-0 (unchanged).

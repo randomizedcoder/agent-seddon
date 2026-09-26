@@ -2581,7 +2581,8 @@ pub struct GrpcCfg {
 /// `[auth]` — OIDC/JWT bearer authentication for served gRPC seams (config C33 /
 /// increment B1). `mode = "none"` (the default) preserves today's trusted-header
 /// path; `mode = "oidc"` makes every served seam require and verify a bearer token
-/// (requires the `agent-grpc` `auth` feature at build time). All values are the
+/// (the `auth` feature, default in the `agent` binary). Checked at load by
+/// [`AuthCfg::validate`]. All values are the
 /// standard OIDC discovery fields; no secret is stored (JWKS is a public URL).
 #[derive(Debug, Default, Deserialize)]
 #[cfg_attr(
@@ -2607,9 +2608,92 @@ pub struct AuthCfg {
     /// Claim carrying the roles array (default `"roles"` when empty).
     #[serde(default)]
     pub roles_claim: String,
-    /// Accepted clock skew for `exp`/`nbf`, in seconds (default `0`).
+    /// Accepted clock skew for `exp`/`nbf`, in seconds (default `0`, at most
+    /// [`AuthCfg::MAX_LEEWAY_SECS`]).
     #[serde(default)]
     pub leeway_secs: u64,
+    /// Serve with `mode = "none"` on a non-loopback address anyway (default `false`,
+    /// which makes that a startup error: without auth any peer can claim any
+    /// tenant). When set, every start logs a warning. Loopback and unix-socket
+    /// listeners never need it.
+    #[serde(default)]
+    pub allow_insecure_listen: bool,
+}
+
+impl AuthCfg {
+    /// The largest accepted `leeway_secs`. A larger skew window would let an
+    /// expired token keep working for longer than the token's own lifetime.
+    pub const MAX_LEEWAY_SECS: u64 = 300;
+
+    /// Validate `[auth]` when the config is loaded (security-hardening S1), so a
+    /// bad value fails at startup for every entry point rather than only when a
+    /// seam is served. Checks for this build: `oidc` is refused if the verifier is
+    /// not compiled in.
+    pub fn validate(&self) -> Result<(), String> {
+        self.validate_with(cfg!(feature = "auth"))
+    }
+
+    /// [`validate`](Self::validate) with the "verifier compiled in" fact injected,
+    /// so both builds' behaviour is testable from either.
+    pub fn validate_with(&self, verifier_compiled: bool) -> Result<(), String> {
+        if self.leeway_secs > Self::MAX_LEEWAY_SECS {
+            return Err(format!(
+                "`[auth] leeway_secs` = {} exceeds the maximum of {}",
+                self.leeway_secs,
+                Self::MAX_LEEWAY_SECS
+            ));
+        }
+        match self.mode.trim() {
+            "" | "none" => Ok(()),
+            "oidc" => {
+                if !verifier_compiled {
+                    return Err("`[auth] mode = \"oidc\"` needs the agent built with the \
+                                `auth` feature (it is in the default feature set)"
+                        .into());
+                }
+                for (key, value) in [
+                    ("issuer", &self.issuer),
+                    ("audience", &self.audience),
+                    ("jwks_url", &self.jwks_url),
+                ] {
+                    if value.trim().is_empty() {
+                        return Err(format!("`[auth] mode = \"oidc\"` needs `{key}`"));
+                    }
+                }
+                check_jwks_url(&self.jwks_url)
+            }
+            other => Err(format!(
+                "unknown `[auth] mode` `{other}` (want `none` | `oidc`)"
+            )),
+        }
+    }
+}
+
+/// The JWKS URL must be `https`, or plain `http` to a numeric loopback address (a
+/// local test issuer). Public keys fetched over plaintext from the network could be
+/// swapped in transit, which would let an attacker mint accepted tokens. Embedded
+/// credentials are refused: the config holds no secrets.
+fn check_jwks_url(raw: &str) -> Result<(), String> {
+    let url = url::Url::parse(raw.trim())
+        .map_err(|e| format!("`[auth] jwks_url` is not a valid URL ({e})"))?;
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("`[auth] jwks_url` must not embed credentials".into());
+    }
+    let loopback = match url.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        _ => false,
+    };
+    match url.scheme() {
+        "https" if url.host().is_some() => Ok(()),
+        "http" if loopback => Ok(()),
+        "http" => Err(
+            "`[auth] jwks_url` must use https (plain http is allowed only to a loopback IP)".into(),
+        ),
+        other => Err(format!(
+            "`[auth] jwks_url` scheme `{other}` is not supported (want https)"
+        )),
+    }
 }
 
 /// The `[tenancy]` bootstrap block (config C35 / C2): whether the converged
@@ -3738,6 +3822,100 @@ mod tests {
                 sections.iter().any(|x| x == s),
                 "declared tenant-writable section `{s}` is not a real config section: {sections:?}"
             );
+        }
+    }
+
+    /// A well-formed `oidc` block; cases override one field at a time.
+    fn oidc(jwks_url: &str) -> AuthCfg {
+        AuthCfg {
+            mode: "oidc".into(),
+            issuer: "https://issuer.example".into(),
+            audience: "agent".into(),
+            jwks_url: jwks_url.into(),
+            ..AuthCfg::default()
+        }
+    }
+
+    const GOOD_JWKS: &str = "https://issuer.example/.well-known/jwks.json";
+
+    #[rstest::rstest]
+    #[case::positive_absent_section(AuthCfg::default(), true, None)]
+    #[case::positive_explicit_none(AuthCfg { mode: "none".into(), ..AuthCfg::default() }, true, None)]
+    #[case::positive_oidc_https(oidc(GOOD_JWKS), true, None)]
+    #[case::positive_oidc_http_loopback_test_issuer(oidc("http://127.0.0.1:8123/jwks"), true, None)]
+    #[case::positive_oidc_http_ipv6_loopback(oidc("http://[::1]:8123/jwks"), true, None)]
+    #[case::positive_none_ignores_stale_oidc_fields(AuthCfg { mode: "none".into(), jwks_url: "http://10.0.0.1/j".into(), ..AuthCfg::default() }, true, None)]
+    #[case::negative_oidc_without_auth_feature(oidc(GOOD_JWKS), false, Some("`auth` feature"))]
+    #[case::negative_oidc_missing_issuer(AuthCfg { issuer: " ".into(), ..oidc(GOOD_JWKS) }, true, Some("needs `issuer`"))]
+    #[case::negative_oidc_missing_audience(AuthCfg { audience: String::new(), ..oidc(GOOD_JWKS) }, true, Some("needs `audience`"))]
+    #[case::negative_oidc_missing_jwks_url(oidc(""), true, Some("needs `jwks_url`"))]
+    #[case::negative_jwks_plain_http_remote(
+        oidc("http://issuer.example/jwks"),
+        true,
+        Some("must use https")
+    )]
+    #[case::negative_jwks_not_a_url(oidc("issuer.example/jwks"), true, Some("not a valid URL"))]
+    #[case::boundary_leeway_at_max(AuthCfg { leeway_secs: AuthCfg::MAX_LEEWAY_SECS, ..oidc(GOOD_JWKS) }, true, None)]
+    #[case::boundary_leeway_over_max(AuthCfg { leeway_secs: AuthCfg::MAX_LEEWAY_SECS + 1, ..oidc(GOOD_JWKS) }, true, Some("leeway_secs"))]
+    #[case::corner_mode_whitespace_trimmed(AuthCfg { mode: " oidc ".into(), ..oidc(GOOD_JWKS) }, true, None)]
+    #[case::corner_allow_insecure_listen_is_not_a_load_error(AuthCfg { allow_insecure_listen: true, ..AuthCfg::default() }, true, None)]
+    #[case::adversarial_unknown_mode(AuthCfg { mode: "off".into(), ..AuthCfg::default() }, true, Some("unknown `[auth] mode`"))]
+    #[case::adversarial_mode_case_is_exact(AuthCfg { mode: "OIDC".into(), ..oidc(GOOD_JWKS) }, true, Some("unknown `[auth] mode`"))]
+    #[case::adversarial_jwks_http_localhost_name(
+        oidc("http://localhost:8123/jwks"),
+        true,
+        Some("must use https")
+    )]
+    #[case::adversarial_jwks_http_mapped_loopback(
+        oidc("http://[::ffff:127.0.0.1]/jwks"),
+        true,
+        Some("must use https")
+    )]
+    #[case::adversarial_jwks_embedded_credentials(
+        oidc("https://u:p@issuer.example/jwks"),
+        true,
+        Some("credentials")
+    )]
+    #[case::adversarial_jwks_file_scheme(
+        oidc("file:///etc/agent/jwks.json"),
+        true,
+        Some("scheme `file`")
+    )]
+    #[case::adversarial_leeway_u64_max(AuthCfg { leeway_secs: u64::MAX, ..oidc(GOOD_JWKS) }, true, Some("leeway_secs"))]
+    fn auth_cfg_validate_cases(
+        #[case] cfg: AuthCfg,
+        #[case] verifier_compiled: bool,
+        #[case] want_err: Option<&str>,
+    ) {
+        match (cfg.validate_with(verifier_compiled), want_err) {
+            (Ok(()), None) => {}
+            (Err(e), Some(want)) => assert!(e.contains(want), "want {want:?} in {e:?}"),
+            (got, want) => panic!("{cfg:?}: got {got:?}, want error {want:?}"),
+        }
+    }
+
+    /// Loading goes through the check: a bad `[auth]` fails `parse_config`, not
+    /// only the serve path.
+    #[rstest::rstest]
+    #[case::negative_unknown_mode_fails_load(
+        "[auth]\nmode = \"jwt\"\n",
+        Some("unknown `[auth] mode`")
+    )]
+    #[case::boundary_leeway_over_max_fails_load("[auth]\nleeway_secs = 301\n", Some("leeway_secs"))]
+    #[case::positive_no_auth_section_loads("", None)]
+    #[case::positive_allow_insecure_listen_loads("[auth]\nallow_insecure_listen = true\n", None)]
+    fn auth_cfg_checked_at_load(#[case] toml_str: &str, #[case] want_err: Option<&str>) {
+        // `[agent]` + `[provider]` are the required sections; the auth block follows.
+        let doc =
+            format!("[agent]\nprovider = \"scripted\"\n[provider]\nmodel = \"m\"\n\n{toml_str}");
+        match (crate::parse_config_reporting_unknown(&doc), want_err) {
+            (Ok(_), None) => {}
+            (Err(e), Some(want)) => {
+                let e = format!("{e:#}");
+                assert!(e.contains(want), "want {want:?} in {e:?}");
+            }
+            (Ok(_), Some(want)) => panic!("loaded, want error {want:?}"),
+            (Err(e), None) => panic!("want load, got {e:#}"),
         }
     }
 }
