@@ -90,6 +90,12 @@ pkgs.mkShell {
       ch-client -q 'SHOW TABLES FROM agent'   Run a query against it
       ch-down                                 Stop + remove the container
 
+    Postgres (docker) — the transactional config store (agent-config-store; config/multi-tenant.toml):
+      pg-up                                   Start Postgres (tuned; persistent volume; $AGENT_PG_PASSWORD or dev default)
+      pg-client -c 'SELECT count(*) FROM cards' Run a query against it (psql in the container)
+      pg-logs                                 Follow the server logs
+      pg-down                                 Remove the container (the data volume PERSISTS)
+
     HyperDX (docker) — OTLP trace receiver + UI (decomposed; writes the agent ClickHouse):
       hdx-up                                  Start Mongo + OTel collector + app (UI :8080, OTLP :4317)
       ch-client -q 'SHOW TABLES FROM default' Query the traces (otel_* live in the agent ClickHouse now)
@@ -140,6 +146,11 @@ pkgs.mkShell {
         ch-up()     { nix run .#clickhouse-up -- "$@"; }
         ch-down()   { nix run .#clickhouse-down -- "$@"; }
         ch-client() { nix run .#clickhouse-client -- "$@"; }
+
+        pg-up()     { nix run .#postgres-up -- "$@"; }
+        pg-down()   { nix run .#postgres-down -- "$@"; }
+        pg-client() { nix run .#postgres-client -- "$@"; }
+        pg-logs()   { nix run .#postgres-logs -- "$@"; }
 
         hdx-up()    { nix run .#hyperdx-up -- "$@"; }
         hdx-down()  { nix run .#hyperdx-down -- "$@"; }

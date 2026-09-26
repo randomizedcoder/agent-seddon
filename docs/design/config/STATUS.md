@@ -208,6 +208,19 @@ compare-and-swap, retiring the legacy `*-sqlite` impls). Eleven gated PRs off `m
   `#[cfg(not(feature = "…-postgres"))] "postgres" => bail!` arm), reachable via a `--no-default-features`
   build, outside the default-feature hermetic gate.
 
+- **PG-04 — hardened container module (persistence, tuning, creds, logs) + host `psql`.** The
+  `nix/postgres` container apps go from a throwaway dev toy to a production-shaped local/CI server: a
+  PERSISTENT named data volume (`postgresDataVolume`) so `postgres-down` (container-only removal) no
+  longer discards the database; server tuning applied as startup flags (`shared_buffers`,
+  `max_connections`, `work_mem`, `effective_cache_size` — all pinned in `nix/versions.nix`, mirrored by
+  the PG-05 NixOS module later); a run-time password (`$AGENT_PG_PASSWORD`, dev default otherwise) instead
+  of a baked-in constant; and a new `postgres-logs` follower (from the shared container-app factory). Host
+  `psql` (pinned `postgresql_16`) joins the dev shell, with `pg-up/pg-down/pg-client/pg-logs` helpers and
+  an `agent-help` Postgres section. `pg-integration` is unaffected — it resets tables per test and removes
+  the container on cleanup, so the persistent volume doesn't leak between runs. The container's role
+  password is fixed at first volume init (standard postgres-image behaviour), documented alongside the
+  volume knob.
+
 ## Non-goals
 
 - Removing TOML (bootstrap stays TOML).

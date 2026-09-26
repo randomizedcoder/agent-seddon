@@ -1,12 +1,17 @@
-# Postgres container apps (up / down / client) for the transactional config
+# Postgres container apps (up / down / client / logs) for the transactional config
 # store (`agent-config-store` postgres tier, config C41 / A2). The mirror of
 # `nix/clickhouse/default.nix`: a bespoke `postgres-up` (the readiness barrier
-# lives here) plus `down`/`client` from the shared container-app factory.
+# lives here) plus `down`/`client`/`logs` from the shared container-app factory.
 #
-# Opt-in only: this is how `nix run .#integration`'s `pg-integration` harness (and
-# a developer by hand) gets a real server; it is never part of `nix flake check`.
-# The server applies no schema — `agent-config-store` creates its own on connect
-# (`migrate_on_start`), so `postgres-up` only needs the DB up and reachable.
+# Production-shaped (PG-04): the data lives in a PERSISTENT named volume (survives
+# `postgres-down`), the server is started with tuning flags, and the password is a
+# run-time value ($AGENT_PG_PASSWORD, dev default otherwise) rather than a baked-in
+# constant. It is still opt-in — this is how `nix run .#integration`'s
+# `pg-integration` harness (and a developer by hand) gets a real server; it is never
+# part of `nix flake check`. The NixOS-native service (PG-05) is the production
+# deployment; this container is the quick local/CI spin. The server applies no schema
+# — `agent-config-store` creates its own on connect (`migrate_on_start`), so
+# `postgres-up` only needs the DB up and reachable.
 {
   pkgs,
   lib,
@@ -21,6 +26,15 @@ let
   db = versions.postgresDatabase;
   user = versions.postgresUser;
   password = versions.postgresPassword;
+  dataVolume = versions.postgresDataVolume;
+  # Tuning flags (`-c key=value`), passed to the `postgres` server via the image's
+  # entrypoint (everything after the image name is forwarded to the server).
+  tuning = lib.concatStringsSep " " [
+    "-c shared_buffers=${versions.postgresSharedBuffers}"
+    "-c max_connections=${toString versions.postgresMaxConnections}"
+    "-c work_mem=${versions.postgresWorkMem}"
+    "-c effective_cache_size=${versions.postgresEffectiveCacheSize}"
+  ];
 
   # Shared container-lifecycle apps (the identical *-down/*-client bodies).
   c = import ../lib/mk-container-app.nix { inherit pkgs versions; };
@@ -37,19 +51,30 @@ let
           exit 1
         fi
 
+        # The password is a run-time value: $AGENT_PG_PASSWORD wins, else the dev/CI
+        # default. It is consumed by the image ONLY on first init of an empty data
+        # volume; on a restart with existing data the role keeps its original
+        # password (standard postgres-image behaviour), so changing it later means
+        # removing the volume ('$runtime' volume rm "${dataVolume}").
+        pw="''${AGENT_PG_PASSWORD:-${password}}"
+
         if "$runtime" ps -a --format '{{.Names}}' | grep -qx "${name}"; then
           echo "==> container '${name}' already exists; (re)starting it"
           "$runtime" start "${name}" >/dev/null
         else
           echo "==> starting Postgres (${image})"
-          # Published on 127.0.0.1 only (host-local); dev/CI credentials.
+          # Published on 127.0.0.1 only (host-local). Data lives in the named volume
+          # '${dataVolume}' so it SURVIVES 'postgres-down' (which removes only the
+          # container) — the mirror of a real deployment. Tuning is applied as
+          # server startup flags.
           "$runtime" run -d \
             --name "${name}" \
             -e POSTGRES_USER="${user}" \
-            -e POSTGRES_PASSWORD="${password}" \
+            -e POSTGRES_PASSWORD="$pw" \
             -e POSTGRES_DB="${db}" \
+            -v "${dataVolume}":/var/lib/postgresql/data \
             -p 127.0.0.1:${port}:5432 \
-            "${image}" >/dev/null
+            "${image}" ${tuning} >/dev/null
         fi
 
         echo -n "==> waiting for Postgres to accept connections"
@@ -75,15 +100,25 @@ let
 
       Postgres is up.
         Port: localhost:${port}   Database: ${db}   User: ${user}
-        DSN:  postgres://${user}:${password}@127.0.0.1:${port}/${db}
+        DSN:  postgres://${user}:$pw@127.0.0.1:${port}/${db}
+        Data: volume '${dataVolume}' (survives postgres-down)
 
         Client: nix run .#postgres-client -- -c 'SELECT 1'
-        Stop:   nix run .#postgres-down
+        Logs:   nix run .#postgres-logs
+        Stop:   nix run .#postgres-down   (keeps the data volume)
       EOF
     '';
   };
 
+  # Removes the CONTAINER only; the named data volume '${dataVolume}' persists, so a
+  # later `postgres-up` resumes the same database (remove the volume by hand to reset).
   postgres-down = c.down {
+    name = "postgres";
+    container = name;
+  };
+
+  # `nix run .#postgres-logs` → follow the server logs.
+  postgres-logs = c.logs {
     name = "postgres";
     container = name;
   };
@@ -97,5 +132,10 @@ let
   };
 in
 {
-  inherit postgres-up postgres-down postgres-client;
+  inherit
+    postgres-up
+    postgres-down
+    postgres-client
+    postgres-logs
+    ;
 }

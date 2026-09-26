@@ -113,6 +113,10 @@ matching check passes — the diff is the reviewable "accept this change" step)
 **Observability & datastore containers** (need docker)
 - `clickhouse-{up,down,client}` — the single ClickHouse (holds `agent.*` AND, since the
   obs stack was decomposed, the OTLP `default.otel_*` tables)
+- `postgres-{up,down,client,logs}` — the transactional config store (`agent-config-store`
+  postgres tier; the `config/multi-tenant.toml` profile). Tuned, PERSISTENT data volume
+  (`postgres-down` keeps it), password from `$AGENT_PG_PASSWORD` (dev default otherwise).
+  A local/CI spin; the production deployment is the NixOS-native service (PG-05)
 - `hyperdx-{up,down,logs}` — the decomposed HyperDX (Mongo + OTel collector + app), the
   OTLP trace receiver + UI, all pointed at that one ClickHouse
 - `prometheus-{up,down}`, `grafana-{up,down}` — metrics scraping + dashboards
