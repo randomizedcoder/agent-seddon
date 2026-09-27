@@ -76,6 +76,9 @@ pub struct VerifiedIdentity {
     pub issuer: String,
     /// The token's `email` claim, lowercased, when present.
     pub email: Option<String>,
+    /// The IdP vouched for `email` (`email_verified`). Only a verified email
+    /// matches an email or domain role binding (S8).
+    pub email_verified: bool,
     /// The token's `exp` (seconds since the Unix epoch). An agent token minted
     /// from this identity never outlives it.
     pub expires_at: u64,
@@ -117,6 +120,9 @@ pub struct AuthParams {
     /// `[auth.token]`: the agent token service. Set ⇒ seams accept only agent
     /// tokens and login tokens are accepted only by `AuthService.Exchange`.
     pub token: Option<TokenParams>,
+    /// `[auth] operator_subjects`: `email:<address>` / `sub:<issuer>/<sub>`
+    /// entries granted `operator` at sign-in (S8). Needs `token`.
+    pub operator_subjects: Vec<String>,
 }
 
 /// `[auth.token]`, codec-free (security-hardening S5,
@@ -268,9 +274,17 @@ impl AuthLayer {
         login: Arc<dyn TokenVerifier>,
         tokens: Arc<token::TokenService>,
         sessions: Arc<session::SessionStore>,
+        bindings: Arc<binding::BindingStore>,
+        operators: binding::OperatorSubjects,
     ) -> Self {
         let mut layer = Self::enabled(tokens.clone());
-        layer.auth_service = Some(service::AuthSvc::new(login, tokens, sessions.clone()));
+        layer.auth_service = Some(service::AuthSvc::new(
+            login,
+            tokens,
+            sessions.clone(),
+            bindings,
+            Arc::new(operators),
+        ));
         layer.sessions = Some(sessions);
         layer
     }
@@ -318,6 +332,11 @@ impl AuthLayer {
             "" | "none" if params.token.is_some() => {
                 Err("`[auth.token]` requires `[auth] mode = \"oidc\"`".into())
             }
+            _ if !params.operator_subjects.is_empty() && params.token.is_none() => Err(
+                "`[auth] operator_subjects` needs `[auth.token]` (roles are resolved when an \
+                 agent token is minted)"
+                    .into(),
+            ),
             "" | "none" => Ok(Self::disabled()),
             "oidc" => {
                 #[cfg(feature = "auth")]
@@ -349,6 +368,9 @@ impl AuthLayer {
                             Arc::new(agent_config_store::MemoryBackend::new())
                         }
                     };
+                    let operators = binding::OperatorSubjects::parse(&params.operator_subjects)?;
+                    let bindings =
+                        binding::BindingStore::new(backend.clone(), Arc::new(jwt::SystemClock));
                     let sessions = session::SessionStore::new(
                         backend,
                         t.session_ttl_secs,
@@ -359,6 +381,8 @@ impl AuthLayer {
                         Arc::new(login),
                         Arc::new(tokens),
                         Arc::new(sessions),
+                        Arc::new(bindings),
+                        operators,
                     ))
                 }
                 #[cfg(not(feature = "auth"))]
@@ -615,10 +639,20 @@ mod token;
 #[cfg(feature = "auth")]
 mod session;
 
+/// Role bindings: the card, role resolution at mint time, the
+/// permission-management rules, the store.
+#[cfg(feature = "auth")]
+mod binding;
+
 /// `AuthService`: exchange, refresh, logout, sessions, key set, who-am-I.
 #[cfg(feature = "auth")]
 mod service;
 
+#[cfg(feature = "auth")]
+pub use binding::{
+    resolve_roles, BindingStore, Granter, OperatorSubjects, RoleBinding, SubjectKind, Who,
+    MAX_BINDINGS_PER_TENANT, MAX_OPERATOR_SUBJECTS, MAX_ROLES_PER_BINDING,
+};
 #[cfg(feature = "auth")]
 pub use issuer::{ClaimRejection, KeySource, Profile, ResolvedIssuer};
 #[cfg(feature = "auth")]

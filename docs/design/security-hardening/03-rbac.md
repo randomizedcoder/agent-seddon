@@ -119,6 +119,50 @@ Enforced in `authorize` and the `RoleService` handlers; every rule has an `adver
    `authz.action` / `authz.resource` / `authz.decision`, and an `authz_allow` / `authz_deny` /
    `binding_put` / `binding_delete` / `role_put` / `role_delete` row in `agent_auth_events`.
 
+**As built (S8).** Bindings live in
+[`auth/binding.rs`](../../../crates/agent-grpc/src/server/auth/binding.rs). What differs from the
+text above:
+
+- **The binding RPCs are on `AuthService`**, not `RoleService`: `ListBindings` / `GetBinding`
+  (`read:binding`), `PutBinding` (`write:binding`) and `DeleteBinding` (`delete:binding`).
+  - Bindings only take effect when a token is minted, and a change has to revoke sessions, so they
+    belong with the token service and the session store.
+  - `RoleService` is served only with `[role] store`. `AuthService` is served by any listener with
+    `[auth.token]`.
+  - The cards share the session store's backend (collection `role_bindings`, keyed by tenant,
+    at most 1024 per tenant and 32 roles per binding).
+- **Role cards are host-global to write.** The role catalog is one namespace shared by every tenant,
+  so a tenant admin editing a card that another tenant binds would be a cross-tenant escalation.
+  - `RoleService.Put` and `Delete` refuse a tenant principal, even one with `(write, role)`.
+  - A host-global caller other than `operator` may write only a card whose permissions it holds
+    itself (`agent_core::check_role_write`).
+  - With no principal (`mode = "none"`) the seam stays ungated, as before.
+- **A session's `roles` are the login's claim roles**, the ones a `trust_roles_claim` issuer
+  vouched for. `Exchange` and every `Refresh` resolve the full set afresh from those claim roles,
+  the tenant's active bindings and `operator_subjects`. Sessions opened before S8 need no migration.
+- **Only a verified email matches.** An `email` or `domain` binding, and an `email:` entry in
+  `operator_subjects`, match only when the login token's `email_verified` is true.
+  - A `domain` binding matches the address's exact domain, not its subdomains.
+  - The session records `email_verified`, so a revocation after a binding change finds the same
+    subjects the mint did.
+- **`mtls_san` bindings are stored and listed but match nothing** until mTLS service identity
+  lands (S10).
+- **Revoke on change.** `keep_sessions` (default false) replaces `revoke_active`.
+  - `DeleteBinding` revokes every live session the old binding named, with reason `binding`.
+  - `PutBinding` revokes them only when the change narrows the grant: it removes a role, changes
+    the subject or its kind, or shortens the expiry.
+  - Widening a binding revokes nothing; the next refresh picks the new role up.
+- **The refusals.**
+  - An unknown role is `INVALID_ARGUMENT`.
+  - Rules 1–3 are an opaque `PERMISSION_DENIED`. Replacing or deleting a binding checks the *old*
+    binding too, so you cannot remove a grant beyond your own power.
+  - Self-binding covers `sub`, and also an `email` or `domain` binding matching the granter's own
+    email.
+  - Rule 4 is `FAILED_PRECONDITION`. It counts active *bindings* that can `write:binding` in the
+    tenant, an `operator` binding included. Operators from `operator_subjects` sit in TOML, so no
+    RPC can remove them. Rule 4 is serialized per process by a lock around the read-then-write;
+    two agent processes writing one tenant's bindings at once are not serialized.
+
 ## Gating the reads and the ungated surfaces
 
 `authz::require` is added to every `List` / `Get` / `Subscribe` / `Snapshot` handler with the

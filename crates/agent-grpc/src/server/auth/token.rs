@@ -516,6 +516,8 @@ impl TokenVerifier for TokenService {
             subject: claims.subject,
             roles: claims.roles,
             email: claims.email,
+            // Bindings are resolved from the login, never from an agent token.
+            email_verified: false,
             expires_at: claims.expires_at,
             sid: Some(claims.sid),
         })

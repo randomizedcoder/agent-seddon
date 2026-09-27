@@ -2747,6 +2747,12 @@ pub struct AuthCfg {
     /// directly (the S1–S3 behaviour, warned at startup).
     #[serde(default)]
     pub token: Option<AuthTokenCfg>,
+    /// Bootstrap operators (security-hardening S8): `email:<address>` (a verified
+    /// email) or `sub:<issuer name>/<sub>` entries that get the `operator` role at
+    /// sign-in without a role binding. Host-owned, so only the host operator can
+    /// change who is one. Needs `[auth.token]`.
+    #[serde(default)]
+    pub operator_subjects: Vec<String>,
 }
 
 /// `[auth.token]`: how the agent signs the tokens it issues
@@ -2967,6 +2973,16 @@ impl AuthCfg {
                 Self::MAX_LEEWAY_SECS
             ));
         }
+        if !self.operator_subjects.is_empty() {
+            if self.token.is_none() {
+                return Err(
+                    "`[auth] operator_subjects` needs `[auth.token]` (roles are \
+                            resolved when an agent token is minted)"
+                        .into(),
+                );
+            }
+            check_operator_subjects(&self.operator_subjects)?;
+        }
         match self.mode.trim() {
             "" | "none" if self.token.is_some() => {
                 Err("`[auth.token]` requires `[auth] mode = \"oidc\"`".into())
@@ -3029,6 +3045,38 @@ impl AuthCfg {
             )),
         }
     }
+}
+
+/// Structural check of `[auth] operator_subjects` at load (the serve path parses
+/// them again, with the same rules): `email:<address>` or `sub:<issuer>/<sub>`.
+fn check_operator_subjects(entries: &[String]) -> Result<(), String> {
+    const MAX: usize = 64;
+    if entries.len() > MAX {
+        return Err(format!(
+            "`[auth] operator_subjects` has more than {MAX} entries"
+        ));
+    }
+    for raw in entries {
+        let entry = raw.trim();
+        let ok = match entry.split_once(':') {
+            Some(("email", e)) => e
+                .trim()
+                .split_once('@')
+                .is_some_and(|(l, d)| !l.is_empty() && d.contains('.') && !d.contains('@')),
+            Some(("sub", s)) => s
+                .trim()
+                .split_once('/')
+                .is_some_and(|(i, sub)| agent_core::safe_segment(i) && !sub.is_empty()),
+            _ => false,
+        };
+        if !ok || entry.chars().any(char::is_control) {
+            return Err(format!(
+                "`[auth] operator_subjects` entry `{entry}` is not `email:<address>` or \
+                 `sub:<issuer>/<sub>`"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// A URL the verifier fetches keys (or a discovery document) from must be `https`,
@@ -4590,6 +4638,15 @@ mod tests {
     #[case::boundary_session_ttl_min(AuthCfg { token: Some(AuthTokenCfg { session_ttl_secs: 900, ..token_cfg() }), ..oidc(GOOD_JWKS) }, true, None)]
     #[case::boundary_session_ttl_max(AuthCfg { token: Some(AuthTokenCfg { session_ttl_secs: 2_592_000, ..token_cfg() }), ..oidc(GOOD_JWKS) }, true, None)]
     #[case::boundary_session_ttl_below_min(AuthCfg { token: Some(AuthTokenCfg { session_ttl_secs: 899, ..token_cfg() }), ..oidc(GOOD_JWKS) }, true, Some("session_ttl_secs"))]
+    // --- `[auth] operator_subjects` (security-hardening S8) ---
+    #[case::positive_operator_subjects(AuthCfg { operator_subjects: vec!["email:root@example.com".into(), "sub:kc/42".into()], token: Some(token_cfg()), ..oidc(GOOD_JWKS) }, true, None)]
+    #[case::negative_operator_subjects_without_token(AuthCfg { operator_subjects: vec!["email:root@example.com".into()], ..oidc(GOOD_JWKS) }, true, Some("needs `[auth.token]`"))]
+    #[case::negative_operator_subject_bare_email(AuthCfg { operator_subjects: vec!["root@example.com".into()], token: Some(token_cfg()), ..oidc(GOOD_JWKS) }, true, Some("operator_subjects` entry"))]
+    #[case::corner_operator_subject_padded(AuthCfg { operator_subjects: vec![" email: root@example.com ".into()], token: Some(token_cfg()), ..oidc(GOOD_JWKS) }, true, None)]
+    #[case::boundary_operator_subjects_at_cap(AuthCfg { operator_subjects: (0..64).map(|i| format!("sub:kc/{i}")).collect(), token: Some(token_cfg()), ..oidc(GOOD_JWKS) }, true, None)]
+    #[case::boundary_operator_subjects_over_cap(AuthCfg { operator_subjects: (0..65).map(|i| format!("sub:kc/{i}")).collect(), token: Some(token_cfg()), ..oidc(GOOD_JWKS) }, true, Some("more than 64"))]
+    #[case::adversarial_operator_subject_traversal_issuer(AuthCfg { operator_subjects: vec!["sub:../kc/42".into()], token: Some(token_cfg()), ..oidc(GOOD_JWKS) }, true, Some("operator_subjects` entry"))]
+    #[case::adversarial_operator_subject_control_char(AuthCfg { operator_subjects: vec!["email:root@example.com\u{7}".into()], token: Some(token_cfg()), ..oidc(GOOD_JWKS) }, true, Some("operator_subjects` entry"))]
     #[case::boundary_session_ttl_above_max(AuthCfg { token: Some(AuthTokenCfg { session_ttl_secs: 2_592_001, ..token_cfg() }), ..oidc(GOOD_JWKS) }, true, Some("session_ttl_secs"))]
     #[case::adversarial_entry_jwks_credentials(issuers(vec![AuthIssuerCfg { jwks_url: "https://u:p@idp.example/k".into(), ..google_entry() }]), true, Some("credentials"))]
     fn auth_cfg_validate_cases(

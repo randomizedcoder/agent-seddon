@@ -96,7 +96,9 @@ Workspace domain such as `example.com` is a valid tenant segment and a valid pat
 
 A fresh install has no bindings. `[auth] operator_subjects` (operator-global TOML, so only the host
 operator can edit it — C29) lists `email:` or `sub:` subjects that receive the `operator` role at
-exchange time. Everything else is granted through bindings ([03](03-rbac.md)).
+exchange time. Everything else is granted through bindings ([03](03-rbac.md)). As built (S8): an `email:` entry
+matches only a verified email; the list needs `[auth.token]` and at most 64 entries, and a
+malformed entry is a load error, so a typo cannot silently lock the operator out.
 
 ## Human flows
 

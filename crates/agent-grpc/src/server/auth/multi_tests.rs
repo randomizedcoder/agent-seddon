@@ -421,6 +421,7 @@ async fn token_layer_exemption_and_bearer_scope(
         roles: vec![agent_core::ROLE_AGENT_USER.into()],
         issuer: "kc".into(),
         email: None,
+        email_verified: false,
         expires_at: now() + 600,
         sid: None,
     };
@@ -433,4 +434,30 @@ async fn token_layer_exemption_and_bearer_scope(
         saw_bearer, with_agent_token,
         "the verified bearer is scoped for the handler"
     );
+}
+
+/// `[auth] operator_subjects` are resolved when an agent token is minted, so they
+/// need `[auth.token]`; a malformed entry refuses to start (S8).
+#[rstest]
+#[case::positive_with_token(true, &["email:root@example.com"], None)]
+#[case::negative_without_token(false, &["email:root@example.com"], Some("needs `[auth.token]`"))]
+#[case::adversarial_malformed_entry(true, &["root@example.com"], Some("operator_subjects` entry"))]
+#[case::corner_empty_without_token(false, &[], None)]
+#[tokio::test(flavor = "multi_thread")]
+async fn from_params_operator_subjects_cases(
+    #[case] with_token: bool,
+    #[case] operators: &[&str],
+    #[case] want_err: Option<&str>,
+) {
+    let fake = FakeIssuer::start(TestKey::Rsa);
+    let params = AuthParams {
+        token: with_token.then(|| token_params(AGENT_ISS, signing_key_file())),
+        operator_subjects: operators.iter().map(ToString::to_string).collect(),
+        ..oidc(vec![generic("kc", &fake)])
+    };
+    match (AuthLayer::from_params(params), want_err) {
+        (Ok(_), None) => {}
+        (Err(e), Some(want)) => assert!(e.contains(want), "want {want:?} in {e:?}"),
+        (got, want) => panic!("got {:?}, want {want:?}", got.map(|_| "a layer")),
+    }
 }

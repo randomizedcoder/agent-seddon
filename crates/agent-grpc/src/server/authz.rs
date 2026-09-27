@@ -148,6 +148,22 @@ pub(crate) fn require_in(
     decide_on_span(&principal, action, resource_type, tenant)
 }
 
+/// The wire status for a permission-management refusal (security-hardening S8).
+/// Escalation, host-global and self-binding refusals are the same opaque
+/// `PermissionDenied` as any other denial; the reason is logged.
+pub(crate) fn refusal_status(refusal: agent_core::GrantRefusal, what: &str) -> Status {
+    tracing::info!(reason = refusal.as_str(), %what, "permission-management write refused");
+    match refusal {
+        agent_core::GrantRefusal::UnknownRole => Status::invalid_argument("unknown role"),
+        agent_core::GrantRefusal::LastAdmin => Status::failed_precondition(
+            "the change would leave the tenant with nobody who can manage role bindings",
+        ),
+        agent_core::GrantRefusal::HostGlobal
+        | agent_core::GrantRefusal::Escalation
+        | agent_core::GrantRefusal::SelfBinding => denied(),
+    }
+}
+
 #[allow(clippy::result_large_err)]
 fn decide_on_span(
     principal: &VerifiedPrincipal,

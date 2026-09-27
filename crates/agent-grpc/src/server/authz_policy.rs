@@ -54,6 +54,11 @@ pub fn gate_of(service: &str, method: &str) -> Option<Gate> {
         // request may name another tenant, which the handler checks.
         ("AuthService", "ListSessions") => FieldChecked(Read, Binding),
         ("AuthService", "RevokeSession") => FieldChecked(Write, Binding),
+        // Role bindings (S8); the handler adds the tenant check and the
+        // permission-management rules.
+        ("AuthService", "ListBindings" | "GetBinding") => FieldChecked(Read, Binding),
+        ("AuthService", "PutBinding") => FieldChecked(Write, Binding),
+        ("AuthService", "DeleteBinding") => FieldChecked(Delete, Binding),
 
         // The interactive agent and the seams it runs on.
         ("AgentSessionService", "Send") => Require(Use, Agent),

@@ -1,6 +1,10 @@
-//! `AuthService` (security-hardening S5, S6): trade a login ID token for an agent
-//! token and a session, refresh and end sessions, publish the agent's key set, and
-//! report the caller's verified identity.
+//! `AuthService` (security-hardening S5, S6, S8): trade a login ID token for an
+//! agent token and a session, refresh and end sessions, publish the agent's key
+//! set, report the caller's verified identity, and manage role bindings.
+//!
+//! Every mint resolves the token's roles afresh ([`binding::resolve_roles`]): the
+//! login's trusted claim roles, the tenant's bindings that name the caller, and
+//! `operator` for `[auth] operator_subjects`.
 //!
 //! `Exchange`, `Jwks` and `Refresh` are reachable without a bearer (the layer
 //! exempts them; `Refresh` carries its own credential, the refresh handle). Every
@@ -14,6 +18,10 @@ use agent_proto::pb;
 use tonic::{Request, Response, Status};
 use tracing::Instrument;
 
+use super::binding::{
+    self, check_binding_write, removes_last_admin, BindingStore, Granter, OperatorSubjects,
+    RoleBinding, SubjectKind, Who,
+};
 use super::session::{AuthSession, RefreshError, SessionStore, MAX_REFRESH_HANDLE_BYTES};
 use super::token::{AgentClaims, Grant, TokenService};
 use super::TokenVerifier;
@@ -23,12 +31,14 @@ use crate::server::{authz, span};
 pub const MAX_ID_TOKEN_BYTES: usize = 16 * 1024;
 
 /// The `AuthService` handler: the login verifier (IdP tokens), the token service
-/// (agent tokens) and the session store.
+/// (agent tokens), the session store, and the role bindings roles resolve from.
 #[derive(Clone)]
 pub struct AuthSvc {
     login: Arc<dyn TokenVerifier>,
     tokens: Arc<TokenService>,
     sessions: Arc<SessionStore>,
+    bindings: Arc<BindingStore>,
+    operators: Arc<OperatorSubjects>,
 }
 
 impl AuthSvc {
@@ -36,12 +46,59 @@ impl AuthSvc {
         login: Arc<dyn TokenVerifier>,
         tokens: Arc<TokenService>,
         sessions: Arc<SessionStore>,
+        bindings: Arc<BindingStore>,
+        operators: Arc<OperatorSubjects>,
     ) -> Self {
         Self {
             login,
             tokens,
             sessions,
+            bindings,
+            operators,
         }
+    }
+
+    /// The roles a token for `who` carries now. A store failure refuses the mint
+    /// rather than minting without the caller's bindings.
+    async fn resolve(&self, claim_roles: &[String], who: &Who<'_>) -> Result<Vec<String>, Status> {
+        let bindings = self.bindings.list(who.tenant).await.map_err(|e| {
+            tracing::warn!(error = %e, "role bindings unavailable: refusing to mint");
+            unauthenticated()
+        })?;
+        Ok(binding::resolve_roles(
+            claim_roles,
+            &bindings,
+            &self.operators,
+            who,
+            self.bindings.now(),
+        ))
+    }
+
+    /// Revoke every live session in `tenant` that `old` named, unless `keep`.
+    async fn revoke_named(&self, tenant: &str, old: &RoleBinding, by: &str, keep: bool) -> u32 {
+        if keep {
+            return 0;
+        }
+        let sessions = match self.sessions.list(tenant).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "binding change: could not list sessions to revoke");
+                return 0;
+            }
+        };
+        let now = self.bindings.now();
+        let mut revoked = 0;
+        for s in sessions.iter().filter(|s| s.is_live(now)) {
+            if !old.names(&session_who(s)) {
+                continue;
+            }
+            match self.sessions.revoke(tenant, &s.sid, by, "binding").await {
+                Ok(true) => revoked += 1,
+                Ok(false) => {}
+                Err(e) => tracing::warn!(error = %e, sid = %s.sid, "binding change: revoke failed"),
+            }
+        }
+        revoked
     }
 
     pub fn into_server(self) -> pb::auth_service_server::AuthServiceServer<Self> {
@@ -95,6 +152,45 @@ impl AuthSvc {
 
 fn unauthenticated() -> Status {
     Status::unauthenticated("unauthenticated")
+}
+
+/// What a stored session proves about its subject, for re-resolving roles.
+fn session_who(s: &AuthSession) -> Who<'_> {
+    Who {
+        tenant: &s.tenant,
+        subject: &s.subject,
+        email: s.email.as_deref(),
+        email_verified: s.email_verified,
+    }
+}
+
+fn binding_to_pb(b: RoleBinding) -> pb::RoleBinding {
+    pb::RoleBinding {
+        id: b.id,
+        tenant: b.tenant,
+        subject_kind: b.kind.as_str().to_string(),
+        subject: b.subject,
+        roles: b.roles,
+        granted_by: b.granted_by,
+        granted_at: b.granted_at,
+        expires_at: b.expires_at,
+    }
+}
+
+/// Whether replacing `old` with `new` takes anything away from someone `old`
+/// named: a role, the subject itself, or time.
+fn narrows(old: &RoleBinding, new: &RoleBinding) -> bool {
+    (old.kind, &old.subject) != (new.kind, &new.subject)
+        || old.roles.iter().any(|r| !new.roles.contains(r))
+        || (new.expires_at != 0 && (old.expires_at == 0 || new.expires_at < old.expires_at))
+}
+
+/// The binding-admin caller: its principal and the email its token carries.
+#[allow(clippy::result_large_err)]
+fn granter_of(svc: &AuthSvc) -> Result<(agent_core::VerifiedPrincipal, Option<String>), Status> {
+    let principal = agent_core::current_principal().ok_or_else(unauthenticated)?;
+    let email = svc.caller()?.email;
+    Ok((principal, email))
 }
 
 /// The caller-visible view of verified agent-token claims.
@@ -187,6 +283,16 @@ impl pb::auth_service_server::AuthService for AuthSvc {
             // The first token never outlives the login token or the session.
             let mut grant = Grant::from_login(&identity, &session.sid);
             grant.not_after = grant.not_after.min(session.expires_at);
+            grant.roles = match self.resolve(&session.roles, &session_who(&session)).await {
+                Ok(roles) => roles,
+                Err(e) => {
+                    let _ = self
+                        .sessions
+                        .revoke(&session.tenant, &session.sid, "system", "logout")
+                        .await;
+                    return Err(e);
+                }
+            };
             let out = match self.mint(&grant, &session, handle) {
                 Ok(out) => out,
                 Err(e) => {
@@ -228,9 +334,11 @@ impl pb::auth_service_server::AuthService for AuthSvc {
                 }
                 unauthenticated()
             })?;
-            // Roles are the session's (bindings re-resolve them in S8); the
-            // permissions are re-derived under the live catalog.
-            let out = self.mint(&session.grant(), &session, handle)?;
+            // Roles are resolved afresh, so a binding change reaches the caller
+            // here; the permissions are re-derived under the live catalog.
+            let mut grant = session.grant();
+            grant.roles = self.resolve(&session.roles, &session_who(&session)).await?;
+            let out = self.mint(&grant, &session, handle)?;
             Ok(Response::new(out))
         }
         .instrument(sp)
@@ -343,6 +451,182 @@ impl pb::auth_service_server::AuthService for AuthSvc {
                 .await
                 .map_err(store_error)?;
             Ok(Response::new(pb::RevokeSessionResponse { revoked }))
+        }
+        .instrument(sp)
+        .await
+    }
+
+    async fn list_bindings(
+        &self,
+        request: Request<pb::ListBindingsRequest>,
+    ) -> Result<Response<pb::ListBindingsResponse>, Status> {
+        let sp = span("auth.list_bindings", request.metadata());
+        async move {
+            let tenant = admin_tenant(&request.into_inner().tenant, Action::Read)?;
+            let bindings = self
+                .bindings
+                .list(&tenant)
+                .await
+                .map_err(store_error)?
+                .into_iter()
+                .map(binding_to_pb)
+                .collect();
+            Ok(Response::new(pb::ListBindingsResponse { bindings }))
+        }
+        .instrument(sp)
+        .await
+    }
+
+    async fn get_binding(
+        &self,
+        request: Request<pb::GetBindingRequest>,
+    ) -> Result<Response<pb::GetBindingResponse>, Status> {
+        let sp = span("auth.get_binding", request.metadata());
+        async move {
+            let req = request.into_inner();
+            let tenant = admin_tenant(&req.tenant, Action::Read)?;
+            let binding = self
+                .bindings
+                .get(&tenant, &req.id)
+                .await
+                .map_err(store_error)?
+                .ok_or_else(|| Status::not_found("no such role binding"))?;
+            Ok(Response::new(pb::GetBindingResponse {
+                binding: Some(binding_to_pb(binding)),
+            }))
+        }
+        .instrument(sp)
+        .await
+    }
+
+    async fn put_binding(
+        &self,
+        request: Request<pb::PutBindingRequest>,
+    ) -> Result<Response<pb::PutBindingResponse>, Status> {
+        let sp = span("auth.put_binding", request.metadata());
+        async move {
+            let req = request.into_inner();
+            let wire = req
+                .binding
+                .ok_or_else(|| Status::invalid_argument("binding is required"))?;
+            let tenant = admin_tenant(&wire.tenant, Action::Write)?;
+            let (principal, email) = granter_of(self)?;
+            let kind = SubjectKind::parse(wire.subject_kind.trim())
+                .ok_or_else(|| Status::invalid_argument("unknown subject_kind"))?;
+            let now = self.bindings.now();
+            let mut new = RoleBinding {
+                id: wire.id,
+                tenant: tenant.clone(),
+                kind,
+                subject: wire.subject,
+                roles: wire.roles,
+                granted_by: principal.subject.clone(),
+                granted_at: now,
+                expires_at: wire.expires_at,
+            };
+            agent_config_store::Card::sanitize(&mut new);
+            agent_config_store::Card::validate(&new)
+                .map_err(|_| Status::invalid_argument("invalid role binding"))?;
+            if new.expires_at != 0 && new.expires_at <= now {
+                return Err(Status::invalid_argument("expires_at is in the past"));
+            }
+            let catalog = agent_core::current_catalog();
+            let granter = Granter {
+                principal: &principal,
+                email: email.as_deref(),
+            };
+            let _write = self.bindings.lock().await;
+            let before = self.bindings.list(&tenant).await.map_err(store_error)?;
+            let old = before.iter().find(|b| b.id == new.id).cloned();
+            check_binding_write(&catalog, granter, &new, true)
+                .map_err(|r| authz::refusal_status(r, "role binding"))?;
+            if let Some(old) = &old {
+                check_binding_write(&catalog, granter, old, false)
+                    .map_err(|r| authz::refusal_status(r, "role binding"))?;
+            }
+            let after: Vec<RoleBinding> = before
+                .iter()
+                .filter(|b| b.id != new.id)
+                .cloned()
+                .chain(std::iter::once(new.clone()))
+                .collect();
+            if removes_last_admin(&catalog, &before, &after, &tenant, now) {
+                return Err(authz::refusal_status(
+                    agent_core::GrantRefusal::LastAdmin,
+                    "role binding",
+                ));
+            }
+            let stored = self.bindings.put(new).await.map_err(store_error)?;
+            let revoked = match &old {
+                Some(old) if narrows(old, &stored) => {
+                    self.revoke_named(&tenant, old, &principal.subject, req.keep_sessions)
+                        .await
+                }
+                _ => 0,
+            };
+            tracing::info!(
+                %tenant,
+                id = %stored.id,
+                kind = stored.kind.as_str(),
+                by = %principal.subject,
+                revoked,
+                "role binding written"
+            );
+            Ok(Response::new(pb::PutBindingResponse {
+                binding: Some(binding_to_pb(stored)),
+                revoked_sessions: revoked,
+            }))
+        }
+        .instrument(sp)
+        .await
+    }
+
+    async fn delete_binding(
+        &self,
+        request: Request<pb::DeleteBindingRequest>,
+    ) -> Result<Response<pb::DeleteBindingResponse>, Status> {
+        let sp = span("auth.delete_binding", request.metadata());
+        async move {
+            let req = request.into_inner();
+            let tenant = admin_tenant(&req.tenant, Action::Delete)?;
+            let (principal, email) = granter_of(self)?;
+            let catalog = agent_core::current_catalog();
+            let _write = self.bindings.lock().await;
+            let before = self.bindings.list(&tenant).await.map_err(store_error)?;
+            let Some(old) = before.iter().find(|b| b.id == req.id).cloned() else {
+                return Ok(Response::new(pb::DeleteBindingResponse {
+                    deleted: false,
+                    revoked_sessions: 0,
+                }));
+            };
+            let granter = Granter {
+                principal: &principal,
+                email: email.as_deref(),
+            };
+            check_binding_write(&catalog, granter, &old, false)
+                .map_err(|r| authz::refusal_status(r, "role binding"))?;
+            let after: Vec<RoleBinding> =
+                before.iter().filter(|b| b.id != old.id).cloned().collect();
+            let now = self.bindings.now();
+            if removes_last_admin(&catalog, &before, &after, &tenant, now) {
+                return Err(authz::refusal_status(
+                    agent_core::GrantRefusal::LastAdmin,
+                    "role binding",
+                ));
+            }
+            let deleted = self
+                .bindings
+                .delete(&tenant, &old.id)
+                .await
+                .map_err(store_error)?;
+            let revoked = self
+                .revoke_named(&tenant, &old, &principal.subject, req.keep_sessions)
+                .await;
+            tracing::info!(%tenant, id = %old.id, by = %principal.subject, revoked, "role binding deleted");
+            Ok(Response::new(pb::DeleteBindingResponse {
+                deleted,
+                revoked_sessions: revoked,
+            }))
         }
         .instrument(sp)
         .await

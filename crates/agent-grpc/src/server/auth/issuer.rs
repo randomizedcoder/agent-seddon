@@ -365,12 +365,14 @@ impl ResolvedIssuer {
                     .collect()
             })
             .unwrap_or_default();
+        let email_verified = email.is_some() && email_verified(claims);
         Ok(VerifiedIdentity {
             tenant,
             subject: subject.to_string(),
             roles,
             issuer: self.name.clone(),
             email,
+            email_verified,
             // `exp` is a required claim, checked by the verifier before this runs.
             expires_at: claims.get("exp").and_then(Value::as_u64).unwrap_or(0),
             sid: None,

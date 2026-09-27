@@ -38,6 +38,7 @@ fn identity(tenant: &str, subject: &str) -> VerifiedIdentity {
         roles: vec!["agent_user".into()],
         issuer: "google".into(),
         email: Some(format!("{subject}@{tenant}")),
+        email_verified: true,
         expires_at: T0 + 600,
         sid: None,
     }

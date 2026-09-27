@@ -423,6 +423,21 @@ its `sid`, and the response carries a `refresh_handle` plus the session's absolu
 - `ListMySessions` and `RevokeMySession` act on the caller's own sessions.
 - `ListSessions` and `RevokeSession` need `read:binding` and `write:binding`, respectively.
 
+**Role bindings** (S8, [`auth/binding.rs`](../crates/agent-grpc/src/server/auth/binding.rs)).
+A binding grants roles in one tenant to a login subject (`sub`: `<issuer name>/<IdP sub>`), a
+verified `email`, every verified email in a `domain`, or (from S10) an `mtls_san`. Roles are
+resolved at `Exchange` and at every `Refresh`. They are the union of the trusted claim roles, the
+tenant's active bindings that match, and `operator` for `[auth] operator_subjects`.
+
+- `ListBindings` and `GetBinding` need `read:binding`.
+- `PutBinding` needs `write:binding`, and `DeleteBinding` needs `delete:binding`.
+- A tenant other than the caller's needs a host-global grant.
+- Writes may not grant beyond the caller's own permissions, bind the caller, or remove the
+  tenant's last binding that can manage bindings (`FAILED_PRECONDITION`).
+- A delete, or a put that narrows a binding, revokes the sessions the old binding named
+  (`revoke_reason = "binding"`) unless `keep_sessions` is set.
+- Role-card writes on `RoleService` are host-global.
+
 Revocation stops refresh straight away, and it stops sensitive RPCs (approve, exec, and role,
 binding or config writes) within about 5 seconds. Other RPCs keep working until the token
 expires. `[auth.token] session_store` picks where sessions persist: `memory`, `file` or
@@ -433,6 +448,8 @@ RESP=$(grpcurl -d "{\"id_token\":\"$ID_TOKEN\"}" "$ADDR" agent.v1.AuthService/Ex
 TOKEN=$(jq -r .accessToken <<<"$RESP"); HANDLE=$(jq -r .refreshHandle <<<"$RESP")
 grpcurl -H "authorization: Bearer $TOKEN" "$ADDR" agent.v1.AuthService/WhoAmI
 grpcurl -d "{\"refresh_handle\":\"$HANDLE\"}" "$ADDR" agent.v1.AuthService/Refresh
+grpcurl -H "authorization: Bearer $TOKEN" -d '{"binding":{"id":"bob","subject_kind":"email",
+  "subject":"bob@example.com","roles":["reviewer"]}}' "$ADDR" agent.v1.AuthService/PutBinding
 grpcurl -H "authorization: Bearer $TOKEN" "$ADDR" agent.v1.AuthService/Logout
 ```
 

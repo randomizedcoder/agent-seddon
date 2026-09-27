@@ -14,7 +14,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S5 | Token service core (agent JWT, JWKS, `WhoAmI`) | D1, D10 | ✅ | #498 |
 | S6 | Session store + `Exchange/Refresh/Logout` | D11 | ✅ | #505 |
 | S7 | RBAC extension, read gating, authz-coverage gate | D9 | ✅ | #504 |
-| S8 | Role bindings, bootstrap, escalation rules | D3, D9 | ⬜ | — |
+| S8 | Role bindings, bootstrap, escalation rules | D3, D9 | 🟡 | — |
 | S9 | Bearer propagation + two-hop chain test | D7 | ⬜ | — |
 | S10 | mTLS service identity | D6 | ⬜ | — |
 | S11 | `agent_auth_events` audit + doctor probes | D11 | ⬜ | — |
@@ -381,3 +381,64 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
   Gate: `nix flake check --max-jobs 8 --cores 4 --keep-going` green (2026-09-27); `leak`'s
   `fork_cancel_cycle_does_not_leak` (agent-providers, untouched here) flaked once and passed on
   rebuild.
+
+- **2026-09-27 — S8 (PR pending).** Role bindings. Roles now come from the config store, not
+  only from the IdP.
+
+  Bindings: new [`auth/binding.rs`](../../../crates/agent-grpc/src/server/auth/binding.rs).
+  - `RoleBinding {id, tenant, kind: sub|email|domain|mtls_san, subject, roles, granted_by,
+    granted_at, expires_at}` is a card in collection `role_bindings`, on the session store's
+    backend. It is keyed by tenant and capped at 1024 per tenant and 32 roles per binding.
+  - Subjects are validated per kind: an `<issuer>/<sub>` pair, an email, or a domain.
+    Emails and domains are trimmed and lowercased; control characters and whitespace are refused.
+  - Resolution happens at `Exchange` and every `Refresh`. The roles are the union of:
+    - the claim roles (a `trust_roles_claim` issuer),
+    - the tenant's active bindings that match,
+    - `operator` for `[auth] operator_subjects`.
+  - An `email` or `domain` binding matches only a verified email. `VerifiedIdentity` and
+    `AuthSession` gain `email_verified`. `mtls_san` bindings match nothing until S10.
+  - If the binding store cannot be read, no token is minted: `Exchange` revokes the session it
+    just opened.
+
+  `AuthService` RPCs:
+  - `ListBindings` / `GetBinding` (`read:binding`), `PutBinding` (`write:binding`) and
+    `DeleteBinding` (`delete:binding`). The proto change is additive.
+  - Rules, all refused with an opaque `PERMISSION_DENIED`: no grant beyond the caller's own
+    permissions, a host-global role or another tenant only from a host-global caller, and no
+    binding that names the caller (by sub, email or domain).
+  - The last-admin guard is `FAILED_PRECONDITION`, and an unknown role is `INVALID_ARGUMENT`.
+  - A delete, or a put that narrows a binding, revokes the old binding's live sessions
+    (`revoke_reason = "binding"`) unless `keep_sessions` is set.
+
+  Role cards: `RoleService.Put`/`Delete` are host-global (`agent_core::check_role_write`), because
+  the catalog is shared by every tenant.
+
+  Config: `[auth] operator_subjects` (`email:` / `sub:`, at most 64) is checked at load and needs
+  `[auth.token]`.
+
+  Deviations are listed under "As built (S8)" in [03](03-rbac.md#permission-to-manage-permissions-rules):
+  - The binding RPCs are on `AuthService`, not `RoleService`.
+  - Role-card writes are host-global.
+  - `session.roles` now holds the login's claim roles.
+  - `keep_sessions` replaces `revoke_active`, and only a narrowing put revokes.
+  - The lockout guard is serialized per process.
+
+  Tests:
+  - `binding/tests.rs`: subject kinds, 27 validation cases (traversal, control characters, two `@`,
+    wildcard domains, size caps), matching (unverified email, domain suffix, prefix and subdomain,
+    tenant firewall, expiry boundary), `operator_subjects` parse and match, resolution,
+    20 `check_binding_write` cases, the last-admin table, and a store round trip including a
+    key-mismatch blob.
+  - `agent_core::rbac`: `check_role_write` and `exceeding_permissions` tables.
+  - `role.rs`: the card-write gate.
+  - Config and `from_params` `operator_subjects` cases.
+  - `tests/auth_token.rs` over a real listener:
+    - bootstrap operator (verified and unverified email);
+    - `Exchange` picks up a binding;
+    - `positive_binding_change_revokes_sessions`;
+    - `keep_sessions` followed by a refresh that drops the role;
+    - refresh picks up a widening and is revoked by a narrowing;
+    - 14 `PutBinding` refusal and grant cases;
+    - `corner_last_binding_admin_not_deletable`;
+    - binding reads, and `ListBindings` needing `read:binding`.
+
