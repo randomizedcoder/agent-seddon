@@ -17,7 +17,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S8 | Role bindings, bootstrap, escalation rules | D3, D9 | ✅ | #511 |
 | S9 | Bearer propagation + two-hop chain test | D7 | ✅ | #514 |
 | S10 | mTLS service identity | D6 | ✅ | #516 |
-| S11a | `agent_auth_events` audit stream | D11 | ✅ | #PRNUM |
+| S11a | `agent_auth_events` audit stream | D11 | ✅ | #518 |
 | S11b | `doctor` auth probes (signer, JWKS, IdP discovery, session store) | D11 | ⬜ | — |
 | S12 | CLI `agent login/logout/whoami` | D6 | ⬜ | — |
 | S13 | Portal login + capability-aware UI | P0-4 | ⬜ | — |
@@ -497,7 +497,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
       claims (malformed = rejected), service sessions, the listen posture, and the config tables.
   - Deferred: a queued `ReviewNow` attributed to its requester (S11, with the audit rows);
     `step ca renew` and the `step-ca` daemon (S15).
-- **2026-09-27 — S11a (#PRNUM).** S11 is split in two: the audit stream (here) and the `doctor`
+- **2026-09-27 — S11a (#518).** S11 is split in two: the audit stream (here) and the `doctor`
   probes (S11b).
   - `agent_core::audit`: the `AuthEvent` type and a process-global sink.
     `record_auth_event` strips control characters and caps every text field at 256 bytes.
