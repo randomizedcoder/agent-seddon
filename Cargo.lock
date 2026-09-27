@@ -130,6 +130,7 @@ dependencies = [
  "rstest",
  "rusqlite",
  "serde_json",
+ "sqlx",
  "tokio",
 ]
 

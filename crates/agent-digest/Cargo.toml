@@ -11,6 +11,15 @@ digest-sqlite = ["dep:rusqlite"]
 # ClickHouse ledger (the default deployment target) — native protocol, durable
 # async_insert writes, reuses the pinned klickhouse the telemetry writer uses.
 digest-clickhouse = ["dep:klickhouse", "dep:tokio"]
+# Postgres ledger — the same per-session contract over a real server via `sqlx`
+# (pure-Rust rustls, no libpq), off by default so a normal build stays DB-free.
+# Unlike sqlite this tier is NOT hermetic (it needs a live server), so its tests
+# are `#[ignore]`-gated and run only under `nix run .#integration`; the crate
+# still compiles under this feature with no DB (runtime-checked queries).
+# Deliberately NO `sqlx/migrate`/`sqlx/macros` — they pull in `sqlx-mysql` →
+# `rsa` (RUSTSEC-2023-0071, rejected by cargo-audit); a tiny in-crate versioned
+# runner over the embedded `migrations/` set stands in (see `postgres.rs`).
+digest-postgres = ["dep:sqlx"]
 # dhat-instrumented leak/allocation tests (tests/leak.rs).
 dhat-heap = ["dep:dhat"]
 
@@ -20,6 +29,7 @@ async-trait.workspace = true
 serde_json.workspace = true
 rusqlite = { workspace = true, optional = true }
 klickhouse = { workspace = true, optional = true }
+sqlx = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 dhat = { workspace = true, optional = true }
 
