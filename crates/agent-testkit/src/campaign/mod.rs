@@ -3,6 +3,7 @@
 //! suite ([`conformance`]) that every tier — this double and `PgCampaigns` — runs
 //! through the [`campaign_conformance_suite!`](crate::campaign_conformance_suite) macro.
 
+pub mod conformance;
 mod mem;
 pub use mem::MemCampaigns;
 

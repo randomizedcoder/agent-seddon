@@ -1,6 +1,7 @@
 //! `MemCampaigns`-only behaviour (tenant refusal, shared state, clock injection,
-//! rollback on `Err`). The shared T3–T8 rows run through the conformance suite.
+//! rollback on `Err`), plus the shared T3–T8 rows stamped in by the conformance suite.
 
+use super::conformance::Harness;
 use super::MemCampaigns;
 use agent_core::campaign::{
     Actor, CampaignError, CampaignStore, NewCampaign, Policy, TaskId, TaskState,
@@ -109,3 +110,7 @@ fn positive_debug_names_tenant_only() {
     let dbg = format!("{store:?}");
     assert!(dbg.contains("ta") && !dbg.contains("tasks"), "{dbg}");
 }
+
+// The shared rows (`06-test-matrix.md` T3–T8) against `MemCampaigns`:
+// `campaign::tests::mem::t3::positive_all_done`, …
+crate::campaign_conformance_suite!(mem, Harness::mem());
