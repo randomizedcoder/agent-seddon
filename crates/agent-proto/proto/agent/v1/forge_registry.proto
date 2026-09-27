@@ -27,6 +27,11 @@ syntax = "proto3";
 
 package agent.v1;
 
+// REST transcoding annotations (gap-analysis §4, docs/design/rest-openapi/). The
+// `(google.api.http)` options below let Envoy's `grpc_json_transcoder` expose the
+// service as REST/JSON without any Rust code; gRPC stays the primary interface.
+import "google/api/annotations.proto";
+
 // A forge (git-host) card. Mirrors `agent_core::ForgeCard`. `kind` selects the impl
 // factory; `base_url` empty ⇒ the kind's registered default; `repo_encoding` is a
 // validated scheme string (`owner_name` | `path`).
@@ -70,8 +75,22 @@ message ForgeDeleteReply {
 // enforcement core (C1) — a caller needs a role granting `(write|delete,
 // forge_registry)`.
 service ForgeRegistryService {
-  rpc List(ForgeListRequest) returns (ForgeList);
-  rpc Get(ForgeRef) returns (ForgeCard);
-  rpc Put(ForgeCard) returns (ForgeCard); // upsert = create + update
-  rpc Delete(ForgeRef) returns (ForgeDeleteReply);
+  // REST mappings (docs/design/rest-openapi/): reads → GET, deletes → DELETE by id,
+  // upsert → POST with `body: "*"`. Paths live under /v1/forges/.
+  rpc List(ForgeListRequest) returns (ForgeList) {
+    option (google.api.http) = {get: "/v1/forges"};
+  }
+  rpc Get(ForgeRef) returns (ForgeCard) {
+    option (google.api.http) = {get: "/v1/forges/{id}"};
+  }
+  rpc Put(ForgeCard) returns (ForgeCard) {
+    // upsert = create + update
+    option (google.api.http) = {
+      post: "/v1/forges"
+      body: "*"
+    };
+  }
+  rpc Delete(ForgeRef) returns (ForgeDeleteReply) {
+    option (google.api.http) = {delete: "/v1/forges/{id}"};
+  }
 }

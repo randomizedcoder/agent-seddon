@@ -247,6 +247,27 @@ enum Expect {
     "ConfigService.GetSchema",
     Expect::Routes(&[("GET", "/v1/config/schema")])
 )]
+// --- 03c: registries (forge / transport / provider-router) ------------------
+// positive — ForgeRegistryService is a third CRUD mirror in a distinct proto group.
+#[case::positive_forge_get_maps_to_get_with_id(
+    "ForgeRegistryService.Get -> GET /v1/forges/{id}",
+    "ForgeRegistryService.Get",
+    Expect::Routes(&[("GET", "/v1/forges/{id}")])
+)]
+// corner — the provider registry's upstream toggle nests under the /upstreams
+// collection (a path capture deeper than the resource root).
+#[case::corner_upstream_enable_nested_under_collection(
+    "ProviderRegistryService.Enable -> POST /v1/router/upstreams/{id}/enable",
+    "ProviderRegistryService.Enable",
+    Expect::Routes(&[("POST", "/v1/router/upstreams/{id}/enable")])
+)]
+// corner — Route is read-only introspection but its request carries a nested
+// `RouteHint`, so it maps to POST body:* (the nested-body read convention), not GET.
+#[case::corner_route_introspection_maps_to_post(
+    "ProviderRegistryService.Route -> POST /v1/router/route (nested-body read)",
+    "ProviderRegistryService.Route",
+    Expect::Routes(&[("POST", "/v1/router/route")])
+)]
 // negative — an RPC in a not-yet-annotated proto carries no rule. This row flips to a
 // positive `Routes` case when `policy.proto` is annotated in a later increment.
 #[case::negative_unannotated_rpc_has_no_rule(
