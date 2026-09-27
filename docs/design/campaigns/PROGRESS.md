@@ -10,9 +10,9 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 
 ## Now
 
-- **Next:** CP-01 is open as #501 (`campaigns/cp-01`, gate-green @ `89ecaaf`); waiting on review / merge. After it merges: `STATUS.md` CP-01 → ✅ #501 + as-built entry, branch `campaigns/cp-02` from `main`, CP-02 step 1.
+- **Next:** CP-02 is open as #508 (rebased onto `main` @ `71d4abf`, gate-green @ `2cc7fdd`). Waiting on review / merge: after it merges, `STATUS.md` CP-02 → ✅ #508 + as-built entry, then lane B / CP-03 planning (a new plan of record).
 
-## CP-01 — seam, pure rules, `MemCampaigns`, T1–T8 (mem) — 🟡 #501 (branch `campaigns/cp-01`)
+## CP-01 — seam, pure rules, `MemCampaigns`, T1–T8 (mem) — ✅ #501 (merged 2026-09-27, `71d4abf`)
 
 | Item | State | Notes |
 |---|---|---|
@@ -36,24 +36,24 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 | doc amendments (02 transitions, 03 attempt note, 05 row, 06 harness/dims) | ✅ | 02: (b) inputs + step 1 / step 3 comments (attempt row inside the finishing tx), planner-`blocked` rollup paragraph; 03: step 1 (no attempt row at `plan_start`, `blocked` rolls up); 05: CP-01 row (pure rules in `agent_core::campaign`, `agent-campaign` = display letters); 06: harness bullets (`campaign_conformance_suite!`, suffixed rows), T7 `adversarial_pr_url_long` → `TooLong`, `positive_failed_does_not_block_done_dependent` wording; testkit `lib.rs` doc bullets (step 11) |
 | gate `nix flake check` | ✅ | 2026-09-26, green first run against the committed ref (see Gate status); an earlier dirty-tree run failed only in `portal-report-tests` because the working tree carries unrelated, uncommitted `test/**` deletions (`Path 'test/portal-report' does not exist in Git repository`) — not this branch; workspace clippy `--all-features` first surfaced the exhaustive `Error::Campaign` match in `agent-proto` (`89ecaaf`) |
 
-## CP-02 — `PgCampaigns`, migration 0001, live suite, invariants, pg-integration — ⬜
+## CP-02 — `PgCampaigns`, migration 0001, live suite, invariants, pg-integration — 🟡 #508 (branch `campaigns/cp-02`)
 
 | Item | State | Notes |
 |---|---|---|
-| feature `campaign-postgres` + deps | ⬜ | |
-| `migrations/0001_campaigns.sql` | ⬜ | deviations from `01-schema.md` listed here |
-| `postgres.rs` skeleton (connect, migrations, `with_tenant`, `with_clock`, `map_db`, `row_to_task`) | ⬜ | |
-| tx helpers (lock, transition, patch, bulk, rollup) | ⬜ | |
-| protocols (a) (c) (e) | ⬜ | |
-| protocols (b) + `mark_leaf` / `plan_close` | ⬜ | |
-| protocols (d) + `resolve_review` | ⬜ | |
-| protocols (f) (g) | ⬜ | |
-| T3–T8 via `campaign_conformance_suite!(pg, …)` | ⬜ | |
-| T14 multi-tenant | ⬜ | rows: 0/7 |
-| T15 invariants + negatives | ⬜ | |
-| concurrency: `adversarial_double_claim` / `adversarial_concurrent_decompose` / `corner_reap_skips_locked` | ⬜ | |
-| `nix/pg-integration.nix` + config-store `TRUNCATE … CASCADE` | ⬜ | |
-| gate: pg suite local, `nix run .#pg-integration` ×2, `nix flake check` | ⬜ | |
+| feature `campaign-postgres` + deps | ✅ | `campaign-postgres = ["dep:sqlx", "dep:async-trait", "dep:serde_json"]` (no `sqlx/migrate` / `macros`); dev-deps `agent-testkit`, `tokio`, `rstest` |
+| `migrations/0001_campaigns.sql` | ✅ | deviations: `IF NOT EXISTS` everywhere; named `tasks_path_key` / `task_attempts_idem_key`; `tenants` = config-store definition verbatim; conditional `tasks_repo_fk` block kept (RK-02) — recorded in `01-schema.md` "As built" |
+| `postgres.rs` skeleton (connect, migrations, `with_tenant`, `with_clock`, `map_db`, `row_to_task`) | ✅ | lock key `"agcampgn"`, ledger `_campaign_migrations`; `map_db` maps by `ErrorKind` + constraint name only (idem UNIQUE → `AlreadyApplied`); `row_to_task` fails closed (`Backend`) on any undecodable column; every statement is a `const` in `postgres/sql.rs` |
+| tx helpers (lock, transition, patch, bulk, rollup) | ✅ | `Tx { conn, tenant, now }` mirrors the mem `Tx`: `peek` / `lock` / `lock_ancestors` / `children_of` / `subtree_of(lock)` / `transition` (CAS + event) / `insert_attempt` / `plan_attempt` / `close_work` / `block_dependents` / `rollup_from`; subtree writes are row-by-row inside the tx (≤ 200 rows), no `bulk_cas` |
+| protocols (a) (c) (e) | ✅ | (a) CTE `nextval` root insert; (c) one `WITH cand AS MATERIALIZED (… FOR UPDATE OF t SKIP LOCKED) UPDATE … RETURNING` + events/attempts per row (queue order restored in Rust); heartbeat one conditional UPDATE; reap CTE `SKIP LOCKED`; (e) node lock + CAS |
+| protocols (b) + `mark_leaf` / `plan_close` | ✅ | idem checked before the lookup and again under the lock; children inserted one `INSERT … RETURNING` each; `plan_start` / `plan_close` lock the ancestors before the node (they may block → roll up) |
+| protocols (d) + `resolve_review` | ✅ | `fail` / `resolve_review` lock ancestors root → parent, then the leaf; `complete` locks the leaf only (it never rolls up) |
+| protocols (f) (g) | ✅ | ancestors, then the subtree `ORDER BY depth, path COLLATE "C" FOR UPDATE`; `superseded_by` patched after the state change (CHECK) |
+| T3–T8 via `campaign_conformance_suite!(pg, …)` | ✅ | `postgres/tests.rs`: `pg_harness()` = reset + shared pool + harness clock; `after = assert_invariants` |
+| T14 multi-tenant | ✅ | rows: 10/10 (`adversarial_tenant_string_sql` + traversal / empty / 129 as an in-gate rstest over `connect_lazy`, no statement possible) |
+| T15 invariants + negatives | ✅ | `INVARIANTS` = one `WITH RECURSIVE … UNION ALL` query (path, depth, campaign/repo, > 8 children, dep not sibling, dep cycle ≤ 9 hops, leaf has children, policy on root only, lease ⇔ state, superseded_by ⇔ state, last event version); negatives plant rows that pass every CHECK |
+| concurrency: `adversarial_double_claim` / `adversarial_concurrent_decompose` / `corner_reap_skips_locked` | ✅ | two pools, `multi_thread` runtime; double_claim releases by back-dating `lease_until` + `reap()` so the history stays valid |
+| `nix/pg-integration.nix` + config-store `TRUNCATE … CASCADE` | ✅ | `AGENT_CAMPAIGN_TEST_DSN` exported; campaign suite block last; `contract_exit` text += campaign; config-store reset is `TRUNCATE cards, tenants CASCADE` |
+| gate: pg suite local, `nix run .#pg-integration` ×2, `nix flake check` | ✅ | pg suite local green (157); `nix run .#pg-integration` green twice (second pass over the persisted volume, config-store CASCADE proven in place); `nix flake check` green on the committed ref `74c5bcd` — see Gate status |
 
 ## Decisions log (append-only)
 
@@ -85,6 +85,17 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
   from (b). Found by T8 `positive_retry_blocked_task`; `PgCampaigns` must lock the ancestors in
   those three branches too (CP-02). Doc amendment for `02-transactions.md` (b) in step 12.
 
+- 2026-09-27 — CP-02 is developed on `campaigns/cp-02` = `origin/main` (`f6809be`) + `campaigns/cp-01`
+  merged in, because #501 is still open and every file CP-02 touches exists only there. The PR
+  stays unstacked: once #501 merges, the branch is rebased onto `main`
+  (`git rebase --onto origin/main campaigns/cp-01 campaigns/cp-02`, which replays only CP-02's
+  own commits) before it opens.
+- 2026-09-27 — `PgCampaigns` writes subtrees row by row inside the transaction (`transition` per
+  node, ≤ 200 rows per campaign) instead of the planned `bulk_cas` / `bulk_events` helpers: the
+  same code path as every other write, one event per row, and nothing to keep in step with the
+  memory tier. `complete` locks the leaf only (no rollup); `fail`, `resolve_review`, `retry`,
+  `cancel`, `replan`, `plan_start` and `plan_close` lock the ancestors first.
+
 ## Gate status
 
 | When | Command | Result |
@@ -92,6 +103,18 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 | 2026-09-26 | `cargo fmt --all -- --check` (dev shell) | green |
 | 2026-09-26 | `cargo clippy --workspace --all-targets --all-features -- -D warnings` (dev shell) | red once (`E0004` non-exhaustive `Error::Campaign` in `agent-proto`, fixed in `89ecaaf`), then green |
 | 2026-09-26 | `nix flake check "git+file:///…/agent-seddon?ref=refs/heads/campaigns/cp-01"` (@ `89ecaaf`) | green, `all checks passed!`; the dirty-tree form failed in `portal-report-tests` for the unrelated uncommitted `test/**` deletions, so the gate runs against the committed ref |
+| 2026-09-27 | CP-02: `cargo clippy -p agent-campaign --all-targets --all-features -D warnings` | red once (`redundant_closure`), then green |
+| 2026-09-27 | CP-02: `cargo test -p agent-campaign --features campaign-postgres -- --ignored --test-threads=1` against `nix run .#postgres-up` (podman) | green first run: 157 passed (T3–T8 pg + T14 + T15 + concurrency + durability); the in-gate rstest over `connect_lazy` needed `#[tokio::test]` (the lazy pool spawns on the runtime) |
+| 2026-09-27 | CP-02: `cargo test -p agent-config-store --features config-store-postgres -- --ignored` against the populated campaign schema | green, 33 passed (proves `TRUNCATE … CASCADE`) |
+| 2026-09-27 | CP-02: `cargo fmt --all -- --check` + `cargo clippy --workspace --all-targets --all-features -- -D warnings` | green |
+| 2026-09-27 | CP-02: `CONTAINER_RUNTIME=podman nix run .#pg-integration` ×2 | green both passes (`PASS: … + campaign suites green.`); campaign suite 157/157 each time, ~78 s |
+| 2026-09-27 | CP-02: `nix flake check "git+file:///…/agent-seddon?ref=refs/heads/campaigns/cp-02"` (@ `74c5bcd`) | green, `all checks passed!` |
+| 2026-09-27 | End-to-end verification (plan items 2–3): `06-test-matrix.md` row ids vs `cargo test -- --list` (`mem::tN::<id>`, `pg::tN::<id>`, pg-only fns, T14/T15); relative-link check over `docs/design/campaigns/*.md` | every shared T3–T8 row present on both tiers (134 row ids; 146 mem fns, 135 pg conformance fns + 22 pg-only), T14 10/10 (`adversarial_tenant_string_sql` is the in-gate rstest, not in the `--ignored` list by design), T15 4/4; no broken links |
+| 2026-09-27 | Rebase dry-run in a throwaway worktree: `git rebase --onto campaigns/cp-01 6d7b87f` (the four CP-02 commits over the cp-01 tip, standing in for post-merge `main`) | clean, no conflicts; the real rebase waits for #501 |
+| 2026-09-27 | `main` advanced to `538bb34` (#502, config-store `tenants()` skip scan + one `suite!` row); dry-run `git merge origin/main` into `campaigns/cp-02` in a throwaway worktree | clean; #502 touches only `cards` and does not overlap the CP-02 `TRUNCATE … CASCADE` hunk in the same test file; the post-rebase gate covers the combined tree |
+| 2026-09-27 | #501 merged (`71d4abf`, merge commit); `git rebase --autostash --onto origin/main 6d7b87f campaigns/cp-02` | clean, six commits replayed; `cargo fmt --all -- --check` + `cargo clippy --workspace --all-targets --all-features -- -D warnings` + `cargo test -p agent-campaign --features campaign-postgres` (34 in-gate) green |
+| 2026-09-27 | post-rebase `CONTAINER_RUNTIME=podman nix run .#pg-integration` | green on the combined tree: config-store 34 (33 + #502's `boundary_tenants_dedups_many_per_tenant`, `CASCADE` reset in place), campaign 157/157 (108 s) |
+| 2026-09-27 | post-rebase `nix flake check "git+file:///…/agent-seddon?ref=refs/heads/campaigns/cp-02"` (@ `2cc7fdd`) | green, `all checks passed!` — a cold build (the rebase changed the source hash), ~35 min alongside another nix build on the host |
 
 ## Open questions / blockers
 

@@ -72,6 +72,10 @@ pkgs.writeShellApplication {
     # gates on AGENT_DIGEST_TEST_DSN, and its own versioned runner creates the
     # `digests` table (distinct from the config-store `cards`/`tenants`).
     export AGENT_DIGEST_TEST_DSN="$AGENT_CONFIG_STORE_TEST_DSN"
+    # The campaign store (campaigns CP-02) shares the server and the `tenants`
+    # table; its own versioned runner creates `tasks` / `task_events` /
+    # `task_attempts`, and its suite truncates only those three.
+    export AGENT_CAMPAIGN_TEST_DSN="$AGENT_CONFIG_STORE_TEST_DSN"
 
     echo "==> pg-integration: running the ignored config-store postgres suite"
     set +e
@@ -201,6 +205,19 @@ pkgs.writeShellApplication {
     set -e
     if [ "$rc" -ne 0 ]; then note_fail 2; fi
 
-    contract_exit "PASS: pg-integration — postgres config-store + registry + fleet + prompt + role + per-tenant + scheduler + forge + transport + digest suites green."
+    # The campaign store (campaigns CP-02): `PgCampaigns` proves the `CampaignStore`
+    # contract over the real server — the shared T3–T8 conformance rows (each
+    # followed by the T15 invariants query), T14 multi-tenant isolation, and the
+    # three concurrency cases (two pools, `SKIP LOCKED`, one-winner decompose).
+    echo "==> pg-integration: running the ignored campaign postgres suite"
+    set +e
+    nix develop --extra-experimental-features 'nix-command flakes' -c \
+      cargo test -p agent-campaign --features campaign-postgres \
+      -- --ignored --test-threads=1
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then note_fail 2; fi
+
+    contract_exit "PASS: pg-integration — postgres config-store + registry + fleet + prompt + role + per-tenant + scheduler + forge + transport + digest + campaign suites green."
   '';
 }
