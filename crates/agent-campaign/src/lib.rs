@@ -28,3 +28,7 @@ pub use agent_core::campaign::{
     Actor, CampaignError, CampaignResult, CampaignStore, Policy, Task, TaskId, TaskPath, TaskState,
 };
 pub use display::Letters;
+pub use planner::{
+    BriefSource, FallbackBrief, PlanOutcome, Planned, Planner, SkipReason, StaticBrief,
+    TickSummary, TouchResolver, WorktreeTouches,
+};
