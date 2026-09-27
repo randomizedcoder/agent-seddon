@@ -10,7 +10,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 
 ## Now
 
-- **Next:** CP-02 step 9 — `nix flake check` on the committed `campaigns/cp-02` ref (running); record it below. Then wait on #501: after it merges, `STATUS.md` CP-01 → ✅ #501 + as-built entry, rebase `campaigns/cp-02` onto `main` (`git rebase --onto origin/main campaigns/cp-01 campaigns/cp-02`), rerun the gate, and ask before push / PR (body drafted).
+- **Next:** CP-02 is gate-green on `campaigns/cp-02` @ `74c5bcd` (+ this gate record). Waiting on #501: after it merges, `STATUS.md` CP-01 → ✅ #501 + as-built entry, rebase `campaigns/cp-02` onto `main` (`git rebase --onto origin/main campaigns/cp-01 campaigns/cp-02`), rerun the gate, and ask before push / PR (body drafted).
 
 ## CP-01 — seam, pure rules, `MemCampaigns`, T1–T8 (mem) — 🟡 #501 (branch `campaigns/cp-01`)
 
@@ -53,7 +53,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 | T15 invariants + negatives | ✅ | `INVARIANTS` = one `WITH RECURSIVE … UNION ALL` query (path, depth, campaign/repo, > 8 children, dep not sibling, dep cycle ≤ 9 hops, leaf has children, policy on root only, lease ⇔ state, superseded_by ⇔ state, last event version); negatives plant rows that pass every CHECK |
 | concurrency: `adversarial_double_claim` / `adversarial_concurrent_decompose` / `corner_reap_skips_locked` | ✅ | two pools, `multi_thread` runtime; double_claim releases by back-dating `lease_until` + `reap()` so the history stays valid |
 | `nix/pg-integration.nix` + config-store `TRUNCATE … CASCADE` | ✅ | `AGENT_CAMPAIGN_TEST_DSN` exported; campaign suite block last; `contract_exit` text += campaign; config-store reset is `TRUNCATE cards, tenants CASCADE` |
-| gate: pg suite local, `nix run .#pg-integration` ×2, `nix flake check` | 🟡 | pg suite local green (157); `nix run .#pg-integration` green twice (second pass over the persisted volume, config-store CASCADE proven in place); `nix flake check` on the committed ref pending — see Gate status |
+| gate: pg suite local, `nix run .#pg-integration` ×2, `nix flake check` | ✅ | pg suite local green (157); `nix run .#pg-integration` green twice (second pass over the persisted volume, config-store CASCADE proven in place); `nix flake check` green on the committed ref `74c5bcd` — see Gate status |
 
 ## Decisions log (append-only)
 
@@ -108,6 +108,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 | 2026-09-27 | CP-02: `cargo test -p agent-config-store --features config-store-postgres -- --ignored` against the populated campaign schema | green, 33 passed (proves `TRUNCATE … CASCADE`) |
 | 2026-09-27 | CP-02: `cargo fmt --all -- --check` + `cargo clippy --workspace --all-targets --all-features -- -D warnings` | green |
 | 2026-09-27 | CP-02: `CONTAINER_RUNTIME=podman nix run .#pg-integration` ×2 | green both passes (`PASS: … + campaign suites green.`); campaign suite 157/157 each time, ~78 s |
+| 2026-09-27 | CP-02: `nix flake check "git+file:///…/agent-seddon?ref=refs/heads/campaigns/cp-02"` (@ `74c5bcd`) | green, `all checks passed!` |
 
 ## Open questions / blockers
 
