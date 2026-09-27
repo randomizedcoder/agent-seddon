@@ -41,7 +41,16 @@ use std::collections::HashSet;
 /// Adding a migration = drop the next-numbered `.sql` in `migrations/` and append
 /// its `(n, include_str!(...))` here (the version is the source of truth, not the
 /// filename — no runtime path parsing).
-const MIGRATIONS: &[(i64, &str)] = &[(1, include_str!("../migrations/0001_digests.sql"))];
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, include_str!("../migrations/0001_digests.sql")),
+    // 0002 drops `idx_digests_session_kind_seq`: never chosen by the only read
+    // (the `($2='' OR kind=$2)` filter isn't sargable under generic plans) and
+    // redundant with the PK, so it was pure write-amplification. See the file.
+    (
+        2,
+        include_str!("../migrations/0002_drop_dead_kind_seq_index.sql"),
+    ),
+];
 
 /// A fixed, arbitrary key for the transaction-scoped advisory lock that serializes
 /// concurrent starters through [`PgDigests::run_migrations`] (so two processes
@@ -601,5 +610,28 @@ mod tests {
         PgDigests::run_migrations(&pool)
             .await
             .expect("second migrate no-ops");
+    }
+
+    // corner: after the full migration set, the dead `(session_id, kind, seq)`
+    // index is gone (0002 dropped it) even though 0001 still creates it — the
+    // versioned runner applies both in order. A fresh DB ends with no such index.
+    #[tokio::test]
+    #[ignore = "requires a live Postgres (AGENT_DIGEST_TEST_DSN); run via nix run .#integration"]
+    async fn corner_migrate_drops_dead_kind_seq_index() {
+        let pool = test_pool().await; // runs 0001 then 0002
+        let present: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1 FROM pg_indexes
+                  WHERE tablename = 'digests'
+                    AND indexname = 'idx_digests_session_kind_seq'
+             )",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("query pg_indexes");
+        assert!(
+            !present,
+            "0002 must leave no idx_digests_session_kind_seq on a fully-migrated DB"
+        );
     }
 }
