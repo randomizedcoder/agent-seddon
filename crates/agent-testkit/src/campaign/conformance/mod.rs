@@ -19,6 +19,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 pub mod t3;
+pub mod t4;
+pub mod t5;
 
 type Open = dyn Fn(&str) -> CampaignResult<Arc<dyn CampaignStore>> + Send + Sync;
 
@@ -391,6 +393,64 @@ macro_rules! campaign_conformance_suite {
                 boundary_single_child,
                 boundary_eight_children,
                 boundary_depth6_chain,
+            ]);
+            $crate::__campaign_table!(t4, $make, $after, $ig, [
+                positive_create,
+                positive_draft,
+                positive_tenant_ensured,
+                positive_two_campaigns_distinct_paths,
+                boundary_title_120,
+                boundary_title_121,
+                boundary_goal_4000,
+                boundary_goal_4001,
+                boundary_source_ref_120,
+                negative_empty_title,
+                negative_policy_unknown_key,
+                negative_policy_out_of_range_max_depth,
+                negative_policy_out_of_range_max_children,
+                negative_policy_out_of_range_max_nodes,
+                negative_policy_out_of_range_lease_secs,
+                negative_policy_bad_level_zero,
+                negative_policy_bad_level_seven,
+                corner_policy_omitted,
+                corner_policy_partial,
+                adversarial_tenant_traversal,
+                adversarial_tenant_empty,
+                adversarial_goal_injection,
+                adversarial_created_by_spoof,
+                adversarial_policy_by_model_principal,
+            ]);
+            $crate::__campaign_table!(t5, $make, $after, $ig, [
+                positive_split_three,
+                positive_approval_level,
+                positive_deps_mapped,
+                positive_ordinal_continues,
+                positive_mark_leaf,
+                positive_mark_leaf_gated,
+                positive_inherits_repo_and_campaign,
+                negative_version_conflict,
+                negative_wrong_state,
+                negative_decompose_leaf,
+                negative_dep_unknown_ordinal,
+                negative_dep_self,
+                negative_dep_cycle,
+                negative_dep_chain_cycle,
+                negative_mark_leaf_with_children,
+                boundary_eight_children,
+                boundary_nine_children,
+                boundary_children_plus_existing,
+                boundary_max_children_policy,
+                boundary_max_depth,
+                boundary_max_depth_exceeded,
+                boundary_max_nodes,
+                corner_zero_children,
+                corner_idem_replay,
+                corner_idem_same_key_other_tenant,
+                corner_attempt_exhausted,
+                adversarial_child_path_supplied,
+                adversarial_child_policy,
+                adversarial_parent_other_tenant,
+                adversarial_child_created_by_user,
             ]);
         }
     };
