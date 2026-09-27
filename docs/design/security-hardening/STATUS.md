@@ -18,7 +18,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S9 | Bearer propagation + two-hop chain test | D7 | ✅ | #514 |
 | S10 | mTLS service identity | D6 | ✅ | #516 |
 | S11a | `agent_auth_events` audit stream | D11 | ✅ | #518 |
-| S11b | `doctor` auth probes (signer, JWKS, IdP discovery, session store) | D11 | ⬜ | — |
+| S11b | `doctor` auth probes (signer, JWKS, IdP discovery, session store) | D11 | 🟡 | — |
 | S12 | CLI `agent login/logout/whoami` | D6 | ⬜ | — |
 | S13 | Portal login + capability-aware UI | P0-4 | ⬜ | — |
 | S14 | Envoy hardening + `jwt_authn` | P0-4 | ⬜ | — |
@@ -533,3 +533,29 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
       stamps `now64(3)`.
   - Deferred: attributing a queued `ReviewNow` to its requester still waits for the
     fleet queue to carry the principal.
+- **2026-09-27 — S11b.** `agent doctor` gains four auth probes (`doctor/auth.rs`, behind
+  `agent-runtime/auth`):
+  - `auth.signer`: the signing key and `previous_key` load. The detail is the key id. A key
+    file readable by group or other warns.
+  - `auth.issuer.<name>`: one per login issuer. The key set is fetched through the verifier's
+    own code (`probe_issuer_keys`), via discovery when there is no `jwks_url`.
+    - `HttpJwks::get` and `DiscoveryJwks::discover` now return a reason. It is a short class
+      (HTTP status, could not connect, timed out, not JSON, different issuer, no `jwks_uri`),
+      never the URL.
+    - The verifier still sees `()` and logs the reason.
+  - `auth.sessions`: the session store lists tenants within the timeout. `memory` or unset
+    warns.
+  - `tls.certs`: the listener and client certificates are inside their window, and warn once
+    less than a third of the lifetime is left.
+    - `peer.rs` gains a DER `validity` reader: UTCTime / GeneralizedTime, `Z` only, and an
+      inverted window is refused.
+    - It also gains `pem_certificates` and `cert_file_validity`.
+  - Signer expiry is not probed: `[auth.token]` holds a key, not a certificate.
+  - `issuer_params` moved from `agent-cli` into `agent_runtime::auth_params`, so the serve path
+    and the doctor build the same `IssuerParams`.
+  - Tests:
+    - Graders: the certificate window at the one-third boundary, expired, not yet valid.
+    - Each probe against real files, a real session-store tier, testkit PKI leaves, and the
+      loopback fake OIDC issuer. This covers discovery naming another issuer and URL
+      credentials never echoed.
+    - `der_time` / `validity` tables, including every truncation of a real leaf.

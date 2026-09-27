@@ -71,6 +71,22 @@ wiring crate that already owns `Config` and depends on `agent-telemetry`,
   - **ProviderKeyProbe** — the provider is selected and its API key is resolvable
     (inline / env / file). Present ⇒ Ok; absent ⇒ Warn (a local Ollama needs none)
     — no network.
+- **Auth probes** (`doctor/auth.rs`, built with the `auth` feature; added by
+  [security-hardening S11b](../security-hardening/STATUS.md)):
+  - **`auth.signer`**: `[auth.token] signing_key` (and `previous_key`) load as the
+    token service loads them. The detail is the key id, a public thumbprint. A key
+    file readable by group or other ⇒ Warn. Skipped without `[auth.token]`.
+  - **`auth.issuer.<name>`**, one per login issuer: its key set is fetched through
+    the verifier's own code path, via discovery when there is no `jwks_url`. An empty
+    set, an unreachable host, or discovery naming a different issuer ⇒ Fail. The
+    reason is a short class and never includes the URL.
+  - **`auth.sessions`**: `[auth.token] session_store` answers a tenant listing
+    within the probe timeout. `memory` (or unset) ⇒ Warn, because sessions vanish on
+    restart and are not shared between processes.
+  - **`tls.certs`**: `[grpc.tls] cert` and `[grpc.tls.client] cert` are inside
+    their validity window. It warns once less than a third of the lifetime is left,
+    so a 24-hour step-ca leaf and a one-year certificate are judged alike.
+  - Under `mode = "none"` only `tls.certs` runs.
 - `agent-cli`: `agent doctor` / `--doctor` → `Mode::Doctor`, early-exit printing the
   report; exit non-zero iff `!report.ok()`.
 

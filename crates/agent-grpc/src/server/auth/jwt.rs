@@ -5,7 +5,7 @@ use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use tokio::sync::Mutex;
 
 use super::issuer::{check_fetch_url, KeySource, ResolvedIssuer};
-use super::{AuthParams, TokenVerifier, VerifiedIdentity};
+use super::{AuthParams, IssuerParams, TokenVerifier, VerifiedIdentity};
 
 /// Pinned asymmetric-only algorithm allow-list. Never derived from the token
 /// header — this is what defeats `alg:none` and HS/RS key-confusion.
@@ -50,14 +50,43 @@ pub struct HttpJwks {
     client: reqwest::Client,
 }
 
+impl HttpJwks {
+    /// The set, or a short reason (no response body, no URL credentials) that
+    /// `agent doctor` can show.
+    async fn get(&self) -> Result<JwkSet, String> {
+        let resp = self
+            .client
+            .get(&self.url)
+            .send()
+            .await
+            .map_err(|e| request_failure("key set fetch", &e))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(format!("key set fetch returned HTTP {}", status.as_u16()));
+        }
+        resp.json::<JwkSet>()
+            .await
+            .map_err(|_| "key set is not a JWK set".to_string())
+    }
+}
+
+/// `what` failed: timed out, could not connect, or another transport error. Never
+/// the error text, which can carry the full URL.
+fn request_failure(what: &str, e: &reqwest::Error) -> String {
+    if e.is_timeout() {
+        format!("{what} timed out")
+    } else if e.is_connect() {
+        format!("{what} could not connect")
+    } else {
+        format!("{what} failed")
+    }
+}
+
 #[async_trait::async_trait]
 impl JwksSource for HttpJwks {
     async fn fetch(&self) -> Result<JwkSet, ()> {
-        let resp = self.client.get(&self.url).send().await.map_err(|e| {
-            tracing::warn!(error = %e, "jwks fetch failed");
-        })?;
-        resp.json::<JwkSet>().await.map_err(|e| {
-            tracing::warn!(error = %e, "jwks parse failed");
+        self.get().await.map_err(|reason| {
+            tracing::warn!(%reason, "jwks fetch failed");
         })
     }
 }
@@ -82,30 +111,33 @@ impl DiscoveryJwks {
         }
     }
 
-    async fn discover(&self) -> Result<String, ()> {
+    async fn discover(&self) -> Result<String, String> {
         let url = format!(
             "{}/.well-known/openid-configuration",
             self.issuer.trim_end_matches('/')
         );
-        let doc: serde_json::Value = self
+        let resp = self
             .client
             .get(&url)
             .send()
             .await
-            .map_err(|e| tracing::warn!(error = %e, "oidc discovery fetch failed"))?
+            .map_err(|e| request_failure("discovery fetch", &e))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(format!("discovery returned HTTP {}", status.as_u16()));
+        }
+        let doc: serde_json::Value = resp
             .json()
             .await
-            .map_err(|e| tracing::warn!(error = %e, "oidc discovery parse failed"))?;
+            .map_err(|_| "discovery document is not JSON".to_string())?;
         if doc.get("issuer").and_then(serde_json::Value::as_str) != Some(self.issuer.as_str()) {
-            tracing::warn!(issuer = %self.issuer, "oidc discovery names a different issuer");
-            return Err(());
+            return Err("discovery names a different issuer".into());
         }
         let jwks_uri = doc
             .get("jwks_uri")
             .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| tracing::warn!("oidc discovery has no jwks_uri"))?;
-        check_fetch_url(jwks_uri)
-            .map_err(|e| tracing::warn!(reason = %e, "oidc discovery jwks_uri refused"))?;
+            .ok_or_else(|| "discovery has no jwks_uri".to_string())?;
+        check_fetch_url(jwks_uri).map_err(|e| format!("discovery jwks_uri {e}"))?;
         Ok(jwks_uri.to_string())
     }
 }
@@ -117,7 +149,9 @@ impl JwksSource for DiscoveryJwks {
         let uri = match cached.as_ref() {
             Some(uri) => uri.clone(),
             None => {
-                let uri = self.discover().await?;
+                let uri = self.discover().await.map_err(|reason| {
+                    tracing::warn!(issuer = %self.issuer, %reason, "oidc discovery failed");
+                })?;
                 *cached = Some(uri.clone());
                 uri
             }
@@ -130,6 +164,43 @@ impl JwksSource for DiscoveryJwks {
         .fetch()
         .await
     }
+}
+
+/// What `agent doctor` learned about one login issuer's keys (S11b).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IssuerKeys {
+    /// Found through OIDC discovery rather than a configured `jwks_url`.
+    pub discovered: bool,
+    /// Keys in the published set.
+    pub keys: usize,
+}
+
+/// Fetch one issuer's key set the way the verifier does (the same profile
+/// defaults, discovery rules and URL checks), each request bounded by `timeout`.
+/// The error is a short reason: a config problem, or which step failed and how.
+pub async fn probe_issuer_keys(
+    params: &IssuerParams,
+    timeout: std::time::Duration,
+) -> Result<IssuerKeys, String> {
+    let issuer = ResolvedIssuer::resolve(params)?;
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|_| "http client could not be built".to_string())?;
+    let (url, discovered) = match &issuer.keys {
+        KeySource::Jwks(url) => (url.clone(), false),
+        KeySource::Discovery(iss) => (
+            DiscoveryJwks::new(iss.clone(), client.clone())
+                .discover()
+                .await?,
+            true,
+        ),
+    };
+    let set = HttpJwks { url, client }.get().await?;
+    Ok(IssuerKeys {
+        discovered,
+        keys: set.keys.len(),
+    })
 }
 
 /// The OIDC/JWT [`TokenVerifier`] for **one** issuer: its own key cache, its own

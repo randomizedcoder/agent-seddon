@@ -19,6 +19,10 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// The auth probes (security-hardening S11b).
+#[cfg(feature = "auth")]
+mod auth;
+
 /// Per-probe network dial budget. Generous enough for a slow-but-alive dependency,
 /// short enough that a dead host doesn't stall `agent doctor`.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -83,12 +87,17 @@ pub async fn run(probes: Vec<Arc<dyn Probe>>) -> DoctorReport {
 /// ClickHouse liveness (if telemetry is on), provider API-key resolvability, and a
 /// non-billing provider reachability ping.
 pub fn probes_for(config: &Config) -> Vec<Arc<dyn Probe>> {
-    vec![
+    #[allow(unused_mut)] // extended only with the `auth` feature
+    let mut probes: Vec<Arc<dyn Probe>> = vec![
         Arc::new(ConfigProbe::new(config)),
         Arc::new(ClickHouseProbe::new(config)),
         Arc::new(ProviderKeyProbe::new(config)),
         Arc::new(ProviderReachProbe::new(config)),
-    ]
+    ];
+    // Token signer, login issuers, session store, TLS certificates (S11b).
+    #[cfg(feature = "auth")]
+    probes.extend(auth::probes_for(config));
+    probes
 }
 
 /// Resolve the provider's API key to its value (inline > env > file), or empty if
