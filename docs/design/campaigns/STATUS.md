@@ -3,13 +3,13 @@
 Legend: ✅ merged · 🟡 in progress · ⬜ not started · ❌ dropped
 
 Design: [`README.md`](README.md) · sequence: [`05-increments.md`](05-increments.md) · tests:
-[`06-test-matrix.md`](06-test-matrix.md) · source:
+[`06-test-matrix.md`](06-test-matrix.md) · progress journal: [`PROGRESS.md`](PROGRESS.md) · source:
 [self-improvement gap analysis](../../gap-analysis/self-improvement.md) §3 SI-11.
 
 | # | Increment | Closes | State | PR |
 |---|---|---|---|---|
-| CP-00 | This track, SI-11 in the gap analysis, index links | — | 🟡 | — |
-| CP-01 | `CampaignStore` seam, path grammar, `allowed()`, rollup, policy, `MemCampaigns` | SI-11 | ⬜ | — |
+| CP-00 | This track, SI-11 in the gap analysis, index links | — | ✅ | #495 |
+| CP-01 | `CampaignStore` seam, path grammar, `allowed()`, rollup, policy, `MemCampaigns` | SI-11 | 🟡 | `campaigns/cp-01` |
 | CP-02 | `PgCampaigns`, migration 0001, protocols (a)–(g), live suite, invariants query | SI-11 | ⬜ | — |
 | CP-03 | Planner: prompt, schema, validation, caps, `needs_info` / `reject`, fallback brief | SI-11 | ⬜ | — |
 | CP-04 | CLI `agent campaign …` | SI-11 | ⬜ | — |
@@ -22,7 +22,7 @@ Design: [`README.md`](README.md) · sequence: [`05-increments.md`](05-increments
 
 ## As-built log
 
-- **2026-09-26 — CP-00 (this PR).** Opened the track from
+- **2026-09-26 — CP-00 (#495).** Opened the track from
   [`gap-analysis/self-improvement.md`](../../gap-analysis/self-improvement.md) SI-11. Decisions
   D1–D10 in [`README.md`](README.md); DDL in [`01-schema.md`](01-schema.md); protocols in
   [`02-transactions.md`](02-transactions.md); test matrices T1–T16 in

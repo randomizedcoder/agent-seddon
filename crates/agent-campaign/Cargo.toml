@@ -1,0 +1,19 @@
+[package]
+name = "agent-campaign"
+version.workspace = true
+publish.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Campaigns (docs/design/campaigns): the pure rules and the `CampaignStore` seam live
+# in `agent_core::campaign`; this crate holds what only a consumer needs (display
+# letters) and, from CP-02, the Postgres tier behind `campaign-postgres`.
+
+[dependencies]
+agent-core.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
+
+[lints]
+workspace = true
