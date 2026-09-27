@@ -7,6 +7,9 @@
 //!   * `digest-sqlite` — a single-file ledger for server-less environments.
 //!   * `digest-clickhouse` — the default deployment target: append-only
 //!     `MergeTree`, durable `async_insert` writes.
+//!   * `digest-postgres` — the OLTP alternative over a real Postgres server
+//!     (`sqlx`), for operators who already run one Postgres and want no
+//!     ClickHouse dependency; runtime-checked queries, `#[ignore]`-gated tests.
 //!
 //! **Every stored field is untrusted** (the writer is an LLM; with a `grpc`
 //! backend the reader is remote too): ids are `safe_segment`-validated, text and
@@ -24,6 +27,11 @@ pub use sqlite::SqliteDigests;
 mod clickhouse;
 #[cfg(feature = "digest-clickhouse")]
 pub use clickhouse::ClickHouseDigests;
+
+#[cfg(feature = "digest-postgres")]
+mod postgres;
+#[cfg(feature = "digest-postgres")]
+pub use postgres::PgDigests;
 
 /// Deterministic, realistic corpora for tests and benches (phase-shaped summaries
 /// on the section-locked template, facts, alternatives, objectives). Also used by

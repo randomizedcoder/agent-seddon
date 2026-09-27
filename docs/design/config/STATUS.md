@@ -256,6 +256,27 @@ compare-and-swap, retiring the legacy `*-sqlite` impls). Eleven gated PRs off `m
   never error, never perturb a real collection). Test-only, one crate; the parity invariant is now a
   gate-enforced guard against sqlite/file/postgres silently diverging.
 
+- **PG-07 — digest Postgres backend (crate-local).** The cognition-graph digest ledger
+  (`docs/design/cognition-graph/02-background-distiller.md`) had a hermetic SQLite tier and the
+  ClickHouse scale tier, but no OLTP Postgres option for an operator who already runs one Postgres and
+  wants no ClickHouse dependency. This adds `crates/agent-digest/src/postgres.rs` (`PgDigests` impl
+  `DigestStore` via `sqlx`, behind the off-by-default `digest-postgres` feature) mirroring
+  `SqliteDigests` semantics exactly: the shared `sanitize`/`sanitize_query`/`keyword_match` helpers (so
+  ids/tenants are `safe_segment`-validated before binding and text/keywords are size-capped in Rust),
+  `INSERT … ON CONFLICT (session_id, seq, kind) DO UPDATE` as the replace-in-place, the same
+  `user_id`-scoped read (empty = unscoped/single-tenant), the Rust keyword prefilter *after* the SQL
+  fetch and *before* the caller's limit, the `MAX_QUERY_LIMIT` server cap, and the fail-closed decode
+  (unknown-kind/corrupt row skipped, not fatal). New `crates/agent-digest/migrations/0001_digests.sql`
+  translates the SQLite DDL (BIGINT counters so the full `u32`/`u64` range the SQLite `INTEGER` tier
+  accepts is preserved; the same `kind` closed-set CHECK; PK `(session_id, seq, kind)` + the
+  `(session_id, kind, seq)` read index). Schema is applied by a small in-crate **versioned runner**
+  (`PgDigests::run_migrations`, advisory-locked, `_digest_migrations` ledger) — the same
+  exactly-once mechanism as the config-store tier, and for the same reason: **no `sqlx/migrate` /
+  `sqlx/macros`** (they pull `sqlx-mysql` → `rsa`/RUSTSEC-2023-0071). Queries are runtime-checked
+  (`sqlx::query`), so the crate compiles under the feature with no `DATABASE_URL`; the ported
+  behavioural + `adversarial_` tests are `#[ignore]`-gated on `AGENT_DIGEST_TEST_DSN` and run only via
+  `nix run .#integration` (wired in PG-08). Crate-local; no runtime wiring yet.
+
 ## Non-goals
 
 - Removing TOML (bootstrap stays TOML).
