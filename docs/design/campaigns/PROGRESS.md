@@ -10,7 +10,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 
 ## Now
 
-- **Next:** CP-01 step 13 — `nix flake check` (+ workspace clippy `--all-features`, `fmt --check`); record the gate below; then ask before push / PR.
+- **Next:** CP-01 is gate-green on `campaigns/cp-01` @ `89ecaaf`; waiting on the go-ahead to push and open the PR. After it merges: branch `campaigns/cp-02` from `main`, CP-02 step 1.
 
 ## CP-01 — seam, pure rules, `MemCampaigns`, T1–T8 (mem) — 🟡 branch `campaigns/cp-01`
 
@@ -34,7 +34,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 | T7 complete / fail (mem) | ✅ | rows: 19/19; two doc amendments for step 12: `adversarial_pr_url_long` is `TooLong` (the cap class, like `boundary_title_121`), not `Invalid`; `positive_failed_does_not_block_done_dependent` uses a `cancelled` dependent (a dependent is never `done` before its dependency, and `done` never fails) and also checks a non-dependent `ready` sibling is untouched |
 | T8 approve / answer / retry / cancel / replan (mem) | ✅ | rows: 25/25; `positive_retry_blocked_task` found a store bug — a planner `blocked` (`plan_start` caps, `plan_close` reject / attempts exhausted) did not roll up; fixed in `MemCampaigns` and logged below for `PgCampaigns`; `adversarial_actor_from_arg` sweeps every non-human `Actor` variant over the seven human protocols |
 | doc amendments (02 transitions, 03 attempt note, 05 row, 06 harness/dims) | ✅ | 02: (b) inputs + step 1 / step 3 comments (attempt row inside the finishing tx), planner-`blocked` rollup paragraph; 03: step 1 (no attempt row at `plan_start`, `blocked` rolls up); 05: CP-01 row (pure rules in `agent_core::campaign`, `agent-campaign` = display letters); 06: harness bullets (`campaign_conformance_suite!`, suffixed rows), T7 `adversarial_pr_url_long` → `TooLong`, `positive_failed_does_not_block_done_dependent` wording; testkit `lib.rs` doc bullets (step 11) |
-| gate `nix flake check` | ⬜ | |
+| gate `nix flake check` | ✅ | 2026-09-26, green first run against the committed ref (see Gate status); an earlier dirty-tree run failed only in `portal-report-tests` because the working tree carries unrelated, uncommitted `test/**` deletions (`Path 'test/portal-report' does not exist in Git repository`) — not this branch; workspace clippy `--all-features` first surfaced the exhaustive `Error::Campaign` match in `agent-proto` (`89ecaaf`) |
 
 ## CP-02 — `PgCampaigns`, migration 0001, live suite, invariants, pg-integration — ⬜
 
@@ -89,6 +89,9 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 
 | When | Command | Result |
 |---|---|---|
+| 2026-09-26 | `cargo fmt --all -- --check` (dev shell) | green |
+| 2026-09-26 | `cargo clippy --workspace --all-targets --all-features -- -D warnings` (dev shell) | red once (`E0004` non-exhaustive `Error::Campaign` in `agent-proto`, fixed in `89ecaaf`), then green |
+| 2026-09-26 | `nix flake check "git+file:///…/agent-seddon?ref=refs/heads/campaigns/cp-01"` (@ `89ecaaf`) | green, `all checks passed!`; the dirty-tree form failed in `portal-report-tests` for the unrelated uncommitted `test/**` deletions, so the gate runs against the committed ref |
 
 ## Open questions / blockers
 
