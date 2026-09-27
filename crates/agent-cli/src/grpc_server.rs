@@ -862,7 +862,9 @@ fn install_authz_observer(agent: &Agent) {
 ///
 /// It first applies the startup listen policy for `listen` (security-hardening S1):
 /// `mode = "none"` on a non-loopback address refuses to start unless
-/// `[auth] allow_insecure_listen = true`, which warns instead.
+/// `[auth] allow_insecure_listen = true`, which warns instead. It then sets the
+/// per-service identity policy (S2) from `[auth] require_identity`, defaulted per
+/// listener by [`require_identity`].
 fn auth_layer(agent: &Agent, listen: &Endpoint) -> anyhow::Result<agent_grpc::server::AuthLayer> {
     let a = agent.grpc_auth();
     let posture = agent_grpc::server::listen_posture(&a.mode, a.allow_insecure_listen, listen)
@@ -883,8 +885,19 @@ fn auth_layer(agent: &Agent, listen: &Endpoint) -> anyhow::Result<agent_grpc::se
         roles_claim: a.roles_claim.clone(),
         leeway_secs: a.leeway_secs,
     })
-    .map(|layer| layer.with_observer(Some(auth_verify_observer(agent))))
+    .map(|layer| {
+        layer
+            .with_observer(Some(auth_verify_observer(agent)))
+            .with_require_identity(require_identity(a.require_identity, listen))
+    })
     .map_err(anyhow::Error::msg)
+}
+
+/// `[auth] require_identity`, defaulted per listener: on for a routable address,
+/// off for loopback and unix sockets, where the host is the trust boundary and the
+/// local tools and harnesses send no identity.
+fn require_identity(configured: Option<bool>, listen: &Endpoint) -> bool {
+    configured.unwrap_or_else(|| !listen.is_local())
 }
 
 pub async fn serve_session_observe(agent: &Agent, listen: Endpoint) -> anyhow::Result<()> {
@@ -1612,5 +1625,21 @@ mod tests {
     #[case::adversarial_prefix_only("--serve-", None)]
     fn from_flag_cases(#[case] flag: &str, #[case] want: Option<Seam>) {
         assert_eq!(Seam::from_flag(flag), want);
+    }
+
+    #[rstest]
+    #[case::positive_routable_defaults_on(None, "0.0.0.0:50051", true)]
+    #[case::boundary_loopback_default_require_false(None, "127.0.0.1:50051", false)]
+    #[case::corner_uds_defaults_off(None, "unix:///run/agent.sock", false)]
+    #[case::negative_explicit_off_on_routable(Some(false), "0.0.0.0:50051", false)]
+    #[case::positive_explicit_on_loopback(Some(true), "127.0.0.1:50051", true)]
+    #[case::adversarial_localhost_name_counts_as_remote(None, "localhost:50051", true)]
+    fn require_identity_cases(
+        #[case] configured: Option<bool>,
+        #[case] listen: &str,
+        #[case] want: bool,
+    ) {
+        let ep = Endpoint::parse(listen);
+        assert_eq!(super::require_identity(configured, &ep), want);
     }
 }

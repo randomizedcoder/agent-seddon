@@ -54,6 +54,7 @@ mod forge;
 mod forge_registry;
 mod graph;
 mod health;
+mod identity_policy;
 mod llm_pool;
 mod lsp;
 mod memory;
@@ -94,6 +95,7 @@ pub use forge::*;
 pub use forge_registry::*;
 pub use graph::*;
 pub use health::*;
+pub use identity_policy::{class_of, IdentityClass};
 pub use llm_pool::*;
 pub use lsp::*;
 pub use memory::*;
@@ -166,14 +168,23 @@ pub(crate) fn missing(field: &'static str) -> Status {
 /// (there is no auth layer — see docs/design/multi-session/07-security.md), so this
 /// fails closed to `None` on anything malformed rather than sanitizing.
 ///
-/// `None` means "run under the default `local` tenant" — a client that sends no
-/// identity keeps today's single-tenant behaviour (back-compat). Per-seam *rejection*
-/// of absent identity is a later increment; here absence is simply the default tenant.
+/// `None` means the handler runs unscoped: under a verified principal that is the
+/// token's tenant ([`agent_core::current_tenant`] prefers the principal); with no
+/// principal it is the default `local` tenant. Tenant-keyed services never get here
+/// without a session while identity is enforced — the auth layer's
+/// [`identity_policy::admit`] rejects them first (security-hardening S2).
 pub(crate) fn identity_key(meta: &tonic::metadata::MetadataMap) -> Option<agent_core::SessionKey> {
     let (user, session) = agent_proto::identity::extract_identity(meta);
     let user = user.filter(|u| agent_core::safe_segment(u))?;
     let session = session.filter(|s| agent_core::safe_segment(s))?;
     agent_core::SessionKey::parse(&user, &session).ok()
+}
+
+/// The caller's tenant for a handler that filters by it directly: the verified
+/// principal's tenant when one is in scope, else the `user` of `key`. `None` names
+/// no tenant (callers fail closed to an empty result).
+pub(crate) fn request_tenant(key: Option<&agent_core::SessionKey>) -> Option<String> {
+    agent_core::scoped_tenant().or_else(|| key.map(|k| k.user.as_str().to_string()))
 }
 
 /// Run `fut` with the caller's ambient identity scoped, so a stateful backend that

@@ -1115,6 +1115,13 @@ job         = "agent-seddon"
 # Loopback TCP and unix sockets are unaffected. `allow_insecure_listen = true`
 # accepts the risk and warns on every start.
 #
+# Tenant-keyed services (memory, prompts, registries, fleet, search, …) reject a
+# call that names no session (`x-agent-session-id`) with UNAUTHENTICATED instead of
+# running it as the shared `local` tenant. That check always applies to a call
+# with a verified token (whose tenant wins over any header), and applies to
+# token-less calls when `require_identity` is on: by default for a non-loopback
+# listener, off for loopback TCP and unix sockets.
+#
 # [auth]
 # mode         = "oidc"                                 # "none" (default) | "oidc"
 # issuer       = "https://issuer.example.com"           # expected `iss`
@@ -1124,6 +1131,7 @@ job         = "agent-seddon"
 # roles_claim  = "roles"                                # claim → roles (default "roles")
 # leeway_secs  = 60                                     # accepted exp/nbf clock skew (max 300)
 # allow_insecure_listen = false                         # permit mode="none" on 0.0.0.0 (warns)
+# require_identity = true                               # default: on off-loopback, off on loopback/uds
 
 # [tenancy] — the per-tenant config plane (config C35 / C2). When `per_tenant =
 # true`, the converged shared-store control-plane seams (provider-registry, review-

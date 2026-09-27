@@ -2,7 +2,9 @@
 #
 # This is the source of truth `nix run .#mt-audit` reconciles the source against
 # (the constants-sync / buf-image governance shape). When you add a gRPC service or a
-# metric family, classify it HERE or the audit flags it as unclassified drift.
+# metric family, classify it HERE or the audit flags it as unclassified drift. A service
+# also needs the SAME class in `class_of` (crates/agent-grpc/src/server/identity_policy.rs),
+# which decides which calls must name a session (sub-check 5, identity-policy).
 #
 # service class: scoped | field-scoped | stateless | operator-global | single-store
 #   scoped        every RPC calls identity_key + run_scoped (ambient tenant routing)

@@ -9,8 +9,8 @@ point is drift detection: as the agent grows new gRPC services and new metric fa
 each new element must be *classified* in the manifest, or the audit flags it — so
 tenancy coverage can never silently regress.
 
-Four sub-checks (each maps to one plane of the multi-tenancy design,
-``docs/design/multi-tenancy/``):
+Five sub-checks (the first four map to the planes of the multi-tenancy design,
+``docs/design/multi-tenancy/``; the fifth to security-hardening S2):
 
 1. **services** — every served gRPC handler in ``crates/agent-grpc/src/server/*.rs`` is
    classified in the manifest as ``scoped`` (must call ``identity_key`` + ``run_scoped``),
@@ -36,6 +36,11 @@ Four sub-checks (each maps to one plane of the multi-tenancy design,
 4. **config-ownership** — ``tenant_writable_config_sections()`` still matches the manifest
    (the C29 empty-set invariant: ``agent.toml`` is operator-global), and the
    ``ConfigService`` tenant-write rejection is present.
+5. **identity-policy** — the runtime ``class_of`` match in
+   ``crates/agent-grpc/src/server/identity_policy.rs`` (which decides which services reject
+   a call that names no session) classifies exactly the manifest's services, each with the
+   manifest's class. A service in one but not the other, or with a different class, is
+   drift: the gate and the running server would disagree about which calls need identity.
 
 Usage::
 
@@ -182,8 +187,8 @@ def parse_metric_families(text: str) -> set[str]:
 
 @dataclass
 class Finding:
-    check: str  # services | metrics | spans-logs | config
-    kind: str  # not-scoped | unclassified | manifest-stale | mechanism-missing | config-mismatch
+    check: str  # services | metrics | spans-logs | config | identity-policy
+    kind: str  # not-scoped | unclassified | manifest-stale | mechanism-missing | config-mismatch | policy-missing | policy-drift
     subject: str
     message: str
     expected: bool = False  # matches a manifest known_issue → labeled, still a finding
@@ -406,6 +411,61 @@ def check_config_ownership(text: str, manifest: dict) -> list[Finding]:
     return findings
 
 
+# identity_policy.rs `IdentityClass` variant → manifest class (the same closed vocabulary).
+IDENTITY_CLASS_NAMES = {
+    "Scoped": "scoped",
+    "FieldScoped": "field-scoped",
+    "Stateless": "stateless",
+    "OperatorGlobal": "operator-global",
+    "SingleStore": "single-store",
+}
+
+_CLASS_OF_RE = re.compile(r"fn\s+class_of\s*\([^)]*\)[^\{]*\{")
+_ARM_RE = re.compile(r'(?P<names>"[A-Za-z0-9]+"(?:\s*\|\s*"[A-Za-z0-9]+")*)\s*=>\s*(?P<cls>[A-Za-z]+)\b')
+
+
+def parse_identity_classes(text: str) -> dict[str, str] | None:
+    """The ``service → class`` map of ``class_of`` in identity_policy.rs, with classes in
+    manifest spelling. ``None`` when the function is absent. An arm whose variant is not an
+    ``IdentityClass`` maps to ``?<Variant>`` so the check reports it rather than dropping it."""
+    text = strip_test_module(text)
+    m = _CLASS_OF_RE.search(text)
+    if not m:
+        return None
+    body = text[m.end() : _block_end(text, m.end() - 1)]
+    out: dict[str, str] = {}
+    for arm in _ARM_RE.finditer(body):
+        cls = IDENTITY_CLASS_NAMES.get(arm.group("cls"), "?" + arm.group("cls"))
+        for name in re.findall(r'"([A-Za-z0-9]+)"', arm.group("names")):
+            out[name] = cls
+    return out
+
+
+def check_identity_policy(runtime: dict[str, str] | None, manifest: dict) -> list[Finding]:
+    """Sub-check 5: the runtime identity policy equals the manifest classes."""
+    check = "identity-policy"
+    if runtime is None:
+        return [
+            Finding(check, "mechanism-missing", "class_of",
+                    "identity_policy.rs no longer defines `class_of`")
+        ]
+    findings: list[Finding] = []
+    expected = {name: spec.get("class", "") for name, spec in manifest.get("services", {}).items()}
+    for name in sorted(expected.keys() - runtime.keys()):
+        findings.append(Finding(check, "policy-missing", name,
+                                f"`{name}` is in the manifest but not in `class_of`: "
+                                "the server rejects it while identity is enforced"))
+    for name in sorted(runtime.keys() - expected.keys()):
+        findings.append(Finding(check, "unclassified", name,
+                                f"`class_of` classifies `{name}` but the manifest does not"))
+    for name in sorted(runtime.keys() & expected.keys()):
+        if runtime[name] != expected[name]:
+            findings.append(Finding(check, "policy-drift", name,
+                                    f"`class_of` says `{runtime[name]}`, manifest says "
+                                    f"`{expected[name]}`"))
+    return findings
+
+
 # --------------------------------------------------------------------------------------
 # Orchestration + I/O
 # --------------------------------------------------------------------------------------
@@ -432,6 +492,7 @@ def run_audit(root: Path, manifest: dict) -> list[Finding]:
     metrics_rs = read(root, "crates/agent-metrics/src/lib.rs")
     families = parse_metric_families(metrics_rs)
     config_rs = read(root, "crates/agent-runtime/src/config.rs")
+    policy_rs = server_files.get("crates/agent-grpc/src/server/identity_policy.rs", "")
 
     anchor_checks = ("spans-logs", "config", "metrics")
     anchor_files: dict[str, str] = {}
@@ -448,6 +509,7 @@ def run_audit(root: Path, manifest: dict) -> list[Finding]:
     for check in anchor_checks:
         findings += check_anchors(anchor_files, manifest, check)
     findings += check_config_ownership(config_rs, manifest)
+    findings += check_identity_policy(parse_identity_classes(policy_rs), manifest)
     return findings
 
 

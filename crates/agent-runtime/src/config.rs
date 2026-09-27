@@ -2618,6 +2618,13 @@ pub struct AuthCfg {
     /// listeners never need it.
     #[serde(default)]
     pub allow_insecure_listen: bool,
+    /// Reject calls to tenant-keyed services (memory, prompts, registries, …) that
+    /// name no `(tenant, session)` identity, instead of running them as the shared
+    /// `local` tenant. Unset: on for a routable listener, off for loopback and unix
+    /// sockets (so local tools and harnesses keep working). A verified bearer token
+    /// always applies the check.
+    #[serde(default)]
+    pub require_identity: Option<bool>,
 }
 
 impl AuthCfg {

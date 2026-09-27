@@ -22,6 +22,13 @@
 //! [`listen_posture`] is the startup twin: `mode = "none"` is only allowed on a
 //! loopback or unix-socket listener unless `allow_insecure_listen` is set.
 //!
+//! ## Identity policy (security-hardening S2)
+//! After verification — or, without a verifier, when `require_identity` is set —
+//! the layer applies [`super::identity_policy::admit`]: a call to a tenant-keyed
+//! service that names no session is rejected `UNAUTHENTICATED`, and a service with
+//! no identity class is rejected `PERMISSION_DENIED`, instead of either running
+//! unscoped as the shared `local` tenant.
+//!
 //! ## What is verified (standard OIDC bearer), all fail-closed
 //! - Signature against the issuer's **JWKS** (fetched + cached; a `kid` miss forces
 //!   one refetch, so key rotation is honoured).
@@ -93,6 +100,9 @@ pub struct AuthLayer {
     verifier: Option<Arc<dyn TokenVerifier>>,
     /// Invoked on every verify with `ok`/`error` (serve path bridges to the metric).
     on_verify: Option<AuthObserver>,
+    /// Enforce the per-service identity policy even without a verifier
+    /// (`[auth] require_identity`). A verified principal always enforces it.
+    require_identity: bool,
 }
 
 impl AuthLayer {
@@ -103,6 +113,7 @@ impl AuthLayer {
         Self {
             verifier: None,
             on_verify: None,
+            require_identity: false,
         }
     }
 
@@ -111,6 +122,7 @@ impl AuthLayer {
         Self {
             verifier: Some(verifier),
             on_verify: None,
+            require_identity: false,
         }
     }
 
@@ -119,6 +131,15 @@ impl AuthLayer {
     /// (pass-through) layer never verifies, so the observer is simply never called.
     pub fn with_observer(mut self, on_verify: Option<AuthObserver>) -> Self {
         self.on_verify = on_verify;
+        self
+    }
+
+    /// Enforce the per-service identity policy ([`super::identity_policy::admit`])
+    /// on calls that carry no verified principal — `[auth] require_identity`,
+    /// defaulted per listener by the serve path (on for routable addresses, off for
+    /// loopback and unix sockets). Calls with a principal are always checked.
+    pub fn with_require_identity(mut self, require_identity: bool) -> Self {
+        self.require_identity = require_identity;
         self
     }
 
@@ -209,18 +230,22 @@ impl<S> Layer<S> for AuthLayer {
             inner,
             verifier: self.verifier.clone(),
             on_verify: self.on_verify.clone(),
+            require_identity: self.require_identity,
         }
     }
 }
 
 /// The middleware service. On a verified token it rewrites `x-agent-user-id` to the
-/// verified tenant before calling the inner service; on failure it returns an opaque
-/// `UNAUTHENTICATED`; when disabled it is a pass-through.
+/// verified tenant and applies the identity policy before calling the inner service;
+/// on failure it returns an opaque `UNAUTHENTICATED`. Without a verifier it applies
+/// only the identity policy, and only when `require_identity` is set; otherwise it is
+/// a pass-through.
 #[derive(Clone)]
 pub struct Auth<S> {
     inner: S,
     verifier: Option<Arc<dyn TokenVerifier>>,
     on_verify: Option<AuthObserver>,
+    require_identity: bool,
 }
 
 /// Paths served without authentication: standard health + reflection, so an
@@ -261,16 +286,23 @@ where
         let clone = self.inner.clone();
         let mut inner = std::mem::replace(&mut self.inner, clone);
 
+        // Health/reflection probes never carry a token or an identity.
+        if is_exempt(req.uri().path()) {
+            return Box::pin(async move { inner.call(req).await });
+        }
         let verifier = match &self.verifier {
+            None if self.require_identity => {
+                return match super::identity_policy::admit(req.uri().path(), req.headers(), false) {
+                    Ok(()) => Box::pin(async move { inner.call(req).await }),
+                    Err(rejected) => {
+                        Box::pin(async move { Ok(rejected.into_status().into_http()) })
+                    }
+                };
+            }
             None => return Box::pin(async move { inner.call(req).await }), // disabled
             Some(v) => v.clone(),
         };
         let on_verify = self.on_verify.clone();
-
-        // Health/reflection probes never carry a token.
-        if is_exempt(req.uri().path()) {
-            return Box::pin(async move { inner.call(req).await });
-        }
 
         Box::pin(async move {
             let Some(token) = bearer_token(req.headers()) else {
@@ -289,6 +321,13 @@ where
                     req.headers_mut().remove(&name);
                     if let Ok(v) = http::HeaderValue::from_str(&id.tenant) {
                         req.headers_mut().insert(name, v);
+                    }
+                    // A tenant-keyed service needs a session too; without one the
+                    // call would run as the bare tenant with no session partition.
+                    if let Err(rejected) =
+                        super::identity_policy::admit(req.uri().path(), req.headers(), true)
+                    {
+                        return Ok(rejected.into_status().into_http());
                     }
                     // Install the verified principal (tenant + subject + roles) into the
                     // ambient scope for the whole handler, so the RBAC gate

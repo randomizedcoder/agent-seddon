@@ -110,6 +110,8 @@ pub struct GrpcAuthSettings {
     /// `[auth] allow_insecure_listen`: permit `mode = "none"` on a non-loopback
     /// listener (warned on every start). Checked by the serve path's listen policy.
     pub allow_insecure_listen: bool,
+    /// `[auth] require_identity`; `None` ⇒ the serve path defaults it per listener.
+    pub require_identity: Option<bool>,
 }
 
 /// How the scheduler is wired (config C2c-2). The registry half is served either

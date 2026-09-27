@@ -426,7 +426,8 @@ pub(crate) fn file_alternatives(
         }
         let row = Digest {
             session_id: key.session.as_str().to_string(),
-            user_id: key.user.as_str().to_string(),
+            // The verified tenant (principal first), same rule as every router.
+            user_id: agent_core::current_tenant(),
             seq: ts.saturating_add(i as u64),
             kind: DigestKind::Alternatives,
             text,

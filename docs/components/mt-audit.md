@@ -14,7 +14,8 @@ and `buf breaking` (a committed image moved only on a deliberate, reviewed diff)
 
 ## What it checks
 
-Each sub-check maps to a plane of the [multi-tenancy design](../design/multi-tenancy/):
+Sub-checks 1–4 map to the planes of the [multi-tenancy design](../design/multi-tenancy/);
+sub-check 5 to [security-hardening](../design/security-hardening/05-identity-and-tenancy.md) S2:
 
 1. **services** — every served gRPC handler in `crates/agent-grpc/src/server/*.rs` is
    classified in the manifest as:
@@ -47,6 +48,15 @@ Each sub-check maps to a plane of the [multi-tenancy design](../design/multi-ten
 4. **config-ownership** — `tenant_writable_config_sections()` still matches the manifest (the
    C29 empty-set invariant: `agent.toml` is operator-global), and the `ConfigService`
    tenant-write rejection is present.
+5. **identity-policy** — the runtime `class_of` match in
+   [`identity_policy.rs`](../../crates/agent-grpc/src/server/identity_policy.rs) classifies
+   exactly the manifest's services with the manifest's classes. That match is what the auth
+   layer uses to reject a session-less call to a `scoped` or `single-store` service (and any
+   unclassified service) while identity is enforced, so a mismatch means the server and the
+   audit disagree about which calls need identity. Findings: `policy-missing` (in the
+   manifest, not in `class_of`), `unclassified` (the reverse), `policy-drift` (different
+   class). A Rust test separately asserts every service in `agent_proto::method_paths()` has
+   a class.
 
 ## Usage
 

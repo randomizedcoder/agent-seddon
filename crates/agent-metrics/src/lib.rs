@@ -2924,10 +2924,7 @@ impl FleetRepoLru {
 /// [`SessionMetrics`]; these decorator families have no such handle, so the ambient read
 /// is the natural, DRY fit.
 fn ambient_tenant() -> String {
-    agent_core::current_identity()
-        .map(|k| k.user.as_str().to_string())
-        .filter(|u| agent_core::safe_segment(u))
-        .unwrap_or_default()
+    agent_core::scoped_tenant().unwrap_or_default()
 }
 
 /// The LRU cap on distinct `tenant` label values, shared by every tenant-labelled
