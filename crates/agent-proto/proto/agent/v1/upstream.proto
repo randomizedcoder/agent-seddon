@@ -19,6 +19,10 @@ package agent.v1;
 
 import "agent/v1/common.proto"; // TaskMode, PoolTier, RouteRole, RouteHint
 import "agent/v1/llm_pool.proto"; // PoolMemberState
+// REST transcoding annotations (gap-analysis §4, docs/design/rest-openapi/). The
+// `(google.api.http)` options below let Envoy's `grpc_json_transcoder` expose the
+// service as REST/JSON without any Rust code; gRPC stays the primary interface.
+import "google/api/annotations.proto";
 
 // One routable upstream definition + metadata — the "model card". Mirrors
 // `agent_core::Upstream`. Persisted by the registry stores; `UpstreamHealth`
@@ -148,13 +152,53 @@ message UpstreamHealthList {
 // The registry control plane (mirrors PromptService / SchedulerService: one
 // process holds the fleet while any number of agents drive it).
 service ProviderRegistryService {
-  rpc List(UpstreamListRequest) returns (UpstreamList);
-  rpc Get(UpstreamRef) returns (Upstream);
-  rpc Put(Upstream) returns (Upstream); // upsert = create + update
-  rpc Delete(UpstreamRef) returns (UpstreamDeleteReply);
-  rpc Enable(UpstreamEnableRequest) returns (Upstream); // toggle without a full Put
-  rpc GetPolicy(RoutePolicyRef) returns (RoutePolicy);
-  rpc PutPolicy(RoutePolicy) returns (RoutePolicy);
-  rpc Route(RouteRequest) returns (RouteDecision); // introspection: no dispatch
-  rpc Health(UpstreamHealthRequest) returns (UpstreamHealthList);
+  // REST mappings (docs/design/rest-openapi/): reads → GET, deletes → DELETE by id,
+  // every other mutation/action → POST with `body: "*"`. This is the model-router
+  // registry (the portal's "Router" tab), so paths live under /v1/router/: upstream
+  // CRUD under /v1/router/upstreams, the router-wide policy + introspection at the
+  // /v1/router/ root.
+  rpc List(UpstreamListRequest) returns (UpstreamList) {
+    option (google.api.http) = {get: "/v1/router/upstreams"};
+  }
+  rpc Get(UpstreamRef) returns (Upstream) {
+    option (google.api.http) = {get: "/v1/router/upstreams/{id}"};
+  }
+  rpc Put(Upstream) returns (Upstream) {
+    // upsert = create + update
+    option (google.api.http) = {
+      post: "/v1/router/upstreams"
+      body: "*"
+    };
+  }
+  rpc Delete(UpstreamRef) returns (UpstreamDeleteReply) {
+    option (google.api.http) = {delete: "/v1/router/upstreams/{id}"};
+  }
+  rpc Enable(UpstreamEnableRequest) returns (Upstream) {
+    // toggle without a full Put
+    option (google.api.http) = {
+      post: "/v1/router/upstreams/{id}/enable"
+      body: "*"
+    };
+  }
+  rpc GetPolicy(RoutePolicyRef) returns (RoutePolicy) {
+    option (google.api.http) = {get: "/v1/router/policy"};
+  }
+  rpc PutPolicy(RoutePolicy) returns (RoutePolicy) {
+    option (google.api.http) = {
+      post: "/v1/router/policy"
+      body: "*"
+    };
+  }
+  // Introspection (no dispatch): a read whose request carries a nested `RouteHint`
+  // message → POST body:"*" (per the composite/nested-body convention), still
+  // side-effect-free.
+  rpc Route(RouteRequest) returns (RouteDecision) {
+    option (google.api.http) = {
+      post: "/v1/router/route"
+      body: "*"
+    };
+  }
+  rpc Health(UpstreamHealthRequest) returns (UpstreamHealthList) {
+    option (google.api.http) = {get: "/v1/router/health"};
+  }
 }

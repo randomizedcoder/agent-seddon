@@ -45,8 +45,8 @@ added, it fires as a reminder to list it here as gRPC-only.
 | Batch | Proto group | Status |
 |---|---|:--:|
 | 03a | `review_fleet.proto` (ReviewFleetService, 11 RPCs) | ✅ merged (#515) |
-| 03b | `prompt.proto`, `role.proto`, `config.proto` (control plane) | 🟡 in flight |
-| 03c | `forge_registry.proto`, `transport_registry.proto`, `upstream.proto` (registries) | ⬜ |
+| 03b | `prompt.proto`, `role.proto`, `config.proto` (control plane) | ✅ merged (#517) |
+| 03c | `forge_registry.proto`, `transport_registry.proto`, `upstream.proto` (registries) | 🟡 in flight |
 | 03d | `repo.proto`, `search.proto`, `ast.proto` (code intelligence) | ⬜ |
 | 03e | `session.proto`, `session_registry.proto`, `agent_session.proto`, `scheduler.proto` | ⬜ |
 | 03f | `tool.proto`, `exec.proto`, `web.proto`, `forge.proto` (TaskService) | ⬜ |
@@ -89,3 +89,12 @@ added, it fires as a reminder to list it here as gRPC-only.
   `/v1/config/validate`). Added 5 class-tagged coverage rows (role-Get mirror, config-Put write,
   prompt-Get two-param corner, Select repeated-scalar GET, config-schema paramless sub-path); the
   whole-set uniqueness/versioning/streaming invariants cover the rest automatically.
+- **03c (registries: forge / transport / provider-router).** Annotated
+  `ForgeRegistryService` (`/v1/forges/`) and `TransportRegistryService` (`/v1/transports/`) — both
+  straight CRUD mirrors of the fleet-session shape — and `ProviderRegistryService`, the model-router
+  registry (the portal's "Router" tab), under `/v1/router/`: upstream CRUD + toggle under
+  `/v1/router/upstreams` (`Enable` → `/v1/router/upstreams/{id}/enable`), the router-wide policy at
+  `/v1/router/policy` (GET/POST), `Health` → GET `/v1/router/health`, and `Route` introspection →
+  POST `/v1/router/route` (read-only but its request nests a `RouteHint`, so the nested-body-read
+  convention maps it to POST, not GET). Added 3 class-tagged coverage rows (forge-Get third mirror,
+  upstream-Enable nested toggle, Route nested-body-read → POST).

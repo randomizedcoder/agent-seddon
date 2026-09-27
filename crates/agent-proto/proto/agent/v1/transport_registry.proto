@@ -27,6 +27,11 @@ syntax = "proto3";
 
 package agent.v1;
 
+// REST transcoding annotations (gap-analysis §4, docs/design/rest-openapi/). The
+// `(google.api.http)` options below let Envoy's `grpc_json_transcoder` expose the
+// service as REST/JSON without any Rust code; gRPC stays the primary interface.
+import "google/api/annotations.proto";
+
 // One channel binding: which channel, for which purpose.
 message ChannelBinding {
   // The channel/room/thread id (server-validated: non-empty, bounded).
@@ -78,8 +83,22 @@ message TransportDeleteReply {
 // RBAC enforcement core (C1) — a caller needs a role granting `(write|delete,
 // transport_registry)`.
 service TransportRegistryService {
-  rpc List(TransportListRequest) returns (TransportList);
-  rpc Get(TransportRef) returns (TransportCard);
-  rpc Put(TransportCard) returns (TransportCard); // upsert = create + update
-  rpc Delete(TransportRef) returns (TransportDeleteReply);
+  // REST mappings (docs/design/rest-openapi/): reads → GET, deletes → DELETE by id,
+  // upsert → POST with `body: "*"`. Paths live under /v1/transports/.
+  rpc List(TransportListRequest) returns (TransportList) {
+    option (google.api.http) = {get: "/v1/transports"};
+  }
+  rpc Get(TransportRef) returns (TransportCard) {
+    option (google.api.http) = {get: "/v1/transports/{id}"};
+  }
+  rpc Put(TransportCard) returns (TransportCard) {
+    // upsert = create + update
+    option (google.api.http) = {
+      post: "/v1/transports"
+      body: "*"
+    };
+  }
+  rpc Delete(TransportRef) returns (TransportDeleteReply) {
+    option (google.api.http) = {delete: "/v1/transports/{id}"};
+  }
 }
