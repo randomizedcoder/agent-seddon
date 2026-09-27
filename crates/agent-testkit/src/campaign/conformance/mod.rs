@@ -22,6 +22,7 @@ pub mod t3;
 pub mod t4;
 pub mod t5;
 pub mod t6;
+pub mod t7;
 
 type Open = dyn Fn(&str) -> CampaignResult<Arc<dyn CampaignStore>> + Send + Sync;
 
@@ -476,6 +477,27 @@ macro_rules! campaign_conformance_suite {
                 adversarial_owner_forged,
                 adversarial_lease_negative,
                 adversarial_owner_empty,
+            ]);
+            $crate::__campaign_table!(t7, $make, $after, $ig, [
+                positive_in_review,
+                positive_done_rollup,
+                positive_failed_blocks_dependents,
+                positive_failed_does_not_block_done_dependent,
+                negative_owner_mismatch,
+                negative_not_running,
+                negative_poller_wrong_state,
+                corner_lease_expired_same_owner,
+                corner_pr_fields_on_failed,
+                corner_timeout_outcome,
+                boundary_error_2000,
+                boundary_error_2001,
+                boundary_tokens_zero,
+                adversarial_error_injection,
+                adversarial_error_control_chars,
+                adversarial_pr_url_scheme,
+                adversarial_pr_url_long,
+                adversarial_tokens_negative,
+                adversarial_cross_tenant_complete,
             ]);
         }
     };
