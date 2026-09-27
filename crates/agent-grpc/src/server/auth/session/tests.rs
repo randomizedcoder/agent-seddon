@@ -416,3 +416,104 @@ async fn card_validation_cases(#[case] break_it: fn(&mut AuthSession)) {
     break_it(&mut s);
     assert!(s.validate().is_err());
 }
+
+// --- audit events (S11) ------------------------------------------------------------
+
+use crate::server::audit::capture::Capture;
+
+/// A revocation records one row: `logout` when the subject ends their own
+/// session, `revoke` (naming who did it) otherwise.
+#[rstest]
+#[case::positive_own_logout(true, "logout", AuthEventKind::Logout, "logout", false)]
+#[case::positive_operator_revoke(false, "operator", AuthEventKind::Revoke, "operator", true)]
+#[case::corner_logout_by_someone_else_is_a_revoke(
+    false,
+    "logout",
+    AuthEventKind::Revoke,
+    "logout",
+    true
+)]
+#[case::negative_reuse_is_a_revoke(true, "reuse", AuthEventKind::Revoke, "reuse", true)]
+#[case::adversarial_unknown_reason_is_closed(
+    false,
+    "evil\nreason",
+    AuthEventKind::Revoke,
+    "other",
+    true
+)]
+#[tokio::test]
+async fn revoke_records_one_event(
+    #[case] by_self: bool,
+    #[case] reason: &str,
+    #[case] kind: AuthEventKind,
+    #[case] label: &str,
+    #[case] names_target: bool,
+) {
+    let f = fixture();
+    let (s, _) = open(&f, "acme").await;
+    let by = if by_self {
+        s.subject.clone()
+    } else {
+        "user:google/op".to_string()
+    };
+    let cap = Capture::start();
+    assert!(f.store.revoke("acme", &s.sid, &by, reason).await.unwrap());
+    let got = cap.take();
+    assert_eq!(got.len(), 1, "{got:?}");
+    let e = &got[0];
+    assert_eq!((e.kind, e.reason), (kind, label));
+    assert_eq!(
+        (e.tenant.as_str(), e.sid.as_str()),
+        ("acme", s.sid.as_str())
+    );
+    assert_eq!(e.subject, s.subject);
+    assert_eq!(!e.target.is_empty(), names_target);
+}
+
+/// Nothing revoked, nothing recorded.
+#[rstest]
+#[case::negative_unknown_sid("acme", "nope")]
+#[case::adversarial_traversal_tenant("../acme", "s")]
+#[tokio::test]
+async fn revoke_of_nothing_records_nothing(#[case] tenant: &str, #[case] sid: &str) {
+    let f = fixture();
+    let cap = Capture::start();
+    assert!(!f.store.revoke(tenant, sid, "x", "logout").await.unwrap());
+    assert!(cap.take().is_empty());
+}
+
+#[rstest]
+#[case::positive_login(AuthEventKind::Login, "login")]
+#[case::positive_refresh(AuthEventKind::Refresh, "refresh")]
+#[tokio::test]
+async fn session_event_names_the_session(#[case] kind: AuthEventKind, #[case] want: &str) {
+    let f = fixture();
+    let (s, _) = open(&f, "acme").await;
+    let e = session_event(kind, &s);
+    assert_eq!(e.kind.as_str(), want);
+    assert_eq!(
+        (e.tenant.as_str(), e.sid.as_str()),
+        ("acme", s.sid.as_str())
+    );
+    assert_eq!(e.issuer, "google");
+    assert_eq!(e.client_kind, "portal");
+    assert_eq!(e.amr, s.amr.join(","));
+    assert!(e.peer_san.is_empty(), "a person's session has no peer SAN");
+}
+
+#[rstest]
+#[case::positive_invalid(RefreshError::Invalid, "refresh_invalid")]
+#[case::negative_reused(RefreshError::Reused, "refresh_reused")]
+#[case::corner_raced(RefreshError::Raced, "refresh_raced")]
+#[case::adversarial_store_error_text_not_leaked(RefreshError::Store("secret dsn".into()), "store_unavailable")]
+fn refresh_error_labels(#[case] e: RefreshError, #[case] want: &str) {
+    assert_eq!(e.label(), want);
+}
+
+#[rstest]
+#[case::positive_known("binding", "binding")]
+#[case::boundary_empty("", "other")]
+#[case::adversarial_case_folded("LOGOUT", "other")]
+fn revoke_reason_label_cases(#[case] raw: &str, #[case] want: &str) {
+    assert_eq!(revoke_reason_label(raw), want);
+}

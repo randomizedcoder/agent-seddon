@@ -15,7 +15,7 @@ tables. Tracker: [`STATUS.md`](STATUS.md).
 | S8 | `RoleBinding` card + RPCs, exchange-time resolution, `operator_subjects`, escalation and lockout rules, revoke-on-change | D3, D9 | S6, S7 |
 | S9 | Propagation: `outbound()` forwards `AGENT_BEARER` else the `BearerSource` service token; `x-agent-hops`; spawn-site re-scope + grep gate; two-hop in-process chain test | D7 | S5 |
 | S10 | mTLS service identity: `PeerVerifier`, `[auth.mtls] bindings`, `Exchange{client_cert}` service tokens with `cnf`, non-loopback plaintext refusal | D6 (machine) | S4, S5, S9 |
-| S11 | Audit stream: `agent_auth_events` table + policy + writer hooks for every auth / authz / binding event; `doctor` probes (signer cert, JWKS, IdP discovery, session store) | D11 | S6, S8 |
+| S11 | Audit stream: `agent_auth_events` table + policy + writer hooks for every auth / authz / binding event; `doctor` probes (signer cert, JWKS, IdP discovery, session store). Built as S11a (audit) and S11b (probes) | D11 | S6, S8 |
 | S12 | CLI: `BearerSource` token file, `agent login/logout/whoami` (device flow → `Exchange`), `[grpc.client] bearer` | D6 (human) | S6 |
 | S13 | Portal login: `AuthState`, `AuthInterceptor`, `LoginPage`, callback, capability-aware controls, Layer-A fakes | P0-4 (portal) | S6, S8 |
 | S14 | Envoy hardening: loopback bind, exact-origin CORS, `authorization`, `jwt_authn` against the agent JWKS, `PORTAL_AUTH=off`, `--mode validate` check, portal-e2e under auth, optional TLS / mTLS contexts | P0-4 | S5, S13 |

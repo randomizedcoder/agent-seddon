@@ -970,6 +970,9 @@ pub use rbac::*;
 // The inbound bearer + request-scope re-install helper — see request_scope.rs.
 mod request_scope;
 pub use request_scope::*;
+// The authentication audit trail (S11) — see audit.rs.
+mod audit;
+pub use audit::*;
 
 mod forge_card;
 pub use forge_card::*;

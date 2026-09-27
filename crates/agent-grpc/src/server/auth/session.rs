@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use agent_config_store::{is_conflict, Backend, Card, Store, Write};
-use agent_core::safe_segment;
+use agent_core::{record_auth_event, safe_segment, AuthEvent, AuthEventKind};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use ring::rand::{SecureRandom, SystemRandom};
@@ -200,6 +200,69 @@ struct Opened<'a> {
     kind: &'a str,
     meta: &'a str,
     lifetime_secs: u64,
+}
+
+/// The audit row for a revocation (S11): `logout` when the session's own subject
+/// ended it, else `revoke` with the bounded reason.
+pub(crate) fn revoke_event(session: &AuthSession, by: &str, reason: &str) -> AuthEvent {
+    let kind = if reason == "logout" && by == session.subject {
+        AuthEventKind::Logout
+    } else {
+        AuthEventKind::Revoke
+    };
+    AuthEvent {
+        tenant: session.tenant.clone(),
+        sid: session.sid.clone(),
+        subject: session.subject.clone(),
+        issuer: session.issuer.clone(),
+        client_kind: session.client_kind.clone(),
+        peer_san: session.peer_san.clone().unwrap_or_default(),
+        target: if kind == AuthEventKind::Revoke {
+            client_meta(by)
+        } else {
+            String::new()
+        },
+        reason: revoke_reason_label(reason),
+        ..AuthEvent::new(kind)
+    }
+}
+
+/// A revocation reason as a closed label for the audit column.
+pub(crate) fn revoke_reason_label(reason: &str) -> &'static str {
+    match reason {
+        "logout" => "logout",
+        "operator" => "operator",
+        "reuse" => "reuse",
+        "binding" => "binding",
+        _ => "other",
+    }
+}
+
+/// The audit row for a session that just minted a token (S11): `login` from
+/// `Exchange`, `refresh` from `Refresh`.
+pub(crate) fn session_event(kind: AuthEventKind, session: &AuthSession) -> AuthEvent {
+    AuthEvent {
+        tenant: session.tenant.clone(),
+        sid: session.sid.clone(),
+        subject: session.subject.clone(),
+        issuer: session.issuer.clone(),
+        amr: session.amr.join(","),
+        client_kind: session.client_kind.clone(),
+        peer_san: session.peer_san.clone().unwrap_or_default(),
+        ..AuthEvent::new(kind)
+    }
+}
+
+impl RefreshError {
+    /// The audit reason for a refused refresh.
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            RefreshError::Invalid => "refresh_invalid",
+            RefreshError::Reused => "refresh_reused",
+            RefreshError::Raced => "refresh_raced",
+            RefreshError::Store(_) => "store_unavailable",
+        }
+    }
 }
 
 /// Why a refresh was refused. All map to the same opaque `UNAUTHENTICATED`.
@@ -494,12 +557,14 @@ impl SessionStore {
         session.revoked_by = client_meta(by);
         // A plain put: a refresh racing this revoke either lands first (and is then
         // overwritten as revoked) or fails its compare-and-swap.
+        let event = revoke_event(&session, by, reason);
         self.store
             .put(tenant, session)
             .await
             .map_err(|e| format!("revoking the session: {e}"))?;
         self.remember(tenant, sid, now, false);
         tracing::info!(%tenant, %sid, %reason, "auth session revoked");
+        record_auth_event(event);
         Ok(true)
     }
 

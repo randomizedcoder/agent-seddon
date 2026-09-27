@@ -33,10 +33,25 @@ pub use otel::{otlp_layer, OtelConfig, OtelGuard};
 pub use recall::ClickHouseRecall;
 
 use rows::{
-    DimensionRow, EventRow, ReviewCollectorRow, ReviewDraftRow, ReviewFeedbackRow, ReviewRow,
-    ReviewToolRow, UsageRow, VerificationRow,
+    AuthEventRow, DimensionRow, EventRow, ReviewCollectorRow, ReviewDraftRow, ReviewFeedbackRow,
+    ReviewRow, ReviewToolRow, UsageRow, VerificationRow,
 };
 use writer::{Msg, WriterConfig, TARGET};
+
+/// The W3C trace id (32 lowercase hex) of the current span, or `""` when the
+/// span carries no valid OpenTelemetry context.
+fn current_trace_id() -> String {
+    use opentelemetry::trace::TraceContextExt;
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+    let context = tracing::Span::current().context();
+    let span = context.span();
+    let sc = span.span_context();
+    if sc.is_valid() {
+        sc.trace_id().to_string()
+    } else {
+        String::new()
+    }
+}
 
 /// Bounded channel size. Overflow drops rows rather than blocking the loop.
 const CHANNEL_CAPACITY: usize = 16_384;
@@ -150,6 +165,20 @@ impl TelemetryHandle {
         }
     }
 
+    /// Record one authentication/authorization event (`agent_auth_events`,
+    /// security-hardening S11). Stamped with the current time, the handle's
+    /// sequence (ties within a millisecond) and the trace id of the span it was
+    /// recorded in, so an audit row joins the request's OTLP trace.
+    pub fn record_auth_event(&self, event: agent_core::AuthEvent) {
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+        self.send(Msg::AuthEvent(AuthEventRow::from_event(
+            event,
+            rows::now_ms(),
+            seq,
+            current_trace_id(),
+        )));
+    }
+
     pub(crate) fn record_log(&self, row: rows::LogRow) {
         self.send(Msg::Log(row));
     }
@@ -176,5 +205,78 @@ impl TelemetryHandle {
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod auth_event_tests {
+    use super::*;
+    use agent_core::{AuthEvent, AuthEventKind};
+    use opentelemetry::trace::TracerProvider as _;
+    use rstest::rstest;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    fn take(rx: &mut mpsc::Receiver<Msg>) -> rows::AuthEventRow {
+        match rx.try_recv() {
+            Ok(Msg::AuthEvent(row)) => row,
+            Ok(_) => panic!("expected an auth-event row, got another message"),
+            Err(e) => panic!("expected an auth-event row: {e}"),
+        }
+    }
+
+    #[rstest]
+    #[case::positive_one_row_per_event(AuthEventKind::Login, "login")]
+    #[case::positive_denial_row(AuthEventKind::AuthzDeny, "authz_deny")]
+    #[case::corner_role_change_row(AuthEventKind::RoleDelete, "role_delete")]
+    fn record_auth_event_routes_to_its_table(#[case] kind: AuthEventKind, #[case] want: &str) {
+        let (handle, mut rx) = TelemetryHandle::for_test("s");
+        handle.record_auth_event(AuthEvent::new(kind));
+        let row = take(&mut rx);
+        assert_eq!(row.event, want);
+        assert!(row.trace_id.is_empty(), "no span, no trace id");
+        assert!(rx.try_recv().is_err(), "exactly one row");
+    }
+
+    /// Two events in the same millisecond still order: `seq` advances per row.
+    #[rstest]
+    #[case::boundary_seq_advances(3)]
+    fn record_auth_event_sequences(#[case] n: u32) {
+        let (handle, mut rx) = TelemetryHandle::for_test("s");
+        for _ in 0..n {
+            handle.record_auth_event(AuthEvent::new(AuthEventKind::Refresh));
+        }
+        let seqs: Vec<u32> = (0..n).map(|_| take(&mut rx).seq).collect();
+        assert_eq!(seqs, (0..n).collect::<Vec<_>>());
+    }
+
+    /// Inside an OpenTelemetry span the row carries that trace's id, so it joins
+    /// `otel_traces`.
+    #[rstest]
+    #[case::positive_trace_id_from_current_span()]
+    fn record_auth_event_carries_the_trace_id() {
+        let provider = opentelemetry_sdk::trace::TracerProvider::builder().build();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("t")));
+        let (handle, mut rx) = TelemetryHandle::for_test("s");
+        tracing::subscriber::with_default(subscriber, || {
+            let _g = tracing::info_span!("rpc").entered();
+            handle.record_auth_event(AuthEvent::new(AuthEventKind::AuthzAllow));
+        });
+        let row = take(&mut rx);
+        assert_eq!(row.trace_id.len(), 32);
+        assert!(row.trace_id.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(row.trace_id, "0".repeat(32));
+    }
+
+    /// A full channel drops the row rather than blocking the request path.
+    #[rstest]
+    #[case::adversarial_flood_never_blocks(CHANNEL_CAPACITY + 10)]
+    fn record_auth_event_drops_on_overflow(#[case] n: usize) {
+        let (handle, rx) = TelemetryHandle::for_test("s");
+        for _ in 0..n {
+            handle.record_auth_event(AuthEvent::new(AuthEventKind::VerifyFail));
+        }
+        assert_eq!(rx.len(), CHANNEL_CAPACITY);
+        assert!(handle.warned.load(Ordering::Relaxed));
     }
 }

@@ -17,7 +17,8 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S8 | Role bindings, bootstrap, escalation rules | D3, D9 | ✅ | #511 |
 | S9 | Bearer propagation + two-hop chain test | D7 | ✅ | #514 |
 | S10 | mTLS service identity | D6 | ✅ | #516 |
-| S11 | `agent_auth_events` audit + doctor probes | D11 | ⬜ | — |
+| S11a | `agent_auth_events` audit stream | D11 | ✅ | #518 |
+| S11b | `doctor` auth probes (signer, JWKS, IdP discovery, session store) | D11 | ⬜ | — |
 | S12 | CLI `agent login/logout/whoami` | D6 | ⬜ | — |
 | S13 | Portal login + capability-aware UI | P0-4 | ⬜ | — |
 | S14 | Envoy hardening + `jwt_authn` | P0-4 | ⬜ | — |
@@ -496,3 +497,39 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
       claims (malformed = rejected), service sessions, the listen posture, and the config tables.
   - Deferred: a queued `ReviewNow` attributed to its requester (S11, with the audit rows);
     `step ca renew` and the `step-ca` daemon (S15).
+- **2026-09-27 — S11a (#518).** S11 is split in two: the audit stream (here) and the `doctor`
+  probes (S11b).
+  - `agent_core::audit`: the `AuthEvent` type and a process-global sink.
+    `record_auth_event` strips control characters and caps every text field at 256 bytes.
+  - The serve path emits:
+    - `AuthLayer` refusals;
+    - gate decisions, and the handler checks in `authz::decide_on_span`;
+    - permission-management refusals;
+    - `Exchange` / `Refresh` (success and every refusal reason);
+    - session revocation (`logout` for your own session, else `revoke` naming who did it);
+    - role and binding writes.
+  - `agent` forwards the events to `TelemetryHandle::record_auth_event`, which adds the
+    trace id and writes to `agent.agent_auth_events`: `ORDER BY (user, ts, seq)`, kept
+    400 days.
+    - `tenant_iso_auth_events` (excluding `''`) applies to `agent_reader`;
+      `operator_all_auth_events` to the writer, viewer and admin.
+    - The RLS harness has four new rows (own tenant, viewer sees all, cross-tenant
+      refused, unproven refusals hidden).
+  - The gate's session-liveness check now runs before the permission, so an allow row
+    always means the call went ahead.
+  - Tests:
+    - `server/audit.rs` tables: `rpc_label` against forged paths, decision filtering,
+      target and peer SAN.
+    - Revocation events, refresh labels and reason labels.
+    - Layer rows through the served stack.
+    - Rows and handle in `agent-telemetry`, including the trace id under a real
+      OpenTelemetry layer.
+    - `tests/auth_token.rs` over a real listener: the login → refresh → logout →
+      `session_not_live` sequence; refused exchanges; binding put/delete; a gate denial.
+    - Live (`nix run .#ch-integration`, podman on l2): the RLS rows, and a new ignored
+      round-trip test. It writes as `agent_writer` through the real telemetry writer,
+      then reads as `agent_reader`, which sees only its tenant's row. This exercise also
+      showed that a row with the default 1970 `ts` is dropped by the TTL, so the seed
+      stamps `now64(3)`.
+  - Deferred: attributing a queued `ReviewNow` to its requester still waits for the
+    fleet queue to carry the principal.

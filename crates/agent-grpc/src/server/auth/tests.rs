@@ -769,3 +769,66 @@ fn inbound_hops_cases(#[case] raw: Option<&[u8]>, #[case] want: Result<u8, tonic
     }
     assert_eq!(super::inbound_hops(&headers).map_err(|s| s.code()), want);
 }
+
+// ===================== audit rows from the served stack (S11) =====================
+
+/// What the layer records for one request: refused credentials name the reason
+/// (and nothing the caller merely claimed); a gate denial names the verified
+/// tenant and the permission; an exempt path records nothing.
+#[rstest::rstest]
+// desc: no bearer at all.
+#[case::negative_no_token("/agent.v1.ConfigService/Put", None, Some(("verify_fail", "no_token", "")))]
+// desc: a token that does not verify (garbage).
+#[case::negative_invalid_token("/agent.v1.ConfigService/Put", Some("not-a-jwt"), Some(("verify_fail", "invalid_token", "")))]
+// desc: a verified reader asking for a config write is denied at the gate.
+#[case::positive_gate_denial_names_the_tenant("/agent.v1.ConfigService/Put", Some("reader"), Some(("authz_deny", "", "acme")))]
+// desc: health is exempt: no credential needed, no row written.
+#[case::corner_exempt_path_records_nothing("/grpc.health.v1.Health/Check", None, None)]
+#[tokio::test]
+async fn layer_audit_cases(
+    #[case] path: &str,
+    #[case] token: Option<&str>,
+    #[case] want: Option<(&str, &str, &str)>,
+) {
+    let bearer = token.map(|t| match t {
+        "reader" => mint(KID, &claims_with_roles("acme", &["reader"])),
+        other => other.to_string(),
+    });
+    let auth = bearer.as_ref().map(|b| format!("Bearer {b}"));
+    let mut headers = vec![("x-agent-session-id", "s1")];
+    if let Some(a) = auth.as_deref() {
+        headers.push(("authorization", a));
+    }
+    let cap = crate::server::audit::capture::Capture::start();
+    let _ = drive(&enabled_layer(), request(path, &headers)).await;
+    let got = cap.take();
+    match want {
+        None => assert!(got.is_empty(), "{got:?}"),
+        Some((kind, reason, tenant)) => {
+            assert_eq!(got.len(), 1, "{got:?}");
+            assert_eq!(got[0].kind.as_str(), kind);
+            assert_eq!(got[0].reason, reason);
+            assert_eq!(got[0].tenant, tenant);
+            assert_eq!(got[0].rpc, path);
+        }
+    }
+}
+
+/// A forged tenant header and an invented path cannot steer the row: the refusal
+/// names no tenant and no path.
+#[tokio::test]
+async fn adversarial_refusal_row_ignores_claimed_identity_and_forged_path() {
+    let cap = crate::server::audit::capture::Capture::start();
+    let _ = drive(
+        &enabled_layer(),
+        request(
+            "/agent.v1.NoSuchService/Anything",
+            &[("x-agent-user-id", "victim"), ("x-agent-session-id", "s1")],
+        ),
+    )
+    .await;
+    let got = cap.take();
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(got[0].tenant, "");
+    assert_eq!(got[0].rpc, "");
+}

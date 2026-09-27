@@ -93,7 +93,12 @@ fn denied() -> Status {
 /// a `Public` or `Authenticated` gate needs nothing more. Every permission
 /// decision reaches the [`AuthzObserver`], with bounded enum labels (no tenant).
 #[allow(clippy::result_large_err)]
-pub(crate) fn gate(path: &str, principal: &VerifiedPrincipal) -> Result<(), Status> {
+pub(crate) fn gate(
+    path: &str,
+    principal: &VerifiedPrincipal,
+    peer_san: Option<&str>,
+    sid: &str,
+) -> Result<(), Status> {
     let Some(gate) = super::authz_policy::rpc_of(path)
         .and_then(|(service, method)| super::authz_policy::gate_of(service, method))
     else {
@@ -107,6 +112,18 @@ pub(crate) fn gate(path: &str, principal: &VerifiedPrincipal) -> Result<(), Stat
     if let Some(observer) = AUTHZ_OBSERVER.get() {
         observer(action, resource_type, allow);
     }
+    super::audit::decision(
+        principal,
+        action,
+        resource_type,
+        &principal.tenant,
+        allow,
+        super::audit::At {
+            rpc: path,
+            peer_san,
+            sid,
+        },
+    );
     if allow {
         Ok(())
     } else {
@@ -151,8 +168,24 @@ pub(crate) fn require_in(
 /// The wire status for a permission-management refusal (security-hardening S8).
 /// Escalation, host-global and self-binding refusals are the same opaque
 /// `PermissionDenied` as any other denial; the reason is logged.
-pub(crate) fn refusal_status(refusal: agent_core::GrantRefusal, what: &str) -> Status {
-    tracing::info!(reason = refusal.as_str(), %what, "permission-management write refused");
+pub(crate) fn refusal_status(
+    refusal: agent_core::GrantRefusal,
+    action: Action,
+    resource_type: ResourceType,
+) -> Status {
+    tracing::info!(
+        reason = refusal.as_str(),
+        what = resource_type.as_str(),
+        "permission-management write refused"
+    );
+    if current_principal().is_some() {
+        agent_core::record_auth_event(agent_core::AuthEvent {
+            action: action.as_str(),
+            resource_type: resource_type.as_str(),
+            reason: refusal.as_str(),
+            ..super::audit::caller_event(agent_core::AuthEventKind::AuthzDeny)
+        });
+    }
     match refusal {
         agent_core::GrantRefusal::UnknownRole => Status::invalid_argument("unknown role"),
         agent_core::GrantRefusal::LastAdmin => Status::failed_precondition(
@@ -172,6 +205,21 @@ fn decide_on_span(
     tenant: &str,
 ) -> Result<(), Status> {
     let allow = allowed(principal, action, resource_type, tenant);
+    // A handler-level check: the layer already recorded the RPC's own gate, so
+    // this row has no RPC of its own.
+    let (peer_san, sid) = (super::auth::current_peer_san(), super::auth::current_sid());
+    super::audit::decision(
+        principal,
+        action,
+        resource_type,
+        tenant,
+        allow,
+        super::audit::At {
+            rpc: "",
+            peer_san: peer_san.as_deref(),
+            sid: &sid,
+        },
+    );
     // Record on the ambient `grpc.server` span (which already carries `tenant`),
     // so the decision is filterable per trace. Bounded enum names only.
     let span = tracing::Span::current();
@@ -239,7 +287,7 @@ mod tests {
     ) -> (bool, Vec<(Action, ResourceType, bool)>) {
         install_forwarding_observer();
         SINK.with(|s| *s.borrow_mut() = Some(Vec::new()));
-        let ok = gate(path, principal).is_ok();
+        let ok = gate(path, principal, None, "").is_ok();
         (ok, SINK.with(|s| s.borrow_mut().take().unwrap_or_default()))
     }
 
@@ -370,7 +418,7 @@ mod tests {
     )]
     fn gate_by_persona(#[case] role: &str, #[case] path: &str, #[case] want: bool) {
         let roles: &[&str] = if role == ROLE_NONE { &[] } else { &[role] };
-        let got = gate(path, &principal("acme", roles));
+        let got = gate(path, &principal("acme", roles), None, "");
         assert_eq!(got.is_ok(), want, "{role} {path}");
         if let Err(e) = got {
             assert_eq!(e.code(), tonic::Code::PermissionDenied);
