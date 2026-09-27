@@ -16,9 +16,13 @@
 //! * [`bench`] — deterministic input fixtures shared by benches + larger tests.
 //! * [`observe`] — assert observability: metric deltas ([`observe::MetricsProbe`])
 //!   and emitted spans ([`observe::captured_spans`]).
+//! * `oidc` (feature `oidc`) — a fake OIDC issuer (discovery + JWKS on loopback)
+//!   and fixed test signing keys, for authentication tests.
 
 pub mod bench;
 pub mod observe;
+#[cfg(feature = "oidc")]
+pub mod oidc;
 
 use agent_core::{
     BlobContent, Checkpoint, CommitInfo, CompletionRequest, CompletionResponse, ContextInput,

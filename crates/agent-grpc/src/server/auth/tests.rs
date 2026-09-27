@@ -11,48 +11,20 @@
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 
+use agent_testkit::oidc::TestKey;
 use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use tonic::body::BoxBody;
 use tonic::codegen::http;
 use tower::{Layer, Service};
 
+use super::issuer::ResolvedIssuer;
 use super::jwt::{Clock, JwksSource, JwtVerifier};
 use super::{AuthLayer, AuthParams, TokenVerifier};
 
-// --- embedded hermetic fixtures (generated offline, test-only) ---------------
+// --- hermetic fixtures: the shared test keys from `agent_testkit::oidc` ---------
 
 const KID: &str = "test-key-1";
-const N_B64URL: &str = "1MqZq25Ke9ylA-FeB0rTsk91t6zRm5CF2yawoMZ9r0IrYFeq9zWzn0Ph-5uPlTDkdUEalGzS-TW7WhEI3Z7fNx-bl5NIqr_FleIYcG7pQ91l0Vm9cssqDH5yJfdgQXFpqri8XIIiTB2BZrnbXebRXwLY3k12RfmdmO5WLJPEY_UOcfpFuTZEbkAU-VCf0CFHaOpwK-1zZ2LTezn9wVV5EQtumMGhSdqvPbY_tw3eetAZlJ_8qDcQ5IT2mBIAQy05ABRLfnn0tugS53sQwe243sFltNhZpMDDIiXww7LlrdZeN5DgJpBkg3nrl3yzGyQJY6iCwq--iJ0q9XZOU1yaNw";
-const E_B64URL: &str = "AQAB";
-const PRIV_PEM: &str = "-----BEGIN PRIVATE KEY-----
-MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDUypmrbkp73KUD
-4V4HStOyT3W3rNGbkIXbJrCgxn2vQitgV6r3NbOfQ+H7m4+VMOR1QRqUbNL5Nbta
-EQjdnt83H5uXk0iqv8WV4hhwbulD3WXRWb1yyyoMfnIl92BBcWmquLxcgiJMHYFm
-udtd5tFfAtjeTXZF+Z2Y7lYsk8Rj9Q5x+kW5NkRuQBT5UJ/QIUdo6nAr7XNnYtN7
-Of3BVXkRC26YwaFJ2q89tj+3Dd560BmUn/yoNxDkhPaYEgBDLTkAFEt+efS26BLn
-exDB7bjewWW02FmkwMMiJfDDsuWt1l43kOAmkGSDeeuXfLMbJAljqILCr76InSr1
-dk5TXJo3AgMBAAECggEADkm2TMkAjlWP7PVGe4XeNhRYyqb7gg8PtdngtULusIRo
-ZjUswSGleHW16E+XMgTQ6kCfWMT/24Tsmg0Xw83Fni1spJ5anEB5M2m1i2MfHZPx
-oL9+VYVnwuQApST5nRtQ5Yo2950zUVoP1MZ5ANKdT1xhFHguD1/F4b1rIt4fKzjr
-Th2TLnbrUPIWmkxibZOU7bz6e+JKLtWHxWuG6fSWXkHn2VHQGXM+u9zUUF07hPS4
-Rzto7fzsOTy1LJMKwksonBM0lwNfK/TEpdwzEAmlFgkY/KRmDI6t1Is8KUcqnC9R
-X6c54BaAeHvxvsgLhPBInM/eRMSL9vPbE2aeJevjIQKBgQDwsnJDtoKubAmKarxM
-Wt4PY57Zr8gMuDE4//yvyECSCtZWXCVnB4uS0S9Kmokn8TW8D50lsFwyDNqkExm+
-nP6+BjBtD230nF1k2iTxolDcFMvZNqTOdSQWraHAs0Wlgl+V1KtCS4rAPWRIGYwe
-/CEGQCkHh8wbU/7ZRkDXc7OalwKBgQDiUfca77OR0/Cy91qLe6lJdGLfw75tVpSc
-jKy4QpYA5GREwbwcv7b432P0bl5EGI39TPLGIeUnugdv2jaDe+SaflYz4WR5YUHW
-pqMQEkdPAWOzxsCi8/+MiHd267ptNL9EAqPn89dFzEy3m4FFnVnHETP3GzHIStKd
-7+rhga0RYQKBgB04TI7T1UF/dBkNpBZQ4axUl7AtmseQhMk6ql5cnRodnq+VOCUt
-0U/dfTQ9VnE24yMVciplIowg61oHx5RQUsyWy8IxoVOUt/HKWbnLzq0pCSYxcAhw
-SBVItt5B5S6WiSwTSUcfDJUR3t6x20TXrtqnZ1O2tJyMsd+Gm9CMBz25AoGBAKsI
-VFzX3vWKnHEzOwsEBhgLy5jc/bD1aFOyf+iz8VZ1Q00ut7FmNKl5cLlNGxINGGjf
-WOzguqO+E1a1KtNMsqMKbKzCXcLY+/9yaPKBTcBoBWfcAMJk8K/MhbOqS3WyEgUc
-la95+Cq4TRXIf/YTBsDIwGOy+nkqCmbu46tN63OhAoGAaZTnRlBRaLUi/8V5QgeF
-1F5cns1XY80LClbfBKeAVjdqNIC/o1fHwqSmfGnRj4K6ydFYroyo+SNXYVUD/4sm
-KnC5Hc74UgEtPZi9A5XRbIvoaBzsvcI0v5fYw8tK1M0tlnHjOsBFuYvmOwjO5cGV
-LJOPkEBi+Fyxpfe5vSyURKE=
------END PRIVATE KEY-----";
 
 const ISSUER: &str = "https://issuer.test";
 const AUDIENCE: &str = "agent";
@@ -61,13 +33,8 @@ const NOW: u64 = 1_700_000_000;
 
 /// A JWK set carrying our test public key under `kid` (with our fixed `n`/`e`).
 fn jwks_with_kid(kid: &str) -> JwkSet {
-    let json = serde_json::json!({
-        "keys": [{
-            "kty": "RSA", "use": "sig", "alg": "RS256",
-            "kid": kid, "n": N_B64URL, "e": E_B64URL,
-        }]
-    });
-    serde_json::from_value(json).expect("valid JWK set")
+    serde_json::from_value(agent_testkit::oidc::jwks(&[(TestKey::Rsa, kid)]))
+        .expect("valid JWK set")
 }
 
 /// A JWKS source whose returned set the test can swap at runtime — the seam for the
@@ -134,7 +101,7 @@ impl JwksSource for CountingJwks {
     }
 }
 
-fn params(leeway_secs: u64) -> AuthParams {
+fn params() -> AuthParams {
     AuthParams {
         mode: "oidc".into(),
         issuer: ISSUER.into(),
@@ -142,8 +109,13 @@ fn params(leeway_secs: u64) -> AuthParams {
         jwks_url: "https://issuer.test/jwks".into(),
         tenant_claim: "org".into(),
         roles_claim: "roles".into(),
-        leeway_secs,
+        ..AuthParams::default()
     }
+}
+
+/// The single-issuer `[auth]` form, resolved as the verifier sees it.
+fn legacy_issuer() -> ResolvedIssuer {
+    ResolvedIssuer::resolve(&params().issuer_list()[0]).expect("legacy issuer resolves")
 }
 
 /// A verifier over a swappable JWKS + fixed clock. Returns the verifier and the
@@ -151,7 +123,8 @@ fn params(leeway_secs: u64) -> AuthParams {
 fn verifier_with(leeway_secs: u64, now: u64) -> (JwtVerifier, Arc<Mutex<JwkSet>>) {
     let set = Arc::new(Mutex::new(jwks_with_kid(KID)));
     let v = JwtVerifier::with_sources(
-        params(leeway_secs),
+        legacy_issuer(),
+        leeway_secs,
         Arc::new(SwitchableJwks(set.clone())),
         Arc::new(FixedClock(now)),
     );
@@ -168,10 +141,7 @@ fn valid_claims(org: &str, sub: &str) -> serde_json::Value {
 
 /// Mint a signed RS256 token for `kid` over `claims` with our test private key.
 fn mint(kid: &str, claims: &serde_json::Value) -> String {
-    let mut header = Header::new(Algorithm::RS256);
-    header.kid = Some(kid.to_string());
-    let key = EncodingKey::from_rsa_pem(PRIV_PEM.as_bytes()).expect("test priv key");
-    jsonwebtoken::encode(&header, claims, &key).expect("mint token")
+    TestKey::Rsa.mint(kid, claims)
 }
 
 /// Minimal base64url (no padding) — only for hand-crafting the adversarial
@@ -215,7 +185,8 @@ async fn positive_jwks_rotation_reverifies() {
     let set = Arc::new(Mutex::new(jwks_with_kid(KID)));
     let clock = AdvanceableClock::new(NOW);
     let v = JwtVerifier::with_sources(
-        params(60),
+        legacy_issuer(),
+        60,
         Arc::new(CountingJwks::new(set.clone())),
         Arc::new(clock.clone()),
     );
@@ -243,7 +214,12 @@ async fn adversarial_unknown_kid_flood_is_rate_limited() {
     let set = Arc::new(Mutex::new(jwks_with_kid(KID)));
     let jwks = CountingJwks::new(set.clone());
     let clock = AdvanceableClock::new(NOW);
-    let v = JwtVerifier::with_sources(params(60), Arc::new(jwks.clone()), Arc::new(clock.clone()));
+    let v = JwtVerifier::with_sources(
+        legacy_issuer(),
+        60,
+        Arc::new(jwks.clone()),
+        Arc::new(clock.clone()),
+    );
     // A burst of distinct unknown kids, all within the same cooldown window.
     for i in 0..50 {
         let _ = v

@@ -9,7 +9,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 |---|---|---|---|---|
 | S1 | `auth` default feature, load-time validation, insecure-listen refusal | P0-1, P0-3 | ✅ | #487 |
 | S2 | Tenant from principal, identity policy, direct-reader conversion | P0-2, P0-3 | ✅ | #489 |
-| S3 | Multi-issuer OIDC profiles + fake issuer | D2 | ⬜ | — |
+| S3 | Multi-issuer OIDC profiles + fake issuer | D2 | 🟡 | — |
 | S4 | tonic TLS, `[grpc.tls]`, `nix run .#pki-dev` | P0-5 | ⬜ | — |
 | S5 | Token service core (agent JWT, JWKS, `WhoAmI`) | D1, D10 | ⬜ | — |
 | S6 | Session store + `Exchange/Refresh/Logout` | D11 | ⬜ | — |
@@ -69,3 +69,28 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
   loopback, so they move to S15, where the strict path first runs.
   Gate: `nix flake check` green (the `leak` check's `tools_do_not_leak` window-2 timing flake,
   outside S2's code, passed on rerun).
+- **2026-09-26 — S3.** `[[auth.issuers]]` adds any number of OIDC issuers beside the single-issuer
+  form, which now resolves to one `generic` issuer named `default` that keeps trusting its roles
+  claim (existing configs verify exactly as before). New
+  `crates/agent-grpc/src/server/auth/issuer.rs`: `ResolvedIssuer::resolve` applies the `google` /
+  `entra` / `generic` profile defaults (accepted `iss`, JWKS or discovery, claim map) and refuses
+  unusable combinations (Google with no `allowed_domains` and no `default_tenant`, Entra with no
+  `allowed_tenants`, profile-fixed claims overridden, roles trusted from Google, unsafe names,
+  domains or default tenant, plain-http or credentialed key URLs); `identity()` maps verified
+  claims to tenant / subject / roles / email per profile. The JWT verifier moved to
+  `auth/jwt.rs`: one `JwtVerifier` per issuer (own key cache), `DiscoveryJwks` (the discovery
+  document must name the configured issuer and its `jwks_uri` must be https or loopback), and
+  `MultiIssuerVerifier`, which routes by the unverified `iss` (unknown, missing or array `iss`
+  rejected before any fetch) and refuses duplicate names or overlapping `iss` at startup.
+  `VerifiedIdentity` gained `issuer` and `email` (for S5's exchange). Config: `AuthIssuerCfg`
+  (`client_id` is an alias of `audience`) with `deny_unknown_fields`, because a misspelt
+  restriction would otherwise widen who may sign in; checked at load. Fake issuer:
+  `agent_testkit::oidc` (feature `oidc`) serves discovery + JWKS on loopback via `tiny_http`,
+  with two fixed keys (the existing RSA fixture moved here from `auth/tests.rs`, plus a P-256
+  key) so two issuers can have different keys. Deferred, with the increments that use them:
+  `operator_subjects` bootstrap (S8); the fake issuer's token and device endpoints, `state`
+  expiry / replay and PKCE cases (S6, S12); "an IdP token presented to a seam is rejected"
+  (S5, when seams accept only agent tokens). Subjects are not yet namespaced by issuer; the
+  agent token's `sub = user:<issuer>/<sub>` (S5) does that.
+  Gate: `nix flake check --max-jobs 8 --cores 4` green (`leak`'s `fork_cancel_cycle_does_not_leak`
+  in `agent-providers`, untouched here, flaked once and passed on rerun).

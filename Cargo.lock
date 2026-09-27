@@ -251,6 +251,7 @@ dependencies = [
  "tower 0.5.3",
  "tracing",
  "tracing-opentelemetry",
+ "url",
 ]
 
 [[package]]
@@ -692,8 +693,10 @@ dependencies = [
  "agent-mcp",
  "agent-metrics",
  "async-trait",
+ "jsonwebtoken",
  "rstest",
  "serde_json",
+ "tiny_http",
  "tokio",
  "tracing",
  "tracing-subscriber",

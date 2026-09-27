@@ -112,6 +112,8 @@ pub struct GrpcAuthSettings {
     pub allow_insecure_listen: bool,
     /// `[auth] require_identity`; `None` ⇒ the serve path defaults it per listener.
     pub require_identity: Option<bool>,
+    /// `[[auth.issuers]]`: login issuers with per-IdP profiles.
+    pub issuers: Vec<crate::config::AuthIssuerCfg>,
 }
 
 /// How the scheduler is wired (config C2c-2). The registry half is served either
