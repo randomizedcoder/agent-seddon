@@ -9,7 +9,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 |---|---|---|---|---|
 | S1 | `auth` default feature, load-time validation, insecure-listen refusal | P0-1, P0-3 | ✅ | #487 |
 | S2 | Tenant from principal, identity policy, direct-reader conversion | P0-2, P0-3 | ✅ | #489 |
-| S3 | Multi-issuer OIDC profiles + fake issuer | D2 | 🟡 | — |
+| S3 | Multi-issuer OIDC profiles + fake issuer | D2 | ✅ | #492 |
 | S4 | tonic TLS, `[grpc.tls]`, `nix run .#pki-dev` | P0-5 | ⬜ | — |
 | S5 | Token service core (agent JWT, JWKS, `WhoAmI`) | D1, D10 | ⬜ | — |
 | S6 | Session store + `Exchange/Refresh/Logout` | D11 | ⬜ | — |
@@ -69,7 +69,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
   loopback, so they move to S15, where the strict path first runs.
   Gate: `nix flake check` green (the `leak` check's `tools_do_not_leak` window-2 timing flake,
   outside S2's code, passed on rerun).
-- **2026-09-26 — S3.** `[[auth.issuers]]` adds any number of OIDC issuers beside the single-issuer
+- **2026-09-26 — S3 (#492).** `[[auth.issuers]]` adds any number of OIDC issuers beside the single-issuer
   form, which now resolves to one `generic` issuer named `default` that keeps trusting its roles
   claim (existing configs verify exactly as before). New
   `crates/agent-grpc/src/server/auth/issuer.rs`: `ResolvedIssuer::resolve` applies the `google` /
