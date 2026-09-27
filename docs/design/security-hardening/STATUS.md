@@ -14,7 +14,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S5 | Token service core (agent JWT, JWKS, `WhoAmI`) | D1, D10 | ✅ | #498 |
 | S6 | Session store + `Exchange/Refresh/Logout` | D11 | ✅ | #505 |
 | S7 | RBAC extension, read gating, authz-coverage gate | D9 | ✅ | #504 |
-| S8 | Role bindings, bootstrap, escalation rules | D3, D9 | 🟡 | — |
+| S8 | Role bindings, bootstrap, escalation rules | D3, D9 | ✅ | #511 |
 | S9 | Bearer propagation + two-hop chain test | D7 | ⬜ | — |
 | S10 | mTLS service identity | D6 | ⬜ | — |
 | S11 | `agent_auth_events` audit + doctor probes | D11 | ⬜ | — |
@@ -382,7 +382,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
   `fork_cancel_cycle_does_not_leak` (agent-providers, untouched here) flaked once and passed on
   rebuild.
 
-- **2026-09-27 — S8 (PR pending).** Role bindings. Roles now come from the config store, not
+- **2026-09-27 — S8 (#511).** Role bindings. Roles now come from the config store, not
   only from the IdP.
 
   Bindings: new [`auth/binding.rs`](../../../crates/agent-grpc/src/server/auth/binding.rs).
