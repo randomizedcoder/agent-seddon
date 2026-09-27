@@ -10,7 +10,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 
 ## Now
 
-- **Next:** #501 merged (`71d4abf`); `campaigns/cp-02` rebased onto it (`git rebase --autostash --onto origin/main 6d7b87f`, six commits, clean); `STATUS.md` CP-01 → ✅ #501 + as-built entry. Rerun the gate on the rebased ref (fmt, workspace clippy, in-gate tests, `nix run .#pg-integration`, `nix flake check`), record it, then ask before push / PR (body drafted).
+- **Next:** CP-02 is rebased onto `main` @ `71d4abf` (#501 merged) and gate-green on `campaigns/cp-02` @ `2cc7fdd` (+ this record). Push `campaigns/cp-02` and open the CP-02 PR against `main` (body drafted) once the user asks; after it merges, `STATUS.md` CP-02 → ✅ #NNN + as-built entry, then lane B / CP-03 planning.
 
 ## CP-01 — seam, pure rules, `MemCampaigns`, T1–T8 (mem) — ✅ #501 (merged 2026-09-27, `71d4abf`)
 
@@ -112,6 +112,9 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 | 2026-09-27 | End-to-end verification (plan items 2–3): `06-test-matrix.md` row ids vs `cargo test -- --list` (`mem::tN::<id>`, `pg::tN::<id>`, pg-only fns, T14/T15); relative-link check over `docs/design/campaigns/*.md` | every shared T3–T8 row present on both tiers (134 row ids; 146 mem fns, 135 pg conformance fns + 22 pg-only), T14 10/10 (`adversarial_tenant_string_sql` is the in-gate rstest, not in the `--ignored` list by design), T15 4/4; no broken links |
 | 2026-09-27 | Rebase dry-run in a throwaway worktree: `git rebase --onto campaigns/cp-01 6d7b87f` (the four CP-02 commits over the cp-01 tip, standing in for post-merge `main`) | clean, no conflicts; the real rebase waits for #501 |
 | 2026-09-27 | `main` advanced to `538bb34` (#502, config-store `tenants()` skip scan + one `suite!` row); dry-run `git merge origin/main` into `campaigns/cp-02` in a throwaway worktree | clean; #502 touches only `cards` and does not overlap the CP-02 `TRUNCATE … CASCADE` hunk in the same test file; the post-rebase gate covers the combined tree |
+| 2026-09-27 | #501 merged (`71d4abf`, merge commit); `git rebase --autostash --onto origin/main 6d7b87f campaigns/cp-02` | clean, six commits replayed; `cargo fmt --all -- --check` + `cargo clippy --workspace --all-targets --all-features -- -D warnings` + `cargo test -p agent-campaign --features campaign-postgres` (34 in-gate) green |
+| 2026-09-27 | post-rebase `CONTAINER_RUNTIME=podman nix run .#pg-integration` | green on the combined tree: config-store 34 (33 + #502's `boundary_tenants_dedups_many_per_tenant`, `CASCADE` reset in place), campaign 157/157 (108 s) |
+| 2026-09-27 | post-rebase `nix flake check "git+file:///…/agent-seddon?ref=refs/heads/campaigns/cp-02"` (@ `2cc7fdd`) | green, `all checks passed!` — a cold build (the rebase changed the source hash), ~35 min alongside another nix build on the host |
 
 ## Open questions / blockers
 
