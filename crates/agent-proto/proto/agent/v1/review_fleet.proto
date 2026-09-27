@@ -205,43 +205,76 @@ message PreflightReply {
 // the roster while any number of clients drive it). `token_ref` rides as a
 // reference; the server never resolves it.
 service ReviewFleetService {
-  rpc List(FleetListRequest) returns (FleetSessionList);
-  // REST: `GET /v1/fleet/sessions/{id}` (read RPC → GET, id as a path param). This
-  // is the PR-02 proof that `(google.api.http)` survives `tonic-build` codegen into
-  // `FILE_DESCRIPTOR_SET`; the rest of the surface is annotated in later increments
-  // (docs/design/rest-openapi/STATUS.md).
+  // REST mappings (docs/design/rest-openapi/): reads → GET, deletes → DELETE by id,
+  // every other mutation/action → POST with `body: "*"`. Paths live under /v1/fleet/.
+  rpc List(FleetListRequest) returns (FleetSessionList) {
+    option (google.api.http) = {get: "/v1/fleet/sessions"};
+  }
   rpc Get(FleetSessionRef) returns (FleetSession) {
+    option (google.api.http) = {get: "/v1/fleet/sessions/{id}"};
+  }
+  // upsert = create + update
+  rpc Put(FleetSession) returns (FleetSession) {
     option (google.api.http) = {
-      get: "/v1/fleet/sessions/{id}"
+      post: "/v1/fleet/sessions"
+      body: "*"
     };
   }
-  rpc Put(FleetSession) returns (FleetSession); // upsert = create + update
-  rpc Delete(FleetSessionRef) returns (FleetDeleteReply);
-  rpc SetEnabled(FleetSetEnabledRequest) returns (FleetSession); // toggle without a full Put
+  rpc Delete(FleetSessionRef) returns (FleetDeleteReply) {
+    option (google.api.http) = {delete: "/v1/fleet/sessions/{id}"};
+  }
+  // toggle without a full Put
+  rpc SetEnabled(FleetSetEnabledRequest) returns (FleetSession) {
+    option (google.api.http) = {
+      post: "/v1/fleet/sessions/{id}/enabled"
+      body: "*"
+    };
+  }
   // Manually queue a review (C8). Opt-in: served only by the full `--serve-fleet`
   // process (which has an orchestrator); the bare control-plane endpoint returns
   // UNIMPLEMENTED.
-  rpc ReviewNow(ReviewNowRequest) returns (ReviewNowReply);
+  rpc ReviewNow(ReviewNowRequest) returns (ReviewNowReply) {
+    option (google.api.http) = {
+      post: "/v1/fleet/sessions/{session_id}/review-now"
+      body: "*"
+    };
+  }
   // Approve a persisted draft → post it to its forge (C17). Opt-in: served only by the
   // full `--serve-fleet` process with persisted history wired (the approver needs to
   // look the draft up + build the row's forge); the bare control plane, or a process
   // with no history, returns UNIMPLEMENTED. This is the human approval gesture — the
   // ONLY path that posts; the model's own forge stays read-only (`dry_run`).
-  rpc Approve(ApproveRequest) returns (ApproveReply);
+  rpc Approve(ApproveRequest) returns (ApproveReply) {
+    option (google.api.http) = {
+      post: "/v1/fleet/reviews/{review_id}/approve"
+      body: "*"
+    };
+  }
   // List persisted review drafts (C14), newest state per review. Opt-in: served only
   // by a process with persisted fleet history wired (the `--serve-fleet` process); a
   // process with no history returns UNIMPLEMENTED. Read-only.
-  rpc ListReviews(ListReviewsRequest) returns (ListReviewsReply);
+  rpc ListReviews(ListReviewsRequest) returns (ListReviewsReply) {
+    option (google.api.http) = {get: "/v1/fleet/reviews"};
+  }
   // Fetch one draft's metadata + rendered markdown body (C14). Opt-in: needs the
   // history reader (the `--serve-fleet` process); else UNIMPLEMENTED. Read-only.
-  rpc GetReview(GetReviewRequest) returns (GetReviewReply);
+  rpc GetReview(GetReviewRequest) returns (GetReviewReply) {
+    option (google.api.http) = {get: "/v1/fleet/reviews/{review_id}"};
+  }
   // Rewrite a draft's markdown body (C14, the portal's edit). Opt-in: needs the draft
   // editor (the `--serve-fleet` process); else UNIMPLEMENTED. A `posted`/`approved` draft
   // is locked. This edits the local draft only — it never posts; posting stays the
   // separate `Approve` gesture.
-  rpc UpdateReview(UpdateReviewRequest) returns (UpdateReviewReply);
+  rpc UpdateReview(UpdateReviewRequest) returns (UpdateReviewReply) {
+    option (google.api.http) = {
+      post: "/v1/fleet/reviews/{review_id}"
+      body: "*"
+    };
+  }
   // Operational self-diagnosis (docs/design/doctor/). Opt-in: served only by the
   // full `--serve-fleet` process (which has the config to build the probes); the
   // bare control-plane endpoint returns UNIMPLEMENTED.
-  rpc Preflight(PreflightRequest) returns (PreflightReply);
+  rpc Preflight(PreflightRequest) returns (PreflightReply) {
+    option (google.api.http) = {get: "/v1/fleet/preflight"};
+  }
 }

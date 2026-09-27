@@ -175,18 +175,49 @@ enum Expect {
 }
 
 #[rstest]
-// positive — the PR-02 proof: a read RPC transcodes to GET with an `{id}` path param,
-// and the option survives `tonic-build` codegen into `FILE_DESCRIPTOR_SET`.
+// positive — a read RPC transcodes to GET with an `{id}` path param (also the PR-02
+// proof that the option survives `tonic-build` codegen into `FILE_DESCRIPTOR_SET`).
 #[case::positive_read_rpc_maps_to_get_with_id(
     "read RPC ReviewFleetService.Get -> GET /v1/fleet/sessions/{id}",
     "ReviewFleetService.Get",
     Expect::Routes(&[("GET", "/v1/fleet/sessions/{id}")])
 )]
-// negative — a sibling RPC not annotated yet carries no rule. This row flips to a
-// positive `Routes` case when `Put` is annotated in a later increment.
-#[case::negative_unannotated_rpc_has_no_rule(
-    "ReviewFleetService.Put is not annotated yet -> no google.api.http rule",
+// positive — an upsert maps to POST on the collection with the whole message as body.
+#[case::positive_upsert_maps_to_post_collection(
+    "upsert RPC ReviewFleetService.Put -> POST /v1/fleet/sessions (body: *)",
     "ReviewFleetService.Put",
+    Expect::Routes(&[("POST", "/v1/fleet/sessions")])
+)]
+// positive — an imperative action maps to POST with an id path param + body.
+#[case::positive_action_maps_to_post_with_id(
+    "action RPC ReviewFleetService.Approve -> POST /v1/fleet/reviews/{review_id}/approve",
+    "ReviewFleetService.Approve",
+    Expect::Routes(&[("POST", "/v1/fleet/reviews/{review_id}/approve")])
+)]
+// corner — a delete maps to the DELETE verb by id (a less common verb in the surface).
+#[case::corner_delete_maps_to_delete_verb(
+    "ReviewFleetService.Delete -> DELETE /v1/fleet/sessions/{id}",
+    "ReviewFleetService.Delete",
+    Expect::Routes(&[("DELETE", "/v1/fleet/sessions/{id}")])
+)]
+// corner — a toggle maps to POST with BOTH a path capture and a `body: *` (the field
+// not captured by the path lands in the body).
+#[case::corner_toggle_has_path_param_and_body(
+    "ReviewFleetService.SetEnabled -> POST /v1/fleet/sessions/{id}/enabled",
+    "ReviewFleetService.SetEnabled",
+    Expect::Routes(&[("POST", "/v1/fleet/sessions/{id}/enabled")])
+)]
+// boundary — a read RPC with an empty request maps to GET with ZERO path params.
+#[case::boundary_paramless_read_maps_to_bare_get(
+    "ReviewFleetService.Preflight (empty request) -> GET /v1/fleet/preflight",
+    "ReviewFleetService.Preflight",
+    Expect::Routes(&[("GET", "/v1/fleet/preflight")])
+)]
+// negative — an RPC in a not-yet-annotated proto carries no rule. This row flips to a
+// positive `Routes` case when `policy.proto` is annotated in a later increment.
+#[case::negative_unannotated_rpc_has_no_rule(
+    "Policy.Authorize is not annotated yet -> no google.api.http rule",
+    "Policy.Authorize",
     Expect::Unmapped
 )]
 // negative — a junk method name must not resolve to any rule (fail closed).

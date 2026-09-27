@@ -9,8 +9,8 @@ the as-built log) in the PR that lands the increment.
 | # | Increment | Proto | Nix | Envoy | Tests | Bench | Status |
 |---|---|:--:|:--:|:--:|:--:|:--:|:--:|
 | 01 | [Design directory](README.md) (design-of-record + STATUS + index) | — | — | — | — | — | ✅ merged (#510) |
-| 02 | Groundwork: vendor `google/api/{annotations,http}.proto`, wire `tonic-build` + buf-lint exemption, annotate one RPC, coverage-test skeleton | ✅ | — | — | ✅ | — | 🟡 in flight |
-| 03 | Annotate the full transcodable surface (batched per proto file); streaming RPCs excluded + documented | ✅ | — | — | ✅ | — | ⬜ |
+| 02 | Groundwork: vendor `google/api/{annotations,http}.proto`, wire `tonic-build` + buf-lint exemption, annotate one RPC, coverage-test skeleton | ✅ | — | — | ✅ | — | ✅ merged (#512) |
+| 03 | Annotate the full surface, batched per proto group (reads→GET, deletes→DELETE, else POST body:*); server-streaming annotated too — **nothing excluded** | 🟡 | — | — | 🟡 | — | 🟡 in flight |
 | 04 | OpenAPI doc: pin `protoc-gen-openapiv2`, generate + commit, `gen-openapi`/`openapi-sync` drift gate, OpenAPI-parity test | — | ✅ | — | ✅ | — | ⬜ |
 | 05 | Envoy `grpc_json_transcoder`: descriptor derivation, loopback REST listener (port via `nix/constants.nix`), filter before `router`, descriptor mount, `authorization` in CORS | — | ✅ | ✅ | — | — | ⬜ |
 | 06 | `nix run .#rest-integration` (boot → Envoy → curl → assert → teardown; adversarial cases); folded into `nix/integration.nix` | — | ✅ | ✅ | ✅ | — | ⬜ |
@@ -35,10 +35,24 @@ Legend: ✅ built · 🟡 partial / in flight · ⬜ not started.
 RPCs (`Provider.Stream`, `AstService.Reindex`, `SearchService.Reindex`, `AgentSessionService.Subscribe`,
 `AgentSessionService.Send`) are **server-streaming**, which the transcoder *does* support (it emits a
 JSON array / chunked body). So there is **no hard REST-exclusion list** — the whole surface is
-transcodable in principle. Increment 03 still decides, per RPC, whether a live-event / token-stream RPC
-is *worth* a REST binding (UX), but nothing is excluded for being untranscodable. A whole-set invariant
+transcodable. **Decision (03):** annotate everything, server-streaming included — no RPC is left
+gRPC-only, keeping the sweep uniform and the "full surface" commitment literal. A whole-set invariant
 test (`boundary_surface_has_no_client_or_bidi_streaming_rpcs`) guards this — if a client/bidi RPC is ever
 added, it fires as a reminder to list it here as gRPC-only.
+
+## Increment 03 batches (one gated PR each, per proto group)
+
+| Batch | Proto group | Status |
+|---|---|:--:|
+| 03a | `review_fleet.proto` (ReviewFleetService, 11 RPCs) | 🟡 in flight |
+| 03b | `prompt.proto`, `role.proto`, `config.proto` (control plane) | ⬜ |
+| 03c | `forge_registry.proto`, `transport_registry.proto`, `upstream.proto` (registries) | ⬜ |
+| 03d | `repo.proto`, `search.proto`, `ast.proto` (code intelligence) | ⬜ |
+| 03e | `session.proto`, `session_registry.proto`, `agent_session.proto`, `scheduler.proto` | ⬜ |
+| 03f | `tool.proto`, `exec.proto`, `web.proto`, `forge.proto` (TaskService) | ⬜ |
+| 03g | `provider.proto`, `llm_pool.proto`, `embed.proto`, `tokenizer.proto`, `memory.proto`, `context.proto`, `dimension.proto`, `mode.proto`, `graph.proto`, `digest.proto`, `reference.proto`, `scanner.proto`, `lsp.proto`, `metrics_proxy.proto`, `policy.proto`, `review.proto` (remaining seams) | ⬜ |
+
+(Batch boundaries may shift as the sweep proceeds; the tracker is updated per PR.)
 
 ## Implementation log (as-built deviations)
 
@@ -56,3 +70,11 @@ added, it fires as a reminder to list it here as gRPC-only.
   (field 72295728) — `prost` drops unknown fields and `prost_types::MethodOptions` has no field for the
   custom extension, so this reads the option with **no new dependency** (no `prost-reflect`). This proves
   `(google.api.http)` survives `tonic-build` codegen before increment 03 annotates the rest.
+- **03a (fleet control plane).** Annotated all 11 `ReviewFleetService` RPCs under `/v1/fleet/`:
+  reads → GET (`List`→`/sessions`, `Get`→`/sessions/{id}`, `ListReviews`→`/reviews`,
+  `GetReview`→`/reviews/{review_id}`, `Preflight`→`/preflight`), `Delete` → DELETE `/sessions/{id}`,
+  every other mutation/action → POST `body:"*"` (`Put`→`/sessions`, `SetEnabled`→`/sessions/{id}/enabled`,
+  `ReviewNow`→`/sessions/{session_id}/review-now`, `Approve`→`/reviews/{review_id}/approve`,
+  `UpdateReview`→`/reviews/{review_id}`). Added `DELETE` to the documented convention. Expanded the
+  coverage table to exercise every verb + the param/no-param/param+body shapes; the negative
+  `Unmapped` row now points at `Policy.Authorize` (a later batch) and flips when `policy.proto` lands.
