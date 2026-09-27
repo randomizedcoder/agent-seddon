@@ -94,6 +94,14 @@ reviewable, the mapping follows one convention (documented here, applied uniform
   }
   ```
 
+- **`Delete` RPCs** → `delete:` with the id as a path param (no body):
+
+  ```proto
+  rpc Delete(DeleteRequest) returns (DeleteReply) {
+    option (google.api.http) = { delete: "/v1/fleet/sessions/{id}" };
+  }
+  ```
+
 - **Server-streaming RPCs** → annotated; the transcoder emits a JSON array / chunked stream.
 
 Paths are versioned under `/v1/` and grouped by area (`/v1/fleet/…`, `/v1/session/…`, …). URL
