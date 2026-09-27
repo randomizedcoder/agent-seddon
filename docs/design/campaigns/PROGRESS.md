@@ -10,9 +10,9 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 
 ## Now
 
-- **Next:** CP-02 is gate-green on `campaigns/cp-02` @ `74c5bcd` (+ gate record, row-coverage/link check, rebase dry-run — all clean). Waiting on #501: after it merges, `STATUS.md` CP-01 → ✅ #501 + as-built entry, rebase `campaigns/cp-02` onto `main` (`git rebase --onto origin/main campaigns/cp-01 campaigns/cp-02`), rerun the gate, and ask before push / PR (body drafted).
+- **Next:** #501 merged (`71d4abf`); `campaigns/cp-02` rebased onto it (`git rebase --autostash --onto origin/main 6d7b87f`, six commits, clean); `STATUS.md` CP-01 → ✅ #501 + as-built entry. Rerun the gate on the rebased ref (fmt, workspace clippy, in-gate tests, `nix run .#pg-integration`, `nix flake check`), record it, then ask before push / PR (body drafted).
 
-## CP-01 — seam, pure rules, `MemCampaigns`, T1–T8 (mem) — 🟡 #501 (branch `campaigns/cp-01`)
+## CP-01 — seam, pure rules, `MemCampaigns`, T1–T8 (mem) — ✅ #501 (merged 2026-09-27, `71d4abf`)
 
 | Item | State | Notes |
 |---|---|---|
