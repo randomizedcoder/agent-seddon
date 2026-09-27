@@ -102,9 +102,16 @@ templates and field paths must be unique across the whole surface (enforced by a
 ### Streaming (the excluded set)
 
 `grpc_json_transcoder` supports **unary** and **server-streaming** RPCs. **Client-streaming and
-bidirectional-streaming RPCs are not transcodable** and are deliberately left un-annotated; each
-carries a `// REST: gRPC-only (streaming)` comment at its definition and is listed in `STATUS.md`.
-They remain fully available over gRPC.
+bidirectional-streaming RPCs are not transcodable** and would be deliberately left un-annotated (each
+carrying a `// REST: gRPC-only (streaming)` comment and listed in `STATUS.md`).
+
+**As surveyed in increment 02, this surface has none of them.** All five streaming RPCs
+(`Provider.Stream`, `AstService.Reindex`, `SearchService.Reindex`, `AgentSessionService.Subscribe`,
+`AgentSessionService.Send`) are **server-streaming**, so the whole surface is transcodable in principle
+and the hard-exclusion set is **empty**. Increment 03 still decides per RPC whether a live-event /
+token-stream RPC is *worth* a REST binding, but nothing is excluded for being untranscodable. A
+whole-set invariant test (`boundary_surface_has_no_client_or_bidi_streaming_rpcs`) fires if a
+client/bidi RPC is ever added, as a reminder to list it here.
 
 ## OpenAPI generation + drift gate
 

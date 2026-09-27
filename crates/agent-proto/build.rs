@@ -41,8 +41,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "proto/agent/v1/transport_registry.proto",
         "proto/agent/v1/auth.proto",
     ];
+    // Vendored third-party protos resolved as imports (not compiled to Rust, so not
+    // in `protos`): `google/api/*` supplies the `(google.api.http)` extension for the
+    // REST transcoding annotations (gap-analysis §4). `protoc` finds them via the
+    // `["proto"]` include path below; list them here only so a change re-runs codegen.
+    let import_only = [
+        "proto/google/api/annotations.proto",
+        "proto/google/api/http.proto",
+    ];
     // Re-run only when a proto changes.
-    for p in &protos {
+    for p in protos.iter().chain(import_only.iter()) {
         println!("cargo:rerun-if-changed={p}");
     }
     // Emit a serialized FileDescriptorSet alongside the generated code so the crate
