@@ -181,6 +181,15 @@ pub async fn build_agent_with(
         "sqlite" => Some(Arc::new(agent_digest::SqliteDigests::open(expand_tilde(
             &cfg.digest.path,
         ))?)),
+        // The OLTP Postgres tier (PG-08): the ledger over a real server, for an
+        // operator who already runs one Postgres and wants no ClickHouse
+        // dependency (ClickHouse stays the scale tier). The DSN is the shared
+        // `[config_store] dsn_ref` (one server for the whole OLTP surface); the
+        // pool is bounded by `[digest] pool_max`. Schema is applied on connect
+        // when `[config_store] migrate_on_start` is set (the same opt-in the
+        // config-store tier uses), via the crate's versioned runner.
+        #[cfg(feature = "digest-postgres")]
+        "postgres" => Some(pg_digests(&cfg).await?),
         #[cfg(feature = "grpc")]
         "grpc" => {
             let ep = crate::registry::grpc_client_endpoint(
@@ -3581,6 +3590,28 @@ fn preflight_graph_providers(
     Ok(())
 }
 
+/// Build the **Postgres** digest ledger (PG-08) from bootstrap config: the DSN
+/// is the shared `[config_store] dsn_ref` (resolved fail-closed, `env:`/`file:`
+/// only, never echoed), the pool is bounded by `[digest] pool_max`, and the
+/// crate's versioned schema runner applies on connect when `[config_store]
+/// migrate_on_start` is set (the same opt-in the config-store tier honours). One
+/// Postgres serves the whole OLTP surface, digest included.
+#[cfg(feature = "digest-postgres")]
+async fn pg_digests(
+    cfg: &crate::config::Config,
+) -> anyhow::Result<Arc<dyn agent_core::DigestStore>> {
+    let dsn = crate::dsn::resolve_dsn_ref(&cfg.config_store.dsn_ref)
+        .context("[digest] store = \"postgres\" (DSN comes from [config_store] dsn_ref)")?;
+    let store = agent_digest::PgDigests::connect(
+        &dsn,
+        cfg.digest.pool_max,
+        cfg.config_store.migrate_on_start,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("[digest] postgres backend: {e}"))?;
+    Ok(Arc::new(store))
+}
+
 /// Compose the fork's provider chain from a compiled [`ForkPlan`]: per-branch
 /// generators (name-resolved or the base) each optionally wrapped in a
 /// branch-local consensus gate, the `BranchingProvider` with its join/merge
@@ -5018,5 +5049,62 @@ mod registry_seed_tests {
             Ok(_) => panic!("kind `{kind}` with this shape must not build"),
         };
         assert!(err.to_string().contains(want), "{err}");
+    }
+}
+
+#[cfg(all(test, feature = "digest-postgres"))]
+mod pg_digest_wiring_tests {
+    use super::*;
+    use agent_core::{Digest, DigestKind, DigestQuery};
+
+    // desc (postgres, live): the wired `[digest] store = "postgres"` arm builds a
+    // real `PgDigests` from the shared `[config_store] dsn_ref` (schema applied by
+    // the crate's versioned runner because `migrate_on_start` is set) and
+    // round-trips a row — the OLTP digest tier proven end-to-end through the
+    // builder helper, not just the crate in isolation. A dedicated session id
+    // keeps it idempotent across re-runs (ON CONFLICT overwrites the same PK) and
+    // isolated from the config-store suite sharing the DB.
+    #[tokio::test]
+    #[ignore = "needs a running postgres (nix run .#postgres-up) — run via `nix run .#integration`"]
+    async fn positive_pg_digests_wired_round_trip() {
+        let name = "AGENT_CONFIG_STORE_TEST_DSN";
+        std::env::var(name)
+            .expect("AGENT_CONFIG_STORE_TEST_DSN must be set by the pg-integration harness");
+
+        let mut cfg = crate::config::Config::minimal_for_test();
+        cfg.config_store.dsn_ref = format!("env:{name}");
+        cfg.config_store.migrate_on_start = true;
+        cfg.digest.store = "postgres".into();
+        cfg.digest.pool_max = 4;
+
+        let store = pg_digests(&cfg).await.expect("build wired pg digest store");
+        let sid = "pg_wiring_it";
+        store
+            .put(Digest {
+                session_id: sid.into(),
+                user_id: "local".into(),
+                seq: 1,
+                kind: DigestKind::Summary,
+                text: "wired via builder".into(),
+                keywords: vec![],
+                mode: "implement".into(),
+                model: "kimi".into(),
+                ts_ms: 1,
+                duration_ms: 0,
+                tokens: 0,
+            })
+            .await
+            .expect("put via wired store");
+        let rows = store
+            .query(&DigestQuery {
+                session_id: sid.into(),
+                ..DigestQuery::default()
+            })
+            .await
+            .expect("query via wired store");
+        assert!(
+            rows.iter().any(|d| d.text == "wired via builder"),
+            "the row written through the wired postgres arm reads back"
+        );
     }
 }

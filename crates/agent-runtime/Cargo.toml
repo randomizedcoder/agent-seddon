@@ -84,6 +84,17 @@ digest = [
     "agent-digest/digest-sqlite",
     "agent-digest/digest-clickhouse",
 ]
+# The Postgres arm of the digest ledger (PG-08): adds the `postgres` arm to the
+# `[digest] store` selection, building `PgDigests` over a real server from the
+# shared `[config_store]` DSN + a `[digest] pool_max` bound. ClickHouse stays the
+# scale/analytics tier; this is the OLTP alternative for an operator who runs no
+# ClickHouse. Off by default; NOT hermetic (needs a live server). The DSN comes
+# from the shared `[config_store] dsn_ref` via `crate::dsn` (which links no
+# `PgBackend`), so this needs no config-store domain feature.
+digest-postgres = [
+    "digest",
+    "agent-digest/digest-postgres",
+]
 # Cognition-graph document (cognition-graph 04/05): the declarative node graph
 # + node-type schema registry (`[graph] store`, `--serve-graph`), plus the fork
 # executor — the builder composes branch chains from `provider-branching` and
@@ -357,6 +368,7 @@ postgres = [
   "role-postgres",
   "forge-registry-postgres",
   "transport-registry-postgres",
+  "digest-postgres",
 ]
 # Metrics proxy seam (docs/design/portal): generic PromQL-over-gRPC to Prometheus.
 metrics-proxy = ["dep:agent-metrics-proxy", "agent-metrics-proxy/http"]
