@@ -891,6 +891,12 @@ fn auth_layer(agent: &Agent, listen: &Endpoint) -> anyhow::Result<agent_grpc::se
             ttl_secs: t.ttl_secs,
             signing_key: t.signing_key.clone(),
             previous_key: t.previous_key.clone(),
+            session_ttl_secs: t.session_ttl_secs,
+            max_sessions_per_tenant: t.max_sessions_per_tenant,
+            #[cfg(feature = "auth")]
+            sessions: a.sessions.clone(),
+            #[cfg(not(feature = "auth"))]
+            sessions: None,
         }),
     })
     .map(|layer| {

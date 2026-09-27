@@ -422,8 +422,10 @@ async fn token_layer_exemption_and_bearer_scope(
         issuer: "kc".into(),
         email: None,
         expires_at: now() + 600,
+        sid: None,
     };
-    let token = tokens.mint(&id, &[]).expect("mint").token;
+    let grant = super::token::Grant::from_login(&id, "sid-1");
+    let token = tokens.mint(&grant, &[]).expect("mint").token;
     let (status, saw_bearer) =
         call_through(&layer, path, with_agent_token.then_some(token.as_str())).await;
     assert_eq!(status.as_deref(), want_status);

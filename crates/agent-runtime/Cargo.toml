@@ -389,6 +389,7 @@ postgres = [
   "forge-registry-postgres",
   "transport-registry-postgres",
   "digest-postgres",
+  "auth-postgres",
 ]
 # Metrics proxy seam (docs/design/portal): generic PromQL-over-gRPC to Prometheus.
 metrics-proxy = ["dep:agent-metrics-proxy", "agent-metrics-proxy/http"]
@@ -399,7 +400,10 @@ grpc = ["dep:agent-grpc"]
 # OIDC/JWT bearer authentication for served seams (config C33/B1). Off by default so
 # the standard binary ships no token verification; enabling it lets `[auth] mode =
 # "oidc"` build the JWKS/JWT verifier (else it is a fail-closed startup error).
-auth = ["grpc", "agent-grpc/auth"]
+auth = ["grpc", "agent-grpc/auth", "dep:agent-config-store"]
+# The Postgres arm of the auth session store (`[auth.token] session_store =
+# "postgres"`, security-hardening S6). NOT hermetic (needs a live Postgres server).
+auth-postgres = ["auth", "agent-config-store/config-store-postgres"]
 # Expose a `delegate` tool that spawns child agents (isolated context).
 subagents = []
 # The `web_fetch` tool over the WebBackend seam: the local reqwest transport +

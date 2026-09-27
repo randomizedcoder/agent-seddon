@@ -2775,11 +2775,28 @@ pub struct AuthTokenCfg {
     /// expire; drop it after one `ttl_secs`.
     #[serde(default)]
     pub previous_key: String,
+    /// Where sign-in sessions persist (security-hardening S6): `""`/`memory`
+    /// (lost on restart), `file` (under `session_path`), or `postgres` (the
+    /// `[config_store]` DSN; needs the `auth-postgres` build feature).
+    #[serde(default)]
+    pub session_store: String,
+    /// Directory for `session_store = "file"`.
+    #[serde(default)]
+    pub session_path: String,
+    /// Absolute session lifetime in seconds: refresh stops working after it
+    /// (default 43200 = 12 h; 900..=2592000).
+    #[serde(default)]
+    pub session_ttl_secs: u64,
+    /// Stored sessions per tenant before `Exchange` is refused (default 4096).
+    #[serde(default)]
+    pub max_sessions_per_tenant: usize,
 }
 
 impl AuthTokenCfg {
     /// Shortest and longest accepted `ttl_secs` (`0` ⇒ the 900 s default).
     pub const TTL_SECS: std::ops::RangeInclusive<u64> = 60..=3600;
+    /// Shortest and longest accepted `session_ttl_secs` (`0` ⇒ the 12 h default).
+    pub const SESSION_TTL_SECS: std::ops::RangeInclusive<u64> = 900..=30 * 24 * 3600;
 
     fn validate(&self) -> Result<(), String> {
         for (key, value) in [
@@ -2803,6 +2820,26 @@ impl AuthTokenCfg {
             && self.previous_key.trim() == self.signing_key.trim()
         {
             return Err("`[auth.token] previous_key` is the same file as `signing_key`".into());
+        }
+        match self.session_store.as_str() {
+            "" | "memory" | "postgres" => {}
+            "file" if self.session_path.trim().is_empty() => {
+                return Err("`[auth.token] session_store = \"file\"` needs `session_path`".into())
+            }
+            "file" => {}
+            other => {
+                return Err(format!(
+                    "unknown `[auth.token] session_store` `{other}` (memory | file | postgres)"
+                ))
+            }
+        }
+        if self.session_ttl_secs != 0 && !Self::SESSION_TTL_SECS.contains(&self.session_ttl_secs) {
+            return Err(format!(
+                "`[auth.token] session_ttl_secs` = {} is outside {}..={}",
+                self.session_ttl_secs,
+                Self::SESSION_TTL_SECS.start(),
+                Self::SESSION_TTL_SECS.end()
+            ));
         }
         Ok(())
     }
@@ -4275,6 +4312,15 @@ mod tests {
     #[case::corner_previous_key_same_file(AuthCfg { token: Some(AuthTokenCfg { previous_key: "/run/pki/token-signer.key".into(), ..token_cfg() }), ..oidc(GOOD_JWKS) }, true, Some("same file"))]
     #[case::adversarial_token_issuer_is_the_login_issuer(AuthCfg { token: Some(AuthTokenCfg { issuer: "https://issuer.example".into(), ..token_cfg() }), ..oidc(GOOD_JWKS) }, true, Some("also a login issuer"))]
     #[case::adversarial_token_issuer_is_an_entry_issuer(AuthCfg { token: Some(AuthTokenCfg { issuer: "https://idp.example/realms/a".into(), ..token_cfg() }), ..issuers(vec![generic_entry("kc")]) }, true, Some("also a login issuer"))]
+    // --- `[auth.token]` sessions (security-hardening S6) ---
+    #[case::positive_file_session_store(AuthCfg { token: Some(AuthTokenCfg { session_store: "file".into(), session_path: "/var/lib/agent/sessions".into(), ..token_cfg() }), ..oidc(GOOD_JWKS) }, true, None)]
+    #[case::positive_postgres_session_store(AuthCfg { token: Some(AuthTokenCfg { session_store: "postgres".into(), ..token_cfg() }), ..oidc(GOOD_JWKS) }, true, None)]
+    #[case::negative_file_session_store_without_path(AuthCfg { token: Some(AuthTokenCfg { session_store: "file".into(), ..token_cfg() }), ..oidc(GOOD_JWKS) }, true, Some("needs `session_path`"))]
+    #[case::negative_unknown_session_store(AuthCfg { token: Some(AuthTokenCfg { session_store: "redis".into(), ..token_cfg() }), ..oidc(GOOD_JWKS) }, true, Some("unknown `[auth.token] session_store`"))]
+    #[case::boundary_session_ttl_min(AuthCfg { token: Some(AuthTokenCfg { session_ttl_secs: 900, ..token_cfg() }), ..oidc(GOOD_JWKS) }, true, None)]
+    #[case::boundary_session_ttl_max(AuthCfg { token: Some(AuthTokenCfg { session_ttl_secs: 2_592_000, ..token_cfg() }), ..oidc(GOOD_JWKS) }, true, None)]
+    #[case::boundary_session_ttl_below_min(AuthCfg { token: Some(AuthTokenCfg { session_ttl_secs: 899, ..token_cfg() }), ..oidc(GOOD_JWKS) }, true, Some("session_ttl_secs"))]
+    #[case::boundary_session_ttl_above_max(AuthCfg { token: Some(AuthTokenCfg { session_ttl_secs: 2_592_001, ..token_cfg() }), ..oidc(GOOD_JWKS) }, true, Some("session_ttl_secs"))]
     #[case::adversarial_entry_jwks_credentials(issuers(vec![AuthIssuerCfg { jwks_url: "https://u:p@idp.example/k".into(), ..google_entry() }]), true, Some("credentials"))]
     fn auth_cfg_validate_cases(
         #[case] cfg: AuthCfg,

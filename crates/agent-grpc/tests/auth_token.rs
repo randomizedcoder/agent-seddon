@@ -4,7 +4,9 @@
 //!
 //! The chain under test: IdP ID token → `AuthService.Exchange` → agent token →
 //! `WhoAmI` and a seam call. And the split it enforces: IdP tokens only at
-//! `Exchange`, agent tokens only at the seams.
+//! `Exchange`, agent tokens only at the seams. S6 adds the session behind every
+//! token: `Refresh` rotates its handle, `Logout` revokes it, and a sensitive action
+//! stops working the moment it is revoked.
 #![cfg(feature = "auth")]
 
 use std::sync::Arc;
@@ -15,6 +17,7 @@ use agent_grpc::server::{
 use agent_grpc::Endpoint;
 use agent_proto::pb;
 use agent_proto::pb::auth_service_client::AuthServiceClient;
+use agent_proto::pb::review_fleet_service_client::ReviewFleetServiceClient;
 use agent_proto::pb::tokenizer_service_client::TokenizerServiceClient;
 use agent_testkit::oidc::{FakeIssuer, TestKey, EC_PRIV_SEC1_PEM};
 use rstest::rstest;
@@ -101,6 +104,7 @@ impl Harness {
         AuthServiceClient::new(self.channel.clone())
             .exchange(pb::ExchangeRequest {
                 id_token: id_token.into(),
+                client_kind: "cli".into(),
             })
             .await
             .map(tonic::Response::into_inner)
@@ -111,6 +115,39 @@ impl Harness {
             .who_am_i(with_bearer(pb::WhoAmIRequest {}, bearer))
             .await
             .map(tonic::Response::into_inner)
+    }
+
+    fn auth(&self) -> AuthServiceClient<Channel> {
+        AuthServiceClient::new(self.channel.clone())
+    }
+
+    async fn refresh(&self, handle: &str) -> Result<pb::ExchangeResponse, tonic::Status> {
+        self.auth()
+            .refresh(pb::RefreshRequest {
+                refresh_handle: handle.into(),
+            })
+            .await
+            .map(tonic::Response::into_inner)
+    }
+
+    async fn my_sessions(&self, bearer: &str) -> Result<Vec<pb::AuthSessionInfo>, tonic::Status> {
+        self.auth()
+            .list_my_sessions(with_bearer(pb::ListMySessionsRequest {}, Some(bearer)))
+            .await
+            .map(|r| r.into_inner().sessions)
+    }
+
+    /// `ReviewFleetService.Approve` is a sensitive action; this listener does not
+    /// serve the fleet, so a call the layer admits ends as `UNIMPLEMENTED`. The
+    /// fleet is a scoped service, so the call names an agent session too.
+    async fn approve(&self, bearer: &str) -> Code {
+        let mut req = with_bearer(pb::ApproveRequest::default(), Some(bearer));
+        req.metadata_mut()
+            .insert("x-agent-session-id", "s1".parse().expect("header"));
+        ReviewFleetServiceClient::new(self.channel.clone())
+            .approve(req)
+            .await
+            .map_or_else(|e| e.code(), |_| Code::Ok)
     }
 
     async fn count(&self, bearer: Option<&str>) -> Result<u32, tonic::Status> {
@@ -269,4 +306,166 @@ async fn boundary_oversized_id_token_rejected(#[case] len: usize) {
     let h = Harness::start().await;
     let err = h.exchange(&"a".repeat(len)).await.unwrap_err();
     assert_eq!(err.code(), Code::Unauthenticated);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn positive_exchange_opens_a_session_the_token_names() {
+    let h = Harness::start().await;
+    let resp = h.exchange(&h.id_token(json!({}))).await.expect("exchange");
+    assert!(resp.refresh_handle.starts_with("rh1."));
+    assert!(resp.session_expires_at >= resp.expires_at);
+    let principal = resp.principal.expect("principal");
+    assert_eq!(principal.sid.len(), 32);
+    let sessions = h.my_sessions(&resp.access_token).await.expect("list");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].sid, principal.sid);
+    assert_eq!(sessions[0].client_kind, "cli");
+    assert!(sessions[0].current);
+    assert_eq!(sessions[0].revoked_at, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn positive_refresh_rotates_the_handle_without_a_bearer() {
+    let h = Harness::start().await;
+    let first = h.exchange(&h.id_token(json!({}))).await.expect("exchange");
+    let next = h.refresh(&first.refresh_handle).await.expect("refresh");
+    assert_ne!(next.refresh_handle, first.refresh_handle);
+    let (a, b) = (first.principal.unwrap(), next.principal.unwrap());
+    assert_eq!((a.sid, a.subject, a.roles), (b.sid, b.subject, b.roles));
+    assert!(h.count(Some(&next.access_token)).await.expect("seam") > 0);
+    // The rotated handle refreshes again.
+    assert!(h.refresh(&next.refresh_handle).await.is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn adversarial_reused_refresh_handle_revokes_the_session() {
+    let h = Harness::start().await;
+    let first = h.exchange(&h.id_token(json!({}))).await.expect("exchange");
+    let next = h.refresh(&first.refresh_handle).await.expect("refresh");
+    // Replaying the retired handle is theft: refused, and the session dies with it.
+    assert_eq!(
+        h.refresh(&first.refresh_handle).await.unwrap_err().code(),
+        Code::Unauthenticated
+    );
+    assert_eq!(
+        h.refresh(&next.refresh_handle).await.unwrap_err().code(),
+        Code::Unauthenticated
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn positive_logout_revokes_and_stops_sensitive_actions() {
+    let h = Harness::start().await;
+    let resp = h
+        .exchange(&h.id_token(json!({"roles": ["reviewer"]})))
+        .await
+        .expect("exchange");
+    let token = resp.access_token;
+    // Admitted by the layer (live session, `approve:review`); nothing serves it here.
+    assert_eq!(h.approve(&token).await, Code::Unimplemented);
+
+    let out = h
+        .auth()
+        .logout(with_bearer(pb::LogoutRequest {}, Some(&token)))
+        .await
+        .expect("logout")
+        .into_inner();
+    assert!(out.revoked);
+
+    // The token itself has not expired: reads still work, the sensitive action and
+    // the refresh do not.
+    assert_eq!(h.approve(&token).await, Code::Unauthenticated);
+    assert!(h.who_am_i(Some(&token)).await.is_ok());
+    assert_eq!(
+        h.refresh(&resp.refresh_handle).await.unwrap_err().code(),
+        Code::Unauthenticated
+    );
+    let sessions = h.my_sessions(&token).await.expect("list");
+    assert_eq!(sessions[0].revoke_reason, "logout");
+    assert!(sessions[0].revoked_at > 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn positive_revoke_my_other_session() {
+    let h = Harness::start().await;
+    let laptop = h.exchange(&h.id_token(json!({}))).await.expect("exchange");
+    let phone = h.exchange(&h.id_token(json!({}))).await.expect("exchange");
+    let phone_sid = phone.principal.unwrap().sid;
+    let revoked = h
+        .auth()
+        .revoke_my_session(with_bearer(
+            pb::RevokeMySessionRequest {
+                sid: phone_sid.clone(),
+            },
+            Some(&laptop.access_token),
+        ))
+        .await
+        .expect("revoke")
+        .into_inner()
+        .revoked;
+    assert!(revoked);
+    assert!(h.refresh(&phone.refresh_handle).await.is_err());
+    assert!(h.refresh(&laptop.refresh_handle).await.is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn negative_another_subjects_session_is_absent_to_me() {
+    let h = Harness::start().await;
+    let alice = h.exchange(&h.id_token(json!({}))).await.expect("alice");
+    let bob = h
+        .exchange(&h.id_token(json!({"sub": "bob"})))
+        .await
+        .expect("bob");
+    // Same tenant, different subject: bob neither sees nor revokes alice's session.
+    assert_eq!(h.my_sessions(&bob.access_token).await.unwrap().len(), 1);
+    let revoked = h
+        .auth()
+        .revoke_my_session(with_bearer(
+            pb::RevokeMySessionRequest {
+                sid: alice.principal.unwrap().sid,
+            },
+            Some(&bob.access_token),
+        ))
+        .await
+        .expect("revoke")
+        .into_inner()
+        .revoked;
+    assert!(!revoked);
+    assert!(h.refresh(&alice.refresh_handle).await.is_ok());
+}
+
+#[rstest]
+#[case::negative_agent_user(json!({}), Code::PermissionDenied)]
+#[case::positive_org_admin(json!({"roles": ["org_admin"]}), Code::Ok)]
+#[tokio::test(flavor = "multi_thread")]
+async fn list_sessions_needs_read_binding(#[case] extra: Value, #[case] want: Code) {
+    let h = Harness::start().await;
+    let resp = h.exchange(&h.id_token(extra)).await.expect("exchange");
+    let got = h
+        .auth()
+        .list_sessions(with_bearer(
+            pb::ListSessionsRequest::default(),
+            Some(&resp.access_token),
+        ))
+        .await
+        .map_or_else(|e| e.code(), |_| Code::Ok);
+    assert_eq!(got, want);
+}
+
+#[rstest]
+#[case::adversarial_empty("")]
+#[case::adversarial_garbage("rh1.not-a-handle")]
+#[case::adversarial_oversized("a")]
+#[tokio::test(flavor = "multi_thread")]
+async fn refresh_rejects_bad_handles(#[case] handle: &str) {
+    let h = Harness::start().await;
+    let handle = if handle == "a" {
+        "a".repeat(1024 + 1)
+    } else {
+        handle.to_string()
+    };
+    assert_eq!(
+        h.refresh(&handle).await.unwrap_err().code(),
+        Code::Unauthenticated
+    );
 }

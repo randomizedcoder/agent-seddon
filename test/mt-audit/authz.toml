@@ -5,9 +5,10 @@
 #
 #   "action:resource"                a verified caller needs this permission in its tenant
 #   "field-checked:action:resource"  that permission, plus a handler check on the object
-#                                    (watching a session someone else owns)
-#   "authenticated"                  any verified caller (WhoAmI)
-#   "public"                         no bearer at all (Exchange, Jwks)
+#                                    (watching a session someone else owns; another
+#                                    tenant's sign-in sessions)
+#   "authenticated"                  any verified caller (WhoAmI, Logout, own sessions)
+#   "public"                         no bearer at all (Exchange, Jwks, Refresh)
 #
 # Regenerate after an intentional change with `python3 test/mt-audit/audit.py --dump-authz`,
 # then review the diff.
@@ -29,6 +30,12 @@
 "AstService.Status" = "use:agent"
 "AuthService.Exchange" = "public"
 "AuthService.Jwks" = "public"
+"AuthService.ListMySessions" = "authenticated"
+"AuthService.ListSessions" = "field-checked:read:binding"
+"AuthService.Logout" = "authenticated"
+"AuthService.Refresh" = "public"
+"AuthService.RevokeMySession" = "authenticated"
+"AuthService.RevokeSession" = "field-checked:write:binding"
 "AuthService.WhoAmI" = "authenticated"
 "ConfigService.GetSchema" = "read:config"
 "ConfigService.GetValues" = "read:config"

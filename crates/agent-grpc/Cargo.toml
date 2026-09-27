@@ -33,6 +33,10 @@ tonic = { workspace = true, features = ["tls", "tls-webpki-roots"] }
 tonic-reflection = { workspace = true }
 tonic-health = { workspace = true }
 serde_json = { workspace = true }
+# Auth sessions (security-hardening S6) are cards in the shared config store, so the
+# file tier serves dev and Postgres production. Small: agent-core + serde only.
+agent-config-store = { workspace = true }
+serde = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tower = { workspace = true }

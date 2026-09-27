@@ -121,6 +121,27 @@ binding)` holders within their tenant. Expired rows are garbage-collected by the
 (`auth_sessions_gc`, daily). Reuse of a rotated refresh handle revokes the whole session (token
 theft signal).
 
+**As built (S6).** Where the implementation differs from the above
+([`auth/session.rs`](../../../crates/agent-grpc/src/server/auth/session.rs)):
+
+- **No migration.** A session is a JSON card in the `auth_sessions` collection of the generic
+  config-store card table, keyed `(tenant, sid)`. The memory, file and Postgres tiers all work
+  unchanged, and `Store::with_cap` enforces the per-tenant cap (default 4096). Rotation is a
+  `CompareAndSwap` on the stored bytes, so two racing refreshes of one handle have exactly one
+  winner. `[auth.token] session_store` selects the backend.
+- **Handle.** `rh1.<tenant>.<sid>.<secret>`. Only the SHA-256 of the 32-byte secret is stored,
+  plus up to 16 retired hashes. A retired hash presented again revokes the session. An unknown
+  secret is only refused, so knowing a `sid` is not enough to kill a session.
+- **Garbage collection** happens on `Exchange` and `ListSessions`, not in a scheduled job. They
+  remove sessions that have been dead (expired or revoked) for 24 hours in that tenant.
+- **Roles are a snapshot.** `Refresh` keeps the roles from sign-in and re-derives permissions
+  under the live catalog. S8 re-resolves them from bindings.
+- **Deferred.** Not built: `refresh_token_enc`, IdP revalidation and `amr` beyond the login
+  token's.
+- **Liveness.** The layer checks `sid` on sensitive RPCs (`authz_policy::is_sensitive`: any
+  `approve`, `(use, exec)`, and writes or deletes of `role`, `binding` or `config`), with a
+  per-process 5-second cache. A store error, or a token without a `sid`, is denied.
+
 ## Audit stream (D11)
 
 **Yes, an audit stream is needed**, and ClickHouse with the existing tenant pattern is the right home:

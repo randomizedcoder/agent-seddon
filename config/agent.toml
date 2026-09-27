@@ -1176,7 +1176,11 @@ job         = "agent-seddon"
 # returns an agent-signed token (ES256, `typ = at+jwt`, `iss`/`aud` below, lifetime
 # min(ttl_secs, the login token's own expiry)) carrying tenant, subject, roles and a
 # permission snapshot. Every seam then accepts only agent tokens. The listener serves
-# `AuthService` itself; `Exchange` and `Jwks` need no bearer, `WhoAmI` does.
+# `AuthService` itself; `Exchange`, `Jwks` and `Refresh` need no bearer, the rest do.
+# Each `Exchange` opens a sign-in session (S6): the token carries its `sid` and the
+# reply a single-use `refresh_handle`. `Logout`/`RevokeSession` end the session:
+# refresh stops at once, and sensitive RPCs (approve, exec, role/binding/config writes)
+# within ~5 s.
 # Without `[auth.token]`, `oidc` keeps verifying IdP tokens at every seam (warned).
 # `nix run .#pki-dev` writes a signing key at `<pki>/token-signer/key.pem`.
 #
@@ -1186,6 +1190,10 @@ job         = "agent-seddon"
 # ttl_secs     = 900                           # default 900; 60..=3600
 # signing_key  = "/run/agent-seddon/pki/token-signer/key.pem"   # P-256 PEM, mode 0600
 # # previous_key = "/run/agent-seddon/pki/token-signer/old.pem"  # still verifies after a rotation
+# session_store = "file"                       # "" / memory (lost on restart) | file | postgres
+# session_path  = "~/.local/state/agent-seddon/auth-sessions"   # for `file`
+# session_ttl_secs = 43200                     # absolute session lifetime; 900..=2592000
+# max_sessions_per_tenant = 4096               # `Exchange` is refused past this
 
 # [tenancy] — the per-tenant config plane (config C35 / C2). When `per_tenant =
 # true`, the converged shared-store control-plane seams (provider-registry, review-

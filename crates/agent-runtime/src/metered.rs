@@ -2137,6 +2137,7 @@ impl agent_core::Pty for MeteredPty {
     feature = "registry-store",
     feature = "fleet-store",
     feature = "role-store",
+    feature = "auth",
     feature = "forge-registry-store",
     feature = "transport-registry-store"
 ))]
@@ -2158,6 +2159,7 @@ pub(crate) fn config_store(
     feature = "registry-store",
     feature = "fleet-store",
     feature = "role-store",
+    feature = "auth",
     feature = "forge-registry-store",
     feature = "transport-registry-store"
 ))]
@@ -2173,6 +2175,7 @@ struct MeteredBackend {
     feature = "registry-store",
     feature = "fleet-store",
     feature = "role-store",
+    feature = "auth",
     feature = "forge-registry-store",
     feature = "transport-registry-store"
 ))]
@@ -2198,6 +2201,7 @@ impl MeteredBackend {
     feature = "registry-store",
     feature = "fleet-store",
     feature = "role-store",
+    feature = "auth",
     feature = "forge-registry-store",
     feature = "transport-registry-store"
 ))]
@@ -3242,6 +3246,7 @@ mod transport_tests {
         feature = "registry-store",
         feature = "fleet-store",
         feature = "role-store",
+        feature = "auth",
         feature = "forge-registry-store",
         feature = "transport-registry-store"
     )

@@ -1336,6 +1336,8 @@ pub async fn build_agent_with(
             require_identity: cfg.auth.require_identity,
             issuers: cfg.auth.issuers.clone(),
             token: cfg.auth.token.clone(),
+            #[cfg(feature = "auth")]
+            sessions: resolve_auth_session_backend(&cfg, &metrics)?,
         },
         // TLS on served TCP listeners (`[grpc.tls]`, security-hardening S4).
         grpc_tls: crate::agent::GrpcTlsSettings {
@@ -3406,6 +3408,43 @@ pub(crate) fn resolve_role_registry(
     Ok(store)
 }
 
+/// Build the `[auth.token] session_store` backend (security-hardening S6): where
+/// sign-in sessions persist. `None` ⇒ no token service, or `""` — the auth layer
+/// then keeps sessions in memory and warns. Mirrors [`resolve_role_registry`].
+#[cfg(feature = "auth")]
+pub(crate) fn resolve_auth_session_backend(
+    cfg: &Config,
+    metrics: &Metrics,
+) -> anyhow::Result<Option<agent_grpc::server::SessionBackend>> {
+    let Some(token) = &cfg.auth.token else {
+        return Ok(None);
+    };
+    let backend: Arc<dyn agent_config_store::Backend> = match token.session_store.as_str() {
+        "" => return Ok(None),
+        "memory" => crate::metered::config_store(
+            Arc::new(agent_config_store::MemoryBackend::new()),
+            metrics.clone(),
+            "memory",
+        ),
+        "file" => crate::metered::config_store(
+            Arc::new(agent_config_store::FileBackend::new(expand_tilde(
+                &token.session_path,
+            ))),
+            metrics.clone(),
+            "file",
+        ),
+        #[cfg(feature = "auth-postgres")]
+        "postgres" => crate::store_backend::pg_backend(&cfg.config_store, metrics)?,
+        #[cfg(not(feature = "auth-postgres"))]
+        "postgres" => anyhow::bail!(
+            "[auth.token] session_store = \"postgres\" requires building with the \
+             `auth-postgres` feature"
+        ),
+        other => anyhow::bail!("unknown [auth.token] session_store `{other}`"),
+    };
+    Ok(Some(agent_grpc::server::SessionBackend(backend)))
+}
+
 /// Build the `ForgeRegistry` view over a shared-store `backend`: a per-tenant
 /// [`PerTenant`] wrap when `per_tenant` is set (each caller routes to its verified
 /// tenant's forge cards, config C40/E1), else one shared `local` view (Tier-0).
@@ -5190,5 +5229,45 @@ mod pg_digest_wiring_tests {
             rows.iter().any(|d| d.text == "wired via builder"),
             "the row written through the wired postgres arm reads back"
         );
+    }
+}
+
+#[cfg(all(test, feature = "auth"))]
+mod auth_session_backend_tests {
+    use super::*;
+    use crate::config::AuthTokenCfg;
+
+    fn cfg(token: Option<(&str, &str)>) -> Config {
+        let mut cfg = Config::minimal_for_test();
+        cfg.auth.token = token.map(|(store, path)| AuthTokenCfg {
+            session_store: store.into(),
+            session_path: path.into(),
+            ..AuthTokenCfg::default()
+        });
+        cfg
+    }
+
+    // desc: which `[auth.token] session_store` values build a backend, which leave
+    // the layer's in-memory fallback, and which fail the build.
+    #[rstest::rstest]
+    #[case::corner_no_token_service(None, Ok(false))]
+    #[case::positive_default_is_the_fallback(Some(("", "")), Ok(false))]
+    #[case::positive_memory(Some(("memory", "")), Ok(true))]
+    #[case::positive_file(Some(("file", "/tmp/agent-sessions")), Ok(true))]
+    #[cfg_attr(
+        not(feature = "auth-postgres"),
+        case::negative_postgres_without_feature(Some(("postgres", "")), Err("auth-postgres"))
+    )]
+    #[case::adversarial_unknown_store(Some(("sqlite; drop", "")), Err("unknown"))]
+    fn resolve_auth_session_backend_cases(
+        #[case] token: Option<(&str, &str)>,
+        #[case] want: Result<bool, &str>,
+    ) {
+        let got = resolve_auth_session_backend(&cfg(token), &Metrics::new());
+        match (got, want) {
+            (Ok(b), Ok(some)) => assert_eq!(b.is_some(), some),
+            (Err(e), Err(needle)) => assert!(e.to_string().contains(needle), "{e}"),
+            (got, want) => panic!("got {got:?}, want {want:?}"),
+        }
     }
 }

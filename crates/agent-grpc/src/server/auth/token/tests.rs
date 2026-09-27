@@ -84,7 +84,13 @@ fn identity(expires_at: u64) -> VerifiedIdentity {
         issuer: "google".into(),
         email: Some("alice@example.com".into()),
         expires_at,
+        sid: None,
     }
+}
+
+/// The grant for [`identity`] in session `sid-1`.
+fn grant(expires_at: u64) -> Grant {
+    Grant::from_login(&identity(expires_at), "sid-1")
 }
 
 fn perms(n: usize) -> Vec<String> {
@@ -104,7 +110,7 @@ fn good_claims() -> Value {
     json!({
         "iss": ISS, "aud": AUD, "sub": "user:google/alice", "tenant": "example.com",
         "amr": ["oidc:google"], "roles": [], "perms": [],
-        "iat": NOW, "nbf": NOW, "exp": NOW + 600, "jti": "00",
+        "iat": NOW, "nbf": NOW, "exp": NOW + 600, "jti": "00", "sid": "sid-1",
     })
 }
 
@@ -208,7 +214,7 @@ fn negative_from_params_without_signing_key() {
 #[test]
 fn positive_mint_then_verify_round_trips_the_claims() {
     let svc = service_at(NOW, key_a(), None);
-    let minted = svc.mint(&identity(NOW + 3600), &perms(2)).unwrap();
+    let minted = svc.mint(&grant(NOW + 3600), &perms(2)).unwrap();
     assert_eq!(minted.expires_at, NOW + DEFAULT_TTL_SECS);
     let claims = svc.verify(&minted.token).expect("verifies");
     assert_eq!(claims, minted.claims);
@@ -219,6 +225,7 @@ fn positive_mint_then_verify_round_trips_the_claims() {
     assert_eq!(claims.perms, perms(2));
     assert!(!claims.perms_ref);
     assert_eq!(claims.jti.len(), 32);
+    assert_eq!(claims.sid, "sid-1");
     let header = jsonwebtoken::decode_header(&minted.token).unwrap();
     assert_eq!(header.typ.as_deref(), Some(TOKEN_TYP));
     assert_eq!(header.kid.as_deref(), Some(key_a().kid()));
@@ -227,19 +234,32 @@ fn positive_mint_then_verify_round_trips_the_claims() {
 #[tokio::test]
 async fn positive_seam_verifier_yields_the_identity() {
     let svc = service_at(NOW, key_a(), None);
-    let minted = svc.mint(&identity(NOW + 3600), &[]).unwrap();
+    let minted = svc.mint(&grant(NOW + 3600), &[]).unwrap();
     let id = TokenVerifier::verify(&svc, &minted.token).await.unwrap();
     assert_eq!(id.tenant, "example.com");
     assert_eq!(id.subject, "user:google/alice-123");
     assert_eq!(id.issuer, "google");
     assert_eq!(id.roles, vec!["reader".to_string()]);
+    assert_eq!(id.sid.as_deref(), Some("sid-1"));
+}
+
+#[rstest]
+#[case::adversarial_traversal_sid("../x")]
+#[case::adversarial_empty_sid("")]
+fn adversarial_mint_refuses_an_unsafe_sid(#[case] sid: &str) {
+    let svc = service_at(NOW, key_a(), None);
+    let bad = Grant {
+        sid: sid.into(),
+        ..grant(NOW + 3600)
+    };
+    assert!(svc.mint(&bad, &[]).is_err());
 }
 
 #[test]
 fn positive_each_token_gets_a_fresh_jti() {
     let svc = service_at(NOW, key_a(), None);
-    let a = svc.mint(&identity(NOW + 3600), &[]).unwrap();
-    let b = svc.mint(&identity(NOW + 3600), &[]).unwrap();
+    let a = svc.mint(&grant(NOW + 3600), &[]).unwrap();
+    let b = svc.mint(&grant(NOW + 3600), &[]).unwrap();
     assert_ne!(a.claims.jti, b.claims.jti);
 }
 
@@ -249,7 +269,7 @@ fn positive_each_token_gets_a_fresh_jti() {
 #[case::corner_no_perms(0, false)]
 fn boundary_token_size(#[case] n: usize, #[case] by_ref: bool) {
     let svc = service_at(NOW, key_a(), None);
-    let minted = svc.mint(&identity(NOW + 3600), &perms(n)).unwrap();
+    let minted = svc.mint(&grant(NOW + 3600), &perms(n)).unwrap();
     let claims = svc.verify(&minted.token).unwrap();
     assert_eq!(claims.perms_ref, by_ref);
     assert_eq!(claims.perms.len(), if by_ref { 0 } else { n });
@@ -266,9 +286,7 @@ fn boundary_token_size(#[case] n: usize, #[case] by_ref: bool) {
 fn mint_expiry_cases(#[case] login_exp: u64, #[case] want: Option<u64>) {
     let svc = service_at(NOW, key_a(), None);
     assert_eq!(
-        svc.mint(&identity(login_exp), &[])
-            .ok()
-            .map(|m| m.expires_at),
+        svc.mint(&grant(login_exp), &[]).ok().map(|m| m.expires_at),
         want
     );
 }
@@ -281,7 +299,7 @@ fn mint_expiry_cases(#[case] login_exp: u64, #[case] want: Option<u64>) {
 #[case::negative_not_yet_valid(NOW - LEEWAY - 1, false)]
 fn verify_time_cases(#[case] verify_at: u64, #[case] ok: bool) {
     let token = service_at(NOW, key_a(), None)
-        .mint(&identity(NOW + 3600), &[])
+        .mint(&grant(NOW + 3600), &[])
         .unwrap()
         .token;
     assert_eq!(
@@ -296,13 +314,13 @@ fn verify_time_cases(#[case] verify_at: u64, #[case] ok: bool) {
 fn positive_rotation_grace_accepts_previous_kid() {
     let old = key_a();
     let token = service_at(NOW, key_a(), None)
-        .mint(&identity(NOW + 3600), &[])
+        .mint(&grant(NOW + 3600), &[])
         .unwrap()
         .token;
     let rotated = service_at(NOW, fresh_key(), Some(old));
     assert!(rotated.verify(&token).is_ok());
     // New tokens are signed by the new key.
-    let new_token = rotated.mint(&identity(NOW + 3600), &[]).unwrap().token;
+    let new_token = rotated.mint(&grant(NOW + 3600), &[]).unwrap().token;
     let kid = jsonwebtoken::decode_header(&new_token)
         .unwrap()
         .kid
@@ -313,7 +331,7 @@ fn positive_rotation_grace_accepts_previous_kid() {
 #[test]
 fn adversarial_token_signed_by_old_key_after_grace_rejected() {
     let token = service_at(NOW, key_a(), None)
-        .mint(&identity(NOW + 3600), &[])
+        .mint(&grant(NOW + 3600), &[])
         .unwrap()
         .token;
     assert!(service_at(NOW, fresh_key(), None).verify(&token).is_err());
@@ -333,7 +351,7 @@ fn positive_jwks_publishes_current_then_previous_and_verifies_elsewhere() {
         vec![svc.current.kid.clone(), key_a().kid().to_string()]
     );
     // A verifier that only has the published set (another process, Envoy) accepts it.
-    let token = svc.mint(&identity(NOW + 3600), &[]).unwrap().token;
+    let token = svc.mint(&grant(NOW + 3600), &[]).unwrap().token;
     let jwk = set.find(&svc.current.kid).unwrap();
     let mut v = Validation::new(Algorithm::ES256);
     v.set_audience(&[AUD]);
@@ -364,6 +382,9 @@ fn adversarial_idp_token_presented_to_seam_rejected() {
 #[case::adversarial_empty_subject(Some(TOKEN_TYP), json!({"sub": ""}))]
 #[case::adversarial_roles_not_an_array(Some(TOKEN_TYP), json!({"roles": "operator"}))]
 #[case::adversarial_non_string_role(Some(TOKEN_TYP), json!({"roles": [1]}))]
+#[case::adversarial_no_sid(Some(TOKEN_TYP), json!({"sid": null}))]
+#[case::adversarial_traversal_sid(Some(TOKEN_TYP), json!({"sid": "../x"}))]
+#[case::adversarial_empty_sid(Some(TOKEN_TYP), json!({"sid": ""}))]
 fn adversarial_claim_cases(#[case] typ: Option<&str>, #[case] overrides: Value) {
     let svc = service_at(NOW, key_a(), None);
     let mut claims = good_claims();
@@ -411,7 +432,7 @@ fn adversarial_unknown_kid_rejected() {
 #[test]
 fn adversarial_tampered_payload_rejected() {
     let svc = service_at(NOW, key_a(), None);
-    let token = svc.mint(&identity(NOW + 3600), &[]).unwrap().token;
+    let token = svc.mint(&grant(NOW + 3600), &[]).unwrap().token;
     let mut parts: Vec<String> = token.split('.').map(str::to_string).collect();
     let mut body: Value =
         serde_json::from_slice(&URL_SAFE_NO_PAD.decode(&parts[1]).unwrap()).unwrap();

@@ -79,6 +79,8 @@ pub struct VerifiedIdentity {
     /// The token's `exp` (seconds since the Unix epoch). An agent token minted
     /// from this identity never outlives it.
     pub expires_at: u64,
+    /// The auth session an agent token names (S6); `None` for an IdP token.
+    pub sid: Option<String>,
 }
 
 /// Verifies a bearer token, yielding a [`VerifiedIdentity`] or an **opaque**
@@ -131,6 +133,22 @@ pub struct TokenParams {
     pub signing_key: String,
     /// Path to the key rotated out, still trusted for verification (optional).
     pub previous_key: String,
+    /// Absolute auth-session lifetime in seconds; `0` ⇒ the default (12 h).
+    pub session_ttl_secs: u64,
+    /// Stored sessions per tenant; `0` ⇒ the default (4096).
+    pub max_sessions_per_tenant: usize,
+    /// Where sessions persist; `None` ⇒ in memory (lost on restart).
+    pub sessions: Option<SessionBackend>,
+}
+
+/// The config-store backend auth sessions persist on (security-hardening S6).
+#[derive(Clone)]
+pub struct SessionBackend(pub Arc<dyn agent_config_store::Backend>);
+
+impl std::fmt::Debug for SessionBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SessionBackend(..)")
+    }
 }
 
 impl AuthParams {
@@ -208,6 +226,10 @@ pub struct AuthLayer {
     /// router by [`AuthLayer::serve_auth_service`].
     #[cfg(feature = "auth")]
     auth_service: Option<service::AuthSvc>,
+    /// Auth sessions, present with `[auth.token]`: sensitive actions check that the
+    /// token's session is still live.
+    #[cfg(feature = "auth")]
+    sessions: Option<Arc<session::SessionStore>>,
 }
 
 impl AuthLayer {
@@ -221,6 +243,8 @@ impl AuthLayer {
             require_identity: false,
             #[cfg(feature = "auth")]
             auth_service: None,
+            #[cfg(feature = "auth")]
+            sessions: None,
         }
     }
 
@@ -232,6 +256,8 @@ impl AuthLayer {
             require_identity: false,
             #[cfg(feature = "auth")]
             auth_service: None,
+            #[cfg(feature = "auth")]
+            sessions: None,
         }
     }
 
@@ -241,9 +267,11 @@ impl AuthLayer {
     pub fn with_token_service(
         login: Arc<dyn TokenVerifier>,
         tokens: Arc<token::TokenService>,
+        sessions: Arc<session::SessionStore>,
     ) -> Self {
         let mut layer = Self::enabled(tokens.clone());
-        layer.auth_service = Some(service::AuthSvc::new(login, tokens));
+        layer.auth_service = Some(service::AuthSvc::new(login, tokens, sessions.clone()));
+        layer.sessions = Some(sessions);
         layer
     }
 
@@ -311,7 +339,27 @@ impl AuthLayer {
                             tokens.issuer()
                         ));
                     }
-                    Ok(Self::with_token_service(Arc::new(login), Arc::new(tokens)))
+                    let backend = match &t.sessions {
+                        Some(b) => b.0.clone(),
+                        None => {
+                            tracing::warn!(
+                                "`[auth.token]` without a session store: sessions live in \
+                                 memory and every sign-in is lost on restart"
+                            );
+                            Arc::new(agent_config_store::MemoryBackend::new())
+                        }
+                    };
+                    let sessions = session::SessionStore::new(
+                        backend,
+                        t.session_ttl_secs,
+                        t.max_sessions_per_tenant,
+                        Arc::new(jwt::SystemClock),
+                    )?;
+                    Ok(Self::with_token_service(
+                        Arc::new(login),
+                        Arc::new(tokens),
+                        Arc::new(sessions),
+                    ))
                 }
                 #[cfg(not(feature = "auth"))]
                 {
@@ -380,6 +428,8 @@ impl<S> Layer<S> for AuthLayer {
             verifier: self.verifier.clone(),
             on_verify: self.on_verify.clone(),
             require_identity: self.require_identity,
+            #[cfg(feature = "auth")]
+            sessions: self.sessions.clone(),
         }
     }
 }
@@ -395,17 +445,21 @@ pub struct Auth<S> {
     verifier: Option<Arc<dyn TokenVerifier>>,
     on_verify: Option<AuthObserver>,
     require_identity: bool,
+    #[cfg(feature = "auth")]
+    sessions: Option<Arc<session::SessionStore>>,
 }
 
 /// Paths served without authentication: standard health + reflection, so an
 /// orchestrator/`grpcurl` can probe liveness and introspect without a token; and
-/// the two `AuthService` calls a caller makes before it holds an agent token
-/// (`Exchange` verifies its own login token; `Jwks` is public key material).
+/// the `AuthService` calls a caller makes without an agent token (`Exchange`
+/// verifies its own login token; `Jwks` is public key material; `Refresh` carries
+/// the refresh handle, verified by the session store).
 fn is_exempt(path: &str) -> bool {
     path.starts_with("/grpc.health.")
         || path.starts_with("/grpc.reflection.")
         || path == "/agent.v1.AuthService/Exchange"
         || path == "/agent.v1.AuthService/Jwks"
+        || path == "/agent.v1.AuthService/Refresh"
 }
 
 /// The bearer token from an `authorization: Bearer <token>` header, if well-formed.
@@ -457,6 +511,8 @@ where
             Some(v) => v.clone(),
         };
         let on_verify = self.on_verify.clone();
+        #[cfg(feature = "auth")]
+        let sessions = self.sessions.clone();
 
         Box::pin(async move {
             let Some(token) = bearer_token(req.headers()) else {
@@ -499,6 +555,24 @@ where
                     if let Err(denied) = super::authz::gate(req.uri().path(), &principal) {
                         return Ok(denied.into_http());
                     }
+                    // A sensitive action also needs the token's session to be live,
+                    // so logout and revocation stop it before the token expires (S6).
+                    #[cfg(feature = "auth")]
+                    if let Some(sessions) = &sessions {
+                        if super::authz_policy::is_sensitive(req.uri().path()) {
+                            let live = match &id.sid {
+                                Some(sid) => sessions.is_live(&principal.tenant, sid).await,
+                                None => false,
+                            };
+                            if !live {
+                                tracing::info!(
+                                    rpc = %req.uri().path(),
+                                    "denied: the token's session is not live"
+                                );
+                                return Ok(unauthenticated());
+                            }
+                        }
+                    }
                     let scope = agent_core::RequestScope {
                         identity: None,
                         principal: Some(principal),
@@ -537,7 +611,11 @@ mod jwt;
 #[cfg(feature = "auth")]
 mod token;
 
-/// `AuthService`: exchange, key set, who-am-I.
+/// Auth sessions: open, refresh rotation, revocation, liveness.
+#[cfg(feature = "auth")]
+mod session;
+
+/// `AuthService`: exchange, refresh, logout, sessions, key set, who-am-I.
 #[cfg(feature = "auth")]
 mod service;
 
@@ -548,9 +626,15 @@ pub use jwt::{Clock, JwksSource, JwtVerifier, MultiIssuerVerifier, SystemClock};
 #[cfg(feature = "auth")]
 pub use service::{AuthSvc, MAX_ID_TOKEN_BYTES};
 #[cfg(feature = "auth")]
+pub use session::{
+    AuthSession, RefreshError, SessionStore, DEFAULT_MAX_SESSIONS_PER_TENANT,
+    DEFAULT_SESSION_TTL_SECS, LIVE_CACHE_SECS, MAX_REFRESH_HANDLE_BYTES, MAX_SESSION_TTL_SECS,
+    MIN_SESSION_TTL_SECS,
+};
+#[cfg(feature = "auth")]
 pub use token::{
-    AgentClaims, MintedToken, SigningKey, TokenService, DEFAULT_TTL_SECS, MAX_PERMS_IN_TOKEN,
-    MAX_TTL_SECS, MIN_TTL_SECS, TOKEN_TYP,
+    AgentClaims, Grant, MintedToken, SigningKey, TokenService, DEFAULT_TTL_SECS,
+    MAX_PERMS_IN_TOKEN, MAX_TTL_SECS, MIN_TTL_SECS, TOKEN_TYP,
 };
 
 #[cfg(all(test, feature = "auth"))]
