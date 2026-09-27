@@ -33,6 +33,7 @@
   agent,
   harness,
   portal-test-report,
+  clickhouse-creds,
 }:
 let
   # grpc-web proxy ports. UI plumbing, not seams, so they live here rather than in
@@ -756,6 +757,7 @@ let
       pkgs.gawk
       pkgs.git # perf rows (inc 09) stamp commit_sha / branch / git_dirty
       grpc-web-up
+      clickhouse-creds
     ];
     text = ''
       set -uo pipefail
@@ -767,6 +769,15 @@ let
       runtime="''${CONTAINER_RUNTIME:-docker}"
       export CONTAINER_RUNTIME="$runtime"
       run_id="''${PORTAL_E2E_RUN_ID:-$$}"
+
+      # ClickHouse logins (security-hardening S16), best-effort like every ClickHouse
+      # step here: span lookups read as agent_viewer, perf rows insert as agent_writer.
+      # Passwords travel in the environment or on stdin, never a command line.
+      ch_pw() { local f; f="$(clickhouse-creds path "$1")"; if [ -r "$f" ]; then cat "$f"; fi; }
+      CLICKHOUSE_PASSWORD="$(ch_pw viewer)"
+      export CLICKHOUSE_PASSWORD
+      ch_writer_pw="$(ch_pw writer)"
+      ch_viewer() { "$runtime" exec -e CLICKHOUSE_PASSWORD "${chContainer}" clickhouse-client --user agent_viewer "$@"; }
 
       config="''${PORTAL_CONFIG:-config/agent.toml}"
       if [ ! -f "$config" ]; then
@@ -1023,7 +1034,7 @@ let
       span_n=0
       if "$runtime" ps --format '{{.Names}}' 2>/dev/null | grep -qx "${chContainer}"; then
         for _ in $(seq 1 15); do
-          span_n="$("$runtime" exec "${chContainer}" clickhouse-client -q \
+          span_n="$(ch_viewer -q \
             "SELECT count() FROM default.otel_traces WHERE ServiceName='agent-gateway' AND SpanName='grpc.server' AND Timestamp > now() - INTERVAL 3 MINUTE" 2>/dev/null || echo 0)"
           case "$span_n" in "" | *[!0-9]* ) span_n=0 ;; esac
           if [ "$span_n" -ge 1 ]; then break; fi
@@ -1086,7 +1097,7 @@ let
         [ -n "$sr" ] || { echo ""; return; }
         "$runtime" ps --format '{{.Names}}' 2>/dev/null | grep -qx "${chContainer}" || { echo ""; return; }
         for _ in $(seq 1 6); do
-          tid="$("$runtime" exec "${chContainer}" clickhouse-client -q \
+          tid="$(ch_viewer -q \
             "SELECT TraceId FROM default.otel_traces WHERE ServiceName='agent-gateway' AND SpanAttributes['rpc']='$sr' AND Timestamp > now() - INTERVAL 5 MINUTE ORDER BY Timestamp DESC LIMIT 1" 2>/dev/null || echo "")"
           if [ -n "$tid" ]; then break; fi
           sleep 1
@@ -1154,7 +1165,8 @@ let
           printf 'INSERT INTO agent.portal_gui_perf FORMAT JSONEachRow\n'
           cat "$workdir/perf.jsonl"
         } >"$workdir/perf.post"
-        if curl -sf --data-binary @"$workdir/perf.post" "http://127.0.0.1:${toString chHttpPort}/" >/dev/null 2>&1; then
+        if printf 'user = "agent_writer:%s"\n' "$ch_writer_pw" \
+          | curl -K - -sf --data-binary @"$workdir/perf.post" "http://127.0.0.1:${toString chHttpPort}/" >/dev/null 2>&1; then
           echo "portal-e2e: inserted $perf_rows perf row(s) into agent.portal_gui_perf (run_id=$run_id)"
         else
           echo "portal-e2e: [warn] perf insert skipped — agent ClickHouse :${toString chHttpPort} down, or table missing (run 'nix run .#clickhouse-migrate')"

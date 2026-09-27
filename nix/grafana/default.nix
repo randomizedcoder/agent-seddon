@@ -14,6 +14,7 @@
   pkgs,
   lib,
   versions,
+  clickhouse-creds,
 }:
 
 let
@@ -32,10 +33,20 @@ in
 {
   grafana-up = pkgs.writeShellApplication {
     name = "grafana-up";
-    runtimeInputs = c.runtimes ++ [ versions.curl ];
+    runtimeInputs = c.runtimes ++ [
+      versions.curl
+      clickhouse-creds
+    ];
     text = ''
         set -euo pipefail
         ${c.pickRuntime}
+
+        # The ClickHouse datasource reads as the read-only agent_viewer (S16); the
+        # provisioning file expands $CLICKHOUSE_VIEWER_PASSWORD, which reaches the
+        # container through the environment, never a command line.
+        clickhouse-creds ensure
+        CLICKHOUSE_VIEWER_PASSWORD="$(cat "$(clickhouse-creds path viewer)")"
+        export CLICKHOUSE_VIEWER_PASSWORD
 
         if ! "$runtime" info >/dev/null 2>&1; then
           echo "grafana-up: '$runtime' not reachable — is it installed/running?" >&2
@@ -54,6 +65,7 @@ in
             --network host \
             -e GF_SERVER_HTTP_PORT="${port}" \
             -e GF_INSTALL_PLUGINS=grafana-clickhouse-datasource \
+            -e CLICKHOUSE_VIEWER_PASSWORD \
             -e GF_AUTH_ANONYMOUS_ENABLED=true \
             -e GF_AUTH_ANONYMOUS_ORG_ROLE=Admin \
             -e GF_AUTH_DISABLE_LOGIN_FORM=true \

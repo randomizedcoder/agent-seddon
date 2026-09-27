@@ -1543,6 +1543,23 @@ class TelemetrySectionTables(unittest.TestCase):
                 self.assertIn('clickhouse_url = "localhost:9000"', t)
                 self.assertIn("stream_logs = false", t)
 
+    def test_positive_password_file_adds_the_writer_login(self):
+        import dataclasses as dc
+        env = dc.replace(self.env("http://127.0.0.1:8123"), clickhouse_password_file="/s/writer.password")
+        for arm in core.ARM_NAMES:
+            with self.subTest(arm):
+                t = core.arm_agent_toml(arm, "/cog", "/work", "/scratch", ArmConfigTables.TIER, env)
+                self.assertIn('user = "agent_writer"', t)
+                self.assertIn('password_file = "/s/writer.password"', t)
+
+    def test_corner_no_password_file_emits_no_login(self):
+        t = core.arm_agent_toml(
+            "baseline", "/cog", "/work", "/scratch", ArmConfigTables.TIER,
+            self.env("http://127.0.0.1:8123"),
+        )
+        self.assertNotIn("password_file", t)
+        self.assertNotIn("agent_writer", t)
+
     def test_negative_absent_without_the_env(self):
         for arm in core.ARM_NAMES:
             self.assertNotIn(

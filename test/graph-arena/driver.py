@@ -207,6 +207,11 @@ def resolve_env(arms: list[str]) -> core.ArmEnv:
     # look like clean telemetry).
     ch_http = os.environ.get("ARENA_CLICKHOUSE", "").strip() or None
     ch_native = os.environ.get("ARENA_CLICKHOUSE_NATIVE", "localhost:9000").strip()
+    # S16: the agent_writer password file (`nix run .#clickhouse-creds -- path writer`);
+    # every arm writes, and the witness reads back, with it.
+    ch_pw_file = os.environ.get("ARENA_CLICKHOUSE_PASSWORD_FILE", "").strip()
+    if ch_pw_file:
+        ch_pw_file = str(Path(ch_pw_file).expanduser())
     if ch_http:
         try:
             with urllib.request.urlopen(ch_http.rstrip("/") + "/ping", timeout=10) as resp:
@@ -230,15 +235,21 @@ def resolve_env(arms: list[str]) -> core.ArmEnv:
         ),
         clickhouse_http=ch_http,
         clickhouse_native=ch_native,
+        clickhouse_password_file=ch_pw_file,
     )
 
 
-def ch_query(base_url: str, sql: str) -> str:
-    """One ClickHouse HTTP query (stdlib only); the reply body is size-capped."""
+def ch_query(base_url: str, sql: str, password_file: str = "") -> str:
+    """One ClickHouse HTTP query (stdlib only); the reply body is size-capped. With a
+    password file it logs in as agent_writer (security-hardening S16)."""
+    headers = {"Content-Type": "text/plain", "User-Agent": "graph-arena/1"}
+    if password_file:
+        headers["X-ClickHouse-User"] = "agent_writer"
+        headers["X-ClickHouse-Key"] = Path(password_file).read_text().strip()
     req = urllib.request.Request(
         base_url.rstrip("/") + "/",
         data=sql.encode(),
-        headers={"Content-Type": "text/plain", "User-Agent": "graph-arena/1"},
+        headers=headers,
     )
     with urllib.request.urlopen(req, timeout=20) as resp:
         return resp.read(core.MAX_CH_BODY_CHARS).decode("utf-8", errors="replace")
@@ -260,8 +271,12 @@ def collect_trace_witness(env: core.ArmEnv, run_dir: Path) -> core.TraceWitness 
     prev: core.TraceWitness | None = None
     for _ in range(10):
         try:
-            usage = core.parse_ch_json(ch_query(env.clickhouse_http, queries["usage"]))
-            tools = core.parse_ch_json(ch_query(env.clickhouse_http, queries["tools"]))
+            usage = core.parse_ch_json(
+                ch_query(env.clickhouse_http, queries["usage"], env.clickhouse_password_file)
+            )
+            tools = core.parse_ch_json(
+                ch_query(env.clickhouse_http, queries["tools"], env.clickhouse_password_file)
+            )
         except Exception as e:  # noqa: BLE001 — the witness never fails the run
             log(f"trace witness query failed: {e}")
             return None

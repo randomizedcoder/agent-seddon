@@ -22,19 +22,70 @@ let
 
   # The schema, materialized into the Nix store so we can bind-mount it.
   schema = ./schema.sql;
-  # Dev override widening the `default` user's allowed networks (see users.xml).
+  # Server settings (config.d) and the users override (users.d); see each file.
+  serverOverride = ./config.xml;
   usersOverride = ./users.xml;
+  # Where the rendered admin-hash override is mounted (security-hardening S16).
+  credsMount = "/etc/clickhouse-server/users.d/50-agent-credentials.xml";
 
   # Shared container-lifecycle apps (the identical *-down/*-client/*-logs bodies).
   c = import ../lib/mk-container-app.nix { inherit pkgs versions; };
+
+  # `clickhouse-creds` — the per-login password files + rendered admin override
+  # (test/clickhouse/ch_creds.py, tested by the `ch-creds-tests` check). Every
+  # ClickHouse app below goes through it; `nix run .#clickhouse-creds -- path writer`
+  # tells an operator which file to point `[telemetry] password_file` at.
+  clickhouse-creds = pkgs.writeShellApplication {
+    name = "clickhouse-creds";
+    runtimeInputs = [ pkgs.python3 ];
+    text = ''
+      exec python3 "${../../test/clickhouse}/ch_creds.py" "$@"
+    '';
+  };
+
+  # Shell prelude shared by the apps that run SQL as the admin: the admin password is
+  # read from its 0600 file into the environment and handed to `clickhouse-client` via
+  # `exec -e CLICKHOUSE_PASSWORD` — never on a command line. `admin_client ARGS…` runs
+  # clickhouse-client inside the container as the admin.
+  adminPrelude = ''
+    clickhouse-creds ensure
+    CLICKHOUSE_PASSWORD="$(cat "$(clickhouse-creds path admin)")"
+    export CLICKHOUSE_PASSWORD
+    admin_client() { "$runtime" exec -i -e CLICKHOUSE_PASSWORD "${name}" clickhouse-client "$@"; }
+    # Refuse a container created before S16: it has no admin password and still lets
+    # users without a row policy read every row. Recreating it discards the telemetry
+    # in its writable layer, so that is the operator's call, not ours.
+    require_hardened() {
+      if ! "$runtime" inspect -f '{{range .Mounts}}{{.Destination}} {{end}}' "${name}" \
+          | grep -q "${credsMount}"; then
+        echo "clickhouse: container '${name}' predates the credential lockdown (S16):" >&2
+        echo "  its admin has no password and its row-policy default is open." >&2
+        echo "  Recreate it (this DISCARDS its telemetry):" >&2
+        echo "    nix run .#clickhouse-down && nix run .#clickhouse-up" >&2
+        exit 1
+      fi
+    }
+    apply_schema() {
+      echo "==> applying schema (database '${db}')"
+      admin_client --multiquery < "${schema}"
+      echo "==> setting the agent_writer / agent_reader / agent_viewer passwords"
+      clickhouse-creds alter-sql | admin_client --multiquery
+    }
+  '';
 in
 {
+  inherit clickhouse-creds;
+
   clickhouse-up = pkgs.writeShellApplication {
     name = "clickhouse-up";
-    runtimeInputs = c.runtimes ++ [ versions.curl ];
+    runtimeInputs = c.runtimes ++ [
+      versions.curl
+      clickhouse-creds
+    ];
     text = ''
         set -euo pipefail
         ${c.pickRuntime}
+        ${adminPrelude}
 
         if ! "$runtime" info >/dev/null 2>&1; then
           echo "clickhouse-up: '$runtime' not reachable — is it installed/running?" >&2
@@ -42,18 +93,22 @@ in
         fi
 
         if "$runtime" ps -a --format '{{.Names}}' | grep -qx "${name}"; then
+          require_hardened
           echo "==> container '${name}' already exists; (re)starting it"
           "$runtime" start "${name}" >/dev/null
         else
           echo "==> starting ClickHouse (${image})"
-          # Ports are published on 127.0.0.1 only (host-local); the users.xml
-          # override lets the `default` user connect over HTTP from the host.
+          # Ports are published on 127.0.0.1 only (host-local). Every login needs a
+          # password: the admin's hash comes from the rendered override mounted below.
+          # The schema is applied by apply_schema (not the image's initdb hook, which
+          # would run it as the admin before the passwords exist).
           "$runtime" run -d \
             --name "${name}" \
             -p 127.0.0.1:${httpPort}:8123 \
             -p 127.0.0.1:${nativePort}:9000 \
-            -v "${schema}:/docker-entrypoint-initdb.d/00-schema.sql:ro" \
+            -v "${serverOverride}:/etc/clickhouse-server/config.d/agent.xml:ro" \
             -v "${usersOverride}:/etc/clickhouse-server/users.d/99-allow-remote-default.xml:ro" \
+            -v "$(clickhouse-creds path server-xml):${credsMount}:ro" \
             "${image}" >/dev/null
         fi
 
@@ -67,10 +122,9 @@ in
           sleep 1
         done
 
-        # Re-apply the schema idempotently (the initdb mount only runs on a fresh
-        # data dir; this covers an already-existing container/volume).
-        echo "==> applying schema (database '${db}')"
-        "$runtime" exec -i "${name}" clickhouse-client --multiquery < "${schema}"
+        # Apply the schema idempotently, then set the SQL users' passwords (they are
+        # created unable to log in until this runs).
+        apply_schema
 
         cat <<EOF
 
@@ -78,6 +132,13 @@ in
         HTTP:    http://localhost:${httpPort}   (/ping, /play)
         Native:  localhost:${nativePort}        (clickhouse-client --port ${nativePort})
         Database: ${db}   Tables: agent_events, agent_logs, agent_usage
+
+        Logins (passwords in $(dirname "$(clickhouse-creds path admin)"), 0600):
+          agent_writer  the agent:  [telemetry] user = "agent_writer"
+                                    [telemetry] password_file = "$(clickhouse-creds path writer)"
+          agent_reader  tenant-scoped reads:  reader_user / reader_password_file
+          agent_viewer  dashboards (HyperDX, Grafana)
+          default       admin (schema, access management)
 
         Query:   nix run .#clickhouse-client -- -q 'SHOW TABLES FROM ${db}'
         Migrate: nix run .#clickhouse-migrate   (re-apply schema after a binary update)
@@ -94,7 +155,7 @@ in
   # `clickhouse` probe now flags that drift; this fixes it).
   clickhouse-migrate = pkgs.writeShellApplication {
     name = "clickhouse-migrate";
-    runtimeInputs = c.runtimes;
+    runtimeInputs = c.runtimes ++ [ clickhouse-creds ];
     text = ''
       set -euo pipefail
       ${c.pickRuntime}
@@ -104,9 +165,9 @@ in
         echo "  nix run .#clickhouse-up" >&2
         exit 1
       fi
-
-      echo "==> applying schema to '${name}' (database '${db}')"
-      "$runtime" exec -i "${name}" clickhouse-client --multiquery < "${schema}"
+      ${adminPrelude}
+      require_hardened
+      apply_schema
       echo "==> schema applied (idempotent)"
     '';
   };
@@ -117,10 +178,21 @@ in
   };
 
   # `nix run .#clickhouse-client -- <args>` → clickhouse-client inside the
-  # container, e.g. `-- -q 'SELECT count() FROM agent.agent_events'`.
-  clickhouse-client = c.client {
-    name = "clickhouse";
-    container = name;
-    exec = "clickhouse-client";
+  # container as the admin, e.g. `-- -q 'SELECT count() FROM agent.agent_events'`.
+  # (Not the shared c.client: this one must carry the admin password.)
+  clickhouse-client = pkgs.writeShellApplication {
+    name = "clickhouse-client-wrapper";
+    runtimeInputs = c.runtimes ++ [ clickhouse-creds ];
+    text = ''
+      set -euo pipefail
+      ${c.pickRuntime}
+      if ! "$runtime" ps --format '{{.Names}}' | grep -qx "${name}"; then
+        echo "clickhouse-client: container '${name}' is not running — run 'nix run .#clickhouse-up' first" >&2
+        exit 1
+      fi
+      CLICKHOUSE_PASSWORD="$(cat "$(clickhouse-creds path admin)")"
+      export CLICKHOUSE_PASSWORD
+      exec "$runtime" exec -i -e CLICKHOUSE_PASSWORD "${name}" clickhouse-client "$@"
+    '';
   };
 }

@@ -294,6 +294,12 @@ in
   clickhouseHttpPort = 8123; # HTTP interface (/ping, clickhouse-client --port for native below)
   clickhouseNativePort = 9000; # native TCP protocol
   clickhouseDatabase = "agent";
+  # `nix run .#ch-integration` (security-hardening S16): a throwaway ClickHouse for the
+  # credential + row-level-security matrix, on its own name and ports so it never
+  # touches the long-lived agent ClickHouse above.
+  clickhouseRlsTestContainerName = "agent-seddon-clickhouse-rls-test";
+  clickhouseRlsTestHttpPort = 18123;
+  clickhouseRlsTestNativePort = 19000;
 
   # ── Postgres container settings ────────────────────────────────────────────
   # The transactional config-store (`agent-config-store` postgres tier, config

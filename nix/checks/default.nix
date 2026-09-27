@@ -294,6 +294,9 @@ in
   # The dev-PKI generator's own tests, incl. an offline real-step-cli mint + verify and
   # check-the-checks (security-hardening S4). Pure stdlib Python + step-cli.
   pki-dev-tests = import ./pki-dev-tests.nix { inherit pkgs; };
+  # The ClickHouse credentials helper's own tests + check-the-checks for the live RLS
+  # harness's matcher (security-hardening S16). Pure stdlib Python.
+  ch-creds-tests = import ./ch-creds-tests.nix { inherit pkgs; };
   # The repo-wide multi-tenancy coverage gate: `mt-audit --gate` against the real
   # source, failing on any unclassified/regressed tenancy surface. Shares the one
   # audit.py entrypoint with `nix run .#mt-audit` (report), the constants-sync duality.

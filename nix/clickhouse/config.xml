@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<!--
+  nix/clickhouse/config.xml — SERVER settings for the agent ClickHouse, mounted into
+  config.d (users.d only merges the users configuration, so a server setting placed
+  there is silently ignored; `nix run .#ch-integration` caught exactly that).
+  Users, passwords and networks live in ./users.xml.
+-->
+<clickhouse>
+    <!-- Multi-tenancy C27 (docs/design/multi-tenancy/02-data-scoping-and-rls.md): the
+         `agent_reader` row-level-security reader (created in schema.sql) binds a
+         `SQL_tenant_id` custom setting that the `tenant_iso_*` ROW POLICYs read via
+         getSetting(). Custom settings must have a server-declared prefix. -->
+    <custom_settings_prefixes>SQL_</custom_settings_prefixes>
+
+    <access_control_improvements>
+        <!-- Security-hardening S16: on a table with ANY row policy, a user named in NO
+             policy sees NO rows. Every cross-tenant reader (writer, viewer, admin) is
+             listed explicitly in the schema's operator_all_* policies, so a newly added
+             user is tenant-blind until someone decides otherwise. -->
+        <users_without_row_policies_can_read_rows>false</users_without_row_policies_can_read_rows>
+    </access_control_improvements>
+</clickhouse>

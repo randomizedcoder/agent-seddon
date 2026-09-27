@@ -110,14 +110,23 @@ feature only if one tenant cannot read another's rows out of it. Multi-tenancy
   table: `USING user = getSetting('SQL_tenant_id')` (the digest table keys on `user_id`). Defined
   once in [`nix/clickhouse/schema.sql`](../nix/clickhouse/schema.sql) +
   [`users.xml`](../nix/clickhouse/users.xml) — no DDL churn as orgs come and go.
-- The pure-read fleet-history seam (`ClickHouseHistory`) binds `SQL_tenant_id` from the **verified
-  ambient identity** (`current_identity()`) per connection — never a value the prompt-injectable
-  model can choose (there is no raw-SQL tool). So `SELECT * FROM agent_review_drafts` returns only the
+- The pure-read seams (`ClickHouseHistory`, `ClickHouseRecall`) bind `SQL_tenant_id` from the
+  **verified ambient identity** before **every read** — never a value the prompt-injectable model can
+  choose (there is no raw-SQL tool). So `SELECT * FROM agent_review_drafts` returns only the
   caller-tenant's rows regardless of any `WHERE` the model adds; the credential + policy *is* the
-  boundary. A missing/hostile identity fails closed (the policy's `''` default matches no rows).
-- **Tier-0 is unchanged.** RLS engages only when an operator sets `[telemetry] reader_user`; empty
-  (the default) reuses the writer credential, which is outside every policy's `TO` list. The writer
-  sink keeps its own (INSERT-capable) credential.
+  boundary. A scoped read with no verified tenant is refused. (Before security-hardening S16 the
+  binding happened once per cached connection, so a connection first used by tenant A served tenant
+  B's reads under A's scope; `nix run .#ch-integration` now reproduces and gates that.)
+- **Every login has a password** (S16). `nix run .#clickhouse-up` generates one file per login under
+  `~/.local/state/agent-seddon/clickhouse/` (0600; `nix run .#clickhouse-creds -- path <role>`):
+  `agent_writer` (the agent's writer and Tier-0 reader, `[telemetry] user` / `password_file`),
+  `agent_reader` (tenant-scoped, `reader_user` / `reader_password_file`), `agent_viewer` (HyperDX and
+  Grafana, read-only) and the `default` admin. Users are created unable to log in until their
+  password is set, and `users_without_row_policies_can_read_rows = false` means a login named in no
+  policy sees no tenant rows. The writer, viewer and admin see every tenant through explicit
+  `operator_all_*` policies.
+- **Tier-0 reads are unchanged in shape.** RLS engages only when an operator sets `[telemetry]
+  reader_user`; empty (the default) reuses the writer login, which reads every tenant.
 
 `user` is the **leading `ORDER BY` key** on the telemetry tables (C27-2), so the RLS predicate rides
 the primary index and *prunes other tenants' granules* — a scoped read touches fewer parts, making

@@ -3414,10 +3414,18 @@ pub struct TelemetryCfg {
     pub clickhouse_url: String,
     #[serde(default = "default_database")]
     pub database: String,
+    /// The writer login. Defaults to `agent_writer`, the least-privilege writer the
+    /// shipped schema creates (security-hardening S16): INSERT + SELECT on `agent.*`.
     #[serde(default = "default_ch_user")]
     pub user: String,
+    /// Inline writer password. Prefer `password_file`; setting both is an error.
     #[serde(default)]
     pub password: String,
+    /// File holding the writer password (`~` expanded, read when the connection is
+    /// built, trailing whitespace trimmed, at most 4 KiB). `nix run .#clickhouse-creds
+    /// -- path writer` prints the one `clickhouse-up` generated.
+    #[serde(default)]
+    pub password_file: String,
     /// Least-privilege **reader** credential for the pure-read fleet-history seam
     /// (multi-tenancy C27). Empty (the default) ⇒ reuse `user`/`password` (Tier-0: one
     /// credential, RLS off). When set to a distinct `agent_reader`-style user (SELECT on
@@ -3427,10 +3435,14 @@ pub struct TelemetryCfg {
     /// See docs/design/multi-tenancy/02-data-scoping-and-rls.md + nix/clickhouse/users.xml.
     #[serde(default)]
     pub reader_user: String,
-    /// Password for `reader_user`. Only consulted when `reader_user` is set; may legitimately
-    /// be empty. Never falls back to the writer `password` (a distinct reader has its own).
+    /// Password for `reader_user`. Only consulted when `reader_user` is set. Never falls
+    /// back to the writer `password` (a distinct reader has its own). With telemetry on,
+    /// a `reader_user` needs this or `reader_password_file` (S16: every login has one).
     #[serde(default)]
     pub reader_password: String,
+    /// File holding the `reader_user` password; same rules as `password_file`.
+    #[serde(default)]
+    pub reader_password_file: String,
     /// Stream `tracing` log events into `agent_logs` (in addition to stdout).
     #[serde(default = "default_true")]
     pub stream_logs: bool,
@@ -3462,8 +3474,10 @@ impl Default for TelemetryCfg {
             database: default_database(),
             user: default_ch_user(),
             password: String::new(),
+            password_file: String::new(),
             reader_user: String::new(),
             reader_password: String::new(),
+            reader_password_file: String::new(),
             stream_logs: default_true(),
             batch_max_rows: default_batch_rows(),
             flush_interval_ms: default_flush_ms(),
@@ -3487,25 +3501,105 @@ pub struct ReaderCredentials {
     pub tenant_scoped: bool,
 }
 
+/// Largest ClickHouse password file read. A real password is tens of bytes.
+pub const MAX_PASSWORD_FILE_BYTES: u64 = 4096;
+
+/// Read a password file: `~` expanded, size-capped, trailing whitespace trimmed, and
+/// never empty. Errors name the file (operator config) but never its contents.
+fn read_password_file(field: &str, path: &str) -> Result<String, String> {
+    let expanded = match path.strip_prefix("~/") {
+        Some(rest) => match std::env::var("HOME") {
+            Ok(home) => format!("{home}/{rest}"),
+            Err(_) => path.to_string(),
+        },
+        None => path.to_string(),
+    };
+    let unreadable = |e: std::io::Error| format!("[telemetry] {field} {expanded}: {e}");
+    let len = std::fs::metadata(&expanded).map_err(unreadable)?.len();
+    if len > MAX_PASSWORD_FILE_BYTES {
+        return Err(format!(
+            "[telemetry] {field} {expanded} is larger than {MAX_PASSWORD_FILE_BYTES} bytes"
+        ));
+    }
+    let raw = std::fs::read_to_string(&expanded).map_err(unreadable)?;
+    let password = raw.trim_end();
+    if password.is_empty() {
+        return Err(format!("[telemetry] {field} {expanded} is empty"));
+    }
+    Ok(password.to_string())
+}
+
+/// The inline value, or the file's contents when a file is named.
+fn password_from(field: &str, inline: &str, file: &str) -> Result<String, String> {
+    if file.trim().is_empty() {
+        Ok(inline.to_string())
+    } else {
+        read_password_file(field, file)
+    }
+}
+
 impl TelemetryCfg {
-    /// Resolve the reader credential: the explicit `reader_user`/`reader_password` when a
-    /// distinct reader is provisioned (RLS on), else the writer `user`/`password` (Tier 0,
-    /// RLS off). Keeping the fallback here means the builder wires one value and can't
-    /// diverge between the history seam and any future reader.
-    pub fn reader_credentials(&self) -> ReaderCredentials {
-        if self.reader_user.is_empty() {
+    /// Load-time shape checks (security-hardening S16). The password files themselves
+    /// are read when a connection is built ([`Self::writer_password`],
+    /// [`Self::reader_credentials`]), like `[grpc.tls]`.
+    pub fn validate(&self) -> Result<(), String> {
+        let set = |s: &str| !s.trim().is_empty();
+        if set(&self.password) && set(&self.password_file) {
+            return Err("[telemetry] set `password` or `password_file`, not both".into());
+        }
+        if set(&self.reader_password) && set(&self.reader_password_file) {
+            return Err(
+                "[telemetry] set `reader_password` or `reader_password_file`, not both".into(),
+            );
+        }
+        if !set(&self.reader_user)
+            && (set(&self.reader_password) || set(&self.reader_password_file))
+        {
+            return Err(
+                "[telemetry] `reader_password` / `reader_password_file` need `reader_user`".into(),
+            );
+        }
+        if self.enabled
+            && set(&self.reader_user)
+            && !set(&self.reader_password)
+            && !set(&self.reader_password_file)
+        {
+            return Err(
+                "[telemetry] `reader_user` needs `reader_password_file` (or `reader_password`): \
+                 every ClickHouse login has a password"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
+    /// The writer password: `password_file`'s contents when set, else `password`.
+    pub fn writer_password(&self) -> Result<String, String> {
+        password_from("password_file", &self.password, &self.password_file)
+    }
+
+    /// Resolve the reader credential: the explicit `reader_user` and its password when a
+    /// distinct reader is provisioned (RLS on), else the writer login (Tier 0, RLS off).
+    /// Keeping the fallback here means the builder wires one value and can't diverge
+    /// between the history seam and any future reader.
+    pub fn reader_credentials(&self) -> Result<ReaderCredentials, String> {
+        Ok(if self.reader_user.is_empty() {
             ReaderCredentials {
                 user: self.user.clone(),
-                password: self.password.clone(),
+                password: self.writer_password()?,
                 tenant_scoped: false,
             }
         } else {
             ReaderCredentials {
                 user: self.reader_user.clone(),
-                password: self.reader_password.clone(),
+                password: password_from(
+                    "reader_password_file",
+                    &self.reader_password,
+                    &self.reader_password_file,
+                )?,
                 tenant_scoped: true,
             }
-        }
+        })
     }
 }
 
@@ -3616,7 +3710,7 @@ fn default_database() -> String {
     "agent".into()
 }
 fn default_ch_user() -> String {
-    "default".into()
+    "agent_writer".into()
 }
 fn default_true() -> bool {
     true
@@ -3782,7 +3876,8 @@ mod tests {
         "rp",
         true
     )]
-    // corner: a reader with a legitimately empty password never borrows the writer's.
+    // corner: a reader with no password never borrows the writer's (with telemetry on,
+    // `validate` refuses this config at load; see `telemetry_validate_cases`).
     #[case::corner_reader_empty_password(
         r#"
         user = "w"
@@ -3800,10 +3895,135 @@ mod tests {
         #[case] want_scoped: bool,
     ) {
         let cfg: TelemetryCfg = toml::from_str(toml_src).unwrap();
-        let got = cfg.reader_credentials();
+        let got = cfg.reader_credentials().expect("inline passwords resolve");
         assert_eq!(got.user, want_user, "reader user");
         assert_eq!(got.password, want_password, "reader password");
         assert_eq!(got.tenant_scoped, want_scoped, "tenant_scoped");
+    }
+
+    /// desc: `TelemetryCfg::validate` (security-hardening S16) — the load-time shape of
+    /// the ClickHouse credentials. Inline and file forms are exclusive; a reader password
+    /// needs a reader; with telemetry on, a reader needs a password.
+    #[rstest::rstest]
+    #[case::positive_empty_is_fine("", None)]
+    #[case::positive_writer_password_file("password_file = \"/s/w\"", None)]
+    #[case::positive_reader_with_file(
+        "enabled = true\nreader_user = \"agent_reader\"\nreader_password_file = \"/s/r\"",
+        None
+    )]
+    #[case::positive_reader_with_inline(
+        "enabled = true\nreader_user = \"agent_reader\"\nreader_password = \"rp\"",
+        None
+    )]
+    #[case::negative_writer_both_forms(
+        "password = \"x\"\npassword_file = \"/s/w\"",
+        Some("not both")
+    )]
+    #[case::negative_reader_both_forms(
+        "reader_user = \"r\"\nreader_password = \"x\"\nreader_password_file = \"/s/r\"",
+        Some("not both")
+    )]
+    #[case::negative_reader_password_without_reader(
+        "reader_password_file = \"/s/r\"",
+        Some("need `reader_user`")
+    )]
+    #[case::negative_enabled_reader_without_password(
+        "enabled = true\nreader_user = \"agent_reader\"",
+        Some("every ClickHouse login has a password")
+    )]
+    #[case::corner_disabled_reader_without_password_is_inert(
+        "enabled = false\nreader_user = \"agent_reader\"",
+        None
+    )]
+    #[case::boundary_whitespace_only_counts_as_unset(
+        "enabled = true\nreader_user = \"agent_reader\"\nreader_password_file = \"   \"",
+        Some("every ClickHouse login has a password")
+    )]
+    fn telemetry_validate_cases(#[case] toml_src: &str, #[case] want_err: Option<&str>) {
+        let cfg: TelemetryCfg = toml::from_str(toml_src).unwrap();
+        match (cfg.validate(), want_err) {
+            (Ok(()), None) => {}
+            (Err(e), Some(frag)) => assert!(e.contains(frag), "{e}"),
+            (got, want) => panic!("validate() = {got:?}, want error containing {want:?}"),
+        }
+    }
+
+    /// desc: the writer / reader password files (S16) — read when the connection is
+    /// built, trimmed, size-capped, never empty, and an error names the file but never
+    /// its contents.
+    #[rstest::rstest]
+    #[case::positive_trailing_newline_trimmed(Some("s3cret-pass\n"), Ok("s3cret-pass"))]
+    #[case::positive_no_newline(Some("s3cret-pass"), Ok("s3cret-pass"))]
+    #[case::negative_missing_file(None, Err("password_file"))]
+    #[case::negative_empty_file(Some(""), Err("is empty"))]
+    #[case::corner_whitespace_only_is_empty(Some("  \n\n"), Err("is empty"))]
+    #[case::boundary_at_cap(Some(&*"a".repeat(MAX_PASSWORD_FILE_BYTES as usize)), Ok("<cap>"))]
+    #[case::adversarial_over_cap_refused_unread(
+        Some(&*"a".repeat(MAX_PASSWORD_FILE_BYTES as usize + 1)),
+        Err("larger than")
+    )]
+    fn telemetry_password_file_cases(
+        #[case] content: Option<&str>,
+        #[case] want: std::result::Result<&str, &str>,
+    ) {
+        let dir = std::env::temp_dir().join(format!(
+            "s16-pw-{}-{}",
+            std::process::id(),
+            content.map_or(0, str::len)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("writer.password");
+        let _ = std::fs::remove_file(&file);
+        if let Some(c) = content {
+            std::fs::write(&file, c).unwrap();
+        }
+        let cfg = TelemetryCfg {
+            password_file: file.display().to_string(),
+            ..TelemetryCfg::default()
+        };
+        let got = cfg.writer_password();
+        std::fs::remove_dir_all(&dir).ok();
+        match want {
+            Ok("<cap>") => assert_eq!(got.unwrap().len(), MAX_PASSWORD_FILE_BYTES as usize),
+            Ok(p) => assert_eq!(got.unwrap(), p),
+            Err(frag) => {
+                let e = got.unwrap_err();
+                assert!(e.contains(frag), "{e}");
+                assert!(!e.contains("aaaa"), "an error never echoes the contents");
+            }
+        }
+    }
+
+    /// desc: the reader credential reads its own file, never the writer's (S16), and the
+    /// Tier-0 fallback carries the writer's file.
+    #[test]
+    fn positive_reader_credentials_read_password_files() {
+        let dir = std::env::temp_dir().join(format!("s16-rc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (w, r) = (dir.join("writer.password"), dir.join("reader.password"));
+        std::fs::write(&w, "writer-pw\n").unwrap();
+        std::fs::write(&r, "reader-pw\n").unwrap();
+        let tier0 = TelemetryCfg {
+            password_file: w.display().to_string(),
+            ..TelemetryCfg::default()
+        };
+        let scoped = TelemetryCfg {
+            password_file: w.display().to_string(),
+            reader_user: "agent_reader".into(),
+            reader_password_file: r.display().to_string(),
+            ..TelemetryCfg::default()
+        };
+        let t0 = tier0.reader_credentials().unwrap();
+        let sc = scoped.reader_credentials().unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(
+            (t0.user.as_str(), t0.password.as_str(), t0.tenant_scoped),
+            ("agent_writer", "writer-pw", false)
+        );
+        assert_eq!(
+            (sc.user.as_str(), sc.password.as_str(), sc.tenant_scoped),
+            ("agent_reader", "reader-pw", true)
+        );
     }
 
     /// The detailed `[[members]]` form parses into `Detailed` entries with knobs.
