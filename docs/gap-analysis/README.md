@@ -25,6 +25,11 @@ against the code. No code, prompt or STATUS file was changed while writing this;
 §9.6 instead. This folder mirrors the `docs/design/<track>/README.md` convention so a `STATUS.md`
 tracking gap closure can sit beside it.
 
+A narrower companion, [`self-improvement.md`](self-improvement.md), asks what the agent needs in
+order to work this list itself (a deterministic, persisted code graph; a cited repo inventory;
+PR-time and feature-time reuse) and is closed by the
+[`design/repo-knowledge/`](../design/repo-knowledge/README.md) track.
+
 ---
 
 ## 0. Summary
@@ -468,7 +473,9 @@ model that the collectors write once and the reviewer, the portal and the eval h
 - **Measure-gate it** the way fleet-grounding inc 3 is gated: iterations, tokens and finding quality
   per review before and after the brief carries graph slices.
 
-Status: ⬜ design proposal. The [code-graph](../design/code-graph/README.md) track is the natural home.
+Status: ⬜ design proposal → now designed in [`design/repo-knowledge/`](../design/repo-knowledge/README.md)
+(increments RK-01–RK-18, tracked in its `STATUS.md`); the [code-graph](../design/code-graph/README.md)
+track keeps the `AstBackend` seam and gains a Postgres-backed engine behind it.
 
 ---
 
@@ -766,7 +773,9 @@ links its own sub-docs.
 
 **P3 — repo knowledge graph**
 
-- Persisted, versioned graph behind `DispatchAst`, measure-gated (§7).
+- Persisted, versioned graph behind `DispatchAst`, measure-gated (§7). Designed in
+  [`design/repo-knowledge/`](../design/repo-knowledge/README.md); the self-improvement view is
+  [`self-improvement.md`](self-improvement.md).
 
 **P3 — docs**
 

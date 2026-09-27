@@ -1,0 +1,51 @@
+# 05 — Increments: CP-00 to CP-10
+
+One PR per increment. Each is gated by `nix flake check` (clippy `-D warnings`, rustfmt, tests,
+cargo-audit, buf, bench, leak, mt-audit, constants-sync) plus whatever the row adds. Tests are the
+table-driven matrices in [`06-test-matrix.md`](06-test-matrix.md), `rstest` with all four case
+classes and `adversarial_` cases for every untrusted input.
+
+| ID | Increment | Lane | Depends | Adds to `nix flake check` | Test matrices |
+|---|---|---|---|---|---|
+| CP-00 | This track, gap-analysis SI-11, index and back-links | — | — | — | — |
+| CP-01 | `CampaignStore` seam and value types in `agent-core`; crate `agent-campaign` with the path grammar, `allowed(from, to, kind, actor)`, the rollup rule, policy struct and validation; `MemCampaigns` in `agent-testkit` implementing every protocol in memory with the same errors | A | CP-00 | unit tests | T1, T2, T3, and T4–T8 against `MemCampaigns` |
+| CP-02 | `PgCampaigns` (feature `postgres`), migration 0001, `with_tenant`, protocols (a)–(g); `#[ignore = "requires a live Postgres (AGENT_CAMPAIGN_TEST_DSN)"]` suite with `TRUNCATE`; `tasks_invariants()`; `nix/pg-integration.nix` step | A | CP-01 (RK-02 for the `repos` FK; conditional until then) | pg suite in `nix run .#integration` | T4–T8, T14, T15 against Postgres |
+| CP-03 | Planner: prompt assembly, schema, enum narrowing, `complete_structured`, post-validation, caps, `needs_info` / `reject`; fallback brief | B | CP-01 | unit tests | T9, T10 |
+| CP-04 | CLI `agent campaign add \| plan \| list \| show \| approve \| answer \| retry \| replan \| cancel \| run --once`; `--needs-attention`; letter display | B | CP-03 | `cli-help`, `config-roundtrip` | CLI arg tests (adversarial ids, oversize text) |
+| CP-05 | `CampaignDriver` tick (reap, poll, plan, claim, interleave, `JoinSet`, semaphores), `[campaign]` config, in-process dispatch | C | CP-02, CP-03 | `config-roundtrip` | T11 |
+| CP-06 | Worker `--run-task`: worktree, heartbeat, Implement session, push, `Forge::create_pr`, `PrPoller`; e2e with fake forge, fake provider and a tempdir repo | C | CP-05 | `campaign-e2e.nix` | T12, T13 |
+| CP-07 | RK-12 brief wired in; `touches` validated against `RepoGraphStore`; RK-08 `repo_graph` tool in the worker tool set | B | CP-03, RK-12 | tests | T9 rows for node_key resolution |
+| CP-08 | Metrics, ClickHouse `agent_events` rows, `docs/components/campaigns.md` | C | CP-05 | `bench` if a hot path is added | metrics assertions via `MetricsProbe` |
+| CP-09 | gRPC `CampaignService` (`scoped`) + mt-audit manifest row + constants + `--serve-campaign` | opt | CP-02 | `buf`, `mt-audit`, `constants-sync` | scoped-service tests |
+| CP-10 | Forge webhook for merge; "changes requested" re-run on the same branch; fleet auto-review of campaign PRs | opt | CP-06 | e2e extended | T13 extended |
+
+## Lanes
+
+```
+A  CP-01 ──► CP-02 ──────────────────────────┐
+B  CP-01 ──► CP-03 ──► CP-04 ──► CP-07        │
+C            CP-02 + CP-03 ──► CP-05 ──► CP-06 ──► CP-08
+opt          CP-02 ──► CP-09 ;  CP-06 ──► CP-10
+```
+
+First value: CP-04, `agent campaign add / plan / show` over agent-seddon with the fallback brief,
+on `MemCampaigns` or Postgres. First autonomous PR: CP-06.
+
+## Repo-knowledge prerequisites
+
+| Need | RK increment | Until it lands |
+|---|---|---|
+| `repos(tenant, repo_id, slug)` for the FK | RK-02 | `repo_id` is a plain BIGINT and the CLI takes `--repo <slug>` mapped by config |
+| the brief | RK-12 | fallback: `docs/architecture.md` + `CLAUDE.md` sections |
+| `node_key` resolution for `touches` | RK-08 | paths only (`safe_segment`, exists in the worktree) |
+
+## Open questions (recorded, not blocking)
+
+| Question | Recommendation |
+|---|---|
+| Should `in_review` leaves count against `per_tenant_workers`? | No. They hold no worker; a campaign with many open PRs is a review-capacity problem, surfaced by `list`. |
+| Should `execute` decisions use the consensus provider? | Later. Measure the rate of `failed` leaves per planner model first (CP-08 metrics). |
+| Gate on `confidence`? | Record it now (`detail.low_confidence`); decide a threshold from data. |
+| Cross-repo campaigns? | v2: `repo_id` on every node instead of inherited from the root, with the FK unchanged. |
+| Should the poller be a webhook? | CP-10. Polling is enough for the first repos. |
+| A `retry` that re-runs on the same branch? | CP-10, together with "changes requested". |

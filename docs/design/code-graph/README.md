@@ -40,6 +40,9 @@ The seam is **language-neutral**; engines are selected by config string:
 - **Increment 3 — `structural_search` (orthogonal):** an `ast-grep`-backed tool for
   multi-language structural pattern search (`$X.Close()`), via the Sandbox. Not a full
   seam.
+- **Persistence, multi-repo and the repo inventory** live in
+  [`../repo-knowledge/`](../repo-knowledge/README.md): a Postgres-backed graph per
+  `(tenant, repo, commit)` with a `pg` engine behind this same seam (RK-08).
 
 ## Design specifics
 
