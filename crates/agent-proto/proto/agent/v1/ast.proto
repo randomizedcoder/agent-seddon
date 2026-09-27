@@ -12,6 +12,10 @@ package agent.v1;
 
 // Reuse IndexState / IndexStatus / ReindexProgress (freshness + progress currency).
 import "agent/v1/search.proto";
+// REST transcoding annotations (gap-analysis §4, docs/design/rest-openapi/). The
+// `(google.api.http)` options below let Envoy's `grpc_json_transcoder` expose the
+// service as REST/JSON without any Rust code; gRPC stays the primary interface.
+import "google/api/annotations.proto";
 
 // The kind of a code symbol. `SYMBOL_KIND_UNKNOWN` is the proto3 zero value and the
 // additive fallback for a kind a peer doesn't recognise.
@@ -158,26 +162,74 @@ message DependencyPathResponse {
 }
 
 service AstService {
+  // REST mappings (docs/design/rest-openapi/), under /v1/ast/. Structural queries
+  // that name a target by a nested `SymbolRef` (Implementations / InterfaceOf /
+  // Callers / Callees / Callchain) → POST `body:"*"` per the nested-body-read
+  // convention (side-effect-free). Reads whose request is only scalar / repeated-
+  // scalar (Status / Capabilities / FindSymbol / BlastRadius / DependencyPath) stay
+  // GET with query params. `Reindex` rebuilds the graph (a side-effect) and server-
+  // streams progress → POST `body:"*"`.
+  //
   // Index freshness (one entry per served backend, or the selected one).
-  rpc Status(AstStatusRequest) returns (AstStatusResponse);
+  rpc Status(AstStatusRequest) returns (AstStatusResponse) {
+    option (google.api.http) = {get: "/v1/ast/status"};
+  }
   // Advertised verbs + languages per backend.
-  rpc Capabilities(AstCapabilitiesRequest) returns (AstCapabilitiesResponse);
+  rpc Capabilities(AstCapabilitiesRequest) returns (AstCapabilitiesResponse) {
+    option (google.api.http) = {get: "/v1/ast/capabilities"};
+  }
   // Build/refresh the code graph, streaming progress.
-  rpc Reindex(AstReindexRequest) returns (stream ReindexProgress);
+  rpc Reindex(AstReindexRequest) returns (stream ReindexProgress) {
+    option (google.api.http) = {
+      post: "/v1/ast/reindex"
+      body: "*"
+    };
+  }
   // Find symbols by name.
-  rpc FindSymbol(FindSymbolRequest) returns (SymbolList);
+  rpc FindSymbol(FindSymbolRequest) returns (SymbolList) {
+    option (google.api.http) = {get: "/v1/ast/symbols"};
+  }
   // Concrete types that satisfy an interface (implicit satisfaction in Go).
-  rpc Implementations(ImplementationsRequest) returns (SymbolList);
+  rpc Implementations(ImplementationsRequest) returns (SymbolList) {
+    option (google.api.http) = {
+      post: "/v1/ast/implementations"
+      body: "*"
+    };
+  }
   // Interfaces a concrete type satisfies.
-  rpc InterfaceOf(InterfaceOfRequest) returns (SymbolList);
+  rpc InterfaceOf(InterfaceOfRequest) returns (SymbolList) {
+    option (google.api.http) = {
+      post: "/v1/ast/interface-of"
+      body: "*"
+    };
+  }
   // Callers of the target, out to `hops` levels.
-  rpc Callers(CallersRequest) returns (AstCallGraph);
+  rpc Callers(CallersRequest) returns (AstCallGraph) {
+    option (google.api.http) = {
+      post: "/v1/ast/callers"
+      body: "*"
+    };
+  }
   // Callees of the target, out to `hops` levels.
-  rpc Callees(CalleesRequest) returns (AstCallGraph);
+  rpc Callees(CalleesRequest) returns (AstCallGraph) {
+    option (google.api.http) = {
+      post: "/v1/ast/callees"
+      body: "*"
+    };
+  }
   // Distinct call paths from one symbol to another.
-  rpc Callchain(CallchainRequest) returns (CallchainResponse);
+  rpc Callchain(CallchainRequest) returns (CallchainResponse) {
+    option (google.api.http) = {
+      post: "/v1/ast/callchain"
+      body: "*"
+    };
+  }
   // Blast radius: callers of every symbol in the changed files.
-  rpc BlastRadius(BlastRadiusRequest) returns (AstCallGraph);
+  rpc BlastRadius(BlastRadiusRequest) returns (AstCallGraph) {
+    option (google.api.http) = {get: "/v1/ast/blast-radius"};
+  }
   // An import path from one package to another.
-  rpc DependencyPath(DependencyPathRequest) returns (DependencyPathResponse);
+  rpc DependencyPath(DependencyPathRequest) returns (DependencyPathResponse) {
+    option (google.api.http) = {get: "/v1/ast/dependency-path"};
+  }
 }

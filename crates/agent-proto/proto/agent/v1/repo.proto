@@ -6,6 +6,11 @@ syntax = "proto3";
 
 package agent.v1;
 
+// REST transcoding annotations (gap-analysis §4, docs/design/rest-openapi/). The
+// `(google.api.http)` options below let Envoy's `grpc_json_transcoder` expose the
+// service as REST/JSON without any Rust code; gRPC stays the primary interface.
+import "google/api/annotations.proto";
+
 // The kind of object a TreeEntry points at.
 enum EntryKind {
   ENTRY_KIND_BLOB = 0;
@@ -168,22 +173,69 @@ message PushRequest {
 message PushResponse {}
 
 service RepoService {
+  // REST mappings (docs/design/rest-openapi/), under /v1/repo/. Object reads are
+  // revision-addressed, and a revision / path is a rev-spec that may contain `/`
+  // (`refs/heads/main`, `dir/file`), so — unlike a `safe_segment` id — it rides as a
+  // query param (GET, unbound fields auto-map to the query string), never a `{param}`
+  // path segment. Lifecycle side-effects → POST `body:"*"`; `WorktreeRemove` → DELETE.
+  //
   // Object-level, read-only, revision-addressed.
-  rpc Resolve(ResolveRequest) returns (ResolveResponse);
-  rpc ReadFile(ReadFileRequest) returns (BlobContent);
-  rpc ListTree(ListTreeRequest) returns (ListTreeResponse);
-  rpc Diff(DiffRequest) returns (DiffResult);
-  rpc Grep(GrepRequest) returns (GrepResponse);
-  rpc Log(LogRequest) returns (LogResponse);
-  rpc Branches(BranchesRequest) returns (BranchesResponse);
+  rpc Resolve(ResolveRequest) returns (ResolveResponse) {
+    option (google.api.http) = {get: "/v1/repo/resolve"};
+  }
+  rpc ReadFile(ReadFileRequest) returns (BlobContent) {
+    option (google.api.http) = {get: "/v1/repo/file"};
+  }
+  rpc ListTree(ListTreeRequest) returns (ListTreeResponse) {
+    option (google.api.http) = {get: "/v1/repo/tree"};
+  }
+  rpc Diff(DiffRequest) returns (DiffResult) {
+    option (google.api.http) = {get: "/v1/repo/diff"};
+  }
+  rpc Grep(GrepRequest) returns (GrepResponse) {
+    option (google.api.http) = {get: "/v1/repo/grep"};
+  }
+  rpc Log(LogRequest) returns (LogResponse) {
+    option (google.api.http) = {get: "/v1/repo/log"};
+  }
+  rpc Branches(BranchesRequest) returns (BranchesResponse) {
+    option (google.api.http) = {get: "/v1/repo/branches"};
+  }
   // Mirror / worktree / ref lifecycle.
-  rpc Status(RepoStatusRequest) returns (RepoStatus);
-  rpc Fetch(FetchRequest) returns (RepoStatus);
-  rpc WorktreeAdd(WorktreeSpec) returns (WorktreeHandle);
-  rpc WorktreeList(WorktreeListRequest) returns (WorktreeListResponse);
-  rpc WorktreeRemove(WorktreeRemoveRequest) returns (WorktreeRemoveResponse);
+  rpc Status(RepoStatusRequest) returns (RepoStatus) {
+    option (google.api.http) = {get: "/v1/repo/status"};
+  }
+  rpc Fetch(FetchRequest) returns (RepoStatus) {
+    // fetches from the remote (side-effect on the shared object DB)
+    option (google.api.http) = {
+      post: "/v1/repo/fetch"
+      body: "*"
+    };
+  }
+  rpc WorktreeAdd(WorktreeSpec) returns (WorktreeHandle) {
+    option (google.api.http) = {
+      post: "/v1/repo/worktrees"
+      body: "*"
+    };
+  }
+  rpc WorktreeList(WorktreeListRequest) returns (WorktreeListResponse) {
+    option (google.api.http) = {get: "/v1/repo/worktrees"};
+  }
+  rpc WorktreeRemove(WorktreeRemoveRequest) returns (WorktreeRemoveResponse) {
+    option (google.api.http) = {delete: "/v1/repo/worktrees/{id}"};
+  }
   // Named `CreateCheckpoint` (not `Checkpoint`) so the method name doesn't shadow
   // the `Checkpoint` message type when protoc resolves the return type.
-  rpc CreateCheckpoint(CheckpointRequest) returns (Checkpoint);
-  rpc Push(PushRequest) returns (PushResponse);
+  rpc CreateCheckpoint(CheckpointRequest) returns (Checkpoint) {
+    option (google.api.http) = {
+      post: "/v1/repo/checkpoints"
+      body: "*"
+    };
+  }
+  rpc Push(PushRequest) returns (PushResponse) {
+    option (google.api.http) = {
+      post: "/v1/repo/push"
+      body: "*"
+    };
+  }
 }
