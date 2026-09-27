@@ -10,9 +10,9 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 
 ## Now
 
-- **Next:** CP-01 is gate-green on `campaigns/cp-01` @ `89ecaaf`; waiting on the go-ahead to push and open the PR. After it merges: branch `campaigns/cp-02` from `main`, CP-02 step 1.
+- **Next:** CP-01 is open as #501 (`campaigns/cp-01`, gate-green @ `89ecaaf`); waiting on review / merge. After it merges: `STATUS.md` CP-01 → ✅ #501 + as-built entry, branch `campaigns/cp-02` from `main`, CP-02 step 1.
 
-## CP-01 — seam, pure rules, `MemCampaigns`, T1–T8 (mem) — 🟡 branch `campaigns/cp-01`
+## CP-01 — seam, pure rules, `MemCampaigns`, T1–T8 (mem) — 🟡 #501 (branch `campaigns/cp-01`)
 
 | Item | State | Notes |
 |---|---|---|
