@@ -10,7 +10,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 
 ## Now
 
-- **Next:** CP-01 step 10 — conformance tables `t6.rs` (claim / heartbeat / reap), `t7.rs`, `t8.rs`.
+- **Next:** CP-01 step 10 — conformance tables `t7.rs` (complete / fail), `t8.rs`.
 
 ## CP-01 — seam, pure rules, `MemCampaigns`, T1–T8 (mem) — 🟡 branch `campaigns/cp-01`
 
@@ -30,7 +30,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 | T3 rollup (mem) | ✅ | rows: 15/15 (`conformance/t3.rs`) |
 | T4 create (mem) | ✅ | rows: 20/20 as 24 fns (`negative_policy_out_of_range_{max_depth,max_children,max_nodes,lease_secs}`, `negative_policy_bad_level_{zero,seven}`); pg-only: the "CHECK also rejects if bypassed" half of `boundary_title_121`, the `tenants` row of `positive_tenant_ensured`; `negative_policy_unknown_key` goes through `Policy::from_json` (the typed request cannot carry a stray key) |
 | T5 decompose / mark_leaf (mem) | ✅ | rows: 30/31 (`adversarial_concurrent_decompose` pg-only); `boundary_max_nodes` builds the 198-node tree with 25 splits; `negative_mark_leaf_with_children` uses a replan in flight so the has-children branch (not the CAS) is what refuses; `corner_attempt_exhausted` ends by showing `plan_start` on the blocked root is `Conflict` and `replan` resets `attempts` |
-| T6 claim / heartbeat / reap (mem) | ⬜ | rows: 0/24 (`corner_reap_skips_locked`, `adversarial_double_claim` pg-only) |
+| T6 claim / heartbeat / reap (mem) | ✅ | rows: 22/24 (`corner_reap_skips_locked`, `adversarial_double_claim` pg-only); rows look at `work` attempts only (a fixture leaf also owns its `execute` attempt); lease rows assert `lease_until_ms` against the harness clock, so they run unchanged on pg; `adversarial_owner_empty` holds at `Owner::parse` (a `ClaimRequest` cannot carry a bad owner) |
 | T7 complete / fail (mem) | ⬜ | rows: 0/19 |
 | T8 approve / answer / retry / cancel / replan (mem) | ⬜ | rows: 0/25 |
 | doc amendments (02 transitions, 03 attempt note, 05 row, 06 harness/dims) | ⬜ | |

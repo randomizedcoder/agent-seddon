@@ -21,6 +21,7 @@ use std::sync::Arc;
 pub mod t3;
 pub mod t4;
 pub mod t5;
+pub mod t6;
 
 type Open = dyn Fn(&str) -> CampaignResult<Arc<dyn CampaignStore>> + Send + Sync;
 
@@ -451,6 +452,30 @@ macro_rules! campaign_conformance_suite {
                 adversarial_child_policy,
                 adversarial_parent_other_tenant,
                 adversarial_child_created_by_user,
+            ]);
+            $crate::__campaign_table!(t6, $make, $after, $ig, [
+                positive_claim_one,
+                positive_claim_order,
+                positive_deps_satisfied,
+                positive_heartbeat,
+                positive_reap_expired,
+                negative_dep_unsatisfied,
+                negative_dep_failed,
+                negative_heartbeat_wrong_owner,
+                negative_heartbeat_after_reap,
+                negative_claim_non_leaf,
+                negative_claim_awaiting,
+                negative_claim_blocked,
+                corner_reap_running,
+                corner_reap_none,
+                boundary_limit_n,
+                boundary_limit_zero,
+                boundary_lease_floor,
+                boundary_lease_ceiling,
+                adversarial_cross_tenant_claim,
+                adversarial_owner_forged,
+                adversarial_lease_negative,
+                adversarial_owner_empty,
             ]);
         }
     };
