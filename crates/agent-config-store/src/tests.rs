@@ -229,6 +229,31 @@ mod scen {
         );
     }
 
+    /// boundary: many cards per tenant still enumerate each tenant exactly once,
+    /// sorted. Guards the Postgres loose-index-scan ("skip scan"), whose whole job
+    /// is to jump PAST every same-tenant row to the next distinct tenant — a bug in
+    /// the jump would either loop on one tenant, skip a tenant, or emit duplicates.
+    pub async fn tenants_dedups_many_per_tenant(backend: Arc<dyn Backend>) {
+        let s = Store::<TestCard>::new(backend.clone());
+        // Insert out of order, several cards each, so ordering can't be incidental.
+        for (tenant, n) in [("orgc", 7), ("orga", 5), ("orgb", 6)] {
+            for i in 0..n {
+                s.put(tenant, card(&format!("{tenant}-{i}"), i))
+                    .await
+                    .expect("put");
+            }
+        }
+        let ts = backend
+            .tenants(TestCard::COLLECTION)
+            .await
+            .expect("tenants");
+        assert_eq!(
+            ts,
+            vec!["orga".to_string(), "orgb".to_string(), "orgc".to_string()],
+            "each tenant once, sorted, regardless of card count or insert order"
+        );
+    }
+
     /// negative: getting an absent card is a `not found` error, not a panic.
     pub async fn missing_card(backend: Arc<dyn Backend>) {
         let s = Store::<TestCard>::new(backend);
@@ -858,6 +883,11 @@ macro_rules! suite {
             $(#[$ig])?
             async fn corner_tenants_empty() {
                 scen::tenants_empty($make).await;
+            }
+            #[tokio::test]
+            $(#[$ig])?
+            async fn boundary_tenants_dedups_many_per_tenant() {
+                scen::tenants_dedups_many_per_tenant($make).await;
             }
             #[tokio::test]
             $(#[$ig])?
