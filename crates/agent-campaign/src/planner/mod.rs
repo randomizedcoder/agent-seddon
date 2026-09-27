@@ -9,6 +9,9 @@
 //! * [`schema`] — the decision schema and its per-depth `decision` enum.
 //! * [`brief`] — the repo brief (`FallbackBrief` until RK-12).
 //! * [`prompt`] — screening, fenced rendering under the 24 KiB cap, the hash.
+//! * [`ask`] — the structured question with its bounded repair loop, summed usage
+//!   and response byte cap.
+//! * [`validate`] — the rules a schema cannot express, applied before any write.
 //! * [`touches`] — resolution of an `execute` decision's paths (`WorktreeTouches`
 //!   until RK-08).
 //!
@@ -16,11 +19,13 @@
 //! before it enters a prompt, and every field it answers with is capped, screened
 //! and resolved before a store call.
 
+pub mod ask;
 pub mod brief;
 pub mod hash;
 pub mod prompt;
 pub mod schema;
 pub mod touches;
+pub mod validate;
 
 pub use brief::{BriefSource, FallbackBrief, StaticBrief};
 pub use touches::{TouchError, TouchResolver, WorktreeTouches};
