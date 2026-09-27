@@ -398,7 +398,7 @@ exist); the node goes `decomposed | blocked → decomposing` with `version + 1` 
 | Error | Raised when | Caller's response |
 |---|---|---|
 | `NotFound` | no row for `(tenant, task_id)`; includes every cross-tenant access | report; never echo the foreign id's data |
-| `Conflict` | version or state CAS failed | re-read and retry at most once (planner), or report (user) |
+| `Conflict` | version or state CAS failed | the planner writes nothing further and lets the next tick re-read ([`03-decomposition.md`](03-decomposition.md) step 5); the user re-reads and reports |
 | `AlreadyApplied` | `idem_key` already present | success, no-op |
 | `LeaseLost` | owner check failed on heartbeat, complete, fail | worker aborts, no repo writes |
 | `Denied` | `allowed()` returned false or the actor class is wrong | report |

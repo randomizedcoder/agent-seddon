@@ -11,7 +11,7 @@ Design: [`README.md`](README.md) · sequence: [`05-increments.md`](05-increments
 | CP-00 | This track, SI-11 in the gap analysis, index links | — | ✅ | #495 |
 | CP-01 | `CampaignStore` seam, path grammar, `allowed()`, rollup, policy, `MemCampaigns` | SI-11 | ✅ | #501 |
 | CP-02 | `PgCampaigns`, migration 0001, protocols (a)–(g), live suite, invariants query | SI-11 | ✅ | #508 |
-| CP-03 | Planner: prompt, schema, validation, caps, `needs_info` / `reject`, fallback brief | SI-11 | ⬜ | — |
+| CP-03 | Planner: prompt, schema, validation, caps, `needs_info` / `reject`, fallback brief | SI-11 | 🟡 | `campaigns/cp-03` |
 | CP-04 | CLI `agent campaign …` | SI-11 | ⬜ | — |
 | CP-05 | `CampaignDriver` tick + `[campaign]` config | SI-11 | ⬜ | — |
 | CP-06 | Worker `--run-task`, worktree → PR, `PrPoller`, e2e check | SI-11 | ⬜ | — |
