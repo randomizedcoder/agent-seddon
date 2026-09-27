@@ -11,7 +11,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S2 | Tenant from principal, identity policy, direct-reader conversion | P0-2, P0-3 | ✅ | #489 |
 | S3 | Multi-issuer OIDC profiles + fake issuer | D2 | ✅ | #492 |
 | S4 | tonic TLS, `[grpc.tls]`, `nix run .#pki-dev` | P0-5 | ✅ | #494 |
-| S5 | Token service core (agent JWT, JWKS, `WhoAmI`) | D1, D10 | 🟡 | #498 |
+| S5 | Token service core (agent JWT, JWKS, `WhoAmI`) | D1, D10 | ✅ | #498 |
 | S6 | Session store + `Exchange/Refresh/Logout` | D11 | ⬜ | — |
 | S7 | RBAC extension, read gating, authz-coverage gate | D9 | 🟡 | — |
 | S8 | Role bindings, bootstrap, escalation rules | D3, D9 | ⬜ | — |
