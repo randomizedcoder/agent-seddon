@@ -885,6 +885,13 @@ fn auth_layer(agent: &Agent, listen: &Endpoint) -> anyhow::Result<agent_grpc::se
         roles_claim: a.roles_claim.clone(),
         leeway_secs: a.leeway_secs,
         issuers: a.issuers.iter().map(issuer_params).collect(),
+        token: a.token.as_ref().map(|t| agent_grpc::server::TokenParams {
+            issuer: t.issuer.clone(),
+            audience: t.audience.clone(),
+            ttl_secs: t.ttl_secs,
+            signing_key: t.signing_key.clone(),
+            previous_key: t.previous_key.clone(),
+        }),
     })
     .map(|layer| {
         layer
@@ -927,15 +934,19 @@ async fn serve_base(
         Some(_) => "tls",
     };
     tracing::info!(endpoint = ?listen, transport = mode, "gRPC listener transport");
-    agent_grpc::server::base_router_with_tls(
+    let auth = auth_layer(agent, listen)?;
+    let (router, health) = agent_grpc::server::base_router_with_tls(
         agent.grpc_max_in_flight(),
         Some(shed_observer(agent)),
-        auth_layer(agent, listen)?,
+        auth.clone(),
         Some(rpc_observer(agent)),
         tls.as_ref(),
     )
     .await
-    .map_err(anyhow::Error::msg)
+    .map_err(anyhow::Error::msg)?;
+    // `[auth.token]` ⇒ this listener also serves `AuthService` (exchange, key set,
+    // who-am-I) beside whatever seams the caller adds.
+    Ok((auth.serve_auth_service(router), health))
 }
 
 /// Load the listener's TLS material when [`serves_tls`] says it should.

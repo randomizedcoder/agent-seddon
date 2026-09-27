@@ -186,6 +186,11 @@ tiny_http = "0.12"
 # fetched JWKS is cached via the workspace HTTP client (`reqwest`). No PEM/key
 # generation in a normal build. See docs/design/config/09-increments.md (B1).
 jsonwebtoken = "9"
+# The agent token service (security-hardening S5): ES256 signing-key checks and its
+# public point (`ring`, already in-tree via jsonwebtoken/rustls) and base64url for
+# the JWK coordinates / `kid` thumbprint (`base64`, already in-tree via jsonwebtoken).
+ring = "0.17"
+base64 = "0.22"
 # Test-time X.509 certificates for the gRPC TLS matrix (agent-testkit `pki`,
 # security-hardening S4). ring only: the workspace's rustls is ring-only, and a
 # second crypto provider would make rustls' process default ambiguous.

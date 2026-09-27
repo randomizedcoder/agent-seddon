@@ -1332,6 +1332,7 @@ pub async fn build_agent_with(
             allow_insecure_listen: cfg.auth.allow_insecure_listen,
             require_identity: cfg.auth.require_identity,
             issuers: cfg.auth.issuers.clone(),
+            token: cfg.auth.token.clone(),
         },
         // TLS on served TCP listeners (`[grpc.tls]`, security-hardening S4).
         grpc_tls: crate::agent::GrpcTlsSettings {

@@ -1169,6 +1169,22 @@ job         = "agent-seddon"
 # audience          = "agent-seddon"
 # tenant_claim      = "org"
 # trust_roles_claim = true
+#
+# The agent token service (security-hardening S5). With `[auth.token]` set, login
+# tokens from the issuers above are accepted ONLY by `AuthService.Exchange`, which
+# returns an agent-signed token (ES256, `typ = at+jwt`, `iss`/`aud` below, lifetime
+# min(ttl_secs, the login token's own expiry)) carrying tenant, subject, roles and a
+# permission snapshot. Every seam then accepts only agent tokens. The listener serves
+# `AuthService` itself; `Exchange` and `Jwks` need no bearer, `WhoAmI` does.
+# Without `[auth.token]`, `oidc` keeps verifying IdP tokens at every seam (warned).
+# `nix run .#pki-dev` writes a signing key at `<pki>/token-signer/key.pem`.
+#
+# [auth.token]
+# issuer       = "https://agent.example.com"   # the agent's `iss`; must not be a login issuer's
+# audience     = "agent-seddon"                # the `aud` every seam expects
+# ttl_secs     = 900                           # default 900; 60..=3600
+# signing_key  = "/run/agent-seddon/pki/token-signer/key.pem"   # P-256 PEM, mode 0600
+# # previous_key = "/run/agent-seddon/pki/token-signer/old.pem"  # still verifies after a rotation
 
 # [tenancy] — the per-tenant config plane (config C35 / C2). When `per_tenant =
 # true`, the converged shared-store control-plane seams (provider-registry, review-

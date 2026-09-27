@@ -224,7 +224,7 @@ fn read_pem(path: &Path) -> Result<Vec<u8>, String> {
 
 /// A private key readable by group/other is worth a warning (not a refusal: a
 /// deployment may deliberately share it with a group-owned sidecar).
-fn warn_if_key_is_readable(key: &Path) {
+pub(crate) fn warn_if_key_is_readable(key: &Path) {
     use std::os::unix::fs::PermissionsExt;
     if let Ok(meta) = std::fs::metadata(key) {
         let mode = meta.permissions().mode() & 0o777;
