@@ -12,7 +12,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S3 | Multi-issuer OIDC profiles + fake issuer | D2 | ✅ | #492 |
 | S4 | tonic TLS, `[grpc.tls]`, `nix run .#pki-dev` | P0-5 | ✅ | #494 |
 | S5 | Token service core (agent JWT, JWKS, `WhoAmI`) | D1, D10 | ✅ | #498 |
-| S6 | Session store + `Exchange/Refresh/Logout` | D11 | 🟡 | — |
+| S6 | Session store + `Exchange/Refresh/Logout` | D11 | ✅ | #505 |
 | S7 | RBAC extension, read gating, authz-coverage gate | D9 | ✅ | #504 |
 | S8 | Role bindings, bootstrap, escalation rules | D3, D9 | ⬜ | — |
 | S9 | Bearer propagation + two-hop chain test | D7 | ⬜ | — |
@@ -261,7 +261,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 
   Gate: `nix flake check --max-jobs 8 --cores 4 --keep-going` green (2026-09-26).
 
-- **2026-09-26 — S6.** Sign-in sessions. Logout and revocation now mean something.
+- **2026-09-26 — S6 (#505).** Sign-in sessions. Logout and revocation now mean something.
 
   Store: new [`auth/session.rs`](../../../crates/agent-grpc/src/server/auth/session.rs).
   - `SessionStore` over any `agent-config-store` `Backend`. Each session is a JSON card in the
