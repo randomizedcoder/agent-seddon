@@ -10,7 +10,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S1 | `auth` default feature, load-time validation, insecure-listen refusal | P0-1, P0-3 | ✅ | #487 |
 | S2 | Tenant from principal, identity policy, direct-reader conversion | P0-2, P0-3 | ✅ | #489 |
 | S3 | Multi-issuer OIDC profiles + fake issuer | D2 | ✅ | #492 |
-| S4 | tonic TLS, `[grpc.tls]`, `nix run .#pki-dev` | P0-5 | 🟡 | — |
+| S4 | tonic TLS, `[grpc.tls]`, `nix run .#pki-dev` | P0-5 | ✅ | #494 |
 | S5 | Token service core (agent JWT, JWKS, `WhoAmI`) | D1, D10 | ⬜ | — |
 | S6 | Session store + `Exchange/Refresh/Logout` | D11 | ⬜ | — |
 | S7 | RBAC extension, read gating, authz-coverage gate | D9 | ⬜ | — |
@@ -94,7 +94,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
   agent token's `sub = user:<issuer>/<sub>` (S5) does that.
   Gate: `nix flake check --max-jobs 8 --cores 4` green (`leak`'s `fork_cancel_cycle_does_not_leak`
   in `agent-providers`, untouched here, flaked once and passed on rerun).
-- **2026-09-26 — S4.** tonic's `tls` + `tls-webpki-roots` features are on in `agent-grpc` (rustls
+- **2026-09-26 — S4 (#494).** tonic's `tls` + `tls-webpki-roots` features are on in `agent-grpc` (rustls
   with `ring`; the lock still has no aws-lc). `Endpoint::Tcp` is now `{ hostport, tls }`:
   `https://` dials TLS, while `http://` and bare `host:port` stay plaintext. Before S4,
   `https://` was stripped and dialed plaintext. New `crates/agent-grpc/src/tls.rs`:
