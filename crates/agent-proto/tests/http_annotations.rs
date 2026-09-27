@@ -268,6 +268,50 @@ enum Expect {
     "ProviderRegistryService.Route",
     Expect::Routes(&[("POST", "/v1/router/route")])
 )]
+// --- 03d: code intelligence (repo / search / ast) --------------------------
+// positive — an object read is revision-addressed, and a revision/path may contain
+// `/`, so it rides as a query param: GET with ZERO path params (contrast the
+// `safe_segment` id reads, which DO capture `{id}`).
+#[case::positive_repo_readfile_revision_is_query_param(
+    "RepoService.ReadFile -> GET /v1/repo/file (revision/path are query params, not captures)",
+    "RepoService.ReadFile",
+    Expect::Routes(&[("GET", "/v1/repo/file")])
+)]
+// corner — the FIRST server-streaming RPC in the manifest: the transcoder supports it
+// (chunked JSON), so it IS annotated. A reindex is a side-effect → POST body:*.
+#[case::corner_server_streaming_reindex_is_annotated_post(
+    "SearchService.Reindex (server-streaming) -> POST /v1/search/reindex",
+    "SearchService.Reindex",
+    Expect::Routes(&[("POST", "/v1/search/reindex")])
+)]
+// corner — a structural read that names its target by a nested `SymbolRef` message
+// maps to POST body:* (nested-body-read convention), though it is side-effect-free.
+#[case::corner_ast_callers_nested_body_read_maps_to_post(
+    "AstService.Callers -> POST /v1/ast/callers (nested SymbolRef in the request)",
+    "AstService.Callers",
+    Expect::Routes(&[("POST", "/v1/ast/callers")])
+)]
+// corner — a structural read whose request is ONLY repeated-scalar (`changed` paths)
+// stays GET (the paths ride as repeated query params) — the direct contrast to the
+// nested-body Callers row above.
+#[case::corner_ast_blast_radius_repeated_scalar_read_maps_to_get(
+    "AstService.BlastRadius -> GET /v1/ast/blast-radius (repeated-scalar filter)",
+    "AstService.BlastRadius",
+    Expect::Routes(&[("GET", "/v1/ast/blast-radius")])
+)]
+// corner — list + create share ONE collection path, disambiguated only by verb (GET
+// lists, POST creates); the uniqueness invariant treats `(verb, path)` as the key so
+// they don't collide. This row locks the GET half; `WorktreeAdd` locks the POST half.
+#[case::corner_worktree_list_shares_collection_path_via_verb(
+    "RepoService.WorktreeList -> GET /v1/repo/worktrees (same path as POST WorktreeAdd)",
+    "RepoService.WorktreeList",
+    Expect::Routes(&[("GET", "/v1/repo/worktrees")])
+)]
+#[case::corner_worktree_add_shares_collection_path_via_verb(
+    "RepoService.WorktreeAdd -> POST /v1/repo/worktrees (same path as GET WorktreeList)",
+    "RepoService.WorktreeAdd",
+    Expect::Routes(&[("POST", "/v1/repo/worktrees")])
+)]
 // negative — an RPC in a not-yet-annotated proto carries no rule. This row flips to a
 // positive `Routes` case when `policy.proto` is annotated in a later increment.
 #[case::negative_unannotated_rpc_has_no_rule(

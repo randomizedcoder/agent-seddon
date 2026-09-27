@@ -7,6 +7,11 @@ syntax = "proto3";
 
 package agent.v1;
 
+// REST transcoding annotations (gap-analysis §4, docs/design/rest-openapi/). The
+// `(google.api.http)` options below let Envoy's `grpc_json_transcoder` expose the
+// service as REST/JSON without any Rust code; gRPC stays the primary interface.
+import "google/api/annotations.proto";
+
 // How the query text is interpreted. `SEARCH_MODE_LITERAL` is the proto3 zero
 // value and the common mode every backend supports.
 enum SearchMode {
@@ -112,14 +117,36 @@ message ReindexProgress {
 }
 
 service SearchService {
+  // REST mappings (docs/design/rest-openapi/), under /v1/search/. Scalar/repeated-
+  // scalar reads → GET (query params); `Search` carries a nested `SearchQuery`, so
+  // per the nested-body-read convention it is POST `body:"*"` (still side-effect-
+  // free). `Reindex` rebuilds the index (a side-effect) and server-streams progress
+  // → POST `body:"*"` (the transcoder emits a chunked JSON stream).
+  //
   // Index freshness (one entry per served backend, or the selected one).
-  rpc Status(StatusRequest) returns (StatusResponse);
+  rpc Status(StatusRequest) returns (StatusResponse) {
+    option (google.api.http) = {get: "/v1/search/status"};
+  }
   // Advertised capabilities per backend.
-  rpc Capabilities(SearchCapabilitiesRequest) returns (SearchCapabilitiesResponse);
+  rpc Capabilities(SearchCapabilitiesRequest) returns (SearchCapabilitiesResponse) {
+    option (google.api.http) = {get: "/v1/search/capabilities"};
+  }
   // Bring the index up to date, streaming progress.
-  rpc Reindex(ReindexRequest) returns (stream ReindexProgress);
+  rpc Reindex(ReindexRequest) returns (stream ReindexProgress) {
+    option (google.api.http) = {
+      post: "/v1/search/reindex"
+      body: "*"
+    };
+  }
   // Run a query against the selected backend.
-  rpc Search(SearchRequest) returns (SearchResponse);
+  rpc Search(SearchRequest) returns (SearchResponse) {
+    option (google.api.http) = {
+      post: "/v1/search/query"
+      body: "*"
+    };
+  }
   // List indexed file paths (optionally glob-filtered) from the selected backend.
-  rpc ListFiles(ListFilesRequest) returns (ListFilesResponse);
+  rpc ListFiles(ListFilesRequest) returns (ListFilesResponse) {
+    option (google.api.http) = {get: "/v1/search/files"};
+  }
 }

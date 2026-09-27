@@ -46,8 +46,8 @@ added, it fires as a reminder to list it here as gRPC-only.
 |---|---|:--:|
 | 03a | `review_fleet.proto` (ReviewFleetService, 11 RPCs) | ✅ merged (#515) |
 | 03b | `prompt.proto`, `role.proto`, `config.proto` (control plane) | ✅ merged (#517) |
-| 03c | `forge_registry.proto`, `transport_registry.proto`, `upstream.proto` (registries) | 🟡 in flight |
-| 03d | `repo.proto`, `search.proto`, `ast.proto` (code intelligence) | ⬜ |
+| 03c | `forge_registry.proto`, `transport_registry.proto`, `upstream.proto` (registries) | ✅ merged (#519) |
+| 03d | `repo.proto`, `search.proto`, `ast.proto` (code intelligence) | 🟡 in flight |
 | 03e | `session.proto`, `session_registry.proto`, `agent_session.proto`, `scheduler.proto` | ⬜ |
 | 03f | `tool.proto`, `exec.proto`, `web.proto`, `forge.proto` (TaskService) | ⬜ |
 | 03g | `provider.proto`, `llm_pool.proto`, `embed.proto`, `tokenizer.proto`, `memory.proto`, `context.proto`, `dimension.proto`, `mode.proto`, `graph.proto`, `digest.proto`, `reference.proto`, `scanner.proto`, `lsp.proto`, `metrics_proxy.proto`, `policy.proto`, `review.proto` (remaining seams) | ⬜ |
@@ -98,3 +98,19 @@ added, it fires as a reminder to list it here as gRPC-only.
   POST `/v1/router/route` (read-only but its request nests a `RouteHint`, so the nested-body-read
   convention maps it to POST, not GET). Added 3 class-tagged coverage rows (forge-Get third mirror,
   upstream-Enable nested toggle, Route nested-body-read → POST).
+- **03d (code intelligence: repo / search / ast).** Annotated `RepoService` (`/v1/repo/`),
+  `SearchService` (`/v1/search/`), and `AstService` (`/v1/ast/`). Two shapes appear here for the first
+  time: (1) **revision-addressed reads ride as query params, never path captures** — a revision/path is
+  a rev-spec that may contain `/` (`refs/heads/main`, `dir/file`), so unlike a `safe_segment` id it can't
+  be a `{param}` segment; every object read (`Resolve`/`ReadFile`/`ListTree`/`Diff`/`Grep`/`Log`) is a
+  bare GET with the fields auto-mapped to the query string. (2) **the first server-streaming RPCs**
+  (`SearchService.Reindex`, `AstService.Reindex`) — the transcoder supports server-streaming (chunked
+  JSON), and a reindex is a side-effect, so both are POST `body:"*"` (nothing left gRPC-only). AST's
+  structural queries split by the nested-body-read convention: those naming a target by a nested
+  `SymbolRef` (`Implementations`/`InterfaceOf`/`Callers`/`Callees`/`Callchain`) → POST `body:"*"`, while
+  scalar/repeated-scalar reads (`FindSymbol`/`BlastRadius`/`DependencyPath`) stay GET. `RepoService`
+  lifecycle side-effects → POST (`Fetch`/`WorktreeAdd`/`CreateCheckpoint`/`Push`), `WorktreeRemove` →
+  DELETE `/{id}`; list + create share the `/v1/repo/worktrees` collection path, disambiguated by verb
+  (GET lists, POST creates). Added 6 class-tagged coverage rows (revision-query-param read, first
+  server-streaming annotation, nested-body Callers vs repeated-scalar BlastRadius, and the GET/POST
+  shared-collection-path pair); the whole-set invariants cover the rest.
