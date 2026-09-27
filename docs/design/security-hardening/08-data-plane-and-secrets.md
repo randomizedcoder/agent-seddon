@@ -87,6 +87,27 @@ Parity spec [50](../../parity/50-secret-store.md) designs a `SecretStore` seam (
 - The shape (`SecretScope` + a `resolve(scope, ref)` entry point) is what parity 50's `SecretStore`
   seam replaces; the confinement rule moves into the `file` backend unchanged.
 
+### As built (S17)
+
+- [`crates/agent-runtime/src/secrets.rs`](../../../crates/agent-runtime/src/secrets.rs):
+  - `SecretScope::{Operator, Tenant}` and `SecretsPolicy { per_tenant, root, allow_env_for_tenants }`.
+  - `admit(policy, scope, ref)` decides what a reference points at without reading it.
+  - `resolve(scope, ref)` reads it.
+  - The builder installs the policy once per process, from `[secrets]` and `[tenancy] per_tenant`.
+- Tenant scope applies at four places:
+  - a fleet row's inline `token_ref`, and a forge card's `token_ref`, owned by `row.user`;
+  - a transport card's bot token in progress posts (`event.user()`) and its app token in the Slack
+    watch (`row.user`; the legacy `[review_fleet.slack]` ref stays operator);
+  - a provider upstream card's `api_key_ref`, owned by the tenant whose router cell is built
+    (`current_tenant()`).
+- A tenant `file:` may be relative (resolved in `root/<tenant>/`) or absolute inside that
+  directory. `confine` rejects `..`, other tenants' directories and symlinks that lead out.
+- **Inline keys.** Every card path already takes only the `ApiKeyRef` grammar, which refuses raw
+  values. The remaining inline fields (`api_key`, `token`) are operator config, so nothing
+  changed there.
+- Confinement is keyed on `per_tenant`, not on the tenant name. With `per_tenant` off, every
+  card lives in the shared `local` view the operator owns, and resolves as before.
+
 ## Test matrix
 
 | Class | Case | Expect |

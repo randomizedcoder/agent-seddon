@@ -23,7 +23,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S14 | Envoy hardening + `jwt_authn` | P0-4 | ⬜ | — |
 | S15 | auth-e2e gate + integration tiers | testing | ⬜ | — |
 | S16 | ClickHouse credentials + RLS lockdown | P0-6 | ✅ | #506 |
-| S17 | Secret-reference confinement | P0-7 | ⬜ | — |
+| S17 | Secret-reference confinement | P0-7 | ✅ | #507 |
 
 ## As-built log
 
@@ -345,3 +345,39 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
   so an existing install also needs that connection switched to `agent_viewer` in the UI (or a
   fresh `hyperdx-down -- --volumes`).
   Gate: `nix flake check --max-jobs 8 --cores 4 --keep-going` green (2026-09-27), first run.
+
+- **2026-09-27 — S17 (#507).** Secret references from tenants are confined (P0-7).
+
+  New [`agent-runtime/src/secrets.rs`](../../../crates/agent-runtime/src/secrets.rs):
+  - `SecretScope` (`Operator` | `Tenant`) and a process `SecretsPolicy` installed by the builder.
+  - Under `[tenancy] per_tenant = true`, a tenant's `file:` reference resolves only inside
+    `[secrets] root/<tenant>/`, through `agent_core::confine`, so symlinks cannot lead out.
+  - A tenant's `env:` reference is refused unless `[secrets] allow_env_for_tenants`.
+  - Errors name the rule, never the path or variable.
+
+  Call sites:
+  - Fleet rows and forge cards (`resolve_tenant_token_ref(row.user, …)`).
+  - Transport bot tokens in progress posts, and app tokens in the Slack watch; the watch groups
+    by `(owner, ref)`.
+  - Provider upstream cards (`synth_key_refs` under `current_tenant()`).
+  - Operator config keeps the old behaviour. `resolve_token_ref` is now the operator form, and
+    reads through the same module.
+
+  Config: `[secrets] root` (default `$XDG_CONFIG_HOME/agent-seddon/secrets`) and
+  `allow_env_for_tenants`. Unknown keys are refused.
+
+  Deviations from 08:
+  - Inline-key refusal needed no change, because every card path already accepts only the
+    `ApiKeyRef` grammar.
+  - Confinement is keyed on `per_tenant` rather than on `tenant != local`.
+
+  Tests:
+  - A secrets table: relative and absolute inside, missing file, host path, `/etc/passwd`, `..`,
+    another tenant's directory, a symlink to another tenant, a symlink escape, a dangling link,
+    the directory itself, and a raw secret. Each rejection asserts the path is not echoed.
+  - `env:` refused by default and allowed when on; bad tenant segments rejected.
+  - Operator and per-tenant-off keep legacy resolution; an unset `env:` is absent.
+  - `synth_key_refs_with` (seven provider-card cases) and `[secrets]` config parsing.
+  Gate: `nix flake check --max-jobs 8 --cores 4 --keep-going` green (2026-09-27); `leak`'s
+  `fork_cancel_cycle_does_not_leak` (agent-providers, untouched here) flaked once and passed on
+  rebuild.

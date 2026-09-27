@@ -115,7 +115,8 @@ impl FleetProgress for TransportProgressFeed {
             // Resolve the OUTBOUND (post) token and build the transport. A resolve/build
             // error is soft — the review is unaffected, but a configured-yet-broken channel
             // is a real post failure worth counting.
-            let bot_token = match crate::resolve_token_ref(&card.bot_token_ref) {
+            let bot_token = match crate::resolve_tenant_token_ref(event.user(), &card.bot_token_ref)
+            {
                 Ok(secret) => secret,
                 Err(e) => {
                     tracing::warn!(transport_id, error = %e,
