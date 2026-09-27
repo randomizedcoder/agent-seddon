@@ -41,9 +41,10 @@ in
   # Cheap runCommand (manifest parse + source scan, no compile). Per-crate false
   # positives are suppressed via `[package.metadata.cargo-machete] ignored`.
   cargo-machete = import ./cargo-machete.nix { inherit pkgs versions; };
-  # Executes the sqlite PromptStore backend's tests (feature `prompt-sqlite`, off by
-  # default so the main `test` check never builds the DB dep). The dedicated,
-  # feature-scoped check that runs them in the gate. docs/design/prompts/05-storage.md.
+  # Executes the sqlite PromptStore tier's tests (feature `prompt-sqlite`, off by
+  # default so the main `test` check never builds the DB dep). PG-10 repointed this
+  # tier onto `StorePrompt` over a config-store `SqliteBackend`; the dedicated,
+  # feature-scoped check runs the sqlite path in the gate. docs/design/prompts/05-storage.md.
   prompt-sqlite = craneCheck ./prompt-sqlite.nix { inherit cargoArtifacts; };
   # Executes the bwrap Tier-1 isolation backend's tests (feature `sandbox-bwrap`, off by
   # default so the main `test` check never builds the seccomp/libc deps). The dedicated,

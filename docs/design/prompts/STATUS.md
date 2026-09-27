@@ -16,6 +16,19 @@ shipped `PromptStore` seam and its lens-externalization precedent — then gener
 it to **tag-based situational selection** ([`04`](04-selection.md)) over a **swappable
 storage backend** ([`05`](05-storage.md)).
 
+> **Supersedes (PG-10, postgres-first-class track).** The bespoke `SqlitePromptStore`
+> (`crates/agent-prompt/src/sqlite.rs`, ~1122 lines) described in increment 05 and the
+> Round-3 versioning as-built below **has been retired**. The `sqlite` prompt tier is now
+> `StorePrompt` (the config-store-backed `PromptStore`, feature `prompt-store`) over a
+> config-store `SqliteBackend` — the same converged path as `file`/`memory`/`postgres`;
+> the `prompt-sqlite` feature was repointed (`prompt-store` + `config-store-sqlite`), not
+> deleted, so the config arm and its hermetic gate check survive. **Breaking change:** the
+> bespoke tier's bespoke versioning is gone — `SqlitePromptStore`'s `version` bumping and
+> the inherent `history()`/`rollback()` methods (never on the `PromptStore` seam, never
+> RPC-exposed, so unreachable through any client) were removed with it. Every backend now
+> reports `version = 0`; `source_ref` provenance is unaffected (it still travels over grpc
+> and through `migrate`). See [`docs/components/prompt.md`](../../components/prompt.md).
+
 ## Increments
 
 One focused, individually gated PR per increment — each earns the next, and each is

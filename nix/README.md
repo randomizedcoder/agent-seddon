@@ -65,7 +65,8 @@ those live under `apps` instead.
 
 - **Build / lint / format** — `clippy`, `rustfmt`, `nix-fmt`
 - **Tests** — `test` (the workspace suite), `prompt-sqlite` (the feature-gated
-  sqlite `PromptStore` tests), `coverage` (instrumented build + lcov, non-gating on
+  sqlite `PromptStore` tier — since PG-10 a `StorePrompt` over a config-store
+  `SqliteBackend`), `coverage` (instrumented build + lcov, non-gating on
   the number), `config-roundtrip`, `cli-help`, `mode-detect`, `expect-smoke`
 - **Supply chain** — `cargo-audit` (RustSec advisories), `cargo-deny`
   (licenses/bans/sources), `cargo-machete` (unused deps)

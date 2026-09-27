@@ -7,14 +7,16 @@ license.workspace = true
 
 [features]
 default = []
-# The `sqlite` PromptStore backend (docs/design/prompts/05-storage.md) — the first
-# database dependency in the workspace, off by default so a normal build stays
-# dependency-free (mirrors agent-session's `session-file` two-tier feature).
-prompt-sqlite = ["dep:rusqlite"]
 # The shared-store `PromptStore` backend (config C41 / A3c): the storable tiers
 # (sqlite/postgres/grpc) persist onto `agent-config-store`. The `FilePromptStore`
 # directory tree stays as-is. Off by default.
 prompt-store = ["dep:agent-config-store", "dep:serde", "dep:serde_json"]
+# The `sqlite` PromptStore backend (docs/design/prompts/05-storage.md): the embedded
+# catalog persists through the config-store `SqliteBackend` via `StorePrompt` (the
+# bespoke, versioned `SqlitePromptStore` was retired in PG-10 — the `sqlite` tier is
+# now the un-versioned override store the `postgres`/`file` tiers already are). Off by
+# default; enables the hermetic sqlite-backed `StorePrompt` tests in `store.rs`.
+prompt-sqlite = ["prompt-store", "agent-config-store/config-store-sqlite"]
 # The Postgres arm of the shared-store backend: forwards to `agent-config-store`'s
 # `config-store-postgres` (sqlx) tier. Off by default; NOT hermetic (needs a live
 # server), so its tests are `#[ignore]`-gated (run via `nix run .#integration`).
@@ -27,12 +29,9 @@ agent-core.workspace = true
 agent-context.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
-# Embedded SQLite for the `sqlite` backend, behind `prompt-sqlite` (off by default).
-# `bundled` compiles vendored sqlite3.c — no system library. See the workspace dep.
-rusqlite = { workspace = true, optional = true }
 # The shared transactional config store the `prompt-store` backend persists onto,
 # plus the JSON codec for its override cards (config C41 / A3c). Optional: pulled in
-# only by `prompt-store`/`prompt-store-postgres`.
+# only by `prompt-store`/`prompt-sqlite`/`prompt-store-postgres`.
 agent-config-store = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }

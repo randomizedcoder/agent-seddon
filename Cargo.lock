@@ -347,7 +347,6 @@ dependencies = [
  "agent-testkit",
  "async-trait",
  "rstest",
- "rusqlite",
  "serde",
  "serde_json",
  "tokio",

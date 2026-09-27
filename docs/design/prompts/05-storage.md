@@ -1,5 +1,14 @@
 # 05 — Storage backends: file · sqlite · grpc
 
+> **Superseded in part (PG-10).** This doc specifies the original `sqlite` tier as a
+> bespoke `SqlitePromptStore` (`agent-prompt/src/sqlite.rs`). That impl was **retired** in
+> the postgres-first-class track (PG-10): the `sqlite` tier is now `StorePrompt` — the
+> config-store-backed `PromptStore` — over a config-store `SqliteBackend`, the same
+> converged path as `file`/`memory`/`postgres`. The `[prompts] backend = "sqlite"` selector
+> and the `prompt-sqlite` feature/gate survive (repointed to `prompt-store` +
+> `config-store-sqlite`); the bespoke versioning (`history`/`rollback`) is gone. See
+> [`docs/components/prompt.md`](../../components/prompt.md) and [`STATUS.md`](STATUS.md).
+
 The prompt content ([`03`](03-content.md)) and its tags ([`04`](04-selection.md)) are
 *data*; where that data lives is a **backend choice behind the `PromptStore` seam**.
 Because every consumer — the loop, the portal — reaches prompts through the seam's

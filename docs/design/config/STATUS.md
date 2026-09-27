@@ -310,6 +310,24 @@ compare-and-swap, retiring the legacy `*-sqlite` impls). Eleven gated PRs off `m
   case); the `#[ignore]` `pg_lease_tests` prove the same over a real server (real reconnect durability +
   concurrent-race), wired into `nix/pg-integration.nix`.
 
+- **PG-10 — retire `SqlitePromptStore` (the largest legacy `*-sqlite` surface, ~1122 lines).** The
+  first legacy retirement of Phase 3 (guarded by PG-06's cross-backend parity harness). The bespoke
+  `SqlitePromptStore` (`crates/agent-prompt/src/sqlite.rs`) is deleted; the `prompt` `sqlite` tier now
+  builds `StorePrompt` (the config-store-backed `PromptStore`, feature `prompt-store`) over a config-store
+  `SqliteBackend`, via a new shared `agent_runtime::store_backend::sqlite_backend(path, metrics)` helper
+  (the SQLite sibling of `pg_backend`, reused by PG-11 for registry/fleet). The `prompt-sqlite` feature is
+  **repointed** (`prompt-store` + `agent-config-store/config-store-sqlite`), not deleted — mirroring PG-09's
+  `fleet-sqlite` precedent — so `[prompts] backend = "sqlite"` and the hermetic `nix/checks/prompt-sqlite.nix`
+  gate both survive, now exercising the converged `StorePrompt`/SQLite-SQL path (CRUD + `select` + hostile
+  tag/`source_ref` bind-safety). Per-tenant isolation moves from path-split DB files to `StorePrompt`'s
+  tenant column (`with_tenant`, `safe_segment`-gated); the old path-split `SqlitePromptStore` tenant test is
+  dropped (its semantics no longer exist), covered instead by `real_store`'s two-tenant `StorePrompt` case.
+  **Breaking change:** the bespoke tier's bespoke versioning is retired with it — `version` bumping and the
+  inherent `history()`/`rollback()` methods (never on the `PromptStore` seam, never RPC-exposed, so
+  unreachable through any client) are gone; every backend now reports `version = 0`, and `source_ref`
+  provenance is unaffected. Documented in [`docs/components/prompt.md`](../../components/prompt.md) and the
+  prompt track's [`STATUS.md`](../prompts/STATUS.md).
+
 ## Non-goals
 
 - Removing TOML (bootstrap stays TOML).

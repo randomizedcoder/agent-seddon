@@ -259,8 +259,11 @@ dimensions = ["agent-memory/memory-dimensions"]
 # Prompt management seam (docs/design/portal): see + CRUD every prompt.
 prompt = ["dep:agent-prompt"]
 # The `sqlite` PromptStore backend (docs/design/prompts/05-storage.md), off by
-# default. Forwards to agent-prompt's own feature (mirrors `session`→`session-file`).
-prompt-sqlite = ["prompt", "agent-prompt/prompt-sqlite"]
+# default. PG-10 retired the bespoke `SqlitePromptStore`: the `sqlite` arm now builds
+# `StorePrompt` over a config-store `SqliteBackend` (mirrors the `postgres` arm), so
+# this forwards `prompt-store` + the config-store sqlite tier (the `fleet-sqlite`
+# precedent from PG-09).
+prompt-sqlite = ["prompt-store", "agent-prompt/prompt-sqlite", "agent-config-store/config-store-sqlite"]
 # The shared-store prompt backend (config C41 / A3c): the storable tiers persist
 # onto `agent-config-store`; the FilePromptStore tree stays as-is. Off by default.
 prompt-store = ["prompt", "agent-prompt/prompt-store", "dep:agent-config-store"]

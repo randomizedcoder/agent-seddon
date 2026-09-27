@@ -793,3 +793,153 @@ mod pg_tests {
             .is_empty());
     }
 }
+
+// The `sqlite` tier exercised HERMETICALLY over a real config-store `SqliteBackend`
+// (bundled sqlite3.c, in-memory — no server). This is the retirement guard for
+// PG-10: `prompts.backend = "sqlite"` now routes through `StorePrompt` over this
+// backend (the bespoke `SqlitePromptStore` is gone), so these prove the *real SQL
+// layer* round-trips prompt cards and binds hostile tag/source_ref bytes rather than
+// interpreting them. The behavioural contract over `MemoryBackend` lives in `tests`
+// above; PG-06's parity harness proves memory ≡ sqlite at the `Backend` seam, so this
+// module targets the sqlite-specific bind/roundtrip surface. Run by
+// `nix/checks/prompt-sqlite.nix` (feature `prompt-sqlite`).
+#[cfg(all(test, feature = "prompt-sqlite"))]
+mod sqlite_tests {
+    use super::*;
+    use agent_config_store::SqliteBackend;
+
+    fn sqlite_store() -> StorePrompt {
+        let backend = SqliteBackend::open_in_memory().expect("open in-memory sqlite backend");
+        StorePrompt::new(Arc::new(backend), "CONFIG SYS")
+    }
+
+    fn frag(id: &str, content: &str) -> PromptEntry {
+        PromptEntry {
+            kind: PromptKind::SystemFragment,
+            id: id.into(),
+            content: content.into(),
+            ..Default::default()
+        }
+    }
+
+    // positive: System default → override → revert, and fragment CRUD + tag-derived
+    // select all round-trip through the real SQLite backend (not just memory).
+    #[tokio::test]
+    async fn positive_sqlite_backend_crud_and_select() {
+        let s = sqlite_store();
+        let sysref = PromptRef {
+            kind: PromptKind::System,
+            id: String::new(),
+        };
+        assert_eq!(s.get(&sysref).await.unwrap().content, "CONFIG SYS");
+        assert!(s.get(&sysref).await.unwrap().builtin);
+        s.put(PromptEntry {
+            kind: PromptKind::System,
+            content: "OVERRIDE".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        assert_eq!(s.get(&sysref).await.unwrap().content, "OVERRIDE");
+        assert!(s.delete(&sysref).await.unwrap());
+        assert!(s.get(&sysref).await.unwrap().builtin);
+
+        s.put(frag(
+            "review/0001_focus.md",
+            "---\ntags: [language:rust]\n---\nGROUND",
+        ))
+        .await
+        .unwrap();
+        let ctx = PromptContext::new()
+            .with_tag("mode:review")
+            .with_tag("language:rust");
+        assert_eq!(s.select(&ctx).await.unwrap().len(), 1);
+        assert!(s
+            .delete(&PromptRef {
+                kind: PromptKind::SystemFragment,
+                id: "review/0001_focus.md".into(),
+            })
+            .await
+            .unwrap());
+        assert!(s.select(&ctx).await.unwrap().is_empty());
+    }
+
+    // adversarial: a fragment carrying a SQL-metachar frontmatter tag is stored as an
+    // opaque blob field — the bytes round-trip verbatim and the `cards` table is
+    // intact afterwards (a second write still succeeds), proving no injection.
+    #[tokio::test]
+    async fn adversarial_sqlite_metachar_tag_is_inert() {
+        let s = sqlite_store();
+        let hostile = "language:'; DROP TABLE cards;--";
+        s.put(frag(
+            "review/0001_x.md",
+            &format!("---\ntags: [\"{hostile}\"]\n---\nBODY"),
+        ))
+        .await
+        .unwrap();
+        let e = s
+            .get(&PromptRef {
+                kind: PromptKind::SystemFragment,
+                id: "review/0001_x.md".into(),
+            })
+            .await
+            .unwrap();
+        assert!(
+            e.tags.iter().any(|t| t == hostile),
+            "hostile tag round-trips verbatim: {:?}",
+            e.tags
+        );
+        // The table survived — a second write still lands.
+        s.put(frag("review/0002_y.md", "OK")).await.unwrap();
+        assert_eq!(
+            s.list(Some(PromptKind::SystemFragment))
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    // adversarial: a hostile `source_ref` is opaque provenance — it round-trips as data
+    // and never reaches SQL as anything but a bound param.
+    #[tokio::test]
+    async fn adversarial_sqlite_hostile_source_ref_roundtrips() {
+        let s = sqlite_store();
+        let hostile = "'; DROP TABLE cards;--";
+        s.put(PromptEntry {
+            kind: PromptKind::Prepend,
+            id: "0001_p.md".into(),
+            content: "PRE".into(),
+            source_ref: hostile.into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let e = s
+            .get(&PromptRef {
+                kind: PromptKind::Prepend,
+                id: "0001_p.md".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(e.source_ref, hostile);
+        assert_eq!(e.content, "PRE");
+    }
+
+    // adversarial: a traversing fragment id is rejected before any SQL, nothing stored.
+    #[tokio::test]
+    async fn adversarial_sqlite_fragment_id_rejected() {
+        let s = sqlite_store();
+        for bad in ["review/../../evil.md", "../../etc.md", "notamode/x.md"] {
+            assert!(
+                matches!(s.put(frag(bad, "x")).await.unwrap_err(), Error::Prompt(_)),
+                "id `{bad}` must be rejected"
+            );
+        }
+        assert!(s
+            .list(Some(PromptKind::SystemFragment))
+            .await
+            .unwrap()
+            .is_empty());
+    }
+}
