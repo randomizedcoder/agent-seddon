@@ -22,6 +22,7 @@
 //!   TLS / mTLS matrix.
 
 pub mod bench;
+pub mod campaign;
 pub mod observe;
 #[cfg(feature = "oidc")]
 pub mod oidc;
