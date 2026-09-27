@@ -10,9 +10,15 @@
 # it brings up the container (`postgres-up` owns the readiness barrier), runs the
 # crate's `#[ignore]`-gated suite through the pinned dev shell (`nix develop -c`,
 # so the toolchain matches CLAUDE.md), then tears the container down. Registered
-# in `nix/integration.nix` (model-free tier, guarded by a docker check).
+# in `nix/integration.nix` (model-free tier; self-skips without a container runtime).
 #
-# Exit codes (the shared 0/1/2 contract): 0 clean or skipped (no docker), 1 a
+# The container runtime is picked the same way every container app picks it
+# (`nix/lib/mk-container-app.nix`): `$CONTAINER_RUNTIME` (default `docker`), so a
+# docker-less, podman-only host (e.g. the headless l2 box) runs this harness with
+# `CONTAINER_RUNTIME=podman` instead of self-skipping — `postgres-up`/`-down`
+# inherit the same env var.
+#
+# Exit codes (the shared 0/1/2 contract): 0 clean or skipped (no runtime), 1 a
 # harness failure (server never came up), 2 a contract failure (a test failed).
 {
   pkgs,
@@ -27,6 +33,7 @@ pkgs.writeShellApplication {
   runtimeInputs = [
     pkgs.coreutils
     versions.docker
+    versions.podman # a podman-only host (l2) probes + runs via CONTAINER_RUNTIME=podman
     pkgs.nix # runs the crate suite through the pinned dev shell
     postgres-up
     postgres-down
@@ -38,10 +45,13 @@ pkgs.writeShellApplication {
   + ''
 
     # Opt-in resource: skip-with-notice (exit 0) on a bare machine so the whole
-    # `nix run .#integration` aggregate stays runnable without docker.
-    if ! docker info >/dev/null 2>&1; then
-      echo "pg-integration: SKIP — docker daemon not reachable (the postgres tier is opt-in)."
-      contract_exit "PASS: pg-integration skipped (no docker)."
+    # `nix run .#integration` aggregate stays runnable without a container runtime.
+    # Pick the runtime like every container app does (mk-container-app.nix): honor
+    # $CONTAINER_RUNTIME (default docker) so a podman-only host is not skipped.
+    runtime="''${CONTAINER_RUNTIME:-docker}"
+    if ! "$runtime" info >/dev/null 2>&1; then
+      echo "pg-integration: SKIP — container runtime ($runtime) not reachable (the postgres tier is opt-in)."
+      contract_exit "PASS: pg-integration skipped (no container runtime)."
     fi
 
     # shellcheck disable=SC2329  # invoked indirectly via the EXIT trap below.

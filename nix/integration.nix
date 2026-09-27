@@ -10,7 +10,8 @@
 # outcome via nix/lib/contract.sh — no harness logic is re-implemented here.
 #
 #   Model-free tier (always): loadtest, loadtest-loop, loadtest-wire, serve-smoke,
-#     pg-integration (the postgres config-store tier; self-skips without docker).
+#     pg-integration (the postgres config-store tier; self-skips without a
+#     container runtime — honors CONTAINER_RUNTIME, so podman-only hosts run it).
 #   Model tier (auto): e2e-live, e2e-expect, e2e-multi, and fleet-e2e (the last only
 #     when a GITHUB_TOKEN is also present) — run only when a model is
 #     configured AND reachable (AGENT_E2E_BASE_URL), else skipped with a notice, so
@@ -99,9 +100,11 @@ pkgs.writeShellApplication {
       run_step "loadtest-loop — full-loop probe"   loadtest-loop --concurrency 8 --runs 128
       run_step "loadtest-wire — real wire (tcp+uds)" loadtest-wire
       run_step "serve-smoke — seam breadth (tcp+uds)" serve-smoke
-      # `pg-integration` needs docker (the postgres tier is opt-in); it self-skips
-      # with a notice and exit 0 when the daemon is absent, so it is always safe to
-      # run here — a bare machine simply records the skip.
+      # `pg-integration` needs a container runtime (the postgres tier is opt-in); it
+      # self-skips with a notice and exit 0 when none is reachable (honouring
+      # $CONTAINER_RUNTIME, default docker — so a podman-only host runs it with
+      # CONTAINER_RUNTIME=podman), so it is always safe to run here — a bare machine
+      # simply records the skip.
       run_step "pg-integration — real Postgres config-store" pg-integration
     fi
 
