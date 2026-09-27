@@ -239,6 +239,23 @@ Three seams are deliberately *not* distributed;
 why. `--serve-sandbox`, `--serve-pty` and `--serve-forge` expose arbitrary code
 execution or authenticated writes — read the warning there before exposing them.
 
+### REST + OpenAPI
+
+**gRPC is the primary interface, and the one to use.** A REST/JSON surface is being
+added for low-traffic external callers who want plain HTTP — not as a second
+implementation, but as a thin translation: each RPC carries a `google.api.http`
+annotation, and Envoy's `grpc_json_transcoder` maps REST/JSON onto the *same* gRPC
+handlers, so REST bypasses none of the gRPC auth. A generated **OpenAPI** document
+publishes the contract. Because it's pure translation, the whole surface is
+reachable — the only calls that can't transcode are client/bidi-streaming RPCs, and
+this API has none.
+
+This is **in progress**: the annotations and their survival through codegen are
+proven in the tree (`crates/agent-proto/tests/http_annotations.rs`); the full
+annotation sweep, the published OpenAPI doc, and the live transcoder listener are
+landing increment by increment. Design of record and status:
+[`docs/design/rest-openapi/`](docs/design/rest-openapi/README.md).
+
 ## How it's kept honest
 
 - **Table-driven tests.** Over 2,200 tests, 1,514 of them `#[rstest]` cases,
@@ -330,6 +347,7 @@ built vs. designed. (Two deferred idea-notes are single files rather than direct
 | [portal](docs/design/portal/README.md) | A Flutter/gRPC-only portal: prompt CRUD, live agent view, config/router admin, and an obs launcher. |
 | [portal-gui-testing](docs/design/portal-gui-testing/README.md) | A portal GUI test-automation framework: hermetic widget tests plus live Layer-B e2e proven via observability. |
 | [prompts](docs/design/prompts/README.md) | Situational, tag-based prompt selection with swappable storage and named personalities. |
+| [rest-openapi](docs/design/rest-openapi/README.md) | A REST/JSON + OpenAPI surface over the gRPC API via Envoy `grpc_json_transcoder` — REST as thin translation; gRPC stays primary. |
 | [review-analysis-depth](docs/design/review-analysis-depth/README.md) | Deeper review static analysis: nix-provisioned tool suites, run in parallel and condensed before the LLM. |
 | [review-fleet](docs/design/review-fleet/README.md) | A long-running server hosting N unattended review sessions (watch → checkout → review → approve → post). |
 | [review-parallelism](docs/design/review-parallelism/README.md) | Chunked map-reduce review to cut single-PR review latency (lever 3). |
