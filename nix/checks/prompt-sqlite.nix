@@ -1,17 +1,16 @@
 # nix/checks/prompt-sqlite.nix
 #
-# Executes the `SqlitePromptStore` backend's tests, which sit behind the non-default
-# `prompt-sqlite` cargo feature — the workspace's only database dependency
-# (docs/design/prompts/05-storage.md). The main `test` check runs *default* features
-# (it must not enable feature-gated allocators like `dhat-heap`), and clippy
-# `--all-features` compiles + lints this code but does not run it. This dedicated,
-# feature-scoped check is what actually EXECUTES the sqlite backend's tests in the gate —
-# including the Round-3 versioning & provenance suite (version bump / no-op idempotence /
-# rollback / history / hostile source_ref) behind the same feature
-# (docs/design/prompts/08-versioning-and-provenance.md).
+# Executes the `sqlite` PromptStore tier's HERMETIC tests, behind the non-default
+# `prompt-sqlite` cargo feature (docs/design/prompts/05-storage.md). PG-10 retired the
+# bespoke `SqlitePromptStore`: the `sqlite` tier is now `StorePrompt` over a config-store
+# `SqliteBackend`, so this feature forwards `prompt-store` + `config-store-sqlite` and
+# the check runs `store.rs`'s `sqlite_tests` module (CRUD/select roundtrip + hostile
+# tag/source_ref bind-safety over the real in-memory SQLite SQL layer). The main `test`
+# check runs *default* features and clippy `--all-features` only compiles this code;
+# this dedicated, feature-scoped check is what actually EXECUTES the sqlite path.
 #
-# `rusqlite`'s `bundled` feature compiles vendored `sqlite3.c` with the stdenv C
-# toolchain crane already provides — no system libsqlite3, no extra build input.
+# `rusqlite`'s `bundled` feature (pulled by `config-store-sqlite`) compiles vendored
+# `sqlite3.c` with the stdenv C toolchain crane already provides — no system libsqlite3.
 {
   craneLib,
   commonArgs,

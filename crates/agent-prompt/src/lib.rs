@@ -46,11 +46,6 @@ pub mod store;
 #[cfg(feature = "prompt-store")]
 pub use store::StorePrompt;
 
-#[cfg(feature = "prompt-sqlite")]
-mod sqlite;
-#[cfg(feature = "prompt-sqlite")]
-pub use sqlite::SqlitePromptStore;
-
 /// Copy every *stored* (non-builtin) prompt from `from` into `to` — the file↔sqlite
 /// bridge (docs/design/prompts/05-storage.md): so an operator can snapshot a DB
 /// catalog into the git-legible file tree for review, or seed a DB from files, and

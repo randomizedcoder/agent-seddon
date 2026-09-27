@@ -4,6 +4,16 @@
 > traceable and re-importable. This doc adds **version** + **source provenance** to the
 > prompt store — overturning a Round-1/2 non-goal, with the rationale below.
 
+> **Partly reverted (PG-10).** The **version** half of this design lived only in the
+> bespoke `SqlitePromptStore` (`version` bumping + append-only `prompt_history` +
+> inherent `history()`/`rollback()`), which was **never surfaced on the `PromptStore`
+> seam or any RPC**. When PG-10 retired `SqlitePromptStore` for the converged config-store
+> path, that versioning went with it: every backend now reports `version = 0` and the
+> Round-1/2 "git or the DB's own tooling is the history" non-goal is effectively back in
+> force. The **provenance** half survives untouched — `source_ref` is still stored,
+> validated on import, and carried over grpc + `migrate`. See
+> [`docs/components/prompt.md`](../../components/prompt.md) and [`STATUS.md`](STATUS.md).
+
 ## Why this overturns the "No versioning" non-goal
 
 Rounds 1–2 stated a **non-goal**: *"No prompt versioning / history. The shipped

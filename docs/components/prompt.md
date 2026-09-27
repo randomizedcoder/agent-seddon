@@ -160,14 +160,15 @@ reaches prompts through the same CRUD, so files or a database is invisible to th
 | `backend` | Impl | Notes |
 |---|---|---|
 | `file` (default) | `FilePromptStore` | git-legible markdown under `<prompts>`/`<context.d>`; zero dependencies |
-| `sqlite` | `SqlitePromptStore` (feature `prompt-sqlite`) | embedded catalog; tags normalised into a `prompt_tags` table so `select` pushes down to SQL. The workspace's **only** DB dependency — off by default (`rusqlite`, `bundled`) |
+| `sqlite` | `StorePrompt` over a config-store `SqliteBackend` (feature `prompt-sqlite`) | embedded catalog on the shared `cards`/`tenants` tables (`rusqlite`, `bundled`), off by default. Since **PG-10** this is the config-store path — the bespoke `SqlitePromptStore` was retired |
+| `postgres` | `StorePrompt` over a config-store `PgBackend` (feature `prompt-postgres`) | the storable tier that can join a cross-card transaction on the shared `[config_store]` server; DSN via `dsn_ref`. Not hermetic (needs a live server) |
 | `grpc` | `GrpcPrompts` client | dials a central `PromptService` (a shared catalog, itself backed by any store) |
 
 Selection semantics are identical across backends (`fragment.tags ⊆ context`); only
-*where the filter runs* differs (in-memory vs SQL vs remote). The `sqlite` store returns
-the same shape as the file store — `System`/`ModeLens` fall back to their
-compiled/config default when no override row exists, and a `SystemFragment`'s `tags` are
-derived from its content the same way — so the two are interchangeable. Move a catalog
+*where the filter runs* differs (in-memory vs SQL vs remote). The `sqlite`/`postgres`
+stores return the same shape as the file store — `System`/`ModeLens` fall back to their
+compiled/config default when no override card exists, and a `SystemFragment`'s `tags` are
+derived from its content the same way — so all backends are interchangeable. Move a catalog
 between them with `agent_prompt::migrate(&from, &to)` (skips builtins; works in either
 direction).
 
@@ -176,21 +177,22 @@ direction).
 Every `PromptEntry` carries two extra fields (Round 3,
 [`docs/design/prompts/08-versioning-and-provenance.md`](../design/prompts/08-versioning-and-provenance.md)):
 
-- **`version: u32`** — a monotonically increasing revision per `(kind, id)`. The **file**
-  backend leaves it `0` (git is its history); a **sqlite** entry starts at `1` and bumps on
-  each content-or-provenance change.
+- **`version: u32`** — a per-`(kind, id)` revision counter. Every current backend
+  (`file`/`sqlite`/`postgres`) reports `0`: git is the file backend's history, and the
+  shared config store keeps the current card, not a revision chain.
 - **`source_ref: String`** — opaque, bounded (`MAX_SOURCE_REF_LEN`) provenance, e.g.
   `nixpkgs:opencode@<narHash>:…/anthropic.txt`. Empty for operator-authored entries;
   `agent_prompt::validate_imported_source_ref` requires it on the *import* path (so a
   machine-written personality always records where it came from), while ordinary `put`s stay
-  permissive.
+  permissive. `source_ref` travels over the grpc wire and through `migrate`, so provenance is
+  preserved when a catalog moves between backends.
 
-In the sqlite backend a `put` is **idempotent**: an identical `(content, source_ref)` is a
-no-op (no bump, no history row), while a change appends to an append-only history. That
-history is queryable (`SqlitePromptStore::history`) and a prior revision can be restored as a
-new forward revision (`SqlitePromptStore::rollback`). Both `version` and `source_ref` travel
-over the grpc wire and through `migrate`, so provenance is preserved when a catalog moves
-between backends.
+> **Breaking change (PG-10).** The bespoke `SqlitePromptStore` — the only backend that
+> bumped `version` and kept an append-only history — was retired when the `sqlite` tier
+> converged onto the shared config store. With it went the in-crate `version` bumping and
+> the `history`/`rollback` inherent methods (which were never on the `PromptStore` seam, so
+> no RPC/portal path consumed them). The `sqlite` tier is now an un-versioned override
+> store like `postgres`/`file`; `source_ref` provenance is unaffected.
 
 ## Config
 
