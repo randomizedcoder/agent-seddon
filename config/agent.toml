@@ -990,6 +990,21 @@ job         = "agent-seddon"
 # [grpc]
 # max_in_flight = 1024
 #
+# TLS / mTLS on the TCP transport (security-hardening S4; docs/grpc.md "TLS and
+# mTLS"). `nix run .#pki-dev` mints a dev CA + leaves and prints this block. With
+# `cert` + `key` set, every `--serve-*` TCP listener serves TLS (unix sockets stay
+# plaintext); `client_ca` makes it mutual. A client uses TLS only for an
+# `https://…` endpoint — `http://` and bare `host:port` stay plaintext.
+# [grpc.tls]
+# cert      = "/run/user/1000/agent-seddon/pki/agent/cert.pem"
+# key       = "/run/user/1000/agent-seddon/pki/agent/key.pem"
+# client_ca = "/run/user/1000/agent-seddon/pki/ca/root.crt"   # set ⇒ mTLS required
+# [grpc.tls.client]
+# ca     = "/run/user/1000/agent-seddon/pki/ca/root.crt"      # the ONLY trust anchor; empty ⇒ web roots
+# cert   = "/run/user/1000/agent-seddon/pki/cli/cert.pem"     # client identity for mTLS
+# key    = "/run/user/1000/agent-seddon/pki/cli/key.pem"
+# domain = "agent"                                            # verify the server as this name
+#
 # [grpc.provider]
 # endpoint = "unix:/tmp/agent-seddon/provider.sock"   # client dials this
 # listen   = "unix:/tmp/agent-seddon/provider.sock"   # --serve-provider binds this

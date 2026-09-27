@@ -10,7 +10,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S1 | `auth` default feature, load-time validation, insecure-listen refusal | P0-1, P0-3 | ✅ | #487 |
 | S2 | Tenant from principal, identity policy, direct-reader conversion | P0-2, P0-3 | ✅ | #489 |
 | S3 | Multi-issuer OIDC profiles + fake issuer | D2 | ✅ | #492 |
-| S4 | tonic TLS, `[grpc.tls]`, `nix run .#pki-dev` | P0-5 | ⬜ | — |
+| S4 | tonic TLS, `[grpc.tls]`, `nix run .#pki-dev` | P0-5 | ✅ | #494 |
 | S5 | Token service core (agent JWT, JWKS, `WhoAmI`) | D1, D10 | ⬜ | — |
 | S6 | Session store + `Exchange/Refresh/Logout` | D11 | ⬜ | — |
 | S7 | RBAC extension, read gating, authz-coverage gate | D9 | ⬜ | — |
@@ -92,5 +92,55 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
   expiry / replay and PKCE cases (S6, S12); "an IdP token presented to a seam is rejected"
   (S5, when seams accept only agent tokens). Subjects are not yet namespaced by issuer; the
   agent token's `sub = user:<issuer>/<sub>` (S5) does that.
+  Gate: `nix flake check --max-jobs 8 --cores 4` green (`leak`'s `fork_cancel_cycle_does_not_leak`
+  in `agent-providers`, untouched here, flaked once and passed on rerun).
+- **2026-09-26 — S4 (#494).** tonic's `tls` + `tls-webpki-roots` features are on in `agent-grpc` (rustls
+  with `ring`; the lock still has no aws-lc). `Endpoint::Tcp` is now `{ hostport, tls }`:
+  `https://` dials TLS, while `http://` and bare `host:port` stay plaintext. Before S4,
+  `https://` was stripped and dialed plaintext. New `crates/agent-grpc/src/tls.rs`:
+  - `ServerTls::load(cert, key, client_ca)`; a client CA makes the listener mutual.
+  - `ClientTls::load(ca, cert, key, domain)`: a configured CA is the only trust anchor, else
+    the webpki roots.
+  - PEM files are capped at 1 MiB, must contain a `-----BEGIN` block, and are validated by
+    building the rustls config at load. A group- or world-readable key logs a warning.
+  - The client side is installed process-wide with `set_client_tls` (replace semantics), so
+    the ~50 `connect_lazy()` callers are unchanged; `connect_lazy_with` takes it explicitly.
+
+  `base_router_with_tls` seeds the router with TLS. The CLI's four serve entry points now share
+  `serve_base`, which applies TLS to TCP listeners only (a unix socket stays plaintext), refuses
+  an `https://` listen address with no cert, and logs `transport = plaintext | tls | mtls`.
+  Config (`[grpc.tls]`, `[grpc.tls.client]`, both `deny_unknown_fields`):
+  - `GrpcTlsCfg::validate` runs at load: cert and key must be set together, `client_ca`
+    needs a server cert, and the domain must be a hostname or an IP.
+  - Client TLS is installed early in `build_agent_with`.
+  - Values are plain paths, not `file:` references (doc 07 updated).
+
+  `nix run .#pki-dev` (`test/pki-dev/pki_dev.py`, stdlib python driving `step certificate
+  create` offline) mints the root CA, a `token-signer`, and per-service leaves (SANs
+  localhost / 127.0.0.1 / ::1 / name / `spiffe://agent.<deployment>/svc/<name>`, EKU
+  server + client). It is idempotent, `--force` never deletes the directory, `--verify` checks
+  every leaf, and it prints the `[grpc.tls]` block. The new `pki-dev-tests` check runs its
+  four-class tables plus a real step-cli mint, verify and check-the-checks (a foreign-CA leaf
+  and a corrupt cert must fail) offline in the sandbox.
+
+  Tests:
+  - `crates/agent-grpc/tests/tls.rs` is a 16-case handshake matrix on `127.0.0.1:0`, using
+    the new `agent_testkit::pki` (rcgen, in-memory CA). It covers TLS, mTLS and domain
+    override; expired, not-yet-valid, other-CA and wrong-name server certs; a foreign or
+    missing client cert; plaintext against TLS and TLS against plaintext; web roots against
+    a private CA; bare `host:port` staying plaintext; and UDS unaffected.
+  - Parse, PEM, domain and config-load tables.
+  - `serve-smoke` gains `tls` and `mtls` rows (step-cli certs, grpcurl). Both must also refuse
+    a plaintext client, and mTLS must refuse a client without a certificate. All four
+    transports pass. This also fixed a pre-existing break: since #305, backticks in
+    serve-smoke's agent.toml heredoc comments failed shellcheck, so the app did not build.
+
+  Deferred:
+  - Peer SAN → service principal, `[auth.mtls]` bindings, and refusing plaintext on
+    non-loopback listeners: S10.
+  - The `step-ca` daemon (`nix run .#step-ca`) and `renew_cmd` / `step ca renew`: integration
+    tier, S15.
+  - The signer-certificate expiry `doctor` probe: S11.
+  - Hot reload of certificates: needs a restart today.
   Gate: `nix flake check --max-jobs 8 --cores 4` green (`leak`'s `fork_cancel_cycle_does_not_leak`
   in `agent-providers`, untouched here, flaked once and passed on rerun).

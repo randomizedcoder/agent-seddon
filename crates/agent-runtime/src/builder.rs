@@ -117,6 +117,29 @@ pub(crate) fn build_review_orchestrator(
     orch.with_gate_threshold(review.gate_threshold)
 }
 
+/// Install `[grpc.tls.client]` as the process-wide client TLS (security-hardening
+/// S4) that every `https://` seam endpoint dials with. The files are read and
+/// parsed here, so an unreadable or malformed one is a startup error rather than a
+/// failed first handshake. An empty block clears it (such dials then trust the
+/// public web roots and present no certificate); `http://` / bare `host:port`
+/// endpoints are plaintext either way.
+#[cfg(feature = "grpc")]
+fn install_client_tls(c: &crate::config::GrpcTlsClientCfg) -> anyhow::Result<()> {
+    let path = |s: &str| (!s.trim().is_empty()).then(|| std::path::PathBuf::from(s.trim()));
+    let (ca, cert, key) = (path(&c.ca), path(&c.cert), path(&c.key));
+    let domain = (!c.domain.trim().is_empty()).then(|| c.domain.trim());
+    let tls = if ca.is_none() && cert.is_none() && domain.is_none() {
+        None
+    } else {
+        Some(
+            agent_grpc::ClientTls::load(ca.as_deref(), cert.as_deref(), key.as_deref(), domain)
+                .map_err(|e| anyhow::anyhow!("[grpc.tls.client]: {e}"))?,
+        )
+    };
+    agent_grpc::tls::set_client_tls(tls);
+    Ok(())
+}
+
 /// Build the agent from a caller-supplied [`Registry`]. Out-of-tree binaries use
 /// this to register their own provider/tool/memory/etc. factories (see
 /// `docs/extending.md`) before wiring the loop — no fork required.
@@ -163,6 +186,9 @@ pub async fn build_agent_with(
         Option<(bool, bool)>,
     ) = (None, None);
     let cfg = cfg;
+    // Before any `= "grpc"` seam client below is built.
+    #[cfg(feature = "grpc")]
+    install_client_tls(&cfg.grpc.tls.client)?;
 
     // The digest ledger (cognition-graph 02), opt-in via `[digest] store`. Built
     // BEFORE the provider so the fork observer can file loser alternatives, and
@@ -1306,6 +1332,12 @@ pub async fn build_agent_with(
             allow_insecure_listen: cfg.auth.allow_insecure_listen,
             require_identity: cfg.auth.require_identity,
             issuers: cfg.auth.issuers.clone(),
+        },
+        // TLS on served TCP listeners (`[grpc.tls]`, security-hardening S4).
+        grpc_tls: crate::agent::GrpcTlsSettings {
+            cert: cfg.grpc.tls.cert.trim().to_owned(),
+            key: cfg.grpc.tls.key.trim().to_owned(),
+            client_ca: cfg.grpc.tls.client_ca.trim().to_owned(),
         },
         // Multi-tenant deployment (`[tenancy] per_tenant`); arms the C29 ConfigService
         // operator-config write guard on the serve path. `false` = Tier-0 (unchanged).

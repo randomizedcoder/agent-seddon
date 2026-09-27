@@ -295,6 +295,11 @@ let
   # by the `mt-audit-tests` check).
   mt-audit = import ./mt-audit.nix { inherit pkgs; };
 
+  # `nix run .#pki-dev` — offline dev PKI (step-cli) for gRPC TLS/mTLS: root CA,
+  # token-signer, per-service leaves + the matching `[grpc.tls]` block (security-
+  # hardening S4). nix/pki-dev.nix + test/pki-dev/pki_dev.py (tested by `pki-dev-tests`).
+  pki-dev = import ./pki-dev.nix { inherit pkgs; };
+
   # `nix run .#portal-test-report -- <jsonl>...` — render the portal GUI test
   # report (page → element → case) from the hermetic checks' `flutter test
   # --machine` streams + the Layer-B rich records. See nix/portal-test-report.nix
@@ -518,13 +523,15 @@ let
     inherit (nixLib) harness;
   };
   # Real-wire seam-surface breadth probe: `--serve-all` + grpcurl reflection over
-  # tcp+uds — every advertised seam describes + a critical subset round-trips. Opt-in.
+  # tcp+uds+tls+mtls — every advertised seam describes + a critical subset round-trips.
+  # Opt-in.
   serve-smoke = import ./serve-smoke.nix {
     inherit
       pkgs
       lib
       versions
       agent
+      pki-dev
       ;
     inherit (nixLib) harness;
   };
@@ -646,6 +653,7 @@ in
         fleet-e2e
         fleet-measure
         mt-audit
+        pki-dev
         fleet-redeploy
         portal-test-report
         graph-arena

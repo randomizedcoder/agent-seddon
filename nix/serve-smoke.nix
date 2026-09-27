@@ -12,8 +12,11 @@
 #     the gateway fails here), and
 #   - two real unary RPCs round-trip (Memory/Recall, TokenizerService/Count).
 #
-# It runs the whole sequence over **both TCP and UDS**, one server per transport in
-# turn (like `loadtest-wire`), so the seam surface is proven on each transport. The
+# It runs the whole sequence over **TCP, UDS, TLS and mTLS**, one server per transport
+# in turn (like `loadtest-wire`), so the seam surface is proven on each transport. The
+# TLS rows mint an offline dev PKI with `pki-dev` (step-cli) and add refusal checks: a
+# plaintext client against the TLS listener, and (mTLS) a client without a
+# certificate, must both fail (security-hardening S4). The
 # server boot / health-wait / dial / teardown and the exit-code contract are the
 # shared `nix/lib/{serve-wire,contract}.sh` snippets (see loadtest-wire).
 #
@@ -21,7 +24,7 @@
 # a socket, which agent-seddon keeps out of the hermetic `nix flake check` sandbox.
 # It needs no model, though — every probed seam is CPU-only (file/approx backends),
 # so it runs anywhere the agent binary builds. Set `SERVE_SMOKE_TRANSPORTS="tcp"`
-# (or `"uds"`) to pin one.
+# (or `"uds"`, `"tls"`, `"mtls"`) to pin one.
 #
 # Exit codes (the shared contract): 0 ok, 1 harness, 2 contract.
 {
@@ -30,11 +33,13 @@
   versions,
   agent,
   harness,
+  pki-dev,
 }:
 pkgs.writeShellApplication {
   name = "serve-smoke";
   runtimeInputs = [
     agent
+    pki-dev
     versions.grpcurl
     pkgs.coreutils
     pkgs.gnugrep
@@ -42,7 +47,7 @@ pkgs.writeShellApplication {
   text = ''
     set -uo pipefail
 
-    TRANSPORTS="''${SERVE_SMOKE_TRANSPORTS:-tcp uds}"
+    TRANSPORTS="''${SERVE_SMOKE_TRANSPORTS:-tcp uds tls mtls}"
   ''
   + harness.contract
   + harness.serveWire
@@ -126,9 +131,9 @@ pkgs.writeShellApplication {
     file  = "$work/.agent/transports.json"
 
     # A file-backed durable scheduler (config C2c), so --serve-all advertises the
-    # Scheduler control plane over the persistent `StoreScheduler` and the
-    # Schedule→List roundtrip below can exercise it over the wire. `enabled` wires the
-    # seam; jobs only FIRE under `agent --scheduler`, so serving alone starts nothing.
+    # Scheduler control plane over the persistent StoreScheduler and the
+    # Schedule->List roundtrip below can exercise it over the wire. 'enabled' wires the
+    # seam; jobs only FIRE under 'agent --scheduler', so serving alone starts nothing.
     [scheduler]
     enabled = true
     store   = "file"
@@ -147,6 +152,21 @@ pkgs.writeShellApplication {
       echo "serve-smoke: [$transport] healthy (grpc.health.v1 SERVING)."
 
       local rc=0
+
+      # The TLS rows must also REFUSE: plaintext against a TLS listener, and (mTLS)
+      # a verified-TLS client that presents no certificate.
+      if [ -n "$tls_addr" ]; then
+        if grpcurl -plaintext "$tls_addr" grpc.health.v1.Health/Check >/dev/null 2>&1; then
+          echo "CONTRACT[$transport]: a PLAINTEXT client reached the TLS listener" >&2
+          rc=2
+        fi
+        if [ "$transport" = mtls ] &&
+          grpcurl -cacert "$tls_ca" "$tls_addr" grpc.health.v1.Health/Check >/dev/null 2>&1; then
+          echo "CONTRACT[$transport]: a client WITHOUT a certificate reached the mTLS listener" >&2
+          rc=2
+        fi
+        [ "$rc" -eq 0 ] && echo "serve-smoke: [$transport] refuses plaintext$([ "$transport" = mtls ] && echo ' and cert-less') clients."
+      fi
 
       # ---- Enumerate the advertised seam surface via reflection ------------------
       local services count

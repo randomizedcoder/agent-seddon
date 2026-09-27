@@ -32,16 +32,21 @@ Closes P0-5: no TLS on TCP transports; `https://` silently downgraded.
 
 ```toml
 [grpc.tls]                      # server side
-cert = "file:…/svc-a.crt"
-key  = "file:…/svc-a.key"
-client_ca = "file:…/root_ca.crt"   # set ⇒ mTLS required on this listener
+cert = "…/pki/svc-a/cert.pem"
+key  = "…/pki/svc-a/key.pem"
+client_ca = "…/pki/ca/root.crt"  # set ⇒ mTLS required on this listener
 
 [grpc.tls.client]               # what this process presents when dialing
-ca = "file:…/root_ca.crt"
+ca = "…/pki/ca/root.crt"
 domain = "svc-b.agent.internal"
-cert = "file:…/svc-a.crt"
-key  = "file:…/svc-a.key"
+cert = "…/pki/svc-a/cert.pem"
+key  = "…/pki/svc-a/key.pem"
 ```
+
+  As built (S4), the values are plain file paths, not `file:` references: certificates and
+  keys are operator-provisioned files the process reads directly, and a `file:` prefix would
+  suggest the tenant-confinable secret-reference resolver ([08](08-data-plane-and-secrets.md)),
+  which they do not go through.
 
 - **Server:** `Server::builder().tls_config(ServerTlsConfig)` at `health.rs:144`, a `TlsParams`
   beside `AuthLayer`. **Client:** `TonicEndpoint.tls_config` in `connect_lazy`
@@ -53,7 +58,9 @@ key  = "file:…/svc-a.key"
 - **Certificate lifecycle:**
   - `nix run .#pki-dev`: `step certificate create` offline: root CA, the token-signer key and
     certificate ([02](02-token-service.md)), one leaf per service, under
-    `$XDG_RUNTIME_DIR/agent-seddon/pki`. The same command runs inside `nix flake check`.
+    `$XDG_RUNTIME_DIR/agent-seddon/pki`. The same generator runs offline inside `nix flake check`
+    (the `pki-dev-tests` check); the Rust wire tests use an in-memory CA
+    (`agent_testkit::pki`, rcgen) instead, so `cargo test` needs no step-cli.
   - `nix run .#step-ca`: the `step-ca` daemon (container or native) with ACME and a JWK provisioner,
     for l2 and `nix run .#integration`; services renew with `step ca renew --daemon`, or the agent's
     `[grpc.tls] renew_cmd` (a python helper, per the bash-only-as-shim rule).
@@ -66,6 +73,11 @@ key  = "file:…/svc-a.key"
 
 The transport matrix ([`transport.rs`](../../../crates/agent-grpc/src/transport.rs) tests and the
 wire roundtrips) gains `tls` and `mtls` rows using certificates generated at test time.
+
+As built in S4: [`crates/agent-grpc/tests/tls.rs`](../../../crates/agent-grpc/tests/tls.rs) (the
+handshake matrix), `transport.rs` / `tls.rs` unit tables, and the `tls` / `mtls` rows of
+`nix run .#serve-smoke`. The peer-SAN, service-token and startup-refusal rows below land with S10;
+the signer-expiry `doctor` row with S11.
 
 | Class | Case | Expect |
 |---|---|---|

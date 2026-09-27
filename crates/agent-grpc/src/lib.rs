@@ -13,6 +13,8 @@
 pub mod client;
 pub mod constants;
 pub mod server;
+pub mod tls;
 pub mod transport;
 
+pub use tls::{ClientTls, ServerTls};
 pub use transport::{Bound, Endpoint};

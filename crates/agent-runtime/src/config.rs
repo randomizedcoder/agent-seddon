@@ -2586,6 +2586,105 @@ pub struct GrpcCfg {
     /// dials an individual seam's service, not the gateway as a whole.
     #[serde(default)]
     pub gateway: GrpcSeamCfg,
+    /// TLS / mTLS on TCP listeners and `https://` dials (`[grpc.tls]`,
+    /// security-hardening S4). Checked at load by [`GrpcTlsCfg::validate`].
+    #[serde(default)]
+    pub tls: GrpcTlsCfg,
+}
+
+/// `[grpc.tls]` — PEM file paths for TLS on the gRPC TCP transport
+/// (docs/design/security-hardening/07-transport-tls-and-pki.md; dev certs from
+/// `nix run .#pki-dev`).
+///
+/// - Server side (`cert` + `key`): every `--serve-*` process listening on TCP serves
+///   TLS. Adding `client_ca` makes it **mutual**: a client must present a
+///   certificate chaining to that CA. Unix-socket listeners stay plaintext.
+/// - Client side (`[grpc.tls.client]`): how an `https://…` seam `endpoint` is
+///   verified and, with `cert` + `key`, which certificate it presents. Which dials
+///   use TLS is set by the endpoint's scheme, not here: `http://` and bare
+///   `host:port` stay plaintext.
+///
+/// Unknown keys are an error, not a warning: a misspelt `client_ca` would
+/// otherwise silently turn mTLS off.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
+pub struct GrpcTlsCfg {
+    /// Server certificate chain (PEM, leaf first). Set together with `key`.
+    #[serde(default)]
+    pub cert: String,
+    /// Server private key (PEM; keep it `0600`).
+    #[serde(default)]
+    pub key: String,
+    /// CA bundle (PEM) that client certificates must chain to. Set ⇒ mTLS required.
+    #[serde(default)]
+    pub client_ca: String,
+    #[serde(default)]
+    pub client: GrpcTlsClientCfg,
+}
+
+/// `[grpc.tls.client]` — verifying `https://` seam endpoints, and the client
+/// certificate presented to an mTLS server.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
+pub struct GrpcTlsClientCfg {
+    /// CA bundle (PEM) trusted for server certificates — the **only** trust anchor
+    /// when set. Empty ⇒ the public web roots.
+    #[serde(default)]
+    pub ca: String,
+    /// Name the server certificate must carry, instead of the dialed host (e.g.
+    /// dialing an IP whose certificate names only a service DNS name).
+    #[serde(default)]
+    pub domain: String,
+    /// Client certificate chain (PEM) for mTLS. Set together with `key`.
+    #[serde(default)]
+    pub cert: String,
+    /// Client private key (PEM).
+    #[serde(default)]
+    pub key: String,
+}
+
+impl GrpcTlsCfg {
+    /// Structural checks at load; the files themselves are read (size-capped,
+    /// PEM-checked, parsed) when a process starts serving or dialing.
+    pub fn validate(&self) -> Result<(), String> {
+        let set = |s: &str| !s.trim().is_empty();
+        if set(&self.cert) != set(&self.key) {
+            return Err("[grpc.tls] `cert` and `key` must be set together".into());
+        }
+        if set(&self.client_ca) && !set(&self.cert) {
+            return Err("[grpc.tls] `client_ca` (mTLS) needs a server `cert` and `key`".into());
+        }
+        let c = &self.client;
+        if set(&c.cert) != set(&c.key) {
+            return Err("[grpc.tls.client] `cert` and `key` must be set together".into());
+        }
+        if set(&c.domain) {
+            let d = c.domain.as_str();
+            let host = d.len() <= 253
+                && !d.starts_with(['.', '-'])
+                && d.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-');
+            if !host && d.parse::<std::net::IpAddr>().is_err() {
+                return Err(
+                    "[grpc.tls.client] `domain` must be a hostname ([A-Za-z0-9.-]) or an IP".into(),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether this process should serve TLS on TCP listeners.
+    pub fn serves_tls(&self) -> bool {
+        !self.cert.trim().is_empty()
+    }
 }
 
 /// `[auth]` — OIDC/JWT bearer authentication for served gRPC seams (config C33 /
@@ -4127,5 +4226,46 @@ mod tests {
     )]
     fn auth_issuers_checked_at_load(#[case] toml_str: &str, #[case] want_err: Option<&str>) {
         auth_cfg_checked_at_load(toml_str, want_err);
+    }
+
+    /// `[grpc.tls]` is checked at load, so a half-configured block fails every
+    /// entry point up front instead of silently serving plaintext.
+    #[rstest::rstest]
+    #[case::positive_server_tls("[grpc.tls]\ncert = \"/p/c.pem\"\nkey = \"/p/k.pem\"\n", None)]
+    #[case::positive_mtls_both_sides(
+        "[grpc.tls]\ncert = \"c\"\nkey = \"k\"\nclient_ca = \"ca\"\n[grpc.tls.client]\nca = \"ca\"\ncert = \"c\"\nkey = \"k\"\ndomain = \"seam.internal\"\n",
+        None
+    )]
+    #[case::corner_client_only("[grpc.tls.client]\nca = \"ca\"\ndomain = \"127.0.0.1\"\n", None)]
+    #[case::negative_cert_without_key("[grpc.tls]\ncert = \"c\"\n", Some("set together"))]
+    #[case::negative_client_ca_without_cert(
+        "[grpc.tls]\nclient_ca = \"ca\"\n",
+        Some("needs a server")
+    )]
+    #[case::negative_client_key_without_cert(
+        "[grpc.tls.client]\nkey = \"k\"\n",
+        Some("set together")
+    )]
+    #[case::boundary_blank_is_unset("[grpc.tls]\ncert = \"  \"\nkey = \"\"\n", None)]
+    #[case::adversarial_domain_injection(
+        "[grpc.tls.client]\ndomain = \"seam/../evil:443\"\n",
+        Some("must be a hostname")
+    )]
+    #[case::adversarial_misspelt_client_ca_refused(
+        "[grpc.tls]\ncert = \"c\"\nkey = \"k\"\nclient_cA = \"ca\"\n",
+        Some("unknown field `client_cA`")
+    )]
+    fn grpc_tls_checked_at_load(#[case] toml_str: &str, #[case] want_err: Option<&str>) {
+        let doc =
+            format!("[agent]\nprovider = \"scripted\"\n[provider]\nmodel = \"m\"\n\n{toml_str}");
+        match (crate::parse_config_reporting_unknown(&doc), want_err) {
+            (Ok(_), None) => {}
+            (Err(e), Some(want)) => {
+                let e = format!("{e:#}");
+                assert!(e.contains(want), "want {want:?} in {e:?}");
+            }
+            (Ok(_), Some(want)) => panic!("loaded, want error {want:?}"),
+            (Err(e), None) => panic!("want load, got {e:#}"),
+        }
     }
 }

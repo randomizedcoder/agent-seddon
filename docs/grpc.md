@@ -120,7 +120,63 @@ shutdown).
 write permission on the socket) — an unauthenticated local peer can't invoke, say,
 `tools.Execute`. On a multi-user host, prefer a per-user runtime dir over shared
 `/tmp` (`listen = "unix:$XDG_RUNTIME_DIR/agent-seddon/<seam>.sock"`). For isolation
-*across* UIDs, add a `SO_PEERCRED` check or mTLS on the TCP transport (a follow-up).
+*across* UIDs, use mTLS on the TCP transport (below) or a `SO_PEERCRED` check (a
+follow-up).
+
+### TLS and mTLS
+
+The TCP transport speaks TLS 1.2/1.3 (tonic's rustls, `ring` provider) configured
+by `[grpc.tls]` (security-hardening S4,
+[design](design/security-hardening/07-transport-tls-and-pki.md)).
+
+- **Which dials use TLS is the address's call.** `https://host:port` ⇒ TLS;
+  `http://host:port` and bare `host:port` ⇒ plaintext (back-compat); `unix:` ⇒
+  never TLS. Before S4 an `https://` was stripped and dialed plaintext — a silent
+  downgrade that is now gone.
+- **Server** — `[grpc.tls] cert` + `key` (PEM, leaf first): every `--serve-*`
+  process listening on TCP serves TLS, including `--serve-all`, `--serve-fleet` and
+  `--serve-sessions`. `client_ca` makes it **mutual**: a client without a
+  certificate chaining to that CA is refused in the handshake. A unix-socket listener
+  stays plaintext (its boundary is the `0600` socket). A `listen = "https://…"` with
+  no cert is a startup error, not a plaintext listener. Startup logs
+  `transport = plaintext | tls | mtls` per listener.
+- **Client** — `[grpc.tls.client]`: `ca` is the **only** trust anchor when set (the
+  public web roots are not mixed in, so no public CA can mint a certificate for an
+  internal seam); empty ⇒ the webpki roots. `cert` + `key` present a client
+  certificate for mTLS. `domain` overrides the name the server certificate must
+  carry (e.g. dialing an IP whose certificate only names `agent`). It is installed
+  process-wide at startup, so every `= "grpc"` seam client picks it up.
+- **Files** are read at startup, capped at 1 MiB, must be PEM, and are parsed then —
+  a bad file fails the start, not the first handshake. A private key readable by
+  group/other logs a warning. Unknown keys under `[grpc.tls]` are errors (a
+  misspelt `client_ca` would otherwise silently turn mTLS off).
+
+**Certificates.** `nix run .#pki-dev` mints an offline development PKI with
+smallstep's `step certificate create` (no `step-ca` daemon, no network) into
+`$XDG_RUNTIME_DIR/agent-seddon/pki` (or `--out`): a P-256 root CA, a
+`token-signer` key for the agent-token service (S5), and one leaf per `--service`
+(default `agent`, `cli`) with SANs `localhost`, `127.0.0.1`, `::1`, the name and
+`spiffe://agent.<deployment>/svc/<name>`, EKU server + client auth. It prints the
+matching `[grpc.tls]` block; `--verify` checks every leaf chains to the root;
+re-runs keep what exists, `--force` regenerates. Production brings its own CA —
+the agent only needs PEM files.
+
+```sh
+nix run .#pki-dev                                   # mint + print the config block
+grpcurl -cacert "$XDG_RUNTIME_DIR/agent-seddon/pki/ca/root.crt" \
+  -cert "$XDG_RUNTIME_DIR/agent-seddon/pki/cli/cert.pem" \
+  -key  "$XDG_RUNTIME_DIR/agent-seddon/pki/cli/key.pem" \
+  127.0.0.1:50100 grpc.health.v1.Health/Check
+```
+
+**Tested by** the `crates/agent-grpc/tests/tls.rs` wire matrix (in-memory CA from
+`agent_testkit::pki`: TLS, mTLS, bring-your-own-CA, expired / not-yet-valid /
+other-CA / wrong-name server certs, a client cert from another CA, no client cert,
+plaintext against TLS, bare `host:port` staying plaintext, UDS unaffected), the
+`pki-dev-tests` check (real step-cli, offline, with check-the-checks), and the
+`tls` / `mtls` rows of `nix run .#serve-smoke`. Not yet: mapping the peer
+certificate to a service principal and refusing plaintext on routable listeners
+(S10).
 
 ### Default ports & sockets (generated)
 
@@ -528,7 +584,8 @@ wiring line, and is deferred as such.
 
 - An example / compose file running the loop against a separate `--serve-provider`
   gateway process end-to-end.
-- TLS / mTLS on the TCP transport for cross-host trust.
+- Peer-certificate → service-principal mapping and refusing plaintext on routable
+  listeners (security-hardening S10).
 
 ## Three seams are deliberately not distributed
 

@@ -24,7 +24,9 @@ jsonwebtoken = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 # Issuer / JWKS URL checks (https, or http to a loopback IP) for the `auth` feature.
 url = { workspace = true, optional = true }
-tonic = { workspace = true }
+# `tls`: TLS / mTLS on the TCP transport (security-hardening S4); `tls-webpki-roots`:
+# an `https://` endpoint with no configured CA trusts the public web roots.
+tonic = { workspace = true, features = ["tls", "tls-webpki-roots"] }
 tonic-reflection = { workspace = true }
 tonic-health = { workspace = true }
 serde_json = { workspace = true }
@@ -65,7 +67,7 @@ agent-pty = { workspace = true }
 # asserted across the wire rather than by a double that fakes it.
 agent-tasks = { workspace = true, features = ["tasks-memory"] }
 # `oidc` = the fake OIDC issuer + shared test signing keys for the auth tests.
-agent-testkit = { workspace = true, features = ["oidc"] }
+agent-testkit = { workspace = true, features = ["oidc", "pki"] }
 # The real prompt store, so the round-trip asserts CRUD + the id-validation
 # rejection surviving the hop rather than a double echoing what it was handed.
 agent-prompt = { workspace = true }

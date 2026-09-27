@@ -77,7 +77,7 @@ mod tenant;
 #[cfg(feature = "scheduler-store")]
 mod scheduler_driver;
 
-pub use agent::{Agent, OpenError, Session, SessionManager, Settings};
+pub use agent::{Agent, GrpcTlsSettings, OpenError, Session, SessionManager, Settings};
 pub use agent_metrics::Metrics;
 pub use builder::{build_agent, build_agent_with};
 /// C29 config-ownership annotation: the (currently empty) set of tenant-writable
@@ -137,5 +137,6 @@ pub fn parse_config_reporting_unknown(toml_str: &str) -> anyhow::Result<(Config,
     // `[auth]` is checked here, at load, so every entry point (serve, one-shot,
     // doctor) refuses a bad block up front (security-hardening S1).
     cfg.auth.validate().map_err(anyhow::Error::msg)?;
+    cfg.grpc.tls.validate().map_err(anyhow::Error::msg)?;
     Ok((cfg, unknown))
 }

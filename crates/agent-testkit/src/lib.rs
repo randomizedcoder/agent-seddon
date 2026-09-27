@@ -18,11 +18,15 @@
 //!   and emitted spans ([`observe::captured_spans`]).
 //! * `oidc` (feature `oidc`) — a fake OIDC issuer (discovery + JWKS on loopback)
 //!   and fixed test signing keys, for authentication tests.
+//! * `pki` (feature `pki`) — throwaway CAs and leaf certificates for the gRPC
+//!   TLS / mTLS matrix.
 
 pub mod bench;
 pub mod observe;
 #[cfg(feature = "oidc")]
 pub mod oidc;
+#[cfg(feature = "pki")]
+pub mod pki;
 
 use agent_core::{
     BlobContent, Checkpoint, CommitInfo, CompletionRequest, CompletionResponse, ContextInput,
