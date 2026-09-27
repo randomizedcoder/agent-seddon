@@ -12,7 +12,7 @@ tenancy coverage can never silently regress.
 Five sub-checks (the first four map to the planes of the multi-tenancy design,
 ``docs/design/multi-tenancy/``; the fifth to security-hardening S2):
 
-1. **services** — every served gRPC handler in ``crates/agent-grpc/src/server/*.rs`` is
+1. **services** — every served gRPC handler in ``crates/agent-grpc/src/server/**/*.rs`` is
    classified in the manifest as ``scoped`` (must call ``identity_key`` + ``run_scoped``),
    ``stateless`` (no per-tenant state), ``field-scoped`` (tenant from request fields, not
    the metadata header), ``operator-global`` (deliberately process-global), or
@@ -483,7 +483,7 @@ def glob_texts(root: Path, rel_dir: str, pattern: str) -> dict[str, str]:
 
 
 def run_audit(root: Path, manifest: dict) -> list[Finding]:
-    server_files = glob_texts(root, "crates/agent-grpc/src/server", "*.rs")
+    server_files = glob_texts(root, "crates/agent-grpc/src/server", "**/*.rs")
     services: list[Service] = []
     for text in server_files.values():
         services.extend(parse_service_handlers(text))
@@ -536,7 +536,7 @@ def main(argv: list[str] | None = None) -> int:
     manifest_path = args.manifest or (Path(__file__).resolve().parent / "manifest.toml")
 
     if args.dump_services:
-        files = glob_texts(root, "crates/agent-grpc/src/server", "*.rs")
+        files = glob_texts(root, "crates/agent-grpc/src/server", "**/*.rs")
         svcs: list[Service] = []
         for t in files.values():
             svcs.extend(parse_service_handlers(t))

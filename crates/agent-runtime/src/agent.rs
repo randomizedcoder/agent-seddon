@@ -117,6 +117,8 @@ pub struct GrpcAuthSettings {
     pub require_identity: Option<bool>,
     /// `[[auth.issuers]]`: login issuers with per-IdP profiles.
     pub issuers: Vec<crate::config::AuthIssuerCfg>,
+    /// `[auth.token]`: the agent token service (security-hardening S5).
+    pub token: Option<crate::config::AuthTokenCfg>,
 }
 
 /// Runtime view of the server half of `[grpc.tls]` (security-hardening S4): PEM

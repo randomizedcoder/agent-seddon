@@ -2739,6 +2739,73 @@ pub struct AuthCfg {
     /// acts as one `generic` issuer named `default`; entries here add more.
     #[serde(default)]
     pub issuers: Vec<AuthIssuerCfg>,
+    /// The agent token service (`[auth.token]`, security-hardening S5). Set ⇒ login
+    /// tokens are accepted only by `AuthService.Exchange`, which mints an agent
+    /// token that every seam accepts. Unset under `oidc` ⇒ seams verify IdP tokens
+    /// directly (the S1–S3 behaviour, warned at startup).
+    #[serde(default)]
+    pub token: Option<AuthTokenCfg>,
+}
+
+/// `[auth.token]`: how the agent signs the tokens it issues
+/// (docs/design/security-hardening/02-token-service.md). Unknown keys are an error:
+/// a misspelt `ttl_secs` must not silently fall back to the default.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
+pub struct AuthTokenCfg {
+    /// The agent's `iss`, e.g. `https://agent.example`. Must not be any login
+    /// issuer's `iss`.
+    #[serde(default)]
+    pub issuer: String,
+    /// The `aud` every seam expects, e.g. `agent-seddon`.
+    #[serde(default)]
+    pub audience: String,
+    /// Token lifetime in seconds (default 900; 60..=3600).
+    #[serde(default)]
+    pub ttl_secs: u64,
+    /// Path to the P-256 signing key (PEM, PKCS#8 or SEC1 — `nix run .#pki-dev`
+    /// writes one). Keep it mode 0600.
+    #[serde(default)]
+    pub signing_key: String,
+    /// Path to the key rotated out. Tokens it signed keep verifying until they
+    /// expire; drop it after one `ttl_secs`.
+    #[serde(default)]
+    pub previous_key: String,
+}
+
+impl AuthTokenCfg {
+    /// Shortest and longest accepted `ttl_secs` (`0` ⇒ the 900 s default).
+    pub const TTL_SECS: std::ops::RangeInclusive<u64> = 60..=3600;
+
+    fn validate(&self) -> Result<(), String> {
+        for (key, value) in [
+            ("issuer", &self.issuer),
+            ("audience", &self.audience),
+            ("signing_key", &self.signing_key),
+        ] {
+            if value.trim().is_empty() {
+                return Err(format!("`[auth.token]` needs `{key}`"));
+            }
+        }
+        if self.ttl_secs != 0 && !Self::TTL_SECS.contains(&self.ttl_secs) {
+            return Err(format!(
+                "`[auth.token] ttl_secs` = {} is outside {}..={}",
+                self.ttl_secs,
+                Self::TTL_SECS.start(),
+                Self::TTL_SECS.end()
+            ));
+        }
+        if !self.previous_key.trim().is_empty()
+            && self.previous_key.trim() == self.signing_key.trim()
+        {
+            return Err("`[auth.token] previous_key` is the same file as `signing_key`".into());
+        }
+        Ok(())
+    }
 }
 
 /// One `[[auth.issuers]]` entry: an OIDC identity provider plus the profile that
@@ -2862,6 +2929,9 @@ impl AuthCfg {
             ));
         }
         match self.mode.trim() {
+            "" | "none" if self.token.is_some() => {
+                Err("`[auth.token]` requires `[auth] mode = \"oidc\"`".into())
+            }
             "" | "none" => Ok(()),
             "oidc" => {
                 if !verifier_compiled {
@@ -2899,6 +2969,19 @@ impl AuthCfg {
                         return Err(format!("two `[auth]` issuers are named `{name}`"));
                     }
                     names.push(name);
+                }
+                if let Some(token) = &self.token {
+                    token.validate()?;
+                    // The serve path re-checks against every profile's `iss` too.
+                    let agent_iss = token.issuer.trim();
+                    if std::iter::once(&self.issuer)
+                        .chain(self.issuers.iter().map(|i| &i.issuer))
+                        .any(|iss| iss.trim() == agent_iss)
+                    {
+                        return Err(format!(
+                            "`[auth.token] issuer` `{agent_iss}` is also a login issuer's `iss`"
+                        ));
+                    }
                 }
                 Ok(())
             }
@@ -4088,6 +4171,15 @@ mod tests {
         }
     }
 
+    fn token_cfg() -> AuthTokenCfg {
+        AuthTokenCfg {
+            issuer: "https://agent.example".into(),
+            audience: "agent-seddon".into(),
+            signing_key: "/run/pki/token-signer.key".into(),
+            ..AuthTokenCfg::default()
+        }
+    }
+
     fn google_entry() -> AuthIssuerCfg {
         AuthIssuerCfg {
             name: "google".into(),
@@ -4170,6 +4262,19 @@ mod tests {
     #[case::adversarial_entry_name_traversal(issuers(vec![generic_entry("../kc")]), true, Some("plain identifier"))]
     #[case::adversarial_entry_jwks_plain_http_remote(issuers(vec![AuthIssuerCfg { jwks_url: "http://idp.example/k".into(), ..google_entry() }]), true, Some("must use https"))]
     #[case::adversarial_discovery_plain_http_remote(issuers(vec![AuthIssuerCfg { issuer: "http://idp.example".into(), ..generic_entry("kc") }]), true, Some("used for discovery"))]
+    // --- `[auth.token]` (security-hardening S5) ---
+    #[case::positive_token_service(AuthCfg { token: Some(token_cfg()), ..oidc(GOOD_JWKS) }, true, None)]
+    #[case::boundary_token_ttl_min(AuthCfg { token: Some(AuthTokenCfg { ttl_secs: 60, ..token_cfg() }), ..oidc(GOOD_JWKS) }, true, None)]
+    #[case::boundary_token_ttl_max(AuthCfg { token: Some(AuthTokenCfg { ttl_secs: 3600, ..token_cfg() }), ..oidc(GOOD_JWKS) }, true, None)]
+    #[case::boundary_token_ttl_below_min(AuthCfg { token: Some(AuthTokenCfg { ttl_secs: 59, ..token_cfg() }), ..oidc(GOOD_JWKS) }, true, Some("ttl_secs"))]
+    #[case::boundary_token_ttl_above_max(AuthCfg { token: Some(AuthTokenCfg { ttl_secs: 3601, ..token_cfg() }), ..oidc(GOOD_JWKS) }, true, Some("ttl_secs"))]
+    #[case::negative_token_without_oidc(AuthCfg { token: Some(token_cfg()), ..AuthCfg::default() }, true, Some("requires `[auth] mode"))]
+    #[case::negative_token_without_signing_key(AuthCfg { token: Some(AuthTokenCfg { signing_key: " ".into(), ..token_cfg() }), ..oidc(GOOD_JWKS) }, true, Some("needs `signing_key`"))]
+    #[case::negative_token_without_issuer(AuthCfg { token: Some(AuthTokenCfg { issuer: String::new(), ..token_cfg() }), ..oidc(GOOD_JWKS) }, true, Some("needs `issuer`"))]
+    #[case::negative_token_without_audience(AuthCfg { token: Some(AuthTokenCfg { audience: String::new(), ..token_cfg() }), ..oidc(GOOD_JWKS) }, true, Some("needs `audience`"))]
+    #[case::corner_previous_key_same_file(AuthCfg { token: Some(AuthTokenCfg { previous_key: "/run/pki/token-signer.key".into(), ..token_cfg() }), ..oidc(GOOD_JWKS) }, true, Some("same file"))]
+    #[case::adversarial_token_issuer_is_the_login_issuer(AuthCfg { token: Some(AuthTokenCfg { issuer: "https://issuer.example".into(), ..token_cfg() }), ..oidc(GOOD_JWKS) }, true, Some("also a login issuer"))]
+    #[case::adversarial_token_issuer_is_an_entry_issuer(AuthCfg { token: Some(AuthTokenCfg { issuer: "https://idp.example/realms/a".into(), ..token_cfg() }), ..issuers(vec![generic_entry("kc")]) }, true, Some("also a login issuer"))]
     #[case::adversarial_entry_jwks_credentials(issuers(vec![AuthIssuerCfg { jwks_url: "https://u:p@idp.example/k".into(), ..google_entry() }]), true, Some("credentials"))]
     fn auth_cfg_validate_cases(
         #[case] cfg: AuthCfg,
@@ -4193,6 +4298,10 @@ mod tests {
     #[case::boundary_leeway_over_max_fails_load("[auth]\nleeway_secs = 301\n", Some("leeway_secs"))]
     #[case::positive_no_auth_section_loads("", None)]
     #[case::positive_allow_insecure_listen_loads("[auth]\nallow_insecure_listen = true\n", None)]
+    #[case::adversarial_token_unknown_key_fails_load(
+        "[auth]\nmode = \"oidc\"\nissuer = \"https://i.example\"\naudience = \"a\"\njwks_url = \"https://i.example/k\"\n[auth.token]\nissuer = \"https://agent.example\"\naudience = \"a\"\nsigning_key = \"/k\"\nttl_sec = 5\n",
+        Some("ttl_sec")
+    )]
     fn auth_cfg_checked_at_load(#[case] toml_str: &str, #[case] want_err: Option<&str>) {
         // `[agent]` + `[provider]` are the required sections; the auth block follows.
         let doc =

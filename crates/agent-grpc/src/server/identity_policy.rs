@@ -56,6 +56,7 @@ pub fn class_of(service: &str) -> Option<IdentityClass> {
         | "TransportRegistryService" => Scoped,
         "AgentSessionService" | "SessionRegistryService" | "SessionService" => FieldScoped,
         "AstService"
+        | "AuthService"
         | "ContextService"
         | "EmbedService"
         | "FactCollectorService"
@@ -148,6 +149,7 @@ mod tests {
     #[case::positive_scoped("Memory", Some(IdentityClass::Scoped))]
     #[case::positive_field_scoped("SessionRegistryService", Some(IdentityClass::FieldScoped))]
     #[case::positive_stateless("EmbedService", Some(IdentityClass::Stateless))]
+    #[case::positive_auth_service_is_stateless("AuthService", Some(IdentityClass::Stateless))]
     #[case::positive_operator_global("RoleService", Some(IdentityClass::OperatorGlobal))]
     #[case::positive_single_store("Episodic", Some(IdentityClass::SingleStore))]
     #[case::negative_unknown("NotAService", None)]

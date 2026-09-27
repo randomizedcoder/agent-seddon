@@ -60,6 +60,14 @@ MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgL/bFba+FC+OkDCHn
 KAGBub/n9aFTcpKLeD0fHR6Un3mhRANCAAQCEx58Og1jc5Z55LguBFoJpW/99olE
 xxhA2syrbO38f8jBVxICHg9YGBHF5w0Ju0rYEJVdFagFZ/KjyNsPjXYJ
 -----END PRIVATE KEY-----";
+/// [`EC_PRIV_PEM`] in SEC1 form (`EC PRIVATE KEY`, what `step-cli` writes), so
+/// a loader can be shown to derive the same key from either encoding.
+pub const EC_PRIV_SEC1_PEM: &str = "-----BEGIN EC PRIVATE KEY-----
+MHcCAQEEIC/2xW2vhQvjpAwh5ygBgbm/5/WhU3KSi3g9Hx0elJ95oAoGCCqGSM49
+AwEHoUQDQgAEAhMefDoNY3OWeeS4LgRaCaVv/faJRMcYQNrMq2zt/H/IwVcSAh4P
+WBgRxecNCbtK2BCVXRWoBWfyo8jbD412CQ==
+-----END EC PRIVATE KEY-----
+";
 
 /// One of the two fixed signing keys.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

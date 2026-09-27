@@ -1,0 +1,75 @@
+// The agent's token service (security-hardening S5,
+// docs/design/security-hardening/02-token-service.md). An identity provider proves
+// who a caller is (an OIDC ID token); the agent then issues its own short-lived
+// ES256 JWT carrying the tenant, subject, roles and a permission snapshot, and every
+// seam accepts only that token.
+//
+// Served beside the seams by any listener whose `[auth]` has a `[auth.token]`
+// block; there is no dedicated port.
+//
+// Security contract:
+//   - `Exchange` and `Jwks` need no bearer (a caller has no agent token yet, and a
+//     verifier fetches the public keys). Every other RPC needs an agent token.
+//   - `Exchange` accepts only ID tokens from a configured `[auth]` issuer; an agent
+//     token is not accepted there, and an ID token is not accepted anywhere else.
+//   - Every failure is an opaque `UNAUTHENTICATED`; the reason is logged, never sent.
+//   - Sessions, refresh handles and logout arrive in S6; an S5 token is stateless
+//     and never outlives the ID token it was exchanged from.
+syntax = "proto3";
+
+package agent.v1;
+
+service AuthService {
+  // Trade an identity provider's ID token for an agent token.
+  rpc Exchange(ExchangeRequest) returns (ExchangeResponse);
+  // The public keys agent tokens are signed with, as a JWK Set.
+  rpc Jwks(JwksRequest) returns (JwksResponse);
+  // Who the caller's agent token says they are, and what it lets them do.
+  rpc WhoAmI(WhoAmIRequest) returns (WhoAmIResponse);
+}
+
+message ExchangeRequest {
+  // An OIDC ID token (compact JWT) from a configured issuer. At most 16 KiB.
+  string id_token = 1;
+}
+
+message ExchangeResponse {
+  // The agent token (compact JWT); send it as `authorization: Bearer <token>`.
+  string access_token = 1;
+  // Always `Bearer`.
+  string token_type = 2;
+  // Unix seconds after which the token is rejected.
+  uint64 expires_at = 3;
+  // The identity the token carries (the same fields `WhoAmI` returns).
+  WhoAmIResponse principal = 4;
+}
+
+message JwksRequest {}
+
+message JwksResponse {
+  // The JWK Set document (`{"keys":[...]}`), as served at `/.well-known/jwks.json`.
+  string jwks_json = 1;
+}
+
+message WhoAmIRequest {}
+
+message WhoAmIResponse {
+  // The verified organization; the caller's `x-agent-user-id`.
+  string tenant = 1;
+  // `user:<issuer>/<sub>` for a person, `svc:<name>` for a service.
+  string subject = 2;
+  // The login issuer's configured name.
+  string issuer = 3;
+  // Empty when the identity provider sent none.
+  string email = 4;
+  repeated string roles = 5;
+  // `action:resource` pairs the roles grant in the caller's own tenant, as of when
+  // the token was issued. Empty with `perms_ref` set when the list is too large to
+  // embed; the roles are authoritative either way.
+  repeated string permissions = 6;
+  bool perms_ref = 7;
+  // How the caller authenticated (`oidc:<issuer>`).
+  repeated string amr = 8;
+  // Unix seconds after which the token is rejected.
+  uint64 expires_at = 9;
+}

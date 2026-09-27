@@ -11,7 +11,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S2 | Tenant from principal, identity policy, direct-reader conversion | P0-2, P0-3 | ✅ | #489 |
 | S3 | Multi-issuer OIDC profiles + fake issuer | D2 | ✅ | #492 |
 | S4 | tonic TLS, `[grpc.tls]`, `nix run .#pki-dev` | P0-5 | ✅ | #494 |
-| S5 | Token service core (agent JWT, JWKS, `WhoAmI`) | D1, D10 | ⬜ | — |
+| S5 | Token service core (agent JWT, JWKS, `WhoAmI`) | D1, D10 | 🟡 | #498 |
 | S6 | Session store + `Exchange/Refresh/Logout` | D11 | ⬜ | — |
 | S7 | RBAC extension, read gating, authz-coverage gate | D9 | ⬜ | — |
 | S8 | Role bindings, bootstrap, escalation rules | D3, D9 | ⬜ | — |
@@ -144,3 +144,57 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
   - Hot reload of certificates: needs a restart today.
   Gate: `nix flake check --max-jobs 8 --cores 4` green (`leak`'s `fork_cancel_cycle_does_not_leak`
   in `agent-providers`, untouched here, flaked once and passed on rerun).
+- **2026-09-26 — S5 (#498).** The agent issues its own tokens. New
+  `crates/agent-grpc/src/server/auth/token.rs`: `TokenService` loads a P-256 signing key (PKCS#8,
+  or SEC1 as `step-cli` and `nix run .#pki-dev` write it; 64 KiB cap, warns when group/other can
+  read it), mints ES256 tokens with header `typ = at+jwt` and `kid` = RFC 7638 thumbprint, and
+  verifies them. The key may be the current `signing_key` or the `previous_key` kept after a
+  rotation. Claims: `iss`, `aud`, `sub = user:<issuer>/<sub>`, `tenant`, `email`, `amr`, `roles`,
+  `perms` (`"action:resource"` from new `agent_core::effective_permissions`; left out with
+  `perms_ref = true` past 40), `iat`/`nbf`/`exp`, `jti`. `exp` is the earlier of `ttl_secs`
+  (default 900, 60..=3600) and the login token's own `exp`.
+
+  New `AuthService` (`auth.proto`, `auth/service.rs`):
+  - `Exchange{id_token}` verifies a login token with the S3 issuers and returns an agent token.
+    It was pulled forward from S6 in stateless form: no `sid`, no refresh.
+  - `Jwks` returns the public key set.
+  - `WhoAmI` returns the caller's verified claims.
+
+  With `[auth.token]` set:
+  - The `AuthLayer` verifies only agent tokens at every seam and serves `AuthService` on the
+    listener (`serve_auth_service`, called from `serve_base`).
+  - `Exchange` and `Jwks` are exempt from the bearer check.
+  - Without `[auth.token]`, `oidc` keeps the S1–S3 direct IdP verification and warns.
+  - The verified bearer is scoped beside the principal (`agent_core::AGENT_BEARER`), and
+    `agent_core::scope_request` re-installs identity, principal and bearer across a spawn (S9
+    uses both to forward).
+
+  Config: `[auth.token]` (`AuthTokenCfg`, unknown keys rejected) is validated at load:
+  - it needs `mode = "oidc"`, `issuer`, `audience` and `signing_key`;
+  - `ttl_secs` is bounded;
+  - `previous_key` must be a different file;
+  - the agent `issuer` must not be a login issuer's `iss`.
+
+  `AuthService` is class `stateless` in `identity_policy.rs` and the mt-audit manifest. The
+  audit now scans `server/**/*.rs`, not only the top level, so a handler in a submodule cannot
+  escape it.
+
+  Tests:
+  - Token tables: key formats and refusals (RSA, P-384, encrypted, junk); service bounds; mint
+    and verify; expiry capping; leeway; rotation grace; the 40/41-permission boundary; JWKS
+    usable by another verifier.
+  - Adversarial tokens: an IdP token, a missing or wrong `typ`, RS256, an unknown `kid`, a
+    foreign `iss` or `aud`, a traversal tenant, tampering, and `alg:none`.
+  - Layer `from_params` and exemption / bearer-scope tables.
+  - `tests/auth_token.rs`, over a real server with a `FakeIssuer`:
+    Exchange → WhoAmI → seam call; an IdP token at a seam and an agent token at `Exchange` both
+    rejected; the 16 KiB `id_token` cap.
+
+  Deferred:
+  - Sessions, refresh, logout and `sid` checks: S6.
+  - Verify-only processes reading a remote JWKS: S9.
+  - Signer-certificate expiry probe: S11.
+  - `agent login`: S12.
+  - Key hot-reload: needs a restart.
+
+  Gate: `nix flake check --max-jobs 8 --cores 4 --keep-going` green (all checks passed).

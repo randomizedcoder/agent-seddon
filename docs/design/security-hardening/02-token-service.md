@@ -59,7 +59,8 @@ and the token stays under 4 KB); a role set that would exceed the cap is emitted
 | `act` | reserved for delegation ([04](04-service-integration.md)); not rewritten per hop in this track |
 | `cnf` | certificate thumbprint for service tokens (bound to the mTLS peer) |
 
-Algorithm: **ES256** (P-256, cheap to verify, small); RS256 accepted for compatibility. The allowed
+Algorithm: **ES256** (P-256, cheap to verify, small). As built (S5), agent tokens are ES256 only
+and carry header `typ = at+jwt` (RFC 9068), which an IdP ID token lacks. The allowed
 set stays pinned server-side exactly as today ([`auth.rs`](../../../crates/agent-grpc/src/server/auth.rs):286-288);
 seams accept the agent's issuer **only** — an IdP token on any RPC other than `Exchange` is
 `UNAUTHENTICATED`.
@@ -71,12 +72,20 @@ seams accept the agent's issuer **only** — an IdP token on any RPC other than 
 issuer = "https://agent.example"
 audience = "agent-seddon"
 ttl_secs = 900
-signing_key_ref = "file:/run/agent-seddon/pki/token-signer.key"   # P-256, cert from step-ca
-previous_key_ref = ""                                              # kept in the JWKS for one TTL
-session_key_ref = "file:/run/agent-seddon/pki/session.key"         # encrypts refresh tokens at rest
+signing_key = "/run/agent-seddon/pki/token-signer/key.pem"   # P-256 PEM (PKCS#8 or SEC1)
+previous_key = ""                                              # kept in the JWKS for one TTL
+# session_key = …                                              # S6: encrypts refresh tokens at rest
 ```
 
-- `kid` = the certificate thumbprint. The JWKS is served by `AuthService.Jwks` and, once REST lands,
+> **As built (S5).** The keys are plain paths (`signing_key`, `previous_key`), like `[grpc.tls]`
+> in S4, not `*_ref` secret references; S17's secret confinement will cover them. `kid` is the
+> key's RFC 7638 JWK thumbprint rather than a certificate thumbprint, so a bare key works and a
+> key re-issued under a new certificate keeps its `kid`. `Exchange{id_token}` was pulled forward
+> from S6 in stateless form (no `sid`, no refresh), so S5 can issue tokens at all; S6 adds the
+> session. The agent's `issuer` may not be any login issuer's `iss` (checked at load and again
+> at startup against the profiles' fixed `iss`).
+
+- `kid` = the certificate thumbprint (as built: the JWK thumbprint, see above). The JWKS is served by `AuthService.Jwks` and, once REST lands,
   at `/.well-known/jwks.json` through the transcoder. Envoy `jwt_authn` and every seam read it.
 - Rotation: drop the new key file, move the old one to `previous_key_ref`, reload; tokens signed by
   the previous `kid` verify for one TTL, then the old key is removed. The certificate lifecycle

@@ -344,6 +344,13 @@ impl MultiIssuerVerifier {
     }
 }
 
+impl MultiIssuerVerifier {
+    /// Whether any login issuer accepts tokens carrying `iss`.
+    pub fn accepts(&self, iss: &str) -> bool {
+        self.verifiers.iter().any(|v| v.accepts(iss))
+    }
+}
+
 /// The token's `iss` claim, **unverified** — used only to pick which issuer's
 /// verifier checks the token. A missing or non-string `iss` routes nowhere.
 fn unverified_iss(token: &str) -> Option<String> {

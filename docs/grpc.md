@@ -397,6 +397,26 @@ issuer without `jwks_url` finds its keys by OIDC discovery, and the discovery do
 name the same issuer. Roles are read from a token only with `trust_roles_claim = true` (the
 single-issuer form keeps trusting its `roles_claim`, as before).
 
+**Agent tokens.** With `[auth.token]` configured
+([`auth/token.rs`](../crates/agent-grpc/src/server/auth/token.rs)), an IdP token is good for
+one call only: `agent.v1.AuthService/Exchange`, which verifies it with the issuer rules above
+and returns an agent-signed token (`ES256`, header `typ = at+jwt`, `kid` = the signing key's
+RFC 7638 thumbprint). Its claims carry `tenant`, `sub = user:<issuer name>/<IdP subject>`,
+`roles`, `amr`, and a `perms` snapshot (`"read:prompt"`, …; left out with `perms_ref = true`
+past 40 entries). It expires at the earlier of `ttl_secs` (default 900) and the login token's
+own `exp`. Every other RPC, on every seam, accepts only agent tokens: an IdP token presented
+to a seam, or an agent token presented to `Exchange`, is `UNAUTHENTICATED`. `AuthService` is
+served by any listener with `[auth.token]`; `Exchange` and `Jwks` (the public key set, for
+Envoy or another process) are exempt from the bearer check, `WhoAmI` is not. After key
+rotation, set `previous_key` to the old key for one `ttl_secs` so tokens it signed keep
+verifying. The verified bearer is kept in the request scope (`agent_core::AGENT_BEARER`), and
+`agent_core::scope_request` carries identity, principal and bearer across a `spawn`.
+
+```sh
+TOKEN=$(grpcurl -d "{\"id_token\":\"$ID_TOKEN\"}" "$ADDR" agent.v1.AuthService/Exchange | jq -r .accessToken)
+grpcurl -H "authorization: Bearer $TOKEN" "$ADDR" agent.v1.AuthService/WhoAmI
+```
+
 ### Isolation is not containment: `bash` and the exec seams
 
 Per-tenant paths isolate the *confined* file tools (`edit`/`read`/`write`/`search`).

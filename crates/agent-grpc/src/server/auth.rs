@@ -76,6 +76,9 @@ pub struct VerifiedIdentity {
     pub issuer: String,
     /// The token's `email` claim, lowercased, when present.
     pub email: Option<String>,
+    /// The token's `exp` (seconds since the Unix epoch). An agent token minted
+    /// from this identity never outlives it.
+    pub expires_at: u64,
 }
 
 /// Verifies a bearer token, yielding a [`VerifiedIdentity`] or an **opaque**
@@ -109,6 +112,25 @@ pub struct AuthParams {
     pub leeway_secs: u64,
     /// `[[auth.issuers]]`: login issuers with per-IdP profiles.
     pub issuers: Vec<IssuerParams>,
+    /// `[auth.token]`: the agent token service. Set ⇒ seams accept only agent
+    /// tokens and login tokens are accepted only by `AuthService.Exchange`.
+    pub token: Option<TokenParams>,
+}
+
+/// `[auth.token]`, codec-free (security-hardening S5,
+/// docs/design/security-hardening/02-token-service.md).
+#[derive(Clone, Debug, Default)]
+pub struct TokenParams {
+    /// The agent's `iss`. Must differ from every login issuer's.
+    pub issuer: String,
+    /// The `aud` every seam expects.
+    pub audience: String,
+    /// Token lifetime in seconds; `0` ⇒ the default (900).
+    pub ttl_secs: u64,
+    /// Path to the current signing key (P-256 PEM, PKCS#8 or SEC1).
+    pub signing_key: String,
+    /// Path to the key rotated out, still trusted for verification (optional).
+    pub previous_key: String,
 }
 
 impl AuthParams {
@@ -182,6 +204,10 @@ pub struct AuthLayer {
     /// Enforce the per-service identity policy even without a verifier
     /// (`[auth] require_identity`). A verified principal always enforces it.
     require_identity: bool,
+    /// `AuthService`, present when `[auth.token]` is configured; added to the
+    /// router by [`AuthLayer::serve_auth_service`].
+    #[cfg(feature = "auth")]
+    auth_service: Option<service::AuthSvc>,
 }
 
 impl AuthLayer {
@@ -193,6 +219,8 @@ impl AuthLayer {
             verifier: None,
             on_verify: None,
             require_identity: false,
+            #[cfg(feature = "auth")]
+            auth_service: None,
         }
     }
 
@@ -202,7 +230,31 @@ impl AuthLayer {
             verifier: Some(verifier),
             on_verify: None,
             require_identity: false,
+            #[cfg(feature = "auth")]
+            auth_service: None,
         }
+    }
+
+    /// An enabled layer that accepts only agent tokens at the seams, serving
+    /// `AuthService` so a `login` token can be exchanged for one.
+    #[cfg(feature = "auth")]
+    pub fn with_token_service(
+        login: Arc<dyn TokenVerifier>,
+        tokens: Arc<token::TokenService>,
+    ) -> Self {
+        let mut layer = Self::enabled(tokens.clone());
+        layer.auth_service = Some(service::AuthSvc::new(login, tokens));
+        layer
+    }
+
+    /// Add `AuthService` to `router` when this layer has a token service; otherwise
+    /// return it unchanged.
+    pub fn serve_auth_service(&self, router: super::ServeRouter) -> super::ServeRouter {
+        #[cfg(feature = "auth")]
+        if let Some(svc) = &self.auth_service {
+            return router.add_service(svc.clone().into_server());
+        }
+        router
     }
 
     /// Attach an observer invoked on every token-verification attempt (`ok`/`error`).
@@ -235,13 +287,31 @@ impl AuthLayer {
     /// [`disabled`]: AuthLayer::disabled
     pub fn from_params(params: AuthParams) -> Result<Self, String> {
         match params.mode.trim() {
+            "" | "none" if params.token.is_some() => {
+                Err("`[auth.token]` requires `[auth] mode = \"oidc\"`".into())
+            }
             "" | "none" => Ok(Self::disabled()),
             "oidc" => {
                 #[cfg(feature = "auth")]
                 {
-                    Ok(Self::enabled(Arc::new(
-                        jwt::MultiIssuerVerifier::from_params(&params)?,
-                    )))
+                    let login = jwt::MultiIssuerVerifier::from_params(&params)?;
+                    let Some(t) = &params.token else {
+                        tracing::warn!(
+                            "`[auth] mode = \"oidc\"` without `[auth.token]`: seams accept IdP \
+                             tokens directly (legacy); configure `[auth.token]` to issue agent tokens"
+                        );
+                        return Ok(Self::enabled(Arc::new(login)));
+                    };
+                    let tokens = token::TokenService::from_params(t, params.leeway_secs)?;
+                    // A login issuer that accepted the agent's `iss` would make the
+                    // two token kinds indistinguishable by issuer.
+                    if login.accepts(tokens.issuer()) {
+                        return Err(format!(
+                            "`[auth.token] issuer` `{}` is also a login issuer's `iss`",
+                            tokens.issuer()
+                        ));
+                    }
+                    Ok(Self::with_token_service(Arc::new(login), Arc::new(tokens)))
                 }
                 #[cfg(not(feature = "auth"))]
                 {
@@ -328,9 +398,14 @@ pub struct Auth<S> {
 }
 
 /// Paths served without authentication: standard health + reflection, so an
-/// orchestrator/`grpcurl` can probe liveness and introspect without a token.
+/// orchestrator/`grpcurl` can probe liveness and introspect without a token; and
+/// the two `AuthService` calls a caller makes before it holds an agent token
+/// (`Exchange` verifies its own login token; `Jwks` is public key material).
 fn is_exempt(path: &str) -> bool {
-    path.starts_with("/grpc.health.") || path.starts_with("/grpc.reflection.")
+    path.starts_with("/grpc.health.")
+        || path.starts_with("/grpc.reflection.")
+        || path == "/agent.v1.AuthService/Exchange"
+        || path == "/agent.v1.AuthService/Jwks"
 }
 
 /// The bearer token from an `authorization: Bearer <token>` header, if well-formed.
@@ -411,13 +486,19 @@ where
                     // Install the verified principal (tenant + subject + roles) into the
                     // ambient scope for the whole handler, so the RBAC gate
                     // (`server::authz::require`) can authorize without threading it
-                    // through every signature. Roles reach the handler ONLY here.
-                    let principal = agent_core::VerifiedPrincipal {
-                        tenant: id.tenant,
-                        subject: id.subject,
-                        roles: id.roles,
+                    // through every signature. Roles reach the handler ONLY here. The
+                    // verified bearer rides beside it for `WhoAmI` and, later,
+                    // forwarding to downstream seams.
+                    let scope = agent_core::RequestScope {
+                        identity: None,
+                        principal: Some(agent_core::VerifiedPrincipal {
+                            tenant: id.tenant,
+                            subject: id.subject,
+                            roles: id.roles,
+                        }),
+                        bearer: Some(agent_core::Bearer::new(token)),
                     };
-                    agent_core::principal_scope(principal, inner.call(req)).await
+                    agent_core::scope_request(scope, inner.call(req)).await
                 }
                 Err(()) => {
                     if let Some(obs) = &on_verify {
@@ -446,10 +527,25 @@ mod issuer;
 #[cfg(feature = "auth")]
 mod jwt;
 
+/// The agent token service: signing keys, mint, verify, key set.
+#[cfg(feature = "auth")]
+mod token;
+
+/// `AuthService`: exchange, key set, who-am-I.
+#[cfg(feature = "auth")]
+mod service;
+
 #[cfg(feature = "auth")]
 pub use issuer::{ClaimRejection, KeySource, Profile, ResolvedIssuer};
 #[cfg(feature = "auth")]
 pub use jwt::{Clock, JwksSource, JwtVerifier, MultiIssuerVerifier, SystemClock};
+#[cfg(feature = "auth")]
+pub use service::{AuthSvc, MAX_ID_TOKEN_BYTES};
+#[cfg(feature = "auth")]
+pub use token::{
+    AgentClaims, MintedToken, SigningKey, TokenService, DEFAULT_TTL_SECS, MAX_PERMS_IN_TOKEN,
+    MAX_TTL_SECS, MIN_TTL_SECS, TOKEN_TYP,
+};
 
 #[cfg(all(test, feature = "auth"))]
 mod tests;

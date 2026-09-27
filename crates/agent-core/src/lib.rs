@@ -967,6 +967,9 @@ pub use identity::*;
 // Control-plane role-based access control — see rbac.rs (re-exported below).
 mod rbac;
 pub use rbac::*;
+// The inbound bearer + request-scope re-install helper — see request_scope.rs.
+mod request_scope;
+pub use request_scope::*;
 
 mod forge_card;
 pub use forge_card::*;

@@ -21,6 +21,10 @@
 class = "field-scoped"
 note = "identity_key addresses the live session directly"
 
+[services.AuthService]
+class = "stateless"
+note = "security-hardening S5: Exchange/Jwks are auth-exempt (no identity yet); WhoAmI reads only the caller's own verified token"
+
 [services.AstService]
 class = "stateless"
 

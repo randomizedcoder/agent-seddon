@@ -65,6 +65,17 @@ pub enum Action {
 }
 
 impl Action {
+    /// Every action, in declaration order (enumerates a principal's effective
+    /// permissions; a new variant must be added here too).
+    pub const ALL: [Action; 6] = [
+        Action::Read,
+        Action::Write,
+        Action::Delete,
+        Action::Approve,
+        Action::Schedule,
+        Action::Trigger,
+    ];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Action::Read => "read",
@@ -106,6 +117,19 @@ pub enum ResourceType {
 }
 
 impl ResourceType {
+    /// Every resource type, in declaration order (see [`Action::ALL`]).
+    pub const ALL: [ResourceType; 9] = [
+        ResourceType::Config,
+        ResourceType::Registry,
+        ResourceType::Fleet,
+        ResourceType::Prompt,
+        ResourceType::Graph,
+        ResourceType::Scheduler,
+        ResourceType::Role,
+        ResourceType::ForgeRegistry,
+        ResourceType::TransportRegistry,
+    ];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             ResourceType::Config => "config",
@@ -356,6 +380,30 @@ pub fn authorize(
     AccessDecision::Deny("access denied".to_string())
 }
 
+/// Every `(action, resource_type)` pair `principal` may perform **in its own
+/// tenant**, in [`Action::ALL`] × [`ResourceType::ALL`] order. Decided by
+/// [`authorize`] itself, so this listing cannot drift from enforcement. The token
+/// service embeds it as the token's `perms` snapshot (security-hardening S5) for
+/// display and capability discovery; enforcement still calls [`authorize`].
+pub fn effective_permissions(
+    catalog: &RoleCatalog,
+    principal: &VerifiedPrincipal,
+) -> Vec<(Action, ResourceType)> {
+    Action::ALL
+        .iter()
+        .flat_map(|a| ResourceType::ALL.iter().map(move |r| (*a, *r)))
+        .filter(|(a, r)| {
+            authorize(
+                catalog,
+                principal,
+                *a,
+                &Resource::new(*r, principal.tenant.clone()),
+            )
+            .is_allowed()
+        })
+        .collect()
+}
+
 /// The verified principal behind a request: the identity the auth layer derived
 /// from a validated bearer token. `roles` originate **only** from the token — the
 /// client cannot assert them — so they are trustworthy input to [`authorize`].
@@ -532,6 +580,50 @@ mod tests {
             subject: "sub-1".to_string(),
             roles: roles.iter().copied().map(String::from).collect(),
         }
+    }
+
+    // --- effective_permissions --------------------------------------------
+
+    #[rstest]
+    // desc: reader gets read on every resource type except the operator-global config.
+    #[case::positive_reader_reads_everything_but_config(&[ROLE_READER], 8)]
+    // desc: org_admin: every action on every tenant resource, still not config.
+    #[case::positive_org_admin_all_but_config(&[ROLE_ORG_ADMIN], 6 * 8)]
+    // desc: operator: the whole matrix, config included.
+    #[case::boundary_operator_full_matrix(&[ROLE_OPERATOR], 6 * 9)]
+    // desc: no roles ⇒ nothing.
+    #[case::negative_no_roles(&[], 0)]
+    // desc: an unknown role grants nothing.
+    #[case::negative_unknown_role(&["superuser"], 0)]
+    // desc: overlapping roles are not double-counted.
+    #[case::corner_overlap_dedup(&[ROLE_READER, ROLE_ORG_ADMIN], 6 * 8)]
+    fn effective_permissions_cases(#[case] roles: &[&str], #[case] expected: usize) {
+        let perms = effective_permissions(&RoleCatalog::builtin(), &principal("acme", roles));
+        assert_eq!(perms.len(), expected, "{perms:?}");
+        for (a, r) in &perms {
+            assert!(authorize(
+                &RoleCatalog::builtin(),
+                &principal("acme", roles),
+                *a,
+                &Resource::new(*r, "acme")
+            )
+            .is_allowed());
+        }
+    }
+
+    #[test]
+    fn corner_all_lists_are_exhaustive() {
+        // A variant missing from ALL would never appear in a token's perms.
+        for a in Action::ALL {
+            assert_eq!(Action::parse(a.as_str()), Some(a));
+        }
+        for r in ResourceType::ALL {
+            assert_eq!(ResourceType::parse(r.as_str()), Some(r));
+        }
+        let distinct: HashSet<_> = Action::ALL.iter().collect();
+        assert_eq!(distinct.len(), Action::ALL.len());
+        let distinct: HashSet<_> = ResourceType::ALL.iter().collect();
+        assert_eq!(distinct.len(), ResourceType::ALL.len());
     }
 
     // --- authorize decision table (built-in catalog) -----------------------

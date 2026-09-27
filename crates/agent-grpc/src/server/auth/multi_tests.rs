@@ -278,3 +278,155 @@ async fn boundary_layer_from_issuers_only_rewrites_tenant() {
         "the verified tenant replaces the client header"
     );
 }
+
+// --- `[auth.token]` (security-hardening S5) ---------------------------------------
+
+const AGENT_ISS: &str = "https://agent.test";
+
+/// A signing-key file in a fresh temp dir.
+fn signing_key_file() -> String {
+    let path = agent_testkit::tempdir().join("token-signer.key");
+    std::fs::write(&path, agent_testkit::oidc::EC_PRIV_PEM).expect("write key");
+    path.to_string_lossy().into_owned()
+}
+
+fn token_params(issuer: &str, signing_key: String) -> super::TokenParams {
+    super::TokenParams {
+        issuer: issuer.into(),
+        audience: AUD.into(),
+        signing_key,
+        ..super::TokenParams::default()
+    }
+}
+
+#[derive(Debug)]
+enum Built {
+    WithAuthService,
+    LegacyNoAuthService,
+    Refused(&'static str),
+}
+
+#[rstest]
+#[case::positive_token_service(Some(AGENT_ISS), "oidc", true, Built::WithAuthService)]
+#[case::corner_oidc_without_token_is_legacy(None, "oidc", true, Built::LegacyNoAuthService)]
+#[case::negative_token_with_mode_none(Some(AGENT_ISS), "none", true, Built::Refused("requires"))]
+#[case::negative_missing_signing_key_file(
+    Some(AGENT_ISS),
+    "oidc",
+    false,
+    Built::Refused("signing_key")
+)]
+#[case::adversarial_agent_iss_is_the_login_iss(
+    None,
+    "oidc",
+    true,
+    Built::Refused("also a login issuer")
+)]
+#[tokio::test(flavor = "multi_thread")]
+async fn from_params_token_cases(
+    #[case] agent_iss: Option<&str>,
+    #[case] mode: &str,
+    #[case] key_exists: bool,
+    #[case] want: Built,
+) {
+    let fake = FakeIssuer::start(TestKey::Rsa);
+    let key = if key_exists {
+        signing_key_file()
+    } else {
+        "/nonexistent/token-signer.key".into()
+    };
+    // `None` in the refusal case means "reuse the login issuer's own `iss`".
+    let token = match (&want, agent_iss) {
+        (Built::LegacyNoAuthService, _) => None,
+        (_, Some(iss)) => Some(token_params(iss, key)),
+        (_, None) => Some(token_params(fake.issuer(), key)),
+    };
+    let params = AuthParams {
+        mode: mode.into(),
+        token,
+        ..oidc(vec![generic("kc", &fake)])
+    };
+    match (AuthLayer::from_params(params), want) {
+        (Ok(layer), Built::WithAuthService) => assert!(layer.auth_service.is_some()),
+        (Ok(layer), Built::LegacyNoAuthService) => {
+            assert!(layer.is_enabled() && layer.auth_service.is_none());
+        }
+        (Err(e), Built::Refused(want)) => assert!(e.contains(want), "want {want:?} in {e:?}"),
+        (got, want) => panic!("got {:?}, want {want:?}", got.map(|_| "a layer")),
+    }
+}
+
+/// What the inner handler observed: status code + whether a bearer was in scope.
+async fn call_through(
+    layer: &AuthLayer,
+    path: &str,
+    bearer: Option<&str>,
+) -> (Option<String>, bool) {
+    let mut req = http::Request::builder().uri(path);
+    if let Some(b) = bearer {
+        req = req.header("authorization", format!("Bearer {b}"));
+    }
+    let req = req.body(tonic::body::empty_body()).expect("request");
+    let mut svc = layer.layer(tower::service_fn(
+        |_req: http::Request<BoxBody>| async move {
+            let mut resp = http::Response::new(tonic::body::empty_body());
+            if agent_core::current_bearer().is_some() {
+                resp.headers_mut()
+                    .insert("x-saw-bearer", http::HeaderValue::from_static("1"));
+            }
+            Ok::<_, Infallible>(resp)
+        },
+    ));
+    let resp = svc.call(req).await.expect("infallible");
+    let status = resp
+        .headers()
+        .get("grpc-status")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    (status, resp.headers().contains_key("x-saw-bearer"))
+}
+
+#[rstest]
+#[case::positive_exchange_needs_no_bearer("/agent.v1.AuthService/Exchange", false, None)]
+#[case::positive_jwks_needs_no_bearer("/agent.v1.AuthService/Jwks", false, None)]
+#[case::negative_who_am_i_needs_a_bearer("/agent.v1.AuthService/WhoAmI", false, Some("16"))]
+#[case::positive_agent_token_scopes_the_bearer("/agent.v1.EmbedService/Embed", true, None)]
+#[case::negative_seam_needs_a_bearer("/agent.v1.EmbedService/Embed", false, Some("16"))]
+#[case::adversarial_exchange_prefix_is_not_exempt(
+    "/agent.v1.AuthService/ExchangeX",
+    false,
+    Some("16")
+)]
+#[case::adversarial_other_package_auth_service("/evil.v1.AuthService/Exchange", false, Some("16"))]
+#[tokio::test(flavor = "multi_thread")]
+async fn token_layer_exemption_and_bearer_scope(
+    #[case] path: &str,
+    #[case] with_agent_token: bool,
+    #[case] want_status: Option<&str>,
+) {
+    let fake = FakeIssuer::start(TestKey::Rsa);
+    let layer = AuthLayer::from_params(AuthParams {
+        token: Some(token_params(AGENT_ISS, signing_key_file())),
+        ..oidc(vec![generic("kc", &fake)])
+    })
+    .expect("layer");
+    let tokens =
+        super::token::TokenService::from_params(&token_params(AGENT_ISS, signing_key_file()), 0)
+            .expect("tokens");
+    let id = super::VerifiedIdentity {
+        tenant: "acme".into(),
+        subject: "u-1".into(),
+        roles: vec![],
+        issuer: "kc".into(),
+        email: None,
+        expires_at: now() + 600,
+    };
+    let token = tokens.mint(&id, &[]).expect("mint").token;
+    let (status, saw_bearer) =
+        call_through(&layer, path, with_agent_token.then_some(token.as_str())).await;
+    assert_eq!(status.as_deref(), want_status);
+    assert_eq!(
+        saw_bearer, with_agent_token,
+        "the verified bearer is scoped for the handler"
+    );
+}

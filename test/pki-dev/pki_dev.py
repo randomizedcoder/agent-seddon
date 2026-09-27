@@ -5,7 +5,7 @@ Drives `step certificate create` (smallstep step-cli; no `step-ca` daemon, no
 network) to mint, under one output directory:
 
     ca/root.crt, ca/root.key                 the dev root CA (P-256)
-    token-signer/cert.pem, key.pem           the future agent-token signing key
+    token-signer/cert.pem, key.pem           the agent-token signing key ([auth.token] signing_key)
                                              (security-hardening S5), SAN
                                              spiffe://agent.<deployment>/svc/token-signer
     <service>/cert.pem, key.pem              one leaf per --service: SANs localhost,
