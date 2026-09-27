@@ -11,7 +11,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S2 | Tenant from principal, identity policy, direct-reader conversion | P0-2, P0-3 | ✅ | #489 |
 | S3 | Multi-issuer OIDC profiles + fake issuer | D2 | ✅ | #492 |
 | S4 | tonic TLS, `[grpc.tls]`, `nix run .#pki-dev` | P0-5 | ✅ | #494 |
-| S5 | Token service core (agent JWT, JWKS, `WhoAmI`) | D1, D10 | 🟡 | — |
+| S5 | Token service core (agent JWT, JWKS, `WhoAmI`) | D1, D10 | 🟡 | #498 |
 | S6 | Session store + `Exchange/Refresh/Logout` | D11 | ⬜ | — |
 | S7 | RBAC extension, read gating, authz-coverage gate | D9 | ⬜ | — |
 | S8 | Role bindings, bootstrap, escalation rules | D3, D9 | ⬜ | — |
@@ -144,7 +144,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
   - Hot reload of certificates: needs a restart today.
   Gate: `nix flake check --max-jobs 8 --cores 4` green (`leak`'s `fork_cancel_cycle_does_not_leak`
   in `agent-providers`, untouched here, flaked once and passed on rerun).
-- **2026-09-26 — S5 (in progress).** The agent issues its own tokens. New
+- **2026-09-26 — S5 (#498).** The agent issues its own tokens. New
   `crates/agent-grpc/src/server/auth/token.rs`: `TokenService` loads a P-256 signing key (PKCS#8,
   or SEC1 as `step-cli` and `nix run .#pki-dev` write it; 64 KiB cap, warns when group/other can
   read it), mints ES256 tokens with header `typ = at+jwt` and `kid` = RFC 7638 thumbprint, and
