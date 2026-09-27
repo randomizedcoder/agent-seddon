@@ -13,7 +13,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S4 | tonic TLS, `[grpc.tls]`, `nix run .#pki-dev` | P0-5 | ✅ | #494 |
 | S5 | Token service core (agent JWT, JWKS, `WhoAmI`) | D1, D10 | ✅ | #498 |
 | S6 | Session store + `Exchange/Refresh/Logout` | D11 | ⬜ | — |
-| S7 | RBAC extension, read gating, authz-coverage gate | D9 | 🟡 | — |
+| S7 | RBAC extension, read gating, authz-coverage gate | D9 | ✅ | #504 |
 | S8 | Role bindings, bootstrap, escalation rules | D3, D9 | ⬜ | — |
 | S9 | Bearer propagation + two-hop chain test | D7 | ⬜ | — |
 | S10 | mTLS service identity | D6 | ⬜ | — |
@@ -198,7 +198,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
   - Key hot-reload: needs a restart.
 
   Gate: `nix flake check --max-jobs 8 --cores 4 --keep-going` green (all checks passed).
-- **2026-09-26 — S7.** Every RPC is authorized, reads included.
+- **2026-09-26 — S7 (#504).** Every RPC is authorized, reads included.
 
   Model (`agent_core::rbac`):
   - `Action` gains `use` and `observe`. `ResourceType` gains `agent`, `exec`, `review`, `binding`
