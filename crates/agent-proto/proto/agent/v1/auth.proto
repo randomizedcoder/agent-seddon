@@ -12,6 +12,10 @@
 //     verifier fetches the public keys). Every other RPC needs an agent token.
 //   - `Exchange` accepts only ID tokens from a configured `[auth]` issuer; an agent
 //     token is not accepted there, and an ID token is not accepted anywhere else.
+//   - `Exchange{use_client_cert}` accepts a known service's client certificate
+//     instead (S10). A token minted that way is bound to the certificate: a seam
+//     accepts it only over a connection presenting that certificate, or relayed
+//     by another known service.
 //   - Every failure is an opaque `UNAUTHENTICATED`; the reason is logged, never sent.
 //   - `Refresh` needs no bearer either: the refresh handle is the credential. It
 //     is rotated on every use, and presenting a rotated-out handle revokes the
@@ -59,6 +63,13 @@ message ExchangeRequest {
   string id_token = 1;
   // `portal` | `cli` | `service`; anything else is recorded as `unspecified`.
   string client_kind = 2;
+  // Trade this connection's client certificate for a service token instead of
+  // an ID token (security-hardening S10). Needs a mutual-TLS listener and a
+  // certificate whose URI SAN is in `[auth.mtls] bindings`; `id_token` must be
+  // empty. The token is bound to the certificate (`cnf`), carries
+  // `sub = svc:<name>` and `amr = ["mtls"]`, and has no refresh handle: exchange
+  // again before it expires.
+  bool use_client_cert = 3;
 }
 
 message ExchangeResponse {

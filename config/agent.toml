@@ -1207,6 +1207,20 @@ job         = "agent-seddon"
 # session_path  = "~/.local/state/agent-seddon/auth-sessions"   # for `file`
 # session_ttl_secs = 43200                     # absolute session lifetime; 900..=2592000
 # max_sessions_per_tenant = 4096               # `Exchange` is refused past this
+#
+# Service identity from mutual TLS (security-hardening S10). A client certificate
+# whose URI SAN is bound here can call `AuthService.Exchange{use_client_cert}` for a
+# service token (`sub = svc:<service>`, bound to that certificate). Needs
+# `[auth.token]` and a `[grpc.tls] client_ca` on the listener.
+# `token_endpoint` makes this process trade its own `[grpc.tls.client]` certificate
+# for a service token, sent on calls made with no caller behind them.
+# [auth.mtls]
+# token_endpoint = "https://agent.internal:50100"
+# [[auth.mtls.bindings]]
+# san     = "spiffe://agent.example/svc/fleet"
+# service = "fleet"
+# tenant  = "example.com"
+# roles   = ["svc_fleet"]
 
 # [tenancy] — the per-tenant config plane (config C35 / C2). When `per_tenant =
 # true`, the converged shared-store control-plane seams (provider-registry, review-

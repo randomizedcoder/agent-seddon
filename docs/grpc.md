@@ -174,9 +174,13 @@ grpcurl -cacert "$XDG_RUNTIME_DIR/agent-seddon/pki/ca/root.crt" \
 other-CA / wrong-name server certs, a client cert from another CA, no client cert,
 plaintext against TLS, bare `host:port` staying plaintext, UDS unaffected), the
 `pki-dev-tests` check (real step-cli, offline, with check-the-checks), and the
-`tls` / `mtls` rows of `nix run .#serve-smoke`. Not yet: mapping the peer
-certificate to a service principal and refusing plaintext on routable listeners
-(S10).
+`tls` / `mtls` rows of `nix run .#serve-smoke`. Mapping the peer certificate to a
+service principal is covered below under **Service identity**.
+
+**Plaintext refusal (S10).** With `[auth] mode = "oidc"`, a TCP listener that is
+not loopback and has no `[grpc.tls]` refuses to start, because bearer tokens would
+cross the network in clear. `[auth] allow_insecure_listen = true` overrides it, with
+a warning at every start.
 
 ### Default ports & sockets (generated)
 
@@ -445,7 +449,8 @@ its `sid`, and the response carries a `refresh_handle` plus the session's absolu
 
 **Role bindings** (S8, [`auth/binding.rs`](../crates/agent-grpc/src/server/auth/binding.rs)).
 A binding grants roles in one tenant to a login subject (`sub`: `<issuer name>/<IdP sub>`), a
-verified `email`, every verified email in a `domain`, or (from S10) an `mtls_san`. Roles are
+verified `email`, every verified email in a `domain`, or an `mtls_san` (a service's
+certificate SAN). Roles are
 resolved at `Exchange` and at every `Refresh`. They are the union of the trusted claim roles, the
 tenant's active bindings that match, and `operator` for `[auth] operator_subjects`.
 
@@ -471,6 +476,28 @@ grpcurl -d "{\"refresh_handle\":\"$HANDLE\"}" "$ADDR" agent.v1.AuthService/Refre
 grpcurl -H "authorization: Bearer $TOKEN" -d '{"binding":{"id":"bob","subject_kind":"email",
   "subject":"bob@example.com","roles":["reviewer"]}}' "$ADDR" agent.v1.AuthService/PutBinding
 grpcurl -H "authorization: Bearer $TOKEN" "$ADDR" agent.v1.AuthService/Logout
+```
+
+**Service identity** (S10, [`auth/mtls.rs`](../crates/agent-grpc/src/server/auth/mtls.rs)).
+A service proves itself with its client certificate instead of a login.
+
+- `[[auth.mtls.bindings]]` maps a certificate's URI SAN to `{service, tenant, roles}`.
+- `Exchange{use_client_cert: true}` over an mTLS connection returns a token with:
+  - `sub = svc:<service>` and `amr = ["mtls"]`;
+  - a `cnf` claim holding the certificate's SHA-256 thumbprint (`x5t#S256`);
+  - the binding's roles plus any matching `mtls_san` role bindings.
+- There is no refresh handle: the service exchanges again before expiry.
+- With `[auth.mtls] token_endpoint` set, the process does that itself: its service
+  token becomes the S9 fallback bearer.
+- A token with `cnf` is accepted only from a connection that presents that
+  certificate, or from another bound service relaying it. Over plaintext, from Envoy
+  or from an unbound client certificate it is `UNAUTHENTICATED`.
+- The bound SAN of the connection is recorded as `peer_san` on the `grpc.server` span.
+
+```sh
+PKI="$XDG_RUNTIME_DIR/agent-seddon/pki"
+grpcurl -cacert "$PKI/ca/root.crt" -cert "$PKI/fleet/cert.pem" -key "$PKI/fleet/key.pem" \
+  -d '{"use_client_cert": true}' "$ADDR" agent.v1.AuthService/Exchange
 ```
 
 ### Isolation is not containment: `bash` and the exec seams

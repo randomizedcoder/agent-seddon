@@ -22,6 +22,8 @@ use super::binding::{
     self, check_binding_write, removes_last_admin, BindingStore, Granter, OperatorSubjects,
     RoleBinding, SubjectKind, Who,
 };
+use super::mtls::MtlsBindings;
+use super::peer::{self, PeerCert};
 use super::session::{AuthSession, RefreshError, SessionStore, MAX_REFRESH_HANDLE_BYTES};
 use super::token::{AgentClaims, Grant, TokenService};
 use super::TokenVerifier;
@@ -39,6 +41,8 @@ pub struct AuthSvc {
     sessions: Arc<SessionStore>,
     bindings: Arc<BindingStore>,
     operators: Arc<OperatorSubjects>,
+    /// `[auth.mtls] bindings`: which client certificates are services (S10).
+    mtls: Arc<MtlsBindings>,
 }
 
 impl AuthSvc {
@@ -48,6 +52,7 @@ impl AuthSvc {
         sessions: Arc<SessionStore>,
         bindings: Arc<BindingStore>,
         operators: Arc<OperatorSubjects>,
+        mtls: Arc<MtlsBindings>,
     ) -> Self {
         Self {
             login,
@@ -55,6 +60,62 @@ impl AuthSvc {
             sessions,
             bindings,
             operators,
+            mtls,
+        }
+    }
+
+    /// `Exchange{use_client_cert}`: a known service's certificate for a service
+    /// token bound to it. Roles are the binding's plus the tenant's `mtls_san`
+    /// role bindings. No refresh handle: the service exchanges again.
+    async fn exchange_service(
+        &self,
+        peer: Option<PeerCert>,
+        meta: &str,
+    ) -> Result<pb::ExchangeResponse, Status> {
+        let Some(peer) = peer else {
+            tracing::warn!("exchange refused: no client certificate on this connection");
+            return Err(unauthenticated());
+        };
+        let Some(service) = self.mtls.service_of(&peer).cloned() else {
+            tracing::warn!(
+                sans = ?peer.uris,
+                "exchange refused: the client certificate is not a bound service"
+            );
+            return Err(unauthenticated());
+        };
+        let (session, mut grant) = self
+            .sessions
+            .open_service(&service, &peer.thumbprint, self.tokens.ttl_secs(), meta)
+            .await
+            .map_err(|e| {
+                tracing::warn!(reason = %e, "exchange refused: no session");
+                unauthenticated()
+            })?;
+        let minted = match self.resolve(&session.roles, &session_who(&session)).await {
+            Ok(roles) => {
+                grant.roles = roles;
+                self.mint(&grant, &session, String::new())
+            }
+            Err(e) => Err(e),
+        };
+        match minted {
+            Ok(out) => {
+                tracing::info!(
+                    tenant = %session.tenant,
+                    subject = %session.subject,
+                    sid = %session.sid,
+                    peer_san = %service.san,
+                    "service token issued"
+                );
+                Ok(out)
+            }
+            Err(e) => {
+                let _ = self
+                    .sessions
+                    .revoke(&session.tenant, &session.sid, "system", "logout")
+                    .await;
+                Err(e)
+            }
         }
     }
 
@@ -161,6 +222,7 @@ fn session_who(s: &AuthSession) -> Who<'_> {
         subject: &s.subject,
         email: s.email.as_deref(),
         email_verified: s.email_verified,
+        san: s.peer_san.as_deref(),
     }
 }
 
@@ -264,7 +326,15 @@ impl pb::auth_service_server::AuthService for AuthSvc {
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or_default()
                 .to_string();
+            let peer = request.peer_certs().and_then(|c| peer::of_certs(&c));
             let req = request.into_inner();
+            if req.use_client_cert {
+                // One credential per exchange: never both.
+                if !req.id_token.is_empty() {
+                    return Err(unauthenticated());
+                }
+                return self.exchange_service(peer, &meta).await.map(Response::new);
+            }
             if req.id_token.is_empty() || req.id_token.len() > MAX_ID_TOKEN_BYTES {
                 return Err(unauthenticated());
             }

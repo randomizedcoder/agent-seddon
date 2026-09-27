@@ -88,6 +88,9 @@ pub struct Who<'a> {
     pub email: Option<&'a str>,
     /// Only a verified email matches `email` and `domain` bindings.
     pub email_verified: bool,
+    /// The bound client certificate's URI SAN, for a service (S10). Only this
+    /// matches `mtls_san` bindings.
+    pub san: Option<&'a str>,
 }
 
 impl Who<'_> {
@@ -129,8 +132,7 @@ impl RoleBinding {
                 .verified_email()
                 .and_then(|e| e.rsplit_once('@'))
                 .is_some_and(|(_, d)| d == self.subject),
-            // Peer identities arrive with mTLS service identity (S10).
-            SubjectKind::MtlsSan => false,
+            SubjectKind::MtlsSan => who.san == Some(self.subject.as_str()),
         }
     }
 
@@ -172,7 +174,7 @@ fn valid_subject(kind: SubjectKind, subject: &str) -> bool {
             .is_some_and(|(issuer, sub)| safe_segment(issuer) && !sub.is_empty()),
         SubjectKind::Email => valid_email(subject),
         SubjectKind::Domain => valid_domain(subject),
-        SubjectKind::MtlsSan => true,
+        SubjectKind::MtlsSan => super::mtls::valid_san(subject),
     }
 }
 
@@ -393,6 +395,7 @@ pub fn check_binding_write(
         subject: &p.subject,
         email: granter.email,
         email_verified: true,
+        san: None,
     };
     if granting && binding.names(&me) {
         return Err(GrantRefusal::SelfBinding);

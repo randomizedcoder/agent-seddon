@@ -111,6 +111,10 @@ pub struct AuthSession {
     /// `logout` | `operator` | `reuse` | `binding`.
     pub revoke_reason: String,
     pub revoked_by: String,
+    /// A service session's bound client-certificate SAN (S10), so deleting an
+    /// `mtls_san` binding revokes it. `None` for a person's session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_san: Option<String>,
 }
 
 impl AuthSession {
@@ -129,6 +133,7 @@ impl AuthSession {
             roles: self.roles.clone(),
             sid: self.sid.clone(),
             not_after: self.expires_at,
+            cnf: None,
         }
     }
 
@@ -185,6 +190,16 @@ impl Card for AuthSession {
         serde_json::from_slice(bytes)
             .map_err(|e| agent_core::Error::Config(format!("auth session does not decode: {e}")))
     }
+}
+
+/// What a new session records beyond its grant.
+struct Opened<'a> {
+    issuer: String,
+    email_verified: bool,
+    peer_san: Option<String>,
+    kind: &'a str,
+    meta: &'a str,
+    lifetime_secs: u64,
 }
 
 /// Why a refresh was refused. All map to the same opaque `UNAUTHENTICATED`.
@@ -309,37 +324,90 @@ impl SessionStore {
         kind: &str,
         meta: &str,
     ) -> Result<(AuthSession, String), String> {
-        self.gc(&id.tenant).await;
+        self.open_session(
+            &id.tenant,
+            |sid| Grant::from_login(id, sid),
+            Opened {
+                issuer: id.issuer.clone(),
+                email_verified: id.email_verified,
+                peer_san: None,
+                kind,
+                meta,
+                lifetime_secs: self.ttl_secs,
+            },
+        )
+        .await
+    }
+
+    /// Open a session for a known service that presented its client certificate
+    /// (S10). It lives only as long as the one token minted from it: a service
+    /// holds its certificate and exchanges again rather than refreshing, so
+    /// sessions do not pile up. The handle is never handed out.
+    pub async fn open_service(
+        &self,
+        service: &super::mtls::ServiceBinding,
+        thumbprint: &str,
+        lifetime_secs: u64,
+        meta: &str,
+    ) -> Result<(AuthSession, Grant), String> {
+        let lifetime_secs = lifetime_secs.clamp(1, self.ttl_secs);
+        let not_after = self.now().saturating_add(lifetime_secs);
+        let (session, _handle) = self
+            .open_session(
+                &service.tenant,
+                |sid| Grant::for_service(service, thumbprint, sid, not_after),
+                Opened {
+                    issuer: super::token::AMR_MTLS.to_string(),
+                    email_verified: false,
+                    peer_san: Some(service.san.clone()),
+                    kind: "service",
+                    meta,
+                    lifetime_secs,
+                },
+            )
+            .await?;
+        let grant = Grant::for_service(service, thumbprint, &session.sid, session.expires_at);
+        Ok((session, grant))
+    }
+
+    async fn open_session(
+        &self,
+        tenant: &str,
+        grant_for: impl FnOnce(&str) -> Grant,
+        o: Opened<'_>,
+    ) -> Result<(AuthSession, String), String> {
+        self.gc(tenant).await;
         let now = self.now();
         let handle = Handle {
-            tenant: id.tenant.clone(),
+            tenant: tenant.to_string(),
             sid: random_hex()?,
             secret: new_secret()?,
         };
-        let grant = Grant::from_login(id, &handle.sid);
+        let grant = grant_for(&handle.sid);
         let session = AuthSession {
             sid: handle.sid.clone(),
             tenant: grant.tenant,
             subject: grant.subject,
-            issuer: id.issuer.clone(),
+            issuer: o.issuer,
             email: grant.email,
-            email_verified: id.email_verified,
+            email_verified: o.email_verified,
             amr: grant.amr,
             roles: grant.roles,
-            client_kind: client_kind(kind).to_string(),
-            client_meta: client_meta(meta),
+            client_kind: client_kind(o.kind).to_string(),
+            client_meta: client_meta(o.meta),
             created_at: now,
             last_seen_at: now,
-            expires_at: now.saturating_add(self.ttl_secs),
+            expires_at: now.saturating_add(o.lifetime_secs),
             handle_hash: hash(&handle.secret),
             retired: Vec::new(),
             revoked_at: 0,
             revoke_reason: String::new(),
             revoked_by: String::new(),
+            peer_san: o.peer_san,
         };
         let session = self
             .store
-            .put(&id.tenant, session)
+            .put(tenant, session)
             .await
             .map_err(|e| format!("opening the session: {e}"))?;
         Ok((session, handle.render()))
@@ -355,6 +423,11 @@ impl SessionStore {
             .ok_or(RefreshError::Invalid)?;
         let now = self.now();
         if !session.is_live(now) {
+            return Err(RefreshError::Invalid);
+        }
+        // A service session is never refreshed: its handle was never handed out,
+        // and its token is bound to a certificate only a new exchange can prove.
+        if session.peer_san.is_some() {
             return Err(RefreshError::Invalid);
         }
         let presented = hash(&handle.secret);

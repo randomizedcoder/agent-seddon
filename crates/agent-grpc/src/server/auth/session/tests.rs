@@ -41,6 +41,7 @@ fn identity(tenant: &str, subject: &str) -> VerifiedIdentity {
         email_verified: true,
         expires_at: T0 + 600,
         sid: None,
+        cnf: None,
     }
 }
 

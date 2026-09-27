@@ -140,6 +140,36 @@ fn install_client_tls(c: &crate::config::GrpcTlsClientCfg) -> anyhow::Result<()>
     Ok(())
 }
 
+/// Install this process's service token (security-hardening S10) when
+/// `[auth.mtls] token_endpoint` is set: the `[grpc.tls.client]` certificate is
+/// traded for a service token at that endpoint and kept fresh in the background,
+/// and `outbound()` sends it on calls made with no caller token in scope (S9).
+/// Once per process: a second agent built in the same process reuses the first
+/// source.
+#[cfg(feature = "grpc")]
+fn install_service_token(m: Option<&crate::config::AuthMtlsCfg>) -> anyhow::Result<()> {
+    let Some(endpoint) = m.map(|m| m.token_endpoint.trim()).filter(|e| !e.is_empty()) else {
+        return Ok(());
+    };
+    let tls = agent_grpc::tls::client_tls().ok_or_else(|| {
+        anyhow::anyhow!("`[auth.mtls] token_endpoint` needs `[grpc.tls.client]` cert and key")
+    })?;
+    let source = Arc::new(
+        agent_grpc::client::MtlsBearerSource::new(agent_grpc::Endpoint::parse(endpoint), tls)
+            .map_err(|e| anyhow::anyhow!("[auth.mtls]: {e}"))?,
+    );
+    if agent_core::install_bearer_source(source.clone()) {
+        source.spawn_refresher();
+        tracing::info!(
+            endpoint,
+            "service token: trading this process's client certificate"
+        );
+    } else {
+        tracing::debug!("a service-token source is already installed in this process");
+    }
+    Ok(())
+}
+
 /// Build the agent from a caller-supplied [`Registry`]. Out-of-tree binaries use
 /// this to register their own provider/tool/memory/etc. factories (see
 /// `docs/extending.md`) before wiring the loop — no fork required.
@@ -193,6 +223,8 @@ pub async fn build_agent_with(
     // Before any `= "grpc"` seam client below is built.
     #[cfg(feature = "grpc")]
     install_client_tls(&cfg.grpc.tls.client)?;
+    #[cfg(feature = "grpc")]
+    install_service_token(cfg.auth.mtls.as_ref())?;
 
     // The digest ledger (cognition-graph 02), opt-in via `[digest] store`. Built
     // BEFORE the provider so the fork observer can file loser alternatives, and
@@ -1343,6 +1375,7 @@ pub async fn build_agent_with(
             issuers: cfg.auth.issuers.clone(),
             token: cfg.auth.token.clone(),
             operator_subjects: cfg.auth.operator_subjects.clone(),
+            mtls: cfg.auth.mtls.clone(),
             #[cfg(feature = "auth")]
             sessions: resolve_auth_session_backend(&cfg, &metrics)?,
         },

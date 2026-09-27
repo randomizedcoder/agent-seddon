@@ -69,6 +69,31 @@ key  = "…/pki/svc-a/key.pem"
 - **Startup refusal:** a non-loopback TCP listener without `[grpc.tls]` is an error unless
   `allow_insecure_listen = true` (the same knob as [05](05-identity-and-tenancy.md)). UDS unaffected.
 
+### As built (S10)
+
+- **Peer certificate.** The server reads it from `TlsConnectInfo` in the request extensions, or
+  from `Request::peer_certs()` inside a handler.
+  - The leaf's URI SANs come from a small DER walk in
+    [`auth/peer.rs`](../../../crates/agent-grpc/src/server/auth/peer.rs) that fails closed.
+    It accepts only minimal definite lengths, refuses a duplicate SAN extension or more than 64
+    entries, and skips URIs that are not printable ASCII or longer than 2048 bytes.
+  - The thumbprint is SHA-256 of the leaf DER (`ring`), base64url without padding.
+  - There is no separate `PeerVerifier` type. `AuthLayer` holds the parsed
+    [`MtlsBindings`](../../../crates/agent-grpc/src/server/auth/mtls.rs) and checks the peer
+    next to the bearer.
+- **Startup refusal.** `listen_posture(mode, allow_insecure_listen, listen, tls)` refuses `oidc` on
+  a non-loopback TCP listener with no `[grpc.tls]`. The error names the three remedies: TLS, a
+  local listener, or the override. `allow_insecure_listen` turns the refusal into a warning.
+  `mode = "none"` on such a listener was already refused by S1.
+- **`[auth.mtls]`** is checked at load:
+  - bindings need `[auth.token]`;
+  - at most 256 bindings;
+  - each SAN is a `spiffe://` URI of printable ASCII, at most 2048 bytes;
+  - `service`, `tenant` and each of 1..=32 roles are plain segments;
+  - `token_endpoint` must be `https://` and needs `[grpc.tls.client] cert` + `key`.
+  Unknown keys are errors.
+- The `renew_cmd` / `step ca renew` rows stay with S15.
+
 ## Test matrix
 
 The transport matrix ([`transport.rs`](../../../crates/agent-grpc/src/transport.rs) tests and the
@@ -76,8 +101,10 @@ wire roundtrips) gains `tls` and `mtls` rows using certificates generated at tes
 
 As built in S4: [`crates/agent-grpc/tests/tls.rs`](../../../crates/agent-grpc/tests/tls.rs) (the
 handshake matrix), `transport.rs` / `tls.rs` unit tables, and the `tls` / `mtls` rows of
-`nix run .#serve-smoke`. The peer-SAN, service-token and startup-refusal rows below land with S10;
-the signer-expiry `doctor` row with S11.
+`nix run .#serve-smoke`. The peer-SAN, service-token and startup-refusal rows landed with S10
+([`crates/agent-grpc/tests/mtls_identity.rs`](../../../crates/agent-grpc/tests/mtls_identity.rs),
+the `peer` / `mtls` unit tables and `auth/listen_tests.rs`). The signer-expiry `doctor` row lands
+with S11.
 
 | Class | Case | Expect |
 |---|---|---|

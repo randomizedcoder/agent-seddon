@@ -121,6 +121,8 @@ pub struct GrpcAuthSettings {
     pub token: Option<crate::config::AuthTokenCfg>,
     /// `[auth] operator_subjects`: bootstrap operators (S8).
     pub operator_subjects: Vec<String>,
+    /// `[auth.mtls]`: service identity from client certificates (S10).
+    pub mtls: Option<crate::config::AuthMtlsCfg>,
     /// The backend `[auth.token] session_store` resolved to (S6); `None` ⇒ memory.
     #[cfg(feature = "auth")]
     pub sessions: Option<agent_grpc::server::SessionBackend>,

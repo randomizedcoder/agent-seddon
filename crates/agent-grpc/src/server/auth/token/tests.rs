@@ -86,6 +86,7 @@ fn identity(expires_at: u64) -> VerifiedIdentity {
         email_verified: true,
         expires_at,
         sid: None,
+        cnf: None,
     }
 }
 
@@ -386,6 +387,11 @@ fn adversarial_idp_token_presented_to_seam_rejected() {
 #[case::adversarial_no_sid(Some(TOKEN_TYP), json!({"sid": null}))]
 #[case::adversarial_traversal_sid(Some(TOKEN_TYP), json!({"sid": "../x"}))]
 #[case::adversarial_empty_sid(Some(TOKEN_TYP), json!({"sid": ""}))]
+#[case::adversarial_cnf_not_an_object(Some(TOKEN_TYP), json!({"cnf": TP}))]
+#[case::adversarial_cnf_without_thumbprint(Some(TOKEN_TYP), json!({"cnf": {"jkt": TP}}))]
+#[case::adversarial_cnf_short_thumbprint(Some(TOKEN_TYP), json!({"cnf": {"x5t#S256": "abc"}}))]
+#[case::adversarial_cnf_padded_thumbprint(Some(TOKEN_TYP), json!({"cnf": {"x5t#S256": format!("{}=", &TP[..42])}}))]
+#[case::adversarial_cnf_numeric_thumbprint(Some(TOKEN_TYP), json!({"cnf": {"x5t#S256": 5}}))]
 fn adversarial_claim_cases(#[case] typ: Option<&str>, #[case] overrides: Value) {
     let svc = service_at(NOW, key_a(), None);
     let mut claims = good_claims();
@@ -448,4 +454,69 @@ fn adversarial_tampered_payload_rejected() {
 #[case::adversarial_alg_none("eyJhbGciOiJub25lIiwidHlwIjoiYXQrand0In0.e30.")]
 fn adversarial_malformed_tokens_rejected(#[case] token: &str) {
     assert!(service_at(NOW, key_a(), None).verify(token).is_err());
+}
+
+// --- certificate-bound service tokens (S10) ------------------------------------
+
+/// A well-formed `x5t#S256` (43 base64url characters).
+const TP: &str = "q1w2e3r4t5y6u7i8o9p0a1s2d3f4g5h6j7k8l9z0x1c";
+
+fn fleet_binding() -> crate::server::auth::mtls::ServiceBinding {
+    crate::server::auth::mtls::ServiceBinding {
+        san: "spiffe://agent.test/svc/fleet".into(),
+        service: "fleet".into(),
+        tenant: "acme".into(),
+        roles: vec!["svc_fleet".into()],
+    }
+}
+
+#[test]
+fn positive_service_grant_mints_a_bound_token() {
+    let svc = service_at(NOW, key_a(), None);
+    let grant = Grant::for_service(&fleet_binding(), TP, "sid-9", NOW + 3600);
+    let minted = svc.mint(&grant, &[]).expect("mint");
+    let claims = svc.verify(&minted.token).expect("verify");
+    assert_eq!(claims.subject, "svc:fleet");
+    assert_eq!(claims.tenant, "acme");
+    assert_eq!(claims.amr, vec![AMR_MTLS.to_string()]);
+    assert_eq!(claims.cnf.as_deref(), Some(TP));
+    assert_eq!(claims.login_issuer(), "");
+}
+
+#[tokio::test]
+async fn positive_verifier_surfaces_cnf() {
+    let svc = service_at(NOW, key_a(), None);
+    let bound = svc
+        .mint(
+            &Grant::for_service(&fleet_binding(), TP, "sid-9", NOW + 3600),
+            &[],
+        )
+        .unwrap();
+    let person = svc.mint(&grant(NOW + 3600), &[]).unwrap();
+    let id = TokenVerifier::verify(&svc, &bound.token).await.unwrap();
+    assert_eq!(id.cnf.as_deref(), Some(TP));
+    let id = TokenVerifier::verify(&svc, &person.token).await.unwrap();
+    assert_eq!(id.cnf, None);
+}
+
+#[test]
+fn corner_valid_cnf_signed_raw_verifies() {
+    let svc = service_at(NOW, key_a(), None);
+    let mut claims = good_claims();
+    claims["cnf"] = json!({ "x5t#S256": TP });
+    let got = svc
+        .verify(&sign_raw(&svc, Some(TOKEN_TYP), &claims))
+        .unwrap();
+    assert_eq!(got.cnf.as_deref(), Some(TP));
+}
+
+#[rstest]
+#[case::adversarial_short("abc")]
+#[case::adversarial_padded("q1w2e3r4t5y6u7i8o9p0a1s2d3f4g5h6j7k8l9z0x1=")]
+#[case::adversarial_standard_alphabet("q1w2e3r4t5y6u7i8o9p0a1s2d3f4g5h6j7k8l9z0x1/")]
+#[case::adversarial_empty("")]
+fn adversarial_mint_refuses_a_malformed_thumbprint(#[case] tp: &str) {
+    let svc = service_at(NOW, key_a(), None);
+    let grant = Grant::for_service(&fleet_binding(), tp, "sid-9", NOW + 3600);
+    assert!(svc.mint(&grant, &[]).is_err());
 }
