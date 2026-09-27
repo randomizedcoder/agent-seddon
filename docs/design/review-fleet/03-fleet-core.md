@@ -13,8 +13,11 @@ file.rs:24, sqlite.rs:31}`).
 - New crate `agent-review-fleet`, module `registry`. `trait FleetRegistry { list, get, put,
   delete, set_enabled }`, all routed through `mod ops` for validation + caps.
 - `FleetSession` row = the fields in `00-components.md#C2`. Backends: `MemoryRegistry`
-  (tests), `FileRegistry` (one bundle on disk), `SqliteRegistry` (feature `fleet-sqlite`,
-  the default; path from `[review_fleet] store`).
+  (tests), `FileRegistry` (one bundle on disk), and the config-store tier (feature
+  `fleet-sqlite`/`fleet-postgres`; path from `[review_fleet] store`). *(As-built: the
+  embedded backend was originally the bespoke `SqliteFleet`; PG-11 retired it for
+  `StoreFleet` over the shared config-store `SqliteBackend`/`PgBackend` — see config
+  `STATUS.md`.)*
 - `ops` validation: `safe_segment` on `id`/`user`/`repo` segments; `token_ref` scheme
   allow-list `{env:, file:}` (refuse a raw token, as the provider registry refuses raw
   `api_key`); `poll_secs` clamped to `[MIN_POLL, MAX_POLL]`; total-rows cap.

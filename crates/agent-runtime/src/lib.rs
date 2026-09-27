@@ -55,7 +55,9 @@ mod dsn;
     feature = "transport-registry-postgres",
     // The sqlite arms build their config-store `SqliteBackend` here too (PG-10:
     // prompt; PG-11: registry/fleet reuse `sqlite_backend`).
-    feature = "prompt-sqlite"
+    feature = "prompt-sqlite",
+    feature = "registry-sqlite",
+    feature = "fleet-sqlite"
 ))]
 mod store_backend;
 #[cfg(feature = "structured")]

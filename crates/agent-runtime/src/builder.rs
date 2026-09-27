@@ -3171,10 +3171,28 @@ pub(crate) fn resolve_provider_registry(
             };
             Some(Arc::new(agent_registry::FileRegistry::new(path)))
         }
+        // The shared-store sqlite arm (config C41 / A3, PG-11): the embedded catalog
+        // now persists through the config-store `SqliteBackend` (the shared
+        // `cards`/`tenants` tables) via `StoreRegistry`, replacing the retired bespoke
+        // `SqliteRegistry`. Mirrors the `postgres` arm (per-tenant tenant column, not a
+        // per-file split); `[registry] path` names the DB file.
         #[cfg(feature = "registry-sqlite")]
-        "sqlite" => Some(Arc::new(agent_registry::SqliteRegistry::open(
-            expand_tilde(&cfg.registry.path),
-        )?)),
+        "sqlite" => {
+            let backend = crate::store_backend::sqlite_backend(
+                std::path::Path::new(&expand_tilde(&cfg.registry.path)),
+                metrics,
+            )?;
+            if cfg.tenancy.per_tenant {
+                let b = backend.clone();
+                Some(Arc::new(crate::tenant::PerTenant::new(move |t| {
+                    agent_registry::StoreRegistry::with_tenant(b.clone(), t)
+                        .map(|s| Arc::new(s) as Arc<dyn agent_core::ProviderRegistry>)
+                        .unwrap_or_else(|_| Arc::new(agent_registry::StoreRegistry::new(b.clone())))
+                })) as Arc<dyn agent_core::ProviderRegistry>)
+            } else {
+                Some(Arc::new(agent_registry::StoreRegistry::new(backend)))
+            }
+        }
         #[cfg(not(feature = "registry-sqlite"))]
         "sqlite" => anyhow::bail!(
             "[registry] store = \"sqlite\" requires building with the `registry-sqlite` feature"
@@ -3228,18 +3246,35 @@ pub(crate) fn resolve_fleet_registry(
     cfg: &Config,
     metrics: &Metrics,
 ) -> anyhow::Result<Option<Arc<dyn agent_core::FleetRegistry>>> {
-    // Only the (off-by-default) postgres arm builds a config-store backend to meter.
-    #[cfg(not(feature = "fleet-postgres"))]
+    // Only the (off-by-default) shared-store arms build a config-store backend to meter.
+    #[cfg(not(any(feature = "fleet-postgres", feature = "fleet-sqlite")))]
     let _ = metrics;
     let store: Option<Arc<dyn agent_core::FleetRegistry>> = match cfg.review_fleet.store.as_str() {
         "" => None,
         "file" => Some(Arc::new(agent_review_fleet::FileFleet::new(expand_tilde(
             &cfg.review_fleet.file,
         )))),
+        // The shared-store sqlite arm (config C41 / A3b, PG-11): the roster now persists
+        // through the config-store `SqliteBackend` via `StoreFleet`, replacing the retired
+        // bespoke `SqliteFleet`. Mirrors the `postgres` arm (per-tenant tenant column);
+        // `[review_fleet] path` names the DB file.
         #[cfg(feature = "fleet-sqlite")]
-        "sqlite" => Some(Arc::new(agent_review_fleet::SqliteFleet::open(
-            expand_tilde(&cfg.review_fleet.path),
-        )?)),
+        "sqlite" => {
+            let backend = crate::store_backend::sqlite_backend(
+                std::path::Path::new(&expand_tilde(&cfg.review_fleet.path)),
+                metrics,
+            )?;
+            if cfg.tenancy.per_tenant {
+                let b = backend.clone();
+                Some(Arc::new(crate::tenant::PerTenant::new(move |t| {
+                    agent_review_fleet::StoreFleet::with_tenant(b.clone(), t)
+                        .map(|s| Arc::new(s) as Arc<dyn agent_core::FleetRegistry>)
+                        .unwrap_or_else(|_| Arc::new(agent_review_fleet::StoreFleet::new(b.clone())))
+                })) as Arc<dyn agent_core::FleetRegistry>)
+            } else {
+                Some(Arc::new(agent_review_fleet::StoreFleet::new(backend)))
+            }
+        }
         #[cfg(not(feature = "fleet-sqlite"))]
         "sqlite" => anyhow::bail!(
             "[review_fleet] store = \"sqlite\" requires building with the `fleet-sqlite` feature"
@@ -3312,18 +3347,15 @@ pub(crate) fn resolve_fleet_post_lease(
         )),
         // A `sqlite` roster keeps its durable, cross-process lease — a `StorePostLease`
         // over the config-store SQLite backend at the same DB file (its own `post_lease`
-        // collection; coexists with the legacy roster tables), replacing `SqlitePostLease`.
+        // collection; coexists with the roster cards), via the shared `sqlite_backend`
+        // helper (PG-11), replacing the retired `SqlitePostLease`.
         #[cfg(feature = "fleet-sqlite")]
-        "sqlite" => {
-            let backend = crate::metered::config_store(
-                Arc::new(agent_config_store::SqliteBackend::open(expand_tilde(
-                    &cfg.review_fleet.path,
-                ))?),
-                metrics.clone(),
-                "sqlite",
-            );
-            Arc::new(agent_review_fleet::StorePostLease::new(backend))
-        }
+        "sqlite" => Arc::new(agent_review_fleet::StorePostLease::new(
+            crate::store_backend::sqlite_backend(
+                std::path::Path::new(&expand_tilde(&cfg.review_fleet.path)),
+                metrics,
+            )?,
+        )),
         // In-process fallback: closes same-process double-posts but is not durable across
         // restarts/processes; a fleet needing that should run the postgres or sqlite store.
         _ => Arc::new(agent_review_fleet::MemoryPostLease::new()),

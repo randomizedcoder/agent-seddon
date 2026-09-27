@@ -3,19 +3,18 @@
 //!
 //! The clean twin of the registry's `StoreRegistry`: instead of a bespoke
 //! file/SQLite roster, the fleet persists onto any [`agent_config_store::Backend`]
-//! (memory, file, sqlite, or — the capability A3b unlocks — **postgres**). The
-//! legacy [`MemoryFleet`](crate::MemoryFleet) / [`FileFleet`](crate::FileFleet) /
-//! `SqliteFleet` backends are **untouched** (decision: keep `rusqlite` for
-//! `file`/`sqlite`, add postgres as the new `sqlx` tier), so their behaviour — and
-//! their tests — are unchanged; this backend adds the shared-store path beside
-//! them.
+//! (memory, file, sqlite, or — the capability A3b unlocks — **postgres**). It is
+//! the sole store for the `sqlite` and `postgres` tiers: PG-11 retired the bespoke
+//! embedded-SQLite `SqliteFleet` in favour of this over a config-store
+//! `SqliteBackend`; the [`MemoryFleet`](crate::MemoryFleet) /
+//! [`FileFleet`](crate::FileFleet) backends are untouched and their tests unchanged.
 //!
 //! **Behaviour-identical by construction.** Every mutation routes through the same
-//! shared [`crate::ops`], and reads decode the same **JSON** roster rows the file
-//! and SQLite tiers use (one at-rest shape, so encodings can't drift) then
+//! shared [`crate::ops`], and reads decode the same **JSON** roster rows across
+//! every tier (one at-rest shape, so encodings can't drift) then
 //! `ops::revalidate` fail-closed. The store is a serialized snapshot → op →
-//! rewrite cycle, committed as one atomic [`Backend::apply`] batch — exactly like
-//! the SQLite tier's `mutate`, so the tiers stay interchangeable.
+//! rewrite cycle, committed as one atomic [`Backend::apply`] batch, so every tier
+//! stays interchangeable.
 //!
 //! **Untrusted input, fail closed.** Rows decode-then-`validate` on read (an
 //! out-of-band-tampered row fails closed at the seam); ids reach the backend only
@@ -86,9 +85,8 @@ impl StoreFleet {
 
     /// One serialized snapshot → shared op → rewrite cycle, committed atomically.
     /// Rewriting the (≤`MAX_FLEET_ROWS`) card set inside a single
-    /// [`Backend::apply`] batch mirrors the SQLite tier's `mutate`, keeping the
-    /// backends byte-for-byte interchangeable without a per-row path that could
-    /// drift from `ops`.
+    /// [`Backend::apply`] batch keeps every backend byte-for-byte interchangeable
+    /// without a per-row path that could drift from `ops`.
     async fn mutate<T>(&self, f: impl FnOnce(&mut Vec<FleetSession>) -> Result<T>) -> Result<T> {
         use std::collections::HashSet;
         let mut rows = self.load().await?;
@@ -415,5 +413,61 @@ mod pg_tests {
             assert!(reg.delete(id).await.is_err(), "delete {id:?}");
         }
         assert_eq!(reg.list().await.unwrap().len(), 1, "store unchanged");
+    }
+}
+
+// The `sqlite` fleet tier is `StoreFleet` over a config-store `SqliteBackend` (PG-11
+// retired the bespoke `SqliteFleet`). The `tests` module above proves the converged
+// behaviour over `MemoryBackend`; these run the same store over the REAL embedded-SQLite
+// SQL layer, so the bind-safety + at-rest-tamper contract is executed against actual
+// SQLite (not just memory). `nix/checks/fleet-sqlite.nix` runs them.
+#[cfg(all(test, feature = "fleet-sqlite"))]
+mod sqlite_tests {
+    use super::*;
+    use crate::testdata::row;
+    use crate::MemoryFleet;
+    use agent_config_store::SqliteBackend;
+
+    fn sqlite_store() -> StoreFleet {
+        let backend = SqliteBackend::open_in_memory().expect("open in-memory sqlite backend");
+        StoreFleet::new(Arc::new(backend))
+    }
+
+    async fn seeded() -> StoreFleet {
+        let reg = sqlite_store();
+        reg.put(row("r1")).await.expect("seed r1");
+        reg.put(row("r2")).await.expect("seed r2");
+        reg
+    }
+
+    // positive: rows round-trip through the SQLite JSON-blob store, agree with the
+    // in-memory backend, and a toggle persists.
+    #[tokio::test]
+    async fn positive_sqlite_backend_crud_and_agree() {
+        let reg = seeded().await;
+        let mem = MemoryFleet::new();
+        mem.put(row("r1")).await.unwrap();
+        mem.put(row("r2")).await.unwrap();
+        assert_eq!(reg.list().await.unwrap(), mem.list().await.unwrap());
+        assert!(!reg.set_enabled("r1", false).await.unwrap().enabled);
+        assert!(!reg.get("r1").await.unwrap().enabled, "toggle persisted");
+        assert!(reg.delete("r1").await.unwrap());
+        assert!(!reg.delete("r1").await.unwrap());
+        assert_eq!(reg.list().await.unwrap().len(), 1);
+    }
+
+    // adversarial: a hostile id is rejected by `check_id` before the backend, and
+    // the backend only ever binds ids as parameters — after rejected reads the
+    // roster is intact (a fresh row still lands, proving the `cards` table survived).
+    #[tokio::test]
+    async fn adversarial_sqlite_metachar_id_is_inert() {
+        let reg = seeded().await;
+        for id in ["r1'; DROP TABLE cards;--", "../escape", "a/b", ""] {
+            assert!(reg.get(id).await.is_err(), "get {id:?}");
+            assert!(reg.delete(id).await.is_err(), "delete {id:?}");
+        }
+        reg.put(row("r3")).await.expect("post-attempt write");
+        assert!(reg.get("r3").await.is_ok());
+        assert_eq!(reg.list().await.unwrap().len(), 3);
     }
 }

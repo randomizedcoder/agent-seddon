@@ -8,8 +8,10 @@
 //!   process falls back to with no backing file configured.
 //! - [`FileFleet`] — one JSON bundle on disk (`Vec<FleetSession>`), hand-editable
 //!   *or* rewritten by a control-plane `Put`; an absent file is an empty roster.
-//! - `SqliteFleet` (feature `fleet-sqlite`) — each row as JSON in an embedded
-//!   SQLite BLOB.
+//! - [`StoreFleet`] (feature `fleet-store`) — each row as a JSON blob on the shared
+//!   `agent-config-store` `Backend` (memory/file/sqlite/postgres). The `sqlite` and
+//!   `postgres` tiers are this store over the matching config-store backend; PG-11
+//!   retired the bespoke embedded-SQLite `SqliteFleet` in favour of it.
 //!
 //! **Untrusted input, fail closed.** Every id may become a storage-path segment;
 //! every row arrives from a gRPC peer or a hand-edited file. Stores validate ids
@@ -34,10 +36,6 @@ pub use orchestrator::{
 };
 pub mod poll;
 pub use poll::{poll_session, PollReport, MAX_POLL_PAGES, MAX_TRIGGERS_PER_TICK};
-#[cfg(feature = "fleet-sqlite")]
-pub mod sqlite;
-#[cfg(feature = "fleet-sqlite")]
-pub use sqlite::SqliteFleet;
 #[cfg(feature = "fleet-store")]
 pub mod store;
 #[cfg(feature = "fleet-store")]

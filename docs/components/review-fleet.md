@@ -10,7 +10,8 @@ server reconciles its live sessions from (review-fleet C2,
 - **Row type:** `agent_core::FleetSession`
 - **Impl crate:** [`agent-review-fleet`](../../crates/agent-review-fleet)
 - **Shipped backends:** `MemoryFleet` (base), `FileFleet` (JSON bundle),
-  `SqliteFleet` (feature `fleet-sqlite`)
+  `StoreFleet` (features `fleet-sqlite` / `fleet-postgres` — the converged
+  config-store tier; PG-11 retired the bespoke `SqliteFleet`)
 - **Config:** `[review_fleet] store`, `file`, `path`, `root`, `max_total`,
   `max_per_user`; `[review_fleet.slack] app_token_ref`, `bot_token_ref`
 - **Control plane (inc 3b):** `ReviewFleetService` — the seam over gRPC (client `= "grpc"`)
@@ -101,7 +102,7 @@ app-level token is resolved on the fleet host only.
 
 ## Storage backends
 
-All three backends funnel every mutation through one shared `ops` module
+Every backend funnels every mutation through one shared `ops` module
 (sanitize → validate → cap `MAX_FLEET_ROWS` on insert), so validation, clamps, and caps
 can never drift between them:
 
@@ -113,9 +114,12 @@ can never drift between them:
   operation — never a partially-loaded roster. Writes are validate-then-persist via a
   same-directory temp file + atomic rename; reads re-validate every row (defending
   against out-of-band edits).
-- **`SqliteFleet`** (feature `fleet-sqlite`, off by default) — each row as its JSON form
-  in an embedded-SQLite BLOB (the same at-rest shape as the file backend). Ids reach SQL
-  only as bound parameters; reads re-decode + re-validate, failing closed on tampering.
+- **`StoreFleet`** (features `fleet-sqlite` / `fleet-postgres`, both off by default) — each
+  row as its JSON form in a blob on the shared `agent-config-store` `Backend` (the same
+  at-rest shape as the file backend), over an embedded-SQLite `SqliteBackend` or a
+  `PgBackend`. **PG-11 retired the bespoke `SqliteFleet`** in favour of this converged
+  store. Ids reach SQL only as bound parameters; reads re-decode + re-validate, failing
+  closed on tampering.
 
 ## Control plane (`ReviewFleetService`, inc 3b)
 

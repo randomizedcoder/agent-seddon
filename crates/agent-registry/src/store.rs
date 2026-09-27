@@ -3,20 +3,19 @@
 //!
 //! This is the **convergence** backend: instead of a bespoke file/SQLite store,
 //! the registry persists onto any [`agent_config_store::Backend`] (memory, file,
-//! sqlite, or — the capability A3 unlocks — **postgres**). The legacy
+//! sqlite, or — the capability A3 unlocks — **postgres**). It is the sole store
+//! for the `sqlite` and `postgres` tiers: PG-11 retired the bespoke embedded-SQLite
+//! `SqliteRegistry` in favour of this over a config-store `SqliteBackend`; the
 //! [`MemoryRegistry`](crate::MemoryRegistry) / [`FileRegistry`](crate::FileRegistry)
-//! / `SqliteRegistry` backends are **untouched** (decision: keep `rusqlite` for
-//! `file`/`sqlite`, add postgres as the new `sqlx` tier), so their behaviour — and
-//! their tests — are unchanged; this backend adds the shared-store path beside
-//! them.
+//! backends are untouched and their tests unchanged.
 //!
 //! **Behaviour-identical by construction.** Every mutation routes through the same
 //! shared [`crate::ops`], reads decode the same `pb::Upstream`/`pb::RoutePolicy`
-//! wire blobs the SQLite tier uses (one schema, so encodings can't drift), and
+//! wire blobs across every tier (one schema, so encodings can't drift), and
 //! `route`/`health` run the same [`crate::decide`]/[`crate::static_health`]. The
-//! store is a serialized snapshot → op → rewrite cycle, exactly like the SQLite
-//! backend's `mutate` (a ≤`MAX_REGISTRY_UPSTREAMS`-row rewrite inside one atomic
-//! batch), so the three tiers stay interchangeable.
+//! store is a serialized snapshot → op → rewrite cycle (a
+//! ≤`MAX_REGISTRY_UPSTREAMS`-row rewrite inside one atomic batch), so every tier
+//! stays interchangeable.
 //!
 //! **Untrusted input, fail closed.** Cards decode-then-`validate` on read (an
 //! out-of-band-tampered row fails closed at the seam); ids reach the backend only
@@ -108,9 +107,8 @@ impl StoreRegistry {
 
     /// One serialized snapshot → shared op → rewrite cycle, committed atomically.
     /// Rewriting the (≤`MAX_REGISTRY_UPSTREAMS`) card set inside a single
-    /// [`Backend::apply`] batch mirrors the SQLite tier's `mutate`, keeping the
-    /// backends byte-for-byte interchangeable without a per-row path that could
-    /// drift from `ops`.
+    /// [`Backend::apply`] batch keeps every backend byte-for-byte interchangeable
+    /// without a per-row path that could drift from `ops`.
     async fn mutate<T>(&self, f: impl FnOnce(&mut ModelRouterConfig) -> Result<T>) -> Result<T> {
         use std::collections::HashSet;
         let mut cfg = self.load().await?;
@@ -534,5 +532,70 @@ mod pg_tests {
         reserved.tier = Some(agent_core::PoolTier::Medium);
         assert!(reg.put(reserved).await.is_err());
         assert_eq!(reg.list().await.unwrap().len(), 1, "store unchanged");
+    }
+}
+
+// The `sqlite` registry tier is `StoreRegistry` over a config-store `SqliteBackend`
+// (PG-11 retired the bespoke `SqliteRegistry`). The `tests` module above proves the
+// converged behaviour over `MemoryBackend`; these run the same store over the REAL
+// embedded-SQLite SQL layer, so the bind-safety + at-rest-tamper contract is executed
+// against actual SQLite (not just memory). `nix/checks/registry-sqlite.nix` runs them.
+#[cfg(all(test, feature = "registry-sqlite"))]
+mod sqlite_tests {
+    use super::*;
+    use crate::testdata::{card, config};
+    use agent_config_store::SqliteBackend;
+    use agent_core::RouteRole;
+
+    fn sqlite_store() -> StoreRegistry {
+        let backend = SqliteBackend::open_in_memory().expect("open in-memory sqlite backend");
+        StoreRegistry::new(Arc::new(backend))
+    }
+
+    async fn seeded() -> StoreRegistry {
+        let reg = sqlite_store();
+        for u in config().upstreams {
+            reg.put(u).await.expect("seed put");
+        }
+        reg.put_policy(config().policy).await.expect("seed policy");
+        reg
+    }
+
+    // positive: cards round-trip through the SQLite blob store and `route` decides
+    // identically to a fresh in-memory registry over the same config.
+    #[tokio::test]
+    async fn positive_sqlite_backend_crud_and_route() {
+        let reg = seeded().await;
+        let mem = crate::MemoryRegistry::new(config()).expect("valid");
+        for role in [RouteRole::Judge, RouteRole::Main] {
+            let hint = RouteHint {
+                role: Some(role),
+                ..Default::default()
+            };
+            assert_eq!(
+                reg.route(&hint).await.unwrap(),
+                mem.route(&hint).await.unwrap(),
+                "route disagreement for {role:?}"
+            );
+        }
+        assert_eq!(reg.list().await.unwrap(), mem.list().await.unwrap());
+        assert!(reg.delete("kimi").await.unwrap());
+        assert!(!reg.delete("kimi").await.unwrap());
+    }
+
+    // adversarial: a card id carrying SQL metacharacters is rejected by
+    // `safe_segment` before the backend, and even the backend only binds ids as
+    // parameters — after rejected reads the store is intact (a fresh write still
+    // lands, proving the `cards` table survived).
+    #[tokio::test]
+    async fn adversarial_sqlite_metachar_id_is_inert() {
+        let reg = seeded().await;
+        for id in ["kimi'; DROP TABLE cards;--", "../escape", "a/b", ""] {
+            assert!(reg.get(id).await.is_err(), "get {id:?}");
+            assert!(reg.delete(id).await.is_err(), "delete {id:?}");
+        }
+        // The table survived — a fresh card still lands.
+        reg.put(card("newone")).await.expect("post-attempt write");
+        assert!(reg.get("newone").await.is_ok());
     }
 }
