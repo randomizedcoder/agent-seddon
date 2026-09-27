@@ -7,13 +7,29 @@ license.workspace = true
 
 # Campaigns (docs/design/campaigns): the pure rules and the `CampaignStore` seam live
 # in `agent_core::campaign`; this crate holds what only a consumer needs (display
-# letters) and, from CP-02, the Postgres tier behind `campaign-postgres`.
+# letters) and the Postgres tier behind `campaign-postgres`.
+
+[features]
+# Postgres tier — `PgCampaigns`, every protocol (a)–(g) as one transaction over a
+# real server via `sqlx` (pure-Rust rustls, no libpq), off by default so a normal
+# build stays DB-free. NOT hermetic (it needs a live server): its tests are
+# `#[ignore]`-gated and run only under `nix run .#pg-integration`; the crate still
+# compiles under this feature with no DB (runtime-checked queries, no `query!`).
+# Deliberately NO `sqlx/migrate` / `sqlx/macros` — they pull in `sqlx-mysql` →
+# `rsa` (RUSTSEC-2023-0071, rejected by cargo-audit); the in-crate versioned runner
+# over the embedded `migrations/` set stands in (see `postgres.rs`).
+campaign-postgres = ["dep:sqlx", "dep:async-trait", "dep:serde_json"]
 
 [dependencies]
 agent-core.workspace = true
+async-trait = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+sqlx = { workspace = true, optional = true }
 
 [dev-dependencies]
+agent-testkit.workspace = true
 rstest.workspace = true
+tokio = { workspace = true }
 
 [lints]
 workspace = true
