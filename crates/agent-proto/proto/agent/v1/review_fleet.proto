@@ -18,6 +18,11 @@ syntax = "proto3";
 
 package agent.v1;
 
+// REST transcoding annotations (gap-analysis §4, docs/design/rest-openapi/). The
+// `(google.api.http)` options below let Envoy's `grpc_json_transcoder` expose the
+// read RPCs as REST/JSON without any Rust code; gRPC stays the primary interface.
+import "google/api/annotations.proto";
+
 // One durable roster row — a review session's identity, the repo it watches, how
 // it reaches its forge, and its triggers. Mirrors `agent_core::FleetSession`.
 message FleetSession {
@@ -201,7 +206,15 @@ message PreflightReply {
 // reference; the server never resolves it.
 service ReviewFleetService {
   rpc List(FleetListRequest) returns (FleetSessionList);
-  rpc Get(FleetSessionRef) returns (FleetSession);
+  // REST: `GET /v1/fleet/sessions/{id}` (read RPC → GET, id as a path param). This
+  // is the PR-02 proof that `(google.api.http)` survives `tonic-build` codegen into
+  // `FILE_DESCRIPTOR_SET`; the rest of the surface is annotated in later increments
+  // (docs/design/rest-openapi/STATUS.md).
+  rpc Get(FleetSessionRef) returns (FleetSession) {
+    option (google.api.http) = {
+      get: "/v1/fleet/sessions/{id}"
+    };
+  }
   rpc Put(FleetSession) returns (FleetSession); // upsert = create + update
   rpc Delete(FleetSessionRef) returns (FleetDeleteReply);
   rpc SetEnabled(FleetSetEnabledRequest) returns (FleetSession); // toggle without a full Put

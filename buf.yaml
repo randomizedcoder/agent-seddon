@@ -4,6 +4,10 @@ modules:
 lint:
   use:
     - STANDARD
+  # Vendored third-party well-known types (google/api/{annotations,http}.proto,
+  # gap-analysis §4). We do not own this wire — exempt it from our lint rules.
+  ignore:
+    - crates/agent-proto/proto/google
   # The wire types deliberately mirror the `agent-core` "message currency" (Message,
   # ToolCall, Observation, CompletionRequest, …) and the seams keep their trait
   # names, rather than buf's method-derived naming. The enums also use meaningful
@@ -25,3 +29,6 @@ lint:
 breaking:
   use:
     - WIRE_JSON
+  # Vendored third-party wire we do not own — not subject to our compat gate.
+  ignore:
+    - crates/agent-proto/proto/google
