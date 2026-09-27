@@ -226,6 +226,7 @@ dependencies = [
 name = "agent-grpc"
 version = "0.1.0"
 dependencies = [
+ "agent-config-store",
  "agent-core",
  "agent-digest",
  "agent-embed",
@@ -253,6 +254,7 @@ dependencies = [
  "reqwest",
  "ring",
  "rstest",
+ "serde",
  "serde_json",
  "tokio",
  "tokio-stream",

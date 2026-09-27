@@ -12,7 +12,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S3 | Multi-issuer OIDC profiles + fake issuer | D2 | ✅ | #492 |
 | S4 | tonic TLS, `[grpc.tls]`, `nix run .#pki-dev` | P0-5 | ✅ | #494 |
 | S5 | Token service core (agent JWT, JWKS, `WhoAmI`) | D1, D10 | ✅ | #498 |
-| S6 | Session store + `Exchange/Refresh/Logout` | D11 | ⬜ | — |
+| S6 | Session store + `Exchange/Refresh/Logout` | D11 | ✅ | #505 |
 | S7 | RBAC extension, read gating, authz-coverage gate | D9 | ✅ | #504 |
 | S8 | Role bindings, bootstrap, escalation rules | D3, D9 | ⬜ | — |
 | S9 | Bearer propagation + two-hop chain test | D7 | ⬜ | — |
@@ -261,3 +261,58 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 
   Gate: `nix flake check --max-jobs 8 --cores 4 --keep-going` green (2026-09-26).
 
+- **2026-09-26 — S6 (#505).** Sign-in sessions. Logout and revocation now mean something.
+
+  Store: new [`auth/session.rs`](../../../crates/agent-grpc/src/server/auth/session.rs).
+  - `SessionStore` over any `agent-config-store` `Backend`. Each session is a JSON card in the
+    `auth_sessions` collection, keyed `(tenant, sid)`, capped at 4096 per tenant.
+  - Absolute lifetime `session_ttl_secs` (default 12 h, 900 s..=30 d).
+  - Refresh handle `rh1.<tenant>.<sid>.<secret>`; only the secret's SHA-256 is stored.
+  - Rotation is a `CompareAndSwap`, so a race has exactly one winner.
+  - Reuse of a retired handle revokes the session. A forged secret is only refused.
+  - `is_live` has a 5 s per-process cache and fails closed.
+
+  Tokens:
+  - Agent tokens carry a required `sid`, which `safe_segment` checks when the token is verified.
+  - `mint` takes a `Grant`. Its expiry is capped at the session's end, as well as at the login
+    token's.
+
+  `AuthService`:
+  - `Exchange` opens a session and returns `refresh_handle` and `session_expires_at`.
+  - New RPCs: `Refresh` (public, handle ≤ 1 KiB), `Logout`, `ListMySessions` and
+    `RevokeMySession` (for the signed-in user), and `ListSessions` / `RevokeSession`
+    (`read`/`write:binding`; another tenant needs a host-global grant).
+  - `WhoAmI` returns `sid`.
+
+  Layer:
+  - A sensitive RPC also needs a live session. `authz_policy::is_sensitive` covers any
+    `approve`, `(use, exec)`, and writes or deletes of `role`, `binding` and `config`.
+  - A denial is `UNAUTHENTICATED`.
+
+  Config: `[auth.token] session_store` (`memory` | `file` | `postgres`), `session_path`,
+  `session_ttl_secs` and `max_sessions_per_tenant`, validated at load. A new `auth-postgres`
+  runtime feature is part of the `postgres` umbrella.
+
+  Deviations from 02: listed under "As built (S6)" in
+  [02-token-service.md](02-token-service.md#session-store-d11).
+  - A card collection instead of a `0003` migration.
+  - Opportunistic GC instead of a scheduled job.
+  - A roles snapshot until S8.
+  - No IdP refresh token or revalidation yet.
+
+  Tests:
+  - Session store table, about 25 cases: rotation, reuse, forged secret, race, expiry,
+    malformed-handle adversarial table, swapped tenant, tampered row, cache window, tenant
+    scoping, GC, retired-list cap.
+  - Token `sid` adversarial cases and the `is_sensitive` table.
+  - Config and resolver tables.
+  - `tests/auth_token.rs` on the wire: exchange opens a session; refresh rotates without a
+    bearer; a reused handle kills the session; logout stops `Approve`
+    (`UNIMPLEMENTED` → `UNAUTHENTICATED`) while `WhoAmI` still works; revoke-my-other-session;
+    another subject's session is invisible; `ListSessions` needs `read:binding`; bad handles are
+    rejected.
+  - mt-audit `authz.toml` has the six new rows.
+
+  Gate: `nix flake check --max-jobs 8 --cores 4 --keep-going` green (2026-09-26). The `leak` check's
+  `agent-memory` `summarize_step_does_not_leak` failed once on live-block timing (18 → 30) and
+  passed when rebuilt alone. S6 does not touch that crate.

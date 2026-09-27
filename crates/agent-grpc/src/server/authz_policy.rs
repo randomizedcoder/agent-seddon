@@ -45,8 +45,15 @@ pub fn gate_of(service: &str, method: &str) -> Option<Gate> {
     use Gate::*;
     use ResourceType::*;
     Some(match (service, method) {
-        ("AuthService", "Exchange" | "Jwks") => Public,
-        ("AuthService", "WhoAmI") => Authenticated,
+        // `Refresh` carries its own credential (the refresh handle).
+        ("AuthService", "Exchange" | "Jwks" | "Refresh") => Public,
+        ("AuthService", "WhoAmI" | "Logout" | "ListMySessions" | "RevokeMySession") => {
+            Authenticated
+        }
+        // Sessions are access control: the same permission as role bindings. The
+        // request may name another tenant, which the handler checks.
+        ("AuthService", "ListSessions") => FieldChecked(Read, Binding),
+        ("AuthService", "RevokeSession") => FieldChecked(Write, Binding),
 
         // The interactive agent and the seams it runs on.
         ("AgentSessionService", "Send") => Require(Use, Agent),
@@ -159,6 +166,22 @@ pub fn gate_of(service: &str, method: &str) -> Option<Gate> {
     })
 }
 
+/// Whether the RPC at `path` is sensitive enough that the caller's auth session
+/// must still be live, not just the token unexpired (security-hardening S6, D10):
+/// approving a review, served exec, and role / binding / config writes.
+#[cfg(any(feature = "auth", test))]
+pub fn is_sensitive(path: &str) -> bool {
+    use Action::*;
+    use ResourceType::*;
+    let permission = rpc_of(path)
+        .and_then(|(s, m)| gate_of(s, m))
+        .and_then(Gate::permission);
+    matches!(
+        permission,
+        Some((Approve, _) | (Use, Exec) | (Write | Delete, Role | Binding | Config))
+    )
+}
+
 /// The `(service, method)` of an `agent.v1` request path, or `None` for any other
 /// shape (the same parse as [`super::identity_policy::service_of`]).
 pub fn rpc_of(path: &str) -> Option<(&str, &str)> {
@@ -248,5 +271,22 @@ mod tests {
             want,
             "{path}"
         );
+    }
+
+    #[rstest]
+    #[case::positive_approve("/agent.v1.ReviewFleetService/Approve", true)]
+    #[case::positive_exec("/agent.v1.SandboxService/Exec", true)]
+    #[case::positive_role_write("/agent.v1.RoleService/Put", true)]
+    #[case::positive_role_delete("/agent.v1.RoleService/Delete", true)]
+    #[case::positive_config_write("/agent.v1.ConfigService/Put", true)]
+    #[case::positive_revoke_session("/agent.v1.AuthService/RevokeSession", true)]
+    #[case::negative_review_read("/agent.v1.ReviewFleetService/GetReview", false)]
+    #[case::negative_draft_edit("/agent.v1.ReviewFleetService/UpdateReview", false)]
+    #[case::negative_role_read("/agent.v1.RoleService/List", false)]
+    #[case::corner_authenticated_only("/agent.v1.AuthService/Logout", false)]
+    #[case::corner_public("/agent.v1.AuthService/Refresh", false)]
+    #[case::adversarial_unknown_rpc("/agent.v1.RoleService/PutAll", false)]
+    fn sensitive_cases(#[case] path: &str, #[case] want: bool) {
+        assert_eq!(is_sensitive(path), want, "{path}");
     }
 }

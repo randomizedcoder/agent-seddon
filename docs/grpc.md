@@ -412,9 +412,28 @@ rotation, set `previous_key` to the old key for one `ttl_secs` so tokens it sign
 verifying. The verified bearer is kept in the request scope (`agent_core::AGENT_BEARER`), and
 `agent_core::scope_request` carries identity, principal and bearer across a `spawn`.
 
+**Sessions.** `Exchange` also opens a sign-in session
+([`auth/session.rs`](../crates/agent-grpc/src/server/auth/session.rs)). The agent token carries
+its `sid`, and the response carries a `refresh_handle` plus the session's absolute expiry
+(`session_ttl_secs`, default 12 h).
+
+- `Refresh{refresh_handle}` needs no bearer. It returns a new token and a new handle; the old
+  handle is retired, and presenting it again revokes the session.
+- `Logout` revokes the caller's session.
+- `ListMySessions` and `RevokeMySession` act on the caller's own sessions.
+- `ListSessions` and `RevokeSession` need `read:binding` and `write:binding`, respectively.
+
+Revocation stops refresh straight away, and it stops sensitive RPCs (approve, exec, and role,
+binding or config writes) within about 5 seconds. Other RPCs keep working until the token
+expires. `[auth.token] session_store` picks where sessions persist: `memory`, `file` or
+`postgres`.
+
 ```sh
-TOKEN=$(grpcurl -d "{\"id_token\":\"$ID_TOKEN\"}" "$ADDR" agent.v1.AuthService/Exchange | jq -r .accessToken)
+RESP=$(grpcurl -d "{\"id_token\":\"$ID_TOKEN\"}" "$ADDR" agent.v1.AuthService/Exchange)
+TOKEN=$(jq -r .accessToken <<<"$RESP"); HANDLE=$(jq -r .refreshHandle <<<"$RESP")
 grpcurl -H "authorization: Bearer $TOKEN" "$ADDR" agent.v1.AuthService/WhoAmI
+grpcurl -d "{\"refresh_handle\":\"$HANDLE\"}" "$ADDR" agent.v1.AuthService/Refresh
+grpcurl -H "authorization: Bearer $TOKEN" "$ADDR" agent.v1.AuthService/Logout
 ```
 
 ### Isolation is not containment: `bash` and the exec seams

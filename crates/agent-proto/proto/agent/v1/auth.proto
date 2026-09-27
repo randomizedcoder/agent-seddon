@@ -13,8 +13,13 @@
 //   - `Exchange` accepts only ID tokens from a configured `[auth]` issuer; an agent
 //     token is not accepted there, and an ID token is not accepted anywhere else.
 //   - Every failure is an opaque `UNAUTHENTICATED`; the reason is logged, never sent.
-//   - Sessions, refresh handles and logout arrive in S6; an S5 token is stateless
-//     and never outlives the ID token it was exchanged from.
+//   - `Refresh` needs no bearer either: the refresh handle is the credential. It
+//     is rotated on every use, and presenting a rotated-out handle revokes the
+//     whole session (the token-theft signal).
+//   - Every agent token names its auth session (`sid`). Sensitive actions
+//     (approve, exec, role / binding / config writes) also check that the session
+//     is still live, so `Logout` and `RevokeSession` stop them at once; other
+//     calls stop when the token expires (S6).
 syntax = "proto3";
 
 package agent.v1;
@@ -26,11 +31,25 @@ service AuthService {
   rpc Jwks(JwksRequest) returns (JwksResponse);
   // Who the caller's agent token says they are, and what it lets them do.
   rpc WhoAmI(WhoAmIRequest) returns (WhoAmIResponse);
+  // Trade a refresh handle for a new agent token and a new handle.
+  rpc Refresh(RefreshRequest) returns (ExchangeResponse);
+  // Revoke the caller's own session (the one its token names).
+  rpc Logout(LogoutRequest) returns (LogoutResponse);
+  // The caller's own sessions.
+  rpc ListMySessions(ListMySessionsRequest) returns (ListSessionsResponse);
+  // Revoke one of the caller's own sessions.
+  rpc RevokeMySession(RevokeMySessionRequest) returns (RevokeSessionResponse);
+  // Every session in a tenant; needs `read:binding` there.
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+  // Revoke any session in a tenant; needs `write:binding` there.
+  rpc RevokeSession(RevokeSessionRequest) returns (RevokeSessionResponse);
 }
 
 message ExchangeRequest {
   // An OIDC ID token (compact JWT) from a configured issuer. At most 16 KiB.
   string id_token = 1;
+  // `portal` | `cli` | `service`; anything else is recorded as `unspecified`.
+  string client_kind = 2;
 }
 
 message ExchangeResponse {
@@ -42,6 +61,10 @@ message ExchangeResponse {
   uint64 expires_at = 3;
   // The identity the token carries (the same fields `WhoAmI` returns).
   WhoAmIResponse principal = 4;
+  // Opaque; send it to `Refresh` before `expires_at`. Each use returns a new one.
+  string refresh_handle = 5;
+  // Unix seconds after which the session cannot be refreshed; sign in again.
+  uint64 session_expires_at = 6;
 }
 
 message JwksRequest {}
@@ -72,4 +95,65 @@ message WhoAmIResponse {
   repeated string amr = 8;
   // Unix seconds after which the token is rejected.
   uint64 expires_at = 9;
+  // The auth session the token belongs to.
+  string sid = 10;
+}
+
+message RefreshRequest {
+  // The handle from the last `Exchange` or `Refresh`. At most 1 KiB.
+  string refresh_handle = 1;
+}
+
+message LogoutRequest {}
+
+message LogoutResponse {
+  // False when the session was already revoked or expired.
+  bool revoked = 1;
+}
+
+message ListMySessionsRequest {}
+
+message ListSessionsRequest {
+  // Empty ⇒ the caller's own tenant. Another tenant needs a host-global role.
+  string tenant = 1;
+}
+
+message ListSessionsResponse {
+  repeated AuthSessionInfo sessions = 1;
+}
+
+message RevokeMySessionRequest {
+  string sid = 1;
+}
+
+message RevokeSessionRequest {
+  // Empty ⇒ the caller's own tenant.
+  string tenant = 1;
+  string sid = 2;
+}
+
+message RevokeSessionResponse {
+  // False when there was no live session with that id.
+  bool revoked = 1;
+}
+
+// One auth session. Never carries a token or a refresh handle.
+message AuthSessionInfo {
+  string sid = 1;
+  string tenant = 2;
+  string subject = 3;
+  string issuer = 4;
+  string email = 5;
+  // `portal` | `cli` | `service` | `unspecified`.
+  string client_kind = 6;
+  // Unix seconds.
+  uint64 created_at = 7;
+  uint64 last_seen_at = 8;
+  uint64 expires_at = 9;
+  // Zero while live.
+  uint64 revoked_at = 10;
+  // `logout` | `operator` | `reuse` | empty.
+  string revoke_reason = 11;
+  // The session the caller's own token names.
+  bool current = 12;
 }

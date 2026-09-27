@@ -37,6 +37,7 @@ pub mod skills;
 // the builder's `pg_digests`). One home for the secret-handling (never echo the
 // resolved DSN), so the two callers can't diverge.
 #[cfg(any(
+    feature = "auth-postgres",
     feature = "registry-postgres",
     feature = "fleet-postgres",
     feature = "prompt-postgres",
@@ -47,6 +48,7 @@ pub mod skills;
 ))]
 mod dsn;
 #[cfg(any(
+    feature = "auth-postgres",
     feature = "registry-postgres",
     feature = "fleet-postgres",
     feature = "prompt-postgres",

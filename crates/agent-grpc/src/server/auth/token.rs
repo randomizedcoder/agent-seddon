@@ -224,6 +224,8 @@ pub struct AgentClaims {
     pub perms_ref: bool,
     pub expires_at: u64,
     pub jti: String,
+    /// The auth session this token belongs to (S6).
+    pub sid: String,
 }
 
 impl AgentClaims {
@@ -247,6 +249,8 @@ impl AgentClaims {
         };
         let subject = s("sub").filter(|v| !v.is_empty())?;
         let tenant = s("tenant").filter(|t| agent_core::safe_segment(t))?;
+        // Every agent token names its session; one without is not ours.
+        let sid = s("sid").filter(|v| agent_core::safe_segment(v))?;
         Some(Self {
             subject,
             tenant,
@@ -260,7 +264,38 @@ impl AgentClaims {
                 .unwrap_or(false),
             expires_at: claims.get("exp").and_then(Value::as_u64)?,
             jti: s("jti").unwrap_or_default(),
+            sid,
         })
+    }
+}
+
+/// What a token is minted for: a login identity at `Exchange`, or a live session at
+/// `Refresh`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Grant {
+    /// `user:<login issuer>/<IdP subject>`.
+    pub subject: String,
+    pub tenant: String,
+    pub email: Option<String>,
+    pub amr: Vec<String>,
+    pub roles: Vec<String>,
+    pub sid: String,
+    /// The token never outlives this (the login token's or the session's expiry).
+    pub not_after: u64,
+}
+
+impl Grant {
+    /// The grant for a freshly verified login in session `sid`.
+    pub fn from_login(id: &VerifiedIdentity, sid: &str) -> Self {
+        Self {
+            subject: format!("user:{}/{}", id.issuer, id.subject),
+            tenant: id.tenant.clone(),
+            email: id.email.clone(),
+            amr: vec![format!("oidc:{}", id.issuer)],
+            roles: id.roles.clone(),
+            sid: sid.to_string(),
+            not_after: id.expires_at,
+        }
     }
 }
 
@@ -347,14 +382,17 @@ impl TokenService {
         &self.issuer
     }
 
-    /// Mint an agent token for a verified login identity. It expires at the
-    /// earlier of `now + ttl` and the login token's own `exp`, so an exchange never
-    /// extends a login. `perms` beyond [`MAX_PERMS_IN_TOKEN`] are left out.
-    pub fn mint(&self, id: &VerifiedIdentity, perms: &[String]) -> Result<MintedToken, String> {
+    /// Mint an agent token for `grant`. It expires at the earlier of `now + ttl` and
+    /// `grant.not_after`, so an exchange never extends a login and a refresh never
+    /// extends a session. `perms` beyond [`MAX_PERMS_IN_TOKEN`] are left out.
+    pub fn mint(&self, grant: &Grant, perms: &[String]) -> Result<MintedToken, String> {
         let now = self.clock.now_secs();
-        let exp = now.saturating_add(self.ttl_secs).min(id.expires_at);
+        let exp = now.saturating_add(self.ttl_secs).min(grant.not_after);
         if exp <= now {
-            return Err("the login token has expired".into());
+            return Err("the login or session has expired".into());
+        }
+        if !agent_core::safe_segment(&grant.sid) {
+            return Err("invalid session id".into());
         }
         let (perms, perms_ref) = if perms.len() > MAX_PERMS_IN_TOKEN {
             (Vec::new(), true)
@@ -362,15 +400,16 @@ impl TokenService {
             (perms.to_vec(), false)
         };
         let claims = AgentClaims {
-            subject: format!("user:{}/{}", id.issuer, id.subject),
-            tenant: id.tenant.clone(),
-            email: id.email.clone(),
-            amr: vec![format!("oidc:{}", id.issuer)],
-            roles: id.roles.clone(),
+            subject: grant.subject.clone(),
+            tenant: grant.tenant.clone(),
+            email: grant.email.clone(),
+            amr: grant.amr.clone(),
+            roles: grant.roles.clone(),
             perms,
             perms_ref,
             expires_at: exp,
-            jti: random_jti()?,
+            jti: random_hex()?,
+            sid: grant.sid.clone(),
         };
         let mut body = json!({
             "iss": self.issuer,
@@ -384,6 +423,7 @@ impl TokenService {
             "nbf": now,
             "exp": exp,
             "jti": claims.jti,
+            "sid": claims.sid,
         });
         if let Some(email) = &claims.email {
             body["email"] = json!(email);
@@ -456,12 +496,12 @@ impl TokenService {
     }
 }
 
-/// 128 random bits as hex.
-fn random_jti() -> Result<String, String> {
+/// 128 random bits as hex (token ids, session ids).
+pub(crate) fn random_hex() -> Result<String, String> {
     let mut bytes = [0u8; 16];
     SystemRandom::new()
         .fill(&mut bytes)
-        .map_err(|_| "no system randomness for `jti`".to_string())?;
+        .map_err(|_| "no system randomness".to_string())?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
@@ -477,6 +517,7 @@ impl TokenVerifier for TokenService {
             roles: claims.roles,
             email: claims.email,
             expires_at: claims.expires_at,
+            sid: Some(claims.sid),
         })
     }
 }
