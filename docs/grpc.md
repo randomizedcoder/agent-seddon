@@ -328,6 +328,19 @@ service with no class gets `PERMISSION_DENIED`. `field-scoped` services
 (`SessionRegistryService.Open` is how a client gets a session), `stateless` and
 `operator-global` services proceed on the tenant alone. Health and reflection are exempt.
 
+**Who may sign tokens.** `[auth]` accepts tokens from any number of OIDC issuers
+(`[[auth.issuers]]`, beside the original single-issuer `issuer` / `audience` / `jwks_url`
+form, which acts as one issuer named `default`). Each issuer has a profile
+([`auth/issuer.rs`](../crates/agent-grpc/src/server/auth/issuer.rs)): `google` takes the
+tenant from the Workspace domain (`hd`, which must be in `allowed_domains`) and requires a
+verified email; `entra` takes it from the directory id (`tid`, which must be in
+`allowed_tenants`); `generic` takes it from a configured claim. A token is routed to its issuer
+by `iss` before verification, so an unknown issuer costs no key fetch, and each issuer keeps its
+own key cache, so one issuer's key never verifies a token that claims another. A `generic`
+issuer without `jwks_url` finds its keys by OIDC discovery, and the discovery document must
+name the same issuer. Roles are read from a token only with `trust_roles_claim = true` (the
+single-issuer form keeps trusting its `roles_claim`, as before).
+
 ### Isolation is not containment: `bash` and the exec seams
 
 Per-tenant paths isolate the *confined* file tools (`edit`/`read`/`write`/`search`).

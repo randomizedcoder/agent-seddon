@@ -19,6 +19,14 @@ tokio = { workspace = true }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+# `oidc::FakeIssuer` (security-hardening S3): a loopback OIDC issuer (discovery +
+# JWKS) and fixed signing keys for auth tests.
+jsonwebtoken = { workspace = true, optional = true }
+tiny_http = { workspace = true, optional = true }
+
+[features]
+oidc = ["dep:jsonwebtoken", "dep:tiny_http"]
+
 [dev-dependencies]
 rstest.workspace = true
 

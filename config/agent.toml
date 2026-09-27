@@ -1132,6 +1132,28 @@ job         = "agent-seddon"
 # leeway_secs  = 60                                     # accepted exp/nbf clock skew (max 300)
 # allow_insecure_listen = false                         # permit mode="none" on 0.0.0.0 (warns)
 # require_identity = true                               # default: on off-loopback, off on loopback/uds
+#
+# More login issuers, one table each (the single-issuer keys above act as one
+# `generic` issuer named "default"). A profile fixes how claims map to a tenant:
+# `google` → Workspace domain (`hd` must be in `allowed_domains`, email verified);
+# `entra` → directory id (`tid` must be in `allowed_tenants`); `generic` → `tenant_claim`.
+# A `generic` issuer without `jwks_url` uses OIDC discovery. Roles come from a token only
+# with `trust_roles_claim = true`. Unknown keys in an entry are an error.
+#
+# [[auth.issuers]]
+# name            = "google"
+# profile         = "google"
+# client_id       = "1234.apps.googleusercontent.com"  # the expected `aud`
+# allowed_domains = ["example.com"]                    # Workspace domains → tenants
+# # default_tenant = "home"                            # admit consumer accounts (no `hd`) here
+#
+# [[auth.issuers]]
+# name              = "keycloak"
+# profile           = "generic"
+# issuer            = "https://idp.example.com/realms/agents"   # keys via discovery
+# audience          = "agent-seddon"
+# tenant_claim      = "org"
+# trust_roles_claim = true
 
 # [tenancy] — the per-tenant config plane (config C35 / C2). When `per_tenant =
 # true`, the converged shared-store control-plane seams (provider-registry, review-

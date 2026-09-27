@@ -29,14 +29,25 @@
 //! no identity class is rejected `PERMISSION_DENIED`, instead of either running
 //! unscoped as the shared `local` tenant.
 //!
+//! ## Issuers (security-hardening S3)
+//! Any number of OIDC issuers may be configured, each with a **profile**
+//! (`google`, `entra`, `generic`) that fixes how its claims map to a tenant,
+//! subject and roles (`auth/issuer.rs`). A token is routed to its issuer by its
+//! `iss` claim, read before verification; an unknown `iss` is rejected without a
+//! key fetch, and each issuer has its own key cache, so a key published by one
+//! issuer never verifies a token claiming another.
+//!
 //! ## What is verified (standard OIDC bearer), all fail-closed
-//! - Signature against the issuer's **JWKS** (fetched + cached; a `kid` miss forces
-//!   one refetch, so key rotation is honoured).
+//! - Signature against the issuer's **JWKS** (a fixed URL or found by OIDC
+//!   discovery; fetched + cached; a `kid` miss forces one refetch, so key rotation
+//!   is honoured).
 //! - **Algorithm allow-list is asymmetric-only** (`RS256`/`ES256`), pinned — never
 //!   derived from the token header — so `alg:none` and the HS/RS *key-confusion*
 //!   attack are both rejected.
-//! - `iss` / `aud` match config; `exp` / `nbf` within `leeway_secs` (checked against
-//!   an injectable clock); `sub` and the tenant claim present and `safe_segment`.
+//! - `iss` / `aud` match the issuer; `exp` / `nbf` within `leeway_secs` (checked
+//!   against an injectable clock); then the profile's rules: subject and tenant
+//!   present, tenant `safe_segment`, email verified and domain / directory allowed
+//!   where the profile asks.
 //!
 //! The health (`grpc.health.v1.*`) and reflection (`grpc.reflection.*`) services are
 //! **exempt** — an orchestrator must be able to probe liveness without a token.
@@ -60,6 +71,11 @@ pub struct VerifiedIdentity {
     pub tenant: String,
     pub subject: String,
     pub roles: Vec<String>,
+    /// The configured name of the issuer that signed the token (`default` for the
+    /// single-issuer `[auth]` form).
+    pub issuer: String,
+    /// The token's `email` claim, lowercased, when present.
+    pub email: Option<String>,
 }
 
 /// Verifies a bearer token, yielding a [`VerifiedIdentity`] or an **opaque**
@@ -73,6 +89,11 @@ pub trait TokenVerifier: Send + Sync {
 
 /// Bootstrap parameters for [`AuthLayer::from_params`] (mapped from `[auth]` in the
 /// runtime config). Held codec-free so agent-grpc binds to no config type.
+///
+/// The top-level `issuer` / `audience` / `jwks_url` / `tenant_claim` /
+/// `roles_claim` are the single-issuer form; when `issuer` is set they become one
+/// `generic` issuer named `default` that trusts its roles claim, exactly as before
+/// multi-issuer support. `issuers` adds more (security-hardening S3).
 #[derive(Clone, Debug, Default)]
 pub struct AuthParams {
     /// `"none"` (or empty) ⇒ pass-through; `"oidc"` ⇒ verify (needs `auth` feature).
@@ -84,8 +105,66 @@ pub struct AuthParams {
     pub tenant_claim: String,
     /// Claim carrying the roles array (default `"roles"`).
     pub roles_claim: String,
-    /// Accepted clock skew for `exp`/`nbf`, in seconds.
+    /// Accepted clock skew for `exp`/`nbf`, in seconds (every issuer).
     pub leeway_secs: u64,
+    /// `[[auth.issuers]]`: login issuers with per-IdP profiles.
+    pub issuers: Vec<IssuerParams>,
+}
+
+impl AuthParams {
+    /// Every configured issuer: the single-issuer form (as `default`) first, then
+    /// `issuers` in order.
+    pub fn issuer_list(&self) -> Vec<IssuerParams> {
+        let legacy = (!self.issuer.trim().is_empty()).then(|| IssuerParams {
+            name: "default".into(),
+            profile: "generic".into(),
+            issuer: self.issuer.clone(),
+            audience: self.audience.clone(),
+            jwks_url: self.jwks_url.clone(),
+            tenant_claim: self.tenant_claim.clone(),
+            roles_claim: self.roles_claim.clone(),
+            trust_roles_claim: Some(true),
+            ..IssuerParams::default()
+        });
+        legacy
+            .into_iter()
+            .chain(self.issuers.iter().cloned())
+            .collect()
+    }
+}
+
+/// One `[[auth.issuers]]` entry: an OIDC identity provider and the profile that
+/// says how its claims map to a tenant, subject and roles (security-hardening S3,
+/// docs/design/security-hardening/01-authentication.md). Empty strings take the
+/// profile's defaults.
+#[derive(Clone, Debug, Default)]
+pub struct IssuerParams {
+    /// Unique name (logs, metrics, `VerifiedIdentity::issuer`).
+    pub name: String,
+    /// `google` | `entra` | `generic` (default).
+    pub profile: String,
+    /// Expected `iss`. Fixed by the `google` / `entra` profiles unless set.
+    pub issuer: String,
+    /// Expected `aud`: the OAuth client id registered with the IdP.
+    pub audience: String,
+    /// Key set URL. `generic` without it uses OIDC discovery on `issuer`.
+    pub jwks_url: String,
+    /// `generic` only: claim carrying the tenant (default `org`).
+    pub tenant_claim: String,
+    /// `generic` only: claim carrying the subject (default `sub`).
+    pub subject_claim: String,
+    /// Claim carrying roles (default `roles`), read only with `trust_roles_claim`.
+    pub roles_claim: String,
+    /// Take roles from the token (default `false`: roles come from bindings).
+    pub trust_roles_claim: Option<bool>,
+    /// Reject tokens whose `email_verified` is not true (always on for `google`).
+    pub require_email_verified: bool,
+    /// `google`: allowed Workspace (`hd`) domains. `generic`: allowed email domains.
+    pub allowed_domains: Vec<String>,
+    /// `entra`: allowed directory (`tid`) ids.
+    pub allowed_tenants: Vec<String>,
+    /// Tenant for tokens without one (a single-organization deployment).
+    pub default_tenant: String,
 }
 
 /// Called once per token-verification attempt with the bounded outcome (`ok`|`error`),
@@ -160,9 +239,9 @@ impl AuthLayer {
             "oidc" => {
                 #[cfg(feature = "auth")]
                 {
-                    Ok(Self::enabled(Arc::new(jwt::JwtVerifier::from_params(
-                        params,
-                    )?)))
+                    Ok(Self::enabled(Arc::new(
+                        jwt::MultiIssuerVerifier::from_params(&params)?,
+                    )))
                 }
                 #[cfg(not(feature = "auth"))]
                 {
@@ -357,264 +436,26 @@ fn unauthenticated() -> http::Response<BoxBody> {
     tonic::Status::unauthenticated("unauthenticated").into_http()
 }
 
+/// Issuer profiles: which `iss` an issuer accepts and how its claims map to an
+/// identity. Behind `auth` with the verifier that uses it.
+#[cfg(feature = "auth")]
+mod issuer;
+
 /// The JWKS/JWT verifier — the only part that needs the `auth` feature (and thus
 /// `jsonwebtoken` + `reqwest`). The [`AuthLayer`] above compiles without it.
 #[cfg(feature = "auth")]
-mod jwt {
-    use std::sync::Arc;
-
-    use jsonwebtoken::jwk::{Jwk, JwkSet};
-    use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
-    use tokio::sync::Mutex;
-
-    use super::{AuthParams, TokenVerifier, VerifiedIdentity};
-
-    /// Pinned asymmetric-only algorithm allow-list. Never derived from the token
-    /// header — this is what defeats `alg:none` and HS/RS key-confusion.
-    const ALLOWED_ALGS: [Algorithm; 2] = [Algorithm::RS256, Algorithm::ES256];
-
-    /// Minimum seconds between JWKS refetches. A cache miss (unknown `kid`) triggers at
-    /// most one outbound fetch per this window — so an attacker who sends tokens bearing a
-    /// fresh random `kid` each request (all of which pass the unsigned `decode_header` +
-    /// alg-allow-list checks *before* any signature is verified) cannot amplify each cheap
-    /// inbound request into an outbound JWKS GET+parse (a pre-auth DoS on both this process
-    /// and the IdP). Legitimate key rotation is still honoured within this window — IdPs
-    /// rotate with old/new key overlap, so a bounded pickup delay is safe.
-    pub(super) const MIN_JWKS_REFETCH_SECS: u64 = 60;
-
-    /// A clock, injectable so `exp`/`nbf` leeway is testable without sleeping.
-    pub trait Clock: Send + Sync {
-        fn now_secs(&self) -> u64;
-    }
-
-    /// Wall-clock (seconds since the Unix epoch).
-    pub struct SystemClock;
-    impl Clock for SystemClock {
-        fn now_secs(&self) -> u64 {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0)
-        }
-    }
-
-    /// Source of the issuer's JWK set, injectable so rotation is testable without a
-    /// network. Returns the *current* set on each call; the verifier caches it and
-    /// only calls again on a `kid` miss.
-    #[async_trait::async_trait]
-    pub trait JwksSource: Send + Sync {
-        async fn fetch(&self) -> Result<JwkSet, ()>;
-    }
-
-    /// Fetches the JWK set over HTTPS via the workspace HTTP client.
-    pub struct HttpJwks {
-        url: String,
-        client: reqwest::Client,
-    }
-
-    #[async_trait::async_trait]
-    impl JwksSource for HttpJwks {
-        async fn fetch(&self) -> Result<JwkSet, ()> {
-            let resp = self.client.get(&self.url).send().await.map_err(|e| {
-                tracing::warn!(error = %e, "jwks fetch failed");
-            })?;
-            resp.json::<JwkSet>().await.map_err(|e| {
-                tracing::warn!(error = %e, "jwks parse failed");
-            })
-        }
-    }
-
-    /// The concrete OIDC/JWT [`TokenVerifier`].
-    pub struct JwtVerifier {
-        issuer: String,
-        audience: String,
-        tenant_claim: String,
-        roles_claim: String,
-        leeway_secs: u64,
-        jwks: Arc<dyn JwksSource>,
-        clock: Arc<dyn Clock>,
-        cache: Mutex<JwksCache>,
-    }
-
-    /// The cached JWK set plus the time of the last fetch *attempt* — the timestamp
-    /// rate-limits refetches (see [`MIN_JWKS_REFETCH_SECS`]). `last_fetch_secs == 0`
-    /// means "never fetched" (a cold cache always allows the first fetch).
-    #[derive(Default)]
-    struct JwksCache {
-        set: Option<JwkSet>,
-        last_fetch_secs: u64,
-    }
-
-    impl JwtVerifier {
-        /// Build the production verifier (HTTPS JWKS + system clock) from params.
-        pub fn from_params(params: AuthParams) -> Result<Self, String> {
-            if params.issuer.is_empty() || params.audience.is_empty() || params.jwks_url.is_empty()
-            {
-                return Err("`[auth] mode=oidc` needs `issuer`, `audience`, and `jwks_url`".into());
-            }
-            let client = reqwest::Client::builder()
-                .build()
-                .map_err(|e| format!("auth http client: {e}"))?;
-            let jwks = Arc::new(HttpJwks {
-                url: params.jwks_url.clone(),
-                client,
-            });
-            Ok(Self::with_sources(params, jwks, Arc::new(SystemClock)))
-        }
-
-        /// Build a verifier with injected JWKS source + clock (the test seam).
-        pub fn with_sources(
-            params: AuthParams,
-            jwks: Arc<dyn JwksSource>,
-            clock: Arc<dyn Clock>,
-        ) -> Self {
-            Self {
-                issuer: params.issuer,
-                audience: params.audience,
-                tenant_claim: if params.tenant_claim.is_empty() {
-                    "org".to_string()
-                } else {
-                    params.tenant_claim
-                },
-                roles_claim: if params.roles_claim.is_empty() {
-                    "roles".to_string()
-                } else {
-                    params.roles_claim
-                },
-                leeway_secs: params.leeway_secs,
-                jwks,
-                clock,
-                cache: Mutex::new(JwksCache::default()),
-            }
-        }
-
-        /// Find the JWK for `kid`. On a cache miss (cold cache or a rotated key) refetch
-        /// the JWK set — but **rate-limited**: at most one fetch per
-        /// [`MIN_JWKS_REFETCH_SECS`], so an unknown `kid` cannot force an outbound fetch on
-        /// every request (a pre-auth amplification DoS). Returns `None` on a fetch failure,
-        /// a persistent miss, or while inside the refetch cooldown after a recent attempt.
-        async fn key_for(&self, kid: &str) -> Option<Jwk> {
-            {
-                let mut cache = self.cache.lock().await;
-                if let Some(set) = cache.set.as_ref() {
-                    if let Some(k) = set.find(kid) {
-                        return Some(k.clone());
-                    }
-                }
-                // Miss. Refuse to refetch inside the cooldown so a flood of unknown `kid`s
-                // can't each force an outbound fetch. Stamp the attempt NOW, before
-                // releasing the lock, so concurrent misses coalesce onto this one fetch
-                // (they see the fresh timestamp and back off) — bounding fetches to one per
-                // window even under a concurrent burst.
-                let now = self.clock.now_secs();
-                if cache.last_fetch_secs != 0
-                    && now.saturating_sub(cache.last_fetch_secs) < MIN_JWKS_REFETCH_SECS
-                {
-                    return None;
-                }
-                cache.last_fetch_secs = now;
-            }
-            // Miss past the cooldown (cold cache or a rotated key) → refetch once. The lock
-            // is released across the network fetch so a slow JWKS endpoint can't stall other
-            // verifications.
-            let fresh = self.jwks.fetch().await.ok()?;
-            let found = fresh.find(kid).cloned();
-            self.cache.lock().await.set = Some(fresh);
-            found
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl TokenVerifier for JwtVerifier {
-        async fn verify(&self, token: &str) -> Result<VerifiedIdentity, ()> {
-            let header = decode_header(token).map_err(|_| ())?;
-            // Reject up-front anything outside the pinned asymmetric allow-list
-            // (alg:none, HS*, RS/HS confusion) before touching a key.
-            if !ALLOWED_ALGS.contains(&header.alg) {
-                tracing::warn!(alg = ?header.alg, "rejected token: algorithm not allowed");
-                return Err(());
-            }
-            let kid = header.kid.ok_or(())?;
-            let jwk = self.key_for(&kid).await.ok_or(())?;
-            let key = DecodingKey::from_jwk(&jwk).map_err(|_| ())?;
-
-            // `header.alg` is already proven to be in the pinned asymmetric
-            // allow-list above, so validating against exactly it is safe — and
-            // avoids jsonwebtoken's multi-family `algorithms` quirk.
-            let mut validation = Validation::new(header.alg);
-            validation.algorithms = vec![header.alg];
-            validation.set_issuer(&[self.issuer.as_str()]);
-            validation.set_audience(&[self.audience.as_str()]);
-            // We validate exp/nbf ourselves against the injectable clock (below), so
-            // the leeway is deterministic and testable.
-            validation.validate_exp = false;
-            validation.validate_nbf = false;
-            // `aud`/`iss` are enforced via set_audience/set_issuer, but jsonwebtoken
-            // only checks them when the claim is PRESENT — an absent `aud` (or `iss`)
-            // would otherwise pass vacuously, so a token minted for another resource
-            // server whose JWKS also signs for us would be accepted here. Require
-            // them so a missing claim is a MissingRequiredClaim rejection, making the
-            // "iss/aud match config, fail-closed" promise in the module doc true.
-            validation.required_spec_claims = ["exp", "sub", "aud", "iss"]
-                .iter()
-                .map(|s| (*s).to_string())
-                .collect();
-
-            let data = decode::<serde_json::Value>(token, &key, &validation).map_err(|_| ())?;
-            let claims = data.claims;
-
-            let now = self.clock.now_secs();
-            let exp = claims
-                .get("exp")
-                .and_then(serde_json::Value::as_u64)
-                .ok_or(())?;
-            if now > exp.saturating_add(self.leeway_secs) {
-                return Err(());
-            }
-            if let Some(nbf) = claims.get("nbf").and_then(serde_json::Value::as_u64) {
-                if now.saturating_add(self.leeway_secs) < nbf {
-                    return Err(());
-                }
-            }
-
-            let subject = claims
-                .get("sub")
-                .and_then(serde_json::Value::as_str)
-                .ok_or(())?;
-            let tenant = claims
-                .get(&self.tenant_claim)
-                .and_then(serde_json::Value::as_str)
-                .ok_or(())?;
-            // The tenant becomes a scoping key / path segment downstream — it is
-            // attacker-influenced (a compromised IdP claim), so fail closed here.
-            if !agent_core::safe_segment(tenant) {
-                tracing::warn!("rejected token: tenant claim is not a safe segment");
-                return Err(());
-            }
-            let roles = claims
-                .get(&self.roles_claim)
-                .and_then(serde_json::Value::as_array)
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            Ok(VerifiedIdentity {
-                tenant: tenant.to_string(),
-                subject: subject.to_string(),
-                roles,
-            })
-        }
-    }
-}
+mod jwt;
 
 #[cfg(feature = "auth")]
-pub use jwt::{Clock, JwksSource, JwtVerifier, SystemClock};
+pub use issuer::{ClaimRejection, KeySource, Profile, ResolvedIssuer};
+#[cfg(feature = "auth")]
+pub use jwt::{Clock, JwksSource, JwtVerifier, MultiIssuerVerifier, SystemClock};
 
 #[cfg(all(test, feature = "auth"))]
 mod tests;
+
+#[cfg(all(test, feature = "auth"))]
+mod multi_tests;
 
 #[cfg(test)]
 mod listen_tests;

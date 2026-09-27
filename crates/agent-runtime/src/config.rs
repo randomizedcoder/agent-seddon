@@ -2625,6 +2625,108 @@ pub struct AuthCfg {
     /// always applies the check.
     #[serde(default)]
     pub require_identity: Option<bool>,
+    /// Login issuers with per-IdP profiles (`[[auth.issuers]]`, security-hardening
+    /// S3). The top-level `issuer` / `audience` / `jwks_url` form still works and
+    /// acts as one `generic` issuer named `default`; entries here add more.
+    #[serde(default)]
+    pub issuers: Vec<AuthIssuerCfg>,
+}
+
+/// One `[[auth.issuers]]` entry: an OIDC identity provider plus the profile that
+/// maps its claims to a tenant, subject and roles
+/// (docs/design/security-hardening/01-authentication.md). Empty fields take the
+/// profile's defaults. Unknown keys are an error, not a warning: a misspelt
+/// restriction such as `allowed_domain` would otherwise silently widen who may
+/// sign in.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
+pub struct AuthIssuerCfg {
+    /// Unique name; shows up in logs and as the verified identity's issuer.
+    #[serde(default)]
+    pub name: String,
+    /// `google` | `entra` | `generic` (default).
+    #[serde(default)]
+    pub profile: String,
+    /// Expected `iss`. The `google` and `entra` profiles supply it; `generic` needs it.
+    #[serde(default)]
+    pub issuer: String,
+    /// Expected `aud`: the OAuth client id registered with the IdP.
+    #[serde(default, alias = "client_id")]
+    pub audience: String,
+    /// Public key set URL. A `generic` issuer without one uses OIDC discovery.
+    #[serde(default)]
+    pub jwks_url: String,
+    /// `generic` only: claim carrying the tenant (default `org`).
+    #[serde(default)]
+    pub tenant_claim: String,
+    /// `generic` only: claim carrying the subject (default `sub`).
+    #[serde(default)]
+    pub subject_claim: String,
+    /// Claim carrying roles (default `roles`); read only with `trust_roles_claim`.
+    #[serde(default)]
+    pub roles_claim: String,
+    /// Take roles from the token (default `false`).
+    #[serde(default)]
+    pub trust_roles_claim: Option<bool>,
+    /// Refuse tokens whose `email_verified` is not true (always on for `google`).
+    #[serde(default)]
+    pub require_email_verified: bool,
+    /// `google`: allowed Workspace (`hd`) domains. `generic`: allowed email domains.
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
+    /// `entra`: allowed directory (`tid`) ids.
+    #[serde(default)]
+    pub allowed_tenants: Vec<String>,
+    /// Tenant for tokens that carry none (a single-organization deployment).
+    #[serde(default)]
+    pub default_tenant: String,
+}
+
+impl AuthIssuerCfg {
+    /// Load-time shape checks for one entry. The serve path re-resolves every
+    /// issuer and also refuses profile-fixed claim overrides and duplicate `iss`.
+    fn validate(&self) -> Result<(), String> {
+        let name = self.name.trim();
+        let fail = |msg: &str| Err(format!("`[[auth.issuers]]` `{name}`: {msg}"));
+        if name.is_empty() {
+            return Err("every `[[auth.issuers]]` entry needs a `name`".into());
+        }
+        if !agent_core::safe_segment(name) {
+            return fail("`name` must be a plain identifier");
+        }
+        if self.audience.trim().is_empty() {
+            return fail("needs `audience` (the client id)");
+        }
+        if !self.jwks_url.trim().is_empty() {
+            check_fetch_url("jwks_url", &self.jwks_url)
+                .map_err(|e| format!("`[[auth.issuers]]` `{name}`: {e}"))?;
+        }
+        match self.profile.trim() {
+            "google"
+                if self.allowed_domains.is_empty() && self.default_tenant.trim().is_empty() =>
+            {
+                fail("the `google` profile needs `allowed_domains` or `default_tenant`")
+            }
+            "entra" if self.allowed_tenants.is_empty() => {
+                fail("the `entra` profile needs `allowed_tenants`")
+            }
+            "google" | "entra" => Ok(()),
+            "" | "generic" if self.issuer.trim().is_empty() => fail("needs `issuer`"),
+            "" | "generic" if self.jwks_url.trim().is_empty() => {
+                check_fetch_url("issuer", &self.issuer).map_err(|e| {
+                    format!("`[[auth.issuers]]` `{name}`: {e} (it is used for discovery)")
+                })
+            }
+            "" | "generic" => Ok(()),
+            other => fail(&format!(
+                "unknown `profile` `{other}` (want `google` | `entra` | `generic`)"
+            )),
+        }
+    }
 }
 
 impl AuthCfg {
@@ -2658,16 +2760,38 @@ impl AuthCfg {
                                 `auth` feature (it is in the default feature set)"
                         .into());
                 }
-                for (key, value) in [
-                    ("issuer", &self.issuer),
-                    ("audience", &self.audience),
-                    ("jwks_url", &self.jwks_url),
-                ] {
-                    if value.trim().is_empty() {
-                        return Err(format!("`[auth] mode = \"oidc\"` needs `{key}`"));
+                // The single-issuer form is used when `issuer` is set, or when no
+                // `[[auth.issuers]]` exist (so a half-filled block names what is missing).
+                if !self.issuer.trim().is_empty() || self.issuers.is_empty() {
+                    for (key, value) in [
+                        ("issuer", &self.issuer),
+                        ("audience", &self.audience),
+                        ("jwks_url", &self.jwks_url),
+                    ] {
+                        if value.trim().is_empty() {
+                            return Err(format!(
+                                "`[auth] mode = \"oidc\"` needs `{key}` (or `[[auth.issuers]]`)"
+                            ));
+                        }
                     }
+                    check_fetch_url("jwks_url", &self.jwks_url)
+                        .map_err(|e| format!("`[auth]` {e}"))?;
+                } else if !self.audience.trim().is_empty() || !self.jwks_url.trim().is_empty() {
+                    return Err("`[auth]` top-level `audience` / `jwks_url` need `issuer`; \
+                                set them per entry in `[[auth.issuers]]`"
+                        .into());
                 }
-                check_jwks_url(&self.jwks_url)
+                let legacy = (!self.issuer.trim().is_empty()).then_some("default");
+                let mut names: Vec<&str> = legacy.into_iter().collect();
+                for issuer in &self.issuers {
+                    issuer.validate()?;
+                    let name = issuer.name.trim();
+                    if names.contains(&name) {
+                        return Err(format!("two `[auth]` issuers are named `{name}`"));
+                    }
+                    names.push(name);
+                }
+                Ok(())
             }
             other => Err(format!(
                 "unknown `[auth] mode` `{other}` (want `none` | `oidc`)"
@@ -2676,15 +2800,16 @@ impl AuthCfg {
     }
 }
 
-/// The JWKS URL must be `https`, or plain `http` to a numeric loopback address (a
-/// local test issuer). Public keys fetched over plaintext from the network could be
-/// swapped in transit, which would let an attacker mint accepted tokens. Embedded
-/// credentials are refused: the config holds no secrets.
-fn check_jwks_url(raw: &str) -> Result<(), String> {
-    let url = url::Url::parse(raw.trim())
-        .map_err(|e| format!("`[auth] jwks_url` is not a valid URL ({e})"))?;
+/// A URL the verifier fetches keys (or a discovery document) from must be `https`,
+/// or plain `http` to a numeric loopback address (a local test issuer). Public keys
+/// fetched over plaintext from the network could be swapped in transit, which would
+/// let an attacker mint accepted tokens. Embedded credentials are refused: the
+/// config holds no secrets. `key` names the field in errors.
+fn check_fetch_url(key: &str, raw: &str) -> Result<(), String> {
+    let url =
+        url::Url::parse(raw.trim()).map_err(|e| format!("`{key}` is not a valid URL ({e})"))?;
     if !url.username().is_empty() || url.password().is_some() {
-        return Err("`[auth] jwks_url` must not embed credentials".into());
+        return Err(format!("`{key}` must not embed credentials"));
     }
     let loopback = match url.host() {
         Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
@@ -2694,11 +2819,11 @@ fn check_jwks_url(raw: &str) -> Result<(), String> {
     match url.scheme() {
         "https" if url.host().is_some() => Ok(()),
         "http" if loopback => Ok(()),
-        "http" => Err(
-            "`[auth] jwks_url` must use https (plain http is allowed only to a loopback IP)".into(),
-        ),
+        "http" => Err(format!(
+            "`{key}` must use https (plain http is allowed only to a loopback IP)"
+        )),
         other => Err(format!(
-            "`[auth] jwks_url` scheme `{other}` is not supported (want https)"
+            "`{key}` scheme `{other}` is not supported (want https)"
         )),
     }
 }
@@ -3845,6 +3970,34 @@ mod tests {
 
     const GOOD_JWKS: &str = "https://issuer.example/.well-known/jwks.json";
 
+    /// `oidc` with only `[[auth.issuers]]` (no top-level issuer).
+    fn issuers(entries: Vec<AuthIssuerCfg>) -> AuthCfg {
+        AuthCfg {
+            mode: "oidc".into(),
+            issuers: entries,
+            ..AuthCfg::default()
+        }
+    }
+
+    fn google_entry() -> AuthIssuerCfg {
+        AuthIssuerCfg {
+            name: "google".into(),
+            profile: "google".into(),
+            audience: "cid.apps.googleusercontent.com".into(),
+            allowed_domains: vec!["example.com".into()],
+            ..AuthIssuerCfg::default()
+        }
+    }
+
+    fn generic_entry(name: &str) -> AuthIssuerCfg {
+        AuthIssuerCfg {
+            name: name.into(),
+            issuer: "https://idp.example/realms/a".into(),
+            audience: "agent".into(),
+            ..AuthIssuerCfg::default()
+        }
+    }
+
     #[rstest::rstest]
     #[case::positive_absent_section(AuthCfg::default(), true, None)]
     #[case::positive_explicit_none(AuthCfg { mode: "none".into(), ..AuthCfg::default() }, true, None)]
@@ -3889,6 +4042,26 @@ mod tests {
         Some("scheme `file`")
     )]
     #[case::adversarial_leeway_u64_max(AuthCfg { leeway_secs: u64::MAX, ..oidc(GOOD_JWKS) }, true, Some("leeway_secs"))]
+    // --- `[[auth.issuers]]` (security-hardening S3) ---
+    #[case::positive_issuers_only(issuers(vec![google_entry(), generic_entry("kc")]), true, None)]
+    #[case::positive_legacy_plus_issuers(AuthCfg { issuers: vec![google_entry()], ..oidc(GOOD_JWKS) }, true, None)]
+    #[case::positive_entra_entry(issuers(vec![AuthIssuerCfg { name: "entra".into(), profile: "entra".into(), audience: "api://a".into(), allowed_tenants: vec!["t-1".into()], ..AuthIssuerCfg::default() }]), true, None)]
+    #[case::positive_generic_discovery_loopback(issuers(vec![AuthIssuerCfg { issuer: "http://127.0.0.1:9".into(), ..generic_entry("kc") }]), true, None)]
+    #[case::negative_issuers_without_auth_feature(issuers(vec![google_entry()]), false, Some("`auth` feature"))]
+    #[case::negative_entry_without_name(issuers(vec![AuthIssuerCfg { name: String::new(), ..google_entry() }]), true, Some("needs a `name`"))]
+    #[case::negative_entry_without_audience(issuers(vec![AuthIssuerCfg { audience: String::new(), ..google_entry() }]), true, Some("needs `audience`"))]
+    #[case::negative_google_without_domains(issuers(vec![AuthIssuerCfg { allowed_domains: vec![], ..google_entry() }]), true, Some("`allowed_domains` or `default_tenant`"))]
+    #[case::negative_entra_without_tenants(issuers(vec![AuthIssuerCfg { name: "e".into(), profile: "entra".into(), audience: "a".into(), ..AuthIssuerCfg::default() }]), true, Some("`allowed_tenants`"))]
+    #[case::negative_generic_without_issuer(issuers(vec![AuthIssuerCfg { issuer: String::new(), ..generic_entry("kc") }]), true, Some("needs `issuer`"))]
+    #[case::negative_unknown_profile(issuers(vec![AuthIssuerCfg { profile: "okta".into(), ..generic_entry("kc") }]), true, Some("unknown `profile`"))]
+    #[case::corner_google_consumer_default_tenant(issuers(vec![AuthIssuerCfg { allowed_domains: vec![], default_tenant: "home".into(), ..google_entry() }]), true, None)]
+    #[case::corner_top_level_audience_without_issuer(AuthCfg { audience: "a".into(), ..issuers(vec![google_entry()]) }, true, Some("need `issuer`"))]
+    #[case::boundary_duplicate_entry_names(issuers(vec![generic_entry("kc"), generic_entry("kc")]), true, Some("named `kc`"))]
+    #[case::adversarial_entry_named_default_collides_with_legacy(AuthCfg { issuers: vec![generic_entry("default")], ..oidc(GOOD_JWKS) }, true, Some("named `default`"))]
+    #[case::adversarial_entry_name_traversal(issuers(vec![generic_entry("../kc")]), true, Some("plain identifier"))]
+    #[case::adversarial_entry_jwks_plain_http_remote(issuers(vec![AuthIssuerCfg { jwks_url: "http://idp.example/k".into(), ..google_entry() }]), true, Some("must use https"))]
+    #[case::adversarial_discovery_plain_http_remote(issuers(vec![AuthIssuerCfg { issuer: "http://idp.example".into(), ..generic_entry("kc") }]), true, Some("used for discovery"))]
+    #[case::adversarial_entry_jwks_credentials(issuers(vec![AuthIssuerCfg { jwks_url: "https://u:p@idp.example/k".into(), ..google_entry() }]), true, Some("credentials"))]
     fn auth_cfg_validate_cases(
         #[case] cfg: AuthCfg,
         #[case] verifier_compiled: bool,
@@ -3924,5 +4097,25 @@ mod tests {
             (Ok(_), Some(want)) => panic!("loaded, want error {want:?}"),
             (Err(e), None) => panic!("want load, got {e:#}"),
         }
+    }
+
+    /// `[[auth.issuers]]` loads and is checked at load; `oidc` needs the verifier,
+    /// so these run only in a build with the `auth` feature.
+    #[cfg(feature = "auth")]
+    #[rstest::rstest]
+    #[case::positive_issuers_table_loads(
+        "[auth]\nmode = \"oidc\"\n[[auth.issuers]]\nname = \"google\"\nprofile = \"google\"\nclient_id = \"cid\"\nallowed_domains = [\"example.com\"]\n",
+        None
+    )]
+    #[case::negative_issuers_entry_checked_at_load(
+        "[auth]\nmode = \"oidc\"\n[[auth.issuers]]\nname = \"kc\"\naudience = \"a\"\n",
+        Some("needs `issuer`")
+    )]
+    #[case::adversarial_misspelt_restriction_refused(
+        "[auth]\nmode = \"oidc\"\n[[auth.issuers]]\nname = \"kc\"\nissuer = \"https://idp.example\"\naudience = \"a\"\nallowed_domain = [\"example.com\"]\n",
+        Some("unknown field `allowed_domain`")
+    )]
+    fn auth_issuers_checked_at_load(#[case] toml_str: &str, #[case] want_err: Option<&str>) {
+        auth_cfg_checked_at_load(toml_str, want_err);
     }
 }

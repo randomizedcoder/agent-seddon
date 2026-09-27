@@ -69,6 +69,8 @@ pub use builder::{build_agent, build_agent_with};
 /// C29 config-ownership annotation: the (currently empty) set of tenant-writable
 /// `agent.toml` sections — every section is operator-global. See the fn's docs.
 pub use config::tenant_writable_config_sections;
+/// One `[[auth.issuers]]` entry (security-hardening S3), mapped by the serve path.
+pub use config::AuthIssuerCfg;
 pub use config::Config;
 #[cfg(feature = "recall")]
 pub use config::RecallCfg;

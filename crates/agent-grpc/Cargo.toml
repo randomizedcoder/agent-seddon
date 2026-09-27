@@ -12,7 +12,7 @@ default = []
 # standard build ships no token verification and no HTTP-fetch dep; the `AuthLayer`
 # itself always compiles (a pass-through when disabled, i.e. `[auth] mode = "none"`),
 # only the JWKS/JWT verifier is gated. See docs/design/config/09-increments.md.
-auth = ["dep:jsonwebtoken", "dep:reqwest"]
+auth = ["dep:jsonwebtoken", "dep:reqwest", "dep:url"]
 
 [dependencies]
 agent-core = { workspace = true }
@@ -22,6 +22,8 @@ agent-retry = { workspace = true }
 # JWT verify + JWKS fetch for the `auth` feature (see the feature comment above).
 jsonwebtoken = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
+# Issuer / JWKS URL checks (https, or http to a loopback IP) for the `auth` feature.
+url = { workspace = true, optional = true }
 tonic = { workspace = true }
 tonic-reflection = { workspace = true }
 tonic-health = { workspace = true }
@@ -62,7 +64,8 @@ agent-pty = { workspace = true }
 # The real in-memory task store, so the at-most-one-in_progress invariant is
 # asserted across the wire rather than by a double that fakes it.
 agent-tasks = { workspace = true, features = ["tasks-memory"] }
-agent-testkit = { workspace = true }
+# `oidc` = the fake OIDC issuer + shared test signing keys for the auth tests.
+agent-testkit = { workspace = true, features = ["oidc"] }
 # The real prompt store, so the round-trip asserts CRUD + the id-validation
 # rejection surviving the hop rather than a double echoing what it was handed.
 agent-prompt = { workspace = true }
