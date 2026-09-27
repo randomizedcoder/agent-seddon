@@ -141,6 +141,15 @@ The `DEFERRABLE INITIALLY DEFERRED` self-reference on `campaign_id` lets the roo
 to its own not-yet-committed `task_id` in one statement (protocol (a) in
 [`02-transactions.md`](02-transactions.md)). Children never need it: their root already exists.
 
+As built (CP-02, `crates/agent-campaign/migrations/0001_campaigns.sql`), with two deliberate
+differences from the listing above: every `CREATE TABLE` / `CREATE INDEX` is `IF NOT EXISTS`, so
+a database carrying the schema but no ledger re-records the baseline harmlessly (the digest and
+config-store runners do the same), and the two UNIQUE constraints are **named** —
+`tasks_path_key (tenant, path)` and `task_attempts_idem_key (tenant, idem_key)` — so the store
+maps a violation by constraint name (`AlreadyApplied` for the idempotency key), never by message
+text. `tenants` is the config-store definition verbatim; whichever runner comes first creates it.
+Any suite that `TRUNCATE`s `tenants` must `CASCADE` now that three more tables reference it.
+
 ## Invariants
 
 | Invariant | Enforced by |
