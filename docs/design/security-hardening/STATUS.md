@@ -16,7 +16,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S7 | RBAC extension, read gating, authz-coverage gate | D9 | ✅ | #504 |
 | S8 | Role bindings, bootstrap, escalation rules | D3, D9 | ✅ | #511 |
 | S9 | Bearer propagation + two-hop chain test | D7 | ✅ | #514 |
-| S10 | mTLS service identity | D6 | 🟡 | — |
+| S10 | mTLS service identity | D6 | ✅ | #516 |
 | S11 | `agent_auth_events` audit + doctor probes | D11 | ⬜ | — |
 | S12 | CLI `agent login/logout/whoami` | D6 | ⬜ | — |
 | S13 | Portal login + capability-aware UI | P0-4 | ⬜ | — |
@@ -466,7 +466,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
       `scope_request` with hops, and `outbound()`'s bearer and hop headers.
   - Deferred: `peer_san` and service-token-needs-mTLS (S10), and attributing a queued
     `ReviewNow` to its requester (S10/S11).
-- **2026-09-27 — S10.** Services prove who they are with their client certificate.
+- **2026-09-27 — S10 (#516).** Services prove who they are with their client certificate.
   - `AuthService.Exchange{use_client_cert}` (an additive proto field) maps the mTLS peer's URI SAN
     through `[[auth.mtls.bindings]]` to a service token:
     - `sub = svc:<service>`, `amr = ["mtls"]`;
