@@ -284,37 +284,72 @@ impl Backend for PgBackend {
                     expected,
                     blob,
                 } => {
-                    // `SELECT … FOR UPDATE` takes a row lock, so a second connection
-                    // racing the same claim blocks until this txn commits/rolls back
-                    // and then sees the updated value — the row lock is what makes
-                    // this true cross-connection mutual exclusion. On mismatch the
-                    // `Err` drops `tx` before commit, rolling back the whole batch.
-                    let cur: Option<Vec<u8>> = sqlx::query_scalar(
-                        "SELECT blob FROM cards WHERE collection = $1 AND tenant = $2 AND id = $3 FOR UPDATE",
-                    )
-                    .bind(collection)
-                    .bind(tenant)
-                    .bind(id)
-                    .fetch_optional(&mut *tx)
-                    .await
-                    .map_err(pg_err)?;
-                    if cur.as_deref() != expected.as_deref() {
-                        return Err(conflict(collection, id));
+                    match expected.as_deref() {
+                        // Insert-if-absent (e.g. the review-fleet post-lease
+                        // claim). `SELECT … FOR UPDATE` cannot lock a row that
+                        // does not exist yet, so a SELECT-then-INSERT lets two
+                        // connections both observe "absent", both pass the
+                        // `expected = None` check, and both land the row (the
+                        // second via `ON CONFLICT DO UPDATE`) — silently
+                        // breaking cross-connection mutual exclusion (two
+                        // racers each see `Acquired`). Claim atomically with
+                        // `ON CONFLICT DO NOTHING` and read the command tag
+                        // instead: exactly one racer inserts (`rows_affected
+                        // == 1`), and every loser is arbitrated by the unique
+                        // index (`rows_affected == 0`) → the CAS conflict. The
+                        // unique-index contention IS cross-connection atomic,
+                        // unlike a phantom-row `FOR UPDATE`.
+                        None => {
+                            let res = sqlx::query(
+                                "INSERT INTO cards (collection, tenant, id, blob)
+                                 VALUES ($1, $2, $3, $4)
+                                 ON CONFLICT (collection, tenant, id) DO NOTHING",
+                            )
+                            .bind(collection)
+                            .bind(tenant)
+                            .bind(id)
+                            .bind(blob.as_slice())
+                            .execute(&mut *tx)
+                            .await
+                            .map_err(pg_err)?;
+                            if res.rows_affected() == 0 {
+                                return Err(conflict(collection, id));
+                            }
+                        }
+                        // Replace-if-equals: the row must already exist, so
+                        // `SELECT … FOR UPDATE` locks it and a second connection
+                        // racing the same claim blocks until this txn
+                        // commits/rolls back and then sees the updated value —
+                        // the row lock is what makes this true cross-connection
+                        // mutual exclusion. On mismatch (or an absent row) the
+                        // `Err` drops `tx` before commit, rolling back the whole
+                        // batch. A plain `UPDATE` of the matched row keeps its
+                        // identity `pos`.
+                        Some(exp) => {
+                            let cur: Option<Vec<u8>> = sqlx::query_scalar(
+                                "SELECT blob FROM cards WHERE collection = $1 AND tenant = $2 AND id = $3 FOR UPDATE",
+                            )
+                            .bind(collection)
+                            .bind(tenant)
+                            .bind(id)
+                            .fetch_optional(&mut *tx)
+                            .await
+                            .map_err(pg_err)?;
+                            if cur.as_deref() != Some(exp) {
+                                return Err(conflict(collection, id));
+                            }
+                            sqlx::query(
+                                "UPDATE cards SET blob = $4 WHERE collection = $1 AND tenant = $2 AND id = $3",
+                            )
+                            .bind(collection)
+                            .bind(tenant)
+                            .bind(id)
+                            .bind(blob.as_slice())
+                            .execute(&mut *tx)
+                            .await
+                            .map_err(pg_err)?;
+                        }
                     }
-                    // Identity `pos` on insert (see the `Put` arm); an update
-                    // keeps the row's existing pos.
-                    sqlx::query(
-                        "INSERT INTO cards (collection, tenant, id, blob)
-                         VALUES ($1, $2, $3, $4)
-                         ON CONFLICT (collection, tenant, id) DO UPDATE SET blob = EXCLUDED.blob",
-                    )
-                    .bind(collection)
-                    .bind(tenant)
-                    .bind(id)
-                    .bind(blob.as_slice())
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(pg_err)?;
                 }
             }
         }
