@@ -8,7 +8,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | # | Increment | Closes | State | PR |
 |---|---|---|---|---|
 | S1 | `auth` default feature, load-time validation, insecure-listen refusal | P0-1, P0-3 | ✅ | #487 |
-| S2 | Tenant from principal, identity policy, direct-reader conversion | P0-2, P0-3 | 🟡 | — |
+| S2 | Tenant from principal, identity policy, direct-reader conversion | P0-2, P0-3 | ✅ | #489 |
 | S3 | Multi-issuer OIDC profiles + fake issuer | D2 | ⬜ | — |
 | S4 | tonic TLS, `[grpc.tls]`, `nix run .#pki-dev` | P0-5 | ⬜ | — |
 | S5 | Token service core (agent JWT, JWKS, `WhoAmI`) | D1, D10 | ⬜ | — |
@@ -49,7 +49,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
   (S2).
   Gate: `nix flake check` green (the `leak` fork/cancel and `coverage` pty-firehose timing
   flakes, both outside S1's code, passed on rerun).
-- **2026-09-26 — S2.** `agent_core::current_tenant()` now prefers the verified principal's tenant
+- **2026-09-26 — S2 (#489).** `agent_core::current_tenant()` now prefers the verified principal's tenant
   (new `scoped_tenant()` is the `Option` form for callers that must fail closed), so a token with
   no session header runs as its own tenant, never `local`. The direct readers now use it: memory
   `PerUserMemory`, the ClickHouse reader's `SET SQL_tenant_id`, the metrics `ambient_tenant`
