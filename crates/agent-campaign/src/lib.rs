@@ -11,3 +11,10 @@
 //!
 //! Design: `docs/design/campaigns/` (README decisions D1–D10, `01-schema.md`,
 //! `02-transactions.md`, `06-test-matrix.md`).
+
+pub mod display;
+
+pub use agent_core::campaign::{
+    Actor, CampaignError, CampaignResult, CampaignStore, Policy, Task, TaskId, TaskPath, TaskState,
+};
+pub use display::Letters;

@@ -10,7 +10,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 
 ## Now
 
-- **Next:** CP-01 step 7 — crate `agent-campaign` `display.rs` (letters) + T1 `positive_display` + lib re-exports.
+- **Next:** CP-01 step 8 — testkit `campaign/{mod.rs, mem.rs}` `MemCampaigns` (every protocol).
 
 ## CP-01 — seam, pure rules, `MemCampaigns`, T1–T8 (mem) — 🟡 branch `campaigns/cp-01`
 
@@ -22,10 +22,10 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 | `campaign/path.rs` `TaskPath` | ✅ | `TaskId` newtype landed in `mod.rs` with it; `root(TaskId)` is fallible (non-positive id refused) |
 | `campaign/policy.rs` `Policy` | ✅ | `from_json` shape-checks keys before serde so every rejection names `policy.<key>`; `from_stored` maps to `Backend`; T4 policy rows at the pure level (3 named + 28 rejected + 15 accepted) |
 | `campaign/mod.rs` errors, types, `Actor`, `CampaignStore` | ✅ | errors landed with policy (step 5); `Owner` / `IdemKey` validate on deserialize too; shared checkers `check_len` / `check_max` / `screen` / `check_list` / `truncate_chars`; `NewCampaign` / `ChildSpec` / `PlanAttempt` / `PrRef` carry `validate()`; `Actor::from_scope` never yields `Model` (a gateway constructs it) |
-| crate `agent-campaign` (display letters) | ⬜ | |
+| crate `agent-campaign` (display letters) | ✅ | `Letters` per listing (bijective base 26, capped at 1000 roots), `letters()` / `parse_letter()`; re-exports the seam |
 | testkit `MemCampaigns` | ⬜ | |
 | testkit conformance harness + `campaign_conformance_suite!` | ⬜ | |
-| T1 path grammar | 🟡 | rows: 26/27 in agent-core (+16 extra boundary / adversarial rows); `positive_display` lands with the crate (step 7) |
+| T1 path grammar | ✅ | rows: 27/27 — 26 in agent-core (+16 extra boundary / adversarial rows), `positive_display` in `agent-campaign::display` |
 | T2 `allowed()` + `boundary_exhaustive` | ✅ | rows: 26/26 (+11 rows for the amendments); count = 82 of 13 × 13 × 3 × 8; rollup pure half of T3 (20 rows) and `clamp_lease` (9 rows) here too |
 | T3 rollup (mem) | ⬜ | rows: 0/15 |
 | T4 create (mem) | ⬜ | rows: 0/20 (pg-only halves listed in notes) |
