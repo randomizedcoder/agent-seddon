@@ -1,37 +1,32 @@
 <?xml version="1.0"?>
 <!--
-  nix/clickhouse/users.xml — dev-only override.
+  nix/clickhouse/users.xml — the agent ClickHouse's server-side access overrides.
 
-  The official image ships users.d/default-user.xml restricting the `default`
-  user to ::1/127.0.0.1. Connections from the host arrive via the Docker bridge
-  gateway IP, so they'd be rejected over HTTP. This widens the `default` user to
-  any network (no password) so the agent can reach it over the mapped port.
+  Every login needs a password (security-hardening S16,
+  docs/design/security-hardening/08-data-plane-and-secrets.md):
 
-  Safe for local dev because `clickhouse-up` publishes the ports on 127.0.0.1
-  only (host-local). Do NOT use this container config on a shared/exposed host.
+  - `default` is the ADMIN (schema apply, CREATE USER / ROW POLICY, the OTel
+    collector's otel_* DDL). Its password is NOT here: `nix run .#clickhouse-up`
+    renders a second override, users.d/50-agent-credentials.xml, holding only the
+    SHA-256 of the admin password (test/clickhouse/ch_creds.py), and bind-mounts
+    it next to this file. The plaintext stays in a 0600 file on the host.
+  - agent_writer / agent_reader / agent_viewer are SQL users (schema.sql), created
+    unable to log in (`HOST NONE`) until the same helper sets their passwords.
+
+  The `default` user's networks stay open to any address because host connections
+  arrive through the container runtime's port forward (the bridge gateway, not
+  loopback); `clickhouse-up` publishes the ports on 127.0.0.1 only, and the password
+  is what gates the login.
 -->
 <clickhouse>
-    <!-- Multi-tenancy C27 (docs/design/multi-tenancy/02-data-scoping-and-rls.md): the
-         `agent_reader` row-level-security reader (created in schema.sql) binds a per-
-         connection `SQL_tenant_id` custom setting that the `tenant_iso_*` ROW POLICYs read
-         via getSetting(). Custom settings must have a server-declared prefix. -->
-    <custom_settings_prefixes>SQL_</custom_settings_prefixes>
-
-    <access_control_improvements>
-        <!-- A table with ANY row policy: users NOT named in a policy's TO list (here the
-             `default`/writer credential) still see ALL rows. This is the recent-ClickHouse
-             default; pin it explicitly so a version flip can't silently hide the writer's
-             own rows and break Tier-0 (single-operator) reads/inserts. -->
-        <users_without_row_policies_can_read_rows>true</users_without_row_policies_can_read_rows>
-    </access_control_improvements>
-
+    <!-- Server settings (custom_settings_prefixes, users_without_row_policies_can_read_rows)
+         live in ./config.xml: users.d ignores them. -->
     <users>
         <default>
             <networks replace="replace">
                 <ip>::/0</ip>
             </networks>
-            <!-- Let the schema migration (run as `default` by `clickhouse-migrate`) issue
-                 CREATE USER / CREATE ROW POLICY. Dev-only, like the widened networks above. -->
+            <!-- The admin issues CREATE USER / CREATE ROW POLICY for the schema. -->
             <access_management>1</access_management>
         </default>
     </users>

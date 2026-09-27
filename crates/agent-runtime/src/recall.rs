@@ -149,7 +149,7 @@ fn build_clickhouse_recall(cfg: &Config) -> Result<Arc<dyn SearchBackend>> {
                 .into(),
         ));
     }
-    let reader = cfg.telemetry.reader_credentials();
+    let reader = cfg.telemetry.reader_credentials().map_err(Error::Config)?;
     let backend = agent_telemetry::ClickHouseRecall::new(
         cfg.telemetry.clickhouse_url.clone(),
         cfg.telemetry.database.clone(),

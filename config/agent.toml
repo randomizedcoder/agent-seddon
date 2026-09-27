@@ -912,12 +912,21 @@ push_policy   = "never"      # never | checkpoint-only | explicit
 # `nix run .#clickhouse-up`, then set enabled = true. Never blocks the loop: if
 # ClickHouse is unreachable, rows are dropped and the .agent/episodic.jsonl log
 # still holds the full record.
+#
+# Every ClickHouse login has a password (security-hardening S16). `clickhouse-up`
+# generates one file per login under ~/.local/state/agent-seddon/clickhouse/ (0600);
+# `nix run .#clickhouse-creds -- path writer` prints the writer's. Point
+# `password_file` at it (`~` is expanded). `password` (inline) also works, but not
+# both. The writer (agent_writer) inserts and reads back every tenant; for
+# tenant-scoped reads under `[tenancy] per_tenant`, add the row-level-security reader:
+#   reader_user          = "agent_reader"
+#   reader_password_file = "~/.local/state/agent-seddon/clickhouse/reader.password"
 [telemetry]
 enabled          = false
 clickhouse_url   = "localhost:9000"   # native protocol (TCP), host:port
 database         = "agent"
-user             = "default"
-password         = ""
+user             = "agent_writer"
+password_file    = "~/.local/state/agent-seddon/clickhouse/writer.password"
 stream_logs      = true       # also send tracing logs to agent_logs
 batch_max_rows   = 256
 flush_interval_ms = 1000

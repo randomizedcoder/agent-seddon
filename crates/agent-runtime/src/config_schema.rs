@@ -99,6 +99,7 @@ pub const ENUM_CHOICES: &[(&str, &[&str])] = &[
 pub const SECRET_PATHS: &[&str] = &[
     "provider.api_key",
     "telemetry.password",
+    "telemetry.reader_password",
     "forge.token",
     "web_search.brave_api_key",
     "tokenizer.provider.api_key",

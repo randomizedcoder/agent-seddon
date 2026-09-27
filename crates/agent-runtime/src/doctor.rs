@@ -234,7 +234,9 @@ pub struct ClickHouseProbe {
     addr: String,
     database: String,
     user: String,
-    password: String,
+    /// The writer password, or why it could not be read (`password_file`); a probe
+    /// reports the latter as a failure rather than dialing without a password.
+    password: Result<String, String>,
 }
 
 impl ClickHouseProbe {
@@ -245,7 +247,7 @@ impl ClickHouseProbe {
             addr: t.clickhouse_url.clone(),
             database: t.database.clone(),
             user: t.user.clone(),
-            password: t.password.clone(),
+            password: t.writer_password(),
         }
     }
 }
@@ -259,11 +261,15 @@ impl Probe for ClickHouseProbe {
         if !self.enabled {
             return ProbeOutcome::new("clickhouse", ProbeStatus::Skipped, "telemetry disabled", 0);
         }
+        let password = match &self.password {
+            Ok(p) => p.clone(),
+            Err(e) => return ProbeOutcome::new("clickhouse", ProbeStatus::Fail, e.clone(), 0),
+        };
         let history = agent_telemetry::ClickHouseHistory::new(
             self.addr.clone(),
             self.database.clone(),
             self.user.clone(),
-            self.password.clone(),
+            password,
         );
         let start = Instant::now();
         let result = tokio::time::timeout(PROBE_TIMEOUT, history.ping()).await;
@@ -863,11 +869,28 @@ mod tests {
             enabled: false,
             addr: "localhost:9000".into(),
             database: "agent".into(),
-            user: "default".into(),
-            password: String::new(),
+            user: "agent_writer".into(),
+            password: Ok(String::new()),
         };
         let o = p.check().await;
         assert_eq!(o.status, ProbeStatus::Skipped);
+    }
+
+    /// desc: an unreadable `password_file` fails the probe with the reason, before any
+    /// dial (S16) — the probe never falls back to connecting without a password.
+    #[tokio::test]
+    async fn negative_clickhouse_unreadable_password_file_fails() {
+        let p = ClickHouseProbe {
+            enabled: true,
+            // A closed port: had the probe dialed, the reason would be a connect error.
+            addr: "127.0.0.1:1".into(),
+            database: "agent".into(),
+            user: "agent_writer".into(),
+            password: Err("[telemetry] password_file /nope: No such file".into()),
+        };
+        let o = p.check().await;
+        assert_eq!(o.status, ProbeStatus::Fail);
+        assert!(o.detail.contains("password_file"), "{}", o.detail);
     }
 
     // --- schema-drift check: the tables come from the baked-in schema.sql ---

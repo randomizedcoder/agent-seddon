@@ -109,7 +109,10 @@ async fn main() -> Result<()> {
                 addr: config.telemetry.clickhouse_url.clone(),
                 database: config.telemetry.database.clone(),
                 user: config.telemetry.user.clone(),
-                password: config.telemetry.password.clone(),
+                password: config
+                    .telemetry
+                    .writer_password()
+                    .map_err(anyhow::Error::msg)?,
                 batch_max_rows: config.telemetry.batch_max_rows,
                 flush_interval: Duration::from_millis(config.telemetry.flush_interval_ms),
             },

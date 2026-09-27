@@ -10,6 +10,10 @@
 # plugin and will log a provisioning error for this datasource (harmless — the
 # Prometheus datasource + dashboard keep working); recreate it to pick up the plugin:
 #   nix run .#grafana-down && nix run .#grafana-up
+#
+# Logs in as the read-only `agent_viewer` (security-hardening S16); `grafana-up` passes
+# its password as $CLICKHOUSE_VIEWER_PASSWORD, which Grafana expands below. A grafana
+# container created before S16 has no such variable: recreate it as above.
 apiVersion: 1
 
 datasources:
@@ -23,5 +27,7 @@ datasources:
       port: 9000
       protocol: native
       secure: false
-      username: default
+      username: agent_viewer
       defaultDatabase: agent
+    secureJsonData:
+      password: $CLICKHOUSE_VIEWER_PASSWORD

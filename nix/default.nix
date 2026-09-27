@@ -489,11 +489,17 @@ let
 
   # HyperDX (decomposed) apps (up / down / logs) — Mongo + OTel collector + app,
   # all writing/reading the SINGLE agent ClickHouse (no bundled ClickHouse).
-  hyperdx = import ./hyperdx { inherit pkgs lib versions; };
+  hyperdx = import ./hyperdx {
+    inherit pkgs lib versions;
+    inherit (clickhouse) clickhouse-creds;
+  };
 
   # Prometheus scraper + Grafana dashboards for the agent's metrics.
   prometheus = import ./prometheus { inherit pkgs lib versions; };
-  grafana = import ./grafana { inherit pkgs lib versions; };
+  grafana = import ./grafana {
+    inherit pkgs lib versions;
+    inherit (clickhouse) clickhouse-creds;
+  };
 
   # Agent Portal (docs/design/portal): Dart codegen + Flutter run + grpc-web proxy.
   # `agent` is passed so `portal-redeploy` can bake the freshly-built binary.
@@ -506,6 +512,7 @@ let
       portal-test-report
       ;
     inherit (nixLib) harness;
+    inherit (clickhouse) clickhouse-creds;
   };
 
   # Seam load / overload-conformance harness (docs/design/loadtest), opt-in.
@@ -552,6 +559,10 @@ let
     inherit (nixLib) harness;
   };
 
+  # `ch-integration` — the ClickHouse credential + row-level-security matrix against a
+  # throwaway server (security-hardening S16). Aggregated by `integration` below.
+  ch-integration = import ./ch-integration.nix { inherit pkgs versions; };
+
   # `nix run .#integration` — run the whole opt-in integration tier in one shot
   # (the model-free harnesses always, the model tier when AGENT_E2E_* is reachable),
   # orchestrating the apps below as black boxes on the shared 0/1/2 contract.
@@ -564,6 +575,7 @@ let
       loadtest-wire
       serve-smoke
       pg-integration
+      ch-integration
       e2e-live
       e2e-expect
       e2e-multi
@@ -670,6 +682,7 @@ in
         loadtest-wire
         serve-smoke
         pg-integration
+        ch-integration
         vcr-record
         integration
         soak

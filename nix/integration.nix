@@ -11,7 +11,9 @@
 #
 #   Model-free tier (always): loadtest, loadtest-loop, loadtest-wire, serve-smoke,
 #     pg-integration (the postgres config-store tier; self-skips without a
-#     container runtime — honors CONTAINER_RUNTIME, so podman-only hosts run it).
+#     container runtime — honors CONTAINER_RUNTIME, so podman-only hosts run it),
+#     ch-integration (the ClickHouse credential + row-level-security matrix; same
+#     self-skip and runtime rule).
 #   Model tier (auto): e2e-live, e2e-expect, e2e-multi, and fleet-e2e (the last only
 #     when a GITHUB_TOKEN is also present) — run only when a model is
 #     configured AND reachable (AGENT_E2E_BASE_URL), else skipped with a notice, so
@@ -32,6 +34,7 @@
   loadtest-wire,
   serve-smoke,
   pg-integration,
+  ch-integration,
   e2e-live,
   e2e-expect,
   e2e-multi,
@@ -48,6 +51,7 @@ pkgs.writeShellApplication {
     loadtest-wire
     serve-smoke
     pg-integration
+    ch-integration
     e2e-live
     e2e-expect
     e2e-multi
@@ -106,6 +110,7 @@ pkgs.writeShellApplication {
       # CONTAINER_RUNTIME=podman), so it is always safe to run here — a bare machine
       # simply records the skip.
       run_step "pg-integration — real Postgres config-store" pg-integration
+      run_step "ch-integration — ClickHouse credentials + row-level security" ch-integration
     fi
 
     if [ "$WITH_MODEL" != no ]; then

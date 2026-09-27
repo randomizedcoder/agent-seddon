@@ -145,5 +145,6 @@ pub fn parse_config_reporting_unknown(toml_str: &str) -> anyhow::Result<(Config,
     // doctor) refuses a bad block up front (security-hardening S1).
     cfg.auth.validate().map_err(anyhow::Error::msg)?;
     cfg.grpc.tls.validate().map_err(anyhow::Error::msg)?;
+    cfg.telemetry.validate().map_err(anyhow::Error::msg)?;
     Ok((cfg, unknown))
 }

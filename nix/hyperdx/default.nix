@@ -21,6 +21,7 @@
   pkgs,
   lib,
   versions,
+  clickhouse-creds,
 }:
 
 let
@@ -50,20 +51,14 @@ let
 
   mongoVolume = "agent-seddon-hyperdx-mongo-data";
 
-  # Seed the app's ClickHouse connection + base sources so the UI works headlessly
-  # (no manual "add a source" clicks). HyperDX applies these ONCE, at first team
-  # creation via password registration (not on later restarts, and not for an invited
-  # user — hyperdx issue #2921). Built with builtins.toJSON so the quoting is correct
-  # by construction; the result has no single quotes / no `${`, so it drops straight
-  # into a single-quoted shell `-e VAR='…'`.
-  defaultConnections = builtins.toJSON [
-    {
-      name = "Local ClickHouse";
-      host = "http://127.0.0.1:${chHttp}";
-      username = "default";
-      password = "";
-    }
-  ];
+  # The app's ClickHouse connection (DEFAULT_CONNECTIONS) is rendered at `hyperdx-up`
+  # time by `clickhouse-creds hyperdx-connections`: it logs in as the read-only
+  # `agent_viewer` (security-hardening S16), whose password must not be in the store.
+  # HyperDX applies it ONCE, at first team creation via password registration (not on
+  # later restarts, and not for an invited user — hyperdx issue #2921).
+  chHttpUrl = "http://127.0.0.1:${chHttp}";
+  # Built with builtins.toJSON so the quoting is correct by construction; the result has
+  # no single quotes / no `${`, so it drops straight into a single-quoted `-e VAR='…'`.
   # Only the base otel_logs / otel_traces sources — the rollup / materialized-view
   # entries the stock compose ships are DELIBERATELY omitted: with the legacy schema
   # (CREATE_LEGACY_SCHEMA=true, required for ClickHouse 24.8) those tables are never
@@ -123,10 +118,21 @@ in
 {
   hyperdx-up = pkgs.writeShellApplication {
     name = "hyperdx-up";
-    runtimeInputs = c.runtimes ++ [ versions.curl ];
+    runtimeInputs = c.runtimes ++ [
+      versions.curl
+      clickhouse-creds
+    ];
     text = ''
       set -euo pipefail
       ${c.pickRuntime}
+
+      # ClickHouse logins (S16): the app reads as agent_viewer; the collector creates its
+      # own otel_* tables, so it needs the admin. Both reach the containers through the
+      # environment (`-e NAME` copies the value from here), never a command line.
+      clickhouse-creds ensure
+      DEFAULT_CONNECTIONS="$(clickhouse-creds hyperdx-connections --url "${chHttpUrl}")"
+      CLICKHOUSE_PASSWORD="$(cat "$(clickhouse-creds path admin)")"
+      export DEFAULT_CONNECTIONS CLICKHOUSE_PASSWORD
 
       if ! "$runtime" info >/dev/null 2>&1; then
         echo "hyperdx-up: '$runtime' not reachable — is it installed/running?" >&2
@@ -193,7 +199,7 @@ in
           -e "OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:${otlpHttp}" \
           -e "OTEL_SERVICE_NAME=hdx-oss-app" \
           -e "USAGE_STATS_ENABLED=false" \
-          -e 'DEFAULT_CONNECTIONS=${defaultConnections}' \
+          -e DEFAULT_CONNECTIONS \
           -e 'DEFAULT_SOURCES=${defaultSources}' \
           "${appImage}" >/dev/null
       fi
@@ -221,7 +227,7 @@ in
           --network host \
           -e "CLICKHOUSE_ENDPOINT=tcp://127.0.0.1:${chNative}?dial_timeout=10s" \
           -e "CLICKHOUSE_USER=default" \
-          -e "CLICKHOUSE_PASSWORD=" \
+          -e CLICKHOUSE_PASSWORD \
           -e "HYPERDX_OTEL_EXPORTER_CLICKHOUSE_DATABASE=${otelDb}" \
           -e "HYPERDX_OTEL_EXPORTER_CREATE_LEGACY_SCHEMA=true" \
           -e "OPAMP_SERVER_URL=http://127.0.0.1:${opampPort}" \

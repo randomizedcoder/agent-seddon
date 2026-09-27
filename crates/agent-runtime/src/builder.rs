@@ -202,7 +202,9 @@ pub async fn build_agent_with(
             cfg.telemetry.clickhouse_url.clone(),
             cfg.telemetry.database.clone(),
             cfg.telemetry.user.clone(),
-            cfg.telemetry.password.clone(),
+            cfg.telemetry
+                .writer_password()
+                .map_err(anyhow::Error::msg)?,
         ))),
         "sqlite" => Some(Arc::new(agent_digest::SqliteDigests::open(expand_tilde(
             &cfg.digest.path,
@@ -1522,7 +1524,10 @@ pub async fn build_agent_with(
         // Pure-read seam ⇒ use the least-privilege reader credential (multi-tenancy C27),
         // which falls back to the writer credential at Tier 0. `tenant_scoped` engages the
         // per-tenant ROW POLICY only when a distinct reader was provisioned.
-        let reader = cfg.telemetry.reader_credentials();
+        let reader = cfg
+            .telemetry
+            .reader_credentials()
+            .map_err(anyhow::Error::msg)?;
         agent.with_fleet_history(Arc::new(
             agent_telemetry::ClickHouseHistory::new(
                 cfg.telemetry.clickhouse_url.clone(),

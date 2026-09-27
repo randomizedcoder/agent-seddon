@@ -517,6 +517,9 @@ class ArmEnv:
     # construction).
     clickhouse_http: str | None = None
     clickhouse_native: str = "localhost:9000"
+    # The agent_writer password file (security-hardening S16: every ClickHouse login
+    # needs one). Empty = no credential lines, for a ClickHouse that predates S16.
+    clickhouse_password_file: str = ""
 
 
 # Filenames under the cognition-documents dir (the driver resolves the dir:
@@ -638,6 +641,10 @@ enabled = false
 enabled = true
 clickhouse_url = "{env.clickhouse_native}"
 stream_logs = false
+"""
+        if env.clickhouse_password_file:
+            toml += f"""user = "agent_writer"
+password_file = "{env.clickhouse_password_file}"
 """
     if arm != "baseline":
         if env.local_base_url:

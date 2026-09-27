@@ -21,6 +21,11 @@ Env / flags (flags win over env; every value is optional):
 
   --ch-url URL   / CH_URL      ClickHouse HTTP endpoint (default http://localhost:8123)
   --db NAME      / CH_DB       database                 (default agent)
+  --ch-user U    / CH_USER     ClickHouse login          (default agent_viewer)
+  --ch-password-file F / CH_PASSWORD_FILE
+                               that login's password file (security-hardening S16;
+                               `nix run .#clickhouse-creds -- path viewer`). Unset =
+                               no credentials, for a ClickHouse that predates S16.
   --since TS     / CH_SINCE    only rows with ts > TS   (e.g. '2026-09-16 04:07:00', UTC)
   --like SUBSTR  / CH_LIKE     only sessions whose id contains SUBSTR (e.g. 'runpod')
   --iter-cap N   / CH_ITER_CAP flag reviews that hit this many model iterations (default 40)
@@ -49,10 +54,15 @@ def _sql_str(value: str) -> str:
 class ClickHouse:
     """A minimal HTTP query client (stdlib only — no clickhouse driver dep)."""
 
-    def __init__(self, url: str, db: str, timeout: float = 30.0):
+    def __init__(
+        self, url: str, db: str, timeout: float = 30.0,
+        user: str = "", password: str = "",
+    ):
         self.url = url.rstrip("/")
         self.db = db
         self.timeout = timeout
+        self.user = user
+        self.password = password
 
     def rows(self, sql: str) -> tuple[list[str], list[list[str]]]:
         """Run `sql` (FORMAT TSVWithNames appended); return (header, rows)."""
@@ -60,6 +70,10 @@ class ClickHouse:
         req = urllib.request.Request(
             f"{self.url}/?database={self.db}", data=body, method="POST"
         )
+        if self.password:
+            # Headers, not the URL, so the password never lands in a log line.
+            req.add_header("X-ClickHouse-User", self.user)
+            req.add_header("X-ClickHouse-Key", self.password)
         with urllib.request.urlopen(req, timeout=self.timeout) as resp:
             text = resp.read().decode()
         lines = text.splitlines()
@@ -192,13 +206,18 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Review-fleet performance report.")
     ap.add_argument("--ch-url", default=os.environ.get("CH_URL", "http://localhost:8123"))
     ap.add_argument("--db", default=os.environ.get("CH_DB", "agent"))
+    ap.add_argument("--ch-user", default=os.environ.get("CH_USER", "agent_viewer"))
+    ap.add_argument("--ch-password-file", default=os.environ.get("CH_PASSWORD_FILE") or None)
     ap.add_argument("--since", default=os.environ.get("CH_SINCE") or None)
     ap.add_argument("--like", default=os.environ.get("CH_LIKE") or None)
     ap.add_argument("--iter-cap", type=int, default=int(os.environ.get("CH_ITER_CAP", "40")))
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
 
-    ch = ClickHouse(args.ch_url, args.db)
+    password = ""
+    if args.ch_password_file:
+        password = open(os.path.expanduser(args.ch_password_file)).read().strip()
+    ch = ClickHouse(args.ch_url, args.db, user=args.ch_user, password=password)
     filt = Filters(since=args.since, like=args.like, iter_cap=args.iter_cap)
 
     try:

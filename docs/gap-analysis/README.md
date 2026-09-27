@@ -722,7 +722,7 @@ links its own sub-docs.
 - ✅ Reject absent identity on every stateful RPC — security-hardening S2 (always with a token and off-loopback; token-less loopback/unix-socket listeners opt in with `[auth] require_identity`).
 - Envoy: bind to loopback or the LAN address, add `authorization` to `allow_headers`, add `jwt_authn`.
 - ✅ TLS on TCP transports — security-hardening S4 (`[grpc.tls]`, `https://` endpoints, mTLS via `client_ca`, `nix run .#pki-dev`; peer-certificate identity and refusing plaintext off-loopback follow in S10).
-- Give `agent_reader` a password and drop `users_without_row_policies_can_read_rows`.
+- ✅ Give `agent_reader` a password and drop `users_without_row_policies_can_read_rows` — security-hardening S16 (every ClickHouse login has a generated password; writer / reader / viewer / admin split; the reader binds its tenant on every read; gated live by `nix run .#ch-integration`).
 - Confine `env:` / `file:` credential references per tenant.
 
 **P1 — tenancy completeness**

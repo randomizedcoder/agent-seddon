@@ -241,7 +241,7 @@ impl ClickHouseHistory {
         let db = self.inner.database().to_string();
         let rows: Vec<TableNameRow> = self
             .inner
-            .with_client(move |client| {
+            .with_client_unscoped(move |client| {
                 let q = QueryBuilder::new("SELECT name FROM system.tables WHERE database = $1")
                     .arg(db.clone());
                 async move { client.query_collect::<TableNameRow>(q).await }
