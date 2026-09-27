@@ -111,6 +111,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 | 2026-09-27 | CP-02: `nix flake check "git+file:///…/agent-seddon?ref=refs/heads/campaigns/cp-02"` (@ `74c5bcd`) | green, `all checks passed!` |
 | 2026-09-27 | End-to-end verification (plan items 2–3): `06-test-matrix.md` row ids vs `cargo test -- --list` (`mem::tN::<id>`, `pg::tN::<id>`, pg-only fns, T14/T15); relative-link check over `docs/design/campaigns/*.md` | every shared T3–T8 row present on both tiers (134 row ids; 146 mem fns, 135 pg conformance fns + 22 pg-only), T14 10/10 (`adversarial_tenant_string_sql` is the in-gate rstest, not in the `--ignored` list by design), T15 4/4; no broken links |
 | 2026-09-27 | Rebase dry-run in a throwaway worktree: `git rebase --onto campaigns/cp-01 6d7b87f` (the four CP-02 commits over the cp-01 tip, standing in for post-merge `main`) | clean, no conflicts; the real rebase waits for #501 |
+| 2026-09-27 | `main` advanced to `538bb34` (#502, config-store `tenants()` skip scan + one `suite!` row); dry-run `git merge origin/main` into `campaigns/cp-02` in a throwaway worktree | clean; #502 touches only `cards` and does not overlap the CP-02 `TRUNCATE … CASCADE` hunk in the same test file; the post-rebase gate covers the combined tree |
 
 ## Open questions / blockers
 
