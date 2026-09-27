@@ -10,6 +10,11 @@ syntax = "proto3";
 
 package agent.v1;
 
+// REST transcoding annotations (gap-analysis §4, docs/design/rest-openapi/). The
+// `(google.api.http)` options below let Envoy's `grpc_json_transcoder` expose the
+// service as REST/JSON without any Rust code; gRPC stays the primary interface.
+import "google/api/annotations.proto";
+
 // Where a prompt lives. UNSPECIFIED in a List request means "every kind".
 enum PromptKind {
   PROMPT_KIND_UNSPECIFIED = 0;
@@ -99,18 +104,50 @@ message SetActivePersonalityRequest {
 }
 
 service PromptService {
-  rpc List(PromptListRequest) returns (PromptList);
-  rpc Get(PromptRef) returns (PromptEntry);
-  rpc Put(PromptEntry) returns (PromptEntry);
-  rpc Delete(PromptRef) returns (DeleteReply);
+  // REST mappings (docs/design/rest-openapi/): reads → GET, deletes → DELETE, every
+  // other mutation/action → POST with `body: "*"`. A prompt's identity is the
+  // (kind, id) pair, so both ride as path params. Paths live under /v1/prompts/.
+  rpc List(PromptListRequest) returns (PromptList) {
+    option (google.api.http) = {get: "/v1/prompts"};
+  }
+  rpc Get(PromptRef) returns (PromptEntry) {
+    option (google.api.http) = {get: "/v1/prompts/{kind}/{id}"};
+  }
+  rpc Put(PromptEntry) returns (PromptEntry) {
+    option (google.api.http) = {
+      post: "/v1/prompts"
+      body: "*"
+    };
+  }
+  rpc Delete(PromptRef) returns (DeleteReply) {
+    option (google.api.http) = {delete: "/v1/prompts/{kind}/{id}"};
+  }
   // The situational fragments selected for a context — the wire form of the loop's
   // resolver. Returns each selected fragment as a full entry (with its tags), so an
-  // operator sees exactly the set that composes and why.
-  rpc Select(PromptContext) returns (PromptList);
-  rpc PreviewAssembled(PreviewRequest) returns (AssembledContext);
+  // operator sees exactly the set that composes and why. Read-only with a
+  // repeated-scalar filter (`tags`) → GET (each tag rides as a repeated query param).
+  rpc Select(PromptContext) returns (PromptList) {
+    option (google.api.http) = {get: "/v1/prompts/select"};
+  }
+  // A preview/assemble read whose request carries a nested message (`context`) +
+  // free-text `goal` → POST `body: "*"` (avoids brittle dotted query expansion; still
+  // side-effect-free).
+  rpc PreviewAssembled(PreviewRequest) returns (AssembledContext) {
+    option (google.api.http) = {
+      post: "/v1/prompts/preview"
+      body: "*"
+    };
+  }
   // Read / switch the active personality (the head base) live — no restart
   // (docs/design/prompts/10-portal-selector.md). `Set` re-resolves the base for the
   // next turn; with `persist` it also writes the new default through ConfigService.
-  rpc GetActivePersonality(GetActivePersonalityRequest) returns (ActivePersonality);
-  rpc SetActivePersonality(SetActivePersonalityRequest) returns (ActivePersonality);
+  rpc GetActivePersonality(GetActivePersonalityRequest) returns (ActivePersonality) {
+    option (google.api.http) = {get: "/v1/prompts/personality"};
+  }
+  rpc SetActivePersonality(SetActivePersonalityRequest) returns (ActivePersonality) {
+    option (google.api.http) = {
+      post: "/v1/prompts/personality"
+      body: "*"
+    };
+  }
 }

@@ -213,6 +213,40 @@ enum Expect {
     "ReviewFleetService.Preflight",
     Expect::Routes(&[("GET", "/v1/fleet/preflight")])
 )]
+// --- 03b: control plane (role / prompt / config) ---------------------------
+// positive — RoleService mirrors the fleet-session CRUD shape in a different proto
+// group (read by id → GET).
+#[case::positive_role_get_maps_to_get_with_id(
+    "RoleService.Get -> GET /v1/roles/{id}",
+    "RoleService.Get",
+    Expect::Routes(&[("GET", "/v1/roles/{id}")])
+)]
+// positive — ConfigService write maps to POST body:* on the resource root.
+#[case::positive_config_put_maps_to_post(
+    "ConfigService.Put -> POST /v1/config (body: *)",
+    "ConfigService.Put",
+    Expect::Routes(&[("POST", "/v1/config")])
+)]
+// corner — a prompt's identity is the (kind, id) PAIR, so its read route carries TWO
+// path params (the first RPC in the surface with a composite key).
+#[case::corner_prompt_get_has_two_path_params(
+    "PromptService.Get -> GET /v1/prompts/{kind}/{id} (composite key)",
+    "PromptService.Get",
+    Expect::Routes(&[("GET", "/v1/prompts/{kind}/{id}")])
+)]
+// corner — a read whose request is only a repeated-scalar filter maps to GET (the tag
+// list rides as repeated query params), not POST.
+#[case::corner_repeated_scalar_filter_read_maps_to_get(
+    "PromptService.Select -> GET /v1/prompts/select",
+    "PromptService.Select",
+    Expect::Routes(&[("GET", "/v1/prompts/select")])
+)]
+// boundary — a paramless read on a sub-resource maps to a bare GET sub-path.
+#[case::boundary_config_schema_maps_to_bare_get_subpath(
+    "ConfigService.GetSchema (empty request) -> GET /v1/config/schema",
+    "ConfigService.GetSchema",
+    Expect::Routes(&[("GET", "/v1/config/schema")])
+)]
 // negative — an RPC in a not-yet-annotated proto carries no rule. This row flips to a
 // positive `Routes` case when `policy.proto` is annotated in a later increment.
 #[case::negative_unannotated_rpc_has_no_rule(

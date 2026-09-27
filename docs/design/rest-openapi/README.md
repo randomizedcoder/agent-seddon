@@ -104,6 +104,17 @@ reviewable, the mapping follows one convention (documented here, applied uniform
 
 - **Server-streaming RPCs** → annotated; the transcoder emits a JSON array / chunked stream.
 
+Two refinements the sweep applies (both first exercised by the `03b` control plane):
+
+- **Composite keys** — when an entity's identity is more than one field (e.g. a prompt is keyed by
+  the `(kind, id)` pair), every key field is a path param: `get: "/v1/prompts/{kind}/{id}"`.
+- **Reads that carry a request body** — a read whose request is only scalar / repeated-scalar
+  *filters* stays `get:` (repeated fields expand to repeated query params, e.g.
+  `GET /v1/prompts/select?tags=mode:review&tags=language:rust`). A read whose request carries a
+  **nested message** (or a free-text field that would need brittle dotted query expansion) uses
+  `post: … body:"*"` instead — still side-effect-free, but the filter travels as a JSON body
+  (e.g. `PromptService.PreviewAssembled`, `ConfigService.Validate`).
+
 Paths are versioned under `/v1/` and grouped by area (`/v1/fleet/…`, `/v1/session/…`, …). URL
 templates and field paths must be unique across the whole surface (enforced by a unit test, below).
 
