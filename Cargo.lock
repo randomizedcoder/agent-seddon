@@ -50,9 +50,11 @@ version = "0.1.0"
 dependencies = [
  "agent-core",
  "agent-testkit",
+ "agent-validate",
  "async-trait",
  "rstest",
  "serde_json",
+ "sha2",
  "sqlx",
  "tokio",
 ]
