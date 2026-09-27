@@ -6,9 +6,12 @@
 //!
 //! * [`rules`] — the state / kind / actor vocabularies, the transition table
 //!   [`allowed()`], the parent [`rollup()`] rule and [`clamp_lease()`].
+//! * [`path`] — the materialized-path grammar, [`TaskPath`], the only `LIKE` builder.
 //!
 //! The model is untrusted: every string that reaches a store is capped and screened,
 //! every number clamped, every path and tenant validated fail-closed.
+
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Seam: CampaignStore (hierarchical task tree — docs/design/campaigns/)
@@ -16,3 +19,19 @@
 
 mod rules;
 pub use rules::*;
+mod path;
+pub use path::*;
+
+/// A `tasks.task_id` (identity column, always positive). The root's id doubles as its
+/// `campaign_id` and as the first segment of every path in the campaign.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default,
+)]
+#[serde(transparent)]
+pub struct TaskId(pub i64);
+
+impl std::fmt::Display for TaskId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}

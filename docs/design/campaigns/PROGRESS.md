@@ -10,7 +10,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 
 ## Now
 
-- **Next:** CP-01 step 4 — `campaign/path.rs` `TaskPath` + T1.
+- **Next:** CP-01 step 5 — `campaign/policy.rs` `Policy`.
 
 ## CP-01 — seam, pure rules, `MemCampaigns`, T1–T8 (mem) — 🟡 branch `campaigns/cp-01`
 
@@ -19,13 +19,13 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 | root `Cargo.toml` member + path dep | ✅ | `crates/agent-campaign`, `default-features = false`; doc-only crate skeleton so every commit builds |
 | agent-core `Error::Campaign`, `pub mod campaign` | ✅ | namespaced module, no glob re-export |
 | `campaign/rules.rs` enums, `allowed()`, `rollup()`, `clamp_lease()` | ✅ | `allowed()` is a `match`; the test holds the doc table as data |
-| `campaign/path.rs` `TaskPath` | ⬜ | |
+| `campaign/path.rs` `TaskPath` | ✅ | `TaskId` newtype landed in `mod.rs` with it; `root(TaskId)` is fallible (non-positive id refused) |
 | `campaign/policy.rs` `Policy` | ⬜ | |
 | `campaign/mod.rs` errors, types, `Actor`, `CampaignStore` | ⬜ | |
 | crate `agent-campaign` (display letters) | ⬜ | |
 | testkit `MemCampaigns` | ⬜ | |
 | testkit conformance harness + `campaign_conformance_suite!` | ⬜ | |
-| T1 path grammar | ⬜ | rows: 0/27 |
+| T1 path grammar | 🟡 | rows: 26/27 in agent-core (+16 extra boundary / adversarial rows); `positive_display` lands with the crate (step 7) |
 | T2 `allowed()` + `boundary_exhaustive` | ✅ | rows: 26/26 (+11 rows for the amendments); count = 82 of 13 × 13 × 3 × 8; rollup pure half of T3 (20 rows) and `clamp_lease` (9 rows) here too |
 | T3 rollup (mem) | ⬜ | rows: 0/15 |
 | T4 create (mem) | ⬜ | rows: 0/20 (pg-only halves listed in notes) |
