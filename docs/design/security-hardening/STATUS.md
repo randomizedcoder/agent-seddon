@@ -18,7 +18,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S9 | Bearer propagation + two-hop chain test | D7 | ✅ | #514 |
 | S10 | mTLS service identity | D6 | ✅ | #516 |
 | S11a | `agent_auth_events` audit stream | D11 | ✅ | #518 |
-| S11b | `doctor` auth probes (signer, JWKS, IdP discovery, session store) | D11 | 🟡 | — |
+| S11b | `doctor` auth probes (signer, JWKS, IdP discovery, session store) | D11 | ✅ | #521 |
 | S12 | CLI `agent login/logout/whoami` | D6 | ⬜ | — |
 | S13 | Portal login + capability-aware UI | P0-4 | ⬜ | — |
 | S14 | Envoy hardening + `jwt_authn` | P0-4 | ⬜ | — |
@@ -533,7 +533,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
       stamps `now64(3)`.
   - Deferred: attributing a queued `ReviewNow` to its requester still waits for the
     fleet queue to carry the principal.
-- **2026-09-27 — S11b.** `agent doctor` gains four auth probes (`doctor/auth.rs`, behind
+- **2026-09-27 — S11b (#521).** `agent doctor` gains four auth probes (`doctor/auth.rs`, behind
   `agent-runtime/auth`):
   - `auth.signer`: the signing key and `previous_key` load. The detail is the key id. A key
     file readable by group or other warns.
