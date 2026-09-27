@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use agent_core::{Action, ResourceType};
+use agent_core::{record_auth_event, Action, AuthEvent, AuthEventKind, ResourceType};
 use agent_proto::pb;
 use tonic::{Request, Response, Status};
 use tracing::Instrument;
@@ -24,7 +24,9 @@ use super::binding::{
 };
 use super::mtls::MtlsBindings;
 use super::peer::{self, PeerCert};
-use super::session::{AuthSession, RefreshError, SessionStore, MAX_REFRESH_HANDLE_BYTES};
+use super::session::{
+    session_event, AuthSession, RefreshError, SessionStore, MAX_REFRESH_HANDLE_BYTES,
+};
 use super::token::{AgentClaims, Grant, TokenService};
 use super::TokenVerifier;
 use crate::server::{authz, span};
@@ -74,14 +76,14 @@ impl AuthSvc {
     ) -> Result<pb::ExchangeResponse, Status> {
         let Some(peer) = peer else {
             tracing::warn!("exchange refused: no client certificate on this connection");
-            return Err(unauthenticated());
+            return Err(exchange_refused("no_client_cert"));
         };
         let Some(service) = self.mtls.service_of(&peer).cloned() else {
             tracing::warn!(
                 sans = ?peer.uris,
                 "exchange refused: the client certificate is not a bound service"
             );
-            return Err(unauthenticated());
+            return Err(exchange_refused("unbound_cert"));
         };
         let (session, mut grant) = self
             .sessions
@@ -89,7 +91,7 @@ impl AuthSvc {
             .await
             .map_err(|e| {
                 tracing::warn!(reason = %e, "exchange refused: no session");
-                unauthenticated()
+                exchange_refused("no_session")
             })?;
         let minted = match self.resolve(&session.roles, &session_who(&session)).await {
             Ok(roles) => {
@@ -107,6 +109,7 @@ impl AuthSvc {
                     peer_san = %service.san,
                     "service token issued"
                 );
+                record_auth_event(session_event(AuthEventKind::Login, &session));
                 Ok(out)
             }
             Err(e) => {
@@ -114,6 +117,7 @@ impl AuthSvc {
                     .sessions
                     .revoke(&session.tenant, &session.sid, "system", "logout")
                     .await;
+                record_mint_refused(EXCHANGE, &session);
                 Err(e)
             }
         }
@@ -213,6 +217,41 @@ impl AuthSvc {
 
 fn unauthenticated() -> Status {
     Status::unauthenticated("unauthenticated")
+}
+
+const EXCHANGE: &str = "/agent.v1.AuthService/Exchange";
+const REFRESH: &str = "/agent.v1.AuthService/Refresh";
+
+/// A refused `Exchange`: recorded with its reason, answered opaquely. Nothing the
+/// caller sent is proven, so the row names no tenant or subject.
+fn exchange_refused(reason: &'static str) -> Status {
+    super::super::audit::refused(EXCHANGE, reason, Default::default());
+    unauthenticated()
+}
+
+/// A session that verified but could not be given a token (bindings unavailable,
+/// the mint refused): the session is known, so the row names it.
+fn record_mint_refused(rpc: &str, session: &AuthSession) {
+    super::super::audit::refused(
+        rpc,
+        "mint_refused",
+        super::super::audit::Refused {
+            tenant: &session.tenant,
+            subject: &session.subject,
+            sid: &session.sid,
+        },
+    );
+}
+
+/// The audit row for a role-binding change by the current caller. The row sits
+/// in the binding's tenant, so that tenant's admins see who changed their grants;
+/// `target` is the binding id.
+fn record_binding_change(kind: AuthEventKind, tenant: &str, id: &str) {
+    record_auth_event(AuthEvent {
+        tenant: tenant.to_string(),
+        target: id.to_string(),
+        ..super::super::audit::caller_event(kind)
+    });
 }
 
 /// What a stored session proves about its subject, for re-resolving roles.
@@ -331,16 +370,16 @@ impl pb::auth_service_server::AuthService for AuthSvc {
             if req.use_client_cert {
                 // One credential per exchange: never both.
                 if !req.id_token.is_empty() {
-                    return Err(unauthenticated());
+                    return Err(exchange_refused("two_credentials"));
                 }
                 return self.exchange_service(peer, &meta).await.map(Response::new);
             }
             if req.id_token.is_empty() || req.id_token.len() > MAX_ID_TOKEN_BYTES {
-                return Err(unauthenticated());
+                return Err(exchange_refused("malformed_login"));
             }
             let identity = self.login.verify(&req.id_token).await.map_err(|()| {
                 tracing::warn!("exchange refused: login token did not verify");
-                unauthenticated()
+                exchange_refused("login_invalid")
             })?;
             let (session, handle) = self
                 .sessions
@@ -348,7 +387,7 @@ impl pb::auth_service_server::AuthService for AuthSvc {
                 .await
                 .map_err(|e| {
                     tracing::warn!(reason = %e, "exchange refused: no session");
-                    unauthenticated()
+                    exchange_refused("no_session")
                 })?;
             // The first token never outlives the login token or the session.
             let mut grant = Grant::from_login(&identity, &session.sid);
@@ -360,6 +399,7 @@ impl pb::auth_service_server::AuthService for AuthSvc {
                         .sessions
                         .revoke(&session.tenant, &session.sid, "system", "logout")
                         .await;
+                    record_mint_refused(EXCHANGE, &session);
                     return Err(e);
                 }
             };
@@ -371,6 +411,7 @@ impl pb::auth_service_server::AuthService for AuthSvc {
                         .sessions
                         .revoke(&session.tenant, &session.sid, "system", "logout")
                         .await;
+                    record_mint_refused(EXCHANGE, &session);
                     return Err(e);
                 }
             };
@@ -381,6 +422,7 @@ impl pb::auth_service_server::AuthService for AuthSvc {
                 client_kind = %session.client_kind,
                 "agent session opened"
             );
+            record_auth_event(session_event(AuthEventKind::Login, &session));
             Ok(Response::new(out))
         }
         .instrument(sp)
@@ -395,6 +437,7 @@ impl pb::auth_service_server::AuthService for AuthSvc {
         async move {
             let raw = request.into_inner().refresh_handle;
             if raw.is_empty() || raw.len() > MAX_REFRESH_HANDLE_BYTES {
+                super::super::audit::refused(REFRESH, "refresh_invalid", Default::default());
                 return Err(unauthenticated());
             }
             let (session, handle) = self.sessions.refresh(&raw).await.map_err(|e| {
@@ -402,13 +445,23 @@ impl pb::auth_service_server::AuthService for AuthSvc {
                     RefreshError::Store(err) => tracing::warn!(error = %err, "refresh: store"),
                     other => tracing::warn!(reason = ?other, "refresh refused"),
                 }
+                // The handle names a tenant, but nothing about it is proven
+                // until it matches; a reuse is recorded by the revocation.
+                super::super::audit::refused(REFRESH, e.label(), Default::default());
                 unauthenticated()
             })?;
             // Roles are resolved afresh, so a binding change reaches the caller
             // here; the permissions are re-derived under the live catalog.
             let mut grant = session.grant();
-            grant.roles = self.resolve(&session.roles, &session_who(&session)).await?;
-            let out = self.mint(&grant, &session, handle)?;
+            let minted = match self.resolve(&session.roles, &session_who(&session)).await {
+                Ok(roles) => {
+                    grant.roles = roles;
+                    self.mint(&grant, &session, handle)
+                }
+                Err(e) => Err(e),
+            };
+            let out = minted.inspect_err(|_| record_mint_refused(REFRESH, &session))?;
+            record_auth_event(session_event(AuthEventKind::Refresh, &session));
             Ok(Response::new(out))
         }
         .instrument(sp)
@@ -609,10 +662,10 @@ impl pb::auth_service_server::AuthService for AuthSvc {
             let before = self.bindings.list(&tenant).await.map_err(store_error)?;
             let old = before.iter().find(|b| b.id == new.id).cloned();
             check_binding_write(&catalog, granter, &new, true)
-                .map_err(|r| authz::refusal_status(r, "role binding"))?;
+                .map_err(|r| authz::refusal_status(r, Action::Write, ResourceType::Binding))?;
             if let Some(old) = &old {
                 check_binding_write(&catalog, granter, old, false)
-                    .map_err(|r| authz::refusal_status(r, "role binding"))?;
+                    .map_err(|r| authz::refusal_status(r, Action::Write, ResourceType::Binding))?;
             }
             let after: Vec<RoleBinding> = before
                 .iter()
@@ -623,7 +676,8 @@ impl pb::auth_service_server::AuthService for AuthSvc {
             if removes_last_admin(&catalog, &before, &after, &tenant, now) {
                 return Err(authz::refusal_status(
                     agent_core::GrantRefusal::LastAdmin,
-                    "role binding",
+                    Action::Write,
+                    ResourceType::Binding,
                 ));
             }
             let stored = self.bindings.put(new).await.map_err(store_error)?;
@@ -642,6 +696,7 @@ impl pb::auth_service_server::AuthService for AuthSvc {
                 revoked,
                 "role binding written"
             );
+            record_binding_change(AuthEventKind::BindingPut, &tenant, &stored.id);
             Ok(Response::new(pb::PutBindingResponse {
                 binding: Some(binding_to_pb(stored)),
                 revoked_sessions: revoked,
@@ -674,14 +729,15 @@ impl pb::auth_service_server::AuthService for AuthSvc {
                 email: email.as_deref(),
             };
             check_binding_write(&catalog, granter, &old, false)
-                .map_err(|r| authz::refusal_status(r, "role binding"))?;
+                .map_err(|r| authz::refusal_status(r, Action::Delete, ResourceType::Binding))?;
             let after: Vec<RoleBinding> =
                 before.iter().filter(|b| b.id != old.id).cloned().collect();
             let now = self.bindings.now();
             if removes_last_admin(&catalog, &before, &after, &tenant, now) {
                 return Err(authz::refusal_status(
                     agent_core::GrantRefusal::LastAdmin,
-                    "role binding",
+                    Action::Delete,
+                    ResourceType::Binding,
                 ));
             }
             let deleted = self
@@ -693,6 +749,9 @@ impl pb::auth_service_server::AuthService for AuthSvc {
                 .revoke_named(&tenant, &old, &principal.subject, req.keep_sessions)
                 .await;
             tracing::info!(%tenant, id = %old.id, by = %principal.subject, revoked, "role binding deleted");
+            if deleted {
+                record_binding_change(AuthEventKind::BindingDelete, &tenant, &old.id);
+            }
             Ok(Response::new(pb::DeleteBindingResponse {
                 deleted,
                 revoked_sessions: revoked,

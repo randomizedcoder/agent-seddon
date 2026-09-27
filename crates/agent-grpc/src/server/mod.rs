@@ -42,6 +42,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 mod admission;
 mod agent_session;
 mod ast;
+mod audit;
 mod auth;
 mod authz;
 mod authz_policy;

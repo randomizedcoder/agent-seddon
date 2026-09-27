@@ -485,6 +485,61 @@ impl DimensionRow {
     }
 }
 
+/// One authentication or authorization event (`agent_auth_events`) —
+/// security-hardening S11. `user` is the tenant the event belongs to (empty for a
+/// refusal that proved nothing); every text field was already control-stripped and
+/// capped by [`agent_core::AuthEvent::sanitized`], and no field ever carries token
+/// material.
+#[derive(Debug, Clone, Row)]
+pub struct AuthEventRow {
+    pub ts: DateTime64<3>,
+    pub user: String,
+    pub session_id: String,
+    pub subject: String,
+    pub event: String,
+    pub issuer: String,
+    pub amr: String,
+    pub action: String,
+    pub resource_type: String,
+    pub rpc: String,
+    pub reason: String,
+    pub client_kind: String,
+    pub peer_san: String,
+    pub target: String,
+    pub trace_id: String,
+    pub seq: u32,
+}
+
+impl AuthEventRow {
+    /// The row for one event, stamped `ts_ms`, `seq` (ties within a millisecond)
+    /// and the W3C trace id of the request it happened in (`""` outside a trace).
+    pub fn from_event(
+        event: agent_core::AuthEvent,
+        ts_ms: u64,
+        seq: u32,
+        trace_id: String,
+    ) -> Self {
+        Self {
+            ts: dt64_from_ms(ts_ms),
+            user: event.tenant,
+            session_id: event.sid,
+            subject: event.subject,
+            event: event.kind.as_str().to_string(),
+            issuer: event.issuer,
+            amr: event.amr,
+            action: event.action.to_string(),
+            resource_type: event.resource_type.to_string(),
+            rpc: event.rpc,
+            reason: event.reason.to_string(),
+            client_kind: event.client_kind,
+            peer_san: event.peer_san,
+            target: event.target,
+            trace_id,
+            seq,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1097,5 +1152,84 @@ mod tests {
         assert!(
             ReviewFeedbackRow::rows_from_event(&ev("goal", Message::user("x"), None)).is_empty()
         );
+    }
+}
+
+#[cfg(test)]
+mod auth_event_row_tests {
+    use super::*;
+    use agent_core::{AuthEvent, AuthEventKind};
+    use rstest::rstest;
+
+    fn deny() -> AuthEvent {
+        AuthEvent {
+            tenant: "acme".into(),
+            sid: "s1".into(),
+            subject: "user:google/1".into(),
+            action: "approve",
+            resource_type: "review",
+            rpc: "/agent.v1.ReviewFleetService/Approve".into(),
+            reason: "missing_permission",
+            ..AuthEvent::new(AuthEventKind::AuthzDeny)
+        }
+    }
+
+    #[rstest]
+    #[case::positive_deny_maps_every_field(deny(), "authz_deny", "acme", "approve")]
+    #[case::positive_login_names_the_kind(
+        AuthEvent { tenant: "acme".into(), ..AuthEvent::new(AuthEventKind::Login) },
+        "login",
+        "acme",
+        ""
+    )]
+    #[case::corner_unproven_refusal_has_no_tenant(
+        AuthEvent { reason: "no_token", ..AuthEvent::new(AuthEventKind::VerifyFail) },
+        "verify_fail",
+        "",
+        ""
+    )]
+    fn auth_event_row_cases(
+        #[case] event: AuthEvent,
+        #[case] kind: &str,
+        #[case] user: &str,
+        #[case] action: &str,
+    ) {
+        let reason = event.reason;
+        let row = AuthEventRow::from_event(event, 1_700_000_000_123, 7, "ab".repeat(16));
+        assert_eq!(row.event, kind);
+        assert_eq!(row.user, user);
+        assert_eq!(row.action, action);
+        assert_eq!(row.reason, reason);
+        assert_eq!(row.seq, 7);
+        assert_eq!(row.trace_id.len(), 32);
+        assert_eq!(row.ts.1, 1_700_000_000_123);
+    }
+
+    #[rstest]
+    #[case::boundary_zero_ts_and_seq(0, 0)]
+    #[case::boundary_max_seq(u64::from(u32::MAX), u32::MAX)]
+    fn auth_event_row_boundaries(#[case] ts_ms: u64, #[case] seq: u32) {
+        let row = AuthEventRow::from_event(deny(), ts_ms, seq, String::new());
+        assert_eq!(row.ts.1, ts_ms);
+        assert_eq!(row.seq, seq);
+        assert!(row.trace_id.is_empty());
+    }
+
+    /// A hostile subject arrives already sanitized by the funnel; the row keeps it
+    /// verbatim (it adds nothing and strips nothing twice).
+    #[rstest]
+    #[case::adversarial_control_chars_stripped_before_the_row(
+        "evil\n\u{1b}[31mroot",
+        "evil[31mroot"
+    )]
+    #[case::adversarial_oversized_subject_capped(&"x".repeat(10_000), &"x".repeat(agent_core::MAX_AUDIT_FIELD_BYTES))]
+    fn auth_event_row_adversarial(#[case] subject: &str, #[case] want: &str) {
+        let event = AuthEvent {
+            subject: subject.into(),
+            ..deny()
+        }
+        .sanitized();
+        let row = AuthEventRow::from_event(event, 1, 0, String::new());
+        assert_eq!(row.subject, want);
     }
 }

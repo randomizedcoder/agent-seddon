@@ -16,8 +16,8 @@
 //! `agent_review_drafts` rows that approve→post later reads.
 
 use crate::rows::{
-    DimensionRow, EventRow, LogRow, ReviewCollectorRow, ReviewDraftRow, ReviewFeedbackRow,
-    ReviewRow, ReviewToolRow, UsageRow, VerificationRow,
+    AuthEventRow, DimensionRow, EventRow, LogRow, ReviewCollectorRow, ReviewDraftRow,
+    ReviewFeedbackRow, ReviewRow, ReviewToolRow, UsageRow, VerificationRow,
 };
 use klickhouse::{Client, ClientOptions, Row};
 use std::time::Duration;
@@ -38,6 +38,7 @@ pub(crate) enum Msg {
     ReviewDraft(ReviewDraftRow),
     ReviewFeedback(ReviewFeedbackRow),
     Dimension(DimensionRow),
+    AuthEvent(AuthEventRow),
     /// Flush everything and stop; the ack fires once the final flush completes.
     /// Needed because the global tracing subscriber holds a `Sender` clone for
     /// the process lifetime, so channel-close can't be the shutdown signal.
@@ -88,6 +89,7 @@ pub(crate) async fn run(mut rx: mpsc::Receiver<Msg>, cfg: WriterConfig) {
     let mut review_drafts: Vec<ReviewDraftRow> = Vec::new();
     let mut review_feedback: Vec<ReviewFeedbackRow> = Vec::new();
     let mut dimensions: Vec<DimensionRow> = Vec::new();
+    let mut auth_events: Vec<AuthEventRow> = Vec::new();
 
     let mut ticker = tokio::time::interval(cfg.flush_interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -155,6 +157,12 @@ pub(crate) async fn run(mut rx: mpsc::Receiver<Msg>, cfg: WriterConfig) {
                         flush(&client, "agent_dimension_summaries", &mut dimensions).await;
                     }
                 }
+                Some(Msg::AuthEvent(r)) => {
+                    auth_events.push(r);
+                    if auth_events.len() >= cfg.batch_max_rows {
+                        flush(&client, "agent_auth_events", &mut auth_events).await;
+                    }
+                }
                 Some(Msg::Shutdown(ack)) => {
                     flush(&client, "agent_events", &mut events).await;
                     flush(&client, "agent_logs", &mut logs).await;
@@ -166,6 +174,7 @@ pub(crate) async fn run(mut rx: mpsc::Receiver<Msg>, cfg: WriterConfig) {
                     flush(&client, "agent_review_drafts", &mut review_drafts).await;
                     flush(&client, "agent_review_feedback", &mut review_feedback).await;
                     flush(&client, "agent_dimension_summaries", &mut dimensions).await;
+                    flush(&client, "agent_auth_events", &mut auth_events).await;
                     let _ = ack.send(());
                     return;
                 }
@@ -183,6 +192,7 @@ pub(crate) async fn run(mut rx: mpsc::Receiver<Msg>, cfg: WriterConfig) {
                 flush(&client, "agent_review_drafts", &mut review_drafts).await;
                 flush(&client, "agent_review_feedback", &mut review_feedback).await;
                 flush(&client, "agent_dimension_summaries", &mut dimensions).await;
+                flush(&client, "agent_auth_events", &mut auth_events).await;
             }
         }
     }
@@ -198,6 +208,7 @@ pub(crate) async fn run(mut rx: mpsc::Receiver<Msg>, cfg: WriterConfig) {
     flush(&client, "agent_review_drafts", &mut review_drafts).await;
     flush(&client, "agent_review_feedback", &mut review_feedback).await;
     flush(&client, "agent_dimension_summaries", &mut dimensions).await;
+    flush(&client, "agent_auth_events", &mut auth_events).await;
 }
 
 async fn connect(cfg: &WriterConfig) -> klickhouse::Result<Client> {

@@ -101,6 +101,7 @@ impl pb::role_service_server::RoleService for RoleSvc {
                 .map_err(tonic::Status::from)?;
             check_write(Some(&card))?;
             let stored = inner.put(card).await.map_err(|e| status_from_error(&e))?;
+            record_role_change(agent_core::AuthEventKind::RolePut, &stored.id);
             Self::refresh_catalog(&inner).await?;
             Ok(Response::new(stored.into()))
         }
@@ -117,10 +118,11 @@ impl pb::role_service_server::RoleService for RoleSvc {
         let inner = self.inner.clone();
         async move {
             check_write(None)?;
-            let deleted = inner
-                .delete(&request.into_inner().id)
-                .await
-                .map_err(|e| status_from_error(&e))?;
+            let id = request.into_inner().id;
+            let deleted = inner.delete(&id).await.map_err(|e| status_from_error(&e))?;
+            if deleted {
+                record_role_change(agent_core::AuthEventKind::RoleDelete, &id);
+            }
             Self::refresh_catalog(&inner).await?;
             Ok(Response::new(pb::RoleDeleteReply { deleted }))
         }
@@ -136,8 +138,22 @@ fn check_write(card: Option<&agent_core::RoleCard>) -> Result<(), Status> {
     let Some(principal) = agent_core::current_principal() else {
         return Ok(());
     };
+    let action = if card.is_some() {
+        agent_core::Action::Write
+    } else {
+        agent_core::Action::Delete
+    };
     agent_core::check_role_write(&agent_core::current_catalog(), &principal, card)
-        .map_err(|r| super::authz::refusal_status(r, "role card"))
+        .map_err(|r| super::authz::refusal_status(r, action, agent_core::ResourceType::Role))
+}
+
+/// The audit row for a role-card change (S11). Role cards are host-global, so the
+/// row sits in the writer's tenant; `target` is the role id.
+fn record_role_change(kind: agent_core::AuthEventKind, id: &str) {
+    agent_core::record_auth_event(agent_core::AuthEvent {
+        target: id.to_string(),
+        ..super::audit::caller_event(kind)
+    });
 }
 
 pub fn role_router(inner: Arc<dyn RoleRegistry>) -> Router {

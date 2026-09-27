@@ -839,3 +839,193 @@ async fn list_bindings_needs_read_binding(#[case] roles: &[&str], #[case] want: 
         .map_or_else(|e| e.code(), |_| Code::Ok);
     assert_eq!(got, want);
 }
+
+// ===================== the audit stream (S11) =====================
+//
+// The sink is process-global and these tests run concurrently on a multi-thread
+// runtime, so the collector keeps every event and each test reads back only the
+// rows of its own tenant (the `org` it signs in with). A refusal that proved no
+// identity has no tenant; for those the test asserts its row is present.
+
+mod audit {
+    use agent_core::{set_auth_audit, AuthEvent};
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    fn events() -> &'static Mutex<Vec<AuthEvent>> {
+        static EVENTS: OnceLock<Mutex<Vec<AuthEvent>>> = OnceLock::new();
+        EVENTS.get_or_init(|| {
+            set_auth_audit(Arc::new(|e| {
+                if let Some(m) = EVENTS.get() {
+                    m.lock().expect("audit lock").push(e);
+                }
+            }));
+            Mutex::new(Vec::new())
+        })
+    }
+
+    pub fn install() {
+        let _ = events();
+    }
+
+    /// `(kind, reason, rpc, sid, target)` of every row in `tenant`, in order.
+    pub fn rows(tenant: &str) -> Vec<(String, String, String, String, String)> {
+        events()
+            .lock()
+            .expect("audit lock")
+            .iter()
+            .filter(|e| e.tenant == tenant)
+            .map(|e| {
+                (
+                    e.kind.as_str().to_string(),
+                    e.reason.to_string(),
+                    e.rpc.clone(),
+                    e.sid.clone(),
+                    e.target.clone(),
+                )
+            })
+            .collect()
+    }
+
+    pub fn has_unproven(reason: &str, rpc: &str) -> bool {
+        events().lock().expect("audit lock").iter().any(|e| {
+            e.tenant.is_empty() && e.subject.is_empty() && e.reason == reason && e.rpc == rpc
+        })
+    }
+}
+
+const EXCHANGE: &str = "/agent.v1.AuthService/Exchange";
+const REFRESH: &str = "/agent.v1.AuthService/Refresh";
+
+/// Sign in, refresh, use a sensitive action after logout: one row per step, all
+/// in the session's tenant and naming its `sid`.
+#[tokio::test(flavor = "multi_thread")]
+async fn positive_session_lifecycle_is_audited() {
+    audit::install();
+    let h = Harness::start().await;
+    let org = "audit-lifecycle.test";
+    let resp = h
+        .exchange(&h.id_token(json!({"org": org, "roles": ["reviewer"]})))
+        .await
+        .expect("exchange");
+    let sid = resp.principal.clone().expect("principal").sid;
+    let next = h.refresh(&resp.refresh_handle).await.expect("refresh");
+    h.auth()
+        .logout(with_bearer(pb::LogoutRequest {}, Some(&next.access_token)))
+        .await
+        .expect("logout");
+    assert_eq!(h.approve(&next.access_token).await, Code::Unauthenticated);
+
+    let kinds: Vec<(String, String)> = audit::rows(org)
+        .into_iter()
+        .map(|(kind, reason, _, row_sid, _)| {
+            assert_eq!(row_sid, sid, "every row names the session");
+            (kind, reason)
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            ("login".to_string(), String::new()),
+            ("refresh".to_string(), String::new()),
+            ("logout".to_string(), "logout".to_string()),
+            ("verify_fail".to_string(), "session_not_live".to_string()),
+        ]
+    );
+}
+
+/// A refused exchange or refresh is recorded with its reason and names nobody:
+/// nothing the caller sent was proven.
+#[rstest]
+#[case::negative_login_token_does_not_verify("not.a.jwt", false, "login_invalid")]
+#[case::boundary_empty_login_token("", false, "malformed_login")]
+#[case::adversarial_two_credentials_at_once("x.y.z", true, "two_credentials")]
+#[case::corner_client_cert_asked_for_but_absent("", true, "no_client_cert")]
+#[tokio::test(flavor = "multi_thread")]
+async fn refused_exchange_is_audited(
+    #[case] id_token: &str,
+    #[case] use_client_cert: bool,
+    #[case] reason: &str,
+) {
+    audit::install();
+    let h = Harness::start().await;
+    let err = h
+        .auth()
+        .exchange(pb::ExchangeRequest {
+            id_token: id_token.into(),
+            use_client_cert,
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::Unauthenticated);
+    assert!(audit::has_unproven(reason, EXCHANGE), "no {reason} row");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn adversarial_forged_refresh_handle_is_audited() {
+    audit::install();
+    let h = Harness::start().await;
+    assert!(h.refresh("rh1.Zm9yZ2Vk.sid.secret").await.is_err());
+    assert!(audit::has_unproven("refresh_invalid", REFRESH));
+}
+
+/// Granting and removing a role: a row each, in the binding's tenant, naming the
+/// binding.
+#[tokio::test(flavor = "multi_thread")]
+async fn positive_binding_changes_are_audited() {
+    audit::install();
+    let h = Harness::start_with(OPS).await;
+    let org = "audit-binding.test";
+    let root = h
+        .exchange(&h.id_token(json!({
+            "org": org, "sub": "root", "email": "root@example.com", "email_verified": true,
+        })))
+        .await
+        .expect("exchange")
+        .access_token;
+    h.put_binding(
+        &root,
+        wire_binding("grant-1", "email", "bob@audit-binding.test", &["viewer"]),
+        false,
+    )
+    .await
+    .expect("put");
+    assert!(
+        h.delete_binding(&root, "grant-1", false)
+            .await
+            .expect("delete")
+            .deleted
+    );
+    let changes: Vec<(String, String)> = audit::rows(org)
+        .into_iter()
+        .filter(|(kind, ..)| kind.starts_with("binding_"))
+        .map(|(kind, _, _, _, target)| (kind, target))
+        .collect();
+    assert_eq!(
+        changes,
+        [
+            ("binding_put".to_string(), "grant-1".to_string()),
+            ("binding_delete".to_string(), "grant-1".to_string()),
+        ]
+    );
+}
+
+/// A permission refusal at the gate is a row in the caller's tenant naming the RPC.
+#[tokio::test(flavor = "multi_thread")]
+async fn negative_gate_denial_is_audited() {
+    audit::install();
+    let h = Harness::start().await;
+    let org = "audit-deny.test";
+    let token = h
+        .exchange(&h.id_token(json!({"org": org, "roles": ["viewer"]})))
+        .await
+        .expect("exchange")
+        .access_token;
+    assert_eq!(h.approve(&token).await, Code::PermissionDenied);
+    let denials: Vec<String> = audit::rows(org)
+        .into_iter()
+        .filter(|(kind, ..)| kind == "authz_deny")
+        .map(|(_, _, rpc, ..)| rpc)
+        .collect();
+    assert_eq!(denials, ["/agent.v1.ReviewFleetService/Approve"]);
+}

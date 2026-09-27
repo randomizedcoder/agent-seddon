@@ -118,6 +118,12 @@ async fn main() -> Result<()> {
             },
             session_id.clone(),
         );
+        // Every auth/authz event (security-hardening S11) goes to
+        // `agent_auth_events` through the same writer.
+        let audit = handle.clone();
+        agent_core::set_auth_audit(std::sync::Arc::new(move |event| {
+            audit.record_auth_event(event);
+        }));
         (Some(handle), session_id)
     } else {
         (None, String::new())

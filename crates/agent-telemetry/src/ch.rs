@@ -334,4 +334,75 @@ mod tests {
             .await
             .expect("tenant-agnostic ping needs no tenant");
     }
+
+    /// One `(event, reason, subject)` from `agent_auth_events`.
+    #[derive(Debug, klickhouse::Row)]
+    struct AuthProbeRow {
+        event: String,
+        reason: String,
+        subject: String,
+    }
+
+    /// desc: live (opt-in, `nix run .#ch-integration`) — `positive_auth_events_written_and_tenant_read`:
+    /// the telemetry writer (as `agent_writer`) inserts `agent_auth_events` rows whose
+    /// `LowCardinality` columns come from plain `String` fields; `agent_reader` reads
+    /// back only its own tenant's row (security-hardening S11).
+    #[tokio::test]
+    #[ignore = "needs a live ClickHouse; run via `nix run .#ch-integration`"]
+    async fn positive_auth_events_written_and_tenant_read() {
+        use agent_core::{AuthEvent, AuthEventKind};
+        let addr = std::env::var("AGENT_CH_RLS_TEST_ADDR").expect("AGENT_CH_RLS_TEST_ADDR");
+        let writer_password = std::env::var("AGENT_CH_RLS_TEST_WRITER_PASSWORD")
+            .expect("AGENT_CH_RLS_TEST_WRITER_PASSWORD");
+        let reader_password = std::env::var("AGENT_CH_RLS_TEST_READER_PASSWORD")
+            .expect("AGENT_CH_RLS_TEST_READER_PASSWORD");
+        let handle = crate::TelemetryHandle::spawn(
+            crate::TelemetryConfig {
+                addr: addr.clone(),
+                database: "agent".into(),
+                user: "agent_writer".into(),
+                password: writer_password,
+                batch_max_rows: 100,
+                flush_interval: std::time::Duration::from_millis(50),
+            },
+            "s1",
+        );
+        for tenant in ["rls-w1", "rls-w2"] {
+            handle.record_auth_event(AuthEvent {
+                tenant: tenant.into(),
+                subject: format!("user:kc/{tenant}"),
+                action: "approve",
+                resource_type: "review",
+                reason: "missing_permission",
+                ..AuthEvent::new(AuthEventKind::AuthzDeny)
+            });
+        }
+        handle.shutdown().await;
+
+        let reader =
+            ChReader::new(addr, "agent", "agent_reader", reader_password).tenant_scoped(true);
+        let rows: Vec<AuthProbeRow> = agent_core::scope(scoped("rls-w1"), async {
+            reader
+                .with_client(|client| async move {
+                    client
+                        .query_collect::<AuthProbeRow>(
+                            "SELECT event, reason, subject FROM agent.agent_auth_events \
+                             WHERE user LIKE 'rls-w%'",
+                        )
+                        .await
+                })
+                .await
+        })
+        .await
+        .expect("tenant read");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(
+            (
+                rows[0].event.as_str(),
+                rows[0].reason.as_str(),
+                rows[0].subject.as_str()
+            ),
+            ("authz_deny", "missing_permission", "user:kc/rls-w1")
+        );
+    }
 }

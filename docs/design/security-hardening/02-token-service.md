@@ -186,6 +186,32 @@ CREATE ROW POLICY IF NOT EXISTS tenant_iso_auth_events ON agent.agent_auth_event
 - The existing counters `agent_auth_verify_total` and `agent_authz_decisions_total` remain the cheap
   health signal; the table is the forensic trail. A portal "Audit" page over it is P1.
 
+> **As built (S11a).** The table matches the sketch above, with these differences:
+>
+> - A `target` column names the binding or role id of a change, whoever a revoke was done
+>   by, or the other tenant an operator acted in.
+> - `user`/`issuer`/`rpc` are plain `String`.
+> - Which rows are written:
+>   - every denial is written;
+>   - allows are written only when they are not reads and not `(use, agent)`, which keeps
+>     the table forensic rather than a request log;
+>   - there are no `exchange`, `verify_ok` or `mtls_peer` kinds: a successful exchange is a
+>     `login` row, and `peer_san` rides on every row instead.
+> - `verify_fail` reasons are what the server can tell apart without leaking detail:
+>   - the layer: `no_token`, `invalid_token`, `cert_not_presented`, `session_not_live`;
+>   - `Exchange`: `malformed_login`, `login_invalid`, `two_credentials`, `no_client_cert`,
+>     `unbound_cert`, `no_session`, `mint_refused`;
+>   - `Refresh`: `refresh_invalid`, `refresh_reused`, `refresh_raced`, `store_unavailable`.
+>
+>   The verifier returns `Err(())`, so `expired` and `bad_signature` are both `invalid_token`.
+> - A refusal that proved nothing has an empty tenant. The tenant policy adds
+>   `AND user != ''`, so a reader whose tenant setting is empty sees none of those rows.
+> - Events leave the serve path through a process-global sink (`agent_core::set_auth_audit`),
+>   which `agent` installs over its telemetry handle. The row takes the W3C trace id of
+>   the request span.
+> - A sensitive RPC's session liveness is now checked before its permission, so an
+>   `authz_allow` row is written only for a call that goes ahead.
+
 ## Test matrix
 
 | Class | Case | Expect |

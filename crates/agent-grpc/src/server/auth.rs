@@ -534,15 +534,29 @@ pub struct Auth<S> {
     mtls: Arc<mtls::MtlsBindings>,
 }
 
+/// What the audit rows and the `grpc.server` span need about a verified call that
+/// the principal does not carry.
+#[derive(Clone)]
+struct Caller {
+    /// The bound SAN of the known service on this request's connection (S10).
+    /// `None` for any other peer.
+    peer_san: Option<String>,
+    /// The token's auth session (S6); empty for a token that names none.
+    sid: String,
+}
+
 tokio::task_local! {
-    /// The bound SAN of the known service on this request's connection (S10), for
-    /// the `grpc.server` span's `peer_san` field. Unset for any other peer.
-    static PEER_SAN: String;
+    static CALLER: Caller;
 }
 
 /// The known service on the current request's connection, if any.
 pub(crate) fn current_peer_san() -> Option<String> {
-    PEER_SAN.try_with(Clone::clone).ok()
+    CALLER.try_with(|c| c.peer_san.clone()).ok().flatten()
+}
+
+/// The current request's auth session id, or empty (S11).
+pub(crate) fn current_sid() -> String {
+    CALLER.try_with(|c| c.sid.clone()).unwrap_or_default()
 }
 
 /// Paths served without authentication: standard health + reflection, so an
@@ -631,6 +645,7 @@ where
 
         Box::pin(async move {
             let Some(token) = bearer_token(req.headers()) else {
+                super::audit::refused(req.uri().path(), "no_token", Default::default());
                 return Ok(unauthenticated());
             };
             match verifier.verify(&token).await {
@@ -655,6 +670,15 @@ where
                         if let Some(obs) = &on_verify {
                             obs("error");
                         }
+                        super::audit::refused(
+                            req.uri().path(),
+                            "cert_not_presented",
+                            super::audit::Refused {
+                                tenant: &id.tenant,
+                                subject: &id.subject,
+                                sid: id.sid.as_deref().unwrap_or_default(),
+                            },
+                        );
                         tracing::warn!(
                             rpc = %req.uri().path(),
                             "rejected a certificate-bound token: the connection does not present \
@@ -692,13 +716,10 @@ where
                         subject: id.subject,
                         roles: id.roles,
                     };
-                    // The RPC's permission (security-hardening S7): every RPC, reads
-                    // included, and an unclassified RPC is denied.
-                    if let Err(denied) = super::authz::gate(req.uri().path(), &principal) {
-                        return Ok(denied.into_http());
-                    }
                     // A sensitive action also needs the token's session to be live,
                     // so logout and revocation stop it before the token expires (S6).
+                    // Checked before the permission, so an audited allow is only
+                    // ever written for a call that goes ahead.
                     #[cfg(feature = "auth")]
                     if let Some(sessions) = &sessions {
                         if super::authz_policy::is_sensitive(req.uri().path()) {
@@ -707,6 +728,15 @@ where
                                 None => false,
                             };
                             if !live {
+                                super::audit::refused(
+                                    req.uri().path(),
+                                    "session_not_live",
+                                    super::audit::Refused {
+                                        tenant: &principal.tenant,
+                                        subject: &principal.subject,
+                                        sid: id.sid.as_deref().unwrap_or_default(),
+                                    },
+                                );
                                 tracing::info!(
                                     rpc = %req.uri().path(),
                                     "denied: the token's session is not live"
@@ -715,6 +745,14 @@ where
                             }
                         }
                     }
+                    // The RPC's permission (security-hardening S7): every RPC, reads
+                    // included, and an unclassified RPC is denied.
+                    let sid = id.sid.clone().unwrap_or_default();
+                    if let Err(denied) =
+                        super::authz::gate(req.uri().path(), &principal, peer_san.as_deref(), &sid)
+                    {
+                        return Ok(denied.into_http());
+                    }
                     let scope = agent_core::RequestScope {
                         identity: None,
                         principal: Some(principal),
@@ -722,15 +760,13 @@ where
                         hops,
                     };
                     let call = agent_core::scope_request(scope, inner.call(req));
-                    match peer_san {
-                        Some(san) => PEER_SAN.scope(san, call).await,
-                        None => call.await,
-                    }
+                    CALLER.scope(Caller { peer_san, sid }, call).await
                 }
                 Err(()) => {
                     if let Some(obs) = &on_verify {
                         obs("error");
                     }
+                    super::audit::refused(req.uri().path(), "invalid_token", Default::default());
                     Ok(unauthenticated())
                 }
             }

@@ -254,6 +254,34 @@ CREATE TABLE IF NOT EXISTS agent.agent_dimension_summaries
 ENGINE = MergeTree
 ORDER BY (user, session_id, ts, dimension);
 
+-- The authentication/authorization audit trail (security-hardening S11): one row
+-- per login, refresh, logout, revocation, refused request, audited authz decision
+-- and role/binding change. `user` is the tenant the event belongs to ('' for a
+-- refusal that proved no identity — visible to operators only). Reasons are a
+-- bounded vocabulary and no column ever carries token material. Kept 400 days.
+CREATE TABLE IF NOT EXISTS agent.agent_auth_events
+(
+    ts            DateTime64(3, 'UTC'),
+    user          String,                       -- tenant ('' when unproven)
+    session_id    String,                       -- auth session id (sid)
+    subject       String,                       -- user:<issuer>/<sub> | svc:<name>
+    event         LowCardinality(String),       -- login | refresh | logout | revoke | verify_fail | authz_allow | authz_deny | binding_put | ...
+    issuer        String,
+    amr           LowCardinality(String),
+    action        LowCardinality(String),
+    resource_type LowCardinality(String),
+    rpc           String,                       -- /agent.v1.<Service>/<Method>, '' when not a known path
+    reason        LowCardinality(String),       -- bounded enum, never secrets
+    client_kind   LowCardinality(String),
+    peer_san      String,                       -- mTLS peer URI SAN, '' when none
+    target        String,                       -- binding/role id, or the other tenant acted on
+    trace_id      String,                       -- W3C trace id → otel_traces JOIN
+    seq           UInt32
+)
+ENGINE = MergeTree
+ORDER BY (user, ts, seq)
+TTL toDateTime(ts) + INTERVAL 400 DAY;
+
 -- The per-session digest ledger (cognition-graph 02): one summary + one facts row
 -- per delivered response (+ gate alternatives / compaction objectives), written
 -- DURABLY by the background distiller (async_insert + wait_for_async_insert — not
@@ -378,6 +406,7 @@ CREATE ROW POLICY IF NOT EXISTS tenant_iso_drafts        ON agent.agent_review_d
 CREATE ROW POLICY IF NOT EXISTS tenant_iso_feedback      ON agent.agent_review_feedback     USING user = getSetting('SQL_tenant_id')     TO agent_reader;
 CREATE ROW POLICY IF NOT EXISTS tenant_iso_dimensions    ON agent.agent_dimension_summaries USING user = getSetting('SQL_tenant_id')     TO agent_reader;
 CREATE ROW POLICY IF NOT EXISTS tenant_iso_digests       ON agent.agent_turn_digests        USING user_id = getSetting('SQL_tenant_id')  TO agent_reader;
+CREATE ROW POLICY IF NOT EXISTS tenant_iso_auth_events   ON agent.agent_auth_events         USING user = getSetting('SQL_tenant_id') AND user != '' TO agent_reader;
 
 -- The operator's cross-tenant view: the writer (which also reads back at Tier 0 and for
 -- the digest store), the dashboards, and the admin see every row.
@@ -392,3 +421,4 @@ CREATE ROW POLICY IF NOT EXISTS operator_all_drafts        ON agent.agent_review
 CREATE ROW POLICY IF NOT EXISTS operator_all_feedback      ON agent.agent_review_feedback     USING 1 TO agent_writer, agent_viewer, default;
 CREATE ROW POLICY IF NOT EXISTS operator_all_dimensions    ON agent.agent_dimension_summaries USING 1 TO agent_writer, agent_viewer, default;
 CREATE ROW POLICY IF NOT EXISTS operator_all_digests       ON agent.agent_turn_digests        USING 1 TO agent_writer, agent_viewer, default;
+CREATE ROW POLICY IF NOT EXISTS operator_all_auth_events   ON agent.agent_auth_events         USING 1 TO agent_writer, agent_viewer, default;

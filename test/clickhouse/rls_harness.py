@@ -91,6 +91,10 @@ def distinct_users(extra: str = "") -> str:
     return f"SELECT DISTINCT user FROM agent.agent_events{extra}"
 
 
+def auth_users(extra: str = "") -> str:
+    return f"SELECT DISTINCT user FROM agent.agent_auth_events{extra}"
+
+
 # Before the password ALTERs: the schema alone must leave no open login.
 PRE_ALTER = (
     Case("negative_schema_only_reader_cannot_log_in", "agent_reader", None, "SELECT 1", None),
@@ -112,6 +116,10 @@ MATRIX = (
          "SELECT x FROM default.rls_probe", ("1",)),
     Case("positive_admin_reads_all_tenants", "default", "admin",
          distinct_users(), (TENANT_A, TENANT_B)),
+    Case("positive_reader_sees_own_tenant_auth_events", "agent_reader", "reader",
+         auth_users(f" SETTINGS SQL_tenant_id = '{TENANT_A}'"), (TENANT_A,)),
+    Case("positive_viewer_reads_every_auth_event", "agent_viewer", "viewer",
+         "SELECT count() FROM agent.agent_auth_events", ("3",)),
     Case("positive_writer_inserts", "agent_writer", "writer",
          f"INSERT INTO agent.agent_usage (user) VALUES ('{TENANT_A}')", ()),
     # negative
@@ -133,6 +141,11 @@ MATRIX = (
          "SELECT x FROM default.rls_probe", None),
     Case("adversarial_reader_injection_in_setting_matches_nothing", "agent_reader", "reader",
          distinct_users(" SETTINGS SQL_tenant_id = 'rls-a'' OR ''1''=''1'"), ()),
+    Case("adversarial_reader_cannot_read_other_tenant_auth_events", "agent_reader", "reader",
+         auth_users(f" WHERE user = '{TENANT_B}' SETTINGS SQL_tenant_id = '{TENANT_A}'"), ()),
+    # corner: an unproven refusal ('' tenant) is visible to operators, never to a tenant
+    Case("corner_unproven_auth_refusal_hidden_from_reader", "agent_reader", "reader",
+         auth_users(" SETTINGS SQL_tenant_id = ''"), ()),
     # corner: a user named in no policy is tenant-blind (users_without_row_policies = false)
     Case("corner_user_without_policy_sees_no_rows", "rls_probe_user", "reader",
          distinct_users(), ()),
@@ -144,6 +157,8 @@ MATRIX = (
 
 SEED = f"""
 INSERT INTO agent.agent_events (user, session_id) VALUES ('{TENANT_A}', 's1'), ('{TENANT_B}', 's1');
+-- ts must be recent: the table's 400-day TTL drops a default (1970) row on insert.
+INSERT INTO agent.agent_auth_events (ts, user, event, reason) VALUES (now64(3), '{TENANT_A}', 'login', ''), (now64(3), '{TENANT_B}', 'authz_deny', 'missing_permission'), (now64(3), '', 'verify_fail', 'no_token');
 INSERT INTO agent.agent_turn_digests (user_id, session_id) VALUES ('{TENANT_A}', 's1'), ('{TENANT_B}', 's1');
 CREATE TABLE IF NOT EXISTS default.rls_probe (x UInt8) ENGINE = MergeTree ORDER BY x;
 INSERT INTO default.rls_probe VALUES (1);
@@ -251,17 +266,21 @@ def main(argv: list[str]) -> int:
             print("==> ch-integration: passwords set, two tenants seeded")
             failures += run_matrix(MATRIX, query, pw)
             if args.cargo:
-                print("==> ch-integration: the shared-connection regression (Rust, ignored)")
+                print("==> ch-integration: the live Rust tests (ignored): shared-connection "
+                      "regression, auth-event writer round trip")
+                live = ["boundary_two_tenants_share_one_connection",
+                        "positive_auth_events_written_and_tenant_read"]
                 rc = subprocess.run(
                     ["nix", "develop", "--extra-experimental-features", "nix-command flakes",
                      "-c", "cargo", "test", "-p", "agent-telemetry", "--lib", "--",
-                     "--ignored", "boundary_two_tenants_share_one_connection"],
+                     "--ignored", "--exact", *(f"ch::tests::{t}" for t in live)],
                     env={**os.environ,
                          "AGENT_CH_RLS_TEST_ADDR": f"127.0.0.1:{args.native_port}",
-                         "AGENT_CH_RLS_TEST_READER_PASSWORD": pw["reader"]},
+                         "AGENT_CH_RLS_TEST_READER_PASSWORD": pw["reader"],
+                         "AGENT_CH_RLS_TEST_WRITER_PASSWORD": pw["writer"]},
                 ).returncode
                 if rc:
-                    failures.append("boundary_two_tenants_share_one_connection")
+                    failures.append("live Rust tests: " + ", ".join(live))
         except (HarnessError, ch_creds.CredsError) as e:
             print(f"ch-integration: FAIL(harness): {e}", file=sys.stderr)
             return 1

@@ -500,6 +500,26 @@ grpcurl -cacert "$PKI/ca/root.crt" -cert "$PKI/fleet/cert.pem" -key "$PKI/fleet/
   -d '{"use_client_cert": true}' "$ADDR" agent.v1.AuthService/Exchange
 ```
 
+**Audit trail** (S11, [`server/audit.rs`](../crates/agent-grpc/src/server/audit.rs)). Every
+auth event is a row in ClickHouse `agent.agent_auth_events` when `[telemetry]` is on.
+
+- Rows cover: `login` and `refresh` (`Exchange`, `Refresh`); `logout` and `revoke`; every
+  refused credential (`verify_fail`, with a reason such as `no_token`, `invalid_token`,
+  `login_invalid`, `refresh_reused`, `session_not_live`, `cert_not_presented`); every
+  permission denial; allows for anything other than reads and `(use, agent)`; and role
+  and binding changes.
+- `user` is the tenant. A refusal that proved no identity has an empty tenant, so only
+  operators see it: the `tenant_iso_auth_events` policy never matches `''`.
+- `rpc` is only ever a served method (never a path the caller made up); `trace_id` joins
+  the row to its OTLP trace; no column holds token material.
+
+```sql
+-- as agent_reader: this tenant's denials in the last day
+SELECT ts, subject, action, resource_type, rpc, reason FROM agent.agent_auth_events
+WHERE event = 'authz_deny' AND ts > now() - INTERVAL 1 DAY
+SETTINGS SQL_tenant_id = 'example.com';
+```
+
 ### Isolation is not containment: `bash` and the exec seams
 
 Per-tenant paths isolate the *confined* file tools (`edit`/`read`/`write`/`search`).
