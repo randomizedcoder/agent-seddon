@@ -5,9 +5,13 @@ scenario, the expected outcome. Every table over untrusted input (model JSON, te
 paths, keys, forge responses) has `adversarial_` rows that assert the rejection. Each table names
 its owning increment and harness:
 
-- **pure**: no store, `agent-campaign` unit tests.
+- **pure**: no store, `agent-core` unit tests (`agent_core::campaign`; the display letters of T1
+  `positive_display` in `agent-campaign`).
 - **mem**: `MemCampaigns` in `agent-testkit` (CP-01); the same cases run again against Postgres in
-  CP-02 through a shared `#[rstest]` body parameterised by the store.
+  CP-02 through `agent_testkit::campaign_conformance_suite!`: one
+  `pub async fn <row>(h: &Harness)` per row in `agent_testkit::campaign::conformance::tN`, stamped
+  into a tier's tests as `<tier>::tN::<row>`. A row with several inputs ("one case each") is one
+  fn per input, suffixed (`negative_policy_out_of_range_max_depth`).
 - **pg**: live Postgres, `#[ignore = "requires a live Postgres (AGENT_CAMPAIGN_TEST_DSN)"]`,
   `TRUNCATE` between cases, run by `nix run .#integration` (`nix/pg-integration.nix`).
 - **fake**: fake provider (`agent-testkit`) returning scripted JSON; fake forge; tempdir repo.
@@ -195,7 +199,7 @@ the cases, not the other way round.
 | `positive_in_review` | `running` leaf, pr fields | `in_review`; pr fields set; `claimed_by NULL`; attempt `pr` |
 | `positive_done_rollup` | poller: `in_review → done`, last sibling | parent `done`; events on leaf and parent |
 | `positive_failed_blocks_dependents` | leaf fails; sibling depends on it | sibling `ready → blocked`; event `detail.reason = dependency_failed` |
-| `positive_failed_does_not_block_done_dependent` | dependent already `done` | dependent unchanged |
+| `positive_failed_does_not_block_done_dependent` | dependent already terminal (`cancelled`: a dependent is never `done` before its dependency, and `done` never fails) | dependent unchanged; a non-dependent `ready` sibling unchanged |
 | `negative_owner_mismatch` | complete with the wrong owner | `LeaseLost`; nothing written |
 | `negative_not_running` | leaf is `claimed`, not `running` | `Conflict` |
 | `negative_poller_wrong_state` | poller completes a `running` leaf | `Conflict` |
@@ -208,7 +212,7 @@ the cases, not the other way round.
 | `adversarial_error_injection` | error text with prompt-injection | stored verbatim, never re-prompted; CLI renders with control characters escaped |
 | `adversarial_error_control_chars` | error with `\x1b[` sequences | stored; rendered escaped |
 | `adversarial_pr_url_scheme` | `pr_url = "javascript:…"` | `Invalid` (https only, forge host) |
-| `adversarial_pr_url_long` | 513-char URL | `Invalid` |
+| `adversarial_pr_url_long` | 513-char URL | `TooLong` (the cap class, as `boundary_title_121`); 512 accepted |
 | `adversarial_tokens_negative` | `tokens_in = -5` | clamped to 0 before the write and before any metric |
 | `adversarial_cross_tenant_complete` | tenant B completes tenant A's leaf | `NotFound` |
 

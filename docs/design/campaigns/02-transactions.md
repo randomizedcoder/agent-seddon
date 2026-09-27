@@ -149,14 +149,17 @@ COMMIT;
 ### (b) Decompose (planner result `split`)
 
 Inputs: `parent_id`, `expected_version` (read when the node moved to `decomposing`),
-`attempt` (the `task_attempts` row created when the model was called, `outcome = 'pending'`),
-`children[]` already post-validated in Rust ([`03-decomposition.md`](03-decomposition.md)).
+`attempt` (the finished model call: `idem_key`, `prompt_hash`, `model`, tokens — its
+`task_attempts` row is inserted **here**, inside the finishing transaction, never at
+`plan_start`), `children[]` already post-validated in Rust
+([`03-decomposition.md`](03-decomposition.md)).
 
 ```sql
 BEGIN;
--- 1. Idempotency: the attempt row was inserted 'pending' before the model call; finishing it
---    twice is impossible because outcome is CAS-updated at the end. A *new* attempt with the
---    same idem_key (a retried tick) fails here and the caller reports AlreadyApplied.
+-- 1. Idempotency: the attempt row is written inside this transaction (plan_start writes none).
+--    A replayed idem_key (a retried tick against unchanged input) hits the UNIQUE and the
+--    caller reports AlreadyApplied; any ROLLBACK below discards the row with everything else,
+--    so the key stays usable for the retry (T5 negative_version_conflict).
 INSERT INTO task_attempts (tenant, task_id, kind, idem_key, prompt_hash, model, outcome)
 VALUES ($t, $parent, 'decompose', $idem, $phash, $model, 'pending')
 ON CONFLICT (tenant, idem_key) DO NOTHING
@@ -174,7 +177,9 @@ FROM tasks WHERE tenant = $t AND parent_id = $parent;
 SELECT count(*) AS n_nodes FROM tasks WHERE tenant = $t AND campaign_id = $campaign;
 -- app: depth + 1 <= policy.max_depth
 --      n_children + N <= min(8, policy.max_children)
---      n_nodes + N <= policy.max_nodes                 else ROLLBACK; attempt outcome = 'error'
+--      n_nodes + N <= policy.max_nodes                 else ROLLBACK; Invalid (the row above is
+--      rolled back too; the planner then records the failure through plan_close(error), which
+--      counts the attempt and may block the node)
 
 -- 4. Insert the children in one statement; ordinals continue from max_ord.
 INSERT INTO tasks (tenant, campaign_id, repo_id, parent_id, path, depth, ordinal, kind, state,
@@ -220,6 +225,12 @@ c.parent_id = $node)`. `needs_info` and `reject` are single CAS updates with the
 reason in `detail`. A validation failure leaves the node `ready` with `attempts = attempts + 1`
 and closes the attempt as `error`; at `attempts >= policy.max_plan_attempts` the node goes to
 `blocked` instead.
+
+A node the **planner** moves to `blocked` — `reject`, attempts exhausted, or the `plan_start`
+caps in [`03-decomposition.md`](03-decomposition.md) step 1 — is a failure state for its parent
+exactly like a failed leaf: the transaction locks the ancestors first (lock order) and runs the
+rollup pass of (d) step 5 after the CAS. Without it the rule's "any `failed` or `blocked` child"
+row is unreachable from (b) (T8 `positive_retry_blocked_task`).
 
 ### (c) Claim, heartbeat, reap
 

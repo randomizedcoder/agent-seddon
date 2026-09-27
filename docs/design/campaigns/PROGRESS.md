@@ -10,7 +10,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 
 ## Now
 
-- **Next:** CP-01 step 11 — testkit `lib.rs` doc-header bullets; then step 12 (doc amendments) and step 13 (`nix flake check`, ask before push / PR).
+- **Next:** CP-01 step 13 — `nix flake check` (+ workspace clippy `--all-features`, `fmt --check`); record the gate below; then ask before push / PR.
 
 ## CP-01 — seam, pure rules, `MemCampaigns`, T1–T8 (mem) — 🟡 branch `campaigns/cp-01`
 
@@ -33,7 +33,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 | T6 claim / heartbeat / reap (mem) | ✅ | rows: 22/24 (`corner_reap_skips_locked`, `adversarial_double_claim` pg-only); rows look at `work` attempts only (a fixture leaf also owns its `execute` attempt); lease rows assert `lease_until_ms` against the harness clock, so they run unchanged on pg; `adversarial_owner_empty` holds at `Owner::parse` (a `ClaimRequest` cannot carry a bad owner) |
 | T7 complete / fail (mem) | ✅ | rows: 19/19; two doc amendments for step 12: `adversarial_pr_url_long` is `TooLong` (the cap class, like `boundary_title_121`), not `Invalid`; `positive_failed_does_not_block_done_dependent` uses a `cancelled` dependent (a dependent is never `done` before its dependency, and `done` never fails) and also checks a non-dependent `ready` sibling is untouched |
 | T8 approve / answer / retry / cancel / replan (mem) | ✅ | rows: 25/25; `positive_retry_blocked_task` found a store bug — a planner `blocked` (`plan_start` caps, `plan_close` reject / attempts exhausted) did not roll up; fixed in `MemCampaigns` and logged below for `PgCampaigns`; `adversarial_actor_from_arg` sweeps every non-human `Actor` variant over the seven human protocols |
-| doc amendments (02 transitions, 03 attempt note, 05 row, 06 harness/dims) | ⬜ | |
+| doc amendments (02 transitions, 03 attempt note, 05 row, 06 harness/dims) | ✅ | 02: (b) inputs + step 1 / step 3 comments (attempt row inside the finishing tx), planner-`blocked` rollup paragraph; 03: step 1 (no attempt row at `plan_start`, `blocked` rolls up); 05: CP-01 row (pure rules in `agent_core::campaign`, `agent-campaign` = display letters); 06: harness bullets (`campaign_conformance_suite!`, suffixed rows), T7 `adversarial_pr_url_long` → `TooLong`, `positive_failed_does_not_block_done_dependent` wording; testkit `lib.rs` doc bullets (step 11) |
 | gate `nix flake check` | ⬜ | |
 
 ## CP-02 — `PgCampaigns`, migration 0001, live suite, invariants, pg-integration — ⬜
