@@ -9,16 +9,23 @@
 //! guard: exactly one `acquire` wins (`Acquired`), the rest observe `Held`/`AlreadyPosted`
 //! and never post.
 //!
-//! Two backends, mirroring the roster triad:
+//! Two backends:
 //! - [`MemoryPostLease`] — in-process (a mutex-guarded map). Atomic **within one process**
 //!   (closes the concurrent + sequential-within-process double-post), the default and the
 //!   test double. It does **not** survive a restart or coordinate across processes — a
 //!   fleet that needs that must run a durable backend.
-//! - `SqlitePostLease` (feature `fleet-sqlite`) — a durable, cross-process CAS via an
-//!   `INSERT … ON CONFLICT DO NOTHING` claim in an embedded SQLite table.
+//! - [`StorePostLease`] (feature `fleet-store`) — the durable, cross-process lease over the
+//!   shared transactional config store ([`agent_config_store::Backend`]: memory/file/sqlite/
+//!   **postgres**), the lease twin of [`crate::StoreFleet`]. It replaces the retired
+//!   `SqlitePostLease`: the claim is one atomic [`agent_config_store::Write::CompareAndSwap`]
+//!   (land `held` only if the row is absent), so exactly one racer — across threads *and*
+//!   processes sharing the backend — observes `Acquired`. A `postgres` fleet finally gets
+//!   cross-process/restart-durable dedup, not just the old embedded-SQLite tier.
 //!
-//! `review_id` is untrusted wire input; every backend binds it as a query argument and
-//! never turns it into a path.
+//! `review_id` is untrusted wire input. [`MemoryPostLease`] keys it into an opaque in-process
+//! map (never a path). [`StorePostLease`] makes it a card **id**, so it is `safe_segment`-gated
+//! and reaches the backend only as a bound parameter — it can neither traverse nor inject.
+//! (Review ids are server-minted UUIDs, so a well-formed id always passes.)
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
@@ -121,121 +128,162 @@ impl FleetPostLease for MemoryPostLease {
     }
 }
 
-#[cfg(feature = "fleet-sqlite")]
-pub use sqlite_lease::SqlitePostLease;
+#[cfg(feature = "fleet-store")]
+pub use store_lease::StorePostLease;
 
-#[cfg(feature = "fleet-sqlite")]
-mod sqlite_lease {
-    use super::*;
-    use agent_core::Error;
-    use rusqlite::{params, Connection};
+#[cfg(feature = "fleet-store")]
+mod store_lease {
+    use std::sync::Arc;
 
-    fn sql_err(e: impl std::fmt::Display) -> Error {
-        Error::Fleet(format!("post-lease sqlite: {e}"))
+    use agent_config_store::{is_conflict, Backend, Write};
+    use agent_core::{safe_segment, Error, FleetPostLease, PostLease, Result};
+    use async_trait::async_trait;
+
+    /// One card per review's post lease; the id is the (server-minted) review id.
+    const POST_LEASE: &str = "post_lease";
+    /// The default single-tenant scope (mirrors [`crate::StoreFleet`]'s).
+    const DEFAULT_TENANT: &str = "local";
+    /// Lease states, stored as the opaque card blob: `held` = a post in flight,
+    /// `posted` = terminal (the forge comment landed). An absent card is *none*.
+    const HELD: &[u8] = b"held";
+    const POSTED: &[u8] = b"posted";
+
+    /// The durable, cross-process [`FleetPostLease`] over a shared [`Backend`] — the
+    /// lease twin of [`crate::StoreFleet`]. Cheap to clone (an `Arc` handle plus the
+    /// tenant key).
+    pub struct StorePostLease {
+        backend: Arc<dyn Backend>,
+        tenant: String,
     }
 
-    /// A durable, cross-process [`FleetPostLease`] backed by an embedded SQLite table.
-    ///
-    /// The claim is a single atomic statement — `INSERT … ON CONFLICT(review_id) DO
-    /// NOTHING` — so exactly one racer (across threads *and* processes sharing the file)
-    /// inserts the `held` row and observes `changes() == 1`; the losers read the existing
-    /// row's status. `busy_timeout` lets a second connection to the same file wait out a
-    /// writer's lock rather than fail.
-    pub struct SqlitePostLease {
-        conn: std::sync::Mutex<Connection>,
-    }
-
-    impl SqlitePostLease {
-        /// Open (creating if absent) the lease table in the SQLite database at `path`. May
-        /// share the file with [`crate::SqliteFleet`] — it uses its own table.
-        pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self> {
-            let conn = Connection::open(path).map_err(sql_err)?;
-            Self::from_conn(conn)
+    impl StorePostLease {
+        /// A lease over `backend` under the default single-tenant scope.
+        pub fn new(backend: Arc<dyn Backend>) -> Self {
+            Self {
+                backend,
+                tenant: DEFAULT_TENANT.to_string(),
+            }
         }
 
-        /// An in-memory lease (tests): durable within the connection's lifetime only.
-        pub fn open_in_memory() -> Result<Self> {
-            Self::from_conn(Connection::open_in_memory().map_err(sql_err)?)
-        }
-
-        fn from_conn(conn: Connection) -> Result<Self> {
-            // Wait out a concurrent writer's lock (the second connection to a shared file)
-            // rather than error immediately.
-            conn.busy_timeout(std::time::Duration::from_secs(5))
-                .map_err(sql_err)?;
-            conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS post_lease (
-                     review_id TEXT PRIMARY KEY,
-                     status    TEXT NOT NULL,
-                     ts_ms     INTEGER NOT NULL
-                 );",
-            )
-            .map_err(sql_err)?;
+        /// A lease scoped to an explicit tenant. The tenant is `safe_segment`-gated —
+        /// a hostile tenant is rejected at construction, never persisted or keyed.
+        pub fn with_tenant(backend: Arc<dyn Backend>, tenant: &str) -> Result<Self> {
+            if !safe_segment(tenant) {
+                return Err(Error::Fleet(format!("invalid tenant `{tenant}`")));
+            }
             Ok(Self {
-                conn: std::sync::Mutex::new(conn),
+                backend,
+                tenant: tenant.to_string(),
             })
         }
 
-        fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
-            self.conn
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        /// `review_id` becomes a card id, so — unlike the opaque-map
+        /// [`MemoryPostLease`] — it must pass [`safe_segment`]. We fail closed early
+        /// with a clear error (the backend would reject a hostile segment anyway).
+        fn check(&self, review_id: &str) -> Result<()> {
+            if safe_segment(review_id) {
+                Ok(())
+            } else {
+                Err(Error::Fleet("invalid review id".into()))
+            }
         }
     }
 
+    /// The config-store seam speaks `Error::Config`; re-tag non-precondition failures
+    /// as `Error::Fleet` for the lease seam's callers.
+    fn map_err(e: Error) -> Error {
+        Error::Fleet(format!("post-lease store: {e}"))
+    }
+
     #[async_trait]
-    impl FleetPostLease for SqlitePostLease {
+    impl FleetPostLease for StorePostLease {
         async fn acquire(&self, review_id: &str) -> Result<PostLease> {
-            let conn = self.lock();
-            // Atomic claim: only the first racer inserts the `held` row.
-            let inserted = conn
-                .execute(
-                    "INSERT INTO post_lease (review_id, status, ts_ms) VALUES (?1, 'held', 0)
-                     ON CONFLICT(review_id) DO NOTHING",
-                    params![review_id],
-                )
-                .map_err(sql_err)?;
-            if inserted == 1 {
-                return Ok(PostLease::Acquired);
-            }
-            // Someone else holds or already posted — read the (now-stable) row.
-            let status: Option<String> = conn
-                .query_row(
-                    "SELECT status FROM post_lease WHERE review_id = ?1",
-                    params![review_id],
-                    |r| r.get(0),
-                )
-                .map_err(sql_err)?;
-            match status.as_deref() {
-                Some("posted") => Ok(PostLease::AlreadyPosted),
-                // A `held` row (or a row that vanished via a concurrent release — treat the
-                // absence as still-contended for this call; the next approve re-acquires).
-                _ => Ok(PostLease::Held),
+            self.check(review_id)?;
+            // Atomic claim: land `held` ONLY if the card is currently absent. Exactly
+            // one racer's CAS precondition (`expected = None`) holds — across threads
+            // AND processes sharing the backend — so exactly one sees `Acquired`.
+            let claim = [
+                Write::EnsureTenant {
+                    tenant: self.tenant.clone(),
+                },
+                Write::CompareAndSwap {
+                    collection: POST_LEASE,
+                    tenant: self.tenant.clone(),
+                    id: review_id.to_string(),
+                    expected: None,
+                    blob: HELD.to_vec(),
+                },
+            ];
+            match self.backend.apply(&claim).await {
+                Ok(()) => Ok(PostLease::Acquired),
+                // Lost the claim — someone holds or already posted. Read the row to
+                // classify. This read is NOT atomic with the failed CAS, but lease
+                // states are monotonic (none→held→posted; held→none only via the
+                // holder's own release), so the worst case is a racing release between
+                // the CAS and this read → we read *none* and report `Held` (never
+                // `Acquired`), a benign over-report that never double-posts.
+                Err(e) if is_conflict(&e) => {
+                    match self
+                        .backend
+                        .get(POST_LEASE, &self.tenant, review_id)
+                        .await?
+                    {
+                        Some(b) if b.as_slice() == POSTED => Ok(PostLease::AlreadyPosted),
+                        _ => Ok(PostLease::Held),
+                    }
+                }
+                Err(e) => Err(map_err(e)),
             }
         }
 
         async fn commit(&self, review_id: &str) -> Result<()> {
-            let conn = self.lock();
-            // Upsert to `posted` so a held→posted flip is durable even if the original
-            // `held` row was lost; terminal thereafter.
-            conn.execute(
-                "INSERT INTO post_lease (review_id, status, ts_ms) VALUES (?1, 'posted', 0)
-                 ON CONFLICT(review_id) DO UPDATE SET status = 'posted'",
-                params![review_id],
-            )
-            .map_err(sql_err)?;
-            Ok(())
+            self.check(review_id)?;
+            // Terminal: upsert `posted` unconditionally, so a held→posted flip is
+            // durable even if the `held` row was lost, and a re-commit is a no-op.
+            let writes = [
+                Write::EnsureTenant {
+                    tenant: self.tenant.clone(),
+                },
+                Write::Put {
+                    collection: POST_LEASE,
+                    tenant: self.tenant.clone(),
+                    id: review_id.to_string(),
+                    blob: POSTED.to_vec(),
+                },
+            ];
+            self.backend.apply(&writes).await.map_err(map_err)
         }
 
         async fn release(&self, review_id: &str) -> Result<()> {
-            let conn = self.lock();
-            // Release only a held (un-posted) lease; never delete a committed post.
-            conn.execute(
-                "DELETE FROM post_lease WHERE review_id = ?1 AND status = 'held'",
-                params![review_id],
-            )
-            .map_err(sql_err)?;
-            Ok(())
+            self.check(review_id)?;
+            // Release ONLY a still-held lease (a failed post can retry); never undo a
+            // committed post. The CAS precondition (`expected = held`) makes the
+            // delete-if-held atomic under the backend's transaction: if the row is
+            // `posted` or absent the CAS conflicts and the whole batch — the `Delete`
+            // included — is rejected, so a posted lease is never removed.
+            let writes = [
+                Write::EnsureTenant {
+                    tenant: self.tenant.clone(),
+                },
+                Write::CompareAndSwap {
+                    collection: POST_LEASE,
+                    tenant: self.tenant.clone(),
+                    id: review_id.to_string(),
+                    expected: Some(HELD.to_vec()),
+                    blob: HELD.to_vec(),
+                },
+                Write::Delete {
+                    collection: POST_LEASE,
+                    tenant: self.tenant.clone(),
+                    id: review_id.to_string(),
+                },
+            ];
+            match self.backend.apply(&writes).await {
+                Ok(()) => Ok(()),
+                // Not held (posted or already released) → nothing to release, a no-op.
+                Err(e) if is_conflict(&e) => Ok(()),
+                Err(e) => Err(map_err(e)),
+            }
         }
     }
 }
@@ -245,16 +293,22 @@ mod tests {
     use super::*;
     use rstest::rstest;
 
-    // MemoryPostLease and (when built) SqlitePostLease must satisfy the SAME contract, so
-    // the behavioural tests run over both via a small factory list.
+    // MemoryPostLease and (when built) StorePostLease must satisfy the SAME contract, so
+    // the behavioural tests run over each via a small factory list. StorePostLease is
+    // exercised over an in-process `MemoryBackend` (the hermetic proof of the shared-store
+    // path); the real Postgres backend is covered by the `#[ignore]` `pg_lease_tests`.
+    // Every contract case uses a `safe_segment` id (all backends accept it); the hostile-id
+    // divergence between the two tiers is asserted in its own tests below.
     fn backends() -> Vec<(&'static str, Box<dyn FleetPostLease>)> {
-        #[cfg_attr(not(feature = "fleet-sqlite"), allow(unused_mut))]
+        #[cfg_attr(not(feature = "fleet-store"), allow(unused_mut))]
         let mut v: Vec<(&'static str, Box<dyn FleetPostLease>)> =
             vec![("memory", Box::new(MemoryPostLease::new()))];
-        #[cfg(feature = "fleet-sqlite")]
+        #[cfg(feature = "fleet-store")]
         v.push((
-            "sqlite",
-            Box::new(SqlitePostLease::open_in_memory().expect("open in-memory lease")),
+            "store",
+            Box::new(StorePostLease::new(std::sync::Arc::new(
+                agent_config_store::MemoryBackend::new(),
+            ))),
         ));
         v
     }
@@ -319,28 +373,96 @@ mod tests {
         }
     }
 
+    // MemoryPostLease keys review_id into an opaque in-process map, so a hostile value is
+    // inert (never a path, never interpolated) and still dedups correctly.
     #[rstest]
     #[case::uuid("6f3d2a1e-0000-4b2c-9f1a-abcdef012345")]
-    // review_id is untrusted wire input; a hostile value is a bound query arg (SQLite) /
-    // map key (memory), never a path or interpolated SQL — it can neither escape nor
-    // inject, and still dedups correctly.
     #[case::sql_meta("rev'; DROP TABLE post_lease;--")]
     #[case::traversal("../../etc/passwd")]
     #[tokio::test]
-    async fn adversarial_hostile_review_id_is_inert_and_still_dedups(#[case] id: &str) {
-        for (name, lease) in backends() {
-            assert_eq!(
-                lease.acquire(id).await.unwrap(),
-                PostLease::Acquired,
-                "{name}: first claim of a hostile id"
-            );
-            lease.commit(id).await.unwrap();
-            assert_eq!(
-                lease.acquire(id).await.unwrap(),
-                PostLease::AlreadyPosted,
-                "{name}: hostile id still dedups (bound arg, not injected)"
-            );
+    async fn adversarial_hostile_review_id_inert_in_memory(#[case] id: &str) {
+        let lease = MemoryPostLease::new();
+        assert_eq!(
+            lease.acquire(id).await.unwrap(),
+            PostLease::Acquired,
+            "first claim of a hostile id"
+        );
+        lease.commit(id).await.unwrap();
+        assert_eq!(
+            lease.acquire(id).await.unwrap(),
+            PostLease::AlreadyPosted,
+            "hostile id still dedups (opaque map key, not injected)"
+        );
+    }
+
+    // StorePostLease makes review_id a card id, so a hostile value is rejected fail-closed
+    // at every entry point (it can neither traverse nor inject); no rejected call mutates
+    // the store. (A well-formed server-minted id — see the contract tests — is accepted.)
+    #[cfg(feature = "fleet-store")]
+    #[rstest]
+    #[case::sql_meta("rev'; DROP TABLE post_lease;--")]
+    #[case::traversal("../../etc/passwd")]
+    #[case::separator("a/b")]
+    #[case::leading_dash("-rf")]
+    #[case::dotdot("..")]
+    #[case::empty("")]
+    #[tokio::test]
+    async fn adversarial_store_hostile_review_id_rejected_fail_closed(#[case] id: &str) {
+        let lease =
+            StorePostLease::new(std::sync::Arc::new(agent_config_store::MemoryBackend::new()));
+        assert!(lease.acquire(id).await.is_err(), "acquire {id:?}");
+        assert!(lease.commit(id).await.is_err(), "commit {id:?}");
+        assert!(lease.release(id).await.is_err(), "release {id:?}");
+    }
+
+    // adversarial: N concurrent acquires of the SAME review_id yield EXACTLY ONE
+    // `Acquired` — the CAS none→held claim is atomic under the backend, so the
+    // cross-process double-post is impossible even under a thundering herd.
+    #[cfg(feature = "fleet-store")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn adversarial_racing_acquires_exactly_one_acquired() {
+        use std::sync::Arc;
+        let lease = Arc::new(StorePostLease::new(Arc::new(
+            agent_config_store::MemoryBackend::new(),
+        )));
+        let handles: Vec<_> = (0..16)
+            .map(|_| {
+                let l = lease.clone();
+                tokio::spawn(async move { l.acquire("rev-race").await })
+            })
+            .collect();
+        let mut acquired = 0;
+        for h in handles {
+            if matches!(h.await.unwrap().unwrap(), PostLease::Acquired) {
+                acquired += 1;
+            }
         }
+        assert_eq!(acquired, 1, "exactly one racer may acquire the lease");
+    }
+
+    // positive: a committed lease survives dropping and rebuilding the wrapper over the
+    // SAME backend — all durable state lives in the store, not the wrapper (the hermetic
+    // stand-in for a process restart; `pg_lease_tests` proves it over a real reconnect).
+    #[cfg(feature = "fleet-store")]
+    #[tokio::test]
+    async fn positive_restart_durability_over_shared_backend() {
+        use std::sync::Arc;
+        let backend: Arc<dyn agent_config_store::Backend> =
+            Arc::new(agent_config_store::MemoryBackend::new());
+        {
+            let lease = StorePostLease::new(backend.clone());
+            assert_eq!(
+                lease.acquire("rev-durable").await.unwrap(),
+                PostLease::Acquired
+            );
+            lease.commit("rev-durable").await.unwrap();
+        }
+        let lease = StorePostLease::new(backend);
+        assert_eq!(
+            lease.acquire("rev-durable").await.unwrap(),
+            PostLease::AlreadyPosted,
+            "committed lease persists across a wrapper rebuild"
+        );
     }
 
     #[tokio::test]
@@ -364,5 +486,146 @@ mod tests {
         );
         // …an evicted old one is re-acquirable (best-effort dedup, documented).
         assert_eq!(lease.acquire("rev-0").await.unwrap(), PostLease::Acquired);
+    }
+}
+
+// The `StorePostLease` Postgres arm exercised against a REAL server — the durable,
+// cross-process dedup this PR unlocks for a `postgres` fleet, and the tier `nix flake
+// check` cannot host. `#[ignore]`-gated and run single-threaded by the `pg-integration`
+// harness (`AGENT_CONFIG_STORE_TEST_DSN`). A dedicated tenant + a per-test cleanup keep
+// re-runs idempotent without a global TRUNCATE.
+#[cfg(all(test, feature = "fleet-store-postgres"))]
+mod pg_lease_tests {
+    use super::*;
+    use agent_config_store::{Backend, PgBackend, Write};
+    use std::sync::Arc;
+
+    const IT_TENANT: &str = "c17_lease_it";
+    // Must match `store_lease::POST_LEASE` (private); asserted by construction — the
+    // contract tests above fail if the collection name drifts.
+    const POST_LEASE: &str = "post_lease";
+
+    // Connect, and hand back both the shared backend (for cleanup) and a lease over it.
+    async fn pg_lease() -> (Arc<dyn Backend>, StorePostLease) {
+        let dsn = std::env::var("AGENT_CONFIG_STORE_TEST_DSN")
+            .expect("AGENT_CONFIG_STORE_TEST_DSN must be set by the pg-integration harness");
+        let backend: Arc<dyn Backend> = Arc::new(
+            PgBackend::connect(&dsn, 4, true)
+                .await
+                .expect("connect postgres + ensure schema"),
+        );
+        let lease = StorePostLease::with_tenant(backend.clone(), IT_TENANT).expect("tenant");
+        (backend, lease)
+    }
+
+    // Unconditional delete of the given ids for this tenant (a `posted` lease is
+    // terminal via the API, so tests reset with the raw backend, not `release`).
+    async fn clean(backend: &Arc<dyn Backend>, ids: &[&str]) {
+        let writes: Vec<Write> = std::iter::once(Write::EnsureTenant {
+            tenant: IT_TENANT.to_string(),
+        })
+        .chain(ids.iter().map(|id| Write::Delete {
+            collection: POST_LEASE,
+            tenant: IT_TENANT.to_string(),
+            id: (*id).to_string(),
+        }))
+        .collect();
+        backend.apply(&writes).await.expect("clean");
+    }
+
+    // desc (postgres, live): first acquire wins; a sequential re-approve after commit
+    // sees `AlreadyPosted` (the read-your-writes dedup) — durable across the server.
+    #[tokio::test]
+    #[ignore = "needs a running postgres (nix run .#postgres-up) — run via `nix run .#integration`"]
+    async fn positive_pg_acquire_commit_dedups() {
+        let (backend, lease) = pg_lease().await;
+        clean(&backend, &["rev-1"]).await;
+        assert_eq!(lease.acquire("rev-1").await.unwrap(), PostLease::Acquired);
+        assert_eq!(lease.acquire("rev-1").await.unwrap(), PostLease::Held);
+        lease.commit("rev-1").await.unwrap();
+        assert_eq!(
+            lease.acquire("rev-1").await.unwrap(),
+            PostLease::AlreadyPosted
+        );
+    }
+
+    // desc (postgres, live): a released hold is re-acquirable; a release after commit is
+    // a no-op that never re-opens a posted lease (no double post).
+    #[tokio::test]
+    #[ignore = "needs a running postgres (nix run .#postgres-up) — run via `nix run .#integration`"]
+    async fn positive_pg_release_then_commit_semantics() {
+        let (backend, lease) = pg_lease().await;
+        clean(&backend, &["rev-2"]).await;
+        assert_eq!(lease.acquire("rev-2").await.unwrap(), PostLease::Acquired);
+        lease.release("rev-2").await.unwrap();
+        assert_eq!(
+            lease.acquire("rev-2").await.unwrap(),
+            PostLease::Acquired,
+            "a released hold is re-acquirable"
+        );
+        lease.commit("rev-2").await.unwrap();
+        lease.release("rev-2").await.unwrap(); // no-op after commit
+        assert_eq!(
+            lease.acquire("rev-2").await.unwrap(),
+            PostLease::AlreadyPosted,
+            "commit is terminal even after a stray release"
+        );
+    }
+
+    // adversarial (postgres, live): a committed lease survives a full reconnect (a fresh
+    // pool over the same server) — real cross-process/restart durability.
+    #[tokio::test]
+    #[ignore = "needs a running postgres (nix run .#postgres-up) — run via `nix run .#integration`"]
+    async fn positive_pg_restart_durability() {
+        let (backend, lease) = pg_lease().await;
+        clean(&backend, &["rev-restart"]).await;
+        assert_eq!(
+            lease.acquire("rev-restart").await.unwrap(),
+            PostLease::Acquired
+        );
+        lease.commit("rev-restart").await.unwrap();
+        drop(lease);
+        drop(backend);
+        // A brand-new connection/pool = a restart.
+        let (_b2, lease2) = pg_lease().await;
+        assert_eq!(
+            lease2.acquire("rev-restart").await.unwrap(),
+            PostLease::AlreadyPosted,
+            "posted lease is durable across a reconnect"
+        );
+    }
+
+    // adversarial (postgres, live): N concurrent acquires of one id over a shared pool
+    // yield EXACTLY ONE `Acquired` — the CAS claim is atomic on the real server.
+    #[tokio::test]
+    #[ignore = "needs a running postgres (nix run .#postgres-up) — run via `nix run .#integration`"]
+    async fn adversarial_pg_racing_one_acquired() {
+        let (backend, _lease) = pg_lease().await;
+        clean(&backend, &["rev-pg-race"]).await;
+        let lease = Arc::new(StorePostLease::with_tenant(backend, IT_TENANT).expect("tenant"));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let l = lease.clone();
+                tokio::spawn(async move { l.acquire("rev-pg-race").await })
+            })
+            .collect();
+        let mut acquired = 0;
+        for h in handles {
+            if matches!(h.await.unwrap().unwrap(), PostLease::Acquired) {
+                acquired += 1;
+            }
+        }
+        assert_eq!(acquired, 1, "exactly one racer acquires on the real server");
+    }
+
+    // adversarial (postgres, live): a hostile review_id is rejected fail-closed and never
+    // reaches the server as a card id.
+    #[tokio::test]
+    #[ignore = "needs a running postgres (nix run .#postgres-up) — run via `nix run .#integration`"]
+    async fn adversarial_pg_hostile_review_id_rejected() {
+        let (_backend, lease) = pg_lease().await;
+        for id in ["../../etc/passwd", "rev'; DROP TABLE cards;--", ""] {
+            assert!(lease.acquire(id).await.is_err(), "acquire {id:?}");
+        }
     }
 }

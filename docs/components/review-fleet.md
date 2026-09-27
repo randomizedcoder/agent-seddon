@@ -255,12 +255,16 @@ its own — two concurrent approves, or a re-approve inside the flush window, wo
 and both post a duplicate comment. The persisted `status = posted` remains a **cheap early-out** (the
 `plan_approve` short-circuit for a far-apart re-approve) and feeds C16 head-oid dedup + operator
 history, but the lease is what makes the guarantee. The lease follows the roster store
-([`resolve_fleet_post_lease`](../../crates/agent-runtime/src/builder.rs)): a `sqlite` store gets the
-durable, cross-process [`SqlitePostLease`](../../crates/agent-review-fleet/src/lease.rs) (its own table
-in the roster DB); every other store falls back to the in-process
+([`resolve_fleet_post_lease`](../../crates/agent-runtime/src/builder.rs)): a `postgres` or `sqlite`
+store gets the durable, cross-process
+[`StorePostLease`](../../crates/agent-review-fleet/src/lease.rs) over the shared config store — the
+lease twin of `StoreFleet`, whose `acquire` is one atomic `Write::CompareAndSwap` (land `held` only if
+the row is absent), so exactly one racer across threads *and* processes wins. It replaces the retired
+`SqlitePostLease` and finally gives a **postgres** fleet cross-process/restart-durable dedup, not just
+the embedded-SQLite tier. Every other store (`""`, `file`, `grpc`) falls back to the in-process
 [`MemoryPostLease`](../../crates/agent-review-fleet/src/lease.rs), which still closes the same-process
-double-post but is not durable across restarts/processes (a fleet needing that runs `sqlite`; durable
-`file`/`postgres` leases are a follow-up). On a **failed** post the lease is released so a later approve
+double-post but is not durable across restarts/processes (a fleet needing that runs the `postgres` or
+`sqlite` store). On a **failed** post the lease is released so a later approve
 can retry; a post that succeeds but whose lease-commit fails still dedups (a leftover `held` lease makes
 the next approve stand down), so commit is best-effort.
 
