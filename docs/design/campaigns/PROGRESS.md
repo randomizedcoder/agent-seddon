@@ -10,7 +10,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 
 ## Now
 
-- **Next:** CP-02 is rebased onto `main` @ `71d4abf` (#501 merged) and gate-green on `campaigns/cp-02` @ `2cc7fdd` (+ this record). Push `campaigns/cp-02` and open the CP-02 PR against `main` (body drafted) once the user asks; after it merges, `STATUS.md` CP-02 → ✅ #NNN + as-built entry, then lane B / CP-03 planning.
+- **Next:** CP-02 is open as #508 (rebased onto `main` @ `71d4abf`, gate-green @ `2cc7fdd`). Waiting on review / merge: after it merges, `STATUS.md` CP-02 → ✅ #508 + as-built entry, then lane B / CP-03 planning (a new plan of record).
 
 ## CP-01 — seam, pure rules, `MemCampaigns`, T1–T8 (mem) — ✅ #501 (merged 2026-09-27, `71d4abf`)
 
@@ -36,7 +36,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 | doc amendments (02 transitions, 03 attempt note, 05 row, 06 harness/dims) | ✅ | 02: (b) inputs + step 1 / step 3 comments (attempt row inside the finishing tx), planner-`blocked` rollup paragraph; 03: step 1 (no attempt row at `plan_start`, `blocked` rolls up); 05: CP-01 row (pure rules in `agent_core::campaign`, `agent-campaign` = display letters); 06: harness bullets (`campaign_conformance_suite!`, suffixed rows), T7 `adversarial_pr_url_long` → `TooLong`, `positive_failed_does_not_block_done_dependent` wording; testkit `lib.rs` doc bullets (step 11) |
 | gate `nix flake check` | ✅ | 2026-09-26, green first run against the committed ref (see Gate status); an earlier dirty-tree run failed only in `portal-report-tests` because the working tree carries unrelated, uncommitted `test/**` deletions (`Path 'test/portal-report' does not exist in Git repository`) — not this branch; workspace clippy `--all-features` first surfaced the exhaustive `Error::Campaign` match in `agent-proto` (`89ecaaf`) |
 
-## CP-02 — `PgCampaigns`, migration 0001, live suite, invariants, pg-integration — 🟡 branch `campaigns/cp-02`
+## CP-02 — `PgCampaigns`, migration 0001, live suite, invariants, pg-integration — 🟡 #508 (branch `campaigns/cp-02`)
 
 | Item | State | Notes |
 |---|---|---|
