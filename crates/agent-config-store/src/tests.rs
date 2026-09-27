@@ -129,7 +129,11 @@ async fn pg_backend() -> Arc<dyn Backend> {
         .await
         .expect("ensure schema");
     // FK: cards references tenants; truncating both in one statement satisfies it.
-    sqlx::query("TRUNCATE cards, tenants")
+    // CASCADE: any suite that truncates `tenants` must cascade, because the campaign
+    // tables (`agent-campaign`, `tasks` / `task_events` / `task_attempts`) reference
+    // it too and share this server under `pg-integration` — the data volume
+    // persists across `postgres-down`, so those tables exist on the second run.
+    sqlx::query("TRUNCATE cards, tenants CASCADE")
         .execute(&pool)
         .await
         .expect("reset to clean slate");
