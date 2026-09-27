@@ -22,7 +22,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S13 | Portal login + capability-aware UI | P0-4 | ⬜ | — |
 | S14 | Envoy hardening + `jwt_authn` | P0-4 | ⬜ | — |
 | S15 | auth-e2e gate + integration tiers | testing | ⬜ | — |
-| S16 | ClickHouse credentials + RLS lockdown | P0-6 | 🟡 | — |
+| S16 | ClickHouse credentials + RLS lockdown | P0-6 | ✅ | #506 |
 | S17 | Secret-reference confinement | P0-7 | ⬜ | — |
 
 ## As-built log
@@ -317,7 +317,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
   `agent-memory` `summarize_step_does_not_leak` failed once on live-block timing (18 → 30) and
   passed when rebuilt alone. S6 does not touch that crate.
 
-- **2026-09-27 — S16 (ClickHouse lockdown).** Every ClickHouse login now has a password, and each
+- **2026-09-27 — S16 (#506, ClickHouse lockdown).** Every ClickHouse login now has a password, and each
   tenant-scoped read binds its tenant. See [08 "As built (S16)"](08-data-plane-and-secrets.md#as-built-s16).
   - Logins: admin (`default`), `agent_writer`, `agent_reader`, `agent_viewer`. The SQL users are
     created `HOST NONE`, and `clickhouse-up` sets their passwords as SHA-256 hashes from 0600
