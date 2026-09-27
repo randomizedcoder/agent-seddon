@@ -7,12 +7,15 @@ license.workspace = true
 
 [features]
 default = []
-# The `sqlite` FleetRegistry backend — the roster row as JSON in an embedded
-# SQLite BLOB, off by default so a normal build stays dependency-free (mirrors
-# agent-registry's `registry-sqlite`).
-fleet-sqlite = ["dep:rusqlite"]
+# The `sqlite` FleetRegistry backend. PG-11 retired the bespoke embedded-SQLite
+# `SqliteFleet`: the `sqlite` tier is now `StoreFleet` over a config-store
+# `SqliteBackend` (the same JSON rows on the shared `cards`/`tenants` tables), so
+# this forwards `fleet-store` + the config-store sqlite tier (mirrors `registry-sqlite`,
+# PG-11). Off by default so a normal build stays dependency-free.
+fleet-sqlite = ["fleet-store", "agent-config-store/config-store-sqlite"]
 # The shared-store `FleetRegistry` backend (config C41 / A3b): the roster persists
-# onto `agent-config-store` (memory/file/sqlite), the same JSON rows. Off by default.
+# onto `agent-config-store` (memory/file/sqlite/postgres), the same JSON rows.
+# Off by default — the legacy `Memory`/`File` backends are untouched.
 fleet-store = ["dep:agent-config-store"]
 # The Postgres arm of the shared-store backend: forwards to `agent-config-store`'s
 # `config-store-postgres` (sqlx) tier. Off by default; NOT hermetic (needs a live
@@ -33,7 +36,6 @@ tokio = { workspace = true }
 tracing.workspace = true
 # Server-minted review-round ids (C8/C14) — the same crate the session registry uses.
 uuid = { workspace = true }
-rusqlite = { workspace = true, optional = true }
 
 [dev-dependencies]
 agent-testkit.workspace = true

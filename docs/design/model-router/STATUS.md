@@ -136,7 +136,9 @@ leak) and must pass `nix develop -c nix flake check`.
   rest → `InvalidArgument`. **agent-registry** crate: memory/file/sqlite stores share one
   `ops` module (validate→clamp→cap can't drift); the file store is the *same* textproto
   bundle the loader reads (absent = empty registry, invalid = every op fails closed,
-  atomic temp+rename); sqlite stores prost-encoded blobs behind `registry-sqlite`.
+  atomic temp+rename); sqlite stores prost-encoded blobs behind `registry-sqlite`
+  (PG-11: the bespoke `SqliteRegistry` was retired — the `sqlite`/`postgres` tiers are now
+  `StoreRegistry` over the shared config-store backend; see config `STATUS.md`).
   **Loader**: `--model-router-config` (> env > config key) REPLACES `[route]` wholesale
   and builds through the existing factory chain — one build path; kinds
   `anthropic`/`grpc` are stored but **not yet loader-buildable** (fail closed with a

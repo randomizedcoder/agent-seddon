@@ -7,8 +7,11 @@
 //! - [`FileRegistry`] — one `ModelRouterConfig` **textproto** bundle on disk:
 //!   the same file `agent --model-router-config <file>` loads at startup,
 //!   hand-edited *or* rewritten by a control-plane `Put` (one format for both).
-//! - `SqliteRegistry` (feature `registry-sqlite`) — cards/policy as
-//!   prost-encoded blobs in embedded SQLite.
+//! - [`StoreRegistry`] (feature `registry-store`) — cards/policy as
+//!   prost-encoded blobs on the shared `agent-config-store` `Backend`
+//!   (memory/file/sqlite/postgres). The `sqlite` and `postgres` tiers are this
+//!   store over the matching config-store backend; PG-11 retired the bespoke
+//!   embedded-SQLite `SqliteRegistry` in favour of it.
 //!
 //! **Untrusted input, fail closed.** Every id may become a storage path
 //! segment; every card arrives from a gRPC peer or a hand-edited file. Stores
@@ -29,10 +32,6 @@ use std::sync::Mutex;
 pub mod file;
 pub mod textproto;
 pub use file::FileRegistry;
-#[cfg(feature = "registry-sqlite")]
-pub mod sqlite;
-#[cfg(feature = "registry-sqlite")]
-pub use sqlite::SqliteRegistry;
 #[cfg(feature = "registry-store")]
 pub mod store;
 #[cfg(feature = "registry-store")]

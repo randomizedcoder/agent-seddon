@@ -126,14 +126,14 @@ iai-callgrind = "0.16"
 dhat = "0.3"
 
 # The workspace's embedded-SQLite dependency, deliberately behind non-default features
-# so a default build / `nix build .#agent` stays dependency-free. It is pulled by
-# `agent-config-store/config-store-sqlite` (the shared config-store `SqliteBackend`, which
-# the `*-sqlite` domain features forward to) and by the remaining bespoke `Sqlite*` domain
-# stores (registry/fleet). PG-10 retired the bespoke `SqlitePromptStore`, so the `prompt`
-# `sqlite` tier now reaches this only via the config store. `bundled` vendors + compiles
-# sqlite3.c, so no system libsqlite3 / pkg-config is needed; crane vendors the crate from
-# Cargo.lock and stdenv's `cc` compiles it hermetically. The real version pin is Cargo.lock
-# (recorded in nix/versions.nix). See docs/design/prompts/05-storage.md.
+# so a default build / `nix build .#agent` stays dependency-free. Since PG-10/PG-11 the
+# only SQLite path is `agent-config-store/config-store-sqlite` (the shared config-store
+# `SqliteBackend`); every domain `*-sqlite` feature (prompt/registry/fleet) now forwards to
+# it, and the four bespoke `Sqlite*` domain stores that used to depend on `rusqlite`
+# directly were retired. `bundled` vendors + compiles sqlite3.c, so no system libsqlite3 /
+# pkg-config is needed; crane vendors the crate from Cargo.lock and stdenv's `cc` compiles
+# it hermetically. The real version pin is Cargo.lock (recorded in nix/versions.nix). See
+# docs/design/prompts/05-storage.md.
 rusqlite = { version = "0.32", features = ["bundled"] }
 
 # The Postgres tier of `agent-config-store` (config C41 / A2), behind that crate's

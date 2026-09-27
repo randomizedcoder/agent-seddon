@@ -65,7 +65,11 @@ pub(crate) fn pg_backend(
 /// decorator, so a `sqlite`-backed domain (prompt/registry/fleet) counts + spans as
 /// `backend = sqlite` at the same choke point. The caller resolves the path (e.g.
 /// tilde/working-dir expansion); this opens exactly what it is given.
-#[cfg(feature = "prompt-sqlite")]
+#[cfg(any(
+    feature = "prompt-sqlite",
+    feature = "registry-sqlite",
+    feature = "fleet-sqlite"
+))]
 pub(crate) fn sqlite_backend(
     path: &std::path::Path,
     metrics: &agent_metrics::Metrics,
@@ -87,20 +91,14 @@ pub(crate) fn sqlite_backend(
         feature = "prompt-postgres",
         feature = "scheduler-postgres",
         feature = "forge-registry-postgres",
-        feature = "transport-registry-postgres"
+        feature = "transport-registry-postgres",
+        feature = "prompt-sqlite",
+        feature = "registry-sqlite",
+        feature = "fleet-sqlite"
     )
 ))]
 mod tests {
     use super::*;
-    use crate::config::ConfigStoreCfg;
-
-    fn cfg_with(dsn_ref: &str) -> ConfigStoreCfg {
-        ConfigStoreCfg {
-            backend: "postgres".into(),
-            dsn_ref: dsn_ref.into(),
-            ..Default::default()
-        }
-    }
 
     // The `env:`/`file:` resolution + fail-closed/no-echo cases live with the
     // shared resolver in `crate::dsn`; here we prove only the backend build wiring.
@@ -110,11 +108,24 @@ mod tests {
     // does not connect), proving the sync resolver path is wired end to end.
     // `connect_lazy` spawns pool maintenance, so it needs a runtime — which the
     // real caller (`build_agent`) always has.
+    #[cfg(any(
+        feature = "registry-postgres",
+        feature = "fleet-postgres",
+        feature = "prompt-postgres",
+        feature = "scheduler-postgres",
+        feature = "forge-registry-postgres",
+        feature = "transport-registry-postgres"
+    ))]
     #[tokio::test]
     async fn positive_pg_backend_builds_lazily_from_env_ref() {
+        use crate::config::ConfigStoreCfg;
         let name = "AGENT_A3_TEST_DSN_LAZY";
         std::env::set_var(name, "postgres://u:p@127.0.0.1:5432/db");
-        let cfg = cfg_with(&format!("env:{name}"));
+        let cfg = ConfigStoreCfg {
+            backend: "postgres".into(),
+            dsn_ref: format!("env:{name}"),
+            ..Default::default()
+        };
         assert!(
             pg_backend(&cfg, &agent_metrics::Metrics::new()).is_ok(),
             "lazy pool must construct"
@@ -123,8 +134,13 @@ mod tests {
     }
 
     // positive: the sqlite helper opens an on-disk catalog and returns a live,
-    // metered backend that round-trips a card (ensure-tenant → put → get).
-    #[cfg(feature = "prompt-sqlite")]
+    // metered backend that round-trips a card (ensure-tenant → put → get). Runs
+    // under any `*-sqlite` tier (prompt/registry/fleet) — the helper is shared.
+    #[cfg(any(
+        feature = "prompt-sqlite",
+        feature = "registry-sqlite",
+        feature = "fleet-sqlite"
+    ))]
     #[tokio::test]
     async fn positive_sqlite_backend_opens_and_roundtrips() {
         use agent_config_store::Write;

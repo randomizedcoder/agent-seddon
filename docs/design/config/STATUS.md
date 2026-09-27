@@ -328,6 +328,25 @@ compare-and-swap, retiring the legacy `*-sqlite` impls). Eleven gated PRs off `m
   provenance is unaffected. Documented in [`docs/components/prompt.md`](../../components/prompt.md) and the
   prompt track's [`STATUS.md`](../prompts/STATUS.md).
 
+- **PG-11 — retire `SqliteRegistry` + `SqliteFleet` (the last two legacy `*-sqlite` impls).** Phase 3's
+  closing PR: with the prompt store (PG-10) and post-lease (PG-09) already converged, the two remaining
+  bespoke embedded-SQLite domain stores are deleted. `crates/agent-registry/src/sqlite.rs` (`SqliteRegistry`)
+  and `crates/agent-review-fleet/src/sqlite.rs` (`SqliteFleet`) are removed; the `[registry] store = "sqlite"`
+  and `[review_fleet] store = "sqlite"` arms now build `StoreRegistry`/`StoreFleet` over a config-store
+  `SqliteBackend` via the shared `store_backend::sqlite_backend(path, metrics)` helper PG-10 introduced (the
+  fleet post-lease sqlite arm is refactored onto the same helper). The `registry-sqlite`/`fleet-sqlite`
+  features are **repointed** (`*-store` + `agent-config-store/config-store-sqlite`), not deleted — the
+  PG-10/PG-09 precedent — so both config selectors keep working, now with per-tenant isolation via the tenant
+  column (matching the `postgres` arms) instead of a per-file split. Coverage: each store's `store.rs` gains a
+  `sqlite_tests` module (CRUD/route-or-agree roundtrip + hostile-id bind-safety over the real in-memory SQLite
+  SQL layer); `nix/checks/fleet-sqlite.nix` is repointed to run the converged path, and a **new**
+  `nix/checks/registry-sqlite.nix` executes the registry sqlite path in-gate (the bespoke `SqliteRegistry`
+  never had a dedicated check, so its tests previously never ran — this closes that gap). After this PR the
+  only SQLite path in the workspace is the shared config-store `SqliteBackend`; `rusqlite` is pulled solely
+  by `agent-config-store/config-store-sqlite` — no domain store crate depends on it directly any more.
+  Documented in [`docs/components/router.md`](../../components/router.md) and
+  [`docs/components/review-fleet.md`](../../components/review-fleet.md). **This completes the PG track.**
+
 ## Non-goals
 
 - Removing TOML (bootstrap stays TOML).

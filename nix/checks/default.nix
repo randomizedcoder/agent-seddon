@@ -46,16 +46,23 @@ in
   # tier onto `StorePrompt` over a config-store `SqliteBackend`; the dedicated,
   # feature-scoped check runs the sqlite path in the gate. docs/design/prompts/05-storage.md.
   prompt-sqlite = craneCheck ./prompt-sqlite.nix { inherit cargoArtifacts; };
+  # Executes the sqlite ProviderRegistry tier's tests (feature `registry-sqlite`, off
+  # by default). PG-11 retired the bespoke `SqliteRegistry` — the `sqlite` tier is now
+  # `StoreRegistry` over a config-store `SqliteBackend` — and added this dedicated,
+  # feature-scoped check (the bespoke impl had none, so its tests never ran in-gate);
+  # the model-router 03 twin of prompt-sqlite/fleet-sqlite.
+  registry-sqlite = craneCheck ./registry-sqlite.nix { inherit cargoArtifacts; };
   # Executes the bwrap Tier-1 isolation backend's tests (feature `sandbox-bwrap`, off by
   # default so the main `test` check never builds the seccomp/libc deps). The dedicated,
   # feature-scoped check that runs the pure argv/seccomp-BPF assembly in the gate; the
   # live-exec pillar tests self-skip where unprivileged namespaces are unavailable.
   # multi-tenancy C23 (docs/design/multi-tenancy/01-process-isolation.md).
   sandbox-bwrap = craneCheck ./sandbox-bwrap.nix { inherit cargoArtifacts; };
-  # Executes the sqlite FleetRegistry roster backend's tests (feature `fleet-sqlite`,
-  # off by default so the main `test` check never builds the DB dep). The dedicated,
-  # feature-scoped check that runs them in the gate — the review-fleet C2 twin of
-  # prompt-sqlite. docs/design/review-fleet/03-fleet-core.md.
+  # Executes the sqlite FleetRegistry roster tier's tests (feature `fleet-sqlite`,
+  # off by default). PG-11 retired the bespoke `SqliteFleet` — the `sqlite` tier is now
+  # `StoreFleet` over a config-store `SqliteBackend`; this dedicated, feature-scoped
+  # check runs the sqlite path in the gate — the review-fleet C2 twin of
+  # prompt-sqlite/registry-sqlite. docs/design/review-fleet/03-fleet-core.md.
   fleet-sqlite = craneCheck ./fleet-sqlite.nix { inherit cargoArtifacts; };
   # Executes the OIDC/JWT auth layer's verifier + tower-layer matrix (feature `auth`,
   # off by default so the main `test` check never builds `jsonwebtoken`/`reqwest`).

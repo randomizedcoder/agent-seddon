@@ -7,14 +7,16 @@ license.workspace = true
 
 [features]
 default = []
-# The `sqlite` ProviderRegistry backend — cards/policy as prost-encoded blobs in
-# embedded SQLite, off by default so a normal build stays dependency-free
-# (mirrors agent-prompt's `prompt-sqlite`).
-registry-sqlite = ["dep:rusqlite", "dep:prost"]
+# The `sqlite` ProviderRegistry backend. PG-11 retired the bespoke embedded-SQLite
+# `SqliteRegistry`: the `sqlite` tier is now `StoreRegistry` over a config-store
+# `SqliteBackend` (the shared `cards`/`tenants` tables), so this forwards
+# `registry-store` + the config-store sqlite tier (mirrors `prompt-sqlite`, PG-10).
+# Off by default so a normal build stays dependency-free.
+registry-sqlite = ["registry-store", "agent-config-store/config-store-sqlite"]
 # The shared-store `ProviderRegistry` backend (config C41 / A3): reimplements the
-# registry over `agent-config-store::Backend` (cards as the same prost blobs the
-# sqlite tier uses), reusing the shared `ops`/`decide` so behaviour is identical.
-# Off by default — the legacy `Memory`/`File`/`Sqlite` backends are untouched.
+# registry over `agent-config-store::Backend` (cards as prost blobs), reusing the
+# shared `ops`/`decide` so behaviour is identical across memory/file/sqlite/postgres.
+# Off by default — the legacy `Memory`/`File` backends are untouched.
 registry-store = ["dep:agent-config-store", "dep:prost"]
 # The Postgres arm of the shared-store backend: forwards to `agent-config-store`'s
 # own `config-store-postgres` (sqlx) tier. Off by default; NOT hermetic (needs a
@@ -27,7 +29,7 @@ dhat-heap = ["dep:dhat"]
 agent-core.workspace = true
 # The wire twin (`pb::ModelRouterConfig`) + the emitted descriptor set drive the
 # textproto parse/print — one schema, three encodings (binary, text, Rust) —
-# and the sqlite backend stores cards as prost-encoded blobs.
+# and the shared-store backend stores cards as prost-encoded blobs.
 agent-proto.workspace = true
 # The routing engine (`route::Policy`) answers the `Route` introspection RPC with
 # exactly the ordering the TaskRouter would produce (the module is feature-free).
@@ -38,7 +40,6 @@ async-trait.workspace = true
 agent-config-store = { workspace = true, optional = true }
 prost = { workspace = true, optional = true }
 prost-reflect.workspace = true
-rusqlite = { workspace = true, optional = true }
 dhat = { workspace = true, optional = true }
 
 [dev-dependencies]

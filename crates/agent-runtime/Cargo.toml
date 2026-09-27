@@ -278,8 +278,16 @@ prompt-postgres = [
 # Provider-registry seam (model-router 03): the ProviderRegistry stores + the
 # `--model-router-config` textproto startup loader.
 registry = ["dep:agent-registry"]
-# The `sqlite` registry backend, off by default (mirrors `prompt-sqlite`).
-registry-sqlite = ["registry", "agent-registry/registry-sqlite"]
+# The `sqlite` registry backend, off by default (mirrors `prompt-sqlite`). PG-11
+# retired the bespoke `SqliteRegistry`: the `sqlite` arm now builds `StoreRegistry`
+# over a config-store `SqliteBackend`, so this forwards `registry-store` + the
+# config-store sqlite tier (the `fleet-sqlite` precedent from PG-09).
+registry-sqlite = [
+  "registry",
+  "registry-store",
+  "agent-registry/registry-sqlite",
+  "agent-config-store/config-store-sqlite",
+]
 # The shared-store registry backend (config C41 / A3): the registry persists onto
 # `agent-config-store` (memory/file/sqlite). Off by default.
 registry-store = ["registry", "agent-registry/registry-store", "dep:agent-config-store"]
@@ -294,10 +302,11 @@ registry-postgres = [
 # Review-fleet roster seam (review-fleet C2/C3): the FleetRegistry stores + the
 # `resolve_fleet_registry` factory (`[review_fleet] store`, `--serve-fleet`).
 fleet = ["dep:agent-review-fleet"]
-# The `sqlite` fleet backend, off by default (mirrors `registry-sqlite`). Also pulls
-# in the shared-store path (`fleet-store` + the config-store SQLite backend) so the
-# approve→post lease for a `sqlite` roster is a durable `StorePostLease` over the
-# config-store SQLite backend (review-fleet C17 / PG-09), replacing `SqlitePostLease`.
+# The `sqlite` fleet backend, off by default (mirrors `registry-sqlite`). Forwards
+# the shared-store path (`fleet-store` + the config-store SQLite backend): PG-11
+# retired the bespoke `SqliteFleet` so the roster is now `StoreFleet` over a
+# config-store `SqliteBackend`, and (since PG-09) the approve→post lease is a durable
+# `StorePostLease` over that same backend (review-fleet C17), replacing `SqlitePostLease`.
 fleet-sqlite = [
   "fleet",
   "fleet-store",

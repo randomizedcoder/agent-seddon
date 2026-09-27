@@ -60,6 +60,8 @@ sessions** (C20–C22, deferred).
   }
   ```
   Default backend = sqlite (feature `fleet-sqlite`), path from `[review_fleet] store`.
+  (PG-11: the bespoke `SqliteFleet` was retired — the `sqlite`/`postgres` tiers are now
+  `StoreFleet` over the shared config-store backend; see config `STATUS.md`.)
 - **Security.** `token_ref` stores a *reference*, never the secret (mirrors provider
   registry's refusal to persist raw `api_key`). `id`/`user`/`repo` pass `safe_segment`
   before they become path or SessionKey segments. DB writes parameterized; row-count cap.

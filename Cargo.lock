@@ -430,7 +430,6 @@ dependencies = [
  "prost",
  "prost-reflect",
  "rstest",
- "rusqlite",
  "tokio",
 ]
 
@@ -470,7 +469,6 @@ dependencies = [
  "agent-testkit",
  "async-trait",
  "rstest",
- "rusqlite",
  "serde_json",
  "tokio",
  "tracing",

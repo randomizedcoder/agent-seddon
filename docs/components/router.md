@@ -198,8 +198,10 @@ faces over the same messages:
   it runs the same `route::Policy` engine, so the answer is the router's), and
   `Health`. Swappable storage behind `[registry] store`: `file` (the same
   textproto bundle — hand-edited or `Put`-rewritten, one format), `sqlite`
-  (feature `registry-sqlite`, prost-encoded blobs), `grpc` (a central registry),
-  `""` (off). `agent_registry_mutations_total{op}` +
+  (feature `registry-sqlite`) and `postgres` (feature `registry-postgres`) —
+  both `StoreRegistry` over the shared config-store `SqliteBackend`/`PgBackend`,
+  prost-encoded card blobs (PG-11 retired the bespoke `SqliteRegistry`) — `grpc`
+  (a central registry), `""` (off). `agent_registry_mutations_total{op}` +
   `agent_registry_upstreams{enabled}` meter the control plane.
 
 **Security.** A card's `api_key_ref` is a kind-prefixed *reference* —
@@ -209,7 +211,7 @@ raw value is rejected (without being echoed). Every id is `safe_segment`-gated
 before it can become a storage path or label; every number (cost, window,
 weight, retries, concurrency) is clamped at wire decode *and* on store ingest;
 sizes and counts are capped (`MAX_REGISTRY_UPSTREAMS`, rule/tag caps, a 1 MiB
-textproto cap applied before parsing). All three stores share one `ops` module,
+textproto cap applied before parsing). Every store shares one `ops` module,
 so validation cannot drift between backends.
 
 **Registry-backed routing** ([04](../design/model-router/04-registry-backed.md)):
