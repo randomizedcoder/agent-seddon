@@ -10,7 +10,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 
 ## Now
 
-- **Next:** CP-01 step 6 — `campaign/mod.rs` newtypes, records, requests, `Actor`, `CampaignStore`.
+- **Next:** CP-01 step 7 — crate `agent-campaign` `display.rs` (letters) + T1 `positive_display` + lib re-exports.
 
 ## CP-01 — seam, pure rules, `MemCampaigns`, T1–T8 (mem) — 🟡 branch `campaigns/cp-01`
 
@@ -21,7 +21,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 | `campaign/rules.rs` enums, `allowed()`, `rollup()`, `clamp_lease()` | ✅ | `allowed()` is a `match`; the test holds the doc table as data |
 | `campaign/path.rs` `TaskPath` | ✅ | `TaskId` newtype landed in `mod.rs` with it; `root(TaskId)` is fallible (non-positive id refused) |
 | `campaign/policy.rs` `Policy` | ✅ | `from_json` shape-checks keys before serde so every rejection names `policy.<key>`; `from_stored` maps to `Backend`; T4 policy rows at the pure level (3 named + 28 rejected + 15 accepted) |
-| `campaign/mod.rs` errors, types, `Actor`, `CampaignStore` | 🟡 | `CampaignError` / `CampaignResult` / `From<PathError>` / `From<CampaignError> for Error` landed with policy (step 5) |
+| `campaign/mod.rs` errors, types, `Actor`, `CampaignStore` | ✅ | errors landed with policy (step 5); `Owner` / `IdemKey` validate on deserialize too; shared checkers `check_len` / `check_max` / `screen` / `check_list` / `truncate_chars`; `NewCampaign` / `ChildSpec` / `PlanAttempt` / `PrRef` carry `validate()`; `Actor::from_scope` never yields `Model` (a gateway constructs it) |
 | crate `agent-campaign` (display letters) | ⬜ | |
 | testkit `MemCampaigns` | ⬜ | |
 | testkit conformance harness + `campaign_conformance_suite!` | ⬜ | |
