@@ -1354,25 +1354,26 @@ fn resolve_token(inline: &str, env_var: &str, file: &str) -> anyhow::Result<agen
 /// credential), a **missing/unreadable `file:` is a hard error** (never silently fall
 /// back to no-auth on a misconfigured secret mount). The returned [`Secret`] never
 /// appears in `Debug`/logs.
+///
+/// This is the **operator** form (the reference is host config). A reference from a
+/// tenant's card or row goes through [`resolve_tenant_token_ref`].
 #[cfg(feature = "fleet")]
 pub fn resolve_token_ref(token_ref: &str) -> anyhow::Result<agent_core::Secret> {
-    use agent_core::ApiKeyRef;
-    use anyhow::Context;
-    match ApiKeyRef::parse(token_ref).map_err(|e| anyhow::anyhow!(e))? {
-        ApiKeyRef::None => Ok(agent_core::Secret::default()),
-        ApiKeyRef::Env(name) => match std::env::var(name) {
-            Ok(v) if !v.is_empty() => Ok(agent_core::Secret::new(v)),
-            // Unset / empty ⇒ absent (fail-soft): the row runs without a credential.
-            _ => Ok(agent_core::Secret::default()),
-        },
-        ApiKeyRef::File(path) => {
-            let expanded = crate::builder::expand_tilde(path);
-            let v = std::fs::read_to_string(&expanded)
-                // Never echo the path's *contents*; the path itself is operator config.
-                .with_context(|| format!("reading fleet token_ref file `{expanded}`"))?;
-            Ok(agent_core::Secret::new(v.trim()))
-        }
-    }
+    crate::secrets::resolve(crate::secrets::SecretScope::Operator, token_ref)
+        .map_err(|e| anyhow::anyhow!("fleet token_ref: {e}"))
+}
+
+/// [`resolve_token_ref`] for a reference owned by `tenant` (a fleet row, a forge or
+/// transport card): under `[tenancy] per_tenant` it resolves only inside that
+/// tenant's `[secrets] root` directory, and `env:` only when allowed
+/// (security-hardening S17).
+#[cfg(feature = "fleet")]
+pub fn resolve_tenant_token_ref(
+    tenant: &str,
+    token_ref: &str,
+) -> anyhow::Result<agent_core::Secret> {
+    crate::secrets::resolve(crate::secrets::SecretScope::Tenant(tenant), token_ref)
+        .map_err(|e| anyhow::anyhow!("tenant `{tenant}` token_ref: {e}"))
 }
 
 /// Build a **session-scoped** forge from a roster row's **inline** fields
@@ -1405,7 +1406,7 @@ pub fn build_session_forge(
     {
         use anyhow::Context;
         // Resolve first: an unresolvable credential fails the whole build (fail closed).
-        let token = resolve_token_ref(&row.token_ref)?;
+        let token = resolve_tenant_token_ref(&row.user, &row.token_ref)?;
         let card = agent_core::ForgeCard {
             id: row.id.clone(),
             kind: row.backend.clone(),
@@ -1460,7 +1461,7 @@ pub fn build_session_forge_from_card(
         // The credential comes from the CARD's own ref (not the row's inline
         // token_ref); resolve first so an unresolvable credential fails the whole
         // build (fail closed).
-        let token = resolve_token_ref(&card.token_ref)?;
+        let token = resolve_tenant_token_ref(&row.user, &card.token_ref)?;
         let forge =
             agent_forge::build_forge_from_card(card, &row.repo, token).with_context(|| {
                 format!(

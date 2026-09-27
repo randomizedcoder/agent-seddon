@@ -1430,7 +1430,10 @@ async fn spawn_slack_watch(
 
     // token_ref -> the watch fanning out every row that resolves to that token. A card
     // is fetched at most once per id (a dangling/errored id ⇒ no trigger, warned once).
-    let mut groups: std::collections::HashMap<String, agent_slack::SlackWatch> =
+    // Keyed by (owner, token_ref): a card's token belongs to the row's tenant and
+    // resolves confined to it (S17); the legacy `[review_fleet.slack]` ref is operator
+    // config (owner `None`).
+    let mut groups: std::collections::HashMap<(Option<String>, String), agent_slack::SlackWatch> =
         std::collections::HashMap::new();
     let mut card_cache: std::collections::HashMap<String, Option<agent_core::TransportCard>> =
         std::collections::HashMap::new();
@@ -1478,7 +1481,8 @@ async fn spawn_slack_watch(
                 continue;
             }
         };
-        let watch = groups.entry(token_ref).or_default();
+        let owner = (!row.transport_id.is_empty()).then(|| row.user.clone());
+        let watch = groups.entry((owner, token_ref)).or_default();
         for channel in channels {
             // `subscribe` ignores blank channels, so an empty inline channel is a no-op.
             watch.subscribe(&channel, &row.id, expect.clone());
@@ -1488,11 +1492,15 @@ async fn spawn_slack_watch(
     // Spawn one reconnecting Socket-Mode driver per token that resolves to a live
     // connection AND has at least one subscribed channel.
     let mut connections = 0usize;
-    for (token_ref, watch) in groups {
+    for ((owner, token_ref), watch) in groups {
         if watch.subscribed_channels().next().is_none() {
             continue; // token with no channels — nothing to watch.
         }
-        let app_token = match agent_runtime::resolve_token_ref(&token_ref) {
+        let resolved = match &owner {
+            Some(tenant) => agent_runtime::resolve_tenant_token_ref(tenant, &token_ref),
+            None => agent_runtime::resolve_token_ref(&token_ref),
+        };
+        let app_token = match resolved {
             Ok(secret) if !secret.expose().is_empty() => secret,
             Ok(_) => {
                 tracing::warn!(

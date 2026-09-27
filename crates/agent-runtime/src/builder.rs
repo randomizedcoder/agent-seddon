@@ -159,6 +159,10 @@ pub async fn build_agent_with(
     // to the anchor's built-in behavior (fail soft).
     #[allow(unused_mut)]
     let mut cfg = cfg;
+    // Tenant-owned secret references resolve under this policy from here on
+    // (security-hardening S17): confined to `[secrets] root/<tenant>` when
+    // `[tenancy] per_tenant` is on.
+    crate::secrets::install_policy(cfg.secrets.policy(cfg.tenancy.per_tenant));
     // The model-router textproto scenario file (model-router 03), applied
     // before any factory reads `[route]`: it REPLACES the TOML fleet+policy
     // wholesale (one authority, never a merge). A missing/unparseable/invalid
@@ -2710,11 +2714,27 @@ pub(crate) fn synth_route_upstream(
 /// take — never a raw value (`ApiKeyRef::parse` already refused those without
 /// echoing them).
 #[cfg(all(feature = "registry", feature = "provider-router"))]
+///
+/// A card belongs to the tenant whose router cell is being built (the ambient
+/// [`agent_core::current_tenant`]), so its reference is confined to that tenant's
+/// secrets directory under `per_tenant` (security-hardening S17).
 fn synth_key_refs(card: &agent_core::Upstream) -> agent_core::Result<(String, String)> {
-    match agent_core::ApiKeyRef::parse(&card.api_key_ref) {
-        Ok(agent_core::ApiKeyRef::Env(n)) => Ok((n.to_string(), String::new())),
-        Ok(agent_core::ApiKeyRef::File(f)) => Ok((String::new(), f.to_string())),
-        Ok(agent_core::ApiKeyRef::None) => Ok((String::new(), String::new())),
+    let tenant = agent_core::current_tenant();
+    synth_key_refs_with(&crate::secrets::policy(), &tenant, card)
+}
+
+/// [`synth_key_refs`] against an explicit policy and tenant.
+#[cfg(all(feature = "registry", feature = "provider-router"))]
+fn synth_key_refs_with(
+    policy: &crate::secrets::SecretsPolicy,
+    tenant: &str,
+    card: &agent_core::Upstream,
+) -> agent_core::Result<(String, String)> {
+    use crate::secrets::{admit, Admitted, SecretScope};
+    match admit(policy, SecretScope::Tenant(tenant), &card.api_key_ref) {
+        Ok(Admitted::Env(n)) => Ok((n, String::new())),
+        Ok(Admitted::File(f)) => Ok((String::new(), f.to_string_lossy().into_owned())),
+        Ok(Admitted::None) => Ok((String::new(), String::new())),
         Err(e) => Err(agent_core::Error::Registry(format!(
             "card `{}`: {e}",
             card.id
@@ -5272,6 +5292,68 @@ mod auth_session_backend_tests {
         match (got, want) {
             (Ok(b), Ok(some)) => assert_eq!(b.is_some(), some),
             (Err(e), Err(needle)) => assert!(e.to_string().contains(needle), "{e}"),
+            (got, want) => panic!("got {got:?}, want {want:?}"),
+        }
+    }
+}
+
+#[cfg(all(test, feature = "registry", feature = "provider-router"))]
+mod synth_secret_tests {
+    use super::*;
+    use crate::secrets::SecretsPolicy;
+
+    fn card(api_key_ref: &str) -> agent_core::Upstream {
+        agent_core::Upstream {
+            id: "kimi".into(),
+            api_key_ref: api_key_ref.into(),
+            ..agent_core::Upstream::default()
+        }
+    }
+
+    // desc: a provider card's key reference goes through the tenant policy
+    // (security-hardening S17): confined under per_tenant, unchanged without it.
+    #[rstest::rstest]
+    #[case::positive_inside_the_tenant_dir(true, "file:kimi.key", Ok(("", "acme/kimi.key")))]
+    #[case::corner_per_tenant_off_keeps_the_path(false, "file:/etc/key", Ok(("", "/etc/key")))]
+    #[case::corner_per_tenant_off_keeps_env(false, "env:KIMI_KEY", Ok(("KIMI_KEY", "")))]
+    #[case::negative_empty_ref_is_keyless(true, "", Ok(("", "")))]
+    #[case::adversarial_host_file_refused(true, "file:/etc/key", Err("secrets directory"))]
+    #[case::adversarial_other_tenant_refused(
+        true,
+        "file:../other/kimi.key",
+        Err("secrets directory")
+    )]
+    #[case::adversarial_env_refused(true, "env:KIMI_KEY", Err("allow_env_for_tenants"))]
+    fn synth_key_refs_cases(
+        #[case] per_tenant: bool,
+        #[case] api_key_ref: &str,
+        #[case] want: Result<(&str, &str), &str>,
+    ) {
+        let root = agent_testkit::tempdir();
+        std::fs::create_dir_all(root.join("acme")).unwrap();
+        let policy = SecretsPolicy {
+            per_tenant,
+            root: root.clone(),
+            allow_env_for_tenants: false,
+        };
+        match (
+            synth_key_refs_with(&policy, "acme", &card(api_key_ref)),
+            want,
+        ) {
+            (Ok((env, file)), Ok((want_env, want_file))) => {
+                assert_eq!(env, want_env);
+                let want_file = if want_file.starts_with("acme/") {
+                    root.join(want_file).to_string_lossy().into_owned()
+                } else {
+                    want_file.to_string()
+                };
+                assert_eq!(file, want_file);
+            }
+            (Err(e), Err(needle)) => {
+                let e = e.to_string();
+                assert!(e.contains(needle), "{e}");
+                assert!(!e.contains("/etc/key"), "the path is not echoed: {e}");
+            }
             (got, want) => panic!("got {got:?}, want {want:?}"),
         }
     }

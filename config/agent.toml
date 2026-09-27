@@ -1220,6 +1220,16 @@ job         = "agent-seddon"
 # [tenancy]
 # per_tenant = true
 
+# [secrets] — where tenants' credential files live (security-hardening S17). Only
+# under `[tenancy] per_tenant = true`: a TENANT's card or fleet row (forge / transport
+# / provider-upstream `*_ref`) may then say `file:<name>` only for a file inside
+# `<root>/<tenant>/` (relative names resolve there; symlinks may not lead out), and
+# `env:NAME` only with `allow_env_for_tenants`. Operator config in this file keeps
+# resolving `env:`/`file:` anywhere, as before. Errors never echo the path.
+# [secrets]
+# root = "/run/agent-seddon/secrets"       # default $XDG_CONFIG_HOME/agent-seddon/secrets
+# allow_env_for_tenants = false
+
 # [config_store] — the shared transactional config data layer (config C41 / A2,
 # docs/design/config/09-increments.md). One store that supplies the DSN + pool every
 # domain's `store = "postgres"` reuses now that the per-domain stores have converged

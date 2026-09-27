@@ -36,6 +36,8 @@ pub struct Config {
     #[serde(default)]
     pub tenancy: TenancyCfg,
     #[serde(default)]
+    pub secrets: SecretsCfg,
+    #[serde(default)]
     pub search: SearchCfg,
     #[serde(default)]
     pub ast: AstCfg,
@@ -3075,6 +3077,53 @@ pub struct TenancyCfg {
     pub per_tenant: bool,
 }
 
+/// `[secrets]`: where a tenant's credential files live (security-hardening S17,
+/// docs/design/security-hardening/08-data-plane-and-secrets.md). Applies only under
+/// `[tenancy] per_tenant = true`: a tenant-owned card's `file:` reference must then
+/// resolve inside `<root>/<tenant>/`, and its `env:` reference is refused unless
+/// `allow_env_for_tenants`. Operator config is unaffected.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
+pub struct SecretsCfg {
+    /// Directory holding one sub-directory per tenant. Empty ⇒
+    /// `$XDG_CONFIG_HOME/agent-seddon/secrets` (`~/.config/…` when unset).
+    #[serde(default)]
+    pub root: String,
+    /// Let tenant cards read the host's environment variables (default `false`).
+    #[serde(default)]
+    pub allow_env_for_tenants: bool,
+}
+
+impl SecretsCfg {
+    /// The effective, tilde-expanded root.
+    pub fn root_path(&self) -> std::path::PathBuf {
+        let root = self.root.trim();
+        if !root.is_empty() {
+            return crate::builder::expand_tilde(root).into();
+        }
+        let base = std::env::var("XDG_CONFIG_HOME")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| crate::builder::expand_tilde("~/.config"));
+        std::path::Path::new(&base)
+            .join("agent-seddon")
+            .join("secrets")
+    }
+
+    /// The process policy these settings and `per_tenant` describe.
+    pub fn policy(&self, per_tenant: bool) -> crate::secrets::SecretsPolicy {
+        crate::secrets::SecretsPolicy {
+            per_tenant,
+            root: self.root_path(),
+            allow_env_for_tenants: self.allow_env_for_tenants,
+        }
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[cfg_attr(
     feature = "config-schema",
@@ -3822,6 +3871,7 @@ impl Config {
             transport_registry: TransportRegistryCfg::default(),
             auth: AuthCfg::default(),
             tenancy: TenancyCfg::default(),
+            secrets: SecretsCfg::default(),
             source_path: None,
         }
     }
@@ -4551,6 +4601,40 @@ mod tests {
             (Ok(()), None) => {}
             (Err(e), Some(want)) => assert!(e.contains(want), "want {want:?} in {e:?}"),
             (got, want) => panic!("{cfg:?}: got {got:?}, want error {want:?}"),
+        }
+    }
+
+    // --- `[secrets]` (security-hardening S17) ---
+    #[rstest::rstest]
+    #[case::positive_explicit_root("[secrets]\nroot = \"/srv/secrets\"\n", Some("/srv/secrets"))]
+    #[case::positive_allow_env("[secrets]\nallow_env_for_tenants = true\n", None)]
+    #[case::positive_absent_section("", None)]
+    #[case::adversarial_misspelt_key_is_an_error("[secrets]\nallow_env = true\n", None)]
+    fn secrets_cfg_cases(#[case] toml_src: &str, #[case] root: Option<&str>) {
+        #[derive(Deserialize)]
+        struct Wrap {
+            #[serde(default)]
+            secrets: SecretsCfg,
+        }
+        let parsed = toml::from_str::<Wrap>(toml_src);
+        if toml_src.contains("allow_env =") {
+            assert!(parsed.is_err(), "unknown keys are refused");
+            return;
+        }
+        let cfg = parsed.expect("parses").secrets;
+        let policy = cfg.policy(true);
+        assert!(policy.per_tenant);
+        assert_eq!(
+            policy.allow_env_for_tenants,
+            toml_src.contains("allow_env_for_tenants")
+        );
+        match root {
+            Some(r) => assert_eq!(policy.root, std::path::PathBuf::from(r)),
+            None => assert!(
+                policy.root.ends_with("agent-seddon/secrets"),
+                "{:?}",
+                policy.root
+            ),
         }
     }
 

@@ -29,6 +29,7 @@ pub mod recall;
 mod registry;
 #[cfg(feature = "search")]
 mod search;
+pub mod secrets;
 mod session_events;
 pub mod session_store;
 pub mod skills;
@@ -104,7 +105,8 @@ pub use egress::derive_egress_allowlist;
 pub use progress::{progress_channels, TransportProgressFeed};
 #[cfg(feature = "fleet")]
 pub use registry::{
-    build_session_forge, build_session_forge_from_card, resolve_session_forge, resolve_token_ref,
+    build_session_forge, build_session_forge_from_card, resolve_session_forge,
+    resolve_tenant_token_ref, resolve_token_ref,
 };
 pub use registry::{register_builtins, Registry};
 pub use session_events::{SessionEvents, SessionEventsRegistry};
