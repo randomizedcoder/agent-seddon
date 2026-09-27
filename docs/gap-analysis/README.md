@@ -212,6 +212,10 @@ Deferred in [multi-session/STATUS.md](../design/multi-session/STATUS.md): 04c ch
 
 ## 4. API surface: protobuf → OpenAPI + REST
 
+> **Implementation plan:** this section now has a design-of-record and increment tracker in
+> [`design/rest-openapi/`](../design/rest-openapi/README.md) (Envoy `grpc_json_transcoder` for the
+> live path + `protoc-gen-openapiv2` for the committed, drift-gated OpenAPI doc).
+
 **Today.** A repo-wide grep for `openapi`, `grpc_json_transcoder`, `google.api.http`, `swagger`,
 `grpc-gateway` and `tonic-web` over `.proto`, `.nix`, `.yaml` and `.rs` returns **zero hits**. The
 HTTP surfaces are:
