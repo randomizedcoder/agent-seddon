@@ -203,8 +203,30 @@ impl Backend for PgBackend {
     }
 
     async fn tenants(&self, collection: &str) -> Result<Vec<String>> {
+        // `SELECT DISTINCT tenant … WHERE collection = $1` reads EVERY card in the
+        // collection to recover its distinct tenants — O(rows), even as an
+        // index-only scan. That is a scaling hazard on the scheduler's hot path:
+        // the tenant-fair driver calls this once PER TICK to enumerate tenants
+        // owning a job card (`scheduler_driver::rotated_tenants`), so the per-tick
+        // cost grows with the total job-card count, not the tenant count.
+        //
+        // Do a loose index scan (a "skip scan") instead: seed with the first
+        // tenant, then repeatedly jump to the next tenant strictly greater than
+        // the last via the `cards` PK's `(collection, tenant, …)` prefix — one
+        // index seek per DISTINCT tenant, O(tenants), not O(rows). The recursion
+        // ends when the look-ahead subquery finds no greater tenant (a trailing
+        // NULL row, filtered out). Results come back sorted ascending, identical
+        // to the old query. `collection` is a bound parameter (never interpolated).
         let rows: Vec<String> = sqlx::query_scalar(
-            "SELECT DISTINCT tenant FROM cards WHERE collection = $1 ORDER BY tenant",
+            "WITH RECURSIVE t AS (
+                 (SELECT tenant FROM cards WHERE collection = $1 ORDER BY tenant LIMIT 1)
+                 UNION ALL
+                 SELECT (SELECT c.tenant FROM cards c
+                          WHERE c.collection = $1 AND c.tenant > t.tenant
+                          ORDER BY c.tenant LIMIT 1)
+                   FROM t WHERE t.tenant IS NOT NULL
+             )
+             SELECT tenant FROM t WHERE tenant IS NOT NULL ORDER BY tenant",
         )
         .bind(collection)
         .fetch_all(&self.pool)
