@@ -1,4 +1,4 @@
-# Campaigns — implementation progress (lane A: CP-01 → CP-02)
+# Campaigns — implementation progress (lane A: CP-01 → CP-02; lane B: CP-03 → CP-04)
 
 Crash-resilient running journal, finer-grained than [`STATUS.md`](STATUS.md) (one row per
 increment). Updated after every step; the decisions log is append-only. Design contract:
@@ -10,7 +10,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 
 ## Now
 
-- **Next:** lane A is done — CP-01 (#501, `71d4abf`) and CP-02 (#508, `630098a`) are on `main`; `STATUS.md` carries both as-built entries. Next increment is CP-03 (planner over the seam, T9/T10) or lane B per [`05-increments.md`](05-increments.md); it starts with a new plan of record and its own branch off `main`.
+- **Next:** CP-03 step 2 (Cargo: workspace `sha2`, `agent-campaign` manifest, `pub mod planner`; `planner/hash.rs` + `planner/schema.rs` + tests) on `campaigns/cp-03` (off `main` at `ddc00e2`). Lane A is done — CP-01 (#501, `71d4abf`) and CP-02 (#508, `630098a`) are on `main`. Lane B scope = CP-03 (planner, T9/T10) then CP-04 (`agent campaign` CLI, Postgres store only, T16), two PRs each off `main`, never stacked.
 
 ## CP-01 — seam, pure rules, `MemCampaigns`, T1–T8 (mem) — ✅ #501 (merged 2026-09-27, `71d4abf`)
 
@@ -55,6 +55,30 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 | `nix/pg-integration.nix` + config-store `TRUNCATE … CASCADE` | ✅ | `AGENT_CAMPAIGN_TEST_DSN` exported; campaign suite block last; `contract_exit` text += campaign; config-store reset is `TRUNCATE cards, tenants CASCADE` |
 | gate: pg suite local, `nix run .#pg-integration` ×2, `nix flake check` | ✅ | pg suite local green (157); `nix run .#pg-integration` green twice (second pass over the persisted volume, config-store CASCADE proven in place); `nix flake check` green on the committed ref `74c5bcd` — see Gate status |
 
+## CP-03 — planner: prompt, schema, structured ask, post-validation, T9/T10 — 🟡 `campaigns/cp-03`
+
+| Item | State | Notes |
+|---|---|---|
+| 1. seam: `PlanCloseOutcome::Injection { field }`, `LOW_CONFIDENCE` / `plan_detail`, shared `check_deps`; mem + pg arms; t5 rows | ✅ | `check_deps` (Kahn) moved from the two private store copies to `agent_core::campaign` (11 unit rows); `plan_detail` adds `low_confidence: true` under 0.4 or non-finite on **both** `mark_leaf` and `decompose` (8 unit rows); `Injection` arm: attempt `error` = `injection: <field>`, `blocked` with `detail.reason = injection` + `detail.field`, `attempts` untouched, rollup; t5 rows `positive_plan_close_injection`, `corner_mark_leaf_low_confidence`, `corner_decompose_low_confidence` run on mem and pg via the macro list; 02 (b) tail + 06 T5 amended |
+| 2. Cargo (`sha2` workspace dep, manifest, `pub mod planner`) + `hash.rs` + `schema.rs` | ⬜ | |
+| 3. `prompt.rs` (random fence, 24 KiB cap, canonical hash render), `brief.rs`, `touches.rs` | ⬜ | |
+| 4. `ask.rs` (structured loop, byte cap, usage sum), `validate.rs` (03 step 4 table) | ⬜ | |
+| 5. `planner/mod.rs` (`Planner`, `plan_node`, `tick`), exports, tests harness, T9 | ⬜ | rows: 0/36 (+ `corner_unchanged_input_no_call`; † `positive_execute_node_key` / `negative_execute_unknown_node_key` deferred to CP-07) |
+| 6. T10 + `Overlay` double | ⬜ | rows: 0/13 |
+| 7. docs (03 / 02 / 06 / 05 amendments, STATUS 🟡, PROGRESS); gate | ⬜ | |
+
+## CP-04 — `agent campaign …` CLI + runtime wiring — ⬜ (branch off `main` after CP-03 merges)
+
+| Item | State | Notes |
+|---|---|---|
+| 1. `is_hidden_control` pub; `display::escape_terminal` + rows; `PgCampaigns::ensure_migrated` | ⬜ | |
+| 2. `CampaignCfg` + `Config.campaign` + validator; `config/agent.toml` block; config tests | ⬜ | |
+| 3. runtime features / dep, `mod dsn` list, `campaign.rs` resolver, planner provider on `Agent`; `multi-tenant.toml`; fixture 10; cli-help require | ⬜ | |
+| 4. `campaign_cli.rs` parse + refs + tests; `Mode::Campaign`, parser arm, help, `--check-config`; e2e rows | ⬜ | |
+| 5. `run()` store-only verbs + `render`; early dispatch; `MemCampaigns` run-level tests; disabled-store e2e | ⬜ | |
+| 6. `plan` / `run --once` via `Planner::draft07`; in-process test | ⬜ | |
+| 7. docs (component doc, README / extending, 04 / 05, STATUS 🟡, PROGRESS); gate | ⬜ | T16 rows: 0/8 |
+
 ## Decisions log (append-only)
 
 - 2026-09-26 — Everything pure (`allowed()`, `rollup()`, `TaskPath`, `Policy`, the seam) lives in
@@ -95,6 +119,39 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
   same code path as every other write, one event per row, and nothing to keep in step with the
   memory tier. `complete` locks the leaf only (no rollup); `fail`, `resolve_review`, `retry`,
   `cancel`, `replan`, `plan_start` and `plan_close` lock the ancestors first.
+- 2026-09-27 — Lane B scope: CP-03 then CP-04, two PRs each off `main`, never stacked; the CLI
+  store is Postgres only (`MemCampaigns` reaches the CLI only by injection in tests).
+- 2026-09-27 — The planner owns its structured-output loop in `agent-campaign` (`planner/ask.rs`):
+  `agent_runtime::structured` cannot be reused (agent-runtime will depend on agent-campaign for
+  CP-04, and the runtime loop discards `Usage` and has no byte cap). `agent-validate` is an
+  unconditional dep (`validate-draft07`) so `Planner::draft07` can build the validator.
+- 2026-09-27 — Hashing: `sha2 = "0.10"` workspace dep. `prompt_hash = sha256(SYSTEM ‖ \0 ‖
+  user_canonical ‖ \0 ‖ schema json)` where the user message is rendered with a canonical fence
+  tag (`"0" × 32`); the messages sent use a random 32-hex tag (`uuid` v4 simple) of the same
+  length, so truncation is byte-identical and model text cannot close a fence. `idem_key =
+  sha256(tenant \0 task_id \0 expected_version \0 prompt_hash)`.
+- 2026-09-27 — Seam additions for the planner: `PlanCloseOutcome::Injection { field }` (a prompt
+  **input** hit `scan_for_injection` → `blocked`, `attempts` untouched; a hit inside the model's
+  **answer** is an ordinary attempt `error` prefixed `injection: <field>` and the node returns to
+  `ready`); `low_confidence` marker on both `mark_leaf` and `decompose` (03 said execute only;
+  amended for symmetry so `show` can mark both); `check_deps` shared from `agent_core::campaign`.
+- 2026-09-27 — `Conflict` at the finishing write: the planner writes nothing further (the attempt
+  row was inside the rolled-back tx), warns and counts it; a `plan_close(Error{conflict})` would
+  CAS on the same stale version. Pre-call idempotency: the planner scans `attempts(task)` for the
+  computed key and skips the provider call on a hit; the store's `AlreadyApplied` stays the
+  backstop.
+- 2026-09-27 — Touches resolve through `TouchResolver` (`WorktreeTouches { root }`: relative,
+  `safe_segment` per segment, `confine`, exists, not a symlink; node-key syntax rejected until
+  RK-08 / CP-07). Brief through `BriefSource` (`FallbackBrief { repo_root }` = first 6 KiB of
+  `docs/architecture.md` + CLAUDE.md `## Conventions` / `## Security` sections; not
+  injection-screened because CLAUDE.md discusses injection phrases). Plannable order is the
+  store's `(campaign_id, path)`.
+- 2026-09-27 — CP-04: `[campaign]` config reuses `[config_store] dsn_ref` (no `dsn_ref` of its
+  own); the store opens with `connect_lazy` and migrates on the first verb via
+  `PgCampaigns::ensure_migrated` when `migrate_on_start`, never eagerly (fixture 10's dummy DSN
+  must not dial). Store-only verbs run before metrics / `build_agent`; every untrusted string is
+  rendered through `display::escape_terminal` (`is_hidden_control` becomes pub); letters are
+  minted from the unfiltered listing so `A` is stable across `list` / `show` / `add`.
 
 ## Gate status
 
@@ -115,6 +172,8 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 | 2026-09-27 | #501 merged (`71d4abf`, merge commit); `git rebase --autostash --onto origin/main 6d7b87f campaigns/cp-02` | clean, six commits replayed; `cargo fmt --all -- --check` + `cargo clippy --workspace --all-targets --all-features -- -D warnings` + `cargo test -p agent-campaign --features campaign-postgres` (34 in-gate) green |
 | 2026-09-27 | post-rebase `CONTAINER_RUNTIME=podman nix run .#pg-integration` | green on the combined tree: config-store 34 (33 + #502's `boundary_tenants_dedups_many_per_tenant`, `CASCADE` reset in place), campaign 157/157 (108 s) |
 | 2026-09-27 | post-rebase `nix flake check "git+file:///…/agent-seddon?ref=refs/heads/campaigns/cp-02"` (@ `2cc7fdd`) | green, `all checks passed!` — a cold build (the rebase changed the source hash), ~35 min alongside another nix build on the host |
+| 2026-09-27 | CP-03 step 1: `cargo fmt --all` + `cargo clippy -p agent-core -p agent-testkit -p agent-campaign --all-targets --all-features -- -D warnings` + `cargo test -p agent-core campaign` / `-p agent-testkit campaign` / `-p agent-campaign --all-features` | green first run: 290 / 149 / 34 in-gate (pg suite `#[ignore]`) |
+| 2026-09-27 | CP-03 step 1: `CONTAINER_RUNTIME=podman nix run .#pg-integration` | green first run (`PASS: …`); campaign pg suite 160/160 (157 + the three new t5 rows), 91 s |
 
 ## Open questions / blockers
 

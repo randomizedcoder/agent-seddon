@@ -157,6 +157,9 @@ the cases, not the other way round.
 | `corner_idem_replay` | same `idem_key` twice | second call `AlreadyApplied`; state unchanged; one attempt row |
 | `corner_idem_same_key_other_tenant` | same `idem_key` under tenant B | accepted (UNIQUE is per tenant) |
 | `corner_attempt_exhausted` | third validation failure, `max_plan_attempts 3` | node `blocked`, `detail.reason = attempts_exhausted` |
+| `corner_mark_leaf_low_confidence` | `execute` with `confidence 0.2` / `0.9` | accepted; event `detail.low_confidence = true` only under 0.4 (CP-03) |
+| `corner_decompose_low_confidence` | `split` with `confidence 0.39` / `0.4` | same marker on the `decomposed` event (CP-03) |
+| `positive_plan_close_injection` | `plan_close` with `Injection { field }` (a prompt input hit `scan_for_injection`) | node `blocked`, `detail.reason = injection`, `detail.field`; attempt `error` = `injection: <field>`; `attempts` unchanged; parent rolls up (CP-03) |
 | `adversarial_child_path_supplied` | caller supplies `path` / `ordinal` / `depth` for a child | ignored; computed under the lock |
 | `adversarial_child_policy` | child carries `policy` | rejected (CHECK `policy IS NULL OR depth = 0`) |
 | `adversarial_parent_other_tenant` | `parent_id` from tenant B | `NotFound` |
