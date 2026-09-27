@@ -58,6 +58,10 @@ pkgs.writeShellApplication {
     # The DSN mirrors the pins in nix/versions.nix; passed to the ignored suite,
     # which resets the tables and connects (see crates/agent-config-store/src/tests.rs).
     export AGENT_CONFIG_STORE_TEST_DSN="postgres://${versions.postgresUser}:${versions.postgresPassword}@127.0.0.1:${toString versions.postgresPort}/${versions.postgresDatabase}"
+    # The digest ledger (PG-08) shares the same server; its `#[ignore]` suite
+    # gates on AGENT_DIGEST_TEST_DSN, and its own versioned runner creates the
+    # `digests` table (distinct from the config-store `cards`/`tenants`).
+    export AGENT_DIGEST_TEST_DSN="$AGENT_CONFIG_STORE_TEST_DSN"
 
     echo "==> pg-integration: running the ignored config-store postgres suite"
     set +e
@@ -160,6 +164,30 @@ pkgs.writeShellApplication {
     set -e
     if [ "$rc" -ne 0 ]; then note_fail 2; fi
 
-    contract_exit "PASS: pg-integration — postgres config-store + registry + fleet + prompt + role + per-tenant + scheduler + forge + transport suites green."
+    # The digest ledger (PG-07/PG-08): the crate-local `PgDigests` suite proves the
+    # DigestStore contract over the real server; its own versioned runner creates
+    # the `digests` table. Shares the DB (distinct tables), so no reset needed.
+    echo "==> pg-integration: running the ignored digest postgres suite"
+    set +e
+    nix develop --extra-experimental-features 'nix-command flakes' -c \
+      cargo test -p agent-digest --features digest-postgres \
+      -- --ignored --test-threads=1
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then note_fail 2; fi
+
+    # The runtime wiring (config C41 / PG-08): the `[digest] store = "postgres"`
+    # arm builds `PgDigests` from the shared `[config_store] dsn_ref` and
+    # round-trips a row end-to-end through the builder helper.
+    echo "==> pg-integration: running the ignored digest wiring suite"
+    set +e
+    nix develop --extra-experimental-features 'nix-command flakes' -c \
+      cargo test -p agent-runtime --features digest-postgres \
+      -- --ignored --test-threads=1 pg_digest_wiring_tests
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then note_fail 2; fi
+
+    contract_exit "PASS: pg-integration — postgres config-store + registry + fleet + prompt + role + per-tenant + scheduler + forge + transport + digest suites green."
   '';
 }

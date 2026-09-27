@@ -32,6 +32,20 @@ mod search;
 mod session_events;
 pub mod session_store;
 pub mod skills;
+// The fail-closed `env:`/`file:` DSN-reference resolver, shared by every Postgres
+// tier (the config-store domains via `store_backend`, and the digest ledger via
+// the builder's `pg_digests`). One home for the secret-handling (never echo the
+// resolved DSN), so the two callers can't diverge.
+#[cfg(any(
+    feature = "registry-postgres",
+    feature = "fleet-postgres",
+    feature = "prompt-postgres",
+    feature = "scheduler-postgres",
+    feature = "forge-registry-postgres",
+    feature = "transport-registry-postgres",
+    feature = "digest-postgres"
+))]
+mod dsn;
 #[cfg(any(
     feature = "registry-postgres",
     feature = "fleet-postgres",

@@ -914,7 +914,8 @@ fn default_gate_alternatives() -> u8 {
     derive(serde::Serialize, schemars::JsonSchema)
 )]
 pub struct DigestCfg {
-    /// "" (off) | "clickhouse" | "sqlite".
+    /// "" (off) | "clickhouse" | "sqlite" | "postgres" (feature
+    /// `digest-postgres`, opt-in, never in `nix flake check`) | "grpc".
     #[serde(default)]
     pub store: String,
     /// Role routing: the provider the distiller's summary/facts calls use — a
@@ -926,6 +927,11 @@ pub struct DigestCfg {
     /// SQLite ledger path (`sqlite` backend only).
     #[serde(default = "default_digest_path")]
     pub path: String,
+    /// Postgres connection-pool ceiling (`postgres` backend only). The DSN itself
+    /// is the shared `[config_store] dsn_ref` (one server for the whole OLTP
+    /// surface); this only bounds the digest ledger's own pool.
+    #[serde(default = "default_digest_pool_max")]
+    pub pool_max: u32,
     #[serde(default = "default_digest_summary_tokens")]
     pub summary_max_tokens: u32,
     #[serde(default = "default_digest_facts_tokens")]
@@ -954,6 +960,7 @@ impl Default for DigestCfg {
             store: String::new(),
             provider: String::new(),
             path: default_digest_path(),
+            pool_max: default_digest_pool_max(),
             summary_max_tokens: default_digest_summary_tokens(),
             facts_max_tokens: default_digest_facts_tokens(),
             drain_timeout_s: default_digest_drain_timeout_s(),
@@ -1181,6 +1188,9 @@ fn default_instant_summaries_chars() -> usize {
 
 fn default_digest_path() -> String {
     ".agent/digests.sqlite3".into()
+}
+fn default_digest_pool_max() -> u32 {
+    8
 }
 fn default_digest_summary_tokens() -> u32 {
     512

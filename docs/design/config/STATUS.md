@@ -277,6 +277,20 @@ compare-and-swap, retiring the legacy `*-sqlite` impls). Eleven gated PRs off `m
   behavioural + `adversarial_` tests are `#[ignore]`-gated on `AGENT_DIGEST_TEST_DSN` and run only via
   `nix run .#integration` (wired in PG-08). Crate-local; no runtime wiring yet.
 
+- **PG-08 — digest Postgres wiring in `agent-runtime`.** Makes PG-07's `PgDigests` reachable from
+  config: the `[digest] store = "postgres"` arm (`builder.rs`) now builds it from the shared
+  `[config_store] dsn_ref` (so the digest ledger rides the same DSN reference as every other Postgres
+  domain — one secret, one place) and a new `[digest] pool_max` bound (`DigestCfg.pool_max`, default 8).
+  The secret-sensitive DSN resolution — `env:`/`file:` only, fail-closed, **never echoing the resolved
+  DSN** — is extracted from `store_backend` into a dedicated `crate::dsn` module so both the
+  config-store domains and the digest ledger share exactly one implementation; the new
+  `digest-postgres` runtime feature gates that module in without dragging in the config-store `Backend`
+  build path. The `pg-integration` harness gains two `#[ignore]`-gated stanzas (the crate-local
+  `PgDigests` suite and a runtime round-trip through the `pg_digests` builder helper, both keyed on
+  `AGENT_DIGEST_TEST_DSN`), and the `postgres` umbrella feature now forwards `digest-postgres` so the
+  shipped `agent` binary is digest-Postgres-capable. `ConfigStoreCfg::default()` stays `""` (D2): a
+  minimal config still opens no DB.
+
 ## Non-goals
 
 - Removing TOML (bootstrap stays TOML).
