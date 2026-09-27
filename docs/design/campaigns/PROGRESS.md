@@ -10,7 +10,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 
 ## Now
 
-- **Next:** CP-02 is gate-green on `campaigns/cp-02` @ `74c5bcd` (+ this gate record). Waiting on #501: after it merges, `STATUS.md` CP-01 → ✅ #501 + as-built entry, rebase `campaigns/cp-02` onto `main` (`git rebase --onto origin/main campaigns/cp-01 campaigns/cp-02`), rerun the gate, and ask before push / PR (body drafted).
+- **Next:** CP-02 is gate-green on `campaigns/cp-02` @ `74c5bcd` (+ gate record, row-coverage/link check, rebase dry-run — all clean). Waiting on #501: after it merges, `STATUS.md` CP-01 → ✅ #501 + as-built entry, rebase `campaigns/cp-02` onto `main` (`git rebase --onto origin/main campaigns/cp-01 campaigns/cp-02`), rerun the gate, and ask before push / PR (body drafted).
 
 ## CP-01 — seam, pure rules, `MemCampaigns`, T1–T8 (mem) — 🟡 #501 (branch `campaigns/cp-01`)
 
@@ -109,6 +109,8 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 | 2026-09-27 | CP-02: `cargo fmt --all -- --check` + `cargo clippy --workspace --all-targets --all-features -- -D warnings` | green |
 | 2026-09-27 | CP-02: `CONTAINER_RUNTIME=podman nix run .#pg-integration` ×2 | green both passes (`PASS: … + campaign suites green.`); campaign suite 157/157 each time, ~78 s |
 | 2026-09-27 | CP-02: `nix flake check "git+file:///…/agent-seddon?ref=refs/heads/campaigns/cp-02"` (@ `74c5bcd`) | green, `all checks passed!` |
+| 2026-09-27 | End-to-end verification (plan items 2–3): `06-test-matrix.md` row ids vs `cargo test -- --list` (`mem::tN::<id>`, `pg::tN::<id>`, pg-only fns, T14/T15); relative-link check over `docs/design/campaigns/*.md` | every shared T3–T8 row present on both tiers (134 row ids; 146 mem fns, 135 pg conformance fns + 22 pg-only), T14 10/10 (`adversarial_tenant_string_sql` is the in-gate rstest, not in the `--ignored` list by design), T15 4/4; no broken links |
+| 2026-09-27 | Rebase dry-run in a throwaway worktree: `git rebase --onto campaigns/cp-01 6d7b87f` (the four CP-02 commits over the cp-01 tip, standing in for post-merge `main`) | clean, no conflicts; the real rebase waits for #501 |
 
 ## Open questions / blockers
 
