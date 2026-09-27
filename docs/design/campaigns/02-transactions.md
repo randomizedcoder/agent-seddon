@@ -28,24 +28,32 @@ for owner-token claims with TTL reclaim is the durable scheduler
 
 ## Allowed transitions
 
-`allowed(from, to, kind, actor_class) -> bool` is a pure function in `agent-core` (CP-01) and
-the single source of truth; the store calls it before every write. The table is exhaustive: any
-pair not listed is denied.
+`allowed(from, to, kind, actor_class) -> bool` is a pure function in `agent_core::campaign`
+(CP-01, `crates/agent-core/src/campaign/rules.rs`) and the single source of truth; the store
+calls it before every write. The table is exhaustive: any pair not listed is denied. `kind` is
+the node's kind **before** the write, so the two "as `kind = leaf`" rows are the `task` rows
+they sit next to (listed for the reader, not counted twice). Expanded over `any` and
+`any non-terminal`, the table holds **82** `(from, to, kind, actor)` tuples out of
+13 × 13 × 3 × 8; T2 `boundary_exhaustive` asserts that count and the set. The actor classes
+are `user`, `model`, `planner`, `driver`, `worker`, `reaper`, `poller`, `rollup`; `model` (the
+LLM as a principal) is allowed nothing.
 
 | From | To | Kind | Actor |
 |---|---|---|---|
 | `draft` | `ready` | objective | user |
 | `draft` | `cancelled` | objective | user |
-| `awaiting_approval` | `ready` | task, leaf | user |
+| `awaiting_approval` | `ready` | any | user (`approve`; `answer` on a `needs_info` node, the root included) |
 | `awaiting_approval` | `cancelled` | any | user |
 | `ready` | `decomposing` | objective, task | planner |
 | `ready` | `claimed` | leaf | driver |
 | `ready` | `blocked` | task, leaf | planner (injection, attempts), rollup (dependency failed) |
+| `ready` | `blocked` | objective | planner (attempts exhausted, token cap on the root) |
 | `ready` | `cancelled` | any | user |
 | `decomposing` | `decomposed` | objective, task | planner (`split`) |
 | `decomposing` | `ready` | objective, task | planner (validation error, retry) |
-| `decomposing` | `awaiting_approval` | task | planner (`needs_info`) |
+| `decomposing` | `awaiting_approval` | objective, task | planner (`needs_info`) |
 | `decomposing` | `blocked` | objective, task | planner (`reject`, attempts exhausted) |
+| `decomposing` | `cancelled` | any | user (protocol (f) while a planner call is in flight) |
 | `decomposing` | `ready` (as `kind = leaf`) | task | planner (`execute`, depth not gated) |
 | `decomposing` | `awaiting_approval` (as `kind = leaf`) | task | planner (`execute`, depth gated) |
 | `decomposed` | `done` / `blocked` | objective, task | rollup |
@@ -64,6 +72,8 @@ pair not listed is denied.
 | `blocked` | `ready` | task, leaf | user (`retry`) |
 | `blocked` | `decomposing` | objective, task | user (`replan`) |
 | `blocked` | `cancelled` | any | user |
+| `blocked` | `decomposed` | objective, task | rollup (the offending child was retried or cancelled) |
+| `blocked` | `done` | objective, task | rollup (cancelling the offender left every live child `done`) |
 | `failed` | `ready` | leaf | user (`retry`) |
 | `failed` | `cancelled` | leaf | user |
 | any non-terminal | `superseded` | task, leaf | user (`replan` on the parent) |
@@ -73,19 +83,25 @@ Terminal: `done`, `cancelled`, `superseded`. Heartbeat is not a transition (it t
 
 ## Rollup rule
 
-After a child reaches a terminal or failure state, the parent is recomputed over its children
-**excluding** `superseded` and `cancelled`:
+`rollup(parent_state, children_states) -> Option<new_state>` is the second pure function in
+`agent_core::campaign` (T3's pure half is tested there; the mem and pg halves drive it through
+the store). After a child reaches a terminal or failure state, or is retried, the parent is
+recomputed over its children **excluding** `superseded` and `cancelled` ("live"). Only a
+`decomposed` or `blocked` parent ever changes; a `decomposing` parent (replan in flight) or a
+terminal one is never touched by a child.
 
-| Children (live) | Parent becomes |
-|---|---|
-| none | unchanged |
-| all `done` | `done` |
-| any `failed` or `blocked` | `blocked` |
-| otherwise | unchanged |
+| Children (live) | Parent `decomposed` becomes | Parent `blocked` becomes |
+|---|---|---|
+| none, and no child is `cancelled` (all `superseded`) | unchanged | unchanged |
+| none, and some child is `cancelled` | `blocked` (someone must decide) | unchanged |
+| all `done` | `done` | `done` |
+| any `failed` or `blocked` | `blocked` | unchanged |
+| otherwise (work in progress, nothing stuck) | unchanged | `decomposed` |
 
-If every child is `cancelled` the parent becomes `blocked` (someone must decide). Recurse upward
-until the first ancestor that does not change. A parent that is `blocked` returns to `decomposed`
-when the offending child is retried (the retry protocol recomputes the parent once).
+Recurse upward until the first ancestor that does not change. The last row is the unblock: a
+parent that is `blocked` returns to `decomposed` when the offending child is retried or
+cancelled (the retry and cancel protocols recompute the parent once). `in_review` is neither
+`done` nor stuck, so it never rolls up.
 
 ## Lock order
 

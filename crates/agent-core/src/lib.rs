@@ -76,6 +76,11 @@ pub enum Error {
     /// fault).
     #[error("fleet error: {0}")]
     Fleet(String),
+    /// Campaign seam (`docs/design/campaigns/`): the rendered form of a
+    /// [`campaign::CampaignError`] for callers that speak the shared `Error` (the
+    /// gRPC service in CP-09 maps the typed variants, not this string).
+    #[error("campaign error: {0}")]
+    Campaign(String),
 }
 
 // The shared message vocabulary — see message.rs (re-exported below).
@@ -965,6 +970,12 @@ pub use rbac::*;
 
 mod forge_card;
 pub use forge_card::*;
+
+// Campaigns: the `CampaignStore` seam, its value types and the pure rules
+// (`allowed()`, `rollup()`, the path grammar, the policy). A namespaced module, not a
+// glob re-export: the names (`Task`, `Policy`, `TaskState`) would collide with the
+// tracker / policy seams above. See docs/design/campaigns/.
+pub mod campaign;
 
 mod message_transport;
 pub use message_transport::*;

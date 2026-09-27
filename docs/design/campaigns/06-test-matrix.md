@@ -76,7 +76,7 @@ the cases, not the other way round.
 | `corner_same_state` | `ready → ready` | denied (no self-loops) |
 | `corner_leaf_to_decomposing` | leaf, planner | denied |
 | `corner_replan_while_decomposing` | task, user: `decomposing → decomposing` | denied |
-| `boundary_exhaustive` | every (from, to, kind, actor) tuple, 13 × 13 × 3 × 5 | the allowed set equals the documented table exactly; count asserted |
+| `boundary_exhaustive` | every (from, to, kind, actor) tuple, 13 × 13 × 3 × 8 actor classes | the allowed set equals the documented table exactly; count (82) asserted |
 
 ## T3 Rollup (CP-01 mem, CP-02 pg)
 

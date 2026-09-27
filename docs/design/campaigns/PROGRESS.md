@@ -10,15 +10,15 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 
 ## Now
 
-- **Next:** CP-01 step 2 — `agent-core`: `Error::Campaign`, `pub mod campaign`.
+- **Next:** CP-01 step 4 — `campaign/path.rs` `TaskPath` + T1.
 
 ## CP-01 — seam, pure rules, `MemCampaigns`, T1–T8 (mem) — 🟡 branch `campaigns/cp-01`
 
 | Item | State | Notes |
 |---|---|---|
 | root `Cargo.toml` member + path dep | ✅ | `crates/agent-campaign`, `default-features = false`; doc-only crate skeleton so every commit builds |
-| agent-core `Error::Campaign`, `pub mod campaign` | ⬜ | |
-| `campaign/rules.rs` enums, `allowed()`, `rollup()`, `clamp_lease()` | ⬜ | |
+| agent-core `Error::Campaign`, `pub mod campaign` | ✅ | namespaced module, no glob re-export |
+| `campaign/rules.rs` enums, `allowed()`, `rollup()`, `clamp_lease()` | ✅ | `allowed()` is a `match`; the test holds the doc table as data |
 | `campaign/path.rs` `TaskPath` | ⬜ | |
 | `campaign/policy.rs` `Policy` | ⬜ | |
 | `campaign/mod.rs` errors, types, `Actor`, `CampaignStore` | ⬜ | |
@@ -26,7 +26,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 | testkit `MemCampaigns` | ⬜ | |
 | testkit conformance harness + `campaign_conformance_suite!` | ⬜ | |
 | T1 path grammar | ⬜ | rows: 0/27 |
-| T2 `allowed()` + `boundary_exhaustive` | ⬜ | rows: 0/26; count = — |
+| T2 `allowed()` + `boundary_exhaustive` | ✅ | rows: 26/26 (+11 rows for the amendments); count = 82 of 13 × 13 × 3 × 8; rollup pure half of T3 (20 rows) and `clamp_lease` (9 rows) here too |
 | T3 rollup (mem) | ⬜ | rows: 0/15 |
 | T4 create (mem) | ⬜ | rows: 0/20 (pg-only halves listed in notes) |
 | T5 decompose / mark_leaf (mem) | ⬜ | rows: 0/31 (`adversarial_concurrent_decompose` pg-only) |
@@ -75,7 +75,10 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 - 2026-09-26 — Transition table amended with six rows (root `ready → blocked`, `decomposing →
   cancelled`, `blocked → decomposed`, `blocked → done`, root `decomposing → awaiting_approval`,
   root `awaiting_approval → ready`); `allowed()` takes the pre-write kind; T2 sweep is
-  13 × 13 × 3 × 8 actor classes.
+  13 × 13 × 3 × 8 actor classes; the expanded table has 82 tuples.
+- 2026-09-26 — `rollup()` changes only a `decomposed` or `blocked` parent (a `decomposing` parent
+  mid-replan, or a terminal one, is never touched by a child); the "all cancelled → blocked" row
+  applies to a `decomposed` parent only. Recorded in `02-transactions.md` "Rollup rule".
 
 ## Gate status
 
