@@ -145,8 +145,13 @@ pub(crate) fn span(rpc: &'static str, meta: &tonic::metadata::MetadataMap) -> tr
         authz.decision = tracing::field::Empty,
         authz.action = tracing::field::Empty,
         authz.resource = tracing::field::Empty,
+        // The known service (bound mTLS SAN) this call arrived from (S10).
+        peer_san = tracing::field::Empty,
     );
     s.set_parent(agent_proto::trace::extract_context(meta));
+    if let Some(san) = auth::current_peer_san() {
+        s.record("peer_san", san.as_str());
+    }
     let (user, session) = agent_proto::identity::extract_identity(meta);
     if let Some(u) = user.as_deref().filter(|u| agent_core::safe_segment(u)) {
         s.record("user_id", u);

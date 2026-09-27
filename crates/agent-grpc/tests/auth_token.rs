@@ -114,6 +114,7 @@ impl Harness {
             .exchange(pb::ExchangeRequest {
                 id_token: id_token.into(),
                 client_kind: "cli".into(),
+                ..Default::default()
             })
             .await
             .map(tonic::Response::into_inner)

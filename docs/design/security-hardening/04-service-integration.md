@@ -95,6 +95,36 @@ A user bearer over a connection whose peer is not a known service (the portal th
 is accepted with `peer_san = none`. A **service** bearer over a connection that does not present its
 bound certificate is rejected.
 
+**As built (S10).**
+
+- **Getting a service token.** A service calls `AuthService.Exchange{use_client_cert: true}` over an
+  mTLS connection. The leaf certificate's URI SAN is looked up in `[[auth.mtls.bindings]]`
+  (`san → service, tenant, roles`). The token carries:
+  - `sub = svc:<service>` and `amr = ["mtls"]`;
+  - `cnf = {"x5t#S256": <base64url SHA-256 of the leaf DER>}`;
+  - the binding's roles, plus any `mtls_san` role bindings for that SAN in the tenant.
+  An `id_token` sent alongside `use_client_cert` is refused. So is a certificate that matches no
+  binding, or whose SANs match two bindings. There is no refresh handle: the service session lives
+  only for the token's TTL, `Refresh` on it is refused, and the service exchanges again.
+- **Client side.** With `[auth.mtls] token_endpoint = "https://…"`, the process installs an
+  `MtlsBearerSource` as its S9 `BearerSource`. It exchanges with its `[grpc.tls.client]`
+  certificate, re-exchanges at two thirds of the token's lifetime, and backs off on failure through
+  `agent-retry` (1 s doubling to 60 s). It stops offering a token 30 s before expiry.
+- **Enforcement in `AuthLayer`.** A token with `cnf` is accepted only when:
+  - the peer presented the certificate it names, or
+  - the peer is itself a bound service relaying the token.
+  A person's token (no `cnf`) needs no certificate. A build without the `auth` feature refuses every
+  `cnf` token. The peer's bound SAN is recorded as `peer_san` on the `grpc.server` span.
+- **Deviation from the design above: bound services may relay.** S9 forwards the caller's token
+  unchanged, so seam B sees the fleet's token arriving over seam A's connection, not the fleet's
+  own. Requiring the exact certificate would break every two-hop chain. The rule therefore accepts
+  a relay by any bound service. A stolen service token is still useless from a laptop, from Envoy
+  or over plaintext, because none of those present a bound certificate. What it no longer stops is
+  one compromised bound service replaying another service's token. Per-service audiences remain
+  the follow-up for that.
+- **Plaintext refusal.** `oidc` on a non-loopback TCP listener without `[grpc.tls]` refuses to
+  start. `allow_insecure_listen = true` overrides it with a warning at every start.
+
 ## Testing auth and credential passing
 
 | Tier | What | How |

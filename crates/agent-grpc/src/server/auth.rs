@@ -84,6 +84,10 @@ pub struct VerifiedIdentity {
     pub expires_at: u64,
     /// The auth session an agent token names (S6); `None` for an IdP token.
     pub sid: Option<String>,
+    /// The client certificate a service token is bound to (RFC 8705 `x5t#S256`,
+    /// S10); `None` for a person's token. The layer refuses a bound token on a
+    /// connection that does not present that certificate or a known service's.
+    pub cnf: Option<String>,
 }
 
 /// Verifies a bearer token, yielding a [`VerifiedIdentity`] or an **opaque**
@@ -123,6 +127,22 @@ pub struct AuthParams {
     /// `[auth] operator_subjects`: `email:<address>` / `sub:<issuer>/<sub>`
     /// entries granted `operator` at sign-in (S8). Needs `token`.
     pub operator_subjects: Vec<String>,
+    /// `[auth.mtls] bindings`: client-certificate SANs that are services (S10).
+    /// Needs `token`.
+    pub mtls: Vec<MtlsBindingParams>,
+}
+
+/// One `[[auth.mtls.bindings]]` entry, codec-free.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MtlsBindingParams {
+    /// The certificate's URI SAN, exactly (`spiffe://agent.example/svc/fleet`).
+    pub san: String,
+    /// The service's name; its agent subject is `svc:<service>`.
+    pub service: String,
+    /// The tenant the service acts in.
+    pub tenant: String,
+    /// Roles its service tokens carry (role bindings of kind `mtls_san` add more).
+    pub roles: Vec<String>,
 }
 
 /// `[auth.token]`, codec-free (security-hardening S5,
@@ -236,6 +256,10 @@ pub struct AuthLayer {
     /// token's session is still live.
     #[cfg(feature = "auth")]
     sessions: Option<Arc<session::SessionStore>>,
+    /// `[auth.mtls]` service bindings: a certificate-bound token needs its
+    /// certificate or a known service's on the connection (S10).
+    #[cfg(feature = "auth")]
+    mtls: Arc<mtls::MtlsBindings>,
 }
 
 impl AuthLayer {
@@ -251,6 +275,8 @@ impl AuthLayer {
             auth_service: None,
             #[cfg(feature = "auth")]
             sessions: None,
+            #[cfg(feature = "auth")]
+            mtls: Arc::default(),
         }
     }
 
@@ -264,6 +290,8 @@ impl AuthLayer {
             auth_service: None,
             #[cfg(feature = "auth")]
             sessions: None,
+            #[cfg(feature = "auth")]
+            mtls: Arc::default(),
         }
     }
 
@@ -276,16 +304,20 @@ impl AuthLayer {
         sessions: Arc<session::SessionStore>,
         bindings: Arc<binding::BindingStore>,
         operators: binding::OperatorSubjects,
+        mtls: mtls::MtlsBindings,
     ) -> Self {
         let mut layer = Self::enabled(tokens.clone());
+        let mtls = Arc::new(mtls);
         layer.auth_service = Some(service::AuthSvc::new(
             login,
             tokens,
             sessions.clone(),
             bindings,
             Arc::new(operators),
+            mtls.clone(),
         ));
         layer.sessions = Some(sessions);
+        layer.mtls = mtls;
         layer
     }
 
@@ -337,6 +369,11 @@ impl AuthLayer {
                  agent token is minted)"
                     .into(),
             ),
+            _ if !params.mtls.is_empty() && params.token.is_none() => Err(
+                "`[auth.mtls] bindings` needs `[auth.token]` (services trade their \
+                 certificate for an agent token)"
+                    .into(),
+            ),
             "" | "none" => Ok(Self::disabled()),
             "oidc" => {
                 #[cfg(feature = "auth")]
@@ -369,6 +406,7 @@ impl AuthLayer {
                         }
                     };
                     let operators = binding::OperatorSubjects::parse(&params.operator_subjects)?;
+                    let services = mtls::MtlsBindings::parse(&params.mtls)?;
                     let bindings =
                         binding::BindingStore::new(backend.clone(), Arc::new(jwt::SystemClock));
                     let sessions = session::SessionStore::new(
@@ -383,6 +421,7 @@ impl AuthLayer {
                         Arc::new(sessions),
                         Arc::new(bindings),
                         operators,
+                        services,
                     ))
                 }
                 #[cfg(not(feature = "auth"))]
@@ -412,6 +451,10 @@ pub enum ListenPosture {
     /// `mode = "none"` on a routable address, explicitly accepted with
     /// `allow_insecure_listen = true`. The caller warns on every start.
     InsecureAllowed,
+    /// `mode = "oidc"` on a routable address without TLS, explicitly accepted
+    /// with `allow_insecure_listen = true` (S10): bearer tokens cross the network
+    /// in the clear. The caller warns on every start.
+    PlaintextAllowed,
 }
 
 /// Decide whether a served listener may start under the configured `[auth] mode`.
@@ -423,13 +466,27 @@ pub enum ListenPosture {
 /// operator sets `allow_insecure_listen = true`, which yields
 /// [`ListenPosture::InsecureAllowed`] for the caller to warn about. An unknown
 /// mode is rejected here too, so the check never passes on a typo.
+///
+/// Authentication over plaintext is refused the same way (security-hardening
+/// S10): with `mode = "oidc"` a routable listener needs TLS (`tls`, from
+/// `[grpc.tls]`), or bearer tokens would cross the network readable by anyone on
+/// the path. `allow_insecure_listen = true` accepts that too, as
+/// [`ListenPosture::PlaintextAllowed`].
 pub fn listen_posture(
     mode: &str,
     allow_insecure_listen: bool,
     listen: &crate::transport::Endpoint,
+    tls: bool,
 ) -> Result<ListenPosture, String> {
     match mode.trim() {
-        "oidc" => Ok(ListenPosture::Authenticated),
+        "oidc" if tls || listen.is_local() => Ok(ListenPosture::Authenticated),
+        "oidc" if allow_insecure_listen => Ok(ListenPosture::PlaintextAllowed),
+        "oidc" => Err(format!(
+            "refusing to serve on {listen:?} in plaintext: with `[auth] mode = \"oidc\"` bearer \
+             tokens would cross the network unencrypted. Configure `[grpc.tls]` (`nix run \
+             .#pki-dev` mints certificates), listen on 127.0.0.1 or a unix socket, or set \
+             `[auth] allow_insecure_listen = true` to accept the risk"
+        )),
         "" | "none" if listen.is_local() => Ok(ListenPosture::LocalOnly),
         "" | "none" if allow_insecure_listen => Ok(ListenPosture::InsecureAllowed),
         "" | "none" => Err(format!(
@@ -454,6 +511,8 @@ impl<S> Layer<S> for AuthLayer {
             require_identity: self.require_identity,
             #[cfg(feature = "auth")]
             sessions: self.sessions.clone(),
+            #[cfg(feature = "auth")]
+            mtls: self.mtls.clone(),
         }
     }
 }
@@ -471,6 +530,19 @@ pub struct Auth<S> {
     require_identity: bool,
     #[cfg(feature = "auth")]
     sessions: Option<Arc<session::SessionStore>>,
+    #[cfg(feature = "auth")]
+    mtls: Arc<mtls::MtlsBindings>,
+}
+
+tokio::task_local! {
+    /// The bound SAN of the known service on this request's connection (S10), for
+    /// the `grpc.server` span's `peer_san` field. Unset for any other peer.
+    static PEER_SAN: String;
+}
+
+/// The known service on the current request's connection, if any.
+pub(crate) fn current_peer_san() -> Option<String> {
+    PEER_SAN.try_with(Clone::clone).ok()
 }
 
 /// Paths served without authentication: standard health + reflection, so an
@@ -554,6 +626,8 @@ where
         let on_verify = self.on_verify.clone();
         #[cfg(feature = "auth")]
         let sessions = self.sessions.clone();
+        #[cfg(feature = "auth")]
+        let services = self.mtls.clone();
 
         Box::pin(async move {
             let Some(token) = bearer_token(req.headers()) else {
@@ -561,6 +635,33 @@ where
             };
             match verifier.verify(&token).await {
                 Ok(id) => {
+                    // A certificate-bound (service) token is refused off the
+                    // connection that proves it (S10); the known service on this
+                    // connection, if any, is recorded on the span.
+                    #[cfg(feature = "auth")]
+                    let (bound_ok, peer_san) = {
+                        let peer = peer::of_request(&req);
+                        (
+                            mtls::cnf_allows(id.cnf.as_deref(), peer.as_ref(), &services),
+                            peer.as_ref()
+                                .and_then(|p| services.service_of(p))
+                                .map(|s| s.san.clone()),
+                        )
+                    };
+                    // Without the `auth` feature nothing can check a binding.
+                    #[cfg(not(feature = "auth"))]
+                    let (bound_ok, peer_san) = (id.cnf.is_none(), None::<String>);
+                    if !bound_ok {
+                        if let Some(obs) = &on_verify {
+                            obs("error");
+                        }
+                        tracing::warn!(
+                            rpc = %req.uri().path(),
+                            "rejected a certificate-bound token: the connection does not present \
+                             its certificate or a known service's"
+                        );
+                        return Ok(unauthenticated());
+                    }
                     if let Some(obs) = &on_verify {
                         obs("ok");
                     }
@@ -620,7 +721,11 @@ where
                         bearer: Some(agent_core::Bearer::new(token)),
                         hops,
                     };
-                    agent_core::scope_request(scope, inner.call(req)).await
+                    let call = agent_core::scope_request(scope, inner.call(req));
+                    match peer_san {
+                        Some(san) => PEER_SAN.scope(san, call).await,
+                        None => call.await,
+                    }
                 }
                 Err(()) => {
                     if let Some(obs) = &on_verify {
@@ -684,6 +789,15 @@ mod session;
 #[cfg(feature = "auth")]
 mod binding;
 
+/// The client certificate a mutual-TLS peer presented: URI SANs and thumbprint.
+#[cfg(feature = "auth")]
+mod peer;
+
+/// `[auth.mtls]`: which client certificates are services, and certificate-bound
+/// token checks.
+#[cfg(feature = "auth")]
+mod mtls;
+
 /// `AuthService`: exchange, refresh, logout, sessions, key set, who-am-I.
 #[cfg(feature = "auth")]
 mod service;
@@ -698,6 +812,12 @@ pub use issuer::{ClaimRejection, KeySource, Profile, ResolvedIssuer};
 #[cfg(feature = "auth")]
 pub use jwt::{Clock, JwksSource, JwtVerifier, MultiIssuerVerifier, SystemClock};
 #[cfg(feature = "auth")]
+pub use mtls::{
+    cnf_allows, valid_san, MtlsBindings, ServiceBinding, MAX_MTLS_BINDINGS, MAX_MTLS_ROLES,
+};
+#[cfg(feature = "auth")]
+pub use peer::{san_uris, thumbprint, PeerCert, MAX_SAN_ENTRIES, MAX_URI_BYTES};
+#[cfg(feature = "auth")]
 pub use service::{AuthSvc, MAX_ID_TOKEN_BYTES};
 #[cfg(feature = "auth")]
 pub use session::{
@@ -707,7 +827,7 @@ pub use session::{
 };
 #[cfg(feature = "auth")]
 pub use token::{
-    AgentClaims, Grant, MintedToken, SigningKey, TokenService, DEFAULT_TTL_SECS,
+    AgentClaims, Grant, MintedToken, SigningKey, TokenService, AMR_MTLS, CNF_X5T, DEFAULT_TTL_SECS,
     MAX_PERMS_IN_TOKEN, MAX_TTL_SECS, MIN_TTL_SECS, TOKEN_TYP,
 };
 

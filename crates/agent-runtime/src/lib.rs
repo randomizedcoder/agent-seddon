@@ -95,7 +95,7 @@ pub use config::Config;
 #[cfg(feature = "recall")]
 pub use config::RecallCfg;
 /// One `[[auth.issuers]]` entry (security-hardening S3), mapped by the serve path.
-pub use config::{AuthIssuerCfg, AuthTokenCfg};
+pub use config::{AuthIssuerCfg, AuthMtlsBindingCfg, AuthMtlsCfg, AuthTokenCfg};
 #[cfg(feature = "config-schema")]
 pub use config_schema::{build_schema, validate_config};
 #[cfg(feature = "config")]
@@ -147,6 +147,10 @@ pub fn parse_config_reporting_unknown(toml_str: &str) -> anyhow::Result<(Config,
     // doctor) refuses a bad block up front (security-hardening S1).
     cfg.auth.validate().map_err(anyhow::Error::msg)?;
     cfg.grpc.tls.validate().map_err(anyhow::Error::msg)?;
+    if let Some(mtls) = &cfg.auth.mtls {
+        mtls.validate_client(&cfg.grpc.tls.client)
+            .map_err(anyhow::Error::msg)?;
+    }
     cfg.telemetry.validate().map_err(anyhow::Error::msg)?;
     Ok((cfg, unknown))
 }

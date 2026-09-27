@@ -424,6 +424,7 @@ async fn token_layer_exemption_and_bearer_scope(
         email_verified: false,
         expires_at: now() + 600,
         sid: None,
+        cnf: None,
     };
     let grant = super::token::Grant::from_login(&id, "sid-1");
     let token = tokens.mint(&grant, &[]).expect("mint").token;

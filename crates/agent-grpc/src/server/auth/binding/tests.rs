@@ -49,6 +49,7 @@ fn who<'a>(tenant: &'a str, subject: &'a str, email: Option<&'a str>, verified: 
         subject,
         email,
         email_verified: verified,
+        san: None,
     }
 }
 
@@ -124,6 +125,8 @@ fn roles_n(n: usize) -> Vec<String> {
 #[case::adversarial_domain_wildcard(binding("acme", SubjectKind::Domain, "*.acme.com", &["viewer"]), false)]
 #[case::adversarial_inner_whitespace(binding("acme", SubjectKind::Email, "alice @acme.com", &["viewer"]), false)]
 #[case::adversarial_control_char(binding("acme", SubjectKind::MtlsSan, "spiffe://a\u{0}b", &["viewer"]), false)]
+#[case::negative_mtls_dns_name(binding("acme", SubjectKind::MtlsSan, "fleet.internal", &["viewer"]), false)]
+#[case::negative_mtls_https_uri(binding("acme", SubjectKind::MtlsSan, "https://agent/svc/fleet", &["viewer"]), false)]
 #[case::adversarial_sub_issuer_traversal(binding("acme", SubjectKind::Sub, "../x/1234", &["viewer"]), false)]
 #[case::adversarial_role_traversal(binding("acme", SubjectKind::Email, "alice@acme.com", &["../operator"]), false)]
 #[case::adversarial_tenant_traversal(binding("..", SubjectKind::Email, "alice@acme.com", &["viewer"]), false)]
@@ -163,7 +166,11 @@ fn boundary_granted_by_truncated_on_char_boundary() {
 #[case::negative_unverified_email(binding("acme", SubjectKind::Email, "alice@acme.com", &["viewer"]), who("acme", "user:google/42", Some("alice@acme.com"), false), T0, false)]
 #[case::negative_unverified_domain(binding("acme", SubjectKind::Domain, "acme.com", &["viewer"]), who("acme", "user:google/42", Some("alice@acme.com"), false), T0, false)]
 #[case::negative_other_sub(binding("acme", SubjectKind::Sub, "google/42", &["viewer"]), who("acme", "user:google/43", None, false), T0, false)]
-#[case::negative_mtls_not_matched_before_s10(binding("acme", SubjectKind::MtlsSan, "google/42", &["viewer"]), who("acme", "user:google/42", Some("a@acme.com"), true), T0, false)]
+#[case::negative_mtls_does_not_match_a_person(binding("acme", SubjectKind::MtlsSan, "spiffe://agent/svc/fleet", &["viewer"]), who("acme", "user:google/42", Some("a@acme.com"), true), T0, false)]
+#[case::positive_mtls_matches_the_service_san(binding("acme", SubjectKind::MtlsSan, "spiffe://agent/svc/fleet", &["viewer"]), Who { san: Some("spiffe://agent/svc/fleet"), ..who("acme", "svc:fleet", None, false) }, T0, true)]
+#[case::negative_mtls_other_san(binding("acme", SubjectKind::MtlsSan, "spiffe://agent/svc/fleet", &["viewer"]), Who { san: Some("spiffe://agent/svc/seam"), ..who("acme", "svc:seam", None, false) }, T0, false)]
+#[case::adversarial_mtls_other_tenant(binding("other", SubjectKind::MtlsSan, "spiffe://agent/svc/fleet", &["viewer"]), Who { san: Some("spiffe://agent/svc/fleet"), ..who("acme", "svc:fleet", None, false) }, T0, false)]
+#[case::adversarial_sub_binding_does_not_match_a_service(binding("acme", SubjectKind::Sub, "mtls/fleet", &["viewer"]), Who { san: Some("spiffe://agent/svc/fleet"), ..who("acme", "svc:fleet", None, false) }, T0, false)]
 #[case::boundary_active_until_expiry(expiring(binding("acme", SubjectKind::Sub, "google/42", &["viewer"]), T0 + 1), who("acme", "user:google/42", None, false), T0, true)]
 #[case::boundary_expired_at_expiry(expiring(binding("acme", SubjectKind::Sub, "google/42", &["viewer"]), T0), who("acme", "user:google/42", None, false), T0, false)]
 #[case::corner_zero_expiry_never_expires(expiring(binding("acme", SubjectKind::Sub, "google/42", &["viewer"]), 0), who("acme", "user:google/42", None, false), u64::MAX, true)]

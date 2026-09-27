@@ -16,7 +16,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S7 | RBAC extension, read gating, authz-coverage gate | D9 | ✅ | #504 |
 | S8 | Role bindings, bootstrap, escalation rules | D3, D9 | ✅ | #511 |
 | S9 | Bearer propagation + two-hop chain test | D7 | ✅ | #514 |
-| S10 | mTLS service identity | D6 | ⬜ | — |
+| S10 | mTLS service identity | D6 | 🟡 | — |
 | S11 | `agent_auth_events` audit + doctor probes | D11 | ⬜ | — |
 | S12 | CLI `agent login/logout/whoami` | D6 | ⬜ | — |
 | S13 | Portal login + capability-aware UI | P0-4 | ⬜ | — |
@@ -466,3 +466,33 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
       `scope_request` with hops, and `outbound()`'s bearer and hop headers.
   - Deferred: `peer_san` and service-token-needs-mTLS (S10), and attributing a queued
     `ReviewNow` to its requester (S10/S11).
+- **2026-09-27 — S10.** Services prove who they are with their client certificate.
+  - `AuthService.Exchange{use_client_cert}` (an additive proto field) maps the mTLS peer's URI SAN
+    through `[[auth.mtls.bindings]]` to a service token:
+    - `sub = svc:<service>`, `amr = ["mtls"]`;
+    - a `cnf` `x5t#S256` thumbprint of the leaf certificate;
+    - the binding's roles plus `mtls_san` role bindings, which now match.
+    The service session lasts one token TTL, records `peer_san`, and refuses `Refresh`.
+  - `AuthLayer` accepts a `cnf` token only from the certificate it names, or relayed by another
+    bound service. A token without `cnf` needs no certificate. `peer_san` is a `grpc.server` span
+    field.
+  - Deviation: relaying by any bound service is allowed, because S9 forwards tokens unchanged
+    across hops. The exact-certificate rule in the design would break every two-hop chain.
+    Recorded in [04](04-service-integration.md).
+  - `MtlsBearerSource` (installed by `[auth.mtls] token_endpoint`) is the first real S9
+    `BearerSource`. It re-exchanges at 2/3 of the lifetime and backs off through `agent-retry`.
+  - `oidc` on a non-loopback TCP listener without `[grpc.tls]` refuses to start
+    (`allow_insecure_listen` overrides it with a warning).
+  - Peer SANs come from a fail-closed DER walk (`auth/peer.rs`): minimal lengths only, a
+    duplicate SAN extension refused, at most 64 entries, URIs printable and at most 2048 bytes.
+  - `[auth.mtls]` is validated at load (the SAN, service, tenant and role rules, the 256-binding
+    cap, an `https` endpoint with a client cert).
+  - Tests:
+    - `tests/mtls_identity.rs` (real mTLS listeners): a bound token issued; a
+      connection table (own cert, relay, laptop cert, plaintext); `Exchange` refusals; a
+      person's token over an unbound certificate; an `mtls_san` binding adding a role; the
+      bearer source.
+    - Unit tables: the DER walk (every truncation of a real leaf), bindings, `cnf`, token `cnf`
+      claims (malformed = rejected), service sessions, the listen posture, and the config tables.
+  - Deferred: a queued `ReviewNow` attributed to its requester (S11, with the audit rows);
+    `step ca renew` and the `step-ca` daemon (S15).

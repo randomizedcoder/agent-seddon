@@ -376,6 +376,7 @@ impl ResolvedIssuer {
             // `exp` is a required claim, checked by the verifier before this runs.
             expires_at: claims.get("exp").and_then(Value::as_u64).unwrap_or(0),
             sid: None,
+            cnf: None,
         })
     }
 }

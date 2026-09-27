@@ -129,6 +129,7 @@ impl Cluster {
             .exchange(pb::ExchangeRequest {
                 id_token,
                 client_kind: "cli".into(),
+                ..Default::default()
             })
             .await
             .expect("exchange")

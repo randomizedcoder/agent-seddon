@@ -862,19 +862,31 @@ fn install_authz_observer(agent: &Agent) {
 ///
 /// It first applies the startup listen policy for `listen` (security-hardening S1):
 /// `mode = "none"` on a non-loopback address refuses to start unless
-/// `[auth] allow_insecure_listen = true`, which warns instead. It then sets the
+/// `[auth] allow_insecure_listen = true`, which warns instead. So does `oidc` on a
+/// non-loopback address without TLS (`tls`, S10): tokens must not cross the
+/// network in plaintext. It then sets the
 /// per-service identity policy (S2) from `[auth] require_identity`, defaulted per
 /// listener by [`require_identity`].
-fn auth_layer(agent: &Agent, listen: &Endpoint) -> anyhow::Result<agent_grpc::server::AuthLayer> {
+fn auth_layer(
+    agent: &Agent,
+    listen: &Endpoint,
+    tls: bool,
+) -> anyhow::Result<agent_grpc::server::AuthLayer> {
     let a = agent.grpc_auth();
-    let posture = agent_grpc::server::listen_posture(&a.mode, a.allow_insecure_listen, listen)
+    let posture = agent_grpc::server::listen_posture(&a.mode, a.allow_insecure_listen, listen, tls)
         .map_err(anyhow::Error::msg)?;
-    if posture == agent_grpc::server::ListenPosture::InsecureAllowed {
-        tracing::warn!(
+    match posture {
+        agent_grpc::server::ListenPosture::InsecureAllowed => tracing::warn!(
             endpoint = ?listen,
             "serving WITHOUT authentication on a non-loopback address \
              (`[auth] allow_insecure_listen = true`): any peer that can reach it can claim any tenant"
-        );
+        ),
+        agent_grpc::server::ListenPosture::PlaintextAllowed => tracing::warn!(
+            endpoint = ?listen,
+            "serving authentication WITHOUT TLS on a non-loopback address \
+             (`[auth] allow_insecure_listen = true`): bearer tokens cross the network in the clear"
+        ),
+        _ => {}
     }
     agent_grpc::server::AuthLayer::from_params(agent_grpc::server::AuthParams {
         mode: a.mode.clone(),
@@ -899,6 +911,17 @@ fn auth_layer(agent: &Agent, listen: &Endpoint) -> anyhow::Result<agent_grpc::se
             sessions: None,
         }),
         operator_subjects: a.operator_subjects.clone(),
+        mtls: a
+            .mtls
+            .iter()
+            .flat_map(|m| &m.bindings)
+            .map(|b| agent_grpc::server::MtlsBindingParams {
+                san: b.san.clone(),
+                service: b.service.clone(),
+                tenant: b.tenant.clone(),
+                roles: b.roles.clone(),
+            })
+            .collect(),
     })
     .map(|layer| {
         layer
@@ -941,7 +964,7 @@ async fn serve_base(
         Some(_) => "tls",
     };
     tracing::info!(endpoint = ?listen, transport = mode, "gRPC listener transport");
-    let auth = auth_layer(agent, listen)?;
+    let auth = auth_layer(agent, listen, tls.is_some())?;
     let (router, health) = agent_grpc::server::base_router_with_tls(
         agent.grpc_max_in_flight(),
         Some(shed_observer(agent)),

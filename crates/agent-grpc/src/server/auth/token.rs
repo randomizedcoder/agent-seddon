@@ -51,6 +51,8 @@ pub const MAX_TTL_SECS: u64 = 3600;
 /// Beyond this many permissions the snapshot is left out (`perms = []`,
 /// `perms_ref = true`) so the token stays well under the HTTP/2 header limit.
 pub const MAX_PERMS_IN_TOKEN: usize = 40;
+/// The `cnf` member naming a bound certificate's SHA-256 thumbprint (RFC 8705).
+pub const CNF_X5T: &str = "x5t#S256";
 /// A signing-key file larger than this is not a P-256 key; refuse before buffering.
 const MAX_KEY_FILE_BYTES: u64 = 64 * 1024;
 
@@ -226,6 +228,8 @@ pub struct AgentClaims {
     pub jti: String,
     /// The auth session this token belongs to (S6).
     pub sid: String,
+    /// The certificate a service token is bound to (`cnf.x5t#S256`, S10).
+    pub cnf: Option<String>,
 }
 
 impl AgentClaims {
@@ -265,12 +269,30 @@ impl AgentClaims {
             expires_at: claims.get("exp").and_then(Value::as_u64)?,
             jti: s("jti").unwrap_or_default(),
             sid,
+            cnf: match claims.get("cnf") {
+                None => None,
+                // A `cnf` this verifier cannot read must not be treated as absent:
+                // that would unbind the token.
+                Some(c) => Some(
+                    c.get(CNF_X5T)
+                        .and_then(Value::as_str)
+                        .filter(|t| valid_thumbprint(t))?
+                        .to_string(),
+                ),
+            },
         })
     }
 }
 
-/// What a token is minted for: a login identity at `Exchange`, or a live session at
-/// `Refresh`.
+/// A base64url SHA-256 digest: 43 characters of the URL-safe alphabet.
+fn valid_thumbprint(t: &str) -> bool {
+    t.len() == 43
+        && t.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// What a token is minted for: a login identity at `Exchange`, a service's client
+/// certificate at `Exchange` (S10), or a live session at `Refresh`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Grant {
     /// `user:<login issuer>/<IdP subject>`.
@@ -282,6 +304,8 @@ pub struct Grant {
     pub sid: String,
     /// The token never outlives this (the login token's or the session's expiry).
     pub not_after: u64,
+    /// Bind the token to this client certificate thumbprint (service tokens).
+    pub cnf: Option<String>,
 }
 
 impl Grant {
@@ -295,9 +319,33 @@ impl Grant {
             roles: id.roles.clone(),
             sid: sid.to_string(),
             not_after: id.expires_at,
+            cnf: None,
+        }
+    }
+
+    /// The grant for a known service that presented its client certificate, in
+    /// session `sid`: subject `svc:<name>`, `amr = ["mtls"]`, bound to `thumbprint`.
+    pub fn for_service(
+        service: &super::mtls::ServiceBinding,
+        thumbprint: &str,
+        sid: &str,
+        not_after: u64,
+    ) -> Self {
+        Self {
+            subject: service.subject(),
+            tenant: service.tenant.clone(),
+            email: None,
+            amr: vec![AMR_MTLS.to_string()],
+            roles: service.roles.clone(),
+            sid: sid.to_string(),
+            not_after,
+            cnf: Some(thumbprint.to_string()),
         }
     }
 }
+
+/// The `amr` of a service token minted from a client certificate.
+pub const AMR_MTLS: &str = "mtls";
 
 /// A freshly minted token.
 #[derive(Clone, Debug)]
@@ -382,6 +430,11 @@ impl TokenService {
         &self.issuer
     }
 
+    /// The configured token lifetime.
+    pub fn ttl_secs(&self) -> u64 {
+        self.ttl_secs
+    }
+
     /// Mint an agent token for `grant`. It expires at the earlier of `now + ttl` and
     /// `grant.not_after`, so an exchange never extends a login and a refresh never
     /// extends a session. `perms` beyond [`MAX_PERMS_IN_TOKEN`] are left out.
@@ -393,6 +446,9 @@ impl TokenService {
         }
         if !agent_core::safe_segment(&grant.sid) {
             return Err("invalid session id".into());
+        }
+        if grant.cnf.as_deref().is_some_and(|t| !valid_thumbprint(t)) {
+            return Err("invalid certificate thumbprint".into());
         }
         let (perms, perms_ref) = if perms.len() > MAX_PERMS_IN_TOKEN {
             (Vec::new(), true)
@@ -410,6 +466,7 @@ impl TokenService {
             expires_at: exp,
             jti: random_hex()?,
             sid: grant.sid.clone(),
+            cnf: grant.cnf.clone(),
         };
         let mut body = json!({
             "iss": self.issuer,
@@ -430,6 +487,9 @@ impl TokenService {
         }
         if perms_ref {
             body["perms_ref"] = json!(true);
+        }
+        if let Some(t) = &claims.cnf {
+            body["cnf"] = json!({ CNF_X5T: t });
         }
         let mut header = Header::new(Algorithm::ES256);
         header.typ = Some(TOKEN_TYP.into());
@@ -520,6 +580,7 @@ impl TokenVerifier for TokenService {
             email_verified: false,
             expires_at: claims.expires_at,
             sid: Some(claims.sid),
+            cnf: claims.cnf,
         })
     }
 }

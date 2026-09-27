@@ -10,12 +10,25 @@ use crate::transport::Endpoint;
 
 const REFUSED: &str = "refusing to serve";
 const UNKNOWN: &str = "unknown `[auth] mode`";
+const PLAINTEXT: &str = "in plaintext";
 
 #[rstest]
-#[case::positive_oidc_on_all_interfaces(
+#[case::negative_remote_listen_without_tls_refuses_start(
     "oidc",
     false,
     "0.0.0.0:50051",
+    Err(PLAINTEXT)
+)]
+#[case::corner_plaintext_oidc_allowed_warns(
+    "oidc",
+    true,
+    "172.16.50.46:50051",
+    Ok(ListenPosture::PlaintextAllowed)
+)]
+#[case::positive_oidc_plaintext_on_uds(
+    "oidc",
+    false,
+    "unix:/tmp/agent-seddon/a.sock",
     Ok(ListenPosture::Authenticated)
 )]
 #[case::positive_oidc_on_loopback(
@@ -74,7 +87,7 @@ fn listen_posture_cases(
     #[case] listen: &str,
     #[case] expected: Result<ListenPosture, &str>,
 ) {
-    let got = listen_posture(mode, allow_insecure_listen, &Endpoint::parse(listen));
+    let got = listen_posture(mode, allow_insecure_listen, &Endpoint::parse(listen), false);
     match (got, expected) {
         (Ok(g), Ok(e)) => assert_eq!(g, e, "mode={mode:?} listen={listen}"),
         (Err(g), Err(e)) => assert!(g.contains(e), "want error containing {e:?}, got {g:?}"),
@@ -85,12 +98,58 @@ fn listen_posture_cases(
 /// The refusal names the three ways out, so an operator can act on it.
 #[test]
 fn negative_refusal_message_names_the_remedies() {
-    let err = listen_posture("none", false, &Endpoint::parse("0.0.0.0:50051")).unwrap_err();
+    let err = listen_posture("none", false, &Endpoint::parse("0.0.0.0:50051"), false).unwrap_err();
     for remedy in [
         "mode = \"oidc\"",
         "127.0.0.1",
         "allow_insecure_listen = true",
     ] {
+        assert!(err.contains(remedy), "missing {remedy:?} in {err:?}");
+    }
+}
+
+/// With TLS on the listener (S10): authentication is enough on any address, and TLS
+/// never stands in for authentication.
+#[rstest]
+#[case::positive_oidc_tls_on_all_interfaces(
+    "oidc",
+    false,
+    "0.0.0.0:50051",
+    Ok(ListenPosture::Authenticated)
+)]
+#[case::positive_oidc_tls_on_lan_ip(
+    "oidc",
+    false,
+    "172.16.50.46:50051",
+    Ok(ListenPosture::Authenticated)
+)]
+#[case::negative_tls_without_auth_still_refused("none", false, "0.0.0.0:50051", Err(REFUSED))]
+#[case::corner_tls_without_auth_allowed(
+    "none",
+    true,
+    "0.0.0.0:50051",
+    Ok(ListenPosture::InsecureAllowed)
+)]
+#[case::adversarial_unknown_mode_not_rescued_by_tls("jwt", true, "0.0.0.0:1", Err(UNKNOWN))]
+fn listen_posture_with_tls_cases(
+    #[case] mode: &str,
+    #[case] allow_insecure_listen: bool,
+    #[case] listen: &str,
+    #[case] expected: Result<ListenPosture, &str>,
+) {
+    let got = listen_posture(mode, allow_insecure_listen, &Endpoint::parse(listen), true);
+    match (got, expected) {
+        (Ok(g), Ok(e)) => assert_eq!(g, e),
+        (Err(g), Err(e)) => assert!(g.contains(e), "want error containing {e:?}, got {g:?}"),
+        (g, e) => panic!("got {g:?}, want {e:?}"),
+    }
+}
+
+/// The plaintext refusal names its remedies too.
+#[test]
+fn negative_plaintext_refusal_names_the_remedies() {
+    let err = listen_posture("oidc", false, &Endpoint::parse("0.0.0.0:50051"), false).unwrap_err();
+    for remedy in ["[grpc.tls]", "127.0.0.1", "allow_insecure_listen = true"] {
         assert!(err.contains(remedy), "missing {remedy:?} in {err:?}");
     }
 }

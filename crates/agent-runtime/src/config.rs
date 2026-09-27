@@ -2753,6 +2753,113 @@ pub struct AuthCfg {
     /// change who is one. Needs `[auth.token]`.
     #[serde(default)]
     pub operator_subjects: Vec<String>,
+    /// Service identity from mutual TLS (`[auth.mtls]`, security-hardening S10).
+    #[serde(default)]
+    pub mtls: Option<AuthMtlsCfg>,
+}
+
+/// `[auth.mtls]`: which client certificates are services, and where this process
+/// trades its own for a service token (docs/design/security-hardening/
+/// 04-service-integration.md). Unknown keys are an error.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
+pub struct AuthMtlsCfg {
+    /// `[[auth.mtls.bindings]]`: a client certificate's URI SAN → a service
+    /// principal. A listener with `[grpc.tls] client_ca` then lets that service
+    /// call `AuthService.Exchange{use_client_cert}`. Needs `[auth.token]`.
+    #[serde(default)]
+    pub bindings: Vec<AuthMtlsBindingCfg>,
+    /// An `https://` listener serving `AuthService` where this process trades its
+    /// `[grpc.tls.client]` certificate for a service token, sent on calls made
+    /// with no caller behind them. Empty ⇒ no service token.
+    #[serde(default)]
+    pub token_endpoint: String,
+}
+
+/// One `[[auth.mtls.bindings]]` entry.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(serde::Serialize, schemars::JsonSchema)
+)]
+pub struct AuthMtlsBindingCfg {
+    /// The certificate's URI SAN, e.g. `spiffe://agent.example/svc/fleet`.
+    pub san: String,
+    /// The service's name; its tokens carry `sub = svc:<service>`.
+    pub service: String,
+    /// The tenant the service acts in.
+    pub tenant: String,
+    /// Roles its tokens carry (`svc_fleet`, `svc_seam`, …).
+    pub roles: Vec<String>,
+}
+
+impl AuthMtlsCfg {
+    /// Most bindings accepted (the serve path enforces the same cap).
+    pub const MAX_BINDINGS: usize = 256;
+
+    /// Structural checks at load; the serve path parses the bindings again with
+    /// the same rules.
+    fn validate(&self, has_token_service: bool) -> Result<(), String> {
+        if !self.bindings.is_empty() && !has_token_service {
+            return Err(
+                "`[auth.mtls] bindings` needs `[auth.token]` (services trade their \
+                        certificate for an agent token)"
+                    .into(),
+            );
+        }
+        if self.bindings.len() > Self::MAX_BINDINGS {
+            return Err(format!(
+                "`[auth.mtls] bindings` has more than {} entries",
+                Self::MAX_BINDINGS
+            ));
+        }
+        for b in &self.bindings {
+            let san = b.san.trim();
+            let ok = san.len() > "spiffe://".len()
+                && san.len() <= 2048
+                && san.starts_with("spiffe://")
+                && san.bytes().all(|c| c.is_ascii_graphic())
+                && agent_core::safe_segment(b.service.trim())
+                && agent_core::safe_segment(b.tenant.trim())
+                && (1..=32).contains(&b.roles.len())
+                && b.roles.iter().all(|r| agent_core::safe_segment(r.trim()));
+            if !ok {
+                return Err(format!(
+                    "`[auth.mtls] bindings` entry `{san}` needs a `spiffe://` `san`, plain \
+                     `service` and `tenant` names, and 1..=32 plain `roles`"
+                ));
+            }
+        }
+        let endpoint = self.token_endpoint.trim();
+        if !endpoint.is_empty() && !endpoint.starts_with("https://") {
+            return Err(
+                "`[auth.mtls] token_endpoint` must be an `https://` address: the exchange \
+                 proves this process's client certificate"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
+    /// A service token needs a client certificate to trade (checked at load
+    /// against `[grpc.tls.client]`).
+    pub fn validate_client(&self, client: &GrpcTlsClientCfg) -> Result<(), String> {
+        if !self.token_endpoint.trim().is_empty()
+            && (client.cert.trim().is_empty() || client.key.trim().is_empty())
+        {
+            return Err(
+                "`[auth.mtls] token_endpoint` needs `[grpc.tls.client] cert` and \
+                        `key`: the service token is traded for that certificate"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
 }
 
 /// `[auth.token]`: how the agent signs the tokens it issues
@@ -2982,6 +3089,9 @@ impl AuthCfg {
                 );
             }
             check_operator_subjects(&self.operator_subjects)?;
+        }
+        if let Some(mtls) = &self.mtls {
+            mtls.validate(self.token.is_some())?;
         }
         match self.mode.trim() {
             "" | "none" if self.token.is_some() => {
@@ -4783,5 +4893,121 @@ mod tests {
             (Ok(_), Some(want)) => panic!("loaded, want error {want:?}"),
             (Err(e), None) => panic!("want load, got {e:#}"),
         }
+    }
+
+    fn mtls_binding(san: &str) -> AuthMtlsBindingCfg {
+        AuthMtlsBindingCfg {
+            san: san.into(),
+            service: "fleet".into(),
+            tenant: "example.com".into(),
+            roles: vec!["svc_fleet".into()],
+        }
+    }
+
+    const FLEET_SAN: &str = "spiffe://agent.example/svc/fleet";
+
+    /// `[auth.mtls]` structural rules (security-hardening S10): the SAN, service,
+    /// tenant and roles land in tokens and role matching, so they are untrusted
+    /// config checked fail-closed.
+    #[rstest::rstest]
+    #[case::positive_one_binding(vec![mtls_binding(FLEET_SAN)], "", true, None)]
+    #[case::positive_endpoint_only(vec![], "https://auth.internal:50090", false, None)]
+    #[case::corner_empty_block(vec![], "", false, None)]
+    #[case::corner_blank_endpoint_is_unset(vec![], "   ", false, None)]
+    #[case::negative_bindings_without_token(vec![mtls_binding(FLEET_SAN)], "", false, Some("needs `[auth.token]`"))]
+    #[case::negative_plain_http_endpoint(vec![], "http://auth.internal:50090", false, Some("`https://`"))]
+    #[case::negative_non_spiffe_san(vec![mtls_binding("https://agent.example/svc/fleet")], "", true, Some("spiffe://"))]
+    #[case::negative_no_roles(vec![AuthMtlsBindingCfg { roles: vec![], ..mtls_binding(FLEET_SAN) }], "", true, Some("1..=32"))]
+    #[case::boundary_bare_spiffe_scheme(vec![mtls_binding("spiffe://")], "", true, Some("spiffe://"))]
+    #[case::boundary_32_roles(vec![AuthMtlsBindingCfg { roles: (0..32).map(|i| format!("r{i}")).collect(), ..mtls_binding(FLEET_SAN) }], "", true, None)]
+    #[case::boundary_33_roles(vec![AuthMtlsBindingCfg { roles: (0..33).map(|i| format!("r{i}")).collect(), ..mtls_binding(FLEET_SAN) }], "", true, Some("1..=32"))]
+    #[case::boundary_256_bindings((0..256).map(|i| mtls_binding(&format!("{FLEET_SAN}/{i}"))).collect(), "", true, None)]
+    #[case::boundary_257_bindings((0..257).map(|i| mtls_binding(&format!("{FLEET_SAN}/{i}"))).collect(), "", true, Some("more than 256"))]
+    #[case::boundary_san_over_2048_bytes(vec![mtls_binding(&format!("spiffe://{}", "a".repeat(2040)))], "", true, Some("spiffe://"))]
+    #[case::adversarial_san_with_space(vec![mtls_binding("spiffe://agent.example/svc/fleet evil")], "", true, Some("spiffe://"))]
+    #[case::adversarial_san_control_char(vec![mtls_binding("spiffe://agent.example/svc/\u{0}fleet")], "", true, Some("spiffe://"))]
+    #[case::adversarial_service_traversal(vec![AuthMtlsBindingCfg { service: "../operator".into(), ..mtls_binding(FLEET_SAN) }], "", true, Some("plain"))]
+    #[case::adversarial_tenant_separator(vec![AuthMtlsBindingCfg { tenant: "a/b".into(), ..mtls_binding(FLEET_SAN) }], "", true, Some("plain"))]
+    #[case::adversarial_role_injection(vec![AuthMtlsBindingCfg { roles: vec!["operator,svc".into(), "../x".into()], ..mtls_binding(FLEET_SAN) }], "", true, Some("plain"))]
+    fn auth_mtls_validate_cases(
+        #[case] bindings: Vec<AuthMtlsBindingCfg>,
+        #[case] token_endpoint: &str,
+        #[case] has_token_service: bool,
+        #[case] want_err: Option<&str>,
+    ) {
+        let cfg = AuthMtlsCfg {
+            bindings,
+            token_endpoint: token_endpoint.into(),
+        };
+        match (cfg.validate(has_token_service), want_err) {
+            (Ok(()), None) => {}
+            (Err(e), Some(want)) => assert!(e.contains(want), "want {want:?} in {e:?}"),
+            (got, want) => panic!("got {got:?}, want error {want:?}"),
+        }
+    }
+
+    /// A service token is traded for the client certificate, so `token_endpoint`
+    /// needs `[grpc.tls.client] cert` + `key`.
+    #[rstest::rstest]
+    #[case::positive_cert_and_key("https://a:1", "c", "k", None)]
+    #[case::positive_no_endpoint_needs_nothing("", "", "", None)]
+    #[case::negative_endpoint_without_cert(
+        "https://a:1",
+        "",
+        "k",
+        Some("needs `[grpc.tls.client] cert`")
+    )]
+    #[case::negative_endpoint_without_key(
+        "https://a:1",
+        "c",
+        "",
+        Some("needs `[grpc.tls.client] cert`")
+    )]
+    #[case::boundary_blank_cert_is_unset(
+        "https://a:1",
+        "  ",
+        "k",
+        Some("needs `[grpc.tls.client] cert`")
+    )]
+    fn auth_mtls_validate_client_cases(
+        #[case] token_endpoint: &str,
+        #[case] cert: &str,
+        #[case] key: &str,
+        #[case] want_err: Option<&str>,
+    ) {
+        let cfg = AuthMtlsCfg {
+            token_endpoint: token_endpoint.into(),
+            ..AuthMtlsCfg::default()
+        };
+        let client = GrpcTlsClientCfg {
+            cert: cert.into(),
+            key: key.into(),
+            ..GrpcTlsClientCfg::default()
+        };
+        match (cfg.validate_client(&client), want_err) {
+            (Ok(()), None) => {}
+            (Err(e), Some(want)) => assert!(e.contains(want), "want {want:?} in {e:?}"),
+            (got, want) => panic!("got {got:?}, want error {want:?}"),
+        }
+    }
+
+    /// `[auth.mtls]` is checked at load, client side included.
+    #[cfg(feature = "auth")]
+    #[rstest::rstest]
+    #[case::positive_bindings_and_endpoint_load(
+        "[auth.mtls]\ntoken_endpoint = \"https://auth.internal:50090\"\n[[auth.mtls.bindings]]\nsan = \"spiffe://agent.example/svc/fleet\"\nservice = \"fleet\"\ntenant = \"example.com\"\nroles = [\"svc_fleet\"]\n[grpc.tls.client]\ncert = \"c\"\nkey = \"k\"\n",
+        None
+    )]
+    #[case::negative_endpoint_without_client_cert(
+        "[auth.mtls]\ntoken_endpoint = \"https://auth.internal:50090\"\n",
+        Some("needs `[grpc.tls.client] cert`")
+    )]
+    #[case::adversarial_misspelt_binding_key_refused(
+        "[auth.mtls]\n[[auth.mtls.bindings]]\nsan = \"spiffe://agent.example/svc/fleet\"\nservice = \"fleet\"\ntenant = \"example.com\"\nrole = [\"operator\"]\n",
+        Some("unknown field `role`")
+    )]
+    fn auth_mtls_checked_at_load(#[case] toml_str: &str, #[case] want_err: Option<&str>) {
+        let token = "[auth]\nmode = \"oidc\"\nissuer = \"https://i.example\"\naudience = \"a\"\njwks_url = \"https://i.example/k\"\n[auth.token]\nissuer = \"https://agent.example\"\naudience = \"a\"\nsigning_key = \"/k\"\n";
+        auth_cfg_checked_at_load(&format!("{token}{toml_str}"), want_err);
     }
 }

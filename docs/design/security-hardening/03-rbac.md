@@ -145,8 +145,8 @@ text above:
   - A `domain` binding matches the address's exact domain, not its subdomains.
   - The session records `email_verified`, so a revocation after a binding change finds the same
     subjects the mint did.
-- **`mtls_san` bindings are stored and listed but match nothing** until mTLS service identity
-  lands (S10).
+- **`mtls_san` bindings** match a service session whose peer certificate carries that SAN (S10).
+  They add roles to the ones its `[[auth.mtls.bindings]]` entry grants.
 - **Revoke on change.** `keep_sessions` (default false) replaces `revoke_active`.
   - `DeleteBinding` revokes every live session the old binding named, with reason `binding`.
   - `PutBinding` revokes them only when the change narrows the grant: it removes a role, changes
