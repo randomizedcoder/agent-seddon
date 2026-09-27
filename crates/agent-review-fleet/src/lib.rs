@@ -24,8 +24,8 @@ use std::sync::Mutex;
 pub mod file;
 pub use file::FileFleet;
 pub mod lease;
-#[cfg(feature = "fleet-sqlite")]
-pub use lease::SqlitePostLease;
+#[cfg(feature = "fleet-store")]
+pub use lease::StorePostLease;
 pub use lease::{MemoryPostLease, MAX_POSTED_LEASES};
 pub mod orchestrator;
 pub use orchestrator::{

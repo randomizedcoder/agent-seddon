@@ -291,8 +291,16 @@ registry-postgres = [
 # Review-fleet roster seam (review-fleet C2/C3): the FleetRegistry stores + the
 # `resolve_fleet_registry` factory (`[review_fleet] store`, `--serve-fleet`).
 fleet = ["dep:agent-review-fleet"]
-# The `sqlite` fleet backend, off by default (mirrors `registry-sqlite`).
-fleet-sqlite = ["fleet", "agent-review-fleet/fleet-sqlite"]
+# The `sqlite` fleet backend, off by default (mirrors `registry-sqlite`). Also pulls
+# in the shared-store path (`fleet-store` + the config-store SQLite backend) so the
+# approve→post lease for a `sqlite` roster is a durable `StorePostLease` over the
+# config-store SQLite backend (review-fleet C17 / PG-09), replacing `SqlitePostLease`.
+fleet-sqlite = [
+  "fleet",
+  "fleet-store",
+  "agent-review-fleet/fleet-sqlite",
+  "agent-config-store/config-store-sqlite",
+]
 # The shared-store fleet backend (config C41 / A3b): the roster persists onto
 # `agent-config-store` (memory/file/sqlite). Off by default.
 fleet-store = ["fleet", "agent-review-fleet/fleet-store", "dep:agent-config-store"]

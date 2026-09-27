@@ -291,6 +291,25 @@ compare-and-swap, retiring the legacy `*-sqlite` impls). Eleven gated PRs off `m
   shipped `agent` binary is digest-Postgres-capable. `ConfigStoreCfg::default()` stays `""` (D2): a
   minimal config still opens no DB.
 
+- **PG-09 — post-lease durability via `StorePostLease` + retire `SqlitePostLease`.** The approve→post
+  idempotency lease (review-fleet C17) — the authoritative, read-your-writes compare-and-set that makes
+  a forge post at-most-once — was durable only for a `sqlite` roster (via `SqlitePostLease`, an embedded
+  `INSERT … ON CONFLICT DO NOTHING`); a `postgres` fleet fell back to the in-process `MemoryPostLease`
+  and lost cross-process/restart dedup. This adds `StorePostLease` (behind `fleet-store`), the lease
+  twin of `StoreFleet`, over any shared [`Backend`]: `acquire` is one atomic `Write::CompareAndSwap`
+  (land `held` only if the row is absent, collection `post_lease`, id = `review_id`), so exactly one
+  racer across threads *and* processes wins; `commit` upserts `posted` (terminal); `release` is an
+  atomic CAS-`held`-then-`Delete` batch that never removes a `posted` lease. `resolve_fleet_post_lease`
+  now builds it for the `postgres` arm (over the `[config_store]` Postgres backend — the durability a
+  postgres fleet gains here) and the `sqlite` arm (over the config-store SQLite backend at the roster's
+  DB file, its own `post_lease` collection), retiring `SqlitePostLease` with no loss of durability;
+  `fleet-sqlite` now also pulls in `fleet-store` + the config-store SQLite backend. Unlike the opaque-map
+  `MemoryPostLease`, `review_id` becomes a card id and is `safe_segment`-gated — a hostile id is rejected
+  fail-closed (server-minted UUIDs always pass). Hermetic tests run the full lease contract over
+  `MemoryPostLease` + `StorePostLease<MemoryBackend>` (plus a racing-acquire and a restart-durability
+  case); the `#[ignore]` `pg_lease_tests` prove the same over a real server (real reconnect durability +
+  concurrent-race), wired into `nix/pg-integration.nix`.
+
 ## Non-goals
 
 - Removing TOML (bootstrap stays TOML).

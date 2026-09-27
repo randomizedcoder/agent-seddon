@@ -1439,10 +1439,11 @@ pub async fn build_agent_with(
     };
     // The approve→post idempotency lease (review-fleet C17): a durable, cross-process
     // compare-and-set so a review posts to its forge at most once. Its durability follows
-    // the roster store — a `sqlite` roster gets a durable `SqlitePostLease`; anything else
-    // an in-process fallback (still closes same-process double-posts).
+    // the roster store — a `postgres`/`sqlite` roster gets a durable `StorePostLease` over
+    // the shared config store; anything else an in-process fallback (still closes
+    // same-process double-posts).
     #[cfg(feature = "fleet")]
-    let agent = match resolve_fleet_post_lease(&cfg)? {
+    let agent = match resolve_fleet_post_lease(&cfg, &metrics)? {
         Some(l) => agent.with_fleet_post_lease(l),
         None => agent,
     };
@@ -3243,42 +3244,56 @@ pub(crate) fn resolve_fleet_registry(
     Ok(store)
 }
 
-/// Build the approve→post idempotency lease (review-fleet C17). Its durability follows the
-/// roster store (`[review_fleet] store`): a `sqlite` roster resolves a durable
-/// `SqlitePostLease` in the SAME database file (its own table), giving a cross-process,
-/// read-your-writes compare-and-set. Every other store (`""`, `file`, `postgres`, `grpc`)
-/// falls back to an in-process `MemoryPostLease` — which still closes the same-process
-/// double-post (concurrent approves + re-approve inside the telemetry flush window) but is
-/// not durable across restarts/processes; a fleet needing that should run the `sqlite`
-/// store (durable `file`/`postgres` leases are a documented follow-up). `None` is never
-/// returned (the approver always has a lease); the option shape mirrors the sibling
-/// resolvers.
+/// Build the approve→post idempotency lease (review-fleet C17): a durable, cross-process
+/// compare-and-set so a review posts to its forge at most once. Its durability follows the
+/// roster store (`[review_fleet] store`):
+/// - `postgres` → a [`StorePostLease`](agent_review_fleet::StorePostLease) over the shared
+///   `[config_store]` Postgres backend (the same spine `StoreFleet` persists the roster
+///   onto) — the durable, cross-process/restart dedup a `postgres` fleet gains here.
+/// - `sqlite` → a `StorePostLease` over the config-store SQLite backend at the roster's DB
+///   file (its own `post_lease` collection). This replaces the retired `SqlitePostLease`
+///   with no loss of durability.
+/// - everything else (`""`, `file`, `grpc`, or a build without the durable feature) → an
+///   in-process [`MemoryPostLease`](agent_review_fleet::MemoryPostLease), which still closes
+///   the same-process double-post (concurrent approves + a re-approve inside the telemetry
+///   flush window) but is not durable across restarts/processes.
+///
+/// `None` is never returned (the approver always has a lease); the option shape mirrors the
+/// sibling resolvers.
 #[cfg(feature = "fleet")]
 pub(crate) fn resolve_fleet_post_lease(
     cfg: &Config,
+    metrics: &Metrics,
 ) -> anyhow::Result<Option<Arc<dyn agent_core::FleetPostLease>>> {
-    // The durable, cross-process arm: a sqlite roster shares its DB file for the lease table.
-    #[cfg(feature = "fleet-sqlite")]
-    if cfg.review_fleet.store == "sqlite" {
-        let lease =
-            agent_review_fleet::SqlitePostLease::open(expand_tilde(&cfg.review_fleet.path))?;
-        return Ok(Some(Arc::new(lease)));
-    }
-    // In-process fallback: closes same-process double-posts but is not durable across
-    // restarts/processes. Warn if the operator picked a store that *implies* they want
-    // durable dedup but this build/config can't provide it here.
-    if matches!(
-        cfg.review_fleet.store.as_str(),
-        "sqlite" | "postgres" | "file"
-    ) {
-        tracing::warn!(
-            store = %cfg.review_fleet.store,
-            "review-fleet approve→post idempotency is in-process only for this store; \
-             cross-process/restart-durable dedup needs the `sqlite` store built with the \
-             `fleet-sqlite` feature"
-        );
-    }
-    Ok(Some(Arc::new(agent_review_fleet::MemoryPostLease::new())))
+    // Only the shared-store arms build a config-store backend to meter.
+    #[cfg(not(any(feature = "fleet-postgres", feature = "fleet-sqlite")))]
+    let _ = metrics;
+    let lease: Arc<dyn agent_core::FleetPostLease> = match cfg.review_fleet.store.as_str() {
+        // Durable, cross-process dedup on the shared Postgres backend. DSN from
+        // `[config_store] dsn_ref`; metered at the shared config-store choke point.
+        #[cfg(feature = "fleet-postgres")]
+        "postgres" => Arc::new(agent_review_fleet::StorePostLease::new(
+            crate::store_backend::pg_backend(&cfg.config_store, metrics)?,
+        )),
+        // A `sqlite` roster keeps its durable, cross-process lease — a `StorePostLease`
+        // over the config-store SQLite backend at the same DB file (its own `post_lease`
+        // collection; coexists with the legacy roster tables), replacing `SqlitePostLease`.
+        #[cfg(feature = "fleet-sqlite")]
+        "sqlite" => {
+            let backend = crate::metered::config_store(
+                Arc::new(agent_config_store::SqliteBackend::open(expand_tilde(
+                    &cfg.review_fleet.path,
+                ))?),
+                metrics.clone(),
+                "sqlite",
+            );
+            Arc::new(agent_review_fleet::StorePostLease::new(backend))
+        }
+        // In-process fallback: closes same-process double-posts but is not durable across
+        // restarts/processes; a fleet needing that should run the postgres or sqlite store.
+        _ => Arc::new(agent_review_fleet::MemoryPostLease::new()),
+    };
+    Ok(Some(lease))
 }
 
 /// Build the `[role] store` backend — the operator-defined RBAC role cards (config

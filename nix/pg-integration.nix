@@ -87,8 +87,11 @@ pkgs.writeShellApplication {
     if [ "$rc" -ne 0 ]; then note_fail 2; fi
 
     # The fleet convergence (config C41 / A3b): the same real server proves the
-    # `StoreFleet` postgres arm. A dedicated tenant keeps it isolated.
-    echo "==> pg-integration: running the ignored fleet postgres suite"
+    # `StoreFleet` postgres arm AND the `StorePostLease` approve→post idempotency lease
+    # (review-fleet C17 / PG-09) — the whole crate's `#[ignore]` suite under
+    # `fleet-store-postgres`, incl. `pg_lease_tests` (reconnect durability + a
+    # concurrent-acquire race). Dedicated tenants keep them isolated.
+    echo "==> pg-integration: running the ignored fleet + post-lease postgres suites"
     set +e
     nix develop --extra-experimental-features 'nix-command flakes' -c \
       cargo test -p agent-review-fleet --features fleet-store-postgres \
