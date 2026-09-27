@@ -1,0 +1,26 @@
+-- agent-digest migration 0002 (PG): drop the never-used secondary index.
+--
+-- `0001` created `idx_digests_session_kind_seq (session_id, kind, seq)` to serve
+-- an "all rows of one kind for this session, in order" read. In practice the ONLY
+-- read is `query()` in `postgres.rs`, whose kind filter is written with the
+-- optional-parameter idiom `($2 = '' OR kind = $2)`. Under the generic (prepared)
+-- plans sqlx settles into after a few executions, that OR is NOT sargable — the
+-- planner can't push `kind` down to an index range, so it never chooses this
+-- index; the kind check runs as a post-index Filter regardless.
+--
+-- And it earns nothing even when it could be chosen: the PK `(session_id, seq,
+-- kind)` already narrows every read to ONE session's ledger (a small, bounded set)
+-- and its `(session_id, seq)` prefix supplies the `ORDER BY seq ASC` for free, so
+-- the common (no-kind) read is already optimal and a kind sub-filter over a single
+-- session's handful of rows is negligible. The index therefore only adds write
+-- amplification on every `put()` upsert (and storage) while never serving a read.
+--
+-- Drop it. `IF EXISTS` keeps this inert on a DB that never had it (e.g. one whose
+-- `0001` predates the index, or a manual reset). The versioned runner records
+-- version 2 in `_digest_migrations` so this applies exactly once.
+--
+-- (The embedded-SQLite tier in `src/sqlite.rs` keeps its `CREATE INDEX IF NOT
+-- EXISTS` — the generic-plan pathology is Postgres-prepared-statement-specific,
+-- SQLite's per-open index cost on a local file is trivial, and SQLite has no
+-- versioned drop path here; parity of the READ result is unaffected either way.)
+DROP INDEX IF EXISTS idx_digests_session_kind_seq;
