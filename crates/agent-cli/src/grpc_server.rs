@@ -913,6 +913,59 @@ fn issuer_params(c: &agent_runtime::AuthIssuerCfg) -> agent_grpc::server::Issuer
     }
 }
 
+/// The base router every serve entry point seeds its seams onto: admission, the
+/// `[auth]` layer ([`auth_layer`]) and metrics, plus TLS on the listener when
+/// [`listener_tls`] says so (security-hardening S4). Logs the transport mode once.
+async fn serve_base(
+    agent: &Agent,
+    listen: &Endpoint,
+) -> anyhow::Result<(ServeRouter, agent_grpc::server::HealthHandle)> {
+    let tls = listener_tls(agent.grpc_tls(), listen)?;
+    let mode = match &tls {
+        None => "plaintext",
+        Some(t) if t.is_mutual() => "mtls",
+        Some(_) => "tls",
+    };
+    tracing::info!(endpoint = ?listen, transport = mode, "gRPC listener transport");
+    agent_grpc::server::base_router_with_tls(
+        agent.grpc_max_in_flight(),
+        Some(shed_observer(agent)),
+        auth_layer(agent, listen)?,
+        Some(rpc_observer(agent)),
+        tls.as_ref(),
+    )
+    .await
+    .map_err(anyhow::Error::msg)
+}
+
+/// Load the listener's TLS material when [`serves_tls`] says it should.
+fn listener_tls(
+    t: &agent_runtime::GrpcTlsSettings,
+    listen: &Endpoint,
+) -> anyhow::Result<Option<agent_grpc::ServerTls>> {
+    if !serves_tls(!t.cert.is_empty(), listen).map_err(anyhow::Error::msg)? {
+        return Ok(None);
+    }
+    let client_ca = (!t.client_ca.is_empty()).then(|| std::path::Path::new(&t.client_ca));
+    agent_grpc::ServerTls::load(t.cert.as_ref(), t.key.as_ref(), client_ca)
+        .map(Some)
+        .map_err(|e| anyhow::anyhow!("[grpc.tls]: {e}"))
+}
+
+/// Whether a listener serves TLS: a TCP listener does whenever `[grpc.tls] cert` is
+/// set; a unix socket never does (its boundary is the 0600 socket file, and TLS
+/// would break every local client). An `https://` listen address with no cert is
+/// an error rather than a silent plaintext listener.
+fn serves_tls(cert_configured: bool, listen: &Endpoint) -> Result<bool, String> {
+    match listen {
+        Endpoint::Uds(_) => Ok(false),
+        Endpoint::Tcp { tls: true, .. } if !cert_configured => Err(format!(
+            "listen address {listen:?} asks for TLS (`https://`) but `[grpc.tls]` has no `cert`/`key`"
+        )),
+        Endpoint::Tcp { .. } => Ok(cert_configured),
+    }
+}
+
 /// `[auth] require_identity`, defaulted per listener: on for a routable address,
 /// off for loopback and unix sockets, where the host is the trust boundary and the
 /// local tools and harnesses send no identity.
@@ -922,13 +975,7 @@ fn require_identity(configured: Option<bool>, listen: &Endpoint) -> bool {
 
 pub async fn serve_session_observe(agent: &Agent, listen: Endpoint) -> anyhow::Result<()> {
     install_authz_observer(agent);
-    let (router, health) = agent_grpc::server::base_router_with_auth(
-        agent.grpc_max_in_flight(),
-        Some(shed_observer(agent)),
-        auth_layer(agent, &listen)?,
-        Some(rpc_observer(agent)),
-    )
-    .await;
+    let (router, health) = serve_base(agent, &listen).await?;
     let (router, added) = add_seam_service(router, agent, Seam::SessionStream)?;
     if !added {
         anyhow::bail!("session-stream seam not available in this build");
@@ -974,13 +1021,7 @@ pub async fn serve_sessions(agent: Arc<Agent>, listen: Endpoint) -> anyhow::Resu
     }
 
     install_authz_observer(&agent);
-    let (router, health) = agent_grpc::server::base_router_with_auth(
-        agent.grpc_max_in_flight(),
-        Some(shed_observer(&agent)),
-        auth_layer(&agent, &listen)?,
-        Some(rpc_observer(&agent)),
-    )
-    .await;
+    let (router, health) = serve_base(&agent, &listen).await?;
     let router = router.add_service(
         srv::SessionRegistrySvc::new(mgr.clone() as Arc<dyn agent_core::SessionRegistry>)
             .into_server(),
@@ -1194,13 +1235,7 @@ pub async fn serve_fleet(
     };
 
     install_authz_observer(&agent);
-    let (router, health) = agent_grpc::server::base_router_with_auth(
-        agent.grpc_max_in_flight(),
-        Some(shed_observer(&agent)),
-        auth_layer(&agent, &listen)?,
-        Some(rpc_observer(&agent)),
-    )
-    .await;
+    let (router, health) = serve_base(&agent, &listen).await?;
     let mut fleet_svc = srv::ReviewFleetSvc::new(roster.clone());
     if let Some(triggers) = triggers {
         fleet_svc = fleet_svc.with_triggers(triggers);
@@ -1490,13 +1525,7 @@ async fn serve_seams(
     // Health is the seed of the router, so hosting one seam and hosting all of
     // them are the same code path rather than two that can drift.
     install_authz_observer(agent);
-    let (mut router, health) = agent_grpc::server::base_router_with_auth(
-        agent.grpc_max_in_flight(),
-        Some(shed_observer(agent)),
-        auth_layer(agent, &listen)?,
-        Some(rpc_observer(agent)),
-    )
-    .await;
+    let (mut router, health) = serve_base(agent, &listen).await?;
     let mut hosted: Vec<&str> = Vec::new();
     for &seam in seams {
         let (next, added) = add_seam_service(router, agent, seam)?;
@@ -1661,5 +1690,28 @@ mod tests {
     ) {
         let ep = Endpoint::parse(listen);
         assert_eq!(super::require_identity(configured, &ep), want);
+    }
+
+    #[rstest]
+    #[case::positive_tcp_with_cert_serves_tls(true, "0.0.0.0:50051", Ok(true))]
+    #[case::positive_https_listen_with_cert(true, "https://127.0.0.1:50051", Ok(true))]
+    #[case::negative_tcp_without_cert_plaintext(false, "127.0.0.1:50051", Ok(false))]
+    #[case::corner_uds_never_tls(true, "unix:///run/agent.sock", Ok(false))]
+    #[case::boundary_http_scheme_with_cert_still_tls(true, "http://127.0.0.1:50051", Ok(true))]
+    #[case::adversarial_https_listen_without_cert_refused(
+        false,
+        "https://0.0.0.0:50051",
+        Err("no `cert`")
+    )]
+    fn serves_tls_cases(
+        #[case] cert: bool,
+        #[case] listen: &str,
+        #[case] want: Result<bool, &str>,
+    ) {
+        match (super::serves_tls(cert, &Endpoint::parse(listen)), want) {
+            (Ok(got), Ok(want)) => assert_eq!(got, want, "{listen}"),
+            (Err(e), Err(want)) => assert!(e.contains(want), "{e}"),
+            (got, want) => panic!("{listen}: got {got:?}, want {want:?}"),
+        }
     }
 }

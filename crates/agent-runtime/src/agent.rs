@@ -89,6 +89,9 @@ pub struct Settings {
     /// (`mode` empty) ⇒ disabled (today's trusted-header path). Read by the serve path
     /// to build the `AuthLayer`.
     pub grpc_auth: GrpcAuthSettings,
+    /// TLS for served TCP listeners (`[grpc.tls]`, security-hardening S4). Read by the
+    /// serve path; empty `cert` ⇒ plaintext.
+    pub grpc_tls: GrpcTlsSettings,
     /// Multi-tenant deployment (`[tenancy] per_tenant`, default `false`). Gates the
     /// per-tenant store routing (builder) and the C29 operator-config write guard on the
     /// served `ConfigService`. Tier-0 (`false`) is byte-identical single-operator behaviour.
@@ -114,6 +117,17 @@ pub struct GrpcAuthSettings {
     pub require_identity: Option<bool>,
     /// `[[auth.issuers]]`: login issuers with per-IdP profiles.
     pub issuers: Vec<crate::config::AuthIssuerCfg>,
+}
+
+/// Runtime view of the server half of `[grpc.tls]` (security-hardening S4): PEM
+/// paths, empty ⇒ unset. Validated structurally at load
+/// ([`crate::config::GrpcTlsCfg::validate`]); the serve path reads the files.
+#[derive(Debug, Clone, Default)]
+pub struct GrpcTlsSettings {
+    pub cert: String,
+    pub key: String,
+    /// Set ⇒ client certificates chaining to this CA are required (mTLS).
+    pub client_ca: String,
 }
 
 /// How the scheduler is wired (config C2c-2). The registry half is served either
@@ -1701,6 +1715,11 @@ impl Agent {
     /// disabled (today's trusted-header path).
     pub fn grpc_auth(&self) -> &GrpcAuthSettings {
         &self.settings.grpc_auth
+    }
+
+    /// TLS for served TCP listeners (`[grpc.tls]`, security-hardening S4).
+    pub fn grpc_tls(&self) -> &GrpcTlsSettings {
+        &self.settings.grpc_tls
     }
 
     /// Whether this is a multi-tenant deployment (`[tenancy] per_tenant`, config C29).
@@ -4994,6 +5013,7 @@ mod tests {
             fleet_max_per_user: 0,
             fleet_slack_app_token_ref: String::new(),
             grpc_auth: GrpcAuthSettings::default(),
+            grpc_tls: GrpcTlsSettings::default(),
             per_tenant: false,
         }
     }

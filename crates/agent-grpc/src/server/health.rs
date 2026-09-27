@@ -30,6 +30,8 @@
 
 use tonic::transport::Server;
 
+use crate::tls::ServerTls;
+
 use super::{
     admission::{AdmissionLayer, ShedObserver},
     auth::AuthLayer,
@@ -130,6 +132,39 @@ pub async fn base_router_with_auth(
     auth: AuthLayer,
     on_rpc: Option<RpcObserver>,
 ) -> (ServeRouter, HealthHandle) {
+    seed(Server::builder(), max_in_flight, on_shed, auth, on_rpc).await
+}
+
+/// [`base_router_with_auth`] plus TLS on the listener (security-hardening S4). With
+/// `tls = None` it is exactly [`base_router_with_auth`]. TLS wraps **every**
+/// connection the router serves, so the caller passes it only for a TCP listener —
+/// a unix socket stays plaintext (its boundary is the 0600 file mode).
+///
+/// Errors only when the TLS material fails to build an acceptor, which
+/// [`ServerTls::load`] already checked — so in practice it cannot.
+pub async fn base_router_with_tls(
+    max_in_flight: usize,
+    on_shed: Option<ShedObserver>,
+    auth: AuthLayer,
+    on_rpc: Option<RpcObserver>,
+    tls: Option<&ServerTls>,
+) -> Result<(ServeRouter, HealthHandle), String> {
+    let mut server = Server::builder();
+    if let Some(tls) = tls {
+        server = server
+            .tls_config(tls.config())
+            .map_err(|e| format!("gRPC server TLS: {e}"))?;
+    }
+    Ok(seed(server, max_in_flight, on_shed, auth, on_rpc).await)
+}
+
+async fn seed(
+    server: Server,
+    max_in_flight: usize,
+    on_shed: Option<ShedObserver>,
+    auth: AuthLayer,
+    on_rpc: Option<RpcObserver>,
+) -> (ServeRouter, HealthHandle) {
     let (mut reporter, health_service) = tonic_health::server::health_reporter();
     reporter
         .set_service_status("", tonic_health::ServingStatus::Serving)
@@ -141,7 +176,7 @@ pub async fn base_router_with_auth(
         // then `.layer(admission)` yields execution order admission → auth → metrics →
         // handler (shed before crypto; meter the verified identity + real handler work).
         // The type is `Stack<Admission, Stack<Auth, Stack<Metrics, _>>>`.
-        Server::builder()
+        server
             .layer(MetricsLayer::disabled().with_observer(on_rpc))
             .layer(auth)
             .layer(AdmissionLayer::new(max_in_flight, SHED_PUSHBACK_MS).with_observer(on_shed))

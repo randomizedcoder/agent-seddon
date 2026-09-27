@@ -37,7 +37,7 @@ struct Server {
 async fn serve(router: agent_grpc::server::Router) -> (String, Server) {
     let bound = Endpoint::parse("127.0.0.1:0").bind().await.expect("bind");
     let dial = match bound.dial_endpoint().expect("dial") {
-        Endpoint::Tcp(hostport) => hostport,
+        Endpoint::Tcp { hostport, .. } => hostport,
         Endpoint::Uds(p) => format!("unix:{}", p.display()),
     };
     let (tx, rx) = oneshot::channel();

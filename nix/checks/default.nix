@@ -283,6 +283,9 @@ in
   # The multi-tenancy auditor's own test suite (four-class tables + check-the-checks +
   # manifest self-consistency). Gates the auditor's CORRECTNESS. Pure stdlib Python.
   mt-audit-tests = import ./mt-audit-tests.nix { inherit pkgs; };
+  # The dev-PKI generator's own tests, incl. an offline real-step-cli mint + verify and
+  # check-the-checks (security-hardening S4). Pure stdlib Python + step-cli.
+  pki-dev-tests = import ./pki-dev-tests.nix { inherit pkgs; };
   # The repo-wide multi-tenancy coverage gate: `mt-audit --gate` against the real
   # source, failing on any unclassified/regressed tenancy surface. Shares the one
   # audit.py entrypoint with `nix run .#mt-audit` (report), the constants-sync duality.

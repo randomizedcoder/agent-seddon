@@ -5,6 +5,9 @@
 //! [`Bound`] listener that feeds `serve_with_incoming`. UDS is the fast path when
 //! components share a host: it skips the TCP/IP stack entirely on a known socket
 //! path.
+//!
+//! TCP dials are plaintext unless the address says `https://`, in which case they
+//! use the process-wide [`crate::tls::ClientTls`] (see [`crate::tls`]).
 
 use std::io;
 use std::net::SocketAddr;
@@ -18,13 +21,17 @@ use tonic::transport::{Channel, Endpoint as TonicEndpoint, Uri};
 
 /// A parsed seam address: a TCP `host:port` or a local unix-domain-socket path.
 ///
-/// Parsing (`unix:` ⇒ UDS, otherwise TCP; an `http(s)://` scheme is stripped):
+/// Parsing (`unix:` ⇒ UDS, otherwise TCP; the scheme decides TLS):
 /// - `unix:/tmp/agent-seddon/provider.sock` → [`Endpoint::Uds`]
-/// - `127.0.0.1:50051`, `provider:50051`, `http://127.0.0.1:50051` → [`Endpoint::Tcp`]
+/// - `127.0.0.1:50051`, `provider:50051`, `http://127.0.0.1:50051` → plaintext
+///   [`Endpoint::Tcp`]
+/// - `https://provider:50051` → [`Endpoint::Tcp`] with `tls: true`. (Before S4 the
+///   `https://` was stripped and the dial went out plaintext — a silent downgrade.)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Endpoint {
-    /// A `host:port` (scheme-less); hostnames are allowed when dialing.
-    Tcp(String),
+    /// A `host:port` (scheme-less); hostnames are allowed when dialing. `tls` is
+    /// set by an `https://` address.
+    Tcp { hostport: String, tls: bool },
     /// A unix-domain-socket path.
     Uds(PathBuf),
 }
@@ -35,11 +42,35 @@ impl Endpoint {
             // Accept unix:/p, unix://p, unix:///abs — normalize to a path.
             Endpoint::Uds(PathBuf::from(rest.trim_start_matches("//")))
         } else {
-            let hostport = addr
-                .strip_prefix("http://")
-                .or_else(|| addr.strip_prefix("https://"))
-                .unwrap_or(addr);
-            Endpoint::Tcp(hostport.to_string())
+            let (hostport, tls) = match addr.strip_prefix("https://") {
+                Some(rest) => (rest, true),
+                None => (addr.strip_prefix("http://").unwrap_or(addr), false),
+            };
+            Endpoint::Tcp {
+                hostport: hostport.to_string(),
+                tls,
+            }
+        }
+    }
+
+    /// A plaintext TCP endpoint for `hostport`.
+    pub fn tcp(hostport: impl Into<String>) -> Self {
+        Endpoint::Tcp {
+            hostport: hostport.into(),
+            tls: false,
+        }
+    }
+
+    /// Whether dialing this endpoint uses TLS (`https://`; never for UDS).
+    pub fn is_tls(&self) -> bool {
+        matches!(self, Endpoint::Tcp { tls: true, .. })
+    }
+
+    /// The same endpoint with TLS switched on/off (TCP only; UDS is unchanged).
+    pub fn with_tls(self, on: bool) -> Self {
+        match self {
+            Endpoint::Tcp { hostport, .. } => Endpoint::Tcp { hostport, tls: on },
+            uds => uds,
         }
     }
 
@@ -52,18 +83,43 @@ impl Endpoint {
     pub fn is_local(&self) -> bool {
         match self {
             Endpoint::Uds(_) => true,
-            Endpoint::Tcp(hostport) => hostport
+            Endpoint::Tcp { hostport, .. } => hostport
                 .parse::<SocketAddr>()
                 .is_ok_and(|addr| addr.ip().is_loopback()),
         }
     }
 
     /// Build a **lazy** channel (connects on first request). TCP uses the standard
-    /// connector; UDS uses a custom connector that dials the socket path.
+    /// connector; UDS uses a custom connector that dials the socket path. An
+    /// `https://` endpoint uses the process-wide client TLS
+    /// ([`crate::tls::set_client_tls`]).
     pub fn connect_lazy(&self) -> Result<Channel, tonic::transport::Error> {
+        self.connect_lazy_with(crate::tls::client_tls().as_deref())
+    }
+
+    /// [`Self::connect_lazy`] with explicit client TLS instead of the process-wide
+    /// one. `tls` only matters for an `https://` endpoint; with none configured
+    /// such a dial trusts the public web roots and presents no client certificate.
+    pub fn connect_lazy_with(
+        &self,
+        tls: Option<&crate::tls::ClientTls>,
+    ) -> Result<Channel, tonic::transport::Error> {
         match self {
-            Endpoint::Tcp(hostport) => {
-                Ok(TonicEndpoint::from_shared(format!("http://{hostport}"))?.connect_lazy())
+            Endpoint::Tcp {
+                hostport,
+                tls: false,
+            } => Ok(TonicEndpoint::from_shared(format!("http://{hostport}"))?.connect_lazy()),
+            Endpoint::Tcp {
+                hostport,
+                tls: true,
+            } => {
+                let endpoint = TonicEndpoint::from_shared(format!("https://{hostport}"))?;
+                let host = endpoint.uri().host().unwrap_or_default().to_owned();
+                let config = match tls {
+                    Some(tls) => tls.config_for(&host),
+                    None => crate::tls::ClientTls::default().config_for(&host),
+                };
+                Ok(endpoint.tls_config(config)?.connect_lazy())
             }
             Endpoint::Uds(path) => {
                 let path = path.clone();
@@ -85,7 +141,7 @@ impl Endpoint {
     /// any stale socket first; the returned [`Bound`] unlinks it on drop.
     pub async fn bind(&self) -> io::Result<Bound> {
         match self {
-            Endpoint::Tcp(hostport) => {
+            Endpoint::Tcp { hostport, .. } => {
                 let addr: SocketAddr = hostport.parse().map_err(|e| {
                     io::Error::new(
                         io::ErrorKind::InvalidInput,
@@ -161,10 +217,11 @@ pub enum Bound {
 impl Bound {
     /// The endpoint a client should dial to reach this listener. For TCP this is
     /// the *resolved* local address (so an ephemeral `:0` bind yields its real
-    /// port — handy for tests).
+    /// port — handy for tests), plaintext; a TLS listener's caller adds
+    /// [`Endpoint::with_tls`].
     pub fn dial_endpoint(&self) -> io::Result<Endpoint> {
         match self {
-            Bound::Tcp(l) => Ok(Endpoint::Tcp(l.local_addr()?.to_string())),
+            Bound::Tcp(l) => Ok(Endpoint::tcp(l.local_addr()?.to_string())),
             Bound::Uds(_, guard) => Ok(Endpoint::Uds(guard.0.clone())),
         }
     }
@@ -220,10 +277,15 @@ mod tests {
     use rstest::rstest;
 
     #[rstest]
-    #[case::bare_ip("127.0.0.1:50051", Endpoint::Tcp("127.0.0.1:50051".into()))]
-    #[case::http_scheme("http://127.0.0.1:50051", Endpoint::Tcp("127.0.0.1:50051".into()))]
-    #[case::https_scheme("https://gw:50051", Endpoint::Tcp("gw:50051".into()))]
-    #[case::hostname("provider:50051", Endpoint::Tcp("provider:50051".into()))]
+    #[case::bare_ip("127.0.0.1:50051", Endpoint::tcp("127.0.0.1:50051"))]
+    #[case::http_scheme("http://127.0.0.1:50051", Endpoint::tcp("127.0.0.1:50051"))]
+    #[case::https_scheme("https://gw:50051", Endpoint::tcp("gw:50051").with_tls(true))]
+    #[case::hostname("provider:50051", Endpoint::tcp("provider:50051"))]
+    #[case::corner_https_ipv6("https://[::1]:50051", Endpoint::tcp("[::1]:50051").with_tls(true))]
+    #[case::corner_uppercase_scheme_is_not_parsed(
+        "HTTPS://gw:50051",
+        Endpoint::tcp("HTTPS://gw:50051")
+    )]
     #[case::unix_single("unix:/tmp/a.sock", Endpoint::Uds(PathBuf::from("/tmp/a.sock")))]
     #[case::unix_double("unix://tmp/a.sock", Endpoint::Uds(PathBuf::from("tmp/a.sock")))]
     #[case::unix_triple("unix:///tmp/a.sock", Endpoint::Uds(PathBuf::from("/tmp/a.sock")))]
@@ -232,10 +294,23 @@ mod tests {
     }
 
     #[rstest]
+    #[case::positive_https("https://gw:1", true)]
+    #[case::negative_http("http://gw:1", false)]
+    #[case::corner_bare_hostport_stays_plaintext("gw:1", false)]
+    #[case::corner_uds_never_tls("unix:/tmp/a.sock", false)]
+    fn is_tls_cases(#[case] input: &str, #[case] expected: bool) {
+        assert_eq!(Endpoint::parse(input).is_tls(), expected);
+        // `with_tls` never turns a socket into a TLS dial.
+        let forced = Endpoint::parse(input).with_tls(true);
+        assert_eq!(forced.is_tls(), !input.starts_with("unix:"));
+    }
+
+    #[rstest]
     #[case::positive_ipv4_loopback("127.0.0.1:50051", true)]
     #[case::positive_ipv6_loopback("[::1]:50051", true)]
     #[case::positive_uds("unix:/tmp/agent-seddon/a.sock", true)]
     #[case::positive_http_scheme_loopback("http://127.0.0.1:50051", true)]
+    #[case::positive_https_scheme_loopback("https://127.0.0.1:50051", true)]
     #[case::boundary_top_of_loopback_block("127.255.255.254:1", true)]
     #[case::negative_all_interfaces_v4("0.0.0.0:50051", false)]
     #[case::negative_all_interfaces_v6("[::]:50051", false)]

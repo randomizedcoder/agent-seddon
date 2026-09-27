@@ -186,6 +186,10 @@ tiny_http = "0.12"
 # fetched JWKS is cached via the workspace HTTP client (`reqwest`). No PEM/key
 # generation in a normal build. See docs/design/config/09-increments.md (B1).
 jsonwebtoken = "9"
+# Test-time X.509 certificates for the gRPC TLS matrix (agent-testkit `pki`,
+# security-hardening S4). ring only: the workspace's rustls is ring-only, and a
+# second crypto provider would make rustls' process default ambiguous.
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }
 
 # Drives the CLI through a real pty in tests. Needed because the REPL's line
 # editor and the policy guard's operator prompt are both tty-only: the guard
