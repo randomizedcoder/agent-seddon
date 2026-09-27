@@ -50,10 +50,10 @@ use async_trait::async_trait;
 
 use crate::{safe_segment, Error, Result};
 
-/// A mutating action on a control-plane resource. Closed set (house style: an
-/// `as_str`/`parse` pair, `parse` fail-closed to `None` on an unknown name —
-/// mirrors [`crate::RouteRole`]). `Read` exists for completeness / the `reader`
-/// role; the gate only wraps *mutating* RPCs.
+/// An action on a resource. Closed set (house style: an `as_str`/`parse` pair,
+/// `parse` fail-closed to `None` on an unknown name — mirrors [`crate::RouteRole`]).
+/// `Use` is running something (the interactive agent, served exec); `Observe` is
+/// watching another subject's live session (security-hardening S7, 03-rbac.md).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Action {
     Read,
@@ -62,18 +62,22 @@ pub enum Action {
     Approve,
     Schedule,
     Trigger,
+    Use,
+    Observe,
 }
 
 impl Action {
     /// Every action, in declaration order (enumerates a principal's effective
     /// permissions; a new variant must be added here too).
-    pub const ALL: [Action; 6] = [
+    pub const ALL: [Action; 8] = [
         Action::Read,
         Action::Write,
         Action::Delete,
         Action::Approve,
         Action::Schedule,
         Action::Trigger,
+        Action::Use,
+        Action::Observe,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -84,6 +88,8 @@ impl Action {
             Action::Approve => "approve",
             Action::Schedule => "schedule",
             Action::Trigger => "trigger",
+            Action::Use => "use",
+            Action::Observe => "observe",
         }
     }
     /// Parse a config/wire action name; unknown / empty ⇒ `None` (fail-closed —
@@ -96,13 +102,19 @@ impl Action {
             "approve" => Action::Approve,
             "schedule" => Action::Schedule,
             "trigger" => Action::Trigger,
+            "use" => Action::Use,
+            "observe" => Action::Observe,
             _ => return None,
         })
     }
 }
 
-/// A control-plane resource type — one gated surface. Closed set; `parse` is
-/// fail-closed like [`Action::parse`].
+/// A resource type — one gated surface. Closed set; `parse` is fail-closed like
+/// [`Action::parse`]. `Fleet` is the review roster; `Review` is the drafts and
+/// their history (so approving a review is not a roster write); `Agent` is the
+/// interactive agent and the seams it runs on; `Exec` is served arbitrary
+/// execution; `Binding` is who holds which role; `Telemetry` is metrics, digests
+/// and the auth audit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResourceType {
     Config,
@@ -114,11 +126,16 @@ pub enum ResourceType {
     Role,
     ForgeRegistry,
     TransportRegistry,
+    Agent,
+    Exec,
+    Review,
+    Binding,
+    Telemetry,
 }
 
 impl ResourceType {
     /// Every resource type, in declaration order (see [`Action::ALL`]).
-    pub const ALL: [ResourceType; 9] = [
+    pub const ALL: [ResourceType; 14] = [
         ResourceType::Config,
         ResourceType::Registry,
         ResourceType::Fleet,
@@ -128,6 +145,11 @@ impl ResourceType {
         ResourceType::Role,
         ResourceType::ForgeRegistry,
         ResourceType::TransportRegistry,
+        ResourceType::Agent,
+        ResourceType::Exec,
+        ResourceType::Review,
+        ResourceType::Binding,
+        ResourceType::Telemetry,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -141,6 +163,11 @@ impl ResourceType {
             ResourceType::Role => "role",
             ResourceType::ForgeRegistry => "forge_registry",
             ResourceType::TransportRegistry => "transport_registry",
+            ResourceType::Agent => "agent",
+            ResourceType::Exec => "exec",
+            ResourceType::Review => "review",
+            ResourceType::Binding => "binding",
+            ResourceType::Telemetry => "telemetry",
         }
     }
     pub fn parse(s: &str) -> Option<Self> {
@@ -154,6 +181,11 @@ impl ResourceType {
             "role" => ResourceType::Role,
             "forge_registry" => ResourceType::ForgeRegistry,
             "transport_registry" => ResourceType::TransportRegistry,
+            "agent" => ResourceType::Agent,
+            "exec" => ResourceType::Exec,
+            "review" => ResourceType::Review,
+            "binding" => ResourceType::Binding,
+            "telemetry" => ResourceType::Telemetry,
             _ => return None,
         })
     }
@@ -176,7 +208,12 @@ impl ResourceType {
             | ResourceType::Scheduler
             | ResourceType::Role
             | ResourceType::ForgeRegistry
-            | ResourceType::TransportRegistry => false,
+            | ResourceType::TransportRegistry
+            | ResourceType::Agent
+            | ResourceType::Exec
+            | ResourceType::Review
+            | ResourceType::Binding
+            | ResourceType::Telemetry => false,
         }
     }
 }
@@ -284,10 +321,35 @@ impl RoleDef {
 }
 
 /// Names of the built-in roles (reserved — an operator-defined role card may not
-/// reuse one of these ids).
+/// reuse one of these ids). The persona behind each is in
+/// docs/design/security-hardening/03-rbac.md.
 pub const ROLE_OPERATOR: &str = "operator";
 pub const ROLE_ORG_ADMIN: &str = "org_admin";
+pub const ROLE_VIEWER: &str = "viewer";
+/// The pre-S7 name of [`ROLE_VIEWER`], kept as an alias with the same grants.
 pub const ROLE_READER: &str = "reader";
+pub const ROLE_REVIEW_VIEWER: &str = "review_viewer";
+pub const ROLE_AGENT_USER: &str = "agent_user";
+pub const ROLE_REVIEWER: &str = "reviewer";
+pub const ROLE_FLEET_ADMIN: &str = "fleet_admin";
+pub const ROLE_ACCESS_ADMIN: &str = "access_admin";
+pub const ROLE_SVC_FLEET: &str = "svc_fleet";
+pub const ROLE_SVC_SEAM: &str = "svc_seam";
+
+/// Every built-in role id.
+pub const BUILTIN_ROLES: [&str; 11] = [
+    ROLE_OPERATOR,
+    ROLE_ORG_ADMIN,
+    ROLE_VIEWER,
+    ROLE_READER,
+    ROLE_REVIEW_VIEWER,
+    ROLE_AGENT_USER,
+    ROLE_REVIEWER,
+    ROLE_FLEET_ADMIN,
+    ROLE_ACCESS_ADMIN,
+    ROLE_SVC_FLEET,
+    ROLE_SVC_SEAM,
+];
 
 /// A name → [`RoleDef`] map. `authorize` resolves a principal's role names
 /// through it.
@@ -297,26 +359,128 @@ pub struct RoleCatalog {
 }
 
 impl RoleCatalog {
-    /// The three built-in roles:
-    /// - `operator` — host-global admin (every action, every resource, **every
-    ///   tenant**). The only role that crosses tenants.
-    /// - `org_admin` — tenant-scoped admin (every action, every resource, own
-    ///   tenant only).
-    /// - `reader` — read-only, own tenant.
+    /// The built-in roles. Only `operator` crosses tenants; the rest act in the
+    /// principal's own tenant. Each is written out in full (no inheritance):
+    /// - `operator` — every action on every resource in every tenant, `config`
+    ///   and `exec` included.
+    /// - `org_admin` — every action on every resource in its own tenant (so not
+    ///   the operator-global `config`).
+    /// - `viewer` (alias `reader`) — read on every resource; `config` stays
+    ///   operator-only.
+    /// - `review_viewer` — read reviews.
+    /// - `agent_user` — use the agent; read prompts, reviews and graphs.
+    /// - `reviewer` — `agent_user`, plus edit and approve reviews, trigger a
+    ///   review, read the roster.
+    /// - `fleet_admin` — `reviewer`, plus onboard repos: the roster, forge and
+    ///   transport cards; read upstreams and telemetry.
+    /// - `access_admin` — roles and bindings.
+    /// - `svc_fleet` / `svc_seam` — service identities (bound by mTLS in S10).
+    ///
+    /// `(use, exec)` and `(observe, agent)` belong to no tenant role but
+    /// `org_admin`: a deployment that wants them grants a custom role on purpose.
     pub fn builtin() -> Self {
-        let mut roles = HashMap::new();
-        roles.insert(ROLE_OPERATOR.to_string(), RoleDef::admin(true));
-        roles.insert(ROLE_ORG_ADMIN.to_string(), RoleDef::admin(false));
-        roles.insert(
-            ROLE_READER.to_string(),
-            RoleDef::actions_on_all(false, [Action::Read]),
-        );
-        Self { roles }
+        use Action::*;
+        use ResourceType::*;
+        let viewer = || {
+            RoleDef::pairs(
+                false,
+                ResourceType::ALL
+                    .into_iter()
+                    .filter(|r| !r.is_operator_global())
+                    .map(|r| (Read, r)),
+            )
+        };
+        const AGENT_USER: [(Action, ResourceType); 4] =
+            [(Use, Agent), (Read, Prompt), (Read, Review), (Read, Graph)];
+        const REVIEWER: [(Action, ResourceType); 4] = [
+            (Write, Review),
+            (Approve, Review),
+            (Trigger, Fleet),
+            (Read, Fleet),
+        ];
+        const FLEET_ADMIN: [(Action, ResourceType); 10] = [
+            (Write, Fleet),
+            (Delete, Fleet),
+            (Read, ForgeRegistry),
+            (Write, ForgeRegistry),
+            (Delete, ForgeRegistry),
+            (Read, TransportRegistry),
+            (Write, TransportRegistry),
+            (Delete, TransportRegistry),
+            (Read, Registry),
+            (Read, Telemetry),
+        ];
+        let roles = HashMap::from([
+            (ROLE_OPERATOR, RoleDef::admin(true)),
+            (ROLE_ORG_ADMIN, RoleDef::admin(false)),
+            (ROLE_VIEWER, viewer()),
+            (ROLE_READER, viewer()),
+            (ROLE_REVIEW_VIEWER, RoleDef::pairs(false, [(Read, Review)])),
+            (ROLE_AGENT_USER, RoleDef::pairs(false, AGENT_USER)),
+            (
+                ROLE_REVIEWER,
+                RoleDef::pairs(false, AGENT_USER.into_iter().chain(REVIEWER)),
+            ),
+            (
+                ROLE_FLEET_ADMIN,
+                RoleDef::pairs(
+                    false,
+                    AGENT_USER.into_iter().chain(REVIEWER).chain(FLEET_ADMIN),
+                ),
+            ),
+            (
+                ROLE_ACCESS_ADMIN,
+                RoleDef::pairs(
+                    false,
+                    [
+                        (Read, Role),
+                        (Write, Role),
+                        (Delete, Role),
+                        (Read, Binding),
+                        (Write, Binding),
+                        (Delete, Binding),
+                    ],
+                ),
+            ),
+            (
+                ROLE_SVC_FLEET,
+                RoleDef::pairs(
+                    false,
+                    [
+                        (Use, Agent),
+                        (Read, Review),
+                        (Write, Review),
+                        (Trigger, Fleet),
+                        (Read, Fleet),
+                        (Read, Registry),
+                        (Read, Prompt),
+                    ],
+                ),
+            ),
+            (
+                ROLE_SVC_SEAM,
+                RoleDef::pairs(
+                    false,
+                    [
+                        (Read, Prompt),
+                        (Read, Graph),
+                        (Read, Registry),
+                        (Read, Scheduler),
+                    ],
+                ),
+            ),
+        ]);
+        Self {
+            roles: roles
+                .into_iter()
+                .map(|(name, def)| (name.to_string(), def))
+                .collect(),
+        }
     }
 
     /// Whether `name` is one of the reserved built-in roles.
     pub fn is_builtin(name: &str) -> bool {
-        matches!(name, ROLE_OPERATOR | ROLE_ORG_ADMIN | ROLE_READER)
+        BUILTIN_ROLES.contains(&name)
     }
 
     pub fn get(&self, name: &str) -> Option<&RoleDef> {
@@ -510,9 +674,16 @@ impl RoleCard {
             RolePermissions::ActionsOnAll(actions) => {
                 RoleDef::actions_on_all(self.crosses_tenants, actions.iter().copied())
             }
-            RolePermissions::Pairs(pairs) => {
-                RoleDef::pairs(self.crosses_tenants, pairs.iter().copied())
-            }
+            RolePermissions::Pairs(pairs) => RoleDef::pairs(
+                self.crosses_tenants,
+                pairs.iter().copied().chain(
+                    // Approving moved from the roster (`fleet`) to the draft
+                    // (`review`) in S7; a card written before keeps approving.
+                    pairs
+                        .contains(&(Action::Approve, ResourceType::Fleet))
+                        .then_some((Action::Approve, ResourceType::Review)),
+                ),
+            ),
         }
     }
 }
@@ -586,17 +757,21 @@ mod tests {
 
     #[rstest]
     // desc: reader gets read on every resource type except the operator-global config.
-    #[case::positive_reader_reads_everything_but_config(&[ROLE_READER], 8)]
+    #[case::positive_reader_reads_everything_but_config(&[ROLE_READER], 13)]
     // desc: org_admin: every action on every tenant resource, still not config.
-    #[case::positive_org_admin_all_but_config(&[ROLE_ORG_ADMIN], 6 * 8)]
+    #[case::positive_org_admin_all_but_config(&[ROLE_ORG_ADMIN], 8 * 13)]
     // desc: operator: the whole matrix, config included.
-    #[case::boundary_operator_full_matrix(&[ROLE_OPERATOR], 6 * 9)]
+    #[case::boundary_operator_full_matrix(&[ROLE_OPERATOR], 8 * 14)]
+    // desc: agent_user is exactly its four grants.
+    #[case::positive_agent_user_four(&[ROLE_AGENT_USER], 4)]
     // desc: no roles ⇒ nothing.
     #[case::negative_no_roles(&[], 0)]
     // desc: an unknown role grants nothing.
     #[case::negative_unknown_role(&["superuser"], 0)]
     // desc: overlapping roles are not double-counted.
-    #[case::corner_overlap_dedup(&[ROLE_READER, ROLE_ORG_ADMIN], 6 * 8)]
+    #[case::corner_overlap_dedup(&[ROLE_READER, ROLE_ORG_ADMIN], 8 * 13)]
+    // desc: reviewer ⊃ agent_user: the union is not double-counted.
+    #[case::corner_nested_personas_dedup(&[ROLE_AGENT_USER, ROLE_REVIEWER], 8)]
     fn effective_permissions_cases(#[case] roles: &[&str], #[case] expected: usize) {
         let perms = effective_permissions(&RoleCatalog::builtin(), &principal("acme", roles));
         assert_eq!(perms.len(), expected, "{perms:?}");
@@ -703,6 +878,11 @@ mod tests {
     #[case::negative_role_is_tenant_owned(ResourceType::Role, false)]
     #[case::negative_forge_is_tenant_owned(ResourceType::ForgeRegistry, false)]
     #[case::negative_transport_is_tenant_owned(ResourceType::TransportRegistry, false)]
+    #[case::negative_agent_is_tenant_owned(ResourceType::Agent, false)]
+    #[case::negative_exec_is_tenant_owned(ResourceType::Exec, false)]
+    #[case::negative_review_is_tenant_owned(ResourceType::Review, false)]
+    #[case::negative_binding_is_tenant_owned(ResourceType::Binding, false)]
+    #[case::negative_telemetry_is_tenant_owned(ResourceType::Telemetry, false)]
     fn operator_global_classification(
         #[case] resource_type: ResourceType,
         #[case] expect_operator_global: bool,
@@ -773,6 +953,8 @@ mod tests {
     #[case::positive_write(Action::Write)]
     #[case::positive_approve(Action::Approve)]
     #[case::positive_trigger(Action::Trigger)]
+    #[case::positive_use(Action::Use)]
+    #[case::positive_observe(Action::Observe)]
     fn action_round_trips(#[case] a: Action) {
         assert_eq!(Action::parse(a.as_str()), Some(a));
     }
@@ -790,6 +972,11 @@ mod tests {
     #[case::positive_role(ResourceType::Role)]
     #[case::positive_forge_registry(ResourceType::ForgeRegistry)]
     #[case::positive_transport_registry(ResourceType::TransportRegistry)]
+    #[case::positive_agent(ResourceType::Agent)]
+    #[case::positive_exec(ResourceType::Exec)]
+    #[case::positive_review(ResourceType::Review)]
+    #[case::positive_binding(ResourceType::Binding)]
+    #[case::positive_telemetry(ResourceType::Telemetry)]
     fn resource_type_round_trips(#[case] r: ResourceType) {
         assert_eq!(ResourceType::parse(r.as_str()), Some(r));
     }
@@ -803,22 +990,246 @@ mod tests {
 
     #[test]
     fn builtin_ids_are_reserved() {
-        assert!(RoleCatalog::is_builtin(ROLE_OPERATOR));
-        assert!(RoleCatalog::is_builtin(ROLE_ORG_ADMIN));
-        assert!(RoleCatalog::is_builtin(ROLE_READER));
+        let cat = RoleCatalog::builtin();
+        for id in BUILTIN_ROLES {
+            assert!(RoleCatalog::is_builtin(id), "{id}");
+            assert!(cat.get(id).is_some(), "{id} is reserved but not defined");
+        }
+        assert_eq!(
+            cat.names().count(),
+            BUILTIN_ROLES.len(),
+            "an undeclared built-in"
+        );
         assert!(!RoleCatalog::is_builtin("fleet_approver"));
+    }
+
+    // --- the built-in personas (03-rbac.md) --------------------------------
+
+    #[rstest]
+    // positive: each persona can do its defining job.
+    #[case::positive_agent_user_uses_agent(ROLE_AGENT_USER, Action::Use, ResourceType::Agent, true)]
+    #[case::positive_review_viewer_reads_reviews(
+        ROLE_REVIEW_VIEWER,
+        Action::Read,
+        ResourceType::Review,
+        true
+    )]
+    #[case::positive_reviewer_can_approve(
+        ROLE_REVIEWER,
+        Action::Approve,
+        ResourceType::Review,
+        true
+    )]
+    #[case::positive_reviewer_triggers_review(
+        ROLE_REVIEWER,
+        Action::Trigger,
+        ResourceType::Fleet,
+        true
+    )]
+    #[case::positive_fleet_admin_onboards_repo(
+        ROLE_FLEET_ADMIN,
+        Action::Write,
+        ResourceType::Fleet,
+        true
+    )]
+    #[case::positive_fleet_admin_writes_forge_card(
+        ROLE_FLEET_ADMIN,
+        Action::Write,
+        ResourceType::ForgeRegistry,
+        true
+    )]
+    #[case::positive_fleet_admin_writes_transport_card(
+        ROLE_FLEET_ADMIN,
+        Action::Write,
+        ResourceType::TransportRegistry,
+        true
+    )]
+    #[case::positive_access_admin_writes_binding(
+        ROLE_ACCESS_ADMIN,
+        Action::Write,
+        ResourceType::Binding,
+        true
+    )]
+    #[case::positive_viewer_reads_telemetry(
+        ROLE_VIEWER,
+        Action::Read,
+        ResourceType::Telemetry,
+        true
+    )]
+    #[case::positive_svc_fleet_writes_review(
+        ROLE_SVC_FLEET,
+        Action::Write,
+        ResourceType::Review,
+        true
+    )]
+    #[case::positive_org_admin_observes(ROLE_ORG_ADMIN, Action::Observe, ResourceType::Agent, true)]
+    // negative: and nothing next to it.
+    #[case::negative_review_viewer_cannot_approve(
+        ROLE_REVIEW_VIEWER,
+        Action::Approve,
+        ResourceType::Review,
+        false
+    )]
+    #[case::negative_review_viewer_cannot_use_agent(
+        ROLE_REVIEW_VIEWER,
+        Action::Use,
+        ResourceType::Agent,
+        false
+    )]
+    #[case::negative_agent_user_cannot_read_roster(
+        ROLE_AGENT_USER,
+        Action::Read,
+        ResourceType::Fleet,
+        false
+    )]
+    #[case::negative_agent_user_cannot_approve(
+        ROLE_AGENT_USER,
+        Action::Approve,
+        ResourceType::Review,
+        false
+    )]
+    #[case::negative_reviewer_cannot_onboard(
+        ROLE_REVIEWER,
+        Action::Write,
+        ResourceType::Fleet,
+        false
+    )]
+    #[case::negative_fleet_admin_cannot_edit_roles(
+        ROLE_FLEET_ADMIN,
+        Action::Write,
+        ResourceType::Role,
+        false
+    )]
+    #[case::negative_fleet_admin_cannot_write_upstreams(
+        ROLE_FLEET_ADMIN,
+        Action::Write,
+        ResourceType::Registry,
+        false
+    )]
+    #[case::negative_access_admin_cannot_use_agent(
+        ROLE_ACCESS_ADMIN,
+        Action::Use,
+        ResourceType::Agent,
+        false
+    )]
+    #[case::negative_viewer_cannot_use_agent(ROLE_VIEWER, Action::Use, ResourceType::Agent, false)]
+    #[case::negative_svc_seam_cannot_write(
+        ROLE_SVC_SEAM,
+        Action::Write,
+        ResourceType::Prompt,
+        false
+    )]
+    // boundary: approving is a review permission now, not a roster one.
+    #[case::boundary_reviewer_approve_is_on_review_not_fleet(
+        ROLE_REVIEWER,
+        Action::Approve,
+        ResourceType::Fleet,
+        false
+    )]
+    // corner: the alias grants exactly what viewer does.
+    #[case::corner_reader_alias_reads_reviews(
+        ROLE_READER,
+        Action::Read,
+        ResourceType::Review,
+        true
+    )]
+    #[case::corner_viewer_cannot_read_config(
+        ROLE_VIEWER,
+        Action::Read,
+        ResourceType::Config,
+        false
+    )]
+    // adversarial: the critical grants sit with no delegated tenant persona.
+    #[case::adversarial_fleet_admin_no_exec(
+        ROLE_FLEET_ADMIN,
+        Action::Use,
+        ResourceType::Exec,
+        false
+    )]
+    #[case::adversarial_access_admin_no_exec(
+        ROLE_ACCESS_ADMIN,
+        Action::Use,
+        ResourceType::Exec,
+        false
+    )]
+    #[case::adversarial_reviewer_cannot_observe(
+        ROLE_REVIEWER,
+        Action::Observe,
+        ResourceType::Agent,
+        false
+    )]
+    #[case::adversarial_svc_fleet_cannot_approve(
+        ROLE_SVC_FLEET,
+        Action::Approve,
+        ResourceType::Review,
+        false
+    )]
+    fn builtin_persona_grants(
+        #[case] role: &str,
+        #[case] action: Action,
+        #[case] resource_type: ResourceType,
+        #[case] expect_allow: bool,
+    ) {
+        let d = authorize(
+            &RoleCatalog::builtin(),
+            &principal("acme", &[role]),
+            action,
+            &Resource::new(resource_type, "acme"),
+        );
+        assert_eq!(
+            d.is_allowed(),
+            expect_allow,
+            "{role} {action:?} {resource_type:?}"
+        );
+    }
+
+    #[test]
+    fn corner_personas_nest() {
+        // reviewer ⊇ agent_user and fleet_admin ⊇ reviewer, pair for pair.
+        let cat = RoleCatalog::builtin();
+        let perms = |role| effective_permissions(&cat, &principal("acme", &[role]));
+        let agent_user: HashSet<_> = perms(ROLE_AGENT_USER).into_iter().collect();
+        let reviewer: HashSet<_> = perms(ROLE_REVIEWER).into_iter().collect();
+        let fleet_admin: HashSet<_> = perms(ROLE_FLEET_ADMIN).into_iter().collect();
+        assert!(agent_user.is_subset(&reviewer));
+        assert!(reviewer.is_subset(&fleet_admin));
+        assert!(agent_user.len() < reviewer.len() && reviewer.len() < fleet_admin.len());
+    }
+
+    #[rstest]
+    // positive: a pre-S7 card that approved on the roster keeps approving reviews.
+    #[case::positive_legacy_fleet_approve_maps_to_review(vec![(Action::Approve, ResourceType::Fleet)], true)]
+    // negative: nothing else is mapped.
+    #[case::negative_fleet_write_does_not_grant_review_approve(vec![(Action::Write, ResourceType::Fleet)], false)]
+    // corner: a card already on the new pair is unchanged.
+    #[case::corner_new_pair_as_is(vec![(Action::Approve, ResourceType::Review)], true)]
+    // boundary: the empty card grants nothing.
+    #[case::boundary_empty_pairs(vec![], false)]
+    fn legacy_approve_pair(#[case] pairs: Vec<(Action, ResourceType)>, #[case] approves: bool) {
+        let card = RoleCard {
+            id: "legacy".to_string(),
+            crosses_tenants: false,
+            permissions: RolePermissions::Pairs(pairs),
+        };
+        assert_eq!(
+            card.to_def().grants(Action::Approve, ResourceType::Review),
+            approves
+        );
+        assert!(!card.to_def().grants(Action::Write, ResourceType::Review));
     }
 
     // --- operator-defined role cards (C1b) ---------------------------------
 
     #[rstest]
     // desc: a well-formed operator card validates.
-    #[case::positive_ok("reviewer", true)]
+    #[case::positive_ok("release_manager", true)]
     // desc: an empty id is rejected (fail-closed).
     #[case::negative_empty_id("", false)]
     // desc: a reserved built-in id may not be reused by an operator card.
     #[case::adversarial_reserved_operator(ROLE_OPERATOR, false)]
     #[case::adversarial_reserved_reader(ROLE_READER, false)]
+    #[case::adversarial_reserved_reviewer(ROLE_REVIEWER, false)]
+    #[case::adversarial_reserved_svc_fleet(ROLE_SVC_FLEET, false)]
     // adversarial: a traversal / separator id is not a path-safe segment.
     #[case::adversarial_traversal("../etc", false)]
     #[case::adversarial_separator("a/b", false)]
@@ -878,12 +1289,15 @@ mod tests {
         // A custom role is unknown until a catalog carrying it is installed.
         let mut cat = RoleCatalog::builtin();
         cat.insert(
-            "reviewer",
-            RoleDef::pairs(false, [(Action::Approve, ResourceType::Fleet)]),
+            "release_manager",
+            RoleDef::pairs(false, [(Action::Approve, ResourceType::Review)]),
         );
         install_catalog(cat);
         let now = current_catalog();
-        assert!(now.get("reviewer").is_some(), "installed role is visible");
+        assert!(
+            now.get("release_manager").is_some(),
+            "installed role is visible"
+        );
         assert!(now.get(ROLE_OPERATOR).is_some(), "built-ins still present");
     }
 

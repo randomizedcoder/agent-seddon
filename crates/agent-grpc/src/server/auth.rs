@@ -489,13 +489,19 @@ where
                     // through every signature. Roles reach the handler ONLY here. The
                     // verified bearer rides beside it for `WhoAmI` and, later,
                     // forwarding to downstream seams.
+                    let principal = agent_core::VerifiedPrincipal {
+                        tenant: id.tenant,
+                        subject: id.subject,
+                        roles: id.roles,
+                    };
+                    // The RPC's permission (security-hardening S7): every RPC, reads
+                    // included, and an unclassified RPC is denied.
+                    if let Err(denied) = super::authz::gate(req.uri().path(), &principal) {
+                        return Ok(denied.into_http());
+                    }
                     let scope = agent_core::RequestScope {
                         identity: None,
-                        principal: Some(agent_core::VerifiedPrincipal {
-                            tenant: id.tenant,
-                            subject: id.subject,
-                            roles: id.roles,
-                        }),
+                        principal: Some(principal),
                         bearer: Some(agent_core::Bearer::new(token)),
                     };
                     agent_core::scope_request(scope, inner.call(req)).await

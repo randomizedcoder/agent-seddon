@@ -152,12 +152,12 @@ mod tests {
     async fn positive_put_get_roundtrip() {
         let s = store();
         let c = card(
-            "reviewer",
+            "release_manager",
             RolePermissions::Pairs(vec![(Action::Approve, ResourceType::Fleet)]),
         );
         let stored = s.put(c.clone()).await.expect("put");
         assert_eq!(stored, c);
-        assert_eq!(s.get("reviewer").await.expect("get"), c);
+        assert_eq!(s.get("release_manager").await.expect("get"), c);
         let all = s.list().await.expect("list");
         assert_eq!(all, vec![c]);
     }

@@ -1,47 +1,54 @@
-//! The control-plane RBAC gate (config design C34, increment C1).
+//! The RBAC gate (config design C34; every RPC since security-hardening S7).
 //!
-//! One helper, [`require`], wraps every **mutating** control-plane RPC handler.
-//! It reads the ambient [`agent_core::VerifiedPrincipal`] the auth tower layer
-//! (`super::auth`) installed for the request and asks [`agent_core::authorize`]
-//! whether that principal may perform the action.
+//! Two entry points, both reading the ambient [`agent_core::VerifiedPrincipal`] the
+//! auth tower layer (`super::auth`) derived from the bearer token:
+//! - [`gate`] — called by the auth layer for **every** call with a principal. It
+//!   looks the RPC up in [`super::authz_policy::gate_of`] and enforces its
+//!   permission, so reads, the interactive agent and served exec are gated, and an
+//!   RPC missing from the table is denied. It is the one place a decision is
+//!   counted (the [`AuthzObserver`]).
+//! - [`require`] — called inside a handler: defense-in-depth on the mutating
+//!   RPCs (it must agree with the table; mt-audit sub-check 6 checks), and the
+//!   handler-only checks such as [`require_in`] for watching another subject's
+//!   session. It records the decision on the `grpc.server` span.
 //!
 //! Two regimes, both fail-safe:
 //! - **Auth disabled** (`[auth] mode = "none"`, the default): no principal is in
-//!   scope, so `require` is a **pass-through** — today's trusted-transport
-//!   behaviour is preserved, and existing single-tenant installs are unaffected.
+//!   scope, so both are **pass-throughs** — today's trusted-transport behaviour is
+//!   preserved, and existing single-tenant installs are unaffected.
 //! - **Auth enabled** (`oidc`): the layer rejected the request already if the
-//!   token did not verify, so a principal is always present here. `require`
-//!   enforces **deny-by-default**; a denial is an **opaque** `PermissionDenied`
-//!   (never leaking which check failed), the wire twin of the auth layer's opaque
+//!   token did not verify, so a principal is always present here. The gate is
+//!   **deny-by-default**; a denial is an **opaque** `PermissionDenied` (never
+//!   leaking which check failed), the wire twin of the auth layer's opaque
 //!   `Unauthenticated`.
 //!
-//! The resource's tenant is always the caller's *own* verified tenant (the store
-//! scopes every write by it), so a cross-tenant write is unreachable through the
-//! gate — the cross-tenant firewall in `authorize` is defence-in-depth.
+//! The resource's tenant is the caller's *own* verified tenant (the stores scope
+//! by it), so a cross-tenant action is unreachable through the gate — the
+//! cross-tenant firewall in `authorize` is defence-in-depth. [`require_in`] is the
+//! exception: it names the tenant of an existing object (a live session).
 //!
 //! The **operator-global vs tenant split** (config C29/C40) rides entirely inside
-//! [`agent_core::authorize`]: a write to an operator-global resource
+//! [`agent_core::authorize`]: an operator-global resource
 //! ([`ResourceType::is_operator_global`] — the bootstrap `Config` surface behind
 //! `ConfigService`) is granted only to a host-global role, so a tenant `org_admin`
-//! is denied even in its own tenant. Every gated card service names a tenant-owned
-//! resource type, so the split is transparent at these call sites — `require` needs
-//! no per-resource special-casing.
+//! is denied even in its own tenant.
 //!
 //! This is distinct from the per-`ToolCall` `Policy` seam: that decides what the
-//! *model* may run; this decides what an authenticated *operator* may reconfigure.
+//! *model* may run; this decides what an authenticated *caller* may do.
 
 use std::sync::{Arc, OnceLock};
 
 use agent_core::{
-    authorize, current_catalog, current_principal, AccessDecision, Action, Resource, ResourceType,
+    authorize, current_catalog, current_principal, Action, Resource, ResourceType,
+    VerifiedPrincipal,
 };
 use tonic::Status;
 
 /// A process-global sink for authz decisions (config-plane observability, Phase 4).
 ///
-/// [`require`] is a free fn reading task-locals, so — unlike the auth tower layer,
-/// which carries its observer as a field — the authz counter is reported through a
-/// process-global callback registered once at serve init. The callback keeps
+/// [`gate`] is a free fn, so — unlike the auth tower layer, which carries its
+/// observer as a field — the authz counter is reported through a process-global
+/// callback registered once at serve init. The callback keeps
 /// `agent-grpc` free of any `agent-metrics` dependency (the [`ShedObserver`] /
 /// [`AuthObserver`] pattern): the wiring in `agent-cli` closes over the `Metrics`
 /// handle and forwards `(action, resource_type, allow)`.
@@ -59,42 +66,106 @@ pub fn set_authz_observer(observer: AuthzObserver) {
     let _ = AUTHZ_OBSERVER.set(observer);
 }
 
-/// Authorize the current request to perform `action` on `resource_type`, or
-/// return an opaque `PermissionDenied`. A pass-through when no verified principal
-/// is in scope (auth disabled). See the module docs.
+/// Whether `principal` may perform `action` on `resource_type` in `tenant`,
+/// against the live catalog: `builtin ∪ persisted role cards` when a role registry
+/// has been wired (C1b), else the built-ins alone.
+fn allowed(
+    principal: &VerifiedPrincipal,
+    action: Action,
+    resource_type: ResourceType,
+    tenant: &str,
+) -> bool {
+    authorize(
+        &current_catalog(),
+        principal,
+        action,
+        &Resource::new(resource_type, tenant),
+    )
+    .is_allowed()
+}
+
+fn denied() -> Status {
+    Status::permission_denied("permission denied")
+}
+
+/// Enforce the RPC's [`Gate`](super::authz_policy::Gate) for a verified `principal`
+/// (called by the auth layer before the handler). An RPC with no gate is denied;
+/// a `Public` or `Authenticated` gate needs nothing more. Every permission
+/// decision reaches the [`AuthzObserver`], with bounded enum labels (no tenant).
+#[allow(clippy::result_large_err)]
+pub(crate) fn gate(path: &str, principal: &VerifiedPrincipal) -> Result<(), Status> {
+    let Some(gate) = super::authz_policy::rpc_of(path)
+        .and_then(|(service, method)| super::authz_policy::gate_of(service, method))
+    else {
+        tracing::warn!(rpc = %path, "denied: no authorization policy for this RPC");
+        return Err(denied());
+    };
+    let Some((action, resource_type)) = gate.permission() else {
+        return Ok(());
+    };
+    let allow = allowed(principal, action, resource_type, &principal.tenant);
+    if let Some(observer) = AUTHZ_OBSERVER.get() {
+        observer(action, resource_type, allow);
+    }
+    if allow {
+        Ok(())
+    } else {
+        tracing::info!(
+            rpc = %path,
+            action = action.as_str(),
+            resource = resource_type.as_str(),
+            "authz denied"
+        );
+        Err(denied())
+    }
+}
+
+/// Authorize the current request to perform `action` on `resource_type` in the
+/// caller's own tenant, or return an opaque `PermissionDenied`. A pass-through
+/// when no verified principal is in scope (auth disabled). See the module docs.
 // `tonic::Status` is a large Err variant, as it is for every handler in this crate.
 #[allow(clippy::result_large_err)]
 pub(crate) fn require(action: Action, resource_type: ResourceType) -> Result<(), Status> {
     let Some(principal) = current_principal() else {
         return Ok(());
     };
-    // These RPCs act only on the caller's own tenant.
-    let resource = Resource::new(resource_type, principal.tenant.clone());
-    // The ambient catalog snapshot: `builtin ∪ persisted role cards` when a role
-    // registry has been wired (C1b), else the built-ins alone — so an install that
-    // never persisted a role card gates exactly as C1 did.
-    let allow = matches!(
-        authorize(&current_catalog(), &principal, action, &resource),
-        AccessDecision::Allow
-    );
+    let tenant = principal.tenant.clone();
+    decide_on_span(&principal, action, resource_type, &tenant)
+}
 
-    // Observability (Phase 4): count the decision and record it on the ambient
-    // `grpc.server` span (which already carries `tenant`), so authz is filterable
-    // both as a metric (bounded enums, no tenant label) and per-trace. The action
-    // and resource names are bounded enum `as_str()`s — safe as labels/attributes
-    // without `safe_segment` re-validation.
-    if let Some(observer) = AUTHZ_OBSERVER.get() {
-        observer(action, resource_type, allow);
-    }
+/// [`require`] against an object in `tenant` rather than the caller's own (a live
+/// session opened by someone else). A tenant-scoped role is denied outside its own
+/// tenant; only a host-global one crosses.
+#[allow(clippy::result_large_err)]
+pub(crate) fn require_in(
+    action: Action,
+    resource_type: ResourceType,
+    tenant: &str,
+) -> Result<(), Status> {
+    let Some(principal) = current_principal() else {
+        return Ok(());
+    };
+    decide_on_span(&principal, action, resource_type, tenant)
+}
+
+#[allow(clippy::result_large_err)]
+fn decide_on_span(
+    principal: &VerifiedPrincipal,
+    action: Action,
+    resource_type: ResourceType,
+    tenant: &str,
+) -> Result<(), Status> {
+    let allow = allowed(principal, action, resource_type, tenant);
+    // Record on the ambient `grpc.server` span (which already carries `tenant`),
+    // so the decision is filterable per trace. Bounded enum names only.
     let span = tracing::Span::current();
     span.record("authz.decision", if allow { "allow" } else { "deny" });
     span.record("authz.action", action.as_str());
     span.record("authz.resource", resource_type.as_str());
-
     if allow {
         Ok(())
     } else {
-        Err(Status::permission_denied("permission denied"))
+        Err(denied())
     }
 }
 
@@ -107,7 +178,8 @@ mod tests {
 
     use super::*;
     use agent_core::{
-        principal_scope, VerifiedPrincipal, ROLE_OPERATOR, ROLE_ORG_ADMIN, ROLE_READER,
+        principal_scope, VerifiedPrincipal, ROLE_AGENT_USER, ROLE_FLEET_ADMIN, ROLE_OPERATOR,
+        ROLE_ORG_ADMIN, ROLE_READER, ROLE_REVIEWER, ROLE_REVIEW_VIEWER, ROLE_VIEWER,
     };
 
     fn principal(tenant: &str, roles: &[&str]) -> VerifiedPrincipal {
@@ -143,60 +215,176 @@ mod tests {
         }));
     }
 
-    /// Enable this thread's sink, run each `(action, resource)` through `require` under
-    /// `principal`, and return the decisions the observer captured.
-    async fn observed(
-        principal: VerifiedPrincipal,
-        calls: &[(Action, ResourceType)],
-    ) -> Vec<(Action, ResourceType, bool)> {
+    /// Enable this thread's sink, run `path` through `gate` for `principal`, and
+    /// return the gate's verdict and the decisions the observer captured.
+    fn observed(
+        principal: &VerifiedPrincipal,
+        path: &str,
+    ) -> (bool, Vec<(Action, ResourceType, bool)>) {
         install_forwarding_observer();
         SINK.with(|s| *s.borrow_mut() = Some(Vec::new()));
-        principal_scope(principal, async {
-            for &(action, resource) in calls {
-                let _ = require(action, resource);
-            }
-        })
-        .await;
-        SINK.with(|s| s.borrow_mut().take().unwrap_or_default())
+        let ok = gate(path, principal).is_ok();
+        (ok, SINK.with(|s| s.borrow_mut().take().unwrap_or_default()))
     }
 
     #[rstest]
     // desc: an allowed decision fires the observer with allow=true (org_admin writing a tenant card).
-    #[case::positive_allow_ticks_allow(&[ROLE_ORG_ADMIN], Action::Write, ResourceType::Registry, true)]
+    #[case::positive_allow_ticks_allow(&[ROLE_ORG_ADMIN], "/agent.v1.ProviderRegistryService/Put", Some((Action::Write, ResourceType::Registry, true)))]
     // desc: a denied decision fires the observer with allow=false (reader may not write).
-    #[case::negative_deny_ticks_deny(&[ROLE_READER], Action::Write, ResourceType::Config, false)]
+    #[case::negative_deny_ticks_deny(&[ROLE_READER], "/agent.v1.ConfigService/Put", Some((Action::Write, ResourceType::Config, false)))]
     // desc: the operator/tenant split still fires as a decision — a tenant admin denied the operator-global key.
-    #[case::corner_operator_global_denied_still_ticks(&[ROLE_ORG_ADMIN], Action::Write, ResourceType::Config, false)]
+    #[case::corner_operator_global_denied_still_ticks(&[ROLE_ORG_ADMIN], "/agent.v1.ConfigService/Put", Some((Action::Write, ResourceType::Config, false)))]
     // desc: an operator IS allowed the operator-global key — allow decision recorded.
-    #[case::boundary_operator_global_allowed(&[ROLE_OPERATOR], Action::Write, ResourceType::Config, true)]
+    #[case::boundary_operator_global_allowed(&[ROLE_OPERATOR], "/agent.v1.ConfigService/Put", Some((Action::Write, ResourceType::Config, true)))]
+    // corner: a gate with no permission (WhoAmI) decides nothing, so nothing is counted.
+    #[case::corner_authenticated_gate_records_nothing(&[], "/agent.v1.AuthService/WhoAmI", None)]
+    // adversarial: an unclassified RPC is denied before any permission is looked up.
+    #[case::adversarial_unknown_rpc_records_nothing(&[ROLE_OPERATOR], "/agent.v1.Memory/DropAll", None)]
     #[tokio::test]
     async fn authz_observer_records_decision(
         #[case] roles: &[&str],
-        #[case] action: Action,
-        #[case] resource: ResourceType,
-        #[case] want_allow: bool,
+        #[case] path: &str,
+        #[case] want: Option<(Action, ResourceType, bool)>,
     ) {
-        let got = observed(principal("acme", roles), &[(action, resource)]).await;
+        let (_, got) = observed(&principal("acme", roles), path);
         assert_eq!(
             got,
-            vec![(action, resource, want_allow)],
-            "the observer records exactly the decision `require` reached"
+            want.into_iter().collect::<Vec<_>>(),
+            "the observer records exactly the decision `gate` reached"
         );
     }
 
-    // corner: no principal in scope (auth disabled) ⇒ `require` short-circuits before the
-    // observer, so nothing is recorded.
+    #[rstest]
+    // positive: each persona reaches the RPCs of its job.
+    #[case::positive_agent_user_sends(ROLE_AGENT_USER, "/agent.v1.AgentSessionService/Send", true)]
+    #[case::positive_agent_user_runs_tools(ROLE_AGENT_USER, "/agent.v1.ToolService/Execute", true)]
+    #[case::positive_agent_user_reads_prompts(
+        ROLE_AGENT_USER,
+        "/agent.v1.PromptService/Select",
+        true
+    )]
+    #[case::positive_review_viewer_lists_reviews(
+        ROLE_REVIEW_VIEWER,
+        "/agent.v1.ReviewFleetService/ListReviews",
+        true
+    )]
+    #[case::positive_reviewer_can_approve(
+        ROLE_REVIEWER,
+        "/agent.v1.ReviewFleetService/Approve",
+        true
+    )]
+    #[case::positive_fleet_admin_onboards_repo(
+        ROLE_FLEET_ADMIN,
+        "/agent.v1.ReviewFleetService/Put",
+        true
+    )]
+    #[case::positive_fleet_admin_adds_forge(
+        ROLE_FLEET_ADMIN,
+        "/agent.v1.ForgeRegistryService/Put",
+        true
+    )]
+    #[case::positive_fleet_admin_adds_transport(
+        ROLE_FLEET_ADMIN,
+        "/agent.v1.TransportRegistryService/Put",
+        true
+    )]
+    #[case::positive_viewer_reads_metrics(
+        ROLE_VIEWER,
+        "/agent.v1.MetricsProxyService/QueryRange",
+        true
+    )]
+    #[case::positive_anyone_whoami(ROLE_REVIEW_VIEWER, "/agent.v1.AuthService/WhoAmI", true)]
+    // negative: and is refused next door, reads included.
+    #[case::negative_review_viewer_cannot_approve(
+        ROLE_REVIEW_VIEWER,
+        "/agent.v1.ReviewFleetService/Approve",
+        false
+    )]
+    #[case::negative_agent_user_cannot_read_roster(
+        ROLE_AGENT_USER,
+        "/agent.v1.ReviewFleetService/List",
+        false
+    )]
+    #[case::negative_read_gated_when_principal_present(
+        ROLE_REVIEW_VIEWER,
+        "/agent.v1.PromptService/List",
+        false
+    )]
+    #[case::negative_fleet_admin_cannot_edit_roles(
+        ROLE_FLEET_ADMIN,
+        "/agent.v1.RoleService/Put",
+        false
+    )]
+    #[case::negative_viewer_cannot_send(ROLE_VIEWER, "/agent.v1.AgentSessionService/Send", false)]
+    #[case::negative_org_admin_cannot_read_config(
+        ROLE_ORG_ADMIN,
+        "/agent.v1.ConfigService/GetValues",
+        false
+    )]
+    // boundary: reviewing and onboarding are different permissions on the same service.
+    #[case::boundary_reviewer_cannot_delete_repo(
+        ROLE_REVIEWER,
+        "/agent.v1.ReviewFleetService/Delete",
+        false
+    )]
+    #[case::boundary_reviewer_edits_draft(
+        ROLE_REVIEWER,
+        "/agent.v1.ReviewFleetService/UpdateReview",
+        true
+    )]
+    // corner: no roles still sees who it is, and nothing else.
+    #[case::corner_no_roles_whoami(ROLE_NONE, "/agent.v1.AuthService/WhoAmI", true)]
+    #[case::corner_no_roles_no_tokenizer(ROLE_NONE, "/agent.v1.TokenizerService/Count", false)]
+    // adversarial: exec is no delegated persona's, and unknown RPCs are shut.
+    #[case::adversarial_fleet_admin_no_sandbox(
+        ROLE_FLEET_ADMIN,
+        "/agent.v1.SandboxService/Exec",
+        false
+    )]
+    #[case::adversarial_agent_user_no_pty(ROLE_AGENT_USER, "/agent.v1.PtyService/Open", false)]
+    #[case::adversarial_operator_unknown_rpc_denied(
+        ROLE_OPERATOR,
+        "/agent.v1.Memory/DropAll",
+        false
+    )]
+    #[case::adversarial_operator_malformed_path_denied(
+        ROLE_OPERATOR,
+        "/agent.v1.Memory/Recall/x",
+        false
+    )]
+    fn gate_by_persona(#[case] role: &str, #[case] path: &str, #[case] want: bool) {
+        let roles: &[&str] = if role == ROLE_NONE { &[] } else { &[role] };
+        let got = gate(path, &principal("acme", roles));
+        assert_eq!(got.is_ok(), want, "{role} {path}");
+        if let Err(e) = got {
+            assert_eq!(e.code(), tonic::Code::PermissionDenied);
+            assert_eq!(e.message(), "permission denied", "opaque");
+        }
+    }
+
+    /// A marker for "no roles at all" in the persona table.
+    const ROLE_NONE: &str = "<none>";
+
+    // desc: an operator may watch a session in another tenant; an org_admin may not
+    // (require_in names the object's tenant, not the caller's).
+    #[rstest]
+    #[case::positive_operator_observes_elsewhere(ROLE_OPERATOR, "globex", true)]
+    #[case::positive_org_admin_observes_own_tenant(ROLE_ORG_ADMIN, "acme", true)]
+    #[case::negative_reviewer_cannot_observe(ROLE_REVIEWER, "acme", false)]
+    #[case::adversarial_org_admin_other_tenant(ROLE_ORG_ADMIN, "globex", false)]
     #[tokio::test]
-    async fn corner_no_principal_records_nothing() {
-        install_forwarding_observer();
-        SINK.with(|s| *s.borrow_mut() = Some(Vec::new()));
-        // No `principal_scope`, so `current_principal()` is None.
-        let _ = require(Action::Write, ResourceType::Config);
-        let got = SINK.with(|s| s.borrow_mut().take().unwrap_or_default());
-        assert!(
-            got.is_empty(),
-            "a pass-through (no principal) records no authz decision"
-        );
+    async fn require_in_names_the_object_tenant(
+        #[case] role: &str,
+        #[case] tenant: &str,
+        #[case] want: bool,
+    ) {
+        principal_scope(principal("acme", &[role]), async {
+            assert_eq!(
+                require_in(Action::Observe, ResourceType::Agent, tenant).is_ok(),
+                want
+            );
+        })
+        .await;
     }
 
     // desc: `require` records `authz.decision`/`action`/`resource` onto the ambient
@@ -333,7 +521,7 @@ mod tests {
     #[tokio::test]
     async fn adversarial_gate_targets_own_tenant_only() {
         principal_scope(principal("acme", &[ROLE_ORG_ADMIN]), async {
-            assert!(require(Action::Approve, ResourceType::Fleet).is_ok());
+            assert!(require(Action::Approve, ResourceType::Review).is_ok());
         })
         .await;
         // An operator (host-global) is likewise fine acting in its own tenant.

@@ -9,8 +9,8 @@ point is drift detection: as the agent grows new gRPC services and new metric fa
 each new element must be *classified* in the manifest, or the audit flags it — so
 tenancy coverage can never silently regress.
 
-Five sub-checks (the first four map to the planes of the multi-tenancy design,
-``docs/design/multi-tenancy/``; the fifth to security-hardening S2):
+Six sub-checks (the first four map to the planes of the multi-tenancy design,
+``docs/design/multi-tenancy/``; the fifth and sixth to security-hardening S2 and S7):
 
 1. **services** — every served gRPC handler in ``crates/agent-grpc/src/server/**/*.rs`` is
    classified in the manifest as ``scoped`` (must call ``identity_key`` + ``run_scoped``),
@@ -41,6 +41,13 @@ Five sub-checks (the first four map to the planes of the multi-tenancy design,
    a call that names no session) classifies exactly the manifest's services, each with the
    manifest's class. A service in one but not the other, or with a different class, is
    drift: the gate and the running server would disagree about which calls need identity.
+6. **authz-coverage** — the per-RPC authorization table ``gate_of`` in
+   ``crates/agent-grpc/src/server/authz_policy.rs`` (which the auth layer enforces on every
+   call) equals the committed ``authz.toml`` map ``"Service.Rpc" = "action:resource" |
+   "field-checked:action:resource" | "authenticated" | "public"``, row by row; and every
+   handler's own ``authz::require(Action, ResourceType)`` names the same permission as its
+   row. A new RPC therefore needs a reviewed permission in two places, and a handler check
+   cannot quietly disagree with the gate.
 
 Usage::
 
@@ -49,6 +56,7 @@ Usage::
     python3 audit.py --json          # machine-readable findings
     python3 audit.py --dump-services # discovered services (manifest-seeding aid)
     python3 audit.py --dump-metrics  # discovered metric families
+    python3 audit.py --dump-authz    # gate_of as authz.toml
 
 Pure stdlib. The parsing helpers take source *text* (not paths) so the test suite can feed
 fixtures directly; the file-reading wrappers are thin.
@@ -111,6 +119,24 @@ def _block_end(text: str, open_brace: int) -> int:
     return n
 
 
+_REQUIRE_RE = re.compile(
+    r"authz::require\(\s*(?:agent_core::)?Action::(\w+)\s*,\s*(?:agent_core::)?ResourceType::(\w+)"
+)
+
+
+def snake(name: str) -> str:
+    """``ForgeRegistry`` → ``forge_registry`` (a Rust variant in its wire spelling)."""
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+
+
+def camel(name: str) -> str:
+    """``query_range`` → ``QueryRange`` (a handler fn in its proto RPC spelling)."""
+    return "".join(part[:1].upper() + part[1:] for part in name.split("_"))
+
+
+def permission_name(action: str, resource: str) -> str:
+    return f"{snake(action)}:{snake(resource)}"
+
 _IMPL_RE = re.compile(
     r"impl\s+pb::(?P<mod>\w+)_server::(?P<svc>\w+)\s+for\s+(?P<ty>\w+)\s*\{"
 )
@@ -122,6 +148,8 @@ class Rpc:
     name: str
     scoped: bool
     gated: bool  # calls authz::require — RBAC, distinct from tenant routing
+    # every `authz::require(Action, ResourceType)` in the handler, in authz.toml spelling
+    requires: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -154,7 +182,9 @@ def parse_service_handlers(text: str) -> list[Service]:
             chunk = body[fm.start() : (fns[i + 1].start() if i + 1 < len(fns) else len(body))]
             scoped = ("identity_key(" in chunk) and ("run_scoped(" in chunk)
             gated = "authz::require(" in chunk
-            svc.rpcs.append(Rpc(name=fm.group("name"), scoped=scoped, gated=gated))
+            requires = [permission_name(a, r) for a, r in _REQUIRE_RE.findall(chunk)]
+            svc.rpcs.append(Rpc(name=fm.group("name"), scoped=scoped, gated=gated,
+                                requires=requires))
         out.append(svc)
     return out
 
@@ -187,7 +217,7 @@ def parse_metric_families(text: str) -> set[str]:
 
 @dataclass
 class Finding:
-    check: str  # services | metrics | spans-logs | config | identity-policy
+    check: str  # services | metrics | spans-logs | config | identity-policy | authz-coverage
     kind: str  # not-scoped | unclassified | manifest-stale | mechanism-missing | config-mismatch | policy-missing | policy-drift
     subject: str
     message: str
@@ -466,6 +496,80 @@ def check_identity_policy(runtime: dict[str, str] | None, manifest: dict) -> lis
     return findings
 
 
+_GATE_OF_RE = re.compile(r"fn\s+gate_of\s*\([^)]*\)[^\{]*\{")
+# One gate expression ending a match arm: `=> Public`, `=> { Require(Use, Agent) }`, …
+_GATE_EXPR_RE = re.compile(
+    r"=>\s*\{?\s*(?:(?P<bare>Public|Authenticated)\b"
+    r"|(?P<kind>Require|FieldChecked)\(\s*(?P<action>\w+)\s*,\s*(?P<resource>\w+)\s*\))"
+)
+# One `("Service", "A" | "B")` tuple pattern of an arm.
+_GATE_PAT_RE = re.compile(
+    r'\(\s*"(?P<svc>[A-Za-z0-9]+)"\s*,\s*'
+    r'(?P<rpcs>"[A-Za-z0-9]+"(?:\s*\|\s*"[A-Za-z0-9]+")*)\s*,?\s*\)'
+)
+
+
+def parse_gate_table(text: str) -> dict[str, str] | None:
+    """The ``"Service.Rpc" → gate`` map of ``gate_of`` in authz_policy.rs, in authz.toml
+    spelling. ``None`` when the function is absent. An arm's patterns are the text between
+    the previous gate expression and this one, so ``(a) | (b) => Require(..)`` arms split
+    into every tuple they name."""
+    text = strip_test_module(text)
+    m = _GATE_OF_RE.search(text)
+    if not m:
+        return None
+    body = text[m.end() : _block_end(text, m.end() - 1)]
+    out: dict[str, str] = {}
+    prev = 0
+    for g in _GATE_EXPR_RE.finditer(body):
+        if g.group("bare"):
+            gate = g.group("bare").lower()
+        else:
+            gate = permission_name(g.group("action"), g.group("resource"))
+            if g.group("kind") == "FieldChecked":
+                gate = "field-checked:" + gate
+        for pat in _GATE_PAT_RE.finditer(body[prev : g.start()]):
+            for rpc in re.findall(r'"([A-Za-z0-9]+)"', pat.group("rpcs")):
+                out[f"{pat.group('svc')}.{rpc}"] = gate
+        prev = g.end()
+    return out
+
+
+def check_authz_coverage(
+    runtime: dict[str, str] | None, services: list[Service], table: dict
+) -> list[Finding]:
+    """Sub-check 6: ``gate_of`` equals ``authz.toml``, and each handler ``require`` names
+    its row's permission."""
+    check = "authz-coverage"
+    if runtime is None:
+        return [Finding(check, "mechanism-missing", "gate_of",
+                        "authz_policy.rs no longer defines `gate_of`")]
+    expected: dict[str, str] = table.get("rpcs", {})
+    findings: list[Finding] = []
+    for rpc in sorted(expected.keys() - runtime.keys()):
+        findings.append(Finding(check, "policy-missing", rpc,
+                                f"`{rpc}` is in authz.toml but not in `gate_of`: "
+                                "the auth layer denies it to every caller"))
+    for rpc in sorted(runtime.keys() - expected.keys()):
+        findings.append(Finding(check, "unclassified", rpc,
+                                f"`gate_of` gates `{rpc}` but authz.toml does not list it"))
+    for rpc in sorted(runtime.keys() & expected.keys()):
+        if runtime[rpc] != expected[rpc]:
+            findings.append(Finding(check, "policy-drift", rpc,
+                                    f"`gate_of` says `{runtime[rpc]}`, authz.toml says "
+                                    f"`{expected[rpc]}`"))
+    for svc in services:
+        for r in svc.rpcs:
+            key = f"{svc.svc}.{camel(r.name)}"
+            row = runtime.get(key, "").removeprefix("field-checked:")
+            for perm in r.requires:
+                if perm != row:
+                    findings.append(Finding(check, "handler-drift", key,
+                                            f"the handler requires `{perm}` but `gate_of` "
+                                            f"says `{runtime.get(key, 'nothing')}`"))
+    return findings
+
+
 # --------------------------------------------------------------------------------------
 # Orchestration + I/O
 # --------------------------------------------------------------------------------------
@@ -482,7 +586,7 @@ def glob_texts(root: Path, rel_dir: str, pattern: str) -> dict[str, str]:
     return out
 
 
-def run_audit(root: Path, manifest: dict) -> list[Finding]:
+def run_audit(root: Path, manifest: dict, authz_table: dict | None = None) -> list[Finding]:
     server_files = glob_texts(root, "crates/agent-grpc/src/server", "**/*.rs")
     services: list[Service] = []
     for text in server_files.values():
@@ -493,6 +597,7 @@ def run_audit(root: Path, manifest: dict) -> list[Finding]:
     families = parse_metric_families(metrics_rs)
     config_rs = read(root, "crates/agent-runtime/src/config.rs")
     policy_rs = server_files.get("crates/agent-grpc/src/server/identity_policy.rs", "")
+    authz_rs = server_files.get("crates/agent-grpc/src/server/authz_policy.rs", "")
 
     anchor_checks = ("spans-logs", "config", "metrics")
     anchor_files: dict[str, str] = {}
@@ -510,6 +615,7 @@ def run_audit(root: Path, manifest: dict) -> list[Finding]:
         findings += check_anchors(anchor_files, manifest, check)
     findings += check_config_ownership(config_rs, manifest)
     findings += check_identity_policy(parse_identity_classes(policy_rs), manifest)
+    findings += check_authz_coverage(parse_gate_table(authz_rs), services, authz_table or {})
     return findings
 
 
@@ -526,6 +632,9 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="multi-tenancy coverage audit")
     ap.add_argument("--repo-root", type=Path, default=None)
     ap.add_argument("--manifest", type=Path, default=None)
+    ap.add_argument("--authz", type=Path, default=None, help="the authz.toml to check against")
+    ap.add_argument("--dump-authz", action="store_true",
+                    help="print gate_of as authz.toml (seeding aid)")
     ap.add_argument("--gate", action="store_true", help="exit non-zero on any finding")
     ap.add_argument("--json", action="store_true", help="machine-readable findings")
     ap.add_argument("--dump-services", action="store_true")
@@ -534,6 +643,14 @@ def main(argv: list[str] | None = None) -> int:
 
     root = args.repo_root or default_root()
     manifest_path = args.manifest or (Path(__file__).resolve().parent / "manifest.toml")
+    authz_path = args.authz or (Path(__file__).resolve().parent / "authz.toml")
+
+    if args.dump_authz:
+        rows = parse_gate_table(read(root, "crates/agent-grpc/src/server/authz_policy.rs")) or {}
+        print("[rpcs]")
+        for rpc in sorted(rows):
+            print(f'"{rpc}" = "{rows[rpc]}"')
+        return 0
 
     if args.dump_services:
         files = glob_texts(root, "crates/agent-grpc/src/server", "**/*.rs")
@@ -555,7 +672,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     manifest = load_manifest(manifest_path)
-    findings = run_audit(root, manifest)
+    findings = run_audit(root, manifest, load_manifest(authz_path))
 
     if args.json:
         print(json.dumps([f.as_dict() for f in findings], indent=2))

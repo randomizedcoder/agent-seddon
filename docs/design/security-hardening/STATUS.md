@@ -13,7 +13,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S4 | tonic TLS, `[grpc.tls]`, `nix run .#pki-dev` | P0-5 | ✅ | #494 |
 | S5 | Token service core (agent JWT, JWKS, `WhoAmI`) | D1, D10 | 🟡 | #498 |
 | S6 | Session store + `Exchange/Refresh/Logout` | D11 | ⬜ | — |
-| S7 | RBAC extension, read gating, authz-coverage gate | D9 | ⬜ | — |
+| S7 | RBAC extension, read gating, authz-coverage gate | D9 | 🟡 | — |
 | S8 | Role bindings, bootstrap, escalation rules | D3, D9 | ⬜ | — |
 | S9 | Bearer propagation + two-hop chain test | D7 | ⬜ | — |
 | S10 | mTLS service identity | D6 | ⬜ | — |
@@ -198,3 +198,66 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
   - Key hot-reload: needs a restart.
 
   Gate: `nix flake check --max-jobs 8 --cores 4 --keep-going` green (all checks passed).
+- **2026-09-26 — S7.** Every RPC is authorized, reads included.
+
+  Model (`agent_core::rbac`):
+  - `Action` gains `use` and `observe`. `ResourceType` gains `agent`, `exec`, `review`, `binding`
+    and `telemetry`, all tenant-owned. `Config` stays the only operator-global resource.
+  - The built-in roles are those of [03](03-rbac.md): `viewer` (alias `reader`),
+    `review_viewer`, `agent_user`, `reviewer`, `fleet_admin`, `access_admin`, `svc_fleet`,
+    `svc_seam`, `org_admin`, `operator`. All of their ids are reserved.
+  - `Approve` moves from `fleet` to `review`, and `UpdateReview` is `(write, review)`. A stored
+    card that grants `approve:fleet` also grants `approve:review`, so existing approver cards
+    keep working.
+
+  Enforcement:
+  - New `crates/agent-grpc/src/server/authz_policy.rs`: `gate_of(service, method)` is a closed
+    match giving each of the 160 RPCs a gate. The `AuthLayer` enforces it after the identity
+    policy (`authz::gate`), and an RPC with no row is denied.
+  - The decision counter (`AuthzObserver`) now ticks there, once per call. Handler
+    `authz::require` stays on the mutating RPCs as defense-in-depth and records the span fields.
+  - The agent's own seams (context, provider, tokenizer, tools, repo, memory, search, forge,
+    tasks, `ProviderRegistry.Route`, digest) are `(use, agent)`; Sandbox and Pty are
+    `(use, exec)`; the metrics proxy is `(read, telemetry)`.
+
+  Session ownership (`agent_session.rs`):
+  - `SessionSource::owner()` is new, and the runtime sink records the first verified caller to
+    `Send` (first write wins).
+  - A non-owner's `Subscribe`/`Snapshot` needs `(observe, agent)` in the owner's tenant; on an
+    unowned session, in their own. A non-owner's `Send` is denied.
+
+  mt-audit sub-check 6, **authz-coverage**: `gate_of` must equal the committed
+  `test/mt-audit/authz.toml` row by row, and each handler `require` must name its row's
+  permission (`--dump-authz` renders the table).
+
+  Deviations from the design:
+  - The gate is one table in the layer rather than a `require` in every handler, and the audit
+    parses that table.
+  - Ownership is recorded at `Send`, not `SessionRegistry.Open`, because the live event source
+    is created there.
+  - `DigestService` is `(use, agent)` rather than `(read, telemetry)`, because the agent loop
+    writes and reads it.
+
+  Behaviour changes under `oidc`:
+  - `reader`/`viewer` no longer reach the agent's seams (no `(use, agent)`).
+  - `ActionsOnAll` cards also cover the new resources.
+  - Admin tokens carry `perms_ref` because they exceed 40 permissions (`org_admin` 104,
+    `operator` 112).
+
+  Tests:
+  - Role grant and nesting tables, and the legacy `approve:fleet` mapping.
+  - The `gate_of` path table, and a test that every RPC in `method_paths()` has a gate.
+  - A persona × RPC table through `gate`, and the observer counting once.
+  - `require_in` tenant cases, the session-ownership table, and first-owner-wins on the sink.
+  - `tests/auth_token.rs`: a `viewer` token is refused a seam but reaches `WhoAmI`.
+  - mt-audit check-the-checks for every finding kind.
+
+  Deferred:
+  - Role bindings, bootstrap operators and the escalation rules: S8.
+  - Registry reads by the runtime under a forwarded user token (`agent_user` has no
+    `(read, registry)`): S9.
+  - Dropping unknown pairs from stored cards at load: old cards still decode, because only
+    variants were added.
+
+  Gate: `nix flake check --max-jobs 8 --cores 4 --keep-going` green (2026-09-26).
+

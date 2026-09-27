@@ -15,7 +15,8 @@ and `buf breaking` (a committed image moved only on a deliberate, reviewed diff)
 ## What it checks
 
 Sub-checks 1–4 map to the planes of the [multi-tenancy design](../design/multi-tenancy/);
-sub-check 5 to [security-hardening](../design/security-hardening/05-identity-and-tenancy.md) S2:
+sub-check 5 to [security-hardening](../design/security-hardening/05-identity-and-tenancy.md) S2,
+and sub-check 6 to [security-hardening](../design/security-hardening/03-rbac.md) S7:
 
 1. **services** — every served gRPC handler in `crates/agent-grpc/src/server/*.rs` is
    classified in the manifest as:
@@ -57,6 +58,15 @@ sub-check 5 to [security-hardening](../design/security-hardening/05-identity-and
    manifest, not in `class_of`), `unclassified` (the reverse), `policy-drift` (different
    class). A Rust test separately asserts every service in `agent_proto::method_paths()` has
    a class.
+6. **authz-coverage** — the per-RPC table `gate_of` in
+   [`authz_policy.rs`](../../crates/agent-grpc/src/server/authz_policy.rs), which the auth
+   layer enforces on every call with a verified principal, equals the committed
+   [`authz.toml`](../../test/mt-audit/authz.toml) row by row:
+   `"Service.Rpc" = "action:resource" | "field-checked:action:resource" | "authenticated" |
+   "public"`. Each handler's own `authz::require(Action, ResourceType)` must name the same
+   permission as its row. Findings: `policy-missing`, `unclassified`, `policy-drift` (as in
+   5) and `handler-drift` (a handler check that disagrees with the table). A Rust test
+   separately asserts every RPC in `agent_proto::method_paths()` has a gate.
 
 ## Usage
 
@@ -66,6 +76,7 @@ nix run .#mt-audit -- --gate       # exit non-zero on any finding
 nix run .#mt-audit -- --json       # machine-readable findings
 nix run .#mt-audit -- --dump-services   # discovered services (manifest-seeding aid)
 nix run .#mt-audit -- --dump-metrics    # discovered metric families
+nix run .#mt-audit -- --dump-authz      # gate_of rendered as authz.toml
 # also runs straight from the dev shell:
 python3 test/mt-audit/audit.py
 ```
@@ -75,7 +86,8 @@ Run from the repo root (it reads `crates/` + `docs/`); pass `--repo-root <path>`
 ## Extending: the manifest-update ritual
 
 When you add a gRPC service or a metric family, **classify it in `manifest.toml`** — the
-audit flags anything unclassified. A `status = "gap"` marker records a *known* coverage gap:
+audit flags anything unclassified. When you add an RPC, give it a row in `gate_of` and in
+`authz.toml` (`--dump-authz` renders the former; review the diff). A `status = "gap"` marker records a *known* coverage gap:
 it is still reported (and labeled `known gap`) but signals a fix is pending. Removing the
 marker as you fix the gap is the deliberate, reviewed baseline move (the `buf.image.binpb`
 idiom).
