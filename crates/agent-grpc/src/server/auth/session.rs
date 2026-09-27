@@ -89,8 +89,13 @@ pub struct AuthSession {
     /// The login issuer's configured name.
     pub issuer: String,
     pub email: Option<String>,
+    /// The login vouched for `email`; only then does it match email and domain
+    /// bindings when a refresh re-resolves roles (S8).
+    #[serde(default)]
+    pub email_verified: bool,
     pub amr: Vec<String>,
-    /// The roles embedded at the last mint.
+    /// The roles the login token carried (its issuer trusts its roles claim).
+    /// Role bindings are resolved on top of these at every mint (S8).
     pub roles: Vec<String>,
     pub client_kind: String,
     pub client_meta: String,
@@ -103,7 +108,7 @@ pub struct AuthSession {
     retired: Vec<String>,
     /// Zero while live.
     pub revoked_at: u64,
-    /// `logout` | `operator` | `reuse`.
+    /// `logout` | `operator` | `reuse` | `binding`.
     pub revoke_reason: String,
     pub revoked_by: String,
 }
@@ -318,6 +323,7 @@ impl SessionStore {
             subject: grant.subject,
             issuer: id.issuer.clone(),
             email: grant.email,
+            email_verified: id.email_verified,
             amr: grant.amr,
             roles: grant.roles,
             client_kind: client_kind(kind).to_string(),

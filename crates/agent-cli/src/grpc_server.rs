@@ -898,6 +898,7 @@ fn auth_layer(agent: &Agent, listen: &Endpoint) -> anyhow::Result<agent_grpc::se
             #[cfg(not(feature = "auth"))]
             sessions: None,
         }),
+        operator_subjects: a.operator_subjects.clone(),
     })
     .map(|layer| {
         layer

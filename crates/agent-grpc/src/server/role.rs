@@ -14,6 +14,13 @@
 //! successful `Put`/`Delete` this seam rebuilds that snapshot from the store and
 //! [`agent_core::install_catalog`]s it, so a role edit takes effect for the very
 //! next request — within this process (cross-process propagation is a later lift).
+//!
+//! **Who may write a card** (security-hardening S8). The catalog is one namespace
+//! shared by every tenant, so a card write is host-global: a tenant principal is
+//! refused even with `(write, role)`, and a host-global caller other than
+//! `operator` may only write a card whose permissions it holds itself
+//! ([`agent_core::check_role_write`]). Without a principal (`mode = "none"`) the
+//! seam is ungated, as before.
 
 use std::sync::Arc;
 
@@ -92,6 +99,7 @@ impl pb::role_service_server::RoleService for RoleSvc {
             // reserved/hostile id); the store validates again before it persists.
             let card = agent_core::RoleCard::try_from(request.into_inner())
                 .map_err(tonic::Status::from)?;
+            check_write(Some(&card))?;
             let stored = inner.put(card).await.map_err(|e| status_from_error(&e))?;
             Self::refresh_catalog(&inner).await?;
             Ok(Response::new(stored.into()))
@@ -108,6 +116,7 @@ impl pb::role_service_server::RoleService for RoleSvc {
         let sp = span("role.delete", request.metadata());
         let inner = self.inner.clone();
         async move {
+            check_write(None)?;
             let deleted = inner
                 .delete(&request.into_inner().id)
                 .await
@@ -120,6 +129,71 @@ impl pb::role_service_server::RoleService for RoleSvc {
     }
 }
 
+/// The permission-management rules for a card write by the current principal
+/// (none in scope ⇒ ungated).
+#[allow(clippy::result_large_err)]
+fn check_write(card: Option<&agent_core::RoleCard>) -> Result<(), Status> {
+    let Some(principal) = agent_core::current_principal() else {
+        return Ok(());
+    };
+    agent_core::check_role_write(&agent_core::current_catalog(), &principal, card)
+        .map_err(|r| super::authz::refusal_status(r, "role card"))
+}
+
 pub fn role_router(inner: Arc<dyn RoleRegistry>) -> Router {
     Server::builder().add_service(RoleSvc::new(inner).into_server())
+}
+
+#[cfg(test)]
+mod tests {
+    //! The card-write gate over the ambient principal: the rules themselves are
+    //! tabled in `agent_core::rbac`; this checks the seam applies them and maps
+    //! the refusal to an opaque status.
+
+    use agent_core::{principal_scope, RoleCard, RolePermissions, VerifiedPrincipal};
+    use rstest::rstest;
+    use tonic::Code;
+
+    use super::check_write;
+
+    fn card() -> RoleCard {
+        RoleCard {
+            id: "prompt_editor".into(),
+            crosses_tenants: false,
+            permissions: RolePermissions::All,
+        }
+    }
+
+    #[rstest]
+    #[case::corner_no_principal_is_ungated(None, true, Code::Ok)]
+    #[case::positive_operator_writes_any_card(Some("operator"), true, Code::Ok)]
+    #[case::positive_operator_deletes(Some("operator"), false, Code::Ok)]
+    // desc: the catalog is shared by all tenants, so a tenant admin may not edit it.
+    #[case::adversarial_org_admin_cannot_write_shared_catalog(
+        Some("org_admin"),
+        true,
+        Code::PermissionDenied
+    )]
+    #[case::adversarial_access_admin_cannot_delete_a_card(
+        Some("access_admin"),
+        false,
+        Code::PermissionDenied
+    )]
+    #[tokio::test]
+    async fn check_write_cases(#[case] role: Option<&str>, #[case] put: bool, #[case] want: Code) {
+        let c = card();
+        let target = put.then_some(&c);
+        let got = match role {
+            None => check_write(target),
+            Some(r) => {
+                let p = VerifiedPrincipal {
+                    tenant: "acme".into(),
+                    subject: "user:kc/alice".into(),
+                    roles: vec![r.into()],
+                };
+                principal_scope(p, async { check_write(target) }).await
+            }
+        };
+        assert_eq!(got.map_or_else(|e| e.code(), |()| Code::Ok), want);
+    }
 }

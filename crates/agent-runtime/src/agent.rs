@@ -119,6 +119,8 @@ pub struct GrpcAuthSettings {
     pub issuers: Vec<crate::config::AuthIssuerCfg>,
     /// `[auth.token]`: the agent token service (security-hardening S5).
     pub token: Option<crate::config::AuthTokenCfg>,
+    /// `[auth] operator_subjects`: bootstrap operators (S8).
+    pub operator_subjects: Vec<String>,
     /// The backend `[auth.token] session_store` resolved to (S6); `None` ⇒ memory.
     #[cfg(feature = "auth")]
     pub sessions: Option<agent_grpc::server::SessionBackend>,

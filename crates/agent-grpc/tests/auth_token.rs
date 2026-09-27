@@ -6,7 +6,10 @@
 //! `WhoAmI` and a seam call. And the split it enforces: IdP tokens only at
 //! `Exchange`, agent tokens only at the seams. S6 adds the session behind every
 //! token: `Refresh` rotates its handle, `Logout` revokes it, and a sensitive action
-//! stops working the moment it is revoked.
+//! stops working the moment it is revoked. S8 adds role bindings: roles resolved
+//! from bindings at `Exchange` and every `Refresh`, the `operator_subjects`
+//! bootstrap, the permission-management refusals, and sessions revoked when a
+//! binding narrows or goes away.
 #![cfg(feature = "auth")]
 
 use std::sync::Arc;
@@ -45,6 +48,11 @@ impl Harness {
     /// A listener with `[auth.token]` configured, signing with the SEC1 test key
     /// (the form `step-cli` writes).
     async fn start() -> Self {
+        Self::start_with(&[]).await
+    }
+
+    /// As [`Harness::start`], with `[auth] operator_subjects`.
+    async fn start_with(operators: &[&str]) -> Self {
         let idp = FakeIssuer::start(TestKey::Rsa);
         let keys = agent_testkit::tempdir();
         let signing_key = keys.join("token-signer.key");
@@ -65,6 +73,7 @@ impl Harness {
                 signing_key: signing_key.to_string_lossy().into_owned(),
                 ..TokenParams::default()
             }),
+            operator_subjects: operators.iter().map(ToString::to_string).collect(),
             ..AuthParams::default()
         })
         .expect("layer builds");
@@ -160,6 +169,78 @@ impl Harness {
             .await
             .map(|r| r.into_inner().tokens)
     }
+}
+
+/// A binding in `example.com` (the harness tenant).
+fn wire_binding(id: &str, kind: &str, subject: &str, roles: &[&str]) -> pb::RoleBinding {
+    pb::RoleBinding {
+        id: id.into(),
+        subject_kind: kind.into(),
+        subject: subject.into(),
+        roles: roles.iter().map(ToString::to_string).collect(),
+        ..Default::default()
+    }
+}
+
+impl Harness {
+    /// Sign in as `sub` with `email` (verified) and the claim `roles`.
+    async fn login(&self, sub: &str, email: &str, roles: &[&str]) -> pb::ExchangeResponse {
+        self.exchange(&self.id_token(json!({
+            "sub": sub, "email": email, "email_verified": true, "roles": roles,
+        })))
+        .await
+        .expect("exchange")
+    }
+
+    /// The bootstrap operator's token (`root@example.com`, see [`OPS`]).
+    async fn root(&self) -> String {
+        self.login("root", "root@example.com", &[])
+            .await
+            .access_token
+    }
+
+    async fn put_binding(
+        &self,
+        bearer: &str,
+        binding: pb::RoleBinding,
+        keep_sessions: bool,
+    ) -> Result<pb::PutBindingResponse, tonic::Status> {
+        self.auth()
+            .put_binding(with_bearer(
+                pb::PutBindingRequest {
+                    binding: Some(binding),
+                    keep_sessions,
+                },
+                Some(bearer),
+            ))
+            .await
+            .map(tonic::Response::into_inner)
+    }
+
+    async fn delete_binding(
+        &self,
+        bearer: &str,
+        id: &str,
+        keep_sessions: bool,
+    ) -> Result<pb::DeleteBindingResponse, tonic::Status> {
+        self.auth()
+            .delete_binding(with_bearer(
+                pb::DeleteBindingRequest {
+                    id: id.into(),
+                    keep_sessions,
+                    ..Default::default()
+                },
+                Some(bearer),
+            ))
+            .await
+            .map(tonic::Response::into_inner)
+    }
+}
+
+const OPS: &[&str] = &["email:root@example.com"];
+
+fn roles_of(resp: &pb::ExchangeResponse) -> Vec<String> {
+    resp.principal.clone().expect("principal").roles
 }
 
 fn with_bearer<T>(msg: T, bearer: Option<&str>) -> tonic::Request<T> {
@@ -468,4 +549,292 @@ async fn refresh_rejects_bad_handles(#[case] handle: &str) {
         h.refresh(&handle).await.unwrap_err().code(),
         Code::Unauthenticated
     );
+}
+
+// --- role bindings (S8) -------------------------------------------------------
+
+#[rstest]
+#[case::positive_verified_bootstrap_email(true, true)]
+#[case::negative_unverified_bootstrap_email(false, false)]
+#[tokio::test(flavor = "multi_thread")]
+async fn operator_subjects_bootstrap(#[case] verified: bool, #[case] operator: bool) {
+    let h = Harness::start_with(OPS).await;
+    let resp = h
+        .exchange(&h.id_token(json!({
+            "sub": "root", "email": "root@example.com", "email_verified": verified, "roles": [],
+        })))
+        .await
+        .expect("exchange");
+    assert_eq!(roles_of(&resp).contains(&"operator".to_string()), operator);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn positive_exchange_picks_up_a_binding() {
+    let h = Harness::start_with(OPS).await;
+    let root = h.root().await;
+    let put = h
+        .put_binding(
+            &root,
+            wire_binding("bob-rev", "email", "Bob@Example.com", &["reviewer"]),
+            false,
+        )
+        .await
+        .expect("put");
+    let stored = put.binding.expect("binding");
+    assert_eq!(stored.subject, "bob@example.com", "stored normalised");
+    assert_eq!(
+        stored.tenant, "example.com",
+        "defaults to the caller's tenant"
+    );
+    assert_eq!(stored.granted_by, "user:kc/root");
+    let bob = h.login("bob", "bob@example.com", &["agent_user"]).await;
+    assert_eq!(roles_of(&bob), ["agent_user", "reviewer"]);
+    assert_eq!(h.approve(&bob.access_token).await, Code::Unimplemented);
+    // Another subject in the tenant gets nothing from it.
+    let carol = h.login("carol", "carol@example.com", &["agent_user"]).await;
+    assert_eq!(roles_of(&carol), ["agent_user"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn positive_binding_change_revokes_sessions() {
+    let h = Harness::start_with(OPS).await;
+    let root = h.root().await;
+    h.put_binding(
+        &root,
+        wire_binding("bob-rev", "sub", "kc/bob", &["reviewer"]),
+        false,
+    )
+    .await
+    .expect("put");
+    let bob = h.login("bob", "bob@example.com", &[]).await;
+    let other = h.login("carol", "carol@example.com", &[]).await;
+    let out = h
+        .delete_binding(&root, "bob-rev", false)
+        .await
+        .expect("delete");
+    assert!(out.deleted);
+    assert_eq!(out.revoked_sessions, 1, "only bob's session");
+    assert_eq!(
+        h.refresh(&bob.refresh_handle).await.unwrap_err().code(),
+        Code::Unauthenticated
+    );
+    assert!(h.refresh(&other.refresh_handle).await.is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn corner_keep_sessions_then_refresh_drops_the_role() {
+    let h = Harness::start_with(OPS).await;
+    let root = h.root().await;
+    h.put_binding(
+        &root,
+        wire_binding("bob-rev", "sub", "kc/bob", &["reviewer"]),
+        false,
+    )
+    .await
+    .expect("put");
+    let bob = h.login("bob", "bob@example.com", &["agent_user"]).await;
+    assert!(roles_of(&bob).contains(&"reviewer".to_string()));
+    let out = h
+        .delete_binding(&root, "bob-rev", true)
+        .await
+        .expect("delete");
+    assert_eq!(out.revoked_sessions, 0);
+    let next = h.refresh(&bob.refresh_handle).await.expect("refresh");
+    assert_eq!(roles_of(&next), ["agent_user"], "re-resolved at refresh");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn positive_refresh_picks_up_a_new_binding_without_revoking() {
+    let h = Harness::start_with(OPS).await;
+    let root = h.root().await;
+    let bob = h.login("bob", "bob@example.com", &["agent_user"]).await;
+    let put = h
+        .put_binding(
+            &root,
+            wire_binding("bob-rev", "sub", "kc/bob", &["reviewer"]),
+            false,
+        )
+        .await
+        .expect("put");
+    assert_eq!(put.revoked_sessions, 0, "a new grant revokes nothing");
+    let next = h.refresh(&bob.refresh_handle).await.expect("refresh");
+    assert_eq!(roles_of(&next), ["agent_user", "reviewer"]);
+    // Widening an existing binding revokes nothing; narrowing it does.
+    let widened = h
+        .put_binding(
+            &root,
+            wire_binding("bob-rev", "sub", "kc/bob", &["reviewer", "viewer"]),
+            false,
+        )
+        .await
+        .expect("widen");
+    assert_eq!(widened.revoked_sessions, 0);
+    let narrowed = h
+        .put_binding(
+            &root,
+            wire_binding("bob-rev", "sub", "kc/bob", &["viewer"]),
+            false,
+        )
+        .await
+        .expect("narrow");
+    assert_eq!(narrowed.revoked_sessions, 1);
+    assert!(h.refresh(&next.refresh_handle).await.is_err());
+}
+
+#[rstest]
+// desc: org_admin (a trusted claim role) cannot bind itself.
+#[case::adversarial_self_binding_denied(&["org_admin"], wire_binding("me", "sub", "kc/alice", &["viewer"]), Code::PermissionDenied)]
+#[case::adversarial_self_binding_by_email(&["access_admin"], wire_binding("me", "email", "alice@example.com", &["access_admin"]), Code::PermissionDenied)]
+#[case::adversarial_access_admin_cannot_grant_org_admin(&["access_admin"], wire_binding("b", "email", "bob@example.com", &["org_admin"]), Code::PermissionDenied)]
+#[case::adversarial_org_admin_cannot_grant_operator(&["org_admin"], wire_binding("b", "email", "bob@example.com", &["operator"]), Code::PermissionDenied)]
+#[case::adversarial_org_admin_cannot_bind_in_other_tenant(&["org_admin"], pb::RoleBinding { tenant: "globex.com".into(), ..wire_binding("b", "email", "bob@globex.com", &["viewer"]) }, Code::PermissionDenied)]
+#[case::adversarial_traversal_subject(&["org_admin"], wire_binding("b", "sub", "../kc/bob", &["viewer"]), Code::InvalidArgument)]
+#[case::adversarial_traversal_id(&["org_admin"], wire_binding("../b", "email", "bob@example.com", &["viewer"]), Code::InvalidArgument)]
+#[case::negative_unknown_role(&["org_admin"], wire_binding("b", "email", "bob@example.com", &["no_such_role"]), Code::InvalidArgument)]
+#[case::negative_unknown_kind(&["org_admin"], wire_binding("b", "group", "devs", &["viewer"]), Code::InvalidArgument)]
+#[case::negative_expired(&["org_admin"], pb::RoleBinding { expires_at: 1, ..wire_binding("b", "email", "bob@example.com", &["viewer"]) }, Code::InvalidArgument)]
+#[case::negative_agent_user_cannot_write_bindings(&["agent_user"], wire_binding("b", "email", "bob@example.com", &["viewer"]), Code::PermissionDenied)]
+// desc: a domain binding covering the granter's own verified email is self-binding.
+#[case::adversarial_self_binding_by_domain(&["org_admin"], wire_binding("b", "domain", "example.com", &["reviewer"]), Code::PermissionDenied)]
+#[case::positive_org_admin_grants_reviewer(&["org_admin"], wire_binding("b", "email", "bob@example.com", &["reviewer"]), Code::Ok)]
+#[case::positive_access_admin_grants_access_admin(&["access_admin"], wire_binding("b", "email", "bob@example.com", &["access_admin"]), Code::Ok)]
+#[tokio::test(flavor = "multi_thread")]
+async fn put_binding_cases(
+    #[case] roles: &[&str],
+    #[case] binding: pb::RoleBinding,
+    #[case] want: Code,
+) {
+    let h = Harness::start().await;
+    let alice = h.login("alice", "alice@example.com", roles).await;
+    let got = h
+        .put_binding(&alice.access_token, binding, false)
+        .await
+        .map_or_else(|e| e.code(), |_| Code::Ok);
+    assert_eq!(got, want);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn corner_last_binding_admin_not_deletable() {
+    let h = Harness::start_with(OPS).await;
+    let root = h.root().await;
+    h.put_binding(
+        &root,
+        wire_binding("owner", "email", "bob@example.com", &["access_admin"]),
+        false,
+    )
+    .await
+    .expect("put");
+    assert_eq!(
+        h.delete_binding(&root, "owner", false)
+            .await
+            .unwrap_err()
+            .code(),
+        Code::FailedPrecondition
+    );
+    // Downgrading it in place is the same removal.
+    assert_eq!(
+        h.put_binding(
+            &root,
+            wire_binding("owner", "email", "bob@example.com", &["viewer"]),
+            false
+        )
+        .await
+        .unwrap_err()
+        .code(),
+        Code::FailedPrecondition
+    );
+    // With a second admin bound, the first may go.
+    h.put_binding(
+        &root,
+        wire_binding("owner2", "email", "carol@example.com", &["org_admin"]),
+        false,
+    )
+    .await
+    .expect("put");
+    assert!(
+        h.delete_binding(&root, "owner", false)
+            .await
+            .expect("delete")
+            .deleted
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn binding_reads() {
+    let h = Harness::start_with(OPS).await;
+    let root = h.root().await;
+    h.put_binding(
+        &root,
+        wire_binding("b1", "domain", "example.com", &["viewer"]),
+        false,
+    )
+    .await
+    .expect("put");
+    let list = h
+        .auth()
+        .list_bindings(with_bearer(pb::ListBindingsRequest::default(), Some(&root)))
+        .await
+        .expect("list")
+        .into_inner()
+        .bindings;
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].id, "b1");
+    let got = h
+        .auth()
+        .get_binding(with_bearer(
+            pb::GetBindingRequest {
+                id: "b1".into(),
+                ..Default::default()
+            },
+            Some(&root),
+        ))
+        .await
+        .expect("get")
+        .into_inner()
+        .binding
+        .expect("binding");
+    assert_eq!(got, list[0]);
+    let missing = h
+        .auth()
+        .get_binding(with_bearer(
+            pb::GetBindingRequest {
+                id: "nope".into(),
+                ..Default::default()
+            },
+            Some(&root),
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(missing.code(), Code::NotFound);
+    let absent = h
+        .delete_binding(&root, "nope", false)
+        .await
+        .expect("delete");
+    assert!(!absent.deleted);
+}
+
+#[rstest]
+#[case::negative_agent_user(&["agent_user"], Code::PermissionDenied)]
+#[case::positive_access_admin(&["access_admin"], Code::Ok)]
+#[case::adversarial_other_tenant(&["org_admin"], Code::PermissionDenied)]
+#[tokio::test(flavor = "multi_thread")]
+async fn list_bindings_needs_read_binding(#[case] roles: &[&str], #[case] want: Code) {
+    let h = Harness::start().await;
+    let alice = h.login("alice", "alice@example.com", roles).await;
+    let tenant = if want == Code::PermissionDenied && roles == ["org_admin"] {
+        "globex.com"
+    } else {
+        ""
+    };
+    let got = h
+        .auth()
+        .list_bindings(with_bearer(
+            pb::ListBindingsRequest {
+                tenant: tenant.into(),
+            },
+            Some(&alice.access_token),
+        ))
+        .await
+        .map_or_else(|e| e.code(), |_| Code::Ok);
+    assert_eq!(got, want);
 }

@@ -740,6 +740,124 @@ pub fn install_catalog(catalog: RoleCatalog) {
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(catalog);
 }
 
+// ---------------------------------------------------------------------------
+// Managing permissions (security-hardening S8, 03-rbac.md)
+// ---------------------------------------------------------------------------
+
+/// Why a role or binding write was refused by the permission-management rules
+/// (docs/design/security-hardening/03-rbac.md). Each maps to one wire code; the
+/// name is for logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrantRefusal {
+    /// A role the binding names is not in the catalog.
+    UnknownRole,
+    /// The write reaches beyond one tenant (a `crosses_tenants` role, or the
+    /// shared role catalog) and the caller is not host-global (rule 2).
+    HostGlobal,
+    /// The write confers a permission the caller does not hold (rule 1).
+    Escalation,
+    /// The binding would apply to the caller (rule 3).
+    SelfBinding,
+    /// The change leaves the tenant with nobody who can manage bindings (rule 4).
+    LastAdmin,
+}
+
+impl GrantRefusal {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            GrantRefusal::UnknownRole => "unknown_role",
+            GrantRefusal::HostGlobal => "host_global",
+            GrantRefusal::Escalation => "escalation",
+            GrantRefusal::SelfBinding => "self_binding",
+            GrantRefusal::LastAdmin => "last_admin",
+        }
+    }
+}
+
+/// Whether `principal` holds the built-in `operator` role: the one principal the
+/// permission-management rules exempt.
+pub fn is_operator(principal: &VerifiedPrincipal) -> bool {
+    principal.roles.iter().any(|r| r == ROLE_OPERATOR)
+}
+
+/// Whether any of `roles` crosses tenants under `catalog`.
+pub fn any_crosses_tenants(catalog: &RoleCatalog, roles: &[String]) -> bool {
+    roles
+        .iter()
+        .filter_map(|r| catalog.get(r))
+        .any(|d| d.crosses_tenants)
+}
+
+/// Whether `principal` holds a role that crosses tenants.
+pub fn is_host_global(catalog: &RoleCatalog, principal: &VerifiedPrincipal) -> bool {
+    any_crosses_tenants(catalog, &principal.roles)
+}
+
+/// The permissions in `granted` that `granter` does not hold in `tenant` under
+/// `catalog`. Empty ⇒ the grant is within the granter's own power (rule 1).
+pub fn exceeding_permissions(
+    catalog: &RoleCatalog,
+    granter: &VerifiedPrincipal,
+    granted: &[(Action, ResourceType)],
+    tenant: &str,
+) -> Vec<(Action, ResourceType)> {
+    granted
+        .iter()
+        .copied()
+        .filter(|(a, r)| !authorize(catalog, granter, *a, &Resource::new(*r, tenant)).is_allowed())
+        .collect()
+}
+
+/// What `roles` let a principal do in `tenant` under `catalog` (a hypothetical
+/// grantee, for comparing against a granter).
+pub fn permissions_of(
+    catalog: &RoleCatalog,
+    roles: &[String],
+    tenant: &str,
+) -> Vec<(Action, ResourceType)> {
+    effective_permissions(
+        catalog,
+        &VerifiedPrincipal {
+            tenant: tenant.to_string(),
+            subject: String::new(),
+            roles: roles.to_vec(),
+        },
+    )
+}
+
+/// Rules 1 and 2 for a role-card write: `card` is `Some` for `Put`, `None` for
+/// `Delete`.
+///
+/// Role cards form **one catalog shared by every tenant**: a card named in
+/// tenant B's bindings can be edited by whoever writes cards. So a card write is
+/// host-global, and a tenant principal is refused even for a tenant-scoped card
+/// (it would otherwise redefine a role another tenant relies on). A host-global
+/// caller other than `operator` may still only write a card whose permissions it
+/// holds itself.
+pub fn check_role_write(
+    catalog: &RoleCatalog,
+    principal: &VerifiedPrincipal,
+    card: Option<&RoleCard>,
+) -> std::result::Result<(), GrantRefusal> {
+    if is_operator(principal) {
+        return Ok(());
+    }
+    if !is_host_global(catalog, principal) {
+        return Err(GrantRefusal::HostGlobal);
+    }
+    let Some(card) = card else {
+        return Ok(());
+    };
+    let mut alone = RoleCatalog::default();
+    alone.insert(card.id.clone(), card.to_def());
+    let granted = permissions_of(&alone, std::slice::from_ref(&card.id), &principal.tenant);
+    if exceeding_permissions(catalog, principal, &granted, &principal.tenant).is_empty() {
+        Ok(())
+    } else {
+        Err(GrantRefusal::Escalation)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1318,5 +1436,88 @@ mod tests {
             current_principal().is_none(),
             "principal cleared after the scope"
         );
+    }
+
+    // --- permission management (S8) ----------------------------------------
+
+    /// The built-ins plus `global_reader`: read everything, in every tenant.
+    fn catalog_with_global_reader() -> RoleCatalog {
+        let mut c = RoleCatalog::builtin();
+        c.insert(
+            "global_reader",
+            RoleDef::actions_on_all(true, [Action::Read]),
+        );
+        c
+    }
+
+    fn pairs_card(id: &str, crosses: bool, pairs: &[(Action, ResourceType)]) -> RoleCard {
+        RoleCard {
+            id: id.to_string(),
+            crosses_tenants: crosses,
+            permissions: RolePermissions::Pairs(pairs.to_vec()),
+        }
+    }
+
+    #[rstest]
+    // desc: operator may write any card, including a host-global admin card.
+    #[case::positive_operator_any_card(&[ROLE_OPERATOR], Some(RoleCard { id: "root2".into(), crosses_tenants: true, permissions: RolePermissions::All }), Ok(()))]
+    // desc: a host-global caller writes a card it fully holds.
+    #[case::positive_host_global_within_own(&["global_reader"], Some(pairs_card("prompt_reader", false, &[(Action::Read, ResourceType::Prompt)])), Ok(()))]
+    // desc: deleting needs only host-global.
+    #[case::positive_host_global_delete(&["global_reader"], None, Ok(()))]
+    // desc: org_admin holds every tenant permission, but the catalog is shared by all tenants.
+    #[case::negative_org_admin_is_tenant_scoped(&[ROLE_ORG_ADMIN], Some(pairs_card("prompt_reader", false, &[(Action::Read, ResourceType::Prompt)])), Err(GrantRefusal::HostGlobal))]
+    // desc: access_admin manages bindings in its tenant, not the shared catalog.
+    #[case::negative_access_admin_cannot_write_cards(&[ROLE_ACCESS_ADMIN], Some(pairs_card("x", false, &[])), Err(GrantRefusal::HostGlobal))]
+    // desc: a tenant caller cannot delete a card either.
+    #[case::negative_tenant_delete(&[ROLE_ORG_ADMIN], None, Err(GrantRefusal::HostGlobal))]
+    // desc: an empty card grants nothing, so it never exceeds.
+    #[case::boundary_empty_card(&["global_reader"], Some(pairs_card("nothing", false, &[])), Ok(()))]
+    // desc: read on config is within a host-global reader's own grants.
+    #[case::boundary_config_read_within(&["global_reader"], Some(pairs_card("cfg_reader", true, &[(Action::Read, ResourceType::Config)])), Ok(()))]
+    // desc: a legacy approve-on-fleet card also approves reviews; still refused beyond reads.
+    #[case::corner_legacy_approve_card(&["global_reader"], Some(pairs_card("old", false, &[(Action::Approve, ResourceType::Fleet)])), Err(GrantRefusal::Escalation))]
+    // desc: a read-only host-global caller cannot mint a card that grants exec.
+    #[case::adversarial_grant_exec_beyond_own(&["global_reader"], Some(pairs_card("exec", false, &[(Action::Use, ResourceType::Exec)])), Err(GrantRefusal::Escalation))]
+    // desc: nor an all-powerful card.
+    #[case::adversarial_admin_card_beyond_own(&["global_reader"], Some(RoleCard { id: "root2".into(), crosses_tenants: true, permissions: RolePermissions::All }), Err(GrantRefusal::Escalation))]
+    // desc: a caller with no roles is refused outright.
+    #[case::adversarial_no_roles(&[], Some(pairs_card("x", false, &[])), Err(GrantRefusal::HostGlobal))]
+    // desc: an unknown role name does not make the caller host-global.
+    #[case::adversarial_unknown_role_name(&["operator "], Some(pairs_card("x", false, &[])), Err(GrantRefusal::HostGlobal))]
+    fn check_role_write_cases(
+        #[case] roles: &[&str],
+        #[case] card: Option<RoleCard>,
+        #[case] expected: std::result::Result<(), GrantRefusal>,
+    ) {
+        let got = check_role_write(
+            &catalog_with_global_reader(),
+            &principal("acme", roles),
+            card.as_ref(),
+        );
+        assert_eq!(got, expected);
+    }
+
+    #[rstest]
+    // desc: agent_user's grants are all within org_admin's.
+    #[case::positive_within(&[ROLE_ORG_ADMIN], &[ROLE_AGENT_USER], 0)]
+    // desc: a reviewer cannot grant fleet_admin's extra onboarding permissions.
+    #[case::negative_reviewer_to_fleet_admin(&[ROLE_REVIEWER], &[ROLE_FLEET_ADMIN], 10)]
+    // desc: granting nothing exceeds nothing.
+    #[case::boundary_empty_grant(&[], &[], 0)]
+    // desc: org_admin granting operator exceeds by the config surface (tenant-local view).
+    #[case::corner_operator_exceeds_org_admin_by_config(&[ROLE_ORG_ADMIN], &[ROLE_OPERATOR], 8)]
+    // desc: access_admin cannot hand out exec.
+    #[case::adversarial_access_admin_exec(&[ROLE_ACCESS_ADMIN], &[ROLE_ORG_ADMIN], 8 * 13 - 6)]
+    fn exceeding_permissions_cases(
+        #[case] granter: &[&str],
+        #[case] granted: &[&str],
+        #[case] expected: usize,
+    ) {
+        let cat = RoleCatalog::builtin();
+        let granted: Vec<String> = granted.iter().map(ToString::to_string).collect();
+        let perms = permissions_of(&cat, &granted, "acme");
+        let over = exceeding_permissions(&cat, &principal("acme", granter), &perms, "acme");
+        assert_eq!(over.len(), expected, "{over:?}");
     }
 }

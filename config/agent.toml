@@ -1157,6 +1157,10 @@ job         = "agent-seddon"
 # leeway_secs  = 60                                     # accepted exp/nbf clock skew (max 300)
 # allow_insecure_listen = false                         # permit mode="none" on 0.0.0.0 (warns)
 # require_identity = true                               # default: on off-loopback, off on loopback/uds
+# operator_subjects = ["email:root@example.com"]       # S8 bootstrap operators; needs [auth.token]
+#                     # `email:<addr>` (VERIFIED email only) | `sub:<issuer name>/<IdP sub>`; ≤ 64.
+#                     # Everyone else gets roles from bindings (`AuthService.PutBinding`),
+#                     # resolved at `Exchange` and every `Refresh`.
 #
 # More login issuers, one table each (the single-issuer keys above act as one
 # `generic` issuer named "default"). A profile fixes how claims map to a tenant:

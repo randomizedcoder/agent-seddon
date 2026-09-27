@@ -43,6 +43,15 @@ service AuthService {
   rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
   // Revoke any session in a tenant; needs `write:binding` there.
   rpc RevokeSession(RevokeSessionRequest) returns (RevokeSessionResponse);
+  // Role bindings in a tenant; needs `read:binding` there.
+  rpc ListBindings(ListBindingsRequest) returns (ListBindingsResponse);
+  // One role binding; needs `read:binding` there.
+  rpc GetBinding(GetBindingRequest) returns (GetBindingResponse);
+  // Create or replace a role binding; needs `write:binding` there, and may grant
+  // only permissions the caller holds, never to the caller itself.
+  rpc PutBinding(PutBindingRequest) returns (PutBindingResponse);
+  // Remove a role binding; needs `delete:binding` there.
+  rpc DeleteBinding(DeleteBindingRequest) returns (DeleteBindingResponse);
 }
 
 message ExchangeRequest {
@@ -152,8 +161,77 @@ message AuthSessionInfo {
   uint64 expires_at = 9;
   // Zero while live.
   uint64 revoked_at = 10;
-  // `logout` | `operator` | `reuse` | empty.
+  // `logout` | `operator` | `reuse` | `binding` | empty.
   string revoke_reason = 11;
   // The session the caller's own token names.
   bool current = 12;
+}
+
+// Grants roles to a subject in one tenant. Roles are resolved when a token is
+// minted (sign-in and every refresh): the union of the tenant's bindings that
+// name the caller.
+message RoleBinding {
+  // Path-safe id, unique in the tenant.
+  string id = 1;
+  // Empty on write ⇒ the caller's own tenant. Another tenant needs a host-global
+  // role.
+  string tenant = 2;
+  // `sub` (subject `<issuer>/<sub>`), `email` (a verified address), `domain`
+  // (every verified address in it) or `mtls_san` (a service peer).
+  string subject_kind = 3;
+  string subject = 4;
+  // Role names; each must exist when the binding is written.
+  repeated string roles = 5;
+  // Set by the server: who wrote the binding, and when (Unix seconds).
+  string granted_by = 6;
+  uint64 granted_at = 7;
+  // Unix seconds; zero ⇒ never expires.
+  uint64 expires_at = 8;
+}
+
+message ListBindingsRequest {
+  // Empty ⇒ the caller's own tenant.
+  string tenant = 1;
+}
+
+message ListBindingsResponse {
+  repeated RoleBinding bindings = 1;
+}
+
+message GetBindingRequest {
+  // Empty ⇒ the caller's own tenant.
+  string tenant = 1;
+  string id = 2;
+}
+
+message GetBindingResponse {
+  RoleBinding binding = 1;
+}
+
+message PutBindingRequest {
+  RoleBinding binding = 1;
+  // By default a change that takes roles away (replacing a binding with fewer
+  // roles, another subject, or an earlier expiry) revokes the sessions of every
+  // subject the old binding named, so the change applies now rather than at their
+  // next refresh. Set to leave them signed in.
+  bool keep_sessions = 2;
+}
+
+message PutBindingResponse {
+  RoleBinding binding = 1;
+  uint32 revoked_sessions = 2;
+}
+
+message DeleteBindingRequest {
+  // Empty ⇒ the caller's own tenant.
+  string tenant = 1;
+  string id = 2;
+  // See `PutBindingRequest.keep_sessions`.
+  bool keep_sessions = 3;
+}
+
+message DeleteBindingResponse {
+  // False when there was no binding with that id.
+  bool deleted = 1;
+  uint32 revoked_sessions = 2;
 }

@@ -83,6 +83,7 @@ fn identity(expires_at: u64) -> VerifiedIdentity {
         roles: vec!["reader".into()],
         issuer: "google".into(),
         email: Some("alice@example.com".into()),
+        email_verified: true,
         expires_at,
         sid: None,
     }
