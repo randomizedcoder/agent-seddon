@@ -15,13 +15,35 @@ syntax = "proto3";
 package agent.v1;
 
 import "agent/v1/common.proto";
+// REST transcoding annotations (gap-analysis §4, docs/design/rest-openapi/). The
+// `(google.api.http)` options below let Envoy's `grpc_json_transcoder` expose the
+// service as REST/JSON without any Rust code; gRPC stays the primary interface.
+import "google/api/annotations.proto";
 
 service ConfigService {
-  rpc GetSchema(GetSchemaRequest) returns (ConfigSchema);
-  rpc GetValues(GetValuesRequest) returns (ConfigValues);
-  rpc Validate(ValidateConfigRequest) returns (ValidateConfigResponse);
-  rpc Put(PutConfigRequest) returns (PutConfigResponse);
-  rpc Status(ConfigStatusRequest) returns (ConfigStatus);
+  // REST mappings (docs/design/rest-openapi/): reads → GET, every other action
+  // (validate compute + the write) → POST with `body: "*"`. Paths live under /v1/config/.
+  rpc GetSchema(GetSchemaRequest) returns (ConfigSchema) {
+    option (google.api.http) = {get: "/v1/config/schema"};
+  }
+  rpc GetValues(GetValuesRequest) returns (ConfigValues) {
+    option (google.api.http) = {get: "/v1/config/values"};
+  }
+  rpc Validate(ValidateConfigRequest) returns (ValidateConfigResponse) {
+    option (google.api.http) = {
+      post: "/v1/config/validate"
+      body: "*"
+    };
+  }
+  rpc Put(PutConfigRequest) returns (PutConfigResponse) {
+    option (google.api.http) = {
+      post: "/v1/config"
+      body: "*"
+    };
+  }
+  rpc Status(ConfigStatusRequest) returns (ConfigStatus) {
+    option (google.api.http) = {get: "/v1/config/status"};
+  }
 }
 
 message GetSchemaRequest {}

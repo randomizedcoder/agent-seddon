@@ -44,8 +44,8 @@ added, it fires as a reminder to list it here as gRPC-only.
 
 | Batch | Proto group | Status |
 |---|---|:--:|
-| 03a | `review_fleet.proto` (ReviewFleetService, 11 RPCs) | 🟡 in flight |
-| 03b | `prompt.proto`, `role.proto`, `config.proto` (control plane) | ⬜ |
+| 03a | `review_fleet.proto` (ReviewFleetService, 11 RPCs) | ✅ merged (#515) |
+| 03b | `prompt.proto`, `role.proto`, `config.proto` (control plane) | 🟡 in flight |
 | 03c | `forge_registry.proto`, `transport_registry.proto`, `upstream.proto` (registries) | ⬜ |
 | 03d | `repo.proto`, `search.proto`, `ast.proto` (code intelligence) | ⬜ |
 | 03e | `session.proto`, `session_registry.proto`, `agent_session.proto`, `scheduler.proto` | ⬜ |
@@ -78,3 +78,14 @@ added, it fires as a reminder to list it here as gRPC-only.
   `UpdateReview`→`/reviews/{review_id}`). Added `DELETE` to the documented convention. Expanded the
   coverage table to exercise every verb + the param/no-param/param+body shapes; the negative
   `Unmapped` row now points at `Policy.Authorize` (a later batch) and flips when `policy.proto` lands.
+- **03b (control plane: role / prompt / config).** Annotated `RoleService` (4 RPCs, `/v1/roles/` —
+  a straight CRUD mirror of the fleet-session shape), `PromptService` (8 RPCs, `/v1/prompts/`), and
+  `ConfigService` (5 RPCs, `/v1/config/`). Two convention refinements first appear here (documented in
+  the README): (1) **composite keys** — a prompt is keyed by `(kind, id)`, so its read/delete routes
+  carry *two* path params (`/v1/prompts/{kind}/{id}`); (2) **reads with a request body** — a
+  repeated-scalar filter stays GET with repeated query params (`PromptService.Select` →
+  `/v1/prompts/select`), but a read whose request holds a nested message / free text uses POST
+  `body:"*"` (`PromptService.PreviewAssembled` → `/v1/prompts/preview`, `ConfigService.Validate` →
+  `/v1/config/validate`). Added 5 class-tagged coverage rows (role-Get mirror, config-Put write,
+  prompt-Get two-param corner, Select repeated-scalar GET, config-schema paramless sub-path); the
+  whole-set uniqueness/versioning/streaming invariants cover the rest automatically.

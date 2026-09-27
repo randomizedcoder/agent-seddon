@@ -19,6 +19,11 @@ syntax = "proto3";
 
 package agent.v1;
 
+// REST transcoding annotations (gap-analysis §4, docs/design/rest-openapi/). The
+// `(google.api.http)` options below let Envoy's `grpc_json_transcoder` expose the
+// service as REST/JSON without any Rust code; gRPC stays the primary interface.
+import "google/api/annotations.proto";
+
 // One `(action, resource_type)` grant — both validated strings (e.g.
 // `("write", "registry")`, `("approve", "fleet")`).
 message RolePermission {
@@ -61,8 +66,22 @@ message RoleDeleteReply {
 // role store while any number of clients drive it). Mutations are gated by the RBAC
 // enforcement core (C1) — a caller needs a role granting `(write|delete, role)`.
 service RoleService {
-  rpc List(RoleListRequest) returns (RoleList);
-  rpc Get(RoleRef) returns (RoleCard);
-  rpc Put(RoleCard) returns (RoleCard); // upsert = create + update
-  rpc Delete(RoleRef) returns (RoleDeleteReply);
+  // REST mappings (docs/design/rest-openapi/): reads → GET, deletes → DELETE by id,
+  // upsert → POST with `body: "*"`. Paths live under /v1/roles/.
+  rpc List(RoleListRequest) returns (RoleList) {
+    option (google.api.http) = {get: "/v1/roles"};
+  }
+  rpc Get(RoleRef) returns (RoleCard) {
+    option (google.api.http) = {get: "/v1/roles/{id}"};
+  }
+  rpc Put(RoleCard) returns (RoleCard) {
+    // upsert = create + update
+    option (google.api.http) = {
+      post: "/v1/roles"
+      body: "*"
+    };
+  }
+  rpc Delete(RoleRef) returns (RoleDeleteReply) {
+    option (google.api.http) = {delete: "/v1/roles/{id}"};
+  }
 }
