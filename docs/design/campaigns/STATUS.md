@@ -10,7 +10,7 @@ Design: [`README.md`](README.md) · sequence: [`05-increments.md`](05-increments
 |---|---|---|---|---|
 | CP-00 | This track, SI-11 in the gap analysis, index links | — | ✅ | #495 |
 | CP-01 | `CampaignStore` seam, path grammar, `allowed()`, rollup, policy, `MemCampaigns` | SI-11 | ✅ | #501 |
-| CP-02 | `PgCampaigns`, migration 0001, protocols (a)–(g), live suite, invariants query | SI-11 | 🟡 | #508 |
+| CP-02 | `PgCampaigns`, migration 0001, protocols (a)–(g), live suite, invariants query | SI-11 | ✅ | #508 |
 | CP-03 | Planner: prompt, schema, validation, caps, `needs_info` / `reject`, fallback brief | SI-11 | ⬜ | — |
 | CP-04 | CLI `agent campaign …` | SI-11 | ⬜ | — |
 | CP-05 | `CampaignDriver` tick + `[campaign]` config | SI-11 | ⬜ | — |
@@ -46,3 +46,21 @@ Design: [`README.md`](README.md) · sequence: [`05-increments.md`](05-increments
   tenant / clock / rollback tests. Deferred: runtime registry wiring and the umbrella `postgres`
   feature: CP-04/05; `sha2` idempotency keys: CP-03. Gate: `nix flake check` green on the
   committed ref (the dirty-tree form fails only in unrelated `portal-report-tests`).
+- **2026-09-27 — CP-02 (#508).** `PgCampaigns` behind `agent-campaign`'s `campaign-postgres`
+  feature: `migrations/0001_campaigns.sql` applied by the same versioned runner and advisory-lock
+  shape as the digest and config-store tiers (ledger `_campaign_migrations`); every protocol
+  (a)–(g) one transaction with the same errors, caps and rollup as `MemCampaigns`; tenant-bound
+  handles that fail closed on `safe_segment` before any statement; the injectable epoch-ms clock
+  bound wherever the design says `now()`; every statement a `const` in `postgres/sql.rs`;
+  constraint violations mapped by kind + constraint name, never message text. Deviations from
+  [`01-schema.md`](01-schema.md) (recorded there): `IF NOT EXISTS` DDL, named `tasks_path_key` /
+  `task_attempts_idem_key`, `tenants` shared verbatim with the config store, so any suite that
+  truncates `tenants` must `CASCADE`. Deviations from the plan: subtree writes are row by row
+  inside the transaction, no bulk CAS; `complete` locks only the leaf; `claim` restores queue
+  order in Rust after `RETURNING`. Tests: T3–T8 rerun unchanged as `pg::tN::<row>` with the T15
+  invariants query after every case, T14 (10), T15 (4), the three lock-dependent rows
+  (`adversarial_double_claim`, `adversarial_concurrent_decompose`, `corner_reap_skips_locked`),
+  durability; 157 live tests under `nix run .#pg-integration`, 34 in-gate. Deferred: registry
+  wiring and the umbrella `postgres` feature: CP-04/05; `repos` FK: RK-02. Gate: `nix flake
+  check` green on the committed ref before and after the rebase onto `main`; `pg-integration`
+  green three times.
