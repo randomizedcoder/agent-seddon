@@ -14,8 +14,12 @@ whose `attempts >= policy.max_plan_attempts` is moved to `blocked` instead, with
 `detail.reason = 'attempts_exhausted'`. A node whose campaign has spent
 `SUM(tokens_in + tokens_out) FROM task_attempts WHERE campaign_id = …` at or above
 `max_plan_tokens` is moved to `blocked` with `detail.reason = 'token_cap'`, without a provider
-call. A `task_attempts` row is inserted `pending` with `idem_key = sha256(tenant, task_id,
-expected_version, prompt_hash)`.
+call; either `blocked` rolls up to the ancestors like a failed leaf
+([`02-transactions.md`](02-transactions.md) (b)). The planner computes
+`idem_key = sha256(tenant, task_id, expected_version, prompt_hash)` here but writes **no**
+`task_attempts` row yet: the row is inserted inside the finishing transaction (`decompose`,
+`mark_leaf` or `plan_close`), so a `Conflict` there rolls the attempt back with everything else
+and the key stays usable (T5 `negative_version_conflict`).
 
 The planner never descends past a node in `awaiting_approval`: children of an unapproved node do
 not exist yet, and a `needs_info` node is not `ready`.

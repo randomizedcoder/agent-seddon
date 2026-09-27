@@ -7,7 +7,7 @@ Design: [`README.md`](README.md) · sequence: [`06-increments.md`](06-increments
 
 | # | Increment | Closes | State | PR |
 |---|---|---|---|---|
-| RK-00 | This track, the self-improvement gap analysis, index links | — | 🟡 | — |
+| RK-00 | This track, the self-improvement gap analysis, index links | — | ✅ | #495 |
 | RK-01 | `RepoGraphStore` seam, model, key grammar, validation, `GraphBuilder`, `MemRepoGraph` | SI-1 | ⬜ | — |
 | RK-02 | `PgRepoGraph`, migration 0001, `with_tenant`, bulk write, read verbs, live suite | SI-1, SI-3 | ⬜ | — |
 | RK-03 | Extractors `rust-syn`, `cargo`, `docs`; fixture workspace; determinism check; bench + leak | SI-2 | ⬜ | — |
@@ -29,7 +29,7 @@ Design: [`README.md`](README.md) · sequence: [`06-increments.md`](06-increments
 
 ## As-built log
 
-- **2026-09-26 — RK-00 (this PR).** Opened the track from
+- **2026-09-26 — RK-00 (#495).** Opened the track from
   [`gap-analysis/self-improvement.md`](../../gap-analysis/self-improvement.md). Decisions D1–D10
   recorded in [`README.md`](README.md). No code. The `docs/components/repo-graph.md` stub is
   written in RK-08 with the tool, not here.

@@ -16,13 +16,24 @@
 //! * [`bench`] — deterministic input fixtures shared by benches + larger tests.
 //! * [`observe`] — assert observability: metric deltas ([`observe::MetricsProbe`])
 //!   and emitted spans ([`observe::captured_spans`]).
+//! * [`campaign::MemCampaigns`] — the in-memory `CampaignStore` (every protocol,
+//!   multi-tenant, injectable clock) for planner / driver / CLI tests.
+//! * [`campaign::conformance`] + [`campaign_conformance_suite!`] — the shared
+//!   T3–T8 rows of `docs/design/campaigns/06-test-matrix.md`, stamped into any tier's
+//!   tests (`MemCampaigns` here; `PgCampaigns` in `agent-campaign`).
 //! * `oidc` (feature `oidc`) — a fake OIDC issuer (discovery + JWKS on loopback)
 //!   and fixed test signing keys, for authentication tests.
 //! * `pki` (feature `pki`) — throwaway CAs and leaf certificates for the gRPC
 //!   TLS / mTLS matrix.
 
 pub mod bench;
+pub mod campaign;
 pub mod observe;
+
+/// Re-exported for the `campaign_conformance_suite!` macro (`#[$crate::tokio::test]`),
+/// so a tier's crate need not name `tokio` itself.
+#[doc(hidden)]
+pub use tokio;
 #[cfg(feature = "oidc")]
 pub mod oidc;
 #[cfg(feature = "pki")]

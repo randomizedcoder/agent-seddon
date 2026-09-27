@@ -200,6 +200,30 @@ pub fn status_from_error(e: &agent_core::Error) -> tonic::Status {
             tonic::Status::not_found(format!("fleet: {m}"))
         }
         Error::Fleet(m) => tonic::Status::invalid_argument(format!("fleet: {m}")),
+        // The campaign seam renders its typed `CampaignError` into this string
+        // (`Display` prefixes, `agent_core::campaign`): a missing row is NotFound, a
+        // non-human principal is PermissionDenied, a lost lease / stale version / replayed
+        // key is FailedPrecondition (re-read and retry), a store fault is Internal, and a
+        // rejected or oversized field (the rest) is a bad request. The CP-09
+        // `CampaignService` maps the typed variants directly; this keeps the shared bridge
+        // exhaustive until then.
+        Error::Campaign(m) if m.starts_with("not found") => {
+            tonic::Status::not_found(format!("campaign: {m}"))
+        }
+        Error::Campaign(m) if m.starts_with("denied") => {
+            tonic::Status::permission_denied(format!("campaign: {m}"))
+        }
+        Error::Campaign(m)
+            if m.starts_with("conflict")
+                || m.starts_with("already applied")
+                || m.starts_with("lease lost") =>
+        {
+            tonic::Status::failed_precondition(format!("campaign: {m}"))
+        }
+        Error::Campaign(m) if m.starts_with("backend") => {
+            tonic::Status::internal(format!("campaign: {m}"))
+        }
+        Error::Campaign(m) => tonic::Status::invalid_argument(format!("campaign: {m}")),
         // Overload is a "slow down", not a fault: RESOURCE_EXHAUSTED is in the
         // client's retryable set, so it backs off + retries rather than failing.
         Error::Overloaded(m) => tonic::Status::resource_exhausted(format!("overloaded: {m}")),
@@ -4740,6 +4764,7 @@ pub fn snapshot_event(s: agent_core::StatusSnapshot) -> pb::SessionEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_core::campaign::CampaignError;
     use rstest::rstest;
 
     fn msg_with_calls() -> agent_core::Message {
@@ -5248,6 +5273,7 @@ mod tests {
             (Error::Prompt("m".into()), Code::InvalidArgument),
             (Error::Metrics("m".into()), Code::Internal),
             (Error::Overloaded("m".into()), Code::ResourceExhausted),
+            (Error::Campaign("m".into()), Code::InvalidArgument),
         ];
         for (err, want) in cases {
             assert_eq!(
@@ -5270,6 +5296,38 @@ mod tests {
     #[case::prefix_only("id not found in card", tonic::Code::InvalidArgument)]
     fn status_from_config_not_found(#[case] msg: &str, #[case] want: tonic::Code) {
         let s = status_from_error(&agent_core::Error::Config(msg.to_string()));
+        assert_eq!(s.code(), want, "wrong code for {msg:?}");
+    }
+
+    // A `Campaign` error carries a rendered `CampaignError`; its `Display` prefix picks
+    // the code. Built from the typed error so a renamed prefix fails here, not on the wire.
+    #[rstest]
+    #[case::positive_not_found(CampaignError::NotFound, tonic::Code::NotFound)]
+    #[case::positive_denied(CampaignError::Denied("actor: model".into()), tonic::Code::PermissionDenied)]
+    #[case::positive_conflict(CampaignError::Conflict("version: expected 2".into()), tonic::Code::FailedPrecondition)]
+    #[case::positive_already_applied(
+        CampaignError::AlreadyApplied,
+        tonic::Code::FailedPrecondition
+    )]
+    #[case::positive_lease_lost(CampaignError::LeaseLost, tonic::Code::FailedPrecondition)]
+    #[case::positive_backend(CampaignError::Backend("stored policy".into()), tonic::Code::Internal)]
+    #[case::positive_invalid(CampaignError::Invalid("title: must not be empty".into()), tonic::Code::InvalidArgument)]
+    #[case::positive_too_long(CampaignError::TooLong("goal: over 4000 chars".into()), tonic::Code::InvalidArgument)]
+    fn status_from_campaign_error(#[case] err: CampaignError, #[case] want: tonic::Code) {
+        let shared: agent_core::Error = err.into();
+        let s = status_from_error(&shared);
+        assert_eq!(s.code(), want, "wrong code for {shared:?}");
+        assert!(s.message().starts_with("campaign: "), "{}", s.message());
+    }
+
+    // boundary / adversarial: only the leading prefix flips the code — a model-written
+    // message that merely *contains* a prefix word stays a bad request.
+    #[rstest]
+    #[case::boundary_prefix_mid_message("goal: not found in repo", tonic::Code::InvalidArgument)]
+    #[case::adversarial_spoofed_backend("title: backend: x", tonic::Code::InvalidArgument)]
+    #[case::adversarial_empty("", tonic::Code::InvalidArgument)]
+    fn status_from_campaign_prefix_only(#[case] msg: &str, #[case] want: tonic::Code) {
+        let s = status_from_error(&agent_core::Error::Campaign(msg.to_string()));
         assert_eq!(s.code(), want, "wrong code for {msg:?}");
     }
 

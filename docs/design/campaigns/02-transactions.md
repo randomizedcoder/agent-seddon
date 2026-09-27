@@ -28,24 +28,32 @@ for owner-token claims with TTL reclaim is the durable scheduler
 
 ## Allowed transitions
 
-`allowed(from, to, kind, actor_class) -> bool` is a pure function in `agent-core` (CP-01) and
-the single source of truth; the store calls it before every write. The table is exhaustive: any
-pair not listed is denied.
+`allowed(from, to, kind, actor_class) -> bool` is a pure function in `agent_core::campaign`
+(CP-01, `crates/agent-core/src/campaign/rules.rs`) and the single source of truth; the store
+calls it before every write. The table is exhaustive: any pair not listed is denied. `kind` is
+the node's kind **before** the write, so the two "as `kind = leaf`" rows are the `task` rows
+they sit next to (listed for the reader, not counted twice). Expanded over `any` and
+`any non-terminal`, the table holds **82** `(from, to, kind, actor)` tuples out of
+13 × 13 × 3 × 8; T2 `boundary_exhaustive` asserts that count and the set. The actor classes
+are `user`, `model`, `planner`, `driver`, `worker`, `reaper`, `poller`, `rollup`; `model` (the
+LLM as a principal) is allowed nothing.
 
 | From | To | Kind | Actor |
 |---|---|---|---|
 | `draft` | `ready` | objective | user |
 | `draft` | `cancelled` | objective | user |
-| `awaiting_approval` | `ready` | task, leaf | user |
+| `awaiting_approval` | `ready` | any | user (`approve`; `answer` on a `needs_info` node, the root included) |
 | `awaiting_approval` | `cancelled` | any | user |
 | `ready` | `decomposing` | objective, task | planner |
 | `ready` | `claimed` | leaf | driver |
 | `ready` | `blocked` | task, leaf | planner (injection, attempts), rollup (dependency failed) |
+| `ready` | `blocked` | objective | planner (attempts exhausted, token cap on the root) |
 | `ready` | `cancelled` | any | user |
 | `decomposing` | `decomposed` | objective, task | planner (`split`) |
 | `decomposing` | `ready` | objective, task | planner (validation error, retry) |
-| `decomposing` | `awaiting_approval` | task | planner (`needs_info`) |
+| `decomposing` | `awaiting_approval` | objective, task | planner (`needs_info`) |
 | `decomposing` | `blocked` | objective, task | planner (`reject`, attempts exhausted) |
+| `decomposing` | `cancelled` | any | user (protocol (f) while a planner call is in flight) |
 | `decomposing` | `ready` (as `kind = leaf`) | task | planner (`execute`, depth not gated) |
 | `decomposing` | `awaiting_approval` (as `kind = leaf`) | task | planner (`execute`, depth gated) |
 | `decomposed` | `done` / `blocked` | objective, task | rollup |
@@ -64,6 +72,8 @@ pair not listed is denied.
 | `blocked` | `ready` | task, leaf | user (`retry`) |
 | `blocked` | `decomposing` | objective, task | user (`replan`) |
 | `blocked` | `cancelled` | any | user |
+| `blocked` | `decomposed` | objective, task | rollup (the offending child was retried or cancelled) |
+| `blocked` | `done` | objective, task | rollup (cancelling the offender left every live child `done`) |
 | `failed` | `ready` | leaf | user (`retry`) |
 | `failed` | `cancelled` | leaf | user |
 | any non-terminal | `superseded` | task, leaf | user (`replan` on the parent) |
@@ -73,19 +83,25 @@ Terminal: `done`, `cancelled`, `superseded`. Heartbeat is not a transition (it t
 
 ## Rollup rule
 
-After a child reaches a terminal or failure state, the parent is recomputed over its children
-**excluding** `superseded` and `cancelled`:
+`rollup(parent_state, children_states) -> Option<new_state>` is the second pure function in
+`agent_core::campaign` (T3's pure half is tested there; the mem and pg halves drive it through
+the store). After a child reaches a terminal or failure state, or is retried, the parent is
+recomputed over its children **excluding** `superseded` and `cancelled` ("live"). Only a
+`decomposed` or `blocked` parent ever changes; a `decomposing` parent (replan in flight) or a
+terminal one is never touched by a child.
 
-| Children (live) | Parent becomes |
-|---|---|
-| none | unchanged |
-| all `done` | `done` |
-| any `failed` or `blocked` | `blocked` |
-| otherwise | unchanged |
+| Children (live) | Parent `decomposed` becomes | Parent `blocked` becomes |
+|---|---|---|
+| none, and no child is `cancelled` (all `superseded`) | unchanged | unchanged |
+| none, and some child is `cancelled` | `blocked` (someone must decide) | unchanged |
+| all `done` | `done` | `done` |
+| any `failed` or `blocked` | `blocked` | unchanged |
+| otherwise (work in progress, nothing stuck) | unchanged | `decomposed` |
 
-If every child is `cancelled` the parent becomes `blocked` (someone must decide). Recurse upward
-until the first ancestor that does not change. A parent that is `blocked` returns to `decomposed`
-when the offending child is retried (the retry protocol recomputes the parent once).
+Recurse upward until the first ancestor that does not change. The last row is the unblock: a
+parent that is `blocked` returns to `decomposed` when the offending child is retried or
+cancelled (the retry and cancel protocols recompute the parent once). `in_review` is neither
+`done` nor stuck, so it never rolls up.
 
 ## Lock order
 
@@ -133,14 +149,17 @@ COMMIT;
 ### (b) Decompose (planner result `split`)
 
 Inputs: `parent_id`, `expected_version` (read when the node moved to `decomposing`),
-`attempt` (the `task_attempts` row created when the model was called, `outcome = 'pending'`),
-`children[]` already post-validated in Rust ([`03-decomposition.md`](03-decomposition.md)).
+`attempt` (the finished model call: `idem_key`, `prompt_hash`, `model`, tokens — its
+`task_attempts` row is inserted **here**, inside the finishing transaction, never at
+`plan_start`), `children[]` already post-validated in Rust
+([`03-decomposition.md`](03-decomposition.md)).
 
 ```sql
 BEGIN;
--- 1. Idempotency: the attempt row was inserted 'pending' before the model call; finishing it
---    twice is impossible because outcome is CAS-updated at the end. A *new* attempt with the
---    same idem_key (a retried tick) fails here and the caller reports AlreadyApplied.
+-- 1. Idempotency: the attempt row is written inside this transaction (plan_start writes none).
+--    A replayed idem_key (a retried tick against unchanged input) hits the UNIQUE and the
+--    caller reports AlreadyApplied; any ROLLBACK below discards the row with everything else,
+--    so the key stays usable for the retry (T5 negative_version_conflict).
 INSERT INTO task_attempts (tenant, task_id, kind, idem_key, prompt_hash, model, outcome)
 VALUES ($t, $parent, 'decompose', $idem, $phash, $model, 'pending')
 ON CONFLICT (tenant, idem_key) DO NOTHING
@@ -158,7 +177,9 @@ FROM tasks WHERE tenant = $t AND parent_id = $parent;
 SELECT count(*) AS n_nodes FROM tasks WHERE tenant = $t AND campaign_id = $campaign;
 -- app: depth + 1 <= policy.max_depth
 --      n_children + N <= min(8, policy.max_children)
---      n_nodes + N <= policy.max_nodes                 else ROLLBACK; attempt outcome = 'error'
+--      n_nodes + N <= policy.max_nodes                 else ROLLBACK; Invalid (the row above is
+--      rolled back too; the planner then records the failure through plan_close(error), which
+--      counts the attempt and may block the node)
 
 -- 4. Insert the children in one statement; ordinals continue from max_ord.
 INSERT INTO tasks (tenant, campaign_id, repo_id, parent_id, path, depth, ordinal, kind, state,
@@ -204,6 +225,12 @@ c.parent_id = $node)`. `needs_info` and `reject` are single CAS updates with the
 reason in `detail`. A validation failure leaves the node `ready` with `attempts = attempts + 1`
 and closes the attempt as `error`; at `attempts >= policy.max_plan_attempts` the node goes to
 `blocked` instead.
+
+A node the **planner** moves to `blocked` — `reject`, attempts exhausted, or the `plan_start`
+caps in [`03-decomposition.md`](03-decomposition.md) step 1 — is a failure state for its parent
+exactly like a failed leaf: the transaction locks the ancestors first (lock order) and runs the
+rollup pass of (d) step 5 after the CAS. Without it the rule's "any `failed` or `blocked` child"
+row is unreachable from (b) (T8 `positive_retry_blocked_task`).
 
 ### (c) Claim, heartbeat, reap
 
