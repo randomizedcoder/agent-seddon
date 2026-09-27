@@ -23,7 +23,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S14 | Envoy hardening + `jwt_authn` | P0-4 | ⬜ | — |
 | S15 | auth-e2e gate + integration tiers | testing | ⬜ | — |
 | S16 | ClickHouse credentials + RLS lockdown | P0-6 | ✅ | #506 |
-| S17 | Secret-reference confinement | P0-7 | 🟡 | — |
+| S17 | Secret-reference confinement | P0-7 | ✅ | #507 |
 
 ## As-built log
 
@@ -346,7 +346,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
   fresh `hyperdx-down -- --volumes`).
   Gate: `nix flake check --max-jobs 8 --cores 4 --keep-going` green (2026-09-27), first run.
 
-- **2026-09-27 — S17.** Secret references from tenants are confined (P0-7).
+- **2026-09-27 — S17 (#507).** Secret references from tenants are confined (P0-7).
 
   New [`agent-runtime/src/secrets.rs`](../../../crates/agent-runtime/src/secrets.rs):
   - `SecretScope` (`Operator` | `Tenant`) and a process `SecretsPolicy` installed by the builder.
