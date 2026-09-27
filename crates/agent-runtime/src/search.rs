@@ -97,6 +97,7 @@ pub(crate) fn build_embedder(cfg: &Config) -> anyhow::Result<Arc<dyn agent_core:
 /// stale/missing. Non-blocking: the agent starts immediately, and queries serve
 /// the last committed snapshot until a background reindex commits.
 pub fn spawn_freshness(dispatch: Arc<DispatchSearch>, metrics: Metrics) {
+    // unscoped-spawn: startup warm-up, no caller.
     tokio::spawn(async move {
         for (name, backend) in dispatch.all() {
             match backend.status().await {
@@ -138,7 +139,9 @@ pub fn spawn_freshness(dispatch: Arc<DispatchSearch>, metrics: Metrics) {
 /// search-health *gauges* are deliberately not touched here, so many tenants
 /// warming concurrently cannot make one gauge flap across tenants.
 pub(crate) fn spawn_reindex_if_stale(backend: Arc<dyn agent_core::SearchBackend>) {
-    tokio::spawn(async move {
+    // Built on a tenant's first request: carry that request's scope (S9).
+    let carried = agent_core::RequestScope::current();
+    tokio::spawn(agent_core::scope_request(carried, async move {
         match backend.status().await {
             Ok(st) if st.state == IndexState::Fresh => {
                 tracing::debug!(files = st.indexed_files, "per-tenant code index fresh");
@@ -151,7 +154,7 @@ pub(crate) fn spawn_reindex_if_stale(backend: Arc<dyn agent_core::SearchBackend>
             }
             Err(e) => tracing::warn!(error = %e, "per-tenant code index status check failed"),
         }
-    });
+    }));
 }
 
 /// A fail-closed, empty [`SearchBackend`]: it holds no documents and every query

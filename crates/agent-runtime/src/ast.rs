@@ -88,6 +88,7 @@ pub fn build_ast(
 /// Kick off a background graph build so the first query is warm (serve-stale until
 /// then). Detached — a build failure is logged, never fatal.
 pub fn spawn_freshness(dispatch: Arc<DispatchAst>) {
+    // unscoped-spawn: background upkeep with no caller.
     tokio::spawn(async move {
         let noop = |_p: agent_core::ReindexProgress| {};
         if let Err(e) = dispatch.reindex(&noop).await {

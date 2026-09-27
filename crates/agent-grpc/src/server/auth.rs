@@ -522,16 +522,33 @@ where
         if is_exempt(req.uri().path()) {
             return Box::pin(async move { inner.call(req).await });
         }
+        // This server's hop (S9): one more than the sender's, whatever the auth mode,
+        // so a forwarding loop stops even with auth off.
+        let hops = match inbound_hops(req.headers()) {
+            Ok(n) => n,
+            Err(refused) => return Box::pin(async move { Ok(refused.into_http()) }),
+        };
+        let hops_only = agent_core::RequestScope {
+            hops,
+            ..agent_core::RequestScope::default()
+        };
         let verifier = match &self.verifier {
             None if self.require_identity => {
                 return match super::identity_policy::admit(req.uri().path(), req.headers(), false) {
-                    Ok(()) => Box::pin(async move { inner.call(req).await }),
+                    Ok(()) => Box::pin(async move {
+                        agent_core::scope_request(hops_only, inner.call(req)).await
+                    }),
                     Err(rejected) => {
                         Box::pin(async move { Ok(rejected.into_status().into_http()) })
                     }
                 };
             }
-            None => return Box::pin(async move { inner.call(req).await }), // disabled
+            // disabled
+            None => {
+                return Box::pin(async move {
+                    agent_core::scope_request(hops_only, inner.call(req)).await
+                })
+            }
             Some(v) => v.clone(),
         };
         let on_verify = self.on_verify.clone();
@@ -601,6 +618,7 @@ where
                         identity: None,
                         principal: Some(principal),
                         bearer: Some(agent_core::Bearer::new(token)),
+                        hops,
                     };
                     agent_core::scope_request(scope, inner.call(req)).await
                 }
@@ -612,6 +630,28 @@ where
                 }
             }
         })
+    }
+}
+
+/// This server's hop count: the sender's `x-agent-hops` plus one. A value that is
+/// not a small ASCII number is `INVALID_ARGUMENT`; one over the ceiling (a forwarding
+/// loop) is `FAILED_PRECONDITION`. Never trusted downwards: the count only grows.
+#[allow(clippy::result_large_err)] // the refusal is returned as-is, once per call
+fn inbound_hops(headers: &http::HeaderMap) -> Result<u8, tonic::Status> {
+    use agent_proto::identity::{parse_hops, HopsError, HOPS_KEY};
+    let raw = match headers.get(HOPS_KEY) {
+        None => None,
+        Some(v) => Some(
+            v.to_str()
+                .map_err(|_| tonic::Status::invalid_argument("malformed x-agent-hops"))?,
+        ),
+    };
+    match parse_hops(raw) {
+        Ok(n) => Ok(n + 1),
+        Err(HopsError::Malformed) => Err(tonic::Status::invalid_argument("malformed x-agent-hops")),
+        Err(HopsError::TooMany) => Err(tonic::Status::failed_precondition(
+            "too many forwarding hops",
+        )),
     }
 }
 

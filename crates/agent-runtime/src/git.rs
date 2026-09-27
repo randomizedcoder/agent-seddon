@@ -73,6 +73,7 @@ pub fn spawn_fetch(backend: Arc<dyn RepoBackend>, auto_fetch_secs: u64) {
     if auto_fetch_secs == 0 {
         return;
     }
+    // unscoped-spawn: background upkeep with no caller.
     tokio::spawn(async move {
         let stale = match backend.status().await {
             Ok(st) => now_ms().saturating_sub(st.last_fetch_ms) >= auto_fetch_secs * 1000,

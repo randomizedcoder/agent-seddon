@@ -120,7 +120,31 @@ pub(crate) fn outbound<T>(msg: T) -> tonic::Request<T> {
             req.metadata_mut(),
         );
     }
+    // Security-hardening S9: the caller's agent token, forwarded on their behalf, else
+    // this process's own service token; and this hop's count, so the next server can
+    // stop a forwarding loop. Neither is sent when there is none.
+    attach_bearer(agent_core::outbound_bearer(), req.metadata_mut());
+    agent_proto::identity::inject_hops(agent_core::current_hops(), req.metadata_mut());
     req
+}
+
+/// Set `authorization: Bearer <token>`, replacing any existing value. A token that
+/// cannot be a header value (it never is: agent tokens are base64url) is dropped, so
+/// the call goes out unauthenticated and the server refuses it, rather than panicking.
+pub(crate) fn attach_bearer(
+    bearer: Option<agent_core::Bearer>,
+    meta: &mut tonic::metadata::MetadataMap,
+) {
+    meta.remove("authorization");
+    let Some(b) = bearer else {
+        return;
+    };
+    match tonic::metadata::MetadataValue::try_from(format!("Bearer {}", b.expose())) {
+        Ok(v) => {
+            meta.insert("authorization", v);
+        }
+        Err(_) => tracing::warn!("outbound bearer is not a valid header value; not sent"),
+    }
 }
 
 /// Default retry policy for the gRPC seam clients: the canonical backoff (+ full
@@ -241,5 +265,73 @@ mod outbound_identity_tests {
             assert_eq!(m.get(SESSION_ID_KEY).unwrap().to_str().unwrap(), "sess-1");
         })
         .await;
+    }
+}
+
+#[cfg(test)]
+mod outbound_bearer_tests {
+    use super::{attach_bearer, outbound};
+    use agent_core::{Bearer, RequestScope};
+    use agent_proto::identity::HOPS_KEY;
+    use rstest::rstest;
+    use tonic::metadata::MetadataMap;
+
+    fn auth(req: &tonic::Request<()>) -> Option<String> {
+        req.metadata()
+            .get("authorization")
+            .map(|v| v.to_str().unwrap().to_string())
+    }
+
+    fn hops(req: &tonic::Request<()>) -> Option<String> {
+        req.metadata()
+            .get(HOPS_KEY)
+            .map(|v| v.to_str().unwrap().to_string())
+    }
+
+    #[rstest]
+    // desc: inside a served request the caller's token and this hop go downstream.
+    #[case::positive_forwards_token_and_hop(
+        Some("user-tok"),
+        1,
+        Some("Bearer user-tok"),
+        Some("1")
+    )]
+    // desc: a deeper hop is stamped as-is (the next server adds its own).
+    #[case::corner_deeper_hop(Some("user-tok"), 3, Some("Bearer user-tok"), Some("3"))]
+    // desc: auth off upstream — no token, but the hop still counts.
+    #[case::corner_hop_without_token(None, 2, None, Some("2"))]
+    // desc: outside any request: nothing (no service source installed in this binary).
+    #[case::negative_outside_a_request(None, 0, None, None)]
+    #[tokio::test]
+    async fn outbound_carries_scope(
+        #[case] bearer: Option<&str>,
+        #[case] hop: u8,
+        #[case] want_auth: Option<&str>,
+        #[case] want_hops: Option<&str>,
+    ) {
+        let scope = RequestScope {
+            bearer: bearer.map(Bearer::new),
+            hops: hop,
+            ..RequestScope::default()
+        };
+        let req = agent_core::scope_request(scope, async { outbound(()) }).await;
+        assert_eq!(auth(&req).as_deref(), want_auth);
+        assert_eq!(hops(&req).as_deref(), want_hops);
+    }
+
+    #[test]
+    fn adversarial_unencodable_token_is_dropped_not_panicked() {
+        let mut meta = MetadataMap::new();
+        meta.insert("authorization", "Bearer stale".parse().unwrap());
+        attach_bearer(Some(Bearer::new("bad\ntoken")), &mut meta);
+        assert!(meta.get("authorization").is_none());
+    }
+
+    #[test]
+    fn boundary_none_clears_a_stale_header() {
+        let mut meta = MetadataMap::new();
+        meta.insert("authorization", "Bearer stale".parse().unwrap());
+        attach_bearer(None, &mut meta);
+        assert!(meta.get("authorization").is_none());
     }
 }

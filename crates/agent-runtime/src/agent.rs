@@ -3251,7 +3251,12 @@ async fn run_tool_guarded(
     cwd: PathBuf,
     timeout_secs: u64,
 ) -> Observation {
-    let handle = tokio::spawn(async move { tool.execute(args, &ToolContext { cwd }).await });
+    // The turn's scope rides into the tool task, so a tool backed by a remote seam
+    // acts for the same caller (S9).
+    let carried = agent_core::RequestScope::current();
+    let handle = tokio::spawn(agent_core::scope_request(carried, async move {
+        tool.execute(args, &ToolContext { cwd }).await
+    }));
 
     let outcome = if timeout_secs == 0 {
         handle.await

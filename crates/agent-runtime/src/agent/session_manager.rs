@@ -69,6 +69,9 @@ enum SessionCommand {
         goal: String,
         cancel: oneshot::Receiver<()>,
         done: oneshot::Sender<anyhow::Result<String>>,
+        /// The submitter's request scope (principal, token, hop count), so the turn's
+        /// downstream seam calls act for the caller, not the service (S9).
+        scope: agent_core::RequestScope,
     },
 }
 
@@ -123,6 +126,7 @@ impl SessionHandle {
                 goal: goal.to_string(),
                 cancel,
                 done,
+                scope: agent_core::RequestScope::current(),
             })
             .await
             .map_err(|_| anyhow::anyhow!("session actor is gone"))?;
@@ -151,13 +155,18 @@ async fn run_actor(
 ) {
     while let Some(cmd) = rx.recv().await {
         match cmd {
-            SessionCommand::Run { goal, cancel, done } => {
+            SessionCommand::Run {
+                goal,
+                cancel,
+                done,
+                scope,
+            } => {
                 shared.busy.store(true, Ordering::SeqCst);
                 // Future-drop cancellation: `cancel` resolving (client disconnect drops the
                 // sender) drops `session.send` at its next `.await`; the owned `Session`'s
                 // working set survives for the next Run.
                 let result = tokio::select! {
-                    r = session.send(&goal) => r,
+                    r = agent_core::scope_request(scope, session.send(&goal)) => r,
                     _ = cancel => Err(anyhow::anyhow!("run cancelled (client disconnected)")),
                 };
                 shared.busy.store(false, Ordering::SeqCst);
@@ -213,6 +222,8 @@ impl SessionManager {
         if let Some(skill) = review_skill {
             session.seed_review(skill);
         }
+        // unscoped-spawn: the actor outlives any one request; each `Run` carries its
+        // submitter's scope instead.
         let task = tokio::spawn(run_actor(session, rx, shared.clone()));
         let entry = Entry {
             tx: tx.clone(),
@@ -410,7 +421,12 @@ impl agent_core::RunStarter for SessionHandle {
         // Best-effort enqueue: if the actor is gone or its queue is full the run simply
         // does not start (the stream then carries only the snapshot). Dropping the
         // returned handle drops `cancel_tx`, which the actor observes as cancellation.
-        let _ = self.tx.try_send(SessionCommand::Run { goal, cancel, done });
+        let _ = self.tx.try_send(SessionCommand::Run {
+            goal,
+            cancel,
+            done,
+            scope: agent_core::RequestScope::current(),
+        });
         agent_core::RunHandle::new(cancel_tx)
     }
 }

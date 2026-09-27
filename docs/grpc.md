@@ -350,6 +350,8 @@ metadata (not a `.proto` field, so it is additive and `buf breaking` never sees 
 |---|---|
 | `x-agent-session-id` | the session id (a server-minted UUID in the multi-user flow) |
 | `x-agent-user-id` | the user id (`local` for the single-user CLI/REPL) |
+| `authorization` | `Bearer <agent token>`: the caller's, forwarded; else this process's service token |
+| `x-agent-hops` | how many agent services the request has already passed through |
 
 - [`agent-proto::identity`](../crates/agent-proto/src/identity.rs) defines the key
   constants and `inject_identity` / `extract_identity` over tonic metadata.
@@ -361,6 +363,24 @@ metadata (not a `.proto` field, so it is additive and `buf breaking` never sees 
   `agent_core::safe_segment`, and attributes the handler span (`session_id` /
   `user_id`). A server-as-client (`--serve-all`) forwards the caller's identity via
   the same task-local.
+- **Credentials follow the call** (security-hardening S9). A served request's verified
+  agent token is kept in the `AGENT_BEARER` task-local, and `outbound()` sends it on every
+  downstream seam call, so the next seam authorizes the *caller*, not the service in the
+  middle. With no caller token in scope (a scheduler job, background upkeep, a host with
+  auth off dialling a seam that has it on), `outbound()` sends the process's own token
+  from the installed `BearerSource` instead, and nothing when there is none. A caller's
+  token is never swapped for the service's.
+- **Hop count.** Every server computes its hop as the inbound `x-agent-hops` plus one
+  (absent = a client, so the first server is hop 1) and `outbound()` stamps that count on
+  the next call, replacing whatever was there. A value that is not a small ASCII number is
+  `INVALID_ARGUMENT`; more than 4 is `FAILED_PRECONDITION`, so a forwarding loop stops.
+  The count applies with auth on or off. A caller can hide hops made before it reached
+  us, never the ones after.
+- **Spawned work keeps its caller.** `tokio::spawn` inherits no task-local, so request
+  work handed to a task runs under `agent_core::scope_request(RequestScope::current(), …)`.
+  A test ([`no_unscoped_spawn.rs`](../crates/agent-grpc/tests/no_unscoped_spawn.rs)) fails
+  the build on a spawn in the served crates that does neither that nor carry an
+  `// unscoped-spawn: <reason>` comment.
 
 > **Trust boundary (important).** Without `[auth] mode = "oidc"` these values are
 > **attacker-controllable**. They are trusted only as routing/namespacing labels, and

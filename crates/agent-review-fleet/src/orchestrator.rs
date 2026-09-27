@@ -771,7 +771,11 @@ impl FleetOrchestrator {
         // Carry the prior round's still-open items into the draft so the tracker (C16) can
         // reconcile them against this round's findings (addressed vs still-open).
         let open_items = prior.open_items;
-        let task = tokio::spawn(
+        // Whatever scope `handle` runs under rides into the review task (S9). Triggers
+        // from the queue carry none, so the review's seam calls use the service token.
+        let carried = agent_core::RequestScope::current();
+        let task = tokio::spawn(agent_core::scope_request(
+            carried,
             async move {
                 // reviewing: a PR was accepted and the review is starting (soft-fail).
                 if let Some(fm) = &fm_task {
@@ -863,7 +867,7 @@ impl FleetOrchestrator {
                 host.remove_session(&key_free);
             }
             .instrument(review_span),
-        );
+        ));
         self.in_flight
             .lock()
             .expect("in_flight poisoned")
