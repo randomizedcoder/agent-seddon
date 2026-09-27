@@ -136,6 +136,17 @@ session; `Subscribe` / `Snapshot` by a different subject needs `(observe, agent)
 `test/mt-audit/authz.toml` as `Service.Rpc → (action, resource) | exempt | field-checked`, and the
 `require(` call parsed from the handler must match. An RPC added without a row fails the gate.
 
+**As built (S7).** Two changes from the text above:
+- **One table, enforced in the layer.** `authz_policy::gate_of(service, method)` gives every RPC a
+  gate (`Public`, `Authenticated`, `Require(action, resource)` or `FieldChecked(action,
+  resource)`). The `AuthLayer` enforces it right after the identity policy, the same shape as S2.
+  Handler `require` calls stay on the mutating RPCs as defense-in-depth. An RPC missing from the
+  table is denied.
+- **Session ownership is recorded at `Send`**, not `Open`: the live session's owner is the first
+  verified caller that drives it. Watching a session someone else owns needs `(observe, agent)`
+  in the owner's tenant. Watching an unowned one (fleet, CLI) needs it in the caller's own tenant.
+  Driving another subject's session is denied outright.
+
 ## Capability discovery
 
 `AuthService.WhoAmI` returns `{tenant, subject, roles, permissions[], sid, expires_at}`. The portal

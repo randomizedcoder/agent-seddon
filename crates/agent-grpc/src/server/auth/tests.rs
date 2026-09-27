@@ -440,7 +440,7 @@ async fn positive_layer_rewrites_user_header_to_verified_tenant() {
     let resp = drive(
         &enabled_layer(),
         request(
-            "/agent.v1.EmbedService/Embed",
+            "/agent.v1.EmbedService/EmbedQuery",
             &[("authorization", &format!("Bearer {token}"))],
         ),
     )
@@ -456,7 +456,7 @@ async fn positive_layer_rewrites_user_header_to_verified_tenant() {
 async fn corner_no_token_is_unauthenticated() {
     let resp = drive(
         &enabled_layer(),
-        request("/agent.v1.EmbedService/Embed", &[]),
+        request("/agent.v1.EmbedService/EmbedQuery", &[]),
     )
     .await;
     assert!(
@@ -475,7 +475,7 @@ async fn corner_mode_none_uses_header() {
     let resp = drive(
         &AuthLayer::disabled(),
         request(
-            "/agent.v1.EmbedService/Embed",
+            "/agent.v1.EmbedService/EmbedQuery",
             &[("x-agent-user-id", "client-said")],
         ),
     )
@@ -640,7 +640,7 @@ async fn adversarial_client_header_ignored_when_token_present() {
     let resp = drive(
         &enabled_layer(),
         request(
-            "/agent.v1.EmbedService/Embed",
+            "/agent.v1.EmbedService/EmbedQuery",
             &[
                 ("x-agent-user-id", "evil"),
                 ("authorization", &format!("Bearer {token}")),

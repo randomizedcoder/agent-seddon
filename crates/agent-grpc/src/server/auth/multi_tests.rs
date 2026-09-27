@@ -248,7 +248,8 @@ async fn boundary_layer_from_issuers_only_rewrites_tenant() {
     let layer = AuthLayer::from_params(oidc(vec![generic("kc", &fake)])).expect("layer builds");
     let token = fake.mint(&claims(fake.issuer(), &json!({"org": "acme"})));
     let req = http::Request::builder()
-        .uri("/agent.v1.EmbedService/Embed")
+        // WhoAmI needs no permission, so a token with no roles still reaches it.
+        .uri("/agent.v1.AuthService/WhoAmI")
         .header("authorization", format!("Bearer {token}"))
         .header("x-agent-user-id", "someone-else")
         .body(tonic::body::empty_body())
@@ -390,8 +391,8 @@ async fn call_through(
 #[case::positive_exchange_needs_no_bearer("/agent.v1.AuthService/Exchange", false, None)]
 #[case::positive_jwks_needs_no_bearer("/agent.v1.AuthService/Jwks", false, None)]
 #[case::negative_who_am_i_needs_a_bearer("/agent.v1.AuthService/WhoAmI", false, Some("16"))]
-#[case::positive_agent_token_scopes_the_bearer("/agent.v1.EmbedService/Embed", true, None)]
-#[case::negative_seam_needs_a_bearer("/agent.v1.EmbedService/Embed", false, Some("16"))]
+#[case::positive_agent_token_scopes_the_bearer("/agent.v1.EmbedService/EmbedQuery", true, None)]
+#[case::negative_seam_needs_a_bearer("/agent.v1.EmbedService/EmbedQuery", false, Some("16"))]
 #[case::adversarial_exchange_prefix_is_not_exempt(
     "/agent.v1.AuthService/ExchangeX",
     false,
@@ -416,7 +417,8 @@ async fn token_layer_exemption_and_bearer_scope(
     let id = super::VerifiedIdentity {
         tenant: "acme".into(),
         subject: "u-1".into(),
-        roles: vec![],
+        // (use, agent) for the seam rows (S7 gates every RPC).
+        roles: vec![agent_core::ROLE_AGENT_USER.into()],
         issuer: "kc".into(),
         email: None,
         expires_at: now() + 600,

@@ -186,10 +186,11 @@ root = ""                    # empty ⇒ unset (shared agent.working_dir); tilde
 # (config C41 / A3b) — the [config_store] block supplies the DSN and pool. Needs the
 # `fleet-postgres` feature (a live Postgres server, opt-in).
 
-# [role] — operator-defined RBAC role cards (config C34 / C1b). The control-plane
-# gate (config C1) authorizes against the three immutable built-in roles
-# (`operator` host-global, `org_admin` per-tenant admin, `reader`) PLUS any cards
-# stored here. A card carries an id (may NOT reuse a built-in id) and its
+# [role] — operator-defined RBAC role cards (config C34 / C1b). Under `[auth] mode =
+# "oidc"` every RPC is gated (security-hardening S7) against the immutable built-in
+# roles — `operator` (host-global), `org_admin`, `viewer` (alias `reader`),
+# `review_viewer`, `agent_user`, `reviewer`, `fleet_admin`, `access_admin`,
+# `svc_fleet`, `svc_seam` — PLUS any cards stored here. A card carries an id (may NOT reuse a built-in id) and its
 # permissions as validated action/resource STRINGS. Empty `store` (the default) ⇒
 # the gate uses only the built-ins — exactly the C1 behaviour. Edit a card via the
 # RoleService seam (`agent --serve-role`); a Put/Delete rebuilds the in-process

@@ -10,10 +10,11 @@
 //! the loop — the same drop-not-block discipline as the ClickHouse sink.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use agent_core::{
-    SessionEvent, SessionEventStream, SessionSource, SessionSourceRegistry, StatusSnapshot,
+    SessionEvent, SessionEventStream, SessionOwner, SessionSource, SessionSourceRegistry,
+    StatusSnapshot,
 };
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
@@ -29,6 +30,8 @@ const CHANNEL_CAPACITY: usize = 512;
 pub struct SessionEvents {
     tx: broadcast::Sender<SessionEvent>,
     snap: Mutex<StatusSnapshot>,
+    /// The verified principal that first drove this session (S7); set once.
+    owner: OnceLock<SessionOwner>,
 }
 
 impl SessionEvents {
@@ -42,7 +45,14 @@ impl SessionEvents {
                 context_window,
                 ..Default::default()
             }),
+            owner: OnceLock::new(),
         }
+    }
+
+    /// Record `owner` as the session's owner unless one is already recorded (first
+    /// write wins, so a later caller cannot take over someone else's session).
+    pub fn claim_owner(&self, owner: SessionOwner) {
+        let _ = self.owner.set(owner);
     }
 
     /// Whether anyone is currently subscribed — a cheap atomic load the hot token
@@ -89,6 +99,10 @@ impl SessionSource for SessionEvents {
         // Drop `Lagged` items (slow-consumer backpressure = drop, not stall).
         let stream = BroadcastStream::new(self.tx.subscribe()).filter_map(std::result::Result::ok);
         Box::pin(stream)
+    }
+
+    fn owner(&self) -> Option<SessionOwner> {
+        self.owner.get().cloned()
     }
 }
 
@@ -297,5 +311,27 @@ mod tests {
         assert!(reg.source("s1").is_none());
         reg.remove("s1"); // absent id is a no-op, never panics
         reg.remove("never-existed");
+    }
+
+    fn owner(tenant: &str, subject: &str) -> SessionOwner {
+        SessionOwner {
+            tenant: tenant.into(),
+            subject: subject.into(),
+        }
+    }
+
+    // corner: a sink nobody authenticated drove has no owner.
+    #[test]
+    fn corner_new_sink_is_unowned() {
+        assert_eq!(SessionEvents::new(1).owner(), None);
+    }
+
+    // positive + adversarial: the first claim sticks; a later caller cannot take over.
+    #[test]
+    fn adversarial_first_owner_wins() {
+        let e = SessionEvents::new(1);
+        e.claim_owner(owner("acme", "alice"));
+        e.claim_owner(owner("acme", "mallory"));
+        assert_eq!(e.owner(), Some(owner("acme", "alice")));
     }
 }

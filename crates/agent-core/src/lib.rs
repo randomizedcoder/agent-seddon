@@ -3461,6 +3461,20 @@ pub trait SessionSource: Send + Sync {
     fn snapshot(&self) -> StatusSnapshot;
     /// A live stream of subsequent events.
     fn subscribe(&self) -> SessionEventStream;
+    /// Who opened the session through an authenticated `Send` (security-hardening
+    /// S7), or `None` when no verified principal did (auth off, the CLI, a fleet
+    /// owner session). Watching a session someone else owns needs `(observe, agent)`.
+    fn owner(&self) -> Option<SessionOwner> {
+        None
+    }
+}
+
+/// The verified `(tenant, subject)` that opened a live session (see
+/// [`SessionSource::owner`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionOwner {
+    pub tenant: String,
+    pub subject: String,
 }
 
 /// A registry of live [`SessionSource`]s keyed by session id — the multi-session

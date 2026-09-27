@@ -15,10 +15,12 @@ from audit import (
     Rpc,
     Service,
     check_anchors,
+    check_authz_coverage,
     check_config_ownership,
     check_identity_policy,
     check_metrics,
     check_services,
+    parse_gate_table,
     parse_identity_classes,
     parse_metric_families,
     parse_pertenant_seams,
@@ -443,6 +445,135 @@ class TestIdentityPolicy(unittest.TestCase):
         rs = POLICY_RS.replace('"RoleService" => OperatorGlobal', '"RoleService" => Superuser')
         out = check_identity_policy(parse_identity_classes(rs), POLICY_MANIFEST)
         self.assertEqual([(f.kind, f.subject) for f in out], [("policy-drift", "RoleService")])
+
+
+# --------------------------------------------------------------------------------------
+# Sub-check 6: authz-coverage (authz_policy.rs `gate_of` == authz.toml, handlers agree)
+# --------------------------------------------------------------------------------------
+
+GATE_RS = """
+pub fn gate_of(service: &str, method: &str) -> Option<Gate> {
+    use Action::*;
+    Some(match (service, method) {
+        ("AuthService", "Exchange" | "Jwks") => Public,
+        ("AuthService", "WhoAmI") => Authenticated,
+        ("AgentSessionService", "Subscribe") => FieldChecked(Use, Agent),
+        ("Memory", "Recall" | "Append")
+        | ("Episodic", "Recent") => Require(Use, Agent),
+        (
+            "ForgeRegistryService",
+            "List" | "Get",
+        ) => {
+            Require(Read, ForgeRegistry)
+        }
+        ("ForgeRegistryService", "Put") => Require(Write, ForgeRegistry),
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    fn fixture() { match x { ("Ghost", "Boo") => Public, _ => {} } }
+}
+"""
+
+GATE_TABLE = {
+    "rpcs": {
+        "AuthService.Exchange": "public",
+        "AuthService.Jwks": "public",
+        "AuthService.WhoAmI": "authenticated",
+        "AgentSessionService.Subscribe": "field-checked:use:agent",
+        "Memory.Recall": "use:agent",
+        "Memory.Append": "use:agent",
+        "Episodic.Recent": "use:agent",
+        "ForgeRegistryService.List": "read:forge_registry",
+        "ForgeRegistryService.Get": "read:forge_registry",
+        "ForgeRegistryService.Put": "write:forge_registry",
+    }
+}
+
+FORGE_HANDLER = """
+impl pb::forge_registry_service_server::ForgeRegistryService for ForgeRegistrySvc {
+    async fn put(&self, request: Request<pb::PutForgeRequest>) -> Result<Response<pb::Ack>, Status> {
+        super::authz::require(
+            agent_core::Action::Write,
+            agent_core::ResourceType::ForgeRegistry,
+        )?;
+        Ok(Response::new(pb::Ack {}))
+    }
+}
+"""
+
+
+def _kinds(out):
+    return [(f.kind, f.subject) for f in out]
+
+
+class TestAuthzCoverage(unittest.TestCase):
+    def positive_parse_every_arm_shape(self):
+        got = parse_gate_table(GATE_RS)
+        self.assertEqual(got, GATE_TABLE["rpcs"])
+
+    def positive_matching_table_and_handler_clean(self):
+        svcs = parse_service_handlers(FORGE_HANDLER)
+        self.assertEqual(svcs[0].rpcs[0].requires, ["write:forge_registry"])
+        self.assertEqual(check_authz_coverage(parse_gate_table(GATE_RS), svcs, GATE_TABLE), [])
+
+    def negative_table_row_missing_from_gate(self):
+        t = {"rpcs": dict(GATE_TABLE["rpcs"], **{"Memory.Distill": "use:agent"})}
+        out = check_authz_coverage(parse_gate_table(GATE_RS), [], t)
+        self.assertEqual(_kinds(out), [("policy-missing", "Memory.Distill")])
+
+    def negative_gate_row_missing_from_table(self):
+        t = {"rpcs": {k: v for k, v in GATE_TABLE["rpcs"].items() if k != "Episodic.Recent"}}
+        out = check_authz_coverage(parse_gate_table(GATE_RS), [], t)
+        self.assertEqual(_kinds(out), [("unclassified", "Episodic.Recent")])
+
+    def adversarial_permission_drift_fails_gate(self):
+        # The table says onboarding needs write; the code quietly lets readers through.
+        rs = GATE_RS.replace("Require(Write, ForgeRegistry)", "Require(Read, ForgeRegistry)")
+        out = check_authz_coverage(parse_gate_table(rs), [], GATE_TABLE)
+        self.assertEqual(_kinds(out), [("policy-drift", "ForgeRegistryService.Put")])
+
+    def adversarial_handler_disagrees_with_gate(self):
+        svcs = parse_service_handlers(FORGE_HANDLER.replace("Action::Write", "Action::Delete"))
+        out = check_authz_coverage(parse_gate_table(GATE_RS), svcs, GATE_TABLE)
+        self.assertEqual(_kinds(out), [("handler-drift", "ForgeRegistryService.Put")])
+
+    def boundary_missing_function_flagged(self):
+        out = check_authz_coverage(parse_gate_table("fn other() {}"), [], GATE_TABLE)
+        self.assertEqual([f.kind for f in out], ["mechanism-missing"])
+
+    def boundary_field_checked_handler_matches_its_permission(self):
+        handler = FORGE_HANDLER.replace("forge_registry_service_server::ForgeRegistryService",
+                                        "agent_session_service_server::AgentSessionService")
+        handler = handler.replace("async fn put", "async fn subscribe")
+        handler = handler.replace("Action::Write", "Action::Use")
+        handler = handler.replace("ResourceType::ForgeRegistry", "ResourceType::Agent")
+        out = check_authz_coverage(parse_gate_table(GATE_RS), parse_service_handlers(handler),
+                                   GATE_TABLE)
+        self.assertEqual(out, [])
+
+    def corner_test_module_arms_ignored(self):
+        self.assertNotIn("Ghost.Boo", parse_gate_table(GATE_RS))
+
+    def corner_names_convert(self):
+        self.assertEqual(audit.snake("TransportRegistry"), "transport_registry")
+        self.assertEqual(audit.camel("get_active_personality"), "GetActivePersonality")
+        self.assertEqual(audit.camel("who_am_i"), "WhoAmI")
+
+    def positive_committed_table_matches_source(self):
+        # The real authz.toml equals the real gate_of (the gate run, in miniature).
+        import tomllib
+        from pathlib import Path
+
+        here = Path(__file__).resolve().parent
+        rs = here.parent.parent / "crates/agent-grpc/src/server/authz_policy.rs"
+        if not rs.exists():  # the nix check copies only this directory
+            self.skipTest("source tree not present")
+        with (here / "authz.toml").open("rb") as fh:
+            table = tomllib.load(fh)
+        self.assertEqual(check_authz_coverage(parse_gate_table(rs.read_text()), [], table), [])
 
 
 # --------------------------------------------------------------------------------------

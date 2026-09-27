@@ -266,7 +266,10 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
         &self,
         request: Request<pb::ApproveRequest>,
     ) -> Result<Response<pb::ApproveReply>, Status> {
-        super::authz::require(agent_core::Action::Approve, agent_core::ResourceType::Fleet)?;
+        super::authz::require(
+            agent_core::Action::Approve,
+            agent_core::ResourceType::Review,
+        )?;
         let key = super::identity_key(request.metadata());
         let sp = span("fleet.approve", request.metadata());
         // Opt-in: only the full fleet process with persisted history wires an approver.
@@ -404,11 +407,11 @@ impl pb::review_fleet_service_server::ReviewFleetService for ReviewFleetSvc {
         &self,
         request: Request<pb::UpdateReviewRequest>,
     ) -> Result<Response<pb::UpdateReviewReply>, Status> {
-        // A write to a persisted draft: gated `Write` on the Fleet resource (like put/delete).
+        // A write to a persisted draft: gated `Write` on the Review resource (S7: drafts, not the roster).
         // `review_id` is untrusted — the editor looks it up as a bound query arg and writes the
         // body to the draft's own `draft_path` (confined under the fleet root), never a
         // wire-supplied path; an over-cap body is rejected, a posted/approved draft is locked.
-        super::authz::require(agent_core::Action::Write, agent_core::ResourceType::Fleet)?;
+        super::authz::require(agent_core::Action::Write, agent_core::ResourceType::Review)?;
         let key = super::identity_key(request.metadata());
         let sp = span("fleet.update_review", request.metadata());
         // Opt-in: needs the draft-body editor (persisted history + a fleet root).

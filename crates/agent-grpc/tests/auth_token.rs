@@ -89,7 +89,7 @@ impl Harness {
     fn id_token(&self, extra: Value) -> String {
         let mut claims = json!({
             "iss": self.idp.issuer(), "aud": AUD, "sub": "alice",
-            "org": "example.com", "roles": ["reader"], "exp": now() + 600,
+            "org": "example.com", "roles": ["agent_user"], "exp": now() + 600,
         });
         for (k, v) in extra.as_object().expect("object") {
             claims[k] = v.clone();
@@ -145,7 +145,8 @@ async fn positive_exchange_then_who_am_i_then_seam() {
     let principal = resp.principal.expect("principal");
     assert_eq!(principal.tenant, "example.com");
     assert_eq!(principal.subject, "user:kc/alice");
-    // `reader` grants `read` on every tenant resource (config is operator-global).
+    // `agent_user` uses the agent and reads prompts, reviews and graphs; nothing more.
+    assert!(principal.permissions.contains(&"use:agent".to_string()));
     assert!(principal.permissions.contains(&"read:prompt".to_string()));
     assert!(!principal
         .permissions
@@ -158,6 +159,22 @@ async fn positive_exchange_then_who_am_i_then_seam() {
         .expect("who am i");
     assert_eq!(me, principal);
     assert!(h.count(Some(&resp.access_token)).await.expect("seam call") > 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn negative_viewer_token_cannot_use_the_agent() {
+    // S7: a valid agent token whose roles grant only reads is refused a seam the
+    // agent runs on, but still sees who it is.
+    let h = Harness::start().await;
+    let resp = h
+        .exchange(&h.id_token(json!({"roles": ["viewer"]})))
+        .await
+        .expect("exchange");
+    assert_eq!(
+        h.count(Some(&resp.access_token)).await.unwrap_err().code(),
+        Code::PermissionDenied
+    );
+    assert!(h.who_am_i(Some(&resp.access_token)).await.is_ok());
 }
 
 #[tokio::test(flavor = "multi_thread")]

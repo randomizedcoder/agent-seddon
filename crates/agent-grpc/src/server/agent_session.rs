@@ -9,7 +9,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use agent_core::{DriverError, SessionDriver, SessionSource, SessionSourceRegistry};
+use agent_core::{
+    Action, DriverError, ResourceType, SessionDriver, SessionSource, SessionSourceRegistry,
+};
 use agent_proto::{pb, snapshot_event};
 use futures_util::{Stream, StreamExt};
 use tonic::transport::server::Router;
@@ -84,6 +86,36 @@ impl AgentSessionSvc {
     }
 }
 
+/// Session ownership (security-hardening S7), checked after the auth layer granted
+/// `(use, agent)`. The owner may always watch its own session. Anyone else needs
+/// `(observe, agent)` in the owner's tenant — or, for a session no verified caller
+/// opened (fleet, CLI), in their own. A pass-through when auth is off.
+#[allow(clippy::result_large_err)]
+fn may_observe(source: &dyn SessionSource) -> Result<(), Status> {
+    let Some(caller) = agent_core::current_principal() else {
+        return Ok(());
+    };
+    match source.owner() {
+        Some(o) if o.tenant == caller.tenant && o.subject == caller.subject => Ok(()),
+        Some(o) => super::authz::require_in(Action::Observe, ResourceType::Agent, &o.tenant),
+        None => super::authz::require_in(Action::Observe, ResourceType::Agent, &caller.tenant),
+    }
+}
+
+/// Driving a run in a session another subject owns is nobody's function: denied
+/// (opaque), whatever the caller's roles. Unowned and own sessions pass.
+#[allow(clippy::result_large_err)]
+fn may_drive(source: &dyn SessionSource) -> Result<(), Status> {
+    let (Some(caller), Some(o)) = (agent_core::current_principal(), source.owner()) else {
+        return Ok(());
+    };
+    if o.tenant == caller.tenant && o.subject == caller.subject {
+        Ok(())
+    } else {
+        Err(Status::permission_denied("permission denied"))
+    }
+}
+
 #[tonic::async_trait]
 impl pb::agent_session_service_server::AgentSessionService for AgentSessionSvc {
     type SubscribeStream = Pin<Box<dyn Stream<Item = Result<pb::SessionEvent, Status>> + Send>>;
@@ -95,6 +127,7 @@ impl pb::agent_session_service_server::AgentSessionService for AgentSessionSvc {
     ) -> Result<Response<Self::SubscribeStream>, Status> {
         let sp = span("agent_session.subscribe", request.metadata());
         let source = self.resolve(&request.get_ref().session_id)?;
+        may_observe(source.as_ref())?;
         // The snapshot is taken *before* subscribing so no event is missed between
         // the two (the leading snapshot may double a just-published event — the
         // client renders idempotently).
@@ -111,6 +144,7 @@ impl pb::agent_session_service_server::AgentSessionService for AgentSessionSvc {
     ) -> Result<Response<pb::StatusSnapshot>, Status> {
         let sp = span("agent_session.snapshot", request.metadata());
         let source = self.resolve(&request.get_ref().session_id)?;
+        may_observe(source.as_ref())?;
         async move { Ok(Response::new(source.snapshot().into())) }
             .instrument(sp)
             .await
@@ -157,6 +191,8 @@ impl pb::agent_session_service_server::AgentSessionService for AgentSessionSvc {
             // internal for exhaustiveness.
             DriverError::Backend(_) => Status::internal(e.to_string()),
         })?;
+        // `session_for` recorded this caller as owner if the session was new.
+        may_drive(ds.source.as_ref())?;
 
         // Subscribe *before* starting the run so the leading `RunStarted` is captured
         // (the snapshot is taken first, exactly as `subscribe` does).
@@ -420,5 +456,88 @@ mod tests {
             .map(|_| ())
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::ResourceExhausted);
+    }
+
+    // --- session ownership (security-hardening S7) --------------------------------
+
+    /// A source with a recorded (or no) owner.
+    struct OwnedSource(Option<(&'static str, &'static str)>);
+    impl SessionSource for OwnedSource {
+        fn snapshot(&self) -> StatusSnapshot {
+            StatusSnapshot::default()
+        }
+        fn subscribe(&self) -> SessionEventStream {
+            Box::pin(futures_util::stream::empty::<SessionEvent>())
+        }
+        fn owner(&self) -> Option<agent_core::SessionOwner> {
+            self.0.map(|(tenant, subject)| agent_core::SessionOwner {
+                tenant: tenant.into(),
+                subject: subject.into(),
+            })
+        }
+    }
+
+    const NOBODY: Option<(&str, &str)> = None;
+
+    #[rstest::rstest]
+    // positive: the owner watches and drives its own session, whatever its roles.
+    #[case::positive_owner_observes(Some(("acme", "alice")), "acme", "alice", agent_core::ROLE_AGENT_USER, true, true)]
+    #[case::positive_org_admin_observes_other_subject(Some(("acme", "alice")), "acme", "bob", agent_core::ROLE_ORG_ADMIN, true, false)]
+    #[case::positive_operator_observe_any_session(Some(("globex", "carol")), "host", "op", agent_core::ROLE_OPERATOR, true, false)]
+    // negative: a plain user may not watch a colleague's session.
+    #[case::negative_agent_user_cannot_observe_other_subject(Some(("acme", "alice")), "acme", "bob", agent_core::ROLE_AGENT_USER, false, false)]
+    // boundary: same subject name in another tenant is a different principal.
+    #[case::boundary_same_subject_other_tenant(Some(("acme", "alice")), "globex", "alice", agent_core::ROLE_AGENT_USER, false, false)]
+    // corner: an unowned session (fleet, CLI) is watchable only with observe in the caller's tenant; anyone may drive it.
+    #[case::corner_unowned_needs_observe(
+        NOBODY,
+        "acme",
+        "bob",
+        agent_core::ROLE_AGENT_USER,
+        false,
+        true
+    )]
+    #[case::corner_unowned_org_admin_observes(
+        NOBODY,
+        "acme",
+        "bob",
+        agent_core::ROLE_ORG_ADMIN,
+        true,
+        true
+    )]
+    // adversarial: a tenant admin cannot reach into another tenant's session.
+    #[case::adversarial_org_admin_other_tenant(Some(("globex", "carol")), "acme", "bob", agent_core::ROLE_ORG_ADMIN, false, false)]
+    #[tokio::test]
+    async fn session_ownership(
+        #[case] owner: Option<(&'static str, &'static str)>,
+        #[case] tenant: &str,
+        #[case] subject: &str,
+        #[case] role: &str,
+        #[case] observe: bool,
+        #[case] drive: bool,
+    ) {
+        let caller = agent_core::VerifiedPrincipal {
+            tenant: tenant.into(),
+            subject: subject.into(),
+            roles: vec![role.into()],
+        };
+        let source = OwnedSource(owner);
+        agent_core::principal_scope(caller, async {
+            let got = may_observe(&source);
+            assert_eq!(got.is_ok(), observe, "observe");
+            if let Err(e) = got {
+                assert_eq!(e.code(), tonic::Code::PermissionDenied);
+            }
+            assert_eq!(may_drive(&source).is_ok(), drive, "drive");
+        })
+        .await;
+    }
+
+    // corner: with auth off (no principal) ownership is not checked at all.
+    #[tokio::test]
+    async fn corner_no_principal_skips_ownership() {
+        let source = OwnedSource(Some(("acme", "alice")));
+        assert!(may_observe(&source).is_ok());
+        assert!(may_drive(&source).is_ok());
     }
 }

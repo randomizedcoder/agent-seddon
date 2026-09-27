@@ -428,8 +428,16 @@ impl agent_core::SessionDriver for SessionManager {
             .map_err(agent_core::DriverError::from)?;
         // The session's actor built its sink via `session_with` → `events.get_or_create`,
         // so this resolves the *same* sink the loop publishes into (idempotent lookup).
-        let source: Arc<dyn agent_core::SessionSource> =
-            self.backend.events.get_or_create(key.session.as_str());
+        let sink = self.backend.events.get_or_create(key.session.as_str());
+        // The verified caller that drives a session owns it (S7): watching it from
+        // another subject then needs `(observe, agent)`. First write wins.
+        if let Some(p) = agent_core::current_principal() {
+            sink.claim_owner(agent_core::SessionOwner {
+                tenant: p.tenant,
+                subject: p.subject,
+            });
+        }
+        let source: Arc<dyn agent_core::SessionSource> = sink;
         Ok(agent_core::DriverSession {
             source,
             runner: Arc::new(handle),
