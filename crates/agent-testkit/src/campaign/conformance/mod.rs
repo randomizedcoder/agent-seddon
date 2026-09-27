@@ -23,6 +23,7 @@ pub mod t4;
 pub mod t5;
 pub mod t6;
 pub mod t7;
+pub mod t8;
 
 type Open = dyn Fn(&str) -> CampaignResult<Arc<dyn CampaignStore>> + Send + Sync;
 
@@ -498,6 +499,33 @@ macro_rules! campaign_conformance_suite {
                 adversarial_pr_url_long,
                 adversarial_tokens_negative,
                 adversarial_cross_tenant_complete,
+            ]);
+            $crate::__campaign_table!(t8, $make, $after, $ig, [
+                positive_approve,
+                positive_approve_children,
+                positive_answer,
+                positive_retry_failed,
+                positive_retry_blocked_task,
+                positive_cancel_subtree,
+                positive_replan,
+                positive_replan_keeps_done,
+                positive_pr_approval_event,
+                negative_approve_wrong_state,
+                negative_stale_version,
+                negative_cancel_done,
+                negative_replan_leaf,
+                negative_answer_not_awaiting,
+                corner_cancel_leaf,
+                corner_cancel_partial_subtree,
+                corner_replan_twice,
+                corner_answer_goal_at_cap,
+                boundary_answer_600,
+                adversarial_actor_from_arg,
+                adversarial_answer_injection,
+                adversarial_policy_edit_by_model,
+                adversarial_policy_edit_loosens_check,
+                adversarial_cross_tenant_approve,
+                adversarial_cross_tenant_cancel,
             ]);
         }
     };

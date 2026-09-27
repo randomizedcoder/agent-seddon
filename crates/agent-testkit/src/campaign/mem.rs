@@ -559,6 +559,8 @@ impl CampaignStore for MemCampaigns {
                         &Actor::Planner,
                         json!({"reason": reason.as_str()}),
                     )?;
+                    // A `blocked` child is a failure state: the parent is recomputed.
+                    tx.rollup_from(t.parent_id)?;
                     Ok(PlanStart::Blocked { task, reason })
                 }
                 None => {
@@ -796,12 +798,16 @@ impl CampaignStore for MemCampaigns {
                     check_max("reason", reason, MAX_REASON)?;
                     let id =
                         tx.plan_attempt(t.task_id, &req.attempt, AttemptOutcome::Reject, None)?;
-                    tx.transition(
+                    let task = tx.transition(
                         t.task_id,
                         TaskState::Blocked,
                         &Actor::Attempt(id),
                         json!({"reason": BlockReason::Reject.as_str(), "message": reason}),
-                    )
+                    )?;
+                    // A `blocked` child is a failure state: the parent is recomputed
+                    // (`02-transactions.md` "Rollup rule").
+                    tx.rollup_from(t.parent_id)?;
+                    Ok(task)
                 }
                 PlanCloseOutcome::Error { error } => {
                     let error = truncate_chars(error, MAX_ERROR);
@@ -815,12 +821,14 @@ impl CampaignStore for MemCampaigns {
                     let attempts = t.attempts.saturating_add(1);
                     tx.task_mut(t.task_id)?.attempts = attempts;
                     if i64::from(attempts) >= policy.max_plan_attempts {
-                        tx.transition(
+                        let task = tx.transition(
                             t.task_id,
                             TaskState::Blocked,
                             &Actor::Attempt(id),
                             json!({"reason": BlockReason::AttemptsExhausted.as_str(), "attempts": attempts}),
-                        )
+                        )?;
+                        tx.rollup_from(t.parent_id)?;
+                        Ok(task)
                     } else {
                         tx.transition(
                             t.task_id,

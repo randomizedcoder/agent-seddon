@@ -10,7 +10,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 
 ## Now
 
-- **Next:** CP-01 step 10 — conformance table `t8.rs` (approve / answer / retry / cancel / replan); then steps 11–13.
+- **Next:** CP-01 step 11 — testkit `lib.rs` doc-header bullets; then step 12 (doc amendments) and step 13 (`nix flake check`, ask before push / PR).
 
 ## CP-01 — seam, pure rules, `MemCampaigns`, T1–T8 (mem) — 🟡 branch `campaigns/cp-01`
 
@@ -32,7 +32,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 | T5 decompose / mark_leaf (mem) | ✅ | rows: 30/31 (`adversarial_concurrent_decompose` pg-only); `boundary_max_nodes` builds the 198-node tree with 25 splits; `negative_mark_leaf_with_children` uses a replan in flight so the has-children branch (not the CAS) is what refuses; `corner_attempt_exhausted` ends by showing `plan_start` on the blocked root is `Conflict` and `replan` resets `attempts` |
 | T6 claim / heartbeat / reap (mem) | ✅ | rows: 22/24 (`corner_reap_skips_locked`, `adversarial_double_claim` pg-only); rows look at `work` attempts only (a fixture leaf also owns its `execute` attempt); lease rows assert `lease_until_ms` against the harness clock, so they run unchanged on pg; `adversarial_owner_empty` holds at `Owner::parse` (a `ClaimRequest` cannot carry a bad owner) |
 | T7 complete / fail (mem) | ✅ | rows: 19/19; two doc amendments for step 12: `adversarial_pr_url_long` is `TooLong` (the cap class, like `boundary_title_121`), not `Invalid`; `positive_failed_does_not_block_done_dependent` uses a `cancelled` dependent (a dependent is never `done` before its dependency, and `done` never fails) and also checks a non-dependent `ready` sibling is untouched |
-| T8 approve / answer / retry / cancel / replan (mem) | ⬜ | rows: 0/25 |
+| T8 approve / answer / retry / cancel / replan (mem) | ✅ | rows: 25/25; `positive_retry_blocked_task` found a store bug — a planner `blocked` (`plan_start` caps, `plan_close` reject / attempts exhausted) did not roll up; fixed in `MemCampaigns` and logged below for `PgCampaigns`; `adversarial_actor_from_arg` sweeps every non-human `Actor` variant over the seven human protocols |
 | doc amendments (02 transitions, 03 attempt note, 05 row, 06 harness/dims) | ⬜ | |
 | gate `nix flake check` | ⬜ | |
 
@@ -79,6 +79,11 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 - 2026-09-26 — `rollup()` changes only a `decomposed` or `blocked` parent (a `decomposing` parent
   mid-replan, or a terminal one, is never touched by a child); the "all cancelled → blocked" row
   applies to a `decomposed` parent only. Recorded in `02-transactions.md` "Rollup rule".
+- 2026-09-26 — A node the **planner** moves to `blocked` (`plan_start` at `attempts_exhausted` /
+  `token_cap`, `plan_close` `reject` / attempts exhausted) runs the same rollup pass as (d) step 5
+  on its ancestors; the rule's "any `failed` or `blocked` child" row is otherwise unreachable
+  from (b). Found by T8 `positive_retry_blocked_task`; `PgCampaigns` must lock the ancestors in
+  those three branches too (CP-02). Doc amendment for `02-transactions.md` (b) in step 12.
 
 ## Gate status
 
