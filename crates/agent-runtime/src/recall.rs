@@ -189,6 +189,7 @@ pub fn build_tantivy_recall(
 /// snapshot meanwhile (serve-stale). Mirrors [`crate::search::spawn_freshness`]
 /// for the single recall backend.
 pub fn spawn_freshness(backend: Arc<dyn SearchBackend>) {
+    // unscoped-spawn: background upkeep with no caller.
     tokio::spawn(async move {
         match backend.status().await {
             Ok(st) if st.state == agent_core::IndexState::Fresh => {

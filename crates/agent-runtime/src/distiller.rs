@@ -94,6 +94,7 @@ impl Distiller {
     pub fn spawn(ctx: DistillerCtx) -> Self {
         let (tx, rx) = mpsc::channel(QUEUE_CAP);
         let (done_tx, processed) = tokio::sync::watch::channel(0u64);
+        // unscoped-spawn: the per-session worker outlives any one request.
         tokio::spawn(run(rx, ctx, done_tx));
         Self {
             tx,
@@ -440,7 +441,8 @@ pub(crate) fn file_alternatives(
         };
         let store = store.clone();
         let metrics = metrics.clone();
-        tokio::spawn(async move {
+        let carried = agent_core::RequestScope::current();
+        tokio::spawn(agent_core::scope_request(carried, async move {
             match store.put(row).await {
                 Ok(()) => metrics.on_distill("alternatives", "succeeded", 0.0),
                 Err(e) => {
@@ -448,7 +450,7 @@ pub(crate) fn file_alternatives(
                     metrics.on_distill("alternatives", "store_failed", 0.0);
                 }
             }
-        });
+        }));
     }
 }
 

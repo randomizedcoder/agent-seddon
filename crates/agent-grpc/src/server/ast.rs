@@ -78,7 +78,9 @@ impl pb::ast_service_server::AstService for AstServiceSvc {
         let label = self.label();
         async move {
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-            tokio::spawn(async move {
+            // The caller's scope rides into the spawned reindex (S9).
+            let carried = agent_core::RequestScope::current();
+            tokio::spawn(agent_core::scope_request(carried, async move {
                 let tx_progress = tx.clone();
                 let progress = move |p: agent_core::ReindexProgress| {
                     let mut pp = pb::ReindexProgress::from(p);
@@ -88,7 +90,7 @@ impl pb::ast_service_server::AstService for AstServiceSvc {
                 if let Err(e) = inner.reindex(&progress).await {
                     let _ = tx.send(Err(status_from_error(&e)));
                 }
-            });
+            }));
             let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(rx);
             Ok(Response::new(Box::pin(stream) as Self::ReindexStream))
         }

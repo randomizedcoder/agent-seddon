@@ -65,6 +65,28 @@ process's service principal (`sub = svc:fleet`, role `svc_fleet`). When a user t
 the forge post is attributed to the approver: audit `authz_allow{approve, review}` with
 `subject = user:…` and `peer_san = svc:fleet`.
 
+**As built (S9).**
+- `AGENT_BEARER` and a new `AGENT_HOPS` task-local ride in `RequestScope`
+  ([`request_scope.rs`](../../../crates/agent-core/src/request_scope.rs)). `BearerSource` is
+  a trait with a once-per-process install (`install_bearer_source`; a second install is
+  refused so the credential cannot be swapped). `outbound_bearer()` = caller's token, else
+  service token. S9 ships the trait and `StaticBearer`. S10 (the mTLS-exchanged service
+  token) and S12 (the CLI's stored login) install real sources.
+- The hop count is computed in `AuthLayer` before the auth mode is consulted, so it also
+  applies with auth off. Wire value = the sender's hop; this server's hop = value + 1;
+  a value over `MAX_HOPS = 4` is refused. So a client may send 4 and the deepest server
+  that does work is hop 5.
+- Carried across spawns: the served AST and search reindex tasks, the per-tool task in the
+  agent loop, the fleet's review task, the distiller's alternatives write, and a tenant's
+  first reindex. The session actor outlives requests, so each `Run` message carries its
+  submitter's `RequestScope` and the turn runs under it. That keeps an interactive turn's
+  remote tool calls attributed to the user. Background upkeep (index warm-up, git fetch),
+  the distiller worker and scheduled jobs are marked `// unscoped-spawn:` with a reason.
+- **Not in S9.** `peer_san` and "a service token without mTLS is rejected" need the mTLS
+  peer (S10). The fleet's trigger queue carries no caller scope (one review may merge
+  triggers from several users), so a queued `ReviewNow` runs under the service token.
+  Attributing it to the requester is left for S10/S11, together with the audit rows.
+
 ## mTLS between services
 
 Every `--serve-*` TCP listener requires a client certificate from the local CA; every seam client

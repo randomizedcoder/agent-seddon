@@ -15,7 +15,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S6 | Session store + `Exchange/Refresh/Logout` | D11 | ✅ | #505 |
 | S7 | RBAC extension, read gating, authz-coverage gate | D9 | ✅ | #504 |
 | S8 | Role bindings, bootstrap, escalation rules | D3, D9 | ✅ | #511 |
-| S9 | Bearer propagation + two-hop chain test | D7 | ⬜ | — |
+| S9 | Bearer propagation + two-hop chain test | D7 | 🟡 | — |
 | S10 | mTLS service identity | D6 | ⬜ | — |
 | S11 | `agent_auth_events` audit + doctor probes | D11 | ⬜ | — |
 | S12 | CLI `agent login/logout/whoami` | D6 | ⬜ | — |
@@ -441,4 +441,28 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     - 14 `PutBinding` refusal and grant cases;
     - `corner_last_binding_admin_not_deletable`;
     - binding reads, and `ListBindings` needing `read:binding`.
-
+- **2026-09-27 — S9 (PR pending).** The caller's credentials now follow a request from one
+  seam to the next.
+  - `outbound()` sends `authorization: Bearer` with the caller's agent token (the
+    `AGENT_BEARER` task-local S5 added). With no caller token it sends the process's
+    service token from the new `BearerSource`, a once-per-process install; S10 and S12
+    provide real sources. A caller's token is never replaced by the service's.
+  - `x-agent-hops`: `AuthLayer` computes this server's hop as the inbound value + 1, with
+    auth on or off. Over 4 is `FAILED_PRECONDITION`; a malformed or non-ASCII value is
+    `INVALID_ARGUMENT`. `outbound()` stamps its own count, replacing any forged one.
+  - `RequestScope` gains `hops`; `scope_request` installs it.
+  - Six request spawn sites now run under `scope_request`. The session actor's `Run`
+    message carries its submitter's scope. Deliberate exceptions carry
+    `// unscoped-spawn: <reason>`.
+  - Gate: `crates/agent-grpc/tests/no_unscoped_spawn.rs` scans the production source of
+    `agent-grpc` server/client, `agent-runtime` and `agent-review-fleet`. It has 10 fixture
+    cases testing the checker itself.
+  - Tests:
+    - `tests/auth_chain.rs`: two real servers, A forwarding to B. The user's token and
+      principal reach B at hop 2; no token stops at A; a 6-case hop table at B; a forged
+      `x-agent-hops: 0` still counts real hops; the loop ceiling; the service-token
+      fallback with auth off at A, plus the refused second install.
+    - Tables for `parse_hops`/`inject_hops`, `inbound_hops`, `select_bearer`,
+      `scope_request` with hops, and `outbound()`'s bearer and hop headers.
+  - Deferred: `peer_san` and service-token-needs-mTLS (S10), and attributing a queued
+    `ReviewNow` to its requester (S10/S11).

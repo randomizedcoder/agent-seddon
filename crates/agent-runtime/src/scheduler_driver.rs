@@ -272,6 +272,8 @@ impl StoreDriver {
                 .clone();
             let global = global.clone();
             let exec = exec.clone();
+            // unscoped-spawn: a scheduled job has no caller; its seam calls carry the
+            // process's service token (`agent_core::outbound_bearer`).
             set.spawn(async move {
                 // Per-tenant permit first, then the global one — a fixed acquire
                 // order across every task, so the two semaphores cannot deadlock.

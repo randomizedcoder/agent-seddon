@@ -97,7 +97,9 @@ impl pb::search_service_server::SearchService for SearchServiceSvc {
             // a background task drives `reindex`, forwarding each progress increment
             // (and any terminal error) into an mpsc channel that becomes the stream.
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-            tokio::spawn(async move {
+            // The caller's principal, token and hop ride along too (S9).
+            let carried = agent_core::RequestScope::current();
+            tokio::spawn(agent_core::scope_request(carried, async move {
                 let tx_progress = tx.clone();
                 let progress = move |p: agent_core::ReindexProgress| {
                     let mut pp = pb::ReindexProgress::from(p);
@@ -114,7 +116,7 @@ impl pb::search_service_server::SearchService for SearchServiceSvc {
                     }
                 };
                 super::run_scoped(key, job).await;
-            });
+            }));
             let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(rx);
             Ok(Response::new(Box::pin(stream) as Self::ReindexStream))
         }

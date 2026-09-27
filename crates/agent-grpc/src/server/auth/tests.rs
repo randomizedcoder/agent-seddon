@@ -742,3 +742,30 @@ async fn corner_health_exempt_from_identity_policy() {
         "health needs no token or identity"
     );
 }
+
+/// This server's hop from the inbound `x-agent-hops` (security-hardening S9): the
+/// sender's count plus one; malformed ⇒ `INVALID_ARGUMENT`, over the ceiling ⇒
+/// `FAILED_PRECONDITION`.
+#[rstest::rstest]
+// desc: a client (no header) makes this hop 1.
+#[case::positive_absent(None, Ok(1))]
+// desc: a forwarded call.
+#[case::positive_forwarded(Some(b"1".as_slice()), Ok(2))]
+// desc: the ceiling.
+#[case::boundary_max(Some(b"4".as_slice()), Ok(5))]
+// desc: one over.
+#[case::boundary_over(Some(b"5".as_slice()), Err(tonic::Code::FailedPrecondition))]
+// desc: not a number.
+#[case::negative_text(Some(b"x".as_slice()), Err(tonic::Code::InvalidArgument))]
+// desc: a non-ASCII header value cannot be read as text at all.
+#[case::adversarial_non_ascii(Some(b"\xff".as_slice()), Err(tonic::Code::InvalidArgument))]
+fn inbound_hops_cases(#[case] raw: Option<&[u8]>, #[case] want: Result<u8, tonic::Code>) {
+    let mut headers = http::HeaderMap::new();
+    if let Some(raw) = raw {
+        headers.insert(
+            agent_proto::identity::HOPS_KEY,
+            http::HeaderValue::from_bytes(raw).expect("header bytes"),
+        );
+    }
+    assert_eq!(super::inbound_hops(&headers).map_err(|s| s.code()), want);
+}
