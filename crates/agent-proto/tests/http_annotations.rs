@@ -351,6 +351,50 @@ enum Expect {
     "SchedulerService.History",
     Expect::Routes(&[("GET", "/v1/scheduler/jobs/{id}/runs")])
 )]
+// --- 03f: tools / exec / web / forge ----------------------------------------
+// corner — running a named tool captures the tool name in the path and carries the
+// arguments/context in the body (path param + POST body:*).
+#[case::corner_tool_execute_name_in_path_with_body(
+    "ToolService.Execute -> POST /v1/tools/{name}/execute",
+    "ToolService.Execute",
+    Expect::Routes(&[("POST", "/v1/tools/{name}/execute")])
+)]
+// positive — the sandbox exec (run a command to completion, the largest grant) is an
+// action → POST body:*.
+#[case::positive_sandbox_exec_action_maps_to_post(
+    "SandboxService.Exec -> POST /v1/sandbox/exec",
+    "SandboxService.Exec",
+    Expect::Routes(&[("POST", "/v1/sandbox/exec")])
+)]
+// corner — reading a pty's output is a cursor read on a session sub-resource → GET
+// /{id}/read (the cursor rides as a query param), NOT a POST.
+#[case::corner_pty_read_is_get_on_session_subresource(
+    "PtyService.Read -> GET /v1/pty/sessions/{id}/read",
+    "PtyService.Read",
+    Expect::Routes(&[("GET", "/v1/pty/sessions/{id}/read")])
+)]
+// corner — a PR is addressed by a NUMERIC id (`uint64 number`); the transcoder binds
+// it to the `{number}` capture just like a string id (first numeric path param).
+#[case::corner_forge_getpr_numeric_path_param(
+    "ForgeService.GetPr -> GET /v1/forge/prs/{number}",
+    "ForgeService.GetPr",
+    Expect::Routes(&[("GET", "/v1/forge/prs/{number}")])
+)]
+// corner — clearing the whole todo list is a collection-level DELETE with ZERO path
+// params (the /v1/tasks collection also carries POST Write + GET List — three verbs,
+// one path, distinct routes).
+#[case::corner_task_clear_collection_level_delete(
+    "TaskService.Clear -> DELETE /v1/tasks (collection-level delete, no path param)",
+    "TaskService.Clear",
+    Expect::Routes(&[("DELETE", "/v1/tasks")])
+)]
+// corner — submitting a review is an outside-world WRITE nested under a numeric parent
+// (POST body:* with a `{number}` capture).
+#[case::corner_forge_reviewpr_write_under_numeric_parent(
+    "ForgeService.ReviewPr -> POST /v1/forge/prs/{number}/reviews",
+    "ForgeService.ReviewPr",
+    Expect::Routes(&[("POST", "/v1/forge/prs/{number}/reviews")])
+)]
 // negative — an RPC in a not-yet-annotated proto carries no rule. This row flips to a
 // positive `Routes` case when `policy.proto` is annotated in a later increment.
 #[case::negative_unannotated_rpc_has_no_rule(

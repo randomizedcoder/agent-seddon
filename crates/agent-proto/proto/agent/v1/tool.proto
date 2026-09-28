@@ -6,6 +6,10 @@ syntax = "proto3";
 package agent.v1;
 
 import "agent/v1/common.proto";
+// REST transcoding annotations (gap-analysis §4, docs/design/rest-openapi/). The
+// `(google.api.http)` options below let Envoy's `grpc_json_transcoder` expose the
+// service as REST/JSON without any Rust code; gRPC stays the primary interface.
+import "google/api/annotations.proto";
 
 message DescribeAllRequest {}
 
@@ -21,8 +25,19 @@ message ExecuteRequest {
 }
 
 service ToolService {
+  // REST mappings (docs/design/rest-openapi/), under /v1/tools/. DescribeAll is a
+  // read → GET; Execute runs a named tool (arbitrary side-effects) → POST with the
+  // tool name captured in the path and the arguments/context in the body.
+  //
   // The tools this worker advertises (what the model is told about).
-  rpc DescribeAll(DescribeAllRequest) returns (DescribeAllResponse);
+  rpc DescribeAll(DescribeAllRequest) returns (DescribeAllResponse) {
+    option (google.api.http) = {get: "/v1/tools"};
+  }
   // Run one named tool.
-  rpc Execute(ExecuteRequest) returns (Observation);
+  rpc Execute(ExecuteRequest) returns (Observation) {
+    option (google.api.http) = {
+      post: "/v1/tools/{name}/execute"
+      body: "*"
+    };
+  }
 }
