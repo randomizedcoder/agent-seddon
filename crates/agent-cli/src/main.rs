@@ -32,6 +32,18 @@ async fn main() -> Result<()> {
         model_router_config,
     } = parse_args()?;
 
+    // `agent --run-task --tenant T --task <id>` (docs/design/campaigns, CP-05): the
+    // worker subprocess the campaign driver will dispatch. Until CP-06 lands the
+    // worker body it is a stub that exits BEFORE the config is read or any store
+    // is opened: `AGENT_CAMPAIGN_OWNER` missing / unsafe ⇒ `lease lost` (exit 3),
+    // present ⇒ `not implemented` (exit 4). The token is never printed.
+    if let Mode::RunTask { tenant, task } = &mode {
+        let owner = std::env::var(agent_core::campaign::CAMPAIGN_OWNER_ENV).ok();
+        let (code, msg) = campaign_cli::run_task_stub(owner.as_deref());
+        eprintln!("{msg} (tenant {tenant}, task #{task})");
+        std::process::exit(code);
+    }
+
     let toml_str = std::fs::read_to_string(&config_path)
         .with_context(|| format!("reading config `{}`", config_path.display()))?;
     // Parse with the ignored-key list in hand rather than letting `parse_config`
@@ -233,11 +245,22 @@ async fn main() -> Result<()> {
     // here, before any metrics or seam machinery starts — like `doctor`. The store
     // is opened lazily and migrated on this first use when `[config_store]
     // migrate_on_start` allows it; `--tenant` only selects the tenant view. The
-    // verbs run as `user:local` under a fresh local session scope. `plan` and
-    // `run --once` need the planner (a provider), so they keep the opened store
-    // and fall through to the built agent's `scope` arm below.
+    // verbs run as `user:local` under a fresh local session scope. `plan`, `run
+    // --once` and `run` need the planner (a provider), so they keep the opened
+    // store — and, for the driver verbs, the multi-tenant backend (CP-05) — and
+    // fall through to the built agent's `scope` arm below.
     let mut campaign_run: Option<CampaignRun> = None;
     if let Mode::Campaign(args) = &mode {
+        // The resident driver is gated by `[campaign] enabled` (an explicit
+        // opt-in, since it claims and dispatches on its own); refused here, after
+        // the config load and before anything opens. `run --once` is an explicit
+        // human action and ignores the key.
+        if args.cmd == campaign_cli::CampaignCmd::Run && !config.campaign.enabled {
+            anyhow::bail!(
+                "agent campaign run: the resident driver is off — set `[campaign] enabled = true` \
+                 (or use `run --once` for a single tick)"
+            );
+        }
         let store = agent_runtime::campaign::open_campaign_store(
             &config,
             agent_runtime::campaign::CampaignOpen {
@@ -264,6 +287,18 @@ async fn main() -> Result<()> {
             })
             .await;
         }
+        // The driver verbs also need the backend (every tenant's view); the store
+        // above already applied the schema, so this open never migrates.
+        let backend = if args.cmd.needs_driver() {
+            Some(
+                agent_runtime::campaign::open_campaign_backend(&config, false)
+                    .await
+                    .context("[campaign] store")?
+                    .context("agent campaign run: no campaign store is configured")?,
+            )
+        } else {
+            None
+        };
         // `config` moves into the builder below; keep what the planner needs.
         let working_dir = if config.agent.working_dir.is_empty() {
             std::env::current_dir().context("resolving the working directory")?
@@ -275,6 +310,8 @@ async fn main() -> Result<()> {
             cfg: config.campaign.clone(),
             repo_root: config.campaign.repo_root_or(&working_dir),
             main_model: config.provider.model.clone(),
+            backend,
+            tenants: agent_runtime::campaign_driver::tenants_for(&config, args.tenant.as_deref()),
         });
     }
 
@@ -599,31 +636,123 @@ async fn main() -> Result<()> {
             // already returned.
             Mode::CheckConfig => unreachable!("--check-config returns before the run"),
             Mode::Doctor => unreachable!("doctor returns before the run"),
-            // `plan` / `run --once`: the planner over the store opened above and the
-            // agent's planner provider (`[campaign] planner_model`, else the main
-            // one), with the worktree brief and touch resolver rooted at
-            // `[campaign] repo_root` (else `[agent] working_dir`).
+            // `plan` / `run --once` / `run`: the planner over the store opened above
+            // and the agent's planner provider (`[campaign] planner_model`, else the
+            // main one), with the worktree brief and touch resolver rooted at
+            // `[campaign] repo_root` (else `[agent] working_dir`). The driver verbs
+            // build one planner per tenant per tick from the same parts.
             Mode::Campaign(args) => {
                 let CampaignRun {
                     ctx,
                     cfg,
                     repo_root,
                     main_model,
+                    backend,
+                    tenants,
                 } = campaign_run.expect("the campaign store is opened before the build");
-                let planner = agent_campaign::Planner::draft07(
-                    ctx.store.clone(),
-                    agent.campaign_planner_provider(),
-                    std::sync::Arc::new(agent_campaign::FallbackBrief::new(&repo_root)),
-                    std::sync::Arc::new(agent_campaign::WorktreeTouches::new(&repo_root)),
-                    cfg.planner_label(&main_model),
-                )
-                .with_max_repairs(cfg.max_repairs);
+                let provider = agent.campaign_planner_provider();
+                let brief: std::sync::Arc<dyn agent_campaign::BriefSource> =
+                    std::sync::Arc::new(agent_campaign::FallbackBrief::new(&repo_root));
+                let touches: std::sync::Arc<dyn agent_campaign::TouchResolver> =
+                    std::sync::Arc::new(agent_campaign::WorktreeTouches::new(&repo_root));
+                let label = cfg.planner_label(&main_model).to_string();
+                let max_repairs = cfg.max_repairs;
                 let stdout = std::io::stdout();
-                let mut out = stdout.lock();
-                campaign_cli::run_plan(&ctx, &planner, cfg.plan_per_tick, &args.cmd, &mut out)
-                    .await
-                    .map(|()| None)
+                match &args.cmd {
+                    campaign_cli::CampaignCmd::RunOnce | campaign_cli::CampaignCmd::Run => {
+                        let factory: agent_campaign::PlannerFactory =
+                            std::sync::Arc::new(move |store| {
+                                agent_campaign::Planner::draft07(
+                                    store,
+                                    provider.clone(),
+                                    brief.clone(),
+                                    touches.clone(),
+                                    label.clone(),
+                                )
+                                .with_max_repairs(max_repairs)
+                            });
+                        let backend =
+                            backend.expect("the backend is opened for the driver verbs");
+                        let planner = std::sync::Arc::new(agent_campaign::FactoryPlanner(factory));
+                        if args.cmd == campaign_cli::CampaignCmd::RunOnce {
+                            // One tick over the one tenant `ctx.store` is bound to,
+                            // `enabled` forced on (an explicit human action).
+                            let once = agent_runtime::CampaignCfg {
+                                enabled: true,
+                                ..cfg
+                            };
+                            let driver = agent_runtime::campaign_driver::build_driver(
+                                &once,
+                                backend,
+                                agent_campaign::Tenants::Fixed(vec![ctx
+                                    .store
+                                    .tenant()
+                                    .to_string()]),
+                                planner,
+                            );
+                            let mut out = stdout.lock();
+                            return campaign_cli::run_driver_once(&ctx, &driver, &mut out)
+                                .await
+                                .map(|()| None);
+                        }
+                        // The resident loop, mirroring `--scheduler`: tick every
+                        // `tick_secs` until interrupted, then drain the workers.
+                        let driver = agent_runtime::campaign_driver::build_driver(
+                            &cfg, backend, tenants, planner,
+                        );
+                        let every = Duration::from_secs(cfg.tick_secs.max(1));
+                        eprintln!(
+                            "campaign: ticking every {}s — ^C to stop",
+                            every.as_secs()
+                        );
+                        loop {
+                            tokio::select! {
+                                () = tokio::time::sleep(every) => {
+                                    let report = driver.tick().await;
+                                    let mut out = stdout.lock();
+                                    campaign_cli::render_resident_tick(&report, &mut out)?;
+                                }
+                                sig = shutdown::signal() => {
+                                    eprintln!("\n{sig} — stopping the campaign driver");
+                                    break;
+                                }
+                            }
+                        }
+                        let drained = driver
+                            .drain(Duration::from_secs(cfg.worker_timeout_secs))
+                            .await;
+                        if drained.aborted > 0 {
+                            eprintln!(
+                                "campaign: {} worker(s) aborted; their leases expire and reap returns the leaves",
+                                drained.aborted
+                            );
+                        }
+                        Ok(None)
+                    }
+                    _ => {
+                        let planner = agent_campaign::Planner::draft07(
+                            ctx.store.clone(),
+                            provider,
+                            brief,
+                            touches,
+                            label,
+                        )
+                        .with_max_repairs(max_repairs);
+                        let mut out = stdout.lock();
+                        campaign_cli::run_plan(
+                            &ctx,
+                            &planner,
+                            cfg.plan_per_tick,
+                            &args.cmd,
+                            &mut out,
+                        )
+                        .await
+                        .map(|()| None)
+                    }
+                }
             }
+            // Returned before the config was read (the stub exits the process).
+            Mode::RunTask { .. } => unreachable!("--run-task exits before the run"),
             Mode::Login { .. } | Mode::Logout { .. } | Mode::WhoAmI { .. } => {
                 unreachable!("login/logout/whoami return before the run")
             }
@@ -793,10 +922,19 @@ enum Mode {
     Doctor,
     /// `agent campaign <verb> …` (docs/design/campaigns, CP-04): the human-facing
     /// verbs over the campaign store. Store-only verbs run before metrics and the
-    /// agent build, like `doctor`; `plan` / `run --once` build the agent for the
-    /// planner's provider. The bare word `campaign` selects this only as the first
-    /// non-option token — after `--` it is a goal word like any other.
+    /// agent build, like `doctor`; `plan` / `run --once` / `run` build the agent
+    /// for the planner's provider. The bare word `campaign` selects this only as
+    /// the first non-option token — after `--` it is a goal word like any other.
     Campaign(campaign_cli::CampaignArgs),
+    /// `agent --run-task --tenant T --task <id>` (campaigns CP-05): the worker
+    /// subprocess the campaign driver dispatches, hidden like
+    /// `--run-scheduled-job`. A stub until CP-06 — it exits before the config is
+    /// read (`campaign_cli::run_task_stub`). The tenant is validated fail-closed
+    /// at parse time; the task is an id, never a listing letter.
+    RunTask {
+        tenant: String,
+        task: agent_core::campaign::TaskId,
+    },
     /// Sign in (`agent login [--issuer NAME] [--endpoint ADDR]`): the device flow at
     /// the login issuer, then an agent token kept in
     /// `$XDG_CONFIG_HOME/agent-seddon/tokens/<issuer>.json`
@@ -818,13 +956,17 @@ enum Mode {
     },
 }
 
-/// What a planner verb (`plan`, `run --once`) carries from the config load to the
-/// `scope` arm, since `config` is consumed by the builder in between.
+/// What a planner verb (`plan`, `run --once`, `run`) carries from the config load
+/// to the `scope` arm, since `config` is consumed by the builder in between.
 struct CampaignRun {
     ctx: campaign_cli::CampaignCtx,
     cfg: agent_runtime::CampaignCfg,
     repo_root: PathBuf,
     main_model: String,
+    /// The multi-tenant backend, opened for the driver verbs only.
+    backend: Option<std::sync::Arc<dyn agent_core::campaign::CampaignBackend>>,
+    /// The tenants the resident driver serves (`--tenant`, discovery, or `local`).
+    tenants: agent_campaign::Tenants,
 }
 
 /// The seam impls a config selects — captured before `Config` is consumed by the
@@ -909,6 +1051,8 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<Args> {
     let mut resume: Option<ResumeArg> = None;
     let mut scheduler_mode = false;
     let mut run_scheduled_job = false;
+    let mut run_task = false;
+    let mut task: Option<String> = None;
     let mut tenant: Option<String> = None;
     let mut serve_mcp = false;
     let mut serve_grpc: Option<grpc_server::Seam> = None;
@@ -956,6 +1100,12 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<Args> {
             }
             "--scheduler" => scheduler_mode = true,
             "--run-scheduled-job" => run_scheduled_job = true,
+            // The campaign worker mode (CP-05 stub, CP-06 body), hidden like
+            // `--run-scheduled-job`; unreachable after `--`.
+            "--run-task" => run_task = true,
+            "--task" => {
+                task = Some(args.next().context("--task requires a task id")?);
+            }
             "--tenant" => {
                 tenant = Some(args.next().context("--tenant requires a tenant segment")?);
             }
@@ -1096,6 +1246,20 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<Args> {
             c.tenant = Some(t);
         }
         Mode::Campaign(c)
+    } else if run_task {
+        // Fail closed on both arguments: a worker never runs un-scoped, and a task
+        // is an id (a letter is a listing position, meaningless to a subprocess).
+        let tenant = tenant.context("--run-task requires --tenant <segment>")?;
+        if !agent_core::safe_segment(&tenant) {
+            anyhow::bail!("--tenant `{}` is not a valid tenant segment", {
+                let cut: String = tenant.chars().take(40).collect();
+                agent_campaign::display::escape_terminal(&cut)
+            });
+        }
+        let task = campaign_cli::parse_task_id(&task.context("--run-task requires --task <id>")?)?;
+        Mode::RunTask { tenant, task }
+    } else if task.is_some() {
+        anyhow::bail!("--task only applies to `--run-task`");
     } else if scheduler_mode {
         Mode::Scheduler
     } else if run_scheduled_job {
@@ -1236,6 +1400,49 @@ mod tests {
     #[test]
     fn negative_run_scheduled_job_requires_tenant() {
         assert!(parse(&["--run-scheduled-job", "--", "some goal"]).is_err());
+    }
+
+    /// The parsed `--run-task` mode, for the table below.
+    fn run_task_mode(argv: &[&str]) -> Result<String> {
+        parse(argv).map(|a| match a.mode {
+            Mode::RunTask { tenant, task } => format!("run-task {tenant} #{task}"),
+            Mode::OneShot(goal) => format!("oneshot {goal}"),
+            _ => "other".into(),
+        })
+    }
+
+    // desc: `--run-task --tenant T --task <id>` (campaigns CP-05) parses like
+    // `--run-scheduled-job`: both arguments required, the tenant a safe segment,
+    // the task an id; after `--` the flags are goal words.
+    #[rstest::rstest]
+    #[case::positive_run_task(&["--run-task", "--tenant", "acme", "--task", "12"], "run-task acme #12")]
+    #[case::positive_run_task_flag_order(&["--task", "7", "--tenant", "t", "--run-task"], "run-task t #7")]
+    #[case::adversarial_run_task_after_double_dash_is_a_goal(
+        &["--", "--run-task", "--tenant", "t", "--task", "1"],
+        "oneshot --run-task --tenant t --task 1"
+    )]
+    fn run_task_parses(#[case] argv: &[&str], #[case] want: &str) {
+        assert_eq!(run_task_mode(argv).expect("parses"), want);
+    }
+
+    #[rstest::rstest]
+    #[case::negative_run_task_requires_tenant(&["--run-task", "--task", "1"], "requires --tenant")]
+    #[case::negative_run_task_requires_task(&["--run-task", "--tenant", "t"], "requires --task")]
+    #[case::negative_run_task_bad_task_id_zero(&["--run-task", "--tenant", "t", "--task", "0"], "is not a task ref")]
+    #[case::negative_run_task_bad_task_id_word(&["--run-task", "--tenant", "t", "--task", "abc"], "is not a task ref")]
+    #[case::negative_run_task_letter_task(&["--run-task", "--tenant", "t", "--task", "A"], "must be a task id")]
+    #[case::adversarial_run_task_tenant_traversal(&["--run-task", "--tenant", "../x", "--task", "1"], "not a valid tenant segment")]
+    #[case::adversarial_run_task_task_traversal(&["--run-task", "--tenant", "t", "--task", "../1"], "is not a task ref")]
+    #[case::negative_task_without_run_task(&["--task", "1", "hello"], "only applies to")]
+    #[case::boundary_task_missing_value(&["--run-task", "--tenant", "t", "--task"], "requires a task id")]
+    fn run_task_refused(#[case] argv: &[&str], #[case] want: &str) {
+        let err = run_task_mode(argv).expect_err("refused");
+        let msg = format!("{err:#}");
+        assert!(msg.contains(want), "{msg}");
+        assert!(
+            msg.len() < 300 && !msg.chars().any(char::is_control),
+            "{msg:?}"
+        );
     }
 
     // desc (adversarial): a bare flag-like word (no `--`) is still NOT a scheduled job

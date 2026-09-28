@@ -8,18 +8,23 @@
 //! refused where they can only be a mistake, the goal and source ref are
 //! screened, and every echo in an error is escaped and cut to 40 chars.
 //!
-//! It also owns the store-only verbs (`run`) and their terminal rendering: every
-//! string the store hands back was written by a human or by the model, so it is
-//! passed through `escape_terminal` before it reaches stdout, and list titles are
-//! cut. Letters are minted from the **unfiltered** listing, so `A` names the same
+//! It also owns the store-only verbs and their terminal rendering: every string
+//! the store hands back was written by a human or by the model, so it is passed
+//! through `escape_terminal` before it reaches stdout, and list titles are cut.
+//! Letters are minted from the **unfiltered** listing, so `A` names the same
 //! campaign in `list`, `list --needs-attention`, `show` and `add`.
+//!
+//! `run` (CP-05) drives the campaign driver (`agent_campaign::Driver`): `run
+//! --once` is one tick plus a drain over the `--tenant` (or `local`) tenant,
+//! `run` the resident loop `main.rs` ticks every `[campaign] tick_secs`. The
+//! hidden `--run-task` worker mode is a stub until CP-06 ([`run_task_stub`]).
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::sync::Arc;
 
 use agent_campaign::display::{escape_terminal, letters, parse_letter, Letters};
-use agent_campaign::{PlanOutcome, Planned, Planner};
+use agent_campaign::{DrainReport, Driver, PlanOutcome, PlanReport, Planned, Planner, TickReport};
 use agent_core::campaign::{
     check_len, screen, truncate_chars, Actor, CampaignStore, ListFilter, NewCampaign, Policy, Task,
     TaskId, TaskPath, TaskState, MAX_ANSWER, MAX_DETAIL_BYTES, MAX_GOAL, MAX_SOURCE_REF, MAX_TITLE,
@@ -39,12 +44,20 @@ pub const USAGE: &str = "usage: agent [--config PATH] campaign [--tenant SEG] <v
   retry <ref>                 requeue a failed or blocked node
   replan <ref>                discard a node's subtree and plan it again
   cancel <ref>                cancel a node and everything under it
-  run --once                  reap stale leases, then run one planner tick
+  run [--once]                drive campaigns: reap, poll, plan, claim (resident unless --once; needs [campaign] enabled)
 
 <ref> is an id from `list`/`show` (`12`) or a letter path (`A`, `B.2`, `AB.1.3`).
 Letters are minted from the unfiltered listing, so `A` names the same campaign in
 `list`, `list --needs-attention` and `show`; scripts should use ids.
 Every verb runs as `user:local`; `--tenant SEG` scopes it to that tenant.";
+
+/// `agent --run-task` exit when the owner token is missing or not a path-safe
+/// segment: the worker never held a lease it could act on, so it touches nothing
+/// (`04-executor.md` "Worker protocol" step 1).
+pub const EXIT_LEASE_LOST: i32 = 3;
+/// `agent --run-task` exit while the worker body is not implemented (CP-06): the
+/// owner was present, the store is untouched, the driver fails the leaf.
+pub const EXIT_NO_WORKER: i32 = 4;
 
 /// How many chars of a user token an error may echo (escaped).
 const ECHO_CHARS: usize = 40;
@@ -110,15 +123,29 @@ pub enum CampaignCmd {
     Retry(Ref),
     Replan(Ref),
     Cancel(Ref),
+    /// `run --once`: one driver tick over the `--tenant` (or `local`) tenant, then
+    /// a drain; ignores `[campaign] enabled`.
     RunOnce,
+    /// `run`: the resident driver, ticking every `[campaign] tick_secs` until
+    /// interrupted; refused unless `[campaign] enabled`.
+    Run,
     Help,
 }
 
 impl CampaignCmd {
-    /// `plan` and `run --once` need the planner (a provider, so the built agent);
-    /// every other verb needs only the store and runs before any seam starts.
+    /// `plan`, `run --once` and `run` need the planner (a provider, so the built
+    /// agent); every other verb needs only the store and runs before any seam
+    /// starts.
     pub fn needs_planner(&self) -> bool {
-        matches!(self, CampaignCmd::Plan { .. } | CampaignCmd::RunOnce)
+        matches!(
+            self,
+            CampaignCmd::Plan { .. } | CampaignCmd::RunOnce | CampaignCmd::Run
+        )
+    }
+
+    /// The driver verbs (`run`, `run --once`), which need the campaign backend.
+    pub fn needs_driver(&self) -> bool {
+        matches!(self, CampaignCmd::RunOnce | CampaignCmd::Run)
     }
 }
 
@@ -446,9 +473,30 @@ fn parse_answer(rest: &[String], stdin: &mut dyn Read) -> Result<CampaignCmd> {
 
 fn parse_run(rest: &[String]) -> Result<CampaignCmd> {
     match rest {
+        [] => Ok(CampaignCmd::Run),
         [once] if once == "--once" => Ok(CampaignCmd::RunOnce),
-        [] => bail!("run: only `run --once` is available (the resident driver lands in CP-05)"),
         [other, ..] => bail!("run: unknown argument `{}`", echo(other)),
+    }
+}
+
+/// `--task <id>` of the hidden `--run-task` mode: the id grammar of a `<ref>`
+/// (`[1-9][0-9]{0,17}`), letters refused — a worker is handed an id, never a
+/// listing position.
+pub fn parse_task_id(s: &str) -> Result<TaskId> {
+    match parse_ref(s)? {
+        Ref::Id(id) => Ok(id),
+        Ref::Letter { .. } => bail!("--task `{}` must be a task id, not a letter", echo(s)),
+    }
+}
+
+/// The `--run-task` worker mode until CP-06 lands the worker body: the owner token
+/// comes through `AGENT_CAMPAIGN_OWNER` (never an argument); missing or not a
+/// path-safe segment ⇒ [`EXIT_LEASE_LOST`] before any config or store is opened;
+/// present ⇒ [`EXIT_NO_WORKER`]. The message never carries the token.
+pub fn run_task_stub(owner: Option<&str>) -> (i32, &'static str) {
+    match owner {
+        Some(o) if safe_segment(o) => (EXIT_NO_WORKER, "run-task: worker not implemented (CP-06)"),
+        _ => (EXIT_LEASE_LOST, "run-task: lease lost (owner missing)"),
     }
 }
 
@@ -525,8 +573,8 @@ pub async fn run(ctx: &CampaignCtx, cmd: &CampaignCmd, out: &mut dyn Write) -> R
             writeln!(out, "cancelled {} task(s) under #{}", done.len(), t.task_id)?;
             Ok(())
         }
-        CampaignCmd::Plan { .. } | CampaignCmd::RunOnce => {
-            bail!("this verb needs the planner (`run_plan`), not the store-only runner")
+        CampaignCmd::Plan { .. } | CampaignCmd::RunOnce | CampaignCmd::Run => {
+            bail!("this verb needs the planner (`run_plan` / `run_driver_once`), not the store-only runner")
         }
         CampaignCmd::Help => {
             writeln!(out, "{USAGE}")?;
@@ -538,11 +586,11 @@ pub async fn run(ctx: &CampaignCtx, cmd: &CampaignCmd, out: &mut dyn Write) -> R
 /// How many chars of a planner error one `plan` line shows.
 const PLAN_ERROR_CHARS: usize = 200;
 
-/// Run a planner verb: `plan [<ref>] [--max N]` (one node, or one tick over up to
-/// `N` / `plan_per_tick` plannable nodes) or `run --once` (`reap()` first, then one
-/// tick). One line per node, then a `plan:` summary line. A node the store refuses
-/// (`NotFound` / `Backend`) is reported on its line and counted as a failure, like
-/// `Planner::tick`; only a single explicit `<ref>` propagates its error.
+/// Run the planner verb `plan [<ref>] [--max N]`: one node, or one tick over up to
+/// `N` / `plan_per_tick` plannable nodes. One line per node, then a `plan:` summary
+/// line. A node the store refuses (`NotFound` / `Backend`) is reported on its line
+/// and counted as a failure, like `Planner::tick`; only a single explicit `<ref>`
+/// propagates its error. The driver verbs go through [`run_driver_once`].
 pub async fn run_plan(
     ctx: &CampaignCtx,
     planner: &Planner,
@@ -562,10 +610,11 @@ pub async fn run_plan(
             return Ok(());
         }
         CampaignCmd::Plan { target: None, max } => max.unwrap_or(plan_per_tick),
-        CampaignCmd::RunOnce => {
-            let reaped = ctx.store.reap().await.map_err(seam)?;
-            writeln!(out, "reaped {}", reaped.len())?;
-            plan_per_tick
+        CampaignCmd::RunOnce | CampaignCmd::Run => {
+            bail!(
+                "`{}` is a driver verb (`run_driver_once`), not a planner verb",
+                verb_name(cmd)
+            )
         }
         other => bail!("`{}` is a store verb, not a planner verb", verb_name(other)),
     };
@@ -609,8 +658,107 @@ fn verb_name(cmd: &CampaignCmd) -> &'static str {
         CampaignCmd::Replan(_) => "replan",
         CampaignCmd::Cancel(_) => "cancel",
         CampaignCmd::RunOnce => "run --once",
+        CampaignCmd::Run => "run",
         CampaignCmd::Help => "help",
     }
+}
+
+/// `run --once`: one driver tick over `ctx.store`'s tenant, then a drain bounded
+/// by the driver's `worker_timeout`, rendered as CP-04's `run --once` was plus the
+/// driver's counts (see [`render_once`]). The driver must serve exactly the tenant
+/// `ctx.store` is bound to, so the plan lines can be labelled from its listing.
+pub async fn run_driver_once(
+    ctx: &CampaignCtx,
+    driver: &Driver,
+    out: &mut dyn Write,
+) -> Result<()> {
+    let report = driver.tick().await;
+    let drained = driver.drain(driver.config().worker_timeout).await;
+    render_once(ctx, &report, &drained, out).await
+}
+
+/// The `run --once` report: `reaped n  released n`, the plan lines and `plan:`
+/// summary CP-04 printed, then `claimed n  dispatched n  failed n  (workers:
+/// CP-06)`. A tenant the driver skipped is an error naming why (never the tenant).
+async fn render_once(
+    ctx: &CampaignCtx,
+    report: &TickReport,
+    drained: &DrainReport,
+    out: &mut dyn Write,
+) -> Result<()> {
+    let Some(tenant) = report.per_tenant.first() else {
+        bail!("run --once: the driver served no tenant");
+    };
+    if let Some(why) = &tenant.skipped {
+        bail!("run --once: tenant skipped: {why}");
+    }
+    writeln!(
+        out,
+        "reaped {}  released {}",
+        tenant.reaped, tenant.released
+    )?;
+    match &tenant.plan {
+        Some(plan) => render_plan(ctx, plan, out).await?,
+        None => plan_summary(out, &[], 0)?,
+    }
+    let failed = drained
+        .settled
+        .iter()
+        .filter(|s| s.outcome != agent_campaign::WorkerOutcome::Ok)
+        .count();
+    writeln!(
+        out,
+        "claimed {}  dispatched {}  failed {}  (workers: CP-06)",
+        tenant.claimed,
+        report.dispatched.len(),
+        failed
+    )?;
+    Ok(())
+}
+
+/// The plan phase of one tenant as `plan` prints it: one line per node (a store
+/// error is a `failed:` line, escaped and cut), then the `plan:` summary.
+async fn render_plan(ctx: &CampaignCtx, plan: &PlanReport, out: &mut dyn Write) -> Result<()> {
+    let mut listing = Listing::load(&*ctx.store).await?;
+    let mut planned = Vec::with_capacity(plan.nodes.len());
+    let mut failures = 0usize;
+    for (t, outcome) in &plan.nodes {
+        match outcome {
+            Ok(p) => {
+                writeln!(out, "{}", plan_line(&mut listing, t, p))?;
+                planned.push(p.clone());
+            }
+            Err(e) => {
+                failures += 1;
+                writeln!(
+                    out,
+                    "#{}  {:<12} → failed: {}",
+                    t.task_id,
+                    listing.label(t),
+                    escape_terminal(&truncate_chars(&e.to_string(), PLAN_ERROR_CHARS))
+                )?;
+            }
+        }
+    }
+    plan_summary(out, &planned, failures)
+}
+
+/// One line per resident tick: the counts only (the per-node plan lines go to the
+/// log at `info`, since a resident process prints for hours).
+pub fn render_resident_tick(report: &TickReport, out: &mut dyn Write) -> Result<()> {
+    writeln!(
+        out,
+        "tick: tenants {}  reaped {}  released {}  planned {}  claimed {}  dispatched {}  failed {}  errors {}",
+        report.tenants.len(),
+        report.reaped(),
+        report.released(),
+        report.planned(),
+        report.claimed(),
+        report.dispatched.len(),
+        report.failed(),
+        report.errors
+    )?;
+    Ok(())
 }
 
 /// `#id  A.1          → split (3 children)` — the outcome word is the planner's
@@ -1333,6 +1481,7 @@ mod tests {
     #[case::positive_approve_children(&["approve", "--children", "A"], CampaignCmd::Approve { target: Ref::Letter { idx: 0, ordinals: vec![] }, children: true })]
     #[case::positive_answer_inline(&["answer", "A.1", "use the v2 API"], CampaignCmd::Answer { target: Ref::Letter { idx: 0, ordinals: vec![1] }, text: "use the v2 API".into() })]
     #[case::positive_run_once(&["run", "--once"], CampaignCmd::RunOnce)]
+    #[case::positive_run_resident(&["run"], CampaignCmd::Run)]
     #[case::corner_help_bare(&[], CampaignCmd::Help)]
     #[case::corner_help_flag(&["--help"], CampaignCmd::Help)]
     #[case::corner_help_short(&["-h"], CampaignCmd::Help)]
@@ -1351,8 +1500,9 @@ mod tests {
     #[case::negative_approve_missing_ref(&["approve", "--children"], "approve: <ref> is required")]
     #[case::negative_answer_missing_text(&["answer", "A"], "<ref> and <text>")]
     #[case::negative_answer_extra(&["answer", "A", "x", "y"], "takes <ref> <text>")]
-    #[case::negative_run_without_once(&["run"], "only `run --once`")]
     #[case::negative_run_unknown_flag(&["run", "--forever"], "run: unknown argument")]
+    #[case::negative_run_twice(&["run", "--twice"], "run: unknown argument")]
+    #[case::negative_run_once_extra(&["run", "--once", "A"], "run: unknown argument")]
     #[case::negative_tenant_missing_value(&["list", "--tenant"], "--tenant requires")]
     #[case::negative_tenant_twice(&["--tenant", "a", "list", "--tenant", "b"], "--tenant given twice")]
     #[case::adversarial_tenant_traversal(&["--tenant", "../other", "list"], "not a path-safe segment")]
@@ -1504,10 +1654,89 @@ mod tests {
             "retry",
             "replan",
             "cancel",
-            "run --once",
+            "run [--once]",
             "--tenant",
         ] {
             assert!(USAGE.contains(verb), "usage lacks `{verb}`");
+        }
+    }
+
+    // `run` names the resident driver and its gate in the usage text.
+    #[test]
+    fn positive_usage_names_run() {
+        assert!(USAGE.contains("resident unless --once"), "{USAGE}");
+        assert!(USAGE.contains("[campaign] enabled"), "{USAGE}");
+    }
+
+    // `parse_run`: bare `run` is the resident driver, `--once` one tick, anything
+    // else an error.
+    #[rstest]
+    #[case::positive_resident(&["run"], Ok(CampaignCmd::Run))]
+    #[case::positive_once(&["run", "--once"], Ok(CampaignCmd::RunOnce))]
+    #[case::negative_twice(&["run", "--twice"], Err("run: unknown argument `--twice`"))]
+    #[case::negative_once_and_more(&["run", "--once", "--once"], Err("run: unknown argument"))]
+    #[case::adversarial_control(&["run", "--\u{1b}[2J"], Err("run: unknown argument"))]
+    fn parse_run_rows(#[case] toks: &[&str], #[case] want: Result<CampaignCmd, &str>) {
+        match want {
+            Ok(cmd) => {
+                let got = parse_toks(toks).unwrap();
+                assert_eq!(got.cmd, cmd);
+                assert!(got.cmd.needs_planner() && got.cmd.needs_driver());
+            }
+            Err(needle) => {
+                let msg = err_of(parse_toks(toks));
+                assert!(msg.contains(needle), "{msg}");
+                assert_bounded(&msg);
+            }
+        }
+    }
+
+    /// 129 chars: one over the `safe_segment` length cap.
+    const HUGE_OWNER: &str = "ooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo";
+
+    // T11 `adversarial_owner_from_env_missing` (unit half): no owner, an unsafe
+    // owner or an empty one exit `lease lost` before anything opens; a valid one
+    // exits `no worker` (CP-06). The message never carries the token.
+    #[rstest]
+    #[case::adversarial_owner_from_env_missing(None, EXIT_LEASE_LOST, "lease lost")]
+    #[case::adversarial_owner_traversal(Some("../x"), EXIT_LEASE_LOST, "lease lost")]
+    #[case::adversarial_owner_empty(Some(""), EXIT_LEASE_LOST, "lease lost")]
+    #[case::adversarial_owner_space(Some("a b"), EXIT_LEASE_LOST, "lease lost")]
+    #[case::adversarial_owner_huge(Some(HUGE_OWNER), EXIT_LEASE_LOST, "lease lost")]
+    #[case::corner_owner_present(
+        Some("0123456789abcdef0123456789abcdef"),
+        EXIT_NO_WORKER,
+        "not implemented (CP-06)"
+    )]
+    fn run_task_stub_rows(#[case] owner: Option<&str>, #[case] code: i32, #[case] needle: &str) {
+        let (got, msg) = run_task_stub(owner);
+        assert_eq!(got, code);
+        assert!(msg.contains(needle), "{msg}");
+        if let Some(o) = owner.filter(|o| !o.is_empty()) {
+            assert!(!msg.contains(o), "the token leaked: {msg}");
+        }
+    }
+
+    // The two worker exits are distinct from each other and from a plain error (1).
+    const _: () = assert!(EXIT_LEASE_LOST != EXIT_NO_WORKER);
+    const _: () = assert!(EXIT_LEASE_LOST > 1 && EXIT_NO_WORKER > 1);
+
+    #[rstest]
+    #[case::positive_id("12", Ok(TaskId(12)))]
+    #[case::boundary_id_18_digits("999999999999999999", Ok(TaskId(999_999_999_999_999_999)))]
+    #[case::negative_letter("A", Err("must be a task id"))]
+    #[case::negative_zero("0", Err("is not a task ref"))]
+    #[case::negative_word("abc", Err("is not a task ref"))]
+    #[case::adversarial_traversal("../1", Err("is not a task ref"))]
+    #[case::adversarial_19_digits("9999999999999999999", Err("is not a task ref"))]
+    fn parse_task_id_rows(#[case] s: &str, #[case] want: Result<TaskId, &str>) {
+        match want {
+            Ok(id) => assert_eq!(parse_task_id(s).unwrap(), id),
+            Err(needle) => {
+                let msg = parse_task_id(s).unwrap_err().to_string();
+                assert!(msg.contains(needle), "{msg}");
+                assert_bounded(&msg);
+            }
         }
     }
 
@@ -1908,10 +2137,11 @@ mod tests {
         assert!(shown.contains(" superseded "), "{shown}");
     }
 
-    // `plan` / `run --once` are refused by the store-only runner (step 6 wires them).
+    // `plan` / `run --once` / `run` are refused by the store-only runner.
     #[rstest]
     #[case::plan(&["plan"])]
     #[case::run_once(&["run", "--once"])]
+    #[case::run(&["run"])]
     #[tokio::test]
     async fn negative_planner_verbs_refused_here(#[case] toks: &[&str]) {
         let ctx = fresh();
@@ -1999,8 +2229,15 @@ mod tests {
         root
     }
 
-    /// A planner over `ctx.store` scripted with `answers` (the last one repeats).
-    fn planner(ctx: &CampaignCtx, answers: Vec<serde_json::Value>) -> Planner {
+    /// The scripted provider, brief and touch resolver every planner in these
+    /// tests is built from (`answers`: the last one repeats).
+    fn planner_parts(
+        answers: Vec<serde_json::Value>,
+    ) -> (
+        Arc<dyn agent_core::LlmProvider>,
+        Arc<dyn agent_campaign::BriefSource>,
+        Arc<dyn agent_campaign::TouchResolver>,
+    ) {
         let script = answers
             .into_iter()
             .map(|v| final_turn(v.to_string()))
@@ -2010,13 +2247,61 @@ mod tests {
             ..ModelCapabilities::default()
         });
         let root = worktree();
-        Planner::draft07(
-            ctx.store.clone(),
+        (
             Arc::new(provider),
             Arc::new(FallbackBrief::new(&root)),
             Arc::new(WorktreeTouches::new(&root)),
-            "test-planner",
         )
+    }
+
+    /// A planner over `ctx.store` scripted with `answers` (the last one repeats).
+    fn planner(ctx: &CampaignCtx, answers: Vec<serde_json::Value>) -> Planner {
+        let (provider, brief, touches) = planner_parts(answers);
+        Planner::draft07(ctx.store.clone(), provider, brief, touches, "test-planner")
+    }
+
+    /// A driver over the memory tier behind `ctx.store` (the `local` tenant) with
+    /// a `FactoryPlanner` scripted with `answers` and `max_repairs` repairs, the
+    /// shape `main.rs` builds for `run --once`.
+    fn driver(mem: &MemCampaigns, answers: Vec<serde_json::Value>, max_repairs: usize) -> Driver {
+        let (provider, brief, touches) = planner_parts(answers);
+        let factory: agent_campaign::PlannerFactory = Arc::new(move |store| {
+            Planner::draft07(
+                store,
+                provider.clone(),
+                brief.clone(),
+                touches.clone(),
+                "test-planner",
+            )
+            .with_max_repairs(max_repairs)
+        });
+        let backend: Arc<dyn agent_campaign::CampaignBackend> = Arc::new(mem.clone());
+        Driver::new(
+            backend,
+            agent_campaign::Tenants::Fixed(vec!["local".into()]),
+            agent_campaign::DriverConfig {
+                worker_timeout: std::time::Duration::from_secs(1),
+                ..agent_campaign::DriverConfig::default()
+            },
+            Arc::new(agent_campaign::FactoryPlanner(factory)),
+        )
+    }
+
+    /// A fresh memory tier and the `local` context over it.
+    fn fresh_mem() -> (MemCampaigns, CampaignCtx) {
+        let mem = MemCampaigns::new();
+        let ctx = CampaignCtx {
+            store: Arc::new(mem.clone()),
+            repos: BTreeMap::from([("seddon".to_string(), 1_i64)]),
+        };
+        (mem, ctx)
+    }
+
+    /// `run --once` through the driver, returning stdout.
+    async fn go_once(ctx: &CampaignCtx, driver: &Driver) -> Result<String> {
+        let mut out = Vec::new();
+        run_driver_once(ctx, driver, &mut out).await?;
+        Ok(String::from_utf8(out).expect("utf-8 output"))
     }
 
     fn split_two() -> serde_json::Value {
@@ -2050,11 +2335,12 @@ mod tests {
         Ok(String::from_utf8(out).expect("utf-8 output"))
     }
 
-    // The in-process end-to-end path: `add` → `run --once` (the root splits) →
-    // `plan` (both children execute) → `show A` renders the planned tree.
+    // The in-process end-to-end path: `add` → `run --once` (the driver's tick: the
+    // root splits) → `plan` (both children execute) → `show A` renders the planned
+    // tree. `run --once` prints CP-04's lines plus the driver's counts.
     #[tokio::test]
     async fn positive_run_once_add_plan_show() {
-        let ctx = fresh();
+        let (mem, ctx) = fresh_mem();
         // `approve_levels: []` so the children are `ready` rather than gated.
         let out = go_ok(
             &ctx,
@@ -2074,11 +2360,11 @@ mod tests {
         assert!(out.starts_with("created A  #"), "{out}");
         let root = add_id(&out);
 
-        let planner = planner(&ctx, vec![split_two(), execute_small()]);
-        let once = go_plan(&ctx, &planner, &["run", "--once"]).await.unwrap();
+        let driver = driver(&mem, vec![split_two(), execute_small()], 2);
+        let once = go_once(&ctx, &driver).await.unwrap();
         assert_terminal_safe(&once);
         let lines: Vec<&str> = once.lines().collect();
-        assert_eq!(lines[0], "reaped 0", "{once}");
+        assert_eq!(lines[0], "reaped 0  released 0", "{once}");
         assert_eq!(
             lines[1],
             format!("#{}  {:<12} → split (2 children)", root.0, "A"),
@@ -2088,9 +2374,15 @@ mod tests {
             lines[2].starts_with("plan: 1 node(s); calls 1, repairs 0, tokens in "),
             "{once}"
         );
+        assert_eq!(
+            lines[3], "claimed 0  dispatched 0  failed 0  (workers: CP-06)",
+            "{once}"
+        );
+        assert_eq!(lines.len(), 4, "{once}");
 
         // The children were created by the split during the previous tick, so
         // they wait for this one; both execute (the last scripted answer repeats).
+        let planner = planner(&ctx, vec![execute_small()]);
         let tick = go_plan(&ctx, &planner, &["plan"]).await.unwrap();
         let lines: Vec<&str> = tick.lines().collect();
         assert_eq!(lines.len(), 3, "{tick}");
@@ -2174,17 +2466,17 @@ mod tests {
     // state, and the tick continues; the text on the line is escaped.
     #[tokio::test]
     async fn negative_schema_error_is_reported_per_node() {
-        let ctx = fresh();
+        let (mem, ctx) = fresh_mem();
         add_one(&ctx, "first").await;
-        let planner = planner(
-            &ctx,
+        let driver = driver(
+            &mem,
             vec![json!({ "decision": "dance\u{1b}[31m", "reason": "x", "confidence": 0.5 })],
-        )
-        .with_max_repairs(0);
-        let out = go_plan(&ctx, &planner, &["run", "--once"]).await.unwrap();
+            0,
+        );
+        let out = go_once(&ctx, &driver).await.unwrap();
         assert_terminal_safe(&out);
         let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines[0], "reaped 0", "{out}");
+        assert_eq!(lines[0], "reaped 0  released 0", "{out}");
         assert!(
             lines[1].starts_with(&format!("#1  {:<12} → error (ready): ", "A")),
             "{out}"
@@ -2192,6 +2484,121 @@ mod tests {
         assert!(
             lines[2].starts_with("plan: 1 node(s); calls 1, repairs 0,"),
             "{out}"
+        );
+        assert_eq!(
+            lines[3],
+            "claimed 0  dispatched 0  failed 0  (workers: CP-06)"
+        );
+    }
+
+    // T11 (CLI half) `positive_run_once_reports_phases`: an idle campaign prints
+    // every phase's count, in order, with nothing to plan.
+    #[tokio::test]
+    async fn positive_run_once_reports_phases() {
+        let (mem, ctx) = fresh_mem();
+        let a = add_one(&ctx, "idle").await;
+        ctx.store.cancel(a, &Actor::from_scope()).await.unwrap();
+        let driver = driver(&mem, vec![split_two()], 2);
+        let out = go_once(&ctx, &driver).await.unwrap();
+        assert_eq!(
+            out,
+            "reaped 0  released 0\nplan: 0 node(s); calls 0, repairs 0, tokens in 0 out 0\nclaimed 0  dispatched 0  failed 0  (workers: CP-06)\n"
+        );
+    }
+
+    // T11 (CLI half) `positive_run_once_reaps_decomposing`: a node a crashed
+    // planner left in `decomposing` past the bound is released (`released 1`) and
+    // planned again in the same tick.
+    #[tokio::test]
+    async fn positive_run_once_reaps_decomposing() {
+        let clock = Arc::new(std::sync::atomic::AtomicU64::new(1_700_000_000_000));
+        let c = Arc::clone(&clock);
+        let mem = MemCampaigns::new().with_clock(Arc::new(move || {
+            c.load(std::sync::atomic::Ordering::SeqCst)
+        }));
+        let ctx = CampaignCtx {
+            store: Arc::new(mem.clone()),
+            repos: BTreeMap::new(),
+        };
+        let a = add_one(&ctx, "wedged").await;
+        started(&*ctx.store, a).await;
+        assert_eq!(
+            ctx.store.get(a).await.unwrap().state,
+            TaskState::Decomposing
+        );
+        clock.fetch_add(901_000, std::sync::atomic::Ordering::SeqCst);
+        let driver = driver(&mem, vec![split_two()], 2);
+        let out = go_once(&ctx, &driver).await.unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "reaped 0  released 1", "{out}");
+        assert_eq!(
+            lines[1],
+            format!("#{a}  {:<12} → split (2 children)", "A"),
+            "{out}"
+        );
+        assert_eq!(ctx.store.get(a).await.unwrap().state, TaskState::Decomposed);
+        // Fresh in `decomposing` again a moment later, nothing is released.
+        let b = add_one(&ctx, "fresh").await;
+        started(&*ctx.store, b).await;
+        let out = go_once(&ctx, &driver).await.unwrap();
+        assert!(out.starts_with("reaped 0  released 0\n"), "{out}");
+    }
+
+    // `run --once` refuses a driver that served no tenant, or one it skipped.
+    #[tokio::test]
+    async fn negative_run_once_no_tenant_served() {
+        let (mem, ctx) = fresh_mem();
+        let driver = driver(&mem, vec![split_two()], 2);
+        let empty = agent_campaign::TickReport::default();
+        let mut out = Vec::new();
+        let err = render_once(&ctx, &empty, &DrainReport::default(), &mut out)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("served no tenant"), "{err:#}");
+        drop(driver);
+        let skipped = agent_campaign::TickReport {
+            per_tenant: vec![agent_campaign::TenantReport {
+                tenant: "../x".into(),
+                skipped: Some("tenant is not a path-safe segment".into()),
+                ..agent_campaign::TenantReport::default()
+            }],
+            ..agent_campaign::TickReport::default()
+        };
+        let err = render_once(&ctx, &skipped, &DrainReport::default(), &mut out)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("tenant skipped"), "{err:#}");
+        assert!(out.is_empty());
+    }
+
+    // The resident tick line carries every count the report has.
+    #[test]
+    fn positive_render_resident_tick_line() {
+        let report = agent_campaign::TickReport {
+            tenants: vec!["a".into(), "b".into()],
+            per_tenant: vec![
+                agent_campaign::TenantReport {
+                    tenant: "a".into(),
+                    reaped: 1,
+                    released: 2,
+                    claimed: 3,
+                    errors: 1,
+                    ..agent_campaign::TenantReport::default()
+                },
+                agent_campaign::TenantReport {
+                    tenant: "b".into(),
+                    ..agent_campaign::TenantReport::default()
+                },
+            ],
+            dispatched: vec![("a".into(), TaskId(1)); 3],
+            errors: 1,
+            ..agent_campaign::TickReport::default()
+        };
+        let mut out = Vec::new();
+        render_resident_tick(&report, &mut out).unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "tick: tenants 2  reaped 1  released 2  planned 0  claimed 3  dispatched 3  failed 0  errors 1\n"
         );
     }
 
@@ -2223,16 +2630,19 @@ mod tests {
         assert!(err.to_string().contains("not found"), "{err:#}");
     }
 
-    // The store-only verbs are refused by the planner runner (and vice versa).
+    // The store-only verbs are refused by the planner runner (and vice versa), and
+    // so are the driver verbs.
     #[rstest]
-    #[case::list(&["list"][..])]
-    #[case::show(&["show", "A"][..])]
-    #[case::add(&["add", "--repo", "1", "--title", "t", "--goal", "g"][..])]
+    #[case::list(&["list"][..], "store verb")]
+    #[case::show(&["show", "A"][..], "store verb")]
+    #[case::add(&["add", "--repo", "1", "--title", "t", "--goal", "g"][..], "store verb")]
+    #[case::run_once(&["run", "--once"][..], "driver verb")]
+    #[case::run(&["run"][..], "driver verb")]
     #[tokio::test]
-    async fn negative_store_verbs_refused_by_run_plan(#[case] toks: &[&str]) {
+    async fn negative_store_verbs_refused_by_run_plan(#[case] toks: &[&str], #[case] needle: &str) {
         let ctx = fresh();
         let planner = planner(&ctx, vec![split_two()]);
         let err = go_plan(&ctx, &planner, toks).await.unwrap_err();
-        assert!(err.to_string().contains("store verb"), "{err:#}");
+        assert!(err.to_string().contains(needle), "{err:#}");
     }
 }

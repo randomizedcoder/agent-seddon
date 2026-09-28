@@ -309,16 +309,31 @@ pub fn run_agent_env(
     goal: &[&str],
     env: &[(&str, &str)],
 ) -> (i32, String, String) {
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_agent"))
-        .arg("--config")
+    run_agent_with(cfg, ws, goal, env, &[])
+}
+
+/// [`run_agent_env`] that also **removes** variables from the child's environment
+/// (e.g. the campaign owner token a `--run-task` stub must not inherit from the
+/// developer's shell).
+pub fn run_agent_with(
+    cfg: &std::path::Path,
+    ws: &TempWorkspace,
+    goal: &[&str],
+    env: &[(&str, &str)],
+    env_remove: &[&str],
+) -> (i32, String, String) {
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_agent"));
+    cmd.arg("--config")
         .arg(cfg)
         .args(goal)
         .current_dir(&ws.dir)
         // Keep the child's log level predictable regardless of the developer's env.
         .env("RUST_LOG", "warn")
-        .envs(env.iter().copied())
-        .output()
-        .expect("spawn agent binary");
+        .envs(env.iter().copied());
+    for k in env_remove {
+        cmd.env_remove(k);
+    }
+    let out = cmd.output().expect("spawn agent binary");
     (
         out.status.code().unwrap_or(-1),
         String::from_utf8_lossy(&out.stdout).into_owned(),
