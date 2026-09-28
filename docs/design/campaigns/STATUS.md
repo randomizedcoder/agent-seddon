@@ -12,7 +12,7 @@ Design: [`README.md`](README.md) · sequence: [`05-increments.md`](05-increments
 | CP-01 | `CampaignStore` seam, path grammar, `allowed()`, rollup, policy, `MemCampaigns` | SI-11 | ✅ | #501 |
 | CP-02 | `PgCampaigns`, migration 0001, protocols (a)–(g), live suite, invariants query | SI-11 | ✅ | #508 |
 | CP-03 | Planner: prompt, schema, validation, caps, `needs_info` / `reject`, fallback brief | SI-11 | ✅ | #525 |
-| CP-04 | CLI `agent campaign …` | SI-11 | 🟡 | `campaigns/cp-04` |
+| CP-04 | CLI `agent campaign …` | SI-11 | 🟡 | #531 |
 | CP-05 | `CampaignDriver` tick + `[campaign]` config | SI-11 | ⬜ | — |
 | CP-06 | Worker `--run-task`, worktree → PR, `PrPoller`, e2e check | SI-11 | ⬜ | — |
 | CP-07 | RK-12 brief, `touches` against `RepoGraphStore`, RK-08 tool for workers | SI-7, SI-11 | ⬜ | — |

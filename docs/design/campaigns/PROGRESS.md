@@ -10,7 +10,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 
 ## Now
 
-- **Next:** CP-04 gate (`nix flake check` on the committed ref of `campaigns/cp-04`), then the PR (STATUS row gets the PR number at open, ✅ + as-built entry after the merge commit). Steps 1–7 are ✅ on `campaigns/cp-04` (off `main` at `ed03ff1`, the CP-03 merge). CP-03 is on `main` (#525). Lane A is done — CP-01 (#501, `71d4abf`) and CP-02 (#508, `630098a`) are on `main`. Lane B scope = CP-03 (planner, T9/T10) then CP-04 (`agent campaign` CLI, Postgres store only, T16), two PRs each off `main`, never stacked.
+- **Next:** CP-04 is in review as #531 (`campaigns/cp-04`, gate green on `9f28c09`); after the merge commit: STATUS ✅ + as-built entry, this journal's CP-04 header flips. Steps 1–7 are ✅ on `campaigns/cp-04` (off `main` at `ed03ff1`, the CP-03 merge). CP-03 is on `main` (#525). Lane A is done — CP-01 (#501, `71d4abf`) and CP-02 (#508, `630098a`) are on `main`. Lane B scope = CP-03 (planner, T9/T10) then CP-04 (`agent campaign` CLI, Postgres store only, T16), two PRs each off `main`, never stacked.
 
 ## CP-01 — seam, pure rules, `MemCampaigns`, T1–T8 (mem) — ✅ #501 (merged 2026-09-27, `71d4abf`)
 
