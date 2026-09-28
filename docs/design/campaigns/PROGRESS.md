@@ -10,7 +10,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 
 ## Now
 
-- **Next:** CP-05 (`agent campaign run`, the driver tick, lane C) is in flight on `campaigns/cp-05` (off `main` at `9e83247d`, the #550 merge): steps 1–7 ✅ (the gate is green on `252610b6`) — publish as #PR-CP05; see the CP-05 table. After it merges: STATUS ✅ + as-built entry in its own docs PR, then CP-06 (the worker body, subprocess dispatch with `ExecSpec.env_set`, the forge poller). CP-07 (RK-08 / RK-12 wiring, lane B) stays blocked on RK-12. The five hygiene follow-ups from the CP-04 gate are all on `main` (#541, #545, #546, #547, #550; see Open questions). Lane B to first value is done — CP-04 merged as #531 (`513447a`); CP-03 #525; lane A CP-01 #501 (`71d4abf`) and CP-02 #508 (`630098a`).
+- **Next:** CP-05 (`agent campaign run`, the driver tick, lane C) is in flight on `campaigns/cp-05` (off `main` at `9e83247d`, the #550 merge): steps 1–7 ✅ (the gate is green on `252610b6`) — publish as #553; see the CP-05 table. After it merges: STATUS ✅ + as-built entry in its own docs PR, then CP-06 (the worker body, subprocess dispatch with `ExecSpec.env_set`, the forge poller). CP-07 (RK-08 / RK-12 wiring, lane B) stays blocked on RK-12. The five hygiene follow-ups from the CP-04 gate are all on `main` (#541, #545, #546, #547, #550; see Open questions). Lane B to first value is done — CP-04 merged as #531 (`513447a`); CP-03 #525; lane A CP-01 #501 (`71d4abf`) and CP-02 #508 (`630098a`).
 
 ## CP-01 — seam, pure rules, `MemCampaigns`, T1–T8 (mem) — ✅ #501 (merged 2026-09-27, `71d4abf`)
 
@@ -329,7 +329,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 - ~~A node left in `decomposing` by a crash between `plan_start` and the close (the best-effort
   close cannot run if the process dies) needs a reaper — CP-05's driver tick (`reap()` already
   handles leases; `decomposing` older than a bound is the analogous rule).~~ **Resolved in
-  CP-05 (#PR-CP05).** `CampaignStore::reap_decomposing(max_age_secs)`: every non-leaf
+  CP-05 (#553).** `CampaignStore::reap_decomposing(max_age_secs)`: every non-leaf
   `decomposing` for longer than `DECOMPOSING_MAX_SECS` (900 s, clamped like a lease) goes back
   to `ready` by `reaper` with `detail.reason = plan_stale`, no attempt touched; the driver runs
   it right after `reap()` every tick, and `run --once` prints it as `released n`. T6 +5 rows on
