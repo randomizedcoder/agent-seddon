@@ -1071,8 +1071,8 @@ pub async fn serve_sessions(agent: Arc<Agent>, listen: Endpoint) -> anyhow::Resu
         "sessions gateway ready (SessionRegistry + driving AgentSession + reaper)"
     );
     let shutdown = async {
-        let _ = tokio::signal::ctrl_c().await;
-        tracing::info!("shutting down sessions gateway");
+        let sig = crate::shutdown::signal().await;
+        tracing::info!(signal = sig, "shutting down sessions gateway");
     };
     bound.serve(router, shutdown).await?;
     Ok(())
@@ -1310,8 +1310,8 @@ pub async fn serve_fleet(
         "review fleet ready (roster control plane + orchestrator + driving AgentSession + reaper)"
     );
     let shutdown = async {
-        let _ = tokio::signal::ctrl_c().await;
-        tracing::info!("shutting down review fleet");
+        let sig = crate::shutdown::signal().await;
+        tracing::info!(signal = sig, "shutting down review fleet");
     };
     bound.serve(router, shutdown).await?;
     Ok(())
@@ -1594,8 +1594,8 @@ async fn serve_seams(
         "gRPC seam server ready"
     );
     let shutdown = async {
-        let _ = tokio::signal::ctrl_c().await;
-        tracing::info!("shutting down gRPC seam server");
+        let sig = crate::shutdown::signal().await;
+        tracing::info!(signal = sig, "shutting down gRPC seam server");
     };
     bound.serve(router, shutdown).await?;
     Ok(())

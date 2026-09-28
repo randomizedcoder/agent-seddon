@@ -13,7 +13,9 @@
 #     pg-integration (the postgres config-store tier; self-skips without a
 #     container runtime — honors CONTAINER_RUNTIME, so podman-only hosts run it),
 #     ch-integration (the ClickHouse credential + row-level-security matrix; same
-#     self-skip and runtime rule).
+#     self-skip and runtime rule), auth-integration (the sign-in stack over a
+#     step-ca daemon, Postgres sessions and ClickHouse audit; the step-ca tier always
+#     runs, the container tiers follow the same self-skip and runtime rule).
 #   Model tier (auto): e2e-live, e2e-expect, e2e-multi, and fleet-e2e (the last only
 #     when a GITHUB_TOKEN is also present) — run only when a model is
 #     configured AND reachable (AGENT_E2E_BASE_URL), else skipped with a notice, so
@@ -36,6 +38,7 @@
   pg-integration,
   ch-integration,
   rest-integration,
+  auth-integration,
   e2e-live,
   e2e-expect,
   e2e-multi,
@@ -54,6 +57,7 @@ pkgs.writeShellApplication {
     pg-integration
     ch-integration
     rest-integration
+    auth-integration
     e2e-live
     e2e-expect
     e2e-multi
@@ -116,6 +120,7 @@ pkgs.writeShellApplication {
       # `rest-integration` likewise needs a container runtime (the REST leg runs the
       # Envoy transcoder container) and self-skips with exit 0 when none is reachable.
       run_step "rest-integration — live REST↔gRPC round-trip" rest-integration
+      run_step "auth-integration — step-ca, Postgres sessions, ClickHouse audit" auth-integration
     fi
 
     if [ "$WITH_MODEL" != no ]; then

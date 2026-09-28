@@ -24,7 +24,8 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S13b | Portal login + capability-aware UI | P0-4 | ✅ | #533 |
 | S14 | Envoy hardening + `jwt_authn` | P0-4 | ✅ | #536 |
 | S15a | auth-e2e gate (process wire) | testing | ✅ | #537 |
-| S15b | integration tiers (step-ca, Postgres, ClickHouse audit, portal-e2e under auth) | testing | ⬜ | — |
+| S15b | integration tiers (step-ca daemon, Postgres sessions, ClickHouse audit) | testing | ✅ | #543 |
+| S15c | `portal-e2e` under auth | testing | ⬜ | — |
 | S16 | ClickHouse credentials + RLS lockdown | P0-6 | ✅ | #506 |
 | S17 | Secret-reference confinement | P0-7 | ✅ | #507 |
 
@@ -724,3 +725,64 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     - The harness has its own grpcurl client, so `dial_for` did not grow `--bearer` / `--cert`
       modes. The loopback harnesses stay header-free; the S2 helpers (ghz `-m`, fleet-e2e
       `DIAL_FLAGS`, `scoped_request()`) remain unneeded.
+- **2026-09-28 — S15b (#543).** New `nix run .#auth-integration`, registered in the model-free tier of
+  `nix run .#integration`, and a gate check `auth-integration-tests`. The harness
+  ([`test/auth-integration/auth_integration.py`](../../../test/auth-integration/auth_integration.py))
+  reuses the S15a issuer, config renderer, grpcurl client and steps, and the S16 ClickHouse
+  container and credentials helpers. It runs the two S15a agents against real infrastructure:
+  - **step-ca tier** (always; native binaries, no container): `step ca init` under a private
+    `STEPPATH`, the `step-ca` daemon on loopback (`stepCaAuthTestPort`), and every certificate
+    issued over its provisioner API. The S15a health, `Exchange`, chain and mTLS steps pass over
+    those certificates.
+    - `step ca renew` gives the fleet a new serial with the same SPIFFE name, and the new
+      certificate still exchanges for `svc:fleet` in tenant A.
+    - A token minted before renewal keeps working over the renewed certificate. This is by
+      design: a bound service may relay a token it did not present (S9/S10 `cnf_allows`), so
+      rotation does not strand work in flight. That token is still refused over the unbound `cli`
+      certificate and with no certificate.
+    - A `pki-dev` certificate from another CA, with the same fleet SPIFFE name, is refused at the
+      handshake on both agents and cannot exchange.
+  - **Postgres tier**: agent A runs `session_store = "postgres"` against a throwaway Postgres
+    (`postgresAuthTestPort`, password in the container env, never argv).
+    - `auth_sessions` rows land per tenant, and no access token or refresh handle is stored in
+      clear.
+    - After a restart, bob's pre-restart handle refreshes and rotates, and the replayed handle is
+      refused.
+    - After a second restart, the rotated handle is still refused (the revocation persisted), and
+      alice's `Logout` makes her refresh fail.
+  - **ClickHouse tier**: agent A writes telemetry as `agent_writer` into a throwaway ClickHouse
+    with the shipped `schema.sql`, `users.xml` and `clickhouse-creds` passwords.
+    - Every expected `(tenant, event)` lands: `login` ×2, `refresh`, `revoke`, `logout`, and a
+      tenantless `verify_fail`.
+    - `agent_reader` scoped with `SQL_tenant_id` sees only that tenant; unscoped it reads nothing.
+    - No row carries a token, handle, or bearer material.
+  - Without a container runtime the Postgres and ClickHouse tiers are skipped with a notice, and
+    the step-ca tier runs with file sessions. Containers use their own names and ports
+    (`*AuthTest*` pins) and are removed on exit.
+  - Verified live on l2 with podman: all 11 steps pass, the no-runtime path passes, nothing
+    leaks, and the long-lived ClickHouse is untouched. The gate check covers the tables and
+    check-the-checks: every step fails against a fake that breaks one promise, including renewal
+    keeping the serial, a token honoured off a bound certificate, and in-flight tokens stranded
+    on rotation.
+  - **Two real bugs, found by the live run and fixed here:**
+    - *Runtime Postgres stores never migrated.* Every runtime card store is built through
+      `store_backend::pg_backend` → `PgBackend::connect_lazy`, which ran no migrations, so
+      `[config_store] migrate_on_start` did nothing for them. On a fresh database the first
+      `Exchange` failed with `relation "cards" does not exist`. Fix: `PgBackend::migrate_lazily`,
+      a `OnceCell` barrier that applies the versioned migrations on first use, is retried after a
+      failure, and is safe under concurrent first use (advisory lock). `pg_backend` sets it from
+      `migrate_on_start`. There are new `#[ignore]` real-Postgres rows (positive, negative,
+      boundary retry, corner race), and the live config-store suite passes 38/38 on l2.
+    - *SIGTERM lost buffered telemetry.* Every `--serve-*` mode, the scheduler and the one-shot
+      run waited only on Ctrl-C. SIGTERM (systemd, podman, every harness) killed the process
+      before the exit path, which is where the telemetry writer and the OTLP batch are flushed.
+      The audit rows from an agent's last ~200 ms, the whole middle run in this harness, never
+      reached ClickHouse. Fix: `agent-cli/src/shutdown.rs` resolves on SIGINT or SIGTERM. A new
+      `shutdown_e2e` test covers SIGTERM and SIGINT → a clean exit through the shutdown path, and
+      SIGKILL as check-the-check. The SIGTERM row fails without the fix.
+  - Differences from the design:
+    - `portal-e2e` under auth moves to a new **S15c**: it needs the portal build and Envoy on top
+      of this harness, and is an increment of its own.
+    - Certificates come from the daemon's JWK provisioner (`step ca certificate`), not ACME. The
+      agent consumes PEM files either way, and ACME would need an HTTP-01/TLS-ALPN responder the
+      harness does not otherwise need.

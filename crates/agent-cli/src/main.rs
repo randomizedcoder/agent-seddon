@@ -12,6 +12,7 @@ mod grpc_server;
 mod mcp_server;
 mod metrics_server;
 mod repl;
+mod shutdown;
 
 use agent_runtime::{session_store, Metrics};
 use agent_telemetry::{ClickHouseLayer, OtelConfig, OtelGuard, TelemetryConfig, TelemetryHandle};
@@ -440,14 +441,14 @@ async fn main() -> Result<()> {
                     }
                     None => repl::new_id(),
                 };
-                // Race the run against Ctrl-C: an interrupt should save the (partial)
-                // transcript and clean up rather than killing the process and orphaning
-                // state. Cancelling `send` drops its future; the working set it mutated
+                // Race the run against Ctrl-C / SIGTERM: an interrupt should save the
+                // (partial) transcript and clean up rather than killing the process and
+                // orphaning state. Cancelling `send` drops its future; the working set it mutated
                 // in place is still readable via `messages()`.
                 let outcome: Result<Option<String>> = tokio::select! {
                     r = session.send(&goal) => r.map(Some),
-                    _ = tokio::signal::ctrl_c() => {
-                        eprintln!("\n^C — interrupted; saving session and cleaning up…");
+                    sig = shutdown::signal() => {
+                        eprintln!("\n{sig} — interrupted; saving session and cleaning up…");
                         Ok(None)
                     }
                     // Runs concurrently, sharing the live session source; resolves only
@@ -487,8 +488,8 @@ async fn main() -> Result<()> {
                                 tracing::info!(jobs = n, "scheduler fired due jobs");
                             }
                         }
-                        _ = tokio::signal::ctrl_c() => {
-                            eprintln!("\n^C — stopping the scheduler");
+                        sig = shutdown::signal() => {
+                            eprintln!("\n{sig} — stopping the scheduler");
                             break;
                         }
                     }

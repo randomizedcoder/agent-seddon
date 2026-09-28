@@ -42,7 +42,7 @@ use crate::{check_batch, conflict, Backend, Write};
 /// Adding a migration = drop the next-numbered `.sql` in `migrations/` and append
 /// its `(n, include_str!(...))` here (the version is the source of truth, not the
 /// filename — no runtime path parsing).
-const MIGRATIONS: &[(i64, &str)] = &[
+pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../migrations/0001_config_store.sql")),
     (
         2,
@@ -59,6 +59,10 @@ const MIGRATION_LOCK_KEY: i64 = 0x6167_636f_6e66_6773_u64 as i64;
 /// A Postgres-backed config store (a connection pool + the shared schema).
 pub struct PgBackend {
     pool: PgPool,
+    /// `Some` ⇒ apply the embedded migrations before the first query
+    /// ([`Self::migrate_lazily`]): a lazily-connected backend has no connection
+    /// when it is built, so the schema waits for first use.
+    lazy_schema: Option<tokio::sync::OnceCell<()>>,
 }
 
 fn pg_err(e: sqlx::Error) -> Error {
@@ -81,7 +85,10 @@ impl PgBackend {
         if migrate_on_start {
             Self::run_migrations(&pool).await?;
         }
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            lazy_schema: None,
+        })
     }
 
     /// Apply the embedded [`MIGRATIONS`] set exactly once, in order.
@@ -124,8 +131,10 @@ impl PgBackend {
             }
             // `raw_sql` uses the simple-query protocol, so a script with several
             // statements runs as one call — the migration body applies whole.
-            sqlx::raw_sql(sql)
-                .execute(&mut *tx)
+            // Run through `Executor::execute` rather than `RawSql::execute`: the
+            // latter's lifetime bounds make this future unprovably `Send`, and
+            // the lazy schema barrier awaits it inside the `Backend` methods.
+            sqlx::Executor::execute(&mut *tx, sqlx::raw_sql(sql))
                 .await
                 .map_err(|e| Error::Config(format!("postgres: migration {version} failed: {e}")))?;
             sqlx::query("INSERT INTO _schema_migrations (version) VALUES ($1)")
@@ -143,9 +152,9 @@ impl PgBackend {
     /// use — mirroring the lazy-connect discipline the gRPC clients use, so a
     /// sync config resolver (`resolve_provider_registry`) can construct the
     /// backend without an async context. Schema is **not** applied here (there is
-    /// no connection yet); a lazy deployment assumes the schema is present (the
-    /// shared `cards`/`tenants` tables from the config-store migration), or is
-    /// migrated out of band. The DSN is never echoed on error (it carries a
+    /// no connection yet): chain [`Self::migrate_lazily`] to apply it on first
+    /// use (`[config_store] migrate_on_start`), else the shared `cards`/`tenants`
+    /// tables must already exist. The DSN is never echoed on error (it carries a
     /// password).
     pub fn connect_lazy(dsn: &str, pool_max: u32) -> Result<Self> {
         let pool = PgPoolOptions::new()
@@ -153,18 +162,47 @@ impl PgBackend {
             // Never echo `e`: a DSN parse error can contain the connection string.
             .connect_lazy(dsn)
             .map_err(|_| Error::Config("postgres: invalid DSN (could not parse)".into()))?;
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            lazy_schema: None,
+        })
+    }
+
+    /// With `on`, apply the embedded migrations once, before this backend's first
+    /// query (security-hardening S15b: a lazily-built session store on a fresh
+    /// database otherwise failed every call with `relation "cards" does not
+    /// exist`). A failed attempt is not remembered, so a server that comes up
+    /// after the agent is migrated on the next call; concurrent first uses, in
+    /// this process or another, serialize on the runner's advisory lock.
+    pub fn migrate_lazily(mut self, on: bool) -> Self {
+        self.lazy_schema = on.then(tokio::sync::OnceCell::new);
+        self
+    }
+
+    /// The schema barrier every query passes (a no-op unless [`Self::migrate_lazily`]).
+    async fn ready(&self) -> Result<()> {
+        match &self.lazy_schema {
+            None => Ok(()),
+            Some(cell) => cell
+                .get_or_try_init(|| Self::run_migrations(&self.pool))
+                .await
+                .map(|&()| ()),
+        }
     }
 
     /// Build a backend over an already-established pool (tests/embedding).
     pub fn from_pool(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            lazy_schema: None,
+        }
     }
 }
 
 #[async_trait]
 impl Backend for PgBackend {
     async fn get(&self, collection: &str, tenant: &str, id: &str) -> Result<Option<Vec<u8>>> {
+        self.ready().await?;
         let row =
             sqlx::query("SELECT blob FROM cards WHERE collection = $1 AND tenant = $2 AND id = $3")
                 .bind(collection)
@@ -177,6 +215,7 @@ impl Backend for PgBackend {
     }
 
     async fn list(&self, collection: &str, tenant: &str) -> Result<Vec<Vec<u8>>> {
+        self.ready().await?;
         let rows = sqlx::query(
             "SELECT blob FROM cards WHERE collection = $1 AND tenant = $2 ORDER BY pos, id",
         )
@@ -192,6 +231,7 @@ impl Backend for PgBackend {
     }
 
     async fn count(&self, collection: &str, tenant: &str) -> Result<usize> {
+        self.ready().await?;
         let n: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM cards WHERE collection = $1 AND tenant = $2")
                 .bind(collection)
@@ -203,6 +243,7 @@ impl Backend for PgBackend {
     }
 
     async fn tenants(&self, collection: &str) -> Result<Vec<String>> {
+        self.ready().await?;
         // `SELECT DISTINCT tenant … WHERE collection = $1` reads EVERY card in the
         // collection to recover its distinct tenants — O(rows), even as an
         // index-only scan. That is a scaling hazard on the scheduler's hot path:
@@ -236,6 +277,7 @@ impl Backend for PgBackend {
     }
 
     async fn apply(&self, writes: &[Write]) -> Result<()> {
+        self.ready().await?;
         let mut tx = self.pool.begin().await.map_err(pg_err)?;
 
         // Snapshot existing tenants inside the transaction so the fail-closed

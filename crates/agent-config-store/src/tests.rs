@@ -1064,6 +1064,146 @@ async fn positive_migrate_is_idempotent_on_reconnect() {
         .expect("second migrate is a no-op, not a re-apply or error");
 }
 
+/// A throwaway database on the pg-integration server, so the lazy-schema tests
+/// start from nothing without dropping the shared suite's tables. Returns its DSN,
+/// its name, and a pool on the shared database to drop it with.
+#[cfg(feature = "config-store-postgres")]
+async fn fresh_database(tag: &str) -> (String, String, sqlx::PgPool) {
+    use sqlx::postgres::PgPoolOptions;
+    let dsn = std::env::var("AGENT_CONFIG_STORE_TEST_DSN")
+        .expect("AGENT_CONFIG_STORE_TEST_DSN must be set by the pg-integration harness");
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&dsn)
+        .await
+        .expect("connect postgres");
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after 1970")
+        .as_nanos();
+    let name = format!("lazy_{tag}_{}_{nanos}", std::process::id());
+    let base = dsn.rsplit_once('/').expect("a DSN names its database").0;
+    (format!("{base}/{name}"), name, admin)
+}
+
+#[cfg(feature = "config-store-postgres")]
+async fn create_database(admin: &sqlx::PgPool, name: &str) {
+    sqlx::raw_sql(&format!("CREATE DATABASE \"{name}\""))
+        .execute(admin)
+        .await
+        .expect("create the throwaway database");
+}
+
+#[cfg(feature = "config-store-postgres")]
+async fn drop_database(admin: &sqlx::PgPool, name: &str) {
+    sqlx::raw_sql(&format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"))
+        .execute(admin)
+        .await
+        .expect("drop the throwaway database");
+}
+
+/// `positive` / `negative` (postgres, live, security-hardening S15b): a lazily
+/// connected backend — the one every runtime store builds — on a database with no
+/// schema. With `migrate_lazily(true)` (`[config_store] migrate_on_start`) the
+/// first call applies the migrations and succeeds, and a card round-trips; without
+/// it the schema stays absent and the call fails closed. Before the fix the
+/// runtime never migrated, so a fresh database refused every sign-in.
+#[cfg(feature = "config-store-postgres")]
+#[rstest::rstest]
+#[case::positive_migrate_lazily_applies_schema_on_first_use(true)]
+#[case::negative_without_migrate_the_schema_stays_absent(false)]
+#[tokio::test]
+#[ignore = "needs a running postgres (nix run .#postgres-up) — run via `nix run .#integration`"]
+async fn lazy_backend_schema_on_first_use(#[case] migrate: bool) {
+    let (dsn, name, admin) = fresh_database(if migrate { "on" } else { "off" }).await;
+    create_database(&admin, &name).await;
+    let backend = crate::PgBackend::connect_lazy(&dsn, 2)
+        .expect("lazy pool")
+        .migrate_lazily(migrate);
+    let first = backend.count(TestCard::COLLECTION, "t").await;
+    if migrate {
+        assert_eq!(first.expect("first call migrates, then counts"), 0);
+        let store = Store::<TestCard>::new(Arc::new(backend));
+        store
+            .put("t", card("x", 7))
+            .await
+            .expect("put after lazy migration");
+        assert_eq!(store.get("t", "x").await.expect("get").weight, 7);
+    } else {
+        let err = first.expect_err("no schema, no migration ⇒ the call fails");
+        assert!(err.to_string().contains("does not exist"), "{err}");
+    }
+    drop_database(&admin, &name).await;
+}
+
+/// `boundary` (postgres, live): a failed lazy migration is not remembered. The
+/// first call targets a database that does not exist yet and fails; once it
+/// exists, the next call migrates and succeeds — a server that comes up after
+/// the agent needs no restart.
+#[cfg(feature = "config-store-postgres")]
+#[tokio::test]
+#[ignore = "needs a running postgres (nix run .#postgres-up) — run via `nix run .#integration`"]
+async fn boundary_failed_lazy_migration_is_retried() {
+    let (dsn, name, admin) = fresh_database("retry").await;
+    let backend = crate::PgBackend::connect_lazy(&dsn, 2)
+        .expect("lazy pool")
+        .migrate_lazily(true);
+    backend
+        .count(TestCard::COLLECTION, "t")
+        .await
+        .expect_err("the database does not exist yet");
+    create_database(&admin, &name).await;
+    assert_eq!(
+        backend
+            .count(TestCard::COLLECTION, "t")
+            .await
+            .expect("retried migration succeeds"),
+        0
+    );
+    drop(backend);
+    drop_database(&admin, &name).await;
+}
+
+/// `corner` (postgres, live): two lazy backends on one fresh database race their
+/// first call; the runner's advisory lock serializes them, so both succeed and
+/// the ledger records each migration once.
+#[cfg(feature = "config-store-postgres")]
+#[tokio::test]
+#[ignore = "needs a running postgres (nix run .#postgres-up) — run via `nix run .#integration`"]
+async fn corner_two_lazy_backends_race_first_use() {
+    let (dsn, name, admin) = fresh_database("race").await;
+    create_database(&admin, &name).await;
+    let mk = || {
+        crate::PgBackend::connect_lazy(&dsn, 2)
+            .expect("lazy pool")
+            .migrate_lazily(true)
+    };
+    let (a, b) = (mk(), mk());
+    let (ra, rb) = tokio::join!(
+        a.count(TestCard::COLLECTION, "t"),
+        b.count(TestCard::COLLECTION, "t")
+    );
+    assert_eq!(ra.expect("racer A"), 0);
+    assert_eq!(rb.expect("racer B"), 0);
+    let ledger = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&dsn)
+        .await
+        .expect("connect the throwaway database");
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM _schema_migrations")
+        .fetch_one(&ledger)
+        .await
+        .expect("ledger");
+    assert_eq!(
+        rows as usize,
+        crate::postgres::MIGRATIONS.len(),
+        "each migration once"
+    );
+    ledger.close().await;
+    drop((a, b));
+    drop_database(&admin, &name).await;
+}
+
 /// `corner` (postgres, live): two independent connections race a `put` of the
 /// same `(tenant, id)`. Under MVCC the second INSERT … ON CONFLICT blocks on the
 /// first's row lock, then takes the UPDATE branch — both commit (no lost update,
