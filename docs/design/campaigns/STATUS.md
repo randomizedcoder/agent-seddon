@@ -129,6 +129,6 @@ Design: [`README.md`](README.md) · sequence: [`05-increments.md`](05-increments
   RK-08): CP-07; a gated level is approved twice, as a task and again as a leaf (UX): CP-05;
   `agent-runtime --no-default-features` fails to build on `main` (pre-existing, 25 errors): its
   own change (the two flaky gate tests were fixed in #541 (`agent-runtime` `progress::tests`)
-  and #PR2 (`agent-search` `tests/leak.rs`)). Gate: `pg-integration` green
+  and #545 (`agent-search` `tests/leak.rs`)). Gate: `pg-integration` green
   (161/161); `nix flake check` green on the committed ref (third pass after the two flakes)
   and again first pass on the merge of `main` (#524–#530) into the branch.

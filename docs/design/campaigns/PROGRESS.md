@@ -222,7 +222,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
   Tripwire: `observe::tests::positive_capture_survives_no_subscriber_first_registration`
   (fails deterministically without the pin).
 - ~~Flaky gate test `agent-search` `tests/leak.rs` `search_query_paths_do_not_leak`: grew 28 live
-  blocks against a `+16` budget once under heavy host load.~~ **Resolved in #PR2.** Two causes:
+  blocks against a `+16` budget once under heavy host load.~~ **Resolved in #545.** Two causes:
   the reader was built with `ReloadPolicy::OnCommitWithDelay`, which spawns a `meta.json`
   watcher thread and a `watch-callbacks` reload thread that allocate in the background, and
   each `query` runs on `spawn_blocking`, so tokio can add a blocking-pool thread inside the
