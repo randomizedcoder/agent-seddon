@@ -10,7 +10,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
 
 ## Now
 
-- **Next:** CP-06 (lane C: the worker body behind `agent --run-task`, subprocess dispatch with `ExecSpec.env_set`, the heartbeat, the forge `PrPoller`, the e2e check) — not started. CP-05 merged as #553 (`a0ec5b3`); its close-out is this docs PR (#PR-CP05-CLOSE). CP-07 (RK-08 / RK-12 wiring, lane B) stays blocked on RK-12. The five hygiene follow-ups from the CP-04 gate are all on `main` (#541, #545, #546, #547, #550; see Open questions); two small observations from the CP-05 gate remain there (the `negative_bearer_beside_service_token` feature gap, the double-approval UX). Lane B to first value is done — CP-04 merged as #531 (`513447a`); CP-03 #525; lane A CP-01 #501 (`71d4abf`) and CP-02 #508 (`630098a`).
+- **Next:** CP-06 (lane C: the worker body behind `agent --run-task`, subprocess dispatch with `ExecSpec.env_set`, the heartbeat, the forge `PrPoller`, the e2e check) — not started. CP-05 merged as #553 (`a0ec5b3`); its close-out is this docs PR (#554). CP-07 (RK-08 / RK-12 wiring, lane B) stays blocked on RK-12. The five hygiene follow-ups from the CP-04 gate are all on `main` (#541, #545, #546, #547, #550; see Open questions); two small observations from the CP-05 gate remain there (the `negative_bearer_beside_service_token` feature gap, the double-approval UX). Lane B to first value is done — CP-04 merged as #531 (`513447a`); CP-03 #525; lane A CP-01 #501 (`71d4abf`) and CP-02 #508 (`630098a`).
 
 ## CP-01 — seam, pure rules, `MemCampaigns`, T1–T8 (mem) — ✅ #501 (merged 2026-09-27, `71d4abf`)
 
