@@ -942,10 +942,12 @@ fn auth_layer(
 /// The base router every serve entry point seeds its seams onto: admission, the
 /// `[auth]` layer ([`auth_layer`]) and metrics, plus TLS on the listener when
 /// [`listener_tls`] says so (security-hardening S4). Logs the transport mode once.
+/// The returned flag says whether the listener serves TLS, so the caller's
+/// "ready" log reports the endpoint a client must actually dial.
 async fn serve_base(
     agent: &Agent,
     listen: &Endpoint,
-) -> anyhow::Result<(ServeRouter, agent_grpc::server::HealthHandle)> {
+) -> anyhow::Result<(ServeRouter, agent_grpc::server::HealthHandle, bool)> {
     let tls = listener_tls(agent.grpc_tls(), listen)?;
     let mode = match &tls {
         None => "plaintext",
@@ -965,7 +967,7 @@ async fn serve_base(
     .map_err(anyhow::Error::msg)?;
     // `[auth.token]` ⇒ this listener also serves `AuthService` (exchange, key set,
     // who-am-I) beside whatever seams the caller adds.
-    Ok((auth.serve_auth_service(router), health))
+    Ok((auth.serve_auth_service(router), health, tls.is_some()))
 }
 
 /// Load the listener's TLS material when [`serves_tls`] says it should.
@@ -1005,7 +1007,7 @@ fn require_identity(configured: Option<bool>, listen: &Endpoint) -> bool {
 
 pub async fn serve_session_observe(agent: &Agent, listen: Endpoint) -> anyhow::Result<()> {
     install_authz_observer(agent);
-    let (router, health) = serve_base(agent, &listen).await?;
+    let (router, health, tls) = serve_base(agent, &listen).await?;
     let (router, added) = add_seam_service(router, agent, Seam::SessionStream)?;
     if !added {
         anyhow::bail!("session-stream seam not available in this build");
@@ -1013,7 +1015,10 @@ pub async fn serve_session_observe(agent: &Agent, listen: Endpoint) -> anyhow::R
     health.set_serving(Seam::SessionStream.service_name()).await;
     let router = agent_grpc::server::with_reflection(router).map_err(anyhow::Error::msg)?;
     let bound = listen.bind().await?;
-    tracing::info!(endpoint = ?bound.dial_endpoint()?, "session-observe server ready");
+    tracing::info!(
+        endpoint = ?bound.dial_endpoint()?.with_tls(tls),
+        "session-observe server ready"
+    );
     // No self-shutdown: `pending` keeps it alive until the caller drops the future.
     bound.serve(router, std::future::pending::<()>()).await?;
     Ok(())
@@ -1051,7 +1056,7 @@ pub async fn serve_sessions(agent: Arc<Agent>, listen: Endpoint) -> anyhow::Resu
     }
 
     install_authz_observer(&agent);
-    let (router, health) = serve_base(&agent, &listen).await?;
+    let (router, health, tls) = serve_base(&agent, &listen).await?;
     let router = router.add_service(
         srv::SessionRegistrySvc::new(mgr.clone() as Arc<dyn agent_core::SessionRegistry>)
             .into_server(),
@@ -1067,7 +1072,7 @@ pub async fn serve_sessions(agent: Arc<Agent>, listen: Endpoint) -> anyhow::Resu
     let router = agent_grpc::server::with_reflection(router).map_err(anyhow::Error::msg)?;
     let bound = listen.bind().await?;
     tracing::info!(
-        endpoint = ?bound.dial_endpoint()?,
+        endpoint = ?bound.dial_endpoint()?.with_tls(tls),
         "sessions gateway ready (SessionRegistry + driving AgentSession + reaper)"
     );
     let shutdown = async {
@@ -1265,7 +1270,7 @@ pub async fn serve_fleet(
     };
 
     install_authz_observer(&agent);
-    let (router, health) = serve_base(&agent, &listen).await?;
+    let (router, health, tls) = serve_base(&agent, &listen).await?;
     let mut fleet_svc = srv::ReviewFleetSvc::new(roster.clone());
     if let Some(triggers) = triggers {
         fleet_svc = fleet_svc.with_triggers(triggers);
@@ -1306,7 +1311,7 @@ pub async fn serve_fleet(
     let router = agent_grpc::server::with_reflection(router).map_err(anyhow::Error::msg)?;
     let bound = listen.bind().await?;
     tracing::info!(
-        endpoint = ?bound.dial_endpoint()?,
+        endpoint = ?bound.dial_endpoint()?.with_tls(tls),
         "review fleet ready (roster control plane + orchestrator + driving AgentSession + reaper)"
     );
     let shutdown = async {
@@ -1563,7 +1568,7 @@ async fn serve_seams(
     // Health is the seed of the router, so hosting one seam and hosting all of
     // them are the same code path rather than two that can drift.
     install_authz_observer(agent);
-    let (mut router, health) = serve_base(agent, &listen).await?;
+    let (mut router, health, tls) = serve_base(agent, &listen).await?;
     let mut hosted: Vec<&str> = Vec::new();
     for &seam in seams {
         let (next, added) = add_seam_service(router, agent, seam)?;
@@ -1590,7 +1595,7 @@ async fn serve_seams(
     let bound = listen.bind().await?;
     tracing::info!(
         seams = hosted.join(","),
-        endpoint = ?bound.dial_endpoint()?,
+        endpoint = ?bound.dial_endpoint()?.with_tls(tls),
         "gRPC seam server ready"
     );
     let shutdown = async {
