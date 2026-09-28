@@ -305,6 +305,10 @@ in
   # jwt_authn, TLS) + `envoy --mode validate` of every mode against the real listener
   # spec, with check-the-checks (security-hardening S14). Python + cached envoy-bin.
   portal-envoy = import ./portal-envoy.nix { inherit pkgs versions; };
+  # The sign-in chain end to end over real processes: fake OIDC issuer + dev PKI +
+  # `--serve-all` whose memory is a `= "grpc"` client of `--serve-memory`, mTLS, two
+  # tenants; tables + check-the-checks + the live run (security-hardening S15a).
+  auth-e2e = agentCheck ./auth-e2e.nix { inherit versions; };
   # The ClickHouse credentials helper's own tests + check-the-checks for the live RLS
   # harness's matcher (security-hardening S16). Pure stdlib Python.
   ch-creds-tests = import ./ch-creds-tests.nix { inherit pkgs; };
