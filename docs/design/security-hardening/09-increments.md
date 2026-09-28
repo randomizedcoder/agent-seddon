@@ -20,7 +20,7 @@ tables. Tracker: [`STATUS.md`](STATUS.md).
 | S13a | Browser sign-in server side: `AuthService.Issuers` / `Begin`, `Exchange{code, state, code_verifier}` (authorization code + PKCE, redeemed by the agent with the client secret), `[auth] redirect_uris`, testkit fake IdP `/authorize` | P0-4 (portal) | S6, S12 |
 | S13b | Portal login: `AuthState`, `AuthInterceptor`, `LoginPage`, callback, capability-aware controls, Layer-A fakes | P0-4 (portal) | S13a, S8 |
 | S14 | Envoy hardening: loopback bind, exact-origin CORS, `authorization`, `jwt_authn` against the agent JWKS, `PORTAL_AUTH=off`, `--mode validate` check, portal-e2e under auth, optional TLS / mTLS contexts | P0-4 | S5, S13 |
-| S15 | `nix flake check` **auth-e2e** (fake issuer + real `--serve-all` + step-cli certs + two-tenant isolation + chain through a `= "grpc"` seam) and the `nix run .#integration` step-ca / Postgres / ClickHouse tiers | testing | S9, S10, S11 |
+| S15 | `nix flake check` **auth-e2e** (fake issuer + real `--serve-all` + step-cli certs + two-tenant isolation + chain through a `= "grpc"` seam, `portal-e2e` under auth, moved from S14) and the `nix run .#integration` step-ca / Postgres / ClickHouse tiers | testing | S9, S10, S11 |
 | S16 | ClickHouse lockdown: passwords from files, `users_without_row_policies_can_read_rows = false`, writer / reader split, per-query tenant setting, HyperDX wiring, RLS harness | P0-6 | — (S11 adds its table) |
 | S17 | Secret-reference confinement: `SecretScope`, `[secrets]`, inline refusal under `per_tenant` | P0-7 | — |
 

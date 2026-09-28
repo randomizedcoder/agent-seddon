@@ -301,6 +301,10 @@ in
   # The dev-PKI generator's own tests, incl. an offline real-step-cli mint + verify and
   # check-the-checks (security-hardening S4). Pure stdlib Python + step-cli.
   pki-dev-tests = import ./pki-dev-tests.nix { inherit pkgs; };
+  # The portal Envoy bridge renderer's tables (safe defaults, exact-origin CORS,
+  # jwt_authn, TLS) + `envoy --mode validate` of every mode against the real listener
+  # spec, with check-the-checks (security-hardening S14). Python + cached envoy-bin.
+  portal-envoy = import ./portal-envoy.nix { inherit pkgs versions; };
   # The ClickHouse credentials helper's own tests + check-the-checks for the live RLS
   # harness's matcher (security-hardening S16). Pure stdlib Python.
   ch-creds-tests = import ./ch-creds-tests.nix { inherit pkgs; };

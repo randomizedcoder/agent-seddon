@@ -22,7 +22,7 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
 | S12 | CLI `agent login/logout/whoami` | D6 | ✅ | #524 |
 | S13a | Browser sign-in server side (`Issuers` / `Begin` / code + PKCE `Exchange`) | P0-4 | ✅ | #528 |
 | S13b | Portal login + capability-aware UI | P0-4 | ✅ | #533 |
-| S14 | Envoy hardening + `jwt_authn` | P0-4 | ⬜ | — |
+| S14 | Envoy hardening + `jwt_authn` | P0-4 | 🟡 | — |
 | S15 | auth-e2e gate + integration tiers | testing | ⬜ | — |
 | S16 | ClickHouse credentials + RLS lockdown | P0-6 | ✅ | #506 |
 | S17 | Secret-reference confinement | P0-7 | ✅ | #507 |
@@ -675,3 +675,18 @@ Design: [`README.md`](README.md) · sequence: [`09-increments.md`](09-increments
     reload's reply, not just the recorded call; `portal-widget` runs `flutter test
     --concurrency=4`.
   - Deferred: native desktop sign-in (read the CLI's stored login), a Roles / bindings page.
+- **2026-09-27 — S14.** Envoy hardening. The grpc-web bridge config moved from a nix heredoc to a
+  tested renderer ([`test/portal-envoy/portal_envoy.py`](../../../test/portal-envoy/portal_envoy.py))
+  over a listener spec ([`nix/portal/envoy-spec.nix`](../../../nix/portal/envoy-spec.nix));
+  `grpc-web-up` is its shim. Details: [06, "As built (S14)"](06-portal-and-edge.md#envoy-hardening).
+  - Defaults: bind `127.0.0.1`, exact-origin CORS (`http://127.0.0.1:8092`,
+    `http://localhost:8092`), `authorization` allowed.
+  - `jwt_authn` against the agent's own JWKS (fetched with `AuthService.Jwks`, or a file / URL),
+    bypassing AuthService, health and reflection; `PORTAL_AUTH` `auto` (default) / `on` / `off`.
+    An unreachable agent is an error, never a silent "no edge check".
+  - Optional listener TLS and upstream TLS / mTLS from files.
+  - Image bumped to `envoyproxy/envoy:v1.39-latest`; `versions.envoy-bin` (same minor) runs
+    `--mode validate` in the new `portal-envoy` check, which also runs check-the-checks.
+  - Verified live on l2 with podman on side ports (CORS, missing / garbage / valid / wrong-`iss`
+    tokens, bypass paths, TLS).
+  - Moved to S15: `portal-e2e` under auth (needs S15's fake-issuer agent).
