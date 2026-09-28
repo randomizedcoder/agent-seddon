@@ -75,7 +75,7 @@ Same heredoc, env knobs with safe defaults:
 | `PORTAL_GRPC_WEB_HOST` | `127.0.0.1` | listener bind (all three) |
 | `PORTAL_WEB_ORIGIN` | `http://127.0.0.1:8092` | CORS `exact` match; `authorization` added to `allow_headers` |
 | `PORTAL_JWT_ISSUER`, `PORTAL_JWT_JWKS`, `PORTAL_JWT_AUDIENCE` | the agent's `[auth.token]` values | one `jwt_authn` provider (`remote_jwks`, `cache_duration`, `forward: true`) |
-| `PORTAL_AUTH` | `on` | `off` renders the `jwt_authn` filter out (loopback dev) |
+| `PORTAL_AUTH` | `auto` (as built; designed as `on`) | `off` renders the `jwt_authn` filter out (loopback dev) |
 | `PORTAL_TLS_CERT` / `PORTAL_TLS_KEY` | unset | listener `DownstreamTlsContext` (step-ca certificates) |
 | `PORTAL_UPSTREAM_MTLS` | unset | `UpstreamTlsContext` with Envoy's service certificate, so the agent sees `peer_san = svc:envoy` |
 
@@ -83,6 +83,55 @@ Same heredoc, env knobs with safe defaults:
 edge check is defense in depth; `AuthLayer` in the agent is the enforcement point
 ([04](04-service-integration.md)). When REST lands, the same listener adds `grpc_json_transcoder`
 ahead of `grpc_web`; auth is unchanged.
+
+**As built (S14).** The heredoc is gone. [`nix/portal/envoy-spec.nix`](../../../nix/portal/envoy-spec.nix)
+holds the listener table (and is now the single source of the bridge ports);
+[`test/portal-envoy/portal_envoy.py`](../../../test/portal-envoy/portal_envoy.py) renders the
+bootstrap as JSON (Envoy reads JSON as YAML, and `json.dumps` means no knob can escape its
+string), and `grpc-web-up` is a shim that runs it and starts the container.
+
+- Bind: `PORTAL_GRPC_WEB_HOST`, an IP literal, default `127.0.0.1`, applied to all three
+  listeners. A non-loopback bind prints a note naming the allowed origins.
+- CORS: `PORTAL_WEB_ORIGIN` is a comma list of exact origins, normalised to
+  `scheme://host[:port]`. `*`, `null`, paths, queries, credentials and control characters are
+  refused. `authorization` stays in `allow_headers`.
+- `jwt_authn`: one provider (`agent`), `forward: true`, `bypass_cors_preflight`, placed after
+  `cors` (so the preflight is answered and the 401 carries CORS headers) and before `router`.
+  The three bypass prefixes skip it; everything else requires it. The agent answers
+  `AuthService.Jwks` only over gRPC, so by default the renderer calls it with `grpcurl` (using
+  the committed `auth.proto`, not reflection) and inlines the key set as `local_jwks`.
+  `PORTAL_JWT_JWKS` may instead name a file or an https (loopback http) URL, which becomes
+  `remote_jwks` with its own cluster. A key set with private members (`d`, `k`, …) is refused.
+  `PORTAL_JWT_ISSUER` / `PORTAL_JWT_AUDIENCE` are optional; unset, only the agent checks them.
+- `PORTAL_AUTH` defaults to `auto`, matching the portal: `auto` renders `jwt_authn` when the
+  agent serves a non-empty key set and omits it (with a note) when the agent answers
+  `UNIMPLEMENTED`; `on` refuses to start without keys; `off` never asks. In every mode an
+  unreachable agent is an error after `PORTAL_JWKS_WAIT` seconds (default 30): the edge cannot
+  tell "no tokens" from "not up yet", and guessing would fail open. Key rotation needs a
+  re-run of `grpc-web-up` (the agent keeps the previous key in its set for one token lifetime).
+- TLS: `PORTAL_TLS_CERT` / `_KEY` add a `DownstreamTlsContext` (ALPN h2, http/1.1) to every
+  listener. `PORTAL_UPSTREAM_CA` adds an `UpstreamTlsContext` to the three agent clusters
+  (not the OTLP one), checking the DNS SAN `PORTAL_UPSTREAM_SNI` (default `localhost`, which
+  `nix run .#pki-dev` leaves carry); `_CERT` / `_KEY` add Envoy's client certificate. The
+  files are mounted read-only under `/etc/envoy/tls/`.
+- The rendered file holds the OTLP ingestion key, so it is written `0600` and the container runs
+  as the invoking user (`--user`, plus `--userns keep-id` under podman).
+- Image `envoyproxy/envoy:v1.39-latest` (was v1.31) so the gate validates the version that runs:
+  `versions.envoy-bin` is the cached upstream 1.39 binary.
+- `portal-redeploy` probes `grpc.health.v1.Health/Check` through the bridge (bypassed by
+  `jwt_authn`) and fails on a non-zero `grpc-status`; `portal-e2e` pins `flutter drive` to
+  `127.0.0.1:8097` and allows exactly that origin.
+- Gate: the `portal-envoy` check runs the renderer's tables, then `envoy --mode validate` on
+  five modes (auth off, local JWKS, remote JWKS, LAN bind with two origins, TLS + upstream
+  mTLS + auth) over the real spec, and check-the-checks: a corrupt JWKS, an unknown provider
+  and a missing key file must fail validate.
+- Verified live on l2 (podman, side ports): a foreign origin gets no
+  `access-control-allow-origin`; no token and a garbage token get `grpc-status: 16`; a token
+  signed by the served key passes to the upstream; a wrong `iss` is refused; AuthService and
+  health pass without a token; the TLS listener answers over https with the dev CA.
+- Not in S14: `portal-e2e` under auth needs an agent that issues tokens from a fake issuer,
+  which is S15's harness, so it moves there. The REST transcoder (rest-openapi PR-05) now
+  lands as a filter in the renderer.
 
 ## Tests
 

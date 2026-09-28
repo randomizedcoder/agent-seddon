@@ -209,7 +209,10 @@ MCP; on branch `feat/portal-config-settings` (not yet merged).
 - A `constants-sync`-style **drift check for the committed Dart stubs**.
 - **mTLS / cross-host** transport for the portal (tracks the existing gRPC follow-up
   in [`grpc.md`](../../grpc.md#possible-follow-ups); the portal inherits whatever the
-  transport layer grows).
+  transport layer grows). Resolved at the edge by security-hardening S14: the grpc-web
+  bridge serves TLS (`PORTAL_TLS_CERT` / `_KEY`) and dials the agent over TLS or mTLS
+  (`PORTAL_UPSTREAM_CA` / `_CERT` / `_KEY`); see
+  [`06-portal-and-edge.md`](../security-hardening/06-portal-and-edge.md).
 - **Per-mode *system* prompts** (not just per-mode compaction lenses). Today only the
   compaction lens is per-mode; a per-mode system prompt would be a separate design on
   the `ContextStrategy`/prompt seams.

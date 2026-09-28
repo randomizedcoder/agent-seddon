@@ -24,7 +24,7 @@ LAN. Nothing needs a browser on l2 — the portal is *served* headless.
 | Service | Bind | Started by | Notes |
 |---|---|---|---|
 | Portal web UI | `0.0.0.0:8092` | `nix run .#portal-web` | `flutter build web` + `static-web-server`; endpoints are `--dart-define` (see §2) |
-| Envoy grpc-web | `0.0.0.0:8090→50100`, `0.0.0.0:8091→50080` | `CONTAINER_RUNTIME=podman nix run .#grpc-web-up` | browsers can't speak raw gRPC; two listeners in one container |
+| Envoy grpc-web | `0.0.0.0:8090→50100`, `0.0.0.0:8091→50080`, `0.0.0.0:8093→50086` | `CONTAINER_RUNTIME=podman PORTAL_GRPC_WEB_HOST=0.0.0.0 PORTAL_WEB_ORIGIN=http://172.16.50.46:8092 nix run .#grpc-web-up` | browsers can't speak raw gRPC; three listeners in one container. Since security-hardening S14 the bridge binds `127.0.0.1` and allows only `http://127.0.0.1:8092` / `http://localhost:8092` unless told otherwise, so LAN use needs both knobs |
 | Agent gateway | loopback `:50100` (metrics `:9700`) | `agent --serve-all` | serves every seam |
 | Agent sessions | loopback `:50080` (metrics `:9630`) | `agent --serve-sessions` | drives runs from the portal; **needs its own `[search] index_dir`** (§3) |
 | Prometheus | `:9090` | native NixOS service (`l2/prometheus.nix`) | scrapes `127.0.0.1:9700` + `:9630` |
@@ -34,8 +34,9 @@ LAN. Nothing needs a browser on l2 — the portal is *served* headless.
 
 **Reachability** requires three layers to line up: (1) the NixOS firewall
 (`l2/lan-access.nix` opens 8090/8091/8092/8095/3000/9090/8080), (2) each service's
-bind address (loopback vs `0.0.0.0`; the grpc-web/hyperdx containers publish on
-`0.0.0.0`, the gateways stay loopback *behind* Envoy), and (3) the URLs baked into
+bind address (loopback vs `0.0.0.0`; the hyperdx container publishes on `0.0.0.0`,
+the grpc-web bridge only with `PORTAL_GRPC_WEB_HOST=0.0.0.0`, the gateways stay loopback
+*behind* Envoy), and (3) the URLs baked into
 the portal bundle (§2).
 
 ---

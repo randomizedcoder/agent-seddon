@@ -50,3 +50,24 @@ knobs (`--dart-define`, wired in `nix/portal/default.nix`):
 
 The native desktop build cannot redirect to an IdP; run it with `PORTAL_AUTH=off` against a
 loopback agent.
+
+### The grpc-web bridge (security-hardening S14)
+
+`nix run .#grpc-web-up` renders the Envoy config at bring-up
+([`test/portal-envoy/portal_envoy.py`](../test/portal-envoy/portal_envoy.py)) from `PORTAL_*`
+environment knobs whose defaults are the safe ones:
+
+| Knob | Default | Meaning |
+|---|---|---|
+| `PORTAL_GRPC_WEB_HOST` | `127.0.0.1` | bind for all three listeners (`0.0.0.0` for LAN browsers) |
+| `PORTAL_WEB_ORIGIN` | `http://127.0.0.1:8092,http://localhost:8092` | the exact origins CORS allows; no wildcards |
+| `PORTAL_AUTH` | `auto` | `auto`: check agent tokens at the edge when the agent issues them; `on`: insist; `off`: never |
+| `PORTAL_JWT_JWKS` | fetched from the gateway | a JWKS file or https URL instead of `AuthService.Jwks` |
+| `PORTAL_JWT_ISSUER` / `PORTAL_JWT_AUDIENCE` | unset | also check `iss` / `aud` at the edge |
+| `PORTAL_TLS_CERT` / `PORTAL_TLS_KEY` | unset | serve the listeners over TLS |
+| `PORTAL_UPSTREAM_CA` (+ `_CERT` / `_KEY`, `_SNI`) | unset | TLS (mTLS) from Envoy to the agent |
+
+Start the gateway first: with `PORTAL_AUTH=auto` the bridge asks it for its JWKS, waits up to
+`PORTAL_JWKS_WAIT` seconds (30), and refuses to start rather than guess. `flutter run -d chrome`
+serves from a random port, so pass `-- --web-port 8092` (or add its origin to
+`PORTAL_WEB_ORIGIN`).

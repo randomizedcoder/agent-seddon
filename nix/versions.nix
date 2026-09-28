@@ -157,7 +157,11 @@ in
   # never source-builds envoy. Web build only. Referenced fully-qualified
   # (`docker.io/...`) in nix/portal so podman — whose unqualified-search list can be
   # empty (e.g. the headless l2 box) — resolves it too.
-  envoyImage = "envoyproxy/envoy:v1.31-latest";
+  envoyImage = "envoyproxy/envoy:v1.39-latest";
+  # The same Envoy as a cached upstream binary, used ONLY by the `portal-envoy` check
+  # to `envoy --mode validate` the rendered bridge config (security-hardening S14).
+  # Keep its minor version equal to `envoyImage` so the gate validates what runs.
+  envoy-bin = pkgs.envoy-bin;
   # Serves the headless Flutter *web* bundle (`nix run .#portal-web`); a static file
   # server, no browser needed. In the pin as `static-web-server`.
   static-web-server = pkgs.static-web-server;
