@@ -141,8 +141,19 @@ client/bidi RPC is ever added, as a reminder to list it here.
 ## OpenAPI generation + drift gate
 
 The OpenAPI document is generated from the annotated protos by **`protoc-gen-openapiv2`** (the
-grpc-gateway OpenAPI plugin; emits **Swagger 2.0**), pinned in `nix/versions.nix` and run as a
-hermetic `local:` buf plugin — never a BSR/network plugin, matching the Dart codegen posture.
+grpc-gateway OpenAPI plugin; emits **Swagger 2.0**), run as a hermetic `local:` buf plugin — never a
+BSR/network plugin, matching the Dart codegen posture. As built, the plugin binary is bundled in the
+nixpkgs **`grpc-gateway`** package (pinned as `versions.grpc-gateway`; the top-level
+`protoc-gen-openapiv2` and gnostic attrs are absent in the pin), invoked from its own template
+(`nix/openapi/buf.gen.openapi.yaml`). protoc-gen-openapiv2 requires a Go import path per proto (used
+only to group output files); rather than 36 hand-written `M…=` mappings, the template uses buf v2
+**managed mode** (a `go_package_prefix` override, with `disable go_package` for the
+`buf.build/googleapis/googleapis` module so the vendored `google/api` protos keep their own) — output
+is byte-identical and, with `preserve_rpc_order=true`, **deterministic** across runs, which the drift
+gate requires. `allow_merge=true`+`merge_file_name=agent` produce one merged doc;
+`json_names_for_fields=true` gives camelCase JSON fields and `{reviewId}`-style path params; a `.info`
+rewrite (`nix/openapi/info.jq`) stamps the title/version, the "recommend gRPC" note, and a
+do-not-edit-by-hand banner.
 
 The generated document is **committed** (`crates/agent-proto/openapi/agent.swagger.json`) and
 **gated against drift** with the exact three-piece pattern that already keeps

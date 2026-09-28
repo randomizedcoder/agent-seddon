@@ -11,7 +11,7 @@ the as-built log) in the PR that lands the increment.
 | 01 | [Design directory](README.md) (design-of-record + STATUS + index) | — | — | — | — | — | ✅ merged (#510) |
 | 02 | Groundwork: vendor `google/api/{annotations,http}.proto`, wire `tonic-build` + buf-lint exemption, annotate one RPC, coverage-test skeleton | ✅ | — | — | ✅ | — | ✅ merged (#512) |
 | 03 | Annotate the full surface, batched per proto group (reads→GET, deletes→DELETE, else POST body:*); server-streaming annotated too — **nothing excluded** | ✅ | — | — | ✅ | — | ✅ complete (03a–03g4) |
-| 04 | OpenAPI doc: pin `protoc-gen-openapiv2`, generate + commit, `gen-openapi`/`openapi-sync` drift gate, OpenAPI-parity test | — | ✅ | — | ✅ | — | ⬜ |
+| 04 | OpenAPI doc: pin `protoc-gen-openapiv2`, generate + commit, `gen-openapi`/`openapi-sync` drift gate, OpenAPI-parity test | — | ✅ | — | ✅ | — | 🟡 in flight |
 | 05 | Envoy `grpc_json_transcoder`: descriptor derivation, loopback REST listener (port via `nix/constants.nix`), filter before `router`, descriptor mount, `authorization` in CORS | — | ✅ | ✅ | — | — | ⬜ |
 | 06 | `nix run .#rest-integration` (boot → Envoy → curl → assert → teardown; adversarial cases); folded into `nix/integration.nix` | — | ✅ | ✅ | ✅ | — | ⬜ |
 | 07 | `nix run .#rest-bench` (REST-vs-gRPC via `ghz` + HTTP load; descriptor/config-size note) | — | ✅ | ✅ | — | ✅ | ⬜ |
@@ -213,3 +213,27 @@ distinct control-plane group during the sweep and became its own final batch, 03
   invariants = 60 tests. With this, **the whole surface is annotated** and increment 03 (03a–03g4) is
   complete — REST bypasses no authz (transcoded calls hit the same gRPC handler behind the same
   `AuthLayer`). Next: increment 04 (OpenAPI doc + drift gate).
+- **04 (OpenAPI doc + drift gate).** Generated a committed **Swagger 2.0** contract at
+  `crates/agent-proto/openapi/agent.swagger.json` from the `.proto` `(google.api.http)` annotations, and
+  gated it against drift with the **`constants-sync` trio**: a shared derivation
+  (`nix/gen-openapi.nix`) → the `gen-openapi` app (copies the derivation into the repo) → the
+  `openapi-sync` check (`diff -u` committed vs derivation). Generator = **`protoc-gen-openapiv2`**,
+  bundled in nixpkgs `grpc-gateway` (pinned as `versions.grpc-gateway`; the top-level
+  `protoc-gen-openapiv2`/gnostic attrs are absent in the pin) and run via `buf generate` with its own
+  template (`nix/openapi/buf.gen.openapi.yaml`). openapiv2 needs a Go import path per proto (only for
+  output grouping); supplied via buf v2 **managed mode** (`go_package_prefix` override + `disable
+  go_package` for the `buf.build/googleapis/googleapis` module so the vendored google/api protos keep
+  their own) rather than 36 hand-written `M…=` mappings — output is byte-identical and **deterministic**
+  across runs (`preserve_rpc_order=true`), which the drift gate requires. opts: `allow_merge=true` +
+  `merge_file_name=agent` (one merged doc), `json_names_for_fields=true` (camelCase JSON + `{reviewId}`
+  path params), `openapi_naming_strategy=fqn`. A `.info` rewrite (`nix/openapi/info.jq`) stamps the
+  title/version/"recommend gRPC" description + do-not-edit note. **Crane caveat:** the committed doc is
+  `.json`, which crane's Rust source filter drops from `commonArgs.src` — so, like `buf.nix`,
+  `openapi-sync.nix` references it by a direct nix path, not through the filtered source. **Parity test**
+  (`crates/agent-proto/tests/openapi_parity.rs`): asserts the committed doc's `(verb, path)` set equals
+  the route set decoded straight from `FILE_DESCRIPTOR_SET` — so a generator that dropped or invented a
+  route fails in `cargo test`, not just at Envoy load time. Both it and `http_annotations.rs` now derive
+  routes from one shared decoder (`tests/proto_http/mod.rs`, the minimal descriptor mirror extracted from
+  02) so they can never disagree. Doc = 146 unique paths / 172 `(verb,path)` routes; 4 parity tests + the
+  refactored 60 annotation tests all green. Verified: `nix run .#gen-openapi` no-diffs a clean tree, and a
+  hand-edit makes `openapi-sync` fail (the gate bites both ways). Next: increment 05 (Envoy transcoder).
