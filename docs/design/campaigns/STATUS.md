@@ -13,7 +13,7 @@ Design: [`README.md`](README.md) · sequence: [`05-increments.md`](05-increments
 | CP-02 | `PgCampaigns`, migration 0001, protocols (a)–(g), live suite, invariants query | SI-11 | ✅ | #508 |
 | CP-03 | Planner: prompt, schema, validation, caps, `needs_info` / `reject`, fallback brief | SI-11 | ✅ | #525 |
 | CP-04 | CLI `agent campaign …` | SI-11 | ✅ | #531 |
-| CP-05 | `CampaignDriver` tick + `[campaign]` config | SI-11 | 🟡 | `campaigns/cp-05` |
+| CP-05 | `CampaignDriver` tick + `[campaign]` config | SI-11 | ✅ | #553 |
 | CP-06 | Worker `--run-task`, worktree → PR, `PrPoller`, e2e check | SI-11 | ⬜ | — |
 | CP-07 | RK-12 brief, `touches` against `RepoGraphStore`, RK-08 tool for workers | SI-7, SI-11 | ⬜ | — |
 | CP-08 | Metrics, ClickHouse events, component doc | — | ⬜ | — |
@@ -126,10 +126,50 @@ Design: [`README.md`](README.md) · sequence: [`05-increments.md`](05-increments
   Live smoke with Kimi-K3 against podman Postgres: `add` → `plan` split the root into three
   children → `approve --children` → `plan` marked two leaves and refused one whose `touches`
   named a file that does not exist yet. Deferred: touches for not-yet-existing files (node keys,
-  RK-08): CP-07; a gated level is approved twice, as a task and again as a leaf (UX): CP-05;
+  RK-08): CP-07; a gated level is approved twice, as a task and again as a leaf (UX): recorded under PROGRESS
+  open questions in CP-05, still open;
   `agent-runtime --no-default-features` failed to build on `main` (pre-existing, 21 errors):
   fixed in #546, which also added the `feature-matrix` gate so it stays fixed (the two flaky
   gate tests were fixed in #541 (`agent-runtime` `progress::tests`) and #545 (`agent-search`
   `tests/leak.rs`)). Gate: `pg-integration` green
   (161/161); `nix flake check` green on the committed ref (third pass after the two flakes)
   and again first pass on the merge of `main` (#524–#530) into the branch.
+- **2026-09-28 — CP-05 (#553).** The driver tick in `agent_campaign::driver`: `Driver::tick`
+  harvests finished workers, serves the tenants (a `--tenant` list, or `CampaignBackend::tenants()`
+  under `[tenancy] per_tenant`, rotated round-robin) and per tenant, inside the tenant's session
+  scope, runs `reap()` → `reap_decomposing()` → `PrPoller::poll` → `TickPlanner::tick` (a CP-03
+  `Planner` per tenant per tick, bounded by `plan_per_tick`) → `claim` sized to
+  `min(per-tenant free, global budget)`; claims are interleaved across tenants and dispatched into
+  a persistent `JoinSet` under a global and a per-tenant `Semaphore`. A worker's `Err`, timeout
+  (`tokio::time::timeout` inside the spawned task) or panic is settled by the driver
+  (`claimed → running → failed`, error text bounded by `MAX_ERROR`); `drain(deadline)` joins the
+  rest and aborts the leftovers (their leases expire and `reap()` returns them). **The shipped
+  driver has no worker exec, so its claim phase is off** and `run --once` prints `claimed 0
+  dispatched 0  (workers: CP-06)` — `fail` blocks dependents and rolls parents up, so a stub
+  that failed every leaf would wreck CP-04's `add → run --once → show`. Seam: `CampaignStore::
+  reap_decomposing(max_age_secs)` (a non-leaf `decomposing` for longer than
+  `DECOMPOSING_MAX_SECS = 900` back to `ready` by `reaper`, `detail.reason = plan_stale`, no
+  attempt touched; T2 exhaustive 82 → 84), `CampaignBackend { tenants, with_tenant }` over the
+  `tasks` table's live states, `safe_segment`-filtered (`PgCampaigns` with `SKIP LOCKED`),
+  `CAMPAIGN_OWNER_ENV`, `LIVE_STATES`. Config: `enabled` (needs a `store`), `tick_secs`
+  5..=3600, `per_tenant_workers` 1..=32, `global_workers` 1..=256, `sandbox` (`subprocess` |
+  `in_process`, validated now, dispatched in CP-06), `worker_timeout_secs` 60..=86400;
+  `agent_runtime::campaign::open_campaign_backend`, `campaign_driver::{driver_config,
+  tenants_for, build_driver}`. CLI: `agent campaign run` (resident, refused unless `[campaign]
+  enabled` after the config load and before any store opens; one counts line per tick; `^C`
+  drains) and `run --once` (one tick + drain, the CP-04 plan lines kept); the hidden `agent
+  --run-task --tenant T --task <id>` worker mode is a stub that exits before the config is
+  read (`AGENT_CAMPAIGN_OWNER` missing / unsafe ⇒ 3 `lease lost`, present ⇒ 4 `not implemented
+  (CP-06)`; the token is never printed). Deviations from `04-executor.md`, recorded there under
+  "As built in CP-05": the tick does not join its workers (persistent `JoinSet`, harvested per
+  tick); the claim limit never waits on a permit; `lease_secs` is the policy default until the
+  CP-06 heartbeat; `POLL_BATCH = 20` until `poll_batch` lands with the poller; subprocess
+  dispatch (the `ExecSpec.env_set` design) moves to CP-06. Tests: T11 18/18 (15 in
+  `driver/tests.rs` over `MemCampaigns` with a recording store / backend / poller, a counting
+  planner and closure execs, incl. `adversarial_worker_panics` / `_hangs` (paused clock) /
+  `_store_error_mid_tick`; `boundary_config_floor` / `_ceiling` as `campaign_validate_cases`
+  rows; `adversarial_owner_from_env_missing` as an e2e row plus `run_task_stub_rows`), T6 +8 on
+  both tiers (+1 mem-only `adversarial_tenants_never_unsafe`), T2 +5, runtime backend / driver
+  builder rows, CLI parse / render / `run --once` rows, four e2e rows. Gate: `pg-integration`
+  green (169/169); the manual smoke over the dev Postgres green on every path; `nix flake check`
+  green on the committed ref first pass (72 checks).
