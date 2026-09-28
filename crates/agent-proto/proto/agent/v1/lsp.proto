@@ -11,12 +11,38 @@ syntax = "proto3";
 
 package agent.v1;
 
+// REST transcoding annotations (gap-analysis §4, docs/design/rest-openapi/). The
+// `(google.api.http)` options below let Envoy's `grpc_json_transcoder` expose the
+// service as REST/JSON without any Rust code; gRPC stays the primary interface.
+import "google/api/annotations.proto";
+
+// REST mappings (docs/design/rest-openapi/), under /v1/lsp/. Open (carries a file's
+// `text`) and Request (nested method/position, and rename mutates) → POST body:*;
+// Shutdown is an action → POST; Capabilities is a read whose only field is a scalar
+// `language` → GET (query param).
 service LspService {
   // Tell the server about a file's current contents (unsaved buffers).
-  rpc Open(LspOpenRequest) returns (LspOpenResponse);
-  rpc Request(LspRequestMsg) returns (LspResultMsg);
-  rpc Capabilities(LspCapabilitiesRequest) returns (LspCapabilities);
-  rpc Shutdown(LspShutdownRequest) returns (LspShutdownResponse);
+  rpc Open(LspOpenRequest) returns (LspOpenResponse) {
+    option (google.api.http) = {
+      post: "/v1/lsp/open"
+      body: "*"
+    };
+  }
+  rpc Request(LspRequestMsg) returns (LspResultMsg) {
+    option (google.api.http) = {
+      post: "/v1/lsp/request"
+      body: "*"
+    };
+  }
+  rpc Capabilities(LspCapabilitiesRequest) returns (LspCapabilities) {
+    option (google.api.http) = {get: "/v1/lsp/capabilities"};
+  }
+  rpc Shutdown(LspShutdownRequest) returns (LspShutdownResponse) {
+    option (google.api.http) = {
+      post: "/v1/lsp/shutdown"
+      body: "*"
+    };
+  }
 }
 
 enum LspMethod {

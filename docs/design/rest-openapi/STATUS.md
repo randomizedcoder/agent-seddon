@@ -51,11 +51,13 @@ added, it fires as a reminder to list it here as gRPC-only.
 | 03e | `session.proto`, `session_registry.proto`, `agent_session.proto`, `scheduler.proto` | ✅ merged (#522) |
 | 03f | `tool.proto`, `exec.proto`, `web.proto`, `forge.proto` (TaskService) | ✅ merged (#523) |
 | 03g1 | `provider.proto`, `llm_pool.proto`, `embed.proto`, `tokenizer.proto` (LLM plane) | ✅ merged (#526) |
-| 03g2 | `memory.proto`, `context.proto`, `dimension.proto`, `mode.proto`, `digest.proto`, `reference.proto` (cognition/memory) | 🟡 in flight |
-| 03g3 | `graph.proto`, `scanner.proto`, `lsp.proto`, `metrics_proxy.proto`, `policy.proto`, `review.proto` (analysis + control) | ⬜ |
+| 03g2 | `memory.proto`, `context.proto`, `dimension.proto`, `mode.proto`, `digest.proto`, `reference.proto` (cognition/memory) | ✅ merged (#527) |
+| 03g3 | `graph.proto`, `scanner.proto`, `lsp.proto`, `metrics_proxy.proto`, `policy.proto`, `review.proto` (analysis + control) | 🟡 in flight |
+| 03g4 | `auth.proto` (AuthService, 13 RPCs — OIDC/JWT/RBAC/sessions/bindings) | ⬜ |
 
 (Batch boundaries may shift as the sweep proceeds; the tracker is updated per PR. The original
-16-proto `03g` was split into three reviewable sub-batches — smaller PRs.)
+16-proto `03g` was split into reviewable sub-batches — smaller PRs; `auth.proto` surfaced as a
+distinct control-plane group during the sweep and became its own final batch, 03g4.)
 
 ## Implementation log (as-built deviations)
 
@@ -177,3 +179,19 @@ added, it fires as a reminder to list it here as gRPC-only.
   `Memory.Distill` even with an empty request). Added 6 class-tagged coverage rows (scalar-limit read →
   GET, nested-body Recall → POST, slug path param, repeated-scalar filter stays GET, content-payload
   Resolve → POST, empty-request action → POST); the whole-set invariants cover the rest.
+- **03g3 (analysis + control: graph / scanner / lsp / metrics_proxy / policy / review).** Annotated
+  `GraphService` (`/v1/graph/`), `ScannerService` (`/v1/scanner/`), `LspService` (`/v1/lsp/`),
+  `MetricsProxyService` (`/v1/metrics/`), `Policy` (`/v1/policy/`), and `FactCollectorService`
+  (`/v1/review/`). `GraphService.Get`/`Put` share `/v1/graph` (verb-disambiguated, like
+  WorktreeList/Add); `Validate` carries the whole document → POST body:* (nested-body-read). Content
+  payloads → POST (`Scanner.Scan`, `Lsp.Open`/`Request`); `Policy.Authorize` carries a nested `ToolCall`
+  → POST (this **flipped the former `Unmapped` sentinel** to a positive row). Two read shapes worth
+  noting: `MetricsProxy.Query`/`QueryRange` are pure reads whose PromQL `query` is a **selector**
+  expression over stored series (not a content payload), so they stay GET with the query as a query
+  param — mirroring Prometheus's own `/api/v1/query`; and `FactCollector.Collect`'s `target` selector can
+  contain `:`/`/` (`branch:feature/x`), so — like `RepoService.ReadFile`'s revision — it rides as a query
+  param, never a `{param}` capture (GET `/v1/review/facts`). Added 6 class-tagged coverage rows
+  (shared-path GET, nested-body Validate → POST, content-payload Scan → POST, PromQL selector stays GET,
+  slashy selector as query param, the Policy.Authorize flip). **Completeness:** a sweep of `proto/agent/v1/`
+  found `auth.proto` (`AuthService`, 13 RPCs) as the sole remaining unannotated service — carved out as
+  the final batch **03g4**; the `Unmapped` sentinel now points at `AuthService.WhoAmI` until then.

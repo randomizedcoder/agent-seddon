@@ -14,6 +14,10 @@ syntax = "proto3";
 package agent.v1;
 
 import "agent/v1/common.proto";
+// REST transcoding annotations (gap-analysis §4, docs/design/rest-openapi/). The
+// `(google.api.http)` options below let Envoy's `grpc_json_transcoder` expose the
+// service as REST/JSON without any Rust code; gRPC stays the primary interface.
+import "google/api/annotations.proto";
 
 // One node instance: a registered type + schema version + parameters
 // (`agent-core GraphNode`). Schemas are never embedded in documents.
@@ -103,11 +107,29 @@ message DescribeNodeTypesResponse {
   repeated NodeTypeSchema node_types = 1;
 }
 
+// REST mappings (docs/design/rest-openapi/), under /v1/graph/. Get and Put share the
+// /v1/graph resource, disambiguated by verb (GET reads the document, POST replaces
+// it); Validate carries the whole document → POST body:* (nested-body-read), and
+// DescribeNodeTypes (empty request) reads the schema registry → GET.
 service GraphService {
-  rpc Get(GetGraphRequest) returns (GetGraphResponse);
+  rpc Get(GetGraphRequest) returns (GetGraphResponse) {
+    option (google.api.http) = {get: "/v1/graph"};
+  }
   // Validates before accepting; an invalid document is rejected wholesale
   // (`INVALID_ARGUMENT` carrying the first issues), never partially stored.
-  rpc Put(PutGraphRequest) returns (PutGraphResponse);
-  rpc Validate(ValidateGraphRequest) returns (ValidateGraphResponse);
-  rpc DescribeNodeTypes(DescribeNodeTypesRequest) returns (DescribeNodeTypesResponse);
+  rpc Put(PutGraphRequest) returns (PutGraphResponse) {
+    option (google.api.http) = {
+      post: "/v1/graph"
+      body: "*"
+    };
+  }
+  rpc Validate(ValidateGraphRequest) returns (ValidateGraphResponse) {
+    option (google.api.http) = {
+      post: "/v1/graph/validate"
+      body: "*"
+    };
+  }
+  rpc DescribeNodeTypes(DescribeNodeTypesRequest) returns (DescribeNodeTypesResponse) {
+    option (google.api.http) = {get: "/v1/graph/node-types"};
+  }
 }

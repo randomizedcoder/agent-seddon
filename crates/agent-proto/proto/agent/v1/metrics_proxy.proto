@@ -9,11 +9,25 @@ syntax = "proto3";
 
 package agent.v1;
 
+// REST transcoding annotations (gap-analysis §4, docs/design/rest-openapi/). The
+// `(google.api.http)` options below let Envoy's `grpc_json_transcoder` expose the
+// service as REST/JSON without any Rust code; gRPC stays the primary interface.
+import "google/api/annotations.proto";
+
+// REST mappings (docs/design/rest-openapi/), under /v1/metrics/. Both RPCs are pure
+// reads (they only read Prometheus). The PromQL `query` is a SELECTOR expression over
+// stored series, not a content payload, so — like Prometheus's own /api/v1/query — it
+// stays GET and rides as a query param (with the time/range/step scalars); the string
+// lives in the query string, never in a path template.
 service MetricsProxyService {
   // Instant query at `time_unix_ms` (or now).
-  rpc Query(PromQuery) returns (PromResult);
+  rpc Query(PromQuery) returns (PromResult) {
+    option (google.api.http) = {get: "/v1/metrics/query"};
+  }
   // Range query over [start, end] at `step_secs` resolution.
-  rpc QueryRange(PromRangeQuery) returns (PromResult);
+  rpc QueryRange(PromRangeQuery) returns (PromResult) {
+    option (google.api.http) = {get: "/v1/metrics/query-range"};
+  }
 }
 
 message PromQuery {
