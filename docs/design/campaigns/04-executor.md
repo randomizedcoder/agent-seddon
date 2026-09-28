@@ -120,6 +120,15 @@ campaign_id, path` claim order, which is a preference, not a guarantee.
 `lease_secs` lives in the campaign policy (per campaign), not here; the config floor of `60`
 applies to it as well.
 
+**As built in CP-04** (`CampaignCfg`, `crates/agent-runtime/src/config.rs`): the block shipped
+with the keys the CLI needs — `store` (`""` | `"postgres"`), `pool_max` (`4`, `1..=64`),
+`planner_model`, `plan_per_tick` (`4`, `0..=32`), `max_repairs` (`2`, `0..=5`), `repo_root`
+(`""` = `[agent] working_dir`) and `[campaign.repos]` (slug → `repo_id` until RK-02). There is
+**no `dsn_ref`**: like the scheduler and digest tiers the store reuses `[config_store] dsn_ref`,
+so one secret reference names the one Postgres. `enabled`, `tick_secs`, the worker keys,
+`sandbox`, `worker_model`, `worker_timeout_secs` and `poll_batch` land with the driver (CP-05)
+and the workers (CP-06). Component doc: [`docs/components/campaigns.md`](../../components/campaigns.md).
+
 ## Observability (CP-08)
 
 Metrics: `agent_campaign_nodes_total{tenant,kind,state}`, `agent_campaign_attempts_total

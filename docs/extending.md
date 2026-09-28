@@ -27,6 +27,7 @@ and its own "Adding your own"):
 | Search | `[search] backends` | `Registry::search` | [search](components/search.md) |
 | AST (code graph) | `[ast] backends` | builder-wired (`build_ast`) | [ast](components/ast.md) |
 | Git (repo) | `[git] backend` | `Registry::repo` | [git](components/git.md) |
+| Campaign store | `[campaign] store` | builder-wired (`campaign::open_campaign_store`) | [campaigns](components/campaigns.md) |
 
 The shared message protocol (`Message`, `ToolCall`, `Observation`, `ToolSchema`,
 `CompletionChunk`, …) is the only currency between seams — don't invent a parallel
@@ -40,6 +41,11 @@ provider or the pool) rather than being chosen by a single backend string: the
 classifier** (`[mode]`, see [mode](components/mode.md)), and **dimensional memory**
 (`[dimensions]`, see [dimensions](components/dimensions.md)). To swap one of these,
 add a branch in the builder keyed on its config string — the trait is still the seam.
+The **campaign store** (`[campaign] store`, see [campaigns](components/campaigns.md))
+follows the same pattern from `agent_runtime::campaign::open_campaign_store`: the
+seam is `agent_core::campaign::CampaignStore`, `"postgres"` is the only shipped arm,
+and a new tier is a feature-gated branch there plus the shared conformance rows
+(`agent_testkit::campaign::conformance`) rerun over it.
 
 ## In-tree (contribute a built-in)
 

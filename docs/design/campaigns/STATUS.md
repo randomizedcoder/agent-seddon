@@ -26,8 +26,9 @@ Design: [`README.md`](README.md) · sequence: [`05-increments.md`](05-increments
   [`gap-analysis/self-improvement.md`](../../gap-analysis/self-improvement.md) SI-11. Decisions
   D1–D10 in [`README.md`](README.md); DDL in [`01-schema.md`](01-schema.md); protocols in
   [`02-transactions.md`](02-transactions.md); test matrices T1–T16 in
-  [`06-test-matrix.md`](06-test-matrix.md). No code. `docs/components/campaigns.md` is written in
-  CP-08 with the metrics, not here.
+  [`06-test-matrix.md`](06-test-matrix.md). No code. `docs/components/campaigns.md` was planned
+  for CP-08 with the metrics; it arrived with the CLI in CP-04 (the first user-facing surface),
+  and CP-08 adds its observability section.
 - **2026-09-27 — CP-01 (#501).** The `CampaignStore` seam and everything pure live in
   `agent_core::campaign` (`rules.rs` enums + `allowed()` / `rollup()` / `clamp_lease()`,
   `path.rs` `TaskPath`, `policy.rs` `Policy`, `mod.rs` errors / value types / requests / typed
