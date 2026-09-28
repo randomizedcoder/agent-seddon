@@ -118,6 +118,11 @@ in
   # real wire via server reflection and reports throughput + p50/p99. Not in the dev
   # shell or any check — the wire harness needs a running server + socket.
   ghz = pkgs.ghz;
+  # `hey` is the pooled keep-alive HTTP load generator for the REST leg of the opt-in
+  # `nix run .#rest-bench` app — symmetric with `ghz`'s pooled HTTP/2 so the two legs
+  # compare like-for-like (a fresh-process-per-request `curl` loop would dodge the
+  # keep-alive path browsers actually use). Not in the dev shell or any check.
+  hey = pkgs.hey;
   # Go static-analysis toolchain for the code-review analyzer (increment 5). The
   # binaries are cached in /nix/store; the review flow shells out to them.
   go = pkgs.go_1_25 or pkgs.go;
