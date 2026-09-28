@@ -221,7 +221,7 @@ Legend: ✅ done · 🟡 in progress · ⬜ not started · ❌ dropped
   while waiting for an open connection` against the dummy DSN). Fixture 10 in
   `nix/checks/config-roundtrip.nix` omits `[role]`, so the gate never sees it. With `[role]` off
   the shipped file checks clean and prints `campaign  = postgres`. Not from this track; the role
-  registry needs a lazy open like the other domains.~~ **Resolved in #PR5.** Corrected diagnosis:
+  registry needs a lazy open like the other domains.~~ **Resolved in #550.** Corrected diagnosis:
   the role store *open* was already lazy (`resolve_role_registry` → `pg_backend` →
   `connect_lazy`); what dialed was the eager catalog *read* in `build_agent_with`
   (`load_catalog` + `install_catalog`), which the control-plane gate needs installed before it
