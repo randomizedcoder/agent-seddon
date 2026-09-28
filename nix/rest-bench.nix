@@ -103,9 +103,9 @@ pkgs.writeShellApplication {
     auto_index = false
 
     # Disable the cognition graph: it is default-on and its document is discovered
-    # from the process cwd (`.agent/graph.textproto`), so a real checkout that seeds
-    # one (e.g. l2's, which references a `glm` provider) would fail the agent build
-    # under this model-free config. Fail-hermetic regardless of the cwd's `.agent/`.
+    # from the process cwd (.agent/graph.textproto), so a real checkout that seeds
+    # one (e.g. l2, whose graph references a glm provider) would fail the agent build
+    # under this model-free config. Fail-hermetic regardless of the cwd .agent tree.
     [graph]
     store = ""
 
