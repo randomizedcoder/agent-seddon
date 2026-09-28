@@ -19,6 +19,17 @@ means reaching for a ready-made fake.
 | `StaticContext` | `ContextStrategy` | Assemble system + user, never compact. |
 | `EchoTool` | `Tool` | Returns its `val` arg after an optional `sleep_ms` delay (to make completion order differ from call order). |
 | `mcp::ScriptedTransport` | `McpTransport` | Answer requests from a canned `method → result` map; pair with `McpClient::with_transport` to drive the client with no subprocess. |
+| `observe::{MetricsProbe, captured_spans, captured_span_fields}` | metrics + tracing | Assert an action moved a named Prometheus series, or emitted a span / span field, with no collector running. |
+
+The span capture helpers are safe to run **in parallel with tests that emit the same span
+with no subscriber installed**. `tracing-core` caches per-callsite interest and, while the
+process has at most one live dispatcher, rebuilds it from the *calling thread's* default
+only — so a subscriber-less test on another thread could stamp the callsite `never` after
+a capture had installed its collector (the old `progress::tests` flake). The helpers pin a
+second, always-interested no-op dispatcher for the life of the process, which forces
+`tracing-core` to AND every live dispatcher's interest; callers need no lock and no
+`rebuild_interest_cache()` of their own. `observe::tests::positive_capture_survives_no_subscriber_first_registration`
+is the deterministic tripwire should a `tracing-core` bump change that path.
 
 ## Example
 
