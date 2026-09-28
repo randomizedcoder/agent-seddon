@@ -13,7 +13,7 @@ the as-built log) in the PR that lands the increment.
 | 03 | Annotate the full surface, batched per proto group (reads→GET, deletes→DELETE, else POST body:*); server-streaming annotated too — **nothing excluded** | ✅ | — | — | ✅ | — | ✅ complete (03a–03g4) |
 | 04 | OpenAPI doc: pin `protoc-gen-openapiv2`, generate + commit, `gen-openapi`/`openapi-sync` drift gate, OpenAPI-parity test | — | ✅ | — | ✅ | — | ✅ merged (#534) |
 | 05 | Envoy `grpc_json_transcoder`: descriptor derivation, loopback REST listener (`:8094`, in the `portal_envoy.py` renderer), filter after `cors`/before `router`, descriptor mount, `authorization` in CORS | — | ✅ | ✅ | ✅ | — | ✅ complete |
-| 06 | `nix run .#rest-integration` (boot → Envoy → curl → assert → teardown; adversarial cases); folded into `nix/integration.nix` | — | ✅ | ✅ | ✅ | — | ⬜ |
+| 06 | `nix run .#rest-integration` (boot → Envoy → curl → assert → teardown; adversarial cases); folded into `nix/integration.nix` | — | ✅ | ✅ | ✅ | — | ✅ complete |
 | 07 | `nix run .#rest-bench` (REST-vs-gRPC via `ghz` + HTTP load; descriptor/config-size note) | — | ✅ | ✅ | — | ✅ | ⬜ |
 
 Legend: ✅ built · 🟡 partial / in flight · ⬜ not started.
@@ -276,3 +276,28 @@ distinct control-plane group during the sweep and became its own final batch, 03
   fail-closed transcoder knobs, loopback pin under LAN host, no edge-jwt, cluster reuse, descriptor
   remap, OTLP-key coverage). A live REST curl round-trip is increment 06 (`nix run .#rest-integration`).
   Next: increment 06.
+
+- **Increment 06 — `nix run .#rest-integration` (live REST↔gRPC round-trip).** New `nix/rest-integration.nix`:
+  a `writeShellApplication` that boots `agent --serve-all` on `127.0.0.1:50100` (hermetic, model-free,
+  no-`[auth]` ⇒ loopback `mode="none"`), brings up the `grpc_json_transcoder` listener via `grpc-web-up`
+  (which renders the `rest` block of `envoy-spec.nix`, mounts `agent_descriptor.pb`, `--network host`),
+  polls `GET /v1/config/status` ready, then drives nine four-class/adversarial `curl` cases and tears down
+  (EXIT trap: `grpc-web-down` + kill the pids it started + `rm -rf`). It **self-skips with exit 0** when no
+  container runtime is reachable (same `$CONTAINER_RUNTIME` probe as `pg-integration`), so it folds into
+  the model-free tier of `nix/integration.nix` and stays green on a bare box. Representative RPC =
+  `ConfigService.GetValues` (`GET /v1/config/values`), served on the gateway because `--config` gives the
+  CLI a `source_path` (the exact condition, in `builder.rs`, that wires the config seam). Cases: (1) the
+  read is 200 and its body carries `.values`; (2) **parity** — `grpcurl … ConfigService/GetValues` agrees
+  (also carries `.values`); (3) `GET /v1/config/schema` 200; (4) an unmapped path is 404
+  (`match_incoming_request_route`); (5) empty `validate` body handled (200), not 500; (6) malformed JSON →
+  400 at the transcoder, never 500; (7) unknown body field ignored (non-5xx); (8) a percent-encoded
+  traversal under a real served prefix → 4xx (never 5xx / file read); (9) an ~8MB body in a real field
+  fails closed (non-5xx) **and** the gateway survives (re-probed healthy — the OOM assertion). Registered
+  in `nix/default.nix` (`let` def with `inherit (portal) grpc-web-up grpc-web-down`, added to `mkApps` +
+  threaded into the `integration` derivation) and `nix/integration.nix` (arg + `runtimeInputs` + a
+  `run_step` in the model-free tier beside `pg-integration`). No proto/Envoy-spec change (05's `rest` block
+  + descriptor are reused as-is). Gate green. **Deviation from the plan's traversal case:** the plan curled
+  the fleet capture route (`/v1/fleet/sessions/{id}`), but the fleet seam is unwired under the hermetic
+  config → that route would 501 (UNIMPLEMENTED, a 5xx) and muddy the "never 5xx" invariant; retargeted the
+  traversal at the always-served config prefix, which 404s deterministically. Next: increment 07
+  (`nix run .#rest-bench`).

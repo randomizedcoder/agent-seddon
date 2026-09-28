@@ -35,6 +35,7 @@
   serve-smoke,
   pg-integration,
   ch-integration,
+  rest-integration,
   e2e-live,
   e2e-expect,
   e2e-multi,
@@ -52,6 +53,7 @@ pkgs.writeShellApplication {
     serve-smoke
     pg-integration
     ch-integration
+    rest-integration
     e2e-live
     e2e-expect
     e2e-multi
@@ -111,6 +113,9 @@ pkgs.writeShellApplication {
       # simply records the skip.
       run_step "pg-integration — real Postgres config-store" pg-integration
       run_step "ch-integration — ClickHouse credentials + row-level security" ch-integration
+      # `rest-integration` likewise needs a container runtime (the REST leg runs the
+      # Envoy transcoder container) and self-skips with exit 0 when none is reachable.
+      run_step "rest-integration — live REST↔gRPC round-trip" rest-integration
     fi
 
     if [ "$WITH_MODEL" != no ]; then
